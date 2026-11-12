@@ -203,7 +203,7 @@ async function renderSchedules(panel, project) {
         const p = await read('preview_schedule',{plan,...(id ? {schedule_id:id} : {})});
         if (!live() || index!==activePreview || signature!==JSON.stringify(spec()) || id!==original?.id) return;
         revision=p.revision; parsed.textContent='时区：'+p.timezone+'\n未来触发：\n'+(p.future.length ? p.future.map(t=>time(t,p.timezone)).join('\n') : '无下一次触发')+'\n'+(p.report ? '以下为当前时间的样例日报；正式窗口截至逻辑触发时刻。\n'+p.report.text : p.supported ? '处理器已注册' : '处理器尚不支持，不能视为可执行');
-      } catch(error) { if (live() && index===activePreview && !revoked(error)) { parsed.textContent=error.code === 'schedule_has_no_future_occurrence' ? '无下一次触发：有效期已在当前时刻之前结束。' : '未来触发状态未知；请重新预览。'; status.textContent=error.message; } }
+      } catch(error) { if (live() && index===activePreview && !revoked(error)) { parsed.textContent=error.code === 'schedule_has_no_future_occurrence' ? '无下一次触发：按当前时间规则与有效期，服务端找不到未来触发。' : '未来触发状态未知；请重新预览。'; status.textContent=error.message; } }
     },'quiet'),parsed);
   const save = element('button', '保存计划'); save.type = 'submit'; save.dataset.scheduleWrite='1'; form.append(save);
   form.onsubmit = e => { e.preventDefault(); void command(original ? 'schedule.update' : 'schedule.register', original ? { id: original.id, revision: original.revision, plan: spec() } : { plan: spec() }); };
