@@ -34,7 +34,7 @@ test('项目保存、规则刷新、未启动仓库、任务过程及390px导航
   await expect.poll(async()=>(await admin('/api/repositories/101/manager')).value.manager.prompt.content).toBe('A complete dispatch prompt.');
   await expect(page.getByText('已保存 Manager 提示词',{exact:true})).toBeVisible();
   await page.getByRole('link',{name:'基本设置',exact:true}).click();await expect(page.locator('#project-page')).toContainText('Visible model name');await expect(page.locator('#project-page')).toContainText('1.5 CPU · 2048 MB');
-  await page.getByRole('link',{name:'机器配置',exact:true}).click();await page.getByRole('link',{name:'在全局设置中配置项目电脑',exact:false}).click();await expect(page.getByText('表单显示默认分支 .bot/computer.yaml 合并后的配置目标',{exact:false})).toBeVisible();await expect(page.getByText('仓库仅覆盖写明的字段；表单改动写入项目控制台',{exact:false})).toBeVisible();await expect(page.getByLabel('CPU（核）',{exact:true})).toHaveValue('1.5');await expect(page.locator('#settings-panel')).not.toContainText('单条命令最长时间');
+  await page.getByRole('link',{name:'机器配置',exact:true}).click();await expect(page.getByText('表单显示默认分支 .bot/computer.yaml 合并后的配置目标',{exact:false})).toBeVisible();await expect(page.getByText('仓库仅覆盖写明的字段；表单改动写入项目控制台',{exact:false})).toBeVisible();await expect(page.getByLabel('CPU（核）',{exact:true})).toHaveValue('1.5');await expect(page.locator('#project-page')).not.toContainText('单条命令最长时间');
   // Rule file sources: reading the default branch again happens once at a time, updates the sources in place and reports a failure.
   await page.getByRole('link',{name:'查看规则文件来源',exact:true}).click();
   const fileSource=path=>page.locator(`[data-rule-file="${path}"] [data-rule-source]`),refresh=page.getByRole('button',{name:'刷新默认分支文件',exact:true}),releaseSkill='.agents/skills/release-notes/SKILL.md';

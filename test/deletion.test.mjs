@@ -472,7 +472,7 @@ test('the project list marks reduced permissions, refreshes stale ones once, and
   assert.ok(removed.querySelectorAll('.status').some(chip => chip.textContent === '已移出安装'));
   for (const line of [removed, first, third]) {
     assert.ok(!actions(line).includes('删除'));
-    assert.ok(line.querySelectorAll('a').some(link => link.href.startsWith('#/settings/projects/')));
+    assert.ok(actions(line).includes('设置'));
   }
   await settle();
   // One background check; the badges changed on the rows already drawn, which stayed on the list.

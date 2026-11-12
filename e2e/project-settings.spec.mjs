@@ -36,7 +36,6 @@ test('settings preserve a draft across refresh and save errors, with separate co
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       if (width === 390 || width === 1440) await page.screenshot({ path: `${output}/settings-${width}.png`, fullPage: true });
     }
-    await page.getByRole('link', { name: '在全局设置中管理项目', exact: false }).click();
     const danger = page.locator('.project-danger');
     await danger.getByRole('button', { name: '禁用项目', exact: true }).click();
     const dialog = page.getByRole('dialog'); await expect(dialog).toContainText('正在执行的任务会中止'); await expect(dialog).toContainText('公开看板');

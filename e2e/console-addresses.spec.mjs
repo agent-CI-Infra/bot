@@ -16,7 +16,8 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     const tab = name => ({ click: () => consoleNavigate(page, name) }), current = () => page.locator('#tabs [aria-current=page]');
     for (const [name, address] of [['看板', '#/board'], ['统计', '#/costs'], ['Webhook 投递', '#/events'], ['外部执行端', '#/external'], ['管理对话', '#/management'], ['项目', '#/projects']]) {
       await tab(name).click(); await expect(page).toHaveURL(new RegExp(address.replace(/[#/]/g, '\\$&') + '$'));
-      await page.reload(); await expect(current()).toHaveText(name);
+      await page.reload(); await expect(current()).toHaveText(name === '外部执行端' ? '个人设置' : name);
+      if (name === '外部执行端') await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('外部执行端');
     }
     for (const [address, category] of [['#/reviews', 'review'], ['#/developments', 'development']]) {
       await page.goto(h.admin + '/' + address); await expect(current()).toHaveText('看板'); await expect(page.getByRole('group',{name:'工作类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value',category);
@@ -25,7 +26,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     // Global settings: one category at a time, each with its own address; a reload keeps it.
     await tab('全局设置').click(); await expect(page).toHaveURL(/#\/settings$/);
     const nav = page.locator('.project-nav'), cards = () => page.locator('#settings-panel h3').allInnerTexts();
-    await expect(nav.getByRole('link')).toHaveText(['常规', '接入向导', '飞书连接', '公网接入', '机器人账号', '安装档案', '项目管理', '项目电脑', '助手电脑', '外部执行', '模型', '服务角色', '用户']);
+    await expect(nav.getByRole('link')).toHaveText(['常规', '模型', '服务角色', '助手电脑', '接入向导', '公网接入', '外部执行', '机器人账号', '安装档案', '飞书连接', '项目管理', '用户']);
     for (const [caption, key, shown] of [['常规', 'general', ['当前运行版本', '同时运行的任务', '虚拟电脑默认资源']], ['飞书连接', 'feishu', ['飞书应用连接']], ['公网接入', 'access', ['公网 HTTPS 地址', 'Cloudflare Tunnel', 'GitHub 登录（只读）']],
       ['机器人账号', 'accounts', ['接入向导使用的 GitHub App', '已登记的账号', 'GitHub 请求额度']], ['安装档案', 'installations', ['GitHub App 安装档案']],
       ['模型', 'models', ['默认共享模型', '部署共享模型']], ['用户', 'users', ['用户']]]) {
