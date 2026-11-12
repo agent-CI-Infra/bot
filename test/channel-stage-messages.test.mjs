@@ -39,8 +39,8 @@ test('a group assistant sends progress messages while it works, before its final
   // The first progress message reaches the group while the turn still runs; no permission item or approval is involved.
   await until(() => position(f, '正在查询仓库') >= 0);
   assert.equal(h.store.get('SELECT state FROM channel_service_turns').state, 'running');
-  assert.match(first.messages[0].content, /send_message/); assert.match(first.messages[0].content, /at most 10 per turn/);
-  assert.match(first.tools.find(tool => tool.function.name === 'send_message').function.description, /At most 10 per turn.*attachments are sent only with your final answer/);
+  assert.match(first.messages[0].content, /send_message/); assert.match(first.messages[0].content, /每回合最多 10 条/);
+  assert.match(first.tools.find(tool => tool.function.name === 'send_message').function.description, /每回合最多 10 条.*附件只随最终回答/);
   release();
   assert.equal((await inbox(f, receipt)).state, 'completed');
   await until(() => position(f, '结论：有 2 个相关 PR') >= 0);
@@ -162,7 +162,7 @@ test('in a console conversation progress messages only enter the event stream, t
   assert.ok(!history.events.some(e => e.data?.name === 'send_message'));
   assert.equal(observations(f.requests.at(-1))[10].error, 'stage_message_limit');
   assert.equal(h.store.get('SELECT count(*) n FROM channel_outbox').n, outbox);
-  assert.match(f.requests[0].messages[0].content, /at most 10 per turn/);
+  assert.match(f.requests[0].messages[0].content, /每回合最多 10 条/);
 });
 
 test('group and private timers send their progress messages to the chat under the timer\'s name before the result (#435)', async t => {
@@ -212,4 +212,41 @@ test('assistant turns and own tasks have no step limit: a long group answer, a l
   const continued = await settled(f.admin, conversation, message.id);
   assert.match(continued.events.filter(e => e.type === 'reply').at(-1).data.text, /第 21 轮：独立任务查了 12 次/);
   assert.equal(h.store.get('SELECT rounds FROM service_role_own_tasks WHERE id=?', own.id).rounds, 21);
+});
+
+test('the stage-message instruction tells a role when to report progress and what must not be sent (#453)', async t => {
+  const f = await group(t), { h } = f;
+  let system, described;
+  f.modelState.respond = (body, res) => {
+    if (system === undefined) { system = body.messages[0].content; described = body.tools.find(tool => tool.function.name === 'send_message').function.description; }
+    return say(res, '结论：收到。');
+  };
+  assert.equal((await inbox(f, await post(h, f.id, inGroup('看一下这个仓库', 'ou_bob')))).state, 'completed');
+  assert.equal(typeof system, 'string'); assert.equal(typeof described, 'string');
+  // Both places a model learns the contract carry the same three hard rules, so the description cannot contradict the prompt.
+  const rules = [
+    [/长耗时任务/, 'names the long-running work it applies to'],
+    [/多步工具/, 'names multi-step tool work'],
+    [/跨仓库/, 'names cross-repository work'],
+    [/日志排查/, 'names log investigation'],
+    [/虚拟电脑/, 'names computer execution'],
+    [/开工前/, 'asks for the notice before the work starts'],
+    [/关键发现/, 'allows a mid-work message for a key finding'],
+    [/阶段结论/, 'allows a mid-work message for a stage conclusion'],
+    [/仍在执行/, 'forbids a heartbeat that only says it is still running'],
+    [/请稍候/, 'forbids a heartbeat that only asks people to wait'],
+    [/静默/, 'keeps silent contexts exempt from the first notice'],
+    [/定时任务/, 'names the scheduled turn that may have nothing to report'],
+  ];
+  for (const [pattern, why] of rules) {
+    assert.match(system, pattern, 'system prompt: ' + why);
+    assert.match(described, pattern, 'tool description: ' + why);
+  }
+  // The #435 boundaries are unchanged: ten per turn, attachments only with the final answer, the final answer sent automatically.
+  for (const text of [system, described]) {
+    assert.match(text, new RegExp('每回合最多 ' + 10 + ' 条'), 'the turn limit stays stated');
+    assert.match(text, /附件只随最终回答/, 'attachments still go only with the final answer');
+    assert.match(text, /自动发送/, 'the final answer is still sent automatically');
+    assert.match(text, /最终回答.*重复|重复.*最终回答/, 'the final answer does not repeat sent progress');
+  }
 });

@@ -8,11 +8,11 @@ export const stageMessageLimit = 10;
 const maxChars = 4000;
 export const sendMessageName = 'send_message';
 export const sendMessageTool = { type: 'function', function: { name: sendMessageName,
-  description: `Send a progress message to the current conversation now and keep working: what you are doing, an intermediate finding, or why the work takes longer. At most ${stageMessageLimit} per turn; after that this tool refuses and the turn continues. Text only (Markdown allowed, at most ${maxChars} characters); attachments are sent only with your final answer. Your final answer, the reply you give without tool calls, is still sent automatically when the turn ends: never use this tool for it and do not repeat a progress message there.`,
+  description: `向当前对话立即发送一条阶段消息并继续工作：通报计划、关键发现、新证据或阶段结论。长耗时任务（多步工具调用、跨仓库或多文件改动、日志排查、虚拟电脑执行）开工前先发一条，不要让人干等；中途只在有实质内容时再发。禁止发送「仍在执行」「请稍候」这类没有实质内容的心跳，也不要在最终回答里重复已经发过的内容。允许静默的上下文（未被 @ 的群消息、没有可汇报内容的定时任务）不要求先通报。每回合最多 ${stageMessageLimit} 条，超出后本工具拒绝调用而回合继续。只接受文本（允许 Markdown，最多 ${maxChars} 字符）；附件只随最终回答发送，最终回答（没有工具调用的回复）仍会在回合结束时自动发送，不能用它代替最终回答。`,
   parameters: { type: 'object', properties: { text: { type: 'string', minLength: 1, maxLength: maxChars, description: 'The progress message for the people in this conversation.' } },
     required: ['text'], additionalProperties: false } } };
 /** The same contract for the system prompt, so the model knows the limit before it calls the tool. */
-export const stageMessageInstructions = ` For longer work you may call ${sendMessageName} to post a short progress message to this conversation while you keep working; at most ${stageMessageLimit} per turn, and further calls are refused without ending the turn. Attachments go only with your final answer, and your final answer (the reply without tool calls) is sent automatically at the end of the turn.`;
+export const stageMessageInstructions = ` 长耗时任务开工前先调用 ${sendMessageName} 通报一次本次工作的进展或计划：需要多步工具调用、跨仓库或多文件改动、日志排查、虚拟电脑执行的工作都属于这一类，先通报，别让人干等。开始之后只在出现关键发现、新证据或一个阶段结论时同步一次，不要按固定节奏刷进度。禁止发送「仍在执行」「请稍候」这类没有实质内容的心跳，也不要在最终回答里重复已经发过的进展。允许静默的上下文（未被 @ 的群消息、没有可汇报内容的定时任务）不要求先通报。每回合最多 ${stageMessageLimit} 条，超出后调用会被拒绝且不会结束回合；只接受文本，附件只随最终回答发送，最终回答（没有工具调用的回复）在回合结束时自动发送。`;
 
 /**
  * Answers one send_message call. `sent` counts this turn's delivered progress messages; `post` records and queues the
