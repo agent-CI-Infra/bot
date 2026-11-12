@@ -499,9 +499,9 @@ export class ChannelService {
       stage:m=>this.queue(e,card(m.text),row.id+':stage:'+m.sequence,row.id,{...protection(m.fence,m.turn_id),stage:m.sequence})});
     const target=this.turnMessages.replyEvent(result.id);
     this.store.transaction(()=>{
-      if(result.message.trim()||result.attachments?.length)this.queue(target??e,card(result.message),row.id+':business-result',row.id,{...protection(result.fence,result.id),resource_fence:result.fence},
-        false,false,undefined,result.attachments,!!target);
-      this.turnMessages.complete(result.id);
+      const outbox=result.message.trim()||result.attachments?.length?this.queue(target??e,card(result.message),row.id+':business-result',row.id,{...protection(result.fence,result.id),resource_fence:result.fence},
+        false,false,undefined,result.attachments,!!target):undefined;
+      this.turnMessages.complete(result.id,outbox);
       this.store.run("UPDATE channel_inbox SET state='completed',message_id=? WHERE id=?",result.id,row.id);
     });
   }
@@ -520,9 +520,9 @@ export class ChannelService {
     const attachments=m.state==='completed'&&selected?JSON.parse(selected.data):{};
     const target=this.turnMessages.replyEvent(message.id);
     this.store.transaction(()=>{
-      this.queue(target??e,card(this.personalReply(actor,message),this.url()),row.id+':result',row.id,{principal_id:actor.principal_id,authorization_revision:actor.authorization_revision,
+      const outbox=this.queue(target??e,card(this.personalReply(actor,message),this.url()),row.id+':result',row.id,{principal_id:actor.principal_id,authorization_revision:actor.authorization_revision,
         personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id,management_message:message.id,resource_fence:attachments.fence??''},false,false,undefined,attachments.resource_ids??[],!!target);
-      if(m.state==='completed')this.turnMessages.complete(message.id);
+      if(m.state==='completed')this.turnMessages.complete(message.id,outbox);
       this.store.run("UPDATE channel_inbox SET state=? WHERE id=?",m.state==='completed'?'completed':'failed',row.id);
     });
   }

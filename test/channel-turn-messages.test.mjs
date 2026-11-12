@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { channelFixture, boundGroup, repositoryAssistant, inGroup, envelope, post, until } from './channel-fixture.mjs';
-import { ServiceComputers } from '../dist/service-roles/resources.js';
+import { AssistantComputer } from '../dist/service-roles/assistant-computers.js';
 
 const say = (res, content) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content } }], usage: { prompt_tokens: 12, completion_tokens: 4 } })); };
 const call = (res, name) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null,
@@ -10,6 +10,7 @@ const incoming = body => body.messages.filter(m => m.role === 'user').map(m => {
 const row = (f, receipt) => f.h.store.get('SELECT * FROM channel_inbox WHERE id=?', receipt.value.operation_id);
 const done = (f, receipt) => until(() => row(f, receipt), r => ['completed', 'failed'].includes(r?.state));
 const sent = f => f.wire.sent.map(s => JSON.stringify(s.content));
+const indicator = (f, receipt, state) => until(() => f.h.store.get('SELECT state FROM channel_reactions WHERE source_event=?', receipt.value.operation_id), r => r?.state === state);
 async function group(t) { const f = await channelFixture(t); await repositoryAssistant(f); f.chat = await boundGroup(f); return f; }
 function gate(t) { let release; const wait = new Promise(r => { release = r; }); t.after(() => release()); return { wait, release }; }
 const chunk = (res, delta, finish_reason = null) => res.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] }) + '\n\n');
@@ -157,14 +158,42 @@ test('messages during a tool are injected together at the next step, distinguish
   const reference = await post(f.h, f.id, discussion);
   for (const item of [second, cancel, reference]) assert.equal(row(f, item).state, 'merged');
   assert.equal((await post(f.h, f.id, { ...secondEvent, header: { ...secondEvent.header, event_id: 'redelivered' } })).value.duplicate, true);
+  for (const item of [initial, second, cancel]) await indicator(f, item, 'active');
+  assert.deepEqual(f.wire.state.reactionRequests.filter(r => r.method === 'POST').map(r => r.message).sort(),
+    [initial, second, cancel].map(item => f.service.turnMessages.event(row(f, item)).message_id).sort());
   tool.release(); await done(f, initial); await done(f, second); await done(f, cancel);
   await until(() => sent(f).some(s => s.includes('已停止后续查询')));
   assert.equal(calls, 2); assert.equal(f.h.store.get('SELECT count(*) n FROM channel_service_turns').n, 1);
   assert.equal(f.h.store.get('SELECT count(*) n FROM channel_reactions').n, 3, 'initial and both required messages get normal acknowledgements');
+  for (const item of [initial, second, cancel]) await indicator(f, item, 'done');
+  assert.deepEqual(f.wire.state.reactionRequests.filter(r => r.method === 'DELETE').map(r => r.message).sort(),
+    [initial, second, cancel].map(item => f.service.turnMessages.event(row(f, item)).message_id).sort());
   const outbox = f.h.store.get("SELECT * FROM channel_outbox WHERE idempotency_key=?", initial.value.operation_id + ':business-result');
   assert.equal(f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id).delivery.reply_to, f.service.turnMessages.replyEvent(row(f, initial).message_id).message_id);
   const view = (await f.admin(`/api/channels/chats/${f.chat.id}/timeline`)).value.conversation.turns[0];
   assert.deepEqual(view.incoming_messages.map(m => [m.needs_reply, m.state]), [[true, 'answered'], [true, 'answered'], [false, 'answered']]);
+});
+
+for (const personal of [false, true]) test(`${personal ? 'private' : 'group'} merged questions keep their processing reaction through final delivery retries (#458)`, async t => {
+  const f = personal ? await channelFixture(t) : await group(t), held = gate(t); let calls = 0, executing = false;
+  const send = event => post(f.h, f.id, event), message = text => personal ? envelope(text) : inGroup(text);
+  const own = personal ? f.service.management.own : f.service.serviceSessions.own;
+  own.invoke = async () => { executing = true; await held.wait; return { conclusion: '核对完成' }; };
+  f.modelState.respond = async (_body, res) => ++calls === 1 ? call(res, 'start_own_task') : say(res, '已回答补充问题');
+  const initial = await send(message('开始')); await until(() => executing);
+  const extraEvent = message('补充问题'), extra = await send(extraEvent); assert.equal(row(f, extra).state, 'merged');
+  await indicator(f, extra, 'active');
+  assert.equal((await send(extraEvent)).value.duplicate, true);
+  f.wire.state.sendFailures = 1; held.release();
+  const outbox = await until(() => f.h.store.get("SELECT * FROM channel_outbox WHERE source_event=? AND state='retry'", initial.value.operation_id));
+  assert.equal(row(f, extra).state, 'completed');
+  await f.service.reactions.tick(); assert.equal((await indicator(f, extra, 'active')).state, 'active');
+  assert.deepEqual(f.wire.state.reactionRequests.filter(r => r.message === extraEvent.event.message.message_id).map(r => r.method), ['POST']);
+  f.h.store.run('UPDATE channel_outbox SET next_attempt=0 WHERE id=?', outbox.id);
+  await until(() => f.h.store.get('SELECT state FROM channel_outbox WHERE id=?', outbox.id), r => r.state === 'sent');
+  await indicator(f, extra, 'done');
+  assert.deepEqual(f.wire.state.reactionRequests.filter(r => r.message === extraEvent.event.message.message_id).map(r => r.method), ['POST', 'DELETE']);
+  assert.equal(calls, 2);
 });
 
 test('a final answer never gains a model step for messages received during generation (#458)', async t => {
@@ -230,9 +259,15 @@ test('group timers absorb incoming questions and still publish one named timer r
   };
   const schedule = (await f.admin(`/api/channels/chats/${f.chat.id}/schedules`, 'POST', { name: '巡检', prompt: '检查项目', timezone: 'UTC', interval_minutes: 5 })).value.schedule;
   await f.admin(`/api/channels/schedules/${schedule.id}/run`, 'POST', {}); await until(() => executing);
-  const extra = await post(f.h, f.id, inGroup('也核对一下我的问题')); assert.equal(row(f, extra).state, 'merged'); held.release();
+  const extraEvent = inGroup('也核对一下我的问题'), extra = await post(f.h, f.id, extraEvent); assert.equal(row(f, extra).state, 'merged');
+  await indicator(f, extra, 'active'); f.wire.state.sendFailures = 1; held.release();
   const run = await until(() => f.h.store.get('SELECT * FROM channel_schedule_runs WHERE schedule_id=?', schedule.id), r => r?.state === 'completed');
+  await until(() => f.h.store.get('SELECT state FROM channel_outbox WHERE id=?', run.outbox_id), r => r.state === 'retry');
+  await f.service.reactions.tick(); assert.equal((await indicator(f, extra, 'active')).state, 'active');
+  f.h.store.run('UPDATE channel_outbox SET next_attempt=0 WHERE id=?', run.outbox_id);
   await done(f, extra); await until(() => sent(f).some(s => s.includes('定时检查和群友问题')));
+  await indicator(f, extra, 'done');
+  assert.deepEqual(f.wire.state.reactionRequests.filter(r => r.message === extraEvent.event.message.message_id).map(r => r.method), ['POST', 'DELETE']);
   const delivery = f.h.store.secrets.open(f.h.store.get('SELECT payload FROM channel_outbox WHERE id=?', run.outbox_id).payload, 'channel-outbox:' + run.outbox_id);
   assert.equal(delivery.delivery.reply_to, undefined); assert.match(JSON.stringify(delivery.delivery.content), /定时任务「巡检」/);
   assert.equal(f.h.store.get('SELECT count(*) n FROM channel_service_turns').n, 1);
@@ -257,10 +292,10 @@ test('an active agent accepts more than 32 messages beyond two minutes without i
 
 test('a completed agent no longer receives messages while platform cleanup and posting wait (#458)', async t => {
   const f = await group(t), held = gate(t); let calls = 0, cleaning = false;
-  const close = ServiceComputers.prototype.close;
-  t.mock.method(ServiceComputers.prototype, 'close', async function () {
+  const close = AssistantComputer.prototype.close;
+  t.mock.method(AssistantComputer.prototype, 'close', async function (...args) {
     if (!cleaning) { cleaning = true; await held.wait; }
-    return close.call(this);
+    return close.apply(this, args);
   });
   f.modelState.respond = async (_body, res) => { calls++; say(res, calls === 1 ? '已结束但尚未贴出的结果' : '下一个回合'); };
   const initial = await post(f.h, f.id, inGroup('开始')); await until(() => cleaning);
