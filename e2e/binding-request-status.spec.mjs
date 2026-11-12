@@ -33,6 +33,7 @@ for (const width of [1440, 390]) {
       const name = 'binding-user-with-a-long-account-name-for-rebind-' + width, user = { ...await f.member(name, { repository_ids: ['101'] }), name };
       const actor = 'ou_browser_' + width, grants = f.h.store.get('SELECT count(*) n FROM scoped_grants').n;
       await page.setViewportSize({ width, height: 844 }); await login(page, f, user);
+      await expect(page.locator('#count')).toHaveText('');
       await expect(page.getByRole('link', { name: '管理员：连接或管理飞书应用', exact: true })).toHaveCount(0);
       await expect(page.getByLabel('助手所在群', { exact: true })).toHaveCount(0);
       await expect(page.getByLabel('飞书认证字符串', { exact: true })).toBeHidden();

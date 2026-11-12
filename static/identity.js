@@ -44,9 +44,10 @@ async function renderIdentity() {
   const groups = location.hash === '#/identity/feishu/groups', conversations = location.hash === '#/identity/feishu/conversations';
   panel.classList.toggle('identity-feishu-page', personalBinding || groups || conversations);
   if (personalBinding || groups || conversations) {
+    $('count').textContent = '';
     const navigation = element('nav', '', 'actions'); navigation.setAttribute('aria-label', '飞书个人设置');
-    navigation.append(channelLink('#/identity', '身份与权限'), channelLink('#/identity/feishu', '个人飞书绑定'),
-      channelLink('#/identity/feishu/groups', '我维护的群助手'), channelLink('#/identity/feishu/conversations', '我的私信会话'));
+    navigation.append(channelLink('#/identity', '身份与权限', 'button-link quiet'), channelLink('#/identity/feishu', '个人飞书绑定', 'button-link quiet'),
+      channelLink('#/identity/feishu/groups', '我维护的群助手', 'button-link quiet'), channelLink('#/identity/feishu/conversations', '我的私信会话', 'button-link quiet'));
     panel.replaceChildren(navigation, consoleState('正在读取飞书设置', '正在核对本人的绑定或获准管理的会话。'));
     const load = async () => {
       try {
