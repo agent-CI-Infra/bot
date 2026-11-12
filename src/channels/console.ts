@@ -110,10 +110,12 @@ export class ChannelConsole {
         can_continue: !!store.get('SELECT 1 FROM channel_personal_owners WHERE chat_id=? AND principal_id=?', chat.id, actor.principal_id) }
         : binding ? { binding: this.service.serviceBindings.view(binding), can_manage: manageable } : {}),
       turns: turns.slice(0, 50).map(turn => mode === 'management' ? { id: turn.id, source_message: turn.source_message, created_at: turn.created_at,
-        state: managementStates[turn.state] ?? turn.state, request: JSON.parse(turn.input).content, messages: this.service.management.stageMessages(turn.id), reply: this.personalReply(turn), role_id: '管理助手' }
+        state: managementStates[turn.state] ?? turn.state, request: JSON.parse(turn.input).content, messages: this.service.management.stageMessages(turn.id),
+        incoming_messages: this.service.turnMessages.list(turn.id), reply: this.personalReply(turn), role_id: '管理助手' }
         : binding ? { id: turn.id, source_message: turn.source_message, state: turn.state, error: turn.error, created_at: turn.created_at, updated_at: turn.updated_at,
           role_id: roles.get(turn.service_role_id) ?? turn.service_role_id, can_stop: manageable && turn.state === 'running',
           messages: this.service.serviceSessions.messages(turn.id).map(m => ({ sequence: m.sequence, text: m.text, created_at: m.created_at })),
+          incoming_messages: this.service.turnMessages.list(turn.id),
           reply: turn.reply ? store.secrets.open(turn.reply, 'service-turn-reply:' + turn.id).message : null }
         : { id: turn.id, source_message: turn.source_message, project_id: turn.project_id, role_id: turn.role_id, state: turn.state, error: turn.error,
           created_at: turn.created_at, updated_at: turn.updated_at, reply: turn.reply ? store.secrets.open(turn.reply, 'conversation-reply:' + turn.id).message : null }),

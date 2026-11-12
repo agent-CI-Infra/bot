@@ -163,7 +163,8 @@ test('a few messages beyond the recent window wait for a batch: no summary reque
   assert.equal((await complete(f,receipt)).state,'completed');
   assert.ok(!f.requests.some(isSummary),'fewer than a batch of earlier messages is not summarized');
   const context=JSON.parse(f.requests.at(-1).messages[1].content).context;
-  assert.equal(context.earlier_messages[0].message_id,'seed-000');assert.equal(context.earlier_messages.length+context.recent_messages.length,f.h.store.get('SELECT count(*) n FROM channel_messages WHERE chat_id=?',f.chat.id).n);
+  // Delivery may already have appended this turn's bot answer, which cannot have been in its own model input.
+  assert.equal(context.earlier_messages[0].message_id,'seed-000');assert.equal(context.earlier_messages.length+context.recent_messages.length,f.h.store.get("SELECT count(*) n FROM channel_messages WHERE chat_id=? AND sender_type='user'",f.chat.id).n);
   assert.equal(f.h.store.get('SELECT count(*) n FROM channel_chat_summaries').n,0);
 });
 
