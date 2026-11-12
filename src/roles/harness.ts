@@ -135,7 +135,7 @@ export function roleHarness(id:string){
   const emit=(event:import('../harness/session.js').HarnessEvent)=>{traceEvent(spec.store,spec.task.id,'harness_event',spec.redactor.clean(event),spec.task.trace_run_id,'harness');spec.onHarnessEvent?.(spec.redactor.clean(event));};
   const session=managedSession(async signal=>{const wrapped={...spec,executionSignal:signal,guard:async()=>{if(signal.aborted)throw signal.reason;await spec.guard();}};return factory?factory(wrapped)({...services,guard:wrapped.guard}):runTools(wrapped,{...services,guard:wrapped.guard});},emit);
   // A RoleRun cancel or an exhausted budget interrupts the session the same way the task guard does.
-  const external=spec.cancelSignal;if(external){const cancel=()=>void session.cancel();if(external.aborted)cancel();else external.addEventListener('abort',cancel,{once:true});}
+  const external=spec.cancelSignal;if(external){const cancel=()=>void session.cancel(external.reason);if(external.aborted)cancel();else external.addEventListener('abort',cancel,{once:true});}
   return session;
  };
  return {...harnesses.find(h=>h.id===id)!,prepare:id==='claude_code'?prepareClaudeCode:undefined,createSession,adapter:<T>(spec:AgentSpec<T>)=>async(services:AgentServices)=>{
