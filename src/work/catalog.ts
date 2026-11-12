@@ -81,11 +81,14 @@ export const workTypes: WorkType[] = [
     description: '默认分支的 Actions 运行失败后分析原因：外部原因最多重跑原运行一次，代码缺陷或不明原因提报 Issue，再由检视 Issue 接手。' },
   { id: 'gate.onboarding', name: '接入门禁', base: 'gate', object: 'repository', kinds: ['gate.onboarding'], section: 'gate.onboarding', defaultEnabled: true,
     description: '在「接入门禁」对话里分析仓库、设计各 lane 的门禁命令并回答问题；人确认方案后，控制面才开门禁 PR。' },
+  { id: 'task.development', name: '开发任务', base: 'development', object: 'schedule', kinds: ['task.development'], section: 'development', family: 'development', defaultEnabled: true,
+    description: '直接创建的开发任务，复用项目开发授权、测试、独立 QA 和 PR 交付；可独立执行或关联父任务，不需要虚构 GitHub Issue。' },
   { id: 'task.request', name: '普通事项与定时检查', base: 'request', object: 'schedule', kinds: ['task.request'], section: 'schedule', defaultEnabled: true,
     description: '处理直接创建的普通事项或 Manager 接受的定时检查。默认不写 GitHub；交付 PR 需项目显式允许，仍经测试及独立 QA；执行角色有 GitHub 写权限时可以用 github_write 直接写，例如提报 Issue。' }
 ];
 export const workType = (id: string) => workTypes.find(work => work.id === id);
 /** The work type a task belongs to: reply tasks (including those of former custom workflows) are one work type. */
+export const requestedTask = (task: Record<string,any>) => ['task.request','task.development'].includes(task.kind);
 export const workOf = (task: { kind: string }) => String(task.kind).startsWith('workflow.') ? 'reply' : String(task.kind);
 
 // Sections of the Manager prompt. A section the project has not written uses its built-in text. The review and

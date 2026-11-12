@@ -1,3 +1,4 @@
+import {requestedTask} from '../work/catalog.js';
 import {taskPermissions} from './configuration.js';
 import {attachChild} from './children.js';
 import {roleConfiguration} from '../roles/definition.js';
@@ -94,7 +95,7 @@ export class TaskCommands {
       records.atomic(()=>{
         try{records.contract(task!.id,contract,Number(input.expected_revision));}catch(error){fail((error as Error).message==='task_revision_changed'?409:400,(error as Error).message);}
         const saved=JSON.parse(task!.input);
-        this.store.run("UPDATE tasks SET input=?,status='queued',phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,publication_started=0,error_code=NULL,next_run_at=0,attempt=attempt+1 WHERE id=?",JSON.stringify({...saved,contract,request:task!.kind==='task.request'?contract.goal:saved.request}),task!.id);
+        this.store.run("UPDATE tasks SET input=?,status='queued',phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,publication_started=0,error_code=NULL,next_run_at=0,attempt=attempt+1 WHERE id=?",JSON.stringify({...saved,contract,request:requestedTask(task!)?contract.goal:saved.request}),task!.id);
         this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",task!.id);
         this.store.run('DELETE FROM development_candidates WHERE task_id=?',task!.id);
         traceEvent(this.store,task!.id,'intervention',{action:'contract_revision',before:new TaskRecords(this.store).get(task!.id).revision-1,after:contract,reason:'explicit user contract revision',stage_plan:stageReplanContext(this.store,task!.id)},null,'user:'+user.id);
@@ -114,18 +115,30 @@ export class TaskCommands {
       this.store.audit(user.id,'project.context',contextMatch[1]!,contextMatch[1]!);return {context:records.project(contextMatch[1]!)};
     }
     if(url.pathname==='/api/tasks'&&method==='POST') {
-      fields(input,['repository_id','request','contract',...(caller?['executor_role','execute','as_child']:[])]);
+      fields(input,['repository_id','request','contract','intent',...(caller?['executor_role','execute','as_child']:[])]);
       if(typeof input.repository_id!=='string'||typeof input.request!=='string'||!input.request.trim()||input.request.length>60000)fail(400,'invalid_task_request');
       repository(this.store,user,input.repository_id as string);
       const id=randomId(),now=new Date().toISOString();
       const contract=input.contract as any;
       if(!contract||!Array.isArray(contract.criteria)||!contract.criteria.length||typeof contract.endpoint!=='string'||!contract.endpoint.trim())fail(400,'invalid_task_contract');
+      if(input.intent!==undefined&&!['report','development'].includes(String(input.intent)))fail(400,'invalid_task_intent');
+      const development=input.intent==='development'||input.intent===undefined&&contract.endpoint==='reviewable_pull_request',kind=development?'task.development':'task.request';
+      if(development&&contract.endpoint!=='reviewable_pull_request'||input.intent==='report'&&contract.endpoint!=='report')fail(400,'invalid_task_endpoint');
+      const controller=roleConfiguration(this.store,String(input.repository_id)).controller.role;
+      const team=!!caller&&caller.role===controller&&input.executor_role===undefined;
+      if(team){const definition=roleConfiguration(this.store,caller!.project_id).roles.find(r=>r.role_id===caller!.role);
+        if(caller!.permissions?.delegation!=='allow'||definition?.permissions.delegation!=='allow')fail(403,'task_delegation_forbidden');}
+      if(development){
+        // Development uses the project's ordinary development work type. Parent linkage adds no authority.
+        try{assertRequestPullRequest(this.store,{id:'',kind,repository_id:input.repository_id,input:JSON.stringify({contract})});}catch(error){if(error instanceof TaskError)fail(403,error.code);throw error;}
+        if(caller?.source_task_id){const source=this.store.get('SELECT * FROM tasks WHERE id=? AND repository_id=?',caller.source_task_id,caller.project_id);
+          if(!source||!['code','pull_request'].every(write=>taskPermissions(this.store,source).writes.includes(write)))fail(403,'task_external_write_forbidden');}
+      }
       // Validate before insertion; rollback also removes trigger-created records on failure.
       if (caller && (input.executor_role !== undefined && typeof input.executor_role !== 'string' || input.execute !== undefined && typeof input.execute !== 'boolean')) fail(400,'invalid_task_executor');
       if(input.as_child!==undefined&&typeof input.as_child!=='boolean')fail(400,'invalid_child_task');
       if(input.as_child&&(!caller?.source_task_id||caller.role!==roleConfiguration(this.store,caller.project_id).controller.role))fail(403,'child_task_manager_required');
       if(input.as_child){
-        if(input.executor_role!==undefined)fail(400,'child_task_uses_project_team');
         const controller=roleConfiguration(this.store,caller!.project_id).roles.find(r=>r.role_id===caller!.role);
         if(caller!.permissions?.delegation!=='allow'||controller?.permissions.delegation!=='allow')fail(403,'task_delegation_forbidden');
         const parent=this.store.get('SELECT * FROM tasks WHERE id=? AND repository_id=?',caller!.source_task_id!,caller!.project_id);
@@ -133,11 +146,13 @@ export class TaskCommands {
         if(contract.endpoint==='reviewable_pull_request'&&!['code','pull_request'].every(write=>taskPermissions(this.store,parent!).writes.includes(write)))fail(403,'task_external_write_forbidden');
       }
       const key=caller?'managed:'+digest(JSON.stringify([caller.owner_key,caller.source_message,caller.source_task_id,
+        caller.source_task_id?this.store.get('SELECT revision FROM task_records WHERE task_id=?',caller.source_task_id)?.revision:null,input.request,contract,input.executor_role??caller.role,...(input.as_child?['child']:[]),...(development?['development']:[])])):null;
+      const legacyKey=development&&caller?'managed:'+digest(JSON.stringify([caller.owner_key,caller.source_message,caller.source_task_id,
         caller.source_task_id?this.store.get('SELECT revision FROM task_records WHERE task_id=?',caller.source_task_id)?.revision:null,input.request,contract,input.executor_role??caller.role,...(input.as_child?['child']:[])])):null;
-      const previous=key?this.store.get('SELECT id FROM tasks WHERE unique_key=?',key):undefined;
+      const previous=key?this.store.get('SELECT id FROM tasks WHERE unique_key=?',key)??(legacyKey?this.store.get("SELECT id FROM tasks WHERE unique_key=? AND kind='task.request'",legacyKey):undefined):undefined;
       if(previous){assertManagedTask(this.store,caller!,previous.id,true);return {id:previous.id,replayed:true};}
       this.store.transaction(()=>{createManagedTask(this.store,caller??operatorTaskCaller(this.store,user,String(input.repository_id)),input.executor_role as string|undefined,()=>{
-        this.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,unique_key,created_at,updated_at) VALUES(?,?,'task.request',?,?,?,?,?,?)",id,input.repository_id as string,input.execute===false?'paused':'queued',(input.request as string).slice(0,160),JSON.stringify({request:input.request,contract}),key,now,now);
+        this.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,unique_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",id,input.repository_id as string,kind,input.execute===false?'paused':'queued',(input.request as string).slice(0,160),JSON.stringify({request:input.request,contract}),key,now,now);
         try {new TaskRecords(this.store).contract(id,{...contract,source:{type:'request',actor:user.id},completeness:'explicit'});}catch{fail(400,'invalid_task_contract');}
         // Persist the authoritative validated contract for executor recovery.
         this.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({request:input.request,contract:new TaskRecords(this.store).get(id).contract}),id);
@@ -148,8 +163,8 @@ export class TaskCommands {
         this.store.audit(user.id,'task.create',id,input.repository_id as string);
         return id;
       });
-      // Explicit children run the normal project team; they are not the creating Manager acting as a writer.
-      if(input.as_child)this.store.run('UPDATE task_origins SET executor_role=NULL WHERE task_id=?',id);
+      // The Task Manager coordinates the same project team, independently of parent linkage.
+      if(team)this.store.run('UPDATE task_origins SET executor_role=NULL WHERE task_id=?',id);
       const created=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;
       if(softwareRequest(created))try{assertRequestPullRequest(this.store,created);}catch(error){if(error instanceof TaskError)fail(403,error.code);throw error;}
       });this.hooks.tick?.();return {id};
@@ -162,7 +177,7 @@ export class TaskCommands {
     this.store.transaction(()=>{
       // A publish-phase task restarts only when re-planning it cannot strand a branch or PR it already wrote.
       const wrote=!!this.store.get("SELECT 1 FROM github_effects WHERE task_id=? AND state<>'pending'",task.id);
-      if(task.kind!=='task.request'&&(replies(task.kind)&&!wrote || (task.phase!=='publish'||task.status==='needs_replan'&&!wrote)&&['failed','waiting_environment','needs_replan'].includes(task.status))){
+      if(!requestedTask(task)&&(replies(task.kind)&&!wrote || (task.phase!=='publish'||task.status==='needs_replan'&&!wrote)&&['failed','waiting_environment','needs_replan'].includes(task.status))){
         this.store.run("UPDATE tasks SET phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,review_update_cursor=0,publication_started=0,attempt=attempt+1 WHERE id=?",task.id);
         if(replies(task.kind))this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",task.id);
         this.store.run('DELETE FROM development_candidates WHERE task_id=?',task.id);
@@ -200,11 +215,19 @@ export class TaskCommands {
       return {task:records.context(id),origin:this.store.get('SELECT source_kind,source_role,executor_role,conversation_id FROM task_origins WHERE task_id=?',id)??null};
     }
     if(name==='create_task'){
-      fields(args,['request','criteria','executor_role','execute','endpoint','as_child']);
-      if(args.endpoint!==undefined&&!['report','reviewable_pull_request'].includes(String(args.endpoint)))fail(400,'invalid_task_endpoint');
-      return this.api(user,'POST',new URL('http://local/api/tasks'),{repository_id:caller.project_id,request:args.request,
-        contract:{goal:args.request,criteria:args.criteria,scope:[String(args.request).slice(0,2000)],endpoint:args.endpoint??'report'},
-        ...(args.executor_role!==undefined?{executor_role:args.executor_role}:{}),...(args.execute!==undefined?{execute:args.execute}:{}),...(args.as_child!==undefined?{as_child:args.as_child}:{})},caller)!;
+      try{
+        fields(args,['request','criteria','executor_role','execute','endpoint','as_child','intent']);
+        if(args.intent!==undefined&&!['report','development'].includes(String(args.intent)))fail(400,'invalid_task_intent');
+        if(args.endpoint!==undefined&&!['report','reviewable_pull_request'].includes(String(args.endpoint)))fail(400,'invalid_task_endpoint');
+        const intent=args.intent??(args.endpoint==='reviewable_pull_request'?'development':undefined);
+        return this.api(user,'POST',new URL('http://local/api/tasks'),{repository_id:caller.project_id,request:args.request,
+          contract:{goal:args.request,criteria:args.criteria,scope:[String(args.request).slice(0,2000)],endpoint:args.endpoint??(intent==='development'?'reviewable_pull_request':'report')},
+          ...(intent!==undefined?{intent}:{}),...(args.executor_role!==undefined?{executor_role:args.executor_role}:{}),...(args.execute!==undefined?{execute:args.execute}:{}),...(args.as_child!==undefined?{as_child:args.as_child}:{})},caller)!;
+      }catch(error){
+        const expected=['invalid_task_intent','invalid_task_endpoint','invalid_task_request','invalid_task_contract','invalid_task_executor','invalid_child_task','child_task_manager_required','child_task_uses_project_team','task_executor_unavailable','task_delegation_forbidden','task_external_write_forbidden','task_pull_request_forbidden','task_software_disabled'];
+        if(!(error instanceof HttpError||error instanceof TaskError)||!expected.includes(error.code))throw error;
+        return {error:error.code,stage:'task_creation',created:false,instruction:error.code==='task_external_write_forbidden'?'The source task has no code/PR authority to delegate. Keep the original goal and coordinate or request the missing authority.':error.code==='task_software_disabled'?'Project development or this work type is disabled. Ask the project administrator to enable it; no task was created.':error.code==='task_pull_request_forbidden'?'The selected executor or work type cannot edit code and deliver a PR. A Task Manager can delegate to the normal project team within existing development authority.':error.message};
+      }
     }
     if(name==='manage_task'){
       fields(args,['task_id','action','instruction']);if(!['instructions','retry','pause','cancel'].includes(String(args.action)))fail(400,'task_operation_forbidden');

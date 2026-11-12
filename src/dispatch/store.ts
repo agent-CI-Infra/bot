@@ -125,7 +125,7 @@ export function continuations(store: Store, event: Record<string, any>): Continu
 export function dispatchContext(store: Store, event: Row): DispatchContext {
   const options = (JSON.parse(event.options) as CreateOption[]).filter(option => workOffered(store, event.repository_id, option.work, event.type));
   const related = event.object_number ? store.all(`SELECT id,kind,status,summary,error_code,created_at,updated_at,result FROM tasks WHERE repository_id=? AND object_number=?
-    AND kind NOT IN ('release.observe','release.notes','actions.failures','gate.onboarding','task.request') ORDER BY created_at DESC,rowid DESC LIMIT 8`, event.repository_id, event.object_number).map(task => {
+    AND kind NOT IN ('release.observe','release.notes','actions.failures','gate.onboarding','task.request','task.development') ORDER BY created_at DESC,rowid DESC LIMIT 8`, event.repository_id, event.object_number).map(task => {
     let outcome: unknown = null; try { const result = JSON.parse(task.result || 'null'); outcome = result?.summary ? String(result.summary).slice(0, 300) : result?.pr_url ?? null; } catch { outcome = null; }
     return { id: task.id, kind: task.kind, status: task.status, summary: task.summary, error_code: task.error_code ?? null, created_at: task.created_at, outcome };
   }) : [];

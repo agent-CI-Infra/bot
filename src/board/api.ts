@@ -168,7 +168,7 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
       ${execution('t.status')} AS execution_status,t.id AS task_id,t.status AS task_status,NULL AS review_task_id,NULL AS review_status,
       NULL AS development_task_id,NULL AS development_status,NULL AS field_value,
       NULL AS release_id,t.id AS version,NULL AS release_stage,NULL AS release_url
-      FROM tasks t JOIN repositories repos ON repos.id=t.repository_id WHERE t.kind='task.request'`;
+      FROM tasks t JOIN repositories repos ON repos.id=t.repository_id WHERE t.kind IN ('task.request','task.development')`;
     const cte = `WITH ${latestTasks}, work AS (${objectSql('review')} UNION ALL ${objectSql('development')} UNION ALL ${customSql} UNION ALL ${releaseSql} UNION ALL ${requestedSql})`;
     // A built-in object workflow already names its object type, like the release process.
     const typed = !['release','task.request'].includes(category) && !objectWorkflows.includes(category);
