@@ -356,7 +356,7 @@ export class ChannelServiceSessions {
       event('done');
       return { id, message: reply, attachments:media?.attachments, fence };
     } catch (error) {
-      event('error');
+      event(this.store.get('SELECT state FROM channel_service_turns WHERE id=?', id)?.state === 'stopped' ? 'stopped' : 'error');
       const reason = controller.signal.aborted ? controller.signal.reason ?? error : error;
       this.store.run("UPDATE channel_service_turns SET state='failed',error=?,updated_at=? WHERE id=? AND state='running'",
         reason instanceof HttpError || reason instanceof TaskError ? reason.code : 'conversation_failed', Date.now(), id);

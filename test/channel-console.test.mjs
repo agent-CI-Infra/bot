@@ -49,10 +49,12 @@ test('timeline pages newest messages without duplication and keeps tombstones, s
 
 test('assistant steps are real metadata, paginated, fenced and erased with local history', async t => {
   const f = await channelFixture(t); await repositoryAssistant(f); const chat = await boundGroup(f);
-  scriptedModel(f, [['list_projects', {}], '当前项目已核对。']);
+  scriptedModel(f, [['send_message', { text: '正在核对当前项目。' }], ['list_projects', {}], '当前项目已核对。']);
   const receipt = await post(f.h, f.id, inGroup('查看项目范围', 'ou_bob'));
   assert.equal((await finished(f.h, receipt.value.operation_id)).state, 'completed');
+  await until(() => f.h.store.get("SELECT state FROM channel_outbox WHERE idempotency_key LIKE '%:stage:1'"), row => row?.state === 'sent');
   const timeline = await f.admin(`/api/channels/chats/${chat.id}/timeline`), turn = timeline.value.conversation.turns[0];
+  assert.equal(turn.messages[0].text, '正在核对当前项目。'); assert.equal(turn.messages[0].delivery.state, 'sent');
   const steps = await f.admin(`/api/channels/chats/${chat.id}/turns/${turn.id}`);
   assert.equal(steps.status, 200); assert.ok(steps.value.events.some(e => e.type === 'tool_call' && e.name === 'list_projects'));
   assert.ok(steps.value.events.some(e => e.type === 'tool_result')); assert.equal(steps.value.events.at(-1).type, 'done');
@@ -108,12 +110,14 @@ test('a project task delegated by the group is linked to its conversation and di
 });
 
 test('private turns show actual delivery facts and cannot restore own tasks after the local source changes', async t => {
-  const f = await channelFixture(t); scriptedModel(f, ['私聊中核对当前项目。']);
+  const f = await channelFixture(t); scriptedModel(f, [['send_message', { text: '正在读取本人私聊的项目。' }], '私聊中核对当前项目。']);
   const receipt = await post(f.h, f.id, envelope('请核对当前项目'));
   assert.equal((await finished(f.h, receipt.value.operation_id)).state, 'completed');
   await until(() => f.h.store.get("SELECT state FROM channel_outbox WHERE idempotency_key=?", receipt.value.operation_id + ':result'), row => row?.state === 'sent');
   const chat = f.h.store.get("SELECT * FROM channel_chats WHERE chat_type='p2p'");
   const timeline = (await f.admin(`/api/channels/chats/${chat.id}/timeline`)).value, conversation = timeline.conversation;
+  assert.equal(conversation.turns[0].messages[0].text, '正在读取本人私聊的项目。');
+  assert.equal(conversation.turns[0].messages[0].delivery.state, 'sent');
   assert.equal(conversation.turns[0].state, 'completed'); assert.equal(conversation.mode, 'management'); assert.equal(conversation.turns[0].delivery.state, 'sent');
   const id = 'b'.repeat(48);
   f.h.store.run(`INSERT INTO service_role_own_tasks(id,service_role_id,owner_kind,owner_id,principal_id,fence,title,state,history,created_at,updated_at)

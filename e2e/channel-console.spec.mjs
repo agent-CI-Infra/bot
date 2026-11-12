@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
-import { channelFixture, boundGroup, privateChat, repositoryAssistant, scriptedModel, inGroup, envelope, post, finished } from '../test/channel-fixture.mjs';
+import { channelFixture, boundGroup, privateChat, repositoryAssistant, scriptedModel, inGroup, envelope, post, finished, until } from '../test/channel-fixture.mjs';
+import { TaskEngine } from '../dist/agent/engine.js';
 import { testPassword } from '../test/helpers.mjs';
 
 async function login(page, f, hash, username = 'administrator', password = f.password) {
@@ -138,4 +139,35 @@ test('binding generation remains available while optional group metadata is slow
     await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible();
     await expect(page.getByRole('region', { name: '飞书绑定概览' })).toHaveCount(0);
   } finally { release?.(); await f.close(); }
+});
+
+
+test('conversation workspace shows a running group progress message and lets its manager confirm stopping the answer', async ({ page }) => {
+  const f = await channelFixture(undefined, store => ({ engine: new TaskEngine(store, { call: async () => ({ state: 'stopped' }) }) }));
+  try {
+    await repositoryAssistant(f); const chat = await boundGroup(f);
+    f.modelState.respond = async (body, res) => {
+      if (body.messages.some(m => m.role === 'tool')) return await new Promise(() => {});
+      res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null,
+        tool_calls: [{ id: 'progress', type: 'function', function: { name: 'send_message', arguments: JSON.stringify({ text: '正在核对项目证据，请稍等。' }) } }] } }], usage: { prompt_tokens: 12, completion_tokens: 4 } }));
+    };
+    await post(f.h, f.id, inGroup('请核对项目证据。', 'ou_bob'));
+    await until(() => f.wire.sent.find(row => JSON.stringify(row.content).includes('正在核对项目证据')));
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, f, '#/conversations/' + chat.id);
+    const progress = page.getByRole('region', { name: '助手进展消息' });
+    await expect(progress).toContainText('正在核对项目证据，请稍等。'); await expect(progress).toContainText('已发送至飞书');
+    await page.screenshot({ path: '.tmp/channel-console/progress-1440.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/channel-console/progress-390.png', fullPage: true });
+    await page.getByRole('button', { name: '停止回答', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: '停止回答', exact: true }).click();
+    await expect(page.locator('.channel-run .status')).toHaveText('已停止');
+    await expect(progress).toContainText('正在核对项目证据，请稍等。');
+    await expect(page.getByRole('button', { name: '停止回答', exact: true })).toHaveCount(0);
+    await until(() => f.wire.sent.find(row => JSON.stringify(row.content).includes('已在控制台停止')));
+    await page.getByText('查看执行过程', { exact: true }).click();
+    await expect(page.locator('.channel-step').last()).toContainText('已停止');
+  } finally { await f.close(); }
 });
