@@ -17,6 +17,7 @@ import { ActionsFailures } from './actions/service.js';
 import { GitHubLogin } from './identity/github-login.js';
 import { deploymentOrigin, loginCallbackPath } from './onboarding/public-url.js';
 import { StallMonitor } from './core/stalls.js';
+import { PayloadMigration } from './storage/migration.js';
 
 process.umask(0o077);
 const keyFile = process.env.BOT_MASTER_KEY_FILE;
@@ -73,16 +74,18 @@ const { server } = createControlPlane({ store, staticDirectory: resolve(import.m
   { trustedProxies: (process.env.BOT_TRUSTED_PROXIES || '').split(',').map(value => value.trim()).filter(Boolean) });
 // The only business listener: console, API, OAuth, App callbacks, webhooks, external executors and public boards.
 server.on('error', () => { console.error('listener failed'); process.exit(1); });
+const migration = new PayloadMigration(store);
 server.listen(8791, '0.0.0.0', () => {
   console.log('listening on 8791');
-  // Background work that never delays readiness: close the trajectory files a stopped process left open.
-  const seal = () => void store.trajectories.seal().catch(error => console.error('[trajectories] sealing failed:', error));
-  seal(); setInterval(seal, 10 * 60_000).unref();
+  // Background work that never delays readiness: close the trajectory files a stopped process left open, then move
+  // payloads written before #436 out of their rows, slice by slice.
+  const seal = () => store.trajectories.seal().catch(error => console.error('[trajectories] sealing failed:', error));
+  void seal().then(() => { if (!stopping) migration.start(); }); setInterval(seal, 10 * 60_000).unref();
 });
 let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;
   clearInterval(timer); clearInterval(syncTimer); clearInterval(identityTimer);
-  server.close(async () => { await Promise.all([installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close()]); store.close(); process.exit(0); });
+  server.close(async () => { await Promise.all([installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close(),migration.stop()]); store.close(); process.exit(0); });
   setTimeout(() => process.exit(1), 100_000).unref();
 });
