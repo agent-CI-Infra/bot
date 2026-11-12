@@ -45,7 +45,7 @@ export class ChannelApi {
     if (schedule && !schedule[2] && method === 'DELETE') return this.service.schedules.remove(actor, schedule[1]!, input);
     if (schedule && schedule[2] && method === 'POST') return this.service.schedules.runNow(actor, schedule[1]!, input);
     const conversation=/^\/api\/channels\/chats\/([a-f0-9]{48})\/conversation$/.exec(path);
-    if(conversation&&method==='GET')return this.service.conversationView(actor,conversation[1]!,Number(url.searchParams.get('offset')??0));
+    if(conversation&&method==='GET')return console.conversation(actor,conversation[1]!,Number(url.searchParams.get('offset')??0));
     // Stopping a running group answer (#435); its progress messages already sent stay.
     const turnStop=/^\/api\/channels\/chats\/([a-f0-9]{48})\/service-turns\/([a-f0-9]{48})\/stop$/.exec(path);
     if(turnStop&&method==='POST'){fields(input,[]);return this.service.stopServiceTurn(actor,turnStop[1]!,turnStop[2]!);}
@@ -63,16 +63,15 @@ export class ChannelApi {
     const local = /^\/api\/channels\/chats\/([a-f0-9]{48})\/(messages|sync|retention)$/.exec(path);
     if (local) {
       // Project access alone does not authorize reading a group's messages or personal chats.
-      if (local[2] === 'messages' && method === 'GET' || local[2] === 'sync' && method === 'POST') this.service.authorizeHistory(actor, local[1]!);
+      if (local[2] === 'messages' && method === 'GET') this.service.authorizeConversation(actor, local[1]!);
+      else if (local[2] === 'sync' && method === 'POST') this.service.authorizeHistory(actor, local[1]!);
       else authorize(actor, 'platform.manage');
       const id = local[1]!, chat = store.get('SELECT * FROM channel_chats WHERE id=?', id);
       if (!chat) return fail(404, 'channel_chat_not_found');
       if (local[2] === 'messages' && method === 'GET') {
         const query = Object.fromEntries(url.searchParams);
         fields(query, ['message_id', 'sender_id', 'reply_to', 'thread_id', 'from', 'to', 'keyword', 'cursor', 'limit']);
-        let projects:string[]|undefined;
-        try{authorize(actor,'platform.manage');}catch{projects=this.service.visibleScopes(id,actor);}
-        return this.service.ledger.query(id, { ...query, ...Object.fromEntries(['from', 'to', 'limit'].filter(k => query[k] !== undefined).map(k => [k, Number(query[k])])) },projects);
+        return this.service.ledger.query(id, { ...query, ...Object.fromEntries(['from', 'to', 'limit'].filter(k => query[k] !== undefined).map(k => [k, Number(query[k])])) });
       }
       if (local[2] === 'sync' && method === 'POST') {
         fields(input, ['full']);

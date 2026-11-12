@@ -18,6 +18,9 @@ for (const width of [1440, 390]) test(`Feishu console shows real messages, steps
     scriptedModel(f, [['list_projects', {}], '根据群里的讨论，先核对项目证据。']);
     const receipt = await post(f.h, f.id, inGroup('大家先核对当前的项目范围。', 'ou_bob'));
     expect((await finished(f.h, receipt.value.operation_id)).state).toBe('completed');
+    expect((await f.admin('/api/channels/chats/' + group.id + '/service-binding', 'PUT', {
+      service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['102'] }, enabled: true, expected_revision: 1
+    })).status).toBe(200);
     await page.setViewportSize({ width, height: 1000 }); await login(page, f, '#/conversations/' + group.id);
     const thread = page.getByRole('region', { name: '当前飞书会话' });
     await expect(page.getByLabel('消息与执行时间线')).toContainText('大家先核对当前的项目范围。');
@@ -26,6 +29,7 @@ for (const width of [1440, 390]) test(`Feishu console shows real messages, steps
     await page.getByText('本轮生成的回答', { exact: true }).click();
     await expect(page.getByLabel('消息与执行时间线')).toContainText('根据群里的讨论，先核对项目证据。');
     await expect(page.getByLabel('会话派生任务')).toContainText('项目任务');
+    await expect(thread).not.toContainText('来源或授权范围已变化');
     if (width === 1440) for (const breakpoint of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width: breakpoint, height: 1000 }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(breakpoint)).toBe(true);
     }
@@ -230,6 +234,35 @@ for (const width of [1440, 390]) test(`Feishu names identify private chats and g
     await expect(page.getByText('私信 · 张小明', { exact: true })).toBeVisible();
     await expect(page.getByRole('article').filter({ hasText: '私信 · 张小明' })).toContainText('所属企业：示例企业');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(errors).toEqual([]);
+  } finally { await f.close(); }
+});
+
+
+for (const width of [1440, 390]) test(`a platform administrator reads another user's complete private conversation at ${width}px`, async ({ page }) => {
+  const f = await channelFixture(), errors = []; page.on('pageerror', error => errors.push(error.message));
+  try {
+    const owner = await f.member('private-conversation-owner', { repository_ids: ['101'] });
+    bindFixture(f.h, f.id, owner.id, 'ou_console_owner');
+    f.h.store.run("UPDATE external_identities SET display_name='李明' WHERE principal_id=?", owner.id);
+    scriptedModel(f, [['send_message', { text: '正在核对私聊的问题。' }], '这是成员私聊中已经生成的完整回答。']);
+    const receipt = await post(f.h, f.id, envelope('请核对我的项目问题', { sender: { sender_id: { open_id: 'ou_console_owner' } }, message: { chat_id: 'oc_console_owner' } }));
+    expect((await finished(f.h, receipt.value.operation_id)).state).toBe('completed');
+    const chat = f.h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_console_owner'");
+    f.h.store.run('UPDATE channel_chats SET context_revision=context_revision+1 WHERE id=?', chat.id);
+    f.h.store.run('UPDATE principals SET authorization_revision=authorization_revision+1 WHERE id=?', owner.id);
+    await page.setViewportSize({ width, height: 1000 }); await login(page, f, '#/conversations');
+    await page.getByRole('link', { name: /私聊 · 李明/ }).click();
+    const timeline = page.getByLabel('消息与执行时间线');
+    await expect(timeline).toContainText('请核对我的项目问题');
+    await expect(timeline).toContainText('这是成员私聊中已经生成的完整回答。');
+    await expect(timeline).toContainText('正在核对私聊的问题。');
+    await timeline.getByText('查看执行过程', { exact: true }).click();
+    await expect(timeline.locator('.channel-step')).not.toHaveCount(0);
+    await expect(timeline).not.toContainText('来源或授权范围已变化');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    mkdirSync('.tmp/channel-console', { recursive: true });
+    await page.screenshot({ path: `.tmp/channel-console/admin-private-history-${width}.png`, fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
