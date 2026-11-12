@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
-import { channelFixture, boundGroup, privateChat, repositoryAssistant, scriptedModel, inGroup, envelope, post, finished, until } from '../test/channel-fixture.mjs';
+import { channelFixture, boundGroup, privateChat, bindFixture, repositoryAssistant, scriptedModel, inGroup, envelope, post, finished, until } from '../test/channel-fixture.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { testPassword } from '../test/helpers.mjs';
 
@@ -169,5 +169,27 @@ test('conversation workspace shows a running group progress message and lets its
     await until(() => f.wire.sent.find(row => JSON.stringify(row.content).includes('已在控制台停止')));
     await page.getByText('查看执行过程', { exact: true }).click();
     await expect(page.locator('.channel-step').last()).toContainText('已停止');
+  } finally { await f.close(); }
+});
+
+
+test('binding overview pairs private chats with their exact Feishu identity and removes only the revoked identity from current counts', async ({ page }) => {
+  const f = await channelFixture();
+  try {
+    const first = await privateChat(f);
+    bindFixture(f.h, f.id, f.principal, 'ou_second');
+    const second = await privateChat(f, 'ou_second', f.principal, 'oc_second');
+    await login(page, f, '#/identity/feishu');
+    const overview = page.getByRole('region', { name: '飞书绑定概览' });
+    await expect(overview.locator('.feishu-metric')).toContainText(['已绑定身份2', '本人私聊2']);
+    const identities = overview.locator('.feishu-bound-summary > .feishu-summary-row');
+    await expect(identities).toHaveCount(2);
+    for (const row of await identities.all()) await expect(row.getByRole('link', { name: '打开私聊会话', exact: true })).toHaveCount(1);
+    expect(new Set(await identities.locator('a').evaluateAll(nodes => nodes.map(node => node.getAttribute('href'))))).toEqual(new Set(['#/conversations/' + first.id, '#/conversations/' + second.id]));
+    f.h.store.run("UPDATE external_identities SET status='revoked' WHERE principal_id=? AND provider='feishu' AND external_actor='ou_second'", f.principal);
+    await page.reload();
+    await expect(overview.locator('.feishu-metric')).toContainText(['已绑定身份1', '本人私聊1']);
+    await expect(overview).toContainText('另有 1 个历史会话');
+    await expect(overview.getByRole('link', { name: '打开私聊会话', exact: true })).toHaveAttribute('href', '#/conversations/' + first.id);
   } finally { await f.close(); }
 });

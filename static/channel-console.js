@@ -35,10 +35,11 @@ async function channelBindingOverview(data) {
   const show = (node, value, hint) => { node.querySelector('strong').textContent = String(value); node.querySelector('small').textContent = hint; };
   void Promise.all([
     api('/api/channels/employees').then(result => {
-      const currentChats = result.personal_chats.filter(c => active.some(b => b.connector === c.connector_id + ':' + c.app_id));
+      const belongs = (binding, chat) => binding.connector === chat.connector_id + ':' + chat.app_id && binding.external_actor === chat.actor_id && binding.external_tenant === chat.actor_tenant;
+      const currentChats = result.personal_chats.filter(c => active.some(b => belongs(b, c)));
       show(privateCount, currentChats.length, '当前绑定对应的私聊' + (result.personal_chats.length > currentChats.length ? `；另有 ${result.personal_chats.length - currentChats.length} 个历史会话` : ''));
       for (const b of active) {
-        const chats = result.personal_chats.filter(c => b.connector === c.connector_id + ':' + c.app_id);
+        const chats = result.personal_chats.filter(c => belongs(b, c));
         const row = element('div', '', 'feishu-summary-row');
         row.append(element('strong', b.app_name || '机器人名称暂未获取'), note(`${b.tenant_name || '企业名称暂未获取'} · ${b.display_name && b.display_name !== b.external_actor ? b.display_name : owner.username + ' 的飞书身份'}`),
           note(chats.length ? `私聊已建立 ${chats.length} 个 · 使用管理助手` : '身份已绑定，尚未建立私聊会话；请给机器人发送一条普通消息。'));

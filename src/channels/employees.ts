@@ -232,7 +232,7 @@ export class ChannelEmployees {
       let state = g.enabled ? 'active' : 'disabled', error = null;
       if (g.enabled) try { this.assertGrant(g); } catch (e) { state = 'paused'; error = (e as any).code ?? 'channel_employee_unavailable'; }
       return { ...g, capabilities: JSON.parse(g.capabilities), state, error, conversation_id: g.chat_id };
-    }), chats,personal_chats:this.store.all('SELECT c.id,c.chat_id,c.app_id,c.connector_id FROM channel_chats c JOIN channel_personal_owners o ON o.chat_id=c.id WHERE o.principal_id=?',actor.principal_id),
+    }), chats,personal_chats:this.store.all('SELECT c.id,c.chat_id,c.app_id,c.connector_id,o.actor_id,o.actor_tenant FROM channel_chats c JOIN channel_personal_owners o ON o.chat_id=c.id WHERE o.principal_id=?',actor.principal_id),
       projects: listEffectiveProjectAccess(this.store, actor.principal_id).filter(p => p.can_configure), capability_options: capabilities };
   }
   /** Refresh authority, never run business work. Queries themselves perform no provider reads. */
