@@ -6,7 +6,7 @@ titles.settings = '全局设置';
 // waiting_token with a saved token means this deployment has no tunnel status endpoint to read.
 const tunnelStates = { waiting_token: '读不到状态', not_running: 'tunnel 服务未运行', connecting: '正在连接', connected: '已连接' };
 const settingsGroups = [
-  ['系统与算力', [['general', '常规'], ['models', '模型'], ['service-roles', '服务角色'], ['assistant-computers', '助手电脑'], ['storage', '存储']]],
+  ['系统与算力', [['platform', '平台'], ['models', '模型'], ['service-roles', '服务角色'], ['assistant-computers', '助手电脑'], ['storage', '存储']]],
   ['接入与网络', [['onboarding', '接入向导'], ['access', '公网接入'], ['external', '外部执行']]],
   ['连接与渠道', [['accounts', '机器人账号'], ['installations', '安装档案'], ['feishu', '飞书连接']]],
   ['仓库与用户', [['projects', '项目管理'], ['users', '用户']]]
@@ -17,17 +17,24 @@ const visibleSettingsGroups = () => typeof me === 'object' && me && me.role !== 
   ? settingsGroups.map(([title, items]) => [title, items.filter(([key]) => key === 'storage')]).filter(([, items]) => items.length) : settingsGroups;
 const visibleSettingsSections = () => visibleSettingsGroups().flatMap(([, items]) => items);
 // A settings address is a section and, for a detail page, one record inside it: #/settings/installations/<host>/<app>/<id>
-// and #/settings/users/<id>. Unknown sections fall back to 常规, an unreadable id is handled by the page itself.
+// and #/settings/users/<id>. Unknown sections fall back to the first category the reader can see (平台 for a super
+// administrator, 存储 for a project administrator), and so does the retired #/settings/general; an unreadable id is
+// handled by the page itself.
 function settingsRoute() {
   if (/^#\/settings\/onboarding(?:\/|$)/.test(location.hash)) return { section: 'onboarding', id: null };
   if (/^#\/settings\/feishu(?:\/|$)/.test(location.hash)) return { section: 'feishu', id: null };
   const match = /^#\/settings\/([a-z-]+)(?:\/(.+))?$/.exec(location.hash), key = match?.[1], sections = visibleSettingsSections();
-  return { section: sections.some(([name]) => name === key) ? key : sections[0][0], id: match?.[2] ? decodeURIComponent(match[2]) : null };
+  // #356 renamed 常规 to 平台: the retired name still opens the category that now carries those cards, and the address is
+  // rewritten to that category's current name so one category cannot be shared under two names.
+  return { section: sections.some(([name]) => name === key) ? key : sections[0][0], retired: key === 'general' && sections.some(([name]) => name === 'platform'), id: match?.[2] ? decodeURIComponent(match[2]) : null };
 }
 // What the cards draw from; the model cards are redrawn together because deleting the default model clears it.
 let settingsView = null;
 async function renderSettings(request) {
   const route = settingsRoute(), section = route.section, nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content'), body = element('div', '', 'project-body settings-body');
+  // #356 renamed 常规 to 平台: the retired address still opens this category, and the bar is left showing the one address
+  // a category has, so a reload and every link keep agreeing on the name.
+  if (route.retired) history.replaceState(null, '', '#/settings/platform');
   nav.setAttribute('aria-label', '全局设置类别');
   for (const [groupTitle, items] of visibleSettingsGroups()) {
     nav.append(element('p', groupTitle, 'console-nav-label'));
@@ -37,7 +44,7 @@ async function renderSettings(request) {
   $('count').textContent = ''; content.append(element('p', '正在加载…', 'muted')); body.append(nav, content); $('settings-panel').replaceChildren(body);
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
   // The hash may only choose among the declared sections: never let a user-written name reach the prototype chain, and
-  // never call anything that is not a declared loader. Anything else falls back to 常规.
+  // never call anything that is not a declared loader. Anything else falls back to 平台.
   const handler = Object.hasOwn(settingsCards, section) ? settingsCards[section] : settingsCards.general;
   if (typeof handler !== 'function') return;
   const cards = await handler(request, route.id);
@@ -148,7 +155,7 @@ const settingsCards = {
     }
     return [section];
   },
-  async general(request) {
+  async platform(request) {
     const { settings, version } = await api('/api/settings');
     const about = card('当前运行版本');
     about.append(version.image_tag ? facts([['镜像标签', version.image_tag]]) : note('源码运行：没有设置镜像标签（BOT_IMAGE_TAG），版本以部署所用的源码提交为准。'));
@@ -212,6 +219,9 @@ const settingsCards = {
     return [settingsList('用户', '项目权限由 GitHub 当前权限和 Bot 内显式委派共同决定；下面显示当前可见项目及来源。超级管理员管理全部项目和全局设置。', users.map(userProfileLine), '还没有用户。', '新增用户', 'users')];
   },
 };
+// #356 renamed 常规 to 平台: the loader keeps the retired name as an alias, so #/settings/general still draws the three
+// platform cards instead of an empty page.
+settingsCards.general = settingsCards.platform;
 async function globalProjectSettings(request, id) {
   const selection = card('项目管理');
   selection.append(note('仅超级管理员可配置。项目管理员使用「设置」管理项目策略、模型、角色和成员。'));
