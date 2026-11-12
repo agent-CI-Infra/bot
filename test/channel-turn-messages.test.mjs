@@ -57,7 +57,7 @@ test('a text preamble followed by a tool call resumes admission and incorporates
       chunk(res, { tool_calls: [{ index: 0, id: 'tool', type: 'function', function: { name: 'start_own_task', arguments: '{}' } }] }, 'tool_calls');
       return res.end('data: [DONE]\n\n');
     }
-    assert.deepEqual(incoming(body)[0].reply_required.map(m => m.message_id), [older.event.message.message_id, newer.event.message.message_id]);
+    assert.deepEqual(incoming(body)[0].messages.map(m => m.message_id), [older.event.message.message_id, newer.event.message.message_id]);
     return say(res, '自然的下一步已综合两个问题');
   };
   const initial = await post(f.h, f.id, inGroup('开始')); await output.wait;
@@ -97,9 +97,10 @@ test('verified self mentions stay distinct from ambient participation and same-n
   f.modelState.respond = async (body, res) => {
     calls++; if (calls === 1) { assert.equal(JSON.parse(body.messages[1].content).context.current_message.is_direct_mention,true); return call(res,'start_own_task'); }
     const batch = incoming(body)[0];
-    assert.deepEqual(batch.reply_required.map(m => m.is_direct_mention), [true,false,false]);
-    assert.deepEqual(batch.reply_required.map(m => m.mentions), normalized);
-    assert.equal(batch.reference_only.length,0); return say(res,'按是否 @ 区分后回答');
+    assert.deepEqual(batch.messages.map(m => m.is_direct_mention), [true,false,false]);
+    assert.deepEqual(batch.messages.map(m => m.mentions), normalized);
+    // Participation only hints; whether a message concerns the assistant is the model's call.
+    assert.deepEqual(batch.messages.map(m => m.group_setting_invites_reply), [true,true,true]); return say(res,'按是否 @ 区分后回答');
   };
   const initial = await post(f.h,f.id,inGroup('开始')); await until(() => executing);
   const self = inGroup('直接呼叫'); self.event.message.mentions[0].name = 'SameName';
@@ -123,20 +124,20 @@ test('verified self mentions stay distinct from ambient participation and same-n
 
 test('the model byte budget leaves unseen inputs durable without imposing a turn message limit (#458)', async t => {
   const f = await group(t); clearInterval(f.service.timer);
-  const feed = f.service.turnMessages.open(f.chat,'budget-turn',f.chat.id,'initial',()=>true,(source,event)=>f.service.employees.currentMessage(f.chat,event));
+  const feed = f.service.turnMessages.open(f.chat,'budget-turn',f.chat.id,'initial',{needsReply:()=>true,guard:(source,event)=>f.service.employees.currentMessage(f.chat,event)});
   const receipts = [];
   for (let i = 0;i < 3;i++) {
     const event = inGroup(String(i)+'x'.repeat(1000));
     receipts.push(await post(f.h,f.id,event));
   }
-  assert.equal(feed.take(1800).reply_required.length,1);
-  assert.equal(feed.take(1800).reply_required.length,1);
+  assert.equal(feed.take(1800).content.messages.length,1);
+  assert.equal(feed.take(1800).content.messages.length,1);
   feed.finish(); f.service.turnMessages.complete('budget-turn');
   assert.deepEqual(receipts.map(r=>row(f,r).state),['completed','completed','queued']);
   assert.deepEqual(f.service.turnMessages.list('budget-turn').map(m=>m.state),['answered','answered','released']);
 });
 
-test('messages during a tool are injected together at the next step, distinguished from reference traffic and deduplicated (#458)', async t => {
+test('messages during a tool are injected together at the next step with their facts, acknowledged and deduplicated (#458)', async t => {
   const f = await group(t), tool = gate(t); let executing = false;
   // Hold an actual tool, not a model request, to exercise receipt-time merging independently of the worker tick.
   f.service.serviceSessions.own.invoke = async () => { executing = true; await tool.wait; return { conclusion: '范围已核对' }; };
@@ -145,9 +146,12 @@ test('messages during a tool are injected together at the next step, distinguish
     calls++;
     if (calls === 1) return call(res, 'start_own_task');
     const additions = incoming(body); assert.equal(additions.length, 1);
-    assert.deepEqual(additions[0].reply_required.map(m => m.sender_id), ['ou_bob', 'ou_alice']);
-    assert.match(additions[0].reply_required[1].content, /算了不用查了/);
-    assert.deepEqual(additions[0].reference_only.map(m => m.content), ['旁边的讨论']);
+    assert.deepEqual(additions[0].messages.map(m => m.sender_id), ['ou_bob', 'ou_alice', 'ou_alice']);
+    assert.deepEqual(additions[0].messages.map(m => m.same_sender_as_request), [false, true, true]);
+    assert.match(additions[0].messages[1].content, /算了不用查了/);
+    assert.deepEqual(additions[0].messages.map(m => [m.is_direct_mention, m.group_setting_invites_reply]), [[true, true], [true, true], [false, false]]);
+    assert.equal(additions[0].messages[2].content, '旁边的讨论');
+    assert.match(additions[0].notice, /not necessarily addressed to you/);
     return say(res, 'Bob：范围已核对。Alice：已停止后续查询。');
   };
   const initial = await post(f.h, f.id, inGroup('查一下项目'));
@@ -158,16 +162,18 @@ test('messages during a tool are injected together at the next step, distinguish
   const reference = await post(f.h, f.id, discussion);
   for (const item of [second, cancel, reference]) assert.equal(row(f, item).state, 'merged');
   assert.equal((await post(f.h, f.id, { ...secondEvent, header: { ...secondEvent.header, event_id: 'redelivered' } })).value.duplicate, true);
-  for (const item of [initial, second, cancel]) await indicator(f, item, 'active');
+  // Every message taken into the turn shows the processing indicator, also one the participation setting would not answer.
+  for (const item of [initial, second, cancel, reference]) await indicator(f, item, 'active');
   assert.deepEqual(f.wire.state.reactionRequests.filter(r => r.method === 'POST').map(r => r.message).sort(),
-    [initial, second, cancel].map(item => f.service.turnMessages.event(row(f, item)).message_id).sort());
+    [initial, second, cancel, reference].map(item => f.service.turnMessages.event(row(f, item)).message_id).sort());
   tool.release(); await done(f, initial); await done(f, second); await done(f, cancel);
   await until(() => sent(f).some(s => s.includes('已停止后续查询')));
   assert.equal(calls, 2); assert.equal(f.h.store.get('SELECT count(*) n FROM channel_service_turns').n, 1);
-  assert.equal(f.h.store.get('SELECT count(*) n FROM channel_reactions').n, 3, 'initial and both required messages get normal acknowledgements');
-  for (const item of [initial, second, cancel]) await indicator(f, item, 'done');
+  assert.equal(f.h.store.get('SELECT count(*) n FROM channel_reactions').n, 4, 'the initial and every merged message get acknowledgements');
+  // The final answer clears all of them together.
+  for (const item of [initial, second, cancel, reference]) await indicator(f, item, 'done');
   assert.deepEqual(f.wire.state.reactionRequests.filter(r => r.method === 'DELETE').map(r => r.message).sort(),
-    [initial, second, cancel].map(item => f.service.turnMessages.event(row(f, item)).message_id).sort());
+    [initial, second, cancel, reference].map(item => f.service.turnMessages.event(row(f, item)).message_id).sort());
   const outbox = f.h.store.get("SELECT * FROM channel_outbox WHERE idempotency_key=?", initial.value.operation_id + ':business-result');
   assert.equal(f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id).delivery.reply_to, f.service.turnMessages.replyEvent(row(f, initial).message_id).message_id);
   const view = (await f.admin(`/api/channels/chats/${f.chat.id}/timeline`)).value.conversation.turns[0];
@@ -231,8 +237,10 @@ test('private management messages join the natural next step and remain in subse
   f.service.management.own.invoke = async () => { executing = true; await held.wait; return { conclusion: '工具完成' }; };
   f.modelState.respond = async (body, res) => {
     calls++; if (calls === 1) return call(res, 'start_own_task');
-    assert.equal(incoming(body)[0].reply_required[0].content, '再看看第二个问题');
-    assert.equal(incoming(body)[0].reply_required[0].is_direct_mention, false, 'a private message is not a group @mention');
+    const [message] = incoming(body)[0].messages;
+    assert.equal(message.content, '再看看第二个问题'); assert.equal(message.same_sender_as_request, true);
+    assert.equal('is_direct_mention' in message, false, 'a private message carries no group mention facts');
+    assert.match(body.messages[0].content, /In this private chat they come from the person you serve/);
     return say(res, '两个问题一起回答');
   };
   const initial = await post(f.h, f.id, envelope('第一个问题')); await until(() => executing);
@@ -255,7 +263,8 @@ test('group timers absorb incoming questions and still publish one named timer r
     calls++;
     assert.match(body.messages[0].content, /started by one of this group's timers/);
     if (calls === 1) return call(res, 'start_own_task');
-    assert.ok(String(incoming(body)[0].reply_required[0].content).endsWith('也核对一下我的问题')); return say(res, '定时检查和群友问题均已核对');
+    assert.ok(String(incoming(body)[0].messages[0].content).endsWith('也核对一下我的问题')); assert.equal('same_sender_as_request' in incoming(body)[0].messages[0], false);
+    return say(res, '定时检查和群友问题均已核对');
   };
   const schedule = (await f.admin(`/api/channels/chats/${f.chat.id}/schedules`, 'POST', { name: '巡检', prompt: '检查项目', timezone: 'UTC', interval_minutes: 5 })).value.schedule;
   await f.admin(`/api/channels/schedules/${schedule.id}/run`, 'POST', {}); await until(() => executing);
@@ -278,7 +287,7 @@ test('an active agent accepts more than 32 messages beyond two minutes without i
   f.service.serviceSessions.own.invoke = async () => { executing = true; await held.wait; return { conclusion: '工具完成' }; };
   f.modelState.respond = async (body, res) => {
     calls++; if (calls === 1) return call(res, 'start_own_task');
-    assert.equal(incoming(body)[0].reply_required.length, 40); return say(res, '所有补充已在原回合处理');
+    assert.equal(incoming(body)[0].messages.length, 40); return say(res, '所有补充已在原回合处理');
   };
   const initial = await post(f.h, f.id, inGroup('开始')); await until(() => executing);
   for (let i = 0; i < 40; i++) {
@@ -325,7 +334,7 @@ test('restart recovery preserves memberships and returns only required unanswere
   // Persist an interrupted membership without an in-process model. This is the state loaded by a fresh process.
   const older = inGroup('重启后接手'); older.event.message.create_time = String(Date.now() - 3_600_000);
   const receipt = await post(f.h, f.id, older), source = row(f, receipt);
-  const feed = f.service.turnMessages.open(f.chat, 'lost-turn', f.chat.id, 'lost-source', () => true, () => {});
+  const feed = f.service.turnMessages.open(f.chat, 'lost-turn', f.chat.id, 'lost-source', { needsReply: () => true, guard: () => {} });
   const event = f.service.turnMessages.event(source); event.created_at = Date.now();
   f.h.store.run('UPDATE channel_inbox SET payload=? WHERE id=?', f.h.store.secrets.seal(event, 'channel-event:' + source.id), source.id);
   assert.equal(f.service.turnMessages.merge(f.chat.id, row(f, receipt), true), true); feed.take(); feed.seal();
@@ -361,7 +370,7 @@ test('queued messages accepted before a turn starts are claimed once and do not 
   f.modelState.respond = async (body, res) => {
     calls++;
     assert.equal(JSON.parse(body.messages[1].content).context.recent_messages.some(m => String(m.content).includes('预先收到的第二个问题')), false);
-    assert.ok(String(incoming(body)[0].reply_required[0].content).endsWith('预先收到的第二个问题')); say(res, '两个问题只答一遍');
+    assert.ok(String(incoming(body)[0].messages[0].content).endsWith('预先收到的第二个问题')); say(res, '两个问题只答一遍');
   };
   const initial = await post(f.h, f.id, inGroup('第一个问题')), extra = await post(f.h, f.id, inGroup('预先收到的第二个问题'));
   await f.service.tick(); await done(f, initial); await f.service.tick();
@@ -401,4 +410,99 @@ test('a fence change after completion but before delivery returns undelivered me
   await f.service.tick(); assert.equal(row(f, extra).state, 'queued');
   await f.service.tick(); await done(f, extra); await f.service.tick();
   assert.equal(calls, 3); assert.ok(!sent(f).some(s => s.includes('不能交付的旧回答'))); assert.ok(sent(f).some(s => s.includes('当前范围的新回答')));
+});
+
+async function participation(f, mode) {
+  const binding = f.service.serviceBindings.get(f.chat.id);
+  assert.equal((await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', { service_role_id: binding.service_role_id,
+    scope: { kind: 'repositories', repositories: ['101'] }, participation: mode, enabled: true, expected_revision: binding.revision })).status, 200);
+}
+const toPeer = text => { const e = inGroup(text, 'ou_carol'); e.event.message.mentions = [{ key: '@_user_1', id: { open_id: 'ou_peer' }, name: 'Bob' }]; return e; };
+for (const [answer, merged] of [['', 'peer'], ['CI 日志结论：测试超时', 'peer'], ['', 'mention']])
+  test(`a merged message is the model's to judge: ${merged === 'peer' ? 'one to another member' : 'a verified mention'} with ${answer ? 'an answer' : 'an empty answer'} (#458)`, async t => {
+    const f = await group(t), held = gate(t); let calls = 0, executing = false, batch;
+    await participation(f, 'all');
+    f.service.serviceSessions.own.invoke = async () => { executing = true; await held.wait; return { conclusion: '日志已读' }; };
+    f.modelState.respond = async (body, res) => {
+      calls++; if (calls === 1) return call(res, 'start_own_task');
+      if (calls === 2) batch = incoming(body)[0]; return say(res, answer);
+    };
+    const quiet = inGroup('大家看下这个 CI 日志'); quiet.event.message.mentions = [];
+    const initial = await post(f.h, f.id, quiet); await until(() => executing);
+    const extraEvent = merged === 'peer' ? toPeer('你明天来开会吗？') : inGroup('也看看我的问题', 'ou_bob'), extra = await post(f.h, f.id, extraEvent);
+    held.release(); await done(f, initial); await done(f, extra);
+    assert.match(batch.notice, /not necessarily addressed to you/);
+    assert.deepEqual(batch.messages.map(m => [m.is_direct_mention, m.group_setting_invites_reply]), [[merged === 'mention', true]]);
+    if (merged === 'mention') {
+      // A verified mention needs an answer, exactly as the same message on its own would.
+      assert.equal(row(f, initial).state, 'failed'); assert.equal(f.h.store.get('SELECT error FROM channel_service_turns').error, 'conversation_reply_invalid');
+      return;
+    }
+    // The participation setting would have answered it, but the model decided: no failure, no extra turn.
+    assert.equal(row(f, initial).state, 'completed'); assert.equal(row(f, extra).state, 'completed'); assert.equal(calls, 2);
+    assert.equal(f.h.store.get('SELECT count(*) n FROM channel_service_turns').n, 1);
+    if (!answer) { await f.service.drain(); assert.equal(f.wire.sent.length, 0, 'silence sends nothing, not a failure card'); return; }
+    await until(() => sent(f).some(s => s.includes('测试超时')));
+    // No merged message verifiably addressed the assistant, so the answer is not threaded under the message meant for someone else.
+    assert.equal(f.wire.sent.at(-1).url.includes(extraEvent.event.message.message_id), false);
+    const outbox = f.h.store.get('SELECT * FROM channel_outbox WHERE idempotency_key=?', initial.value.operation_id + ':business-result');
+    assert.equal(f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id).delivery.reply_to, undefined);
+  });
+
+test('speakers are named from the directory first, then the member list; external members keep only their id; the assistant can list members (#458)', async t => {
+  const f = await group(t); let calls = 0, first, second;
+  f.wire.state.members = [{ member_id_type: 'open_id', member_id: 'ou_alice', tenant_key: 'actor-tenant', name: 'Alice' },
+    { member_id_type: 'open_id', member_id: 'ou_carol', tenant_key: 'install-tenant', name: 'Carol（群成员名）' },
+    { member_id_type: 'open_id', member_id: 'ou_guest', tenant_key: 'guest-tenant' }];
+  f.wire.state.profileName = '卡罗尔';
+  const request = inGroup('帮我查下 CI', 'ou_carol'); request.event.sender.tenant_key = 'install-tenant';
+  const followup = inGroup('补充：只看 main 分支', 'ou_guest'); followup.event.sender.tenant_key = 'guest-tenant'; followup.event.message.mentions = [];
+  Object.assign(followup.event.message, { root_id: request.event.message.message_id, parent_id: request.event.message.message_id });
+  f.modelState.respond = async (body, res) => {
+    calls++;
+    if (calls === 1) { first = body; assert.equal((await post(f.h, f.id, followup)).value.state, 'merged'); return call(res, 'list_chat_members'); }
+    second = body; return say(res, '卡罗尔：CI 已核对；关于 main 分支的补充也已看过。');
+  };
+  const receipt = await post(f.h, f.id, request); await done(f, receipt);
+  const context = JSON.parse(first.messages[1].content).context;
+  assert.deepEqual([context.current_message.sender_id, context.current_message.sender_name], ['ou_carol', '卡罗尔'], 'the directory name wins over the member list');
+  assert.equal(context.recent_messages.find(m => m.sender_id === 'ou_alice').sender_name, 'Alice', 'outside the directory the member list names the sender');
+  assert.match(first.messages[0].content, /tell people apart by sender_id/); assert.match(first.messages[0].content, /list_chat_members/);
+  // Only the installation's own user is looked up in the directory; external members never are.
+  assert.deepEqual(f.wire.state.profileRequests.map(url => decodeURIComponent(new URL(url).pathname.split('/').at(-1))), ['ou_carol']);
+  const [merged] = incoming(second)[0].messages;
+  assert.deepEqual([merged.sender_id, 'sender_name' in merged, merged.same_sender_as_request, merged.in_request_thread, merged.reply_to_message_id],
+    ['ou_guest', false, false, true, request.event.message.message_id]);
+  const listed = JSON.parse(second.messages.find(m => m.role === 'tool').content);
+  assert.deepEqual(listed.members, [{ id: 'ou_alice', name: 'Alice', external: true }, { id: 'ou_carol', name: '卡罗尔' }, { id: 'ou_guest', external: true }]);
+  assert.equal(listed.total, 3); assert.equal(listed.next_offset, null); assert.ok(listed.refreshed_at);
+  // The cache answers again without another read within ten minutes; a query filters it.
+  const reads = f.wire.state.audienceRequests.filter(url => !url.endsWith('/is_in_chat')).length;
+  const roster = await f.service.members.members(f.chat);
+  assert.equal(f.wire.state.audienceRequests.filter(url => !url.endsWith('/is_in_chat')).length, reads);
+  assert.deepEqual(roster.members.filter(m => m.name?.includes('卡罗')).map(m => m.id), ['ou_carol']);
+  const timeline = (await f.admin(`/api/channels/chats/${f.chat.id}/timeline`)).value, view = timeline.conversation.turns[0];
+  assert.deepEqual(view.incoming_messages.map(m => [m.sender_id, m.sender_name]), [['ou_guest', undefined]]);
+  // The console timeline reads the same cache, without a provider request of its own.
+  const profiles = f.wire.state.profileRequests.length;
+  assert.equal(timeline.messages.find(m => m.sender_id === 'ou_carol').sender_name, '卡罗尔'); assert.equal(f.wire.state.profileRequests.length, profiles);
+  assert.ok(!JSON.stringify(f.h.store.all('SELECT * FROM channel_chat_rosters')).includes('Alice'), 'the cached member list is sealed');
+});
+
+test('each merged message allows one more progress message in the turn (#458)', async t => {
+  const f = await group(t), held = gate(t); let calls = 0, executing = false, results;
+  f.service.serviceSessions.own.invoke = async () => { executing = true; await held.wait; return { conclusion: '完成' }; };
+  const progress = (res, count) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null,
+    tool_calls: Array.from({ length: count }, (_, i) => ({ id: 'p' + i, type: 'function', function: { name: 'send_message', arguments: JSON.stringify({ text: '发现 ' + i }) } })) } }] })); };
+  f.modelState.respond = async (body, res) => {
+    calls++;
+    if (calls === 1) return call(res, 'start_own_task');
+    if (calls === 2) { assert.equal(incoming(body)[0].messages.length, 2); return progress(res, 13); }
+    results = body.messages.filter(m => m.role === 'tool').slice(-13).map(m => JSON.parse(m.content)); return say(res, '结论');
+  };
+  const initial = await post(f.h, f.id, inGroup('开始')); await until(() => executing);
+  await post(f.h, f.id, inGroup('补充一')); await post(f.h, f.id, inGroup('补充二')); held.release(); await done(f, initial);
+  assert.deepEqual(results.slice(0, 12).map(r => r.sent), Array(12).fill(true));
+  assert.deepEqual([results[11].remaining, results[12].error], [0, 'stage_message_limit']);
+  assert.equal(f.h.store.get('SELECT count(*) n FROM channel_service_turn_messages').n, 12);
 });
