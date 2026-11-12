@@ -108,3 +108,17 @@ test('stopping a ledger migration during a file sync commits the slice and close
     await f.projects.trajectories.settle();
   }
 });
+
+test('the manager reports its storage for the storage page without reading the ledger', async t => {
+  const f = await managerFixture(t), generation = await ready(f);
+  f.docker.runner = async () => ({ ok: true, result: { output: 'x'.repeat(2000) } });
+  const reap = { operation_id: id(), generation, request: { type: 'reap', workspace_id: workspace } };
+  await f.projects.operate('101', 'execute', call(generation, { type: 'workspace_command', command: 'a' }));
+  await f.projects.operate('101', 'execute', reap);
+  await f.projects.operate('101', 'execute', call(generation, { type: 'workspace_read', path: 'b' }, id()));
+  const report = f.projects.storage(), usage = kind => report.usage.find(row => row.repository_id === '101' && row.kind === kind);
+  assert.equal(usage('files').count, 1, 'the reap closed the workspace file'); assert.equal(usage('records:tool_result').count, 2);
+  assert.equal(usage('open').count, 1, 'the workspace file reopened after the reap is still open'); assert.ok(usage('open').bytes > 2000);
+  assert.ok(report.database.bytes > 0 && Number.isSafeInteger(report.database.free_pages)); assert.ok(report.disk.total_bytes > 0);
+  assert.ok('operations' in report.migration.remaining);
+});

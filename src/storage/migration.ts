@@ -52,15 +52,8 @@ export class PayloadMigration {
     return new Promise<void>(resolve => { const timer = setTimeout(done, ms); timer.unref?.(); function done() { clearTimeout(timer); resolve(); } this.wake = done; });
   }
 
-  /** Progress for the storage page: per table cursor, counts and the last error; remaining is estimated from max(rowid). */
-  state(): MigrationState & { remaining: Record<string, number> } {
-    const state = readState(this.store), remaining: Record<string, number> = {};
-    for (const phase of this.phases()) {
-      const last = this.store.hasTable(phase.table) ? Number(this.store.get(`SELECT max(rowid) n FROM ${phase.table}`)?.n ?? 0) : 0;
-      remaining[phase.name] = Math.max(0, last - (state.phases[phase.name]?.cursor ?? 0));
-    }
-    return { ...state, remaining };
-  }
+  /** Progress for the storage page (see migrationProgress). */
+  state() { return migrationProgress(this.store); }
 
   private async loop() {
     const state = readState(this.store);
@@ -206,6 +199,22 @@ export class PayloadMigration {
     }
     return legacyConversationScope('service-' + String(row.turn_id).split(':')[0], null);
   }
+}
+
+/** The tables the migration walks, in order. */
+export const migratedTables = ['task_tools', 'role_conversation_operations', 'service_role_operations', 'model_requests', 'task_logs', 'tasks', 'task_history'];
+
+/**
+ * Progress per table (cursor, counts, bytes, last error, finished time), the rate, and the rows not examined yet per
+ * table, estimated as max(rowid) minus the cursor: never counted, so reading it costs one index lookup per table.
+ */
+export function migrationProgress(store: Store): MigrationState & { remaining: Record<string, number> } {
+  const state = readState(store), remaining: Record<string, number> = {};
+  for (const table of migratedTables) {
+    const last = store.hasTable(table) ? Number(store.get(`SELECT max(rowid) n FROM ${table}`)?.n ?? 0) : 0;
+    remaining[table] = Math.max(0, last - (state.phases[table]?.cursor ?? 0));
+  }
+  return { ...state, remaining };
 }
 
 function readState(store: Store): MigrationState {
