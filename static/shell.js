@@ -110,10 +110,11 @@ function consoleGroups() {
     ['#/projects', '全部项目', '查看有权访问的项目'], ['#/board', '任务看板', '任务状态、角色与运行证据'],
     ['#/new-task' + (repo ? '/' + id : ''), '新建任务', '填写需求、验收条件和交付类型'],
     ['#/inbox' + (repo ? '/' + id : ''), '待处理', '配置、权限、环境与失败事项'],
-    ['#/management', '管理对话', '实时回答、执行进展与命令回执']
+    ['#/management', '管理对话', '实时回答、执行进展与命令回执'],
+    ['#/conversations', '飞书会话', '成员消息、执行过程与派生任务']
   ] }];
   if (repo) groups.push({ title: repo.full_name, items: projectSections
-    .filter(([, , admin]) => !admin || me.role === 'super_admin')
+    .filter(([key]) => ['overview', 'management', 'release', 'knowledge', 'activity'].includes(key))
     .map(([key, name]) => [`#/projects/${id}/${key}`, name, '当前项目']) });
   groups.push({ title: '分析与身份', items: [
     ['#/costs', '用量与成本', '按项目、日期与工作类型查看'],
@@ -121,7 +122,10 @@ function consoleGroups() {
     ['#/identity', '身份与权限', '本人绑定与当前有效授权'],
     ['#/external', '外部执行端', '接入与连接诊断']
   ] });
-  if (me.role === 'super_admin') groups.push({ title: '平台管理', items: settingsSections.map(([key, name]) => [
+  groups.push({ title: '设置', items: [['#/preferences', '设置', '个人身份、飞书绑定与项目配置'], ...(repo ? projectSections
+    .filter(([key]) => ['basic', 'roles', 'model', 'machine', 'schedules', 'external', 'members'].includes(key))
+    .map(([key, name]) => [`#/projects/${id}/${key}`, name, repo.full_name]) : [])] });
+  if (me.role === 'super_admin') groups.push({ title: '全局设置', items: settingsSections.map(([key, name]) => [
     key === 'onboarding' ? '#/settings/onboarding/0' : '#/settings/' + key, name, '平台超级管理员'
   ]) });
   return groups;
@@ -164,6 +168,7 @@ function syncConsoleShell() {
     picker.value = consoleProject || '';
   }
   const platform = tab === 'settings';
+  $('console-project').closest('label').hidden = platform;
   $('console-area').textContent = platform ? '平台管理' : project ? '项目工作区' : tab === 'identity' ? '我的身份' : '工作区';
   // The scope bar names both halves of the current address: a project name alone does not say which organization it is in.
   const shortName = r => (r.full_name || '').includes('/') ? r.full_name.split('/').slice(1).join('/') : r.full_name;
@@ -242,6 +247,8 @@ async function renderConsoleInbox(request) {
 }
 async function renderConsolePage(request) {
   if (tab === 'new-task') await renderNewTask(request);
+  else if (tab === 'preferences') await renderPreferences(request);
+  else if (tab === 'conversations') await renderChannelConsole(request);
   else if (tab === 'more') renderConsoleMore();
   else {
     await renderConsoleInbox(request);
@@ -269,6 +276,8 @@ function restoreConsolePosition() {
 function initConsoleShell() {
   const sidebar = $('console-sidebar'), kicker = element('p', '工作区', 'console-nav-label'), scope = element('label', '切换项目', 'console-project-picker'), picker = document.createElement('select');
   picker.id = 'console-project'; picker.setAttribute('aria-label', '切换项目'); picker.addEventListener('change', () => { consoleProject = picker.value || null; location.hash = picker.value ? `#/projects/${picker.value}/overview` : '#/projects'; }); scope.append(picker);
+  const settingsLabel = element('p', '个人与项目', 'console-nav-label');
+  $('tabs').insertBefore(settingsLabel, $('tabs').querySelector('[data-tab=preferences]'));
   sidebar.append(scope, kicker, $('tabs'));
   const inbox = consoleLink('#/inbox', '待处理'); inbox.id = 'console-inbox-link'; sidebar.append(inbox);
   const secondary = element('div'); secondary.id = 'console-secondary-nav'; sidebar.append(secondary);

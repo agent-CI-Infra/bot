@@ -190,7 +190,7 @@ export class ChannelService {
       sum(CASE WHEN finished_at IS NULL OR input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,
       sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests FROM model_requests WHERE conversation_id=? AND service_role_id=?`,session.conversation_id,managementAssistant):null;
     const costs=current?this.store.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE conversation_id=? AND service_role_id=? AND cost IS NOT NULL GROUP BY currency`,session.conversation_id,managementAssistant):[];
-    return {conversation_id:chat.id,management_conversation_id:session?.conversation_id,mode:'management',current_project:null,
+    return {conversation_id:chat.id,management_conversation_id:current?session.conversation_id:null,mode:'management',current_project:null,
       turns:messages.slice(0,50).map(m=>({id:m.id,source_message:m.source_message,created_at:m.created_at,state:managementStates[m.state]??m.state,
         request:JSON.parse(m.input).content,messages:this.management.stageMessages(m.id),reply:this.personalReply(actor,m),role_id:'管理助手'})),
       has_more:messages.length>50,next_offset:messages.length>50?offset+50:null,usage:{...requests,costs},...this.ledger.diagnostics(chat.id)};

@@ -54,7 +54,7 @@ test('项目导航只列真实页面，管理对话的深链不丢页，移动�
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(h.admin + '/#/projects/101/overview');
     await expect(current).toHaveText('项目总览');
-    const first = nav.getByRole('link', { name: '项目总览', exact: true }), second = nav.getByRole('link', { name: '基本设置', exact: true });
+    const first = nav.getByRole('link', { name: '项目总览', exact: true }), second = nav.getByRole('link', { name: '管理对话', exact: true });
     await first.focus(); await page.keyboard.press('Tab');
     await expect(second).toBeFocused();
     await expect(second).toBeInViewport();
@@ -79,7 +79,7 @@ test('项目导航只列真实页面，管理对话的深链不丢页，移动�
     await bottom.filter({ hasText: '更多' }).click();
     const more = page.locator('#console-page');
     await expect(more.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
-    for (const group of ['工作区', '分析与身份', '平台管理']) await expect(more.getByRole('heading', { name: group, exact: true })).toBeVisible();
+    for (const group of ['工作区', '分析与身份', '设置', '全局设置']) await expect(more.getByRole('heading', { name: group, exact: true })).toBeVisible();
     for (const entry of ['项目总览', '基本设置', '机器配置', '模型', '发版本', '计划与通知', '项目知识', '外部执行', '成员', '运行状态', '用量与成本', '身份与权限'])
       await expect(more.getByRole('link', { name: new RegExp('^' + entry) }).first()).toBeVisible();
     expect(await more.locator('a').evaluateAll(ns => ns.every(n => n.getAttribute('href')?.startsWith('#')))).toBe(true);

@@ -4,6 +4,8 @@
 
 `src/main.ts` 是控制面入口，`src/server.ts` 在唯一的业务监听上按路径分派控制台、OAuth、App 回调、Webhook 和外部执行端请求。`src/app/` 保存账号、登录、仓库授权、模型和投递归一化逻辑，`src/core/security.ts` 提供验签、慢哈希和凭据加密，`src/storage/database.ts` 管理 SQLite、事务及审计，`src/storage/trajectories.ts` 管理按运行的[轨迹文件](trajectories.md)，`src/storage/payloads.ts` 是读写这些正文的唯一入口；`static/` 是同一管理入口。`src/agent/` 保存模型循环、任务认领及恢复，`src/review/` 保存触发和位置校验，`src/github/` 保存授权读取及发布 outbox。`src/projects/` 是环境网关，`manager/` 管理受管 Docker 资源，`runner/` 是容器内命令／文件协议，`images/project/` 构建批准镜像。manager／runner 独立实现，保留 Apache-2.0 及 NOTICE 中的上游设计归属，不携带完整员工平台。
 
+新增 `static/` 的脚本或样式时，同时更新 `static/index.html` 的引用和 `src/server.ts` 的静态资源允许列表；浏览器验证要确认资源实际返回成功，语法检查不能验证 HTTP 路由。
+
 ## 独立工作区开发
 
 每项开发使用独立分支和 git worktree，避免在共享 main 工作区修改或覆盖别人的未提交内容。依赖、测试数据和端口按工作区隔离；Docker 验证使用独立的 Compose 项目、容器名和端口，不替换正在运行的本机实例；构建出的镜像标签见下文。

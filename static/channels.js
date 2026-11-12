@@ -2,6 +2,7 @@
 async function feishuIdentityCard() {
   const data = await api('/api/channels/bindings'), section = card('飞书身份绑定'), request = renderVersion, nameLookups = [];
   section.id = 'feishu-identity';
+  section.append(await channelBindingOverview(data));
   section.append(note('将本人的飞书账号关联到当前平台账户。本地账户和 GitHub 登录均可使用，无需先绑定 GitHub。之后仅能访问该账户实际获准的项目，绑定本身不会增加仓库权限。'));
   // Organization and repository admins add and manage their organization's apps from here; super administrators in settings (#424).
   if (me.role === 'super_admin') section.append(channelLink('#/settings/feishu', '管理员：连接或管理飞书应用', 'button-link'));
@@ -336,7 +337,8 @@ async function channelServiceBindingSettings() {
   if (!chats.size) box.append(note('尚无可选择的群。请先完成个人绑定，在机器人已加入的目标群发一条消息，再刷新本页。'));
   if (!data.projects.length && !data.organizations.length) box.append(note('当前没有可配置的仓库。个人绑定不会增加项目权限。'));
   if (!data.service_roles.length) box.append(note('当前没有可用于群聊的服务角色，请联系超级管理员。'));
-  box.append(form); if (chats.size) fill();
+  const editor = element('details', '', 'fold'); editor.open = !data.bindings.length;
+  editor.append(element('summary', '新增或调整群助手绑定'), form); box.append(editor); if (chats.size) fill();
   for (const b of data.bindings) {
     const row = element('article', '', 'channel-binding'), scopeText = b.scope.organization ? '整个组织 ' + b.scope.organization.name : b.scope.repositories.map(r => r.full_name).join('、');
     row.setAttribute('aria-label', '群聊助手绑定');
@@ -491,7 +493,7 @@ async function channelDiagnostics(c, panel, history = true) {
   const view = card('连接健康与收发记录');
   view.append(facts([['连接状态', c.enabled ? '启用' : '停用'], ['传输状态', c.transport === 'http' ? 'HTTP 事件回调' : c.health.connection_state],
     ['最后收到事件', c.health.last_received_at ? new Date(c.health.last_received_at).toLocaleString() : '尚未收到'], ['诊断', c.health.last_error || '无'], ['待处理', c.health.queued], ['发送失败', c.health.failed]]),
-    note('应用鉴权成功或长连接已连接，都不能证明消息已经送达。请完成发布并在飞书中实测。群聊的项目范围在「身份与权限 → 飞书群聊助手」为每个群单独设置。'));
+    note('应用鉴权成功或长连接已连接，都不能证明消息已经送达。请完成发布并在飞书中实测。群聊的项目范围在「设置 → 群助手设置」为每个群单独设置。'));
   for (const op of operations.slice(0, 10)) view.append(note(`渠道操作 ${op.operation_id} · ${op.state}${op.error ? ' · ' + op.error : ''}${op.conversation_id ? ' · 会话 ' + op.conversation_id : ''}`));
   if (operations.some(op => op.reaction_error === 'channel_reaction_permission_required'))
     view.append(note('处理中表情暂不可用：请在飞书开通应用身份权限 im:message.reactions:write_only，并发布新版本。普通消息回复不受影响。'));

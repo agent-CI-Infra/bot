@@ -38,6 +38,9 @@ export function serviceBindingStorage(store: Store): void {
       service_role_id TEXT NOT NULL,source_message TEXT NOT NULL,fence TEXT NOT NULL,state TEXT NOT NULL,reply TEXT,error TEXT,
       tool_calls INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(chat_id,source_message));
     CREATE INDEX IF NOT EXISTS channel_service_turn_scope ON channel_service_turns(chat_id,created_at);
+    CREATE TABLE IF NOT EXISTS channel_service_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,turn_id TEXT NOT NULL REFERENCES channel_service_turns(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,name TEXT NOT NULL,created_at INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS channel_service_event_turn ON channel_service_events(turn_id,sequence);
     -- Tasks a group created through delegation, so their results return to that group (and only while it may still see them).
     CREATE TABLE IF NOT EXISTS channel_service_tasks(task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,binding_id TEXT NOT NULL,
       chat_id TEXT NOT NULL,source_message TEXT NOT NULL,command_id TEXT NOT NULL,created_at INTEGER NOT NULL);

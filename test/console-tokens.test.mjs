@@ -42,12 +42,14 @@ test('every var() a sheet reads is declared by shell.css, locally, at runtime, o
 // The first two tests prove a declaration exists somewhere; this one proves the resolved value did not change. Pin the
 // shell.css value of every token a module sheet reads through the contract, and refuse a new such read until it is pinned.
 // Sheets that predate shell.css: a value change in the contract restyles these legacy pages, so their reads are pinned.
-const moduleSheets = ['style.css', 'views.css', 'board.css', 'costs.css', 'management.css'];
+const moduleSheets = ['style.css', 'views.css', 'board.css', 'costs.css', 'management.css', 'channel-console.css'];
 const SHARED = {
   '--color-surface': '#fff',
   '--color-brand': '#245de0', '--color-text-muted': '#607087', '--font-size-2': '14px', '--control-min': '44px',
   '--color-brand-weak': '#edf2ff',
   '--color-border': '#dce3ed', '--color-surface-alt': '#f8fafc', '--radius-card': '12px',
+  '--space-2': '6px', '--space-3': '8px', '--space-4': '12px', '--space-5': '16px', '--space-6': '20px',
+  '--font-size-1': '12px', '--font-size-3': '17px', '--font-size-5': '30px', '--radius-3': '6px',
 };
 
 test('tokens the module sheets read through shell.css keep their contract value', () => {

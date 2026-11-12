@@ -63,9 +63,9 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await expect(result).toContainText('检视和开发所需的 App 权限和事件订阅齐全。'); await expect(result).toContainText('勾选 Workflow run');
     app.permissions = everything; app.events = allEvents; await accountRow.getByRole('button', { name: '重新检查', exact: true }).click();
     await expect(result).toContainText('App 权限和事件订阅齐全，覆盖全部功能。'); await expect(result).not.toContainText('安装'); await expect(settingsLink).toBeVisible();
-    await page.setViewportSize({ width: 1365, height: 900 }); await page.getByRole('button', { name: '项目', exact: true }).click();
+    await page.setViewportSize({ width: 1365, height: 900 }); await page.goto(h.admin + '/#/settings/projects');
     await expect(page.getByRole('button', { name: '检查接入', exact: true })).toHaveCount(0);
-    const row = id => page.locator(`#rows [data-repository-id="${id}"]`), message = page.locator('#message'), chip = id => row(id).locator('[data-permission]');
+    const row = id => page.locator(`.global-project-row[data-repository-id="${id}"]`), message = page.locator('#message'), chip = id => row(id).locator('[data-permission]');
     const sync = page.getByRole('button', { name: '同步安装列表', exact: true });
     await sync.click(); await expect(message).toContainText('权限和事件订阅并非全部正常。');
     await expect(message).toContainText('fixture（安装 7）：Actions 需要「Read and write」，现在「Read-only」（影响发版本、Actions 失败分析）');
@@ -97,7 +97,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await row('101').getByRole('button', { name: '设置', exact: true }).click();
     await expect(page.locator('.project-head [data-permission]')).toHaveText('事件未订阅');
     await expect(page.locator('.project-head [data-permission]')).toHaveAttribute('title', /Pull request review comment.*Workflow run/);
-    await page.getByRole('link', { name: '← 全部项目', exact: true }).click();
+    await page.getByRole('link', { name: '← 全部项目', exact: true }).click(); await page.goto(h.admin + '/#/settings/projects');
     installations[0].events = allEvents; await sync.click();
     await expect(message.locator('span')).toHaveText('安装列表已同步，1 个安装的权限和事件订阅都正常。');
     await expect(message.locator('span')).toHaveClass('view-success');

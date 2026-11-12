@@ -11,11 +11,11 @@ async function runTurn(f) {
 }
 
 async function login(page, f) {
-  await page.goto(f.h.admin);
+  await page.goto(f.h.admin + '/#/settings/projects');
   await page.getByLabel('用户名', { exact: true }).fill('administrator');
   await page.getByLabel('密码', { exact: true }).fill(f.password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
-  await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '全局设置', exact: true })).toBeVisible();
 }
 
 test('接入门禁先介绍各 lane，再和 agent 按仓库事实定方案，确认后才开 PR；有 merge queue 时合入门禁在队列里运行', async ({ page }) => {
@@ -30,7 +30,7 @@ test('接入门禁先介绍各 lane，再和 agent 按仓库事实定方案，�
     f.state.repos['octo/hello'].queue = 'ruleset';
     await login(page, f);
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.locator('#rows [data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
+    await page.locator('.global-project-row[data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
     const dialog = page.locator('#quickstart-view');
     await expect(dialog.getByRole('heading', { name: '接入门禁 · octo/hello', exact: true })).toBeVisible();
     // The four lanes come first, fully visible, before any conversation, branch or PR exists.
@@ -99,7 +99,7 @@ test('没有启动的项目只能看介绍；启动、虚拟电脑就绪后才�
   try {
     f.state.repos['octo/hello'].queue = 'hidden';
     await login(page, f);
-    await page.locator('#rows [data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
+    await page.locator('.global-project-row[data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
     let dialog = page.locator('#quickstart-view');
     await expect(dialog.locator('#gate-onboarding-lanes dt', { hasText: /^pr-ready$/ })).toBeVisible();
     await expect(dialog.locator('#gate-onboarding-ready')).toContainText('项目还没有启动');
@@ -108,7 +108,7 @@ test('没有启动的项目只能看介绍；启动、虚拟电脑就绪后才�
     await dialog.getByRole('button', { name: '关闭', exact: true }).click();
     await f.startProject();
     await page.reload();
-    await page.locator('#rows [data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
+    await page.locator('.global-project-row[data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
     dialog = page.locator('#quickstart-view');
     await dialog.getByRole('button', { name: '开始适配', exact: true }).click();
     await runTurn(f);
@@ -138,7 +138,7 @@ test('已有 CI 的仓库：把门禁 job 并入已有 ci.yml 前先看到改动
     f.state.repos['octo/hello'].files['.github/workflows/ci.yml'] = '# Our CI\nname: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make test\n';
     await login(page, f);
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.locator('#rows [data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
+    await page.locator('.global-project-row[data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
     const dialog = page.locator('#quickstart-view');
     await dialog.getByRole('button', { name: '开始适配', exact: true }).click();
     await runTurn(f);

@@ -107,6 +107,10 @@ export class ChannelServiceSessions {
     this.store.run(`INSERT INTO channel_service_turns(id,chat_id,binding_id,binding_revision,service_role_id,source_message,fence,state,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,'running',?,?)`, id, chat.id, binding.id, binding.revision, role.id, turn.source_message, fence, Date.now(), Date.now());
     this.active.set(id, controller);
+    // Persist step metadata, never tool arguments, results or private model reasoning.
+    const event = (type: string, name = '') => this.store.run('INSERT INTO channel_service_events(turn_id,type,name,created_at) VALUES(?,?,?,?)', id, type,
+      !name || serviceTools.some(tool => tool.function.name === name) ? name : 'unknown_tool', Date.now());
+    event('running');
     // Read per call: revoking a permission item refuses the next tool call (and changes the fence, ending this turn).
     const permissions = () => JSON.parse(serviceRole(this.store, role.id)?.permissions ?? '{}') as RolePermissions;
     const check = () => {
@@ -320,7 +324,9 @@ export class ChannelServiceSessions {
             media?.addImages(messages);
             const tools = serviceTools.filter(t => offered(permissions(), t.function.name)&&(!mediaTools.includes(t as any)||!!media)), body = { messages, tools, tool_choice: 'auto' };
             transcript.fit(body);
+            event('model_start');
             const { value } = await request(body, 'turn:' + step).catch(error=>{if(media)media.modelError(error,messages);throw error;});
+            event('model_done');
             const message = value?.choices?.[0]?.message;
             if (!message) return fail(502, 'service_model_invalid');
             const calls = message.tool_calls ?? [];
@@ -334,15 +340,23 @@ export class ChannelServiceSessions {
             messages.push(traceClean(message));
             const results: unknown[] = [];
             // Unparsable arguments reach execute as null and come back to the model as invalid_arguments.
-            for (const call of calls) results.push(redactor.clean(await execute(call.function.name, toolArguments(call), step + ':' + call.id)));
+            for (const call of calls) {
+              event('tool_call', call.function.name);
+              try {
+                const result = redactor.clean(await execute(call.function.name, toolArguments(call), step + ':' + call.id));
+                results.push(result); event((result as Json)?.error ? 'tool_error' : 'tool_result', call.function.name);
+              } catch (error) { event('tool_error', call.function.name); throw error; }
+            }
             boundedBatch(results).forEach((result, i) => messages.push({ role: 'tool', tool_call_id: calls[i].id, content: JSON.stringify(result) }));
           }
         } });
       check();
       this.store.run("UPDATE channel_service_turns SET state='completed',reply=?,updated_at=? WHERE id=? AND state='running'",
         this.store.secrets.seal({ message: reply, attachments:media?.attachments??[] }, 'service-turn-reply:' + id), Date.now(), id);
+      event('done');
       return { id, message: reply, attachments:media?.attachments, fence };
     } catch (error) {
+      event('error');
       const reason = controller.signal.aborted ? controller.signal.reason ?? error : error;
       this.store.run("UPDATE channel_service_turns SET state='failed',error=?,updated_at=? WHERE id=? AND state='running'",
         reason instanceof HttpError || reason instanceof TaskError ? reason.code : 'conversation_failed', Date.now(), id);

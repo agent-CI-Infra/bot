@@ -1,3 +1,4 @@
+import { consoleNavigate } from './console-navigation.mjs';
 import { test, expect } from '@playwright/test';
 import { rmSync } from 'node:fs';
 import { harness, setup } from '../test/helpers.mjs';
@@ -37,7 +38,7 @@ test('外部执行端复制的接入说明用 launchpad 指代本项目', async 
     await page.getByLabel('密码', { exact: true }).fill(h.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('button', { name: '退出登录', exact: true })).toBeVisible();
-    await page.getByRole('button', { name: '外部执行端', exact: true }).click();
+    await consoleNavigate(page, '外部执行端');
     const guide = page.locator('#external-panel .external-guide');
     await guide.locator('summary').click();
     await guide.getByRole('combobox', { name: '复制指令所用客户端', exact: true }).selectOption(a.client.id);
