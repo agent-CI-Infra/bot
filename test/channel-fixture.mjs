@@ -52,7 +52,7 @@ export function transport() {
     if (url.includes('/contact/v3/users/')) {
       state.profileRequests.push(url); if (state.profileGate) await state.profileGate;
       return Response.json({ code: state.profileCode, data: { user: { open_id: state.profileOpenId ?? decodeURIComponent(new URL(url).pathname.split('/').at(-1)),
-        name: state.profileName, email: 'must-not-expose-profile-email', mobile: 'must-not-expose-profile-phone' } }, msg: 'fixture-only-access-token' });
+        name: state.profileName, email: 'must-not-expose-profile-email', mobile: 'must-not-expose-profile-phone' } }, msg: 'fixture-only-access-token' }, { status: state.profileStatus ?? 200 });
     }
     if (url.endsWith('/application/v6/scopes')) {
       state.scopeRequests++;
@@ -120,7 +120,7 @@ export async function until(read, check = v => !!v, timeout = 10000) {
   while (Date.now() < end) { const value = await read(); if (check(value)) return value; await new Promise(r => setTimeout(r, 20)); }
   throw new Error('channel_fixture_timeout');
 }
-export const finished = (h, id) => until(() => h.store.get('SELECT * FROM channel_inbox WHERE id=?', id), r => r && !['queued', 'running', 'submitted'].includes(r.state));
+export const finished = (h, id) => until(() => h.store.get('SELECT * FROM channel_inbox WHERE id=?', id), r => r && !['queued', 'running', 'submitted', 'merged'].includes(r.state));
 export function bindFixture(h, id, principal, actor = 'ou_alice', tenant = 'actor-tenant', app = 'cli_fixture') {
   h.store.run(`INSERT INTO external_identities(id,principal_id,provider,host,connector,external_tenant,external_actor,display_name,status,verified_at)
     VALUES(?,?,'feishu','open.feishu.cn',?,?,?,?,'active',?)`, randomId(), principal, id + ':' + app, tenant, actor, actor, Date.now());

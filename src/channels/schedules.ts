@@ -242,10 +242,18 @@ export class ChannelSchedules {
       stage: m => this.host.post(chat, `定时任务「${row.name}」\n\n${m.text}`, 'channel-schedule:' + run + ':stage:' + m.sequence, 'schedule:' + run,
         { ...protection(m.turn_id, m.fence), stage: m.sequence }) }));
     this.store.run('UPDATE channel_schedule_runs SET turn_id=? WHERE id=?', result.id, run);
-    guard();
-    if (!result.message.trim()) { this.finish(run, 'silent', null); return; }
-    const outbox = this.host.post(chat, `定时任务「${row.name}」\n\n${result.message}`, 'channel-schedule:' + run, 'schedule:' + run, protection(result.id, result.fence));
-    this.finish(run, 'completed', null, outbox);
+    try {
+      guard();
+      this.store.transaction(()=>{
+        let outbox: string | undefined;
+        if (!result.message.trim()) { this.finish(run, 'silent', null); }
+        else {
+          outbox = this.host.post(chat, `定时任务「${row.name}」\n\n${result.message}`, 'channel-schedule:' + run, 'schedule:' + run, protection(result.id, result.fence));
+          this.finish(run, 'completed', null, outbox);
+        }
+        this.host.turnMessages.complete(result.id,outbox);
+      });
+    } catch(error) { this.host.turnMessages.release(result.id);throw error; }
   }
 
   // --- Checks for other paths ------------------------------------------------------------------------------------------

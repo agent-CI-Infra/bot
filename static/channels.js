@@ -6,6 +6,7 @@ function channelNameRequest(route) {
 }
 const channelChatName = chat => chat.display_name || (chat.type === 'p2p' || chat.binding_id !== undefined ? '飞书姓名暂未获取' : '群名称暂未获取');
 const channelChatContext = chat => `机器人：${chat.app_name || '机器人名称暂未获取'}；所属企业：${chat.tenant_name || '企业名称暂未获取'}${chat.organization_name ? '；应用所属组织：' + chat.organization_name : ''}`;
+const channelNamePermissionHint = '读取飞书姓名所需的权限尚未生效。请该应用管理员在「全局设置 → 飞书连接」（组织应用在「设置 → 组织飞书应用」）导入完整权限 JSON，在飞书开通并发布后重试。';
 function channelProfileDetails(chat, changed = () => {}) {
   const box = element('div'), context = note(channelChatContext(chat)), status = note(''), request = renderVersion;
   status.setAttribute('role', 'status'); box.append(context);
@@ -21,7 +22,7 @@ function channelProfileDetails(chat, changed = () => {}) {
       } catch (err) {
         if (request !== renderVersion) return;
         const changedAccess = [401, 404, 409].includes(err.status) || /authorization_changed|channel_history_forbidden|capability_forbidden|source_inactive|external_binding_required/.test(err.message);
-        status.textContent = changedAccess ? '会话或权限已变化，请刷新页面。' : `${chat.display_name ? '暂时无法更新，保留上次读取的名称。' : '暂时无法读取名称。'}请管理员检查飞书应用权限、发布状态和通讯录可见范围后重试。`;
+        status.textContent = changedAccess ? '会话或权限已变化，请刷新页面。' : `${chat.display_name ? '暂时无法更新，保留上次读取的名称。' : '暂时无法读取名称。'}${err.message.includes('channel_user_name_permission_required') ? channelNamePermissionHint : '请管理员检查飞书应用权限、发布状态和通讯录可见范围后重试。'}`;
       } finally { refresh.disabled = false; }
     }, 'quiet');
     box.append(refresh, status);
@@ -34,6 +35,7 @@ function channelProfileDetails(chat, changed = () => {}) {
 async function feishuIdentityCard() {
   const data = await api('/api/channels/bindings'), section = card('飞书身份绑定'), request = renderVersion, nameLookups = [];
   section.id = 'feishu-identity';
+  if (typeof notePersonalApps === 'function') notePersonalApps(data);
   section.append(await channelBindingOverview(data));
   section.append(note('将本人的飞书账号关联到当前平台账户。本地账户和 GitHub 登录均可使用，无需先绑定 GitHub。之后仅能访问该账户实际获准的项目，绑定本身不会增加仓库权限。'));
   // Organization and repository admins add and manage their organization's apps from here; super administrators in settings (#424).
@@ -187,7 +189,7 @@ async function feishuIdentityCard() {
         } catch (err) {
           if (request !== renderVersion) return;
           const changed = ['authorization_changed', 'external_binding_required', 'identity_not_found', 'channel_connector_inactive', 'channel_configuration_changed', 'login_required'].some(code => err.message.includes(code));
-          nameStatus.textContent = changed ? '绑定或机器人连接状态已变化，请刷新飞书绑定状态。' : name() ? '暂时无法更新飞书姓名，保留上次读取的姓名。' : '飞书暂未提供姓名。请管理员开通“获取用户基本信息”权限并发布，确认通讯录可见范围包含本人后重试；当前显示关联的平台账户。';
+          nameStatus.textContent = changed ? '绑定或机器人连接状态已变化，请刷新飞书绑定状态。' : `${name() ? '暂时无法更新飞书姓名，保留上次读取的姓名。' : '飞书暂未提供姓名，当前显示关联的平台账户。'}${err.message.includes('channel_user_name_permission_required') ? channelNamePermissionHint : '请管理员检查完整应用权限、发布状态和通讯录可见范围后重试。'}`;
         } finally { refresh.disabled = false; }
       };
       const refresh = button('刷新飞书姓名', refreshName, 'quiet'); row.append(refresh);

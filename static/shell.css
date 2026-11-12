@@ -49,9 +49,14 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: 20px 28px 
 .console-settings-nav { flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid var(--color-border); }
 #console-sidebar #tabs button, #console-sidebar .console-link { display: flex; align-items: center; width: 100%; min-height: 44px; height: auto; padding: 10px 14px; border: 0; border-radius: 7px; color: #4b5d75; background: transparent; text-align: left; text-decoration: none; font-size: 14px; font-weight: 550; }
 #console-sidebar #tabs button:hover, #console-sidebar .console-link:hover { background: #f1f5fb; filter: none; }
-#console-sidebar #tabs button[aria-current=page], #console-sidebar .project-nav a[aria-current=page] { background: var(--color-brand-weak); color: var(--color-brand); border: 0; }
-#console-secondary-nav .project-nav { display: flex; flex-direction: column; gap: 3px; background: transparent; border: 0; padding: 12px 0 0; margin: 12px 0; border-top: 1px solid var(--color-border); }
-#console-sidebar .project-nav a { display: flex; align-items: center; min-height: 44px; padding: 10px 14px; font-size: 13px; border-radius: 7px; white-space: normal; }
+#console-sidebar #tabs button[aria-current=page], #console-secondary-nav .project-nav a[aria-current=page] { background: var(--color-brand-weak); color: var(--color-brand); border: 0; }
+#console-secondary-nav { margin: 0 0 16px; }
+#console-secondary-nav .project-nav { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: 8px 12px; margin: 0; }
+#console-secondary-nav .project-nav .console-nav-label { margin: 0 4px 0 8px; padding: 0; font-size: 11px; font-weight: 650; color: var(--color-text-muted); letter-spacing: .04em; }
+#console-secondary-nav .project-nav .console-nav-label:first-child { margin-left: 2px; }
+#console-secondary-nav .project-nav .console-nav-label:not(:first-child) { padding-left: 10px; border-left: 1px solid var(--color-border); }
+#console-secondary-nav .project-nav a { display: inline-flex; align-items: center; min-height: 36px; padding: 6px 12px; font-size: 13px; border-radius: 7px; color: #4b5d75; white-space: nowrap; }
+#console-secondary-nav .project-nav a:hover { background: #f1f5fb; }
 .console-location { display: flex; align-items: center; gap: 12px; min-height: 32px; margin-bottom: 16px; font-size: 13px; color: var(--color-text-muted); }
 .console-location > span + span::before { content: '/'; padding-right: 12px; color: #a5b0be; }
 /* The permission state is a badge, not a breadcrumb: no slash before it, and nothing at all while the project has no gap. */
@@ -111,7 +116,7 @@ body.console-ready .management-page { left: var(--console-rail); }
   #who { max-width: 100px; font-size: 11px; }
   #who img { width: 24px; height: 24px; }
   #identity #logout { padding: 6px 8px; font-size: 12px; }
-  #console-sidebar { display: none; }
+  #console-sidebar, #console-secondary-nav { display: none; }
   body.console-ready main { margin: 0; padding: 12px 12px calc(var(--console-mobile-height) + 100px); }
   .console-ready input:not([type=checkbox]):not([type=radio]), .console-ready select, .console-ready textarea { font-size: 16px !important; }
   .console-ready :is(button, .button-link, summary) { min-height: 44px; }

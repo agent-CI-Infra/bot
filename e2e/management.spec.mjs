@@ -100,8 +100,7 @@ test('global management chat keeps drafts and a running conversation across navi
     const message = page.getByLabel('管理消息', { exact: true }); await message.fill('任务为什么没有继续？');
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
     await launcher.click(); await expect(message).toHaveValue('任务为什么没有继续？');
-    await consoleNavigate(page, '设置');
-    await page.locator('#console-page a[href="#/identity"]').click();
+    await consoleNavigate(page, '身份与权限');
     await expect(page).toHaveURL(/#\/identity$/); await expect(message).toHaveValue('任务为什么没有继续？');
     f.modelState.gate = new Promise(resolve => { release = resolve; });
     await page.getByRole('button', { name: '发送', exact: true }).click();

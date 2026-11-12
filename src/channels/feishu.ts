@@ -29,6 +29,7 @@ export const FEISHU_SCOPES: readonly { scope: string; purpose: string; enterpris
   { scope: 'im:chat:read', purpose: '查看群信息，订阅群解散事件' },
   { scope: 'im:chat.members:bot_access', purpose: '接收机器人进群、移出事件' },
   { scope: 'im:chat.members:read', purpose: '核验群成员，保存群聊助手绑定' },
+  { scope: 'contact:contact.base:readonly', purpose: '调用通讯录接口读取已绑定用户的资料' },
   { scope: 'contact:user.base:readonly', purpose: '读取已绑定用户的飞书姓名' },
   { scope: 'tenant:tenant:readonly', purpose: '自动获取安装企业', enterprise_only: true },
 ];
@@ -153,6 +154,7 @@ export class FeishuAdapter implements ChannelAdapter {
       // A member lookup the app holds no scope for (99991672) needs an administrator to grant the scope, not a retry. It is
       // also a 4xx on purpose: Cloudflare in front of the console replaces a 502 body, which would hide this code.
       if (path.startsWith('/im/v1/chats/') && data.code === 99991672) fail(403, 'channel_audience_permission_required');
+      if (path.startsWith('/contact/v3/users/') && data.code === 99991672) fail(403, 'channel_user_name_permission_required');
       if (path === '/application/v6/scopes' && (!r.ok || data.code !== 0)) fail(502, 'channel_scope_check_unavailable');
       if (!r.ok || data.code !== 0) fail(502, path.startsWith('/auth/') ? 'channel_auth_failed' : path === '/bot/v3/info' ? 'channel_bot_unavailable' : path === '/tenant/v2/tenant/query' ? 'channel_tenant_unavailable' : 'channel_delivery_rejected');
       return data;

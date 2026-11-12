@@ -63,6 +63,7 @@ test('90 seconds without tokens fails even with comments, role, empty content an
   t.mock.timers.tick(45000);await f.send(': keep-alive\n\n');
   t.mock.timers.tick(44000);await f.send('\n'+sse({content:'',tool_calls:[{index:0,id:'call',function:{name:'write_file',arguments:''}}]}));
   t.mock.timers.tick(999);await flush();assert.equal(ended,false);
+  await f.send(sse({},{finish_reason:'stop'}));
   t.mock.timers.tick(1);
   let failure;await assert.rejects(f.running,error=>{failure=error;return error.code==='model_unavailable'&&error.state==='retry_wait'&&/连续 90 秒没有 token 输出/.test(error.detail);});
   assert.equal(f.signal.aborted,true);assert.equal(f.progress.length,0);assert.equal(f.replies.length,0);
@@ -76,6 +77,17 @@ test('90 seconds without tokens fails even with comments, role, empty content an
     assert.match(cause.label,/连续 90 秒没有 token 输出/);assert.match(cause.action,/自动重试/);
     assert.doesNotMatch(cause.label+cause.action,/外部服务或网络波动|不是配置问题/);
   }
+});
+
+test('model completion is reported before usage trailers without counting it as token activity',async()=>{
+  let source,completed;const finish=new Promise(resolve=>{completed=resolve;}),tokens=[];
+  const response=new Response(new ReadableStream({start(controller){source=controller;}}),{headers:{'Content-Type':'text/event-stream'}});
+  let returned=false;
+  const reading=readModelResponse(response,async delta=>{tokens.push(delta);},async reason=>{assert.equal(reason,'stop');completed();}).then(value=>{returned=true;return value;});
+  source.enqueue(Buffer.from(sse({},{finish_reason:'stop'})));await finish;
+  assert.equal(returned,false);assert.deepEqual(tokens,[]);
+  source.enqueue(Buffer.from('data: '+JSON.stringify({choices:[],usage:{prompt_tokens:10,completion_tokens:0}})+'\n\ndata: [DONE]\n\n'));source.close();
+  assert.equal((await reading).usage.prompt_tokens,10);assert.deepEqual(tokens,[]);
 });
 
 test('text, reasoning and tool arguments keep both mailboxes alive beyond 120 seconds, with usage before the reply',async t=>{

@@ -48,16 +48,16 @@ test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建�
     expect(projects.describe('101').computer.resources_pending).toBe(false);
 
     // The project form leaves resources that follow the default empty; a value of its own stays when the default changes.
-    await page.goto(h.admin + '/#/settings/computers/101');
+    await page.goto(h.admin + '/#/projects/101/machine');
     const form = page.locator('.project-form').filter({ has: page.getByLabel('CPU（核）', { exact: true }) }), cores = form.getByLabel('CPU（核）', { exact: true });
     await expect(cores).toHaveValue(''); await expect(cores).toHaveAttribute('placeholder', '留空使用全局默认（4）');
     await form.screenshot({ path: '.tmp/computer-defaults/project-machine.png' });
     await cores.fill('3'); await form.getByRole('button', { name: '保存', exact: true }).click();
-    await expect(page.locator('#settings-panel')).toContainText('已保存，虚拟电脑已按新配置重建');
+    await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
     await expect.poll(() => [projects.own('101').cpus, host().NanoCpus]).toEqual([3, 3e9]);
     await expect(cores).toHaveValue('3');
     await cores.fill(''); await form.getByRole('button', { name: '保存', exact: true }).click();
-    await expect(page.locator('#settings-panel')).toContainText('已保存，虚拟电脑已按新配置重建');
+    await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
     await expect.poll(() => [projects.own('101').cpus, host().NanoCpus]).toEqual([undefined, 4e9]);
 
     await page.setViewportSize({ width: 390, height: 844 }); await page.goto(h.admin + '/#/settings/general'); await expect(defaults).toContainText('8 CPU');

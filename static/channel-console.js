@@ -1,24 +1,42 @@
-titles.preferences = '设置'; titles.conversations = '飞书会话';
+titles.preferences = '个人设置'; titles.conversations = '飞书会话';
 
-async function renderPreferences(request) {
-  const page = $('console-page'), head = element('div', '', 'console-page-head'), groups = element('div', '', 'console-groups');
-  head.append(element('p', '个人与项目', 'eyebrow'), element('h1', '设置'), note('管理本人的身份与绑定，或进入当前授权项目的设置。'));
-  const personal = card('个人设置'); personal.append(consoleLink('#/identity', '身份与权限', '当前账户、组织与项目授权'),
-    consoleLink('#/identity/feishu', '飞书身份绑定', '私聊身份、机器人和群绑定概览'), consoleLink('#/identity/feishu/groups', '群助手设置', '服务角色、项目范围与负责人'));
-  const project = card('项目设置'), selector = document.createElement('select'), links = element('div'); selector.setAttribute('aria-label', '要设置的项目');
-  selector.add(new Option('选择项目', ''));
-  for (const repo of repositories) selector.add(new Option(repo.full_name, repo.id));
-  selector.value = consoleScope() || '';
-  const draw = () => { links.replaceChildren(); const id = selector.value;
-    if (!id) { links.append(note('请选择项目。具体操作按当前账户的项目权限显示。')); return; }
-    for (const [key, name] of projectSections.filter(([key]) => ['basic', 'roles', 'model', 'machine', 'members', 'external', 'schedules'].includes(key))) { links.append(consoleLink(`#/projects/${id}/${key}`, name, '仅影响这个项目'));
-    }
-  }; selector.addEventListener('change', draw); draw(); project.append(field('项目', selector), links);
-  groups.append(personal, project); page.replaceChildren(head, groups);
-  try {
-    const data = await api('/api/channels/bindings');
-    if (request === renderVersion && data.can_manage_applications && me.role !== 'super_admin') personal.append(consoleLink('#/identity/feishu-apps', '组织飞书应用', '仅管理当前授权组织的应用'));
-  } catch (err) { if (request === renderVersion) personal.append(note('组织应用入口暂不可读取，可刷新重试。')); }
+// Whether the signed-in user may manage their organization's Feishu apps. It belongs to one user: a different sign-in
+// starts from false, and every /api/channels/bindings read updates it, so the nav never depends on the page visited first.
+let personalCanManageApps = false, personalAppsOwner = null;
+function notePersonalApps(data) {
+  const next = !!(data?.can_manage_applications && me?.role !== 'super_admin');
+  personalAppsOwner = me?.id ?? null;
+  if (next !== personalCanManageApps) { personalCanManageApps = next; if (typeof syncConsoleShell === 'function') syncConsoleShell(); }
+}
+function resetPersonalApps() { personalCanManageApps = false; personalAppsOwner = null; }
+function personalSettingsNav() {
+  if (me && personalAppsOwner !== me.id) {
+    // First personal page for this user: read the capability once instead of waiting for the identity overview.
+    personalCanManageApps = false; personalAppsOwner = me.id;
+    if (me.role !== 'super_admin') { const owner = me; api('/api/channels/bindings').then(data => { if (me === owner) notePersonalApps(data); }).catch(() => {}); }
+  }
+  const nav = element('nav', '', 'project-nav'), hash = location.hash;
+  nav.setAttribute('aria-label', '个人设置类别');
+  nav.append(element('p', '个人设置', 'console-nav-label'));
+  const activeKey = tab === 'external' ? 'external'
+    : tab === 'conversations' || hash === '#/identity/feishu/conversations' ? 'conversations'
+    : /^#\/identity\/feishu-apps(?:\/|$)/.test(hash) ? 'feishu-apps'
+    : hash === '#/identity/feishu/groups' ? 'groups'
+    : /^#\/identity\/feishu(?:$|\?)/.test(hash) ? 'feishu' : 'identity';
+  const items = [
+    ['identity', '#/identity', '身份与权限'],
+    ['feishu', '#/identity/feishu', '个人飞书绑定'],
+    ['groups', '#/identity/feishu/groups', '群助手设置'],
+    ...(personalCanManageApps || activeKey === 'feishu-apps' ? [['feishu-apps', '#/identity/feishu-apps', '组织飞书应用']] : []),
+    ['conversations', '#/conversations', '飞书会话'],
+    ['external', '#/external', '外部执行端']
+  ];
+  for (const [key, href, caption] of items) {
+    const item = element('a', caption); item.href = href;
+    if (key === activeKey) item.setAttribute('aria-current', 'page');
+    nav.append(item);
+  }
+  return nav;
 }
 
 async function channelBindingOverview(data) {
@@ -150,6 +168,16 @@ async function renderChannelConsole(request) {
         title.append(element('strong', value.role_id || '管理助手'), statusBadge, element('time', channelTime(value.created_at))); row.append(title);
         const details = element('details'), steps = element('div'); details.append(element('summary', '查看执行过程'), steps);
         details.addEventListener('toggle', () => { if (details.open && !details.dataset.loaded) { details.dataset.loaded = '1'; void readSteps(value.id, steps); } }); row.append(details);
+        if (value.incoming_messages?.length) {
+          const incoming = element('details'); incoming.setAttribute('aria-label', '回合并入的消息');
+          incoming.append(element('summary', '并入的消息（' + value.incoming_messages.length + '）'));
+          for (const message of value.incoming_messages) {
+            const status = { pending: '尚未交给模型', injected: '已交给模型', answered: '本轮处理完成', released: '已交回待处理' }[message.state] || message.state;
+            const mention = conversationMode === 'service' ? message.is_direct_mention ? ' · @助手' : ' · 未 @助手' : '';
+            incoming.append(element('p', `${message.sender_id} · ${message.message_id} · ${message.needs_reply ? '需要回复' : '仅供参考'}${mention} · ${status}`, 'channel-step'));
+          }
+          row.append(incoming);
+        }
         for (const message of value.messages || []) {
           const progress = element('section', '', 'channel-progress-message'); progress.setAttribute('aria-label', '助手进展消息');
           progress.append(element('strong', '进展消息 ' + message.sequence), element('p', message.text, 'channel-message-body'),

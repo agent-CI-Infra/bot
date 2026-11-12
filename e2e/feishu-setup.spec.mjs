@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { managementFixture } from '../test/management-fixture.mjs';
 import { identityFixture } from '../test/identity-fixture.mjs';
-import { transport, connector, envelope, post, finished, credentials, bindFixture, until } from '../test/channel-fixture.mjs';
+import { transport, connector, envelope, post, finished, credentials, bindFixture, until, channelFixture, privateChat } from '../test/channel-fixture.mjs';
 import { harness, setup } from '../test/helpers.mjs';
 import { FEISHU_SCOPES } from '../dist/channels/feishu.js';
 
@@ -11,6 +11,41 @@ async function login(page, h, password, username = 'administrator') {
   await page.getByLabel('用户名', { exact: true }).fill(username); await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
 }
+for (const width of [1440, 390]) test(`name lookup reports the missing directory endpoint grant and recovers after publication at ${width}px`, async ({ page }) => {
+  const f = await channelFixture(), errors = []; page.on('pageerror', error => errors.push(error.message));
+  try {
+    const chat = await privateChat(f);
+    f.h.store.run("UPDATE external_identities SET external_tenant='install-tenant',display_name='' WHERE principal_id=?", f.principal);
+    f.h.store.run("UPDATE channel_personal_owners SET actor_tenant='install-tenant' WHERE chat_id=?", chat.id);
+    f.wire.state.profileCode = 99991672; f.wire.state.profileStatus = 400;
+    f.wire.state.scopes = FEISHU_SCOPES.filter(s => s.scope !== 'contact:contact.base:readonly').map(s => ({ scope_name: s.scope, grant_status: 1, scope_type: 'tenant' }));
+    await page.setViewportSize({ width, height: 1000 });
+    await page.goto(f.h.admin + '/#/settings/feishu'); await login(page, f.h, f.password);
+    const grants = page.getByLabel('飞书权限检查');
+    await expect(grants).toContainText('contact:contact.base:readonly');
+    await expect(grants).toContainText('缺少 1 项');
+    const scopes = JSON.parse(await grants.getByLabel('完整权限 JSON', { exact: true }).inputValue());
+    expect(scopes.scopes.tenant).toEqual(expect.arrayContaining(['contact:contact.base:readonly', 'contact:user.base:readonly']));
+    mkdirSync(output, { recursive: true });
+    await page.screenshot({ path: `${output}/directory-grant-${width}.png`, fullPage: true });
+    await page.goto(f.h.admin + '/#/identity/feishu');
+    const binding = page.getByLabel('我的飞书账号', { exact: true });
+    await expect(binding).toContainText('导入完整权限 JSON');
+    await expect(binding).toContainText('设置 → 组织飞书应用');
+    await expect(binding).not.toContainText('fixture-only');
+    await page.goto(f.h.admin + '/#/identity/feishu/conversations');
+    const conversation = page.getByRole('article');
+    await conversation.getByRole('button', { name: '刷新飞书姓名', exact: true }).click();
+    await expect(conversation).toContainText('读取飞书姓名所需的权限尚未生效');
+    await expect(conversation).toContainText('设置 → 组织飞书应用');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: `${output}/name-permission-${width}.png`, fullPage: true });
+    f.wire.state.profileCode = 0; f.wire.state.profileStatus = 200;
+    await conversation.getByRole('button', { name: '刷新飞书姓名', exact: true }).click();
+    await expect(conversation).toContainText('张小明'); await expect(conversation).toContainText('名称已更新');
+    expect(errors).toEqual([]);
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
 test('missing reaction permission gives an administrator an actionable hint on desktop and mobile', async ({ page }) => {
   const wire = transport(), h = await harness(null, undefined, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
   try {
@@ -47,7 +82,7 @@ test('global administrator connects an app through the wizard, resumes it and se
     await expect(page.getByLabel('事件接收方式')).toHaveValue('http');
     const scopes = JSON.parse(await page.getByLabel('完整权限 JSON').inputValue());
     expect(scopes.scopes.tenant).toEqual(['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'im:resource', 'im:message.reactions:write_only', 'cardkit:card:write',
-      'im:message.group_msg', 'im:message:readonly', 'im:chat:read', 'im:chat.members:bot_access', 'im:chat.members:read', 'contact:user.base:readonly']);
+      'im:message.group_msg', 'im:message:readonly', 'im:chat:read', 'im:chat.members:bot_access', 'im:chat.members:read', 'contact:contact.base:readonly', 'contact:user.base:readonly']);
     expect(scopes.scopes.user).toEqual([]);
     await expect(page.getByText('卡片是默认功能：', { exact: false })).toContainText('权限导入不会自动订阅回调');
     await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('enterprise');
@@ -405,6 +440,7 @@ test('a linked account shows readable names without blocking on directory lookup
     wire.state.profileCode = 99991672;
     await binding.getByRole('button', { name: '刷新飞书姓名' }).click();
     await expect(binding).toContainText('保留上次读取的姓名');
+    await expect(binding).toContainText('导入完整权限 JSON');
     await expect(binding).toContainText('张小明 · 已绑定');
     expect(await binding.innerText()).not.toContain('fixture-only-access-token');
     wire.state.profileCode = 0; wire.state.profileName = '<img src=x onerror=alert(1)> 张小明';

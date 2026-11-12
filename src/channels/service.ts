@@ -22,6 +22,7 @@ import { TaskError } from '../agent/common.js';
 import { ChannelReactions } from './reactions.js';
 import { ChannelMedia, MediaTurn } from './media.js';
 import { markdownPosts } from './format.js';
+import { assistantMessage, ChannelTurnMessages } from './turn-messages.js';
 
 const errorCode = (error: unknown) => error instanceof HttpError || error instanceof TaskError ? error.code : 'channel_processing_failed';
 const card = (value: string, link?: string, token?: string): Json => ({ config: { wide_screen_mode: true },
@@ -40,6 +41,7 @@ export class ChannelService {
   readonly serviceSessions: ChannelServiceSessions;
   readonly reactions: ChannelReactions;
   readonly schedules: ChannelSchedules;
+  readonly turnMessages: ChannelTurnMessages;
   private readonly business = new Map<string,Promise<void>>();
   private timer?: ReturnType<typeof setInterval>;
   private syncTimer?: ReturnType<typeof setInterval>;
@@ -53,6 +55,20 @@ export class ChannelService {
     this.employees = new ChannelEmployees(store, (c, guard) => this.adapter(c, guard));
     this.serviceBindings = new ChannelServiceBindings(store, this.employees);
     this.serviceSessions = new ChannelServiceSessions(store, this.serviceBindings, this.ledger, management.service, options.githubUrl,this.media);
+    this.turnMessages = new ChannelTurnMessages(store);
+    management.incomingHistory = id => this.turnMessages.history(id);
+    this.serviceSessions.incomingMessages = (turn,id) => this.turnMessages.open(turn.chat,id,turn.chat.id,turn.source_message,
+      event => this.needsReply(event,turn.binding), (row,event) => { this.source(event);this.employees.currentMessage(turn.chat,event); });
+    management.incomingMessages = (actor,conversation,input,id) => {
+      const source=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',String(input.source_message).replace(/^feishu:/,''),conversation);
+      if(!source||!input.content)return;
+      const event=this.turnMessages.event(source),chat=store.get('SELECT * FROM channel_chats WHERE id=?',source.chat_ref);
+      if(!chat||event.chat_type!=='p2p')return;
+      return this.turnMessages.open(chat,id,conversation,source.id,()=>true,(row,event)=>{
+        this.source(event);this.employees.guardPersonal(chat.id,actor.principal_id,row.id);
+        if(row.context_revision!==null&&row.context_revision!==chat.context_revision)fail(409,'conversation_source_changed');
+      });
+    };
     this.schedules = new ChannelSchedules(store, this);
     // Tasks a group delegated are linked to it when created, and stop once that group may no longer delegate there.
     this.employees.bindingGuard = origin => this.serviceBindings.guardTask(origin);
@@ -250,12 +266,16 @@ export class ChannelService {
     const ambient=event.chat_type==='group'&&this.store.get(`SELECT 1 FROM channel_service_bindings b JOIN channel_chats h ON h.id=b.chat_id WHERE h.provider=? AND h.app_id=? AND h.installation_tenant=? AND h.chat_id=? AND b.enabled=1
       AND (b.participation='all' OR (b.participation='questions' AND ?=1))`,event.provider,event.app_id,event.installation_tenant,event.chat_id,/[?？]\s*$/.test(event.content)?1:0);
     const actionable = event.kind !== 'message' || (event.addressed||ambient) && event.sender_type === 'user' && Math.abs(Date.now() - event.created_at) <= 300_000;
-    const id = randomId(), state = actionable ? 'queued' : 'completed';
+    const id = randomId(); let state = actionable ? 'queued' : 'completed';
     this.store.transaction(() => {
       this.store.run('INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,created_at) VALUES(?,?,?,?,?,?,?)',
         id, c.id, event.event_id, event.kind === 'message' ? 'message:' + event.message_id : event.kind + ':' + event.event_id,
         this.store.secrets.seal(event, 'channel-event:' + id), state, Date.now());
-      this.ledger.accept(event);
+      const chat=this.ledger.accept(event);
+      if(chat){
+        this.store.run('UPDATE channel_inbox SET chat_ref=? WHERE id=?',chat.id,id);
+        if(assistantMessage(event)&&this.turnMessages.merge(chat.id,this.store.get('SELECT * FROM channel_inbox WHERE id=?',id)!,!!actionable))state='merged';
+      }
       if (actionable && event.kind === 'message')
         this.store.run("INSERT INTO channel_reactions(source_event,state) VALUES(?,'pending')", id);
       if (['audience_changed', 'bot_removed', 'chat_archived', 'uninstalled'].includes(event.kind)) {
@@ -313,7 +333,7 @@ export class ChannelService {
   /** Queues a card to a chat once per key; the protection is checked again right before sending. */
   post(chat: Row, message: string, key: string, source: string, protection: Json): string { return this.queue(this.chatEvent(chat), card(message), key, source, protection); }
   chatBusy(chat: string): boolean { return this.business.has(chat); }
-  /** Runs a turn of a group's assistant while the group's incoming messages wait in the queue, as for a live answer. */
+  /** Serializes turns, including timers; the active turn may absorb incoming messages before its final answer. */
   exclusive<T>(chat: string, work: () => Promise<T>): Promise<T> {
     if (this.business.has(chat)) return fail(409, 'channel_chat_busy');
     const result = work(), settled = result.then(() => {}, () => {}).finally(() => this.business.delete(chat));
@@ -362,10 +382,10 @@ export class ChannelService {
     this.serviceBindings.assertUsable(binding);
     if (!this.serviceBindings.reachable(binding, project, ['tasks.read'])) fail(403, 'channel_service_scope_paused');
   }
-  private queue(e: ChannelEvent, content: Json, key: string, source?: string, protection?: Json, registered = false, direct = false, update?: string, resources: string[] = []): string {
+  private queue(e: ChannelEvent, content: Json, key: string, source?: string, protection?: Json, registered = false, direct = false, update?: string, resources: string[] = [], replyTo = false): string {
     const previous = this.store.get('SELECT id FROM channel_outbox WHERE idempotency_key=?', key); if (previous) return previous.id;
     const id = randomId(), delivery: ChannelDelivery = { receive_id: direct ? e.actor_id : e.chat_id, receive_id_type: direct ? 'open_id' : 'chat_id', content, resources,format_version:2,
-      ...(!direct&&e.thread_id&&e.message_id?{reply_to:e.message_id,reply_in_thread:true}:{}),...(update ? { message_id: update } : {}) };
+      ...(!direct&&(replyTo||e.thread_id)&&e.message_id?{reply_to:e.message_id,...(e.thread_id?{reply_in_thread:true}:{})}:{}),...(update ? { message_id: update } : {}) };
     this.store.run('INSERT INTO channel_outbox(id,connector_id,idempotency_key,source_event,payload,state,next_attempt,created_at) VALUES(?,?,?,?,?,?,?,?)', id, e.connector_id, key, source ?? null,
       this.store.secrets.seal({ event: {...e,content:'',raw_content:''}, delivery, protection }, 'channel-outbox:' + id), registered ? 'registered' : 'queued', Date.now(), Date.now());
     return id;
@@ -409,8 +429,13 @@ export class ChannelService {
         await this.personalMessage(row,e,chat,content);return;
       }
       if (binding && chat) {
-        if (this.business.has(chat.id)) { this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return; }
+        if (this.business.has(chat.id)) {
+          if(!this.turnMessages.merge(chat.id,row,this.needsReply(e,binding)))this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);
+          return;
+        }
         const work = this.serviceMessage(row,e,chat,binding).catch(error=>{
+          const turn=this.store.get('SELECT id FROM channel_service_turns WHERE chat_id=? AND source_message=?',chat.id,row.id);
+          if(turn)this.turnMessages.release(turn.id);
           if(this.stopped)return;
           this.store.run("UPDATE channel_inbox SET state='failed',error=? WHERE id=?",errorCode(error),row.id);
           try { this.source(e);this.queue(e,card(serviceFailure(errorCode(error),serviceRole(this.store,binding.service_role_id)?.name??'群助手')),row.id+':business-error',row.id); } catch {}
@@ -434,7 +459,7 @@ export class ChannelService {
     });
     let session=this.session(actor,e);
     if(this.store.get("SELECT 1 FROM management_messages WHERE conversation_id=? AND state IN ('pending','running')",session.conversation_id)){
-      this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return;
+      if(!this.turnMessages.merge(chat.id,row,true))this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return;
     }
     if(e.created_at<session.last_message_at)fail(409,'channel_message_out_of_order');
     if(session.context_revision!==revision||session.connector_revision!==e.connector_revision){
@@ -459,6 +484,9 @@ export class ChannelService {
         visible.includes(g.project_id)])}));
   }
   /** One message in a bound group: participation decides whether to answer; the reply is protected by the turn's fence. */
+  private needsReply(event:ChannelEvent,binding:Row):boolean {
+    return !!event.addressed||binding.participation==='all'||binding.participation==='questions'&&/[?？]\s*$/.test(event.content.trim());
+  }
   private async serviceMessage(row:Row,e:ChannelEvent,chat:Row,binding:Row):Promise<void> {
     const content=e.content.trim();
     if(!e.addressed&&binding.participation!=='all'&&!(binding.participation==='questions'&&/[?？]\s*$/.test(content))){this.store.run("UPDATE channel_inbox SET state='completed',conversation_id=? WHERE id=?",chat.id,row.id);return;}
@@ -469,9 +497,13 @@ export class ChannelService {
     // Progress messages (#435) go out while the turn runs, as replies to the same message; attachments only with the answer.
     const result=await this.serviceSessions.run({chat,binding,source_message:row.id,event:e,request:content,allowSilence:!e.addressed,
       stage:m=>this.queue(e,card(m.text),row.id+':stage:'+m.sequence,row.id,{...protection(m.fence,m.turn_id),stage:m.sequence})});
-    if(result.message.trim()||result.attachments?.length)this.queue(e,card(result.message),row.id+':business-result',row.id,{...protection(result.fence,result.id),resource_fence:result.fence},
-      false,false,undefined,result.attachments);
-    this.store.run("UPDATE channel_inbox SET state='completed',message_id=? WHERE id=?",result.id,row.id);
+    const target=this.turnMessages.replyEvent(result.id);
+    this.store.transaction(()=>{
+      const outbox=result.message.trim()||result.attachments?.length?this.queue(target??e,card(result.message),row.id+':business-result',row.id,{...protection(result.fence,result.id),resource_fence:result.fence},
+        false,false,undefined,result.attachments,!!target):undefined;
+      this.turnMessages.complete(result.id,outbox);
+      this.store.run("UPDATE channel_inbox SET state='completed',message_id=? WHERE id=?",result.id,row.id);
+    });
   }
   private async result(row: Row): Promise<void> {
     const m = this.store.get('SELECT state FROM management_messages WHERE id=?', row.message_id);
@@ -486,9 +518,13 @@ export class ChannelService {
     if(message.authorization_revision!==actor.authorization_revision||session.context_revision!==chat.context_revision)fail(409,'conversation_source_changed');
     const selected=this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='attachments' ORDER BY sequence DESC LIMIT 1",row.message_id);
     const attachments=m.state==='completed'&&selected?JSON.parse(selected.data):{};
-    this.queue(e,card(this.personalReply(actor,message),this.url()),row.id+':result',row.id,{principal_id:actor.principal_id,authorization_revision:actor.authorization_revision,
-      personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id,resource_fence:attachments.fence??''},false,false,undefined,attachments.resource_ids??[]);
-    this.store.run("UPDATE channel_inbox SET state=? WHERE id=?",m.state==='completed'?'completed':'failed',row.id);
+    const target=this.turnMessages.replyEvent(message.id);
+    this.store.transaction(()=>{
+      const outbox=this.queue(target??e,card(this.personalReply(actor,message),this.url()),row.id+':result',row.id,{principal_id:actor.principal_id,authorization_revision:actor.authorization_revision,
+        personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id,management_message:message.id,resource_fence:attachments.fence??''},false,false,undefined,attachments.resource_ids??[],!!target);
+      if(m.state==='completed')this.turnMessages.complete(message.id,outbox);
+      this.store.run("UPDATE channel_inbox SET state=? WHERE id=?",m.state==='completed'?'completed':'failed',row.id);
+    });
   }
   private async deliver(row: Row): Promise<void> {
     const { event, delivery, protection } = this.store.secrets.open(row.payload, 'channel-outbox:' + row.id) as any;
@@ -627,11 +663,14 @@ export class ChannelService {
     try {
       for (const row of this.store.all("SELECT * FROM channel_inbox WHERE state IN ('queued','submitted') ORDER BY created_at,rowid LIMIT 50")) {
         if (this.stopped) return;
+        // Opening a turn may have claimed later rows from this snapshot already.
+        if(this.store.get('SELECT state FROM channel_inbox WHERE id=?',row.id)?.state!==row.state)continue;
         try {
           if (row.state === 'submitted') await this.result(row);
           else { this.store.run("UPDATE channel_inbox SET state='running' WHERE id=?", row.id); await this.process(row); }
         } catch (error) {
           if (this.stopped) return;
+          if(row.state==='submitted')this.turnMessages.release(row.message_id);
           this.store.run("UPDATE channel_inbox SET state='failed',error=? WHERE id=?", errorCode(error), row.id);
           // Stable public diagnostics never contain request contents, project data or credentials.
           const e = this.store.secrets.open(row.payload, 'channel-event:' + row.id) as unknown as ChannelEvent;
@@ -648,6 +687,11 @@ export class ChannelService {
           this.store.run('UPDATE channel_connectors SET last_error=? WHERE id=?', errorCode(error), row.connector_id);
           if(!retry){
             const payload=this.store.secrets.open(row.payload,'channel-outbox:'+row.id) as any;
+            // A changed source can invalidate a completed draft before its first delivery. Return its unanswered inputs,
+            // but never auto-repeat a final answer that already has a confirmed sent part.
+            const turn=payload.protection?.turn_id??payload.protection?.management_message;
+            if(turn&&!payload.protection?.stage&&/changed|inactive|mismatch|revoked|forbidden|stopped|unavailable/.test(errorCode(error))&&
+              !this.store.get("SELECT 1 FROM channel_outbox_parts WHERE outbox_id=? AND state='sent'",row.id))this.turnMessages.release(turn,true);
             if(payload.delivery.resources?.length){
               const code=errorCode(error),notice=code==='channel_resource_permission_required'?'附件未全部送达。请管理员在控制台飞书连接设置中补齐图片与文件权限，并在飞书发布生效后重新请求发送。'
                 :code==='channel_delivery_unknown'?'部分消息或附件的送达结果无法确认，自动重发已停止。请管理员核对原会话与控制台的逐项发送记录，避免重复发送。'

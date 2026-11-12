@@ -47,7 +47,9 @@ test('重新验证 GitHub 权限：待验证身份经服务端复核后回到已
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.screenshot({ path: resolve(output, 'reverify-verified-1440.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(page.getByRole('button', { name: '重新验证 GitHub 权限', exact: true })).toBeInViewport();
+    const reverifyButton = page.getByRole('button', { name: '重新验证 GitHub 权限', exact: true });
+    await reverifyButton.scrollIntoViewIfNeeded();
+    await expect(reverifyButton).toBeInViewport();
     await page.screenshot({ path: resolve(output, 'reverify-verified-390.png'), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
 

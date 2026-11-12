@@ -284,13 +284,16 @@ export class ChannelLedger {
     return { chat_id: id, messages: items, next_cursor: cursor, has_more: more, ...diagnostics };
   }
   /** Bounded prompt windows and compaction use the same sealed local records as searches. */
-  recent(id: string, limit = 40, projects?:string[],fence?:string): Json[] {
+  recent(id: string, limit = 40, projects?:string[],fence?:string,excludePending=false): Json[] {
     const visible=this.visibility(projects,fence);
-    return this.store.all(`SELECT * FROM channel_messages WHERE chat_id=?${visible.sql} ORDER BY created_at DESC,message_id DESC LIMIT ?`,id,...visible.args,limit).reverse().map(row=>this.view(row));
+    return this.store.all(`SELECT * FROM channel_messages WHERE chat_id=?${visible.sql}${excludePending?this.pendingFilter():''} ORDER BY created_at DESC,message_id DESC LIMIT ?`,id,...visible.args,limit).reverse().map(row=>this.view(row));
   }
-  before(id: string, boundary: Json, after?: Json, projects?:string[],fence?:string): Json[] {
+  private pendingFilter():string {
+    return ` AND NOT EXISTS(SELECT 1 FROM channel_inbox i WHERE i.chat_ref=channel_messages.chat_id AND i.dedup_key='message:'||channel_messages.message_id AND i.state IN ('queued','merged'))`;
+  }
+  before(id: string, boundary: Json, after?: Json, projects?:string[],fence?:string,excludePending=false): Json[] {
     const visible=this.visibility(projects,fence);
-    return this.store.all(`SELECT * FROM channel_messages WHERE chat_id=?${visible.sql} AND (created_at<? OR (created_at=? AND message_id<?))
+    return this.store.all(`SELECT * FROM channel_messages WHERE chat_id=?${visible.sql}${excludePending?this.pendingFilter():''} AND (created_at<? OR (created_at=? AND message_id<?))
       AND (created_at>? OR (created_at=? AND message_id>?)) ORDER BY created_at,message_id LIMIT 100`, id,
       ...visible.args,
       Number(boundary.created_at), Number(boundary.created_at), String(boundary.message_id), Number(after?.created_at??-1),Number(after?.created_at??-1),String(after?.message_id??''))
