@@ -56,6 +56,9 @@ services:
       - bot-keys:/keys:ro
       - internal-keys:/internal:ro
       - tunnel-keys:/tunnel
+      # Persistent HOME of every assistant computer (#457), one directory per group or person; the control plane reads,
+      # writes, measures and deletes them as the computers' own user (10001).
+      - assistant-homes:/assistant-homes
     networks: [control]
     read_only: true
     tmpfs:
@@ -110,6 +113,8 @@ services:
       - manager-data:/data
       - internal-keys:/internal:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      # Read-only: the manager finds the volume's name here and mounts one owner's HOME directory (a subpath) per computer.
+      - assistant-homes:/assistant-homes:ro
     networks: [control]
     read_only: true
     tmpfs:
@@ -128,6 +133,7 @@ services:
     security_opt: [no-new-privileges:true]
     restart: "no"
 volumes:
+  assistant-homes:
   bot-data:
   bot-keys:
   internal-keys:

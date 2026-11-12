@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, realpath, readdir, rename, open, unlink, readlink } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, realpath, readdir, rename, open, unlink, readlink, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
 import { workspace as workspaceTool } from './workspace.mjs';
@@ -8,7 +8,8 @@ import { ownership, isRunner, tasksRoot } from './ownership.mjs';
 import { pruneJournal } from './journal.mjs';
 import { storeOperation, pruneStore } from './store.mjs';
 import { listTaskDirectories, removeTaskDirectories } from './task-dirs.mjs';
-import {local,workspaceRoot} from './paths.mjs';
+import {local,workspaceRoot,assistant} from './paths.mjs';
+import { assistantFile } from './assistant-files.mjs';
 
 const workspace = workspaceRoot, journal = workspace + '/.runner-journal';
 const idPattern = /^[a-f0-9]{48}$/;
@@ -26,6 +27,7 @@ async function execute(input) {
   const outputFile = `${journal}/${input.operation_id}.out`;
   if(input.type.startsWith('workspace_')) return workspaceTool({ ...input, output_file: outputFile });
   if(input.type.startsWith('git_')) return storeOperation(input);
+  if (input.type.startsWith('assistant_')) { if (!assistant) throw new Error('invalid_command'); return assistantFile(input); }
   // Health does not read the journal: a record left running by an earlier container already answers a repeated id
   // with operation_interrupted, and reading every record took longer than a start may on a computer with a large journal.
   if (input.type === 'health') return { ready: true, runner_version: 1 };
@@ -95,11 +97,16 @@ async function reap({ workspace_id: workspaceId, keep_agent: keepAgent }) {
   }
   throw new Error('reap_incomplete');
 }
-await mkdir(journal, { recursive: true, mode: 0o700 }); await mkdir(workspace+'/home', { recursive: true }); await mkdir(workspace+'/tmp', {recursive:true});
+// An assistant computer's HOME is its own mount and its temporary files go to /tmp (paths.mjs).
+await mkdir(journal, { recursive: true, mode: 0o700 }); if (!assistant) { await mkdir(workspace+'/home', { recursive: true }); await mkdir(workspace+'/tmp', {recursive:true}); }
 const request = JSON.parse(Buffer.from(process.argv[2] || '', 'base64url').toString());
 if (!idPattern.test(request.operation_id || '')) throw new Error('invalid_operation_id');
 let result;
-if (['tail', 'reap', 'usage', 'prune', 'tasks_list', 'tasks_remove'].includes(request.type)) {
+// journal_clear: an assistant computer's journal serves retries within one turn; the manager clears it when the turn ends.
+if (request.type === 'journal_clear' && assistant) {
+  try { for (const name of await readdir(journal)) await rm(`${journal}/${name}`, { force: true }); result = { ok: true, result: { cleared: true } }; }
+  catch { result = { ok: false, error: 'journal_clear_failed' }; }
+} else if (['tail', 'reap', 'usage', 'prune', 'tasks_list', 'tasks_remove'].includes(request.type)) {
   // Reading progress or usage, stopping leftovers, removing old journal records and listing or removing task directories
   // are repeatable and never journaled.
   try {
@@ -113,7 +120,7 @@ if (['tail', 'reap', 'usage', 'prune', 'tasks_list', 'tasks_remove'].includes(re
   else {
     await save(request.operation_id, { state: 'running' });
     try { result = { ok: true, result: await execute(request) }; }
-    catch(error) { result = { ok: false, error: 'runner_operation_failed', ...(request.type.startsWith('workspace_')?{detail:`${request.type}${request.path?' '+request.path:''}: ${String(error?.message||'operation failed').slice(0,8000)}`}:{}) }; }
+    catch(error) { result = { ok: false, error: 'runner_operation_failed', ...(/^(?:workspace|assistant)_/.test(request.type)?{detail:`${request.type}${request.path?' '+request.path:''}: ${String(error?.message||'operation failed').slice(0,8000)}`}:{}) }; }
     await save(request.operation_id, { state: 'completed', result });
     // The journal now holds the full result; the live copy is no longer needed.
     await unlink(`${journal}/${request.operation_id}.out`).catch(() => {});

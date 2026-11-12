@@ -15,6 +15,12 @@ export class Docker {
     if (!mount || !posix.isAbsolute(mount.Source)) throw new ManagerError('notes_storage_mount_missing', 503);
     return posix.join(mount.Source, posix.relative(mount.Destination, directory));
   }
+  // The name of the Docker volume mounted at `destination` in the manager's own container (the assistant HOME volume, which
+  // Compose names after its project); null when there is none.
+  async volumeName(destination) {
+    const self = await this.request('GET', `/containers/${encodeURIComponent(hostname())}/json`);
+    return self?.Mounts?.find(m => m.Type === 'volume' && m.Destination === destination)?.Name || null;
+  }
   request(method, path, body, raw = false, timeout = 90000) {
     return new Promise((resolve, reject) => {
       const bytes = body === undefined ? null : Buffer.from(JSON.stringify(body));

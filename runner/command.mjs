@@ -1,13 +1,16 @@
 import { spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { local, workspaceRoot, localEnvironment } from './paths.mjs';
-// User-level installs (pip --user, uv tool, cargo, npm prefix) land under HOME, which lives in the work volume.
-const home = workspaceRoot + '/home', userBins = ['.local/bin', '.cargo/bin', '.npm-global/bin'].map(dir => `${home}/${dir}`).join(':');
+import { local, workspaceRoot, localEnvironment, assistant, homeDirectory as home } from './paths.mjs';
+// User-level installs (pip --user, uv tool, cargo, npm prefix) land under HOME: the work volume of a project computer, the
+// persistent HOME of an assistant computer.
+const userBins = ['.local/bin', '.cargo/bin', '.npm-global/bin'].map(dir => `${home}/${dir}`).join(':');
 // Repository variables configured by an administrator; the manager lists their names in BOT_PROJECT_ENV_KEYS.
 const projectEnvironment = Object.fromEntries(String(process.env.BOT_PROJECT_ENV_KEYS || '').split(',').filter(Boolean)
   .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
-export const environment = { LANG:'C.UTF-8', ...projectEnvironment, ...localEnvironment, PATH:`${local ? dirname(process.execPath) + ':' : ''}${userBins}:/usr/local/bin:/usr/bin:/bin`, HOME:home, TMPDIR:local ? workspaceRoot + '/tmp' : '/tmp',
+// An assistant's HOME is persistent and has a size limit: package caches go to /tmp, which ends with the computer.
+const caches = assistant ? { XDG_CACHE_HOME:'/tmp/.cache', PIP_CACHE_DIR:'/tmp/.cache/pip', UV_CACHE_DIR:'/tmp/.cache/uv', npm_config_cache:'/tmp/.npm' } : {};
+export const environment = { LANG:'C.UTF-8', ...projectEnvironment, ...localEnvironment, ...caches, PATH:`${local ? dirname(process.execPath) + ':' : ''}${userBins}:/usr/local/bin:/usr/bin:/bin`, HOME:home, TMPDIR:local ? workspaceRoot + '/tmp' : '/tmp',
   NPM_CONFIG_PREFIX:`${home}/.npm-global`, GIT_CONFIG_GLOBAL:'/dev/null', GIT_CONFIG_NOSYSTEM:'1', GIT_TERMINAL_PROMPT:'0' };
 // Output is mirrored to outputFile while the command runs so the control plane can show it live.
 // timeoutMs null runs the command until it ends (stopping the project computer still ends it); omitted means 10 seconds.

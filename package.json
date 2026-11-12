@@ -19,6 +19,7 @@
     "test:external:docker": "node test/external-docker.mjs",
     "test:pi:docker": "npm run build && node test/pi-controller-docker.mjs",
     "test:isolation:docker": "npm run build && node test/role-run-docker.mjs",
+    "test:assistant:docker": "node test/assistant-computers-docker.mjs",
     "test:deploy:docker": "node test/deploy-recovery-docker.mjs"
   },
   "devDependencies": {
