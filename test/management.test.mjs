@@ -283,3 +283,16 @@ test('long earlier answers stay bounded in the history the management assistant 
   assert.ok(Buffer.byteLength(JSON.stringify(context.history))<=96*1024);
   assert.equal(h.store.get("SELECT count(*) n FROM management_messages WHERE conversation_id=? AND state='completed'",conversation).n,21);
 });
+
+test('public task creation accepts development intent and PR endpoint inference through the management boundary',async t=>{
+ const {h,admin}=await managementFixture(t);await admin('/api/repositories/101/policy','PATCH',{development_enabled:true});
+ for(const intent of ['development',undefined,'report']){
+  const software=intent!=='report',contract={goal:'Observable delivery '+String(intent),scope:['project'],criteria:['Executable result'],endpoint:software?'reviewable_pull_request':'report'};
+  const response=await admin('/api/tasks','POST',{repository_id:'101',request:contract.goal,contract,...(intent?{intent}:{})});
+  assert.equal(response.status,200,JSON.stringify(response.value));assert.ok(response.value.id);
+  const task=h.store.get('SELECT * FROM tasks WHERE id=?',response.value.id);assert.equal(task.kind,software?'task.development':'task.request');assert.equal(task.object_number,null);
+ }
+ const before=h.store.get('SELECT count(*) n FROM tasks').n;await admin('/api/repositories/101/policy','PATCH',{development_enabled:false});
+ const refused=await admin('/api/tasks','POST',{repository_id:'101',request:'No grant',intent:'development',contract:{goal:'No grant',scope:['project'],criteria:['result'],endpoint:'reviewable_pull_request'}});
+ assert.equal(refused.status,403);assert.equal(refused.value.error,'task_software_disabled');assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,before);
+});
