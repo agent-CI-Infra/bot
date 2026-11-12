@@ -464,7 +464,7 @@ test('a group assistant works a side question in its own task with the same tool
   // The own task had the turn's tools minus its own-task tools, and a context of its own.
   const inner = ownBodies[0];
   assert.ok(inner.tools.some(t => t.function.name === 'github_read'));
-  assert.ok(!inner.tools.some(t => ['start_own_task', 'continue_own_task', 'list_own_tasks'].includes(t.function.name)));
+  assert.ok(!inner.tools.some(t => ['start_own_task', 'continue_own_task', 'list_own_tasks', 'send_message'].includes(t.function.name)));
   assert.equal(JSON.parse(inner.messages[1].content).instruction, '列出 bot 仓库未关闭的 PR');
   const row = f.h.store.get('SELECT * FROM service_role_own_tasks');
   assert.equal(row.owner_kind, 'channel'); assert.equal(row.owner_id, binding.id); assert.equal(row.principal_id, binding.principal_id);

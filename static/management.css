@@ -81,6 +81,8 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-receipt details summary { cursor: pointer; }
 .management-answer { min-width: 0; }
 .management-answer-actions { display: flex; margin-top: 9px; }
+.management-progress-message { padding-left: 10px; border-left: 2px solid #c5d8d2; }
+.management-progress-label { display: block; margin-bottom: 4px; color: #6a7f86; font-size: 11px; }
 .management-answer-actions button { min-height: 26px; padding: 3px 7px; border-color: transparent; background: transparent; color: #7b8e95; font-size: 11px; font-weight: 400; }
 .management-stream .management-answer-actions { display: none; }
 .management-stream .management-markdown::after { content: ''; display: inline-block; width: 7px; height: 14px; margin-left: 4px; border-radius: 2px; background: #4d897b; animation: management-pulse 1s ease-in-out infinite; }
