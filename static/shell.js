@@ -285,6 +285,23 @@ function initConsoleShell() {
     const a = consoleLink(href, caption); a.dataset.page = key; const icon = element('span', glyph, 'console-nav-icon'); icon.setAttribute('aria-hidden', 'true'); a.prepend(icon); mobile.append(a);
   }
   document.body.append(mobile);
+  // Defer focus transfer until click so restored mobile navigation cannot steal pointer-up.
+  // Commit the editor's change before the button handler captures a command or submitted draft.
+  let pressedAction = null;
+  document.addEventListener('pointerdown', event => {
+    pressedAction = null;
+    const control = event.target.closest('button'), focused = document.activeElement;
+    if (consoleMedia.matches && document.body.classList.contains('console-ready') && event.button === 0
+      && control && focused.matches('input,textarea')) {
+      event.preventDefault(); pressedAction = control;
+    }
+  });
+  document.addEventListener('pointercancel', () => { pressedAction = null; });
+  document.addEventListener('click', event => {
+    const control = event.target.closest('button');
+    if (control && control === pressedAction) control.focus({ preventScroll: true });
+    pressedAction = null;
+  }, true);
   document.addEventListener('click', event => { if (event.target.closest('a[href^="#/"], [data-tab]')) rememberConsolePosition(); }, true);
   addEventListener('scroll', rememberConsolePosition, { passive: true });
   // The browser's native modal focus restoration is retained; Escape keeps each existing dialog's semantics.
