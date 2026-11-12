@@ -33,7 +33,7 @@ async function project(t) {
 }
 
 test('the work types are the former built-in workflows plus reply and scheduled checks, each with a model of its own', async t => {
-  assert.deepEqual(workTypes.map(work => work.id), ['review.issue', 'review.pr', 'development.issue', 'development.pr', 'reply', 'release.observe', 'release.notes', 'actions.failures', 'gate.onboarding', 'task.request']);
+  assert.deepEqual(workTypes.map(work => work.id), ['review.issue', 'review.pr', 'development.issue', 'development.pr', 'reply', 'release.observe', 'release.notes', 'actions.failures', 'gate.onboarding', 'task.development', 'task.request']);
   const { h, admin } = await project(t);
   const create = async name => (await admin('/api/models', 'POST', { repository_id: '101', model_name: name, api_url: 'https://model.invalid/v1', api_key: 'k'.repeat(20) })).value.model;
   const base = await create('default'), review = await create('review'), manager = await create('manager');
