@@ -133,7 +133,7 @@ export class TaskCommands {
         if(contract.endpoint==='reviewable_pull_request'&&!['code','pull_request'].every(write=>taskPermissions(this.store,parent!).writes.includes(write)))fail(403,'task_external_write_forbidden');
       }
       const key=caller?'managed:'+digest(JSON.stringify([caller.owner_key,caller.source_message,caller.source_task_id,
-        caller.source_task_id?this.store.get('SELECT revision FROM task_records WHERE task_id=?',caller.source_task_id)?.revision:null,input.request,contract,input.executor_role??caller.role,input.as_child===true])):null;
+        caller.source_task_id?this.store.get('SELECT revision FROM task_records WHERE task_id=?',caller.source_task_id)?.revision:null,input.request,contract,input.executor_role??caller.role,...(input.as_child?['child']:[])])):null;
       const previous=key?this.store.get('SELECT id FROM tasks WHERE unique_key=?',key):undefined;
       if(previous){assertManagedTask(this.store,caller!,previous.id,true);return {id:previous.id,replayed:true};}
       this.store.transaction(()=>{createManagedTask(this.store,caller??operatorTaskCaller(this.store,user,String(input.repository_id)),input.executor_role as string|undefined,()=>{

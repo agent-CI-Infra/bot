@@ -106,6 +106,8 @@ export function isAttemptFailure(code: string|null|undefined, state: string) {
 const ended = new Set(['cancelled','superseded']);
 const retry = '改好后点「重试」。';
 const codeActions: Record<string,string> = {
+  task_children_pending:'正在等待子任务返回；任一结果到达后由父任务 Manager 自动继续协调，无需人工重试。',
+  manager_execution_stopped:'Manager 已停止本次角色执行；已有产物和证据保留，接下来由 Manager 决定恢复或调整安排。',
   stage_policy_changed:'阶段策略已变化，任务已暂停。等到安全检查点后采用新配置，旧 run 和证据保留为历史。',
   stage_plan_stale:'阶段计划的合同版本已过期，任务已暂停。显式重试或采用当前配置并重新规划后继续。',
   required_stages_incomplete:'必需阶段缺少当前候选的合格证据。读取阶段等待原因，安排原角色修复或补证后再提名；阶段齐备仍需独立 QA。',
