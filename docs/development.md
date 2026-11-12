@@ -64,6 +64,8 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 `npm run test:isolation:docker` 验收每次角色运行的独立容器：以本机已有的项目电脑镜像（`BOT_TEST_BASE_IMAGE`，默认 `department-bot-project-computer:local`）为底叠加本检出的 runner，构建带随机标签的测试镜像，在进程内启动本检出的 manager（独立 deployment id），检查 HOME／进程／环境／卷／网络隔离、恶意路径与符号链接、缓存污染、固定候选复制、资源与时限，以及 RoleRun 准入；结束后只删除该 deployment 标签下的容器、网络、卷和测试镜像，证据在 `.tmp/role-run-docker/`。
 
+`npm run test:assistant:docker` 验收群聊助手和管理助手的电脑（#457）：同样以本机已有的项目电脑镜像（`BOT_TEST_BASE_IMAGE`）叠加本检出的 runner 构建测试镜像，建一个测试用的 HOME 卷，在进程内运行本检出的 `manager/assistant-computers.mjs`（独立 deployment id），检查两个归属之间 HOME、/tmp、进程、环境变量、符号链接和网络的隔离，资源上限，文件操作的路径限制（只在 HOME、/workspace、/tmp 内且不跟随符号链接），回合结束回收进程、空闲复用、fence 变化重建、只读 HOME、HOME 换代、空闲删除、manager 重启清理和创建失败，并输出冷启动、复用时每条命令开销、10 个并发启动和内存；结束后只删除该 deployment 标签下的容器、卷和测试镜像，证据在 `.tmp/assistant-computers-docker/`。
+
 `npm run test:deploy:docker` 验收生产部署这一步：取出 `.github/workflows/release.yml` 中 Deploy 步骤发到服务器的脚本原文，在一次性的 Compose 项目 `bot-deploy-recovery-*` 里运行。项目里的 `bot`、`manager` 替身保持 `compose.yaml` 的依赖关系，并忽略停止信号；用例覆盖首次部署、发布新版本、在已创建替换容器时中断（旧容器仍在，以及只剩替换容器）后重跑，以及失败时输出每个容器的状态。基础镜像取本机已有的 `BOT_TEST_BASE_IMAGE`（默认 `department-bot-project-computer:local`，任何带 `sh` 的本机镜像都可以），不拉取镜像；结束后只删除本项目的容器和网络，日志在 `.tmp/deploy-recovery/`。
 
 ## CI 与合入

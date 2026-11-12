@@ -20,7 +20,8 @@ WORKDIR /app
 # git keeps the repository mirrors (/data/git-cache) that tasks copy their files from.
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates python3 tzdata && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 10001 bot && useradd --uid 10001 --gid bot --no-create-home bot \
-    && mkdir /data /keys /internal /tunnel && chown bot:bot /data /keys /internal /tunnel && chmod 700 /data /keys /tunnel && chmod 750 /internal
+    && mkdir /data /keys /internal /tunnel /assistant-homes && chown bot:bot /data /keys /internal /tunnel /assistant-homes \
+    && chmod 700 /data /keys /tunnel && chmod 750 /internal /assistant-homes
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY package.json ./package.json
 COPY --from=build /app/dist ./dist

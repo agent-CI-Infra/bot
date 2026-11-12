@@ -5,11 +5,12 @@ import { logFailure } from './projects.mjs';
 
 // Listen during recovery so callers can distinguish startup from an unreachable manager. Project APIs stay fenced
 // until every saved project has stopped uncertain work and been recovered according to its desired state.
-export function createManagerServer({ projects, token, runs = null }) {
+export function createManagerServer({ projects, token, runs = null, assistants = null }) {
   const bearer = 'Bearer ' + token.toString('base64');
   let ready = false;
-  // Run environments left from before a restart belong to runs whose outcome is unknown; they are removed, never reused.
-  const recovered = Promise.resolve().then(() => projects.recover()).then(() => runs?.reap({ all: true })).then(() => { ready = true; });
+  // Run environments and assistant computers left from before a restart belong to runs or turns whose outcome is unknown;
+  // they are removed, never reused.
+  const recovered = Promise.resolve().then(() => projects.recover()).then(() => runs?.reap({ all: true })).then(() => assistants?.recover()).then(() => { ready = true; });
   // General operations retain their transport bound; note contents have no application size limit.
   async function json(req, limit = 1500000) {
     const chunks = []; let size = 0;
@@ -63,6 +64,21 @@ export function createManagerServer({ projects, token, runs = null }) {
         else if (req.method === 'GET' && run && !action) result = await runs.inspect(repo, run);
         else if (req.method === 'POST' && run && action === 'execute') result = await runs.execute(repo, run, await json(req));
         else if (req.method === 'DELETE' && run && !action) result = await runs.release(repo, run, 'released');
+        else throw new ManagerError('not_found', 404);
+      } else if (assistants && path.startsWith('/v1/assistant-computers')) {
+        // Assistant computers of conversation owners (assistant-computers.mjs, #457).
+        const [, , , owner, action] = path.split('/');
+        if (path === '/v1/assistant-computers' && req.method === 'GET') result = assistants.list();
+        else if (path === '/v1/assistant-computers/settings' && req.method === 'GET') result = await assistants.settingsView();
+        else if (path === '/v1/assistant-computers/settings' && req.method === 'PUT') result = await assistants.setSettings(await json(req));
+        else if (path === '/v1/assistant-computers/reconcile' && req.method === 'POST') result = await assistants.reconcile(await json(req));
+        else if (!/^[a-f0-9]{32}$/.test(owner || '') || path.split('/').length > 5) throw new ManagerError('not_found', 404);
+        else if (req.method === 'PUT' && !action) result = await assistants.acquire(owner, await json(req));
+        else if (req.method === 'GET' && !action) { const container = await assistants.inspect(owner); result = { owner, container: assistants.facts(container) }; }
+        else if (req.method === 'DELETE' && !action) result = await assistants.remove(owner);
+        else if (req.method === 'POST' && action === 'execute') result = await assistants.execute(owner, await json(req));
+        else if (req.method === 'POST' && action === 'renew') result = assistants.renew(owner, await json(req));
+        else if (req.method === 'POST' && action === 'release') result = await assistants.release(owner, await json(req));
         else throw new ManagerError('not_found', 404);
       } else {
         const match = /^\/v1\/projects\/([1-9]\d{0,19})(?:\/(start|stop|reset|delete|execute|configure|refresh))?$/.exec(path);

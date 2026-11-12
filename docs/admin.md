@@ -120,7 +120,7 @@ docker compose pull
 docker compose up -d
 ```
 
-数据在四个部署卷里：`bot-data`（控制面数据库）、`bot-keys`（加密凭据的主密钥）、`internal-keys`（bot 与 manager 的内部认证）和 `manager-data`（虚拟电脑账本及各项目笔记卷的文件）；`tunnel-keys` 只放 Cloudflare Tunnel token。丢了主密钥，已保存的 App 私钥和模型 Key 都解不开。`docker compose down` 会保留卷；日常升级不要加 `-v`（`--volumes`），它会删掉这些卷。备份见[备份与恢复](deployment.md#备份与恢复)。
+数据在五个部署卷里：`bot-data`（控制面数据库）、`bot-keys`（加密凭据的主密钥）、`internal-keys`（bot 与 manager 的内部认证）、`manager-data`（虚拟电脑账本及各项目笔记卷的文件）和 `assistant-homes`（群聊助手、管理助手电脑的持久 HOME）；`tunnel-keys` 只放 Cloudflare Tunnel token。丢了主密钥，已保存的 App 私钥和模型 Key 都解不开。`docker compose down` 会保留卷；日常升级不要加 `-v`（`--volumes`），它会删掉这些卷。备份见[备份与恢复](deployment.md#备份与恢复)。
 
 以前在仓库根目录用 `docker compose up --build -d` 从源码部署的实例，更新代码后再运行 `docker compose up -d` 会改为拉取 GHCR 镜像（同一目录，数据卷不变）；要继续从源码构建，改用 `docker compose -f compose.yaml -f compose.build.yaml up -d --build`。
 

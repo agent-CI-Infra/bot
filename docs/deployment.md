@@ -99,9 +99,9 @@ Compose 只发布这一个端口，宿主端口默认 `8791`，默认只绑定�
 
 ## 服务、卷与隔离
 
-Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一次性的 `key-init` 与 `project-image`。`key-init` 首次启动时生成主密钥和内部认证。`project-image` 仅确保批准的项目镜像已在本机 Docker 中（`compose.yaml` 拉取，加上 `compose.build.yaml` 时构建），不是某个仓库的长期环境。`tunnel` 在向导保存 Cloudflare Tunnel token 之前不连接任何账号；它只在独立的 `edge` 网络，经 `webhook` 入口网关固定转发到 `bot:8791`，不能直接连接 bot 或 manager。manager 按仓库创建动态项目容器，项目容器不属于 Compose 静态服务，不对宿主或公网发布端口。
+Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一次性的 `key-init` 与 `project-image`。`key-init` 首次启动时生成主密钥和内部认证。`project-image` 仅确保批准的项目镜像已在本机 Docker 中（`compose.yaml` 拉取，加上 `compose.build.yaml` 时构建），不是某个仓库的长期环境。`tunnel` 在向导保存 Cloudflare Tunnel token 之前不连接任何账号；它只在独立的 `edge` 网络，经 `webhook` 入口网关固定转发到 `bot:8791`，不能直接连接 bot 或 manager。manager 按仓库创建动态项目容器，按群或私信的归属创建短时的助手电脑容器（无网络，空闲到期即删除），它们都不属于 Compose 静态服务，不对宿主或公网发布端口；manager 启动时删除上次留下的助手电脑。
 
-`bot-data` 保存控制面 SQLite 和仓库 Git 镜像（`/data/git-cache`，只是缓存，删掉后任务会重新从 GitHub 拉取；控制面进程的 `BOT_GIT_CACHE_DIR` 可改位置），`bot-keys` 保存加密主密钥，仅 bot 可读；`internal-keys` 保存 bot 与 manager 的内部认证，manager 不挂载上游凭据或控制面数据库。`manager-data` 保存环境和操作账本。`tunnel-keys` 只放 Cloudflare Tunnel token 文件。每个环境代次拥有独立具名工作卷和内部网络，标签同时绑定部署、仓库 ID、代次和资源类型。部署 ID 从独立内部认证材料派生，不同部署不会共用资源名。
+`bot-data` 保存控制面 SQLite 和仓库 Git 镜像（`/data/git-cache`，只是缓存，删掉后任务会重新从 GitHub 拉取；控制面进程的 `BOT_GIT_CACHE_DIR` 可改位置），`bot-keys` 保存加密主密钥，仅 bot 可读；`internal-keys` 保存 bot 与 manager 的内部认证，manager 不挂载上游凭据或控制面数据库。`manager-data` 保存环境和操作账本。`assistant-homes` 保存群聊助手和管理助手电脑的持久 HOME（每个群或每个人一个目录，按代次分子目录）：bot 以与这些电脑相同的用户（10001）读写挂载，manager 只读挂载，用来找到卷名，并为每台助手电脑只挂入一个归属当前代次的子目录（Docker 卷 subpath，需要 Engine API 1.45 及以上）。`tunnel-keys` 只放 Cloudflare Tunnel token 文件。每个环境代次拥有独立具名工作卷和内部网络，标签同时绑定部署、仓库 ID、代次和资源类型。部署 ID 从独立内部认证材料派生，不同部署不会共用资源名。
 
 只有 manager 挂载 Docker socket；它以 UID 0、GID 10001 访问 socket 和只读内部认证卷，丢弃所有 capabilities、禁止提权、根文件系统只读。Docker socket 本身仍赋予 manager 管理宿主 Docker 的能力，因此不对宿主发布 manager 端口，也不向项目网络提供该接口。它只接受登记项目的固定生命周期和 runner 请求，不能指定任意镜像、挂载、容器 ID 或 Docker API。bot 和项目容器没有 socket，项目容器也不挂载任何认证卷。bot／manager 使用独立控制网络，每个项目使用自己的 bridge 网络，项目之间互不可达。项目容器默认可以访问外网，用于安装依赖和访问测试地址；设置 `BOT_PROJECT_EGRESS=false` 可改回无出口的内部网络。外网出口意味着仓库代码也能访问宿主在 `0.0.0.0` 上发布的端口，以及公网入口本身；业务端口默认只绑定回环地址，项目容器经宿主地址访问不到它。设置 `BOT_BIND_ADDRESS=0.0.0.0` 后，项目容器和局域网一样能连到控制台和 Webhook（仍需登录或签名）。GitHub 和模型凭据仍不进入项目容器。
 
@@ -133,7 +133,7 @@ runner 只接受 48 位十六进制的目录名，只删除 `/workspace/tasks` �
 
 ## 备份与恢复
 
-备份前停止 bot 和 manager，并备份四个部署卷及项目具名卷；数据库停止写入后再复制，恢复时使用同一套内部认证和管理账本。`bot-data` 卷里除了 `control.sqlite`，还有数据库引用的[轨迹文件](trajectories.md) `trajectories/`，两者要来自同一次停写后的备份。丢失主密钥会无法解密凭据，丢失内部认证会改变部署 ID，不能用新的空账本直接接管旧容器。`docker compose down` 保留卷；`--volumes` 会删除部署认证和账本，日常升级不要使用。动态项目资源需要通过环境接口管理，Compose down 不会直接删除它们。
+备份前停止 bot 和 manager，并备份部署卷（`assistant-homes` 只有助手的持久 HOME，可按需要单独备份或不备份）及项目具名卷；数据库停止写入后再复制，恢复时使用同一套内部认证和管理账本。`bot-data` 卷里除了 `control.sqlite`，还有数据库引用的[轨迹文件](trajectories.md) `trajectories/`，两者要来自同一次停写后的备份。丢失主密钥会无法解密凭据，丢失内部认证会改变部署 ID，不能用新的空账本直接接管旧容器。`docker compose down` 保留卷；`--volumes` 会删除部署认证和账本，日常升级不要使用。动态项目资源需要通过环境接口管理，Compose down 不会直接删除它们。
 
 
 ## GitHub 用户登录
