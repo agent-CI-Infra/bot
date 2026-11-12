@@ -125,11 +125,28 @@ test('the project computer spec is validated by the manager, survives restarts a
   const result = await f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { cpus: 0.5, memory_mb: 1024, pids: 256, tmp_mb: 128, egress: false } });
   const host = f.docker.containers.get(name).HostConfig;
   assert.deepEqual([host.NanoCpus, host.Memory, host.PidsLimit, host.Tmpfs['/tmp'].includes(`size=${128 * 1024 * 1024}`)], [5e8, 1024 * 1024 * 1024, 256, true]);
+  assert.equal(host.MemorySwap, host.Memory, 'no swap beyond the memory limit'); assert.match(host.Tmpfs['/tmp'], /^rw,exec,/, 'Docker mounts a tmpfs noexec unless exec is given');
   assert.equal(f.docker.networks.get(f.projects.names('101', 1).network).Internal, true);
   assert.equal(result.computer.network_policy, 'internal, no egress'); assert.equal(f.docker.created, created + 1);
   assert.equal(f.docker.containers.get(name).State.Running, true); assert.equal(f.docker.volumes.size, 2);
   f.restart(); assert.equal(f.projects.spec('101').memory_mb, 1024);
   await f.projects.provision('101'); assert.equal(f.docker.created, created + 1);
+});
+
+test('a computer created with a noexec /tmp or with swap is replaced at the next provision and keeps its work volume', async t => {
+  const gib = 1024 * 1024 * 1024;
+  // What an earlier manager created: the same computer except for this one setting.
+  for (const [key, value] of [['Tmpfs', { '/tmp': `rw,nosuid,nodev,noexec,size=${gib},mode=1777` }], ['MemorySwap', 8 * gib]]) {
+    const f = fixture(t); await f.projects.register('101');
+    const name = f.projects.names('101', 1).container, volumes = f.docker.volumes.size, created = f.docker.created, host = f.docker.containers.get(name).HostConfig;
+    assert.deepEqual([host.Memory, host.MemorySwap, host.Tmpfs['/tmp']], [4 * gib, 4 * gib, `rw,exec,nosuid,nodev,size=${gib},mode=1777`]);
+    host[key] = value;
+    f.restart(); await f.projects.provision('101');
+    const replaced = f.docker.containers.get(name).HostConfig;
+    assert.equal(f.docker.created, created + 1, key); assert.equal(f.docker.volumes.size, volumes); assert.equal(f.projects.get('101').generation, 1);
+    assert.equal(replaced.MemorySwap, replaced.Memory); assert.match(replaced.Tmpfs['/tmp'], /^rw,exec,/);
+    await f.projects.provision('101'); assert.equal(f.docker.created, created + 1, 'a current computer is kept');
+  }
 });
 
 test('packages build a derived image once, variables reach the container, and the setup script runs when it changes', async t => {

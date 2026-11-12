@@ -202,7 +202,8 @@ export class AssistantComputers {
       HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false, Init: true, RestartPolicy: { Name: 'no' },
         Memory: l.memory_mb * mib, MemorySwap: l.memory_mb * mib, NanoCpus: Math.round(l.cpus * 1e9), PidsLimit: l.pids, IpcMode: 'private', NetworkMode: 'none',
         Mounts: [{ Type: 'volume', Source: volume, Target: assistantHome, ReadOnly: lease.mode === 'ro', VolumeOptions: { NoCopy: true, Subpath: subpath } }],
-        Tmpfs: { '/workspace': `rw,nosuid,nodev,size=${l.workspace_mb * mib},uid=10001,gid=10001,mode=0700`, '/tmp': `rw,nosuid,nodev,size=${l.tmp_mb * mib},mode=1777` } } });
+        // Programs run from both, as on a work computer; Docker mounts a tmpfs noexec unless `exec` is given.
+        Tmpfs: { '/workspace': `rw,exec,nosuid,nodev,size=${l.workspace_mb * mib},uid=10001,gid=10001,mode=0700`, '/tmp': `rw,exec,nosuid,nodev,size=${l.tmp_mb * mib},mode=1777` } } });
     if (!made) throw Object.assign(new ManagerError('assistant_computer_create_failed', 503), { detail: `image ${lease.image} not found` });
     await this.docker.request('POST', `/containers/${name}/start`);
     const health = await this.docker.runner(name, { operation_id: randomBytes(24).toString('hex'), type: 'health' });

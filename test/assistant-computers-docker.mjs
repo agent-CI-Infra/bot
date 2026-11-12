@@ -63,6 +63,9 @@ try {
   const limits = await run(A, 'ta', 'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max; df -k /tmp /workspace | tail -2 | awk \'{print $2}\'; touch /x 2>&1; cat /proc/self/status | grep -E "^(CapEff|NoNewPrivs)"');
   assert.match(limits.output, /^2147483648\n0\n512\n100000 100000\n524288\n524288\n.*Read-only file system\nCapEff:\t0000000000000000\nNoNewPrivs:\t1/s);
   passed('limits are in force: 2 GiB memory without swap, 512 pids, 1 CPU, 512 MiB tmpfs, read-only root, no capabilities', limits.output.trim().split('\n'));
+  const programs = await run(A, 'ta', `for d in /tmp /workspace; do printf '#!/bin/sh\\necho ran from %s\\n' $d > $d/probe.sh && chmod +x $d/probe.sh && $d/probe.sh; done`);
+  assert.equal(programs.output, 'ran from /tmp\nran from /workspace\n', programs.output);
+  passed('programs written to /tmp and /workspace run (both tmpfs are mounted exec)', programs.output.trim().split('\n'));
   // File operations stay below /workspace and /tmp, never follow a symlink and never reach HOME or the runner journal.
   const file = request => computers.execute(A, { turn: 'ta', operation_id: hex(24), request });
   const data = Buffer.from('chunked\0binary'), part = Math.ceil(data.length / 2);
