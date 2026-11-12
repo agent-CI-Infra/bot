@@ -49,6 +49,8 @@ export function deleteProjectRecords(store: Store, id: string): void {
     const table = /^(?:DELETE FROM|UPDATE) (\w+)/.exec(sql)![1]!;
     if (store.hasTable(table)) store.run(sql, ...Array<string>(count).fill(id));
   }
+  // The project's trajectory files (its runs' model requests, tool calls and logs) go with the rows that referred to them.
+  store.trajectories.remove({ repository_id: id });
 }
 
 // Both project-removal endpoints share environment and record cleanup. Off-installation removal first checks GitHub.

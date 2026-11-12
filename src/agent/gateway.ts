@@ -49,9 +49,17 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
   // enter the same repository/model ledger; the request identity retains their provenance.
   const ledgerTask = { ...task, id: task.id && store.get('SELECT id FROM tasks WHERE id=?', task.id) ? task.id : null };
   const requestLog = beginModelRequest(store, ledgerTask, `${task.kind}:${task.id ?? 'run'}:${requestId}`, model);
+  // Bodies go to the trajectory file of the run (or conversation turn, or dispatch): a request as the messages added
+  // since the previous one. The row keeps refs. Without a file to put them in, the row keeps snapshots as before.
+  const scope=store.trajectories.scopeOf(task);
   const snapshot=(value:unknown,part:string)=>task.conversation_id?store.secrets.seal({snapshot:traceSnapshot(value)},'conversation-model-'+part+':'+requestLog):traceSnapshot(value);
+  const respond=(value:unknown)=>{
+    if(scope)store.run('UPDATE model_requests SET response_ref=? WHERE id=?',store.trajectories.append(scope,'model_response',requestLog,value),requestLog);
+    else store.run('UPDATE model_requests SET response_snapshot=? WHERE id=?',snapshot(value,'response'),requestLog);
+  };
   const captured=redactor.clean({ ...requestBody, model: model.model, [limit]: outputTokens, stream: true, stream_options: { include_usage: true } });
-  store.run('UPDATE model_requests SET run_id=?,request_snapshot=? WHERE id=?',task.trace_run_id??null,snapshot(captured,'request'),requestLog);
+  if(scope)store.run('UPDATE model_requests SET run_id=?,request_ref=? WHERE id=?',task.trace_run_id??null,store.trajectories.appendModelRequest(scope,requestLog,captured),requestLog);
+  else store.run('UPDATE model_requests SET run_id=?,request_snapshot=? WHERE id=?',task.trace_run_id??null,snapshot(captured,'request'),requestLog);
   const controller = new AbortController();
   const abort=()=>controller.abort();
   input.executionSignal?.addEventListener('abort',abort,{once:true});
@@ -79,17 +87,17 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
       catch (error) { callbackFailed = true; throw error; }
     }) : await errorBody(response);
   } catch (error) {
-    store.run('UPDATE model_requests SET response_snapshot=? WHERE id=?',traceSnapshot({error:callbackFailed?'guard_failed':error instanceof TaskError?error.code:'transport_error'}),requestLog);
+    respond({error:callbackFailed?'guard_failed':error instanceof TaskError?error.code:'transport_error'});
     finishModelRequest(store, requestLog, null, response?.status ?? null, callbackFailed ? 'guard_failed' : error instanceof TaskError ? 'invalid_response' : 'transport_error');
     if (callbackFailed || error instanceof TaskError) throw error;
     return stop('model_unavailable', 'retry_wait', redactor.text(`${target}请求失败：${idle ? '连续 90 秒没有 token 输出' : networkReason(error, modelIdleMs)}。`));
   } finally { clearTimeout(timer); input.executionSignal?.removeEventListener('abort',abort); }
   try { await input.guard?.(); }
   catch(error){
-    store.run('UPDATE model_requests SET response_snapshot=? WHERE id=?',traceSnapshot({error:'guard_failed'}),requestLog);
+    respond({error:'guard_failed'});
     finishModelRequest(store,requestLog,value?.usage,response.status,'guard_failed');throw error;
   }
-  store.run('UPDATE model_requests SET response_snapshot=? WHERE id=?',snapshot(redactor.clean(value),'response'),requestLog);
+  respond(redactor.clean(value));
   if (!response.ok) {
     finishModelRequest(store, requestLog, null, response.status, 'http_error');
     const error = value?.error, found = [error?.message, error, value?.message, value?.detail, value?.msg].find(item => typeof item === 'string' && item.trim());

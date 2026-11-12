@@ -109,7 +109,7 @@ Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一�
 
 ## 备份与恢复
 
-备份前停止 bot 和 manager，并备份四个部署卷及项目具名卷；数据库停止写入后再复制，恢复时使用同一套内部认证和管理账本。丢失主密钥会无法解密凭据，丢失内部认证会改变部署 ID，不能用新的空账本直接接管旧容器。`docker compose down` 保留卷；`--volumes` 会删除部署认证和账本，日常升级不要使用。动态项目资源需要通过环境接口管理，Compose down 不会直接删除它们。
+备份前停止 bot 和 manager，并备份四个部署卷及项目具名卷；数据库停止写入后再复制，恢复时使用同一套内部认证和管理账本。`bot-data` 卷里除了 `control.sqlite`，还有数据库引用的[轨迹文件](trajectories.md) `trajectories/`，两者要来自同一次停写后的备份。丢失主密钥会无法解密凭据，丢失内部认证会改变部署 ID，不能用新的空账本直接接管旧容器。`docker compose down` 保留卷；`--volumes` 会删除部署认证和账本，日常升级不要使用。动态项目资源需要通过环境接口管理，Compose down 不会直接删除它们。
 
 
 ## GitHub 用户登录

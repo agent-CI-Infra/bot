@@ -1,4 +1,5 @@
 import { visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
+import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import type { Store } from '../storage/database.js';
 import { sha } from '../agent/common.js';
 import type { Candidate, Evidence } from './service.js';
@@ -30,8 +31,10 @@ export function readEvidence(store:Store,taskId:string,candidate:Candidate,args:
   const source=String(args?.source||''),[kind,id]=source.split(':');
   if(!id||id.length>128)return {error:'invalid_evidence_source'};
   if(!evidence&&kind!=='task_history')return {error:'evidence_not_offered'};
-  const row=kind==='task_history'?store.get('SELECT data AS raw,type FROM task_history WHERE task_id=? AND id=?',taskId,id!):kind==='task_log'?store.get('SELECT content AS raw FROM task_logs WHERE task_id=? AND id=?',taskId,id!):null;
+  const row=kind==='task_history'?store.get('SELECT data AS raw,data,type FROM task_history WHERE task_id=? AND id=?',taskId,id!):kind==='task_log'?store.get('SELECT content AS raw,content,content_ref FROM task_logs WHERE task_id=? AND id=?',taskId,id!):null;
   if(!row)return {error:'raw_evidence_unavailable'};
+  // A body in a trajectory file reads as the text it was recorded with, so digests taken before still match.
+  try{row.raw=kind==='task_log'?logContent(store,row):historyData(store,row);}catch{return {error:'raw_evidence_unavailable'};}
   let data:any;try{data=JSON.parse(row.raw);}catch{data={};}
   const verification=!evidence&&row.type==='acceptance_evidence'&&data&&typeof data.evaluation_id==='string'?store.get("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_started' AND json_extract(data,'$.evaluation_id')=? AND json_extract(data,'$.candidate_id')=? AND json_extract(data,'$.revision')=?",taskId,data.evaluation_id,candidate.id,candidate.revision):null;
   if(!evidence&&row.type!=='execution_evidence'&&!verification)return {error:'evidence_not_offered'};

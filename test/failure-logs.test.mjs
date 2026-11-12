@@ -60,7 +60,7 @@ test('workspace conflicts reach fault logs and the task detail through the exist
   const h=await emptyRepositoryFixture(t);h.setBranch('ready');
   const key='prepare:init',task=h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId),id=operationId(`${task.id}:${task.attempt}:${key}`);
   h.store.run('UPDATE tasks SET workspace_id=? WHERE id=?','workspace-b',task.id);
-  h.store.run("INSERT INTO task_tools VALUES(?,?,?,NULL,'pending')",id,task.id,JSON.stringify({operation_id:id,generation:1,
+  h.store.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES(?,?,?,NULL,'pending')",id,task.id,JSON.stringify({operation_id:id,generation:1,
     request:{type:'workspace_init',author_email:'999+fixture-bot@users.noreply.github.com',workspace_id:'workspace-a'}}));
   // A conflict is the bot's own fault, not the person's: it waits for an automatic retry, in a new attempt whose
   // operation keys cannot collide with the leftover one.

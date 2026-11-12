@@ -13,7 +13,7 @@ const url=(q='')=>new URL('http://local/api/tasks/t/events'+(q?q+'&':'?')+'inclu
 test('run snapshots survive reopen and input/config changes; interrupted run and recovery have stable ancestry',()=>{
  const dir=mkdtempSync(join(tmpdir(),'bot155-')),path=join(dir,'db');let s=new Store(path,Buffer.alloc(32));try{seed(s);
  const run=beginRun(s,{id:'t'},'execution',{model:'fixed',prompt:'original',api_key:'secret'});
- s.run("INSERT INTO task_tools VALUES('op','t',?,NULL,'pending')",JSON.stringify({type:'workspace_command',command:'npm test',token:'SECRET'}));
+ s.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES('op','t',?,NULL,'pending')",JSON.stringify({type:'workspace_command',command:'npm test',token:'SECRET'}));
  s.run("UPDATE task_tools SET state='completed',result=? WHERE id='op'",JSON.stringify({exit_code:0,output:'actual observed result'}));
  s.run("UPDATE tasks SET input=? WHERE id='t'",JSON.stringify({request:'changed later'}));s.close();s=new Store(path,Buffer.alloc(32));interruptRuns(s);
  const next=beginRun(s,{id:'t'},'execution',{prompt:'resumed'});assert.equal(s.get('SELECT previous_run_id FROM task_runs WHERE id=?',next.id).previous_run_id,run.id);
@@ -25,7 +25,7 @@ test('run snapshots survive reopen and input/config changes; interrupted run and
 });
 test('events are transaction-bound, paginated, filterable and authorized without invented legacy runs',()=>{
  const s=new Store(':memory:',Buffer.alloc(32));try{seed(s);assert.equal(taskTrace(s,'t',url(),'runs').runs.length,0);
- const before=s.get('SELECT count(*) n FROM task_history').n;assert.throws(()=>s.transaction(()=>{s.run("INSERT INTO task_tools VALUES('rollback','t','{}',NULL,'pending')");throw Error('fault');}));assert.equal(s.get('SELECT count(*) n FROM task_history').n,before);
+ const before=s.get('SELECT count(*) n FROM task_history').n;assert.throws(()=>s.transaction(()=>{s.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES('rollback','t','{}',NULL,'pending')");throw Error('fault');}));assert.equal(s.get('SELECT count(*) n FROM task_history').n,before);
  traceEvent(s,'t','contract',{revision:2});assert.equal(taskTrace(s,'t',url('?revision=2&type=contract'),'events').events.length,1);
  for(let i=0;i<3;i++)traceEvent(s,'t','intervention',{i},null,'user:owner');
  const first=taskTrace(s,'t',url('?type=intervention&limit=2'),'events');assert.equal(first.events.length,2);const second=taskTrace(s,'t',url('?type=intervention&limit=2&after='+first.next_after),'events');assert.equal(second.events.length,1);assert.equal(second.events[0].actor,'user:owner');assert.throws(()=>taskTrace(s,'t',url('?limit=-1'),'events'));
@@ -74,7 +74,7 @@ test('task log pages use stable cursors, preserve public output and omit histori
 
 test('detail polling returns a bounded history index and omits large candidate/operation bodies',()=>{
  const s=new Store(':memory:',Buffer.alloc(32));try{seed(s);const r=new TaskRecords(s);r.submit('t',[{kind:'report',reference:'large.json',version:'v',content:{text:'PAYLOAD_SENTINEL'.repeat(50000)}}],[{source:'test',version:'v',verified:false,result:{text:'PAYLOAD_SENTINEL'.repeat(50000)}}],{});
- for(let i=0;i<120;i++)s.run('INSERT INTO task_tools VALUES(?,?,?,?,?)','op'+i,'t',JSON.stringify({command:'inspect',output:'PAYLOAD_SENTINEL'.repeat(1000)}),'{}','completed');
+ for(let i=0;i<120;i++)s.run('INSERT INTO task_tools(id,task_id,request,result,state) VALUES(?,?,?,?,?)','op'+i,'t',JSON.stringify({command:'inspect',output:'PAYLOAD_SENTINEL'.repeat(1000)}),'{}','completed');
  const actor={id:'owner',role:'super_admin',repositories:[]},detail=queries(s,actor,new URL('http://local/api/tasks/t'));assert.equal(detail.history.length,50);assert.equal(detail.history_page.has_older,true);assert.ok(JSON.stringify(detail).length<30000);assert.doesNotMatch(JSON.stringify(detail),/PAYLOAD_SENTINEL/);
  const page=taskTrace(s,'t',new URL('http://local?limit=2&type=operation'),'events');assert.equal(page.events.length,2);assert.ok(page.events[0].data.body_omitted);assert.ok(traceSource(s,'t',page.events[0].event_id).complete);
  }finally{s.close();}

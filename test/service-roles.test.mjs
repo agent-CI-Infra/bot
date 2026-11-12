@@ -157,7 +157,7 @@ test('an existing ledger is rebuilt once with a nullable repository, keeping eve
   let store=new Store(path,key);
   const info=store.all('PRAGMA table_info(model_requests)');
   assert.equal(info.find(r=>r.name==='repository_id').notnull,0);
-  assert.deepEqual(info.map(r=>r.name),[...columns,'service_role_id']);
+  assert.deepEqual(info.map(r=>r.name),[...columns,'service_role_id','request_ref','response_ref']);
   assert.deepEqual(store.all(`SELECT ${columns.join(',')} FROM model_requests ORDER BY id`),rows);
   const rebuilt=store.all("SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='model_requests' AND sql IS NOT NULL ORDER BY name");
   for(const index of indexes)assert.deepEqual(rebuilt.find(r=>r.name===index.name),index);

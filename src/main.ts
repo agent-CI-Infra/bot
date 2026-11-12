@@ -73,7 +73,12 @@ const { server } = createControlPlane({ store, staticDirectory: resolve(import.m
   { trustedProxies: (process.env.BOT_TRUSTED_PROXIES || '').split(',').map(value => value.trim()).filter(Boolean) });
 // The only business listener: console, API, OAuth, App callbacks, webhooks, external executors and public boards.
 server.on('error', () => { console.error('listener failed'); process.exit(1); });
-server.listen(8791, '0.0.0.0', () => console.log('listening on 8791'));
+server.listen(8791, '0.0.0.0', () => {
+  console.log('listening on 8791');
+  // Background work that never delays readiness: close the trajectory files a stopped process left open.
+  const seal = () => void store.trajectories.seal().catch(error => console.error('[trajectories] sealing failed:', error));
+  seal(); setInterval(seal, 10 * 60_000).unref();
+});
 let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;

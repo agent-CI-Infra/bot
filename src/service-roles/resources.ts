@@ -1,6 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import type { Manager } from '../projects/service.js';
 import { Workspace } from '../agent/workspace.js';
+import { addColumns, operationRefColumns } from '../storage/trajectories.js';
 import { blobSha, Redactor, safePath } from '../agent/common.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
 import type { OwnTaskOwner } from './own-tasks.js';
@@ -68,6 +69,7 @@ export class ServiceComputers {
     // Service turns belong to management/group conversations, not project RoleConversation rows.
     store.db.exec(`CREATE TABLE IF NOT EXISTS service_role_operations(id TEXT PRIMARY KEY,turn_id TEXT NOT NULL,
       request TEXT NOT NULL,result TEXT,state TEXT NOT NULL)`);
+    addColumns(store.db,'service_role_operations',operationRefColumns);
   }
   async execute(name:string,args:Json):Promise<unknown>{
     if(!this.manager)fail(409,'computer_not_configured');

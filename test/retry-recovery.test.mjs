@@ -24,7 +24,7 @@ test('a cached started receipt left by an older run cannot bypass the runner liv
   }});h.setBranch('ready');
   h.store.run("UPDATE tasks SET phase='model',workspace_id='dead',generation=1,attempt=3,input=? WHERE id=?",JSON.stringify({context:{mode:'review'}}),h.taskId);
   const id=operationId(`${h.taskId}:3:pi:start`),request={operation_id:id,generation:1,request:{type:'workspace_agent_start',workspace_id:'dead'}};
-  h.store.run("INSERT INTO task_tools VALUES(?,?,?,?,'completed')",id,h.taskId,JSON.stringify(request),JSON.stringify({started:true}));
+  h.store.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES(?,?,?,?,'completed')",id,h.taskId,JSON.stringify(request),JSON.stringify({started:true}));
   let task=await h.run();assert.deepEqual([task.status,task.phase,task.attempt],['waiting_environment','prepare',4]);assert.deepEqual(starts,['dead']);
   h.due();task=await h.run();assert.equal(task.status,'succeeded');assert.equal(starts.length,2);assert.notEqual(starts[1],'dead');
 });
