@@ -240,7 +240,13 @@ export class AssistantComputers {
     this.validate(owner);
     const lease = this.leases.get(owner);
     if (lease) await this.discard(lease, reason);
-    else if (await this.inspect(owner).catch(() => null)) await this.docker.request('DELETE', `/containers/${this.name(owner)}?force=true`);
+    else {
+      // Without a lease the container may still be going away from an earlier discard (the lease leaves the map first).
+      // Wait for that removal: a second DELETE meanwhile gets Docker's 409 "removal already in progress", and the caller
+      // (the control plane's sweep, a console clear, retention) would fail although the computer is gone.
+      await this.removing.get(owner);
+      if (await this.inspect(owner).catch(() => null)) await this.docker.request('DELETE', `/containers/${this.name(owner)}?force=true`);
+    }
     return { owner, state: 'removed' };
   }
   /** After a control plane restart: only the turns it still runs keep their computers. */
