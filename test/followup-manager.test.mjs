@@ -20,7 +20,8 @@ async function fixture(t,respond){
 }
 test('real Native Manager tool loop consumes objective QA impact, searches existing work and ranks/links without changing QA',async t=>{
  const f=await fixture(t,(body,n)=>{
- if(n===1){assert.ok(body.messages[0].content.includes('P0:'));assert.ok(body.messages[0].content.includes('not QA'));return call('read_task_record',{query:'existing'});}
+ if(n===1){assert.ok(body.messages[0].content.includes('P0:'));assert.ok(body.messages[0].content.includes('not QA'));return call('search_project_tasks',{query:'existing'});}
+ assert.ok(body.messages.at(-1).content.includes('existing'));assert.ok(!body.messages.at(-1).content.includes('task_record_not_found'));
  return call('submit_followup_plan',{items:[{key:residual.key,priority:'P3',reason:'Only stale documentation; package.json is a workaround, no delivery blocked',evidence_refs:[residual.evidence],action:'supplement',task_id:'existing'}]});});
  const original=JSON.stringify(verdict);await assessFollowups(f.s,f.task,f.candidate,verdict,f.workspace,async()=>{},new Redactor());assert.equal(JSON.stringify(verdict),original);
  const row=f.s.get('SELECT * FROM task_followup_plans');assert.ok(row,JSON.stringify(f.s.all("SELECT type,data FROM task_history WHERE type='followup_plan_deferred'")));assert.equal(JSON.parse(row.plan)[0].priority,'P3');assert.equal(f.requests.length,2);

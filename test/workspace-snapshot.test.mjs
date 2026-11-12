@@ -264,7 +264,7 @@ test('publishing a partial snapshot preserves excluded upstream paths and verifi
   const skipped=[{path:'vendor/module',mode:'160000',sha:'b'.repeat(40)},{path:'weights/huge.bin',mode:'100644',sha:'c'.repeat(40)}],expected=treeHash([file,...skipped]);
   const branch='bot/issue-1-snapshot',source='d'.repeat(40),writes=[];
   h.store.run('INSERT INTO bot_branches VALUES(?,?,?)','101',branch,h.taskId);
-  const github={defaultBranch:'main',path:path=>path,authorEmail:()=> '999+fixture-bot@users.noreply.github.com',ref:async()=>null,
+  const github={defaultBranch:'main',path:path=>path,authorEmail:()=> '999+fixture-bot@users.noreply.github.com',ref:async()=>writes.some(w=>w.path==='/git/refs')?{object:{sha:'e'.repeat(40)}}:null,
     async request(_method,path,body){writes.push({path,body});if(path==='/git/blobs')return {sha:file.sha};if(path==='/git/trees')return {sha:expected};if(path==='/git/commits')return {sha:'e'.repeat(40),tree:{sha:expected}};if(path==='/git/refs')return {object:{sha:'e'.repeat(40)}};assert.fail(path);}};
   const candidate={branch,owner_task_id:h.taskId,files:[{...file,base64:data.toString('base64')}],skipped_files:skipped,snapshot_files:[deleted],source_tree:source,tree_sha:treeHash([file]),base_sha:commit,date:new Date().toISOString(),summary:'Update source',test_command:'true',validation:{source:'agent',skipped:true,command:'true'}};
   const publisher=new Publisher(h.store,github,h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId),async()=>{});
@@ -280,7 +280,7 @@ async function publishTree(t,{files,snapshot,trees}){
   const h=await emptyRepositoryFixture(t),branch='bot/issue-1-tree',source='d'.repeat(40),writes=[];
   h.store.run('INSERT INTO bot_branches VALUES(?,?,?)','101',branch,h.taskId);
   const expected=treeHash(files),answers=[...trees(expected)];
-  const github={defaultBranch:'main',path:path=>path,authorEmail:()=> '999+fixture-bot@users.noreply.github.com',ref:async()=>null,
+  const github={defaultBranch:'main',path:path=>path,authorEmail:()=> '999+fixture-bot@users.noreply.github.com',ref:async()=>writes.some(w=>w.path==='/git/refs')?{object:{sha:'e'.repeat(40)}}:null,
     async request(_method,path,body){writes.push({path,body});if(path==='/git/blobs')return {sha:body.sha||files.find(f=>f.base64===body.content).sha};
       if(path==='/git/trees')return {sha:answers.shift()};if(path==='/git/commits')return {sha:'e'.repeat(40),tree:{sha:expected}};if(path==='/git/refs')return {object:{sha:'e'.repeat(40)}};assert.fail(path);}};
   const candidate={branch,owner_task_id:h.taskId,files,skipped_files:[],snapshot_files:snapshot,source_tree:source,tree_sha:expected,base_sha:commit,date:new Date().toISOString(),

@@ -1,7 +1,8 @@
+import { publicationFact } from '../tasks/publication.js';
 import { assertPublicationStages } from '../roles/schedule.js';
 import { type Store, type Row } from '../storage/database.js';
 import { GitHub } from './client.js';
-import { blobSha, operationId, stop, TaskError, treeSha } from '../agent/common.js';
+import { blobSha, operationId, sha, stop, TaskError, treeSha } from '../agent/common.js';
 import { implementationText, reviewText, summaryComment, humanItems, markHuman, type HumanItem, type Place, type Prompted, type DevelopmentWait } from './text.js';
 import { inlineLocation } from '../review/findings.js';
 import { applyReleaseCategory, releaseCategory } from './release-label.js';
@@ -23,6 +24,7 @@ export class Publisher {
     const id=operationId(this.task.id+':'+key),marker=`<!-- dept-bot:${id} -->`;
     let row=this.store.get('SELECT * FROM github_effects WHERE id=?',id);
     if(!row){this.store.run("INSERT INTO github_effects VALUES(?,?,?,?, 'pending',NULL,?)",id,this.task.id,kind,JSON.stringify(request),marker);row=this.store.get('SELECT * FROM github_effects WHERE id=?',id);}
+    if(kind==='branch' && row!.request!==JSON.stringify(request))stop('publication_receipt_mismatch','needs_replan','Publication request differs from its retained receipt. Query read_publication_context before deciding how to continue.');
     if(row!.state==='sent')return JSON.parse(row!.response);
     // pending means never sent, or refused for certain: only an inflight or unknown request can have landed, so only then
     // is GitHub searched for it. recheck is an unconfirmed write a person released with 重试: it is searched for once
@@ -185,9 +187,18 @@ export class Publisher {
     const direct=this.store.get("SELECT 1 FROM tasks WHERE id=? AND repository_id=? AND kind IN ('task.request','task.development')",candidate.owner_task_id,this.task.repository_id)&&candidate.branch==='bot/task-'+candidate.owner_task_id;
     if(!branch||branch.task_id!==candidate.owner_task_id||candidate.branch===this.github.defaultBranch||!candidate.branch.startsWith('bot/issue-')&&!direct)stop('branch_not_owned','waiting_permission',`分支 ${candidate.branch} 不属于已登记的任务分支，禁止发布。`);
     await this.validate();
-    if(candidate.remote_sha && this.store.get("SELECT state FROM github_effects WHERE id=?",operationId(this.task.id+':'+(candidate.publication_key?'branch:'+candidate.publication_key:'branch')))?.state==='sent'){
-      if((await this.github.ref(candidate.branch))?.object?.sha!==candidate.remote_sha)stop('branch_head_changed','superseded',`分支 ${candidate.branch} 已偏离已发布提交 ${candidate.remote_sha}。`);
-      return candidate.remote_sha;
+    // Operation identity belongs to this exact candidate, not a task attempt or a previous QA revision.
+    const expected=(candidate.skipped_files||[]).length?treeSha([...candidate.files,...candidate.skipped_files]):candidate.tree_sha;
+    const identity=sha(JSON.stringify({branch:candidate.branch,tree:expected,base:candidate.base_sha,previous:candidate.expected_sha??null,title:implementationText(candidate,this.task.object_number).title,date:candidate.date}));
+    const key='branch:v2:'+identity;
+    const save=()=>this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify(candidate),this.task.id);
+    const observe=async()=>{const ref=await this.github.ref(candidate.branch);publicationFact(this.store,this.task,'branch_observed',{operation_key:key,branch:candidate.branch,expected_sha:candidate.expected_sha??null,target_sha:candidate.created_commit_sha??null,observed_sha:ref?.object?.sha??null});return ref;};
+    // Legacy remote_sha can mean only "commit created". It is not evidence of a confirmed branch update.
+    if(candidate.publication_identity!==identity){candidate.publication_identity=identity;delete candidate.created_commit_sha;delete candidate.remote_sha;delete candidate.branch_confirmed;delete candidate.published_tree_sha;save();}
+    if(candidate.created_commit_sha){
+      const current=await observe(),actual=current?.object?.sha;
+      if(actual===candidate.created_commit_sha){candidate.remote_sha=actual;candidate.published_tree_sha=expected;candidate.branch_confirmed={sha:actual,observed_at:new Date().toISOString()};save();this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(current),operationId(this.task.id+':'+key));publicationFact(this.store,this.task,'branch_confirmed',{operation_key:key,branch:candidate.branch,commit_sha:actual,tree_sha:expected});return actual;}
+      if(candidate.branch_confirmed || actual && actual!==candidate.expected_sha || !actual && candidate.expected_sha)stop('branch_head_changed','needs_replan','Publication branch differs from the expected head. Query read_publication_context; choose investigation, coordination, integration or help.');
     }
     for(const file of candidate.files){
       if(file.base64===undefined)continue; // Verified object already belongs to the source snapshot.
@@ -197,7 +208,7 @@ export class Publisher {
     }
     // Skipped upstream entries (submodules, blobs GitHub will not let us download) stay as they are in the source tree.
     // Hashing the merged manifest also rejects a candidate that overwrites an excluded path.
-    const skipped=candidate.skipped_files||[],expected=skipped.length?treeSha([...candidate.files,...skipped]):candidate.tree_sha;
+    const skipped=candidate.skipped_files||[];
     const entry=(f:any,sha=f.sha)=>({path:f.path,mode:f.mode,type:'blob',sha});
     const snapshot=candidate.snapshot_files||[],upstream=new Map<string,any>(snapshot.map((f:any)=>[f.path,f])),paths=new Set(candidate.files.map((f:any)=>f.path));
     const deletions=snapshot.filter((f:any)=>!paths.has(f.path)).map((f:any)=>entry(f,null));
@@ -212,17 +223,17 @@ export class Publisher {
     let tree=candidate.source_tree&&changes.length+deletions.length&&!reshaped?await create({base_tree:candidate.source_tree,tree:[...changes,...deletions]}):null;
     if(tree?.sha!==expected)tree=await create(skipped.length?{base_tree:candidate.source_tree,tree:[...candidate.files.map((f:any)=>entry(f)),...deletions]}:{tree:candidate.files.map((f:any)=>entry(f))});
     if(tree.sha!==expected)stop('github_tree_mismatch',undefined,`GitHub 创建的文件树不一致：预期 ${expected}，实际 ${tree.sha}。`);
-    candidate.published_tree_sha=expected;
+    candidate.created_tree_sha=expected;
     const author={name:'Department Bot',email:this.github.authorEmail(),date:candidate.date};
-    const commit=await this.github.request('POST',this.github.path('/git/commits'),{message:implementationText(candidate,this.task.object_number).title,
+    const commit=candidate.created_commit_sha?{sha:candidate.created_commit_sha,tree:{sha:expected}}:await this.github.request('POST',this.github.path('/git/commits'),{message:implementationText(candidate,this.task.object_number).title,
       tree:expected,parents:[candidate.base_sha,...(candidate.expected_sha&&candidate.expected_sha!==candidate.base_sha?[candidate.expected_sha]:[])],author,committer:author});
     if(commit.tree?.sha!==expected)stop('github_commit_tree_mismatch',undefined,`GitHub 提交 ${commit.sha} 的文件树不一致：预期 ${expected}，实际 ${commit.tree?.sha}。`);
-    candidate.remote_sha=commit.sha;
-    this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify(candidate),this.task.id);
+    candidate.created_commit_sha=commit.sha;save();
+    publicationFact(this.store,this.task,'commit_created',{operation_key:key,branch:candidate.branch,commit_sha:commit.sha,tree_sha:expected,expected_sha:candidate.expected_sha??null});
     await this.validate();
-    const current=await this.github.ref(candidate.branch);
-    if(current&&current.object.sha!==commit.sha&&current.object.sha!==candidate.expected_sha)stop('branch_head_changed','superseded',`发布分支 ${candidate.branch} 前发现 head 已变化，当前提交=${current.object.sha}。`);
-    if(!current&&candidate.expected_sha)stop('branch_disappeared','superseded',`待更新的分支 ${candidate.branch} 已不存在。`);
+    const current=await observe();
+    if(current&&current.object.sha!==commit.sha&&current.object.sha!==candidate.expected_sha)stop('branch_head_changed','needs_replan',`发布分支 ${candidate.branch} 前发现 head 已变化，当前提交=${current.object.sha}。`);
+    if(!current&&candidate.expected_sha)stop('branch_disappeared','needs_replan',`待更新的分支 ${candidate.branch} 已不存在。`);
     const path=this.github.path('/git/refs'+(candidate.expected_sha?'/heads/'+encodeURIComponent(candidate.branch):''));
     const request=candidate.expected_sha?{sha:commit.sha,force:false}:{ref:'refs/heads/'+candidate.branch,sha:commit.sha};
     const find=async()=>{const state=await this.github.ref(candidate.branch);return state?.object?.sha===commit.sha?state:null;};
@@ -233,8 +244,13 @@ export class Publisher {
       try{return await this.github.request(candidate.expected_sha?'PATCH':'POST',path,request);}
       catch(error){if(error instanceof TaskError&&error.code==='github_http_422'){const state=await find();if(state)return state;}throw error;}
     };
-    const ref=await this.effect(candidate.publication_key?'branch:'+candidate.publication_key:'branch','branch',request,send,find,true);
+    publicationFact(this.store,this.task,'branch_update_requested',{operation_key:key,branch:candidate.branch,target_sha:commit.sha,expected_sha:candidate.expected_sha??null});
+    const ref=await this.effect(key,'branch',request,send,find,true);
     if(ref.object?.sha!==commit.sha)stop('branch_not_confirmed',undefined,`分支 ${candidate.branch} 发布未确认：预期提交 ${commit.sha}，返回 ${ref.object?.sha||'无提交'}。`);
+    const confirmed=await observe();
+    if(confirmed?.object?.sha!==commit.sha)stop('branch_not_confirmed',undefined,'Branch update receipt exists, but the current remote head is not confirmed. Query read_publication_context.');
+    candidate.remote_sha=commit.sha;candidate.published_tree_sha=expected;candidate.branch_confirmed={sha:commit.sha,observed_at:new Date().toISOString()};save();
+    publicationFact(this.store,this.task,'branch_confirmed',{operation_key:key,branch:candidate.branch,commit_sha:commit.sha,tree_sha:expected});
     return commit.sha;
   }
   async pullRequest(candidate:any,sha:string){
@@ -252,13 +268,14 @@ export class Publisher {
       if(pr?.head.sha!==sha)stop('pr_head_pending','waiting_pr_head',`PR #${candidate.pr_number} 尚未更新到提交 ${sha}，当前 head=${pr?.head.sha||'未知'}。`);
       const source=this.store.get('SELECT object_number FROM tasks WHERE id=?',owned!.source_task_id);
       const content=implementationText(candidate,Number(source?.object_number||this.task.object_number));
-      const marker=this.marker(candidate.publication_key?'pr-update:'+candidate.publication_key:'pr-update'),payload={...content,body:content.body+'\n\n'+(this.store.get("SELECT marker FROM github_effects WHERE task_id=? AND kind='pull_request'",owned!.source_task_id)?.marker||'')+'\n\n'+marker};
-      await this.effect(candidate.publication_key?'pr-update:'+candidate.publication_key:'pr-update','pull_request',payload,()=>this.github.request('PATCH',this.github.path('/pulls/'+pr.number),payload),async()=>{
+      const updateKey='pr-update:'+sha+':'+operationId(JSON.stringify(implementationText(candidate,Number(source?.object_number||this.task.object_number)))) ,marker=this.marker(updateKey),payload={...content,body:content.body+'\n\n'+(this.store.get("SELECT marker FROM github_effects WHERE task_id=? AND kind='pull_request'",owned!.source_task_id)?.marker||'')+'\n\n'+marker};
+      await this.effect(updateKey,'pull_request',payload,()=>this.github.request('PATCH',this.github.path('/pulls/'+pr.number),payload),async()=>{
         const current=await this.github.object('review.pr',pr.number);assertOwnedPR(owned,current,this.github.actorId,this.task.repository_id);
         return current.head.sha===sha&&current.title===payload.title&&current.body===payload.body?current:null;
       },true);
       recordRevision(this.store,this.task,candidate.pr_number,sha);
       await applyReleaseCategory(this.github, pr.number, releaseLabel);
+      publicationFact(this.store,this.task,'pr_confirmed',{pr_number:pr.number,commit_sha:sha});
       return {...pr,...payload};
     }
     const marker=this.marker('pr'),path=this.github.path('/pulls'),body=implementationText(candidate,this.task.object_number).body+'\n\n'+marker;
@@ -268,6 +285,7 @@ export class Publisher {
     if(String(pr.user?.id)!==this.github.actorId||String(pr.head?.repo?.id)!==this.task.repository_id||pr.head?.ref!==candidate.branch||pr.head.sha!==sha)stop('bot_pr_ownership_unconfirmed','waiting_permission',`新建 PR #${pr.number} 的作者、来源仓库、分支或提交与候选分支 ${candidate.branch} 不一致。`);
     this.store.run(`INSERT INTO bot_pull_requests VALUES(?,?,?,?,?,?,?,?,0) ON CONFLICT(repository_id,number) DO NOTHING`,this.task.repository_id,pr.number,String(pr.id),String(pr.user.id),String(pr.head.repo.id),candidate.branch,sha,this.task.id);
     await applyReleaseCategory(this.github, pr.number, releaseLabel);
+    publicationFact(this.store,this.task,'pr_confirmed',{pr_number:pr.number,commit_sha:sha});
     return pr;
   }
 }

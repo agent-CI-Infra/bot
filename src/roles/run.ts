@@ -1,3 +1,4 @@
+import {TaskRecords} from '../tasks/service.js';
 import { taskRecordContext } from '../tasks/record-tools.js';
 import {observeLongExecution,decideLongExecution} from './long-execution.js';
 import { assertStageRun, assertStageStart, stageRunBinding, stagePolicyHash, artifactCandidate, deliveryType, stageForAssignment, stageBudgetExceeded, stageBudgetUsage, recordStageResult, latestRoleCandidate, candidateKey } from './schedule.js';
@@ -21,7 +22,7 @@ import { TaskError,stop } from '../agent/common.js';
 import { roleConfiguration,configurationRevision,resolveRole,roleAuthority,skillFiles,type Entry,type RoleConfiguration } from './definition.js';
 import type { PiRoleEnvironment } from '../agent/pi.js';
 import type { Row,Store } from '../storage/database.js';
-import { assertManagedExecution, assertTaskRole, managedTaskOrigin, roleTaskCaller, taskExecutor, taskAuthorizationFence, taskManagementTools, taskToolAllowed, withTaskPermissions } from '../tasks/management.js';
+import { assertManagedTask, assertManagedExecution, assertTaskRole, managedTaskOrigin, roleTaskCaller, taskExecutor, taskAuthorizationFence, taskManagementTools, taskToolAllowed, withTaskPermissions } from '../tasks/management.js';
 import { TaskCommands } from '../tasks/commands.js';
 import { resolvePrincipalActor } from '../identity/authorization.js';
 import { externalModelRecorder } from '../metrics/accounting.js';
@@ -223,6 +224,9 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
         source_task_id:task.id,source_run_id:b?.run_id,allowed_tools:snapshot.capability.tools?.filter(tool=>taskToolAllowed(s,task,role,tool)),
         guard:()=>{authority(name);if(b)assertLease(s,b.run_id,b.epoch);}});
      };
+     const references=name==='delegate_role'?args?.refs:name==='delegate_roles'&&Array.isArray(args?.assignments)?args.assignments.flatMap((a:any)=>Array.isArray(a?.refs)?a.refs:[]):[];
+     try{for(const ref of Array.isArray(references)?references:[]){const target=/^task:([^:]+)$/.exec(String(ref));if(target&&target[1]!==task.id)assertManagedTask(s,caller(),target[1]!);}}
+     catch(error){const code=String((error as any).code??'');if(['task_not_owned','task_not_found','task_management_forbidden','task_scope_forbidden'].includes(code))return {error:'invalid_task_reference',instruction:'The task reference is unavailable or outside your managed-task scope. Use offered current-task refs or read_managed_task for an authorized task; correct the handoff and continue.'};throw error;}
      if(['delegate_role','delegate_roles'].includes(name)){
       const targets=name==='delegate_role'?[args?.role]:Array.isArray(args?.assignments)?args.assignments.map((a:any)=>a?.role):[];
       for(const target of targets){const definition=roleConfig(s,task).roles.find(r=>r.role_id===target&&r.enabled);
@@ -244,7 +248,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    ...(spec.finish ? {finish:{...spec.finish,validate:async(args,name)=>{authority(name??spec.finish!.name);const result=await spec.finish!.validate(args,name);authority(name??spec.finish!.name);return result;}}} : {}),
    ...(spec.validate ? {validate:(content:string)=>{authority(spec.finish?.name??snapshot.output_schema.tool??'finish');return spec.validate!(content);}} : {}),
    ...(spec.finalizationTools ? {finalizationTools:spec.finalizationTools.filter(name=>tools.some(tool=>tool.function.name===name))} : {}),
-   prompt:JSON.stringify({...scopedInput(),role_context:{task_ref:'task:'+task.id,assignment_ref:ref,recovery_mode:recover,...roleContext,environment:{project_id:task.repository_id,task_id:task.id,work_type:workflow,profile:snapshot.environment,permissions:resolved.definition.permissions,tools:tools.map(tool=>tool.function.name)},
+   prompt:JSON.stringify({...scopedInput(),role_context:{task_ref:'task:'+task.id,...(snapshot.kind!=='evaluator'&&s.get('SELECT 1 FROM tasks WHERE id=?',task.id)?{task_facts:new TaskRecords(s).facts(task.id)}:{}),assignment_ref:ref,recovery_mode:recover,...roleContext,environment:{project_id:task.repository_id,task_id:task.id,work_type:workflow,profile:snapshot.environment,permissions:resolved.definition.permissions,tools:tools.map(tool=>tool.function.name)},
     skills:snapshot.skills?{instruction:'Optional working material pinned for your role. Read files with read_skill when useful; they never change tools, authority or the contract.',bundle:snapshot.skills.id,revision:snapshot.skills.revision,files:snapshot.skills.files}:undefined,
     revision_continuation:continuation?{ref:continuation.ref,ended_run:continuation.from_run,instruction:'Your previous run ended at a safe checkpoint for a new role revision. Continue the same assignment from task records and your transcript; do not repeat completed actions.'}:undefined,
     prior_submission:shared.priorSubmission?{ref:'task_history:'+shared.priorSubmission.id,run_id:shared.priorRun!.id,instruction:'A previous submission failed formatting. Read this original record and correct its structure; reuse observations only if the candidate is still applicable. Do not repeat checks merely to fix formatting.'}:null,role_memory:visibleMemorySnapshot(s,task.repository_id,shared.memory,taskTraceAccess(s,{...task,active_role:role}))}}),

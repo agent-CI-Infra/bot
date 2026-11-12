@@ -1,3 +1,5 @@
+import {requestIntegration} from './integration.js';
+import {traceSource} from './trace.js';
 import {requestedTask} from '../work/catalog.js';
 import {taskPermissions} from './configuration.js';
 import {attachChild} from './children.js';
@@ -14,7 +16,7 @@ import { stageReplanContext } from '../roles/schedule.js';
 import { assertManagedTask, assertManagedExecution, assertTaskCaller, createManagedTask, operatorTaskCaller, taskCallerActor, type TaskCaller } from './management.js';
 import { TaskError } from '../agent/common.js';
 import { readEvidence } from './evidence.js';
-import { taskTraceAccess } from '../memory/access.js';
+import { taskTraceAccess,taskControllerReads } from '../memory/access.js';
 import { assertRequestPullRequest, softwareRequest } from './pull-request.js';
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
@@ -37,6 +39,18 @@ export class TaskCommands {
     } else if (target && method !== 'GET') {
       const project=this.store.get('SELECT repository_id FROM tasks WHERE id=?',target[1]!)?.repository_id;
       if(project) operatorTaskCaller(this.store,user,project);
+    }
+    const integrate=/^\/api\/tasks\/([^/]+)\/integrate$/.exec(url.pathname);
+    if(integrate&&method==='POST'){
+      fields(input,['base_ref','reason']);const filter=scope(user,'repository_id'),task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,integrate[1]!,...filter.args);if(!task)fail(404,'task_not_found');
+      if(typeof input.reason!=='string'||!input.reason.trim()||input.reason.length>2000||typeof input.base_ref!=='string')fail(400,'invalid_integration_request');
+      const ref=/^task_history:(\d+)$/.exec(input.base_ref as string),row=ref?this.store.get("SELECT h.data FROM task_history h JOIN tasks t ON t.id=h.task_id WHERE h.id=? AND h.type='version_reference' AND t.repository_id=?",Number(ref[1]),task!.repository_id):null;
+      const version=row?JSON.parse(row.data):null;
+      if(version?.purpose!=='current_main'||!/^([a-f0-9]{40})$/.test(version?.commit_sha??''))return {error:'integration_base_reference_required',discovery:{tool:'read_version_context',arguments:{}}};
+      if(!['code','pull_request'].every(write=>taskPermissions(this.store,task!).writes.includes(write)))fail(403,'task_external_write_forbidden');
+      const result=JSON.parse(task!.result||'null'),saved=JSON.parse(task!.input||'{}');
+      requestIntegration(this.store,task!,version.commit_sha,'agent_requested:'+String(input.reason),saved.bot_pr??(result?.pr_number?(()=>{const owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task!.repository_id,result.pr_number);if(!owned)fail(409,'integration_pr_unavailable');return {id:owned!.pr_id,number:result.pr_number,state:'open',draft:false,user:{id:owned!.author_id},head:{sha:result.sha,ref:owned!.branch,repo:{id:owned!.head_repository_id}},base:{ref:saved.base_branch}};})():undefined));
+      traceEvent(this.store,task!.id,'integration_decision',{base_ref:input.base_ref,reason:input.reason,actor:caller?.role??user.id},null,caller?'role:'+caller.role:'user:'+user.id);this.hooks.tick?.();return {status:'integrating',task_id:task!.id};
     }
     const relation=/^\/api\/tasks\/([^/]+)\/relate$/.exec(url.pathname);
     if(relation&&method==='POST'){
@@ -209,10 +223,24 @@ export class TaskCommands {
       if(args.source!==undefined){
         if(typeof args.source!=='string')fail(400,'invalid_evidence_source');
         const candidate=records.get(id).candidate;
-        return {evidence:candidate?readEvidence(this.store,id,candidate,args,taskTraceAccess(this.store,{...task,active_role:caller.role})): {error:'evidence_not_offered'}};
+        const access={...taskTraceAccess(this.store,{...task,active_role:caller.role}),task_id:caller.source_task_id??undefined};
+        const evidence=candidate?readEvidence(this.store,id,candidate,args,access):{error:'evidence_not_offered'};
+        if('error' in evidence&&taskControllerReads(this.store,id,access)){
+          const offset=args.offset??0,length=args.length??12000;if(!Number.isSafeInteger(offset)||Number(offset)<0||!Number.isSafeInteger(length)||Number(length)<1||Number(length)>32000)fail(400,'invalid_evidence_range');
+          try{const raw=JSON.stringify(traceSource(this.store,id,args.source as string,access));return {task_id:id,record:{source:args.source,offset,total:raw.length,chunk:raw.slice(Number(offset),Number(offset)+Number(length))}};}
+          catch(error){if((error as any).code!=='trace_source_not_found')throw error;return {task_id:id,error:'task_record_not_found',source:args.source};}
+        }
+        if('error' in evidence&&evidence.error==='evidence_not_offered'){
+          const match=/^task_history:(\d+)$/.exec(args.source as string),row=match?this.store.get('SELECT type FROM task_history WHERE task_id=? AND id=?',id,Number(match[1])):null;
+          if(row&&['manager_recovery_queued','repository_evolved','publication','publication_state','merge_requested','merge_version_context','merge_queue','version_reference','version_comparison','integration_result','integration_requested','integration_decision'].includes(row.type)){
+            const offset=args.offset??0,length=args.length??12000;if(!Number.isSafeInteger(offset)||Number(offset)<0||!Number.isSafeInteger(length)||Number(length)<1||Number(length)>32000)fail(400,'invalid_evidence_range');
+            const raw=JSON.stringify(traceSource(this.store,id,args.source as string,access));return {record:{source:args.source,type:row.type,offset,total:raw.length,chunk:raw.slice(Number(offset),Number(offset)+Number(length))}};
+          }
+        }
+        return {evidence};
       }
       if(args.offset!==undefined||args.length!==undefined)fail(400,'evidence_source_required');
-      return {task:records.context(id),origin:this.store.get('SELECT source_kind,source_role,executor_role,conversation_id FROM task_origins WHERE task_id=?',id)??null};
+      return {task_id:id,task_ref:'task:'+id,task:records.context(id),origin:this.store.get('SELECT source_kind,source_role,executor_role,conversation_id FROM task_origins WHERE task_id=?',id)??null};
     }
     if(name==='create_task'){
       try{
@@ -230,9 +258,12 @@ export class TaskCommands {
       }
     }
     if(name==='manage_task'){
-      fields(args,['task_id','action','instruction']);if(!['instructions','retry','pause','cancel'].includes(String(args.action)))fail(400,'task_operation_forbidden');
+      fields(args,['task_id','action','instruction','base_ref','reason']);if(!['instructions','retry','pause','cancel','integrate'].includes(String(args.action)))fail(400,'task_operation_forbidden');
+      if(args.action!=='integrate'&&(args.base_ref!==undefined||args.reason!==undefined))fail(400,'unknown_field');
       if(args.action!=='instructions'&&args.instruction!==undefined)fail(400,'unknown_field');
-      return this.api(user,'POST',new URL('http://local/api/tasks/'+String(args.task_id)+'/'+args.action),args.action==='instructions'?{instruction:args.instruction}:{},caller)!;
+      try{return this.api(user,'POST',new URL('http://local/api/tasks/'+String(args.task_id)+'/'+args.action),args.action==='instructions'?{instruction:args.instruction}:args.action==='integrate'?{base_ref:args.base_ref,reason:args.reason}:{},caller)!;}
+      catch(error){if(args.action!=='integrate'||!(error instanceof HttpError)||!['invalid_integration_request','integration_task_running','integration_snapshot_unavailable','integration_pr_unavailable'].includes(error.code))throw error;
+        return {error:error.code,task_ref:'task:'+String(args.task_id),discovery:{tool:'read_managed_task',arguments:{task_id:args.task_id}},instruction:'Integration is optional and needs a recorded code candidate, an offered current_main base_ref and a reason. Inspect current facts and decide how to continue.'};} 
     }
     return fail(403,'task_tool_not_allowed');
   }

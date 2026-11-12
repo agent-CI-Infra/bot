@@ -1,3 +1,4 @@
+import {roleConfiguration} from '../roles/definition.js';
 import type { Store, Row } from '../storage/database.js';
 import { authorize, narrowActor, resolvePrincipalActor, type ActorContext } from '../identity/authorization.js';
 import { fail } from '../core/security.js';
@@ -8,7 +9,13 @@ export interface MemoryAccess { actor: ActorContext; role?: string; task_id?: st
 // Trace readers can still inspect non-knowledge work products of legacy tasks. Knowledge remains closed without an actor.
 export function taskTraceAccess(store: Store, task: Row): MemoryAccess {
   try { return taskMemoryAccess(store, task); }
-  catch (error) { if ((error as any).code !== 'memory_actor_unavailable') throw error; return { actor: undefined!, role: task.active_role || 'dev' }; }
+  catch (error) { if ((error as any).code !== 'memory_actor_unavailable') throw error; return { actor: undefined!, role: task.active_role || 'dev',task_id:task.id,run_id:task.trace_run_id??undefined }; }
+}
+/** The configured Task Manager reads every retained record of its own task. This is not project-wide access. */
+export function taskControllerReads(store:Store,taskId:string,access?:MemoryAccess):boolean {
+  if(!access?.role||access.task_id!==taskId)return false;
+  const task=store.get('SELECT repository_id FROM tasks WHERE id=?',taskId);
+  return !!task&&access.role===roleConfiguration(store,task.repository_id).controller.role;
 }
 export function taskMemoryAccess(store: Store, task: Row): MemoryAccess {
   const grant = store.get('SELECT * FROM task_authorizations WHERE task_id=? AND project_id=?', task.id, task.repository_id);

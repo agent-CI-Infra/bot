@@ -12,6 +12,13 @@ export interface StageDefinition {
   retry: { max_attempts: number };
   budget: { max_tool_calls?: number; max_wall_seconds?: number };
 }
+/** Tool documentation of the existing StageDefinition contract; validation/authority remains below. */
+export const stageDefinitionSchema={type:'object',additionalProperties:false,required:['stage_id','depends_on','delivery_types','role_constraints','required','completion','retry','budget'],properties:{
+ stage_id:{type:'string'},depends_on:{type:'array',items:{type:'string'}},delivery_types:{type:'array',items:{type:'string',enum:['code','artifact','no_changes']}},
+ role_constraints:{type:'object',additionalProperties:false,required:['kinds','capabilities','independent'],properties:{kinds:{type:'array',items:{type:'string',enum:['writer','observer']}},role_ids:{type:'array',items:{type:'string'}},capabilities:{type:'array',items:{type:'string',enum:capabilityNames}},independent:{type:'boolean'}}},
+ required:{type:'boolean'},completion:{type:'object',additionalProperties:false,required:['evidence_types','min_evidence','no_findings'],properties:{evidence_types:{type:'array',items:{type:'string',enum:['tool_observation','execution_evidence','role_result']}},min_evidence:{type:'integer'},no_findings:{type:'boolean'},tools:{type:'array',items:{type:'string',enum:['read_file','run_command','read_task_record','read_evidence','submit_delivery','finish']}}}},
+ retry:{type:'object',additionalProperties:false,required:['max_attempts'],properties:{max_attempts:{type:'integer'}}},budget:{type:'object',additionalProperties:false,properties:{max_tool_calls:{type:'integer'},max_wall_seconds:{type:'integer'}}}
+}};
 const evidenceTypes = ['tool_observation', 'execution_evidence', 'role_result'];
 const object = (value: any) => value && typeof value === 'object' && !Array.isArray(value);
 const keys = (value: any, allowed: string[]) => object(value) && Object.keys(value).every(k => allowed.includes(k));

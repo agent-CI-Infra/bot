@@ -413,3 +413,73 @@ test('a stopped stage row with no stop_reason still counts as an attempt', async
   assert.equal(dev().attempts, 1);
   assert.equal(dev().status, 'ready');
 });
+
+test('Manager receives current revisions after a rejected plan and can correct it in the same turn',async t=>{
+  let corrected=false,steps=0;
+  const f=await fixture(t,{handler:body=>{
+    steps++;const observations=body.messages.filter(m=>m.role==='tool').map(m=>{try{return JSON.parse(m.content);}catch{return {};}}),failure=observations.find(x=>x.error==='task_revision_changed');
+    if(!failure)return call('plan_task',{expected_revision:0});
+    assert.equal(failure.submitted.revision,0);assert.equal(failure.contract_ref,'contract:revision:'+failure.current.revision);assert.equal(typeof failure.current.plan_revision,'number');
+    if(!corrected){corrected=true;return call('plan_task',{expected_revision:failure.current.revision});}
+    return call('finish_coordination',{action:'continue',reason:'The corrected call succeeded; retain the original goal and choose the next work.'});
+  }});
+  await assert.rejects(runTeam(f.spec(),{prepare:async()=>{}}),{code:'manager_deferred'});
+  assert.equal(corrected,true);assert.equal(steps,3);assert.equal(f.records.get('t').contract.goal,'stages');
+  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager' AND status='fault'").n,0);
+});
+
+test('an overlong handoff returns existing limits without starting a role or aborting Manager',async t=>{
+ let observed=false;
+ const f=await fixture(t,{handler:body=>{const failure=body.messages.filter(m=>m.role==='tool').map(m=>{try{return JSON.parse(m.content);}catch{return {};}}).find(x=>x.error==='invalid_role_assignment');
+  if(!failure)return call('delegate_role',{role:'dev',purpose:'large'.repeat(501),refs:['task:t']});
+  observed=true;assert.equal(failure.limits.purpose_max_chars,2000);assert.equal(failure.received.purpose_chars,2505);assert.equal(failure.contract_ref,'contract:revision:2');
+  return call('finish_coordination',{action:'continue',reason:'Use a short purpose and retained contract refs for the next assignment.'});
+ }});
+ await assert.rejects(runTeam(f.spec(),{prepare:async()=>{}}),{code:'manager_deferred'});assert.equal(observed,true);assert.equal(f.s.get('SELECT count(*) n FROM role_assignments').n,0);
+});
+
+test('Manager routes version queries and reads all Dev/QA records of its task through real role tools',async t=>{
+ const {versionTools,versionTool,resolveVersion}=await import('../dist/tasks/versions.js'),{traceSnapshot}=await import('../dist/tasks/trace.js');let step=0;const seen=[];
+ const f=await fixture(t,{handler:body=>{const last=body.messages.at(-1);if(last?.role==='tool')seen.push(JSON.parse(last.content));
+  return [()=>call('read_version_context',{}),()=>call('read_task_record',{ref:checkpoint}),()=>call('read_task_record',{ref:'task_runs:'+qa.id+':context'}),()=>call('read_task_record',{ref:'model_requests:qa-source:request'}),()=>call('finish_coordination',{action:'continue',reason:'Read the offered version and all task records, no execution or acceptance.'})][step++]();
+ }});
+ const dev=beginRun(f.s,{id:'t'},'role',{role:'dev'});f.s.run("UPDATE task_runs SET role='dev' WHERE id=?",dev.id);
+ const checkpoint=traceEvent(f.s,'t','artifact_checkpoint',{tree_sha:tree('b'),marker:'dev-checkpoint'},dev.id);
+ const qa=beginRun(f.s,{id:'t'},'role',{role:'qa'});f.s.run("UPDATE task_runs SET role='qa',context_snapshot=? WHERE id=?",traceSnapshot({marker:'qa-context',captured:{ref:'project_memories:role-private:1',body:'captured-role-note'}}),qa.id);
+ f.s.run("INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,run_id,request_snapshot) VALUES('qa-source','t','r','probe','m','fixture','now',?,?)",qa.id,traceSnapshot({marker:'qa-model-input',api_key:'must-remain-redacted'}));
+ const workspace={task:{workspace_id:'probe'},call:async()=>({local_sha:tree('a'),tree_sha:tree('b')})};let routed=0;
+ await assert.rejects(runTeam({...f.spec(),tools:versionTools,execute:async(name,args)=>{routed++;return versionTool(f.s,f.spec().task,workspace,name,args,async()=>({defaultBranch:'main',permissions:{contents:'read'},ref:async()=>({object:{sha:tree('c')}})}));}},{prepare:async()=>{}}),{code:'manager_deferred'});
+ assert.equal(routed,1);assert.equal(resolveVersion(f.s,f.spec().task,seen[0].remote.current_main_ref).commit_sha,tree('c'));
+ assert.ok(seen[1].content.includes('dev-checkpoint'));assert.ok(seen[2].content.includes('qa-context'));assert.ok(seen[2].content.includes('captured-role-note'));assert.ok(seen[3].content.includes('qa-model-input'));assert.ok(!JSON.stringify(seen).includes('must-remain-redacted'));
+});
+
+test('Manager can hand an authorized parent task reference to Dev without copying records',async t=>{
+ const {attachChild}=await import('../dist/tasks/children.js');let delegated=false;
+ const f=await fixture(t,{handler:body=>{
+  const role=JSON.parse(body.messages[1].content).role_context?.role;
+  if(role==='dev'){if(body.messages.at(-1).role!=='tool')return call('read_managed_task',{task_id:'parent'});assert.ok(body.messages.at(-1).content.includes('parent goal'));return call('finish',{summary:'Read the handed-off parent task facts'});}
+  if(!delegated){delegated=true;return call('delegate_role',{role:'dev',purpose:'Read the parent goal from its durable task reference',refs:['task:parent']});}
+  const result=JSON.parse(body.messages.at(-1).content);assert.ok(result.result_ref);return call('finish_coordination',{action:'continue',reason:'Parent reference handoff completed'});
+ }});
+ f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('parent','r','development.issue','running','parent','{}')");
+ f.records.contract('parent',{goal:'parent goal',scope:['fixture'],criteria:['verified'],endpoint:'code'});attachChild(f.s,'parent','t');
+ await assert.rejects(runTeam(f.spec(),{prepare:async()=>{}}),{code:'manager_deferred'});
+ assert.equal(f.s.get("SELECT count(*) n FROM role_assignments WHERE task_id='t' AND status='completed'").n,1);
+});
+
+test('refused handoff refs are correctable observations and unrelated records stay task scoped',async t=>{
+ let step=0;const seen=[];
+ const f=await fixture(t,{handler:body=>{
+  const last=body.messages.at(-1);if(last?.role==='tool')seen.push(JSON.parse(last.content));
+  return [()=>call('read_task_record',{ref:'task:unrelated'}),()=>call('delegate_role',{role:'dev',purpose:'Inspect',refs:['task:missing']}),()=>call('delegate_role',{role:'dev',purpose:'Inspect',refs:['task:unrelated']}),()=>call('finish_coordination',{action:'continue',reason:'Refusals are facts; retain the task and correct the references.'})][step++]();
+ }});
+ f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('unrelated','r','development.issue','running','unrelated','{}')");f.records.contract('unrelated',{goal:'UNRELATED_PRIVATE_GOAL',scope:[],criteria:['test'],endpoint:'code'});
+ await assert.rejects(runTeam(f.spec(),{prepare:async()=>{}}),{code:'manager_deferred'});
+ assert.equal(seen[0].error,'task_record_not_found');assert.equal(seen[1].error,'invalid_task_reference');assert.equal(seen[2].error,'invalid_task_reference');assert.ok(!JSON.stringify(seen).includes('UNRELATED_PRIVATE_GOAL'));
+ assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager' AND status='fault'").n,0);assert.equal(f.s.get('SELECT count(*) n FROM role_assignments').n,0);
+});
+test('non-array parallel assignments return validation facts without aborting Manager',async t=>{
+ let step=0;const f=await fixture(t,{handler:body=>{if(step++===0)return call('delegate_roles',{assignments:'invalid'});assert.equal(JSON.parse(body.messages.at(-1).content).error,'parallel_observers_required');return call('finish_coordination',{action:'continue',reason:'Correct parallel assignment format'});}});
+ await assert.rejects(runTeam(f.spec(),{prepare:async()=>{},withRole:async()=>assert.fail('no role should start')}),{code:'manager_deferred'});
+ assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager' AND status='fault'").n,0);
+});

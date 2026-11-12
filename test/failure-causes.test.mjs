@@ -179,7 +179,7 @@ test('a needs_replan retry starts over only while nothing was written to GitHub'
     try{assert.equal((await h.admin('/api/tasks/'+h.taskId+'/retry','POST',{})).status,201);return h.store.get('SELECT phase,attempt,status FROM tasks WHERE id=?',h.taskId);}
     finally{release();await Promise.all(h.engine.active.values());h.engine.run=run;h.store.run("DELETE FROM tasks WHERE id='busy'");}
   };
-  h.store.run("UPDATE tasks SET status='needs_replan',phase='publish',error_code='base_branch_changed',next_run_at=9999999999999 WHERE id=?",h.taskId);
+  h.store.run("UPDATE tasks SET status='needs_replan',phase='publish',error_code='development_not_approved',next_run_at=9999999999999 WHERE id=?",h.taskId);
   assert.deepEqual({...await retry()},{phase:'prepare',attempt:2,status:'queued'});
   h.store.run("UPDATE tasks SET status='needs_replan',phase='publish',error_code='development_not_approved',next_run_at=9999999999999 WHERE id=?",h.taskId);
   h.store.run("INSERT INTO github_effects VALUES('pushed',?,'branch','{}','sent','{}','marker')",h.taskId);

@@ -1,3 +1,4 @@
+import {traceClean} from './trace.js';
 import {childTaskContext} from './children.js';
 import {captureTaskConfiguration} from './configuration.js';
 import {followupDecision,followupTarget,recordFollowupRelation,coordinateFollowup,completedFollowupTarget} from './followups.js';
@@ -5,7 +6,7 @@ import {setTaskPriority,taskRelations} from './priority.js';
 import { reconcileAssignments, assertStageAcceptance } from '../roles/schedule.js';
 import {requestCoordination,validCoordination,coordinationContext,coordinationVersion,assertCoordinationCurrent,acknowledgeCoordination,type CoordinationRequest} from './coordination.js';
 import {recordScopeDifference,scopeDifferences} from './scope.js';
-import { visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
+import { taskControllerReads, visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
 import { stop } from '../agent/common.js';
 import type { Store } from '../storage/database.js';
 import { randomId } from '../core/security.js';
@@ -66,9 +67,24 @@ export class TaskRecords {
    * of KB after a long review) and would sit in every model request of the next attempt. Tools read the bodies on demand. */
   context(id: string) {
     const record=this.get(id),candidate=record.candidate;
-    return {...record,candidate:candidate?{id:candidate.id,revision:candidate.revision,created_at:candidate.created_at,claims:candidate.claims,
+    return {...record,facts:this.facts(id),candidate:candidate?{id:candidate.id,revision:candidate.revision,created_at:candidate.created_at,claims:candidate.claims,
       artifacts:candidate.artifacts.map(({kind,reference,version})=>({kind,reference,version})),
       evidence:candidate.evidence.map(({source,version,verified})=>({source,version,verified}))}:null};
+  }
+  /** Bounded factual navigation, with original evidence retained in existing records. No diagnosis or next-step gate. */
+  facts(id:string){
+    const task=this.store.get('SELECT status,phase,attempt,result FROM tasks WHERE id=?',id)!,record=this.get(id),candidate=record.candidate;
+    const recent=(types:string[],limit:number)=>this.store.all(`SELECT id,type,data,created_at FROM task_history WHERE task_id=? AND type IN (SELECT value FROM json_each(?)) ORDER BY id DESC LIMIT ?`,id,JSON.stringify(types),limit);
+    return {publication_discovery:{tool:'read_publication_context',arguments:{}},contract_ref:'contract:revision:'+record.revision,revision:record.revision,attempt:task.attempt,
+      candidate:candidate?{id:candidate.id,revision:candidate.revision,artifacts:candidate.artifacts.slice(0,8).map(({kind,reference,version})=>({kind,reference,version})),evidence:candidate.evidence.slice(-8).map(({source,version,verified})=>({source,version,verified})),artifact_count:candidate.artifacts.length,evidence_count:candidate.evidence.length}:null,
+      acceptance:record.acceptance?{candidate_id:record.acceptance.candidate_id,revision:record.acceptance.revision,outcome:record.acceptance.outcome,matches_current_candidate:record.acceptance.candidate_id===candidate?.id&&record.acceptance.revision===record.revision}:null,
+      workspace_checkpoint:(()=>{const row=this.store.get("SELECT id,data,created_at FROM task_history WHERE task_id=? AND type='artifact_checkpoint' ORDER BY id DESC LIMIT 1",id);if(!row)return null;const d=JSON.parse(row.data);return {ref:'task_history:'+row.id,tree_sha:d.tree_sha,base_sha:d.base_sha,revision:d.revision,created_at:row.created_at};})(),
+      publication:(()=>{const owned=this.store.get('SELECT number,sha,branch FROM bot_pull_requests WHERE source_task_id=? ORDER BY number DESC LIMIT 1',id);return owned?{pr_number:owned.number,head_sha:owned.sha,branch:owned.branch,source:'recorded_publication',local_availability:'unknown'}:null;})(),
+      merge_request:this.store.hasTable('task_merge_requests')?this.store.get('SELECT state,expected_sha,revision,error FROM task_merge_requests WHERE task_id=?',id)??null:null,
+      recovery_events:recent(['manager_recovery_queued'],1).map(r=>{const d=JSON.parse(r.data);return {ref:'task_history:'+r.id,created_at:r.created_at,code:d.code,previous_status:d.previous_status};}),
+      recent_failures:recent(['retry_failure','role_assignment_fault','acceptance_fault'],3).map(r=>{const d=JSON.parse(r.data);return {ref:'task_history:'+r.id,type:r.type,created_at:r.created_at,code:d.code,group:d.group,count:d.count,attempt:d.attempt,phase:d.phase,source_ref:d.source_ref};}),
+      recent_verifications:recent(['acceptance_evaluated','merge_checks','stage_result'],5).map(r=>{const d=JSON.parse(r.data);return {ref:'task_history:'+r.id,type:r.type,created_at:r.created_at,candidate_id:d.candidate_id??d.candidate_ref?.id,revision:d.revision,version:d.sha??d.source_version,outcome:d.verdict?.outcome,failed:d.failed,pending:d.pending};}),
+      history:{tool:'read_task_history',arguments:{offset:0,limit:10},instruction:'Page older attempts with next_offset; read originals by offered reference. Historical observations are bound to their recorded versions, not an approval of the current workspace.'}};
   }
   project(id: string) { const row=this.store.get('SELECT * FROM project_context WHERE repository_id=?',id);return row?{revision:row.revision,facts:JSON.parse(row.facts),updated_at:row.updated_at}:null; }
   setProject(id: string, facts: {source:string;fact:string}[], expectedRevision: number) {
@@ -104,12 +120,12 @@ export class TaskRecords {
     if(name==='record_scope_difference')return recordScopeDifference(this.store,id,args);
     if(name==='read_task_history'){
       const offset=args?.offset??0,limit=args?.limit??10;
-      if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>20)return {error:'invalid_history_page'};
+      if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>20)return {error:'invalid_history_page',received:{offset,limit},range:{offset_min:0,limit_min:1,limit_max:20},discovery:{tool:'read_task_history',arguments:{offset:0,limit:10}}};
       const clip=(value:any):any=>typeof value==='string'&&value.length>12000?value.slice(0,12000)+' [truncated; original retained in task_history]':Array.isArray(value)?value.map(clip):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,clip(v)])):value;
-      const filter="task_id=? AND type IN ('long_execution_report','long_execution_decision','long_execution_notification_fault','child_task_created','parent_task_linked','children_waiting','children_resumed','retry_failure','retry_report','retry_decision','retry_resolved','retry_evidence','retry_notification_fault','priority_changed','priority_assessed','priority_defaulted','queue_entered','queue_claimed','followup_plan','followup_plan_deferred','followup_linked','followup_coordination','task_related','coordination_requested','coordination_notice','coordination_acknowledged','coordination_result','coordination_fault','scope_difference','checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated','role_assignment_fault','role_result_normalized','stage_plan','stage_result')";
+      const filter="task_id=? AND type IN ('long_execution_report','long_execution_decision','long_execution_notification_fault','child_task_created','parent_task_linked','children_waiting','children_resumed','retry_failure','retry_report','retry_decision','retry_resolved','retry_evidence','retry_notification_fault','priority_changed','priority_assessed','priority_defaulted','queue_entered','queue_claimed','followup_plan','followup_plan_deferred','followup_linked','followup_coordination','task_related','coordination_requested','coordination_notice','coordination_acknowledged','coordination_result','coordination_fault','scope_difference','checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated','role_assignment_fault','role_result_normalized','stage_plan','stage_result','acceptance_evaluated','repository_evolved','publication','publication_state','merge_requested','merge_version_context','merge_queue','version_reference','integration_result','integration_requested','integration_decision','supplemental_instruction','manager_recovery_queued')";
       const total=Number(this.store.get('SELECT count(*) n FROM task_history WHERE '+filter,id)!.n);
       const rows=this.store.all('SELECT id,type,data,created_at FROM task_history WHERE '+filter+' ORDER BY id DESC LIMIT ? OFFSET ?',id,limit,offset).reverse();
-      return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(visibleMemorySnapshot(this.store,this.store.get('SELECT repository_id FROM tasks WHERE id=?',id)!.repository_id,JSON.parse(row.data),access))}))};
+      return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(taskControllerReads(this.store,id,access)?traceClean(JSON.parse(row.data)):visibleMemorySnapshot(this.store,this.store.get('SELECT repository_id FROM tasks WHERE id=?',id)!.repository_id,JSON.parse(row.data),access))}))};
     }
     if(name==='record_progress'){if(!Array.isArray(args?.completed)||args.completed.some((x:unknown)=>typeof x!=='string')||typeof args?.next_action!=='string')return {error:'invalid_task_progress'};this.progress(id,args.completed,args.next_action);return {ok:true};}
     return {error:'tool_not_allowed'};
