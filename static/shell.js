@@ -276,12 +276,14 @@ function restoreConsolePosition() {
 function initConsoleShell() {
   const sidebar = $('console-sidebar'), kicker = element('p', '工作区', 'console-nav-label'), scope = element('label', '切换项目', 'console-project-picker'), picker = document.createElement('select');
   picker.id = 'console-project'; picker.setAttribute('aria-label', '切换项目'); picker.addEventListener('change', () => { consoleProject = picker.value || null; location.hash = picker.value ? `#/projects/${picker.value}/overview` : '#/projects'; }); scope.append(picker);
-  const settingsLabel = element('p', '个人与项目', 'console-nav-label');
-  $('tabs').insertBefore(settingsLabel, $('tabs').querySelector('[data-tab=preferences]'));
-  sidebar.append(scope, kicker, $('tabs'));
-  const inbox = consoleLink('#/inbox', '待处理'); inbox.id = 'console-inbox-link'; sidebar.append(inbox);
-  const secondary = element('div'); secondary.id = 'console-secondary-nav'; sidebar.append(secondary);
-  const more = consoleLink('#/more', '更多功能'); more.classList.add('console-more-link'); sidebar.append(more);
+  const tabs = $('tabs'), primary = element('div', '', 'console-primary-nav'), settings = element('div', '', 'console-settings-nav');
+  settings.setAttribute('role', 'group'); settings.setAttribute('aria-label', '设置与管理');
+  settings.append(tabs.querySelector('[data-tab=preferences]'), tabs.querySelector('[data-tab=settings]'));
+  primary.append(kicker, ...tabs.children);
+  const inbox = consoleLink('#/inbox', '待处理'); inbox.id = 'console-inbox-link'; primary.append(inbox);
+  const secondary = element('div'); secondary.id = 'console-secondary-nav'; primary.append(secondary);
+  // Keep the original tabs and their click handling, but let only the work navigation scroll above the settings.
+  tabs.replaceChildren(primary, settings); sidebar.append(scope, tabs);
   const locationBox = element('div', '', 'console-location'); locationBox.id = 'console-location'; locationBox.hidden = true;
   const area = element('span', '', 'eyebrow'), context = element('span'); area.id = 'console-area'; context.id = 'console-context';
   const permission = element('span', '', 'console-permission'); permission.id = 'console-permission';

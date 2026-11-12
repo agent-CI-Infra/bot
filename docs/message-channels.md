@@ -57,6 +57,7 @@
 | `im:chat:read` | 查看群信息，订阅群解散事件 `im.chat.disbanded_v1` |
 | `im:chat.members:bot_access` | 接收机器人进群、移出事件 |
 | `im:chat.members:read` | 判断当前 bot 是否在群中并完整分页核验维护人及来源成员；保存群聊助手绑定时必需，缺少时保存返回 `channel_audience_permission_required` |
+| `contact:user.base:readonly` | 读取已绑定用户的飞书姓名；需发布生效，通讯录可见范围须包含本人 |
 | `tenant:tenant:readonly` | 企业自建应用自动获取安装 tenant_key；保存连接前需开通并发布生效 |
 
 这两项群消息权限用途不同：根据[接收消息事件](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)，`im:message.group_msg` 只推送用户消息，`include_bot:read` 还推送其他机器人消息，且当前仅支持企业自建应用。企业自建连接同时申请两项，因为[获取会话历史消息](https://open.feishu.cn/document/server-docs/im-v1/message/list)仍明确要求 `im:message.group_msg` 与消息读取权限；新增的事件权限不替代历史接口权限。机器人消息安静进入本地记录，后续用户 @ 时可作为上下文，消息来源仍保留为 bot/app；机器人消息本身不触发模型或业务操作。当前机器人的群回复通过本地发送记录保留，不能依赖接收事件回传。
@@ -120,6 +121,10 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 `身份` / `/identity` 查询当前关联状态；`解绑` / `/unbind` 撤销原身份服务中的映射；`重新认证` / `/reauth` 重新走双端证明。个人绑定页面提供步骤说明、待确认身份与指令、刷新状态和解除飞书绑定；撤销后提示重新认证。验证失败使用明确错误码，不打印凭据、OAuth code、challenge 或个人聊天正文到日志和审计。
 
 ## 管理会话与结果
+
+飞书会话、私信列表、群助手设置和绑定概览优先显示姓名或群名，并标明机器人及其安装企业；组织应用另显示应用所属平台组织。安装企业不代表私聊操作者或跨企业群成员所属企业。会话 ID 放在可展开的标识详情中，群选择器保留 ID 以区分同名群；会话搜索支持姓名、群名、企业、应用所属组织、机器人和会话 ID。
+
+页面先展示本地名称，再异步补全缺失名称；群名通过 `POST /api/channels/chats/:id/name` 从飞书[获取群信息](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/chat/get)读取，使用已有 `im:chat:read` 权限。仅有权查看该群或在群助手设置中选择该群的人可刷新，异步调用后重新检查授权、群状态及连接版本。私信姓名只取本人在当前连接下的有效绑定，可用原有刷新姓名接口更新。名称只用于展示，不改变会话、配置或权限版本；读取失败保留旧名称和原有功能，可手动刷新。权限不足时管理员应导入完整权限 JSON、发布生效，并核对通讯录可见范围。外部企业用户暂不可通过本安装企业的通讯录令牌读取姓名时，明确提示姓名暂未获取。
 
 私聊和群聊都不需要先选项目，也没有命令写法（#312）。`/project …`（含 `/query`、`/command`、`/link`、`/destination`）和 `/chat` 前缀都不再触发特殊流程，原样作为自然语言交给助手：私聊交给管理助手，按本人当前权限查询和管理；已绑定的群交给群聊助手；未绑定的群在被 @ 时只回复如何绑定，不执行任何管理请求。只有绑定相关的 `绑定`、`确认绑定`、`解绑`、`身份`、`重新认证` 及其英文写法仍是固定指令。管理助手的查询和命令走原管理模型与相同工具，不在飞书 handler 内实现 SQL、Manager 配置或 GitHub 写入。
 

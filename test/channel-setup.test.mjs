@@ -436,7 +436,7 @@ test('store apps bootstrap without a bot ID, then persist discovery after a veri
 
 test('connection probes compare tenant grants with the one required scope list and stay usable when the grant check fails', async t => {
   const { admin, id, wire, h } = await channelFixture(t);
-  const absent = 'im:chat:read', pending = 'im:message:readonly', userOnly = 'im:message.group_msg';
+  const absent = 'contact:user.base:readonly', pending = 'im:message:readonly', userOnly = 'im:message.group_msg';
   wire.state.scopes = [...FEISHU_SCOPES.filter(s => ![absent, pending, userOnly].includes(s.scope)).map(s => ({ scope_name: s.scope, grant_status: 1, scope_type: 'tenant' })),
     { scope_name: pending, grant_status: 2, scope_type: 'tenant' }, { scope_name: userOnly, grant_status: 1, scope_type: 'user' }];
   const checked = await probe(admin, id);

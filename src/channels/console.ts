@@ -1,9 +1,10 @@
 import type { ActorContext } from '../identity/authorization.js';
-import { authorize } from '../identity/authorization.js';
+import { assertCurrent, authorize } from '../identity/authorization.js';
 import { fail, HttpError, type Json } from '../core/security.js';
 import { traceClean } from '../tasks/trace.js';
 import type { Row } from '../storage/database.js';
 import type { ChannelService } from './service.js';
+import { chatProfile } from './profiles.js';
 
 const pageOffset = (value: unknown): number => {
   const offset = Number(value ?? 0);
@@ -16,6 +17,22 @@ const denied = (error: unknown): boolean => error instanceof HttpError && error.
 /** Read-only console projections. Reading a project never grants access to its group's conversation. */
 export class ChannelConsole {
   constructor(readonly service: ChannelService) {}
+  async refreshName(actor: ActorContext, id: string): Promise<Json> {
+    const chat = this.service.employees.chat(id);
+    if (chat.chat_type !== 'group') return fail(400, 'channel_employee_group_required');
+    const guard = () => {
+      assertCurrent(actor);
+      const current = this.service.employees.chat(id);
+      if (current.connector_id !== chat.connector_id || current.connector.revision !== chat.connector.revision || current.revision !== chat.revision)
+        fail(409, 'channel_configuration_changed');
+      // A group may be selectable before its first assistant binding; neither case grants access to other groups.
+      if (!this.service.employees.selectableChats(actor).some(c => c.id === id)) this.service.authorizeHistory(actor, id);
+    };
+    guard();
+    const name = await this.service.adapter(chat.connector, guard).chatName(chat.chat_id);
+    this.service.store.transaction(() => { guard(); this.service.store.run('UPDATE channel_chats SET display_name=? WHERE id=?', name, id); });
+    return { id, ...chatProfile(this.service.store, id) };
+  }
   private chat(actor: ActorContext, id: string): Row {
     const chat = this.service.store.get('SELECT * FROM channel_chats WHERE id=?', id);
     if (!chat) return fail(404, 'channel_chat_not_found');
@@ -31,7 +48,7 @@ export class ChannelConsole {
     const chats = store.all('SELECT h.*,c.app_name,c.tenant_name,c.enabled AS connection_enabled FROM channel_chats h LEFT JOIN channel_connectors c ON c.id=h.connector_id ORDER BY h.last_received_at DESC,h.id')
       .filter(chat => { try { this.chat(actor, chat.id); return true; } catch (error) { if (denied(error)) return false; throw error; } });
     return { conversations: chats.slice(offset, offset + 50).map(chat => ({ id: chat.id, chat_id: chat.chat_id, type: chat.chat_type,
-      app_name: chat.app_name || '飞书机器人', tenant_name: chat.tenant_name || '', state: chat.state, connection_enabled: !!chat.connection_enabled,
+      ...chatProfile(store, chat.id), state: chat.state, connection_enabled: !!chat.connection_enabled,
       last_received_at: chat.last_received_at, binding: chat.chat_type === 'group' ? this.service.serviceBindings.get(chat.id)?.enabled === 1 : null })),
       total: chats.length, next_offset: offset + 50 < chats.length ? offset + 50 : null,
       counts: { private: chats.filter(c => c.chat_type === 'p2p').length, group: chats.filter(c => c.chat_type === 'group').length } };
@@ -65,7 +82,7 @@ export class ChannelConsole {
       return { ...turn, messages: progress, ...(rawState ? { state: rawState, state_label: turn.state } : {}), delivery: delivery ? { state: delivery.state, error: delivery.last_error } : null };
     });
     return { ...messages, conversation,
-      chat: { id, chat_id: chat.chat_id, type: chat.chat_type }, read_at: Date.now() };
+      chat: { id, chat_id: chat.chat_id, type: chat.chat_type, ...chatProfile(this.service.store, id) }, read_at: Date.now() };
   }
   /** Event metadata is paginated independently of message history, so a long turn cannot silently truncate. */
   events(actor: ActorContext, chatId: string, turnId: string, after: number): Json {

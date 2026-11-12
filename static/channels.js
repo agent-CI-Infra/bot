@@ -1,3 +1,35 @@
+const channelNameRequests = new Map();
+function channelNameRequest(route) {
+  const key = renderVersion + ':' + route;
+  if (!channelNameRequests.has(key)) channelNameRequests.set(key, api(route, 'POST', {}).finally(() => channelNameRequests.delete(key)));
+  return channelNameRequests.get(key);
+}
+const channelChatName = chat => chat.display_name || (chat.type === 'p2p' || chat.binding_id !== undefined ? '飞书姓名暂未获取' : '群名称暂未获取');
+const channelChatContext = chat => `机器人：${chat.app_name || '机器人名称暂未获取'}；所属企业：${chat.tenant_name || '企业名称暂未获取'}${chat.organization_name ? '；应用所属组织：' + chat.organization_name : ''}`;
+function channelProfileDetails(chat, changed = () => {}) {
+  const box = element('div'), context = note(channelChatContext(chat)), status = note(''), request = renderVersion;
+  status.setAttribute('role', 'status'); box.append(context);
+  if (chat.chat_id) { const ids = element('details'); ids.append(element('summary', '查看会话标识'), note(chat.chat_id)); box.append(ids); }
+  if (chat.can_refresh_name) {
+    const refresh = button(chat.binding_id ? '刷新飞书姓名' : '刷新群名称', async () => {
+      refresh.disabled = true; status.textContent = '正在读取名称…';
+      const route = chat.binding_id ? '/api/channels/bindings/' + encodeURIComponent(chat.binding_id) + '/name' : '/api/channels/chats/' + encodeURIComponent(chat.id) + '/name';
+      try {
+        // Several panels can show the same chat. Share the in-flight lookup, without keeping a cross-account cache.
+        const result = await channelNameRequest(route); if (request !== renderVersion) return;
+        Object.assign(chat, result, { id: chat.id }); context.textContent = channelChatContext(chat); changed(); status.textContent = '名称已更新。';
+      } catch (err) {
+        if (request !== renderVersion) return;
+        const changedAccess = [401, 404, 409].includes(err.status) || /authorization_changed|channel_history_forbidden|capability_forbidden|source_inactive|external_binding_required/.test(err.message);
+        status.textContent = changedAccess ? '会话或权限已变化，请刷新页面。' : `${chat.display_name ? '暂时无法更新，保留上次读取的名称。' : '暂时无法读取名称。'}请管理员检查飞书应用权限、发布状态和通讯录可见范围后重试。`;
+      } finally { refresh.disabled = false; }
+    }, 'quiet');
+    box.append(refresh, status);
+    if (!chat.display_name) setTimeout(() => { if (request === renderVersion && !chat.display_name) refresh.click(); }, 0);
+  }
+  return box;
+}
+
 // Personal identity proof belongs with account permissions; app credentials live in global settings.
 async function feishuIdentityCard() {
   const data = await api('/api/channels/bindings'), section = card('飞书身份绑定'), request = renderVersion, nameLookups = [];
@@ -138,7 +170,7 @@ async function feishuIdentityCard() {
     const title = element('strong'), renderName = () => { title.textContent = `${name() || me.username + ' 的飞书账号'} · ${state}`; };
     renderName();
     row.setAttribute('aria-label', '我的飞书账号');
-    row.append(title, note(`机器人：${b.app_name || '机器人名称暂未获取'}；所属企业：${b.tenant_name || '企业名称暂未获取'}`),
+    row.append(title, note(channelChatContext(b)),
       note(`关联平台账户：${me.username}`));
     const nameStatus = note(name() ? '' : '飞书姓名暂不可读取，当前显示关联的平台账户。'); nameStatus.setAttribute('role', 'status');
     row.append(nameStatus);
@@ -149,13 +181,13 @@ async function feishuIdentityCard() {
         if (refresh.disabled) return;
         refresh.disabled = true; nameStatus.textContent = '正在读取飞书姓名…';
         try {
-          const result = await api('/api/channels/bindings/' + encodeURIComponent(b.id) + '/name', 'POST', {});
+          const result = await channelNameRequest('/api/channels/bindings/' + encodeURIComponent(b.id) + '/name');
           if (request !== renderVersion) return;
           b.display_name = result.display_name; renderName(); nameStatus.textContent = '飞书姓名已更新。';
         } catch (err) {
           if (request !== renderVersion) return;
           const changed = ['authorization_changed', 'external_binding_required', 'identity_not_found', 'channel_connector_inactive', 'channel_configuration_changed', 'login_required'].some(code => err.message.includes(code));
-          nameStatus.textContent = changed ? '绑定或机器人连接状态已变化，请刷新飞书绑定状态。' : name() ? '暂时无法更新飞书姓名，保留上次读取的姓名。' : '飞书暂未提供姓名，当前显示关联的平台账户。';
+          nameStatus.textContent = changed ? '绑定或机器人连接状态已变化，请刷新飞书绑定状态。' : name() ? '暂时无法更新飞书姓名，保留上次读取的姓名。' : '飞书暂未提供姓名。请管理员开通“获取用户基本信息”权限并发布，确认通讯录可见范围包含本人后重试；当前显示关联的平台账户。';
         } finally { refresh.disabled = false; }
       };
       const refresh = button('刷新飞书姓名', refreshName, 'quiet'); row.append(refresh);
@@ -273,8 +305,23 @@ async function channelServiceBindingSettings() {
     note('之后只有负责人、项目范围所属组织的管理员和超级管理员可以修改或停用，组织管理员和超级管理员不在群里也可以修改，并可以把负责人转交给对全部范围有配置权限的人。使用组织飞书应用的群只能选择该组织的仓库。'));
   // Each chat's app decides which organization its scope may use (null: any).
   const chatOrganization = new Map([...data.chats.map(c => [c.id, c.organization || null]), ...data.bindings.map(b => [b.chat_id, b.chat.organization || null])]);
-  const chats = new Map([...data.chats.map(c => [c.id, `${c.app_name || c.app_id || '已配置群'} · ${c.chat_id}`]), ...data.bindings.filter(b => !data.chats.some(c => c.id === b.chat_id)).map(b => [b.chat_id, `${b.chat.app_name || '已配置群'} · ${b.chat.chat_id}`])]);
+  const profiles = new Map([...data.chats.map(c => [c.id, c]), ...data.bindings.map(b => [b.chat_id, b.chat])]);
+  const chatLabel = c => `${channelChatName(c)} · ${c.tenant_name || '企业名称暂未获取'} · ${c.app_name || '机器人名称暂未获取'} · ${c.chat_id}`;
+  const chats = new Map([...profiles].map(([id, c]) => [id, chatLabel(c)]));
   const chat = channelSelect(form, '助手所在群', 'binding_chat', [...chats]);
+  const updateOption = selected => { const option = [...chat.options].find(o => o.value === selected.id); if (option) option.textContent = chatLabel(selected); };
+  const request = renderVersion;
+  for (const selected of profiles.values()) if (!selected.display_name && selected.can_refresh_name) {
+    void channelNameRequest('/api/channels/chats/' + encodeURIComponent(selected.id) + '/name').then(result => {
+      if (request === renderVersion) { Object.assign(selected, result); updateOption(selected); }
+    }).catch(() => {}); // The selected group's refresh control shows lookup failures without blocking other groups.
+  }
+  const profile = element('div'); form.append(profile);
+  const showProfile = () => {
+    const selected = profiles.get(chat.value); profile.replaceChildren();
+    if (selected) profile.append(channelProfileDetails(selected, () => updateOption(selected)));
+  };
+  chat.addEventListener('change', showProfile); showProfile();
   const role = channelSelect(form, '服务角色', 'binding_role', data.service_roles.map(r => [r.id, r.name + (r.recommended ? '（推荐）' : '')]));
   const roleNote = note(''); form.append(roleNote);
   const scope = element('fieldset', '', 'role-choices'); scope.append(element('legend', '项目范围'));
@@ -342,7 +389,9 @@ async function channelServiceBindingSettings() {
   for (const b of data.bindings) {
     const row = element('article', '', 'channel-binding'), scopeText = b.scope.organization ? '整个组织 ' + b.scope.organization.name : b.scope.repositories.map(r => r.full_name).join('、');
     row.setAttribute('aria-label', '群聊助手绑定');
-    row.append(element('strong', `${bindingStates[b.state] || b.state} · ${b.service_role.name || '服务角色已删除'}`), note(`群：${b.chat.app_name ? b.chat.app_name + ' · ' : ''}${b.chat.chat_id}`),
+    const groupName = element('strong', channelChatName(b.chat));
+    row.append(groupName, channelProfileDetails(b.chat, () => { groupName.textContent = channelChatName(b.chat); }),
+      note(`${bindingStates[b.state] || b.state} · ${b.service_role.name || '服务角色已删除'}`),
       note('项目范围：' + scopeText), note('发言范围：' + (participationOptions.find(([id]) => id === b.participation)?.[1] || b.participation)),
       note(`负责人：${b.owner || '账户已删除'}${b.configured_by && b.configured_by !== b.owner ? '；最近修改：' + b.configured_by : ''}`),
       ...(b.paused.length ? [note('暂停的仓库（配置人权限已变化）：' + b.paused.join('、'))] : []), ...(b.migrated ? [note('由旧群员工自动迁移为仓库问答助手。')] : []),
@@ -393,7 +442,8 @@ async function channelPersonalChats() {
   if (!data.personal_chats.length) personal.append(note('绑定后先在飞书私聊发一条普通消息，再刷新此页。'));
   for (const chat of data.personal_chats) {
     const row = element('article', '', 'channel-binding'), target = element('div');
-    row.append(element('strong', '私信 ' + chat.chat_id), button('查看私信连续会话', () => channelConversation(chat.id, target).catch(error), 'quiet'),
+    const name = element('strong', '私信 · ' + channelChatName(chat));
+    row.append(name, channelProfileDetails(chat, () => { name.textContent = '私信 · ' + channelChatName(chat); }), button('查看私信连续会话', () => channelConversation(chat.id, target).catch(error), 'quiet'),
       button('查询私信本地记录', () => channelEmployeeHistory({ chat_id: chat.id }, target).catch(error), 'quiet'));
     row.append(await channelSchedules(chat.id), target); personal.append(row);
   }

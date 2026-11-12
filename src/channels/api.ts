@@ -14,6 +14,8 @@ export class ChannelApi {
     const store = this.service.store, path = url.pathname;
     assertCurrent(actor);
     const console = new ChannelConsole(this.service);
+    const chatName = /^\/api\/channels\/chats\/([a-f0-9]{48})\/name$/.exec(path);
+    if (chatName && method === 'POST') { fields(input, []); return console.refreshName(actor, chatName[1]!); }
     if (path === '/api/channels/conversations' && method === 'GET') return console.list(actor, Number(url.searchParams.get('offset') ?? 0));
     const consoleChat = /^\/api\/channels\/chats\/([a-f0-9]{48})\/(timeline|tasks|turns\/([a-f0-9]{48}))$/.exec(path);
     if (consoleChat && method === 'GET') {
@@ -176,7 +178,7 @@ export class ChannelApi {
     const profile = /^\/api\/channels\/bindings\/([a-f0-9]{48})\/name$/.exec(path);
     if (profile && method === 'POST') {
       fields(input, []);
-      const identity = store.get("SELECT * FROM external_identities WHERE id=? AND principal_id=? AND provider='feishu' AND host='open.feishu.cn' AND status='active'", profile[1]!, actor.principal_id);
+      const identity = store.get("SELECT * FROM external_identities WHERE id=? AND principal_id=? AND provider='feishu' AND host='open.feishu.cn' AND status='active' AND (expires_at IS NULL OR expires_at>?)", profile[1]!, actor.principal_id, Date.now());
       if (!identity) return fail(404, 'identity_not_found');
       const c = store.get("SELECT * FROM channel_connectors WHERE id||':'||app_id=? AND provider='feishu' AND enabled=1", identity.connector);
       if (!c) return fail(403, 'channel_connector_inactive');
@@ -186,8 +188,8 @@ export class ChannelApi {
         assertCurrent(actor);
         const current = this.service.connector(c.id);
         if (current.revision !== c.revision) fail(409, 'channel_configuration_changed');
-        if (!store.get("SELECT 1 FROM external_identities WHERE id=? AND principal_id=? AND provider='feishu' AND host=? AND status='active' AND connector=? AND external_tenant=? AND external_actor=?",
-          identity.id, actor.principal_id, identity.host, identity.connector, identity.external_tenant, identity.external_actor)) fail(403, 'external_binding_required');
+        if (!store.get("SELECT 1 FROM external_identities WHERE id=? AND principal_id=? AND provider='feishu' AND host=? AND status='active' AND connector=? AND external_tenant=? AND external_actor=? AND (expires_at IS NULL OR expires_at>?)",
+          identity.id, actor.principal_id, identity.host, identity.connector, identity.external_tenant, identity.external_actor, Date.now())) fail(403, 'external_binding_required');
       };
       let name: string;
       try { name = await this.service.adapter(c, guard).userName(identity.external_actor); }
@@ -200,10 +202,11 @@ export class ChannelApi {
     }
     if (path === '/api/channels/bindings' && method === 'GET') return {
       bindings: store.all(`SELECT e.id,e.provider,e.connector,e.external_tenant,e.external_actor,e.display_name,e.status,e.verified_at,e.expires_at,
-        c.app_name,c.tenant_name,c.enabled AS connection_enabled,
-        CASE WHEN e.status='active' AND e.host='open.feishu.cn' AND c.enabled=1 AND e.external_tenant=c.installation_tenant THEN 1 ELSE 0 END AS can_read_name
+        c.app_name,c.tenant_name,c.owner_tenant,c.enabled AS connection_enabled,
+        CASE WHEN e.status='active' AND (e.expires_at IS NULL OR e.expires_at>?) AND e.host='open.feishu.cn' AND c.enabled=1 AND e.external_tenant=c.installation_tenant THEN 1 ELSE 0 END AS can_read_name
         FROM external_identities e LEFT JOIN channel_connectors c ON c.id||':'||c.app_id=e.connector
-        WHERE e.principal_id=? AND e.provider='feishu'`, actor.principal_id),
+        WHERE e.principal_id=? AND e.provider='feishu'`, Date.now(), actor.principal_id).map(({ owner_tenant, ...binding }) => ({ ...binding,
+          organization_name: owner_tenant ? tenantName(store, owner_tenant) : '' })),
       pending: this.service.bindings.pending(actor.principal_id),
       // Public identifiers let users bind before receiving any project grants; an organization's app only to its members (#424).
       applications: store.all('SELECT id,app_id,app_name,tenant_name,owner_tenant FROM channel_connectors WHERE enabled=1')
