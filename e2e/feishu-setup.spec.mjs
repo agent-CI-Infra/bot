@@ -303,6 +303,7 @@ test('ordinary users see connected bot names and private-chat links, confirm a p
     expect((await finished(f.h, started.value.operation_id)).state).toBe('completed');
     const outbox = f.h.store.get('SELECT * FROM channel_outbox WHERE source_event=?', started.value.operation_id);
     const reply = JSON.stringify(f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id)), code = /FSB-[a-f0-9]{48}/.exec(reply)[0];
+    await identity.getByText('使用旧私聊认证字符串（兼容入口）', { exact: true }).click();
     await identity.getByLabel('飞书认证字符串', { exact: true }).fill('FSB-invalid');
     await identity.getByRole('button', { name: '确认绑定到当前账户' }).click();
     await expect(identity.getByRole('alert')).toContainText('认证字符串无效');
