@@ -310,6 +310,10 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       assertSessionWrite(store, sessionToken(req), user.context!);
       respond(res, 201, channels.bindings.issue(text(input.connector_id, 48), sessionToken(req))); return;
     }
+    const bindingRequest = /^\/api\/channels\/bindings\/requests\/([a-f0-9]{64})$/.exec(path);
+    if (bindingRequest && method === 'GET') {
+      respond(res, 200, channels.bindings.requestStatus(bindingRequest[1]!, sessionToken(req))); return;
+    }
     if (path === '/api/channels/bindings/claim' && method === 'POST') {
       fields(input, ['challenge']);
       // Binding proves the platform session; repository grants and GitHub availability are unrelated to association.

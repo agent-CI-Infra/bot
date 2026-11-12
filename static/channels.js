@@ -20,12 +20,11 @@ async function feishuIdentityCard() {
       const box = element('div', '', 'channel-binding-console'); box.setAttribute('aria-label', '控制台发起的绑定');
       // One bot shows one string at a time: asking again replaces the previous box, and the server retires the older code.
       slot.replaceChildren(box);
-      // Success means a binding this page did not have before: an existing binding is not proof that this code was used.
-      const known = data.bindings.length;
       const status = element('p', '', 'muted'); status.setAttribute('role', 'status');
       box.append(status); status.textContent = '正在向服务端申请一次性绑定串…';
       try {
         const issued = await api('/api/channels/bindings/issue', 'POST', { connector_id: a.id }), command = '绑定 ' + issued.code;
+        if (!box.isConnected) return;
         const copy = button('复制绑定串', async () => {
           try { await navigator.clipboard.writeText(command); status.textContent = '已复制。复制只影响剪贴板，绑定仍以服务端确认为准。'; }
           catch { status.textContent = '复制失败，请选中上面的文字手动复制。'; }
@@ -35,11 +34,21 @@ async function feishuIdentityCard() {
         const deadline = issued.expires_at;
         const poll = async () => {
           if (!box.isConnected) return;
-          if (Date.now() > deadline) { status.textContent = '绑定串已过期，请重新生成。'; return; }
+          const stop = message => { box.replaceChildren(status); status.textContent = message; };
           try {
-            const now = await api('/api/channels/bindings');
-            if (now.bindings.length > known) { status.textContent = '已绑定。'; await start(); return; }
-          } catch { status.textContent = '暂时无法读取服务端绑定状态，仍在等待确认。'; }
+            const result = await api('/api/channels/bindings/requests/' + issued.request_id);
+            if (!box.isConnected) return;
+            if (result.state === 'completed') { stop('服务端已确认绑定，正在读取身份。'); await start(); return; }
+            const terminal = { expired:'绑定串已过期，请重新生成。', superseded:'这条绑定串已失效，请使用最新生成的消息。',
+              invalidated:'登录会话或机器人配置已变化，请重新生成绑定串。', revoked:'这次绑定已经解除，请重新生成绑定串。' };
+            if (terminal[result.state]) { stop(terminal[result.state]); return; }
+            status.textContent = result.state === 'processing' ? '服务端正在核验这次绑定，尚未确认完成。' : '等待飞书中发送这条消息…（五分钟内有效，仅可使用一次，请勿转发）';
+          } catch (error) {
+            if (!box.isConnected) return;
+            if ([401,403,404].includes(error.status)) { stop('无法继续读取这次绑定，请刷新登录与机器人状态后重新生成。'); return; }
+            if (Date.now() > deadline) { stop('绑定串已过期，暂时无法确认结果，请刷新飞书绑定状态。'); return; }
+            status.textContent = '暂时无法读取服务端绑定状态，仍在等待确认。';
+          }
           setTimeout(poll, 2000);
         };
         void poll();
@@ -47,6 +56,7 @@ async function feishuIdentityCard() {
     };
     for (const a of data.applications) {
       const row = element('div', '', 'channel-binding'), link = channelLink(a.chat_url, '打开机器人私聊', 'button-link');
+      row.dataset.bindingConnector = a.id;
       const slot = element('div', '', 'channel-binding-slot'); slot.setAttribute('aria-live', 'polite');
       link.target = '_blank'; link.rel = 'noopener noreferrer';
       row.append(element('strong', label(a)), link, button('生成绑定串', () => consoleBind(a, slot), 'quiet'), slot,
