@@ -155,7 +155,8 @@ async function renderChannelConsole(request) {
           incoming.append(element('summary', '并入的消息（' + value.incoming_messages.length + '）'));
           for (const message of value.incoming_messages) {
             const status = { pending: '尚未交给模型', injected: '已交给模型', answered: '本轮处理完成', released: '已交回待处理' }[message.state] || message.state;
-            incoming.append(element('p', `${message.sender_id} · ${message.message_id} · ${message.needs_reply ? '需要回复' : '仅供参考'} · ${status}`, 'channel-step'));
+            const mention = conversationMode === 'service' ? message.is_direct_mention ? ' · @助手' : ' · 未 @助手' : '';
+            incoming.append(element('p', `${message.sender_id} · ${message.message_id} · ${message.needs_reply ? '需要回复' : '仅供参考'}${mention} · ${status}`, 'channel-step'));
           }
           row.append(incoming);
         }

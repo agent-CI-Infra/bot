@@ -1,7 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { digest, fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
 import { runAgent } from '../agent/runtime.js';
-import { boundedBatch, chatContextBytes, toolArguments, toolCallsProblem, ToolTranscript } from '../agent/tool-context.js';
+import { boundedBatch, chatContextBytes, requestBytes, requestLimit, toolArguments, toolCallsProblem, ToolTranscript } from '../agent/tool-context.js';
 import { Redactor, TaskError } from '../agent/common.js';
 import { RepositoryExplorer, repositoryTools } from '../agent/exploration.js';
 import { ReadTokens } from '../agent/read-token.js';
@@ -20,7 +20,7 @@ import type { ChannelLedger } from './ledger.js';
 import type { ChannelEvent, ChannelMention } from './types.js';
 import { ChannelMedia, MediaTurn, mediaTools, mediaPermission } from './media.js';
 import { sendMessageName, sendMessageTool, stageMessage, stageMessageInstructions } from '../service-roles/stage-messages.js';
-import { turnMessageInstructions, type TurnMessages } from './turn-messages.js';
+import { directMention, turnMessageInstructions, type TurnMessages } from './turn-messages.js';
 
 const fn = (name: string, description: string, properties: Json, required: string[] = []) => ({ type: 'function', function: { name, description,
   parameters: { type: 'object', properties, required, additionalProperties: false } } });
@@ -333,7 +333,7 @@ export class ChannelServiceSessions {
             : { unsummarized_earlier_messages: earlier.length, notice: 'Messages between the summary and recent_messages are not summarized yet; search_conversation_history reads them.' };
           const messages: any[] = [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify({ conversation_id: chat.id, request: turn.request,
             context: { bot_identity: botIdentity,
-              current_message: turn.event ? { message_id: turn.event.message_id, is_direct_mention: !!turn.event.addressed, mentions: turn.event.mentions ?? [] } : null,
+              current_message: turn.event ? { message_id: turn.event.message_id, is_direct_mention: directMention(turn.event), mentions: turn.event.mentions ?? [] } : null,
               ...(earlier.length ? unsummarized : {}), recent_messages: recent.map(m => excerpt(m, 3000)), history: this.ledger.diagnostics(chat.id),
               scope: { kind: binding.scope, repositories: reach.projects.slice(0, 50).map(p => p.full_name), more_repositories: Math.max(0, reach.projects.length - 50), paused_repositories: reach.paused.length },
               permissions: granted }, summary: saved }) }];
@@ -343,13 +343,15 @@ export class ChannelServiceSessions {
           // changed binding or fence) or when the service role's budget runs out before a model request.
           for (let step = 0; ; step++) {
             check();
-            const added = incoming?.take();
-            if (added) { messages.push({ role: 'user', content: JSON.stringify(added) }); mustReply ||= (added.reply_required as Json[]).length > 0; }
             media?.addImages(messages);
             const tools = serviceTools.filter(t => offered(permissions(), t.function.name)&&(!mediaTools.includes(t as any)||!!media)&&(!computerTool(t.function.name)||computing)), body = { messages, tools, tool_choice: 'auto' };
             transcript.fit(body);
+            const added = incoming?.take(Math.max(0,Math.min(chatContextBytes,requestLimit-requestBytes(body)-128)));
+            if (added) { messages.push({ role: 'user', content: JSON.stringify(added) }); mustReply ||= (added.reply_required as Json[]).length > 0; }
+            transcript.fit(body);
             event('model_start');
-            const { value } = await request(body, 'turn:' + step).catch(error=>{if(media)media.modelError(error,messages);throw error;});
+            const { value } = await request(body, 'turn:' + step, async delta => { if (delta?.content) incoming?.pause(); },
+              async reason => { if (!['tool_calls','function_call'].includes(reason)) incoming?.pause(); }).catch(error=>{if(media)media.modelError(error,messages);throw error;});
             event('model_done');
             const message = value?.choices?.[0]?.message;
             if (!message) return fail(502, 'service_model_invalid');
@@ -358,13 +360,12 @@ export class ChannelServiceSessions {
             if (!calls.length) {
               if (message.content !== null && message.content !== undefined && typeof message.content !== 'string') return fail(502, 'service_model_invalid');
               check();
-              const added = incoming?.take(true);
-              if (added) { messages.push(traceClean(message), { role: 'user', content: JSON.stringify(added) }); mustReply ||= (added.reply_required as Json[]).length > 0; continue; }
-              incoming?.seal();
+              incoming?.finish();
               reply = redactor.text(String(message.content ?? ''));
               if (!reply.trim() && !media?.attachments.length && mustReply) return fail(502, 'conversation_reply_invalid');
               return;
             }
+            incoming?.resume();
             messages.push(traceClean(message));
             const results: unknown[] = [];
             // Unparsable arguments reach execute as null and come back to the model as invalid_arguments.
@@ -390,8 +391,8 @@ export class ChannelServiceSessions {
         reason instanceof HttpError || reason instanceof TaskError ? reason.code : 'conversation_failed', Date.now(), id);
       throw reason;
     } finally {
-      incoming?.seal();
-      if (this.store.get('SELECT state FROM channel_service_turns WHERE id=?', id)?.state !== 'completed') incoming?.release();
+      if (this.store.get('SELECT state FROM channel_service_turns WHERE id=?', id)?.state === 'completed') incoming?.finish();
+      else incoming?.release();
       // The computer stays for the group's next turn unless what the group may see changed: then it goes at once.
       const changed = (() => { try { this.bindings.assertUsable(binding); return this.bindings.fence(chat.id) !== fence; } catch { return true; } })();
       await computers?.close(changed);

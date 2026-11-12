@@ -12,7 +12,7 @@ import { ToolTranscript, toolArguments, toolCallsProblem } from './tool-context.
 export interface AgentServices {
   model: AgentModel;
   guard: () => Promise<void>;
-  request: (body: Record<string, any>, requestId: string, onToken?: (delta?: ModelDelta) => Promise<void>) => ReturnType<typeof requestModel>;
+  request: (body: Record<string, any>, requestId: string, onToken?: (delta?: ModelDelta) => Promise<void>, onFinish?: (reason: string) => Promise<void>) => ReturnType<typeof requestModel>;
 }
 /** Run-local measurements and the receipts needed to investigate an interrupted provider request. */
 export interface ExternalUsage {
@@ -122,7 +122,7 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   spec.task.trace_run_id=run?.id;
   const services: AgentServices = {
     model, guard: spec.guard,
-    request: async (body, requestId, onToken) => {
+    request: async (body, requestId, onToken, onFinish) => {
       if(spec.modelTrace?.source==='external_harness')return stop('external_harness_model_request','failed');
       if (body.tools !== undefined && (!Array.isArray(body.tools) || body.tools.some((tool: any) => !tool || tool.type !== 'function' || !allowed.has(tool.function?.name))))
         return stop('agent_tool_not_allowed', 'failed', 'Agent 请求使用未授权的工具。');
@@ -131,7 +131,7 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
         return stop('agent_tool_not_allowed', 'failed', 'Agent 请求使用未授权的工具。');
       const tools = body.tools?.map((tool: any) => allowed.get(tool.function.name));
       for (let attempt = 0; ; attempt++) {
-        try { await spec.beforeModel?.(); return await requestModel({ ...spec, model, body: { ...body, ...(tools ? { tools } : {}) }, requestId: (spec.requestPrefix || '') + requestId, onToken }); }
+        try { await spec.beforeModel?.(); return await requestModel({ ...spec, model, body: { ...body, ...(tools ? { tools } : {}) }, requestId: (spec.requestPrefix || '') + requestId, onToken, onFinish }); }
         catch (error) {
           const transient = error instanceof TaskError && (error.code === 'model_unavailable' || error.code==='model_response_invalid' || /^model_http_(429|5\d\d)$/.test(error.code));
           if (!transient || attempt + 1 >= attempts) {if(error instanceof TaskError&&error.code==='model_response_invalid')return stop(error.code,'retry_wait',error.detail);throw error;}
