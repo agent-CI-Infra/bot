@@ -86,7 +86,7 @@ async function renderChannelConsole(request) {
   };
   let allChats = [], listOffset = 0, pending = false, messageCursor = null, turnOffset = null, taskOffset = 0, sampledAt = null;
   const search = input('conversation_search', '', { type: 'search', placeholder: '搜索姓名、群名、企业或机器人' }); search.setAttribute('aria-label', '搜索飞书会话');
-  const kind = document.createElement('select'); kind.setAttribute('aria-label', '会话类型'); for (const [value, label] of [['', '全部会话'], ['group', '群聊'], ['p2p', '本人私聊']]) kind.add(new Option(label, value));
+  const kind = document.createElement('select'); kind.setAttribute('aria-label', '会话类型'); for (const [value, label] of [['', '全部会话'], ['group', '群聊'], ['p2p', '私聊']]) kind.add(new Option(label, value));
   const listStatus = note('正在读取…'), chatList = element('div'), listMore = button('更多会话', () => readList(true), 'quiet'); listMore.hidden = true;
   const chooser = element('details', '', 'channel-chooser'); chooser.open = !selected || !consoleMedia.matches;
   chooser.append(element('summary', '切换或搜索会话'), field('搜索', search), field('类型', kind), listStatus, chatList, listMore);
@@ -110,11 +110,11 @@ async function renderChannelConsole(request) {
     try {
       const result = await api('/api/channels/conversations?offset=' + (more ? listOffset : 0)); if (!alive()) return;
       allChats = more ? [...allChats, ...result.conversations] : result.conversations; listOffset = result.next_offset;
-      listStatus.textContent = `有权查看 ${result.total} 个 · 群聊 ${result.counts.group} · 本人私聊 ${result.counts.private}`; listMore.hidden = listOffset === null; drawList();
+      listStatus.textContent = `有权查看 ${result.total} 个 · 群聊 ${result.counts.group} · 私聊 ${result.counts.private}`; listMore.hidden = listOffset === null; drawList();
     } catch (err) { failRead(chatList, err, () => readList(more)); } finally { listMore.disabled = false; }
   }
   if (!selected) {
-    thread.append(consoleState('选择一个飞书会话', '左侧列出你有权查看的群聊和本人私聊。'));
+    thread.append(consoleState('选择一个飞书会话', '左侧列出你有权查看的群聊和私聊。'));
     related.append(consoleState('执行与任务', '选择会话后，可查看助手步骤、独立任务与交给项目团队的任务。'));
     await readList(); return;
   }
@@ -148,25 +148,23 @@ async function renderChannelConsole(request) {
         const row = element('article', '', 'channel-run'); row.setAttribute('aria-label', '助手执行回合');
         const title = element('div', '', 'heading'); const statusBadge = state(value.state); if (value.state_label) statusBadge.textContent = value.state_label;
         title.append(element('strong', value.role_id || '管理助手'), statusBadge, element('time', channelTime(value.created_at))); row.append(title);
-        if (value.stale_source) row.append(note('来源或授权范围已变化，本轮回答和执行详情已隐藏。'));
-        else {
-          const details = element('details'), steps = element('div'); details.append(element('summary', '查看执行过程'), steps);
-          details.addEventListener('toggle', () => { if (details.open && !details.dataset.loaded) { details.dataset.loaded = '1'; void readSteps(value.id, steps); } }); row.append(details);
-          for (const message of value.messages || []) {
-            const progress = element('section', '', 'channel-progress-message'); progress.setAttribute('aria-label', '助手进展消息');
-            progress.append(element('strong', '进展消息 ' + message.sequence), element('p', message.text, 'channel-message-body'),
-              note(message.delivery?.state === 'sent' ? '已发送至飞书' : message.delivery?.state === 'failed' ? '发送失败' : '尚未核验飞书送达结果'));
-            row.append(progress);
-          }
-          if (value.can_stop) row.append(button('停止回答', () => stopTurn(value).catch(error), 'quiet'));
-          if (value.reply) {
-            if (conversationMode === 'management') row.append(element('p', value.reply, 'channel-message-body'));
-            else { const answer = element('details'); answer.append(element('summary', '本轮生成的回答'), element('p', value.reply, 'channel-message-body')); row.append(answer); }
-            row.append(note(value.delivery?.state === 'sent' ? '本轮回答已发送至飞书。' : value.delivery?.state === 'unknown' ? '飞书发送结果未知，请先核对。' : value.delivery?.state === 'failed' ? '发送失败；执行结果不代表已经送达。' : '已生成回答，尚未核验飞书送达结果。'));
-          }
-          else if (value.state === 'completed') row.append(note('本轮没有生成可展示的回答。'));
-          if (value.error) row.append(note(employeeError(value.error)));
-        } history.append(row);
+        const details = element('details'), steps = element('div'); details.append(element('summary', '查看执行过程'), steps);
+        details.addEventListener('toggle', () => { if (details.open && !details.dataset.loaded) { details.dataset.loaded = '1'; void readSteps(value.id, steps); } }); row.append(details);
+        for (const message of value.messages || []) {
+          const progress = element('section', '', 'channel-progress-message'); progress.setAttribute('aria-label', '助手进展消息');
+          progress.append(element('strong', '进展消息 ' + message.sequence), element('p', message.text, 'channel-message-body'),
+            note(message.delivery?.state === 'sent' ? '已发送至飞书' : message.delivery?.state === 'failed' ? '发送失败' : '尚未核验飞书送达结果'));
+          row.append(progress);
+        }
+        if (value.can_stop) row.append(button('停止回答', () => stopTurn(value).catch(error), 'quiet'));
+        if (value.reply) {
+          if (conversationMode === 'management') row.append(element('p', value.reply, 'channel-message-body'));
+          else { const answer = element('details'); answer.append(element('summary', '本轮生成的回答'), element('p', value.reply, 'channel-message-body')); row.append(answer); }
+          row.append(note(value.delivery?.state === 'sent' ? '本轮回答已发送至飞书。' : value.delivery?.state === 'unknown' ? '飞书发送结果未知，请先核对。' : value.delivery?.state === 'failed' ? '发送失败；执行结果不代表已经送达。' : '已生成回答，尚未核验飞书送达结果。'));
+        }
+        else if (value.state === 'completed') row.append(note('本轮没有生成可展示的回答。'));
+        if (value.error) row.append(note(employeeError(value.error)));
+        history.append(row);
       }
     }
     if (!rows.length) history.append(consoleState('暂无本地会话记录', '尚未同步到消息或助手执行回合，可刷新查看。'));
@@ -183,8 +181,7 @@ async function renderChannelConsole(request) {
       const result = await api(`/api/channels/chats/${selected}/turns/${turn}?after=${after}`); if (!alive() || !target.isConnected) return;
       if (!after) target.replaceChildren();
       for (const event of result.events) target.append(element('p', `${channelTime(event.created_at)} · ${channelStepLabels[event.type] || event.type}${event.name ? ' · ' + (channelToolLabels[event.name] || event.name) : ''}`, 'channel-step'));
-      if (result.stale_source) target.append(note('来源或授权范围已变化，旧执行步骤已隐藏。'));
-      else if (result.coverage === 'legacy_steps_unavailable') target.append(note('这轮执行发生在步骤记录启用前，没有可补写的执行步骤。'));
+      if (result.coverage === 'legacy_steps_unavailable') target.append(note('这轮执行发生在步骤记录启用前，没有可补写的执行步骤。'));
       if (result.has_more) { const next = button('更多执行步骤', async () => { next.remove(); await readSteps(turn, target, result.next_after); }, 'quiet'); target.append(next); }
     } catch (err) { failRead(target, err, () => readSteps(turn, target, after)); }
   }
@@ -215,7 +212,7 @@ async function renderChannelConsole(request) {
       if (more !== 'messages') { for (const turn of result.conversation.turns) turns.set(turn.id, turn); turnOffset = result.conversation.next_offset; }
       conversationMode = result.conversation.mode; sampledAt = result.read_at; moreMessages.hidden = !messageCursor; moreTurns.hidden = turnOffset === null;
       conversationTitle.textContent = channelChatName(allChats.find(c => c.id === selected && c.display_name) || result.chat);
-      status.textContent = `${result.chat.type === 'p2p' ? '本人私聊' : '群聊'} · ${channelChatContext(result.chat)} · 读取于 ${channelTime(sampledAt)}`;
+      status.textContent = `${result.chat.type === 'p2p' ? '私聊' : '群聊'} · ${channelChatContext(result.chat)} · 读取于 ${channelTime(sampledAt)}`;
       diagnosticText.textContent = `本地同步：${channelSyncText(result.sync_state)}。缺口：${result.gaps.map(g => channelGapText(g.reason)).join('、') || '本次未报告'}。可见范围受飞书权限与保留策略约束。模型请求 ${result.conversation.usage.requests || 0} 次；未知费用不按零处理。`;
       drawTimeline(); await readTasks();
     } catch (err) {

@@ -132,7 +132,23 @@ export class ChannelService {
     if(this.serviceBindings.canView(actor,id))return;
     this.employees.authorizeHistory(actor,id);
   }
-  /** Ledger scopes of bot replies a non-platform reader may see in a chat's local history. */
+  /** Console history is authorized once for the whole chat; execution keeps its own source and scope guards. */
+  authorizeConversation(actor: ActorContext, id: string): Row {
+    assertCurrent(actor);
+    const chat = this.store.get('SELECT * FROM channel_chats WHERE id=?', id);
+    if (!chat) return fail(404, 'channel_chat_not_found');
+    try { authorize(actor, 'platform.manage'); return chat; }
+    catch (error) { if (!(error instanceof HttpError) || error.code !== 'capability_forbidden') throw error; }
+    if (chat.chat_type === 'p2p' && !this.store.get('SELECT 1 FROM channel_personal_owners WHERE chat_id=? AND principal_id=?', id, actor.principal_id))
+      fail(403, 'channel_history_forbidden');
+    if (chat.chat_type === 'group' && this.serviceBindings.get(id)) {
+      if (!this.serviceBindings.canView(actor, id)) fail(403, 'channel_history_forbidden');
+      return chat;
+    }
+    this.authorizeHistory(actor, id);
+    return chat;
+  }
+  /** Ledger scopes for assistant execution and tools; console history uses whole-conversation authorization. */
   visibleScopes(id:string,actor:ActorContext):string[]{
     const binding=this.serviceBindings.canView(actor,id);
     return [...this.employees.visibleProjects(id,actor),...(binding?[bindingScope(binding.id)]:[])];
@@ -142,58 +158,6 @@ export class ChannelService {
     const binding=this.serviceBindings.get(chat.id);
     if(binding){if(!binding.enabled)fail(403,'channel_service_binding_disabled');return;}
     this.employees.guardSync(chat);
-  }
-  conversationView(actor:ActorContext,id:string,offset=0):Json{
-    this.authorizeHistory(actor,id);if(!Number.isSafeInteger(offset)||offset<0)fail(400,'invalid_pagination');
-    const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',id)!;
-    if(chat.chat_type==='p2p')return this.personalView(actor,chat,offset);
-    const binding=this.serviceBindings.get(id);
-    if(binding)return this.serviceView(actor,chat,binding,offset);
-    const projects=this.employees.visibleProjects(id,actor),marks=projects.map(()=>'?').join(','),fence=this.businessFence(chat);
-    const turns=projects.length?this.store.all(`SELECT id,source_message,project_id,role_id,state,reply,error,created_at,updated_at,fence FROM role_conversation_turns
-      WHERE conversation_id=? AND project_id IN (${marks}) ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?`,id,...projects,offset):[];
-    const requests=projects.length?this.store.get(`SELECT count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,
-      sum(CASE WHEN finished_at IS NULL OR input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,sum(CASE WHEN accounting_source='acp_prompt' THEN 1 ELSE 0 END) provider_request_count_unknown,
-      sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests FROM model_requests WHERE conversation_id=? AND repository_id IN (${marks})`,id,...projects):null;
-    const costs=projects.length?this.store.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE conversation_id=? AND repository_id IN (${marks}) AND cost IS NOT NULL GROUP BY currency`,id,...projects):[];
-    return {conversation_id:id,current_project:this.store.get('SELECT project_id FROM role_conversations WHERE id=?',id)?.project_id??null,
-      turns:turns.slice(0,50).map(t=>({...t,fence:undefined,reply:t.reply&&t.fence===fence?this.store.secrets.open(t.reply,'conversation-reply:'+t.id).message:null,
-        stale_source:t.fence!==fence})),has_more:turns.length>50,next_offset:turns.length>50?offset+50:null,usage:{...requests,costs,semantics:requests?.usage_missing_requests?'lower_bound':requests?.unpriced_requests?'known usage; cost incomplete':'recorded estimates'},...this.ledger.diagnostics(id)};
-  }
-  /** A bound group's assistant turns with their progress messages (#435). Replies and progress messages derived under an older
-   * scope or source are withheld, not shown. Whoever may manage the binding can stop a running turn. */
-  private serviceView(actor:ActorContext,chat:Row,binding:Row,offset:number):Json{
-    const fence=this.serviceBindings.fence(chat.id),view=this.serviceBindings.view(binding);
-    const turns=this.store.all('SELECT * FROM channel_service_turns WHERE chat_id=? ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?',chat.id,offset);
-    const names=new Map(this.store.all('SELECT id,name FROM service_roles').map(r=>[r.id,r.name]));
-    // A group assistant is a service role: its usage is billed to the role, never to a project.
-    const requests=this.store.get(`SELECT count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,
-      sum(CASE WHEN finished_at IS NULL OR input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,
-      sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests FROM model_requests WHERE conversation_id=? AND repository_id IS NULL AND service_role_id IS NOT NULL`,chat.id)!;
-    const costs=this.store.all('SELECT currency,sum(cost) amount FROM model_requests WHERE conversation_id=? AND repository_id IS NULL AND service_role_id IS NOT NULL AND cost IS NOT NULL GROUP BY currency',chat.id);
-    const manageable=this.serviceBindings.canManage(actor,chat.id);
-    return {conversation_id:chat.id,mode:'service',current_project:null,binding:view,can_manage:manageable,
-      turns:turns.slice(0,50).map(t=>({id:t.id,source_message:t.source_message,state:t.state,error:t.error,created_at:t.created_at,updated_at:t.updated_at,
-        role_id:names.get(t.service_role_id)??t.service_role_id,stale_source:t.fence!==fence,can_stop:manageable&&t.state==='running',
-        messages:t.fence===fence?this.serviceSessions.messages(t.id).map(m=>({sequence:m.sequence,text:m.text,created_at:m.created_at})):[],
-        reply:t.reply&&t.fence===fence?this.store.secrets.open(t.reply,'service-turn-reply:'+t.id).message:null})),
-      has_more:turns.length>50,next_offset:turns.length>50?offset+50:null,
-      usage:{...requests,costs,semantics:requests.usage_missing_requests?'lower_bound':requests.unpriced_requests?'known usage; cost incomplete':'recorded estimates'},...this.ledger.diagnostics(chat.id)};
-  }
-  private personalView(actor:ActorContext,chat:Row,offset:number):Json{
-    const session=this.store.get("SELECT * FROM channel_sessions WHERE connector_id=? AND chat_id=? AND principal_id=? AND project_id=''",chat.connector_id,chat.chat_id,actor.principal_id);
-    const current=session&&session.context_revision===chat.context_revision&&session.connector_revision===this.connector(chat.connector_id).revision;
-    if(current)this.management.conversation(actor,session.conversation_id);
-    const messages=current?this.store.all(`SELECT * FROM management_messages WHERE conversation_id=? AND authorization_revision=? ORDER BY rowid DESC LIMIT 51 OFFSET ?`,session.conversation_id,actor.authorization_revision,offset):[];
-    // The personal chat is the management assistant: its usage is billed to that service role, not to a project.
-    const requests=current?this.store.get(`SELECT count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,
-      sum(CASE WHEN finished_at IS NULL OR input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,
-      sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests FROM model_requests WHERE conversation_id=? AND service_role_id=?`,session.conversation_id,managementAssistant):null;
-    const costs=current?this.store.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE conversation_id=? AND service_role_id=? AND cost IS NOT NULL GROUP BY currency`,session.conversation_id,managementAssistant):[];
-    return {conversation_id:chat.id,management_conversation_id:current?session.conversation_id:null,mode:'management',current_project:null,
-      turns:messages.slice(0,50).map(m=>({id:m.id,source_message:m.source_message,created_at:m.created_at,state:managementStates[m.state]??m.state,
-        request:JSON.parse(m.input).content,messages:this.management.stageMessages(m.id),reply:this.personalReply(actor,m),role_id:'管理助手'})),
-      has_more:messages.length>50,next_offset:messages.length>50?offset+50:null,usage:{...requests,costs},...this.ledger.diagnostics(chat.id)};
   }
   personalReply(actor:ActorContext,message:Row):string{
     const reply=this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='reply' ORDER BY sequence DESC LIMIT 1",message.id);

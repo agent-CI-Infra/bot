@@ -451,7 +451,7 @@ async function channelPersonalChats() {
 }
 const serviceTurnStates = { running: '回答中', completed: '已完成', failed: '未完成', stopped: '已停止', interrupted: '已中断' };
 // A group answer's text while it has none yet: still running, stopped in the console, kept quiet, or why it ended.
-const serviceTurnText = turn => turn.reply || (turn.stale_source ? '来源或授权范围已变化，旧回答不再展示。' : turn.state === 'running' ? '正在回答…'
+const serviceTurnText = turn => turn.reply || (turn.state === 'running' ? '正在回答…'
   : turn.state === 'stopped' ? '已在控制台停止，不再发送最终回答；已发出的进展消息保留。' : turn.state === 'completed' ? '本轮保持安静。' : '本轮未完成：' + employeeError(turn.error || turn.state));
 async function channelConversation(id, target) {
   target.replaceChildren(); const summary = element('div'), turns = element('div'), status = note(''), controls = element('div', '', 'actions');
@@ -480,17 +480,17 @@ async function channelConversation(id, target) {
         // Progress messages (#435) were sent while the turn ran; they come before its final answer, in order.
         if (result.mode === 'management') row.append(element('strong', '管理助手 · ' + turn.state), note(new Date(turn.created_at).toLocaleString()),
           ...(turn.request ? [element('p', '我：' + turn.request)] : []), ...(turn.messages ?? []).map((text, i) => element('p', '进展 ' + (i + 1) + '：' + text)),
-          element('p', turn.reply || '等待处理'), channelLink('#/management', '打开管理对话与执行记录'));
+          element('p', turn.reply || '等待处理'), ...(result.can_continue ? [channelLink('#/management', '打开管理对话与执行记录')] : []));
         else if (result.mode === 'service') {
           row.append(element('strong', turn.role_id + ' · ' + (serviceTurnStates[turn.state] ?? turn.state)), note(new Date(turn.created_at).toLocaleString()),
             ...(turn.messages ?? []).map(message => element('p', '进展 ' + message.sequence + '：' + message.text)), element('p', serviceTurnText(turn)));
           if (turn.can_stop) { const control = button('停止回答', () => stop(turn, control), 'quiet'); row.append(control); }
         }
         else row.append(element('strong', turn.role_id + ' · 项目 ' + turn.project_id), note(new Date(turn.created_at).toLocaleString() + ' · 来源 ' + turn.source_message),
-          element('p', turn.reply || (turn.stale_source ? '来源或授权范围已变化，旧派生回答不再展示。' : turn.state === 'completed' ? '本轮保持安静。' : '本轮未完成：' + (turn.error || turn.state))),
+          element('p', turn.reply || (turn.state === 'completed' ? '本轮保持安静。' : '本轮未完成：' + (turn.error || turn.state))),
           channelLink('#/projects/' + turn.project_id + '/overview/all', '查看同一项目任务看板')); turns.append(row);
       }
-      if (!result.turns.length && !more) turns.append(note('当前授权范围暂无会话回合。原始本地消息可通过记录搜索查询。'));
+      if (!result.turns.length && !more) turns.append(note('当前会话暂无助手回合。原始本地消息可通过记录搜索查询。'));
       next.hidden = !result.has_more;
       // While an answer on the first page runs, re-read it so its progress messages and end appear without a manual refresh.
       if (!more && result.mode === 'service' && result.turns.some(turn => turn.state === 'running')) refresh = setTimeout(() => { if (target.isConnected && turns.isConnected) void read(false); }, 3000);

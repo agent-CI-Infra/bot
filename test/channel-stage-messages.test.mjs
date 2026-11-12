@@ -5,6 +5,7 @@ import { settled } from './management-fixture.mjs';
 import { knowledgeActor } from './knowledge-fixture.mjs';
 import { resolvePrincipalActor } from '../dist/identity/authorization.js';
 import { bindingScope } from '../dist/channels/service-bindings.js';
+import { ChannelConsole } from '../dist/channels/console.js';
 
 // Progress messages of service roles (#435) and their turns without a step limit. Feishu and the model are local protocol fixtures.
 const reply = (res, message) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 12, completion_tokens: 4 } })); };
@@ -108,7 +109,7 @@ test('whoever manages the binding stops a running group answer in the console; s
   const turn = h.store.get('SELECT * FROM channel_service_turns'), path = '/api/channels/chats/' + chat.id + '/service-turns/' + turn.id + '/stop';
   // Someone holding config.write over the scope may read the conversation but not stop it: only the owner and its governors (#424).
   knowledgeActor(h.store, 'peer', '101', ['config.write', 'tasks.read', 'tasks.write']);
-  const peer = resolvePrincipalActor(h.store, 'peer', null), peerView = f.service.conversationView(peer, chat.id);
+  const peer = resolvePrincipalActor(h.store, 'peer', null), peerView = new ChannelConsole(f.service).conversation(peer, chat.id);
   assert.deepEqual([peerView.can_manage, peerView.turns[0].can_stop], [false, false]);
   assert.throws(() => f.service.stopServiceTurn(peer, chat.id, turn.id), { code: 'channel_service_binding_forbidden' });
   const view = (await f.admin('/api/channels/chats/' + chat.id + '/conversation')).value;

@@ -68,7 +68,7 @@ test('private conversation names require the exact active owner binding and keep
   assert.equal((await f.admin('/api/channels/bindings/' + identity.id + '/name', 'POST', {})).status, 404);
 });
 
-test('conversation console filters history authority before pagination and excludes other people’s private chats', async t => {
+test('conversation console authorizes whole chats before pagination and platform managers see every private chat', async t => {
   const f = await channelFixture(t), group = await boundGroup(f, ['101', '102']), mine = await privateChat(f);
   const password = testPassword(), created = await f.admin('/api/users', 'POST', { username: 'console-member', password, repository_ids: ['101'] });
   assert.equal(created.status, 201);
@@ -77,11 +77,12 @@ test('conversation console filters history authority before pagination and exclu
   bindFixture(f.h, f.id, principal, 'ou_member');
   const theirs = await privateChat(f, 'ou_member', principal, 'oc_member');
   const adminList = await f.admin('/api/channels/conversations');
-  assert.equal(adminList.status, 200); assert.deepEqual(new Set(adminList.value.conversations.map(c => c.id)), new Set([mine.id, group.id]));
+  assert.equal(adminList.status, 200); assert.deepEqual(new Set(adminList.value.conversations.map(c => c.id)), new Set([mine.id, group.id, theirs.id]));
   const list = await member('/api/channels/conversations'); assert.equal(list.status, 200);
   assert.deepEqual(list.value.conversations.map(c => c.id), [theirs.id]);
   for (const section of ['timeline', 'tasks']) assert.equal((await member(`/api/channels/chats/${group.id}/${section}`)).status, 403);
-  assert.equal((await f.admin(`/api/channels/chats/${theirs.id}/timeline`)).status, 403);
+  for (const section of ['timeline', 'tasks', 'conversation', 'messages']) assert.equal((await f.admin(`/api/channels/chats/${theirs.id}/${section}`)).status, 200);
+  assert.equal((await member(`/api/channels/chats/${mine.id}/timeline`)).status, 403);
   assert.equal((await member('/api/channels/conversations?offset=NaN')).status, 400);
   f.h.store.run("UPDATE external_identities SET status='revoked' WHERE principal_id=? AND provider='feishu'", principal);
   const revoked = await member('/api/channels/conversations'); assert.equal(revoked.status, 200, JSON.stringify(revoked.value)); assert.deepEqual(revoked.value.conversations, []);
@@ -90,7 +91,7 @@ test('conversation console filters history authority before pagination and exclu
   const inactive = await member('/api/channels/conversations'); assert.equal(inactive.status, 200); assert.deepEqual(inactive.value.conversations, []);
 });
 
-test('timeline pages newest messages without duplication and keeps tombstones, sensitive text and stale derived output hidden', async t => {
+test('timeline pages newest messages without duplication and keeps tombstones and sensitive text redacted', async t => {
   const f = await channelFixture(t), chat = await boundGroup(f), now = Date.now() - 20000;
   f.h.store.run("UPDATE external_identities SET display_name='张小明' WHERE principal_id=? AND provider='feishu'", f.principal);
   for (let i = 0; i < 110; i++) f.service.ledger.merge(chat, { message_id: 'page-' + String(i).padStart(3, '0'), sender_id: 'ou_member', sender_tenant: 'actor-tenant', sender_type: 'user', message_type: 'text',
@@ -112,7 +113,7 @@ test('timeline pages newest messages without duplication and keeps tombstones, s
   assert.equal((await f.admin(`/api/channels/chats/${other.id}/timeline?cursor=${encodeURIComponent(pages[0].next_cursor)}`)).status, 400);
 });
 
-test('assistant steps are real metadata, paginated, fenced and erased with local history', async t => {
+test('assistant steps stay linked to their chat, paginated and erased with local history', async t => {
   const f = await channelFixture(t); await repositoryAssistant(f); const chat = await boundGroup(f);
   scriptedModel(f, [['send_message', { text: '正在核对当前项目。' }], ['list_projects', {}], '当前项目已核对。']);
   const receipt = await post(f.h, f.id, inGroup('查看项目范围', 'ou_bob'));
@@ -131,12 +132,14 @@ test('assistant steps are real metadata, paginated, fenced and erased with local
   assert.ok(page2.events[0].sequence > page1.events.at(-1).sequence);
   f.h.store.run('UPDATE channel_chats SET context_revision=context_revision+1 WHERE id=?', chat.id);
   const stale = (await f.admin(`/api/channels/chats/${chat.id}/turns/${turn.id}`)).value;
-  assert.deepEqual(stale.events, []); assert.equal(stale.stale_source, true);
+  assert.ok(stale.events.length > 0); assert.equal(stale.stale_source, undefined);
+  const otherChat = await boundGroup(f, ['101'], 'oc_other_steps');
+  assert.equal((await f.admin(`/api/channels/chats/${otherChat.id}/turns/${turn.id}`)).status, 404);
   f.service.ledger.cleanup(chat.id, Date.now(), f.h.store.get('SELECT revision FROM channel_chats WHERE id=?', chat.id).revision);
   assert.equal(f.h.store.get('SELECT count(*) n FROM channel_service_events WHERE turn_id=?', turn.id).n, 0);
 });
 
-test('conversation own tasks are visible only under the current service binding fence', async t => {
+test('conversation own task history remains visible across service binding source changes', async t => {
   const f = await channelFixture(t); await repositoryAssistant(f); const chat = await boundGroup(f);
   const binding = f.service.serviceBindings.get(chat.id), id = 'a'.repeat(48);
   f.h.store.run(`INSERT INTO service_role_own_tasks(id,service_role_id,owner_kind,owner_id,principal_id,fence,title,state,history,created_at,updated_at)
@@ -145,7 +148,7 @@ test('conversation own tasks are visible only under the current service binding 
   let result = await f.admin(`/api/channels/chats/${chat.id}/tasks`); assert.equal(result.status, 200);
   assert.equal(result.value.own_tasks[0].last_conclusion, '证据已找到。');
   f.h.store.run('UPDATE channel_chats SET context_revision=context_revision+1 WHERE id=?', chat.id);
-  result = await f.admin(`/api/channels/chats/${chat.id}/tasks`); assert.deepEqual(result.value.own_tasks, []);
+  result = await f.admin(`/api/channels/chats/${chat.id}/tasks`); assert.equal(result.value.own_tasks[0].last_conclusion, '证据已找到。');
 });
 
 test('a project task delegated by the group is linked to its conversation and disappears when its source changes', async t => {
@@ -171,10 +174,10 @@ test('a project task delegated by the group is linked to its conversation and di
   const narrowed = await member.client(`/api/channels/chats/${chat.id}/tasks`);
   assert.equal(narrowed.status, 200, JSON.stringify(narrowed.value)); assert.deepEqual(narrowed.value.tasks, []);
   f.h.store.run('UPDATE channel_chats SET context_revision=context_revision+1 WHERE id=?', chat.id);
-  assert.deepEqual((await f.admin(`/api/channels/chats/${chat.id}/tasks`)).value.tasks, []);
+  assert.equal((await f.admin(`/api/channels/chats/${chat.id}/tasks`)).value.tasks.length, 1);
 });
 
-test('private turns show actual delivery facts and cannot restore own tasks after the local source changes', async t => {
+test('private turns keep delivery facts and own task history after the local source changes', async t => {
   const f = await channelFixture(t); scriptedModel(f, [['send_message', { text: '正在读取本人私聊的项目。' }], '私聊中核对当前项目。']);
   const receipt = await post(f.h, f.id, envelope('请核对当前项目'));
   assert.equal((await finished(f.h, receipt.value.operation_id)).state, 'completed');
@@ -191,6 +194,63 @@ test('private turns show actual delivery facts and cannot restore own tasks afte
   assert.equal((await f.admin(`/api/channels/chats/${chat.id}/tasks`)).value.own_tasks.length, 1);
   f.h.store.run('UPDATE channel_chats SET context_revision=context_revision+1 WHERE id=?', chat.id);
   const stale = (await f.admin(`/api/channels/chats/${chat.id}/timeline`)).value;
-  assert.equal(stale.conversation.management_conversation_id, null); assert.deepEqual(stale.conversation.turns, []);
-  assert.deepEqual((await f.admin(`/api/channels/chats/${chat.id}/tasks`)).value.own_tasks, []);
+  assert.equal(stale.conversation.management_conversation_id, conversation.management_conversation_id);
+  assert.equal(stale.conversation.turns[0].reply, '私聊中核对当前项目。');
+  assert.equal(stale.conversation.turns[0].messages[0].text, '正在读取本人私聊的项目。');
+  assert.equal((await f.admin(`/api/channels/chats/${chat.id}/tasks`)).value.own_tasks.length, 1);
+});
+
+
+test('whole-chat access keeps historical group replies and steps visible after a scope change while model input stays fenced', async t => {
+  const f = await channelFixture(t); await repositoryAssistant(f); const chat = await boundGroup(f, ['101']);
+  scriptedModel(f, [['send_message', { text: '旧范围的执行进展。' }], ['list_projects', {}], '旧范围的完整历史回答。']);
+  const first = await post(f.h, f.id, inGroup('核对原范围')); assert.equal((await finished(f.h, first.value.operation_id)).state, 'completed');
+  await until(() => f.h.store.get('SELECT state FROM channel_outbox WHERE idempotency_key=?', first.value.operation_id + ':business-result'), row => row?.state === 'sent');
+  const old = await f.member('old-scope-viewer', { repository_ids: ['101'] }), next = await f.member('new-scope-viewer', { repository_ids: ['102'] });
+  assert.equal((await old.client(`/api/channels/chats/${chat.id}/timeline`)).status, 200);
+  const binding = f.service.serviceBindings.get(chat.id);
+  assert.equal((await f.admin(`/api/channels/chats/${chat.id}/service-binding`, 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['102'] }, enabled: true, expected_revision: binding.revision })).status, 200);
+  assert.equal((await old.client(`/api/channels/chats/${chat.id}/timeline`)).status, 403);
+  assert.ok(!(await old.client('/api/channels/conversations')).value.conversations.some(c => c.id === chat.id));
+  const timeline = await next.client(`/api/channels/chats/${chat.id}/timeline`); assert.equal(timeline.status, 200, JSON.stringify(timeline.value));
+  const turn = timeline.value.conversation.turns[0];
+  assert.equal(turn.reply, '旧范围的完整历史回答。'); assert.equal(turn.messages[0].text, '旧范围的执行进展。'); assert.equal(turn.stale_source, undefined);
+  assert.ok(timeline.value.messages.some(m => m.content.includes('旧范围的完整历史回答')));
+  assert.ok((await next.client(`/api/channels/chats/${chat.id}/messages`)).value.messages.some(m => m.content.includes('旧范围的完整历史回答')));
+  assert.ok((await next.client(`/api/channels/chats/${chat.id}/turns/${turn.id}`)).value.events.some(e => e.type === 'tool_call'));
+  f.modelState.respond = async (body, res) => {
+    assert.ok(!JSON.stringify(body).includes('旧范围的完整历史回答。'), 'console access does not widen the assistant runtime history');
+    res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '按当前范围继续。' } }], usage: { prompt_tokens: 12, completion_tokens: 4 } }));
+  };
+  assert.equal((await finished(f.h, (await post(f.h, f.id, inGroup('按新范围继续'))).value.operation_id)).state, 'completed');
+});
+
+test('platform managers read another owner’s complete private history across authorization changes and session rotation without acting as the owner', async t => {
+  const f = await channelFixture(t), owner = await f.member('private-history-owner', { repository_ids: ['101'] });
+  bindFixture(f.h, f.id, owner.id, 'ou_history_owner');
+  const send = content => post(f.h, f.id, envelope(content, { sender: { sender_id: { open_id: 'ou_history_owner' } }, message: { chat_id: 'oc_history_owner' } }));
+  scriptedModel(f, [['send_message', { text: '第一轮的进展。' }], '第一轮的回答。']);
+  const first = await send('第一轮的问题'); assert.equal((await finished(f.h, first.value.operation_id)).state, 'completed');
+  const chat = f.h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_history_owner'");
+  const firstView = (await owner.client(`/api/channels/chats/${chat.id}/conversation`)).value;
+  f.h.store.run('UPDATE principals SET authorization_revision=authorization_revision+1 WHERE id=?', owner.id);
+  f.h.store.run('UPDATE channel_chats SET context_revision=context_revision+1 WHERE id=?', chat.id);
+  scriptedModel(f, ['会话轮换后的回答。']);
+  const second = await send('第二轮的问题'); assert.equal((await finished(f.h, second.value.operation_id)).state, 'completed');
+  scriptedModel(f, ['管理员自己的回答。']);
+  assert.equal((await finished(f.h, (await post(f.h, f.id, envelope('另一个私聊的请求'))).value.operation_id)).state, 'completed');
+  const actual = (await f.admin(`/api/channels/chats/${chat.id}/timeline`)).value;
+  assert.equal(actual.conversation.turns.length, 2, JSON.stringify(actual));
+  assert.deepEqual(new Set(actual.conversation.turns.map(t => t.reply)), new Set(['第一轮的回答。', '会话轮换后的回答。']));
+  assert.equal(actual.conversation.can_continue, false); assert.equal(actual.chat.can_refresh_name, false); assert.equal(actual.chat.binding_id, null);
+  assert.notEqual(actual.conversation.management_conversation_id, firstView.management_conversation_id);
+  const firstTurn = actual.conversation.turns.find(t => t.reply === '第一轮的回答。'); assert.equal(firstTurn.messages[0].text, '第一轮的进展。');
+  assert.ok((await f.admin(`/api/channels/chats/${chat.id}/turns/${firstTurn.id}`)).value.events.length > 0);
+  const own = (await owner.client(`/api/channels/chats/${chat.id}/conversation`)).value; assert.equal(own.turns.length, 2); assert.equal(own.can_continue, true);
+  const stranger = await f.member('private-history-stranger', { repository_ids: ['101'] });
+  for (const part of ['timeline', 'conversation', 'messages', 'tasks']) assert.equal((await stranger.client(`/api/channels/chats/${chat.id}/${part}`)).status, 403);
+  assert.equal((await f.admin('/api/management/conversations/' + actual.conversation.management_conversation_id)).status, 404);
+  f.h.store.run('UPDATE channel_connectors SET enabled=0 WHERE id=?', f.id);
+  assert.equal((await f.admin(`/api/channels/chats/${chat.id}/timeline`)).value.conversation.turns.length, 2);
+  assert.ok((await f.admin('/api/channels/conversations')).value.conversations.some(c => c.id === chat.id));
 });
