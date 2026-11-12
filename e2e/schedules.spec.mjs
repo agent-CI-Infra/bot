@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomId } from '../dist/core/security.js';
+import { defaultLimits } from '../dist/schedules/types.js';
 import { channelFixture, bindFixture, privateChat, boundGroup, registerDestination } from '../test/channel-fixture.mjs';
 
 async function environment() {
@@ -269,3 +270,49 @@ for (const surface of ['management', 'project']) {
     } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
   });
 }
+// #234 验收第 2、3、4 条：预览里的下一触发必须与服务端 nextTime 一致（换时区后同样），有效期结束后不再给出时间；
+// 键盘能到时间预览与主操作并用 Enter 触发；390px 下长时区与长目的地要能读全，不能被省略号截断。
+test('schedule preview matches the server after a timezone change, is reachable by keyboard and keeps long names readable at 390px', async ({ page }) => {
+  test.setTimeout(180000); const f = await environment();
+  const longChat = await privateChat(f, 'ou_alice', f.principal, 'oc_' + 'x'.repeat(40));
+  const longDestination = await registerDestination(f.admin, longChat); await f.service.tick();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1300 }); await login(page, f);
+    const start = new Date(Date.now() - 86400000).toISOString();
+    await page.getByLabel('计划名称', { exact: true }).fill('跨时区长名称计划：大西洋两岸的日报协调');
+    await page.getByLabel('计划时区', { exact: true }).fill('America/Argentina/ComodRivadavia');
+    await page.getByLabel('有效期开始', { exact: true }).fill(start);
+    await page.getByLabel('计划目的地', { exact: true }).selectOption(longDestination);
+    // 键盘：从计划名称开始按 Tab 能到「预览日报计划」，Enter 触发预览。
+    await page.getByLabel('计划名称', { exact: true }).focus();
+    let reached = false;
+    for (let i = 0; i < 60 && !reached; i++) { await page.keyboard.press('Tab'); reached = await page.evaluate(() => document.activeElement?.textContent?.trim() === '预览日报计划'); }
+    expect(reached).toBe(true);
+    await page.keyboard.press('Enter');
+    await expect(page.getByLabel('计划预览')).toContainText('未来触发');
+    // 换时区后，预览列的每条未来时间必须等于服务端 preview_schedule 的 nextTime 结果。
+    await page.getByLabel('计划时区', { exact: true }).fill('Europe/Berlin');
+    await page.getByRole('button', { name: '预览日报计划', exact: true }).click();
+    await expect(page.getByLabel('计划预览')).toContainText('Europe/Berlin');
+    const plan = { name: '跨时区长名称计划：大西洋两岸的日报协调', kind: 'personal', actor_id: f.principal, owner_id: f.principal, maintainer_id: f.principal,
+      workflow: 'report.daily', parameters: {}, timezone: 'Europe/Berlin', cron: '0 9 * * *', start_at: Date.parse(start), enabled: true,
+      misfire: 'skip', grace_ms: 60000, destination_id: longDestination, limits: { ...defaultLimits } };
+    const server = (await f.admin('/api/management/query', 'POST', { operation: 'preview_schedule', target: { project_id: '101' }, arguments: { plan } })).value;
+    const ui = (await page.getByLabel('计划预览').innerText()).split('\n').filter(line => line.includes('Europe/Berlin') && !line.startsWith('时区：') && !line.startsWith('时间窗口'));
+    const expected = [];
+    for (const at of server.future) expected.push(await page.evaluate(([ts, zone]) => new Date(ts).toLocaleString(undefined, { timeZone: zone }) + ' · ' + zone, [at, 'Europe/Berlin']));
+    expect(ui).toEqual(expected);
+    // 有效期结束后不再显示某个时间。
+    await page.getByLabel('有效期结束（可留空）', { exact: true }).fill(new Date(Date.now() - 3600000).toISOString());
+    await page.getByRole('button', { name: '预览日报计划', exact: true }).click();
+    await expect(page.getByLabel('计划预览')).toContainText('无下一次触发');
+    // 390px：执行时区与目的地一行能读全，页面不横向溢出。
+    await page.getByLabel('计划时区', { exact: true }).fill('America/Argentina/ComodRivadavia');
+    await page.setViewportSize({ width: 390, height: 900 });
+    const context = page.locator('.schedule-context');
+    await expect(context).toContainText('America/Argentina/ComodRivadavia');
+    await expect(context).toContainText('oc_' + 'x'.repeat(40));
+    expect(await context.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
