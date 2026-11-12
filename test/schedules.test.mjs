@@ -72,6 +72,20 @@ test('wall-clock preview chooses first DST fold, skips gaps, uses cron OR semant
   assert.throws(() => nextTime({ ...plan, timezone: 'Moon/Base' }, Date.now()), /invalid_schedule_timezone/);
   assert.equal(new Date(quietUntil({ timezone: 'America/New_York', quiet_start: '22:00', quiet_end: '07:00' }, Date.parse('2026-11-01T04:00Z'))).toISOString(), '2026-11-01T12:00:00.000Z');
 });
+// #234 验收第 2 条：有效期必须和服务端算法一致。cron 与固定周期两条分支都以 end_at 为开区间上界，
+// 而空窗口（end_at <= start_at）必须在校验层被拒，不能落成一个永远没有下次触发的计划。
+test('nextTime excludes a trigger that lands exactly on end_at and rejects a window that ends before it starts', async t => {
+  const base = { timezone: 'UTC', start_at: Date.parse('2026-11-01T00:00Z') };
+  const cronPlan = { ...base, cron: '0 9 * * *' }, after = Date.parse('2026-11-01T10:00Z'), ninth = Date.parse('2026-11-02T09:00Z');
+  assert.equal(nextTime({ ...cronPlan, end_at: ninth }, after), null);
+  assert.equal(nextTime({ ...cronPlan, end_at: ninth + 1 }, after), ninth);
+  const interval = { ...base, interval_ms: 3600000 }, halfway = Date.parse('2026-11-01T05:30Z'), six = Date.parse('2026-11-01T06:00Z');
+  assert.equal(nextTime(interval, halfway), six);
+  assert.equal(nextTime({ ...interval, end_at: six }, halfway), null);
+  assert.equal(nextTime({ ...interval, end_at: six + 1 }, halfway), six);
+  const f = await fixture(t);
+  await assert.rejects(query(f, 'preview_schedule', { plan: f.plan({ interval_ms: undefined, cron: '0 9 * * *', end_at: f.now() }) }), /invalid_schedule_recurrence/);
+});
 test('user creates and previews a daily report, sees evidence, runs now and receives a persisted delivery', async t => {
   const f = await fixture(t);
   f.modelState.failure = 503;
