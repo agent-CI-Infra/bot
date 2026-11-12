@@ -235,6 +235,10 @@ test('self mentions retain visible names and verified targets in text and rich p
   assert.equal(only.content, '@LaunchPad-Test'); assert.equal(only.command_text, ''); assert.equal(only.addressed, true);
   assert.deepEqual(only.mentions[0], { key: '@_user_1', actor_id: 'ou_bot', name: 'LaunchPad-Test', is_self: true });
   assert.equal(adapter.normalize(event('@_user_10 问 @_user_1')).content, '@Alex 问 @LaunchPad-Test');
+  for (const suffix of ['please check', '123', '_please']) {
+    assert.equal(adapter.normalize(event('@_user_1' + suffix)).content, '@LaunchPad-Test' + suffix);
+    assert.equal(adapter.normalize(event('@_user_1' + suffix)).command_text, suffix);
+  }
   const binding = adapter.normalize(event('@_user_1 /bind'));
   assert.equal(binding.content, '@LaunchPad-Test /bind'); assert.equal(binding.command_text.trim(), '/bind');
   const postMessage = event(''); postMessage.event.message.message_type = 'post';
@@ -247,6 +251,37 @@ test('self mentions retain visible names and verified targets in text and rich p
   mentions[0].name = '@_user_10';
   assert.equal(adapter.normalize(event('@_user_1')).content, '@@_user_10', 'replacement names are not expanded again');
   assert.equal(adapter.normalize(postMessage).content, '@@_user_10 请回复 @Alex');
+});
+
+test('binding commands adjacent to self mentions stay sensitive in live and historical text and rich posts', async t => {
+  const f = await channelFixture(t), adapter = f.service.adapter(f.service.connector(f.id));
+  for (const type of ['text', 'post']) for (const command of ['/bind', '/confirm', '/reauth', '绑定', '确认绑定', '重新认证']) {
+    const text = command + ' FSB-ABCDEFGH12';
+    const raw = JSON.stringify(type === 'text' ? { text: '@_user_1' + text }
+      : { zh_cn: { content: [[{ tag: 'at', user_id: '@_user_1' }, { tag: 'text', text }]] } });
+    const mentions = [{ key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'LaunchPad-Test' }];
+    const live = adapter.normalize(envelope('', { message: { chat_id: 'oc_binding_mentions', message_type: type, content: raw, mentions } }));
+    assert.equal(live.command_text, text);
+    const chat = f.service.ledger.accept(live);
+    f.wire.state.history = () => Response.json({ code: 0, data: { items: [{ message_id: 'history-' + live.message_id, msg_type: type,
+      body: { content: raw }, mentions: [{ key: '@_user_1', id: 'ou_bot', id_type: 'open_id', name: 'LaunchPad-Test' }],
+      sender: { id: live.actor_id, sender_type: 'user', tenant_key: live.actor_tenant }, create_time: String(live.created_at) }], has_more: false } });
+    const history = await adapter.history({ container_type: 'chat', container_id: chat.chat_id, start_time: 0, end_time: Date.now() });
+    assert.equal(history.items[0].command_text, text);
+    f.service.ledger.merge(chat, history.items[0], 'history');
+    for (const id of [live.message_id, history.items[0].message_id]) {
+      const stored = f.h.store.get('SELECT sensitive FROM channel_messages WHERE chat_id=? AND message_id=?', chat.id, id);
+      assert.equal(stored.sensitive, 1, type + ' ' + command + ' ' + id);
+      const view = f.service.ledger.query(chat.id, { message_id: id }).messages[0];
+      assert.equal(view.content, '[敏感消息已隐藏]');
+      assert.equal(view.mentions, undefined); assert.equal(view.command_text, undefined);
+    }
+    f.service.ledger.merge(chat, { ...history.items[0], deleted: true }, 'live');
+    const id = history.items[0].message_id;
+    const sealed = f.h.store.get('SELECT payload FROM channel_messages WHERE chat_id=? AND message_id=?', chat.id, id).payload;
+    const recalled = f.h.store.secrets.open(sealed, 'channel-message:' + chat.id + ':' + id);
+    assert.equal(recalled.command_text, ''); assert.equal(recalled.raw_content, ''); assert.deepEqual(recalled.mentions, []);
+  }
 });
 
 test('history mentions use the same names as live ingress and disappear from recalled or sensitive local views', async t => {
