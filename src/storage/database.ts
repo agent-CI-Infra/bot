@@ -35,9 +35,20 @@ import { serviceBindingStorage } from '../channels/service-bindings.js';
 import { workspaceStorage } from '../projects/workspace-cleanup.js';
 
 export type Row = Record<string, any>;
+export interface StoreOptions { slowSqlMs?: number; log?: (line: string) => void; now?: () => number }
 // WAL files keep the largest size they ever reached; after a checkpoint resets the log, SQLite truncates it to this.
 // The manager's ledger uses the same limit (manager/projects.mjs).
 export const walSizeLimit = 512 * 1024 * 1024;
+/** SQL shape without parameter or literal values, for slow-statement logs. */
+export function sqlFingerprint(sql: string): string {
+  const normalized = sql
+    .replace(/--[^\r\n]*|\/\*[\s\S]*?(?:\*\/|$)|[xX]'(?:''|[^'])*'?|'(?:''|[^'])*'?|"(?:""|[^"])*"?|\b(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/g,
+      token => (token.startsWith('--') || token.startsWith('/*') ? ' ' : '?'))
+    .replace(/\s+/g, ' ')
+    .replace(/(?:\?\s*,\s*){2,}\?/g, '?,?...')
+    .trim();
+  return normalized.length > 240 ? normalized.slice(0, 240) + '...' : normalized;
+}
 export class Store {
   readonly db: DatabaseSync;
   readonly secrets: SecretBox;
@@ -45,7 +56,9 @@ export class Store {
   readonly trajectories: Trajectories;
   private readonly authorizationGuard = new AsyncLocalStorage<() => void>();
   private transactionDepth = 0;
-  constructor(path: string, key: Buffer) {
+  private transactionStatements = 0;
+  private transactionSlowReported = false;
+  constructor(path: string, key: Buffer, private readonly options: StoreOptions = {}) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
     if (path !== ':memory:') chmodSync(path, 0o600);
@@ -231,11 +244,26 @@ export class Store {
     // Workflows became the Manager and project configuration (#207); an upgraded database moves them once.
     migrateWorkflows(this);
   }
-  get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
-  all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }
+  private get now() { return this.options.now ?? (() => performance.now()); }
+  private logSlow(ms: number, op: string, detail: string | (() => string)) {
+    if (ms < (this.options.slowSqlMs ?? 100)) return false;
+    const text = typeof detail === 'function' ? detail() : detail;
+    (this.options.log ?? console.warn)(`[slow-sql] ${Math.round(ms)} ms ${op} ${text}`);
+    return true;
+  }
+  private measure<T>(op: 'get' | 'all' | 'run', sql: string, fn: () => T): T {
+    if (this.transactionDepth) this.transactionStatements++;
+    const started = this.now();
+    try { return fn(); }
+    finally {
+      if (this.logSlow(this.now() - started, op, () => sqlFingerprint(sql)) && this.transactionDepth) this.transactionSlowReported = true;
+    }
+  }
+  get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.measure('get', sql, () => this.db.prepare(sql).get(...args)); }
+  all(sql: string, ...args: SQLInputValue[]): Row[] { return this.measure('all', sql, () => this.db.prepare(sql).all(...args)); }
   run(sql: string, ...args: SQLInputValue[]) {
     if (!this.transactionDepth) this.authorizationGuard.getStore()?.();
-    return this.db.prepare(sql).run(...args);
+    return this.measure('run', sql, () => this.db.prepare(sql).run(...args));
   }
   withAuthorizationGuard<T>(guard: () => void, fn: () => T): T { return this.authorizationGuard.run(guard, fn); }
   checkAuthorization(): void { this.authorizationGuard.getStore()?.(); }
@@ -246,11 +274,32 @@ export class Store {
       catch (error) { this.db.exec('ROLLBACK TO ' + savepoint); this.db.exec('RELEASE ' + savepoint); throw error; }
     }
     this.authorizationGuard.getStore()?.();
+    const txStarted = this.now();
     this.db.exec('BEGIN IMMEDIATE');
-    this.transactionDepth++;
-    try { const result = fn(); this.db.exec('COMMIT'); return result; }
-    catch (error) { this.db.exec('ROLLBACK'); throw error; }
-    finally { this.transactionDepth--; }
+    let reported = this.logSlow(this.now() - txStarted, 'begin', 'BEGIN IMMEDIATE');
+    this.transactionDepth = 1;
+    this.transactionStatements = 0;
+    this.transactionSlowReported = false;
+    let commitMs = 0, committed = false;
+    try {
+      const result = fn();
+      const commitStarted = this.now();
+      this.db.exec('COMMIT');
+      commitMs = this.now() - commitStarted;
+      committed = true;
+      if (this.logSlow(commitMs, 'commit', 'COMMIT')) reported = true;
+      return result;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    } finally {
+      const statements = this.transactionStatements, childReported = this.transactionSlowReported;
+      this.transactionDepth = 0;
+      this.transactionStatements = 0;
+      this.transactionSlowReported = false;
+      const totalMs = this.now() - txStarted;
+      if (!reported && !childReported) this.logSlow(totalMs, 'transaction', () => `(${statements ? `${statements} statements, ` : ''}${committed ? `commit ${Math.round(commitMs)} ms` : 'rolled back'})`);
+    }
   }
   // Some tables belong to services that create them on construction; deletions skip the ones this process has not made.
   hasTable(name: string): boolean { return !!this.get("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", name); }

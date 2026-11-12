@@ -40,7 +40,12 @@ export class PayloadMigration {
   private readonly repositories = new Map<string, string | null>();
   // Records moved per slice in the last minute: [time, records].
   private readonly recent: [number, number][] = [];
-  constructor(private readonly store: Store, private readonly options: { readMs?: number; pauseMs?: number; openFiles?: number; idleMs?: number; log?: (line: string) => void } = {}) {}
+  constructor(private readonly store: Store, private readonly options: { readMs?: number; pauseMs?: number; openFiles?: number; idleMs?: number; slowSliceMs?: number; log?: (line: string) => void; now?: () => number } = {}) {}
+
+  private get now() { return this.options.now ?? (() => performance.now()); }
+  private logSlowSlice(phase: string, step: 'read' | 'verify' | 'apply', ms: number, rows: number) {
+    if (ms >= (this.options.slowSliceMs ?? 200)) (this.options.log ?? console.warn)(`[slow-migration] ${phase} ${step} ${Math.round(ms)} ms (${rows} rows)`);
+  }
 
   /** Starts the background work; call after the service listens. */
   start(): void { if (!this.running) this.running = this.loop().catch(error => (this.options.log ?? console.error)('[migration] stopped: ' + String(error))); }
@@ -77,37 +82,43 @@ export class PayloadMigration {
     const next = this.store.db.prepare(`SELECT rowid AS migration_rowid,* FROM ${phase.table} WHERE rowid>? ORDER BY rowid LIMIT 1`);
     let total = 0;
     while (!this.stopped) {
-      const started = performance.now(), moves: Move[] = [];
-      let cursor = progress.cursor, skipped = 0, failed = 0, error: string | null = null;
+      const started = this.now(), moves: Move[] = [];
+      let cursor = progress.cursor, skipped = 0, failed = 0, readRows = 0, error: string | null = null;
       // Read at least one row, then until the slice's time is used; a single row is bounded by its own size.
-      for (let read = 0; read === 0 || performance.now() - started < (this.options.readMs ?? 25) && moves.length < 200; read++) {
+      for (let read = 0; read === 0 || this.now() - started < (this.options.readMs ?? 25) && moves.length < 200; read++) {
         const row = next.get(cursor) as Row | undefined;
         if (!row) break;
+        readRows++;
         cursor = Number(row.migration_rowid);
         try { const move = phase.move(row); if (move) moves.push(move); else skipped++; }
         catch (failure) { failed++; error = `${phase.table} rowid ${cursor}: ${String((failure as Error)?.message ?? failure).slice(0, 300)}`; }
       }
+      this.logSlowSlice(phase.name, 'read', this.now() - started, readRows);
       if (cursor === progress.cursor) { progress.finished_at ??= new Date().toISOString(); this.save(state); return total; }
       // The files reach the disk before any row stops holding its payload; each record is read back against its hash.
       await Promise.all([...new Set(moves.map(move => move.refs.at(-1)!).filter(Boolean))].map(ref => this.store.trajectories.sync(ref)));
+      const verifyStarted = this.now();
       const verified = moves.filter(move => {
         try { for (const ref of move.refs) this.store.trajectories.read(ref); for (const blob of move.blobs ?? []) this.store.trajectories.getBlob(blob); return true; }
         catch (failure) { failed++; error = String((failure as Error).message).slice(0, 300); return false; }
       });
+      this.logSlowSlice(phase.name, 'verify', this.now() - verifyStarted, moves.length);
       const now = Date.now();
       this.recent.push([now, verified.length]);
       while (this.recent.length && this.recent[0]![0] < now - 60_000) this.recent.shift();
       state.rate = Math.round(this.recent.reduce((sum, [, count]) => sum + count, 0) / Math.max(1, (now - this.recent[0]![0]) / 1000));
+      const applyStarted = this.now();
       this.store.transaction(() => {
         for (const move of verified) move.apply();
         Object.assign(progress, { cursor, migrated: progress.migrated + verified.length, skipped: progress.skipped + skipped, failed: progress.failed + failed,
           bytes: progress.bytes + verified.reduce((sum, move) => sum + move.bytes, 0), last_error: error ?? progress.last_error, finished_at: null });
         this.save(state);
       });
+      this.logSlowSlice(phase.name, 'apply', this.now() - applyStarted, verified.length);
       total += verified.length;
       this.closeTouched(this.options.openFiles ?? 32);
       // Leave at least as much time to everything else as this slice took.
-      await this.pause(Math.max(this.options.pauseMs ?? 10, performance.now() - started));
+      await this.pause(Math.max(this.options.pauseMs ?? 10, this.now() - started));
     }
     return total;
   }

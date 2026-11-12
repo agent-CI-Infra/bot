@@ -86,8 +86,15 @@ export function verifyRunToken(s: Store, token: unknown, expect: Partial<RunBind
   if (capability && !granted.includes(capability)) deny('run_token_capability_denied');
   return { id: String(row.id), tenant_id: String(row.tenant_id), project_id: String(row.project_id), task_id: String(row.task_id), run_id: String(row.run_id), lease_epoch: Number(row.lease_epoch), capabilities: granted, expires_at: Number(row.expires_at) };
 }
-/** Sliding expiry: a token stays valid only while its run keeps passing control-plane guards. */
-export function touchRunToken(s: Store, id: string, ttlMs = 15 * 60_000, at = Date.now()) {
+/**
+ * Sliding expiry: a token stays valid only while its run keeps passing control-plane guards.
+ * Revocation and expiry are checked on every call; the database row is rewritten only once at least
+ * minExtendMs of the TTL window has elapsed (default: 30 s, bounded to half of ttlMs for short TTLs).
+ */
+export function touchRunToken(s: Store, id: string, ttlMs = 15 * 60_000, at = Date.now(), minExtendMs = Math.min(30_000, Math.floor(ttlMs / 2))) {
+  const row = s.get('SELECT revoked_at,expires_at FROM role_run_tokens WHERE id=?', id);
+  if (!row || row.revoked_at !== null || Number(row.expires_at) <= at) return false;
+  if (at + ttlMs - Number(row.expires_at) < minExtendMs) return true;
   return Number(s.run('UPDATE role_run_tokens SET expires_at=? WHERE id=? AND revoked_at IS NULL AND expires_at>?', at + ttlMs, id, at).changes) > 0;
 }
 export function revokeRunTokens(s: Store, runId: string, reason: string, at = Date.now()) {

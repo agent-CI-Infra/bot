@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
 import { boardTask, boardFixtures, boardRelease } from './board-fixtures.mjs';
+import { boardStorage } from '../dist/board/storage.js';
 const query=filters=>'/api/board/cards?filters='+encodeURIComponent(JSON.stringify(filters));
 async function fixture(t){const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');return {h,admin,a};}
 test('board projects one card per workflow, keeps published PR separate and omits raw task JSON',async t=>{
@@ -260,4 +261,46 @@ test('reply tasks get cards of their own, and the board lists the work types; vi
   const tasks=(await admin('/api/board/cards/101/issue/3/tasks?filters='+encodeURIComponent(JSON.stringify([{field:'category',value:'reply'}])))).value.tasks;
   assert.deepEqual(tasks.map(t=>t.id),['docs-new','docs-old']);
   assert.equal((await admin('/api/board/cards/101/issue/3/tasks')).value.tasks.length,4);
+});
+
+test('task update triggers skip JSON projection on status/lease/updated_at changes while keeping last_seen, input and published PR projections current',async t=>{
+  const {h}=await fixture(t);boardFixtures(h.store);
+  // Simulate upgrading a pre-change database that still had the unconditional board_tasks_update trigger.
+  h.store.db.exec('CREATE TRIGGER board_tasks_update AFTER UPDATE ON tasks BEGIN SELECT 1; END;');
+  boardStorage(h.store);
+  const triggers=h.store.all("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='tasks' AND name LIKE 'board_tasks%' ORDER BY name").map(r=>r.name);
+  assert.deepEqual(triggers,['board_tasks_insert','board_tasks_update_input','board_tasks_update_published','board_tasks_update_seen']);
+
+  const compiledTriggers=ops=>ops.filter(r=>r.opcode==='Init'&&String(r.p4||'').startsWith('-- TRIGGER ')).map(r=>String(r.p4).slice('-- TRIGGER '.length));
+  // Claim/workspace updates fire zero triggers; phase/attempt updates fire zero board_tasks_* triggers.
+  const claimOps=h.store.all("EXPLAIN UPDATE tasks SET claim_token='c-next',workspace_id='w-next' WHERE id='reviewing'");
+  assert.deepEqual(compiledTriggers(claimOps),[]);
+  const phaseOps=h.store.all("EXPLAIN UPDATE tasks SET phase='model',claim_token='c-next',attempt=2 WHERE id='reviewing'");
+  assert.deepEqual(compiledTriggers(phaseOps).filter(name=>name.startsWith('board_tasks')),[]);
+
+  // Status + updated_at updates do not compile board_tasks_update_input and never run json_valid/json_extract on task input.
+  const statusOps=h.store.all("EXPLAIN UPDATE tasks SET status='succeeded',updated_at='2026-12-10T00:00:00.000Z' WHERE id='reviewing'");
+  assert.equal(compiledTriggers(statusOps).includes('board_tasks_update_input'),false);
+  // Only board_tasks_update_seen and board_tasks_update_published compile, and published guards on kind='development.issue' AND result IS NOT NULL before any JSON work.
+  assert.equal(statusOps.some(r=>String(r.p4||'').includes('$.pull_request')||String(r.p4||'').includes('$.issue')),false,'input JSON paths are never compiled into status/updated_at updates');
+
+  // Advancing status + updated_at refreshes last_seen while keeping title/state/draft intact, even without touching input.
+  const before=h.store.get("SELECT * FROM board_objects WHERE repository_id='101' AND object_type='pr' AND object_number=2");
+  const nextSeen='2026-12-15T08:00:00.000Z';
+  h.store.run("UPDATE tasks SET status='succeeded',updated_at=? WHERE id='reviewing'",nextSeen);
+  const afterSeen=h.store.get("SELECT * FROM board_objects WHERE repository_id='101' AND object_type='pr' AND object_number=2");
+  assert.equal(afterSeen.last_seen,nextSeen);
+  assert.deepEqual([afterSeen.title,afterSeen.github_state,afterSeen.draft],[before.title,before.github_state,before.draft]);
+
+  // Updating input updates the projected object metadata.
+  h.store.run("UPDATE tasks SET input=?,created_at='2026-12-16T00:00:00.000Z',updated_at='2026-12-16T00:00:00.000Z' WHERE id='reviewing'",
+    JSON.stringify({pull_request:{number:2,title:'Renamed PR title',state:'closed',draft:true}}));
+  const afterInput=h.store.get("SELECT * FROM board_objects WHERE repository_id='101' AND object_type='pr' AND object_number=2");
+  assert.deepEqual([afterInput.title,afterInput.github_state,afterInput.draft],['Renamed PR title','closed',1]);
+
+  // Publishing a PR from development.issue projects the new PR immediately, and later updated_at changes advance its last_seen.
+  h.store.run("UPDATE tasks SET status='pr_opened',result=?,updated_at='2026-12-17T01:00:00.000Z' WHERE id='developing'",JSON.stringify({pr_number:88}));
+  assert.equal(h.store.get("SELECT last_seen FROM board_objects WHERE repository_id='101' AND object_type='pr' AND object_number=88")?.last_seen,'2026-12-17T01:00:00.000Z');
+  h.store.run("UPDATE tasks SET updated_at='2026-12-18T01:00:00.000Z' WHERE id='developing'");
+  assert.equal(h.store.get("SELECT last_seen FROM board_objects WHERE repository_id='101' AND object_type='pr' AND object_number=88")?.last_seen,'2026-12-18T01:00:00.000Z');
 });
