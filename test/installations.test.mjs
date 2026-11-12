@@ -231,12 +231,15 @@ test('a background check of stale integration chips updates them in place and ne
   const settle = () => new Promise(r => setTimeout(r, 50)), gate = line => line.querySelectorAll('[data-integration]').map(chip => chip.textContent);
   const once = ['GET /api/integrations', 'GET /api/installations?offset=0&limit=50', 'POST /api/integrations/check'];
   await page.run('render()'); const [line] = page.$('rows').querySelectorAll('.row');
+  const globalLine = page.run("var globalLine = element('article', '', 'global-project-row'); globalLine.dataset.repositoryId = '101'; globalLine.append(...installedIntegration({ gate_state: 'configured' }, { board_enabled: false })); document.getElementById('global-project-test').append(globalLine); globalLine;");
   assert.deepEqual(gate(line), ['门禁已配置']);
+  assert.deepEqual(gate(globalLine), ['门禁已配置']);
   const boardChip = line.querySelector('[data-board-status]'); assert.equal(boardChip.textContent, '看板已关闭');
   await settle();
   // The check ran once and only the chips changed, although the answer is still stale: the same row stays on the list.
   assert.equal(page.run('startCalls'), 0); assert.deepEqual(page.requests, once);
   assert.equal(page.$('rows').querySelector('.row'), line); assert.deepEqual(gate(line), ['门禁已生效']);
+  assert.deepEqual(gate(globalLine), ['门禁已生效']);
   assert.equal(line.querySelector('[data-board-status]'), boardChip);
   // A failed check leaves the chips as they are and is not retried either.
   check = () => [502, { error: 'github_unavailable' }]; page.requests.length = 0;

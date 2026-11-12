@@ -3,7 +3,7 @@ import vm from 'node:vm';
 
 // Loads console scripts from static/ into a sandbox with a small stand-in DOM: enough to load the scripts and draw
 // lists, so page logic can be tested without a browser. Selectors support tags, #id, .class, [attr], [attr=value], descendant and
-// `:scope >` steps.
+// `:scope >` steps and comma-separated selector lists.
 class FakeElement {
   constructor(tagName) {
     Object.assign(this, { tagName: tagName.toUpperCase(), id: '', className: '', textContent: '', hidden: false, children: [], parentElement: null,
@@ -57,16 +57,16 @@ function simple(element, part) {
     && [...attributes.matchAll(/\[([\w-]+)(?:=([\w-]+))?\]/g)].every(([, name, value]) => element.hasAttribute(name) && (value === undefined || element.getAttribute(name) === value));
 }
 function select(root, selector) {
-  const parts = selector.trim().split(/\s+/), found = [];
+  const selectors = selector.split(',').map(value => value.trim().split(/\s+/)), found = [];
   // Matched right to left; a step before `>` must be the parent, any other step some ancestor below the root.
-  const fits = (element, index) => {
+  const fits = (element, parts, index) => {
     if (!simple(element, parts[index])) return false;
     if (index === 0) return true;
-    if (parts[index - 1] === '>') return parts[index - 2] === ':scope' ? element.parentElement === root : !!element.parentElement && fits(element.parentElement, index - 2);
-    for (let parent = element.parentElement; parent && parent !== root; parent = parent.parentElement) if (fits(parent, index - 1)) return true;
+    if (parts[index - 1] === '>') return parts[index - 2] === ':scope' ? element.parentElement === root : !!element.parentElement && fits(element.parentElement, parts, index - 2);
+    for (let parent = element.parentElement; parent && parent !== root; parent = parent.parentElement) if (fits(parent, parts, index - 1)) return true;
     return false;
   };
-  const walk = node => { for (const child of node.children) { if (fits(child, parts.length - 1)) found.push(child); walk(child); } };
+  const walk = node => { for (const child of node.children) { if (selectors.some(parts => fits(child, parts, parts.length - 1))) found.push(child); walk(child); } };
   walk(root); return found;
 }
 
