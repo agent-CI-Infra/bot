@@ -108,7 +108,7 @@ try{
       if(denied) result={error:denied};
       // The control plane decides the result; only its explicit finish ends this session with the validated submission.
       else if(controlTools.has(name)&&!agent){const reply=await controlTool(name,args,signal);result=reply.result;if(reply.finish===true){finished=reply.result;submitted=true;}}
-      else if(['github_read','github_search','read_job_log','read_task_history','read_playbook','select_playbooks','record_progress','search_project_memory','read_project_memory','remember_project_memory'].includes(name)||Object.hasOwn(platformWrites,name)&&!agent)result=await repositoryTool(name,args,signal);
+      else if(['github_read','github_search','read_job_log','read_task_history','record_progress','search_project_memory','read_project_memory','remember_project_memory'].includes(name)||Object.hasOwn(platformWrites,name)&&!agent)result=await repositoryTool(name,args,signal);
       else if(finishTools.has(name)&&!agent){finished=args;result={finished:true};}
       else if(name==='create_pull_request'&&!agent){
         result=await createPullRequest(args);

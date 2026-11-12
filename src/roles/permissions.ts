@@ -15,7 +15,6 @@ const legacyItems: PermissionItem[] = [
   access('conversation_history', '当前会话记录', ['search_conversation_history', 'read_conversation_message', 'read_conversation_summary'], [], '只查询当前已授权会话的本地记录和摘要；不会联网回源，不开放其他群或私信。'),
   access('task_management', '任务管理', ['list_managed_tasks', 'read_managed_task'], ['create_task', 'manage_task'], '读取获准任务，或创建、追加、继续、暂停和结束自己拥有或已分派的事项。默认由自己执行；选择其他角色另需委派权限，不增加 GitHub 写权限。'),
   action('scope_differences', '记录范围差异', ['record_scope_difference'], '登记实际修改与原计划的差异及证据，不改变任务目标或授权。'),
-  access('playbooks', '操作指南', ['read_playbook'], ['select_playbooks'], '读取指南，或登记本次采用的指南。'),
   access('project_memory', '项目知识', ['search_project_memory', 'read_project_memory'], ['remember_project_memory'], '查询项目知识，或提交知识候选；仍受知识本身的可见范围限制。'),
   access('role_memory', '角色知识', ['search_role_memory', 'read_role_memory'], ['remember_role_memory'], '查询或记录当前角色的知识。'),
   access('skills', '技能包', ['read_skill'], [], '读取绑定在当前角色上的技能文件。'),
@@ -40,7 +39,7 @@ const legacyItems: PermissionItem[] = [
 export const basicTools = ['read_child_tasks','wait_for_children','read_ci_evidence','read_recovery_source','read_version_context','read_task_record','read_task_history','read_evidence','record_progress','record_scope_difference',
   'search_conversation_history','read_conversation_message','read_conversation_summary',
   'list_managed_tasks','read_managed_task','create_task','manage_task','start_own_task','continue_own_task','list_own_tasks','read_own_task','manage_own_task',
-  'read_playbook','select_playbooks','search_role_memory','read_role_memory','remember_role_memory','read_skill','read_related_artifact',
+  'search_role_memory','read_role_memory','remember_role_memory','read_skill','read_related_artifact',
   'read_coordination','acknowledge_coordination','read_stage_schedule','plan_task','start_agent','dispatch',
   'nominate_delivery','finish_coordination','submit_followup_plan','submit_retry_decision','submit_role_result','submit_delivery','finish','finish_review',
   'finish_analysis','finish_observation','finish_release_notes','submit_gate_plan','submit_acceptance',
@@ -100,7 +99,7 @@ function customResource(p:RolePermissions,resource:string):void {
 
 /** Old rows and run snapshots keep their original body. Reading a row converts its permission meaning, not its history. */
 export function normalizePermissions(value: RolePermissions, service = false): RolePermissions {
-  if (Object.hasOwn(value,'computer')) return { ...empty(), ...value };
+  if (Object.hasOwn(value,'computer')) { const { playbooks, ...active } = value; return { ...empty(), ...active }; }
   const p = empty();
   const repo = value.repository ?? 'none', commands = value.commands ?? 'deny';
   p.computer = repo === 'write' && commands === 'allow' ? 'allow' : repo === 'none' && commands === 'deny' ? 'deny' : 'custom';
@@ -173,6 +172,7 @@ export function updatePermissions(base: RolePermissions, input: RolePermissions,
   return p;
 }
 export function validPermissionInput(key: string, mode: unknown, base: RolePermissions): boolean {
+  if (key === 'playbooks') return ['none','read','write'].includes(String(mode)); // Old clients may echo a retired field, never grant tools.
   if (key.startsWith('legacy_')) return base[key] === mode;
   if (mode === 'custom') return normalizePermissions(base)[key] === 'custom';
   const item = permissionItems.find(item => item.id === key) ?? legacyItems.find(item => item.id === key);

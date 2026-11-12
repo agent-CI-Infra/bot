@@ -3,7 +3,7 @@ import { taskTraceAccess } from '../memory/access.js';
 import { checkpoint } from '../tasks/checkpoint.js';
 import {runTeam} from './team.js';
 import {roleWorkspaces} from './workspace.js';
-import {taskTools} from '../tasks/playbooks.js';
+import {taskTools} from '../tasks/record-tools.js';
 import {TaskRecords} from '../tasks/service.js';
 import {memoryTools,memoryTool} from '../memory/project.js';
 import type {Workspace} from '../agent/workspace.js';

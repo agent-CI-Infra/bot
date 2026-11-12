@@ -90,7 +90,7 @@ try {
   assert.deepEqual([qa.recovery_mode, done.status], ['fresh_evaluation', 'completed']);
   assert.deepEqual(roles.instances.map(i => i.role).sort(), ['dev', 'manager', 'qa']);
   const piState = await fake('pi-state'), controllerTools = [...new Set(piState.requests.filter(r => r.role === 'controller').flatMap(r => r.tools))].sort();
-  assert.deepEqual(controllerTools, ['acknowledge_coordination', 'delegate_role', 'list_project_tasks', 'nominate_delivery', 'read_coordination', 'read_playbook', 'read_task_history', 'read_task_record', 'record_progress', 'request_task_coordination', 'select_playbooks', 'wait_for_tasks']);
+  assert.deepEqual(controllerTools, ['acknowledge_coordination', 'delegate_role', 'list_project_tasks', 'nominate_delivery', 'read_coordination', 'read_task_history', 'read_task_record', 'record_progress', 'request_task_coordination', 'wait_for_tasks']);
   passed('a real Pi controller in the project computer delegates dev, reads its result, nominates; fresh QA completes the task',
     { task: first.id, controller_run: manager.id, snapshot: manager.role_snapshot, pi: started, denied: denied.map(d => d.reason), qa_run: qa.id, controller_tools: controllerTools });
 

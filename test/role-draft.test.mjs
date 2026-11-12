@@ -42,7 +42,7 @@ test('ordered stage constraints stay atomic while other stage fields merge indep
   assert.equal(result.draft.required_stages[0].title, 'Independent QA');
 });
 test('independent skill edits are merged by stable id and conflicting additions need a choice', () => {
-  const before = base(), local = base(), remote = base(); local.skills = [{ id: 'a/b', source: { type: 'inline', files: [] } }]; remote.skills = [{ id: 'a/b', source: { type: 'builtin', playbooks: ['review'] } }];
+  const before = base(), local = base(), remote = base(); local.skills = [{ id: 'a/b', source: { type: 'inline', files: [] } }]; remote.skills = [{ id: 'a/b', source: { type: 'repository', commit: 'a'.repeat(40), paths: ['.agents/skills/review/SKILL.md'] } }];
   const result = merge(before, local, remote), conflict = result.conflicts[0];
   assert.equal(conflict.id, JSON.stringify(['skills', 'a/b']));
   assert.equal(merge(before, local, remote, { [conflict.id]: 'draft' }).draft.skills[0].source.type, 'inline');

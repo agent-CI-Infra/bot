@@ -1,8 +1,9 @@
+import { legacySkillBinding } from './skill-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -213,7 +214,6 @@ test('two roles resolve different supported models, pinned skills and harnesses;
   f.s.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)', 'r', 'b'.repeat(40), JSON.stringify({ '.agents/skills/sec/SKILL.md': '---\ndescription: security\n---\nCheck trust boundaries.' }), 'now');
   const config = f.put({ skills: [
     { id: 'review-kit', source: { type: 'inline', files: [{ path: 'checklist.md', content: 'Check boundaries and error paths.' }] } },
-    { id: 'guides', source: { type: 'builtin', playbooks: ['review', 'browser-verification'] } },
     { id: 'repo-sec', source: { type: 'repository', commit: 'b'.repeat(40), paths: ['.agents/skills/sec/SKILL.md'] } }],
     roles: [{ role_id: 'reviewer', harness_ref: { id: 'process' }, model_profile_ref: { model_id: 'm2' }, skill_bundle_ref: { id: 'review-kit' } },
       { role_id: 'test', skill_bundle_ref: { id: 'repo-sec' } }] });
@@ -347,7 +347,7 @@ test('the project controller runs on the Pi harness, delegates by references and
   // The controller session is its own restricted workspace with only control-plane tools.
   const [session] = [...runner.spaces.values()].filter(sp => sp.parsed);
   assert.notEqual(session.id, workspace.task.workspace_id);
-  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['acknowledge_coordination', 'create_task', 'delegate_role', 'finish_coordination', 'list_managed_tasks', 'list_project_tasks', 'manage_task', 'nominate_delivery', 'plan_task', 'read_child_tasks', 'read_coordination', 'read_managed_task', 'read_playbook', 'read_stage_schedule', 'read_task_history', 'read_task_record', 'record_progress', 'record_scope_difference', 'relate_task', 'request_task_coordination', 'select_playbooks', 'set_task_priority', 'wait_for_children', 'wait_for_tasks']);
+  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['acknowledge_coordination', 'create_task', 'delegate_role', 'finish_coordination', 'list_managed_tasks', 'list_project_tasks', 'manage_task', 'nominate_delivery', 'plan_task', 'read_child_tasks', 'read_coordination', 'read_managed_task', 'read_stage_schedule', 'read_task_history', 'read_task_record', 'record_progress', 'record_scope_difference', 'relate_task', 'request_task_coordination', 'set_task_priority', 'wait_for_children', 'wait_for_tasks']);
   assert.deepEqual(session.parsed.control_tools.sort(), session.parsed.tools.map(t => t.function.name).sort());
   assert.deepEqual(session.parsed.capabilities.workspace, { read: false, write: false, notes: false, shell: false });
   for (const body of f.requests.filter(isController)) for (const name of ['write_file', 'run_command', 'create_pull_request', 'submit_acceptance']) assert.ok(!body.tools.some(t => t.function.name === name));
@@ -647,4 +647,102 @@ test('Manager final reserved turn still permits non-delivery disposition instead
  await assert.rejects(runTeam(f.spec,{prepare:async()=>{}}),e=>e.code==='manager_deferred');
  assert.equal(f.requests.at(-1).tool_choice,'auto');assert.ok(f.requests.at(-1).tools.some(t=>t.function.name==='finish_coordination'));
  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='delivery_nominated'").n,0);
+});
+
+
+test('legacy bound files reopen and save as ordinary Skills without losing provenance or widening permissions', async t => {
+  const f = await fixture(t, () => call('finish', {})), path = 'playbooks/review.md', content = 'Previously pinned instructions, not a current catalog.';
+  const initial = f.put({ skills: [{ id: 'legacy', source: { type: 'inline', files: [{ path, content }] } }], roles: [{ role_id: 'reviewer', skill_bundle_ref: { id: 'legacy' } }] });
+  const old = legacySkillBinding(f.s, 'r', initial, 'legacy'), original = structuredClone(old.skills[0]);
+  const reopened = roleApi(f.s, admin, 'GET', rolesUrl, {});
+  assert.equal(reopened.playbooks, undefined); assert.deepEqual(reopened.skill_inputs[0].source, { type: 'inline', files: [{ path, content }] });
+  assert.equal(reopened.configuration.skills[0].source.type, 'inline');
+  assert.equal(reopened.configuration.skills[0].source.origin.content_hash, original.content_hash);
+  assert.equal(reopened.configuration.skills[0].content_hash, original.content_hash);
+  assert.equal(JSON.parse(f.s.get("SELECT source FROM skill_bundle_revisions WHERE id='legacy' AND revision=1").source).type, 'builtin');
+  const before = resolveRole(f.s, 'r', 'reviewer', 'task.request').snapshot;
+  const saved = f.put({ skills: [{ id: 'legacy', source: { type: 'builtin', playbooks: ['review'] } }], roles: [{ role_id: 'reviewer', skill_bundle_ref: { id: 'legacy' }, permissions: { ...initial.roles.find(r => r.role_id === 'reviewer').permissions, playbooks: 'write' } }] });
+  assert.equal(saved.skills[0].revision, 2); assert.equal(saved.skills[0].source.type, 'inline'); assert.deepEqual(saved.skills[0].files, original.files);
+  assert.equal(saved.skills[0].source.origin.content_hash, original.content_hash);
+  const after = resolveRole(f.s, 'r', 'reviewer', 'task.request').snapshot;
+  assert.deepEqual(before.capability.tools, after.capability.tools); assert.equal(after.capability.permissions.playbooks, undefined);
+  assert.deepEqual(skillFiles(f.s, 'r', before.skills), skillFiles(f.s, 'r', after.skills));
+  const roundTrip = roleApi(f.s, admin, 'GET', rolesUrl, {});
+  const again = f.put({ skills: roundTrip.skill_inputs, roles: [{ role_id: 'reviewer', skill_bundle_ref: { id: 'legacy' } }] });
+  assert.deepEqual(again.skills, saved.skills);
+  rejects(() => f.put({ expected_revision: 1 }), 'role_configuration_conflict', 'expected_revision');
+  for (const input of [{ id: 'new-binding', source: { type: 'builtin', playbooks: ['review'] } }, { id: 'legacy', source: { type: 'builtin', playbooks: ['research'] } }])
+    rejects(() => f.put({ skills: [input] }), 'retired_skill_source', 'skills[0].source.type');
+});
+
+test('a frozen legacy task and role snapshot rebuild from facts and read the actual pinned Skill through read_skill', async t => {
+  const path = 'playbooks/review.md', content = 'Retain the ORIGINAL fixed instructions.';
+  const f = await fixture(t, body => {
+    assert.ok(!body.tools.some(t => ['read_playbook','select_playbooks'].includes(t.function.name)));
+    assert.ok(!/playbook_catalog|playbook_request|Discover optional playbooks/.test(JSON.stringify(body.messages.slice(0, 2))));
+    const observed = results(body.messages).find(r => r.path === path);
+    if (!observed) return call('read_skill', { path });
+    assert.equal(observed.content, content); assert.equal(observed.sha256, createHash('sha256').update(content).digest('hex'));
+    return call('finish', { summary: 'Read the fixed original content.' });
+  });
+  const initial = f.put({ skills: [{ id: 'legacy', source: { type: 'inline', files: [{ path, content }] } }], roles: [{ role_id: 'reviewer', skill_bundle_ref: { id: 'legacy' }, persona_prompt: 'Inspect actual boundaries. Discover optional playbooks.' }] });
+  const old = legacySkillBinding(f.s, 'r', initial, 'legacy');
+  captureTaskConfiguration(f.s, 't');
+  const fixed = JSON.parse(f.s.get("SELECT snapshot FROM task_execution_configs WHERE task_id='t'").snapshot); fixed.roles = old;
+  f.s.run("UPDATE task_execution_configs SET snapshot=? WHERE task_id='t'", JSON.stringify(fixed));
+  const instance = roleInstance(f.s, f.task, 'reviewer'), previous = resolveRole(f.s, 'r', 'reviewer', 'task.request').snapshot;
+  previous.capability.tools.push('read_playbook', 'select_playbooks'); previous.skills.source = old.skills[0].source;
+  f.s.run('INSERT INTO role_snapshots VALUES(?,?,?,?,?,?,?)', 'previous-snapshot', 'r', 'reviewer', 1, 1, JSON.stringify(previous), 'now');
+  f.s.run("UPDATE role_instances SET snapshot_id='previous-snapshot',session=?,harness_state=?,runtime=?,sequence=1 WHERE id=?", JSON.stringify([{ role: 'user', content: 'playbook_catalog: obsolete' }]), '{"session_id":"obsolete"}', '{"workspace_id":"obsolete"}', instance.id);
+  f.records.progress('t', ['Original checkpoint retained'], 'Read fixed skill');
+  // Current project content may change; the interrupted task still owns its original source/version.
+  f.put({ skills: [{ id: 'legacy', source: { type: 'inline', files: [{ path, content: 'NEW instructions for new tasks' }] } }], roles: [{ role_id: 'reviewer', skill_bundle_ref: { id: 'legacy' } }] });
+  const input = { playbook_catalog: ['obsolete'], playbook_request: ['review'], task: f.records.context('t') };
+  const run = await runRole({ ...f.spec, prompt: JSON.stringify(input) }, 'reviewer');
+  assert.equal(run.instance_id, instance.id); assert.equal(run.result.summary, 'Read the fixed original content.');
+  const read = JSON.parse(f.s.get("SELECT data FROM task_history WHERE type='skill_read'").data);
+  assert.equal(read.bundle.revision, old.skills[0].revision); assert.equal(read.bundle.content_hash, old.skills[0].content_hash);
+  assert.equal(read.bundle.source.type, 'inline'); assert.equal(read.bundle.source.origin.type, 'builtin');
+  assert.ok(f.s.get("SELECT 1 FROM task_history WHERE type='role_guidance_migrated'"));
+  assert.deepEqual(f.records.get('t').progress.completed, ['Original checkpoint retained']);
+  assert.equal(JSON.parse(f.s.get("SELECT snapshot FROM role_snapshots WHERE id='previous-snapshot'").snapshot).skills.source.type, 'builtin');
+});
+
+
+test('an old live Pi session is rejected before any provider request, allowing normal workspace recovery', async t => {
+  const f = await fixture(t, () => call('finish', {}));
+  const runner = fakeRunner(), workspace = new Workspace(f.s, runner.manager, { ...f.task, workspace_id: 'f'.repeat(48) }, f.spec.redactor, async () => {}, () => {});
+  const config = { system: 'Old runtime', prompt: JSON.stringify({ playbook_catalog: ['old'] }), tools: [tool('read_playbook'), tool('finish')] };
+  await workspace.call('legacy-config', { type: 'workspace_agent_config', base64: Buffer.from(JSON.stringify(config)).toString('base64'), offset: 0, final: true });
+  await workspace.call('legacy-start', { type: 'workspace_agent_start' });
+  let requests = 0;
+  const session = roleHarness('pi').createSession({ ...f.spec, pi: { workspace, resume: true } }, { guard: async () => {}, model: {}, request: async () => { requests++; throw Error('must not reach provider'); } });
+  await assert.rejects(session.run(), e => e.code === 'execution_interrupted' && e.state === 'waiting_environment');
+  await session.close(); assert.equal(requests, 0); assert.equal(f.requests.length, 0);
+  assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status, 'running');
+});
+
+test('pre-snapshot role instances rebuild obsolete guidance while preserving task and role identity', async t => {
+  const f = await fixture(t, body => { assert.ok(!JSON.stringify(body.messages).includes('Discover optional playbooks')); return call('finish', { summary: 'continued' }); });
+  f.s.run("INSERT INTO settings VALUES('roles:r',?)", JSON.stringify({ enabled: true, harnesses: { manager: 'native' } }));
+  const instance = roleInstance(f.s, f.task, 'manager');
+  const old = JSON.parse(instance.definition); old.prompt += ' Discover optional playbooks.';
+  f.s.run("UPDATE role_instances SET snapshot_id=NULL,definition=?,session=?,sequence=1 WHERE id=?", JSON.stringify(old), JSON.stringify([{ role: 'user', content: 'playbook_catalog: obsolete' }]), instance.id);
+  const run = await runRole(f.spec, 'manager'); assert.equal(run.instance_id, instance.id); assert.equal(run.result.summary, 'continued');
+  assert.ok(f.s.get("SELECT 1 FROM task_history WHERE type='role_guidance_migrated'"));
+});
+
+
+test('rebuilding an old Pi role reaps its obsolete live mailbox before starting a new session', async t => {
+ const f=await fixture(t,()=>call('finish',{summary:'continued'}));f.put({roles:[{role_id:'manager',harness_ref:{id:'pi'}}]});
+ const runner=fakeRunner(),workspace=new Workspace(f.s,runner.manager,{...f.task,workspace_id:'e'.repeat(48)},f.spec.redactor,async()=>{},()=>{});
+ const config={system:'Old runtime',prompt:'Old catalog',tools:[tool('read_playbook'),tool('finish')]};
+ await workspace.call('legacy-config',{type:'workspace_agent_config',base64:Buffer.from(JSON.stringify(config)).toString('base64'),offset:0,final:true});
+ await workspace.call('legacy-start',{type:'workspace_agent_start'});
+ const instance=roleInstance(f.s,f.task,'manager'),row=f.s.get('SELECT snapshot FROM role_snapshots WHERE id=?',instance.snapshot_id),snapshot=JSON.parse(row.snapshot);snapshot.capability.tools.push('read_playbook');
+ f.s.run('INSERT INTO role_snapshots VALUES(?,?,?,?,?,?,?)','old-pi-snapshot','r','manager',1,1,JSON.stringify(snapshot),'now');
+ f.s.run("UPDATE role_instances SET snapshot_id='old-pi-snapshot',runtime=?,sequence=1,source_fence='',knowledge_fence='' WHERE id=?",JSON.stringify({workspace_id:workspace.task.workspace_id,generation:f.task.generation}),instance.id);
+ const run=await runRole(f.spec,'manager',undefined,undefined,{prepare:controllerWorkspace(workspace)});
+ assert.equal(run.result.summary,'continued');assert.equal(run.instance_id,instance.id);assert.equal(runner.spaces.get(workspace.task.workspace_id).alive,false);
+ assert.ok(f.requests.every(body=>!body.tools.some(t=>['read_playbook','select_playbooks'].includes(t.function.name))));
 });

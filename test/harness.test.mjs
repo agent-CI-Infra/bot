@@ -36,3 +36,21 @@ test('managed session preserves a Manager stop reason instead of converting it t
  const session=managedSession(async signal=>{started();await new Promise(resolve=>signal.addEventListener('abort',resolve,{once:true}));return {summary:'late result'};},event=>events.push(event));
  const run=session.run();await bound;await session.cancel(reason);await assert.rejects(run,error=>error===reason);assert.equal(events.at(-1).code,'manager_execution_stopped');await session.close();
 });
+
+
+test('ACP loads an ordinary pinned Skill over MCP and rebuilds an obsolete external session without old tools', async t => {
+ const f=fixture(t,{FIXTURE_SKILL:'true'}),url=new URL('http://local/api/repositories/r/roles'),actor={id:'admin',role:'project_admin',repositories:['r']};
+ const saved=roleApi(f.s,actor,'PUT',url,{expected_revision:0,enabled:true,skills:[{id:'inspection',source:{type:'inline',files:[{path:'SKILL.md',content:'Inspect the actual source before reporting a defect.'}]}}],roles:[{role_id:'reviewer',harness_ref:{id:'acp'},skill_bundle_ref:{id:'inspection'}}]}).configuration;
+ const first=await runRole(f.spec,'reviewer'),binding=JSON.parse(f.s.get('SELECT harness_state FROM role_instances WHERE id=?',first.instance_id).harness_state);
+ assert.equal(first.result.summary,'Inspect the actual source before reporting a defect.');
+ assert.deepEqual([first.result.bundle.revision,first.result.bundle.content_hash,first.result.sha256],[saved.skills[0].revision,saved.skills[0].content_hash,saved.skills[0].files[0].sha256]);
+ assert.ok(!first.result.provided_tools.some(name=>['read_playbook','select_playbooks'].includes(name)));
+ const row=f.s.get('SELECT snapshot_id FROM role_instances WHERE id=?',first.instance_id),snapshot=JSON.parse(f.s.get('SELECT snapshot FROM role_snapshots WHERE id=?',row.snapshot_id).snapshot);
+ snapshot.capability.tools.push('read_playbook','select_playbooks');
+ f.s.run('INSERT INTO role_snapshots VALUES(?,?,?,?,?,?,?)','old-acp-snapshot','r','reviewer',1,1,JSON.stringify(snapshot),'now');
+ f.s.run("UPDATE role_instances SET snapshot_id='old-acp-snapshot' WHERE id=?",first.instance_id);
+ const second=await runRole(f.spec,'reviewer'),next=JSON.parse(f.s.get('SELECT harness_state FROM role_instances WHERE id=?',first.instance_id).harness_state);
+ assert.equal(second.instance_id,first.instance_id);assert.notEqual(next.sessionId,binding.sessionId);assert.notEqual(next.recoveryMode,'native_resume');
+ assert.equal(second.result.summary,first.result.summary);assert.ok(f.s.get("SELECT 1 FROM task_history WHERE type='role_guidance_migrated'"));
+ assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='skill_read'").n,2);
+});

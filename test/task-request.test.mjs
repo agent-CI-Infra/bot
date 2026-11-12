@@ -17,7 +17,7 @@ import { server as github } from './fixtures/agent-server.mjs';
 const pass={outcome:'pass',reason:'Read the actual submitted report from its pinned Git object',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
 const call=(name,args,id)=>({role:'assistant',content:null,tool_calls:[{id,type:'function',function:{name,arguments:JSON.stringify(args)}}]});
 
-test('ordinary tasks run single/multiple guides, correct invalid paths, and resume only fresh acceptance after an outage',async t=>{
+test('ordinary tasks omit retired guidance, correct invalid paths, and resume only fresh acceptance after an outage',async t=>{
  const root=mkdtempSync(join(tmpdir(),'bot-request-flow-')),store=new Store(':memory:',randomBytes(32)),records=new TaskRecords(store),manager=new LocalManager('101',root);
  t.after(async()=>{await manager.recover();store.close();rmSync(root,{recursive:true,force:true});});
  github.listen(0,'127.0.0.1');await once(github,'listening');t.after(()=>new Promise(r=>{github.close(r);github.closeAllConnections();}));
@@ -48,7 +48,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
   }
   if(body.tools?.some(t=>t.function.name==='submit_followup_plan')){const context=JSON.parse(messages[1].content);return send(call('submit_followup_plan',{items:context.qa.residuals.map(r=>({key:r.key,priority:'P3',reason:'Independent optional report extension; core report verified',evidence_refs:[r.evidence],action:'new'}))},'followup-plan'));}
   executionCalls++;
-  const context=JSON.parse(messages[1].content),multi=context.request.includes('multiple'),wanted=multi?['research','persistence']:['research'];
+  const context=JSON.parse(messages[1].content),multi=context.request.includes('multiple');
   if(multi&&!names.includes('search_project_memory'))return send(call('search_project_memory',{query:'memory'},'memory-search'));
   if(multi&&!names.includes('read_project_memory'))return send(call('read_project_memory',{id:memorySeed.id,revision:memorySeed.revision},'memory-read'));
   if(context.task.contract.source?.parent_task&&!names.includes('read_file'))return send(call('read_file',{path:'report.md'},'inherited-read'));
@@ -67,17 +67,13 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
   }
   if(context.request.includes('write-outage')&&writeOutage===3&&!names.includes('read_file'))return send(call('read_file',{path:'report.md'},'read-restored-late-write'));
   if(context.request.includes('write-outage')&&writeOutage===3)restoredLateWrite||=messages.some(m=>m.role==='tool'&&m.content.includes('Observed repository fact'));
-  const read=calls.filter(c=>c.function.name==='read_playbook').map(c=>JSON.parse(c.function.arguments).id);
-  const next=wanted.find(id=>!read.includes(id));if(next)return send(call('read_playbook',{id:next},'read-'+next));
-  if(!names.includes('select_playbooks')){
-   const guides=messages.filter(m=>m.role==='tool').map(m=>{try{return JSON.parse(m.content);}catch{return null;}}).filter(v=>v?.version&&v?.id);
-   return send(call('select_playbooks',{selections:guides.map(g=>({id:g.id,version:g.version,purpose:'Relevant to this bounded report'}))},'select'));
-  }
+  assert.ok(!body.tools.some(t=>['read_playbook','select_playbooks'].includes(t.function.name)));
+  assert.ok(!/playbook_catalog|playbook_request|select_playbooks/.test(JSON.stringify(messages.slice(0,2))));
   const writes=calls.filter(c=>c.function.name==='write_file');
   if(!writes.length)return send(call('write_file',{path:'/tmp/forbidden-report.md',content:'bad target'},'invalid-path'));
   if(writes.length===1){invalidPathObserved||=messages.some(m=>m.role==='tool'&&m.content.includes('invalid_artifact_path'));return send(call('write_file',{path:'report.md',content:'Observed repository fact: calc.mjs contains the arithmetic implementation.'+(context.task.contract.source?.residual==='follow-report'?' SIBLING_ACCEPTED_EXTENSION':'')+(context.task.acceptance?.gaps?.length?' Recovered observation with source calc.mjs.':'')},'write-report'));}
   if(context.request.includes('write-outage')&&writeOutage<3){writeOutage++;res.writeHead(503,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'Outage after saving artifact, before progress'}}));return;}
-  if(!names.includes('record_progress'))return send(call('record_progress',{completed:['Read guides and wrote observed report'],next_action:'Submit for independent acceptance'},'checkpoint'));
+  if(!names.includes('record_progress'))return send(call('record_progress',{completed:['Wrote observed report'],next_action:'Submit for independent acceptance'},'checkpoint'));
   return send(call('submit_delivery',{summary:'Reported observed code',artifacts:[{path:'report.md',description:'Observed repository fact'}],evidence:[],unknowns:[]},'submit-delivery'));
  });
  model.listen(0,'127.0.0.1');await once(model,'listening');t.after(()=>new Promise(r=>{model.close(r);model.closeAllConnections();}));
@@ -104,7 +100,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
   }
   if(store.get('SELECT status FROM tasks WHERE id=?',id).status==='queued')await engine.run(id,'claim');
   const result=records.get(id);assert.equal(result.progress.status,'completed',JSON.stringify(store.all('SELECT content FROM task_logs WHERE task_id=?',id)));
-  assert.equal(result.selections.length,mode==='multiple'?2:1);assert.equal(result.acceptance.outcome,mode==='multiple'?'pass_with_issues':'pass');
+  assert.equal(result.selections.length,0);assert.equal(result.acceptance.outcome,mode==='multiple'?'pass_with_issues':'pass');
   if(['return','insufficient_evidence'].includes(mode)){
    assert.equal(remediations.get(mode),2);
    const decisions=store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance' ORDER BY id",id).map(r=>JSON.parse(r.data).outcome);

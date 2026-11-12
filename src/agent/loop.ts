@@ -7,7 +7,7 @@ import { roleWorkspaces, executorWorkspace } from '../roles/workspace.js';
 import { ProjectMemory,memoryTools,memoryTool } from '../memory/project.js';
 import { checkpoint } from '../tasks/checkpoint.js';
 import { TaskRecords } from '../tasks/service.js';
-import { taskTools, playbookInstructions, playbooks } from '../tasks/playbooks.js';
+import { taskTools, taskRecordInstructions } from '../tasks/record-tools.js';
 import { type Store, type Row } from '../storage/database.js';
 import { type Workspace } from './workspace.js';
 import { workspaceProfile, roleAssignmentContext } from './profiles.js';
@@ -51,8 +51,8 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     };
   }
   for(const tool of memoryTools){if(tool.function.name==='remember_project_memory'&&!profile.capabilities.workspace.notes&&!profile.capabilities.workspace.write)continue;profile.tools.push(tool as any);platform[tool.function.name]=async(_id,args)=>{await guard();return memoryTool(store,task,tool.function.name,redactor.clean(args),async doc=>{const raw=await workspace.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};});};}
-  const system = profile.system + '\n' + playbookInstructions;
-  context={...context,project_memory:new ProjectMemory(store).context(task),playbook_request:JSON.parse(task.input||'{}').playbook_request||null,playbook_catalog:playbooks.map(({content,...p})=>p),structured_task:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?records.context(task.id):null};
+  const system = profile.system + '\n' + taskRecordInstructions;
+  context={...context,project_memory:new ProjectMemory(store).context(task),structured_task:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?records.context(task.id):null};
   // Only development ends with its pull request; any other work that may open one carries on to its own finish.
   const config = { system, prompt: JSON.stringify(roleAssignmentContext(context, prompt)), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
     finish_on_pull_request: profile.completion === 'publication', finish_tools: profile.finishTools,
