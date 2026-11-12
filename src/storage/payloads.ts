@@ -39,8 +39,18 @@ export function logContent(store: Store, row: Row): string {
 /** The trace snapshot of a model request or response, as stored before #436 (traceSnapshot JSON), or null. */
 export function modelSnapshot(store: Store, row: Row, part: 'request' | 'response'): string | null {
   const ref = row[part + '_ref'];
-  if (ref) return traceSnapshot(part === 'request' ? store.trajectories.readModelRequest(ref) : store.trajectories.read(ref).data);
-  return row[part + '_snapshot'] ?? null;
+  if (!ref) return legacySnapshot(store, row, part);
+  // A snapshot moved from its column by the background migration is kept as it was stored.
+  const data = store.trajectories.read(ref).data;
+  if (data && typeof data === 'object' && '$snapshot' in data) return JSON.stringify(data.$snapshot);
+  return traceSnapshot(part === 'request' ? store.trajectories.readModelRequest(ref) : data);
+}
+
+/** A snapshot still in its column: a conversation's was sealed as {snapshot}, any other is the snapshot JSON itself. */
+export function legacySnapshot(store: Store, row: Row, part: 'request' | 'response'): string | null {
+  const value = row[part + '_snapshot'];
+  if (value === null || value === undefined || String(value).startsWith('{')) return value ?? null;
+  return String((store.secrets.open(String(value), 'conversation-model-' + part + ':' + row.id) as { snapshot: string }).snapshot);
 }
 
 /** A reader's answer for a record whose file is missing or fails verification. */
@@ -55,7 +65,9 @@ export function unreadable(error: unknown) {
  */
 export function historyData(store: Store, row: Row): string {
   if (row.type !== 'operation' && row.type !== 'runtime_log') return row.data;
-  const data = JSON.parse(row.data)?.data;
+  const stored = JSON.parse(row.data), data = stored?.data;
+  // A snapshot the background migration moved to a file as it was.
+  if (typeof stored?.$trajectory === 'string') return JSON.stringify(store.trajectories.read(stored.$trajectory).data);
   if (row.type === 'operation' && typeof data?.request_ref === 'string') {
     const request = JSON.stringify(store.trajectories.read(data.request_ref).data);
     const result = typeof data.result_ref === 'string' ? JSON.stringify(store.trajectories.read(data.result_ref).data) : null;
@@ -65,11 +77,12 @@ export function historyData(store: Store, row: Row): string {
   return row.data;
 }
 
-/** The bytes of the records a history snapshot refers to, or null for a snapshot that holds its own data. */
+/** The size of the body a history snapshot refers to (characters when recorded, else record bytes), or null for one that holds its own data. */
 export function historyRefBytes(row: Row): number | null {
   if (row.type !== 'operation' && row.type !== 'runtime_log') return null;
-  let data: any; try { data = JSON.parse(row.data)?.data; } catch { return null; }
-  const refs = [data?.request_ref, data?.result_ref, data?.content_ref].filter((ref): ref is string => typeof ref === 'string');
+  let stored: any; try { stored = JSON.parse(row.data); } catch { return null; }
+  if (typeof stored?.$trajectory === 'string' && Number.isSafeInteger(stored.characters)) return stored.characters;
+  const data = stored?.data, refs = [stored?.$trajectory, data?.request_ref, data?.result_ref, data?.content_ref].filter((ref): ref is string => typeof ref === 'string');
   return refs.length ? refs.reduce((sum, ref) => sum + Number(ref.split(':')[2] ?? 0), 0) : null;
 }
 
