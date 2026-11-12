@@ -87,3 +87,20 @@ test('memory and execution provenance bind the integrated baseline separately fr
  const memory=new ProjectMemory(s,{actor}).get('101',result.id);assert.equal(memory.scope.commit,baseline);assert.equal(memory.sources[0].source_sha,baseline);
  assert.equal(task.head_sha,ownedHead,'ownership fence must still refer to the original PR head');
 });
+
+test('an optional integration does not revive a withdrawn merge intent',t=>{
+ const s=new Store(':memory:',randomBytes(32));t.after(()=>s.close());s.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,'{}','')");s.run("INSERT INTO repositories VALUES('101','fixture/project','1','a')");
+ s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,workspace_id,head_sha) VALUES('t','101','development.issue','running','goal','{}',?,?)",'a'.repeat(48),'1'.repeat(40));
+ const records=new TaskRecords(s);records.contract('t',{goal:'goal',scope:[],criteria:['working'],endpoint:'reviewable_pull_request'});s.run("UPDATE tasks SET status='pr_opened' WHERE id='t'");
+ s.run('INSERT INTO development_candidates VALUES(?,?)','t',JSON.stringify({source_workspace_id:'a'.repeat(48),local_sha:'3'.repeat(40),tree_sha:'2'.repeat(40),source_tree:'4'.repeat(40),base_sha:'1'.repeat(40)}));
+ authorizeMerge(s,s.get("SELECT * FROM tasks WHERE id='t'"),{id:'operator',role:'super_admin',repositories:[]},'5'.repeat(40),'merge');s.run("UPDATE task_merge_requests SET state='cancelled'");
+ requestIntegration(s,s.get("SELECT * FROM tasks WHERE id='t'"),'6'.repeat(40),'agent_requested:verify current main',{number:1,head:{sha:'5'.repeat(40)}});
+ assert.equal(s.get("SELECT state FROM task_merge_requests WHERE task_id='t'").state,'cancelled');integratedPublication(s,s.get("SELECT * FROM tasks WHERE id='t'"),'7'.repeat(40));assert.equal(s.get("SELECT state FROM task_merge_requests WHERE task_id='t'").state,'cancelled');
+});
+
+test('repeating an integration ref cannot report a cancelled pending task as running',t=>{
+ const s=new Store(':memory:',randomBytes(32));t.after(()=>s.close());s.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,'{}','')");s.run("INSERT INTO repositories VALUES('101','fixture/project','1','a')");
+ s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,workspace_id) VALUES('t','101','development.issue','cancelled','goal',?,?)",JSON.stringify({integration:{state:'pending',target_base:'6'.repeat(40)}}),'a'.repeat(48));
+ s.run('INSERT INTO development_candidates VALUES(?,?)','t',JSON.stringify({source_workspace_id:'a'.repeat(48),local_sha:'3'.repeat(40),tree_sha:'2'.repeat(40),source_tree:'4'.repeat(40)}));
+ assert.throws(()=>requestIntegration(s,s.get("SELECT * FROM tasks WHERE id='t'"),'6'.repeat(40),'agent_requested:retry'),{code:'integration_task_cancelled'});assert.equal(s.get("SELECT status FROM tasks WHERE id='t'").status,'cancelled');
+});

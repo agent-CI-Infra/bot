@@ -282,3 +282,24 @@ test('managed-task context keeps large candidate bodies as references and reads 
   assert.throws(()=>commands.tool(source,'read_managed_task',{task_id:id,offset:1}),{code:'evidence_source_required'});
   assert.ok(JSON.stringify(records.get(id)).includes('artifact-body-marker'),'original task audit is preserved');
 });
+
+test('managed shared publication facts are readable while non-offered records remain private',async t=>{
+  const {s,commands,caller,create}=fixture(t),source=caller(),id=create(source).id,records=new TaskRecords(s);
+  records.history(id,'repository_evolved',{pr:7,head_sha:'a'.repeat(40),merge_sha:'b'.repeat(40)});
+  const offered='task_history:'+s.get('SELECT max(id) id FROM task_history WHERE task_id=?',id).id;
+  const original=commands.tool(source,'read_managed_task',{task_id:id,source:offered,length:1200});
+  assert.equal(original.record.type,'repository_evolved');assert.equal(JSON.parse(original.record.chunk).data.merge_sha,'b'.repeat(40));
+  records.history(id,'runtime_log',{private_transcript:'must-not-be-offered'});const hidden='task_history:'+s.get('SELECT max(id) id FROM task_history WHERE task_id=?',id).id;
+  const denied=commands.tool(source,'read_managed_task',{task_id:id,source:hidden});assert.equal(denied.evidence.error,'evidence_not_offered');assert.ok(!JSON.stringify(denied).includes('must-not-be-offered'));
+});
+
+test('task facts separate recorded acceptance, a changed workspace checkpoint, publication and failure refs',async t=>{
+  const {s,commands,caller,create}=fixture(t),source=caller(),id=create(source).id,records=new TaskRecords(s);
+  const candidate=records.submit(id,[{kind:'report',reference:'delivery',version:'v1',content:{private_body:'large-body-must-stay-out'}}],[],{});
+  records.decide(id,candidate.id,candidate.revision,{outcome:'pass',reason:'v1 only',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true},'completed');
+  records.history(id,'artifact_checkpoint',{tree_sha:'v2',base_sha:'base',revision:candidate.revision});records.history(id,'retry_failure',{code:'test_failure',group:'execution',count:1,attempt:2,detail:'full-observation-not-in-brief'});
+  s.run("INSERT INTO bot_pull_requests VALUES('r',7,'7','bot','r','bot/facts',?,?,0)",'a'.repeat(40),id);
+  const context=commands.tool(source,'read_managed_task',{task_id:id}).task,facts=context.facts;
+  assert.equal(facts.acceptance.candidate_id,candidate.id);assert.equal(facts.workspace_checkpoint.tree_sha,'v2');assert.equal(facts.publication.pr_number,7);assert.equal(facts.recent_failures[0].code,'test_failure');
+  assert.equal(facts.history.tool,'read_task_history');assert.ok(!JSON.stringify(context).includes('large-body-must-stay-out'));assert.ok(!JSON.stringify(facts).includes('full-observation-not-in-brief'));
+});

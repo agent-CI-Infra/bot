@@ -30,13 +30,13 @@ test('an unanswered Manager does not pause work or prevent the next reporting no
 });
 
 
-test('Manager reads offered computer facts with its own access but never another role model context',async t=>{
+test('Manager reads computer facts and worker context of its own task',async t=>{
  for(const privateContext of [false,true])await t.test(String(privateContext),async t=>{
   const f=await fixture(t);f.s.run("UPDATE task_runs SET config_snapshot=? WHERE id=?",JSON.stringify({private:'PRIVATE_WORKER_CONTEXT'}),f.run.id);
   const ref=traceEvent(f.s,f.task.id,'tool_observation',{name:'run_command',observation:{exit_code:0,output:'job is progressing'}},f.run.id,'tool');
   const report=observeLongExecution(f.s,f.task,f.run.id,firstReportMs);f.setReadRef(privateContext?'task_runs:'+f.run.id+':config':ref);
   await decideLongExecution(f.spec,report,()=>true,()=>assert.fail());assert.equal(f.s.get('SELECT state FROM long_execution_reports').state,'decided');
-  const tools=f.lastBody.messages.filter(m=>m.role==='tool').map(m=>m.content).join('');assert.equal(tools.includes('PRIVATE_WORKER_CONTEXT'),false);
-  assert.match(tools,privateContext?/trace_role_private/:/job is progressing/);
+  const tools=f.lastBody.messages.filter(m=>m.role==='tool').map(m=>m.content).join('');assert.equal(tools.includes('PRIVATE_WORKER_CONTEXT'),privateContext);
+  assert.match(tools,privateContext?/PRIVATE_WORKER_CONTEXT/:/job is progressing/);
  });
 });

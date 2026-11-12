@@ -90,11 +90,11 @@ async function mergeRequest(s:Store,user:Actor,method:string,url:URL,input:Json,
  const saved=s.get('SELECT data FROM development_candidates WHERE task_id=?',task!.id),candidate=saved?JSON.parse(saved.data):null;
  // PullRequest.base.sha can lag behind the actual branch after another PR merges.
  const base=candidate?.base_sha?(await github.ref(github.defaultBranch))?.object?.sha:pr.base?.sha;
- if(candidate?.base_sha&&!base)fail(409,'merge_base_unavailable');
- if(queue.state!=='enabled'&&candidate?.base_sha&&base&&candidate.base_sha!==base){
-  requestIntegration(s,task!,base,'default_branch_advanced',pr);
-  return {merged:false,status:'integrating',task_id:task!.id,pr_number:pr.number};
- }
+ // Main advancing does not change the accepted candidate. Git/GitHub and configured checks decide mergeability.
+ const versions={candidate_base:candidate?.base_sha??null,current_main:base??null,head_sha:head,mergeable:pr.mergeable??null,mergeable_state:pr.mergeable_state??null,queue:queue.state};
+ const lastVersions=s.get("SELECT data FROM task_history WHERE task_id=? AND type='merge_version_context' ORDER BY id DESC LIMIT 1",task!.id);
+ if(lastVersions?.data!==JSON.stringify(versions))traceEvent(s,task!.id,'merge_version_context',versions,null,'framework');
+ if(pr.mergeable===false){requestIntegration(s,task!,base??pr.base?.sha??'latest','pull_request_conflict',pr);return {merged:false,status:'integrating',task_id:task!.id,pr_number:pr.number};}
  if(queue.state==='enabled'){
   const [owner,name]=github.fullName.split('/');
   const state=await github.graphql('query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){id mergeQueueEntry{id position state baseCommit{oid} headCommit{oid}}}}}',{owner,name,number:pr.number});
@@ -125,7 +125,7 @@ async function mergeRequest(s:Store,user:Actor,method:string,url:URL,input:Json,
  }
  const checked=await checks(s,github,task!.id,head);if(checked.failed&&candidate?.local_sha&&task!.workspace_id){retryFailedChecks(s,task!,base,head,pr);return {merged:false,status:'integrating',task_id:task!.id};}if(checked.failed||checked.pending)fail(409,'merge_checks_not_green');
  s.audit(user.id,'task.merge.authorized',task!.id,task!.repository_id);
- const publisher=new Publisher(s,github,task!,async()=>{await validate();if(!pr.merged&&candidate?.base_sha&&(await github.ref(github.defaultBranch))?.object?.sha!==candidate.base_sha)fail(409,'merge_base_advanced');});
+ const publisher=new Publisher(s,github,task!,validate);
  const merged=await publisher.effect('merge:'+head,'merge',{pr:result.pr_number,sha:head,method:input.merge_method,actor:user.id},()=>github.request('PUT',github.path('/pulls/'+result.pr_number+'/merge'),{sha:head,merge_method:input.merge_method}),async()=>{const current=await github.object('review.pr',result.pr_number);return current.merged&&current.head.sha===head?{merged:true,sha:current.merge_commit_sha,reconciled:true}:null;});
  if(merged.merged!==true)fail(409,'merge_not_confirmed');
  return evolved(s,task!,head,{merged:true,sha:merged.sha,pr_number:result.pr_number},user);

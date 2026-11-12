@@ -1,3 +1,4 @@
+import {GitHub} from '../github/client.js';
 import { taskTraceAccess } from '../memory/access.js';
 import { taskConfiguration, taskPermissions } from '../tasks/configuration.js';
 import { developmentTeam } from '../roles/development.js';
@@ -57,7 +58,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const config = { system, prompt: JSON.stringify(roleAssignmentContext(context, prompt)), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
     finish_on_pull_request: profile.completion === 'publication', finish_tools: profile.finishTools,
     ...(profile.subagentSystem ? { subagent_system: profile.subagentSystem } : {}) };
-  if(profile.completion==='publication'&&createPullRequest&&controlled(store,task,'development'))return developmentTeam(workspace,system,config.prompt,createPullRequest,profile.capabilities.workspace,platform.github_write&&(args=>platform.github_write!(randomId(),args)));
+  if(profile.completion==='publication'&&createPullRequest&&controlled(store,task,'development'))return developmentTeam(workspace,system,config.prompt,createPullRequest,profile.capabilities.workspace,platform.github_write&&(args=>platform.github_write!(randomId(),args)),tokens?.allowedScopes().includes('contents')?async()=>{const github=new GitHub(store,tokens.repository,redactor,guard,tokens.apiUrl);await github.connect(false,undefined,{contents:'read',...(tokens.allowedScopes().includes('pull_requests')?{pull_requests:'read'}:{})},false);return github;}:undefined);
   // The work type's own executor: one Pi session in the task workspace (the formal Pi harness, src/agent/pi.ts).
   const session: PiSession<any> = { store, taskId: task.id, guard, workspace, redactor, config, conversation, platform, createPullRequest,
     offered: name => profile.tools.some(tool => tool.function.name === name), publication: profile.capabilities.github.publication,

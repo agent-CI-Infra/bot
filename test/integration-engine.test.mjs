@@ -16,6 +16,8 @@ import {GitHub} from '../dist/github/client.js';
 import {Redactor} from '../dist/agent/common.js';
 import {TaskRecords} from '../dist/tasks/service.js';
 import {roleInstance} from '../dist/roles/run.js';
+import {authorizeMerge} from '../dist/tasks/integration.js';
+import {traceEvent} from '../dist/tasks/trace.js';
 import {checkpoint} from '../dist/tasks/checkpoint.js';
 import {candidateKey,deliveryCandidate,latestRoleCandidate} from '../dist/roles/schedule.js';
 import {acceptanceFixture} from './acceptance-fixture.mjs';
@@ -73,13 +75,13 @@ export async function fixture(t,mode='clean',options={}){
   if(p.includes('/git/trees/')){const tree=p.split('/').at(-1);const entries=git(['ls-tree','-rl',tree]).split('\n').filter(Boolean).map(line=>{const [metadata,path]=line.split('\t'),[mode,type,sha,size]=metadata.split(/\s+/);return {path,mode,type,sha,size:Number(size)};});return send({sha:tree,tree:entries,truncated:false});}
   if(p.endsWith('/git/commits')&&req.method==='POST'){const commit=git(['commit-tree',body.tree,...body.parents.flatMap(p=>['-p',p])],body.message+'\n');return send({sha:commit,tree:{sha:body.tree}});}
   if(p.includes('/git/commits/')){const commit=p.split('/').at(-1);return send({sha:commit,tree:{sha:git(['rev-parse',commit+'^{tree}'])}});}
-  const currentPR=()=>({...pr,head:{sha:git(['rev-parse','refs/heads/'+pr.head.ref]),ref:pr.head.ref,repo:{id:101}},base:{ref:'main',sha:staleBase?base:main}});
+  const currentPR=()=>({...pr,mergeable:options.mergeable,head:{sha:git(['rev-parse','refs/heads/'+pr.head.ref]),ref:pr.head.ref,repo:{id:101}},base:{ref:'main',sha:staleBase?base:main}});
   if(p.endsWith('/pulls')&&req.method==='POST'){pr={id:1,node_id:'PR_fixture',number:1,state:'open',draft:false,user:{id:999},head:{ref:body.head},title:body.title,body:body.body,html_url:'https://github.invalid/pull/1'};return send(currentPR());}
   if(p.endsWith('/pulls/1')){if(req.method==='PATCH')Object.assign(pr,body);return send(currentPR());}
   if(p.endsWith('/check-runs'))return send({check_runs:failedChecks-->0?[{id:99,name:'Install packages',status:'completed',conclusion:'failure'}]:[]});
   if(p.endsWith('/status'))return send({state:'pending',statuses:[]});
   if(p.endsWith('/pulls/1/merge')&&req.method==='PUT'){
-   assert.equal(body.sha,currentPR().head.sha);const tree=git(['rev-parse',body.sha+'^{tree}']);
+   assert.equal(body.sha,currentPR().head.sha);const mergeDir=join(root,'merge-'+randomBytes(6).toString('hex'));git(['worktree','add','--detach',mergeDir,main]);let tree;try{const mergeGit=args=>execFileSync('git',['-C',mergeDir,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid',...args],{encoding:'utf8',stdio:['pipe','pipe','pipe']}).trim();mergeGit(['merge','--no-commit','--no-ff',body.sha]);tree=mergeGit(['write-tree']);}finally{git(['worktree','remove','--force',mergeDir]);}
    main=git(['commit-tree',tree,'-p',main,'-p',body.sha],'merge\n');git(['update-ref','refs/heads/main',main]);pr.merged=true;pr.state='closed';pr.merge_commit_sha=main;puts++;return send({merged:true,sha:main});
   }
   return send({},404);
@@ -120,14 +122,22 @@ test('a model-phase restart with a pending integration uses one no_changes sourc
  assert.equal(delivery.source_ref,role.source_ref);assert.equal(candidateKey(delivery),candidateKey(role));
  assert.equal(h.counts().branchWrites,0);assert.equal(h.counts().qaCalls,1);
 });
+// Explicitly requested revalidation remains available; a main advance alone no longer requests it.
+async function revalidate(h,actor,head,method='merge'){
+ const task=h.s.get("SELECT * FROM tasks WHERE id='t'");authorizeMerge(h.s,task,actor,head,method);
+ const ref=traceEvent(h.s,'t','version_reference',{purpose:'current_main',commit_sha:h.main,repository_id:'101'});
+ const result=await h.engine.api(actor,'POST',new URL('http://local/api/tasks/t/integrate'),{base_ref:ref,reason:'Explicitly verify combined behavior before delivery'});
+ return {...result,merged:false};
+}
+
 for(const mode of ['clean','conflict','semantic'])test(`full engine ${mode}: stale-base publication, integration, fresh QA and authorized merge`,async t=>{
  const h=await fixture(t,mode);h.engine.tick();await Promise.all(h.engine.active.values());
- let task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(task.status,'pr_opened',JSON.stringify(task));assert.equal(h.counts().puts,0);
+ let task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(task.status,'pr_opened',JSON.stringify({status:task.status,error_code:task.error_code}));assert.equal(h.counts().puts,0);
  h.stalePRBase=true; // GitHub PR metadata deliberately lags the live default-branch ref.
- const before=h.counts().modelCalls,result=await h.engine.api({id:'operator',role:'super_admin',repositories:[]},'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:JSON.parse(task.result).sha,merge_method:'squash'});
+ const before=h.counts().modelCalls,result=await revalidate(h,{id:'operator',role:'super_admin',repositories:[]},JSON.parse(task.result).sha,'squash');
  assert.equal(result.status,'integrating');assert.equal(result.merged,false);
  h.s.run("UPDATE tasks SET next_run_at=0 WHERE id='t'");h.engine.tick();await Promise.all(h.engine.active.values());
- task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.ok(['completed','pr_opened'].includes(task.status),JSON.stringify(task));
+ task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.ok(['completed','pr_opened'].includes(task.status),JSON.stringify({status:task.status,error_code:task.error_code}));
  if(process.env.DEBUG_INTEGRATION)console.error(mode,h.counts(),h.s.all("SELECT data FROM task_history WHERE type IN ('integration_result','integration_validation')").map(r=>JSON.parse(r.data)),h.s.all('SELECT id,role,sequence FROM role_instances'));
  if(mode==='clean')assert.equal(h.counts().modelCalls,before,'clean integration should not ask the developer to reimplement');
  else{assert.equal(h.s.get('SELECT sequence FROM role_instances WHERE id=?',h.dev).sequence,2);assert.ok(h.counts().modelCalls>before);}
@@ -143,12 +153,12 @@ for(const mode of ['clean','conflict','semantic'])test(`full engine ${mode}: sta
 test('QA return after an existing PR resumes Manager/Dev and updates that PR before merging',async t=>{
  const h=await fixture(t,'qa-return');h.engine.tick();await Promise.all(h.engine.active.values());
  const original=h.s.get("SELECT * FROM tasks WHERE id='t'"),first=JSON.parse(original.result);
- await h.engine.api({id:'operator',role:'super_admin',repositories:[]},'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:first.sha,merge_method:'merge'});
+ await revalidate(h,{id:'operator',role:'super_admin',repositories:[]},first.sha);
  h.s.run("UPDATE tasks SET next_run_at=0 WHERE id='t'");h.engine.tick();await Promise.all(h.engine.active.values());
  const returned=h.s.get("SELECT * FROM tasks WHERE id='t'");
  assert.equal(returned.status,'queued');assert.notEqual(returned.error_code,'acceptance_publication_changed');assert.equal(h.counts().puts,0);
  h.s.run("UPDATE tasks SET next_run_at=0 WHERE id='t'");h.engine.tick();await Promise.all(h.engine.active.values());
- const repaired=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.ok(['completed','pr_opened'].includes(repaired.status),JSON.stringify(repaired));
+ const repaired=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.ok(['completed','pr_opened'].includes(repaired.status),JSON.stringify({status:repaired.status,error_code:repaired.error_code}));
  assert.equal(JSON.parse(repaired.result).pr_number,first.pr_number);assert.notEqual(JSON.parse(repaired.result).sha,first.sha);
  assert.equal(h.counts().qaCalls,3);assert.ok(h.counts().modelCalls>0);assert.equal(h.s.get('SELECT count(*) n FROM bot_pull_requests').n,1);
  h.s.run('UPDATE task_merge_requests SET next_run_at=0');h.engine.tick();await Promise.all(h.engine.merging.values());
@@ -158,22 +168,22 @@ test('QA return after an existing PR resumes Manager/Dev and updates that PR bef
 
 for(const decision of ['continue_retry','investigate'])test(`three failed CI integrations notify Manager, which can ${decision}`,async t=>{
  const h=await fixture(t,'clean',{failedChecks:3,retryDecision:decision});h.engine.tick();await Promise.all(h.engine.active.values());
- // The first integration is for the already advanced main, followed by three actual failed-CI attempts.
- for(let attempt=0;attempt<=3;attempt++){
+ // Three actual failed CI attempts; a main advance adds no extra execution.
+ for(let attempt=0;attempt<3;attempt++){
   const task=h.s.get("SELECT * FROM tasks WHERE id='t'");
   const result=await h.engine.api({id:'operator',role:'super_admin',repositories:[]},'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:JSON.parse(task.result).sha,merge_method:'merge'});
   assert.equal(result.status,'integrating');h.s.run("UPDATE tasks SET next_run_at=0 WHERE id='t'");h.engine.tick();await Promise.all(h.engine.active.values());
  }
  const reports=h.s.all("SELECT data FROM task_history WHERE type='retry_report'").map(r=>JSON.parse(r.data));assert.deepEqual(reports.map(r=>r.count),[3]);
  const decided=h.s.get("SELECT data FROM task_history WHERE type='retry_decision'");assert.equal(JSON.parse(decided.data).action,decision);
- const task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.ok(['completed','pr_opened'].includes(task.status),JSON.stringify(task));
+ const task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.ok(['completed','pr_opened'].includes(task.status),JSON.stringify({status:task.status,error_code:task.error_code}));
  assert.equal(h.s.get("SELECT sequence FROM role_instances WHERE id=?",h.dev).sequence,decision==='investigate'?2:1);
  h.s.run('UPDATE task_merge_requests SET next_run_at=0');h.engine.tick();await Promise.all(h.engine.merging.values());assert.equal(h.counts().puts,1);
 });
 
 
 test('an overlapping background merge poll cannot replace or block an integration already requested',async t=>{
- const h=await fixture(t,'clean');h.engine.tick();await Promise.all(h.engine.active.values());
+ const h=await fixture(t,'clean',{failedChecks:1});h.engine.tick();await Promise.all(h.engine.active.values());
  const task=h.s.get("SELECT * FROM tasks WHERE id='t'"),resume=h.pauseFacts();
  const initial=h.engine.api({id:'operator',role:'super_admin',repositories:[]},'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:JSON.parse(task.result).sha,merge_method:'squash'});
  for(let n=0;n<100&&!h.factsEntered;n++)await new Promise(r=>setTimeout(r,10));
@@ -189,8 +199,8 @@ for(const revoked of [false,true])test(`persisted scoped merge intent refreshes 
  const h=await fixture(t,'clean');h.engine.tick();await Promise.all(h.engine.active.values());
  h.s.run("INSERT INTO users VALUES('member','member','fixture-password-hash','project_admin',1)");identityProjection(h.s);
  h.s.run("INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,policy,evidence,verified_at) VALUES('grant','member','github.com:10','101','project','project_admin',?,'explicit','manual','fixture',?)",JSON.stringify(['tasks.read','tasks.write']),Date.now());
- const operator={id:'member',role:'project_admin',repositories:['101'],context:{principal_id:'member',tenant_id:null}},task=h.s.get("SELECT * FROM tasks WHERE id='t'");
- await h.engine.api(operator,'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:JSON.parse(task.result).sha,merge_method:'squash'});
+ const operator={id:'member',role:'project_admin',repositories:['101'],context:(await import('../dist/identity/authorization.js')).resolvePrincipalActor(h.s,'member','github.com:10','101')},task=h.s.get("SELECT * FROM tasks WHERE id='t'");
+ await revalidate(h,operator,JSON.parse(task.result).sha,'squash');
  h.s.run("UPDATE tasks SET next_run_at=0 WHERE id='t'");h.engine.tick();await Promise.all(h.engine.active.values());
  if(revoked)h.s.run("UPDATE scoped_grants SET revoked_at=? WHERE id='grant'",Date.now());
  h.s.run('UPDATE task_merge_requests SET next_run_at=0');h.engine.tick();await Promise.all(h.engine.merging.values());
@@ -210,8 +220,8 @@ for(const kind of ['task.request','task.development'])test(`${kind} preserves th
  h.s.run("UPDATE policies SET work_settings=? WHERE repository_id='101'",JSON.stringify({'task.request':{writes:['code','pull_request']}}));
  h.s.run("UPDATE tasks SET kind=?,object_number=NULL,input=? WHERE id='t'",kind,JSON.stringify({...JSON.parse(row.input),request:'Preserve both features',contract:records.get('t').contract}));
  const candidate=records.submit('t',[{kind:'code',reference:'task:t:candidate',version:code.tree_sha,content:code}],[],{summary:'Accepted original candidate'});records.stage('t',candidate.id,candidate.revision,verdict,undefined,{policy_hash:sha('node check.cjs')});
- h.engine.tick();await Promise.all(h.engine.active.values());let task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(task.status,'pr_opened',JSON.stringify(task));const oldHead=JSON.parse(task.result).sha;
- const request=await h.engine.api({id:'operator',role:'super_admin',repositories:[]},'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:oldHead,merge_method:'merge'});assert.equal(request.status,'integrating');
+ h.engine.tick();await Promise.all(h.engine.active.values());let task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(task.status,'pr_opened',JSON.stringify({status:task.status,error_code:task.error_code}));const oldHead=JSON.parse(task.result).sha;
+ const request=await revalidate(h,{id:'operator',role:'super_admin',repositories:[]},oldHead);assert.equal(request.status,'integrating');
  h.s.run("UPDATE tasks SET next_run_at=0 WHERE id='t'");h.engine.tick();await Promise.all(h.engine.active.values());task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(task.status,'pr_opened',JSON.stringify(h.s.all("SELECT type,data FROM task_history WHERE type IN ('retry_failure','checkpoint_fault')")));
  const result=JSON.parse(task.result);assert.notEqual(result.sha,oldHead);assert.equal(h.git(['show',result.sha+':other.txt']),'independent feature');assert.equal(h.git(['show',result.sha+':a.txt']),'2');assert.equal(h.s.get("SELECT state FROM task_merge_requests WHERE task_id='t'").state,'waiting');assert.ok(h.s.get("SELECT id FROM task_history WHERE type='integration_result'"));assert.ok(h.s.get("SELECT id FROM task_history WHERE type='merge_candidate_revalidated'"));assert.equal(JSON.parse(h.s.get("SELECT data FROM task_history WHERE type='controller_entry' ORDER BY id DESC LIMIT 1").data).entry,kind==='task.development'?'development':'request');
  h.s.run('UPDATE task_merge_requests SET next_run_at=0');h.engine.tick();await Promise.all(h.engine.merging.values());assert.equal(h.counts().puts,1);assert.equal(h.s.get("SELECT state FROM task_merge_requests WHERE task_id='t'").state,'merged');
@@ -234,4 +244,53 @@ test('integration replays identical operations but accepts a changed checkpoint 
  await applyIntegration(h.s,target,space,task.head_sha,next);
  const file=await space.call('read-retained-repair',{type:'workspace_read',path:'repair.txt'});assert.equal(file.content,'retained progress');
  assert.equal(h.s.get("SELECT count(*) n FROM task_tools WHERE json_extract(request,'$.request.type')='workspace_integrate'").n,1);
+});
+
+
+test('independent PR merges its accepted head after main advances, retaining both changes without reexecution',async t=>{
+ const h=await fixture(t,'clean');h.engine.tick();await Promise.all(h.engine.active.values());
+ const before=h.counts(),task=h.s.get("SELECT * FROM tasks WHERE id='t'"),head=JSON.parse(task.result).sha;h.stalePRBase=true;
+ const merged=await h.engine.api({id:'operator',role:'super_admin',repositories:[]},'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:head,merge_method:'merge'});
+ assert.equal(merged.merged,true);assert.equal(h.counts().modelCalls,before.modelCalls);assert.equal(h.counts().qaCalls,before.qaCalls);
+ assert.equal(h.git(['show',h.main+':a.txt']),'2');assert.equal(h.git(['show',h.main+':other.txt']),'independent feature');
+ assert.equal(h.s.get("SELECT count(*) n FROM task_history WHERE type='integration_requested'").n,0);
+ assert.equal(JSON.parse(h.s.get("SELECT data FROM task_history WHERE type='repository_evolved'").data).head_sha,head);
+});
+
+
+test('a reported Git conflict still requests repair while an ordinary main advance does not',async t=>{
+ const h=await fixture(t,'conflict',{mergeable:false});h.engine.tick();await Promise.all(h.engine.active.values());
+ const task=h.s.get("SELECT * FROM tasks WHERE id='t'"),head=JSON.parse(task.result).sha;
+ const result=await h.engine.api({id:'operator',role:'super_admin',repositories:[]},'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:head,merge_method:'merge'});
+ assert.equal(result.status,'integrating');assert.equal(h.counts().puts,0);
+ assert.equal(JSON.parse(h.s.get("SELECT data FROM task_history WHERE type='integration_requested'").data).reason,'pull_request_conflict');
+ assert.equal(h.s.get("SELECT state FROM task_merge_requests WHERE task_id='t'").state,'integrating');
+});
+
+
+test('a legacy SHA fence resumes Manager with retained facts instead of forcing an integration',async t=>{
+ const h=await fixture(t,'clean'),saved=h.s.get("SELECT data FROM development_candidates WHERE task_id='t'").data,started=[];
+ h.s.run("UPDATE tasks SET status='needs_replan',error_code='base_branch_changed' WHERE id='t'");h.engine.run=async id=>{started.push(id);};
+ h.engine.tick();await Promise.all(h.engine.active.values());
+ assert.deepEqual(started,['t']);assert.equal(h.s.get("SELECT data FROM development_candidates WHERE task_id='t'").data,saved);
+ const input=JSON.parse(h.s.get("SELECT input FROM tasks WHERE id='t'").input);assert.equal(input.manager_feedback.code,'base_branch_changed');assert.equal(input.integration,undefined);
+ const facts=new TaskRecords(h.s).context('t').facts;assert.equal(facts.recovery_events[0].code,'base_branch_changed');assert.ok(facts.recovery_events[0].ref.startsWith('task_history:'));assert.equal(new TaskRecords(h.s).tool('t','read_task_history',{}).observations.some(x=>x.type==='manager_recovery_queued'),true);
+ assert.equal(h.s.get("SELECT count(*) n FROM task_history WHERE type='integration_requested'").n,0);
+});
+
+test('publication head divergence preserves candidate and wakes normal Manager to query facts and decide',async t=>{
+ let observed=false;
+ const h=await fixture(t,'clean',{respond:body=>{
+  assert.ok(body.tools.some(x=>x.function.name==='finish_coordination'),'normal coordination tools are offered');
+  const response=body.messages.filter(m=>m.role==='tool').map(m=>{try{return JSON.parse(m.content);}catch{return {};}}).find(x=>x.remote?.observed_sha);
+  if(!response)return toolCall('read_publication_context',{});
+  observed=true;assert.equal(response.remote.observed_sha,h.main);assert.ok(response.remote.ref);assert.ok(response.candidate.created_commit);
+  return toolCall('finish_coordination',{action:'continue',reason:'Read the publication mismatch; investigate before deciding whether to update this branch.'});
+ }});
+ h.git(['update-ref','refs/heads/bot/issue-7-t',h.main]);
+ h.engine.tick();await Promise.all(h.engine.active.values());let task=h.s.get("SELECT * FROM tasks WHERE id='t'");
+ assert.equal(task.status,'retry_wait');assert.equal(task.phase,'prepare');assert.equal(task.error_code,'branch_head_changed');
+ const input=JSON.parse(task.input);assert.ok(input.recovery.tree_sha);assert.equal(input.manager_feedback.discovery.tool,'read_publication_context');assert.equal(h.counts().branchWrites,0);
+ h.s.run("UPDATE tasks SET next_run_at=0 WHERE id='t'");h.engine.tick();await Promise.all(h.engine.active.values());task=h.s.get("SELECT * FROM tasks WHERE id='t'");
+ assert.equal(observed,true,JSON.stringify({status:task.status,phase:task.phase,error:task.error_code,history:h.s.all("SELECT type,data FROM task_history WHERE type IN ('runtime_log','role_assignment_fault','tool_observation') ORDER BY id DESC LIMIT 6")}));assert.equal(task.error_code,'manager_deferred');assert.equal(task.status,'retry_wait');assert.equal(h.counts().branchWrites,0);
 });

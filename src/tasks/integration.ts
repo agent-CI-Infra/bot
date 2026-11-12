@@ -24,6 +24,7 @@ export function requestIntegration(s:Store,task:Row,base:string,reason:string,pr
  if(!candidate?.local_sha||!candidate.tree_sha||!candidate.source_tree||!source)fail(409,'integration_snapshot_unavailable');
  const records=new TaskRecords(s),latest=s.get('SELECT * FROM tasks WHERE id=?',task.id)!;
  const input=JSON.parse(latest.input||'{}');
+ if(['cancelled','superseded'].includes(latest.status))fail(409,'integration_task_cancelled');
  if(input.integration?.state==='pending'&&input.integration.target_base===base)return;
  if(!['pr_opened','completed','needs_replan'].includes(latest.status))fail(409,'integration_task_running');
  const integration={id:randomId(),state:'pending',reason,target_base:base,source_workspace_id:source,sha:candidate.local_sha,tree_sha:candidate.tree_sha,base_tree:candidate.source_tree,previous_base:candidate.base_sha,previous_candidate:records.get(task.id).candidate?.id,previous_head:pr?.head?.sha??null,revision:records.get(task.id).revision,requested_at:new Date().toISOString()};
@@ -31,7 +32,7 @@ export function requestIntegration(s:Store,task:Row,base:string,reason:string,pr
   const current=s.get('SELECT status,claim_token FROM tasks WHERE id=?',task.id)!;
   if(['cancelled','superseded'].includes(current.status))fail(409,'integration_task_cancelled');
   s.run("UPDATE tasks SET input=?,status='queued',phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,publication_started=0,error_code=NULL,next_run_at=?,attempt=attempt+1,claim_token=NULL WHERE id=?",JSON.stringify({...input,integration,recovery:undefined,...(pr?{bot_pr:pr}:{})}),Date.now()+1000,task.id);
-  s.run("UPDATE task_merge_requests SET state='integrating',next_run_at=?,updated_at=? WHERE task_id=?",Date.now()+5000,new Date().toISOString(),task.id);
+  s.run("UPDATE task_merge_requests SET state='integrating',next_run_at=?,updated_at=? WHERE task_id=? AND state IN ('waiting','queued','integrating')",Date.now()+5000,new Date().toISOString(),task.id);
   traceEvent(s,task.id,'integration_requested',integration,null,'framework');
  });
 }

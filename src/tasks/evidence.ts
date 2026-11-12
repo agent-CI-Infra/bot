@@ -1,4 +1,4 @@
-import { visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
+import { taskControllerReads, visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
 import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import type { Store } from '../storage/database.js';
 import { sha } from '../agent/common.js';
@@ -27,22 +27,23 @@ export function boundedCandidate(candidate:Candidate|null){
   return {...candidate,artifacts:candidate.artifacts.map(artifact=>({...artifact,...(artifact.content===undefined?{}:{content:content(artifact.content)})})),evidence};
 }
 export function readEvidence(store:Store,taskId:string,candidate:Candidate,args:any,access?:MemoryAccess){
+  const error=(code:string)=>({error:code,requested_source:args?.source,candidate_id:candidate.id,revision:candidate.revision,offered_sources:candidate.evidence.slice(-20).map(({source,version,verified})=>({source,version,verified})),discovery:{tool:'read_evidence',task_ref:'task:'+taskId},instruction:'Only offered, authorized observations are readable here. Choose among offered_sources; task-reading tools, when available, expose shared publication/version facts. You decide whether to query another source or obtain new evidence.'});
   const evidence=candidate.evidence.find(e=>e.source===args?.source);
   const source=String(args?.source||''),[kind,id]=source.split(':');
-  if(!id||id.length>128)return {error:'invalid_evidence_source'};
-  if(!evidence&&kind!=='task_history')return {error:'evidence_not_offered'};
+  if(!id||id.length>128)return error('invalid_evidence_source');
+  if(!evidence&&kind!=='task_history')return error('evidence_not_offered');
   const row=kind==='task_history'?store.get('SELECT data AS raw,data,type FROM task_history WHERE task_id=? AND id=?',taskId,id!):kind==='task_log'?store.get('SELECT content AS raw,content,content_ref FROM task_logs WHERE task_id=? AND id=?',taskId,id!):null;
-  if(!row)return {error:'raw_evidence_unavailable'};
+  if(!row)return error('raw_evidence_unavailable');
   // A body in a trajectory file reads as the text it was recorded with, so digests taken before still match.
-  try{row.raw=kind==='task_log'?logContent(store,row):historyData(store,row);}catch{return {error:'raw_evidence_unavailable'};}
+  try{row.raw=kind==='task_log'?logContent(store,row):historyData(store,row);}catch{return error('raw_evidence_unavailable');}
   let data:any;try{data=JSON.parse(row.raw);}catch{data={};}
   const verification=!evidence&&row.type==='acceptance_evidence'&&data&&typeof data.evaluation_id==='string'?store.get("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_started' AND json_extract(data,'$.evaluation_id')=? AND json_extract(data,'$.candidate_id')=? AND json_extract(data,'$.revision')=?",taskId,data.evaluation_id,candidate.id,candidate.revision):null;
-  if(!evidence&&row.type!=='execution_evidence'&&!verification)return {error:'evidence_not_offered'};
-  if(evidence&&(evidence.result as any)?.digest!==sha(row.raw))return {error:'evidence_digest_changed'};
-  const scoped=visibleMemorySnapshot(store,store.get('SELECT repository_id FROM tasks WHERE id=?',taskId)!.repository_id,data,access);
-  if(scoped!==data)return {error:'evidence_knowledge_forbidden'};
+  if(!evidence&&row.type!=='execution_evidence'&&!verification)return error('evidence_not_offered');
+  if(evidence&&(evidence.result as any)?.digest!==sha(row.raw))return error('evidence_digest_changed');
+  const scoped=taskControllerReads(store,taskId,access)?data:visibleMemorySnapshot(store,store.get('SELECT repository_id FROM tasks WHERE id=?',taskId)!.repository_id,data,access);
+  if(scoped!==data)return error('evidence_knowledge_forbidden');
   const offset=args?.offset??0,length=args?.length??12000;
-  if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(length)||length<1||length>32000)return {error:'invalid_evidence_range'};
+  if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(length)||length<1||length>32000)return error('invalid_evidence_range');
   const binding=verification?JSON.parse(verification.data):null;
   return {source,version:evidence?.version||data?.version||data?.result?.version||binding?.source_tree||'unknown',historical:!evidence,
     ...(binding?{verification_candidate:binding.candidate_id,revision:binding.revision}:{}),digest:sha(row.raw),offset,total:row.raw.length,chunk:row.raw.slice(offset,offset+length)};

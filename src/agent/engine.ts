@@ -6,7 +6,7 @@ import {claimQueuedTask} from '../tasks/priority.js';
 import { sourceRef } from '../roles/role-run.js';
 import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import {CoordinationWorker,resumeCoordinatedTasks,coordinationApi} from '../tasks/coordination.js';
-import {requestIntegration,integratedPublication,applyIntegration} from '../tasks/integration.js';
+import {integratedPublication,applyIntegration} from '../tasks/integration.js';
 import { checkManagementBudget } from '../management/budget.js';
 import { executionModel, taskConfiguration, executionRuleFiles, taskPermissions } from '../tasks/configuration.js';
 import { TaskCommands } from '../tasks/commands.js';
@@ -124,21 +124,13 @@ export class TaskEngine {
   tick(){
     if(this.closing)return;
     this.coordinator.tick();resumeParentTasks(this.store,id=>this.active.has(id));resumeCoordinatedTasks(this.store,id=>this.active.has(id));resumeInstallationWaits(this.store,id=>this.active.has(id));
-    // Old installations may have parked candidates at the removed SHA fence. Recover once,
-    // retaining their actual snapshots, without requiring an operator script.
-    for(const old of this.store.all("SELECT * FROM tasks WHERE status='needs_replan' AND error_code='base_branch_changed'")){
-      if(this.active.has(old.id))continue;
-      try{requestIntegration(this.store,old,'latest','legacy_base_branch_changed');}catch(error){
-        const code=(error as any).code??'integration_snapshot_unavailable';
-        if(!this.store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='integration_blocked' AND json_extract(data,'$.code')=?",old.id,code))traceEvent(this.store,old.id,'integration_blocked',{code,reason:'Retained integration source unavailable; operator attention required. Existing candidate was not discarded.'},null,'framework');
-      }
-    }
     for(const request of this.store.all("SELECT m.* FROM task_merge_requests m JOIN tasks t ON t.id=m.task_id WHERE m.state IN ('waiting','queued','cancelling') AND m.next_run_at<=? AND (m.state='cancelling' OR t.status IN ('pr_opened','completed'))",Date.now())){
       if(this.active.has(request.task_id)||this.merging.has(request.task_id))continue;
       this.store.run('UPDATE task_merge_requests SET next_run_at=? WHERE task_id=?',Date.now()+15000,request.task_id);
       const work=this.continueMerge(request).finally(()=>this.merging.delete(request.task_id));this.merging.set(request.task_id,work);
     }
-    for(const parked of this.store.all("SELECT * FROM tasks WHERE status='needs_replan' AND error_code NOT IN ('base_branch_changed','development_not_approved','actions_development_not_approved')")){
+    // Legacy SHA fences return facts to the Manager, just like other recoverable parked tasks.
+    for(const parked of this.store.all("SELECT * FROM tasks WHERE status='needs_replan' AND error_code NOT IN ('development_not_approved','actions_development_not_approved')")){
       if(this.active.has(parked.id))continue;
       const input=JSON.parse(parked.input||'{}');
       this.store.run("UPDATE tasks SET status='queued',phase='prepare',input=?,next_run_at=0 WHERE id=? AND status='needs_replan'",JSON.stringify({...input,manager_feedback:{code:parked.error_code,detail:'Legacy parked task: review original records before deciding how to continue. Existing candidates and effects are retained.'}}),parked.id);
@@ -281,7 +273,7 @@ export class TaskEngine {
       redactor.add(config.key);await this.share(task.repository_id);
       attemptRun=beginRun(this.store,task,'attempt',{phase:task.phase,kind:task.kind,model:{id:config.id,name:config.model,version:config.version},policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)});task.trace_run_id=attemptRun?.id;
       const repo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
-      await recoverWithManager(this.store,task,guard,redactor,async()=>{if(requestedTask(task))return {request:JSON.parse(task.input||'{}').request,contract:records.get(id).contract};const reader=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await reader.connect(false,undefined,{contents:'read',issues:'read',pull_requests:'read'});return reader.object(task.kind,task.object_number);},async(instance,resolved)=>{if(resolved.snapshot.harness.id!=='pi')return;const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment','Manager backend is waiting for the configured project computer.');return roleBackendWorkspace(new Workspace(this.store,this.manager,{...task,generation:environment.generation},redactor,guard,log))(instance,resolved);});
+      await recoverWithManager(this.store,task,guard,redactor,async()=>{if(requestedTask(task))return {request:JSON.parse(task.input||'{}').request,contract:records.get(id).contract};const reader=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await reader.connect(false,undefined,{contents:'read',issues:'read',pull_requests:'read'});return reader.object(task.kind,task.object_number);},async(instance,resolved)=>{if(resolved.snapshot.harness.id!=='pi')return;const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment','Manager backend is waiting for the configured project computer.');return roleBackendWorkspace(new Workspace(this.store,this.manager,{...task,generation:environment.generation},redactor,guard,log))(instance,resolved);},async()=>{const reader=new GitHub(this.store,repo,redactor,guard,this.githubUrl);const scopes=taskReadScopes(this.store,task);if(!scopes.includes('contents'))stop('github_read_token_not_allowed','waiting_permission');await reader.connect(false,undefined,{contents:'read',...(scopes.includes('pull_requests')?{pull_requests:'read'}:{})},false);return reader;});
       // A task waiting for its computer retries every few seconds, so it checks the computer before it asks GitHub for
       // anything: four such tasks once used up their installation's hourly GitHub quota while their computer was down.
       let environment:any=null;
@@ -805,6 +797,12 @@ export class TaskEngine {
       // waiting for the same window); it does not use up the five automatic retries.
       const limited=failure.code==='github_rate_limited';
       if((failure.state==='needs_replan'||failure.code==='manager_execution_stopped'||['stage_budget_exhausted','role_budget_exhausted'].includes(failure.code))&&!['development_not_approved','actions_development_not_approved'].includes(failure.code)){const saved=JSON.parse(current?.input||'{}');update({input:JSON.stringify({...saved,manager_feedback:{code:failure.code,detail:redactor.text(String(failure.detail||'')),at:new Date().toISOString()}})});}
+      if(['branch_head_changed','branch_disappeared','publication_receipt_mismatch'].includes(failure.code)&&failure.state==='needs_replan'&&controlled(this.store,task,'development')){
+        const row=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=row?JSON.parse(row.data):null,saved=JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)?.input||'{}');
+        const recovery=candidate?.local_sha?{source_workspace_id:candidate.source_workspace_id??task.workspace_id,base_sha:candidate.base_sha,revision:records.get(id).revision,sha:candidate.local_sha,tree_sha:candidate.tree_sha,created_at:new Date().toISOString()}:saved.recovery;
+        update({input:JSON.stringify({...saved,recovery,manager_feedback:{code:failure.code,detail:redactor.text(String(failure.detail||'')),discovery:{tool:'read_publication_context',arguments:{}}}}),phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,publication_started:0,attempt:task.attempt+1});
+        traceEvent(this.store,id,'manager_recovery_queued',{code:failure.code,previous_status:current?.status,discovery:{tool:'read_publication_context',arguments:{}}},attemptRun?.id,'framework');
+      }
       const managerFault=this.store.get("SELECT role,status FROM task_runs WHERE task_id=? AND role IS NOT NULL ORDER BY rowid DESC LIMIT 1",id);
       const managerRetry=failure.state==='needs_replan'||failure.code==='manager_execution_stopped'||managerFault?.role===roleConfig(this.store,task).controller.role&&managerFault?.status==='fault';
       const state=managerRetry&&failure.state==='failed'? 'retry_wait':automaticState(failure.code,failure.state),retrying=automaticRetry.has(state),counted=isAttemptFailure(failure.code,state),now=Date.now();

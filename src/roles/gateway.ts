@@ -2,7 +2,7 @@ import type { Store, Row } from '../storage/database.js';
 import { TaskError } from '../agent/common.js';
 import { traceEvent, traceSource } from '../tasks/trace.js';
 import { memoryTool } from '../memory/project.js';
-import { canReadMemory, taskTraceAccess } from '../memory/access.js';
+import { canReadMemory, taskControllerReads, taskTraceAccess } from '../memory/access.js';
 import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
 import { roleAuthority, type RoleSnapshot } from './definition.js';
 import { verifyRunToken, tenantOf } from './role-run.js';
@@ -13,13 +13,14 @@ import { managedTaskOrigin, taskToolAllowed } from '../tasks/management.js';
  * project knowledge, and proposes experience candidates. Every call presents the run's capability token and is checked
  * again on the server: token binding and expiry, the current lease epoch, the run still running, the principal's current
  * authorization, the role's live permissions, and the reference's own scope. A reference is a pointer, not a pass to read
- * everything: other tasks, other role instances' runs and model exchanges, and other roles' scoped memory are refused,
+ * everything: other tasks and other roles' scoped memory are refused. The task controller can read every retained record
+ * of its own task; other roles can only expand permitted runs and model exchanges,
  * and a refused or guessed reference gets the same answer as a missing one. The gateway has no SQL, shell, publication,
  * merge or management tool. Calls and the exact versions read go into the task trace.
  */
 const tool = (name: string, description: string, properties: any, required: string[] = []) => ({ type: 'function', function: { name, description, parameters: { type: 'object', properties, required, additionalProperties: false } } });
 export const gatewayTools = [
-  tool('read_task_record', 'Read a durable record from THIS task by offered reference; use offset to page its JSON.', { ref: { type: 'string' }, offset: { type: 'integer' } }, ['ref']),
+  tool('read_task_record', 'Read a retained record from THIS task by offered reference; the Task Manager can read all worker records. Use offset to page JSON; use read_managed_task for another authorized task.', { ref: { type: 'string' }, offset: { type: 'integer' } }, ['ref']),
   tool('list_task_records', 'List references (type and ref, no bodies) of this task\'s durable records, newest first. Expand one with read_task_record.', { types: { type: 'array', items: { type: 'string' } }, before: { type: 'integer' }, limit: { type: 'integer' } }),
   tool('search_knowledge', 'Search this project\'s knowledge for your role. Previews are not proof; read the exact revision before relying on it.', { query: { type: 'string' }, module: { type: 'string' }, kind: { type: 'string' } }),
   tool('read_knowledge', 'Read one exact project knowledge revision and its sources.', { id: { type: 'string' }, revision: { type: 'integer' }, offset: { type: 'integer' } }, ['id']),
@@ -109,6 +110,7 @@ export class TaskToolGateway {
   /** Whether this run's role may expand a reference of its own task. */
   private visible(task: Row, run: Row, role: string, ref: string): boolean {
     const s = this.store;
+    if (!ref.startsWith('project_memories:') && taskControllerReads(s, String(task.id), taskTraceAccess(s, { ...task, active_role: role, trace_run_id: run.id }))) return true;
     const runRef = /^(?:model_requests|task_runs):([^:]+):/.exec(ref);
     if (runRef) {
       // Model exchanges and run snapshots belong to the role instance that made them.
