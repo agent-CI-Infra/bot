@@ -1,7 +1,7 @@
 // Task process and project computer views. Loaded after app.js and reuses its helpers ($, api, element, state, states, timestamp).
 const terminalStates = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'superseded', 'failed'];
 const kindLabels = { 'gate.onboarding': '接入门禁', 'review.issue': '检视 Issue', 'review.pr': '检视 PR', 'development.issue': '开发 Issue', 'development.pr': '跟进 bot PR', 'release.observe': 'CI 观察', 'release.notes': '发行说明', 'actions.failures': 'Actions 失败分析',
-  'workflow.issue': '通用回复 Issue', 'workflow.pr': '通用回复 PR', 'task.request': '普通任务' };
+  'workflow.issue': '通用回复 Issue', 'workflow.pr': '通用回复 PR', 'task.request': '普通任务', 'task.development': '开发任务' };
 const modeLabels = { 'review.issue': '检视', 'review.pr': '检视', 'development.issue': '开发', 'development.pr': '跟进' };
 const phaseLabels = { prepare: '准备工作区', model: '模型执行', validate: '测试验证', acceptance: '独立验收', publish: '发布', done: '完成' };
 // Role coordination words shared by the task view and the 「Manager 与角色」 page. A harness is how a role runs;
