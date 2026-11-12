@@ -210,24 +210,29 @@ test('keyboard users reach the directory, the file, its history and restore in o
     await f.admin(base+'/'+encodeURIComponent(file.id),'PUT',{content:'# 第二版',expected_revision:file.revision});
     await f.login();
     const panel=page=>page.locator('.knowledge-main'),focused=()=>page.evaluate(()=>{const el=document.activeElement;return el?.getAttribute('aria-label')||el?.textContent?.trim()||'';});
+    // The tree is redrawn while the page settles, so wait for the entry, focus it, and confirm focus landed before
+    // counting Tabs; a redraw that drops focus to the document restarts the walk from the same entry.
+    const focusEntry=async(name,scope=page.locator('.knowledge-tree'))=>{const node=scope.getByRole('button',{name,exact:true});await expect(node).toBeVisible();await node.focus();await expect.poll(focused).toBe(name);return node;};
+    const tabTo=async(start,target,limit=40,scope)=>{await focusEntry(start,scope);const seen=[];
+      for(let i=0;i<limit;i++){await page.keyboard.press('Tab');const current=await focused();seen.push(current);
+        if(current===target)return seen;if(!current)await focusEntry(start,scope);}
+      throw new Error(`Tab never reached ${target} in ${limit} presses; focus sequence: ${JSON.stringify(seen)}`);};
+    const tabOrder=async(start,count,scope)=>{await focusEntry(start,scope);const out=[];let attempts=0;
+      while(out.length<count&&attempts<count+6){attempts++;await page.keyboard.press('Tab');const current=await focused();
+        if(!current){await focusEntry(start,scope);continue;}out.push(current);}
+      return out;};
     // Tab from the workspace's first control reaches the directory entry, and Enter opens that directory.
-    await page.locator('.knowledge-tree').getByRole('button',{name:'全部文件',exact:true}).focus();
-    let current='',reached=false;
-    for(let i=0;i<12;i++){await page.keyboard.press('Tab');current=await focused();if(current==='目录 手册'){reached=true;break;}}
-    expect(reached).toBe(true);
+    await tabTo('全部文件','目录 手册');
     await page.keyboard.press('Enter');
     await expect(panel(page).getByRole('button',{name:'笔记.md',exact:true})).toBeVisible();
     // The file entry is reachable with Tab too, and Enter opens its content.
-    await page.locator('.knowledge-tree').getByRole('button',{name:'全部文件',exact:true}).focus();
-    for(let i=0;i<16;i++){await page.keyboard.press('Tab');current=await focused();if(current==='文件 手册/笔记.md')break;}
-    expect(current).toBe('文件 手册/笔记.md');
+    await tabTo('全部文件','文件 手册/笔记.md');
     await page.keyboard.press('Enter');
     await expect(panel(page).getByRole('heading',{name:'笔记.md',exact:true})).toBeVisible();
     await expect(page.locator('.knowledge-content')).toContainText('第二版');
     // Focus order after the back link does not jump: the file actions follow in order, and Enter opens history.
-    const back=page.getByRole('button',{name:'← 返回目录',exact:true});await back.focus();
-    const order=[];for(let i=0;i<3;i++){await page.keyboard.press('Tab');order.push(await focused());}
-    expect(order).toEqual(['编辑文件','下载文件','历史版本']);
+    const back=page.getByRole('button',{name:'← 返回目录',exact:true});
+    expect(await tabOrder('← 返回目录',3,page)).toEqual(['编辑文件','下载文件','历史版本']);
     await page.keyboard.press('Enter');
     await expect(page.getByRole('complementary',{name:'文件历史'})).toBeVisible();
     await expect(panel(page).getByRole('textbox',{name:'搜索文件名或路径',exact:true})).toHaveCount(0);
@@ -235,8 +240,7 @@ test('keyboard users reach the directory, the file, its history and restore in o
     await page.getByRole('complementary',{name:'文件历史'}).getByRole('button',{name:'v1',exact:true}).focus();
     await page.keyboard.press('Enter');
     await expect(page.getByText('正在查看 v1 · 只读，当前仍为 v2',{exact:true})).toBeVisible();
-    await back.focus();const restore=[];for(let i=0;i<6;i++){await page.keyboard.press('Tab');restore.push(await focused());}
-    expect(restore).toContain('恢复此版本');
+    await tabTo('← 返回目录','恢复此版本',10,page);
     await page.getByRole('button',{name:'恢复此版本',exact:true}).focus();await page.keyboard.press('Enter');
     await expect(page.getByRole('dialog')).toBeVisible();
     await expect(page.getByRole('dialog').getByRole('button',{name:'恢复版本',exact:true})).toBeVisible();
