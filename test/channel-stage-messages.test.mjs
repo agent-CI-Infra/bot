@@ -216,14 +216,17 @@ test('assistant turns and own tasks have no step limit: a long group answer, a l
 
 test('the stage-message instruction tells a role when to report progress and what must not be sent (#453)', async t => {
   const f = await group(t), { h } = f;
-  let system, described;
+  let system, described, parameter;
   f.modelState.respond = (body, res) => {
-    if (system === undefined) { system = body.messages[0].content; described = body.tools.find(tool => tool.function.name === 'send_message').function.description; }
+    if (system === undefined) {
+      const tool = body.tools.find(t => t.function.name === 'send_message');
+      system = body.messages[0].content; described = tool.function.description; parameter = tool.function.parameters.properties.text.description;
+    }
     return say(res, '结论：收到。');
   };
   assert.equal((await inbox(f, await post(h, f.id, inGroup('看一下这个仓库', 'ou_bob')))).state, 'completed');
-  assert.equal(typeof system, 'string'); assert.equal(typeof described, 'string');
-  // Both places a model learns the contract carry the same three hard rules, so the description cannot contradict the prompt.
+  assert.equal(typeof system, 'string'); assert.equal(typeof described, 'string'); assert.equal(typeof parameter, 'string');
+  // All three places a model learns the contract carry the same three hard rules, so none can contradict another.
   const rules = [
     [/长耗时任务/, 'names the long-running work it applies to'],
     [/多步工具/, 'names multi-step tool work'],
@@ -241,6 +244,7 @@ test('the stage-message instruction tells a role when to report progress and wha
   for (const [pattern, why] of rules) {
     assert.match(system, pattern, 'system prompt: ' + why);
     assert.match(described, pattern, 'tool description: ' + why);
+    assert.match(parameter, pattern, 'text parameter: ' + why);
   }
   // The #435 boundaries are unchanged: ten per turn, attachments only with the final answer, the final answer sent automatically.
   for (const text of [system, described]) {
