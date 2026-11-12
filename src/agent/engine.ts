@@ -1,3 +1,5 @@
+import {assertRequestPullRequest} from '../tasks/pull-request.js';
+import {requestedTask} from '../work/catalog.js';
 import {resumeParentTasks} from '../tasks/children.js';
 import { taskReadScopes } from '../tasks/management.js';
 import {claimQueuedTask} from '../tasks/priority.js';
@@ -67,7 +69,7 @@ const automaticRetry=new Set(['retry_wait','waiting_configuration','waiting_envi
 const retryCycleMs=8*60*60*1000;
 // Reviews and reply tasks answer on the object; development publishes a branch and PR.
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
-const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%' OR kind IN ('release.observe','release.notes','actions.failures','gate.onboarding','task.request'))";
+const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%' OR kind IN ('release.observe','release.notes','actions.failures','gate.onboarding','task.request','task.development'))";
 // A task stopped here waits for the installation projection, not for a person: the installation was suspended or
 // uninstalled, the repository left it, or its scope was being re-verified (scope_pending, set by every scope-changing
 // webhook and by the first sync after an upgrade). The GitHub client stops on the same check before each request.
@@ -229,7 +231,7 @@ export class TaskEngine {
       try{checkManagementBudget(this.store,task.repository_id);}catch(error){if(error instanceof HttpError)stop(error.code,'waiting_configuration');throw error;}
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),claim=this.store.get('SELECT token FROM task_claims WHERE task_id=?',id);
       if(current?.claim_token!==token||claim?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled',`任务 ${id} 的执行权已撤销或状态已变为 ${current?.status||'不存在'}。`);
-      if (task.kind === 'task.request') {
+      if (requestedTask(task)) {
         const execution = this.store.get('SELECT * FROM task_authorizations WHERE task_id=?', id);
         if (execution && this.store.get('SELECT source_kind FROM task_origins WHERE task_id=?',id)?.source_kind!=='role') {
           try { authorize(resolvePrincipalActor(this.store, execution.principal_id, execution.tenant_id, task.repository_id), execution.capability); }
@@ -241,9 +243,10 @@ export class TaskEngine {
         stop(installationWait,'waiting_permission','安装已失效或正在核实范围，任务等待安装同步。');
       const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number});
       if(actionsIssue!==null&&(!policy?.actions_failures_enabled||task.kind.startsWith('development.')&&!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue)))stop('actions_development_disabled','cancelled');
+      if(task.kind==='task.development')assertRequestPullRequest(this.store,task);
       if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用，或已关闭 ${task.kind} 类型任务。`);
       // A work type that was switched off in the project configuration stops its tasks the same way.
-      if(task.kind!=='task.request'&&!workEnabled(this.store,task.repository_id,workOf(task as any)))stop('work_disabled','cancelled',`项目已关闭 ${workOf(task as any)} 这类工作。`);
+      if(!requestedTask(task)&&!workEnabled(this.store,task.repository_id,workOf(task as any)))stop('work_disabled','cancelled',`项目已关闭 ${workOf(task as any)} 这类工作。`);
       // The guard runs on every poll, tool call and streamed reply of every task: read only the columns this check needs, and
       // only in publication. Building the whole record here (assignments, coordination, relations) took most of the
       // control plane's CPU with ten tasks running.
@@ -274,12 +277,12 @@ export class TaskEngine {
     let workspace:Workspace|undefined;let attemptRun:Row|null=null;
     try{
       await guard();
-      const entry=task.kind.startsWith('development.')?'development':task.kind.startsWith('review.')?'review':task.kind==='actions.failures'?'actions':task.kind==='task.request'?'request':null;
+      const entry=task.kind.startsWith('development.')?'development':task.kind.startsWith('review.')?'review':task.kind==='actions.failures'?'actions':requestedTask(task)?'request':null;
       const config=entry&&controlled(this.store,task,entry)?roleExecutionModel(this.store,task,roleConfig(this.store,task).controller.role):executionModel(this.store,task,workOf(task as any));
       redactor.add(config.key);await this.share(task.repository_id);
       attemptRun=beginRun(this.store,task,'attempt',{phase:task.phase,kind:task.kind,model:{id:config.id,name:config.model,version:config.version},policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)});task.trace_run_id=attemptRun?.id;
       const repo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
-      await recoverWithManager(this.store,task,guard,redactor,async()=>{if(task.kind==='task.request')return {request:JSON.parse(task.input||'{}').request,contract:records.get(id).contract};const reader=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await reader.connect(false,undefined,{contents:'read',issues:'read',pull_requests:'read'});return reader.object(task.kind,task.object_number);},async(instance,resolved)=>{if(resolved.snapshot.harness.id!=='pi')return;const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment','Manager backend is waiting for the configured project computer.');return roleBackendWorkspace(new Workspace(this.store,this.manager,{...task,generation:environment.generation},redactor,guard,log))(instance,resolved);});
+      await recoverWithManager(this.store,task,guard,redactor,async()=>{if(requestedTask(task))return {request:JSON.parse(task.input||'{}').request,contract:records.get(id).contract};const reader=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await reader.connect(false,undefined,{contents:'read',issues:'read',pull_requests:'read'});return reader.object(task.kind,task.object_number);},async(instance,resolved)=>{if(resolved.snapshot.harness.id!=='pi')return;const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment','Manager backend is waiting for the configured project computer.');return roleBackendWorkspace(new Workspace(this.store,this.manager,{...task,generation:environment.generation},redactor,guard,log))(instance,resolved);});
       // A task waiting for its computer retries every few seconds, so it checks the computer before it asks GitHub for
       // anything: four such tasks once used up their installation's hourly GitHub quota while their computer was down.
       let environment:any=null;
@@ -288,7 +291,7 @@ export class TaskEngine {
         if(!environment){environment=await this.manager.call('PUT','/v1/projects/'+task.repository_id);this.granted.delete(task.repository_id);await this.share(task.repository_id);}
         if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`准备工作区时项目电脑尚未就绪，当前状态=${environment.state}。`);
       }
-      if(task.kind==='task.request'){await runRequest(this.store,this.manager,task,redactor,guard,log,this.githubUrl,this.gitCache);return;}
+      if(requestedTask(task)){await runRequest(this.store,this.manager,task,redactor,guard,log,this.githubUrl,this.gitCache);return;}
       // The writes this task may ask for decide the platform tools; a task that may open a PR needs contents write.
       const writes=taskPermissions(this.store,task).writes,eventState:Record<string,any>={};
       // Event work reads Actions runs and logs; it writes only through its own tools.
@@ -834,7 +837,7 @@ export class TaskEngine {
       // A capacity wait never started a run, so it keeps its attempt and its workspace; everything else in the model phase
       // starts the next attempt on a new one.
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status)&&!['cancelled','superseded'].includes(state)&&
-        state!=='waiting_coordination'&&state!=='needs_help'&&task.kind!=='task.request'&&failure.code!=='role_capacity'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||
+        state!=='waiting_coordination'&&state!=='needs_help'&&!requestedTask(task)&&failure.code!=='role_capacity'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||
         // An operation left over from an interrupted run conflicts with the same key again; a new attempt has new keys.
         ['execution_interrupted','tool_operation_conflict'].includes(failure.code)&&task.phase!=='publish')){
         if(replies(task.kind)&&!task.publication_started)this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);

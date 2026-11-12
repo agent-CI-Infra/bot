@@ -9,13 +9,14 @@ import { assertPublicationStages } from '../roles/schedule.js';
 import { assertManagedExecution, assertTaskExternalEffect, taskToolAllowed } from './management.js';
 import { taskPermissions } from './configuration.js';
 import { TaskRecords } from './service.js';
+import { requestedTask,workOf } from '../work/catalog.js';
 import { workEnabled } from '../work/settings.js';
 
-export const softwareRequest = (task: Row) => task.kind==='task.request' && JSON.parse(task.input||'{}').contract?.endpoint==='reviewable_pull_request';
+export const softwareRequest = (task: Row) => requestedTask(task) && JSON.parse(task.input||'{}').contract?.endpoint==='reviewable_pull_request';
 /** A delivery endpoint does not lend file/PR authority to an ordinary report or a delegated executor. */
 export function assertRequestPullRequest(store: Store, task: Row): void {
   const origin=assertManagedExecution(store,task),policy=store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id),writes=taskPermissions(store,task).writes;
-  if(!softwareRequest(task)||!policy?.enabled||!policy.development_enabled||!workEnabled(store,task.repository_id,'task.request'))stop('task_software_disabled','waiting_configuration');
+  if(!softwareRequest(task)||!policy?.enabled||!policy.development_enabled||!workEnabled(store,task.repository_id,workOf(task as any)))stop('task_software_disabled','waiting_configuration');
   if(!writes.includes('code')||!writes.includes('pull_request'))stop('task_pull_request_forbidden','waiting_permission','项目未显式允许普通事项修改代码并交付 PR。');
   if(origin?.executor_role){
     const executor=roleConfiguration(store,task.repository_id).roles.find(r=>r.role_id===origin.executor_role&&r.enabled);

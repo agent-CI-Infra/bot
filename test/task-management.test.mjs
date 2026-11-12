@@ -31,7 +31,7 @@ function fixture(t) {
   };
   save('reviewer', { computer: 'deny', github_issues:'read',github_pull_requests:'read', task_management: 'write', delegation: 'deny', github: 'read' }, { harness_ref: { id: 'native', version: config.roles.find(r => r.role_id === 'reviewer').harness_ref.version } });
   const commands = new TaskCommands(s), caller = (source = {}) => roleTaskCaller(s, 'r', 'reviewer', { conversation_id: 'chat-a', source_message: 'message-a', guard() {}, ...source });
-  const create = (c = caller(), request = 'Inspect the logs', extra = {}) => commands.tool(c, 'create_task', { request, criteria: ['Report actual observations'], ...extra });
+  const create = (c = caller(), request = 'Inspect the logs', extra = {}) => {const result=commands.tool(c, 'create_task', { request, criteria: ['Report actual observations'], ...extra });if(result.error)throw Object.assign(new Error(result.error),{code:result.error});return result;};
   return { s, config, save, commands, caller, create };
 }
 
@@ -264,7 +264,7 @@ test('software request endpoint is explicit, defaults off and intersects fixed s
   const record=new TaskRecords(s).get(report);
   assert.throws(()=>commands.api({id:'operator',role:'project_admin',repositories:['r']},'PATCH',new URL('http://local/api/tasks/'+report+'/contract'),{expected_revision:record.revision,contract:{...record.contract,endpoint:'reviewable_pull_request'}},caller()),{code:'task_pull_request_forbidden'});
   assert.equal(new TaskRecords(s).get(report).contract.endpoint,'report');
-  assert.throws(()=>commands.tool(caller(),'create_task',{request:'Unknown endpoint',criteria:['Valid result'],endpoint:'merge'}),{code:'invalid_task_endpoint'});
+  assert.equal(commands.tool(caller(),'create_task',{request:'Unknown endpoint',criteria:['Valid result'],endpoint:'merge'}).error,'invalid_task_endpoint');
 });
 
 
