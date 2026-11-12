@@ -11,6 +11,23 @@ async function renderSchedules(panel, project) {
   const isSubscription = operation => operation === 'notification.register' || operation?.startsWith('subscription.');
   const markConflict = (operation, message) => { const target = isSubscription(operation) ? state.subscription : state; target.conflict = /revision.*conflict|revision_changed/.test(message || ''); if(isSubscription(operation)){target.error=message;target.candidate=null;} };
   const container = panel; panel = element('section', '', 'schedule-panel'); container.replaceChildren(panel);
+  // Defer the focus transfer until click so restored mobile navigation cannot steal pointer-up.
+  // Focus the button before its handler runs, committing the editor's change before the command snapshot.
+  let pressedAction = null;
+  panel.addEventListener('pointerdown', event => {
+    pressedAction = null;
+    const control = event.target.closest('button'), focused = document.activeElement;
+    if (event.button === 0 && control && panel.contains(focused)
+      && focused.matches('input,textarea') && matchMedia('(max-width:767px)').matches) {
+      event.preventDefault(); pressedAction = control;
+    }
+  });
+  panel.addEventListener('pointercancel', () => { pressedAction = null; });
+  panel.addEventListener('click', event => {
+    const control = event.target.closest('button');
+    if (control && control === pressedAction) control.focus({ preventScroll: true });
+    pressedAction = null;
+  }, true);
   let accessLost = false;
   const live = () => !accessLost && panel.isConnected && scheduleOwner === owner && owner === JSON.stringify([me?.id, me?.actor?.tenant_id, me?.actor?.principal_id]);
   panel.append(element('h3', '定时计划与通知'));

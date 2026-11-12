@@ -203,3 +203,69 @@ test('a missing schedules capability is explained as missing authority rather th
   expect(f.h.store.get('select count(*) n from schedules').n).toBe(0);
  }finally{await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
 });
+
+for (const surface of ['management', 'project']) {
+  test(`mobile ${surface} editor saves on the first press while an input is focused, then follows the plan to delivery`, async ({ page }) => {
+    test.setTimeout(90000);
+    const f = await environment(), errors = [], commands = [];
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('request', request => {
+      if (request.url().endsWith('/api/management/commands')) commands.push(request.postDataJSON().operation);
+    });
+    try {
+      await page.setViewportSize({ width: 390, height: 844 });
+      if (surface === 'management') await login(page, f);
+      else {
+        await page.goto(f.h.admin + '/#/projects/101/schedules');
+        await page.getByLabel('用户名', { exact: true }).fill('administrator');
+        await page.getByLabel('密码', { exact: true }).fill(f.password);
+        await page.getByRole('button', { name: '登录', exact: true }).click();
+      }
+      const steps = page.getByRole('navigation', { name: '计划编辑步骤' });
+      await page.getByLabel('计划名称', { exact: true }).fill('Mobile delivery');
+      await steps.getByRole('button', { name: '触发时间', exact: true }).click();
+      await page.getByLabel('计划时区', { exact: true }).fill('America/Argentina/Buenos_Aires');
+      await page.getByRole('button', { name: '预览日报计划', exact: true }).click();
+      await expect(page.getByLabel('计划预览')).toContainText('America/Argentina/Buenos_Aires');
+      await expect(page.getByLabel('计划预览')).toContainText('未来触发');
+      await page.getByRole('button', { name: '保存计划', exact: true }).click();
+      await expect.poll(() => f.h.store.get('SELECT count(*) n FROM schedules').n).toBe(1);
+      const plan = (await read(f, 'list_schedules')).schedules[0];
+      await page.getByLabel('编辑计划', { exact: true }).selectOption(plan.id);
+      await steps.getByRole('button', { name: '执行内容', exact: true }).click();
+      // A reduced viewport models the space left by a keyboard. The pointer press must not lose its target on blur.
+      await page.setViewportSize({ width: 390, height: 360 });
+      const name = page.getByLabel('计划名称', { exact: true }), save = page.getByRole('button', { name: '保存计划', exact: true });
+      await name.fill('Saved from the focused editor'); await name.focus(); await expect(name).toBeFocused();
+      await expect(page.locator('#console-mobile-nav')).toBeHidden();
+      await save.scrollIntoViewIfNeeded(); await expect(save).toBeInViewport();
+      await save.click();
+      await expect.poll(async () => (await read(f, 'list_schedules')).schedules[0].spec.name).toBe('Saved from the focused editor');
+      expect(commands.filter(operation => operation === 'schedule.update')).toHaveLength(1);
+      await page.setViewportSize({ width: 390, height: 844 });
+      for (const [label, state] of [['暂停计划', 'paused'], ['恢复计划', 'active']]) {
+        await page.getByLabel('编辑计划', { exact: true }).selectOption(plan.id);
+        await page.getByRole('button', { name: label, exact: true }).click();
+        await expect.poll(() => f.h.store.get('SELECT state FROM schedules').state).toBe(state);
+      }
+      await page.getByLabel('编辑计划', { exact: true }).selectOption(plan.id);
+      await page.getByRole('button', { name: '立即运行一次', exact: true }).click();
+      await expect.poll(() => f.h.store.get('SELECT count(*) n FROM schedule_occurrences').n).toBe(1);
+      await f.worker.tick();
+      const occurrence = (await read(f, 'list_occurrences')).records[0], delivery = (await read(f, 'list_notification_deliveries')).records[0];
+      expect(occurrence.state).toBe('succeeded'); expect(delivery.state).toBe('sent');
+      const record = page.locator('.schedule-record').first();
+      await page.getByRole('button', { name: '查看运行与跳过原因', exact: true }).click();
+      await record.locator(':scope > summary').click();
+      await expect(record).toHaveAttribute('data-record-id', occurrence.id); await expect(record).toContainText('执行成功');
+      await page.getByRole('button', { name: '查看通知及失败队列', exact: true }).click();
+      await record.locator(':scope > summary').click();
+      await expect(record).toContainText('第 1 次 · 已送达');
+      await expect(record).toContainText('America/Argentina/Buenos_Aires');
+      expect(commands.filter(operation => operation === 'schedule.register')).toHaveLength(1);
+      expect(commands.filter(operation => operation === 'schedule.run-now')).toHaveLength(1);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      expect(errors).toEqual([]);
+    } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+  });
+}
