@@ -40,6 +40,12 @@ test('an assigned child can read its parent contract but cannot acquire unrelate
  f.s.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,role,context_snapshot,config_snapshot) VALUES('child-run',?,'execution',1,1,'now','running','dev','{}','{}')",id);
  const child=roleTaskCaller(f.s,'r','dev',{source_task_id:id,source_run_id:'child-run',guard(){}});
  assert.ok(cmd.tool(child,'read_managed_task',{task_id:'parent'}).task.contract);
+ const sibling=cmd.tool(manager,'create_task',{request:'Sibling capability',criteria:['Deliver sibling evidence'],as_child:true}).id;
+ assert.ok(cmd.tool(child,'read_managed_task',{task_id:sibling}).task.contract);
+ assert.throws(()=>cmd.tool(child,'manage_task',{task_id:sibling,action:'pause'}),{code:'task_not_owned'});
+ f.s.run("UPDATE task_runs SET status='succeeded' WHERE id='child-run'");
+ assert.throws(()=>cmd.tool(child,'read_managed_task',{task_id:sibling}),{code:'task_not_owned'});
+ f.s.run("UPDATE task_runs SET status='running' WHERE id='child-run'");
  assert.throws(()=>cmd.tool(child,'manage_task',{task_id:'parent',action:'pause'}),{code:'task_not_owned'});
  f.add('unrelated');assert.throws(()=>cmd.tool(child,'read_managed_task',{task_id:'unrelated'}),{code:'task_not_owned'});
 });

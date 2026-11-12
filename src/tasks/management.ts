@@ -130,10 +130,12 @@ export function assertManagedTask(store: Store, caller: TaskCaller, id: string, 
   const origin = store.get('SELECT owner_key FROM task_origins WHERE task_id=?', id);
   const assigned = caller.source_task_id === id && caller.source_run_id && store.get(
     "SELECT 1 FROM task_runs WHERE id=? AND task_id=? AND role=? AND status='running'", caller.source_run_id, id, caller.role!);
-  const parentRead=!write&&caller.source_task_id&&caller.source_run_id&&store.get(
-    "SELECT 1 FROM task_children c JOIN task_runs r ON r.task_id=c.child_id WHERE c.parent_id=? AND c.child_id=? AND r.id=? AND r.role=? AND r.status='running'",
-    id,caller.source_task_id,caller.source_run_id,caller.role!);
-  if (origin?.owner_key !== caller.owner_key && !assigned&&!parentRead) return fail(403, 'task_not_owned');
+  const familyRead=!write&&caller.source_task_id&&caller.source_run_id&&store.get(
+    `SELECT 1 FROM task_runs r WHERE r.task_id=? AND r.id=? AND r.role=? AND r.status='running' AND (
+      EXISTS(SELECT 1 FROM task_children c WHERE (c.parent_id=? AND c.child_id=r.task_id) OR (c.child_id=? AND c.parent_id=r.task_id)) OR
+      EXISTS(SELECT 1 FROM task_children a JOIN task_children b ON a.parent_id=b.parent_id WHERE a.child_id=r.task_id AND b.child_id=?))`,
+    caller.source_task_id,caller.source_run_id,caller.role!,id,id,id);
+  if (origin?.owner_key !== caller.owner_key && !assigned&&!familyRead) return fail(403, 'task_not_owned');
   return task;
 }
 /** Every entry creates/attaches through this boundary; its callback retains the work type's original validation and records. */
@@ -270,7 +272,7 @@ const tool = (name: string, description: string, properties: any, required: stri
   parameters: { type: 'object', properties, required, additionalProperties: false } } });
 export const taskManagementTools = [
   tool('list_managed_tasks', 'List tasks owned by this trusted caller. This never reads another conversation or project.', { offset: { type: 'integer' }, limit: { type: 'integer' } }),
-  tool('read_managed_task', 'Read an owned or assigned task as artifact/evidence references. To read an original observation, pass an offered source and a bounded offset/length. This never returns executor transcripts.', { task_id: { type: 'string' }, source: { type: 'string' }, offset: { type: 'integer' }, length: { type: 'integer',maximum:32000 } }, ['task_id']),
+  tool('read_managed_task', 'Read an owned, assigned, or explicit parent/child/sibling task as artifact/evidence references; family reads require a live assigned role run. To read an original observation, pass an offered source and a bounded offset/length. This never returns executor transcripts.', { task_id: { type: 'string' }, source: { type: 'string' }, offset: { type: 'integer' }, length: { type: 'integer',maximum:32000 } }, ['task_id']),
   tool('create_task', 'Create a task in the current project, executing as yourself by default. Another executor requires delegation. Set execute=false to record it without running. A reviewable_pull_request endpoint requires explicit project code/PR writes and source/executor authority; it never bypasses tests or independent QA.', {
     request: { type: 'string' }, criteria: { type: 'array', items: { type: 'string' } }, endpoint: { type: 'string', enum: ['report','reviewable_pull_request'] }, executor_role: { type: 'string' }, execute: { type: 'boolean' }, as_child: { type: 'boolean', description: 'Task Manager only: create a normal project-team child of the current task; do not combine with executor_role. Parent may wait for any child result. Use execute=false for work not ready to start.' } }, ['request', 'criteria']),
   tool('manage_task', 'Append an instruction, continue, pause, or cancel an owned or assigned task. Terminal software deliveries cannot be reopened.', {

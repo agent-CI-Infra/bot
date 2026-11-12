@@ -2,7 +2,7 @@ import type {Store,Row} from '../storage/database.js';
 import {runAgent,type AgentSpec} from '../agent/runtime.js';
 import {TaskRecords} from '../tasks/service.js';
 import {traceEvent,traceSource} from '../tasks/trace.js';
-import {taskTraceAccess} from '../memory/access.js';
+import {visibleMemorySnapshot,taskTraceAccess} from '../memory/access.js';
 import {taskConfiguration} from '../tasks/configuration.js';
 import {roleExecutionSystem,roleExecutionModel} from './run.js';
 import {roleConfiguration} from './definition.js';
@@ -25,7 +25,7 @@ export function observeLongExecution(s:Store,task:Row,runId:string,now=Date.now(
    const tools=s.all("SELECT id,type,data,created_at FROM task_history WHERE task_id=? AND run_id=? AND type IN ('tool_started','tool_observation') ORDER BY id DESC LIMIT 12",task.id,runId).map(r=>({ref:'task_history:'+r.id,type:r.type,at:r.created_at,data:JSON.parse(r.data)}));
    const checkpoint=s.get("SELECT id,type FROM task_history WHERE task_id=? AND type IN ('artifact_checkpoint','checkpoint','role_run_checkpoint') ORDER BY id DESC LIMIT 1",task.id);
    const handoff=run.assignment_id?s.get("SELECT id FROM task_history WHERE task_id=? AND type='role_handoff' AND json_extract(data,'$.assignment_id')=? ORDER BY id DESC LIMIT 1",task.id,run.assignment_id):null;
-   const ref=traceEvent(s,task.id,'long_execution_report',{run_id:runId,role:run.role,harness:run.harness,assignment_id:run.assignment_id,assignment_ref:handoff?'task_history:'+handoff.id:null,input_ref:'task_runs:'+runId+':config',elapsed_ms:elapsed,threshold_ms:due,
+   const ref=traceEvent(s,task.id,'long_execution_report',{run_id:runId,role:run.role,harness:run.harness,assignment_id:run.assignment_id,assignment_ref:handoff?'task_history:'+handoff.id:null,input_ref:handoff?'task_history:'+handoff.id:'task:'+task.id,elapsed_ms:elapsed,threshold_ms:due,
     recent_activity:latest?{ref:'task_history:'+latest.id,type:latest.type,at:latest.created_at}:null,recent_tool_refs:tools.map(r=>({ref:r.ref,type:r.type,at:r.at,name:r.data.name,call_id:r.data.call_id??null})),
     checkpoint_ref:checkpoint?'task_history:'+checkpoint.id:null,instruction:'Still running. Tool starts without matching receipts may be in flight or unknown, not cancelled. Check source refs and versions; elapsed time alone does not prove a hang.'},runId,'framework');
    s.run('INSERT INTO long_execution_reports(run_id,threshold_ms,report_ref) VALUES(?,?,?)',runId,due,ref);
@@ -42,13 +42,24 @@ export async function decideLongExecution(spec:AgentSpec<any>,report:Row,isCurre
  active.add(task.id);s.run("UPDATE long_execution_reports SET state='running' WHERE run_id=? AND threshold_ms=?",report.run_id,report.threshold_ms);
  const controller=roleConfiguration(s,task.repository_id,taskConfiguration(s,task)?.roles).controller.role;
  const guard=async()=>{await spec.guard();assertTaskRole(s,task,controller);if(!isCurrent())throw new Error('long_execution_already_ended');};
+ // Manager may read the explicitly offered computer observations, not another role's transcript, model context
+ // or private memory tools. Keep the canonical observation in place and apply the Manager's knowledge ACL.
+ const readControlEvidence=(source:string)=>{
+  const match=/^task_history:(\d+)$/.exec(source),reportData=JSON.parse(s.get("SELECT data FROM task_history WHERE task_id=? AND 'task_history:'||id=?",task.id,report.report_ref)?.data||'{}');
+  if(match&&reportData.recent_tool_refs?.some((r:any)=>r.ref===source)){
+   const row=s.get("SELECT type,data FROM task_history WHERE task_id=? AND id=?",task.id,Number(match[1]));
+   const data=row&&JSON.parse(row.data);
+   if(row&&['tool_started','tool_observation'].includes(row.type)&&['run_command','read_file','write_file'].includes(data?.name))return visibleMemorySnapshot(s,task.repository_id,data,taskTraceAccess(s,{...task,active_role:controller}));
+  }
+  return traceSource(s,task.id,source,taskTraceAccess(s,{...task,active_role:controller}));
+ };
  const tool=(name:string,description:string,properties:any,required:string[]=[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
  try{
   const result=await runAgent({store:s,task:{...task,active_role:controller},onRun:id=>{s.run("UPDATE task_runs SET kind='manager_control' WHERE id=?",id);},redactor:spec.redactor,guard,system:roleExecutionSystem(s,task,controller)+'\nLong execution control turn. The normal Manager coordination is waiting for this running role. Inspect progress and choose continue or stop for this exact run. Time is a reporting threshold, not a failure. You cannot accept, publish, merge or change task criteria. If the work needs adjustment, record concrete instructions for the normal Manager to apply at its next checkpoint.',
    model:roleExecutionModel(s,task,controller),requestPrefix:'manager:long-execution:'+report.run_id+':'+report.threshold_ms,
-   prompt:JSON.stringify({report_ref:report.report_ref,report:traceSource(s,task.id,report.report_ref,taskTraceAccess(s,{...task,active_role:controller})),task:new TaskRecords(s).context(task.id),previous_decisions:s.all('SELECT threshold_ms,state,decision_ref FROM long_execution_reports WHERE run_id=? ORDER BY threshold_ms',report.run_id)}),maxTurns:8,modelAttempts:1,
+   prompt:JSON.stringify({report_ref:report.report_ref,report:readControlEvidence(report.report_ref),task:new TaskRecords(s).context(task.id),previous_decisions:s.all('SELECT threshold_ms,state,decision_ref FROM long_execution_reports WHERE run_id=? ORDER BY threshold_ms',report.run_id)}),maxTurns:8,modelAttempts:1,
    tools:[tool('read_task_record','Read original task evidence by durable ref.',{ref:{type:'string'},offset:{type:'integer',minimum:0}},['ref']),tool('submit_long_execution_decision','Continue or explicitly stop this exact execution. Not a task completion decision.',{action:{type:'string',enum:['continue','stop']},reason:{type:'string'},instructions:{type:'string'}},['action','reason'])],
-   execute:async(name,args)=>{if(name!=='read_task_record')return {error:'tool_not_allowed'};if(!Number.isSafeInteger(args.offset??0)||(args.offset??0)<0)return {error:'invalid_offset'};const raw=JSON.stringify(traceSource(s,task.id,args.ref,taskTraceAccess(s,{...task,active_role:controller}))),offset=args.offset??0;return {ref:args.ref,content:raw.slice(offset,offset+16000),next_offset:offset+16000<raw.length?offset+16000:null};},
+   execute:async(name,args)=>{if(name!=='read_task_record')return {error:'tool_not_allowed'};if(!Number.isSafeInteger(args.offset??0)||(args.offset??0)<0)return {error:'invalid_offset'};let value;try{value=readControlEvidence(args.ref);}catch(error){return {error:String((error as any).code??'evidence_unavailable')};}const raw=JSON.stringify(value),offset=args.offset??0;return {ref:args.ref,content:raw.slice(offset,offset+16000),next_offset:offset+16000<raw.length?offset+16000:null};},
    finish:{name:'submit_long_execution_decision',validate:value=>{if(!['continue','stop'].includes(value?.action)||typeof value.reason!=='string'||!value.reason.trim()||value.instructions!==undefined&&typeof value.instructions!=='string')throw new Error('invalid_long_execution_decision');return value;}}});
   const applicable=isCurrent()&&!!s.get("SELECT id FROM task_runs WHERE id=? AND status='running'",report.run_id);
   const ref=traceEvent(s,task.id,'long_execution_decision',{run_id:report.run_id,report_ref:report.report_ref,...result,applied:applicable},task.trace_run_id,'role:'+controller,[report.report_ref]);
