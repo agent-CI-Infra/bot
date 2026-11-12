@@ -54,7 +54,9 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 真实外部服务例外：会真实访问飞书开放平台、GitHub 或其他外部服务的测试放在 `test/<名字>.live.test.mjs`。`npm test` 不运行这类文件，运行器也拒绝把它们当作测试集；需要时带上所需凭据，用 `node --test test/<名字>.live.test.mjs` 单独运行。只在断言或夹具里出现 `api.github.com`、飞书字段，或者访问本地假服务器（`test/fixtures/`、`test/git-server.mjs` 等）的测试不属于例外，留在并行的测试集里。目前没有 `.live.test.mjs` 文件，现有单元测试都只连接本地假服务器。
 
-浏览器验收使用固定在 lockfile 的 Playwright，先运行 `npx playwright install chromium --only-shell`，再执行 `npm run test:e2e`；测试在自己的临时 SQLite 和随机端口上启动服务，覆盖初始化、登录、登记账号、查看签名投递、项目权限以及宽屏／窄屏页面，不占用部署数据或固定试用端口。输出放在忽略提交的 `.tmp/`。
+浏览器验收使用固定在 lockfile 的 Playwright，先运行 `npx playwright install chromium --only-shell`，再执行 `npm run test:e2e`。每个 `e2e/*.spec.mjs` 文件是一个测试集，文件内的用例依次运行，不同文件由同一台机器上的 Playwright worker 并行执行；默认 worker 数为 Node.js 的 `availableParallelism()`，本地和 CI 使用同一配置，CI 仍只有一个 `e2e` 作业，不通过增加 runner 分片。可用 `npm run test:e2e -- --workers 4` 限制并发，或 `--workers 1` 作串行对照；命令后跟文件名只运行指定集。
+
+新增浏览器测试按主题放进独立的 spec 文件，不把所有用例包进一个串行大集。需要按顺序操作同一资源的场景留在一个文件中，并说明依赖原因；跨文件不共享可写状态。每个用例使用独立的浏览器 context、自己的 SQLite 与临时目录和 `listen(0, '127.0.0.1')` 随机端口；`test/helpers.mjs` 的 harness 和现有 manager fixture 已这样隔离资源。临时数据在 `tmpdir()` 下用 `mkdtemp` 创建，只清理自己创建的目录；真实本机进程的工作区 id 使用 `randomWorkspaceId()`。截图目录也必须按 spec 主题独立，复制测试时不能沿用另一个文件的输出路径。测试使用本地假服务器和夹具，不占用部署数据、固定试用端口或其他本机共享状态。Playwright 的逐用例结果放在 `.tmp/e2e-results`，截图等产物也放在忽略提交的 `.tmp/`；不要在同一工作树同时启动两次会清理这一输出目录的 Playwright 命令。
 
 实际 Docker 验收运行 `npm run test:docker`，需要 Docker 和上述 Playwright 浏览器。它用 `compose.yaml` 加 [`compose.build.yaml`](../compose.build.yaml) 从当前源码构建镜像，标签是 `department-bot*:local`，和同一台机器上从源码构建的部署共用：运行中的容器不受影响，但那份部署下次 `up` 会用上测试构建的镜像；按 GHCR 镜像运行的部署不受影响。它使用独立 Compose 项目和 18881／18883 测试端口，18881 是业务端口，18883 仅在测试覆盖文件里映射 manager；生产 Compose 不发布该端口。测试会检查两个真实环境、串行与并行、文件／卷／网络隔离、无凭据、代次重置、重启和角色页面，并按本次部署标签清理容器、网络及卷。输出保存在 `.tmp/project-env/`。
 
