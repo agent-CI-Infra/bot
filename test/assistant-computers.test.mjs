@@ -10,6 +10,7 @@ import { AssistantComputers, abandonAfterMs, assistantDefaults } from '../manage
 import { Projects } from '../manager/projects.mjs';
 import { createManagerServer } from '../manager/server.mjs';
 import { FakeDocker } from './fake-docker.mjs';
+import { ManagerError } from '../manager/docker.mjs';
 import { ManagerClient } from '../dist/projects/service.js';
 
 const hex = n => randomBytes(n).toString('hex'), opId = () => hex(24);
@@ -160,6 +161,24 @@ test('reconcile keeps only the computers of turns the control plane still runs; 
   const restarted = new AssistantComputers({ docker: f.docker, db: f.db, deployment: 'fixture', image: 'approved', homes: f.homes });
   assert.equal(await restarted.recover(), 1);
   assert.deepEqual([...f.docker.containers.keys()], ['other-deployment']);
+});
+
+test('removing a computer that is still going away waits for that removal instead of failing', async t => {
+  const f = fixture(t), id = f.owner();
+  await f.acquire(id, 'turn'); await f.computers.release(id, { turn: 'turn' });
+  // Docker answers a second DELETE of a container whose removal is still in progress with HTTP 409.
+  const request = f.docker.request.bind(f.docker); let open, deleting = false; const gate = new Promise(resolve => { open = resolve; });
+  f.docker.request = async (method, path, body) => {
+    if (method !== 'DELETE' || !path.startsWith('/containers/')) return request(method, path, body);
+    if (deleting) throw Object.assign(new ManagerError('docker_operation_failed', 503), { detail: 'HTTP 409: removal already in progress' });
+    deleting = true; await gate; try { return await request(method, path, body); } finally { deleting = false; }
+  };
+  // The control plane's sweep removes the computer (its fence changed) while a console clear removes it too.
+  const sweep = f.computers.remove(id, 'fence'), clear = f.computers.remove(id);
+  await new Promise(resolve => setImmediate(resolve)); open();
+  assert.deepEqual(await Promise.all([sweep, clear]), [{ owner: id, state: 'removed' }, { owner: id, state: 'removed' }]);
+  assert.ok(!f.docker.containers.has(f.computers.name(id)));
+  assert.equal(f.docker.calls.filter(call => call.startsWith('DELETE /containers/')).length, 1, 'the container is deleted once');
 });
 
 test('creation fails clearly and leaves nothing behind', async t => {
