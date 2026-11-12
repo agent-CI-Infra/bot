@@ -32,7 +32,10 @@ export class ChannelReactions {
     if (!message || message.deleted) return false;
     const inbox = this.store.get('SELECT state FROM channel_inbox WHERE id=?', row.source_event);
     // A completed model turn can still have an unsent reply. Keep the indicator throughout delivery retries.
-    return !!inbox && (['queued', 'running', 'submitted'].includes(inbox.state) ||
+    return !!inbox && (['queued', 'running', 'submitted', 'merged'].includes(inbox.state) ||
+      // Incorporated questions share the turn's final delivery, whose source is the initial message or timer.
+      !!this.store.get(`SELECT 1 FROM channel_turn_inputs m JOIN channel_outbox o ON o.id=m.outbox_id
+        WHERE m.source_event=? AND m.state='answered' AND o.state IN ('queued','sending','retry')`, row.source_event) ||
       !this.store.get("SELECT 1 FROM channel_outbox WHERE source_event=? AND state='sent'", row.source_event) &&
       !!this.store.get("SELECT 1 FROM channel_outbox WHERE source_event=? AND state IN ('queued','sending','retry')", row.source_event));
   }

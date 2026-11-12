@@ -245,12 +245,13 @@ export class ChannelSchedules {
     try {
       guard();
       this.store.transaction(()=>{
+        let outbox: string | undefined;
         if (!result.message.trim()) { this.finish(run, 'silent', null); }
         else {
-          const outbox = this.host.post(chat, `定时任务「${row.name}」\n\n${result.message}`, 'channel-schedule:' + run, 'schedule:' + run, protection(result.id, result.fence));
+          outbox = this.host.post(chat, `定时任务「${row.name}」\n\n${result.message}`, 'channel-schedule:' + run, 'schedule:' + run, protection(result.id, result.fence));
           this.finish(run, 'completed', null, outbox);
         }
-        this.host.turnMessages.complete(result.id);
+        this.host.turnMessages.complete(result.id,outbox);
       });
     } catch(error) { this.host.turnMessages.release(result.id);throw error; }
   }

@@ -28,10 +28,12 @@ export class ChannelTurnMessages {
   private readonly active = new Map<string, { turn: string; merge: (source: Row, reply: boolean) => boolean }>();
   constructor(readonly store: Store, readonly clock = () => Date.now()) {
     store.db.exec(`CREATE TABLE IF NOT EXISTS channel_turn_inputs(turn_id TEXT NOT NULL,source_event TEXT NOT NULL,
-      chat_id TEXT NOT NULL,needs_reply INTEGER NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,injected_at INTEGER,
+      chat_id TEXT NOT NULL,needs_reply INTEGER NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,injected_at INTEGER,outbox_id TEXT,
       PRIMARY KEY(turn_id,source_event));
       CREATE INDEX IF NOT EXISTS channel_turn_inputs_source ON channel_turn_inputs(source_event);
       CREATE INDEX IF NOT EXISTS channel_turn_inputs_chat ON channel_turn_inputs(chat_id,turn_id)`);
+    if (!store.all('PRAGMA table_info(channel_turn_inputs)').some(c => c.name === 'outbox_id'))
+      store.db.exec('ALTER TABLE channel_turn_inputs ADD COLUMN outbox_id TEXT');
     if (!store.all('PRAGMA table_info(channel_inbox)').some(c => c.name === 'chat_ref'))
       store.db.exec('ALTER TABLE channel_inbox ADD COLUMN chat_ref TEXT');
     store.db.exec('CREATE INDEX IF NOT EXISTS channel_inbox_chat_pending ON channel_inbox(chat_ref,state)');
@@ -61,7 +63,7 @@ export class ChannelTurnMessages {
       if (sealed || paused || row.id === source) return false;
       const event = this.event(row);
       if (!assistantMessage(event,row.created_at) || event.chat_id !== chat.chat_id || event.app_id !== chat.app_id || event.installation_tenant !== chat.installation_tenant) return false;
-      const inserted = this.store.run("INSERT OR IGNORE INTO channel_turn_inputs VALUES(?,?,?,?,'pending',?,NULL)", turn, row.id, chat.id, reply ? 1 : 0, this.clock());
+      const inserted = this.store.run("INSERT OR IGNORE INTO channel_turn_inputs(turn_id,source_event,chat_id,needs_reply,state,created_at) VALUES(?,?,?,?,'pending',?)", turn, row.id, chat.id, reply ? 1 : 0, this.clock());
       if (!inserted.changes) return true;
       this.store.run("UPDATE channel_inbox SET state='merged',conversation_id=?,message_id=?,context_revision=? WHERE id=?", conversation, turn, chat.context_revision, row.id);
       return true;
@@ -102,9 +104,9 @@ export class ChannelTurnMessages {
       for (const row of this.store.all(`SELECT i.*,m.needs_reply FROM channel_turn_inputs m JOIN channel_inbox i ON i.id=m.source_event WHERE m.turn_id=? AND m.state IN ('pending','injected'${undelivered?",'answered'":''})`, turn)) this.returnInput(turn, row);
     });
   }
-  complete(turn: string): void {
+  complete(turn: string, outbox?: string): void {
     this.store.run("UPDATE channel_inbox SET state='completed' WHERE state='merged' AND message_id=?", turn);
-    this.store.run("UPDATE channel_turn_inputs SET state='answered' WHERE turn_id=? AND state IN ('pending','injected')", turn);
+    this.store.run("UPDATE channel_turn_inputs SET state='answered',outbox_id=? WHERE turn_id=? AND state IN ('pending','injected')", outbox ?? null, turn);
   }
   /** Last required message actually presented to the model, in arrival order rather than provider timestamp order. */
   replyEvent(turn: string): ChannelEvent | undefined {
