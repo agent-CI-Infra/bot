@@ -6,7 +6,7 @@ import {randomBytes} from 'node:crypto';
 import {Store} from '../dist/storage/database.js';
 import {TaskRecords} from '../dist/tasks/service.js';
 import {scopeInstructions} from '../dist/tasks/scope.js';
-import {taskTools} from '../dist/tasks/playbooks.js';
+import {taskTools} from '../dist/tasks/record-tools.js';
 import {runRole} from '../dist/roles/run.js';
 import {evaluateDelivery} from '../dist/tasks/acceptance.js';
 import {Redactor} from '../dist/agent/common.js';

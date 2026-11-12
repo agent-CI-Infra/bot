@@ -10,6 +10,12 @@ createInterface({input:process.stdin}).on('line',async line=>{const m=JSON.parse
   prompt=m;if(process.env.FIXTURE_EXIT==='true'){process.exit(7);}
   if(process.env.FIXTURE_WAIT==='true')return;
   const tools=await rpc('tools/list',{});
+  if(process.env.FIXTURE_SKILL==='true'){
+   if(tools.tools.some(t=>['read_playbook','select_playbooks'].includes(t.name))||/playbook_catalog|Discover optional playbooks/.test(JSON.stringify(m.params)))throw Error('retired_guidance_offered');
+   const call=async(name,args)=>JSON.parse((await rpc('tools/call',{name,arguments:args})).content[0].text);
+   const listing=await call('read_skill',{}),file=await call('read_skill',{path:listing.files[0].path});
+   await call('finish',{summary:file.content,bundle:listing.bundle,sha256:file.sha256,provided_tools:tools.tools.map(t=>t.name)});reply({stopReason:'end_turn'});return;
+  }
   if(process.env.FIXTURE_KNOWLEDGE==='true'){
    const call=async(name,args)=>JSON.parse((await rpc('tools/call',{name,arguments:args})).content[0].text);
    const search=await call('search_project_memory',{query:'socket reset'}),item=search.items?.[0];

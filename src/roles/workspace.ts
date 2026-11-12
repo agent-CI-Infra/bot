@@ -61,9 +61,14 @@ export function roleBackendWorkspace(workspace:Workspace):NonNullable<RoleRunOpt
   const {store,task}=workspace,runtime=instance.runtime?JSON.parse(instance.runtime):null;
   const last=store.get('SELECT status FROM task_runs WHERE role_instance_id=? ORDER BY rowid DESC LIMIT 1',instance.id);
   let space:Workspace|undefined,resume=false;
+  if(runtime?.guidance_retired&&runtime.workspace_id){
+   // Retiring a protocol also retires its live runner, which may otherwise wait forever on an obsolete mailbox.
+   const previous=new Workspace(store,workspace.manager,{...task,workspace_id:runtime.workspace_id},workspace.redactor,workspace.guard,workspace.log);
+   await previous.release(false);
+  }
   // Only a run interrupted by a control-plane crash can leave a session to reattach. A cancelled or failed run released its
   // workspace; its next run is rebuilt from task records, never reported as native resume.
-  if(!['qa','coordinator'].includes(String(instance.role))&&runtime?.workspace_id&&runtime.generation===task.generation&&last?.status==='interrupted'){
+  if(!runtime?.guidance_retired&&!['qa','coordinator'].includes(String(instance.role))&&runtime?.workspace_id&&runtime.generation===task.generation&&last?.status==='interrupted'){
    const previous=new Workspace(store,workspace.manager,{...task,workspace_id:runtime.workspace_id},workspace.redactor,workspace.guard,workspace.log);
    // Only a session still running is reattached. One that already ended is rebuilt from task records: its submission
    // may be stale by now, and the delegations it made are reused from their durable results.

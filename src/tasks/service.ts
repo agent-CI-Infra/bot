@@ -11,7 +11,6 @@ import type { Store } from '../storage/database.js';
 import { randomId } from '../core/security.js';
 import {retryContext} from './retries.js';
 import { createHash } from 'node:crypto';
-import { playbooks } from './playbooks.js';
 
 export interface Contract { goal: string; scope: string[]; constraints?: string[]; criteria: string[]; endpoint: string | null; source: unknown; completeness?: string }
 export interface Artifact { kind: string; reference: string; version: string; content?: unknown }
@@ -112,18 +111,7 @@ export class TaskRecords {
       const rows=this.store.all('SELECT id,type,data,created_at FROM task_history WHERE '+filter+' ORDER BY id DESC LIMIT ? OFFSET ?',id,limit,offset).reverse();
       return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(visibleMemorySnapshot(this.store,this.store.get('SELECT repository_id FROM tasks WHERE id=?',id)!.repository_id,JSON.parse(row.data),access))}))};
     }
-    if(name==='read_playbook'){
-      if(!args?.id)return playbooks.map(({content,...p})=>p);
-      const guide=playbooks.find(p=>p.id===args.id);if(!guide)return {error:'playbook_not_found'};
-      this.history(id,'playbook_read',{id:guide.id,version:guide.version});return guide;
-    }
     if(name==='record_progress'){if(!Array.isArray(args?.completed)||args.completed.some((x:unknown)=>typeof x!=='string')||typeof args?.next_action!=='string')return {error:'invalid_task_progress'};this.progress(id,args.completed,args.next_action);return {ok:true};}
-    if(name==='select_playbooks'){
-      const selections=args?.selections;
-      const read=new Set(this.store.all("SELECT data FROM task_history WHERE task_id=? AND type='playbook_read'",id).map(row=>{const p=JSON.parse(row.data);return p.id+':'+p.version;}));
-      if(!Array.isArray(selections)||new Set(selections.map(s=>s?.id)).size!==selections.length||selections.some(s=>!playbooks.some(p=>p.id===s?.id&&p.version===s?.version)||!read.has(s.id+':'+s.version)||typeof s.purpose!=='string'||!s.purpose.trim()))return {error:'invalid_playbook_selection'};
-      this.store.run('UPDATE task_records SET selections=? WHERE task_id=?',JSON.stringify(selections),id);this.history(id,'playbooks',{selections});return {ok:true};
-    }
     return {error:'tool_not_allowed'};
   }
   submit(id: string, artifacts: Artifact[], evidence: Evidence[], claims: unknown, token?: string): Candidate {

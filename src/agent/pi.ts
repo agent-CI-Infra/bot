@@ -205,6 +205,9 @@ export function piAdapter<T>(session: PiSession<T>) {
       if (state.request && !answered.has(state.request.id)) {
         const body = state.request.body;
         if (!body || !Array.isArray(body.messages) || Buffer.byteLength(JSON.stringify(body)) > 2 * 1024 * 1024) stop('model_request_invalid', undefined, '模型请求缺少 messages 数组，或请求内容超过 2 MiB 上限。');
+        // A runner surviving an upgrade may still advertise the retired protocol. Recreate the workspace from
+        // existing checkpoints instead of forwarding that session's old catalog/tools to the model.
+        if(body.tools?.some((tool:any)=>['read_playbook','select_playbooks'].includes(tool.function?.name))) stop('execution_interrupted','waiting_environment','旧执行会话仍包含已退役指南工具；保留任务记录并在新工作区恢复。');
         await session.checkpoint?.();
         if (session.maxRequests !== undefined && ++requests > session.maxRequests) stop('agent_turn_limit', 'failed', `Pi 会话达到 ${session.maxRequests} 次模型请求上限。`);
         store.run('UPDATE tasks SET model_started=1 WHERE id=?', taskId);

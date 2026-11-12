@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../dist/storage/database.js';
 import { TaskRecords, validateVerdict } from '../dist/tasks/service.js';
-import { playbooks } from '../dist/tasks/playbooks.js';
 
 function fixture(t,path=':memory:',key=randomBytes(32)) {
  const store=new Store(path,key);t.after(()=>{try{store.close();}catch{}});
@@ -40,16 +39,16 @@ test('contract revision invalidates previous candidate; no old verdict can compl
  assert.equal(records.decide('a',replacement.id,replacement.revision,pass).outcome,'pass');
  assert.throws(()=>records.contract('a',contract,1),/task_revision_changed/);
 });
-test('single, multiple and zero playbooks are advisory, versioned, and cannot mutate goals',t=>{
- const {records,create}=fixture(t);create('a');const original=records.get('a').contract;
- assert.equal(records.tool('a','read_playbook',{}).length,playbooks.length);
- for(const count of [1,3,0]){
-  for(const p of playbooks.slice(0,count))records.tool('a','read_playbook',{id:p.id});
-  const selected=playbooks.slice(0,count).map(p=>({id:p.id,version:p.version,purpose:'Relevant to current work'}));
-  assert.deepEqual(records.tool('a','select_playbooks',{selections:selected}),{ok:true});assert.equal(records.get('a').selections.length,count);
- }
- assert.equal(records.tool('a','select_playbooks',{selections:[{id:'research',version:'old',purpose:'test'}]}).error,'invalid_playbook_selection');
- assert.deepEqual(records.get('a').contract,original);
+test('retired guide tools cannot change the contract or historical selections',t=>{
+ const {store,records,create}=fixture(t);create('a');const original=records.get('a').contract;
+ const selections=[{id:'research',version:'historical-hash',purpose:'Original report'}];
+ store.run('UPDATE task_records SET selections=? WHERE task_id=?',JSON.stringify(selections),'a');
+ records.history('a','playbook_read',selections[0]);records.history('a','playbooks',{selections});
+ for(const name of ['read_playbook','select_playbooks'])assert.deepEqual(records.tool('a',name,{}),{error:'tool_not_allowed'});
+ assert.deepEqual(records.get('a').selections,selections);assert.deepEqual(records.get('a').contract,original);
+ assert.equal(store.get("SELECT count(*) n FROM task_history WHERE type IN ('playbook_read','playbooks')").n,2);
+ assert.deepEqual(records.tool('a','record_progress',{completed:['Retained observed fact'],next_action:'Continue'}),{ok:true});
+ assert.ok(records.tool('a','read_task_history',{}).observations.some(r=>r.type==='checkpoint'));
 });
 test('all five decisions map to explicit task states, for code and non-code artifacts',t=>{
  const {store,records,create}=fixture(t);

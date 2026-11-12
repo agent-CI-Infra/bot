@@ -1,3 +1,4 @@
+import { taskRecordContext } from '../tasks/record-tools.js';
 import {observeLongExecution,decideLongExecution} from './long-execution.js';
 import { assertStageRun, assertStageStart, stageRunBinding, stagePolicyHash, artifactCandidate, deliveryType, stageForAssignment, stageBudgetExceeded, stageBudgetUsage, recordStageResult, latestRoleCandidate, candidateKey } from './schedule.js';
 import {executionBaseline} from '../agent/common.js';
@@ -77,11 +78,22 @@ export function roleInstance(s:Store,task:Row,role:string,harnessOverride?:strin
   instance=s.get('SELECT * FROM role_instances WHERE id=?',id)!;}
  return instance;
 }
+const legacyGuidanceSession = (instance: Row) => !instance.snapshot_id && /read_playbook|select_playbooks|playbook_catalog|Discover optional playbooks|roadmap-decomposition playbook/.test(instance.definition + instance.session);
+const storedRuntime = (instance: Row) => { try { return JSON.parse(instance.runtime ?? 'null'); } catch { return null; } };
+const rebuildingRuntime = (instance: Row) => storedRuntime(instance)?.guidance_retired ? instance.runtime : null;
 /**
  * Moves an existing instance to a new snapshot. This happens only at a safe boundary: before a new assignment starts, or
  * after a running role ended at a checkpoint. The same task, instance and transcript continue; the event keeps both sides.
  */
 function rebind(s:Store,task:Row,instance:Row,resolved:Resolved,reason:'delegation'|'checkpoint',endedRun?:string){
+ const prior=instance.snapshot_id?s.get('SELECT snapshot FROM role_snapshots WHERE id=?',instance.snapshot_id):null;
+ const old=prior?JSON.parse(prior.snapshot):null;
+ if(legacyGuidanceSession(instance)||old?.capability?.tools?.some((name:string)=>['read_playbook','select_playbooks'].includes(name))){
+  // External/native sessions can retain old tools and catalog prompts. Rebuild this same instance from durable facts.
+  s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=? WHERE id=?",storedRuntime(instance)?JSON.stringify({...storedRuntime(instance),guidance_retired:true}):null,instance.id);
+  traceEvent(s,task.id,'role_guidance_migrated',{role:instance.role,instance_id:instance.id,from_snapshot:instance.snapshot_id,recovery:'rebuilt_from_task_records'},task.trace_run_id,'framework');
+ }
+
  const from={snapshot_id:instance.snapshot_id??null,config_revision:instance.config_revision??null,role_revision:instance.role_revision??null,harness:instance.harness,version:JSON.parse(instance.definition).version};
  s.run('UPDATE role_instances SET definition=?,harness=?,snapshot_id=?,config_revision=?,role_revision=?,pending_revision=NULL,updated_at=? WHERE id=?',JSON.stringify(runtimeDefinition(instance.role,resolved)),resolved.snapshot.harness.id,resolved.id,resolved.snapshot.config_revision,resolved.snapshot.role_revision,new Date().toISOString(),instance.id);
  const ref=traceEvent(s,task.id,'role_revision_applied',{instance_id:instance.id,role:instance.role,reason,from,to:{snapshot_id:resolved.id,config_revision:resolved.snapshot.config_revision,role_revision:resolved.snapshot.role_revision,harness:resolved.snapshot.harness.id,version:resolved.snapshot.prompt.system_hash},ended_run:endedRun??null,continuation:'same_task_and_instance'},task.trace_run_id,'framework',endedRun?['task_runs:'+endedRun+':config']:[]);
@@ -121,16 +133,16 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
  const s=spec.store,task=spec.task,stage=stageForAssignment(s,assignment),workflow=workOf(task as any),{resolved,continuation}=state;let instance=state.instance;
  const sourceFence=taskAuthorizationFence(s,task,role);
  if(instance.source_fence!==sourceFence){
-  if(instance.sequence>0){s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=NULL WHERE id=?",instance.id);instance={...instance,session:'[]',harness_state:'{}',runtime:null};traceEvent(s,task.id,'source_authorization_changed',{role,instance_id:instance.id,recovery:'rebuilt_from_authorized_facts'},task.trace_run_id);}
+  if(instance.sequence>0){const runtime=rebuildingRuntime(instance);s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=? WHERE id=?",runtime,instance.id);instance={...instance,session:'[]',harness_state:'{}',runtime};traceEvent(s,task.id,'source_authorization_changed',{role,instance_id:instance.id,recovery:'rebuilt_from_authorized_facts'},task.trace_run_id);}
   s.run('UPDATE role_instances SET source_fence=? WHERE id=?',sourceFence,instance.id);instance.source_fence=sourceFence;
  }
  if(stage&&s.get('SELECT instance_id FROM role_assignments WHERE id=? AND task_id=?',assignment!,task.id)?.instance_id!==instance.id)stop('role_recovery_scope_mismatch','failed','阶段委派必须属于当前任务与角色实例。');
  const knowledgeFence=memoryViewFence(s,{...task,active_role:role});
  if(instance.knowledge_fence!==knowledgeFence){
-  if(instance.sequence>0){s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=NULL WHERE id=?",instance.id);instance={...instance,session:'[]',harness_state:'{}',runtime:null};traceEvent(s,task.id,'role_memory_view_changed',{role,instance_id:instance.id,recovery:'rebuilt_from_authorized_task_records'},task.trace_run_id);}
+  if(instance.sequence>0){const runtime=rebuildingRuntime(instance);s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=? WHERE id=?",runtime,instance.id);instance={...instance,session:'[]',harness_state:'{}',runtime};traceEvent(s,task.id,'role_memory_view_changed',{role,instance_id:instance.id,recovery:'rebuilt_from_authorized_task_records'},task.trace_run_id);}
   s.run('UPDATE role_instances SET knowledge_fence=? WHERE id=?',knowledgeFence,instance.id);instance.knowledge_fence=knowledgeFence;
  }
- const scopedInput=()=>visibleMemorySnapshot(s,task.repository_id,(()=>{try{return JSON.parse(shared.sourceInput);}catch{return {input:shared.sourceInput};}})(),taskTraceAccess(s,{...task,active_role:role}));
+ const scopedInput=()=>visibleMemorySnapshot(s,task.repository_id,(()=>{try{return taskRecordContext(JSON.parse(shared.sourceInput));}catch{return {input:shared.sourceInput};}})(),taskTraceAccess(s,{...task,active_role:role}));
  const definition=JSON.parse(instance.definition),harness=instance.harness,snapshot=resolved.snapshot,driver=roleHarness(harness),persistence=driver.session;
  // The role's explicit model wins; otherwise the caller's pinned execution model, which follows the workflow/project order.
  // A driver with its own model gets no project model at all.
@@ -438,7 +450,7 @@ export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:strin
  let instance=existing??roleInstance(s,task,role,harnessOverride,options.entryExecutor),continuation:{ref:string;from_run:string|null}|null=null;
  // A new assignment is a safe boundary: it starts on the current revision. An instance created before RoleDefinitionV2
  // under a legacy configuration keeps the definition it was pinned with.
- if(instance.snapshot_id!==resolved.id&&!(resolved.snapshot.legacy&&!instance.snapshot_id))instance=rebind(s,task,instance,resolved,'delegation').instance;
+ if(instance.snapshot_id!==resolved.id&&(!(resolved.snapshot.legacy&&!instance.snapshot_id)||legacyGuidanceSession(instance)))instance=rebind(s,task,instance,resolved,'delegation').instance;
  const sourceInput=spec.prompt;
  const priorRun=s.get("SELECT id,stop_reason,assignment_id FROM task_runs WHERE role_instance_id=? ORDER BY rowid DESC LIMIT 1",instance.id),priorSubmission=priorRun?.stop_reason==='role_result_invalid'?s.get("SELECT id FROM task_history WHERE run_id=? AND type='tool_started' AND json_extract(data,'$.name')=? ORDER BY id DESC LIMIT 1",priorRun.id,spec.finish?.name??''):null;
  let memory:any;try{memory={availability:'available',...new ProjectMemory(s,taskMemoryAccess(s,{...task,active_role:role})).search(task.repository_id,'',{role,limit:5,baseline:executionBaseline(task)})};}catch{memory={availability:'unavailable',instruction:'Role memory lookup failed; continue from task records and repository sources. Do not infer no prior knowledge.'};traceEvent(s,task.id,'memory_fault',{operation:'role_context',role,code:'role_memory_unavailable'},task.trace_run_id);}
@@ -467,7 +479,7 @@ export const roleRuns={
  protocol:roleRunProtocol,
  async prepare<T>(spec:AgentSpec<T>,role:string,assignment?:string,harnessOverride?:string,options:RoleRunOptions={}){
   const s=spec.store,task=spec.task,instance=roleInstance(s,task,role,harnessOverride,options.entryExecutor),resolved=taskRole(s,task,role,harnessOverride,false,undefined,spec.model,options.entryExecutor);
-  const bound=instance.snapshot_id!==resolved.id&&!(resolved.snapshot.legacy&&!instance.snapshot_id)?rebind(s,task,instance,resolved,'delegation').instance:instance;
+  const bound=instance.snapshot_id!==resolved.id&&(!(resolved.snapshot.legacy&&!instance.snapshot_id)||legacyGuidanceSession(instance))?rebind(s,task,instance,resolved,'delegation').instance:instance;
   const previousRole=task.active_role;task.active_role=role;
   try{return await prepareRun(spec,role,assignment,harnessOverride,options,{resolved,instance:bound,continuation:null},{sourceInput:spec.prompt,priorRun:undefined,priorSubmission:null,memory:{availability:'not_loaded'}});}finally{task.active_role=previousRole;}
  },

@@ -20,7 +20,6 @@ import { roleApi } from '../roles/api.js';
 import { memoryApi } from '../memory/api.js';
 import { interruptRuns, traceEvent, beginRun, endRun } from '../tasks/trace.js';
 import { observation } from '../tasks/evidence.js';
-import { playbooks } from '../tasks/playbooks.js';
 import { restoreCheckpoint,checkpoint } from '../tasks/checkpoint.js';
 import { runRequest } from '../tasks/request.js';
 import { assertManagedExecution } from '../tasks/management.js';
@@ -618,7 +617,7 @@ export class TaskEngine {
         update({input:storedInput(this.store,redactor.clean(input),task.repository_id)});
         if(updates.length)this.store.run('UPDATE tasks SET review_update_cursor=? WHERE id=?',updates.at(-1)!.id,id);
         if(stage!=='start')for(const row of updates){const data=JSON.parse(row.data);log({type:'review_update',actor:data.actor,reason:data.reason,detail:JSON.stringify(data)});}
-        return stage==='start'?{prompt:JSON.stringify(roleAssignmentContext({...input.context,structured_task:records.context(id),playbook_catalog:playbooks.map(({content,...p})=>p)}))}
+        return stage==='start'?{prompt:JSON.stringify(roleAssignmentContext({...input.context,structured_task:records.context(id)}))}
           :{messages:updates.map(row=>JSON.stringify({instruction:'A person updated this review. Respond to this update and revise the final result before publication. Discussion files have been refreshed.',
             update:JSON.parse(row.data),current_object:object,reviewed_sha:task.head_sha}))};
       }};

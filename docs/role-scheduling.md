@@ -6,7 +6,7 @@
 
 ## 配置阶段
 
-通过既有 `PUT /api/repositories/:id/roles` 保存 `required_stages`，请求仍须带 `expected_revision`。省略该字段保留已有策略，`[]` 表示移除项目新增门禁；已启动任务须在安全检查点显式采用新配置。角色 persona 和 playbook 都不能修改这个策略。
+通过既有 `PUT /api/repositories/:id/roles` 保存 `required_stages`，请求仍须带 `expected_revision`。省略该字段保留已有策略，`[]` 表示移除项目新增门禁；已启动任务须在安全检查点显式采用新配置。角色 persona 和 Skill 都不能修改这个策略。
 
 下面的阶段对象适用于代码交付，可放进 `required_stages` 数组：
 
