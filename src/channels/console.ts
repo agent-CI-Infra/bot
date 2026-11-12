@@ -54,7 +54,15 @@ export class ChannelConsole {
       const source = String(turn.source_message).replace(/^feishu:/, ''), suffix = conversation.mode === 'service' ? ':business-result' : ':result';
       const delivery = turn.stale_source ? null : this.service.store.get('SELECT state,last_error FROM channel_outbox WHERE connector_id=? AND idempotency_key=?', chat.connector_id, source + suffix);
       const rawState = conversation.mode === 'management' ? this.service.store.get('SELECT state FROM management_messages WHERE id=?', String(turn.id))?.state : undefined;
-      return { ...turn, ...(rawState ? { state: rawState, state_label: turn.state } : {}), delivery: delivery ? { state: delivery.state, error: delivery.last_error } : null };
+      const progress = ((turn.messages ?? []) as (string | Json)[]).map((message, index) => {
+        const sequence = typeof message === 'string' ? index + 1 : Number(message.sequence);
+        const receipt = conversation.mode === 'service'
+          ? this.service.store.get(`SELECT o.state,o.last_error FROM channel_service_turn_messages m JOIN channel_outbox o ON o.id=m.outbox_id WHERE m.turn_id=? AND m.sequence=?`, String(turn.id), sequence)
+          : this.service.store.get('SELECT state,last_error FROM channel_outbox WHERE connector_id=? AND idempotency_key=?', chat.connector_id, source + ':stage:' + sequence);
+        return { sequence, text: typeof message === 'string' ? message : message.text,
+          ...(typeof message === 'string' ? {} : { created_at: message.created_at }), delivery: receipt ? { state: receipt.state, error: receipt.last_error } : null };
+      });
+      return { ...turn, messages: progress, ...(rawState ? { state: rawState, state_label: turn.state } : {}), delivery: delivery ? { state: delivery.state, error: delivery.last_error } : null };
     });
     return { ...messages, conversation,
       chat: { id, chat_id: chat.chat_id, type: chat.chat_type }, read_at: Date.now() };

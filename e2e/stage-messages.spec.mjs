@@ -58,7 +58,7 @@ test('a running group answer shows its progress in the console, and its manager 
     };
     await post(f.h, f.id, inGroup('帮我看看未关闭的 PR', 'ou_bob'));
     await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('正在查阅 admin-fixture-101')));
-    await page.setViewportSize({ width: 1440, height: 1000 }); await login(page, f, '/#/identity');
+    await page.setViewportSize({ width: 1440, height: 1000 }); await login(page, f, '/#/identity/feishu/groups');
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
     await binding.getByRole('button', { name: '查看连续会话', exact: true }).click();
     await expect(page.getByText('进展 1：正在查阅 admin-fixture-101 的未关闭 PR。', { exact: true })).toBeVisible();

@@ -19,6 +19,7 @@
 .channel-run .heading { gap: var(--space-3); flex-wrap: wrap; font-size: var(--font-size-1); }
 .channel-console summary { cursor: pointer; padding: var(--space-4) 0; min-height: var(--control-min); }
 .channel-step { border-left: 1px solid var(--color-border); padding-left: var(--space-4); color: var(--color-text-muted); }
+.channel-progress-message { margin: var(--space-4) 0; padding: var(--space-4); background: var(--color-brand-weak); border-radius: var(--radius-3); }
 .channel-history-actions { margin-bottom: var(--space-4); }
 .channel-related-task { padding: var(--space-4) 0; border-bottom: 1px solid var(--color-border); }
 .channel-related-task > strong { display: block; margin-bottom: var(--space-3); }

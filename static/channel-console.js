@@ -64,7 +64,7 @@ async function channelBindingOverview(data) {
 
 const channelStepLabels = { running: '开始执行', model_start: '请求模型', model_done: '模型已返回', model_request: '模型请求已记录', tool_call: '调用工具', tool_result: '工具已返回', tool_error: '工具调用失败', done: '本轮完成', error: '本轮失败', stopped: '已停止' };
 const channelToolLabels = { list_projects: '查看项目范围', list_project_tasks: '查询项目任务', read_project_task: '读取任务', create_project_task: '创建项目任务', manage_project_task: '管理项目任务',
-  start_own_task: '开始独立任务', continue_own_task: '继续独立任务', list_own_tasks: '查看独立任务', management_query: '查询管理信息', management_command: '执行管理操作', github_read: '读取 GitHub', github_write: '写入 GitHub' };
+  start_own_task: '开始独立任务', continue_own_task: '继续独立任务', list_own_tasks: '查看独立任务', management_query: '查询管理信息', management_command: '执行管理操作', github_read: '读取 GitHub', github_write: '写入 GitHub', send_message: '发布进展消息' };
 const channelTime = value => timestamp(typeof value === 'number' ? value : Date.parse(value));
 async function renderChannelConsole(request) {
   const page = $('console-page'), owner = me, address = location.hash, root = element('div', '', 'channel-console');
@@ -117,7 +117,7 @@ async function renderChannelConsole(request) {
   const older = element('div', '', 'actions channel-history-actions'), moreMessages = button('更早消息', () => update('messages'), 'quiet'), moreTurns = button('更早执行回合', () => update('turns'), 'quiet');
   moreMessages.hidden = moreTurns.hidden = true; older.append(moreMessages, moreTurns);
   const diagnostics = element('details', '', 'fold channel-sync-details'), diagnosticText = note(''); diagnostics.append(element('summary', '同步与用量说明'), diagnosticText);
-  thread.append(toolbar, older, history, diagnostics, note('只读会话 · 请在飞书中继续对话。助手生成回答与消息实际送达分别记录。'));
+  thread.append(toolbar, older, history, diagnostics, note('请在飞书中继续对话。生成内容与实际送达分别记录；展开记录时自动刷新暂停，手动刷新仍可使用。'));
   let messages = new Map(), turns = new Map(), tasks = new Map(), refreshTimer, conversationMode;
   const time = value => typeof value === 'number' ? value : Date.parse(value);
   function drawTimeline() {
@@ -143,6 +143,13 @@ async function renderChannelConsole(request) {
         else {
           const details = element('details'), steps = element('div'); details.append(element('summary', '查看执行过程'), steps);
           details.addEventListener('toggle', () => { if (details.open && !details.dataset.loaded) { details.dataset.loaded = '1'; void readSteps(value.id, steps); } }); row.append(details);
+          for (const message of value.messages || []) {
+            const progress = element('section', '', 'channel-progress-message'); progress.setAttribute('aria-label', '助手进展消息');
+            progress.append(element('strong', '进展消息 ' + message.sequence), element('p', message.text, 'channel-message-body'),
+              note(message.delivery?.state === 'sent' ? '已发送至飞书' : message.delivery?.state === 'failed' ? '发送失败' : '尚未核验飞书送达结果'));
+            row.append(progress);
+          }
+          if (value.can_stop) row.append(button('停止回答', () => stopTurn(value).catch(error), 'quiet'));
           if (value.reply) {
             if (conversationMode === 'management') row.append(element('p', value.reply, 'channel-message-body'));
             else { const answer = element('details'); answer.append(element('summary', '本轮生成的回答'), element('p', value.reply, 'channel-message-body')); row.append(answer); }
@@ -155,6 +162,12 @@ async function renderChannelConsole(request) {
     }
     if (!rows.length) history.append(consoleState('暂无本地会话记录', '尚未同步到消息或助手执行回合，可刷新查看。'));
     if (nearBottom) history.scrollTop = history.scrollHeight; else history.scrollTop = previous + Math.max(0, history.scrollHeight - height);
+  }
+  async function stopTurn(turn) {
+    if (!alive()) return;
+    const stopped = await askConfirm({ title: '停止这次回答？', body: ['不再发送本轮最终回答，已经发出的进展消息保留。'], action: '停止回答', danger: true,
+      run: () => api(`/api/channels/chats/${selected}/service-turns/${turn.id}/stop`, 'POST', {}) });
+    if (stopped && alive()) await update();
   }
   async function readSteps(turn, target, after = 0) {
     try {
