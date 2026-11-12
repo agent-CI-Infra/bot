@@ -1,6 +1,7 @@
 import { roleConfiguration, rolePrompt } from '../roles/definition.js';
 import { githubReadScopes, githubWriteAllowed, permitsTool } from '../roles/permissions.js';
 import type { Store } from '../storage/database.js';
+import { dispatchScope } from '../storage/trajectories.js';
 import { Redactor, TaskError } from '../agent/common.js';
 import { requestModel } from '../agent/gateway.js';
 import { selectedModel } from '../agent/model.js';
@@ -90,7 +91,9 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
         continue: context.continuations },
       github: { repository: repository.full_name, writes_made: earlierWrites(store, writeScope) } }) }
   ];
-  const task = { id: null, repository_id: repositoryId, kind: 'manager.dispatch' };
+  // Each dispatch attempt is a run of the Manager with its own trajectory file of model requests and responses.
+  const trajectory = dispatchScope(repositoryId, String(event.id), Number(event.attempts));
+  const task = { id: null, repository_id: repositoryId, kind: 'manager.dispatch', trajectory };
   const transcript = new ToolTranscript(messages, chatContextBytes);
   let corrected = false;
   try {
@@ -125,7 +128,7 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
       }
       messages.push(traceClean(message)); answer();
     }
-  } finally { await tokens.revoke(); }
+  } finally { store.trajectories.close(trajectory.key); await tokens.revoke(); }
   throw new TaskError('dispatch_decision_invalid', 'failed');
 }
 // Enough steps to read and write a few times; the last one may only decide.

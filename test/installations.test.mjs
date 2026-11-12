@@ -262,7 +262,7 @@ test('the console reads the output of the command a running task is executing', 
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,attempt,generation,workspace_id) VALUES('t1','101','review.pr','running','pr',4,2,1,'w1')");
   // A row an interrupted attempt left pending is not running anymore and must not be shown as the current command.
   const stale = 'b'.repeat(48);
-  h.store.run("INSERT INTO task_tools VALUES(?,?,?,NULL,'pending')", stale, 't1', JSON.stringify({ operation_id: stale, generation: 1, request: { type: 'workspace_command', command: 'old command' } }));
+  h.store.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES(?,?,?,NULL,'pending')", stale, 't1', JSON.stringify({ operation_id: stale, generation: 1, request: { type: 'workspace_command', command: 'old command' } }));
   const engine = new TaskEngine(h.store, manager, undefined, undefined, acceptanceFixture), url = path => new URL('http://local' + path);
   const user = { id: 'x', role: 'super_admin', repositories: [] };
   assert.deepEqual(await engine.api(user, 'GET', url('/api/tasks/t1/live'), {}), { running: false });

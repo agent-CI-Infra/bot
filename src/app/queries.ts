@@ -1,4 +1,5 @@
 import {taskRelations} from '../tasks/priority.js';
+import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
 import { taskDispatch } from '../dispatch/store.js';
 import { taskTrace, traceClean } from '../tasks/trace.js';
@@ -143,10 +144,12 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || after !== null && before !== null ||
         [after, before].some(value => value !== null && (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))))) fail(400, 'invalid_pagination');
       const ascending = after !== null, cursor = after ?? before;
-      const rows = store.all(`SELECT rowid AS sequence,id,content,created_at FROM task_logs WHERE task_id=?
+      const rows = store.all(`SELECT rowid AS sequence,id,content,content_ref,created_at FROM task_logs WHERE task_id=?
         ${cursor === null ? '' : 'AND rowid' + (ascending ? '>' : '<') + '?'} ORDER BY rowid ${ascending ? 'ASC' : 'DESC'} LIMIT ?`, row.id, ...(cursor === null ? [] : [Number(cursor)]), limit + 1);
       const more = rows.length > limit; rows.splice(limit); if (!ascending) rows.reverse();
-      const logs = rows.map(faultCause).map(log => {
+      // A large log's text is in its run's trajectory file; one that fails verification says so instead.
+      const logs = rows.map(log => { const { content_ref, ...rest } = log; let text: string; try { text = logContent(store, log); } catch (error) { text = JSON.stringify({ type: 'log_unreadable', ...unreadable(error) }); } return { ...rest, content: text }; })
+        .map(faultCause).map(log => {
         let content = visibleMemorySnapshot(store, row.repository_id, log.content, user.context ? { actor: user.context } : undefined);
         // Historical legacy model logs may contain private fields. Tool/file contents remain literal public evidence.
         try {

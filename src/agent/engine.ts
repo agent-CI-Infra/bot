@@ -25,6 +25,7 @@ import { assertManagedExecution } from '../tasks/management.js';
 import { TaskRecords } from '../tasks/service.js';
 import { evaluateDelivery } from '../tasks/acceptance.js';
 import { type Store, type Row } from '../storage/database.js';
+import { insertTaskLog, logContent } from '../storage/payloads.js';
 import { type Manager } from '../projects/service.js';
 import { randomId, fields, fail, HttpError, type Json } from '../core/security.js';
 import { type Actor, scope, repository } from '../app/auth.js';
@@ -215,8 +216,9 @@ export class TaskEngine {
       if(content.length>70000)content=JSON.stringify({type:clean.type,state:clean.state,code:clean.code,step:clean.step,detail_sha:clean.detail_sha,
         phase:clean.phase,phase_key:clean.phase_key,sha:clean.sha,files:clean.files,bytes:clean.bytes,skipped:clean.skipped,directory_fallback:clean.directory_fallback,source:clean.source,cache:clean.cache,
         detail:clip(clean.detail,6000),output:clip(content,6000),truncated:true});
-      if(value.type==='snapshot'&&this.store.get("SELECT content FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='snapshot' ORDER BY rowid DESC LIMIT 1",id)?.content===content)return;
-      this.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),id,content,new Date().toISOString());
+      if(value.type==='snapshot'){const last=this.store.get("SELECT content,content_ref FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='snapshot' ORDER BY rowid DESC LIMIT 1",id);
+        try{if(last&&logContent(this.store,last)===content)return;}catch{}}
+      insertTaskLog(this.store,task,content);
     };
     const guard=async()=>{
       try { assertManagedExecution(this.store,task); } catch(error) {
@@ -385,7 +387,7 @@ export class TaskEngine {
         return {error:`acceptance_${verdict.outcome}`,reason:verdict.reason,gaps:verdict.gaps};
       };
       const acceptReport=async(value:any)=>{
-        const checked=await accept(value,this.store.all("SELECT id,content FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='tool' AND json_extract(content,'$.name') IN ('run_command','read_file') AND json_extract(content,'$.attempt')=? ORDER BY rowid",id,task.attempt).map(row=>observation('task_log:'+row.id,sha(row.content),row.content)));
+        const checked=await accept(value,this.store.all("SELECT id,content,content_ref FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='tool' AND json_extract(content,'$.name') IN ('run_command','read_file') AND json_extract(content,'$.attempt')=? ORDER BY rowid",id,task.attempt).map(row=>{const content=logContent(this.store,row);return observation('task_log:'+row.id,sha(content),content);}));
         if(checked.error){
           await this.release(workspace,task);
           update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,publication_started:0,attempt:task.attempt+1});

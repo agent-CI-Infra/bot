@@ -91,7 +91,7 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
     VALUES(?,?,'review.issue',?,'fixture',5,?,?)`, id, repositoryId, status, now, now);
   task('running-101', 'running'); task('queued-101', 'queued'); task('done-101', 'succeeded'); task('done-202', 'succeeded', '202');
   h.store.run("INSERT INTO task_logs(id,task_id,content,created_at) VALUES('log-101','done-101','{}',?)", now);
-  h.store.run("INSERT INTO task_tools VALUES('tool-101','done-101','{}',NULL,'completed')");
+  h.store.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES('tool-101','done-101','{}',NULL,'completed')");
   h.store.run("INSERT INTO github_effects VALUES('effect-101','done-101','comment','{}','sent',NULL,'marker')");
   h.store.run("INSERT INTO development_candidates VALUES('done-101','{}')");
   h.store.run("INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at) VALUES('usage-101','done-101','101','request',?,'own',?)", own.id, now);

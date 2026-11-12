@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { modelSnapshot } from '../dist/storage/payloads.js';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
@@ -50,8 +51,10 @@ for(const harness of ['native','process','pi'])test(`generic conversation uses t
   const turn=f.store.get('SELECT * FROM role_conversation_turns');assert.equal(turn.role_id,'reviewer');assert.equal(turn.state,'completed');
   const instance=f.store.get('SELECT * FROM role_instances WHERE conversation_id=?',f.source.id);assert.equal(instance.task_id,null);assert.equal(instance.role,'reviewer');
   const request=f.store.get('SELECT * FROM model_requests WHERE conversation_id=?',f.source.id);
-  assert.ok(!request.request_snapshot.includes('Local context'));assert.ok(!request.response_snapshot.includes('A source-bound response'));
-  assert.ok(f.store.secrets.open(request.request_snapshot,'conversation-model-request:'+request.id).snapshot.includes('Local context'));
+  // The exchange is in the conversation turn's trajectory file (plain text since #436); the ledger row keeps only refs.
+  assert.equal(request.request_snapshot,null);assert.equal(request.response_snapshot,null);assert.ok(request.request_ref&&request.response_ref);
+  assert.ok(modelSnapshot(f.store,request,'request').includes('Local context'));assert.ok(modelSnapshot(f.store,request,'response').includes('A source-bound response'));
+  assert.equal(f.store.get('SELECT conversation_id FROM trajectory_files WHERE id=?',request.request_ref.split(':')[0]).conversation_id,f.source.id);
   assert.ok(f.store.get('SELECT count(*) n FROM role_conversation_events').n>0);
   assert.ok(f.requests.every(r=>!r.tools.some(t=>['run_command','delegate_role','create_pull_request'].includes(t.function.name))));
   const ledger=f.store.get('SELECT * FROM model_requests');assert.equal(ledger.task_id,null);assert.equal(ledger.conversation_id,f.source.id);assert.equal(ledger.role_id,'reviewer');assert.equal(ledger.source_message,'source-1');

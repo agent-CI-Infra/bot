@@ -1,4 +1,5 @@
 import type { Store } from '../storage/database.js';
+import { addColumns, operationRefColumns } from '../storage/trajectories.js';
 /** Logical conversations and transport turns are not business tasks or another task scheduler. */
 export function conversationStorage(store: Store): void {
   store.db.exec(`CREATE TABLE IF NOT EXISTS role_conversations(id TEXT PRIMARY KEY,project_id TEXT,lease TEXT,lease_until INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL);
@@ -10,6 +11,7 @@ export function conversationStorage(store: Store): void {
       type TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS role_conversation_operations(id TEXT PRIMARY KEY,turn_id TEXT NOT NULL REFERENCES role_conversation_turns(id) ON DELETE CASCADE,
       request TEXT NOT NULL,result TEXT,state TEXT NOT NULL);`);
+  addColumns(store.db, 'role_conversation_operations', operationRefColumns);
   for (const name of ['conversation_id','role_id','source_message'])
     if (!store.all('PRAGMA table_info(model_requests)').some(r => r.name === name)) store.db.exec(`ALTER TABLE model_requests ADD COLUMN ${name} TEXT`);
   store.db.exec('CREATE INDEX IF NOT EXISTS model_conversation_scope ON model_requests(conversation_id,role_id,requested_at)');

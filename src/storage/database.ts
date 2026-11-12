@@ -9,7 +9,8 @@ import { traceStorage } from '../tasks/trace.js';
 import { taskStorage } from '../tasks/storage.js';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { chmodSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { Trajectories, trajectoryStorage } from './trajectories.js';
 import { SecretBox, randomId } from '../core/security.js';
 import { externalStorage } from '../external/storage.js';
 import { boardStorage } from '../board/storage.js';
@@ -36,6 +37,8 @@ export type Row = Record<string, any>;
 export class Store {
   readonly db: DatabaseSync;
   readonly secrets: SecretBox;
+  // Bodies of agent work (model requests, tool calls, large logs) in per-run JSONL files next to the database.
+  readonly trajectories: Trajectories;
   private readonly authorizationGuard = new AsyncLocalStorage<() => void>();
   private transactionDepth = 0;
   constructor(path: string, key: Buffer) {
@@ -43,6 +46,7 @@ export class Store {
     this.db = new DatabaseSync(path);
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.secrets = new SecretBox(key);
+    this.trajectories = new Trajectories(this.db, path === ':memory:' ? null : join(dirname(path), 'trajectories'));
     this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -194,6 +198,8 @@ export class Store {
     externalStorage(this);
     boardStorage(this);
     metricsStorage(this);
+    // Ref columns on task_tools, model_requests and task_logs; the trace triggers below record them.
+    trajectoryStorage(this.db);
     workStorage(this);
     dispatchStorage(this);
     githubWriteStorage(this);
@@ -245,5 +251,5 @@ export class Store {
   audit(user: string, action: string, resource: string, repo: string | null = null): void {
     this.run('INSERT INTO audit VALUES(?,?,?,?,?,?)', randomId(), user, repo, action, resource, new Date().toISOString());
   }
-  close(): void { this.db.close(); }
+  close(): void { this.trajectories.dispose(); this.db.close(); }
 }

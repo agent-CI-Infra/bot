@@ -56,7 +56,9 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'github_invalid_response','github_invalid_page','github_response_too_large','repository_blob_invalid','repository_tree_invalid','repository_blob_limit_or_hash','release_operation_changed',
     'github_log_redirect_invalid','github_log_too_large','github_log_job_invalid','actions_report_identity_missing',
     'role_run_protocol_invalid','role_run_secret_rejected','role_run_operation_used','role_run_unknown','role_checkpoint_not_found','role_run_handle_unknown','role_run_not_started','role_recovery_scope_mismatch','role_run_cursor_invalid',
-    'run_token_ttl_invalid','run_token_invalid','run_token_scope_mismatch','run_token_capability_denied','run_candidate_invalid','claude_prepare_required','claude_run_context_required','claude_session_scope_mismatch','claude_tool_denied'] },
+    'run_token_ttl_invalid','run_token_invalid','run_token_scope_mismatch','run_token_capability_denied','run_candidate_invalid','claude_prepare_required','claude_run_context_required','claude_session_scope_mismatch','claude_tool_denied',
+    // A recorded result or trajectory record that fails its hash check; replaying the call could repeat its effect.
+    'trajectory_unreadable'] },
 };
 const byCode = new Map(Object.entries(causes).flatMap(([cause,{codes}]) => codes.map(code => [code, cause as FailureCause])));
 export const classifiedCodes = new Set(byCode.keys());
