@@ -51,3 +51,22 @@ test('an upgraded create retry reuses a legacy software request instead of dupli
  s.run("UPDATE tasks SET kind='task.request',unique_key=? WHERE id=?",key,first.id);
  const retry=commands.tool(caller,'create_task',args);assert.equal(retry.id,first.id);assert.equal(retry.replayed,true);assert.equal(s.get('SELECT count(*) n FROM tasks').n,2);
 });
+
+test('a native Manager observes admission failure and finishes a coordination turn without a runtime retry',async t=>{
+ const {createServer}=await import('node:http'),{once}=await import('node:events');
+ const {runRole}=await import('../dist/roles/run.js'),{Redactor}=await import('../dist/agent/common.js');
+ const {s}=fixture(t);let requests=0;
+ const server=createServer(async(req,res)=>{
+  let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);requests++;
+  const observations=body.messages.filter(m=>m.role==='tool').map(m=>{try{return JSON.parse(m.content);}catch{return {};}});
+  const error=observations.find(m=>m.error==='invalid_task_endpoint');
+  const name=error?'finish_coordination':'create_task',args=error?{action:'continue',reason:'Keep the full parent goal; correct the endpoint and continue planning.'}:{request:'Invalid endpoint combination',criteria:['Working code'],intent:'development',endpoint:'report',as_child:true};
+  if(error){assert.equal(error.created,false);assert.equal(error.source_ref,'task:parent');}
+  res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',tool_calls:[{id:'call-'+requests,type:'function',function:{name,arguments:JSON.stringify(args)}}]}}]}));
+ });server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>{server.closeAllConnections();server.close();});
+ s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','r',?,'fixture',?,'now')",'http://127.0.0.1:'+server.address().port+'/v1',s.secrets.seal({value:'fixture'},'model:m'));s.run("UPDATE policies SET model_id='m'");
+ const task=s.get("SELECT * FROM tasks WHERE id='parent'");
+ const result=await runRole({store:s,task,redactor:new Redactor(),guard:async()=>{},system:'Coordinate without accepting or publishing. Preserve the full parent goal.',prompt:'Use tool feedback to continue this coordination turn.',tools:[{type:'function',function:{name:'finish_coordination',description:'Return a coordination note, without completing the task.',parameters:{type:'object',properties:{action:{type:'string'},reason:{type:'string'}},required:['action','reason']}}}],execute:async()=>{throw Error('unexpected tool');},finish:{name:'finish_coordination',validate:x=>x}},'manager');
+ assert.match(result.result.reason,/full parent goal/);assert.equal(requests,2);assert.equal(s.get('SELECT count(*) n FROM tasks').n,1);assert.equal(s.get('SELECT count(*) n FROM task_children').n,0);assert.equal(s.get("SELECT count(*) n FROM task_runs WHERE role='manager' AND status='fault'").n,0);assert.equal(s.get("SELECT status FROM tasks WHERE id='parent'").status,'running');
+ assert.ok(s.get("SELECT id FROM task_history WHERE type='tool_observation' AND data LIKE '%invalid_task_endpoint%'"));
+});
