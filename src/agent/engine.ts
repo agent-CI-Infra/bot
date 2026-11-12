@@ -56,6 +56,7 @@ import { eventWork } from '../work/events.js';
 import { recordEvent } from '../dispatch/store.js';
 import { Dispatcher } from '../dispatch/worker.js';
 import { managerDecision } from '../dispatch/manager.js';
+import { workspaceRemoving } from '../projects/workspace-cleanup.js';
 // The modules that own event work register it when loaded.
 import '../releases/observe.js';
 import '../releases/notes.js';
@@ -508,7 +509,8 @@ export class TaskEngine {
         // A git worktree from the computer's store when the mirror has the commit. Otherwise files are copied as before, in a
         // fresh workspace, so nothing a checkout left halfway is in the way.
         let snapshot:any=null;
-        if(prior&&prior.generation===environment.generation&&prior.head_sha===ref.object.sha&&prior.workspace_id
+        // A workspace the cleanup is deleting right now is not reused; the task checks out afresh.
+        if(prior&&prior.generation===environment.generation&&prior.head_sha===ref.object.sha&&prior.workspace_id&&!workspaceRemoving(task.repository_id,prior.workspace_id)
           &&!this.store.get("SELECT 1 FROM tasks WHERE workspace_id=? AND id<>? AND status IN ('running','publishing','preparing')",prior.workspace_id,id)){
           const ownWorkspace=task.workspace_id;update({workspace_id:prior.workspace_id});
           const reused=await workspace.deliver({type:'workspace_reuse',sha:ref.object.sha,tree_sha:JSON.parse(prior.snapshot).snapshot_tree});

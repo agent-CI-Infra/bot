@@ -9,6 +9,7 @@ import { open, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { payloadHeader, TrajectoryError } from '../storage/trajectories.js';
 import { operationRequestText, operationResult } from '../storage/payloads.js';
+import { useWorkspace } from '../projects/workspace-cleanup.js';
 
 // Operations each task is waiting on in this process, oldest first. The console shows the newest as the command the task
 // is running. task_tools cannot answer that: it has no task index (2.8M rows in production, so finding a task's pending
@@ -26,6 +27,7 @@ export class Workspace {
     readonly operations?:'service_role_operations'){}
   async call(key:string,request:any){
     await this.guard();
+    useWorkspace(this.store,this.task,request.type);
     request=this.redactor.clean(request);
     const id=operationId(`${this.task.id}:${this.task.attempt}:${key}`),input={operation_id:id,generation:this.task.generation,request:{...request,workspace_id:this.task.workspace_id}};
     const conversation = !!this.task.conversation_id;
@@ -81,6 +83,7 @@ export class Workspace {
   // never stored; a lost answer only means the agent asks again.
   async deliver(request:any){
     await this.guard();
+    useWorkspace(this.store,this.task,request.type);
     const response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,{operation_id:randomId(),generation:this.task.generation,
       request:{...request,workspace_id:this.task.workspace_id}},90000).catch(()=>null);
     return response?.ok?response.result:{error:response?.error||'runner_operation_failed',...(response?.detail?{detail:response.detail}:{})};

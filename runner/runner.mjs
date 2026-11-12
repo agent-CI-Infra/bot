@@ -6,7 +6,8 @@ import { command } from './command.mjs';
 import { execFile } from 'node:child_process';
 import { ownership, isRunner, tasksRoot } from './ownership.mjs';
 import { pruneJournal } from './journal.mjs';
-import { storeOperation, pruneTasks } from './store.mjs';
+import { storeOperation, pruneStore } from './store.mjs';
+import { listTaskDirectories, removeTaskDirectories } from './task-dirs.mjs';
 import {local,workspaceRoot} from './paths.mjs';
 
 const workspace = workspaceRoot, journal = workspace + '/.runner-journal';
@@ -98,10 +99,14 @@ await mkdir(journal, { recursive: true, mode: 0o700 }); await mkdir(workspace+'/
 const request = JSON.parse(Buffer.from(process.argv[2] || '', 'base64url').toString());
 if (!idPattern.test(request.operation_id || '')) throw new Error('invalid_operation_id');
 let result;
-if (['tail', 'reap', 'usage', 'prune'].includes(request.type)) {
-  // Reading progress or usage, stopping leftovers and removing old journal records are repeatable and never journaled.
-  try { result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : request.type === 'prune' ? { journal: await pruneJournal(journal), tasks: await pruneTasks(tasksRoot) } : await reap(request) }; }
-  catch { result = { ok: false, error: request.type + '_failed' }; }
+if (['tail', 'reap', 'usage', 'prune', 'tasks_list', 'tasks_remove'].includes(request.type)) {
+  // Reading progress or usage, stopping leftovers, removing old journal records and listing or removing task directories
+  // are repeatable and never journaled.
+  try {
+    result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : request.type === 'prune' ? { journal: await pruneJournal(journal), store: await pruneStore() }
+      : request.type === 'tasks_list' ? await listTaskDirectories() : request.type === 'tasks_remove' ? await removeTaskDirectories(request.entries) : await reap(request) };
+  }
+  catch (error) { result = { ok: false, error: request.type + '_failed', ...(request.type.startsWith('tasks_') ? { detail: String(error?.message || 'operation failed').slice(0, 2000) } : {}) }; }
 } else try {
   const existing = await readFile(`${journal}/${request.operation_id}.json`, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
   if (existing) result = existing.state === 'completed' ? existing.result : { ok: false, error: 'operation_interrupted' };

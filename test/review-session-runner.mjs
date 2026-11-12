@@ -12,7 +12,7 @@ import {emptyRepositoryFixture} from './empty-repository-helpers.mjs';
 import {saveManager} from './helpers.mjs';
 import {queueWebhook} from '../dist/review/queue.js';
 import {workspace} from '../runner/workspace.mjs';
-import {pruneTasks} from '../runner/store.mjs';
+import {listTaskDirectories,removeTaskDirectories} from '../runner/task-dirs.mjs';
 import {estimateTokens} from '../runner/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
 import {subagentSystem} from '../dist/agent/runtime.js';
 import {TaskRecords} from '../dist/tasks/service.js';
@@ -319,8 +319,9 @@ test('real Pi keeps 26 waiting updates, injects after a model request and tool r
   assert.match(JSON.stringify(d.requests.at(-1).messages),/during tool/);
   assert.match(JSON.stringify(d.requests.at(-1).messages.at(-1)),/Historical code conclusions/);
   assert.equal(await readFile(join(d.base,'project-notes/repository.md'),'utf8'),'Stable project note');
-  // Three-day pruning affects only the checkout; the control-plane conversation survives.
-  assert.equal((await pruneTasks(d.base+'/',undefined,Date.now()+4*86400000,join(d.base,'git'))).removed,1);
+  // The workspace cleanup removing the checkout affects only the computer; the control-plane conversation survives.
+  const listed=(await listTaskDirectories(d.base)).entries;assert.equal(listed.length,1);
+  assert.equal((await removeTaskDirectories(listed,d.base,join(d.base,'git'))).removed.length,1);
   assert.equal(d.update('after container cache loss'),1);const third=(await d.run()).at(-1);
   assert.equal(third.status,'succeeded');assert.notEqual(third.workspace_id,first.workspace_id);
   assert.match(JSON.stringify(d.requests.at(-1).messages),/next successful review/);

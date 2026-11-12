@@ -75,22 +75,17 @@ export async function storeOperation(input, root = storeRoot) {
   }
   throw new Error('unsupported_store_operation');
 }
-// Old task directories go after three days without activity, with their worktree registrations; the store is repacked
-// when git thinks it is due. A task still running keeps touching its agent files.
-export async function pruneTasks(tasksRoot, olderThanMs = 3 * 24 * 3600 * 1000, now = Date.now(), root = storeRoot) {
+// Store upkeep: half-transferred packs go, worktree registrations of removed task directories go, and the store is
+// repacked when git thinks it is due. Task directories themselves are removed only when the control plane asks
+// (task-dirs.mjs): it knows which task each belongs to and whether that task still needs it.
+export async function pruneStore(now = Date.now(), root = storeRoot) {
   const { store, incoming } = paths(root);
+  let packs = 0;
   // A pack whose transfer stopped halfway is of no use to anyone after a few hours.
   for (const name of await readdir(incoming).catch(() => [])) {
     const path = incoming + '/' + name, modified = await stat(path).then(s => s.mtimeMs, () => now);
-    if (now - modified > 6 * 3600 * 1000) await rm(path, { force: true });
-  }
-  let removed = 0;
-  for (const name of await readdir(tasksRoot).catch(() => [])) {
-    if (!/^[a-f0-9]{48}$/.test(name)) continue;
-    const root = tasksRoot + name, times = await Promise.all([root, root + '/agent', root + '/agent/events.jsonl', root + '/agent/state.json'].map(path => stat(path).then(s => s.mtimeMs, () => 0)));
-    if (now - Math.max(...times) <= olderThanMs) continue;
-    await rm(root, { recursive: true, force: true }); removed++;
+    if (now - modified > 6 * 3600 * 1000) { await rm(path, { force: true }); packs++; }
   }
   if (await stat(store + '/HEAD').then(() => true, () => false)) { await git(['worktree', 'prune'], { cwd: store }).catch(() => {}); await git(['gc', '--auto', '--quiet'], { cwd: store }).catch(() => {}); }
-  return { removed };
+  return { packs };
 }

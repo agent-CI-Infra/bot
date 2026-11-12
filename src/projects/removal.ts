@@ -29,7 +29,7 @@ export function deleteProjectRecords(store: Store, id: string): void {
     [`DELETE FROM external_subscriptions WHERE repository_id=? OR client_id IN (${clients})`, 2], ['DELETE FROM external_clients WHERE repository_id=?', 1],
     [`DELETE FROM external_events WHERE repository_id=? OR source_id IN (${deliveries})`, 2],
     ['DELETE FROM board_values WHERE repository_id=?', 1], ['DELETE FROM board_objects WHERE repository_id=?', 1],
-    ['DELETE FROM review_sessions WHERE repository_id=?', 1], ['DELETE FROM review_objects WHERE repository_id=?', 1], ['DELETE FROM review_summaries WHERE repository_id=?', 1],
+    ['DELETE FROM review_sessions WHERE repository_id=?', 1], ['DELETE FROM task_workspaces WHERE repository_id=?', 1], ['DELETE FROM review_objects WHERE repository_id=?', 1], ['DELETE FROM review_summaries WHERE repository_id=?', 1],
     ...['actions_failure_reports', 'actions_failure_issues', 'actions_failure_attempts', 'actions_failure_runs', 'actions_failure_scans'].map((table): [string, number] => [`DELETE FROM ${table} WHERE repository_id=?`, 1]),
     ...['role_assignments', 'role_instances', 'review_updates', 'task_logs', 'task_tools', 'github_effects', 'development_candidates', 'task_metrics'].map((table): [string, number] => [`DELETE FROM ${table} WHERE task_id IN (${tasks})`, 1]),
     [`DELETE FROM model_requests WHERE repository_id=? OR task_id IN (${tasks})`, 2],

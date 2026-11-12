@@ -18,6 +18,7 @@ import { GitHubLogin } from './identity/github-login.js';
 import { deploymentOrigin, loginCallbackPath } from './onboarding/public-url.js';
 import { StallMonitor } from './core/stalls.js';
 import { PayloadMigration } from './storage/migration.js';
+import { WorkspaceCleanup } from './projects/workspace-cleanup.js';
 
 process.umask(0o077);
 const keyFile = process.env.BOT_MASTER_KEY_FILE;
@@ -54,6 +55,8 @@ const engine=new TaskEngine(store,manager,process.env.BOT_GITHUB_API_URL,gitCach
 const external=new ExternalService(store,{githubUrl:process.env.BOT_GITHUB_API_URL,privateHosts:(process.env.BOT_FORWARD_PRIVATE_HOSTS||'').split(',').map(v=>v.trim().toLowerCase()).filter(Boolean)});external.forwarder.start();
 void projects.reconcile();
 const timer = setInterval(() => { void projects.reconcile().catch(error => console.error('[projects] reconciliation failed:', error)); }, 5000);
+// Finished tasks' workspaces leave the project computers: first five minutes after start, then every hour.
+const workspaces = new WorkspaceCleanup(store, manager, { skip: id => projects.isRemoving(id) }); workspaces.start();
 // Installed repositories are listed on start and every ten minutes; webhook events update them in between.
 const installations = new InstallationSync(store, process.env.BOT_GITHUB_API_URL || undefined);
 installations.start();
@@ -85,7 +88,7 @@ server.listen(8791, '0.0.0.0', () => {
 let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;
-  clearInterval(timer); clearInterval(syncTimer); clearInterval(identityTimer);
+  clearInterval(timer); clearInterval(syncTimer); clearInterval(identityTimer); workspaces.close();
   server.close(async () => { await Promise.all([installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close(),migration.stop()]); store.close(); process.exit(0); });
   setTimeout(() => process.exit(1), 100_000).unref();
 });
