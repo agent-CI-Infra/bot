@@ -90,6 +90,8 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 个人绑定页向超级管理员显示全局设置的应用管理入口，向能新增或管理组织应用的人显示“连接或管理本组织的飞书应用”。用户能看到自己可见的已启用应用（见「应用的归属与可见范围」）的企业名称、机器人名称和所属组织，并通过“打开机器人私聊”链接进入飞书会话；链接使用飞书 AppLink `https://applink.feishu.cn/client/bot/open?appId=<App ID>`，仍由飞书检查应用可用范围。组织的应用会注明经它绑定的身份只在该组织内生效。控制台签发的绑定串、私聊认证字符串和绑定链接都只能通过自己可见的应用完成绑定，否则返回 403 `channel_application_forbidden`；签发时和私聊兑换时各检查一次。没有可见的已启用连接时提示联系超级管理员或本组织的管理员，不展示可提交的绑定表单。
 
+`#/identity/feishu` 是独立的个人绑定页：选择机器人、打开私聊、复制并发送一次完整消息。已绑定时先展示实际身份摘要，收起首次绑定步骤，可显式重新绑定；旧私聊认证字符串保留在默认折叠的兼容入口。群角色与项目范围位于独立的 `#/identity/feishu/groups`，私信连续会话与本地记录位于 `#/identity/feishu/conversations`，均继续沿用原服务端权限；群管理读取失败不阻止本人绑定。原 `#/identity` 的身份、授权和会话管理入口继续可用。
+
 默认由控制台签发一次性绑定串，私聊里一条消息即完成：
 
 1. 登录控制台，在「身份与权限 → 飞书身份绑定」选择机器人并点“生成绑定串”。页面调用受会话和 CSRF 保护的 `POST /api/channels/bindings/issue`（`{connector_id}`），成功返回 201 `{request_id, code, expires_at}`；连接不存在或已停用返回 404 `channel_connector_not_found`，看不到的组织应用返回 403 `channel_application_forbidden`，未登录或跨站请求被拒绝。

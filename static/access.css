@@ -66,6 +66,15 @@
 .identity-grants { display: grid; gap: 12px; }
 .identity-layout .perm-row { border: 1px solid var(--color-border); border-radius: var(--radius-3); margin: 12px 0; }
 .identity-feishu > .side-card { margin: 0; }
+.identity-feishu-page { display: grid; gap: 20px; padding: 20px; max-width: 1200px; margin: auto; }
+.identity-feishu-page > .side-card { margin: 0; min-width: 0; }
+.identity-feishu-page > nav { flex-wrap: wrap; }
+.feishu-binding-layout { display: grid; grid-template-columns: minmax(0,2fr) minmax(220px,1fr); gap: 24px; }
+.feishu-binding-layout > *, .feishu-legacy-binding { min-width: 0; overflow-wrap: anywhere; }
+.feishu-binding-help { background: var(--color-brand-weak); border-radius: var(--radius-3); padding: 16px; }
+.feishu-binding-help h4 { margin-top: 0; }
+.feishu-legacy-binding { margin-top: 20px; }
+.feishu-legacy-binding summary { cursor: pointer; }
 @media(max-width:1279px) {
   .onboarding-layout { grid-template-columns: minmax(0,1fr); gap: 16px; }
   #onboarding-panel .onboarding-progress { grid-template-columns: repeat(3,minmax(0,1fr)); }
@@ -77,6 +86,10 @@
   .onboarding-step { padding: 4px; }
   .onboarding-step small { font-size: 12px; }
   .identity-layout { padding: 8px; gap: 14px; }
+  .identity-feishu-page { padding: 8px; gap: 14px; }
+  .feishu-binding-layout { grid-template-columns: minmax(0,1fr); gap: 12px; }
+  .identity-feishu-page :is(button,select,summary) { min-height: 44px; }
+  .identity-feishu-page select { max-width: 100%; font-size: 16px; }
   .identity-layout :is(button, select), .onboarding-content :is(button, input, select) { min-height: 44px; }
   .onboarding-content :is(input, select), .identity-layout select { font-size: 16px; }
   .identity-scope-form { flex-direction: column; align-items: stretch; }

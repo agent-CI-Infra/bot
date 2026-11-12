@@ -34,6 +34,8 @@ for (const width of [1440, 390]) {
       const actor = 'ou_browser_' + width, grants = f.h.store.get('SELECT count(*) n FROM scoped_grants').n;
       await page.setViewportSize({ width, height: 844 }); await login(page, f, user);
       await expect(page.getByRole('link', { name: '管理员：连接或管理飞书应用', exact: true })).toHaveCount(0);
+      await expect(page.getByLabel('助手所在群', { exact: true })).toHaveCount(0);
+      await expect(page.getByLabel('飞书认证字符串', { exact: true })).toBeHidden();
       const first = await issue(page, f.id), slot = app(page, f.id).locator('.channel-binding-console');
       await slot.getByRole('button', { name: '复制绑定串', exact: true }).click();
       await expect(page.getByLabel('我的飞书账号', { exact: true })).toHaveCount(0);
@@ -42,6 +44,8 @@ for (const width of [1440, 390]) {
       await expect(binding).toContainText('已绑定', { timeout: 15000 });
       const identity = f.h.store.get('SELECT id FROM external_identities WHERE external_actor=?', actor);
       const count = f.h.store.get('SELECT count(*) n FROM external_identities').n;
+      await expect(page.locator('.feishu-binding-steps')).toBeHidden();
+      await expect(app(page, f.id).getByRole('button', { name: '重新绑定', exact: true })).toBeVisible();
       page.once('dialog', dialog => dialog.accept());
       await binding.getByRole('button', { name: '解除飞书绑定', exact: true }).click();
       await expect(binding).toContainText('已解绑');
@@ -52,6 +56,11 @@ for (const width of [1440, 390]) {
       expect(f.h.store.get('SELECT count(*) n FROM scoped_grants').n).toBe(grants);
       await expect(app(page, f.id).locator('.channel-binding-console code')).toHaveCount(0);
       await page.goto(f.h.admin + '/#/projects'); await page.goto(f.h.admin + '/#/identity/feishu');
+      await expect(binding).toContainText('已绑定');
+      await page.getByRole('link', { name: '我维护的群助手', exact: true }).click();
+      await expect(page.getByRole('heading', { name: '飞书群聊助手', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: '飞书身份绑定', exact: true })).toHaveCount(0);
+      await page.getByRole('link', { name: '个人飞书绑定', exact: true }).click();
       await expect(binding).toContainText('已绑定');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       expect(errors).toEqual([]);
@@ -72,6 +81,27 @@ test('another bot completing a binding cannot complete the request this page is 
     await expect(app(page, f.id).locator('.channel-binding-console code')).toHaveText('绑定 ' + waiting.code);
     await expect(app(page, f.id).locator('.channel-binding-console')).toContainText('等待飞书中发送');
     expect((await user.client('/api/channels/bindings/requests/' + separate.request_id)).value.state).toBe('completed');
+  } finally { await f.close(); }
+});
+
+test('the chosen bot has its own simple flow and a failed group-management read does not hide personal binding', async ({ page }) => {
+  const f = await channelFixture();
+  try {
+    const other = await connector(f.admin, { app_id: 'cli_other', installation_tenant: 'install-other', bot_open_id: 'ou_bot_other' });
+    const name = 'separate-entry-user', user = { ...await f.member(name, {}), name };
+    await page.route('**/api/channels/service-bindings', route => route.fulfill({ status: 503, json: { error: 'fixture_groups_unavailable' } }));
+    await page.setViewportSize({ width: 390, height: 844 }); await login(page, f, user);
+    await expect(app(page, f.id)).toBeVisible(); await expect(app(page, other)).toBeHidden();
+    await page.getByLabel('选择飞书机器人', { exact: true }).selectOption(other);
+    await expect(app(page, f.id)).toBeHidden(); await expect(app(page, other)).toBeVisible();
+    await issue(page, other, true);
+    await expect(app(page, other).locator('code')).toBeVisible();
+    await expect(page.getByLabel('飞书认证字符串', { exact: true })).toBeHidden();
+    await page.getByRole('link', { name: '我维护的群助手', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '飞书设置读取失败', exact: true })).toBeVisible();
+    await page.getByRole('link', { name: '个人飞书绑定', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '飞书身份绑定', exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   } finally { await f.close(); }
 });
 

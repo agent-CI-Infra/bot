@@ -6,17 +6,23 @@ async function feishuIdentityCard() {
   // Organization and repository admins add and manage their organization's apps from here; super administrators in settings (#424).
   if (me.role === 'super_admin') section.append(channelLink('#/settings/feishu', '管理员：连接或管理飞书应用', 'button-link'));
   else if (data.can_manage_applications) section.append(channelLink('#/identity/feishu-apps', '连接或管理本组织的飞书应用', 'button-link'));
+  const identities = element('div', '', 'feishu-bound-identities');
+  section.append(identities);
   const steps = element('ol', '', 'feishu-binding-steps');
-  for (const caption of ['在下方选择机器人并点“生成绑定串”，本页会显示一条只能使用一次的消息。',
-    '在飞书中打开与这个机器人的私聊，把那条消息原样发送一次。',
-    '本页只在服务端确认后显示“已绑定”；复制、跳转或等待失败都不算绑定成功。']) steps.append(element('li', caption));
+  for (const caption of ['打开所选机器人的私聊，添加机器人联系人。',
+    '生成并复制完整绑定消息，在这个私聊中发送一次。本页会自动读取服务端确认结果。']) steps.append(element('li', caption));
   if (data.applications.length) {
-    section.append(steps, note('认证字符串五分钟内有效，仅可使用一次，请勿转发。'));
+    const flow = element('div', '', 'feishu-binding-layout'), main = element('div'), help = element('aside', '', 'feishu-binding-help');
+    help.append(element('h4', '找不到机器人？'), note('请先登录飞书，再打开机器人名片。也可在飞书中搜索机器人的名称；仍不可见时，请联系管理员检查应用发布和可用范围。'),
+      note('绑定串五分钟内有效，只能使用一次。仅发送到本人与所选机器人的私聊，请勿转发。复制或打开私聊不代表绑定成功。'));
+    main.append(steps); flow.append(main, help); section.append(flow);
     const apps = element('div'); apps.setAttribute('aria-label', '可绑定的飞书应用');
     const label = a => `${a.tenant_name || '企业名称暂未获取'} · ${a.app_name || '机器人名称暂未获取'}${a.organization ? ' · 组织 ' + a.organization + ' 的应用' : ''}`;
+    const active = a => data.bindings.some(b => b.status === 'active' && b.connector === a.id + ':' + a.app_id);
     // The console issues the code for the chosen bot (#236): the private-chat message that carries it completes the
     // binding in one step, and this page only shows 已绑定 after it reads the binding back from the server.
     const consoleBind = async (a, slot) => {
+      steps.hidden = false;
       const box = element('div', '', 'channel-binding-console'); box.setAttribute('aria-label', '控制台发起的绑定');
       // One bot shows one string at a time: asking again replaces the previous box, and the server retires the older code.
       slot.replaceChildren(box);
@@ -54,16 +60,23 @@ async function feishuIdentityCard() {
         void poll();
       } catch (err) { status.textContent = err.message; }
     };
+    const rows = new Map();
     for (const a of data.applications) {
       const row = element('div', '', 'channel-binding'), link = channelLink(a.chat_url, '打开机器人私聊', 'button-link');
       row.dataset.bindingConnector = a.id;
       const slot = element('div', '', 'channel-binding-slot'); slot.setAttribute('aria-live', 'polite');
       link.target = '_blank'; link.rel = 'noopener noreferrer';
-      row.append(element('strong', label(a)), link, button('生成绑定串', () => consoleBind(a, slot), 'quiet'), slot,
-        note('若飞书未打开，请在飞书客户端搜索上方机器人名称；找不到时，请联系应用管理员检查应用可用范围。'),
-        ...(a.organization ? [note(`这是组织 ${a.organization} 的应用：经它绑定的飞书身份只能使用你在该组织内的权限。`)] : []));
+      row.append(element('strong', label(a)), link, button(active(a) ? '重新绑定' : '生成绑定串', () => consoleBind(a, slot), 'quiet'), slot);
+      rows.set(a.id, row);
+      if (a.organization) row.append(note(`这是组织 ${a.organization} 的应用：经它绑定的飞书身份只能使用你在该组织内的权限。`));
       apps.append(row);
     }
+    if (data.applications.length > 1) {
+      const selected = channelSelect(main, '选择飞书机器人', 'personal_binding_connector', data.applications.map(a => [a.id, label(a)]));
+      const choose = () => { for (const [id, row] of rows) row.hidden = id !== selected.value; steps.hidden = active(data.applications.find(a => a.id === selected.value)); };
+      selected.addEventListener('change', choose); choose();
+    } else steps.hidden = active(data.applications[0]);
+    main.append(apps);
     const form = element('form', '', 'project-form'), app = channelSelect(form, '要绑定的飞书机器人', 'binding_connector', data.applications.map(a => [a.id, label(a)]));
     const code = channelField(form, '飞书认证字符串', 'binding_code'); code.required = true; code.autocomplete = 'off'; code.spellcheck = false;
     code.placeholder = '粘贴机器人私聊返回的 FSB- 开头字符串'; code.maxLength = 100;
@@ -85,7 +98,9 @@ async function feishuIdentityCard() {
         submit.disabled = false;
       }
     });
-    section.append(apps, form);
+    const legacy = element('details', '', 'fold feishu-legacy-binding');
+    legacy.append(element('summary', '使用旧私聊认证字符串（兼容入口）'), note('仅用于继续处理之前从机器人私聊发起的认证。首次绑定请使用上方两步流程。'), form);
+    section.append(legacy);
   } else section.append(note('暂无你可以使用的飞书应用。请联系超级管理员或本组织的管理员配置。'));
   const challenge = /^#\/identity\/feishu\?challenge=([a-f0-9]{48})$/.exec(location.hash)?.[1];
   if (challenge) {
@@ -150,12 +165,11 @@ async function feishuIdentityCard() {
       try { await api('/api/identity/bindings/' + b.id, 'DELETE', {}); await start(); } catch (err) { error(err); }
     }, 'quiet'));
     else row.append(note('需要恢复时，在原飞书私聊发送 /reauth，重新完成双端验证。'));
-    section.append(row);
+    identities.append(row);
   }
-  section.append(button('刷新飞书绑定状态', () => start().catch(error), 'quiet'), note('绑定后可直接说“你好”“我能管理哪些项目”或“看看 bot 项目的任务”；需要明确目标时，助手会按名称追问。群聊由维护人在下方「飞书群聊助手」绑定后，群成员无需逐人绑定。'));
+  section.append(button('刷新飞书绑定状态', () => start().catch(error), 'quiet'), note('绑定后可直接在私聊中说“你好”“我能管理哪些项目”或“看看 bot 项目的任务”。个人绑定不会授权群聊读取项目；群助手由有资格的维护人在独立入口配置。'));
   // Names are presentation metadata: render immediately, then fill missing names without blocking the identity page.
   void (async () => { for (const lookup of nameLookups) { if (request !== renderVersion) break; await lookup(); } })();
-  section.append(await channelServiceBindingSettings(), await channelPersonalChats());
   return section;
 }
 const employeeErrors = { channel_employee_revalidation_required: '群成员正在重新核验，受保护动作暂时暂停。', channel_employee_member_required: '你或来源成员当前不在这个群中。',

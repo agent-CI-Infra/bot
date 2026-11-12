@@ -29,6 +29,7 @@ function grantStateText(grant) {
 async function renderIdentity() {
   const panel = $('identity-panel'), request = renderVersion;
   const current = () => request === renderVersion;
+  panel.classList.remove('identity-feishu-page');
   // Organization and repository admins add and manage their organization's Feishu apps here, with the same wizard
   // super administrators use in global settings (#424).
   if (/^#\/identity\/feishu-apps(?:\/|$)/.test(location.hash)) {
@@ -38,6 +39,22 @@ async function renderIdentity() {
     catch (err) { if (current()) panel.replaceChildren(consoleState('飞书应用读取失败', feishuError(err), { tone: 'error', retry: () => render().catch(error) })); return; }
     if (current()) { $('count').textContent = ''; panel.replaceChildren(setup, channelLink('#/identity/feishu', '返回身份与权限')); }
     return;
+  }
+  const personalBinding = /^#\/identity\/feishu(?:$|\?)/.test(location.hash);
+  const groups = location.hash === '#/identity/feishu/groups', conversations = location.hash === '#/identity/feishu/conversations';
+  panel.classList.toggle('identity-feishu-page', personalBinding || groups || conversations);
+  if (personalBinding || groups || conversations) {
+    const navigation = element('nav', '', 'actions'); navigation.setAttribute('aria-label', '飞书个人设置');
+    navigation.append(channelLink('#/identity', '身份与权限'), channelLink('#/identity/feishu', '个人飞书绑定'),
+      channelLink('#/identity/feishu/groups', '我维护的群助手'), channelLink('#/identity/feishu/conversations', '我的私信会话'));
+    panel.replaceChildren(navigation, consoleState('正在读取飞书设置', '正在核对本人的绑定或获准管理的会话。'));
+    const load = async () => {
+      try {
+        const content = await (groups ? channelServiceBindingSettings() : conversations ? channelPersonalChats() : feishuIdentityCard());
+        if (current()) panel.replaceChildren(navigation, content);
+      } catch (err) { if (current()) panel.replaceChildren(navigation, consoleState('飞书设置读取失败', err.message, { tone: 'error', retry: load })); }
+    };
+    await load(); return;
   }
   let data;
   panel.replaceChildren(consoleState('正在读取身份与权限', '正在核对当前会话的组织、身份绑定和授权记录。'));
@@ -120,6 +137,7 @@ async function renderIdentity() {
   const feishuSlot = element('div', '', 'identity-feishu');
   feishuSlot.append(consoleState('正在读取飞书绑定', 'GitHub 身份与管理权限已独立展示。'));
   const layout = element('div', '', 'identity-layout'); layout.append(overview, selection, identities, permissions, feishuSlot); panel.replaceChildren(layout);
+  const collaboration = element('div', '', 'identity-feishu'); layout.append(collaboration);
   const loadProvider = async () => {
     try {
       const { enabled } = await api('/api/auth/github/status'); if (!current()) return;
@@ -131,7 +149,11 @@ async function renderIdentity() {
     try { const feishu = await feishuIdentityCard(); if (!current()) return; feishuSlot.replaceChildren(feishu); if (location.hash.startsWith('#/identity/feishu')) feishu.scrollIntoView({ block: 'start' }); }
     catch (err) { if (current()) feishuSlot.replaceChildren(consoleState('飞书绑定读取失败', err.message, { tone: 'error', retry: () => loadFeishu() })); }
   };
-  const loading = [loadProvider(), loadFeishu()];
+  const loadCollaboration = async () => {
+    try { const content = await Promise.all([channelServiceBindingSettings(), channelPersonalChats()]); if (current()) collaboration.replaceChildren(...content); }
+    catch (err) { if (current()) collaboration.replaceChildren(consoleState('飞书会话读取失败', err.message, { tone: 'error', retry: loadCollaboration })); }
+  };
+  const loading = [loadProvider(), loadFeishu(), loadCollaboration()];
   if (data.actor.tenant_id && data.scopes.some(g => g.state === 'active' && (g.scope === 'platform' || g.scope === 'tenant' && g.tenant_id === data.actor.tenant_id))) {
     const members = card('组织成员授权'); layout.append(members);
     const loadMembers = async () => {
