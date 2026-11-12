@@ -6,6 +6,7 @@ import { ledgerStorage } from '../dist/channels/ledger.js';
 
 test('group names migrate, fill existing views and refresh without changing chat or assistant revisions', async t => {
   const f = await channelFixture(t), chat = await boundGroup(f), path = `/api/channels/chats/${chat.id}/name`;
+  f.h.store.run("UPDATE channel_connectors SET tenant_name='Fixture enterprise' WHERE id=?", f.id);
   const before = { ...f.h.store.get('SELECT * FROM channel_chats WHERE id=?', chat.id) };
   f.h.store.db.exec('ALTER TABLE channel_chats DROP COLUMN display_name'); ledgerStorage(f.h.store); ledgerStorage(f.h.store);
   assert.equal(f.h.store.get('SELECT display_name FROM channel_chats WHERE id=?', chat.id).display_name, '');
@@ -49,6 +50,7 @@ test('group name refresh checks group visibility before provider access and agai
 
 test('private conversation names require the exact active owner binding and keep the robot enterprise distinct', async t => {
   const f = await channelFixture(t), chat = await privateChat(f);
+  f.h.store.run("UPDATE channel_connectors SET tenant_name='Fixture enterprise' WHERE id=?", f.id);
   f.h.store.run("UPDATE external_identities SET display_name='张小明' WHERE principal_id=?", f.principal);
   const read = async () => (await f.admin('/api/channels/employees')).value.personal_chats[0];
   assert.equal((await read()).display_name, '张小明'); assert.equal((await read()).tenant_name, 'Fixture enterprise');
