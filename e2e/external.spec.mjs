@@ -159,7 +159,7 @@ test('全局仅一套说明，选择客户端复制含轮询的指令；地址�
     await expect(guide).toHaveCount(1);await expect(panel.locator('.row .external-guide')).toHaveCount(0);
     await expect(panel.getByRole('button',{name:'新增客户端',exact:true})).toHaveCount(0);
     await expect(panel.getByRole('button',{name:'新增转发订阅',exact:true})).toHaveCount(0);
-    await expect(panel.getByRole('button',{name:'设置兑换地址',exact:true})).toBeVisible();
+    await expect(panel.getByRole('link',{name:'在全局设置中配置兑换地址',exact:false})).toBeVisible();
     await guide.locator('summary').click();const select=guide.getByRole('combobox',{name:'复制指令所用客户端',exact:true});await select.selectOption(a.client.id);
     await expect(select.locator('option')).toHaveCount(2);await expect(select.locator('option[value="'+oidc.client.id+'"]')).toHaveCount(0);
     await guide.getByRole('button',{name:'复制给我的 AI agent',exact:true}).click();await expect(guide.getByRole('status')).toHaveText('已复制接入指令');

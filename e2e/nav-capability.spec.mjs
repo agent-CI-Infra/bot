@@ -53,9 +53,9 @@ test('the shared shell groups projects by organization and keeps the selected pr
     // client: before the answer the cache still holds the old row, after it the bar reads the project again.
     await page.route('**/api/installations/sync', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ results: [] }) }));
     await picker.selectOption('');
-    await expect(page.locator('#sync')).toBeVisible();
-    await page.locator('#sync').click();
-    await expect(page.locator('#sync')).toBeEnabled();
+    await page.goto(h.admin + '/#/settings/projects');
+    const sync = page.getByRole('button', { name: '同步安装列表', exact: true });
+    await expect(sync).toBeVisible(); await sync.click(); await expect(sync).toBeEnabled();
     await page.evaluate(() => { location.hash = '#/projects/101/overview'; });
     await expect(page.locator('#console-location [data-permission]')).toBeVisible();
     expect(snapshotReads).toBeGreaterThanOrEqual(1);
@@ -130,8 +130,8 @@ test('a sync that answers after a project was opened still reaches the scope bar
     await expect(badge).toBeVisible();
     // Open the list, start the sync, and open the project again while the answer is still in flight: that read caches
     // the pre-sync row, so the answer itself has to drop it after it lands, not before it starts.
-    await page.locator('#console-project').selectOption('');
-    await page.locator('#sync').click();
+    await page.goto(h.admin + '/#/settings/projects');
+    await page.getByRole('button', { name: '同步安装列表', exact: true }).click();
     await page.evaluate(() => { location.hash = '#/projects/101/overview'; });
     await expect(badge).toBeVisible();
     await expect(badge).toHaveCount(0, { timeout: 15000 });

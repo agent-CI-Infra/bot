@@ -51,7 +51,7 @@ async function renderFeishuSetup(panel, request) {
   const base = feishuBase(), match = /^#\/(?:settings\/feishu|identity\/feishu-apps)\/(new|[a-f0-9]{48})\/([0-4])$/.exec(location.hash);
   if (!match) {
     const overview = card('飞书应用连接');
-    overview.append(note(data.platform ? '超级管理员可以连接全平台共用的应用，也可以为某个组织连接应用。组织管理员和组织内仓库的管理员可以在「身份与权限」为本组织连接企业自建应用。每位用户在「身份与权限」中绑定本人身份，之后仍按已有项目权限使用。'
+    overview.append(note(data.platform ? '超级管理员可以连接全平台共用的应用，也可以为某个组织连接应用。组织管理员和组织内仓库的管理员可以在「设置 → 组织飞书应用」为本组织连接企业自建应用。每位用户在「设置 → 飞书身份绑定」中绑定本人身份，之后仍按已有项目权限使用。'
       : '你可以为下列组织连接企业自建的飞书应用（SDK 长连接）。组织的应用只有该组织内有授权的人能看到和绑定；它所在的群只能选择本组织的仓库，经它绑定的飞书身份也只能使用本组织内的权限。应用由创建人、组织管理员和超级管理员管理。'),
       ...(data.platform || data.organizations.length ? [channelLink(feishuAddress(), '新增飞书应用连接', 'button-link')] : [note('你当前不能为任何组织新增应用，只能管理下方已有的应用。')]));
     if (!data.connectors.length) overview.append(note(data.platform ? '尚未连接飞书应用。按向导完成应用创建、凭据、事件订阅、发布和试用。' : '你还没有可管理的飞书应用。按向导完成应用创建、凭据、事件订阅、发布和试用。'));
@@ -228,8 +228,8 @@ async function renderFeishuSetup(panel, request) {
   } else {
     body.append(feishuList(['让每位使用者在机器人私聊发起 /bind，打开链接并使用本地账户或 GitHub 登录平台，核对当前账户后确认绑定，再回原私聊确认。',
       '绑定后直接在私聊发送“你好”或“我能管理哪些项目”，确认收到助手回复后才完成接入。不需要先选项目；绑定不增加权限，项目管理员仍需授权。',
-      '需要群内使用时，由已绑定飞书、在该群中并对相关仓库有配置权限的维护人，在「身份与权限 → 飞书群聊助手」为该群选择服务角色和项目范围，再在群里 @ 机器人提问。',
-      '需要定时汇报或巡检时，在「身份与权限」页的「我的飞书私信会话」或对应的群聊助手下添加定时任务，用提示词说明要做什么；项目日报和事件订阅可直接选择有权限的私聊或群作为目的地。']),
+      '需要群内使用时，由已绑定飞书、在该群中并对相关仓库有配置权限的维护人，在「设置 → 群助手设置」为该群选择服务角色和项目范围，再在群里 @ 机器人提问。',
+      '需要定时汇报或巡检时，在「设置 → 我的飞书私信会话」或「设置 → 群助手设置」下添加定时任务，用提示词说明要做什么；项目日报和事件订阅可直接选择有权限的私聊或群作为目的地。']),
       channelLink('#/identity/feishu', '前往个人飞书身份绑定', 'button-link'), button('刷新收件与发送状态', () => render().catch(error), 'quiet'));
     await channelDiagnostics(c, panel, data.platform);
   }

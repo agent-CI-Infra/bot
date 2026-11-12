@@ -13,7 +13,7 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101'); await repository(admin, a.id, '102');
     const id = await connector(admin), principal = (await admin('/api/auth/me')).value.id;
     bindFixture(h, id, principal); const quiet = inGroup('', 'ou_alice'); quiet.event.message.mentions = []; quiet.event.message.content = JSON.stringify({ text: 'Original local group decision' }); await post(h, id, quiet);
-    await page.setViewportSize({ width, height: 900 }); await page.goto(h.admin + '/#/identity');
+    await page.setViewportSize({ width, height: 900 }); await page.goto(h.admin + '/#/identity/feishu/groups');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('heading', { name: '飞书群聊助手', exact: true })).toBeVisible();
@@ -68,7 +68,7 @@ test('saving explains an app without the member scope, and a gateway page, inste
     bindFixture(h, id, principal); const quiet = inGroup('', 'ou_alice'); quiet.event.message.mentions = []; quiet.event.message.content = JSON.stringify({ text: 'Group discussion' }); await post(h, id, quiet);
     // Feishu refuses the member lookup when the app holds none of the member-reading scopes.
     wire.state.audience = () => Response.json({ code: 99991672, msg: 'Access denied.' }, { status: 400 });
-    await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(h.admin + '/#/identity');
+    await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(h.admin + '/#/identity/feishu/groups');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await page.getByLabel('fixture/project-101', { exact: true }).check();

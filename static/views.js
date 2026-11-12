@@ -797,8 +797,9 @@ function projectListControls(row) {
     control.disabled = pending || !registered;
     control.title = !registered ? '请先启动项目' : !row.enabled ? '项目已禁用；此开关只保存配置，重新启用项目后才会生效' : row.installed === false ? '项目已移出安装范围；此开关只保存配置' : caption === '开发' ? 'Issue 明确要求改代码时自动开发；只修改 bot 自己的分支' : '检视这个项目的 Issue 和 PR';
   });
-  const featuresToShow = [...projectFeatures, ...(me.role === 'super_admin' ? [['board_enabled', '看板']] : [])];
+  const featuresToShow = tab === 'settings' ? [['board_enabled', '看板']] : projectFeatures;
   for (const [key, caption] of featuresToShow) {
+    if (tab !== 'settings') { features.append(badge(caption + (row[key] ? '已开启' : '已关闭'))); continue; }
     const control = button('', async () => {
       if (pending) return; pending = true; sync(); feedback.className = 'project-control-feedback';
       try {
@@ -842,7 +843,7 @@ async function refreshProjectActivity() {
     const {repositories} = await api(projectListAddress());
     if (request !== renderVersion || tab !== 'projects' || projectRoute()) return;
     const rows = new Map(repositories.map(row => [row.id, row]));
-    for (const line of document.querySelectorAll('#rows .project-list-row')) {
+    for (const line of document.querySelectorAll('#rows .project-list-row, .global-project-row')) {
       const row = rows.get(line.dataset.repositoryId); if (row) {
         updateProjectTaskPreview(line.querySelector('.project-task-preview'), row);
         line.querySelector('.project-controls')?.updateBoard?.(row, requestedAt);
@@ -1038,11 +1039,11 @@ function boardChip(row) {
   const published = row.board_enabled && row.board_state === 'published';
   const chip = integrationChip(!row.board_enabled ? '看板已关闭' : published ? '查看看板' : '看板采集中',
     !row.board_enabled ? 'info' : published ? 'success' : 'warning', published ? row.board_url : null,
-    row.board_enabled ? '看板数据公开可访问' : '开启仓库列表中的看板开关后对外提供');
+    row.board_enabled ? '看板数据公开可访问' : '在全局设置的项目管理中开启后对外提供');
   chip.dataset.boardStatus = ''; return chip;
 }
 function updateBoardChip(group, row) {
-  const current = group.closest('.project-list-row')?.querySelector('[data-board-status]');
+  const current = group.closest('.project-list-row, .global-project-row')?.querySelector('[data-board-status]');
   if (current) current.replaceWith(boardChip(row));
 }
 function installedIntegration(integration, row) {
@@ -1054,7 +1055,7 @@ function installedIntegration(integration, row) {
 // Gate checks and board publication refresh independently without redrawing the row.
 function updateIntegrationChips(integrations) {
   const byId = new Map(integrations.map(item => [item.repository_id, item]));
-  for (const line of document.querySelectorAll('#rows .project-list-row')) {
+  for (const line of document.querySelectorAll('#rows .project-list-row, .global-project-row')) {
     const integration = byId.get(line.dataset.repositoryId), chips = [...line.querySelectorAll('[data-integration]')];
     if (!integration || !chips.length) continue;
     chips[0].replaceWith(...installedIntegration(integration)); chips.slice(1).forEach(chip => chip.remove());

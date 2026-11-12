@@ -18,7 +18,7 @@ async function fixture() {
   return {h,admin,password,state,close:async()=>{await h.stop();rmSync(h.directory,{recursive:true,force:true});}};
 }
 async function login(page,f) {
-  await page.goto(f.h.admin+'/#/projects/101/machine');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);
+  await page.goto(f.h.admin+'/#/settings/computers/101');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);
   await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.locator('#machine-status')).toContainText('运行任务记录');
 }
 const card=(page,name)=>page.locator('#machine-status .side-card').filter({has:page.getByRole('heading',{name,exact:true})});

@@ -4,6 +4,7 @@ import { fail, fields, HttpError, randomId, text, type Json } from '../core/secu
 import { ChannelService } from './service.js';
 import { FEISHU_SCOPES, FeishuAdapter } from './feishu.js';
 import { applicationConsole, applicationOrganizations, applicationVisible, canAddApplication, canManageApplication, platformManager, tenantName } from './applications.js';
+import { ChannelConsole } from './console.js';
 
 const applicationForbidden = () => fail(403, 'channel_application_forbidden');
 
@@ -12,6 +13,14 @@ export class ChannelApi {
   async api(actor: ActorContext, method: string, url: URL, input: Json): Promise<Json> {
     const store = this.service.store, path = url.pathname;
     assertCurrent(actor);
+    const console = new ChannelConsole(this.service);
+    if (path === '/api/channels/conversations' && method === 'GET') return console.list(actor, Number(url.searchParams.get('offset') ?? 0));
+    const consoleChat = /^\/api\/channels\/chats\/([a-f0-9]{48})\/(timeline|tasks|turns\/([a-f0-9]{48}))$/.exec(path);
+    if (consoleChat && method === 'GET') {
+      if (consoleChat[2] === 'timeline') return console.timeline(actor, consoleChat[1]!, url);
+      if (consoleChat[2] === 'tasks') return console.tasks(actor, consoleChat[1]!, Number(url.searchParams.get('offset') ?? 0));
+      return console.events(actor, consoleChat[1]!, consoleChat[3]!, Number(url.searchParams.get('after') ?? 0));
+    }
     if (path === '/api/channels/employees' && method === 'GET') return this.service.employees.list(actor);
     if (path === '/api/channels/service-bindings' && method === 'GET') return this.service.serviceBindings.list(actor);
     const owner = /^\/api\/channels\/chats\/([a-f0-9]{48})\/service-binding\/owner$/.exec(path);
@@ -190,7 +199,7 @@ export class ChannelApi {
       return { id: identity.id, display_name: name };
     }
     if (path === '/api/channels/bindings' && method === 'GET') return {
-      bindings: store.all(`SELECT e.id,e.provider,e.connector,e.external_tenant,e.external_actor,e.display_name,e.status,e.verified_at,
+      bindings: store.all(`SELECT e.id,e.provider,e.connector,e.external_tenant,e.external_actor,e.display_name,e.status,e.verified_at,e.expires_at,
         c.app_name,c.tenant_name,c.enabled AS connection_enabled,
         CASE WHEN e.status='active' AND e.host='open.feishu.cn' AND c.enabled=1 AND e.external_tenant=c.installation_tenant THEN 1 ELSE 0 END AS can_read_name
         FROM external_identities e LEFT JOIN channel_connectors c ON c.id||':'||c.app_id=e.connector

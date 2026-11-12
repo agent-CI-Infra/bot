@@ -284,7 +284,7 @@ test('global settings change the wizard settings and shared models without a pro
   const submit = form => form.listeners.submit[0]({ preventDefault() {} }), view = page.run('confirmView');
   const confirm = async opening => { await settle(); await submit(view.querySelector('form')); await opening; };
   await page.run('renderSettings(renderVersion)');
-  assert.deepEqual(panel.querySelectorAll('nav a').map(node => [node.textContent, node.href]), [['常规', '#/settings/general'], ['接入向导', '#/settings/onboarding'], ['飞书连接', '#/settings/feishu'], ['公网接入', '#/settings/access'], ['机器人账号', '#/settings/accounts'], ['安装档案', '#/settings/installations'], ['模型', '#/settings/models'], ['服务角色', '#/settings/service-roles'], ['用户', '#/settings/users']]);
+  assert.deepEqual(panel.querySelectorAll('nav a').map(node => [node.textContent, node.href]), [['常规', '#/settings/general'], ['接入向导', '#/settings/onboarding'], ['飞书连接', '#/settings/feishu'], ['公网接入', '#/settings/access'], ['机器人账号', '#/settings/accounts'], ['安装档案', '#/settings/installations'], ['项目管理', '#/settings/projects'], ['项目电脑', '#/settings/computers'], ['外部执行', '#/settings/external'], ['模型', '#/settings/models'], ['服务角色', '#/settings/service-roles'], ['用户', '#/settings/users']]);
   assert.deepEqual(cards(), ['当前运行版本', '同时运行的任务', '虚拟电脑默认资源']);
   assert.equal(panel.querySelector('nav a[aria-current=page]').textContent, '常规');
   assert.match(text(section('当前运行版本')), /v9\.9\.9/);

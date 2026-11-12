@@ -145,7 +145,7 @@ test('identity and effective grants remain visible when optional provider and Fe
     await page.locator('.identity-provider').getByRole('button', { name: '重新加载', exact: true }).click();
     await page.locator('.identity-feishu').getByRole('button', { name: '重新加载', exact: true }).click();
     await expect(page.getByRole('button', { name: '绑定 GitHub 账号', exact: true })).toBeEnabled();
-    await expect(page.getByRole('heading', { name: '飞书身份绑定' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '飞书身份与绑定' })).toBeVisible();
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });

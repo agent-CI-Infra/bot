@@ -145,7 +145,7 @@ async function renderExternal(params,request){
   const [{clients},{settings}]=await Promise.all([api('/api/external/clients?'+params),api('/api/external/settings')]);
   if(request!==renderVersion)return;externalAudience=settings.token_audience||'';externalAudienceSource=settings.token_audience_source||null;
   $('count').textContent=clients.length+' 个客户端';const panel=$('external-panel');panel.replaceChildren();
-  const endpoint=externalGroup('签名证明的兑换地址',me.role==='super_admin'?button('设置兑换地址',()=>editor('设置兑换地址','填写客户端实际访问的 HTTPS /external/token 地址，作为签名证明的固定 audience。',[externalField('token_audience','兑换地址',externalAudience)],data=>api('/api/external/settings','PUT',data))):null);
+  const endpoint=externalGroup('签名证明的兑换地址',me.role==='super_admin'?consoleLink('#/settings/external','在全局设置中配置兑换地址'):null);
   endpoint.append(element('p',audienceCaption(),'muted'),externalPublicKeyGuide(clients));panel.append(endpoint);
   const projects=externalGroup('已配置外部客户端的项目');
   for(const id of [...new Set(clients.map(c=>c.repository_id))]){
@@ -155,7 +155,7 @@ async function renderExternal(params,request){
   if(!clients.length)projects.append(element('p','尚未配置外部客户端，请到项目设置 → 外部执行添加。','muted'));panel.append(projects);
   if(clients.length){
     const list=externalGroup('外部客户端');
-    for(const c of clients)list.append(externalRow(c.name,`${repositories.find(r=>r.id===c.repository_id)?.full_name||'仓库 '+c.repository_id} · ${c.auth_type==='private_key_jwt'?'公钥签名':'GitHub Actions OIDC'} · ID ${c.id}`,c.enabled?'已启用':'已停用',[externalClientLink(c),...(me.role==='super_admin'?[button('删除',()=>deleteExternalClient(c),'quiet destructive')]:[])]));
+    for(const c of clients)list.append(externalRow(c.name,`${repositories.find(r=>r.id===c.repository_id)?.full_name||'仓库 '+c.repository_id} · ${c.auth_type==='private_key_jwt'?'公钥签名':'GitHub Actions OIDC'} · ID ${c.id}`,c.enabled?'已启用':'已停用',[externalClientLink(c)]));
     panel.append(list);
   }
 }

@@ -5,7 +5,7 @@ let grants = { assignments: [], organization_assignments: [], organizations: [] 
 const titles = { projects: '项目', board: '看板', costs: '统计', events: 'Webhook 投递', management: '管理对话', design: '设计系统样例', 'new-task': '新建任务' };
 // Every page has an address, so a reload or a shared link opens the same page. Accounts and users live in global settings.
 const tabAddresses = { projects: '#/projects', board: '#/board', costs: '#/costs', events: '#/events',
-  more: '#/more', inbox: '#/inbox', external: '#/external', settings: '#/settings', identity: '#/identity', management: '#/management', 'new-task': '#/new-task' }, superTabs = ['settings'];
+  preferences: '#/preferences', conversations: '#/conversations', more: '#/more', inbox: '#/inbox', external: '#/external', settings: '#/settings', identity: '#/identity', management: '#/management', 'new-task': '#/new-task' }, superTabs = ['settings'];
 const retryableStates = ['paused', 'failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'waiting_pr_head', 'retry_wait', 'needs_replan'];
 let messagePage = null;
 async function api(path, method = 'GET', body, { signal } = {}) {
@@ -113,7 +113,7 @@ function deliveryDetail(value){
   if(deliveryIgnoreReasons[event.processing_result])rows.push(['说明',deliveryIgnoreReasons[event.processing_result]]);
   // response.review_outcome is computed before the Manager decides whether to create a task, so it can contradict the
   // row that did create one (a task is created for an event whose review_outcome still says not_trigger). It never adds
-  // anything the archive outcome above does not already say, so it stays out of the page rather than being explained. 
+  // anything the archive outcome above does not already say, so it stays out of the page rather than being explained.
   processing.append(element('h3','处理'), facts(rows));
   // The created task is the point of the row, so its name opens the task instead of printing a dead label (#357).
   if((event.tasks||[]).length){ const tasks=element('ul','','delivery-tasks');
@@ -214,7 +214,7 @@ async function start() {
 const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['projects','events','external'];
 // Console pages are drawn by static/shell.js (renderConsolePage). They are not tabs of the generic list, and no list
 // read may ever build /api/<tab> from them: #/more would become GET /api/more, an endpoint that does not exist (#365).
-const consoleTabs = ['more', 'inbox', 'new-task'];
+const consoleTabs = ['more', 'inbox', 'new-task', 'preferences', 'conversations'];
 // Wizard steps live inside global settings; old top-level addresses are normalized by route().
 const onboardingAddress = /^#\/settings\/onboarding(?:\/([0-6]))?$/;
 const legacyOnboardingAddress = /^#onboarding(?:\/(\d+))?$/;
@@ -253,6 +253,9 @@ async function route() {
   const resolved = next;
   if (next !== tab) offset = 0; tab = next;
   const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
+  // Global and project computer views reuse DOM ids; discard the inactive view and its scheduled reads.
+  if (!target && typeof leaveProjectPage === 'function') leaveProjectPage();
+  if (tab !== 'settings') $('settings-panel').replaceChildren();
   const address=tab+':'+location.hash;if(messagePage!==address){notice('message');messagePage=address;}
   const consolePage = consoleTabs.includes(tab);
   const sample = !target && tab === 'design', samplePage = $('design-page');
@@ -316,8 +319,8 @@ async function render(quiet = false) {
   if(tab==='external'){params.delete('account_id');params.delete('owner_id');try{await renderExternal(params,request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if (taskTab) params.set('kind', taskKinds[tab]);
   // Super administrators see every installed repository; project administrators see their registered ones.
-  const installedView = tab === 'projects' && me.role === 'super_admin'; $('sync').hidden = !installedView;
-  $('hidden-filter-label').hidden = !installedView;
+  const installedView = tab === 'projects' && me.role === 'super_admin'; $('sync').hidden = true;
+  $('hidden-filter-label').hidden = true;
   // The 已隐藏 filter swaps the list for the rows an administrator removed from it; each one can be restored.
   const hiddenView = installedView && $('hidden-filter').checked;
   // Gate / dashboard connection status (cached; refreshed on demand).
@@ -373,7 +376,7 @@ async function render(quiet = false) {
     if(tab==='projects'&&!hiddenView){line.classList.add('project-list-row');line.dataset.repositoryId=row.id;status.classList.add('project-overview');status.append(projectListControls(row));}
     if(taskTab&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
     if(status.childElementCount)line.append(status);
-    if(installedView){const actions=hiddenView?element('div','','actions'):installedActions(row,()=>start());
+    if(installedView){const actions=element('div','','actions'); actions.append(consoleLink('#/settings/projects/' + row.id, '全局设置')); actions.append(button('设置',()=>openProject(row.id)));
       if(hiddenView)actions.append(button('恢复',()=>restoreInstalled(row,()=>start()).catch(error),'quiet'));
       if(actions.childElementCount)line.append(actions);}
     else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id)));line.append(actions);}

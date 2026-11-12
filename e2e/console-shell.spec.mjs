@@ -36,7 +36,7 @@ test('shared desktop rail and mobile navigation expose real destinations across 
     await page.getByLabel('当前页面',{exact:true}).selectOption('#/projects/101/knowledge');
     await expect(page).toHaveURL(/#\/projects\/101\/knowledge$/);
     await page.locator('#console-mobile-nav').getByRole('link',{name:'更多',exact:true}).click();
-    await expect(page.locator('.console-group').filter({has:page.getByRole('heading',{name:'fixture/project-101',exact:true})})).toContainText('机器配置');
+    await expect(page.locator('.console-group').filter({has:page.getByRole('heading',{name:'设置',exact:true})})).toContainText('机器配置');
     await expect(page.getByRole('link',{name:'公网接入',exact:false})).toBeVisible();
     expect(errors).toEqual([]);
   } finally {await h.stop();}
@@ -72,7 +72,7 @@ test('permissions, in-flight navigation, keyboard and history keep their boundar
     const {admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');
     const password=testPassword();await admin('/api/users','POST',{username:'member-shell',password,repository_ids:['101']});
     await page.setViewportSize({width:390,height:844});await login(page,h,password,'member-shell','#/more');
-    await expect(page.getByRole('heading',{name:'平台管理',exact:true})).toHaveCount(0);
+    await expect(page.getByRole('heading',{name:'全局设置',exact:true})).toHaveCount(0);
     await expect(page.getByRole('link',{name:'飞书连接',exact:false})).toHaveCount(0);
     expect(await page.locator('#console-project option').allTextContents()).not.toContain('202');
     await page.goto(h.admin+'/#/settings/users');await expect(page.locator('#settings-panel')).toBeHidden();

@@ -433,7 +433,7 @@ test('an older audit with foreign keys is rebuilt without them and keeps its rec
   assert.deepEqual(store.all('SELECT user_id,action FROM audit').map(row => ({ ...row })), [{ user_id: 'u', action: 'system.initialized' }]);
 });
 
-test('the project list marks reduced permissions, refreshes stale ones in place once, and offers deletion on every project row', async () => {
+test('the project list marks reduced permissions, refreshes stale ones once, and links to global project administration', async () => {
   const gap = [{ kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_failures'] }];
   const event = (name, features) => ({ kind: 'event', name, features });
   const row = (id, extra) => ({ id, full_name: 'fixture/project-' + id, owner_id: '10', owner_login: 'fixture', installed: true, registered: true, enabled: true, review_enabled: true,
@@ -470,7 +470,10 @@ test('the project list marks reduced permissions, refreshes stale ones in place 
   assert.equal(facts[2], 'Actions 失败分析在读取运行之前停止：不分类、不重跑、不提报 Issue。涉及：Actions 失败分析（未开启）。');
   view.close();
   assert.ok(removed.querySelectorAll('.status').some(chip => chip.textContent === '已移出安装'));
-  assert.ok(actions(removed).includes('删除')); assert.ok(actions(first).includes('删除')); assert.ok(actions(third).includes('删除'));
+  for (const line of [removed, first, third]) {
+    assert.ok(!actions(line).includes('删除'));
+    assert.ok(line.querySelectorAll('a').some(link => link.href.startsWith('#/settings/projects/')));
+  }
   await settle();
   // One background check; the badges changed on the rows already drawn, which stayed on the list.
   assert.deepEqual(page.requests, ['GET /api/integrations', 'GET /api/installations?offset=0&limit=50', 'POST /api/installations/permissions/check']);
@@ -492,7 +495,7 @@ test('the project list marks reduced permissions, refreshes stale ones in place 
   assert.deepEqual(page.requests, ['GET /api/integrations', 'GET /api/installations?offset=0&limit=50']);
 });
 
-test('deletions confirm in the console dialog, which shows the check and a refusal in place instead of a browser popup', async () => {
+test('global project deletions confirm in the console dialog, which shows the check and a refusal in place instead of a browser popup', async () => {
   let answer = [409, { error: 'repository_still_accessible' }];
   const listing = [{ id: '202', full_name: 'fixture/project-202', owner_id: '10', installed: false, registered: true, enabled: false, review_enabled: false,
     development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0, permission_missing: null, permissions_stale: false }];
@@ -504,7 +507,7 @@ test('deletions confirm in the console dialog, which shows the check and a refus
   });
   // A browser popup would fail here: the page has no confirm() or prompt().
   page.run("var startCalls = 0; start = async () => { startCalls++; }; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
-  await page.run('render()');
+  page.run(`tab = 'settings'; var actionRow = element('div', '', 'row'); actionRow.append(installedActions(${JSON.stringify(listing[0])}, () => start())); $('rows').replaceChildren(actionRow);`);
   const view = page.run('confirmView'), settle = () => new Promise(r => setTimeout(r, 20)), deletes = () => page.requests.filter(r => r.startsWith('DELETE')).length;
   const remove = () => page.$('rows').querySelector('.row').querySelectorAll('button').find(b => b.textContent === '删除').listeners.click[0]();
   const buttons = () => view.querySelectorAll('.confirm-actions button'), submit = () => view.querySelector('form').listeners.submit[0]({ preventDefault() {} });
@@ -530,7 +533,7 @@ test('deletions confirm in the console dialog, which shows the check and a refus
   assert.equal(deletes(), 2);
 });
 
-test('a started project row removes the project from this system, never GitHub, from the console dialog', async () => {
+test('global project actions remove a started project from this system, never GitHub, from the console dialog', async () => {
   const listing = [{ id: '101', full_name: 'fixture/project-101', owner_id: '10', installed: true, registered: true, enabled: true, review_enabled: true,
     development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0, permission_missing: [], permissions_stale: false }];
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
@@ -540,7 +543,7 @@ test('a started project row removes the project from this system, never GitHub, 
     return [404, { error: 'not_found' }];
   });
   page.run("var startCalls = 0; start = async () => { startCalls++; }; var projectRoute = () => null; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
-  await page.run('render()');
+  page.run(`tab = 'settings'; var actionRow = element('div', '', 'row'); actionRow.append(installedActions(${JSON.stringify(listing[0])}, () => start())); $('rows').replaceChildren(actionRow);`);
   const view = page.run('confirmView'), settle = () => new Promise(r => setTimeout(r, 20));
   const texts = selector => view.querySelectorAll(selector).map(node => node.textContent);
   const remove = page.$('rows').querySelector('.row').querySelectorAll('button').find(button => button.textContent === '删除');

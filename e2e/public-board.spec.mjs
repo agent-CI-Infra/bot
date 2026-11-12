@@ -40,11 +40,11 @@ test('repository list switches replace legacy board execution and control public
     f.state.private = true; f.h.store.run('UPDATE installed_repositories SET private=1');
     f.h.store.run(`INSERT INTO installed_repositories(account_id,repository_id,full_name,owner_id,owner_login,private,installed,synced_at)
       VALUES(?,'202','octo/public-project','10','octo',0,1,?)`, f.owner.id, new Date().toISOString());
-    await page.goto(f.h.admin);
+    await page.goto(f.h.admin + '/#/settings/projects');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    const row = id => page.locator(`#rows [data-repository-id="${id}"]`);
+    const row = id => page.locator(`.global-project-row[data-repository-id="${id}"]`);
     const privateSwitch = row('101').getByRole('switch', { name: 'octo/hello 看板', exact: true });
     const publicSwitch = row('202').getByRole('switch', { name: 'octo/public-project 看板', exact: true });
     await expect(privateSwitch).toHaveAttribute('aria-checked', 'false');
@@ -81,7 +81,7 @@ test('repository list switches replace legacy board execution and control public
     await publicSwitch.click(); await dialog.getByRole('button', {name: '关闭公开看板', exact: true}).click(); await expect(publicSwitch).toHaveAttribute('aria-checked', 'false');
     await privateSwitch.click(); await dialog.getByRole('button', {name: '开启公开看板', exact: true}).click(); await expect(privateSwitch).toHaveAttribute('aria-checked', 'true');
     await expect(row('101').getByRole('status')).toHaveText('看板已开启；数据公开可访问');
-    await f.boards.drain();
+    await f.boards.drain(); await page.reload();
     await expect(row('101').getByRole('link', { name: '查看看板', exact: true })).toBeVisible({ timeout: 10000 });
     expect((await f.get('/boards/octo/hello/data/snapshot.json')).status).toBe(200);
     await page.reload(); await expect(privateSwitch).toHaveAttribute('aria-checked', 'true'); await expect(publicSwitch).toHaveAttribute('aria-checked', 'false');
@@ -109,7 +109,7 @@ test('a public-board choice cannot write after leaving the page that opened it',
   const cleanup = [], f = await publicBoardFixture({ after: fn => cleanup.push(fn) });
   try {
     f.state.private = true; f.h.store.run('UPDATE installed_repositories SET private=1');
-    await page.goto(f.h.admin + '/#/projects');
+    await page.goto(f.h.admin + '/#/settings/projects');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     let writes = 0; page.on('request', request => { if (request.method() === 'PATCH' && request.url().endsWith('/api/installations/101/board')) writes++; });

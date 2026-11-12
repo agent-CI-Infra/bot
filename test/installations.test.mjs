@@ -438,7 +438,7 @@ test('an installed but never started repository is hidden from the list, survive
   assert.deepEqual(requests, []);
 });
 
-test('every repository row offers 删除 and an installed but never started row hides through the new endpoint', async () => {
+test('global project actions offer deletion and an installed but never started project hides through its endpoint', async () => {
   const row = (id, extra) => ({ id, full_name: 'fixture/project-' + id, owner_id: '10', installed: true, registered: false, enabled: false,
     review_enabled: false, development_enabled: false, model_id: null, running_tasks: 0, queued_tasks: 0, permission_missing: [], permissions_stale: false, ...extra });
   const listing = [row('101'), row('202', { installed: false, registered: true }), row('303', { registered: true, enabled: true, review_enabled: true, model_id: 'm' })];
@@ -453,6 +453,8 @@ test('every repository row offers 删除 and an installed but never started row 
   });
   page.run("var startCalls = 0; start = async () => { startCalls++; }; var projectRoute = () => null; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
   await page.run('render()');
+  assert.ok(page.$('rows').querySelectorAll('.row').every(line => !line.querySelectorAll('button').some(button => button.textContent === '删除')));
+  page.run(`tab = 'settings'; $('rows').replaceChildren(...${JSON.stringify(listing)}.map(project => { const line = element('div', '', 'row'); line.append(installedActions(project, () => start())); return line; }));`);
   const rows = page.$('rows').querySelectorAll('.row'), actions = line => line.querySelectorAll('button').map(button => button.textContent);
   assert.deepEqual(rows.map(actions).map(names => names.includes('删除')), [true, true, true]);
   const view = page.run('confirmView'), settle = () => new Promise(r => setTimeout(r, 20));
@@ -465,12 +467,8 @@ test('every repository row offers 删除 and an installed but never started row 
   assert.equal(view.open, false);
   assert.ok(page.requests.includes('DELETE /api/installations/101'));
   assert.equal(page.run('startCalls'), 1);
-  // The 已隐藏 filter lists hidden rows and offers 恢复; restoring calls the restore endpoint.
-  page.$('hidden-filter').checked = true; page.requests.length = 0; await page.run('render()');
-  const [hiddenLine] = page.$('rows').querySelectorAll('.row');
-  assert.deepEqual(page.requests, ['GET /api/installations/hidden?offset=0&limit=50']);
-  assert.deepEqual(actions(hiddenLine), ['恢复']);
-  hiddenLine.querySelectorAll('button')[0].listeners.click[0](); await settle();
-  assert.ok(page.requests.includes('POST /api/installations/404/restore'));
+  // The global hidden-project page uses the same authenticated restore handler.
+  page.requests.length = 0; await page.run(`restoreInstalled(${JSON.stringify(hiddenRow)}, () => start())`);
+  assert.deepEqual(page.requests, ['POST /api/installations/404/restore']);
   assert.equal(page.run('startCalls'), 2);
 });

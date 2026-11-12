@@ -43,6 +43,7 @@ export function ledgerStorage(store: Store): void {
 export interface MessageQuery {
   message_id?: string; sender_id?: string; reply_to?: string; thread_id?: string;
   from?: number; to?: number; keyword?: string; cursor?: string; limit?: number;
+  direction?: 'older';
 }
 const sensitive = (message: StoredMessage): boolean =>
   /(?:^|\s)(?:\/bind|\/confirm|\/reauth|确认绑定|绑定|重新认证)(?:\s|$)/i.test(message.content) ||
@@ -202,6 +203,7 @@ export class ChannelLedger {
       }
       if(this.store.hasTable('channel_service_turns'))
         this.store.run("UPDATE channel_service_turns SET reply=NULL,updated_at=CASE WHEN state='running' THEN ? ELSE updated_at END,state=CASE WHEN state='running' THEN 'interrupted' ELSE state END,error=CASE WHEN state='running' THEN 'conversation_history_cleaned' ELSE error END WHERE chat_id=?",Date.now(),id);
+      if(this.store.hasTable('channel_service_events')) this.store.run('DELETE FROM channel_service_events WHERE turn_id IN (SELECT id FROM channel_service_turns WHERE chat_id=?)', id);
       if(this.store.hasTable('role_conversation_turns')){
         this.store.run("UPDATE role_conversation_turns SET reply=NULL,updated_at=CASE WHEN state='running' THEN ? ELSE updated_at END,state=CASE WHEN state='running' THEN 'interrupted' ELSE state END,error=CASE WHEN state='running' THEN 'conversation_history_cleaned' ELSE error END WHERE conversation_id=?",Date.now(),id);
         this.store.run('DELETE FROM role_conversation_events WHERE turn_id IN (SELECT id FROM role_conversation_turns WHERE conversation_id=?)',id);
@@ -239,7 +241,9 @@ export class ChannelLedger {
     const diagnostics = this.diagnostics(id), limit = query.limit ?? 50;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || [query.from, query.to].some(v => v !== undefined && (!Number.isSafeInteger(v) || v < 0)) ||
       query.keyword !== undefined && (typeof query.keyword !== 'string' || query.keyword.length > 200) || query.from !== undefined && query.to !== undefined && query.from > query.to) fail(400, 'invalid_pagination');
-    let after = -1, afterId = '';
+    if (query.direction !== undefined && query.direction !== 'older') fail(400, 'invalid_pagination');
+    const descending = query.direction === 'older', comparison = descending ? '<' : '>', order = descending ? 'DESC' : 'ASC';
+    let after = descending ? Number.MAX_SAFE_INTEGER : -1, afterId = '';
     if (query.cursor) {
       try {
         const cursor = JSON.parse(Buffer.from(query.cursor, 'base64url').toString());
@@ -258,7 +262,7 @@ export class ChannelLedger {
     // Sealed text is searched in bounded batches; plaintext is never duplicated into a SQL index.
     while (messages.length <= limit) {
       const batch = this.store.all(`SELECT * FROM channel_messages WHERE ${conditions.join(' AND ')}${visible.sql} AND
-        (created_at>? OR (created_at=? AND message_id>?)) ORDER BY created_at,message_id LIMIT 200`, ...args,...visible.args, scanTime, scanTime, scanId);
+        (created_at${comparison}? OR (created_at=? AND message_id${comparison}?)) ORDER BY created_at ${order},message_id ${order} LIMIT 200`, ...args,...visible.args, scanTime, scanTime, scanId);
       if (!batch.length) { exhausted = true; break; }
       for (const row of batch) {
         scanTime = row.created_at; scanId = row.message_id;

@@ -1,0 +1,42 @@
+.channel-console-layout { display: grid; grid-template-columns: minmax(200px, 250px) minmax(0, 1fr) minmax(210px, 280px); gap: var(--space-5); align-items: start; }
+.channel-chat-list, .channel-thread, .channel-related { min-width: 0; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: var(--space-5); }
+.channel-console :is(h2,h3) { margin: 0 0 var(--space-4); }
+.channel-console h2 { font-size: var(--font-size-3); }
+.channel-console h3 { font-size: var(--font-size-2); }
+.channel-console :is(label,p,small) { font-size: var(--font-size-2); }
+.channel-chat-list label { margin-bottom: var(--space-4); }
+.channel-chat-choice { margin-bottom: var(--space-2); border: 1px solid transparent; }
+.channel-chat-choice[aria-current=page] { background: var(--color-brand-weak); border-color: var(--color-brand); }
+.channel-thread-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-4); border-bottom: 1px solid var(--color-border); margin-bottom: var(--space-4); }
+.channel-thread-head .actions { align-items: center; }
+.channel-thread-head .check { margin: 0; }
+.channel-messages { height: min(64vh, 820px); min-height: 320px; overflow-y: auto; padding: var(--space-4); background: var(--color-surface-alt); border-radius: var(--radius-3); overscroll-behavior: contain; }
+.channel-message { max-width: 88%; margin: var(--space-5) 0; padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface); }
+.channel-message-bot { margin-left: auto; background: var(--color-brand-weak); }
+.channel-message-meta { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-3); font-size: var(--font-size-1); color: var(--color-text-muted); }
+.channel-message-body { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; font-size: var(--font-size-2); }
+.channel-run { margin: var(--space-5) 0; padding: var(--space-4); border-left: 3px solid var(--color-brand); background: var(--color-surface); border-radius: var(--radius-3); }
+.channel-run .heading { gap: var(--space-3); flex-wrap: wrap; font-size: var(--font-size-1); }
+.channel-console summary { cursor: pointer; padding: var(--space-4) 0; min-height: var(--control-min); }
+.channel-step { border-left: 1px solid var(--color-border); padding-left: var(--space-4); color: var(--color-text-muted); }
+.channel-history-actions { margin-bottom: var(--space-4); }
+.channel-related-task { padding: var(--space-4) 0; border-bottom: 1px solid var(--color-border); }
+.channel-related-task > strong { display: block; margin-bottom: var(--space-3); }
+.channel-related section { margin-top: var(--space-6); }
+.feishu-metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: var(--space-4); margin: var(--space-5) 0; }
+.feishu-metric { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-5); background: var(--color-surface-alt); border: 1px solid var(--color-border); border-radius: var(--radius-card); min-width: 0; }
+.feishu-metric strong { font-size: var(--font-size-5); }
+.feishu-metric small { color: var(--color-text-muted); }
+.feishu-summary-row { padding: var(--space-4) 0; border-bottom: 1px solid var(--color-border); }
+#tabs [data-tab=preferences] { margin-top: var(--space-5); border-top: 1px solid var(--color-border); }
+@media (max-width: 1279px) { .channel-console-layout { grid-template-columns: 210px minmax(0,1fr); } .channel-related { grid-column: 2; } }
+@media (max-width: 767px) {
+  .channel-console-layout { grid-template-columns: minmax(0,1fr); }
+  .channel-related { grid-column: 1; }
+  .channel-chooser > div { max-height: 200px; overflow-y: auto; }
+  .channel-messages { height: 65vh; padding: var(--space-3); }
+  .channel-message { max-width: 96%; }
+  .feishu-metrics { grid-template-columns: minmax(0,1fr); }
+  .feishu-metric { display: grid; grid-template-columns: minmax(0,1fr) auto; padding: var(--space-4); }
+  .feishu-metric small { grid-column: 1 / -1; }
+}

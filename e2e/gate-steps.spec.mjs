@@ -3,8 +3,8 @@ import { mkdirSync } from 'node:fs';
 import { gateFixture, writes, branchOf } from '../test/gate-onboarding-fixtures.mjs';
 const button=(dialog,name)=>dialog.getByRole('button',{name,exact:true});
 async function open(page,f){
-  f.state.repos['octo/hello'].queue='ruleset';await page.goto(f.h.admin);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);await page.getByRole('button',{name:'登录',exact:true}).click();
-  await page.locator('#rows [data-repository-id="101"]').getByRole('button',{name:'接入门禁',exact:true}).click();return page.locator('#quickstart-view');
+  f.state.repos['octo/hello'].queue='ruleset';await page.goto(f.h.admin + '/#/settings/projects');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);await page.getByRole('button',{name:'登录',exact:true}).click();
+  await page.locator('.global-project-row[data-repository-id="101"]').getByRole('button',{name:'接入门禁',exact:true}).click();return page.locator('#quickstart-view');
 }
 async function ready(page,f){
   const dialog=await open(page,f);await button(dialog,'开始适配').click();
@@ -49,7 +49,7 @@ test('a message returning after close and resume cannot reset the new composer o
     const dialog=await ready(page,f),gate=new Promise(resolve=>{release=resolve;});let entered;const seen=new Promise(resolve=>{entered=resolve;});
     await page.route('**/api/gate-onboarding/*/messages',async route=>{const response=await route.fetch();entered();await gate;await route.fulfill({response});});
     await dialog.getByLabel('发给 agent',{exact:true}).fill('old submitted message');await button(dialog,'发送').click();await seen;await button(dialog,'关闭').click();
-    await page.locator('#rows [data-repository-id="101"]').getByRole('button',{name:'接入门禁',exact:true}).click();await button(dialog,'继续上次的对话').click();await turn(f);await expect(dialog.getByLabel('发给 agent',{exact:true})).toBeVisible();await dialog.getByLabel('发给 agent',{exact:true}).fill('keep this new unsent message');
+    await page.locator('.global-project-row[data-repository-id="101"]').getByRole('button',{name:'接入门禁',exact:true}).click();await button(dialog,'继续上次的对话').click();await turn(f);await expect(dialog.getByLabel('发给 agent',{exact:true})).toBeVisible();await dialog.getByLabel('发给 agent',{exact:true}).fill('keep this new unsent message');
     const finished=page.waitForEvent('requestfinished',request=>request.url().endsWith('/messages'));release();await finished;await page.evaluate(()=>new Promise(requestAnimationFrame));await expect(dialog.getByLabel('发给 agent',{exact:true})).toHaveValue('keep this new unsent message');expect(writes(f.state)).toEqual([]);
   }finally{release?.();for(const close of cleanup.reverse())await close();}
 });

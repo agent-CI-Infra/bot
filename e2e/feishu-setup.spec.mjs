@@ -276,7 +276,7 @@ test('the trial step sends group scope to the group assistant binding instead of
     await expect(page.getByRole('heading', { name: '连接健康与收发记录' })).toBeVisible();
     await expect(page.getByRole('button', { name: '批准或更新群范围' })).toHaveCount(0);
     await expect(page.getByLabel('群 chat_id')).toHaveCount(0);
-    await expect(page.getByText('在「身份与权限 → 飞书群聊助手」为该群选择服务角色和项目范围', { exact: false })).toBeVisible();
+    await expect(page.getByText('在「设置 → 群助手设置」为该群选择服务角色和项目范围', { exact: false })).toBeVisible();
     expect((await f.admin('/api/channels/connectors/' + id + '/groups')).status).toBe(404);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });

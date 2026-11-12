@@ -1,3 +1,4 @@
+import { consoleNavigate } from './console-navigation.mjs';
 import { test,expect } from '@playwright/test';
 import { mkdirSync,rmSync,writeFileSync } from 'node:fs';
 import { managementFixture,query,settled } from '../test/management-fixture.mjs';
@@ -99,7 +100,8 @@ test('global management chat keeps drafts and a running conversation across navi
     const message = page.getByLabel('管理消息', { exact: true }); await message.fill('任务为什么没有继续？');
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
     await launcher.click(); await expect(message).toHaveValue('任务为什么没有继续？');
-    await page.locator('#tabs').getByRole('button', { name: '身份与权限', exact: true }).click();
+    await consoleNavigate(page, '设置');
+    await page.locator('#console-page a[href="#/identity"]').click();
     await expect(page).toHaveURL(/#\/identity$/); await expect(message).toHaveValue('任务为什么没有继续？');
     f.modelState.gate = new Promise(resolve => { release = resolve; });
     await page.getByRole('button', { name: '发送', exact: true }).click();
@@ -284,7 +286,7 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click();
     await expect(page).toHaveURL(/#\/projects$/); expect(Math.abs((await chat.boundingBox()).width - resized.width)).toBeLessThan(2);
     await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click();
-    await page.locator('#tabs').getByRole('button', { name: '身份与权限', exact: true }).click();
+    await consoleNavigate(page, '身份与权限');
     await expect(chat).toBeHidden(); await launcher.click(); await expect(message).toHaveValue('保留这条尚未发送的草稿');
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
     expect(f.h.store.get("SELECT count(*) n FROM management_conversations WHERE scope='project:101'").n).toBe(1);

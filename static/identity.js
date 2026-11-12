@@ -47,7 +47,7 @@ async function renderIdentity() {
     $('count').textContent = '';
     const navigation = element('nav', '', 'actions'); navigation.setAttribute('aria-label', '飞书个人设置');
     navigation.append(channelLink('#/identity', '身份与权限', 'button-link quiet'), channelLink('#/identity/feishu', '个人飞书绑定', 'button-link quiet'),
-      channelLink('#/identity/feishu/groups', '我维护的群助手', 'button-link quiet'), channelLink('#/identity/feishu/conversations', '我的私信会话', 'button-link quiet'));
+      channelLink('#/identity/feishu/groups', '群助手设置', 'button-link quiet'), channelLink('#/conversations', '飞书会话', 'button-link quiet'), channelLink('#/preferences', '返回设置', 'button-link quiet'));
     panel.replaceChildren(navigation, consoleState('正在读取飞书设置', '正在核对本人的绑定或获准管理的会话。'));
     const load = async () => {
       try {
@@ -138,7 +138,6 @@ async function renderIdentity() {
   const feishuSlot = element('div', '', 'identity-feishu');
   feishuSlot.append(consoleState('正在读取飞书绑定', 'GitHub 身份与管理权限已独立展示。'));
   const layout = element('div', '', 'identity-layout'); layout.append(overview, selection, identities, permissions, feishuSlot); panel.replaceChildren(layout);
-  const collaboration = element('div', '', 'identity-feishu'); layout.append(collaboration);
   const loadProvider = async () => {
     try {
       const { enabled } = await api('/api/auth/github/status'); if (!current()) return;
@@ -147,14 +146,10 @@ async function renderIdentity() {
     } catch (err) { if (current()) provider.replaceChildren(consoleState('GitHub 登录状态读取失败', err.message, { tone: 'error', retry: () => loadProvider() })); }
   };
   const loadFeishu = async () => {
-    try { const feishu = await feishuIdentityCard(); if (!current()) return; feishuSlot.replaceChildren(feishu); if (location.hash.startsWith('#/identity/feishu')) feishu.scrollIntoView({ block: 'start' }); }
+    try { const data = await api('/api/channels/bindings'), feishu = card('飞书身份与绑定'); feishu.append(await channelBindingOverview(data)); if (!current()) return; feishuSlot.replaceChildren(feishu); }
     catch (err) { if (current()) feishuSlot.replaceChildren(consoleState('飞书绑定读取失败', err.message, { tone: 'error', retry: () => loadFeishu() })); }
   };
-  const loadCollaboration = async () => {
-    try { const content = await Promise.all([channelServiceBindingSettings(), channelPersonalChats()]); if (current()) collaboration.replaceChildren(...content); }
-    catch (err) { if (current()) collaboration.replaceChildren(consoleState('飞书会话读取失败', err.message, { tone: 'error', retry: loadCollaboration })); }
-  };
-  const loading = [loadProvider(), loadFeishu(), loadCollaboration()];
+  const loading = [loadProvider(), loadFeishu()];
   if (data.actor.tenant_id && data.scopes.some(g => g.state === 'active' && (g.scope === 'platform' || g.scope === 'tenant' && g.tenant_id === data.actor.tenant_id))) {
     const members = card('组织成员授权'); layout.append(members);
     const loadMembers = async () => {

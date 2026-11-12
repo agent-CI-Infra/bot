@@ -1,6 +1,6 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['overview', '项目总览'], ['basic', '基本设置'], ['management', '管理对话'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['release', '发版本'], ['schedules', '计划与通知'], ['knowledge', '项目知识'], ['external', '外部执行'], ['members', '成员'], ['activity', '运行状态']];
+const projectSections = [['overview', '项目总览'], ['management', '管理对话'], ['release', '发版本'], ['knowledge', '项目知识'], ['activity', '运行状态'], ['basic', '基本设置'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['schedules', '计划与通知'], ['external', '外部执行'], ['members', '成员']];
 // Older addresses open the Manager page: the workflows page it replaced, the task overview and the review, development and rule pages.
 const legacyProjectSections = { workflows: 'manager-prompt', tasks: '', review: '', development: '', rules: 'rule-sources' };
 // Every file has the same three layers: built-in default, project console override, default-branch repository file.
@@ -113,6 +113,7 @@ function settingsForm(title, nodes, save, { editable = true, caption = '保存',
 }
 
 let current = null, projectTimer = null, renderToken = 0;
+function leaveProjectPage() { clearTimeout(projectTimer); renderToken++; $('project-page').replaceChildren(); }
 // Loads the project once per visit and re-renders the active section; status cards refresh on their own.
 async function renderProject(route) {
   if (route.section === 'notes') { route = { ...route, section: 'knowledge' }; history.replaceState(null, '', `#/projects/${route.id}/knowledge`); }
@@ -122,7 +123,7 @@ async function renderProject(route) {
     history.replaceState(null, '', `#/projects/${route.id}/roles`);
   }
   const token = ++renderToken, page = $('project-page'); clearTimeout(projectTimer);
-  if (current?.id !== route.id) { current = { id: route.id }; page.replaceChildren(element('p', '正在加载…', 'muted')); }
+  if (current?.id !== route.id || current.globalSettings) { current = { id: route.id }; page.replaceChildren(element('p', '正在加载…', 'muted')); }
   if (legacyFocus) current.focusAnchor = legacyFocus;
   try { await loadProject(route.id,route.section); } catch (err) { if (token === renderToken) { if ([401,403].includes(err.status)) { if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles(); if (current?.id === route.id) current.rolesDraft = null; } page.replaceChildren(element('p', err.message, 'view-error')); } return; }
   if (token !== renderToken) return;
@@ -152,9 +153,10 @@ async function loadProject(id,section=current.section) {
     models:(models?.models||[]).filter(model=>model.repository_id===null||model.repository_id===id) });
 }
 async function reloadProject() {
-  const target = current, route = { id: target.id, section: target.section, item: target.item };
+  const target = current, address = { id: target.id, section: target.section, item: target.item };
+  if (target.globalSettings) return route();
   await loadProject(target.id, target.section);
-  if (current === target && projectRoute()?.id === route.id && projectRoute()?.section === route.section) return renderProject(route);
+  if (current === target && projectRoute()?.id === address.id && projectRoute()?.section === address.section) return renderProject(address);
 }
 // Reloads the project with the outcome of an action shown at the top of the section.
 async function reloadWith(notice) { if (notice) current.flash = notice; await reloadProject(); }
@@ -194,6 +196,7 @@ function projectBody(section) {
   const body = element('div', '', 'project-body'), nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content');
   nav.setAttribute('aria-label', '项目设置类别');
   for (const [key, caption, superOnly] of projectSections) {
+    if (key === 'overview' || key === 'basic') nav.append(element('p', key === 'overview' ? '项目工作' : '设置', 'console-nav-label'));
     if (superOnly && me.role !== 'super_admin') continue;
     const item = element('a', caption); item.href = `#/projects/${current.id}/${key}`; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item);
     if (key === 'management') { const project = current.id; item.addEventListener('click', event => { event.preventDefault(); void openManagementChat(project).catch(error); }); }
@@ -266,6 +269,13 @@ function basicSection() {
     sources.append(facts([['规则', file.path], ['当前来源', layerNames[file.source] || file.source]]));
   }
   sources.append(consoleLink(`#/projects/${id}/roles/manager`, '查看与修改规则', '保留现有的来源比较和版本检查'));
+  const layout = element('div', '', 'project-settings-layout'); layout.append(info, summary, branch, automation, sources);
+  if (me.role === 'super_admin') layout.append(consoleLink(`#/settings/projects/${id}`, '在全局设置中管理项目', '项目启停、删除和公开看板'));
+  return [layout];
+}
+
+function globalProjectControls() {
+  const target = current, { repository, policy, installed } = target, id = target.id;
   const publication = card('公开可见性');
   if (me.role !== 'super_admin') publication.append(note('公开看板由平台超级管理员管理；项目配置权限不会增加公开授权。'));
   else if (!installed) publication.append(consoleState('公开设置暂不可读取', '安装信息读取失败，公开状态未知。', { retry: () => reloadProject().catch(error) }));
@@ -303,7 +313,7 @@ function basicSection() {
   }).catch(() => {
     if (current !== target) return;
     impact.classList.add('view-error');
-    impact.textContent = '暂时无法读取推进中的任务数；禁用会中止正在执行的任务，这里不按零处理。可用“刷新项目设置”重试。';
+    impact.textContent = '暂时无法读取推进中的任务数；禁用会中止正在执行的任务，这里不按零处理。可用页面上的“刷新”重试。';
   });
   if (me.role === 'super_admin') {
     const feedback = element('p', '', 'view-error'); feedback.setAttribute('role', 'alert');
@@ -311,22 +321,22 @@ function basicSection() {
       if (!await askConfirm({ title: `${policy.enabled ? '禁用' : '启用'} ${repository.full_name}？`,
         body: [policy.enabled ? '新 Issue／PR 不再处理；正在执行的任务会中止，虚拟电脑停止，已有数据保留。' : '恢复按当前检视、开发与模型配置处理任务。', '公开看板的可见性由上方独立设置控制。'], action: policy.enabled ? '禁用' : '启用', danger: !!policy.enabled })) return;
       change.disabled = true; feedback.textContent = '';
-      try { await api(`/api/installations/${id}/${policy.enabled ? 'disable' : 'activate'}`, 'POST', {}); if (current === target && projectRoute()?.id === id) await reloadProject(); }
+      try { await api(`/api/installations/${id}/${policy.enabled ? 'disable' : 'activate'}`, 'POST', {}); if (current === target) await reloadProject(); }
       catch (err) { feedback.textContent = `项目${policy.enabled ? '禁用' : '启用'}失败：${err.message}`; }
       finally { change.disabled = false; }
     }, policy.enabled ? 'destructive' : '');
     danger.append(change, button('删除项目', () => deleteProject({ id, full_name: repository.full_name, registered: true }, async () => {
-      if (current === target && projectRoute()?.id === id) { current = null; location.hash = '#/projects'; }
+      if (current === target) { current = null; location.hash = '#/settings/projects'; }
     }), 'quiet destructive'), feedback);
   } else danger.append(note('启用、禁用与删除项目由平台超级管理员处理。请联系该管理员；项目管理员不因页面入口获得这些能力。'));
-  const layout = element('div', '', 'project-settings-layout'); layout.append(info, summary, branch, automation, sources, publication, danger);
-  return [layout];
+  return [publication, danger];
 }
 
-function machineSection() {
+function machineSection(globalSettings = false) {
   const { environment } = current, pc = environment?.environment.computer, editable = me.role === 'super_admin' && !!pc;
   const status = element('div', '', 'status-grid computer-status-grid'); status.id = 'machine-status'; status.append(...machineStatus());
-  if (!pc) return [status, concurrencyForm(), note('暂时读不到虚拟电脑规格。连接恢复后可重新读取本页配置；未保存改动请先保存。'),button('重新读取电脑配置',()=>reloadProject().catch(error))];
+  if (!globalSettings) return [status, concurrencyForm(), ...(me.role === 'super_admin' ? [consoleLink(`#/settings/computers/${current.id}`, '在全局设置中配置项目电脑', '资源、软件、网络和初始化由超级管理员统一配置')] : [])];
+  if (!pc) return [status, ...(globalSettings ? [] : [concurrencyForm()]), note('暂时读不到虚拟电脑规格。连接恢复后可重新读取本页配置；未保存改动请先保存。'),button('重新读取电脑配置',()=>reloadProject().catch(error))];
   const unread = !current.rules || current.rules.needs_refresh === true || !current.rules.sha;
   const effective=current.rules?.computer||pc, source=current.rules?.files.find(f=>f.path==='.bot/computer.yaml');
   const shown={...pc,...effective,network_policy:effective.egress===undefined?pc.network_policy:effective.egress?'internet egress':'internal, no egress'};
@@ -420,7 +430,7 @@ function machineSection() {
   const heading=form.querySelector('h3'),toolbar=element('div','','heading');heading.replaceWith(toolbar);toolbar.append(heading,reread);
   toolbar.after(sourceReadError);
   if(unread)toolbar.after(note(!current.rules?'规则来源读取失败，不能确认仓库覆盖关系。请重新读取配置后保存。':'尚未读取默认分支文件，不能确认仓库覆盖关系。请重新读取配置后保存。'));
-  return [status, concurrencyForm(), form];
+  return [status, form];
 }
 // How many tasks this computer runs at once: the project's own value, or empty for the global default. Project
 // administrators change it too; it never rebuilds the computer.
@@ -488,10 +498,10 @@ async function refreshProjectStatus(token) {
   // These manager answers describe the computer/service, not the signed-in actor's project access.
   const managerStatsError=stats.error&&['project_not_registered','unauthorized','resource_ownership_mismatch'].includes(stats.error.code);
   const errors=[environment.error,managerStatsError?null:stats.error],revoked=errors.find(err=>err&&[401,403].includes(err.status))||(target.environment&&errors.find(err=>err?.status===404));
-  if(revoked){target.environment=null;usage=null;$('project-page').replaceChildren(consoleState('项目电脑暂不可访问','原记录和配置已清除。'+revoked.message,{tone:'error',retry:()=>renderProject({id,section})}));return;}
+  if(revoked){target.environment=null;usage=null;$(target.globalSettings ? 'settings-panel' : 'project-page').replaceChildren(consoleState('项目电脑暂不可访问','原记录和配置已清除。'+revoked.message,{tone:'error',retry:()=>target.globalSettings?route():renderProject({id,section})}));return;}
   if (environment.value) target.environment = environment.value;
   target.environmentReadError=environment.error?.message||'';
-  $('project-page').querySelectorAll('[data-project-environment-state]').forEach(node=>node.replaceWith(projectEnvironmentState()));
+  $(target.globalSettings ? 'settings-panel' : 'project-page').querySelectorAll('[data-project-environment-state]').forEach(node=>node.replaceWith(projectEnvironmentState()));
   if (section === 'machine') {
     usage = { id, stats:stats.error?(usage?.id===id?usage.stats:null):stats.value, error:stats.error?.message||'' };
     const status = $('machine-status');if(status){const focused=status.contains(document.activeElement)?document.activeElement.id:null;keepOpen(status, () => status.replaceChildren(...machineStatus()));if(focused)document.getElementById(focused)?.focus({preventScroll:true});}

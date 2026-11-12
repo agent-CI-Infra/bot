@@ -19,7 +19,7 @@ for (const width of [1440, 390]) test(`continuous group assistant and private ma
     await until(() => f.h.store.get('SELECT state FROM channel_inbox WHERE id=?', receipt.value.operation_id), r => r?.state === 'completed');
     const privateReceipt = await post(f.h, f.id, envelope('你好'));
     await until(() => f.h.store.get('SELECT state FROM channel_inbox WHERE id=?', privateReceipt.value.operation_id), r => r?.state === 'completed');
-    await page.setViewportSize({ width, height: 900 }); await page.goto(f.h.admin + '/#/identity');
+    await page.setViewportSize({ width, height: 900 }); await page.goto(f.h.admin + '/#/identity/feishu/groups');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
@@ -28,6 +28,7 @@ for (const width of [1440, 390]) test(`continuous group assistant and private ma
     await expect(page.getByText('群聊助手会话（仓库问答助手）', { exact: true })).toBeVisible();
     await binding.getByRole('button', { name: '查询该群本地记录', exact: true }).click();
     await expect(page.getByText('未 @ 的共同决定：先核对本地证据', { exact: true })).toBeVisible();
+    await page.goto(f.h.admin + '/#/identity/feishu/conversations');
     await expect(page.getByText(/私信与控制台管理对话共用管理助手/)).toBeVisible();
     await expect(page.getByLabel('私信使用角色', { exact: true })).toHaveCount(0);
     await page.getByRole('button', { name: '查看私信连续会话', exact: true }).click();

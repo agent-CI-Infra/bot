@@ -11,11 +11,11 @@ async function runTurn(f) {
 }
 
 async function login(page, f) {
-  await page.goto(f.h.admin);
+  await page.goto(f.h.admin + '/#/settings/projects');
   await page.getByLabel('用户名', { exact: true }).fill('administrator');
   await page.getByLabel('密码', { exact: true }).fill(f.password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
-  await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '全局设置', exact: true })).toBeVisible();
 }
 
 // #233: a lane with no configured check is a gap in the gate, not a passing check. The plan preview has to say so in words,
@@ -32,7 +32,7 @@ test('an empty lane is shown as not configured, never as a check that passed', a
   try {
     await login(page, f);
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.locator('#rows [data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
+    await page.locator('.global-project-row[data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
     const dialog = page.locator('#quickstart-view');
     await expect(dialog.getByRole('heading', { name: '接入门禁 · octo/hello', exact: true })).toBeVisible();
     await dialog.getByRole('button', { name: '开始适配', exact: true }).click();
