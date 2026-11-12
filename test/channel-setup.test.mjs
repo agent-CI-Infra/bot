@@ -29,7 +29,14 @@ test('personal name discovery is owner-only, returns only the matched name and l
   assert.deepEqual({ ...h.store.get('SELECT * FROM external_identities WHERE id=?', binding.id) }, { ...before, display_name: '张小明' });
   assert.equal(JSON.stringify(h.store.all('SELECT * FROM scoped_grants ORDER BY id')), grants);
   wire.state.profileCode = 99991672;
-  assert.equal((await local.client(route, 'POST', {})).value.error, 'channel_user_name_unavailable');
+  for (const status of [200, 400, 403]) {
+    wire.state.profileStatus = status;
+    const denied = await local.client(route, 'POST', {});
+    assert.equal(denied.status, 403);
+    assert.equal(denied.value.error, 'channel_user_name_permission_required');
+    assert.doesNotMatch(JSON.stringify(denied.value), /fixture-only|must-not-expose|email|mobile/);
+  }
+  wire.state.profileStatus = 200;
   wire.state.profileCode = 0; wire.state.profileName = '';
   assert.equal((await local.client(route, 'POST', {})).value.error, 'channel_user_name_unavailable');
   wire.state.profileName = 'Wrong person'; wire.state.profileOpenId = 'ou_wrong';
@@ -436,11 +443,13 @@ test('store apps bootstrap without a bot ID, then persist discovery after a veri
 
 test('connection probes compare tenant grants with the one required scope list and stay usable when the grant check fails', async t => {
   const { admin, id, wire, h } = await channelFixture(t);
-  const absent = 'contact:user.base:readonly', pending = 'im:message:readonly', userOnly = 'im:message.group_msg';
+  const absent = 'contact:contact.base:readonly', pending = 'im:message:readonly', userOnly = 'im:message.group_msg';
   wire.state.scopes = [...FEISHU_SCOPES.filter(s => ![absent, pending, userOnly].includes(s.scope)).map(s => ({ scope_name: s.scope, grant_status: 1, scope_type: 'tenant' })),
     { scope_name: pending, grant_status: 2, scope_type: 'tenant' }, { scope_name: userOnly, grant_status: 1, scope_type: 'user' }];
   const checked = await probe(admin, id);
   assert.equal(checked.status, 201);
+  assert.ok(checked.value.scopes.required.includes('contact:user.base:readonly'));
+  assert.ok(!checked.value.scopes.missing.includes('contact:user.base:readonly'), 'a granted name field scope does not grant directory endpoint access');
   // A user-identity grant does not satisfy a tenant scope; a requested but unapproved scope is reported as pending.
   assert.deepEqual(checked.value.scopes, { required: feishuScopes('enterprise'), missing: [userOnly, pending, absent], pending: [pending] });
   const preview = await admin('/api/channels/feishu/probe', 'POST', { app_id: 'cli_preview', app_secret: 'unsaved-preview-secret' });
