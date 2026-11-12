@@ -215,7 +215,7 @@ export class ChannelEmployees {
   /** Groups the actor can pick: an active chat of an enabled app where the actor's bound Feishu identity has spoken. */
   selectableChats(actor: ActorContext): Row[] {
     const identities = this.store.all("SELECT connector,external_actor,external_tenant FROM external_identities WHERE principal_id=? AND provider='feishu' AND host='open.feishu.cn' AND status='active' AND (expires_at IS NULL OR expires_at>?)", actor.principal_id, Date.now());
-    return this.store.all("SELECT h.id,h.chat_id,h.app_id,h.installation_tenant,c.app_name FROM channel_chats h JOIN channel_connectors c ON c.id=h.connector_id WHERE h.chat_type='group' AND h.state='active' AND c.enabled=1 AND h.app_id=c.app_id AND h.installation_tenant=c.installation_tenant")
+    return this.store.all("SELECT h.id,h.chat_id,h.app_id,h.installation_tenant,c.app_name,NULLIF(c.owner_tenant,'') AS organization FROM channel_chats h JOIN channel_connectors c ON c.id=h.connector_id WHERE h.chat_type='group' AND h.state='active' AND c.enabled=1 AND h.app_id=c.app_id AND h.installation_tenant=c.installation_tenant")
       .filter(chat => identities.some(i => String(i.connector).endsWith(':' + chat.app_id) && this.store.get('SELECT 1 FROM channel_messages WHERE chat_id=? AND sender_id=? AND sender_tenant=?', chat.id, i.external_actor, i.external_tenant)));
   }
   /** Legacy employee grants the actor maintains. They no longer receive messages; they only authorize tasks they already created. */

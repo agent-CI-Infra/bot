@@ -2,7 +2,7 @@ import type { Manager } from '../projects/service.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
 import { checkManagementBudget } from './budget.js';
 import type { Store, Row } from '../storage/database.js';
-import { assertCurrent, authorize, effectiveRepositories, listEffectiveScopes, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
+import { assertCurrent, authorize, confinedTenant, effectiveRepositories, listEffectiveScopes, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
 import type { Actor } from '../app/auth.js';
 import type { RuleService } from '../rules/service.js';
@@ -50,8 +50,8 @@ export class ManagementService {
   user(actor: ActorContext): Actor {
     assertCurrent(actor);
     const row=this.store.get('SELECT u.* FROM users u JOIN principals p ON p.user_id=u.id WHERE p.id=? AND u.active=1',actor.principal_id);
-    // Adapters can use a service principal, but cannot synthesize the legacy super-admin role.
-    return { id:actor.principal_id,username:row?.username??'service',role:row?.role==='super_admin'?'super_admin':'project_admin',csrf:'',context:actor,repositories:this.projects(actor) };
+    // Adapters can use a service principal, but cannot synthesize the legacy super-admin role; a confined actor never holds it.
+    return { id:actor.principal_id,username:row?.username??'service',role:row?.role==='super_admin'&&!confinedTenant(actor)?'super_admin':'project_admin',csrf:'',context:actor,repositories:this.projects(actor) };
   }
   projects(actor: ActorContext): string[] {
     assertCurrent(actor);
@@ -151,7 +151,7 @@ export class ManagementService {
       if(!this.schedulingQuery)fail(409,'scheduling_not_registered');
       return this.schedulingQuery!(actor,operation,target.project_id,args);
     }
-    if(operation==='get_capabilities')return {queries:queryNames,commands:Object.entries(commands).map(([operation,c])=>({operation,...c,available:!['configuration.pr','knowledge.revise',...Object.keys(schedulingCommands)].includes(operation)||this.extensions.has(operation)})),scopes:listEffectiveScopes(this.store,actor.principal_id).filter(s=>s.state==='active'&&(!actor.tenant_id||!s.tenant_id||s.tenant_id===actor.tenant_id)&&(!actor.project_id||s.scope!=='project'||s.project_id===actor.project_id))};
+    if(operation==='get_capabilities')return {queries:queryNames,commands:Object.entries(commands).map(([operation,c])=>({operation,...c,available:!['configuration.pr','knowledge.revise',...Object.keys(schedulingCommands)].includes(operation)||this.extensions.has(operation)})),scopes:listEffectiveScopes(this.store,actor.principal_id).filter(s=>s.state==='active'&&(!confinedTenant(actor)||s.scope!=='platform')&&(!actor.tenant_id||!s.tenant_id||s.tenant_id===actor.tenant_id)&&(!actor.project_id||s.scope!=='project'||s.project_id===actor.project_id))};
     if(operation==='list_projects')return {projects:ids.slice(offset,offset+limit).map(id=>{
       const project=this.scope(actor,id),policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',id)!;
       return {id,tenant_id:this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',id)?.tenant_id,full_name:project.full_name,enabled:!!project.enabled,configuration_gaps:[...(!policy.model_id?['model_not_configured']:[]),...(installationExecutionDenied(this.store,project.account_id,id)?['installation_unavailable']:[])],url:'#/projects/'+id+'/basic'};

@@ -55,7 +55,9 @@ export function channelStorage(store: Store): void {
     store.db.exec("ALTER TABLE channel_employee_grants ADD COLUMN participation TEXT NOT NULL DEFAULT 'mentions'");
   if (!store.all('PRAGMA table_info(channel_connectors)').some(c => c.name === 'connection_state'))
     store.db.exec("ALTER TABLE channel_connectors ADD COLUMN connection_state TEXT NOT NULL DEFAULT 'idle'");
-  // Connections are global; keep their IDs so credentials, bindings and queued events remain valid.
+  // Keep connection IDs so credentials, bindings and queued events remain valid. owner_tenant is the GitHub organization
+  // (tenant) an app belongs to and created_by its creator (#424); connections created before then stay platform-wide ('').
+  // The owner is not called tenant_id: the cleanup below drops that retired column on every start.
   store.transaction(() => {
     if (!store.all('PRAGMA table_info(channel_bind_requests)').some(c => c.name === 'code_hash'))
       store.db.exec('ALTER TABLE channel_bind_requests ADD COLUMN code_hash TEXT');
@@ -63,7 +65,7 @@ export function channelStorage(store: Store): void {
     if (!store.all('PRAGMA table_info(channel_bind_requests)').some(c => c.name === 'superseded_at'))
       store.db.exec('ALTER TABLE channel_bind_requests ADD COLUMN superseded_at INTEGER');
     store.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS channel_bind_code ON channel_bind_requests(code_hash)');
-    for (const column of ['app_name', 'tenant_name', 'app_name_source'])
+    for (const column of ['app_name', 'tenant_name', 'app_name_source', 'owner_tenant', 'created_by'])
       if (!store.all('PRAGMA table_info(channel_connectors)').some(c => c.name === column))
         store.db.exec(`ALTER TABLE channel_connectors ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`);
     // Existing connections also accept external members; identity and project grants still authorize each request.

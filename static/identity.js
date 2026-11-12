@@ -29,6 +29,16 @@ function grantStateText(grant) {
 async function renderIdentity() {
   const panel = $('identity-panel'), request = renderVersion;
   const current = () => request === renderVersion;
+  // Organization and repository admins add and manage their organization's Feishu apps here, with the same wizard
+  // super administrators use in global settings (#424).
+  if (/^#\/identity\/feishu-apps(?:\/|$)/.test(location.hash)) {
+    const setup = element('div', '', 'feishu-setup');
+    panel.replaceChildren(consoleState('正在读取飞书应用', '正在核对你可以新增和管理的飞书应用。'));
+    try { await renderFeishuSetup(setup, request); }
+    catch (err) { if (current()) panel.replaceChildren(consoleState('飞书应用读取失败', feishuError(err), { tone: 'error', retry: () => render().catch(error) })); return; }
+    if (current()) { $('count').textContent = ''; panel.replaceChildren(setup, channelLink('#/identity/feishu', '返回身份与权限')); }
+    return;
+  }
   let data;
   panel.replaceChildren(consoleState('正在读取身份与权限', '正在核对当前会话的组织、身份绑定和授权记录。'));
   try { data = await api('/api/identity'); }

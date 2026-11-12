@@ -66,6 +66,14 @@ function maintainer(f, name, projects, open_id) {
   return resolvePrincipalActor(f.h.store, name, null);
 }
 
+/** A platform user with config.write over a whole organization (an organization admin), outside every group. */
+function organizationAdmin(f, name, tenant = 'github.com:10') {
+  f.h.store.run("INSERT OR IGNORE INTO users(id,username,password_hash,role) VALUES(?,?,?,'project_admin')", name, name, 'fixture-unused-password');
+  f.h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,policy,evidence,verified_at)
+    VALUES(?,?,?,NULL,'tenant','org_admin',?,'explicit_delegation','fixture','explicit fixture grant',0)`, name + ':org', name, tenant, JSON.stringify(['config.write', 'tasks.read', 'tasks.write']));
+  return resolvePrincipalActor(f.h.store, name, null);
+}
+
 test('the repository assistant answers any member across its repositories without choosing a project and refuses the rest', async t => {
   const f = await fixture(t), baseline = f.h.store.get('SELECT count(*) n FROM tasks').n, offered = [];
   const bound = await f.bind(); assert.equal(bound.status, 200, JSON.stringify(bound.value));
@@ -153,6 +161,72 @@ test('binding needs a Feishu-bound maintainer in the group with config.write ove
   assert.ok(listed.organizations.some(o => o.id === tenant));
   // A legacy employee can no longer be enabled; disabling one stays possible.
   assert.equal((await f.admin('/api/channels/chats/' + chat.id + '/employee', 'PUT', { project_id: '101', role_id: 'reviewer', capabilities: ['tasks.read'], enabled: true, expected_revision: 0 })).value.error, 'channel_employee_retired');
+});
+
+test('a group binding has an owner: other repository admins in the group cannot take it over; owner, organization and platform administrators change it; ownership transfers (#424)', async t => {
+  const f = await fixture(t), { h, chat } = f, bindings = f.service.serviceBindings;
+  const input = (revision, repositories = ['101'], extra = {}) => ({ service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories }, enabled: true, expected_revision: revision, ...extra });
+  const state = () => ({ ...h.store.get('SELECT owner_id,configured_by,revision,participation,enabled FROM channel_service_bindings WHERE chat_id=?', chat.id) });
+  const owner = maintainer(f, 'owner', ['101'], 'ou_owner');
+  const bound = await bindings.configure(owner, chat.id, input(0));
+  assert.deepEqual([bound.owner, bound.configured_by], ['owner', 'owner']);
+  // Admins of another repository, or of the same one, in the group: no re-scope, change, disable or transfer.
+  const intruder = maintainer(f, 'intruder', ['102'], 'ou_intruder'), peer = maintainer(f, 'peer', ['101'], 'ou_peer');
+  for (const [actor, repositories] of [[intruder, ['102']], [peer, ['101']]]) {
+    await assert.rejects(bindings.configure(actor, chat.id, input(1, repositories, { participation: 'all' })), { code: 'channel_service_binding_forbidden' });
+    await assert.rejects(bindings.configure(actor, chat.id, { enabled: false, expected_revision: 1 }), { code: 'channel_service_binding_forbidden' });
+    assert.throws(() => bindings.transfer(actor, chat.id, { owner_id: actor.principal_id, expected_revision: 1 }), { code: 'channel_service_binding_forbidden' });
+  }
+  assert.deepEqual(state(), { owner_id: 'owner', configured_by: 'owner', revision: 1, participation: 'mentions', enabled: 1 });
+  const spoken = groupMessage('Just chatting', 'ou_intruder'); spoken.event.message.mentions = []; await post(h, f.id, spoken);
+  const intruderView = (await bindings.list(intruder)).bindings.find(b => b.chat_id === chat.id);
+  assert.deepEqual([intruderView.can_manage, intruderView.can_transfer, intruderView.owner_candidates], [false, false, undefined]);
+  // The owner edits from inside the group, never beyond their own repositories.
+  await assert.rejects(bindings.configure(owner, chat.id, input(1, ['101', '102'])), { code: 'capability_forbidden' });
+  assert.equal((await bindings.configure(owner, chat.id, input(1, ['101'], { participation: 'questions' }))).participation, 'questions');
+  // An organization admin changes it from outside the group; the owner stays.
+  const org = organizationAdmin(f, 'org-admin');
+  const widened = await bindings.configure(org, chat.id, input(2, ['101', '102']));
+  assert.deepEqual([widened.owner, widened.configured_by, widened.reachable], ['owner', 'org-admin', [repo(101), repo(102)]]);
+  // Ownership goes from an administrator to someone who could configure the whole current scope; the revision stays.
+  const both = maintainer(f, 'both', ['101', '102'], 'ou_both');
+  const listed = (await bindings.list(org)).bindings.find(b => b.chat_id === chat.id);
+  assert.deepEqual([listed.can_manage, listed.can_transfer], [true, true]);
+  const candidates = listed.owner_candidates.map(c => c.username);
+  assert.ok(candidates.includes('both') && candidates.includes('org-admin')); assert.ok(!['owner', 'peer', 'intruder'].some(name => candidates.includes(name)));
+  assert.throws(() => bindings.transfer(owner, chat.id, { owner_id: 'both', expected_revision: 3 }), { code: 'channel_service_binding_forbidden' });
+  assert.throws(() => bindings.transfer(org, chat.id, { owner_id: 'peer', expected_revision: 3 }), { code: 'channel_service_owner_ineligible' });
+  assert.throws(() => bindings.transfer(org, chat.id, { owner_id: 'both', expected_revision: 2 }), { code: 'channel_revision_conflict' });
+  const transferred = bindings.transfer(org, chat.id, { owner_id: 'both', expected_revision: 3 });
+  assert.deepEqual([transferred.owner, transferred.revision], ['both', 3]);
+  assert.equal((await f.admin('/api/channels/chats/' + chat.id + '/service-binding/owner', 'PUT', { owner_id: 'owner', expected_revision: 3 })).value.error, 'channel_service_owner_ineligible');
+  await assert.rejects(bindings.configure(owner, chat.id, input(3)), { code: 'channel_service_binding_forbidden' });
+  // An organization admin governs only bindings inside their organizations; a platform administrator governs every one.
+  const platform = resolvePrincipalActor(h.store, f.principal, null);
+  assert.equal((await bindings.configure(platform, chat.id, input(3, ['101', '201']))).owner, 'both');
+  await assert.rejects(bindings.configure(org, chat.id, input(4)), { code: 'channel_service_binding_forbidden' });
+  // A disabled binding keeps its owner: only the owner and its governors enable it again.
+  assert.equal((await bindings.configure(platform, chat.id, { enabled: false, expected_revision: 4 })).state, 'disabled');
+  await assert.rejects(bindings.configure(intruder, chat.id, input(5, ['102'])), { code: 'channel_service_binding_forbidden' });
+  const restored = await bindings.configure(both, chat.id, input(5, ['101', '102']));
+  assert.deepEqual([restored.state, restored.owner, restored.configured_by], ['active', 'both', 'both']);
+  // Bindings from before owners existed are owned by their configurer.
+  h.store.run("UPDATE channel_service_bindings SET owner_id=''");
+  await h.stop(); await h.start();
+  assert.equal(state().owner_id, 'both');
+});
+
+test('a group reached through an organization app can only be scoped to that organization (#424)', async t => {
+  const f = await fixture(t), { h } = f;
+  h.store.run("UPDATE channel_connectors SET owner_tenant='github.com:10' WHERE id=?", f.id);
+  for (const scope of [{ kind: 'repositories', repositories: ['101', '201'] }, { kind: 'organization', organization: 'github.com:20' }])
+    assert.equal((await f.bind({ scope })).value.error, 'channel_service_scope_outside_organization');
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_service_bindings').n, 0);
+  const bound = await f.bind({ scope: { kind: 'organization', organization: 'github.com:10' } });
+  assert.equal(bound.status, 200, JSON.stringify(bound.value)); assert.equal(bound.value.chat.organization, 'github.com:10');
+  const listed = (await f.admin('/api/channels/service-bindings')).value;
+  assert.deepEqual(listed.chats.map(c => c.organization), ['github.com:10']);
+  assert.deepEqual(listed.projects.map(p => [p.id, p.organization]), [['101', 'github.com:10'], ['102', 'github.com:10'], ['201', 'github.com:20']]);
 });
 
 test('an app without a member-reading scope refuses the binding with an actionable 4xx code; other Feishu rejections stay upstream failures', async t => {
@@ -262,7 +336,7 @@ test('legacy group employees migrate once to a repository assistant binding; the
   await h.stop(); await h.start();
   const binding = h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat.id);
   assert.equal(binding.service_role_id, 'repository-assistant'); assert.equal(binding.scope, 'repositories'); assert.equal(binding.participation, 'questions');
-  assert.equal(binding.migrated_from, 'channel_employee'); assert.equal(binding.configured_by, f.principal);
+  assert.equal(binding.migrated_from, 'channel_employee'); assert.equal(binding.configured_by, f.principal); assert.equal(binding.owner_id, f.principal);
   assert.deepEqual(h.store.all('SELECT project_id,grantor_id FROM scoped_grants WHERE principal_id=?', binding.principal_id).map(g => [g.project_id, g.grantor_id]), [['101', f.principal]]);
   assert.equal(h.store.get('SELECT enabled FROM channel_employee_grants WHERE id=?', legacy.id).enabled, 1);
   assertManagedExecution(h.store, h.store.get('SELECT * FROM tasks WHERE id=?', created.id));

@@ -3,6 +3,7 @@ import { ExternalBindings, revokeIdentity, type ExternalSubject, type VerifiedEx
 import { assertCurrent, resolveActor } from '../identity/authorization.js';
 import { digest, fail, randomId, type Json } from '../core/security.js';
 import type { ChannelEvent } from './types.js';
+import { applicationVisible } from './applications.js';
 
 export const externalSubject = (e: ChannelEvent): ExternalSubject => ({ provider: e.provider, host: 'open.feishu.cn',
   connector: e.connector_id + ':' + e.app_id, external_tenant: e.actor_tenant, external_actor: e.actor_id });
@@ -32,9 +33,10 @@ export class ChannelBindings {
   // code are recorded together. The first private-chat message carrying that code completes the binding in one step, so
   // the person never pastes a code back into the console (#236).
   issue(connectorId: string, sessionRef: string): { code: string; expires_at: number } {
-    const connector = this.store.get('SELECT app_id, installation_tenant FROM channel_connectors WHERE id=? AND enabled=1', connectorId);
+    const connector = this.store.get('SELECT * FROM channel_connectors WHERE id=? AND enabled=1', connectorId);
     if (!connector) return fail(404, 'channel_connector_not_found');
     const actor = resolveActor(this.store, sessionRef), challenge = randomId(), code = 'FSB-' + randomId(), expires = Date.now() + 5 * 60_000;
+    this.assertVisible(connectorId, actor.principal_id);
     const placeholder: ChannelEvent = { provider: 'feishu', connector_id: connectorId, connector_revision: 0, app_id: connector.app_id,
       installation_tenant: connector.installation_tenant, actor_tenant: '', actor_id: '', chat_id: '', chat_type: 'p2p',
       message_id: '', event_id: 'console:' + challenge, thread_id: '', created_at: Date.now(), kind: 'message', content: '' };
@@ -65,6 +67,7 @@ export class ChannelBindings {
     const sessionRef = String(this.store.secrets.open(row.session_ref, 'channel-session:' + row.challenge_hash).value);
     const actor = resolveActor(this.store, sessionRef);
     if (actor.principal_id !== row.principal_id) return fail(403, 'binding_session_changed');
+    this.assertVisible(row.connector_id, actor.principal_id);
     this.store.run('UPDATE channel_bind_requests SET subject=? WHERE challenge_hash=? AND consumed_at IS NULL',
       this.store.secrets.seal(e, 'channel-bind:' + row.challenge_hash), row.challenge_hash);
     const binding = await this.identities.beginVerifiedExternalBinding(sessionRef, this.credential(e, '', row.expires_at));
@@ -120,6 +123,7 @@ export class ChannelBindings {
     if (row.expires_at <= Date.now() || row.consumed_at) return fail(410, 'binding_expired');
     if (row.principal_id) return fail(409, 'binding_login_already_started');
     const actor = resolveActor(this.store, sessionRef), e = this.store.secrets.open(row.subject, 'channel-bind:' + row.challenge_hash) as unknown as ChannelEvent;
+    this.assertVisible(row.connector_id, actor.principal_id);
     const binding = await this.identities.beginVerifiedExternalBinding(sessionRef, this.credential(e, '', row.expires_at));
     const confirm = randomId();
     this.store.transaction(() => {
@@ -132,6 +136,11 @@ export class ChannelBindings {
       this.store.run('DELETE FROM channel_oauth_links WHERE challenge_hash=?', row.challenge_hash);
     });
     return e;
+  }
+  /** Only people who may see an organization's app bind through it (#424); a platform-wide app is open to every account. */
+  private assertVisible(connector: string, principal: string): void {
+    const app = this.store.get('SELECT * FROM channel_connectors WHERE id=?', connector);
+    if (app && !applicationVisible(this.store, principal, app)) fail(403, 'channel_application_forbidden');
   }
   pending(principal: string): Json[] {
     return this.store.all('SELECT * FROM channel_bind_requests WHERE principal_id=? AND consumed_at IS NULL AND binding_ref IS NOT NULL AND expires_at>?', principal, Date.now()).map(row => {
