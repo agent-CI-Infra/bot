@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, statSync, statfsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { rm } from 'node:fs/promises';
 import { randomBytes, createHash } from 'node:crypto';
@@ -628,6 +628,22 @@ export class Projects {
         }
       } catch (error) { logFailure(`project ${row.repository_id} recovery after its container stopped failed`, error); this.update(row.repository_id, 'failed', 'stopped', 'recovery_failed'); }
     })));
+  }
+  // The storage page's numbers from this manager: trajectory totals per project (kind 'open' sizes the files still being
+  // written, one per running task), the ledger's size and free pages, the disk and the migration. The PRAGMAs read the
+  // database header and trajectory_usage holds a few rows per project: nothing here scans the ledger.
+  storage() {
+    const value = pragma => Number(Object.values(this.db.prepare('PRAGMA ' + pragma).get() ?? {})[0] ?? 0);
+    const pageSize = value('page_size'), pages = value('page_count'), free = value('freelist_count'), data = dirname(this.trajectories.root);
+    const usage = this.db.prepare('SELECT repository_id,kind,count,bytes FROM trajectory_usage').all(), open = new Map();
+    for (const row of this.db.prepare('SELECT repository_id,path FROM trajectory_files WHERE closed_at IS NULL').all()) {
+      let bytes = 0; try { bytes = statSync(this.trajectories.root + '/' + row.path).size; } catch {}
+      const entry = open.get(row.repository_id) ?? { repository_id: row.repository_id, kind: 'open', count: 0, bytes: 0 }; entry.count++; entry.bytes += bytes; open.set(row.repository_id, entry);
+    }
+    let disk = null; try { const stats = statfsSync(data); disk = { free_bytes: stats.bavail * stats.bsize, total_bytes: stats.blocks * stats.bsize }; } catch {}
+    let wal = 0; try { wal = statSync(data + '/manager.sqlite-wal').size; } catch {}
+    return { usage: [...usage, ...open.values()], database: { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal }, disk,
+      migration: this.migration.state() };
   }
   async shutdown() {
     await this.migration.stop(); await Promise.all([...this.pending]); for (const row of this.list()) await this.stopAll(row.repository_id);

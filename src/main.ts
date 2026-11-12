@@ -19,6 +19,7 @@ import { deploymentOrigin, loginCallbackPath } from './onboarding/public-url.js'
 import { StallMonitor } from './core/stalls.js';
 import { PayloadMigration } from './storage/migration.js';
 import { WorkspaceCleanup } from './projects/workspace-cleanup.js';
+import { StorageReport } from './app/storage.js';
 
 process.umask(0o077);
 const keyFile = process.env.BOT_MASTER_KEY_FILE;
@@ -70,22 +71,23 @@ const releases = new ReleaseService(store, process.env.BOT_GITHUB_API_URL); rele
 const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_URL); actionsFailures.start();
 // Logs a blocked event loop with the requests in flight, and slow requests (see core/stalls.ts).
 const stalls = new StallMonitor(); stalls.start();
+const migration = new PayloadMigration(store), storage = new StorageReport(store, manager);
 const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, gateOnboarding, releases, boards,
-  imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls,
+  imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls, storage,
   // The assistant computers' HOME volume (compose.yaml); a control plane without it offers no assistant computer.
   assistantHomes: existsSync(process.env.BOT_ASSISTANT_HOMES || '/assistant-homes') ? process.env.BOT_ASSISTANT_HOMES || '/assistant-homes' : undefined },
   // BOT_TRUSTED_PROXIES: comma-separated proxy addresses/CIDRs allowed to name the password-login client.
   { trustedProxies: (process.env.BOT_TRUSTED_PROXIES || '').split(',').map(value => value.trim()).filter(Boolean) });
 // The only business listener: console, API, OAuth, App callbacks, webhooks, external executors and public boards.
 server.on('error', () => { console.error('listener failed'); process.exit(1); });
-const migration = new PayloadMigration(store);
 server.listen(8791, '0.0.0.0', () => {
   console.log('listening on 8791');
   // Background work that never delays readiness: close the trajectory files a stopped process left open, then move
   // payloads written before #436 out of their rows, slice by slice.
   const seal = () => store.trajectories.seal().catch(error => console.error('[trajectories] sealing failed:', error));
   void seal().then(() => { if (!stopping) migration.start(); }); setInterval(seal, 10 * 60_000).unref();
+  storage.start();
 });
 let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {

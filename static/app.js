@@ -203,6 +203,8 @@ async function start() {
   if (!me) return;
   renderCurrentUser();
   document.querySelectorAll('[data-super]').forEach(el => el.hidden = me.role !== 'super_admin');
+  // A project administrator's only global settings section is 存储 (its own projects' storage): the tab opens it.
+  const settingsTab = document.querySelector('#tabs [data-tab=settings]'); if (settingsTab && me.role !== 'super_admin') { settingsTab.hidden = false; settingsTab.textContent = '存储'; }
   repositories = (await api('/api/repositories')).repositories;
   if (me.role === 'super_admin') accounts = (await api('/api/accounts')).accounts;
   options($('repository-filter'), repositories, r => r.full_name); options($('account-filter'), accounts, a => a.name);
@@ -248,7 +250,8 @@ async function route() {
   const moved = /^#\/(accounts|users)$/.exec(location.hash); if (moved) history.replaceState(null, '', '#/settings/' + moved[1]);
   // An address the console does not know keeps the current page (on a fresh load that is the projects page).
   let next = addressTab(location.hash) || tab;
-  if (superTabs.includes(next) && me.role !== 'super_admin') next = 'projects';
+  // Project administrators open global settings only for its 存储 section.
+  if (superTabs.includes(next) && me.role !== 'super_admin' && !(next === 'settings' && /^#\/settings(?:\/storage(?:\/.*)?)?$/.test(location.hash))) next = 'projects';
   // The sample page issues no fetch of its own - every panel is constant markup - so a client-side role check is
   // the whole gate. If it ever reads server data, it needs a server-side gate first: hiding a route is not one.
   if (next === 'design' && me.role !== 'super_admin') next = 'projects';
