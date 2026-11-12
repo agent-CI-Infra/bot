@@ -20,6 +20,7 @@ import { TaskError } from '../agent/common.js';
 import { roleApi } from '../roles/api.js';
 import { installationExecutionDenied } from '../installations/archive.js';
 import { commands, commandSchema, querySchema, queries as queryNames, schedulingQueries, validate } from './catalog.js';
+import type { AssistantComputerService } from '../service-roles/assistant-computers.js';
 import { schedulingCommands } from '../schedules/schema.js';
 
 export interface ManagementCommand {
@@ -43,6 +44,8 @@ export class ManagementService {
   knowledgeSearch?: (actor:ActorContext,project:string,query:string,offset:number,limit:number)=>Promise<Json>;
   knowledgeRead?: (actor:ActorContext,project:string,id:string,revision?:number,versions?:boolean,baseline?:string)=>Promise<Json>;
   schedulingQuery?: (actor:ActorContext,operation:string,project:string,args:Json)=>Promise<Json>;
+  /** The conversation owners' computers (#457) used by the management assistant and group assistants. */
+  assistants?: AssistantComputerService;
   constructor(readonly store: Store, readonly rules: RuleService, readonly tasks: TaskCommands, readonly computer?:Manager, readonly githubUrl?:string) {}
   register(operation: string, extension: ManagementExtension): void {
     if(!['configuration.pr','knowledge.revise',...Object.keys(schedulingCommands)].includes(operation)||this.extensions.has(operation))throw new Error('invalid_management_registration');

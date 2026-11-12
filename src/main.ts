@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { Store } from './storage/database.js';
 import { createControlPlane } from './server.js';
@@ -72,7 +72,9 @@ const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_UR
 const stalls = new StallMonitor(); stalls.start();
 const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, gateOnboarding, releases, boards,
-  imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls },
+  imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls,
+  // The assistant computers' HOME volume (compose.yaml); a control plane without it offers no assistant computer.
+  assistantHomes: existsSync(process.env.BOT_ASSISTANT_HOMES || '/assistant-homes') ? process.env.BOT_ASSISTANT_HOMES || '/assistant-homes' : undefined },
   // BOT_TRUSTED_PROXIES: comma-separated proxy addresses/CIDRs allowed to name the password-login client.
   { trustedProxies: (process.env.BOT_TRUSTED_PROXIES || '').split(',').map(value => value.trim()).filter(Boolean) });
 // The only business listener: console, API, OAuth, App callbacks, webhooks, external executors and public boards.

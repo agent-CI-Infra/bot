@@ -1,17 +1,11 @@
 import test from 'node:test';
-import { operationRequestText, operationResult } from '../dist/storage/payloads.js';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { channelFixture, envelope, post, until, finished, privateChat, boundGroup, inGroup } from './channel-fixture.mjs';
 import { feishuMarkdown, markdownPosts, postText } from '../dist/channels/format.js';
 import { MediaTurn, incomingFiles, inboundBytes, safeFilename } from '../dist/channels/media.js';
 import { ChannelService } from '../dist/channels/service.js';
-import { ServiceComputers } from '../dist/service-roles/resources.js';
-import { LocalManager } from '../dist/projects/local-manager.js';
-import { Redactor } from '../dist/agent/common.js';
-import { randomWorkspaceId } from './helpers.mjs';
+import { AssistantComputerService } from '../dist/service-roles/assistant-computers.js';
+import { assistantManager } from './assistant-computer-fixture.mjs';
 import { digest } from '../dist/core/security.js';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64');
@@ -181,24 +175,22 @@ test('missing resource scope is actionable and a recall racing a download cannot
   assert.equal(f.h.store.get('SELECT count(*) n FROM channel_resources WHERE id=?', id).n, 0);
 });
 
-test('real isolated workspace import/export preserves binary bytes, rejects unsafe paths/symlinks and rechecks project access', async t => {
-  const f = await channelFixture(t), directory = mkdtempSync(join(tmpdir(), 'channel-computer-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const manager = new LocalManager('101', directory), store = f.h.store; let authorized = true;
-  const project = selected => { assert.ok(authorized, 'access revoked'); assert.ok(['101', 'agent-test-zone/admin-fixture-101'].includes(selected)); return store.get('SELECT * FROM repositories WHERE id=?', '101'); };
-  const computers = new ServiceComputers(store, manager, randomWorkspaceId(), 'media-test', new Redactor(), async () => { assert.ok(authorized, 'access revoked'); }, project);
-  t.after(() => computers.close());
-  assert.equal((await computers.importFile('101', 'input.png', png)).size, png.length);
-  const file = await computers.exportFile('101', 'input.png', inboundBytes); assert.deepEqual(file.data, png); assert.equal(file.project, '101');
-  for(const op of store.all('SELECT * FROM service_role_operations')){
-    const saved=operationRequestText(store,'service_role_operations',op);
-    assert.ok(!saved.includes('base64'));assert.ok(!saved.includes(png.toString('base64')));
-    if(op.result)assert.ok(!JSON.stringify(operationResult(store,'service_role_operations',op)).includes('base64'));
+test('the assistant computer imports and exports binary bytes in HOME and /tmp, refusing symlinks and host paths', async t => {
+  const f = await channelFixture(t), m = await assistantManager(t), store = f.h.store; let authorized = true;
+  const service = new AssistantComputerService(store, m.manager, m.homes);
+  const computer = service.turn({ owner: { kind: 'group', subject: 'media-chat', tenant: '' }, turn: 'media-turn', fence: () => 'a'.repeat(64),
+    check: () => { assert.ok(authorized, 'access revoked'); }, facts: () => ({ repositories: ['101'] }), commands: () => true, eligible: () => {} });
+  for (const path of ['~/input.png', '/tmp/input.png']) {
+    assert.equal((await computer.importFile(path, png)).size, png.length);
+    const file = await computer.exportFile(path, inboundBytes); assert.deepEqual(file.data, png); assert.equal(file.name, 'input.png');
   }
-  await computers.execute('run_command', { repository: '101', command: 'ln -s input.png alias.png' });
-  await assert.rejects(computers.exportFile('101', 'alias.png', inboundBytes), /channel_artifact_regular_file_required/);
-  for (const path of ['/etc/passwd', '../outside', 'https://example.test/a']) await assert.rejects(computers.exportFile('101', path, inboundBytes));
-  authorized = false; await assert.rejects(computers.exportFile('101', 'input.png', inboundBytes), /access revoked/);
+  // The bytes travel to the computer in its own calls, never through a sealed tool receipt.
+  assert.equal(store.get("SELECT count(*) n FROM sqlite_master WHERE name='service_role_operations'").n, 0);
+  await computer.execute('run_command', { command: 'ln -s input.png ~/alias.png && ln -s /tmp/input.png tmp-alias.png' });
+  for (const path of ['~/alias.png', 'tmp-alias.png']) await assert.rejects(computer.exportFile(path, inboundBytes), /invalid_path|regular_file_required/, path);
+  for (const path of ['/etc/passwd', '~/../outside', 'https://example.test/a', '~']) await assert.rejects(computer.exportFile(path, inboundBytes), undefined, path);
+  authorized = false; await assert.rejects(computer.exportFile('/tmp/input.png', inboundBytes), /access revoked/);
+  await computer.close();
 });
 
 test('a revoked group binding during upload blocks the image send and cross-project artifact selection is refused', async t => {

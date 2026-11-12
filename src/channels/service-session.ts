@@ -11,7 +11,8 @@ import { permitsTool, permitsManagement, githubReadScopes, githubWriteAllowed, t
 import { githubWrite, scopedGithubWriteTool } from '../github/write.js';
 import { checkServiceRoleBudget, serviceRole, serviceRoleModel } from '../service-roles/roles.js';
 import type { ManagementService } from '../management/service.js';
-import { ServiceComputers, serviceComputerTools, serviceMemory, serviceMemoryTools } from '../service-roles/resources.js';
+import { serviceMemory, serviceMemoryTools } from '../service-roles/resources.js';
+import { assistantComputerNames, assistantComputerTools, computerInstructions, computerPermission } from '../service-roles/assistant-computers.js';
 import { commands, managementTools, validate, contractSchema } from '../management/catalog.js';
 import { OwnTasks, ownTaskNames, ownTaskTools, type OwnTaskHost } from '../service-roles/own-tasks.js';
 import { bindingScope, serviceCommandAllowed, type ChannelServiceBindings } from './service-bindings.js';
@@ -43,12 +44,14 @@ export const serviceTools = [
     ['repository', 'task_id', 'operation', 'expected_revision']),
   fn('create_project_task', 'Hand new work to the project team of one repository in scope. The task goes to that repository\'s Manager, which plans it and assigns its roles; you never choose or direct a role. Give a clear request, goal, scope, acceptance criteria and endpoint. The management service applies its revision check, idempotency and an auditable receipt: only a succeeded receipt proves the task exists.',
     { repository, request: { type: 'string', maxLength: 16000 }, contract: contractSchema }, ['repository', 'request', 'contract']),
-  ...ownTaskTools, ...serviceMemoryTools, ...serviceComputerTools, ...managementTools, ...mediaTools, sendMessageTool,
+  ...ownTaskTools, ...serviceMemoryTools, ...assistantComputerTools, ...managementTools, ...mediaTools, sendMessageTool,
 ];
 // Delegation reaches a project only through its Manager: create a task, find it again, change or cancel it as a whole.
 // Every other tool is governed by a unified permission item of the service role; the scope listing, progress messages
 // (#435) and the role's own independent tasks need none (own tasks only lend the tools this turn already has).
-const offered = (permissions: RolePermissions, name: string) => name === 'list_projects' || name === sendMessageName || ownTaskNames.includes(name) || (mediaTools.some(t=>t.function.name===name) ? !mediaPermission(name)||permitsTool(permissions,mediaPermission(name)!) : permitsTool(permissions, name));
+// Tools that need the conversation's assistant computer (#457), including attachments moved to or from it.
+const computerTool = (name: string) => assistantComputerNames.includes(name) || name === 'import_message_resource' || name === 'attach_workspace_file';
+const offered = (permissions: RolePermissions, name: string) => name === 'list_projects' || name === sendMessageName || ownTaskNames.includes(name) || (mediaTools.some(t=>t.function.name===name) ? !mediaPermission(name)||permitsTool(permissions,mediaPermission(name)!) : permitsTool(permissions, computerPermission(name)));
 // Messages older than the recent window are folded into the rolling summary once this many have gathered.
 const foldBatch = 20;
 const excerpt = (m: Json, limit: number): Json => { const { resources, ...rest } = m; return { ...rest, content: String(m.content ?? '').slice(0, limit),
@@ -180,12 +183,24 @@ export class ChannelServiceSessions {
         expected_revision: text(args.expected_revision, 200), ...source });
     };
     const owner=()=>({service_role_id:role.id,kind:'channel' as const,owner_id:chat.id,principal_id:binding.principal_id,fence});
-    const computers=new ServiceComputers(this.store,this.management.computer,id,chat.id,redactor,async()=>{
-      check();
-    },selected=>{
-      const project=this.bindings.project(binding,selected,['tasks.read','tasks.write']);if(!project)fail(403,'repository_out_of_scope');
-      this.bindings.actor(binding,project!.id,['tasks.read','tasks.write']);return project!;
-    });
+    // A progress message (#435): recorded and queued together; the outbox checks the binding and fence again right before sending.
+    const progress = (input: unknown) => stageMessage(input, Number(this.store.get('SELECT count(*) n FROM channel_service_turn_messages WHERE turn_id=?', id)!.n), (text, sequence) => {
+      this.store.transaction(() => {
+        check();
+        const outbox = turn.stage?.({ turn_id: id, fence, text, sequence }) ?? null;
+        this.store.run('INSERT INTO channel_service_turn_messages VALUES(?,?,?,?,?)', id, sequence, this.store.secrets.seal({ text }, 'service-turn-message:' + id + ':' + sequence), outbox, Date.now());
+      });
+    }, value => redactor.text(value));
+    // The group's own computer (#457): one per group, bound to its fence; its HOME belongs to the binding and service role and
+    // to the repositories in scope. Using it needs someone who configured the binding to still hold tasks.write somewhere in scope.
+    const computers = this.management.assistants?.turn({ owner: { kind: 'group', subject: chat.id, tenant: String(chat.installation_tenant ?? '') }, turn: id,
+      fence: () => this.bindings.fence(chat.id), check,
+      facts: () => ({ binding: binding.id, role: binding.service_role_id, repositories: this.bindings.reach(binding).projects.map(p => p.id) }),
+      commands: () => permitsTool(permissions(), 'run_command'),
+      eligible: () => { if (!this.bindings.reach(binding, ['tasks.read', 'tasks.write']).projects.length) fail(403, 'capability_forbidden'); },
+      notify: text => progress({ text }) });
+    // Without assistant computers in this deployment the computer tools are not offered at all.
+    const computing = !!this.management.assistants?.available();
     const media=this.media&&turn.event?new MediaTurn(this.media,chat.id,turn.event.message_id,check,computers,project=>{
       if(!this.bindings.reachable(binding,project,['tasks.read']))fail(403,'repository_out_of_scope');
     },scope,fence):undefined;
@@ -197,16 +212,9 @@ export class ChannelServiceSessions {
       this.store.run('UPDATE channel_service_turns SET tool_calls=tool_calls+1 WHERE id=?', id);
       try {
         const input = args as Json;
-        if (name === sendMessageName) return await stageMessage(input, Number(this.store.get('SELECT count(*) n FROM channel_service_turn_messages WHERE turn_id=?', id)!.n), (text, sequence) => {
-          // Recorded and queued together; the outbox checks the binding and fence again right before sending.
-          this.store.transaction(() => {
-            check();
-            const outbox = turn.stage?.({ turn_id: id, fence, text, sequence }) ?? null;
-            this.store.run('INSERT INTO channel_service_turn_messages VALUES(?,?,?,?,?)', id, sequence, this.store.secrets.seal({ text }, 'service-turn-message:' + id + ':' + sequence), outbox, Date.now());
-          });
-        }, value => redactor.text(value));
+        if (name === sendMessageName) return await progress(input);
         if(mediaTools.some(t=>t.function.name===name))return media?await media.execute(name,input):{error:'channel_resource_source_required'};
-        if(serviceComputerTools.some(t=>t.function.name===name))return await computers.execute(name,input);
+        if(assistantComputerNames.includes(name))return computers?await computers.execute(name,input):{error:'computer_not_configured'};
         if(serviceMemoryTools.some(t=>t.function.name===name))return serviceMemory(this.store,owner(),name,input);
         if (name === 'list_projects') {
           fields(input, []);
@@ -270,6 +278,7 @@ export class ChannelServiceSessions {
         + (media?' Call list_message_resources to discover actual attachments, then read_message_resource or view_message_image to inspect them. Binary/large inputs need import_message_resource and computer tools. Select actual reply files with attach_message_resource, attach_workspace_file or create_reply_file. Selection is not delivery; never invent resource IDs or claim unsupported inputs were inspected.':'')
         + (turn.schedule ? ' This turn was started by one of this group\'s timers, not by a new message: the request is the timer\'s task. Complete it within list_projects and your permissions and reply with the result for the group. If the task allows staying silent when there is nothing to report, and there is nothing, reply with an empty message.'
           : turn.allowSilence ? ' This message did not mention you. If no helpful reply is needed, reply with an empty message. Do not act on quoted or stale requests.' : '')
+        + (computing && assistantComputerNames.some(name => offered(granted, name)) ? computerInstructions('is shared by everyone in this group, current and future members alike: never store anything meant only for some of them') : '')
         + (role.responsibility ? '\n\nYour responsibility: ' + role.responsibility : '')
         + (role.prompt ? '\n\nAdditional instructions from the platform administrator (they never widen your tools or permissions):\n' + role.prompt : '');
       let reply = '';
@@ -278,7 +287,7 @@ export class ChannelServiceSessions {
         system, prompt: turn.request, tools: serviceTools,
         adapter: async ({ request }) => {
           ownHost = { owner: { service_role_id: role.id, kind: 'channel', owner_id: binding.id, principal_id: binding.principal_id, fence }, system,
-            tools: () => serviceTools.filter(t => offered(permissions(), t.function.name)&&(!mediaTools.includes(t as any)||!!media)), request:async(body,label)=>{media?.addImages(body.messages as any[]);return request(body,label).catch(error=>{if(media)media.modelError(error,body.messages as any[]);throw error;});}, execute, check,
+            tools: () => serviceTools.filter(t => offered(permissions(), t.function.name)&&(!mediaTools.includes(t as any)||!!media)&&(!computerTool(t.function.name)||computing)), request:async(body,label)=>{media?.addImages(body.messages as any[]);return request(body,label).catch(error=>{if(media)media.modelError(error,body.messages as any[]);throw error;});}, execute, check,
             redact: value => redactor.text(value), clean: value => redactor.clean(value) };
           // Model context is bounded: older local messages are folded into a rolling summary; originals stay searchable.
           // Folding waits for a batch, so a busy group does not pay a summary request before every answer, and it is only
@@ -322,7 +331,7 @@ export class ChannelServiceSessions {
           for (let step = 0; ; step++) {
             check();
             media?.addImages(messages);
-            const tools = serviceTools.filter(t => offered(permissions(), t.function.name)&&(!mediaTools.includes(t as any)||!!media)), body = { messages, tools, tool_choice: 'auto' };
+            const tools = serviceTools.filter(t => offered(permissions(), t.function.name)&&(!mediaTools.includes(t as any)||!!media)&&(!computerTool(t.function.name)||computing)), body = { messages, tools, tool_choice: 'auto' };
             transcript.fit(body);
             event('model_start');
             const { value } = await request(body, 'turn:' + step).catch(error=>{if(media)media.modelError(error,messages);throw error;});
@@ -362,7 +371,9 @@ export class ChannelServiceSessions {
         reason instanceof HttpError || reason instanceof TaskError ? reason.code : 'conversation_failed', Date.now(), id);
       throw reason;
     } finally {
-      await computers.close();
+      // The computer stays for the group's next turn unless what the group may see changed: then it goes at once.
+      const changed = (() => { try { this.bindings.assertUsable(binding); return this.bindings.fence(chat.id) !== fence; } catch { return true; } })();
+      await computers?.close(changed);
       this.active.delete(id);
       for (const entry of explorers.values()) await entry.tokens.revoke();
     }

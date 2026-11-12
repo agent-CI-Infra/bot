@@ -4,9 +4,10 @@ import { digest, fail, fields, HttpError, randomId, text, type Json } from '../c
 import type { StoredMessage } from './types.js';
 import type { ChannelLedger } from './ledger.js';
 import type { FeishuAdapter } from './feishu.js';
-import type { ServiceComputers } from '../service-roles/resources.js';
 import { marked } from 'marked';
 import { TaskError } from '../agent/common.js';
+// The turn's own assistant computer (#457): HOME paths (~/...) or temporary ones (/tmp/...).
+export interface MediaComputer { importFile(path: string, data: Buffer): Promise<Json>; exportFile(path: string, maxBytes: number): Promise<{ data: Buffer; name: string }> }
 
 export const inboundBytes = 20 * 1024 * 1024;
 export const artifactBytes = 30 * 1024 * 1024;
@@ -114,11 +115,11 @@ const resource_id = { type: 'string', description: 'Opaque resource_id from list
 export const mediaTools = [
   fn('list_message_resources', 'List image/file attachments of a visible local message (the current message by default). This does not download bytes.', { message_id: { type: 'string' } }),
   fn('read_message_text', 'Read the full text of a visible local message in chunks (the current message by default). Use this for long or quoted messages.', { message_id: { type: 'string' }, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 8000 } }),
-  fn('read_message_resource', 'Read an attachment as UTF-8 text in chunks. Binary formats need import_message_resource and an authorized project computer.', { resource_id, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 8000 } }, ['resource_id']),
+  fn('read_message_resource', 'Read an attachment as UTF-8 text in chunks. Binary formats need import_message_resource and your computer.', { resource_id, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 8000 } }, ['resource_id']),
   fn('view_message_image', 'Send a supported PNG/JPEG/GIF/WebP image (up to 512 KiB) to this turn’s model. Requires a model that supports image input; never claim to see it if the provider refuses. Larger/other images need the computer tools.', { resource_id }, ['resource_id']),
-  fn('import_message_resource', 'Copy an authorized attachment into your isolated private project workspace for actual processing. Repository access and computer write permission are required.', { resource_id, repository: { type: 'string' }, path: { type: 'string' } }, ['resource_id', 'repository', 'path']),
+  fn('import_message_resource', 'Copy an authorized attachment into your computer for actual processing: /tmp/... for temporary work, ~/... only to keep it in HOME for later turns. Computer write permission is required.', { resource_id, path: { type: 'string' } }, ['resource_id', 'path']),
   fn('attach_message_resource', 'Select an authorized attachment for the final reply as a real Feishu image/file. Selection is not a delivery receipt. Up to 20 attachments per reply.', { resource_id }, ['resource_id']),
-  fn('attach_workspace_file', 'Snapshot a regular file from your isolated private project workspace and select it for the final Feishu reply (up to 30 MiB). Never accepts host paths or URLs. Repository and computer read permission are required.', { repository: { type: 'string' }, path: { type: 'string' } }, ['repository', 'path']),
+  fn('attach_workspace_file', 'Snapshot a regular file of your computer (~/..., /tmp/... or relative to the working directory) and select it for the final Feishu reply (up to 30 MiB). Never accepts host paths or URLs. Computer read permission is required.', { path: { type: 'string' } }, ['path']),
   fn('create_reply_file', 'Create a UTF-8 text attachment for the final reply, up to 48,000 characters. Selection is not a delivery receipt.', { name: { type: 'string' }, content: { type: 'string' } }, ['name', 'content']),
 ];
 export const mediaPermission = (name: string) => name === 'import_message_resource' ? 'write_file' : name === 'attach_workspace_file' ? 'read_file' : undefined;
@@ -128,7 +129,7 @@ export class MediaTurn {
   private readonly images: { resource: string; url: string }[] = [];
   private readonly viewed=new Set<string>();
   constructor(readonly media: ChannelMedia, readonly chat: string, readonly source: string, readonly guard: () => void,
-    readonly computers: ServiceComputers, readonly project: (id: string) => void, readonly scopes?: string[], readonly fence = '') {}
+    readonly computers: MediaComputer | undefined, readonly project: (id: string) => void, readonly scopes?: string[], readonly fence = '') {}
   row(id: string): Row {
     this.guard();
     const row = this.media.store.get('SELECT * FROM channel_resources WHERE id=? AND chat_id=?', id, this.chat);
@@ -181,11 +182,17 @@ export class MediaTurn {
       return { message_id: message, resources: visible.some(m => !m.deleted && !m.sensitive) ? this.media.store.all('SELECT * FROM channel_resources WHERE chat_id=? AND message_id=? ORDER BY id', this.chat, message).filter(row => row.kind === 'incoming' || row.fence === this.fence).map(row => resourceMetadata(this.media.store, row)) : [] };
     }
     if (name === 'create_reply_file') return this.artifact(Buffer.from(text(args.content, 48000)), text(args.name, 180));
-    if (name === 'attach_workspace_file') { const file = await this.computers.exportFile(text(args.repository), text(args.path, 2048), artifactBytes); this.guard(); this.project(file.project); return this.artifact(file.data, file.name, file.project); }
+    if (name === 'attach_workspace_file') {
+      if (!this.computers) return { error: 'computer_not_configured' };
+      const file = await this.computers.exportFile(text(args.path, 4096), artifactBytes); this.guard(); return this.artifact(file.data, file.name);
+    }
     const id = text(args.resource_id, 100);
     if (name === 'attach_message_resource') return this.select(id);
     const file = await this.bytes(id);
-    if (name === 'import_message_resource') { const result = await this.computers.importFile(text(args.repository), text(args.path, 2048), file.data); this.row(id); return result; }
+    if (name === 'import_message_resource') {
+      if (!this.computers) return { error: 'computer_not_configured' };
+      const result = await this.computers.importFile(text(args.path, 4096), file.data); this.row(id); return result;
+    }
     if (name === 'view_message_image') {
       if (!/^image\/(png|jpeg|gif|webp)$/.test(file.mime)) fail(415, 'channel_image_format_unsupported');
       if (file.data.length > 512 * 1024 || this.images.length >= 1) fail(413, 'channel_image_model_limit');

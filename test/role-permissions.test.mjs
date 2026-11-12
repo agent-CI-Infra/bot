@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { Store } from '../dist/storage/database.js';
 import { normalizePermissions, permissionTools, permitsManagement, resourceAllowed, updatePermissions, fullPermissions, defaultPermissions, githubWriteAllowed, narrowPermissions } from '../dist/roles/permissions.js';
 import { OwnTasks } from '../dist/service-roles/own-tasks.js';
-import { Redactor } from '../dist/agent/common.js';
-import { ServiceComputers, serviceMemory } from '../dist/service-roles/resources.js';
+import { serviceMemory } from '../dist/service-roles/resources.js';
 import { roleConfiguration, resetBuiltinRolePermissions } from '../dist/roles/definition.js';
 import { assertTaskExternalEffect, taskReadScopes, withTaskPermissions } from '../dist/tasks/management.js';
 
@@ -106,31 +105,6 @@ test('private memory and own-task controls are isolated by conversation, princip
   assert.equal((await tasks.invoke('continue_own_task',{task_id:own.task_id,instruction:'Retry'},host)).error,'own_task_cancelled');
   assert.equal(s.get('SELECT count(*) n FROM tasks').n,0);
   assert.equal(permitsManagement(fullPermissions(),'task.create',true),true);
-});
-
-
-test('service computers use private sealed operation rows and refuse cross-scope or changed generations',async t=>{
-  const s=new Store(':memory:',Buffer.alloc(32,2));t.after(()=>s.close());
-  let generation=1,enabled=true;const requests=[];
-  const manager={async call(method,path,input){
-    if(method==='GET')return {generation,state:'ready'};
-    requests.push({path,...input});return {ok:true,result:input.request.type==='workspace_read'?{content:'private-file'}:{written:true}};
-  }};
-  const resolve=selected=>{if(!enabled)throw Error('scope_revoked');if(selected!=='fixture/repo')throw Error('repository_out_of_scope');return {id:'r',full_name:selected};};
-  const a=new ServiceComputers(s,manager,'turn-a','chat-a',new Redactor(),async()=>{},resolve);
-  const b=new ServiceComputers(s,manager,'turn-b','chat-b',new Redactor(),async()=>{},resolve);
-  await a.execute('write_file',{repository:'fixture/repo',path:'note.txt',content:''});
-  assert.equal((await b.execute('read_file',{repository:'fixture/repo',path:'note.txt'})).content,'private-file');
-  assert.equal(new Set(requests.filter(r=>r.request.type==='workspace_init').map(r=>r.request.workspace_id)).size,2);
-  assert.equal(s.get('SELECT count(*) n FROM task_tools').n,0);assert.equal(s.get('SELECT count(*) n FROM role_conversation_operations').n,0);
-  const rows=s.all('SELECT * FROM service_role_operations');assert.ok(rows.length>=4);assert.ok(rows.every(r=>!r.request.includes('note.txt')));
-  let before=requests.length;
-  await assert.rejects(a.execute('read_file',{repository:'other/repo',path:'note.txt'}),/repository_out_of_scope/);
-  assert.equal(requests.length,before);
-  generation=2;await assert.rejects(a.execute('run_command',{repository:'fixture/repo',command:'true'}),{code:'environment_generation_changed'});
-  assert.equal(requests.length,before);
-  enabled=false;await assert.rejects(b.execute('read_file',{repository:'fixture/repo',path:'note.txt'}),/scope_revoked/);
-  await a.close();await b.close();assert.equal(requests.filter(r=>r.request.type==='reap').length,2);
 });
 
 

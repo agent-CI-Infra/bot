@@ -25,7 +25,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     // Global settings: one category at a time, each with its own address; a reload keeps it.
     await tab('全局设置').click(); await expect(page).toHaveURL(/#\/settings$/);
     const nav = page.locator('.project-nav'), cards = () => page.locator('#settings-panel h3').allInnerTexts();
-    await expect(nav.getByRole('link')).toHaveText(['常规', '接入向导', '飞书连接', '公网接入', '机器人账号', '安装档案', '项目管理', '项目电脑', '外部执行', '模型', '服务角色', '用户']);
+    await expect(nav.getByRole('link')).toHaveText(['常规', '接入向导', '飞书连接', '公网接入', '机器人账号', '安装档案', '项目管理', '项目电脑', '助手电脑', '外部执行', '模型', '服务角色', '用户']);
     for (const [caption, key, shown] of [['常规', 'general', ['当前运行版本', '同时运行的任务', '虚拟电脑默认资源']], ['飞书连接', 'feishu', ['飞书应用连接']], ['公网接入', 'access', ['公网 HTTPS 地址', 'Cloudflare Tunnel', 'GitHub 登录（只读）']],
       ['机器人账号', 'accounts', ['接入向导使用的 GitHub App', '已登记的账号', 'GitHub 请求额度']], ['安装档案', 'installations', ['GitHub App 安装档案']],
       ['模型', 'models', ['默认共享模型', '部署共享模型']], ['用户', 'users', ['用户']]]) {

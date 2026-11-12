@@ -56,6 +56,8 @@ manager 重启会先停止不确定的执行，标记未完成操作 interrupted
 
 当前 runner 为无网络监听的一次性固定执行入口：manager 通过 Docker exec 发送校验后的请求，返回 JSON 与持久 journal，调用者不能指定 exec argv 或用户。支持工作区相对文件读取／写入和 shell 命令，命令不限时长，运行到结束为止；要中断正在执行的命令，在机器配置中停止或重置虚拟电脑；单次写入 48 KiB、读取 1 MiB、命令输出 1 MiB。命令运行中输出同步写入 journal 旁的临时文件，manager 的只读 `output` 接口按字节偏移读取，不占用项目锁；命令完成后该文件删除，完整结果保存在 journal。journal 每次调用一条记录，只在调用后不久有用（重复的操作 ID 取回首次结果、读取刚结束命令的输出），所以 manager 在每次 provision 后和运行中每 6 小时在后台、不占项目锁地清理一次：删除超过 1 天的记录，仍记为运行中的命令和它的输出保留 7 天。runner 的健康检查不读 journal，记录再多也不拖慢启动。项目运行用户为 10001，根文件系统只读，工作卷可写，CPU、内存、进程数和 /tmp 默认为 2 核、4096 MB、1024、1024 MB，超级管理员可按仓库在 manager 允许的范围内修改。批准的项目镜像自带 Node.js 22（npm、corepack 的 pnpm／yarn）、Python 3.11（pip、venv、uv）、gcc／g++／make、git、git-lfs、curl、wget、jq、ripgrep、sqlite3、zip／unzip，镜像自带包清单在 `/opt/bot/image-packages`。仓库需要的系统软件包由 manager 以批准镜像为底、用固定的 apt 命令构建派生镜像（按底层镜像和包集合缓存，root 只出现在构建阶段）；非机密环境变量注入容器并传给每条命令；初始化脚本以项目用户在 `/workspace` 运行，`HOME=/workspace/home` 在工作卷中，`~/.local/bin`、`~/.cargo/bin`、`~/.npm-global/bin` 在 PATH 上，脚本或代次变化时重新运行，结果和输出在虚拟电脑页可见。Git 操作在容器内执行。任务工具支持隔离工作目录、分块文件与 Git 候选；上游 API 认证始终由控制面代理。执行入口仅供内部控制面和验收调用，管理页面没有通用终端。
 
+群聊助手和管理助手不使用项目电脑：manager 按对话归属（群按群、私信按人）为它们创建无网络的短时助手电脑，回合结束后空闲 5 分钟回收，持久 HOME 按归属和代次存放在 `assistant-homes` 卷，控制面负责归属、授权围栏、HOME 代次、容量和保留，细节见[服务角色 · 助手电脑](service-roles.md#助手电脑)。
+
 每个仓库的独立稳定笔记卷读写挂在 `/workspace/project-notes`，任务通过 `../notes/` 使用；停机、重建、禁用和重置代次后保留，删除项目时随环境删除笔记卷，旧工作卷仍保留。项目页由 manager 直接读写同一份卷内文件，电脑未启动时也能编辑，无需启动项目或辅助容器。
 
 ## 检视与开发数据流

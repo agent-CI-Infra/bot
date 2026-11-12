@@ -5,7 +5,7 @@
 titles.settings = '全局设置';
 // waiting_token with a saved token means this deployment has no tunnel status endpoint to read.
 const tunnelStates = { waiting_token: '读不到状态', not_running: 'tunnel 服务未运行', connecting: '正在连接', connected: '已连接' };
-const settingsSections = [['general', '常规'], ['onboarding', '接入向导'], ['feishu', '飞书连接'], ['access', '公网接入'], ['accounts', '机器人账号'], ['installations', '安装档案'], ['projects', '项目管理'], ['computers', '项目电脑'], ['external', '外部执行'], ['models', '模型'], ['service-roles', '服务角色'], ['users', '用户']];
+const settingsSections = [['general', '常规'], ['onboarding', '接入向导'], ['feishu', '飞书连接'], ['access', '公网接入'], ['accounts', '机器人账号'], ['installations', '安装档案'], ['projects', '项目管理'], ['computers', '项目电脑'], ['assistant-computers', '助手电脑'], ['external', '外部执行'], ['models', '模型'], ['service-roles', '服务角色'], ['users', '用户']];
 // A settings address is a section and, for a detail page, one record inside it: #/settings/installations/<host>/<app>/<id>
 // and #/settings/users/<id>. Unknown sections fall back to 常规, an unreadable id is handled by the page itself.
 function settingsRoute() {
@@ -36,6 +36,14 @@ async function renderSettings(request) {
 const settingsCards = {
   async projects(request, id) { return globalProjectSettings(request, id, false); },
   async computers(request, id) { return globalProjectSettings(request, id, true); },
+  // Group assistants' and the management assistant's computers (#457): their timers and limits, and every HOME.
+  async 'assistant-computers'(request) {
+    const [{ settings }, overview] = await Promise.all([api('/api/settings'), api('/api/assistant-computers').catch(err => ({ error: err.message }))]);
+    const view = { settings: settings.assistant_computers, overview };
+    if (!view.settings) return [consoleState('助手电脑不可用', '这个部署没有挂载助手 HOME 卷或连不上 manager，群聊助手和管理助手的电脑工具不会提供。', { tone: 'error' })];
+    const homes = liveCard('HOME 占用', redraw => assistantHomesBody(view, redraw, request));
+    return [liveCard('助手电脑设置', redraw => assistantSettingsBody(view, redraw)).section, homes.section];
+  },
   async external(request) {
     const { settings } = await api('/api/external/settings'), section = card('外部执行兑换地址');
     const address = input('token_audience', settings.token_audience || '', { type: 'url' }), status = note(''); status.setAttribute('role', 'status');
@@ -224,6 +232,64 @@ function resourceDefaultsBody(view, redraw) {
       view.computer = (await api('/api/settings', 'PATCH', { computer_defaults: changes })).settings.computer_defaults;
       redraw('已保存：新建的虚拟电脑立即使用，已有的在空闲时重建');
     })];
+}
+// Assistant computers (#457): the manager's container timers and the control plane's HOME limits, saved together.
+const gigabytes = bytes => bytes == null ? '未统计' : bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GB` : bytes >= 1024 ** 2 ? `${(bytes / 1024 ** 2).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`;
+const assistantFields = [['idle_minutes', '空闲回收（分钟）', 'computers'], ['max_containers', '同时存活的电脑上限（台）', 'computers'], ['max_lifetime_minutes', '最长存活（分钟）', 'computers'],
+  ['home_limit_gb', '每个 HOME 上限（GB）', 'homes'], ['retention_days', '不活跃数据保留（天）', 'homes'], ['total_alert_gb', 'HOME 总量告警（GB）', 'homes']];
+function assistantSettingsBody(view, redraw) {
+  const { computers, homes } = view.settings;
+  if (!computers) return [note('暂时读不到 manager，无法显示助手电脑设置，稍后再试。')];
+  const grid = element('div', '', 'field-grid'), controls = {};
+  for (const [key, caption, part] of assistantFields) {
+    const source = part === 'computers' ? computers : homes, [min, max] = source.bounds[key];
+    controls[key] = input(key, String(source.settings[key]), { type: 'number', min, max, step: 1, required: true });
+    grid.append(field(caption, controls[key]));
+  }
+  const runtime = controls.runtime = document.createElement('select'); runtime.name = 'runtime';
+  for (const name of [...new Set([...(computers.runtimes ?? []), computers.settings.runtime])]) { const option = element('option', name + (name === computers.defaults.runtime ? '（默认）' : '')); option.value = name; runtime.append(option); }
+  runtime.value = computers.settings.runtime; grid.append(field('容器运行时', runtime));
+  const { usage, limits } = computers;
+  return [facts([['当前电脑', `${usage.computers} 台（使用中 ${usage.busy} 台，排队 ${usage.waiting} 个）`],
+    ['每台资源', `${limits.cpus} CPU · ${megabytes(limits.memory_mb)} 内存（含 /tmp 与工作目录）· ${limits.pids} 个进程 · /tmp 与工作目录各 ${megabytes(limits.tmp_mb)} · 无网络`]]),
+    note('群按群、私信按人各有一台电脑，回合第一次用到时创建；最终回复交出后开始空闲计时，到时删除，/tmp 和工作目录随之清空。HOME 持久保存：超过上限后下一回合只读，不活跃满保留期后删除；所有 HOME 合计没有硬上限，超过告警值时这里和日志提示。'),
+    actionForm([grid], '保存', async () => {
+      const changes = {};
+      for (const [key, , part] of assistantFields) { const value = Number(controls[key].value); if (!Number.isInteger(value)) throw new Error('请填写整数'); if (value !== (part === 'computers' ? computers : homes).settings[key]) changes[key] = value; }
+      if (runtime.value !== computers.settings.runtime) changes.runtime = runtime.value;
+      if (!Object.keys(changes).length) { redraw('没有改动'); return; }
+      view.settings = (await api('/api/settings', 'PATCH', { assistant_computers: changes })).settings.assistant_computers;
+      redraw('已保存：计时与上限立即按新值执行，运行时从新建的电脑起生效');
+    })];
+}
+function assistantHomesBody(view, redraw, request) {
+  const overview = view.overview;
+  if (overview.error) return [element('p', '读不到 HOME 占用：' + overview.error, 'view-error')];
+  const { totals, disk, homes } = overview, message = element('p', '', 'view-error'), nodes = [message];
+  message.setAttribute('role', 'alert');
+  if (totals.alert) { const alert = element('p', `所有 HOME 合计 ${gigabytes(totals.bytes)}，超过告警值 ${gigabytes(totals.alert_bytes)}。请清理不需要的 HOME，或检查数据盘剩余空间。`, 'view-error'); alert.setAttribute('role', 'alert'); nodes.push(alert); }
+  nodes.push(facts([['HOME 合计', `${gigabytes(totals.bytes)}（告警值 ${gigabytes(totals.alert_bytes)}）`], ['数据盘', disk ? `剩余 ${gigabytes(disk.free_bytes)} / 共 ${gigabytes(disk.total_bytes)}` : '读不到']]));
+  if (!homes.length) { nodes.push(note('还没有群或个人用过助手电脑。')); return nodes; }
+  const captions = ['归属', '占用', '文件数', '最后活跃', '状态', ''];
+  const table = element('table', '', 'rule-table assistant-homes'), head = element('tr', ''), thead = document.createElement('thead'), body = document.createElement('tbody');
+  for (const caption of captions) head.append(element('th', caption));
+  thead.append(head); table.append(thead, body);
+  for (const home of homes) {
+    const row = element('tr', ''), cell = (index, value) => { const td = element('td'); td.dataset.label = captions[index]; td.append(value); return td; };
+    const owner = (home.kind === 'group' ? '群 ' : '个人 ') + (home.name || home.subject);
+    const sealed = home.sealed.length ? `；封存 ${home.sealed.length} 代（${gigabytes(home.sealed.reduce((sum, s) => sum + (s.bytes || 0), 0))}）` : '';
+    const state = (home.read_only ? '超过上限，只读' : '可写') + (home.computer ? (home.computer === 'busy' ? ' · 电脑使用中' : ' · 电脑空闲') : '') + sealed;
+    const clear = button('清空', async () => {
+      if (!await askConfirm({ title: `清空${owner}的 HOME？`, body: ['删除这个 HOME 的全部文件（包括封存的旧代次），并删除它正在运行的电脑；正在进行的回合中的命令会被中断。', '这一操作不能撤销。'], action: '清空', danger: true })) return;
+      clear.disabled = true;
+      try { await api(`/api/assistant-computers/${home.owner}/clear`, 'POST', {}); view.overview = await api('/api/assistant-computers'); if (request === renderVersion) redraw(`已清空${owner}的 HOME`); }
+      catch (err) { clear.disabled = false; message.textContent = err.message; }
+    });
+    row.append(cell(0, owner), cell(1, gigabytes(home.bytes)), cell(2, home.files == null ? '未统计' : String(home.files)), cell(3, timestamp(home.active_at)), cell(4, state), cell(5, clear));
+    body.append(row);
+  }
+  const wrap = element('div', '', 'rule-table-wrap'); wrap.append(table); nodes.push(wrap);
+  return nodes;
 }
 // GitHub's hourly request windows per credential, grouped by account: the App's own (JWT), each installation (an
 // organization or user, shared by every repository and task agent there) and a bot account's user.

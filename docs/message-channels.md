@@ -230,7 +230,7 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 独立 image/file、audio/media 的文件资源及 post 内图片（包括 `md` 中的飞书图片 key）与来源消息一起持久化。`list_message_resources` 只列出本会话可见消息的资源 ID、来源 message_id、安全文件名、MIME、大小和状态，不暴露远端 key。`read_message_resource` 首次读取才调用[获取消息资源](https://open.feishu.cn/document/server-docs/im-v1/message/get-2)，始终使用已认证消息的 message_id 与 key，不使用只能读取机器人自传图片的图片下载接口，也不接受 URL、宿主路径或另一个会话的资源替换。入站流式读取上限为本系统的 20 MiB，长度头与实际流都检查；空文件、权限缺失、超限和下载失败有稳定错误码。
 
-UTF-8 文本可分页读取；PNG/JPEG/GIF/WebP 可通过 `view_message_image` 提供真实图片输入给支持图片的模型，每次最多一张、每张最多 512 KiB，以适配现有 2 MiB 模型请求上限。不支持图片输入的模型会明确报提供方错误，不声称看过图片。其他二进制及较大图片通过 `import_message_resource` 进入已授权项目的私有工作区，再由角色允许的电脑工具处理；没有电脑权限或可用项目时明确说明不能解析，不把文件名当作已读内容。
+UTF-8 文本可分页读取；PNG/JPEG/GIF/WebP 可通过 `view_message_image` 提供真实图片输入给支持图片的模型，每次最多一张、每张最多 512 KiB，以适配现有 2 MiB 模型请求上限。不支持图片输入的模型会明确报提供方错误，不声称看过图片。其他二进制及较大图片通过 `import_message_resource` 导入本群或本人的助手电脑（`/tmp/...` 临时处理，`~/...` 保存到 HOME，见[服务角色 · 助手电脑](service-roles.md#助手电脑)），再由角色允许的电脑工具处理；`attach_workspace_file` 把电脑里的普通文件选为回复附件。没有电脑权限时明确说明不能解析，不把文件名当作已读内容。
 
 `attach_message_resource` 选择本会话授权资源，`create_reply_file` 生成 UTF-8 附件，`attach_workspace_file` 从当前私有项目工作区快照一个常规文件并选择发送；后者按内容哈希读取固定字节，拒绝宿主路径、路径穿越和符号链接。选择只是待发送，不是送达回执。每次回复最多 20 个附件。图片经[上传图片](https://open.feishu.cn/document/server-docs/im-v1/image/create)后作为原生 image 消息预览，其余文件经[上传文件](https://open.feishu.cn/document/server-docs/im-v1/file/create)后作为可下载的 file 消息发送；图片采用本系统保守的 10 MiB 上限、文件 30 MiB，空文件拒绝。大于图片上限或非支持图片格式改用文件；尺寸/编码不被飞书接受时保留明确失败诊断，不承诺平台可预览任意文件。
 
