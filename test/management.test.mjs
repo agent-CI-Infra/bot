@@ -289,7 +289,7 @@ test('public task creation accepts development intent and PR endpoint inference 
  for(const intent of ['development',undefined,'report']){
   const software=intent!=='report',contract={goal:'Observable delivery '+String(intent),scope:['project'],criteria:['Executable result'],endpoint:software?'reviewable_pull_request':'report'};
   const response=await admin('/api/tasks','POST',{repository_id:'101',request:contract.goal,contract,...(intent?{intent}:{})});
-  assert.equal(response.status,200,JSON.stringify(response.value));assert.ok(response.value.id);
+  assert.equal(response.status,201,JSON.stringify(response.value));assert.ok(response.value.id);
   const task=h.store.get('SELECT * FROM tasks WHERE id=?',response.value.id);assert.equal(task.kind,software?'task.development':'task.request');assert.equal(task.object_number,null);
  }
  const before=h.store.get('SELECT count(*) n FROM tasks').n;await admin('/api/repositories/101/policy','PATCH',{development_enabled:false});
