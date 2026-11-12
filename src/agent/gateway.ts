@@ -16,6 +16,7 @@ export interface ModelRequest {
   guard?: () => Promise<void>;
   maxOutputTokens?: number;
   onToken?: (delta?: ModelDelta) => Promise<void>;
+  onFinish?: (reason: string) => Promise<void>;
   executionSignal?: AbortSignal;
 }
 
@@ -84,6 +85,9 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
         if (now - lastGuard >= 1000) { lastGuard = now; await input.guard?.(); }
         await input.onToken?.(delta);
       }
+      catch (error) { callbackFailed = true; throw error; }
+    }, async reason => {
+      try { await input.onFinish?.(reason); }
       catch (error) { callbackFailed = true; throw error; }
     }) : await errorBody(response);
   } catch (error) {

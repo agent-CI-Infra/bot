@@ -4,7 +4,7 @@ import { digest, fail, HttpError, randomId, type Json } from '../core/security.j
 import { runAgent } from '../agent/runtime.js';
 import { Redactor, TaskError } from '../agent/common.js';
 import { traceClean } from '../tasks/trace.js';
-import { boundedBatch, chatContextBytes, toolArguments, toolCallsProblem, ToolTranscript } from '../agent/tool-context.js';
+import { boundedBatch, chatContextBytes, requestBytes, requestLimit, toolArguments, toolCallsProblem, ToolTranscript } from '../agent/tool-context.js';
 import { managementTools, obj, str, validate } from './catalog.js';
 import { ManagementService, parameterHash } from './service.js';
 import { checkServiceRoleBudget, managementAssistant, serviceRole, serviceRoleModel } from '../service-roles/roles.js';
@@ -230,11 +230,13 @@ export class ManagementAgent {
             // authorization or source) or when the assistant's service role budget runs out before a model request.
             for(let turn=0;;turn++){
               await guard();this.event(id,'model_start',{turn});
-              const added=incoming?.take();
-              if(added){messages.push({role:'user',content:JSON.stringify(added)});mustReply||=(added.reply_required as Json[]).length>0;}
               media?.addImages(messages);
               const body={messages,tools,tool_choice:'auto'};transcript.fit(body);
-              const {value,request_log_id}=await request(body,'turn:'+turn,async delta=>{if(delta?.content){await guard();this.event(id,'text',{delta:redactor.text(delta.content),provisional:true});}})
+              const added=incoming?.take(Math.max(0,Math.min(chatContextBytes,requestLimit-requestBytes(body)-128)));
+              if(added){messages.push({role:'user',content:JSON.stringify(added)});mustReply||=(added.reply_required as Json[]).length>0;}
+              transcript.fit(body);
+              const {value,request_log_id}=await request(body,'turn:'+turn,async delta=>{if(delta?.content){incoming?.pause();await guard();this.event(id,'text',{delta:redactor.text(delta.content),provisional:true});}},
+                async reason=>{if(!['tool_calls','function_call'].includes(reason))incoming?.pause();})
                 .catch(error=>{if(media)media.modelError(error,messages);throw error;});
               this.event(id,'model_request',{request_log_id});
               const message=value?.choices?.[0]?.message;
@@ -243,11 +245,11 @@ export class ManagementAgent {
               if(!calls.length){
                 if(typeof message.content!=='string')fail(502,'management_model_invalid');
                 await guard();
-                const added=incoming?.take(true);
-                if(added){messages.push(traceClean(message),{role:'user',content:JSON.stringify(added)});mustReply||=(added.reply_required as Json[]).length>0;continue;}
+                incoming?.finish();
                 if(mustReply&&!message.content.trim()&&!media?.attachments.length)fail(502,'management_model_invalid');
-                incoming?.seal();this.event(id,'reply',{text:redactor.text(message.content),authority:'advisory; see tool receipts'});return;
+                this.event(id,'reply',{text:redactor.text(message.content),authority:'advisory; see tool receipts'});return;
               }
+              incoming?.resume();
               messages.push(traceClean(message));
               const results:unknown[]=[];
               for(const call of calls){
@@ -277,8 +279,8 @@ export class ManagementAgent {
         this.store.run("UPDATE management_messages SET state='failed',updated_at=? WHERE id=?",now(),id);this.event(id,'error',{error:code,...(notice?{notice}:{})});
       }
     }finally{
-      incoming?.seal();
-      if(this.store.get('SELECT state FROM management_messages WHERE id=?',id)?.state!=='completed')incoming?.release();
+      if(this.store.get('SELECT state FROM management_messages WHERE id=?',id)?.state==='completed')incoming?.finish();
+      else incoming?.release();
       // The computer stays for the person's next turn unless their authorization changed: then it goes at once.
       await Promise.allSettled([computer?.close(personFence(this.store,actor.principal_id,tenant)!==fence),repositories.close()]);
     }

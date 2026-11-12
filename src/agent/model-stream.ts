@@ -7,7 +7,7 @@ const responseLimit = 2 * 1024 * 1024;
 export interface ModelDelta { content?: string; reasoning?: string; tool?: { index: number; name: string; arguments: string } }
 // Keep provider output in the control plane until usage accounting and response redaction finish. onToken receives each
 // chunk's additions, for callers that show the answer while it is written.
-export async function readModelResponse(response: Response, onToken: (delta: ModelDelta) => Promise<void>): Promise<any> {
+export async function readModelResponse(response: Response, onToken: (delta: ModelDelta) => Promise<void>, onFinish?: (reason: string) => Promise<void>): Promise<any> {
   const reader = response.body?.getReader();
   if (!reader) return stop('model_response_invalid', undefined, '模型响应没有正文。');
   const streaming = response.headers.get('content-type')?.includes('text/event-stream');
@@ -57,7 +57,11 @@ export async function readModelResponse(response: Response, onToken: (delta: Mod
           }
         }
       }
-      if (part.finish_reason != null) { choice.finish_reason = part.finish_reason; finished = true; }
+      if (part.finish_reason != null) {
+        choice.finish_reason = part.finish_reason; finished = true;
+        // Model completion precedes usage trailers and platform bookkeeping; it is not token activity.
+        await onFinish?.(String(part.finish_reason));
+      }
     }
     // Role-only chunks, usage, SSE comments and blank lines never extend the token deadline.
     if (token) await onToken(added);
@@ -84,11 +88,11 @@ export async function readModelResponse(response: Response, onToken: (delta: Mod
     }
     pending += decoder.decode();
     if (!streaming) {
-      try {
-        const parsed = JSON.parse(pending);
-        if (!parsed?.choices?.[0]?.message) return invalid();
-        return parsed;
-      } catch { return invalid(); }
+      let parsed: any;
+      try { parsed = JSON.parse(pending); } catch { return invalid(); }
+      if (!parsed?.choices?.[0]?.message) return invalid();
+      await onFinish?.(parsed.choices[0].message.tool_calls?.length ? 'tool_calls' : String(parsed.choices[0].finish_reason ?? 'stop'));
+      return parsed;
     }
     if (!done) {
       for (const text of pending.split(/\r\n|[\r\n]/)) { await line(text); if (done) break; }
