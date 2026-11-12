@@ -21,6 +21,7 @@ export function traceClean(value:any,literal=false):any {
 export function retainedTextArtifact(path:string,version:string,data:Buffer,expectedBytes:number,redact:(text:string)=>string){
   const original=data.toString('utf8'),content=traceClean({encoding:'utf8',content:redact(original)}).content;
   const read_complete=data.length===expectedBytes,binary=!Buffer.from(original).equals(data),sanitized=content!==original;
+  // codeql[js/weak-cryptographic-algorithm] Git object id must be SHA-1; not used for passwords, signatures or tokens.
   const blob=(bytes:Buffer)=>createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
   const captured=Buffer.from(content),matches=blob(data)===version,complete=read_complete&&!binary&&!sanitized&&matches;
   return {path,version,encoding:'utf8',content,read_complete,complete,binary,sanitized,captured_blob_sha:blob(captured),content_sha256:createHash('sha256').update(captured).digest('hex'),missing_reason:!read_complete?'blob_unavailable':binary?'binary_utf8_conversion':sanitized?'sanitized_representation':!matches?'blob_hash_mismatch':null};
