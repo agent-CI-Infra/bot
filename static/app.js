@@ -214,7 +214,7 @@ async function start() {
 const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['projects','events','external'];
 // Console pages are drawn by static/shell.js (renderConsolePage). They are not tabs of the generic list, and no list
 // read may ever build /api/<tab> from them: #/more would become GET /api/more, an endpoint that does not exist (#365).
-const consoleTabs = ['more', 'inbox', 'new-task', 'preferences', 'conversations'];
+const consoleTabs = ['more', 'inbox', 'new-task', 'conversations'];
 // Wizard steps live inside global settings; old top-level addresses are normalized by route().
 const onboardingAddress = /^#\/settings\/onboarding(?:\/([0-6]))?$/;
 const legacyOnboardingAddress = /^#onboarding(?:\/(\d+))?$/;
@@ -235,6 +235,8 @@ function addressTab(hash) {
 async function route() {
   renderVersion++;
   if (/^#\/channels(?:\/|$)/.test(location.hash)) history.replaceState(null, '', '#/identity/feishu');
+  const legacyComputer = /^#\/settings\/computers(?:\/([^/?#]+))?$/.exec(location.hash);
+  if (legacyComputer) history.replaceState(null, '', legacyComputer[1] ? `#/projects/${decodeURIComponent(legacyComputer[1])}/machine` : '#/settings/general');
   // A project chat link keeps the project context; the top-level management address is a page of its own.
   const chatProject = /^#\/projects\/([^/]+)\/management$/.exec(location.hash)?.[1];
   // The project chat trigger has no settings section of its own: keep the project, open its first page underneath,
@@ -258,13 +260,15 @@ async function route() {
   if (tab !== 'settings') $('settings-panel').replaceChildren();
   const address=tab+':'+location.hash;if(messagePage!==address){notice('message');messagePage=address;}
   const consolePage = consoleTabs.includes(tab);
+  if (!consolePage) $('console-page').replaceChildren();
   const sample = !target && tab === 'design', samplePage = $('design-page');
   page.hidden = !target; samplePage.hidden = !sample; list.hidden = !!target || tab === 'management' || consolePage || sample;
   $('console-page').hidden = !consolePage;
   if (typeof syncConsoleShell === 'function') syncConsoleShell(target);
   // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
   document.body.classList.toggle('board-mode', !target && tab === 'board');
-  document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
+  const activeNavTab = ['preferences', 'identity', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
+  document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', !target && el.dataset.tab === activeNavTab ? 'page' : 'false'));
   // A second address can arrive while the first one is still loading (a hash change during a list read): the newer
   // route owns the page, so this one stops before it can redraw it from the address it no longer represents.
   if (resolved !== tab) return;
@@ -304,17 +308,18 @@ async function render(quiet = false) {
   // The list this call belongs to. A hash change can land while a read below is still in flight; the call must finish
   // the list it started for, or step aside, and never re-point its own address at whatever `tab` became (#365).
   const pageTab = tab;
-  const request=++renderVersion, taskTab = !!taskKinds[tab];
-  $('page-title').textContent = titles[tab];
-  document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
+  const request=++renderVersion, taskTab = !!taskKinds[tab], isIdentity = tab === 'identity' || tab === 'preferences';
+  $('page-title').textContent = tab === 'preferences' ? titles.identity : titles[tab];
+  const activeNavTab = ['preferences', 'identity', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
+  document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === activeNavTab ? 'page' : 'false'));
   $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
-  $('rows').hidden=['external','board','costs','settings','identity'].includes(tab);$('external-panel').hidden=tab!=='external';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=tab!=='identity';$('sync').hidden=true;$('hidden-filter-label').hidden=true;
+  $('rows').hidden=['external','board','costs','settings','identity','preferences'].includes(tab);$('external-panel').hidden=tab!=='external';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=!isIdentity;$('sync').hidden=true;$('hidden-filter-label').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = listParams();
   $('rows').dataset.view=tab;if(!quiet){$('rows').replaceChildren();listSignature='';$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');}
   if(tab==='board'){try{await renderBoard(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='costs'){try{await renderCosts(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
-  if(tab==='identity'){try{await renderIdentity();}finally{$('rows').removeAttribute('aria-busy');}return;}
+  if(isIdentity){try{await renderIdentity();}finally{$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='settings'){try{await renderSettings(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='external'){params.delete('account_id');params.delete('owner_id');try{await renderExternal(params,request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if (taskTab) params.set('kind', taskKinds[tab]);
@@ -376,7 +381,7 @@ async function render(quiet = false) {
     if(tab==='projects'&&!hiddenView){line.classList.add('project-list-row');line.dataset.repositoryId=row.id;status.classList.add('project-overview');status.append(projectListControls(row));}
     if(taskTab&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
     if(status.childElementCount)line.append(status);
-    if(installedView){const actions=element('div','','actions'); actions.append(consoleLink('#/settings/projects/' + row.id, '全局设置')); actions.append(button('设置',()=>openProject(row.id)));
+    if(installedView){const actions=element('div','','actions'); actions.append(button('设置',()=>openProject(row.id)));
       if(hiddenView)actions.append(button('恢复',()=>restoreInstalled(row,()=>start()).catch(error),'quiet'));
       if(actions.childElementCount)line.append(actions);}
     else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id)));line.append(actions);}

@@ -5,7 +5,13 @@
 titles.settings = '全局设置';
 // waiting_token with a saved token means this deployment has no tunnel status endpoint to read.
 const tunnelStates = { waiting_token: '读不到状态', not_running: 'tunnel 服务未运行', connecting: '正在连接', connected: '已连接' };
-const settingsSections = [['general', '常规'], ['onboarding', '接入向导'], ['feishu', '飞书连接'], ['access', '公网接入'], ['accounts', '机器人账号'], ['installations', '安装档案'], ['projects', '项目管理'], ['computers', '项目电脑'], ['assistant-computers', '助手电脑'], ['external', '外部执行'], ['models', '模型'], ['service-roles', '服务角色'], ['users', '用户']];
+const settingsGroups = [
+  ['系统与算力', [['general', '常规'], ['models', '模型'], ['service-roles', '服务角色'], ['assistant-computers', '助手电脑']]],
+  ['接入与网络', [['onboarding', '接入向导'], ['access', '公网接入'], ['external', '外部执行']]],
+  ['连接与渠道', [['accounts', '机器人账号'], ['installations', '安装档案'], ['feishu', '飞书连接']]],
+  ['仓库与用户', [['projects', '项目管理'], ['users', '用户']]]
+];
+const settingsSections = settingsGroups.flatMap(([, items]) => items);
 // A settings address is a section and, for a detail page, one record inside it: #/settings/installations/<host>/<app>/<id>
 // and #/settings/users/<id>. Unknown sections fall back to 常规, an unreadable id is handled by the page itself.
 function settingsRoute() {
@@ -19,7 +25,10 @@ let settingsView = null;
 async function renderSettings(request) {
   const route = settingsRoute(), section = route.section, nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content'), body = element('div', '', 'project-body settings-body');
   nav.setAttribute('aria-label', '全局设置类别');
-  for (const [key, caption] of settingsSections) { const item = element('a', caption); item.href = '#/settings/' + key; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item); }
+  for (const [groupTitle, items] of settingsGroups) {
+    nav.append(element('p', groupTitle, 'console-nav-label'));
+    for (const [key, caption] of items) { const item = element('a', caption); item.href = '#/settings/' + key; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item); }
+  }
   // The categories are drawn at once; the chosen category's cards follow when their data arrives.
   $('count').textContent = ''; content.append(element('p', '正在加载…', 'muted')); body.append(nav, content); $('settings-panel').replaceChildren(body);
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
@@ -30,12 +39,10 @@ async function renderSettings(request) {
   const cards = await handler(request, route.id);
   if (request !== renderVersion) return;
   content.replaceChildren(...cards);
-  if (section === 'computers' && current?.globalSettings && cards.length > 1) void refreshProjectStatus(renderToken);
 }
 // Each category loads only what its cards show.
 const settingsCards = {
-  async projects(request, id) { return globalProjectSettings(request, id, false); },
-  async computers(request, id) { return globalProjectSettings(request, id, true); },
+  async projects(request, id) { return globalProjectSettings(request, id); },
   // Group assistants' and the management assistant's computers (#457): their timers and limits, and every HOME.
   async 'assistant-computers'(request) {
     const [{ settings }, overview] = await Promise.all([api('/api/settings'), api('/api/assistant-computers').catch(err => ({ error: err.message }))]);
@@ -160,8 +167,8 @@ const settingsCards = {
     return [settingsList('用户', '项目权限由 GitHub 当前权限和 Bot 内显式委派共同决定；下面显示当前可见项目及来源。超级管理员管理全部项目和全局设置。', users.map(userProfileLine), '还没有用户。', '新增用户', 'users')];
   },
 };
-async function globalProjectSettings(request, id, computer) {
-  const selection = card(computer ? '项目电脑配置' : '项目管理');
+async function globalProjectSettings(request, id) {
+  const selection = card('项目管理');
   selection.append(note('仅超级管理员可配置。项目管理员使用「设置」管理项目策略、模型、角色和成员。'));
   const listing = /^(list|hidden)\.(\d+)$/.exec(id || ''), hidden = listing?.[1] === 'hidden', offset = Number(listing?.[2] || 0);
   if (listing) id = null;
@@ -169,7 +176,7 @@ async function globalProjectSettings(request, id, computer) {
   const selector = document.createElement('select'); selector.setAttribute('aria-label', '全局设置中的项目');
   selector.add(new Option('选择项目', ''));
   for (const repo of installed) selector.add(new Option(repo.full_name, repo.id)); selector.value = id || '';
-  selector.addEventListener('change', () => { location.hash = '#/settings/' + (computer ? 'computers' : 'projects') + (selector.value ? '/' + selector.value : ''); });
+  selector.addEventListener('change', () => { location.hash = '#/settings/projects' + (selector.value ? '/' + selector.value : ''); });
   selection.append(field('选择项目', selector));
   if (!id) {
     const tools = element('div', '', 'actions');
@@ -182,28 +189,27 @@ async function globalProjectSettings(request, id, computer) {
     selection.append(tools, note(`${hidden ? '已隐藏仓库' : '项目'} · 第 ${offset / 50 + 1} 页 · 本页 ${installed.length} 个`));
     for (const row of installed) {
       const item = element('article', '', 'channel-binding global-project-row'); item.dataset.key = row.id; item.dataset.repositoryId = row.id; item.append(element('strong', row.full_name));
-      if (computer) item.append(consoleLink('#/settings/computers/' + row.id, '配置项目电脑'));
-      else if (hidden) item.append(button('恢复', () => restoreInstalled(row, () => route()).catch(error), 'quiet'));
+      if (hidden) item.append(button('恢复', () => restoreInstalled(row, () => route()).catch(error), 'quiet'));
       else item.append(...installedBadges(row), ...installedIntegration(null, row), projectListControls(row), installedActions(row, () => route()), consoleLink('#/settings/projects/' + row.id, '全局管理此项目', '启停、删除和公开可见性'));
       selection.append(item);
     }
-    const prefix = '#/settings/' + (computer ? 'computers' : 'projects') + '/' + (hidden ? 'hidden.' : 'list.');
+    const prefix = '#/settings/projects/' + (hidden ? 'hidden.' : 'list.');
     const paging = element('nav', '', 'actions'); paging.setAttribute('aria-label', '全局项目分页');
     if (offset) paging.append(consoleLink(prefix + Math.max(0, offset - 50), '上一页'));
     if (installed.length === 50) paging.append(consoleLink(prefix + (offset + 50), '下一页')); selection.append(paging);
-    if (!hidden && !computer) void api('/api/integrations').then(result => {
+    if (!hidden) void api('/api/integrations').then(result => {
       if (request === renderVersion) updateIntegrationChips(result.integrations || []);
     }).catch(() => { if (request === renderVersion) updateIntegrationChips(installed.map(row => ({ repository_id: row.id, gate_state: 'unknown' }))); });
     return [selection];
   }
   if (request !== renderVersion) return [];
   const flash = current?.globalSettings && current.id === id ? current.flash : null;
-  current = { id, section: computer ? 'machine' : 'basic', globalSettings: true };
+  current = { id, section: 'basic', globalSettings: true };
   const target = current;
   await loadProject(id, target.section);
   if (request !== renderVersion || current !== target) return [];
   if (![...selector.options].some(option => option.value === id)) selector.add(new Option(target.repository.full_name, id)); selector.value = id;
-  const cards = computer ? machineSection(true) : globalProjectControls();
+  const cards = globalProjectControls();
   if (flash) selection.append(note(flash));
   return [selection, projectHeader(), ...cards];
 }

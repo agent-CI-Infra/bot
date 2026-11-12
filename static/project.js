@@ -269,8 +269,7 @@ function basicSection() {
     sources.append(facts([['规则', file.path], ['当前来源', layerNames[file.source] || file.source]]));
   }
   sources.append(consoleLink(`#/projects/${id}/roles/manager`, '查看与修改规则', '保留现有的来源比较和版本检查'));
-  const layout = element('div', '', 'project-settings-layout'); layout.append(info, summary, branch, automation, sources);
-  if (me.role === 'super_admin') layout.append(consoleLink(`#/settings/projects/${id}`, '在全局设置中管理项目', '项目启停、删除和公开看板'));
+  const layout = element('div', '', 'project-settings-layout'); layout.append(info, summary, branch, automation, sources, ...globalProjectControls());
   return [layout];
 }
 
@@ -326,7 +325,7 @@ function globalProjectControls() {
       finally { change.disabled = false; }
     }, policy.enabled ? 'destructive' : '');
     danger.append(change, button('删除项目', () => deleteProject({ id, full_name: repository.full_name, registered: true }, async () => {
-      if (current === target) { current = null; location.hash = '#/settings/projects'; }
+      if (current === target) { current = null; location.hash = target.globalSettings ? '#/settings/projects' : '#/projects'; }
     }), 'quiet destructive'), feedback);
   } else danger.append(note('启用、禁用与删除项目由平台超级管理员处理。请联系该管理员；项目管理员不因页面入口获得这些能力。'));
   return [publication, danger];
@@ -335,7 +334,6 @@ function globalProjectControls() {
 function machineSection(globalSettings = false) {
   const { environment } = current, pc = environment?.environment.computer, editable = me.role === 'super_admin' && !!pc;
   const status = element('div', '', 'status-grid computer-status-grid'); status.id = 'machine-status'; status.append(...machineStatus());
-  if (!globalSettings) return [status, concurrencyForm(), ...(me.role === 'super_admin' ? [consoleLink(`#/settings/computers/${current.id}`, '在全局设置中配置项目电脑', '资源、软件、网络和初始化由超级管理员统一配置')] : [])];
   if (!pc) return [status, ...(globalSettings ? [] : [concurrencyForm()]), note('暂时读不到虚拟电脑规格。连接恢复后可重新读取本页配置；未保存改动请先保存。'),button('重新读取电脑配置',()=>reloadProject().catch(error))];
   const unread = !current.rules || current.rules.needs_refresh === true || !current.rules.sha;
   const effective=current.rules?.computer||pc, source=current.rules?.files.find(f=>f.path==='.bot/computer.yaml');
@@ -430,7 +428,7 @@ function machineSection(globalSettings = false) {
   const heading=form.querySelector('h3'),toolbar=element('div','','heading');heading.replaceWith(toolbar);toolbar.append(heading,reread);
   toolbar.after(sourceReadError);
   if(unread)toolbar.after(note(!current.rules?'规则来源读取失败，不能确认仓库覆盖关系。请重新读取配置后保存。':'尚未读取默认分支文件，不能确认仓库覆盖关系。请重新读取配置后保存。'));
-  return [status, form];
+  return [status, ...(globalSettings ? [] : [concurrencyForm()]), form];
 }
 // How many tasks this computer runs at once: the project's own value, or empty for the global default. Project
 // administrators change it too; it never rebuilds the computer.

@@ -45,15 +45,12 @@ async function renderIdentity() {
   panel.classList.toggle('identity-feishu-page', personalBinding || groups || conversations);
   if (personalBinding || groups || conversations) {
     $('count').textContent = '';
-    const navigation = element('nav', '', 'actions'); navigation.setAttribute('aria-label', '飞书个人设置');
-    navigation.append(channelLink('#/identity', '身份与权限', 'button-link quiet'), channelLink('#/identity/feishu', '个人飞书绑定', 'button-link quiet'),
-      channelLink('#/identity/feishu/groups', '群助手设置', 'button-link quiet'), channelLink('#/conversations', '飞书会话', 'button-link quiet'), channelLink('#/preferences', '返回设置', 'button-link quiet'));
-    panel.replaceChildren(navigation, consoleState('正在读取飞书设置', '正在核对本人的绑定或获准管理的会话。'));
+    panel.replaceChildren(consoleState('正在读取飞书设置', '正在核对本人的绑定或获准管理的会话。'));
     const load = async () => {
       try {
         const content = await (groups ? channelServiceBindingSettings() : conversations ? channelPersonalChats() : feishuIdentityCard());
-        if (current()) panel.replaceChildren(navigation, content);
-      } catch (err) { if (current()) panel.replaceChildren(navigation, consoleState('飞书设置读取失败', err.message, { tone: 'error', retry: load })); }
+        if (current()) panel.replaceChildren(content);
+      } catch (err) { if (current()) panel.replaceChildren(consoleState('飞书设置读取失败', err.message, { tone: 'error', retry: load })); }
     };
     await load(); return;
   }
@@ -146,7 +143,7 @@ async function renderIdentity() {
     } catch (err) { if (current()) provider.replaceChildren(consoleState('GitHub 登录状态读取失败', err.message, { tone: 'error', retry: () => loadProvider() })); }
   };
   const loadFeishu = async () => {
-    try { const data = await api('/api/channels/bindings'), feishu = card('飞书身份与绑定'); feishu.append(await channelBindingOverview(data)); if (!current()) return; feishuSlot.replaceChildren(feishu); }
+    try { const data = await api('/api/channels/bindings'), feishu = card('飞书身份与绑定'); if (typeof notePersonalApps === 'function') notePersonalApps(data); feishu.append(await channelBindingOverview(data)); if (!current()) return; feishuSlot.replaceChildren(feishu); }
     catch (err) { if (current()) feishuSlot.replaceChildren(consoleState('飞书绑定读取失败', err.message, { tone: 'error', retry: () => loadFeishu() })); }
   };
   const loading = [loadProvider(), loadFeishu()];

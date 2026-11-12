@@ -35,6 +35,7 @@ function channelProfileDetails(chat, changed = () => {}) {
 async function feishuIdentityCard() {
   const data = await api('/api/channels/bindings'), section = card('飞书身份绑定'), request = renderVersion, nameLookups = [];
   section.id = 'feishu-identity';
+  if (typeof notePersonalApps === 'function') notePersonalApps(data);
   section.append(await channelBindingOverview(data));
   section.append(note('将本人的飞书账号关联到当前平台账户。本地账户和 GitHub 登录均可使用，无需先绑定 GitHub。之后仅能访问该账户实际获准的项目，绑定本身不会增加仓库权限。'));
   // Organization and repository admins add and manage their organization's apps from here; super administrators in settings (#424).

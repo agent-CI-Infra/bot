@@ -107,7 +107,7 @@ test('project list shows progress while settings own mutations and project admin
     const row=page.locator('#rows [data-repository-id="101"]');
     await expect(row).toContainText('执行中 1');await expect(row.getByRole('switch')).toHaveCount(0);
     await expect(row.getByRole('button',{name:'禁用',exact:true})).toHaveCount(0);
-    await row.getByRole('link',{name:'全局设置',exact:true}).click();
+    await row.getByRole('button',{name:'设置',exact:true}).click();
     await expect(page.getByRole('button',{name:'禁用项目',exact:true})).toBeVisible();
     await page.goto(h.admin+'/#/settings/projects');
     const globalRow=page.locator('.global-project-row[data-key="101"]');
@@ -116,9 +116,9 @@ test('project list shows progress while settings own mutations and project admin
     const memberPassword=testPassword();await admin('/api/users','POST',{username:'project-admin',password:memberPassword,repository_ids:['101']});
     const context=await browser.newContext({viewport:{width:390,height:844}}),member=await context.newPage();
     try{
-      await member.goto(h.admin+'/#/preferences');await member.getByLabel('用户名',{exact:true}).fill('project-admin');await member.getByLabel('密码',{exact:true}).fill(memberPassword);await member.getByRole('button',{name:'登录',exact:true}).click();
-      await member.getByLabel('要设置的项目').selectOption('101');await expect(member.getByLabel('要设置的项目').locator('option')).toHaveCount(2);
-      await member.getByRole('link',{name:'基本设置',exact:false}).click();
+      await member.goto(h.admin+'/#/projects');await member.getByLabel('用户名',{exact:true}).fill('project-admin');await member.getByLabel('密码',{exact:true}).fill(memberPassword);await member.getByRole('button',{name:'登录',exact:true}).click();
+      await expect(member.locator('#rows .row')).toHaveCount(1);
+      await member.locator('#rows [data-repository-id="101"]').getByRole('button',{name:'设置',exact:true}).click();
       await member.getByLabel('开启自动开发',{exact:true}).check();
       await member.getByLabel('开启自动开发',{exact:true}).locator('xpath=ancestor::form').getByRole('button',{name:'保存',exact:true}).click();
       await expect(member.locator('#project-page .flash')).toContainText('已保存');

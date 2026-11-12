@@ -58,10 +58,15 @@ for (const width of [1440, 390]) {
       await expect(app(page, f.id).locator('.channel-binding-console code')).toHaveCount(0);
       await page.goto(f.h.admin + '/#/projects'); await page.goto(f.h.admin + '/#/identity/feishu');
       await expect(binding).toContainText('已绑定');
-      await page.getByRole('link', { name: '群助手设置', exact: true }).click();
+      const pickPage = async name => {
+        const picker = page.getByLabel('当前页面', { exact: true });
+        if (await picker.isVisible()) await picker.selectOption({ label: name });
+        else await page.getByRole('link', { name, exact: true }).click();
+      };
+      await pickPage('群助手设置');
       await expect(page.getByRole('heading', { name: '飞书群聊助手', exact: true })).toBeVisible();
       await expect(page.getByRole('heading', { name: '飞书身份绑定', exact: true })).toHaveCount(0);
-      await page.getByRole('link', { name: '个人飞书绑定', exact: true }).click();
+      await pickPage('个人飞书绑定');
       await expect(binding).toContainText('已绑定');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       expect(errors).toEqual([]);
@@ -98,9 +103,14 @@ test('the chosen bot has its own simple flow and a failed group-management read 
     await issue(page, other, true);
     await expect(app(page, other).locator('code')).toBeVisible();
     await expect(page.getByLabel('飞书认证字符串', { exact: true })).toBeHidden();
-    await page.getByRole('link', { name: '群助手设置', exact: true }).click();
+    const pickPage = async name => {
+      const picker = page.getByLabel('当前页面', { exact: true });
+      if (await picker.isVisible()) await picker.selectOption({ label: name });
+      else await page.getByRole('link', { name, exact: true }).click();
+    };
+    await pickPage('群助手设置');
     await expect(page.getByRole('heading', { name: '飞书设置读取失败', exact: true })).toBeVisible();
-    await page.getByRole('link', { name: '个人飞书绑定', exact: true }).click();
+    await pickPage('个人飞书绑定');
     await expect(page.getByRole('heading', { name: '飞书身份绑定', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   } finally { await f.close(); }

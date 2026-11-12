@@ -34,11 +34,11 @@ test('shared desktop rail and mobile navigation expose real destinations across 
       await page.screenshot({path:`${out}/more-${width}.png`,fullPage:true});
     }
     await page.setViewportSize({width:1440,height:1000});await page.goto(h.admin+'/#/projects/101/roles');
-    for(const name of ['身份与权限','Webhook 投递','外部执行端']) await expect(page.locator('#tabs').getByRole('button',{name,exact:true})).toBeVisible();
-    await expect(page.locator('#console-sidebar .project-nav')).toContainText('项目知识');
-    await page.locator('#console-sidebar .project-nav').getByRole('link',{name:'模型',exact:true}).click();
+    for(const name of ['项目','管理对话','看板','统计','Webhook 投递','个人设置','全局设置']) await expect(page.locator('#tabs').getByRole('button',{name,exact:true})).toBeVisible();
+    await expect(page.locator('#console-secondary-nav .project-nav')).toContainText('项目知识');
+    await page.locator('#console-secondary-nav .project-nav').getByRole('link',{name:'模型',exact:true}).click();
     await expect(page).toHaveURL(/#\/projects\/101\/model$/);await page.reload();
-    await expect(page.locator('#console-sidebar .project-nav [aria-current=page]')).toHaveText('模型');
+    await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('模型');
     await page.setViewportSize({width:390,height:844});
     await page.getByLabel('当前页面',{exact:true}).selectOption('#/projects/101/knowledge');
     await expect(page).toHaveURL(/#\/projects\/101\/knowledge$/);
@@ -46,17 +46,18 @@ test('shared desktop rail and mobile navigation expose real destinations across 
     await expect(page.locator('.console-group').filter({has:page.getByRole('heading',{name:'设置',exact:true})})).toContainText('机器配置');
     await expect(page.getByRole('link',{name:'公网接入',exact:false})).toBeVisible();
     // A short desktop keeps settings visible while a long category list scrolls above them.
-    await page.setViewportSize({width:1440,height:500});await page.goto(h.admin+'/#/settings/users');
+    await page.setViewportSize({width:1440,height:360});await page.goto(h.admin+'/#/settings/users');
     await expect(page.locator('#settings-panel')).toContainText('administrator');
     const primary=page.locator('.console-primary-nav'), settings=page.locator('.console-settings-nav');
     expect(await primary.evaluate(node=>node.scrollHeight>node.clientHeight)).toBe(true);
     await primary.evaluate(node=>node.scrollTop=node.scrollHeight);
+    await page.setViewportSize({width:1440,height:500});
     const mainBox=await primary.boundingBox(), settingsBox=await settings.boundingBox();
     expect(mainBox.y+mainBox.height).toBeLessThanOrEqual(settingsBox.y);
     expect(settingsBox.y+settingsBox.height).toBeLessThanOrEqual(500);
-    await settings.getByRole('button',{name:'设置',exact:true}).click();
-    await expect(page.getByRole('heading',{name:'设置',exact:true})).toBeVisible();
-    await expect(settings.getByRole('button',{name:'设置',exact:true})).toHaveAttribute('aria-current','page');
+    await settings.getByRole('button',{name:'个人设置',exact:true}).click();
+    await expect(page.getByRole('heading',{name:'身份与权限',exact:true})).toBeVisible();
+    await expect(settings.getByRole('button',{name:'个人设置',exact:true})).toHaveAttribute('aria-current','page');
     await page.screenshot({path:`${out}/settings-footer-short-desktop.png`,fullPage:true});
     await page.setViewportSize({width:1440,height:1000});
     await page.screenshot({path:`${out}/settings-footer-desktop.png`,fullPage:true});
@@ -97,7 +98,7 @@ test('permissions, in-flight navigation, keyboard and history keep their boundar
     await expect(page.getByRole('heading',{name:'全局设置',exact:true})).toHaveCount(0);
     await expect(page.getByRole('link',{name:'飞书连接',exact:false})).toHaveCount(0);
     await page.setViewportSize({width:1440,height:900});
-    await expect(page.locator('.console-settings-nav').getByRole('button',{name:'设置',exact:true})).toBeVisible();
+    await expect(page.locator('.console-settings-nav').getByRole('button',{name:'个人设置',exact:true})).toBeVisible();
     await expect(page.locator('.console-settings-nav').getByRole('button',{name:'全局设置',exact:true})).toBeHidden();
     await page.setViewportSize({width:390,height:844});
     expect(await page.locator('#console-project option').allTextContents()).not.toContain('202');

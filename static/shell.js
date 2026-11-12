@@ -122,7 +122,7 @@ function consoleGroups() {
     ['#/identity', '身份与权限', '本人绑定与当前有效授权'],
     ['#/external', '外部执行端', '接入与连接诊断']
   ] });
-  groups.push({ title: '设置', items: [['#/preferences', '设置', '个人身份、飞书绑定与项目配置'], ...(repo ? projectSections
+  groups.push({ title: '设置', items: [['#/preferences', '个人设置', '个人身份、飞书绑定与外部执行端'], ...(repo ? projectSections
     .filter(([key]) => ['basic', 'roles', 'model', 'machine', 'schedules', 'external', 'members'].includes(key))
     .map(([key, name]) => [`#/projects/${id}/${key}`, name, repo.full_name]) : [])] });
   if (me.role === 'super_admin') groups.push({ title: '全局设置', items: settingsSections.map(([key, name]) => [
@@ -142,6 +142,7 @@ function syncConsoleShell() {
     if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles();
     if (typeof resetScheduleViews === 'function') resetScheduleViews();
     if (typeof resetBoard === 'function') resetBoard();
+    if (typeof resetPersonalApps === 'function') resetPersonalApps();
     consoleOwner = me?.id || null; consoleProject = null; consoleNavSignature = ''; consolePositions.clear(); consoleRouteKey = null;
     $('console-secondary-nav').replaceChildren(); $('console-page').replaceChildren();
   }
@@ -167,12 +168,12 @@ function syncConsoleShell() {
     }
     picker.value = consoleProject || '';
   }
-  const platform = tab === 'settings';
+  const platform = tab === 'settings', personal = !project && ['preferences', 'identity', 'external', 'conversations'].includes(tab);
   $('console-project').closest('label').hidden = platform;
-  $('console-area').textContent = platform ? '平台管理' : project ? '项目工作区' : tab === 'identity' ? '我的身份' : '工作区';
+  $('console-area').textContent = platform ? '平台管理' : project ? '项目工作区' : personal ? '个人设置' : '工作区';
   // The scope bar names both halves of the current address: a project name alone does not say which organization it is in.
   const shortName = r => (r.full_name || '').includes('/') ? r.full_name.split('/').slice(1).join('/') : r.full_name;
-  $('console-context').textContent = project ? (repo ? organization(repo) + ' · ' + shortName(repo) : '正在读取项目…') : ({ more: '更多功能', inbox: '待处理', settings: '全局设置' }[tab] || titles[tab] || '身份与权限');
+  $('console-context').textContent = project ? (repo ? organization(repo) + ' · ' + shortName(repo) : '正在读取项目…') : ({ more: '更多功能', inbox: '待处理', settings: '全局设置', preferences: '身份与权限' }[tab] || titles[tab] || '身份与权限');
   // A project can be reachable while some of its features cannot run; the navigation every page shares has to say so.
   // Only the installation snapshot names the gaps, and only a super administrator may read it, so nothing is invented.
   const permission = $('console-permission');
@@ -186,9 +187,17 @@ function syncConsoleShell() {
   if (repo && me.role === 'super_admin' && !consoleGaps.has(String(repo.id))) setTimeout(() => loadConsoleGaps(String(repo.id)), 0);
 
   $('console-inbox-link').href = '#/inbox' + (consoleProject ? '/' + consoleProject : '');
-  const secondary = project ? $('project-page').querySelector('.project-nav') : platform ? $('settings-panel').querySelector('.project-nav') : null;
-  if (secondary) $('console-secondary-nav').replaceChildren(secondary);
-  else if (!project && !platform) $('console-secondary-nav').replaceChildren();
+  const scopeKey = project ? 'project:' + project.id : platform ? 'settings' : personal ? 'personal' : '';
+  const secondary = project ? $('project-page').querySelector('.project-nav')
+    : platform ? $('settings-panel').querySelector('.project-nav')
+    : personal && typeof personalSettingsNav === 'function' ? personalSettingsNav() : null;
+  if (secondary) {
+    secondary.dataset.navScope = scopeKey;
+    $('console-secondary-nav').replaceChildren(secondary);
+  } else if (!scopeKey || $('console-secondary-nav').firstElementChild?.dataset.navScope !== scopeKey) {
+    $('console-secondary-nav').replaceChildren();
+  }
+  $('console-secondary-nav').hidden = !$('console-secondary-nav').childElementCount;
   const nav = $('console-secondary-nav').querySelector('nav'), sectionPicker = $('console-section');
   $('console-section-label').hidden = !nav;
   sectionPicker.replaceChildren();
@@ -247,7 +256,6 @@ async function renderConsoleInbox(request) {
 }
 async function renderConsolePage(request) {
   if (tab === 'new-task') await renderNewTask(request);
-  else if (tab === 'preferences') await renderPreferences(request);
   else if (tab === 'conversations') await renderChannelConsole(request);
   else if (tab === 'more') renderConsoleMore();
   else {
@@ -281,14 +289,14 @@ function initConsoleShell() {
   settings.append(tabs.querySelector('[data-tab=preferences]'), tabs.querySelector('[data-tab=settings]'));
   primary.append(kicker, ...tabs.children);
   const inbox = consoleLink('#/inbox', '待处理'); inbox.id = 'console-inbox-link'; primary.append(inbox);
-  const secondary = element('div'); secondary.id = 'console-secondary-nav'; primary.append(secondary);
   // Keep the original tabs and their click handling, but let only the work navigation scroll above the settings.
   tabs.replaceChildren(primary, settings); sidebar.append(scope, tabs);
   const locationBox = element('div', '', 'console-location'); locationBox.id = 'console-location'; locationBox.hidden = true;
   const area = element('span', '', 'eyebrow'), context = element('span'); area.id = 'console-area'; context.id = 'console-context';
   const permission = element('span', '', 'console-permission'); permission.id = 'console-permission';
   locationBox.append(area, context, permission);
-  $('main-content').prepend(locationBox);
+  const secondary = element('div', '', 'console-secondary-nav'); secondary.id = 'console-secondary-nav'; secondary.hidden = true;
+  $('main-content').prepend(locationBox, secondary);
   const section = element('label', '当前页面', 'console-section-picker'), sectionPicker = document.createElement('select'); section.id = 'console-section-label'; sectionPicker.id = 'console-section'; sectionPicker.setAttribute('aria-label', '当前页面'); section.hidden = true;
   sectionPicker.addEventListener('change', () => { location.hash = sectionPicker.value; }); section.append(sectionPicker); locationBox.append(section);
   const mobile = element('nav', '', 'console-mobile-nav'); mobile.id = 'console-mobile-nav'; mobile.hidden = true; mobile.setAttribute('aria-label', '移动工作区导航');

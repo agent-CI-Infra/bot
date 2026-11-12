@@ -77,8 +77,8 @@ for (const width of [1440, 390]) test(`Feishu console shows real messages, steps
     await overview.getByText('查看维护的群与绑定范围', { exact: true }).click(); await expect(overview).toContainText('项目讨论群');
     await page.evaluate(() => { document.activeElement?.blur(); scrollTo(0, 0); });
     await page.screenshot({ path: `.tmp/channel-console/bindings-${width}.png`, fullPage: true });
-    await page.goto(f.h.admin + '/#/preferences'); await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible();
-    await page.getByLabel('要设置的项目').selectOption('101'); await expect(page.locator('#console-page')).toContainText('基本设置');
+    await page.goto(f.h.admin + '/#/preferences'); await expect(page.getByRole('heading', { name: '身份与权限', exact: true })).toBeVisible();
+    await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('身份与权限');
     await page.screenshot({ path: `.tmp/channel-console/settings-${width}.png`, fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
@@ -119,21 +119,19 @@ test('settings keep platform mutations in global settings and project administra
   const f = await channelFixture();
   try {
     await login(page, f, '#/projects/101/basic');
-    await expect(page.getByRole('button', { name: '删除项目', exact: true })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: '禁用项目', exact: true })).toHaveCount(0);
-    await page.getByRole('link', { name: '在全局设置中管理项目', exact: false }).click();
-    await expect(page).toHaveURL(/#\/settings\/projects\/101$/);
     await expect(page.getByRole('button', { name: '禁用项目', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '删除项目', exact: true })).toBeVisible();
     await page.getByRole('button', { name: '退出登录', exact: true }).click();
     const password = testPassword(); await f.admin('/api/users', 'POST', { username: 'project-owner', password, repository_ids: ['101'] });
     await page.getByLabel('用户名', { exact: true }).fill('project-owner'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click(); await page.goto(f.h.admin + '/#/preferences');
-    await expect(page.locator('#tabs [data-tab=preferences]')).toHaveText('设置');
+    await expect(page.locator('#tabs [data-tab=preferences]')).toHaveText('个人设置');
     await expect(page.locator('#tabs [data-tab=settings]')).toBeHidden();
-    await page.getByLabel('要设置的项目').selectOption('101');
-    await page.getByRole('link', { name: '基本设置', exact: false }).click();
+    await page.getByLabel('切换项目').selectOption('101');
+    await page.locator('#console-secondary-nav .project-nav').getByRole('link', { name: '基本设置', exact: true }).click();
     await expect(page.getByLabel('基准分支', { exact: true })).toBeEnabled();
+    await expect(page.getByRole('button', { name: '删除项目', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '禁用项目', exact: true })).toHaveCount(0);
     await page.goto(f.h.admin + '/#/settings/projects/101'); await expect(page.locator('#settings-panel')).toBeHidden();
     await page.goto(f.h.admin + '/#/more'); await expect(page.getByRole('heading', { name: '全局设置', exact: true })).toHaveCount(0);
   } finally { await f.close(); }
@@ -151,7 +149,7 @@ test('conversation refresh reports stale data, clears revoked content and ignore
     let release; const gate = new Promise(resolve => { release = resolve; });
     await page.route('**/timeline?*', async route => { await gate; await route.continue().catch(() => {}); });
     await page.getByRole('button', { name: '刷新会话', exact: true }).click();
-    await page.goto(f.h.admin + '/#/preferences'); release(); await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible();
+    await page.goto(f.h.admin + '/#/preferences'); release(); await expect(page.getByRole('heading', { name: '身份与权限', exact: true })).toBeVisible();
     await expect(page.getByLabel('消息与执行时间线')).toHaveCount(0); await page.unroute('**/timeline?*');
     await page.goto(f.h.admin + '/#/conversations/' + chat.id); await expect(page.getByLabel('消息与执行时间线')).toContainText('Group discussion');
     await page.clock.install(); let revokedReads = 0;
@@ -174,8 +172,8 @@ test('binding generation remains available while optional group metadata is slow
     await login(page, f, '#/identity/feishu');
     await expect(page.getByRole('button', { name: '生成绑定串', exact: true })).toBeVisible();
     await page.goto(f.h.admin + '/#/preferences'); release();
-    await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible();
-    await expect(page.getByRole('region', { name: '飞书绑定概览' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: '身份与权限', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '生成绑定串', exact: true })).toHaveCount(0);
   } finally { release?.(); await f.close(); }
 });
 
