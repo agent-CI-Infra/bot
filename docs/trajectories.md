@@ -55,6 +55,14 @@ Agent 工作的大块正文（模型请求与响应、工具调用与结果、�
 
 删除项目时删除它的轨迹目录和入口，清理会话历史时删除该会话的轨迹文件。轨迹暂不过期。
 
+## manager 账本
+
+manager 把每次 runner 调用的输入和结果写进自己数据卷里的轨迹文件（`manager/trajectories.mjs`，格式和规则与上文相同）：`trajectories/<repository_id>/<workspace_id>.jsonl`，一个任务工作区一个文件；启动、停止、配置等不属于工作区的调用写进 `trajectories/<repository_id>/project.jsonl`。任务释放工作区（`reap`）时关闭它的文件，30 分钟没有追加也会关闭。
+
+`operations` 每行保留调用的状态、一个小表头（操作 id、generation、请求类型和工作区）、输入的 sha256（`input_sha256`，判断同一操作 id 的重复调用是否同一请求），以及输入和结果的定位串（`input_ref`、`result_ref`），`result` 为 NULL。结果先写入并 `fdatasync`，再提交指向它的更新；重复调用从文件重放结果，校验不通过时以 `operation_record_unreadable` 拒绝，不重新执行。
+
+manager 就绪（恢复完成）之后，后台先封口上次留下的未关闭文件，再按 rowid 分片迁移已结束（`completed`、`interrupted`）的旧行，做法与控制面相同，进度在 manager 数据库的 `settings.trajectory_migration`。仍在运行的调用留给它自己的调用写完。账本行不删除，所以 manager 的轨迹文件也不随项目删除。
+
 ## 历史数据迁移
 
 升级前写进行里的正文由后台迁移搬进文件（`src/storage/migration.ts`）。控制面开始监听、封口任务跑完之后才启动，就绪不等它；启动阶段只加列、重建触发器，不读大表的行。

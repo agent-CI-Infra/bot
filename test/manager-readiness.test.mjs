@@ -23,7 +23,7 @@ test('the manager stays fenced until every saved project has recovered and uncer
   let projects = new Projects(options);
   for (const repo of ['101', '202']) {
     await projects.register(repo);
-    projects.db.prepare("INSERT INTO operations VALUES(?,?, 'execute',1,'{}','running',NULL)").run('old-' + repo, repo);
+    projects.db.prepare("INSERT INTO operations(id,repository_id,action,generation,input,state,result) VALUES(?,?, 'execute',1,'{}','running',NULL)").run('old-' + repo, repo);
   }
   const starts = docker.starts;
   projects.db.close(); projects = new Projects(options);
@@ -141,7 +141,7 @@ test('recovery reads only the running operations, through their partial index', 
     assert.match(plan, /SEARCH operations USING (COVERING )?INDEX operations_running \(repository_id=\?\)/, `${sql}: ${plan}`);
   }
   // A finished operation leaves the index; a running one is in it.
-  projects.db.prepare("INSERT INTO operations VALUES('a','101','execute',1,'{}','running',NULL)").run();
-  projects.db.prepare("INSERT INTO operations VALUES('b','101','execute',1,'{}','completed','{}')").run();
+  projects.db.prepare("INSERT INTO operations(id,repository_id,action,generation,input,state,result) VALUES('a','101','execute',1,'{}','running',NULL)").run();
+  projects.db.prepare("INSERT INTO operations(id,repository_id,action,generation,input,state,result) VALUES('b','101','execute',1,'{}','completed','{}')").run();
   assert.equal(projects.db.prepare("SELECT count(*) n FROM operations INDEXED BY operations_running WHERE repository_id='101' AND state='running'").get().n, 1);
 });

@@ -19,4 +19,7 @@ for (const signal of ['SIGINT','SIGTERM']) process.once(signal, () => {
   server.close(async () => { await recovered; await projects.shutdown(); process.exit(0); });
 });
 await recovered;
+// Background work once the manager is ready: close trajectory files a stopped process left open, then move the bodies of
+// ledger rows written before #436 into files, slice by slice.
+if (!stopping) void projects.trajectories.seal().catch(error => console.error('[manager] sealing trajectory files failed:', error)).then(() => { if (!stopping) projects.migration.start(); });
 if (!stopping) timer = setInterval(async () => { if (checking) return; checking = true; try { await projects.check(); await runs.reap(); } finally { checking = false; } }, 5000);

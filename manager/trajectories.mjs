@@ -1,0 +1,276 @@
+import { closeSync, existsSync, fdatasync, close as closeAsync, ftruncateSync, mkdirSync, openSync, readSync, writeSync } from 'node:fs';
+import { open as openAsync } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { dirname, join, resolve, sep } from 'node:path';
+
+// The manager's trajectory files: the input and result of every runner call it records, appended to JSONL files under
+// its data volume, one per project and task workspace (lifecycle calls without one share the project's file). The
+// ledger (operations) keeps the call's state and a ref "<file>:<offset>:<length>:<sha256 of the line>" per body. The
+// format and rules are those of the control plane's src/storage/trajectories.ts (docs/trajectories.md): a line is
+// {"seq","at","type","id","prev","data"} with prev the sha256 of the line before it; trajectory_files gets one insert
+// when a file is opened and one update when it is closed; appending never writes SQLite; the line is written (and, for
+// a result a repeated call replays, synced) before the row that points to it is committed.
+
+const sha256 = value => createHash('sha256').update(value).digest('hex');
+export const segment = value => String(value ?? '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 120) || '_';
+const refPattern = /^([a-f0-9]{16}):(\d+):(\d+):([a-f0-9]{64})$/;
+
+export class TrajectoryError extends Error {
+  constructor(code, detail) { super(code + ': ' + detail); this.code = code; this.detail = detail; }
+}
+export function parseRef(ref) {
+  const match = refPattern.exec(String(ref));
+  if (!match) throw new TrajectoryError('trajectory_ref_invalid', String(ref).slice(0, 120));
+  return { file: match[1], offset: Number(match[2]), length: Number(match[3]), sha256: match[4] };
+}
+
+export function trajectoryStorage(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS trajectory_files(id TEXT PRIMARY KEY,repository_id TEXT,workspace_id TEXT,path TEXT NOT NULL,created_at TEXT NOT NULL,
+      closed_at TEXT,bytes INTEGER,records INTEGER,last_sha256 TEXT,counts TEXT);
+    CREATE INDEX IF NOT EXISTS trajectory_files_open ON trajectory_files(created_at) WHERE closed_at IS NULL;
+    CREATE INDEX IF NOT EXISTS trajectory_files_repository ON trajectory_files(repository_id,created_at);
+    CREATE TABLE IF NOT EXISTS trajectory_usage(repository_id TEXT NOT NULL,kind TEXT NOT NULL,count INTEGER NOT NULL DEFAULT 0,
+      bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(repository_id,kind));`);
+}
+
+export class Trajectories {
+  constructor(db, root, idleMs = 30 * 60_000) {
+    this.db = db; this.root = resolve(root); this.idleMs = idleMs;
+    this.open = new Map(); this.handles = new Map(); this.paths = new Map();
+    mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    this.timer = setInterval(() => this.closeIdle(), Math.min(idleMs, 60_000)); this.timer.unref?.();
+  }
+  /** The file of a project's runner calls for one task workspace; lifecycle calls go to the project's file. */
+  static scope(repositoryId, workspaceId) {
+    const own = workspaceId ? segment(workspaceId) : 'project';
+    return { key: `${repositoryId}:${own}`, path: `${segment(repositoryId)}/${own}`, repository_id: String(repositoryId), workspace_id: workspaceId ?? null };
+  }
+  append(scope, type, id, data) {
+    const handle = this.handle(scope);
+    const line = JSON.stringify({ seq: handle.seq + 1, at: new Date().toISOString(), type, id: String(id), prev: handle.last, data: data ?? null });
+    const bytes = Buffer.from(line + '\n');
+    try { for (let written = 0; written < bytes.length;) written += writeSync(handle.fd, bytes, written, bytes.length - written); }
+    catch (error) { try { ftruncateSync(handle.fd, handle.bytes); } catch { handle.broken = true; this.finish(handle); } throw error; }
+    const offset = handle.bytes, digest = sha256(line);
+    handle.bytes += bytes.length; handle.seq++; handle.records++; handle.last = digest; handle.used = Date.now();
+    const count = handle.counts[type] ?? [0, 0]; count[0]++; count[1] += bytes.length; handle.counts[type] = count;
+    return `${handle.id}:${offset}:${bytes.length - 1}:${digest}`;
+  }
+  sync(ref) {
+    const handle = this.handles.get(parseRef(ref).file);
+    if (!handle) return Promise.resolve();
+    if (handle.closed) return handle.chain;
+    const done = handle.chain.then(() => new Promise((ok, fail) => fdatasync(handle.fd, error => error ? fail(error) : ok())));
+    handle.chain = done.catch(() => {});
+    return done;
+  }
+  read(ref) {
+    const { file, offset, length, sha256: expected } = parseRef(ref), path = this.pathOf(file), buffer = Buffer.alloc(length + 1);
+    let fd;
+    try { fd = openSync(join(this.root, path), 'r'); } catch { throw new TrajectoryError('trajectory_truncated', `${path}: file is missing`); }
+    try { if (readSync(fd, buffer, 0, length + 1, offset) < length + 1) throw new TrajectoryError('trajectory_truncated', `${path}: ends before offset ${offset + length + 1}`); }
+    finally { closeSync(fd); }
+    const text = buffer.subarray(0, length);
+    if (buffer[length] !== 0x0a || sha256(text) !== expected) throw new TrajectoryError('trajectory_corrupt', `${path}: record at offset ${offset} does not match its hash`);
+    return JSON.parse(text.toString('utf8'));
+  }
+  close(key) { const handle = this.open.get(key); if (handle) this.finish(handle); }
+  closeAll() { clearInterval(this.timer); for (const handle of [...this.open.values()]) this.finish(handle); }
+  async settle() { await Promise.all([...this.handles.values()].map(handle => handle.chain)); }
+  /** Closes the entries a stopped process left open: drops an incomplete last line, verifies the chain, anchors it. */
+  async seal() {
+    let sealed = 0;
+    for (;;) {
+      const open = new Set(this.handles.keys());
+      const entry = this.db.prepare('SELECT * FROM trajectory_files WHERE closed_at IS NULL ORDER BY created_at').all().find(row => !open.has(row.id));
+      if (!entry) return sealed;
+      const path = join(this.root, entry.path), scanned = await scan(path);
+      if (scanned.partial && !scanned.error) { const file = await openAsync(path, 'r+'); try { await file.truncate(scanned.bytes); await file.datasync(); } finally { await file.close(); } }
+      const counts = {};
+      for (const line of scanned.lines) { const count = counts[line.type] ?? [0, 0]; count[0]++; count[1] += line.bytes; counts[line.type] = count; }
+      if (scanned.error) counts.unverified = true;
+      this.atomic(() => {
+        const changed = this.db.prepare('UPDATE trajectory_files SET closed_at=?,bytes=?,records=?,last_sha256=?,counts=? WHERE id=? AND closed_at IS NULL')
+          .run(new Date().toISOString(), scanned.bytes, scanned.lines.length, scanned.last, JSON.stringify(counts), entry.id).changes;
+        if (changed) this.usage(entry.repository_id ?? '', scanned.bytes, counts);
+      });
+      sealed++;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+  }
+  handle(scope) {
+    const current = this.open.get(scope.key);
+    if (current && !current.closed && !current.broken) { this.confirm(current); return current; }
+    let relative = scope.path + '.jsonl';
+    for (let n = 2; existsSync(join(this.root, relative)); n++) relative = `${scope.path}.${n}.jsonl`;
+    const absolute = join(this.root, relative);
+    if (!absolute.startsWith(this.root + sep)) throw new TrajectoryError('trajectory_ref_invalid', relative);
+    mkdirSync(dirname(absolute), { recursive: true, mode: 0o700 });
+    const handle = { id: randomBytes(8).toString('hex'), scope, path: relative, fd: openSync(absolute, 'ax', 0o600), seq: 0, last: null, bytes: 0, records: 0, counts: {},
+      used: Date.now(), confirmed: false, closed: false, broken: false, chain: Promise.resolve() };
+    this.insert(handle);
+    this.open.set(scope.key, handle); this.handles.set(handle.id, handle); this.paths.set(handle.id, relative);
+    return handle;
+  }
+  insert(handle) {
+    this.db.prepare('INSERT OR IGNORE INTO trajectory_files(id,repository_id,workspace_id,path,created_at) VALUES(?,?,?,?,?)')
+      .run(handle.id, handle.scope.repository_id, handle.scope.workspace_id, handle.path, new Date().toISOString());
+    handle.confirmed = this.db.isTransaction === false;
+  }
+  confirm(handle) {
+    if (handle.confirmed) return;
+    if (!this.db.prepare('SELECT 1 FROM trajectory_files WHERE id=?').get(handle.id)) this.insert(handle);
+    else handle.confirmed = this.db.isTransaction === false;
+  }
+  finish(handle) {
+    if (handle.closed) return;
+    handle.closed = true;
+    if (this.open.get(handle.scope.key) === handle) this.open.delete(handle.scope.key);
+    try {
+      this.atomic(() => {
+        const closed = new Date().toISOString(), counts = JSON.stringify(handle.counts);
+        let changed = this.db.prepare('UPDATE trajectory_files SET closed_at=?,bytes=?,records=?,last_sha256=?,counts=? WHERE id=? AND closed_at IS NULL')
+          .run(closed, handle.bytes, handle.records, handle.last, counts, handle.id).changes;
+        if (!changed && !this.db.prepare('SELECT 1 FROM trajectory_files WHERE id=?').get(handle.id))
+          changed = this.db.prepare('INSERT INTO trajectory_files(id,repository_id,workspace_id,path,created_at,closed_at,bytes,records,last_sha256,counts) VALUES(?,?,?,?,?,?,?,?,?,?)')
+            .run(handle.id, handle.scope.repository_id, handle.scope.workspace_id, handle.path, closed, closed, handle.bytes, handle.records, handle.last, counts).changes;
+        if (changed) this.usage(handle.scope.repository_id ?? '', handle.bytes, handle.counts);
+      });
+    } finally {
+      handle.chain = handle.chain.then(() => new Promise(done => fdatasync(handle.fd, () => closeAsync(handle.fd, () => done()))));
+      void handle.chain.then(() => { if (this.handles.get(handle.id) === handle) this.handles.delete(handle.id); });
+    }
+  }
+  usage(repository, bytes, counts) {
+    const add = this.db.prepare(`INSERT INTO trajectory_usage(repository_id,kind,count,bytes) VALUES(?,?,?,?)
+      ON CONFLICT(repository_id,kind) DO UPDATE SET count=count+excluded.count,bytes=bytes+excluded.bytes`);
+    add.run(repository, 'files', 1, bytes);
+    for (const [type, value] of Object.entries(counts)) if (Array.isArray(value)) add.run(repository, 'records:' + type, value[0], value[1]);
+  }
+  pathOf(file) {
+    const known = this.paths.get(file);
+    if (known) return known;
+    const row = this.db.prepare('SELECT path FROM trajectory_files WHERE id=?').get(file);
+    if (!row) throw new TrajectoryError('trajectory_missing', file);
+    if (this.paths.size > 10_000) this.paths.clear();
+    this.paths.set(file, row.path);
+    return row.path;
+  }
+  closeIdle() {
+    const before = Date.now() - this.idleMs;
+    for (const handle of [...this.open.values()]) if (handle.used < before) { try { this.finish(handle); } catch (error) { console.error('[manager] closing a trajectory file failed:', error); } }
+  }
+  atomic(fn) {
+    const name = 'trajectory_' + randomBytes(6).toString('hex');
+    this.db.exec('SAVEPOINT ' + name);
+    try { fn(); this.db.exec('RELEASE ' + name); } catch (error) { this.db.exec('ROLLBACK TO ' + name); this.db.exec('RELEASE ' + name); throw error; }
+  }
+}
+
+/**
+ * Moves the bodies of ledger rows written before trajectory files into them, in the background after the manager is
+ * ready (the same slicing as the control plane's src/storage/migration.ts): read rows in rowid order for about 25 ms,
+ * append, fdatasync off the event loop, read each record back against its hash, then in one short transaction replace
+ * input and result with a header and refs and save the cursor in settings. Only finished calls (completed or
+ * interrupted) move; a running one is left to its call. A restart resumes at the cursor.
+ */
+export class LedgerMigration {
+  constructor(db, trajectories, options = {}) { this.db = db; this.trajectories = trajectories; this.options = options; this.stopped = false; this.touched = new Map(); this.recent = []; }
+  start() { this.running ??= this.loop().catch(error => console.error('[manager] ledger migration stopped:', error)); }
+  async stop() { this.stopped = true; this.wake?.(); await this.running; }
+  /** Progress for the storage page; remaining is estimated from max(rowid), never counted. */
+  state() {
+    const state = JSON.parse(this.db.prepare("SELECT value FROM settings WHERE key='trajectory_migration'").get()?.value ?? 'null') ?? { started_at: null, updated_at: null, rate: 0, phases: {} };
+    const last = Number(this.db.prepare('SELECT max(rowid) n FROM operations').get()?.n ?? 0);
+    return { ...state, remaining: { operations: Math.max(0, last - (state.phases.operations?.cursor ?? 0)) } };
+  }
+  pause(ms) { return new Promise(resolve => { const timer = setTimeout(done, ms); timer.unref?.(); function done() { clearTimeout(timer); resolve(); } this.wake = done; }); }
+  async loop() {
+    const { remaining: _, ...state } = this.state();
+    state.started_at ??= new Date().toISOString();
+    const progress = state.phases.operations ??= { cursor: 0, migrated: 0, skipped: 0, failed: 0, bytes: 0, last_error: null, finished_at: null };
+    const next = this.db.prepare('SELECT rowid AS migration_rowid,* FROM operations WHERE rowid>? ORDER BY rowid LIMIT 1');
+    try {
+      while (!this.stopped) {
+        const started = performance.now(), moves = [];
+        let cursor = progress.cursor, skipped = 0, failed = 0, error = null;
+        for (let read = 0; read === 0 || performance.now() - started < (this.options.readMs ?? 25) && moves.length < 200; read++) {
+          const row = next.get(cursor);
+          if (!row) break;
+          cursor = Number(row.migration_rowid);
+          try { const move = this.move(row); if (move) moves.push(move); else skipped++; }
+          catch (failure) { failed++; error = `operations rowid ${cursor}: ${String(failure?.message ?? failure).slice(0, 300)}`; }
+        }
+        if (cursor === progress.cursor) {
+          if (!progress.finished_at) { progress.finished_at = new Date().toISOString(); this.save(state); }
+          this.closeTouched(0);
+          // Calls finished since (their rows were running when passed) are picked up on the next look.
+          await this.pause(this.options.idleMs ?? 10 * 60_000);
+          continue;
+        }
+        await Promise.all([...new Set(moves.map(move => move.refs.at(-1)))].map(ref => this.trajectories.sync(ref)));
+        const verified = moves.filter(move => { try { for (const ref of move.refs) this.trajectories.read(ref); return true; } catch (failure) { failed++; error = String(failure.message).slice(0, 300); return false; } });
+        const now = Date.now();
+        this.recent.push([now, verified.length]); while (this.recent[0][0] < now - 60_000) this.recent.shift();
+        state.rate = Math.round(this.recent.reduce((sum, [, count]) => sum + count, 0) / Math.max(1, (now - this.recent[0][0]) / 1000));
+        this.db.exec('BEGIN IMMEDIATE');
+        try {
+          for (const move of verified) move.apply();
+          Object.assign(progress, { cursor, migrated: progress.migrated + verified.length, skipped: progress.skipped + skipped, failed: progress.failed + failed,
+            bytes: progress.bytes + verified.reduce((sum, move) => sum + move.bytes, 0), last_error: error ?? progress.last_error, finished_at: null });
+          this.save(state);
+          this.db.exec('COMMIT');
+        } catch (failure) { this.db.exec('ROLLBACK'); throw failure; }
+        this.closeTouched(this.options.openFiles ?? 32);
+        await this.pause(Math.max(this.options.pauseMs ?? 10, performance.now() - started));
+      }
+    } finally { this.closeTouched(0); }
+  }
+  move(row) {
+    if (row.input_ref || !['completed', 'interrupted'].includes(row.state)) return null;
+    const input = JSON.parse(row.input), scope = Trajectories.scope(row.repository_id, input?.request?.workspace_id);
+    this.touched.delete(scope.key); this.touched.set(scope.key, scope);
+    const refs = [this.trajectories.append(scope, 'tool_call', row.id, input)];
+    if (row.result !== null) refs.push(this.trajectories.append(scope, 'tool_result', row.id, JSON.parse(row.result)));
+    return { refs, bytes: String(row.input).length + String(row.result ?? '').length, apply: () => this.db.prepare(
+      'UPDATE operations SET input=?,result=NULL,input_ref=?,result_ref=?,input_sha256=? WHERE id=? AND input_ref IS NULL AND state=?')
+      .run(JSON.stringify(inputHeader(input)), refs[0], refs[1] ?? null, sha256(String(row.input)), row.id, row.state) };
+  }
+  save(state) {
+    state.updated_at = new Date().toISOString();
+    this.db.prepare("INSERT INTO settings VALUES('trajectory_migration',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(state));
+  }
+  closeTouched(keep) { while (this.touched.size > keep) { const [key] = this.touched.keys(); this.touched.delete(key); this.trajectories.close(key); } }
+}
+
+/** What a ledger row keeps of a call's input once its body is in a file: the call's identity and type. */
+export function inputHeader(input) {
+  return { operation_id: input?.operation_id ?? null, generation: input?.generation ?? null, ...(input?.request?.type ? { request: { type: input.request.type, workspace_id: input.request.workspace_id ?? null } } : {}) };
+}
+
+async function scan(path) {
+  const lines = [];
+  let file;
+  try { file = await openAsync(path, 'r'); } catch { return { lines, bytes: 0, last: null, partial: false }; }
+  let bytes = 0, last = null, rest = Buffer.alloc(0);
+  try {
+    const chunk = Buffer.alloc(1 << 20);
+    for (let position = 0; ;) {
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, position);
+      if (!bytesRead) break;
+      position += bytesRead;
+      const buffer = Buffer.concat([rest, chunk.subarray(0, bytesRead)]);
+      let start = 0;
+      for (let end = buffer.indexOf(0x0a); end >= 0; end = buffer.indexOf(0x0a, start)) {
+        const text = buffer.subarray(start, end);
+        let line;
+        try { line = JSON.parse(text.toString('utf8')); } catch { return { lines, bytes, last, partial: false, error: new TrajectoryError('trajectory_corrupt', `${path}: line ${lines.length + 1} is not JSON`) }; }
+        if (line.seq !== lines.length + 1 || (line.prev ?? null) !== last) return { lines, bytes, last, partial: false, error: new TrajectoryError('trajectory_corrupt', `${path}: line ${lines.length + 1} breaks the chain`) };
+        last = sha256(text); bytes += end - start + 1; lines.push({ ...line, bytes: end - start + 1 });
+        start = end + 1;
+      }
+      rest = Buffer.from(buffer.subarray(start));
+    }
+  } finally { await file.close(); }
+  return { lines, bytes, last, partial: rest.length > 0 };
+}
