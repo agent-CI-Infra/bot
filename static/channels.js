@@ -5,17 +5,49 @@ async function feishuIdentityCard() {
   section.append(note('将本人的飞书账号关联到当前平台账户。本地账户和 GitHub 登录均可使用，无需先绑定 GitHub。之后仅能访问该账户实际获准的项目，绑定本身不会增加仓库权限。'));
   if (me.role === 'super_admin') section.append(channelLink('#/settings/feishu', '管理员：连接或管理飞书应用', 'button-link'));
   const steps = element('ol', '', 'feishu-binding-steps');
-  for (const caption of ['点击下方“打开机器人私聊”，在飞书中发送 /bind（或“绑定”）。',
-    '复制机器人在私聊中返回的认证字符串，粘贴到下方表单。',
-    '核对当前平台账户和所选机器人，点击“确认绑定到当前账户”。']) steps.append(element('li', caption));
+  for (const caption of ['在下方选择机器人并点“生成绑定串”，本页会显示一条只能使用一次的消息。',
+    '在飞书中打开与这个机器人的私聊，把那条消息原样发送一次。',
+    '本页只在服务端确认后显示“已绑定”；复制、跳转或等待失败都不算绑定成功。']) steps.append(element('li', caption));
   if (data.applications.length) {
     section.append(steps, note('认证字符串五分钟内有效，仅可使用一次，请勿转发。'));
     const apps = element('div'); apps.setAttribute('aria-label', '可绑定的飞书应用');
     const label = a => `${a.tenant_name || '企业名称暂未获取'} · ${a.app_name || '机器人名称暂未获取'}`;
+    // The console issues the code for the chosen bot (#236): the private-chat message that carries it completes the
+    // binding in one step, and this page only shows 已绑定 after it reads the binding back from the server.
+    const consoleBind = async (a, slot) => {
+      const box = element('div', '', 'channel-binding-console'); box.setAttribute('aria-label', '控制台发起的绑定');
+      // One bot shows one string at a time: asking again replaces the previous box, and the server retires the older code.
+      slot.replaceChildren(box);
+      // Success means a binding this page did not have before: an existing binding is not proof that this code was used.
+      const known = data.bindings.length;
+      const status = element('p', '', 'muted'); status.setAttribute('role', 'status');
+      box.append(status); status.textContent = '正在向服务端申请一次性绑定串…';
+      try {
+        const issued = await api('/api/channels/bindings/issue', 'POST', { connector_id: a.id }), command = '绑定 ' + issued.code;
+        const copy = button('复制绑定串', async () => {
+          try { await navigator.clipboard.writeText(command); status.textContent = '已复制。复制只影响剪贴板，绑定仍以服务端确认为准。'; }
+          catch { status.textContent = '复制失败，请选中上面的文字手动复制。'; }
+        }, 'quiet');
+        box.replaceChildren(element('strong', '在飞书中发送这一条'), element('code', command), copy, status);
+        status.textContent = '等待飞书中发送这条消息…（五分钟内有效，仅可使用一次，请勿转发）';
+        const deadline = issued.expires_at;
+        const poll = async () => {
+          if (!box.isConnected) return;
+          if (Date.now() > deadline) { status.textContent = '绑定串已过期，请重新生成。'; return; }
+          try {
+            const now = await api('/api/channels/bindings');
+            if (now.bindings.length > known) { status.textContent = '已绑定。'; await start(); return; }
+          } catch { status.textContent = '暂时无法读取服务端绑定状态，仍在等待确认。'; }
+          setTimeout(poll, 2000);
+        };
+        void poll();
+      } catch (err) { status.textContent = err.message; }
+    };
     for (const a of data.applications) {
       const row = element('div', '', 'channel-binding'), link = channelLink(a.chat_url, '打开机器人私聊', 'button-link');
+      const slot = element('div', '', 'channel-binding-slot'); slot.setAttribute('aria-live', 'polite');
       link.target = '_blank'; link.rel = 'noopener noreferrer';
-      row.append(element('strong', label(a)), link,
+      row.append(element('strong', label(a)), link, button('生成绑定串', () => consoleBind(a, slot), 'quiet'), slot,
         note('若飞书未打开，请在飞书客户端搜索上方机器人名称；找不到时，请联系超级管理员检查应用可用范围。'));
       apps.append(row);
     }

@@ -25,7 +25,7 @@ export function channelStorage(store: Store): void {
       UNIQUE(connector_id,installation_tenant,actor_tenant,actor_id,chat_id,thread_id,project_id,principal_id));
     CREATE TABLE IF NOT EXISTS channel_bind_requests(challenge_hash TEXT PRIMARY KEY,connector_id TEXT NOT NULL,
       subject TEXT NOT NULL,expires_at INTEGER NOT NULL,oauth_state TEXT,principal_id TEXT,session_ref TEXT,
-      binding_ref TEXT,confirmation_hash TEXT,consumed_at INTEGER,identity_id TEXT);
+      binding_ref TEXT,confirmation_hash TEXT,consumed_at INTEGER,identity_id TEXT,superseded_at INTEGER);
     CREATE TABLE IF NOT EXISTS channel_oauth_links(state_hash TEXT PRIMARY KEY,challenge_hash TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS channel_outbox(id TEXT PRIMARY KEY,connector_id TEXT NOT NULL,idempotency_key TEXT NOT NULL UNIQUE,
       source_event TEXT,payload TEXT NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,
@@ -59,6 +59,9 @@ export function channelStorage(store: Store): void {
   store.transaction(() => {
     if (!store.all('PRAGMA table_info(channel_bind_requests)').some(c => c.name === 'code_hash'))
       store.db.exec('ALTER TABLE channel_bind_requests ADD COLUMN code_hash TEXT');
+    // A console-issued string retires the earlier unused ones (#236); this records when that happened.
+    if (!store.all('PRAGMA table_info(channel_bind_requests)').some(c => c.name === 'superseded_at'))
+      store.db.exec('ALTER TABLE channel_bind_requests ADD COLUMN superseded_at INTEGER');
     store.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS channel_bind_code ON channel_bind_requests(code_hash)');
     for (const column of ['app_name', 'tenant_name', 'app_name_source'])
       if (!store.all('PRAGMA table_info(channel_connectors)').some(c => c.name === column))

@@ -379,7 +379,12 @@ export class ChannelService {
     // No /chat or /project syntax (#312): anything else is natural language for the assistant.
     const content = e.content.trim();
     const reply = (message: string, link?: string) => this.queue(e, card(message, link), row.id + ':reply', row.id);
-    if (['绑定', '/bind', '重新认证', '/reauth'].includes(content)) {
+    const consoleCode = /^(?:绑定|\/bind)\s+(FSB-[A-Za-z0-9]{8,})$/.exec(content);
+    if (consoleCode) {
+      // The console issued this code for the chosen bot; this private-chat message is the proof, so one message binds.
+      await this.bindings.redeem(consoleCode[1]!, e);
+      reply('双端身份绑定成功。这个飞书账号已绑定到你在控制台登录的平台账户；绑定本身不会增加项目权限。');
+    } else if (['绑定', '/bind', '重新认证', '/reauth'].includes(content)) {
       const binding = this.bindings.begin(e);
       reply('飞书身份认证字符串（五分钟内有效，仅可使用一次）：\n' + binding.code + '\n请在控制台「身份与权限 → 飞书身份绑定」选择本机器人，粘贴认证字符串，核对当前平台账户后确认绑定。请勿转发认证字符串。可使用本地账户或 GitHub 登录，绑定不会授予项目权限。' + (this.options.origin ? '\n也可打开下方链接，登录后回到原私聊确认。' : ''),
         this.options.origin ? this.options.origin + '/auth/channels/start?challenge=' + binding.challenge : undefined);
