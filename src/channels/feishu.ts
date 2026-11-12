@@ -2,7 +2,7 @@ import { createDecipheriv, createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Row } from '../storage/database.js';
 import { fail, HttpError, object, text, type Json } from '../core/security.js';
-import type { ChannelAdapter, ChannelDelivery, ChannelEvent, HistoryPage, StoredMessage } from './types.js';
+import type { ChannelAdapter, ChannelDelivery, ChannelEvent, ChannelMention, HistoryPage, StoredMessage } from './types.js';
 import { postText } from './format.js';
 
 export type ChannelFetch = typeof fetch;
@@ -94,16 +94,16 @@ export class FeishuAdapter implements ChannelAdapter {
     const sender = object(e.sender), id = object(sender.sender_id), message = object(e.message);
     if (!['p2p', 'group'].includes(String(message.chat_type))) return null;
     const actorTenant = sender.sender_type === 'user' ? text(sender.tenant_key) : String(sender.tenant_key ?? '');
-    const mentions = Array.isArray(message.mentions) ? message.mentions as any[] : [];
-    const addressed = message.chat_type === 'p2p' || mentions.some(m => m.id?.open_id === this.connector.bot_open_id);
+    const mentions = messageMentions(message.mentions, this.connector.bot_open_id, this.connector.app_name);
+    const addressed = message.chat_type === 'p2p' || mentions.some(m => m.is_self);
     const raw = text(message.content_v2 ?? message.content, 200000), messageType = text(message.message_type, 80);
-    let content = '';
-    try { content = messageText(messageType, raw); } catch { return fail(400, 'channel_message_invalid'); }
-    for (const m of mentions) if (typeof m.key === 'string') content = content.replaceAll(m.key, m.id?.open_id === this.connector.bot_open_id ? '' : '@' + String(m.name ?? m.id?.open_id ?? '用户')).trim();
+    let content = '', commandText = '';
+    try { content = messageText(messageType, raw, mentions); commandText = messageText(messageType, raw, mentions, true); }
+    catch { return fail(400, 'channel_message_invalid'); }
     return { ...base, actor_tenant: actorTenant, actor_id: text(id.open_id ?? id.app_id), chat_id: text(message.chat_id),
       chat_type: message.chat_type as 'p2p' | 'group', message_id: text(message.message_id), thread_id: String(message.thread_id ?? ''),
       parent_id: String(message.parent_id ?? ''), root_id: String(message.root_id ?? ''), created_at: eventTime(message.create_time),
-      updated_at: eventTime(message.update_time ?? message.create_time), kind: 'message', content, raw_content: raw,
+      updated_at: eventTime(message.update_time ?? message.create_time), kind: 'message', content, command_text: commandText, mentions, raw_content: raw,
       message_type: messageType, sender_type: String(sender.sender_type ?? 'unknown'), addressed: addressed && sender.sender_type === 'user' && id.open_id !== this.connector.bot_open_id };
   }
   private async api(path: string, init: RequestInit, authenticated = true, binary = false): Promise<any> {
@@ -235,10 +235,11 @@ export class FeishuAdapter implements ChannelAdapter {
     if (!data || !Array.isArray(data.items) || typeof data.has_more !== 'boolean' || data.has_more && typeof data.page_token !== 'string') fail(502, 'channel_history_invalid');
     const items: StoredMessage[] = data.items.map((item: any) => {
       const raw = String(item.body?.content_v2 ?? item.body?.content ?? ''), messageType = text(item.msg_type, 80);
+      const mentions = item.deleted ? [] : messageMentions(item.mentions, this.connector.bot_open_id, this.connector.app_name);
       let content = '';
-      if (!item.deleted) { try { content = messageText(messageType, raw); } catch { fail(502, 'channel_history_invalid'); } }
+      if (!item.deleted) { try { content = messageText(messageType, raw, mentions); } catch { fail(502, 'channel_history_invalid'); } }
       return { message_id: text(item.message_id), sender_id: String(item.sender?.id ?? ''), sender_tenant: String(item.sender?.tenant_key ?? ''),
-        sender_type: String(item.sender?.sender_type ?? 'unknown'), message_type: messageType, content, raw_content: raw,
+        sender_type: String(item.sender?.sender_type ?? 'unknown'), message_type: messageType, content, mentions, raw_content: raw,
         created_at: eventTime(item.create_time), updated_at: eventTime(item.update_time ?? item.create_time), deleted: !!item.deleted,
         parent_id: String(item.parent_id ?? ''), root_id: String(item.root_id ?? ''), thread_id: String(item.thread_id ?? '') };
     });
@@ -327,13 +328,31 @@ export class FeishuAdapter implements ChannelAdapter {
   }
 }
 
-function messageText(type: string, raw: string): string {
+function messageMentions(value: unknown, bot: string, botName = ''): ChannelMention[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(m => m && typeof m === 'object').map(m => {
+    // Events carry id.open_id; history pages carry id with an explicit id_type.
+    const actor = typeof m.id?.open_id === 'string' ? m.id.open_id : m.id_type === 'open_id' && typeof m.id === 'string' ? m.id : '';
+    const self = !!actor && actor === bot, name = typeof m.name === 'string' ? m.name.trim().slice(0, 200) : '';
+    return { key: typeof m.key === 'string' ? m.key : '', actor_id: actor, name: name || (self ? botName : '') || actor || '用户', is_self: self };
+  });
+}
+
+function messageText(type: string, raw: string, mentions: ChannelMention[] = [], omitSelf = false): string {
   if (!['text', 'post', 'image', 'file', 'audio', 'media'].includes(type)) return '[暂不支持的消息类型：' + type + ']';
   const data = object(JSON.parse(raw));
-  if (type === 'text') return String(data.text ?? '');
+  const at = (ref: string, name = '') => {
+    const mention = ref ? mentions.find(m => m.key === ref || m.actor_id === ref) : undefined;
+    return omitSelf && mention?.is_self ? '' : '@' + (mention?.name || name || ref || '用户');
+  };
+  const keys = [...new Set(mentions.map(m => m.key).filter(Boolean))].sort((a, b) => b.length - a.length);
+  // Replace once, so a display name containing another placeholder cannot turn into a different mention.
+  const pattern = keys.length ? new RegExp('(?:' + keys.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')(?!\\w)', 'g') : null;
+  const render = (value: string) => pattern ? value.replace(pattern, ref => at(ref)) : value;
+  if (type === 'text') return render(String(data.text ?? ''));
   if (type === 'image') return '[图片附件]';
   if (type !== 'post') return '[附件：' + String(data.file_name ?? type) + ']';
-  return postText(data);
+  return postText(data, at, render);
 }
 
 function eventTime(value: unknown): number {
