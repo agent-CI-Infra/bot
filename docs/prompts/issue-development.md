@@ -18,7 +18,7 @@ flowchart LR
 1. **Issue analysis**: read the recorded `implementation_goal` (on a revision, the `actionable_findings`), the
    repository instructions and the code the change touches. Stop as described under "When to stop" when the work
    does not fit the goal.
-2. **Develop**: make the change and add or update the regression test.
+2. **Develop**: make the change and add or update meaningful executable regression tests in the repository. Assert the changed behavior so future PRs and CI can detect breakage; one-off manual checks do not replace these tests. Explain the coverage and actual results in the delivery evidence. Review and QA should check that the tests protect the behavior, rather than merely mirror the implementation.
 3. **Review**: when `start_agent` is available, start an independent reviewer: give it the goal, tell it to read
    the change with `git diff` and the files around it, to report only real defects with `path:line` evidence, and
    pass `permissions` with `write_workspace: false`. It has its own session and does not see this conversation, so
