@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import { ManagerError } from './docker.mjs';
-import { logFailure } from './projects.mjs';
+import { logFailure, resourceBounds, validResource } from './projects.mjs';
 
 /**
  * Assistant computers (#457): one short-lived container per conversation owner (a group, or a person's private chats and
@@ -10,7 +10,7 @@ import { logFailure } from './projects.mjs';
  *
  * Lifecycle of an owner's lease, in memory only (a manager restart removes every assistant container):
  * - acquire: the turn that first needs the computer marks it busy, reusing an idle container of the same fence, HOME
- *   generation and HOME mode that has not outlived max_lifetime; anything else is removed and created again;
+ *   generation, HOME mode and resources that has not outlived max_lifetime; anything else is removed and created again;
  * - renew: the control plane renews a busy lease while its turn runs (model thinking included); a command in flight
  *   counts as use too. A busy lease that stops being renewed belongs to a stopped control plane and is removed;
  * - release: the turn ended; its processes end, the container stays and its idle timer starts;
@@ -18,16 +18,18 @@ import { logFailure } from './projects.mjs';
  * Capacity is max_containers: an idle container used longest ago gives way, otherwise new owners wait in arrival order.
  *
  * Hardening follows run-environments.mjs: uid 10001, read-only root, every capability dropped, no-new-privileges, init,
- * no network at all, private IPC, CPU/memory (no swap)/PID limits, tmpfs workspace and /tmp. The only persistent mount is
- * the owner's current HOME generation, a subpath of the shared HOME volume, never its parent.
+ * no network at all, private IPC, CPU/memory (no swap)/PID limits, tmpfs workspace and /tmp, Docker's default runtime.
+ * The only persistent mount is the owner's current HOME generation, a subpath of the shared HOME volume, never its parent.
  */
 const mib = 1024 * 1024, ownerPattern = /^[a-f0-9]{32}$/, idPattern = /^[a-f0-9]{48}$/, turnPattern = /^[A-Za-z0-9_-]{1,64}$/;
 export const assistantHome = '/home/assistant';
-// Fixed per-computer resources; tmpfs contents count against the memory limit.
-export const assistantLimits = { cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512 };
-export const assistantDefaults = { idle_minutes: 5, max_containers: 20, max_lifetime_minutes: 240, runtime: 'runc' };
-const bounds = { idle_minutes: [1, 120], max_containers: [1, 500], max_lifetime_minutes: [10, 7 * 24 * 60] };
-const runtimePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+// Timers and capacity, then each computer's resources: the project computers' resources in the same bounds, plus the size
+// of the tmpfs working directory. tmpfs contents (/tmp and /workspace) count against the memory limit.
+export const assistantDefaults = { idle_minutes: 5, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512 };
+const timerBounds = { idle_minutes: [1, 120], max_containers: [1, 500], max_lifetime_minutes: [10, 7 * 24 * 60] };
+const sizeBounds = { ...resourceBounds, workspace_mb: resourceBounds.tmp_mb }, resourceKeys = Object.keys(sizeBounds);
+const bounds = { ...timerBounds, ...sizeBounds };
+const resourcesOf = settings => Object.fromEntries(resourceKeys.map(key => [key, settings[key]]));
 // A busy lease whose turn stopped renewing for this long (and runs nothing) is abandoned. The control plane renews every 30 s.
 export const abandonAfterMs = 120_000;
 // A waiting owner keeps its place while it asks again within this time; the control plane retries every 2 s.
@@ -41,12 +43,12 @@ function validateCall(call) {
   if (call.timeout_ms != null && !(Number.isSafeInteger(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
   if (call.type !== 'command' && (typeof call.path !== 'string' || !call.path || call.path.length > 4096 || call.path.includes('\0'))) throw new ManagerError('invalid_runner_request', 400);
 }
-export function validateAssistantSettings(input, runtimes = null) {
+export function validateAssistantSettings(input, hostCpus = null) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || !Object.keys(input).length || Object.keys(input).some(k => !Object.hasOwn(assistantDefaults, k))) throw new ManagerError('invalid_assistant_settings', 400);
-  for (const [key, [min, max]] of Object.entries(bounds)) if (input[key] !== undefined && (!Number.isSafeInteger(input[key]) || input[key] < min || input[key] > max)) throw new ManagerError('invalid_assistant_settings', 400);
-  if (input.runtime !== undefined && (typeof input.runtime !== 'string' || !runtimePattern.test(input.runtime))) throw new ManagerError('invalid_assistant_settings', 400);
-  // Docker would refuse to start a container on a runtime it does not have; refuse the setting instead.
-  if (input.runtime !== undefined && runtimes && !runtimes.includes(input.runtime)) throw new ManagerError('assistant_runtime_unavailable', 400);
+  for (const [key, [min, max]] of Object.entries(timerBounds)) if (input[key] !== undefined && (!Number.isSafeInteger(input[key]) || input[key] < min || input[key] > max)) throw new ManagerError('invalid_assistant_settings', 400);
+  for (const key of resourceKeys) if (input[key] !== undefined && !validResource(key, input[key], sizeBounds)) throw new ManagerError('invalid_assistant_settings', 400);
+  // Docker refuses to create a container that is given more CPUs than the host has.
+  if (hostCpus && input.cpus > hostCpus) throw new ManagerError('cpus_exceed_host', 400);
   return input;
 }
 
@@ -58,15 +60,23 @@ export class AssistantComputers {
     this.leases = new Map(); this.removing = new Map(); this.locks = new Map(); this.waiting = [];
     this.db.exec('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
   }
-  settings() { const saved = this.db.prepare("SELECT value FROM settings WHERE key='assistant_computers'").get(); return { ...assistantDefaults, ...(saved ? JSON.parse(saved.value) : {}) }; }
-  async runtimes() { const info = await this.docker.request('GET', '/info').catch(() => null); return info?.Runtimes ? Object.keys(info.Runtimes).sort() : null; }
+  // Only the current keys: a value an earlier version saved (the container runtime) is dropped, and the next save forgets it.
+  settings() {
+    const saved = this.db.prepare("SELECT value FROM settings WHERE key='assistant_computers'").get(), values = saved ? JSON.parse(saved.value) : {};
+    return Object.fromEntries(Object.entries(assistantDefaults).map(([key, value]) => [key, values[key] ?? value]));
+  }
+  // The host's CPUs and memory, for the console to offer only sizes the host has; null when Docker cannot be read.
+  async host() { const info = await this.docker.request('GET', '/info').catch(() => null); return info?.NCPU ? { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) } : null; }
   async settingsView() {
-    return { settings: this.settings(), defaults: assistantDefaults, bounds, limits: assistantLimits, runtimes: await this.runtimes(),
+    return { settings: this.settings(), defaults: assistantDefaults, bounds, host: await this.host(),
       usage: { computers: this.leases.size, busy: [...this.leases.values()].filter(l => l.state === 'busy').length, waiting: this.waiting.length } };
   }
-  /** New values apply at once: timers on the next check, capacity on the next creation, the runtime to containers created from now on. */
+  /**
+   * New values apply at once: timers on the next check, capacity on the next creation. Resources apply to containers
+   * created from now on; an idle container with other resources is replaced when its owner's next turn takes it.
+   */
   async setSettings(input) {
-    validateAssistantSettings(input, input?.runtime !== undefined ? await this.runtimes() : null);
+    validateAssistantSettings(input, input?.cpus !== undefined ? (await this.host())?.cpus : null);
     this.db.prepare("INSERT INTO settings VALUES('assistant_computers',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ ...this.settings(), ...input }));
     return this.settingsView();
   }
@@ -82,7 +92,7 @@ export class AssistantComputers {
   }
   view(lease) {
     return { owner: lease.owner, state: lease.state, turn: lease.turn, fence: lease.fence, home: { generation: lease.generation, mode: lease.mode },
-      runtime: lease.runtime, image: lease.image, created_at: lease.created, used_at: lease.used, renewed_at: lease.renewed, running_operations: lease.inflight };
+      resources: lease.resources, image: lease.image, created_at: lease.created, used_at: lease.used, renewed_at: lease.renewed, running_operations: lease.inflight };
   }
   list() { return { computers: [...this.leases.values()].filter(l => l.state !== 'creating').map(l => this.view(l)), waiting: this.waiting.length, settings: this.settings() }; }
   /** Inspected facts of the owner's container, for the control plane's own policy check and for tests. */
@@ -136,15 +146,18 @@ export class AssistantComputers {
         this.discard(lease, 'abandoned'); lease = undefined;
       }
       if (lease) {
-        const current = lease.fence === fence && lease.generation === generation && lease.mode === mode && lease.runtime === settings.runtime && lease.image === this.image
-          && now - lease.created < settings.max_lifetime_minutes * 60_000;
+        // The turn already holding it (a retried request) keeps it through new resources and past its lifetime: both apply
+        // between turns. A changed fence, HOME generation or mode never keeps it.
+        const held = lease.state === 'busy' && lease.turn === turn;
+        const current = lease.fence === fence && lease.generation === generation && lease.mode === mode && lease.image === this.image
+          && (held || (JSON.stringify(lease.resources) === JSON.stringify(resourcesOf(settings)) && now - lease.created < settings.max_lifetime_minutes * 60_000));
         const running = current && (await this.inspect(owner).catch(() => null))?.State?.Running === true;
         if (running) {
           const reused = lease.state === 'idle';
           lease.state = 'busy'; lease.turn = turn; lease.renewed = now;
           return { state: 'ready', reused, computer: this.view(lease) };
         }
-        // A changed fence, HOME generation or mode, another runtime or image, or a container past its lifetime: replaced,
+        // A changed fence, HOME generation or mode, other resources or image, or a container past its lifetime: replaced,
         // keeping the owner's slot.
         this.discard(lease, 'replaced');
       } else {
@@ -158,7 +171,7 @@ export class AssistantComputers {
         }
         this.waiting = this.waiting.filter(t => t.owner !== owner);
       }
-      lease = { owner, turn, fence, generation, mode, runtime: settings.runtime, image: this.image, state: 'creating', created: now, used: now, renewed: now, inflight: 0 };
+      lease = { owner, turn, fence, generation, mode, resources: resourcesOf(settings), image: this.image, state: 'creating', created: now, used: now, renewed: now, inflight: 0 };
       this.leases.set(owner, lease);
       try {
         await this.create(lease);
@@ -174,7 +187,7 @@ export class AssistantComputers {
     });
   }
   async create(lease) {
-    const { owner } = lease, name = this.name(owner), l = assistantLimits, volume = await this.volume(), subpath = `${owner}/home-${lease.generation}`;
+    const { owner } = lease, name = this.name(owner), l = lease.resources, volume = await this.volume(), subpath = `${owner}/home-${lease.generation}`;
     // The control plane creates the generation directory; it must be a real directory inside this owner's directory.
     if (this.homes) for (const path of [`${this.homes}/${owner}`, `${this.homes}/${subpath}`]) {
       const info = await lstat(path).catch(() => null);
@@ -183,12 +196,14 @@ export class AssistantComputers {
     await this.removing.get(owner);
     // A container left by an earlier lease of this owner (a failed removal) is never reused.
     if (await this.inspect(owner)) await this.docker.request('DELETE', `/containers/${name}?force=true`);
-    await this.docker.request('POST', `/containers/create?name=${name}`, { Image: lease.image, User: '10001:10001', WorkingDir: '/workspace', Hostname: 'assistant',
+    // Docker answers 404 (no such image) with nothing: a clear creation failure, not a container gone missing later.
+    const made = await this.docker.request('POST', `/containers/create?name=${name}`, { Image: lease.image, User: '10001:10001', WorkingDir: '/workspace', Hostname: 'assistant',
       Cmd: ['node', '/opt/runner/idle.mjs'], Env: [`HOME=${assistantHome}`, 'LANG=C.UTF-8', 'BOT_COMPUTER_KIND=assistant'], Labels: this.labels(owner),
-      HostConfig: { Runtime: lease.runtime, ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false, Init: true, RestartPolicy: { Name: 'no' },
+      HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false, Init: true, RestartPolicy: { Name: 'no' },
         Memory: l.memory_mb * mib, MemorySwap: l.memory_mb * mib, NanoCpus: Math.round(l.cpus * 1e9), PidsLimit: l.pids, IpcMode: 'private', NetworkMode: 'none',
         Mounts: [{ Type: 'volume', Source: volume, Target: assistantHome, ReadOnly: lease.mode === 'ro', VolumeOptions: { NoCopy: true, Subpath: subpath } }],
         Tmpfs: { '/workspace': `rw,nosuid,nodev,size=${l.workspace_mb * mib},uid=10001,gid=10001,mode=0700`, '/tmp': `rw,nosuid,nodev,size=${l.tmp_mb * mib},mode=1777` } } });
+    if (!made) throw Object.assign(new ManagerError('assistant_computer_create_failed', 503), { detail: `image ${lease.image} not found` });
     await this.docker.request('POST', `/containers/${name}/start`);
     const health = await this.docker.runner(name, { operation_id: randomBytes(24).toString('hex'), type: 'health' });
     if (!health?.ok || !health.result?.ready) throw new ManagerError('runner_not_ready');

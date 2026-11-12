@@ -82,12 +82,14 @@ test('two groups on one role get separate computers and HOMEs; the next turn reu
 test('global settings and the console show and change assistant computers; clearing removes a HOME and its computer', async t => {
   const f = await fixture(t), a = await boundGroup(f, ['101'], 'oc_group'), owner = ownerId({ kind: 'group', subject: a.id, tenant: a.installation_tenant });
   const settings = (await f.admin('/api/settings')).value.settings.assistant_computers;
-  assert.deepEqual(settings.computers.settings, { idle_minutes: 5, max_containers: 20, max_lifetime_minutes: 240, runtime: 'runc' });
+  assert.deepEqual(settings.computers.settings, { idle_minutes: 5, max_containers: 20, max_lifetime_minutes: 240, cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512 });
   assert.deepEqual(settings.homes.settings, { home_limit_gb: 5, retention_days: 30, total_alert_gb: 50 });
-  const saved = await f.admin('/api/settings', 'PATCH', { assistant_computers: { idle_minutes: 10, home_limit_gb: 8, retention_days: 7 } });
+  const saved = await f.admin('/api/settings', 'PATCH', { assistant_computers: { idle_minutes: 10, memory_mb: 1024, home_limit_gb: 8, retention_days: 7 } });
   assert.equal(saved.status, 200, JSON.stringify(saved.value));
-  assert.deepEqual([saved.value.settings.assistant_computers.computers.settings.idle_minutes, saved.value.settings.assistant_computers.homes.settings.home_limit_gb], [10, 8]);
-  for (const bad of [{ home_limit_gb: 0 }, { retention_days: 1.5 }, { idle_minutes: 0 }, { runtime: 'runsc' }, { other: 1 }]) {
+  const savedComputers = saved.value.settings.assistant_computers.computers.settings;
+  assert.deepEqual([savedComputers.idle_minutes, savedComputers.memory_mb, saved.value.settings.assistant_computers.homes.settings.home_limit_gb], [10, 1024, 8]);
+  // The container runtime is no longer a setting: Docker's default runs every computer.
+  for (const bad of [{ home_limit_gb: 0 }, { retention_days: 1.5 }, { idle_minutes: 0 }, { memory_mb: 100 }, { cpus: 0.333 }, { runtime: 'runc' }, { other: 1 }]) {
     const refused = await f.admin('/api/settings', 'PATCH', { assistant_computers: bad });
     assert.equal(refused.status, 400, JSON.stringify(bad));
   }

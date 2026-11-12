@@ -238,7 +238,7 @@ async function route() {
   renderVersion++;
   if (/^#\/channels(?:\/|$)/.test(location.hash)) history.replaceState(null, '', '#/identity/feishu');
   const legacyComputer = /^#\/settings\/computers(?:\/([^/?#]+))?$/.exec(location.hash);
-  if (legacyComputer) history.replaceState(null, '', legacyComputer[1] ? `#/projects/${decodeURIComponent(legacyComputer[1])}/machine` : '#/settings/general');
+  if (legacyComputer) history.replaceState(null, '', legacyComputer[1] ? `#/projects/${decodeURIComponent(legacyComputer[1])}/machine` : '#/settings/work-computers');
   // A project chat link keeps the project context; the top-level management address is a page of its own.
   const chatProject = /^#\/projects\/([^/]+)\/management$/.exec(location.hash)?.[1];
   // The project chat trigger has no settings section of its own: keep the project, open its first page underneath,

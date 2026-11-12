@@ -93,7 +93,7 @@ try {
   // 4. A changed fence: a new container; HOME persists, /tmp does not. Read-only HOME refuses writes.
   await computers.release(A, { turn: 'ta2' });
   await acquire(A, 'ta3', { fence: other, home_mode: 'ro' });
-  const ro = await run(A, 'ta3', 'cat ~/a-home.txt; cat /tmp/a-tmp.txt 2>&1; echo x > ~/new.txt 2>&1; echo scratch > /tmp/ok && cat /tmp/ok');
+  const ro = await run(A, 'ta3', 'cat ~/a-home.txt; cat /tmp/a-tmp.txt 2>&1; { echo x > ~/new.txt; } 2>&1; echo scratch > /tmp/ok && cat /tmp/ok');
   assert.match(ro.output, /^a-secret\n.*No such file.*\n.*Read-only file system\nscratch\n$/s);
   passed('a changed fence recreates the computer: HOME kept, /tmp empty; a read-only HOME refuses writes', ro.output.trim().split('\n'));
   await computers.release(A, { turn: 'ta3' });
@@ -103,15 +103,24 @@ try {
   // /home/node comes from the base image; no other owner or generation is visible.
   assert.equal((await run(A, 'ta4', 'ls -A ~ | wc -l; ls /home')).output, '0\nassistant\nnode\n');
   passed('a new HOME generation starts empty and the sealed one is not mounted');
+  await run(A, 'ta4', 'echo kept > ~/kept.txt');
   await computers.release(A, { turn: 'ta4' });
+  // 6. New resources apply from the owner's next turn: the idle computer is replaced with the new limits, HOME kept.
+  await computers.setSettings({ cpus: 0.5, memory_mb: 1024, pids: 256, tmp_mb: 128, workspace_mb: 256 });
+  assert.equal((await acquire(A, 'ta5', { fence: other, home_generation: 2 })).reused, false);
+  const resized = await run(A, 'ta5', 'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max; df -k /tmp /workspace | tail -2 | awk \'{print $2}\'; cat ~/kept.txt');
+  assert.equal(resized.output, '1073741824\n0\n256\n50000 100000\n131072\n262144\nkept\n');
+  passed('new resources replace the idle computer at the next turn: 1 GiB without swap, 256 pids, 0.5 CPU, 128/256 MiB tmpfs, HOME kept', resized.output.trim().split('\n'));
+  await computers.release(A, { turn: 'ta5' });
+  await computers.setSettings({ cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512 });
 
-  // 6. Idle timeout and fence removal take the container away with its processes.
+  // 7. Idle timeout and fence removal take the container away with its processes.
   computers.leases.get(A).used -= 10 * 60_000; await computers.check(); await Promise.all([...computers.removing.values()]);
   assert.equal(sh('docker', ['ps', '-aq', '--filter', 'name=' + name]).trim(), '');
   await computers.remove(B);
   passed('idle and removed computers leave no container');
 
-  // 7. Measurements.
+  // 8. Measurements.
   const owners = Array.from({ length: 10 }, () => hex(16));
   homes(owners.map(o => `mkdir -p -m 750 /assistant-homes/${o} && mkdir -m 700 /assistant-homes/${o}/home-1`).join(' && '));
   const cold = [];
@@ -129,14 +138,14 @@ try {
   console.log(JSON.stringify(evidence.timings, null, 2));
   passed('measured cold start, reused command cost, 10 concurrent starts and memory');
 
-  // 8. A manager restart removes every assistant computer of the deployment.
+  // 9. A manager restart removes every assistant computer of the deployment.
   computers = new AssistantComputers({ docker, db, deployment, image, homes: null });
   assert.equal(await computers.recover(), 10);
   assert.equal(sh('docker', ['ps', '-aq', '--filter', 'label=department.bot.deployment=' + deployment, '--filter', 'label=department.bot.kind=assistant']).trim(), '');
   passed('a manager restart removes the computers left from before');
-  // 9. No fallback: a computer that cannot be created is an error, and nothing runs elsewhere.
-  db.prepare("INSERT INTO settings VALUES('assistant_computers',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ runtime: 'missing-runtime' }));
-  await assert.rejects(acquire(A, 'tz'), error => /docker_operation_failed|assistant_computer_create_failed/.test(error.message));
+  // 10. No fallback: a computer that cannot be created (here its image does not exist) is an error, and nothing runs elsewhere.
+  computers = new AssistantComputers({ docker, db, deployment, image: `dbot-assistant-457-missing-${tag}:none`, homes: null });
+  await assert.rejects(acquire(A, 'tz'), error => error.message === 'assistant_computer_create_failed' && /not found/.test(error.detail));
   assert.equal(computers.leases.size, 0);
   passed('a failed creation is a clear error and leaves no lease');
   evidence.result = 'passed';

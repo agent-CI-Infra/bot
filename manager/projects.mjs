@@ -20,12 +20,13 @@ export function logFailure(what, error) {
 // resource a project does not set itself follows the current default.
 const builtin = { cpus: 2, memory_mb: 4096, pids: 1024, tmp_mb: 1024 };
 const defaults = { ...builtin, packages: [], env: {}, setup_script: '' };
-const bounds = { cpus: [0.25, 16], memory_mb: [256, 65536], pids: [64, 16384], tmp_mb: [16, 16384] };
+export const resourceBounds = { cpus: [0.25, 16], memory_mb: [256, 65536], pids: [64, 16384], tmp_mb: [16, 16384] };
+const bounds = resourceBounds;
 const resourceKeys = Object.keys(bounds), resources = spec => Object.fromEntries(resourceKeys.map(key => [key, spec[key]]));
 const mib = 1024 * 1024;
-// CPUs in steps of 0.01, the other resources whole numbers, all inside their bounds.
-function validResource(key, value) {
-  const [min, max] = bounds[key];
+// CPUs in steps of 0.01, the other resources whole numbers, all inside their bounds (assistant computers pass their own).
+export function validResource(key, value, limits = bounds) {
+  const [min, max] = limits[key];
   return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max && (key === 'cpus' ? Math.round(value * 100) === value * 100 : Number.isInteger(value));
 }
 // Debian package names only (no options, files or URLs); environment names that the computer or runner own are refused.

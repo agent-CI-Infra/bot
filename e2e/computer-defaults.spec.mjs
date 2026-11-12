@@ -30,9 +30,9 @@ test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建�
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
     new RuleService(h.store).cache('101', 'a'.repeat(40), {});
     for (let i = 0; i < 2; i++) await h.projects.reconcile();
-    await page.goto(h.admin + '/#/settings/general'); await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.goto(h.admin + '/#/settings/work-computers'); await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
-    const panel = page.locator('#settings-panel'), defaults = panel.locator('section').filter({ has: page.getByRole('heading', { name: '虚拟电脑默认资源' }) });
+    const panel = page.locator('#settings-panel'), defaults = panel.locator('section').filter({ has: page.getByRole('heading', { name: '默认资源', exact: true }) });
     await expect(defaults).toContainText('8 CPU · 32 GB 内存'); await expect(defaults).toContainText('1 台，共分配 2 CPU · 4 GB 内存');
     // Common sizes inside the bounds, none above the host's 8 CPUs; the built-in value is marked.
     const cpu = defaults.locator('select[name=cpus]');
@@ -60,7 +60,7 @@ test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建�
     await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
     await expect.poll(() => [projects.own('101').cpus, host().NanoCpus]).toEqual([undefined, 4e9]);
 
-    await page.setViewportSize({ width: 390, height: 844 }); await page.goto(h.admin + '/#/settings/general'); await expect(defaults).toContainText('8 CPU');
+    await page.setViewportSize({ width: 390, height: 844 }); await page.goto(h.admin + '/#/settings/work-computers'); await expect(defaults).toContainText('8 CPU');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/computer-defaults/settings-mobile.png', fullPage: true });
     expect(errors).toEqual([]);
