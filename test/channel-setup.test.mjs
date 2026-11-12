@@ -48,7 +48,9 @@ test('name lookups never use another enterprise or a replaced app and do not dis
   const route = '/api/channels/bindings/' + binding.id + '/name';
   assert.equal((await admin(route, 'POST', {})).value.error, 'channel_user_name_unavailable');
   assert.equal(wire.state.profileRequests.length, 0);
-  await admin('/api/channels/connectors/' + id, 'PATCH', { app_id: 'cli_replaced', bot_open_id: 'ou_replaced_bot', expected_revision: 1 });
+  // An app's App ID is fixed (#424); a connection replaced before that keeps its bound identities unusable.
+  assert.equal((await admin('/api/channels/connectors/' + id, 'PATCH', { app_id: 'cli_replaced', expected_revision: 1 })).value.error, 'channel_application_immutable');
+  h.store.run("UPDATE channel_connectors SET app_id='cli_replaced',revision=revision+1 WHERE id=?", id);
   const after = (await admin('/api/channels/bindings')).value.bindings[0];
   assert.equal(after.app_name, null); assert.equal(after.tenant_name, null); assert.equal(after.can_read_name, 0);
   assert.equal((await admin(route, 'POST', {})).value.error, 'channel_connector_inactive');
@@ -74,23 +76,31 @@ test('asynchronous name refresh rechecks revocation and the current connector re
   });
 });
 
-test('global Feishu administration requires platform authority; public app discovery is independent of project grants and selected organization', async t => {
+test('platform-wide apps are managed only by platform administrators; their public discovery is independent of project grants and selected organization', async t => {
   const f = await channelFixture(t), { admin, h, id, member } = f;
   const other = await connector(admin, { app_id: 'cli_other' });
   const org = await member('org-configurator', { organization_ids: ['10'] });
-  assert.equal((await org.client('/api/channels/connectors')).status, 403);
-  assert.equal((await org.client('/api/channels/connectors/' + id, 'PATCH', { enabled: false, expected_revision: 1 })).status, 403);
-  assert.equal((await org.client('/api/channels/connectors', 'POST', {})).status, 403);
+  // An organization admin opens the app console for their own organization only: platform-wide apps stay out of reach.
+  const own = (await org.client('/api/channels/setup')).value;
+  assert.deepEqual([own.platform, own.organizations, own.connectors], [false, [{ id: 'github.com:10', name: 'agent-test-zone' }], []]);
+  assert.deepEqual((await org.client('/api/channels/connectors')).value.connectors, []);
+  assert.equal((await org.client('/api/channels/connectors/' + id, 'PATCH', { enabled: false, expected_revision: 1 })).value.error, 'channel_application_forbidden');
+  assert.equal((await org.client('/api/channels/connectors', 'POST', { app_id: 'cli_platform', application_type: 'enterprise', transport: 'websocket', enabled: true,
+    credentials: { app_secret: credentials.app_secret }, expected_revision: 0 })).value.error, 'channel_application_forbidden');
   for (const suffix of ['outbox', 'events']) assert.equal((await org.client('/api/channels/connectors/' + id + '/' + suffix)).status, 403);
-  assert.equal((await org.client('/api/channels/setup')).status, 403);
   assert.equal((await probe(org.client, id)).status, 403);
-  assert.equal((await org.client('/api/channels/feishu/probe', 'POST', { app_id: 'cli_fixture', app_secret: credentials.app_secret })).status, 403);
+  assert.equal((await org.client('/api/channels/feishu/probe', 'POST', { app_id: 'cli_fixture', app_secret: credentials.app_secret })).status, 201);
   const personal = (await org.client('/api/channels/bindings')).value;
-  assert.deepEqual(personal.applications, [{ id, app_id: 'cli_fixture' }, { id: other, app_id: 'cli_other' }].map(a => ({ ...a, app_name: '', tenant_name: '',
+  assert.deepEqual(personal.applications, [{ id, app_id: 'cli_fixture' }, { id: other, app_id: 'cli_other' }].map(a => ({ ...a, app_name: '', tenant_name: '', organization: null,
     chat_url: 'https://applink.feishu.cn/client/bot/open?appId=' + a.app_id })));
-  assert.doesNotMatch(JSON.stringify(personal), /credential_ref|actor_tenants|installation_tenant|fixture-feishu|tenant_id/);
+  assert.equal(personal.can_manage_applications, true);
+  assert.doesNotMatch(JSON.stringify(personal), /credential_ref|actor_tenants|installation_tenant|fixture-feishu|tenant_id|owner_tenant/);
+  // Someone who can add no app anywhere has no app console at all, yet still discovers platform-wide apps.
   const ordinary = await member('no-project-access', {});
-  assert.deepEqual((await ordinary.client('/api/channels/bindings')).value.applications, personal.applications);
+  for (const route of ['/api/channels/setup', '/api/channels/connectors']) assert.equal((await ordinary.client(route)).value.error, 'channel_application_forbidden');
+  assert.equal((await ordinary.client('/api/channels/feishu/probe', 'POST', { app_id: 'cli_fixture', app_secret: credentials.app_secret })).status, 403);
+  const discovered = (await ordinary.client('/api/channels/bindings')).value;
+  assert.deepEqual(discovered.applications, personal.applications); assert.equal(discovered.can_manage_applications, false);
   const global = await admin('/api/channels/setup');
   assert.equal(global.value.origin, 'https://console.example.test'); assert.equal(global.value.connectors.length, 2);
   await admin('/api/identity/tenant', 'POST', { tenant_id: 'github.com:10' });
@@ -100,6 +110,72 @@ test('global Feishu administration requires platform authority; public app disco
   const receipt = h.store.get('SELECT id FROM channel_control_operations WHERE project_id IS NULL').id;
   assert.equal((await org.client('/api/channels/operations/' + receipt)).status, 403);
   assert.equal((await admin('/api/channels/operations/' + receipt)).status, 200);
+});
+
+test('organization apps: organization and repository admins add them on a long connection, the organization sees and binds them, creator and admins manage them (#424)', async t => {
+  const f = await channelFixture(t), { admin, h, member, service } = f, tenant = 'github.com:10';
+  const repoAdmin = await member('repo-admin-424', { repository_ids: ['101'] }), orgAdmin = await member('org-admin-424', { organization_ids: ['10'] });
+  const foreign = await member('foreign-admin-424', { repository_ids: ['201'] }), plain = await member('plain-424', {}), reader = await member('reader-424', {});
+  // A member of the organization without configuration authority.
+  h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,policy,evidence,verified_at)
+    VALUES('reader-424:101',?,?,'101','project','delegated','["tasks.read"]','explicit_delegation','fixture','explicit fixture grant',0)`, reader.id, tenant);
+  const socket = { app_id: 'cli_org', application_type: 'enterprise', transport: 'websocket', enabled: true, credentials: { app_secret: credentials.app_secret }, expected_revision: 0, owner_tenant: tenant };
+  const save = (client, input) => client('/api/channels/connectors', 'POST', { ...socket, ...input });
+  for (const client of [foreign.client, plain.client, reader.client]) assert.equal((await save(client)).value.error, 'channel_application_forbidden');
+  assert.equal((await save(orgAdmin.client, { owner_tenant: 'github.com:20' })).value.error, 'channel_application_forbidden');
+  assert.equal((await save(repoAdmin.client, { owner_tenant: undefined })).value.error, 'channel_application_forbidden', 'only platform administrators add platform-wide apps');
+  // Whoever holds an HTTP app's verification secrets could forge any member's message.
+  assert.equal((await save(repoAdmin.client, { transport: 'http', credentials })).value.error, 'channel_transport_forbidden');
+  assert.equal((await save(orgAdmin.client, { application_type: 'saas', transport: 'http', installation_tenant: 'store-tenant', credentials })).value.error, 'channel_transport_forbidden');
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_connectors').n, 1);
+  const created = await save(repoAdmin.client); assert.equal(created.status, 201, JSON.stringify(created.value));
+  const id = created.value.connector_id, row = () => h.store.get('SELECT * FROM channel_connectors WHERE id=?', id);
+  assert.deepEqual([row().owner_tenant, row().created_by, row().installation_tenant], [tenant, repoAdmin.id, 'install-tenant']);
+  assert.equal((await repoAdmin.client('/api/channels/operations/' + created.value.operation_id)).status, 200);
+  // A platform administrator may add an organization's app with any transport.
+  assert.equal((await admin('/api/channels/connectors', 'POST', { ...socket, app_id: 'cli_org_http', transport: 'http', credentials })).status, 201);
+  // The organization sees its apps; everyone else only the platform-wide one.
+  const apps = async client => (await client('/api/channels/bindings')).value.applications.map(a => a.app_id + (a.organization ? '@' + a.organization : ''));
+  for (const client of [repoAdmin.client, orgAdmin.client, reader.client, admin]) assert.deepEqual(await apps(client), ['cli_fixture', 'cli_org@agent-test-zone', 'cli_org_http@agent-test-zone']);
+  for (const client of [foreign.client, plain.client]) assert.deepEqual(await apps(client), ['cli_fixture']);
+  // Binding follows visibility.
+  const begin = actor => service.bindings.begin(service.adapter(service.connector(id)).normalize(envelope('/bind', { header: { app_id: 'cli_org' }, sender: { sender_id: { open_id: actor } } }))).code;
+  assert.equal((await plain.client('/api/channels/bindings/confirm', 'POST', { code: begin('ou_plain'), connector_id: id })).value.error, 'channel_application_forbidden');
+  assert.equal((await reader.client('/api/channels/bindings/confirm', 'POST', { code: begin('ou_reader'), connector_id: id })).status, 201);
+  assert.equal(h.store.get("SELECT principal_id FROM external_identities WHERE external_actor='ou_reader'").principal_id, reader.id);
+  // A console-issued string (#236) is checked when issued and again when the private chat redeems it.
+  assert.equal((await plain.client('/api/channels/bindings/issue', 'POST', { connector_id: id })).value.error, 'channel_application_forbidden');
+  const leaver = await member('leaver-424', { repository_ids: ['102'] }), issued = (await leaver.client('/api/channels/bindings/issue', 'POST', { connector_id: id })).value;
+  assert.match(issued.code, /^FSB-/);
+  assert.equal((await admin('/api/project-admin-assignments', 'PUT', { user_id: leaver.id, repository_ids: [], organization_ids: [] })).status, 200);
+  const redeem = service.receiveLongConnection(id, envelope('绑定 ' + issued.code, { header: { app_id: 'cli_org' }, sender: { sender_id: { open_id: 'ou_leaver' } }, message: { chat_id: 'oc_leaver' } }));
+  assert.equal((await finished(h, redeem.operation_id)).error, 'channel_application_forbidden');
+  assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE external_actor='ou_leaver'").n, 0);
+  // Creator, organization admins and platform administrators manage it; others see nothing of it.
+  const listed = (await repoAdmin.client('/api/channels/setup')).value;
+  assert.deepEqual(listed.connectors.map(c => [c.app_id, c.owner, c.creator]), [['cli_org', { id: tenant, name: 'agent-test-zone' }, 'repo-admin-424']]);
+  assert.deepEqual((await orgAdmin.client('/api/channels/connectors')).value.connectors.map(c => c.app_id), ['cli_org', 'cli_org_http']);
+  assert.deepEqual((await foreign.client('/api/channels/connectors')).value.connectors, []);
+  assert.equal((await foreign.client('/api/channels/connectors/' + id, 'PATCH', { enabled: false, expected_revision: 1 })).value.error, 'channel_application_forbidden');
+  assert.equal((await foreign.client('/api/channels/connectors/' + id + '/events')).status, 403);
+  assert.equal((await probe(foreign.client, id)).status, 403);
+  assert.equal((await probe(repoAdmin.client, id)).status, 201);
+  let revision = row().revision;
+  for (const client of [orgAdmin.client, repoAdmin.client, admin]) {
+    const changed = await client('/api/channels/connectors/' + id, 'PATCH', { enabled: !row().enabled, expected_revision: revision });
+    assert.equal(changed.status, 200, JSON.stringify(changed.value)); revision = changed.value.revision;
+  }
+  // Owner, App ID and installation are fixed; an organization admin cannot switch the app to HTTP.
+  for (const input of [{ app_id: 'cli_moved' }, { installation_tenant: 'other-tenant' }, { owner_tenant: null }, { owner_tenant: 'github.com:20' }])
+    assert.equal((await admin('/api/channels/connectors/' + id, 'PATCH', { ...input, expected_revision: revision })).value.error, 'channel_application_immutable');
+  assert.equal((await orgAdmin.client('/api/channels/connectors/' + id, 'PATCH', { transport: 'http', credentials, expected_revision: revision })).value.error, 'channel_transport_forbidden');
+  assert.equal(row().transport, 'websocket');
+  // The creator manages the app only while they could still add one in the organization.
+  assert.equal((await admin('/api/project-admin-assignments', 'PUT', { user_id: repoAdmin.id, repository_ids: [], organization_ids: [] })).status, 200);
+  await repoAdmin.client('/api/identity/refresh', 'POST', {});
+  assert.equal((await repoAdmin.client('/api/channels/connectors/' + id, 'PATCH', { enabled: false, expected_revision: revision })).value.error, 'channel_application_forbidden');
+  assert.deepEqual(await apps(repoAdmin.client), ['cli_fixture']);
+  assert.equal((await orgAdmin.client('/api/channels/connectors/' + id, 'PATCH', { enabled: false, expected_revision: revision })).status, 200);
 });
 
 test('an administrator can connect Feishu before any GitHub organization or project exists', async t => {
@@ -242,9 +318,10 @@ test('missing display information preserves cached names; an installation mismat
   assert.equal((await probe(admin, id)).status, 201); assert.deepEqual(read(), saved);
   wire.state.installationTenant = 'other-installation'; wire.state.appName = 'Wrong app'; wire.state.tenantName = 'Wrong enterprise';
   assert.equal((await probe(admin, id)).value.error, 'channel_source_mismatch'); assert.deepEqual(read(), saved);
-  const changed = await admin('/api/channels/connectors/' + id, 'PATCH', { app_id: 'cli_new', installation_tenant: 'other-installation', bot_open_id: 'ou_new', expected_revision: 1 });
-  assert.equal(changed.status, 200);
-  assert.deepEqual(read(), { app_name: '', tenant_name: '', revision: 2 });
+  // App ID and installation never change, so cached labels always describe the same app.
+  for (const input of [{ app_id: 'cli_new' }, { installation_tenant: 'other-installation' }])
+    assert.equal((await admin('/api/channels/connectors/' + id, 'PATCH', { ...input, expected_revision: 1 })).value.error, 'channel_application_immutable');
+  assert.deepEqual(read(), saved);
 });
 
 test('a label refresh rechecks configuration after the enterprise lookup returns', async t => {
@@ -308,7 +385,7 @@ test('enterprise saves discover the bot from effective credentials and failed di
 test('automatic discovery rechecks the revision after asynchronous authentication before saving rotated credentials', async t => {
   const { admin, id, h, wire } = await channelFixture(t);
   let release; wire.state.authGate = new Promise(r => { release = r; }); t.after(() => release());
-  const pending = admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: 1, app_id: 'cli_changed', credentials: { app_secret: 'pending-secret' } });
+  const pending = admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: 1, credentials: { app_secret: 'pending-secret' } });
   await until(() => wire.state.authStarted);
   assert.equal((await admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: 1, enabled: false })).status, 200);
   release();

@@ -3,6 +3,9 @@ import { assertCurrent, authorize } from '../identity/authorization.js';
 import { fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
 import { ChannelService } from './service.js';
 import { FEISHU_SCOPES, FeishuAdapter } from './feishu.js';
+import { applicationConsole, applicationOrganizations, applicationVisible, canAddApplication, canManageApplication, platformManager, tenantName } from './applications.js';
+
+const applicationForbidden = () => fail(403, 'channel_application_forbidden');
 
 export class ChannelApi {
   constructor(readonly service: ChannelService) {}
@@ -11,6 +14,8 @@ export class ChannelApi {
     assertCurrent(actor);
     if (path === '/api/channels/employees' && method === 'GET') return this.service.employees.list(actor);
     if (path === '/api/channels/service-bindings' && method === 'GET') return this.service.serviceBindings.list(actor);
+    const owner = /^\/api\/channels\/chats\/([a-f0-9]{48})\/service-binding\/owner$/.exec(path);
+    if (owner && method === 'PUT') return this.service.serviceBindings.transfer(actor, owner[1]!, input);
     const binding = /^\/api\/channels\/chats\/([a-f0-9]{48})\/service-binding$/.exec(path);
     if (binding && method === 'PUT') {
       const result = await this.service.serviceBindings.configure(actor, binding[1]!, input);
@@ -79,13 +84,20 @@ export class ChannelApi {
       return fail(405, 'method_not_allowed');
     }
     if (path === '/api/channels/setup' && method === 'GET') {
-      authorize(actor, 'platform.manage');
-      return { ...await this.api(actor, 'GET', new URL('/api/channels/connectors', url), {}), origin: this.service.options.origin || null, feishu_scopes: FEISHU_SCOPES };
+      if (!applicationConsole(store, actor)) return applicationForbidden();
+      // platform: may add platform-wide apps (and any transport); organizations: where the actor may add an app.
+      return { ...await this.api(actor, 'GET', new URL('/api/channels/connectors', url), {}), origin: this.service.options.origin || null, feishu_scopes: FEISHU_SCOPES,
+        platform: platformManager(actor), organizations: applicationOrganizations(store, actor) };
     }
     if (path === '/api/channels/feishu/probe' && method === 'POST') {
-      authorize(actor, 'platform.manage');
       fields(input, ['connector_id', 'expected_revision', 'app_id', 'app_secret']);
-      const guard = () => authorize(actor, 'platform.manage');
+      // A saved app is probed by its managers; new credentials by anyone who may add an app somewhere.
+      const guard = () => {
+        if (input.connector_id === undefined ? platformManager(actor) || applicationOrganizations(store, actor).length > 0
+          : canManageApplication(actor, store.get('SELECT * FROM channel_connectors WHERE id=?', text(input.connector_id)) ?? {})) return;
+        applicationForbidden();
+      };
+      if (input.connector_id === undefined) guard();
       // The grant check is advisory: it never fails a probe whose credentials and bot already work.
       const scopes = async (adapter: FeishuAdapter): Promise<Json> => {
         try { return { scopes: await adapter.scopeCheck() }; } catch (error) {
@@ -143,9 +155,11 @@ export class ChannelApi {
     if (receipt && method === 'GET') {
       const row = store.get('SELECT * FROM channel_control_operations WHERE id=?', receipt[1]!);
       if (!row) return fail(404, 'channel_operation_not_found');
+      // An app's save receipt is readable by the app's managers.
+      const result = JSON.parse(row.receipt), saved = !row.project_id && result.connector_id ? store.get('SELECT * FROM channel_connectors WHERE id=?', String(result.connector_id)) : undefined;
       if (row.project_id) authorize(actor, 'config.write', { project_id: row.project_id });
-      else authorize(actor, 'platform.manage');
-      return JSON.parse(row.receipt);
+      else if (!saved || !canManageApplication(actor, saved)) authorize(actor, 'platform.manage');
+      return result;
     }
     const profile = /^\/api\/channels\/bindings\/([a-f0-9]{48})\/name$/.exec(path);
     if (profile && method === 'POST') {
@@ -179,36 +193,54 @@ export class ChannelApi {
         FROM external_identities e LEFT JOIN channel_connectors c ON c.id||':'||c.app_id=e.connector
         WHERE e.principal_id=? AND e.provider='feishu'`, actor.principal_id),
       pending: this.service.bindings.pending(actor.principal_id),
-      // Public identifiers let users bind before receiving any project grants.
-      applications: store.all('SELECT id,app_id,app_name,tenant_name FROM channel_connectors WHERE enabled=1').map(c => ({ ...c,
-        chat_url: 'https://applink.feishu.cn/client/bot/open?appId=' + encodeURIComponent(c.app_id) })),
+      // Public identifiers let users bind before receiving any project grants; an organization's app only to its members (#424).
+      applications: store.all('SELECT id,app_id,app_name,tenant_name,owner_tenant FROM channel_connectors WHERE enabled=1')
+        .filter(c => applicationVisible(store, actor.principal_id, c)).map(({ owner_tenant, ...c }) => ({ ...c,
+          organization: owner_tenant ? tenantName(store, owner_tenant) : null, chat_url: 'https://applink.feishu.cn/client/bot/open?appId=' + encodeURIComponent(c.app_id) })),
+      can_manage_applications: applicationConsole(store, actor),
     };
     if (path === '/api/channels/connectors' && method === 'GET') {
-      authorize(actor, 'platform.manage');
-      const rows = store.all('SELECT * FROM channel_connectors');
+      if (!applicationConsole(store, actor)) return applicationForbidden();
+      const rows = store.all('SELECT * FROM channel_connectors').filter(c => canManageApplication(actor, c));
       return { connectors: rows.map(c => ({ ...c, capabilities: this.service.adapter(c).capabilities,
+        owner: c.owner_tenant ? { id: c.owner_tenant, name: tenantName(store, c.owner_tenant) } : null,
+        creator: c.created_by ? store.get('SELECT username FROM users WHERE id=?', c.created_by)?.username ?? null : null,
         callback_path: '/hooks/feishu/' + c.id, health: { enabled: !!c.enabled, connection_state: c.connection_state, last_received_at: c.last_received_at, last_error: c.last_error,
           queued: store.get("SELECT count(*) n FROM channel_inbox WHERE connector_id=? AND state IN ('queued','submitted')", c.id)!.n,
           failed: store.get("SELECT count(*) n FROM channel_outbox WHERE connector_id=? AND state='failed'", c.id)!.n } })) };
     }
     const match = /^\/api\/channels\/connectors\/([a-f0-9]{48})(?:\/(outbox|events))?$/.exec(path);
     if (path === '/api/channels/connectors' && method === 'POST' || match && !match[2] && method === 'PATCH') {
-      authorize(actor, 'platform.manage');
       // Accept the retired actor_tenants field from older clients without applying an enterprise restriction.
-      fields(input, ['app_id', 'installation_tenant', 'actor_tenants', 'bot_open_id', 'application_type', 'transport', 'enabled', 'credentials', 'expected_revision']);
+      fields(input, ['app_id', 'installation_tenant', 'actor_tenants', 'bot_open_id', 'application_type', 'transport', 'enabled', 'credentials', 'expected_revision', 'owner_tenant']);
       const current = match ? store.get('SELECT * FROM channel_connectors WHERE id=?', match[1]!) : undefined;
       if (match && !current) return fail(404, 'channel_connector_not_found');
+      // The owner (null: platform-wide), App ID and installation are fixed at creation, so the identities and chats bound
+      // through an app always belong to the same app and organization (#424).
+      const owner = current ? String(current.owner_tenant) : input.owner_tenant == null ? '' : text(input.owner_tenant, 200);
+      if (current) for (const [key, value] of [['owner_tenant', owner || null], ['app_id', current.app_id], ['installation_tenant', current.installation_tenant]] as const)
+        if (input[key] !== undefined && input[key] !== value) fail(400, 'channel_application_immutable', key);
+      if (!current && owner && !store.get('SELECT 1 FROM tenants WHERE id=?', owner)) fail(404, 'organization_not_found', 'owner_tenant');
+      const permitted = () => {
+        const saved = current && store.get('SELECT * FROM channel_connectors WHERE id=?', current.id);
+        if (!(saved ? canManageApplication(actor, saved) : !current && (owner ? canAddApplication(actor, owner) : platformManager(actor)))) applicationForbidden();
+      };
+      permitted();
       const expected = current?.revision ?? 0;
       if (input.expected_revision !== expected) fail(409, 'channel_revision_conflict');
       const get = (key: string) => input[key] ?? current?.[key];
-      const app = text(get('app_id'), 200);
+      const app = current ? String(current.app_id) : text(input.app_id, 200);
       const type = get('application_type'), transport = get('transport'), enabled = input.enabled ?? (current ? !!current.enabled : false);
       if (!['enterprise', 'saas'].includes(String(type)) || !['http', 'websocket'].includes(String(transport)) || transport === 'websocket' && type !== 'enterprise') fail(400, 'channel_transport_invalid');
       if (typeof enabled !== 'boolean') fail(400, 'channel_enabled_invalid');
+      // Whoever holds an HTTP app's verification secrets can forge any member's message; only platform administrators run one.
+      const platformOnly = type !== 'enterprise' || transport !== 'websocket';
+      if (platformOnly && !platformManager(actor)) fail(403, 'channel_transport_forbidden', 'transport');
       let credential = current?.credential_ref;
       const id = current?.id ?? randomId(), operation = randomId();
       const guard = () => {
-        authorize(actor, 'platform.manage');
+        permitted();
+        if (platformOnly && !platformManager(actor)) fail(403, 'channel_transport_forbidden', 'transport');
         if (current && store.get('SELECT revision FROM channel_connectors WHERE id=?', id)?.revision !== expected) fail(409, 'channel_revision_conflict');
       };
       const previous = current ? store.get('SELECT sealed FROM channel_credentials WHERE id=?', current.credential_ref) : undefined;
@@ -222,17 +254,17 @@ export class ChannelApi {
       if (!previous && input.credentials === undefined) fail(400, 'channel_credentials_required');
       text(secret.app_secret, 4096);
       if (transport === 'http' && (!secret.verification_token || !secret.encrypt_key)) fail(400, 'channel_http_credentials_required');
-      if (current && current.app_id !== app) { delete secret.app_ticket; delete secret.app_ticket_time; }
       // An enterprise token identifies its installation; store apps need an explicit installation before token exchange.
-      const changedApp = current && (current.app_id !== app || current.application_type !== type);
-      const suppliedInstallation = input.installation_tenant ?? (changedApp ? undefined : current?.installation_tenant);
+      const changedType = current && current.application_type !== type;
+      const suppliedInstallation = input.installation_tenant ?? (changedType ? undefined : current?.installation_tenant);
       const installationInfo = suppliedInstallation === undefined && type === 'enterprise'
         ? await new FeishuAdapter({ app_id: app, application_type: type }, secret, this.service.options.fetch, guard).installationInfo()
         : undefined;
       const installation = installationInfo?.tenant_key ?? text(suppliedInstallation);
+      if (current && installation !== current.installation_tenant) fail(400, 'channel_application_immutable', 'installation_tenant');
       // Older API clients may supply an ID; the wizard always discovers it from the effective credentials.
       let bot = input.bot_open_id === undefined ? current?.bot_open_id ?? '' : text(input.bot_open_id);
-      const changedSource = current && (current.app_id !== app || current.installation_tenant !== installation || current.application_type !== type);
+      const changedSource = changedType;
       let appName = changedSource ? '' : current?.app_name ?? '';
       let appNameSource = changedSource ? '' : current?.app_name_source ?? '';
       const tenantName = installationInfo?.tenant_name ?? (changedSource ? '' : current?.tenant_name ?? '');
@@ -251,7 +283,7 @@ export class ChannelApi {
       return store.transaction(() => {
         guard();
         if (store.get('SELECT 1 FROM channel_connectors WHERE app_id=? AND installation_tenant=? AND id<>?', app, installation, id)) fail(409, 'channel_installation_conflict');
-        if (input.credentials !== undefined || current && current.app_id !== app) {
+        if (input.credentials !== undefined) {
           credential = randomId(); store.run('INSERT INTO channel_credentials VALUES(?,?)', credential, store.secrets.seal(secret, 'channel-credential:' + credential));
         }
         if (!credential) fail(400, 'channel_credentials_required');
@@ -259,8 +291,8 @@ export class ChannelApi {
           store.run('UPDATE channel_connectors SET app_id=?,installation_tenant=?,bot_open_id=?,application_type=?,transport=?,credential_ref=?,enabled=?,revision=revision+1 WHERE id=? AND revision=?',
             app, installation, bot, String(type), String(transport), credential, Number(enabled), id, expected);
           if (current.credential_ref !== credential) store.run('DELETE FROM channel_credentials WHERE id=?', current.credential_ref);
-        } else store.run('INSERT INTO channel_connectors(id,provider,app_id,installation_tenant,bot_open_id,application_type,transport,credential_ref,enabled,revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-          id, 'feishu', app, installation, bot, String(type), String(transport), credential, Number(enabled), 1, Date.now());
+        } else store.run('INSERT INTO channel_connectors(id,provider,app_id,installation_tenant,bot_open_id,application_type,transport,credential_ref,enabled,revision,created_at,owner_tenant,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          id, 'feishu', app, installation, bot, String(type), String(transport), credential, Number(enabled), 1, Date.now(), owner, actor.principal_id);
         store.run('UPDATE channel_connectors SET app_name=?,tenant_name=?,app_name_source=? WHERE id=?', appName, tenantName, appNameSource, id);
         store.audit(actor.principal_id, 'channel.connector.updated', id);
         const result = { operation_id: operation, state: 'succeeded', connector_id: id, revision: expected + 1 };
@@ -271,7 +303,7 @@ export class ChannelApi {
     if (!match) return fail(404, 'channel_endpoint_not_found');
     const c = store.get('SELECT * FROM channel_connectors WHERE id=?', match[1]!);
     if (!c) return fail(404, 'channel_connector_not_found');
-    authorize(actor, 'platform.manage');
+    if (!canManageApplication(actor, c)) return applicationForbidden();
     if (method === 'GET' && match[2] === 'outbox') return { deliveries: store.all('SELECT id,state,attempts,last_error,remote_message_id,created_at FROM channel_outbox WHERE connector_id=? ORDER BY created_at DESC LIMIT 100', c.id)
       .map(row=>({...row,parts:store.all('SELECT part,state,first_attempt,remote_id FROM channel_outbox_parts WHERE outbox_id=? ORDER BY part',row.id)})) };
     if (method === 'GET' && match[2] === 'events') return { operations: store.all(`SELECT i.id AS operation_id,i.state,i.error,i.conversation_id,i.message_id,i.created_at,

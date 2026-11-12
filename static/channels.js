@@ -3,7 +3,9 @@ async function feishuIdentityCard() {
   const data = await api('/api/channels/bindings'), section = card('飞书身份绑定'), request = renderVersion, nameLookups = [];
   section.id = 'feishu-identity';
   section.append(note('将本人的飞书账号关联到当前平台账户。本地账户和 GitHub 登录均可使用，无需先绑定 GitHub。之后仅能访问该账户实际获准的项目，绑定本身不会增加仓库权限。'));
+  // Organization and repository admins add and manage their organization's apps from here; super administrators in settings (#424).
   if (me.role === 'super_admin') section.append(channelLink('#/settings/feishu', '管理员：连接或管理飞书应用', 'button-link'));
+  else if (data.can_manage_applications) section.append(channelLink('#/identity/feishu-apps', '连接或管理本组织的飞书应用', 'button-link'));
   const steps = element('ol', '', 'feishu-binding-steps');
   for (const caption of ['在下方选择机器人并点“生成绑定串”，本页会显示一条只能使用一次的消息。',
     '在飞书中打开与这个机器人的私聊，把那条消息原样发送一次。',
@@ -11,7 +13,7 @@ async function feishuIdentityCard() {
   if (data.applications.length) {
     section.append(steps, note('认证字符串五分钟内有效，仅可使用一次，请勿转发。'));
     const apps = element('div'); apps.setAttribute('aria-label', '可绑定的飞书应用');
-    const label = a => `${a.tenant_name || '企业名称暂未获取'} · ${a.app_name || '机器人名称暂未获取'}`;
+    const label = a => `${a.tenant_name || '企业名称暂未获取'} · ${a.app_name || '机器人名称暂未获取'}${a.organization ? ' · 组织 ' + a.organization + ' 的应用' : ''}`;
     // The console issues the code for the chosen bot (#236): the private-chat message that carries it completes the
     // binding in one step, and this page only shows 已绑定 after it reads the binding back from the server.
     const consoleBind = async (a, slot) => {
@@ -48,7 +50,8 @@ async function feishuIdentityCard() {
       const slot = element('div', '', 'channel-binding-slot'); slot.setAttribute('aria-live', 'polite');
       link.target = '_blank'; link.rel = 'noopener noreferrer';
       row.append(element('strong', label(a)), link, button('生成绑定串', () => consoleBind(a, slot), 'quiet'), slot,
-        note('若飞书未打开，请在飞书客户端搜索上方机器人名称；找不到时，请联系超级管理员检查应用可用范围。'));
+        note('若飞书未打开，请在飞书客户端搜索上方机器人名称；找不到时，请联系应用管理员检查应用可用范围。'),
+        ...(a.organization ? [note(`这是组织 ${a.organization} 的应用：经它绑定的飞书身份只能使用你在该组织内的权限。`)] : []));
       apps.append(row);
     }
     const form = element('form', '', 'project-form'), app = channelSelect(form, '要绑定的飞书机器人', 'binding_connector', data.applications.map(a => [a.id, label(a)]));
@@ -66,13 +69,14 @@ async function feishuIdentityCard() {
       } catch (err) {
         const reasons = { binding_code_invalid: '认证字符串无效，或不属于所选机器人。请核对后重试。', binding_expired: '认证字符串已过期，请在机器人私聊重新发送 /bind。',
           binding_replayed: '认证字符串已使用，请刷新状态；需要重新认证时发送 /reauth。', binding_login_already_started: '此请求已进入链接绑定流程，请回原私聊确认，或重新发送 /bind 获取认证字符串。',
-          external_identity_conflict: '这个飞书身份已属于其他平台账户，请登录原账户处理。' };
+          external_identity_conflict: '这个飞书身份已属于其他平台账户，请登录原账户处理。',
+          channel_application_forbidden: '你在这个机器人所属的组织没有授权，不能通过它绑定。' };
         status.textContent = Object.entries(reasons).find(([key]) => err.message.includes(key))?.[1] || err.message;
         submit.disabled = false;
       }
     });
     section.append(apps, form);
-  } else section.append(note('请联系超级管理员配置飞书应用。'));
+  } else section.append(note('暂无你可以使用的飞书应用。请联系超级管理员或本组织的管理员配置。'));
   const challenge = /^#\/identity\/feishu\?challenge=([a-f0-9]{48})$/.exec(location.hash)?.[1];
   if (challenge) {
     const status = element('p', '', 'view-error'); status.setAttribute('role', 'alert');
@@ -84,7 +88,8 @@ async function feishuIdentityCard() {
       } catch (err) {
         const reason = { binding_expired: '绑定链接已过期，请在原飞书私聊重新发送 /bind。',
           binding_replayed: '此绑定请求已处理，请刷新状态或在原私聊重新发送 /bind。',
-          binding_login_already_started: '此请求已关联平台账户，请完成原私聊确认；需要更换账户时重新发送 /bind。' };
+          binding_login_already_started: '此请求已关联平台账户，请完成原私聊确认；需要更换账户时重新发送 /bind。',
+          channel_application_forbidden: '你在这个机器人所属的组织没有授权，不能通过它绑定。' };
         status.textContent = Object.entries(reason).find(([code]) => err.message.includes(code))?.[1] || err.message;
         claim.disabled = false;
       }
@@ -147,12 +152,14 @@ const employeeErrors = { channel_employee_revalidation_required: '群成员正�
   external_binding_required: '需要先完成本人的飞书身份绑定。', capability_forbidden: '你在所选仓库或组织没有配置权限（config.write）。', channel_employee_source_inactive: '应用已停用、机器人已移出或群已归档。',
   channel_employee_project_inactive: '项目已停用。', channel_employee_disabled: '旧群员工授权已停用。',
   channel_employee_sync_paused: '群授权或受众待核验，历史同步已暂停。', channel_bot_not_in_chat: '机器人当前不在这个群中。',
-  channel_audience_unverified: '平台未提供完整成员范围，暂时无法核验。', channel_history_forbidden: '需要该群助手的配置人，或在其全部项目范围内有配置权限。',
+  channel_audience_unverified: '平台未提供完整成员范围，暂时无法核验。', channel_history_forbidden: '需要该群助手的负责人，或在其全部项目范围内有配置权限。',
   channel_audience_permission_required: '飞书应用还没有读取群成员的权限，无法核验你是否在群中。请超级管理员在「全局设置 → 飞书连接」查看缺少的权限，为应用开通 im:chat.members:read 并发布新版本后再保存。',
   channel_revision_conflict: '这个群的配置已被其他人修改，请刷新本页后重新保存。', service_role_unavailable: '所选服务角色已停用。', service_role_not_bindable: '管理助手不能绑定到群聊。',
   channel_service_scope_paused: '配置人在全部所选仓库的权限都已变化，助手暂停。', channel_service_binding_disabled: '群聊助手已停用。',
   schedule_destination_binding_required: '这个群没有启用的群聊助手绑定。',
-  channel_service_binding_forbidden: '只有配置人、超级管理员或在全部范围内有配置权限的维护人可以停用。', channel_service_scope_invalid: '请至少选择一个仓库，或选择一个组织。',
+  channel_service_binding_forbidden: '只有这个群聊助手的负责人、其项目范围所属组织的管理员或超级管理员可以修改、停用或转交。', channel_service_scope_invalid: '请至少选择一个仓库，或选择一个组织。',
+  channel_service_scope_outside_organization: '这个群使用的是组织的飞书应用，只能选择该组织的仓库或整个组织。',
+  channel_service_owner_ineligible: '新负责人需要对当前全部项目范围有配置权限，且账户处于启用状态。',
   service_role_model_not_configured: '服务角色尚未配置模型，请超级管理员在「全局设置 → 服务角色」中选择。' };
 const employeeError = value => Object.entries(employeeErrors).find(([key]) => String(value).includes(key))?.[1] || String(value);
 // Prompt-driven timers of one chat (#330): the chat's own assistant runs the prompt with the chat's permissions and posts the
@@ -237,7 +244,10 @@ const bindingStates = { active: '生效中', paused: '已暂停', disabled: '已
 // A group binds one service role and one project scope; members use it without binding themselves.
 async function channelServiceBindingSettings() {
   const data = await api('/api/channels/service-bindings'), box = card('飞书群聊助手'), form = element('form', '', 'project-form');
-  box.append(note('为机器人所在的群选择一个服务角色和项目范围（整个组织或多个仓库）。群成员无需绑定或授权，按这里的配置使用助手，也不需要先选项目。配置人需要已绑定飞书、在该群中，并对所选仓库（或整个组织）有配置权限；配置人失去某个仓库的权限时，只暂停该仓库。'));
+  box.append(note('为机器人所在的群选择一个服务角色和项目范围（整个组织或多个仓库）。群成员无需绑定或授权，按这里的配置使用助手，也不需要先选项目。第一个配置的人成为负责人，需要已绑定飞书、在该群中，并对所选仓库（或整个组织）有配置权限；配置人失去某个仓库的权限时，只暂停该仓库。'),
+    note('之后只有负责人、项目范围所属组织的管理员和超级管理员可以修改或停用，组织管理员和超级管理员不在群里也可以修改，并可以把负责人转交给对全部范围有配置权限的人。使用组织飞书应用的群只能选择该组织的仓库。'));
+  // Each chat's app decides which organization its scope may use (null: any).
+  const chatOrganization = new Map([...data.chats.map(c => [c.id, c.organization || null]), ...data.bindings.map(b => [b.chat_id, b.chat.organization || null])]);
   const chats = new Map([...data.chats.map(c => [c.id, `${c.app_name || c.app_id || '已配置群'} · ${c.chat_id}`]), ...data.bindings.filter(b => !data.chats.some(c => c.id === b.chat_id)).map(b => [b.chat_id, `${b.chat.app_name || '已配置群'} · ${b.chat.chat_id}`])]);
   const chat = channelSelect(form, '助手所在群', 'binding_chat', [...chats]);
   const role = channelSelect(form, '服务角色', 'binding_role', data.service_roles.map(r => [r.id, r.name + (r.recommended ? '（推荐）' : '')]));
@@ -249,6 +259,7 @@ async function channelServiceBindingSettings() {
   repositoriesLabel.append(repositoriesKind, ' 选择仓库'); organizationLabel.append(organizationKind, ' 整个组织');
   const repositories = element('div', '', 'role-choices'); repositories.setAttribute('aria-label', '可选择的仓库');
   const boxes = new Map(data.projects.map(p => { const wrap = checkbox('binding_repository:' + p.id, false, p.full_name); repositories.append(wrap); return [p.id, wrap.querySelector('input')]; }));
+  const projectOrganization = new Map(data.projects.map(p => [p.id, p.organization]));
   const organization = document.createElement('select'); organization.setAttribute('aria-label', '组织');
   for (const o of data.organizations) organization.add(new Option(o.name, o.id));
   organizationKind.disabled = !data.organizations.length;
@@ -257,9 +268,11 @@ async function channelServiceBindingSettings() {
   const participation = channelSelect(form, '助手发言范围', 'binding_participation', participationOptions);
   form.append(note('注意：群内所有成员都能看到助手读取的所选仓库内容（包括私有仓库），由配置人负责控制范围。所有获准消息都会存入本地；扩大发言范围会增加模型用量，用量记在服务角色上，不计入项目。'));
   const status = element('p', '', 'view-error'); status.setAttribute('role', 'alert');
+  const ownership = note(''); ownership.setAttribute('role', 'status');
   const save = element('button', '保存群聊助手'); save.type = 'submit';
-  form.append(status, save);
+  form.append(ownership, status, save);
   let expected = 0;
+  const unavailable = !chats.size || !data.service_roles.length || !data.projects.length && !data.organizations.length;
   const describeRole = () => {
     const r = data.service_roles.find(item => item.id === role.value);
     const labels = { none: '禁止', read: '只读', write: '读写', allow: '允许', deny: '拒绝' };
@@ -267,8 +280,16 @@ async function channelServiceBindingSettings() {
   };
   const showScope = () => { repositories.hidden = !repositoriesKind.checked; organization.closest('label').hidden = !organizationKind.checked; };
   const fill = () => {
-    const current = data.bindings.find(b => b.chat_id === chat.value);
+    const current = data.bindings.find(b => b.chat_id === chat.value), organizationOnly = chatOrganization.get(chat.value) || null;
     expected = current?.revision || 0;
+    // An organization app's group offers only that organization's repositories and the organization itself.
+    for (const [id, input] of boxes) { const hidden = !!organizationOnly && projectOrganization.get(id) !== organizationOnly; input.closest('label').hidden = hidden; if (hidden) input.checked = false; }
+    for (const option of organization.options) option.disabled = !!organizationOnly && option.value !== organizationOnly;
+    if (organizationOnly && [...organization.options].some(o => o.value === organizationOnly)) organization.value = organizationOnly;
+    organizationKind.disabled = !data.organizations.some(o => !organizationOnly || o.id === organizationOnly);
+    const locked = !!current && !current.can_manage;
+    ownership.textContent = locked ? `这个群的助手由 ${current.owner || '原负责人'} 负责；只有负责人、所属组织的管理员和超级管理员可以修改。` : current?.owner ? '负责人：' + current.owner : '';
+    save.disabled = unavailable || locked;
     role.value = current?.enabled && data.service_roles.some(r => r.id === current.service_role.id) ? current.service_role.id : (data.service_roles.find(r => r.recommended) || data.service_roles[0])?.id || '';
     participation.value = current?.participation || 'mentions';
     const org = current?.enabled && current.scope.organization;
@@ -279,7 +300,7 @@ async function channelServiceBindingSettings() {
   };
   for (const control of [repositoriesKind, organizationKind]) control.addEventListener('change', showScope);
   role.addEventListener('change', describeRole); chat.addEventListener('change', fill);
-  save.disabled = !chats.size || !data.service_roles.length || !data.projects.length && !data.organizations.length;
+  save.disabled = unavailable;
   form.addEventListener('submit', async event => {
     event.preventDefault(); save.disabled = true; status.textContent = '正在核验你的飞书绑定、群成员身份和所选范围的配置权限…';
     const selected = organizationKind.checked ? { kind: 'organization', organization: organization.value } : { kind: 'repositories', repositories: [...boxes].filter(([, input]) => input.checked).map(([id]) => id) };
@@ -296,7 +317,8 @@ async function channelServiceBindingSettings() {
     const row = element('article', '', 'channel-binding'), scopeText = b.scope.organization ? '整个组织 ' + b.scope.organization.name : b.scope.repositories.map(r => r.full_name).join('、');
     row.setAttribute('aria-label', '群聊助手绑定');
     row.append(element('strong', `${bindingStates[b.state] || b.state} · ${b.service_role.name || '服务角色已删除'}`), note(`群：${b.chat.app_name ? b.chat.app_name + ' · ' : ''}${b.chat.chat_id}`),
-      note('项目范围：' + scopeText), note('发言范围：' + (participationOptions.find(([id]) => id === b.participation)?.[1] || b.participation) + (b.configured_by ? '；配置人：' + b.configured_by : '')),
+      note('项目范围：' + scopeText), note('发言范围：' + (participationOptions.find(([id]) => id === b.participation)?.[1] || b.participation)),
+      note(`负责人：${b.owner || '账户已删除'}${b.configured_by && b.configured_by !== b.owner ? '；最近修改：' + b.configured_by : ''}`),
       ...(b.paused.length ? [note('暂停的仓库（配置人权限已变化）：' + b.paused.join('、'))] : []), ...(b.migrated ? [note('由旧群员工自动迁移为仓库问答助手。')] : []),
       ...(b.error ? [note(employeeError(b.error))] : []));
     const history = element('div');
@@ -305,6 +327,7 @@ async function channelServiceBindingSettings() {
       try { await api('/api/channels/chats/' + b.chat_id + '/service-binding', 'PUT', { enabled: false, expected_revision: b.revision }); await start(); }
       catch (err) { error(err); }
     }, 'quiet'));
+    if (b.can_transfer) row.append(channelOwnerTransfer(b));
     if (b.enabled && b.can_manage) row.append(await channelSchedules(b.chat_id));
     row.append(history); box.append(row);
   }
@@ -321,6 +344,21 @@ async function channelServiceBindingSettings() {
     }
     box.append(old);
   }
+  return box;
+}
+// Organization and platform administrators hand a group binding to someone who can configure its whole scope (#424).
+function channelOwnerTransfer(binding) {
+  const box = element('form', '', 'project-form'), status = element('p', '', 'view-error'); status.setAttribute('role', 'alert');
+  if (!binding.owner_candidates.length) { box.append(note('转交负责人：暂无其他对全部项目范围有配置权限的账户。')); return box; }
+  const owner = channelSelect(box, '转交负责人给', 'binding_owner_' + binding.chat_id, binding.owner_candidates.map(c => [c.id, c.username]));
+  const submit = element('button', '转交负责人', 'quiet'); submit.type = 'submit'; box.append(status, submit);
+  box.addEventListener('submit', async event => {
+    event.preventDefault(); submit.disabled = true; status.textContent = '';
+    const name = owner.selectedOptions[0]?.textContent || '';
+    if (!confirm(`把这个群聊助手的负责人转交给 ${name}？转交后原负责人不能再修改它。`)) { submit.disabled = false; return; }
+    try { await api('/api/channels/chats/' + binding.chat_id + '/service-binding/owner', 'PUT', { owner_id: owner.value, expected_revision: binding.revision }); await start(); }
+    catch (err) { status.textContent = employeeError(err.message); submit.disabled = false; }
+  });
   return box;
 }
 async function channelPersonalChats() {
@@ -405,7 +443,7 @@ function channelSelect(form, caption, name, values, value) {
   if (value !== undefined) control.value = value;
   form.append(field(caption, control)); return control;
 }
-async function channelDiagnostics(c, panel) {
+async function channelDiagnostics(c, panel, history = true) {
   const [{ operations }, { deliveries }] = await Promise.all([api('/api/channels/connectors/' + c.id + '/events'), api('/api/channels/connectors/' + c.id + '/outbox')]);
   const view = card('连接健康与收发记录');
   view.append(facts([['连接状态', c.enabled ? '启用' : '停用'], ['传输状态', c.transport === 'http' ? 'HTTP 事件回调' : c.health.connection_state],
@@ -417,7 +455,8 @@ async function channelDiagnostics(c, panel) {
   else if (operations.some(op => op.reaction_error)) view.append(note('部分处理中表情添加或清理未成功，可在收件诊断中查看；普通消息回复继续处理。'));
   for (const d of deliveries.slice(0, 10)) view.append(note(`发送 ${d.id} · ${d.state} · 尝试 ${d.attempts}${d.parts?.length ? ' · 已送达 ' + d.parts.filter(p => p.state === 'sent').length + '/' + d.parts.length + ' 项' : ''}${d.last_error === 'channel_delivery_unknown' ? ' · 部分送达结果待核对，已停止自动重发' : d.last_error ? ' · ' + d.last_error : ''}`));
   panel.append(view);
-  await channelHistory(c, panel);
+  // Reading a whole app's local chats stays with super administrators; group histories are read from their bindings.
+  if (history) await channelHistory(c, panel);
 }
 
 async function channelHistory(connector, panel) {

@@ -17,15 +17,34 @@ export interface EffectiveScope {
   reason?: ScopeReason;
 }
 // Object identity is the trust boundary. Deserializing an ActorContext never creates an authenticated actor.
-const issued = new WeakMap<ActorContext, { store: Store; session?: string; guard?: () => void; parent?: ActorContext; allowedCapabilities?: string[] }>();
+// `confined` names the only tenant whose grants count (see confineActor); every actor derived from a confined one inherits it.
+const issued = new WeakMap<ActorContext, { store: Store; session?: string; guard?: () => void; parent?: ActorContext; allowedCapabilities?: string[]; confined?: string }>();
 /** Trusted background work can attenuate authority; this never creates or expands a grant. */
 export function narrowActor(actor: ActorContext, capabilities: string[]): ActorContext {
   assertCurrent(actor);
   const trust = issued.get(actor)!;
   const allowed = capabilities.filter(c => !trust.allowedCapabilities || trust.allowedCapabilities.includes(c));
   const narrowed = Object.freeze({ ...actor, capabilities: Object.freeze([...allowed]) as unknown as string[] });
-  issued.set(narrowed, { store: trust.store, parent: actor, allowedCapabilities: allowed }); return narrowed;
+  issued.set(narrowed, { store: trust.store, parent: actor, allowedCapabilities: allowed, ...(trust.confined ? { confined: trust.confined } : {}) }); return narrowed;
 }
+/**
+ * Authority that arrives through an organization's own Feishu app (#424) stays inside that organization: only the
+ * principal's grants in that tenant count, never a platform grant and never another tenant. The tenant's Feishu
+ * administrators can take over its member accounts, so nothing beyond the tenant may be reachable through its app.
+ */
+export function confineActor(actor: ActorContext, tenant: string): ActorContext {
+  assertCurrent(actor);
+  const trust = issued.get(actor)!;
+  if (actor.tenant_id && actor.tenant_id !== tenant || trust.confined && trust.confined !== tenant) return fail(403, 'tenant_forbidden');
+  if (actor.project_id && trust.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', actor.project_id)?.tenant_id !== tenant) return fail(403, 'tenant_forbidden');
+  const capabilities = confinedScopes(listEffectiveScopes(trust.store, actor.principal_id), tenant).filter(g => g.state === 'active').flatMap(g => g.capabilities)
+    .filter(c => !trust.allowedCapabilities || trust.allowedCapabilities.includes(c));
+  const confined = Object.freeze({ ...actor, tenant_id: tenant, capabilities: Object.freeze([...new Set(capabilities)]) as unknown as string[] });
+  issued.set(confined, { store: trust.store, parent: actor, allowedCapabilities: trust.allowedCapabilities, confined: tenant }); return confined;
+}
+/** The tenant an actor is confined to, or null when its principal's whole authority applies. */
+export function confinedTenant(actor: ActorContext): string | null { return issued.get(actor)?.confined ?? null; }
+const confinedScopes = (scopes: EffectiveScope[], tenant?: string) => tenant ? scopes.filter(g => g.scope !== 'platform' && g.tenant_id === tenant) : scopes;
 // Trusted adapters attach a live credential/connector fence; narrowing scope preserves it.
 export function restrictActor(actor: ActorContext, guard: () => void): ActorContext {
   const trust = issued.get(actor); if (!trust) return fail(403, 'untrusted_actor');
@@ -109,7 +128,7 @@ export function assertCurrent(actor: ActorContext): void {
 }
 export function authorize(actor: ActorContext, capability: string, resource: { tenant_id?: string | null; project_id?: string } = {}): void {
   assertCurrent(actor);
-  const { store } = issued.get(actor)!;
+  const { store, confined } = issued.get(actor)!;
   const permitted = issued.get(actor)!.allowedCapabilities;
   if (permitted && !permitted.includes(capability)) fail(403, 'capability_forbidden');
   let tenant = resource.tenant_id || actor.tenant_id;
@@ -120,7 +139,17 @@ export function authorize(actor: ActorContext, capability: string, resource: { t
     tenant = row.tenant_id;
   }
   if (actor.tenant_id && tenant !== actor.tenant_id) fail(403, 'tenant_forbidden');
-  if (!matchingGrants(store, listEffectiveScopes(store, actor.principal_id), capability, tenant, project).length) fail(403, 'capability_forbidden');
+  if (!matchingGrants(store, confinedScopes(listEffectiveScopes(store, actor.principal_id), confined), capability, tenant, project).length) fail(403, 'capability_forbidden');
+}
+/** Whether the actor holds a capability over a whole tenant or over at least one of its projects, reading its grants once. */
+export function holdsInTenant(actor: ActorContext, capability: string, tenant: string): boolean {
+  assertCurrent(actor);
+  const { store, confined, allowedCapabilities } = issued.get(actor)!;
+  if (allowedCapabilities && !allowedCapabilities.includes(capability) || actor.tenant_id && actor.tenant_id !== tenant) return false;
+  const scopes = confinedScopes(listEffectiveScopes(store, actor.principal_id), confined);
+  if (matchingGrants(store, scopes, capability, tenant).length) return true;
+  return store.all('SELECT project_id FROM identity_projects WHERE tenant_id=?', tenant).some(p => (!actor.project_id || actor.project_id === p.project_id) &&
+    matchingGrants(store, scopes, capability, tenant, p.project_id).length > 0);
 }
 // Permission summaries and request authorization share the same scope and installation checks.
 function matchingGrants(store: Store, scopes: EffectiveScope[], capability: string, tenant: string | null, project?: string): EffectiveScope[] {
@@ -187,14 +216,17 @@ export function resolvePrincipalActor(store: Store, principal: string, tenant: s
   if (parent) { assertCurrent(parent); if (parent.principal_id !== principal) fail(403, 'principal_mismatch'); }
   identityProjection(store); consumeInstallationChanges(store);
   if (!revision(store, principal)) return fail(403, 'principal_inactive');
+  // A scope chosen under a confined parent can only narrow inside its tenant.
+  const confined = parent ? issued.get(parent)?.confined : undefined;
+  if (confined) { if (tenant && tenant !== confined) return fail(403, 'tenant_forbidden'); tenant = confined; }
   if (project) {
     const target = store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project);
     if (!target?.tenant_id || tenant && tenant !== target.tenant_id) return fail(403, 'tenant_forbidden');
     tenant = target.tenant_id;
   }
-  const scopes = listEffectiveScopes(store, principal).filter(g => g.state === 'active' && (!tenant || !g.tenant_id || g.tenant_id === tenant));
+  const scopes = confinedScopes(listEffectiveScopes(store, principal), confined).filter(g => g.state === 'active' && (!tenant || !g.tenant_id || g.tenant_id === tenant));
   const actor: ActorContext = { principal_id: principal, tenant_id: tenant, ...(project ? { project_id: project } : {}), channel,
     capabilities: [...new Set(scopes.flatMap(s => s.capabilities))], authorization_revision: revision(store, principal), request_id: randomId() };
-  issued.set(actor, { store, parent }); return Object.freeze(actor);
+  issued.set(actor, { store, parent, ...(confined ? { confined } : {}) }); return Object.freeze(actor);
 }
 export function migrationReport(store: Store): Row[] { return store.all('SELECT version,applied_at,report FROM identity_migrations'); }

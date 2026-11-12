@@ -64,7 +64,10 @@ test('global administrator connects an app through the wizard, resumes it and se
     expect(f.h.store.get('SELECT count(*) n FROM tenants').n).toBe(0);
     await expect(page.getByRole('heading', { name: '应用凭据', exact: true })).toBeVisible();
     await expect(page.getByLabel('项目所属组织')).toHaveCount(0);
-    await expect(page.getByText('此应用连接全局共用', { exact: false })).toContainText('不限制操作者所属飞书企业');
+    // Without any organization yet, a super administrator's app is platform-wide.
+    await expect(page.getByLabel('应用所属', { exact: true })).toHaveValue('');
+    await expect(page.getByLabel('应用所属', { exact: true }).locator('option')).toHaveText(['全平台共用（所有用户可见）']);
+    await expect(page.getByText('应用连接不授予用户项目权限', { exact: false })).toContainText('不限制操作者所属飞书企业');
     await page.getByLabel('App ID', { exact: true }).fill('cli_wizard'); await page.getByLabel('App Secret', { exact: true }).fill(credentials.app_secret);
     wire.state.authCode = 10003; await page.getByRole('button', { name: '检查凭据并读取机器人' }).click();
     await expect(page.getByRole('alert')).toContainText('无法通过鉴权');
@@ -286,7 +289,8 @@ test('ordinary users see connected bot names and private-chat links, confirm a p
     const local = await f.member('code-browser-user', {});
     await page.goto(f.h.admin + '/#/identity/feishu'); await login(page, f.h, local.password, 'code-browser-user');
     const identity = page.locator('#feishu-identity');
-    await expect(identity.getByText('请联系超级管理员配置飞书应用。', { exact: true })).toBeVisible();
+    await expect(identity.getByText('暂无你可以使用的飞书应用。请联系超级管理员或本组织的管理员配置。', { exact: true })).toBeVisible();
+    await expect(identity.getByRole('link', { name: '连接或管理本组织的飞书应用' })).toHaveCount(0);
     await expect(identity.getByRole('link', { name: '管理员：连接或管理飞书应用' })).toHaveCount(0);
     await expect(identity.getByLabel('飞书认证字符串', { exact: true })).toHaveCount(0);
     const id = await connector(f.admin, { installation_tenant: undefined, bot_open_id: undefined });
@@ -317,6 +321,59 @@ test('ordinary users see connected bot names and private-chat links, confirm a p
     await page.screenshot({ path: output + '/code-binding-mobile.png', fullPage: true });
     await page.evaluate(() => api('/api/auth/logout', 'POST', {})); await page.reload(); await login(page, f.h, f.password);
     await expect(identity.getByRole('link', { name: '管理员：连接或管理飞书应用' })).toBeVisible();
+    expect(errors).toEqual([]);
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('a repository admin connects an app for their organization from the identity page on a long connection only; it stays inside that organization (#424)', async ({ page }) => {
+  test.setTimeout(90000);
+  const wire = transport(), f = await managementFixture(null, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
+  const errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
+  try {
+    await connector(f.admin);
+    const maintainer = await f.member('org-app-maintainer', { repository_ids: ['101'] }), outsider = await f.member('org-app-outsider', { repository_ids: ['201'] });
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await page.goto(f.h.admin + '/#/identity/feishu'); await login(page, f.h, maintainer.password, 'org-app-maintainer');
+    const identity = page.locator('#feishu-identity');
+    await expect(identity.getByRole('link', { name: '管理员：连接或管理飞书应用' })).toHaveCount(0);
+    await identity.getByRole('link', { name: '连接或管理本组织的飞书应用' }).click();
+    await expect(page).toHaveURL(/#\/identity\/feishu-apps$/);
+    await expect(page.getByRole('heading', { name: '飞书应用连接', exact: true })).toBeVisible();
+    await expect(page.getByText('你还没有可管理的飞书应用', { exact: false })).toBeVisible();
+    await expect(page.getByRole('group', { name: 'cli_fixture' })).toHaveCount(0);
+    await page.getByRole('link', { name: '新增飞书应用连接' }).click();
+    await expect(page).toHaveURL(/#\/identity\/feishu-apps\/new\/0$/);
+    // Only an enterprise app on a long connection: HTTP callbacks and store apps stay with super administrators.
+    await expect(page.getByLabel('应用类型', { exact: true })).toHaveValue('enterprise');
+    await expect(page.getByLabel('事件接收方式', { exact: true })).toHaveValue('websocket');
+    await expect(page.getByLabel('应用类型', { exact: true }).locator('option[value="saas"]')).toHaveJSProperty('disabled', true);
+    await expect(page.getByLabel('事件接收方式', { exact: true }).locator('option[value="http"]')).toHaveJSProperty('disabled', true);
+    await expect(page.getByText('组织的应用只能是企业自建应用', { exact: false })).toBeVisible();
+    await page.getByRole('button', { name: '应用已准备，填写凭据' }).click();
+    await expect(page.getByLabel('应用所属', { exact: true }).locator('option')).toHaveText(['组织 agent-test-zone']);
+    await page.getByLabel('App ID', { exact: true }).fill('cli_org_wizard'); await page.getByLabel('App Secret', { exact: true }).fill(credentials.app_secret);
+    await page.screenshot({ path: output + '/organization-app-credentials-desktop.png', fullPage: true });
+    await page.getByRole('button', { name: '保存连接并继续' }).click();
+    await expect(page).toHaveURL(/#\/identity\/feishu-apps\/[a-f0-9]{48}\/2$/);
+    const c = f.h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_org_wizard'");
+    expect([c.owner_tenant, c.created_by, c.transport, c.application_type]).toEqual(['github.com:10', maintainer.id, 'websocket', 'enterprise']);
+    await page.getByRole('link', { name: '返回连接列表' }).click();
+    const row = page.getByRole('group', { name: 'cli_org_wizard' });
+    await expect(row.getByText('组织 agent-test-zone 的应用 · 创建人 org-app-maintainer · 启用 · 企业自建长连接', { exact: true })).toBeVisible();
+    await page.goto(f.h.admin + '/#/identity/feishu-apps/' + c.id + '/1');
+    await expect(page.getByLabel('App ID', { exact: true })).toHaveAttribute('readonly', '');
+    await expect(page.getByLabel('应用所属', { exact: true })).toHaveCount(0);
+    await page.goto(f.h.admin + '/#/identity/feishu');
+    await expect(identity.getByLabel('可绑定的飞书应用')).toContainText('组织 agent-test-zone 的应用');
+    await expect(identity.getByText('经它绑定的飞书身份只能使用你在该组织内的权限', { exact: false })).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: output + '/organization-app-identity-mobile.png', fullPage: true });
+    // Another organization's admin neither sees nor manages it.
+    await page.evaluate(() => api('/api/auth/logout', 'POST', {})); await page.reload(); await login(page, f.h, outsider.password, 'org-app-outsider');
+    await expect(identity.getByLabel('可绑定的飞书应用')).not.toContainText('组织 agent-test-zone');
+    await page.goto(f.h.admin + '/#/identity/feishu-apps/' + c.id + '/1');
+    await expect(page.getByText('连接不存在，或你没有权限管理它。', { exact: true })).toBeVisible();
     expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
@@ -395,7 +452,8 @@ test('personal Feishu guide completes both ends, shows the current identity and 
     await expect(page.getByLabel('我的飞书账号', { exact: true })).toContainText('已绑定');
     await expect(page.getByLabel('我的飞书账号', { exact: true })).not.toContainText('ou_alice');
     expect(f.h.store.get('SELECT count(*) n FROM scoped_grants').n).toBe(grants);
-    const denied = await page.evaluate(async () => (await fetch('/api/channels/setup')).status); expect(denied).toBe(403);
+    // A repository admin may add apps for their own organization (#424), but never sees the platform-wide app's configuration.
+    const own = await page.evaluate(async () => (await fetch('/api/channels/setup')).json()); expect([own.platform, own.connectors]).toEqual([false, []]);
     await page.goto(f.h.admin + '/#/settings/feishu'); await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
     await page.goto(f.h.admin + '/#/channels'); await expect(page).toHaveURL(/#\/identity\/feishu$/);
     await page.setViewportSize({ width: 390, height: 844 });
@@ -445,7 +503,8 @@ test('a local account completes Feishu binding without GitHub login and keeps it
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: output + '/local-binding-bound-mobile.png', fullPage: true });
-    const denied = await page.evaluate(async () => (await fetch('/api/channels/setup')).status);
-    expect(denied).toBe(403); expect(errors).toEqual([]);
+    // A repository admin may add apps for their own organization (#424), but never sees the platform-wide app's configuration.
+    const own = await page.evaluate(async () => (await fetch('/api/channels/setup')).json());
+    expect([own.platform, own.connectors]).toEqual([false, []]); expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });

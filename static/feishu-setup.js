@@ -1,7 +1,11 @@
 const feishuSteps = ['创建应用', '应用凭据', '事件与回调', '发布与检查', '绑定与试用'];
 // Only non-secret selections survive a step change. Credentials stay in the form until saved, never browser storage.
 let feishuChoice = null;
-const feishuAddress = (id = 'new', step = 0) => `#/settings/feishu/${id}/${step}`;
+// Super administrators manage apps in global settings; organization and repository admins reach the same wizard from the
+// identity page (#424). The server decides which apps each person sees and may change.
+const feishuBase = () => location.hash.startsWith('#/identity/') ? '#/identity/feishu-apps' : '#/settings/feishu';
+const feishuAddress = (id = 'new', step = 0) => `${feishuBase()}/${id}/${step}`;
+const feishuOwner = c => c.owner ? `组织 ${c.owner.name} 的应用${c.creator ? ' · 创建人 ' + c.creator : ''}` : '全平台共用';
 function feishuError(err) {
   const reasons = { channel_auth_failed: 'App ID 或 App Secret 无法通过鉴权，请从飞书应用的“凭证与基础信息”重新复制。',
     channel_bot_unavailable: '暂时读不到机器人信息。请先发布包含机器人能力的初始版本，再返回检查；配置事件后还需发布新版本。',
@@ -15,7 +19,11 @@ function feishuError(err) {
     channel_app_ticket_required: '尚未收到有效的商店应用票据。先完成 HTTP 事件配置、安装和发布，再重新检查。',
     channel_http_credentials_required: 'HTTP 回调需要 Verification Token 和 Encrypt Key，请从“事件与回调 → 加密策略”填写。',
     channel_revision_conflict: '连接已被其他操作更新。请刷新本页、核对当前配置后重新保存。',
-    channel_installation_conflict: '这个应用在该安装租户下已登记，请返回连接列表继续配置。' };
+    channel_installation_conflict: '这个应用在该安装租户下已登记，请返回连接列表继续配置。',
+    channel_application_forbidden: '你没有权限管理这个飞书应用，或不能为所选组织新增应用。组织的应用由创建人、组织管理员和超级管理员管理。',
+    channel_transport_forbidden: '组织的应用只能使用企业自建应用和 SDK 长连接；HTTP 回调和商店应用只能由超级管理员配置。',
+    channel_application_immutable: '应用创建后，App ID、安装企业和所属组织都不能修改。需要换用其他应用时，请新增一个连接。',
+    organization_not_found: '所选组织不存在，请刷新本页后重新选择。' };
   return Object.entries(reasons).find(([code]) => err.message.includes(code))?.[1] || err.message;
 }
 // The required scopes come from the server list, so the wizard and every connection import and check the same set.
@@ -40,12 +48,13 @@ function feishuList(items) { const list = element('ol', '', 'feishu-instructions
 async function renderFeishuSetup(panel, request) {
   const data = await api('/api/channels/setup');
   if (request !== renderVersion) return;
-  const match = /^#\/settings\/feishu\/(new|[a-f0-9]{48})\/([0-4])$/.exec(location.hash);
+  const base = feishuBase(), match = /^#\/(?:settings\/feishu|identity\/feishu-apps)\/(new|[a-f0-9]{48})\/([0-4])$/.exec(location.hash);
   if (!match) {
     const overview = card('飞书应用连接');
-    overview.append(note('由全局管理员连接飞书应用，全系统共用，无需选择 GitHub 组织。每位用户在「身份与权限」中绑定本人身份，之后仍按已有项目权限使用。'),
-      channelLink(feishuAddress(), '新增飞书应用连接', 'button-link'));
-    if (!data.connectors.length) overview.append(note('尚未连接飞书应用。按向导完成应用创建、凭据、事件订阅、发布和试用。'));
+    overview.append(note(data.platform ? '超级管理员可以连接全平台共用的应用，也可以为某个组织连接应用。组织管理员和组织内仓库的管理员可以在「身份与权限」为本组织连接企业自建应用。每位用户在「身份与权限」中绑定本人身份，之后仍按已有项目权限使用。'
+      : '你可以为下列组织连接企业自建的飞书应用（SDK 长连接）。组织的应用只有该组织内有授权的人能看到和绑定；它所在的群只能选择本组织的仓库，经它绑定的飞书身份也只能使用本组织内的权限。应用由创建人、组织管理员和超级管理员管理。'),
+      ...(data.platform || data.organizations.length ? [channelLink(feishuAddress(), '新增飞书应用连接', 'button-link')] : [note('你当前不能为任何组织新增应用，只能管理下方已有的应用。')]));
+    if (!data.connectors.length) overview.append(note(data.platform ? '尚未连接飞书应用。按向导完成应用创建、凭据、事件订阅、发布和试用。' : '你还没有可管理的飞书应用。按向导完成应用创建、凭据、事件订阅、发布和试用。'));
     for (const c of data.connectors) {
       const row = element('div', '', 'channel-binding');
       row.setAttribute('role', 'group'); row.setAttribute('aria-label', c.app_id);
@@ -67,7 +76,7 @@ async function renderFeishuSetup(panel, request) {
         } finally { refresh.disabled = false; }
       };
       const refresh = button('刷新应用信息与权限', refreshInfo, 'quiet');
-      row.append(name, tenant, note(`App ID：${c.app_id}`), note(`全局共用 · ${c.enabled ? '启用' : '停用'} · ${c.transport === 'http' ? 'HTTP 回调' : '企业自建长连接'}`),
+      row.append(name, tenant, note(`App ID：${c.app_id}`), note(`${feishuOwner(c)} · ${c.enabled ? '启用' : '停用'} · ${c.transport === 'http' ? 'HTTP 回调' : '企业自建长连接'}`),
         refresh, status, grants,
         channelLink(feishuAddress(c.id, 1), '继续配置', 'button-link'), channelLink(feishuAddress(c.id, 4), '连接诊断与收发记录', 'button-link'));
       overview.append(row);
@@ -76,14 +85,15 @@ async function renderFeishuSetup(panel, request) {
     panel.append(overview); return;
   }
   const id = match[1], step = Number(match[2]), c = data.connectors.find(row => row.id === id);
-  if (id !== 'new' && !c) { panel.append(note('连接不存在。'), channelLink('#/settings/feishu', '返回飞书连接')); return; }
+  if (id !== 'new' && !c) { panel.append(note('连接不存在，或你没有权限管理它。'), channelLink(base, '返回飞书连接')); return; }
+  if (!c && !data.platform && !data.organizations.length) { panel.append(note('你当前不能为任何组织新增飞书应用。'), channelLink(base, '返回飞书连接')); return; }
   if (!c && step > 1) { panel.append(note('请先保存应用连接，再配置事件、发布和试用。'), channelLink(feishuAddress(), '从创建应用开始')); return; }
   const title = card('飞书应用连接向导'), nav = element('nav', '', 'wizard-steps'); nav.setAttribute('aria-label', '飞书连接步骤');
   title.append(note(`第 ${step + 1} / ${feishuSteps.length} 步${c ? ' · ' + (c.app_name || c.app_id) + (c.tenant_name ? ' · ' + c.tenant_name : '') : ''}。应用连接可随时返回继续；凭据保存后不回显。`));
   feishuSteps.forEach((caption, i) => {
     const item = button(`${i + 1}. ${caption}`, () => { location.hash = feishuAddress(id, i); }, 'quiet');
     item.disabled = !c && i > 1; if (i === step) item.setAttribute('aria-current', 'step'); nav.append(item);
-  }); title.append(nav, channelLink('#/settings/feishu', '返回连接列表')); panel.append(title);
+  }); title.append(nav, channelLink(base, '返回连接列表')); panel.append(title);
   const body = card(feishuSteps[step]); panel.append(body);
   const go = (next = step + 1) => { location.hash = feishuAddress(id, next); };
   const next = caption => body.append(button(caption, () => go(), ''));
@@ -92,9 +102,15 @@ async function renderFeishuSetup(panel, request) {
     const initial = feishuChoice?.id === id ? feishuChoice : c || { application_type: 'enterprise', transport: 'websocket' };
     const application = channelSelect(choices, '应用类型', 'application_type', [['enterprise', '企业自建'], ['saas', 'SaaS / 商店应用']], initial.application_type);
     const transport = channelSelect(choices, '事件接收方式', 'transport', [['websocket', '企业自建 SDK 长连接（无需公网事件地址）'], ['http', 'HTTP 事件回调']], initial.transport);
+    // Whoever holds an HTTP app's verification secrets could forge members' messages: only super administrators choose it.
+    if (!data.platform) {
+      application.value = 'enterprise'; transport.value = 'websocket'; application.options[1].disabled = true; transport.options[1].disabled = true;
+      choices.append(note('组织的应用只能是企业自建应用，并通过 SDK 长连接接收事件；HTTP 回调和商店应用只能由超级管理员配置。'));
+    }
     const permissions = element('div'), installationNote = note('企业自建应用需先开通“获取企业信息”（tenant:tenant:readonly）应用身份权限，并发布包含机器人能力和该权限的初始版本、通过必要审核，再进入下一步保存连接；否则无法自动获取安装企业。');
     const sync = () => {
       transport.options[0].disabled = application.value === 'saas'; if (application.value === 'saas') transport.value = 'http';
+      if (!data.platform) transport.options[1].disabled = true;
       permissions.replaceChildren(channelCopy('完整权限 JSON', feishuScopeJSON(data.feishu_scopes, application.value)));
       installationNote.hidden = application.value !== 'enterprise';
     };
@@ -107,11 +123,20 @@ async function renderFeishuSetup(panel, request) {
       permissions, installationNote,
       note('卡片是默认功能：cardkit:card:write 用于创建与更新卡片，im:message:send_as_bot 用于发送和更新机器人消息卡片；还必须在后续“回调配置”添加 card.action.trigger，权限导入不会自动订阅回调。收到消息后的处理中表情需要 im:message.reactions:write_only；已有应用也需补齐并发布新版本。历史读取使用 im:message:readonly，群历史还需要 im:message.group_msg。缺权限会显示同步受阻；不会宣称已同步全部历史。'),
       note('长连接不需要公网事件地址；身份绑定仍需用户浏览器能够访问控制台并登录平台，可使用本地账户或 GitHub 登录。HTTP 必须使用飞书可访问的公网 HTTPS 地址。'),
-      channelLink('#/settings/access', '配置公网 HTTPS 地址'), button('应用已准备，填写凭据', () => { feishuChoice = { id, application_type: application.value, transport: transport.value }; go(); }, ''));
+      ...(data.platform ? [channelLink('#/settings/access', '配置公网 HTTPS 地址')] : []), button('应用已准备，填写凭据', () => { feishuChoice = { ...feishuChoice?.id === id ? feishuChoice : {}, id, application_type: application.value, transport: transport.value }; go(); }, ''));
   } else if (step === 1) {
     const choice = feishuChoice?.id === id ? feishuChoice : c || { application_type: 'enterprise', transport: 'websocket' };
     const form = element('form', '', 'project-form'), message = element('p', '', 'view-error'); message.setAttribute('role', 'alert');
-    form.append(note('此应用连接全局共用，不绑定 GitHub 组织，也不授予用户项目权限。不限制操作者所属飞书企业；外部成员也需完成个人绑定并获得相应项目权限。'));
+    // The owner is chosen once at creation: a platform-wide app, or one organization's app.
+    let owner;
+    if (c) form.append(facts([['所属', feishuOwner(c)]]));
+    else {
+      const owners = [...(data.platform ? [['', '全平台共用（所有用户可见）']] : []), ...data.organizations.map(o => ['org:' + o.id, '组织 ' + o.name])];
+      owner = channelSelect(form, '应用所属', 'owner_tenant', owners, choice.owner ?? owners[0]?.[0]);
+      owner.addEventListener('change', () => { feishuChoice = { ...choice, id, owner: owner.value }; });
+    }
+    form.append(note('组织的应用只有该组织内有授权的人能看到和绑定；它所在的群只能选择本组织的仓库，经它绑定的飞书身份也只能使用本组织内的权限。全平台共用的应用不受这些限制。所属组织、App ID 和安装企业保存后都不能修改。'),
+      note('应用连接不授予用户项目权限，也不限制操作者所属飞书企业；外部成员也需完成个人绑定并获得相应项目权限。'));
     const app = channelField(form, 'App ID', 'app_id', c?.app_id || ''); app.required = true; app.readOnly = !!c;
     const secret = channelField(form, c ? 'App Secret（留空保留）' : 'App Secret', 'app_secret', '', 'password'); secret.required = !c;
     form.append(note(choice.application_type === 'enterprise' ? '机器人身份由系统在保存时自动读取，无需填写 open_id。请先启用机器人能力并发布初始版本。' : '机器人身份无需填写。先保存连接、配置 HTTP 回调并接收应用票据，再在“发布与检查”自动读取并保存。'));
@@ -132,7 +157,7 @@ async function renderFeishuSetup(panel, request) {
     if (choice.application_type === 'enterprise') {
       form.append(note('应用安装企业由系统在保存时自动获取，无需填写 tenant_key。请先开通应用身份权限“获取企业信息”（tenant:tenant:readonly），并发布包含该权限的版本、通过必要审核，再保存连接。安装企业仅用于核对应用事件来源，不限制操作者所属企业。'));
     } else {
-      installation = channelField(form, '应用安装租户 tenant_key', 'installation_tenant', c?.installation_tenant || ''); installation.required = true;
+      installation = channelField(form, '应用安装租户 tenant_key', 'installation_tenant', c?.installation_tenant || ''); installation.required = true; installation.readOnly = !!c;
       form.append(note('商店应用需要先指定机器人安装的飞书企业，才能换取该企业的访问令牌。可从该企业的应用启用事件或登录授权信息获取 tenant_key；此字段用于核对应用事件来源，不限制操作者所属企业。'));
     }
     let verification, encryption;
@@ -149,6 +174,7 @@ async function renderFeishuSetup(panel, request) {
       const credentials = Object.fromEntries([['app_secret', secret.value.trim()], ['verification_token', verification?.value.trim()], ['encrypt_key', encryption?.value.trim()]].filter(([, value]) => value));
       try {
         const result = await api('/api/channels/connectors' + (c ? '/' + c.id : ''), c ? 'PATCH' : 'POST', { app_id: app.value.trim(), ...(installation ? { installation_tenant: installation.value.trim() } : {}),
+          ...(owner ? { owner_tenant: owner.value ? owner.value.slice(4) : null } : {}),
           application_type: choice.application_type, transport: choice.transport, enabled: enabled.checked, expected_revision: c?.revision ?? 0,
           ...(Object.keys(credentials).length ? { credentials } : {}) });
         secret.value = ''; if (verification) verification.value = ''; if (encryption) encryption.value = '';
@@ -205,6 +231,6 @@ async function renderFeishuSetup(panel, request) {
       '需要群内使用时，由已绑定飞书、在该群中并对相关仓库有配置权限的维护人，在「身份与权限 → 飞书群聊助手」为该群选择服务角色和项目范围，再在群里 @ 机器人提问。',
       '需要定时汇报或巡检时，在「身份与权限」页的「我的飞书私信会话」或对应的群聊助手下添加定时任务，用提示词说明要做什么；项目日报和事件订阅可直接选择有权限的私聊或群作为目的地。']),
       channelLink('#/identity/feishu', '前往个人飞书身份绑定', 'button-link'), button('刷新收件与发送状态', () => render().catch(error), 'quiet'));
-    await channelDiagnostics(c, panel);
+    await channelDiagnostics(c, panel, data.platform);
   }
 }

@@ -169,7 +169,7 @@ export class ScheduleService {
   chatDestinations(actor: ActorContext, project: string): Json[] {
     const usable = (check: () => unknown) => { try { check(); return true; } catch (error) { if (error instanceof HttpError) return false; throw error; } };
     const channels = this.channels, personal = this.store.all("SELECT c.* FROM channel_personal_owners o JOIN channel_chats c ON c.id=o.chat_id WHERE o.principal_id=? AND c.chat_type='p2p'", actor.principal_id)
-      .filter(chat => usable(() => { channels.schedules.owner(channels.employees.chat(chat.id), actor.principal_id); authorize(actor, 'tasks.read', { project_id: project }); }));
+      .filter(chat => usable(() => { channels.schedules.owner(channels.employees.chat(chat.id), actor.principal_id); authorize(actor, 'tasks.read', { project_id: project }); channels.assertApplicationProject(chat, project); }));
     const groups = this.store.all("SELECT c.* FROM channel_service_bindings b JOIN channel_chats c ON c.id=b.chat_id WHERE b.enabled=1 AND c.chat_type='group'").filter(chat => usable(() => {
       const binding = channels.serviceBindings.canView(actor, chat.id);
       if (!binding || !channels.serviceBindings.reachable(channels.serviceBindings.assertUsable(binding), project, ['tasks.read'])) fail(403, 'schedule_destination_unavailable');

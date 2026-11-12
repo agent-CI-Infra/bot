@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { identityFixture } from './identity-fixture.mjs';
 import { session } from '../dist/app/auth.js';
-import { resolveActor, authorize, invalidate } from '../dist/identity/authorization.js';
+import { resolveActor, authorize, invalidate, narrowActor, resolvePrincipalActor } from '../dist/identity/authorization.js';
 import { ChannelConnections } from '../dist/channels/connections.js';
 import { channelFixture, transport, connector, envelope, post, until, finished, bindFixture, inGroup, cardEvent, cardToken, digest, credentials, scriptedModel, managementOutcome, privateChat, boundGroup, registerDestination, repositoryAssistant } from './channel-fixture.mjs';
 
@@ -312,6 +312,42 @@ test('one global connection serves authorized projects in different organization
   const revoked = await send('201', 'foreign'); await finished(h, revoked.value.operation_id);
   assert.equal(managementOutcome(h, revoked.value.operation_id).error, 'capability_forbidden');
   assert.equal((await admin('/api/channels/setup')).value.connectors.length, 1);
+});
+
+test('an identity bound through an organization app acts only inside that organization: no platform authority and no other tenant (#424)', async t => {
+  const f = await channelFixture(t), { h, id, service } = f;
+  h.store.run("UPDATE installed_repositories SET owner_id='20',owner_login='second-fixture' WHERE repository_id='201'");
+  h.store.run("UPDATE channel_connectors SET owner_tenant='github.com:10' WHERE id=?", id);
+  const member = await f.member('org-app-im', { repository_ids: ['101', '201'] });
+  bindFixture(h, id, member.id, 'ou_org_member');
+  scriptedModel(f, [readNamed, '已读取任务事实。']);
+  const send = (project, task, actor = 'ou_org_member', chat = 'oc_org_member') => post(h, id, envelope(ask(project, task), { sender: { sender_id: { open_id: actor } }, message: { chat_id: chat } }));
+  const allowed = await send('101', 'blocked'); assert.equal((await finished(h, allowed.value.operation_id)).state, 'completed');
+  assert.equal(managementOutcome(h, allowed.value.operation_id).error, null);
+  // The member administers 201 too, but not through this organization's app.
+  const foreign = await send('201', 'foreign'); await finished(h, foreign.value.operation_id);
+  assert.equal(managementOutcome(h, foreign.value.operation_id).error, 'tenant_forbidden');
+  const conversation = h.store.get('SELECT c.* FROM channel_sessions s JOIN management_conversations c ON c.id=s.conversation_id WHERE s.principal_id=?', member.id);
+  assert.equal(conversation.scope, 'tenant:github.com:10');
+  const actor = await service.actor(service.adapter(service.connector(id)).normalize(envelope(ask(), { sender: { sender_id: { open_id: 'ou_org_member' } } })));
+  assert.equal(actor.tenant_id, 'github.com:10'); authorize(actor, 'tasks.read', { project_id: '101' });
+  assert.throws(() => authorize(actor, 'tasks.read', { project_id: '201' }), /tenant_forbidden/);
+  assert.throws(() => resolvePrincipalActor(h.store, member.id, 'github.com:20', undefined, 'im', actor), /tenant_forbidden/);
+  assert.throws(() => narrowActor(actor, ['tasks.read']) && authorize(narrowActor(actor, ['tasks.read']), 'tasks.read', { project_id: '201' }), /tenant_forbidden/);
+  // A platform administrator's authority never passes through an organization's app.
+  const platform = await service.actor(service.adapter(service.connector(id)).normalize(envelope(ask())));
+  assert.throws(() => authorize(platform, 'platform.manage'), /capability_forbidden/);
+  assert.throws(() => authorize(platform, 'tasks.read', { project_id: '101' }), /capability_forbidden/);
+  assert.equal(service.management.service.user(platform).role, 'project_admin');
+  const refused = await send('101', 'blocked', 'ou_alice', 'oc_private'); await finished(h, refused.value.operation_id);
+  assert.equal(h.store.get('SELECT error FROM channel_inbox WHERE id=?', refused.value.operation_id).error, 'channel_application_tenant_forbidden');
+  await until(() => f.wire.sent.some(s => s.receive_id === 'oc_private' && JSON.stringify(s.content).includes('属于一个 GitHub 组织')));
+  // A private chat of the organization's app is offered only for that organization's projects.
+  const chat = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_org_member'");
+  const offered = async project => (await member.client('/api/management/query', 'POST', { operation: 'list_schedule_destinations', target: { project_id: project }, arguments: {} })).value.destinations.map(d => d.id);
+  assert.ok((await offered('101')).includes('chat:' + chat.id));
+  assert.ok(!(await offered('201')).includes('chat:' + chat.id));
+  await assert.rejects(registerDestination(member.client, chat, '201'), { code: 'channel_application_scope_forbidden' });
 });
 
 test('a project offers chats directly as destinations and registers a chosen one on save, only for its owner or a manager of the group binding (#330)', async t => {

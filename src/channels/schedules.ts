@@ -1,7 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
 import { TaskError } from '../agent/common.js';
-import { assertCurrent, authorize, resolvePrincipalActor, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
+import { assertCurrent, authorize, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
 import { localParts, nextTime, parseCron, previewTimes } from '../schedules/time.js';
 import type { ChannelService } from './service.js';
 
@@ -211,10 +211,10 @@ export class ChannelSchedules {
   /** The owner's management assistant in a conversation of this timer, under the owner's current authority only. */
   private async personal(row: Row, chat: Row, run: string, prompt: string, guard: () => void): Promise<void> {
     const owner = this.owner(chat, row.owner_id);
-    const actor = restrictActor(resolvePrincipalActor(this.store, owner.principal_id, null), guard), management = this.host.management;
+    const actor = restrictActor(this.host.personalActor(owner.principal_id, chat, 'api'), guard), management = this.host.management;
     let conversation = row.conversation_id as string | null;
     if (!conversation || !this.store.get('SELECT 1 FROM management_conversations WHERE id=? AND principal_id=?', conversation, actor.principal_id)) {
-      conversation = String((management.create(actor, { scope: 'platform' }).conversation as Json).id);
+      conversation = String((management.create(actor, { scope: this.host.personalScope(actor) }).conversation as Json).id);
       this.store.run('UPDATE channel_schedules SET conversation_id=? WHERE id=?', conversation, row.id);
     }
     const sent = management.send(actor, conversation, { content: this.frame(row, prompt), source_message: 'schedule:' + run });

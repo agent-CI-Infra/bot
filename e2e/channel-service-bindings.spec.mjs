@@ -24,6 +24,7 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
     await expect(binding.getByText('生效中 · 仓库问答助手', { exact: true })).toBeVisible();
     await expect(binding.getByText('项目范围：fixture/project-101、fixture/project-102', { exact: true })).toBeVisible();
+    await expect(binding.getByText('负责人：administrator', { exact: true })).toBeVisible();
     const row = h.store.get('SELECT * FROM channel_service_bindings');
     expect(row.service_role_id).toBe('repository-assistant');
     expect(h.store.all('SELECT project_id FROM scoped_grants WHERE principal_id=? ORDER BY project_id', row.principal_id).map(g => g.project_id)).toEqual(['101', '102']);

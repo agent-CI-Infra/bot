@@ -1,6 +1,6 @@
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Store, Row } from '../storage/database.js';
-import { assertCurrent, authorize, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
+import { assertCurrent, authorize, confineActor, confinedTenant, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
 import { ManagementAgent } from '../management/agent.js';
 import { managementFailure, managementStates, serviceFailure } from '../management/presentation.js';
@@ -286,16 +286,32 @@ export class ChannelService {
     return { operation_id: id, state };
   }
   async actor(e: ChannelEvent): Promise<ActorContext> {
-    this.source(e);
+    const c = this.source(e);
     // The connection supplies only a verified identity; projects are chosen per request by the management assistant.
-    return this.bindings.identities.resolveExternalActor(this.bindings.credential(e), null, undefined, () => { this.source(e); });
+    const actor = await this.bindings.identities.resolveExternalActor(this.bindings.credential(e), null, undefined, () => { this.source(e); });
+    // An organization's app carries its users' authority only inside that organization (#424).
+    return c.owner_tenant ? confineActor(actor, c.owner_tenant) : actor;
   }
+  /** A private chat's owner, with the authority the chat's app lets them use (see actor), for work without a live message. */
+  personalActor(principal: string, chat: Row, channel: ActorContext['channel']): ActorContext {
+    const actor = resolvePrincipalActor(this.store, principal, null, undefined, channel), owner = this.applicationTenant(chat);
+    return owner ? confineActor(actor, owner) : actor;
+  }
+  /** The organization a chat's app belongs to, or '' for a platform-wide app. */
+  applicationTenant(chat: Row): string { return String(this.store.get('SELECT owner_tenant FROM channel_connectors WHERE id=?', chat.connector_id)?.owner_tenant ?? ''); }
+  /** An organization's app carries only that organization's projects, to a private chat as to a group (#424). */
+  assertApplicationProject(chat: Row, project: string): void {
+    const owner = this.applicationTenant(chat);
+    if (owner && this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)?.tenant_id !== owner) fail(403, 'channel_application_scope_forbidden');
+  }
+  /** The management conversation scope of a private chat: the whole platform, or the app's organization for a confined actor. */
+  personalScope(actor: ActorContext): string { const tenant = confinedTenant(actor); return tenant ? 'tenant:' + tenant : 'platform'; }
   /** The bound user's personal management session in a private chat. */
   private session(actor: ActorContext, e: ChannelEvent): Row {
     const keys = [e.connector_id, e.installation_tenant, e.actor_tenant, e.actor_id, e.chat_id, '', '', actor.principal_id];
     const row = this.store.get(`SELECT * FROM channel_sessions WHERE connector_id=? AND installation_tenant=? AND actor_tenant=? AND actor_id=? AND chat_id=? AND thread_id=? AND project_id=? AND principal_id=?`, ...keys);
     if (row) return row;
-    const conversation = (this.management.create(actor, { scope: 'platform' }).conversation as Json).id, id = randomId();
+    const conversation = (this.management.create(actor, { scope: this.personalScope(actor) }).conversation as Json).id, id = randomId();
     this.store.run('INSERT INTO channel_sessions(id,connector_id,installation_tenant,actor_tenant,actor_id,chat_id,thread_id,project_id,principal_id,conversation_id) VALUES(?,?,?,?,?,?,?,?,?,?)', id, ...keys, String(conversation));
     this.store.run('UPDATE channel_sessions SET context_revision=(SELECT context_revision FROM channel_chats WHERE connector_id=? AND chat_id=?),connector_revision=? WHERE id=?',e.connector_id,e.chat_id,e.connector_revision,id);
     return this.store.get('SELECT * FROM channel_sessions WHERE id=?', id)!;
@@ -323,6 +339,7 @@ export class ChannelService {
     fields(input, ['project_id']); assertCurrent(actor);
     const project = text(input.project_id), chat = this.employees.chat(id), c = this.connector(chat.connector_id);
     authorize(actor, 'schedules.manage', { project_id: project });
+    this.assertApplicationProject(chat, project);
     const base = { provider: 'feishu' as const, connector_id: c.id, connector_revision: c.revision, app_id: chat.app_id, installation_tenant: chat.installation_tenant,
       chat_id: chat.chat_id, chat_type: chat.chat_type, message_id: '', event_id: '', thread_id: '', created_at: Date.now(), kind: 'message' as const, content: '' };
     let event: ChannelEvent, protection: Json;
@@ -420,6 +437,8 @@ export class ChannelService {
   private async personalMessage(row:Row,e:ChannelEvent,chat:Row,content:string):Promise<void>{
     const actor=await this.actor(e);
     this.employees.personalOwner(chat.id,e,actor);
+    // Through an organization's app a person without any project there has nothing to manage.
+    if(confinedTenant(actor)&&!this.management.service.projects(actor).length)fail(403,'channel_application_tenant_forbidden');
     const revision=chat.context_revision;
     restrictActor(actor,()=>{
       if(this.stopped)fail(409,'channel_stopped');
@@ -433,7 +452,7 @@ export class ChannelService {
     if(e.created_at<session.last_message_at)fail(409,'channel_message_out_of_order');
     if(session.context_revision!==revision||session.connector_revision!==e.connector_revision){
       // Edited, recalled or cleaned local sources must not return through old management context.
-      const conversation=(this.management.create(actor,{scope:'platform'}).conversation as Json).id;
+      const conversation=(this.management.create(actor,{scope:this.personalScope(actor)}).conversation as Json).id;
       this.store.run('UPDATE channel_sessions SET conversation_id=?,context_revision=?,connector_revision=? WHERE id=?',String(conversation),revision,e.connector_revision,session.id);
       session=this.store.get('SELECT * FROM channel_sessions WHERE id=?',session.id)!;
     }
@@ -578,7 +597,7 @@ export class ChannelService {
           if(event.chat_type==='group'){
             const binding=this.serviceBindings.active(chat!.id);if(!binding||!this.serviceBindings.reachable(binding,resource!.project_id,['tasks.read']))fail(403,'channel_resource_scope_changed');
           }else{
-            const actor=resolvePrincipalActor(store,String(protection?.principal_id),null,undefined,'im');
+            const actor=this.personalActor(String(protection?.principal_id),chat!,'im');
             this.management.service.scope(actor,resource!.project_id);
           }
         }
