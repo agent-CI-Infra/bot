@@ -54,6 +54,7 @@
 | `im:message.group_msg` | 接收群内用户消息，并满足群历史读取接口的额外权限要求；不包含其他机器人的实时消息 |
 | `im:message.group_msg.include_bot:read` | 企业自建应用接收群内用户及其他机器人的消息，不推送本机器人自己发送的消息；商店应用不申请 |
 | `im:message:readonly` | 读取机器人所在会话的可见历史及接收撤回事件 |
+| `im:chat:read` | 查看群信息，订阅群解散事件 `im.chat.disbanded_v1` |
 | `im:chat.members:bot_access` | 接收机器人进群、移出事件 |
 | `im:chat.members:read` | 判断当前 bot 是否在群中并完整分页核验维护人及来源成员；保存群聊助手绑定时必需，缺少时保存返回 `channel_audience_permission_required` |
 | `tenant:tenant:readonly` | 企业自建应用自动获取安装 tenant_key；保存连接前需开通并发布生效 |
