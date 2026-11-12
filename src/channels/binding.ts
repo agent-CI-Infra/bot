@@ -32,12 +32,12 @@ export class ChannelBindings {
   // A console-initiated request exists before any private-chat message: the web session, the chosen bot and a one-time
   // code are recorded together. The first private-chat message carrying that code completes the binding in one step, so
   // the person never pastes a code back into the console (#236).
-  issue(connectorId: string, sessionRef: string): { code: string; expires_at: number } {
+  issue(connectorId: string, sessionRef: string): { request_id: string; code: string; expires_at: number } {
     const connector = this.store.get('SELECT * FROM channel_connectors WHERE id=? AND enabled=1', connectorId);
     if (!connector) return fail(404, 'channel_connector_not_found');
     const actor = resolveActor(this.store, sessionRef), challenge = randomId(), code = 'FSB-' + randomId(), expires = Date.now() + 5 * 60_000;
     this.assertVisible(connectorId, actor.principal_id);
-    const placeholder: ChannelEvent = { provider: 'feishu', connector_id: connectorId, connector_revision: 0, app_id: connector.app_id,
+    const placeholder: ChannelEvent = { provider: 'feishu', connector_id: connectorId, connector_revision: Number(connector.revision), app_id: connector.app_id,
       installation_tenant: connector.installation_tenant, actor_tenant: '', actor_id: '', chat_id: '', chat_type: 'p2p',
       message_id: '', event_id: 'console:' + challenge, thread_id: '', created_at: Date.now(), kind: 'message', content: '' };
     const hash = digest(challenge);
@@ -50,7 +50,42 @@ export class ChannelBindings {
         hash, connectorId, this.store.secrets.seal(placeholder, 'channel-bind:' + hash), expires, digest(code), actor.principal_id,
         this.store.secrets.seal({ value: sessionRef }, 'channel-session:' + hash));
     });
-    return { code, expires_at: expires };
+    return { request_id: hash, code, expires_at: expires };
+  }
+  requestStatus(id: string, sessionRef: string): Json {
+    const actor = resolveActor(this.store, sessionRef);
+    const row = this.store.get('SELECT * FROM channel_bind_requests WHERE challenge_hash=? AND principal_id=?', id, actor.principal_id);
+    if (!row || !row.code_hash) return fail(404, 'binding_request_not_found');
+    this.assertVisible(row.connector_id, actor.principal_id);
+    const result = { request_id: id, expires_at: Number(row.expires_at) };
+    // The identity transaction may have committed before the channel receipt was updated or the process restarted.
+    let identityId = row.identity_id;
+    if (!identityId && row.binding_ref) {
+      const binding = this.store.secrets.open(row.binding_ref, 'channel-challenge:' + row.challenge_hash);
+      identityId = this.store.get('SELECT identity_id FROM bind_challenges WHERE challenge_hash=? AND principal_id=?',
+        digest(String(binding.challenge)), actor.principal_id)?.identity_id;
+    }
+    if (identityId) {
+      const identity = this.store.get('SELECT id,status FROM external_identities WHERE id=? AND principal_id=?', identityId, actor.principal_id);
+      if (!identity || identity.status !== 'active') return { ...result, state: 'revoked' };
+      return { ...result, state: 'completed', identity_id: identity.id };
+    }
+    if (row.superseded_at) return { ...result, state: 'superseded' };
+    if (row.expires_at <= Date.now()) return { ...result, state: 'expired' };
+    const connector = this.store.get('SELECT app_id,installation_tenant,enabled,revision FROM channel_connectors WHERE id=?', row.connector_id);
+    const issued = this.store.secrets.open(row.subject, 'channel-bind:' + row.challenge_hash);
+    if (!connector?.enabled || connector.app_id !== issued.app_id || connector.installation_tenant !== issued.installation_tenant
+      || issued.connector_revision && Number(connector.revision) !== issued.connector_revision)
+      return { ...result, state: 'invalidated' };
+    if (!row.session_ref) return { ...result, state: 'invalidated' };
+    try {
+      const original = resolveActor(this.store, String(this.store.secrets.open(row.session_ref, 'channel-session:' + row.challenge_hash).value));
+      if (original.principal_id !== actor.principal_id) return { ...result, state: 'invalidated' };
+    } catch (error) {
+      if ([401,403].includes(Number((error as { status?: number }).status))) return { ...result, state: 'invalidated' };
+      throw error;
+    }
+    return { ...result, state: row.consumed_at || row.confirmation_hash ? 'processing' : 'pending' };
   }
   // The private-chat message is the proof: it replaces the placeholder subject before the proof is minted, then the same
   // consume-first confirmation the link flow uses runs, so a replayed code cannot bind twice.
@@ -64,22 +99,35 @@ export class ChannelBindings {
     if (!row.principal_id || !row.session_ref) return fail(409, 'binding_code_needs_console');
     if (row.binding_ref || row.confirmation_hash) return fail(409, 'binding_login_already_started');
     this.source(e);
+    const issued = this.store.secrets.open(row.subject, 'channel-bind:' + row.challenge_hash);
+    if (issued.app_id !== e.app_id || issued.installation_tenant !== e.installation_tenant
+      || issued.connector_revision && issued.connector_revision !== e.connector_revision) return fail(403, 'binding_code_invalid');
     const sessionRef = String(this.store.secrets.open(row.session_ref, 'channel-session:' + row.challenge_hash).value);
     const actor = resolveActor(this.store, sessionRef);
     if (actor.principal_id !== row.principal_id) return fail(403, 'binding_session_changed');
     this.assertVisible(row.connector_id, actor.principal_id);
-    this.store.run('UPDATE channel_bind_requests SET subject=? WHERE challenge_hash=? AND consumed_at IS NULL',
-      this.store.secrets.seal(e, 'channel-bind:' + row.challenge_hash), row.challenge_hash);
-    const binding = await this.identities.beginVerifiedExternalBinding(sessionRef, this.credential(e, '', row.expires_at));
-    const confirm = randomId();
-    this.store.transaction(() => {
-      const current = this.store.get('SELECT * FROM channel_bind_requests WHERE challenge_hash=?', row.challenge_hash)!;
-      if (current.consumed_at || current.binding_ref || current.expires_at <= Date.now()) fail(409, 'binding_replayed');
-      assertCurrent(actor);
-      this.store.run('UPDATE channel_bind_requests SET binding_ref=?,confirmation_hash=? WHERE challenge_hash=?',
-        this.store.secrets.seal({ ...binding, confirmation: confirm }, 'channel-challenge:' + row.challenge_hash), digest(confirm), row.challenge_hash);
-    });
-    return this.confirm(e, confirm);
+    const claim = digest(randomId()), confirm = randomId(), confirmation = digest(confirm);
+    // Claim and save the sender before the first await: a second sender must not replace the first one's proof.
+    if (this.store.run('UPDATE channel_bind_requests SET subject=?,confirmation_hash=? WHERE challenge_hash=? AND consumed_at IS NULL' +
+      ' AND binding_ref IS NULL AND confirmation_hash IS NULL AND superseded_at IS NULL AND expires_at>?',
+      this.store.secrets.seal(e, 'channel-bind:' + row.challenge_hash), claim, row.challenge_hash, Date.now()).changes !== 1) fail(409, 'binding_replayed');
+    try {
+      const binding = await this.identities.beginVerifiedExternalBinding(sessionRef, this.credential(e, '', row.expires_at));
+      this.store.transaction(() => {
+        const current = this.store.get('SELECT * FROM channel_bind_requests WHERE challenge_hash=?', row.challenge_hash)!;
+        if (current.superseded_at) fail(409, 'binding_superseded');
+        if (current.consumed_at || current.binding_ref || current.confirmation_hash !== claim || current.expires_at <= Date.now()) fail(409, 'binding_replayed');
+        assertCurrent(actor);
+        this.assertVisible(row.connector_id, actor.principal_id);
+        this.store.run('UPDATE channel_bind_requests SET binding_ref=?,confirmation_hash=? WHERE challenge_hash=?',
+          this.store.secrets.seal({ ...binding, confirmation: confirm }, 'channel-challenge:' + row.challenge_hash), confirmation, row.challenge_hash);
+      });
+      return await this.confirm(e, confirm);
+    } catch (error) {
+      this.store.run('UPDATE channel_bind_requests SET superseded_at=coalesce(superseded_at,?) WHERE challenge_hash=? AND identity_id IS NULL' +
+        ' AND confirmation_hash IN (?,?)', Date.now(), row.challenge_hash, claim, confirmation);
+      throw error;
+    }
   }
   async confirmCode(code: string, connector: string, sessionRef: string): Promise<Json> {
     // The private-chat code is independent of the legacy navigation link, which cannot complete a binding.
