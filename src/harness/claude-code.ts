@@ -142,7 +142,7 @@ async function runAtGateway<T>(spec: AgentSpec<T>, bridge: ClaudeBridge<T>, sign
   };
   const abort = () => interrupt(signal.reason ?? new TaskError('harness_cancelled', 'cancelled'));
   signal.addEventListener('abort', abort, { once: true }); if (signal.aborted) abort();
-  const timer = setTimeout(() => interrupt(new TaskError('claude_timeout', 'retry_wait')), config.timeoutMs ?? 1200_000); timer.unref();
+  // Legacy absolute timeout is not a run cancellation policy. RoleRun reports to Manager instead.
   let checking = false;
   const guard = setInterval(() => { if (!checking) { checking = true; void spec.guard().catch(interrupt).finally(() => { checking = false; }); } }, 100); guard.unref();
   const save = () => spec.harnessState?.save({ sessionId: sid, previousSessionId: previous.sessionId ?? null, directory, cwd, scope: scope(ctx), inputHash,
@@ -217,7 +217,7 @@ async function runAtGateway<T>(spec: AgentSpec<T>, bridge: ClaudeBridge<T>, sign
     if (!bridge.submitted) return fail('claude_submission_required', 'retry_wait');
     finished = true; return bridge.result;
   } finally {
-    clearTimeout(timer); clearInterval(guard); if (killTimer) clearTimeout(killTimer); signal.removeEventListener('abort', abort);
+    clearInterval(guard); if (killTimer) clearTimeout(killTimer); signal.removeEventListener('abort', abort);
     kill(); child.stdin.destroy(); if (!finished) emit({ type: 'configuration', ended_without_validated_result: true, raw_cursor: cursor });
   }
 }

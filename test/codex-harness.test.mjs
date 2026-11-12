@@ -440,3 +440,11 @@ test('Codex launch configuration refuses shared homes, daemons, unknown sandboxe
  writeFileSync(path,JSON.stringify({...base,protocol:'codex-app-server'}));const acp=process.env.BOT_ACP_CONFIG;process.env.BOT_ACP_CONFIG=path;
  try{assert.throws(()=>acpConfiguration('acp'),{code:'acp_configuration_invalid'});}finally{if(acp===undefined)delete process.env.BOT_ACP_CONFIG;else process.env.BOT_ACP_CONFIG=acp;}
 });
+
+test('legacy absolute Harness timeout no longer kills active execution; explicit cancellation still interrupts',async t=>{
+ const f=fixture(t,{FIXTURE_WAIT:'true'},{timeoutMs:1000});let cancel=false,settled=false;
+ const run=runRole({...f.spec,guard:async()=>{if(cancel)throw new TaskError('task_cancelled','cancelled');}},'dev',undefined,'codex');
+ const observed=run.finally(()=>settled=true);observed.catch(()=>{});
+ await new Promise(r=>setTimeout(r,1600));assert.equal(settled,false);assert.ok(f.events().some(e=>e.stage==='legacy_timeout_ignored'));
+ cancel=true;await assert.rejects(observed,{code:'task_cancelled'});assert.equal(f.events().some(e=>e.code==='harness_timeout'),false);
+});

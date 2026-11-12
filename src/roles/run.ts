@@ -1,3 +1,4 @@
+import {observeLongExecution,decideLongExecution} from './long-execution.js';
 import { assertStageRun, assertStageStart, stageRunBinding, stagePolicyHash, artifactCandidate, deliveryType, stageForAssignment, stageBudgetExceeded, stageBudgetUsage, recordStageResult, latestRoleCandidate, candidateKey } from './schedule.js';
 import {executionBaseline} from '../agent/common.js';
 import { executionModel, taskConfiguration } from '../tasks/configuration.js';
@@ -39,6 +40,7 @@ function taskRole(s:Store,task:Row,role:string,harness?:string,pinned=false,over
   fallbackModel:fixed?()=>({model:model??executionModel(s,task,workOf(task as any)),source:fixed.workflow?.model_id||Object.hasOwn(JSON.parse(fixed.policy.task_models||'{}'),workOf(task as any))?'workflow':'project'}):undefined});
 }
 /** Entry points must resolve the selected role before requiring a project model; external backends own their model. */
+export const roleExecutionSystem = (s:Store,task:Row,role:string) => taskRole(s,task,role).system;
 export const roleExecutionModel = (s:Store,task:Row,role:string) => taskRole(s,task,role).model;
 
 /** A per-run environment provisioned for this run, with the manager's inspection of it (run_isolation profiles). */
@@ -92,7 +94,7 @@ function rebind(s:Store,task:Row,instance:Row,resolved:Resolved,reason:'delegati
  * events, checkpoint and cancel work on a started handle; recover starts a new run of the same instance and assignment.
  */
 interface Bound { ctx:RunContext; token:string; token_id:string; run_id:string; epoch:number }
-interface Live { bound:Bound|null; exhausted:string|null;stage_exhausted:string|null; tools:number; onBound?:()=>void; timer?:ReturnType<typeof setTimeout>; stageTimer?:ReturnType<typeof setTimeout>; heartbeat?:ReturnType<typeof setInterval> }
+interface Live { bound:Bound|null; exhausted:string|null;stage_exhausted:string|null; tools:number; onBound?:()=>void; timer?:ReturnType<typeof setTimeout>; stageTimer?:ReturnType<typeof setTimeout>; longTimer?:ReturnType<typeof setInterval>; longPending?:Set<Promise<void>>; heartbeat?:ReturnType<typeof setInterval> }
 interface LoopState { resolved:Resolved; instance:Row; continuation:{ref:string;from_run:string|null}|null }
 export interface PreparedRun<T> {
  protocol:typeof roleRunProtocol.id; operation_id:string; role:string; assignment?:string; scope:string; spec:AgentSpec<T>; wrapped:AgentSpec<T>;
@@ -318,7 +320,22 @@ export async function startRoleRun<T>(prepared:PreparedRun<T>,operationId=prepar
  const handle:Handle<T>={operation_id:operationId,prepared,controller,settled:false,cancelled:null,done:undefined as any,
   get run_id(){return prepared.live.bound?.run_id??null;},get lease_epoch(){return prepared.live.bound?.epoch??null;},get context(){return prepared.live.bound?.ctx??null;}};
  handles.set(operationId,handle);
- handle.done=withTaskPermissions(s,prepared.spec.task,prepared.role,[prepared.resolved.snapshot.capability.permissions??prepared.resolved.definition.permissions],()=>runAgent(prepared.wrapped)).finally(()=>{handle.settled=true;if(prepared.live.timer)clearTimeout(prepared.live.timer);if(prepared.live.stageTimer)clearTimeout(prepared.live.stageTimer);if(prepared.live.heartbeat)clearInterval(prepared.live.heartbeat);started();});
+ // Begin after bind, using the authoritative run start. A blocked delegate call does not block this control lane.
+ prepared.live.longPending=new Set();
+ if(prepared.resolved.snapshot.kind!=='controller')prepared.live.longTimer=setInterval(()=>{
+  const b=prepared.live.bound;if(!b||handle.settled||controller.signal.aborted)return;
+  const report=observeLongExecution(s,prepared.spec.task,b.run_id);if(!report)return;
+  const work=decideLongExecution(prepared.spec,report,()=>!handle.settled&&!controller.signal.aborted&&leaseCurrent(s,b.run_id,b.epoch),reason=>{
+   if(handle.settled||controller.signal.aborted||!leaseCurrent(s,b.run_id,b.epoch))return;
+   appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'cancel_requested',category:'cancelled',data:{reason,actor:'manager',report_ref:report.report_ref}});
+   // Retain confirmed receipts and the last saved artifacts; do not finalize a workspace while its command is writing.
+   try{recordCheckpoint(s,{run_id:b.run_id,lease_epoch:b.epoch,instance_id:prepared.instance.id,reason:'manager_execution_stop'});}catch{}
+   controller.abort(new TaskError('manager_execution_stopped','retry_wait',reason));
+  });
+  prepared.live.longPending!.add(work);void work.finally(()=>prepared.live.longPending!.delete(work));
+ },1000);
+ prepared.live.longTimer?.unref();
+ handle.done=withTaskPermissions(s,prepared.spec.task,prepared.role,[prepared.resolved.snapshot.capability.permissions??prepared.resolved.definition.permissions],()=>runAgent(prepared.wrapped)).finally(async()=>{handle.settled=true;if(prepared.live.longTimer)clearInterval(prepared.live.longTimer);if(prepared.live.timer)clearTimeout(prepared.live.timer);if(prepared.live.stageTimer)clearTimeout(prepared.live.stageTimer);if(prepared.live.heartbeat)clearInterval(prepared.live.heartbeat);started();await Promise.allSettled(prepared.live.longPending??[]);if(prepared.live.bound)s.run("UPDATE long_execution_reports SET state='ended' WHERE run_id=? AND state IN ('pending','running')",prepared.live.bound.run_id);});
  handle.done.catch(()=>{});
  await bound;return handle;
 }

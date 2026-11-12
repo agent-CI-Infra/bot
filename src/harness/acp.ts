@@ -98,7 +98,9 @@ export async function runAcp<T>(input:AcpInput<T>,signal:AbortSignal,emit:(event
  // Cancel: the dialect's protocol interrupt first, then the process group is reclaimed whatever the agent answered.
  const cancel=async(reason:unknown)=>{if(stopped||cancelReason)return;cancelReason=reason;try{await dialect?.cancel();}catch{}dialect?.close(reason);kill();};
  const abort=()=>{void cancel(signal.reason??new TaskError('harness_cancelled','cancelled'));};signal.addEventListener('abort',abort,{once:true});
- const timer=setTimeout(()=>{void cancel(new TaskError('harness_timeout','retry_wait'));},config.timeoutMs??30*60*1000);timer.unref();
+ // timeoutMs was an absolute run kill switch. Retained only for configuration compatibility.
+ // Continuous work is governed by Task Manager reports, never this legacy duration.
+ if(config.timeoutMs!==undefined)emit({type:'configuration',stage:'legacy_timeout_ignored',timeoutMs:config.timeoutMs});
  const guard=setInterval(()=>{void input.guard().catch(cancel);},500);guard.unref();
  // The previous binding stays persisted until the new session is bound; a patch arriving earlier is only kept in memory.
  let binding:Record<string,unknown>={},bound=false;
@@ -125,7 +127,7 @@ export async function runAcp<T>(input:AcpInput<T>,signal:AbortSignal,emit:(event
   }
   return stop('acp_submission_required','retry_wait');
  }catch(error){if(cancelReason)throw cancelReason;if(error instanceof TaskError)throw error;throw new TaskError('acp_execution_failed','retry_wait',input.redactor.text(String((error as Error).message)).slice(0,1000));}
- finally{stopped=true;clearTimeout(timer);clearInterval(guard);signal.removeEventListener('abort',abort);dialect?.close();kill();}
+ finally{stopped=true;clearInterval(guard);signal.removeEventListener('abort',abort);dialect?.close();kill();}
 }
 
 /** ACP v1 through the locked SDK; unchanged behaviour of the first harness phase. */
