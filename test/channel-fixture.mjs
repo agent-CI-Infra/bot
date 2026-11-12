@@ -120,7 +120,7 @@ export async function until(read, check = v => !!v, timeout = 10000) {
   while (Date.now() < end) { const value = await read(); if (check(value)) return value; await new Promise(r => setTimeout(r, 20)); }
   throw new Error('channel_fixture_timeout');
 }
-export const finished = (h, id) => until(() => h.store.get('SELECT * FROM channel_inbox WHERE id=?', id), r => r && !['queued', 'running', 'submitted'].includes(r.state));
+export const finished = (h, id) => until(() => h.store.get('SELECT * FROM channel_inbox WHERE id=?', id), r => r && !['queued', 'running', 'submitted', 'merged'].includes(r.state));
 export function bindFixture(h, id, principal, actor = 'ou_alice', tenant = 'actor-tenant', app = 'cli_fixture') {
   h.store.run(`INSERT INTO external_identities(id,principal_id,provider,host,connector,external_tenant,external_actor,display_name,status,verified_at)
     VALUES(?,?,'feishu','open.feishu.cn',?,?,?,?,'active',?)`, randomId(), principal, id + ':' + app, tenant, actor, actor, Date.now());

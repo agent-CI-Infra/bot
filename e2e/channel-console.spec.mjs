@@ -10,6 +10,35 @@ async function login(page, f, hash, username = 'administrator', password = f.pas
   await page.getByRole('button', { name: '登录', exact: true }).click();
 }
 
+test('conversation shows the actual messages merged into a running turn on wide and narrow screens (#458)', async ({ page }) => {
+  const f = await channelFixture(); let release, calls = 0;
+  const held = new Promise(resolve => { release = resolve; });
+  try {
+    await repositoryAssistant(f); const chat = await boundGroup(f);
+    f.modelState.respond = async (_body, res) => {
+      calls++; if (calls === 1) await held;
+      res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: calls === 1 ? '暂未交付的草稿' : '已一并回应两位提问人。' } }], usage: { prompt_tokens: 12, completion_tokens: 4 } }));
+    };
+    const original = await post(f.h, f.id, inGroup('请查一下项目。')); await until(() => calls === 1);
+    const followup = inGroup('顺便看看我的问题。', 'ou_bob');
+    expect((await post(f.h, f.id, followup)).value.state).toBe('merged');
+    await login(page, f, '#/conversations/' + chat.id);
+    const inputs = page.getByLabel('回合并入的消息'); await inputs.getByText('并入的消息（1）', { exact: true }).click();
+    await expect(inputs).toContainText(followup.event.message.message_id); await expect(inputs).toContainText('ou_bob'); await expect(inputs).toContainText('需要回复');
+    release(); await until(() => f.h.store.get('SELECT state FROM channel_inbox WHERE id=?', original.value.operation_id)?.state === 'completed');
+    await page.getByRole('button', { name: '刷新会话', exact: true }).click();
+    await page.getByLabel('回合并入的消息').getByText('并入的消息（1）', { exact: true }).click();
+    await page.getByText('本轮生成的回答', { exact: true }).click(); await expect(page.getByLabel('消息与执行时间线')).toContainText('已一并回应两位提问人。');
+    mkdirSync('.tmp/channel-console', { recursive: true });
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: `.tmp/channel-console/turn-messages-${width}.png`, fullPage: true });
+    }
+    expect(calls).toBe(2); expect(f.h.store.get('SELECT count(*) n FROM channel_service_turns').n).toBe(1);
+  } finally { release?.(); await f.close(); }
+});
+
 for (const width of [1440, 390]) test(`Feishu console shows real messages, steps and binding counts at ${width}px`, async ({ page }) => {
   const f = await channelFixture(), errors = []; page.on('pageerror', error => errors.push(error.message));
   try {

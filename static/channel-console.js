@@ -150,6 +150,15 @@ async function renderChannelConsole(request) {
         title.append(element('strong', value.role_id || '管理助手'), statusBadge, element('time', channelTime(value.created_at))); row.append(title);
         const details = element('details'), steps = element('div'); details.append(element('summary', '查看执行过程'), steps);
         details.addEventListener('toggle', () => { if (details.open && !details.dataset.loaded) { details.dataset.loaded = '1'; void readSteps(value.id, steps); } }); row.append(details);
+        if (value.incoming_messages?.length) {
+          const incoming = element('details'); incoming.setAttribute('aria-label', '回合并入的消息');
+          incoming.append(element('summary', '并入的消息（' + value.incoming_messages.length + '）'));
+          for (const message of value.incoming_messages) {
+            const status = { pending: '尚未交给模型', injected: '已交给模型', answered: '本轮处理完成', released: '已交回待处理' }[message.state] || message.state;
+            incoming.append(element('p', `${message.sender_id} · ${message.message_id} · ${message.needs_reply ? '需要回复' : '仅供参考'} · ${status}`, 'channel-step'));
+          }
+          row.append(incoming);
+        }
         for (const message of value.messages || []) {
           const progress = element('section', '', 'channel-progress-message'); progress.setAttribute('aria-label', '助手进展消息');
           progress.append(element('strong', '进展消息 ' + message.sequence), element('p', message.text, 'channel-message-body'),
