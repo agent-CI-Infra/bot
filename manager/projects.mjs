@@ -73,6 +73,11 @@ export class Projects {
       CREATE TABLE IF NOT EXISTS resources(repository_id TEXT NOT NULL,generation INTEGER NOT NULL,image TEXT NOT NULL,PRIMARY KEY(repository_id,generation));
       CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,action TEXT NOT NULL,generation INTEGER NOT NULL,input TEXT NOT NULL,state TEXT NOT NULL,result TEXT);
     `);
+    // The operations still running: all that recovery needs from the ledger, which keeps every runner call with its input
+    // and result (3.8M rows, ~100 GB in production). Without this index each project's recovery scanned the whole ledger,
+    // reading state behind every input; the manager stayed unready for minutes on each start. Creating it reads the ledger
+    // once; afterwards it holds only the few rows in flight.
+    this.db.exec("CREATE INDEX IF NOT EXISTS operations_running ON operations(repository_id,action) WHERE state='running'");
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'revision')) this.db.exec('ALTER TABLE projects ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
     // spec: the requested computer; build: the image built for its packages; setup: the last setup script run.
     for (const column of ['spec', 'build', 'setup']) if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === column)) this.db.exec(`ALTER TABLE projects ADD COLUMN ${column} TEXT`);
