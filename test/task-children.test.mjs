@@ -1,3 +1,4 @@
+import {digest} from '../dist/core/security.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync} from 'node:fs';
@@ -41,4 +42,14 @@ test('an assigned child can read its parent contract but cannot acquire unrelate
  assert.ok(cmd.tool(child,'read_managed_task',{task_id:'parent'}).task.contract);
  assert.throws(()=>cmd.tool(child,'manage_task',{task_id:'parent',action:'pause'}),{code:'task_not_owned'});
  f.add('unrelated');assert.throws(()=>cmd.tool(child,'read_managed_task',{task_id:'unrelated'}),{code:'task_not_owned'});
+});
+
+
+test('ordinary create_task retries retain their pre-child-feature idempotency key across upgrade',t=>{
+ const f=fixture(t),cmd=new TaskCommands(f.s),caller=roleTaskCaller(f.s,'r','manager',{source_task_id:'parent',guard(){}});
+ const request='Existing ordinary report',criteria=['Report facts'];const first=cmd.tool(caller,'create_task',{request,criteria});
+ const contract={goal:request,criteria,scope:[request],endpoint:'report'},revision=f.s.get("SELECT revision FROM task_records WHERE task_id='parent'").revision;
+ const legacy='managed:'+digest(JSON.stringify([caller.owner_key,caller.source_message,caller.source_task_id,revision,request,contract,caller.role]));
+ f.s.run('UPDATE tasks SET unique_key=? WHERE id=?',legacy,first.id);
+ const retried=cmd.tool(caller,'create_task',{request,criteria});assert.equal(retried.id,first.id);assert.equal(retried.replayed,true);
 });
