@@ -130,7 +130,10 @@ export function assertManagedTask(store: Store, caller: TaskCaller, id: string, 
   const origin = store.get('SELECT owner_key FROM task_origins WHERE task_id=?', id);
   const assigned = caller.source_task_id === id && caller.source_run_id && store.get(
     "SELECT 1 FROM task_runs WHERE id=? AND task_id=? AND role=? AND status='running'", caller.source_run_id, id, caller.role!);
-  if (origin?.owner_key !== caller.owner_key && !assigned) return fail(403, 'task_not_owned');
+  const parentRead=!write&&caller.source_task_id&&caller.source_run_id&&store.get(
+    "SELECT 1 FROM task_children c JOIN task_runs r ON r.task_id=c.child_id WHERE c.parent_id=? AND c.child_id=? AND r.id=? AND r.role=? AND r.status='running'",
+    id,caller.source_task_id,caller.source_run_id,caller.role!);
+  if (origin?.owner_key !== caller.owner_key && !assigned&&!parentRead) return fail(403, 'task_not_owned');
   return task;
 }
 /** Every entry creates/attaches through this boundary; its callback retains the work type's original validation and records. */
@@ -194,7 +197,14 @@ export function taskToolAllowed(store: Store, task: Row, role: string, name: str
   if (role === 'qa' && name === 'submit_acceptance') return true;
   for (const origin of taskOriginChain(store, task).filter(o => o.source_kind === 'role')) {
   const fixed = JSON.parse(origin.permissions) as RolePermissions, current = roleOf(store, task.repository_id, origin.source_role)?.permissions;
-  if (!current || !permitsTool(fixed, name) || !permitsTool(current, name)) return false;
+  if (!current) return false;
+  // An explicit team child delegates execution like runTeam in its parent. The controller's lack of a personal
+  // computer does not remove the configured worker's computer; every upstream non-controller ceiling still applies.
+  // Never relax GitHub writes, delegation, project policy or principal authorization.
+  const teamChild=origin.executor_role===null&&origin.source_role===roleConfiguration(store,task.repository_id).controller.role&&
+    !!store.get('SELECT 1 FROM task_children WHERE child_id=? AND parent_id=?',origin.task_id,origin.source_task_id);
+  if(teamChild&&permitsTool({computer:'allow'},name)&&['read_file','write_file','run_command','read_version_file','compare_versions'].includes(name))continue;
+  if (!permitsTool(fixed, name) || !permitsTool(current, name)) return false;
   }
   return true;
 }
@@ -262,7 +272,7 @@ export const taskManagementTools = [
   tool('list_managed_tasks', 'List tasks owned by this trusted caller. This never reads another conversation or project.', { offset: { type: 'integer' }, limit: { type: 'integer' } }),
   tool('read_managed_task', 'Read an owned or assigned task as artifact/evidence references. To read an original observation, pass an offered source and a bounded offset/length. This never returns executor transcripts.', { task_id: { type: 'string' }, source: { type: 'string' }, offset: { type: 'integer' }, length: { type: 'integer',maximum:32000 } }, ['task_id']),
   tool('create_task', 'Create a task in the current project, executing as yourself by default. Another executor requires delegation. Set execute=false to record it without running. A reviewable_pull_request endpoint requires explicit project code/PR writes and source/executor authority; it never bypasses tests or independent QA.', {
-    request: { type: 'string' }, criteria: { type: 'array', items: { type: 'string' } }, endpoint: { type: 'string', enum: ['report','reviewable_pull_request'] }, executor_role: { type: 'string' }, execute: { type: 'boolean' } }, ['request', 'criteria']),
+    request: { type: 'string' }, criteria: { type: 'array', items: { type: 'string' } }, endpoint: { type: 'string', enum: ['report','reviewable_pull_request'] }, executor_role: { type: 'string' }, execute: { type: 'boolean' }, as_child: { type: 'boolean', description: 'Task Manager only: create a normal project-team child of the current task; do not combine with executor_role. Parent may wait for any child result. Use execute=false for work not ready to start.' } }, ['request', 'criteria']),
   tool('manage_task', 'Append an instruction, continue, pause, or cancel an owned or assigned task. Terminal software deliveries cannot be reopened.', {
     task_id: { type: 'string' }, action: { type: 'string', enum: ['instructions', 'retry', 'pause', 'cancel'] }, instruction: { type: 'string' } }, ['task_id', 'action'])
 ];

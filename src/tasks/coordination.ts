@@ -149,7 +149,7 @@ export class CoordinationWorker{
 }
 export function resumeCoordinatedTasks(s:Store,active:(id:string)=>boolean){
  for(const t of s.all("SELECT * FROM tasks WHERE status='waiting_coordination'")){
-  if(active(t.id))continue;
+  if(active(t.id)||t.error_code==='task_children_pending')continue;
   const blocked=s.get("SELECT state,error FROM task_coordinations WHERE source_task_id=? AND state IN ('needs_human','failed')",t.id);
   if(blocked){s.run("UPDATE tasks SET status='needs_replan',error_code=?,updated_at=? WHERE id=?",blocked.state==='needs_human'?'coordination_needs_human':'coordination_failed',new Date().toISOString(),t.id);continue;}
   if(s.get("SELECT id FROM task_coordinations WHERE source_task_id=? AND state IN ('queued','running','needs_human','failed')",t.id))continue;

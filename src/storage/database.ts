@@ -1,3 +1,4 @@
+import {childTaskStorage} from '../tasks/children.js';
 import {priorityStorage} from '../tasks/priority.js';
 import {coordinationStorage} from '../tasks/coordination.js';
 import { integrationStorage } from '../tasks/integration.js';
@@ -202,6 +203,7 @@ export class Store {
     memoryStorage(this);
     integrationStorage(this);
     coordinationStorage(this);
+    childTaskStorage(this);
     roleStorage(this);
     taskManagementStorage(this);
     identityStorage(this);

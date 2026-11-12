@@ -1,3 +1,4 @@
+import {resumeParentTasks} from '../tasks/children.js';
 import { taskReadScopes } from '../tasks/management.js';
 import {claimQueuedTask} from '../tasks/priority.js';
 import { sourceRef } from '../roles/role-run.js';
@@ -119,7 +120,7 @@ export class TaskEngine {
   }
   tick(){
     if(this.closing)return;
-    this.coordinator.tick();resumeCoordinatedTasks(this.store,id=>this.active.has(id));resumeInstallationWaits(this.store,id=>this.active.has(id));
+    this.coordinator.tick();resumeParentTasks(this.store,id=>this.active.has(id));resumeCoordinatedTasks(this.store,id=>this.active.has(id));resumeInstallationWaits(this.store,id=>this.active.has(id));
     // Old installations may have parked candidates at the removed SHA fence. Recover once,
     // retaining their actual snapshots, without requiring an operator script.
     for(const old of this.store.all("SELECT * FROM tasks WHERE status='needs_replan' AND error_code='base_branch_changed'")){

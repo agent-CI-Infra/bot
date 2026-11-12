@@ -1,0 +1,35 @@
+// Opt-in real models, isolated Git/runner/SQLite; GitHub transport is a fixture, no real repository is changed.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync,writeFileSync,mkdirSync,copyFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {fixture} from './integration-engine.test.mjs';
+import {Store} from '../dist/storage/database.js';
+import {TaskRecords} from '../dist/tasks/service.js';
+import {evaluateDelivery} from '../dist/tasks/acceptance.js';
+import {captureTaskConfiguration} from '../dist/tasks/configuration.js';
+
+test('live roadmap: Manager creates parallel acceptable capabilities and resumes for integrated QA', {skip:!process.env.BOT_ROADMAP_RUNTIME,timeout:1200000},async t=>{
+ const root=process.env.BOT_ROADMAP_RUNTIME;mkdirSync(root,{recursive:true});
+ const privateRoot='/home/cdy/zhangyi/bot-benchmark/runs/fixes-362-371';const source=new Store(privateRoot+'/source.sqlite',readFileSync(privateRoot+'/master.key')),model=source.get("SELECT * FROM models WHERE id='manager-model'"),credential=source.secrets.open(model.api_key,'model:'+model.id).value;source.close();
+ const h=await fixture(t,'clean',{respond:async body=>{const response=await fetch(model.api_url+'/chat/completions',{method:'POST',headers:{'content-type':'application/json',Authorization:'Bearer '+credential},body:JSON.stringify({...body,model:model.model_name,stream:false}),signal:AbortSignal.timeout(120000)});if(!response.ok)throw Error('model_http_'+response.status);return(await response.json()).choices[0].message;},evaluate:async(_n,...args)=>evaluateDelivery(...args)});
+ const workerHarness=process.env.BOT_ROADMAP_WORKER_HARNESS??'native';
+ if(workerHarness==='codex'){
+  const cfg=JSON.parse(readFileSync('/home/cdy/zhangyi/bot-benchmark/runs/nushell-001/bot-D/codex.json'));cfg.stateDirectory=join(root,'codex-sessions');writeFileSync(join(root,'codex.json'),JSON.stringify(cfg));process.env.BOT_CODEX_CONFIG=join(root,'codex.json');
+ }
+ h.s.run("UPDATE settings SET value=? WHERE key='roles:101'",JSON.stringify({enabled:true,harnesses:{manager:'native',dev:workerHarness,test:workerHarness,reviewer:workerHarness,qa:workerHarness}}));
+ h.s.run("UPDATE policies SET task_concurrency=3 WHERE repository_id='101'");
+ const goal='Evolve this repository into a usable dependency-free Node data workbench. Provide a durable local JSONL dataset store with validated import/export, idempotent upsert and atomic replacement that preserves old data on validation failure. Provide a Unicode text-search capability with case-insensitive token matching, stable relevance ranking and deterministic tie ordering, including empty/malformed inputs. Provide numeric group aggregation with count/min/max/mean/median, explicit missing/invalid value handling and stable results. Expose these capabilities through a JSON CLI with dataset import, search and aggregate operations using real implementations. Include executable behavior tests and integrated CLI journeys, including failure preservation. Deliver working source and tests as artifacts; GitHub publication is not requested. Preserve existing repository behavior. Decide your own organization, decomposition, parallel opportunities and implementation; no fixed task partition or DAG is supplied.';
+ const contract={goal,scope:['local data workbench and its tests'],criteria:['Dataset import/export/upsert is validated, idempotent and atomically preserves existing data on validation failure','Unicode search returns correct matches and deterministic relevance ordering','Numeric grouped count/min/max/mean/median handles missing/invalid values with documented behavior','JSON CLI exercises the real store, search and aggregation implementations with executable end-to-end assertions','All source/test artifacts and versioned verification evidence are delivered; node check.cjs continues to pass'],endpoint:'report',source:{type:'request'},completeness:'explicit'};
+ h.s.run("UPDATE tasks SET status='cancelled' WHERE id='t'");h.s.run("INSERT INTO tasks(id,repository_id,kind,status,phase,summary,input) VALUES('roadmap-parent','101','task.request','queued','prepare','Data toolkit','{}')");
+ h.s.run("DELETE FROM development_candidates WHERE task_id='roadmap-parent'");h.s.run("DELETE FROM task_execution_configs WHERE task_id='roadmap-parent'");h.s.run("UPDATE task_records SET candidate=NULL,acceptance=NULL,pending=NULL,rounds=0 WHERE task_id='roadmap-parent'");h.s.run("UPDATE role_instances SET session='[]',harness_state='{}' WHERE task_id='roadmap-parent'");h.s.run("UPDATE tasks SET kind='task.request',status='queued',phase='prepare',input=?,result=NULL,head_sha=NULL,workspace_id=NULL,messages=NULL WHERE id='roadmap-parent'",JSON.stringify({request:goal,contract}));new TaskRecords(h.s).contract('roadmap-parent',contract);captureTaskConfiguration(h.s,'roadmap-parent');
+ const snapshot=()=>{h.s.db.exec('PRAGMA wal_checkpoint(FULL)');copyFileSync(join(h.root,'control.sqlite'),join(root,'control.sqlite'));writeFileSync(join(root,'progress.json'),JSON.stringify({at:new Date().toISOString(),tasks:h.s.all('SELECT id,status,phase,summary,error_code FROM tasks'),children:h.s.all('SELECT * FROM task_children'),counts:h.counts()}));};
+ const timer=setInterval(snapshot,15000);t.after(()=>clearInterval(timer));
+ try{for(let loop=0;loop<1000;loop++){
+  h.engine.tick();await new Promise(r=>setTimeout(r,1000));snapshot();const parent=h.s.get("SELECT status FROM tasks WHERE id='roadmap-parent'");if(['completed','succeeded'].includes(parent.status)&&!h.engine.active.size)break;
+ }
+ await Promise.all(h.engine.active.values());snapshot();const children=h.s.all('SELECT * FROM task_children WHERE parent_id=?','roadmap-parent');assert.ok(children.length>=2,'Actual Manager must choose at least two child deliveries');assert.equal(h.s.get("SELECT status FROM tasks WHERE id='roadmap-parent'").status,'completed');assert.ok(h.s.get("SELECT 1 FROM task_history WHERE task_id='roadmap-parent' AND type='playbook_read' AND data LIKE '%roadmap-decomposition%'"));assert.ok(h.s.get("SELECT 1 FROM task_history WHERE task_id='roadmap-parent' AND type='children_resumed'"));
+ const runs=h.s.all("SELECT task_id,role,started_at,ended_at FROM task_runs WHERE role='dev' AND task_id<>'roadmap-parent'");const overlap=runs.some((a,i)=>runs.slice(i+1).some(b=>a.task_id!==b.task_id&&a.started_at<b.ended_at&&b.started_at<a.ended_at));assert.ok(overlap,'Independent child Dev executions must overlap');
+ const qa=h.s.all("SELECT task_id,data FROM task_history WHERE type='acceptance_evaluated'");assert.ok(qa.some(q=>q.task_id==='roadmap-parent'&&JSON.parse(q.data).verdict.outcome==='pass'));writeFileSync(join(root,'result.json'),JSON.stringify({valid:true,model:model.model_name,workerHarness,children,dev_runs:runs,overlap,qa:qa.map(q=>({task_id:q.task_id,verdict:JSON.parse(q.data).verdict})),counts:h.counts(),limits:'Real Native Manager and configured Native/Codex workers/QA, real Git/runner/SQLite. GitHub controlled; report artifact deliveries, no real remote PR. No prewritten split.'},null,2));
+ }finally{snapshot();}
+});

@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/obra/superpowers",
+  "revision": "22f0b463e7a5e579904dd6211a520321035526f7",
+  "license": "MIT",
+  "references": [
+    "skills/writing-plans/SKILL.md",
+    "skills/dispatching-parallel-agents/SKILL.md"
+  ],
+  "adaptation": "Original Bot-specific wording informed by task sizing and handoff concepts."
+}
