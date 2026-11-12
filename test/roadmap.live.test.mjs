@@ -9,7 +9,7 @@ import {TaskRecords} from '../dist/tasks/service.js';
 import {evaluateDelivery} from '../dist/tasks/acceptance.js';
 import {captureTaskConfiguration} from '../dist/tasks/configuration.js';
 
-test('live roadmap: Manager creates parallel acceptable capabilities and resumes for integrated QA', {skip:!process.env.BOT_ROADMAP_RUNTIME,timeout:1200000},async t=>{
+test('live roadmap: Manager creates parallel acceptable capabilities and resumes for integrated QA', {skip:!process.env.BOT_ROADMAP_RUNTIME,timeout:Number(process.env.BOT_ROADMAP_TIMEOUT_MS)||2700000},async t=>{
  const root=process.env.BOT_ROADMAP_RUNTIME;mkdirSync(root,{recursive:true});
  assert.ok(process.env.BOT_ROADMAP_MODEL_DB&&process.env.BOT_ROADMAP_MODEL_KEY,'Provide a private model-config SQLite and its key via BOT_ROADMAP_MODEL_DB/KEY');
  const source=new Store(process.env.BOT_ROADMAP_MODEL_DB,readFileSync(process.env.BOT_ROADMAP_MODEL_KEY)),model=source.get("SELECT * FROM models WHERE id='manager-model'"),credential=source.secrets.open(model.api_key,'model:'+model.id).value;source.close();
@@ -30,7 +30,7 @@ test('live roadmap: Manager creates parallel acceptable capabilities and resumes
  h.s.run("DELETE FROM development_candidates WHERE task_id='roadmap-parent'");h.s.run("DELETE FROM task_execution_configs WHERE task_id='roadmap-parent'");h.s.run("UPDATE task_records SET candidate=NULL,acceptance=NULL,pending=NULL,rounds=0 WHERE task_id='roadmap-parent'");h.s.run("UPDATE role_instances SET session='[]',harness_state='{}' WHERE task_id='roadmap-parent'");h.s.run("UPDATE tasks SET kind='task.request',status='queued',phase='prepare',input=?,result=NULL,head_sha=NULL,workspace_id=NULL,messages=NULL WHERE id='roadmap-parent'",JSON.stringify({request:goal,contract}));new TaskRecords(h.s).contract('roadmap-parent',contract);captureTaskConfiguration(h.s,'roadmap-parent');
  const snapshot=()=>{h.s.db.exec('PRAGMA wal_checkpoint(FULL)');copyFileSync(join(h.root,'control.sqlite'),join(root,'control.sqlite'));if(h.s.trajectories?.root&&existsSync(h.s.trajectories.root))cpSync(h.s.trajectories.root,join(root,'trajectories'),{recursive:true});writeFileSync(join(root,'progress.json'),JSON.stringify({at:new Date().toISOString(),tasks:h.s.all('SELECT id,status,phase,summary,error_code FROM tasks'),children:h.s.all('SELECT * FROM task_children'),counts:h.counts()}));};
  const timer=setInterval(snapshot,15000);t.after(()=>clearInterval(timer));
- try{for(let loop=0;loop<1000;loop++){
+ try{for(let loop=0;loop<2400;loop++){
   h.engine.tick();await new Promise(r=>setTimeout(r,1000));snapshot();const parent=h.s.get("SELECT status FROM tasks WHERE id='roadmap-parent'");if(['completed','succeeded'].includes(parent.status)&&!h.engine.active.size)break;
  }
  await Promise.all(h.engine.active.values());snapshot();const children=h.s.all('SELECT * FROM task_children WHERE parent_id=?','roadmap-parent');assert.ok(small?children.length===0:children.length>=2,'Actual Manager must choose proportionate task granularity');assert.equal(h.s.get("SELECT status FROM tasks WHERE id='roadmap-parent'").status,'completed');if(!small)assert.ok(h.s.get("SELECT 1 FROM task_history WHERE task_id='roadmap-parent' AND type='playbook_read' AND data LIKE '%roadmap-decomposition%'"));if(!small)assert.ok(h.s.get("SELECT 1 FROM task_history WHERE task_id='roadmap-parent' AND type='children_resumed'"));

@@ -135,7 +135,7 @@ test('large evidence stays addressable by digest and cannot read another task’
  assert.equal(readEvidence(store,'a',c,{source:e.source}).error,'evidence_digest_changed');
 });
 
-test('legacy related draft artifacts remain readable without peer approval or cross-family access',async t=>{
+for(const family of ['legacy residual','explicit children'])test(`${family} draft artifacts remain readable without peer approval or cross-family access`,async t=>{
  const {relatedDeliveries,readRelatedArtifact}=await import('../dist/tasks/related.js');
  const {Workspace}=await import('../dist/agent/workspace.js');const {Redactor}=await import('../dist/agent/common.js');
  const {store,records,create}=fixture(t);create('root');const parent=submit(records,'root');
@@ -144,7 +144,8 @@ test('legacy related draft artifacts remain readable without peer approval or cr
  const [first,peer,second]=['first','peer','reader'];
  for(const id of [first,peer,second]){
   create(id);store.run("UPDATE tasks SET source_task_id='root' WHERE id=?",id);
-  store.run("INSERT INTO task_followups VALUES('root',?,?,?)",parent.id,id,id);
+  if(family==='legacy residual')store.run("INSERT INTO task_followups VALUES('root',?,?,?)",parent.id,id,id);
+  else store.run("INSERT INTO task_children VALUES('root',?,'now')",id);
  }
  store.run("UPDATE tasks SET workspace_id=?,generation=1,status='retry_wait',phase='acceptance' WHERE id=?",'1'.repeat(48),first);
  records.submit(first,[{kind:'files',reference:'draft-report',version:'b'.repeat(40),content:{local_sha:'c'.repeat(40),files:[{path:'report.md',sha:'d'.repeat(40)}]}}],[],{summary:'Submitted, not yet accepted'});
