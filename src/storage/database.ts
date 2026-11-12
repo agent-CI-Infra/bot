@@ -111,7 +111,11 @@ export class Store {
       created_at: "TEXT NOT NULL DEFAULT ''", updated_at: "TEXT NOT NULL DEFAULT ''" });
     // A running task holds its own claim; a repository may hold several, up to its concurrency. The earlier
     // one-row-per-repository lock table is replaced (claims never survive a restart, so nothing is migrated).
+    // The tasks a delivery created (deliveryResult, for every row of the console's event list), read from this index
+    // alone: a tasks row stores the task input (about 1 MB on average in production) before these columns, so without it
+    // each event row scanned every task through its input's overflow pages, ~1 s per row and ~55 s per page.
     this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS task_unique_key ON tasks(unique_key);
+      CREATE INDEX IF NOT EXISTS task_source_delivery ON tasks(source_delivery_id,created_at,id,kind,object_number,status);
       DROP TABLE IF EXISTS task_locks;
       CREATE TABLE IF NOT EXISTS task_claims(task_id TEXT PRIMARY KEY REFERENCES tasks(id),repository_id TEXT NOT NULL,token TEXT NOT NULL,claimed_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS task_claims_repository ON task_claims(repository_id);
