@@ -7,7 +7,7 @@ const stepFault=/^(management|service)_turn_limit$/;
 
 /** Public explanations contain no request data; detailed codes remain in the authenticated trace. */
 export function managementFailure(code:string):string {
-  if(code==='channel_image_model_unsupported')return '当前模型拒绝了本次图片输入，未能查看图片。请选择支持图片输入的模型，或使用已授权项目的电脑工具处理。';
+  if(code==='binding_superseded')return '这条绑定串已被控制台新生成的一条取代，请使用最新一条；旧串不能再完成绑定。';  if(code==='channel_image_model_unsupported')return '当前模型拒绝了本次图片输入，未能查看图片。请选择支持图片输入的模型，或使用已授权项目的电脑工具处理。';
   if(code==='channel_resource_permission_required')return '飞书应用缺少图片与文件权限，请管理员在控制台飞书连接设置中导入完整权限，并在飞书发布生效后重试。';
   if(code==='channel_resource_too_large')return '附件超过本次处理的大小限制，请缩小文件后重试；较大的图片可通过项目电脑处理。';
   if(code==='channel_image_model_limit'||code==='channel_image_format_unsupported'||code==='channel_binary_requires_computer')return '此附件需要通过已授权项目的电脑工具处理，当前模型不能直接查看。';

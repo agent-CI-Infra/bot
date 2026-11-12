@@ -299,6 +299,12 @@ export function createControlPlane(options: Options) {
       const result = await channels.bindings.confirmCode(text(input.code, 100), text(input.connector_id), sessionToken(req));
       respond(res, 201, { state: 'bound', ...result }); return;
     }
+    if (path === '/api/channels/bindings/issue' && method === 'POST') {
+      fields(input, ['connector_id']);
+      // The console writes a one-time code for the chosen bot; the private-chat message carrying it completes the binding.
+      assertSessionWrite(store, sessionToken(req), user.context!);
+      respond(res, 201, channels.bindings.issue(text(input.connector_id, 48), sessionToken(req))); return;
+    }
     if (path === '/api/channels/bindings/claim' && method === 'POST') {
       fields(input, ['challenge']);
       // Binding proves the platform session; repository grants and GitHub availability are unrelated to association.
