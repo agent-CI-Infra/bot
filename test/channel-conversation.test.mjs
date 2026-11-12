@@ -128,6 +128,37 @@ test('more than 100 local messages retain old source retrieval and a rolling sou
   assert.equal(f.h.store.get('SELECT count(*) n FROM channel_chat_summaries').n,0);
 });
 
+const seed=(f,count)=>{const now=Date.now();for(let i=0;i<count;i++)f.service.ledger.merge(f.chat,{message_id:'seed-'+String(i).padStart(3,'0'),sender_id:'ou_alice',sender_tenant:'actor-tenant',sender_type:'user',message_type:'text',content:'Seeded discussion '+i,raw_content:'{}',created_at:now-86400000+i,updated_at:now-86400000+i,parent_id:'',root_id:'',thread_id:'',deleted:false},'history');};
+const isSummary=body=>body.messages[0].content.startsWith('Summarize only');
+
+test('a few messages beyond the recent window wait for a batch: no summary request, they stay in the prompt as they are',async t=>{
+  const f=await fixture(t);seed(f,50);
+  const receipt=await post(f.h,f.id,inGroup('What was discussed first?','ou_bob'));
+  assert.equal((await complete(f,receipt)).state,'completed');
+  assert.ok(!f.requests.some(isSummary),'fewer than a batch of earlier messages is not summarized');
+  const context=JSON.parse(f.requests.at(-1).messages[1].content).context;
+  assert.equal(context.earlier_messages[0].message_id,'seed-000');assert.equal(context.earlier_messages.length+context.recent_messages.length,f.h.store.get('SELECT count(*) n FROM channel_messages WHERE chat_id=?',f.chat.id).n);
+  assert.equal(f.h.store.get('SELECT count(*) n FROM channel_chat_summaries').n,0);
+});
+
+test('a summary the model cannot produce never fails the answer; the next turn folds the batch again',async t=>{
+  const f=await fixture(t);seed(f,80);
+  // A provider failure, then an answer without text (a reasoning model that spent its whole output budget), then a summary.
+  const outcomes=[res=>{res.statusCode=500;res.end('{"error":"fixture"}');},res=>answer(res,{role:'assistant',content:''}),res=>say(res,'Seeded discussion summarized.')];
+  f.modelState.respond=async(body,res)=>isSummary(body)?outcomes.shift()(res):say(res,'Recorded local answer');
+  for(const [n,text] of [[1,'First question'],[2,'Second question']]){
+    const receipt=await post(f.h,f.id,inGroup(text,'ou_bob'));const row=await complete(f,receipt);assert.equal(row.state,'completed',row.error);
+    const context=JSON.parse(f.requests.at(-1).messages[1].content).context;
+    assert.ok(context.unsummarized_earlier_messages>=20);assert.match(context.notice,/search_conversation_history/);assert.equal(context.earlier_messages,undefined);
+    assert.equal(f.h.store.get('SELECT count(*) n FROM channel_chat_summaries').n,0);
+    assert.equal(f.h.store.get('SELECT count(*) n FROM channel_service_turns WHERE state=?','completed').n,n);
+  }
+  const receipt=await post(f.h,f.id,inGroup('Third question','ou_bob'));assert.equal((await complete(f,receipt)).state,'completed');
+  const input=JSON.parse(f.requests.at(-1).messages[1].content);
+  assert.equal(input.summary.summary,'Seeded discussion summarized.');assert.equal(input.context.unsummarized_earlier_messages,undefined);
+  assert.equal(f.requests.filter(isSummary).length,3);
+});
+
 test('disabling the binding while a model is blocked rejects its late reply and no protected output is sent',async t=>{
   const f=await fixture(t);let release,started;const gate=new Promise(r=>{release=r;}),seen=new Promise(r=>{started=r;});
   f.modelState.respond=async(body,res)=>{started();await gate;say(res,'This late reply must be withheld');};
