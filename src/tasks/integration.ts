@@ -1,5 +1,5 @@
 import type {Workspace} from '../agent/workspace.js';
-import {stop} from '../agent/common.js';
+import {stop,sha} from '../agent/common.js';
 import type {Store,Row} from '../storage/database.js';
 import type {Actor} from '../app/auth.js';
 import {randomId,fail} from '../core/security.js';
@@ -46,7 +46,11 @@ export function integratedPublication(s:Store,task:Row,head:string){
 
 /** Shared checkout integration for Issue-driven and directly created development tasks. */
 export async function applyIntegration(s:Store,task:Row,workspace:Workspace,base:string,integration:any){
- const merged=await workspace.call('integrate:'+integration.id+':'+base,{type:'workspace_integrate',source_workspace_id:integration.source_workspace_id,sha:integration.sha,tree_sha:integration.tree_sha,base_tree:integration.base_tree});
+ // A failure checkpoint may point at this still-live integrated checkout; retain its edits and conflicts.
+ if(integration.source_workspace_id===task.workspace_id&&integration.result_ref)return {...integration,state:'applied'};
+ const request={type:'workspace_integrate',source_workspace_id:integration.source_workspace_id,sha:integration.sha,tree_sha:integration.tree_sha,base_tree:integration.base_tree};
+ // A checkpoint can replace the retained source within the same attempt. Replay only the same input.
+ const merged=await workspace.call('integrate:'+integration.id+':'+base+':'+sha(JSON.stringify([task.workspace_id,request])),request);
  if(merged.error)stop('integration_unavailable','waiting_environment',merged.detail||merged.error);
  const ref=traceEvent(s,task.id,'integration_result',{...integration,target_base:base,...merged,workspace_id:task.workspace_id},task.trace_run_id,'framework');
  return {...integration,state:'applied',target_base:base,result_ref:ref,conflicts:merged.conflicts};

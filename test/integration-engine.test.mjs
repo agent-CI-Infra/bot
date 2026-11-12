@@ -216,3 +216,22 @@ for(const kind of ['task.request','task.development'])test(`${kind} preserves th
  const result=JSON.parse(task.result);assert.notEqual(result.sha,oldHead);assert.equal(h.git(['show',result.sha+':other.txt']),'independent feature');assert.equal(h.git(['show',result.sha+':a.txt']),'2');assert.equal(h.s.get("SELECT state FROM task_merge_requests WHERE task_id='t'").state,'waiting');assert.ok(h.s.get("SELECT id FROM task_history WHERE type='integration_result'"));assert.ok(h.s.get("SELECT id FROM task_history WHERE type='merge_candidate_revalidated'"));assert.equal(JSON.parse(h.s.get("SELECT data FROM task_history WHERE type='controller_entry' ORDER BY id DESC LIMIT 1").data).entry,kind==='task.development'?'development':'request');
  h.s.run('UPDATE task_merge_requests SET next_run_at=0');h.engine.tick();await Promise.all(h.engine.merging.values());assert.equal(h.counts().puts,1);assert.equal(h.s.get("SELECT state FROM task_merge_requests WHERE task_id='t'").state,'merged');
 });
+
+
+test('integration replays identical operations but accepts a changed checkpoint within the same attempt',async t=>{
+ const {applyIntegration}=await import('../dist/tasks/integration.js');
+ const h=await fixture(t,'clean'),task=h.s.get("SELECT * FROM tasks WHERE id='t'"),code=JSON.parse(h.s.get("SELECT data FROM development_candidates WHERE task_id='t'").data);
+ const integration={id:'checkpoint-retry',state:'pending',source_workspace_id:task.workspace_id,sha:code.local_sha,tree_sha:code.tree_sha,base_tree:code.source_tree};
+ const target={...task,attempt:task.attempt+1,workspace_id:randomWorkspaceId()};h.s.run("UPDATE tasks SET workspace_id=?,attempt=? WHERE id='t'",target.workspace_id,target.attempt);
+ const space=new Workspace(h.s,h.manager,target,new Redactor(),async()=>{},()=>{}),gh=new GitHub(h.s,h.s.get("SELECT * FROM repositories WHERE id='101'"),new Redactor(),async()=>{},h.endpoint);await gh.connect(true);await space.prepare(gh,task.head_sha);
+ const first=await applyIntegration(h.s,target,space,task.head_sha,integration);
+ assert.equal((await applyIntegration(h.s,target,space,task.head_sha,integration)).result_ref!==undefined,true);
+ h.s.run("UPDATE tasks SET input=? WHERE id='t'",JSON.stringify({...JSON.parse(task.input),integration:first}));
+ await space.write('repair-checkpoint','repair.txt',Buffer.from('retained progress'));
+ await checkpoint(h.s,target,space);
+ const next=JSON.parse(h.s.get("SELECT input FROM tasks WHERE id='t'").input).integration;
+ assert.equal(next.state,'pending');assert.notEqual(next.tree_sha,integration.tree_sha);
+ await applyIntegration(h.s,target,space,task.head_sha,next);
+ const file=await space.call('read-retained-repair',{type:'workspace_read',path:'repair.txt'});assert.equal(file.content,'retained progress');
+ assert.equal(h.s.get("SELECT count(*) n FROM task_tools WHERE json_extract(request,'$.request.type')='workspace_integrate'").n,1);
+});
