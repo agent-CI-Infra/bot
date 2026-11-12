@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { randomId, fail } from '../core/security.js';
+import { historyData, historyRefBytes, modelSnapshot, unreadable } from '../storage/payloads.js';
 
 const botVersion=(()=>{try{return process.env.BOT_VERSION||execFileSync('git',['rev-parse','HEAD'],{cwd:fileURLToPath(new URL('../../',import.meta.url)),encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();}catch{return 'unknown';}})();
 const now=()=>new Date().toISOString();
@@ -65,11 +66,21 @@ export function traceStorage(store:Store){
       INSERT INTO task_history(task_id,type,data,created_at,source_ref) VALUES(NEW.task_id,'${kind}',trace_snapshot(${body}),strftime('%Y-%m-%dT%H:%M:%fZ','now'),'${table}:'||NEW.id);
     END;`);
   };
-  capture('task_tools','operation',"json_object('operation_id',NEW.id,'state',NEW.state,'request',NEW.request,'result',NEW.result)");
+  // An operation recorded since #436 keeps its request and result in the run's trajectory file: the row and so this
+  // snapshot hold only their small fields and refs, which traceSource expands. The update trigger fires on state
+  // changes only, so moving an old row's payload to a file adds no history.
+  store.db.exec('DROP TRIGGER IF EXISTS trace_task_tools_insert;DROP TRIGGER IF EXISTS trace_task_tools_update;');
+  const operation="trace_snapshot(CASE WHEN NEW.request_ref IS NULL THEN json_object('operation_id',NEW.id,'state',NEW.state,'request',NEW.request,'result',NEW.result) "+
+    "ELSE json_object('operation_id',NEW.id,'state',NEW.state,'request',NEW.request,'result',NEW.result,'request_ref',NEW.request_ref,'result_ref',NEW.result_ref) END)";
+  for(const [name,event] of [['insert','INSERT'],['update','UPDATE OF state']])store.db.exec(`CREATE TRIGGER trace_task_tools_${name} AFTER ${event} ON task_tools BEGIN
+      INSERT INTO task_history(task_id,type,data,created_at,source_ref) VALUES(NEW.task_id,'operation',${operation},strftime('%Y-%m-%dT%H:%M:%fZ','now'),'task_tools:'||NEW.id);
+    END;`);
   capture('github_effects','publication',"json_object('operation_id',NEW.id,'kind',NEW.kind,'state',NEW.state,'request',NEW.request,'response',NEW.response)");
   // Low-volume lifecycle logs become part of the same query; existing detailed logs stay referenced.
-  store.db.exec(`CREATE TRIGGER IF NOT EXISTS trace_task_log AFTER INSERT ON task_logs WHEN json_valid(NEW.content) BEGIN
-    INSERT INTO task_history(task_id,type,data,created_at,source_ref) VALUES(NEW.task_id,'runtime_log',trace_snapshot(NEW.content),coalesce(nullif(NEW.created_at,''),strftime('%Y-%m-%dT%H:%M:%fZ','now')),'task_logs:'||NEW.id);
+  // A large log's body is in its run's trajectory file (content_ref); the snapshot keeps the header and the ref.
+  store.db.exec(`DROP TRIGGER IF EXISTS trace_task_log;
+  CREATE TRIGGER trace_task_log AFTER INSERT ON task_logs WHEN json_valid(NEW.content) BEGIN
+    INSERT INTO task_history(task_id,type,data,created_at,source_ref) VALUES(NEW.task_id,'runtime_log',trace_snapshot(CASE WHEN NEW.content_ref IS NULL THEN NEW.content ELSE json_set(NEW.content,'$.content_ref',NEW.content_ref) END),coalesce(nullif(NEW.created_at,''),strftime('%Y-%m-%dT%H:%M:%fZ','now')),'task_logs:'||NEW.id);
   END;
   CREATE TRIGGER IF NOT EXISTS trace_model_finish AFTER UPDATE OF finished_at ON model_requests WHEN NEW.task_id IS NOT NULL AND OLD.finished_at IS NULL AND NEW.finished_at IS NOT NULL BEGIN
     INSERT INTO task_history(task_id,type,data,created_at,run_id,source_ref) VALUES(NEW.task_id,'model_request',json_object('request_id',NEW.id,'state',NEW.state,'http_status',NEW.http_status,'request_source','model_requests:'||NEW.id||':request','response_source','model_requests:'||NEW.id||':response'),NEW.finished_at,NEW.run_id,'model_requests:'||NEW.id);
@@ -97,6 +108,8 @@ export function beginRun(store:Store,task:Row,kind:string,config:any){return ato
 export function endRun(store:Store,run:Row|null,status:string,reason?:string){if(!run)return;return atomic(store,()=>{
   const result=store.run("UPDATE task_runs SET ended_at=?,status=?,stop_reason=? WHERE id=? AND status='running'",now(),status,reason??null,run.id);
   if(result.changes)traceEvent(store,run.task_id,'run_ended',{run_id:run.id,status,reason:reason??null},run.id);
+  // The run's trajectory file gets its record count, size and last hash with the same commit.
+  store.trajectories.close('run:'+run.id);
 });}
 export function interruptRuns(store:Store){for(const r of store.all("SELECT * FROM task_runs WHERE status='running'")){endRun(store,r,'interrupted','engine_restart');store.run("UPDATE model_requests SET finished_at=?,state='interrupted' WHERE run_id=? AND finished_at IS NULL",now(),r.id);}if(store.hasTable('role_assignments'))store.run("UPDATE role_assignments SET status='interrupted' WHERE status='running' AND NOT EXISTS(SELECT 1 FROM task_runs r WHERE r.assignment_id=role_assignments.id AND r.status='running')");}
 export function traceSource(store:Store,taskId:string,source:string,access?:MemoryAccess):any{
@@ -116,12 +129,17 @@ export function traceSource(store:Store,taskId:string,source:string,access?:Memo
 
   const memory=/^project_memories:([^:]+):(\d+)$/.exec(source);if(memory&&store.hasTable('project_memory_versions')){if(!canReadMemory(store,repo,memory[1]!,Number(memory[2]),access))fail(404,'trace_source_not_found');const row=store.get('SELECT v.data FROM project_memory_versions v JOIN project_memories m ON m.id=v.memory_id JOIN tasks t ON t.repository_id=m.repository_id WHERE t.id=? AND m.id=? AND v.revision=?',taskId,memory[1]!,Number(memory[2]));if(row)return JSON.parse(traceSnapshot(new ProjectMemory(store,access).get(repo,memory[1]!,Number(memory[2]))));fail(404,'trace_source_not_found');}
   const model=/^model_requests:([^:]+):(request|response)$/.exec(source);
-  if(model){const row=store.get(`SELECT run_id,${model[2]}_snapshot AS snapshot FROM model_requests WHERE id=? AND task_id=?`,model[1]!,taskId);permitRun(row?.run_id);return row?.snapshot?safe(JSON.parse(row.snapshot)):{complete:false,missing_reason:'not_captured_or_unavailable'};}
-  const h=/^task_history:(\d+)$/.exec(source);if(h){const row=store.get('SELECT data,run_id,type FROM task_history WHERE id=? AND task_id=?',h[1]!,taskId);if(row){if(!['merge_checks','retry_failure','retry_report','retry_decision','retry_resolved','retry_evidence','role_result','role_candidate','role_handoff','execution_evidence','acceptance_evidence','memory_read','memory_search'].includes(row.type))permitRun(row.run_id);return capturedSource(JSON.parse(row.data));}}
+  if(model){const row=store.get(`SELECT run_id,${model[2]}_snapshot,${model[2]}_ref FROM model_requests WHERE id=? AND task_id=?`,model[1]!,taskId);permitRun(row?.run_id);
+    let snapshot:string|null;try{snapshot=row?modelSnapshot(store,row,model[2] as 'request'|'response'):null;}catch(error){return unreadable(error);}
+    return snapshot?safe(JSON.parse(snapshot)):{complete:false,missing_reason:'not_captured_or_unavailable'};}
+  const h=/^task_history:(\d+)$/.exec(source);if(h){const row=store.get('SELECT data,run_id,type FROM task_history WHERE id=? AND task_id=?',h[1]!,taskId);if(row){if(!['merge_checks','retry_failure','retry_report','retry_decision','retry_resolved','retry_evidence','role_result','role_candidate','role_handoff','execution_evidence','acceptance_evidence','memory_read','memory_search'].includes(row.type))permitRun(row.run_id);
+    try{return capturedSource(JSON.parse(historyData(store,row)));}catch(error){return unreadable(error);}}}
   // A role run snapshot of this task's project: what a run was configured with, by its content hash.
   const role=/^role_snapshots:([a-f0-9]{64})$/.exec(source);if(role&&store.hasTable('role_snapshots')){const row=store.get('SELECT s.snapshot FROM role_snapshots s JOIN tasks t ON t.repository_id=s.repository_id WHERE t.id=? AND s.id=?',taskId,role[1]!);if(row)return safe(JSON.parse(row.snapshot));}
   const run=/^task_runs:([^:]+):(context|config)$/.exec(source);if(run){permitRun(run[1]);const row=store.get(`SELECT ${run[2]}_snapshot AS snapshot FROM task_runs WHERE id=? AND task_id=?`,run[1]!,taskId);if(row)return safe(JSON.parse(row.snapshot));}
-  const entity=/^(task_tools|task_logs|github_effects):/.test(source);if(entity){const row=store.get('SELECT id,data,run_id FROM task_history WHERE task_id=? AND source_ref=? ORDER BY id DESC LIMIT 1',taskId,source);if(row){permitRun(row.run_id);return {...capturedSource(JSON.parse(row.data)),source_event_id:'task_history:'+row.id};}}
+  const entity=/^(task_tools|task_logs|github_effects):/.test(source);if(entity){const row=store.get('SELECT id,data,run_id,type FROM task_history WHERE task_id=? AND source_ref=? ORDER BY id DESC LIMIT 1',taskId,source);if(row){permitRun(row.run_id);
+    let data:string;try{data=historyData(store,row);}catch(error){return {...unreadable(error),source_event_id:'task_history:'+row.id};}
+    return {...capturedSource(JSON.parse(data)),source_event_id:'task_history:'+row.id};}}
   fail(404,'trace_source_not_found');
 }
 export function taskTrace(store:Store,taskId:string,url:URL,section:string,access?:MemoryAccess){
@@ -139,5 +157,10 @@ export function taskTrace(store:Store,taskId:string,url:URL,section:string,acces
   for(const [param,col] of [['run_id','run_id'],['type','type']]){const v=url.searchParams.get(param!);if(v){sql+=` AND ${col}=?`;args.push(v);}}
   for(const field of ['revision','candidate_id']){const value=url.searchParams.get(field);if(value){const filter=field==='revision'?Number(value):value;if(field==='revision'&&(!Number.isSafeInteger(filter)||Number(filter)<1))fail(400,'invalid_task_revision');sql+=` AND (json_extract(data,'$.${field}')=? OR run_id IN(SELECT id FROM task_runs WHERE ${field}=? AND task_id=?)${field==='candidate_id'?" OR (type='candidate' AND json_extract(data,'$.id')=?)":''})`;args.push(filter,filter,taskId,...(field==='candidate_id'?[filter]:[]));}}
   const rows=store.all(`SELECT id,task_id,type,created_at,run_id,actor,source_ref,caused_by,schema_version,length(data) AS body_chars,CASE WHEN length(data)<=8192 THEN data END AS data FROM task_history WHERE ${sql} ORDER BY id LIMIT ?`,...args,limit+1),more=rows.length>limit;rows.splice(limit);
+  // A snapshot whose body is in a trajectory file counts the body it stands for: a small one is expanded and shown
+  // inline like before, a large one is left to the source view.
+  for(const r of rows){const bytes=r.data?historyRefBytes(r):null;if(bytes===null)continue;
+    if(bytes>65536){r.body_chars=bytes;r.data=null;continue;}
+    try{const expanded=historyData(store,r);r.body_chars=expanded.length;if(expanded.length>8192)r.data=null;}catch{r.data=null;}}
   return {events:rows.map(r=>({...r,event_id:'task_history:'+r.id,data:r.data&&url.searchParams.get('include_data')==='1'?sourceView('task_history:'+r.id).data??{body_omitted:true,missing_reason:'role_private'}:{body_omitted:true,source:'task_history:'+r.id,characters:r.body_chars},caused_by:JSON.parse(r.caused_by)})),next_after:more?rows.at(-1)!.id:null,coverage:{legacy_run_links_may_be_missing:true}};
 }

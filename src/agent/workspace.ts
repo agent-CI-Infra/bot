@@ -6,6 +6,9 @@ import { randomId } from '../core/security.js';
 import { eventHistory, historyOrder } from '../roles/role-run.js';
 import { type Mirror } from './git-cache.js';
 import { open, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { payloadHeader, TrajectoryError } from '../storage/trajectories.js';
+import { operationRequestText, operationResult } from '../storage/payloads.js';
 
 // Operations each task is waiting on in this process, oldest first. The console shows the newest as the command the task
 // is running. task_tools cannot answer that: it has no task index (2.8M rows in production, so finding a task's pending
@@ -26,18 +29,29 @@ export class Workspace {
     request=this.redactor.clean(request);
     const id=operationId(`${this.task.id}:${this.task.attempt}:${key}`),input={operation_id:id,generation:this.task.generation,request:{...request,workspace_id:this.task.workspace_id}};
     const conversation = !!this.task.conversation_id;
-    const table=conversation?(this.operations??'role_conversation_operations'):'task_tools';
-    let row=this.store.get(`SELECT * FROM ${table} WHERE id=?`,id);
-    if(row&&conversation)row={...row,request:JSON.stringify(this.store.secrets.open(row.request,'conversation-operation:'+id+':request')),
-      result:row.result?JSON.stringify(this.store.secrets.open(row.result,'conversation-operation:'+id+':result')):null};
-    if(row&&row.request!==JSON.stringify(input)){
-      const previous=JSON.parse(row.request),changed=['generation','workspace_id','path','command','offset'].filter(field=>
+    const table=conversation?(this.operations??'role_conversation_operations'):'task_tools',owner=conversation?'turn_id':'task_id';
+    const encoded=JSON.stringify(input),digest=createHash('sha256').update(encoded).digest('hex');
+    const row=this.store.get(`SELECT * FROM ${table} WHERE id=?`,id);
+    // A row recorded since #436 keeps the request's hash (its body is in the trajectory file); an older row keeps the
+    // whole request.
+    if(row&&(row.request_sha256?row.request_sha256!==digest:this.readable(()=>operationRequestText(this.store,table,row))!==encoded)){
+      // The recorded request names the fields that differ; its header if its file cannot be read.
+      let previous:any;try{previous=JSON.parse(operationRequestText(this.store,table,row));}catch{previous=JSON.parse(row.request);}
+      const changed=['generation','workspace_id','path','command','offset'].filter(field=>
         JSON.stringify(field==='generation'?previous.generation:previous.request?.[field])!==JSON.stringify(field==='generation'?input.generation:input.request[field]));
       // Report field names only: request payloads can contain file contents, tokens and model credentials.
       stop('tool_operation_conflict',undefined,this.redactor.text(`操作 key=${key}（type=${input.request.type}）与已存请求冲突：${changed.length?changed.join('、')+' 不同':'请求内容不同'}。`));
     }
-    if(row?.state==='completed')return JSON.parse(row.result);
-    if(!row)this.store.run(`INSERT INTO ${table} VALUES(?,?,?,NULL,'pending')`,id,this.task.id,conversation?this.store.secrets.seal(input,'conversation-operation:'+id+':request'):JSON.stringify(input));
+    if(row?.state==='completed')return this.readable(()=>operationResult(this.store,table,row));
+    // The request and result go to the run's trajectory file; the row keeps their refs. Without a run (or conversation
+    // turn) to file them under, the row keeps them as before.
+    const trajectories=this.store.trajectories,scope=trajectories.scopeOf(this.task);
+    if(!row){
+      // Conversation rows were sealed before: they keep no fields of the request at all, only its ref and hash.
+      if(scope)this.store.run(`INSERT INTO ${table}(id,${owner},request,result,state,request_ref,request_sha256) VALUES(?,?,?,NULL,'pending',?,?)`,id,this.task.id,
+        conversation?'{}':JSON.stringify(payloadHeader(input)),trajectories.append(scope,'tool_call',id,input),digest);
+      else this.store.run(`INSERT INTO ${table}(id,${owner},request,result,state) VALUES(?,?,?,NULL,'pending')`,id,this.task.id,conversation?this.store.secrets.seal(input,'conversation-operation:'+id+':request'):encoded);
+    }
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'phase',phase:'validate',operation_id:id,command:request.command,detail:`正在运行测试：${request.command}`});
     let response;
     // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
@@ -47,12 +61,21 @@ export class Workspace {
     try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
     catch{return stop('execution_interrupted','waiting_environment',`Runner request interrupted: ${request.type}${request.path?' '+request.path:''}`);}
     finally{operations.delete(id);if(!operations.size&&inFlight.get(this.task.id)===operations)inFlight.delete(this.task.id);}
-    await this.guard();
     const result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed',...(response.detail?{detail:response.detail}:{})});
-    this.store.run(`UPDATE ${table} SET state='completed',result=? WHERE id=?`,conversation?this.store.secrets.seal(result,'conversation-operation:'+id+':result'):JSON.stringify(result),id);
+    // A repeated call replays this result: it is on disk before the row points to it.
+    let resultRef:string|null=null;
+    if(scope){resultRef=trajectories.append(scope,'tool_result',id,result);await trajectories.sync(resultRef);}
+    await this.guard();
+    if(resultRef)this.store.run(`UPDATE ${table} SET state='completed',result=?,result_ref=? WHERE id=?`,conversation?null:JSON.stringify(payloadHeader(result)),resultRef,id);
+    else this.store.run(`UPDATE ${table} SET state='completed',result=? WHERE id=?`,conversation?this.store.secrets.seal(result,'conversation-operation:'+id+':result'):JSON.stringify(result),id);
     // Model commands are logged by the agent loop together with the tool call; others (tests) are logged here.
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'command',command:request.command,...result,output:clip(result.output)});
     return result;
+  }
+  // A recorded call whose file fails verification stops the task: running it again could repeat its effect.
+  private readable<T>(read:()=>T):T{
+    try{return read();}
+    catch(error){if(error instanceof TrajectoryError)stop('trajectory_unreadable',undefined,`${error.code}: ${error.detail}`);throw error;}
   }
   // Hands a credential to the task agent. Unlike call(), the request is not recorded in task_tools, so the token is
   // never stored; a lost answer only means the agent asks again.

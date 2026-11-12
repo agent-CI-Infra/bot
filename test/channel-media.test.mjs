@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { operationRequestText, operationResult } from '../dist/storage/payloads.js';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -190,9 +191,9 @@ test('real isolated workspace import/export preserves binary bytes, rejects unsa
   assert.equal((await computers.importFile('101', 'input.png', png)).size, png.length);
   const file = await computers.exportFile('101', 'input.png', inboundBytes); assert.deepEqual(file.data, png); assert.equal(file.project, '101');
   for(const op of store.all('SELECT * FROM service_role_operations')){
-    const saved=JSON.stringify(store.secrets.open(op.request,'conversation-operation:'+op.id+':request'));
+    const saved=operationRequestText(store,'service_role_operations',op);
     assert.ok(!saved.includes('base64'));assert.ok(!saved.includes(png.toString('base64')));
-    if(op.result)assert.ok(!JSON.stringify(store.secrets.open(op.result,'conversation-operation:'+op.id+':result')).includes('base64'));
+    if(op.result)assert.ok(!JSON.stringify(operationResult(store,'service_role_operations',op)).includes('base64'));
   }
   await computers.execute('run_command', { repository: '101', command: 'ln -s input.png alias.png' });
   await assert.rejects(computers.exportFile('101', 'alias.png', inboundBytes), /channel_artifact_regular_file_required/);

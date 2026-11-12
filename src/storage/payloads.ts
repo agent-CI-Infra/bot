@@ -1,0 +1,90 @@
+import type { Row, Store } from './database.js';
+import { payloadHeader, TrajectoryError } from './trajectories.js';
+import { traceSnapshot } from '../tasks/trace.js';
+import { randomId } from '../core/security.js';
+
+// Readers of payloads that moved to trajectory files. A row written since #436 keeps a small header in its old column
+// and a ref to its record; a row not migrated yet still holds the whole payload in the old column. Every reader that
+// needs the whole payload goes through these, so migrated and not yet migrated rows read the same.
+
+export type OperationTable = 'task_tools' | 'role_conversation_operations' | 'service_role_operations';
+const sealed = (table: OperationTable) => table !== 'task_tools';
+
+/** The whole request of a recorded runner call, as the JSON text it was recorded with. */
+export function operationRequestText(store: Store, table: OperationTable, row: Row): string {
+  if (row.request_ref) return JSON.stringify(store.trajectories.read(row.request_ref).data);
+  return sealed(table) ? JSON.stringify(store.secrets.open(row.request, 'conversation-operation:' + row.id + ':request')) : String(row.request);
+}
+
+/** The whole result of a completed runner call, or null while it has none. */
+export function operationResult(store: Store, table: OperationTable, row: Row): any {
+  if (row.result_ref) return store.trajectories.read(row.result_ref).data;
+  if (row.result === null || row.result === undefined) return null;
+  return sealed(table) ? store.secrets.open(row.result, 'conversation-operation:' + row.id + ':result') : JSON.parse(row.result);
+}
+
+/** A log record's data: the parsed JSON object when it serializes back to the same text, otherwise {$text}. */
+export function logData(content: string): unknown {
+  try { const value = JSON.parse(content); if (value && typeof value === 'object' && !Array.isArray(value) && !('$text' in value) && JSON.stringify(value) === content) return value; } catch {}
+  return { $text: content };
+}
+
+/** The whole content of a task log, the same text it was inserted with. */
+export function logContent(store: Store, row: Row): string {
+  if (!row.content_ref) return String(row.content);
+  const data = store.trajectories.read(row.content_ref).data;
+  return data && typeof data.$text === 'string' && Object.keys(data).length === 1 ? data.$text : JSON.stringify(data);
+}
+
+/** The trace snapshot of a model request or response, as stored before #436 (traceSnapshot JSON), or null. */
+export function modelSnapshot(store: Store, row: Row, part: 'request' | 'response'): string | null {
+  const ref = row[part + '_ref'];
+  if (ref) return traceSnapshot(part === 'request' ? store.trajectories.readModelRequest(ref) : store.trajectories.read(ref).data);
+  return row[part + '_snapshot'] ?? null;
+}
+
+/** A reader's answer for a record whose file is missing or fails verification. */
+export function unreadable(error: unknown) {
+  if (error instanceof TrajectoryError) return { complete: false, missing_reason: error.code, detail: error.detail };
+  throw error;
+}
+
+/**
+ * A task_history row's data. The snapshot an operation or a large log left there since #436 holds small fields and
+ * refs; it is rebuilt from the trajectory file exactly as the full snapshot was stored before.
+ */
+export function historyData(store: Store, row: Row): string {
+  if (row.type !== 'operation' && row.type !== 'runtime_log') return row.data;
+  const data = JSON.parse(row.data)?.data;
+  if (row.type === 'operation' && typeof data?.request_ref === 'string') {
+    const request = JSON.stringify(store.trajectories.read(data.request_ref).data);
+    const result = typeof data.result_ref === 'string' ? JSON.stringify(store.trajectories.read(data.result_ref).data) : null;
+    return traceSnapshot({ operation_id: data.operation_id, state: data.state, request, result });
+  }
+  if (row.type === 'runtime_log' && typeof data?.content_ref === 'string') return traceSnapshot(JSON.parse(logContent(store, { content_ref: data.content_ref })));
+  return row.data;
+}
+
+/** The bytes of the records a history snapshot refers to, or null for a snapshot that holds its own data. */
+export function historyRefBytes(row: Row): number | null {
+  if (row.type !== 'operation' && row.type !== 'runtime_log') return null;
+  let data: any; try { data = JSON.parse(row.data)?.data; } catch { return null; }
+  const refs = [data?.request_ref, data?.result_ref, data?.content_ref].filter((ref): ref is string => typeof ref === 'string');
+  return refs.length ? refs.reduce((sum, ref) => sum + Number(ref.split(':')[2] ?? 0), 0) : null;
+}
+
+/** Logs larger than this go to the run's trajectory file; the row keeps their small fields. */
+export const inlineLogBytes = 2048;
+
+/**
+ * Inserts a task log. A large log of a task inside a run goes to the run's trajectory file: the row keeps its small
+ * fields (type, phase, code, a clipped detail…) for queries and a ref for the whole text.
+ */
+export function insertTaskLog(store: Store, task: Row, content: string, createdAt = new Date().toISOString(), id = randomId()): string {
+  const scope = Buffer.byteLength(content) > inlineLogBytes ? store.trajectories.scopeOf(task) : null, data = scope ? logData(content) : null;
+  if (scope && data && !('$text' in (data as object))) {
+    const ref = store.trajectories.append(scope, 'log', id, data);
+    store.run('INSERT INTO task_logs(id,task_id,content,created_at,content_ref) VALUES(?,?,?,?,?)', id, task.id, JSON.stringify(payloadHeader(data, ['detail'])), createdAt, ref);
+  } else store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)', id, task.id, content, createdAt);
+  return id;
+}

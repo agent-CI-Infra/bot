@@ -1,3 +1,4 @@
+import { operationResult } from '../storage/payloads.js';
 import type {Store,Row} from '../storage/database.js';
 import {traceEvent} from './trace.js';
 
@@ -13,8 +14,10 @@ export function recordRetryFailure(s:Store,task:Row,failure:{group:string;occurr
   const dev=s.get("SELECT id,data FROM task_history WHERE task_id=? AND type='role_result' AND json_extract(data,'$.role')='dev' ORDER BY id DESC LIMIT 1",task.id);
   const candidate=s.get('SELECT candidate FROM task_records WHERE task_id=?',task.id)?.candidate;
   const saved=s.get('SELECT data FROM development_candidates WHERE task_id=?',task.id),lastSaved=saved?JSON.parse(saved.data):null;
-  const operation=failure.code==='candidate_unavailable'?s.get("SELECT id,request,result FROM task_tools WHERE task_id=? AND state='completed' AND json_extract(request,'$.request.type')='workspace_finalize' AND json_extract(result,'$.error') IS NOT NULL ORDER BY rowid DESC LIMIT 1",task.id):null;
-  const rawError=operation?JSON.parse(operation.result):null;
+  const operation=failure.code==='candidate_unavailable'?s.get("SELECT id,request,result,result_ref FROM task_tools WHERE task_id=? AND state='completed' AND json_extract(request,'$.request.type')='workspace_finalize' AND json_extract(result,'$.error') IS NOT NULL ORDER BY rowid DESC LIMIT 1",task.id):null;
+  // The row keeps the error's small fields; the whole result (a long detail) is in the run's file when it has one.
+  let rawError=operation?JSON.parse(operation.result):null;
+  if(operation?.result_ref)try{rawError=operationResult(s,'task_tools',operation);}catch{}
   const value={...failure,detail:failure.detail?.slice(0,8000),count,attempt:task.attempt,phase:task.phase,
    ...(operation?{source_ref:'task_tools:'+operation.id,operation:{type:'workspace_finalize',workspace_id:JSON.parse(operation.request).request.workspace_id,error:rawError.error,detail:rawError.detail}}:{}),
    artifacts:{dev_result_ref:dev?'task_history:'+dev.id:null,dev_input_version:dev?JSON.parse(dev.data).candidate_version:null,

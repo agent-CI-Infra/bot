@@ -9,7 +9,7 @@ export async function managementFixture(t,options={}) {
   const time=new Date().toISOString();
   for(const [id,project] of [['blocked','101'],['foreign','201']]){
     h.store.run("INSERT INTO tasks(id,repository_id,kind,status,phase,summary,error_code,created_at,updated_at) VALUES(?,?,'task.request','waiting_environment','prepare','Inspect task facts','environment_not_ready',?,?)",id,project,time,time);
-    h.store.run('INSERT INTO task_logs VALUES(?,?,?,?)','log-'+id,id,JSON.stringify({type:'fault',code:'environment_not_ready',detail:'Project computer is stopped'}),time);
+    h.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)','log-'+id,id,JSON.stringify({type:'fault',code:'environment_not_ready',detail:'Project computer is stopped'}),time);
   }
   const requests=[],modelState={gate:null,failure:0};
   const provider=createServer(async(req,res)=>{

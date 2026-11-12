@@ -1,4 +1,5 @@
 import { request as httpRequest } from 'node:http';
+import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import { request as httpsRequest } from 'node:https';
 import { type Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from '../app/auth.js';
@@ -202,9 +203,11 @@ export class ProjectService {
     const tasks = this.store.all(`SELECT id,kind,status,phase,object_number,generation,error_code,updated_at FROM tasks WHERE repository_id=?
       ORDER BY created_at DESC,id DESC LIMIT 20`, id);
     const commands: Json[] = [];
-    for (const row of this.store.all(`SELECT l.task_id,l.content,l.created_at,t.kind,t.object_number FROM task_logs l JOIN tasks t ON t.id=l.task_id
+    for (const row of this.store.all(`SELECT l.task_id,l.content,l.content_ref,l.created_at,t.kind,t.object_number FROM task_logs l JOIN tasks t ON t.id=l.task_id
       WHERE t.repository_id=? ORDER BY l.rowid DESC LIMIT 500`, id)) {
       let entry: Json; try { entry = JSON.parse(row.content); } catch { continue; }
+      // Only command logs are read whole: the header of a large one keeps its type and name, not its arguments.
+      if (row.content_ref && (entry.type === 'command' || entry.type === 'tool' && entry.name === 'run_command')) try { entry = JSON.parse(logContent(this.store, row)); } catch { continue; }
       const command = entry.type === 'command' ? entry : entry.type === 'tool' && entry.name === 'run_command' ? { command: (entry.arguments as Json)?.command, ...(entry.result as Json) } : null;
       if (!command) continue;
       commands.push({ task_id: row.task_id, kind: row.kind, object_number: row.object_number, created_at: row.created_at, command: command.command,
