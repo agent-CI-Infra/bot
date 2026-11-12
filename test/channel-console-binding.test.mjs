@@ -85,6 +85,27 @@ const status = (client, id) => client('/api/channels/bindings/requests/' + id);
 const event = (f, actor, chat, overrides = {}) => f.service.adapter(f.service.connector(f.id)).normalize(
   envelope('binding proof', { sender: { sender_id: { open_id: actor } }, message: { chat_id: chat }, ...overrides }));
 
+test('request results retain the organization application visibility boundary after a member leaves', async t => {
+  const f = await channelFixture(t), tenant = f.h.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', '101').tenant_id;
+  const id = await connector(f.admin, { app_id: 'cli_status_org', owner_tenant: tenant });
+  const member = await f.member('request-status-member', { repository_ids: ['101'] });
+  const completed = (await member.client('/api/channels/bindings/issue', 'POST', { connector_id: id })).value;
+  assert.equal((await status(member.client, completed.request_id)).value.state, 'pending');
+  const proof = f.service.adapter(f.service.connector(id)).normalize(envelope('binding proof', {
+    header: { app_id: 'cli_status_org' }, sender: { sender_id: { open_id: 'ou_status_org' } }, message: { chat_id: 'oc_status_org' }
+  }));
+  await f.service.bindings.redeem(completed.code, proof);
+  assert.equal((await status(member.client, completed.request_id)).value.state, 'completed');
+  await member.client('/api/auth/me');
+  const pending = (await member.client('/api/channels/bindings/issue', 'POST', { connector_id: id })).value;
+  assert.equal((await f.admin('/api/project-admin-assignments', 'PUT', { user_id: member.id, repository_ids: [], organization_ids: [] })).status, 200);
+  for (const request of [completed, pending]) {
+    const denied = await status(member.client, request.request_id);
+    assert.equal(denied.status, 403);
+    assert.equal(denied.value.error, 'channel_application_forbidden');
+  }
+});
+
 test('the owner reads only this request result, including a reactivated identity without another record', async t => {
   const f = await channelFixture(t), { admin, h, id } = f;
   const original = h.store.get("SELECT id FROM external_identities WHERE external_actor='ou_alice'");
