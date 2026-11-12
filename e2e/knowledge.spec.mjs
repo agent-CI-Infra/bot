@@ -152,3 +152,108 @@ test('a legacy file whose name carries a control character is reported as unread
     expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });
+
+test('search matches file names and path fragments in every directory and claims nothing more',async({page})=>{
+  test.setTimeout(90000);const f=await fixture(page);
+  try{
+    const base='/api/repositories/101/knowledge-files',dirs='/api/repositories/101/knowledge-directories';
+    for(const path of ['手册','手册/归档','手册/归档/深层'])await f.admin(dirs,'POST',{path});
+    await f.admin(base,'POST',{path:'手册/开始.md',content:'# 开始\n\n发布说明只写在正文里。'});
+    await f.admin(base,'POST',{path:'手册/归档/深层/发布清单.md',content:'# 发布清单'});
+    await f.admin(base,'POST',{path:'readme.txt',content:'root file'});
+    // The server matches a substring of the whole path; it does not search file bodies or build a semantic index.
+    const api=async query=>(await f.admin(base+'?'+new URLSearchParams({directory:'',query}))).value.files.map(file=>file.path);
+    expect(await api('发布')).toEqual(['手册/归档/深层/发布清单.md']);
+    expect(await api('归档/深层')).toEqual(['手册/归档/深层/发布清单.md']);
+    expect(await api('清单')).toEqual(['手册/归档/深层/发布清单.md']);
+    expect(await api('eadm')).toEqual(['readme.txt']);
+    expect(await api('发布说明')).toEqual([]);
+    await f.login();
+    const panel=page=>page.locator('.knowledge-main'),search=page.getByLabel('搜索文件名或路径',{exact:true});
+    // A listing read can finish after the input was refilled, so retry until the request actually carries this query.
+    const searchFor=async query=>{for(let attempt=0;attempt<3;attempt++){
+      await search.fill(query);
+      const answer=page.waitForResponse(response=>{try{return response.url().includes('/knowledge-files?')&&new URL(response.url()).searchParams.get('query')===query;}catch{return false;}},{timeout:5000}).catch(()=>null);
+      await page.getByRole('button',{name:'搜索',exact:true}).click();
+      if(await answer)return;
+    }throw new Error('search did not run for '+query);};
+    // The page states the scope it has: file names and paths in every directory, never semantic search.
+    await searchFor('清单');
+    await expect(panel(page).getByRole('button',{name:'发布清单.md',exact:true})).toBeVisible();
+    await expect(panel(page)).toContainText('搜索范围：全部目录的文件名和路径。');
+    await expect(page.locator('.knowledge-workspace')).not.toContainText('语义');
+    // A path fragment finds the deep file, and a body-only phrase finds nothing because bodies are not searched.
+    await searchFor('归档/深层');
+    await expect(panel(page).getByRole('button',{name:'发布清单.md',exact:true})).toBeVisible();
+    await searchFor('发布说明');
+    await expect(panel(page).getByRole('button',{name:'发布清单.md',exact:true})).toHaveCount(0);
+    await expect(panel(page).getByRole('button',{name:'开始.md',exact:true})).toHaveCount(0);
+    // The scope stays every directory while browsing inside one: searching 手册 for a root file still finds it.
+    await searchFor('');
+    await panel(page).getByRole('button',{name:'▱ 手册',exact:true}).click();
+    await expect(panel(page).getByRole('button',{name:'开始.md',exact:true})).toBeVisible();
+    await searchFor('readme');
+    await expect(panel(page).getByRole('button',{name:'readme.txt',exact:true})).toBeVisible();
+    await expect(panel(page)).toContainText('搜索范围：全部目录的文件名和路径。');
+    mkdir('.tmp/knowledge-search-232',{recursive:true});
+    await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'.tmp/knowledge-search-232/search-1440.png',fullPage:true});
+    await page.setViewportSize({width:390,height:844});await page.screenshot({path:'.tmp/knowledge-search-232/search-390.png',fullPage:true});
+    expect(f.errors).toEqual([]);
+  }finally{await f.close();}
+});
+
+test('keyboard users reach the directory, the file, its history and restore in order',async({page})=>{
+  test.setTimeout(90000);const f=await fixture(page);
+  try{
+    await f.admin('/api/repositories/101/knowledge-directories','POST',{path:'手册'});
+    const base='/api/repositories/101/knowledge-files',file=(await f.admin(base,'POST',{path:'手册/笔记.md',content:'# 第一版'})).value.file;
+    await f.admin(base+'/'+encodeURIComponent(file.id),'PUT',{content:'# 第二版',expected_revision:file.revision});
+    await f.login();
+    const panel=page=>page.locator('.knowledge-main'),focused=()=>page.evaluate(()=>{const el=document.activeElement;return el?.getAttribute('aria-label')||el?.textContent?.trim()||'';});
+    // Tab from the workspace's first control reaches the directory entry, and Enter opens that directory.
+    await page.locator('.knowledge-tree').getByRole('button',{name:'全部文件',exact:true}).focus();
+    let current='',reached=false;
+    for(let i=0;i<12;i++){await page.keyboard.press('Tab');current=await focused();if(current==='目录 手册'){reached=true;break;}}
+    expect(reached).toBe(true);
+    await page.keyboard.press('Enter');
+    await expect(panel(page).getByRole('button',{name:'笔记.md',exact:true})).toBeVisible();
+    // The file entry is reachable with Tab too, and Enter opens its content.
+    await page.locator('.knowledge-tree').getByRole('button',{name:'全部文件',exact:true}).focus();
+    for(let i=0;i<16;i++){await page.keyboard.press('Tab');current=await focused();if(current==='文件 手册/笔记.md')break;}
+    expect(current).toBe('文件 手册/笔记.md');
+    await page.keyboard.press('Enter');
+    await expect(panel(page).getByRole('heading',{name:'笔记.md',exact:true})).toBeVisible();
+    await expect(page.locator('.knowledge-content')).toContainText('第二版');
+    // Focus order after the back link does not jump: the file actions follow in order, and Enter opens history.
+    const back=page.getByRole('button',{name:'← 返回目录',exact:true});await back.focus();
+    const order=[];for(let i=0;i<3;i++){await page.keyboard.press('Tab');order.push(await focused());}
+    expect(order).toEqual(['编辑文件','下载文件','历史版本']);
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('complementary',{name:'文件历史'})).toBeVisible();
+    await expect(panel(page).getByRole('textbox',{name:'搜索文件名或路径',exact:true})).toHaveCount(0);
+    // An old version opens from the keyboard and offers restore without leaving the keyboard.
+    await page.getByRole('complementary',{name:'文件历史'}).getByRole('button',{name:'v1',exact:true}).focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByText('正在查看 v1 · 只读，当前仍为 v2',{exact:true})).toBeVisible();
+    await back.focus();const restore=[];for(let i=0;i<6;i++){await page.keyboard.press('Tab');restore.push(await focused());}
+    expect(restore).toContain('恢复此版本');
+    await page.getByRole('button',{name:'恢复此版本',exact:true}).focus();await page.keyboard.press('Enter');
+    await expect(page.getByRole('dialog')).toBeVisible();
+    await expect(page.getByRole('dialog').getByRole('button',{name:'恢复版本',exact:true})).toBeVisible();
+    await page.getByRole('dialog').getByRole('button',{name:'取消',exact:true}).click();
+    expect(f.errors).toEqual([]);
+  }finally{await f.close();}
+});
+
+test('the knowledge page offers files and versions only, with no knowledge-governance columns',async({page})=>{
+  const f=await fixture(page);
+  try{
+    await f.admin('/api/repositories/101/memories','POST',{key:'legacy',kind:'experience',body:'旧知识正文',sources:[{reference:'legacy source'}],expected_revision:0,reason:'fixture',catalog:{title:'原有知识'}});
+    await f.admin('/api/repositories/101/knowledge-files','POST',{name:'开始.md',content:'# 开始'});
+    await f.login();
+    await expect(page.locator('.knowledge-workspace')).toContainText('开始.md');
+    for(const label of ['角色记忆','经验候选','可信度','验证者','知识晋升','知识条目','已验证'])await expect(page.locator('.knowledge-workspace')).not.toContainText(label);
+    await expect(page.getByRole('complementary',{name:'文件目录'})).toBeVisible();
+    expect(f.errors).toEqual([]);
+  }finally{await f.close();}
+});
