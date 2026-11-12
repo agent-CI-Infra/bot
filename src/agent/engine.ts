@@ -277,7 +277,7 @@ export class TaskEngine {
     let workspace:Workspace|undefined;let attemptRun:Row|null=null;
     try{
       await guard();
-      const entry=task.kind.startsWith('development.')?'development':task.kind.startsWith('review.')?'review':task.kind==='actions.failures'?'actions':requestedTask(task)?'request':null;
+      const entry=task.kind.startsWith('development.')||task.kind==='task.development'?'development':task.kind.startsWith('review.')?'review':task.kind==='actions.failures'?'actions':requestedTask(task)?'request':null;
       const config=entry&&controlled(this.store,task,entry)?roleExecutionModel(this.store,task,roleConfig(this.store,task).controller.role):executionModel(this.store,task,workOf(task as any));
       redactor.add(config.key);await this.share(task.repository_id);
       attemptRun=beginRun(this.store,task,'attempt',{phase:task.phase,kind:task.kind,model:{id:config.id,name:config.model,version:config.version},policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)});task.trace_run_id=attemptRun?.id;
