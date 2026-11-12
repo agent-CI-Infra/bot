@@ -128,3 +128,20 @@ test('manager failures retain bounded connection diagnostics without credentials
   const logs = lines.join('\n');
   for (const value of [secret, token.toString(), token.toString('base64'), 'private-user', 'private-password', base, '/broken', 'invalid JSON']) assert.ok(!logs.includes(value), value);
 });
+
+// Production: the ledger keeps every runner call (3.8M rows, ~100 GB); recovery looked up each project's running
+// operations with a scan of it, twice per project, and the manager stayed unready for minutes after every start.
+test('recovery reads only the running operations, through their partial index', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'readiness-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const projects = new Projects({ database: join(directory, 'manager.sqlite'), docker: new FakeDocker(), deployment: 'fixture', image: 'approved' });
+  t.after(() => projects.db.close());
+  for (const sql of ["SELECT action FROM operations WHERE repository_id=? AND state='running'",
+    "UPDATE operations SET state='interrupted' WHERE repository_id=? AND state='running'"]) {
+    const plan = projects.db.prepare('EXPLAIN QUERY PLAN ' + sql).all().map(row => row.detail).join(' | ');
+    assert.match(plan, /SEARCH operations USING (COVERING )?INDEX operations_running \(repository_id=\?\)/, `${sql}: ${plan}`);
+  }
+  // A finished operation leaves the index; a running one is in it.
+  projects.db.prepare("INSERT INTO operations VALUES('a','101','execute',1,'{}','running',NULL)").run();
+  projects.db.prepare("INSERT INTO operations VALUES('b','101','execute',1,'{}','completed','{}')").run();
+  assert.equal(projects.db.prepare("SELECT count(*) n FROM operations INDEXED BY operations_running WHERE repository_id='101' AND state='running'").get().n, 1);
+});
