@@ -236,10 +236,13 @@ export class FeishuAdapter implements ChannelAdapter {
     const items: StoredMessage[] = data.items.map((item: any) => {
       const raw = String(item.body?.content_v2 ?? item.body?.content ?? ''), messageType = text(item.msg_type, 80);
       const mentions = item.deleted ? [] : messageMentions(item.mentions, this.connector.bot_open_id, this.connector.app_name);
-      let content = '';
-      if (!item.deleted) { try { content = messageText(messageType, raw, mentions); } catch { fail(502, 'channel_history_invalid'); } }
+      let content = '', commandText = '';
+      if (!item.deleted) {
+        try { content = messageText(messageType, raw, mentions); commandText = messageText(messageType, raw, mentions, true); }
+        catch { fail(502, 'channel_history_invalid'); }
+      }
       return { message_id: text(item.message_id), sender_id: String(item.sender?.id ?? ''), sender_tenant: String(item.sender?.tenant_key ?? ''),
-        sender_type: String(item.sender?.sender_type ?? 'unknown'), message_type: messageType, content, mentions, raw_content: raw,
+        sender_type: String(item.sender?.sender_type ?? 'unknown'), message_type: messageType, content, command_text: commandText, mentions, raw_content: raw,
         created_at: eventTime(item.create_time), updated_at: eventTime(item.update_time ?? item.create_time), deleted: !!item.deleted,
         parent_id: String(item.parent_id ?? ''), root_id: String(item.root_id ?? ''), thread_id: String(item.thread_id ?? '') };
     });
@@ -347,7 +350,7 @@ function messageText(type: string, raw: string, mentions: ChannelMention[] = [],
   };
   const keys = [...new Set(mentions.map(m => m.key).filter(Boolean))].sort((a, b) => b.length - a.length);
   // Replace once, so a display name containing another placeholder cannot turn into a different mention.
-  const pattern = keys.length ? new RegExp('(?:' + keys.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')(?!\\w)', 'g') : null;
+  const pattern = keys.length ? new RegExp('(?:' + keys.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')', 'g') : null;
   const render = (value: string) => pattern ? value.replace(pattern, ref => at(ref)) : value;
   if (type === 'text') return render(String(data.text ?? ''));
   if (type === 'image') return '[图片附件]';

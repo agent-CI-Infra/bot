@@ -32,5 +32,6 @@ export interface StoredMessage {
   created_at: number; updated_at: number; content: string; raw_content: string;
   parent_id: string; root_id: string; thread_id: string; deleted: boolean;
   mentions?: ChannelMention[];
+  command_text?: string;
 }
 export interface HistoryPage { items: StoredMessage[]; has_more: boolean; page_token: string; }
