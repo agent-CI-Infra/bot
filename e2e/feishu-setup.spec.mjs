@@ -47,7 +47,7 @@ test('global administrator connects an app through the wizard, resumes it and se
     await expect(page.getByLabel('事件接收方式')).toHaveValue('http');
     const scopes = JSON.parse(await page.getByLabel('完整权限 JSON').inputValue());
     expect(scopes.scopes.tenant).toEqual(['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'im:resource', 'im:message.reactions:write_only', 'cardkit:card:write',
-      'im:message.group_msg', 'im:message:readonly', 'im:chat.members:bot_access', 'im:chat.members:read']);
+      'im:message.group_msg', 'im:message:readonly', 'im:chat:read', 'im:chat.members:bot_access', 'im:chat.members:read']);
     expect(scopes.scopes.user).toEqual([]);
     await expect(page.getByText('卡片是默认功能：', { exact: false })).toContainText('权限导入不会自动订阅回调');
     await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('enterprise');

@@ -26,6 +26,7 @@ export const FEISHU_SCOPES: readonly { scope: string; purpose: string; enterpris
   { scope: 'im:message.group_msg', purpose: '接收群内用户消息、读取群历史（敏感权限）' },
   { scope: 'im:message.group_msg.include_bot:read', purpose: '接收群内用户及其他机器人消息（企业自建）', enterprise_only: true },
   { scope: 'im:message:readonly', purpose: '读取会话历史、接收撤回事件' },
+  { scope: 'im:chat:read', purpose: '查看群信息，订阅群解散事件' },
   { scope: 'im:chat.members:bot_access', purpose: '接收机器人进群、移出事件' },
   { scope: 'im:chat.members:read', purpose: '核验群成员，保存群聊助手绑定' },
   { scope: 'tenant:tenant:readonly', purpose: '自动获取安装企业', enterprise_only: true },
