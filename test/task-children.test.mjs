@@ -59,3 +59,16 @@ test('ordinary create_task retries retain their pre-child-feature idempotency ke
  f.s.run('UPDATE tasks SET unique_key=? WHERE id=?',legacy,first.id);
  const retried=cmd.tool(caller,'create_task',{request,criteria});assert.equal(retried.id,first.id);assert.equal(retried.replayed,true);
 });
+
+test('accepted children do not satisfy a missing parent integration criterion or override parent QA',t=>{
+ const f=fixture(t),records=new TaskRecords(f.s);
+ records.contract('parent',{goal:'Deliver both products and their integrated journey',scope:['suite'],criteria:['A works','B works','Integrated journey invokes A and B'],endpoint:'report'});
+ const pass={outcome:'pass',reason:'Verified child capability',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
+ for(const id of ['a','b']){f.add(id);attachChild(f.s,'parent',id);const c=records.submit(id,[{kind:'report',reference:id+'.md',version:'v1',content:'Verified product'}],[],{summary:'Child delivered'});records.decide(id,c.id,c.revision,pass);}
+ assert.equal(f.s.get("SELECT count(*) n FROM tasks WHERE id IN ('a','b') AND status='completed'").n,2);
+ assert.notEqual(f.parent().status,'completed');
+ const c=records.submit('parent',[{kind:'report',reference:'suite.md',version:'v1',content:'A and B delivered, no integration'}],[],{summary:'Both children accepted'});
+ records.decide('parent',c.id,c.revision,{...pass,outcome:'return',reason:'Parent integrated journey is missing',gaps:['No runnable journey invokes both real products'],core_complete:false,required_evidence_complete:false});
+ assert.notEqual(f.parent().status,'completed');assert.equal(records.get('parent').acceptance.outcome,'return');
+ assert.equal(childTaskContext(f.s,'parent').children.every(c=>c.acceptance.outcome==='pass'),true);
+});
