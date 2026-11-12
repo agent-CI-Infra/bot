@@ -366,6 +366,7 @@ test('a repository admin connects an app for their organization from the identit
     await expect(page.getByLabel('应用所属', { exact: true })).toHaveCount(0);
     await page.goto(f.h.admin + '/#/identity/feishu');
     await expect(identity.getByLabel('可绑定的飞书应用')).toContainText('组织 agent-test-zone 的应用');
+    await identity.getByLabel('选择飞书机器人', { exact: true }).selectOption(c.id);
     await expect(identity.getByText('经它绑定的飞书身份只能使用你在该组织内的权限', { exact: false })).toBeVisible();
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
