@@ -68,7 +68,7 @@
 .identity-feishu > .side-card { margin: 0; }
 .identity-feishu-page { display: grid; gap: 20px; padding: 20px; max-width: 1200px; margin: auto; }
 .identity-feishu-page > .side-card { margin: 0; min-width: 0; }
-.identity-feishu-page > nav { flex-wrap: wrap; }
+.identity-feishu-page > nav { display: flex; flex-wrap: wrap; gap: 10px; }
 .feishu-binding-layout { display: grid; grid-template-columns: minmax(0,2fr) minmax(220px,1fr); gap: 24px; }
 .feishu-binding-layout > *, .feishu-legacy-binding { min-width: 0; overflow-wrap: anywhere; }
 .feishu-binding-help { background: var(--color-brand-weak); border-radius: var(--radius-3); padding: 16px; }
