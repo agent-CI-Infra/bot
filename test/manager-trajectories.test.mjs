@@ -76,3 +76,35 @@ test('the ledger migration reads operations by rowid ranges', async t => {
   const plan = f.projects.db.prepare('EXPLAIN QUERY PLAN SELECT rowid AS migration_rowid,* FROM operations WHERE rowid>? ORDER BY rowid LIMIT 1').all().map(row => row.detail).join(' | ');
   assert.match(plan, /SEARCH operations USING INTEGER PRIMARY KEY \(rowid>\?\)/, plan);
 });
+
+test('stopping a ledger migration during a file sync commits the slice and closes its files', async t => {
+  const f = await managerFixture(t), generation = await ready(f);
+  const input = call(generation, { type: 'workspace_command', command: 'recorded command' });
+  f.projects.db.prepare('INSERT INTO operations(id,repository_id,action,generation,input,state,result) VALUES(?,?,?,?,?,?,?)')
+    .run(input.operation_id, '101', 'execute', generation, JSON.stringify(input), 'completed', JSON.stringify({ exit_code: 0, output: 'recorded result' }));
+  const migration = new LedgerMigration(f.projects.db, f.projects.trajectories, { readMs: 0, pauseMs: 60_000 });
+  const syncing = Promise.withResolvers(), release = Promise.withResolvers();
+  const sync = f.projects.trajectories.sync.bind(f.projects.trajectories);
+  t.mock.method(f.projects.trajectories, 'sync', async ref => {
+    await sync(ref);
+    syncing.resolve();
+    await release.promise;
+  });
+  migration.start();
+  await syncing.promise;
+  let stopped = false;
+  const stopping = migration.stop().then(() => { stopped = true; });
+  release.resolve();
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(stopped, true, 'stop must not wait for a pause registered after the stop request');
+    await stopping;
+    assert.equal(migration.state().phases.operations.migrated, 1);
+    f.docker.runner = async () => { throw new Error('a migrated operation must replay without running'); };
+    assert.deepEqual(await f.projects.operate('101', 'execute', input), { exit_code: 0, output: 'recorded result' });
+    assert.equal(f.projects.db.prepare('SELECT count(*) n FROM trajectory_files WHERE closed_at IS NULL').get().n, 0);
+  } finally {
+    await migration.stop();
+    await f.projects.trajectories.settle();
+  }
+});

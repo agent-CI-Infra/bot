@@ -184,7 +184,11 @@ export class LedgerMigration {
     const last = Number(this.db.prepare('SELECT max(rowid) n FROM operations').get()?.n ?? 0);
     return { ...state, remaining: { operations: Math.max(0, last - (state.phases.operations?.cursor ?? 0)) } };
   }
-  pause(ms) { return new Promise(resolve => { const timer = setTimeout(done, ms); timer.unref?.(); function done() { clearTimeout(timer); resolve(); } this.wake = done; }); }
+  pause(ms) {
+    // stop() may run during a slice's file sync, before this pause has registered its wake callback.
+    if (this.stopped) return Promise.resolve();
+    return new Promise(resolve => { const timer = setTimeout(done, ms); timer.unref?.(); function done() { clearTimeout(timer); resolve(); } this.wake = done; });
+  }
   async loop() {
     const { remaining: _, ...state } = this.state();
     state.started_at ??= new Date().toISOString();

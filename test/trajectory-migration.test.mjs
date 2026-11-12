@@ -145,6 +145,37 @@ test('the migration resumes from its cursor after a restart and never moves a ro
   assert.equal(new Set(refs.flatMap(row => [row.request_ref, row.result_ref])).size, 62);
 });
 
+test('stopping during a file sync commits the current slice without waiting for another pause', async t => {
+  const store = open(t, database(t)); legacy(store, { tasks: 1, operations: 2 });
+  const migration = new PayloadMigration(store, { readMs: 0, pauseMs: 60_000 });
+  const syncing = Promise.withResolvers(), release = Promise.withResolvers();
+  const sync = store.trajectories.sync.bind(store.trajectories);
+  t.mock.method(store.trajectories, 'sync', async ref => {
+    await sync(ref);
+    syncing.resolve();
+    await release.promise;
+  });
+  migration.start();
+  await syncing.promise;
+  let stopped = false;
+  const stopping = migration.stop().then(() => { stopped = true; });
+  release.resolve();
+  try {
+    // The sync can now finish; drain its continuations without a timer keeping the migration alive.
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(stopped, true, 'stop must not wait for a pause registered after the stop request');
+    await stopping;
+    assert.equal(finished(store).phases.task_tools.migrated, 1);
+    const row = store.get("SELECT * FROM task_tools WHERE id='task-0-op-0'");
+    assert.ok(row.request_ref && row.result_ref);
+    assert.equal(operationResult(store, 'task_tools', row).output.startsWith('out task-0-op-0'), true);
+    assert.equal(store.get('SELECT count(*) n FROM trajectory_files WHERE closed_at IS NULL').n, 0);
+  } finally {
+    await migration.stop();
+    await store.trajectories.settle();
+  }
+});
+
 test('slices stay short: the event loop is never blocked for long while the migration runs', async t => {
   const store = open(t, database(t)); legacy(store, { tasks: 20, operations: 30, size: 40_000 });
   const delay = monitorEventLoopDelay({ resolution: 5 }); delay.enable();
