@@ -6,26 +6,30 @@ titles.settings = '全局设置';
 // waiting_token with a saved token means this deployment has no tunnel status endpoint to read.
 const tunnelStates = { waiting_token: '读不到状态', not_running: 'tunnel 服务未运行', connecting: '正在连接', connected: '已连接' };
 const settingsGroups = [
-  ['系统与算力', [['general', '常规'], ['models', '模型'], ['service-roles', '服务角色'], ['assistant-computers', '助手电脑']]],
+  ['系统与算力', [['general', '常规'], ['models', '模型'], ['service-roles', '服务角色'], ['assistant-computers', '助手电脑'], ['storage', '存储']]],
   ['接入与网络', [['onboarding', '接入向导'], ['access', '公网接入'], ['external', '外部执行']]],
   ['连接与渠道', [['accounts', '机器人账号'], ['installations', '安装档案'], ['feishu', '飞书连接']]],
   ['仓库与用户', [['projects', '项目管理'], ['users', '用户']]]
 ];
 const settingsSections = settingsGroups.flatMap(([, items]) => items);
+// A project administrator reaches global settings only for 存储, which lists their own projects.
+const visibleSettingsGroups = () => typeof me === 'object' && me && me.role !== 'super_admin'
+  ? settingsGroups.map(([title, items]) => [title, items.filter(([key]) => key === 'storage')]).filter(([, items]) => items.length) : settingsGroups;
+const visibleSettingsSections = () => visibleSettingsGroups().flatMap(([, items]) => items);
 // A settings address is a section and, for a detail page, one record inside it: #/settings/installations/<host>/<app>/<id>
 // and #/settings/users/<id>. Unknown sections fall back to 常规, an unreadable id is handled by the page itself.
 function settingsRoute() {
   if (/^#\/settings\/onboarding(?:\/|$)/.test(location.hash)) return { section: 'onboarding', id: null };
   if (/^#\/settings\/feishu(?:\/|$)/.test(location.hash)) return { section: 'feishu', id: null };
-  const match = /^#\/settings\/([a-z-]+)(?:\/(.+))?$/.exec(location.hash), key = match?.[1];
-  return { section: settingsSections.some(([name]) => name === key) ? key : 'general', id: match?.[2] ? decodeURIComponent(match[2]) : null };
+  const match = /^#\/settings\/([a-z-]+)(?:\/(.+))?$/.exec(location.hash), key = match?.[1], sections = visibleSettingsSections();
+  return { section: sections.some(([name]) => name === key) ? key : sections[0][0], id: match?.[2] ? decodeURIComponent(match[2]) : null };
 }
 // What the cards draw from; the model cards are redrawn together because deleting the default model clears it.
 let settingsView = null;
 async function renderSettings(request) {
   const route = settingsRoute(), section = route.section, nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content'), body = element('div', '', 'project-body settings-body');
   nav.setAttribute('aria-label', '全局设置类别');
-  for (const [groupTitle, items] of settingsGroups) {
+  for (const [groupTitle, items] of visibleSettingsGroups()) {
     nav.append(element('p', groupTitle, 'console-nav-label'));
     for (const [key, caption] of items) { const item = element('a', caption); item.href = '#/settings/' + key; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item); }
   }
@@ -60,6 +64,47 @@ const settingsCards = {
       try { await api('/api/external/settings', 'PUT', { token_audience: address.value.trim() }); if (request === renderVersion) status.textContent = '兑换地址已保存。'; }
       catch (err) { if (request === renderVersion) status.textContent = err.message; } finally { save.disabled = false; }
     }); section.append(form); return [section];
+  },
+  // Storage (#436): what each project keeps in trajectory files, records and blobs, read from counters kept when files
+  // close and a background snapshot; platform administrators also see the databases, the disk and the migration.
+  async storage() {
+    const view = await api('/api/storage'), size = value => Number.isFinite(value) ? bytes(value) : '未知', count = value => Number.isFinite(value) ? value.toLocaleString('zh-CN') : '未知';
+    const cards = [], intro = card('存储');
+    intro.append(note(`轨迹文件按运行保存模型请求、工具调用和大日志的正文，数据库只留状态和定位。数字来自文件关闭时累加的计数，每 5 分钟在后台刷新一次；最近刷新：${view.refreshed_at ? new Date(view.refreshed_at).toLocaleString('zh-CN') : '尚未刷新'}。`));
+    cards.push(intro);
+    if (view.totals) {
+      const totals = card('数据库与磁盘'), side = value => value ? `${size(value.bytes)}，空闲页 ${count(value.free_pages)}（${size(value.free_bytes)}）` : '读不到';
+      totals.append(facts([['控制面数据库 control.sqlite', side(view.totals.control?.database)], ['manager 账本 manager.sqlite', side(view.totals.manager?.database)],
+        ['控制面所在磁盘剩余', view.totals.control?.disk ? `${size(view.totals.control.disk.free_bytes)} / ${size(view.totals.control.disk.total_bytes)}` : '读不到'],
+        ['manager 所在磁盘剩余', view.totals.manager?.disk ? `${size(view.totals.manager.disk.free_bytes)} / ${size(view.totals.manager.disk.total_bytes)}` : '读不到']]));
+      totals.append(note('清空正文后数据库文件不会自己变小，空出的页会留给新数据复用；要回收磁盘需要在维护窗口做 VACUUM。'));
+      cards.push(totals);
+      const migration = card('历史数据迁移'), table = costTable(['位置', '表', '已迁移', '跳过', '失败', '已搬出', '待检查（估计）', '完成时间']);
+      for (const [where, state] of [['控制面', view.totals.control?.migration], ['manager', view.totals.manager?.migration]]) {
+        for (const [name, phase] of Object.entries(state?.phases ?? {})) {
+          const row = document.createElement('tr');
+          for (const text of [where, name, count(phase.migrated), count(phase.skipped), count(phase.failed), size(phase.bytes), count(state.remaining?.[name]), phase.finished_at ? new Date(phase.finished_at).toLocaleString('zh-CN') : '进行中'])
+            row.append(element('td', text));
+          table.body.append(row);
+        }
+      }
+      migration.append(table.wrap);
+      const rates = [['控制面', view.totals.control?.migration], ['manager', view.totals.manager?.migration]].map(([where, state]) => `${where} ${state?.rate ?? 0} 条/秒`).join('，');
+      migration.append(note(`当前速度：${rates}。` + [view.totals.control?.migration, view.totals.manager?.migration].flatMap(state => Object.values(state?.phases ?? {}).map(phase => phase.last_error).filter(Boolean)).slice(0, 1).map(error => `最近一个错误：${error}`).join('')));
+      cards.push(migration);
+    }
+    const projects = card('按项目'), table = costTable(['项目', '轨迹文件', '模型请求/响应', '工具调用/结果', '日志', 'blob', 'manager 轨迹', '写入中的文件']);
+    table.wrap.classList.add('storage-projects');
+    for (const project of view.projects) {
+      const row = document.createElement('tr'), record = (...types) => { const value = types.reduce((sum, type) => ({ count: sum.count + (project.records[type]?.count ?? 0), bytes: sum.bytes + (project.records[type]?.bytes ?? 0) }), { count: 0, bytes: 0 }); return `${count(value.count)} 条 · ${size(value.bytes)}`; };
+      for (const text of [project.name || project.repository_id, `${count(project.files.count)} 个 · ${size(project.files.bytes)}`, record('model_request', 'model_response'), record('tool_call', 'tool_result'), record('log', 'event'),
+        `${count(project.blobs.count)} 个 · ${size(project.blobs.bytes)}`, project.manager ? `${count(project.manager.files.count + project.manager.open.count)} 个 · ${size(project.manager.files.bytes + project.manager.open.bytes)}` : '—', project.open.count ? `${count(project.open.count)} 个 · ${size(project.open.bytes)}` : '—'])
+        row.append(element('td', text));
+      table.body.append(row);
+    }
+    projects.append(view.projects.length ? table.wrap : note('还没有项目的轨迹数据。'));
+    cards.push(projects);
+    return cards;
   },
   async feishu(request) {
     const panel = element('div', '', 'feishu-setup'); await renderFeishuSetup(panel, request); return [panel];

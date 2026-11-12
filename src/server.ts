@@ -25,6 +25,7 @@ import { gateOnboardingApi } from './app/gate-onboarding.js';
 import { RuleService } from './rules/service.js';
 import { managerApi } from './work/api.js';
 import { settingsApi } from './app/settings.js';
+import { StorageReport } from './app/storage.js';
 import { serviceRolesApi } from './service-roles/api.js';
 import { ProjectRemoval } from './projects/removal.js';
 import { ReleaseService } from './releases/service.js';
@@ -62,6 +63,8 @@ interface Options { store: Store; staticDirectory: string; secureCookies?: boole
   assistantHomes?: string; installationSetup?: InstallationSetup; githubOAuth?: GitHubOAuthConfig; githubIdentity?: GitHubIdentity; githubLogin?: GitHubLogin;
   /** Times requests and reports a blocked event loop with the requests in flight. */
   stalls?: StallMonitor;
+  // The storage page's report; main.ts starts its background refresh, otherwise the first view refreshes it.
+  storage?: StorageReport;
   channels?: ChannelOptions; onChannels?: (service: ChannelService) => void;
   schedules?: { clock?: () => number; automatic?: boolean }; onSchedules?: (scheduler: Scheduler) => void; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
@@ -105,6 +108,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   registerScheduledChecks(schedules);
   const scheduler = new Scheduler(schedules); options.onSchedules?.(scheduler);
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
+  const storage = options.storage ?? new StorageReport(store, options.projects?.manager);
   const releases = options.releases || new ReleaseService(store, options.githubUrl);
   const loginAttempts = new Map<string, { n: number; until: number }>();
   const requestOrigin = (req: IncomingMessage) => `${options.secureCookies ? 'https' : 'http'}://${req.headers.host}`;
@@ -363,7 +367,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       }
     };
     guard();
-    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await assistantComputersApi(assistants,user,method,path) ?? serviceRolesApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input,options.githubUrl) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
+    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await assistantComputersApi(assistants,user,method,path) ?? await storage.api(user,method,path) ?? serviceRolesApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input,options.githubUrl) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
       ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.

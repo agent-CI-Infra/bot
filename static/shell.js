@@ -120,7 +120,8 @@ function consoleGroups() {
     ['#/costs', '用量与成本', '按项目、日期与工作类型查看'],
     ['#/events', 'Webhook 投递', '接收、验证和处理结果'],
     ['#/identity', '身份与权限', '本人绑定与当前有效授权'],
-    ['#/external', '外部执行端', '接入与连接诊断']
+    ['#/external', '外部执行端', '接入与连接诊断'],
+    ...(me.role === 'super_admin' ? [] : [['#/settings/storage', '存储', '本人项目的轨迹与数据量']])
   ] });
   groups.push({ title: '设置', items: [['#/preferences', '个人设置', '个人身份、飞书绑定与外部执行端'], ...(repo ? projectSections
     .filter(([key]) => ['basic', 'roles', 'model', 'machine', 'schedules', 'external', 'members'].includes(key))
