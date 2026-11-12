@@ -342,16 +342,22 @@ export class AssistantComputer {
     const home = await this.prepare();
     if (this.held) return home.id;
     if (!this.options.commands()) fail(400, 'assistant_computer_requires_commands');
-    let told = false;
+    let told = false, retried = false;
     for (;;) {
       await this.options.check();
       const result = await this.service.manager!.call('PUT', '/v1/assistant-computers/' + home.id,
         { turn: this.options.turn, fence: this.options.fence(), home_generation: home.generation, home_mode: home.mode }, 120_000).catch(error => {
         // No fallback to a project computer or the host: the turn learns that the computer is unavailable.
         if (error instanceof HttpError && ['manager_unavailable', 'docker_operation_failed', 'assistant_computer_create_failed', 'runner_not_ready', 'assistant_homes_unavailable', 'assistant_home_missing', 'not_found'].includes(error.code)) fail(503, 'assistant_computer_unavailable');
+        // Removed while it was being created: the turn is not in `active` until this call returns, so the first reconcile
+        // after a start of the control plane removes it (the periodic sweep never sees a computer being created). It is
+        // taken again once, after check() (a turn whose permission or source changed ends there), like an execute that
+        // meets a removal.
+        if (!retried && error instanceof HttpError && error.code === 'assistant_computer_released') { retried = true; return { state: 'released' }; }
         throw error;
       });
       if (result?.state === 'ready') break;
+      if (result?.state === 'released') continue;
       if (!told && this.options.notify) {
         told = true;
         await this.options.notify(result?.reason === 'owner_busy' ? '电脑正在被你的另一个会话使用，等它结束后继续。' : `助手电脑繁忙，正在排队（第 ${result?.position ?? 1} 位），轮到后继续。`);

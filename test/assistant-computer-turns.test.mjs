@@ -116,6 +116,36 @@ test('the soft limit mounts an over-limit HOME read-only for the next turn; dele
   await third.close();
 });
 
+test('the first sweep after a start does not end a turn whose computer is still being created', async t => {
+  const f = await fixture(t), request = f.docker.request;
+  // The container create waits until the sweep's reconcile has removed the lease being created.
+  let created, creating = new Promise(resolve => { created = resolve; }), reached;
+  const atCreate = new Promise(resolve => { reached = resolve; });
+  f.docker.request = async (method, path, body) => {
+    if (method === 'POST' && path.startsWith('/containers/create') && created) { reached(); await creating; }
+    return request(method, path, body);
+  };
+  const turn = f.turn('turn-1'), ran = turn.execute('run_command', { command: 'echo ok' });
+  await atCreate;
+  // The turn is not among the turns the control plane holds yet, so the reconcile removes its lease.
+  await f.service.sweep();
+  const release = created; created = null; release();
+  const result = await ran;
+  assert.deepEqual([result.exit_code, result.output], [0, 'ok\n'], JSON.stringify(result));
+  assert.equal(f.computers.leases.get(f.owner)?.state, 'busy');
+  await turn.close();
+  // It is taken again once only: a turn whose computer is removed again while being created (here by a direct removal,
+  // as a console clear or retention does) ends instead of trying forever.
+  await f.service.remove(f.owner); await Promise.all([...f.computers.removing.values()]);
+  let creates = 0;
+  f.docker.request = async (method, path, body) => {
+    if (method === 'POST' && path.startsWith('/containers/create')) { creates++; await f.service.remove(f.owner); }
+    return request(method, path, body);
+  };
+  await assert.rejects(f.turn('turn-2').execute('run_command', { command: 'echo again' }), { code: 'assistant_computer_released' });
+  assert.equal(creates, 2);
+});
+
 test('retention removes inactive HOMEs and sealed generations; the sweep removes computers whose fence changed', async t => {
   const f = await fixture(t), day = 86400_000;
   // The first sweep after a start reconciles: no computer of an earlier control plane survives it.
