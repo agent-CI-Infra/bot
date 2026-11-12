@@ -381,7 +381,7 @@ export class ChannelService {
     // Result cards no longer carry refresh actions; a click on an older card is answered as stale.
     if (e.kind === 'card') return fail(409, 'channel_card_stale');
     // No /chat or /project syntax (#312): anything else is natural language for the assistant.
-    const content = e.content.trim();
+    const content = (e.command_text ?? e.content).trim();
     const reply = (message: string, link?: string) => this.queue(e, card(message, link), row.id + ':reply', row.id);
     const consoleCode = /^(?:绑定|\/bind)\s+(FSB-[A-Za-z0-9]{8,})$/.exec(content);
     if (consoleCode) {

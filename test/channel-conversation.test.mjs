@@ -31,6 +31,32 @@ async function legacyTask(f,request){
   return {receipt,source,task:new TaskCommands(f.h.store).tool(caller,'create_task',{request,criteria:['Return the verified report'],execute:false})};
 }
 
+test('a mention-only follow-up reaches the model with the bot group name, verified target and preceding discussion', async t => {
+  const f = await fixture(t), question = inGroup(''); question.event.message.mentions = [];
+  question.event.message.content = JSON.stringify({ text: '你可以创建 issue 吗？' });
+  await complete(f, await post(f.h, f.id, question)); assert.equal(f.requests.length, 0);
+  let expectedName = 'LaunchPad-Test';
+  f.modelState.respond = async (body, res) => {
+    const prompt = JSON.parse(body.messages[1].content), context = prompt.context;
+    assert.equal(prompt.request, '@' + expectedName);
+    assert.deepEqual(context.bot_identity, { open_id: 'ou_bot', name: expectedName });
+    assert.equal(context.current_message.is_direct_mention, true);
+    assert.equal(context.current_message.mentions[0].is_self, true);
+    assert.ok(context.recent_messages.some(m => m.content === '你可以创建 issue 吗？'));
+    assert.match(body.messages[0].content, /a call to you, not an empty message/);
+    return say(res, '我看到了你在 @' + expectedName + '，刚才的问题是创建 Issue 的能力。');
+  };
+  for (const name of ['LaunchPad-Test', '群内新名字']) {
+    expectedName = name;
+    const call = inGroup(''); call.event.message.content = JSON.stringify({ text: '@_user_1' }); call.event.message.mentions[0].name = name;
+    assert.equal((await complete(f, await post(f.h, f.id, call))).state, 'completed');
+    const local = f.service.ledger.query(f.chat.id, { message_id: call.event.message.message_id }).messages[0];
+    assert.equal(local.content, '@' + name); assert.equal(local.mentions[0].is_self, true);
+  }
+  const peer = inGroup(''); peer.event.message.mentions[0] = { key: '@_user_1', id: { open_id: 'ou_peer' }, name: '群内新名字' };
+  await complete(f, await post(f.h, f.id, peer)); assert.equal(f.requests.length, 2);
+});
+
 test('ambient participation is set on the binding and can remain quiet without replaying bot or stale messages',async t=>{
   const f=await fixture(t,'questions');
   const quiet=inGroup('Ordinary ambient discussion','ou_bob');quiet.event.message.mentions=[];

@@ -79,22 +79,22 @@ export function markdownPosts(value: string, origin = ''): Json[] {
 }
 
 /** Keep native post paragraphs, inline styles, links, mentions and code boundaries on ingress. */
-export function postText(data: any): string {
+export function postText(data: any, mention?: (id: string, name: string) => string, renderText: (value: string) => string = value => value): string {
   const post = Array.isArray(data?.content) ? data : Object.values(data ?? {}).find((p: any) => Array.isArray(p?.content)) as any;
   if (!post) return '';
   const element = (el: any): string => {
     if (el.tag === 'img') return '[图片]';
     if (el.tag === 'media') return '[视频附件]';
-    if (el.tag === 'at') return String(el.user_id ?? el.user_name ?? '');
+    if (el.tag === 'at') return mention ? mention(String(el.user_id ?? ''), String(el.user_name ?? '')) : String(el.user_id ?? el.user_name ?? '');
     if (el.tag === 'hr') return '\n---\n';
-    if (el.tag === 'code_block') return '\n````' + String(el.language ?? '').replace(/[^\w+-]/g, '') + '\n' + String(el.text ?? '').replace(/`{4}/g, '` ` ` `') + '\n````\n';
-    if (el.tag === 'md') return String(el.text ?? '');
-    if (el.tag === 'a') { const url = webLink(String(el.href ?? ''), ''); return url ? `[${label(String(el.text ?? url))}](${url})` : String(el.text ?? ''); }
-    let text = String(el.text ?? '');
+    if (el.tag === 'code_block') return '\n````' + String(el.language ?? '').replace(/[^\w+-]/g, '') + '\n' + renderText(String(el.text ?? '')).replace(/`{4}/g, '` ` ` `') + '\n````\n';
+    if (el.tag === 'md') return renderText(String(el.text ?? ''));
+    if (el.tag === 'a') { const url = webLink(String(el.href ?? ''), ''); return url ? `[${label(renderText(String(el.text ?? url)))}](${url})` : renderText(String(el.text ?? '')); }
+    let text = renderText(String(el.text ?? ''));
     for (const [style, mark] of [['lineThrough', '~~'], ['italic', '*'], ['bold', '**']]) {
       if (Array.isArray(el.style) && el.style.includes(style)) text = text.replace(/^(\s*)([\s\S]*?)(\s*)$/, (_: string, a: string, b: string, c: string) => b ? a + mark + b + mark + c : text);
     }
     return text;
   };
-  return [post.title ? String(post.title) : '', ...(post.content as any[]).map(line => Array.isArray(line) ? line.map(element).join('') : '')].filter(Boolean).join('\n').trim();
+  return [post.title ? renderText(String(post.title)) : '', ...(post.content as any[]).map(line => Array.isArray(line) ? line.map(element).join('') : '')].filter(Boolean).join('\n').trim();
 }

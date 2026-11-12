@@ -266,3 +266,41 @@ for (const width of [1440, 390]) test(`a platform administrator reads another us
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
+
+for (const type of ['text', 'post']) test(`a mention-only ${type} message remains visible and gives the assistant its group name and preceding question`, async ({ page }) => {
+  const f = await channelFixture(), errors = []; page.on('pageerror', error => errors.push(error.message));
+  try {
+    await repositoryAssistant(f);
+    const question = inGroup(''); question.event.message.mentions = [];
+    question.event.message.content = JSON.stringify({ text: '你可以创建 issue 吗？' });
+    await post(f.h, f.id, question);
+    const chat = f.h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
+    expect((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', {
+      service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0
+    })).status).toBe(200);
+    scriptedModel(f, [(done, input) => {
+      expect(input.request).toBe('@LaunchPad-Test');
+      expect(input.context.bot_identity.name).toBe('LaunchPad-Test');
+      expect(input.context.current_message.is_direct_mention).toBe(true);
+      expect(input.context.recent_messages.some(m => m.content === '你可以创建 issue 吗？')).toBe(true);
+      return '我看到了你在 @LaunchPad-Test，刚才的问题是创建 Issue 的能力。';
+    }]);
+    const call = inGroup(''); call.event.message.message_type = type;
+    call.event.message.content = JSON.stringify(type === 'text' ? { text: '@_user_1' } : { zh_cn: { content: [[{ tag: 'at', user_id: '@_user_1' }]] } });
+    call.event.message.mentions[0].name = 'LaunchPad-Test';
+    const receipt = await post(f.h, f.id, call); expect((await finished(f.h, receipt.value.operation_id)).state).toBe('completed');
+    await login(page, f, '#/conversations/' + chat.id);
+    const timeline = page.getByLabel('消息与执行时间线');
+    await expect(timeline.getByText('@LaunchPad-Test', { exact: true })).toBeVisible();
+    await expect(timeline).toContainText('你可以创建 issue 吗？');
+    await timeline.getByText('本轮生成的回答', { exact: true }).click();
+    await expect(timeline).toContainText('我看到了你在 @LaunchPad-Test');
+    mkdirSync('.tmp/channel-console', { recursive: true });
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: `.tmp/channel-console/self-mention-${type}-${width}.png`, fullPage: true });
+    }
+    expect(errors).toEqual([]);
+  } finally { await f.close(); }
+});

@@ -87,7 +87,7 @@ export class ChannelLedger {
     } else if (event.kind === 'message' || event.kind === 'message_recalled') {
       this.merge(chat, { message_id: event.message_id, sender_id: event.actor_id, sender_tenant: event.actor_tenant,
         sender_type: event.sender_type ?? 'user', message_type: event.message_type ?? 'text', created_at: event.created_at,
-        updated_at: event.updated_at ?? event.created_at, content: event.content, raw_content: event.raw_content ?? JSON.stringify({ text: event.content }),
+        updated_at: event.updated_at ?? event.created_at, content: event.content, mentions: event.mentions, raw_content: event.raw_content ?? JSON.stringify({ text: event.content }),
         parent_id: event.parent_id ?? '', root_id: event.root_id ?? '', thread_id: event.thread_id,
         deleted: event.kind === 'message_recalled' || !!event.deleted }, 'live');
     }
@@ -107,7 +107,7 @@ export class ChannelLedger {
       if (Object.entries(metadata).every(([key, value]) => old[key] === value)) return false;
       const payload = this.store.secrets.open(old.payload, 'channel-message:' + chat.id + ':' + message.message_id);
       this.store.run(`UPDATE channel_messages SET sender_id=?,sender_tenant=?,sender_type=?,message_type=?,created_at=?,parent_id=?,root_id=?,thread_id=?,payload=? WHERE chat_id=? AND message_id=?`,
-        ...Object.values(metadata), this.store.secrets.seal({ ...payload, ...metadata, content: '', raw_content: '', deleted: true }, 'channel-message:' + chat.id + ':' + message.message_id), chat.id, message.message_id);
+        ...Object.values(metadata), this.store.secrets.seal({ ...payload, ...metadata, content: '', raw_content: '', mentions: [], deleted: true }, 'channel-message:' + chat.id + ':' + message.message_id), chat.id, message.message_id);
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chat.id);
       this.store.run('UPDATE channel_chats SET revision=revision+1,context_revision=context_revision+1 WHERE id=?', chat.id);
       if (metadata.thread_id) this.schedule(chat, 'thread', metadata.thread_id);
@@ -115,7 +115,7 @@ export class ChannelLedger {
     }
     if (message.created_at < chat.retained_after && !message.deleted) return false;
     if (old && !message.deleted && (message.updated_at < old.updated_at || message.updated_at === old.updated_at && (source === 'history' || old.source === 'live'))) return false;
-    const data = message.deleted ? { ...message, content: '', raw_content: '' } : message;
+    const data = message.deleted ? { ...message, content: '', raw_content: '', mentions: [] } : message;
     const sealed = this.store.secrets.seal(data, 'channel-message:' + chat.id + ':' + message.message_id);
     this.store.run(`INSERT INTO channel_messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(chat_id,message_id) DO UPDATE SET sender_id=excluded.sender_id,sender_tenant=excluded.sender_tenant,
@@ -190,7 +190,7 @@ export class ChannelLedger {
         const event = this.store.secrets.open(row.payload, 'channel-event:' + row.id);
         if(event.chat_id === chat.chat_id && event.installation_tenant === chat.installation_tenant && event.app_id === chat.app_id){
           if(row.context_revision!==null&&row.conversation_id)management.add(row.conversation_id);
-          if(Number(event.created_at)<before)this.store.run('UPDATE channel_inbox SET payload=? WHERE id=?', this.store.secrets.seal({ ...event, content: '', raw_content: '' }, 'channel-event:' + row.id), row.id);
+          if(Number(event.created_at)<before)this.store.run('UPDATE channel_inbox SET payload=? WHERE id=?', this.store.secrets.seal({ ...event, content: '', raw_content: '', command_text: '', mentions: [] }, 'channel-event:' + row.id), row.id);
         }
       }
       // Personal management context is derived from the same local sources. Keep command audit/receipts.
@@ -216,7 +216,7 @@ export class ChannelLedger {
         const payload=this.store.secrets.open(row.payload,'channel-outbox:'+row.id) as any;
         if(payload.event?.chat_id===chat.chat_id&&payload.event?.app_id===chat.app_id&&payload.event?.installation_tenant===chat.installation_tenant&&
           (payload.protection?.turn_id||payload.protection?.personal_chat===id||payload.event.created_at<before)){
-          payload.event={...payload.event,content:'',raw_content:''};payload.delivery.content={elements:[{tag:'div',text:{tag:'plain_text',content:'本地保留范围已清理。'}}]};
+          payload.event={...payload.event,content:'',raw_content:'',command_text:'',mentions:[]};payload.delivery.content={elements:[{tag:'div',text:{tag:'plain_text',content:'本地保留范围已清理。'}}]};
           payload.delivery.resources=[];
           for(const part of this.store.all('SELECT part,state FROM channel_outbox_parts WHERE outbox_id=?',row.id))this.store.run('UPDATE channel_outbox_parts SET payload=?,state=? WHERE outbox_id=? AND part=?',
             this.store.secrets.seal({},'channel-outbox-part:'+row.id+':'+part.part),part.state==='sent'?'sent':'failed',row.id,part.part);
@@ -231,7 +231,9 @@ export class ChannelLedger {
     if(!row.deleted&&!row.sensitive)mergeResources(this.store,{id:row.chat_id},payload as unknown as StoredMessage,false);
     return {message_id:row.message_id,sender_id:row.sender_id,sender_tenant:row.sender_tenant,sender_type:row.sender_type,message_type:row.message_type,
       created_at:row.created_at,updated_at:row.updated_at,parent_id:row.parent_id,root_id:row.root_id,thread_id:row.thread_id,deleted:!!row.deleted,sensitive:!!row.sensitive,
-      content:row.deleted?'[消息已撤回]':row.sensitive?'[敏感消息已隐藏]':String(payload.content),resources:row.deleted||row.sensitive?null:this.store.all("SELECT * FROM channel_resources WHERE chat_id=? AND message_id=? AND kind='incoming' ORDER BY id",row.chat_id,row.message_id).map(resource=>resourceMetadata(this.store,resource)),resource_state:row.message_type==='text'?'text':'scoped_resources'};
+      content:row.deleted?'[消息已撤回]':row.sensitive?'[敏感消息已隐藏]':String(payload.content),
+      ...(!row.deleted&&!row.sensitive&&Array.isArray(payload.mentions)&&payload.mentions.length?{mentions:payload.mentions}:{}),
+      resources:row.deleted||row.sensitive?null:this.store.all("SELECT * FROM channel_resources WHERE chat_id=? AND message_id=? AND kind='incoming' ORDER BY id",row.chat_id,row.message_id).map(resource=>resourceMetadata(this.store,resource)),resource_state:row.message_type==='text'?'text':'scoped_resources'};
   }
   private visibility(projects?:string[],fence?:string):{sql:string;args:string[]} {
     if(projects===undefined&&fence===undefined)return {sql:'',args:[]};

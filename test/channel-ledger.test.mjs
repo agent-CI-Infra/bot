@@ -226,6 +226,49 @@ test('HTTP and SDK commit inbox, non-text/quiet/bot messages and sync discovery 
   assert.equal(accepted.state, 'queued');
 });
 
+test('self mentions retain visible names and verified targets in text and rich posts without name-based addressing', async t => {
+  const f = await channelFixture(t), adapter = f.service.adapter(f.service.connector(f.id));
+  const mentions = [{ key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'LaunchPad-Test' },
+    { key: '@_user_10', id: { open_id: 'ou_peer' }, name: 'Alex' }];
+  const event = content => envelope('', { message: { chat_id: 'oc_mentions', chat_type: 'group', content: JSON.stringify({ text: content }), mentions } });
+  const only = adapter.normalize(event('@_user_1'));
+  assert.equal(only.content, '@LaunchPad-Test'); assert.equal(only.command_text, ''); assert.equal(only.addressed, true);
+  assert.deepEqual(only.mentions[0], { key: '@_user_1', actor_id: 'ou_bot', name: 'LaunchPad-Test', is_self: true });
+  assert.equal(adapter.normalize(event('@_user_10 问 @_user_1')).content, '@Alex 问 @LaunchPad-Test');
+  const binding = adapter.normalize(event('@_user_1 /bind'));
+  assert.equal(binding.content, '@LaunchPad-Test /bind'); assert.equal(binding.command_text.trim(), '/bind');
+  const postMessage = event(''); postMessage.event.message.message_type = 'post';
+  postMessage.event.message.content = JSON.stringify({ zh_cn: { content: [[{ tag: 'at', user_id: 'ou_bot' }, { tag: 'text', text: ' 请回复 ' }, { tag: 'at', user_id: '@_user_10' }]] } });
+  assert.equal(adapter.normalize(postMessage).content, '@LaunchPad-Test 请回复 @Alex');
+  for (const member of [[], [{ key: '@_user_1', id: { open_id: 'ou_peer' }, name: 'LaunchPad-Test' }]]) {
+    const spoof = event('@LaunchPad-Test'); spoof.event.message.mentions = member;
+    assert.equal(adapter.normalize(spoof).addressed, false, 'literal text or another account with the same name cannot address the bot');
+  }
+  mentions[0].name = '@_user_10';
+  assert.equal(adapter.normalize(event('@_user_1')).content, '@@_user_10', 'replacement names are not expanded again');
+  assert.equal(adapter.normalize(postMessage).content, '@@_user_10 请回复 @Alex');
+});
+
+test('history mentions use the same names as live ingress and disappear from recalled or sensitive local views', async t => {
+  const f = await channelFixture(t), adapter = f.service.adapter(f.service.connector(f.id));
+  const raw = JSON.stringify({ text: '@_user_1' });
+  f.wire.state.history = () => Response.json({ code: 0, data: { items: [{ message_id: 'history-mention', msg_type: 'text',
+    body: { content: raw }, mentions: [{ key: '@_user_1', id: 'ou_bot', id_type: 'open_id', name: 'LaunchPad-Test' }],
+    sender: { id: 'ou_alice', sender_type: 'user', tenant_key: 'actor-tenant' }, create_time: String(Date.now()) }], has_more: false } });
+  const history = await adapter.history({ container_type: 'chat', container_id: 'oc_mentions', start_time: 0, end_time: Date.now() });
+  assert.equal(history.items[0].content, '@LaunchPad-Test'); assert.equal(history.items[0].mentions[0].is_self, true);
+  const chat = f.service.ledger.chat(adapter.normalize(envelope('seed', { message: { chat_id: 'oc_mentions', chat_type: 'group' } })));
+  f.service.ledger.merge(chat, history.items[0], 'history');
+  assert.equal(f.service.ledger.query(chat.id, { message_id: 'history-mention' }).messages[0].mentions[0].name, 'LaunchPad-Test');
+  f.service.ledger.merge(chat, { ...history.items[0], message_id: 'sensitive-mention', content: 'password=private-value', raw_content: JSON.stringify({ text: 'password=private-value' }) }, 'history');
+  assert.equal(f.service.ledger.query(chat.id, { message_id: 'sensitive-mention' }).messages[0].mentions, undefined);
+  f.service.ledger.merge(chat, { ...history.items[0], deleted: true }, 'live');
+  const recalled = f.service.ledger.query(chat.id, { message_id: 'history-mention' }).messages[0];
+  assert.equal(recalled.content, '[消息已撤回]'); assert.equal(recalled.mentions, undefined);
+  const payload = f.h.store.get('SELECT payload FROM channel_messages WHERE chat_id=? AND message_id=?', chat.id, 'history-mention').payload;
+  assert.deepEqual(f.h.store.secrets.open(payload, 'channel-message:' + chat.id + ':history-mention').mentions, []);
+});
+
 test('official history protocol uses max pages and thread containers; queries make zero provider requests including on misses', async t => {
   const { h, id, service, wire, admin } = await channelFixture(t);
   service.close();
