@@ -72,9 +72,12 @@ test('the refused archive is capped in rows and age, and the prune is counted', 
     http_status,request_headers,payload,body_complete,response) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     id, null, null, null, id, 'issues', 'issue', status, 0, new Date(Date.now() - ageMs).toISOString(), 404, '{}', summary, 1, '{}');
   // An accepted archive older than the window is never pruned, and an expired refusal is.
-  insert('kept-accepted', 'accepted', 9 * 24 * 3600 * 1000);
-  insert('expired-rejected', 'unknown_endpoint', 8 * 24 * 3600 * 1000);
-  for (let i = 0; i < 520; i++) insert('rejected-' + i, 'unknown_endpoint', i * 1000);
+  // Batch fixture fsyncs so synchronous seeding cannot expire the client's idle keep-alive connection.
+  h.store.transaction(() => {
+    insert('kept-accepted', 'accepted', 9 * 24 * 3600 * 1000);
+    insert('expired-rejected', 'unknown_endpoint', 8 * 24 * 3600 * 1000);
+    for (let i = 0; i < 520; i++) insert('rejected-' + i, 'unknown_endpoint', i * 1000);
+  });
   assert.equal((await admin('/api/events')).value.rejected_archive.rows, 521);
   const result = await h.hook(unknown, a.secret, 'fresh-reject', 'x');
   assert.equal(result.status, 404);
