@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openProjectDanger } from './open-basic-folds.mjs';
 import { mkdirSync } from 'node:fs';
 import { channelFixture, boundGroup, privateChat, bindFixture, repositoryAssistant, scriptedModel, inGroup, envelope, post, finished, until } from '../test/channel-fixture.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
@@ -124,6 +125,7 @@ test('settings keep platform mutations in global settings and project administra
   const f = await channelFixture();
   try {
     await login(page, f, '#/projects/101/basic');
+    await openProjectDanger(page);
     await expect(page.getByRole('button', { name: '禁用项目', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '删除项目', exact: true })).toBeVisible();
     await page.getByRole('button', { name: '退出登录', exact: true }).click();

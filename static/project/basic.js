@@ -38,11 +38,25 @@ function basicSection() {
   const target = current, { repository, policy, installed, environment } = target, info = card('项目概况');
   const id = target.id, save = values => api(`/api/repositories/${id}/policy`, 'PATCH', values);
   const editable = target.canConfigure !== false;
-  info.append(facts([['仓库', link(`https://github.com/${repository.full_name}`, repository.full_name)], ['仓库 ID', repository.id], ['所有者', installed?.owner_login ? `${installed.owner_login}（${repository.owner_id}）` : repository.owner_id],
-    ['处理账号', installed?.account_name || repository.account_id], ['安装', !installed ? null : installed.installed === null ? '不在安装列表' : `${installed.installation_id ? '安装 ' + installed.installation_id : '机器人账号可见'}${installed.installed === false ? '（已移出）' : ''}`],
-    ['可见性', installed ? installed.private ? '私有' : '公开' : null], ['项目状态', policy.enabled ? '已启用' : '已禁用'], ['虚拟电脑', projectEnvironmentState()]]));
+  // #570: first screen keeps the repository name; technical identifiers and install internals go into 高级.
+  info.append(facts([['仓库', link(`https://github.com/${repository.full_name}`, repository.full_name)],
+    ['可见性', installed ? installed.private ? '私有' : '公开' : null],
+    ['项目状态', policy.enabled ? '已启用' : '已禁用']]));
   const summary = card('当前配置一览');
-  summary.append(facts([['检视', policy.review_enabled ? '开启' : '关闭'], ['自动开发', policy.development_enabled ? '开启' : '关闭'], ['模型', current.models.find(m=>m.id===policy.model_id)?.model_name || (policy.model_id?'模型不可用':'未选择，任务会等待配置')],
+  const machineSize = current.rules?.computer?.cpus
+    ? `${current.rules.computer.cpus} CPU · ${current.rules.computer.memory_mb} MB`
+    : environment?.environment.computer ? `${environment.environment.computer.cpus} CPU · ${environment.environment.computer.memory_mb} MB` : null;
+  summary.append(facts([['检视', policy.review_enabled ? '开启' : '关闭'], ['自动开发', policy.development_enabled ? '开启' : '关闭'],
+    ['模型', current.models.find(m=>m.id===policy.model_id)?.model_name || (policy.model_id?'模型不可用':'未选择，任务会等待配置')],
+    ['机器', machineSize]]));
+  const advanced = element('details', '', 'fold basic-advanced');
+  advanced.dataset.testid = 'basic-advanced';
+  advanced.append(element('summary', '高级'));
+  const tech = card('技术信息');
+  tech.append(facts([['仓库 ID', repository.id], ['所有者', installed?.owner_login ? `${installed.owner_login}（${repository.owner_id}）` : repository.owner_id],
+    ['处理账号', installed?.account_name || repository.account_id],
+    ['安装', !installed ? null : installed.installed === null ? '不在安装列表' : `${installed.installation_id ? '安装 ' + installed.installation_id : '机器人账号可见'}${installed.installed === false ? '（已移出）' : ''}`],
+    ['虚拟电脑', projectEnvironmentState()],
     ['机器', current.rules?.computer?.cpus ? `${current.rules.computer.cpus} CPU · ${current.rules.computer.memory_mb} MB（${current.rules.files.find(f=>f.path==='.bot/computer.yaml').source==='repository'?'仓库 .bot/computer.yaml':'控制台'}）` : environment?.environment.computer ? `${environment.environment.computer.cpus} CPU · ${environment.environment.computer.memory_mb} MB` : null]]));
   const branch = settingsForm('分支', [field('基准分支', input('base_branch', policy.base_branch, { maxLength: 256, placeholder: '留空使用仓库默认分支' })),
     note('开发任务从这个分支拉取代码并向它开 PR；检视 Issue 时也读取这个分支的代码。')],
@@ -59,7 +73,9 @@ function basicSection() {
     sources.append(facts([['规则', file.path], ['当前来源', layerNames[file.source] || file.source]]));
   }
   sources.append(consoleLink(`#/projects/${id}/roles/manager`, '查看与修改规则', '保留现有的来源比较和版本检查'));
-  const layout = element('div', '', 'project-settings-layout'); layout.append(info, summary, branch, automation, sources, ...globalProjectControls());
+  advanced.append(tech, sources);
+  const layout = element('div', '', 'project-settings-layout');
+  layout.append(info, summary, branch, automation, ...globalProjectControls(), advanced);
   return [layout];
 }
 
@@ -86,7 +102,10 @@ function globalProjectControls() {
     publication.append(status, note('公开与项目启用分别保存。私有仓也可显式选择公开，请确认数据范围后操作。'), toggle, feedback);
     if (installed.board_enabled && installed.board_url) publication.append(link(installed.board_url, '查看公开看板'));
   }
-  const danger = card('危险区'); danger.classList.add('project-danger');
+  const dangerFold = element('details', '', 'fold project-danger-fold');
+  dangerFold.dataset.testid = 'project-danger-fold';
+  dangerFold.append(element('summary', '危险区'));
+  const danger = card('危险操作'); danger.classList.add('project-danger');
   danger.append(note('禁用会停止新任务、中止正在执行的任务并停止虚拟电脑，保留现有数据；删除会清除本系统项目数据，且仍须通过服务端的实时检查。'));
   // The sentence above states the policy; this line says what it costs right now. A failed read says so instead of
   // showing zero, because "nothing is in flight" and "cannot tell" lead an administrator to different decisions.
@@ -120,6 +139,7 @@ function globalProjectControls() {
       if (current === target) { current = null; location.hash = target.globalSettings || fromList ? '#/settings/projects' : '#/projects'; }
     }), 'quiet destructive'), feedback);
   } else danger.append(note('启用、禁用与删除项目由平台超级管理员处理。请联系该管理员；项目管理员不因页面入口获得这些能力。'));
-  return [publication, danger];
+  dangerFold.append(danger);
+  return [publication, dangerFold];
 }
 

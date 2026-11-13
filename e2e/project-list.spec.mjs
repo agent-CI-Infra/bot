@@ -1,4 +1,5 @@
 import {test,expect} from '@playwright/test';
+import { openProjectDanger } from './open-basic-folds.mjs';
 import {mkdirSync,rmSync} from 'node:fs';
 import {harness,setup,account,repository,testPassword} from '../test/helpers.mjs';
 
@@ -111,6 +112,7 @@ test('project list shows progress while settings own mutations and project admin
     await expect(row).toContainText('执行中 1');await expect(row.getByRole('switch')).toHaveCount(0);
     await expect(row.getByRole('button',{name:'禁用',exact:true})).toHaveCount(0);
     await row.getByRole('button',{name:'设置',exact:true}).click();
+    await openProjectDanger(page);
     await expect(page.getByRole('button',{name:'禁用项目',exact:true})).toBeVisible();
     await page.goto(h.admin+'/#/settings/projects');
     const globalRow=page.locator('.global-project-row[data-key="101"]');

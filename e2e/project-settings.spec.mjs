@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openProjectDanger } from './open-basic-folds.mjs';
 import { mkdirSync } from 'node:fs';
 import { identityFixture } from '../test/identity-fixture.mjs';
 import { testPassword } from '../test/helpers.mjs';
@@ -36,6 +37,7 @@ test('settings preserve a draft across refresh and save errors, with separate co
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       if (width === 390 || width === 1440) await page.screenshot({ path: `${output}/settings-${width}.png`, fullPage: true });
     }
+    await openProjectDanger(page);
     const danger = page.locator('.project-danger');
     await danger.getByRole('button', { name: '禁用项目', exact: true }).click();
     const dialog = page.getByRole('dialog'); await expect(dialog).toContainText('正在执行的任务会中止'); await expect(dialog).toContainText('公开看板');
