@@ -35,12 +35,17 @@ test('shared desktop rail and mobile navigation expose real destinations across 
     }
     await page.setViewportSize({width:1440,height:1000});await page.goto(h.admin+'/#/projects/101/roles');
     for(const name of ['项目','管理对话','看板','统计','Webhook 投递','个人设置','全局设置']) await expect(page.locator('#tabs').getByRole('button',{name,exact:true})).toBeVisible();
-    await expect(page.locator('#console-secondary-nav .project-nav')).toContainText('项目知识');
-    await page.locator('#console-secondary-nav .project-nav').getByRole('link',{name:'模型',exact:true}).click();
+    const projectNav = page.getByRole('navigation', { name: '项目入口' });
+    await expect(projectNav.locator('[aria-current=page]')).toHaveText('角色');
+    await expect(projectNav.getByRole('link',{name:'项目知识',exact:true})).toHaveCount(0);
+    await page.getByTestId('project-hub-link').click();
+    await page.getByTestId('project-hub').getByRole('link',{name:'模型',exact:true}).click();
     await expect(page).toHaveURL(/#\/projects\/101\/model$/);await page.reload();
-    await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('模型');
+    await expect(projectNav.locator('[aria-current=page]')).toHaveText('模型');
     await page.setViewportSize({width:390,height:844});
-    await page.getByLabel('当前页面',{exact:true}).selectOption('#/projects/101/knowledge');
+    await page.getByLabel('当前页面',{exact:true}).selectOption('#/projects/101/menu');
+    await expect(page).toHaveURL(/#\/projects\/101\/menu$/);
+    await page.getByTestId('project-hub').getByRole('link',{name:'项目知识',exact:true}).click();
     await expect(page).toHaveURL(/#\/projects\/101\/knowledge$/);
     await page.locator('#console-mobile-nav').getByRole('link',{name:'更多',exact:true}).click();
     // #481: 更多 is the short supplement behind the bar — the project's own pages, the analysis entries and one way into

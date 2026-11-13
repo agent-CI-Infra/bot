@@ -23,7 +23,8 @@ async function renderProject(route) {
     return; }
   if (token !== renderToken) return;
   current.unavailable = null;
-  const section = projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin')) ? route.section : 'basic';
+  const known = route.section === 'menu' || projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin'));
+  const section = known ? route.section : 'basic';
   // A newly granted or externally created project may not be in the list loaded at login.
   if (!repositories.some(repo => String(repo.id) === String(current.id))) repositories.push(current.repository);
   // #642: an unknown section is not quietly replaced by another page: the address and the content have to agree.
@@ -91,7 +92,7 @@ function projectUnavailable(err, route) {
 async function loadProject(id,section=current.section) {
   const superUser = me.role === 'super_admin';
   // Capture the visited object before awaiting: a different project replaces current while this request is in flight.
-  const overview = section === 'overview', target = current;
+  const overview = section === 'overview' || section === 'menu', target = current;
   const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), overview ? null : api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, overview ? null : api('/api/repositories/'+id+'/rules').catch(()=>null), overview ? null : api(superUser ? '/api/models' : '/api/models?repository_id='+id).catch(()=>null)]);
   const external=section==='external'?await loadExternalProject(id):null;
   Object.assign(target, { external, repository: repo.repository, canConfigure: repo.can_configure, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, environmentReadError:'', installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
@@ -131,25 +132,78 @@ function projectEnvironmentState() {
 }
 function projectHeader() {
   const { repository, policy } = current, head = element('div', '', 'project-head'), title = element('div', '', 'title-group'), actions = element('div', '', 'actions');
+  const trail = element('div', '', 'project-trail');
   const back = element('a', '← 全部项目', 'back-link'); back.href = '#/projects';
+  trail.append(back);
+  if (current.section !== 'menu') {
+    const toHub = element('a', '项目入口', 'back-link');
+    toHub.href = `#/projects/${current.id}/menu`;
+    toHub.dataset.testid = 'project-hub-link';
+    trail.append(toHub);
+  }
   title.append(element('h1', repository.full_name), ...projectStatus());
-  actions.append(link(`https://github.com/${repository.full_name}`, '在 GitHub 打开', 'button-link'));
+  const chat = element('a', '管理对话', 'button-link');
+  chat.href = `#/projects/${current.id}/management`;
+  chat.dataset.testid = 'project-open-chat';
+  chat.addEventListener('click', event => { event.preventDefault(); void openManagementChat(current.id).catch(error); });
+  actions.append(chat, link(`https://github.com/${repository.full_name}`, '在 GitHub 打开', 'button-link'));
   if (current.section === 'basic') actions.append(button('刷新项目设置', () => reloadProject().catch(error)));
-  head.append(back, title, actions); return head;
+  head.append(trail, title, actions); return head;
+}
+function projectCrumb(section) {
+  const nav = element('nav', '', 'project-nav'), caption = (projectSections.find(([key]) => key === section) || [section, section])[1];
+  nav.setAttribute('aria-label', '项目入口');
+  const back = element('a', '← 项目入口');
+  back.href = `#/projects/${current.id}/menu`;
+  if (!section) { nav.append(back); return nav; }
+  const here = element('a', caption);
+  here.href = `#/projects/${current.id}/${section}`;
+  here.setAttribute('aria-current', 'page');
+  nav.append(back, here);
+  return nav;
+}
+function menuSection() {
+  const wrap = element('div', '', 'project-hub');
+  wrap.dataset.testid = 'project-hub';
+  wrap.append(element('h2', '项目入口'), note('从这里进入项目的工作和设置。打开某一页后，可用「项目入口」返回。'));
+  for (const [title, items] of projectSectionGroups) {
+    const group = element('section', '', 'project-hub-group');
+    group.append(element('h3', title));
+    const grid = element('div', '', 'project-hub-grid');
+    for (const [key, caption, hint] of items) {
+      const card = element('a', '', 'project-hub-card');
+      card.href = `#/projects/${current.id}/${key}`;
+      card.setAttribute('aria-label', caption);
+      card.dataset.testid = 'project-hub-' + key;
+      card.append(element('strong', caption), element('span', hint));
+      if (key === 'management') {
+        const project = current.id;
+        card.addEventListener('click', event => { event.preventDefault(); void openManagementChat(project).catch(error); });
+      }
+      grid.append(card);
+    }
+    group.append(grid);
+    wrap.append(group);
+  }
+  return [wrap];
+}
+function projectHubNav() {
+  const nav = element('nav', '', 'project-nav');
+  nav.setAttribute('aria-label', '项目入口');
+  const here = element('a', '项目入口');
+  here.href = `#/projects/${current.id}/menu`;
+  here.setAttribute('aria-current', 'page');
+  nav.append(here);
+  return nav;
 }
 function projectBody(section) {
-  const body = element('div', '', 'project-body'), nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content');
-  nav.setAttribute('aria-label', '项目设置类别');
-  for (const [key, caption, superOnly] of projectSections) {
-    if (key === 'overview' || key === 'basic') nav.append(element('p', key === 'overview' ? '项目工作' : '设置', 'console-nav-label'));
-    if (superOnly && me.role !== 'super_admin') continue;
-    const item = element('a', caption); item.href = `#/projects/${current.id}/${key}`; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item);
-    if (key === 'management') { const project = current.id; item.addEventListener('click', event => { event.preventDefault(); void openManagementChat(project).catch(error); }); }
-  }
+  const body = element('div', '', 'project-body'), content = element('div', '', 'project-content');
+  // #642: an unknown subpage has no crumb of its own; it only offers the way back to 项目入口.
+  body.append(section === 'menu' ? projectHubNav() : projectCrumb(section));
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
   if (!section) content.append(pageNotFoundState(current.id));
-  else content.append(...({ overview: workspaceOverview, basic: basicSection, machine: machineSection, model: modelsSection, release: releaseSection, schedules: schedulesSection, knowledge: knowledgeSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
-  body.append(nav, content); return body;
+  else content.append(...({ overview: workspaceOverview, basic: basicSection, machine: machineSection, model: modelsSection, release: releaseSection, schedules: schedulesSection, knowledge: knowledgeSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection, menu: menuSection }[section])());
+  body.append(content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();
 const changed = (values, saved) => Object.fromEntries(Object.entries(values).filter(([key, value]) => value !== saved[key]));
