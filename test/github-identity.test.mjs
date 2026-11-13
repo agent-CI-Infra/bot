@@ -600,6 +600,49 @@ test('GET /api/identity names a plain GitHub connection state, the next step, an
   assert.match(expiredAuth.next_step, /重新连接/);
 });
 
+test('login and reverify renew an expired GitHub-derived grant', async t => {
+  const f = await identityFixture(t), { h } = f, login = await f.login(), p = login.result.principal_id;
+  const grant = () => h.store.get("SELECT verified_at,expires_at FROM scoped_grants WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", p);
+  const first = grant(); assert.ok(first); assert.ok(first.expires_at > Date.now() + 4 * 60_000);
+  h.store.run("UPDATE scoped_grants SET verified_at=1,expires_at=1 WHERE principal_id=? AND source='github_derived'", p);
+  assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'pending_verification'));
+  await f.identity.reverify(p);
+  const renewed = grant();
+  assert.ok(renewed.expires_at > Date.now() + 4 * 60_000);
+  assert.ok(renewed.verified_at > Date.now() - 15_000);
+  assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'active'));
+  h.store.run("UPDATE scoped_grants SET verified_at=1,expires_at=1 WHERE principal_id=? AND source='github_derived'", p);
+  await f.login();
+  const afterLogin = grant();
+  assert.ok(afterLogin.expires_at > Date.now() + 4 * 60_000);
+  assert.ok(afterLogin.verified_at > Date.now() - 15_000);
+  assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'active'));
+});
+
+test('a login that overlaps an in-flight permission check still renews derived grants', async t => {
+  const f = await identityFixture(t), { h, state } = f, first = await f.login(), p = first.result.principal_id;
+  h.store.run("UPDATE scoped_grants SET verified_at=1,expires_at=1 WHERE principal_id=? AND source='github_derived'", p);
+  let release, blocked = 0;
+  const held = new Promise(resolve => { release = resolve; });
+  state.apiGate = async path => { if (path === '/user' && blocked++ === 0) await held; };
+  const inflight = f.identity.reverify(p);
+  const started = Date.now();
+  while (!blocked) {
+    if (Date.now() - started > 5000) throw new Error('permission check did not reach GitHub');
+    await new Promise(r => setTimeout(r, 10));
+  }
+  // The in-flight check captured the previous revision. Login (and its invalidate) must still renew.
+  const loginDone = f.login();
+  await new Promise(r => setTimeout(r, 200));
+  release();
+  await loginDone;
+  await inflight;
+  const after = h.store.get("SELECT verified_at,expires_at FROM scoped_grants WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", p);
+  assert.ok(after.expires_at > Date.now() + 4 * 60_000, `expires_at=${after?.expires_at}`);
+  assert.ok(after.verified_at > Date.now() - 15_000);
+  assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'active'));
+});
+
 test('a signed-in user with no repositories gets a public GitHub App install URL; onboarding stays super-admin only', async t => {
   const f = await identityFixture(t), { h } = f;
   const saved = {

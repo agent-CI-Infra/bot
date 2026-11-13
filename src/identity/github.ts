@@ -110,14 +110,21 @@ export class GitHubIdentity implements InstallationIdentity {
     })().finally(() => this.tokens.delete(identity.id)); this.tokens.set(identity.id, promise); return promise;
   }
   refresh(principal: string): Promise<void> {
-    const previous = this.refreshing.get(principal); if (previous) return previous;
-    const promise = this.verifyPermissions(principal).finally(() => this.refreshing.delete(principal)); this.refreshing.set(principal, promise); return promise;
+    // Login invalidates the principal before it refreshes. Joining an in-flight check that started
+    // against the previous revision would finish without renewing grants, and the login would still
+    // look successful — the derived authorization then expires on its previous 5-minute deadline.
+    const previous = this.refreshing.get(principal);
+    const promise = (async () => {
+      if (previous) await previous.catch(() => {});
+      for (let attempt = 0; attempt < 5; attempt++) if (await this.verifyPermissions(principal) === 'done') return;
+    })().finally(() => { if (this.refreshing.get(principal) === promise) this.refreshing.delete(principal); });
+    this.refreshing.set(principal, promise); return promise;
   }
-  private async verifyPermissions(principal: string): Promise<void> {
+  private async verifyPermissions(principal: string): Promise<'done' | 'retry'> {
     const identity = this.store.get("SELECT * FROM external_identities WHERE principal_id=? AND provider='github' AND status='active'", principal);
-    if (!identity?.credentials) return;
+    if (!identity?.credentials) return 'done';
     const startRevision = revision(this.store, principal), now = Date.now();
-    if (!startRevision) return;
+    if (!startRevision) return 'done';
     const desired: { id: string; tenant: string; project: string | null; role: string; installation: Row; evidence: string }[] = [];
     // Installations whose evidence could not be settled this round, with a reason code (never a credential). Their grants
     // only stop counting until the next proof; grants of every other installation that are not proved again are revoked.
@@ -168,15 +175,21 @@ export class GitHubIdentity implements InstallationIdentity {
         // Compare what the principal can use, not grant rows: renewing, or revoking a grant that had already expired, loses nothing.
         invalidateIfLost(this.store, principal, before, 'github.permissions_changed');
       });
+      return 'done';
     } catch (error) {
       // A transport/SSO failure is uncertainty, never evidence that someone left an organization.
+      // A concurrent invalidate (the caller itself may have bumped the revision) must not be treated
+      // as a completed refresh: return 'retry' so login and the minute job run a fresh check.
+      let committed = false;
       this.store.transaction(() => {
         if (revision(this.store, principal) !== startRevision || !this.store.get("SELECT 1 FROM external_identities WHERE id=? AND status='active'", identity.id)) return;
         const before = activeScopes(this.store, principal), failed = Date.now();
         this.store.run("UPDATE external_identities SET status='pending_verification',verification_issues=? WHERE id=?", issues([{ installation: null, code: errorCode(error) }]), identity.id);
         this.store.run("UPDATE scoped_grants SET expires_at=? WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)", failed, principal, failed);
         invalidateIfLost(this.store, principal, before, 'github.verification_pending');
+        committed = true;
       });
+      return committed ? 'done' : 'retry';
     }
   }
   async reverify(principal: string): Promise<string | undefined> {
