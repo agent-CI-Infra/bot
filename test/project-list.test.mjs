@@ -31,9 +31,36 @@ for (const view of ['project_admin', 'super_admin', 'hidden']) {
       const guidance = page.$('rows').querySelector('.console-state');
       assert.equal(guidance.querySelector('h2').textContent, '已登录，尚无可管理的项目');
       assert.equal(guidance.querySelector('a').href, '#/identity');
-    } else assert.equal(page.$('rows').childElementCount, 0);
+      assert.equal(guidance.getAttribute('data-testid'), 'console-state-empty');
+      assert.equal(guidance.getAttribute('role'), 'status');
+    } else {
+      assert.equal(page.$('rows').childElementCount, 1);
+      const empty = page.$('rows').querySelector('.console-state');
+      assert.equal(empty.querySelector('h2').textContent, view === 'hidden' ? '没有已隐藏的仓库' : '还没有仓库');
+      assert.equal(empty.getAttribute('data-testid'), 'console-state-empty');
+      assert.equal(empty.getAttribute('role'), 'status');
+      assert.match(empty.querySelector('p').textContent, /不是读取失败/);
+    }
   });
 }
+
+test('project list read failure is an error state, not an empty list', async () => {
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path.startsWith('/api/integrations')) return [200, {integrations: []}];
+    return [500, { error: 'upstream failed' }];
+  });
+  page.run(`var projectRoute = () => null; me = {role: 'super_admin'}; tab = 'projects';`);
+  await page.run('render()');
+  const state = page.$('rows').querySelector('.console-state');
+  assert.equal(state.getAttribute('data-testid'), 'console-state-error');
+  assert.equal(state.getAttribute('role'), 'alert');
+  assert.equal(state.querySelector('h2').textContent, '项目列表未能读取');
+  assert.match(state.querySelector('p').textContent, /这不是空列表/);
+  assert.equal(page.$('rows').querySelectorAll('.row').length, 0);
+  assert.ok(state.querySelector('[data-testid=console-state-retry]'));
+  assert.equal(page.$('count').textContent, '读取失败');
+});
+
 
 test('project administrators see installed-but-not-started repositories as waiting for activation', async () => {
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {

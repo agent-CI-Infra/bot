@@ -65,9 +65,15 @@ test('#224-A 设计 token 可解析、组件与四种状态可见、五档视口
 
     // The four states plus the two feedback strips. The empty and loading wording is the console's own, drawn by the same
     // rule the projects list uses, so the sample cannot drift from it.
-    expect(await page.locator('#design-empty').evaluate(el => getComputedStyle(el, '::after').content)).toContain('暂无记录');
-    expect(await page.locator('#design-loading').evaluate(el => getComputedStyle(el, '::after').content)).toContain('正在加载…');
-    await expect(page.locator('#design-states .view-error')).toContainText('刷新后再保存');
+    // #553: empty / loading / error are real consoleState() samples, not ::after placeholders.
+    await expect(page.locator('#design-empty')).toHaveAttribute('data-testid', 'console-state-empty');
+    await expect(page.locator('#design-empty').getByRole('heading', { name: '暂无记录', exact: true })).toBeVisible();
+    await expect(page.locator('#design-loading')).toHaveAttribute('data-testid', 'console-state-loading');
+    await expect(page.locator('#design-loading')).toHaveAttribute('aria-busy', 'true');
+    await expect(page.locator('#design-loading').getByRole('heading', { name: '正在加载…', exact: true })).toBeVisible();
+    await expect(page.locator('#design-error')).toHaveAttribute('data-testid', 'console-state-error');
+    await expect(page.locator('#design-error')).toContainText('刷新后再保存');
+    await expect(page.locator('#design-error').getByRole('button', { name: '重新加载', exact: true })).toBeVisible();
     await expect(page.locator('#design-states .side-card').getByRole('heading', { name: '无权限', exact: true })).toBeVisible();
     await expect(page.locator('#design-states .view-success')).toBeVisible();
     await expect(page.locator('#design-states .flash')).toBeVisible();
@@ -109,7 +115,8 @@ test('#224-A 设计 token 可解析、组件与四种状态可见、五档视口
     await page.goto(h.admin + '/#/projects');
     await expect(page.locator('#rows')).toBeVisible();
     await expect(page.locator('#rows')).not.toHaveAttribute('aria-busy', 'true');
-    expect(await page.locator('#rows').evaluate(el => getComputedStyle(el, '::after').content)).toContain('暂无记录');
+    await expect(page.locator('#rows [data-testid=console-state-empty]').getByRole('heading', { name: '还没有仓库', exact: true })).toBeVisible();
+    expect(await page.locator('#rows').evaluate(el => getComputedStyle(el, '::after').content)).not.toContain('暂无记录');
 
     // A project administrator has no sample page; the address falls back to the projects list.
     const memberPassword = testPassword();
@@ -126,10 +133,9 @@ test('#224-A 设计 token 可解析、组件与四种状态可见、五档视口
   } finally { await h.stop(); }
 });
 
-// #224-A turned a dead rule into a live one: `#rows:empty::after` became `.rows:empty::after`, so a list that is
-// loading now shows 正在加载… instead of 暂无记录. That is a behaviour change, so it gets an assertion of its own
-// rather than being folded into "no visual change".
-test('#224-A 列表加载中显示「正在加载…」，加载完成后忙碌态解除', async ({ page }) => {
+// #224-A made loading visible; #553 draws it with consoleState({ tone: 'loading' }) instead of ::after,
+// so a held request shows the loading component (and not an empty-list message).
+test('#224-A 列表加载中显示「正在加载列表」，加载完成后忙碌态解除', async ({ page }) => {
   test.setTimeout(60000);
   const h = await harness();
   try {
@@ -146,9 +152,12 @@ test('#224-A 列表加载中显示「正在加载…」，加载完成后忙碌�
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const rows = page.locator('#rows');
     await expect(rows).toHaveAttribute('aria-busy', 'true');
-    expect(await rows.evaluate(el => getComputedStyle(el, '::after').content)).toContain('正在加载…');
+    await expect(rows.locator('[data-testid=console-state-loading]')).toBeVisible();
+    await expect(rows.getByRole('heading', { name: '正在加载列表', exact: true })).toBeVisible();
+    await expect(rows.locator('[data-testid=console-state-empty]')).toHaveCount(0);
     release();
     await expect(rows).not.toHaveAttribute('aria-busy', 'true');
-    expect(await rows.evaluate(el => getComputedStyle(el, '::after').content)).not.toContain('正在加载…');
+    await expect(rows.locator('[data-testid=console-state-loading]')).toHaveCount(0);
+    await expect(rows.getByRole('heading', { name: '还没有仓库', exact: true })).toBeVisible();
   } finally { await h.stop(); }
 });

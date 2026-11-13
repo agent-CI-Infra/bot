@@ -1,8 +1,20 @@
-function consoleState(title, text, { tone = '', retry } = {}) {
-  const box = element('div', '', 'console-state' + (tone ? ' console-state-' + tone : ''));
-  box.setAttribute('role', tone === 'error' ? 'alert' : 'status');
+function consoleState(title, text, { tone = '', retry, retryLabel = t('action.reload'), retryId } = {}) {
+  // #553: empty / loading / error share one component. `tone` stays the public
+  // switch so existing callers keep working: '' is empty, 'loading' waits,
+  // 'error' is a failure (role=alert) and must never be styled as an empty list.
+  const kind = tone === 'error' ? 'error' : tone === 'loading' ? 'loading' : 'empty';
+  const box = element('div', '', 'console-state console-state-' + kind);
+  box.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  box.setAttribute('data-testid', 'console-state-' + kind);
+  if (kind === 'loading') box.setAttribute('aria-busy', 'true');
   box.append(element('h2', title), element('p', text));
-  if (retry) box.append(button(t('action.reload'), retry)); return box;
+  if (retry) {
+    const btn = button(retryLabel, retry, 'btn-secondary');
+    btn.setAttribute('data-testid', 'console-state-retry');
+    if (retryId) btn.id = retryId;
+    box.append(btn);
+  }
+  return box;
 }
 const states = {
   accepted:['已接收','success'], invalid_signature:['签名无效','danger'], invalid_payload:['正文无效','danger'], payload_too_large:['正文过大','danger'],

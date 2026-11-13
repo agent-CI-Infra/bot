@@ -135,8 +135,9 @@ function concurrencyForm() {
 // Status cards of the machine section, re-rendered by the refresh loop without touching the form.
 function machineStatus() {
   const environment = current.environment;
-  const reload = button('刷新电脑状态', async event => { const control=event.currentTarget;control.disabled=true;try{await refreshProjectStatus(renderToken);}finally{control.disabled=false;} });reload.id='computer-refresh';
-  if (!environment) return [consoleState('电脑状态未知', '目前无法读取项目电脑记录，不能判断是否就绪。', { tone: 'error' }), reload];
+  const refresh = async event => { const control=event.currentTarget;control.disabled=true;try{await refreshProjectStatus(renderToken);}finally{control.disabled=false;} };
+  const reload = button('刷新电脑状态', refresh);reload.id='computer-refresh';
+  if (!environment) return [consoleState('电脑状态未知', '目前无法读取项目电脑记录，不能判断是否就绪。', { tone: 'error', retry: refresh, retryLabel: '刷新电脑状态', retryId: 'computer-refresh' })];
   const env = environment.environment, pc = env.computer || {}, machine = card('机器'), lifecycle = element('div', '', 'actions');
   const limit=(key,unit)=>typeof pc[key]==='number'&&Number.isFinite(pc[key])&&pc[key]>=0?pc[key]+' '+unit:'未知';
   const observed=environment.observation, available=observed?.status==='available'&&Object.hasOwn(states,observed.state)&&!current.environmentReadError;

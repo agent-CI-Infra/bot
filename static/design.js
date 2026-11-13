@@ -127,17 +127,22 @@ function renderDesignPage() {
   const card = element('div', '', 'side-card');
   card.append(element('h3', '卡片标题'), element('p', '卡片用来承载一组同源信息；表格行在窄屏会转成这种排布。'));
 
+  const emptySample = consoleState('暂无记录', '当前范围内还没有任何条目。可以调整筛选范围，或从上方的操作开始。');
+  emptySample.id = 'design-empty';
+  const loadingSample = consoleState('正在加载…', '正在读取当前范围的记录。', { tone: 'loading' });
+  loadingSample.id = 'design-loading';
+  const errorSample = consoleState('保存失败', '文件已被其他操作更新，请刷新后再保存。', { tone: 'error', retry: () => notice('message', '样例：这里会重新读取。') });
+  errorSample.id = 'design-error';
   const states = element('div', '', 'design-states');
   states.append(
-    element('p', '空：没有任何记录，说明为什么是空的、下一步做什么。', 'muted'),
-    Object.assign(element('div', '', 'rows'), { id: 'design-empty' }),
-    element('p', '加载：占位文案沿用列表的 aria-busy 状态，不提前显示成功。', 'muted'),
-    Object.assign(element('div', '', 'rows'), { id: 'design-loading' }),
-    element('p', '错误：说明发生了什么、还能做什么。', 'muted'),
-    element('p', '保存失败：文件已被其他操作更新，请刷新后再保存。', 'view-error'),
+    element('p', '空：没有任何记录，说明为什么是空的、下一步做什么。由 consoleState() 绘制，与项目列表相同。', 'muted'),
+    emptySample,
+    element('p', '加载：占位文案带 aria-busy，不提前显示成功。由 consoleState(..., { tone: \'loading\' }) 绘制。', 'muted'),
+    loadingSample,
+    element('p', '错误：说明发生了什么、还能做什么；外观与空状态不同，带可重试按钮。', 'muted'),
+    errorSample,
     element('p', '已保存：服务端确认之后才出现。', 'view-success'),
     element('p', '公开地址已生效，现在可以从外部访问。', 'flash'));
-  states.querySelector('#design-loading').setAttribute('aria-busy', 'true');
 
   const permission = element('div', '', 'side-card');
   permission.append(element('h3', '无权限'), designStatus('warning', '权限待处理', true),
