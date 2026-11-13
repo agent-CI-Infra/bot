@@ -56,7 +56,7 @@ test('项目入口总览可到达全部原有页面，配置页不再同时列�
       if (caption === '管理对话') {
         await expect(page).toHaveURL(/#\/projects\/101\/menu$/);
         await expect(page.locator('#management-chat')).toBeVisible({ timeout: 15000 });
-        await page.keyboard.press('Escape');
+        await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
         await expect(page.locator('#management-chat')).toBeHidden();
         continue;
       }
