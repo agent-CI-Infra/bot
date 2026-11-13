@@ -1,4 +1,4 @@
-// Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
+// Project pages: one settings page per repository. Categories live in the 项目入口 hub (#/projects/<id>/menu); leaf pages use a two-item breadcrumb (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
 const projectSections = [['overview', '项目总览'], ['management', '管理对话'], ['release', '发版本'], ['knowledge', '项目知识'], ['activity', '运行状态'], ['basic', '基本设置'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['schedules', '计划与通知'], ['external', '外部执行'], ['members', '成员']];
 // #565: leaf pages no longer list every neighbour. These groups are the 项目入口 hub.
