@@ -76,7 +76,8 @@ test('the identity page follows the language switch, including github_connection
     await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
     await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
     await expect(page.locator('#page-title')).toHaveText('身份与权限');
-    await expect(page.locator('#console-context')).toHaveText('身份与权限');
+    // #558: the page h1 names the identity page; the crumb does not repeat it.
+    await expect(page.locator('#console-context')).toHaveText('');
     await openIdentityAdvanced(page);
     await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
     const connection = page.locator('.identity-connection-status');
@@ -89,7 +90,7 @@ test('the identity page follows the language switch, including github_connection
     await expect(page.locator('html')).toHaveAttribute('lang', 'en');
     expect(await page.evaluate(() => window.__i18nStay)).toBe(1);
     await expect(page.locator('#page-title')).toHaveText('Identity and access');
-    await expect(page.locator('#console-context')).toHaveText('Identity and access');
+    await expect(page.locator('#console-context')).toHaveText('');
     await expect(page.getByRole('heading', { name: 'My GitHub connection' })).toBeVisible();
     await openIdentityAdvanced(page);
     await expect(page.getByRole('heading', { name: 'Current role and grant sources' })).toBeVisible();
