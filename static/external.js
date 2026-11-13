@@ -36,6 +36,18 @@ function externalKeyHelp(){
   const help=element('details','','external-key-help');help.append(element('summary','如何在个人电脑生成公钥'));
   help.append(element('p','在个人电脑的私有目录执行；先检查文件是否存在，不要覆盖已有私钥。'),element('pre',externalKeyCommands),element('p','只粘贴 bot-client.pub.pem 中 BEGIN PUBLIC KEY 的 SPKI PEM 公钥，支持 2048–4096 位 RSA。bot-client.pem 私钥留在个人电脑，不要交给 Bot、聊天或日志。'));return help;
 }
+function copyableCommand(text,status,label='复制'){
+  const block=element('div','','copyable-command'),pre=element('pre',text);
+  const btn=button(label,async()=>{
+    try{await navigator.clipboard.writeText(text);status.textContent='已复制命令';}
+    catch{
+      const selection=getSelection(),range=document.createRange();
+      range.selectNodeContents(pre);selection.removeAllRanges();selection.addRange(range);
+      status.textContent='请手动复制上方命令。';
+    }
+  },'quiet');
+  block.append(pre,btn);return block;
+}
 function externalPublicKeyGuide(clients=[],audience=externalAudience,{expanded=false}={}){
   const guide=element('details','','external-guide');guide.open=expanded;guide.append(element('summary','个人电脑接入：生成公钥、兑换与使用 token'));
   const body=element('div','','external-guide-body'),head=element('div','','heading'),status=element('p','','muted');status.setAttribute('role','status');
@@ -50,17 +62,32 @@ function externalPublicKeyGuide(clients=[],audience=externalAudience,{expanded=f
       try{await navigator.clipboard.writeText(text);status.textContent='已复制接入指令';}catch{fallback.value=text;fallback.hidden=false;fallback.focus();fallback.select();status.textContent='剪贴板不可用，请手动复制下方完整指令。';}
     }));body.append(head,selection,status,fallback);
   }else body.append(head,element('p',expanded?'在本项目新增个人电脑客户端后，即可在这里选择并复制接入指令。':'先在项目设置 → 外部执行中新增个人电脑客户端，再回到这里选择客户端并复制接入指令。'));
-  const steps=element('ol','');
-  const keyStep=element('li','');keyStep.append(element('strong','在个人电脑生成公钥'),element('pre',externalKeyCommands),element('p','先检查文件是否已存在，不要覆盖已有私钥。仅将 bot-client.pub.pem 的公钥粘贴到 Bot；只接受 BEGIN PUBLIC KEY 的 SPKI PEM、2048–4096 位 RSA。bot-client.pem 私钥留在个人电脑，不要粘贴进 Bot、聊天或日志。'));
-  const exchangeStep=element('li','');exchangeStep.append(element('strong','兑换自己的 GitHub token'),element('p','兑换地址以 /external/token 结尾，取自部署的公开入口：超级管理员可设置或覆写，未设置时使用接入向导已验证的公开地址；该完整地址就是签名证明的 audience。'));
-  if(audience){exchangeStep.append(element('p','当前兑换地址：'+audience));exchangeStep.append(element('pre',externalTokenRequest(audience)));}
-  else exchangeStep.append(element('p','兑换地址尚未配置：请超级管理员设置，或先在接入向导中验证公开地址，再重新打开说明。配置前无法兑换，不要猜测 URL。'));
-  exchangeStep.append(element('p','可用任意语言或 HTTP 工具，不要求 Node.js 或项目脚本。用本机私钥签名 RS256 JWT，最长 120 秒：iss、sub 均为客户端 ID，aud 为完整兑换地址，iat 为当前 Unix 秒，exp ≤ iat + 120；每次生成唯一 jti（16–128 位字母、数字、下划线或短横线）。'),element('p','POST /external/token：Authorization: Bearer <签名JWT>，Content-Type: application/json。正文的 request_id 必须等于 jti；只发送证明，不上传私钥。'));
-  exchangeStep.append(element('pre',JSON.stringify({client_id:'<所选客户端ID>',request_id:'<与 jti 完全相同>'},null,2)),element('p','curl 示例从私有文件读取请求头和正文（umask 077），响应保存到 token-response.json，不要输出到公共日志。成功的 token 是绑定仓库的 GitHub App 安装令牌。'));
-  const docs=element('a','详细接口文档：OpenSSL 签名、curl 兑换与撤销');docs.href=externalTokenDocs;docs.target='_blank';docs.rel='noopener noreferrer';exchangeStep.append(docs);
-  const pollStep=element('li','');pollStep.append(element('strong','用同一个 token 轮询事件'),element('p','GET '+(audience?new URL('/external/events',audience).href:'/external/events（与兑换地址同源）')+'，Authorization: Bearer <token>。不需要第二种令牌，不消耗每小时 20 次兑换额度。只返回绑定仓库最近 24 小时的 issues 和 pull_request，每批最多 100 条，没有新事件时返回空列表。'),element('p','每个客户端各自记住进度，换令牌不重置。成功返回 200 并写出这批事件后，旧事件不再返回；其他客户端不受影响。客户端丢失成功响应时服务端不补发；响应发出前失败不推进进度。过期、撤销或未知令牌不能轮询。Webhook 推送继续可用。'));
-  const tokenStep=element('li','');tokenStep.append(element('strong','使用并撤销 token'),element('p','用 Authorization: Bearer <token> 调用 GitHub。权限固定为 '+externalTokenPermissions+'，只限客户端绑定仓库，不能扩大权限，不能当 Contents write。按响应 expires_at 到期，不要将 token 写入聊天、日志或提交。'),element('p','用完调用 POST '+(audience?new URL('/external/revoke',audience).href:'/external/revoke（与兑换地址同源）')+'，Content-Type: application/json，正文：'),element('pre','{"grant_id":"<响应中的 grant_id>","token":"<响应中的 token>"}'));
-  steps.append(keyStep,exchangeStep,pollStep,tokenStep);body.append(steps);guide.append(body);return guide;
+  const eventsUrl=audience?new URL('/external/events',audience).href:'/external/events（与兑换地址同源）';
+  const revokeUrl=audience?new URL('/external/revoke',audience).href:'/external/revoke（与兑换地址同源）';
+  const steps=element('ol','','external-happy-path');
+  const keyStep=element('li','');
+  keyStep.append(element('strong','在本机生成密钥'),element('p','在个人电脑的私有目录执行。先检查文件是否已存在，不要覆盖已有私钥。'),copyableCommand(externalKeyCommands,status));
+  const registerStep=element('li','');
+  registerStep.append(element('strong','只把公钥交给控制台'),element('p','打开 bot-client.pub.pem，把公钥粘贴到这个客户端的「登记公钥」。私钥（bot-client.pem）留在本机，不要粘贴到对话或日志。'));
+  const exchangeStep=element('li','');exchangeStep.append(element('strong','兑换 token'));
+  if(audience){
+    exchangeStep.append(element('p','用本机私钥签名后，向当前兑换地址发送请求。完整签名步骤在下方「高级／协议说明」，也可以把整套指令复制给 AI agent。'),element('p','当前兑换地址：'+audience),copyableCommand(externalTokenRequest(audience),status));
+  }else exchangeStep.append(element('p','兑换地址尚未配置：请超级管理员设置，或先在接入向导中验证公开地址，再重新打开说明。配置前无法兑换，不要猜测 URL。'));
+  const useStep=element('li','');
+  useStep.append(element('strong','用 token 发起请求'),element('p','成功响应里的 token 用于调用 GitHub，或轮询绑定仓库的事件。用完后撤销，不要把 token 写入聊天、日志或提交。'),copyableCommand('Authorization: Bearer <token>\nGET '+eventsUrl,status),element('p','用完后向 '+revokeUrl+' 发送撤销请求。'));
+  steps.append(keyStep,registerStep,exchangeStep,useStep);
+  const advanced=element('details','','external-guide-advanced');
+  advanced.append(element('summary','高级／协议说明'));
+  const adv=element('div','');
+  adv.append(element('p','只接受 BEGIN PUBLIC KEY 的 SPKI PEM、2048–4096 位 RSA。'));
+  adv.append(element('p','签名证明是最长 120 秒的 RS256 JWT：header 为 {"alg":"RS256","typ":"JWT"}；payload 中 iss 和 sub 都为所选客户端 ID，aud 必须与完整兑换地址一致，iat 为当前 Unix 秒，exp 大于 iat 且不超过 iat + 120，jti 为每次新生成的 16–128 位字母、数字、下划线或短横线。'));
+  adv.append(element('p','POST /external/token：Authorization: Bearer <签名JWT>，Content-Type: application/json。正文的 request_id 必须等于 jti；只发送证明，不上传私钥。'));
+  adv.append(element('pre',JSON.stringify({client_id:'<所选客户端ID>',request_id:'<与 jti 完全相同>'},null,2)));
+  adv.append(element('p','curl 示例从私有文件读取请求头和正文（umask 077），响应保存到 token-response.json。成功的 token 是绑定仓库的 GitHub App 安装令牌，权限固定为 '+externalTokenPermissions+'，按 expires_at 到期。'));
+  adv.append(element('p','轮询 GET '+eventsUrl+'：每个客户端各自记住进度，换令牌不重置；服务端成功返回后旧事件不再返回，丢失的成功响应不补发。'));
+  adv.append(element('p','撤销 POST '+revokeUrl+'，正文：'),element('pre','{"grant_id":"<响应中的 grant_id>","token":"<响应中的 token>"}'));
+  const docs=element('a','详细接口文档：OpenSSL 签名、curl 兑换与撤销');docs.href=externalTokenDocs;docs.target='_blank';docs.rel='noopener noreferrer';adv.append(docs);
+  advanced.append(adv);body.append(steps,advanced);guide.append(body);return guide;
 }
 function externalField(name,caption,value='',choices=null){
   const label=element('label',caption),input=document.createElement(choices?'select':'input');input.name=name;
