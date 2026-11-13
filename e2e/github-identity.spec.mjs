@@ -150,8 +150,14 @@ test('已登录但没有仓库时可以去 GitHub 选择仓库，接入向导接
     const go = page.getByRole('link', { name: '去 GitHub 选择仓库', exact: true });
     await expect(go).toBeVisible();
     await expect(go).toHaveAttribute('href', 'https://github.com/apps/fixture-app/installations/select_target');
-    await expect(go).toHaveAttribute('target', '_blank');
     await expect(go).toHaveAttribute('rel', /noopener/);
+    const [installRequest] = await Promise.all([
+      page.waitForRequest(request => request.url().startsWith('https://github.com/apps/fixture-app/installations/select_target')),
+      go.click(),
+    ]);
+    expect(new URL(installRequest.url()).searchParams.get('state')).toMatch(/^[a-f0-9]{48}$/);
+    await page.goto(f.h.admin + '/#/identity');
+    await expect(go).toBeVisible();
     const status = await page.evaluate(async () => (await fetch('/api/onboarding')).status);
     expect(status).toBe(403);
     expect((await f.admin('/api/onboarding')).status).toBe(200);

@@ -137,7 +137,9 @@ test('identity and effective grants remain visible when optional provider and Fe
     await expect(page.getByText('权限更新序号', { exact: true })).toBeVisible();
     await page.route('**/api/auth/github/status', route => failures ? route.fulfill({ status: 503, json: { error: 'provider_unavailable' } }) : route.continue());
     await page.route('**/api/channels/bindings', route => failures ? route.fulfill({ status: 503, json: { error: 'bindings_unavailable' } }) : route.continue());
-    await page.getByRole('button', { name: '刷新身份与授权' }).click();
+    const identityReloaded = page.waitForResponse(r => { try { return new URL(r.url()).pathname === '/api/identity' && r.request().method() === 'GET'; } catch { return false; } });
+    await page.getByRole('button', { name: '刷新', exact: true }).click();
+    await identityReloaded;
     await openIdentityAdvanced(page);
     await expect(page.getByRole('heading', { name: 'GitHub 登录状态读取失败' })).toBeVisible();
     await expect(page.getByRole('heading', { name: '飞书绑定读取失败' })).toBeVisible();
@@ -165,7 +167,7 @@ test('identity read errors replace old permissions and a late response cannot re
     await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
     await openIdentityAdvanced(page);
     await page.route('**/api/identity', route => fail ? route.fulfill({ status: 503, json: { error: 'identity_unavailable' } }) : route.continue());
-    await page.getByRole('button', { name: '刷新身份与授权' }).click();
+    await page.getByRole('button', { name: '刷新', exact: true }).click();
     await expect(page.getByRole('heading', { name: '身份与权限读取失败' })).toBeVisible();
     await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toHaveCount(0);
     fail = false; await page.getByRole('button', { name: '重新加载', exact: true }).click();
@@ -174,7 +176,7 @@ test('identity read errors replace old permissions and a late response cannot re
     await page.unroute('**/api/identity');
     const gate = new Promise(resolve => { release = resolve; });
     await page.route('**/api/identity', async route => { const response = await route.fetch(); await gate; await route.fulfill({ response }); });
-    await page.getByRole('button', { name: '刷新身份与授权' }).click();
+    await page.getByRole('button', { name: '刷新', exact: true }).click();
     await expect(page.getByRole('heading', { name: '正在读取身份与权限' })).toBeVisible();
     await page.evaluate(() => { location.hash = '#/projects'; });
     await expect(page.locator('#identity-panel')).toBeHidden();
