@@ -68,6 +68,8 @@ const SHARED = {
   '--font-size-caption': '10px', '--font-size-title': '20px', '--font-size-hero': '28px', '--font-size-brand': '22px',
   '--line-height-body': '1.5', '--line-height-tight': '1.35',
   '--radius-1': '4px', '--radius-2': '5px',
+  '--shadow-card': '0 2px 6px #182d4b03',
+
 };
 
 test('tokens the module sheets read through shell.css keep their contract value', () => {
@@ -170,6 +172,22 @@ test('#563 muted token stays pinned and nav labels use the shared 12px size', ()
   assert.match(root, /--color-text-muted:\s*#607087/i);
   const shell = read('static/shell.css');
   assert.match(shell, /\.console-nav-label \{[^}]*font-size:\s*var\(--font-size-1\)/);
+});
+
+test('#552 named button variants and shared card component are declared', () => {
+  const shell = read('static/shell.css');
+  for (const name of ['.btn-primary', '.btn-secondary', '.btn-danger', '.btn-text', '.card:not(.list-panel), .side-card'])
+    assert.match(shell, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  const html = read('static/index.html');
+  assert.match(html, /id="access-submit"[^>]*class="btn-primary"/);
+  assert.match(html, /id="refresh"[^>]*class="btn-text"/);
+  assert.match(html, /data-testid="project-filter-submit"/);
+  const identity = read('static/identity.js');
+  assert.match(identity, /绑定 GitHub 账号', 'btn-secondary'/);
+  assert.match(identity, /切换组织', 'btn-secondary'/);
+  assert.ok(identity.includes("button('刷新身份与授权', () => render().catch(error), 'btn-text')"));
+  // First-screen GitHub action is the only solid primary; Advanced actions stay secondary or text.
+  assert.match(identity, /identity-primary btn-primary/);
 });
 
 const luminance = hex => {
