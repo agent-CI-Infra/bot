@@ -106,8 +106,8 @@ test('#557 登录、身份、更多功能、基本设置在 1440 对齐同一栅
     expect(identity.sameHeight).toBeTruthy();
     await page.screenshot({ path: `${out}/identity-after-1440.png`, fullPage: true });
 
-    // Since #481 更多 carries 当前项目 only while a project is in scope, so enter one first: then 当前项目 and 分析与渠道
-    // share the first row and the personal/platform group spans the full row under them.
+    // Since #481 更多 carries 当前项目 only while a project is in scope, so enter one first: then 当前项目 and 个人与平台
+    // share the first row and the 管理 group (#550) spans the full row under them.
     await page.goto(h.admin + '/#/projects/101/basic');
     await expect(page.locator('.project-content')).toBeVisible({ timeout: 10000 });
     await page.goto(h.admin + '/#/more');
