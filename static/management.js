@@ -541,7 +541,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   const reconnect = button('重新连接', () => read(), 'quiet'); reconnect.hidden = true; statusBar.append(status, reconnect); panel.append(statusBar);
   const input = document.createElement('form'), message = textarea('management-message', '', { rows: 3, placeholder: '发消息，或告诉我你想推进什么…' });
   input.className = 'management-input'; message.setAttribute('aria-label', '管理消息'); message.maxLength = 16000;
-  const send = element('button', '发送', 'management-send'), stopButton = button('停止', async () => {
+  const send = element('button', '发送', 'management-send btn-primary'), stopButton = button('停止', async () => {
     const id = active, owner = conversation; if (!id) return;
     try { await api(endpoint + '/conversations/' + owner + '/messages/' + id + '/stop', 'POST', {}); } catch (err) { showError(err); }
   }, 'quiet');

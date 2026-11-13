@@ -105,11 +105,11 @@ function renderDesignPage() {
 
   const buttons = element('div', '', 'design-row');
   buttons.append(
-    button('保存', () => notice('message', '样例：保存反馈沿用页面顶部的提示条。')),
-    button('取消', () => notice('message', ''), 'quiet'),
-    button('删除', () => notice('message', '样例：危险操作必须先说明影响对象。'), 'quiet destructive'),
-    button('查看详情', () => notice('message', '样例：链接式按钮。'), 'linkish'));
-  const disabled = button('保存中…', () => {}); disabled.disabled = true; buttons.append(disabled);
+    button('保存', () => notice('message', '样例：保存反馈沿用页面顶部的提示条。'), 'btn-primary'),
+    button('取消', () => notice('message', ''), 'btn-secondary'),
+    button('删除', () => notice('message', '样例：危险操作必须先说明影响对象。'), 'btn-danger'),
+    button('查看详情', () => notice('message', '样例：文字按钮，用于次要跳转。'), 'btn-text'));
+  const disabled = button('保存中…', () => {}, 'btn-primary'); disabled.disabled = true; buttons.append(disabled);
 
   const field = (label, control) => { const wrap = element('label', label); wrap.append(control); return wrap; };
   const input = document.createElement('input'); input.value = '巡检计划'; input.id = 'design-input';

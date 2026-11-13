@@ -40,11 +40,12 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--spac
 #main-content:focus { outline: none; }
 .console-ready :is(button, .button-link, input:not([type=checkbox]):not([type=radio]), select) { min-height: var(--control-min); }
 .console-ready :is(button, input, select, textarea) { font: inherit; }
-.console-ready :is(button, .button-link):not(.quiet):not(.status):not(.management-size-handle) { background-color: var(--color-brand); border-color: var(--color-brand); color: var(--color-text-inverse); }
+.console-ready :is(button, .button-link):not(.quiet):not(.btn-secondary):not(.btn-text):not(.btn-danger):not(.status):not(.management-size-handle) { background-color: var(--color-brand); border-color: var(--color-brand); color: var(--color-text-inverse); }
 .console-ready :is(button, a, input, select, textarea, summary):focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: 3px; }
 .console-ready :is(h1, h2, h3, p, label, a, pre) { overflow-wrap: anywhere; }
 .console-ready .muted { color: var(--color-text-muted); line-height: var(--line-height-relaxed); }
-.console-ready :is(.card, .side-card) { border-color: var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.console-ready :is(.card, .side-card) { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: var(--space-6); }
+.console-ready .card.list-panel { padding: 0; overflow: hidden; }
 .console-ready .toolbar { padding: var(--space-6) var(--space-7); }
 .console-ready #paging { padding: var(--space-4) var(--space-7); }
 .console-ready .toolbar h1 { font-size: var(--font-size-5); letter-spacing: -.7px; }
@@ -225,6 +226,18 @@ html { scroll-padding-bottom: calc(var(--console-mobile-height,0px) + 100px); }
 @media (min-width: 1440px) {
   .settings-body .project-content, .console-ready .project-content { max-width: none; width: 100%; }
 }
+/* #552: named button and card components. Pages should mark at most one enabled
+   primary action; secondary, danger and text buttons use these classes (quiet /
+   quiet.destructive / linkish remain aliases so existing calls keep working). */
+:is(button, .button-link).btn-primary { background: var(--color-brand); background-color: var(--color-brand); border-color: var(--color-brand); color: var(--color-text-inverse); }
+:is(button, .button-link).btn-secondary,
+:is(button, .button-link).quiet { background: var(--color-surface); background-color: var(--color-surface); border: 1px solid var(--color-border); color: var(--color-text); }
+:is(button, .button-link).btn-danger,
+:is(button, .button-link).quiet.destructive { background: var(--color-surface); background-color: var(--color-surface); border: 1px solid var(--color-danger); color: var(--color-danger); }
+:is(button, .button-link).btn-text { background: transparent; background-color: transparent; border-color: transparent; color: var(--color-brand); box-shadow: none; font-weight: 600; }
+:is(button, .button-link).btn-text:hover { background: var(--color-hover); filter: none; }
+button.linkish { border: 0; background: none; padding: 0; min-height: 0; color: var(--color-brand); text-align: left; font-weight: 600; overflow-wrap: anywhere; }
+.card:not(.list-panel), .side-card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: var(--space-6); min-width: 0; }
 
 /* #481: on a phone one account control replaces the inline login, role and sign-out button; wide screens keep the
    header as it was, so this control exists only below the phone breakpoint. */

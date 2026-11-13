@@ -245,7 +245,7 @@ async function renderIdentity() {
   if (action === 'choose_repos' && connection.install_url) {
     // A public GitHub App install URL only. The App owner's settings page is never linked here.
     // Click mints a setup `state` so GitHub can return to this console instead of a JSON error page.
-    const go = element('a', t('identity.choose_repos'), 'button-link identity-primary');
+    const go = element('a', t('identity.choose_repos'), 'button-link identity-primary btn-primary');
     go.href = rewriteGithubAppInstallUrl(connection.install_url); go.rel = 'noopener noreferrer';
     go.addEventListener('click', async (event) => {
       event.preventDefault();
@@ -261,15 +261,15 @@ async function renderIdentity() {
     });
     overview.append(go);
   } else if (action === 'connect') {
-    const connect = element('button', t('identity.connect_github'), 'identity-primary'); connect.disabled = true;
+    const connect = element('button', t('identity.connect_github'), 'identity-primary btn-primary'); connect.disabled = true;
     connect.addEventListener('click', async () => { connect.disabled = true; try { await startGithubAuthorize(feedback, current); } catch (err) { if (current()) feedback.textContent = identityRefreshError(err); connect.disabled = false; } });
     overview.append(connect); githubEnabledButtons.push(connect);
   } else if (action === 'reconnect') {
-    const reconnect = element('button', t('identity.reconnect'), 'identity-primary'); reconnect.disabled = true;
+    const reconnect = element('button', t('identity.reconnect'), 'identity-primary btn-primary'); reconnect.disabled = true;
     reconnect.addEventListener('click', async () => { reconnect.disabled = true; try { await startGithubAuthorize(feedback, current); } catch (err) { if (current()) feedback.textContent = identityRefreshError(err); reconnect.disabled = false; } });
     overview.append(reconnect); githubEnabledButtons.push(reconnect);
   } else if (action === 'reverify') {
-    const reverify = element('button', t('identity.reverify'), 'identity-primary'); reverify.disabled = true;
+    const reverify = element('button', t('identity.reverify'), 'identity-primary btn-primary'); reverify.disabled = true;
     attachGithubReverify(reverify, { current, feedback });
     overview.append(reverify); githubEnabledButtons.push(reverify);
   }
@@ -282,7 +282,7 @@ async function renderIdentity() {
   select.add(new Option(platform ? t('identity.tenant_platform') : t('identity.tenant_all'), ''));
   for (const tenant of data.tenants) select.add(new Option(`${tenant.display_name.split('/')[0]} · ${tenant.github_account_id}`, tenant.id));
   select.value = data.actor.tenant_id || '';
-  const switcher = element('button', t('identity.switch_org')); switcher.type = 'submit'; form.append(select, switcher);
+  const switcher = element('button', t('identity.switch_org'), 'btn-secondary'); switcher.type = 'submit'; form.append(select, switcher);
   const switchMessage = element('p', '', 'view-error'); switchMessage.setAttribute('role', 'alert');
   form.addEventListener('submit', async e => {
     e.preventDefault(); if (switcher.disabled) return;
@@ -297,13 +297,13 @@ async function renderIdentity() {
   identities.append(note(t('identity.bindings_note')));
   const provider = element('div', '', 'identity-provider'), actions = element('div', '', 'actions');
   const advancedFeedback = element('p', '', 'view-error'); advancedFeedback.setAttribute('role', 'alert');
-  const bind = element('button', t('identity.bind_github')); bind.disabled = true;
+  const bind = element('button', t('identity.bind_github'), 'btn-secondary'); bind.disabled = true;
   bind.addEventListener('click', async () => { bind.disabled = true; try { await startGithubAuthorize(advancedFeedback, current); } catch (err) { if (current()) advancedFeedback.textContent = identityRefreshError(err); bind.disabled = false; } });
   githubEnabledButtons.push(bind);
   // When reverify is already the front-page action, do not put a second identical button here.
   let refresh = null;
   if (action !== 'reverify') {
-    refresh = element('button', t('identity.reverify'), 'quiet'); refresh.disabled = true;
+    refresh = element('button', t('identity.reverify'), 'btn-secondary'); refresh.disabled = true;
     attachGithubReverify(refresh, { current, feedback: advancedFeedback });
     githubEnabledButtons.push(refresh);
     actions.append(bind, refresh);
@@ -315,7 +315,7 @@ async function renderIdentity() {
     row.append(element('strong', identity.display_name), element('span', `${identity.provider} · ${stateLabel}`),
       facts([[t('identity.binding_source'), identity.host || identity.provider], [t('identity.last_verified'), identity.verified_at ? identityTime(identity.verified_at) : t('identity.never_verified')]]));
     if (identity.status !== 'revoked') {
-      const revoke = element('button', t('identity.unbind'), 'quiet');
+      const revoke = element('button', t('identity.unbind'), 'btn-danger');
       revoke.addEventListener('click', async () => {
         if (!confirm(t('identity.unbind_confirm'))) return;
         revoke.disabled = true; advancedFeedback.textContent = '';
