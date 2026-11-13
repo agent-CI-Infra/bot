@@ -14,6 +14,7 @@ test('the console issues a binding string and only the server-confirmed binding 
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('heading', { name: '飞书身份绑定' })).toBeVisible();
+    await page.getByRole('button', { name: '创建个人绑定', exact: true }).click();
     await page.getByRole('button', { name: /^(生成绑定串|重新绑定)$/ }).first().click();
     const issued = page.locator('.channel-binding-console code').first();
     await expect(issued).toContainText('绑定 FSB-');

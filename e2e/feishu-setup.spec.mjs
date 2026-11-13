@@ -34,7 +34,8 @@ for (const width of [1440, 390]) test(`name lookup reports the missing directory
     await expect(binding).toContainText('设置 → 组织飞书应用');
     await expect(binding).not.toContainText('fixture-only');
     await page.goto(f.h.admin + '/#/identity/feishu/conversations');
-    const conversation = page.getByRole('article');
+    const conversation = page.getByLabel('可查看的飞书会话').locator('article').first();
+    await conversation.getByText('会话信息', { exact: true }).click();
     await conversation.getByRole('button', { name: '刷新飞书姓名', exact: true }).click();
     await expect(conversation).toContainText('读取飞书姓名所需的权限尚未生效');
     await expect(conversation).toContainText('设置 → 组织飞书应用');
@@ -148,7 +149,7 @@ test('global administrator connects an app through the wizard, resumes it and se
     await expect(page.getByText('尚未收到', { exact: true })).toBeVisible();
     await expect(page.getByText('绑定后直接在私聊发送', { exact: false })).toContainText('确认收到助手回复后才完成接入');
     await expect(page.getByText('/project', { exact: false })).toHaveCount(0);
-    await page.getByRole('link', { name: '前往个人飞书身份绑定' }).click();
+    await page.getByRole('link', { name: '前往飞书绑定' }).click();
     await expect(page.getByRole('heading', { name: '飞书身份绑定' })).toBeVisible();
     await expect(page.getByRole('button', { name: '消息渠道', exact: true })).toHaveCount(0);
     await page.goto(f.h.admin + '/#/settings/feishu/' + c.id + '/1');
@@ -311,7 +312,7 @@ test('the trial step sends group scope to the group assistant binding instead of
     await expect(page.getByRole('heading', { name: '连接健康与收发记录' })).toBeVisible();
     await expect(page.getByRole('button', { name: '批准或更新群范围' })).toHaveCount(0);
     await expect(page.getByLabel('群 chat_id')).toHaveCount(0);
-    await expect(page.getByText('在「设置 → 群助手设置」为该群选择服务角色和项目范围', { exact: false })).toBeVisible();
+    await expect(page.getByText('在「个人设置 → 飞书绑定」点击「创建群绑定」', { exact: false })).toBeVisible();
     expect((await f.admin('/api/channels/connectors/' + id + '/groups')).status).toBe(404);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });

@@ -123,7 +123,8 @@ function consoleGroups() {
     ['#/external', '外部执行端', '接入与连接诊断'],
     ...(me.role === 'super_admin' ? [] : [['#/settings/storage', '存储', '本人项目的轨迹与数据量']])
   ] });
-  groups.push({ title: '设置', items: [['#/preferences', '个人设置', '个人身份、飞书绑定与外部执行端'], ...(repo ? projectSections
+  groups.push({ title: '设置', items: [['#/preferences', '个人设置', '个人身份、飞书绑定与外部执行端'],
+    ['#/identity/feishu', '飞书绑定', '个人绑定、群绑定、仓库权限与聊天记录'], ...(repo ? projectSections
     .filter(([key]) => ['basic', 'roles', 'model', 'machine', 'schedules', 'external', 'members'].includes(key))
     .map(([key, name]) => [`#/projects/${id}/${key}`, name, repo.full_name]) : [])] });
   if (me.role === 'super_admin') groups.push({ title: '全局设置', items: settingsSections.map(([key, name]) => [
@@ -185,7 +186,10 @@ function syncConsoleShell() {
   $('console-area').textContent = platform ? '平台管理' : project ? '项目工作区' : personal ? '个人设置' : '工作区';
   // The scope bar names both halves of the current address: a project name alone does not say which organization it is in.
   const shortName = r => (r.full_name || '').includes('/') ? r.full_name.split('/').slice(1).join('/') : r.full_name;
-  $('console-context').textContent = project ? (repo ? organization(repo) + ' · ' + shortName(repo) : '正在读取项目…') : ({ more: '更多功能', inbox: '待处理', settings: '全局设置', preferences: '身份与权限' }[tab] || titles[tab] || '身份与权限');
+  const personalTitle = /^#\/identity\/feishu-apps(?:\/|$)/.test(location.hash) ? '组织飞书应用'
+    : /^#\/identity\/feishu(?:$|\?|\/)/.test(location.hash) ? '飞书绑定' : '身份与权限';
+  $('console-context').textContent = project ? (repo ? organization(repo) + ' · ' + shortName(repo) : '正在读取项目…')
+    : tab === 'identity' || tab === 'preferences' ? personalTitle : ({ more: '更多功能', inbox: '待处理', settings: '全局设置' }[tab] || titles[tab] || '身份与权限');
   // A project can be reachable while some of its features cannot run; the navigation every page shares has to say so.
   // Only the installation snapshot names the gaps, and only a super administrator may read it, so nothing is invented.
   const permission = $('console-permission');

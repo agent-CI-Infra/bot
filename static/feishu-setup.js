@@ -50,10 +50,14 @@ async function renderFeishuSetup(panel, request) {
   if (request !== renderVersion) return;
   const base = feishuBase(), match = /^#\/(?:settings\/feishu|identity\/feishu-apps)\/(new|[a-f0-9]{48})\/([0-4])$/.exec(location.hash);
   if (!match) {
-    const overview = card('飞书应用连接');
-    overview.append(note(data.platform ? '超级管理员可以连接全平台共用的应用，也可以为某个组织连接应用。组织管理员和组织内仓库的管理员可以在「设置 → 组织飞书应用」为本组织连接企业自建应用。每位用户在「设置 → 飞书身份绑定」中绑定本人身份，之后仍按已有项目权限使用。'
+    const overview = card('飞书应用连接'), setupLinks = element('div', '', 'actions');
+    if (data.platform || data.organizations.length) setupLinks.append(channelLink(feishuAddress(), '新增飞书应用连接', 'button-link'));
+    setupLinks.append(channelLink('#/identity/feishu', '管理个人与群绑定', 'button-link quiet'));
+    if (data.platform) setupLinks.append(channelLink('#/settings/service-roles', '管理服务角色权限', 'button-link quiet'));
+    overview.append(note(data.platform ? '超级管理员可以连接全平台共用的应用，也可以为某个组织连接应用。组织管理员和组织内仓库的管理员可以在「设置 → 组织飞书应用」为本组织连接企业自建应用。每位用户在「个人设置 → 飞书绑定」中绑定本人身份或配置飞书群的仓库与角色权限。'
       : '你可以为下列组织连接企业自建的飞书应用（SDK 长连接）。组织的应用只有该组织内有授权的人能看到和绑定；它所在的群只能选择本组织的仓库，经它绑定的飞书身份也只能使用本组织内的权限。应用由创建人、组织管理员和超级管理员管理。'),
-      ...(data.platform || data.organizations.length ? [channelLink(feishuAddress(), '新增飞书应用连接', 'button-link')] : [note('你当前不能为任何组织新增应用，只能管理下方已有的应用。')]));
+      ...(data.platform || data.organizations.length ? [] : [note('你当前不能为任何组织新增应用，只能管理下方已有的应用。')]),
+      setupLinks);
     if (!data.connectors.length) overview.append(note(data.platform ? '尚未连接飞书应用。按向导完成应用创建、凭据、事件订阅、发布和试用。' : '你还没有可管理的飞书应用。按向导完成应用创建、凭据、事件订阅、发布和试用。'));
     for (const c of data.connectors) {
       const row = element('div', '', 'channel-binding');
@@ -226,11 +230,11 @@ async function renderFeishuSetup(panel, request) {
       } catch (err) { status.className = 'view-error'; status.textContent = feishuError(err); grants.replaceChildren(); } finally { probe.disabled = false; }
     }, ''), grants = element('div'); body.append(probe, status, grants); next('进入绑定与试用');
   } else {
-    body.append(feishuList(['让每位使用者在机器人私聊发起 /bind，打开链接并使用本地账户或 GitHub 登录平台，核对当前账户后确认绑定，再回原私聊确认。',
+    body.append(feishuList(['让每位使用者在「个人设置 → 飞书绑定」点击「创建个人绑定」生成绑定串并在机器人私聊发送（或在私聊发起 /bind），打开链接并使用本地账户或 GitHub 登录确认绑定。',
       '绑定后直接在私聊发送“你好”或“我能管理哪些项目”，确认收到助手回复后才完成接入。不需要先选项目；绑定不增加权限，项目管理员仍需授权。',
-      '需要群内使用时，由已绑定飞书、在该群中并对相关仓库有配置权限的维护人，在「设置 → 群助手设置」为该群选择服务角色和项目范围，再在群里 @ 机器人提问。',
-      '需要定时汇报或巡检时，在「设置 → 我的飞书私信会话」或「设置 → 群助手设置」下添加定时任务，用提示词说明要做什么；项目日报和事件订阅可直接选择有权限的私聊或群作为目的地。']),
-      channelLink('#/identity/feishu', '前往个人飞书身份绑定', 'button-link'), button('刷新收件与发送状态', () => render().catch(error), 'quiet'));
+      '需要群内使用时，由已绑定飞书、在该群中并对相关仓库有配置权限的维护人，在「个人设置 → 飞书绑定」点击「创建群绑定」，为该群选择服务角色和项目范围，再在群里 @ 机器人提问。',
+      '需要定时汇报或巡检时，在「个人设置 → 飞书绑定」对应个人或群绑定的「定时任务」中添加，用提示词说明要做什么；项目日报和事件订阅可直接选择有权限的私聊或群作为目的地。']),
+      channelLink('#/identity/feishu', '前往飞书绑定', 'button-link'), button('刷新收件与发送状态', () => render().catch(error), 'quiet'));
     await channelDiagnostics(c, panel, data.platform);
   }
 }

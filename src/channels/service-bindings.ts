@@ -365,7 +365,8 @@ export class ChannelServiceBindings {
       b.owner_id === actor.principal_id || b.configured_by === actor.principal_id || this.grants(b).some(g => g.grantor_id === actor.principal_id) || this.governs(actor, b));
     const items = serviceItems;
     return { bindings: bindings.map(b => { const governs = this.governs(actor, b);
-      return { ...this.view(b), can_manage: governs || b.owner_id === actor.principal_id, can_transfer: governs, ...(governs ? { owner_candidates: this.owners(b) } : {}) }; }), chats,
+      return { ...this.view(b), can_manage: governs || b.owner_id === actor.principal_id, can_view: platform || !!this.canView(actor, b.chat_id),
+        can_transfer: governs, ...(governs ? { owner_candidates: this.owners(b) } : {}) }; }), chats,
       service_roles: this.store.all('SELECT * FROM service_roles WHERE enabled=1 AND id<>? ORDER BY builtin DESC,created_at,id',managementAssistant)
         .map(r => ({ id: r.id, name: r.name, responsibility: r.responsibility, permissions: JSON.parse(serviceRole(this.store,r.id)!.permissions), builtin: !!r.builtin, recommended: r.id === repositoryAssistant })),
       organizations: this.store.all('SELECT * FROM tenants ORDER BY display_name').filter(t => {

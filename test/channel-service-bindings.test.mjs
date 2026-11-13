@@ -180,7 +180,10 @@ test('a group binding has an owner: other repository admins in the group cannot 
   assert.deepEqual(state(), { owner_id: 'owner', configured_by: 'owner', revision: 1, participation: 'mentions', enabled: 1 });
   const spoken = groupMessage('Just chatting', 'ou_intruder'); spoken.event.message.mentions = []; await post(h, f.id, spoken);
   const intruderView = (await bindings.list(intruder)).bindings.find(b => b.chat_id === chat.id);
-  assert.deepEqual([intruderView.can_manage, intruderView.can_transfer, intruderView.owner_candidates], [false, false, undefined]);
+  assert.deepEqual([intruderView.can_manage, intruderView.can_view, intruderView.can_transfer, intruderView.owner_candidates], [false, false, false, undefined]);
+  const peerSpoken = groupMessage('Checking repo 101', 'ou_peer'); peerSpoken.event.message.mentions = []; await post(h, f.id, peerSpoken);
+  const peerView = (await bindings.list(peer)).bindings.find(b => b.chat_id === chat.id);
+  assert.deepEqual([peerView.can_manage, peerView.can_view, peerView.can_transfer], [false, true, false]);
   // The owner edits from inside the group, never beyond their own repositories.
   await assert.rejects(bindings.configure(owner, chat.id, input(1, ['101', '102'])), { code: 'capability_forbidden' });
   assert.equal((await bindings.configure(owner, chat.id, input(1, ['101'], { participation: 'questions' }))).participation, 'questions');
