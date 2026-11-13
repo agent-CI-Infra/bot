@@ -26,6 +26,8 @@ export interface EventWork {
   validate(store: Store, task: Row, input: any): void;
   /** The module's own write tools; `state` collects what they recorded for finish. */
   tools?(store: Store, task: Row, input: any, writes: string[], state: Record<string, any>): PlatformTools;
+  /** Checks a submission in the live conversation, without publishing or changing module state. */
+  checkResult?(store: Store, task: Row, input: any, result: any): void;
   /** Checks the finished result and hands it to the module; returns what the task keeps as its result. */
   finish(store: Store, task: Row, input: any, result: any, state: Record<string, any>): Promise<any> | any;
   /** The task ended without a result (failed or cancelled); the module may record why. */

@@ -17,6 +17,10 @@ import { controllerWorkspace } from '../dist/roles/workspace.js';
 import { Redactor } from '../dist/agent/common.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { LocalManager } from '../dist/projects/local-manager.js';
+import { agentLoop } from '../dist/agent/loop.js';
+import { eventWork } from '../dist/work/events.js';
+import { releaseStorage } from '../dist/releases/storage.js';
+import '../dist/releases/notes.js';
 
 // The real Pi SDK (runner/node_modules) in a real runner workspace, driven by the control plane through the task mailbox.
 // CI installs the runner dependencies and sets BOT_REQUIRE_PI=1, so a missing SDK fails there instead of skipping.
@@ -25,6 +29,72 @@ const skip = !sdk && process.env.BOT_REQUIRE_PI !== '1' ? 'Pi SDK not installed:
 const text = content => typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => part.text ?? '').join('') : '';
 const results = messages => messages.filter(m => m.role === 'tool').map(m => { try { return JSON.parse(text(m.content)); } catch { return { raw: text(m.content) }; } });
 const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: 'call_' + randomBytes(6).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
+
+async function entryFixture(t, kind, respond, controlled = false) {
+  const root = mkdtempSync(join(tmpdir(), 'bot-pi-entry-')), store = new Store(':memory:', randomBytes(32)), manager = new LocalManager('101', root), bodies = [], logs = [];
+  const model = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); bodies.push(body);
+    res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: respond(body) }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+  });
+  model.listen(0, '127.0.0.1'); await once(model, 'listening');
+  t.after(async () => { await manager.recover(); await new Promise(resolve => { model.close(resolve); model.closeAllConnections(); }); store.close(); rmSync(root, { recursive: true, force: true }); });
+  store.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')"); store.run("INSERT INTO repositories VALUES('101','fixture/pi','o','a')");
+  store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', 'm', '101', `http://127.0.0.1:${model.address().port}/v1`, 'fixture', store.secrets.seal({ value: 'entry-fixture-key' }, 'model:m'), 'now');
+  store.run("INSERT INTO policies(repository_id,model_id,enabled) VALUES('101','m',1)");
+  const environment = await manager.call('PUT', '/v1/projects/101');
+  store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES(?,?,?,?,?,?,?,?,?)', 't', '101', kind, 'Validate entry submission', '{}', 1, environment.generation, randomBytes(24).toString('hex'));
+  new TaskRecords(store).contract('t', { goal: 'Inspect supplied facts', scope: ['report'], criteria: ['Valid factual report'], endpoint: 'report' });
+  if (controlled) {
+    authorizeKnowledgeTask(store);
+    roleApi(store, { id: 'admin', role: 'project_admin', repositories: ['101'] }, 'PUT', new URL('http://local/api/repositories/101/roles'),
+      { expected_revision: 0, enabled: true, controller: { entries: { review: true } }, roles: [{ role_id: 'manager', harness_ref: { id: 'native' } }] });
+  }
+  // Recording a new contract invalidates the old workspace; the engine allocates its replacement afterwards.
+  store.run("UPDATE tasks SET workspace_id=?,generation=? WHERE id='t'", randomBytes(24).toString('hex'), environment.generation);
+  const task = store.get("SELECT * FROM tasks WHERE id='t'"), redactor = new Redactor(), guard = async () => {}, workspace = new Workspace(store, manager, task, redactor, guard, value => logs.push(value));
+  const initialized = await workspace.call('init', { type: 'workspace_init' });
+  assert.equal(initialized.initialized, true);
+  return { store, task, workspace, redactor, guard, bodies, logs };
+}
+
+for (const controlled of [false, true]) test(`Pi review entry repairs its own finish tool in one session (controlled=${controlled})`, { skip, timeout: 90000 }, async t => {
+  let attempts = 0;
+  const valid = { summary: 'Verified report', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' };
+  const f = await entryFixture(t, 'review.issue', body => {
+    if (body.tools.some(tool => tool.function.name === 'nominate_delivery')) {
+      const ref = results(body.messages).find(result => result.result_ref)?.result_ref;
+      return ref ? call('nominate_delivery', { result_ref: ref }) : call('delegate_role', { role: 'dev', purpose: 'Inspect the report', refs: ['task:t'] });
+    }
+    attempts++;
+    if (attempts === 1) return call('finish_review', { ...valid, findings: [{ body: 'Inspect this line', format: 'inline', selection_reason: 'Changed line', actionable: false, within_goal: false, requires_human_decision: false, path: 'a.js', side: 'RIGHT', line: 'invalid-line' }] });
+    return call('finish_review', attempts === 2 ? { ...valid, summary: 'x'.repeat(16001) } : valid);
+  }, controlled);
+  const result = await agentLoop(f.store, f.task, f.workspace, f.redactor, f.guard, {});
+  assert.equal(result.summary, valid.summary); assert.equal(attempts, 3);
+  assert.ok(f.bodies.some(body => results(body.messages).some(result => result.error === 'invalid_submission' && result.message.includes('model_review_invalid'))));
+  assert.equal(f.logs.filter(log => log.type === 'pi_session').length, 1, 'correction uses the original Pi process and workspace');
+  assert.equal(f.logs.filter(log => log.type === 'tool' && log.result?.submitted === true).length, 1);
+  assert.equal(f.store.get('SELECT count(*) n FROM tasks').n, 1);
+});
+
+test('Pi entry stops with the original validation fault after two unsuccessful repairs', { skip, timeout: 90000 }, async t => {
+  let attempts = 0;
+  const f = await entryFixture(t, 'review.issue', () => { attempts++; return call('finish_review', { summary: 'x'.repeat(16001), findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' }); });
+  await assert.rejects(agentLoop(f.store, f.task, f.workspace, f.redactor, f.guard, {}), { code: 'model_review_invalid' });
+  assert.equal(attempts, 3); assert.equal(f.logs.filter(log => log.type === 'pi_session').length, 1);
+});
+
+test('Pi event finish validates release-note source coverage before ending the session', { skip, timeout: 90000 }, async t => {
+  let attempts = 0;
+  const f = await entryFixture(t, 'release.notes', () => call('finish_release_notes', { groups: [{ heading: 'Fixes', source_ids: ++attempts === 1 ? [] : ['source-1'] }] }));
+  releaseStorage(f.store);
+  const result = await agentLoop(f.store, f.task, f.workspace, f.redactor, f.guard, { headings: ['Fixes'] }, undefined, undefined, undefined, {},
+    { validateSubmission: value => eventWork('release.notes').checkResult(f.store, f.task, { sources: [{ id: 'source-1' }] }, value) });
+  assert.deepEqual(result.groups, [{ heading: 'Fixes', source_ids: ['source-1'] }]); assert.equal(attempts, 2);
+  assert.ok(f.bodies.some(body => results(body.messages).some(result => result.message?.includes('release_notes_invalid'))));
+  assert.equal(f.logs.filter(log => log.type === 'pi_session').length, 1);
+  assert.equal(f.store.get('SELECT count(*) n FROM project_releases').n, 0, 'validation does not publish or mutate release state');
+});
 
 test('a real Pi controller session delegates a role, reads its result by reference and nominates it; forbidden calls are refused', { skip, timeout: 180000 }, async t => {
   assert.ok(sdk, 'runner/node_modules must contain the Pi SDK');

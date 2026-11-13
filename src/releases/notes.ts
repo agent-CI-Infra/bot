@@ -93,5 +93,6 @@ registerEventWork('release.notes', {
     const row = store.get('SELECT stage,data FROM project_releases WHERE id=?', input.release_id);
     if (!row || row.stage !== 'preparing_notes' || JSON.parse(row.data).notes_task !== task.id) stop('release_record_changed', 'cancelled', '发行说明已不在等待这次整理。');
   },
+  checkResult(_store, _task, input, result) { checkGroups(result?.groups, input.sources); },
   finish(_store, _task, input, result) { return { groups: checkGroups(result?.groups, input.sources) }; }
 });

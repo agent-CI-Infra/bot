@@ -685,7 +685,7 @@ export class TaskEngine {
           if(!development)return publishPullRequest();
           update({result:JSON.stringify(args),phase:'publish'});
           return publishDevelopment();
-        }:undefined,conversation,platform);
+        }:undefined,conversation,platform,{validateSubmission:result=>event?.checkResult?.(this.store,task,input,result)});
         if(event){
           // The module checks the finished result and takes it; the task keeps what it returns.
           await acceptReport(result);

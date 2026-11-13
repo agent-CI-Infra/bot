@@ -106,7 +106,7 @@ function validCapabilities(value:any){
 function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
  const env=spec.pi;if(!env)return stop('pi_environment_required','waiting_configuration','Pi harness 需要项目电脑工作区；这个入口没有为角色准备 Pi 会话。');
  const base=env.session,tools=spec.tools??[],own=new Set((base?.config?.tools??[]).map((t:any)=>t.function.name)),finish=spec.finish;
- const control=tools.map(t=>t.function.name).filter(name=>!own.has(name));
+ const control=tools.map(t=>t.function.name).filter(name=>!own.has(name)||(finish?.names??[finish?.name]).includes(name));
  const config={...(base?.config??{capabilities:{workspace:{read:false,write:false,notes:false,shell:false},github:{permissions:{},publication:'none'},agents:false,writes:[]},finish_tools:[],finish_on_pull_request:false,review_session:false}),
   system:spec.system,prompt:spec.prompt,tools,control_tools:control,workspace_id:env.workspace.task.workspace_id};
  let submitted:{value:T}|undefined,repairs=0;
@@ -122,10 +122,10 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
    return {result:value};
   },
   complete:async(state,publication)=>{
-   if(base?.complete)return base.complete(state,publication);
    if(submitted)return submitted.value;
    // A session that finished while the control plane was away carries its submission; validate it again from task facts.
    if(finish&&state.result?.submitted===true)return finish.validate(state.result.submission,state.result.submission_name);
+   if(base?.complete)return base.complete(state,publication);
    return stop('role_submission_required','retry_wait','Pi 会话结束但没有通过控制面提交结果。');
   }});
 }
