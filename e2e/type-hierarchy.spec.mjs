@@ -32,9 +32,10 @@ test('#558 项目、身份、统计、登录的标题层级与行长，1440 与 
     const stacked = await page.evaluate(() => {
       const h1 = document.querySelector('.toolbar .title-group h1').getBoundingClientRect();
       const muted = document.querySelector('.toolbar .title-group .muted').getBoundingClientRect();
-      return muted.top >= h1.bottom - 1;
+      return { below: muted.top >= h1.bottom - 1, sameLeft: Math.abs(muted.left - h1.left) <= 1 };
     });
-    expect(stacked).toBe(true);
+    expect(stacked).toEqual({ below: true, sameLeft: true });
+    expect(await group.evaluate(el => getComputedStyle(el).alignItems)).toBe('flex-start');
     const measure = await count.evaluate(el => parseFloat(getComputedStyle(el).maxWidth));
     const size = await count.evaluate(el => parseFloat(getComputedStyle(el).fontSize));
     expect(measure).toBeGreaterThan(0);
@@ -93,6 +94,8 @@ test('#558 项目、身份、统计、登录的标题层级与行长，1440 与 
       expect(textOverlap).toBe(false);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
       await page.screenshot({ path: `${out}/${shot}`, fullPage: true });
+      // #481: below 768px sign-out lives in the account menu.
+      await page.getByRole('button', { name: '账号菜单' }).click();
       await page.getByRole('button', { name: '退出登录' }).click();
     }
 
