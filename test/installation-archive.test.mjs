@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { harness, setup, account, testPassword } from './helpers.mjs';
 import { InstallationSync } from '../dist/app/installations.js';
 import { InstallationArchive, installationSnapshot, installationExecutionDenied, readInstallationDomainEvents } from '../dist/installations/archive.js';
-import { InstallationSetup } from '../dist/installations/setup.js';
+import { InstallationSetup, githubSetupReturnPath } from '../dist/installations/setup.js';
 import { GitHub, appPermissions, appEvents } from '../dist/github/client.js';
 import { Redactor } from '../dist/agent/common.js';
 import { loadConsole } from './console-page.mjs';
@@ -399,6 +399,18 @@ test('unverified setup, forged installation IDs, requests awaiting approval and 
   await member('/api/auth/login', 'POST', { username: 'tenant-admin', password: pass });
   for (const path of ['/api/installations/archive', f.archiveUrl, f.archiveUrl + '/events', f.archiveUrl + '/repositories']) assert.equal((await member(path)).status, 403);
   const callback = await fetch(f.h.admin + '/onboarding/github/setup?installation_id=77'); assert.equal(callback.status, 400);
+});
+
+test('the setup URL sends the browser back to the console instead of leaving it on a JSON page', async t => {
+  const f = await fixture(t);
+  assert.equal(githubSetupReturnPath('waiting_sync'), '/?github_setup=waiting_sync#/identity');
+  assert.equal(githubSetupReturnPath('ready'), '/?github_setup=ready#/identity');
+  const setup = new InstallationSetup(f.h.store), intent = setup.begin(f.a.id);
+  const response = await fetch(f.h.admin + '/onboarding/github/setup?state=' + intent.state + '&installation_id=77&setup_action=install', { redirect: 'manual' });
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get('location'), githubSetupReturnPath('waiting_identity'));
+  const body = await response.text();
+  assert.equal(body, '');
 });
 
 test('verified consumers can request durable synchronization before the first webhook, while invalid signatures leave no installation facts', async t => {

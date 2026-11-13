@@ -44,7 +44,7 @@
 
 App manifest 注册回调仍是 `/onboarding/github/callback`；新增 Setup URL 为 `/onboarding/github/setup`，用户 OAuth 回调属于 #163，三者分别处理。新 manifest 带独立 setup_url，向导生成的安装链接带随机 state，状态保留 30 分钟。
 
-`InstallationSetup.begin(accountId, expectedTargetId?)` 创建持久化意图；向导传入已核实的目标账号 ID，后续归属验证必须匹配。#163 在核验自己的 OAuth state 后调用 `bindIdentity(state, identitySessionRef)`，该方法不公开为接受 user ID 的 HTTP 接口。Setup 的 installation_id 只绑定查找目标，首次绑定后不能换成另一个 ID；身份与安装 ID 的首次绑定都在事务中完成。`callback(state, installationId, setupAction)` 和 `resume(state)` 返回 `waiting_identity`、`waiting_setup`、`waiting_approval`、`waiting_sync`、`ready` 或 `access_revoked`，归属验证失败返回 403。状态可以在 OAuth、Setup、webhook 的任何先后次序下重入；重复回调依附已有同步，不持续增加代次。待批准请求不生成有效安装。#163 尚未接入时，Setup 安全地停留在 waiting_identity，不要求重新安装。
+`InstallationSetup.begin(accountId, expectedTargetId?)` 创建持久化意图；向导传入已核实的目标账号 ID，后续归属验证必须匹配。#163 在核验自己的 OAuth state 后调用 `bindIdentity(state, identitySessionRef)`，该方法不公开为接受 user ID 的 HTTP 接口。Setup 的 installation_id 只绑定查找目标，首次绑定后不能换成另一个 ID；身份与安装 ID 的首次绑定都在事务中完成。`callback(state, installationId, setupAction)` 和 `resume(state)` 返回 `waiting_identity`、`waiting_setup`、`waiting_approval`、`waiting_sync`、`ready` 或 `access_revoked`，归属验证失败返回 403。状态可以在 OAuth、Setup、webhook 的任何先后次序下重入；重复回调依附已有同步，不持续增加代次。待批准请求不生成有效安装。#163 尚未接入时，Setup 安全地停留在 waiting_identity，不要求重新安装。浏览器访问 `/onboarding/github/setup` 成功时 303 回到控制台身份页（`/?github_setup=<status>#/identity`），由页面自动刷新授权；校验失败仍返回原来的 JSON 错误。
 
 GitHub 明确指出 Setup 的 installation_id 可被伪造，必须核实当前用户关系，见[Setup URL 文档](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-setup-url)。事件字段及 all→selected 的空 removed 语义见[Webhook 事件文档](https://docs.github.com/en/webhooks/webhook-events-and-payloads)。
 

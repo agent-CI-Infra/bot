@@ -684,3 +684,26 @@ test('a signed-in user with no repositories gets a public GitHub App install URL
   assert.equal((await (await fetch(h.admin + '/api/identity', { headers })).json()).github_connection.install_url,
     'https://github.com/apps/fixture-app/installations/select_target');
 });
+
+test('the identity-page install link mints a setup state that returns to the console', async t => {
+  const f = await identityFixture(t), { h } = f;
+  h.store.run("INSERT INTO settings VALUES('onboarding.app',?)", JSON.stringify({
+    account_id: f.a.id, app_id: '123', slug: 'fixture-app',
+    install_url: 'https://github.com/apps/fixture-app/installations/select_target',
+  }));
+  f.state.owner = false; f.state.admin = false; f.state.permission = 'write';
+  const login = await f.login(), principal = login.result.principal_id;
+  const credential = session(h.store, principal, login.result.identity_id);
+  const headers = { Cookie: 'bot_session=' + credential.token, 'X-CSRF-Token': credential.csrf, 'Content-Type': 'application/json' };
+  const minted = await fetch(h.admin + '/api/identity/github/install', { method: 'POST', headers, body: '{}' });
+  assert.equal(minted.status, 201);
+  const body = await minted.json();
+  const install = new URL(body.url);
+  assert.equal(install.origin + install.pathname, 'https://github.com/apps/fixture-app/installations/select_target');
+  assert.match(install.searchParams.get('state'), /^[a-f0-9]{48}$/);
+  const setup = await fetch(h.admin + '/onboarding/github/setup?state=' + install.searchParams.get('state') + '&installation_id=77&setup_action=install', { redirect: 'manual', headers: { Cookie: 'bot_session=' + credential.token } });
+  assert.equal(setup.status, 303);
+  assert.match(setup.headers.get('location'), /[?&]github_setup=/);
+  const missing = await fetch(h.admin + '/onboarding/github/setup?installation_id=77', { redirect: 'manual' });
+  assert.equal(missing.status, 400);
+});

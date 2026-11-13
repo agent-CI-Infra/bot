@@ -16,6 +16,7 @@ import { type TaskEngine } from './agent/engine.js';
 import type { AutomationConfig } from './automation/config.js';
 import { ExternalService } from './external/service.js';
 import { type InstallationSync, installationApi } from './app/installations.js';
+import { githubAppInstallUrl } from './identity/github-status.js';
 import { Onboarding } from './onboarding/service.js';
 import { type IntegrationChecker } from './projects/integrations.js';
 import { type GateOnboarding } from './projects/gate-onboarding.js';
@@ -31,7 +32,7 @@ import { ReleaseService } from './releases/service.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
 
 import { PublicBoards } from './public-board/service.js';
-import { InstallationSetup } from './installations/setup.js';
+import { InstallationSetup, githubSetupReturnPath } from './installations/setup.js';
 import { type GitHubIdentity, type GitHubOAuthConfig } from './identity/github.js';
 import { GitHubLogin } from './identity/github-login.js';
 import { identityApi } from './identity/api.js';
@@ -207,7 +208,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
         });
         const channelBinding = await channels.bindings.githubAuthenticated(url.searchParams.get('state') || '', credentials.token);
         if (result.setup_state) installationSetup.bindIdentity(result.setup_state, githubIdentity.sessionReference(credentials.token));
-        res.setHeader('Set-Cookie', [cookie(req, credentials.token), browserCookie(req, '')]); res.writeHead(303, { Location: channelBinding ? '/#/identity/feishu' : '/#/identity' }); res.end();
+        res.setHeader('Set-Cookie', [cookie(req, credentials.token), browserCookie(req, '')]); res.writeHead(303, { Location: channelBinding ? '/?github_auth=1#/identity/feishu' : '/?github_auth=1#/identity' }); res.end();
       } catch (error) {
         const code = error instanceof HttpError ? error.code : 'github_oauth_unavailable';
         res.writeHead(303, { Location: '/?auth_error=' + encodeURIComponent(code) + '#/identity' }); res.end();
@@ -221,7 +222,8 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     if (method === 'GET' && path === '/onboarding/github/setup') {
       res.setHeader('Cache-Control', 'no-store'); res.setHeader('Referrer-Policy', 'no-referrer');
       const result = await installationSetup.callback(url.searchParams.get('state') || '', url.searchParams.get('installation_id') || '', url.searchParams.get('setup_action') || 'install');
-      respond(res, 200, result); return;
+      const status = result && typeof result === 'object' && !Array.isArray(result) && typeof (result as { status?: unknown }).status === 'string' ? (result as { status: string }).status : 'ready';
+      res.writeHead(303, { Location: githubSetupReturnPath(status) }); res.end(); return;
     }
     const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/channels.js': ['channels.js', 'text/javascript'], '/feishu-setup.js': ['feishu-setup.js', 'text/javascript'], '/identity.js': ['identity.js', 'text/javascript'], '/management.js': ['management.js','text/javascript'], '/schedules.js': ['schedules.js','text/javascript'], '/subscriptions.js':['subscriptions.js','text/javascript'], '/subscriptions.css':['subscriptions.css','text/css'], '/schedule-records.js':['schedule-records.js','text/javascript'], '/schedule-records.css':['schedule-records.css','text/css'], '/style.css': ['style.css', 'text/css'],
       '/views.js': ['views.js', 'text/javascript'], '/gate-onboarding.js': ['gate-onboarding.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/board.js': ['board.js', 'text/javascript'], '/board.css': ['board.css', 'text/css'], '/metrics.js':['metrics.js','text/javascript'], '/costs.js':['costs.js','text/javascript'], '/costs.css':['costs.css','text/css'],'/design.js':['design.js','text/javascript'], '/design.css':['design.css','text/css'], '/external.js':['external.js','text/javascript'], '/release.js':['release.js','text/javascript'], '/release.css':['release.css','text/css'], '/project.js': ['project.js', 'text/javascript'], '/manager.js': ['manager.js', 'text/javascript'], '/roles.js': ['roles.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
@@ -297,6 +299,25 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       if (!githubIdentity) return fail(503, 'github_login_not_configured');
       const browser = randomId(), result = githubIdentity.begin(browser, 'bind', sessionToken(req), input.setup_state === undefined ? null : text(input.setup_state));
       res.setHeader('Set-Cookie', [cookie(req, sessionToken(req)), browserCookie(req, browser)]); respond(res, 201, result); return;
+    }
+    if (path === '/api/identity/github/install' && method === 'POST') {
+      fields(input, []);
+      if (!githubIdentity) return fail(503, 'github_login_not_configured');
+      const installUrl = githubAppInstallUrl(store);
+      const raw = store.get('SELECT value FROM settings WHERE key=?', 'onboarding.app')?.value;
+      let accountId: string | undefined;
+      if (typeof raw === 'string' && raw) {
+        try {
+          const saved = JSON.parse(raw) as { account_id?: unknown };
+          if (typeof saved.account_id === 'string' && saved.account_id) accountId = saved.account_id;
+        } catch { /* malformed onboarding state is treated as unconfigured */ }
+      }
+      if (!installUrl || !accountId) return fail(409, 'github_app_not_configured');
+      const intent = installationSetup.begin(accountId);
+      installationSetup.bindIdentity(intent.state, githubIdentity.sessionReference(sessionToken(req)));
+      const url = new URL(installUrl);
+      url.searchParams.set('state', intent.state);
+      respond(res, 201, { url: url.href }); return;
     }
     if (path === '/api/identity/refresh' && method === 'POST') {
       fields(input, []);

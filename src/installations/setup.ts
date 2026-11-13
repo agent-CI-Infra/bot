@@ -2,6 +2,11 @@ import type { Store } from '../storage/database.js';
 import { digest, fail, randomId, type Json } from '../core/security.js';
 import { accountRef, InstallationArchive, installationRef, numericId, queueInstallationSync, type InstallationIdentity } from './archive.js';
 
+/** Browser return path after GitHub App setup. The HTTP handler 303s here instead of leaving the person on a JSON page. */
+export function githubSetupReturnPath(status: string): string {
+  return `/?github_setup=${encodeURIComponent(status)}#/identity`;
+}
+
 // This service correlates an opaque OAuth/session reference. It does not implement OAuth or assign console roles.
 export class InstallationSetup {
   readonly archive: InstallationArchive;

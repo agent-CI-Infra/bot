@@ -43,6 +43,67 @@ function grantStateText(grant) {
   return ({ active: '有效', pending_verification: '待验证／权限不足，请重新授权', revoked: '已撤销', quarantined: '归属待处理' })[grant.state] || grant.state;
 }
 
+function githubReturnMessage(setup, auth) {
+  if (setup === 'waiting_sync') return 'GitHub App 安装已完成，仓库正在同步。身份与授权已刷新。';
+  if (setup === 'ready') return 'GitHub App 安装已完成，身份与授权已刷新。';
+  if (setup === 'waiting_approval') return 'GitHub App 安装申请待审批。身份与授权已刷新。';
+  if (setup === 'access_revoked') return 'GitHub 安装权限已失效。请重新选择仓库，或联系管理员。';
+  if (setup === 'waiting_identity') return 'GitHub App 安装已记录，请先连接 GitHub 以完成授权。';
+  if (setup) return '已从 GitHub 安装返回，身份与授权已刷新。';
+  if (auth) return '已从 GitHub 授权返回，身份与授权已刷新。';
+  return '身份与授权已刷新。';
+}
+
+// After GitHub OAuth or App setup, the server 303s back with a query flag. Refresh once, show the result, and drop the flag so a later render does not repeat it.
+async function applyGithubReturn(current) {
+  const params = new URLSearchParams(location.search);
+  const setup = params.get('github_setup');
+  const auth = params.get('github_auth');
+  if (setup === null && auth === null) return false;
+  const url = new URL(location.href);
+  url.searchParams.delete('github_setup');
+  url.searchParams.delete('github_auth');
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
+  // A Feishu channel-binding return must not wait on an identity refresh or redirect back to GitHub.
+  if (/^#\/identity\/feishu/.test(url.hash || location.hash)) return false;
+  if (!me || setup === 'waiting_identity') {
+    identityRefreshNotice = githubReturnMessage(setup, auth);
+    identityRefreshNoticeIsError = false;
+    return false;
+  }
+  const panel = $('identity-panel');
+  if (panel) panel.replaceChildren(consoleState('正在刷新身份与授权', '已从 GitHub 返回，正在核对最新的身份与仓库权限。'));
+  try {
+    await api('/api/identity/refresh', 'POST', {}, { signal: AbortSignal.timeout(IDENTITY_REFRESH_TIMEOUT_MS) });
+    if (!current()) return true;
+    identityRefreshNotice = githubReturnMessage(setup, auth);
+    identityRefreshNoticeIsError = false;
+    await start();
+    return true;
+  } catch (err) {
+    if (!current()) return true;
+    identityRefreshNotice = identityRefreshError(err);
+    identityRefreshNoticeIsError = true;
+    if (err && err.code === 'github_reauthorization_required') {
+      try {
+        const result = await api('/api/identity/github/bind', 'POST', {});
+        if (current()) {
+          await new Promise(resolve => setTimeout(resolve, 400));
+          if (current()) location.assign(result.url);
+        }
+        return true;
+      } catch (bindErr) {
+        if (current()) {
+          identityRefreshNotice = identityRefreshError(bindErr);
+          identityRefreshNoticeIsError = true;
+        }
+        return false;
+      }
+    }
+    return false;
+  }
+}
+
 function attachGithubReverify(button, { current, feedback }) {
   const label = '重新验证 GitHub 权限';
   button.addEventListener('click', async () => {
@@ -86,6 +147,7 @@ async function startGithubAuthorize(feedback, current) {
 async function renderIdentity() {
   const panel = $('identity-panel'), request = renderVersion;
   const current = () => request === renderVersion;
+  if (await applyGithubReturn(current)) return;
   panel.classList.remove('identity-feishu-page');
   // Organization and repository admins add and manage their organization's Feishu apps here, with the same wizard
   // super administrators use in global settings (#424).
@@ -142,8 +204,21 @@ async function renderIdentity() {
   const action = connection && connection.action;
   if (action === 'choose_repos' && connection.install_url) {
     // A public GitHub App install URL only. The App owner's settings page is never linked here.
+    // Click mints a setup `state` so GitHub can return to this console instead of a JSON error page.
     const go = element('a', '去 GitHub 选择仓库', 'button-link identity-primary');
-    go.href = rewriteGithubAppInstallUrl(connection.install_url); go.target = '_blank'; go.rel = 'noopener noreferrer';
+    go.href = rewriteGithubAppInstallUrl(connection.install_url); go.rel = 'noopener noreferrer';
+    go.addEventListener('click', async (event) => {
+      event.preventDefault();
+      if (go.getAttribute('aria-busy') === 'true') return;
+      go.setAttribute('aria-busy', 'true'); feedback.textContent = '';
+      try {
+        const result = await api('/api/identity/github/install', 'POST', {});
+        if (current() && result.url) location.assign(result.url);
+      } catch (err) {
+        if (current()) feedback.textContent = identityRefreshError(err);
+        go.removeAttribute('aria-busy');
+      }
+    });
     overview.append(go);
   } else if (action === 'connect') {
     const connect = element('button', '连接 GitHub', 'identity-primary'); connect.disabled = true;
@@ -193,9 +268,6 @@ async function renderIdentity() {
     githubEnabledButtons.push(refresh);
     actions.append(bind, refresh);
   } else actions.append(bind);
-  const reload = button('刷新身份与授权', () => render().catch(error));
-  reload.classList.add('quiet');
-  actions.append(reload);
   identities.append(actions, advancedFeedback, provider);
 
   for (const identity of data.identities.filter(i => i.provider !== 'feishu')) {
