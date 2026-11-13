@@ -14,7 +14,7 @@ function accountChangeMessage(err) {
 function accountProfileLine(account) {
   const line = accountLine(account), content = line.querySelector('.row-content'), actions = line.querySelector('.actions');
   const source = account.type === 'github_app' ? 'GitHub App 安装（私钥换安装临时令牌）' : '用户 Token（按 Token 所属用户的仓库权限）';
-  content.append(element('p', `凭据来源：${source}${account.credentials_configured ? '' : ' · 已撤销，需要重新登记'}`));
+  const origin = element('p', `凭据来源：${source}${account.credentials_configured ? '' : ' · 已撤销，需要重新登记'}`); origin.title = origin.textContent; content.append(origin);
   if (actions) actions.prepend(settingsLink('#/settings/accounts/' + encodeURIComponent(account.id), '详情'));
   return line;
 }
