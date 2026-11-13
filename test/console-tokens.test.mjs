@@ -150,6 +150,28 @@ test('#551 management.css and views.css map heading, body and muted values onto 
   assert.equal(views.toLowerCase().includes('#183142'), false);
 });
 
+// #563: the lighter leftover teals fail 4.5:1 on the page background. They must
+// not return in the remaining console sheets or the usage chart. The muted token
+// itself stays at its pinned #607087 value.
+const LIGHT_LEFTOVER = ['#637c89', '#5b7481', '#52707d'];
+
+test('#563 module sheets and the usage chart no longer hard-code light leftover teals', () => {
+  for (const name of ['static/costs.css', 'static/views.css', 'static/board.css', 'static/costs.js', 'static/management.css']) {
+    const source = read(name);
+    for (const colour of LIGHT_LEFTOVER) {
+      assert.equal(source.toLowerCase().includes(colour), false,
+        `${name} still hard-codes light leftover colour ${colour}`);
+    }
+  }
+});
+
+test('#563 muted token stays pinned and nav labels use the shared 12px size', () => {
+  const root = read('static/shell.css');
+  assert.match(root, /--color-text-muted:\s*#607087/i);
+  const shell = read('static/shell.css');
+  assert.match(shell, /\.console-nav-label \{[^}]*font-size:\s*var\(--font-size-1\)/);
+});
+
 const luminance = hex => {
   const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255)
     .map(c => c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
