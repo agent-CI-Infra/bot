@@ -24,22 +24,23 @@ function roleListStatus(role, state, start) {
   return parts.join(' · ');
 }
 function roleOverviewCards(state, redraw) {
-  const { data, draft } = state, overview = card('角色概览'), { table, body } = projectTable(['角色', '启用', '职责', '状态'], '角色解析结果');
+  const { data, draft } = state, overview = card(rolePageText('overview')), { table, body } = projectTable(rolePageText('columns'), rolePageText('tableLabel'));
   // The version line is the one place that says whether what is on screen is in force or still a draft.
   roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; overview.append(roleDraftStatus);
-  overview.append(note('点角色名称打开完整表单，在同一页编辑并保存。列表只展示名称、是否启用、职责和状态。'));
+  overview.append(note(rolePageText('overviewNote')));
   const starting = new Map((data.configuration.roles || []).map(role => [role.role_id, roleListStart(role, data)]));
   for (const role of draft.roles) {
     const row = document.createElement('tr'); row.dataset.role = role.role_id;
-    const link = element('a', roleLabel(role.role_id, role.name)); link.href = `#/projects/${current.id}/roles/${role.role_id}`;
+    const link = element('a', roleConfigName(role.role_id, role.name)); link.href = `#/projects/${current.id}/roles/${role.role_id}`;
     link.dataset.testid = 'role-list-' + role.role_id;
-    tableCell(row, '角色', link);
-    tableCell(row, '启用', roleCheck(role.role_id + ' 启用', role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind), redraw));
-    const duty = note(role.responsibility || '未填写职责'); if (role.responsibility) duty.title = role.responsibility; tableCell(row, '职责', duty);
+    tableCell(row, rolePageText('columns')[0], link);
+    tableCell(row, rolePageText('columns')[1], roleCheck(role.role_id + ' 启用', role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind), redraw));
+    const dutyText = roleConfigDuty(role.role_id, role.responsibility);
+    const duty = note(dutyText || rolePageText('emptyDuty')); if (dutyText) duty.title = dutyText; tableCell(row, rolePageText('columns')[2], duty);
     const saved = data.configuration.roles.find(entry => entry.role_id === role.role_id);
     const status = note(roleListStatus(role, state, starting.get(role.role_id)));
     if (role.role_id === 'dev' && data.configured && saved?.entry_harness_source !== 'role' && saved?.harness_ref.id !== 'pi') status.append(element('span', '检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更', 'muted'));
-    tableCell(row, '状态', status);
+    tableCell(row, rolePageText('columns')[3], status);
     body.append(row);
   }
   overview.append(table);
@@ -51,6 +52,6 @@ function roleOverviewCards(state, redraw) {
     if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name.value) || draft.roles.some(role => role.role_id === name.value)) { error.textContent = '使用小写字母开头的唯一名称，可包含数字、下划线或连字符。'; return; }
     const defaults = structuredClone(Object.hasOwn(data.role_defaults, name.value) ? data.role_defaults[name.value] : data.role_defaults.observer);
     draft.roles.push({ role_id: name.value, enabled: true, name: name.value, responsibility: '', persona_prompt: Object.hasOwn(data.role_templates || {}, name.value) ? data.role_templates[name.value] : data.role_templates.observer, model_profile_ref: null, skill_bundle_ref: null, harness_ref: { id: data.recommended_backend || 'pi' }, budget_policy_ref: { id: 'entry-default' }, ...defaults }); draft.deleted_roles = (draft.deleted_roles || []).filter(id => id !== name.value); markRoleDirty(state); redraw();
-  }), note('新增角色默认使用可编辑的检视模板。Manager、Coordinator 和 QA 是必需角色，其余角色都可以删除。'), error);
+  }), note(rolePageText('requiredNote')), error);
   return [overview, coordination, roleSkillsCard(state, redraw), roleStagesCard(state, redraw), custom];
 }

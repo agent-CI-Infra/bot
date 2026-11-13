@@ -28,7 +28,11 @@ function roleBound(control, change, state) {
   control.addEventListener('input', edit); control.addEventListener('change', edit); return control;
 }
 function roleText(label, object, key, state, { multiline = false, ...attributes } = {}) {
-  return field(label, roleBound((multiline ? textarea : input)(key, object[key], attributes), value => { object[key] = value; }, state));
+  const raw = object[key];
+  const shown = key === 'name' ? roleConfigName(object.role_id, raw)
+    : key === 'responsibility' ? roleConfigDuty(object.role_id, raw)
+    : raw;
+  return field(label, roleBound((multiline ? textarea : input)(key, shown, attributes), value => { object[key] = value; }, state));
 }
 function roleCheck(label, object, key, state, disabled = false, redraw) {
   const wrap = checkbox(key, object[key], label), control = wrap.querySelector('input'); control.disabled = disabled;

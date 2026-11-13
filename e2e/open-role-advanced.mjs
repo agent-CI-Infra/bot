@@ -2,7 +2,7 @@
 import { expect } from '@playwright/test';
 
 export async function openRoleAdvanced(page) {
-  const overview = page.getByRole('heading', { name: '角色概览', exact: true });
+  const overview = page.getByRole('heading', { name: '角色概览', exact: true }).or(page.getByRole('heading', { name: 'Roles', exact: true }));
   const intro = page.getByTestId('recommended-roles-intro');
   const fold = page.getByTestId('role-advanced');
   // After a navigation the overview may still be loading; do not assume a missing heading means the page is unconfigured.
@@ -19,7 +19,7 @@ export async function openRoleAdvanced(page) {
   await expect(overview).toBeVisible();
 }
 
-const roleIds = { Manager: 'manager', Dev: 'dev', Test: 'test', Reviewer: 'reviewer', Coordinator: 'coordinator', UX: 'ux', '独立 QA': 'qa', QA: 'qa', '跨任务协调': 'coordinator' };
+const roleIds = { Manager: 'manager', Dev: 'dev', Test: 'test', Reviewer: 'reviewer', Coordinator: 'coordinator', UX: 'ux', '独立 QA': 'qa', QA: 'qa', '跨任务协调': 'coordinator', '项目管理者': 'manager', '开发': 'dev', '测试': 'test', '检视': 'reviewer', '体验检视': 'ux', '独立验收': 'qa', 'Developer': 'dev', 'Project controller': 'manager', 'Tester': 'test', 'UX reviewer': 'ux', 'Independent QA': 'qa', 'Task coordinator': 'coordinator' };
 
 export async function openRoleFromList(page, name) {
   await openRoleAdvanced(page);
@@ -63,6 +63,6 @@ export async function goRolePage(page, { role, view } = {}) {
   await page.evaluate(h => { location.hash = h; }, next);
   if (role) await expect(page.getByTestId('role-form')).toBeVisible({ timeout: 15000 });
   else if (!view) {
-    await expect(page.getByRole('heading', { name: '角色概览', exact: true }).or(page.getByTestId('recommended-roles-intro'))).toBeVisible({ timeout: 15000 });
+    await expect(page.getByRole('heading', { name: '角色概览', exact: true }).or(page.getByRole('heading', { name: 'Roles', exact: true })).or(page.getByTestId('recommended-roles-intro'))).toBeVisible({ timeout: 15000 });
   }
 }

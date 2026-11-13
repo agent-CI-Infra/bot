@@ -54,7 +54,7 @@ test('skill editing shares the role binding draft and preserves an older pinned 
   const { h, admin, catalogue, rules, path, saved } = await prepared(page);
   try {
     await select(catalogue, 'console'); await catalogue.getByLabel('文件内容', { exact: true }).fill('Keep this edited source and its role binding.');
-    await catalogue.getByRole('group', { name: '草稿绑定角色', exact: true }).getByRole('checkbox', { name: 'Dev', exact: true }).check();
+    await catalogue.getByRole('group', { name: '草稿绑定角色', exact: true }).getByRole('checkbox', { name: '开发', exact: true }).check();
     await goRolePage(page, { role: 'Dev' }); await openRoleFormAdvanced(page);
     await expect(page.getByRole('combobox', { name: 'dev 技能包', exact: true })).toHaveValue('console');
     await goRolePage(page, { view: 'skills' }); await expect(catalogue.getByLabel('文件内容', { exact: true })).toHaveValue('Keep this edited source and its role binding.');
@@ -67,7 +67,7 @@ test('skill editing shares the role binding draft and preserves an older pinned 
     const migrated = next.skill_inputs.find(b => b.id === 'migrated'); expect(migrated.source.type).toBe('inline'); expect(migrated.source.files[0].content).toBe('Previously bound review instructions.');
     await page.reload(); await expect(catalogue.getByLabel('技能包名称', { exact: true })).toBeVisible();
     await select(catalogue, 'repository'); await expect(catalogue).toContainText('草稿指定的提交与当前仓库缓存不同'); await expect(catalogue.getByLabel('固定仓库提交', { exact: true })).toHaveValue('a'.repeat(40));
-    await expect(catalogue.getByRole('region', { name: '已保存技能版本', exact: true })).toContainText('Test');
+    await expect(catalogue.getByRole('region', { name: '已保存技能版本', exact: true })).toContainText('测试');
   } finally { await h.stop(); }
 });
 

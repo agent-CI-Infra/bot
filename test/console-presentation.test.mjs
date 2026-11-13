@@ -169,7 +169,7 @@ test('role overview is a list of name, enabled, duty and status, without inline 
   assert.equal(view.table.querySelectorAll('select').length, 0);
   assert.doesNotMatch(text(view.cards[0]), /编辑权限/);
   assert.doesNotMatch(text(view.cards[0]), /policy@|配置（JSON）|修改配置/);
-  const link = [...view.table.querySelectorAll('a')].find(a => a.textContent === 'Dev');
+  const link = [...view.table.querySelectorAll('a')].find(a => a.textContent === '开发');
   assert.equal(link && link.href, '#/projects/101/roles/dev');
   assert.match(text(view.table.querySelector('tr[data-role=dev]')), /已启用/);
   const status=view.cards[0].querySelector('[data-role-version]');
