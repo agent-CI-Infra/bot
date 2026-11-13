@@ -65,3 +65,22 @@ export async function identityFixture(t, options = {}) {
   }
   return { h, admin, password, state, a, get identity() { return identity; }, get githubLogin() { return githubLogin; }, base, snapshot, login, close: async () => { await h.stop(); await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); } };
 }
+
+export async function waitForIdentityPage(page) {
+  const { expect } = await import('@playwright/test');
+  await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '正在读取身份与权限' })).toHaveCount(0);
+}
+
+export async function openIdentityAdvanced(page) {
+  const { expect } = await import('@playwright/test');
+  await waitForIdentityPage(page);
+  const summary = page.getByText('高级／诊断', { exact: true });
+  const diagnostic = page.getByRole('heading', { name: '本页诊断信息' });
+  await summary.waitFor({ state: 'visible' });
+  for (let i = 0; i < 4 && !(await diagnostic.isVisible()); i++) {
+    await summary.click();
+    await diagnostic.waitFor({ state: 'visible', timeout: 2000 }).catch(() => {});
+  }
+  await expect(diagnostic).toBeVisible();
+}

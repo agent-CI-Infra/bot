@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { identityFixture } from '../test/identity-fixture.mjs';
+import { identityFixture, openIdentityAdvanced } from '../test/identity-fixture.mjs';
 import { harness, setup, account } from '../test/helpers.mjs';
 
 const output = resolve('.tmp/login-onboarding-225');
@@ -43,6 +43,8 @@ test('a pending grant says which condition it waits on, and an older server with
   page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
   try {
     await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+    await openIdentityAdvanced(page);
     await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
     const grant = f.h.store.get("SELECT * FROM scoped_grants WHERE source='github_derived'");
     f.h.store.run('UPDATE github_installations SET revision=revision+1 WHERE ref=?', grant.installation_ref);

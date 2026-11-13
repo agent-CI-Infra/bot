@@ -56,7 +56,11 @@
 .identity-layout > .side-card { min-width: 0; margin: 0; }
 .identity-layout .identity-overview { grid-column: 1/-1; background: var(--color-brand-weak); }
 .identity-overview .facts { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
-.identity-connection-status { margin: 6px 0 0; color: var(--color-text-muted); }
+.identity-overview .identity-connection-status { font-size: 18px; font-weight: 600; line-height: 1.5; margin: 0 0 8px; }
+.identity-overview .identity-primary { margin-top: 4px; }
+.identity-advanced { grid-column: 1/-1; margin: 0; }
+.identity-advanced > summary { cursor: pointer; font-size: 15px; }
+.identity-advanced > .side-card { margin-top: 16px; }
 .identity-layout :is(.facts, .facts dd, .row, .fold, select) { min-width: 0; overflow-wrap: anywhere; }
 .identity-layout .row { grid-template-columns: minmax(0,1fr); align-items: start; }
 .identity-layout .row .facts { margin: 0; }

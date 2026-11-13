@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { identityFixture } from '../test/identity-fixture.mjs';
+import { identityFixture, openIdentityAdvanced } from '../test/identity-fixture.mjs';
 
 const output = resolve('.tmp/identity-reverify-225');
 
@@ -14,14 +14,14 @@ test('重新验证 GitHub 权限：待验证身份经服务端复核后回到已
   try {
     await page.goto(f.h.admin);
     await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
-    await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
 
     // 把身份与服务端授权行改成「待验证」，模拟 GitHub 侧权限失效后的中间态。
     const identity = f.h.store.get("SELECT id FROM external_identities WHERE provider='github'");
     f.h.store.run("UPDATE external_identities SET status='pending_verification' WHERE id=?", identity.id);
     await page.reload();
     const panel = page.locator('#identity-panel');
-    await expect(panel).toContainText('github · 待验证／需重新授权');
+    await expect(panel.locator('.identity-connection-status')).toContainText('GitHub 授权待验证');
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.screenshot({ path: resolve(output, 'reverify-pending-1440.png'), fullPage: true });
@@ -41,9 +41,12 @@ test('重新验证 GitHub 权限：待验证身份经服务端复核后回到已
     await expect.poll(() => posts.length).toBe(1);
     // 复核结果以服务端状态为准：身份回到已验证。
     await expect.poll(() => f.h.store.get("SELECT status FROM external_identities WHERE id=?", identity.id).status).toBe('active');
+    await expect(panel.getByRole('status')).toHaveText('GitHub 权限已重新验证。');
+    await expect(panel.locator('.identity-connection-status')).not.toHaveText('GitHub 授权待验证');
+    await expect(panel.getByRole('button', { name: '正在验证…' })).toHaveCount(0);
+    await openIdentityAdvanced(page);
     await expect(panel).toContainText('github · 已验证');
     await expect(panel).not.toContainText('github · 待验证／需重新授权');
-    await expect(panel.getByRole('status')).toHaveText('GitHub 权限已重新验证。');
     const done = page.getByRole('button', { name: '重新验证 GitHub 权限', exact: true });
     await expect(done).toBeEnabled();
     await expect(done).toHaveText('重新验证 GitHub 权限');
@@ -69,13 +72,15 @@ test('重新验证 GitHub 权限：需要重新授权时显示原因并跳转到
   try {
     await page.goto(f.h.admin);
     await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
-    await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+
 
     const identity = f.h.store.get("SELECT id FROM external_identities WHERE provider='github'");
     f.h.store.run("UPDATE external_identities SET status='pending_verification' WHERE id=?", identity.id);
     await page.reload();
     const panel = page.locator('#identity-panel');
-    await expect(panel).toContainText('github · 待验证／需重新授权');
+    await expect(panel.locator('.identity-connection-status')).toContainText('GitHub 授权待验证');
+
 
     f.state.failure = 401;
     const refresh = page.getByRole('button', { name: '重新验证 GitHub 权限', exact: true });
@@ -100,7 +105,9 @@ test('重新验证 GitHub 权限：安装仍待确认时显示原因而不是成
   try {
     await page.goto(f.h.admin);
     await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
-    await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+    await openIdentityAdvanced(page);
+
 
     f.state.failure = 403;
     const panel = page.locator('#identity-panel');
@@ -131,13 +138,15 @@ test('重新验证 GitHub 权限：请求超时后显示错误并恢复按钮', 
   try {
     await page.goto(f.h.admin);
     await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
-    await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+
 
     const identity = f.h.store.get("SELECT id FROM external_identities WHERE provider='github'");
     f.h.store.run("UPDATE external_identities SET status='pending_verification' WHERE id=?", identity.id);
     await page.reload();
     const panel = page.locator('#identity-panel');
-    await expect(panel).toContainText('github · 待验证／需重新授权');
+    await expect(panel.locator('.identity-connection-status')).toContainText('GitHub 授权待验证');
+
 
     await page.route('**/api/identity/refresh', async route => {
       await new Promise(resolve => setTimeout(resolve, 60_000));

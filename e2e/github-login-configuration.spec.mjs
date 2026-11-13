@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
-import { identityFixture } from '../test/identity-fixture.mjs';
+import { identityFixture, openIdentityAdvanced } from '../test/identity-fixture.mjs';
 import { harness, setup, account, testPassword } from '../test/helpers.mjs';
 import { Onboarding } from '../dist/onboarding/service.js';
 
@@ -111,7 +111,7 @@ test('系统超级管理员在全局设置向导启用 GitHub 登录，密钥不
     await page.getByRole('button', { name: '保存登录配置', exact: true }).click();
     await expect(page.locator('#message')).toContainText('GitHub 登录已启用');
     await page.locator('#logout').click(); await page.getByRole('link', { name: '使用 GitHub 登录', exact: true }).click();
-    await expect(page.getByRole('heading', { name: '当前角色与授权来源', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接', exact: true })).toBeVisible();
     await expect(page.locator('#tabs').getByRole('button', { name: '全局设置', exact: true })).toBeHidden();
     await page.goto(f.h.admin + '/#/settings/onboarding/2');
     await expect(page.locator('#settings-panel')).toBeHidden();

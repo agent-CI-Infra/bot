@@ -42,6 +42,47 @@ function grantStateText(grant) {
   if (reason) return reason;
   return ({ active: '有效', pending_verification: '待验证／权限不足，请重新授权', revoked: '已撤销', quarantined: '归属待处理' })[grant.state] || grant.state;
 }
+
+function attachGithubReverify(button, { current, feedback }) {
+  const label = '重新验证 GitHub 权限';
+  button.addEventListener('click', async () => {
+    button.disabled = true; button.textContent = '正在验证…';
+    feedback.className = 'view-error'; feedback.setAttribute('role', 'alert'); feedback.textContent = '';
+    try {
+      const result = await api('/api/identity/refresh', 'POST', {}, { signal: AbortSignal.timeout(IDENTITY_REFRESH_TIMEOUT_MS) });
+      if (!current()) return;
+      if (result.status === 'active') {
+        identityRefreshNotice = 'GitHub 权限已重新验证。';
+        identityRefreshNoticeIsError = false;
+      } else {
+        identityRefreshNotice = identityErrors.github_permission_pending;
+        identityRefreshNoticeIsError = true;
+      }
+      await start();
+    } catch (err) {
+      if (!current()) return;
+      feedback.className = 'view-error'; feedback.setAttribute('role', 'alert');
+      feedback.textContent = identityRefreshError(err);
+      if (err && (err.code === 'github_reauthorization_required' || err.code === 'github_oauth_failed')) {
+        try {
+          const result = await api('/api/identity/github/bind', 'POST', {});
+          if (current()) {
+            await new Promise(resolve => setTimeout(resolve, 400));
+            if (current()) location.assign(result.url);
+          }
+        } catch (bindErr) {
+          if (current()) feedback.textContent = identityRefreshError(err);
+        }
+      }
+    } finally { button.disabled = false; button.textContent = label; }
+  });
+}
+async function startGithubAuthorize(feedback, current) {
+  feedback.textContent = '';
+  const result = await api('/api/identity/github/bind', 'POST', {});
+  if (current()) location.assign(result.url);
+}
+
 async function renderIdentity() {
   const panel = $('identity-panel'), request = renderVersion;
   const current = () => request === renderVersion;
@@ -74,21 +115,41 @@ async function renderIdentity() {
   $('count').textContent = '';
   const scopes = data.scopes.filter(g => !data.actor.tenant_id || !g.tenant_id || g.tenant_id === data.actor.tenant_id);
   const active = scopes.filter(g => g.state === 'active'), pending = scopes.filter(g => g.state !== 'active');
-  const overview = card('我的身份与有效权限'); overview.classList.add('identity-overview');
-  overview.append(facts([['当前账户', me.username], ['当前组织', data.tenants.find(t => t.id === data.actor.tenant_id)?.display_name || (data.actor.tenant_id ? data.actor.tenant_id : '全部已授权范围')],
-    ['有效授权', `${active.length} 条`], ['待验证或历史授权', `${pending.length} 条`], ['本次读取', timestamp(Date.now())]]),
-    note(active.length ? '下方展示本次读取时的有效授权。实际操作仍由服务端重新校验；身份绑定与项目管理权限分别核验。' : '已登录，尚无有效管理授权。请联系管理员委派，或重新验证 GitHub 权限。'));
-  if (data.github_connection) {
-    overview.append(element('p', data.github_connection.status, 'identity-connection-status'));
-    if (data.github_connection.next_step) overview.append(note(data.github_connection.next_step));
-    // A public GitHub App install URL only. The App owner's settings page is never linked here.
-    if (data.github_connection.action === 'choose_repos' && data.github_connection.install_url) {
-      const go = element('a', '去 GitHub 选择仓库', 'button-link');
-      go.href = rewriteGithubAppInstallUrl(data.github_connection.install_url); go.target = '_blank'; go.rel = 'noopener noreferrer';
-      overview.append(go);
-    }
+  const connection = data.github_connection;
+  const overview = card('我的 GitHub 连接'); overview.classList.add('identity-overview');
+  const statusText = connection ? connection.status : (active.length ? '已登录，可以管理已授权的项目。' : '已登录，尚无有效管理授权。');
+  overview.append(element('p', statusText, 'identity-connection-status'));
+  if (connection && connection.next_step) overview.append(note(connection.next_step));
+  else if (!connection) overview.append(note(active.length ? '管理权限以下方「高级／诊断」里的记录为准；实际操作仍由服务端重新校验。' : '请联系管理员委派，或连接 GitHub。'));
+  const feedback = element('p', '', 'view-error'); feedback.setAttribute('role', 'alert');
+  if (identityRefreshNotice) {
+    feedback.className = identityRefreshNoticeIsError ? 'view-error' : 'view-success';
+    feedback.setAttribute('role', identityRefreshNoticeIsError ? 'alert' : 'status');
+    feedback.textContent = identityRefreshNotice; identityRefreshNotice = ''; identityRefreshNoticeIsError = false;
   }
-  overview.append(button('刷新身份与授权', () => render().catch(error)));
+  const githubEnabledButtons = [];
+  const action = connection && connection.action;
+  if (action === 'choose_repos' && connection.install_url) {
+    // A public GitHub App install URL only. The App owner's settings page is never linked here.
+    const go = element('a', '去 GitHub 选择仓库', 'button-link identity-primary');
+    go.href = rewriteGithubAppInstallUrl(connection.install_url); go.target = '_blank'; go.rel = 'noopener noreferrer';
+    overview.append(go);
+  } else if (action === 'connect') {
+    const connect = element('button', '连接 GitHub', 'identity-primary'); connect.disabled = true;
+    connect.addEventListener('click', async () => { connect.disabled = true; try { await startGithubAuthorize(feedback, current); } catch (err) { if (current()) feedback.textContent = identityRefreshError(err); connect.disabled = false; } });
+    overview.append(connect); githubEnabledButtons.push(connect);
+  } else if (action === 'reconnect') {
+    const reconnect = element('button', '重新连接', 'identity-primary'); reconnect.disabled = true;
+    reconnect.addEventListener('click', async () => { reconnect.disabled = true; try { await startGithubAuthorize(feedback, current); } catch (err) { if (current()) feedback.textContent = identityRefreshError(err); reconnect.disabled = false; } });
+    overview.append(reconnect); githubEnabledButtons.push(reconnect);
+  } else if (action === 'reverify') {
+    const reverify = element('button', '重新验证 GitHub 权限', 'identity-primary'); reverify.disabled = true;
+    attachGithubReverify(reverify, { current, feedback });
+    overview.append(reverify); githubEnabledButtons.push(reverify);
+  }
+  const disabledHint = element('p', '', 'muted identity-disabled-hint');
+  disabledHint.hidden = true;
+  overview.append(feedback, disabledHint);
   const selection = card('当前组织与项目范围'), select = document.createElement('select'), form = document.createElement('form');
   select.setAttribute('aria-label', '当前租户');
   const platform = data.scopes.some(s => s.scope === 'platform');
@@ -105,61 +166,38 @@ async function renderIdentity() {
     finally { switcher.disabled = false; select.disabled = false; }
   });
   form.className = 'identity-scope-form';
-  selection.append(form, switchMessage, note('选择组织后，项目、任务、日志和配置请求都会限制在该组织内。'), facts([['授权版本', String(data.actor.authorization_revision)]]));
+  selection.append(form, switchMessage, note('选择组织后，项目、任务、日志和配置请求都会限制在该组织内。'), facts([['权限更新序号', String(data.actor.authorization_revision)]]));
   const identities = card('登录与账号绑定');
   identities.append(note('关联 GitHub 账号时，需同时证明当前平台会话和 GitHub 身份。同名或同邮箱账号不会自动合并，关联本身不会增加管理权限。'));
-  const feedback = element('p', '', 'view-error'); feedback.setAttribute('role', 'alert');
-  if (identityRefreshNotice) {
-    feedback.className = identityRefreshNoticeIsError ? 'view-error' : 'view-success';
-    feedback.setAttribute('role', identityRefreshNoticeIsError ? 'alert' : 'status');
-    feedback.textContent = identityRefreshNotice; identityRefreshNotice = ''; identityRefreshNoticeIsError = false;
-  }
   const provider = element('div', '', 'identity-provider'), actions = element('div', '', 'actions');
+  const advancedFeedback = element('p', '', 'view-error'); advancedFeedback.setAttribute('role', 'alert');
   const bind = element('button', '绑定 GitHub 账号'); bind.disabled = true;
-  bind.addEventListener('click', async () => { bind.disabled = true; feedback.textContent = ''; try { const result = await api('/api/identity/github/bind', 'POST', {}); if (current()) location.assign(result.url); } catch (err) { if (current()) feedback.textContent = err.message; bind.disabled = false; } });
-  const refresh = element('button', '重新验证 GitHub 权限', 'quiet'); refresh.disabled = true;
-  refresh.addEventListener('click', async () => {
-    refresh.disabled = true; refresh.textContent = '正在验证…';
-    feedback.className = 'view-error'; feedback.setAttribute('role', 'alert'); feedback.textContent = '';
-    try {
-      const result = await api('/api/identity/refresh', 'POST', {}, { signal: AbortSignal.timeout(IDENTITY_REFRESH_TIMEOUT_MS) });
-      if (!current()) return;
-      if (result.status === 'active') {
-        identityRefreshNotice = 'GitHub 权限已重新验证。';
-        identityRefreshNoticeIsError = false;
-      } else {
-        identityRefreshNotice = identityErrors.github_permission_pending;
-        identityRefreshNoticeIsError = true;
-      }
-      await start();
-    } catch (err) {
-      if (!current()) return;
-      feedback.className = 'view-error'; feedback.setAttribute('role', 'alert');
-      feedback.textContent = identityRefreshError(err);
-      if (err && (err.code === 'github_reauthorization_required' || err.code === 'github_oauth_failed')) {
-        try {
-          const result = await api('/api/identity/github/bind', 'POST', {});
-          if (current()) {
-            await new Promise(resolve => setTimeout(resolve, 400));
-            if (current()) location.assign(result.url);
-          }
-        } catch (bindErr) {
-          if (current()) feedback.textContent = identityRefreshError(err);
-        }
-      }
-    } finally { refresh.disabled = false; refresh.textContent = '重新验证 GitHub 权限'; }
-  }); actions.append(bind, refresh); identities.append(actions, feedback, provider);
+  bind.addEventListener('click', async () => { bind.disabled = true; try { await startGithubAuthorize(advancedFeedback, current); } catch (err) { if (current()) advancedFeedback.textContent = identityRefreshError(err); bind.disabled = false; } });
+  githubEnabledButtons.push(bind);
+  // When reverify is already the front-page action, do not put a second identical button here.
+  let refresh = null;
+  if (action !== 'reverify') {
+    refresh = element('button', '重新验证 GitHub 权限', 'quiet'); refresh.disabled = true;
+    attachGithubReverify(refresh, { current, feedback: advancedFeedback });
+    githubEnabledButtons.push(refresh);
+    actions.append(bind, refresh);
+  } else actions.append(bind);
+  const reload = button('刷新身份与授权', () => render().catch(error));
+  reload.classList.add('quiet');
+  actions.append(reload);
+  identities.append(actions, advancedFeedback, provider);
+
   for (const identity of data.identities.filter(i => i.provider !== 'feishu')) {
     const row = element('div', '', 'row'), stateLabel = ({ active: '已验证', pending_verification: '待验证／需重新授权', revoked: '已撤销' })[identity.status] || identity.status;
     row.classList.add('identity-binding');
     row.append(element('strong', identity.display_name), element('span', `${identity.provider} · ${stateLabel}`),
-      facts([['身份来源', identity.host || identity.provider], ['最近核验', identity.verified_at ? timestamp(identity.verified_at) : '尚无核验时间']]));
+      facts([['绑定来源', identity.host || identity.provider], ['最近核验', identity.verified_at ? timestamp(identity.verified_at) : '尚无核验时间']]));
     if (identity.status !== 'revoked') {
       const revoke = element('button', '解除绑定', 'quiet');
       revoke.addEventListener('click', async () => {
         if (!confirm('解除绑定后，相关外部会话和 GitHub 派生权限立即失效。独立显式委派仍按其实际能力保留。继续？')) return;
-        revoke.disabled = true; feedback.textContent = '';
-        try { await api('/api/identity/bindings/' + encodeURIComponent(identity.id), 'DELETE', {}); if (current()) await start(); } catch (err) { if (current()) feedback.textContent = err.message; revoke.disabled = false; }
+        revoke.disabled = true; advancedFeedback.textContent = '';
+        try { await api('/api/identity/bindings/' + encodeURIComponent(identity.id), 'DELETE', {}); if (current()) await start(); } catch (err) { if (current()) advancedFeedback.textContent = err.message; revoke.disabled = false; }
       }); row.append(revoke);
     }
     identities.append(row);
@@ -182,13 +220,28 @@ async function renderIdentity() {
   permissions.append(activeList); if (pending.length) permissions.append(history);
   if (!active.length) permissions.append(note('尚无管理授权。请联系管理员委派，或重新验证你在已安装项目上的 GitHub 权限。'));
   const feishuSlot = element('div', '', 'identity-feishu');
-  feishuSlot.append(consoleState('正在读取飞书绑定', 'GitHub 身份与管理权限已独立展示。'));
-  const layout = element('div', '', 'identity-layout'); layout.append(overview, selection, identities, permissions, feishuSlot); panel.replaceChildren(layout);
+  // A nested loading line must not use role=status: the identity refresh notice is the panel's status.
+  feishuSlot.append(element('p', '正在读取飞书绑定', 'muted'));
+  const diagnostic = card('本页诊断信息');
+  diagnostic.append(facts([
+    ['本系统用户名', me.username],
+    ['当前组织', data.tenants.find(t => t.id === data.actor.tenant_id)?.display_name || (data.actor.tenant_id ? data.actor.tenant_id : '全部已授权范围')],
+    ['有效的管理权限', `${active.length} 条`],
+    ['待验证或已失效的权限', `${pending.length} 条`],
+    ['本页读取时间', timestamp(Date.now())]
+  ]), note(active.length ? '下面是本次读取到的管理权限。实际操作仍由服务端重新校验；身份绑定与项目管理权限分别核验。' : '已登录，尚无有效管理授权。请联系管理员委派，或重新验证 GitHub 权限。'));
+  const advanced = element('details', '', 'fold identity-advanced');
+  advanced.append(element('summary', '高级／诊断'), diagnostic, selection, identities, permissions);
+  const layout = element('div', '', 'identity-layout'); layout.append(overview, feishuSlot, advanced); panel.replaceChildren(layout);
   const loadProvider = async () => {
     try {
       const { enabled } = await api('/api/auth/github/status'); if (!current()) return;
-      bind.disabled = !enabled; refresh.disabled = !enabled;
-      provider.replaceChildren(...(enabled ? [] : [note('GitHub 登录尚未启用。系统超级管理员可在「全局设置 → 接入向导」中配置；现有本地账号和显式委派继续可用。')]));
+      for (const b of githubEnabledButtons) b.disabled = !enabled;
+      const disabledText = 'GitHub 登录尚未启用。系统超级管理员可在「全局设置 → 接入向导」中配置；现有本地账号和显式委派继续可用。';
+      provider.replaceChildren(...(enabled ? [] : [note(disabledText)]));
+      const primaryDisabled = !enabled && githubEnabledButtons.some(b => overview.contains(b));
+      disabledHint.textContent = disabledText;
+      disabledHint.hidden = !primaryDisabled;
     } catch (err) { if (current()) provider.replaceChildren(consoleState('GitHub 登录状态读取失败', err.message, { tone: 'error', retry: () => loadProvider() })); }
   };
   const loadFeishu = async () => {
@@ -197,7 +250,7 @@ async function renderIdentity() {
   };
   const loading = [loadProvider(), loadFeishu()];
   if (data.actor.tenant_id && data.scopes.some(g => g.state === 'active' && (g.scope === 'platform' || g.scope === 'tenant' && g.tenant_id === data.actor.tenant_id))) {
-    const members = card('组织成员授权'); layout.append(members);
+    const members = card('组织成员授权'); advanced.append(members);
     const loadMembers = async () => {
       let grants;
       try { ({ grants } = await api('/api/identity/grants?tenant_id=' + encodeURIComponent(data.actor.tenant_id))); }
