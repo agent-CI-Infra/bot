@@ -377,7 +377,25 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 
 /* Role editing keeps one mounted form and one draft while navigating its named sections. */
 /* Keep rounded clipping without making the project a separate scrolling ancestor for the toolbar. */
-.project-page:has(.roles-page){overflow:clip}
+/* #569: do not clip the shell; let the role page use the content column. */
+.project-page:has(.roles-page){overflow:visible}
+.project-page:has(.roles-page) .project-content{max-width:none;width:100%}
+.roles-page .project-table{width:100%;table-layout:auto}
+.roles-page .project-table td{min-width:0;vertical-align:top;overflow-wrap:anywhere}
+.roles-page .role-nav,.roles-page .role-editor-nav{overflow-x:auto;max-width:100%;flex-wrap:wrap}
+.roles-page .role-nav a,.roles-page .role-editor-nav button{white-space:normal;overflow-wrap:anywhere}
+.roles-page label.check,.roles-page .role-enable{align-items:center;gap:8px;min-height:var(--control-min,44px)}
+.roles-page input[type=checkbox]{width:18px;height:18px;flex:none;accent-color:var(--color-brand,#1b6b7a);cursor:pointer}
+.roles-page input[type=checkbox]:disabled{cursor:not-allowed;accent-color:var(--color-text-muted,#607087)}
+.roles-page .role-form-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 16px;margin:0 0 8px}
+.roles-page .role-form-head h3{margin:0;min-width:0;flex:1 1 auto;overflow-wrap:anywhere}
+.roles-page .role-form-head .role-enable-block,.roles-page .role-form-head .role-enable{margin:0;flex:0 1 auto}
+.roles-page .role-enable-block{display:flex;flex-direction:column;align-items:flex-start;gap:4px}
+.roles-page .role-enable-reason{margin:0;font-size:13px;color:var(--color-text-muted,#607087);overflow-wrap:anywhere}
+@media(max-width:767px){
+  .roles-page .side-card>label{margin:.45rem 0}
+  .roles-page h2,.roles-page h3{overflow-wrap:anywhere}
+}
 .role-editor-fields{border:0;padding:0;margin:0;min-width:0;display:grid;gap:12px}
 .role-editor-group{min-width:0;padding:16px 0;border-top:1px solid var(--border,#d8dee9);scroll-margin-top:20px}
 .role-editor-group>label{display:flex;flex-direction:column;gap:5px;margin:12px 0}

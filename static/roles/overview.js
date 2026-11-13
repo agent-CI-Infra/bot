@@ -34,7 +34,7 @@ function roleOverviewCards(state, redraw) {
     const link = element('a', roleConfigName(role.role_id, role.name)); link.href = `#/projects/${current.id}/roles/${role.role_id}`;
     link.dataset.testid = 'role-list-' + role.role_id;
     tableCell(row, rolePageText('columns')[0], link);
-    tableCell(row, rolePageText('columns')[1], roleCheck(rolePageText('enableList') + ' ' + roleConfigName(role.role_id, role.name), role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind), redraw));
+    tableCell(row, rolePageText('columns')[1], roleCheck(rolePageText('enableList') + ' ' + roleConfigName(role.role_id, role.name), role, 'enabled', state, requiredRoleLocked(role), { reason: requiredEnableReason(role), redraw }));
     const dutyText = roleConfigDuty(role.role_id, role.responsibility);
     const duty = note(dutyText || rolePageText('emptyDuty')); if (dutyText) duty.title = dutyText; tableCell(row, rolePageText('columns')[2], duty);
     const saved = data.configuration.roles.find(entry => entry.role_id === role.role_id);
