@@ -4,6 +4,7 @@ import {once} from 'node:events';
 import {randomBytes} from 'node:crypto';
 import {createAgentSession,createExtensionRuntime,ModelRuntime,SessionManager,SettingsManager,estimateTokens} from '@earendil-works/pi-coding-agent';
 import {workspace} from './workspace.mjs';
+import {commandOptions} from './command-policy.mjs';
 import {waitModelReply} from './model-reply.mjs';
 import {toolCapabilityError,platformWrites} from './capabilities.mjs';
 import {createRepositoryTool} from './repository-tool.mjs';
@@ -123,11 +124,16 @@ try{
         try{const data=Buffer.from(args.content);if(!note&&data.length>48000)throw new Error('file_too_large');result=await workspace({type:'workspace_write',workspace_id:cfg.workspace_id,path:args.path,base64:data.toString('base64'),offset:0,final:true,mode:'100644'});}
         catch(error){result={error:String(error.message)};}
       }else if(name==='run_command'){
-        // Commands have no time limit; the model may still bound one that could hang.
-        const timeout=args.timeout_seconds>0?args.timeout_seconds*1000:null;
-        await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify(clean({operation_id:id,command:args.command,timeout_ms:timeout,keep_background:args.keep_background===true})),{mode:0o600});
-        const secret_env=grant?{GH_TOKEN:grant.token,GITHUB_TOKEN:grant.token}:undefined;
-        try{result=await workspace({type:'workspace_command',workspace_id:cfg.workspace_id,command:args.command,timeout_ms:timeout,keep_background:args.keep_background===true,output_file:dir+'/command.out',secret_env});}finally{await unlink(dir+'/live.json').catch(()=>{});}
+        const policy=cfg.command_timeout??{default_seconds:null,max_seconds:600};
+        const options=commandOptions(args,policy.default_seconds,policy.max_seconds);
+        if(!options.request)result={error:options.error,message:options.message};
+        else {
+          await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify(clean({operation_id:id,...options.request})),{mode:0o600});
+          const secret_env=grant?{GH_TOKEN:grant.token,GITHUB_TOKEN:grant.token}:undefined;
+          try{result=await workspace({...options.request,workspace_id:cfg.workspace_id,output_file:dir+'/command.out',secret_env});
+            if(options.timeout_notice)result={...result,timeout_notice:options.timeout_notice};
+          }finally{await unlink(dir+'/live.json').catch(()=>{});}
+        }
       }else if(name==='github_read_token'){
         // The token stays in this process and reaches later commands only as environment variables; the model sees what it can do, not the value.
         if(!grant||Date.parse(grant.expires_at)-Date.now()<10*60000){const reply=await exchange(signal);if(reply.error)result={error:reply.error};else if(reply.structured_only)result={repository:reply.repository,permissions:reply.permissions,variables:[],instruction:reply.instruction};else {grant=reply;secrets.add(grant.token);}}

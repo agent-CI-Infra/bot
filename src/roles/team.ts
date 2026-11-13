@@ -17,6 +17,8 @@ import { findingsSchema,nominationSchema,environmentProfiles } from './catalog.j
 const tool=(name:string,description:string,properties:any,required:string[]=[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
 const readRecord=tool('read_task_record','Read a durable record from THIS task by offered reference; use offset to page its JSON.',{ref:{type:'string'},offset:{type:'integer'}},['ref']);
 export interface TeamEnvironment {
+ /** Entry-specific observer tool descriptions and defaults; execution still uses the entry callback. */
+ observerTools?:AgentSpec<any>['tools'];
  withRole?:<R>(role:string,work:()=>Promise<R>)=>Promise<R>;
  withObservers?:<R>(work:()=>Promise<R>)=>Promise<R>;
  bindRun?:(runId:string)=>void;
@@ -115,7 +117,7 @@ if(value.contract_revision!==records.get(task.id).revision)return stop('role_nom
    const handoff=existing?null:traceEvent(s,task.id,'role_handoff',{assignment_id:assignment,role:args.role,purpose:args.purpose,refs:args.refs,revision},task.trace_run_id,'role:manager',args.refs);
    const role=args.role,dev=role==='dev';
    // github_write reaches every worker the entry offers it to; runRole keeps it only for roles whose GitHub permissions write (#381).
-   const narrow=dev?spec.tools??[]:(spec.tools??[]).filter(t=>['read_file','run_command','read_task_history','search_project_memory','read_project_memory','read_related_artifact','github_write'].includes(t.function.name));
+   const narrow=dev?spec.tools??[]:(environment.observerTools??spec.tools??[]).filter(t=>['read_file','run_command','read_task_history','search_project_memory','read_project_memory','read_related_artifact','github_write'].includes(t.function.name));
    const roleSpec:AgentSpec<any>={...spec,candidateSnapshot:dev?(environment.writerSnapshot??environment.snapshot??spec.candidateSnapshot):undefined,onRun:id=>{environment.bindRun?.(id);spec.onRun?.(id);},adapter:undefined,pi:undefined,tools:[...narrow,readRecord,...(dev?[]:[findings])],system:dev?spec.system:'Inspect only this fixed candidate. Commands run in a separate disposable checkout; do not change source or claim unexecuted checks.',prompt:JSON.stringify({task_id:task.id,contract:records.get(task.id).contract,purpose:args.purpose,refs:args.refs,handoff_ref:handoff,previous_acceptance:records.get(task.id).acceptance,source_context:dev?spec.prompt:undefined}),execute:commonExecute,finish:dev?spec.finish:{name:'submit_role_result',validate:validateFindings},finalizationTools:dev?spec.finalizationTools:['submit_role_result'],validate:dev?spec.validate:content=>validateFindings(JSON.parse(content))};
    // Create the persistent instance before linking the assignment. runRole reuses it.
    const executor=dev?environment.executor:undefined,instance=roleInstance(s,task,role,executor?.harness,!!executor);

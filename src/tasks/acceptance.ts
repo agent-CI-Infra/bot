@@ -1,3 +1,4 @@
+import { commandTool, runCommand } from '../agent/command.js';
 import {assessFollowups} from './followups.js';
 import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import {scopeInstructions} from './scope.js';
@@ -51,7 +52,7 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
   if(related.length)tools.push(relatedArtifactTool);
   const hasMemory=!!store.get('SELECT 1 FROM project_memories WHERE repository_id=? LIMIT 1',task.repository_id);if(hasMemory)tools.push(...memoryTools.filter(t=>t.function.name!=='remember_project_memory'));
   // Caller supplies a trusted profile, not permissions from task/model text. Standard engine workflows retain shell.
-  if(shell)tools.push(tool('run_command','Run necessary verification in the candidate workspace; do not modify source',{command:{type:'string'}},['command']));
+  if(shell)tools.push(commandTool(120,'Run necessary verification in the candidate workspace; do not modify source.'));
   const validateDecision=(value:any):Verdict=>{
     if(value?.outcome==='evaluation_incomplete')return stop('acceptance_budget_exhausted','retry_wait','验收未形成判断，候选和原始观察已保留：'+redactor.text(String(value.reason||'verification budget exhausted')).slice(0,2000));
     try{return validateVerdict(redactor.clean(value));}catch(error){return stop('acceptance_output_invalid','retry_wait',String((error as Error).message));}
@@ -102,7 +103,7 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
         if(hasMemory&&['search_project_memory','read_project_memory'].includes(name))return memoryTool(store,{...task,head_sha:snapshot?.local_sha||task.head_sha},name,redactor.clean(args),async doc=>{const raw=await verification.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};});
         const executorPath=name==='run_command'&&verification!==workspace&&typeof args?.command==='string'&&args.command.includes('/'+task.workspace_id+'/');
         const result=executorPath?{error:'executor_workspace_reference',message:'This path names the mutable executor workspace. Use repository-relative paths in the independent candidate checkout (run pwd if needed); retrieve historical observations through read_evidence.'}:name==='read_related_artifact'?await readRelatedArtifact(store,task,verification,args):name==='read_evidence'?readEvidence(store,task.id,candidate,args,taskTraceAccess(store,{...task,active_role:'qa'})):name==='read_task_history'?records.tool(task.id,name,args,taskTraceAccess(store,task)):name==='read_file'?await verification.call(`accept:${evaluationId}:read:${randomId()}`,{type:'workspace_read',path:args?.path,...(snapshot?.local_sha&&!String(args?.path).startsWith('../')?{sha:snapshot.local_sha}:{})})
-          :await verification.call(`accept:${evaluationId}:verify:${randomId()}`,{type:'workspace_command',command:args?.command,timeout_ms:120000});
+          :await runCommand(verification,`accept:${evaluationId}:verify:${randomId()}`,args,120);
         records.history(task.id,'acceptance_evidence',{evaluation_id:evaluationId,name,arguments:redactor.clean(args),result:redactor.clean(result)});return result;
       },repairInvalid:error=>{
         if((error as any).code!=='acceptance_output_invalid')return undefined;

@@ -14,6 +14,14 @@
 
 发布确认、幂等 outbox、发布状态机、仓库授权和 claim 是控制面的职责，不交给提示词决定。统一 Agent 不等于移除这些安全边界。
 
+## 工作区命令时限
+
+`run_command` 接受正整数 `timeout_seconds` 和布尔值 `keep_background`。阶段观察者和独立 QA 不传时默认 120 秒；角色化开发和请求执行器默认 180 秒；普通工作流不传时仍等待命令结束。显式时限统一由部署变量 `BOT_COMMAND_TIMEOUT_MAX_SECONDS` 限制，默认 600 秒；Compose 会把它传入控制面，修改后重建控制面容器生效。变量必须是 1～2147363 的整数（为工作区 RPC 的额外等待预留后，Node 定时器允许的毫秒范围）。若配置上限小于入口缺省值，缺省值也按上限执行。
+
+超过上限的请求会按上限执行，工具结果增加 `timeout_notice`，列出 `requested_seconds`、`effective_seconds`、`max_seconds` 和说明。Native、Process 与 Pi 使用同一参数处理，Pi 普通工作流的容器内命令也遵守控制面传入的上限。框架自行运行的项目策略测试不属于模型的 `run_command`，保持原有等待行为。
+
+启动服务或 watcher 时使用 `keep_background: true`，并把输出重定向到工作区文件；命令及时返回后，后续同一任务命令仍可访问该进程，任务结束时回收。
+
 ## 触发上下文与仓库探索
 
 Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这一个对象。`src/agent/exploration.ts` 的 `RepositoryExplorer` 为 CI 观察、检视和开发提供同一套只读工具：
