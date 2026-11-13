@@ -232,8 +232,6 @@ function syncConsoleShell() {
   $('console-area').textContent = platform ? t('nav.platform') : project ? t('nav.project_workspace') : personal ? t('nav.personal') : t('nav.workspace');
   // The scope bar names both halves of the current address: a project name alone does not say which organization it is in.
   const shortName = r => (r.full_name || '').includes('/') ? r.full_name.split('/').slice(1).join('/') : r.full_name;
-  const personalTitle = /^#\/identity\/feishu-apps(?:\/|$)/.test(location.hash) ? t('nav.feishu_apps')
-    : /^#\/identity\/feishu(?:$|\?|\/)/.test(location.hash) ? t('nav.feishu') : t('identity.title');
   // #558: the identity page already has a single h1; repeating the same words in the
   // breadcrumb made two visible titles. The crumb stays "个人设置" and the h1 names the page.
   // An installed repository nobody has started is no project yet; its cached installation row still names it.
