@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
-import { identityFixture } from '../test/identity-fixture.mjs';
+import { identityFixture, openIdentityAdvanced } from '../test/identity-fixture.mjs';
 import { Onboarding } from '../dist/onboarding/service.js';
 import { testPassword } from '../test/helpers.mjs';
 
@@ -128,10 +128,17 @@ test('identity and effective grants remain visible when optional provider and Fe
   let failures = true;
   try {
     await localLogin(page, f, '/#/identity');
-    await expect(page.getByRole('heading', { name: '我的身份与有效权限' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+    await expect(page.getByText('本系统用户名', { exact: true })).toBeHidden();
+    await expect(page.getByText('权限更新序号', { exact: true })).toBeHidden();
+    await expect(page.getByText('本页读取时间', { exact: true })).toBeHidden();
+    await openIdentityAdvanced(page);
+    await expect(page.getByText('本系统用户名', { exact: true })).toBeVisible();
+    await expect(page.getByText('权限更新序号', { exact: true })).toBeVisible();
     await page.route('**/api/auth/github/status', route => failures ? route.fulfill({ status: 503, json: { error: 'provider_unavailable' } }) : route.continue());
     await page.route('**/api/channels/bindings', route => failures ? route.fulfill({ status: 503, json: { error: 'bindings_unavailable' } }) : route.continue());
     await page.getByRole('button', { name: '刷新身份与授权' }).click();
+    await openIdentityAdvanced(page);
     await expect(page.getByRole('heading', { name: 'GitHub 登录状态读取失败' })).toBeVisible();
     await expect(page.getByRole('heading', { name: '飞书绑定读取失败' })).toBeVisible();
     await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
@@ -155,13 +162,15 @@ test('identity read errors replace old permissions and a late response cannot re
   let fail = true, release = () => {};
   try {
     await localLogin(page, f, '/#/identity');
-    await expect(page.getByRole('heading', { name: '我的身份与有效权限' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+    await openIdentityAdvanced(page);
     await page.route('**/api/identity', route => fail ? route.fulfill({ status: 503, json: { error: 'identity_unavailable' } }) : route.continue());
     await page.getByRole('button', { name: '刷新身份与授权' }).click();
     await expect(page.getByRole('heading', { name: '身份与权限读取失败' })).toBeVisible();
     await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toHaveCount(0);
     fail = false; await page.getByRole('button', { name: '重新加载', exact: true }).click();
-    await expect(page.getByRole('heading', { name: '我的身份与有效权限' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+    await openIdentityAdvanced(page);
     await page.unroute('**/api/identity');
     const gate = new Promise(resolve => { release = resolve; });
     await page.route('**/api/identity', async route => { const response = await route.fetch(); await gate; await route.fulfill({ response }); });
@@ -170,7 +179,7 @@ test('identity read errors replace old permissions and a late response cannot re
     await page.evaluate(() => { location.hash = '#/projects'; });
     await expect(page.locator('#identity-panel')).toBeHidden();
     release(); await page.unrouteAll({ behavior: 'wait' });
-    await expect(page.locator('#identity-panel').getByRole('heading', { name: '我的身份与有效权限' })).toHaveCount(0);
+    await expect(page.locator('#identity-panel').getByRole('heading', { name: '我的 GitHub 连接' })).toHaveCount(0);
     await expect(page).toHaveURL(/#\/projects$/);
   } finally { release(); await f.close(); }
 });

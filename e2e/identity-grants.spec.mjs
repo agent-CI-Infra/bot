@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { identityFixture } from '../test/identity-fixture.mjs';
+import { identityFixture, openIdentityAdvanced } from '../test/identity-fixture.mjs';
 
 // #237: the tenant member list carried principal, source, project and state only, while the same page already asked
 // "最近核验 / 授权有效期" for the person's own grants and the API had always returned grantor_id, expires_at and
@@ -38,11 +38,14 @@ test('组织成员授权展示授权者、最近核验与授权有效期', async
     await delegatedMember(f);
     await page.goto(f.h.admin);
     await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+    await openIdentityAdvanced(page);
     await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
     await page.getByLabel('当前租户').selectOption('github.com:10');
     await page.getByRole('button', { name: '切换组织' }).click();
     await expect(page.getByLabel('当前租户')).toHaveValue('github.com:10');
     await page.goto(f.h.admin + '/#/identity');
+    await openIdentityAdvanced(page);
     await expect(page.getByRole('heading', { name: '组织成员授权' })).toBeVisible();
     const row = page.locator('#identity-panel .row').filter({ hasText: 'team-member' });
     await expect(row).toContainText('授权者');

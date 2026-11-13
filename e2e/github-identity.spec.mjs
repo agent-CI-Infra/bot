@@ -2,7 +2,7 @@ import { consoleNavigate } from './console-navigation.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { identityFixture } from '../test/identity-fixture.mjs';
+import { identityFixture, openIdentityAdvanced } from '../test/identity-fixture.mjs';
 
 const output = resolve('.tmp/github-login-163');
 test.beforeEach(async ({ page }) => {
@@ -13,29 +13,42 @@ test('GitHub 登录、组织切换、权限来源、撤销与本地恢复', asyn
   const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
   try {
     await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+    await openIdentityAdvanced(page);
     await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
     await expect(page.locator('#identity-panel')).toContainText('组织管理员');
     await expect(page.locator('#identity-panel')).toContainText('GitHub 当前权限（继承）');
     await expect(page.getByRole('button', { name: '全局设置', exact: true })).toBeHidden();
     const principal = f.h.store.get("SELECT principal_id FROM external_identities WHERE provider='github'").principal_id;
     await f.admin('/api/project-admin-assignments', 'PUT', { user_id: principal, repository_ids: ['101'] });
-    await page.reload(); await expect(page.locator('#identity-panel')).toContainText('显式委派');
-    await page.getByLabel('当前租户').selectOption('github.com:10'); await page.getByRole('button', { name: '切换组织' }).click();
+    await page.reload(); await openIdentityAdvanced(page); await expect(page.locator('#identity-panel')).toContainText('显式委派');
+    await page.getByLabel('当前租户').selectOption('github.com:10');
+    const switched = page.waitForResponse(r => r.url().includes('/api/identity') && r.request().method() === 'GET' && r.ok());
+    await page.getByRole('button', { name: '切换组织' }).click();
+    await switched;
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+    await openIdentityAdvanced(page);
     await expect(page.getByLabel('当前租户')).toHaveValue('github.com:10');
     const crossTenant = await page.evaluate(async () => (await fetch('/api/repositories/201')).status); expect(crossTenant).toBe(403);
     await page.screenshot({ path: resolve(output, 'permissions-desktop.png'), fullPage: true });
     f.state.owner = false; f.state.admin = false;
+    await openIdentityAdvanced(page);
+    const reverified = page.waitForResponse(r => r.url().includes('/api/identity') && r.request().method() === 'GET' && r.ok());
     await page.getByRole('button', { name: '重新验证 GitHub 权限' }).click();
+    await reverified;
+    await openIdentityAdvanced(page);
     await expect(page.locator('#identity-panel')).toContainText('已撤销');
     await expect(page.locator('#identity-panel')).toContainText('显式委派');
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: resolve(output, 'revoked-mobile.png'), fullPage: true });
     page.on('dialog', dialog => dialog.accept());
+    await openIdentityAdvanced(page);
     await page.getByRole('button', { name: '解除绑定', exact: true }).click();
     await expect(page.getByRole('button', { name: '登录', exact: true })).toBeVisible();
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click(); await consoleNavigate(page, '身份与权限');
+    await openIdentityAdvanced(page);
     await expect(page.locator('#identity-panel')).toContainText('平台超级管理员');
     expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
@@ -75,9 +88,11 @@ test('绑定同一 GitHub 身份会显示冲突；本地会话可以完成新身
     await f.login(); await page.goto(f.h.admin);
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click(); await consoleNavigate(page, '身份与权限');
+    await openIdentityAdvanced(page);
     await page.getByRole('button', { name: '绑定 GitHub 账号', exact: true }).click();
     await expect(page.locator('#message')).toContainText('已绑定其他账号');
     f.state.id = 43;
+    await openIdentityAdvanced(page);
     await page.getByRole('button', { name: '绑定 GitHub 账号', exact: true }).click();
     await expect(page.locator('#identity-panel')).toContainText('已验证');
     await expect(page.locator('#identity-panel')).toContainText('平台超级管理员');
@@ -143,4 +158,57 @@ test('已登录但没有仓库时可以去 GitHub 选择仓库，接入向导接
     await expect(go).toBeInViewport();
     await page.screenshot({ path: '.tmp/ui-509/choose-repos-390.png', fullPage: true });
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('身份页概览在 1440 与 390 下完整可见，展开的高级区占满整行', async ({ page }) => {
+  const f = await identityFixture();
+  const { mkdirSync } = await import('node:fs');
+  try {
+    mkdirSync('.tmp/ui-514', { recursive: true });
+    const shot = async (name) => {
+      const advanced = page.locator('.identity-advanced');
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await expect(advanced).not.toHaveAttribute('open', '');
+      await page.screenshot({ path: `.tmp/ui-514/${name}-collapsed-1440.png`, fullPage: true });
+      await openIdentityAdvanced(page);
+      const widths = await page.evaluate(() => {
+        const overview = document.querySelector('.identity-overview');
+        const adv = document.querySelector('.identity-advanced');
+        return { overview: Math.round(overview.getBoundingClientRect().width), advanced: Math.round(adv.getBoundingClientRect().width) };
+      });
+      expect(Math.abs(widths.overview - widths.advanced)).toBeLessThan(2);
+      await page.screenshot({ path: `.tmp/ui-514/${name}-expanded-1440.png`, fullPage: true });
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+      await page.screenshot({ path: `.tmp/ui-514/${name}-expanded-390.png`, fullPage: true });
+      await advanced.locator(':scope > summary').click();
+      await expect(advanced).not.toHaveAttribute('open', '');
+      await page.screenshot({ path: `.tmp/ui-514/${name}-collapsed-390.png`, fullPage: true });
+    };
+
+    await page.goto(f.h.admin);
+    await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+    await expect(page.locator('.identity-connection-status')).toContainText('已连接 GitHub');
+    await shot('connected');
+
+    const identity = f.h.store.get("SELECT id, principal_id FROM external_identities WHERE provider='github'");
+    f.h.store.run("UPDATE external_identities SET status='pending_verification' WHERE id=?", identity.id);
+    await page.reload();
+    await expect(page.locator('.identity-connection-status')).toContainText('待验证');
+    await expect(page.getByRole('button', { name: '重新验证 GitHub 权限', exact: true })).toBeVisible();
+    await shot('pending');
+
+    f.h.store.run("UPDATE external_identities SET status='active' WHERE id=?", identity.id);
+    f.h.store.run("INSERT OR REPLACE INTO settings VALUES('onboarding.app',?)", JSON.stringify({
+      account_id: f.a.id, app_id: '123', slug: 'fixture-app',
+      install_url: 'https://github.com/apps/fixture-app/installations/select_target',
+    }));
+    f.state.owner = false; f.state.admin = false; f.state.permission = 'write';
+    await f.identity.reverify(identity.principal_id);
+    await page.reload();
+    await expect(page.locator('.identity-connection-status')).toContainText('还没有授权任何仓库');
+    await expect(page.getByRole('link', { name: '去 GitHub 选择仓库', exact: true })).toBeVisible();
+    await shot('no-repos');
+  } finally { await f.close(); }
 });
