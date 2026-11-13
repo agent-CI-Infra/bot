@@ -362,3 +362,166 @@ test('页内显式管理范围不被顶栏切换冲掉，跟随默认的那种�
     await expect(page.locator('#management-scope-note')).not.toContainText('本页覆盖');
   } finally { await h.stop(); }
 });
+
+// #493: a page-local override keeps the assistant on the scope the reader chose, but the shell picker can still change.
+// The sentence beside the control has to name the new default in the same frame; the control and the conversation stay.
+test('窄屏 390：页内覆盖时顶栏切换在同一帧刷新范围说明，控制与会话不动', async ({ page }) => {
+  const { h, password } = await fixture();
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await login(page, h, password);
+    await page.goto(h.admin + '/#/management');
+    const scope = page.getByLabel('当前管理作用域', { exact: true });
+    await expect(scope).toHaveValue('platform');
+    await expect(page.locator('#management-scope-note')).toContainText('顶栏未选项目');
+    await scope.selectOption('project:202');
+    await expect(page.locator('#management-scope-note')).toContainText('本页覆盖；顶栏未选项目');
+    // The sidebar picker is not reachable at this width, so the shell's own change event stands in for the picker change:
+    // the value is written and exactly the event the picker dispatches is dispatched on it.
+    const note = await page.evaluate(() => {
+      const picker = document.getElementById('console-project');
+      picker.value = '101';
+      picker.dispatchEvent(new Event('change', { bubbles: true }));
+      // Same frame: read back before any awaited work can repaint the sentence.
+      return document.getElementById('management-scope-note')?.textContent || '';
+    });
+    expect(note).toContain('本页覆盖');
+    expect(note).toContain('顶栏默认：fixture/project-101');
+    expect(note).not.toContain('顶栏未选项目');
+    await expect(scope).toHaveValue('project:202');
+    await expect(page).toHaveURL(/#\/management$/);
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); }
+});
+
+test('桌面 1440：页内覆盖时顶栏切换在同一帧刷新范围说明，控制与会话不动', async ({ page }) => {
+  const { h, password } = await fixture();
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    await page.goto(h.admin + '/#/management');
+    const scope = page.getByLabel('当前管理作用域', { exact: true });
+    const note = page.locator('#management-scope-note');
+    await expect(scope).toHaveValue('platform');
+    await scope.selectOption('project:202');
+    await expect(note).toContainText('本页覆盖；顶栏未选项目');
+    // The override outlives the picker change: the conversation stays on 202 and the control keeps showing it.
+    const opened = [];
+    page.on('request', request => {
+      const url = new URL(request.url());
+      if (url.pathname !== '/api/management/conversations' || request.method() !== 'POST') return;
+      try { opened.push(JSON.parse(request.postData() || '{}').scope); } catch { /* a body without a scope is not one */ }
+    });
+    await page.locator('#console-project').selectOption('101');
+    await expect(page).toHaveURL(/#\/management$/);
+    // Read straight after the change, before any awaited work: the sentence already names 101 as the shell default.
+    const shown = await page.evaluate(() => document.getElementById('management-scope-note')?.textContent || '');
+    expect(shown).toContain('本页覆盖');
+    expect(shown).toContain('顶栏默认：fixture/project-101');
+    expect(shown).not.toContain('顶栏未选项目');
+    await expect(scope).toHaveValue('project:202');
+    expect(opened).not.toContain('project:101');
+    // Back to the default through the page's own control: a scope equal to the shell default is not an override. A route
+    // round-trip cannot stand in for this — the chat surface survives navigation, so the panel and its flag are kept.
+    await scope.selectOption('project:101');
+    await expect(scope).toHaveValue('project:101');
+    await expect(note).toContainText('fixture/project-101');
+    await expect(note).toContainText('（顶栏默认）');
+    await expect(note).not.toContainText('本页覆盖');
+    // With no override left the picker moves everything again: one wording, and the conversation the assistant shows is
+    // the one it keeps for 202. That conversation already exists from the override above, so following it opens it
+    // instead of creating a second one; the switch is read from the session the panel remembers for that scope.
+    const sessions = page.getByLabel('持久会话');
+    const sessionOf = name => page.evaluate(suffix => {
+      const key = Object.keys(localStorage).find(item => item.startsWith('management-conversation:') && item.endsWith(':' + suffix));
+      return key ? localStorage.getItem(key) : null;
+    }, name);
+    const conversationOf202 = await sessionOf('project:202');
+    expect(conversationOf202).toBeTruthy();
+    await page.locator('#console-project').selectOption('202');
+    await expect(scope).toHaveValue('project:202');
+    await expect(note).toContainText('fixture/project-202');
+    await expect(note).toContainText('（顶栏默认）');
+    await expect(note).not.toContainText('本页覆盖');
+    await expect(sessions).toHaveValue(conversationOf202);
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); }
+});
+
+// #493, negative case: with no page-local override the note keeps its single wording and the conversation really moves
+// with the picker, so only the sentence was ever at stake.
+test('桌面 1440：无页内覆盖时范围说明仍是顶栏默认，会话随顶栏换', async ({ page }) => {
+  const { h, password } = await fixture();
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    await page.goto(h.admin + '/#/management');
+    const scope = page.getByLabel('当前管理作用域', { exact: true });
+    const note = page.locator('#management-scope-note');
+    await expect(scope).toHaveValue('platform');
+    await expect(note).toContainText('顶栏未选项目');
+    // The picker names a project: the sentence names it as the default it is, and the conversation is opened for it.
+    const openedOn101 = conversationScopeRequest(page, 'project:101');
+    await page.locator('#console-project').selectOption('101');
+    // Same frame: the sentence already names 101 as the default, read back before the conversation request is awaited.
+    const shownOn101 = await page.evaluate(() => document.getElementById('management-scope-note')?.textContent || '');
+    expect(shownOn101).toContain('fixture/project-101');
+    expect(shownOn101).toContain('（顶栏默认）');
+    await openedOn101;
+    await expect(scope).toHaveValue('project:101');
+    await expect(note).toContainText('project-101');
+    await expect(note).toContainText('顶栏默认');
+    await expect(note).not.toContainText('本页覆盖');
+    // A second picker change moves everything again: still one wording, and 202 gets its own conversation.
+    const openedOn202 = conversationScopeRequest(page, 'project:202');
+    await page.locator('#console-project').selectOption('202');
+    const shownOn202 = await page.evaluate(() => document.getElementById('management-scope-note')?.textContent || '');
+    expect(shownOn202).toContain('fixture/project-202');
+    expect(shownOn202).toContain('（顶栏默认）');
+    await openedOn202;
+    await expect(scope).toHaveValue('project:202');
+    await expect(note).toContainText('project-202');
+    await expect(note).toContainText('顶栏默认');
+    await expect(note).not.toContainText('本页覆盖');
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); }
+});
+
+// #493 review: the sentence and the scope control must agree once the picker lands on the project the page override
+// names. That scope is the default now, so the next picker change has to move the control and the conversation again.
+test('桌面 1440：页内覆盖被顶栏选成默认后，下一次顶栏切换重新跟随', async ({ page }) => {
+  const { h, password } = await fixture();
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    await page.goto(h.admin + '/#/management');
+    const scope = page.getByLabel('当前管理作用域', { exact: true });
+    const note = page.locator('#management-scope-note');
+    await expect(scope).toHaveValue('platform');
+    await scope.selectOption('project:202');
+    await expect(note).toContainText('本页覆盖；顶栏未选项目');
+    // The picker names the project the page already shows: one scope, one wording, and the control keeps 202.
+    await page.locator('#console-project').selectOption('202');
+    await expect(scope).toHaveValue('project:202');
+    await expect(note).toContainText('fixture/project-202');
+    await expect(note).toContainText('（顶栏默认）');
+    await expect(note).not.toContainText('本页覆盖');
+    // With the override gone, the next picker change really moves the scope and opens 101's conversation.
+    const openedOn101 = conversationScopeRequest(page, 'project:101');
+    await page.locator('#console-project').selectOption('101');
+    await openedOn101;
+    await expect(scope).toHaveValue('project:101');
+    await expect(note).toContainText('fixture/project-101');
+    await expect(note).toContainText('（顶栏默认）');
+    await expect(note).not.toContainText('本页覆盖');
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); }
+});
