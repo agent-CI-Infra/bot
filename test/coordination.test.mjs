@@ -34,7 +34,7 @@ test('Task Manager requests concrete coordination through offered tool and yield
  assert.equal(f.s.get('SELECT count(*) n FROM task_coordinations').n,1);assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='coordination_requested'").n,1);
 });
 test('queued and interrupted coordination survive SQLite reopen; notices preserve running/QA candidates and old QA cannot certify new context',async t=>{
- let calls=0;const f=await setup(t,body=>{calls++;assert.deepEqual(body.tools.map(x=>x.function.name).sort(),['read_project_task','submit_coordination']);return call('submit_coordination',notices());});
+ let calls=0;const f=await setup(t,body=>{calls++;assert.deepEqual(body.tools.map(x=>x.function.name).sort(),['read_project_task','read_tool_result','submit_coordination']);return call('submit_coordination',notices());});
  const r=f.records(),old=r.submit('b',[{kind:'report',reference:'fixed',version:'tree'}],[],{});r.stage('b',old.id,old.revision,verdict);
  const req=requestCoordination(f.s,f.s.get("SELECT * FROM tasks WHERE id='a'"),request);f.s.run("UPDATE tasks SET status='waiting_coordination' WHERE id='a'");assert.equal(requestCoordination(f.s,f.s.get("SELECT * FROM tasks WHERE id='a'"),request).coordination_id,req.coordination_id);
  f.s.run("UPDATE tasks SET status='waiting_coordination' WHERE id='a'");f.s.run("UPDATE task_coordinations SET state='running',claim_token='lost-process' WHERE id=?",req.coordination_id);
