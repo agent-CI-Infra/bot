@@ -81,3 +81,22 @@ test('the console serves /i18n.js', async (t) => {
   assert.match(body, /'zh-CN'/);
   assert.match(body, /\ben:\s*\{/);
 });
+
+test('the console page has no inline script and serves /locale-boot.js', async (t) => {
+  const html = readFileSync(new URL('../static/index.html', import.meta.url), 'utf8');
+  assert.equal([...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>/g)].length, 0);
+  assert.match(html, /<script src="\/locale-boot\.js"><\/script>/);
+  const h = await harness();
+  t.after(async () => { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); });
+  const boot = await fetch(h.admin + '/locale-boot.js');
+  assert.equal(boot.status, 200);
+  assert.match(boot.headers.get('content-type'), /^text\/javascript/);
+  assert.match(await boot.text(), /launchpad\.locale/);
+  const page = await fetch(h.admin + '/');
+  assert.equal(page.status, 200);
+  const csp = page.headers.get('content-security-policy') || '';
+  assert.match(csp, /script-src 'self'/);
+  assert.doesNotMatch(csp, /unsafe-inline/);
+  const body = await page.text();
+  assert.equal([...body.matchAll(/<script(?![^>]*\bsrc=)[^>]*>/g)].length, 0);
+});
