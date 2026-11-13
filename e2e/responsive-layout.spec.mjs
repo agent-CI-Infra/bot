@@ -1,0 +1,184 @@
+import { test, expect } from '@playwright/test';
+import { mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { harness, setup, account, repository } from '../test/helpers.mjs';
+import { TaskEngine } from '../dist/agent/engine.js';
+
+// #562: 390 / 768 / 1440 layout sets; FAB and bottom bar do not cover primary actions. Does not rewrite #481 / #496 nav.
+const out = resolve('.tmp/responsive-layout-562');
+
+const overlap = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+
+async function login(page, h, password) {
+  await page.goto(h.admin + '/');
+  await page.getByLabel('用户名', { exact: true }).fill('administrator');
+  await page.getByLabel('密码', { exact: true }).fill(password);
+  await page.getByRole('button', { name: '登录', exact: true }).click();
+  await expect(page.getByRole('button', { name: '退出登录' })).toBeVisible();
+}
+
+async function metrics(page, name) {
+  return page.evaluate((label) => {
+    const overlap = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+    const fab = document.getElementById('management-launcher');
+    const nav = document.querySelector('.console-mobile-nav');
+    const logout = document.getElementById('logout');
+    const target = [...document.querySelectorAll('button, a, h2, h1')].find(el => (el.textContent || '').trim().startsWith(label) || (el.textContent || '').trim() === label);
+    const fb = fab ? fab.getBoundingClientRect() : null;
+    const tb = target ? target.getBoundingClientRect() : null;
+    const nb = nav && getComputedStyle(nav).display !== 'none' ? nav.getBoundingClientRect() : null;
+    const lb = logout.getBoundingClientRect();
+    return {
+      overflow: document.documentElement.scrollWidth,
+      viewport: window.innerWidth,
+      fab: fb ? { left: fb.left, right: fb.right, top: fb.top, bottom: fb.bottom, width: fb.width, height: fb.height } : null,
+      target: tb ? { left: tb.left, right: tb.right, top: tb.top, bottom: tb.bottom, height: tb.height, inView: tb.height > 0 && tb.top < window.innerHeight && tb.bottom > 0 } : null,
+      fabHitsTarget: fb && tb ? overlap(fb, tb) : false,
+      fabHitsNav: fb && nb ? overlap(fb, nb) : false,
+      fabHitsLogout: fb ? overlap(fb, lb) : false,
+      navDisplay: nav ? getComputedStyle(nav).display : 'missing',
+      sidebar: (() => {
+        const s = document.getElementById('console-sidebar');
+        if (!s) return null;
+        const cs = getComputedStyle(s);
+        return { display: cs.display, width: s.getBoundingClientRect().width };
+      })(),
+    };
+  }, name);
+}
+
+test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或底栏挡住', async ({ page }) => {
+  test.setTimeout(120000);
+  const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  mkdirSync(out, { recursive: true });
+  try {
+    const { admin, password } = await setup(h);
+    const a = await account(admin);
+    await repository(admin, a.id, '101');
+
+    // --- 390 ---
+    await page.setViewportSize({ width: 390, height: 844 });
+    await login(page, h, password);
+
+    await page.goto(h.admin + '/#/identity');
+    await expect(page.getByRole('heading', { name: '当前组织与项目范围' })).toBeVisible();
+    const identity = await metrics(page, '切换组织');
+    expect(identity.overflow).toBe(390);
+    expect(identity.target.inView).toBe(true);
+    expect(identity.fabHitsTarget).toBe(false);
+    expect(identity.fabHitsNav).toBe(false);
+    expect(identity.fabHitsLogout).toBe(false);
+    expect(identity.fab.width).toBeLessThanOrEqual(52);
+    expect(identity.navDisplay).toBe('grid');
+    await page.screenshot({ path: resolve(out, 'identity-390.png'), fullPage: true });
+
+    await page.goto(h.admin + '/#/projects');
+    await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '设置' }).first()).toBeVisible();
+    const projects = await metrics(page, '设置');
+    expect(projects.overflow).toBe(390);
+    expect(projects.fabHitsTarget).toBe(false);
+    expect(projects.fabHitsNav).toBe(false);
+    await page.screenshot({ path: resolve(out, 'projects-390.png'), fullPage: true });
+
+    await page.goto(h.admin + '/#/projects/101/roles');
+    await expect(page.getByRole('heading', { name: '角色概览' })).toBeVisible();
+    const roles = await page.evaluate(() => {
+      const overlap = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+      const nav = document.querySelector('.role-nav');
+      const heading = [...document.querySelectorAll('h2, h3')].find(el => el.textContent.trim() === '角色概览');
+      const save = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '保存角色配置');
+      const fab = document.getElementById('management-launcher');
+      const bar = document.querySelector('.console-mobile-nav');
+      const ns = getComputedStyle(nav);
+      const hb = heading.getBoundingClientRect(), sb = save.getBoundingClientRect(), fb = fab.getBoundingClientRect();
+      const reserved = bar.getBoundingClientRect().top;
+      return {
+        overflow: document.documentElement.scrollWidth,
+        navWrap: ns.flexWrap,
+        navOverflow: ns.overflowX,
+        headingInFirstScreen: hb.top < reserved && hb.height > 0,
+        saveVisible: sb.height > 0,
+        fabHitsSave: overlap(fb, sb),
+        fabHitsHeading: overlap(fb, hb),
+      };
+    });
+    expect(roles.overflow).toBe(390);
+    expect(roles.navWrap).toBe('nowrap');
+    expect(roles.navOverflow).toMatch(/auto|scroll/);
+    expect(roles.headingInFirstScreen).toBe(true);
+    expect(roles.saveVisible).toBe(true);
+    expect(roles.fabHitsSave).toBe(false);
+    expect(roles.fabHitsHeading).toBe(false);
+    await page.screenshot({ path: resolve(out, 'roles-390.png'), fullPage: false });
+
+    await page.goto(h.admin + '/#/more');
+    await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
+    const more390 = await metrics(page, '更多功能');
+    expect(more390.overflow).toBe(390);
+    await page.screenshot({ path: resolve(out, 'more-390.png'), fullPage: true });
+
+    // --- 768 ---
+    await page.setViewportSize({ width: 768, height: 1024 });
+    await page.goto(h.admin + '/#/projects/101/roles');
+    await expect(page.getByRole('heading', { name: '角色概览' })).toBeVisible();
+    const tablet = await page.evaluate(() => {
+      const nav = document.querySelector('#console-secondary-nav .project-nav');
+      const sidebar = document.getElementById('console-sidebar');
+      const ns = getComputedStyle(nav);
+      const links = [...nav.querySelectorAll('a')];
+      const tops = new Set(links.map(a => Math.round(a.getBoundingClientRect().top)));
+      const roleNav = document.querySelector('.role-nav');
+      const roleTops = new Set([...roleNav.querySelectorAll('a')].map(a => Math.round(a.getBoundingClientRect().top)));
+      return {
+        overflow: document.documentElement.scrollWidth,
+        wrap: ns.flexWrap,
+        overflowX: ns.overflowX,
+        oneRow: tops.size === 1,
+        roleNavOneRow: roleTops.size === 1,
+        sidebarWidth: sidebar.getBoundingClientRect().width,
+        sidebarVisible: getComputedStyle(sidebar).display !== 'none',
+        mobileNav: getComputedStyle(document.querySelector('.console-mobile-nav')).display,
+      };
+    });
+    expect(tablet.overflow).toBe(768);
+    expect(tablet.wrap).toBe('nowrap');
+    expect(tablet.oneRow).toBe(true);
+    expect(tablet.roleNavOneRow).toBe(true);
+    expect(tablet.sidebarVisible).toBe(true);
+    expect(tablet.sidebarWidth).toBeGreaterThan(150);
+    expect(tablet.sidebarWidth).toBeLessThanOrEqual(200);
+    expect(tablet.mobileNav).toBe('none');
+    await page.screenshot({ path: resolve(out, 'roles-768.png'), fullPage: false });
+    await page.goto(h.admin + '/#/more');
+    await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
+    await page.screenshot({ path: resolve(out, 'more-768.png'), fullPage: true });
+
+    // --- 1440 ---
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await page.goto(h.admin + '/#/identity');
+    await expect(page.getByRole('heading', { name: '当前组织与项目范围' })).toBeVisible();
+    const deskId = await metrics(page, '切换组织');
+    expect(deskId.overflow).toBe(1440);
+    expect(deskId.target.inView).toBe(true);
+    expect(deskId.fabHitsTarget).toBe(false);
+    expect(deskId.sidebar.width).toBeGreaterThan(200);
+    await page.screenshot({ path: resolve(out, 'identity-1440.png'), fullPage: true });
+
+    await page.goto(h.admin + '/#/projects');
+    await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
+    const deskPr = await metrics(page, '设置');
+    expect(deskPr.overflow).toBe(1440);
+    expect(deskPr.fabHitsTarget).toBe(false);
+    await page.screenshot({ path: resolve(out, 'projects-1440.png'), fullPage: true });
+
+    await page.goto(h.admin + '/#/projects/101/roles');
+    await expect(page.getByRole('heading', { name: '角色概览' })).toBeVisible();
+    const deskRoles = await metrics(page, '保存角色配置');
+    expect(deskRoles.overflow).toBe(1440);
+    expect(deskRoles.fabHitsTarget).toBe(false);
+    await page.screenshot({ path: resolve(out, 'roles-1440.png'), fullPage: false });
+  } finally {
+    await h.stop();
+  }
+});
