@@ -173,3 +173,41 @@ test('a failed receipt read is not read again by the next automatic route', asyn
     await expect(panel.getByRole('button')).toHaveCount(0);
   } finally { await f.close(); }
 });
+
+test('leaving a failed receipt and coming back in the same document reads it again and replaces the error', async ({ page }) => {
+  const f = await managementFixture();
+  try {
+    const receipt = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, {})).value;
+    expect(receipt.state).toBe('succeeded');
+    const reads = [];
+    await page.route('**/api/management/commands/' + receipt.id, async route => {
+      reads.push(route.request().url());
+      // Only the reader's first read fails. Every later read is let through, so a page that has stopped asking can be
+      // told apart from one that asks again and now succeeds.
+      if (reads.length === 1) return route.fulfill({ status: 503, json: { error: 'temporary_unavailable' } });
+      return route.continue();
+    });
+    await login(page, f);
+    const panel = page.locator('#management-receipt-page');
+    await page.evaluate(id => { location.hash = '#/management/commands/' + id; }, receipt.id);
+    await expect(panel).toContainText('读不到这条回执');
+    await expect(panel).toBeVisible();
+    expect(reads).toHaveLength(1);
+    expect(panel.locator('[data-receipt-state]')).toHaveCount(0);
+    await expect(panel.getByRole('button')).toHaveCount(0);
+
+    // #545: leaving the address for another page keeps the document alive, so nothing but the page's own bookkeeping can
+    // make the next visit read again. A person who saw one failure must not be parked on it for the rest of the session.
+    await page.evaluate(() => { location.hash = '#/board'; });
+    await expect(panel).toBeHidden();
+    const reread = page.waitForRequest(request => new URL(request.url()).pathname === '/api/management/commands/' + receipt.id, { timeout: 8000 });
+    await page.evaluate(id => { location.hash = '#/management/commands/' + id; }, receipt.id);
+    await reread;
+    await expect(panel.locator('[data-receipt-state]')).toHaveText('已执行');
+    await expect(panel).not.toContainText('读不到这条回执');
+    await expect(panel).toContainText('agent-test-zone/admin-fixture-101');
+    // Read-only stays read-only: the second visit still offers nothing to click.
+    await expect(panel.getByRole('button')).toHaveCount(0);
+    expect(reads).toHaveLength(2);
+  } finally { await f.close(); }
+});
