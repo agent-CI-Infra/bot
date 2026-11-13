@@ -49,6 +49,8 @@ const SHARED = {
   '--color-brand-weak': '#edf2ff',
   '--color-border': '#dce3ed', '--color-surface-alt': '#f8fafc', '--radius-card': '12px',
   '--space-2': '6px', '--space-3': '8px', '--space-4': '12px', '--space-5': '16px', '--space-6': '20px',
+  '--space-7': '24px', '--space-8': '32px',
+  '--content-max': '1120px',
   '--font-size-1': '12px', '--font-size-3': '17px', '--font-size-5': '30px', '--radius-3': '6px',
   // #551: style.css (a module sheet) now reads the shared theme end-to-end. Existing
   // values above stay pinned; the new tokens keep the values declared in shell.css.

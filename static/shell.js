@@ -307,7 +307,8 @@ function renderConsoleMore() {
   const head = element('div', '', 'console-page-head'); head.append(element('p', '工作区', 'eyebrow'), element('h1', '更多功能'), element('p', '按工作内容找到入口，当前项目和权限范围会随你继续。', 'muted'));
   const groups = element('div', '', 'console-groups');
   for (const group of consoleGroups()) {
-    const section = element('section', '', 'console-group'); section.append(element('h2', group.title));
+    const section = element('section', '', 'console-group'); if (group.title === '全局设置') section.classList.add('console-group-wide');
+    section.append(element('h2', group.title));
     for (const [href, caption, hint] of group.items) section.append(consoleLink(href, caption, hint)); groups.append(section);
   }
   page.append(head, groups);

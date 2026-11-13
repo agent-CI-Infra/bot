@@ -1,6 +1,8 @@
 .workspace-overview { min-width: 0; }
-.project-settings-layout { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--space-5); align-items: start; }
-.project-settings-layout > .side-card { min-width: 0; margin: 0; padding: var(--space-5); }
+.project-settings-layout { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--space-6); align-items: stretch; }
+.project-settings-layout > .side-card { min-width: 0; margin: 0; padding: var(--space-6); display: flex; flex-direction: column; height: 100%; }
+.project-settings-layout > .side-card > :is(button, .actions, a) { align-self: flex-start; width: auto; max-width: 100%; }
+.project-settings-layout > .side-card .actions { margin-top: auto; }
 .project-settings-layout .project-danger { grid-column: 1/-1; border-color: var(--color-danger, #c84242); }
 .project-danger > button { margin: 8px 12px 0 0; }
 .project-member-list { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--space-4); margin-top: var(--space-5); }
