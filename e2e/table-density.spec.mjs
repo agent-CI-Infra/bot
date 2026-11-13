@@ -15,6 +15,10 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
     const { admin, password } = await setup(h);
     const a = await account(admin);
     await repository(admin, a.id, '101');
+    // One finished task so the statistics summary has a count whose drill-down can be opened.
+    const now = new Date().toISOString();
+    h.store.run("INSERT INTO tasks(id,repository_id,kind,status,phase,summary,created_at,updated_at) VALUES(?,?,?,?,'task',?,?,?)",
+      'density-task', '101', 'review.issue', 'succeeded', '表格密度样例任务', now, now);
     await page.setViewportSize({ width: 1440, height: 1100 });
     await page.goto(h.admin + '/');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
@@ -40,7 +44,25 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
     await page.screenshot({ path: `${out}/costs-after-1440.png`, fullPage: true });
 
+    // The drill-down under a task count lists text; it must not inherit the numeric right alignment.
+    await page.locator('#costs-panel .statistics-task-summary tr[data-kind="review.issue"] button').click();
+    const drill = page.locator('.statistics-drill-body .cost-table-scroll');
+    await expect(drill.locator('tbody tr').first()).toBeVisible({ timeout: 10000 });
+    const drillAlign = await drill.evaluate(table => [...table.querySelectorAll('th, tbody tr:first-child td')].map(el => getComputedStyle(el).textAlign));
+    expect(drillAlign.length).toBeGreaterThan(1);
+    expect(drillAlign.every(align => align === 'left' || align === 'start')).toBeTruthy();
+    await page.screenshot({ path: `${out}/costs-drill-after-1440.png`, fullPage: true });
+
+    // #560 also evens out the Webhook delivery rows.
+    await page.goto(h.admin + '/#/events');
+    await expect(page.getByRole('heading', { name: 'Webhook 投递', exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
+    await page.screenshot({ path: `${out}/events-after-1440.png`, fullPage: true });
+
     await page.goto(h.admin + '/#/projects/101/roles');
+    // A fresh project shows the recommended-roles intro first (main); adopt it so the overview table renders.
+    await page.getByTestId('adopt-recommended-roles').click();
+    await expect(page.locator('.flash')).toContainText('已使用推荐配置');
     await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible({ timeout: 15000 });
     const table = page.locator('.project-table[aria-label="角色解析结果"]');
     await expect(table).toBeVisible({ timeout: 10000 });
@@ -85,5 +107,9 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
     await expect(page.getByRole('heading', { name: '统计', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     await page.screenshot({ path: `${out}/costs-after-390.png`, fullPage: true });
+    await page.goto(h.admin + '/#/events');
+    await expect(page.getByRole('heading', { name: 'Webhook 投递', exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    await page.screenshot({ path: `${out}/events-after-390.png`, fullPage: true });
   } finally { await h.stop(); }
 });
