@@ -1,4 +1,5 @@
 import {test,expect} from '@playwright/test';
+import { openModelCatalog } from './open-model-folds.mjs';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {mkdirSync} from 'node:fs';
@@ -17,6 +18,7 @@ test('provider search, draft tests, pricing and conflict comparison share real s
     await admin('/api/models/provider','POST',{api_url:origin+'/v1',api_key:testPassword(),model_names:['shared']});
     await admin(`/api/models/${group[0].id}`,'PATCH',{version:1,pricing:{currency:'CNY',input_per_million:2,output_per_million:8,cache_per_million:0.2}});
     await page.goto(h.admin+'/#/projects/101/model');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
+    await openModelCatalog(page);
     const own=page.locator('.side-card').filter({has:page.getByRole('heading',{name:'本项目专属模型',exact:true})});
     await expect(own).toContainText('CNY / 百万 token');await expect(own).toContainText('未定价');
     const search=own.getByLabel('搜索供应商或模型',{exact:true});await search.fill('alpha');await expect(own.locator('.model-entry:visible')).toHaveCount(1);await search.fill('none');await expect(own).toContainText('没有匹配');await search.fill('');

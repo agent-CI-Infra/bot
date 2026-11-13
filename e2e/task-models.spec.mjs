@@ -4,6 +4,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { openRoleAdvanced } from './open-role-advanced.mjs';
 import { RuleService } from '../dist/rules/service.js';
+import { openModelOverrides, openModelCatalog } from './open-model-folds.mjs';
 
 test('角色详情查看规则来源，模型独立管理且项目不能修改共享模型', async ({ page }) => {
   test.setTimeout(60000);
@@ -45,6 +46,9 @@ test('角色详情查看规则来源，模型独立管理且项目不能修改�
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page).toHaveURL(/#\/projects\/101\/model$/);
     await expect(page.getByRole('table', { name: '工作流', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('table', { name: '工作类型模型', exact: true })).toBeHidden();
+    await openModelOverrides(page);
+    await openModelCatalog(page);
     await expect(page.getByRole('table', { name: '工作类型模型', exact: true })).toBeVisible();
     const sharedCard = page.locator('.side-card').filter({ has: page.getByRole('heading', { name: '部署共享模型', exact: true }) });
     await expect(sharedCard).toContainText('Shared model');
@@ -71,16 +75,16 @@ test('角色详情查看规则来源，模型独立管理且项目不能修改�
     await page.unroute('**/api/repositories/101/policy');
     await custom.getByRole('combobox', { name: '任务模型', exact: true }).selectOption(shared.id);
     await custom.getByRole('button', { name: '保存模型', exact: true }).click();
-    await expect(page.locator('#project-page .flash')).toHaveText('已保存custom.science的模型');
+    await expect(page.locator('#project-page .flash')).toHaveText('已保存其他工作类型的模型');
     await expect.poll(async () => JSON.parse((await policy()).task_models)).toEqual({ 'custom.science': shared.id });
     await reviewModel.selectOption(review.id);
     await reviewRow.getByRole('button', { name: '保存模型', exact: true }).click();
     await expect.poll(async () => JSON.parse((await policy()).task_models)).toEqual({ 'review.pr': review.id, 'custom.science': shared.id });
-    await page.reload(); await expect(reviewModel).toHaveValue(review.id);
+    await page.reload(); await openModelOverrides(page); await expect(reviewModel).toHaveValue(review.id);
     await reviewRow.getByRole('button', { name: '恢复继承', exact: true }).click();
     await expect.poll(async () => JSON.parse((await policy()).task_models)).toEqual({ 'custom.science': shared.id });
     expect((await policy()).model_id).toBe(defaultModel.id);
-    await page.reload(); await expect(reviewModel).toHaveValue('');
+    await page.reload(); await openModelOverrides(page); await expect(reviewModel).toHaveValue('');
     await custom.getByRole('button', { name: '移除这项设置', exact: true }).click();
     await expect.poll(async () => JSON.parse((await policy()).task_models)).toEqual({});
     await expect(custom).toHaveCount(0);

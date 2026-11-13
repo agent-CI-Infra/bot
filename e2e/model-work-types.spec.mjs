@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openModelCatalog } from './open-model-folds.mjs';
 import { strict as assert } from 'node:assert';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 
@@ -27,6 +28,7 @@ test('模型行写明哪些工作类型显式指定它', async ({ page }) => {
     await page.goto(h.admin + '/#/projects/101/model');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
+    await openModelCatalog(page);
     const own = page.locator('.side-card').filter({ has: page.getByRole('heading', { name: '本项目专属模型', exact: true }) });
     await expect(own.getByRole('heading', { name: '本项目专属模型', exact: true })).toBeVisible();
     const facts = name => own.locator('li.model-entry').filter({ hasText: name }).locator('.model-connection-facts');

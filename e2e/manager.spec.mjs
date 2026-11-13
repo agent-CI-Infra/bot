@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openModelOverrides } from './open-model-folds.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
@@ -71,6 +72,7 @@ test('the Manager role edits its complete prompt and events, lists decisions and
 
     // The models page lists every work type and the Manager's own dispatch model.
     await page.locator('.project-nav').getByRole('link', { name: '模型', exact: true }).click();
+    await openModelOverrides(page);
     for (const kind of ['manager', 'review.issue', 'reply', 'actions.failures', 'gate.onboarding']) await expect(page.locator(`[data-task-kind="${kind}"]`)).toBeVisible();
 
     await page.setViewportSize({ width: 390, height: 844 });
