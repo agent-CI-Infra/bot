@@ -14,7 +14,7 @@ import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { concurrencyValue, defaultConcurrency } from './settings.js';
 import { policyView, roleBoard, roleConcurrency, roleConcurrencyValue } from '../roles/board.js';
 import { activateActions } from '../actions/storage.js';
-import { activeScopes, authorize, invalidateIfLost, listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
+import { authorize, listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
 function userAccessView(store: Store, row: Row): Json {
@@ -43,19 +43,18 @@ function grants(store: Store, body: Json, userId: string | null = null): Grants 
   return { repositories, organizations };
 }
 function saveGrants(store: Store, userId: string, { repositories, organizations }: Grants, grantor: string): void {
-  // Saving rewrites whole lists; only authority the user actually loses raises the authorization revision (#521).
-  const before = activeScopes(store, userId);
+  // Only rows that change are written: removing one raises the authorization revision (identity trigger), keeping or
+  // adding one does not, so saving an unchanged list leaves background content in place (#521).
   if (repositories) {
-    store.run('DELETE FROM project_admin_assignments WHERE user_id=?', userId);
-    for (const id of repositories) store.run('INSERT INTO project_admin_assignments VALUES(?,?)', userId, id);
+    store.run('DELETE FROM project_admin_assignments WHERE user_id=? AND repository_id NOT IN (SELECT value FROM json_each(?))', userId, JSON.stringify(repositories));
+    for (const id of repositories) store.run('INSERT OR IGNORE INTO project_admin_assignments VALUES(?,?)', userId, id);
   }
   if (organizations) {
-    store.run('DELETE FROM project_admin_organizations WHERE user_id=?', userId);
-    for (const id of organizations) store.run('INSERT INTO project_admin_organizations VALUES(?,?)', userId, id);
+    store.run('DELETE FROM project_admin_organizations WHERE user_id=? AND owner_id NOT IN (SELECT value FROM json_each(?))', userId, JSON.stringify(organizations));
+    for (const id of organizations) store.run('INSERT OR IGNORE INTO project_admin_organizations VALUES(?,?)', userId, id);
   }
   identityProjection(store);
   store.run("UPDATE scoped_grants SET grantor_id=?,verified_at=?,evidence='console manual authorization' WHERE principal_id=? AND policy='legacy'", grantor, Date.now(), userId);
-  invalidateIfLost(store, userId, before, 'delegation.changed');
 }
 // What grants can be chosen from: installed repositories, one group per owner_id named by the newest login GitHub reported.
 function installedOrganizations(store: Store): Json[] {

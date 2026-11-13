@@ -402,6 +402,9 @@ test('only lost authority raises the authorization revision; unchanged or added 
   // Revoking a delegation still covered by the manual project loses nothing; removing the project does.
   await step(() => admin('/api/identity/grants/' + grant, 'DELETE', {}), false);
   await step(() => admin('/api/project-admin-assignments', 'PUT', { user_id: p, repository_ids: [] }), true);
+  // Any other path that removes a manual assignment, such as removing the project, raises it too.
+  await step(() => admin('/api/project-admin-assignments', 'PUT', { user_id: p, repository_ids: ['201'] }), false);
+  await step(() => h.store.run("DELETE FROM project_admin_assignments WHERE repository_id='201'"), true);
   // Repeated proof of unchanged GitHub permissions changes nothing.
   await step(() => f.identity.reverify(p), false);
   // Promotion adds authority; demotion and disabling remove it; enabling again does not count.
