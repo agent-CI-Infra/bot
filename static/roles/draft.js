@@ -34,11 +34,29 @@ function roleText(label, object, key, state, { multiline = false, ...attributes 
     : raw;
   return field(label, roleBound((multiline ? textarea : input)(key, shown, attributes), value => { object[key] = value; }, state));
 }
-function roleCheck(label, object, key, state, disabled = false, redraw) {
-  const wrap = checkbox(key, object[key], label), control = wrap.querySelector('input'); control.disabled = disabled;
+function requiredRoleLocked(role) {
+  return ['controller', 'evaluator'].includes(role.kind);
+}
+function requiredEnableReason(role) {
+  if (!requiredRoleLocked(role)) return '';
+  return rolePageText('requiredEnable').replace('{name}', roleConfigName(role.role_id, role.name));
+}
+// `reason` explains a locked required-role control (#569); `redraw` refreshes per-row list status on change (d016f0ed).
+function roleCheck(label, object, key, state, disabled = false, { reason = '', redraw = null } = {}) {
+  const wrap = checkbox(key, object[key], label), control = wrap.querySelector('input');
+  control.disabled = disabled;
+  wrap.classList.add('role-enable');
   roleBound(control, value => { object[key] = value; }, state);
   if (redraw) control.addEventListener('change', redraw);
-  return wrap;
+  if (!disabled || !reason) return wrap;
+  control.setAttribute('aria-disabled', 'true');
+  const why = element('p', reason, 'role-enable-reason muted');
+  why.setAttribute('data-testid', 'role-enable-reason');
+  const block = element('div', '', 'role-enable-block');
+  block.append(wrap, why);
+  control.setAttribute('aria-describedby', (control.id || key) + '-reason');
+  why.id = (control.id || key) + '-reason';
+  return block;
 }
 function roleChoices(title, object, key, choices, state) {
   const group = element('fieldset', '', 'role-choices'); group.append(element('legend', title));

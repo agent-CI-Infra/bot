@@ -46,12 +46,17 @@ function roleModelResolution(role, state, access) {
 function roleSettingsCard(role, state, redraw, access) {
   const section = card(roleConfigName(role.role_id, role.name) + rolePageText('formSuffix'));
   section.dataset.testid = 'role-form';
+  const enable = roleCheck(rolePageText('enable'), role, 'enabled', state, requiredRoleLocked(role), { reason: requiredEnableReason(role) });
+  const title = section.querySelector('h3');
+  const head = element('div', '', 'role-form-head');
+  title.replaceWith(head);
+  head.append(title, enable);
   const group = (key, title, parent = section) => {
     const box = element('section', '', 'role-editor-group'), heading = element('h4', title); box.id = `role-${role.role_id}-${key}`; heading.tabIndex = -1;
     box.append(heading); parent.append(box); return box;
   };
   const basic = group('basic', rolePageText('basic'));
-  basic.append(roleText(rolePageText('displayName'), role, 'name', state, { maxLength: 80 }), roleCheck(rolePageText('enable'), role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind)),
+  basic.append(roleText(rolePageText('displayName'), role, 'name', state, { maxLength: 80 }),
     roleText(rolePageText('duty'), role, 'responsibility', state, { multiline: true, rows: 3, maxLength: 2000 }));
   const agent = group('agent', rolePageText('agent'));
   agent.append(note('已保存 · ' + workTypeName(state.data.workflow) + '：' + roleModelText(state.data.preview.find(row => row.role === role.role_id))), note('下面是待保存的选择；修改不会重写运行中任务的模型快照。'), field('Agent 后端', roleBackendPicker(role, state, redraw)), field('模型', roleModelPicker(role, state, redraw)));
