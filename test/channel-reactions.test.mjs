@@ -241,17 +241,19 @@ test('an actionable private image gets a processing indicator until its reply is
   assert.equal(f.wire.state.reactionRequests.filter(r=>r.method==='POST'&&r.message===data.event.message.message_id).length,1);
 });
 
-test('group assistant answers and deliberate silence both clear their original message indicator', async t => {
+test('a group assistant that follows every message answers or stays silent without marking anyone\'s message', async t => {
   const f = await channelFixture(t); await repositoryAssistant(f); const chat = await boundGroup(f);
   f.h.store.run("UPDATE channel_service_bindings SET participation='all' WHERE chat_id=?", chat.id);
   for (const answer of ['群助手回复。', '']) {
     scriptedModel(f, [answer]); const release = blockModel(t, f), data = inGroup('这条消息需要回复吗？', 'ou_bob');
     data.event.message.mentions = [];
     const receipt = await post(f.h, f.id, data), id = receipt.value.operation_id;
-    await active(f, id); release(); await finished(f.h, id); await cleared(f, id);
+    release(); await finished(f.h, id);
     assert.equal(f.h.store.get('SELECT count(*) n FROM channel_outbox WHERE source_event=?', id).n, answer ? 1 : 0);
+    assert.equal(f.h.store.get('SELECT count(*) n FROM channel_reactions WHERE source_event=?', id).n, 0);
   }
-  assert.equal(f.wire.state.reactions.length, 0);
+  await f.service.reactions.tick();
+  assert.equal(f.wire.state.reactionRequests.length, 0);
 });
 
 test('recovery pages through reactions and only adopts this apps processing emoji', async () => {

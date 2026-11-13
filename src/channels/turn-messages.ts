@@ -8,9 +8,16 @@ import { chatContextBytes, requestBytes } from '../agent/tool-context.js';
 const recovered = ' Never repeat a write merely because a message is recovered; inspect its existing receipts first.';
 export const groupTurnMessageInstructions = ' Messages that arrive in this group while you work are added before your next step as a user message marked incoming_during_turn.'
   + ' They are not necessarily addressed to you: people also talk to each other. Judge each one yourself from its sender, its mentions, whether it replies in the thread of your request, and its content.'
-  + ' Take in what continues the current request (an addition, correction or cancellation, which may change your next tools), answer what is clearly asked of you, and leave other conversation as background: do not answer it or remark on it in your reply.'
-  + ' is_direct_mention is the only verified mention of you. group_setting_invites_reply tells whether this group\'s participation setting would have started a reply to that message on its own: a hint, not an obligation.'
+  + ' Take in what continues the current request (an addition, correction or cancellation, which may change your next tools), answer what is clearly asked of you, and leave other conversation as background: do not answer it, and do not mention it in your reply, not even to say that you are not answering it.'
+  + ' is_direct_mention is the only verified mention of you. group_setting_invites_reply tells whether, in this group\'s working mode, that message would have started a reply on its own: a hint, not an obligation.'
   + ' When one answer covers several people, make clear whom each part is for. You never need to wait for further messages.' + recovered;
+// The group's participation setting, stated to the model so it knows when it is expected to speak (its working mode).
+const workingModes: Record<string, string> = {
+  mentions: ' Working mode of this group: you answer only when someone @-mentions you. Messages without an @ are people talking among themselves unless one clearly continues the request you are working on (for example the requester adding to, correcting or cancelling it). You still see them so you can follow the conversation, but otherwise do not answer them, and do not mention them in your reply, not even to say that you are leaving them alone.',
+  questions: ' Working mode of this group: besides messages that @-mention you, you see every message ending with a question mark, without an @. Most of those questions are meant for other people: answer one only when you can genuinely help, otherwise stay silent.',
+  all: ' Working mode of this group: you see every message, without an @. Most of them are people talking to each other: answer only when someone addresses you or a reply is genuinely helpful, otherwise stay silent.',
+};
+export const groupWorkingMode = (participation: unknown): string => workingModes[String(participation)] ?? workingModes.mentions!;
 export const privateTurnMessageInstructions = ' Messages the person sends while you work are added before your next step as a user message marked incoming_during_turn.'
   + ' In this private chat they come from the person you serve and are addressed to you: take them in (an addition, correction or cancellation may change your next tools) and answer them together with the request. You never need to wait for further messages.' + recovered;
 // A private message is always addressed to the assistant, even without an @. Prefer normalized mention targets (#460).

@@ -162,18 +162,18 @@ test('messages during a tool are injected together at the next step with their f
   const reference = await post(f.h, f.id, discussion);
   for (const item of [second, cancel, reference]) assert.equal(row(f, item).state, 'merged');
   assert.equal((await post(f.h, f.id, { ...secondEvent, header: { ...secondEvent.header, event_id: 'redelivered' } })).value.duplicate, true);
-  // Every message taken into the turn shows the processing indicator, also one the participation setting would not answer.
-  for (const item of [initial, second, cancel, reference]) await indicator(f, item, 'active');
+  // In a mention-only group the @ messages show the processing indicator; the merged message without an @ is taken in silently.
+  for (const item of [initial, second, cancel]) await indicator(f, item, 'active');
   assert.deepEqual(f.wire.state.reactionRequests.filter(r => r.method === 'POST').map(r => r.message).sort(),
-    [initial, second, cancel, reference].map(item => f.service.turnMessages.event(row(f, item)).message_id).sort());
+    [initial, second, cancel].map(item => f.service.turnMessages.event(row(f, item)).message_id).sort());
   tool.release(); await done(f, initial); await done(f, second); await done(f, cancel);
   await until(() => sent(f).some(s => s.includes('已停止后续查询')));
   assert.equal(calls, 2); assert.equal(f.h.store.get('SELECT count(*) n FROM channel_service_turns').n, 1);
-  assert.equal(f.h.store.get('SELECT count(*) n FROM channel_reactions').n, 4, 'the initial and every merged message get acknowledgements');
-  // The final answer clears all of them together.
-  for (const item of [initial, second, cancel, reference]) await indicator(f, item, 'done');
+  assert.equal(f.h.store.get('SELECT count(*) n FROM channel_reactions').n, 3, 'only the @ messages get acknowledgements');
+  // The final answer clears them together.
+  for (const item of [initial, second, cancel]) await indicator(f, item, 'done');
   assert.deepEqual(f.wire.state.reactionRequests.filter(r => r.method === 'DELETE').map(r => r.message).sort(),
-    [initial, second, cancel, reference].map(item => f.service.turnMessages.event(row(f, item)).message_id).sort());
+    [initial, second, cancel].map(item => f.service.turnMessages.event(row(f, item)).message_id).sort());
   const outbox = f.h.store.get("SELECT * FROM channel_outbox WHERE idempotency_key=?", initial.value.operation_id + ':business-result');
   assert.equal(f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id).delivery.reply_to, f.service.turnMessages.replyEvent(row(f, initial).message_id).message_id);
   const view = (await f.admin(`/api/channels/chats/${f.chat.id}/timeline`)).value.conversation.turns[0];
