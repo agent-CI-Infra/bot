@@ -34,7 +34,8 @@ header .brand { min-width: 180px; }
 header .brand strong { font-size: var(--font-size-brand); letter-spacing: -.5px; }
 header .sub, .current-user-role { color: var(--color-text-muted); }
 header .quiet { color: var(--color-text); border-color: var(--color-border); background: var(--color-surface); min-height: var(--control-min); }
-#identity { margin-left: auto; }
+#header-tools { margin-left: auto; display: flex; align-items: center; gap: 12px; min-width: 0; }
+#identity { margin-left: 0; }
 body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--space-6) var(--space-8) var(--space-10); min-width: 0; }
 #main-content:focus { outline: none; }
 .console-ready :is(button, .button-link, input:not([type=checkbox]):not([type=radio]), select) { min-height: var(--control-min); }
@@ -235,4 +236,20 @@ html { scroll-padding-bottom: calc(var(--console-mobile-height,0px) + 100px); }
 .console-filters-fold #filters { border-top: 1px solid var(--color-border); margin: 0; }
 @media (max-width: 767px) {
   .console-filters-fold > summary { padding: 10px 16px; }
+}
+
+.locale-switch { display: inline-flex; flex-shrink: 0; border: 1px solid var(--color-border, #cedbe2); border-radius: 7px; overflow: hidden; background: #fff; }
+.locale-switch button, .console-ready .locale-switch button { border: 0; border-radius: 0; background: transparent; color: var(--color-text, #183142); min-height: 36px; padding: 4px 12px; font-size: 12px; font-weight: 550; }
+.locale-switch button + button { border-left: 1px solid var(--color-border, #cedbe2); }
+.locale-switch button[aria-pressed=true], .console-ready .locale-switch button[aria-pressed=true] { background: var(--color-brand-weak, #edf2ff); color: var(--color-brand, #245de0); font-weight: 650; }
+body:not(.console-ready) header .locale-switch { background: #fff; }
+@media (max-width: 700px) {
+  .locale-switch button { min-height: 32px; padding: 4px 8px; }
+}
+/* The language toggle plus account tools do not fit beside the brand below ~480px; wrap them
+   onto a second header row and keep --console-header in step with the taller bar. */
+@media (max-width: 480px) {
+  body.console-ready { --console-header: 108px; }
+  body.console-ready > header { flex-wrap: wrap; row-gap: 4px; }
+  body.console-ready #header-tools { flex: 1 1 100%; width: 100%; justify-content: flex-end; margin-left: 0; }
 }

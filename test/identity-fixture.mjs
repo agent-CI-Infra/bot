@@ -68,19 +68,22 @@ export async function identityFixture(t, options = {}) {
 
 export async function waitForIdentityPage(page) {
   const { expect } = await import('@playwright/test');
-  await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+  // The heading is translated: 「我的 GitHub 连接」 / "My GitHub connection".
+  await expect(page.locator('.identity-overview')).toBeVisible();
   await expect(page.getByRole('heading', { name: '正在读取身份与权限' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Loading identity and access' })).toHaveCount(0);
 }
 
 export async function openIdentityAdvanced(page) {
   const { expect } = await import('@playwright/test');
   await waitForIdentityPage(page);
-  const summary = page.getByText('高级／诊断', { exact: true });
-  const diagnostic = page.getByRole('heading', { name: '本页诊断信息' });
+  const details = page.locator('details.identity-advanced');
+  const summary = details.locator(':scope > summary');
   await summary.waitFor({ state: 'visible' });
-  for (let i = 0; i < 4 && !(await diagnostic.isVisible()); i++) {
+  for (let i = 0; i < 4 && !(await details.evaluate(el => el.open)); i++) {
     await summary.click();
-    await diagnostic.waitFor({ state: 'visible', timeout: 2000 }).catch(() => {});
+    await expect.poll(async () => details.evaluate(el => el.open), { timeout: 2000 }).toBe(true).catch(() => {});
   }
-  await expect(diagnostic).toBeVisible();
+  await expect(details).toHaveJSProperty('open', true);
+  await expect(details.locator('.side-card').first()).toBeVisible();
 }

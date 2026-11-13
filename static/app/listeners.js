@@ -10,13 +10,13 @@ $('close-detail').addEventListener('click', () => $('detail').close());
 $('boot-retry').addEventListener('click', async () => {
   const retry = $('boot-retry'), message = $('boot-message');
   retry.disabled = true; retry.hidden = true;
-  message.textContent = '正在载入…'; message.setAttribute('role', 'status'); message.classList.remove('view-error');
+  message.textContent = t('chrome.boot'); message.setAttribute('role', 'status'); message.classList.remove('view-error');
   try { await start(); } catch (err) { error(err); } finally { retry.disabled = false; }
 });
 let accessPending = false;
 $('access-password-toggle').addEventListener('click', () => {
   const password = $('access-password'), shown = password.type === 'password'; password.type = shown ? 'text' : 'password';
-  $('access-password-toggle').textContent = shown ? '隐藏密码' : '显示密码'; $('access-password-toggle').setAttribute('aria-pressed', String(shown));
+  $('access-password-toggle').textContent = shown ? t('login.hide_password') : t('login.show_password'); $('access-password-toggle').setAttribute('aria-pressed', String(shown));
 });
 $('github-login').addEventListener('click', event => { if (accessPending) event.preventDefault(); });
 $('access-provider-retry').addEventListener('click', async () => {
@@ -27,18 +27,18 @@ $('access-form').addEventListener('submit', async event => {
   const form = event.currentTarget, data = Object.fromEntries(new FormData(form)), submit = $('access-submit'), initializing = setup;
   const controls = [...form.elements].map(control => [control, control.disabled]);
   accessPending = true; controls.forEach(([control]) => { control.disabled = true; }); form.setAttribute('aria-busy', 'true');
-  submit.textContent = initializing ? '正在初始化…' : '正在登录…'; $('github-login').setAttribute('aria-disabled', 'true'); notice('message');
+  submit.textContent = initializing ? t('setup.submitting') : t('login.submitting'); $('github-login').setAttribute('aria-disabled', 'true'); notice('message');
   try {
     await api(initializing ? '/api/setup' : '/api/auth/login', 'POST', data);
     form.reset(); $('message').setAttribute('role', 'status'); const url = new URL(location.href); url.searchParams.delete('auth_error'); history.replaceState(null, '', url);
     try { await start(); } catch (err) { showBootFailure(err); }
   } catch (err) {
-    const text = /invalid_login/.test(err.message) ? '用户名或密码不正确，请检查后重试。' : /login_rate_limited/.test(err.message) ? '登录尝试过于频繁，请稍后再试。' : /already_initialized/.test(err.message) ? '系统已经初始化，请使用已有账号登录。' : err instanceof TypeError ? '网络连接失败，请检查连接后重试。已输入的内容仍保留在当前页面。' : err.message;
+    const text = /invalid_login/.test(err.message) ? t('login.invalid') : /login_rate_limited/.test(err.message) ? t('login.rate_limited') : /already_initialized/.test(err.message) ? t('login.already_initialized') : err instanceof TypeError ? t('login.network') : err.message;
     if (/already_initialized/.test(err.message)) await start().catch(error);
     notice('message', text); $('message').setAttribute('role', 'alert');
   } finally {
     accessPending = false; controls.forEach(([control, disabled]) => { control.disabled = disabled; }); form.removeAttribute('aria-busy');
-    submit.textContent = setup ? '初始化并登录' : '登录'; $('github-login').removeAttribute('aria-disabled');
+    submit.textContent = setup ? t('setup.submit') : t('login.submit'); $('github-login').removeAttribute('aria-disabled');
   }
 });
 // Signing out returns to the default page, so whoever signs in next does not land on the previous user's page; the wizard

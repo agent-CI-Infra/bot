@@ -2,7 +2,7 @@ function consoleState(title, text, { tone = '', retry } = {}) {
   const box = element('div', '', 'console-state' + (tone ? ' console-state-' + tone : ''));
   box.setAttribute('role', tone === 'error' ? 'alert' : 'status');
   box.append(element('h2', title), element('p', text));
-  if (retry) box.append(button('重新加载', retry)); return box;
+  if (retry) box.append(button(t('action.reload'), retry)); return box;
 }
 const states = {
   accepted:['已接收','success'], invalid_signature:['签名无效','danger'], invalid_payload:['正文无效','danger'], payload_too_large:['正文过大','danger'],
