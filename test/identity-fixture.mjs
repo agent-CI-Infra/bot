@@ -80,10 +80,11 @@ export async function openIdentityAdvanced(page) {
   const details = page.locator('details.identity-advanced');
   const summary = details.locator(':scope > summary');
   await summary.waitFor({ state: 'visible' });
-  for (let i = 0; i < 4 && !(await details.evaluate(el => el.open)); i++) {
-    await summary.click();
-    await expect.poll(async () => details.evaluate(el => el.open), { timeout: 2000 }).toBe(true).catch(() => {});
-  }
-  await expect(details).toHaveJSProperty('open', true);
-  await expect(details.locator('.side-card').first()).toBeVisible();
+  // A late re-render after navigation can replace the fold with a fresh, collapsed one; retry the whole
+  // open-and-check step until the fold that is on the page is open and showing its cards.
+  await expect(async () => {
+    if (!(await details.evaluate(el => el.open))) await summary.click();
+    await expect(details).toHaveJSProperty('open', true, { timeout: 1000 });
+    await expect(details.locator('.side-card').first()).toBeVisible({ timeout: 1000 });
+  }).toPass({ timeout: 15000 });
 }
