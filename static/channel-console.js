@@ -19,14 +19,12 @@ function personalSettingsNav() {
   nav.setAttribute('aria-label', '个人设置类别');
   nav.append(element('p', '个人设置', 'console-nav-label'));
   const activeKey = tab === 'external' ? 'external'
-    : tab === 'conversations' || hash === '#/identity/feishu/conversations' ? 'conversations'
     : /^#\/identity\/feishu-apps(?:\/|$)/.test(hash) ? 'feishu-apps'
     : /^#\/identity\/feishu(?:$|\?|\/)/.test(hash) ? 'feishu' : 'identity';
   const items = [
     ['identity', '#/identity', '身份与权限'],
     ['feishu', '#/identity/feishu', '飞书绑定'],
     ...(personalCanManageApps || activeKey === 'feishu-apps' ? [['feishu-apps', '#/identity/feishu-apps', '组织飞书应用']] : []),
-    ['conversations', '#/conversations', '飞书会话'],
     ['external', '#/external', '外部执行端']
   ];
   for (const [key, href, caption] of items) {

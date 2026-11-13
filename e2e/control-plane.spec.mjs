@@ -22,7 +22,7 @@ test('管理员完成初始化、登记账号、查看投递，项目管理员�
     await expect(page.getByText('本页 0 条投递')).toBeVisible();
     await admin('/api/auth/login', 'POST', { username: 'administrator', password });
     // Accounts live in global settings.
-    await page.getByRole('button', { name: '全局设置', exact: true }).click(); await page.locator('.project-nav').getByRole('link', { name: '机器人账号', exact: true }).click();
+    await consoleNavigate(page, '全局设置'); await page.locator('.project-nav').getByRole('link', { name: '机器人账号', exact: true }).click();
     await expect(page).toHaveURL(/#\/settings\/accounts$/); await page.getByRole('button', { name: '新增账号', exact: true }).click();
     const secret = randomBytes(24).toString('hex');
     await page.getByLabel('账号名称', { exact: true }).fill('Browser account');

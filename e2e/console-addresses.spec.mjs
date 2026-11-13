@@ -16,7 +16,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     const tab = name => ({ click: () => consoleNavigate(page, name) }), current = () => page.locator('#tabs [aria-current=page]');
     for (const [name, address] of [['看板', '#/board'], ['统计', '#/costs'], ['Webhook 投递', '#/events'], ['外部执行端', '#/external'], ['管理对话', '#/management'], ['项目', '#/projects']]) {
       await tab(name).click(); await expect(page).toHaveURL(new RegExp(address.replace(/[#/]/g, '\\$&') + '$'));
-      await page.reload(); await expect(current()).toHaveText(name === '外部执行端' ? '个人设置' : name);
+      await page.reload(); await expect(current()).toHaveText(['统计', 'Webhook 投递', '外部执行端'].includes(name) ? '更多功能' : name);
       if (name === '外部执行端') await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('外部执行端');
     }
     for (const [address, category] of [['#/reviews', 'review'], ['#/developments', 'development']]) {
@@ -52,7 +52,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     await expect(member.locator('#tabs [aria-current=page]')).toHaveText('项目'); await expect(member.locator('#settings-panel')).toBeHidden();
     // Its only settings section is 存储, which its settings tab opens: its own projects without the platform totals.
     await expect(member.locator('#tabs').getByRole('button', { name: '全局设置', exact: true })).toBeHidden();
-    await member.locator('#tabs').getByRole('button', { name: '存储', exact: true }).click(); await expect(member.locator('#settings-panel')).toBeVisible();
+    await consoleNavigate(member, '存储'); await expect(member.locator('#settings-panel')).toBeVisible();
     await expect(member.locator('.project-nav').getByRole('link')).toHaveText(['存储']);
     await expect.poll(() => member.locator('#settings-panel h3').allInnerTexts()).toEqual(['存储', '按项目']);
     await expect(member.locator('#settings-panel')).toContainText('fixture/project-101'); await context.close();

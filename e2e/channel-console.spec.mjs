@@ -130,7 +130,7 @@ test('settings keep platform mutations in global settings and project administra
     const password = testPassword(); await f.admin('/api/users', 'POST', { username: 'project-owner', password, repository_ids: ['101'] });
     await page.getByLabel('用户名', { exact: true }).fill('project-owner'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click(); await page.goto(f.h.admin + '/#/preferences');
-    await expect(page.locator('#tabs [data-tab=preferences]')).toHaveText('个人设置');
+    await expect(page.locator('#tabs [data-tab=more]')).toHaveText('更多功能');
     await expect(page.locator('#tabs [data-tab=settings]')).toBeHidden();
     await page.getByLabel('切换项目').selectOption('101');
     await page.locator('#console-secondary-nav .project-nav').getByRole('link', { name: '基本设置', exact: true }).click();

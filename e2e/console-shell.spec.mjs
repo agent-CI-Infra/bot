@@ -8,61 +8,53 @@ async function login(page,h,password,username='administrator',hash='#/projects')
   await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.locator('#workspace')).toBeVisible();
 }
 
-test('shared desktop rail and mobile navigation expose real destinations across breakpoints',async({page})=>{
-  const h=await harness(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+test('four primary destinations and a compact More page preserve access at every breakpoint', async ({ page }) => {
+  const h = await harness(), errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
-    const {admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
-    await login(page,h,password);
-    const out='.tmp/console-shell';mkdirSync(out,{recursive:true});
-    for(const width of [320,390,768,1024,1440,1920]) {
-      await page.setViewportSize({width,height:900});await page.goto(h.admin+'/#/more');
-      await expect(page.getByRole('heading',{name:'更多功能',exact:true})).toBeVisible();
-      expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-      if(width>=768) {
+    const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+    await login(page, h, password);
+    const out = '.tmp/console-shell'; mkdirSync(out, { recursive: true });
+    for (const width of [320, 390, 768, 1440]) {
+      await page.setViewportSize({ width, height: 900 }); await page.goto(h.admin + '/#/more');
+      await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
+      const more = page.locator('#console-page');
+      await expect(more.locator('a[href="#/projects"], a[href="#/board"], a[href="#/preferences"]')).toHaveCount(0);
+      await expect(more.locator('a[href^="#/projects/"]')).toHaveCount(0);
+      await expect(more.locator('a[href^="#/settings"]')).toHaveCount(1);
+      await expect(more.locator('a[href="#/identity"]')).toHaveCount(1);
+      if (width >= 768) {
         await expect(page.locator('#console-sidebar')).toBeVisible();
-        await expect(page.locator('#console-sidebar').getByRole('link',{name:'更多功能',exact:true})).toHaveCount(0);
-        const footer=await page.locator('.console-settings-nav').boundingBox();
-        expect(footer.y+footer.height).toBeLessThanOrEqual(900);
-        expect(footer.y+footer.height).toBeGreaterThan(870);
-      } else await expect(page.locator('#console-sidebar')).toBeHidden();
-      if(width<768){
-        await expect(page.locator('#console-mobile-nav')).toBeVisible();
-        await expect(page.locator('#console-mobile-nav a')).toHaveText(['⌂总览','▤任务','◷待处理','⋯更多']);
-        const boxes=await page.locator('#console-mobile-nav a').evaluateAll(nodes=>nodes.map(n=>({width:n.getBoundingClientRect().width,height:n.getBoundingClientRect().height})));
-        expect(boxes.every(b=>b.width>=44&&b.height>=44)).toBe(true);
+        await expect(page.locator('#tabs button')).toHaveText(['项目', '管理对话', '看板', '更多功能']);
+        await expect(more.locator('a[href="#/management"]')).toHaveCount(0);
+        await expect(page.locator('#tabs [data-tab=more]')).toHaveAttribute('aria-current', 'page');
+      } else {
+        await expect(page.locator('#console-sidebar')).toBeHidden();
+        await expect(page.locator('#console-mobile-nav a')).toHaveText(['⌂总览', '▤任务', '◷待处理', '⋯更多']);
+        await expect(more.locator('a[href="#/management"]')).toBeVisible();
+        await expect(more.locator('a[href^="#/inbox"]')).toHaveCount(0);
       }
-      await page.screenshot({path:`${out}/more-${width}.png`,fullPage:true});
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: `${out}/more-${width}.png`, fullPage: true });
     }
-    await page.setViewportSize({width:1440,height:1000});await page.goto(h.admin+'/#/projects/101/roles');
-    for(const name of ['项目','管理对话','看板','统计','Webhook 投递','个人设置','全局设置']) await expect(page.locator('#tabs').getByRole('button',{name,exact:true})).toBeVisible();
-    await expect(page.locator('#console-secondary-nav .project-nav')).toContainText('项目知识');
-    await page.locator('#console-secondary-nav .project-nav').getByRole('link',{name:'模型',exact:true}).click();
-    await expect(page).toHaveURL(/#\/projects\/101\/model$/);await page.reload();
-    await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('模型');
-    await page.setViewportSize({width:390,height:844});
-    await page.getByLabel('当前页面',{exact:true}).selectOption('#/projects/101/knowledge');
-    await expect(page).toHaveURL(/#\/projects\/101\/knowledge$/);
-    await page.locator('#console-mobile-nav').getByRole('link',{name:'更多',exact:true}).click();
-    await expect(page.locator('.console-group').filter({has:page.getByRole('heading',{name:'设置',exact:true})})).toContainText('机器配置');
-    await expect(page.getByRole('link',{name:'公网接入',exact:false})).toBeVisible();
-    // A short desktop keeps settings visible while a long category list scrolls above them.
-    await page.setViewportSize({width:1440,height:360});await page.goto(h.admin+'/#/settings/users');
-    await expect(page.locator('#settings-panel')).toContainText('administrator');
-    const primary=page.locator('.console-primary-nav'), settings=page.locator('.console-settings-nav');
-    expect(await primary.evaluate(node=>node.scrollHeight>node.clientHeight)).toBe(true);
-    await primary.evaluate(node=>node.scrollTop=node.scrollHeight);
-    await page.setViewportSize({width:1440,height:500});
-    const mainBox=await primary.boundingBox(), settingsBox=await settings.boundingBox();
-    expect(mainBox.y+mainBox.height).toBeLessThanOrEqual(settingsBox.y);
-    expect(settingsBox.y+settingsBox.height).toBeLessThanOrEqual(500);
-    await settings.getByRole('button',{name:'个人设置',exact:true}).click();
-    await expect(page.getByRole('heading',{name:'身份与权限',exact:true})).toBeVisible();
-    await expect(settings.getByRole('button',{name:'个人设置',exact:true})).toHaveAttribute('aria-current','page');
-    await page.screenshot({path:`${out}/settings-footer-short-desktop.png`,fullPage:true});
-    await page.setViewportSize({width:1440,height:1000});
-    await page.screenshot({path:`${out}/settings-footer-desktop.png`,fullPage:true});
+    // Resizing the open page updates only the destinations supplied by the primary navigation.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.locator('#console-page a[href="#/management"]')).toBeVisible();
+    await page.setViewportSize({ width: 1440, height: 360 });
+    await expect(page.locator('#console-page a[href="#/management"]')).toHaveCount(0);
+    await page.locator('#tabs [data-tab=more]').focus(); await expect(page.locator('#tabs [data-tab=more]')).toBeInViewport();
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.locator('#console-page a[href="#/conversations"]').click();
+    await expect(page.locator('#console-area')).toHaveText('工作区');
+    await expect(page.locator('#console-secondary-nav')).toBeHidden();
+    await page.goBack();
+    await page.locator('#console-page a[href="#/identity"]').click();
+    await expect(page.locator('#identity-panel')).toBeVisible();
+    await expect(page.locator('#console-secondary-nav a[href="#/conversations"]')).toHaveCount(0);
+    await page.goto(h.admin + '/#/preferences');
+    await expect(page.locator('#identity-panel')).toBeVisible();
+    await expect(page.locator('#tabs [data-tab=more]')).toHaveAttribute('aria-current', 'page');
     expect(errors).toEqual([]);
-  } finally {await h.stop();}
+  } finally { await h.stop(); }
 });
 
 test('attention uses real tasks, does not count queued work, and handles failure, retry and details',async({page})=>{
@@ -98,8 +90,9 @@ test('permissions, in-flight navigation, keyboard and history keep their boundar
     await expect(page.getByRole('heading',{name:'全局设置',exact:true})).toHaveCount(0);
     await expect(page.getByRole('link',{name:'飞书连接',exact:false})).toHaveCount(0);
     await page.setViewportSize({width:1440,height:900});
-    await expect(page.locator('.console-settings-nav').getByRole('button',{name:'个人设置',exact:true})).toBeVisible();
-    await expect(page.locator('.console-settings-nav').getByRole('button',{name:'全局设置',exact:true})).toBeHidden();
+    await expect(page.locator('#tabs button')).toHaveCount(4);
+    await expect(page.locator('#console-page a[href="#/settings"]')).toHaveCount(0);
+    await expect(page.locator('#console-page a[href="#/settings/storage"]')).toBeVisible();
     await page.setViewportSize({width:390,height:844});
     expect(await page.locator('#console-project option').allTextContents()).not.toContain('202');
     await page.goto(h.admin+'/#/settings/users');await expect(page.locator('#settings-panel')).toBeHidden();
