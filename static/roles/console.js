@@ -23,6 +23,7 @@ function rolesConsole() {
   const draw = () => {
     if (!live() || !state) return;
     state.redraw = draw;
+    let saveRoles = async () => {};
     holder.replaceChildren(); roleDraftStatus = null;
     const nav = element('nav', '', 'role-nav'); nav.setAttribute('aria-label', '角色列表');
     const requestedView = new URLSearchParams(location.hash.split('?')[1] || '').get('view');
@@ -43,12 +44,33 @@ function rolesConsole() {
     else if (role) {
       roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus, roleSettingsCard(role, state, draw, { live, failed }));
       if (role.role_id === 'manager') fields.append(...managerSection(state.data));
-    } else fields.append(...roleOverviewCards(state, draw));
+    } else {
+      const cards = roleOverviewCards(state, draw);
+      const unconfiguredOverview = state.data.configured === false && !current.item && !auxiliaryView;
+      if (unconfiguredOverview) {
+        const intro = card('使用推荐的角色分工');
+        intro.setAttribute('data-testid', 'recommended-roles-intro');
+        const introStatus = note(roleVersionText(state)); introStatus.dataset.roleVersion = '';
+        intro.append(introStatus,
+          note('还没有保存过角色配置。可以先使用推荐配置，按默认的 Manager、Dev、Test、Reviewer 等角色开始工作。技能、提示词、权限和预算不必现在改，需要时再打开「高级」。'));
+        const adopt = button('使用推荐配置', () => saveRoles(), '');
+        adopt.disabled = !!state.busy || !!state.conflict;
+        adopt.setAttribute('data-testid', 'adopt-recommended-roles');
+        intro.append(adopt);
+        const advanced = element('details', '', 'fold role-advanced');
+        advanced.setAttribute('data-testid', 'role-advanced');
+        // Redraws (backend picker, skill edits, etc.) must not slam the fold shut mid-edit.
+        advanced.open = !!state.roleAdvancedOpen;
+        advanced.addEventListener('toggle', () => { state.roleAdvancedOpen = advanced.open; });
+        advanced.append(element('summary', '高级'), ...cards);
+        fields.append(intro, advanced);
+      } else fields.append(...cards);
+    }
     holder.append(nav);
     const comparison = state.comparison ? roleComparison(state, draw, () => { message.textContent = ''; }) : null;
     const actions = element('div', '', 'actions role-save');
     const status = note(state.busy ? '正在读取或保存…' : state.dirty ? '草稿未保存；运行中任务保留原有快照。' : '保存后影响新任务和后续委派；运行中任务保留原有快照。'); status.setAttribute('role', 'status');
-    const save = button('保存角色配置', async () => {
+    saveRoles = async () => {
       if (state.busy || state.conflict) return;
       state.busy = true; draw(); message.textContent = '';
       try {
@@ -57,20 +79,26 @@ function rolesConsole() {
         await api(`/api/repositories/${id}/roles`, 'PUT', { ...draft, roles: draft.roles.map(({ kind, ...role }) => role), ...(stagesChanged ? { required_stages } : {}), expected_revision: state.data.configuration.revision });
         // The result belongs to this project; navigating elsewhere must not clear that other project's draft.
         if (target.rolesDraft === state) target.rolesDraft = null;
-        if (current === target && current.section === 'roles') await reloadWith('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
+        if (current === target && current.section === 'roles') await reloadWith(state.data.configured === false && !state.dirty ? '已使用推荐配置。新任务按默认角色分工；收回权限会阻止后续调用' : '角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
       } catch (err) {
         if (live() && err.code === 'role_configuration_conflict') { state.conflict = true; message.textContent = '角色配置已被别人修改。当前草稿仍保留，请读取最新版本并比较。'; }
         else if (live() && err.code === 'retired_skill_source') message.textContent = '旧指南来源已停用。请读取最新配置保留已迁移文件，或改用仓库技能文件、自定义文件。';
         else failed(err);
       } finally { if (state) state.busy = false; if (state) state.redraw?.(); }
-    }, ''); save.disabled = !!state.busy || !!state.conflict;
+    };
+    const unconfiguredOverview = state.data.configured === false && !current.item && !auxiliaryView;
+    const saveLabel = state.data.configured === false && !state.dirty ? '使用推荐配置' : '保存角色配置';
+    const save = button(saveLabel, () => saveRoles(), unconfiguredOverview && !state.dirty ? 'quiet' : '');
+    save.disabled = !!state.busy || !!state.conflict;
     const compareButton = button('读取最新版本并比较', compare); compareButton.disabled = !!state.busy;
     const discard = button('放弃草稿并刷新', async () => {
       if (state.busy) return;
       if (state.dirty && !await askConfirm({ title: '放弃未保存的角色修改？', body: ['刷新后读取服务器上的最新配置。'], action: '放弃并刷新' })) return;
       if (!live()) return; target.rolesDraft = null; await read();
     }); discard.disabled = !!state.busy;
-    actions.append(status, message, save, compareButton, discard); holder.append(actions);
+    if (unconfiguredOverview && !state.dirty) actions.append(status, message, compareButton, discard);
+    else actions.append(status, message, save, compareButton, discard);
+    holder.append(actions);
     if (comparison) holder.append(comparison); holder.append(fields);
     if (state.stageError && state.focusStageError) { state.focusStageError = false; focusStagePolicyError(holder, state.stageError); }
     if (comparison && state.focusComparison) {

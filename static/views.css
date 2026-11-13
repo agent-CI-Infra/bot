@@ -387,3 +387,7 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .audit-filters{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
 .audit-filters button{font-size:12px;padding:4px 10px}
 .audit-filters button[aria-pressed=true]{border-color:#16636b;color:#16636b;background:#e8f3f4}
+
+/* #564: recommended-config first screen; advanced role details stay folded. */
+.role-advanced { margin-top: var(--space-5, 16px); }
+.role-advanced > summary { cursor: pointer; font-weight: 600; min-height: var(--control-min, 44px); display: flex; align-items: center; }

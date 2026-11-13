@@ -169,7 +169,7 @@ test('role overview preserves stored legacy backends and recommends Pi only for 
   assert.equal(saved.table.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value,'native');
   const fresh=rolesPage(roleData(config,{configured:false}));
   assert.equal(fresh.table.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value,'pi');
-  assert.equal(fresh.cards[0].querySelector('[data-role-version]').textContent,'推荐配置 · 尚未保存');
+  assert.equal(fresh.cards[0].querySelector('[data-role-version]').textContent,'尚未保存。可先使用推荐配置。');
 });
 
 // ---- Against the real control plane: the page reads the same routes and fields the server returns. ----

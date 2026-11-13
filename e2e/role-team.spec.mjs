@@ -2,6 +2,21 @@ import { test, expect } from '@playwright/test';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 
+
+async function openRoleAdvanced(page) {
+  const { expect } = await import('@playwright/test');
+  const fold = page.getByTestId('role-advanced');
+  const overview = page.getByRole('heading', { name: '角色概览', exact: true });
+  await fold.waitFor({ state: 'visible' });
+  const summary = fold.locator(':scope > summary');
+  for (let i = 0; i < 4 && !(await overview.isVisible()); i++) {
+    await summary.click();
+    await overview.waitFor({ state: 'visible', timeout: 2000 }).catch(() => {});
+  }
+  await expect(overview).toBeVisible();
+}
+
+
 // #229 slice 1: the AI-team list carries the role facts and distinguishes saved configuration from the shared draft.
 test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生效版本', async ({ page }) => {
   test.setTimeout(90000);
@@ -46,8 +61,11 @@ test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生�
     await expect(status).toHaveText(`配置版本 ${config.revision} · 已生效`);
 
     await repository(admin, a.id, '102'); await page.goto(h.admin + '/#/projects/102/roles');
-    await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible();
-    await expect(page.locator('[data-role-version]')).toHaveText('推荐配置 · 尚未保存');
+    await expect(page.getByRole('heading', { name: '使用推荐的角色分工', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '使用推荐配置', exact: true })).toBeVisible();
+    await expect(page.getByTestId('role-advanced')).toBeVisible();
+    expect(await page.getByTestId('role-advanced').evaluate(el => el.open)).toBe(false);
+    await expect(page.locator('[data-role-version]').first()).toHaveText('尚未保存。可先使用推荐配置。');
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });
@@ -101,7 +119,7 @@ for (const [name, act] of [
     await expect(status).toHaveText(`配置版本 ${revision} · 已生效`);
   } finally { await h.stop(); }
 });
-test('尚未配置过角色的项目保持「推荐配置 · 尚未保存」，勾选后也不出现「配置版本 0」', async ({ page }) => {
+test('尚未配置过角色的项目保持「尚未保存。可先使用推荐配置。」，勾选后也不出现「配置版本 0」', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
   try {
@@ -110,10 +128,11 @@ test('尚未配置过角色的项目保持「推荐配置 · 尚未保存」，�
     await page.goto(h.admin + '/#/projects/101/roles');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    const status = page.locator('[data-role-version]');
-    await expect(status).toHaveText('推荐配置 · 尚未保存');
+    const status = page.locator('[data-role-version]').first();
+    await expect(status).toHaveText('尚未保存。可先使用推荐配置。');
+    await openRoleAdvanced(page);
     await page.getByLabel('开启角色协调', { exact: true }).setChecked(true);
-    await expect(status).toHaveText('推荐配置 · 尚未保存');
+    await expect(status).toHaveText('尚未保存。可先使用推荐配置。');
     await expect(status).not.toContainText('配置版本 0');
   } finally { await h.stop(); }
 });

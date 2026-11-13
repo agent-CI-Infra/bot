@@ -3,6 +3,19 @@ import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 
+async function openRoleAdvanced(page) {
+  const { expect } = await import('@playwright/test');
+  const fold = page.getByTestId('role-advanced');
+  const overview = page.getByRole('heading', { name: '角色概览', exact: true });
+  await fold.waitFor({ state: 'visible' });
+  const summary = fold.locator(':scope > summary');
+  for (let i = 0; i < 4 && !(await overview.isVisible()); i++) {
+    await summary.click();
+    await overview.waitFor({ state: 'visible', timeout: 2000 }).catch(() => {});
+  }
+  await expect(overview).toBeVisible();
+}
+
 test('角色概览和详情通过表单保存模型、提示词、预算、技能和阶段，保留草稿并拒绝过期保存', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), errors = [];
@@ -17,6 +30,8 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await expect(nav.getByRole('link').first()).toHaveText('概览');
     const sections = await page.locator('.project-nav > a').allTextContents();
     expect(sections[sections.indexOf('机器配置') + 1]).toBe('角色');
+    await expect(page.getByTestId('recommended-roles-intro')).toBeVisible();
+    await openRoleAdvanced(page);
     await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible();
     await expect(page.locator('textarea[name=role_configuration]')).toHaveCount(0);
     await expect(page.getByText('工作类型：开关、写入与设置', { exact: true })).toHaveCount(0);
@@ -83,6 +98,7 @@ test('新增角色、删除内置角色并重载，只有三个必需角色不�
     await page.goto(h.admin + '/#/projects/101/roles');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
+    await openRoleAdvanced(page);
     await page.getByLabel('新角色标识', { exact: true }).fill('security');
     await page.getByRole('button', { name: '添加角色', exact: true }).click();
     const nav = page.locator('.role-nav');
