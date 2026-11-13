@@ -65,7 +65,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 .project-nav{display:flex;flex-direction:column;gap:2px;padding:12px 8px;border-right:1px solid #e3eaf0;background:#f7fafb}
 .project-nav a{padding:8px 12px;border-radius:5px;color:var(--color-text-muted);text-decoration:none;font-weight:600;font-size:var(--font-size-2)}
 .project-nav a:hover{background:#edf3f5}.project-nav a[aria-current=page]{background:var(--color-brand);color:var(--color-text-inverse)}
-.project-content{padding:16px;display:flex;flex-direction:column;gap:12px;min-width:0;max-width:980px}
+.project-content{padding:var(--space-6);display:flex;flex-direction:column;gap:var(--space-6);min-width:0;max-width:980px}.project-content>.side-card,.project-content>.card{margin:0}
 .project-content .side-card h3{font-size:var(--font-size-row)}.project-content h4{margin:6px 0 0;font-size:var(--font-size-label);color:var(--color-text)}
 .project-form{gap:10px}.project-form fieldset{border:0;padding:0;margin:0;display:flex;flex-direction:column;gap:10px;min-width:0}
 .project-form fieldset:disabled input,.project-form fieldset:disabled textarea,.project-form fieldset:disabled select{background:#f7fafb;color:var(--color-text-muted)}
