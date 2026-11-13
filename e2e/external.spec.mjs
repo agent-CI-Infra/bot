@@ -168,6 +168,12 @@ test('全局仅一套说明，选择客户端复制含轮询的指令；地址�
     await expect(happy).toContainText('兑换 token');
     await expect(happy).toContainText('用 token 发起请求');
     await expect(guide.locator('.external-guide-advanced')).not.toHaveAttribute('open','');
+    await expect(guide.locator('.external-exchange-script')).not.toHaveAttribute('open','');
+    const visible=await guide.innerText();
+    for(const term of ['RS256','jti','request_id'])expect(visible).not.toContain(term);
+    expect(visible).not.toMatch(/\biss\b/);
+    expect(visible).not.toMatch(/\bsub\b/);
+    expect(visible).not.toMatch(/\baud\b/);
     await expect(guide.getByRole('button',{name:'复制生成密钥命令',exact:true})).toHaveCount(1);
     await expect(guide.getByRole('button',{name:'复制兑换命令',exact:true})).toHaveCount(1);
     await expect(guide.getByRole('button',{name:'复制轮询命令',exact:true})).toHaveCount(1);
@@ -176,8 +182,10 @@ test('全局仅一套说明，选择客户端复制含轮询的指令；地址�
     expect(await page.evaluate(()=>navigator.clipboard.readText())).toContain('openssl genpkey');
     await guide.getByRole('button',{name:'复制兑换命令',exact:true}).click();
     const exchange=await page.evaluate(()=>navigator.clipboard.readText());
-    for(const text of ['proof-header.txt','token-request.json','openssl dgst',h.audience,'jq -cn'])expect(exchange).toContain(text);
+    for(const text of ['proof-header.txt','token-request.json','openssl dgst',h.audience,'jq -cn','兑换结果已保存到','jq -r .token'])expect(exchange).toContain(text);
     expect(exchange).toContain('CLIENT_ID=');
+    await expect(guide.locator('.external-exchange-script')).not.toHaveAttribute('open','');
+    await expect(happy).toContainText('jq -r .token');
     await guide.locator('.external-guide-advanced summary').click();
     await expect(guide.locator('.external-guide-advanced')).toContainText('RS256 JWT');
     await expect(guide.locator('.external-guide-advanced')).toContainText('request_id');
@@ -198,6 +206,10 @@ test('全局仅一套说明，选择客户端复制含轮询的指令；地址�
     expect(copied).not.toContain(b.client.id);expect(copied).not.toContain('-----BEGIN PRIVATE KEY-----');expect(copied).not.toContain(h.github.privateKey);expect(copied).not.toContain('scripts/external-token.mjs');
     await select.selectOption(b.client.id);await guide.getByRole('button',{name:'复制给我的 AI agent',exact:true}).click();
     const changed=await page.evaluate(()=>navigator.clipboard.readText());expect(changed).toContain(b.client.id);expect(changed).not.toContain(a.client.id);
+    await guide.getByRole('button',{name:'复制兑换命令',exact:true}).click();
+    const exchanged=await page.evaluate(()=>navigator.clipboard.readText());
+    expect(exchanged).toContain('CLIENT_ID=\''+b.client.id+'\'');
+    expect(exchanged).not.toContain('CLIENT_ID=\''+a.client.id+'\'');
     const doc=await page.request.get(h.adminBase+'/docs/external-token-api.md');expect(doc.status()).toBe(200);expect(await doc.text()).toContain('# token-poll');
     mkdirSync('.tmp/external-e2e',{recursive:true});await page.setViewportSize({width:1365,height:1000});await noOverflow(page);
     await page.screenshot({path:'.tmp/external-e2e/global-desktop.png',fullPage:true});

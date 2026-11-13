@@ -25,6 +25,7 @@ function externalExchangeScript(clientId,audience){
   return 'umask 077\n'
     +'CLIENT_ID='+quote(clientId||'<所选客户端ID>')+'\n'
     +'TOKEN_URL='+quote(audience)+'\n'
+    +'# 请在生成密钥的同一目录运行\n'
     +'KEY_FILE=./bot-client.pem\n'
     +'WORK_DIR=$(mktemp -d ./bot-token.XXXXXXXX)\n'
     +'b64url() { openssl base64 -A | tr \'+/\' \'-_\' | tr -d \'=\'; }\n'
@@ -41,7 +42,9 @@ function externalExchangeScript(clientId,audience){
     +'  --header @"$WORK_DIR/proof-header.txt" \\\n'
     +'  --data-binary @"$WORK_DIR/token-request.json" \\\n'
     +'  --output "$WORK_DIR/token-response.json"\n'
-    +'jq \'{grant_id,token_type,expires_at,repository_id,permissions}\' "$WORK_DIR/token-response.json"';
+    +'jq \'{grant_id,token_type,expires_at,repository_id,permissions}\' "$WORK_DIR/token-response.json"\n'
+    +'printf \'兑换结果已保存到 %s\\n\' "$WORK_DIR/token-response.json"\n'
+    +'printf \'在同一个 shell 里用 jq -r .token "%s" 读取 token。\\n\' "$WORK_DIR/token-response.json"';
 }
 function externalAgentInstructions(client,audience){
   const exchange=audience
@@ -96,12 +99,24 @@ function externalPublicKeyGuide(clients=[],audience=externalAudience,{expanded=f
   const exchangeStep=element('li','');exchangeStep.append(element('strong','兑换 token'));
   let exchangeCommand=null;
   if(audience){
-    exchangeStep.append(element('p','在本机私有目录运行下面的脚本即可完成兑换，不必打开「高级／协议说明」。脚本会用本机私钥签名，写出 proof-header.txt 和 token-request.json，并请求当前兑换地址。需要已安装 openssl 和 jq。协议细节仍可在下方查阅。'),element('p','当前兑换地址：'+audience));
-    exchangeCommand=copyableCommand(externalExchangeScript(selectedClient()?.id,audience),status,'复制兑换命令');
+    exchangeStep.append(element('p','在生成密钥的同一目录运行兑换脚本即可完成兑换，不必打开「高级／协议说明」。脚本使用本机的 ./bot-client.pem 签名，写出证明文件并请求当前兑换地址。需要已安装 openssl 和 jq。协议细节仍可在下方查阅。'),element('p','当前兑换地址：'+audience));
+    const pre=element('pre',externalExchangeScript(selectedClient()?.id,audience));
+    const scriptDetails=element('details','','external-exchange-script');
+    scriptDetails.append(element('summary','查看兑换脚本'),pre,element('p','脚本较长时可在框内滚动；复制按钮会复制全部内容。','muted'));
+    const copyExchange=button('复制兑换命令',async()=>{
+      try{await navigator.clipboard.writeText(pre.textContent);status.textContent='已复制命令';}
+      catch{
+        const selection=getSelection(),range=document.createRange();
+        range.selectNodeContents(pre);selection.removeAllRanges();selection.addRange(range);
+        status.textContent='请手动复制上方命令。';
+      }
+    },'quiet');
+    exchangeCommand=element('div','','external-exchange');
+    exchangeCommand.append(copyExchange,scriptDetails);
     exchangeStep.append(exchangeCommand);
   }else exchangeStep.append(element('p','兑换地址尚未配置：请超级管理员设置，或先在接入向导中验证公开地址，再重新打开说明。配置前无法兑换，不要猜测 URL。'));
   const useStep=element('li','');
-  useStep.append(element('strong','用 token 发起请求'),element('p','成功响应里的 token 用于调用 GitHub，或轮询绑定仓库的事件。用完后撤销，不要把 token 写入聊天、日志或提交。'),copyableCommand('Authorization: Bearer <token>\nGET '+eventsUrl,status,'复制轮询命令'),element('p','用完后向 '+revokeUrl+' 发送撤销请求。'));
+  useStep.append(element('strong','用 token 发起请求'),element('p','兑换脚本结束时会打印结果文件路径。在同一个 shell 里用 jq -r .token "$WORK_DIR/token-response.json" 读取 token，再用它调用 GitHub，或轮询绑定仓库的事件。用完后撤销，不要把 token 写入聊天、日志或提交。'),copyableCommand('Authorization: Bearer <token>\nGET '+eventsUrl,status,'复制轮询命令'),element('p','用完后向 '+revokeUrl+' 发送撤销请求。'));
   steps.append(keyStep,registerStep,exchangeStep,useStep);
   const advanced=element('details','','external-guide-advanced');
   advanced.append(element('summary','高级／协议说明'));
