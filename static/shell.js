@@ -191,7 +191,10 @@ function syncConsoleShell() {
   const shortName = r => (r.full_name || '').includes('/') ? r.full_name.split('/').slice(1).join('/') : r.full_name;
   const personalTitle = /^#\/identity\/feishu-apps(?:\/|$)/.test(location.hash) ? '组织飞书应用'
     : /^#\/identity\/feishu(?:$|\?|\/)/.test(location.hash) ? '飞书绑定' : '身份与权限';
-  $('console-context').textContent = project ? (repo ? organization(repo) + ' · ' + shortName(repo) : '正在读取项目…')
+  // An installed repository nobody has started is no project yet; its cached installation row still names it.
+  const unstarted = project && !repo ? consoleGaps.get(String(project.id)) : null;
+  $('console-context').textContent = project ? (repo ? organization(repo) + ' · ' + shortName(repo)
+    : unstarted?.registered === false ? organization(unstarted) + ' · ' + shortName(unstarted) + ' · 未启动' : '正在读取项目…')
     : tab === 'identity' || tab === 'preferences' ? personalTitle : ({ more: '更多功能', inbox: '待处理', settings: '全局设置' }[tab] || titles[tab] || '身份与权限');
   // A project can be reachable while some of its features cannot run; the navigation every page shares has to say so.
   // Only the installation snapshot names the gaps, and only a super administrator may read it, so nothing is invented.

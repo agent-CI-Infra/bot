@@ -11,7 +11,11 @@ async function renderProject(route) {
   const token = ++renderToken, page = $('project-page'); clearTimeout(projectTimer);
   if (current?.id !== route.id || current.globalSettings) { current = { id: route.id }; page.replaceChildren(element('p', '正在加载…', 'muted')); }
   if (legacyFocus) current.focusAnchor = legacyFocus;
-  try { await loadProject(route.id,route.section); } catch (err) { if (token === renderToken) { if ([401,403].includes(err.status)) { if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles(); if (current?.id === route.id) current.rolesDraft = null; } page.replaceChildren(element('p', err.message, 'view-error')); } return; }
+  try { await loadProject(route.id,route.section); } catch (err) {
+    if (token === renderToken) { if ([401,403].includes(err.status)) { if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles(); if (current?.id === route.id) current.rolesDraft = null; }
+      const unstarted = await unstartedProject(route.id, err);
+      if (token === renderToken) page.replaceChildren(unstarted || element('p', err.message, 'view-error')); }
+    return; }
   if (token !== renderToken) return;
   const section = projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin')) ? route.section : 'basic';
   // A newly granted or externally created project may not be in the list loaded at login.
@@ -28,6 +32,20 @@ async function renderProject(route) {
   if (current.focusRule) { page.querySelector(`[data-rule-path="${CSS.escape(current.focusRule)}"]`)?.scrollIntoView({ block: 'start' }); current.focusRule = null; }
   if (['machine', 'activity'].includes(section)) refreshProjectStatus(token);
   if (section === 'roles' && current.policy.actions_failures_enabled) projectTimer = setTimeout(() => refreshActionsFailureStatus(token), 5000);
+}
+// The address of an installed repository nobody has started yet (a bookmark, or a link from elsewhere): it has no project
+// page until it is started, so a super administrator gets that explanation and the 启动 action instead of a bare 404.
+async function unstartedProject(id, err) {
+  if (err.code !== 'repository_not_found' || me.role !== 'super_admin') return null;
+  const row = (await api('/api/installations?repository_id=' + encodeURIComponent(id)).catch(() => null))?.repositories?.[0];
+  if (!row || row.registered) return null;
+  // The scope bar names started projects only; the installation row it caches lets it name this one as not started.
+  if (typeof updateConsoleGaps === 'function') updateConsoleGaps([row]);
+  const box = consoleState(`${row.full_name} 还没有启动`, row.installed ? '这个仓库已经安装了 GitHub App，但还没有在控制台启动；启动后才有项目页。'
+    : '这个仓库已不在 GitHub App 的安装范围内，不能启动。'), actions = element('div', '', 'actions');
+  if (row.installed) actions.append(button('启动', () => openActivation(row, () => route()).catch(error)));
+  actions.append(consoleLink('#/settings/projects', '全局设置 · 项目', '启动、隐藏和公开看板'));
+  box.append(actions); return box;
 }
 async function loadProject(id,section=current.section) {
   const superUser = me.role === 'super_admin';

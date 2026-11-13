@@ -24,8 +24,12 @@ export function actor(store: Store, req: IncomingMessage): Actor {
 export function superAdmin(user: Actor): void { if (user.role !== 'super_admin') fail(403, 'super_admin_required'); if (user.context) authorize(user.context, 'platform.manage'); }
 export function repository(store: Store, user: Actor, id: string): void {
   if (user.role !== 'super_admin' && !user.repositories.includes(id)) fail(403, 'repository_forbidden');
+  // A repository installed but not started yet has no project and so no organization: tell a super administrator it is
+  // not a project rather than letting the grant check report an organization mismatch. Everyone else stopped above.
+  const registered = !!store.get('SELECT id FROM repositories WHERE id=?', id);
+  if (!registered && user.role === 'super_admin') fail(404, 'repository_not_found');
   if (user.context) authorize(user.context, 'tasks.read', { project_id: id });
-  if (!store.get('SELECT id FROM repositories WHERE id=?', id)) fail(404, 'repository_not_found');
+  if (!registered) fail(404, 'repository_not_found');
 }
 export function scope(user: Actor, column: string): { sql: string; args: string[] } {
   if (user.role === 'super_admin' && !user.context?.tenant_id) return { sql: '1=1', args: [] };
