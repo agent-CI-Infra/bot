@@ -73,33 +73,85 @@ test('继续滚动可读完全部三页，到末页后不再请求', async ({ pa
   } finally { await close(h); }
 });
 
-test('键盘滚动与移动端空列都能触发续页，列表视图同样续页', async ({ page }) => {
+test('键盘滚动、列表视图与 390px 看板容器都能续页，末页后不再请求', async ({ page }) => {
   const { h, offsets } = await fixture(page);
   try {
     await page.getByRole('group', { name: '按…分列', exact: true }).locator('button[data-value="repository"]').click();
+    // Keyboard scrolling reaches the same trigger as a pointer scroll.
     const list = page.locator('[data-column-id="101"] .board-column-list');
     await list.evaluate(element => { element.tabIndex = 0; element.focus(); });
     await page.keyboard.press('End');
     await expect.poll(() => continuations(offsets)).toEqual(['100']);
-    // A phone shows one column at a time. Its first group can have a count but no card in the loaded page: the board must
-    // keep reading instead of leaving 「请加载更多」 as a dead end.
-    await page.setViewportSize({ width: 390, height: 800 });
-    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
-    await expect.poll(() => continuations(offsets).length).toBeGreaterThan(1);
-    await expect(page.getByRole('button', { name: '加载更多', exact: true })).toHaveCount(0);
-    // Switching to the populated group keeps the page and scrolling its own container continues from there.
-    await page.getByRole('combobox', { name: '当前分组', exact: true }).selectOption({ label: '已检视 · ' + (await page.locator('#board-mobile-group option').last().innerText()).split(' · ')[1] }).catch(async () => {});
-    const scroll = page.locator('#board-columns');
-    const before = (await continuations(offsets)).length;
-    await scroll.evaluate(element => { element.scrollTop = element.scrollHeight; });
-    await expect.poll(() => continuations(offsets).length).toBeGreaterThan(before);
-    // The list layout scrolls the board container itself and continues the same way.
-    await page.setViewportSize({ width: 1440, height: 900 });
+    // The list layout scrolls the board container itself; its height settles a frame after the switch.
     await page.getByRole('button', { name: '更多视图操作', exact: true }).click();
     await page.getByRole('button', { name: '切换为列表', exact: true }).click();
     await expect(page.locator('#board-columns')).toHaveClass(/board-list-layout/);
-    const listBefore = (await continuations(offsets)).length;
+    const scroll = page.locator('#board-columns');
+    await expect.poll(async () => {
+      await scroll.evaluate(element => { element.scrollTop = element.scrollHeight; });
+      return continuations(offsets).length;
+    }).toBe(2);
+    await expect(page.locator('#board-status')).toContainText('已全部加载');
+    // A phone shows one column, and the board container itself scrolls it. The last page is already loaded, so reaching
+    // its end asks for nothing more and never leaves a permanent button behind.
+    await page.setViewportSize({ width: 390, height: 800 });
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
+    await expect(page.getByRole('button', { name: '加载更多', exact: true })).toHaveCount(0);
     await scroll.evaluate(element => { element.scrollTop = element.scrollHeight; });
-    await expect.poll(() => continuations(offsets).length).toBeGreaterThan(listBefore);
+    await page.waitForTimeout(600);
+    expect(continuations(offsets)).toEqual(['100', '200']);
+  } finally { await close(h); }
+});
+
+test('续页失败只给一次性「重试」，没有自动退避重试', async ({ page }) => {
+  const { h, offsets } = await fixture(page);
+  try {
+    let failOnce = true;
+    await page.route('**/api/board/cards?*', async route => {
+      const url = new URL(route.request().url());
+      // The reader's own continuation fails once; a retry is let through to the server.
+      if (url.searchParams.get('offset') === '100' && failOnce) {
+        failOnce = false;
+        return route.fulfill({ status: 503, json: { error: 'temporary_unavailable' } });
+      }
+      return route.continue();
+    });
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await scrollDeepest(page);
+    await expect(page.getByRole('button', { name: '重试', exact: true })).toBeVisible();
+    await expect(page.locator('#board-status')).toContainText('读取失败');
+    // The failed page is not asked for again by itself: no backoff loop, no second request for the same offset.
+    expect(continuations(offsets).filter(offset => offset === '100')).toHaveLength(1);
+    const again = page.waitForRequest(request => new URL(request.url()).searchParams.get('offset') === '100', { timeout: 2500 })
+      .then(() => true, () => false);
+    expect(await again).toBe(false);
+    // The retry asks for that same page once and the card list continues from where it stopped.
+    const before = await cards(page).count();
+    await page.getByRole('button', { name: '重试', exact: true }).click();
+    await expect.poll(() => cards(page).count()).toBeGreaterThan(before);
+    await expect(page.getByRole('button', { name: '重试', exact: true })).toHaveCount(0);
+    expect(continuations(offsets).filter(offset => offset === '100')).toHaveLength(2);
+  } finally { await close(h); }
+});
+
+test('已翻到第二页后，15s 静默刷新只刷计数，不换掉已加载的卡片', async ({ page }) => {
+  test.setTimeout(60000);
+  const { h, offsets } = await fixture(page);
+  try {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await scrollDeepest(page);
+    await expect.poll(() => continuations(offsets)).toEqual(['100']);
+    const loaded = await cards(page).count();
+    const handle = await page.locator('.board-card').first().elementHandle();
+    expect(await cards(page).count()).toBe(loaded);
+    // The server gains a card while the reader is on page two; the quiet refresh must report it in the counts only.
+    boardTask(h.store, 'late-arrival', 900, 'review.issue', 'succeeded');
+    const polls = page.waitForRequest(request => new URL(request.url()).searchParams.get('offset') === '0', { timeout: 20000 });
+    await polls;
+    await expect(page.locator('#board-status')).toContainText('项工作');
+    // The same card node is still in the document and the appended pages are still there: nothing was re-rendered.
+    expect(await page.evaluate(element => element.isConnected, handle)).toBe(true);
+    expect(await cards(page).count()).toBe(loaded);
+    expect(continuations(offsets)).toEqual(['100']);
   } finally { await close(h); }
 });
