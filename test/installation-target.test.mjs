@@ -3,7 +3,32 @@ import assert from 'node:assert/strict';
 import {generateKeyPairSync} from 'node:crypto';
 import {harness,setup,account,testPassword} from './helpers.mjs';
 import {Onboarding} from '../dist/onboarding/service.js';
-import {installationAccount} from '../dist/onboarding/installation-target.js';
+import {installationAccount, accountInstallUrl} from '../dist/onboarding/installation-target.js';
+import {githubAppInstallUrl, rewriteGithubAppInstallUrl, withGithubAppInstallUrl} from '../dist/github/app-install-url.js';
+
+test('github App install URLs always use select_target and rewrite stored /new addresses', () => {
+  assert.equal(githubAppInstallUrl('agent-ci-infra-bot'), 'https://github.com/apps/agent-ci-infra-bot/installations/select_target');
+  assert.equal(accountInstallUrl('fixture-app', 10), 'https://github.com/apps/fixture-app/installations/new/permissions?suggested_target_id=10');
+  assert.equal(githubAppInstallUrl('../nope'), null);
+  assert.equal(rewriteGithubAppInstallUrl('https://github.com/apps/fixture-app/installations/new?next=https://evil.example'),
+    'https://github.com/apps/fixture-app/installations/select_target');
+  assert.equal(rewriteGithubAppInstallUrl('https://github.com/apps/fixture-app/installations/new/permissions'),
+    'https://github.com/apps/fixture-app/installations/select_target');
+  const wizard = rewriteGithubAppInstallUrl('https://github.com/apps/fixture-app/installations/new/permissions?suggested_target_id=10&state=abababababababababababababababababababababababab&next=https://evil.example');
+  const parsed = new URL(wizard);
+  assert.equal(parsed.origin + parsed.pathname, 'https://github.com/apps/fixture-app/installations/new/permissions');
+  assert.equal(parsed.searchParams.get('suggested_target_id'), '10');
+  assert.equal(parsed.searchParams.get('state'), 'abababababababababababababababababababababababab');
+  assert.equal(parsed.searchParams.get('next'), null);
+  assert.equal(rewriteGithubAppInstallUrl('https://github.com/apps/fixture-app/installations/select_target'),
+    'https://github.com/apps/fixture-app/installations/select_target');
+  assert.equal(rewriteGithubAppInstallUrl('https://evil.example/apps/fixture-app/installations/new', 'fixture-app'),
+    'https://github.com/apps/fixture-app/installations/select_target');
+  assert.equal(rewriteGithubAppInstallUrl('https://github.com/settings/installations/77'), null);
+  assert.deepEqual(withGithubAppInstallUrl({ slug: 'fixture-app', install_url: 'https://github.com/apps/fixture-app/installations/new', account_id: 'a' }),
+    { slug: 'fixture-app', install_url: 'https://github.com/apps/fixture-app/installations/select_target', account_id: 'a' });
+});
+
 
 test('installation target accepts personal account, organization, repository, issue, PR, team and clone references without fetching them',()=>{
   for(const value of ['Fixture','@Fixture','Fixture/repo','https://github.com/Fixture','https://github.com/Fixture/repo.git','github.com/Fixture/repo',
@@ -33,16 +58,16 @@ test('account lookup supports organizations and personal accounts, scopes existi
   assert.equal(result.status,201);assert.deepEqual(result.value.account,{id:'10',login:'fixture',type:'Organization',html_url:'https://github.com/fixture'});assert.equal(result.value.installed,false);
   const installUrl=new URL(result.value.install_url);assert.equal(installUrl.origin+installUrl.pathname,'https://github.com/apps/fixture-app/installations/new/permissions');assert.equal(installUrl.searchParams.get('suggested_target_id'),'10');assert.match(installUrl.searchParams.get('state'),/^[a-f0-9]{48}$/);
   assert.equal(requests[0].options.headers.Authorization,undefined);assert.match(requests[1].options.headers.Authorization,/^Bearer /);assert.ok(requests.every(r=>r.url.origin==='https://api.github.com'&&r.options.redirect==='error'));
-  assert.deepEqual(onboarding.saved('app'),app);assert.equal(h.store.get('SELECT count(*) n FROM repositories').n,0);assert.ok(!JSON.stringify(result.value).includes(pem));
+  assert.deepEqual(onboarding.saved('app'),{...app,install_url:'https://github.com/apps/fixture-app/installations/select_target'});assert.equal(h.store.get('SELECT count(*) n FROM repositories').n,0);assert.ok(!JSON.stringify(result.value).includes(pem));
   installed=true;const existing=await admin('/api/onboarding/installation-target','POST',{target:'fixture'});assert.equal(existing.value.installed,true);assert.equal(existing.value.install_url,'https://github.com/organizations/fixture/settings/installations/77');
   mismatch=true;assert.equal((await admin('/api/onboarding/installation-target','POST',{target:'fixture'})).status,502);mismatch=false;
   installed=false;const personal=await admin('/api/onboarding/installation-target','POST',{target:'https://github.com/personal/repo/issues/2'});
   assert.equal(personal.status,201);assert.deepEqual(personal.value.account,{id:'20',login:'personal',type:'User',html_url:'https://github.com/personal'});assert.equal(personal.value.installed,false);
-  assert.equal(new URL(personal.value.install_url).searchParams.get('suggested_target_id'),'20');assert.match(new URL(personal.value.install_url).searchParams.get('state'),/^[a-f0-9]{48}$/);
+  assert.equal(new URL(personal.value.install_url).origin+new URL(personal.value.install_url).pathname,'https://github.com/apps/fixture-app/installations/new/permissions');assert.equal(new URL(personal.value.install_url).searchParams.get('suggested_target_id'),'20');assert.match(new URL(personal.value.install_url).searchParams.get('state'),/^[a-f0-9]{48}$/);
   assert.equal(requests.at(-1).url.pathname,'/users/personal/installation');assert.match(requests.at(-1).options.headers.Authorization,/^Bearer /);
   installed=true;const installedPersonal=await admin('/api/onboarding/installation-target','POST',{target:'@personal'});assert.equal(installedPersonal.value.installed,true);assert.equal(installedPersonal.value.install_url,'https://github.com/settings/installations/88');
   mismatch=true;assert.equal((await admin('/api/onboarding/installation-target','POST',{target:'personal'})).status,502);mismatch=false;
-  assert.deepEqual(onboarding.saved('app'),app);assert.equal(h.store.get('SELECT count(*) n FROM repositories').n,0);
+  assert.deepEqual(onboarding.saved('app'),{...app,install_url:'https://github.com/apps/fixture-app/installations/select_target'});assert.equal(h.store.get('SELECT count(*) n FROM repositories').n,0);
   for(const [target,status,code]of [['automation',400,'installation_target_not_installable'],['missing',404,'installation_target_not_found'],['limited',503,'installation_target_lookup_failed']]){
     const response=await admin('/api/onboarding/installation-target','POST',{target});assert.equal(response.status,status);assert.equal(response.value.error,code);
   }

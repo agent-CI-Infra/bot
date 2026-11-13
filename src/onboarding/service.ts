@@ -8,6 +8,7 @@ import { publicOrigin, probeGet, registrationPath, setupPath } from './public-ur
 import { appEvents, appJwt, appPermissions } from '../github/client.js';
 import { defaults } from '../rules/service.js';
 import { installationAccount, accountInstallUrl } from './installation-target.js';
+import { githubAppInstallUrl, withGithubAppInstallUrl } from '../github/app-install-url.js';
 import { InstallationSetup } from '../installations/setup.js';
 import { tunnelToken } from './tunnel-token.js';
 import { appSettingsUrl } from '../app/installations.js';
@@ -20,7 +21,13 @@ export class Onboarding {
   constructor(readonly store: Store, readonly options: Options = {}) {
     store.db.exec(`CREATE TABLE IF NOT EXISTS app_manifest_states(state TEXT PRIMARY KEY,user_id TEXT NOT NULL,account_id TEXT NOT NULL,endpoint_id TEXT NOT NULL,expires_at INTEGER NOT NULL,status TEXT NOT NULL);`);
   }
-  saved(key: string): any { const value = this.store.get('SELECT value FROM settings WHERE key=?', 'onboarding.' + key)?.value; return value ? JSON.parse(value) : null; }
+  saved(key: string): any {
+    const value = this.store.get('SELECT value FROM settings WHERE key=?', 'onboarding.' + key)?.value;
+    if (!value) return null;
+    const parsed = JSON.parse(value);
+    // Legacy /installations/new addresses are rewritten on read so a stored wizard record keeps working.
+    return key === 'app' && parsed && typeof parsed === 'object' ? withGithubAppInstallUrl(parsed) : parsed;
+  }
   save(key: string, value: unknown) { this.store.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', 'onboarding.' + key, JSON.stringify(value)); }
   readiness() {
     const app = this.saved('app');
@@ -126,7 +133,7 @@ export class Onboarding {
     // Re-read after the request so another tab's selection or installation changes cannot be overwritten.
     const current = this.saved('app');
     if (current?.account_id !== accountId || String(current.app_id) !== String(account.app_id)) return fail(409, 'github_app_changed');
-    const value = { ...current, slug: app.slug, ...owner, install_url: `https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new` };
+    const value = { ...current, slug: app.slug, ...owner, install_url: githubAppInstallUrl(app.slug) };
     this.save('app', value);
     return value;
   }
@@ -167,7 +174,7 @@ export class Onboarding {
           if(!r.ok)throw new Error();const confirmed:any=await get('/app/hook/config');if(confirmed.url!==webhookUrl)throw new Error();
         }
       } catch { return fail(502, 'github_app_check_failed'); }
-      const value = { account_id: account!.id, app_id: String(app.id), slug: app.slug, ...this.owner(app), installations: installations.length, ...(webhookUrl?{webhook_url:webhookUrl}:{}), install_url: `https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new` };
+      const value = { account_id: account!.id, app_id: String(app.id), slug: app.slug, ...this.owner(app), installations: installations.length, ...(webhookUrl?{webhook_url:webhookUrl}:{}), install_url: githubAppInstallUrl(app.slug) };
       if (typeof app.client_id === 'string') this.store.run('UPDATE accounts SET credentials=? WHERE id=?',
         this.store.secrets.seal({ ...secrets, oauth_client_id: app.client_id }, 'account:' + account!.id), account!.id);
       this.save('app', value); this.save('installation_skipped', false); return { app: value };
@@ -223,7 +230,7 @@ export class Onboarding {
       this.store.run('INSERT INTO accounts VALUES(?,?,?,?,?,?)', pending!.account_id, value.name || value.slug, 'github_app', String(value.id), this.store.secrets.seal({ private_key: value.pem,
         ...(typeof value.client_id === 'string' && typeof value.client_secret === 'string' ? { oauth_client_id: value.client_id, oauth_client_secret: value.client_secret } : {}) }, 'account:' + pending!.account_id), new Date().toISOString());
       this.store.run('INSERT INTO endpoints VALUES(?,?,?)', pending!.endpoint_id, pending!.account_id, this.store.secrets.seal({ value: value.webhook_secret }, 'endpoint:' + pending!.endpoint_id));
-      this.save('app', { account_id: pending!.account_id, app_id: String(value.id), slug: value.slug, ...this.owner(value), install_url: `https://github.com/apps/${encodeURIComponent(value.slug)}/installations/new` });
+      this.save('app', { account_id: pending!.account_id, app_id: String(value.id), slug: value.slug, ...this.owner(value), install_url: githubAppInstallUrl(value.slug) });
       this.store.run("UPDATE app_manifest_states SET status='completed' WHERE state=?", state); this.store.audit(pending!.user_id, 'onboarding.app_created', pending!.account_id);
     });
   }

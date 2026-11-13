@@ -76,7 +76,7 @@ function accountInstallationForm(){
       const resolved=await api('/api/onboarding/installation-target','POST',value);if(request!==version)return false;
       const account=resolved.account;result.replaceChildren(facts([['已识别账号',link(account.html_url,account.login)],['账号类型',account.type==='Organization'?'组织':'个人账号']]),
         note(resolved.installed?'此 App 已安装到该账号，可打开安装设置调整仓库范围。':'请前往此账号的 GitHub 安装页，选择仓库并确认授权。'),
-        link(resolved.install_url,resolved.installed?'打开 '+account.login+' 安装设置':'前往 '+account.login+' 安装','button-link'));
+        link(rewriteGithubAppInstallUrl(resolved.install_url),resolved.installed?'打开 '+account.login+' 安装设置':'前往 '+account.login+' 安装','button-link'));
     }catch(error){
       if(request!==version)return false;result.replaceChildren();
       const code=error.message.replace(/^\d+\s*·\s*/,'');
@@ -216,7 +216,7 @@ async function renderOnboarding(request,panel,feedback=''){
   }else if(onboardingStep===2){
     panel.append(githubLoginForm(data.github_login, data.app));next();
   }else if(onboardingStep===3){
-    const install=card('安装到目标账号');if(data.app){install.append(facts([['App',data.app.slug],['App ID',data.app.app_id],['当前有效安装数',installations===null?'未知（状态未提供）':String(installations)]]),note('统计来自当前安装记录，暂停、卸载或范围尚未同步的安装不计入。'),link(data.app.install_url,'在 GitHub 选择账号','button-link'),button('重新检查安装',async()=>{try{await api('/api/onboarding/use-app','POST',{account_id:data.app.account_id});await api('/api/installations/sync','POST',{});if(typeof forgetConsoleGaps==='function')forgetConsoleGaps();await start();}catch(e){error(e);}}));}else install.append(note('尚未选择 App。可以返回第 2 步使用已登记的账号，或准备 manifest 后由你在 GitHub 确认。'));
+    const install=card('安装到目标账号');if(data.app){install.append(facts([['App',data.app.slug],['App ID',data.app.app_id],['当前有效安装数',installations===null?'未知（状态未提供）':String(installations)]]),note('统计来自当前安装记录，暂停、卸载或范围尚未同步的安装不计入。'),link(rewriteGithubAppInstallUrl(data.app.install_url,data.app.slug),'在 GitHub 选择账号','button-link'),button('重新检查安装',async()=>{try{await api('/api/onboarding/use-app','POST',{account_id:data.app.account_id});await api('/api/installations/sync','POST',{});if(typeof forgetConsoleGaps==='function')forgetConsoleGaps();await start();}catch(e){error(e);}}));}else install.append(note('尚未选择 App。可以返回第 2 步使用已登记的账号，或准备 manifest 后由你在 GitHub 确认。'));
     install.append(button('暂时跳过安装',async()=>{await api('/api/onboarding/installation','POST',{skip:true});wizardNext(4);}));panel.append(install);if(data.app)panel.append(accountInstallationForm(),note('安装到其他组织或个人账号要求 App 为公开，且你拥有相应安装权限；最终由 GitHub 校验。安装完成后点「重新检查安装」，再到第 7 步同步并启动仓库。'));next();
   }else if(onboardingStep===4){
     const shared=models.filter(model=>!model.repository_id&&model.key_configured),list=card('使用已配置的模型');for(const model of shared){const row=element('div','','row');row.append(modelAddress(model),button('选用此模型',async()=>{await api('/api/onboarding/model','POST',{model_id:model.id});wizardNext(5);}));list.append(row);}if(shared.length)panel.append(list);

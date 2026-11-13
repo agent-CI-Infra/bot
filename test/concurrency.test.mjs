@@ -230,7 +230,7 @@ test('global settings switch to a registered App through the wizard API, updatin
   const used = await admin('/api/onboarding/use-app', 'POST', { account_id: app.id, update_webhook: true });
   assert.equal(used.status, 201);
   assert.deepEqual(hook, { url: `https://hooks.example.com${app.endpoints[0].webhook_path}`, content_type: 'json' });
-  assert.deepEqual(used.value.app, { account_id: app.id, app_id: '456', slug: 'second-app', installations: 2, webhook_url: hook.url, install_url: 'https://github.com/apps/second-app/installations/new' });
+  assert.deepEqual(used.value.app, { account_id: app.id, app_id: '456', slug: 'second-app', installations: 2, webhook_url: hook.url, install_url: 'https://github.com/apps/second-app/installations/select_target' });
   const visible = JSON.stringify([used.value, (await admin('/api/onboarding')).value, (await admin('/api/accounts')).value]);
   for (const secret of [privateKey, webhookSecret]) assert.ok(!visible.includes(secret));
 });

@@ -1,4 +1,5 @@
 import {fail} from '../core/security.js';
+import {githubAppInstallUrl} from '../github/app-install-url.js';
 
 // Parse only GitHub identifiers; pasted URLs are never requested by the server.
 export function installationAccount(input:unknown):string{
@@ -21,7 +22,11 @@ export function installationAccount(input:unknown):string{
 }
 
 export function accountInstallUrl(slug:string,id:number):string{
-  // GitHub documents suggested_target_id for preselecting an account on the permissions page.
-  const url=new URL(`https://github.com/apps/${encodeURIComponent(slug)}/installations/new/permissions`);
-  url.searchParams.set('suggested_target_id',String(id));return url.href;
+  // The general install entry is always select_target. When the wizard already knows the account,
+  // use the documented /installations/new/permissions?suggested_target_id= path: GitHub only
+  // documents that query for this page, not for select_target (#508 allows this exception).
+  const base=githubAppInstallUrl(slug); if(!base)return fail(400,'invalid_github_app_slug');
+  const url=new URL(base);
+  url.pathname=url.pathname.replace(/\/installations\/select_target$/,'/installations/new/permissions');
+  url.searchParams.set('suggested_target_id',String(id)); return url.href;
 }

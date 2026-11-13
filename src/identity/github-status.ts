@@ -1,5 +1,6 @@
 import type { Store } from '../storage/database.js';
 import { listEffectiveProjectAccess, listEffectiveScopes } from './authorization.js';
+import { rewriteGithubAppInstallUrl } from '../github/app-install-url.js';
 
 // A computed GitHub connection summary for the identity page: one state, one sentence, and the
 // next step. "已验证" on an identity row only means the binding is live; this object is what
@@ -20,30 +21,14 @@ function byName(left: GitHubRepositoryRef, right: GitHubRepositoryRef): number {
 
 
 // Only the public "install / choose repositories" address of this deployment's GitHub App. The App owner's
-// settings page, account ids and webhook addresses stay on the super-admin onboarding APIs.
-function safeInstallUrl(value: string): string | null {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== 'https:' || url.hostname !== 'github.com' || url.username || url.password) return null;
-    if (!/^\/apps\/[A-Za-z0-9][A-Za-z0-9-]{0,99}\/installations\/(new|select_target)(\/permissions)?$/.test(url.pathname)) return null;
-    return url.origin + url.pathname;
-  } catch { return null; }
-}
-
+// settings page, account ids and webhook addresses stay on the super-admin onboarding APIs. Stored
+// `/installations/new` addresses are rewritten to `select_target` on read.
 export function githubAppInstallUrl(store: Store): string | null {
   const raw = store.get('SELECT value FROM settings WHERE key=?', 'onboarding.app')?.value;
   if (typeof raw !== 'string' || !raw) return null;
   let saved: { slug?: unknown; install_url?: unknown };
   try { saved = JSON.parse(raw); } catch { return null; }
-  if (typeof saved.install_url === 'string') {
-    const url = safeInstallUrl(saved.install_url);
-    if (url) return url;
-  }
-  if (typeof saved.slug === 'string' && /^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/.test(saved.slug)) {
-    return `https://github.com/apps/${encodeURIComponent(saved.slug)}/installations/new`;
-  }
-  return null;
-}
+  return rewriteGithubAppInstallUrl(typeof saved.install_url === 'string' ? saved.install_url : '', typeof saved.slug === 'string' ? saved.slug : undefined);}
 
 /** Installed repositories this principal already administers, but that a platform administrator has not started. */
 export function pendingInstalledRepositories(store: Store, principal: string): GitHubRepositoryRef[] {

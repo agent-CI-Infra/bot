@@ -84,7 +84,7 @@ async function renderIdentity() {
     // A public GitHub App install URL only. The App owner's settings page is never linked here.
     if (data.github_connection.action === 'choose_repos' && data.github_connection.install_url) {
       const go = element('a', '去 GitHub 选择仓库', 'button-link');
-      go.href = data.github_connection.install_url; go.target = '_blank'; go.rel = 'noopener noreferrer';
+      go.href = rewriteGithubAppInstallUrl(data.github_connection.install_url); go.target = '_blank'; go.rel = 'noopener noreferrer';
       overview.append(go);
     }
   }

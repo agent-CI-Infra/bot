@@ -90,7 +90,7 @@ test('legacy selected App metadata is refreshed in place without changing login,
  const h=await harness(t,undefined,store=>({onboarding:onboarding=new Onboarding(store,{fetcher:async(url,options)=>{
   calls.push({url,method:options.method||'GET'});return new Response(JSON.stringify({id:123,slug:'fixture-app',owner,html_url:'https://github.com/apps/fixture-app',client_secret:secret,pem}));
  }})})),{admin}=await setup(h),a=await account(admin,{type:'github_app',app_id:'123',private_key:pem,token:undefined});
- const original={account_id:a.id,app_id:'123',slug:'fixture-app',installations:3,webhook_url:'https://hooks.invalid/existing',install_url:'https://github.com/apps/fixture-app/installations/new'};
+ const original={account_id:a.id,app_id:'123',slug:'fixture-app',installations:3,webhook_url:'https://hooks.invalid/existing',install_url:'https://github.com/apps/fixture-app/installations/select_target'};
  onboarding.save('app',original);onboarding.save('installation_skipped',true);
  await admin('/api/onboarding/github-login','PUT',{enabled:true,client_id:'Ov23.existing',client_secret:secret});
  const credentials=h.store.get('SELECT credentials FROM accounts WHERE id=?',a.id).credentials,login=h.store.get("SELECT value FROM settings WHERE key='identity.github_login'").value;
@@ -128,7 +128,7 @@ test('a slow App metadata lookup preserves newer installation fields and cannot 
   const ready=new Promise(resolve=>{started=resolve;}),pending=admin('/api/onboarding/app/refresh','POST',{account_id:a.id});await ready;
   onboarding.save('app',changed);release();const result=await pending;
   if(changed.account_id===a.id){assert.equal(result.status,201);assert.equal(onboarding.saved('app').installations,5);assert.equal(onboarding.saved('app').webhook_url,changed.webhook_url);}
-  else{assert.equal(result.status,409);assert.equal(result.value.error,'github_app_changed');assert.deepEqual(onboarding.saved('app'),changed);}
+  else{assert.equal(result.status,409);assert.equal(result.value.error,'github_app_changed');assert.deepEqual(onboarding.saved('app'),{...changed,install_url:'https://github.com/apps/another-app/installations/select_target'});}
  }
  assert.equal((await admin('/api/onboarding/app/refresh','POST',{account_id:a.id})).status,409);
 });
