@@ -49,7 +49,9 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
     const mobile = page.locator('#console-mobile-nav');
     await expect(mobile).toBeVisible();
-    for (const name of ['总览', '任务', '待处理', '更多']) {
+    // #481: five phone destinations, each with one decorative SVG.
+    await expect(mobile.locator('svg.console-icon')).toHaveCount(5);
+    for (const name of ['项目', '任务', '待处理', '助手', '更多']) {
       const item = mobile.getByRole('link', { name, exact: true });
       await expect(item).toBeVisible();
       await expect(item.locator('svg.console-icon')).toBeVisible();
@@ -63,5 +65,31 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     expect(await page.locator('.console-groups .console-link-with-icon svg.console-icon').count()).toBeGreaterThan(4);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     await page.screenshot({ path: `${out}/more-icons-390.png`, fullPage: true });
+
+    // Empty and error states carry an inline SVG mark (a data: mask image would be blocked by the console CSP).
+    const stateIcon = async (selector, name) => {
+      const state = page.locator(selector).first();
+      await expect(state).toBeVisible();
+      const icon = state.locator('svg.console-state-icon.console-icon-' + name);
+      await expect(icon).toBeVisible();
+      const box = await icon.boundingBox();
+      expect(Math.round(box.width)).toBe(32);
+      expect(await icon.evaluate(el => el.querySelectorAll('path, circle').length)).toBeGreaterThan(0);
+      expect(await state.evaluate(el => getComputedStyle(el, '::before').content)).toBe('none');
+    };
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+      await page.unrouteAll({ behavior: 'wait' });
+      // Leave the inbox first: the second pass would otherwise keep the failed read from the first.
+      await page.goto(h.admin + '/#/more');
+      await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
+      await page.goto(h.admin + '/#/inbox');
+      await stateIcon('.console-state:not(.console-state-error)', 'tray');
+      await page.screenshot({ path: `${out}/state-empty-${width}.png`, fullPage: true });
+      await page.route('**/api/tasks?attention=*', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
+      await page.reload();
+      await stateIcon('.console-state-error', 'alert');
+      await page.screenshot({ path: `${out}/state-error-${width}.png`, fullPage: true });
+    }
   } finally { await h.stop(); }
 });

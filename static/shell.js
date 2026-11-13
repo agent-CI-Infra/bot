@@ -416,8 +416,8 @@ function restoreConsolePosition() {
 }
 
 // #554: one linear SVG set for workspace navigation. Icons are decorative
-// (aria-hidden); the visible caption remains the accessible name. The four
-// mobile destinations and their addresses are unchanged (#481 / #496).
+// (aria-hidden); the visible caption remains the accessible name. The five
+// mobile destinations and their addresses stay as #481 defined them.
 function consoleIcon(name) {
   const ns = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(ns, 'svg');
@@ -466,7 +466,10 @@ consoleIcon.shapes = {
   download: [['path', { d: 'M12 4v11' }], ['path', { d: 'M8 11.5 12 15.5 16 11.5' }], ['path', { d: 'M5 19h14' }]],
   folder: [['path', { d: 'M3.5 7.5A1.5 1.5 0 0 1 5 6h5l2 2.5h7A1.5 1.5 0 0 1 20.5 10v7.5a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18z' }]],
   message: [['path', { d: 'M5 5.5h14A1.5 1.5 0 0 1 20.5 7v8A1.5 1.5 0 0 1 19 16.5H9L5 20v-3.5H5A1.5 1.5 0 0 1 3.5 15V7A1.5 1.5 0 0 1 5 5.5z' }]],
-  link: [['circle', { cx: '12', cy: '12', r: '8.5' }], ['path', { d: 'M12 8v8M8 12h8' }]]
+  link: [['circle', { cx: '12', cy: '12', r: '8.5' }], ['path', { d: 'M12 8v8M8 12h8' }]],
+  // consoleState() marks: an empty tray, and an alert for a failed read.
+  tray: [['path', { d: 'M4 13h4l1.2 2.4a1 1 0 0 0 .9.6h3.8a1 1 0 0 0 .9-.6L16 13h4' }], ['path', { d: 'M5.5 13 7 20h10l1.5-7' }], ['path', { d: 'M12 4v8' }], ['path', { d: 'M8.5 8.5 12 12l3.5-3.5' }]],
+  alert: [['circle', { cx: '12', cy: '12', r: '9' }], ['path', { d: 'M12 8v5M12 16.5h.01' }]]
 };
 function consoleIconName(href) {
   const path = String(href || '').replace(/^#/, '');
