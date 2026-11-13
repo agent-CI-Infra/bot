@@ -1,4 +1,5 @@
 import { legacySkillBinding } from '../test/skill-fixtures.mjs';
+import { projectNavigate } from './console-navigation.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
@@ -18,7 +19,7 @@ async function prepared(page) {
     legacySkillBinding(h.store, '101', result.value.configuration, 'migrated');
     await page.goto(h.admin + '/#/projects/101/basic');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.locator('.project-nav').getByRole('link', { name: '角色', exact: true }).click();
+    await projectNavigate(page, '角色');
     await page.locator('.role-nav').getByRole('link', { name: '技能包目录', exact: true }).click();
     const catalogue = page.getByRole('region', { name: '技能包目录', exact: true }); await expect(catalogue.getByLabel('技能包名称', { exact: true })).toBeVisible();
     return { h, admin, catalogue, rules, path, saved: result.value.configuration };

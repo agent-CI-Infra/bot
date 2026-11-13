@@ -1,6 +1,8 @@
-// Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
+// Project work stays in the navigation; configuration pages are reached through one settings directory.
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['overview', '项目总览'], ['management', '管理对话'], ['release', '发版本'], ['knowledge', '项目知识'], ['activity', '运行状态'], ['basic', '基本设置'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['schedules', '计划与通知'], ['external', '外部执行'], ['members', '成员']];
+const projectSettingsSections = [['basic', '基本设置'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['schedules', '计划与通知'], ['external', '外部执行'], ['members', '成员']];
+const projectWorkSections = [['overview', '项目总览'], ['management', '管理对话'], ['release', '发版本'], ['knowledge', '项目知识'], ['activity', '运行状态'], ['settings', '项目设置']];
+const projectSections = [...projectWorkSections, ...projectSettingsSections];
 // Older addresses open the Manager page: the workflows page it replaced, the task overview and the review, development and rule pages.
 const legacyProjectSections = { workflows: 'manager-prompt', tasks: '', review: '', development: '', rules: 'rule-sources' };
 // Every file has the same three layers: built-in default, project console override, default-branch repository file.

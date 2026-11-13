@@ -78,18 +78,35 @@ function projectHeader() {
   if (current.section === 'basic') actions.append(button('刷新项目设置', () => reloadProject().catch(error)));
   head.append(back, title, actions); return head;
 }
+function projectSettingsDirectory() {
+  const root = element('section', '', 'project-settings-directory'), links = element('div', '', 'console-groups');
+  root.append(element('h2', '项目设置'));
+  for (const [key, caption] of projectSettingsSections) {
+    const item = consoleLink(`#/projects/${current.id}/${key}`, caption); item.classList.add('console-group'); links.append(item);
+  }
+  root.append(links);
+  const location = element('div', '', 'project-setting-location'), back = element('a', '返回项目总览', 'button-link quiet');
+  back.href = `#/projects/${current.id}/overview`; location.append(back);
+  return [location, root];
+}
 function projectBody(section) {
   const body = element('div', '', 'project-body'), nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content');
-  nav.setAttribute('aria-label', '项目设置类别');
-  for (const [key, caption, superOnly] of projectSections) {
-    if (key === 'overview' || key === 'basic') nav.append(element('p', key === 'overview' ? '项目工作' : '设置', 'console-nav-label'));
-    if (superOnly && me.role !== 'super_admin') continue;
+  const setting = projectSettingsSections.find(([key]) => key === section);
+  nav.setAttribute('aria-label', '项目工作');
+  for (const [key, caption] of projectWorkSections) {
     const item = element('a', caption); item.href = `#/projects/${current.id}/${key}`; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item);
     if (key === 'management') { const project = current.id; item.addEventListener('click', event => { event.preventDefault(); void openManagementChat(project).catch(error); }); }
   }
+  if (setting) {
+    const location = element('div', '', 'project-setting-location'), back = element('a', '返回项目设置', 'button-link quiet');
+    back.href = `#/projects/${current.id}/settings`;
+    location.append(back, element('h2', setting[1])); content.append(location);
+  }
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
-  content.append(...({ overview: workspaceOverview, basic: basicSection, machine: machineSection, model: modelsSection, release: releaseSection, schedules: schedulesSection, knowledge: knowledgeSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
-  body.append(nav, content); return body;
+  content.append(...({ overview: workspaceOverview, settings: projectSettingsDirectory, basic: basicSection, machine: machineSection, model: modelsSection, release: releaseSection, schedules: schedulesSection, knowledge: knowledgeSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
+  // A configuration page shows its own controls, not a third row of sibling pages above the role editor.
+  if (!setting) body.append(nav);
+  body.append(content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();
 const changed = (values, saved) => Object.fromEntries(Object.entries(values).filter(([key, value]) => value !== saved[key]));

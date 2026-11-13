@@ -15,8 +15,8 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const nav = page.locator('.role-nav');
     await expect(nav.getByRole('link').first()).toHaveText('概览');
-    const sections = await page.locator('.project-nav > a').allTextContents();
-    expect(sections[sections.indexOf('机器配置') + 1]).toBe('角色');
+    await expect(page.locator('#console-secondary-nav')).toBeHidden();
+    await expect(page.locator('.project-setting-location')).toContainText('角色');
     await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible();
     await expect(page.locator('textarea[name=role_configuration]')).toHaveCount(0);
     await expect(page.getByText('工作类型：开关、写入与设置', { exact: true })).toHaveCount(0);

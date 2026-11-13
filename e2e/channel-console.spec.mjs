@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { channelFixture, boundGroup, privateChat, bindFixture, repositoryAssistant, scriptedModel, inGroup, envelope, post, finished, until } from '../test/channel-fixture.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { testPassword } from '../test/helpers.mjs';
+import { projectNavigate } from './console-navigation.mjs';
 
 async function login(page, f, hash, username = 'administrator', password = f.password) {
   await page.goto(f.h.admin + '/' + hash);
@@ -133,7 +134,7 @@ test('settings keep platform mutations in global settings and project administra
     await expect(page.locator('#tabs [data-tab=preferences]')).toHaveText('个人设置');
     await expect(page.locator('#tabs [data-tab=settings]')).toBeHidden();
     await page.getByLabel('切换项目').selectOption('101');
-    await page.locator('#console-secondary-nav .project-nav').getByRole('link', { name: '基本设置', exact: true }).click();
+    await projectNavigate(page, '基本设置');
     await expect(page.getByLabel('基准分支', { exact: true })).toBeEnabled();
     await expect(page.getByRole('button', { name: '删除项目', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: '禁用项目', exact: true })).toHaveCount(0);

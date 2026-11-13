@@ -1,4 +1,4 @@
-import { consoleNavigate } from './console-navigation.mjs';
+import { consoleNavigate, projectNavigate } from './console-navigation.mjs';
 import { test,expect } from '@playwright/test';
 import { mkdirSync,rmSync,writeFileSync } from 'node:fs';
 import { managementFixture,query,settled } from '../test/management-fixture.mjs';
@@ -161,9 +161,10 @@ test('project chat links select the project, and a delayed old read cannot repla
     await expect(feed).not.toContainText('environment_not_ready'); await expect(message).toHaveValue('102 的草稿');
     await page.unrouteAll({ behavior: 'wait' });
     await scope.selectOption('project:101'); await expect(message).toHaveValue('101 的草稿'); await expect(feed).toContainText('environment_not_ready');
-    // Opening the project entry again reuses the same chat and keeps the current settings page.
-    await page.locator('.project-nav').getByRole('link', { name: '角色', exact: true }).click();
-    await page.locator('.project-nav').getByRole('link', { name: '管理对话', exact: true }).click();
+    // Opening the assistant again reuses the same chat and keeps the current settings page.
+    await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
+    await projectNavigate(page, '角色');
+    await page.locator('#management-launcher').click();
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/); await expect(scope).toHaveValue('project:101'); await expect(message).toHaveValue('101 的草稿');
     await scope.selectOption('project:102'); await expect(message).toHaveValue('102 的草稿');
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();

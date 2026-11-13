@@ -67,6 +67,10 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: 20px 28px 
 .console-ready .project-head { padding: 20px 24px; }
 .console-ready .project-head h1 { font-size: 26px; }
 .console-ready .project-content { min-width: 0; }
+.project-setting-location { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.project-setting-location h2 { margin: 0; font-size: 20px; }
+.project-setting-location .button-link { min-height: 44px; }
+.project-settings-directory h2 { margin: 0 0 16px; }
 .console-section-picker, .console-mobile-nav { display: none; }
 .console-page-head { margin: 10px 0 24px; }
 .console-page-head h1 { font-size: 30px; margin: 8px 0; letter-spacing: -.7px; }
