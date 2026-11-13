@@ -70,16 +70,17 @@ test('项目导航只列真实页面，管理对话的深链不丢页，移动�
     // The chat's own launcher takes focus back, so the keyboard is never dropped somewhere invisible.
     await expect(page.locator('#management-launcher')).toBeVisible();
     await expect(page.locator('#management-launcher')).toBeFocused();
-    // The phone keeps four bottom entries and every destination behind 更多, grouped, with touch-sized targets.
+    // #481: the phone keeps five bottom destinations — the assistant itself is one of them — and every page the bar
+    // cannot carry sits behind 更多, grouped, with touch-sized targets.
     await page.setViewportSize({ width: 390, height: 844 });
     const bottom = page.locator('#console-mobile-nav a');
-    await expect(bottom).toHaveCount(4);
-    await expect(bottom).toHaveText([/总览/, /任务/, /待处理/, /更多/]);
+    await expect(bottom).toHaveCount(5);
+    await expect(bottom).toHaveText(['项目', '任务', '待处理', '助手', '更多']);
     for (const entry of await bottom.all()) expect((await entry.boundingBox()).height).toBeGreaterThanOrEqual(44);
     await bottom.filter({ hasText: '更多' }).click();
     const more = page.locator('#console-page');
     await expect(more.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
-    for (const group of ['工作区', '分析与身份', '设置', '全局设置']) await expect(more.getByRole('heading', { name: group, exact: true })).toBeVisible();
+    for (const group of ['当前项目', '分析与渠道', '个人与平台']) await expect(more.getByRole('heading', { name: group, exact: true })).toBeVisible();
     for (const entry of ['项目总览', '基本设置', '机器配置', '模型', '发版本', '计划与通知', '项目知识', '外部执行', '成员', '运行状态', '用量与成本', '身份与权限'])
       await expect(more.getByRole('link', { name: new RegExp('^' + entry) }).first()).toBeVisible();
     expect(await more.locator('a').evaluateAll(ns => ns.every(n => n.getAttribute('href')?.startsWith('#')))).toBe(true);

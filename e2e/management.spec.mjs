@@ -123,8 +123,11 @@ test('global management chat keeps drafts and a running conversation across navi
     await expect(message).toBeInViewport(); await expect(page.getByRole('button', { name: '发送', exact: true })).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     await page.screenshot({ path: '.tmp/management-164/floating-mobile.png' });
-    await page.keyboard.press('Escape'); await expect(chat).toBeHidden(); await expect(launcher).toBeFocused();
-    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    // #481: on a phone the bar's 助手 destination replaces both the floating launcher and the header's sign-out button.
+    await page.keyboard.press('Escape'); await expect(chat).toBeHidden();
+    await expect(page.locator('#console-mobile-nav a[data-page="assistant"]')).toBeFocused(); await expect(launcher).toBeHidden();
+    await page.locator('#console-account').click();
+    await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click();
     await expect(launcher).toHaveCount(0); await expect(chat).toHaveCount(0);
     expect(errors).toEqual([]);
   } finally { release?.(); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
@@ -320,7 +323,9 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await page.setViewportSize({ width: 520, height: 430 }); await expect(send).toBeInViewport();
     const short = await chat.boundingBox(); expect(short.y).toBeGreaterThanOrEqual(0); expect(short.y + short.height).toBeLessThanOrEqual(430);
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole('button', { name: '收起管理助手', exact: true }).click(); await launcher.click();
+    // #481: at this width the bar's 助手 destination is the way back in; the floating launcher is not on screen.
+    await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
+    await page.locator('#console-mobile-nav a[data-page="assistant"]').click();
     expect((await chat.boundingBox()).width).toBe(360); expect((await chat.boundingBox()).height).toBe(460);
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1); expect(errors).toEqual([]);
   } finally { releaseReturn?.(); await page.unrouteAll({ behavior: 'wait' }); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }

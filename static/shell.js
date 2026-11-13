@@ -104,36 +104,40 @@ function consoleScope() {
   const inbox = consoleInboxRoute();
   return projectRoute()?.id || (inbox ? (inbox[1] === 'all' ? null : inbox[1]) : consoleProject);
 }
+// #481: the phone's bottom bar owns the five primary destinations (项目 / 任务 / 待处理 / 助手 / 更多), so this page is
+// the supplement behind 更多. It must not repeat what the bar already carries, and it stays short enough to read on a
+// phone: one group for the project the reader is in, one for analysis and channels, one for personal and platform.
 function consoleGroups() {
   const id = consoleScope(), repo = repositories.find(r => String(r.id) === id);
-  const groups = [{ title: '工作区', items: [
-    ['#/projects', '全部项目', '查看有权访问的项目'], ['#/board', '任务看板', '任务状态、角色与运行证据'],
-    ['#/new-task' + (repo ? '/' + id : ''), '新建任务', '填写需求、验收条件和交付类型'],
-    ['#/inbox' + (repo ? '/' + id : ''), '待处理', '配置、权限、环境与失败事项'],
-    ['#/management', '管理对话', '实时回答、执行进展与命令回执'],
-    ['#/conversations', '飞书会话', '成员消息、执行过程与派生任务']
-  ] }];
-  if (repo) groups.push({ title: repo.full_name, items: projectSections
-    .filter(([key]) => ['overview', 'management', 'release', 'knowledge', 'activity'].includes(key))
-    .map(([key, name]) => [`#/projects/${id}/${key}`, name, '当前项目']) });
-  groups.push({ title: '分析与身份', items: [
+  const groups = [];
+  // 管理对话 is the bar's 助手 destination, and each project section is one address the phone can reach from here.
+  if (repo) groups.push({ title: '当前项目', items: projectSections
+    .filter(([key]) => key !== 'management')
+    .map(([key, name]) => [`#/projects/${id}/${key}`, name, repo.full_name]) });
+  groups.push({ title: '分析与渠道', items: [
     ['#/costs', '用量与成本', '按项目、日期与工作类型查看'],
     ['#/events', 'Webhook 投递', '接收、验证和处理结果'],
+    ['#/conversations', '飞书会话', '成员消息、执行过程与派生任务']
+  ] });
+  // A project administrator has no platform surface, so the third group is their own settings only and never mentions
+  // global settings. A super administrator gets one entry into them: the section picker on that page carries the rest.
+  groups.push({ title: me.role === 'super_admin' ? '个人与平台' : '设置', items: [
+    ['#/preferences', '个人设置', '个人身份、飞书绑定与外部执行端'],
+    ['#/identity/feishu', '飞书绑定', '个人绑定、群绑定、仓库权限与聊天记录'],
     ['#/identity', '身份与权限', '本人绑定与当前有效授权'],
     ['#/external', '外部执行端', '接入与连接诊断'],
-    ...(me.role === 'super_admin' ? [] : [['#/settings/storage', '存储', '本人项目的轨迹与数据量']])
+    me.role === 'super_admin' ? ['#/settings/work-computers', '全局设置', '系统算力、接入、渠道与用户']
+      : ['#/settings/storage', '存储', '本人项目的轨迹与数据量']
   ] });
-  groups.push({ title: '设置', items: [['#/preferences', '个人设置', '个人身份、飞书绑定与外部执行端'],
-    ['#/identity/feishu', '飞书绑定', '个人绑定、群绑定、仓库权限与聊天记录'], ...(repo ? projectSections
-    .filter(([key]) => ['basic', 'roles', 'model', 'machine', 'schedules', 'external', 'members'].includes(key))
-    .map(([key, name]) => [`#/projects/${id}/${key}`, name, repo.full_name]) : [])] });
-  if (me.role === 'super_admin') groups.push({ title: '全局设置', items: settingsSections.map(([key, name]) => [
-    key === 'onboarding' ? '#/settings/onboarding/0' : '#/settings/' + key, name, '平台超级管理员'
-  ]) });
   return groups;
 }
 function syncConsoleShell() {
   const signedIn = !!me && !$('workspace').hidden;
+  // #481: the account menu belongs to the page that opened it. Every shell re-sync is a route or a breakpoint change, so
+  // closing here keeps it from hanging over the page it just navigated to, and from staying open past 767px where its
+  // trigger is hidden (the menu is a sibling of #console-account, not a child of it).
+  const accountMenu = $('console-account-menu');
+  if (accountMenu && !accountMenu.hidden) setAccountMenu(false);
   document.body.classList.toggle('console-ready', signedIn);
   $('console-sidebar').hidden = !signedIn;
   $('console-mobile-nav').hidden = !signedIn;
@@ -150,8 +154,15 @@ function syncConsoleShell() {
     if (typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(null);
     const clearedPicker = $('console-project'); if (clearedPicker) clearedPicker.value = '';
     $('console-secondary-nav').replaceChildren(); $('console-page').replaceChildren();
+    setAccountMenu(false);
+    // #481: the bar's assistant state belongs to one session. A different owner starts idle and read, so a turn left
+    // running or a reply left unread by the previous user never survives the sign-out.
+    updateConsoleAssistant();
   }
   if (!signedIn) return;
+  // The menu names the same person the header used to print beside the sign-out button.
+  $('console-account-login').textContent = '@' + (me.github?.login || me.username);
+  $('console-account-role').textContent = me.role === 'super_admin' ? '超级管理员' : '项目管理员';
   const project = projectRoute(), inbox = consoleInboxRoute();
   const routed = project?.id || (inbox ? (inbox[1] === 'all' ? null : inbox[1]) : null) || null;
   // #480: the address wins where it names a project; the board, costs and management pages follow the shell picker.
@@ -220,14 +231,49 @@ function syncConsoleShell() {
   const nav = $('console-secondary-nav').querySelector('nav'), sectionPicker = $('console-section');
   $('console-section-label').hidden = !nav;
   sectionPicker.replaceChildren();
-  if (nav) for (const a of nav.querySelectorAll('a')) sectionPicker.add(new Option(a.textContent, a.getAttribute('href'), false, a.getAttribute('aria-current') === 'page'));
+  // #481: the picker keeps the groups the page's own navigation draws, so a long project page stays readable on a phone
+  // instead of flattening every entry into one list.
+  if (nav) {
+    let group = null;
+    for (const child of nav.children) {
+      if (child.classList.contains('console-nav-label')) {
+        group = document.createElement('optgroup'); group.label = child.textContent; sectionPicker.append(group); continue;
+      }
+      if (child.matches?.('a')) (group || sectionPicker).append(new Option(child.textContent, child.getAttribute('href'), false, child.getAttribute('aria-current') === 'page'));
+    }
+  }
+  syncConsoleMobileCurrent();
+  $('console-sidebar').classList.toggle('console-platform', platform);
+}
+// #481: 更多 stands for every page the bar cannot carry, and 助手 is the assistant itself: while the chat is open the bar
+// reports it as the current destination instead of naming a page underneath it.
+function syncConsoleMobileCurrent() {
+  const chat = typeof managementChatState === 'function' ? managementChatState() : null;
+  const chosen = chat?.open ? 'assistant' : ['projects', 'board', 'inbox'].includes(tab) ? tab : tab === 'design' ? '' : 'more';
   for (const a of $('console-mobile-nav').querySelectorAll('a')) {
     if (a.dataset.page === 'inbox') a.href = '#/inbox' + (consoleProject ? '/' + consoleProject : '');
-    const mobilePage = ['projects', 'board', 'inbox'].includes(tab) ? tab : tab === 'design' ? '' : 'more';
-    const active = a.dataset.page === mobilePage;
-    if (active) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+    if (a.dataset.page === chosen) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
-  $('console-sidebar').classList.toggle('console-platform', platform);
+}
+// The account menu is a small disclosure, not a dialog: Escape closes it and hands focus back to the control that opened
+// it, and opening it moves focus inside so the keyboard reaches the entries without passing through the page behind.
+function setAccountMenu(open) {
+  const account = $('console-account'), menu = $('console-account-menu');
+  if (!account || !menu) return;
+  menu.hidden = !open; account.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) menu.querySelector('a, button')?.focus();
+}
+// The bar carries the live assistant state the floating launcher carries on wide screens: a turn in progress survives the
+// chat being closed, and a reply that arrived while it was closed stays unread until the bar opens it again.
+function updateConsoleAssistant() {
+  const link = $('console-mobile-nav').querySelector('a[data-page="assistant"]'); if (!link) return;
+  const chat = typeof managementChatState === 'function' ? managementChatState() : null;
+  const running = !!chat?.active, unread = !running && !!chat?.unread;
+  if (running) link.dataset.active = '1'; else delete link.dataset.active;
+  if (unread) link.dataset.unread = '1'; else delete link.dataset.unread;
+  link.setAttribute('aria-label', '助手' + (running ? ' · 正在处理' : unread ? ' · 未读' : ''));
+  link.classList.toggle('console-nav-busy', running);
+  syncConsoleMobileCurrent();
 }
 function renderConsoleMore() {
   const page = $('console-page'); page.replaceChildren();
@@ -334,11 +380,43 @@ function initConsoleShell() {
   $('main-content').prepend(locationBox, secondary);
   const section = element('label', '当前页面', 'console-section-picker'), sectionPicker = document.createElement('select'); section.id = 'console-section-label'; sectionPicker.id = 'console-section'; sectionPicker.setAttribute('aria-label', '当前页面'); section.hidden = true;
   sectionPicker.addEventListener('change', () => { location.hash = sectionPicker.value; }); section.append(sectionPicker); locationBox.append(section);
+  // #481: five destinations own the phone's navigation. The glyph is drawn by CSS from data-glyph, so the link's text —
+  // and its accessible name — is exactly its destination, and the badge stays decorative.
   const mobile = element('nav', '', 'console-mobile-nav'); mobile.id = 'console-mobile-nav'; mobile.hidden = true; mobile.setAttribute('aria-label', '移动工作区导航');
-  for (const [key, href, caption, glyph] of [['projects', '#/projects', '总览', '⌂'], ['board', '#/board', '任务', '▤'], ['inbox', '#/inbox', '待处理', '◷'], ['more', '#/more', '更多', '⋯']]) {
-    const a = consoleLink(href, caption); a.dataset.page = key; const icon = element('span', glyph, 'console-nav-icon'); icon.setAttribute('aria-hidden', 'true'); a.prepend(icon); mobile.append(a);
+  for (const [key, href, caption, glyph] of [
+    ['projects', '#/projects', '项目', '⌂'], ['board', '#/board', '任务', '▤'], ['inbox', '#/inbox', '待处理', '◷'],
+    ['assistant', '#/management', '助手', '✦'], ['more', '#/more', '更多', '⋯']]) {
+    const a = consoleLink(href, caption);
+    a.dataset.page = key; a.dataset.glyph = glyph; a.setAttribute('aria-label', caption);
+    const badge = element('span', '', 'console-nav-badge'); badge.setAttribute('aria-hidden', 'true'); a.append(badge);
+    // 助手 opens the assistant in place: it is a destination of the shell, not an address the reader leaves the page for.
+    if (key === 'assistant') a.addEventListener('click', event => {
+      event.preventDefault();
+      if (typeof openManagementChat === 'function') Promise.resolve(openManagementChat()).catch(error);
+    });
+    mobile.append(a);
   }
   document.body.append(mobile);
+  // #481: the phone header cannot carry a login, a role and a separate sign-out button. They move into one account menu
+  // that opens from a single control; the working sign-out handler stays the one the header always had.
+  const identity = $('identity');
+  const account = button('', () => setAccountMenu($('console-account-menu').hidden), 'quiet console-account');
+  account.id = 'console-account'; account.setAttribute('aria-expanded', 'false');
+  account.setAttribute('aria-controls', 'console-account-menu'); account.setAttribute('aria-label', '账号菜单');
+  const mark = element('span', '⋯', 'console-account-mark'); mark.setAttribute('aria-hidden', 'true'); account.append(mark);
+  const accountMenu = element('div', '', 'console-account-menu'); accountMenu.id = 'console-account-menu'; accountMenu.hidden = true;
+  const accountLogin = element('p', '', 'console-account-login'), accountRole = element('p', '', 'console-account-role');
+  accountLogin.id = 'console-account-login'; accountRole.id = 'console-account-role';
+  accountMenu.append(accountLogin, accountRole, consoleLink('#/preferences', '个人设置'), button('退出登录', () => $('logout').click(), 'quiet console-account-signout'));
+  identity.append(account, accountMenu);
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || $('console-account-menu').hidden) return;
+    event.preventDefault(); setAccountMenu(false); $('console-account').focus();
+  });
+  document.addEventListener('click', event => {
+    const menu = $('console-account-menu');
+    if (!menu.hidden && !event.target.closest('#identity')) setAccountMenu(false);
+  });
   // Defer focus transfer until click so restored mobile navigation cannot steal pointer-up.
   // Commit the editor's change before the button handler captures a command or submitted draft.
   let pressedAction = null;

@@ -238,8 +238,10 @@ for (const surface of ['management', 'project']) {
       await page.setViewportSize({ width: 390, height: 360 });
       const name = page.getByLabel('计划名称', { exact: true }), save = page.getByRole('button', { name: '保存计划', exact: true });
       await name.fill('Saved from the focused editor'); await name.focus(); await expect(name).toBeFocused();
-      await expect(page.locator('#console-mobile-nav')).toBeHidden();
+      // #481: the bar no longer disappears behind the keyboard, so it must not sit between the reader and the control
+      // they are about to press: the press has to land on the button itself.
       await save.scrollIntoViewIfNeeded(); await expect(save).toBeInViewport();
+      expect(await save.evaluate(el => { const b = el.getBoundingClientRect(); const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return !!hit && (el === hit || el.contains(hit)); })).toBe(true);
       await save.click();
       await expect.poll(async () => (await read(f, 'list_schedules')).schedules[0].spec.name).toBe('Saved from the focused editor');
       expect(commands.filter(operation => operation === 'schedule.update')).toHaveLength(1);

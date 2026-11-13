@@ -87,7 +87,9 @@ test('access revoked during an open task clears the returned inbox instead of re
   const { h, admin } = await prepared(page);
   try {
     const password = testPassword(); await admin('/api/users', 'POST', { username: 'inbox-member', password, repository_ids: ['101'] });
-    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    // #481: below the phone breakpoint sign-out lives in the account menu; wide screens keep the inline button.
+    if (await page.locator('#console-account').isVisible()) { await page.locator('#console-account').click(); await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click(); }
+    else await page.getByRole('button', { name: '退出登录', exact: true }).click();
     await expect(page.getByRole('button', { name: '登录', exact: true })).toBeVisible(); await page.goto(h.admin + '/#/inbox/101');
     await page.getByLabel('用户名', { exact: true }).fill('inbox-member'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();

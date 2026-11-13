@@ -69,7 +69,7 @@ test('the shared shell groups projects by organization and keeps the selected pr
       await page.goto(h.admin + '/#/projects/101/overview');
       await expect(page.locator('#console-location [data-permission]')).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      if (width < 768) expect(await page.locator('#console-mobile-nav a').count()).toBe(4);
+      if (width < 768) expect(await page.locator('#console-mobile-nav a').count()).toBe(5);
     }
     expect(errors).toEqual([]);
   } finally { await h.stop(); }

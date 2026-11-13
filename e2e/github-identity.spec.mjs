@@ -69,12 +69,18 @@ test('GitHub 页头展示用户名与头像，旧会话和改名可刷新，窄�
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 844 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await expect(who).toBeVisible(); await expect(page.getByRole('button', { name: '退出登录' })).toBeVisible();
+      // #481: a phone header keeps one account control instead of the inline login text and sign-out button.
+      await expect(page.locator('#console-account')).toBeVisible();
+      await page.locator('#console-account').click();
+      await expect(page.locator('#console-account-menu')).toContainText('@' + f.state.login);
+      await expect(page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true })).toBeVisible();
+      await page.keyboard.press('Escape'); await expect(page.locator('#console-account-menu')).toBeHidden();
     }
     await page.screenshot({ path: resolve(output, 'profile-mobile.png'), fullPage: true });
     await page.route('https://avatars.githubusercontent.com/**', route => route.abort());
     await page.reload(); await expect(who.locator('img')).toHaveCount(0); await expect(who).toContainText('@' + f.state.login);
-    await page.getByRole('button', { name: '退出登录' }).click();
+    await page.locator('#console-account').click();
+    await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click();
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(who).toHaveText('administrator · 超级管理员'); await expect(who.locator('img')).toHaveCount(0);
