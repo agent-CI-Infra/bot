@@ -1,7 +1,7 @@
 // One account or user as a list row, the same markup as the other lists; drawn by the global settings sections.
 function settingsRow(title, detail, extra, badges, actions) {
   const line = element('div', '', 'row has-actions'), content = element('div', '', 'row-content'), status = element('div', '', 'row-state'), group = element('div', '', 'actions');
-  line.setAttribute('role', 'listitem'); content.append(element('strong', title), element('p', detail), ...extra); status.append(...badges); group.append(...actions);
+  line.setAttribute('role', 'listitem'); const subtitle = element('p', detail); subtitle.title = subtitle.textContent; content.append(element('strong', title), subtitle, ...extra); status.append(...badges); group.append(...actions);
   line.append(content, status, group); return line;
 }
 function accountLine(row) {

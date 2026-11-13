@@ -362,7 +362,7 @@ body:not(.console-ready) header .locale-switch { background: #fff; }
 .console-link-title, .board-card-repo {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 100%;
 }
-.console-ready .toolbar .muted, .console-ready #count, .console-ready .row p,
+.console-ready .toolbar .muted, .console-ready #count, .console-ready .row-content > p,
 .roles-page .project-table td .muted, .roles-page .project-table td p {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   overflow: hidden; overflow-wrap: anywhere;

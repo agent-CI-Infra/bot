@@ -152,6 +152,8 @@ async function render(quiet = false) {
       }line.append(actions);
     }
     if(taskTab)content.append(taskMetricsLine(row));
+    // #561: list subtitles clamp to two lines, so each one carries its full text for hover and assistive reading.
+    for(const paragraph of content.querySelectorAll(':scope > p'))if(!paragraph.title)paragraph.title=paragraph.textContent;
     line.classList.toggle('has-actions',!!line.querySelector(':scope > .actions'));lines.push(line);
   });
   const entries = tab === 'projects' ? groupProjectRows(rows, lines) : lines;
