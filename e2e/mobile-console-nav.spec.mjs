@@ -206,9 +206,18 @@ test('移动「当前页面」选择器保留分组，深链仍然打开对应�
     // Every option keeps its address, so a deep link opens the page it names.
     const options = await page.locator('#console-section option').evaluateAll(rows => rows.map(row => [row.textContent.trim(), row.value]));
     expect(options).toContainEqual(['项目总览', '#/projects/101/overview']);
+    // #565: the leaf page draws only the two-item breadcrumb, but the picker keeps the hub's groups plus the way back.
+    expect(options[0]).toEqual(['← 项目入口', '#/projects/101/menu']);
+    await expect(page.locator('#console-section')).toHaveValue('#/projects/101/overview');
+    expect(options.map(([, href]) => href)).toEqual(expect.arrayContaining(['#/projects/101/machine', '#/projects/101/roles', '#/projects/101/model', '#/projects/101/members']));
     await page.locator('#console-section').selectOption('#/projects/101/basic');
     await expect(page).toHaveURL(/#\/projects\/101\/basic$/);
     await expect(page.getByLabel('基准分支', { exact: true })).toBeEnabled();
+    await expect(page.locator('#console-section')).toHaveValue('#/projects/101/basic');
+    await page.locator('#console-section').selectOption('#/projects/101/menu');
+    await expect(page).toHaveURL(/#\/projects\/101\/menu$/);
+    await expect(page.getByTestId('project-hub')).toBeVisible();
+    await expect(page.locator('#console-section optgroup')).toHaveCount(2);
   } finally { await h.stop(); }
 });
 

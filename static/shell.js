@@ -269,7 +269,20 @@ function syncConsoleShell() {
   sectionPicker.replaceChildren();
   // #481: the picker keeps the groups the page's own navigation draws, so a long project page stays readable on a phone
   // instead of flattening every entry into one list.
-  if (nav) {
+  // #565: a project page draws only the two-item breadcrumb, so the picker takes the 项目入口 hub groups instead: the
+  // breadcrumb's own links first (← 项目入口 / current), then 项目工作 / 设置 with every original entry.
+  if (nav && nav.dataset.pickerProject && typeof projectSectionGroups !== 'undefined') {
+    const project = nav.dataset.pickerProject, here = nav.querySelector('[aria-current=page]')?.getAttribute('href');
+    sectionPicker.append(new Option('← 项目入口', `#/projects/${project}/menu`, false, here === `#/projects/${project}/menu`));
+    for (const [title, items] of projectSectionGroups) {
+      const group = document.createElement('optgroup'); group.label = title;
+      for (const [key, caption] of items) {
+        const href = `#/projects/${project}/${key}`;
+        group.append(new Option(caption, href, false, href === here));
+      }
+      sectionPicker.append(group);
+    }
+  } else if (nav) {
     let group = null;
     for (const child of nav.children) {
       if (child.classList.contains('console-nav-label')) {
