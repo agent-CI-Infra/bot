@@ -52,6 +52,12 @@ test('#569 角色页用满内容区，不裁切文字；必需角色写明不能
     expect(layout.overflow).toBeLessThanOrEqual(1440);
     expect(layout.clipped).toEqual([]);
     await page.screenshot({ path: `${out}/list-1440.png`, fullPage: true });
+    // Every locked row's aria-describedby resolves to its own reason (no spaces, no shared ids).
+    const described = await page.evaluate(() => [...document.querySelectorAll('input[type=checkbox][aria-describedby]')]
+      .map(input => ({ id: input.getAttribute('aria-describedby'), text: document.getElementById(input.getAttribute('aria-describedby'))?.textContent || '' })));
+    expect(described.length).toBeGreaterThan(0);
+    for (const { id, text } of described) { expect(id).not.toMatch(/\s/); expect(text).toContain('不能关闭'); }
+    expect(new Set(described.map(entry => entry.id)).size).toBe(described.length);
 
     await openRoleFromList(page, '项目管理者');
     await expect(page.getByLabel('启用角色', { exact: true })).toBeDisabled();

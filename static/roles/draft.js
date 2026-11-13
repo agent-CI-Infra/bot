@@ -54,8 +54,9 @@ function roleCheck(label, object, key, state, disabled = false, { reason = '', r
   why.setAttribute('data-testid', 'role-enable-reason');
   const block = element('div', '', 'role-enable-block');
   block.append(wrap, why);
-  control.setAttribute('aria-describedby', (control.id || key) + '-reason');
-  why.id = (control.id || key) + '-reason';
+  // One space-free id per role, so every locked row in the list points at its own reason.
+  why.id = 'role-enable-reason-' + String(object.role_id || control.id || key).replace(/[^A-Za-z0-9_-]/g, '-');
+  control.setAttribute('aria-describedby', why.id);
   return block;
 }
 function roleChoices(title, object, key, choices, state) {
