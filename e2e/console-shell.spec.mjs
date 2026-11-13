@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
+import { projectNavigate } from './console-navigation.mjs';
 
 async function login(page,h,password,username='administrator',hash='#/projects') {
   await page.goto(h.admin+'/'+hash);
@@ -35,12 +36,12 @@ test('shared desktop rail and mobile navigation expose real destinations across 
     }
     await page.setViewportSize({width:1440,height:1000});await page.goto(h.admin+'/#/projects/101/roles');
     for(const name of ['项目','管理对话','看板','统计','Webhook 投递','个人设置','全局设置']) await expect(page.locator('#tabs').getByRole('button',{name,exact:true})).toBeVisible();
-    await expect(page.locator('#console-secondary-nav .project-nav')).toContainText('项目知识');
-    await page.locator('#console-secondary-nav .project-nav').getByRole('link',{name:'模型',exact:true}).click();
+    await expect(page.locator('#console-secondary-nav')).toBeHidden();
+    await projectNavigate(page, '模型');
     await expect(page).toHaveURL(/#\/projects\/101\/model$/);await page.reload();
-    await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('模型');
+    await expect(page.locator('.project-setting-location')).toContainText('模型');
     await page.setViewportSize({width:390,height:844});
-    await page.getByLabel('当前页面',{exact:true}).selectOption('#/projects/101/knowledge');
+    await projectNavigate(page, '项目知识');
     await expect(page).toHaveURL(/#\/projects\/101\/knowledge$/);
     await page.locator('#console-mobile-nav').getByRole('link',{name:'更多',exact:true}).click();
     await expect(page.locator('.console-group').filter({has:page.getByRole('heading',{name:'设置',exact:true})})).toContainText('机器配置');

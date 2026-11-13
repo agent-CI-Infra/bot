@@ -213,7 +213,9 @@ function syncConsoleShell() {
   if (secondary) {
     secondary.dataset.navScope = scopeKey;
     $('console-secondary-nav').replaceChildren(secondary);
-  } else if (!scopeKey || $('console-secondary-nav').firstElementChild?.dataset.navScope !== scopeKey) {
+  } else if (project && projectSettingsSections.some(([key]) => key === project.section)
+    || !scopeKey || $('console-secondary-nav').firstElementChild?.dataset.navScope !== scopeKey) {
+    // Only configuration pages replace the moved navigation with a return link; later shell refreshes keep work tabs.
     $('console-secondary-nav').replaceChildren();
   }
   $('console-secondary-nav').hidden = !$('console-secondary-nav').childElementCount;

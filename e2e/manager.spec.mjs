@@ -3,6 +3,7 @@ import { TaskEngine } from '../dist/agent/engine.js';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { RuleService } from '../dist/rules/service.js';
+import { projectNavigate } from './console-navigation.mjs';
 import { configureDispatch, ruleDecider } from '../dist/dispatch/worker.js';
 import { queueWebhook } from '../dist/review/queue.js';
 
@@ -31,7 +32,7 @@ test('the Manager role edits its complete prompt and events, lists decisions and
     await page.getByRole('button', { name: '登录', exact: true }).click();
     // An old workflows address opens the Manager page; the navigation has no workflows page any more.
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
-    await expect(page.locator('.project-nav').getByRole('link', { name: '角色', exact: true })).toHaveAttribute('aria-current', 'page');
+    await expect(page.locator('.project-setting-location')).toContainText('角色');
     await expect(page.locator('.project-nav').getByRole('link', { name: '工作流', exact: true })).toHaveCount(0);
     await page.locator('.role-nav').getByRole('link',{name:'Manager',exact:true}).click();
     const prompt=page.getByLabel('Manager 提示词',{exact:true});
@@ -70,7 +71,7 @@ test('the Manager role edits its complete prompt and events, lists decisions and
     expect(h.store.get('SELECT state FROM dispatch_events WHERE id=?', failed.id).state).toBe('pending');
 
     // The models page lists every work type and the Manager's own dispatch model.
-    await page.locator('.project-nav').getByRole('link', { name: '模型', exact: true }).click();
+    await projectNavigate(page, '模型');
     for (const kind of ['manager', 'review.issue', 'reply', 'actions.failures', 'gate.onboarding']) await expect(page.locator(`[data-task-kind="${kind}"]`)).toBeVisible();
 
     await page.setViewportSize({ width: 390, height: 844 });

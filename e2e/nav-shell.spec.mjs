@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
+import { projectNavigate } from './console-navigation.mjs';
 
 // #224 slice 2: the shell navigation must only offer destinations that really render, and an older project address must
 // survive a refresh instead of silently landing on another section.
@@ -22,13 +23,14 @@ test('项目导航只列真实页面，管理对话的深链不丢页，移动�
     const nav = page.locator('.project-nav'), current = nav.locator('[aria-current=page]');
     // Every entry named like a page must land on that page: the address it advertises keeps that section current.
     for (const caption of ['项目总览', '基本设置', '机器配置', '模型', '发版本', '计划与通知', '项目知识', '外部执行', '成员', '运行状态']) {
-      await nav.getByRole('link', { name: caption, exact: true }).click();
-      await expect(current).toHaveText(caption);
+      await projectNavigate(page, caption);
+      if (['项目总览', '发版本', '项目知识', '运行状态'].includes(caption)) await expect(current).toHaveText(caption);
+      else await expect(page.locator('.project-setting-location')).toContainText(caption);
       await expect(page).toHaveURL(new RegExp('#/projects/101/[a-z]+$'));
     }
     // 管理对话 is a chat, not a settings section: opening it keeps the settings page underneath.
-    await nav.getByRole('link', { name: '角色', exact: true }).click();
-    await nav.getByRole('link', { name: '管理对话', exact: true }).click();
+    await projectNavigate(page, '角色');
+    await page.locator('#management-launcher').click();
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
     // An older address for that chat must open the chat on a page that address still describes, not on 基本设置.
     await page.goto(h.admin + '/#/projects/101/management');
