@@ -8,8 +8,8 @@ test('a console manifest concatenates its modules in order', () => {
 });
 
 test('a script that is not a manifest is left unchanged', () => {
-  const raw = readFileSync('static/app.js', 'utf8');
-  assert.equal(readConsoleScriptSync('static/app.js'), raw);
+  const raw = readFileSync('test/fixtures/console-modules/parts/a.js', 'utf8');
+  assert.equal(readConsoleScriptSync('test/fixtures/console-modules/parts/a.js'), raw);
   assert.equal(consoleModulePaths('function ready() {}\n'), null);
 });
 
@@ -31,6 +31,7 @@ test('split console pages still define their entry functions in source order', (
     'static/roles.js': ['function rolesConsole', 'function stagePolicyGraph'],
     'static/settings.js': ['function settingsRoute', 'function installationDetail', 'function serviceRoleCreate'],
     'static/onboarding.js': ['function wizardForm', 'function githubLoginForm', 'async function renderOnboarding'],
+    'static/app.js': ['async function api', 'async function route', 'async function render'],
   };
   for (const [file, markers] of Object.entries(pages)) {
     const source = readConsoleScriptSync(file);
