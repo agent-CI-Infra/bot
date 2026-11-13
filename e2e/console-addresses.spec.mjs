@@ -11,6 +11,8 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
       't' + i, '101', 'review.issue', i === 1 ? 'running' : 'succeeded', 'Task ' + i, i, i === 1 ? 'model' : 'done', 'a'.repeat(40));
     await page.goto(h.admin); await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
+    // Navigation and reload must wait until the login response has installed the session cookie.
+    await expect(page.getByRole('button', { name: '退出登录', exact: true })).toBeVisible();
     // Accounts, users, review and development no longer have top-level tabs.
     for (const gone of ['机器人账号', '用户', '检视', '开发', '接入向导', '消息渠道']) await expect(page.locator('#tabs').getByRole('button', { name: gone, exact: true })).toHaveCount(0);
     const tab = name => ({ click: () => consoleNavigate(page, name) }), current = () => page.locator('#tabs [aria-current=page]');

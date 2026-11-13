@@ -84,7 +84,8 @@ test('#555 项目、对话、身份页首屏各至多一个主按钮，次要筛
       await expect(page.getByRole('button', { name: '发送', exact: true })).toBeVisible();
       await expect(page.getByRole('button', { name: '新建会话' })).toBeVisible();
       // 全屏 / 收起 / 新建会话 stay visible as quiet secondary controls so 收起 is never hidden.
-      expect(await enabledPrimaries(page)).toEqual(['发送']);
+      // The shell appears before its conversation has opened and enabled the composer.
+      await expect.poll(() => enabledPrimaries(page)).toEqual(['发送']);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await page.screenshot({ path: resolve(out, `management-after-${width}.png`), fullPage: true });
     }
