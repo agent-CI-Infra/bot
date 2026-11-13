@@ -5,7 +5,7 @@ COPY public-board/dashboard/package.json ./public-board/dashboard/package.json
 RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
-COPY runner/command-policy.mjs runner/command-policy.d.mts ./runner/
+COPY runner/command-policy.mjs runner/command-policy.d.mts runner/command-output.mjs runner/command-output.d.mts ./runner/
 COPY public-board ./public-board
 RUN npm run build
 
@@ -36,7 +36,7 @@ COPY config ./config
 COPY skills ./skills
 # Process Harness executes this worker in the control-plane container.
 COPY runner/role-worker.mjs ./runner/role-worker.mjs
-COPY runner/command-policy.mjs ./runner/command-policy.mjs
+COPY runner/command-policy.mjs runner/command-output.mjs ./runner/
 COPY scripts/external-token.mjs ./scripts/external-token.mjs
 # The entry gateway service runs from this image too (node webhook/main.mjs), as its own container.
 COPY webhook/main.mjs ./webhook/main.mjs
