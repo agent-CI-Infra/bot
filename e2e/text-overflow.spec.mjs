@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openRoleAdvanced } from './open-role-advanced.mjs';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
@@ -146,9 +147,14 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     expect(desktop.ellipsis).toBe('ellipsis');
     expect(desktop.roleDisplay).not.toBe('none');
     expect(desktop.overflow).toBe(1440);
+    // A clamped list subtitle always carries its full text in title (F4: the clamp is scoped to .row-content > p).
+    const subtitles = await page.evaluate(() => [...document.querySelectorAll('.console-ready .row-content > p')].map(p => ({ clamp: getComputedStyle(p).webkitLineClamp, title: p.title, text: p.textContent })));
+    expect(subtitles.length).toBeGreaterThan(0);
+    for (const line of subtitles) { expect(line.clamp).toBe('2'); expect(line.title).toBe(line.text); }
     await page.screenshot({ path: resolve(out, 'projects-1440.png'), fullPage: true });
 
     await page.goto(h.admin + '/#/projects/101/roles');
+    await openRoleAdvanced(page);
     await expect(page.getByRole('heading', { name: '角色概览' })).toBeVisible();
     await expect(page.locator('table[aria-label="角色解析结果"]')).toBeVisible();
     const roles = await page.evaluate(() => {
@@ -163,6 +169,7 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/projects/101/roles');
+    await openRoleAdvanced(page);
     await expect(page.getByRole('heading', { name: '角色概览' })).toBeVisible();
     await page.screenshot({ path: resolve(out, 'roles-390.png'), fullPage: true });
   } finally {
