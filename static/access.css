@@ -2,51 +2,51 @@
 .access-intro { padding: 48px 40px; background: var(--color-brand-weak); border-right: 1px solid var(--color-border); }
 .access-intro h2 { margin: 24px 0 16px; font-size: var(--font-size-5); line-height: 1.4; letter-spacing: -.6px; }
 .access-intro p { color: var(--color-text-muted); line-height: 1.8; }
-.access-intro ul { display: grid; gap: 18px; margin: 40px 0 0; padding-left: 22px; font-size: 15px; line-height: 1.7; }
+.access-intro ul { display: grid; gap: 18px; margin: 40px 0 0; padding-left: 22px; font-size: var(--font-size-row); line-height: 1.7; }
 .access-panel { min-width: 0; padding: 40px; }
-#access h1 { margin: 10px 0 12px; font-size: 28px; }
+#access h1 { margin: 10px 0 12px; font-size: var(--font-size-5); }
 #access p { overflow-wrap: anywhere; }
 #access-description { color: var(--color-text-muted); }
-#access a#github-login { display: flex; justify-content: center; width: 100%; min-height: 48px; margin-top: 24px; padding: 12px; border-radius: var(--radius-3); background: var(--color-brand); color: #fff; text-decoration: none; font-weight: 650; }
-#access-provider-note, .access-recovery-note { font-size: 13px; line-height: 1.7; }
-#access-provider-status { color: var(--color-danger); font-size: 14px; line-height: 1.7; }
+#access a#github-login { display: flex; justify-content: center; width: 100%; min-height: 48px; margin-top: 24px; padding: 12px; border-radius: var(--radius-3); background: var(--color-brand); color: var(--color-text-inverse); text-decoration: none; font-weight: 650; }
+#access-provider-note, .access-recovery-note { font-size: var(--font-size-label); line-height: 1.7; }
+#access-provider-status { color: var(--color-danger); font-size: var(--font-size-2); line-height: 1.7; }
 #access-provider-status:empty, #access-provider-note:empty { display: none; }
-.access-divider { display: flex; align-items: center; gap: 12px; margin: 24px 0 0; color: var(--color-text-muted); font-size: 12px; }
+.access-divider { display: flex; align-items: center; gap: 12px; margin: 24px 0 0; color: var(--color-text-muted); font-size: var(--font-size-1); }
 .access-divider::before, .access-divider::after { content: ''; flex: 1; border-top: 1px solid var(--color-border); }
 #access-form { display: flex; flex-direction: column; gap: 10px; }
-#access-form label { gap: 8px; font-size: 14px; color: var(--color-text); }
-#access input { width: 100%; min-width: 0; min-height: 48px; font-size: 16px; border-color: var(--color-border); }
+#access-form label { gap: 8px; font-size: var(--font-size-2); color: var(--color-text); }
+#access input { width: 100%; min-width: 0; min-height: 48px; font-size: var(--font-size-touch); border-color: var(--color-border); }
 #access :is(input, button, a):focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: 3px; }
 .access-password-field { display: flex; gap: 8px; }
 .access-password-field input { flex: 1; }
-#access .access-password-field button { white-space: nowrap; min-height: 48px; font-size: 13px; padding: 8px 12px; color: var(--color-text); }
-#access-password-help { margin: 0; font-size: 12px; }
+#access .access-password-field button { white-space: nowrap; min-height: 48px; font-size: var(--font-size-label); padding: 8px 12px; color: var(--color-text); }
+#access-password-help { margin: 0; font-size: var(--font-size-1); }
 #access #access-submit { min-height: 48px; margin-top: 10px; background: var(--color-brand); border-color: var(--color-brand); }
 #access[data-mode=github] #access-submit { background: var(--color-surface); color: var(--color-text); border-color: var(--color-border); }
 #access [aria-disabled=true] { opacity: .5; cursor: wait; }
 #access #message { margin: 16px 0; padding: 12px; border: 1px solid var(--color-border); border-radius: var(--radius-3); background: var(--color-surface-alt); }
 #access #message:empty { display: none; }
-#access #message > button { min-height: 44px; }
+#access #message > button { min-height: var(--control-min); }
 #access .access-recovery-note { margin: 22px 0 0; border-top: 1px solid var(--color-border); padding-top: 16px; }
 @media(max-width:767px) {
   #access.access-layout { grid-template-columns: minmax(0,1fr); margin: 20px auto; }
   .access-intro { padding: 24px; border-right: 0; border-bottom: 1px solid var(--color-border); }
-  .access-intro h2 { margin: 12px 0; font-size: 25px; }
+  .access-intro h2 { margin: 12px 0; font-size: var(--font-size-display); }
   .access-intro ul { display: none; }
-  .access-intro p { font-size: 14px; margin-bottom: 0; }
+  .access-intro p { font-size: var(--font-size-2); margin-bottom: 0; }
   .access-panel { padding: 24px; }
-  #access h1 { font-size: 25px; }
+  #access h1 { font-size: var(--font-size-display); }
 }
 @media(max-width:360px) { .access-panel, .access-intro { padding: 18px; } .access-password-field { flex-wrap: wrap; } #access .access-password-field button { flex: 1; } }
 
 /* The wizard and identity page share the console's tokens and keep long proofs inside their cards. */
-.onboarding-intro h2 { margin: 0 0 8px; font-size: 24px; color: var(--color-text); }
+.onboarding-intro h2 { margin: 0 0 8px; font-size: var(--font-size-display); color: var(--color-text); }
 .onboarding-layout { display: grid; grid-template-columns: 190px minmax(0,1fr); gap: 24px; align-items: start; }
 #onboarding-panel .onboarding-progress { display: grid; grid-template-columns: minmax(0,1fr); gap: 8px; margin: 0; padding: 0; background: transparent; border: 0; overflow: visible; }
 .onboarding-step { min-width: 0; padding: 8px; border: 1px solid var(--color-border); border-radius: var(--radius-3); background: var(--color-surface); }
-#onboarding-panel .onboarding-step button { width: 100%; text-align: left; white-space: normal; min-height: 44px; border-radius: var(--radius-2); }
+#onboarding-panel .onboarding-step button { width: 100%; text-align: left; white-space: normal; min-height: var(--control-min); border-radius: var(--radius-2); }
 .onboarding-step small { display: block; margin: 6px 4px 2px; color: var(--color-text-muted); line-height: 1.5; overflow-wrap: anywhere; }
-.onboarding-step[data-ready=false] small { color: var(--color-warning,#875a0a); }
+.onboarding-step[data-ready=false] small { color: var(--color-warning); }
 .onboarding-content { display: grid; gap: 16px; min-width: 0; }
 .onboarding-content > .side-card { margin: 0; }
 .onboarding-content :is(.side-card, form, .row, .facts, code) { min-width: 0; overflow-wrap: anywhere; }
@@ -89,14 +89,14 @@
   #onboarding-panel { padding: 8px; }
   #onboarding-panel .onboarding-progress { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 6px; }
   .onboarding-step { padding: 4px; }
-  .onboarding-step small { font-size: 12px; }
+  .onboarding-step small { font-size: var(--font-size-1); }
   .identity-layout { padding: 8px; gap: 14px; }
   .identity-feishu-page { padding: 8px; gap: 14px; }
   .feishu-binding-layout { grid-template-columns: minmax(0,1fr); gap: 12px; }
-  .identity-feishu-page :is(button,select,summary) { min-height: 44px; }
-  .identity-feishu-page select { max-width: 100%; font-size: 16px; }
-  .identity-layout :is(button, select), .onboarding-content :is(button, input, select) { min-height: 44px; }
-  .onboarding-content :is(input, select), .identity-layout select { font-size: 16px; }
+  .identity-feishu-page :is(button,select,summary) { min-height: var(--control-min); }
+  .identity-feishu-page select { max-width: 100%; font-size: var(--font-size-touch); }
+  .identity-layout :is(button, select), .onboarding-content :is(button, input, select) { min-height: var(--control-min); }
+  .onboarding-content :is(input, select), .identity-layout select { font-size: var(--font-size-touch); }
   .identity-scope-form { flex-direction: column; align-items: stretch; }
 }
 

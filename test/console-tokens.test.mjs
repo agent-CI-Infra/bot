@@ -50,6 +50,19 @@ const SHARED = {
   '--color-border': '#dce3ed', '--color-surface-alt': '#f8fafc', '--radius-card': '12px',
   '--space-2': '6px', '--space-3': '8px', '--space-4': '12px', '--space-5': '16px', '--space-6': '20px',
   '--font-size-1': '12px', '--font-size-3': '17px', '--font-size-5': '30px', '--radius-3': '6px',
+  // #551: style.css (a module sheet) now reads the shared theme end-to-end. Existing
+  // values above stay pinned; the new tokens keep the values declared in shell.css.
+  '--color-bg': '#f5f7fb', '--color-text': '#17243b', '--color-text-inverse': '#fff',
+  '--color-danger': '#ad3039', '--color-danger-bg': '#fbeaea',
+  '--color-warning': '#875a0a', '--color-warning-bg': '#fff2d9', '--color-warning-border': '#e9c27a',
+  '--color-success': '#24603d', '--color-success-bg': '#e5f2e9',
+  '--color-info': '#2c5791', '--color-info-bg': '#e8f0fb',
+  '--color-hover': '#f1f5fb', '--color-overlay': '#16374470',
+  '--focus-ring': '#245de0', '--focus-ring-width': '3px',
+  '--font-size-4': '18px', '--font-size-micro': '11px', '--font-size-label': '13px',
+  '--font-size-row': '15px', '--font-size-touch': '16px', '--font-size-display': '24px',
+  '--line-height-body': '1.5', '--line-height-tight': '1.35',
+  '--radius-1': '4px', '--radius-2': '5px',
 };
 
 test('tokens the module sheets read through shell.css keep their contract value', () => {
@@ -67,4 +80,32 @@ test('tokens the module sheets read through shell.css keep their contract value'
       assert.ok(fallback, `${name} reads var(${token}) with no fallback and shell.css does not declare it`);
     }
   }
+});
+
+// #551: the leftover teal palette in style.css was a second theme. Login, projects and
+// identity must read the shared tokens so the same heading / body / muted level looks
+// the same on every page. New hard-coded values of those colours are a regression.
+const LEGACY_THEME = ['#637c89', '#5b7481', '#52707d', '#183142', '#16636b', '#f3f6f8', '#365564', '#13394b'];
+
+test('#551 style.css and access.css no longer hard-code the leftover teal theme', () => {
+  for (const name of ['style.css', 'access.css']) {
+    const source = read('static/' + name);
+    for (const colour of LEGACY_THEME) {
+      assert.equal(source.toLowerCase().includes(colour), false,
+        `${name} still hard-codes leftover theme colour ${colour}`);
+    }
+  }
+});
+
+test('#551 page body, muted text and heading sizes in style.css and access.css use tokens', () => {
+  const style = read('static/style.css');
+  assert.match(style, /:root\{[^}]*color:\s*var\(--color-text\)/);
+  assert.match(style, /:root\{[^}]*background:\s*var\(--color-bg\)/);
+  assert.match(style, /\.muted\{[^}]*color:\s*var\(--color-text-muted\)/);
+  assert.match(style, /h1\{font-size:\s*var\(--font-size-display\)/);
+  assert.match(style, /h2\{font-size:\s*var\(--font-size-4\)/);
+  const access = read('static/access.css');
+  assert.match(access, /#access h1 \{[^}]*font-size:\s*var\(--font-size-5\)/);
+  assert.match(access, /#access-form label \{[^}]*font-size:\s*var\(--font-size-2\)/);
+  assert.match(access, /#access-description \{ color:\s*var\(--color-text-muted\)/);
 });

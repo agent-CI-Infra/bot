@@ -9,14 +9,14 @@
 // static/app.js states(), the notification strip from app.js notice(), cards from views.js. Nothing here invents a second
 // version of a component, and nothing here is presented as an unbuilt capability: the states are the real states.
 const designTokenGroups = [
-  ['表面', [['--color-bg', '页面底色'], ['--color-surface', '卡片'], ['--color-surface-alt', '侧栏/下沉']]],
-  ['文字', [['--color-text', '正文（强）'], ['--color-text-muted', '次要']]],
-  ['品牌与状态', [['--color-brand', '品牌/当前'], ['--color-brand-weak', '当前底色'], ['--color-danger', '失败']]],
+  ['表面', [['--color-bg', '页面底色'], ['--color-surface', '卡片'], ['--color-surface-alt', '侧栏/下沉'], ['--color-hover', '悬停底']]],
+  ['文字', [['--color-text', '正文（强）'], ['--color-text-muted', '次要'], ['--color-text-inverse', '反白'], ['--color-nav', '导航']]],
+  ['品牌与状态', [['--color-brand', '品牌/当前'], ['--color-brand-weak', '当前底色'], ['--color-danger', '失败'], ['--color-danger-bg', '失败底'], ['--color-warning', '关注'], ['--color-warning-bg', '关注底'], ['--color-success', '成功'], ['--color-success-bg', '成功底'], ['--color-info', '信息'], ['--color-info-bg', '信息底']]],
   ['边框与形状', [['--color-border', '卡片边框'], ['--radius-2', '控件圆角'], ['--radius-card', '卡片圆角']]],
   ['密度与动效', [['--control-min', '触控下限'], ['--motion-fast', '状态变化'], ['--motion-base', '较大位移'], ['--focus-ring', '焦点环']]],
 ];
-const designScale = ['--space-1', '--space-2', '--space-3', '--space-4', '--space-5', '--space-6'];
-const designFonts = ['--font-size-1', '--font-size-2', '--font-size-3', '--font-size-4', '--font-size-5'];
+const designScale = ['--space-1', '--space-2', '--space-3', '--space-4', '--space-5', '--space-6', '--space-7', '--space-8', '--space-9', '--space-10'];
+const designFonts = ['--font-size-micro', '--font-size-1', '--font-size-label', '--font-size-2', '--font-size-row', '--font-size-touch', '--font-size-3', '--font-size-4', '--font-size-brand', '--font-size-display', '--font-size-5'];
 // The scale rows read the token itself, so the table shows the value the page actually uses (#223 shell.css owns
 // several of these names) instead of a copy that drifts the moment a token changes.
 const tokenValue = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
