@@ -113,7 +113,8 @@ test('键盘滚动、列表视图与 390px 看板容器都能续页，末页后�
 test('首次读取失败后，后台刷新成功会清掉失败提示并恢复数据', async ({ page }) => {
   test.setTimeout(60000);
   const h = await harness(), { admin, password } = await setup(h), a = await account(admin);
-  await repository(admin, a.id, '101'); boardFixtures(h.store);
+  // boardFixtures also files one card under repository '202', so both rows have to exist before it writes.
+  await repository(admin, a.id, '101'); await repository(admin, a.id, '202'); boardFixtures(h.store);
   for (let i = 0; i < 130; i++) boardTask(h.store, `recover-${i}`, 100 + i, 'review.issue', 'succeeded');
   let failOnce = true;
   await page.route('**/api/board/cards?*', route => {
