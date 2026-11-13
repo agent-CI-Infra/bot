@@ -35,6 +35,59 @@ for (const view of ['project_admin', 'super_admin', 'hidden']) {
   });
 }
 
+test('project administrators see installed-but-not-started repositories as waiting for activation', async () => {
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path.startsWith('/api/identity')) return [200, { github_connection: { pending_repositories: [{ id: '101', full_name: 'fixture/project-101' }] } }];
+    if (path.startsWith('/api/integrations')) return [200, { integrations: [] }];
+    return [200, { repositories: [], syncs: [] }];
+  });
+  page.run(`var projectRoute = () => null; me = {role: 'project_admin'}; tab = 'projects'; repositories = [];`);
+  await page.run('render()');
+  assert.equal(page.$('rows').querySelector('.console-state'), null, 'pending installations are not the empty-project guidance');
+  assert.equal(page.$('rows').querySelector('h2').textContent, '等待管理员启动');
+  assert.equal(page.$('rows').querySelector('strong').textContent, 'fixture/project-101');
+  assert.ok([...page.$('rows').querySelectorAll('span')].some(el => el.textContent === '等待管理员启动'));
+  assert.equal(page.$('rows').querySelector('p').textContent, '已安装到 GitHub，等待管理员在控制台启动后即可打开。');
+  const links = [...page.$('rows').querySelectorAll('a')];
+  assert.ok(links.every(a => a.href !== '#/projects/101/overview'), 'an unstarted repository has no project page');
+  assert.equal(page.$('count').textContent, '0 个项目，1 个等待管理员启动');
+  assert.equal(links.length, 1); assert.equal(links[0].href, '#/identity');
+  assert.equal(links[0].querySelector('span').textContent, '查看身份与权限');
+});
+
+
+test('a failed identity read is a retryable error, not an empty project list', async () => {
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path.startsWith('/api/identity')) return [500, { error: 'identity_unavailable' }];
+    if (path.startsWith('/api/integrations')) return [200, { integrations: [] }];
+    return [200, { repositories: [], syncs: [] }];
+  });
+  page.run(`var projectRoute = () => null; me = {role: 'project_admin'}; tab = 'projects'; repositories = [];`);
+  await page.run('render()');
+  const state = page.$('rows').querySelector('.console-state');
+  assert.equal(state.querySelector('h2').textContent, '等待启动的仓库暂时无法读取');
+  assert.ok([...state.querySelectorAll('button')].some(el => el.textContent === '重新加载'));
+  assert.ok(![...page.$('rows').querySelectorAll('h2')].some(h => h.textContent === '已登录，尚无可管理的项目'));
+  assert.match(page.$('count').textContent, /等待启动的仓库暂时无法读取/);
+});
+
+test('the pending-activation group is hidden while a project list filter is set', async () => {
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path.startsWith('/api/identity')) return [200, { github_connection: { pending_repositories: [{ id: '101', full_name: 'fixture/project-101' }] } }];
+    if (path.startsWith('/api/integrations')) return [200, { integrations: [] }];
+    return [200, { repositories: [], syncs: [] }];
+  });
+  page.run(`var projectRoute = () => null; me = {role: 'project_admin'}; tab = 'projects'; repositories = [];`);
+  page.$('owner-filter').value = '10';
+  await page.run('render()');
+  assert.equal(page.$('rows').querySelector('.project-pending-group'), null);
+  assert.equal(page.$('count').textContent, '0 个项目');
+  page.$('owner-filter').value = '';
+  await page.run('render()');
+  assert.equal(page.$('rows').querySelector('.project-pending-group h2').textContent, '等待管理员启动');
+  assert.equal(page.$('count').textContent, '0 个项目，1 个等待管理员启动');
+});
+
 test('project list endpoints filter before taking 50 rows and never expand administrator scope', async t => {
   const h = await harness(t), {admin} = await setup(h), a = await account(admin);
   for (let i = 0; i < 53; i++) {

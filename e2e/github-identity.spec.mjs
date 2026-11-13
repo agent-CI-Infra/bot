@@ -160,6 +160,44 @@ test('已登录但没有仓库时可以去 GitHub 选择仓库，接入向导接
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
+test('已安装但未启动的仓库在项目列表和身份页显示等待管理员启动', async ({ page }) => {
+  const f = await identityFixture();
+  try {
+    await page.goto(f.h.admin);
+    await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+    f.h.store.transaction(() => {
+      f.h.store.run("DELETE FROM policies WHERE repository_id='101'");
+      f.h.store.run("DELETE FROM identity_projects WHERE project_id='101'");
+      f.h.store.run("DELETE FROM repositories WHERE id='101'");
+    });
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync('.tmp/ui-515', { recursive: true });
+    const shot = async (name, width) => {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      if (width === 390) expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+      await page.screenshot({ path: `.tmp/ui-515/${name}-${width}.png`, fullPage: true });
+    };
+    await page.reload();
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(f.h.admin + '/#/identity');
+    await expect(page.locator('#identity-panel')).toContainText('fixture/project-101');
+    await expect(page.locator('#identity-panel')).toContainText('等待管理员启动');
+    await expect(page.locator('.identity-connection-status')).toContainText('已安装但还没有被管理员启动');
+    await shot('identity-pending', 1440);
+    await shot('identity-pending', 390);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(f.h.admin + '/#/projects');
+    await expect(page.getByRole('heading', { name: '等待管理员启动' })).toBeVisible();
+    await expect(page.locator('#rows')).toContainText('fixture/project-101');
+    await expect(page.getByRole('heading', { name: '已登录，尚无可管理的项目' })).toHaveCount(0);
+    await expect(page.locator('#count')).toContainText('0 个项目，1 个等待管理员启动');
+    await expect(page.locator('.project-pending-group').getByRole('link', { name: '项目总览' })).toHaveCount(0);
+    await shot('projects-pending', 1440);
+    await shot('projects-pending', 390);
+  } finally { await f.close(); }
+});
+
 test('身份页概览在 1440 与 390 下完整可见，展开的高级区占满整行', async ({ page }) => {
   const f = await identityFixture();
   const { mkdirSync } = await import('node:fs');

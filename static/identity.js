@@ -121,6 +121,17 @@ async function renderIdentity() {
   overview.append(element('p', statusText, 'identity-connection-status'));
   if (connection && connection.next_step) overview.append(note(connection.next_step));
   else if (!connection) overview.append(note(active.length ? '管理权限以下方「高级／诊断」里的记录为准；实际操作仍由服务端重新校验。' : '请联系管理员委派，或连接 GitHub。'));
+  const pendingRepos = (connection && connection.pending_repositories) || [];
+  if (pendingRepos.length) {
+    const list = element('ul', '', 'identity-pending-repos');
+    list.setAttribute('aria-label', '等待管理员启动的仓库');
+    for (const repo of pendingRepos) {
+      const item = element('li', '');
+      item.append(element('strong', repo.full_name), element('span', '等待管理员启动', 'status status-warning'));
+      list.append(item);
+    }
+    overview.append(list);
+  }
   const feedback = element('p', '', 'view-error'); feedback.setAttribute('role', 'alert');
   if (identityRefreshNotice) {
     feedback.className = identityRefreshNoticeIsError ? 'view-error' : 'view-success';

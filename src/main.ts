@@ -38,10 +38,12 @@ const githubLogin = new GitHubLogin(store, {
 });
 // Validate deployment defaults at startup; a saved wizard configuration takes precedence.
 githubLogin.identity;
-const identityTimer = setInterval(() => {
+const reverifyIdentities = () => {
   for (const row of store.all("SELECT DISTINCT principal_id FROM external_identities WHERE provider='github' AND status IN ('active','pending_verification')"))
     void githubLogin.identity?.reverify(row.principal_id).catch(() => {});
-}, 60_000); identityTimer.unref();
+};
+// Fire once at start: setInterval would otherwise leave derived grants untouched for the first minute.
+const identityTimer = setInterval(reverifyIdentities, 60_000); identityTimer.unref(); reverifyIdentities();
 const tokenFile = process.env.BOT_MANAGER_TOKEN_FILE;
 if (!tokenFile) throw new Error('BOT_MANAGER_TOKEN_FILE is required');
 const manager=new ManagerClient(process.env.BOT_MANAGER_URL || 'http://manager:8793',readFileSync(tokenFile));

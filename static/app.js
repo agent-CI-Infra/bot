@@ -412,7 +412,15 @@ async function render(quiet = false) {
   $('page-title').textContent = isIdentity ? identityTitle : titles[tab];
   const activeNavTab = ['preferences', 'identity', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === activeNavTab ? 'page' : 'false'));
-  $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
+  $('filters').hidden = !listTabs.includes(tab);
+  const filtersFold = document.querySelector('[data-testid=project-filters-fold]');
+  if (filtersFold) {
+    filtersFold.hidden = $('filters').hidden;
+    const active = $('repository-filter').value || $('account-filter').value || $('owner-filter').value;
+    const summary = filtersFold.querySelector('summary');
+    if (summary) summary.textContent = active ? '筛选（已设条件）' : '筛选';
+    if (active) filtersFold.open = true;
+  } $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
   $('rows').hidden=['external','board','costs','settings','identity','preferences'].includes(tab);$('external-panel').hidden=tab!=='external';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=!isIdentity;$('sync').hidden=true;$('hidden-filter-label').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = listParams();
@@ -445,8 +453,19 @@ async function render(quiet = false) {
   const address = tab === 'projects' ? projectListAddress(hiddenView, params) : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`;
   let result;try{result=await api(address);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
   if(request!==renderVersion)return;const rows=result[installedView ? 'repositories' : endpoint];
-  const signature=tab+'\n'+(hiddenView?'hidden\n':'')+params+'\n'+JSON.stringify(rows);if(quiet&&signature===listSignature)return;listSignature=signature;
-  const lines=[]; $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目` : `${rows.length} 条记录`;
+  let pendingRepositories=[];
+  let pendingRepositoriesError=null;
+  const projectListFiltered=!!(params.get('repository_id')||params.get('account_id')||params.get('owner_id'));
+  if(tab==='projects'&&!installedView&&!hiddenView&&!projectListFiltered){
+    // Started repos come from /api/repositories. Installed-but-not-started names come from GET /api/identity;
+    // the installations admin API stays closed to project users. A list filter hides the unfiltered pending group.
+    try{pendingRepositories=(await api('/api/identity')).github_connection?.pending_repositories||[];}catch(err){pendingRepositoriesError=err;pendingRepositories=[];}
+    if(request!==renderVersion)return;
+    const started=new Set(rows.map(row=>String(row.id)));
+    pendingRepositories=pendingRepositories.filter(repo=>repo&&repo.full_name&&!started.has(String(repo.id)));
+  }
+  const signature=tab+'\n'+(hiddenView?'hidden\n':'')+params+'\n'+JSON.stringify(rows)+'\n'+JSON.stringify(pendingRepositories)+'\n'+String(!!pendingRepositoriesError);if(quiet&&signature===listSignature)return;listSignature=signature;
+  const lines=[]; $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目${pendingRepositories.length?`，${pendingRepositories.length} 个等待管理员启动`:pendingRepositoriesError?'，等待启动的仓库暂时无法读取':''}` : `${rows.length} 条记录`;
   if (installedView && !hiddenView) $('count').textContent += ' · 看板公开可访问：公开仓默认开，私有仓默认关';
   $('previous').disabled = offset === 0; $('next').disabled = rows.length < 50; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
@@ -481,10 +500,10 @@ async function render(quiet = false) {
     if(tab==='projects'&&!hiddenView){line.classList.add('project-list-row');line.dataset.repositoryId=row.id;status.classList.add('project-overview');status.append(projectListControls(row));}
     if(taskTab&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
     if(status.childElementCount)line.append(status);
-    if(installedView){const actions=element('div','','actions'); actions.append(button('设置',()=>openProject(row.id)));
+    if(installedView){const actions=element('div','','actions'); actions.append(button('设置',()=>openProject(row.id),'quiet'));
       if(hiddenView)actions.append(button('恢复',()=>restoreInstalled(row,()=>start()).catch(error),'quiet'));
       if(actions.childElementCount)line.append(actions);}
-    else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id)));line.append(actions);}
+    else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id),'quiet'));line.append(actions);}
     if (tab === 'events') {
       const button = element('button', '查看详情', 'quiet'); button.addEventListener('click', async () => {
         try { $('detail-title').textContent='投递详情'; $('detail-body').replaceChildren(...deliveryDetail(await api('/api/events/' + row.id))); $('detail').showModal(); } catch (err) { error(err); }
@@ -508,8 +527,14 @@ async function render(quiet = false) {
   if(quiet&&shown.length===entries.length&&shown.every((node,index)=>node.dataset.key===entries[index].dataset.key))
     shown.forEach((node,index)=>{if(rowSignatures.get(node)!==rowSignatures.get(entries[index]))node.replaceWith(entries[index]);});
   else $('rows').replaceChildren(...entries);
+  if (tab === 'projects' && !installedView && !hiddenView && pendingRepositories.length) {
+    $('rows').append(pendingActivationGroup(pendingRepositories));
+  }
+  if (tab === 'projects' && !installedView && !hiddenView && pendingRepositoriesError) {
+    $('rows').append(consoleState('等待启动的仓库暂时无法读取', pendingRepositoriesError.message || '请稍后重试。', { tone: 'error', retry: () => start().catch(error) }));
+  }
   if (tab === 'events' && !rows.length) $('rows').replaceChildren(eventsEmptyState(params));
-  if (tab === 'projects' && !installedView && !repositories.length && !rows.length) {
+  if (tab === 'projects' && !installedView && !repositories.length && !rows.length && !pendingRepositories.length && !pendingRepositoriesError) {
     const empty = consoleState('已登录，尚无可管理的项目', '可以先查看身份与权限；安装待同步或权限待核验时，按身份页提示重新验证，或联系管理员分配项目。', { retry: () => start().catch(error) });
     empty.append(consoleLink('#/identity', '查看身份与权限')); $('rows').replaceChildren(empty);
   }
@@ -517,6 +542,20 @@ async function render(quiet = false) {
   if(installedView&&!hiddenView&&rows.some(row=>row.permissions_stale))refreshStalePermissions();
 }
 // Group only the rows already loaded, preserving each owner's first position and the order within it.
+function pendingActivationGroup(pending) {
+  const section = element('div', '', 'project-owner-group project-pending-group');
+  section.setAttribute('role', 'listitem'); section.dataset.key = 'pending-activation';
+  const list = element('div', '', 'project-owner-rows'); list.setAttribute('role', 'list'); list.setAttribute('aria-label', '等待管理员启动');
+  for (const repo of pending) {
+    const line = element('div', '', 'row project-pending-row'), content = element('div', '', 'row-content'), status = element('div', '', 'row-state');
+    line.setAttribute('role', 'listitem'); line.dataset.key = 'pending:' + repo.id;
+    content.append(element('strong', repo.full_name), element('p', '已安装到 GitHub，等待管理员在控制台启动后即可打开。'));
+    status.append(element('span', '等待管理员启动', 'status status-warning'));
+    line.append(content, status); list.append(line);
+  }
+  section.append(element('h2', '等待管理员启动', 'project-owner-title'), list, consoleLink('#/identity', '查看身份与权限'));
+  return section;
+}
 function groupProjectRows(rows, lines) {
   const groups = new Map();
   rows.forEach((row, index) => {

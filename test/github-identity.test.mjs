@@ -555,6 +555,21 @@ test('GET /api/identity names a plain GitHub connection state, the next step, an
   assert.equal(pending.repository_count, 0);
   assert.deepEqual(pending.pending_repositories, [{ id: '101', full_name: 'fixture/project-101' }]);
 
+  // A selected tenant must not list another organization's unstarted repositories.
+  const tenantSession = session(h.store, principal, identity);
+  const readWith = async (tenant) => {
+    h.store.run('UPDATE sessions SET tenant_id=? WHERE token_hash=?', tenant, digest(tenantSession.token));
+    const response = await fetch(h.admin + '/api/identity', { headers: { Cookie: 'bot_session=' + tenantSession.token } });
+    assert.equal(response.status, 200);
+    return (await response.json()).github_connection;
+  };
+  assert.deepEqual((await readWith('github.com:10')).pending_repositories, [{ id: '101', full_name: 'fixture/project-101' }]);
+  const otherTenant = await readWith('github.com:20');
+  assert.deepEqual(otherTenant.pending_repositories, []);
+  assert.notEqual(otherTenant.state, 'pending_activation');
+  h.store.run('UPDATE sessions SET tenant_id=NULL WHERE token_hash=?', digest(tenantSession.token));
+
+
   // Write/Maintain/Triage/Read never become management: the person is signed in, with no authorized repositories.
   // Restore a started project so membership checks have a target, then drop Admin.
   await repository(f.admin, f.a.id, '101');
@@ -583,6 +598,53 @@ test('GET /api/identity names a plain GitHub connection state, the next step, an
   assert.equal(expiredAuth.status, 'GitHub 授权已失效');
   assert.equal(expiredAuth.action, 'reconnect');
   assert.match(expiredAuth.next_step, /重新连接/);
+});
+
+test('login and reverify renew an expired GitHub-derived grant', async t => {
+  const f = await identityFixture(t), { h } = f, login = await f.login(), p = login.result.principal_id;
+  const grant = () => h.store.get("SELECT verified_at,expires_at FROM scoped_grants WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", p);
+  const first = grant(); assert.ok(first); assert.ok(first.expires_at > Date.now() + 4 * 60_000);
+  h.store.run("UPDATE scoped_grants SET verified_at=1,expires_at=1 WHERE principal_id=? AND source='github_derived'", p);
+  assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'pending_verification'));
+  await f.identity.reverify(p);
+  const renewed = grant();
+  assert.ok(renewed.expires_at > Date.now() + 4 * 60_000);
+  assert.ok(renewed.verified_at > Date.now() - 15_000);
+  assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'active'));
+  h.store.run("UPDATE scoped_grants SET verified_at=1,expires_at=1 WHERE principal_id=? AND source='github_derived'", p);
+  await f.login();
+  const afterLogin = grant();
+  assert.ok(afterLogin.expires_at > Date.now() + 4 * 60_000);
+  assert.ok(afterLogin.verified_at > Date.now() - 15_000);
+  assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'active'));
+});
+
+test('a login that overlaps an in-flight permission check still renews derived grants', async t => {
+  const f = await identityFixture(t), { h, state } = f, first = await f.login(), p = first.result.principal_id;
+  h.store.run("UPDATE scoped_grants SET verified_at=1,expires_at=1 WHERE principal_id=? AND source='github_derived'", p);
+  let release, blocked = 0;
+  const held = new Promise(resolve => { release = resolve; });
+  state.apiGate = async path => { if (path === '/user' && blocked++ === 0) await held; };
+  // Start refresh() itself (not reverify(), whose own /user probe runs before refresh()), so the
+  // blocked /user call below belongs to a permission check that is registered as in flight.
+  const inflight = f.identity.refresh(p);
+  const started = Date.now();
+  while (!blocked) {
+    if (Date.now() - started > 5000) throw new Error('permission check did not reach GitHub');
+    await new Promise(r => setTimeout(r, 10));
+  }
+  // The in-flight check captured the previous revision. A login that arrives now must not just join it:
+  // bump the revision while the check is still blocked, so that check ends without renewing grants.
+  const loginDone = f.login();
+  await new Promise(r => setTimeout(r, 200));
+  invalidate(h.store, p, 'manual_change');
+  release();
+  await loginDone;
+  await inflight;
+  const after = h.store.get("SELECT verified_at,expires_at FROM scoped_grants WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", p);
+  assert.ok(after.expires_at > Date.now() + 4 * 60_000, `expires_at=${after?.expires_at}`);
+  assert.ok(after.verified_at > Date.now() - 15_000);
+  assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'active'));
 });
 
 test('a signed-in user with no repositories gets a public GitHub App install URL; onboarding stays super-admin only', async t => {
