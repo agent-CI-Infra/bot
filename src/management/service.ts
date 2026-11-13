@@ -1,3 +1,4 @@
+import { hasCredentials } from '../core/redaction.js';
 import type { Manager } from '../projects/service.js';
 import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
@@ -208,7 +209,7 @@ export class ManagementService {
   async submit(actor:ActorContext,input:Json):Promise<Json>{
     validate(commandSchema,input);const command=input as unknown as ManagementCommand,entry=commands[command.operation]!;
     validate(entry.arguments,command.arguments);
-    if(JSON.stringify(traceClean(command.arguments))!==JSON.stringify(command.arguments))fail(400,'sensitive_management_arguments');
+    if(hasCredentials(command.arguments))fail(400,'sensitive_management_arguments');
     this.scope(actor,command.target.project_id,entry.capability);
     const hash=parameterHash(command),previous=this.store.get('SELECT * FROM management_commands WHERE principal_id=? AND idempotency_key=?',actor.principal_id,command.idempotency_key);
     if(previous){if(previous.parameter_hash!==hash)fail(409,'idempotency_conflict');return this.receipt(previous);}
@@ -218,7 +219,7 @@ export class ManagementService {
       // Authorized commands execute directly: what an actor may do is configured in the console, with no approval step.
       const id=randomId(),time=now();
       this.store.run(`INSERT INTO management_commands(id,principal_id,tenant_id,project_id,channel,operation,target,arguments,expected_revision,idempotency_key,parameter_hash,authorization_revision,execution_fence,source_conversation,source_message,state,before_revision,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,id,actor.principal_id,this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',command.target.project_id)!.tenant_id,command.target.project_id,actor.channel,command.operation,JSON.stringify(command.target),JSON.stringify(traceClean(command.arguments)),command.expected_revision,command.idempotency_key,hash,actor.authorization_revision,this.fence(actor,command.target.project_id),command.source_conversation,command.source_message,'pending',current,time,time);
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,id,actor.principal_id,this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',command.target.project_id)!.tenant_id,command.target.project_id,actor.channel,command.operation,JSON.stringify(command.target),JSON.stringify(command.arguments),command.expected_revision,command.idempotency_key,hash,actor.authorization_revision,this.fence(actor,command.target.project_id),command.source_conversation,command.source_message,'pending',current,time,time);
       return this.store.get('SELECT * FROM management_commands WHERE id=?',id)!;
     });
     return this.execute(actor,row.id,command);

@@ -13,7 +13,7 @@ const url=(q='')=>new URL('http://local/api/tasks/t/events'+(q?q+'&':'?')+'inclu
 test('run snapshots survive reopen and input/config changes; interrupted run and recovery have stable ancestry',()=>{
  const dir=mkdtempSync(join(tmpdir(),'bot155-')),path=join(dir,'db');let s=new Store(path,Buffer.alloc(32));try{seed(s);
  const run=beginRun(s,{id:'t'},'execution',{model:'fixed',prompt:'original',api_key:'secret'});
- s.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES('op','t',?,NULL,'pending')",JSON.stringify({type:'workspace_command',command:'npm test',token:'SECRET'}));
+ s.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES('op','t',?,NULL,'pending')",JSON.stringify({type:'workspace_command',command:'npm test',token:'ghp_SECRET123456789012345678901234567890'}));
  s.run("UPDATE task_tools SET state='completed',result=? WHERE id='op'",JSON.stringify({exit_code:0,output:'actual observed result'}));
  s.run("UPDATE tasks SET input=? WHERE id='t'",JSON.stringify({request:'changed later'}));s.close();s=new Store(path,Buffer.alloc(32));interruptRuns(s);
  const next=beginRun(s,{id:'t'},'execution',{prompt:'resumed'});assert.equal(s.get('SELECT previous_run_id FROM task_runs WHERE id=?',next.id).previous_run_id,run.id);

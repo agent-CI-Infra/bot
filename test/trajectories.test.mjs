@@ -148,7 +148,7 @@ function recordBoth(t) {
   const stores = ['legacy', 'files'].map(mode => {
     const { path } = database(t), store = new Store(path, key); t.after(() => store.close()); seed(store);
     const run = beginRun(store, { id: 't' }, 'execution', {}), scope = runScope('101', 't', run.id);
-    const request = { operation_id: 'op', generation: 1, request: { type: 'workspace_command', command: 'npm test', token: 'SECRET', workspace_id: 'w' } };
+    const request = { operation_id: 'op', generation: 1, request: { type: 'workspace_command', command: 'npm test', token: 'ghp_SECRET123456789012345678901234567890', workspace_id: 'w' } };
     const result = { exit_code: 0, output: 'observed '.repeat(1500) };
     if (mode === 'legacy') {
       store.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES('op','t',?,NULL,'pending')", JSON.stringify(request));

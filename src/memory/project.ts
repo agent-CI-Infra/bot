@@ -1,10 +1,11 @@
+import { hasCredentials } from '../core/redaction.js';
 import { memoryCatalog, validateCatalog, knowledgePath } from './catalog.js';
 import { authorize } from '../identity/authorization.js';
 import { memoryAuthorize, memoryVisible, visibleMemorySnapshot, taskMemoryAccess, type MemoryAccess } from './access.js';
 import {executionBaseline} from '../agent/common.js';
 import type { Store,Row } from '../storage/database.js';
 import { randomId,fail } from '../core/security.js';
-import { traceEvent,traceClean } from '../tasks/trace.js';
+import { traceEvent } from '../tasks/trace.js';
 import { createHash } from 'node:crypto';
 const time=()=>new Date().toISOString();
 const hash=(v:string)=>createHash('sha256').update(v).digest('hex');
@@ -50,9 +51,9 @@ export class ProjectMemory {
   if(!kinds.includes(data.kind)||!states.includes(data.status)||!['human_asserted','observed','unverified'].includes(data.verification)||data.authority==='sqlite'&&(typeof data.body!=='string'||!data.body.trim()||data.body.length>4000)||!Array.isArray(data.sources)||!data.sources.length||JSON.stringify(data.sources).length>8000||JSON.stringify(data.scope).length>4000)fail(400,'invalid_memory');
   if(!previous||input.sources!==undefined)for(const source of data.sources){if(!source||typeof source!=='object'||Array.isArray(source)||!Object.values(source).some(v=>typeof v==='string'&&v.trim()||typeof v==='number'))fail(400,'invalid_memory_source');if(source.path)knowledgePath(source.path);if(source?.task_id&&!this.store.get('SELECT 1 FROM tasks WHERE id=? AND repository_id=?',source.task_id,repo))fail(403,'memory_source_outside_project');}
   if(actor.startsWith('agent:')){data.verification='unverified';if(data.body.length>1000)fail(400,'memory_note_too_large');}
-  const normalize=(v:any):any=>{if(typeof v==='string'&&/^[\[{]/.test(v)){try{return JSON.stringify(normalize(JSON.parse(v)));}catch{return v;}}if(Array.isArray(v))return v.map(normalize);if(v&&typeof v==='object')return Object.fromEntries(Object.entries(v).map(([k,x])=>[k,normalize(x)]));return v;};
-  if(traceClean(reason)!==reason)fail(400,'memory_sensitive_content');
-  if(JSON.stringify(traceClean(data))!==JSON.stringify(normalize(data)))fail(400,'memory_sensitive_content');
+
+  if(hasCredentials(reason))fail(400,'memory_sensitive_content');
+  if(hasCredentials(data))fail(400,'memory_sensitive_content');
   return this.commit(repo,key,old,data,actor,reason);
  }
  private commit(repo:string,key:string,old:Row|undefined,data:any,actor:string,reason:string){
