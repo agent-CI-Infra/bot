@@ -389,3 +389,92 @@ test('a pending grant names the condition it waits on; states outside the three 
   h.store.run("UPDATE external_identities SET status='active' WHERE id=?", login.result.identity_id);
   assert.equal((await scopes())[0].state, 'active');
 });
+
+test('GET /api/identity names a plain GitHub connection state, the next step, and repository names', async t => {
+  const f = await identityFixture(t), { h } = f;
+  const read = async (principal, identityId) => {
+    const credential = session(h.store, principal, identityId);
+    const response = await fetch(h.admin + '/api/identity', { headers: { Cookie: 'bot_session=' + credential.token } });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    const text = JSON.stringify(body);
+    assert.doesNotMatch(text, /fixture-user|fixture-refresh|credentials|access_token|private_key/);
+    assert.equal('github_connection' in body, true);
+    return body.github_connection;
+  };
+
+  // A local recovery account has no GitHub binding; started repositories it administers are still listed.
+  const local = await read((await f.admin('/api/auth/me')).value.id, null);
+  assert.equal(local.state, 'disconnected');
+  assert.equal(local.status, '尚未连接 GitHub');
+  assert.match(local.next_step, /连接 GitHub/);
+  assert.equal(local.action, 'connect');
+  assert.deepEqual(local.repositories.map(r => r.id).sort(), ['101', '201']);
+  assert.equal(local.repository_count, 2);
+  assert.deepEqual(local.pending_repositories, []);
+
+  const login = await f.login(), principal = login.result.principal_id, identity = login.result.identity_id;
+  const connected = await read(principal, identity);
+  assert.deepEqual(connected, {
+    state: 'connected', status: '已连接 GitHub，可访问 1 个仓库', next_step: '可在项目列表中打开这些仓库。', action: null,
+    repository_count: 1, repositories: [{ id: '101', full_name: 'fixture/project-101' }], pending_repositories: [],
+  });
+
+  // A pending GitHub proof drops derived grants, so the person cannot see those repositories until they re-verify.
+  h.store.run("UPDATE external_identities SET status='pending_verification' WHERE id=?", identity);
+  const pendingProof = await read(principal, identity);
+  assert.equal(pendingProof.state, 'pending_verification');
+  assert.equal(pendingProof.action, 'reverify');
+  assert.deepEqual(pendingProof.repositories, []);
+  // An independent explicit grant still lets them into that project while GitHub is pending.
+  assert.equal((await f.admin('/api/identity/grants', 'POST', { principal_id: principal, tenant_id: 'github.com:20', project_id: '201', capabilities: ['tasks.read'] })).status, 201);
+  const delegated = await read(principal, identity);
+  assert.equal(delegated.state, 'connected');
+  assert.deepEqual(delegated.repositories, [{ id: '201', full_name: 'other/project-201' }]);
+  h.store.run("UPDATE external_identities SET status='active' WHERE id=?", identity);
+  h.store.run("UPDATE scoped_grants SET revoked_at=? WHERE principal_id=? AND source='explicit_delegation'", Date.now(), principal);
+
+  // Installed and administered, but not started: the name is visible, the project list stays empty.
+  h.store.transaction(() => {
+    h.store.run("DELETE FROM policies WHERE repository_id='101'");
+    h.store.run("DELETE FROM identity_projects WHERE project_id='101'");
+    h.store.run("DELETE FROM repositories WHERE id='101'");
+  });
+  const pending = await read(principal, identity);
+  assert.equal(pending.state, 'pending_activation');
+  assert.equal(pending.status, '已登录 GitHub，有 1 个仓库已安装但还没有被管理员启动');
+  assert.match(pending.next_step, /联系管理员/);
+  assert.equal(pending.action, 'wait_activation');
+  assert.deepEqual(pending.repositories, []);
+  assert.equal(pending.repository_count, 0);
+  assert.deepEqual(pending.pending_repositories, [{ id: '101', full_name: 'fixture/project-101' }]);
+
+  // Write/Maintain/Triage/Read never become management: the person is signed in, with no authorized repositories.
+  // Restore a started project so membership checks have a target, then drop Admin.
+  await repository(f.admin, f.a.id, '101');
+  f.state.owner = false; f.state.permission = 'write'; await f.identity.reverify(principal);
+  const member = await read(principal, identity);
+  assert.equal(member.state, 'no_repositories');
+  assert.equal(member.status, '已登录 GitHub，但还没有授权任何仓库');
+  assert.match(member.next_step, /选择要授权的仓库/);
+  assert.equal(member.action, 'choose_repos');
+  assert.deepEqual(member.repositories, []);
+  assert.deepEqual(member.pending_repositories, []);
+
+  // Expired derived grants, with no other access, ask the person to re-verify — not that they have no repositories.
+  f.state.owner = true; f.state.permission = undefined; await f.identity.reverify(principal);
+  h.store.run("UPDATE scoped_grants SET expires_at=1 WHERE principal_id=? AND source='github_derived'", principal);
+  h.store.run("DELETE FROM scoped_grants WHERE principal_id=? AND source='explicit_delegation'", principal);
+  const expired = await read(principal, identity);
+  assert.equal(expired.state, 'pending_verification');
+  assert.equal(expired.status, 'GitHub 授权待验证');
+  assert.equal(expired.action, 'reverify');
+  assert.deepEqual(expired.repositories, []);
+
+  h.store.run("UPDATE external_identities SET credentials=NULL WHERE id=?", identity);
+  const expiredAuth = await read(principal, identity);
+  assert.equal(expiredAuth.state, 'reauthorization_required');
+  assert.equal(expiredAuth.status, 'GitHub 授权已失效');
+  assert.equal(expiredAuth.action, 'reconnect');
+  assert.match(expiredAuth.next_step, /重新连接/);
+});
