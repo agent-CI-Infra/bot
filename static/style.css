@@ -44,7 +44,7 @@ a.status-link:hover{text-decoration:underline}
 #who img { width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0; object-fit: cover; }
 .current-user-copy { display: flex; flex-direction: column; min-width: 0; line-height: var(--line-height-tight); }
 .current-user-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-.current-user-role { color: var(--color-text-muted); font-size: var(--font-size-micro); }
+.current-user-role { color: var(--color-text-muted); font-size: var(--font-size-1); }
 .user-project-access { margin: 4px 0 8px; padding-left: 20px; font-size: var(--font-size-1); line-height: 1.7; overflow-wrap: anywhere; }
 @media (max-width: 760px) { #who { max-width: 150px; } }
 

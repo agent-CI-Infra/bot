@@ -215,10 +215,10 @@ function costChart(container,byDate,projects,currency,tokens=false) {
   const unit=tokens?'token':currency,value=row=>costChartValue(row,tokens)||0;
   const ns='http://www.w3.org/2000/svg',width=Math.max(800,byDate.size*30+100),height=350,left=90,bottom=45,top=20,plot=height-bottom-top;
   const svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox',`0 0 ${width} ${height}`);svg.setAttribute('width',String(width));svg.setAttribute('height',String(height));svg.setAttribute('role','img');svg.setAttribute('aria-label',tokens?'每日模型 token 用量，柱内不同颜色代表各项目':'每日模型估算费用，柱内不同颜色代表各项目');svg.dataset.metric=tokens?'tokens':'cost';
-  const add=(tag,attributes,text)=>{const node=document.createElementNS(ns,tag);for(const [key,value]of Object.entries(attributes))node.setAttribute(key,String(value));if(text!==undefined)node.textContent=text;svg.append(node);return node;};
+  const muted=(typeof getComputedStyle==='function'&&getComputedStyle(document.documentElement).getPropertyValue('--color-text-muted').trim()||'#607087'),add=(tag,attributes,text)=>{const node=document.createElementNS(ns,tag);for(const [key,value]of Object.entries(attributes))node.setAttribute(key,String(value));if(text!==undefined)node.textContent=text;svg.append(node);return node;};
   const dates=[...byDate],max=Math.max(...dates.map(([,d])=>value(d)),0),ceiling=max>0?max*1.1:1,step=(width-left-20)/dates.length;
-  for(let i=0;i<=4;i++){const y=top+plot*(1-i/4),value=ceiling*i/4;add('line',{x1:left,y1:y,x2:width-20,y2:y,stroke:'#dce6ed'});add('text',{x:left-8,y:y+4,'text-anchor':'end',fill:'#637c89','font-size':12},value>0&&value<0.000001?value.toExponential(1):value.toLocaleString('zh-CN',{maximumFractionDigits:6}));}
-  add('text',{x:left,y:14,fill:'#637c89','font-size':12},unit);
+  for(let i=0;i<=4;i++){const y=top+plot*(1-i/4),value=ceiling*i/4;add('line',{x1:left,y1:y,x2:width-20,y2:y,stroke:'#dce6ed'});add('text',{x:left-8,y:y+4,'text-anchor':'end',fill:muted,'font-size':12},value>0&&value<0.000001?value.toExponential(1):value.toLocaleString('zh-CN',{maximumFractionDigits:6}));}
+  add('text',{x:left,y:14,fill:muted,'font-size':12},unit);
   const hover=element('p',tokens?'悬停或聚焦色块，可查看该项目当天的 token 用量和占比。':'悬停或聚焦色块，可查看该项目当天的费用和占比。','cost-chart-detail');hover.setAttribute('aria-live','polite');
   dates.forEach(([date,day],index)=>{
     let total=0;
@@ -229,7 +229,7 @@ function costChart(container,byDate,projects,currency,tokens=false) {
       const rect=add('rect',{x:left+index*step+step*.12,y,width:step*.76,height:h,fill:costColor(project.repository_id),tabindex:0,role:'img','aria-label':label,'data-project':project.repository_id,'data-date':date,'data-value':amount});
       const title=document.createElementNS(ns,'title');title.textContent=label;rect.append(title);rect.addEventListener('mouseenter',()=>hover.textContent=label);rect.addEventListener('focus',()=>hover.textContent=label);total+=amount;
     }
-    if(index%Math.max(1,Math.ceil(dates.length/15))===0||index===dates.length-1)add('text',{x:left+index*step+step/2,y:height-18,'text-anchor':'middle',fill:'#637c89','font-size':12},date.slice(5));
+    if(index%Math.max(1,Math.ceil(dates.length/15))===0||index===dates.length-1)add('text',{x:left+index*step+step/2,y:height-18,'text-anchor':'middle',fill:muted,'font-size':12},date.slice(5));
   });
   const scroll=element('div','','cost-chart-scroll');scroll.tabIndex=0;scroll.setAttribute('aria-label',tokens?'可横向滚动的 token 用量图':'可横向滚动的费用图');scroll.append(svg);container.append(scroll,hover);
   const legend=element('div','','cost-legend');for(const project of projects){const entry=element('span',''),dot=element('span','','cost-color');dot.style.backgroundColor=costColor(project.repository_id);entry.append(dot,document.createTextNode(project.full_name));legend.append(entry);}container.append(legend);

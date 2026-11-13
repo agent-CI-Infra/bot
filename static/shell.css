@@ -61,7 +61,7 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--spac
 #console-sidebar { position: fixed; top: var(--console-header); bottom: 0; left: 0; display: flex; flex-direction: column; width: var(--console-rail); padding: 20px 12px 12px; border-right: 1px solid var(--color-border); background: var(--color-surface); z-index: 4; }
 .console-project-picker { flex-shrink: 0; gap: 8px; padding: 0 4px 18px; font-size: var(--font-size-1); color: var(--color-text-muted); }
 .console-project-picker select { font-size: var(--font-size-label); width: 100%; }
-.console-nav-label { font-size: var(--font-size-micro); font-weight: 650; color: var(--color-text-muted); margin: 0 12px 6px; letter-spacing: .07em; }
+.console-nav-label { font-size: var(--font-size-1); font-weight: 650; color: var(--color-text-muted); margin: 0 12px 6px; letter-spacing: .07em; }
 #console-sidebar #tabs { display: flex; flex: 1; min-height: 0; flex-direction: column; margin: 0; padding: 0; height: auto; overflow: visible; gap: 12px; }
 .console-primary-nav { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
 .console-settings-nav { flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid var(--color-border); }
@@ -70,7 +70,7 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--spac
 #console-sidebar #tabs button[aria-current=page], #console-secondary-nav .project-nav a[aria-current=page] { background: var(--color-brand-weak); color: var(--color-brand); border: 0; }
 #console-secondary-nav { margin: 0 0 var(--space-5); }
 #console-secondary-nav .project-nav { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: 8px 12px; margin: 0; }
-#console-secondary-nav .project-nav .console-nav-label { margin: 0 4px 0 8px; padding: 0; font-size: var(--font-size-micro); font-weight: 650; color: var(--color-text-muted); letter-spacing: .04em; }
+#console-secondary-nav .project-nav .console-nav-label { margin: 0 4px 0 8px; padding: 0; font-size: var(--font-size-1); font-weight: 650; color: var(--color-text-muted); letter-spacing: .04em; }
 #console-secondary-nav .project-nav .console-nav-label:first-child { margin-left: 2px; }
 #console-secondary-nav .project-nav .console-nav-label:not(:first-child) { padding-left: 10px; border-left: 1px solid var(--color-border); }
 #console-secondary-nav .project-nav a { display: inline-flex; align-items: center; min-height: 36px; padding: 6px 12px; font-size: var(--font-size-label); border-radius: var(--radius-control); color: var(--color-nav); white-space: nowrap; }
@@ -88,7 +88,7 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--spac
 .console-section-picker, .console-mobile-nav { display: none; }
 .console-page-head { margin: 0 0 var(--space-7); }
 .console-page-head h1 { font-size: var(--font-size-5); margin: 8px 0; letter-spacing: -.7px; }
-.console-page-head .eyebrow { color: var(--color-brand); font-weight: 650; font-size: var(--font-size-micro); }
+.console-page-head .eyebrow { color: var(--color-brand); font-weight: 650; font-size: var(--font-size-1); }
 .console-page-head .muted { max-width: 760px; font-size: var(--font-size-2); }
 .console-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-6); align-items: start; }
 .console-group { background: var(--color-surface); padding: var(--space-6); border: 1px solid var(--color-border); border-radius: var(--radius-card); min-width: 0; }
@@ -140,7 +140,7 @@ body.console-ready .management-page { left: var(--console-rail); }
   header .brand strong { font-size: 20px; }
   header .sub { display: none; }
   #identity { gap: 8px; min-width: 0; }
-  #who { max-width: 100px; font-size: var(--font-size-micro); }
+  #who { max-width: 100px; font-size: var(--font-size-1); }
   #who img { width: 24px; height: 24px; }
   #identity #logout { padding: 6px 8px; font-size: var(--font-size-1); }
   #console-sidebar, #console-secondary-nav { display: none; }
@@ -160,7 +160,7 @@ body.console-ready .management-page { left: var(--console-rail); }
   .console-section-picker { display: flex; flex-basis: 100%; gap: 6px; font-size: var(--font-size-1); margin-top: 4px; }
   .console-mobile-nav { position: fixed; z-index: 48; inset: auto 0 0; display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); min-height: var(--console-mobile-height); margin: 0; padding: 4px 4px calc(4px + env(safe-area-inset-bottom)); background: var(--color-surface); border: 0; border-top: 1px solid var(--color-border); box-shadow: 0 -3px 16px #142b4b05; }
   /* The glyph is drawn from data-glyph: the destination's text, and its accessible name, is only the label. */
-  .console-mobile-nav .console-link { position: relative; align-items: center; text-align: center; gap: 2px; padding: 4px 2px; min-height: 52px; font-size: var(--font-size-micro); color: var(--color-text-muted); }
+  .console-mobile-nav .console-link { position: relative; align-items: center; text-align: center; gap: 2px; padding: 4px 2px; min-height: 52px; font-size: var(--font-size-1); color: var(--color-text-muted); }
   .console-mobile-nav .console-link::before { content: attr(data-glyph); font-size: 20px; line-height: 24px; }
   .console-mobile-nav .console-link[aria-current=page] { color: var(--color-brand); background: var(--color-brand-weak); }
   .console-mobile-nav .console-link.console-nav-busy { color: var(--color-brand); }

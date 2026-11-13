@@ -87,7 +87,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 .project-table{width:100%;border-collapse:collapse;font-size:var(--font-size-label);table-layout:fixed}
 .project-table th{text-align:left;color:var(--color-text-muted);font-size:var(--font-size-1);padding:10px 8px;border-bottom:1px solid #d7e3e8}
 .project-table td{padding:12px 8px;border-bottom:1px solid #edf1f4;vertical-align:middle;overflow-wrap:anywhere}
-.project-table tr:last-child td{border-bottom:0}.project-table td>code{display:block;margin-top:4px;font-size:var(--font-size-micro);color:var(--color-text-muted)}
+.project-table tr:last-child td{border-bottom:0}.project-table td>code{display:block;margin-top:4px;font-size:var(--font-size-1);color:var(--color-text-muted)}
 
 .project-table[aria-label="任务模型"] th:first-child{width:24%}.project-table button{white-space:nowrap}
 .task-model-editor{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;align-items:end;min-width:0}
@@ -258,7 +258,7 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .task-fact{padding:9px 0;border-top:1px solid #edf1f4;min-width:0}.task-fact:first-of-type{border-top:0;padding-top:4px}
 .task-fact-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.task-fact-head h4{margin:0;font-size:var(--font-size-label);color:var(--color-text)}
 .task-fact .facts{margin-top:6px}.task-fact>p{margin:6px 0 0}.task-fact .history{margin-top:4px}.task-fact>button{margin-top:8px}
-.task-fact-list{margin:0;padding-left:18px;font-size:var(--font-size-1);display:grid;gap:4px}.task-fact-list li{overflow-wrap:anywhere}.task-fact-list li>.status{margin-left:6px}.task-fact-list li code{margin-left:6px;font-size:var(--font-size-micro);color:var(--color-text-muted)}
+.task-fact-list{margin:0;padding-left:18px;font-size:var(--font-size-1);display:grid;gap:4px}.task-fact-list li{overflow-wrap:anywhere}.task-fact-list li>.status{margin-left:6px}.task-fact-list li code{margin-left:6px;font-size:var(--font-size-1);color:var(--color-text-muted)}
 .task-execution h4{margin:10px 0 4px;font-size:var(--font-size-label);color:var(--color-text)}
 .role-work{margin:0;padding-left:20px;display:grid;gap:8px;font-size:var(--font-size-label)}.role-work p{margin:3px 0 0;overflow-wrap:anywhere}
 .role-work-head{display:flex;align-items:center;gap:6px 8px;flex-wrap:wrap}
