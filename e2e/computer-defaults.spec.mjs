@@ -7,6 +7,7 @@ import { ManagerError } from '../manager/docker.mjs';
 import { FakeDocker } from '../test/fake-docker.mjs';
 import { fail } from '../dist/core/security.js';
 import { RuleService } from '../dist/rules/service.js';
+import { consoleSave } from './console-save.mjs';
 
 const mib = 1024 * 1024;
 test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建；项目留空的资源跟随默认', async ({ page }) => {
@@ -52,11 +53,11 @@ test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建�
     const form = page.locator('.project-form').filter({ has: page.getByLabel('CPU（核）', { exact: true }) }), cores = form.getByLabel('CPU（核）', { exact: true });
     await expect(cores).toHaveValue(''); await expect(cores).toHaveAttribute('placeholder', '留空使用全局默认（4）');
     await form.screenshot({ path: '.tmp/computer-defaults/project-machine.png' });
-    await cores.fill('3'); await form.getByRole('button', { name: '保存', exact: true }).click();
+    await cores.fill('3'); await consoleSave(page).click();
     await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
     await expect.poll(() => [projects.own('101').cpus, host().NanoCpus]).toEqual([3, 3e9]);
     await expect(cores).toHaveValue('3');
-    await cores.fill(''); await form.getByRole('button', { name: '保存', exact: true }).click();
+    await cores.fill(''); await consoleSave(page).click();
     await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
     await expect.poll(() => [projects.own('101').cpus, host().NanoCpus]).toEqual([undefined, 4e9]);
 
