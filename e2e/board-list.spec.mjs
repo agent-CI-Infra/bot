@@ -124,3 +124,31 @@ test('logout clears list presentation, cached cards and reading positions before
     await expect(page.locator('#board-columns')).not.toHaveClass(/board-list-layout/);
   } finally { await close(h); }
 });
+
+test('窄屏筛选区只向下滚动：搜索和「含已关闭」在首屏，不会被挤到右侧屏幕外', async ({ page }) => {
+  const h = await fixture(page), output = '.tmp/ui-board-narrow';
+  mkdirSync(output, { recursive: true });
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(page.getByLabel('搜索编号或标题')).toBeInViewport();
+    await page.screenshot({ path: output + '/board-1440.png' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    const details = page.locator('.board-filter-details');
+    if (!await details.evaluate(node => node.open)) await details.locator('summary').click();
+    const controls = page.locator('.board-filter-controls');
+    // No second column past the right edge: the filter area itself must not scroll sideways.
+    expect(await controls.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    for (const control of [page.getByLabel('搜索编号或标题'), page.getByLabel('含已关闭')]) {
+      await expect(control).toBeInViewport();
+      const box = await control.boundingBox();
+      expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(390);
+    }
+    // Every control is still reachable inside the filter area, one under another.
+    const lefts = await controls.evaluate(node => [...node.children].filter(child => !child.hidden).map(child => Math.round(child.getBoundingClientRect().left)));
+    expect(new Set(lefts).size).toBe(1);
+    await page.screenshot({ path: output + '/board-390.png' });
+    await page.getByLabel('搜索编号或标题').fill('#40');
+    await expect(page.locator('#board-chips')).toContainText('40');
+  } finally { await close(h); }
+});

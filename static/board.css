@@ -90,7 +90,12 @@ body.board-mode .list-panel>.toolbar{display:none}
   body.board-mode #tabs button{flex:none;height:32px}
   .board-filter-details{padding-bottom:0;border:0}
   .board-filter-details>summary{margin:0;padding:4px 0}
-  .board-filter-controls{display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:8px 0;max-height:38dvh;overflow-y:auto}
+  /* One column that scrolls down, never sideways: wrapping a column flex box under a max-height starts a second column
+     past the right edge, which is where search and 含已关闭 ended up. The two quick controls come first. */
+  .board-filter-controls{display:flex;flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:10px;padding:8px 0;max-height:38dvh;overflow-x:hidden;overflow-y:auto}
+  .board-filter-controls>*{flex:none;max-width:100%}
+  .board-filter-controls>.board-search{order:-2}
+  .board-filter-controls>.board-check{order:-1}
   .board-filter-controls>.board-options:first-child{flex-basis:auto}
   .board-filter-controls .board-options{flex-direction:column;gap:4px}
   .board-filter-controls .board-options-label{line-height:1.4}
