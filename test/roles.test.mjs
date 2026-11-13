@@ -87,7 +87,7 @@ test('failed queue combination is returned to the same task with its original ar
  assert.equal(s.get("SELECT count(*) n FROM task_history WHERE type='merge_checks'").n,1);
 });
 
-test('a role transcript is rebuilt when its current knowledge audience changes',async t=>{
+test('a role transcript is rebuilt when a previously visible memory is withdrawn',async t=>{
  const requests=[],f=await fixture(t,body=>{requests.push(body.messages);return call('finish',{summary:'authorized result'});});
  authorizeKnowledgeTask(f.s);const memory=new ProjectMemory(f.s,{actor:knowledgeActor(f.s)});
  const item=memory.save('r','role-view',{body:'shared source',kind:'experience',sources:[{reference:'fixture observation'}]},0,'user:owner','initial');
@@ -97,7 +97,32 @@ test('a role transcript is rebuilt when its current knowledge audience changes',
 });
 
 
-test('RoleRun prepare filters restored knowledge and input, honors context rebuild and invalidates withdrawn bindings',async t=>{
+test('visible memory additions preserve sessions and announce only new authorized titles',async t=>{
+ for(const harness of ['native','process'])await t.test(harness,async t=>{
+  const requests=[],f=await fixture(t,body=>{requests.push(body.messages);return call('finish',{summary:'retained work'});});
+  authorizeKnowledgeTask(f.s);const memory=new ProjectMemory(f.s,{actor:knowledgeActor(f.s)});
+  const run=await runRole(f.spec,'dev',undefined,harness);
+  f.s.run('UPDATE role_instances SET harness_state=?,runtime=? WHERE id=?',JSON.stringify({session_id:'retained-binding'}),JSON.stringify({session:'retained-binding'}),run.instance_id);
+  const item=memory.save('r','new-shared-memory',{body:'BODY_NOT_INCLUDED_IN_NOTICE',kind:'experience',sources:[{reference:'fixture'}],catalog:{title:'New shared guidance'}},0,'user:owner','new source');
+  await runRole(f.spec,'dev',undefined,harness);
+  assert.ok(requests[1].some(m=>m.role==='assistant'));
+  const context=JSON.parse(requests[1].at(-1).content).role_context;
+  assert.deepEqual(context.new_readable_memories.items,[{id:item.id,title:'New shared guidance'}]);
+  assert.ok(!JSON.stringify(context.new_readable_memories).includes('BODY_NOT_INCLUDED_IN_NOTICE'));
+  assert.equal(JSON.parse(f.s.get('SELECT harness_state FROM role_instances WHERE id=?',run.instance_id).harness_state).session_id,'retained-binding');
+  memory.save('r','private-memory',{body:'private source',kind:'experience',sources:[{reference:'fixture'}],catalog:{audience:'role:reviewer'}},0,'user:owner','private source');
+  await runRole(f.spec,'dev',undefined,harness);
+  assert.ok(requests[2].some(m=>m.role==='assistant'));
+  assert.equal(JSON.parse(requests[2].at(-1).content).role_context.new_readable_memories,undefined);
+  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='role_memory_view_changed'").n,0);
+  f.s.run('DELETE FROM project_memories WHERE id=?',item.id);
+  await runRole(f.spec,'dev',undefined,harness);
+  assert.equal(requests[3].length,2);
+  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='role_memory_view_changed'").n,1);
+ });
+});
+
+test('RoleRun prepare filters restored knowledge and input, honors context rebuild and retains newly granted bindings',async t=>{
  const f=await fixture(t,()=>call('finish',{summary:'ordinary result'}));authorizeKnowledgeTask(f.s);
  const memory=new ProjectMemory(f.s,{actor:knowledgeActor(f.s)});
  const item=memory.save('r','prepare-private',{body:'reviewer source',kind:'experience',sources:[{reference:'fixture observation'}],catalog:{audience:'role:reviewer'}},0,'user:owner','source');
@@ -111,9 +136,10 @@ test('RoleRun prepare filters restored knowledge and input, honors context rebui
  const rebuilt=await roleRuns.prepare(spec,'dev',undefined,undefined,{rebuildContext:true});assert.deepEqual(rebuilt.wrapped.session.messages,[]);await rebuilt.env.release?.();
  f.s.run('UPDATE role_instances SET harness_state=?,runtime=? WHERE id=?',JSON.stringify({session_id:'old-private-binding'}),JSON.stringify({session:'old-private-binding'}),run.instance_id);
  memory.save('r',item.key,{catalog:{audience:'project'}},1,'user:owner','change role view');
- const changed=await roleRuns.prepare(f.spec,'dev');assert.deepEqual(changed.wrapped.session.messages,[]);
- const row=f.s.get('SELECT harness_state,runtime FROM role_instances WHERE id=?',run.instance_id);assert.deepEqual(JSON.parse(row.harness_state),{});assert.equal(row.runtime,null);
- assert.ok(f.s.get("SELECT id FROM task_history WHERE type='role_memory_view_changed'"));await changed.env.release?.();
+ const changed=await roleRuns.prepare(f.spec,'dev');assert.ok(changed.wrapped.session.messages.some(m=>m.content==='ordinary retained work'));
+ const row=f.s.get('SELECT harness_state,runtime FROM role_instances WHERE id=?',run.instance_id);assert.equal(JSON.parse(row.harness_state).session_id,'old-private-binding');assert.equal(JSON.parse(row.runtime).session,'old-private-binding');
+ assert.deepEqual(JSON.parse(changed.wrapped.prompt).role_context.new_readable_memories.items,[{id:item.id,title:item.catalog.title}]);
+ assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='role_memory_view_changed'").n,0);await changed.env.release?.();
 });
 
 test('Native reviewer on a fixed candidate may create unignored build output without finalizing it or the controller', async t => {

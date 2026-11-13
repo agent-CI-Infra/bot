@@ -2,6 +2,8 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {randomBytes} from 'node:crypto';import {mkdtempSync,writeFileSync,rmSync,readFileSync,existsSync} from 'node:fs';import {tmpdir} from 'node:os';import {join,resolve} from 'node:path';
 import {Store} from '../dist/storage/database.js';import {TaskRecords} from '../dist/tasks/service.js';import {runRole} from '../dist/roles/run.js';import {Redactor,TaskError} from '../dist/agent/common.js';
 import {LineRpc,codexAppServer,deniedFeatures} from '../dist/harness/app-server.js';import {acpConfiguration} from '../dist/harness/acp.js';import {instanceUsage} from '../dist/roles/role-run.js';import {roleHarness} from '../dist/roles/harness.js';
+import { knowledgeActor, authorizeKnowledgeTask } from './knowledge-fixture.mjs';
+import { ProjectMemory } from '../dist/memory/project.js';
 const tool=name=>({type:'function',function:{name,description:name,parameters:{type:'object',properties:{},additionalProperties:true}}});
 function fixture(t,env={},config={}){
  const root=mkdtempSync(join(tmpdir(),'bot-codex-')),key=randomBytes(32),file=join(root,'db'),home=join(root,'codex-home');let s=new Store(file,key);
@@ -98,6 +100,19 @@ test('Codex resume continues the own thread, counts usage once and rebuilds expl
  const rebuilt=f.state();
  assert.notEqual(rebuilt.sessionId,thread);assert.deepEqual([rebuilt.recoveryMode,rebuilt.previousSessionId],['rebuilt_from_task_records',thread]);
  assert.ok(f.events().some(e=>e.recovery==='native_resume_failed'&&e.previousSessionId===thread));
+});
+
+test('Codex keeps its native thread when a new memory becomes readable',async t=>{
+ const f=fixture(t);authorizeKnowledgeTask(f.s);
+ await runRole(f.spec,'dev',undefined,'codex');const thread=f.state().sessionId;
+ const memory=new ProjectMemory(f.s,{actor:knowledgeActor(f.s)});
+ const item=memory.save('r','new-codex-memory',{body:'new source',kind:'experience',sources:[{reference:'fixture observation'}],catalog:{title:'New guidance'}},0,'user:owner','new source');
+ await runRole(f.spec,'dev');
+ assert.equal(f.state().sessionId,thread);assert.equal(f.state().recoveryMode,'native_resume');
+ assert.ok(f.lines('requests.jsonl').some(r=>r.method==='thread/resume'));
+ const input=f.lines('prompts.jsonl').at(-1).prompt;
+ assert.ok(input.includes('new_readable_memories'));assert.ok(input.includes(item.id));
+ assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='role_memory_view_changed'").n,0);
 });
 
 test('Codex stream that ends before turn/completed fails; the next run reconciles the unconfirmed turn first',async t=>{
