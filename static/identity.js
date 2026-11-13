@@ -73,11 +73,12 @@ function grantExpiryText(grant) {
 function githubConnectionStatus(connection) {
   if (!connection || !connection.state) return '';
   const pending = (connection.pending_repositories || []).length;
-  return t('identity.github.status.' + connection.state, { count: connection.repository_count, pending });
+  return t('identity.github.status.' + connection.state, { count: connection.repository_count, pending, hidden: connection.hidden_repository_count ?? 0 });
 }
 function githubConnectionNextStep(connection) {
   if (!connection || !connection.state) return '';
-  const key = 'identity.github.next.' + connection.state, text = t(key);
+  const key = 'identity.github.next.' + connection.state;
+  const text = t(key, { hidden: connection.hidden_repository_count ?? 0, organization: connection.tenant_name || '' });
   return text === key ? (connection.next_step || '') : text;
 }
 
@@ -274,7 +275,7 @@ async function renderIdentity() {
     overview.append(reverify); githubEnabledButtons.push(reverify);
   } else if (action === 'switch_tenant') {
     // The repositories are in another organization than the one this session is limited to: one click widens it.
-    const widen = element('button', '切换到所有已授权组织', 'identity-primary');
+    const widen = element('button', t('identity.switch_all_tenants'), 'identity-primary');
     widen.addEventListener('click', async () => {
       widen.disabled = true;
       try { await api('/api/identity/tenant', 'POST', { tenant_id: null }); if (current()) await start(); }
