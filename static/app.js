@@ -321,6 +321,48 @@ function listParams() {
 function projectListAddress(hidden = false, params = listParams()) {
   return (me.role !== 'super_admin' ? '/api/repositories' : hidden ? '/api/installations/hidden' : '/api/installations') + '?' + params;
 }
+
+// #523: an empty delivery list is a guided empty state, not the generic "暂无记录" CSS placeholder.
+function eventsEmptyState(params) {
+  const filtered = !!(params.get('repository_id') || params.get('account_id') || params.get('owner_id'));
+  const paged = Number(params.get('offset') || 0) > 0;
+  const title = paged ? '本页没有投递' : filtered ? '当前筛选下没有投递' : '还没有 Webhook 投递';
+  const text = paged
+    ? '已经翻过第一页，这一页没有记录。可以回到上一页，或调整筛选后再看。'
+    : filtered
+      ? '这个仓库、账号或组织范围内还没有投递记录。投递可能在其他筛选条件下，或 Webhook 尚未把事件送到本部署。'
+      : '下面是常见原因。有投递之后，这里会列出接收、验签和处理结果。';
+  const empty = consoleState(title, text);
+  if (!filtered && !paged) {
+    const reasons = document.createElement('ul');
+    reasons.append(
+      element('li', 'GitHub App 的 Webhook 还没指向本部署，或验签失败。'),
+      element('li', '仓库还没被管理员启动，事件不会在这里形成任务。'),
+      element('li', '当前账号范围内确实还没有事件。')
+    );
+    empty.append(reasons);
+  }
+  if (filtered) {
+    empty.append(button('清除筛选', () => {
+      $('repository-filter').value = '';
+      $('account-filter').value = '';
+      $('owner-filter').value = '';
+      offset = 0;
+      render().catch(error);
+    }));
+  } else if (paged) {
+    empty.append(button('返回第一页', () => { offset = 0; render().catch(error); }));
+  }
+  if (me.role === 'super_admin') {
+    empty.append(consoleLink('#/settings/onboarding', '打开接入向导', '检查并更新 GitHub App 的 Webhook 地址'));
+    empty.append(consoleLink('#/settings/accounts', '查看机器人账号', '核对 Webhook 入口和签名凭据'));
+  } else {
+    empty.append(consoleLink('#/identity', '查看身份与权限', '确认当前授权范围'));
+    empty.append(element('p', '若授权无误，请联系超级管理员检查 Webhook 是否指向本部署，以及相关仓库是否已启动。', 'muted'));
+  }
+  return empty;
+}
+
 async function render(quiet = false) {
   // The list renderer never owns a console page. This is the second line of defence for #365: even when a stale route
   // reaches here after `tab` has moved to #/more, it must not turn that tab name into an API path.
@@ -430,6 +472,7 @@ async function render(quiet = false) {
   if(quiet&&shown.length===entries.length&&shown.every((node,index)=>node.dataset.key===entries[index].dataset.key))
     shown.forEach((node,index)=>{if(rowSignatures.get(node)!==rowSignatures.get(entries[index]))node.replaceWith(entries[index]);});
   else $('rows').replaceChildren(...entries);
+  if (tab === 'events' && !rows.length) $('rows').replaceChildren(eventsEmptyState(params));
   if (tab === 'projects' && !installedView && !repositories.length && !rows.length) {
     const empty = consoleState('已登录，尚无可管理的项目', '可以先查看身份与权限；安装待同步或权限待核验时，按身份页提示重新验证，或联系管理员分配项目。', { retry: () => start().catch(error) });
     empty.append(consoleLink('#/identity', '查看身份与权限')); $('rows').replaceChildren(empty);
