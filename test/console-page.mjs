@@ -7,7 +7,7 @@ import { readConsoleScriptSync } from '../dist/console/modules.js';
 class FakeElement {
   constructor(tagName) {
     Object.assign(this, { tagName: tagName.toUpperCase(), id: '', className: '', textContent: '', hidden: false, children: [], parentElement: null,
-      dataset: {}, attributes: {}, listeners: {}, style: {} });
+      dataset: {}, attributes: {}, listeners: {}, style: {}, scrollTop: 0 });
     const names = () => this.className.split(/\s+/).filter(Boolean);
     this.classList = {
       contains: name => names().includes(name),
@@ -19,6 +19,8 @@ class FakeElement {
   }
   get childElementCount() { return this.children.length; }
   get lastElementChild() { return this.children.at(-1) || null; }
+  get open() { return this.hasAttribute('open'); }
+  set open(value) { if (value) this.setAttribute('open', ''); else this.removeAttribute('open'); }
   setAttribute(name, value) { if (name.startsWith('data-')) this.dataset[camel(name)] = String(value); else this.attributes[name] = String(value); }
   getAttribute(name) { return (name.startsWith('data-') ? this.dataset[camel(name)] : this.attributes[name]) ?? null; }
   hasAttribute(name) { return this.getAttribute(name) !== null; }
@@ -44,17 +46,22 @@ class FakeElement {
   close() { if (!this.open) return; this.open = false; for (const listener of this.listeners.close || []) listener({ type: 'close' }); }
   focus() { this.ownerFocus = true; }
   scrollIntoView() {}
+  contains(node) { for (; node; node = node.parentElement) if (node === this) return true; return false; }
+  // This DOM has no layout. Real scroll anchors and viewport positions are covered in Playwright.
+  getBoundingClientRect() { return { x: 0, y: 0, top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }; }
   remove() { if (this.parentElement) { this.parentElement.children.splice(this.parentElement.children.indexOf(this), 1); this.parentElement = null; } }
   querySelectorAll(selector) { return select(this, selector); }
   querySelector(selector) { return select(this, selector)[0] || null; }
 }
 const camel = name => name.slice(5).replace(/-(\w)/g, (_, c) => c.toUpperCase());
 function simple(element, part) {
-  const [, tag, id, classes, attributes] = /^(\w+)?(?:#([\w-]+))?((?:\.[\w-]+)*)((?:\[[\w-]+(?:=[\w-]+)?\])*)$/.exec(part) || [];
+  const [, tag, id, classes, attributes] = /^(\w+)?(?:#([\w-]+))?((?:\.[\w-]+)*)((?:\[[\w-]+(?:=(?:"[^"]*"|'[^']*'|[\w-]+))?\])*)$/.exec(part) || [];
   if (classes === undefined) throw new Error('unsupported selector: ' + part);
   return (!tag || element.tagName === tag.toUpperCase()) && (!id || element.id === id)
     && classes.split('.').filter(Boolean).every(name => element.classList.contains(name))
-    && [...attributes.matchAll(/\[([\w-]+)(?:=([\w-]+))?\]/g)].every(([, name, value]) => element.hasAttribute(name) && (value === undefined || element.getAttribute(name) === value));
+    && [...attributes.matchAll(/\[([\w-]+)(?:=(?:"([^"]*)"|'([^']*)'|([\w-]+)))?\]/g)].every(([, name, quoted, single, bare]) => {
+      const value = quoted ?? single ?? bare; return element.hasAttribute(name) && (value === undefined || element.getAttribute(name) === value);
+    });
 }
 function select(root, selector) {
   const selectors = selector.split(',').map(value => value.trim().split(/\s+/)), found = [];

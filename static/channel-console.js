@@ -97,6 +97,20 @@ const channelStepLabels = { running: '开始执行', model_start: '请求模型'
 const channelToolLabels = { list_projects: '查看项目范围', list_project_tasks: '查询项目任务', read_project_task: '读取任务', create_project_task: '创建项目任务', manage_project_task: '管理项目任务',
   start_own_task: '开始独立任务', continue_own_task: '继续独立任务', list_own_tasks: '查看独立任务', management_query: '查询管理信息', management_command: '执行管理操作', github_read: '读取 GitHub', github_write: '写入 GitHub', send_message: '发布进展消息' };
 const channelTime = value => timestamp(typeof value === 'number' ? value : Date.parse(value));
+function channelExecutionTime(turn, mode, readAt) {
+  // Group turns are inserted when execution starts. Management messages start pending;
+  // interrupted timestamps record recovery, and stopped timestamps record the stop request.
+  const start = turn.created_at, end = turn.state === 'running' ? readAt : turn.updated_at;
+  if (mode === 'management' || !['running', 'completed', 'failed'].includes(turn.state)
+    || typeof start !== 'number' || typeof end !== 'number' || !Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end < start) return '执行时长未知';
+  const seconds = Math.floor((end - start) / 1000), minutes = Math.floor(seconds / 60);
+  const duration = seconds < 1 ? '不足 1 秒' : minutes ? `${minutes} 分 ${seconds % 60} 秒` : `${seconds} 秒`;
+  return `${turn.state === 'running' ? '助手已执行' : '助手执行'} ${duration}`;
+}
+function channelDeliveryText(turn) {
+  const labels = { sent: '回答已发送至飞书', failed: '回答发送失败', unknown: '回答发送结果未知', queued: '回答待发送', sending: '正在发送回答', retry: '回答等待重试' };
+  return labels[turn.delivery?.state] || (turn.silent ? '本轮未发送回答' : turn.reply ? '回答送达未核验' : '尚无最终回答发送记录');
+}
 async function renderChannelConsole(request) {
   const page = $('console-page'), owner = me, address = location.hash, root = element('div', '', 'channel-console');
   const alive = () => renderVersion === request && me === owner && location.hash === address && root.isConnected && root.contains(thread);
@@ -106,6 +120,7 @@ async function renderChannelConsole(request) {
   head.append(element('p', '消息与执行', 'eyebrow'), headTop, note('在同一处查看成员消息、助手执行过程和派生任务。'));
   const layout = element('div', '', 'channel-console-layout'), sidebar = element('aside', '', 'channel-chat-list'), thread = element('section', '', 'channel-thread'), related = element('aside', '', 'channel-related');
   sidebar.setAttribute('aria-label', '可查看的飞书会话'); thread.setAttribute('aria-label', '当前飞书会话'); related.setAttribute('aria-label', '会话派生任务');
+  related.hidden = true;
   layout.append(sidebar, thread, related); root.append(head, layout); page.replaceChildren(root);
   const failRead = (target, err, retry) => {
     if (!alive()) return;
@@ -144,7 +159,6 @@ async function renderChannelConsole(request) {
   }
   if (!selected) {
     thread.append(consoleState('选择一个飞书会话', '左侧列出你有权查看的群聊和私聊，也可从「飞书绑定」点击任意绑定直接进入。'));
-    related.append(consoleState('执行与任务', '选择会话后，可查看助手步骤、独立任务与交给项目团队的任务。'));
     await readList(); return;
   }
   const toolbar = element('div', '', 'channel-thread-head'), caption = element('div'), actions = element('div', '', 'actions'), status = note('正在读取会话…'); status.setAttribute('role', 'status');
@@ -169,28 +183,57 @@ async function renderChannelConsole(request) {
   let messages = new Map(), turns = new Map(), tasks = new Map(), refreshTimer, conversationMode;
   const time = value => typeof value === 'number' ? value : Date.parse(value);
   function drawTimeline() {
-    const nearBottom = history.scrollHeight - history.scrollTop - history.clientHeight < 80, previous = history.scrollTop, height = history.scrollHeight;
+    const nearBottom = history.scrollHeight - history.scrollTop - history.clientHeight < 80, previous = history.scrollTop;
+    const opened = new Set([...history.querySelectorAll('details[open]')].map(d => `${d.closest('[data-timeline-key]').dataset.timelineKey}/${d.dataset.detailKey}`));
+    const top = history.getBoundingClientRect().top, visible = node => node.getClientRects().length && node.getBoundingClientRect().bottom > top;
+    const anchor = [...history.querySelectorAll('[data-reading-key]')].find(visible) || [...history.children].find(visible);
+    const anchorKey = anchor?.closest('[data-timeline-key]')?.dataset.timelineKey, readingKey = anchor?.dataset.readingKey, anchorOffset = anchor?.getBoundingClientRect().top - top;
+    let restoredScroll;
+    const restorePosition = () => {
+      // A late step response must not move somebody who has already scrolled on.
+      if (restoredScroll !== undefined && Math.abs(history.scrollTop - restoredScroll) > 2) return;
+      const row = [...history.children].find(item => item.dataset.timelineKey === anchorKey);
+      const content = readingKey && row && [...row.querySelectorAll('[data-reading-key]')].find(item => item.dataset.readingKey === readingKey);
+      const target = content || row;
+      if (nearBottom && !opened.size) history.scrollTop = history.scrollHeight;
+      else if (target) history.scrollTop += target.getBoundingClientRect().top - history.getBoundingClientRect().top - anchorOffset;
+      else history.scrollTop = previous;
+      restoredScroll = history.scrollTop;
+    };
     history.replaceChildren();
     const rows = [...[...messages.values()].map(value => ({ type: 'message', value })), ...[...turns.values()].map(value => ({ type: 'turn', value }))]
       .sort((a, b) => time(a.value.created_at) - time(b.value.created_at) || String(a.value.message_id || a.value.id).localeCompare(String(b.value.message_id || b.value.id)));
     for (const { type, value } of rows) {
       if (type === 'message') {
         const bot = value.sender_type === 'app' || value.sender_type === 'bot', row = element('article', '', 'channel-message' + (bot ? ' channel-message-bot' : ''));
+        row.dataset.timelineKey = 'message:' + value.message_id;
         row.setAttribute('aria-label', bot ? '机器人消息' : '成员消息');
         const meta = element('div', '', 'channel-message-meta'); meta.append(element('strong', value.sender_name || (bot ? '机器人 · ' + (value.sender_id || '未知') : value.sender_id || '发送者未知')), element('time', channelTime(value.created_at)));
         const body = element('div', value.content || (value.resources?.length ? '附件消息（本页展示已同步的文字与附件名称）' : '本地未保存可展示的文字'), 'channel-message-body');
+        body.dataset.readingKey = 'message';
         row.append(meta, body);
         if (value.resources?.length) for (const resource of value.resources) row.append(note('附件：' + (resource.name || resource.file_name || resource.kind || '未命名附件')));
         if (value.parent_id || value.thread_id) row.append(element('small', '回复 / 话题：' + (value.parent_id || value.thread_id), 'muted'));
         history.append(row);
       } else {
-        const row = element('article', '', 'channel-run'); row.setAttribute('aria-label', '助手执行回合');
+        const row = element('article', '', 'channel-run'); row.setAttribute('aria-label', '助手执行回合'); row.dataset.timelineKey = 'turn:' + value.id;
         const title = element('div', '', 'heading'); const statusBadge = state(value.state); if (value.state_label) statusBadge.textContent = value.state_label;
+        if (value.state === 'completed') statusBadge.textContent = value.reply && conversationMode !== 'management' ? '生成完成' : '执行完成';
         title.append(element('strong', value.role_id || '管理助手'), statusBadge, element('time', channelTime(value.created_at))); row.append(title);
-        const details = element('details'), steps = element('div'); details.append(element('summary', '查看执行过程'), steps);
-        details.addEventListener('toggle', () => { if (details.open && !details.dataset.loaded) { details.dataset.loaded = '1'; void readSteps(value.id, steps); } }); row.append(details);
+        const facts = element('div', '', 'channel-run-facts'), duration = element('span', channelExecutionTime(value, conversationMode, sampledAt));
+        duration.title = '助手回合执行时间，不含消息排队和飞书发送；运行中截至本次读取。无法确定起止时刻时显示未知。';
+        const delivery = element('span', channelDeliveryText(value), 'channel-run-delivery');
+        if (value.delivery?.state === 'failed' || value.delivery?.state === 'unknown') delivery.classList.add('channel-run-attention');
+        facts.append(duration, delivery); row.append(facts);
+        const details = element('details'), steps = element('div'); details.dataset.detailKey = 'steps'; details.append(element('summary', '查看执行过程'), steps);
+        let restoringSteps = opened.has(`${row.dataset.timelineKey}/steps`);
+        details.addEventListener('toggle', () => {
+          const onRead = restoringSteps ? restorePosition : undefined; restoringSteps = false;
+          if (details.open && !details.dataset.loaded) { details.dataset.loaded = '1'; void readSteps(value.id, steps, 0, onRead); }
+        }); row.append(details);
         if (value.incoming_messages?.length) {
           const incoming = element('details'); incoming.setAttribute('aria-label', '回合并入的消息');
+          incoming.dataset.detailKey = 'incoming';
           incoming.append(element('summary', '并入的消息（' + value.incoming_messages.length + '）'));
           for (const message of value.incoming_messages) {
             const status = { pending: '尚未交给模型', injected: '已交给模型', answered: '本轮处理完成', released: '已交回待处理' }[message.state] || message.state;
@@ -209,19 +252,21 @@ async function renderChannelConsole(request) {
         }
         if (value.can_stop) row.append(button('停止回答', () => stopTurn(value).catch(error), 'quiet'));
         if (value.reply) {
-          if (conversationMode === 'management') row.append(element('p', value.reply, 'channel-message-body'));
-          else { const answer = element('details'); answer.append(element('summary', '本轮生成的回答'), element('p', value.reply, 'channel-message-body')); row.append(answer); }
-          row.append(note(value.delivery?.state === 'sent' ? '本轮回答已发送至飞书。' : value.delivery?.state === 'unknown' ? '飞书发送结果未知，请先核对。' : value.delivery?.state === 'failed' ? '发送失败；执行结果不代表已经送达。' : '已生成回答，尚未核验飞书送达结果。'));
+          const body = element('p', value.reply, 'channel-message-body'); body.dataset.readingKey = 'reply';
+          if (conversationMode === 'management') row.append(body);
+          else { const answer = element('details'); answer.dataset.detailKey = 'reply'; answer.append(element('summary', '本轮生成的回答'), body); row.append(answer); }
         } else if (value.state === 'running') row.append(note('正在回答…'));
         else if (value.state === 'stopped') row.append(note('已在控制台停止，不再发送最终回答；已发出的进展消息保留。'));
         else if (value.silent) row.append(note('本轮保持安静，未发送回答' + (value.silent_reason ? '：' + value.silent_reason : '。')));
         else if (value.state === 'completed') row.append(note('本轮没有生成可展示的回答。'));
         if (value.error) row.append(note(employeeError(value.error)));
+        if (value.delivery?.error) row.append(note('发送原因：' + employeeError(value.delivery.error)));
+        for (const detail of row.querySelectorAll('details')) detail.open = opened.has(`${row.dataset.timelineKey}/${detail.dataset.detailKey}`);
         history.append(row);
       }
     }
     if (!rows.length) history.append(consoleState('暂无本地会话记录', '尚未同步到消息或助手执行回合，可刷新查看。'));
-    if (nearBottom) history.scrollTop = history.scrollHeight; else history.scrollTop = previous + Math.max(0, history.scrollHeight - height);
+    restorePosition();
   }
   async function stopTurn(turn) {
     if (!alive()) return;
@@ -229,28 +274,35 @@ async function renderChannelConsole(request) {
       run: () => api(`/api/channels/chats/${selected}/service-turns/${turn.id}/stop`, 'POST', {}) });
     if (stopped && alive()) await update();
   }
-  async function readSteps(turn, target, after = 0) {
+  async function readSteps(turn, target, after = 0, onRead) {
     try {
       const result = await api(`/api/channels/chats/${selected}/turns/${turn}?after=${after}`); if (!alive() || !target.isConnected) return;
       if (!after) target.replaceChildren();
-      for (const event of result.events) target.append(element('p', `${channelTime(event.created_at)} · ${channelStepLabels[event.type] || event.type}${event.name ? ' · ' + (channelToolLabels[event.name] || event.name) : ''}`, 'channel-step'));
+      for (const event of result.events) {
+        const step = element('p', `${channelTime(event.created_at)} · ${channelStepLabels[event.type] || event.type}${event.name ? ' · ' + (channelToolLabels[event.name] || event.name) : ''}`, 'channel-step');
+        step.dataset.readingKey = 'step:' + event.sequence; target.append(step);
+      }
       if (result.coverage === 'legacy_steps_unavailable') target.append(note('这轮执行发生在步骤记录启用前，没有可补写的执行步骤。'));
       if (result.has_more) { const next = button('更多执行步骤', async () => { next.remove(); await readSteps(turn, target, result.next_after); }, 'quiet'); target.append(next); }
+      onRead?.();
     } catch (err) { failRead(target, err, () => readSteps(turn, target, after)); }
   }
   async function readTasks(more = false) {
     const result = await api(`/api/channels/chats/${selected}/tasks?offset=${more ? taskOffset : 0}`); if (!alive()) return;
     if (!more) tasks.clear(); for (const task of result.tasks) tasks.set(task.id, task); taskOffset = result.next_offset;
-    related.replaceChildren(element('h2', '派生任务'), note('项目任务交给项目团队处理；独立任务由本会话的服务角色处理。'));
+    const opened = new Set([...related.querySelectorAll('details[open]')].map(d => d.closest('[data-task-id]').dataset.taskId));
+    related.hidden = !tasks.size && !result.own_tasks.length && taskOffset === null;
+    layout.classList.toggle('channel-with-tasks', !related.hidden);
+    related.replaceChildren(); if (related.hidden) return;
+    related.append(element('h2', '派生任务'));
     const projectTasks = element('section'); projectTasks.append(element('h3', '项目任务'));
     for (const task of tasks.values()) { const row = element('article', '', 'channel-related-task'); row.append(element('strong', task.summary), state(task.status), note(task.project_name), button('查看任务过程', () => openTask(task.id).catch(error), 'quiet')); projectTasks.append(row); }
-    if (!tasks.size) projectTasks.append(note('当前授权和来源范围暂无项目任务。'));
     if (taskOffset !== null) projectTasks.append(button('更多项目任务', () => readTasks(true).catch(err => failRead(related, err, () => readTasks(true))), 'quiet'));
     const own = element('section'); own.append(element('h3', '独立任务（最近 20 项）'));
-    for (const task of result.own_tasks) { const row = element('article', '', 'channel-related-task'); row.append(element('strong', task.title), state(task.state));
-      if (task.last_conclusion) { const detail = element('details'); detail.append(element('summary', '查看最近结论'), element('p', task.last_conclusion, 'channel-message-body')); row.append(detail); } own.append(row); }
-    if (!result.own_tasks.length) own.append(note('当前会话暂无可见独立任务。'));
-    related.append(projectTasks, own, consoleLink(conversationMode === 'service' ? '#/identity/feishu?group=' + selected : '#/identity/feishu', '飞书绑定', '管理个人绑定、群仓库范围与角色权限'));
+    for (const task of result.own_tasks) { const row = element('article', '', 'channel-related-task'); row.dataset.taskId = task.task_id; row.append(element('strong', task.title), state(task.state));
+      if (task.last_conclusion) { const detail = element('details'); detail.open = opened.has(String(task.task_id)); detail.append(element('summary', '查看最近结论'), element('p', task.last_conclusion, 'channel-message-body')); row.append(detail); } own.append(row); }
+    if (tasks.size || taskOffset !== null) related.append(projectTasks);
+    if (result.own_tasks.length) related.append(own);
   }
   async function update(more) {
     if (pending || !alive()) return; pending = true; refresh.disabled = moreMessages.disabled = moreTurns.disabled = true; clearTimeout(refreshTimer);
@@ -260,7 +312,22 @@ async function renderChannelConsole(request) {
       if (more === 'messages' && messageCursor) query.set('cursor', messageCursor);
       if (more === 'turns' && turnOffset !== null) query.set('turn_offset', String(turnOffset));
       const result = await api(`/api/channels/chats/${selected}/timeline?${query}`); if (!alive()) return;
-      if (!more) { messages.clear(); turns.clear(); }
+      if (!more) {
+        // Re-read loaded history under current permissions before replacing it. Keeping
+        // only the newest page would discard an expanded older turn during refresh.
+        while (result.next_cursor && result.messages.length < messages.size
+          || result.conversation.next_offset !== null && result.conversation.turns.length < turns.size) {
+          const readMessages = !!result.next_cursor && result.messages.length < messages.size;
+          const readTurns = result.conversation.next_offset !== null && result.conversation.turns.length < turns.size;
+          const next = new URLSearchParams();
+          if (readMessages) next.set('cursor', result.next_cursor);
+          if (readTurns) next.set('turn_offset', String(result.conversation.next_offset));
+          const older = await api(`/api/channels/chats/${selected}/timeline?${next}`); if (!alive()) return;
+          if (readMessages) { result.messages.push(...older.messages); result.next_cursor = older.next_cursor; }
+          if (readTurns) { result.conversation.turns.push(...older.conversation.turns); result.conversation.next_offset = older.conversation.next_offset; }
+        }
+        messages.clear(); turns.clear();
+      }
       if (more !== 'turns') { for (const message of result.messages) messages.set(message.message_id, message); messageCursor = result.next_cursor; }
       if (more !== 'messages') { for (const turn of result.conversation.turns) turns.set(turn.id, turn); turnOffset = result.conversation.next_offset; }
       conversationMode = result.conversation.mode; sampledAt = result.read_at; moreMessages.hidden = !messageCursor; moreTurns.hidden = turnOffset === null;

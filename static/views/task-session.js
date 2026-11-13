@@ -8,6 +8,7 @@ async function openTask(id) {
   taskReadVersion++; taskLogState = { id, logs: [], page: null, error: '', olderPending: false };
   $('task-log-controls').replaceChildren();
   openTaskId = id; resetTaskRendering(); $('timeline-command').hidden = true; clearTimeout(taskTimer);
+  $('task-layout').prepend($('task-side'));
   $('task-picker').hidden = true; $('task-layout').hidden = false; $('task-next').hidden = true; $('task-next-text').textContent = '';
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = '正在加载…'; notice('task-error'); $('timeline-live').hidden = true;
@@ -63,7 +64,7 @@ async function refreshTask() {
     }
     logState.task = detail.task; updateTaskLogControls(logState);
     await refreshLive(detail.task, current); if (!current()) return;
-    keepOpen($('task-side'), () => renderTaskSide(detail, environment, roles, purposes));
+    refreshTaskSide(() => renderTaskSide(detail, environment, roles, purposes));
     if (!terminalStates.includes(detail.task.status)) taskTimer = setTimeout(refreshTask, detail.task.status.startsWith('waiting_') ? 5000 : 2000);
   } catch (err) {
     if (!current()) return;
@@ -77,6 +78,30 @@ async function refreshTask() {
     }
     notice('task-error', err.message); taskTimer = setTimeout(refreshTask, 5000);
   }
+}
+// Polling replaces the facts, but must leave an open detail and an unfinished priority edit readable.
+function refreshTaskSide(render) {
+  const side = $('task-side'), panel = scroller(side), top = panel.scrollTop;
+  const key = node => node.querySelector('summary, h3')?.textContent;
+  const anchor = [...side.children].find(node => node.getBoundingClientRect().bottom > panel.getBoundingClientRect().top + 8);
+  const anchorKey = anchor && key(anchor), anchorTop = anchor?.getBoundingClientRect().top;
+  const traceTop = !anchor && panel !== side ? $('timeline').parentElement.getBoundingClientRect().top : null;
+  const outputs = [...side.querySelectorAll('pre.output')].map(node => node.scrollTop);
+  const reason = side.querySelector('[aria-label="优先级调整理由"]'), priority = side.querySelector('[aria-label="任务优先级"]');
+  const active = side.contains(document.activeElement) ? document.activeElement.getAttribute('aria-label') : null;
+  const draft = reason?.value || '', selected = priority?.value, editing = !!draft || selected !== priority?.dataset.savedValue;
+  const selection = active === '优先级调整理由' ? [reason.selectionStart, reason.selectionEnd] : null;
+  keepOpen(side, render);
+  const nextReason = side.querySelector('[aria-label="优先级调整理由"]'), nextPriority = side.querySelector('[aria-label="任务优先级"]');
+  if (nextReason) nextReason.value = draft;
+  if (nextPriority && editing && selected) nextPriority.value = selected;
+  if (active) [...side.querySelectorAll('[aria-label]')].find(node => node.getAttribute('aria-label') === active)?.focus({ preventScroll: true });
+  if (selection && nextReason) nextReason.setSelectionRange(...selection);
+  side.querySelectorAll('pre.output').forEach((node, index) => { node.scrollTop = outputs[index] || 0; });
+  panel.scrollTop = top;
+  const nextAnchor = anchorKey && [...side.children].find(node => key(node) === anchorKey);
+  if (nextAnchor) panel.scrollTop += nextAnchor.getBoundingClientRect().top - anchorTop;
+  else if (traceTop !== null) panel.scrollTop += $('timeline').parentElement.getBoundingClientRect().top - traceTop;
 }
 function mergeTaskLogs(cache, result, initial = false) {
   const rows = new Map(cache.logs.map(log => [log.id, log]));
