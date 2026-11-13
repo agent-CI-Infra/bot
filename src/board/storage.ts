@@ -77,7 +77,8 @@ export function boardStorage(store: Store): void {
     store.db.exec(`CREATE TRIGGER IF NOT EXISTS board_deliveries_${operation.toLowerCase()} AFTER ${operation} ON deliveries BEGIN
       ${projection('deliveries', 's', 's.rowid=NEW.rowid')} ${deliveryArrays('s.rowid=NEW.rowid')} END;`);
   }
-  store.db.exec(`
+  // Another worker can open this database concurrently; it must never observe half-replaced task triggers.
+  store.transaction(()=>store.db.exec(`
     CREATE TRIGGER IF NOT EXISTS board_tasks_insert AFTER INSERT ON tasks BEGIN
       ${projection('tasks', 's', 's.rowid=NEW.rowid')} ${published('s.rowid=NEW.rowid')} END;
     DROP TRIGGER IF EXISTS board_tasks_update;
@@ -106,7 +107,7 @@ export function boardStorage(store: Store): void {
     BEGIN
       ${published('s.rowid=NEW.rowid')}
     END;
-  `);
+  `));
   if (!store.get("SELECT 1 FROM settings WHERE key='board_projection_v1'")) {
     store.transaction(() => {
       // A one-time migration reads existing rows in bounded, primary-key batches.
