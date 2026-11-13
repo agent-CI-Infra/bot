@@ -60,17 +60,33 @@ function taskModelEditor(kind, title, policy, models, { custom = false, draft = 
   const currentText = configured
     ? selectedModel ? `${selectedModel.model_name} · 此任务指定${selectedModel.key_configured ? '' : ' · Key 已撤销，不会自动切换'}` : `模型不可用（${selected}） · 此任务指定，不会自动切换`
     : selectedModel ? `${selectedModel.model_name} · 继承项目默认${selectedModel.key_configured ? '' : ' · Key 已撤销'}` : policy.model_id ? `模型不可用（${policy.model_id}） · 继承项目默认，不会自动切换` : '未选择项目默认模型，任务会等待配置';
+  const actions = element('div', '', 'actions form-actions');
+  if (!draft) {
+    // Pages outside the unified save bar (the Manager rules page's「Manager 分派」) still save this one entry at once.
+    const persist = async (value, notice) => {
+      message.textContent = ''; for (const control of actions.querySelectorAll('button')) control.disabled = true;
+      try {
+        const values = taskModelMap(current.policy);
+        if (value) values[kind] = value; else delete values[kind];
+        await patchPolicy({ task_models: values }); current.focusAnchor = kind; await reloadWith(notice);
+      } catch (err) { message.textContent = err.message; }
+      finally { for (const control of actions.querySelectorAll('button')) control.disabled = false; }
+    };
+    actions.append(button('保存模型', () => persist(select.value, `已保存${title}的模型`)));
+    if (!custom && configured) actions.append(button('恢复继承', () => persist('', `已恢复${title}继承项目默认模型`), 'quiet'));
+    if (custom) actions.append(button('移除这项设置', () => persist('', `已移除 ${kind} 的模型设置`), 'quiet destructive'));
+    section.append(note(`当前使用：${currentText}`), field('任务模型', select), message, actions);
+    return section;
+  }
   const apply = value => {
-    if (!draft) return;
     if (value) draft.tasks[kind] = value; else delete draft.tasks[kind];
     sync?.();
   };
   select.addEventListener('change', () => apply(select.value));
-  const actions = element('div', '', 'actions form-actions');
   if (!custom) {
     const inherit = button('恢复继承', () => { select.value = ''; apply(''); inherit.hidden = true; }, 'quiet');
     inherit.hidden = !configured;
-    select.addEventListener('change', () => { inherit.hidden = !Object.hasOwn(draft ? draft.tasks : {}, kind); });
+    select.addEventListener('change', () => { inherit.hidden = !Object.hasOwn(draft.tasks, kind); });
     actions.append(inherit);
   }
   if (custom) actions.append(button('移除这项设置', () => { select.value = ''; apply(''); }, 'quiet destructive'));

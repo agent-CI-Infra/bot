@@ -38,7 +38,7 @@ function settingsForm(title, nodes, save, { editable = true, caption = '保存',
       form.querySelector('.form-actions').append(discardBtn);
     }
   }
-  section.settingForm = form;
+  section.settingForm = form; section.settingTitle = title;
   section.settingDirty = () => !!(key && Object.keys(projectSettingDrafts.get(key) || {}).length);
   section.settingClearDraft = () => { if (key) projectSettingDrafts.delete(key); };
   section.settingCommit = () => new Promise((resolve, reject) => {
@@ -75,6 +75,21 @@ function settingsForm(title, nodes, save, { editable = true, caption = '保存',
 /** One sticky「保存」bar for a page that hosts several settingsForm sections (#567). */
 function attachUnifiedSettingsBar(host, sections, { dirty: dirtyFn = null, advanced = null, afterDiscard = null } = {}) {
   const isDirty = dirtyFn || (() => sections.some(section => section.settingDirty?.()));
+  // With several draft groups on one page, each group can still be discarded on its own from the bar's「高级」(#567).
+  const groups = sections.filter(section => section.settingDiscard);
+  const groupDiscards = groups.length > 1 ? groups.map(section => {
+    const title = section.settingTitle || '本组';
+    const control = button(`放弃「${title}」的更改`, async () => {
+      if (!section.settingDirty?.()) return;
+      if (!await askConfirm({ title: `放弃「${title}」的更改？`, body: ['仅清除这一组的草稿，并重新读取已保存的设置；其他组的未保存更改保留。'], action: '放弃本组更改' })) return;
+      await section.settingDiscard();
+    }, 'quiet');
+    control.dataset.testid = 'console-save-group-discard';
+    control.disabled = !section.settingDirty?.();
+    return { section, control };
+  }) : [];
+  const extra = advanced == null ? [] : Array.isArray(advanced) ? advanced : [advanced];
+  const advancedNodes = [...groupDiscards.map(group => group.control), ...extra];
   const bar = consoleSaveBar({
     status: isDirty() ? '有未保存的更改' : '已保存',
     dirty: isDirty(),
@@ -99,9 +114,12 @@ function attachUnifiedSettingsBar(host, sections, { dirty: dirtyFn = null, advan
       if (afterDiscard) await afterDiscard();
       else await reloadProject();
     },
-    advanced,
+    advanced: advancedNodes.length ? advancedNodes : null,
   });
-  const sync = () => bar.refresh({ dirty: isDirty(), status: isDirty() ? '有未保存的更改' : '已保存' });
+  const sync = () => {
+    bar.refresh({ dirty: isDirty(), status: isDirty() ? '有未保存的更改' : '已保存' });
+    for (const group of groupDiscards) group.control.disabled = !group.section.settingDirty?.();
+  };
   for (const section of sections) {
     section.settingForm?.addEventListener('input', sync);
     section.settingForm?.addEventListener('change', sync);
