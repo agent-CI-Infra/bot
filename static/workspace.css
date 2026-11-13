@@ -3,7 +3,10 @@
 .project-settings-layout > .side-card { min-width: 0; margin: 0; padding: var(--space-6); display: flex; flex-direction: column; height: 100%; }
 .project-settings-layout > .side-card > :is(button, .actions, a) { align-self: flex-start; width: auto; max-width: 100%; }
 .project-settings-layout > .side-card .actions { margin-top: auto; }
-.project-settings-layout .project-danger { grid-column: 1/-1; border-color: var(--color-danger, #c84242); }
+.project-settings-layout .project-danger { border-color: var(--color-danger, #c84242); }
+/* #570 moved 技术信息 / 规则来源 and 危险区 into folds that are grid items of their own: each fold spans the full row
+   (so 危险区 stays full width once opened), and the cards inside it stack at that width. */
+.project-settings-layout > .fold { grid-column: 1/-1; min-width: 0; margin: 0; }
 .project-danger > button { margin: 8px 12px 0 0; }
 .project-member-list { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--space-4); margin-top: var(--space-5); }
 .project-member { min-width: 0; border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: var(--space-5); overflow-wrap: anywhere; }
