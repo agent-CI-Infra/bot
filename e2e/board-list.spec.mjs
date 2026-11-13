@@ -134,8 +134,12 @@ test('窄屏筛选区只向下滚动：搜索和「含已关闭」在首屏，�
     await page.screenshot({ path: output + '/board-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     const details = page.locator('.board-filter-details');
-    if (!await details.evaluate(node => node.open)) await details.locator('summary').click();
+    // Crossing ≤760px makes board.js collapse the panel and rebuild the shell. Wait for that
+    // rebuild before opening, otherwise a stale open=true skips the click and the controls are off-screen.
+    await expect(details).not.toHaveAttribute('open');
+    await details.locator('summary').click();
     const controls = page.locator('.board-filter-controls');
+    await expect(controls).toBeVisible();
     // No second column past the right edge: the filter area itself must not scroll sideways.
     expect(await controls.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
@@ -150,5 +154,7 @@ test('窄屏筛选区只向下滚动：搜索和「含已关闭」在首屏，�
     await page.screenshot({ path: output + '/board-390.png' });
     await page.getByLabel('搜索编号或标题').fill('#40');
     await expect(page.locator('#board-chips')).toContainText('40');
+    await details.locator('summary').click();
+    await expect(details).not.toHaveAttribute('open');
   } finally { await close(h); }
 });
