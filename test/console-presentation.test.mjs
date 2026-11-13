@@ -141,35 +141,64 @@ const roleData = (config, { workflow = 'development.issue', configured = true } 
   models: [], revisions: [], skill_inputs: [], preview: config.roles.map(r => ({ role: r.role_id, model: r.harness_ref.id === 'acp' ? { source: 'external_harness', name: 'external' } : { source: 'project', name: 'fixture-model' } })) });
 const team = controller => [role('manager', 'controller', controller, controller === 'pi' ? '1.4.0' : '1'), role('dev', 'writer', 'native'), role('test', 'observer', 'native'), role('reviewer', 'observer', 'acp'), role('ux', 'observer', 'native'), role('qa', 'evaluator', 'native'), role('coordinator', 'controller', 'native')];
 const entries = { development: true, request: true, review: false, actions: false };
+function rolesDraft(data) {
+  return {enabled:data.configuration.enabled,controller:data.configuration.controller,roles:data.configuration.roles.map(role=>({...role,...(!data.configured?{harness_ref:{id:'pi'}}:{})})),skills:[],required_stages:[]};
+}
 function rolesPage(data) {
   data.permission_items = [{id:'computer',name:'使用虚拟电脑',group:'platform',modes:['deny','allow'],detail:'读取、修改工作区文件和执行命令。'}];
   const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/roles.js'], () => [404, {}]);
-  const draft = {enabled:data.configuration.enabled,controller:data.configuration.controller,roles:data.configuration.roles.map(role=>({...role,...(!data.configured?{harness_ref:{id:'pi'}}:{})})),skills:[],required_stages:[]};
+  const draft = rolesDraft(data);
   page.run(`current={id:'101',section:'roles'}; window.roleState=${JSON.stringify({data,draft,dirty:false})}; window.roleView=roleOverviewCards(roleState,()=>{});`);
   const cards=[...page.run('roleView')];return {page,cards,table:cards[0].querySelector('table')};
 }
-test('role overview edits backends, models and permissions without a JSON editor', () => {
+function roleForm(data, roleId = 'dev') {
+  data.permission_items = data.permission_items || [{id:'computer',name:'使用虚拟电脑',group:'platform',modes:['deny','allow'],detail:'读取、修改工作区文件和执行命令。'}];
+  data.environment_profiles = data.environment_profiles || [];
+  data.output_schemas = data.output_schemas || [];
+  data.system_prompt = data.system_prompt || '';
+  data.role_templates = data.role_templates || {};
+  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/roles.js'], () => [404, {}]);
+  const draft = rolesDraft(data);
+  page.run(`current={id:'101',section:'roles',item:${JSON.stringify(roleId)}}; window.roleState=${JSON.stringify({data,draft,dirty:false})}; window.roleForm=roleSettingsCard(roleState.draft.roles.find(r=>r.role_id===${JSON.stringify(roleId)}), roleState, ()=>{}, {live:()=>true,failed:()=>{}});`);
+  return {page, form: page.run('roleForm')};
+}
+test('role overview is a list of name, enabled, duty and status, without inline editors', () => {
   const view=rolesPage(roleData({schema:2,revision:4,enabled:true,controller:{role:'manager',entries},roles:team('pi'),skills:[]}));
   assert.equal(view.cards[0].children[0].textContent,'角色概览');
-  const picker=id=>view.table.querySelectorAll('select').find(select=>select.getAttribute('aria-label')===id+' Agent 后端');
-  assert.deepEqual(['manager','dev','reviewer'].map(id=>picker(id).value),['pi','native','acp']);
-  assert.ok(picker('manager').children.find(option=>option.value==='claude_code').disabled);
-  assert.ok(!picker('dev').children.find(option=>option.value==='claude_code').disabled);
-  assert.match(text(view.cards[0]),/编辑权限/);assert.match(text(view.cards[0]),/使用虚拟电脑/);assert.doesNotMatch(text(view.cards[0]),/能力策略/);
-  assert.doesNotMatch(text(view.cards[0]),/policy@|配置（JSON）|修改配置/);
+  assert.deepEqual([...view.table.querySelectorAll('th')].map(th => th.textContent), ['角色', '启用', '职责', '状态']);
+  assert.equal(view.table.querySelectorAll('select').length, 0);
+  assert.doesNotMatch(text(view.cards[0]), /编辑权限/);
+  assert.doesNotMatch(text(view.cards[0]), /policy@|配置（JSON）|修改配置/);
+  const link = [...view.table.querySelectorAll('a')].find(a => a.textContent === 'Dev');
+  assert.equal(link && link.href, '#/projects/101/roles/dev');
+  assert.match(text(view.table.querySelector('tr[data-role=dev]')), /已启用/);
   const status=view.cards[0].querySelector('[data-role-version]');
   assert.equal(status.textContent,'配置版本 4 · 已生效');
-  picker('dev').value='process';picker('dev').listeners.change[0]();
-  assert.equal(view.page.run("roleState.draft.roles.find(r=>r.role_id==='dev').harness_ref.id"),'process');
-  assert.equal(status.textContent,'配置版本 4 · 草稿未保存');
 });
-test('role overview preserves stored legacy backends and recommends Pi only for an unsaved project', () => {
+test('role form edits backends without a JSON editor, and marks the draft dirty', () => {
+  const manager=roleForm(roleData({schema:2,revision:4,enabled:true,controller:{role:'manager',entries},roles:team('pi'),skills:[]}), 'manager');
+  const dev=roleForm(roleData({schema:2,revision:4,enabled:true,controller:{role:'manager',entries},roles:team('pi'),skills:[]}), 'dev');
+  const reviewer=roleForm(roleData({schema:2,revision:4,enabled:true,controller:{role:'manager',entries},roles:team('pi'),skills:[]}), 'reviewer');
+  const picker=(view,id)=>view.form.querySelectorAll('select').find(select=>select.getAttribute('aria-label')===id+' Agent 后端');
+  assert.equal(picker(manager,'manager').value,'pi');
+  assert.equal(picker(dev,'dev').value,'native');
+  assert.equal(picker(reviewer,'reviewer').value,'acp');
+  assert.ok(picker(manager,'manager').children.find(option=>option.value==='claude_code').disabled);
+  assert.ok(!picker(dev,'dev').children.find(option=>option.value==='claude_code').disabled);
+  assert.doesNotMatch(text(dev.form),/能力策略|policy@|配置（JSON）|修改配置/);
+  picker(dev,'dev').value='process';picker(dev,'dev').listeners.change[0]();
+  assert.equal(dev.page.run("roleState.draft.roles.find(r=>r.role_id==='dev').harness_ref.id"),'process');
+  assert.equal(dev.page.run('roleState.dirty'), true);
+});
+test('role form preserves stored backends and recommends Pi only for an unsaved project', () => {
   const config={schema:2,revision:0,enabled:true,legacy:true,controller:{role:'manager',entries},roles:team('native'),skills:[]};
-  const saved=rolesPage(roleData(config));
-  assert.equal(saved.table.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value,'native');
-  const fresh=rolesPage(roleData(config,{configured:false}));
-  assert.equal(fresh.table.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value,'pi');
-  assert.equal(fresh.cards[0].querySelector('[data-role-version]').textContent,'尚未保存。可先使用推荐配置。');
+  const saved=roleForm(roleData(config),'manager');
+  assert.equal(saved.form.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value,'native');
+  const fresh=roleForm(roleData(config,{configured:false}),'manager');
+  assert.equal(fresh.form.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value,'pi');
+  const list=rolesPage(roleData(config,{configured:false}));
+  assert.equal(list.cards[0].querySelector('[data-role-version]').textContent,'尚未保存。可先使用推荐配置。');
+  assert.match(text(list.table.querySelector('tr[data-role=manager]')), /推荐配置/);
 });
 
 // ---- Against the real control plane: the page reads the same routes and fields the server returns. ----

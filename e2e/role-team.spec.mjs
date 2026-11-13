@@ -1,20 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
-
-
-async function openRoleAdvanced(page) {
-  const { expect } = await import('@playwright/test');
-  const fold = page.getByTestId('role-advanced');
-  const overview = page.getByRole('heading', { name: '角色概览', exact: true });
-  await fold.waitFor({ state: 'visible' });
-  const summary = fold.locator(':scope > summary');
-  for (let i = 0; i < 4 && !(await overview.isVisible()); i++) {
-    await summary.click();
-    await overview.waitFor({ state: 'visible', timeout: 2000 }).catch(() => {});
-  }
-  await expect(overview).toBeVisible();
-}
+import { goRolePage, openRoleFormAdvanced, openRoleAdvanced } from './open-role-advanced.mjs';
 
 
 // #229 slice 1: the AI-team list carries the role facts and distinguishes saved configuration from the shared draft.
@@ -44,16 +31,19 @@ test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生�
       await expect(status).toHaveText(`配置版本 ${config.revision} · 已生效`);
     };
 
+    await goRolePage(page, { role: 'dev' });
     await page.getByLabel('dev 模型', { exact: true }).selectOption(model.id); await dirty(); await discard();
+    await openRoleFormAdvanced(page);
     await page.getByLabel('dev 技能包', { exact: true }).selectOption('review-kit'); await dirty(); await discard();
-    const row = table.locator('tr[data-role=dev]');
-    await row.locator('details').locator('summary').click();
+    await openRoleFormAdvanced(page);
     await page.getByLabel('dev 使用虚拟电脑权限', { exact: true }).selectOption(dev.permissions.computer === 'allow' ? 'deny' : 'allow'); await dirty(); await discard();
+    await goRolePage(page);
+    const row = table.locator('tr[data-role=dev]');
     await page.getByLabel('开启角色协调', { exact: true }).setChecked(!config.configuration.enabled); await dirty();
 
     await expect(table.getByRole('columnheader', { name: '职责', exact: true })).toBeVisible();
-    await expect(table.getByRole('columnheader', { name: '预算', exact: true })).toBeVisible();
-    await expect(row).toContainText(dev.responsibility); await expect(row).toContainText(dev.budget_policy_ref.id);
+    await expect(table.getByRole('columnheader', { name: '状态', exact: true })).toBeVisible();
+    await expect(row).toContainText(dev.responsibility); await expect(row).toContainText('已启用');
     await expect(table.locator('tr[data-role]')).toHaveCount(config.configuration.roles.length);
     await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
     await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
@@ -111,6 +101,7 @@ for (const [name, act] of [
     const status = page.locator('[data-role-version]');
     await expect(status).toHaveText(`配置版本 ${revision} · 已生效`);
     await page.goto(detail);
+    await openRoleFormAdvanced(page);
     await act(page);
     await page.goto(list);
     await expect(status).toHaveText(`配置版本 ${revision} · 草稿未保存`);

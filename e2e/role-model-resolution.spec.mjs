@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
+import { goRolePage, openRoleFormAdvanced } from './open-role-advanced.mjs';
 
 async function prepared(page) {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
@@ -18,6 +19,7 @@ async function prepared(page) {
     ] }); expect(saved.status, JSON.stringify(saved.value)).toBe(200);
     await page.goto(h.admin + '/#/projects/101/roles/dev');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
+    await openRoleFormAdvanced(page);
     await expect(panel(page)).toBeVisible(); return { h, admin, models, revision: saved.value.configuration.revision };
   } catch (error) { await h.stop(); throw error; }
 }
@@ -45,7 +47,7 @@ test('work type inheritance and explicit roles use saved configuration without s
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true);
       if ([390, 1440].includes(width)) await page.screenshot({ path: `.tmp/model-resolution-230/previews/model-resolution-${width === 390 ? 'mobile' : 'desktop'}.png` });
     }
-    await page.locator('.role-nav').getByRole('link', { name: 'Reviewer', exact: true }).click(); await choose(page, 'review.pr'); await read(page).click();
+    await goRolePage(page, { role: 'Reviewer' }); await openRoleFormAdvanced(page); await choose(page, 'review.pr'); await read(page).click();
     await expect(fact(page, '模型来源')).toHaveText('角色'); await expect(fact(page, '模型名称')).toHaveText('Role fixed');
     expect((await admin('/api/repositories/101/roles')).value.revision).toBe(revision);
     expect(h.store.get('SELECT COUNT(*) AS n FROM role_snapshots').n).toBe(before); expect(h.store.get('SELECT COUNT(*) AS n FROM tasks').n).toBe(0); expect(errors).toEqual([]);
@@ -68,7 +70,7 @@ test('an external backend reports its own model instead of fabricating a project
   const { h, admin, revision } = await prepared(page);
   try {
     expect((await admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: false, roles: [{ role_id: 'dev', harness_ref: { id: 'codex' }, model_profile_ref: null }] })).status).toBe(200);
-    await page.reload(); await expect(panel(page)).toBeVisible(); await read(page).click();
+    await page.reload(); await openRoleFormAdvanced(page); await expect(panel(page)).toBeVisible(); await read(page).click();
     await expect(fact(page, '模型来源')).toHaveText('执行器自带模型'); await expect(fact(page, '模型记录版本')).toHaveText('不适用');
     await expect(fact(page, '模型名称')).toHaveText('由执行器管理，不使用项目模型');
   } finally { await h.stop(); }
@@ -78,10 +80,11 @@ test('late resolutions cannot replace another project and a forbidden preview cl
   try {
     let entered; const seen = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
     await page.route('**/api/repositories/101/roles/resolve', async route => { const response = await route.fetch(); entered(); await gate; await route.fulfill({ response }); });
-    await read(page).click(); await seen; await page.goto(h.admin + '/#/projects/102/roles/dev'); await expect(panel(page)).toBeVisible(); release();
+    await read(page).click(); await seen; await page.goto(h.admin + '/#/projects/102/roles/dev'); await openRoleFormAdvanced(page); await expect(panel(page)).toBeVisible(); release();
     await expect(panel(page).locator('dd')).toHaveCount(0); await expect(panel(page).getByRole('status')).toContainText('尚未读取');
     await page.unroute('**/api/repositories/101/roles/resolve'); await page.goto(h.admin + '/#/projects/101/roles/dev');
     await page.getByLabel('角色提示词', { exact: true }).fill('Private local draft');
+    await openRoleFormAdvanced(page);
     await page.route('**/api/repositories/101/roles/resolve', route => route.fulfill({ status: 403, contentType: 'application/json', body: '{"error":"repository_forbidden"}' }));
     await read(page).click(); await expect(page.getByText('当前身份无权读取或修改角色配置，已清空本页草稿。', { exact: true })).toBeVisible();
     await expect(panel(page)).toHaveCount(0); await expect(page.getByLabel('角色提示词', { exact: true })).toHaveCount(0);

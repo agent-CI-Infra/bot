@@ -3,6 +3,7 @@ import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
+import { goRolePage, openRoleFormAdvanced } from './open-role-advanced.mjs';
 import { RuleService } from '../dist/rules/service.js';
 
 async function prepared(page) {
@@ -19,7 +20,7 @@ async function prepared(page) {
     await page.goto(h.admin + '/#/projects/101/basic');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
     await page.locator('.project-nav').getByRole('link', { name: '角色', exact: true }).click();
-    await page.locator('.role-nav').getByRole('link', { name: '技能包目录', exact: true }).click();
+    await goRolePage(page, { view: 'skills' });
     const catalogue = page.getByRole('region', { name: '技能包目录', exact: true }); await expect(catalogue.getByLabel('技能包名称', { exact: true })).toBeVisible();
     return { h, admin, catalogue, rules, path, saved: result.value.configuration };
   } catch (error) { await h.stop(); throw error; }
@@ -53,9 +54,9 @@ test('skill editing shares the role binding draft and preserves an older pinned 
   try {
     await select(catalogue, 'console'); await catalogue.getByLabel('文件内容', { exact: true }).fill('Keep this edited source and its role binding.');
     await catalogue.getByRole('group', { name: '草稿绑定角色', exact: true }).getByRole('checkbox', { name: 'Dev', exact: true }).check();
-    await page.locator('.role-nav').getByRole('link', { name: 'Dev', exact: true }).click(); await page.getByRole('navigation', { name: '角色设置分区', exact: true }).getByRole('button', { name: '技能包', exact: true }).click();
+    await goRolePage(page, { role: 'Dev' }); await openRoleFormAdvanced(page);
     await expect(page.getByRole('combobox', { name: 'dev 技能包', exact: true })).toHaveValue('console');
-    await page.locator('.role-nav').getByRole('link', { name: '技能包目录', exact: true }).click(); await expect(catalogue.getByLabel('文件内容', { exact: true })).toHaveValue('Keep this edited source and its role binding.');
+    await goRolePage(page, { view: 'skills' }); await expect(catalogue.getByLabel('文件内容', { exact: true })).toHaveValue('Keep this edited source and its role binding.');
     rules.cache('101', 'b'.repeat(40), { [path]: 'New moving-branch text.' });
     await page.getByRole('button', { name: '保存角色配置', exact: true }).click(); await expect(page.locator('.flash')).toContainText('角色配置已保存');
     const next = (await admin('/api/repositories/101/roles')).value;

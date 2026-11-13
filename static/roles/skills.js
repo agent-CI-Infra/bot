@@ -44,28 +44,35 @@ function roleModelResolution(role, state, access) {
   region.append(field('解析工作类型', selector), read, status, result); return region;
 }
 function roleSettingsCard(role, state, redraw, access) {
-  const section = card(roleLabel(role.role_id, role.name) + ' 设置'), nav = element('nav', '', 'role-editor-nav');
-  nav.setAttribute('aria-label', '角色设置分区'); section.append(nav);
-  const group = (key, title) => {
+  const section = card(roleLabel(role.role_id, role.name) + ' 设置');
+  section.dataset.testid = 'role-form';
+  const group = (key, title, parent = section) => {
     const box = element('section', '', 'role-editor-group'), heading = element('h4', title); box.id = `role-${role.role_id}-${key}`; heading.tabIndex = -1;
-    const jump = button(title, () => {
-      const toolbar = section.closest('.roles-page').querySelector('.role-save');
-      box.style.scrollMarginTop = `${Math.ceil(toolbar.getBoundingClientRect().height) + 16}px`;
-      box.scrollIntoView({ block: 'start' }); heading.focus({ preventScroll: true });
-    }, 'quiet'); jump.setAttribute('aria-controls', box.id); nav.append(jump);
-    box.append(heading); section.append(box); return box;
+    box.append(heading); parent.append(box); return box;
   };
   const basic = group('basic', '基本信息');
   basic.append(roleText('显示名称', role, 'name', state, { maxLength: 80 }), roleCheck('启用角色', role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind)),
     roleText('职责', role, 'responsibility', state, { multiline: true, rows: 3, maxLength: 2000 }));
   const agent = group('agent', 'Agent 与模型');
   agent.append(note('已保存 · ' + workTypeName(state.data.workflow) + '：' + roleModelText(state.data.preview.find(row => row.role === role.role_id))), note('下面是待保存的选择；修改不会重写运行中任务的模型快照。'), field('Agent 后端', roleBackendPicker(role, state, redraw)), field('模型', roleModelPicker(role, state, redraw)));
-  const profile = role.model_profile_ref, backend = state.data.harnesses.find(entry => entry.id === role.harness_ref.id);
-  if (profile) {
-    agent.append(field('模型 API', roleSelect('模型 API', profile.api, (backend?.model_api || []).map(id => [id, id]), value => { profile.api = value; markRoleDirty(state); })),
-      roleCheck('模型支持工具调用', profile, 'tool_calls', state), field('结构化输出方式', roleSelect('结构化输出方式', profile.structured_output, (backend?.structured_output || []).map(id => [id, id]), value => { profile.structured_output = value; markRoleDirty(state); })));
+  const saved = state.data.configuration.roles.find(entry => entry.role_id === role.role_id);
+  if (role.role_id === 'dev' && state.data.configured && saved?.entry_harness_source !== 'role' && saved?.harness_ref.id !== 'pi') {
+    agent.append(note('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更'));
   }
-  agent.append(roleModelResolution(role, state, access));
+  const profile = role.model_profile_ref, backend = state.data.harnesses.find(entry => entry.id === role.harness_ref.id);
+  const advanced = element('details', '', 'fold role-form-advanced');
+  advanced.dataset.testid = 'role-form-advanced';
+  advanced.open = !!state.roleFormAdvancedOpen;
+  advanced.addEventListener('toggle', () => { state.roleFormAdvancedOpen = advanced.open; });
+  advanced.append(element('summary', '高级设置'));
+  if (profile) {
+    const modelExtra = group('model-extra', '模型细节', advanced);
+    modelExtra.append(field('模型 API', roleSelect('模型 API', profile.api, (backend?.model_api || []).map(id => [id, id]), value => { profile.api = value; markRoleDirty(state); })),
+      roleCheck('模型支持工具调用', profile, 'tool_calls', state), field('结构化输出方式', roleSelect('结构化输出方式', profile.structured_output, (backend?.structured_output || []).map(id => [id, id]), value => { profile.structured_output = value; markRoleDirty(state); })),
+      roleModelResolution(role, state, access));
+  } else {
+    group('model-extra', '模型细节', advanced).append(roleModelResolution(role, state, access));
+  }
   const prompts = group('prompts', '提示词');
   const system = textarea('system_prompt', state.data.system_prompt, { rows: 6, readOnly: true }); system.setAttribute('aria-label', '系统提示词'); system.readOnly = true;
   prompts.append(field('系统提示词', system), note('所有角色共用的系统背景、环境说明和基本行为准则。角色职责与任务记录规则在下面的提示词中直接修改。'));
@@ -73,13 +80,13 @@ function roleSettingsCard(role, state, redraw, access) {
     if (!await askConfirm({ title: '恢复角色模板？', body: ['当前角色提示词将替换为默认模板，保存后生效。'], action: '恢复模板' })) return;
     role.persona_prompt = (Object.hasOwn(state.data.role_templates, role.role_id) ? state.data.role_templates[role.role_id] : state.data.role_templates.observer); markRoleDirty(state); redraw();
   }));
-  group('skills', '技能包').append(field('技能包', roleSkillPicker(role, state)));
-  group('permissions', '权限').append(rolePermissionEditor(role, state));
-  const runtime = group('runtime', '环境与输出');
+  group('skills', '技能包', advanced).append(field('技能包', roleSkillPicker(role, state)));
+  group('permissions', '权限', advanced).append(rolePermissionEditor(role, state));
+  const runtime = group('runtime', '环境与输出', advanced);
   const environment = state.data.environment_profiles.filter(entry => entry.kinds.includes(role.kind));
   runtime.append(field('运行环境', roleSelect('运行环境', role.environment_profile_ref.id, environment.map(entry => [entry.id, environmentLabels[entry.id] || entry.id, entry.isolation === 'run_container' && backend?.capabilities?.isolation !== 'run_environment']), id => { role.environment_profile_ref = { id }; markRoleDirty(state); })));
   runtime.append(field('输出结果', roleSelect('输出结果', role.output_schema_ref.id, state.data.output_schemas.filter(entry => entry.kinds.includes(role.kind)).map(entry => [entry.id, outputLabels[entry.id] || entry.id]), id => { role.output_schema_ref = { id }; markRoleDirty(state); })));
-  const budget = group('budget', '预算');
+  const budget = group('budget', '预算', advanced);
   budget.append(field('预算方式', roleSelect('预算方式', role.budget_policy_ref.id, [['entry-default', '沿用任务限制'], ['bounded', '限制单次运行'], ['metered', '限制任务累计用量']], id => {
     const old = role.budget_policy_ref; role.budget_policy_ref = id === 'entry-default' ? { id } : { id, max_turns: old.max_turns || 32, max_output_tokens: old.max_output_tokens || 4096 }; markRoleDirty(state); redraw();
   })));
@@ -94,12 +101,13 @@ function roleSettingsCard(role, state, redraw, access) {
       budget.append(field('任务累计金额上限（留空不设置）', roleBound(amount, value => { if (value === '') delete role.budget_policy_ref.max_cost; else role.budget_policy_ref.max_cost = { amount: Number(value), currency: currency.value }; }, state)), field('预算币种', currency));
     }
   }
-  if (!(state.data.required_roles || ['manager', 'coordinator', 'qa']).includes(role.role_id)) group('danger', '删除角色').append(button('删除这个角色', async () => {
+  if (!(state.data.required_roles || ['manager', 'coordinator', 'qa']).includes(role.role_id)) group('danger', '删除角色', advanced).append(button('删除这个角色', async () => {
     const stages = state.draft.required_stages.filter(stage => stage.role_constraints.role_ids?.includes(role.role_id));
     if (stages.length) { await askConfirm({ title: '先调整任务阶段', body: ['这些阶段仍指定了该角色：' + stages.map(stage => stage.stage_id).join('、') + '。请在概览中修改阶段角色或移除阶段，再删除角色。'], action: '知道了' }); return; }
     if (!await askConfirm({ title: '删除角色 ' + role.name + '？', body: ['保存后该角色不再参与新任务，正在运行的角色也会停止使用工具。阶段要求如引用此角色，需要一并调整。'], action: '删除角色' })) return;
     state.draft.roles = state.draft.roles.filter(entry => entry !== role);
     if (state.data.configuration.roles.some(entry => entry.role_id === role.role_id)) state.draft.deleted_roles = [...new Set([...(state.draft.deleted_roles || []), role.role_id])]; markRoleDirty(state); current.item = null; history.replaceState(null, '', `#/projects/${current.id}/roles`); redraw(); }, 'quiet destructive'));
+  section.append(advanced);
   return section;
 }
 const skillSourceNames = { repository: '固定仓库提交', inline: '控制台文件' };

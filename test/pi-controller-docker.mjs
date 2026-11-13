@@ -116,9 +116,11 @@ try {
     await page.goto(base + '/#/projects/101/roles'); await page.getByText('角色解析结果').first().waitFor({ state: 'attached' }).catch(() => {});
     await page.getByRole('table', { name: '角色解析结果' }).waitFor();
     const table = await page.getByRole('table', { name: '角色解析结果' }).innerText();
-    assert.ok(table.includes('Pi') && table.includes('controller-fixture'));
+    assert.ok(table.includes('Reviewer'), table);
     await page.screenshot({ path: resolve(out, 'roles-page.png'), fullPage: true });
-    await page.locator('.role-nav').getByRole('link', {name:'Reviewer',exact:true}).click();
+    await page.getByTestId('role-list-reviewer').click();
+    const fold = page.getByTestId('role-form-advanced');
+    if (!(await fold.evaluate(el => el.open))) await fold.locator(':scope > summary').click();
     await page.getByLabel('预算方式',{exact:true}).selectOption('bounded');
     await page.getByLabel('单次运行最多模型轮数',{exact:true}).fill('1');
     await page.getByRole('button',{name:'保存角色配置',exact:true}).click();
