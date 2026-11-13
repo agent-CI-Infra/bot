@@ -65,6 +65,12 @@ const managementCommandStates = {
 const managementCommandState = state => managementCommandStates[state] ?? [state, '当前状态：' + state];
 // One authenticated chat surface survives page navigation. Minimizing it never cancels a submitted command.
 let managementChat = null;
+// #481: the phone's bottom bar is the assistant's only entry point, so it reads the same state the floating
+// launcher shows on wide screens instead of keeping a second copy of it.
+function managementChatState() {
+  const chat = managementChat;
+  return chat ? { active: !!chat.active, unread: !!chat.unread, open: !chat.window.hidden } : null;
+}
 function syncManagementChat() {
   if (managementChat?.user === me?.id && me) return;
   managementChat?.client?.dispose();
@@ -397,7 +403,10 @@ function minimizeManagementChat(focus = true) {
   if (chat.mode === 'page' || chat.mode === 'fullscreen' && chat.fullscreenFrom === 'page') return floatManagementPage();
   if (chat.mode === 'fullscreen') setManagementPresentation(chat, 'floating');
   chat.window.hidden = true; chat.launcher.hidden = false; chat.launcher.setAttribute('aria-expanded', 'false');
-  if (focus) chat.launcher.focus();
+  // #481: a phone has no floating launcher to take focus back, so the bar's 助手 destination does, and the bar also
+  // learns that the chat is closed again.
+  if (focus) { const bar = document.querySelector('#console-mobile-nav a[data-page="assistant"]'); if (bar && consoleMedia.matches) bar.focus({ preventScroll: true }); else chat.launcher.focus(); }
+  if (typeof updateConsoleAssistant === 'function') updateConsoleAssistant();
 }
 async function openManagementChat(projectId = null, { mode = 'floating' } = {}) {
   syncManagementChat(); const chat = managementChat; if (!chat) return;
@@ -410,6 +419,7 @@ async function openManagementChat(projectId = null, { mode = 'floating' } = {}) 
     chat.active = active; if (received && chat.window.hidden) chat.unread = true;
     chat.state.textContent = active ? '正在处理…' : chat.unread ? '有新回复' : '随时唤起';
     chat.launcher.classList.toggle('has-update', active || chat.unread);
+    if (typeof updateConsoleAssistant === 'function') updateConsoleAssistant();
   };
   if (!chat.loading && !chat.client) {
     chat.panel.replaceChildren(note('正在连接管理助手…'));

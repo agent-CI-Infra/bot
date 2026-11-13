@@ -110,7 +110,9 @@ test('系统超级管理员在全局设置向导启用 GitHub 登录，密钥不
     await page.getByLabel('启用 GitHub 账号登录', { exact: true }).check();
     await page.getByRole('button', { name: '保存登录配置', exact: true }).click();
     await expect(page.locator('#message')).toContainText('GitHub 登录已启用');
-    await page.locator('#logout').click(); await page.getByRole('link', { name: '使用 GitHub 登录', exact: true }).click();
+    // #481: at 390 the header's sign-out button is inside the account menu.
+    await page.locator('#console-account').click(); await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click();
+    await page.getByRole('link', { name: '使用 GitHub 登录', exact: true }).click();
     await expect(page.getByRole('heading', { name: '我的 GitHub 连接', exact: true })).toBeVisible();
     await expect(page.locator('#tabs').getByRole('button', { name: '全局设置', exact: true })).toBeHidden();
     await page.goto(f.h.admin + '/#/settings/onboarding/2');
@@ -122,14 +124,16 @@ test('系统超级管理员在全局设置向导启用 GitHub 登录，密钥不
     await member.goto(f.h.admin + '/#/settings/onboarding/2'); await member.getByLabel('用户名', { exact: true }).fill('scoped-admin');
     await member.getByLabel('密码', { exact: true }).fill(memberPassword); await member.getByRole('button', { name: '登录', exact: true }).click();
     await expect(member.locator('#settings-panel')).toBeHidden(); await context.close();
-    await page.locator('#logout').click(); await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.locator('#console-account').click(); await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click();
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
     await page.goto(f.h.admin + '/#/settings/onboarding/2');
     await page.getByLabel('清除登录 Client secret，并停用 GitHub 登录', { exact: true }).check();
     await page.getByRole('button', { name: '保存登录配置', exact: true }).click();
     await expect(page.locator('#message')).toContainText('当前使用本地账号登录');
     expect((await f.admin('/api/onboarding')).value.github_login.secret_configured).toBe(false);
-    await page.locator('#logout').click(); await expect(page.getByRole('link', { name: '使用 GitHub 登录', exact: true })).toHaveCount(0);
+    await page.locator('#console-account').click(); await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click();
+    await expect(page.getByRole('link', { name: '使用 GitHub 登录', exact: true })).toHaveCount(0);
     expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });

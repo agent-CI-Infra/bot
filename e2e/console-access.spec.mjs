@@ -23,7 +23,8 @@ test('first setup keeps one-time initialization and local recovery across screen
     const submit=page.getByRole('button',{name:'初始化并登录',exact:true});await submit.scrollIntoViewIfNeeded();await expect(submit).toBeInViewport();await submit.click();
     await expect(page.locator('#workspace')).toBeVisible();expect(h.store.get('SELECT COUNT(*) AS n FROM users').n).toBe(1);
     expect((await h.client()('/api/setup','POST',{username:'second',password})).status).toBe(409);
-    await page.getByRole('button',{name:'退出登录',exact:true}).click();await expect(page.getByRole('heading',{name:'登录',exact:true})).toBeVisible();
+    // #481: below the phone breakpoint sign-out moves into the account menu.
+    await page.locator('#console-account').click();await page.locator('#console-account-menu').getByRole('button',{name:'退出登录',exact:true}).click();await expect(page.getByRole('heading',{name:'登录',exact:true})).toBeVisible();
     await expect(page.locator('#access-password')).toHaveValue('');await expect(page.locator('#access-password')).toHaveAttribute('type','password');
     await fill(page,'first-administrator',password);await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.locator('#workspace')).toBeVisible();
     expect(errors).toEqual([]);
