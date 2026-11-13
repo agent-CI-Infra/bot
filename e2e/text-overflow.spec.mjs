@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
+import { externalFixture } from '../test/external-helpers.mjs';
 
 // #561: long titles and notes ellipsize; 390 keeps 设置 visible and 退出登录 reachable in the #481 account menu; 1440 does not over-truncate medium names.
 const out = resolve('.tmp/text-overflow-561');
@@ -101,6 +102,22 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     expect(list.overflow).toBe(390);
     await page.screenshot({ path: resolve(out, 'projects-390.png'), fullPage: true });
 
+    // Folded state first: the page's primary action stays visible and no note is drawn over it (F5).
+    await page.goto(h.admin + '/#/identity');
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible({ timeout: 15000 });
+    const primary = page.locator('.identity-primary').first();
+    await expect(primary).toBeVisible();
+    const folded = await primary.evaluate(btn => {
+      const bb = btn.getBoundingClientRect();
+      const notes = [...document.querySelectorAll('.identity-layout .muted, .identity-overview .muted')].filter(n => n.getClientRects().length);
+      return {
+        width: bb.width, height: bb.height, right: bb.right,
+        overlaps: notes.some(n => { const nb = n.getBoundingClientRect(); return !(nb.right <= bb.left || bb.right <= nb.left || nb.bottom <= bb.top + 1 || bb.bottom <= nb.top); }),
+      };
+    });
+    expect(folded.overlaps).toBe(false);
+    expect(folded.height).toBeGreaterThanOrEqual(44);
+    expect(folded.right).toBeLessThanOrEqual(390.5);
     await readyIdentity(page, h.admin + '/#/identity');
     const identity = await page.evaluate(() => {
       const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '切换组织');
@@ -153,6 +170,10 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     for (const line of subtitles) { expect(line.clamp).toBe('2'); expect(line.title).toBe(line.text); }
     await page.screenshot({ path: resolve(out, 'projects-1440.png'), fullPage: true });
 
+    await readyIdentity(page, h.admin + '/#/identity');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
+    await page.screenshot({ path: resolve(out, 'identity-1440.png'), fullPage: true });
+
     await page.goto(h.admin + '/#/projects/101/roles');
     await openRoleAdvanced(page);
     await expect(page.getByRole('heading', { name: '角色概览' })).toBeVisible();
@@ -161,10 +182,13 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
       const muted = document.querySelector('.roles-page .project-table td .muted');
       if (!muted) return { missing: true };
       const cs = getComputedStyle(muted);
-      return { clamp: cs.webkitLineClamp, overflow: cs.overflow, title: muted.title || muted.textContent };
+      return { clamp: cs.webkitLineClamp, overflow: cs.overflow, title: muted.title, text: muted.textContent };
     });
     expect(roles.missing).toBeFalsy();
     expect(roles.clamp).toBe('2');
+    // The clamped duty keeps its full text in title, with no textContent fallback in the assertion.
+    expect(roles.title).toBeTruthy();
+    expect(roles.title).toBe(roles.text);
     await page.screenshot({ path: resolve(out, 'roles-1440.png'), fullPage: true });
 
     await page.setViewportSize({ width: 390, height: 844 });
@@ -174,5 +198,34 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     await page.screenshot({ path: resolve(out, 'roles-390.png'), fullPage: true });
   } finally {
     await h.stop();
+  }
+});
+
+test('#561 外部执行页被裁成两行的副标题都在 title 里保留完整文字', async ({ page }) => {
+  test.setTimeout(90000);
+  const h = await externalFixture();
+  try {
+    const client = await h.client();
+    const longUrl = 'https://receiver.invalid/hooks/' + 'a-very-long-forward-path-segment/'.repeat(6) + 'events';
+    await h.admin('/api/repositories/101/external/subscriptions', 'POST', { client_id: client.client.id, name: 'Long forward', url: longUrl, filters: { events: ['issues', 'pull_request', 'issue_comment'], actions: ['opened', 'edited', 'synchronize', 'ready_for_review'], exclude_drafts: true } });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(h.adminBase + '/');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(h.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.locator('#console-account')).toBeVisible();
+    await page.goto(h.adminBase + '/#/projects/101/external');
+    await expect(page.getByRole('heading', { name: '当前项目的外部执行', exact: true })).toBeVisible();
+    await expect(page.locator('.row-content > p').filter({ hasText: 'receiver.invalid' })).toBeVisible();
+    const lines = await page.evaluate(() => [...document.querySelectorAll('.console-ready .row-content > p')]
+      .map(p => ({ clamp: getComputedStyle(p).webkitLineClamp, title: p.title, text: p.textContent, cut: p.scrollHeight > p.clientHeight + 1 })));
+    expect(lines.length).toBeGreaterThan(1);
+    // The long subscription line is actually cut at 390, and like every clamped line it keeps its full text in title.
+    expect(lines.some(line => line.cut)).toBe(true);
+    for (const line of lines) { expect(line.clamp).toBe('2'); expect(line.title).toBe(line.text); }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  } finally {
+    await h.stop();
+    await new Promise(resolve => h.github.server.close(resolve));
   }
 });

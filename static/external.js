@@ -192,7 +192,9 @@ function editSubscription(repositoryId,clients,row=null){
   });
 }
 function externalGroup(title,action){const group=element('section','','external-group'),head=element('div','','heading');head.append(element('h2',title));if(action)head.append(action);group.append(head);return group;}
-function externalRow(name,detail,stateLabel,actions=[]){const row=element('div','','row'+(actions.length?' has-actions':'')),content=element('div','','row-content');content.append(element('strong',name),element('p',detail));row.append(content,element('span',stateLabel,'status'));if(actions.length){const group=element('div','','actions');group.append(...actions);row.append(group);}return row;}
+// #561: .row-content > p is clamped to two lines, so each one keeps its full text in title.
+function externalNote(text){const line=element('p',text);line.title=text;return line;}
+function externalRow(name,detail,stateLabel,actions=[]){const row=element('div','','row'+(actions.length?' has-actions':'')),content=element('div','','row-content');const line=externalNote(detail);content.append(element('strong',name),line);row.append(content,element('span',stateLabel,'status'));if(actions.length){const group=element('div','','actions');group.append(...actions);row.append(group);}return row;}
 const externalProjectApi=(repositoryId,path,method='GET',body)=>api('/api/repositories/'+repositoryId+'/external'+path,method,body);
 // Deletes one client with its grants, subscriptions, event progress and pending forwards; the project itself stays.
 async function deleteExternalClient(client){
@@ -292,8 +294,8 @@ function externalSection(){
   const group=externalGroup('客户端',...(editable?[button('新增客户端',()=>addClient(repositoryId))]:[]));
   for(const c of clients){const actions=[externalClientLink(c)];if(editable){actions.push(externalClientToggle(c));if(c.auth_type==='private_key_jwt')actions.push(button(c.key_configured?'更换公钥':'登记公钥',()=>registerPublicKey(c)));actions.push(button('删除',()=>deleteExternalClient(c),'quiet destructive'));}
     const pending=c.auth_type==='private_key_jwt'&&!c.key_configured,row=externalRow(c.name,`仓库 ${c.repository_id} · ${c.auth_type==='private_key_jwt'?'公钥签名':'GitHub Actions OIDC'} · ID ${c.id}`,pending?'待登记公钥':c.enabled?'已启用':'已停用',actions);
-    if(c.key_fingerprint)row.querySelector('.row-content').append(element('p','公钥指纹 SHA256 '+c.key_fingerprint));
-    if(pending)row.querySelector('.row-content').append(element('p','旧客户端凭据已停用，请在个人电脑生成密钥后登记公钥。'));group.append(row);
+    if(c.key_fingerprint)row.querySelector('.row-content').append(externalNote('公钥指纹 SHA256 '+c.key_fingerprint));
+    if(pending)row.querySelector('.row-content').append(externalNote('旧客户端凭据已停用，请在个人电脑生成密钥后登记公钥。'));group.append(row);
   }
   if(!clients.length)group.append(element('p','尚未配置外部客户端','muted'));
   const subs=externalGroup('Webhook 转发订阅',...(editable?[button('新增转发订阅',()=>editSubscription(repositoryId,clients))]:[]));
