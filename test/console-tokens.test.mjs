@@ -42,7 +42,7 @@ test('every var() a sheet reads is declared by shell.css, locally, at runtime, o
 // The first two tests prove a declaration exists somewhere; this one proves the resolved value did not change. Pin the
 // shell.css value of every token a module sheet reads through the contract, and refuse a new such read until it is pinned.
 // Sheets that predate shell.css: a value change in the contract restyles these legacy pages, so their reads are pinned.
-const moduleSheets = ['style.css', 'views.css', 'board.css', 'costs.css', 'management.css', 'channel-console.css'];
+const moduleSheets = ['style.css', 'views.css', 'board.css', 'costs.css', 'management.css', 'channel-console.css', 'access.css'];
 const SHARED = {
   '--color-surface': '#fff',
   '--color-brand': '#245de0', '--color-text-muted': '#607087', '--font-size-2': '14px', '--control-min': '44px',
@@ -57,6 +57,9 @@ const SHARED = {
   '--color-warning': '#875a0a', '--color-warning-bg': '#fff2d9', '--color-warning-border': '#e9c27a',
   '--color-success': '#24603d', '--color-success-bg': '#e5f2e9',
   '--color-info': '#2c5791', '--color-info-bg': '#e8f0fb',
+  // Review of #584: the neutral status badge keeps its own AA-contrast pair and the info
+  // alert keeps a visible ring; border and surface tokens are too light for either job.
+  '--color-info-border': '#b9cdec', '--color-status-neutral': '#536c78', '--color-status-neutral-bg': '#edf1f4',
   '--color-hover': '#f1f5fb', '--color-overlay': '#16374470',
   '--focus-ring': '#245de0', '--focus-ring-width': '3px',
   '--font-size-4': '18px', '--font-size-micro': '11px', '--font-size-label': '13px',
@@ -108,4 +111,19 @@ test('#551 page body, muted text and heading sizes in style.css and access.css u
   assert.match(access, /#access h1 \{[^}]*font-size:\s*var\(--font-size-5\)/);
   assert.match(access, /#access-form label \{[^}]*font-size:\s*var\(--font-size-2\)/);
   assert.match(access, /#access-description \{ color:\s*var\(--color-text-muted\)/);
+});
+
+const luminance = hex => {
+  const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255)
+    .map(c => c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+const contrast = (a, b) => { const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
+
+test('#584 neutral status badges keep AA text contrast and the info alert ring stays visible', () => {
+  const source = read('static/style.css');
+  assert.match(source, /\.status\{[^}]*background:var\(--color-status-neutral-bg\);color:var\(--color-status-neutral\)/);
+  assert.match(source, /\.status-info\.status-alert\{box-shadow:inset 0 0 0 1px var\(--color-info-border\)\}/);
+  assert.ok(contrast(SHARED['--color-status-neutral'], SHARED['--color-status-neutral-bg']) >= 4.5, 'neutral badge text must stay at WCAG AA for 12px text');
+  assert.ok(contrast(SHARED['--color-info-border'], SHARED['--color-info-bg']) >= 1.3, 'info alert ring must be distinguishable from the info badge fill');
 });

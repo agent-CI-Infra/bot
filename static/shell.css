@@ -16,7 +16,8 @@
   --color-warning: #875a0a; --color-warning-bg: #fff2d9; --color-warning-border: #e9c27a;
   --color-success: #24603d; --color-success-bg: #e5f2e9;
   --color-danger-bg: #fbeaea; --color-danger-weak: #edc5c8; --color-danger-soft: #fffafa;
-  --color-info: #2c5791; --color-info-bg: #e8f0fb;
+  --color-info: #2c5791; --color-info-bg: #e8f0fb; --color-info-border: #b9cdec;
+  --color-status-neutral: #536c78; --color-status-neutral-bg: #edf1f4;
   --color-overlay: #16374470; --shadow-card: 0 2px 6px #182d4b03;
   --font-size-micro: 11px; --font-size-label: 13px; --font-size-row: 15px;
   --font-size-touch: 16px; --font-size-brand: 22px; --font-size-display: 24px;
