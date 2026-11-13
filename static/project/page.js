@@ -153,6 +153,8 @@ function projectHeader() {
 function projectCrumb(section) {
   const nav = element('nav', '', 'project-nav'), caption = (projectSections.find(([key]) => key === section) || [section, section])[1];
   nav.setAttribute('aria-label', '项目入口');
+  // #481/#565: the phone's 当前页面 picker still lists every project entry in its groups (see syncConsoleShell).
+  nav.dataset.pickerProject = current.id;
   const back = element('a', '← 项目入口');
   back.href = `#/projects/${current.id}/menu`;
   if (!section) { nav.append(back); return nav; }
@@ -190,6 +192,7 @@ function menuSection() {
 function projectHubNav() {
   const nav = element('nav', '', 'project-nav');
   nav.setAttribute('aria-label', '项目入口');
+  nav.dataset.pickerProject = current.id;
   const here = element('a', '项目入口');
   here.href = `#/projects/${current.id}/menu`;
   here.setAttribute('aria-current', 'page');
