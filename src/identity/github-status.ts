@@ -6,8 +6,8 @@ import { rewriteGithubAppInstallUrl } from '../github/app-install-url.js';
 // next step. "已验证" on an identity row only means the binding is live; this object is what
 // tells the person whether they can already see repositories and, if not, why.
 export type GitHubConnectionState = 'disconnected' | 'reauthorization_required' | 'pending_verification'
-  | 'connected' | 'pending_activation' | 'no_repositories';
-export type GitHubConnectionAction = 'connect' | 'reconnect' | 'reverify' | 'choose_repos' | 'wait_activation' | null;
+  | 'connected' | 'outside_tenant' | 'not_listed' | 'pending_activation' | 'no_repositories';
+export type GitHubConnectionAction = 'connect' | 'reconnect' | 'reverify' | 'choose_repos' | 'wait_activation' | 'switch_tenant' | null;
 export interface GitHubRepositoryRef { id: string; full_name: string }
 export interface GitHubConnection {
   state: GitHubConnectionState; status: string; next_step: string; action: GitHubConnectionAction;
@@ -49,11 +49,19 @@ export function pendingInstalledRepositories(store: Store, principal: string, te
   return [...seen.values()].sort(byName);
 }
 
-export function githubConnection(store: Store, principal: string, tenantId?: string | null): GitHubConnection {
-  const repositories = listEffectiveProjectAccess(store, principal)
-    .filter(p => !tenantId || !!store.get('SELECT 1 FROM identity_projects WHERE project_id=? AND tenant_id=?', p.id, tenantId))
+/**
+ * `visible` is the project list this session actually gets (the ids /api/repositories filters by), and `tenant` the
+ * organization the session is confined to. A count the project list cannot show is not reported as "openable".
+ */
+export function githubConnection(store: Store, principal: string, scope: { visible?: string[]; tenant?: string | null } = {}): GitHubConnection {
+  const granted = listEffectiveProjectAccess(store, principal)
     .map(p => ({ id: p.id, full_name: p.full_name })).sort(byName);
-  const pending = pendingInstalledRepositories(store, principal, tenantId);
+  const visible = scope.visible ? new Set(scope.visible) : null;
+  const repositories = visible
+    ? granted.filter(r => visible.has(r.id))
+    : granted.filter(p => !scope.tenant || !!store.get('SELECT 1 FROM identity_projects WHERE project_id=? AND tenant_id=?', p.id, scope.tenant));
+  const hidden = granted.length - repositories.length;
+  const pending = pendingInstalledRepositories(store, principal, scope.tenant);
   const identity = store.get(`SELECT status,credentials FROM external_identities
     WHERE principal_id=? AND provider='github' AND status<>'revoked' ORDER BY verified_at DESC LIMIT 1`, principal);
   const scopes = listEffectiveScopes(store, principal);
@@ -72,6 +80,16 @@ export function githubConnection(store: Store, principal: string, tenantId?: str
   // GitHub proof. Derived grants are themselves pending when the proof is, so they do not appear here.
   if (repositories.length) {
     return result('connected', `已连接 GitHub，可访问 ${repositories.length} 个仓库`, '可在项目列表中打开这些仓库。', null);
+  }
+  // Granted, but not in the list this session reads: say where they are instead of sending the person to an empty list.
+  if (hidden && scope.tenant) {
+    const name = store.get('SELECT display_name FROM tenants WHERE id=?', scope.tenant)?.display_name || scope.tenant;
+    return result('outside_tenant', '已连接 GitHub，但当前组织下没有你能打开的项目',
+      `你有权访问的 ${hidden} 个仓库不在当前组织「${name}」里。切换到「所有已授权组织与项目」后，就能在项目列表中打开。`, 'switch_tenant');
+  }
+  if (hidden) {
+    return result('not_listed', `已连接 GitHub，但项目列表暂时打不开这 ${hidden} 个仓库`,
+      '请点「重新验证 GitHub 权限」后再打开项目列表；仍然看不到时，请联系管理员核对项目授权。', 'reverify');
   }
   if (identity.status === 'pending_verification' || githubPending) {
     return result('pending_verification', 'GitHub 授权待验证', '重新验证 GitHub 权限；若安装还在同步，请稍后再试。', 'reverify');

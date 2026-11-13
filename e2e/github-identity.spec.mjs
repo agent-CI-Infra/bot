@@ -262,3 +262,34 @@ test('身份页概览在 1440 与 390 下完整可见，展开的高级区占满
     await shot('no-repos');
   } finally { await f.close(); }
 });
+
+test('会话限定在别的组织时，身份页不再说「可在项目列表中打开」，一键切回后项目列表能看到仓库', async ({ page }) => {
+  const f = await identityFixture(), output = '.tmp/ui-identity-scope';
+  mkdirSync(output, { recursive: true });
+  try {
+    await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    await expect(page.locator('.identity-connection-status')).toContainText('已连接 GitHub，可访问 1 个仓库');
+    f.h.store.run("INSERT OR IGNORE INTO tenants(id,github_host,github_account_id,display_name) VALUES('github.com:30','github.com','30','elsewhere')");
+    f.h.store.run("UPDATE sessions SET tenant_id='github.com:30'");
+    await page.goto(f.h.admin + '/#/projects'); await page.reload();
+    await expect(page.locator('#count')).toHaveText('0 个项目');
+    await page.goto(f.h.admin + '/#/identity');
+    const status = page.locator('.identity-connection-status');
+    await expect(status).toHaveText('已连接 GitHub，但当前组织下没有你能打开的项目');
+    await expect(page.locator('#identity-panel')).toContainText('1 个仓库不在当前组织「elsewhere」里');
+    await expect(page.locator('#identity-panel')).not.toContainText('可在项目列表中打开这些仓库');
+    const widen = page.getByRole('button', { name: '切换到所有已授权组织', exact: true });
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      if (width === 390) expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+      await expect(widen).toBeVisible();
+      await page.screenshot({ path: `${output}/identity-outside-tenant-${width}.png`, fullPage: true });
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await widen.click();
+    await expect(page.locator('.identity-connection-status')).toHaveText('已连接 GitHub，可访问 1 个仓库');
+    expect(f.h.store.get('SELECT tenant_id FROM sessions ORDER BY rowid DESC LIMIT 1').tenant_id).toBe(null);
+    await page.goto(f.h.admin + '/#/projects');
+    await expect(page.locator('#rows')).toContainText('fixture/project-101');
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});

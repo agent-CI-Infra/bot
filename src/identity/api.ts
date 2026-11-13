@@ -42,7 +42,7 @@ export function identityApi(store: Store, user: Actor, token: string, method: st
     const tenants = store.all('SELECT * FROM tenants').filter(t => platform || scopes.some(s => s.tenant_id === t.id && s.state === 'active'));
     return { actor: context, tenants, scopes,
       identities: store.all('SELECT id,provider,host,display_name,status,verified_at FROM external_identities WHERE principal_id=?', context.principal_id),
-      github_connection: githubConnection(store, context.principal_id, context.tenant_id) };
+      github_connection: githubConnection(store, context.principal_id, { visible: user.repositories, tenant: context.tenant_id }) };
   }
   if (path === '/api/identity/tenant' && method === 'POST') {
     fields(body, ['tenant_id']); const tenant = body.tenant_id === null ? null : text(body.tenant_id);
