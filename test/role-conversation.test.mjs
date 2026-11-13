@@ -19,12 +19,13 @@ import { instanceUsage } from '../dist/roles/role-run.js';
 
 async function fixture(t,harness,budget,stall=false){
   const store=new Store(':memory:',Buffer.alloc(32,8)),root=mkdtempSync(join(tmpdir(),'role-conversation-')),manager=new LocalManager('101',root),requests=[];
+  let response=()=>({role:'assistant',content:null,tool_calls:[{id:'reply-'+requests.length,type:'function',function:{name:'finish',arguments:JSON.stringify({message:'A source-bound response'})}}]});
   const external=['acp','codex','claude_code'].includes(harness),claudeModel='claude-sonnet-4-5-20250929';let began;const started=new Promise(resolve=>{began=resolve;});
   const server=createServer(async(req,res)=>{
     if(req.method==='GET'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({data:[{id:claudeModel}]}));return;}
     let text='';for await(const c of req)text+=c;const body=JSON.parse(text);requests.push(body);began();if(stall)await new Promise(()=>{});
     if(harness==='claude_code'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({id:'fixture-provider-response',type:'message',model:claudeModel,role:'assistant',content:[{type:'text',text:'Fixture response'}],usage:{input_tokens:9,output_tokens:3}}));return;}
-    res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:[{id:'reply-'+requests.length,type:'function',function:{name:'finish',arguments:JSON.stringify({message:'A source-bound response'})}}]}}],usage:{prompt_tokens:9,completion_tokens:3}}));});
+    res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:response(body)}],usage:{prompt_tokens:9,completion_tokens:3}}));});
   server.listen(0,'127.0.0.1');await once(server,'listening');
   if(external){
     const name=harness==='acp'?'BOT_ACP_CONFIG':harness==='codex'?'BOT_CODEX_CONFIG':'BOT_CLAUDE_CODE_CONFIG',file=join(root,'config.json'),prior=process.env[name];
@@ -43,7 +44,7 @@ async function fixture(t,harness,budget,stall=false){
   const actor=knowledgeActor(store,'reader','101',['tasks.read','knowledge.read']),caller=roleTaskCaller(store,'101','reviewer',{actor,conversation_id:'one-logical-conversation',source_message:'source-1',guard(){}});
   const conversations=new RoleConversations(store,new TaskCommands(store),manager);let current='original';
   const source={id:'one-logical-conversation',source_message:'source-1',caller,request:'Read the local context',guard(){},fence:()=>current,context:()=>({fixture_mode:'conversation',messages:[{content:'Local context'}]}),query:()=>({messages:[]}),summary:()=>({state:'none'})};
-  return {store,requests,started,conversations,source,next:()=>({...source,source_message:'source-2',caller:roleTaskCaller(store,'101','reviewer',{actor,conversation_id:source.id,source_message:'source-2',guard(){}})}),change:()=>{current='changed';}};
+  return {store,requests,started,conversations,source,respond:handler=>{response=handler;},next:()=>({...source,source_message:'source-2',caller:roleTaskCaller(store,'101','reviewer',{actor,conversation_id:source.id,source_message:'source-2',guard(){}})}),change:()=>{current='changed';}};
 }
 for(const harness of ['native','process','pi'])test(`generic conversation uses the configured ${harness} harness without a business task or fake writer`,async t=>{
   const f=await fixture(t,harness),result=await f.conversations.run(f.source);
@@ -101,6 +102,21 @@ test('legacy task role instances and assignment foreign keys survive the nullabl
   assert.equal(store.all('PRAGMA table_info(role_instances)').find(r=>r.name==='task_id').notnull,0);
   store.run("DELETE FROM tasks WHERE id='old-task'");assert.equal(store.get('SELECT count(*) n FROM role_instances').n,0);assert.equal(store.get('SELECT count(*) n FROM role_assignments').n,0);
 });
+test('conversation limits honor configured values beyond the default reply limit and preserve default output',async t=>{
+  for(const budget of [undefined,{id:'bounded',max_turns:200,max_output_tokens:32768}]){
+    const f=await fixture(t,'native',budget);
+    f.source.compact={input:{messages:[]},commit(){}};
+    let replies=0;
+    f.respond(body=>{
+      const summary=body.messages[0].content.startsWith('Summarize only'),name=budget&&!summary&&++replies<=25?'read_conversation_summary':'finish';
+      return {role:'assistant',content:null,tool_calls:[{id:'response-'+f.requests.length,type:'function',function:{name,arguments:JSON.stringify(name==='finish'?{message:'A source-bound response'}:{})}}]};
+    });
+    await f.conversations.run(f.source);
+    assert.equal(f.requests.length,budget?27:2);
+    assert.ok(f.requests.every(body=>body.max_completion_tokens===(budget?32768:8192)));
+  }
+});
+
 test('a metered one-request budget admits its final response and does not admit another billable request',async t=>{
   const f=await fixture(t,'native',{id:'metered',max_model_requests:1});
   assert.equal((await f.conversations.run(f.source)).message,'A source-bound response');

@@ -99,7 +99,7 @@ recover 只返回四种模式：`native_resume`、`checkpoint_restore`（Native/
 
 ## 预算与用量
 
-`entry-default` 保持入口自身的单次运行上限；`bounded` 沿用 #167 的语义，只压低每次运行的上限。新的 `metered` 按角色实例（任务里的这个角色）累计它的全部运行：恢复、检查点续接、引擎自动重启的新尝试、人工「重试」、后续委派和子代理都算，所以自动重启和重试都不会重开预算。RunContext 的 `budget.accounting` 写明 `per_run` 或 `role_instance`。预算只作用于角色运行，主控不接管的入口仍按入口自身上限执行：
+`entry-default` 保持入口自身的单次运行上限；`bounded` 配置的 `max_turns`（4–256）和 `max_output_tokens`（256–32768）直接作为单次运行上限，可以提高或降低入口缺省值。未配置的字段沿用入口缺省值，角色对话也遵守这一规则。`metered` 的轮次与输出限制同样只管单次运行，累计请求数单独由 `max_model_requests` 控制，不从 `max_turns` 扣减。其他累计用量按角色实例（任务里的这个角色）汇总其全部运行：恢复、检查点续接、引擎自动重启的新尝试、人工「重试」、后续委派和子代理都算，所以自动重启和重试都不会重开累计预算。RunContext 的 `budget.accounting` 写明 `per_run` 或 `role_instance`。预算只作用于角色运行，主控不接管的入口仍按入口自身上限执行：
 
 - `metered` 可设 `max_turns`、`max_output_tokens`、`max_total_tokens`、`max_model_requests`、`max_tool_calls`、`max_wall_seconds`、`max_cost`（`{amount, currency}`）。
 - 用量来自模型请求账本，加上 Codex 这类自带模型的执行器上报的用量（每条 `usage` 增量算一次未定价请求；已开始却没有任何上报的 turn，在它结束或所在运行结束后算 unknown）：缺少 token 数的请求计入 `unknown_requests`，此时已知用量只是下限（`semantics: lower_bound`），不记为 0；缓存输入是输入的一部分，不重复相加；金额是价格快照的估算，不是供应商账单，存在测量延迟与有限超额。

@@ -15,7 +15,7 @@ import { traceEvent, beginRun } from '../dist/tasks/trace.js';
 import { ProjectMemory } from '../dist/memory/project.js';
 import { authorizeKnowledgeTask } from './knowledge-fixture.mjs';
 import { validateCandidateRef, validateRunContext, assertSecretFree, protocolRecovery } from '../dist/roles/protocol.js';
-import { allocateLease, leaseCurrent, issueRunToken, verifyRunToken, touchRunToken, revokeRunTokens, appendRunEvent, runEvents, scopeUsage, recordCheckpoint } from '../dist/roles/role-run.js';
+import { allocateLease, leaseCurrent, issueRunToken, verifyRunToken, touchRunToken, revokeRunTokens, appendRunEvent, runEvents, scopeUsage, instanceUsage, recordCheckpoint } from '../dist/roles/role-run.js';
 import { verifyRunEnvironment } from '../dist/projects/run-environment.js';
 
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
@@ -39,7 +39,7 @@ async function fixture(t, handler, { usage = () => ({ prompt_tokens: 100, comple
   const server = createServer(async (req, res) => {
     try { let raw = ''; for await (const c of req) raw += c; const body = JSON.parse(raw); const message = await handler(body, ++turn);
       res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message }], usage: usage(turn) })); }
-    catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); }
+    catch (e) { console.error(e); res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); }
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', 'm', 'r', 'http://127.0.0.1:' + server.address().port + '/v1', 'fixture', s.secrets.seal({ value: 'fixture-model-key-169' }, 'model:m'), 'now');
@@ -302,6 +302,55 @@ test('explicit recover takes a checkpoint of the same scope; a different scope i
   assert.equal(recovery_mode, 'checkpoint_restore');
   const collected = await roleRuns.collect(handle);
   assert.equal(collected.context.resume_from_run_id, run.id); assert.equal(collected.result.summary, 'ok');
+});
+
+test('configured per-run limits replace entry defaults while omitted fields retain their entry values', async t => {
+  for (const entry of [{}, { maxTurns: 12 }, { maxTurns: 16 }, { maxTurns: 24 }, { maxTurns: 32 }, { maxTurns: 64, maxOutputTokens: 16384 }]) {
+    const f = await fixture(t, () => call('finish', {})), spec = { ...f.spec, maxTurns: undefined, ...entry };
+    let prepared = await roleRuns.prepare(spec, 'dev');
+    assert.equal(prepared.wrapped.maxTurns, spec.maxTurns); assert.equal(prepared.wrapped.maxOutputTokens, spec.maxOutputTokens);
+    f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'bounded', max_turns: 200, max_output_tokens: 32768 } }] });
+    prepared = await roleRuns.prepare(spec, 'dev');
+    assert.equal(prepared.wrapped.maxTurns, 200); assert.equal(prepared.wrapped.maxOutputTokens, 32768);
+  }
+  const f = await fixture(t, () => call('finish', {}));
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'bounded', max_output_tokens: 32768 } }] });
+  assert.equal((await roleRuns.prepare(f.spec, 'dev')).wrapped.maxTurns, 8);
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'bounded', max_turns: 200 } }] });
+  assert.equal((await roleRuns.prepare({ ...f.spec, maxOutputTokens: 16384 }, 'dev')).wrapped.maxOutputTokens, 16384);
+});
+
+test('a configured 200-turn run reserves its last eight turns and sends the configured output limit', async t => {
+  const f = await fixture(t, (body, turn) => {
+    assert.equal(body.max_completion_tokens, 32768);
+    if (turn <= 192) {
+      assert.ok(body.tools.some(tool => tool.function.name === 'read_file'));
+      return call('read_file', {});
+    }
+    assert.equal(turn, 193);
+    assert.deepEqual(body.tools.map(tool => tool.function.name), ['finish']);
+    assert.match(body.messages.at(-1).content, /8 turns left/);
+    return call('finish', { summary: 'done' });
+  });
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'bounded', max_turns: 200, max_output_tokens: 32768 } }] });
+  assert.equal((await runRole({ ...f.spec, modelAttempts: 1, finalizationTools: ['finish'], tools: [tool('read_file'), tool('finish')], execute: async () => ({ fixture: true }) }, 'dev')).result.summary, 'done');
+  assert.equal(f.s.get('SELECT count(*) n FROM model_requests').n, 193);
+});
+
+test('metered max_turns limits each run independently of the cumulative model request count', async t => {
+  const f = await fixture(t, () => call('finish', { summary: 'done' }));
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'metered', max_turns: 32, max_model_requests: 1000 } }] });
+  await runRole(f.spec, 'dev');
+  const instance = f.s.get("SELECT id FROM role_instances WHERE role='dev'"), original = f.s.get('SELECT id FROM model_requests');
+  const seed = (count, prefix) => f.s.run(`WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<?)
+    INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,run_id,finished_at,http_status,state,input_tokens,output_tokens)
+    SELECT ?||n,task_id,repository_id,?||n,model_id,model_name,requested_at,run_id,finished_at,http_status,state,input_tokens,output_tokens FROM model_requests,seq WHERE id=?`, count, prefix, prefix, original.id);
+  seed(255, 'prior-'); assert.equal(instanceUsage(f.s, instance.id).model_requests, 256);
+  assert.equal((await roleRuns.prepare(f.spec, 'dev')).wrapped.maxTurns, 32);
+  await runRole(f.spec, 'dev'); assert.equal(instanceUsage(f.s, instance.id).model_requests, 257);
+  seed(743, 'later-'); assert.equal(instanceUsage(f.s, instance.id).model_requests, 1000);
+  await assert.rejects(runRole(f.spec, 'dev'), { code: 'role_budget_exhausted' });
+  assert.equal(f.s.get('SELECT count(*) n FROM model_requests').n, 1000);
 });
 
 test('a metered budget spans recoveries, attempts and assignments of the role: exhaustion cancels, keeps a checkpoint and refuses to restart; unknown usage is never zero', async t => {

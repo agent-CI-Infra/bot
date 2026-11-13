@@ -34,8 +34,9 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await page.getByLabel('dev 项目任务与协作权限', { exact: true }).selectOption('write');
     await page.getByLabel('dev 指派其他角色权限', { exact: true }).selectOption('deny');
     await page.getByLabel('预算方式', { exact: true }).selectOption('bounded');
-    await page.getByLabel('单次运行最多模型轮数', { exact: true }).fill('12');
-    await page.getByLabel('单次输出最多 token', { exact: true }).fill('2048');
+    await expect(page.getByText('未配置的轮次沿用运行入口缺省值：', { exact: false })).toBeVisible();
+    await page.getByLabel('单次运行最多模型轮数', { exact: true }).fill('200');
+    await page.getByLabel('单次输出最多 token', { exact: true }).fill('32768');
     await goRolePage(page, { role: 'test' });
     await goRolePage(page, { role: 'dev' });
     await expect(page.getByLabel('角色提示词', { exact: true })).toHaveValue('先读复现，再修改代码并验证。');
@@ -46,7 +47,18 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     expect(dev.persona_prompt).toBe('先读复现，再修改代码并验证。'); expect(dev.model_profile_ref.model_id).toBe(model.id);
     expect(dev.permissions).toMatchObject({ computer: 'deny', project_tasks: 'write', delegation: 'deny' });
     expect(dev.capability_policy_ref).toBeUndefined();
-    expect(dev.budget_policy_ref).toMatchObject({ id: 'bounded', max_turns: 12, max_output_tokens: 2048 });
+    expect(dev.budget_policy_ref).toMatchObject({ id: 'bounded', max_turns: 200, max_output_tokens: 32768 });
+    await openRoleFormAdvanced(page);
+    mkdirSync('.tmp/role-settings', { recursive: true });
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.getByLabel('预算方式', { exact: true }).scrollIntoViewIfNeeded();
+      await expect(page.getByLabel('单次运行最多模型轮数', { exact: true })).toHaveValue('200');
+      await expect(page.getByLabel('单次输出最多 token', { exact: true })).toHaveValue('32768');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: `.tmp/role-settings/budget-${width}.png` });
+    }
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await goRolePage(page);
     await page.getByRole('button', { name: '添加技能包', exact: true }).click();
     await page.locator('.role-skill').getByLabel('文件内容', { exact: true }).fill('记录测试证据。');

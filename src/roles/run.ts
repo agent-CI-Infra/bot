@@ -118,7 +118,7 @@ export interface RoleRunHandle<T> { readonly operation_id:string; readonly run_i
 interface Handle<T> extends RoleRunHandle<T> { prepared:PreparedRun<T>; controller:AbortController; done:Promise<T>; settled:boolean; cancelled:string|null }
 const handles=new Map<string,Handle<any>>(),gateway=(s:Store)=>new TaskToolGateway(s);
 const tokenTtl=15*60_000;
-// bounded caps each run (#167); metered also counts every run of the role instance in the task (role-run.ts runBudget).
+// Explicit turn/output limits replace entry defaults; metered also counts cumulative usage of the role instance.
 const perRunBudget=(snapshot:Resolved['snapshot'])=>snapshot.budget.id==='bounded'||snapshot.budget.id==='metered';
 const cumulativeBudget=(snapshot:Resolved['snapshot'])=>snapshot.budget.id==='metered';
 // The scope of an assignment's runs: the delegated assignment, otherwise the entry's own assignment of this instance in
@@ -176,7 +176,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    candidate,source_ref:sourceRef(s,task),required:stage?.role_constraints.capabilities,fresh:!messages.length&&!Object.keys(qaState).length,validated:!!(spec.finish||spec.validate||env.pi?.session),snapshot_id:resolved.id});
   const budget=runBudget(snapshot);
   // A cumulative budget already used up by earlier runs of this assignment stops before anything starts; no other model.
-  if(cumulativeBudget(snapshot)){const used=instanceUsage(s,instance.id),reached=budgetExceeded(budget,used);if(reached||budget.max_turns!==null&&used.runs>0&&used.model_requests>=budget.max_turns)stop('role_budget_exhausted','waiting_configuration',`${role}：本任务中这个角色的累计预算 ${reached??'max_turns'} 已用尽；已有产物保留，提高预算后才能继续。`);}
+  if(cumulativeBudget(snapshot)){const reached=budgetExceeded(budget,instanceUsage(s,instance.id));if(reached)stop('role_budget_exhausted','waiting_configuration',`${role}：本任务中这个角色的累计预算 ${reached} 已用尽；已有产物保留，提高预算后才能继续。`);}
   if(options.recover){const previous=s.get('SELECT role_instance_id,lease_scope FROM task_runs WHERE id=? AND task_id=?',options.recover.previous_run_id,task.id);if(!previous||previous.role_instance_id!==instance.id||previous.lease_scope!==scope)stop('role_recovery_scope_mismatch','failed','只能恢复同一角色实例、同一委派的运行。');}
   const roleContext={role,snapshot_ref:'role_snapshots:'+resolved.id,config_revision:snapshot.config_revision,role_revision:snapshot.role_revision,model_source:snapshot.model.source};
   const ref=traceEvent(s,task.id,'role_input',{instance_id:instance.id,role_version:definition.version,harness,assignment_id:assignment??null,recovery_mode:recover,...roleContext,skills:snapshot.skills?{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,files:snapshot.skills.files.map(f=>f.path)}:null,continuation:continuation?.ref??null,input:spec.redactor.clean(spec.prompt)},task.trace_run_id,'role:'+role,continuation?[continuation.ref]:[]);
@@ -205,7 +205,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   let executionRun:string|undefined;
   const wrapped:AgentSpec<T>={...spec,model,tools,pi:env.pi??spec.pi,runEnvironment:env.environment?.handle,
    guard:async()=>{await spec.guard();authority();const b=live.bound;if(b){assertLease(s,b.run_id,b.epoch);if(!touchRunToken(s,b.token_id,tokenTtl))stop('run_token_revoked','cancelled','运行的能力令牌已撤销或过期，运行停止。');budgetGuard();}},
-   maxTurns:bounded?.max_turns?Math.min(spec.maxTurns??16,cumulative?bounded.max_turns-instanceUsage(s,instance.id).model_requests:bounded.max_turns):spec.maxTurns,maxOutputTokens:bounded?.max_output_tokens?Math.min(spec.maxOutputTokens??8192,bounded.max_output_tokens):spec.maxOutputTokens,
+   maxTurns:bounded?.max_turns??spec.maxTurns,maxOutputTokens:bounded?.max_output_tokens??spec.maxOutputTokens,
    onDenied:(name,reason)=>denied(name,reason),
    // A newer revision requested for this running instance ends the run here; the loop below continues it.
    checkpoint:async()=>{await spec.checkpoint?.();const pending=s.get('SELECT pending_revision FROM role_instances WHERE id=?',instance.id)?.pending_revision;if(pending&&pending>(instance.config_revision??0))stop('role_revision_checkpoint','retry_wait','角色在安全检查点结束，将带新 revision 续接。');},
