@@ -65,8 +65,8 @@ async function start() {
   if (!me) return;
   renderCurrentUser();
   document.querySelectorAll('[data-super]').forEach(el => el.hidden = me.role !== 'super_admin');
-  // A project administrator's only global settings section is 存储 (its own projects' storage): the tab opens it.
-  const settingsTab = document.querySelector('#tabs [data-tab=settings]'); if (settingsTab && me.role !== 'super_admin') { settingsTab.hidden = false; settingsTab.textContent = '存储'; }
+  // #549: do not put 存储 back on a project administrator's sidebar. The address still opens; the management area is #550.
+  if (typeof applyConsoleNavVisibility === 'function') applyConsoleNavVisibility();
   repositories = (await api('/api/repositories')).repositories;
   if (me.role === 'super_admin') accounts = (await api('/api/accounts')).accounts;
   options($('repository-filter'), repositories, r => r.full_name); options($('account-filter'), accounts, a => a.name);

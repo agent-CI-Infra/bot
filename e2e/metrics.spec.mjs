@@ -51,7 +51,7 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
     const memberPassword=testPassword();await admin('/api/users','POST',{username:'metrics-member',password:memberPassword,repository_ids:['101']});
     const context=await browser.newContext(),member=await context.newPage();
     try{
-      await login(member,h.admin,'metrics-member',memberPassword);await member.getByRole('button',{name:'统计',exact:true}).click();
+      await login(member,h.admin+'/#/costs','metrics-member',memberPassword);
       await member.getByLabel('开始日期（本地）',{exact:true}).fill('2026-10-22');await member.getByLabel('结束日期（本地）',{exact:true}).fill('2026-10-23');await member.getByRole('button',{name:'查看统计',exact:true}).click();
       await expect(member.locator('.cost-summary')).toContainText('USD 5.56');await expect(member.locator('#costs-panel')).not.toContainText('project-202');
       expect(await member.getByLabel('统计项目',{exact:true}).locator('option').count()).toBe(2);
@@ -90,7 +90,7 @@ test('没有费用信息时按输入加输出 token 堆叠，缓存不重复累�
     const memberPassword=testPassword();await admin('/api/users','POST',{username:'token-member',password:memberPassword,repository_ids:['101']});
     const context=await browser.newContext(),member=await context.newPage();
     try{
-      await login(member,h.admin,'token-member',memberPassword);await member.getByRole('button',{name:'统计',exact:true}).click();
+      await login(member,h.admin+'/#/costs','token-member',memberPassword);
       await expect(member.locator('.cost-chart-section svg')).toHaveAttribute('data-metric','tokens');await expect(member.locator('rect[data-project="202"]')).toHaveCount(0);await expect(member.locator('.cost-legend')).not.toContainText('project-202');
     }finally{await context.close();}
     expect(errors).toEqual([]);

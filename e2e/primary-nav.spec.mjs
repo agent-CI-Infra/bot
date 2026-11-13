@@ -1,0 +1,82 @@
+import { test, expect } from '@playwright/test';
+import { mkdirSync } from 'node:fs';
+import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
+
+const out = '.tmp/primary-nav-549';
+
+async function login(page, h, username, password, hash = '#/projects') {
+  await page.goto(h.admin + '/' + hash);
+  await page.getByLabel('用户名', { exact: true }).fill(username);
+  await page.getByLabel('密码', { exact: true }).fill(password);
+  await page.getByRole('button', { name: '登录', exact: true }).click();
+  await expect(page.locator('#workspace')).toBeVisible();
+}
+
+async function visiblePrimaryCaptions(page) {
+  return page.locator('#console-sidebar').evaluate(root => {
+    const nodes = [...root.querySelectorAll('.console-primary-nav [data-tab], .console-primary-nav a, .console-settings-nav [data-tab]')]
+      .filter(node => {
+        const style = getComputedStyle(node);
+        return style.display !== 'none' && style.visibility !== 'hidden' && !node.hidden && node.getClientRects().length;
+      });
+    return nodes.map(node => (node.textContent || '').trim()).filter(Boolean);
+  });
+}
+
+test('#549 项目管理员主导航不超过 4 个入口，更多不重复且 1440/768/390 无横向溢出', async ({ page }) => {
+  test.setTimeout(90000);
+  const h = await harness();
+  mkdirSync(out, { recursive: true });
+  try {
+    const { admin } = await setup(h), a = await account(admin);
+    await repository(admin, a.id, '101');
+    const password = testPassword();
+    const created = await admin('/api/users', 'POST', { username: 'nav-member', password, repository_ids: ['101'] });
+    expect(created.status).toBe(201);
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await login(page, h, 'nav-member', password);
+    const desktop = await visiblePrimaryCaptions(page);
+    expect(desktop).toEqual(['项目', '管理对话', '看板', '待处理']);
+    for (const name of ['统计', 'Webhook 投递', '个人设置', '存储', '全局设置']) {
+      await expect(page.locator('#console-sidebar').getByRole('button', { name, exact: true })).toBeHidden();
+    }
+    await expect(page.locator('#console-sidebar').getByRole('link', { name: '更多功能', exact: true })).toHaveCount(0);
+    await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(1440);
+    await page.screenshot({ path: `${out}/nav-member-1440.png`, fullPage: true });
+
+    await page.goto(h.admin + '/#/more');
+    await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
+    const headings = await page.locator('.console-group h2').allInnerTexts();
+    expect(headings).toEqual(['设置']);
+    const captions = (await page.locator('.console-group a > span').allInnerTexts()).map(text => text.trim());
+    expect(captions).toEqual(['个人设置', '飞书绑定', '身份与权限', '飞书会话']);
+    for (const duplicate of ['项目', '任务', '待处理', '助手', '全部项目', '任务看板', '管理对话', '看板', 'Webhook 投递', '用量与成本', '存储', '外部执行端', '全局设置']) {
+      expect(captions).not.toContain(duplicate);
+    }
+    await page.screenshot({ path: `${out}/more-member-1440.png`, fullPage: true });
+
+    await page.setViewportSize({ width: 768, height: 900 });
+    await expect(page.locator('#console-sidebar')).toBeVisible();
+    expect(await visiblePrimaryCaptions(page)).toEqual(['项目', '管理对话', '看板', '待处理']);
+    await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(768);
+    await page.screenshot({ path: `${out}/nav-member-768.png`, fullPage: true });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.locator('#console-sidebar')).toBeHidden();
+    await expect(page.locator('#console-mobile-nav')).toBeVisible();
+    await expect(page.locator('#console-mobile-nav a')).toHaveText(['项目', '任务', '待处理', '助手', '更多']);
+    const boxes = await page.locator('#console-mobile-nav a').evaluateAll(nodes =>
+      nodes.map(n => ({ width: n.getBoundingClientRect().width, height: n.getBoundingClientRect().height })));
+    expect(boxes.every(b => b.width >= 44 && b.height >= 44)).toBe(true);
+    await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
+    await page.locator('#console-mobile-nav').getByRole('link', { name: '更多', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
+    expect(await page.locator('.console-group h2').allInnerTexts()).toEqual(['设置']);
+    expect((await page.locator('.console-group a > span').allInnerTexts()).map(t => t.trim())).toEqual(['个人设置', '飞书绑定', '身份与权限', '飞书会话']);
+    await expect(page.locator('#console-page')).not.toContainText('全局设置');
+    await expect(page.locator('#console-page')).not.toContainText('Webhook');
+    await page.screenshot({ path: `${out}/nav-member-390.png`, fullPage: true });
+
+  } finally { await h.stop(); }
+});

@@ -100,8 +100,11 @@ test('permissions, in-flight navigation, keyboard and history keep their boundar
     await expect(page.getByRole('heading',{name:'全局设置',exact:true})).toHaveCount(0);
     await expect(page.getByRole('link',{name:'飞书连接',exact:false})).toHaveCount(0);
     await page.setViewportSize({width:1440,height:900});
-    await expect(page.locator('.console-settings-nav').getByRole('button',{name:'个人设置',exact:true})).toBeVisible();
+    // #549: a project administrator's sidebar keeps four destinations; 个人设置 lives in 更多 and the account menu.
+    await expect(page.locator('.console-settings-nav').getByRole('button',{name:'个人设置',exact:true})).toBeHidden();
     await expect(page.locator('.console-settings-nav').getByRole('button',{name:'全局设置',exact:true})).toBeHidden();
+    await expect(page.locator('#tabs').getByRole('button',{name:'统计',exact:true})).toBeHidden();
+    await expect(page.locator('#tabs').getByRole('button',{name:'Webhook 投递',exact:true})).toBeHidden();
     await page.setViewportSize({width:390,height:844});
     expect(await page.locator('#console-project option').allTextContents()).not.toContain('202');
     await page.goto(h.admin+'/#/settings/users');await expect(page.locator('#settings-panel')).toBeHidden();
