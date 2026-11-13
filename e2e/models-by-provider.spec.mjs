@@ -1,4 +1,5 @@
 import {test,expect} from '@playwright/test';
+import { openModelCatalog } from './open-model-folds.mjs';
 import {rmSync,mkdirSync} from 'node:fs';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
@@ -19,6 +20,7 @@ test('供应商新增和编辑使用同一表单，连接管理集中在供应�
   const own=await create('101','/v1',['beta'],ownKey);await create('101','/other/v1',['delta'],testPassword());await create(null,'/v1',['alpha'],sharedKey);
   await admin('/api/repositories/101/policy','PATCH',{model_id:own[0].id});
   await page.goto(h.admin+'/#/projects/101/model');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
+  await openModelCatalog(page);
   const ownCard=page.locator('.side-card').filter({has:page.getByRole('heading',{name:'本项目专属模型',exact:true})}),dialog=page.locator('#provider-edit');
   await expect(ownCard.locator('.provider-group')).toHaveCount(2);await expect(ownCard.getByRole('button',{name:'获取模型列表',exact:true})).toHaveCount(0);await expect(ownCard.getByRole('button',{name:/修改 URL|更换 Key|撤销 Key/})).toHaveCount(0);
   const group=ownCard.locator('.provider-group').first();await group.getByRole('button',{name:'编辑供应商',exact:true}).click();await expect(dialog.getByLabel('API Key（留空保持不变）',{exact:true})).toHaveValue('');
@@ -48,6 +50,6 @@ test('供应商新增和编辑使用同一表单，连接管理集中在供应�
   const before=(await admin('/api/models')).value.models.length;await shared.getByRole('button',{name:'新增供应商',exact:true}).click();await dialog.getByLabel('接口 URL',{exact:true}).fill(origin+'/cancel/v1');await dialog.getByRole('button',{name:'取消',exact:true}).click();expect((await admin('/api/models')).value.models.length).toBe(before);
   const raw=JSON.stringify((await admin('/api/models')).value);expect(raw).not.toContain(sharedKey);expect(raw).not.toContain(rotated);expect(raw).not.toContain(ownKey);
   const memberPassword=testPassword();await admin('/api/users','POST',{username:'member',password:memberPassword,repository_ids:['101']});const context=await browser.newContext({viewport:{width:390,height:844}}),member=await context.newPage();
-  await member.goto(h.admin+'/#/projects/101/model');await member.getByLabel('用户名',{exact:true}).fill('member');await member.getByLabel('密码',{exact:true}).fill(memberPassword);await member.getByRole('button',{name:'登录',exact:true}).click();await expect(member.getByRole('button',{name:'编辑供应商',exact:true})).toHaveCount(2);await expect(member.getByRole('heading',{name:'部署共享模型',exact:true})).toHaveCount(1);await context.close();expect(errors).toEqual([]);
+  await member.goto(h.admin+'/#/projects/101/model');await member.getByLabel('用户名',{exact:true}).fill('member');await member.getByLabel('密码',{exact:true}).fill(memberPassword);await member.getByRole('button',{name:'登录',exact:true}).click();await openModelCatalog(member);await expect(member.getByRole('button',{name:'编辑供应商',exact:true})).toHaveCount(2);await expect(member.getByRole('heading',{name:'部署共享模型',exact:true})).toHaveCount(1);await context.close();expect(errors).toEqual([]);
  }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});await new Promise(resolve=>upstream.close(resolve));}
 });

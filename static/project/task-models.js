@@ -39,7 +39,7 @@ function projectDefaultModelCard(policy, models) {
   }, '');
   const actions = element('div', '', 'actions form-actions'); actions.append(save);
   section.append(note('未单独指定模型的任务继承这里的选择。部署共享模型由超级管理员提供，本项目专属模型只对这个项目可见。'),
-    note(policy.model_id && !selected ? `当前默认模型不可用（${policy.model_id}），不会自动换成其他模型。` : selected?.key_configured === false ? `当前默认模型 ${selected.model_name} 的 Key 已撤销，任务会等待配置。` : '在下方任务模型表中可以单独覆盖项目默认。'),
+    note(policy.model_id && !selected ? `当前默认模型不可用（${policy.model_id}），不会自动换成其他模型。` : selected?.key_configured === false ? `当前默认模型 ${selected.model_name} 的 Key 已撤销，任务会等待配置。` : '需要时，可在下方「按任务类型覆写」里为个别工作类型单独指定。'),
     field('默认模型', select), message, actions);
   return section;
 }

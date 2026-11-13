@@ -65,3 +65,11 @@
 @media(max-width:767px) { #provider-edit form { height:100%; } }
 #provider-edit::backdrop { background:#13233a75; }
 @media(max-width:767px) { #provider-edit { position:fixed; inset:0; } }
+
+/* #571: work-type overrides and the model catalog stay folded so the first screen is the default model. */
+.model-overrides, .model-catalog { margin: 16px 0 0; }
+.model-overrides > summary, .model-catalog > summary {
+  cursor: pointer; min-height: var(--control-min, 44px); display: flex; align-items: center;
+  font-size: 14px; font-weight: 600;
+}
+.model-overrides .project-table { margin-top: 12px; }
