@@ -67,7 +67,6 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 .project-nav{display:flex;flex-direction:column;gap:2px;padding:12px 8px;border-right:1px solid #e3eaf0;background:#f7fafb}
 .project-nav a{padding:8px 12px;border-radius:5px;color:var(--color-text-muted);text-decoration:none;font-weight:600;font-size:var(--font-size-2)}
 .project-nav a:hover{background:#edf3f5}.project-nav a[aria-current=page]{background:var(--color-brand);color:var(--color-text-inverse)}
-.project-body>.project-nav{flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 16px;border-right:0;border-bottom:1px solid #e3eaf0}
 .project-hub{display:flex;flex-direction:column;gap:var(--space-6)}
 .project-hub>h2{margin:0;font-size:var(--font-size-4)}
 .project-hub-group h3{margin:0 0 var(--space-3);font-size:var(--font-size-2);color:var(--color-text-muted)}
@@ -127,8 +126,6 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 @media(max-width:760px){
   #tabs,.project-nav,.wizard-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));overflow:visible;gap:4px}
   #tabs button,.project-nav a,.wizard-steps button{white-space:normal;text-align:center;padding:8px 4px;min-width:0;line-height:1.35;overflow-wrap:anywhere}
-  .project-body>.project-nav{display:flex;grid-template-columns:unset;flex-direction:row;flex-wrap:wrap;gap:8px;overflow:visible}
-  .project-body>.project-nav a{white-space:nowrap;text-align:left;padding:8px 12px}
   .choice .muted{flex-basis:100%}
 }
 
