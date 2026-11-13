@@ -69,12 +69,18 @@ test('a rejected retry keeps the item and return focus, and recorded failures ch
 });
 
 test('a late inbox refresh after closing cannot replace a new page or steal its focus', async ({ page }) => {
+  // prepared() below already spends most of the default 30s budget on boot, 51 rows and a login, so this case needs
+  // its own budget: when it ran out, the failure surfaced as a bare "Test timeout of 30000ms exceeded" with no line.
+  test.setTimeout(120000);
   const { h } = await prepared(page); let release;
   try {
     await open(page).click();
-    let entered; const seen = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
-    await page.route('**/api/tasks?attention=*', async route => { const response = await route.fetch(); entered(); await gate; await route.fulfill({ response }); });
-    await page.keyboard.press('Escape'); await seen;
+    let entered = 0; const gate = new Promise(resolve => { release = resolve; });
+    await page.route('**/api/tasks?attention=*', async route => { const response = await route.fetch(); entered += 1; await gate; await route.fulfill({ response }); });
+    await page.keyboard.press('Escape');
+    // Bounded instead of an unbounded `await`: a refresh that never comes must fail here, by name, rather than
+    // starving the remainder of the test of its budget.
+    await expect.poll(() => entered, { timeout: 30000, message: 'closing the task must request the inbox again' }).toBeGreaterThan(0);
     await page.locator('#console-mobile-nav').getByRole('link', { name: '更多', exact: true }).click();
     const heading = page.getByRole('heading', { name: '更多功能', exact: true }); await expect(heading).toBeVisible();
     const focus = page.getByRole('link', { name: '身份与权限', exact: false }); await focus.focus();
