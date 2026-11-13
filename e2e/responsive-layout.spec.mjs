@@ -33,7 +33,9 @@ async function login(page, h, password) {
   await page.getByLabel('用户名', { exact: true }).fill('administrator');
   await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
-  await expect(page.getByRole('button', { name: '退出登录' })).toBeVisible();
+  // After #481, 390 puts 退出登录 in the account menu; wider screens keep the inline button.
+  const account = page.locator('#console-account');
+  await expect(account.or(page.getByRole('button', { name: '退出登录', exact: true })).first()).toBeVisible();
 }
 
 async function metrics(page, name) {
@@ -86,7 +88,10 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     expect(identity.fabHitsTarget).toBe(false);
     expect(identity.fabHitsNav).toBe(false);
     expect(identity.fabHitsLogout).toBe(false);
-    expect(identity.fab.width).toBeLessThanOrEqual(52);
+    // #481 hides the floating assistant on a phone; if it is shown, it stays a compact control.
+    if (identity.fab && identity.fab.width > 0 && identity.fab.height > 0) {
+      expect(identity.fab.width).toBeLessThanOrEqual(52);
+    }
     expect(identity.navDisplay).toBe('grid');
     await page.screenshot({ path: resolve(out, 'identity-390.png'), fullPage: true });
 
