@@ -141,7 +141,7 @@ function projectHeader() {
     toHub.dataset.testid = 'project-hub-link';
     trail.append(toHub);
   }
-  title.append(element('h1', repository.full_name), ...projectStatus());
+  const heading = element('h1', repository.full_name); heading.title = repository.full_name; title.append(heading, ...projectStatus());
   const chat = element('a', '管理对话', 'button-link');
   chat.href = `#/projects/${current.id}/management`;
   chat.dataset.testid = 'project-open-chat';
