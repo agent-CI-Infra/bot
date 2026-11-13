@@ -1,3 +1,5 @@
+import { messageResultSources } from '../storage/tool-results.js';
+import { ResultSession, resultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
 import { hasCredentials } from '../core/redaction.js';
 import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, resolvePrincipalActor, type ActorContext } from '../identity/authorization.js';
@@ -170,7 +172,7 @@ export class ManagementAgent {
         actor:{kind:'management',service_role_id:managementAssistant,conversation_id:conversation,source_message:String(input.source_message),principal_id:actor.principal_id},
         allowed:(resource,operation)=>githubWriteAllowed(permissions(),resource,operation)},rest)};
     };
-    const tools=[...managementTools,...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!['import_message_resource','attach_workspace_file'].includes(t.function.name)):[]),sendMessageTool];
+    const tools=[readToolResult,...managementTools,...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!['import_message_resource','attach_workspace_file'].includes(t.function.name)):[]),sendMessageTool];
     // Only a timer's turn may end silently, and only through stay_silent (#489); own tasks never get the tool.
     const turnTools=timer?[...tools,staySilentTool]:tools;let silence:string|undefined;
     let ownHost:OwnTaskHost|undefined;
@@ -185,14 +187,15 @@ export class ManagementAgent {
         this.event(id,'message',{text,sequence,remaining:limit-sequence});
       }),value=>redactor.text(value),limit);
     };
-    const execute=async(name:string,args:any,callId:string):Promise<any>=>{
+    const executeRaw=async(name:string,args:any,callId:string):Promise<any>=>{
       if(name===sendMessageName)return progress(args);
       // Providers may reuse a tool id in later model turns. Progress needs an id unique to this invocation.
       const eventCallId=randomId();
       await guard();this.event(id,'tool_call',{name,call_id:eventCallId,arguments:args});
       let result:any;
       try{
-        if(media&&mediaTools.some(t=>t.function.name===name))result=await media.execute(name,args);
+        if(name==='read_tool_result')result=await results.read(args);
+        else if(media&&mediaTools.some(t=>t.function.name===name))result=await media.execute(name,args);
         else if(serviceRepositoryTools.some(t=>t.function.name===name))result=await repositories.execute(name,args);
         else if(name==='github_write'){if(!permitsTool(permissions(),'github_write'))fail(403,'tool_not_allowed');result=await write(args);}
         else if(assistantComputerNames.includes(name))result=computer?await computer.execute(name,args):fail(409,'computer_not_configured');
@@ -217,6 +220,8 @@ export class ManagementAgent {
         this.event(id,'tool_error',{name,call_id:eventCallId,...result});throw error;
       }
     };
+    const results=new ResultSession(this.store,resultScope(this.store,{id,conversation_id:conversation}),()=>resultOwner('management',conversation,actor.principal_id,actor.authorization_revision),guard,redactor.values,()=>incoming?messageResultSources(this.store.db,this.store.all('SELECT DISTINCT chat_ref FROM channel_inbox WHERE conversation_id=? AND chat_ref IS NOT NULL',conversation).map(row=>String(row.chat_ref))):[]);
+    const execute=(name:string,args:any,callId:string)=>results.run(()=>executeRaw(name,args,callId));
     try{
       await guard();this.store.run("UPDATE management_messages SET state='running',updated_at=? WHERE id=?",now(),id);this.event(id,'running',{});
       if(input.query)await execute('management_query',input.query,'direct-query');

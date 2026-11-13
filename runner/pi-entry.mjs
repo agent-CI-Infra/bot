@@ -1,3 +1,4 @@
+import { localCommandResult, readLocalResult, prepareLocalResults } from './tool-results.mjs';
 import {readFile,writeFile,rename,unlink,appendFile} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
@@ -118,6 +119,7 @@ try{
       }
       // A sub-agent is a new session built from its own configuration; it never sees this conversation.
       else if(name==='start_agent'&&!agent)result=await runSubagent({config:cfg,args,id:'agent-'+randomBytes(6).toString('hex'),createSession:(child,childId)=>createSession(child,childId,[]),writeEvent});
+      else if(name==='read_tool_result')result=await readLocalResult(dir+'/results',cfg.workspace_id+':'+(agent||''),args);
       else if(name==='read_file')result=await workspace({type:'workspace_read',workspace_id:cfg.workspace_id,path:args.path});
       else if(name==='write_file'){
         const note=typeof args.path==='string'&&args.path.startsWith('../notes/');
@@ -128,9 +130,12 @@ try{
         const options=commandOptions(args,policy.default_seconds,policy.max_seconds);
         if(!options.request)result={error:options.error,message:options.message};
         else {
-          await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify(clean({operation_id:id,...options.request})),{mode:0o600});
+          const outputId=randomBytes(24).toString('hex'),outputDirectory=dir+'/results';
+          await prepareLocalResults(outputDirectory);
+          await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify(clean({operation_id:id,output_file:outputDirectory+'/'+outputId+'.utf8',...options.request})),{mode:0o600});
           const secret_env=grant?{GH_TOKEN:grant.token,GITHUB_TOKEN:grant.token}:undefined;
-          try{result=await workspace({...options.request,workspace_id:cfg.workspace_id,output_file:dir+'/command.out',secret_env});
+          try{result=await workspace({...options.request,workspace_id:cfg.workspace_id,output_file:outputDirectory+'/'+outputId+'.utf8',secret_env});
+            result=await localCommandResult(outputDirectory,cfg.workspace_id+':'+(agent||''),outputId,result);
             if(options.timeout_notice)result={...result,timeout_notice:options.timeout_notice};
           }finally{await unlink(dir+'/live.json').catch(()=>{});}
         }

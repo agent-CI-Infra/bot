@@ -222,6 +222,15 @@ export class AssistantComputers {
     return { state: 'busy', renewed_at: lease.renewed };
   }
   /** One runner operation of the turn holding the computer. A command never outlives the removal of its container. */
+  async output(owner,input) {
+    this.validate(owner);
+    if(!input||Object.keys(input).some(k=>!['turn','operation_id','offset'].includes(k))||!turnPattern.test(input.turn||'')||!idPattern.test(input.operation_id||'')||!Number.isSafeInteger(input.offset)||input.offset<0)throw new ManagerError('invalid_operation',400);
+    this.held(owner,input.turn);
+    const response=await this.docker.runner(this.name(owner),{type:'tail',operation_id:input.operation_id,offset:input.offset});
+    this.held(owner,input.turn);
+    if(!response.ok)throw new ManagerError('output_unavailable',503);
+    return response.result;
+  }
   async execute(owner, input) {
     this.validate(owner);
     if (!input || Object.keys(input).some(k => !['turn', 'operation_id', 'request'].includes(k)) || !turnPattern.test(input.turn || '') || !idPattern.test(input.operation_id || '')) throw new ManagerError('invalid_operation', 400);

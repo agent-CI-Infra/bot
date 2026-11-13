@@ -160,3 +160,23 @@ test('kept background service remains accessible to later task commands', async 
   const read = await runCommand(f.workspace, 'read', { command: `node -e 'fetch("http://127.0.0.1:"+require("node:fs").readFileSync("port","utf8")).then(r=>r.text()).then(console.log)'` }, 120);
   assert.equal(read.exit_code, 0); assert.equal(read.output.trim(), 'ready');
 });
+
+for(const backend of ['native','process','pi'])test(`QA consumes a complete large command result by read-only pagination (${backend})`,{skip:backend==='pi'&&skipPi,timeout:90000},async t=>{
+  let observed;
+  const f=await fixture(t,backend,'task.request',body=>{
+    const results=receipts(body),command=results.find(r=>r.file&&r.exit_code===0);
+    if(results.some(r=>r.error))return call('submit_acceptance',{...pass,outcome:'insufficient_evidence',core_complete:false,required_evidence_complete:false,gaps:['Command output was unavailable']});
+    if(!command)return call('run_command',{command:'node -e '+JSON.stringify("process.stdout.write('START\\n'+'中😀'.repeat(800000)+'\\nEND\\n')"),timeout_seconds:30});
+    assert.equal(command.truncated,true);assert.ok(command.bytes>5*1024*1024);assert.match(command.head,/START/);assert.match(command.tail,/END/);assert.equal(command.output_file,undefined);
+    observed=command;
+    const pages=results.filter(r=>r.file===command.file&&typeof r.content==='string');
+    if(!pages.length)return call('read_tool_result',{file:command.file,position:0,length:16384});
+    if(pages.length===1)return call('read_tool_result',{file:command.file,position:command.bytes-4,length:4});
+    assert.match(pages[0].content,/START/);assert.equal(pages[1].eof,true);assert.match(pages[1].content,/END/);
+    return call('submit_acceptance',pass);
+  });
+
+  f.records.submit('t',[{kind:'report',reference:'report.md',version:'v1',content:'observed'}],[],{});
+  try{assert.equal((await evaluateDelivery(f.store,f.task,f.workspace,f.redactor,f.guard)).outcome,'pass');}catch(error){t.diagnostic(JSON.stringify(f.bodies.slice(1,3).map(b=>receipts(b).slice(-3).map(r=>({keys:Object.keys(r),error:r.error,file:r.file,position:r.position,eof:r.eof,exit_code:r.exit_code})))));throw error;}assert.ok(observed?.file);
+  assert.equal(f.commands.filter(c=>c.command.includes('800000')).length,1,'paging must not repeat the command');
+});

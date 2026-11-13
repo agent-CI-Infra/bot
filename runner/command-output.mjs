@@ -36,8 +36,8 @@ export class CommandOutput {
   }
   result() {
     if (this.bytes <= outputLimit) return { output: this.head.subarray(0, this.bytes).toString('utf8'), truncated: false };
-    const head = new StringDecoder('utf8').write(this.head.subarray(0, outputLimit / 2));
-    const end = Buffer.concat([this.tail.subarray(this.cursor), this.tail.subarray(0, this.cursor)]);
+    const head = new StringDecoder('utf8').write(this.head.subarray(0, 64 * 1024));
+    const end = Buffer.concat([this.tail.subarray(this.cursor), this.tail.subarray(0, this.cursor)]).subarray(-64*1024);
     let start = 0; while (start < 3 && (end[start] & 0xc0) === 0x80) start++;
     const tail = end.subarray(start).toString('utf8');
     return { output: head + `\n[… ${this.bytes - Buffer.byteLength(head) - Buffer.byteLength(tail)} bytes omitted; read the complete result file …]\n` + tail,

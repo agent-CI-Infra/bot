@@ -1,3 +1,4 @@
+import { resultSpec, resultOwner } from './tool-results.js';
 import { executionModel, taskConfiguration, supplementalInstructions } from '../tasks/configuration.js';
 import { beginRun, endRun, traceEvent, traceSnapshot } from '../tasks/trace.js';
 import type { Store, Row } from '../storage/database.js';
@@ -130,6 +131,7 @@ export const subagentSystem = 'You are an independent agent started by the main 
  * The runtime never obtains permissions from model output or untrusted task text.
  */
 export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
+  if(!spec.roleRun)spec=resultSpec(spec,()=>resultOwner('task',spec.task.id,spec.task.authority_fence));
   await spec.guard();
   const attempts = spec.modelAttempts ?? modelRetries + 1;
   if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > modelRetries + 1)

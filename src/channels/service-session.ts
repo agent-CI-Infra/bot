@@ -1,3 +1,5 @@
+import { messageResultSources } from '../storage/tool-results.js';
+import { ResultSession, resultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
 import type { Store, Row } from '../storage/database.js';
 import { digest, fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
 import { runAgent } from '../agent/runtime.js';
@@ -34,7 +36,7 @@ const scoped = (name: string) => {
   return fn(name, tool.description.replace(/\s*Call github_read_token first\./g, '') + ' The repository argument selects one repository from list_projects; any other repository is refused.',
     { repository, ...tool.parameters.properties }, ['repository', ...tool.parameters.required]);
 };
-export const serviceTools = [
+export const serviceTools = [readToolResult,
   fn('list_projects', 'List the repositories this group may use now, with full names and GitHub links. Every other repository tool takes one of these full names.', {}),
   fn(listChatMembers, 'List the members of this group: id (open_id, the stable identity) and display name when known, from a cache refreshed at most every 10 minutes. Names can be missing (for example external members) or shared by several people: tell people apart by id. query filters by name or id.',
     { query: { type: 'string', maxLength: 100 }, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 200 } }),
@@ -219,13 +221,14 @@ export class ChannelServiceSessions {
       const known = m.sender_type === 'user' ? name?.({ id: String(m.sender_id), tenant: String(m.sender_tenant) }) : undefined;
       return known ? { ...m, sender_name: known } : m; }; };
     let ownHost: OwnTaskHost | undefined;
-    const execute = async (name: string, args: unknown, key: string): Promise<unknown> => {
+    const executeRaw = async (name: string, args: unknown, key: string): Promise<unknown> => {
       check();
       if (!serviceTools.some(t => t.function.name === name) || !offered(permissions(), name)) return { error: 'tool_not_allowed' };
       if (!args || typeof args !== 'object' || Array.isArray(args)) return { error: 'invalid_arguments' };
       this.store.run('UPDATE channel_service_turns SET tool_calls=tool_calls+1 WHERE id=?', id);
       try {
         const input = args as Json;
+        if(name==='read_tool_result')return results.read(input);
         if (name === sendMessageName) return await progress(input);
         if(mediaTools.some(t=>t.function.name===name))return media?await media.execute(name,input):{error:'channel_resource_source_required'};
         if(assistantComputerNames.includes(name))return computers?await computers.execute(name,input):{error:'computer_not_configured'};
@@ -285,6 +288,8 @@ export class ChannelServiceSessions {
         return { error: error.code, ...(error instanceof TaskError && error.detail ? { detail: redactor.text(error.detail) } : {}) };
       }
     };
+    const results=new ResultSession(this.store,resultScope(this.store,{id,conversation_id:chat.id}),()=>resultOwner('channel',chat.id,role.id,binding.principal_id,fence),check,redactor.values,()=>messageResultSources(this.store.db,[chat.id]));
+    const execute=(name:string,args:unknown,key:string)=>results.run(()=>executeRaw(name,args,key));
     try {
       let sourceVersion = this.ledger.sourceVersion(chat.id);
       const history = true;

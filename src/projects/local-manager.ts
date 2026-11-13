@@ -33,6 +33,7 @@ export class LocalManager implements Manager {
         stdio: ['ignore','pipe','pipe'] });
       let out = '', err = '';
       const timer = timeoutMs ? setTimeout(() => { child.kill('SIGKILL'); reject(new Error('local_runner_timeout')); }, timeoutMs) : undefined;
+      child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');
       child.stdout.on('data', chunk => { out += chunk; if (out.length > 8 * 1024 * 1024) child.kill('SIGKILL'); });
       child.stderr.on('data', chunk => { err = (err + chunk).slice(-1000); });
       child.on('error', error => { clearTimeout(timer); reject(error); });
@@ -46,6 +47,8 @@ export class LocalManager implements Manager {
     for (const workspace_id of ids) { const result = await this.execute({ operation_id: randomId(), type: 'reap', workspace_id }); if (!result.ok) throw new Error('local_recovery_failed'); }
   }
   async call(method: string, path: string, input?: Json, timeoutMs = 90000): Promise<any> {
+    const output=/^\/v1\/projects\/([1-9]\d*)\/output\/([a-f0-9]{48})\?offset=(\d+)$/.exec(path);
+    if(method==='GET'&&output&&output[1]===this.repositoryId){const response=await this.execute({type:'tail',operation_id:output[2],offset:Number(output[3])});if(!response.ok)fail(503,'output_unavailable');return response.result;}
     const match = /^\/v1\/projects\/([1-9]\d*)(?:\/(parallel|execute|start|stop|configure|refresh))?$/.exec(path);
     if (!match || match[1] !== this.repositoryId) return fail(404, 'local_project_not_found');
     const action = match[2];

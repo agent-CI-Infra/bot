@@ -1,3 +1,4 @@
+import { readToolResult } from './tool-results.js';
 import { commandTool } from './command.js';
 import { type Store } from '../storage/database.js';
 import { stop } from './common.js';
@@ -45,7 +46,7 @@ export function tools(profile: { workspaceWrite: boolean; completion: 'review' |
   const development = profile.completion === 'publication', allow = (flag?: boolean) => flag !== false;
   const writes = profile.writes ?? (development ? ['code', 'pull_request'] : profile.completion === 'review' ? ['reply', 'labels'] : ['reply']);
   const labels = writes.includes('labels') ? { labels: { type: 'array', items: string, description: 'Classification labels for this Issue or PR, chosen only from repository_labels. The control plane adds the valid ones after publishing; never apply labels yourself' } } : {};
-  const result:any[]=[];
+  const result:any[]=[readToolResult];
   if(allow(profile.read))result.push(fn('read_file','Read a file in this task workspace',{path:string},['path']));
   if(allow(profile.shell))result.push(commandTool(null));
   if(allow(profile.github))result.push(fn('github_read_token','Exchange a short-lived read-only GitHub token for this repository. Later run_command calls get it as GH_TOKEN and GITHUB_TOKEN for https://api.github.com; it can read code, Issues, pull requests, comments, reviews, Actions runs and checks, and cannot write anything. The token value is never shown to you',{},[]));

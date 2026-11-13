@@ -1,3 +1,4 @@
+import { commandResult, ResultSession, resultOwner } from './tool-results.js';
 import { type Store, type Row } from '../storage/database.js';
 import { type Manager } from '../projects/service.js';
 import { GitHub, repositoryTree } from '../github/client.js';
@@ -63,7 +64,9 @@ export class Workspace {
     try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
     catch{return stop('execution_interrupted','waiting_environment',`Runner request interrupted: ${request.type}${request.path?' '+request.path:''}`);}
     finally{operations.delete(id);if(!operations.size&&inFlight.get(this.task.id)===operations)inFlight.delete(this.task.id);}
-    const result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed',...(response.detail?{detail:response.detail}:{})});
+    let result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed',...(response.detail?{detail:response.detail}:{})});
+    if(request.type==='workspace_command'&&scope)result=await commandResult(result,id,async offset=>this.manager.call('GET',`/v1/projects/${this.task.repository_id}/output/${id}?offset=${offset}`),
+      new ResultSession(this.store,scope,()=>resultOwner('task',this.task.id,this.task.authority_fence),this.guard));
     // A repeated call replays this result: it is on disk before the row points to it.
     let resultRef:string|null=null;
     if(scope){resultRef=trajectories.append(scope,'tool_result',id,result);await trajectories.sync(resultRef);}

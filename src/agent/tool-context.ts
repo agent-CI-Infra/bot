@@ -60,6 +60,13 @@ export function boundedBatch(results: unknown[], budget = batchBytes): unknown[]
 export function boundedResult(value: unknown, bytes: number): unknown {
   const json = JSON.stringify(value) ?? 'null', size = Buffer.byteLength(json), sent = (text: string) => Buffer.byteLength(JSON.stringify(text));
   if (size <= bytes) return value;
+  if (value && typeof value === 'object' && typeof (value as any).file === 'string' && (value as any).file.startsWith('result:')) {
+    const v=value as any, status=Object.fromEntries(['file','bytes','encoding','notice','exit_code','signal','timed_out','error','output_bytes','log_path','running'].filter(k=>Object.hasOwn(v,k)).map(k=>[k,v[k]]));
+    let head=String(v.head??v.content??v.output??''),tail=String(v.tail??'');
+    const make=()=>({...status,truncated:true,head,tail});
+    while(Buffer.byteLength(JSON.stringify(make()))>Math.max(1024,bytes)&&head.length+tail.length){head=head.slice(0,Math.floor(head.length*.75));tail=tail.length>1?tail.slice(-Math.floor(tail.length*.75)):'';}
+    return make();
+  }
   const fields = value && typeof value === 'object' && !Array.isArray(value)
     ? Object.fromEntries(Object.entries(value).filter(([, v]) => v === null || typeof v !== 'object' && Buffer.byteLength(JSON.stringify(v) ?? '') <= 256)) : {};
   const room = Math.max(1024, bytes - Buffer.byteLength(JSON.stringify(fields)));
@@ -71,12 +78,16 @@ export function boundedResult(value: unknown, bytes: number): unknown {
 
 /** What the model gets instead of a result that cannot fit any request. A command has already run, so its status stays. */
 export function withheldResult(name: string, value: any) {
+  if(value?.file)return boundedResult(value,8192);
   const status = name === 'run_command' && value && typeof value === 'object' ? Object.fromEntries(['exit_code', 'signal', 'timed_out', 'truncated'].filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])) : {};
   return { error: 'tool_result_too_large', ...status, result_characters: JSON.stringify(value)?.length ?? 0, detail: name === 'run_command'
     ? 'The command ran, but its output alone exceeds the model request limit and was not returned. Do not print it again in full: pipe it through head, tail, grep or wc, or redirect it to a file and read only the parts you need.'
     : 'This result alone exceeds the model request limit and was not returned. Read a smaller part instead, for example one file at a time or a line range.' };
 }
-const elidedResult = (characters: number) => JSON.stringify({ elided: true, result_characters: characters, detail: 'This earlier tool result was removed to keep the request within the model limit. Run or read it again, narrowed, if you still need it.' });
+const elidedResult = (characters: number, content?: string) => {
+  let reference:any={};try{const value=JSON.parse(content??'null');if(value?.file)reference=Object.fromEntries(['file','bytes','encoding','notice'].filter(k=>Object.hasOwn(value,k)).map(k=>[k,value[k]]));}catch{}
+  return JSON.stringify({ elided: true, ...reference, result_characters: characters, detail: Object.keys(reference).length?'Read this file with read_tool_result; do not repeat its original operation.':'This earlier tool result was removed to keep the request within the model limit. Run or read it again, narrowed, if you still need it.' });
+};
 
 /** The messages of one tool loop and the folding that keeps its requests within budget. */
 export class ToolTranscript {
@@ -95,7 +106,7 @@ export class ToolTranscript {
         // A restored session may already carry markers.
         if (message.role !== 'tool' || this.elided.has(message) || typeof message.content !== 'string' || message.content.startsWith('{"elided":true')) continue;
         const before = Buffer.byteLength(JSON.stringify(message.content));
-        message.content = elidedResult(message.content.length); this.elided.add(message);
+        message.content = elidedResult(message.content.length,message.content); this.elided.add(message);
         bytes -= before - Buffer.byteLength(JSON.stringify(message.content));
       }
     };
@@ -105,7 +116,7 @@ export class ToolTranscript {
   /** A result that would not fit even with every earlier tool result elided never enters the conversation: the model gets
    * tool_result_too_large and reads a smaller part, instead of the next request failing the run. */
   admit(name: string, result: unknown, tools: any[]): string {
-    const content = JSON.stringify(result), base = requestBytes({ tools, messages: this.messages.map(message => message.role === 'tool' && !this.elided.has(message) ? { ...message, content: elidedResult(0) } : message) });
+    const content = JSON.stringify((result as any)?.file?boundedResult(result,batchBytes):result), base = requestBytes({ tools, messages: this.messages.map(message => message.role === 'tool' && !this.elided.has(message) ? { ...message, content: elidedResult(0,message.content) } : message) });
     // The content is a string inside the request, so it is escaped once more there.
     return base + Buffer.byteLength(JSON.stringify(content)) + 64 > requestLimit ? JSON.stringify(withheldResult(name, result)) : content;
   }

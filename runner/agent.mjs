@@ -21,9 +21,14 @@ export async function agentOperation(input,root){
   if(input.type==='workspace_agent_live'){
     const live=await readFile(dir+'/live.json','utf8').then(JSON.parse).catch(()=>null);if(!live)return {running:false};
     if(!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_offset');
-    const bytes=await readFile(dir+'/command.out').catch(()=>Buffer.alloc(0)),start=Math.min(input.offset,bytes.length);let end=Math.min(bytes.length,start+65536);
-    if(end<bytes.length)while(end>start&&(bytes[end]&0xc0)===0x80)end--;
-    return {...live,running:true,output:bytes.subarray(start,end).toString('utf8'),offset:end,state:'running'};
+    const path=typeof live.output_file==='string'&&new RegExp('^'+dir.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'/results/[a-f0-9]{48}\\.utf8$').test(live.output_file)?live.output_file:dir+'/command.out';
+    const file=await open(path,'r').catch(()=>null);let output='',offset=input.offset;
+    if(file)try{
+      const size=(await file.stat()).size,bytes=Buffer.alloc(Math.max(0,Math.min(65539,size-input.offset))),{bytesRead}=await file.read(bytes,0,bytes.length,input.offset);
+      let end=Math.min(65536,bytesRead);if(input.offset+end<size)while(end>0&&(bytes[end]&0xc0)===0x80)end--;
+      output=bytes.subarray(0,end).toString('utf8');offset=input.offset+end;
+    }finally{await file.close();}
+    const {output_file,...details}=live;return {...details,running:true,output,offset,state:'running'};
   }
   if(input.type==='workspace_agent_session'){
     if(!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_session_offset');

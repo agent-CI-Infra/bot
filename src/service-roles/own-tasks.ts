@@ -1,3 +1,4 @@
+import { ResultSession, resultOwner, resultScope } from '../agent/tool-results.js';
 import type { Store, Row } from '../storage/database.js';
 import { fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
 import { TaskError } from '../agent/common.js';
@@ -100,6 +101,7 @@ export class OwnTasks {
   }
   private async work(row: Row, request: string, host: OwnTaskHost): Promise<Json> {
     const previous = this.history(row), round = previous.length;
+    const resultFiles=new ResultSession(this.store,resultScope(this.store,{id:row.id,conversation_id:host.owner.owner_id}),()=>resultOwner('own-task',row.id,host.owner),host.check);
     // Own tasks run with the host's tools minus the own-task tools themselves (no recursion, nothing the host may not do)
     // and minus progress messages: only the host conversation addresses its people.
     const tools = () => host.tools().filter(t => !ownTaskNames.includes((t as any).function.name) && (t as any).function.name !== sendMessageName);
@@ -138,7 +140,7 @@ export class OwnTasks {
         checkControl();
         const name = call.function.name;
         results.push(host.clean(!tools().some(t => (t as any).function.name === name) ? { error: 'tool_not_allowed' }
-          : await host.execute(name, toolArguments(call), 'own:' + row.id + ':' + round + ':' + step + ':' + call.id)));
+          : await resultFiles.run(()=>host.execute(name, toolArguments(call), 'own:' + row.id + ':' + round + ':' + step + ':' + call.id),true)));
       }
       boundedBatch(results).forEach((result, i) => messages.push({ role: 'tool', tool_call_id: calls[i].id, content: JSON.stringify(result) }));
     }

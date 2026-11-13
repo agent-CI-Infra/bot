@@ -1,3 +1,4 @@
+import { resultSpec, resultOwner } from '../agent/tool-results.js';
 import {TaskRecords} from '../tasks/service.js';
 import { taskRecordContext } from '../tasks/record-tools.js';
 import {observeLongExecution,decideLongExecution} from './long-execution.js';
@@ -134,6 +135,7 @@ const harnessEventType:Record<string,[RunEvent['type'],RunEvent['category']]>={s
 async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|undefined,harnessOverride:string|undefined,options:RoleRunOptions,state:LoopState,shared:{sourceInput:string;priorRun:Row|undefined;priorSubmission:Row|null|undefined;memory:any}):Promise<PreparedRun<T>>{
  const s=spec.store,task=spec.task,stage=stageForAssignment(s,assignment),workflow=workOf(task as any),{resolved,continuation}=state;let instance=state.instance;
  const sourceFence=taskAuthorizationFence(s,task,role);
+ spec=resultSpec(spec,()=>resultOwner('task-role',task.id,role,sourceFence));
  if(instance.source_fence!==sourceFence){
   if(instance.sequence>0){const runtime=rebuildingRuntime(instance);s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=? WHERE id=?",runtime,instance.id);instance={...instance,session:'[]',harness_state:'{}',runtime};traceEvent(s,task.id,'source_authorization_changed',{role,instance_id:instance.id,recovery:'rebuilt_from_authorized_facts'},task.trace_run_id);}
   s.run('UPDATE role_instances SET source_fence=? WHERE id=?',sourceFence,instance.id);instance.source_fence=sourceFence;
