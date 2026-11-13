@@ -1,6 +1,8 @@
 // Saved views and custom fields belong to the signed-in user. Execution stages remain read-only.
 // A card is one work type's work on one object (or a release); saved views include object scope as well as grouping.
 let boardState = null, boardRequest = 0, boardDragging = false;
+// #503: one page read at a time, and a failed page stops the auto-loading until the reader asks for it again.
+let boardPending = 0, boardLoadFailed = false;
 function resetBoard() { boardRequest++;boardState=null;boardDragging=false;$('board-panel')?.replaceChildren(); }
 const boardPageSize = 100, boardTypes = [['', '全部对象'], ['issue', 'Issue'], ['pr', 'PR'], ['task', '通用任务']];
 const boardMedia = matchMedia('(max-width:760px)');
@@ -243,8 +245,32 @@ function boardParams(offset) {
   return new URLSearchParams({view_id:boardState.viewId,group_by:boardState.group,offset:String(offset),limit:String(boardPageSize),
     filters:JSON.stringify(boardConditions())});
 }
+// #503: the scroll areas that actually scroll the cards in the current layout. Desktop columns scroll one by one;
+// the list and the phone board scroll the board container itself. The nodes are rebuilt with every render.
+function boardScrollAreas() {
+  const columns=$('board-columns');if(!columns||!boardState)return [];
+  if(boardState.layout==='list'||boardMedia.matches)return [columns];
+  return [...columns.querySelectorAll('.board-column:not(.board-collapsed) .board-column-list')];
+}
+const boardEndReached=area=>area.scrollHeight-area.scrollTop-area.clientHeight<=200;
+// A page is read in two cases: the reader scrolled an area that really overflows to its end, or the board cannot scroll
+// at all yet while pages remain — a group whose first card sits on a later page must not leave a dead 「请加载更多」 line.
+// A short column that merely overflows by a few pixels never counts as «the reader reached the end»: only a real scroll
+// does, so the first page of a long board is not read to its end before the reader touches it.
+async function boardContinue(fromScroll=false) {
+  if(!me||tab!=='board'||boardPending||boardLoadFailed||!boardState?.hasMore||boardState.owner!==me.id)return;
+  // A render that happens before the board has its height (a hidden tab, the first frame of a layout switch) measures 0.
+  const areas=boardScrollAreas().filter(area=>area.clientHeight>0);
+  if(!areas.length)return;
+  const scrollable=areas.filter(area=>area.scrollHeight>area.clientHeight+1);
+  if(fromScroll){if(!scrollable.some(boardEndReached))return;}
+  else if(scrollable.length)return;
+  try{await boardLoadCards(true);}catch{/* boardLoadCards reports the failure and keeps the loaded cards */}
+}
 async function boardLoadCards(more=false) {
+  if(more&&boardPending)return;
   const request=++boardRequest,owner=me.id,offset=more?boardState.offset+boardPageSize:0;
+  boardPending++;if(!more)boardLoadFailed=false;
   $('board-columns').setAttribute('aria-busy','true');if(!more)$('board-status').textContent='正在加载…';
   try {
     const result=await api('/api/board/cards?'+boardParams(offset));
@@ -255,15 +281,24 @@ async function boardLoadCards(more=false) {
       signature:more?'':JSON.stringify([result.cards,result.has_more,result.counts,result.release_count,result.column_counts])});
     boardRenderCards(more);
   }catch(err){
-    if(!boardAccessLost(err,request,owner)&&request===boardRequest&&owner===me?.id&&tab==='board')
+    if(!boardAccessLost(err,request,owner)&&request===boardRequest&&owner===me?.id&&tab==='board'){
+      // A first read that fails with nothing on screen is a failure too: the count is unknown, not zero.
+      if(more||!boardState.cards?.length)boardLoadFailed=true;
       $('board-status').textContent=boardState.cards?.length?'读取失败，保留上次读取结果。':'工作数量未知，读取失败。';
+    }
     throw err;
   }
-  finally{if(request===boardRequest)$('board-columns')?.removeAttribute('aria-busy');}
+  finally{
+    boardPending--;
+    if(request===boardRequest)$('board-columns')?.removeAttribute('aria-busy');
+    boardSummary();
+    // The page that just arrived can leave the board still unable to scroll: keep reading, one page at a time.
+    if(!boardLoadFailed)void boardContinue();
+  }
 }
 // Stages change while the bot works. Refresh the first page quietly unless the person is in the middle of something.
 async function boardPoll() {
-  if(!me||tab!=='board'||projectRoute()||document.hidden||boardDragging||boardState?.owner!==me.id||boardState.offset>0)return;
+  if(!me||tab!=='board'||projectRoute()||document.hidden||boardDragging||boardState?.owner!==me.id)return;
   const columns=$('board-columns');
   if(!columns||columns.hasAttribute('aria-busy')||columns.contains(document.activeElement)||document.querySelector('dialog[open],.board-menu.open'))return;
   const request=boardRequest,owner=me.id;let result;
@@ -274,6 +309,12 @@ async function boardPoll() {
     return;
   }
   if(request!==boardRequest||me?.id!==owner||tab!=='board'||boardDragging)return;
+  // #503: once the reader has paged past the first page the quiet refresh only refreshes the counts. Replacing the cards
+  // would drop the appended pages and the reading position, so the loaded cards stay exactly where they are.
+  if(boardState.offset>0){
+    Object.assign(boardState,{counts:result.counts,releaseCount:result.release_count,workCount:result.work_count,columnCounts:result.column_counts});
+    boardSummary();return;
+  }
   const signature=JSON.stringify([result.cards,result.has_more,result.counts,result.release_count,result.column_counts]);if(signature===boardState.signature){boardSummary();return;}
   Object.assign(boardState,{cards:result.cards,hasMore:result.has_more,counts:result.counts,releaseCount:result.release_count,workCount:result.work_count,columnCounts:result.column_counts,signature});boardRenderCards(true);
 }
@@ -319,21 +360,37 @@ function boardRenderCards(keepScroll=false) {
     if(collapsed)section.addEventListener('click',event=>{if(!event.target.closest('button'))boardToggleColumn(column.id);});
     else{
       const list=element('div','','board-column-list');cards.forEach(item=>list.append(boardCard(item)));
-      if(!cards.length)list.append(element('p',total(column.id)?'这一分组的工作尚未加载，请加载更多。':'当前筛选和分组下没有条目','board-empty'));section.append(list);
+      if(!cards.length)list.append(element('p',total(column.id)?'这一分组的工作还在后面几页里，继续向下滚动就会读到。':'当前筛选和分组下没有条目','board-empty'));section.append(list);
     }
     columns.append(section);
   }
   if(!displayed.length)columns.append(element('p','当前筛选和分组下没有条目','board-empty'));
   if(keepScroll){columns.scrollLeft=left;columns.scrollTop=top;for(const list of columns.querySelectorAll('.board-column-list'))list.scrollTop=tops.get(list.closest('.board-column').dataset.columnId)||0;}
   else{columns.scrollLeft=0;columns.scrollTop=0;}
+  // The scroll listeners live on the nodes this render just built, so a rebuild drops them with the old nodes: no stale
+  // area keeps asking for a page the reader already left.
+  for(const area of boardScrollAreas())area.addEventListener('scroll',()=>{void boardContinue(true);},{passive:true});
   boardSummary();
+  // A layout switch can leave a phone column empty and the container short; that still has to read on until it can scroll.
+  void boardContinue();
 }
+// #503: the next page is read by scrolling, so the summary reports progress instead of offering a permanent button.
+// A failed page offers one 「重试」 that asks for the same offset again and disappears as soon as it succeeds.
 function boardSummary() {
-  const status=$('board-status');status.replaceChildren(element('span',`共 ${boardState.workCount||0} 项工作`));
-  if(boardState.hasMore)status.append(element('span',`已加载 ${boardState.cards.length} 项`),boardButton('加载更多',()=>boardLoadCards(true),'board-link'));
-  if(!boardState.cards.length&&boardOwnFilters().length)status.append(boardButton('清除筛选',async()=>{
+  const status=$('board-status');if(!status||!boardState)return;
+  const clearFilters=()=>{if(!boardState.cards.length&&boardOwnFilters().length)status.append(boardButton('清除筛选',async()=>{
     boardState.filters=[];boardState.type='all';boardDirty();boardShell();await boardLoadCards();
-  },'board-link'));
+  },'board-link'));};
+  // Nothing loaded and the first read failed: the work count is unknown, not zero.
+  if(boardLoadFailed&&!boardState.cards.length){status.replaceChildren(element('span','工作数量未知，读取失败。'));clearFilters();return;}
+  status.replaceChildren(element('span',`共 ${boardState.workCount||0} 项工作`));
+  // A board that fits one page keeps the bare count it has always shown; the progress line is for boards with pages.
+  if(!boardState.hasMore&&boardState.offset===0){clearFilters();return;}
+  if(boardState.cards.length)status.append(element('span',`已加载 ${boardState.cards.length} 项`));
+  if(boardPending)status.append(element('span',`正在加载${boardState.cards.length?'更多':''}…`));
+  else if(boardLoadFailed)status.append(element('span','读取失败，保留上次读取结果。'),boardButton('重试',()=>{boardLoadFailed=false;boardLoadCards(true).catch(()=>{});},'board-link'));
+  else if(!boardState.hasMore)status.append(element('span','已全部加载'));
+  clearFilters();
 }
 function boardKey(item) { return `${item.repository_id}/${item.object_type}/${item.card_type==='release'?item.release_id:item.card_type==='task'?item.task_id:item.object_number}`; }
 function boardCardKey(item) { return boardKey(item)+'/'+(item.card_category||''); }
