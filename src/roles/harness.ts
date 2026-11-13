@@ -48,7 +48,7 @@ export function processHarness<T>(spec:AgentSpec<T>){return async(services:Agent
    child.stdin.write(JSON.stringify({id:m.id,result:spec.redactor.clean(value)})+'\n');
   }).catch(fail);
  });
- child.stdin.write(JSON.stringify({start:{system:spec.system,prompt:spec.prompt,messages:spec.session?.messages??[],tools:spec.tools??[],finish:spec.finish?.name,finishes:spec.finish?.names,maxTurns:spec.maxTurns??32,token:spec.runAccess?.token??null}})+'\n');
+ child.stdin.write(JSON.stringify({start:{system:spec.system,prompt:spec.prompt,messages:spec.session?.messages??[],tools:spec.tools??[],finish:spec.finish?.name,finishes:spec.finish?.names,finalizationTools:spec.finalizationTools,finalizationMessage:spec.finish?.finalizationMessage,textResult:!!spec.validate||!spec.finish,maxTurns:spec.maxTurns??32,token:spec.runAccess?.token??null}})+'\n');
 });}
 
 export const completeTranscript=(messages:any[])=>{const last=messages.findLastIndex(m=>m?.role==='assistant');if(last<0||!messages[last].tool_calls?.length)return true;const answered=new Set(messages.slice(last+1).filter(m=>m?.role==='tool').map(m=>m.tool_call_id));return messages[last].tool_calls.every((c:any)=>answered.has(c.id));};
@@ -111,7 +111,7 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
   system:spec.system,prompt:spec.prompt,tools,control_tools:control,workspace_id:env.workspace.task.workspace_id};
  let submitted:{value:T}|undefined,repairs=0;
  return piAdapter<T>({store:spec.store,taskId:spec.task.id,guard:spec.guard,workspace:env.workspace,redactor:spec.redactor,config,conversation:base?.conversation,platform:base?.platform,repository:base?.repository,token:base?.token,createPullRequest:base?.createPullRequest,publication:base?.publication,
-  offered:name=>tools.some(t=>t.function.name===name),resume:env.resume,key:env.key,signal:spec.executionSignal,maxRequests:base?undefined:spec.maxTurns,checkpoint:spec.checkpoint,runtime:env.runtime,
+  offered:name=>tools.some(t=>t.function.name===name),resume:env.resume,key:env.key,signal:spec.executionSignal,maxRequests:base?undefined:spec.maxTurns??32,finalizationTools:spec.finalizationTools??(finish?.names??(finish?[finish.name]:[])),finalizationMessage:finish?.finalizationMessage,checkpoint:spec.checkpoint,runtime:env.runtime,
   // Pi may refuse a call itself (unknown tool, schema mismatch) before the control plane sees it; the model output always
   // passes through here, so every forbidden call is recorded whatever the runtime did with it.
   inspect:message=>{for(const call of message?.tool_calls??[]){const name=String(call.function?.name);if(!tools.some(t=>t.function.name===name)){spec.onDenied?.(name,'not_offered');continue;}let args:any=null;try{args=JSON.parse(call.function.arguments);}catch{}spec.screen?.(name,args);}},

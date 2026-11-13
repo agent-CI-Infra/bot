@@ -4,6 +4,7 @@ import type { AgentServices } from './runtime.js';
 import type { Workspace } from './workspace.js';
 import type { AgentModel } from './gateway.js';
 import type { Store } from '../storage/database.js';
+import { finalizationReserve } from './tool-context.js';
 
 /** The Pi SDK the project computer image installs (runner/package.json). scripts/check-runtime.mjs keeps the two equal. */
 export const piRuntime = { agent: 'pi', package: '@earendil-works/pi-coding-agent', version: '1.4.0' } as const;
@@ -45,6 +46,9 @@ export interface PiSession<T> {
   key?: string;
   /** At most this many model requests (a role budget). Pi itself has no turn limit. */
   maxRequests?: number;
+  /** Tools retained in the reserved final requests; the control mailbox enforces the same restriction. */
+  finalizationTools?: string[];
+  finalizationMessage?: string;
   /** Sees each model message before it is relayed, for example to record a denied tool call. */
   inspect?: (message: any) => void;
   /** A safe checkpoint: Pi waits for a model reply, so every tool result is already in its history. */
@@ -68,6 +72,9 @@ export function piAdapter<T>(session: PiSession<T>) {
   });
   const pause = (ms: number) => abortable(new Promise(resolve => setTimeout(resolve, ms)));
   return async ({ request, model }: AgentServices): Promise<T> => {
+    const finishingNames=new Set(session.finalizationTools??config.finish_tools??[]);
+    if(session.maxRequests!==undefined&&finishingNames.size&&session.maxRequests<=finalizationReserve(session.maxRequests))
+      stop('role_budget_exhausted','waiting_configuration','剩余请求不足以保留至少一轮工作和收尾，Pi 会话尚未启动。');
     // Revising an unpublished result continues this execution; later tasks choose a fresh model.
     if (conversation) conversation.model = model;
     if (session.runtime) {
@@ -98,7 +105,7 @@ export function piAdapter<T>(session: PiSession<T>) {
     // No deadline: the task runs until the agent finishes. Disabling the project or stopping its computer ends it
     // (guard() and the interrupted poll below). A request stays visible until the agent picks up its reply; answering it
     // twice would call the model twice.
-    let offset = conversation?.offset || 0, publication: any, requests = 0; const answered = new Set<string>();
+    let offset = conversation?.offset || 0, publication: any, requests = 0, finalizing=false; const answered = new Set<string>();
     for (;;) {
       await guard();
       const state = conversation ? await workspace.deliver({ type: 'workspace_agent_poll', offset })
@@ -147,7 +154,7 @@ export function piAdapter<T>(session: PiSession<T>) {
         const { id, name, arguments: args } = state.control_tool;
         if (typeof id !== 'string' || !/^[a-f0-9]{48}$/.test(id)) stop('model_request_invalid');
         // Only tools this session offered and the control plane runs itself; the runner cannot add one by naming it.
-        const allowed = session.control && session.offered(name) && (config.control_tools || []).includes(name);
+        const allowed = session.control && session.offered(name) && (config.control_tools || []).includes(name) && (!finalizing||finishingNames.has(name));
         const reply = allowed ? await abortable(session.control!(name, args)) : { result: { error: 'tool_not_allowed' } };
         const body = Buffer.from(JSON.stringify(redactor.clean({ result: reply.result, ...(reply.finish ? { finish: true } : {}) })));
         for (const [at, part] of chunks(body)) {
@@ -209,7 +216,17 @@ export function piAdapter<T>(session: PiSession<T>) {
         // existing checkpoints instead of forwarding that session's old catalog/tools to the model.
         if(body.tools?.some((tool:any)=>['read_playbook','select_playbooks'].includes(tool.function?.name))) stop('execution_interrupted','waiting_environment','旧执行会话仍包含已退役指南工具；保留任务记录并在新工作区恢复。');
         await session.checkpoint?.();
-        if (session.maxRequests !== undefined && ++requests > session.maxRequests) stop('agent_turn_limit', 'failed', `Pi 会话达到 ${session.maxRequests} 次模型请求上限。`);
+        const turn=requests++;
+        if (session.maxRequests !== undefined) {
+          if(turn>=session.maxRequests)stop('agent_turn_limit', 'failed', `Pi 会话达到 ${session.maxRequests} 次模型请求上限。`);
+          const reserve=finalizationReserve(session.maxRequests);
+          finalizing=finishingNames.size>0&&turn>=session.maxRequests-reserve;
+          if(finalizing){
+            body.tools=(body.tools??[]).filter((tool:any)=>finishingNames.has(tool.function?.name));
+            body.messages.push({role:'user',content:`Execution has ${session.maxRequests-turn} turns left. ${session.finalizationMessage??'Save the bounded artifact and submit the honest current result using the finish tool. Exploration tools are closed.'}`});
+            if(turn===session.maxRequests-1){const names=(body.tools as any[]).map(tool=>tool.function.name);body.tool_choice=names.length===1?{type:'function',function:{name:names[0]}}:'required';}
+          }
+        }
         store.run('UPDATE tasks SET model_started=1 WHERE id=?', taskId);
         let lastProgress = -Infinity, sequence = 0, heartbeat: ReturnType<typeof setInterval> | undefined;
         const ping = async () => {

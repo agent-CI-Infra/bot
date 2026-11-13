@@ -9,9 +9,9 @@ import { join } from 'node:path';
 import { Store } from '../dist/storage/database.js';
 import { TaskRecords } from '../dist/tasks/service.js';
 import { roleApi } from '../dist/roles/api.js';
-import { roleWorkspaces } from '../dist/roles/workspace.js';
+import { roleWorkspaces, controllerWorkspace } from '../dist/roles/workspace.js';
 import { runTeam } from '../dist/roles/team.js';
-import { roleExecutionModel } from '../dist/roles/run.js';
+import { roleExecutionModel, runRole } from '../dist/roles/run.js';
 import { evaluateDelivery } from '../dist/tasks/acceptance.js';
 import { requestCoordination, CoordinationWorker } from '../dist/tasks/coordination.js';
 import { Workspace } from '../dist/agent/workspace.js';
@@ -84,6 +84,26 @@ test('new roles default to Pi; general backends preserve role authority and Clau
     assert.equal(f.view().revision, view.revision);
   }
   assert.equal(f.view().recommended_backend, 'pi');
+});
+
+test('non-entry Pi reserves four of sixteen requests and refuses closed exploration calls', {skip,timeout:90000}, async t => {
+  let requests=0;
+  const f=await fixture(t,body=>{
+    const turn=++requests,names=body.tools.map(t=>t.function.name);
+    if(turn<=12){assert.ok(names.includes('read_file'));return call('read_file',{path:'report.md'});}
+    assert.deepEqual(names,['finish']);
+    assert.ok(body.messages.some(message=>text(message.content).includes(`${17-turn} turns left`)));
+    if(turn===13)return call('read_file',{path:'report.md'});
+    assert.ok(observations(body).some(result=>result.error==='tool_not_allowed'));
+    return call('finish',{summary:'submitted within the reserved requests'});
+  });
+  t.after(()=>{if(requests!==14)t.diagnostic(`Expected 14 provider requests, observed ${requests}`);});
+  f.put({roles:[{role_id:'dev',harness_ref:{id:'pi'},budget_policy_ref:{id:'bounded',max_turns:16}}]});
+  const result=await runRole({store:f.s,task:f.task,redactor:f.redactor,guard:f.guard,cancelSignal:t.signal,system:'Inspect the retained report',prompt:'Read the task, then submit',
+    tools:[tool('read_file',{path:{type:'string'}},['path']),tool('finish',{summary:{type:'string'}},['summary'])],execute:async()=>({content:'retained report'}),finish:{name:'finish',validate:value=>value},finalizationTools:['finish'],maxTurns:16},
+    'dev',undefined,'pi',{prepare:controllerWorkspace(f.workspace)});
+  assert.equal(requests,14);assert.equal(result.result.summary,'submitted within the reserved requests');
+  assert.equal(f.s.get("SELECT status FROM task_runs WHERE role='dev'").status,'succeeded');
 });
 
 test('external role models and an explicit QA model do not require an unrelated project default', async t => {
