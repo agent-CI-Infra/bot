@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openScheduleTimeRules, openScheduleIdentity } from './open-schedule-folds.mjs';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomId } from '../dist/core/security.js';
 import { defaultLimits } from '../dist/schedules/types.js';
@@ -27,7 +28,8 @@ test('user previews and creates a timezone-aware daily report, then explicitly r
   try {
     await page.setViewportSize({ width: 1440, height: 1100 }); await login(page, f);
     await page.getByLabel('计划名称', { exact: true }).fill('每日项目证据');
-    await page.getByLabel('计划时区', { exact: true }).fill('Asia/Shanghai'); await page.getByText('高级时间规则（Cron / 固定周期）',{exact:true}).click(); await page.getByLabel('Cron 表达式', { exact: true }).fill('0 9 * * *');
+    await openScheduleTimeRules(page);
+    await page.getByLabel('计划时区', { exact: true }).fill('Asia/Shanghai'); await page.getByLabel('Cron 表达式', { exact: true }).fill('0 9 * * *');
     await page.getByRole('button', { name: '预览日报计划', exact: true }).click();
     await expect(page.getByLabel('计划预览')).toContainText('Asia/Shanghai'); await expect(page.getByLabel('计划预览')).toContainText('缺数');
     await expect(page.getByLabel('计划预览')).toContainText('waiting_environment');
@@ -96,14 +98,14 @@ test('an administrator previews and saves a maintainer handover after the projec
     const keeper = await f.member('group-keeper-browser', { repository_ids: ['101'] });
     bindFixture(f.h, f.id, keeper.id, 'ou_keeper'); f.wire.state.members.push({ member_id_type: 'open_id', member_id: 'ou_keeper', tenant_key: 'actor-tenant' });
     const destination = await registerDestination(f.admin, await boundGroup(f, ['101'], 'oc_group', keeper.client));
-    await login(page, f); await page.getByLabel('执行身份类型', { exact: true }).selectOption('project');
+    await login(page, f); await openScheduleIdentity(page); await page.getByLabel('执行身份类型', { exact: true }).selectOption('project');
     await page.getByLabel('项目服务身份', { exact: true }).selectOption(service); await page.getByLabel('项目维护人', { exact: true }).selectOption(f.principal);
     await page.getByLabel('计划目的地', { exact: true }).selectOption(destination); await page.getByRole('button', { name: '保存计划', exact: true }).click();
     await expect.poll(() => f.h.store.get('SELECT count(*) n FROM schedules').n).toBe(1); const original = (await read(f, 'list_schedules')).schedules[0];
     expect((await successor.client('/api/users/' + f.principal, 'PATCH', { active: false })).status).toBe(200); await f.worker.tick();
     expect(f.h.store.get('SELECT state FROM schedules').state).toBe('paused');
     await page.context().clearCookies(); await page.reload(); await login(page, f, 'handover-admin-browser', successor.password);
-    await page.getByLabel('编辑计划', { exact: true }).selectOption(original.id); await page.getByLabel('项目维护人', { exact: true }).selectOption(maintainer.id);
+    await page.getByLabel('编辑计划', { exact: true }).selectOption(original.id); await openScheduleIdentity(page); await page.getByLabel('项目维护人', { exact: true }).selectOption(maintainer.id);
     await page.getByRole('button', { name: '预览日报计划', exact: true }).click(); await expect(page.getByLabel('计划预览')).toContainText('Asia/Shanghai');
     await page.getByRole('button', { name: '保存计划', exact: true }).click();
     await expect.poll(() => f.h.store.get('SELECT maintainer_id FROM schedules').maintainer_id).toBe(maintainer.id);
@@ -132,6 +134,7 @@ test('a delayed preview cannot replace the current timezone or an edited form',a
   await page.route('**/api/management/query',async route=>{
    const body=route.request().postDataJSON();if(body.operation==='preview_schedule'&&body.arguments.plan.timezone==='Pacific/Auckland'){const response=await route.fetch();entered();await gate;await route.fulfill({response});}else await route.continue();
   });
+  await openScheduleTimeRules(page);
   await page.getByLabel('计划时区',{exact:true}).fill('Pacific/Auckland');await page.getByRole('button',{name:'预览日报计划',exact:true}).click();await seen;await page.getByLabel('计划时区',{exact:true}).fill('UTC');await page.getByRole('button',{name:'预览日报计划',exact:true}).click();await expect(page.getByLabel('计划预览')).toContainText('时区：UTC');
   const finished=page.waitForEvent('requestfinished',request=>request.url().endsWith('/query')&&request.postData()?.includes('Pacific/Auckland'));release();await finished;await page.evaluate(()=>new Promise(requestAnimationFrame));await expect(page.getByLabel('计划预览')).toContainText('时区：UTC');await expect(page.getByLabel('计划预览')).not.toContainText('Auckland');expect(f.h.store.get('select count(*) n from schedules').n).toBe(0);
  }finally{release?.();await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
@@ -225,6 +228,7 @@ for (const surface of ['management', 'project']) {
       const steps = page.getByRole('navigation', { name: '计划编辑步骤' });
       await page.getByLabel('计划名称', { exact: true }).fill('Mobile delivery');
       await steps.getByRole('button', { name: '触发时间', exact: true }).click();
+      await openScheduleTimeRules(page);
       await page.getByLabel('计划时区', { exact: true }).fill('America/Argentina/Buenos_Aires');
       await page.getByRole('button', { name: '预览日报计划', exact: true }).click();
       await expect(page.getByLabel('计划预览')).toContainText('America/Argentina/Buenos_Aires');
@@ -282,6 +286,7 @@ test('schedule preview matches the server after a timezone change, is reachable 
     await page.setViewportSize({ width: 1440, height: 1300 }); await login(page, f);
     const start = new Date(Date.now() - 86400000).toISOString();
     await page.getByLabel('计划名称', { exact: true }).fill('跨时区长名称计划：大西洋两岸的日报协调');
+    await openScheduleTimeRules(page);
     await page.getByLabel('计划时区', { exact: true }).fill('America/Argentina/ComodRivadavia');
     await page.getByLabel('有效期开始', { exact: true }).fill(start);
     await page.getByLabel('计划目的地', { exact: true }).selectOption(longDestination);
@@ -293,6 +298,7 @@ test('schedule preview matches the server after a timezone change, is reachable 
     await page.keyboard.press('Enter');
     await expect(page.getByLabel('计划预览')).toContainText('未来触发');
     // 换时区后，预览列的每条未来时间必须等于服务端 preview_schedule 的 nextTime 结果。
+    await openScheduleTimeRules(page);
     await page.getByLabel('计划时区', { exact: true }).fill('Europe/Berlin');
     await page.getByRole('button', { name: '预览日报计划', exact: true }).click();
     await expect(page.getByLabel('计划预览')).toContainText('Europe/Berlin');
@@ -309,6 +315,7 @@ test('schedule preview matches the server after a timezone change, is reachable 
     await page.getByRole('button', { name: '预览日报计划', exact: true }).click();
     await expect(page.getByLabel('计划预览')).toContainText('无下一次触发');
     // 390px：执行时区与目的地一行能读全，页面不横向溢出。
+    await openScheduleTimeRules(page);
     await page.getByLabel('计划时区', { exact: true }).fill('America/Argentina/ComodRivadavia');
     await page.setViewportSize({ width: 390, height: 900 });
     const context = page.locator('.schedule-context');

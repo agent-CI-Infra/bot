@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openSubscriptionAdvanced } from './open-schedule-folds.mjs';
 import { mkdirSync, rmSync } from 'node:fs';
 import { channelFixture, privateChat, registerDestination } from '../test/channel-fixture.mjs';
 async function environment(register=true){let now=Date.now();const f=await channelFixture(undefined,{schedules:{automatic:false,clock:()=>now}});const chat=await privateChat(f);f.destination=register?await registerDestination(f.admin,chat):'chat:'+chat.id;await f.service.tick();f.query=async(op,args={})=>(await f.admin('/api/management/query','POST',{operation:op,target:{project_id:'101'},arguments:args})).value;
@@ -33,7 +34,7 @@ test('a project reader can inspect another identity subscription without editing
  }finally{await close(f);}});
 test('a stale time preview cannot overwrite edited inputs and an invalid destination preserves both drafts',async({page})=>{const f=await environment();let release;try{
  await login(page,f);await page.getByLabel('计划名称',{exact:true}).fill('plan survives destination refusal');await page.getByLabel('订阅名称',{exact:true}).fill('private destination draft');let entered;const seen=new Promise(resolve=>{entered=resolve;}),gate=new Promise(resolve=>{release=resolve;});
- await page.route('**/api/management/query',async route=>{if(route.request().postDataJSON().operation!=='preview_subscription'){await route.continue();return;}const response=await route.fetch();entered();await gate;await route.fulfill({response});});await page.getByRole('button',{name:'预览事件订阅时间',exact:true}).click();await seen;await page.getByLabel('订阅时区',{exact:true}).fill('Europe/London');release();await page.unrouteAll({behavior:'wait'});await expect(page.getByLabel('事件订阅时间预览',{exact:true})).toContainText('草稿已修改');
+ await page.route('**/api/management/query',async route=>{if(route.request().postDataJSON().operation!=='preview_subscription'){await route.continue();return;}const response=await route.fetch();entered();await gate;await route.fulfill({response});});await page.getByRole('button',{name:'预览事件订阅时间',exact:true}).click();await seen;await openSubscriptionAdvanced(page);await page.getByLabel('订阅时区',{exact:true}).fill('Europe/London');release();await page.unrouteAll({behavior:'wait'});await expect(page.getByLabel('事件订阅时间预览',{exact:true})).toContainText('草稿已修改');
  f.h.store.run("update channel_outbox set state='blocked' where id=?",f.destination);await page.getByRole('button',{name:'预览事件订阅时间',exact:true}).click();await expect(editor(page).getByRole('alert')).toContainText('目的地或受众需要重新核验');await expect(page.getByLabel('订阅名称',{exact:true})).toHaveValue('private destination draft');await expect(page.getByLabel('计划名称',{exact:true})).toHaveValue('plan survives destination refusal');expect(f.h.store.get('select count(*) n from notification_subscriptions').n).toBe(0);
  }finally{release?.();await close(f);}});
 
