@@ -436,3 +436,23 @@ test('Docker manager forwards versioned acceptance/recovery operations and rejec
   await assert.rejects(f.projects.operate('101','execute',{operation_id:id(),generation:1,request}),/invalid_runner_request/);
  assert.equal(f.docker.runs.length,count);assert.equal(f.projects.get('101').state,'ready');
 });
+
+// #534: the control plane starts a three-way integration when a branch fell behind main (src/tasks/integration.ts) and
+// re-checks it before publishing (src/agent/engine.ts). The static whitelist listed neither call, so Docker mode answered
+// 400 invalid_runner_request and the task stayed in waiting_environment; LocalManager's /^(workspace_|git_)/ passthrough
+// hid it, which is why this goes through the manager's own validation path. The payloads are the ones the control plane
+// sends, with the same 40-hex and 48-hex shapes runner/workspace.mjs insists on.
+test('the project computer accepts the control plane\'s three-way integration calls',async t=>{
+ const f=fixture(t);await f.projects.register('101');const workspace='a'.repeat(48),source='b'.repeat(48),sha='c'.repeat(40),tree='d'.repeat(40),base='e'.repeat(40);
+ const integrate={type:'workspace_integrate',workspace_id:workspace,source_workspace_id:source,sha,tree_sha:tree,base_tree:base},call=()=>f.docker.runs.at(-1);
+ await f.projects.operate('101','execute',{operation_id:id(),generation:1,request:integrate});
+ assert.deepEqual([call().type,call().source_workspace_id,call().sha,call().tree_sha,call().base_tree],['workspace_integrate',source,sha,tree,base]);
+ await f.projects.operate('101','execute',{operation_id:id(),generation:1,request:{type:'workspace_integration_check',workspace_id:workspace}});
+ assert.equal(call().type,'workspace_integration_check');
+ const count=f.docker.runs.length;
+ for(const request of [{...integrate,unknown:true}, {...integrate,base_tree:'not-a-tree'}, {...integrate,source_workspace_id:'../other'},
+  {...integrate,source_workspace_id:workspace}, {type:'workspace_integrate',workspace_id:workspace,sha,tree_sha:tree,base_tree:base},
+  {type:'workspace_command',workspace_id:workspace,source_workspace_id:source,command:'true'}])
+  await assert.rejects(f.projects.operate('101','execute',{operation_id:id(),generation:1,request}),/invalid_runner_request/);
+ assert.equal(f.docker.runs.length,count);assert.equal(f.projects.get('101').state,'ready');
+});

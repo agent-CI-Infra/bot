@@ -49,8 +49,8 @@ export function validateSpec(input) {
 const digest = value => createHash('sha256').update(value).digest('hex');
 const commandTypes = ['command', 'workspace_command'];
 export const parallelBounds = [1, 32];
-const runnerTypes = ['command','read','write','workspace_init','workspace_acceptance','workspace_source','workspace_restore','workspace_checkout','workspace_context','git_have','git_pack','git_import','git_export','workspace_write','workspace_snapshot','workspace_read','workspace_export','workspace_command','workspace_finalize','workspace_blob','workspace_reuse','workspace_cache','workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_repository_tool','workspace_agent_pull_request','workspace_agent_live','workspace_agent_runtime','workspace_agent_control_tool','reap','tasks_list','tasks_remove'];
-const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','base64','offset','author_email','final','mode','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits','entries'];
+const runnerTypes = ['command','read','write','workspace_init','workspace_acceptance','workspace_source','workspace_restore','workspace_integrate','workspace_integration_check','workspace_checkout','workspace_context','git_have','git_pack','git_import','git_export','workspace_write','workspace_snapshot','workspace_read','workspace_export','workspace_command','workspace_finalize','workspace_blob','workspace_reuse','workspace_cache','workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_repository_tool','workspace_agent_pull_request','workspace_agent_live','workspace_agent_runtime','workspace_agent_control_tool','reap','tasks_list','tasks_remove'];
+const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','base_tree','base64','offset','author_email','final','mode','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits','entries'];
 // The control plane's workspace cleanup: list the task directories, remove a few of them per call (runner/task-dirs.mjs).
 const cleanupTypes = ['tasks_list', 'tasks_remove'];
 // WAL files keep the largest size they ever reached; after a checkpoint resets the log, SQLite truncates it to this.
@@ -60,8 +60,13 @@ export const walSizeLimit = 512 * 1024 * 1024;
 function validateCall(call) {
   if (!call || !runnerTypes.includes(call.type) || Object.keys(call).some(k => !runnerKeys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
   if (call.workspace_id !== undefined && !/^[a-f0-9]{48}$/.test(call.workspace_id) || call.idle !== undefined && call.idle !== true) throw new ManagerError('invalid_runner_request', 400);
-  if (call.source_workspace_id !== undefined && (!['workspace_acceptance','workspace_restore'].includes(call.type) || !/^[a-f0-9]{48}$/.test(call.source_workspace_id))) throw new ManagerError('invalid_runner_request', 400);
-  if (['workspace_acceptance','workspace_restore'].includes(call.type) && !/^[a-f0-9]{48}$/.test(call.source_workspace_id || '')) throw new ManagerError('invalid_runner_request', 400);
+  // The three-way integration the control plane starts when a branch fell behind main names the workspace it integrates
+  // from (src/tasks/integration.ts:52); runner/workspace.mjs refuses a snapshot without a 40-hex sha, tree and base tree
+  // and a source other than its own workspace, so the manager refuses it before the call reaches the computer.
+  const sourced = ['workspace_acceptance','workspace_restore','workspace_integrate'];
+  if (call.source_workspace_id !== undefined && (!sourced.includes(call.type) || !/^[a-f0-9]{48}$/.test(call.source_workspace_id))) throw new ManagerError('invalid_runner_request', 400);
+  if (sourced.includes(call.type) && !/^[a-f0-9]{48}$/.test(call.source_workspace_id || '')) throw new ManagerError('invalid_runner_request', 400);
+  if (call.type === 'workspace_integrate' && (![call.sha,call.tree_sha,call.base_tree].every(value => /^[a-f0-9]{40}$/.test(value || '')) || call.source_workspace_id === call.workspace_id)) throw new ManagerError('invalid_runner_request', 400);
   if (call.timeout_ms != null && !(Number.isFinite(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
   // A cleanup call names task directories only by their ids, at most 20 at a time, and carries nothing else.
   if (cleanupTypes.includes(call.type) ? Object.keys(call).some(k => !['type', 'entries'].includes(k)) || (call.type === 'tasks_list' ? call.entries !== undefined
