@@ -391,3 +391,8 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 /* #564: recommended-config first screen; advanced role details stay folded. */
 .role-advanced { margin-top: var(--space-5, 16px); }
 .role-advanced > summary { cursor: pointer; font-weight: 600; min-height: var(--control-min, 44px); display: flex; align-items: center; }
+
+/* #566: role detail is one scrolling form; advanced fields stay folded. */
+.role-form-advanced { margin-top: 16px; padding-top: 8px; border-top: 1px solid var(--border, #d8dee9); }
+.role-form-advanced > summary { cursor: pointer; font-weight: 600; min-height: var(--control-min, 44px); display: flex; align-items: center; }
+.role-nav a[data-testid="role-list-link"] { font-weight: 600; }

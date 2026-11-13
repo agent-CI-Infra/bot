@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
+import { goRolePage } from './open-role-advanced.mjs';
 
 const stage = (stage_id, depends_on = [], writer = false) => ({ stage_id, depends_on, delivery_types: ['code', 'artifact', 'no_changes'],
   role_constraints: { kinds: [writer ? 'writer' : 'observer'], role_ids: [writer ? 'dev' : 'reviewer'], independent: !writer,
@@ -40,8 +41,8 @@ test('the same stage fields, dependency levels and reachable editor work at six 
     }
     const target = exactGroup(page, 'final'); await target.getByLabel('最多尝试次数', { exact: true }).fill('5'); await target.getByLabel('阶段最多工具调用', { exact: true }).fill('40');
     await target.getByLabel('阶段最多秒数', { exact: true }).fill('600');
-    await page.locator('.role-nav').getByRole('link', { name: 'Dev', exact: true }).click();
-    await page.locator('.role-nav').getByRole('link', { name: '阶段策略', exact: true }).click();
+    await goRolePage(page, { role: 'Dev' });
+    await goRolePage(page, { view: 'stages' });
     await expect(exactGroup(page, 'final').getByLabel('最多尝试次数', { exact: true })).toHaveValue('5');
     mkdirSync('.tmp/stage-policy-229/previews', { recursive: true });
     for (const [name, width] of [['desktop', 1440], ['mobile', 390]]) {
@@ -124,14 +125,14 @@ test('an empty extra policy keeps the independent acceptance explanation and can
 test('unreachable roles, optional prerequisites and invalid evidence locate their real server fields', async ({ page }) => {
   const { h, admin, revision } = await prepared(page);
   try {
-    await page.locator('.role-nav').getByRole('link', { name: 'Reviewer', exact: true }).click();
+    await goRolePage(page, { role: 'Reviewer' });
     await page.getByLabel('启用角色', { exact: true }).uncheck();
-    await page.locator('.role-nav').getByRole('link', { name: '阶段策略', exact: true }).click();
+    await goRolePage(page, { view: 'stages' });
     await save(page).click();
     await expect(exactGroup(page, 'review')).toHaveAttribute('aria-invalid', 'true');
     await expect(page.getByRole('alert').filter({ hasText: 'required_stages.review.unreachable_role' })).toBeVisible();
-    await page.locator('.role-nav').getByRole('link', { name: 'Reviewer', exact: true }).click(); await page.getByLabel('启用角色', { exact: true }).check();
-    await page.locator('.role-nav').getByRole('link', { name: '阶段策略', exact: true }).click();
+    await goRolePage(page, { role: 'Reviewer' }); await page.getByLabel('启用角色', { exact: true }).check();
+    await goRolePage(page, { view: 'stages' });
     await exactGroup(page, 'review').getByLabel('必须完成', { exact: true }).uncheck();
     await expect(page.locator('.stage-policy-issues')).toContainText('可选阶段 review'); await save(page).click();
     await expect(exactGroup(page, 'final')).toHaveAttribute('aria-invalid', 'true');

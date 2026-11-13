@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
-import { openRoleAdvanced } from './open-role-advanced.mjs';
+import { openRoleAdvanced, goRolePage } from './open-role-advanced.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 
 // A model the role previews can resolve; nothing here asks it anything.
@@ -33,10 +33,13 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     const cardOf = title => page.locator('.side-card').filter({ has: page.getByRole('heading', { name: title, exact: true }) });
     await openRoleAdvanced(page);
     await expect(cardOf('角色概览')).toBeVisible();
+    await goRolePage(page, { role: 'manager' });
     const managerPicker=page.getByRole('combobox',{name:'manager Agent 后端',exact:true});
     await expect(managerPicker).toHaveValue('pi');
     h.store.run("INSERT INTO settings(key,value) VALUES('roles:101',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",JSON.stringify({enabled:true,harnesses:{}}));
-    await page.reload();await expect(managerPicker).toHaveValue('native');
+    await page.reload();
+    await goRolePage(page, { role: 'manager' });
+    await expect(managerPicker).toHaveValue('native');
     await managerPicker.selectOption('pi');
     await page.getByRole('button',{name:'保存角色配置',exact:true}).click();
     await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');

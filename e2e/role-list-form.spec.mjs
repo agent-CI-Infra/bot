@@ -1,0 +1,74 @@
+import { test, expect } from '@playwright/test';
+import { mkdirSync } from 'node:fs';
+import { harness, setup, account, repository } from '../test/helpers.mjs';
+import { openRoleAdvanced, openRoleFromList, openRoleFormAdvanced } from './open-role-advanced.mjs';
+import { TaskEngine } from '../dist/agent/engine.js';
+
+test('角色概览是列表，点名称打开单页表单，没有两排标签，保存后仍在', async ({ page }) => {
+  test.setTimeout(90000);
+  const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const out = '.tmp/role-list-form';
+  mkdirSync(out, { recursive: true });
+  try {
+    const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto(h.admin + '/#/projects/101/roles');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await openRoleAdvanced(page);
+    const table = page.getByRole('table', { name: '角色解析结果' });
+    await expect(table).toBeVisible();
+    await expect(table.getByRole('columnheader', { name: '角色', exact: true })).toBeVisible();
+    await expect(table.getByRole('columnheader', { name: '启用', exact: true })).toBeVisible();
+    await expect(table.getByRole('columnheader', { name: '职责', exact: true })).toBeVisible();
+    await expect(table.getByRole('columnheader', { name: '状态', exact: true })).toBeVisible();
+    await expect(table.getByRole('columnheader', { name: 'Agent 后端', exact: true })).toHaveCount(0);
+    await expect(table.getByRole('columnheader', { name: '模型', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('navigation', { name: '角色设置分区' })).toHaveCount(0);
+    await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Manager', exact: true })).toHaveCount(0);
+    await page.screenshot({ path: `${out}/list-1440.png`, fullPage: true });
+
+    await openRoleFromList(page, 'Dev');
+    await expect(page).toHaveURL(/\/roles\/dev$/);
+    await expect(page.getByTestId('role-form')).toBeVisible();
+    await expect(page.getByRole('heading', { name: '基本信息', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Agent 与模型', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '提示词', exact: true })).toBeVisible();
+    await expect(page.getByLabel('dev Agent 后端', { exact: true })).toBeVisible();
+    await expect(page.getByLabel('角色提示词', { exact: true })).toBeVisible();
+    const advanced = page.getByTestId('role-form-advanced');
+    await expect(advanced).toBeVisible();
+    expect(await advanced.evaluate(el => el.open)).toBe(false);
+    await expect(page.getByLabel('dev 技能包', { exact: true })).toBeHidden();
+    await expect(page.getByRole('navigation', { name: '角色设置分区' })).toHaveCount(0);
+    const crumb = page.getByTestId('role-list-link');
+    await expect(crumb).toHaveText('← 角色列表');
+    await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Dev', exact: true })).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Manager', exact: true })).toHaveCount(0);
+    await page.getByLabel('dev Agent 后端', { exact: true }).selectOption('native');
+    await page.getByLabel('角色提示词', { exact: true }).fill('先读复现，再改代码。');
+    const save = page.getByRole('button', { name: '保存角色配置', exact: true });
+    await expect(save).toBeVisible();
+    await page.screenshot({ path: `${out}/form-1440.png`, fullPage: true });
+    await save.click();
+    await expect(page.locator('.flash')).toContainText('角色配置已保存');
+    const saved = (await admin('/api/repositories/101/roles')).value.configuration.roles.find(r => r.role_id === 'dev');
+    expect(saved.persona_prompt).toBe('先读复现，再改代码。');
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await crumb.click();
+    await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: `${out}/list-390.png`, fullPage: true });
+    await openRoleFromList(page, 'Dev');
+    await expect(page.getByTestId('role-form')).toBeVisible();
+    await expect(page.getByLabel('角色提示词', { exact: true })).toHaveValue('先读复现，再改代码。');
+    await openRoleFormAdvanced(page);
+    await expect(page.getByLabel('dev 技能包', { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: `${out}/form-390.png`, fullPage: true });
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); }
+});

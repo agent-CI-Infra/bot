@@ -1,25 +1,29 @@
+function roleListStatus(role, state) {
+  const parts = [role.enabled ? '已启用' : '已关闭'];
+  if (state.dirty) parts.push('有未保存的更改');
+  else if (state.data.configured) parts.push('已保存');
+  else parts.push('推荐配置');
+  return parts.join(' · ');
+}
 function roleOverviewCards(state, redraw) {
-  const { data, draft } = state, overview = card('角色概览'), { table, body } = projectTable(['角色', '启用', '职责', 'Agent 后端', '模型', '技能包', '预算', '权限控制'], '角色解析结果');
+  const { data, draft } = state, overview = card('角色概览'), { table, body } = projectTable(['角色', '启用', '职责', '状态'], '角色解析结果');
   // The version line is the one place that says whether what is on screen is in force or still a draft.
   roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; overview.append(roleDraftStatus);
-  overview.append(note(`这里可以直接修改每个角色的配置；点角色名称可编辑提示词和完整设置。修改在点击「保存角色配置」后生效。模型解析按「${workTypeName(data.workflow)}」工作类型展示最近读取的已保存配置；角色详情可切换工作类型检查。`));
+  overview.append(note('点角色名称打开完整表单，在同一页编辑并保存。列表只展示名称、是否启用、职责和状态。'));
   for (const role of draft.roles) {
     const row = document.createElement('tr'); row.dataset.role = role.role_id;
     const link = element('a', roleLabel(role.role_id, role.name)); link.href = `#/projects/${current.id}/roles/${role.role_id}`;
-    tableCell(row, '角色', link, roleText(role.role_id + ' 名称', role, 'name', state));
+    link.dataset.testid = 'role-list-' + role.role_id;
+    tableCell(row, '角色', link);
     tableCell(row, '启用', roleCheck(role.role_id + ' 启用', role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind)));
-    // Responsibility and budget are summary facts here; they stay editable on the role page itself.
     tableCell(row, '职责', note(role.responsibility || '未填写职责'));
-    tableCell(row, '预算', note(role.budget_policy_ref?.id || '未设置'));
     const saved = data.configuration.roles.find(entry => entry.role_id === role.role_id);
-    tableCell(row, 'Agent 后端', roleBackendPicker(role, state, redraw), note(data.configured ? '已保存：' + harnessName(saved?.harness_ref.id) : '尚未保存，当前显示推荐配置'));
-    if (role.role_id === 'dev' && data.configured && saved?.entry_harness_source !== 'role' && saved?.harness_ref.id !== 'pi') row.lastElementChild.append(note('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更')); 
-    tableCell(row, '模型', roleModelPicker(role, state), note('已保存 · ' + workTypeName(data.workflow) + '：' + roleModelText(data.preview.find(entry => entry.role === role.role_id))));
-    tableCell(row, '技能包', roleSkillPicker(role, state));
-    const details = element('details', '', 'role-permission-details'); details.append(element('summary', '编辑权限'), rolePermissionEditor(role, state));
-    tableCell(row, '权限控制', details); body.append(row);
+    const status = note(roleListStatus(role, state));
+    if (role.role_id === 'dev' && data.configured && saved?.entry_harness_source !== 'role' && saved?.harness_ref.id !== 'pi') status.append(element('span', '检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更', 'muted'));
+    tableCell(row, '状态', status);
+    body.append(row);
   }
-  overview.append(table, note('Agent 后端：' + data.backends.map(backend => backend.name + (backend.available ? '（可用）' : '（尚未接入）')).join('；')));
+  overview.append(table);
   const coordination = card('角色协调设置'); coordination.append(roleCheck('开启角色协调', draft, 'enabled', state));
   for (const [id, title, covers] of roleEntries) coordination.append(roleCheck(`${title}交给主控（${covers}）`, draft.controller.entries, id, state));
   coordination.append(note('关闭协调时，任务沿用原执行器；独立 QA 仍然负责验收。正在运行的任务保留启动时的配置快照。'));

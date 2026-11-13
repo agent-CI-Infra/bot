@@ -25,19 +25,34 @@ function rolesConsole() {
     state.redraw = draw;
     let saveRoles = async () => {};
     holder.replaceChildren(); roleDraftStatus = null;
-    const nav = element('nav', '', 'role-nav'); nav.setAttribute('aria-label', '角色列表');
     const requestedView = new URLSearchParams(location.hash.split('?')[1] || '').get('view');
     const auxiliaryView = !current.item && ['skills', 'stages'].includes(requestedView) ? requestedView : '';
-    for (const [key, title] of [['', '概览'], ...state.draft.roles.map(role => [role.role_id, roleLabel(role.role_id, role.name)])]) {
-      const item = element('a', title); item.href = `#/projects/${id}/roles${key ? '/' + key : ''}`;
-      if ((current.item || '') === key && !auxiliaryView) item.setAttribute('aria-current', 'page'); nav.append(item);
-    }
-    for (const [view, title] of [['stages', '阶段策略'], ['skills', '技能包目录']]) {
-      const link = element('a', title); link.href = `#/projects/${id}/roles?view=${view}`;
-      if (auxiliaryView === view) link.setAttribute('aria-current', 'page'); nav.insertBefore(link, nav.children[1] || null);
-    }
     const fields = element('fieldset', '', 'role-editor-fields'); fields.disabled = !!state.busy;
     const role = state.draft.roles.find(role => role.role_id === current.item);
+    // #566: overview is a list; a role (or skills/stages) page only has a back crumb, not a tab strip of every role.
+    const nav = element('nav', '', 'role-nav'); nav.setAttribute('aria-label', '角色列表');
+    if (current.item || auxiliaryView) {
+      const back = element('a', '← 角色列表');
+      back.href = `#/projects/${id}/roles`;
+      back.dataset.testid = 'role-list-link';
+      nav.append(back);
+      if (current.item) {
+        const here = element('a', role ? roleLabel(role.role_id, role.name) : current.item);
+        here.href = `#/projects/${id}/roles/${current.item}`;
+        here.setAttribute('aria-current', 'page');
+        nav.append(here);
+      } else {
+        const titles = { skills: '技能包目录', stages: '阶段策略' };
+        const here = element('a', titles[auxiliaryView]);
+        here.href = `#/projects/${id}/roles?view=${auxiliaryView}`;
+        here.setAttribute('aria-current', 'page');
+        nav.append(here);
+      }
+    } else {
+      const skills = element('a', '技能包目录'); skills.href = `#/projects/${id}/roles?view=skills`; skills.dataset.testid = 'role-skills-link';
+      const stages = element('a', '阶段策略'); stages.href = `#/projects/${id}/roles?view=stages`; stages.dataset.testid = 'role-stages-link';
+      nav.append(skills, stages);
+    }
     if (auxiliaryView === 'skills') { roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus, roleSkillsWorkspace(state, draw)); }
     else if (auxiliaryView === 'stages') { roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus, roleStageWorkspace(state, draw)); }
     else if (current.item && !role) fields.append(note('这个角色已不存在，请在概览选择角色。'));

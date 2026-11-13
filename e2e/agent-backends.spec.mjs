@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
-import { openRoleAdvanced } from './open-role-advanced.mjs';
+import { openRoleAdvanced, goRolePage, openRoleFormAdvanced } from './open-role-advanced.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 
 test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，未接入驱动明确显示', async ({ page }) => {
@@ -19,19 +19,23 @@ test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，�
     const roles = ['coordinator', 'manager', 'dev', 'test', 'reviewer', 'ux', 'qa'];
     await openRoleAdvanced(page);
     for (const role of roles) {
-      const picker = page.getByRole('combobox', { name: `${role} Agent 后端`, exact: true });
+      await goRolePage(page, { role });
+      const picker = page.getByTestId('role-form').getByRole('combobox', { name: `${role} Agent 后端`, exact: true });
       await expect(picker).toHaveValue('pi');
-      for (const backend of ['pi', 'native', 'process', 'acp']) await expect(picker.locator(`option[value="${backend}"]`)).toBeEnabled();
+      const optionDisabled = (value) => picker.locator(`option[value="${value}"]`).evaluate(el => el.disabled);
+      for (const backend of ['pi', 'native', 'process', 'acp']) expect(await optionDisabled(backend)).toBe(false);
       // Claude Code and Codex App Server are worker-only backends.
       for (const backend of ['claude_code', 'codex']) {
-        const worker = picker.locator(`option[value="${backend}"]`);
-        if (['coordinator', 'manager'].includes(role)) await expect(worker).toBeDisabled();
-        else await expect(worker).toBeEnabled();
+        if (['coordinator', 'manager'].includes(role)) expect(await optionDisabled(backend)).toBe(true);
+        else expect(await optionDisabled(backend)).toBe(false);
       }
-      await expect(picker.locator('option[value="opencode"]')).toBeDisabled();
+      expect(await optionDisabled('opencode')).toBe(true);
     }
+    await goRolePage(page, { role: 'manager' });
     await page.getByRole('combobox', { name: 'manager Agent 后端', exact: true }).selectOption('native');
+    await goRolePage(page, { role: 'reviewer' });
     await page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true }).selectOption('acp');
+    await goRolePage(page, { role: 'dev' });
     await page.getByRole('combobox', { name: 'dev Agent 后端', exact: true }).selectOption('claude_code');
     await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
     await expect(page.locator('#project-page .flash')).toContainText('角色配置已保存');
@@ -41,13 +45,17 @@ test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，�
     expect(saved.configuration.roles.find(r => r.role_id === 'dev').harness_ref.id).toBe('claude_code');
     expect(saved.configuration.roles.find(r => r.role_id === 'qa').harness_ref.id).toBe('pi');
     await page.reload();
+    await goRolePage(page, { role: 'manager' });
     await expect(page.getByRole('combobox', { name: 'manager Agent 后端', exact: true })).toHaveValue('native');
+    await goRolePage(page, { role: 'reviewer' });
     await expect(page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true })).toHaveValue('acp');
+    await goRolePage(page, { role: 'dev' });
     await expect(page.getByRole('combobox', { name: 'dev Agent 后端', exact: true })).toHaveValue('claude_code');
     mkdirSync('.tmp/agent-backends', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.screenshot({ path: '.tmp/agent-backends/desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
+    await goRolePage(page, { role: 'qa' });
     await expect(page.getByRole('combobox', { name: 'qa Agent 后端', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/agent-backends/mobile.png', fullPage: true });
@@ -57,6 +65,7 @@ test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，�
     delete dev.entry_harness_source; dev.harness_ref = { id: 'native', version: '1' };
     h.store.run("UPDATE settings SET value=? WHERE key='roles:101'", JSON.stringify(old));
     await page.reload();
+    await goRolePage(page, { role: 'dev' });
     const warning = page.getByText('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更', { exact: true });
     await expect(warning).toBeVisible();
     await expect(page.getByRole('combobox', { name: 'dev Agent 后端', exact: true })).toHaveValue('native');

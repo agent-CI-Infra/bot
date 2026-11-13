@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
-import { openRoleAdvanced } from './open-role-advanced.mjs';
+import { openRoleAdvanced, goRolePage } from './open-role-advanced.mjs';
 import { RuleService } from '../dist/rules/service.js';
 
 test('角色详情查看规则来源，模型独立管理且项目不能修改共享模型', async ({ page }) => {
@@ -36,7 +36,7 @@ test('角色详情查看规则来源，模型独立管理且项目不能修改�
     await openRoleAdvanced(page);
     await expect(page.getByRole('heading',{name:'角色概览',exact:true})).toBeVisible();
     await expect(page.locator('[data-work-type]')).toHaveCount(0);
-    await page.locator('.role-nav').getByRole('link',{name:'Manager',exact:true}).click();
+    await goRolePage(page, { role: 'Manager' });
     await expect(page.locator('[data-rule-file=".bot/guide.md"] [data-rule-source]')).toHaveText('仓库文件');
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await page.locator('[data-rule-file=".bot/guide.md"]').getByRole('button',{name:'展开规则',exact:true}).click();
