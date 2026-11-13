@@ -524,12 +524,17 @@ test('GET /api/identity counts only the repositories the project list of this se
   assert.match(elsewhere.connection.next_step, /1 个仓库不在当前组织「elsewhere」里/);
   assert.match(elsewhere.connection.next_step, /所有已授权组织与项目/);
   assert.doesNotMatch(elsewhere.connection.next_step, /可在项目列表中打开这些仓库/);
+  // The console translates by state code, so the count and the organization name travel as fields too.
+  assert.equal(elsewhere.connection.hidden_repository_count, 1);
+  assert.equal(elsewhere.connection.tenant_name, 'elsewhere');
 
   // The same organization as the repository: the count and the list agree again.
   const own = await read('github.com:10');
   assert.equal(own.connection.state, 'connected');
   assert.deepEqual(own.listed, ['101']);
   assert.equal(own.connection.repository_count, 1);
+  assert.equal(own.connection.hidden_repository_count, 0);
+  assert.equal(own.connection.tenant_name, null);
 });
 
 test('GET /api/identity names a plain GitHub connection state, the next step, and repository names', async t => {
@@ -560,7 +565,7 @@ test('GET /api/identity names a plain GitHub connection state, the next step, an
   assert.deepEqual(connected, {
     state: 'connected', status: '已连接 GitHub，可访问 1 个仓库', next_step: '可在项目列表中打开这些仓库。', action: null,
     repository_count: 1, repositories: [{ id: '101', full_name: 'fixture/project-101' }], pending_repositories: [],
-    install_url: null,
+    install_url: null, hidden_repository_count: 0, tenant_name: null,
   });
 
   // A pending GitHub proof drops derived grants, so the person cannot see those repositories until they re-verify.

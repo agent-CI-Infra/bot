@@ -13,6 +13,10 @@ export interface GitHubConnection {
   state: GitHubConnectionState; status: string; next_step: string; action: GitHubConnectionAction;
   repository_count: number; repositories: GitHubRepositoryRef[]; pending_repositories: GitHubRepositoryRef[];
   install_url: string | null;
+  /** Granted repositories the session's project list does not show (`outside_tenant` / `not_listed`), else 0. */
+  hidden_repository_count: number;
+  /** Display name of the organization the session is limited to, set only for `outside_tenant`. */
+  tenant_name: string | null;
 }
 
 function byName(left: GitHubRepositoryRef, right: GitHubRepositoryRef): number {
@@ -67,8 +71,10 @@ export function githubConnection(store: Store, principal: string, scope: { visib
   const scopes = listEffectiveScopes(store, principal);
   const githubPending = scopes.some(g => g.source === 'github_derived' && g.state === 'pending_verification');
   const install_url = githubAppInstallUrl(store);
-  const result = (state: GitHubConnectionState, status: string, next_step: string, action: GitHubConnectionAction): GitHubConnection =>
-    ({ state, status, next_step, action, repository_count: repositories.length, repositories, pending_repositories: pending, install_url });
+  const result = (state: GitHubConnectionState, status: string, next_step: string, action: GitHubConnectionAction,
+    extra: { hidden?: number; tenant_name?: string | null } = {}): GitHubConnection =>
+    ({ state, status, next_step, action, repository_count: repositories.length, repositories, pending_repositories: pending, install_url,
+      hidden_repository_count: extra.hidden ?? 0, tenant_name: extra.tenant_name ?? null });
 
   if (!identity) {
     return result('disconnected', '尚未连接 GitHub', '连接 GitHub，然后选择要授权的仓库。', 'connect');
@@ -85,11 +91,13 @@ export function githubConnection(store: Store, principal: string, scope: { visib
   if (hidden && scope.tenant) {
     const name = store.get('SELECT display_name FROM tenants WHERE id=?', scope.tenant)?.display_name || scope.tenant;
     return result('outside_tenant', '已连接 GitHub，但当前组织下没有你能打开的项目',
-      `你有权访问的 ${hidden} 个仓库不在当前组织「${name}」里。切换到「所有已授权组织与项目」后，就能在项目列表中打开。`, 'switch_tenant');
+      `你有权访问的 ${hidden} 个仓库不在当前组织「${name}」里。切换到「所有已授权组织与项目」后，就能在项目列表中打开。`, 'switch_tenant',
+      { hidden, tenant_name: name });
   }
   if (hidden) {
     return result('not_listed', `已连接 GitHub，但项目列表暂时打不开这 ${hidden} 个仓库`,
-      '请点「重新验证 GitHub 权限」后再打开项目列表；仍然看不到时，请联系管理员核对项目授权。', 'reverify');
+      '请点「重新验证 GitHub 权限」后再打开项目列表；仍然看不到时，请联系管理员核对项目授权。', 'reverify',
+      { hidden });
   }
   if (identity.status === 'pending_verification' || githubPending) {
     return result('pending_verification', 'GitHub 授权待验证', '重新验证 GitHub 权限；若安装还在同步，请稍后再试。', 'reverify');

@@ -286,6 +286,15 @@ test('会话限定在别的组织时，身份页不再说「可在项目列表�
       await page.screenshot({ path: `${output}/identity-outside-tenant-${width}.png`, fullPage: true });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
+    // English keeps the hidden count and the organization name, which travel as fields rather than inside next_step.
+    await page.getByRole('button', { name: 'English' }).click();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+    await expect(status).toHaveText('Connected to GitHub, but there are no projects you can open in the current organization');
+    await expect(page.locator('#identity-panel')).toContainText('The 1 repositories you can access are not in the current organization "elsewhere".');
+    await expect(page.getByRole('button', { name: 'Switch to all authorized organizations', exact: true })).toBeVisible();
+    await expect(page.locator('#identity-panel')).not.toContainText(/identity\.(github|switch_all_tenants)/);
+    await page.getByRole('button', { name: '中文' }).click();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
     await widen.click();
     await expect(page.locator('.identity-connection-status')).toHaveText('已连接 GitHub，可访问 1 个仓库');
     expect(f.h.store.get('SELECT tenant_id FROM sessions ORDER BY rowid DESC LIMIT 1').tenant_id).toBe(null);
