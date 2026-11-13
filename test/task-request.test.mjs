@@ -23,7 +23,8 @@ test('ordinary tasks omit retired guidance, correct invalid paths, and resume on
  github.listen(0,'127.0.0.1');await once(github,'listening');t.after(()=>new Promise(r=>{github.close(r);github.closeAllConnections();}));
  const gh='http://127.0.0.1:'+github.address().port;
  await fetch(gh+'/fixture/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({github_token:'fixture-github-token'})});
- let executionCalls=0,acceptanceCalls=0,firstOutage=3,invalidPathObserved=false,acceptedDeliveries=0,inheritedRead=false,siblingRead=false,writeOutage=0,restoredLateWrite=false,inheritedContextRead=false,legacyParent;
+ // Outages last six requests: longer than the transport's five retries, so the attempt itself fails.
+ let executionCalls=0,acceptanceCalls=0,firstOutage=6,invalidPathObserved=false,acceptedDeliveries=0,inheritedRead=false,siblingRead=false,writeOutage=0,restoredLateWrite=false,inheritedContextRead=false,legacyParent;
  const remediations=new Map();
  const model=createServer(async(req,res)=>{
   let raw='';for await(const b of req)raw+=b;const body=JSON.parse(raw),messages=body.messages;
@@ -65,14 +66,14 @@ test('ordinary tasks omit retired guidance, correct invalid paths, and resume on
    if(relatedCalls.length===3){assert.ok(messages.some(m=>m.role==='tool'&&m.content.includes('invalid_artifact_path')));return send(call('read_related_artifact',{task_id:sibling.task_id,path:'report.md'},'sibling-read'));}
    siblingRead||=messages.some(m=>m.role==='tool'&&m.content.includes('SIBLING_ACCEPTED_EXTENSION'));
   }
-  if(context.request.includes('write-outage')&&writeOutage===3&&!names.includes('read_file'))return send(call('read_file',{path:'report.md'},'read-restored-late-write'));
-  if(context.request.includes('write-outage')&&writeOutage===3)restoredLateWrite||=messages.some(m=>m.role==='tool'&&m.content.includes('Observed repository fact'));
+  if(context.request.includes('write-outage')&&writeOutage===6&&!names.includes('read_file'))return send(call('read_file',{path:'report.md'},'read-restored-late-write'));
+  if(context.request.includes('write-outage')&&writeOutage===6)restoredLateWrite||=messages.some(m=>m.role==='tool'&&m.content.includes('Observed repository fact'));
   assert.ok(!body.tools.some(t=>['read_playbook','select_playbooks'].includes(t.function.name)));
   assert.ok(!/playbook_catalog|playbook_request|select_playbooks/.test(JSON.stringify(messages.slice(0,2))));
   const writes=calls.filter(c=>c.function.name==='write_file');
   if(!writes.length)return send(call('write_file',{path:'/tmp/forbidden-report.md',content:'bad target'},'invalid-path'));
   if(writes.length===1){invalidPathObserved||=messages.some(m=>m.role==='tool'&&m.content.includes('invalid_artifact_path'));return send(call('write_file',{path:'report.md',content:'Observed repository fact: calc.mjs contains the arithmetic implementation.'+(context.task.contract.source?.residual==='follow-report'?' SIBLING_ACCEPTED_EXTENSION':'')+(context.task.acceptance?.gaps?.length?' Recovered observation with source calc.mjs.':'')},'write-report'));}
-  if(context.request.includes('write-outage')&&writeOutage<3){writeOutage++;res.writeHead(503,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'Outage after saving artifact, before progress'}}));return;}
+  if(context.request.includes('write-outage')&&writeOutage<6){writeOutage++;res.writeHead(503,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'Outage after saving artifact, before progress'}}));return;}
   if(!names.includes('record_progress'))return send(call('record_progress',{completed:['Wrote observed report'],next_action:'Submit for independent acceptance'},'checkpoint'));
   return send(call('submit_delivery',{summary:'Reported observed code',artifacts:[{path:'report.md',description:'Observed repository fact'}],evidence:[],unknowns:[]},'submit-delivery'));
  });

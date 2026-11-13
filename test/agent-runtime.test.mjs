@@ -5,9 +5,12 @@ import { once } from 'node:events';
 import { Store } from '../dist/storage/database.js';
 import { Redactor } from '../dist/agent/common.js';
 import { HttpError } from '../dist/core/security.js';
-import { runAgent } from '../dist/agent/runtime.js';
+import { runAgent, configureModelRetry, modelRetryDelay } from '../dist/agent/runtime.js';
 import { agentLoop } from '../dist/agent/loop.js';
 import { modelSnapshot } from '../dist/storage/payloads.js';
+
+// Retry waits are 1, 3, 9, 27 and 60 seconds in production; here the same schedule runs in milliseconds.
+configureModelRetry({ baseMs: 1 });
 
 async function fixture(t) {
   const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
@@ -18,6 +21,7 @@ async function fixture(t) {
     let raw = ''; for await (const chunk of req) raw += chunk;
     const body = JSON.parse(raw); requests.push(body);
     const reply = await respond(body);
+    if (reply.drop) { res.socket.destroy(); return; }
     if (reply.sse) { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.end(reply.sse); return; }
     res.writeHead(reply.status ?? 200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(reply.body ?? reply));
   });
@@ -288,10 +292,10 @@ for (const status of [429, 503]) test('container-default model transport recover
 });
 test('transport retry budget is bounded and permanent errors are never retried', async t => {
   const f = await fixture(t);
-  for (const modelAttempts of [0, 4, 1.5]) await assert.rejects(runAgent({ ...f.spec, modelAttempts }), e => e.code === 'agent_limits_invalid');
+  for (const modelAttempts of [0, 7, 1.5]) await assert.rejects(runAgent({ ...f.spec, modelAttempts }), e => e.code === 'agent_limits_invalid');
   assert.equal(f.requests.length, 0);
   f.respond(() => ({ status: 503, body: { error: 'transient' } }));
-  await assert.rejects(runAgent({ ...f.spec, modelAttempts: 2 }), e => e.code === 'model_http_503');
+  await assert.rejects(runAgent({ ...f.spec, modelAttempts: 2 }), e => e.code === 'model_http_503' && e.detail.endsWith('（已自动重试 1 次仍失败）'));
   assert.equal(f.requests.length, 2);
   f.respond(() => ({ status: 401, body: { error: 'unauthorized' } }));
   await assert.rejects(runAgent(f.spec), e => e.code === 'model_authentication_failed');
@@ -361,4 +365,37 @@ test('the default loop runs any number of tool calls in one message and still re
     const g=await fixture(t);g.respond(()=>({choices:[{message:{tool_calls}}]}));
     await assert.rejects(runAgent({...g.spec,tools:[tool],execute:async()=>({})}),error=>error.code==='agent_tool_calls_invalid');
   }
+});
+
+test('a model request that gets no response is retried five times by default, with growing waits, before the run fails', async t => {
+  const f = await fixture(t); let sent = 0; const retries = [];
+  f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('domain-run','r','custom.analysis','running','retry test')");
+  assert.deepEqual([1, 2, 3, 4, 5].map(modelRetryDelay), [1, 3, 9, 27, 60]);
+  // The connection drops without a response five times; the sixth request answers.
+  f.respond(() => ++sent <= 5 ? { drop: true } : { choices: [{ message: { content: 'recovered after five retries' } }] });
+  assert.equal(await runAgent({ ...f.spec, onModelRetry: retry => { retries.push(retry); } }), 'recovered after five retries');
+  assert.equal(f.requests.length, 6);
+  assert.deepEqual(retries.map(r => [r.retry, r.retries, r.code, r.delay_ms]), [1, 2, 3, 4, 5].map(n => [n, 5, 'model_unavailable', modelRetryDelay(n)]));
+  assert.match(retries[0].detail, /请求失败：/);
+  const logged = f.store.all("SELECT content FROM task_logs WHERE json_extract(content,'$.type')='model_retry'").map(row => JSON.parse(row.content));
+  assert.deepEqual(logged.map(l => l.retry), [1, 2, 3, 4, 5]); assert.ok(logged.every(l => l.detail && l.delay_ms));
+  // Each failed request keeps its reason in its own record, so it can be explained after the process is gone.
+  const failed = f.store.all("SELECT * FROM model_requests WHERE state='transport_error' ORDER BY requested_at");
+  assert.equal(failed.length, 5);
+  for (const row of failed) assert.match(JSON.parse(modelSnapshot(f.store, row, 'response')).data.detail, /网络错误|连接/);
+  // Six failures in a row end the run, and the failure says it was retried.
+  sent = 0; f.respond(() => ({ drop: true }));
+  await assert.rejects(runAgent(f.spec), e => e.code === 'model_unavailable' && e.state === 'retry_wait' && e.detail.endsWith('（已自动重试 5 次仍失败）'));
+  assert.equal(f.requests.length, 12);
+});
+
+test('a stopped run does not wait out a retry delay', async t => {
+  const f = await fixture(t), controller = new AbortController();
+  configureModelRetry({ baseMs: 60000 }); t.after(() => configureModelRetry({ baseMs: 1 }));
+  f.respond(() => ({ status: 503, body: { error: 'busy' } }));
+  const started = Date.now();
+  // The stop arrives while the first retry would wait a minute; the wait ends at once and the guard reports the stop.
+  await assert.rejects(runAgent({ ...f.spec, executionSignal: controller.signal, onModelRetry: () => { controller.abort(); },
+    guard: async () => { if (controller.signal.aborted) throw Object.assign(new Error('stopped'), { code: 'run_stopped' }); } }), e => e.code === 'run_stopped');
+  assert.ok(Date.now() - started < 5000); assert.equal(f.requests.length, 1);
 });

@@ -73,8 +73,8 @@ for(const kind of ['review.issue','development.issue'])for(const fault of ['tran
     const saved=h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId),receipts=h.store.all("SELECT id,request FROM task_tools WHERE task_id=? AND json_extract(request,'$.request.type')='workspace_agent_start'",h.taskId);
     assert.equal(new Set(receipts.map(row=>row.id)).size,5);
     assert.equal(new Set(receipts.map(row=>JSON.parse(row.request).request.workspace_id)).size,5);
-    // Five failed task attempts each exhaust the shared three-request transport budget.
-    assert.equal(requests,fault==='transport'?15:0);
+    // Five failed task attempts each exhaust the shared transport budget: one request and five retries.
+    assert.equal(requests,fault==='transport'?30:0);
     // Recreate the engine: the slow schedule belongs to the task, not a timer in this process.
     await h.engine.close();const engine=new TaskEngine(h.store,h.engine.manager,h.githubUrl, undefined, acceptanceFixture);t.after(()=>engine.close());
     let now=saved.next_run_at-1;t.mock.method(Date,'now',()=>now);

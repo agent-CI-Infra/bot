@@ -787,6 +787,10 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
       item.node.prepend(element('span', '进展消息 ' + data.sequence, 'management-progress-label'));
       item.text = data.text; queueMarkdown(item); currentTurn.provisional = null;
       currentTurn.stage = '已发送进展'; onActivity(!!active, true);
+    } else if (row.type === 'model_retry') {
+      // The failed attempt's partial answer is not the answer: drop it, the retry writes a new one.
+      if (currentTurn.provisional) { currentTurn.provisional.node.remove(); currentTurn.provisional = null; }
+      currentTurn.stage = `模型暂时没有响应，正在重试（第 ${data.retry}/${data.retries} 次）`;
     } else if (row.type === 'text') {
       const item = answer(currentTurn); item.text += data.delta ?? ''; queueMarkdown(item);
       currentTurn.stage = '正在回复'; status.textContent = '助手正在回复…';
@@ -798,7 +802,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
     else if (row.type === 'error' || row.type === 'stopped') {
       finishTurn(currentTurn, row.type === 'error' ? 'failed' : 'stopped', row.created_at);
       if (!currentTurn.notice) {
-        currentTurn.notice = element('p', row.type === 'stopped' ? '已停止后续处理。已提交的操作仍保留结果，请在执行进展中核对。' : data.notice ? '这次处理未完成：' + data.notice : '这次处理未完成：' + data.error + '。可以检查管理助手的模型与权限配置后继续。', 'management-run-notice');
+        currentTurn.notice = element('p', row.type === 'stopped' ? '已停止后续处理。已提交的操作仍保留结果，请在执行进展中核对。' : data.notice ? '这次处理未完成：' + data.notice : data.detail ? '这次处理未完成：' + data.detail + '（' + data.error + '）' : '这次处理未完成：' + data.error + '。可以检查管理助手的模型与权限配置后继续。', 'management-run-notice');
         replies.append(currentTurn.notice);
       }
       onActivity(!!active, true);

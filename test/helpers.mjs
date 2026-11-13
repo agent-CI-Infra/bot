@@ -7,6 +7,11 @@ import { Store } from '../dist/storage/database.js';
 import { createControlPlane } from '../dist/server.js';
 import { ProjectService } from '../dist/projects/service.js';
 import { configureDispatch, ruleDecider } from '../dist/dispatch/worker.js';
+import { configureModelRetry } from '../dist/agent/runtime.js';
+
+// A failed model request is retried five times with waits of 1, 3, 9, 27 and 60 seconds; tests keep the schedule in
+// milliseconds so a provider failure fixture ends quickly. Tests that check the waits themselves set their own base.
+configureModelRetry({ baseMs: 1 });
 
 // Tests that exercise what happens after dispatch decide events at once, with the control plane's pre-#207 rules; the
 // Manager's own model call is tested in test/dispatch.test.mjs, which turns this off.

@@ -67,7 +67,7 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
   if(input.executionSignal?.aborted)controller.abort();
   let callbackFailed = false;
   let lastGuard = -Infinity;
-  let idle = false, timer: ReturnType<typeof setTimeout> | undefined, response: Response | undefined, value: any;
+  let idle = false, timer: ReturnType<typeof setTimeout> | undefined, response: Response | undefined, value: any, streamed = false;
   const reset = () => { clearTimeout(timer); timer = setTimeout(() => { idle = true; controller.abort(); }, modelIdleMs); };
   reset();
   try {
@@ -77,7 +77,7 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
       body: JSON.stringify(redactor.clean({ ...requestBody, model: model.model, [limit]: outputTokens, stream: true, stream_options: { include_usage: true } }))
     });
     value = response.ok ? await readModelResponse(response, async delta => {
-      reset();
+      reset(); streamed = true;
       try {
         // Full guards can call the workspace manager. Check the first token and
         // then at most once a second, while retaining per-token idle/progress updates.
@@ -91,10 +91,12 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
       catch (error) { callbackFailed = true; throw error; }
     }) : await errorBody(response);
   } catch (error) {
-    respond({error:callbackFailed?'guard_failed':error instanceof TaskError?error.code:'transport_error'});
-    finishModelRequest(store, requestLog, null, response?.status ?? null, callbackFailed ? 'guard_failed' : error instanceof TaskError ? 'invalid_response' : 'transport_error');
+    // The reason stays with the request record, so a failure can be explained after the process that saw it is gone.
+    const reason = callbackFailed ? undefined : error instanceof TaskError ? error.detail : idle ? `连续 ${modelIdleMs / 1000} 秒没有 token 输出` : networkReason(error, modelIdleMs);
+    respond({error:callbackFailed?'guard_failed':error instanceof TaskError?error.code:'transport_error',...(reason?{detail:redactor.text(reason)}:{})});
+    finishModelRequest(store, requestLog, null, response?.status ?? null, callbackFailed ? 'guard_failed' : error instanceof TaskError ? 'invalid_response' : 'transport_error', streamed);
     if (callbackFailed || error instanceof TaskError) throw error;
-    return stop('model_unavailable', 'retry_wait', redactor.text(`${target}请求失败：${idle ? '连续 90 秒没有 token 输出' : networkReason(error, modelIdleMs)}。`));
+    return stop('model_unavailable', 'retry_wait', redactor.text(`${target}请求失败：${reason}。`));
   } finally { clearTimeout(timer); input.executionSignal?.removeEventListener('abort',abort); }
   try { await input.guard?.(); }
   catch(error){
@@ -103,7 +105,7 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
   }
   respond(redactor.clean(value));
   if (!response.ok) {
-    finishModelRequest(store, requestLog, null, response.status, 'http_error');
+    finishModelRequest(store, requestLog, null, response.status, 'http_error', false);
     const error = value?.error, found = [error?.message, error, value?.message, value?.detail, value?.msg].find(item => typeof item === 'string' && item.trim());
     const said = found ? '：' + redactor.text(found).replace(/\s+/g, ' ').trim().slice(0, 320) : '';
     if ([401, 403].includes(response.status)) return stop('model_authentication_failed', 'waiting_configuration', `${target}拒绝认证或访问，HTTP ${response.status}${said}。请检查模型 API Key 和权限。`);

@@ -19,7 +19,7 @@ async function until(check){
   assert.fail('fixture did not reach the expected state');
 }
 
-async function fixture(t,{stream=true,failDelivery=false}={}){
+async function fixture(t,{stream=true,failDelivery=false,failures=0}={}){
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   const model=(await admin('/api/models','POST',{repository_id:'101',api_url:'http://model.invalid/v1',api_key:key,model_name:'fixture'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
@@ -33,7 +33,7 @@ async function fixture(t,{stream=true,failDelivery=false}={}){
     requests.push(input);
     if(input.type==='workspace_agent_poll')return replied?{state:'completed',result:finish}:{state:'running',request:{id:requestId,body:{stream,messages:[{role:'user',content:'review'}]}}};
     if(input.type==='workspace_agent_reply'){
-      assert.equal(h.store.get('SELECT state FROM model_requests').state,'received','usage must be persisted before any reply bytes');
+      assert.equal(h.store.get('SELECT state FROM model_requests ORDER BY rowid DESC LIMIT 1').state,'received','usage must be persisted before any reply bytes');
       if(failDelivery)return {error:'fixture-disconnected'};
       replies.push(Buffer.from(input.base64,'base64'));await agentOperation(input,root);replied=input.final;
     }
@@ -43,15 +43,18 @@ async function fixture(t,{stream=true,failDelivery=false}={}){
     assert.equal(url,'http://model.invalid/v1/chat/completions');
     const body=JSON.parse(options.body);assert.equal(body.stream,true);assert.deepEqual(body.stream_options,{include_usage:true});
     assert.equal(body.max_completion_tokens,8192);assert.ok(!('max_tokens' in body));
+    // A provider that is briefly unavailable answers 503 to the first requests.
+    if(failures-->0)return new Response(JSON.stringify({error:{message:'busy'}}),{status:503,headers:{'Content-Type':'application/json'}});
     signal=options.signal;
     return new Response(new ReadableStream({start(controller){source=controller;signal.addEventListener('abort',()=>controller.error(new DOMException('aborted','AbortError')),{once:true});}}),{headers:{'Content-Type':'text/event-stream'}});
   });
   t.mock.timers.enable({apis:['setTimeout','Date'],now:1000000});
   // These fake-clock cases inspect one transport attempt; retry recovery is covered in agent-runtime.test.mjs.
-  const running=agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='stream'"),work,new Redactor(),async()=>{},{},undefined,undefined,undefined,{}, {modelAttempts:1});
+  const retried=failures>0;
+  const running=agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='stream'"),work,new Redactor(),async()=>{},{},undefined,undefined,undefined,{}, retried?{}:{modelAttempts:1});
   // Attach an error handler now: advancing a fake clock may reject before the assertion awaits it.
-  running.catch(()=>{});await until(()=>source);
-  return {h,admin,root,dir,running,requests,progress,replies,signal,
+  running.catch(()=>{});if(!retried)await until(()=>source);
+  return {h,admin,root,dir,running,requests,progress,replies,get signal(){return signal;},
     send:async text=>{source.enqueue(Buffer.from(text));await flush();},
     restore:()=>{t.mock.timers.reset();fetchMock.mock.restore();},
   };
@@ -162,6 +165,20 @@ test('the runner fails only after 95 seconds idle, and duplicate activity cannot
   await assert.rejects(f.running,error=>error.code==='model_unavailable');
   await assert.rejects(agentOperation({type:'workspace_agent_progress',request_id:'b'.repeat(48),sequence:2},f.root),/agent_request_changed/);
   await assert.rejects(agentOperation({type:'workspace_agent_progress',request_id:requestId,sequence:0},f.root),/invalid_agent_progress/);
+});
+
+test('a retried model request tells the runner at once that it is still being worked on, and the retried reply arrives',async t=>{
+  const f=await fixture(t,{failures:2});
+  // Each 503 is retried after a wait (1 and 3 ms in tests); before each wait the runner hears about the retry.
+  await until(()=>f.progress.length===1);t.mock.timers.tick(1);
+  await until(()=>f.progress.length===2);t.mock.timers.tick(3);
+  assert.deepEqual(f.progress.map(p=>[p.type,p.request_id,p.sequence]),[['workspace_agent_progress',requestId,1],['workspace_agent_progress',requestId,2]]);
+  await until(()=>f.signal);
+  await f.send(sse({content:'done'},{finish_reason:'stop'})+'data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":4}}\n\ndata: [DONE]\n\n');
+  await until(()=>f.replies.length);
+  assert.deepEqual(f.h.store.all('SELECT state,http_status FROM model_requests ORDER BY rowid').map(r=>[r.state,r.http_status]),[['http_error',503],['http_error',503],['received',200]]);
+  assert.equal(f.h.store.all("SELECT content FROM task_logs WHERE json_extract(content,'$.type')='model_retry'").length,2);
+  f.restore();
 });
 
 test('the runner treats advancing reply bytes as activity while waiting for the atomic final reply',async t=>{

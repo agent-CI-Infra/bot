@@ -211,13 +211,20 @@ export function piAdapter<T>(session: PiSession<T>) {
         await session.checkpoint?.();
         if (session.maxRequests !== undefined && ++requests > session.maxRequests) stop('agent_turn_limit', 'failed', `Pi 会话达到 ${session.maxRequests} 次模型请求上限。`);
         store.run('UPDATE tasks SET model_started=1 WHERE id=?', taskId);
-        let lastProgress = -Infinity, sequence = 0;
+        let lastProgress = -Infinity, sequence = 0, heartbeat: ReturnType<typeof setInterval> | undefined;
+        const ping = async () => {
+          const sent = await workspace.deliver({ type: 'workspace_agent_progress', request_id: state.request.id, sequence: ++sequence });
+          if (sent.error) stop('execution_interrupted', 'waiting_environment', '向任务执行进程发送模型 token 活动通知时中断。');
+        };
+        // The runner gives up on a reply after 95 seconds without activity (runner/model-reply.mjs). While the control
+        // plane retries a failed request (a 90-second stall, then waits of up to a minute, then another attempt), it tells
+        // the runner at once and then every 30 seconds that the request is still being worked on.
+        const onRetry = async () => { await ping(); heartbeat ??= setInterval(() => { void ping().catch(() => {}); }, 30000); };
         const { value, status, model: used } = await abortable(request(body, String(state.request.id), async () => {
           if (Date.now() - lastProgress < 1000) return;
           lastProgress = Date.now();
-          const sent = await workspace.deliver({ type: 'workspace_agent_progress', request_id: state.request.id, sequence: ++sequence });
-          if (sent.error) stop('execution_interrupted', 'waiting_environment', '向任务执行进程发送模型 token 活动通知时中断。');
-        }));
+          await ping();
+        }, undefined, { onRetry })).finally(() => clearInterval(heartbeat));
         session.inspect?.(value?.choices?.[0]?.message);
         const cleaned = redactor.clean(value);
         // Note contents are user data: preserve write payloads while keeping the existing redaction of other model output.

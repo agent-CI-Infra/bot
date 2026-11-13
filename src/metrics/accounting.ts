@@ -39,12 +39,16 @@ export function beginModelRequest(store: Store, task: Row, requestId: string, mo
     task.active_role??task.role_id??null,task.source_message??origin?.source_message??null,id);
   return id;
 }
-export function finishModelRequest(store: Store, id: string, usage: unknown, httpStatus: number | null, state='received'): void {
+/** `served: false` marks a request that failed before the provider returned any output (an error status, or no response
+ * at all): providers do not charge for it, so a priced model records cost 0. Otherwise a request without usage keeps an
+ * unknown cost, which budgets refuse to treat as zero. Without this, one failed request would block a budget for good. */
+export function finishModelRequest(store: Store, id: string, usage: unknown, httpStatus: number | null, state='received', served=true): void {
   const row=store.get('SELECT * FROM model_requests WHERE id=?',id);if(!row||row.finished_at)return;
   const tokens=normalizeUsage(usage),input=tokens.input_tokens,output=tokens.output_tokens,cached=tokens.cached_input_tokens;
   // Cached input is a subset of input tokens. Missing cache data cannot be assumed to be a cache miss.
   const canPrice=row.currency&&input!==null&&output!==null&&(cached!==null||row.input_per_million===row.cache_per_million);
-  const cost=canPrice?((input!-(cached??0))*row.input_per_million+(cached??0)*row.cache_per_million+output!*row.output_per_million)/1000000:null;
+  const cost=canPrice?((input!-(cached??0))*row.input_per_million+(cached??0)*row.cache_per_million+output!*row.output_per_million)/1000000
+    :!served&&row.currency&&input===null&&output===null?0:null;
   store.run(`UPDATE model_requests SET finished_at=?,http_status=?,state=?,input_tokens=?,output_tokens=?,cached_input_tokens=?,cost=?
     WHERE id=? AND finished_at IS NULL`,new Date().toISOString(),httpStatus,state,input,output,cached,cost,id);
 }
