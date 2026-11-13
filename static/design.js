@@ -16,7 +16,7 @@ const designTokenGroups = [
   ['密度与动效', [['--control-min', '触控下限'], ['--motion-fast', '状态变化'], ['--motion-base', '较大位移'], ['--focus-ring', '焦点环']]],
 ];
 const designScale = ['--space-1', '--space-2', '--space-3', '--space-4', '--space-5', '--space-6', '--space-7', '--space-8', '--space-9', '--space-10'];
-const designFonts = ['--font-size-micro', '--font-size-1', '--font-size-label', '--font-size-2', '--font-size-row', '--font-size-touch', '--font-size-3', '--font-size-4', '--font-size-brand', '--font-size-display', '--font-size-5'];
+const designFonts = ['--font-size-caption', '--font-size-micro', '--font-size-1', '--font-size-label', '--font-size-2', '--font-size-row', '--font-size-touch', '--font-size-3', '--font-size-4', '--font-size-title', '--font-size-brand', '--font-size-display', '--font-size-hero', '--font-size-5'];
 // The scale rows read the token itself, so the table shows the value the page actually uses (#223 shell.css owns
 // several of these names) instead of a copy that drifts the moment a token changes.
 const tokenValue = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();

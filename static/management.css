@@ -2,7 +2,7 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-launcher { position: fixed; right: 24px; bottom: 24px; z-index: 45; display: flex; align-items: center; gap: 10px; padding: 11px 18px 11px 11px; border: 1px solid #286b73; border-radius: 30px; background: #163f50; color: #fff; box-shadow: 0 6px 24px #123d4e30; text-align: left; }
 .management-launcher-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: #ffffff18; color: #f4cc82; font-size: 23px; }
 .management-launcher-label { display: grid; gap: 2px; }
-.management-launcher-label strong { font-size: 14px; }
+.management-launcher-label strong { font-size: var(--font-size-2); }
 .management-launcher-label small { font-size: var(--font-size-micro); color: #c5dce1; font-weight: 400; }
 .management-launcher.has-update .management-launcher-icon { background: #f4cc82; color: #163f50; }
 .management-window { position: fixed; right: 24px; bottom: 24px; z-index: 46; display: flex; flex-direction: column; width: min(480px, calc(100vw - 32px)); height: min(740px, calc(100dvh - 96px)); min-width: 0; min-height: 0; overflow: hidden; border: 1px solid #cbd9de; border-radius: 18px; background: var(--color-surface); color: var(--color-text); box-shadow: 0 18px 70px #123d4e40; }
@@ -33,15 +33,15 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-welcome { display: flex; flex-direction: column; align-items: center; padding: 26px 0; text-align: center; color: var(--color-text); }
 .management-welcome-icon { display: grid; place-items: center; width: 54px; height: 54px; margin-bottom: 18px; border: 1px solid #d4e5e5; border-radius: 18px; background: #eef6f4; color: #2b7671; font-size: 32px; }
 .management-eyebrow { margin: 0 0 8px; color: var(--color-text-muted); font-size: var(--font-size-micro); letter-spacing: .12em; }
-.management-welcome h3 { margin: 0 0 12px; color: var(--color-text); font-size: 28px; font-weight: 650; letter-spacing: -.03em; }
+.management-welcome h3 { margin: 0 0 12px; color: var(--color-text); font-size: var(--font-size-hero); font-weight: 650; letter-spacing: -.03em; }
 .management-welcome > .muted { max-width: 400px; margin: 0; line-height: 1.8; font-size: var(--font-size-label); }
 .management-suggestions { display: grid; grid-template-columns: 1fr; gap: 8px; width: 100%; margin-top: 28px; }
 .management-suggestions button { display: grid; gap: 8px; padding: 14px; border-color: #dde7e8; border-radius: 12px; background: #fff; text-align: left; font-size: var(--font-size-1); }
 .management-suggestions strong { font-size: var(--font-size-label); font-weight: 600; }
 .management-suggestions span { color: #778a94; font-weight: 400; line-height: 1.5; }
 .management-turn + .management-turn { margin-top: 34px; }
-.management-user { width: fit-content; max-width: 88%; margin: 0 0 24px auto; padding: 12px 16px; border: 1px solid #deebea; border-radius: 16px 16px 4px 16px; background: #edf4f2; font-size: 14px; overflow-wrap: anywhere; }
-.management-user strong { color: #66827c; font-size: var(--font-size-micro); }
+.management-user { width: fit-content; max-width: 88%; margin: 0 0 24px auto; padding: 12px 16px; border: 1px solid #deebea; border-radius: 16px 16px 4px 16px; background: #edf4f2; font-size: var(--font-size-2); overflow-wrap: anywhere; }
+.management-user strong { color: var(--color-text-muted); font-size: var(--font-size-micro); }
 .management-user p { margin: 4px 0 0; white-space: pre-wrap; line-height: 1.75; }
 .management-assistant { display: flex; align-items: start; gap: 12px; min-width: 0; }
 .management-avatar { display: grid; place-items: center; flex-shrink: 0; width: 28px; height: 28px; border: 1px solid #dae9e5; border-radius: 9px; background: #eef6f3; color: #34776a; font-size: 19px; }
@@ -61,7 +61,7 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-step-summary::-webkit-details-marker { display: none; }
 .management-step-summary::after { content: '⌄'; color: #94a5aa; }
 .management-step[open] > summary::after { transform: rotate(180deg); }
-.management-step-indicator { display: grid; place-items: center; width: 16px; height: 16px; flex-shrink: 0; border: 1px solid #cadbd6; border-radius: 50%; color: #41816b; font-size: 10px; }
+.management-step-indicator { display: grid; place-items: center; width: 16px; height: 16px; flex-shrink: 0; border: 1px solid #cadbd6; border-radius: 50%; color: #41816b; font-size: var(--font-size-caption); }
 .management-step[data-state=succeeded] .management-step-indicator::after { content: '✓'; }
 .management-step[data-state=running] .management-step-indicator { border: 2px solid #d5e2de; border-top-color: #468373; animation: management-spin 1s linear infinite; }
 .management-step:is([data-state=failed],[data-state=rejected]) .management-step-indicator::after { content: '×'; color: #ab4941; }
@@ -88,19 +88,19 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-answer-actions button { min-height: 26px; padding: 3px 7px; border-color: transparent; background: transparent; color: var(--color-text-muted); font-size: var(--font-size-micro); font-weight: 400; }
 .management-stream .management-answer-actions { display: none; }
 .management-stream .management-markdown::after { content: ''; display: inline-block; width: 7px; height: 14px; margin-left: 4px; border-radius: 2px; background: #4d897b; animation: management-pulse 1s ease-in-out infinite; }
-.management-markdown { color: var(--color-text); font-size: 14px; line-height: 1.85; overflow-wrap: anywhere; }
+.management-markdown { color: var(--color-text); font-size: var(--font-size-2); line-height: 1.85; overflow-wrap: anywhere; }
 .management-markdown > :first-child { margin-top: 0; }
 .management-markdown > :last-child { margin-bottom: 0; }
 .management-markdown :is(h1,h2,h3,h4,h5,h6) { margin: 22px 0 10px; color: var(--color-text); line-height: 1.5; }
-.management-markdown h1 { font-size: 22px; }
-.management-markdown h2 { font-size: 19px; }
+.management-markdown h1 { font-size: var(--font-size-brand); }
+.management-markdown h2 { font-size: var(--font-size-4); }
 .management-markdown h3 { font-size: var(--font-size-touch); }
-.management-markdown :is(h4,h5,h6) { font-size: 14px; }
+.management-markdown :is(h4,h5,h6) { font-size: var(--font-size-2); }
 .management-markdown p { margin: 0 0 12px; }
 .management-markdown :is(ul,ol) { margin: 10px 0 14px; padding-left: 24px; }
 .management-markdown li { margin: 3px 0; }
 .management-markdown li > p { margin-bottom: 5px; }
-.management-markdown a { color: #166e70; text-decoration: underline; text-underline-offset: 3px; }
+.management-markdown a { color: var(--color-brand); text-decoration: underline; text-underline-offset: 3px; }
 .management-markdown blockquote { margin: 14px 0; padding: 8px 14px; border-left: 3px solid #b4d1c9; background: #f2f7f5; color: #5b7775; }
 .management-markdown blockquote p:last-child { margin-bottom: 0; }
 .management-markdown code { padding: 2px 5px; border-radius: 4px; background: #eef2f3; color: #355c65; font: var(--font-size-1)/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; }
@@ -120,7 +120,7 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-queries button { font-size: var(--font-size-1); }
 .management-forms { display: grid; grid-template-columns: minmax(0,1fr); gap: 14px; }
 .management-forms > :is(form,section) { min-width: 0; padding: 12px; border: 1px solid #dfe9ec; border-radius: 8px; background: #fff; }
-.management-forms h3 { margin: 0 0 10px; font-size: 14px; }
+.management-forms h3 { margin: 0 0 10px; font-size: var(--font-size-2); }
 .management-forms label { min-width: 0; gap: 4px; margin-bottom: 8px; font-size: var(--font-size-1); }
 .management-forms :is(select,textarea,input) { min-width: 0; width: 100%; font-size: var(--font-size-1); }
 .management-forms button { margin: 3px 4px 3px 0; font-size: var(--font-size-1); }
@@ -129,7 +129,7 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
    as one more step of 快捷操作, and long arguments wrap instead of widening the panel. */
 .management-command-preview-slot:empty { display: none; }
 .management-command-preview { display: grid; gap: 6px; padding: 12px; border: 1px solid #e2c98f; border-radius: 8px; background: #fffdf6; }
-.management-command-preview h3 { margin: 0 0 4px; font-size: 14px; }
+.management-command-preview h3 { margin: 0 0 4px; font-size: var(--font-size-2); }
 .management-command-preview .facts { margin: 0; }
 .management-command-preview .facts dd { white-space: pre-wrap; }
 .management-command-preview .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
@@ -138,11 +138,11 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-status { min-width: 0; margin: 0; padding: 0; color: var(--color-text-muted); font-size: var(--font-size-micro); line-height: 1.5; overflow-wrap: anywhere; }
 .management-status-bar button { flex-shrink: 0; font-size: var(--font-size-micro); }
 .management-input { flex-shrink: 0; margin: 0; padding: 0 18px 16px; }
-.management-input textarea { min-height: 80px; max-height: 160px; padding: 14px 16px; border: 1px solid #d3e0e1; border-radius: 14px; background: #fff; box-shadow: 0 2px 8px #123d4e06; resize: vertical; font-size: 14px; line-height: 1.65; }
+.management-input textarea { min-height: 80px; max-height: 160px; padding: 14px 16px; border: 1px solid #d3e0e1; border-radius: 14px; background: #fff; box-shadow: 0 2px 8px #123d4e06; resize: vertical; font-size: var(--font-size-2); line-height: 1.65; }
 .management-input textarea::placeholder { color: #9aa9af; }
 .management-input.is-running textarea { border-color: #b8d4ca; }
 .management-input-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
-.management-input-footer .muted { color: #8a9aa1; font-size: 10px; }
+.management-input-footer .muted { color: var(--color-text-muted); font-size: var(--font-size-caption); }
 .management-input-footer .actions { margin: 0; }
 .management-input-footer button { min-height: 34px; padding: 6px 16px; border-radius: 8px; font-size: var(--font-size-1); }
 body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
@@ -170,12 +170,12 @@ body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
   .management-scope label { flex-basis: 100%; }
   /* The scope sentence shares the row with the actions instead of taking a row of its own: on a phone that row is the
      difference between the feed above seeing a full confirmation heading and clipping it. */
-  .management-scope-note { flex: 1 1 132px; min-width: 0; font-size: 10px; line-height: 1.4; }
+  .management-scope-note { flex: 1 1 132px; min-width: 0; font-size: var(--font-size-caption); line-height: 1.4; }
   .management-scope button { padding: 5px 10px; min-height: 30px; }
   .management-sessions { padding-left: 12px; padding-right: 12px; }
   .management-feed, :is(.management-page,.management-fullscreen) .management-feed { padding: 20px 12px; }
   .management-welcome, :is(.management-page,.management-fullscreen) .management-welcome { padding-top: 16px; }
-  .management-welcome h3 { font-size: 24px; }
+  .management-welcome h3 { font-size: var(--font-size-display); }
   .management-welcome-icon { width: 42px; height: 42px; margin-bottom: 12px; }
   :is(.management-page,.management-fullscreen) .management-suggestions { grid-template-columns: 1fr; margin-top: 18px; }
   .management-suggestions button { gap: 4px; padding: 12px; }
@@ -187,7 +187,7 @@ body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
   .management-status-bar { padding: 8px 12px 5px; }
   .management-input { padding: 0 12px max(12px,env(safe-area-inset-bottom)); }
   .management-input textarea { min-height: 64px; max-height: 120px; padding: 10px 12px; font-size: var(--font-size-touch); }
-  .management-input-footer .muted { max-width: 164px; font-size: 9px; }
+  .management-input-footer .muted { max-width: 164px; }
   .management-input-footer button { padding: 6px 12px; }
   .management-window:not(.management-page):not(.management-fullscreen) { inset: auto 10px 10px auto; }
   .management-page { inset: var(--management-header-height,48px) 0 0; }
@@ -202,7 +202,7 @@ body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
 
 /* A command receipt as a page of its own (#235): the project page shell, with the state beside the title. */
 .management-receipt-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.management-receipt-head h1 { margin: 0; font-size: 20px; }
+.management-receipt-head h1 { margin: 0; font-size: var(--font-size-title); }
 .management-receipt-page-note { margin: 0; color: var(--color-text-muted); font-size: var(--font-size-label); line-height: 1.7; }
 #management-receipt-page .facts { margin: 6px 0 0; }
 #management-receipt-page .facts dt { font-size: var(--font-size-1); }

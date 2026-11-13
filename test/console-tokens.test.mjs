@@ -64,6 +64,8 @@ const SHARED = {
   '--focus-ring': '#245de0', '--focus-ring-width': '3px',
   '--font-size-4': '18px', '--font-size-micro': '11px', '--font-size-label': '13px',
   '--font-size-row': '15px', '--font-size-touch': '16px', '--font-size-display': '24px',
+  // Review of #584: 对话 headings and captions that had no scale step get one instead of a literal.
+  '--font-size-caption': '10px', '--font-size-title': '20px', '--font-size-hero': '28px', '--font-size-brand': '22px',
   '--line-height-body': '1.5', '--line-height-tight': '1.35',
   '--radius-1': '4px', '--radius-2': '5px',
 };
@@ -121,7 +123,16 @@ test('#551 management.css and views.css map heading, body and muted values onto 
   assert.match(management, /\.management-window-title h2 \{[^}]*font-size:\s*var\(--font-size-touch\)/);
   assert.match(management, /\.management-window-title p \{[^}]*color:\s*var\(--color-text-muted\); font-size:\s*var\(--font-size-1\)/);
   assert.match(management, /\.management-scope \.management-new-conversation \{ color:\s*var\(--color-brand\)/);
-  assert.match(management, /\.management-markdown \{ color:\s*var\(--color-text\)/);
+  assert.match(management, /\.management-markdown \{ color:\s*var\(--color-text\); font-size:\s*var\(--font-size-2\)/);
+  assert.match(management, /\.management-user \{[^}]*font-size:\s*var\(--font-size-2\)/);
+  assert.match(management, /\.management-markdown a \{ color:\s*var\(--color-brand\)/);
+  assert.match(management, /\.management-input-footer \.muted \{ color:\s*var\(--color-text-muted\)/);
+  assert.match(management, /\.management-welcome h3 \{[^}]*font-size:\s*var\(--font-size-hero\)/);
+  assert.match(management, /\.management-receipt-head h1 \{[^}]*font-size:\s*var\(--font-size-title\)/);
+  for (const literal of ['#166e70', '#66827c', '#8a9aa1']) assert.equal(management.includes(literal), false, literal);
+  // Only icon glyph sizes (launcher, welcome badge, avatar, resize handle) stay literal; text reads the shared scale.
+  const literalSizes = [...management.matchAll(/^\s*([^{}]+?)\s*\{[^}]*font-size:\s*\d+px/gm)].map(match => match[1]);
+  assert.deepEqual(literalSizes.filter(selector => !/-(icon|avatar|size-handle)\b/.test(selector)), [], 'management.css text sizes read the shared scale');
   assert.equal(management.includes('#183142'), false);
   assert.equal(management.includes('#6d818a'), false);
   assert.equal(management.includes('#16636b'), false);
@@ -133,6 +144,7 @@ test('#551 management.css and views.css map heading, body and muted values onto 
   assert.match(views, /pre\.command\{[^}]*background:\s*var\(--color-text\);color:\s*var\(--color-text-inverse\)/);
   assert.equal(views.toLowerCase().includes('#637c89'), false);
   assert.equal(views.toLowerCase().includes('#365564'), false);
+  for (const literal of ['#718793', '#536c78']) assert.equal(views.toLowerCase().includes(literal), false, literal);
   assert.equal(views.toLowerCase().includes('#16636b'), false);
   assert.equal(views.toLowerCase().includes('#13394b'), false);
   assert.equal(views.toLowerCase().includes('#183142'), false);
