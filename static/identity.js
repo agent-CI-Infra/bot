@@ -24,6 +24,7 @@ function identityError(code) {
 // A stalled reverify must not leave the button on "正在验证…" with no explanation.
 const IDENTITY_REFRESH_TIMEOUT_MS = 20_000;
 let identityRefreshNotice = '';
+let identityRefreshNoticeIsError = false;
 function identityRefreshError(err) {
   if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
     return '验证超时，没有收到 GitHub 的回应。请稍后重试；这不代表你的权限被撤销。';
@@ -109,8 +110,9 @@ async function renderIdentity() {
   identities.append(note('关联 GitHub 账号时，需同时证明当前平台会话和 GitHub 身份。同名或同邮箱账号不会自动合并，关联本身不会增加管理权限。'));
   const feedback = element('p', '', 'view-error'); feedback.setAttribute('role', 'alert');
   if (identityRefreshNotice) {
-    feedback.className = 'view-success'; feedback.setAttribute('role', 'status');
-    feedback.textContent = identityRefreshNotice; identityRefreshNotice = '';
+    feedback.className = identityRefreshNoticeIsError ? 'view-error' : 'view-success';
+    feedback.setAttribute('role', identityRefreshNoticeIsError ? 'alert' : 'status');
+    feedback.textContent = identityRefreshNotice; identityRefreshNotice = ''; identityRefreshNoticeIsError = false;
   }
   const provider = element('div', '', 'identity-provider'), actions = element('div', '', 'actions');
   const bind = element('button', '绑定 GitHub 账号'); bind.disabled = true;
@@ -120,15 +122,21 @@ async function renderIdentity() {
     refresh.disabled = true; refresh.textContent = '正在验证…';
     feedback.className = 'view-error'; feedback.setAttribute('role', 'alert'); feedback.textContent = '';
     try {
-      await api('/api/identity/refresh', 'POST', {}, { signal: AbortSignal.timeout(IDENTITY_REFRESH_TIMEOUT_MS) });
+      const result = await api('/api/identity/refresh', 'POST', {}, { signal: AbortSignal.timeout(IDENTITY_REFRESH_TIMEOUT_MS) });
       if (!current()) return;
-      identityRefreshNotice = 'GitHub 权限已重新验证。';
+      if (result.status === 'active') {
+        identityRefreshNotice = 'GitHub 权限已重新验证。';
+        identityRefreshNoticeIsError = false;
+      } else {
+        identityRefreshNotice = identityErrors.github_permission_pending;
+        identityRefreshNoticeIsError = true;
+      }
       await start();
     } catch (err) {
       if (!current()) return;
       feedback.className = 'view-error'; feedback.setAttribute('role', 'alert');
       feedback.textContent = identityRefreshError(err);
-      if (err && err.code === 'github_reauthorization_required') {
+      if (err && (err.code === 'github_reauthorization_required' || err.code === 'github_oauth_failed')) {
         try {
           const result = await api('/api/identity/github/bind', 'POST', {});
           if (current()) {

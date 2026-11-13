@@ -162,7 +162,7 @@ export class GitHubIdentity implements InstallationIdentity {
       });
     }
   }
-  async reverify(principal: string): Promise<void> {
+  async reverify(principal: string): Promise<string | undefined> {
     this.store.run("UPDATE external_identities SET status='active' WHERE principal_id=? AND provider='github' AND status='pending_verification' AND credentials IS NOT NULL", principal);
     const identity = this.store.get("SELECT * FROM external_identities WHERE principal_id=? AND provider='github' AND status='active' AND credentials IS NOT NULL", principal);
     // Login and the minute job still call refresh(), which records pending state and does not fail the caller.
@@ -182,6 +182,7 @@ export class GitHubIdentity implements InstallationIdentity {
     }
     await this.refresh(principal);
     if (surface) throw surface;
+    return this.store.get("SELECT status FROM external_identities WHERE principal_id=? AND provider='github' ORDER BY verified_at DESC", principal)?.status as string | undefined;
   }
   async verifyInstallation(sessionRef: string, ref: InstallationRef): Promise<VerifiedInstallationAccess | null> {
     if (ref.github_host !== 'github.com') return null;

@@ -84,6 +84,42 @@ test('重新验证 GitHub 权限：需要重新授权时显示原因并跳转到
     await refresh.click();
     await expect(panel.getByRole('alert')).toContainText('需要重新授权', { timeout: 10_000 });
     await authorized;
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.screenshot({ path: resolve(output, 'reverify-error-1440.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+    await page.screenshot({ path: resolve(output, 'reverify-error-390.png'), fullPage: true });
+    expect(errors).toEqual([]);
+  } finally { await f.close(); }
+});
+
+
+test('重新验证 GitHub 权限：安装仍待确认时显示原因而不是成功', async ({ page }) => {
+  const f = await identityFixture(), errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  try {
+    await page.goto(f.h.admin);
+    await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
+
+    f.state.failure = 403;
+    const panel = page.locator('#identity-panel');
+    const refresh = page.getByRole('button', { name: '重新验证 GitHub 权限', exact: true });
+    await expect(refresh).toBeEnabled();
+    await refresh.click();
+    await expect(panel.getByRole('alert')).toContainText('还在等待确认', { timeout: 10_000 });
+    await expect(panel.getByRole('status')).toHaveCount(0);
+    await expect(panel).not.toContainText('GitHub 权限已重新验证。');
+    await expect(refresh).toBeEnabled();
+    await expect(refresh).toHaveText('重新验证 GitHub 权限');
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.screenshot({ path: resolve(output, 'reverify-pending-result-1440.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await refresh.scrollIntoViewIfNeeded();
+    await expect(refresh).toBeInViewport();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+    await page.screenshot({ path: resolve(output, 'reverify-pending-result-390.png'), fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
@@ -117,6 +153,13 @@ test('重新验证 GitHub 权限：请求超时后显示错误并恢复按钮', 
     await expect(refresh).toBeEnabled();
     await expect(refresh).toHaveText('重新验证 GitHub 权限');
     await expect(page).toHaveURL(/#\/identity/);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.screenshot({ path: resolve(output, 'reverify-timeout-1440.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await refresh.scrollIntoViewIfNeeded();
+    await expect(refresh).toBeInViewport();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+    await page.screenshot({ path: resolve(output, 'reverify-timeout-390.png'), fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });

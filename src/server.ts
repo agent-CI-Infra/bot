@@ -301,18 +301,22 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     }
     if (path === '/api/identity/refresh' && method === 'POST') {
       fields(input, []);
-      if (githubIdentity) {
-        // Bound so a stalled GitHub call cannot leave the console on "正在验证…" with no result.
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          await Promise.race([
+      let status: string | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        if (githubIdentity) {
+          // Bound so a stalled GitHub call cannot leave the console on "正在验证…" with no result.
+          status = await Promise.race([
             githubIdentity.reverify(user.id),
             new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new HttpError(504, 'github_verification_unavailable')), 20_000); })
           ]);
-        } finally { if (timer) clearTimeout(timer); }
+        }
+        respond(res, 200, { ok: true, status: status ?? null }); return;
+      } finally {
+        if (timer) clearTimeout(timer);
+        // Reverify may have recorded pending/invalidated grants before throwing; keep the session revision current.
+        refreshSessionRevision(store, sessionToken(req));
       }
-      refreshSessionRevision(store, sessionToken(req));
-      respond(res, 200, { ok: true }); return;
     }
     if (path === '/api/auth/logout' && method === 'POST') {
       fields(input, []);
