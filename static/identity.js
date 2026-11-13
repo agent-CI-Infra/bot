@@ -33,6 +33,33 @@ function identityRefreshError(err) {
   return (err && err.message) || identityErrorFallback;
 }
 
+// Identity times use the browser zone and name it, so "05:20" is not mistaken for UTC. Expiry is "还剩 N 分钟" plus the absolute time.
+function identityTimezoneLabel(date) {
+  const offset = -date.getTimezoneOffset(), sign = offset >= 0 ? '+' : '-', abs = Math.abs(offset);
+  const hours = Math.floor(abs / 60), minutes = abs % 60;
+  return minutes ? `UTC${sign}${hours}:${String(minutes).padStart(2, '0')}` : `UTC${sign}${hours}`;
+}
+function identityTime(value) {
+  const text = timestamp(value);
+  if (!text) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return text;
+  return `${text}（${identityTimezoneLabel(date)}）`;
+}
+function identityExpiry(value) {
+  if (value == null || value === '') return '未知';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return timestamp(value) || '未知';
+  const absolute = identityTime(value), ms = date.getTime() - Date.now();
+  if (ms <= 0) return `已过期（${absolute}）`;
+  const minutes = Math.max(1, Math.ceil(ms / 60_000));
+  if (minutes < 60) return `还剩 ${minutes} 分钟（${absolute}）`;
+  const hours = Math.floor(minutes / 60), rest = minutes % 60;
+  if (hours < 24) return rest ? `还剩 ${hours} 小时 ${rest} 分钟（${absolute}）` : `还剩 ${hours} 小时（${absolute}）`;
+  const days = Math.floor(hours / 24);
+  return `还剩 ${days} 天（${absolute}）`;
+}
+
 // A grant's state in words. `reason` is an additive server field: an older server omits it and every grant
 // keeps the combined sentence it had before, so nothing here depends on it being present.
 function grantStateText(grant) {
@@ -274,7 +301,7 @@ async function renderIdentity() {
     const row = element('div', '', 'row'), stateLabel = ({ active: '已验证', pending_verification: '待验证／需重新授权', revoked: '已撤销' })[identity.status] || identity.status;
     row.classList.add('identity-binding');
     row.append(element('strong', identity.display_name), element('span', `${identity.provider} · ${stateLabel}`),
-      facts([['绑定来源', identity.host || identity.provider], ['最近核验', identity.verified_at ? timestamp(identity.verified_at) : '尚无核验时间']]));
+      facts([['绑定来源', identity.host || identity.provider], ['最近核验', identity.verified_at ? identityTime(identity.verified_at) : '尚无核验时间']]));
     if (identity.status !== 'revoked') {
       const revoke = element('button', '解除绑定', 'quiet');
       revoke.addEventListener('click', async () => {
@@ -294,8 +321,8 @@ async function renderIdentity() {
     const row = element('div', '', 'row perm-row'), source = grant.source === 'github_derived' ? 'GitHub 当前权限（继承）' : '显式委派';
     row.append(element('strong', ({ super_admin: '平台超级管理员', org_admin: '组织管理员', project_admin: '项目管理员', delegated: '受委派成员' })[grant.role] || grant.role),
       element('p', `${source} · ${grant.project_id ? '项目 ' + grant.project_id : grant.tenant_id || '平台'}`),
-      element('p', grantStateText(grant)), facts([['最近核验', grant.verified_at ? timestamp(grant.verified_at) : '未提供核验时间'],
-        ['授权有效期', grant.expires_at == null ? (grant.source === 'github_derived' ? '未提供到期时间，仍须核验身份与安装' : '未设置到期时间') : timestamp(grant.expires_at) || '未知']]));
+      element('p', grantStateText(grant)), facts([['最近核验', grant.verified_at ? identityTime(grant.verified_at) : '未提供核验时间'],
+        ['授权有效期', grant.expires_at == null ? (grant.source === 'github_derived' ? '未提供到期时间，仍须核验身份与安装' : '未设置到期时间') : identityExpiry(grant.expires_at)]]));
     const capabilities = element('details', '', 'fold'); capabilities.append(element('summary', '查看具体能力'), element('p', '能力：' + grant.capabilities.join(', '))); row.append(capabilities);
     if (grant.state !== 'active') row.append(note(grant.state === 'revoked' ? '这条授权已撤销，不计入当前有效能力。需要恢复时联系授权来源的管理员。' : '这条授权当前不生效。请重新验证 GitHub 权限；显式委派或归属问题请联系管理员。'));
     (grant.state === 'active' ? activeList : history).append(row);
@@ -311,7 +338,7 @@ async function renderIdentity() {
     ['当前组织', data.tenants.find(t => t.id === data.actor.tenant_id)?.display_name || (data.actor.tenant_id ? data.actor.tenant_id : '全部已授权范围')],
     ['有效的管理权限', `${active.length} 条`],
     ['待验证或已失效的权限', `${pending.length} 条`],
-    ['本页读取时间', timestamp(Date.now())]
+    ['本页读取时间', identityTime(Date.now())]
   ]), note(active.length ? '下面是本次读取到的管理权限。实际操作仍由服务端重新校验；身份绑定与项目管理权限分别核验。' : '已登录，尚无有效管理授权。请联系管理员委派，或重新验证 GitHub 权限。'));
   const advanced = element('details', '', 'fold identity-advanced');
   advanced.append(element('summary', '高级／诊断'), diagnostic, selection, identities, permissions);
@@ -346,8 +373,8 @@ async function renderIdentity() {
           element('p', ({ active: '有效', revoked: '已撤销', pending_verification: '待验证', quarantined: '归属待处理' })[grant.state] || grant.state),
           // The same questions the person's own grant list asks (see the 当前角色与授权来源 block above).
           facts([['授权者', grant.grantor_name || '未记录授权者'],
-            ['最近核验', grant.verified_at ? timestamp(grant.verified_at) : '未提供核验时间'],
-            ['授权有效期', grant.expires_at == null ? (grant.source === 'github_derived' ? '未提供到期时间，仍须核验身份与安装' : '未设置到期时间') : timestamp(grant.expires_at) || '未知']]));
+            ['最近核验', grant.verified_at ? identityTime(grant.verified_at) : '未提供核验时间'],
+            ['授权有效期', grant.expires_at == null ? (grant.source === 'github_derived' ? '未提供到期时间，仍须核验身份与安装' : '未设置到期时间') : identityExpiry(grant.expires_at)]]));
         members.append(row);
       }
     }; loading.push(loadMembers());
