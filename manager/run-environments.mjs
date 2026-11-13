@@ -78,7 +78,7 @@ export class RunEnvironments {
           HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false, Init: true, RestartPolicy: { Name: 'no' },
             Memory: l.memory_mb * mib, MemorySwap: l.memory_mb * mib, NanoCpus: Math.round(l.cpus * 1e9), PidsLimit: l.pids, IpcMode: 'private',
             NetworkMode: spec.network === 'egress' ? names.network : 'none', Mounts: [],
-            Tmpfs: { '/workspace': `rw,nosuid,nodev,size=${l.workspace_mb * mib},uid=10001,gid=10001,mode=0700`, '/tmp': `rw,nosuid,nodev,noexec,size=${l.tmp_mb * mib},mode=1777` } } });
+            Tmpfs: { '/workspace': `rw,nosuid,nodev,exec,size=${l.workspace_mb * mib},uid=10001,gid=10001,mode=0700`, '/tmp': `rw,nosuid,nodev,exec,size=${l.tmp_mb * mib},mode=1777` } } });
         await this.docker.request('POST', `/containers/${names.container}/start`);
         const health = await this.docker.runner(names.container, { operation_id: randomBytes(24).toString('hex'), type: 'health' });
         if (!health.ok || !health.result?.ready) throw new ManagerError('runner_not_ready');

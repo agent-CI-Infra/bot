@@ -77,6 +77,38 @@ git add -A; git -c user.email=t@e -c user.name=t commit -qm seed; git rev-parse 
   const run1 = command => client.call(r1, { type: 'workspace_command', command, timeout_ms: 60000 });
   passed('fixed candidate copied into the run container and its tree verified', copied);
 
+  const mounts=await run1("cat /proc/mounts | awk '$2==\"/workspace\" || $2==\"/tmp\" {print $2,$4}'");
+  assert.equal(mounts.exit_code,0,mounts.output);
+  const mounted=new Map(mounts.output.trim().split('\n').map(line=>{const [path,options]=line.split(' ');return [path,options.split(',')];}));
+  for(const path of ['/workspace','/tmp']){
+    const options=mounted.get(path);assert.ok(options,path);
+    for(const option of ['rw','nosuid','nodev'])assert.ok(options.includes(option),`${path}: ${option}`);
+    assert.ok(!options.includes('noexec'),`${path} permits compiled programs`);
+  }
+  const executable=await run1(`set -eu
+for directory in /workspace /tmp; do
+  printf '#!/bin/sh\\nprintf "script-ok\\\\n"\\n' > "$directory/mount-probe.sh"
+  chmod +x "$directory/mount-probe.sh"
+  "$directory/mount-probe.sh"
+  printf 'int main(void) { return 0; }\\n' | cc -x c - -o "$directory/mount-probe"
+  "$directory/mount-probe"
+done`);
+  assert.equal(executable.exit_code,0,executable.output);assert.equal(executable.output,'script-ok\nscript-ok\n');
+  passed('workspace and tmp retain nosuid/nodev and execute scripts and compiled binaries', {mounts:mounts.output,output:executable.output});
+  // An approved image may include Go; also exercise its real temporary test binary when available.
+  if((await run1('command -v go')).exit_code===0){
+    const go=await run1(`set -eu; mkdir /workspace/mount-go-probe /tmp/mount-go-tmp; cd /workspace/mount-go-probe
+export GOCACHE=/workspace/mount-go-cache GOMODCACHE=/workspace/mount-go-mod GOTMPDIR=/tmp/mount-go-tmp
+trap 'rm -rf /workspace/mount-go-probe /workspace/mount-go-cache /workspace/mount-go-mod /tmp/mount-go-tmp /workspace/mount-go-probe.test' EXIT
+printf 'module mountprobe\\n\\ngo 1.20\\n' > go.mod
+printf 'package mountprobe\\nimport "testing"\\nfunc TestExecutable(t *testing.T) {}\\n' > executable_test.go
+GOTOOLCHAIN=local GOPROXY=off GOMAXPROCS=2 go test -p=2 -v ./...
+GOTOOLCHAIN=local GOPROXY=off GOMAXPROCS=2 go test -p=2 -c -o /workspace/mount-go-probe.test
+/workspace/mount-go-probe.test -test.v`);
+    assert.equal(go.exit_code,0,go.output);assert.match(go.output,/--- PASS: TestExecutable/);
+    passed('Go tests execute from tmp and the compiled test binary executes from workspace',{output:go.output});
+  }
+
   // 4. The developer changes the original workspace; the reviewer's input does not change.
   await computer({ type: 'workspace_command', workspace_id: devWs, command: 'echo changed > a.txt && echo extra > b.txt', timeout_ms: 5000 });
   const view = await run1('cat a.txt; ls; git rev-parse "HEAD^{tree}"');
