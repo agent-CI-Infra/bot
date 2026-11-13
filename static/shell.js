@@ -542,7 +542,7 @@ function initConsoleShell() {
   primary.append(more);
   // Keep the original tabs and their click handling, but let only the work navigation scroll above the settings.
   tabs.replaceChildren(primary, settings); sidebar.append(scope, tabs);
-  const sidebarIcons = { projects: 'home', management: 'chat', board: 'board', costs: 'chart', events: 'webhook', preferences: 'user', settings: 'gear' };
+  const sidebarIcons = { projects: 'home', management: 'chat', board: 'board', costs: 'chart', events: 'webhook', preferences: 'user', settings: 'gear', more: 'more' };
   for (const item of tabs.querySelectorAll('[data-tab], #console-inbox-link')) {
     const name = item.id === 'console-inbox-link' ? 'inbox' : sidebarIcons[item.dataset.tab];
     if (!name || item.querySelector('.console-icon')) continue;
