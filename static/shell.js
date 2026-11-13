@@ -106,30 +106,46 @@ function consoleScope() {
 }
 // #481: the phone's bottom bar owns the five primary destinations (项目 / 任务 / 待处理 / 助手 / 更多), so this page is
 // the supplement behind 更多. It must not repeat what the bar already carries, and it stays short enough to read on a
-// phone: one group for the project the reader is in, one for analysis and channels, one for personal and platform.
+// phone. #549: a project administrator's 更多 is only personal settings — webhook, usage, storage and the external
+// runner belong to the management area (#550), and project sections stay on the project page and 当前页面 picker.
 function consoleGroups() {
   const id = consoleScope(), repo = repositories.find(r => String(r.id) === id);
   const groups = [];
+  const personal = [
+    ['#/preferences', '个人设置', '个人身份、飞书绑定与外部执行端'],
+    ['#/identity/feishu', '飞书绑定', '个人绑定、群绑定、仓库权限与聊天记录'],
+    ['#/identity', '身份与权限', '本人绑定与当前有效授权'],
+    ['#/conversations', '飞书会话', '成员消息、执行过程与派生任务']
+  ];
+  if (me.role !== 'super_admin') {
+    groups.push({ title: '设置', items: personal });
+    return groups;
+  }
   // 管理对话 is the bar's 助手 destination, and each project section is one address the phone can reach from here.
   if (repo) groups.push({ title: '当前项目', items: projectSections
     .filter(([key]) => key !== 'management')
     .map(([key, name]) => [`#/projects/${id}/${key}`, name, repo.full_name]) });
   groups.push({ title: '分析与渠道', items: [
     ['#/costs', '用量与成本', '按项目、日期与工作类型查看'],
-    ['#/events', 'Webhook 投递', '接收、验证和处理结果'],
-    ['#/conversations', '飞书会话', '成员消息、执行过程与派生任务']
+    ['#/events', 'Webhook 投递', '接收、验证和处理结果']
   ] });
-  // A project administrator has no platform surface, so the third group is their own settings only and never mentions
-  // global settings. A super administrator gets one entry into them: the section picker on that page carries the rest.
-  groups.push({ title: me.role === 'super_admin' ? '个人与平台' : '设置', items: [
-    ['#/preferences', '个人设置', '个人身份、飞书绑定与外部执行端'],
-    ['#/identity/feishu', '飞书绑定', '个人绑定、群绑定、仓库权限与聊天记录'],
-    ['#/identity', '身份与权限', '本人绑定与当前有效授权'],
+  // One entry into platform settings: the section picker on that page carries the rest.
+  groups.push({ title: '个人与平台', items: [
+    ...personal,
     ['#/external', '外部执行端', '接入与连接诊断'],
-    me.role === 'super_admin' ? ['#/settings/work-computers', '全局设置', '系统算力、接入、渠道与用户']
-      : ['#/settings/storage', '存储', '本人项目的轨迹与数据量']
+    ['#/settings/work-computers', '全局设置', '系统算力、接入、渠道与用户']
   ] });
   return groups;
+}
+// #549: a project administrator's desktop primary nav is only 项目 / 管理对话 / 看板 / 待处理 (four destinations
+// aligned with the #481 bar). 统计, Webhook, 个人设置 and 存储 leave the sidebar; 个人设置 stays in the account menu and 更多.
+function applyConsoleNavVisibility() {
+  if (!me) return;
+  const isSuper = me.role === 'super_admin';
+  for (const tab of ['costs', 'events', 'preferences', 'settings']) {
+    const node = document.querySelector('#tabs [data-tab="' + tab + '"]');
+    if (node) node.hidden = !isSuper;
+  }
 }
 function syncConsoleShell() {
   const signedIn = !!me && !$('workspace').hidden;
@@ -160,6 +176,7 @@ function syncConsoleShell() {
     updateConsoleAssistant();
   }
   if (!signedIn) return;
+  applyConsoleNavVisibility();
   // The menu names the same person the header used to print beside the sign-out button.
   $('console-account-login').textContent = '@' + (me.github?.login || me.username);
   $('console-account-role').textContent = me.role === 'super_admin' ? '超级管理员' : '项目管理员';
