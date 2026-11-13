@@ -80,7 +80,7 @@ test('项目导航只列真实页面，管理对话的深链不丢页，移动�
     await bottom.filter({ hasText: '更多' }).click();
     const more = page.locator('#console-page');
     await expect(more.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
-    for (const group of ['当前项目', '分析与渠道', '个人与平台']) await expect(more.getByRole('heading', { name: group, exact: true })).toBeVisible();
+    for (const group of ['当前项目', '个人与平台', '管理']) await expect(more.getByRole('heading', { name: group, exact: true })).toBeVisible();
     for (const entry of ['项目总览', '基本设置', '机器配置', '模型', '发版本', '计划与通知', '项目知识', '外部执行', '成员', '运行状态', '用量与成本', '身份与权限'])
       await expect(more.getByRole('link', { name: new RegExp('^' + entry) }).first()).toBeVisible();
     expect(await more.locator('a').evaluateAll(ns => ns.every(n => n.getAttribute('href')?.startsWith('#')))).toBe(true);

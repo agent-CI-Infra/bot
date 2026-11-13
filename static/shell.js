@@ -116,28 +116,36 @@ function consoleGroups() {
     ['#/identity/feishu', '飞书绑定', '个人绑定、群绑定、仓库权限与聊天记录'],
     ['#/identity', '身份与权限', '本人绑定与当前有效授权'],
     ['#/conversations', '飞书会话', '成员消息、执行过程与派生任务']
-  ], conversations = personal[personal.length - 1];
-  // A super administrator keeps 飞书会话 under 分析与渠道 as before #549; a project administrator sees it with personal settings.
+  ];
+  // #550: webhook, usage, storage, the external runner and (for a super administrator) onboarding,
+  // installation archives and robot accounts live in one 管理 group. Permissions are unchanged:
+  // a project administrator only sees the pages their role can already open.
+  const management = [
+    ['#/costs', '用量与成本', '按项目、日期与工作类型查看'],
+    ['#/events', 'Webhook 投递', '接收、验证和处理结果'],
+    ['#/external', '外部执行端', '接入与连接诊断'],
+    ['#/settings/storage', '存储', '本人项目的轨迹与数据量']
+  ];
+  if (me.role === 'super_admin') {
+    management.push(
+      ['#/settings/onboarding', '接入向导', '部署接入步骤'],
+      ['#/settings/installations', '安装档案', 'GitHub App 安装记录'],
+      ['#/settings/accounts', '机器人账号', '接入使用的 GitHub App'],
+      ['#/settings/work-computers', '全局设置', '系统算力、接入、渠道与用户']
+    );
+  }
+  const adminGroup = { title: '管理', items: management, testid: 'console-admin-group' };
   if (me.role !== 'super_admin') {
-    groups.push({ title: '设置', wide: true, items: personal });
+    groups.push({ title: '设置', wide: true, items: personal }, { ...adminGroup, wide: true });
     return groups;
   }
   // 管理对话 is the bar's 助手 destination, and each project section is one address the phone can reach from here.
   if (repo) groups.push({ title: '当前项目', items: projectSections
     .filter(([key]) => key !== 'management')
     .map(([key, name]) => [`#/projects/${id}/${key}`, name, repo.full_name]) });
-  groups.push({ title: '分析与渠道', items: [
-    ['#/costs', '用量与成本', '按项目、日期与工作类型查看'],
-    ['#/events', 'Webhook 投递', '接收、验证和处理结果'],
-    conversations
-  ] });
-  // One entry into platform settings: the section picker on that page carries the rest.
-  // `wide` (#557) keys the full-row layout on the group itself, not on its display title.
-  groups.push({ title: '个人与平台', wide: true, items: [
-    ...personal.filter(item => item !== conversations),
-    ['#/external', '外部执行端', '接入与连接诊断'],
-    ['#/settings/work-computers', '全局设置', '系统算力、接入、渠道与用户']
-  ] });
+  // `wide` (#557) keys the full-row layout on the group itself: 当前项目 and 个人与平台 share the first row, and the
+  // longer 管理 group (#550) spans the full row under them with its entries in three columns.
+  groups.push({ title: '个人与平台', items: personal }, { ...adminGroup, wide: true });
   return groups;
 }
 // #549: a project administrator's desktop primary nav is 项目 / 管理对话 / 看板 / 待处理, plus a visible
@@ -310,7 +318,7 @@ function renderConsoleMore() {
   const groups = element('div', '', 'console-groups');
   for (const group of consoleGroups()) {
     const section = element('section', '', 'console-group'); if (group.wide) section.classList.add('console-group-wide');
-    section.append(element('h2', group.title));
+    if (group.testid) section.dataset.testid = group.testid; section.append(element('h2', group.title));
     for (const [href, caption, hint] of group.items) section.append(consoleLink(href, caption, hint)); groups.append(section);
   }
   page.append(head, groups);

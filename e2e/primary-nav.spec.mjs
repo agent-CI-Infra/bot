@@ -52,11 +52,13 @@ test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可
     await page.locator('#console-sidebar').getByRole('link', { name: '更多功能', exact: true }).click();
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
     const headings = await page.locator('.console-group h2').allInnerTexts();
-    expect(headings).toEqual(['设置']);
-    const captions = (await page.locator('.console-group a > span').allInnerTexts()).map(text => text.trim());
-    expect(captions).toEqual(['个人设置', '飞书绑定', '身份与权限', '飞书会话']);
-    for (const duplicate of ['项目', '任务', '待处理', '助手', '全部项目', '任务看板', '管理对话', '看板', 'Webhook 投递', '用量与成本', '存储', '外部执行端', '全局设置']) {
-      expect(captions).not.toContain(duplicate);
+    expect(headings).toEqual(['设置', '管理']);
+    const settings = (await page.locator('.console-group').filter({ has: page.getByRole('heading', { name: '设置', exact: true }) }).locator('a > span').allInnerTexts()).map(t => t.trim());
+    expect(settings).toEqual(['个人设置', '飞书绑定', '身份与权限', '飞书会话']);
+    const management = (await page.getByTestId('console-admin-group').locator('a > span').allInnerTexts()).map(t => t.trim());
+    expect(management).toEqual(['用量与成本', 'Webhook 投递', '外部执行端', '存储']);
+    for (const duplicate of ['项目', '任务', '待处理', '助手', '全部项目', '任务看板', '管理对话', '看板', '全局设置', '接入向导', '安装档案', '机器人账号']) {
+      expect([...settings, ...management]).not.toContain(duplicate);
     }
     await page.screenshot({ path: `${out}/more-member-1440.png`, fullPage: true });
 
@@ -76,10 +78,11 @@ test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
     await page.locator('#console-mobile-nav').getByRole('link', { name: '更多', exact: true }).click();
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
-    expect(await page.locator('.console-group h2').allInnerTexts()).toEqual(['设置']);
-    expect((await page.locator('.console-group a > span').allInnerTexts()).map(t => t.trim())).toEqual(['个人设置', '飞书绑定', '身份与权限', '飞书会话']);
+    expect(await page.locator('.console-group h2').allInnerTexts()).toEqual(['设置', '管理']);
+    expect((await page.locator('.console-group').filter({ has: page.getByRole('heading', { name: '设置', exact: true }) }).locator('a > span').allInnerTexts()).map(t => t.trim())).toEqual(['个人设置', '飞书绑定', '身份与权限', '飞书会话']);
+    await expect(page.getByTestId('console-admin-group')).toBeVisible();
     await expect(page.locator('#console-page')).not.toContainText('全局设置');
-    await expect(page.locator('#console-page')).not.toContainText('Webhook');
+    await expect(page.locator('#console-page')).not.toContainText('接入向导');
     await page.screenshot({ path: `${out}/nav-member-390.png`, fullPage: true });
 
   } finally { await h.stop(); }
