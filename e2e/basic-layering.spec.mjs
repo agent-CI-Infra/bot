@@ -53,5 +53,12 @@ test('#570 基本设置首屏只有常用项，技术信息和危险操作默认
     await expect(page.getByRole('button', { name: '禁用项目', exact: true })).toBeHidden();
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
     await page.screenshot({ path: `${out}/basic-390.png`, fullPage: true });
+
+    await openBasicAdvanced(page);
+    await openProjectDanger(page);
+    await expect(page.getByText('仓库 ID', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '禁用项目', exact: true })).toBeVisible();
+    await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
+    await page.screenshot({ path: `${out}/basic-advanced-390.png`, fullPage: true });
   } finally { await h.stop(); }
 });

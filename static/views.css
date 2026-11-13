@@ -399,6 +399,12 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .basic-advanced, .project-danger-fold { margin: 16px 0 0; }
 .basic-advanced > summary, .project-danger-fold > summary {
   cursor: pointer; min-height: var(--control-min, 44px); display: flex; align-items: center;
-  font-size: 14px; font-weight: 600;
+  font-size: 14px; font-weight: 600; list-style: none;
 }
+.basic-advanced > summary::-webkit-details-marker,
+.project-danger-fold > summary::-webkit-details-marker { display: none; }
+.basic-advanced > summary::before,
+.project-danger-fold > summary::before { content: '▸'; margin-right: 8px; color: var(--color-text-muted); }
+.basic-advanced[open] > summary::before,
+.project-danger-fold[open] > summary::before { content: '▾'; }
 .basic-advanced > .side-card, .project-danger-fold > .side-card { margin-top: 12px; }
