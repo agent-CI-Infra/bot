@@ -172,12 +172,26 @@ test('#557 登录、身份、更多功能、基本设置在 1440 对齐同一栅
     expect(basic.sameHeight).toBeTruthy();
     expect(basic.dangerFull).toBeTruthy();
     await page.screenshot({ path: `${out}/project-basic-after-1440.png`, fullPage: true });
+    // Review asks: the 运行状态 status grid and 全局设置 pictured at both widths.
+    for (const [hash, name] of [['#/projects/101/machine', 'project-machine'], ['#/settings/work-computers', 'global-settings']]) {
+      await page.goto(h.admin + '/' + hash);
+      await expect(page.locator(name === 'project-machine' ? '.project-content' : 'main')).toBeVisible({ timeout: 10000 });
+      await page.waitForTimeout(300);
+      await page.screenshot({ path: `${out}/${name}-after-1440.png`, fullPage: true });
+    }
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/projects/101/basic');
     await expect(page.locator('.project-content')).toBeVisible({ timeout: 10000 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     await page.screenshot({ path: `${out}/project-basic-after-390.png`, fullPage: true });
+    for (const [hash, name] of [['#/projects/101/machine', 'project-machine'], ['#/settings/work-computers', 'global-settings']]) {
+      await page.goto(h.admin + '/' + hash);
+      await expect(page.locator(name === 'project-machine' ? '.project-content' : 'main')).toBeVisible({ timeout: 10000 });
+      await page.waitForTimeout(300);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+      await page.screenshot({ path: `${out}/${name}-after-390.png`, fullPage: true });
+    }
     await readyIdentity(page, h.admin + '/#/identity');
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     // ≤1279px the 高级／诊断 cards stack in one column.
