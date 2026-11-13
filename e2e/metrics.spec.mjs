@@ -76,16 +76,18 @@ test('没有费用信息时按输入加输出 token 堆叠，缓存不重复累�
   };
   try{
     await page.setViewportSize({width:1440,height:1000});await login(page,h.admin,'administrator',password);await page.getByRole('button',{name:'统计',exact:true}).click();await filter('2026-10-22','2026-10-23');
-    await expect(page.getByRole('heading',{name:'每日 token · 按项目堆叠',exact:true})).toBeVisible();
+    await expect(page.getByRole('heading',{name:'每日用量 · 按项目堆叠',exact:true})).toBeVisible();
     const chart=page.locator('.cost-chart-section');await expect(chart.locator('svg')).toHaveAttribute('data-metric','tokens');await expect(chart.locator('rect')).toHaveCount(2);
+    // The axis unit is 用量 too, so no literal token shows unless the reader opens 统计说明.
+    const axis=(await chart.locator('svg text').allTextContents()).join(' ');expect(axis).toContain('用量');expect(axis).not.toMatch(/token/i);
     const own=chart.locator('rect[data-project="101"]');await expect(own).toHaveAttribute('data-value','1100');await own.focus();
-    await expect(page.locator('.cost-chart-detail')).toContainText('1,100 token（输入 1,000，输出 100）');await expect(page.locator('.cost-chart-detail')).toContainText('当日 33.3%');
+    await expect(page.locator('.cost-chart-detail')).toContainText('1,100（输入 1,000，输出 100）');await expect(page.locator('.cost-chart-detail')).toContainText('当日 33.3%');
     await expect(chart).toContainText('缓存命中已包含在输入中，不重复相加');await expect(page.locator('.cost-summary')).toContainText('未定价');
     await chart.scrollIntoViewIfNeeded();await page.screenshot({path:'.tmp/metrics-evidence/token-chart-desktop.png'});
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await chart.scrollIntoViewIfNeeded();await page.screenshot({path:'.tmp/metrics-evidence/token-chart-mobile.png'});
     await page.getByLabel('统计项目',{exact:true}).selectOption('101');await filter('2026-10-22','2026-10-23');
     await expect(chart.locator('rect[data-project="202"]')).toHaveCount(0);await expect(chart.locator('rect')).toHaveCount(1);
-    await filter('2026-10-23','2026-10-23');await expect(chart).toContainText('没有可靠的 token 记录');await expect(chart.locator('svg')).toHaveCount(0);
+    await filter('2026-10-23','2026-10-23');await expect(chart).toContainText('没有完整的用量记录');await expect(chart.locator('svg')).toHaveCount(0);
     await filter('2026-10-24','2026-10-24');await expect(chart).toContainText('没有模型请求记录');await expect(chart.locator('svg')).toHaveCount(0);
     const memberPassword=testPassword();await admin('/api/users','POST',{username:'token-member',password:memberPassword,repository_ids:['101']});
     const context=await browser.newContext(),member=await context.newPage();

@@ -302,7 +302,7 @@ async function renderIdentity() {
     finally { switcher.disabled = false; select.disabled = false; }
   });
   form.className = 'identity-scope-form';
-  selection.append(form, switchMessage, note(t('identity.scope_note')), facts([[t('identity.auth_revision'), String(data.actor.authorization_revision)]]));
+  selection.append(form, switchMessage, note(t('identity.scope_note')), advancedHelp(t('identity.advanced_help'), t('identity.auth_revision', { revision: String(data.actor.authorization_revision) })));
   const identities = card(t('identity.bindings'));
   identities.append(note(t('identity.bindings_note')));
   const provider = element('div', '', 'identity-provider'), actions = element('div', '', 'actions');

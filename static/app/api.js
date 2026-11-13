@@ -27,3 +27,12 @@ function retryErrorText(err) {
 }
 function error(err) { if (!$('message').childElementCount) notice('message', err.message); if ($('editor').open) $('editor-error').textContent = err.message; }
 function element(tag, text, className) { const el = document.createElement(tag); el.textContent = text; if (className) el.className = className; return el; }
+// Fold technical terms out of a first screen: the summary stays visible, the body opens on demand.
+function advancedHelp(summary, ...content) {
+  const box = document.createElement('details');
+  box.className = 'advanced-help';
+  box.setAttribute('data-testid', 'advanced-help');
+  box.append(element('summary', summary || '高级说明'));
+  for (const item of content) box.append(typeof item === 'string' ? element('p', item, 'muted') : item);
+  return box;
+}

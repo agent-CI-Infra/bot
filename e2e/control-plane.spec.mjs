@@ -10,7 +10,7 @@ test('管理员完成初始化、登记账号、查看投递，项目管理员�
   const password = testPassword(), admin = h.client();
   try {
     await page.goto(h.admin);
-    await expect(page.getByRole('heading', { name: '创建第一名超级管理员' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '创建第一名管理员' })).toBeVisible();
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '初始化并登录' }).click();

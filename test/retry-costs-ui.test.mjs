@@ -45,7 +45,7 @@ test('cost view shows token totals, per-project and daily tokens, and all saved 
   const page=loadConsole(['static/app.js','static/metrics.js','static/costs.js'],()=>[200,data]);
   page.run("me={id:'admin'};tab='costs';costState={from:'2026-10-22',to:'2026-10-23',currency:'USD'};document.createTextNode=text=>element('span',text);costChart=()=>{};");
   await page.run('loadCosts(0)');const body=page.$('cost-body');
-  assert.match(text(body),/输入包含缓存命中 token/);const totals=body.querySelector('.cost-token-summary');
+  assert.match(text(body),/输入用量包含缓存命中/);const totals=body.querySelector('.cost-token-summary');
   for(const token of ['3,000','300','1,750'])assert.ok(text(totals).includes(token));
   const tables=body.querySelectorAll('tbody');assert.equal(tables.length,3);
   assert.equal(tables[0].children.length,2);assert.match(text(tables[0]),/fixture-model USD 2 10 0.0002/);assert.match(text(tables[0]),/fixture-model USD 3 10 0.0002/);
@@ -65,11 +65,11 @@ test('unpriced charts stack recorded input and output tokens, without counting c
     {date:'2026-10-22',repository_id:'202',full_name:'second',cost:0,requests:1,unpriced_requests:1,input_tokens:2000,output_tokens:200,cached_input_tokens:1600},
     {date:'2026-10-23',repository_id:'303',full_name:'missing',cost:0,requests:1,unpriced_requests:1,input_tokens:null,output_tokens:null,cached_input_tokens:null}]);
   const page=chartPage(data);await page.run('loadCosts(0)');const body=page.$('cost-body'),chart=body.querySelector('.cost-chart-section'),svg=chart.querySelector('svg');
-  assert.equal(svg.dataset.metric,'tokens');assert.match(text(chart),/每日 token/);assert.match(text(chart),/不重复相加/);
+  assert.equal(svg.dataset.metric,'tokens');assert.match(text(chart),/每日用量/);assert.match(text(chart),/不重复相加/);
   const bars=svg.querySelectorAll('rect');assert.equal(bars.length,2);
   assert.deepEqual(bars.map(bar=>Number(bar.dataset.value)),[2200,1100]);assert.ok(bars.every(bar=>Number(bar.getAttribute('height'))>0));
-  assert.match(bars[1].getAttribute('aria-label'),/1,100 token（输入 1,000，输出 100） · 当日 33.3%/);
-  assert.match(text(body.querySelectorAll('thead')[0]),/token 占比/);
+  assert.match(bars[1].getAttribute('aria-label'),/1,100（输入 1,000，输出 100） · 当日 33.3%/);
+  assert.match(text(body.querySelectorAll('thead')[0]),/用量占比/);
   assert.match(text(body.querySelectorAll('tbody')[0]),/66.7%/);
   const missing=body.querySelectorAll('tbody')[0].children.find(row=>text(row).includes('missing'));
   assert.equal(missing.children[2].textContent,'—','unknown project usage is not a measured zero share');
@@ -81,7 +81,7 @@ test('known zero pricing and partially priced ranges retain currency charts; mis
   data.summary={...day,cost:2,requests:2,unpriced_requests:1};data.days=[{...day,cost:2}, {...day,date:'2026-10-23',unpriced_requests:1}];await page.run('loadCosts(0)');
   const chart=page.$('cost-body').querySelector('.cost-chart-section');assert.equal(chart.querySelector('svg').dataset.metric,'cost');assert.equal(chart.querySelectorAll('rect').length,1);
   data.summary={cost:0,requests:1,unpriced_requests:1,input_tokens:null,output_tokens:null};data.days=[{...day,unpriced_requests:1,input_tokens:null,output_tokens:null}];await page.run('loadCosts(0)');
-  assert.equal(page.$('cost-body').querySelectorAll('svg').length,0);assert.match(text(page.$('cost-body')),/没有可靠的 token 记录/);
+  assert.equal(page.$('cost-body').querySelectorAll('svg').length,0);assert.match(text(page.$('cost-body')),/没有完整的用量记录/);
   data.summary={cost:0,requests:0,unpriced_requests:0};data.days=[];await page.run('loadCosts(0)');
   assert.equal(page.$('cost-body').querySelectorAll('svg').length,0);assert.match(text(page.$('cost-body')),/没有模型请求记录/);
 });

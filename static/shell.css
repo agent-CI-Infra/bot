@@ -263,6 +263,13 @@ html { scroll-padding-bottom: calc(var(--console-mobile-height,0px) + 100px); }
 button.linkish { border: 0; background: none; padding: 0; min-height: 0; color: var(--color-brand); text-align: left; font-weight: 600; overflow-wrap: anywhere; }
 .card:not(.list-panel), .side-card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: var(--space-6); min-width: 0; }
 
+/* #556: technical notes stay closed until the reader opens them. */
+.advanced-help { margin: var(--space-4) 0 0; font-size: var(--font-size-1); color: var(--color-text-muted); max-width: 40em; }
+.advanced-help > summary { cursor: pointer; color: var(--color-text); font-weight: 600; width: fit-content; }
+.advanced-help[open] > summary { margin-bottom: var(--space-3); }
+#access-provider-note:empty { display: none; }
+#project-board-hint { margin: var(--space-2) 0 0; }
+.toolbar .advanced-help { flex-basis: 100%; }
 /* #481: on a phone one account control replaces the inline login, role and sign-out button; wide screens keep the
    header as it was, so this control exists only below the phone breakpoint. */
 #console-account { display: none; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 6px 10px; }

@@ -130,11 +130,15 @@ test('identity and effective grants remain visible when optional provider and Fe
     await localLogin(page, f, '/#/identity');
     await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
     await expect(page.getByText('本系统用户名', { exact: true })).toBeHidden();
-    await expect(page.getByText('权限更新序号', { exact: true })).toBeHidden();
+    await expect(page.getByText(/权限记录版本/)).toBeHidden();
     await expect(page.getByText('本页读取时间', { exact: true })).toBeHidden();
     await openIdentityAdvanced(page);
     await expect(page.getByText('本系统用户名', { exact: true })).toBeVisible();
-    await expect(page.getByText('权限更新序号', { exact: true })).toBeVisible();
+    // #556 folds the revision into a closed「高级说明」; open it to read the record.
+    const recordHelp = page.getByTestId('advanced-help').filter({ hasText: '高级说明' }).first();
+    await expect(recordHelp).toBeVisible();
+    if (!await recordHelp.evaluate(el => el.open)) await recordHelp.locator('summary').click();
+    await expect(recordHelp).toContainText('权限记录版本');
     await page.route('**/api/auth/github/status', route => failures ? route.fulfill({ status: 503, json: { error: 'provider_unavailable' } }) : route.continue());
     await page.route('**/api/channels/bindings', route => failures ? route.fulfill({ status: 503, json: { error: 'bindings_unavailable' } }) : route.continue());
     const identityReloaded = page.waitForResponse(r => { try { return new URL(r.url()).pathname === '/api/identity' && r.request().method() === 'GET'; } catch { return false; } });
@@ -144,7 +148,7 @@ test('identity and effective grants remain visible when optional provider and Fe
     await expect(page.getByRole('heading', { name: 'GitHub 登录状态读取失败' })).toBeVisible();
     await expect(page.getByRole('heading', { name: '飞书绑定读取失败' })).toBeVisible();
     await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
-    await expect(page.getByLabel('有效授权', { exact: true })).toContainText('平台超级管理员');
+    await expect(page.getByLabel('有效授权', { exact: true })).toContainText('平台管理员');
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

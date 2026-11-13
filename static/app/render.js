@@ -77,7 +77,6 @@ async function render(quiet = false) {
   }
   const signature=tab+'\n'+(hiddenView?'hidden\n':'')+params+'\n'+JSON.stringify(rows)+'\n'+JSON.stringify(pendingRepositories)+'\n'+String(!!pendingRepositoriesError);if(quiet&&signature===listSignature)return;listSignature=signature;
   const lines=[]; $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目${pendingRepositories.length?`，${pendingRepositories.length} 个等待管理员启动`:pendingRepositoriesError?'，等待启动的仓库暂时无法读取':''}` : `${rows.length} 条记录`;
-  if (installedView && !hiddenView) $('count').textContent += ' · 看板公开可访问：公开仓默认开，私有仓默认关';
   $('previous').disabled = offset === 0; $('next').disabled = rows.length < 50; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
     const line = element('div', '', 'row'), content = element('div', '', 'row-content'), status=element('div','','row-state');line.setAttribute('role','listitem');line.dataset.key=String(row.id);rowSignatures.set(line,JSON.stringify(row));
@@ -96,8 +95,10 @@ async function render(quiet = false) {
       status.append(...['reception','signature','processing'].map(kind => deliveryFacet(kind, row)));
     } else {
       const detail = taskTab ? `${phaseLabels[row.phase] || row.phase} · ${row.head_sha ? '提交 ' + row.head_sha.slice(0,12) : '等待材料'} · 第 ${row.attempt} 次 · 更新于 ${timestamp(row.updated_at)}${row.error_code ? ' · '+faultSummary(row.error_code,row.error_cause) : ''}${tab === 'reviews' && Array.isArray(row.result?.findings) ? ` · ${row.result.findings.length} 条发现` : ''}`
-        : installedView ? installedDetail(row) : `仓库 ID ${row.id}${row.model_id ? '' : ' · 未选模型'}`;
-      content.append(element('p', detail)); line.append(content);
+        : installedView ? installedDetail(row) : (row.model_id ? '' : '还没有默认模型');
+      // The repository number leaves the first screen but stays on hover, with or without a detail line.
+      if (tab === 'projects' && row.id) content.title = '编号 ' + row.id;
+      if (detail) { const detailLine = element('p', detail); if (tab === 'projects' && row.id) detailLine.title = '编号 ' + row.id; content.append(detailLine); } line.append(content);
       if(listTabs.includes(tab))status.append(taskTab ? taskState(row) : state(row.status));
     }
     if(tab==='events'){

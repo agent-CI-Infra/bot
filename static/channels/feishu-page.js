@@ -188,7 +188,7 @@ async function renderFeishuBindingsPage(panel, current) {
     const legacy = element('details', '', 'fold feishu-legacy-binding');
     legacy.append(element('summary', '使用旧私聊认证字符串（兼容入口）'), note('仅用于继续处理之前从机器人私聊发起的认证。首次绑定请使用上方两步流程。'), form);
     personalCreator.append(legacy);
-  } else personalCreator.append(note('暂无你可以使用的飞书应用。请联系超级管理员或本组织的管理员配置。'));
+  } else personalCreator.append(note('暂无你可以使用的飞书应用。请联系管理员配置。'));
 
   openPersonalCreator = (connectorId = null) => {
     personalCreator.hidden = false;

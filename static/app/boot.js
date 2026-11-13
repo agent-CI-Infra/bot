@@ -45,7 +45,7 @@ async function start() {
   (me ? $('main-content') : $('access-feedback')).append($('message'));
   $('access').dataset.mode = setup ? 'setup' : 'local'; $('access-setup-note').hidden = !setup;
   $('github-login').hidden = true; $('access-local-divider').hidden = true; $('access-provider-retry').hidden = true;
-  $('access-provider-status').textContent = ''; $('access-provider-note').textContent = setup ? '' : t('login.local_note');
+  $('access-provider-status').textContent = ''; $('access-provider-note').textContent = '';
   if (!me && !setup) {
     try {
       const enabled = (await api('/api/auth/github/status')).enabled;

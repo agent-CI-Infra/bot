@@ -53,7 +53,7 @@ test('usage and cost page separates cached input, unpriced requests and missing 
     await expect(panel).toContainText('不完整');
 
     // A day without any request is empty, not unmetered: the daily table keeps the same rule as the summary card.
-    const daily = panel.locator('details.cost-breakdown').filter({ hasText: '每日费用与 token 明细' });
+    const daily = panel.locator('details.cost-breakdown').filter({ hasText: '每日费用与用量明细' });
     await daily.locator('summary').click();
     const emptyDay = daily.locator('tbody tr').filter({ hasText: '2026-11-09' });
     await expect(emptyDay).toHaveCount(1);
