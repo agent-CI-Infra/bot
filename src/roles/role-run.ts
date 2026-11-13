@@ -188,7 +188,7 @@ export function modelRevision(snapshot: RoleSnapshot) {
   return snapshot.model.source === 'external_harness' ? `external_harness:${snapshot.harness.id}@${snapshot.harness.version}` : `${snapshot.model.source}:${snapshot.model.id}@${snapshot.model.version}:${snapshot.model.profile_hash ?? 'none'}`;
 }
 /**
- * The budget of a run. entry-default keeps the entry's own per-run limits and bounded caps each run (#167); metered is
+ * The budget of a run. entry-default keeps the entry's own per-run limits; bounded replaces configured limits. metered is
  * cumulative over every run of the role instance in its task: recoveries, new attempts, further delegations and
  * sub-agents all count, so neither an automatic restart nor a retry starts it over. Only a higher budget applied to the
  * role does.

@@ -90,6 +90,7 @@ function roleSettingsCard(role, state, redraw, access) {
   budget.append(field('预算方式', roleSelect('预算方式', role.budget_policy_ref.id, [['entry-default', '沿用任务限制'], ['bounded', '限制单次运行'], ['metered', '限制任务累计用量']], id => {
     const old = role.budget_policy_ref; role.budget_policy_ref = id === 'entry-default' ? { id } : { id, max_turns: old.max_turns || 32, max_output_tokens: old.max_output_tokens || 4096 }; markRoleDirty(state); redraw();
   })));
+  budget.append(note('未配置的轮次沿用运行入口缺省值：通用任务 16 轮、角色对话 24 轮（摘要 4 轮）、任务管理 32 轮、开发 64 轮、独立 QA 32 轮、协调 12 轮；恢复与收尾入口另有 8／12／24 轮缺省值。单次输出通常为 8192 token，开发和部分 DeepSeek 入口为 16384 token。显式配置的轮次和输出上限优先于这些缺省值；累计模型请求数单独计算。'));
   if (role.budget_policy_ref.id !== 'entry-default') {
     for (const [key, title, min, max] of budgetFields.slice(0, role.budget_policy_ref.id === 'bounded' ? 2 : undefined)) {
       const control = input(key, role.budget_policy_ref[key] ?? '', { type: 'number', min, max, step: 1 });
