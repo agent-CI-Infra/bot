@@ -9,6 +9,25 @@ const out = resolve('.tmp/responsive-layout-562');
 
 const overlap = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
 
+
+/** After #514 the org-scope card lives inside a closed 高级／诊断 fold. Open it when present. */
+async function readyIdentity(page, url) {
+  if (url) await page.goto(url);
+  await expect(page.locator('#identity-panel')).toBeVisible();
+  const org = page.getByRole('heading', { name: '当前组织与项目范围' });
+  const github = page.getByRole('heading', { name: '我的 GitHub 连接' });
+  const legacy = page.getByRole('heading', { name: '我的身份与有效权限' });
+  await expect(github.or(org).or(legacy).first()).toBeVisible({ timeout: 15000 });
+  if (await org.isVisible()) return;
+  const summary = page.locator('details.identity-advanced > summary');
+  if (await summary.count()) {
+    await summary.first().click();
+    await expect(org).toBeVisible({ timeout: 10000 });
+  }
+  const switcher = page.getByRole('button', { name: '切换组织' });
+  if (await switcher.count()) await switcher.first().scrollIntoViewIfNeeded();
+}
+
 async function login(page, h, password) {
   await page.goto(h.admin + '/');
   await page.getByLabel('用户名', { exact: true }).fill('administrator');
@@ -60,8 +79,7 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     await page.setViewportSize({ width: 390, height: 844 });
     await login(page, h, password);
 
-    await page.goto(h.admin + '/#/identity');
-    await expect(page.getByRole('heading', { name: '当前组织与项目范围' })).toBeVisible();
+    await readyIdentity(page, h.admin + '/#/identity');
     const identity = await metrics(page, '切换组织');
     expect(identity.overflow).toBe(390);
     expect(identity.target.inView).toBe(true);
@@ -156,8 +174,7 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
 
     // --- 1440 ---
     await page.setViewportSize({ width: 1440, height: 1100 });
-    await page.goto(h.admin + '/#/identity');
-    await expect(page.getByRole('heading', { name: '当前组织与项目范围' })).toBeVisible();
+    await readyIdentity(page, h.admin + '/#/identity');
     const deskId = await metrics(page, '切换组织');
     expect(deskId.overflow).toBe(1440);
     expect(deskId.target.inView).toBe(true);
