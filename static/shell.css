@@ -49,6 +49,10 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: 20px 28px 
 .console-settings-nav { flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid var(--color-border); }
 #console-sidebar #tabs button, #console-sidebar .console-link { display: flex; align-items: center; width: 100%; min-height: 44px; height: auto; padding: 10px 14px; border: 0; border-radius: 7px; color: #4b5d75; background: transparent; text-align: left; text-decoration: none; font-size: 14px; font-weight: 550; }
 #console-sidebar #tabs button:hover, #console-sidebar .console-link:hover { background: #f1f5fb; filter: none; }
+/* #480: the primary desktop task action sits directly under the picker and outside the scrolling navigation. */
+/* One row, one line: the sidebar's generic link rule below forces row layout, so the label is centred here and cannot wrap. */
+#console-sidebar .console-link.console-new-task { flex-shrink: 0; margin: 0 4px 14px; padding: 10px 14px; flex-direction: row; justify-content: center; white-space: nowrap; border-radius: 7px; background: var(--color-brand); color: #fff; font-weight: 600; }
+#console-sidebar .console-link.console-new-task:hover { background: var(--color-brand); filter: brightness(1.06); }
 #console-sidebar #tabs button[aria-current=page], #console-secondary-nav .project-nav a[aria-current=page] { background: var(--color-brand-weak); color: var(--color-brand); border: 0; }
 #console-secondary-nav { margin: 0 0 16px; }
 #console-secondary-nav .project-nav { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: 8px 12px; margin: 0; }

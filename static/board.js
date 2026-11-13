@@ -66,15 +66,39 @@ function boardColumns() {
   return [{id:'unassigned',name:'未设置',hint:'还没有为这个字段选值'},...(boardCustomField()?.options||[])];
 }
 function boardFilter(field) { return boardState.filters.find(f=>f.field===field)?.value; }
+// #480: an explicit board filter wins; otherwise the shell picker's project is the effective scope. The default is never
+// written into the saved view, so a saved view keeps exactly the filters it was saved with.
+function boardDefaultScope() {
+  const shared=typeof consoleDefaultProject==='function'?consoleDefaultProject():null;
+  return shared&&repositories.some(r=>String(r.id)===String(shared))?String(shared):'';
+}
+function boardEffectiveScope() { return String(boardFilter('repository_id')||'')||boardDefaultScope(); }
+// Choosing the default's own project on this page is still the default: it keeps following the picker, and the chip and the
+// sentence must not call the same scope both "an override" and "the shell default".
+function boardFollowsDefault() { const shared=boardDefaultScope(),explicit=String(boardFilter('repository_id')||''); return !explicit||(!!shared&&explicit===shared); }
+function boardScopeCaption() {
+  const name=id=>repositories.find(r=>String(r.id)===id)?.full_name||('仓库 '+id),explicit=boardFilter('repository_id'),shared=boardDefaultScope();
+  if(!shared)return '生效范围：'+(explicit?name(String(explicit))+'（本页覆盖）':'全部仓库（顶栏未选项目）');
+  if(!boardFollowsDefault())return `生效范围：${name(String(explicit))}（本页覆盖；顶栏默认：${name(shared)}）`;
+  return `生效范围：${name(shared)}（顶栏默认）`;
+}
 function boardCategory() { return boardFilter('category')||'all'; }
 function boardSetFilter(field,value) {
   boardState.mobileColumn=null;
   boardState.filters=boardState.filters.filter(f=>f.field!==field);
   if(value!==''&&value!==undefined&&value!==false)boardState.filters.push({field,value});
-  if(field==='repository_id'&&$('board-create-task'))$('board-create-task').href='#/new-task'+(value?'/'+value:'');
+  if(field==='repository_id'&&$('board-create-task'))$('board-create-task').href='#/new-task'+(boardEffectiveScope()?'/'+boardEffectiveScope():'');
   boardDirty();
 }
-function boardConditions() { return boardState.filters.filter(f=>f.value!==''&&f.value!==undefined); }
+// What the reader actually filtered on this page. Saved views store exactly this, never the shell default, so clearing the
+// picker later cannot leave a view pinned to a project the reader never selected in it.
+function boardOwnFilters() { return boardState.filters.filter(f=>f.value!==''&&f.value!==undefined); }
+// What the board queries with: the page's own filters plus the shared default when the page names no repository.
+function boardConditions() {
+  const conditions=boardOwnFilters();
+  if(!conditions.some(f=>f.field==='repository_id')&&boardDefaultScope())conditions.push({field:'repository_id',value:boardDefaultScope()});
+  return conditions;
+}
 // Unsaved means different from the stored view, so undoing a change hides the save button again.
 function boardViewShape(filters,hidden,group) {
   const sorted=list=>[...list].map(f=>JSON.stringify([f.field,f.value])).sort();
@@ -145,7 +169,7 @@ function boardShell() {
   const summary=element('summary','筛选');summary.addEventListener('click',()=>{boardState.filterOpen=!filters.open;});filters.append(summary);
   const controls=element('div','','board-filter-controls');controls.setAttribute('role','group');controls.setAttribute('aria-label','筛选');
   const apply=async(field,value,rebuild=false)=>{boardSetFilter(field,value);if(rebuild)boardShell();else boardChips();await boardLoadCards().catch(error);};
-  const repoChoices=[['','全部仓库'],...repositories.map(r=>[r.id,r.full_name])],repo=boardFilter('repository_id');
+  const repoChoices=[['','全部仓库'],...repositories.map(r=>[r.id,r.full_name])],repo=boardEffectiveScope();
   if(repo&&!repoChoices.some(c=>c[0]===repo))repoChoices.push([repo,'仓库不可访问']);
   const repository=boardOptions('仓库',repoChoices,repo||'',value=>apply('repository_id',value));
   const categories=boardOptions('工作类型',boardCategories(),category==='all'?'':category,value=>apply('category',value,true));
@@ -161,6 +185,7 @@ function boardShell() {
   check.addEventListener('change',()=>apply('include_closed',check.checked));closed.append(check,document.createTextNode('含已关闭'));closed.hidden=category==='release';
   controls.append(repository,categories,execution,types,search,closed);filters.append(controls);
   const chips=element('div','','board-chips');chips.id='board-chips';chips.setAttribute('aria-label','当前筛选');
+  const scopeNote=element('p',boardScopeCaption(),'board-scope');scopeNote.id='board-scope';
   const arrangement=element('div','','board-arrangement');arrangement.setAttribute('role','group');arrangement.setAttribute('aria-label','排列与视图');
   const groups=boardOptions('按…分列',[['bot_stage','bot 执行阶段'],['repository','仓库'],['execution_status','执行状态'],['category','工作类型'],...boardState.fields.map(f=>[f.id,f.name])],boardState.group,async value=>{
     if(boardView().builtin&&!boardStandardGroups.includes(value)){boardSaveAs(value);return false;}
@@ -173,7 +198,7 @@ function boardShell() {
   const status=element('div','','board-status');status.id='board-status';status.setAttribute('role','status');
   const create=consoleLink('#/new-task'+(repo?'/'+repo:''),'新建任务');create.id='board-create-task';create.classList.add('board-create-task');
   arrangement.append(groups,more.menu,element('span','','board-spacer'),status,create,boardButton('刷新',()=>boardLoadCards()));
-  toolbar.append(filters,chips,arrangement);
+  toolbar.append(filters,scopeNote,chips,arrangement);
   const mobile=boardSelect('当前分组',[],'');mobile.label.className='board-mobile-group';mobile.select.id='board-mobile-group';
   mobile.select.addEventListener('change',()=>{boardState.mobileColumn=mobile.select.value;boardRenderCards();});
   const zero=element('div','','board-zero-counts');zero.id='board-zero-counts';
@@ -200,14 +225,18 @@ function boardViewControls() {
 }
 function boardChips() {
   const chips=$('board-chips');if(!chips)return;chips.replaceChildren();
+  const scopeNote=$('board-scope');if(scopeNote)scopeNote.textContent=boardScopeCaption();
   const choices={repository_id:['仓库',repositories.map(r=>[r.id,r.full_name])],category:['工作类型',boardCategories()],
     execution_status:['执行状态',boardExecutionStatuses],object_type:['对象类型',boardTypes],
     bot_stage:['阶段',boardState.stages.map(s=>[s.id,boardStage(s).name])],text:['搜索',[]],include_closed:['含已关闭',[]]};
   for(const filter of boardConditions()){
     const [prefix,options]=choices[filter.field]||[filter.field,[]],value=options.find(([id])=>id===filter.value)?.[1]||(filter.field==='repository_id'?'仓库不可访问':filter.value);
-    const caption=filter.field==='include_closed'?prefix:prefix+'：'+value,chip=element('span','','board-chip');
+    const caption=filter.field==='include_closed'?prefix:prefix+'：'+value+(filter.field==='repository_id'&&boardFollowsDefault()?'（顶栏默认）':''),chip=element('span','','board-chip');
+    chip.append(element('span',caption));
+    // A scope that comes from the shell picker is cleared there, not by a chip that would silently restore all projects.
+    if(filter.field==='repository_id'&&boardFollowsDefault()){chips.append(chip);continue;}
     const remove=button('×',async()=>{boardSetFilter(filter.field,'');if(filter.field==='object_type')boardState.type='all';boardShell();await boardLoadCards().catch(error);},'quiet board-chip-remove');remove.setAttribute('aria-label','移除筛选 '+caption);
-    chip.append(element('span',caption),remove);chips.append(chip);
+    chip.append(remove);chips.append(chip);
   }
 }
 function boardParams(offset) {
@@ -302,7 +331,7 @@ function boardRenderCards(keepScroll=false) {
 function boardSummary() {
   const status=$('board-status');status.replaceChildren(element('span',`共 ${boardState.workCount||0} 项工作`));
   if(boardState.hasMore)status.append(element('span',`已加载 ${boardState.cards.length} 项`),boardButton('加载更多',()=>boardLoadCards(true),'board-link'));
-  if(!boardState.cards.length&&boardConditions().length)status.append(boardButton('清除筛选',async()=>{
+  if(!boardState.cards.length&&boardOwnFilters().length)status.append(boardButton('清除筛选',async()=>{
     boardState.filters=[];boardState.type='all';boardDirty();boardShell();await boardLoadCards();
   },'board-link'));
 }
@@ -365,7 +394,7 @@ async function boardMove(item,option) {
   boardState.cards.filter(c=>boardKey(c)===boardKey(item)).forEach(c=>c.field_value=option);await boardLoadCards();
 }
 async function boardSave() {
-  const view=boardView(),body={filters:boardConditions(),hidden_columns:boardState.hidden};
+  const view=boardView(),body={filters:boardOwnFilters(),hidden_columns:boardState.hidden};
   if(!view.builtin||boardStandardGroups.includes(boardState.group))body.group_by=boardState.group;
   const result=await api('/api/board/views/'+view.id,'PATCH',body);Object.assign(view,result.view);boardState.dirty=false;boardViewControls();
 }
@@ -383,7 +412,7 @@ function boardForm(title,description,labels,submitCaption,submit) {
 function boardSaveAs(group=boardState.group) {
   const groupName={bot_stage:'我的看板',repository:'按仓库',execution_status:'按执行状态',category:'按工作类型'}[group]||boardCustomField()?.name+'看板';
   boardForm('另存视图','筛选、查看维度和折叠的列仅为当前账号保存，所有工作类型共用。',[['name','视图名称',groupName]],'创建视图',async({name})=>{
-    const result=await api('/api/board/views','POST',{name,group_by:group,filters:boardConditions(),hidden_columns:group===boardState.group?boardState.hidden:[]});
+    const result=await api('/api/board/views','POST',{name,group_by:group,filters:boardOwnFilters(),hidden_columns:group===boardState.group?boardState.hidden:[]});
     boardState.viewId=result.view.id;await renderBoard(renderVersion,true);
   });
 }
@@ -392,7 +421,7 @@ function boardAddColumn() {
     boardForm('新建自定义字段','bot 执行的六列跟随任务，不能增加或改名。创建单选字段后，将另存一个视图；加列就是为这个字段添加选项。',
       [['name','字段名称',''],['option','第一列名称','']],'创建字段和视图',async({name,option})=>{
         const {field}=await api('/api/board/fields','POST',{name});await api(`/api/board/fields/${field.id}/options`,'POST',{name:option});
-        const {view}=await api('/api/board/views','POST',{name:name.slice(0,98)+'看板',group_by:field.id,filters:boardConditions(),hidden_columns:[]});
+        const {view}=await api('/api/board/views','POST',{name:name.slice(0,98)+'看板',group_by:field.id,filters:boardOwnFilters(),hidden_columns:[]});
         boardState.viewId=view.id;await renderBoard(renderVersion,true);
       });
   }else{

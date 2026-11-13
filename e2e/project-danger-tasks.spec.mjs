@@ -13,6 +13,8 @@ test('the danger zone states how many tasks a disable would stop, and never repo
   page.on('pageerror', err => errors.push(err.message));
   try {
     seed(f, [['danger-run-a', 'running'], ['danger-run-b', 'implementing'], ['danger-run-c', 'succeeded']]);
+    // The legacy single-project settings address redirects to the one project editor (#480); there the refresh action is
+    // named 刷新项目设置, and the danger zone it re-reads is unchanged.
     await page.goto(f.h.admin + '/#/settings/projects/101');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(f.password);
@@ -25,14 +27,14 @@ test('the danger zone states how many tasks a disable would stop, and never repo
 
     // A count that cannot be read is not zero: the line says so and offers the existing refresh.
     await page.route('**/api/tasks?**', route => route.fulfill({ status: 503, json: { error: 'tasks_unavailable' } }));
-    await page.getByRole('button', { name: '刷新', exact: true }).click();
+    await page.getByRole('button', { name: '刷新项目设置', exact: true }).click();
     await expect(impact).toContainText('暂时无法读取推进中的任务数');
     await expect(impact).toContainText('不按零处理');
     await page.unroute('**/api/tasks?**');
 
     // No work in flight is stated as such instead of leaving the previous count behind.
     f.h.store.run("DELETE FROM tasks WHERE id LIKE 'danger-%'");
-    await page.getByRole('button', { name: '刷新', exact: true }).click();
+    await page.getByRole('button', { name: '刷新项目设置', exact: true }).click();
     await expect(impact).toContainText('当前没有推进中的任务');
     await expect(impact).not.toContainText('项任务在推进中');
     expect(errors).toEqual([]);

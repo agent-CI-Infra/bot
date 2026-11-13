@@ -15,7 +15,9 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-window:not(.management-page):not(.management-fullscreen) .management-window-head { padding-left: 28px; }
 .management-size-handle { position: absolute; left: 1px; top: 1px; z-index: 1; width: 20px; height: 20px; min-height: 0; padding: 0; border: 0; border-radius: 10px 0 0; background: transparent; color: #78949e; cursor: nwse-resize; touch-action: none; font-size: 17px; line-height: 20px; }
 .management-panel { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
-.management-scope { display: flex; align-items: end; gap: 8px; padding: 12px 18px 8px; flex-shrink: 0; }
+.management-scope { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; padding: 12px 18px 8px; flex-shrink: 0; }
+/* #480: the scope line names the effective range and distinguishes it from the shell default. */
+.management-scope-note { flex-basis: 100%; margin: 0; font-size: 11px; line-height: 1.5; color: #6a7f89; }
 .management-scope label { flex: 1; min-width: 0; gap: 5px; color: #6a7f89; font-size: 11px; }
 .management-scope select { width: 100%; min-width: 0; height: 34px; padding: 5px 8px; border-color: #dbe4e7; background: #f8fafb; font-size: 12px; text-overflow: ellipsis; }
 .management-scope button { flex-shrink: 0; min-height: 34px; padding: 6px 10px; font-size: 12px; }
@@ -166,6 +168,9 @@ body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
   .management-window-title p { font-size: 11px; }
   .management-scope { flex-wrap: wrap; padding: 10px 12px 8px; gap: 6px; }
   .management-scope label { flex-basis: 100%; }
+  /* The scope sentence shares the row with the actions instead of taking a row of its own: on a phone that row is the
+     difference between the feed above seeing a full confirmation heading and clipping it. */
+  .management-scope-note { flex: 1 1 132px; min-width: 0; font-size: 10px; line-height: 1.4; }
   .management-scope button { padding: 5px 10px; min-height: 30px; }
   .management-sessions { padding-left: 12px; padding-right: 12px; }
   .management-feed, :is(.management-page,.management-fullscreen) .management-feed { padding: 20px 12px; }

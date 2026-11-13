@@ -145,14 +145,25 @@ function syncConsoleShell() {
     if (typeof resetBoard === 'function') resetBoard();
     if (typeof resetPersonalApps === 'function') resetPersonalApps();
     consoleOwner = me?.id || null; consoleProject = null; consoleNavSignature = ''; consolePositions.clear(); consoleRouteKey = null;
+    // #480: the shared default is this session's choice, so a different user never inherits it.
+    if (typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(null);
+    const clearedPicker = $('console-project'); if (clearedPicker) clearedPicker.value = '';
     $('console-secondary-nav').replaceChildren(); $('console-page').replaceChildren();
   }
   if (!signedIn) return;
   const project = projectRoute(), inbox = consoleInboxRoute();
-  if (project || inbox) consoleProject = project?.id || (inbox[1] === 'all' ? null : inbox[1]) || null;
+  const routed = project?.id || (inbox ? (inbox[1] === 'all' ? null : inbox[1]) : null) || null;
+  // #480: the address wins where it names a project; the board, costs and management pages follow the shell picker.
+  // A page that names no project keeps the project the reader last stood in, and only a chosen default replaces it.
+  if (project || inbox) {
+    consoleProject = routed;
+    // The picker shows this project, so it is also the default the board, costs and management read. An address that
+    // names a project must not leave those three describing another one.
+    if (routed && typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(routed);
+  } else if (typeof consoleDefaultProject === 'function' && consoleDefaultProject()) consoleProject = consoleDefaultProject();
   const repo = repositories.find(r => String(r.id) === consoleProject);
   // A revoked project is never kept in the project picker merely because it was selected earlier.
-  if (!repo) consoleProject = null;
+  if (!repo && consoleProject) { consoleProject = null; if (typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(null); }
   // A GitHub full name carries its owner, so the picker groups by organization without asking for another projection:
   // the same repository name can arrive from two owners and then must not look like one project.
   const organization = r => (r.full_name || '').includes('/') ? r.full_name.split('/')[0] : (r.account_name || '其他组织');
@@ -188,6 +199,7 @@ function syncConsoleShell() {
   if (repo && me.role === 'super_admin' && !consoleGaps.has(String(repo.id))) setTimeout(() => loadConsoleGaps(String(repo.id)), 0);
 
   $('console-inbox-link').href = '#/inbox' + (consoleProject ? '/' + consoleProject : '');
+  const newTaskLink = $('console-new-task'); if (newTaskLink) newTaskLink.href = '#/new-task' + (consoleProject ? '/' + consoleProject : '');
   const scopeKey = project ? 'project:' + project.id : platform ? 'settings' : personal ? 'personal' : '';
   const secondary = project ? $('project-page').querySelector('.project-nav')
     : platform ? $('settings-panel').querySelector('.project-nav')
@@ -284,14 +296,32 @@ function restoreConsolePosition() {
 }
 function initConsoleShell() {
   const sidebar = $('console-sidebar'), kicker = element('p', '工作区', 'console-nav-label'), scope = element('label', '切换项目', 'console-project-picker'), picker = document.createElement('select');
-  picker.id = 'console-project'; picker.setAttribute('aria-label', '切换项目'); picker.addEventListener('change', () => { consoleProject = picker.value || null; location.hash = picker.value ? `#/projects/${picker.value}/overview` : '#/projects'; }); scope.append(picker);
+  picker.id = 'console-project'; picker.setAttribute('aria-label', '切换项目');
+  // #480: the picker is the console-wide default. The board and the usage page read that default, so choosing a project
+  // there re-reads the page in place and keeps the reader where the scope applies; the management assistant follows the
+  // default itself (its own scope control and conversation move together), so re-rendering that page would open a second
+  // conversation for one choice. Every other page is a navigation surface, unchanged: it opens the chosen project (or the
+  // projects list), because its address names what it shows.
+  picker.addEventListener('change', () => {
+    const id = picker.value || null;
+    if (typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(id);
+    consoleProject = id;
+    if (/^#\/(board|costs)(\/|$)/.test(location.hash)) route().catch(error);
+    else if (/^#\/management(\/|$)/.test(location.hash)) { /* the open assistant follows the default itself */ }
+    else location.hash = id ? `#/projects/${id}/overview` : '#/projects';
+  }); scope.append(picker);
   const tabs = $('tabs'), primary = element('div', '', 'console-primary-nav'), settings = element('div', '', 'console-settings-nav');
   settings.setAttribute('role', 'group'); settings.setAttribute('aria-label', '设置与管理');
   settings.append(tabs.querySelector('[data-tab=preferences]'), tabs.querySelector('[data-tab=settings]'));
   primary.append(kicker, ...tabs.children);
   const inbox = consoleLink('#/inbox', '待处理'); inbox.id = 'console-inbox-link'; primary.append(inbox);
   // Keep the original tabs and their click handling, but let only the work navigation scroll above the settings.
-  tabs.replaceChildren(primary, settings); sidebar.append(scope, tabs);
+  // #480: the primary desktop task action sits directly under the picker, outside the scrolling navigation, so a wide
+  // but short window still shows it. It carries the current project; without one the task page asks as it already does.
+  // No hint here: a second line inside the sidebar's row layout squeezed the label into 「＋ 新建任 / 务」 (#480 review).
+  const newTask = consoleLink('#/new-task', '＋ 新建任务');
+  newTask.id = 'console-new-task'; newTask.classList.add('console-new-task'); newTask.setAttribute('aria-label', '＋ 新建任务');
+  tabs.replaceChildren(primary, settings); sidebar.append(scope, newTask, tabs);
   const locationBox = element('div', '', 'console-location'); locationBox.id = 'console-location'; locationBox.hidden = true;
   const area = element('span', '', 'eyebrow'), context = element('span'); area.id = 'console-area'; context.id = 'console-context';
   const permission = element('span', '', 'console-permission'); permission.id = 'console-permission';

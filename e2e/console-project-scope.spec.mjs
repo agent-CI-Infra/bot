@@ -1,0 +1,364 @@
+import { test, expect } from '@playwright/test';
+import { harness, setup, account, repository } from '../test/helpers.mjs';
+
+// The shell project picker is the console-wide default project scope (#480). Every surface below reads it unless the
+// page itself names a scope, in which case that override has to be visible and must not change the default.
+
+async function login(page, h, password, hash = '#/projects', username = 'administrator') {
+  await page.goto(h.admin + '/' + hash);
+  await page.getByLabel('用户名', { exact: true }).fill(username);
+  await page.getByLabel('密码', { exact: true }).fill(password);
+  await page.getByRole('button', { name: '登录', exact: true }).click();
+  await expect(page.locator('#workspace')).toBeVisible();
+}
+
+async function fixture() {
+  const h = await harness();
+  const { admin, password } = await setup(h);
+  const a = await account(admin);
+  await repository(admin, a.id, '101');
+  await repository(admin, a.id, '202');
+  return { h, admin, password };
+}
+
+const boardScopes = page => {
+  const seen = [];
+  page.on('request', request => {
+    const url = new URL(request.url());
+    if (url.pathname !== '/api/board/cards') return;
+    let filters = [];
+    try { filters = JSON.parse(url.searchParams.get('filters') || '[]'); } catch { /* a malformed call is not a scope */ }
+    seen.push(filters.filter(filter => filter.field === 'repository_id').map(filter => String(filter.value)).join(','));
+  });
+  return seen;
+};
+
+const costScopes = page => {
+  const seen = [];
+  page.on('request', request => {
+    const url = new URL(request.url());
+    if (url.pathname === '/api/costs') seen.push(url.searchParams.get('repository_id') || '');
+  });
+  return seen;
+};
+
+// Clearing or changing the picker re-reads the page asynchronously, so each assertion waits for the read it names instead
+// of trusting whichever request happened to be recorded last when the assertion ran.
+const boardScopeRequest = (page, expected) => page.waitForRequest(request => {
+  const url = new URL(request.url());
+  if (url.pathname !== '/api/board/cards') return false;
+  let filters = [];
+  try { filters = JSON.parse(url.searchParams.get('filters') || '[]'); } catch { return false; }
+  return filters.filter(filter => filter.field === 'repository_id').map(filter => String(filter.value)).join(',') === expected;
+});
+const costScopeRequest = (page, expected) => page.waitForRequest(request => {
+  const url = new URL(request.url());
+  return url.pathname === '/api/costs' && (url.searchParams.get('repository_id') || '') === expected;
+});
+// The assistant opens a conversation for its scope, so a scope that really changed asks for a new one.
+const conversationScopeRequest = (page, scope) => page.waitForRequest(request => {
+  const url = new URL(request.url());
+  if (url.pathname !== '/api/management/conversations' || request.method() !== 'POST') return false;
+  try { return JSON.parse(request.postData() || '{}').scope === scope; } catch { return false; }
+});
+
+test('选择项目后看板、用量和管理助手都以它为默认范围，「全部项目」清掉默认', async ({ page }) => {
+  const { h, password } = await fixture();
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    const boards = boardScopes(page), costs = costScopes(page);
+
+    // Choosing a project inside a project route keeps the reader in that project.
+    await page.locator('#console-project').selectOption('101');
+    await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
+
+    // The board takes the shell project as its effective scope, and says so next to its controls.
+    let board = boardScopeRequest(page, '101');
+    await page.goto(h.admin + '/#/board');
+    await board;
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
+    expect(boards.at(-1)).toBe('101');
+    await expect(page.locator('#board-panel')).toContainText('project-101');
+    await expect(page.getByRole('link', { name: '新建任务', exact: true })).toHaveAttribute('href', '#/new-task/101');
+
+    // Costs start on the same project instead of all projects.
+    const cost101 = costScopeRequest(page, '101');
+    await page.goto(h.admin + '/#/costs');
+    await cost101;
+    await expect(page.getByLabel('统计项目', { exact: true })).toHaveValue('101');
+    expect(costs.at(-1)).toBe('101');
+
+    // The management assistant opens on that project rather than on the platform scope.
+    await page.goto(h.admin + '/#/management');
+    await expect(page.getByLabel('当前管理作用域', { exact: true })).toHaveValue('project:101');
+
+    // 「全部项目」 is the explicit all-project scope: it clears the default without navigating away.
+    board = boardScopeRequest(page, '');
+    await page.goto(h.admin + '/#/board');
+    await page.locator('#console-project').selectOption('');
+    await expect(page).toHaveURL(/#\/board$/);
+    await board;
+    expect(boards.at(-1)).toBe('');
+    const costAll = costScopeRequest(page, '');
+    await page.goto(h.admin + '/#/costs');
+    await costAll;
+    await expect(page.getByLabel('统计项目', { exact: true })).toHaveValue('');
+    expect(costs.at(-1)).toBe('');
+    await page.goto(h.admin + '/#/management');
+    await expect(page.getByLabel('当前管理作用域', { exact: true })).toHaveValue('platform');
+    await page.goto(h.admin + '/#/management');
+    await expect(page.getByLabel('当前管理作用域', { exact: true })).toHaveValue('platform');
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); }
+});
+
+test('页面自己的临时过滤保持可见，与顶栏默认区分且不改写默认', async ({ page }) => {
+  const { h, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    const boards = boardScopes(page), costs = costScopes(page);
+    await page.locator('#console-project').selectOption('101');
+    await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
+
+    await page.goto(h.admin + '/#/board');
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
+    let board202 = boardScopeRequest(page, '202');
+    await page.getByRole('group', { name: '仓库', exact: true }).locator('button[data-value="202"]').click();
+    await board202;
+    expect(boards.at(-1)).toBe('202');
+    // The override is named as an override, and it still says what the shared default is.
+    await expect(page.locator('#board-scope')).toContainText('本页覆盖');
+    await expect(page.locator('#board-scope')).toContainText('project-202');
+    await expect(page.locator('#board-scope')).toContainText('project-101');
+    // The shell default itself is unchanged: the next surface still starts on 101.
+    const cost101 = costScopeRequest(page, '101');
+    await page.goto(h.admin + '/#/costs');
+    await cost101;
+    await expect(page.getByLabel('统计项目', { exact: true })).toHaveValue('101');
+    await page.getByLabel('统计项目', { exact: true }).selectOption('202');
+    const cost202 = costScopeRequest(page, '202');
+    await page.getByRole('button', { name: '查看统计', exact: true }).click();
+    await cost202;
+    expect(costs.at(-1)).toBe('202');
+    await expect(page.locator('#costs-scope')).toContainText('本页覆盖');
+    await expect(page.locator('#costs-scope')).toContainText('project-202');
+    await expect(page.locator('#costs-scope')).toContainText('project-101');
+    // Returning to the board keeps the page's own unsaved filter, and it still names the shared default it overrides.
+    board202 = boardScopeRequest(page, '202');
+    await page.goto(h.admin + '/#/board');
+    await board202;
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
+    expect(boards.at(-1)).toBe('202');
+    await expect(page.locator('#board-scope')).toContainText('本页覆盖');
+    await expect(page.locator('#console-project')).toHaveValue('101');
+  } finally { await h.stop(); }
+});
+
+test('桌面项目切换器正下方常驻「＋ 新建任务」，带入当前项目，宽而矮也可见', async ({ page }) => {
+  const { h, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    await page.locator('#console-project').selectOption('101');
+    await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
+    const action = page.locator('#console-sidebar').getByRole('link', { name: '＋ 新建任务', exact: true });
+    await expect(action).toHaveAttribute('href', '#/new-task/101');
+    await expect(action).toBeVisible();
+    // Directly below the picker, outside the scrolling navigation.
+    const picker = await page.locator('#console-project').boundingBox();
+    const box = await action.boundingBox();
+    expect(box.y).toBeGreaterThan(picker.y + picker.height - 1);
+    expect(box.width).toBeGreaterThan(100);
+    // One line, not two: a hint beside the label used to wrap it into 「＋ 新建任 / 务」 at 1440 (#480 review).
+    const shape = el => ({
+      lines: el.querySelector('span').getClientRects().length,
+      overflows: el.scrollWidth > el.clientWidth + 1,
+      parts: el.querySelectorAll('span, small').length,
+    });
+    const lines = await action.evaluate(shape);
+    expect(lines.lines).toBe(1);
+    expect(lines.overflows).toBe(false);
+    expect(lines.parts).toBe(1);
+    // The narrow rail of a 768–1023 window is the tightest place for the same single line.
+    await page.setViewportSize({ width: 768, height: 1000 });
+    await page.goto(h.admin + '/#/projects/101/overview');
+    const narrow = await page.locator('#console-sidebar').getByRole('link', { name: '＋ 新建任务', exact: true }).evaluate(shape);
+    expect(narrow.overflows).toBe(false);
+    expect(narrow.lines).toBe(1);
+
+    // A wide but short window keeps it on screen.
+    await page.setViewportSize({ width: 1440, height: 360 });
+    await page.setViewportSize({ width: 1440, height: 360 });
+    await page.goto(h.admin + '/#/board');
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
+    const short = await page.locator('#console-sidebar').getByRole('link', { name: '＋ 新建任务', exact: true }).boundingBox();
+    expect(short.y).toBeGreaterThanOrEqual(0);
+    expect(short.y + short.height).toBeLessThanOrEqual(360);
+
+    // Without a project it falls back to the project-aware creation flow.
+    await page.locator('#console-project').selectOption('');
+    await expect(page.locator('#console-sidebar').getByRole('link', { name: '＋ 新建任务', exact: true }))
+      .toHaveAttribute('href', '#/new-task');
+
+    // Mobile keeps its own navigation and gains no sidebar action.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(h.admin + '/#/board');
+    await expect(page.locator('#console-sidebar')).toBeHidden();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  } finally { await h.stop(); }
+});
+
+test('统计页选「所有有权访问的项目」是本页覆盖，不再声称顶栏默认', async ({ page }) => {
+  const { h, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    await page.locator('#console-project').selectOption('101');
+    await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
+    const first = costScopeRequest(page, '101');
+    await page.goto(h.admin + '/#/costs');
+    await first;
+    await expect(page.locator('#costs-scope')).toContainText('顶栏默认');
+    // Widening the page's own scope is an override: the request loses its repository and the sentence has to say both that
+    // this is a page choice and what the shared default still is.
+    const widened = costScopeRequest(page, '');
+    await page.getByLabel('统计项目', { exact: true }).selectOption('');
+    await page.getByRole('button', { name: '查看统计', exact: true }).click();
+    await widened;
+    await expect(page.locator('#costs-scope')).toContainText('所有有权访问的项目');
+    await expect(page.locator('#costs-scope')).toContainText('本页覆盖');
+    await expect(page.locator('#costs-scope')).toContainText('顶栏默认：fixture/project-101');
+    await expect(page.locator('#console-project')).toHaveValue('101');
+  } finally { await h.stop(); }
+});
+
+test('旧的项目全局设置地址落到唯一的项目基本设置页，批量清单仍在', async ({ page }) => {
+  const { h, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    await page.goto(h.admin + '/#/settings/projects/101');
+    await expect(page).toHaveURL(/#\/projects\/101\/basic$/);
+    await expect(page.locator('#project-page')).toBeVisible();
+    // The duplicate editor is gone, so the global list still carries the batch operations.
+    await page.goto(h.admin + '/#/settings/projects');
+    await expect(page.getByRole('button', { name: '同步安装列表', exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: '全局管理此项目', exact: false }).first())
+      .toHaveAttribute('href', '#/projects/101/basic');
+  } finally { await h.stop(); }
+});
+
+test('浏览器里留下的管理范围不再决定打开范围，换用户清空共享默认', async ({ page }) => {
+  const { h, admin, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    await page.locator('#console-project').selectOption('101');
+    await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
+    // A stale per-user preference must not override the shell choice.
+    await page.evaluate(() => localStorage.setItem('management-scope:administrator', 'project:202'));
+    await page.goto(h.admin + '/#/management');
+    await expect(page.getByLabel('当前管理作用域', { exact: true })).toHaveValue('project:101');
+    // Signing out clears the shared default for the next user.
+    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    await expect(page.locator('#console-sidebar')).toBeHidden();
+    await expect(page.locator('#console-project')).toHaveValue('');
+    await login(page, h, password, '#/board');
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
+    await expect(page.locator('#console-project')).toHaveValue('');
+    await expect(page.locator('#board-panel')).toContainText('全部仓库');
+  } finally { await h.stop(); }
+});
+
+test('保存看板视图只存页面自己的筛选，顶栏默认不进视图', async ({ page }) => {
+  const { h, admin, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    const boards = boardScopes(page);
+    await page.locator('#console-project').selectOption('101');
+    await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
+    const board101 = boardScopeRequest(page, '101');
+    await page.goto(h.admin + '/#/board');
+    await board101;
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
+    expect(boards.at(-1)).toBe('101');
+    // A page filter makes the view dirty; saving it must store that filter only.
+    await page.getByLabel('搜索编号或标题', { exact: true }).fill('blocked');
+    await expect(page.locator('#board-save')).toBeHidden();
+    await page.getByRole('button', { name: '更多视图操作', exact: true }).click();
+    const saved = page.waitForResponse(response => response.request().method() === 'PATCH'
+      && response.url().includes('/api/board/views/'));
+    await page.locator('#board-save').click();
+    await saved;
+    const views = (await admin('/api/board')).value.views;
+    const view = views.find(item => item.id === 'default') || views[0];
+    expect(JSON.stringify(view.filters)).not.toContain('repository_id');
+    expect(JSON.stringify(view.filters)).toContain('blocked');
+    // Clearing the shell default returns the same view to all projects.
+    const cleared = boardScopeRequest(page, '');
+    await page.locator('#console-project').selectOption('');
+    await expect(page).toHaveURL(/#\/board$/);
+    await cleared;
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
+    expect(boards.at(-1)).toBe('');
+    await expect(page.locator('#board-scope')).toContainText('顶栏未选项目');
+  } finally { await h.stop(); }
+});
+
+test('跟随顶栏默认时，管理助手的作用域与会话一起真的换过去', async ({ page }) => {
+  const { h, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    await page.goto(h.admin + '/#/management');
+    const scope = page.getByLabel('当前管理作用域', { exact: true });
+    await expect(scope).toHaveValue('platform');
+    await expect(page.locator('#management-scope-note')).toContainText('顶栏未选项目');
+    // With no page override the assistant follows the shell default: the control, the sentence and the conversation move
+    // together, so the answer can never belong to the project the header no longer names.
+    let reopened = conversationScopeRequest(page, 'project:101');
+    await page.locator('#console-project').selectOption('101');
+    await expect(page).toHaveURL(/#\/management$/);
+    await reopened;
+    await expect(scope).toHaveValue('project:101');
+    await expect(page.locator('#management-scope-note')).toContainText('project-101');
+    await expect(page.locator('#management-scope-note')).toContainText('顶栏默认');
+    // Still following, not an override: the next picker change is followed again.
+    reopened = conversationScopeRequest(page, 'project:202');
+    await page.locator('#console-project').selectOption('202');
+    await reopened;
+    await expect(scope).toHaveValue('project:202');
+    await expect(page.locator('#management-scope-note')).toContainText('project-202');
+  } finally { await h.stop(); }
+});
+
+test('页内显式管理范围不被顶栏切换冲掉，跟随默认的那种才跟着走', async ({ page }) => {
+  const { h, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    await page.goto(h.admin + '/#/management');
+    const scope = page.getByLabel('当前管理作用域', { exact: true });
+    await expect(scope).toHaveValue('platform');
+    // A scope chosen in the page is explicit: the shell picker must not replace it.
+    await scope.selectOption('project:202');
+    await expect(page.locator('#management-scope-note')).toContainText('本页覆盖');
+    await page.locator('#console-project').selectOption('101');
+    await expect(page).toHaveURL(/#\/management$/);
+    await expect(scope).toHaveValue('project:202');
+    await expect(page.locator('#management-scope-note')).toContainText('本页覆盖');
+    // The address names the project the assistant opens on. Because that address also becomes the shell default, the two
+    // agree, and one scope gets one wording: it is reported as the default it is, not as an override it is not.
+    await page.goto(h.admin + '/#/projects/101/overview');
+    await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click();
+    await expect(scope).toHaveValue('project:101');
+    await expect(page.locator('#console-project')).toHaveValue('101');
+    await expect(page.locator('#management-scope-note')).toContainText('顶栏默认');
+    await expect(page.locator('#management-scope-note')).not.toContainText('本页覆盖');
+  } finally { await h.stop(); }
+});

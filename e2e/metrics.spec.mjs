@@ -33,7 +33,12 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
     await expect(page.getByLabel('输入单价 / 百万 token',{exact:true})).toHaveValue('2');await page.getByLabel('输入单价 / 百万 token',{exact:true}).fill('5');
     await page.getByRole('button',{name:'保存单价',exact:true}).click();await expect(page.locator('#model-pricing')).toHaveCount(0);
     expect(h.store.get("SELECT cost FROM model_requests WHERE task_id='review-usage'").cost).toBe(1.56);
-    await page.getByRole('button',{name:'统计',exact:true}).click();await page.getByLabel('开始日期（本地）',{exact:true}).fill('2026-10-22');await page.getByLabel('结束日期（本地）',{exact:true}).fill('2026-10-23');
+    await page.getByRole('button',{name:'统计',exact:true}).click();
+    // #480: the project page this run came through is now the shell default, so a cross-project report starts by choosing
+    // 全部项目. The totals, the chart and the permission rules below are unchanged.
+    await page.locator('#console-project').selectOption('');
+    await expect(page.locator('#costs-scope')).toContainText('顶栏未选项目');
+    await page.getByLabel('开始日期（本地）',{exact:true}).fill('2026-10-22');await page.getByLabel('结束日期（本地）',{exact:true}).fill('2026-10-23');
     await page.getByRole('button',{name:'查看统计',exact:true}).click();await expect(page.locator('.cost-summary')).toContainText('USD 8.56');await expect(page.locator('.cost-incomplete')).toContainText('2 次请求');
     await expect(page.locator('rect[data-project]')).toHaveCount(3);const segment=page.locator('rect[data-project="101"][data-date="2026-10-22"]');
     await segment.focus();await expect(page.locator('.cost-chart-detail')).toContainText('fixture/project-101');await expect(page.locator('.cost-chart-detail')).toContainText('USD 1.56');await expect(page.locator('.cost-chart-detail')).toContainText('当日 34.2%');

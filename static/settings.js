@@ -225,7 +225,8 @@ async function globalProjectSettings(request, id) {
   const selector = document.createElement('select'); selector.setAttribute('aria-label', '全局设置中的项目');
   selector.add(new Option('选择项目', ''));
   for (const repo of installed) selector.add(new Option(repo.full_name, repo.id)); selector.value = id || '';
-  selector.addEventListener('change', () => { location.hash = '#/settings/projects' + (selector.value ? '/' + selector.value : ''); });
+  // #480: a single project is edited only in the project workspace; the list stays the batch surface.
+  selector.addEventListener('change', () => { location.hash = selector.value ? '#/projects/' + selector.value + '/basic' : '#/settings/projects'; });
   selection.append(field('选择项目', selector));
   if (!id) {
     const tools = element('div', '', 'actions');
@@ -239,7 +240,7 @@ async function globalProjectSettings(request, id) {
     for (const row of installed) {
       const item = element('article', '', 'channel-binding global-project-row'); item.dataset.key = row.id; item.dataset.repositoryId = row.id; item.append(element('strong', row.full_name));
       if (hidden) item.append(button('恢复', () => restoreInstalled(row, () => route()).catch(error), 'quiet'));
-      else item.append(...installedBadges(row), ...installedIntegration(null, row), projectListControls(row), installedActions(row, () => route()), consoleLink('#/settings/projects/' + row.id, '全局管理此项目', '启停、删除和公开可见性'));
+      else item.append(...installedBadges(row), ...installedIntegration(null, row), projectListControls(row), installedActions(row, () => route()), consoleLink('#/projects/' + row.id + '/basic', '全局管理此项目', '启停、删除和公开可见性'));
       selection.append(item);
     }
     const prefix = '#/settings/projects/' + (hidden ? 'hidden.' : 'list.');
