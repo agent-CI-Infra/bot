@@ -426,3 +426,45 @@ test('a rollback previews the command it would send, and sends it only after it 
     expect(commands()).toBe(before + 2);
   } finally { await f.close(); rmSync(h.directory, { recursive: true, force: true }); }
 });
+
+test('项目管理员在没有已启动项目或接口 403 时看到原因和重试，不会一直停在正在读取', async ({ page }) => {
+  const f = await managementFixture(), empty = await f.member('no-project', {});
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(f.h.admin + '/#/management');
+    await page.getByLabel('用户名', { exact: true }).fill('no-project');
+    await page.getByLabel('密码', { exact: true }).fill(empty.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const panel = page.locator('.management-panel');
+    await expect(panel.getByRole('heading', { name: '无法打开管理会话' })).toBeVisible({ timeout: 10_000 });
+    await expect(panel.locator('.console-state')).toContainText('已启动');
+    await expect(panel.getByRole('button', { name: '重试', exact: true })).toBeEnabled();
+    await expect(panel.getByRole('link', { name: '查看项目列表' })).toBeVisible();
+    await expect(panel.getByRole('link', { name: '查看身份与权限' })).toBeVisible();
+    await expect(panel.getByText('正在读取会话…', { exact: true })).toHaveCount(0);
+    await expect(panel.getByText('正在连接管理助手…')).toHaveCount(0);
+    await expect(page.getByLabel('管理消息')).toBeDisabled();
+    await page.screenshot({ path: '.tmp/ui-522/after-empty-desktop.png', fullPage: true });
+    await page.setViewportSize({ width: 600, height: 900 });
+    await page.screenshot({ path: '.tmp/ui-522/after-empty-600.png', fullPage: true });
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(f.h.admin + '/#/projects');
+    await page.getByRole('button', { name: '退出登录' }).click();
+    const granted = await f.member('has-project', { repository_ids: ['101'] });
+    await page.route('**/api/management/conversations', route => {
+      if (route.request().method() === 'GET') return route.fulfill({ status: 403, json: { error: 'scope_forbidden' } });
+      return route.continue();
+    });
+    await page.getByLabel('用户名', { exact: true }).fill('has-project');
+    await page.getByLabel('密码', { exact: true }).fill(granted.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await page.goto(f.h.admin + '/#/management');
+    await expect(page.getByRole('heading', { name: '无法打开管理会话' })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('button', { name: '重试', exact: true })).toBeEnabled();
+    await page.unroute('**/api/management/conversations');
+    await page.getByRole('button', { name: '重试', exact: true }).click();
+    await expect(page.getByRole('button', { name: '发送', exact: true })).toBeEnabled({ timeout: 10_000 });
+    await expect(page.getByRole('heading', { name: '无法打开管理会话' })).toHaveCount(0);
+  } finally { await f.close(); }
+});

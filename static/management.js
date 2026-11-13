@@ -165,6 +165,22 @@ async function openManagementPage(projectId = null) {
 }
 // Why a command did not run, in words instead of only the code the server returned. A code the console cannot explain
 // keeps its bare value below the sentence rather than being guessed at.
+// Why the assistant page or the floating chat could not open, in words a project administrator can act on.
+const managementAccessHints = {
+  scope_forbidden: '当前范围里没有已启动、且你有权管理的项目，所以还不能使用管理助手。请改选上面的项目，或先到项目列表、身份与权限查看项目是否已启动。',
+  capability_forbidden: '当前账号没有使用管理助手所需的权限。请联系管理员，或到「身份与权限」查看授权。',
+  tenant_forbidden: '当前组织范围与这个项目不一致。请在「身份与权限」切换组织后再试。',
+  project_scope_mismatch: '这个项目不在当前选定的范围内。请改选范围后再试。',
+  authorization_changed: '权限已变化，请刷新页面后按当前权限重试。',
+  login_required: '登录已失效，请重新登录。',
+  repository_not_found: '这个项目还没有启动，或当前账号看不到它。请到项目列表或身份与权限查看。'
+};
+function managementAccessMessage(err) {
+  if (err && err.code && managementAccessHints[err.code]) return managementAccessHints[err.code];
+  if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) return '读取管理会话超时，请重试。这不代表你的权限被撤销。';
+  return (err && err.message) ? '无法打开管理会话：' + err.message : '暂时无法连接管理助手，请重试。';
+}
+
 const managementFailureHints = {
   task_already_delivered: '任务已经交付，这个操作不能再执行。',
   management_revision_conflict: '提交之后项目配置的版本变了，命令没有执行；先读回当前配置再提交。',
@@ -393,7 +409,9 @@ async function openManagementChat(projectId = null, { mode = 'floating' } = {}) 
       chat.client = client;
     }).catch(err => {
       if (managementChat !== chat) return;
-      chat.panel.replaceChildren(element('p', '暂时无法连接：' + err.message, 'view-error'), button('重新连接', () => openManagementChat(projectId, { mode: chat.mode }), 'quiet'));
+      const box = consoleState('无法连接管理助手', managementAccessMessage(err), { tone: 'error', retry: () => openManagementChat(projectId, { mode: chat.mode }) });
+      box.querySelector('button').textContent = '重试';
+      chat.panel.replaceChildren(box);
     }).finally(() => { chat.loading = null; });
   }
   await chat.loading;
@@ -506,7 +524,16 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   const pendingMarkdown = new Set();
   const drafts = new Map(), turns = new Map(), messages = new Map();
   const alive = generation => !disposed && panel.isConnected && me?.id === user && generation === scopeGeneration;
-  const showError = err => { if (!disposed) { status.textContent = err.message; status.classList.add('view-error'); } };
+  const showError = err => { if (!disposed) { status.textContent = managementAccessMessage(err); status.classList.add('view-error'); status.setAttribute('role', 'alert'); } };
+  const showAccessError = err => {
+    if (disposed) return;
+    showError(err);
+    welcome.hidden = true;
+    const empty = consoleState('无法打开管理会话', managementAccessMessage(err), { tone: 'error', retry: () => openConversation().catch(showAccessError) });
+    const reload = empty.querySelector('button'); if (reload) reload.textContent = '重试';
+    empty.append(consoleLink('#/projects', '查看项目列表'), consoleLink('#/identity', '查看身份与权限'));
+    feed.replaceChildren(empty);
+  };
   const selectedWithin = node => {
     const selection = window.getSelection();
     return selection && !selection.isCollapsed && (node.contains(selection.anchorNode) || node.contains(selection.focusNode));
@@ -803,11 +830,17 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
       if (!alive(generation)) return;
       conversations.replaceChildren(...all.map(item => { const option = element('option', timestamp(item.created_at) + ' · ' + item.id.slice(0, 8)); option.value = item.id; return option; }));
       if (create || !all.length) {
+        if (!projects.length) {
+          showAccessError(Object.assign(new Error(managementAccessHints.scope_forbidden), { code: 'scope_forbidden' }));
+          return;
+        }
         const result = await api(endpoint + '/conversations', 'POST', { scope: scope.value }); if (!alive(generation)) return;
         conversation = result.conversation.id; const option = element('option', '新会话 ' + conversation.slice(0, 8)); option.value = conversation; conversations.prepend(option);
       } else conversation = all.find(item => item.id === (selected || stored(conversationKey())))?.id ?? all[0].id;
       conversations.value = conversation; remember(conversationKey(), conversation); message.value = drafts.get(conversation) ?? '';
       if (toolsOpen) void refreshTools(); void read();
+    } catch (err) {
+      if (alive(generation)) showAccessError(err);
     } finally { if (alive(generation)) { opening = false; updateBusy(); } }
   }
   async function submit(body) {
@@ -878,7 +911,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   const elapsedTimer = setInterval(() => { for (const value of turns.values()) if (['pending', 'running'].includes(value.state)) paintTurn(value); }, 1000);
   try { await openConversation(); } catch (err) { clearInterval(elapsedTimer); document.removeEventListener('selectionchange', selectionChanged); throw err; }
   return {
-    async setScope(value) { if (!available(value)) { showError(new Error('当前账号无权管理这个项目。')); return; } if (applyScope(value)) await openConversation(); },
+    async setScope(value) { if (!available(value)) { showAccessError(Object.assign(new Error('当前账号无权管理这个项目。'), { code: 'scope_forbidden' })); return; } if (applyScope(value)) await openConversation().catch(showAccessError); },
     // #493: a shell-picker change may rewrite the note while an override is active; the control and the conversation stay
     // where the reader put them, and the flag is re-decided here from the default the picker now shows. The note is still
     // the only thing this writes, and applyScope stays the single writer of the control's value.

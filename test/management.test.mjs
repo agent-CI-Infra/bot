@@ -296,3 +296,32 @@ test('public task creation accepts development intent and PR endpoint inference 
  const refused=await admin('/api/tasks','POST',{repository_id:'101',request:'No grant',intent:'development',contract:{goal:'No grant',scope:['project'],criteria:['result'],endpoint:'reviewable_pull_request'}});
  assert.equal(refused.status,403);assert.equal(refused.value.error,'task_software_disabled');assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,before);
 });
+
+test('a project administrator can list and open conversations on a started project, including when the session is tenant-scoped', async t => {
+  const {h, member} = await managementFixture(t);
+  const adminUser = await member('project-chat', { repository_ids: ['101'] });
+  const listed = await adminUser.client('/api/management/conversations');
+  assert.equal(listed.status, 200, JSON.stringify(listed.value));
+  assert.deepEqual(listed.value.conversations, []);
+  const created = await adminUser.client('/api/management/conversations', 'POST', { scope: 'project:101' });
+  assert.equal(created.status, 201, JSON.stringify(created.value));
+  assert.equal(created.value.conversation.scope, 'project:101');
+  assert.equal((await adminUser.client('/api/management/conversations')).value.conversations.length, 1);
+
+  assert.equal((await adminUser.client('/api/identity/tenant', 'POST', { tenant_id: 'github.com:10' })).status, 201);
+  const platform = await adminUser.client('/api/management/conversations', 'POST', { scope: 'platform' });
+  assert.equal(platform.status, 201, JSON.stringify(platform.value));
+  assert.equal(platform.value.conversation.scope, 'platform');
+});
+
+test('a project administrator with no started project cannot create a conversation and gets a named 403', async t => {
+  const {member} = await managementFixture(t);
+  const empty = await member('no-project', {});
+  assert.equal((await empty.client('/api/management/conversations')).status, 200);
+  assert.deepEqual((await empty.client('/api/management/conversations')).value.conversations, []);
+  const created = await empty.client('/api/management/conversations', 'POST', { scope: 'platform' });
+  assert.equal(created.status, 403);
+  assert.equal(created.value.error, 'scope_forbidden');
+  const project = await empty.client('/api/management/conversations', 'POST', { scope: 'project:101' });
+  assert.equal(project.status, 403);
+});
