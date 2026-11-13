@@ -214,6 +214,7 @@ async function renderChannelConsole(request) {
           row.append(note(value.delivery?.state === 'sent' ? '本轮回答已发送至飞书。' : value.delivery?.state === 'unknown' ? '飞书发送结果未知，请先核对。' : value.delivery?.state === 'failed' ? '发送失败；执行结果不代表已经送达。' : '已生成回答，尚未核验飞书送达结果。'));
         } else if (value.state === 'running') row.append(note('正在回答…'));
         else if (value.state === 'stopped') row.append(note('已在控制台停止，不再发送最终回答；已发出的进展消息保留。'));
+        else if (value.silent) row.append(note('本轮保持安静，未发送回答' + (value.silent_reason ? '：' + value.silent_reason : '。')));
         else if (value.state === 'completed') row.append(note('本轮没有生成可展示的回答。'));
         if (value.error) row.append(note(employeeError(value.error)));
         history.append(row);

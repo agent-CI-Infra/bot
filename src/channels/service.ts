@@ -518,7 +518,8 @@ export class ChannelService {
       stage:m=>this.queue(e,card(m.text),row.id+':stage:'+m.sequence,row.id,{...protection(m.fence,m.turn_id),stage:m.sequence})});
     const target=this.turnMessages.replyEvent(result.id);
     this.store.transaction(()=>{
-      const outbox=result.message.trim()||result.attachments?.length?this.queue(target??e,card(result.message),row.id+':business-result',row.id,{...protection(result.fence,result.id),resource_fence:result.fence},
+      // An explicit stay_silent (#489) or an empty answer sends nothing.
+      const outbox=!result.silent&&(result.message.trim()||result.attachments?.length)?this.queue(target??e,card(result.message),row.id+':business-result',row.id,{...protection(result.fence,result.id),resource_fence:result.fence},
         false,false,undefined,result.attachments,!!target):undefined;
       this.turnMessages.complete(result.id,outbox);
       this.store.run("UPDATE channel_inbox SET state='completed',message_id=? WHERE id=?",result.id,row.id);
