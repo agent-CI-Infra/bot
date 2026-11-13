@@ -276,3 +276,31 @@ test('项目说明原页展开收起并复制当前项目客户端，刷新读�
     await copy.click();await expect(guide.getByLabel('可手动复制的接入指令')).toHaveValue(missing);await expect(page).toHaveURL(/\/projects\/101\/external$/);
   }finally{await cleanup(h);}
 });
+
+test('个人电脑接入默认先给四步可复制短路径，协议细节收在默认折叠的高级说明里',async({page,context})=>{
+  const h=await externalFixture(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  try{
+    const client=await h.client('101',{name:'Short path workstation'}),audience='https://executor.invalid/external/token';
+    await h.admin('/api/external/settings','PUT',{token_audience:audience});
+    await context.grantPermissions(['clipboard-read','clipboard-write'],{origin:h.adminBase});
+    await login(page,h);await project(page,h);
+    const guide=page.locator('#project-page .external-guide'),shortPath=guide.locator('.external-short-path');
+    await expect(guide).toHaveAttribute('open','');
+    await expect(shortPath.locator('li')).toHaveCount(4);
+    for(const title of ['在本机生成密钥','只把公钥交给控制台','兑换 token','用 token 发起请求'])await expect(shortPath).toContainText(title);
+    for(const term of ['SPKI PEM','RS256 JWT','jti','request_id'])await expect(guide).not.toContainText(term);
+    await guide.getByRole('button',{name:'复制生成密钥命令',exact:true}).click();await expect(guide.getByRole('status')).toHaveText('已复制命令');
+    const keyCommand=await page.evaluate(()=>navigator.clipboard.readText());expect(keyCommand).toContain('openssl genpkey -algorithm RSA');expect(keyCommand).toContain('bot-client.pub.pem');
+    await guide.getByRole('button',{name:'复制兑换命令',exact:true}).click();expect(await page.evaluate(()=>navigator.clipboard.readText())).toContain(audience);
+    await guide.getByRole('button',{name:'复制请求示例',exact:true}).click();expect(await page.evaluate(()=>navigator.clipboard.readText())).toContain('https://executor.invalid/external/events');
+    const advanced=guide.locator('.external-guide-advanced');
+    await expect(advanced).toBeHidden();
+    await guide.getByRole('button',{name:'展开高级／协议说明',exact:true}).click();await expect(advanced).toBeVisible();
+    for(const term of ['SPKI PEM','RS256 JWT','jti','request_id'])await expect(advanced).toContainText(term);
+    await expect(advanced.getByRole('link',{name:/详细接口文档/})).toBeVisible();
+    await page.setViewportSize({width:600,height:900});await noOverflow(page);
+    mkdirSync('.tmp/external-short-path',{recursive:true});await page.screenshot({path:'.tmp/external-short-path/width-600.png',fullPage:true});
+    await guide.getByRole('button',{name:'收起高级／协议说明',exact:true}).click();await expect(advanced).toBeHidden();
+    expect(errors).toEqual([]);
+  }finally{await cleanup(h);}
+});
