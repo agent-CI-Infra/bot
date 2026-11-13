@@ -165,5 +165,6 @@ test('external receipts use visible configured prices and cumulative updates nev
   recordExternalModelRequest(h.store,task,'external-run',{...receipt,input_tokens:150,output_tokens:30,cached_input_tokens:50});
   recordExternalModelRequest(h.store,task,'external-run',receipt);
   assert.equal(h.store.get('SELECT cost FROM model_requests WHERE id=?',id).cost,0.00051);assert.equal(h.store.get('SELECT count(*) n FROM model_requests WHERE external_key=?',receipt.key).n,1);
+  const unknownCache=recordExternalModelRequest(h.store,task,'external-run',{...receipt,key:'unknown-cache',cached_input_tokens:null});assert.equal(h.store.get('SELECT cost FROM model_requests WHERE id=?',unknownCache).cost,null,'missing cache data is not a cache miss');
   const hidden=recordExternalModelRequest(h.store,{id:'other',repository_id:'202'},'other-run',{...receipt,key:'hidden-price'});assert.equal(h.store.get('SELECT cost FROM model_requests WHERE id=?',hidden).cost,null);
 });

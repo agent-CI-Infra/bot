@@ -72,12 +72,13 @@ async function prepared(page) {
   const dev = config.configuration.roles.find(role => role.role_id === 'dev');
   const { revision, kind, ...editable } = dev;
   // A configuration that renders all three controls: a model profile (structured output), an environment list, and a
-  // metered budget with a cost (the currency select only exists when max_cost is set).
+  // metered resource budget; legacy monetary values are accepted but omitted on save.
   const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: config.revision, enabled: true,
     skills: [{ id: 'skills_1', source: { type: 'inline', files: [{ path: 'guide.md', content: 'fixture' }] } }],
     roles: [{ ...editable, model_profile_ref: { model_id: model.id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' },
-      budget_policy_ref: { id: 'metered', max_cost: { amount: 1, currency: 'USD' } } }] });
+      budget_policy_ref: { id: 'metered', max_tool_calls: 5, max_cost: { amount: 1, currency: 'USD' } } }] });
   expect(saved.status).toBe(200);
+  expect(saved.value.configuration.roles.find(role=>role.role_id==='dev').budget_policy_ref.max_cost).toBeUndefined();
   await page.goto(h.admin + '/#/projects/101/roles');
   await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -94,7 +95,7 @@ async function other(select) {
 for (const [name, act] of [
   ['结构化输出方式', async page => other(page.getByLabel('结构化输出方式', { exact: true }))],
   ['运行环境', async page => other(page.getByLabel('运行环境', { exact: true }))],
-  ['预算币种', async page => page.getByLabel('预算币种', { exact: true }).selectOption('CNY')],
+  ['任务累计工具调用', async page => page.getByLabel('任务累计工具调用', { exact: true }).fill('9')],
 ]) test(`详情页的「${name}」改一下，回到列表就标记为草稿，放弃后回到已生效`, async ({ page }) => {
   test.setTimeout(90000);
   const { h, revision, list, detail } = await prepared(page);
