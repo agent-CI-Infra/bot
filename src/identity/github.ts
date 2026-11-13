@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import type { Store, Row } from '../storage/database.js';
-import { digest, fail, randomId, type Json } from '../core/security.js';
+import { digest, fail, randomId, HttpError, type Json } from '../core/security.js';
 import { installationRef, numericId, type InstallationIdentity, type InstallationRef, type VerifiedInstallationAccess } from '../installations/archive.js';
 import { resolveActor, invalidate, revision } from './authorization.js';
 import { identityProjection, projectCapabilities, tenantId } from './storage.js';
@@ -164,7 +164,24 @@ export class GitHubIdentity implements InstallationIdentity {
   }
   async reverify(principal: string): Promise<void> {
     this.store.run("UPDATE external_identities SET status='active' WHERE principal_id=? AND provider='github' AND status='pending_verification' AND credentials IS NOT NULL", principal);
+    const identity = this.store.get("SELECT * FROM external_identities WHERE principal_id=? AND provider='github' AND status='active' AND credentials IS NOT NULL", principal);
+    // Login and the minute job still call refresh(), which records pending state and does not fail the caller.
+    // The user-facing button must hear when GitHub requires a new authorization or did not answer.
+    let surface: HttpError | undefined;
+    if (identity) {
+      try {
+        const token = await this.token(identity);
+        await this.api(token, '/user');
+      } catch (error) {
+        const http = error instanceof HttpError ? error : new HttpError(502, 'github_verification_unavailable');
+        // 403 permission-pending stays a silent pending state: the person can retry, and existing
+        // callers of reverify() still observe the recorded status without catching.
+        if (http.code === 'github_reauthorization_required' || http.code === 'github_verification_unavailable' ||
+          http.code === 'github_oauth_unavailable' || http.code === 'github_oauth_failed') surface = http;
+      }
+    }
     await this.refresh(principal);
+    if (surface) throw surface;
   }
   async verifyInstallation(sessionRef: string, ref: InstallationRef): Promise<VerifiedInstallationAccess | null> {
     if (ref.github_host !== 'github.com') return null;

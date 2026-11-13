@@ -2,21 +2,36 @@ titles.identity = '身份与权限';
 // Every code the GitHub login callback can put in ?auth_error (src/server.ts routes HttpError.code there), in words. A
 // code this page does not know keeps the fallback sentence, which never prints the raw code: a code names an internal
 // condition, not something the person can act on.
+const identityErrors = {
+  external_identity_conflict: '这个 GitHub 身份已绑定其他账号。请登录原账号解除绑定，或联系管理员处理。',
+  github_identity_already_bound: '当前账号已有 GitHub 绑定。请先解除原绑定，再关联新的 GitHub 身份。',
+  invalid_oauth_state: '登录验证已过期、已使用或不属于当前浏览器。请重新发起 GitHub 登录。',
+  oauth_session_mismatch: '绑定时的本地会话已变化。请重新登录并发起绑定。',
+  github_oauth_excessive_scope: '这个 OAuth App 的旧授权包含额外权限。请到 GitHub Settings → Applications → Authorized OAuth Apps 撤销它，再重新登录；管理员应使用专用于登录的新 OAuth App。',
+  github_login_configuration_changed: 'GitHub 登录配置已更新，请重新发起登录。',
+  github_oauth_failed: 'GitHub 授权失败，请重新授权。', github_oauth_denied: 'GitHub 授权已取消，请重新发起。',
+  github_reauthorization_required: 'GitHub 授权已过期或已被撤销，需要重新授权后才能继续。',
+  github_oauth_unavailable: '连接 GitHub 失败：授权请求没有完成。请检查本机网络后重新发起登录。',
+  github_verification_unavailable: '连接 GitHub 失败：读取身份或安装权限时没有收到回应。请稍后重试，这不代表你的权限被撤销。',
+  github_permission_pending: 'GitHub 安装或权限还在等待确认，暂时无法核验。请稍后重试，或让安装所有者批准待处理的变更。',
+  github_invalid_user: 'GitHub 返回的账号信息不完整，无法确认身份。请重新发起登录；仍然失败时检查 OAuth App 配置。',
+  user_disabled: '账号已停用，请联系管理员。'
+};
+const identityErrorFallback = 'GitHub 身份暂时无法验证，请稍后重试或使用本地账号登录。';
 function identityError(code) {
-  return ({ external_identity_conflict: '这个 GitHub 身份已绑定其他账号。请登录原账号解除绑定，或联系管理员处理。',
-    github_identity_already_bound: '当前账号已有 GitHub 绑定。请先解除原绑定，再关联新的 GitHub 身份。',
-    invalid_oauth_state: '登录验证已过期、已使用或不属于当前浏览器。请重新发起 GitHub 登录。',
-    oauth_session_mismatch: '绑定时的本地会话已变化。请重新登录并发起绑定。',
-    github_oauth_excessive_scope: '这个 OAuth App 的旧授权包含额外权限。请到 GitHub Settings → Applications → Authorized OAuth Apps 撤销它，再重新登录；管理员应使用专用于登录的新 OAuth App。',
-    github_login_configuration_changed: 'GitHub 登录配置已更新，请重新发起登录。',
-    github_oauth_failed: 'GitHub 授权失败，请重新授权。', github_oauth_denied: 'GitHub 授权已取消，请重新发起。',
-    github_reauthorization_required: 'GitHub 授权已过期或已被撤销，需要重新授权后才能继续。',
-    github_oauth_unavailable: '连接 GitHub 失败：授权请求没有完成。请检查本机网络后重新发起登录。',
-    github_verification_unavailable: '连接 GitHub 失败：读取身份或安装权限时没有收到回应。请稍后重试，这不代表你的权限被撤销。',
-    github_permission_pending: 'GitHub 安装或权限还在等待确认，暂时无法核验。请稍后重试，或让安装所有者批准待处理的变更。',
-    github_invalid_user: 'GitHub 返回的账号信息不完整，无法确认身份。请重新发起登录；仍然失败时检查 OAuth App 配置。',
-    user_disabled: '账号已停用，请联系管理员。' })[code] || 'GitHub 身份暂时无法验证，请稍后重试或使用本地账号登录。';
+  return identityErrors[code] || identityErrorFallback;
 }
+// A stalled reverify must not leave the button on "正在验证…" with no explanation.
+const IDENTITY_REFRESH_TIMEOUT_MS = 20_000;
+let identityRefreshNotice = '';
+function identityRefreshError(err) {
+  if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+    return '验证超时，没有收到 GitHub 的回应。请稍后重试；这不代表你的权限被撤销。';
+  }
+  if (err && err.code && identityErrors[err.code]) return identityErrors[err.code];
+  return (err && err.message) || identityErrorFallback;
+}
+
 // A grant's state in words. `reason` is an additive server field: an older server omits it and every grant
 // keeps the combined sentence it had before, so nothing here depends on it being present.
 function grantStateText(grant) {
@@ -93,15 +108,38 @@ async function renderIdentity() {
   const identities = card('登录与账号绑定');
   identities.append(note('关联 GitHub 账号时，需同时证明当前平台会话和 GitHub 身份。同名或同邮箱账号不会自动合并，关联本身不会增加管理权限。'));
   const feedback = element('p', '', 'view-error'); feedback.setAttribute('role', 'alert');
+  if (identityRefreshNotice) {
+    feedback.className = 'view-success'; feedback.setAttribute('role', 'status');
+    feedback.textContent = identityRefreshNotice; identityRefreshNotice = '';
+  }
   const provider = element('div', '', 'identity-provider'), actions = element('div', '', 'actions');
   const bind = element('button', '绑定 GitHub 账号'); bind.disabled = true;
   bind.addEventListener('click', async () => { bind.disabled = true; feedback.textContent = ''; try { const result = await api('/api/identity/github/bind', 'POST', {}); if (current()) location.assign(result.url); } catch (err) { if (current()) feedback.textContent = err.message; bind.disabled = false; } });
   const refresh = element('button', '重新验证 GitHub 权限', 'quiet'); refresh.disabled = true;
   refresh.addEventListener('click', async () => {
     refresh.disabled = true; refresh.textContent = '正在验证…';
-    feedback.textContent = '';
-    try { await api('/api/identity/refresh', 'POST', {}); if (current()) await start(); } catch (err) { if (current()) feedback.textContent = err.message; }
-    finally { refresh.disabled = false; refresh.textContent = '重新验证 GitHub 权限'; }
+    feedback.className = 'view-error'; feedback.setAttribute('role', 'alert'); feedback.textContent = '';
+    try {
+      await api('/api/identity/refresh', 'POST', {}, { signal: AbortSignal.timeout(IDENTITY_REFRESH_TIMEOUT_MS) });
+      if (!current()) return;
+      identityRefreshNotice = 'GitHub 权限已重新验证。';
+      await start();
+    } catch (err) {
+      if (!current()) return;
+      feedback.className = 'view-error'; feedback.setAttribute('role', 'alert');
+      feedback.textContent = identityRefreshError(err);
+      if (err && err.code === 'github_reauthorization_required') {
+        try {
+          const result = await api('/api/identity/github/bind', 'POST', {});
+          if (current()) {
+            await new Promise(resolve => setTimeout(resolve, 400));
+            if (current()) location.assign(result.url);
+          }
+        } catch (bindErr) {
+          if (current()) feedback.textContent = identityRefreshError(err);
+        }
+      }
+    } finally { refresh.disabled = false; refresh.textContent = '重新验证 GitHub 权限'; }
   }); actions.append(bind, refresh); identities.append(actions, feedback, provider);
   for (const identity of data.identities.filter(i => i.provider !== 'feishu')) {
     const row = element('div', '', 'row'), stateLabel = ({ active: '已验证', pending_verification: '待验证／需重新授权', revoked: '已撤销' })[identity.status] || identity.status;
