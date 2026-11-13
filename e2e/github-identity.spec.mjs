@@ -113,3 +113,26 @@ test('全局用户按实际项目显示 GitHub 继承与手工委派，编辑手
     await page.reload(); await expect(row).toContainText('当前没有可访问的项目'); expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
+
+test('已登录但没有仓库时可以去 GitHub 选择仓库，接入向导接口仍仅限超级管理员', async ({ page }) => {
+  const f = await identityFixture();
+  try {
+    f.h.store.run("INSERT INTO settings VALUES('onboarding.app',?)", JSON.stringify({
+      account_id: f.a.id, app_id: '123', slug: 'fixture-app',
+      settings_url: 'https://github.com/settings/apps/fixture-app',
+      webhook_url: 'https://hooks.invalid/secret-webhook',
+      install_url: 'https://github.com/apps/fixture-app/installations/new',
+    }));
+    f.state.owner = false; f.state.admin = false; f.state.permission = 'write';
+    await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    await expect(page.locator('#identity-panel')).toContainText('已登录 GitHub，但还没有授权任何仓库');
+    const go = page.getByRole('link', { name: '去 GitHub 选择仓库', exact: true });
+    await expect(go).toBeVisible();
+    await expect(go).toHaveAttribute('href', 'https://github.com/apps/fixture-app/installations/new');
+    await expect(go).toHaveAttribute('target', '_blank');
+    await expect(go).toHaveAttribute('rel', /noopener/);
+    const status = await page.evaluate(async () => (await fetch('/api/onboarding')).status);
+    expect(status).toBe(403);
+    expect((await f.admin('/api/onboarding')).status).toBe(200);
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});

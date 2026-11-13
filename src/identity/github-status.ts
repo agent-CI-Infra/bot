@@ -11,10 +11,38 @@ export interface GitHubRepositoryRef { id: string; full_name: string }
 export interface GitHubConnection {
   state: GitHubConnectionState; status: string; next_step: string; action: GitHubConnectionAction;
   repository_count: number; repositories: GitHubRepositoryRef[]; pending_repositories: GitHubRepositoryRef[];
+  install_url: string | null;
 }
 
 function byName(left: GitHubRepositoryRef, right: GitHubRepositoryRef): number {
   return left.full_name.localeCompare(right.full_name) || left.id.localeCompare(right.id);
+}
+
+
+// Only the public "install / choose repositories" address of this deployment's GitHub App. The App owner's
+// settings page, account ids and webhook addresses stay on the super-admin onboarding APIs.
+function safeInstallUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.hostname !== 'github.com' || url.username || url.password) return null;
+    if (!/^\/apps\/[A-Za-z0-9][A-Za-z0-9-]{0,99}\/installations\/(new|select_target)(\/permissions)?$/.test(url.pathname)) return null;
+    return url.origin + url.pathname;
+  } catch { return null; }
+}
+
+export function githubAppInstallUrl(store: Store): string | null {
+  const raw = store.get('SELECT value FROM settings WHERE key=?', 'onboarding.app')?.value;
+  if (typeof raw !== 'string' || !raw) return null;
+  let saved: { slug?: unknown; install_url?: unknown };
+  try { saved = JSON.parse(raw); } catch { return null; }
+  if (typeof saved.install_url === 'string') {
+    const url = safeInstallUrl(saved.install_url);
+    if (url) return url;
+  }
+  if (typeof saved.slug === 'string' && /^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/.test(saved.slug)) {
+    return `https://github.com/apps/${encodeURIComponent(saved.slug)}/installations/new`;
+  }
+  return null;
 }
 
 /** Installed repositories this principal already administers, but that a platform administrator has not started. */
@@ -42,8 +70,9 @@ export function githubConnection(store: Store, principal: string): GitHubConnect
     WHERE principal_id=? AND provider='github' AND status<>'revoked' ORDER BY verified_at DESC LIMIT 1`, principal);
   const scopes = listEffectiveScopes(store, principal);
   const githubPending = scopes.some(g => g.source === 'github_derived' && g.state === 'pending_verification');
+  const install_url = githubAppInstallUrl(store);
   const result = (state: GitHubConnectionState, status: string, next_step: string, action: GitHubConnectionAction): GitHubConnection =>
-    ({ state, status, next_step, action, repository_count: repositories.length, repositories, pending_repositories: pending });
+    ({ state, status, next_step, action, repository_count: repositories.length, repositories, pending_repositories: pending, install_url });
 
   if (!identity) {
     return result('disconnected', '尚未连接 GitHub', '连接 GitHub，然后选择要授权的仓库。', 'connect');
