@@ -59,6 +59,8 @@ async function route() {
   const sample = !target && tab === 'design', samplePage = $('design-page');
   page.hidden = !target; samplePage.hidden = !sample; list.hidden = !!target || tab === 'management' || consolePage || sample;
   $('console-page').hidden = !consolePage;
+  // #553: a list read that this navigation abandoned must not leave its loading state behind the hidden list.
+  if (list.hidden) $('rows').querySelector(':scope > .console-state-loading')?.remove();
   if (typeof syncConsoleShell === 'function') syncConsoleShell(target);
   // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
   document.body.classList.toggle('board-mode', !target && tab === 'board');
