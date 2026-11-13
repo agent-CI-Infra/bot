@@ -172,3 +172,28 @@ body.console-ready .management-page { left: var(--console-rail); }
 
 html { scroll-padding-bottom: calc(var(--console-mobile-height,0px) + 100px); }
 @media(max-width:767px) { .console-ready #paging { padding-right:96px; } }
+
+/* #555: project / event list filters stay folded until needed, so they do not take the first screen. */
+.console-filters-fold {
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-alt);
+}
+.console-filters-fold[hidden] { display: none; }
+.console-filters-fold > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  min-height: var(--control-min);
+  padding: 10px 24px;
+  font-size: var(--font-size-2);
+  font-weight: 600;
+  color: var(--color-text);
+}
+.console-filters-fold > summary::-webkit-details-marker { display: none; }
+.console-filters-fold > summary::before { content: '▸'; margin-right: 8px; color: var(--color-text-muted); }
+.console-filters-fold[open] > summary::before { content: '▾'; }
+.console-filters-fold #filters { border-top: 1px solid var(--color-border); margin: 0; }
+@media (max-width: 767px) {
+  .console-filters-fold > summary { padding: 10px 16px; }
+}

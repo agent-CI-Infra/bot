@@ -46,12 +46,17 @@ async function channelBindingOverview(data) {
   const privateCount = metric('本人私聊', '—', '正在读取'), groupCount = metric('维护的群', '—', '正在读取');
   overview.append(metrics);
   const links = element('div', '', 'actions');
-  links.append(
-    channelLink('#/identity/feishu', '管理飞书绑定', 'button-link quiet'),
+  links.append(channelLink('#/identity/feishu', '管理飞书绑定', 'button-link quiet'));
+  // #555: keep the Feishu card on the identity first screen (#514), but fold leftover create/session links.
+  const more = element('details', '', 'fold feishu-more-actions');
+  more.setAttribute('data-testid', 'feishu-more-actions');
+  more.append(
+    element('summary', '更多飞书操作'),
     channelLink('#/identity/feishu?create=personal', '创建个人绑定', 'button-link quiet'),
     channelLink('#/identity/feishu?create=group', '创建群绑定', 'button-link quiet'),
     channelLink('#/conversations', '查看飞书会话', 'button-link quiet')
   );
+  links.append(more);
   overview.append(links);
   const summary = element('div', '', 'feishu-bound-summary'); overview.append(summary);
   const show = (node, value, hint) => { node.querySelector('strong').textContent = String(value); node.querySelector('small').textContent = hint; };

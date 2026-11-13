@@ -41,6 +41,9 @@ test('Webhook 投递空状态说明原因并给出下一步', async ({ page }) =
 
     await page.goto(h.admin + '/#/events');
     await expect(empty.getByRole('heading', { name: '还没有 Webhook 投递', exact: true })).toBeVisible();
+    const filtersFold = page.getByTestId('project-filters-fold');
+    await expect(filtersFold).toBeVisible();
+    await filtersFold.locator('summary').click();
     await page.locator('#owner-filter').fill('99999');
     await page.getByRole('button', { name: '筛选', exact: true }).click();
     await expect(page.getByText('本页 0 条投递')).toBeVisible();

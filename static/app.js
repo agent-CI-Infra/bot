@@ -412,7 +412,15 @@ async function render(quiet = false) {
   $('page-title').textContent = isIdentity ? identityTitle : titles[tab];
   const activeNavTab = ['preferences', 'identity', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === activeNavTab ? 'page' : 'false'));
-  $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
+  $('filters').hidden = !listTabs.includes(tab);
+  const filtersFold = document.querySelector('[data-testid=project-filters-fold]');
+  if (filtersFold) {
+    filtersFold.hidden = $('filters').hidden;
+    const active = $('repository-filter').value || $('account-filter').value || $('owner-filter').value;
+    const summary = filtersFold.querySelector('summary');
+    if (summary) summary.textContent = active ? '筛选（已设条件）' : '筛选';
+    if (active) filtersFold.open = true;
+  } $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
   $('rows').hidden=['external','board','costs','settings','identity','preferences'].includes(tab);$('external-panel').hidden=tab!=='external';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=!isIdentity;$('sync').hidden=true;$('hidden-filter-label').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = listParams();
@@ -481,10 +489,10 @@ async function render(quiet = false) {
     if(tab==='projects'&&!hiddenView){line.classList.add('project-list-row');line.dataset.repositoryId=row.id;status.classList.add('project-overview');status.append(projectListControls(row));}
     if(taskTab&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
     if(status.childElementCount)line.append(status);
-    if(installedView){const actions=element('div','','actions'); actions.append(button('设置',()=>openProject(row.id)));
+    if(installedView){const actions=element('div','','actions'); actions.append(button('设置',()=>openProject(row.id),'quiet'));
       if(hiddenView)actions.append(button('恢复',()=>restoreInstalled(row,()=>start()).catch(error),'quiet'));
       if(actions.childElementCount)line.append(actions);}
-    else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id)));line.append(actions);}
+    else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id),'quiet'));line.append(actions);}
     if (tab === 'events') {
       const button = element('button', '查看详情', 'quiet'); button.addEventListener('click', async () => {
         try { $('detail-title').textContent='投递详情'; $('detail-body').replaceChildren(...deliveryDetail(await api('/api/events/' + row.id))); $('detail').showModal(); } catch (err) { error(err); }

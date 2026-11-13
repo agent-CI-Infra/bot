@@ -315,7 +315,7 @@ function installedActions(row, after) {
     if (await askConfirm({ title: `禁用 ${row.full_name}？`, body: ['新的 Issue／PR 不再处理，正在执行的任务会中止，虚拟电脑停止但数据保留，之后可以再启用。'], action: '禁用', danger: true }))
       call('disable', {}, `正在禁用 ${row.full_name}…`);
   }));
-  if (row.registered) actions.append(button('设置', () => openProject(row.id)));
+  if (row.registered) actions.append(button('设置', () => openProject(row.id), 'quiet'));
   // A project still off the installation is deleted only after GitHub confirms the account lost it; a started project can
   // also be deleted here from the control plane alone; an installed but never started repository is only hidden.
   if (row.installed !== true) actions.append(button('删除', () => deleteProject(row, after), 'quiet destructive'));
