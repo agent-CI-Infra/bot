@@ -1,3 +1,4 @@
+import { consoleNavigate } from './console-navigation.mjs';
 import {test,expect} from '@playwright/test';
 import {mkdirSync,rmSync} from 'node:fs';
 import {harness,setup,account,repository,testPassword} from '../test/helpers.mjs';
@@ -33,7 +34,7 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
     await expect(page.getByLabel('输入单价 / 百万 token',{exact:true})).toHaveValue('2');await page.getByLabel('输入单价 / 百万 token',{exact:true}).fill('5');
     await page.getByRole('button',{name:'保存单价',exact:true}).click();await expect(page.locator('#model-pricing')).toHaveCount(0);
     expect(h.store.get("SELECT cost FROM model_requests WHERE task_id='review-usage'").cost).toBe(1.56);
-    await page.getByRole('button',{name:'统计',exact:true}).click();
+    await consoleNavigate(page, '统计');
     // #480: the project page this run came through is now the shell default, so a cross-project report starts by choosing
     // 全部项目. The totals, the chart and the permission rules below are unchanged.
     await page.locator('#console-project').selectOption('');
@@ -51,7 +52,7 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
     const memberPassword=testPassword();await admin('/api/users','POST',{username:'metrics-member',password:memberPassword,repository_ids:['101']});
     const context=await browser.newContext(),member=await context.newPage();
     try{
-      await login(member,h.admin,'metrics-member',memberPassword);await member.getByRole('button',{name:'统计',exact:true}).click();
+      await login(member,h.admin,'metrics-member',memberPassword);await consoleNavigate(member, '统计');
       await member.getByLabel('开始日期（本地）',{exact:true}).fill('2026-10-22');await member.getByLabel('结束日期（本地）',{exact:true}).fill('2026-10-23');await member.getByRole('button',{name:'查看统计',exact:true}).click();
       await expect(member.locator('.cost-summary')).toContainText('USD 5.56');await expect(member.locator('#costs-panel')).not.toContainText('project-202');
       expect(await member.getByLabel('统计项目',{exact:true}).locator('option').count()).toBe(2);
@@ -75,7 +76,7 @@ test('没有费用信息时按输入加输出 token 堆叠，缓存不重复累�
     await page.getByRole('button',{name:'查看统计',exact:true}).click();
   };
   try{
-    await page.setViewportSize({width:1440,height:1000});await login(page,h.admin,'administrator',password);await page.getByRole('button',{name:'统计',exact:true}).click();await filter('2026-10-22','2026-10-23');
+    await page.setViewportSize({width:1440,height:1000});await login(page,h.admin,'administrator',password);await consoleNavigate(page, '统计');await filter('2026-10-22','2026-10-23');
     await expect(page.getByRole('heading',{name:'每日 token · 按项目堆叠',exact:true})).toBeVisible();
     const chart=page.locator('.cost-chart-section');await expect(chart.locator('svg')).toHaveAttribute('data-metric','tokens');await expect(chart.locator('rect')).toHaveCount(2);
     const own=chart.locator('rect[data-project="101"]');await expect(own).toHaveAttribute('data-value','1100');await own.focus();
@@ -90,7 +91,7 @@ test('没有费用信息时按输入加输出 token 堆叠，缓存不重复累�
     const memberPassword=testPassword();await admin('/api/users','POST',{username:'token-member',password:memberPassword,repository_ids:['101']});
     const context=await browser.newContext(),member=await context.newPage();
     try{
-      await login(member,h.admin,'token-member',memberPassword);await member.getByRole('button',{name:'统计',exact:true}).click();
+      await login(member,h.admin,'token-member',memberPassword);await consoleNavigate(member, '统计');
       await expect(member.locator('.cost-chart-section svg')).toHaveAttribute('data-metric','tokens');await expect(member.locator('rect[data-project="202"]')).toHaveCount(0);await expect(member.locator('.cost-legend')).not.toContainText('project-202');
     }finally{await context.close();}
     expect(errors).toEqual([]);

@@ -1,3 +1,4 @@
+import { consoleNavigate } from './console-navigation.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
@@ -80,7 +81,7 @@ test('系统超级管理员在全局设置向导启用 GitHub 登录，密钥不
     await page.goto(f.h.admin); await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.locator('#tabs').getByRole('button', { name: '接入向导', exact: true })).toHaveCount(0);
-    await page.getByRole('button', { name: '全局设置', exact: true }).click();
+    await consoleNavigate(page, '全局设置');
     await page.locator('.project-nav').getByRole('link', { name: '接入向导', exact: true }).click();
     await page.getByRole('button', { name: '3. GitHub 登录', exact: true }).click();
     await expect(page).toHaveURL(/#\/settings\/onboarding\/2$/);

@@ -1,22 +1,24 @@
-// Exercise the visible navigation at each breakpoint, rather than clicking a hidden desktop menu.
+// Exercise visible navigation at each breakpoint, including destinations moved into More.
 export async function consoleNavigate(page, name) {
-  if (!await page.evaluate(() => matchMedia('(max-width:767px)').matches)) {
-    if (['身份与权限', '飞书绑定', '外部执行端', '飞书会话'].includes(name)) {
-      await page.locator('#tabs [data-tab=preferences]').click();
-      await page.locator('#console-secondary-nav .project-nav').getByRole('link', { name, exact: true }).click();
-      return;
-    }
-    if (name === '设置' || name === '个人设置') {
-      await page.locator('#tabs [data-tab=preferences]').click();
-      return;
-    }
-    const desktop = page.locator('#tabs').getByRole('button', { name, exact: true, includeHidden: true });
-    await desktop.click();
+  const mobile = await page.evaluate(() => matchMedia('(max-width:767px)').matches);
+  if (!mobile && ['项目', '管理对话', '看板'].includes(name)) {
+    await page.locator('#tabs').getByRole('button', { name, exact: true }).click();
     return;
   }
-  await page.locator('#console-mobile-nav').getByRole('link', { name: '更多', exact: true }).click();
-  const address = { '全局设置': '#/settings/work-computers', 'Webhook 投递': '#/events', '外部执行端': '#/external', '身份与权限': '#/identity', '飞书绑定': '#/identity/feishu', '设置': '#/preferences', '个人设置': '#/preferences', '飞书会话': '#/conversations',
-    '看板': '#/board', '统计': '#/costs', '管理对话': '#/management', '项目': '#/projects' }[name];
+  if (mobile && ['项目', '看板'].includes(name)) {
+    await page.locator(`#console-mobile-nav [data-page=${name === '项目' ? 'projects' : 'board'}]`).click();
+    return;
+  }
+  if (mobile) await page.locator('#console-mobile-nav [data-page=more]').click();
+  else await page.locator('#tabs [data-tab=more]').click();
+  const address = { '全局设置': '#/settings', '存储': '#/settings/storage', 'Webhook 投递': '#/events',
+    '外部执行端': '#/external', '身份与权限': '#/identity', '飞书绑定': '#/identity',
+    '设置': '#/identity', '个人设置': '#/identity', '飞书会话': '#/conversations',
+    '统计': '#/costs', '管理对话': '#/management' }[name];
   if (!address) throw new Error('Unknown console navigation: ' + name);
   await page.locator('#console-page').locator(`a[href="${address}"]`).click();
+  if (name === '飞书绑定') {
+    if (mobile) await page.getByLabel('当前页面', { exact: true }).selectOption('#/identity/feishu');
+    else await page.locator('#console-secondary-nav').getByRole('link', { name, exact: true }).click();
+  }
 }

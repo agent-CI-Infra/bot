@@ -1,3 +1,4 @@
+import { consoleNavigate } from './console-navigation.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -37,7 +38,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await admin('/api/installations/sync', 'POST', {}); await repository(admin, a.id, '101');
     await page.goto(h.admin); await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.getByRole('button', { name: '全局设置', exact: true }).click(); await page.locator('.project-nav').getByRole('link', { name: '机器人账号', exact: true }).click();
+    await consoleNavigate(page, '全局设置'); await page.locator('.project-nav').getByRole('link', { name: '机器人账号', exact: true }).click();
     const accountRow = page.locator('.row', { hasText: 'Department App' }); await accountRow.getByRole('button', { name: '检查权限和事件订阅', exact: true }).click();
     const result = accountRow.locator('.permission-result');
     await expect(result).toContainText('Actions：改为「Read and write」（当前「No access」）');

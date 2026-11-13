@@ -107,29 +107,21 @@ function consoleScope() {
 function consoleGroups() {
   const id = consoleScope(), repo = repositories.find(r => String(r.id) === id);
   const groups = [{ title: '工作区', items: [
-    ['#/projects', '全部项目', '查看有权访问的项目'], ['#/board', '任务看板', '任务状态、角色与运行证据'],
     ['#/new-task' + (repo ? '/' + id : ''), '新建任务', '填写需求、验收条件和交付类型'],
-    ['#/inbox' + (repo ? '/' + id : ''), '待处理', '配置、权限、环境与失败事项'],
-    ['#/management', '管理对话', '实时回答、执行进展与命令回执'],
+    ...(!consoleMedia.matches ? [['#/inbox' + (repo ? '/' + id : ''), '待处理', '配置、权限、环境与失败事项']] : []),
+    ...(consoleMedia.matches ? [['#/management', '管理对话', '实时回答、执行进展与命令回执']] : []),
     ['#/conversations', '飞书会话', '成员消息、执行过程与派生任务']
   ] }];
-  if (repo) groups.push({ title: repo.full_name, items: projectSections
-    .filter(([key]) => ['overview', 'management', 'release', 'knowledge', 'activity'].includes(key))
-    .map(([key, name]) => [`#/projects/${id}/${key}`, name, '当前项目']) });
-  groups.push({ title: '分析与身份', items: [
+  groups.push({ title: '分析与诊断', items: [
     ['#/costs', '用量与成本', '按项目、日期与工作类型查看'],
     ['#/events', 'Webhook 投递', '接收、验证和处理结果'],
-    ['#/identity', '身份与权限', '本人绑定与当前有效授权'],
     ['#/external', '外部执行端', '接入与连接诊断'],
     ...(me.role === 'super_admin' ? [] : [['#/settings/storage', '存储', '本人项目的轨迹与数据量']])
   ] });
-  groups.push({ title: '设置', items: [['#/preferences', '个人设置', '个人身份、飞书绑定与外部执行端'],
-    ['#/identity/feishu', '飞书绑定', '个人绑定、群绑定、仓库权限与聊天记录'], ...(repo ? projectSections
-    .filter(([key]) => ['basic', 'roles', 'model', 'machine', 'schedules', 'external', 'members'].includes(key))
-    .map(([key, name]) => [`#/projects/${id}/${key}`, name, repo.full_name]) : [])] });
-  if (me.role === 'super_admin') groups.push({ title: '全局设置', items: settingsSections.map(([key, name]) => [
-    key === 'onboarding' ? '#/settings/onboarding/0' : '#/settings/' + key, name, '平台超级管理员'
-  ]) });
+  groups.push({ title: '设置', items: [
+    ['#/identity', '身份与权限', '个人身份、飞书绑定与当前有效授权'],
+    ...(me.role === 'super_admin' ? [['#/settings', '全局设置', '平台接入、资源与用户管理']] : [])
+  ] });
   return groups;
 }
 function syncConsoleShell() {
@@ -184,7 +176,7 @@ function syncConsoleShell() {
     }
     picker.value = consoleProject || '';
   }
-  const platform = tab === 'settings', personal = !project && ['preferences', 'identity', 'external', 'conversations'].includes(tab);
+  const platform = tab === 'settings', personal = !project && ['preferences', 'identity', 'external'].includes(tab);
   $('console-project').closest('label').hidden = platform;
   $('console-area').textContent = platform ? '平台管理' : project ? '项目工作区' : personal ? '个人设置' : '工作区';
   // The scope bar names both halves of the current address: a project name alone does not say which organization it is in.
@@ -205,7 +197,6 @@ function syncConsoleShell() {
   }
   if (repo && me.role === 'super_admin' && !consoleGaps.has(String(repo.id))) setTimeout(() => loadConsoleGaps(String(repo.id)), 0);
 
-  $('console-inbox-link').href = '#/inbox' + (consoleProject ? '/' + consoleProject : '');
   const scopeKey = project ? 'project:' + project.id : platform ? 'settings' : personal ? 'personal' : '';
   const secondary = project ? $('project-page').querySelector('.project-nav')
     : platform ? $('settings-panel').querySelector('.project-nav')
@@ -319,13 +310,9 @@ function initConsoleShell() {
     else if (/^#\/management(\/|$)/.test(location.hash)) syncConsoleShell();
     else location.hash = id ? `#/projects/${id}/overview` : '#/projects';
   }); scope.append(picker);
-  const tabs = $('tabs'), primary = element('div', '', 'console-primary-nav'), settings = element('div', '', 'console-settings-nav');
-  settings.setAttribute('role', 'group'); settings.setAttribute('aria-label', '设置与管理');
-  settings.append(tabs.querySelector('[data-tab=preferences]'), tabs.querySelector('[data-tab=settings]'));
+  const tabs = $('tabs'), primary = element('div', '', 'console-primary-nav');
   primary.append(kicker, ...tabs.children);
-  const inbox = consoleLink('#/inbox', '待处理'); inbox.id = 'console-inbox-link'; primary.append(inbox);
-  // Keep the original tabs and their click handling, but let only the work navigation scroll above the settings.
-  tabs.replaceChildren(primary, settings); sidebar.append(scope, tabs);
+  tabs.replaceChildren(primary); sidebar.append(scope, tabs);
   const locationBox = element('div', '', 'console-location'); locationBox.id = 'console-location'; locationBox.hidden = true;
   const area = element('span', '', 'eyebrow'), context = element('span'); area.id = 'console-area'; context.id = 'console-context';
   const permission = element('span', '', 'console-permission'); permission.id = 'console-permission';
@@ -360,6 +347,9 @@ function initConsoleShell() {
   addEventListener('scroll', rememberConsolePosition, { passive: true });
   // The browser's native modal focus restoration is retained; Escape keeps each existing dialog's semantics.
   document.querySelector('.skip-link').addEventListener('click', event => { event.preventDefault(); $('main-content').focus(); });
-  consoleMedia.addEventListener('change', () => syncConsoleShell());
+  consoleMedia.addEventListener('change', () => {
+    syncConsoleShell();
+    if (me && tab === 'more') renderConsoleMore();
+  });
 }
 initConsoleShell();

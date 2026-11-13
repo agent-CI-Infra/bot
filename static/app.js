@@ -214,8 +214,6 @@ async function start() {
   if (!me) return;
   renderCurrentUser();
   document.querySelectorAll('[data-super]').forEach(el => el.hidden = me.role !== 'super_admin');
-  // A project administrator's only global settings section is 存储 (its own projects' storage): the tab opens it.
-  const settingsTab = document.querySelector('#tabs [data-tab=settings]'); if (settingsTab && me.role !== 'super_admin') { settingsTab.hidden = false; settingsTab.textContent = '存储'; }
   repositories = (await api('/api/repositories')).repositories;
   if (me.role === 'super_admin') accounts = (await api('/api/accounts')).accounts;
   options($('repository-filter'), repositories, r => r.full_name); options($('account-filter'), accounts, a => a.name);
@@ -287,8 +285,8 @@ async function route() {
   if (typeof syncConsoleShell === 'function') syncConsoleShell(target);
   // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
   document.body.classList.toggle('board-mode', !target && tab === 'board');
-  const activeNavTab = ['preferences', 'identity', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
-  document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', !target && el.dataset.tab === activeNavTab ? 'page' : 'false'));
+  const activeNavTab = ['projects', 'board', 'management'].includes(tab) ? tab : 'more';
+  document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === activeNavTab ? 'page' : 'false'));
   // A second address can arrive while the first one is still loading (a hash change during a list read): the newer
   // route owns the page, so this one stops before it can redraw it from the address it no longer represents.
   if (resolved !== tab) return;
@@ -384,7 +382,7 @@ async function render(quiet = false) {
   const identityTitle = /^#\/identity\/feishu-apps(?:\/|$)/.test(location.hash) ? '组织飞书应用'
     : /^#\/identity\/feishu(?:$|\?|\/)/.test(location.hash) ? '飞书绑定' : titles.identity;
   $('page-title').textContent = isIdentity ? identityTitle : titles[tab];
-  const activeNavTab = ['preferences', 'identity', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
+  const activeNavTab = ['projects', 'board', 'management'].includes(tab) ? tab : 'more';
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === activeNavTab ? 'page' : 'false'));
   $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
   $('rows').hidden=['external','board','costs','settings','identity','preferences'].includes(tab);$('external-panel').hidden=tab!=='external';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=!isIdentity;$('sync').hidden=true;$('hidden-filter-label').hidden=true;

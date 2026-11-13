@@ -171,7 +171,7 @@ test('桌面侧栏不额外提供新建任务一级入口，项目与导航范�
     await page.screenshot({ path: '.tmp/console-project-scope/no-primary-task-1440.png', fullPage: true });
     await page.setViewportSize({ width: 1440, height: 360 });
     await expect(page.locator('#console-project')).toBeVisible();
-    await expect(page.locator('#tabs [data-tab=settings]')).toBeVisible();
+    await expect(page.locator('#tabs [data-tab=more]')).toBeVisible();
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/board');
     await expect(page.locator('#console-sidebar')).toBeHidden();
@@ -526,14 +526,14 @@ test('管理对话页切换顶栏项目时，带项目的收件箱导航链接�
     await login(page, h, password);
     await page.goto(h.admin + '/#/management');
     await expect(page.locator('#console-project')).toHaveValue('');
-    await expect(page.locator('#console-inbox-link')).toHaveAttribute('href', '#/inbox');
+    await expect(page.locator('#console-mobile-nav [data-page=inbox]')).toHaveAttribute('href', '#/inbox');
     const opened = conversationScopeRequest(page, 'project:101');
     await page.locator('#console-project').selectOption('101');
     await opened;
-    await expect(page.locator('#console-inbox-link')).toHaveAttribute('href', '#/inbox/101');
+    await expect(page.locator('#console-mobile-nav [data-page=inbox]')).toHaveAttribute('href', '#/inbox/101');
     // Clearing the choice must not leave the link naming the project it just left.
     await page.locator('#console-project').selectOption('');
-    await expect(page.locator('#console-inbox-link')).toHaveAttribute('href', '#/inbox');
+    await expect(page.locator('#console-mobile-nav [data-page=inbox]')).toHaveAttribute('href', '#/inbox');
   } finally { await h.stop(); }
 });
 

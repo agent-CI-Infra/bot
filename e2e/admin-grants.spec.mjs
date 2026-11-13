@@ -1,3 +1,4 @@
+import { consoleNavigate } from './console-navigation.mjs';
 import { test, expect } from '@playwright/test';
 import { rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
@@ -13,7 +14,7 @@ test('超级管理员按组织分组选择项目管理员的仓库，并在用�
     await page.goto(h.admin);
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.getByRole('button', { name: '全局设置', exact: true }).click(); await page.locator('.project-nav').getByRole('link', { name: '用户', exact: true }).click();
+    await consoleNavigate(page, '全局设置'); await page.locator('.project-nav').getByRole('link', { name: '用户', exact: true }).click();
     await page.getByRole('button', { name: '新增用户', exact: true }).click();
     // One group per organization; its first option is the whole organization, and repositories not enabled yet are listed too.
     const editor = page.locator('#editor'), picker = editor.getByLabel('仓库权限');
