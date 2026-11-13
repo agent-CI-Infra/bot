@@ -10,6 +10,15 @@ const box = async (locator) => locator.evaluate(el => {
   return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width, height: r.height };
 });
 
+/** 高级／诊断 fold cards: their boxes, and the column gutter between cards that share a row. */
+const foldCards = page => page.evaluate(() => {
+  const cards = [...document.querySelectorAll('.identity-layout > .identity-advanced[open] > .side-card')].map(el => el.getBoundingClientRect());
+  const lefts = [...new Set(cards.map(r => Math.round(r.left)))];
+  const gutters = [];
+  for (const a of cards) for (const b of cards) if (Math.abs(a.top - b.top) < 2 && b.left > a.right) gutters.push(Math.round(b.left - a.right));
+  return { count: cards.length, columns: lefts.length, gutter: gutters.length ? Math.min(...gutters) : null };
+});
+
 /** After #514 the org-scope card lives inside a closed 高级／诊断 fold. Open it when present. */
 async function readyIdentity(page, url) {
   if (url) await page.goto(url);
@@ -89,6 +98,10 @@ test('#557 登录、身份、更多功能、基本设置在 1440 对齐同一栅
       return { rows, sameHeight: rows.every(r => r.length < 2 || r.every(c => Math.abs(c.height - r[0].height) < 2)) };
     });
     expect(identity.rows.some(r => r.length === 2)).toBeTruthy();
+    // The fold's paired cards keep the --space-6 (20px) gutter at 1440.
+    const fold1440 = await foldCards(page);
+    expect(fold1440.columns).toBe(2);
+    expect(fold1440.gutter).toBe(20);
     expect(identity.sameHeight).toBeTruthy();
     await page.screenshot({ path: `${out}/identity-after-1440.png`, fullPage: true });
 
@@ -162,11 +175,17 @@ test('#557 登录、身份、更多功能、基本设置在 1440 对齐同一栅
     await page.screenshot({ path: `${out}/project-basic-after-390.png`, fullPage: true });
     await readyIdentity(page, h.admin + '/#/identity');
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    // ≤1279px the 高级／诊断 cards stack in one column.
+    const fold390 = await foldCards(page);
+    expect(fold390.count).toBeGreaterThan(1);
+    expect(fold390.columns).toBe(1);
     await page.screenshot({ path: `${out}/identity-after-390.png`, fullPage: true });
     await page.goto(h.admin + '/#/more');
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     await page.screenshot({ path: `${out}/more-after-390.png`, fullPage: true });
+    // #481: below 768px sign-out lives in the account menu.
+    await page.getByRole('button', { name: '账号菜单' }).click();
     await page.getByRole('button', { name: '退出登录' }).click();
     await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);

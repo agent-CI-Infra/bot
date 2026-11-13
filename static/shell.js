@@ -119,7 +119,7 @@ function consoleGroups() {
   ], conversations = personal[personal.length - 1];
   // A super administrator keeps 飞书会话 under 分析与渠道 as before #549; a project administrator sees it with personal settings.
   if (me.role !== 'super_admin') {
-    groups.push({ title: '设置', items: personal });
+    groups.push({ title: '设置', wide: true, items: personal });
     return groups;
   }
   // 管理对话 is the bar's 助手 destination, and each project section is one address the phone can reach from here.
@@ -132,7 +132,8 @@ function consoleGroups() {
     conversations
   ] });
   // One entry into platform settings: the section picker on that page carries the rest.
-  groups.push({ title: '个人与平台', items: [
+  // `wide` (#557) keys the full-row layout on the group itself, not on its display title.
+  groups.push({ title: '个人与平台', wide: true, items: [
     ...personal.filter(item => item !== conversations),
     ['#/external', '外部执行端', '接入与连接诊断'],
     ['#/settings/work-computers', '全局设置', '系统算力、接入、渠道与用户']
@@ -307,7 +308,7 @@ function renderConsoleMore() {
   const head = element('div', '', 'console-page-head'); head.append(element('p', '工作区', 'eyebrow'), element('h1', '更多功能'), element('p', '按工作内容找到入口，当前项目和权限范围会随你继续。', 'muted'));
   const groups = element('div', '', 'console-groups');
   for (const group of consoleGroups()) {
-    const section = element('section', '', 'console-group'); if (group.title === '全局设置') section.classList.add('console-group-wide');
+    const section = element('section', '', 'console-group'); if (group.wide) section.classList.add('console-group-wide');
     section.append(element('h2', group.title));
     for (const [href, caption, hint] of group.items) section.append(consoleLink(href, caption, hint)); groups.append(section);
   }
