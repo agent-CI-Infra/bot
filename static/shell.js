@@ -161,6 +161,9 @@ function syncConsoleShell() {
     // The picker shows this project, so it is also the default the board, costs and management read. An address that
     // names a project must not leave those three describing another one.
     if (routed && typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(routed);
+    // #494: an inbox address that names no project shows 「全部项目」 in the picker, so the shared default has to become empty
+    // as well. Otherwise the picker, the board, usage and the assistant would read two different values for one choice.
+    else if (inbox && typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(null);
   } else if (typeof consoleDefaultProject === 'function' && consoleDefaultProject()) consoleProject = consoleDefaultProject();
   const repo = repositories.find(r => String(r.id) === consoleProject);
   // A revoked project is never kept in the project picker merely because it was selected earlier.
@@ -311,7 +314,9 @@ function initConsoleShell() {
     if (typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(id);
     consoleProject = id;
     if (/^#\/(board|costs)(\/|$)/.test(location.hash)) route().catch(error);
-    else if (/^#\/management(\/|$)/.test(location.hash)) { /* the open assistant follows the default itself */ }
+    // The open assistant follows the default itself, so this page is not re-rendered. The console link that names the
+    // project comes from that same default and is written only in syncConsoleShell(), so it is refreshed here too (#494).
+    else if (/^#\/management(\/|$)/.test(location.hash)) syncConsoleShell();
     else location.hash = id ? `#/projects/${id}/overview` : '#/projects';
   }); scope.append(picker);
   const tabs = $('tabs'), primary = element('div', '', 'console-primary-nav'), settings = element('div', '', 'console-settings-nav');
