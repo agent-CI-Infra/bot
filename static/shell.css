@@ -80,20 +80,25 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--spac
 #console-secondary-nav .project-nav a { display: inline-flex; align-items: center; min-height: 36px; padding: 6px 12px; font-size: var(--font-size-label); border-radius: var(--radius-control); color: var(--color-nav); white-space: nowrap; }
 #console-secondary-nav .project-nav a:hover { background: var(--color-hover); }
 .console-location { display: flex; align-items: center; gap: var(--space-4); min-height: 32px; margin-bottom: var(--space-5); font-size: var(--font-size-label); color: var(--color-text-muted); }
+.console-location > span:empty { display: none; }
 .console-location > span + span::before { content: '/'; padding-right: 12px; color: var(--color-nav-muted); }
+.console-location > span + span:empty::before { content: none; }
 /* The permission state is a badge, not a breadcrumb: no slash before it, and nothing at all while the project has no gap. */
 .console-location > span.console-permission::before { content: none; }
 .console-location .console-permission:empty { display: none; }
 .console-location .console-permission .status { white-space: normal; }
 .console-ready .project-body { grid-template-columns: minmax(0, 1fr); }
 .console-ready .project-head { padding: var(--space-6) var(--space-7); }
-.console-ready .project-head h1 { font-size: 26px; }
+.console-ready .project-head h1 { font-size: var(--font-size-5); font-weight: 650; line-height: var(--line-height-tight); letter-spacing: -.02em; }
 .console-ready .project-content { min-width: 0; }
 .console-section-picker, .console-mobile-nav { display: none; }
+/* #558: page title, section title, body and supporting text. */
+.console-ready h2 { font-size: var(--font-size-4); font-weight: 650; line-height: var(--line-height-tight); }
+.console-prose, .cost-note, .cost-incomplete, .cost-scope { max-width: 40em; line-height: var(--line-height-relaxed); }
 .console-page-head { margin: 0 0 var(--space-7); }
-.console-page-head h1 { font-size: var(--font-size-5); margin: 8px 0; letter-spacing: -.7px; }
+.console-page-head h1 { font-size: var(--font-size-5); font-weight: 650; margin: 8px 0; letter-spacing: -.02em; line-height: var(--line-height-tight); }
 .console-page-head .eyebrow { color: var(--color-brand); font-weight: 650; font-size: var(--font-size-1); }
-.console-page-head .muted { max-width: 760px; font-size: var(--font-size-2); }
+.console-page-head .muted { max-width: 40em; font-size: var(--font-size-2); line-height: var(--line-height-relaxed); }
 .console-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-6); align-items: stretch; }
 .console-group { display: flex; flex-direction: column; background: var(--color-surface); padding: var(--space-6); border: 1px solid var(--color-border); border-radius: var(--radius-card); min-width: 0; height: 100%; }
 .console-group-wide { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 var(--space-6); height: auto; }
@@ -179,7 +184,7 @@ body.console-ready .management-page { left: var(--console-rail); }
   .console-ready #filters label { min-width: 0; white-space: normal; }
   .console-ready #filters :is(select,input) { height: auto; }
   .console-ready .project-head { padding: var(--space-5); }
-  .console-ready .project-head h1 { font-size: 23px; }
+  .console-ready .project-head h1 { font-size: var(--font-size-display); }
   .console-location { flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-4); }
   .console-section-picker { display: flex; flex-basis: 100%; gap: 6px; font-size: var(--font-size-1); margin-top: 4px; }
   .console-mobile-nav { position: fixed; z-index: 48; inset: auto 0 0; display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); min-height: var(--console-mobile-height); margin: 0; padding: 4px 4px calc(4px + env(safe-area-inset-bottom)); background: var(--color-surface); border: 0; border-top: 1px solid var(--color-border); box-shadow: 0 -3px 16px #142b4b05; }
@@ -193,7 +198,7 @@ body.console-ready .management-page { left: var(--console-rail); }
   .console-mobile-nav a[data-active="1"] .console-nav-badge, .console-mobile-nav a[data-unread="1"] .console-nav-badge { display: block; }
   .console-nav-icon { font-size: var(--font-size-brand); line-height: 24px; }
   .console-page-head { margin-top: 0; margin-bottom: var(--space-6); }
-  .console-page-head h1 { font-size: 27px; }
+  .console-page-head h1 { font-size: var(--font-size-display); }
   .console-groups { grid-template-columns: minmax(0,1fr); gap: var(--space-5); }
   .console-group { padding: var(--space-5); }
   .console-group-wide { grid-template-columns: minmax(0,1fr); }

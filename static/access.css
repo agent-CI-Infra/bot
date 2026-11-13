@@ -3,11 +3,11 @@ body:not(.console-ready) main { flex: 1; display: flex; flex-direction: column; 
 #access.access-layout { display: grid; grid-template-columns: minmax(0,1fr) minmax(340px,1fr); width: min(var(--content-max), 100%); max-width: var(--content-max); margin: 0 auto; padding: 0; border-color: var(--color-border); border-radius: var(--radius-card); overflow: hidden; color: var(--color-text); align-items: stretch; }
 .access-intro, .access-panel { display: flex; flex-direction: column; }
 .access-intro { padding: 48px 40px; background: var(--color-brand-weak); border-right: 1px solid var(--color-border); }
-.access-intro h2 { margin: 24px 0 16px; font-size: var(--font-size-5); line-height: 1.4; letter-spacing: -.6px; }
-.access-intro p { color: var(--color-text-muted); line-height: 1.8; }
+.access-intro h2 { margin: 24px 0 16px; font-size: var(--font-size-display); font-weight: 650; line-height: var(--line-height-tight); letter-spacing: -.02em; }
+.access-intro p { color: var(--color-text-muted); max-width: 40em; font-size: var(--font-size-2); line-height: var(--line-height-relaxed); }
 .access-intro ul { display: grid; gap: 18px; margin: 40px 0 0; padding-left: 22px; font-size: var(--font-size-row); line-height: 1.7; }
 .access-panel { min-width: 0; padding: 40px; }
-#access h1 { margin: 10px 0 12px; font-size: var(--font-size-5); }
+#access h1 { margin: 10px 0 12px; font-size: var(--font-size-5); font-weight: 650; line-height: var(--line-height-tight); letter-spacing: -.02em; }
 #access p { overflow-wrap: anywhere; }
 #access-description { color: var(--color-text-muted); }
 #access a#github-login { display: flex; justify-content: center; width: 100%; min-height: 48px; margin-top: 24px; padding: 12px; border-radius: var(--radius-3); background: var(--color-brand); color: var(--color-text-inverse); text-decoration: none; font-weight: 650; }
