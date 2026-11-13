@@ -34,8 +34,9 @@ test('控制台眉题为中文，站点图标可访问', async ({ page }) => {
     async function shot(name) {
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.screenshot({ path: `.tmp/ui-525/${name}-desktop.png`, fullPage: true });
-      await page.setViewportSize({ width: 600, height: 900 });
-      await page.screenshot({ path: `.tmp/ui-525/${name}-600.png`, fullPage: true });
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+      await page.screenshot({ path: `.tmp/ui-525/${name}-390.png`, fullPage: true });
       await page.setViewportSize({ width: 1440, height: 900 });
     }
 
