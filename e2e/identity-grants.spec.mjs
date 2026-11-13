@@ -42,7 +42,10 @@ test('组织成员授权展示授权者、最近核验与授权有效期', async
     await openIdentityAdvanced(page);
     await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
     await page.getByLabel('当前租户').selectOption('github.com:10');
+    const switched=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/identity/tenant'&&response.request().method()==='POST');
     await page.getByRole('button', { name: '切换组织' }).click();
+    await switched;
+    await expect(page.locator('.identity-scope-form select')).toBeEnabled();
     await expect(page.getByLabel('当前租户')).toHaveValue('github.com:10');
     await page.goto(f.h.admin + '/#/identity');
     await openIdentityAdvanced(page);

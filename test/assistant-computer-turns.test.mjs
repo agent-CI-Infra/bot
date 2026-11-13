@@ -217,3 +217,19 @@ test('a HOME cleared under a running turn turns its file calls into observations
   assert.equal((await next.execute('write_file', { path: '~/again.txt', content: 'z' })).written, true);
   await next.close();
 });
+
+test('shutdown cancels startup maintenance and waits for an already running retention pass', async t => {
+  t.mock.timers.enable({apis:['setTimeout','setInterval']});
+  const service=new AssistantComputerService({});service.available=()=>true;
+  let sweeps=0,retentions=0,finish;
+  service.sweep=async()=>{sweeps++;};
+  service.retain=async()=>{retentions++;await new Promise(resolve=>{finish=resolve;});};
+  service.start();t.mock.timers.tick(1000);
+  assert.equal(sweeps,1);assert.equal(retentions,1);
+  let closed=false;const closing=service.close().then(()=>{closed=true;});
+  await Promise.resolve();assert.equal(closed,false,'storage must stay open while retention still runs');
+  finish();await closing;
+  t.mock.timers.tick(3600_000);assert.equal(sweeps,1);assert.equal(retentions,1);
+  service.start();await service.close();t.mock.timers.tick(1000);
+  assert.equal(sweeps,1);assert.equal(retentions,1,'closing before startup cancels its deferred pass');
+});

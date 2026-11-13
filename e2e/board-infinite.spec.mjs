@@ -37,6 +37,8 @@ test('滚到底自动加载下一页，常驻「加载更多」按钮消失', as
   try {
     await page.setViewportSize({ width: 1600, height: 900 });
     await page.getByRole('group', { name: '按…分列', exact: true }).locator('button[data-value="repository"]').click();
+    await expect(page.locator('.board-card')).toHaveCount(100);
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
     const first = await cards(page).count();
     expect(first).toBe(100);
     expect(continuations(offsets)).toEqual([]);
@@ -78,11 +80,15 @@ test('键盘滚动、列表视图与 390px 看板容器都能续页，末页后�
   const { h, offsets } = await fixture(page, 330);
   try {
     await page.getByRole('group', { name: '按…分列', exact: true }).locator('button[data-value="repository"]').click();
+    await expect(page.locator('.board-card')).toHaveCount(100);
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
     // Keyboard scrolling reaches the same trigger as a pointer scroll.
     const list = page.locator('[data-column-id="101"] .board-column-list');
     await list.evaluate(element => { element.tabIndex = 0; element.focus(); });
     await page.keyboard.press('End');
     await expect.poll(() => continuations(offsets)).toEqual(['100']);
+    await expect(page.locator('.board-card')).toHaveCount(200);
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
     // A phone has one column and the board container itself scrolls it. Switch while two pages still remain, so the
     // phone branch of boardScrollAreas() really continues instead of only finding the last page already loaded.
     const scroll = page.locator('#board-columns'), cards = page.locator('.board-card');
