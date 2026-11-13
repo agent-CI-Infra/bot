@@ -331,6 +331,31 @@ test('a failed runner call ends only its own task workspace; the computer and th
   g.finish('long'); assert.equal((await long).ok, true); assert.equal(f.projects.get('101').state, 'ready');
 });
 
+for(const healthy of [true,false])test(`an unscoped call timeout cleans its operation and checks runner health (${healthy})`,async t=>{
+  const f=fixture(t);await f.projects.register('101');f.projects.parallelism('101',2);const g=gatedRunner(f.docker);
+  const runner=f.docker.runner.bind(f.docker),operation=id(),started=f.projects.get('101').started_at;
+  f.docker.runner=async(container,input,wait)=>{
+    if(input.type==='git_export')throw new Error('docker_timeout');
+    const result=await runner(container,input,wait);
+    return input.type==='health'&&!healthy?{ok:false,error:'runner_unhealthy'}:result;
+  };
+  const other=f.projects.operate('101','execute',{operation_id:id(),generation:1,request:{type:'workspace_command',workspace_id:id(),command:'other'}});
+  const outcome=healthy?other:assert.rejects(other,/runner_failed/);await settle();
+  const lines=[];t.mock.method(console,'error',line=>lines.push(line));
+  await assert.rejects(f.projects.operate('101','execute',{operation_id:operation,generation:1,request:{type:'git_export'}}),/docker_timeout/);
+  const calls=f.docker.runs.filter(call=>['reap_operation','health'].includes(call.type)).slice(-2);assert.deepEqual(calls.map(call=>call.type),['reap_operation','health']);
+  assert.equal(calls[0].target_operation_id,operation);assert.notEqual(calls[0].operation_id,operation);
+  assert.equal(f.projects.db.prepare('SELECT state FROM operations WHERE id=?').get(operation).state,'interrupted');
+  if(healthy){
+    assert.equal(f.projects.get('101').state,'busy');assert.equal(f.projects.get('101').started_at,started);
+    g.finish('other');await outcome;assert.equal(f.projects.get('101').state,'ready');
+  }else{
+    await outcome;assert.equal(f.projects.get('101').state,'failed');
+    assert.ok(lines.some(line=>line.includes('runner health check failed')));
+  }
+  assert.equal(f.docker.containers.get(f.projects.names('101',1).container).State.Running,healthy);
+});
+
 // The incident behind these two tests: on a computer running four tasks, a reap that could not end leftover processes
 // restarted the container from its shared slot; another task's call then found the container changed, which stopped the
 // computer as failed (recovery_required) and left every task waiting for it.

@@ -196,7 +196,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     return {sha,size:data.length};
   }
   // secret_env comes only from the agent process in this container; the manager forwards no such field.
-  if(input.type==='workspace_command')return command(input.command,repo,input.timeout_ms,{outputFile:input.output_file,keepBackground:input.keep_background===true,secretEnv:input.secret_env,workspaceId:input.workspace_id});
+  if(input.type==='workspace_command')return command(input.command,repo,input.timeout_ms,{outputFile:input.output_file,keepBackground:input.keep_background===true,secretEnv:input.secret_env,workspaceId:input.workspace_id,backgroundDirectory:root+'/logs'});
   if(input.type==='workspace_finalize')return withWorkspaceLock(root+'/finalize.lock',async()=>{
     await git(['add','--all']);const tree=(await git(['write-tree'])).toString().trim();
     const raw=(await git(['ls-tree','-r','-l','-z',tree])).toString();const files=[];

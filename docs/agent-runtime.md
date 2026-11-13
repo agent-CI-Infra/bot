@@ -1,5 +1,7 @@
 # 共享 Agent 后端
 
+`run_command` 的 `keep_background` 用于后续命令仍需访问的服务或 watcher。runner 自动把 stdout/stderr 写到任务目录内的日志文件，并返回 `log_path`；无需手动重定向，后续可用命令读取日志。日志不进入候选代码。普通命令结束后仍会回收自己的进程组。无工作区调用失败时，manager 先清理该 operation 并检查 runner 健康；成功则保留项目电脑及其他任务，恢复失败才停机。
+
 ## 边界
 
 `src/agent/runtime.ts` 的 `runAgent(spec)` 是检视、开发、CI 观察和发布说明的共享执行入口。调用方提供 system/prompt、工具白名单、执行器、输出校验器和生命周期 guard；运行时不根据任务类型选择检查器，不绑定 pylint、语言或特定 CI。模型选择、凭据隔离、流式请求、90 秒无 token 超时、错误处理、脱敏和模型用量账本通过 `gateway.ts` 统一。

@@ -310,6 +310,19 @@ test('runner commands without a timeout run until they end; an explicit timeout 
   const stopped = await command('sleep 5; echo late', dir, 200); assert.equal(stopped.timed_out, true); assert.equal(stopped.output, '');
 });
 
+test('automatic background logs mask credentials split across writes after the command returns',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'command-log-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const token='ghs_'+'x'.repeat(36),other='q'.repeat(40);
+  const script=`const fs=require('fs');process.stdout.write(process.env.GH_TOKEN.slice(0,12));setTimeout(()=>{process.stdout.write(process.env.GH_TOKEN.slice(12)+'\\n');process.stderr.write(process.env.GITHUB_TOKEN+'\\n');fs.writeFileSync('finished','yes')},800)`;
+  const result=await command(`${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,dir,5000,{keepBackground:true,secretEnv:{GH_TOKEN:token,GITHUB_TOKEN:other}});
+  t.after(()=>{try{process.kill(-result.pid,'SIGKILL');}catch{}});
+  assert.equal(result.running,true);assert.ok(!result.output.includes(token));
+  const waited=await command('while test ! -f finished; do sleep 0.05; done',dir,5000);assert.equal(waited.exit_code,0);
+  // Wait for the logger to drain the child streams, not just for the child's marker.
+  for(let n=0;n<100&&!readFileSync(result.log_path,'utf8').includes('[REDACTED]\n[REDACTED]');n++)await new Promise(r=>setTimeout(r,20));
+  assert.equal(readFileSync(result.log_path,'utf8'),'[REDACTED]\n[REDACTED]\n');
+});
+
 test('a task read token reaches runner commands only as GH_TOKEN and GITHUB_TOKEN and is masked in their output', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'token-')), out = join(dir, 'op.out'), token = 'ghs_' + 'x'.repeat(36); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const result = await command('echo "$GH_TOKEN|$GITHUB_TOKEN|$OTHER"', dir, 10000, { outputFile: out, secretEnv: { GH_TOKEN: token, GITHUB_TOKEN: token, OTHER: 'not-a-token-variable' } });

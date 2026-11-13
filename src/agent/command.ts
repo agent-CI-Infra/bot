@@ -9,7 +9,7 @@ export function commandTimeoutLimit() {
   return seconds;
 }
 export function commandInstructions(defaultSeconds?: number | null) {
-  return `${defaultSeconds === undefined ? 'Default timeouts are 120 seconds for stage observers and independent QA, 180 seconds for role development and request execution; ordinary workflow commands wait for completion without timeout_seconds. Check the run_command description for the current entry.' : defaultSeconds === null ? 'Without timeout_seconds, this entry waits for the command to finish.' : `The default timeout is ${Math.min(defaultSeconds, commandTimeoutLimit())} seconds.`} Explicit timeouts are capped at ${commandTimeoutLimit()} seconds; larger values are reduced with a notice in the result. Use keep_background for servers and watchers, redirecting their output to a file; they remain available to later commands of this task and stop when the task ends.`;
+  return `${defaultSeconds === undefined ? 'Default timeouts are 120 seconds for stage observers and independent QA, 180 seconds for role development and request execution; ordinary workflow commands wait for completion without timeout_seconds. Check the run_command description for the current entry.' : defaultSeconds === null ? 'Without timeout_seconds, this entry waits for the command to finish.' : `The default timeout is ${Math.min(defaultSeconds, commandTimeoutLimit())} seconds.`} Explicit timeouts are capped at ${commandTimeoutLimit()} seconds; larger values are reduced with a notice in the result. Use keep_background for servers and watchers; their output is automatically saved to the returned log_path, which later commands can read. Kept processes remain available until the task ends. Ordinary commands clean up their process group when the shell exits.`;
 }
 export function commandTool(defaultSeconds: number | null, description = 'Run a shell command in this task workspace inside the project container. Output is streamed to the console.') {
   return { type: 'function', function: { name: 'run_command', description: description + ' ' + commandInstructions(defaultSeconds),
@@ -17,7 +17,7 @@ export function commandTool(defaultSeconds: number | null, description = 'Run a 
       command: { type: 'string' },
       // The runtime clamps values above the limit, so the schema must allow them to reach it (including Pi validation).
       timeout_seconds: { type: 'integer', minimum: 1, description: `Optional timeout in seconds; configured maximum ${commandTimeoutLimit()}. Larger values are reduced with a result notice.` },
-      keep_background: { type: 'boolean', description: 'Keep started processes available for later commands of this task.' }
+      keep_background: { type: 'boolean', description: 'Keep servers and watchers available for later commands of this task; output is automatically written to the returned log_path. Kept processes stop when the task ends.' }
     }, required: ['command'], additionalProperties: false } } };
 }
 export async function runCommand(workspace: Pick<Workspace, 'call'>, key: string, args: any, defaultSeconds: number | null) {
