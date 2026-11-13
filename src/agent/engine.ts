@@ -7,7 +7,6 @@ import { sourceRef } from '../roles/role-run.js';
 import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import {CoordinationWorker,resumeCoordinatedTasks,coordinationApi} from '../tasks/coordination.js';
 import {integratedPublication,applyIntegration} from '../tasks/integration.js';
-import { checkManagementBudget } from '../management/budget.js';
 import { executionModel, taskConfiguration, executionRuleFiles, taskPermissions } from '../tasks/configuration.js';
 import { TaskCommands } from '../tasks/commands.js';
 import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
@@ -219,7 +218,6 @@ export class TaskEngine {
         if(error instanceof HttpError)stop(error.code,error.code==='channel_employee_revalidation_required'?'retry_wait':'waiting_permission');throw error;
       }
       // Only this task's own claim counts; other tasks on the same computer hold their own.
-      try{checkManagementBudget(this.store,task.repository_id);}catch(error){if(error instanceof HttpError)stop(error.code,'waiting_configuration');throw error;}
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),claim=this.store.get('SELECT token FROM task_claims WHERE task_id=?',id);
       if(current?.claim_token!==token||claim?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled',`任务 ${id} 的执行权已撤销或状态已变为 ${current?.status||'不存在'}。`);
       if (requestedTask(task)) {

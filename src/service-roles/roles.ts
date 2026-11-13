@@ -2,7 +2,6 @@ import type { Store, Row } from '../storage/database.js';
 import { fail, fields, object, randomId, text, type Json } from '../core/security.js';
 import { stop } from '../agent/common.js';
 import { openModel } from '../agent/model.js';
-import type { Pricing } from '../metrics/accounting.js';
 import { permissionItems, fullPermissions, normalizePermissions, updatePermissions, validPermissionInput, type RolePermissions } from '../roles/permissions.js';
 
 // Service roles are platform-level assistants (the console/personal management assistant, group chat assistants). They are
@@ -10,7 +9,6 @@ import { permissionItems, fullPermissions, normalizePermissions, updatePermissio
 // Project work roles (Manager, Dev, QA ...) stay in each project's role configuration.
 export const managementAssistant = 'management-assistant';
 export const repositoryAssistant = 'repository-assistant';
-export interface ServiceBudget { currency: 'USD' | 'CNY'; limit_amount: number }
 
 const now = () => new Date().toISOString();
 export const serviceItems = permissionItems;
@@ -23,7 +21,6 @@ const builtins = [
 ];
 
 export function serviceRoleStorage(store: Store): void {
-  // budget: optional {currency,limit_amount}, cumulative like management_budgets.
   store.db.exec(`CREATE TABLE IF NOT EXISTS service_roles(id TEXT PRIMARY KEY,builtin INTEGER NOT NULL DEFAULT 0,enabled INTEGER NOT NULL DEFAULT 1,
     name TEXT NOT NULL,responsibility TEXT NOT NULL DEFAULT '',prompt TEXT NOT NULL DEFAULT '',model_id TEXT,permissions TEXT,budget TEXT,
     revision INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`);
@@ -69,16 +66,6 @@ export function serviceRoleModel(store: Store, id: string) {
   if (!row?.api_key) return stop('service_role_model_not_configured', 'waiting_configuration', `服务角色「${role.name}」尚未配置可用的共享模型，请超级管理员在「全局设置 → 服务角色」中选择；不会改用其他模型。`);
   return openModel(store, row);
 }
-/** Same semantics as management_budgets: unknown usage (an unpriced request, another currency, a model without a price) stops. */
-export function checkServiceRoleBudget(store: Store, id: string, pricing: Pricing | null): void {
-  const stored = serviceRole(store, id)?.budget, budget = stored ? JSON.parse(stored) as ServiceBudget : null;
-  if (!budget) return;
-  if (pricing?.currency !== budget.currency) fail(409, 'service_role_budget_usage_unknown');
-  const usage = store.get(`SELECT coalesce(sum(CASE WHEN currency=? THEN cost END),0) amount,
-    sum(CASE WHEN finished_at IS NOT NULL AND (cost IS NULL OR currency<>?) THEN 1 ELSE 0 END) unknown FROM model_requests WHERE service_role_id=?`, budget.currency, budget.currency, id)!;
-  if (usage.unknown) fail(409, 'service_role_budget_usage_unknown');
-  if (usage.amount >= budget.limit_amount) fail(409, 'service_role_budget_exhausted');
-}
 export function serviceRoleUsage(store: Store, id: string): Json {
   const total = store.get(`SELECT count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,sum(cached_input_tokens) cached_input_tokens,
     sum(CASE WHEN finished_at IS NULL OR input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,
@@ -91,7 +78,7 @@ export function serviceRoleView(store: Store, row: Row): Json {
   const model = row.model_id ? store.get('SELECT id,model_name,api_url,api_key FROM models WHERE id=? AND repository_id IS NULL', row.model_id) : undefined;
   return { id: row.id, builtin: !!row.builtin, enabled: !!row.enabled, name: row.name, responsibility: row.responsibility, prompt: row.prompt,
     model_id: row.model_id, model: model ? { id: model.id, model_name: model.model_name, api_url: model.api_url, key_configured: !!model.api_key } : null,
-    permissions: row.id===managementAssistant?fullPermissions():normalizePermissions(JSON.parse(row.permissions??'{}'),true), permissions_inherited: false, permissions_fixed: row.id===managementAssistant, budget: row.budget ? JSON.parse(row.budget) : null,
+    permissions: row.id===managementAssistant?fullPermissions():normalizePermissions(JSON.parse(row.permissions??'{}'),true), permissions_inherited: false, permissions_fixed: row.id===managementAssistant,
     revision: row.revision, created_at: row.created_at, updated_at: row.updated_at, usage: serviceRoleUsage(store, row.id) };
 }
 
@@ -104,20 +91,13 @@ function permissionsInput(value: unknown, base: RolePermissions): RolePermission
   for (const [key,mode] of Object.entries(given)) if (!validPermissionInput(key,mode,base)) fail(400,'invalid_service_role_permission','permissions.'+key);
   return updatePermissions(base,given as RolePermissions,true);
 }
-function budgetInput(value: unknown): ServiceBudget | null {
-  if (value === null) return null;
-  const budget = object(value); fields(budget, ['currency', 'limit_amount']);
-  if (budget.currency !== 'USD' && budget.currency !== 'CNY') fail(400, 'invalid_pricing_currency', 'budget.currency');
-  const limit = budget.limit_amount;
-  if (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0 || limit > 1_000_000) fail(400, 'invalid_service_role_budget', 'budget.limit_amount');
-  return { currency: budget.currency as ServiceBudget['currency'], limit_amount: limit as number };
-}
 function sharedModel(store: Store, value: unknown): string | null {
   if (value === null) return null;
   const id = text(value, 128);
   if (!store.get('SELECT 1 FROM models WHERE id=? AND repository_id IS NULL', id)) fail(400, 'shared_model_required', 'model_id');
   return id;
 }
+// Accept legacy budget payloads for older clients; definition ignores them and clears the stored value.
 const editable = ['name', 'responsibility', 'prompt', 'model_id', 'permissions', 'budget', 'enabled'];
 /** Field values for an insert or update; `current` is the stored row when editing. */
 function definition(store: Store, input: Json, current?: Row) {
@@ -129,14 +109,13 @@ function definition(store: Store, input: Json, current?: Row) {
   if (input.enabled !== undefined && typeof input.enabled !== 'boolean') fail(400, 'invalid_field', 'enabled');
   if (builtin && input.enabled === false) fail(409, 'builtin_service_role_required', 'enabled');
   const base = current?.permissions ? normalizePermissions(JSON.parse(current.permissions),true) : repositoryAssistantPermissions;
-  const budget = input.budget !== undefined ? budgetInput(input.budget) : undefined;
   return {
     name: input.name !== undefined ? text(input.name, 80) : current?.name ?? fail(400, 'invalid_field', 'name'),
     responsibility: input.responsibility !== undefined ? optionalText(input.responsibility, 2000) : current?.responsibility ?? '',
     prompt: input.prompt !== undefined ? optionalText(input.prompt, 32000) : current?.prompt ?? '',
     model_id: input.model_id !== undefined ? sharedModel(store, input.model_id) : current?.model_id ?? null,
     permissions: JSON.stringify(fixed?fullPermissions():input.permissions !== undefined ? permissionsInput(input.permissions,base):base),
-    budget: budget !== undefined ? (budget ? JSON.stringify(budget) : null) : current?.budget ?? null,
+    budget: null,
     enabled: input.enabled !== undefined ? (input.enabled ? 1 : 0) : current?.enabled ?? 1,
   };
 }

@@ -152,3 +152,18 @@ test('engine recovery excludes downtime and task deletion retains historical pro
   assert.equal(h.store.get('SELECT task_id FROM model_requests').task_id,null);
   assert.equal((await admin('/api/costs?from=2026-10-22&to=2026-10-22')).value.summary.cost,2);
 });
+
+import {recordExternalModelRequest} from '../dist/metrics/accounting.js';
+test('external receipts use visible configured prices and cumulative updates never duplicate charges',async t=>{
+  const {h,admin}=await fixture(t);
+  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://provider.invalid/v1',api_key:'fixture-external-key',model_name:'provider/model.1',pricing:price})).value.model;
+  assert.ok(model.id);
+  const task={id:'external-task',repository_id:'101'},receipt={key:'external-request',source:'provider_requests',model:'MODEL-1',started_at:new Date().toISOString(),finished:true,input_tokens:100,output_tokens:20,cached_input_tokens:40};
+  const id=recordExternalModelRequest(h.store,task,'external-run',receipt);
+  assert.equal(h.store.get('SELECT currency FROM model_requests WHERE id=?',id).currency,'USD');
+  assert.equal(h.store.get('SELECT cost FROM model_requests WHERE id=?',id).cost,0.000328);
+  recordExternalModelRequest(h.store,task,'external-run',{...receipt,input_tokens:150,output_tokens:30,cached_input_tokens:50});
+  recordExternalModelRequest(h.store,task,'external-run',receipt);
+  assert.equal(h.store.get('SELECT cost FROM model_requests WHERE id=?',id).cost,0.00051);assert.equal(h.store.get('SELECT count(*) n FROM model_requests WHERE external_key=?',receipt.key).n,1);
+  const hidden=recordExternalModelRequest(h.store,{id:'other',repository_id:'202'},'other-run',{...receipt,key:'hidden-price'});assert.equal(h.store.get('SELECT cost FROM model_requests WHERE id=?',hidden).cost,null);
+});

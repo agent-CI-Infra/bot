@@ -41,7 +41,7 @@ export function beginModelRequest(store: Store, task: Row, requestId: string, mo
 }
 /** `served: false` marks a request that failed before the provider returned any output (an error status, or no response
  * at all): providers do not charge for it, so a priced model records cost 0. Otherwise a request without usage keeps an
- * unknown cost, which budgets refuse to treat as zero. Without this, one failed request would block a budget for good. */
+ * unknown cost, reported separately from known charges. Without this, one failed request would block a budget for good. */
 export function finishModelRequest(store: Store, id: string, usage: unknown, httpStatus: number | null, state='received', served=true): void {
   const row=store.get('SELECT * FROM model_requests WHERE id=?',id);if(!row||row.finished_at)return;
   const tokens=normalizeUsage(usage),input=tokens.input_tokens,output=tokens.output_tokens,cached=tokens.cached_input_tokens;
@@ -68,7 +68,7 @@ export function recordExternalModelRequest(store:Store,task:Row,runId:string,val
         store.run('UPDATE model_requests SET external_key=? WHERE id=?',value.key,unresolved.id);row=unresolved;}
     }
     if(!row){const id=beginModelRequest(store,{...task,id:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?task.id:null},value.key,
-      {id:'external:'+value.source,model:value.model,pricing:null},value.started_at);
+      {id:'external:'+value.source,model:value.model,pricing:externalModelPricing(store,task,value.model)},value.started_at);
       store.run('UPDATE model_requests SET external_key=?,accounting_source=?,run_id=? WHERE id=?',value.key,value.source,runId,id);row=store.get('SELECT * FROM model_requests WHERE id=?',id)!;}
     const tokens=normalizeUsage({input_tokens:value.input_tokens,output_tokens:value.output_tokens,input_tokens_details:{cached_tokens:value.cached_input_tokens}}),
       input=tokens.input_tokens,output=tokens.output_tokens,cached=tokens.cached_input_tokens;
@@ -78,6 +78,10 @@ export function recordExternalModelRequest(store:Store,task:Row,runId:string,val
       finished_at=CASE WHEN ?=1 THEN coalesce(finished_at,?) ELSE finished_at END,http_status=coalesce(?,http_status),
       state=CASE WHEN ? IS NOT NULL AND ? IS NOT NULL THEN 'external_received' ELSE 'external_usage_unknown' END WHERE id=?`,
       input,input,output,output,cached,cached,value.finished?1:0,new Date().toISOString(),value.http_status??null,input??row.input_tokens,output??row.output_tokens,row.id);
+    if(row.currency===null){const price=externalModelPricing(store,task,value.model);if(price)store.run('UPDATE model_requests SET currency=?,input_per_million=?,output_per_million=?,cache_per_million=?,model_name=? WHERE id=?',price.currency,price.input_per_million,price.output_per_million,price.cache_per_million,value.model,row.id);}
+    // External receipts may be cumulative. Price the monotonic ledger totals, never charge each callback again.
+    store.run(`UPDATE model_requests SET cost=CASE WHEN currency IS NOT NULL AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL
+      THEN ((input_tokens-coalesce(cached_input_tokens,0))*input_per_million+coalesce(cached_input_tokens,0)*cache_per_million+output_tokens*output_per_million)/1000000 ELSE NULL END WHERE id=?`,row.id);
     return row.id;
   });
 }
@@ -125,4 +129,13 @@ export function withTaskMetrics<T extends Row>(store: Store, tasks: T[], now=Dat
       requests:total?.requests||0,usage_missing_requests:total?.usage_missing_requests||0,cache_missing_requests:total?.cache_missing_requests||0,
       unpriced_requests:total?.unpriced_requests||0,costs:costs.get(task.id)||[]}};
   });
+}
+
+/** A CLI's reported model must match a visible configured model before its administrator-supplied price can be used. */
+export function externalModelPricing(store:Store,task:Row,model:string):Pricing|null {
+  const normalize=(name:string)=>name.replace(/^[^/]+\//,'').replaceAll('.','-').toLowerCase();
+  const models=task.repository_id?store.all(`SELECT m.id,m.model_name FROM models m WHERE m.repository_id=? OR m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects p WHERE p.model_id=m.id AND p.repository_id=?)`,task.repository_id,task.repository_id)
+    :store.all('SELECT m.id,m.model_name FROM models m JOIN service_roles r ON r.model_id=m.id WHERE r.id=?',task.service_role_id??'');
+  const prices=models.filter(row=>normalize(row.model_name)===normalize(model)).map(row=>pricingFor(store,row.id)).filter((price):price is Pricing=>!!price);
+  return new Set(prices.map(price=>JSON.stringify(price))).size===1?prices[0]!:null;
 }

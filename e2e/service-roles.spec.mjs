@@ -23,13 +23,13 @@ test('全局设置的服务角色页查看和修改内置角色，新建、停�
     await expect(repository).toContainText('Issue：只读'); await expect(repository).toContainText('项目任务与协作：无权限');
     await expect(assistant.getByRole('button', { name: '删除角色' })).toHaveCount(0);
 
-    // The management assistant: choose the shared model and a budget.
+    // The management assistant: choose the shared model; money is accounting only.
     await assistant.locator('select[name=model_id]').selectOption(shared.id);
-    await assistant.locator('input[name=budget_limit]').fill('5');
+    await expect(assistant.locator('input[name=budget_limit]')).toHaveCount(0);await expect(assistant.locator('select[name=budget_currency]')).toHaveCount(0);
     await assistant.getByRole('button', { name: '保存', exact: true }).click();
     await expect(assistant).toContainText('已保存'); await expect(assistant).toContainText('Shared assistant · 127.0.0.1:9');
-    await expect(assistant).toContainText('USD 5.00（累计）');
-    expect(h.store.get("SELECT model_id,budget FROM service_roles WHERE id='management-assistant'")).toEqual({ model_id: shared.id, budget: JSON.stringify({ currency: 'USD', limit_amount: 5 }) });
+    await expect(assistant).not.toContainText('预算上限');
+    expect(h.store.get("SELECT model_id,budget FROM service_roles WHERE id='management-assistant'")).toEqual({ model_id: shared.id, budget: null });
     await page.screenshot({ path: '.tmp/service-roles/settings-desktop.png', fullPage: true });
 
     // The repository assistant: allow reading other roles' tasks. An edit saved elsewhere first is reported, not overwritten.

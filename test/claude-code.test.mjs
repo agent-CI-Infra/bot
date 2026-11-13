@@ -173,7 +173,7 @@ test('Claude Code rejects model/config drift during recovery and accounts metere
   await t.test('unknown monetary ledger', async t => {
     const f = await claudeFixture(t), admin = { id: 'admin', role: 'project_admin', repositories: ['r'] }, url = new URL('http://local/api/repositories/r/roles');
     roleApi(f.s, admin, 'PUT', url, { expected_revision: roleApi(f.s, admin, 'GET', url, {}).revision, enabled: true, roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' }, budget_policy_ref: { id: 'metered', max_cost: { amount: 1, currency: 'USD' } } }] });
-    await assert.rejects(runRole(f.spec, 'dev'), { code: 'claude_cost_budget_unsupported' }); assert.equal(f.modelCalls, 0);
+    await runRole(f.spec,'dev');assert.equal(f.s.get("SELECT status FROM task_runs WHERE role='dev' ORDER BY rowid DESC LIMIT 1").status,'succeeded');const saved=roleApi(f.s,admin,'GET',url,{});assert.equal(Object.hasOwn(saved.configuration.roles.find(r=>r.role_id==='dev').budget_policy_ref,'max_cost'),false);
   });
   await t.test('missing CLI result usage remains unknown but does not permanently block retry', async t => {
     const f = await claudeFixture(t, { mode: 'unknown_usage' }), first = await runRole(f.spec, 'dev', undefined, 'claude_code');

@@ -105,7 +105,6 @@ async function runAtGateway<T>(spec: AgentSpec<T>, bridge: ClaudeBridge<T>, sign
   await spec.guard(); if (signal.aborted) throw signal.reason;
   // The CLI's dollars are an estimate for an entire native conversation, including earlier resumes. They cannot
   // enforce a framework monetary cap without a gateway billing ledger. Refuse that policy instead of counting zero.
-  if (ctx.budget.max_cost) return fail('claude_cost_budget_unsupported');
   const token = spec.runAccess.token; spec.redactor.add(token);
   await checkGateway(config, token, signal);
   const previous = spec.harnessState?.value ?? {}, fresh = !!ctx.conversation_id || ['observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '') || spec.roleRun?.recovery_mode === 'rebuilt_from_task_records';

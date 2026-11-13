@@ -2,7 +2,6 @@ import { hasCredentials } from '../core/redaction.js';
 import type { Manager } from '../projects/service.js';
 import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
-import { checkManagementBudget } from './budget.js';
 import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, confinedTenant, effectiveRepositories, listEffectiveScopes, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
@@ -111,11 +110,7 @@ export class ManagementService {
       if(!account)fail(409,'account_unavailable');
       const credentials=this.store.secrets.open(account!.credentials,'account:'+account!.id);
       if(!credentials.token&&!credentials.private_key)fail(409,'account_credentials_revoked');
-      if(!(operation==='project.update'&&command.arguments.enabled===false))this.checkBudget(target.project_id);
     }
-  }
-  checkBudget(project:string): void {
-    checkManagementBudget(this.store,project);
   }
 
   async effective(actor:ActorContext,project:string):Promise<Json>{
@@ -190,7 +185,7 @@ export class ManagementService {
     }
     if(operation==='get_usage'){
       const rows=this.store.all(`SELECT repository_id,currency,count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,sum(cost) cost,sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests FROM model_requests WHERE repository_id IN (${marks}) GROUP BY repository_id,currency ORDER BY repository_id,currency LIMIT ? OFFSET ?`,...ids,limit+1,offset),more=rows.length>limit;rows.splice(limit);
-      return {usage:rows,next_offset:more?offset+limit:null,budgets:this.store.all(`SELECT * FROM management_budgets WHERE project_id IN (${marks})`,...ids),budget_policy:'未配置预算表示不限额；未知价格不计作零费用。'};
+      return {usage:rows,next_offset:more?offset+limit:null};
     }
     if(operation==='list_audit'){
       const rows=this.store.all(`SELECT * FROM management_commands WHERE project_id IN (${marks}) ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`,...ids,limit+1,offset),more=rows.length>limit;rows.splice(limit);

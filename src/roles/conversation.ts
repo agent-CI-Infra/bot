@@ -4,7 +4,6 @@ import { fields, fail, randomId, type Json } from '../core/security.js';
 import { runAgent, type AgentSpec } from '../agent/runtime.js';
 import { Redactor, stop } from '../agent/common.js';
 import { Workspace } from '../agent/workspace.js';
-import { checkManagementBudget } from '../management/budget.js';
 import { traceEvent } from '../tasks/trace.js';
 import { TaskCommands } from '../tasks/commands.js';
 import { assertTaskSource, taskManagementTools, type TaskCaller } from '../tasks/management.js';
@@ -58,7 +57,7 @@ export class RoleConversations {
     if (snapshot.kind === 'evaluator' || snapshot.role_id === 'coordinator') return fail(403,'conversation_role_unavailable');
     if (snapshot.environment.id.startsWith('isolated-')) return stop('unsupported_capability','waiting_configuration','当前会话入口尚未提供隔离运行环境，不能退回共享环境。');
     const driver = roleHarness(snapshot.harness.id), budget = runBudget(snapshot), id = randomId(), lease = randomId(), controller = new AbortController();
-    if(['acp','codex'].includes(driver.id)&&(budget.max_model_requests!==null||budget.max_total_tokens!==null||budget.max_cost))return stop('unsupported_capability','waiting_configuration','所选后端没有逐模型请求的调用前核验接口，不能静默放宽该预算。');
+    if(['acp','codex'].includes(driver.id)&&(budget.max_model_requests!==null||budget.max_total_tokens!==null))return stop('unsupported_capability','waiting_configuration','所选后端没有逐模型请求的调用前核验接口，不能静默放宽该预算。');
     let instance:Row|undefined;
     this.store.transaction(() => {
       this.store.run('INSERT OR IGNORE INTO role_conversations(id,created_at) VALUES(?,?)',source.id,Date.now());
@@ -79,11 +78,9 @@ export class RoleConversations {
       const reason = roleAuthority(this.store,source.caller.project_id,snapshot,undefined,true); if (reason) return fail(403,'conversation_role_authority_changed');
       const usage=conversationUsage(this.store,instance!,snapshot.budget.id==='metered'?undefined:source.source_message);
       if(budget.max_wall_ms!==null&&usage.wall_ms>=budget.max_wall_ms)return stop('role_budget_exhausted','waiting_configuration','max_wall_ms');
-      checkManagementBudget(this.store,source.caller.project_id);
       this.store.run('UPDATE role_conversations SET lease_until=? WHERE id=? AND lease=?',Date.now()+120000,source.id,lease);
       if (!admit) return;
-      if(!resolved.model.pricing&&this.store.get('SELECT 1 FROM management_budgets WHERE project_id=?',source.caller.project_id))return stop('budget_usage_unknown','waiting_configuration','当前后端没有可核验价格，不能在费用上限下开始调用。');
-      if(budget.max_total_tokens!==null&&usage.unknown_requests||budget.max_tool_calls!==null&&!usage.tool_usage_complete||budget.max_cost&&(usage.unpriced_requests||!resolved.model.pricing||resolved.model.pricing.currency!==budget.max_cost.currency))return stop('budget_usage_unknown','waiting_configuration','当前模型用量或费用无法完整核验，不能按零继续调用。');
+      if(budget.max_total_tokens!==null&&usage.unknown_requests||budget.max_tool_calls!==null&&!usage.tool_usage_complete)return stop('role_usage_unknown','waiting_configuration','当前模型用量无法完整核验，不能按零继续调用。');
       const reached = budgetExceeded(budget,usage);
       if (reached) return stop('role_budget_exhausted','waiting_configuration',reached);
     };
@@ -102,7 +99,7 @@ export class RoleConversations {
           screen:name=>{
             if(!allowed(name))fail(403,'conversation_tool_forbidden');
             if(name==='finish')return;
-            if(budget.max_tool_calls!==null){const used=conversationUsage(this.store,logicalInstance,snapshot.budget.id==='metered'?undefined:source.source_message);if(!used.tool_usage_complete)stop('budget_usage_unknown','waiting_configuration');if(used.tool_calls>=budget.max_tool_calls)stop('role_budget_exhausted','waiting_configuration','max_tool_calls');}
+            if(budget.max_tool_calls!==null){const used=conversationUsage(this.store,logicalInstance,snapshot.budget.id==='metered'?undefined:source.source_message);if(!used.tool_usage_complete)stop('role_usage_unknown','waiting_configuration');if(used.tool_calls>=budget.max_tool_calls)stop('role_budget_exhausted','waiting_configuration','max_tool_calls');}
             this.store.run('UPDATE role_conversation_turns SET tool_calls=tool_calls+1 WHERE id=?',id);
             traceEvent(this.store,id,'conversation_tool',{name});
           },

@@ -123,9 +123,9 @@ test('a metered one-request budget admits its final response and does not admit 
   const source=f.next();
   await assert.rejects(f.conversations.run(source),{code:'role_budget_exhausted'});assert.equal(f.requests.length,1);
 });
-test('a monetary cap never treats missing pricing as a zero-cost conversation',async t=>{
+test('a legacy monetary cap is ignored even when conversation pricing is unknown',async t=>{
   const f=await fixture(t,'native',{id:'metered',max_cost:{currency:'USD',amount:1}});
-  await assert.rejects(f.conversations.run(f.source),{code:'budget_usage_unknown'});assert.equal(f.requests.length,0);
+  await f.conversations.run(f.source);assert.equal(f.requests.length,1);
 });
 test('cumulative wall budget survives a new conversational turn',async t=>{
   const f=await fixture(t,'native',{id:'metered',max_wall_seconds:60});await f.conversations.run(f.source);

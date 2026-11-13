@@ -69,7 +69,7 @@ test('protocol schemas: three candidate kinds with fixed versions; RunContext re
   const ctx = { protocol: 'bot.role-run/1', task_id: 't', assignment_id: 'a1', run_id: 'r1', tenant_id: 'account:a', project_id: 'r', principal_ref: 'installation:a', source_ref: 'contract:revision:1', candidate_ref: null,
     configuration_snapshot_ref: 'role_snapshots:' + hash('f'), lease_epoch: 1, contract_revision: 1, policy_revision: 'writer@1', role_revision: 'dev@1:config:0', harness_revision: 'native@1', skill_revisions: [], model_revision: 'project:m@1:x',
     budget: { policy_ref: 'entry-default@x', accounting: 'per_run', max_turns: null, max_output_tokens: null, max_total_tokens: null, max_model_requests: null, max_tool_calls: null, max_wall_ms: null, max_concurrency: 1, max_cost: null } };
-  assert.equal(validateRunContext(ctx).run_id, 'r1');
+  assert.equal(validateRunContext(ctx).run_id, 'r1');assert.equal(Object.hasOwn(validateRunContext(ctx).budget,'max_cost'),false);
   assert.throws(() => validateRunContext({ ...ctx, api_key: 'x' }), { detail: 'api_key' });
   assert.throws(() => validateRunContext({ ...ctx, source_ref: 'branch:main' }), { detail: 'source_ref' });
   assert.throws(() => validateRunContext({ ...ctx, model_revision: 'sk-abcdefghijklmnop1234' }), { code: 'role_run_secret_rejected' });

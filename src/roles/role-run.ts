@@ -197,7 +197,7 @@ export function runBudget(snapshot: RoleSnapshot): Budget {
   const b: any = snapshot.budget ?? { id: 'entry-default', version: 'unknown' };
   const n = (v: unknown) => Number.isSafeInteger(v) && (v as number) > 0 ? v as number : null;
   return { policy_ref: `${b.id}@${b.version}`, accounting: b.id === 'metered' ? 'role_instance' : 'per_run', max_turns: n(b.max_turns), max_output_tokens: n(b.max_output_tokens), max_total_tokens: n(b.max_total_tokens), max_model_requests: n(b.max_model_requests),
-    max_tool_calls: n(b.max_tool_calls), max_wall_ms: n(b.max_wall_seconds) ? b.max_wall_seconds * 1000 : null, max_concurrency: 1, max_cost: b.max_cost ? { amount: Number(b.max_cost.amount), currency: String(b.max_cost.currency) } : null };
+    max_tool_calls: n(b.max_tool_calls), max_wall_ms: n(b.max_wall_seconds) ? b.max_wall_seconds * 1000 : null, max_concurrency: 1 };
 }
 export function buildRunContext(s: Store, input: { task: Row; scope: string; run_id: string; lease_epoch: number; resume_from_run_id?: string; instance: Row; role: string; snapshot: RoleSnapshot; snapshot_id: string; candidate: CandidateRef | null }): RunContext {
   const { task, snapshot } = input;
@@ -247,7 +247,7 @@ function usageOf(s: Store, column: 'lease_scope' | 'role_instance_id', value: st
   const costs = s.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE run_id IN (${marks}) AND cost IS NOT NULL GROUP BY currency`, ...ids).map(r => ({ currency: String(r.currency), amount: Number(r.amount) }));
   const tools = Number(s.get(`SELECT count(*) n FROM task_history WHERE run_id IN (${marks}) AND type='tool_observation'`, ...ids)!.n);
   // An external agent with its own model (Codex) reports usage per model response as thread-total deltas; each report is one
-  // request, unpriced. A turn without any report is one unknown request, never zero: once it ended, or once its run ended
+  // request; pricing is accounted separately. A turn without any report is one unknown request, never zero: once it ended, or once its run ended
   // without its terminal status (the stream broke, the interrupt timed out). A start the server never answered is such a turn
   // too, identified by the turn id its notifications carried; with reports for that id it is already counted, and without any
   // id no report can belong to it.
@@ -271,8 +271,9 @@ function usageOf(s: Store, column: 'lease_scope' | 'role_instance_id', value: st
   const sum = (key: string) => external.reduce((n, u) => n + Number(u[key] ?? 0), 0);
   // Codex usage events are per model response (counted above); snapshots and events never describe the same run.
   const codex = Number(reported.n) + unreported;
+  const pricedExternal=Number(s.get(`SELECT count(*) n FROM model_requests WHERE run_id IN (${marks}) AND accounting_source IN ('provider_requests','codex_events') AND cost IS NOT NULL`,...ids)!.n);
   const unknown = Number(m.unknown ?? 0) + sum('unknown_requests') + unreported, input = Number(m.i) + sum('input_tokens') + Number(reported.i), output = Number(m.o) + sum('output_tokens') + Number(reported.o);
-  return { runs: ids.length, model_requests: Number(m.n) + sum('model_requests') + codex, input_tokens: input, output_tokens: output, total_tokens: input + output, unknown_requests: unknown, tool_calls: tools, wall_ms: wall, cost: costs, unpriced_requests: Number(m.unpriced ?? 0) + sum('model_requests') + codex, semantics: unknown || external.some(u => u.semantics === 'lower_bound') ? 'lower_bound' as const : 'exact' as const };
+  return { runs: ids.length, model_requests: Number(m.n) + sum('model_requests') + codex, input_tokens: input, output_tokens: output, total_tokens: input + output, unknown_requests: unknown, tool_calls: tools, wall_ms: wall, cost: costs, unpriced_requests: Number(m.unpriced ?? 0) + Math.max(0,sum('model_requests') + codex-pricedExternal), semantics: unknown || external.some(u => u.semantics === 'lower_bound') ? 'lower_bound' as const : 'exact' as const };
 }
 /** The first budget limit the scope's usage reached, or null. With unknown usage the known part is a lower bound. */
 export function budgetExceeded(budget: Budget, usage: ReturnType<typeof scopeUsage>, pending: { tool_calls?: number } = {}): string | null {
@@ -280,7 +281,6 @@ export function budgetExceeded(budget: Budget, usage: ReturnType<typeof scopeUsa
   if (budget.max_total_tokens !== null && usage.total_tokens >= budget.max_total_tokens) return 'max_total_tokens';
   if (budget.max_tool_calls !== null && usage.tool_calls + (pending.tool_calls ?? 0) > budget.max_tool_calls) return 'max_tool_calls';
   if (budget.max_wall_ms !== null && usage.wall_ms >= budget.max_wall_ms) return 'max_wall_ms';
-  if (budget.max_cost) { const spent = usage.cost.find(c => c.currency === budget.max_cost!.currency)?.amount ?? 0; if (spent >= budget.max_cost.amount) return 'max_cost'; }
   return null;
 }
 

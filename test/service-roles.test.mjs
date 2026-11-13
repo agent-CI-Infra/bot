@@ -39,14 +39,14 @@ test('built-in service roles are seeded once, edited with revisions and audit, a
   const saved=await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,name:'Committer 助手',permissions:{project_tasks:'write'},budget:{currency:'USD',limit_amount:5}});
   assert.equal(saved.status,200,JSON.stringify(saved.value));
   assert.equal(saved.value.service_role.revision,repository.revision+1);assert.equal(saved.value.service_role.permissions.project_tasks,'write');
-  assert.equal(saved.value.service_role.permissions.github_contents,'read');assert.deepEqual(saved.value.service_role.budget,{currency:'USD',limit_amount:5});
+  assert.equal(saved.value.service_role.permissions.github_contents,'read');assert.equal(Object.hasOwn(saved.value.service_role,'budget'),false);assert.equal(h.store.get("SELECT budget FROM service_roles WHERE id='repository-assistant'").budget,null);
   assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='service_role.updated' AND resource_id='repository-assistant'"));
   const stale=await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,name:'Stale'});
   assert.deepEqual([stale.status,stale.value.error],[409,'service_role_revision_conflict']);
   assert.equal((await role(admin,'repository-assistant')).name,'Committer 助手');
 
   for(const [body,code] of [[{permissions:{computer:'execute'}},'invalid_service_role_permission'],[{permissions:{github:'write'}},'invalid_service_role_permission'],
-    [{model_id:f.model.id},'shared_model_required'],[{budget:{currency:'EUR',limit_amount:1}},'invalid_pricing_currency'],[{budget:{currency:'USD',limit_amount:0}},'invalid_service_role_budget'],[{unknown:true},'unknown_field']]){
+    [{model_id:f.model.id},'shared_model_required'],[{unknown:true},'unknown_field']]){
     const current=await role(admin,'repository-assistant'),result=await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:current.revision,...body});
     assert.deepEqual([result.status,result.value.error],[400,code],JSON.stringify(body));
   }
@@ -90,26 +90,17 @@ test('the management assistant uses its own model and ledger even when the first
   assert.equal(failure.error,'service_role_model_not_configured');assert.match(failure.notice,/全局设置 → 服务角色/);
 });
 
-test('service role budgets stop at the limit and on usage that cannot be priced',async t=>{
-  const f=await managementFixture(t),{admin,h}=f;
-  f.modelState.respond=async(_body,res)=>reply(res,'预算内的回答');
-  const setBudget=async budget=>{const current=await role(admin,'management-assistant');return admin('/api/service-roles/management-assistant','PATCH',{expected_revision:current.revision,budget});};
-  // The model has no price: a finite budget cannot be checked, so nothing is sent.
-  await setBudget({currency:'USD',limit_amount:0.01});
-  let before=f.requests.length,result=await web(f,'你好');
-  assert.equal(result.events.find(e=>e.type==='error').data.error,'service_role_budget_usage_unknown');assert.equal(f.requests.length,before);
+test('legacy service role monetary budgets never block unpriced, over-limit or differently priced usage',async t=>{
+  const f=await managementFixture(t),{admin,h}=f;f.modelState.respond=async(_body,res)=>reply(res,'正常回答');
+  h.store.run("UPDATE service_roles SET budget='not-valid-json' WHERE id='management-assistant'");
+  assert.equal(Object.hasOwn(await role(admin,'management-assistant'),'budget'),false);
+  const before=f.requests.length;assert.equal((await web(f,'没有单价也继续')).message.state,'completed');assert.equal(f.requests.length,before+1);
   const model=h.store.get('SELECT version FROM models WHERE id=?',f.assistantModel.id);
   assert.equal((await admin('/api/models/'+f.assistantModel.id,'PATCH',{version:model.version,pricing:{currency:'USD',input_per_million:1000,output_per_million:1000,cache_per_million:1000}})).status,200);
-  // A model change bumps the model version; the role still points at it. One request costs 0.018 USD, above the 0.01 limit.
-  result=await web(f,'你好');assert.equal(result.message.state,'completed',JSON.stringify(result.events));
-  assert.equal(h.store.get("SELECT round(sum(cost),6) cost FROM model_requests WHERE service_role_id='management-assistant'").cost,0.018);
-  before=f.requests.length;result=await web(f,'再来一次');
-  assert.equal(result.events.find(e=>e.type==='error').data.error,'service_role_budget_exhausted');assert.equal(f.requests.length,before);
-  await setBudget({currency:'USD',limit_amount:1});
-  assert.equal((await web(f,'继续')).message.state,'completed');
-  // A model priced in another currency cannot be measured against the budget.
-  await setBudget({currency:'CNY',limit_amount:100});
-  assert.equal((await web(f,'换币种')).events.find(e=>e.type==='error').data.error,'service_role_budget_usage_unknown');
+  h.store.run('UPDATE service_roles SET budget=? WHERE id=?',JSON.stringify({currency:'CNY',limit_amount:0.001}),'management-assistant');
+  for(const request of ['超过旧限额','跨币种继续'])assert.equal((await web(f,request)).message.state,'completed');
+  assert.equal(h.store.get("SELECT round(sum(cost),6) cost FROM model_requests WHERE service_role_id='management-assistant'").cost,0.036);
+  const usage=(await role(admin,'management-assistant')).usage;assert.equal(usage.unpriced_requests,1);assert.deepEqual(usage.costs,[{currency:'USD',amount:0.036}]);
 });
 
 test('a budgeted assistant retries a failed model request: a request that returned nothing costs nothing and never blocks the budget',async t=>{
@@ -127,7 +118,7 @@ test('a budgeted assistant retries a failed model request: a request that return
   // A request that failed after streaming part of an answer may have been charged: its cost stays unknown, and the budget stops.
   calls=0;f.modelState.respond=async(_body,res)=>{if(++calls===1){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('data: '+JSON.stringify({choices:[{index:0,delta:{content:'半截'}}]})+'\n\n');setTimeout(()=>res.socket.destroy(),20);return;}reply(res,'不会发出');};
   result=await web(f,'第三次');
-  assert.equal(result.events.find(e=>e.type==='error').data.error,'service_role_budget_usage_unknown');
+  assert.equal(result.message.state,'completed');
   assert.equal(h.store.get("SELECT cost FROM model_requests WHERE service_role_id='management-assistant' AND state='transport_error' ORDER BY rowid DESC LIMIT 1").cost,null);
 });
 
