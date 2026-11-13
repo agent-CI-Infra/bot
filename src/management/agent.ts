@@ -44,7 +44,19 @@ export class ManagementAgent {
   private scoped(actor:ActorContext,scope:string):ActorContext{
     assertCurrent(actor);
     if(scope==='platform'){
-      if(actor.tenant_id||actor.project_id)fail(403,'scope_forbidden');
+      // Docs: platform is "all currently authorized projects", which for a tenant- or project-scoped
+      // session is that confinement — not a wider unconfined view, and not a hard 403.
+      if(actor.project_id){
+        const scoped=resolvePrincipalActor(this.store,actor.principal_id,actor.tenant_id,actor.project_id,actor.channel,actor);
+        if(!this.service.projects(scoped).length)fail(403,'scope_forbidden');
+        return scoped;
+      }
+      if(actor.tenant_id){
+        const scoped=resolvePrincipalActor(this.store,actor.principal_id,actor.tenant_id,undefined,actor.channel,actor);
+        if(!this.service.projects(scoped).length)fail(403,'scope_forbidden');
+        return scoped;
+      }
+      if(!this.service.projects(actor).length)fail(403,'scope_forbidden');
       return actor;
     }
     const project=scope.startsWith('project:')?scope.slice(8):undefined;

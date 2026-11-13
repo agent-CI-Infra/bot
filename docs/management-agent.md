@@ -55,7 +55,7 @@ RoleDefinitionV2 的显式角色 apply 仍在安全检查点结束旧 run，并�
 
 ## 会话、停止和执行
 
-`/api/management/conversations` 创建与列出本人会话，scope 为 `platform`、`tenant:<tenant id>` 或 `project:<project id>`，其中 platform 仅表示全部当前有权项目。会话由 principal、tenant 和 scope 隔离；授权修订后隐藏旧权限下的消息，范围撤回后旧会话不可访问。
+`/api/management/conversations` 创建与列出本人会话，scope 为 `platform`、`tenant:<tenant id>` 或 `project:<project id>`，其中 platform 仅表示全部当前有权项目：会话若已选定组织或项目，就是该范围内有权的项目，而不是拒绝（403）。项目管理员可以在自己已启动的项目上使用管理对话；还没有已启动项目时创建会话会得到 403 `scope_forbidden`，界面应说明原因并给出重试，而不是一直转圈。会话由 principal、tenant 和 scope 隔离；授权修订后隐藏旧权限下的消息，范围撤回后旧会话不可访问。
 
 `POST /conversations/:id/messages` 接受一个自然语言 content、结构化 query 或 command，以及唯一 `source_message`。消息先持久化再运行，重复消息不会再次执行。`GET /conversations/:id/events?after=<sequence>&stream=1` 输出 NDJSON；重连只读事件。阶段消息是 `message` 事件，数据为 `{text,sequence,remaining}`；最终回答仍是 `reply` 事件。`POST /conversations/:id/messages/:message/stop` 停止后续模型/工具调用，已提交命令保留回执。重启将未完成消息标记为 interrupted，不能自动重放外部写入。
 
