@@ -22,7 +22,7 @@ const tool = { type: 'function', function: { name: 'dispatch', description: 'Rec
     option_ids: { type: 'array', items: { type: 'string' }, description: 'create: ids of offered create options (1-3); continue: the id of one offered continue option; ignore: empty' },
     reason: { type: 'string', description: 'Why, in one or two sentences of Simplified Chinese' },
     brief: { type: 'object', additionalProperties: false, required: ['goal'], description: 'Only with create: the goal and acceptance criteria of the new work',
-      properties: { goal: { type: 'string' }, criteria: { type: 'array', items: { type: 'string' } } } },
+      properties: { goal: { type: 'string', minLength: 1 }, criteria: { type: 'array', items: { type: 'string', minLength: 1 } } } },
     writes: { type: 'array', items: { type: 'string' }, description: 'Only with create, optional: keep only these of the offered writes for the created tasks' } } } } };
 const clip = (text: string, limit: number) => text.length > limit ? text.slice(0, limit) + '\n…（已截断）' : text;
 
