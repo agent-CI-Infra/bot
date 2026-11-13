@@ -8,6 +8,7 @@ import { repository } from './helpers.mjs';
 import { knowledgeActor } from './knowledge-fixture.mjs';
 import { authorize, invalidate, resolvePrincipalActor } from '../dist/identity/authorization.js';
 import { roleApi } from '../dist/roles/api.js';
+import { serviceMemory } from '../dist/service-roles/resources.js';
 import { TaskCommands } from '../dist/tasks/commands.js';
 import { assertManagedExecution } from '../dist/tasks/management.js';
 
@@ -474,6 +475,13 @@ test('a group assistant works a side question in its own task with the same tool
   assert.equal(row.state, 'completed'); assert.equal(row.rounds, 1); assert.ok(!row.history.includes('#7'), 'history is sealed');
   // Billed to the service role like the turn itself: main turn requests plus the own task's two.
   assert.ok(roleRequests() >= billed + 4);
+  // Roster changes retain the exact stored owner key, including its pre-existing context revision.
+  const beforeFence=f.service.serviceBindings.fence(f.chat.id),memoryOwner={service_role_id:binding.service_role_id,kind:'channel',owner_id:f.chat.id,principal_id:binding.principal_id,fence:beforeFence};
+  serviceMemory(f.h.store,memoryOwner,'remember_role_memory',{key:'stable',content:'saved before source updates'});
+  const source=f.service.turnMessages.event(f.h.store.get("SELECT * FROM channel_inbox WHERE chat_ref=? AND dedup_key LIKE 'message:%' LIMIT 1",f.chat.id));
+  f.service.ledger.accept({...source,kind:'audience_changed'});
+  assert.equal(f.service.serviceBindings.fence(f.chat.id),beforeFence);
+  assert.equal(serviceMemory(f.h.store,{...memoryOwner,fence:f.service.serviceBindings.fence(f.chat.id)},'read_role_memory',{key:'stable'}).content,'saved before source updates');
   // Continue it later: it sees its earlier round; listing shows the latest conclusion.
   main = (body, res, seen) => !seen.length ? call(res, 'list_own_tasks', {}) : seen.length === 1 ? call(res, 'continue_own_task', { task_id: seen[0].own_tasks[0].task_id, instruction: '再看看有没有草稿 PR' })
     : say(res, '补充：' + seen[1].conclusion);

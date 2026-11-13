@@ -17,6 +17,10 @@ export function ledgerStorage(store: Store): void {
       parent_id TEXT NOT NULL,root_id TEXT NOT NULL,thread_id TEXT NOT NULL,deleted INTEGER NOT NULL,
       sensitive INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(chat_id,message_id));
     CREATE INDEX IF NOT EXISTS channel_messages_time ON channel_messages(chat_id,created_at,message_id);
+    CREATE TABLE IF NOT EXISTS channel_source_updates(chat_id TEXT NOT NULL,message_id TEXT NOT NULL,revision INTEGER NOT NULL,observed_at INTEGER NOT NULL,
+      PRIMARY KEY(chat_id,message_id),FOREIGN KEY(chat_id,message_id) REFERENCES channel_messages(chat_id,message_id) ON DELETE CASCADE);
+    CREATE INDEX IF NOT EXISTS channel_source_updates_revision ON channel_source_updates(chat_id,revision);
+    CREATE INDEX IF NOT EXISTS channel_source_updates_time ON channel_source_updates(chat_id,observed_at);
     CREATE TABLE IF NOT EXISTS channel_sync_jobs(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL REFERENCES channel_chats(id),
       container_type TEXT NOT NULL,container_id TEXT NOT NULL,state TEXT NOT NULL,page_token TEXT NOT NULL DEFAULT '',
       start_time INTEGER NOT NULL,end_time INTEGER NOT NULL,covered_until INTEGER NOT NULL DEFAULT 0,
@@ -34,6 +38,8 @@ export function ledgerStorage(store: Store): void {
     CREATE TABLE IF NOT EXISTS channel_message_scopes(chat_id TEXT NOT NULL,message_id TEXT NOT NULL,project_id TEXT NOT NULL,
       PRIMARY KEY(chat_id,message_id),FOREIGN KEY(chat_id,message_id) REFERENCES channel_messages(chat_id,message_id) ON DELETE CASCADE);
   `);
+  // This revision fences authorization and explicit history erasure. Preserve its stored value and hash shape so existing
+  // private memory and own tasks keep their owners; edits, recalls, roster updates and backfill only invalidate summaries.
   if (!store.all('PRAGMA table_info(channel_chats)').some(c => c.name === 'context_revision')) store.db.exec('ALTER TABLE channel_chats ADD COLUMN context_revision INTEGER NOT NULL DEFAULT 1');
   if (!store.all('PRAGMA table_info(channel_chats)').some(c => c.name === 'type_verified')) store.db.exec('ALTER TABLE channel_chats ADD COLUMN type_verified INTEGER NOT NULL DEFAULT 0');
   if (!store.all('PRAGMA table_info(channel_chats)').some(c => c.name === 'display_name')) store.db.exec("ALTER TABLE channel_chats ADD COLUMN display_name TEXT NOT NULL DEFAULT ''");
@@ -78,7 +84,7 @@ export class ChannelLedger {
       this.store.run("UPDATE channel_chats SET state='active',revision=revision+1,context_revision=context_revision+1 WHERE id=?", chat.id);
       this.resync(chat.id);
     } else if (event.kind === 'audience_changed') {
-      this.store.run('UPDATE channel_chats SET context_revision=context_revision+1 WHERE id=?', chat.id);
+      this.store.run('UPDATE channel_chats SET revision=revision+1 WHERE id=?', chat.id);
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chat.id);
     } else if (['bot_removed', 'chat_archived'].includes(event.kind)) {
       this.store.run('UPDATE channel_chats SET state=?,revision=revision+1,context_revision=context_revision+1 WHERE id=?', event.kind === 'chat_archived' ? 'archived' : 'removed', chat.id);
@@ -109,7 +115,7 @@ export class ChannelLedger {
       this.store.run(`UPDATE channel_messages SET sender_id=?,sender_tenant=?,sender_type=?,message_type=?,created_at=?,parent_id=?,root_id=?,thread_id=?,payload=? WHERE chat_id=? AND message_id=?`,
         ...Object.values(metadata), this.store.secrets.seal({ ...payload, ...metadata, content: '', command_text: '', raw_content: '', mentions: [], deleted: true }, 'channel-message:' + chat.id + ':' + message.message_id), chat.id, message.message_id);
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chat.id);
-      this.store.run('UPDATE channel_chats SET revision=revision+1,context_revision=context_revision+1 WHERE id=?', chat.id);
+      this.store.run('UPDATE channel_chats SET revision=revision+1 WHERE id=?', chat.id);
       if (metadata.thread_id) this.schedule(chat, 'thread', metadata.thread_id);
       return true;
     }
@@ -128,9 +134,12 @@ export class ChannelLedger {
       Math.max(data.updated_at, old?.updated_at ?? 0), Date.now(), source, data.parent_id || old?.parent_id || '',
       data.root_id || old?.root_id || '', data.thread_id || old?.thread_id || '', Number(data.deleted), Number(sensitive(data)), sealed);
     mergeResources(this.store, chat, data, sensitive(data));
+    if (data.deleted || old) {
+      this.store.run(`INSERT INTO channel_source_updates VALUES(?,?,(SELECT revision+1 FROM channel_chats WHERE id=?),?)
+        ON CONFLICT(chat_id,message_id) DO UPDATE SET revision=excluded.revision,observed_at=excluded.observed_at`, chat.id, data.message_id, chat.id, Date.now());
+    }
     if (old || this.store.get('SELECT 1 FROM channel_chat_summaries WHERE chat_id=? AND through_time>=?', chat.id, data.created_at)) {
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chat.id);
-      this.store.run('UPDATE channel_chats SET context_revision=context_revision+1 WHERE id=?', chat.id);
     }
     this.store.run('UPDATE channel_chats SET revision=revision+1 WHERE id=?', chat.id);
     if (message.thread_id) this.schedule(chat, 'thread', message.thread_id);
@@ -235,6 +244,22 @@ export class ChannelLedger {
       ...(!row.deleted&&!row.sensitive&&Array.isArray(payload.mentions)&&payload.mentions.length?{mentions:payload.mentions}:{}),
       resources:row.deleted||row.sensitive?null:this.store.all("SELECT * FROM channel_resources WHERE chat_id=? AND message_id=? AND kind='incoming' ORDER BY id",row.chat_id,row.message_id).map(resource=>resourceMetadata(this.store,resource)),resource_state:row.message_type==='text'?'text':'scoped_resources'};
   }
+  sourceVersion(id: string): number {
+    return Number(this.store.get('SELECT coalesce(max(revision),0) revision FROM channel_source_updates WHERE chat_id=?', id)!.revision);
+  }
+  /** Changes carry current local projections only, never a second copy of the superseded body. */
+  sourceUpdates(id: string, projects?: string[], fence?: string): Json {
+    const visible = this.visibility(projects, fence);
+    return { revision: this.sourceVersion(id), notice: 'Messages listed here were recalled or edited. Do not quote or rely on their previous content. Recheck facts and existing write receipts before acting; never repeat a write because context was refreshed.',
+      messages: this.store.all(`SELECT channel_messages.* FROM channel_messages JOIN channel_source_updates u USING(chat_id,message_id)
+        WHERE chat_id=?${visible.sql} ORDER BY u.revision DESC LIMIT 40`, id, ...visible.args).map(row => ({ ...this.view(row), change: row.deleted ? 'recalled' : 'edited' })) };
+  }
+  /** Earlier bot text can quote any changed source. Keep stored replies, but omit such derived text from future inputs. */
+  private contextView(row: Row): Json {
+    if (row.sender_type !== 'user' && this.store.get('SELECT 1 FROM channel_source_updates WHERE chat_id=? AND observed_at>=? LIMIT 1', row.chat_id, row.observed_at))
+      return { ...this.view(row), content: '[先前回复可能引用已变更消息；请查阅当前原文。]' };
+    return this.view(row);
+  }
   private visibility(projects?:string[],fence?:string):{sql:string;args:string[]} {
     if(projects===undefined&&fence===undefined)return {sql:'',args:[]};
     const denied=projects===undefined?'0':projects.length?'s.project_id NOT IN ('+projects.map(()=>'?').join(',')+')':'1';
@@ -269,7 +294,7 @@ export class ChannelLedger {
       if (!batch.length) { exhausted = true; break; }
       for (const row of batch) {
         scanTime = row.created_at; scanId = row.message_id;
-        const message=this.view(row),content=String(message.content);
+        const message=this.contextView(row),content=String(message.content);
         if (query.keyword && (row.sensitive || row.deleted || !content.toLocaleLowerCase().includes(query.keyword.toLocaleLowerCase()))) continue;
         messages.push(message);
         if (messages.length > limit) break;
@@ -285,7 +310,7 @@ export class ChannelLedger {
   /** Bounded prompt windows and compaction use the same sealed local records as searches. */
   recent(id: string, limit = 40, projects?:string[],fence?:string,excludePending=false): Json[] {
     const visible=this.visibility(projects,fence);
-    return this.store.all(`SELECT * FROM channel_messages WHERE chat_id=?${visible.sql}${excludePending?this.pendingFilter():''} ORDER BY created_at DESC,message_id DESC LIMIT ?`,id,...visible.args,limit).reverse().map(row=>this.view(row));
+    return this.store.all(`SELECT * FROM channel_messages WHERE chat_id=?${visible.sql}${excludePending?this.pendingFilter():''} ORDER BY created_at DESC,message_id DESC LIMIT ?`,id,...visible.args,limit).reverse().map(row=>this.contextView(row));
   }
   private pendingFilter():string {
     return ` AND NOT EXISTS(SELECT 1 FROM channel_inbox i WHERE i.chat_ref=channel_messages.chat_id AND i.dedup_key='message:'||channel_messages.message_id AND i.state IN ('queued','merged'))`;
@@ -296,6 +321,6 @@ export class ChannelLedger {
       AND (created_at>? OR (created_at=? AND message_id>?)) ORDER BY created_at,message_id LIMIT 100`, id,
       ...visible.args,
       Number(boundary.created_at), Number(boundary.created_at), String(boundary.message_id), Number(after?.created_at??-1),Number(after?.created_at??-1),String(after?.message_id??''))
-      .map(row => this.view(row));
+      .map(row => this.contextView(row));
   }
 }

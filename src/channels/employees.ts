@@ -207,13 +207,13 @@ export class ChannelEmployees {
     if(previous&&(previous.actor_id!==event.actor_id||previous.actor_tenant!==event.actor_tenant))fail(403,'channel_personal_source_mismatch');
     this.store.run('INSERT INTO channel_personal_owners VALUES(?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET principal_id=excluded.principal_id',id,actor.principal_id,event.actor_id,event.actor_tenant);
   }
-  guardPersonal(id:string,principal:string,source:string):void{
+  guardPersonal(id:string,principal:string,source:string,currentMessage=true):void{
     const chat=this.chat(id),owner=this.store.get('SELECT * FROM channel_personal_owners WHERE chat_id=? AND principal_id=?',id,principal),row=this.store.get('SELECT payload FROM channel_inbox WHERE id=?',source);
     if(!owner||!row)fail(403,'channel_personal_source_mismatch');
     const event=this.store.secrets.open(row!.payload,'channel-event:'+source) as unknown as ChannelEvent,binding=this.binding(chat,principal,undefined,{actor:event.actor_id,tenant:event.actor_tenant});
     if(event.chat_id!==chat.chat_id||event.app_id!==chat.app_id||event.installation_tenant!==chat.installation_tenant||event.actor_id!==owner!.actor_id||event.actor_tenant!==owner!.actor_tenant||
       binding.external_actor!==event.actor_id||binding.external_tenant!==event.actor_tenant||event.kind!=='message')fail(403,'channel_personal_source_mismatch');
-    this.currentMessage(chat,event);
+    if(currentMessage)this.currentMessage(chat,event);
   }
   /** Groups the actor can pick: an active chat of an enabled app where the actor's bound Feishu identity has spoken. */
   selectableChats(actor: ActorContext): Row[] {

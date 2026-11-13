@@ -2,6 +2,7 @@ import type { Row, Store } from '../storage/database.js';
 import type { Json } from '../core/security.js';
 import type { ChannelEvent } from './types.js';
 import { chatContextBytes, requestBytes } from '../agent/tool-context.js';
+import { HttpError } from '../core/security.js';
 
 // What the model is told about messages merged into its turn (#458). The platform gives facts about each message; whether a
 // message concerns the assistant, and whether it needs an answer, is the model's own judgement.
@@ -39,6 +40,7 @@ export interface TurnMessages {
   check(): void;
   seal(): void;
   release(): void;
+  refresh?(): void;
 }
 export interface TurnMessageSource {
   /** Whether the chat's participation setting would answer this message on its own; such messages get their own turn if unseen. */
@@ -84,7 +86,17 @@ export class ChannelTurnMessages {
     const { needsReply, guard, senderName, request } = options;
     let sealed = false, paused = false;
     const rows = (state: string) => this.store.all('SELECT i.*,m.needs_reply FROM channel_turn_inputs m JOIN channel_inbox i ON i.id=m.source_event WHERE m.turn_id=? AND m.state=? ORDER BY i.created_at,i.rowid', turn, state);
-    const check = () => { for (const row of rows('injected')) guard(row, this.event(row)); };
+    const available = (row: Row): boolean => {
+      try { guard(row, this.event(row)); return true; }
+      catch (error) {
+        // A supplemental message can change without revoking the authority of the turn's initiating source.
+        if (!(error instanceof HttpError) || !['channel_source_message_unavailable','channel_source_message_changed'].includes(error.code)) throw error;
+        this.store.run("UPDATE channel_turn_inputs SET state='changed' WHERE turn_id=? AND source_event=?",turn,row.id);
+        this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=? AND state='merged'",row.id);
+        return false;
+      }
+    };
+    const check = () => { for (const row of rows('injected')) available(row); };
     const seal = () => { sealed = true; if (this.active.get(chat.id)?.turn === turn) this.active.delete(chat.id); };
     const finish = () => {
       seal();
@@ -114,7 +126,9 @@ export class ChannelTurnMessages {
         ...(event.content.length > 14000 ? { truncated: true, notice: 'Use read_message_text to read the rest of this message.' } : {}) };
     };
     resume(); capture();
-    return { check, seal, finish, resume, pause: () => { paused = true; if (this.active.get(chat.id)?.turn === turn) this.active.delete(chat.id); },
+    return { check, seal, finish, resume,
+      refresh: () => { this.store.run("UPDATE channel_turn_inputs SET state='pending' WHERE turn_id=? AND state='injected'",turn); resume(); },
+      pause: () => { paused = true; if (this.active.get(chat.id)?.turn === turn) this.active.delete(chat.id); },
       injected: () => Number(this.store.get("SELECT count(*) n FROM channel_turn_inputs WHERE turn_id=? AND state IN ('injected','answered')", turn)!.n),
       release: () => { seal(); this.release(turn); }, take: (maxBytes = chatContextBytes) => {
       if (sealed || paused) return;
@@ -128,11 +142,11 @@ export class ChannelTurnMessages {
         : 'Messages the person sent while you were working, oldest first.', messages };
       let direct = false;
       for (const row of pending) {
+        if (!available(row)) continue;
         const event = this.event(row);
         messages.push(describe(row, event));
         // This is the existing model-context budget, not a message-count or turn-duration limit. Unseen inputs stay durable.
         if (requestBytes({ role: 'user', content: JSON.stringify(content) }) > maxBytes) { messages.pop(); break; }
-        guard(row, event);
         direct ||= addressed(event);
         this.store.run("UPDATE channel_turn_inputs SET state='injected',injected_at=? WHERE turn_id=? AND source_event=?", this.clock(), turn, row.id);
       }
@@ -156,6 +170,10 @@ export class ChannelTurnMessages {
   replyEvent(turn: string): ChannelEvent | undefined {
     for (const row of this.store.all("SELECT i.* FROM channel_turn_inputs m JOIN channel_inbox i ON i.id=m.source_event WHERE m.turn_id=? AND m.state IN ('injected','answered') ORDER BY i.created_at DESC,i.rowid DESC", turn)) {
       const event = this.event(row);
+      const current = this.store.get('SELECT * FROM channel_messages WHERE chat_id=? AND message_id=?',row.chat_ref,event.message_id);
+      if(!current||current.deleted||current.sensitive)continue;
+      const payload=this.store.secrets.open(current.payload,'channel-message:'+row.chat_ref+':'+event.message_id);
+      if(payload.content!==event.content)continue;
       if (addressed(event)) return event;
     }
     return undefined;

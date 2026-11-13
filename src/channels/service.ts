@@ -87,14 +87,33 @@ export class ChannelService {
       this.serviceBindings.assertUsable(binding); return this.serviceBindings.fence(row.subject);
     });
     this.historySync = new ChannelHistorySync(store, this.ledger, (c, guard) => this.adapter(c, guard), chat => this.syncGuard(chat));
-    management.sourceGuard=(actor,conversation)=>{
-      const source=store.get('SELECT * FROM channel_inbox WHERE conversation_id=? AND context_revision IS NOT NULL ORDER BY rowid DESC LIMIT 1',conversation);
+    management.sourceGuard=(actor,conversation,input)=>{
+      const source=input?.source_message?.toString().startsWith('feishu:')
+        ? store.get('SELECT * FROM channel_inbox WHERE conversation_id=? AND id=?',conversation,String(input.source_message).slice(7))
+        : store.get('SELECT * FROM channel_inbox WHERE conversation_id=? AND context_revision IS NOT NULL ORDER BY rowid DESC LIMIT 1',conversation);
       if(!source)return;
       const e=store.secrets.open(source.payload,'channel-event:'+source.id) as unknown as ChannelEvent;
       this.source(e);
       const chat=store.get('SELECT * FROM channel_chats WHERE connector_id=? AND chat_id=?',e.connector_id,e.chat_id);
       if(!chat||chat.context_revision!==source.context_revision)fail(409,'conversation_source_changed');
-      this.employees.guardPersonal(chat!.id,actor.principal_id,source.id);
+      this.employees.guardPersonal(chat!.id,actor.principal_id,source.id,!!input?.source_message?.toString().startsWith('feishu:'));
+    };
+    const personalChat=(conversation:string)=>store.get('SELECT h.* FROM channel_sessions s JOIN channel_chats h ON h.connector_id=s.connector_id AND h.chat_id=s.chat_id WHERE s.conversation_id=?',conversation);
+    management.sourceVersion=conversation=>{const chat=personalChat(conversation);return chat?this.ledger.sourceVersion(chat.id):0;};
+    management.sourceContext=(conversation,context)=>{
+      const chat=personalChat(conversation);if(!chat)return context;
+      const changedAt=Number(store.get('SELECT coalesce(max(observed_at),0) time FROM channel_source_updates WHERE chat_id=?',chat.id)!.time);
+      const history=(context.history as Json[]).map(item=>{
+        const request=item.request as Json,source=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',String(request.source_message).replace(/^feishu:/,''),conversation);
+        if(!source)return item;
+        const event=this.turnMessages.event(source),message=this.ledger.query(chat.id,{message_id:event.message_id}).messages as Json[];
+        // Replies and progress are derived from the whole supplied chat, not just their initiating message.
+        const {reply,reply_truncated,progress_messages,...rest}=item;
+        return {...(changedAt>=Date.parse(String(item.created_at))?rest:item),request:{...request,content:message[0]?.content??'[消息已清理]'}};
+      });
+      return {...context,history,source_updates:this.ledger.sourceUpdates(chat.id),write_receipts:{
+        management:store.all('SELECT id,operation,state FROM management_commands WHERE source_conversation=? AND source_message=?',conversation,String(context.source_message)),
+        github:store.hasTable('github_writes')?store.all('SELECT key,method,path,state,status,html_url FROM github_writes WHERE scope=?',`management:${conversation}:${context.source_message}`):[]}};
     };
     management.mediaTurn=(actor,conversation,input,computers,guard)=>{
       const source=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',String(input.source_message).replace(/^feishu:/,''),conversation);
@@ -483,7 +502,7 @@ export class ChannelService {
     }
     if(e.created_at<session.last_message_at)fail(409,'channel_message_out_of_order');
     if(session.context_revision!==revision||session.connector_revision!==e.connector_revision){
-      // Edited, recalled or cleaned local sources must not return through old management context.
+      // Only authorization changes or explicit history erasure replace the conversation.
       const conversation=(this.management.create(actor,{scope:this.personalScope(actor)}).conversation as Json).id;
       this.store.run('UPDATE channel_sessions SET conversation_id=?,context_revision=?,connector_revision=? WHERE id=?',String(conversation),revision,e.connector_revision,session.id);
       session=this.store.get('SELECT * FROM channel_sessions WHERE id=?',session.id)!;

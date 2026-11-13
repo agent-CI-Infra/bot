@@ -28,7 +28,9 @@ const historyReplyChars=4000,historyBytes=96*1024;
 export class ManagementAgent {
   readonly active=new Map<string,{controller:AbortController;work:Promise<void>}>();
   // A transport can invalidate its own persisted context, including when it is reopened from Web.
-  sourceGuard?:(actor:ActorContext,conversation:string)=>void;
+  sourceGuard?:(actor:ActorContext,conversation:string,input?:Json)=>void;
+  sourceContext?:(conversation:string,context:Json)=>Json;
+  sourceVersion?:(conversation:string)=>number;
   incomingMessages?:(actor:ActorContext,conversation:string,input:Json,id:string)=>TurnMessages|undefined;
   incomingHistory?:(message:string)=>Json[];
   mediaTurn?:(actor:ActorContext,conversation:string,input:Json,computers:MediaComputer|undefined,guard:()=>void)=>MediaTurn|undefined;
@@ -97,9 +99,9 @@ export class ManagementAgent {
   private context(actor:ActorContext,conversation:string,message:string,request:unknown):Json{
     const {actor:scoped,row}=this.conversation(actor,conversation);
     // Keep the user's selections as well as answers. Execution events alone lose clarification context.
-    const previous=this.store.all(`SELECT id,input,state,source_message FROM management_messages WHERE conversation_id=? AND authorization_revision=? AND id<>?
+    const previous=this.store.all(`SELECT id,input,state,source_message,created_at FROM management_messages WHERE conversation_id=? AND authorization_revision=? AND id<>?
       ORDER BY rowid DESC LIMIT 20`,conversation,scoped.authorization_revision,message).reverse();
-    const history=previous.map(m=>({request:JSON.parse(m.input),state:m.state,
+    const history=previous.map(m=>({request:JSON.parse(m.input),state:m.state,created_at:m.created_at,
       ...(this.incomingHistory?{incoming_messages:this.incomingHistory(m.id)}:{}),
       ...(()=>{const sent=this.stageMessages(m.id);return sent.length?{progress_messages:sent.map(text=>text.slice(0,1000))}:{};})(),
       reply:this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='reply' ORDER BY sequence DESC LIMIT 1",m.id)?.data,
@@ -109,7 +111,9 @@ export class ManagementAgent {
       return {...m,reply:reply?.slice(0,historyReplyChars),...(reply&&reply.length>historyReplyChars?{reply_truncated:true}:{})};});
     // The history has a budget of its own: the oldest rounds give way first, so long answers cannot crowd out this request.
     let omitted=0;while(history.length>1&&Buffer.byteLength(JSON.stringify(history))>historyBytes){history.shift();omitted++;}
-    return {scope:row.scope,request,history,...(omitted?{earlier_rounds_omitted:omitted}:{})};
+    const source=this.store.get('SELECT source_message FROM management_messages WHERE id=?',message)?.source_message;
+    const context={scope:row.scope,request,history,source_message:source,...(omitted?{earlier_rounds_omitted:omitted}:{})};
+    return this.sourceContext?.(conversation,context)??context;
   }
   /** `timer` marks a message sent by one of the user's chat timers (#330): only such a turn may end silently (#489). */
   send(base:ActorContext,conversationId:string,input:Json,options:{timer?:boolean}={}):Json{
@@ -141,6 +145,7 @@ export class ManagementAgent {
       assertCurrent(base);assertCurrent(actor);
       if(signal.aborted||this.store.get('SELECT state FROM management_messages WHERE id=?',id)?.state==='stopped')fail(409,'management_stopped');
       this.conversation(base,conversation);
+      this.sourceGuard?.(base,conversation,input);
       incoming?.check();
     };
     // The person's own computer (#457), shared by their Feishu private chat and console conversations of the same scope. Its
@@ -244,11 +249,18 @@ export class ManagementAgent {
             // One query per project across many projects is normal (#333): results share a budget per batch and older ones
             // fold away, so the conversation stays within the model's context however many calls the model makes.
             const transcript=new ToolTranscript(messages,chatContextBytes);
+            let sourceVersion=this.sourceVersion?.(conversation);
             let mustReply=false;
             // No step limit (#435): the turn ends with an answer without tool calls, when it is stopped (by the user, a changed
             // authorization or source) or when the assistant's service role budget runs out before a model request.
             for(let turn=0;;turn++){
               await guard();this.event(id,'model_start',{turn});
+              const currentVersion=this.sourceVersion?.(conversation);
+              if(currentVersion!==sourceVersion){
+                sourceVersion=currentVersion;
+                messages.splice(1,messages.length-1,{role:'user',content:JSON.stringify(this.context(base,conversation,id,input.content))});
+                incoming?.refresh?.();
+              }
               media?.addImages(messages);
               const body={messages,tools:turnTools,tool_choice:'auto'};transcript.fit(body);
               const added=incoming?.take(Math.max(0,Math.min(chatContextBytes,requestLimit-requestBytes(body)-128)));
@@ -258,6 +270,8 @@ export class ManagementAgent {
                 async reason=>{if(!['tool_calls','function_call'].includes(reason))incoming?.pause();})
                 .catch(error=>{if(media)media.modelError(error,messages);throw error;});
               this.event(id,'model_request',{request_log_id});
+              // A response to an older source projection cannot authorize tools or become the final reply.
+              if(this.sourceVersion?.(conversation)!==sourceVersion){incoming?.resume();continue;}
               const message=value?.choices?.[0]?.message;
               if(!message)fail(502,'management_model_invalid');
               const calls=message.tool_calls??[];if(toolCallsProblem(calls))fail(502,'management_model_invalid');

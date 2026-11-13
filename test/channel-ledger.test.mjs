@@ -55,6 +55,23 @@ test('live edit and recall win over delayed history, recalls received before ori
   assert.equal(ledger.query(chat.id).messages[0].content, '[消息已撤回]');
 });
 
+test('edits, recalls, roster changes and backfill preserve the existing authorization revision',t=>{
+  const {store,ledger,chat}=fixture(t);
+  // An upgraded deployment may already have any revision; resetting it would orphan fence-keyed private resources.
+  store.run('UPDATE channel_chats SET context_revision=37 WHERE id=?',chat.id);
+  const revision=()=>store.get('SELECT context_revision FROM channel_chats WHERE id=?',chat.id).context_revision;
+  ledger.merge(chat,message('original',10),'live');
+  ledger.merge(chat,message('original',10,{updated_at:30,content:'edited'}),'live');assert.equal(revision(),37);
+  ledger.merge(chat,message('original',10,{updated_at:40,deleted:true}),'live');assert.equal(revision(),37);
+  ledger.accept(event({kind:'audience_changed'}));assert.equal(revision(),37);
+  store.run('INSERT INTO channel_chat_summaries VALUES(?,37,1,100,?,?,?)',chat.id,'through','[]','sealed-placeholder');
+  ledger.merge(chat,message('backfill',20),'history');assert.equal(revision(),37);
+  assert.equal(store.get('SELECT count(*) n FROM channel_chat_summaries').n,0);
+  ledger.merge(chat,message('early-recall',90,{deleted:true,sender_id:'',sender_tenant:''}),'live');
+  ledger.merge(chat,message('early-recall',50),'history');assert.equal(revision(),37);
+  ledger.accept(event({kind:'bot_removed'}));assert.equal(revision(),38);
+});
+
 test('history walks every chat and thread page without replaying instructions; cursor and fixed boundary survive a worker restart', async t => {
   const { store, ledger, chat } = fixture(t), calls = [];
   const adapter = () => ({ history: async job => {

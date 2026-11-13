@@ -286,6 +286,7 @@ export class ChannelServiceSessions {
       }
     };
     try {
+      let sourceVersion = this.ledger.sourceVersion(chat.id);
       const history = true;
       const recent = history ? this.ledger.recent(chat.id, 40, scope, fence, true) : [];
       const connector = this.store.get('SELECT bot_open_id,app_name FROM channel_connectors WHERE id=?', chat.connector_id)!;
@@ -350,7 +351,7 @@ export class ChannelServiceSessions {
               if (!(error instanceof HttpError || error instanceof TaskError)) throw error;
             }
             check();
-            if (typeof content === 'string' && content.trim()) {
+            if (typeof content === 'string' && content.trim() && this.ledger.sourceVersion(chat.id) === sourceVersion) {
               earlier = [];
               const through = older.at(-1)!;
               this.store.run(`INSERT INTO channel_chat_summaries VALUES(?,?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET revision=excluded.revision,
@@ -371,13 +372,27 @@ export class ChannelServiceSessions {
                 ...(requester ? { sender_name: requester } : {}), is_direct_mention: directMention(turn.event), mentions: turn.event.mentions ?? [] } : null,
               ...(earlier.length ? unsummarized : {}), recent_messages: recent.map(m => excerpt(named(m), 3000)), history: this.ledger.diagnostics(chat.id),
               scope: { kind: binding.scope, repositories: reach.projects.slice(0, 50).map(p => p.full_name), more_repositories: Math.max(0, reach.projects.length - 50), paused_repositories: reach.paused.length },
-              permissions: granted }, summary: saved }) }];
+              permissions: granted }, summary: saved, source_updates: this.ledger.sourceUpdates(chat.id,scope,fence) }) }];
           // Results share a budget per batch and older ones fold away, so many parallel calls stay within the model's context.
           const transcript = new ToolTranscript(messages, chatContextBytes);
           // No step limit (#435): the turn ends with an answer without tool calls, when it is stopped (console, recalled source,
           // changed binding or fence) or when the service role's budget runs out before a model request.
           for (let step = 0; ; step++) {
             check();
+            if (this.ledger.sourceVersion(chat.id) !== sourceVersion) {
+              sourceVersion = this.ledger.sourceVersion(chat.id);
+              const seed = JSON.parse(messages[1].content), current = this.ledger.recent(chat.id,40,scope,fence,true);
+              seed.context.recent_messages = current.map(m => excerpt(named(m),3000));
+              delete seed.context.earlier_messages;
+              delete seed.context.unsummarized_earlier_messages;
+              seed.summary = this.summary(chat.id,fence);
+              seed.source_updates = this.ledger.sourceUpdates(chat.id,scope,fence);
+              seed.write_receipts = {
+                management: this.store.all('SELECT id,operation,state FROM management_commands WHERE source_conversation=? AND source_message=?',chat.id,'feishu:'+turn.source_message),
+                github: this.store.hasTable('github_writes') ? this.store.all('SELECT key,method,path,state,status,html_url FROM github_writes WHERE scope=?',`channel:${chat.id}:${turn.source_message}`) : [] };
+              messages.splice(1,messages.length-1,{role:'user',content:JSON.stringify(seed)});
+              incoming?.refresh?.();
+            }
             media?.addImages(messages);
             const tools = [...serviceTools.filter(t => offered(permissions(), t.function.name)&&(!mediaTools.includes(t as any)||!!media)&&(!computerTool(t.function.name)||computing)),
               ...turn.allowSilence ? [staySilentTool] : []], body = { messages, tools, tool_choice: 'auto' };
@@ -390,6 +405,7 @@ export class ChannelServiceSessions {
             const { value } = await request(body, 'turn:' + step, async delta => { if (delta?.content) incoming?.pause(); },
               async reason => { if (!['tool_calls','function_call'].includes(reason)) incoming?.pause(); }).catch(error=>{if(media)media.modelError(error,messages);throw error;});
             event('model_done');
+            if (this.ledger.sourceVersion(chat.id) !== sourceVersion) { incoming?.resume(); continue; }
             const message = value?.choices?.[0]?.message;
             if (!message) return fail(502, 'service_model_invalid');
             const calls = message.tool_calls ?? [];
