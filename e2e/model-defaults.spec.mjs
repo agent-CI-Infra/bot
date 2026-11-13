@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { openModelOverrides, openModelCatalog } from './open-model-folds.mjs';
+import { consoleSave } from './console-save.mjs';
 
 const out = '.tmp/model-defaults-571';
 
@@ -25,7 +26,7 @@ test('#571 模型页首屏只有默认模型，工作类型覆写用中文名称
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await loginModel(page, h, password);
-    await expect(page.getByRole('button', { name: '保存默认模型', exact: true })).toBeVisible();
+    await expect(page.getByTestId('console-save-bar')).toBeVisible(); await expect(consoleSave(page)).toBeHidden();
     await expect(page.getByRole('table', { name: '工作类型模型', exact: true })).toBeHidden();
     await expect(page.getByRole('heading', { name: '本项目专属模型', exact: true })).toBeHidden();
     await expect(page.getByText('review.issue', { exact: true })).toHaveCount(0);
@@ -50,7 +51,7 @@ test('#571 模型页首屏只有默认模型，工作类型覆写用中文名称
     await page.setViewportSize({ width: 390, height: 844 });
     await page.evaluate(() => window.scrollTo(0, 0));
     await expect(page.getByRole('heading', { name: '项目默认模型', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: '保存默认模型', exact: true })).toBeVisible();
+    await expect(page.getByTestId('console-save-bar')).toBeVisible(); await expect(consoleSave(page)).toBeHidden();
     await expect(page.getByRole('table', { name: '工作类型模型', exact: true })).toBeHidden();
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
     await page.screenshot({ path: `${out}/model-390.png`, fullPage: true });
