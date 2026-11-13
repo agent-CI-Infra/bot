@@ -120,13 +120,17 @@ test('costs return distinct saved prices within the selected scope, without inve
   assert.deepEqual(noPrice.prices,[]);assert.equal(noPrice.summary.unpriced_requests,1);
   assert.deepEqual((await admin(query+'&currency=CNY')).value.prices,[{model_name:'fixture',currency:'CNY',input_per_million:7,output_per_million:10,cache_per_million:0.2}]);
 });
-test('pricing uses existing model ownership and version guards and can be cleared without losing history',async t=>{
+test('pricing preserves model contracts, enforces ownership and rejects stale contract versions without losing history',async t=>{
   const {h,admin,model}=await fixture(t);metricTask(h.store,'history');usageRequest(h.store,'history',model.id);
   const password=testPassword();await admin('/api/users','POST',{username:'pricing-member',password,repository_ids:['101']});
   const member=h.client();await member('/api/auth/login','POST',{username:'pricing-member',password});await admin('/api/models/'+model.id+'/projects','PUT',{repository_ids:['101']});
   assert.equal((await member('/api/models/'+model.id,'PATCH',{version:1,pricing:price})).status,403);
   const own=(await member('/api/models','POST',{repository_id:'101',api_url:'https://model.invalid',api_key:testPassword(),model_name:'own'})).value.model;
-  assert.equal((await member('/api/models/'+own.id,'PATCH',{version:1,pricing:price})).status,200);
+  const priced=await member('/api/models/'+own.id,'PATCH',{version:1,pricing:price});
+  assert.equal(priced.status,200);assert.equal(priced.value.model.version,1);
+  const repriced=await member('/api/models/'+own.id,'PATCH',{version:1,pricing:{...price,input_per_million:20}});
+  assert.equal(repriced.status,200);assert.equal(repriced.value.model.version,1);
+  assert.equal((await member('/api/models/'+own.id,'PATCH',{version:1,model_name:'renamed'})).value.model.version,2);
   assert.equal((await member('/api/models/'+own.id,'PATCH',{version:1,pricing:price})).status,409);
   for(const invalid of [{...price,input_per_million:-1},{...price,currency:'EUR'},{...price,currency:['USD']},{...price,output_per_million:'10'},{currency:'USD'}])assert.equal((await admin('/api/models/'+model.id,'PATCH',{version:model.version,pricing:invalid})).status,400);
   assert.equal((await admin('/api/models/'+model.id,'PATCH',{version:1,pricing:null})).status,200);assert.equal((await admin('/api/models/'+model.id)).value.model.pricing,null);

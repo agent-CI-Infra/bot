@@ -33,9 +33,8 @@ export function executionModel(store:Store,task:Row,kind=workOf(task as any)){
   const current=store.get(`SELECT * FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND EXISTS
     (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?)))`,config.model.id,task.repository_id,task.repository_id);
   if(!current?.api_key)stop('model_not_configured','waiting_configuration',`仓库 ${task.repository_id} 的固定模型已被删除、撤销凭据或撤销共享授权；不会自动切换模型。`);
-  const key=String(store.secrets.open(config.credentials,'task-model:'+task.id).value||'');
-  const liveKey=String(store.secrets.open(current!.api_key,'model:'+current!.id).value||'');
-  if(current!.version!==config.model.version||current!.api_url!==config.model.url||current!.model_name!==config.model.model||liveKey!==key)stop('model_configuration_changed','waiting_configuration','固定的执行模型版本或凭据已变化，请显式采用新配置。');
+  const key=String(store.secrets.open(current!.api_key,'model:'+current!.id).value||'');
+  if(current!.version!==config.model.version||current!.api_url!==config.model.url||current!.model_name!==config.model.model)stop('model_configuration_changed','waiting_configuration','固定的执行模型地址或名称已变化，请显式采用新配置。');
   return {...config.model,key} as ReturnType<typeof selectedModel>;
 }
 export function supplementalInstructions(store:Store,task:Row):string[]{

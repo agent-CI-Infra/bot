@@ -1,9 +1,59 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {harness,setup,account,repository,testPassword} from './helpers.mjs';
+import {createServer} from 'node:http';
+import {once} from 'node:events';
+import {runAgent} from '../dist/agent/runtime.js';
+import {Redactor} from '../dist/agent/common.js';
+import {executionModel} from '../dist/tasks/configuration.js';
+import {resolveRole} from '../dist/roles/definition.js';
+import {modelRevision} from '../dist/roles/role-run.js';
+import {TaskCommands} from '../dist/tasks/commands.js';
 
 const snapshot=rows=>rows.map(m=>({id:m.id,version:m.version}));
 const secret=(h,m)=>h.store.secrets.open(h.store.get('SELECT api_key FROM models WHERE id=?',m.id).api_key,'model:'+m.id).value;
+
+test('published tasks survive provider key rotation, sibling additions and revocation without changing their model contract',async t=>{
+ const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+ const received=[],server=createServer(async(req,res)=>{for await(const _ of req){}received.push(req.headers.authorization);res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:'done'}}],usage:{prompt_tokens:5,completion_tokens:2}}));});
+ server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
+ const endpoint=`http://127.0.0.1:${server.address().port}/v1`,key=testPassword(),rotated=testPassword();
+ let group=(await admin('/api/models/provider','POST',{repository_id:'101',api_url:endpoint,api_key:key,model_names:['alpha','beta']})).value.models;
+ const id=group[0].id;await admin('/api/repositories/101/policy','PATCH',{model_id:id});
+ h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt) VALUES('t','101','review.issue','running','Continue the published PR','{}',1)");
+ h.store.run("INSERT INTO github_effects VALUES('sent-pr','t','pull_request','{}','sent','{\"number\":7}','fixture-marker')");
+ const task=h.store.get("SELECT * FROM tasks WHERE id='t'"),pinned=executionModel(h.store,task),revision=modelRevision(resolveRole(h.store,'101','dev','review.issue').snapshot),snapshotBefore=h.store.get("SELECT snapshot FROM task_execution_configs WHERE task_id='t'").snapshot;
+ const result=await runAgent({store:h.store,task,model:pinned,redactor:new Redactor(),guard:async()=>{},system:'Inspect',prompt:'Continue',adapter:async services=>{
+   await services.request({messages:[]},'before-rotation');
+   const changed=await admin(`/api/models/${id}/provider`,'PATCH',{versions:snapshot(group),api_key:rotated});assert.equal(changed.status,200);group=changed.value.models;assert.ok(group.every(model=>model.version===1));
+   assert.equal(executionModel(h.store,task).key,rotated);
+   await services.request({messages:[]},'after-rotation');
+   const added=await admin(`/api/models/${id}/provider`,'PATCH',{versions:snapshot(group),model_names:['gamma']});assert.equal(added.status,200);group=added.value.models;assert.ok(group.every(model=>model.version===1));
+   await services.request({messages:[]},'after-sibling');
+   assert.equal((await admin(`/api/models/${id}/credentials/revoke`,'POST',{})).status,201);
+   assert.throws(()=>executionModel(h.store,task),{code:'model_not_configured'});
+   await assert.rejects(services.request({messages:[]},'while-revoked'),{code:'model_not_configured'});
+   assert.equal(h.store.get('SELECT version FROM models WHERE id=?',id).version,1);
+   const restored=await admin(`/api/models/${id}`,'PATCH',{version:1,api_key:key});assert.equal(restored.status,200);assert.equal(restored.value.model.version,1);
+   assert.equal(modelRevision(resolveRole(h.store,'101','dev','review.issue').snapshot),revision);
+   await services.request({messages:[]},'after-restore');return 'continued';
+ }});
+ assert.equal(result,'continued');assert.deepEqual(received,['Bearer '+key,'Bearer '+rotated,'Bearer '+rotated,'Bearer '+key]);
+ assert.equal(h.store.get("SELECT snapshot FROM task_execution_configs WHERE task_id='t'").snapshot,snapshotBefore);
+ assert.equal(h.store.get("SELECT status FROM tasks WHERE id='t'").status,'running');
+ h.store.run("UPDATE tasks SET status='paused' WHERE id='t'");
+ assert.throws(()=>new TaskCommands(h.store).api({id:'owner',role:'super_admin',repositories:[]},'POST',new URL('http://local/api/tasks/t/adopt-config'),{}),{code:'task_config_after_publication'});
+});
+
+for(const field of ['model_name','api_url'])test(`changing ${field} increments only that model contract and stops its pinned task`,async t=>{
+ const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+ const group=(await admin('/api/models/provider','POST',{repository_id:'101',api_url:'https://models.invalid/v1',api_key:testPassword(),model_names:['alpha','beta']})).value.models,id=group[0].id;
+ await admin('/api/repositories/101/policy','PATCH',{model_id:id});h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('t','101','review.issue','running','Pinned report','{}')");
+ const task=h.store.get("SELECT * FROM tasks WHERE id='t'");executionModel(h.store,task);
+ const change=await admin(`/api/models/${id}`,'PATCH',{version:1,[field]:field==='model_name'?'renamed':'https://changed.invalid/v1'});
+ assert.equal(change.status,200);assert.equal(change.value.model.version,2);assert.equal(h.store.get('SELECT version FROM models WHERE id=?',group[1].id).version,1);
+ assert.throws(()=>executionModel(h.store,task),{code:'model_configuration_changed'});
+});
 test('provider creation and edits apply atomically to one scope while preserving model IDs, pricing and selection',async t=>{
  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
  const key=testPassword(),next=testPassword(),created=await admin('/api/models/provider','POST',{repository_id:null,api_url:'https://models.invalid/v1',api_key:key,model_names:['alpha','beta']});
