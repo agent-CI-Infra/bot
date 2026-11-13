@@ -602,7 +602,7 @@ test('a signed-in user with no repositories gets a public GitHub App install URL
   const text = JSON.stringify(body);
   assert.equal(body.github_connection.state, 'no_repositories');
   assert.equal(body.github_connection.action, 'choose_repos');
-  assert.equal(body.github_connection.install_url, 'https://github.com/apps/fixture-app/installations/new');
+  assert.equal(body.github_connection.install_url, 'https://github.com/apps/fixture-app/installations/select_target');
   assert.doesNotMatch(text, /settings\/apps|hooks\.invalid|secret-webhook|evil\.example/);
   assert.equal('account_id' in body.github_connection, false);
   assert.equal('settings_url' in body.github_connection, false);
@@ -612,8 +612,7 @@ test('a signed-in user with no repositories gets a public GitHub App install URL
 
   h.store.run("UPDATE settings SET value=? WHERE key='onboarding.app'", JSON.stringify({ slug: 'from-slug', settings_url: 'https://evil.example/settings' }));
   assert.equal((await (await fetch(h.admin + '/api/identity', { headers })).json()).github_connection.install_url,
-    'https://github.com/apps/from-slug/installations/new');
-
+    'https://github.com/apps/from-slug/installations/select_target');
   h.store.run("UPDATE settings SET value=? WHERE key='onboarding.app'", JSON.stringify({
     slug: '../not-a-slug', install_url: 'https://evil.example/apps/fixture-app/installations/new' }));
   assert.equal((await (await fetch(h.admin + '/api/identity', { headers })).json()).github_connection.install_url, null);

@@ -36,7 +36,7 @@ test('GitHub 创建 App 后回到全局设置第 3 步配置 GitHub 登录，地
   await page.goto(`${h.admin}/onboarding/github/callback?code=fixture-code&state=${state}`);await expect(page).toHaveURL(/\/#\/settings\/onboarding\/2$/);
   await expect(count).toHaveText('第 3 / 7 步');await expect(page.getByRole('button',{name:'3. GitHub 登录',exact:true})).toHaveAttribute('aria-current','step');
   await expect(page.getByRole('heading',{name:'独立 OAuth App 登录',exact:true})).toBeVisible();await page.getByRole('button',{name:'下一步',exact:true}).click();await expect(count).toHaveText('第 4 / 7 步');
-  await expect(page.locator('#onboarding-panel')).toContainText('fixture-app');await expect(page.getByRole('link',{name:'在 GitHub 选择账号',exact:true})).toHaveAttribute('href','https://github.com/apps/fixture-app/installations/new');
+  await expect(page.locator('#onboarding-panel')).toContainText('fixture-app');await expect(page.getByRole('link',{name:'在 GitHub 选择账号',exact:true})).toHaveAttribute('href','https://github.com/apps/fixture-app/installations/select_target');
   // Moving between steps rewrites the address in place: same document, no history entry, and a reload stays on the step.
   const entries=await page.evaluate(()=>{window.sameDocument=true;return history.length;});
   await page.getByRole('button',{name:'5. 模型',exact:true}).click();await expect(count).toHaveText('第 5 / 7 步');await expect(page).toHaveURL(/#\/settings\/onboarding\/4$/);

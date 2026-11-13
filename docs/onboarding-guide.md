@@ -11,7 +11,7 @@
 | **管理面（控制台）** | https://agent-ci-infra-bot-admin.llmbots.co/ | 启动项目、跑一键接入、管理用户与仓库授权 |
 | **公共 Dashboard** | <公网入口地址>/dashboard/ | 看所有已登记仓库的门禁与时延等指标 |
 | **单仓看板** | `<公网入口地址>/boards/<owner>/<repo>/` | 单个仓库的看板，`<owner>/<repo>` 用小写 |
-| **GitHub App 安装页** | https://github.com/apps/agent-ci-infra-bot/installations/new | 把 bot 安装到你的账号/组织 |
+| **GitHub App 安装页** | https://github.com/apps/agent-ci-infra-bot/installations/select_target | 把 bot 安装到你的账号/组织 |
 
 ### 管理面怎么登录
 
@@ -50,7 +50,7 @@ GitHub 登录使用独立 OAuth App：在 OAuth Apps 中登记 Bot 入口和登�
 打开安装页，选择你的账号或组织，勾选这个仓库：
 
 ```
-https://github.com/apps/agent-ci-infra-bot/installations/new
+https://github.com/apps/agent-ci-infra-bot/installations/select_target
 ```
 
 > 这一步只能你本人做：GitHub 要求仓库所有者确认授权，别人代替不了。
