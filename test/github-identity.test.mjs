@@ -610,15 +610,19 @@ test('a login that overlaps an in-flight permission check still renews derived g
   let release, blocked = 0;
   const held = new Promise(resolve => { release = resolve; });
   state.apiGate = async path => { if (path === '/user' && blocked++ === 0) await held; };
-  const inflight = f.identity.reverify(p);
+  // Start refresh() itself (not reverify(), whose own /user probe runs before refresh()), so the
+  // blocked /user call below belongs to a permission check that is registered as in flight.
+  const inflight = f.identity.refresh(p);
   const started = Date.now();
   while (!blocked) {
     if (Date.now() - started > 5000) throw new Error('permission check did not reach GitHub');
     await new Promise(r => setTimeout(r, 10));
   }
-  // The in-flight check captured the previous revision. Login (and its invalidate) must still renew.
+  // The in-flight check captured the previous revision. A login that arrives now must not just join it:
+  // bump the revision while the check is still blocked, so that check ends without renewing grants.
   const loginDone = f.login();
   await new Promise(r => setTimeout(r, 200));
+  invalidate(h.store, p, 'manual_change');
   release();
   await loginDone;
   await inflight;

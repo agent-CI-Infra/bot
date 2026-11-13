@@ -110,9 +110,9 @@ export class GitHubIdentity implements InstallationIdentity {
     })().finally(() => this.tokens.delete(identity.id)); this.tokens.set(identity.id, promise); return promise;
   }
   refresh(principal: string): Promise<void> {
-    // Login invalidates the principal before it refreshes. Joining an in-flight check that started
-    // against the previous revision would finish without renewing grants, and the login would still
-    // look successful — the derived authorization then expires on its previous 5-minute deadline.
+    // A check that is already in flight may have started against an older revision (for example one that
+    // changed while it waited on GitHub). Joining it would finish without renewing grants and the login would
+    // still look successful, so wait for it, then run checks of our own until one commits.
     const previous = this.refreshing.get(principal);
     const promise = (async () => {
       if (previous) await previous.catch(() => {});
