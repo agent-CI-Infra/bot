@@ -33,7 +33,7 @@ export function serviceFailure(code:string,role:string):string {
   if(code==='service_role_model_not_configured')return `群助手「${role}」尚未配置模型，请超级管理员在控制台「全局设置 → 服务角色」中为它选择共享模型。`;
   if(code==='service_role_budget_exhausted')return `群助手「${role}」的用量预算已用完，请超级管理员在「全局设置 → 服务角色」中检查预算。`;
   if(code==='service_role_budget_usage_unknown')return `群助手「${role}」有无法计价的用量，预算无法核对，已暂停调用；请超级管理员在「全局设置 → 服务角色」中检查模型价格和预算。`;
-  if(code==='service_role_unavailable'||code==='service_role_not_bindable')return `群助手「${role}」已停用或不能用于群聊，请维护人在控制台「设置 → 群助手设置」为本群重新选择服务角色。`;
+  if(code==='service_role_unavailable'||code==='service_role_not_bindable')return `群助手「${role}」已停用或不能用于群聊，请维护人在控制台「个人设置 → 飞书绑定」点击本群「配置仓库与权限」重新选择服务角色。`;
   if(modelFault.test(code))return `群助手「${role}」的模型服务暂不可用，请稍后重试；持续失败时请超级管理员检查模型设置。`;
   if(outputFault.test(code))return `群助手「${role}」的模型返回了无法处理的结果，本次未完成；请重试，持续出现时请维护人在控制台查看本群助手的会话记录。`;
   if(contextFault.test(code))return `本次问题需要的上下文超过群助手「${role}」的模型请求上限，请缩小范围（例如指定仓库）后重试。`;

@@ -21,12 +21,10 @@ function personalSettingsNav() {
   const activeKey = tab === 'external' ? 'external'
     : tab === 'conversations' || hash === '#/identity/feishu/conversations' ? 'conversations'
     : /^#\/identity\/feishu-apps(?:\/|$)/.test(hash) ? 'feishu-apps'
-    : hash === '#/identity/feishu/groups' ? 'groups'
-    : /^#\/identity\/feishu(?:$|\?)/.test(hash) ? 'feishu' : 'identity';
+    : /^#\/identity\/feishu(?:$|\?|\/)/.test(hash) ? 'feishu' : 'identity';
   const items = [
     ['identity', '#/identity', '身份与权限'],
-    ['feishu', '#/identity/feishu', '个人飞书绑定'],
-    ['groups', '#/identity/feishu/groups', '群助手设置'],
+    ['feishu', '#/identity/feishu', '飞书绑定'],
     ...(personalCanManageApps || activeKey === 'feishu-apps' ? [['feishu-apps', '#/identity/feishu-apps', '组织飞书应用']] : []),
     ['conversations', '#/conversations', '飞书会话'],
     ['external', '#/external', '外部执行端']
@@ -47,8 +45,14 @@ async function channelBindingOverview(data) {
   metric('已绑定身份', String(active.length), '当前账户 ' + me.username);
   const privateCount = metric('本人私聊', '—', '正在读取'), groupCount = metric('维护的群', '—', '正在读取');
   overview.append(metrics);
-  const links = element('div', '', 'actions'); links.append(channelLink('#/identity/feishu', '管理身份绑定', 'button-link quiet'),
-    channelLink('#/identity/feishu/groups', '管理群助手', 'button-link quiet'), channelLink('#/conversations', '查看飞书会话', 'button-link quiet')); overview.append(links);
+  const links = element('div', '', 'actions');
+  links.append(
+    channelLink('#/identity/feishu', '管理飞书绑定', 'button-link quiet'),
+    channelLink('#/identity/feishu?create=personal', '创建个人绑定', 'button-link quiet'),
+    channelLink('#/identity/feishu?create=group', '创建群绑定', 'button-link quiet'),
+    channelLink('#/conversations', '查看飞书会话', 'button-link quiet')
+  );
+  overview.append(links);
   const summary = element('div', '', 'feishu-bound-summary'); overview.append(summary);
   const show = (node, value, hint) => { node.querySelector('strong').textContent = String(value); node.querySelector('small').textContent = hint; };
   void Promise.all([
@@ -66,20 +70,25 @@ async function channelBindingOverview(data) {
         for (const chat of chats) row.append(channelLink('#/conversations/' + chat.id, '打开私聊会话', 'button-link quiet'));
         summary.append(row);
       }
-    }).catch(err => show(privateCount, '未知', '读取失败，可刷新重试')),
+    }).catch(() => show(privateCount, '未知', '读取失败，可刷新重试')),
     api('/api/channels/service-bindings').then(result => {
       const groups = result.bindings.filter(b => b.can_manage), activeGroups = groups.filter(b => b.enabled);
       show(groupCount, activeGroups.length, `另有 ${groups.length - activeGroups.length} 个已停用；按管理权限统计`);
       if (groups.length) {
         const list = element('details', '', 'fold'); list.append(element('summary', '查看维护的群与绑定范围'));
         for (const b of groups) {
-          const row = element('div', '', 'feishu-summary-row'), name = element('strong', channelChatName(b.chat)); row.append(name,
+          const row = element('div', '', 'feishu-summary-row'), name = element('strong', channelChatName(b.chat)), rowActions = element('div', '', 'actions');
+          if (b.can_view !== false) rowActions.append(channelLink('#/conversations/' + b.chat_id, '查看聊天记录', 'button-link quiet'));
+          rowActions.append(channelLink('#/identity/feishu?group=' + b.chat_id, '配置仓库与权限', 'button-link quiet'));
+          row.append(name,
             channelProfileDetails(b.chat, () => { name.textContent = channelChatName(b.chat); }),
             note(`${bindingStates[b.state] || b.state} · ${b.service_role.name || '服务角色已删除'} · ${b.scope.organization?.name || b.scope.repositories.map(r => r.full_name).join('、')}`),
-            channelLink('#/conversations/' + b.chat_id, '查看群会话', 'button-link quiet')); list.append(row);
-        } summary.append(list);
+            rowActions);
+          list.append(row);
+        }
+        summary.append(list);
       }
-    }).catch(err => show(groupCount, '未知', '读取失败，可刷新重试'))
+    }).catch(() => show(groupCount, '未知', '读取失败，可刷新重试'))
   ]);
   return overview;
 }
@@ -92,7 +101,9 @@ async function renderChannelConsole(request) {
   const page = $('console-page'), owner = me, address = location.hash, root = element('div', '', 'channel-console');
   const alive = () => renderVersion === request && me === owner && location.hash === address && root.isConnected && root.contains(thread);
   const selected = /^#\/conversations\/([a-f0-9]{48})$/.exec(address)?.[1];
-  const head = element('div', '', 'console-page-head'); head.append(element('p', '消息与执行', 'eyebrow'), element('h1', '飞书会话'), note('在同一处查看成员消息、助手执行过程和派生任务。'));
+  const head = element('div', '', 'console-page-head'), headTop = element('div', '', 'feishu-section-head');
+  headTop.append(element('h1', '飞书会话'), channelLink('#/identity/feishu', '返回飞书绑定', 'button-link quiet'));
+  head.append(element('p', '消息与执行', 'eyebrow'), headTop, note('在同一处查看成员消息、助手执行过程和派生任务。'));
   const layout = element('div', '', 'channel-console-layout'), sidebar = element('aside', '', 'channel-chat-list'), thread = element('section', '', 'channel-thread'), related = element('aside', '', 'channel-related');
   sidebar.setAttribute('aria-label', '可查看的飞书会话'); thread.setAttribute('aria-label', '当前飞书会话'); related.setAttribute('aria-label', '会话派生任务');
   layout.append(sidebar, thread, related); root.append(head, layout); page.replaceChildren(root);
@@ -132,19 +143,29 @@ async function renderChannelConsole(request) {
     } catch (err) { failRead(chatList, err, () => readList(more)); } finally { listMore.disabled = false; }
   }
   if (!selected) {
-    thread.append(consoleState('选择一个飞书会话', '左侧列出你有权查看的群聊和私聊。'));
+    thread.append(consoleState('选择一个飞书会话', '左侧列出你有权查看的群聊和私聊，也可从「飞书绑定」点击任意绑定直接进入。'));
     related.append(consoleState('执行与任务', '选择会话后，可查看助手步骤、独立任务与交给项目团队的任务。'));
     await readList(); return;
   }
   const toolbar = element('div', '', 'channel-thread-head'), caption = element('div'), actions = element('div', '', 'actions'), status = note('正在读取会话…'); status.setAttribute('role', 'status');
-  const conversationTitle = element('h2', '会话记录'); caption.append(conversationTitle, status);
+  const conversationTitle = element('h2', '会话记录'), bindingMeta = note(''); bindingMeta.hidden = true;
+  caption.append(conversationTitle, status, bindingMeta);
+  const contextActions = element('span', '', 'feishu-inline-actions');
   const auto = checkbox('conversation_auto_refresh', false, '自动刷新（5 秒）'), refresh = button('刷新会话', () => update());
-  actions.append(refresh, auto); toolbar.append(caption, actions);
+  actions.append(contextActions, refresh, auto); toolbar.append(caption, actions);
   const history = element('div', '', 'channel-messages'); history.setAttribute('aria-label', '消息与执行时间线'); history.setAttribute('tabindex', '0');
   const older = element('div', '', 'actions channel-history-actions'), moreMessages = button('更早消息', () => update('messages'), 'quiet'), moreTurns = button('更早执行回合', () => update('turns'), 'quiet');
   moreMessages.hidden = moreTurns.hidden = true; older.append(moreMessages, moreTurns);
   const diagnostics = element('details', '', 'fold channel-sync-details'), diagnosticText = note(''); diagnostics.append(element('summary', '同步与用量说明'), diagnosticText);
-  thread.append(toolbar, older, history, diagnostics, note('请在飞书中继续对话。生成内容与实际送达分别记录；展开记录时自动刷新暂停，手动刷新仍可使用。'));
+  const localSearch = element('details', '', 'fold channel-local-search'), searchBody = element('div');
+  localSearch.append(element('summary', '搜索本地消息记录'), searchBody);
+  localSearch.addEventListener('toggle', () => {
+    if (localSearch.open && !localSearch.dataset.loaded) {
+      localSearch.dataset.loaded = '1';
+      void channelEmployeeHistory({ chat_id: selected }, searchBody).catch(error);
+    }
+  });
+  thread.append(toolbar, older, history, diagnostics, localSearch, note('请在飞书中继续对话。生成内容与实际送达分别记录；展开记录时自动刷新暂停，手动刷新仍可使用。'));
   let messages = new Map(), turns = new Map(), tasks = new Map(), refreshTimer, conversationMode;
   const time = value => typeof value === 'number' ? value : Date.parse(value);
   function drawTimeline() {
@@ -191,7 +212,9 @@ async function renderChannelConsole(request) {
           if (conversationMode === 'management') row.append(element('p', value.reply, 'channel-message-body'));
           else { const answer = element('details'); answer.append(element('summary', '本轮生成的回答'), element('p', value.reply, 'channel-message-body')); row.append(answer); }
           row.append(note(value.delivery?.state === 'sent' ? '本轮回答已发送至飞书。' : value.delivery?.state === 'unknown' ? '飞书发送结果未知，请先核对。' : value.delivery?.state === 'failed' ? '发送失败；执行结果不代表已经送达。' : '已生成回答，尚未核验飞书送达结果。'));
-        }
+        } else if (value.state === 'running') row.append(note('正在回答…'));
+        else if (value.state === 'stopped') row.append(note('已在控制台停止，不再发送最终回答；已发出的进展消息保留。'));
+        else if (value.silent) row.append(note('本轮保持安静，未发送回答' + (value.silent_reason ? '：' + value.silent_reason : '。')));
         else if (value.state === 'completed') row.append(note('本轮没有生成可展示的回答。'));
         if (value.error) row.append(note(employeeError(value.error)));
         history.append(row);
@@ -227,7 +250,7 @@ async function renderChannelConsole(request) {
     for (const task of result.own_tasks) { const row = element('article', '', 'channel-related-task'); row.append(element('strong', task.title), state(task.state));
       if (task.last_conclusion) { const detail = element('details'); detail.append(element('summary', '查看最近结论'), element('p', task.last_conclusion, 'channel-message-body')); row.append(detail); } own.append(row); }
     if (!result.own_tasks.length) own.append(note('当前会话暂无可见独立任务。'));
-    related.append(projectTasks, own, consoleLink('#/identity/feishu/groups', '群助手设置', '管理角色、项目范围与负责人'));
+    related.append(projectTasks, own, consoleLink(conversationMode === 'service' ? '#/identity/feishu?group=' + selected : '#/identity/feishu', '飞书绑定', '管理个人绑定、群仓库范围与角色权限'));
   }
   async function update(more) {
     if (pending || !alive()) return; pending = true; refresh.disabled = moreMessages.disabled = moreTurns.disabled = true; clearTimeout(refreshTimer);
@@ -243,6 +266,19 @@ async function renderChannelConsole(request) {
       conversationMode = result.conversation.mode; sampledAt = result.read_at; moreMessages.hidden = !messageCursor; moreTurns.hidden = turnOffset === null;
       conversationTitle.textContent = channelChatName(allChats.find(c => c.id === selected && c.display_name) || result.chat);
       status.textContent = `${result.chat.type === 'p2p' ? '私聊' : '群聊'} · ${channelChatContext(result.chat)} · 读取于 ${channelTime(sampledAt)}`;
+      contextActions.replaceChildren();
+      if (result.conversation.mode === 'service' && result.conversation.binding) {
+        const b = result.conversation.binding;
+        const scopeText = b.scope.organization ? '整个组织 ' + b.scope.organization.name : b.scope.repositories.map(r => r.full_name).join('、');
+        bindingMeta.textContent = `当前群绑定：${b.service_role.name || '服务角色已删除'} · 范围：${scopeText}`;
+        bindingMeta.hidden = false;
+        if (result.conversation.can_manage) contextActions.append(channelLink('#/identity/feishu?group=' + selected, '配置仓库与权限', 'button-link quiet'));
+      } else {
+        bindingMeta.hidden = true;
+        if (result.conversation.mode === 'management' && result.conversation.can_continue) {
+          contextActions.append(channelLink('#/management', '打开管理对话与执行记录', 'button-link quiet'));
+        }
+      }
       diagnosticText.textContent = `本地同步：${channelSyncText(result.sync_state)}。缺口：${result.gaps.map(g => channelGapText(g.reason)).join('、') || '本次未报告'}。可见范围受飞书权限与保留策略约束。模型请求 ${result.conversation.usage.requests || 0} 次；未知费用不按零处理。`;
       drawTimeline(); await readTasks();
     } catch (err) {

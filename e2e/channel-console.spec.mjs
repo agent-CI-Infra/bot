@@ -74,12 +74,16 @@ for (const width of [1440, 390]) test(`Feishu console shows real messages, steps
     await page.goto(f.h.admin + '/#/identity/feishu');
     const overview = page.getByRole('region', { name: '飞书绑定概览' });
     await expect(overview.locator('.feishu-metric')).toContainText(['已绑定身份1', '本人私聊1', '维护的群1']);
-    await expect(overview).toContainText('私聊已建立 1 个');
-    await overview.getByText('查看维护的群与绑定范围', { exact: true }).click(); await expect(overview).toContainText('项目讨论群');
+    await expect(page.getByLabel('个人飞书绑定列表')).toContainText('私聊会话已建立');
+    await expect(page.getByLabel('飞书群绑定列表')).toContainText('项目讨论群');
+    await expect(page.getByLabel('飞书群绑定列表').getByRole('button', { name: '配置仓库与权限', exact: true })).toBeVisible();
     await page.evaluate(() => { document.activeElement?.blur(); scrollTo(0, 0); });
     await page.screenshot({ path: `.tmp/channel-console/bindings-${width}.png`, fullPage: true });
     await page.goto(f.h.admin + '/#/preferences'); await expect(page.getByRole('heading', { name: '身份与权限', exact: true })).toBeVisible();
     await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('身份与权限');
+    const identityOverview = page.getByRole('region', { name: '飞书绑定概览' });
+    await identityOverview.getByText('查看维护的群与绑定范围', { exact: true }).click();
+    await expect(identityOverview).toContainText('项目讨论群');
     await page.screenshot({ path: `.tmp/channel-console/settings-${width}.png`, fullPage: true });
     expect(errors).toEqual([]);
   } finally { await f.close(); }
@@ -219,15 +223,24 @@ test('binding overview pairs private chats with their exact Feishu identity and 
     await login(page, f, '#/identity/feishu');
     const overview = page.getByRole('region', { name: '飞书绑定概览' });
     await expect(overview.locator('.feishu-metric')).toContainText(['已绑定身份2', '本人私聊2']);
-    const identities = overview.locator('.feishu-bound-summary > .feishu-summary-row');
+    const listRows = page.getByLabel('个人飞书绑定列表').getByRole('article', { name: '我的飞书账号' });
+    await expect(listRows).toHaveCount(2);
+    for (const row of await listRows.all()) await expect(row.getByRole('link', { name: '查看聊天记录', exact: true })).toHaveCount(1);
+    expect(new Set(await listRows.getByRole('link', { name: '查看聊天记录', exact: true }).evaluateAll(nodes => nodes.map(node => node.getAttribute('href'))))).toEqual(new Set(['#/conversations/' + first.id, '#/conversations/' + second.id]));
+    await page.goto(f.h.admin + '/#/identity');
+    const identityOverview = page.getByRole('region', { name: '飞书绑定概览' });
+    const identities = identityOverview.locator('.feishu-bound-summary > .feishu-summary-row');
     await expect(identities).toHaveCount(2);
     for (const row of await identities.all()) await expect(row.getByRole('link', { name: '打开私聊会话', exact: true })).toHaveCount(1);
     expect(new Set(await identities.locator('a').evaluateAll(nodes => nodes.map(node => node.getAttribute('href'))))).toEqual(new Set(['#/conversations/' + first.id, '#/conversations/' + second.id]));
     f.h.store.run("UPDATE external_identities SET status='revoked' WHERE principal_id=? AND provider='feishu' AND external_actor='ou_second'", f.principal);
     await page.reload();
+    await expect(identityOverview.locator('.feishu-metric')).toContainText(['已绑定身份1', '本人私聊1']);
+    await expect(identityOverview).toContainText('另有 1 个历史会话');
+    await expect(identityOverview.getByRole('link', { name: '打开私聊会话', exact: true })).toHaveAttribute('href', '#/conversations/' + first.id);
+    await page.goto(f.h.admin + '/#/identity/feishu');
     await expect(overview.locator('.feishu-metric')).toContainText(['已绑定身份1', '本人私聊1']);
     await expect(overview).toContainText('另有 1 个历史会话');
-    await expect(overview.getByRole('link', { name: '打开私聊会话', exact: true })).toHaveAttribute('href', '#/conversations/' + first.id);
   } finally { await f.close(); }
 });
 
@@ -253,9 +266,10 @@ for (const width of [1440, 390]) test(`Feishu names identify private chats and g
     mkdirSync('.tmp/channel-console', { recursive: true });
     await page.screenshot({ path: `.tmp/channel-console/names-${width}.png`, fullPage: true });
     await page.goto(f.h.admin + '/#/identity/feishu/groups');
-    await expect(page.getByLabel('助手所在群')).toContainText('基础设施讨论群 · 示例企业 · 研发助手');
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
     await expect(binding).toContainText('基础设施讨论群'); await expect(binding).toContainText('所属企业：示例企业');
+    await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
+    await expect(page.getByLabel('助手所在群')).toContainText('基础设施讨论群 · 示例企业 · 研发助手');
     f.wire.state.chatName = '<img src=x onerror=alert(1)> 更名群';
     await binding.getByRole('button', { name: '刷新群名称', exact: true }).click();
     await expect(binding).toContainText(f.wire.state.chatName); await expect(binding.locator('img')).toHaveCount(0);
@@ -263,8 +277,9 @@ for (const width of [1440, 390]) test(`Feishu names identify private chats and g
     await binding.getByRole('button', { name: '刷新群名称', exact: true }).click();
     await expect(binding).toContainText('保留上次读取的名称'); await expect(binding).toContainText(f.wire.state.chatName);
     await page.goto(f.h.admin + '/#/identity/feishu/conversations');
-    await expect(page.getByText('私信 · 张小明', { exact: true })).toBeVisible();
-    await expect(page.getByRole('article').filter({ hasText: '私信 · 张小明' })).toContainText('所属企业：示例企业');
+    const conversations = page.getByLabel('可查看的飞书会话');
+    await expect(conversations.getByRole('link', { name: /私聊 · 张小明/ })).toBeVisible();
+    await expect(conversations.locator('article').filter({ hasText: '私聊 · 张小明' })).toContainText('示例企业');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(errors).toEqual([]);
   } finally { await f.close(); }

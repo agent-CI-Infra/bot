@@ -180,7 +180,10 @@ test('a group binding has an owner: other repository admins in the group cannot 
   assert.deepEqual(state(), { owner_id: 'owner', configured_by: 'owner', revision: 1, participation: 'mentions', enabled: 1 });
   const spoken = groupMessage('Just chatting', 'ou_intruder'); spoken.event.message.mentions = []; await post(h, f.id, spoken);
   const intruderView = (await bindings.list(intruder)).bindings.find(b => b.chat_id === chat.id);
-  assert.deepEqual([intruderView.can_manage, intruderView.can_transfer, intruderView.owner_candidates], [false, false, undefined]);
+  assert.deepEqual([intruderView.can_manage, intruderView.can_view, intruderView.can_transfer, intruderView.owner_candidates], [false, false, false, undefined]);
+  const peerSpoken = groupMessage('Checking repo 101', 'ou_peer'); peerSpoken.event.message.mentions = []; await post(h, f.id, peerSpoken);
+  const peerView = (await bindings.list(peer)).bindings.find(b => b.chat_id === chat.id);
+  assert.deepEqual([peerView.can_manage, peerView.can_view, peerView.can_transfer], [false, true, false]);
   // The owner edits from inside the group, never beyond their own repositories.
   await assert.rejects(bindings.configure(owner, chat.id, input(1, ['101', '102'])), { code: 'capability_forbidden' });
   assert.equal((await bindings.configure(owner, chat.id, input(1, ['101'], { participation: 'questions' }))).participation, 'questions');
@@ -361,7 +364,7 @@ test('a disabled binding stops answering and history import; a bound service rol
   await f.setRole({ enabled: false }, custom.id);
   const paused = await post(h, f.id, groupMessage('还在吗？'));
   assert.equal((await done(f, paused)).state, 'failed');
-  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('可信 committer 助手」已停用')));
+  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('可信 committer 助手」已停用') && JSON.stringify(s.content).includes('个人设置 → 飞书绑定')));
   await f.setRole({ enabled: true }, custom.id);
   const disabled = await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { enabled: false, expected_revision: 1 });
   assert.equal(disabled.value.state, 'disabled');
@@ -370,7 +373,7 @@ test('a disabled binding stops answering and history import; a bound service rol
   assert.throws(() => f.service.syncGuard(h.store.get('SELECT * FROM channel_chats WHERE id=?', chat.id)), { code: 'channel_service_binding_disabled' });
   const before = f.requests.length, unbound = await post(h, f.id, groupMessage('你好'));
   assert.equal((await done(f, unbound)).state, 'completed'); assert.equal(f.requests.length, before);
-  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('本群尚未绑定群聊助手')));
+  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('本群尚未绑定群聊助手') && JSON.stringify(s.content).includes('个人设置 → 飞书绑定')));
   const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === custom.id);
   assert.equal((await f.admin('/api/service-roles/' + custom.id, 'DELETE', { expected_revision: role.revision })).status, 200);
   assert.equal((await f.admin('/api/channels/service-bindings')).value.bindings[0].service_role.name, null);

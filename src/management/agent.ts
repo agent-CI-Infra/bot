@@ -17,6 +17,7 @@ import { githubWrite, scopedGithubWriteTool } from '../github/write.js';
 import { OwnTasks, ownTaskNames, ownTaskTools, type OwnTaskHost } from '../service-roles/own-tasks.js';
 import { mediaTools, type MediaComputer, type MediaTurn } from '../channels/media.js';
 import { sendMessageName, sendMessageTool, stageMessage, stageMessageInstructions, stageMessageLimit } from '../service-roles/stage-messages.js';
+import { staySilent, staySilentInstructions, staySilentName, staySilentTool } from '../service-roles/stay-silent.js';
 import { privateTurnMessageInstructions, type TurnMessages } from '../channels/turn-messages.js';
 
 const now=()=>new Date().toISOString();
@@ -100,7 +101,8 @@ export class ManagementAgent {
     let omitted=0;while(history.length>1&&Buffer.byteLength(JSON.stringify(history))>historyBytes){history.shift();omitted++;}
     return {scope:row.scope,request,history,...(omitted?{earlier_rounds_omitted:omitted}:{})};
   }
-  send(base:ActorContext,conversationId:string,input:Json):Json{
+  /** `timer` marks a message sent by one of the user's chat timers (#330): only such a turn may end silently (#489). */
+  send(base:ActorContext,conversationId:string,input:Json,options:{timer?:boolean}={}):Json{
     validate(obj({source_message:{...str,maxLength:240},content:{...str,maxLength:16000},query:managementTools[0]!.function.parameters,command:managementTools[1]!.function.parameters},['source_message']),input);
     if([input.content,input.query,input.command].filter(v=>v!==undefined).length!==1)fail(400,'one_management_input_required');
     if(JSON.stringify(traceClean(input))!==JSON.stringify(input))fail(400,'sensitive_management_input');
@@ -111,7 +113,7 @@ export class ManagementAgent {
     this.store.run('INSERT INTO management_messages VALUES(?,?,?,?,?,?,?,?)',id,conversationId,String(input.source_message),JSON.stringify(input),'pending',actor.authorization_revision,time,time);
     const controller=new AbortController();
     // A process/database shutdown may prevent the terminal event from committing; restart marks that row interrupted.
-    const work=Promise.resolve().then(()=>this.run(base,actor,id,conversationId,input,controller.signal)).catch(()=>{}).finally(()=>this.active.delete(id));
+    const work=Promise.resolve().then(()=>this.run(base,actor,id,conversationId,input,controller.signal,!!options.timer)).catch(()=>{}).finally(()=>this.active.delete(id));
     this.active.set(id,{controller,work});
     return {id,state:'pending'};
   }
@@ -123,7 +125,7 @@ export class ManagementAgent {
       this.active.get(message)?.controller.abort();this.event(message,'stopped',{notice:'已停止后续调用；已提交的命令保留回执，不撤销或重复执行。'});
     }return {id:message,state:this.store.get('SELECT state FROM management_messages WHERE id=?',message)!.state};
   }
-  private async run(base:ActorContext,actor:ActorContext,id:string,conversation:string,input:Json,signal:AbortSignal):Promise<void>{
+  private async run(base:ActorContext,actor:ActorContext,id:string,conversation:string,input:Json,signal:AbortSignal,timer=false):Promise<void>{
     const incoming=this.incomingMessages?.(actor,conversation,input,id);
     const guard=async()=>{
       assertCurrent(base);assertCurrent(actor);
@@ -154,6 +156,8 @@ export class ManagementAgent {
         allowed:(resource,operation)=>githubWriteAllowed(permissions(),resource,operation)},rest)};
     };
     const tools=[...managementTools,...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!['import_message_resource','attach_workspace_file'].includes(t.function.name)):[]),sendMessageTool];
+    // Only a timer's turn may end silently, and only through stay_silent (#489); own tasks never get the tool.
+    const turnTools=timer?[...tools,staySilentTool]:tools;let silence:string|undefined;
     let ownHost:OwnTaskHost|undefined;
     const redactor=new Redactor();
     // A progress message (#435) is its own event, not an execution step: queued to the source transport and recorded together.
@@ -214,12 +218,13 @@ export class ManagementAgent {
           +stageMessageInstructions
           +(this.service.assistants?.available()?computerInstructions('belongs to the current user alone: their Feishu private chat and console conversations share it'):'')
           +(incoming?privateTurnMessageInstructions:'')
+          +(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
           +(role?.prompt?'\n\nAdditional instructions from the platform administrator (they never widen your tools or permissions):\n'+role.prompt:'');
         const context=this.context(base,conversation,id,input.content);
         await runAgent({store:this.store,task:{id,repository_id:null,service_role_id:managementAssistant,kind:'management.agent',conversation_id:conversation,source_message:input.source_message},redactor,guard,
           beforeModel:async()=>checkServiceRoleBudget(this.store,managementAssistant,model.pricing),model,executionSignal:signal,modelAttempts:1,
           system,
-          prompt:JSON.stringify(context),tools,
+          prompt:JSON.stringify(context),tools:turnTools,
           adapter:async({request})=>{
             ownHost={owner:{service_role_id:managementAssistant,kind:'management',owner_id:conversation,principal_id:actor.principal_id,fence:String(actor.authorization_revision)},
               system,tools:()=>tools,request:async(body,label)=>{media?.addImages(body.messages as any[]);return request(body,label).catch(error=>{if(media)media.modelError(error,body.messages as any[]);throw error;});},execute,check:guard,redact:value=>redactor.text(value),clean:value=>value};
@@ -233,7 +238,7 @@ export class ManagementAgent {
             for(let turn=0;;turn++){
               await guard();this.event(id,'model_start',{turn});
               media?.addImages(messages);
-              const body={messages,tools,tool_choice:'auto'};transcript.fit(body);
+              const body={messages,tools:turnTools,tool_choice:'auto'};transcript.fit(body);
               const added=incoming?.take(Math.max(0,Math.min(chatContextBytes,requestLimit-requestBytes(body)-128)));
               if(added){messages.push({role:'user',content:JSON.stringify(added.content)});mustReply||=added.direct;}
               transcript.fit(body);
@@ -258,8 +263,13 @@ export class ManagementAgent {
                 // An unknown tool or malformed arguments are the model's to correct, so they return as observations; a refusal,
                 // conflict or failed command still ends the turn with its code, as the user's authoritative answer.
                 const args=toolArguments(call);let result:any;
-                if(!tools.some(t=>t.function.name===call.function.name))result={error:'tool_not_allowed'};
+                if(!turnTools.some(t=>t.function.name===call.function.name))result={error:'tool_not_allowed'};
                 else if(args===null||typeof args!=='object'||Array.isArray(args))result={error:'invalid_arguments',detail:'Tool arguments must be a JSON object.'};
+                else if(call.function.name===staySilentName){
+                  await guard();const callId=randomId();this.event(id,'tool_call',{name:staySilentName,call_id:callId,arguments:args});
+                  result=staySilent(args,mustReply);if(!result.error)silence=String(result.reason);
+                  this.event(id,result.error?'tool_error':'tool_result',{name:staySilentName,call_id:callId,...result.error?result:{result}});
+                }
                 else try{result=await execute(call.function.name,args,call.id);}catch(error){
                   if(!(error instanceof HttpError&&error.status===400))throw error;
                   await guard();result={error:error.code};
@@ -267,10 +277,16 @@ export class ManagementAgent {
                 results.push(result);
               }
               boundedBatch(results).forEach((result,i)=>messages.push({role:'tool',tool_call_id:calls[i].id,content:JSON.stringify(result)}));
+              // stay_silent ends the turn after its batch with an empty, explicitly silent reply: text written with it and
+              // selected attachments are dropped, and the timer sends nothing.
+              if(silence!==undefined){
+                await guard();incoming?.finish();
+                this.event(id,'reply',{text:'',silent:true,...silence?{reason:redactor.text(silence)}:{},authority:'advisory; see tool receipts'});return;
+              }
             }
           }});
       }
-      await guard();if(media?.attachments.length)this.event(id,'attachments',{resource_ids:media.attachments,fence:media.fence});
+      await guard();if(media?.attachments.length&&silence===undefined)this.event(id,'attachments',{resource_ids:media.attachments,fence:media.fence});
       this.store.run("UPDATE management_messages SET state='completed',updated_at=? WHERE id=?",now(),id);this.event(id,'done',{state:'completed'});
     }catch(error){
       const stopped=this.store.get('SELECT state FROM management_messages WHERE id=?',id)?.state==='stopped';

@@ -4,7 +4,7 @@ import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { transport, connector, bindFixture, inGroup, post } from '../test/channel-fixture.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 
-for (const width of [1440, 390]) test(`maintainer binds a group to the repository assistant over chosen repositories, adds a prompt timer, reads local history and disables it at ${width}px (protocol fixtures)`, async ({ page }) => {
+for (const width of [1440, 390]) test(`maintainer binds a group to the repository assistant over chosen repositories, edits permissions, adds a prompt timer, clicks to view chat history and disables it at ${width}px (protocol fixtures)`, async ({ page }) => {
   const wire = transport(), errors = [], h = await harness(undefined, undefined, store => ({
     engine: new TaskEngine(store, { call: async () => null }), channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false }
   }));
@@ -13,29 +13,38 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101'); await repository(admin, a.id, '102');
     const id = await connector(admin), principal = (await admin('/api/auth/me')).value.id;
     bindFixture(h, id, principal); const quiet = inGroup('', 'ou_alice'); quiet.event.message.mentions = []; quiet.event.message.content = JSON.stringify({ text: 'Original local group decision' }); await post(h, id, quiet);
-    await page.setViewportSize({ width, height: 900 }); await page.goto(h.admin + '/#/identity/feishu/groups');
+    await page.setViewportSize({ width, height: 900 }); await page.goto(h.admin + '/#/identity/feishu');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '飞书身份绑定', exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: '飞书群聊助手', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '创建个人绑定', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '创建群绑定', exact: true }).click();
     await expect(page.getByLabel('服务角色', { exact: true })).toHaveValue('repository-assistant');
+    await expect(page.locator('#feishu-group-editor')).toContainText('Issue：只读');
+    await expect(page.locator('#feishu-group-editor')).toContainText('Pull Request：只读');
     await expect(page.getByText(/群内所有成员都能看到助手读取的所选仓库内容/)).toBeVisible();
     await page.getByLabel('fixture/project-101', { exact: true }).check(); await page.getByLabel('fixture/project-102', { exact: true }).check();
     await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
     await expect(binding.getByText('生效中 · 仓库问答助手', { exact: true })).toBeVisible();
     await expect(binding.getByText('项目范围：fixture/project-101、fixture/project-102', { exact: true })).toBeVisible();
+    await expect(binding).toContainText('角色权限：');
     await expect(binding.getByText('负责人：administrator', { exact: true })).toBeVisible();
+    // Repository & role permissions remain one click away on an existing group binding row.
+    await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
+    await expect(page.locator('#feishu-group-editor')).toBeVisible();
+    await expect(page.getByLabel('fixture/project-101', { exact: true })).toBeChecked();
+    await expect(page.getByLabel('fixture/project-102', { exact: true })).toBeChecked();
+    await page.locator('#feishu-group-editor').getByRole('button', { name: '收起配置', exact: true }).click();
+    await expect(page.locator('#feishu-group-editor')).toBeHidden();
     const row = h.store.get('SELECT * FROM channel_service_bindings');
     expect(row.service_role_id).toBe('repository-assistant');
     expect(h.store.all('SELECT project_id FROM scoped_grants WHERE principal_id=? ORDER BY project_id', row.principal_id).map(g => g.project_id)).toEqual(['101', '102']);
     expect(h.store.get('SELECT kind FROM principals WHERE id=?', row.principal_id).kind).toBe('service');
-    await binding.getByRole('button', { name: '查询该群本地记录', exact: true }).click();
-    await expect(page.getByText('Original local group decision', { exact: true })).toBeVisible();
-    await page.getByLabel('查询关键词', { exact: true }).fill('absent-local-term');
-    await page.getByRole('button', { name: '搜索本地记录', exact: true }).click();
-    await expect(page.getByText('本地已同步范围没有匹配记录；这不代表飞书历史中从未存在。', { exact: true })).toBeVisible();
-    // The group's timers replace per-project destination registration (#330): a prompt for its own assistant.
+    // The group's timers open on demand inside the row (#330).
     await expect(binding.getByLabel('通知项目')).toHaveCount(0);
+    await binding.getByRole('button', { name: '定时任务', exact: true }).click();
     await binding.getByLabel('定时任务名称', { exact: true }).fill('工作日巡检');
     await binding.getByLabel('任务提示词', { exact: true }).fill('检查本群绑定仓库今天新开的 bug 类 Issue 和仍未合入的 PR，整理成简报。');
     await binding.getByLabel('Cron 表达式（分 时 日 月 周）', { exact: true }).fill('0 18 * * 1-5');
@@ -51,8 +60,20 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await timer.getByRole('button', { name: '暂停', exact: true }).click();
     await expect(page.getByRole('article', { name: '定时任务 工作日巡检' }).getByText('已暂停 · 工作日巡检', { exact: true })).toBeVisible();
     expect(h.store.get('SELECT reason FROM channel_schedules').reason).toBe('user_paused');
+    // Clicking the group binding row opens its chat history directly, with local search and a return link.
+    await binding.locator('.feishu-row-title strong').click();
+    await expect(page).toHaveURL(new RegExp(`#/conversations/${row.chat_id}$`));
+    await expect(page.getByLabel('消息与执行时间线')).toContainText('Original local group decision');
+    await expect(page.getByText('当前群绑定：仓库问答助手 · 范围：fixture/project-101、fixture/project-102', { exact: true })).toBeVisible();
+    await page.getByText('搜索本地消息记录', { exact: true }).click();
+    await page.getByLabel('查询关键词', { exact: true }).fill('absent-local-term');
+    await page.getByRole('button', { name: '搜索本地记录', exact: true }).click();
+    await expect(page.getByText('本地已同步范围没有匹配记录；这不代表飞书历史中从未存在。', { exact: true })).toBeVisible();
+    await page.getByRole('link', { name: '返回飞书绑定', exact: true }).click();
+    await expect(page).toHaveURL(/#\/identity\/feishu$/);
     await page.getByRole('article', { name: '群聊助手绑定' }).getByRole('button', { name: '停用群聊助手', exact: true }).click();
     await expect(page.getByRole('article', { name: '群聊助手绑定' }).getByText('已停用 · 仓库问答助手', { exact: true })).toBeVisible();
+    await expect(page.getByRole('article', { name: '群聊助手绑定' }).getByRole('button', { name: '重新启用并配置', exact: true })).toBeVisible();
     expect(h.store.get('SELECT active FROM principals WHERE id=?', row.principal_id).active).toBe(0); expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

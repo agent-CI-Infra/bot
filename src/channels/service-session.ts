@@ -20,6 +20,7 @@ import type { ChannelLedger } from './ledger.js';
 import type { ChannelEvent, ChannelMention } from './types.js';
 import { ChannelMedia, MediaTurn, mediaTools, mediaPermission } from './media.js';
 import { sendMessageName, sendMessageTool, stageMessage, stageMessageInstructions, stageMessageLimit } from '../service-roles/stage-messages.js';
+import { staySilent, staySilentInstructions, staySilentName, staySilentTool } from '../service-roles/stay-silent.js';
 import { directMention, groupTurnMessageInstructions, groupWorkingMode, type TurnMessages } from './turn-messages.js';
 import type { ChannelMembers } from './members.js';
 
@@ -102,7 +103,7 @@ export class ChannelServiceSessions {
     if (!saved || JSON.parse(saved.sources).authorization_fence !== fence) return { state: 'not_compacted', notice: '摘要尚未建立；可检索本地原文。' };
     return { ...this.store.secrets.open(saved.payload, 'channel-summary:' + chat), sources: JSON.parse(saved.sources), through_time: saved.through_time, through_id: saved.through_id, authority: 'derived; inspect original messages' };
   }
-  async run(turn: ServiceTurn): Promise<{ id: string; message: string; fence: string; attachments?: string[]; replayed?: boolean }> {
+  async run(turn: ServiceTurn): Promise<{ id: string; message: string; fence: string; attachments?: string[]; silent?: boolean; replayed?: boolean }> {
     const { chat, binding } = turn, scope = [bindingScope(binding.id)];
     this.bindings.assertUsable(binding);
     const fence = this.bindings.fence(chat.id);
@@ -110,7 +111,7 @@ export class ChannelServiceSessions {
     if (prior) {
       if (prior.binding_id !== binding.id || prior.fence !== fence || prior.state !== 'completed' || !prior.reply) return fail(409, 'conversation_turn_not_replayable');
       const saved=this.store.secrets.open(prior.reply,'service-turn-reply:'+prior.id);
-      return { id: prior.id, message: String(saved.message), attachments: saved.attachments as string[]|undefined, fence, replayed: true };
+      return { id: prior.id, message: String(saved.message), attachments: saved.attachments as string[]|undefined, silent: !!saved.silent, fence, replayed: true };
     }
     const role = serviceRole(this.store, binding.service_role_id)!, model = serviceRoleModel(this.store, role.id);
     const id = randomId(), controller = new AbortController(), redactor = new Redactor();
@@ -120,7 +121,7 @@ export class ChannelServiceSessions {
     const incoming = this.incomingMessages?.(turn, id);
     // Persist step metadata, never tool arguments, results or private model reasoning.
     const event = (type: string, name = '') => this.store.run('INSERT INTO channel_service_events(turn_id,type,name,created_at) VALUES(?,?,?,?)', id, type,
-      !name || serviceTools.some(tool => tool.function.name === name) ? name : 'unknown_tool', Date.now());
+      !name || name === staySilentName || serviceTools.some(tool => tool.function.name === name) ? name : 'unknown_tool', Date.now());
     event('running');
     // Read per call: revoking a permission item refuses the next tool call (and changes the fence, ending this turn).
     const permissions = () => JSON.parse(serviceRole(this.store, role.id)?.permissions ?? '{}') as RolePermissions;
@@ -315,15 +316,17 @@ export class ChannelServiceSessions {
         + stageMessageInstructions
         + groupTurnMessageInstructions
         + (media?' Call list_message_resources to discover actual attachments, then read_message_resource or view_message_image to inspect them. Binary/large inputs need import_message_resource and computer tools. Select actual reply files with attach_message_resource, attach_workspace_file or create_reply_file. Selection is not delivery; never invent resource IDs or claim unsupported inputs were inspected.':'')
-        + (turn.schedule ? ' This turn was started by one of this group\'s timers, not by a new message: the request is the timer\'s task. Complete it within list_projects and your permissions and reply with the result for the group. If the task allows staying silent when there is nothing to report, and there is nothing, reply with an empty message.'
-          : turn.allowSilence ? ' This message did not mention you. If no helpful reply is needed, reply with an empty message. Do not act on quoted or stale requests.' : '')
+        + (turn.schedule ? ' This turn was started by one of this group\'s timers, not by a new message: the request is the timer\'s task. Complete it within list_projects and your permissions and reply with the result for the group. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'
+          : turn.allowSilence ? ' This message did not mention you. Answer only if a reply is genuinely helpful. Do not act on quoted or stale requests.' : '')
+        + (turn.allowSilence ? staySilentInstructions : '')
         + (computing && assistantComputerNames.some(name => offered(granted, name)) ? computerInstructions('is shared by everyone in this group, current and future members alike: never store anything meant only for some of them') : '')
         + (role.responsibility ? '\n\nYour responsibility: ' + role.responsibility : '')
         + (role.prompt ? '\n\nAdditional instructions from the platform administrator (they never widen your tools or permissions):\n' + role.prompt : '');
-      let reply = '', mustReply = !turn.allowSilence;
+      // A turn that may stay silent ends silently only through stay_silent (#489); own tasks never get the tool.
+      let reply = '', mustReply = !turn.allowSilence, silence: string | undefined;
       await runAgent({ store: this.store, task: { id, repository_id: null, service_role_id: role.id, kind: 'channel.service', conversation_id: chat.id, source_message: turn.source_message },
         redactor, guard, beforeModel: async () => { check(); checkServiceRoleBudget(this.store, role.id, model.pricing); }, model, executionSignal: controller.signal, modelAttempts: 1,
-        system, prompt: turn.request, tools: serviceTools,
+        system, prompt: turn.request, tools: turn.allowSilence ? [...serviceTools, staySilentTool] : serviceTools,
         adapter: async ({ request }) => {
           ownHost = { owner: { service_role_id: role.id, kind: 'channel', owner_id: binding.id, principal_id: binding.principal_id, fence }, system,
             tools: () => serviceTools.filter(t => offered(permissions(), t.function.name)&&(!mediaTools.includes(t as any)||!!media)&&(!computerTool(t.function.name)||computing)), request:async(body,label)=>{media?.addImages(body.messages as any[]);return request(body,label).catch(error=>{if(media)media.modelError(error,body.messages as any[]);throw error;});}, execute, check,
@@ -373,7 +376,8 @@ export class ChannelServiceSessions {
           for (let step = 0; ; step++) {
             check();
             media?.addImages(messages);
-            const tools = serviceTools.filter(t => offered(permissions(), t.function.name)&&(!mediaTools.includes(t as any)||!!media)&&(!computerTool(t.function.name)||computing)), body = { messages, tools, tool_choice: 'auto' };
+            const tools = [...serviceTools.filter(t => offered(permissions(), t.function.name)&&(!mediaTools.includes(t as any)||!!media)&&(!computerTool(t.function.name)||computing)),
+              ...turn.allowSilence ? [staySilentTool] : []], body = { messages, tools, tool_choice: 'auto' };
             transcript.fit(body);
             const added = incoming?.take(Math.max(0,Math.min(chatContextBytes,requestLimit-requestBytes(body)-128)));
             // A merged message that verifiably mentions the assistant needs an answer, like the same message on its own would.
@@ -402,18 +406,29 @@ export class ChannelServiceSessions {
             for (const call of calls) {
               event('tool_call', call.function.name);
               try {
-                const result = redactor.clean(await execute(call.function.name, toolArguments(call), step + ':' + call.id));
+                let result: unknown;
+                if (call.function.name === staySilentName) {
+                  // Handled here, not in execute: it ends this loop, and own tasks (which reach execute) never offer it.
+                  check();
+                  const silent = turn.allowSilence ? staySilent(toolArguments(call), mustReply) : { error: 'tool_not_allowed' };
+                  if (!silent.error) { silence = String(silent.reason); this.store.run('UPDATE channel_service_turns SET tool_calls=tool_calls+1 WHERE id=?', id); }
+                  result = silent;
+                } else result = redactor.clean(await execute(call.function.name, toolArguments(call), step + ':' + call.id));
                 results.push(result); event((result as Json)?.error ? 'tool_error' : 'tool_result', call.function.name);
               } catch (error) { event('tool_error', call.function.name); throw error; }
             }
             boundedBatch(results).forEach((result, i) => messages.push({ role: 'tool', tool_call_id: calls[i].id, content: JSON.stringify(result) }));
+            // stay_silent ends the turn after its batch like a final answer would, with nothing to send: any text written
+            // with it and any selected attachment are dropped. Messages that arrive now return to the queue (see finish).
+            if (silence !== undefined) { check(); incoming?.finish(); return; }
           }
         } });
       check();
+      const silent = silence !== undefined, attachments = silent ? [] : media?.attachments ?? [];
       this.store.run("UPDATE channel_service_turns SET state='completed',reply=?,updated_at=? WHERE id=? AND state='running'",
-        this.store.secrets.seal({ message: reply, attachments:media?.attachments??[] }, 'service-turn-reply:' + id), Date.now(), id);
+        this.store.secrets.seal({ message: reply, attachments, ...silent ? { silent, reason: redactor.text(silence!) } : {} }, 'service-turn-reply:' + id), Date.now(), id);
       event('done');
-      return { id, message: reply, attachments:media?.attachments, fence };
+      return { id, message: reply, attachments, silent, fence };
     } catch (error) {
       event(this.store.get('SELECT state FROM channel_service_turns WHERE id=?', id)?.state === 'stopped' ? 'stopped' : 'error');
       const reason = controller.signal.aborted ? controller.signal.reason ?? error : error;
