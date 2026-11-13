@@ -97,6 +97,9 @@ registerEventWork('actions.failures', {
       ...(writes.includes('issue') ? { report_failure: async (_id: string, args: any) => record([args?.job_id], String(args?.kind), args?.reason, args?.evidence) } : {})
     };
   },
+  checkResult(_store, _task, _input, result) {
+    if (typeof result?.summary !== 'string') stop('actions_classification_invalid', 'failed', 'Actions 失败分析没有用 finish_analysis 结束。');
+  },
   finish(_store, _task, _input, result, state) {
     if (typeof result?.summary !== 'string') return stop('actions_classification_invalid', 'failed', 'Actions 失败分析没有用 finish_analysis 结束。');
     return { summary: result.summary, verdicts: Object.values(state.verdicts || {}) };

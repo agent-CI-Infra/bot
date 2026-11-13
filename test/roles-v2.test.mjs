@@ -407,7 +407,7 @@ test('review under the controller keeps its task, executor, tools and completion
   const executor = controlled.runner.spaces.get('b'.repeat(48)).parsed;
   assert.ok(executor.tools.some(t => t.function.name === 'finish_review'));
   assert.deepEqual(executor.finish_tools, ['finish_review']);
-  assert.ok(executor.control_tools.includes('read_task_record') && !executor.control_tools.includes('finish_review'));
+  assert.ok(executor.control_tools.includes('read_task_record') && executor.control_tools.includes('finish_review'));
   const dev = f.s.get("SELECT * FROM task_runs WHERE task_id='rv' AND role='dev'"), devSnapshot = JSON.parse(f.s.get('SELECT snapshot FROM role_snapshots WHERE id=?', dev.role_snapshot).snapshot);
   assert.deepEqual([dev.harness, devSnapshot.harness.source], ['pi', 'role']);
   assert.equal(JSON.parse(f.s.get("SELECT data FROM task_history WHERE task_id='rv' AND type='controller_entry'").data).entry, 'review');
@@ -415,7 +415,7 @@ test('review under the controller keeps its task, executor, tools and completion
   f.put({ controller: { entries: { development: true, request: true, review: false, actions: false } } });
   const direct = await run();
   assert.equal(direct.result.summary, 'Short summary.');
-  assert.equal(direct.runner.spaces.get('b'.repeat(48)).parsed.control_tools, undefined);
+  assert.deepEqual(direct.runner.spaces.get('b'.repeat(48)).parsed.control_tools, ['finish_review']);
   assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE task_id='rv' AND role='manager'").n, 1);
 });
 

@@ -113,6 +113,15 @@ function boundSession(store: Store, task: Row, input: any): Row {
   return row;
 }
 
+// Submission checks are pure: the live tool call can be repaired without appending a reply or changing the plan.
+function submittedPlan(row: Row, result: any): GatePlan | null {
+  if (!result?.plan || typeof result.plan !== 'object') return null;
+  const facts: GateFacts = JSON.parse(String(row.facts)), current: GatePlan = JSON.parse(String(row.plan));
+  const plan = normalizePlan({ ...current, ...result.plan, toolchains: { ...current.toolchains, ...(result.plan.toolchains ?? {}) }, lanes: { ...current.lanes, ...(result.plan.lanes ?? {}) } });
+  if (plan.workflow && !targets(facts).some(item => item.path === plan.workflow)) throw new PlanError('gate_workflow_invalid', `workflow ${plan.workflow} 不在可选的位置里`);
+  return plan;
+}
+
 registerEventWork(workflowId, {
   async prepare(store, github, task, input, redactor) {
     const row = boundSession(store, task, input);
@@ -149,18 +158,16 @@ registerEventWork(workflowId, {
       context: { merge_queue: mergeQueue, work_name: '接入门禁', work_prompt: sectionText(store, task.repository_id, workflowId) } };
   },
   validate(store, task, input) { boundSession(store, task, input); },
+  checkResult(store, task, input, result) {
+    try { submittedPlan(boundSession(store, task, input), result); }
+    catch (error) { if (!(error instanceof PlanError)) throw error; stop('gate_agent_output_invalid', 'failed', error.detail); }
+  },
   finish(store, task, input, result) {
-    const row = boundSession(store, task, input), facts: GateFacts = JSON.parse(String(row.facts)), current: GatePlan = JSON.parse(String(row.plan));
+    const row = boundSession(store, task, input);
     const reply = scrub(typeof result?.reply === 'string' ? result.reply.trim() : '');
     let plan: GatePlan | null = null, problem = '';
-    if (result?.plan && typeof result.plan === 'object') {
-      // Lanes and toolchains the agent left out keep their current values; an empty list still empties a lane.
-      const submitted = { ...current, ...result.plan, toolchains: { ...current.toolchains, ...(result.plan.toolchains ?? {}) }, lanes: { ...current.lanes, ...(result.plan.lanes ?? {}) } };
-      try {
-        plan = normalizePlan(submitted);
-        if (plan.workflow && !targets(facts).some(item => item.path === plan!.workflow)) throw new PlanError('gate_workflow_invalid', `workflow ${plan.workflow} 不在可选的位置里`);
-      } catch (error) { if (!(error instanceof PlanError)) throw error; plan = null; problem = error.detail; }
-    }
+    try { plan = submittedPlan(row, result); }
+    catch (error) { if (!(error instanceof PlanError)) throw error; problem = error.detail; }
     say(store, row.id, 'agent', reply || '（agent 没有写回复）');
     // A plan that fails the checks never replaces the current one; the reply and its analysis are kept.
     if (problem) say(store, row.id, 'system', `agent 提交的方案没有通过检查（${problem}），右侧方案没有变化。`);

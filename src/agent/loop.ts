@@ -28,13 +28,14 @@ import { taskReadScopes, taskRolePolicies, taskToolAllowed, withTaskPermissions 
 export interface ReviewConversation { history?: any[]; resume?: boolean; offset?: number; model?: AgentModel; boundary(stage: string): Promise<{prompt?: string, messages?: string[]}> }
 /** The platform's write tools for this task, by tool name: the control plane performs the write and answers the agent. */
 export type PlatformTools = Record<string, (id: string, args: any) => Promise<any>>;
+type LoopLimits = Pick<AgentSpec<unknown>, 'modelAttempts'> & { validateSubmission?: (result: any) => void };
 
-export async function agentLoop(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}, limits: Pick<AgentSpec<unknown>, 'modelAttempts'> = {}) {
+export async function agentLoop(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}, limits: LoopLimits = {}) {
   try { return await run(store, task, workspace, redactor, guard, context, tokens, createPullRequest, conversation, platform, limits); }
   // A token the agent exchanged is useless after the model phase; revoke it however the phase ends.
   finally { await tokens?.revoke(); }
 }
-async function run(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}, limits: Pick<AgentSpec<unknown>, 'modelAttempts'> = {}) {
+async function run(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}, limits: LoopLimits = {}) {
   // Permissions and a reply task's prompt are read from trusted storage here, for every caller and every attempt. A task of a
   // former custom workflow keeps the prompt its snapshot captured; new reply tasks follow the Manager's reply section.
   const reply = String(task.kind).startsWith('workflow.'), legacy = reply && task.workflow_id ? taskConfiguration(store,task)?.workflow : undefined;
@@ -58,6 +59,8 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const config = { system, prompt: JSON.stringify(roleAssignmentContext(context, prompt)), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
     finish_on_pull_request: profile.completion === 'publication', finish_tools: profile.finishTools,
     ...(profile.subagentSystem ? { subagent_system: profile.subagentSystem } : {}) };
+  const repairInvalid = (error: unknown) => error instanceof TaskError && ['model_review_invalid','model_finding_invalid','release_notes_invalid','release_observation_invalid','actions_classification_invalid','gate_agent_output_invalid'].includes(error.code)
+    ? `Correct the submission and call the finish tool again using the evidence already available. ${error.code}: ${error.detail ?? ''}` : undefined;
   if(profile.completion==='publication'&&createPullRequest&&controlled(store,task,'development'))return developmentTeam(workspace,system,config.prompt,createPullRequest,profile.capabilities.workspace,platform.github_write&&(args=>platform.github_write!(randomId(),args)),tokens?.allowedScopes().includes('contents')?async()=>{const github=new GitHub(store,tokens.repository,redactor,guard,tokens.apiUrl);await github.connect(false,undefined,{contents:'read',...(tokens.allowedScopes().includes('pull_requests')?{pull_requests:'read'}:{})},false);return github;}:undefined);
   // The work type's own executor: one Pi session in the task workspace (the formal Pi harness, src/agent/pi.ts).
   const session: PiSession<any> = { store, taskId: task.id, guard, workspace, redactor, config, conversation, platform, createPullRequest,
@@ -80,6 +83,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     },
     complete: (state, publication) => {
       const result = state.result;
+      limits.validateSubmission?.(result);
       if (profile.completion === 'review') return validateReview(result);
       if (profile.completion === 'reply') return validateReply(result);
       // An event workflow's result is checked by its own module; the log windows the agent read go with it.
@@ -121,7 +125,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       return { error: 'tool_not_allowed' };
     };
     const finish = profile.finishTools[0];
-    return runTeam({ store, task, redactor, guard, system, modelAttempts: limits.modelAttempts, prompt: config.prompt, tools: profile.tools, model: conversation?.model,
+    return runTeam({ store, task, redactor, guard, system, modelAttempts: limits.modelAttempts, repairInvalid, prompt: config.prompt, tools: profile.tools, model: conversation?.model,
       execute: async (name, args) => {
         try { return await execute(name, args); }
         catch (error) { if (error instanceof TaskError) return { error: error.code }; throw error; }
@@ -143,5 +147,16 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const liveGuard=async()=>{await guard();const current=allowed().map(tool=>tool.function.name);
     if(initial.some(name=>!current.includes(name))||scopes.some(scope=>!taskReadScopes(store,task).includes(scope)))stop('role_authority_revoked','waiting_permission');};
   session.guard=liveGuard;
+  // Legacy single-executor Pi sessions use the same live validation as role-backed entries. Keep the raw submission
+  // in the runner receipt so a control-plane restart can validate it again without publishing anything twice.
+  const complete=session.complete;
+  let submitted:{value:any}|undefined,repairs=0;
+  Object.assign(config,{control_tools:profile.finishTools.filter(name=>initial.includes(name))});
+  session.control=async(name,args)=>{
+    if(!profile.finishTools.includes(name))return {result:{error:'tool_not_allowed'}};
+    try {const value=await complete({result:args},null);submitted={value};return {result:{submitted:true,submission:args,submission_name:name},finish:true};}
+    catch(error){const feedback=repairInvalid(error);if(!feedback||repairs++>=2)throw error;return {result:{error:'invalid_submission',message:redactor.text(feedback)}};}
+  };
+  session.complete=(state,publication)=>submitted?submitted.value:complete(state.result?.submitted===true?{...state,result:state.result.submission}:state,publication);
   return withTaskPermissions(store,task,'dev',fixed,()=>runAgent({ store, task, redactor, guard:liveGuard, system, modelAttempts: limits.modelAttempts, prompt: config.prompt, tools: profile.tools, model: conversation?.model, adapter: piAdapter(session) }));
 }

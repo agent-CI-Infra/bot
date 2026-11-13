@@ -23,6 +23,12 @@ function bound(store: Store, task: Row, input: any): Row {
   if (!row || data.run_id !== input.run_id || data.run_attempt !== input.run_attempt) return stop('release_attempt_changed', 'cancelled', 'Actions 运行或 attempt 已变化，这次分析不再适用，请重新查看。');
   return row;
 }
+function submittedJobs(input: any, result: any) {
+  const jobs = failedJobs(input.snapshot);
+  if (!Array.isArray(result?.job_ids) || result.job_ids.some((id: unknown) => !jobs.some((job: any) => job.id === id)) || typeof result.advice !== 'string')
+    return stop('release_observation_invalid', 'failed', '运行分析引用了本次运行之外的 job，已拒绝结果。');
+  return jobs.filter((job: any) => result.job_ids.includes(job.id));
+}
 /**
  * Asks the Manager for an observation of the release's bound run, unless one is running or still being decided. The
  * release records the event (observation_event) until the Manager's decision gives it a task or says why not.
@@ -65,11 +71,10 @@ registerEventWork('release.observe', {
         work_name: 'CI 观察', work_prompt: sectionText(store, task.repository_id, 'release.observe') } };
   },
   validate(store, task, input) { bound(store, task, input); },
+  checkResult(_store, _task, input, result) { submittedJobs(input, result); },
   finish(store, task, input, result) {
-    const row = bound(store, task, input), jobs = failedJobs(input.snapshot);
-    if (!Array.isArray(result?.job_ids) || result.job_ids.some((id: unknown) => !jobs.some((job: any) => job.id === id)) || typeof result.advice !== 'string')
-      return stop('release_observation_invalid', 'failed', '运行分析引用了本次运行之外的 job，已拒绝结果。');
-    const observation = { run_id: input.run_id, attempt: input.run_attempt, url: input.snapshot.url, jobs: jobs.filter((job: any) => result.job_ids.includes(job.id)),
+    const row = bound(store, task, input), jobs = submittedJobs(input, result);
+    const observation = { run_id: input.run_id, attempt: input.run_attempt, url: input.snapshot.url, jobs,
       advice: result.advice, logs: result.read_logs || [], at: new Date().toISOString(), task_id: task.id };
     patch(store, row.id, { observation, observation_error: null, observation_task: null });
     return observation;
