@@ -40,7 +40,7 @@ test('外部执行端复制的接入说明用 launchpad 指代本项目', async 
     await expect(page.getByRole('button', { name: '退出登录', exact: true })).toBeVisible();
     await consoleNavigate(page, '外部执行端');
     const guide = page.locator('#external-panel .external-guide');
-    await guide.locator('summary').click();
+    await guide.locator(':scope > summary').click();
     await guide.getByRole('combobox', { name: '复制指令所用客户端', exact: true }).selectOption(a.client.id);
     await guide.getByRole('button', { name: '复制给我的 AI agent', exact: true }).click();
     await expect(guide.getByRole('status')).toHaveText('已复制接入指令');
