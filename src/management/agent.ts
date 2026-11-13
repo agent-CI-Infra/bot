@@ -1,3 +1,4 @@
+import { hasCredentials } from '../core/redaction.js';
 import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, resolvePrincipalActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
@@ -114,7 +115,7 @@ export class ManagementAgent {
   send(base:ActorContext,conversationId:string,input:Json,options:{timer?:boolean}={}):Json{
     validate(obj({source_message:{...str,maxLength:240},content:{...str,maxLength:16000},query:managementTools[0]!.function.parameters,command:managementTools[1]!.function.parameters},['source_message']),input);
     if([input.content,input.query,input.command].filter(v=>v!==undefined).length!==1)fail(400,'one_management_input_required');
-    if(JSON.stringify(traceClean(input))!==JSON.stringify(input))fail(400,'sensitive_management_input');
+    if(hasCredentials(input))fail(400,'sensitive_management_input');
     const {actor}=this.conversation(base,conversationId);
     const previous=this.store.get('SELECT * FROM management_messages WHERE conversation_id=? AND source_message=?',conversationId,String(input.source_message));
     if(previous){if(parameterHash(JSON.parse(previous.input))!==parameterHash(input))fail(409,'message_idempotency_conflict');return {id:previous.id,state:previous.state,replayed:true};}

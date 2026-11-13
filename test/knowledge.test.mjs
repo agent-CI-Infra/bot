@@ -291,3 +291,10 @@ test('TaskRecords oversized evidence is filtered before capture truncation can r
     assert.ok(!JSON.stringify(filtered).includes('PRIVATE_OVERSIZED_CAPTURE'));
   }
 });
+
+test('ordinary credential discussions and formatted JSON are valid memory bodies and reasons',t=>{
+ const {m}=fixture(t);
+ for(const [index,text] of ['How do I pass a bearer token to the API?','This adds basic validation','const token = readToken();','max_tokens: 8192','{\n  "analysis": "ordinary",\n  "token": "word"\n}'].entries()) {
+  const saved=m.save('r','ordinary-'+index,entry(text),0,'user:owner',text);assert.equal(saved.body,text);
+ }
+});

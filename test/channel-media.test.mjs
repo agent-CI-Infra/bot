@@ -155,7 +155,9 @@ test('resources are isolated by chat, bounded on streaming download, and erased 
   assert.equal(f.h.store.get('SELECT count(*) n FROM channel_resources WHERE id=?', id).n, 0);
   await assert.rejects(turn.execute('read_message_resource', { resource_id: id }));
   f.service.ledger.accept(event); assert.equal(f.h.store.get('SELECT count(*) n FROM channel_resources WHERE id=?', id).n, 0);
-  const next = f.service.adapter(f.service.connector(f.id)).normalize(fileEvent('file_next')); f.service.ledger.accept(next);
+  // Retention removes messages strictly before its cutoff; fast storage may otherwise finish in the same millisecond.
+  const retained = fileEvent('file_next'); retained.event.message.create_time = String(Date.now() - 1000);
+  const next = f.service.adapter(f.service.connector(f.id)).normalize(retained); f.service.ledger.accept(next);
   const current = f.h.store.get('SELECT * FROM channel_chats WHERE id=?', chat.id);
   f.service.ledger.cleanup(chat.id, Date.now(), current.revision);
   assert.equal(f.h.store.get('SELECT count(*) n FROM channel_resources WHERE chat_id=?', chat.id).n, 0);

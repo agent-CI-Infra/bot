@@ -1,6 +1,6 @@
+import { hasCredentials } from '../core/redaction.js';
 import type { Row, Store } from '../storage/database.js';
 import { digest, fail, randomId, type Json } from '../core/security.js';
-import { traceClean } from '../tasks/trace.js';
 import type { ChannelEvent, StoredMessage } from './types.js';
 import { mediaStorage, mergeResources, resourceMetadata } from './media.js';
 
@@ -48,9 +48,8 @@ export interface MessageQuery {
 }
 const sensitive = (message: StoredMessage): boolean =>
   // Self mentions may touch a binding command; inspect the same text that command parsing receives.
-  [message.content, message.command_text ?? ''].some(value => /(?:^|\s)(?:\/bind|\/confirm|\/reauth|确认绑定|绑定|重新认证)(?:\s|$)/i.test(value)) ||
-  /(?:app_secret|encrypt_key|verification_token|api[_ -]?key|password|密码|凭据|私钥)\s*[:=：]/i.test(message.raw_content) ||
-  JSON.stringify(traceClean(message)) !== JSON.stringify(message);
+  [message.content, message.command_text ?? ''].some(value => /(?:^|\s)(?:\/(?:bind|confirm|reauth)(?:\s|$)|(?:确认绑定|绑定|重新认证)\s+(?:FSB-[A-Z0-9]+|[A-Za-z0-9._~+/-]{16,}))/i.test(value)) ||
+  hasCredentials(message);
 
 /** Only local persistence and reads. This repository deliberately has no provider client. */
 export class ChannelLedger {

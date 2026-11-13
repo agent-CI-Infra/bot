@@ -376,3 +376,12 @@ test('bot join starts only local recording and visible-history work; project acc
   assert.equal((await user.client(`/api/channels/chats/${chat.id}/sync`, 'POST', {})).status, 403);
   assert.equal((await admin(`/api/channels/chats/${chat.id}/messages`)).status, 200);
 });
+
+test('ordinary binding questions and JSON remain visible while actual binding commands stay private',async t=>{
+  const f=await channelFixture(t),adapter=f.service.adapter(f.service.connector(f.id));
+  for(const [index,text] of ['@bot 绑定','绑定 是什么意思','重新认证 失败了怎么办','How do I pass a bearer token to the API?','This adds basic validation','const token = readToken();','max_tokens: 8192','{\n  "analysis": "ordinary",\n  "token": "word"\n}'].entries()) {
+    const incoming=adapter.normalize(envelope('',{message:{message_id:'ordinary-'+index,content:JSON.stringify({text})}}));
+    const chat=f.service.ledger.accept(incoming),view=f.service.ledger.query(chat.id,{message_id:incoming.message_id}).messages[0];
+    assert.equal(view.sensitive,false,text);assert.equal(view.content,text);
+  }
+});

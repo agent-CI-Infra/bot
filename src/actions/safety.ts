@@ -1,3 +1,4 @@
+import { redactCredentials } from '../core/redaction.js';
 import type { Store } from '../storage/database.js';
 import { Redactor } from '../agent/common.js';
 
@@ -27,16 +28,8 @@ export function actionsRedactor(store: Store) {
 }
 
 export function publicText(value: string, redactor: Redactor, checkOpaque = true): string {
-  let text = redactor.text(value);
-  text = text.replace(/-----BEGIN [^-]*(?:PRIVATE KEY|CERTIFICATE)-----[\s\S]*?(?:-----END [^-]+-----|$)/g, '[REDACTED]')
-    .replace(/\b(?:github_pat_|gh[pousr]_)[\w]+|\b(?:sk|sk-proj)-[\w-]+|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '[REDACTED]')
-    .replace(/\b(?:glpat-[\w-]+|xox[baprs]-[\w-]+|AIza[\w-]{30,})/g, '[REDACTED]')
-    .replace(/\beyJ[\w-]+\.[\w-]+\.[\w-]+\b/g, '[REDACTED]')
-    .replace(/\b(?:Bearer|Basic)\s+\S+/gi, '[REDACTED]')
-    .replace(/\b(?:authorization|cookie|set-cookie)\s*[:=][^\r\n]*/gi, '[REDACTED]')
-    .replace(/((?:[\w-]*(?:token|password|passwd|secret|api[_-]?key|access[_-]?key|credential)[\w-]*)["']?\s*[:=]\s*)(["'])(.*?)\2/gi, '$1[REDACTED]')
-    .replace(/((?:[\w-]*(?:token|password|passwd|secret|api[_-]?key|access[_-]?key|credential)[\w-]*)["']?\s*[:=]\s*)["']?[^\s,;"'}]+["']?/gi, '$1[REDACTED]')
-    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[REDACTED]@');
+  let text = redactCredentials(redactor.text(value));
+  text = text.replace(/-----BEGIN [^-]*CERTIFICATE-----[\s\S]*?(?:-----END [^-]+-----|$)/g, '[REDACTED]');
   // Encoded/high-entropy material cannot reliably be made public by replacing known shapes.
   if (checkOpaque && /\b[A-Za-z0-9+/_=-]{48,}\b/.test(text) || /\x00|-----BEGIN/.test(text)) return '';
   return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
