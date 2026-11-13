@@ -6,7 +6,9 @@ import {metricTask,usageRequest} from '../test/metrics-fixtures.mjs';
 test.use({timezoneId:'Asia/Shanghai'});
 async function login(page,url,username,password){
   await page.goto(url);await page.getByLabel('用户名',{exact:true}).fill(username);await page.getByLabel('密码',{exact:true}).fill(password);
-  await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'统计',exact:true}).click();
+  await page.getByRole('button',{name:'登录',exact:true}).click();
+  // Project administrators no longer have 统计 in the primary nav (#549); the URL is unchanged.
+  await page.goto(url+'/#/costs');
 }
 async function dates(page,from,to=from){
   await page.getByLabel('开始日期（本地）',{exact:true}).fill(from);await page.getByLabel('结束日期（本地）',{exact:true}).fill(to);
