@@ -68,7 +68,7 @@ const SHARED = {
   '--font-size-row': '15px', '--font-size-touch': '16px', '--font-size-display': '24px',
   // Review of #584: 对话 headings and captions that had no scale step get one instead of a literal.
   '--font-size-caption': '10px', '--font-size-title': '20px', '--font-size-hero': '28px', '--font-size-brand': '22px',
-  '--line-height-body': '1.5', '--line-height-tight': '1.35',
+  '--line-height-body': '1.5', '--line-height-tight': '1.35', '--line-height-relaxed': '1.65',
   '--radius-1': '4px', '--radius-2': '5px',
   '--shadow-card': '0 2px 6px #182d4b03',
 

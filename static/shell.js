@@ -234,12 +234,14 @@ function syncConsoleShell() {
   const shortName = r => (r.full_name || '').includes('/') ? r.full_name.split('/').slice(1).join('/') : r.full_name;
   const personalTitle = /^#\/identity\/feishu-apps(?:\/|$)/.test(location.hash) ? t('nav.feishu_apps')
     : /^#\/identity\/feishu(?:$|\?|\/)/.test(location.hash) ? t('nav.feishu') : t('identity.title');
+  // #558: the identity page already has a single h1; repeating the same words in the
+  // breadcrumb made two visible titles. The crumb stays "个人设置" and the h1 names the page.
   // An installed repository nobody has started is no project yet; its cached installation row still names it.
   const unstarted = project && !repo ? consoleGaps.get(String(project.id)) : null;
   $('console-context').textContent = project ? (repo ? organization(repo) + ' · ' + shortName(repo)
     : unstarted?.registered === false ? organization(unstarted) + ' · ' + shortName(unstarted) + ' · ' + t('nav.unstarted')
       : typeof current !== 'undefined' && current?.unavailable && String(current.id) === String(project.id) ? t(current.unavailable === 'missing' ? 'nav.project_not_found' : 'nav.project_unavailable') : t('nav.reading_project'))
-    : tab === 'identity' || tab === 'preferences' ? personalTitle : ({ more: t('nav.more'), inbox: t('nav.inbox'), settings: t('nav.settings') }[tab] || titles[tab] || t('identity.title'));
+    : tab === 'identity' || tab === 'preferences' ? '' : ({ more: t('nav.more'), inbox: t('nav.inbox'), settings: t('nav.settings') }[tab] || titles[tab] || t('identity.title'));
   // A project can be reachable while some of its features cannot run; the navigation every page shares has to say so.
   // Only the installation snapshot names the gaps, and only a super administrator may read it, so nothing is invented.
   const permission = $('console-permission');
