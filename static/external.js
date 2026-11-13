@@ -20,6 +20,29 @@ function externalTokenRequest(audience){
   const quote=value=>"'"+value.replaceAll("'","'\\''")+"'";
   return 'curl --fail-with-body --silent --show-error \\\n  --request POST '+quote(audience)+' \\\n  --header \'Content-Type: application/json\' \\\n  --header @proof-header.txt \\\n  --data-binary @token-request.json \\\n  --output token-response.json';
 }
+function externalExchangeScript(clientId,audience){
+  const quote=value=>"'"+String(value??'').replaceAll("'","'\\''")+"'";
+  return 'umask 077\n'
+    +'CLIENT_ID='+quote(clientId||'<所选客户端ID>')+'\n'
+    +'TOKEN_URL='+quote(audience)+'\n'
+    +'KEY_FILE=./bot-client.pem\n'
+    +'WORK_DIR=$(mktemp -d ./bot-token.XXXXXXXX)\n'
+    +'b64url() { openssl base64 -A | tr \'+/\' \'-_\' | tr -d \'=\'; }\n'
+    +'NOW=$(date +%s)\n'
+    +'REQUEST_ID=$(openssl rand -hex 24)\n'
+    +'HEADER=$(printf \'%s\' \'{"alg":"RS256","typ":"JWT"}\' | b64url)\n'
+    +'PAYLOAD=$(jq -cn --arg client "$CLIENT_ID" --arg aud "$TOKEN_URL" --arg id "$REQUEST_ID" --argjson now "$NOW" \'{iss:$client,sub:$client,aud:$aud,iat:$now,exp:($now+120),jti:$id}\')\n'
+    +'SIGNING_INPUT="$HEADER.$(printf \'%s\' "$PAYLOAD" | b64url)"\n'
+    +'SIGNATURE=$(printf \'%s\' "$SIGNING_INPUT" | openssl dgst -sha256 -sign "$KEY_FILE" | b64url)\n'
+    +'printf \'Authorization: Bearer %s.%s\\n\' "$SIGNING_INPUT" "$SIGNATURE" > "$WORK_DIR/proof-header.txt"\n'
+    +'jq -cn --arg client "$CLIENT_ID" --arg id "$REQUEST_ID" \'{client_id:$client,request_id:$id}\' > "$WORK_DIR/token-request.json"\n'
+    +'curl --fail-with-body --silent --show-error --request POST "$TOKEN_URL" \\\n'
+    +'  --header \'Content-Type: application/json\' \\\n'
+    +'  --header @"$WORK_DIR/proof-header.txt" \\\n'
+    +'  --data-binary @"$WORK_DIR/token-request.json" \\\n'
+    +'  --output "$WORK_DIR/token-response.json"\n'
+    +'jq \'{grant_id,token_type,expires_at,repository_id,permissions}\' "$WORK_DIR/token-response.json"';
+}
 function externalAgentInstructions(client,audience){
   const exchange=audience
     ?'兑换地址（同时是签名证明的 audience）：'+audience+'\n公钥登记完成后，用本机私钥签名，再通过任意 HTTP 客户端兑换。curl 请求示例：\n'+externalTokenRequest(audience)
@@ -39,7 +62,7 @@ function externalKeyHelp(){
 function copyableCommand(text,status,label='复制'){
   const block=element('div','','copyable-command'),pre=element('pre',text);
   const btn=button(label,async()=>{
-    try{await navigator.clipboard.writeText(text);status.textContent='已复制命令';}
+    try{await navigator.clipboard.writeText(pre.textContent);status.textContent='已复制命令';}
     catch{
       const selection=getSelection(),range=document.createRange();
       range.selectNodeContents(pre);selection.removeAllRanges();selection.addRange(range);
@@ -56,7 +79,7 @@ function externalPublicKeyGuide(clients=[],audience=externalAudience,{expanded=f
   if(available.length){
     const selection=externalField('guide_client','复制指令所用客户端',available[0].id,available.map(c=>[c.id,c.name+' · 仓库 '+c.repository_id]));
     const select=selection.querySelector('select'),fallback=element('textarea','');fallback.readOnly=true;fallback.hidden=true;fallback.rows=10;fallback.setAttribute('aria-label','可手动复制的接入指令');
-    select.onchange=()=>{fallback.value='';fallback.hidden=true;status.textContent='';};
+    select.onchange=()=>{fallback.value='';fallback.hidden=true;status.textContent='';if(exchangeCommand&&audience)exchangeCommand.querySelector('pre').textContent=externalExchangeScript(select.value,audience);};
     head.append(button('复制给我的 AI agent',async()=>{
       const text=externalAgentInstructions(available.find(c=>c.id===select.value),audience);
       try{await navigator.clipboard.writeText(text);status.textContent='已复制接入指令';}catch{fallback.value=text;fallback.hidden=false;fallback.focus();fallback.select();status.textContent='剪贴板不可用，请手动复制下方完整指令。';}
@@ -65,16 +88,20 @@ function externalPublicKeyGuide(clients=[],audience=externalAudience,{expanded=f
   const eventsUrl=audience?new URL('/external/events',audience).href:'/external/events（与兑换地址同源）';
   const revokeUrl=audience?new URL('/external/revoke',audience).href:'/external/revoke（与兑换地址同源）';
   const steps=element('ol','','external-happy-path');
+  const selectedClient=()=>available.find(c=>c.id===(body.querySelector('select')?.value))||available[0];
   const keyStep=element('li','');
-  keyStep.append(element('strong','在本机生成密钥'),element('p','在个人电脑的私有目录执行。先检查文件是否已存在，不要覆盖已有私钥。'),copyableCommand(externalKeyCommands,status));
+  keyStep.append(element('strong','在本机生成密钥'),element('p','在个人电脑的私有目录执行。先检查文件是否已存在，不要覆盖已有私钥。'),copyableCommand(externalKeyCommands,status,'复制生成密钥命令'));
   const registerStep=element('li','');
   registerStep.append(element('strong','只把公钥交给控制台'),element('p','打开 bot-client.pub.pem，把公钥粘贴到这个客户端的「登记公钥」。私钥（bot-client.pem）留在本机，不要粘贴到对话或日志。'));
   const exchangeStep=element('li','');exchangeStep.append(element('strong','兑换 token'));
+  let exchangeCommand=null;
   if(audience){
-    exchangeStep.append(element('p','用本机私钥签名后，向当前兑换地址发送请求。完整签名步骤在下方「高级／协议说明」，也可以把整套指令复制给 AI agent。'),element('p','当前兑换地址：'+audience),copyableCommand(externalTokenRequest(audience),status));
+    exchangeStep.append(element('p','在本机私有目录运行下面的脚本即可完成兑换，不必打开「高级／协议说明」。脚本会用本机私钥签名，写出 proof-header.txt 和 token-request.json，并请求当前兑换地址。需要已安装 openssl 和 jq。协议细节仍可在下方查阅。'),element('p','当前兑换地址：'+audience));
+    exchangeCommand=copyableCommand(externalExchangeScript(selectedClient()?.id,audience),status,'复制兑换命令');
+    exchangeStep.append(exchangeCommand);
   }else exchangeStep.append(element('p','兑换地址尚未配置：请超级管理员设置，或先在接入向导中验证公开地址，再重新打开说明。配置前无法兑换，不要猜测 URL。'));
   const useStep=element('li','');
-  useStep.append(element('strong','用 token 发起请求'),element('p','成功响应里的 token 用于调用 GitHub，或轮询绑定仓库的事件。用完后撤销，不要把 token 写入聊天、日志或提交。'),copyableCommand('Authorization: Bearer <token>\nGET '+eventsUrl,status),element('p','用完后向 '+revokeUrl+' 发送撤销请求。'));
+  useStep.append(element('strong','用 token 发起请求'),element('p','成功响应里的 token 用于调用 GitHub，或轮询绑定仓库的事件。用完后撤销，不要把 token 写入聊天、日志或提交。'),copyableCommand('Authorization: Bearer <token>\nGET '+eventsUrl,status,'复制轮询命令'),element('p','用完后向 '+revokeUrl+' 发送撤销请求。'));
   steps.append(keyStep,registerStep,exchangeStep,useStep);
   const advanced=element('details','','external-guide-advanced');
   advanced.append(element('summary','高级／协议说明'));

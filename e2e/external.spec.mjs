@@ -161,19 +161,23 @@ test('全局仅一套说明，选择客户端复制含轮询的指令；地址�
     await expect(panel.getByRole('button',{name:'新增转发订阅',exact:true})).toHaveCount(0);
     await expect(panel.getByRole('link',{name:'在全局设置中配置兑换地址',exact:false})).toBeVisible();
     await guide.locator(':scope > summary').click();
-    // #524: the opened guide's first screen is a short happy path; protocol stays under 高级.
+    // #524: the opened guide's first screen is a short happy path that can complete the exchange without opening 高级.
     const happy=guide.locator('.external-happy-path');
     await expect(happy).toContainText('在本机生成密钥');
     await expect(happy).toContainText('只把公钥交给控制台');
     await expect(happy).toContainText('兑换 token');
     await expect(happy).toContainText('用 token 发起请求');
-    const visible=await guide.innerText();
-    for(const term of ['SPKI','RS256','jti','request_id','aud '])expect(visible,term).not.toContain(term);
     await expect(guide.locator('.external-guide-advanced')).not.toHaveAttribute('open','');
-    await expect(guide.locator('.copyable-command').getByRole('button',{name:'复制',exact:true})).toHaveCount(3);
-    await guide.locator('.copyable-command').first().getByRole('button',{name:'复制',exact:true}).click();
+    await expect(guide.getByRole('button',{name:'复制生成密钥命令',exact:true})).toHaveCount(1);
+    await expect(guide.getByRole('button',{name:'复制兑换命令',exact:true})).toHaveCount(1);
+    await expect(guide.getByRole('button',{name:'复制轮询命令',exact:true})).toHaveCount(1);
+    await guide.getByRole('button',{name:'复制生成密钥命令',exact:true}).click();
     await expect(guide.getByRole('status')).toHaveText('已复制命令');
     expect(await page.evaluate(()=>navigator.clipboard.readText())).toContain('openssl genpkey');
+    await guide.getByRole('button',{name:'复制兑换命令',exact:true}).click();
+    const exchange=await page.evaluate(()=>navigator.clipboard.readText());
+    for(const text of ['proof-header.txt','token-request.json','openssl dgst',h.audience,'jq -cn'])expect(exchange).toContain(text);
+    expect(exchange).toContain('CLIENT_ID=');
     await guide.locator('.external-guide-advanced summary').click();
     await expect(guide.locator('.external-guide-advanced')).toContainText('RS256 JWT');
     await expect(guide.locator('.external-guide-advanced')).toContainText('request_id');
@@ -181,9 +185,11 @@ test('全局仅一套说明，选择客户端复制含轮询的指令；地址�
     await guide.locator('.external-guide-advanced summary').click();
     mkdirSync('.tmp/ui-524',{recursive:true});
     await page.setViewportSize({width:1440,height:900});await noOverflow(page);
-    await page.screenshot({path:'.tmp/ui-524/after-desktop.png',fullPage:true});
-    await page.setViewportSize({width:600,height:900});await noOverflow(page);
-    await page.screenshot({path:'.tmp/ui-524/after-600.png',fullPage:true});
+    await expect(guide.locator('.external-guide-advanced')).not.toHaveAttribute('open','');
+    await page.screenshot({path:'.tmp/ui-524/guide-1440.png',fullPage:true});
+    await page.setViewportSize({width:390,height:844});await noOverflow(page);
+    await page.screenshot({path:'.tmp/ui-524/guide-390.png',fullPage:true});
+    await page.setViewportSize({width:1440,height:900});
     const select=guide.getByRole('combobox',{name:'复制指令所用客户端',exact:true});await select.selectOption(a.client.id);
     await expect(select.locator('option')).toHaveCount(2);await expect(select.locator('option[value="'+oidc.client.id+'"]')).toHaveCount(0);
     await guide.getByRole('button',{name:'复制给我的 AI agent',exact:true}).click();await expect(guide.getByRole('status')).toHaveText('已复制接入指令');
