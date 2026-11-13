@@ -6,7 +6,7 @@ function pendingActivationGroup(pending) {
   for (const repo of pending) {
     const line = element('div', '', 'row project-pending-row'), content = element('div', '', 'row-content'), status = element('div', '', 'row-state');
     line.setAttribute('role', 'listitem'); line.dataset.key = 'pending:' + repo.id;
-    content.append(element('strong', repo.full_name), element('p', '已安装到 GitHub，等待管理员在控制台启动后即可打开。'));
+    const note = element('p', '已安装到 GitHub，等待管理员在控制台启动后即可打开。'); note.title = note.textContent; content.append(element('strong', repo.full_name), note);
     status.append(element('span', '等待管理员启动', 'status status-warning'));
     line.append(content, status); list.append(line);
   }
