@@ -314,19 +314,24 @@ test('a project administrator can list and open conversations on a started proje
   assert.equal(platform.value.conversation.scope, 'platform');
 });
 
-test('a project administrator with no started project cannot create a conversation and gets a named 403', async t => {
+test('a project administrator with no started project can open a platform conversation and is told there are no projects', async t => {
   const {member} = await managementFixture(t);
   const empty = await member('no-project', {});
   assert.equal((await empty.client('/api/management/conversations')).status, 200);
   assert.deepEqual((await empty.client('/api/management/conversations')).value.conversations, []);
   const created = await empty.client('/api/management/conversations', 'POST', { scope: 'platform' });
-  assert.equal(created.status, 403);
-  assert.equal(created.value.error, 'scope_forbidden');
+  assert.equal(created.status, 201, JSON.stringify(created.value));
+  const conversation = created.value.conversation.id;
+  const sent = await empty.client('/api/management/conversations/' + conversation + '/messages', 'POST', { source_message: 'no-projects', content: '我有哪些项目' });
+  assert.equal(sent.status, 201, JSON.stringify(sent.value));
+  const result = await settled(empty.client, conversation, sent.value.id);
+  assert.equal(result.messages.find(m => m.id === sent.value.id).state, 'completed');
+  assert.ok(result.events.some(e => e.type === 'reply' && /没有可访问的项目/.test(e.data.text)));
   const project = await empty.client('/api/management/conversations', 'POST', { scope: 'project:101' });
   assert.equal(project.status, 403);
 });
 
-test('a project-scoped actor can create a platform conversation on a started project, and is refused once the grant is gone', async t => {
+test('a project-scoped actor can create a platform conversation on a started project, and still can after the grant is gone', async t => {
   const {h, member} = await managementFixture(t);
   const adminUser = await member('project-platform', { repository_ids: ['101'] });
   const principal = h.store.get('SELECT id FROM principals WHERE user_id=?', adminUser.id).id;
@@ -341,5 +346,8 @@ test('a project-scoped actor can create a platform conversation on a started pro
   h.store.run('UPDATE scoped_grants SET revoked_at=? WHERE principal_id=?', Date.now(), principal);
   const later = resolvePrincipalActor(h.store, principal, tenant, '101');
   assert.equal(later.project_id, '101');
-  assert.throws(() => agent.create(later, { scope: 'platform' }), { code: 'scope_forbidden' });
+  // Platform scope stays open after the grant is gone; run() explains that there are no projects.
+  const after = agent.create(later, { scope: 'platform' });
+  assert.equal(after.conversation.scope, 'platform');
+  assert.ok(after.conversation.id);
 });
