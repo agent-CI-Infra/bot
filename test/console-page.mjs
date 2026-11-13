@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { readConsoleScriptSync } from '../dist/console/modules.js';
 
 // Loads console scripts from static/ into a sandbox with a small stand-in DOM: enough to load the scripts and draw
 // lists, so page logic can be tested without a browser. Selectors support tags, #id, .class, [attr], [attr=value], descendant and
@@ -90,6 +90,6 @@ export function loadConsole(files, respond) {
     matchMedia: media => ({ media, matches: false, addEventListener() {} }),
     setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout, URL, URLSearchParams, console });
   context.window = context;
-  for (const file of files) vm.runInContext(readFileSync(file, 'utf8'), context, { filename: file });
+  for (const file of files) vm.runInContext(readConsoleScriptSync(file), context, { filename: file });
   return { requests, $: id => document.getElementById(id), run: code => vm.runInContext(code, context) };
 }
