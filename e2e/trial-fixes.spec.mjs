@@ -1,4 +1,5 @@
 import { consoleNavigate } from './console-navigation.mjs';
+import { openModelCatalog } from './open-model-folds.mjs';
 import{test,expect}from'@playwright/test';import{mkdirSync,rmSync}from'node:fs';import{harness,setup,account,repository,testPassword}from'../test/helpers.mjs';import{RuleService}from'../dist/rules/service.js';import{TaskEngine}from'../dist/agent/engine.js';import{Onboarding}from'../dist/onboarding/service.js';
 
 test('项目保存、规则刷新、未启动仓库、任务过程及390px导航提供可核验反馈',async({page})=>{
@@ -57,7 +58,7 @@ test('项目保存、规则刷新、未启动仓库、任务过程及390px导航
   const sectionPicker=page.getByLabel('当前页面',{exact:true});await expect(sectionPicker).toBeVisible();
   for(const caption of ['基本设置','机器配置','模型','发版本','项目知识','角色','外部执行','成员','运行状态'])await expect(sectionPicker.locator('option').filter({hasText:caption})).toHaveCount(1);
   for(const caption of ['使用的模型','检视','开发','规则总览'])await expect(page.getByRole('link',{name:caption,exact:true})).toHaveCount(0);
-  await sectionPicker.selectOption('#/projects/101/model');await expect(page.locator('.model-address').first()).toBeVisible();await page.locator('.model-address').first().scrollIntoViewIfNeeded();expect(await page.locator('.model-address').first().evaluate(node=>node.scrollWidth<=node.clientWidth)).toBe(true);await page.screenshot({path:'.tmp/trial-ui/model-mobile.png',fullPage:true});
+  await sectionPicker.selectOption('#/projects/101/model');await openModelCatalog(page);await expect(page.locator('.model-address').first()).toBeVisible();await page.locator('.model-address').first().scrollIntoViewIfNeeded();expect(await page.locator('.model-address').first().evaluate(node=>node.scrollWidth<=node.clientWidth)).toBe(true);await page.screenshot({path:'.tmp/trial-ui/model-mobile.png',fullPage:true});
   await consoleNavigate(page,'全局设置');await page.getByLabel('当前页面',{exact:true}).selectOption('#/settings/onboarding');await page.getByRole('button',{name:'1. 公网 HTTPS',exact:true}).click();await expect(page.getByRole('button',{name:'自建 HTTPS 中转',exact:true})).toHaveAttribute('aria-pressed','true');await page.getByRole('button',{name:'Cloudflare Tunnel',exact:true}).click();await expect(page.getByRole('button',{name:'Cloudflare Tunnel',exact:true})).toHaveAttribute('aria-pressed','true');
   for(const caption of ['1. 公网 HTTPS','2. GitHub App','3. GitHub 登录','4. 安装','5. 模型','6. 规则','7. 完成'])await expect(page.getByRole('button',{name:caption,exact:true})).toBeVisible();
   await page.getByRole('button',{name:'7. 完成',exact:true}).click();const fresh=page.locator('#onboarding-panel .row').filter({hasText:'fixture/new-project'});await expect(fresh).toContainText('未启动');await expect(fresh.getByRole('button',{name:'启动并启用检视',exact:true})).toBeEnabled();await page.screenshot({path:'.tmp/trial-ui/wizard-mobile.png',fullPage:true});await fresh.getByRole('button',{name:'启动并启用检视',exact:true}).click();await expect(page.locator('#onboarding-panel .row').filter({hasText:'fixture/new-project'})).toContainText('检视已开启');

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openModelCatalog } from './open-model-folds.mjs';
 import { strict as assert } from 'node:assert';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 
@@ -25,6 +26,7 @@ test('模型行显示使用位置与单价，供应商组显示 Key 状态', asy
     await page.goto(h.admin + '/#/projects/101/model');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
+    await openModelCatalog(page);
     const card = name => page.locator('.side-card').filter({ has: page.getByRole('heading', { name, exact: true }) });
     const own = card('本项目专属模型');
     await expect(own.getByRole('heading', { name: '本项目专属模型', exact: true })).toBeVisible();
@@ -59,6 +61,7 @@ test('模型行显示使用位置与单价，供应商组显示 Key 状态', asy
     const live = (await admin('/api/models?repository_id=101')).value.models.filter(model => model.api_url === host);
     assert.equal((await admin('/api/models/' + priced.id + '/provider', 'PATCH', { versions: live.map(model => ({ id: model.id, version: model.version })), revoke_key: true })).status, 200);
     await page.reload();
+    await openModelCatalog(page);
     const revoked = card('本项目专属模型').locator('.provider-group').first();
     await expect(revoked.locator('.provider-head')).toContainText('Key 已撤销');
     await expect(revoked.locator('li.model-entry').filter({ hasText: 'deepseek-chat' }).locator('.model-usage')).toHaveText('无项目默认或工作类型引用');
