@@ -274,7 +274,7 @@ async function renderIdentity() {
     overview.append(reverify); githubEnabledButtons.push(reverify);
   } else if (action === 'switch_tenant') {
     // The repositories are in another organization than the one this session is limited to: one click widens it.
-    const widen = element('button', '切换到所有已授权组织', 'identity-primary identity-switch-tenant');
+    const widen = element('button', '切换到所有已授权组织', 'identity-primary');
     widen.addEventListener('click', async () => {
       widen.disabled = true;
       try { await api('/api/identity/tenant', 'POST', { tenant_id: null }); if (current()) await start(); }
