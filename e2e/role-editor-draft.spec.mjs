@@ -99,7 +99,7 @@ test('finishing a comparison after switching roles releases the shared draft loc
     await draftPrompt(page).fill('Retained while navigating'); let entered; const seen = new Promise(resolve => { entered = resolve; }); const gate = new Promise(resolve => { release = resolve; }); let held = false;
     await page.route('**/api/repositories/101/roles', async route => { if (held) return route.continue(); held = true; const response = await route.fetch(); entered(); await gate; await route.fulfill({ response }); });
     await compareWithServer(page); await seen;
-    await goRolePage(page, { role: 'Test' }); await expect(page.getByRole('heading', { name: 'Test 设置', exact: true })).toBeVisible(); await expect(draftPrompt(page)).toBeDisabled();
+    await goRolePage(page, { role: 'Test' }); await expect(page.getByRole('heading', { name: '测试 设置', exact: true })).toBeVisible(); await expect(draftPrompt(page)).toBeDisabled();
     release(); await expect(draftPrompt(page)).toBeEnabled(); await expect(page.getByRole('heading', { name: '比较角色配置', exact: true })).toHaveCount(0);
     await goRolePage(page, { role: 'Dev' }); await expect(draftPrompt(page)).toHaveValue('Retained while navigating');
   } finally { release?.(); await h.stop(); }

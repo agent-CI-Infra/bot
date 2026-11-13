@@ -44,16 +44,16 @@ function roleModelResolution(role, state, access) {
   region.append(field('解析工作类型', selector), read, status, result); return region;
 }
 function roleSettingsCard(role, state, redraw, access) {
-  const section = card(roleLabel(role.role_id, role.name) + ' 设置');
+  const section = card(roleConfigName(role.role_id, role.name) + rolePageText('formSuffix'));
   section.dataset.testid = 'role-form';
   const group = (key, title, parent = section) => {
     const box = element('section', '', 'role-editor-group'), heading = element('h4', title); box.id = `role-${role.role_id}-${key}`; heading.tabIndex = -1;
     box.append(heading); parent.append(box); return box;
   };
-  const basic = group('basic', '基本信息');
-  basic.append(roleText('显示名称', role, 'name', state, { maxLength: 80 }), roleCheck('启用角色', role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind)),
-    roleText('职责', role, 'responsibility', state, { multiline: true, rows: 3, maxLength: 2000 }));
-  const agent = group('agent', 'Agent 与模型');
+  const basic = group('basic', rolePageText('basic'));
+  basic.append(roleText(rolePageText('displayName'), role, 'name', state, { maxLength: 80 }), roleCheck(rolePageText('enable'), role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind)),
+    roleText(rolePageText('duty'), role, 'responsibility', state, { multiline: true, rows: 3, maxLength: 2000 }));
+  const agent = group('agent', rolePageText('agent'));
   agent.append(note('已保存 · ' + workTypeName(state.data.workflow) + '：' + roleModelText(state.data.preview.find(row => row.role === role.role_id))), note('下面是待保存的选择；修改不会重写运行中任务的模型快照。'), field('Agent 后端', roleBackendPicker(role, state, redraw)), field('模型', roleModelPicker(role, state, redraw)));
   const saved = state.data.configuration.roles.find(entry => entry.role_id === role.role_id);
   if (role.role_id === 'dev' && state.data.configured && saved?.entry_harness_source !== 'role' && saved?.harness_ref.id !== 'pi') {
@@ -64,7 +64,8 @@ function roleSettingsCard(role, state, redraw, access) {
   advanced.dataset.testid = 'role-form-advanced';
   advanced.open = !!state.roleFormAdvancedOpen;
   advanced.addEventListener('toggle', () => { state.roleFormAdvancedOpen = advanced.open; });
-  advanced.append(element('summary', '高级设置'));
+  advanced.append(element('summary', rolePageText('advanced')));
+  const idLine = note(rolePageText('roleId') + '：' + role.role_id); idLine.dataset.testid = 'role-id'; advanced.append(idLine);
   if (profile) {
     const modelExtra = group('model-extra', '模型细节', advanced);
     modelExtra.append(field('模型 API', roleSelect('模型 API', profile.api, (backend?.model_api || []).map(id => [id, id]), value => { profile.api = value; markRoleDirty(state); })),
@@ -73,10 +74,10 @@ function roleSettingsCard(role, state, redraw, access) {
   } else {
     group('model-extra', '模型细节', advanced).append(roleModelResolution(role, state, access));
   }
-  const prompts = group('prompts', '提示词');
+  const prompts = group('prompts', rolePageText('prompts'));
   const system = textarea('system_prompt', state.data.system_prompt, { rows: 6, readOnly: true }); system.setAttribute('aria-label', '系统提示词'); system.readOnly = true;
-  prompts.append(field('系统提示词', system), note('所有角色共用的系统背景、环境说明和基本行为准则。角色职责与任务记录规则在下面的提示词中直接修改。'));
-  prompts.append(roleText('角色提示词', role, 'persona_prompt', state, { multiline: true, rows: 18, maxLength: 32000 }), note('这份提示词包含角色完整的职责与行为要求，可以全部修改或清空；系统不会再追加固定职责。'), button('恢复角色模板', async () => {
+  prompts.append(field('系统提示词', system), note(rolePageText('systemNote')));
+  prompts.append(roleText('角色提示词', role, 'persona_prompt', state, { multiline: true, rows: 18, maxLength: 32000 }), note(rolePageText('promptNote')), button('恢复角色模板', async () => {
     if (!await askConfirm({ title: '恢复角色模板？', body: ['当前角色提示词将替换为默认模板，保存后生效。'], action: '恢复模板' })) return;
     role.persona_prompt = (Object.hasOwn(state.data.role_templates, role.role_id) ? state.data.role_templates[role.role_id] : state.data.role_templates.observer); markRoleDirty(state); redraw();
   }));
@@ -114,7 +115,7 @@ function roleSettingsCard(role, state, redraw, access) {
 const skillSourceNames = { repository: '固定仓库提交', inline: '控制台文件' };
 function roleSkillFacts(bundle, state) {
   const saved = state.data.configuration.skills.find(entry => entry.id === bundle.id), box = element('section', '', 'skill-saved-facts'); box.setAttribute('aria-label', '已保存技能版本');
-  const savedBindings = state.data.configuration.roles.filter(role => role.skill_bundle_ref?.id === bundle.id).map(role => roleLabel(role.role_id, role.name));
+  const savedBindings = state.data.configuration.roles.filter(role => role.skill_bundle_ref?.id === bundle.id).map(role => roleConfigName(role.role_id, role.name));
   box.append(facts([['已保存版本', saved ? String(saved.revision) : '此标识尚未保存'], ['已保存来源', saved ? skillSourceNames[saved.source.type] || saved.source.type : '尚未保存'], ['已保存绑定角色', savedBindings.join('、') || '无'], ['内容哈希', saved?.content_hash || '保存后由服务端计算']]));
   if (saved?.source.origin) box.append(note('已迁移为控制台文件；保留原绑定内容和文件哈希。原指南：' + saved.source.origin.playbooks.join('、') + '；原版本：' + saved.source.origin.revision + '；原内容哈希：' + saved.source.origin.content_hash));
   if (saved?.source.type === 'repository') box.append(note('已固定提交：' + saved.source.commit));
@@ -163,7 +164,7 @@ function roleSkillsCard(state, redraw, selected = null) {
     }
     if (selected) {
       const bindings = element('fieldset', '', 'role-choices'); bindings.append(element('legend', '草稿绑定角色'));
-      for (const role of draft.roles) { const wrap = checkbox('bind:' + role.role_id, role.skill_bundle_ref?.id === bundle.id, roleLabel(role.role_id, role.name));
+      for (const role of draft.roles) { const wrap = checkbox('bind:' + role.role_id, role.skill_bundle_ref?.id === bundle.id, roleConfigName(role.role_id, role.name));
         roleBound(wrap.querySelector('input'), checked => { if (checked) role.skill_bundle_ref = { id: bundle.id }; else if (role.skill_bundle_ref?.id === bundle.id) role.skill_bundle_ref = null; }, state); bindings.append(wrap); }
       group.append(bindings, note('移除技能包会同时解除草稿中的角色绑定；保存后影响新任务，运行中的快照保持。'));
     }

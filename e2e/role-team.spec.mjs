@@ -44,7 +44,7 @@ test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生�
 
     await expect(table.getByRole('columnheader', { name: '职责', exact: true })).toBeVisible();
     await expect(table.getByRole('columnheader', { name: '状态', exact: true })).toBeVisible();
-    await expect(row).toContainText(dev.responsibility); await expect(row).toContainText('已启用');
+    await expect(row).toContainText('在入口已有的权限范围内实现或调查任务。'); await expect(row).toContainText('已启用');
     await expect(table.locator('tr[data-role]')).toHaveCount(config.configuration.roles.length);
     await consoleSave(page).click();
     await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');

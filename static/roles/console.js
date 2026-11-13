@@ -37,7 +37,7 @@ function rolesConsole() {
       back.dataset.testid = 'role-list-link';
       nav.append(back);
       if (current.item) {
-        const here = element('a', role ? roleLabel(role.role_id, role.name) : current.item);
+        const here = element('a', role ? roleConfigName(role.role_id, role.name) : current.item);
         here.href = `#/projects/${id}/roles/${current.item}`;
         here.setAttribute('aria-current', 'page');
         nav.append(here);
@@ -63,12 +63,12 @@ function rolesConsole() {
       const cards = roleOverviewCards(state, draw);
       const unconfiguredOverview = state.data.configured === false && !current.item && !auxiliaryView;
       if (unconfiguredOverview) {
-        const intro = card('使用推荐的角色分工');
+        const intro = card(rolePageText('introTitle'));
         intro.setAttribute('data-testid', 'recommended-roles-intro');
         const introStatus = note(roleVersionText(state)); introStatus.dataset.roleVersion = '';
         intro.append(introStatus,
-          note('还没有保存过角色配置。可以先使用推荐配置，按默认的 Manager、Dev、Test、Reviewer 等角色开始工作。技能、提示词、权限和预算不必现在改，需要时再打开「高级」。'));
-        const adopt = button('使用推荐配置', () => saveRoles(), '');
+          note(rolePageText('introNote')));
+        const adopt = button(rolePageText('adopt'), () => saveRoles(), '');
         adopt.disabled = !!state.busy || !!state.conflict;
         adopt.setAttribute('data-testid', 'adopt-recommended-roles');
         intro.append(adopt);
@@ -77,7 +77,7 @@ function rolesConsole() {
         // Redraws (backend picker, skill edits, etc.) must not slam the fold shut mid-edit.
         advanced.open = !!state.roleAdvancedOpen;
         advanced.addEventListener('toggle', () => { state.roleAdvancedOpen = advanced.open; });
-        advanced.append(element('summary', '高级'), ...cards);
+        advanced.append(element('summary', rolePageText('foldAdvanced')), ...cards);
         fields.append(intro, advanced);
       } else fields.append(...cards);
     }
