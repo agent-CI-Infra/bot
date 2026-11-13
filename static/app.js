@@ -335,11 +335,21 @@ function eventsEmptyState(params) {
   const empty = consoleState(title, text);
   if (!filtered && !paged) {
     const reasons = document.createElement('ul');
-    reasons.append(
-      element('li', 'GitHub App 的 Webhook 还没指向本部署，或验签失败。'),
-      element('li', '仓库还没被管理员启动，事件不会在这里形成任务。'),
-      element('li', '当前账号范围内确实还没有事件。')
-    );
+    // Super administrators still see rejected-signature and unregistered-repository
+    // rows here (repository_id is null; /api/events does not filter them). Those
+    // conditions therefore cannot explain an empty list for that role.
+    if (me.role === 'super_admin') {
+      reasons.append(
+        element('li', 'GitHub App 的 Webhook 还没指向本部署，事件没有到达这里。'),
+        element('li', '当前确实还没有事件。验签失败或尚未启动的仓库仍会作为投递出现在本页。')
+      );
+    } else {
+      reasons.append(
+        element('li', 'GitHub App 的 Webhook 还没指向本部署，或验签失败。'),
+        element('li', '仓库还没被管理员启动，事件不会在这里形成任务。'),
+        element('li', '当前账号范围内确实还没有事件。')
+      );
+    }
     empty.append(reasons);
   }
   if (filtered) {
