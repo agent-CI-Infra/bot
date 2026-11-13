@@ -12,10 +12,12 @@ function roleSelect(name, value, choices, change) {
 // The list states which revision is in force and whether the draft has moved away from it; every control that
 // dirties the draft refreshes that line, so "saved" and "edited but not saved" are never confused.
 let roleDraftStatus = null;
-const roleVersionText = state => state.data.configured === false ? '推荐配置 · 尚未保存' : `配置版本 ${state.data.revision} · ${state.dirty ? '草稿未保存' : '已生效'}`;
+const roleVersionText = state => state.data.configured === false ? '尚未保存。可先使用推荐配置。' : `配置版本 ${state.data.revision} · ${state.dirty ? '草稿未保存' : '已生效'}`;
 function markRoleDirty(state) {
   state.dirty = true;
-  if (roleDraftStatus) roleDraftStatus.textContent = roleVersionText(state);
+  const text = roleVersionText(state);
+  document.querySelectorAll('[data-role-version]').forEach(el => { el.textContent = text; });
+  if (roleDraftStatus) roleDraftStatus.textContent = text;
 }
 function roleBound(control, change, state) {
   const edit = () => { change(control.type === 'checkbox' ? control.checked : control.value); markRoleDirty(state); };
