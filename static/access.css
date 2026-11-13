@@ -99,3 +99,8 @@
   .onboarding-content :is(input, select), .identity-layout select { font-size: 16px; }
   .identity-scope-form { flex-direction: column; align-items: stretch; }
 }
+
+.identity-pending-repos { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 8px; }
+.identity-pending-repos li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.project-pending-group { margin-top: 16px; }
+.project-pending-row .status { white-space: nowrap; }
