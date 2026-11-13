@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { openRoleAdvanced, goRolePage, openRoleFormAdvanced } from './open-role-advanced.mjs';
+import { consoleSave, compareWithServer, confirmDiscard } from './console-save.mjs';
 
 test('角色概览和详情通过表单保存模型、提示词、预算、技能和阶段，保留草稿并拒绝过期保存', async ({ page }) => {
   test.setTimeout(90000);
@@ -41,7 +42,7 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await goRolePage(page, { role: 'dev' });
     await expect(page.getByLabel('角色提示词', { exact: true })).toHaveValue('先读复现，再修改代码并验证。');
     await expect(page.getByLabel('dev 模型', { exact: true })).toHaveValue(model.id);
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
+    await consoleSave(page).click();
     await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
     let saved = (await admin('/api/repositories/101/roles')).value.configuration, dev = saved.roles.find(role => role.role_id === 'dev');
     expect(dev.persona_prompt).toBe('先读复现，再修改代码并验证。'); expect(dev.model_profile_ref.model_id).toBe(model.id);
@@ -67,7 +68,7 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await page.getByLabel('dev 技能包', { exact: true }).selectOption('skills_1');
     await goRolePage(page);
     await page.getByRole('button', { name: '添加阶段', exact: true }).click();
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
+    await consoleSave(page).click();
     await expect.poll(async () => (await admin('/api/repositories/101/roles')).value.configuration.revision).toBe(2);
     saved = (await admin('/api/repositories/101/roles')).value.configuration;
     expect(saved.roles.find(role => role.role_id === 'dev').skill_bundle_ref.id).toBe('skills_1'); expect(saved.required_stages[0].stage_id).toBe('review_1');
@@ -75,7 +76,7 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await goRolePage(page, { role: 'dev' });
     await page.getByLabel('职责', { exact: true }).fill('保留这份未保存的职责。');
     await admin('/api/repositories/101/roles', 'PUT', { expected_revision: 2, enabled: false, roles: [] });
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
+    await consoleSave(page).click();
     await expect(page.getByRole('alert').filter({ hasText: '角色配置已被别人修改' })).toBeVisible();
     await expect(page.getByLabel('职责', { exact: true })).toHaveValue('保留这份未保存的职责。');
     mkdirSync('.tmp/role-settings', { recursive: true });
@@ -86,7 +87,7 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await goRolePage(page);
     await expect(page.getByRole('table', { name: '角色解析结果' })).toBeVisible();
-    await expect(page.locator('[data-role-version]')).toHaveText(`配置版本 ${saved.revision} · 草稿未保存`);
+    await expect(page.locator('[data-role-version]')).toHaveText(`有未保存的更改`);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/role-settings/overview-mobile.png', fullPage: true });
     expect(errors).toEqual([]);
@@ -107,7 +108,7 @@ test('新增角色、删除内置角色并重载，只有三个必需角色不�
     await page.getByLabel('角色提示词', { exact: true }).fill('检查输入边界并记录证据。');
     await openRoleFormAdvanced(page);
     await page.getByLabel('security 使用虚拟电脑权限', { exact: true }).selectOption('deny');
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
+    await consoleSave(page).click();
     await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
     for (const name of ['Manager', '跨任务协调', '独立 QA']) {
       await goRolePage(page, { role: name });
@@ -119,7 +120,7 @@ test('新增角色、删除内置角色并重载，只有三个必需角色不�
     await page.getByRole('button', { name: '删除这个角色', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: '删除角色', exact: true }).click();
     await expect(page.getByTestId('role-list-reviewer')).toHaveCount(0);
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
+    await consoleSave(page).click();
     await expect.poll(async () => (await admin('/api/repositories/101/roles')).value.configuration.revision).toBe(2);
     await page.reload();
     await goRolePage(page);
@@ -130,7 +131,7 @@ test('新增角色、删除内置角色并重载，只有三个必需角色不�
     await expect(page.getByLabel('security 使用虚拟电脑权限', { exact: true })).toHaveValue('deny');
     await page.getByRole('button', { name: '删除这个角色', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: '删除角色', exact: true }).click();
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
+    await consoleSave(page).click();
     await expect.poll(async () => (await admin('/api/repositories/101/roles')).value.configuration.revision).toBe(3);
     const roles = (await admin('/api/repositories/101/roles')).value.configuration.roles.map(role => role.role_id);
     expect(roles).not.toContain('reviewer'); expect(roles).not.toContain('security');
@@ -158,13 +159,13 @@ test('旧权限明确显示原动作，保存其他字段保留授权，选择�
     await expect(page.locator('.role-permissions')).toContainText('旧配置保留的能力：创建');
     expect(h.store.get("SELECT value FROM settings WHERE key='roles:101'").value).toBe(raw);
     await page.getByLabel('职责',{exact:true}).fill('保留旧授权');
-    await page.getByRole('button',{name:'保存角色配置',exact:true}).click();
+    await consoleSave(page).click();
     await expect.poll(async()=>(await admin('/api/repositories/101/roles')).value.configuration.revision).toBe(2);
     let saved=(await admin('/api/repositories/101/roles')).value.configuration.roles.find(r=>r.role_id==='dev').permissions;
     expect(saved.computer).toBe('custom');expect(saved.legacy_issues_create).toBe('allow');expect(saved.legacy_issues_read).toBe('deny');expect(saved.legacy_issues_reply).toBe('deny');
     await openRoleFormAdvanced(page);
     await computer.selectOption('allow');await issues.selectOption('read');
-    await page.getByRole('button',{name:'保存角色配置',exact:true}).click();
+    await consoleSave(page).click();
     await expect.poll(async()=>(await admin('/api/repositories/101/roles')).value.configuration.revision).toBe(3);
     saved=(await admin('/api/repositories/101/roles')).value.configuration.roles.find(r=>r.role_id==='dev').permissions;
     expect(saved.computer).toBe('allow');expect(saved.github_issues).toBe('read');expect(saved.legacy_repository).toBeUndefined();expect(saved.legacy_issues_create).toBeUndefined();

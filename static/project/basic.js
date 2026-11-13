@@ -60,12 +60,12 @@ function basicSection() {
     ['机器', current.rules?.computer?.cpus ? `${current.rules.computer.cpus} CPU · ${current.rules.computer.memory_mb} MB（${current.rules.files.find(f=>f.path==='.bot/computer.yaml').source==='repository'?'仓库 .bot/computer.yaml':'控制台'}）` : environment?.environment.computer ? `${environment.environment.computer.cpus} CPU · ${environment.environment.computer.memory_mb} MB` : null]]));
   const branch = settingsForm('分支', [field('基准分支', input('base_branch', policy.base_branch, { maxLength: 256, placeholder: '留空使用仓库默认分支' })),
     note('开发任务从这个分支拉取代码并向它开 PR；检视 Issue 时也读取这个分支的代码。')],
-    form => save(changed({ base_branch: form.elements.base_branch.value.trim() }, { base_branch: policy.base_branch || '' })), { editable, draftKey: 'branch' });
+    form => save(changed({ base_branch: form.elements.base_branch.value.trim() }, { base_branch: policy.base_branch || '' })), { editable, draftKey: 'branch', hideActions: true });
   const automation = settingsForm('检视与开发策略', [
     checkbox('review_enabled', policy.review_enabled, '开启 Issue 与 PR 检视'), checkbox('development_enabled', policy.development_enabled, '开启自动开发'),
     note('此处保存功能开关，不代表任务正在执行。项目禁用时仍可保存，重新启用后生效。')],
     form => save(changed({ review_enabled: form.elements.review_enabled.checked, development_enabled: form.elements.development_enabled.checked },
-      { review_enabled: !!policy.review_enabled, development_enabled: !!policy.development_enabled })), { editable, draftKey: 'automation' });
+      { review_enabled: !!policy.review_enabled, development_enabled: !!policy.development_enabled })), { editable, draftKey: 'automation', hideActions: true });
   const sources = card('规则来源');
   sources.append(note('内置默认、项目控制台和默认分支仓库文件依次覆盖。这里仅展示来源，编辑入口沿用角色与机器页面。'));
   if (!target.rules) sources.append(consoleState('规则来源暂不可读取', '请重新读取；当前不能判断哪一层生效。', { retry: () => reloadProject().catch(error) }));
@@ -76,6 +76,7 @@ function basicSection() {
   advanced.append(tech, sources);
   const layout = element('div', '', 'project-settings-layout');
   layout.append(info, summary, branch, automation, ...globalProjectControls(), advanced);
+  if (editable) attachUnifiedSettingsBar(layout, [branch, automation]);
   return [layout];
 }
 

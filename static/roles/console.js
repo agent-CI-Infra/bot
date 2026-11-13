@@ -83,8 +83,6 @@ function rolesConsole() {
     }
     holder.append(nav);
     const comparison = state.comparison ? roleComparison(state, draw, () => { message.textContent = ''; }) : null;
-    const actions = element('div', '', 'actions role-save');
-    const status = note(state.busy ? '正在读取或保存…' : state.dirty ? '草稿未保存；运行中任务保留原有快照。' : '保存后影响新任务和后续委派；运行中任务保留原有快照。'); status.setAttribute('role', 'status');
     saveRoles = async () => {
       if (state.busy || state.conflict) return;
       state.busy = true; draw(); message.textContent = '';
@@ -102,18 +100,33 @@ function rolesConsole() {
       } finally { if (state) state.busy = false; if (state) state.redraw?.(); }
     };
     const unconfiguredOverview = state.data.configured === false && !current.item && !auxiliaryView;
-    const saveLabel = state.data.configured === false && !state.dirty ? '使用推荐配置' : '保存角色配置';
-    const save = button(saveLabel, () => saveRoles(), unconfiguredOverview && !state.dirty ? 'quiet' : '');
-    save.disabled = !!state.busy || !!state.conflict;
-    const compareButton = button('读取最新版本并比较', compare); compareButton.disabled = !!state.busy;
-    const discard = button('放弃草稿并刷新', async () => {
+    const compareButton = button('读取最新版本并比较', compare, 'quiet'); compareButton.disabled = !!state.busy;
+    const discardRoles = async () => {
       if (state.busy) return;
-      if (state.dirty && !await askConfirm({ title: '放弃未保存的角色修改？', body: ['刷新后读取服务器上的最新配置。'], action: '放弃并刷新' })) return;
+      if (state.dirty && !await askConfirm({ title: '放弃未保存的更改？', body: ['将丢弃这次修改，并重新读取已保存的配置。'], action: '放弃更改' })) return;
       if (!live()) return; target.rolesDraft = null; await read();
-    }); discard.disabled = !!state.busy;
-    if (unconfiguredOverview && !state.dirty) actions.append(status, message, compareButton, discard);
-    else actions.append(status, message, save, compareButton, discard);
+    };
+    // Unconfigured first screen keeps「使用推荐配置」on the intro card (#564). The sticky bar appears once there is a draft.
+    const showBar = !unconfiguredOverview || !!state.dirty;
+    const actions = showBar ? consoleSaveBar({
+      status: state.busy ? '正在读取或保存…' : roleVersionText(state) === '有未保存的更改' ? '有未保存的更改。保存后新任务会用新配置，正在运行的任务不受影响。' : roleVersionText(state),
+      dirty: !!state.dirty,
+      busy: !!state.busy,
+      conflict: !!state.conflict,
+      saveLabel: '保存',
+      onSave: () => saveRoles(),
+      onDiscard: discardRoles,
+      advanced: [compareButton],
+      message,
+    }) : element('div', '', 'actions role-save');
+    if (showBar) {
+      actions.classList.add('role-save');
+      state.saveBar = actions;
+    } else {
+      state.saveBar = null;
+    }
     holder.append(actions);
+
     if (comparison) holder.append(comparison); holder.append(fields);
     if (state.stageError && state.focusStageError) { state.focusStageError = false; focusStagePolicyError(holder, state.stageError); }
     if (comparison && state.focusComparison) {

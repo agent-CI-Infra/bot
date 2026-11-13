@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { goRolePage, openRoleFormAdvanced, openRoleAdvanced } from './open-role-advanced.mjs';
+import { consoleSave, compareWithServer, confirmDiscard } from './console-save.mjs';
 
 
 // #229 slice 1: the AI-team list carries the role facts and distinguishes saved configuration from the shared draft.
@@ -23,12 +24,12 @@ test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生�
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const table = page.locator('.project-table[aria-label="角色解析结果"]'), status = page.locator('[data-role-version]');
     await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible();
-    await expect(status).toHaveText(`配置版本 ${config.revision} · 已生效`);
-    const dirty = () => expect(status).toHaveText(`配置版本 ${config.revision} · 草稿未保存`);
+    await expect(status).toHaveText(`已保存`);
+    const dirty = () => expect(status).toHaveText(`有未保存的更改`);
     const discard = async () => {
-      await page.getByRole('button', { name: '放弃草稿并刷新', exact: true }).click();
-      await page.getByRole('dialog').getByRole('button', { name: '放弃并刷新', exact: true }).click();
-      await expect(status).toHaveText(`配置版本 ${config.revision} · 已生效`);
+      await page.getByTestId('console-save-discard').click();
+      await page.getByRole('dialog').getByRole('button', { name: '放弃更改', exact: true }).click();
+      await expect(status).toHaveText(`已保存`);
     };
 
     await goRolePage(page, { role: 'dev' });
@@ -45,10 +46,10 @@ test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生�
     await expect(table.getByRole('columnheader', { name: '状态', exact: true })).toBeVisible();
     await expect(row).toContainText(dev.responsibility); await expect(row).toContainText('已启用');
     await expect(table.locator('tr[data-role]')).toHaveCount(config.configuration.roles.length);
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
+    await consoleSave(page).click();
     await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
     config = (await admin('/api/repositories/101/roles')).value;
-    await expect(status).toHaveText(`配置版本 ${config.revision} · 已生效`);
+    await expect(status).toHaveText(`已保存`);
 
     await repository(admin, a.id, '102'); await page.goto(h.admin + '/#/projects/102/roles');
     await expect(page.getByRole('heading', { name: '使用推荐的角色分工', exact: true })).toBeVisible();
@@ -99,15 +100,15 @@ for (const [name, act] of [
   const { h, revision, list, detail } = await prepared(page);
   try {
     const status = page.locator('[data-role-version]');
-    await expect(status).toHaveText(`配置版本 ${revision} · 已生效`);
+    await expect(status).toHaveText(`已保存`);
     await page.goto(detail);
     await openRoleFormAdvanced(page);
     await act(page);
     await page.goto(list);
-    await expect(status).toHaveText(`配置版本 ${revision} · 草稿未保存`);
-    await page.getByRole('button', { name: '放弃草稿并刷新', exact: true }).click();
-    await page.getByRole('dialog').getByRole('button', { name: '放弃并刷新', exact: true }).click();
-    await expect(status).toHaveText(`配置版本 ${revision} · 已生效`);
+    await expect(status).toHaveText(`有未保存的更改`);
+    await page.getByTestId('console-save-discard').click();
+    await page.getByRole('dialog').getByRole('button', { name: '放弃更改', exact: true }).click();
+    await expect(status).toHaveText(`已保存`);
   } finally { await h.stop(); }
 });
 test('尚未配置过角色的项目保持「尚未保存。可先使用推荐配置。」，勾选后也不出现「配置版本 0」', async ({ page }) => {
@@ -123,7 +124,7 @@ test('尚未配置过角色的项目保持「尚未保存。可先使用推荐�
     await expect(status).toHaveText('尚未保存。可先使用推荐配置。');
     await openRoleAdvanced(page);
     await page.getByLabel('开启角色协调', { exact: true }).setChecked(true);
-    await expect(status).toHaveText('尚未保存。可先使用推荐配置。');
+    await expect(status).toHaveText('有未保存的更改');
     await expect(status).not.toContainText('配置版本 0');
   } finally { await h.stop(); }
 });

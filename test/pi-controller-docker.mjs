@@ -123,7 +123,7 @@ try {
     if (!(await fold.evaluate(el => el.open))) await fold.locator(':scope > summary').click();
     await page.getByLabel('预算方式',{exact:true}).selectOption('bounded');
     await page.getByLabel('单次运行最多模型轮数',{exact:true}).fill('1');
-    await page.getByRole('button',{name:'保存角色配置',exact:true}).click();
+    await page.getByTestId('console-save').click();
     await page.getByText(/roles.reviewer.budget_policy_ref.max_turns/).waitFor();
     await page.screenshot({path:resolve(out,'roles-field-error.png'),fullPage:true});
     passed('the role forms show the resolved model and report invalid budget limits');
