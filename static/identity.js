@@ -272,6 +272,15 @@ async function renderIdentity() {
     const reverify = element('button', t('identity.reverify'), 'identity-primary btn-primary'); reverify.disabled = true;
     attachGithubReverify(reverify, { current, feedback });
     overview.append(reverify); githubEnabledButtons.push(reverify);
+  } else if (action === 'switch_tenant') {
+    // The repositories are in another organization than the one this session is limited to: one click widens it.
+    const widen = element('button', '切换到所有已授权组织', 'identity-primary identity-switch-tenant');
+    widen.addEventListener('click', async () => {
+      widen.disabled = true;
+      try { await api('/api/identity/tenant', 'POST', { tenant_id: null }); if (current()) await start(); }
+      catch (err) { if (current()) { widen.disabled = false; feedback.textContent = identityRefreshError(err); } }
+    });
+    overview.append(widen);
   }
   const disabledHint = element('p', '', 'muted identity-disabled-hint');
   disabledHint.hidden = true;

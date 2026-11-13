@@ -58,6 +58,7 @@
 .identity-overview .facts { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
 .identity-overview .identity-connection-status { font-size: var(--font-size-4); font-weight: 600; line-height: 1.5; margin: 0 0 8px; }
 .identity-overview .identity-primary { margin-top: 4px; }
+.identity-overview .identity-switch-tenant { margin-right: 8px; }
 .identity-advanced { grid-column: 1/-1; margin: 0; }
 .identity-advanced > summary { cursor: pointer; font-size: var(--font-size-row); }
 .identity-advanced > .side-card { margin-top: 16px; }

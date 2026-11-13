@@ -495,6 +495,43 @@ test('a pending grant names the condition it waits on; states outside the three 
   assert.equal((await scopes())[0].state, 'active');
 });
 
+test('GET /api/identity counts only the repositories the project list of this session shows', async t => {
+  const f = await identityFixture(t), { h } = f;
+  const login = await f.login(), principal = login.result.principal_id, identity = login.result.identity_id;
+  const read = async tenant => {
+    const credential = session(h.store, principal, identity);
+    h.store.run('UPDATE sessions SET tenant_id=? WHERE token_hash=?', tenant, digest(credential.token));
+    const headers = { Cookie: 'bot_session=' + credential.token };
+    const body = await (await fetch(h.admin + '/api/identity', { headers })).json();
+    const listed = (await (await fetch(h.admin + '/api/repositories', { headers })).json()).repositories.map(r => r.id);
+    return { connection: body.github_connection, listed };
+  };
+  const all = await read(null);
+  assert.equal(all.connection.state, 'connected');
+  assert.deepEqual(all.listed, ['101']);
+  assert.equal(all.connection.repository_count, all.listed.length);
+
+  // The session is limited to an organization the repository is not in: the project list is empty, so the identity
+  // page must not say "可访问 1 个仓库，可在项目列表中打开", and it names the way out instead.
+  h.store.run("INSERT OR IGNORE INTO tenants(id,github_host,github_account_id,display_name) VALUES('github.com:30','github.com','30','elsewhere')");
+  const elsewhere = await read('github.com:30');
+  assert.deepEqual(elsewhere.listed, []);
+  assert.equal(elsewhere.connection.state, 'outside_tenant');
+  assert.equal(elsewhere.connection.action, 'switch_tenant');
+  assert.equal(elsewhere.connection.repository_count, 0);
+  assert.deepEqual(elsewhere.connection.repositories, []);
+  assert.equal(elsewhere.connection.status, '已连接 GitHub，但当前组织下没有你能打开的项目');
+  assert.match(elsewhere.connection.next_step, /1 个仓库不在当前组织「elsewhere」里/);
+  assert.match(elsewhere.connection.next_step, /所有已授权组织与项目/);
+  assert.doesNotMatch(elsewhere.connection.next_step, /可在项目列表中打开这些仓库/);
+
+  // The same organization as the repository: the count and the list agree again.
+  const own = await read('github.com:10');
+  assert.equal(own.connection.state, 'connected');
+  assert.deepEqual(own.listed, ['101']);
+  assert.equal(own.connection.repository_count, 1);
+});
+
 test('GET /api/identity names a plain GitHub connection state, the next step, and repository names', async t => {
   const f = await identityFixture(t), { h } = f;
   const read = async (principal, identityId) => {
