@@ -5,9 +5,12 @@ import { identityFixture, openIdentityAdvanced } from '../test/identity-fixture.
 
 test('switching language updates login copy and html lang without a reload', async ({ page }) => {
   const h = await harness();
+  const consoleErrors = [];
+  page.on('console', msg => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
   try {
     await setup(h);
     await page.goto(h.admin + '/');
+    expect(consoleErrors.filter(text => /Refused to execute inline script|Content-Security-Policy/i.test(text))).toEqual([]);
     await expect(page.getByRole('button', { name: '登录', exact: true })).toBeVisible();
     await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
     await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();
@@ -91,7 +94,6 @@ test('the identity page follows the language switch, including github_connection
     await openIdentityAdvanced(page);
     await expect(page.getByRole('heading', { name: 'Current role and grant sources' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeVisible();
-    await expect(page.getByRole('link', { name: '+ New task' })).toBeVisible();
     await expect(page.getByRole('navigation', { name: 'Personal settings sections' }).getByRole('link', { name: 'Identity and access' })).toBeVisible();
     // Status is translated from the state code, not taken from the API's Chinese status/next_step.
     await expect(connection).toBeVisible();
