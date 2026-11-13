@@ -175,6 +175,26 @@ test('role overview is a list of name, enabled, duty and status, without inline 
   const status=view.cards[0].querySelector('[data-role-version]');
   assert.equal(status.textContent,'配置版本 4 · 已生效');
 });
+test('role list status is per-role and refreshes when enabled is toggled', () => {
+  const data=roleData({schema:2,revision:4,enabled:true,controller:{role:'manager',entries},roles:team('pi'),skills:[]});
+  data.permission_items=[{id:'computer',name:'使用虚拟电脑',group:'platform',modes:['deny','allow'],detail:'读取、修改工作区文件和执行命令。'}];
+  const page=loadConsole(['static/app.js','static/views.js','static/project.js','static/roles.js'],()=>[404,{}]);
+  const draft=rolesDraft(data);
+  page.run(`current={id:'101',section:'roles'}; window.roleState=${JSON.stringify({data,draft,dirty:false})};
+    window.drawRoles=()=>{window.roleView=roleOverviewCards(roleState,window.drawRoles);};
+    window.drawRoles();`);
+  const row=id=>page.run(`roleView[0].querySelector(${JSON.stringify('tr[data-role='+id+']')})`);
+  assert.match(text(row('dev')), /已启用 · 已保存/);
+  assert.match(text(row('test')), /已启用 · 已保存/);
+  const box=page.run("roleView[0].querySelector('tr[data-role=dev] input')");
+  box.checked=false;
+  for (const fn of box.listeners.change || []) fn();
+  assert.equal(page.run('roleState.dirty'), true);
+  assert.equal(page.run("roleState.draft.roles.find(r=>r.role_id==='dev').enabled"), false);
+  assert.match(text(row('dev')), /已关闭 · 有未保存的更改/);
+  assert.match(text(row('test')), /已启用 · 已保存/);
+  assert.doesNotMatch(text(row('test')), /有未保存的更改/);
+});
 test('role form edits backends without a JSON editor, and marks the draft dirty', () => {
   const manager=roleForm(roleData({schema:2,revision:4,enabled:true,controller:{role:'manager',entries},roles:team('pi'),skills:[]}), 'manager');
   const dev=roleForm(roleData({schema:2,revision:4,enabled:true,controller:{role:'manager',entries},roles:team('pi'),skills:[]}), 'dev');
