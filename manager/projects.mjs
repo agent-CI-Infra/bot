@@ -603,7 +603,17 @@ export class Projects {
           logFailure(`project ${repo} ${input.request.type} failed`, error);
           this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id); throw error;
         }
-        // On an uncertain exec result, kill the entire environment before releasing its lock.
+        if(action==='execute'&&!workspace&&current?.generation===input.generation&&['ready','busy'].includes(current.state)){
+          const container=this.names(repo,input.generation).container;
+          const reaped=await this.docker.runner(container,{operation_id:randomId(),type:'reap_operation',target_operation_id:input.operation_id},10000).catch(()=>null);
+          const health=await this.docker.runner(container,{operation_id:randomId(),type:'health'},10000).catch(()=>null);
+          if(reaped?.ok&&health?.ok&&health.result?.ready){
+            logFailure(`project ${repo} ${input.request.type} failed, operation ended and runner healthy`,error);
+            this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id);throw error;
+          }
+          logFailure(`project ${repo} operation recovery failed (${!reaped?.ok?'operation cleanup failed':'runner health check failed'})`,error);
+        }
+        // A failed lifecycle action or a runner that cannot be recovered still stops the computer.
         logFailure(`project ${repo} ${action === 'execute' ? input.request.type : action} failed, computer stopped`, error);
         try { await this.stopAll(repo); } catch {}
         this.update(repo, action === 'reset' ? 'reset_failed' : 'failed', 'stopped', error instanceof ManagerError ? error.message : 'operation_failed');

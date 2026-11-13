@@ -63,7 +63,7 @@ async function processes() {
   const rows = [];
   for (const name of await readdir('/proc')) if (/^\d+$/.test(name)) try {
     const stat = await readFile(`/proc/${name}/stat`, 'utf8'), fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    rows.push({ pid: Number(name), state: fields[0], ppid: Number(fields[1]), cmdline: (await readFile(`/proc/${name}/cmdline`, 'utf8')).split('\0').filter(Boolean).join(' ') });
+    rows.push({ pid: Number(name), state: fields[0], ppid: Number(fields[1]), pgid: Number(fields[2]), cmdline: (await readFile(`/proc/${name}/cmdline`, 'utf8')).split('\0').filter(Boolean).join(' ') });
   } catch { /* The process already exited. */ }
   return rows;
 }
@@ -97,6 +97,23 @@ async function reap({ workspace_id: workspaceId, keep_agent: keepAgent }) {
   }
   throw new Error('reap_incomplete');
 }
+// An unscoped operation (for example a Git export) has no task directory. Docker tags its runner and each child inherits
+// that tag. Include descendants and their process groups, but never use the computer-wide reap path here.
+async function reapOperation(operationId) {
+  if(!idPattern.test(operationId||''))throw new Error('invalid_target_operation');
+  let killed=0;const owned=new Set();
+  for(let round=0;round<20;round++){
+    const rows=await processes();
+    for(const row of rows)if(row.pid!==process.pid&&(await readFile(`/proc/${row.pid}/environ`,'utf8').catch(()=>''))
+      .split('\0').includes('BOT_OPERATION_ID='+operationId))owned.add(row.pid);
+    for(let changed=true;changed;){changed=false;for(const row of rows)if(!owned.has(row.pid)&&owned.has(row.ppid)){owned.add(row.pid);changed=true;}}
+    const live=rows.filter(row=>row.pid!==process.pid&&row.pid!==1&&row.state!=='Z'&&owned.has(row.pid));
+    if(!live.length)return {killed,remaining:0};
+    for(const row of live)try{process.kill(row.pgid===row.pid?-row.pid:row.pid,'SIGKILL');killed++;}catch{/* Already gone. */}
+    await new Promise(resolve=>setTimeout(resolve,100));
+  }
+  throw new Error('operation_reap_incomplete');
+}
 // An assistant computer's HOME is its own mount and its temporary files go to /tmp (paths.mjs).
 await mkdir(journal, { recursive: true, mode: 0o700 }); if (!assistant) { await mkdir(workspace+'/home', { recursive: true }); await mkdir(workspace+'/tmp', {recursive:true}); }
 const request = JSON.parse(Buffer.from(process.argv[2] || '', 'base64url').toString());
@@ -106,12 +123,13 @@ let result;
 if (request.type === 'journal_clear' && assistant) {
   try { for (const name of await readdir(journal)) await rm(`${journal}/${name}`, { force: true }); result = { ok: true, result: { cleared: true } }; }
   catch { result = { ok: false, error: 'journal_clear_failed' }; }
-} else if (['tail', 'reap', 'usage', 'prune', 'tasks_list', 'tasks_remove'].includes(request.type)) {
+} else if (['tail', 'reap', 'reap_operation', 'usage', 'prune', 'tasks_list', 'tasks_remove'].includes(request.type)) {
   // Reading progress or usage, stopping leftovers, removing old journal records and listing or removing task directories
   // are repeatable and never journaled.
   try {
     result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : request.type === 'prune' ? { journal: await pruneJournal(journal), store: await pruneStore() }
-      : request.type === 'tasks_list' ? await listTaskDirectories() : request.type === 'tasks_remove' ? await removeTaskDirectories(request.entries) : await reap(request) };
+      : request.type === 'tasks_list' ? await listTaskDirectories() : request.type === 'tasks_remove' ? await removeTaskDirectories(request.entries)
+      : request.type === 'reap_operation' ? await reapOperation(request.target_operation_id) : await reap(request) };
   }
   catch (error) { result = { ok: false, error: request.type + '_failed', ...(request.type.startsWith('tasks_') ? { detail: String(error?.message || 'operation failed').slice(0, 2000) } : {}) }; }
 } else try {

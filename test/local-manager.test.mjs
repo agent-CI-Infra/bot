@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -87,6 +87,20 @@ test('explicit background foreground-server command returns promptly and leaves 
  const start=Date.now(),result=await execute({type:'workspace_command',workspace_id:id,command:'node -e "setInterval(()=>{},1000)"',keep_background:true,timeout_ms:null});
  assert.equal(result.result.running,true);assert.ok(Date.now()-start<5000);assert.doesNotThrow(()=>process.kill(result.result.pid,0));
  await execute({type:'reap',workspace_id:id});
+});
+
+test('a kept service logs beyond pipe capacity after the runner exits and remains reachable',async t=>{
+  const root=mkdtempSync(join(tmpdir(),'bot-background-log-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const manager=new LocalManager('123',root),id=randomWorkspaceId();await manager.call('PUT','/v1/projects/123');
+  const execute=request=>manager.call('POST','/v1/projects/123/execute',{operation_id:randomBytes(24).toString('hex'),generation:1,request});
+  await execute({type:'workspace_init',workspace_id:id});t.after(()=>execute({type:'reap',workspace_id:id}));
+  const script=`const fs=require('fs'),http=require('http');const s=http.createServer((q,r)=>r.end('alive'));s.listen(0,'127.0.0.1',()=>fs.writeFileSync('port',String(s.address().port)));setTimeout(()=>{process.stdout.write('x'.repeat(2*1024*1024));process.stderr.write('stderr-after-return\\n');fs.writeFileSync('printed','yes');},1200);`;
+  const started=await execute({type:'workspace_command',workspace_id:id,command:`node -e ${JSON.stringify(script)}`,keep_background:true,timeout_ms:5000});
+  assert.equal(started.ok,true);assert.equal(started.result.running,true);
+  assert.ok(started.result.log_path.startsWith(join(root,'tasks',id,'logs')+'/'));
+  const probe=await execute({type:'workspace_command',workspace_id:id,command:`node -e "const fs=require('fs');(async()=>{while(!fs.existsSync('printed'))await new Promise(r=>setTimeout(r,50));console.log(await (await fetch('http://127.0.0.1:'+fs.readFileSync('port','utf8'))).text())})()"`,timeout_ms:10000});
+  assert.equal(probe.result.output,'alive\n');
+  const log=readFileSync(started.result.log_path,'utf8');assert.ok(log.length>2*1024*1024);assert.match(log,/stderr-after-return/);
 });
 
 test('restoring a checkpoint preserves an unpublished patch against the same base',async t=>{

@@ -89,6 +89,9 @@ test('command timeouts validate configuration and explicit values, clamp with a 
   process.env.BOT_COMMAND_TIMEOUT_MAX_SECONDS = '60';
   assert.equal((await runCommand(workspace, 'default', { command: 'build' }, 120)).timeout_notice.effective_seconds, 60);
   assert.match(commandTool(120).function.description, /default timeout is 60 seconds/);
+  assert.match(commandTool(120).function.description, /automatically saved to the returned log_path/);
+  assert.match(commandTool(120).function.description, /Ordinary commands clean up their process group/);
+  assert.match(commandTool(120).function.parameters.properties.keep_background.description, /log_path/);
 });
 
 for (const backend of ['native', 'process', 'pi']) {

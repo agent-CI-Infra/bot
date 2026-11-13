@@ -70,6 +70,8 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 `npm run test:deploy:docker` 验收生产部署这一步：取出 `.github/workflows/release.yml` 中 Deploy 步骤发到服务器的脚本原文，在一次性的 Compose 项目 `bot-deploy-recovery-*` 里运行。项目里的 `bot`、`manager` 替身保持 `compose.yaml` 的依赖关系，并忽略停止信号；用例覆盖首次部署、发布新版本、在已创建替换容器时中断（旧容器仍在，以及只剩替换容器）后重跑，以及失败时输出每个容器的状态。基础镜像取本机已有的 `BOT_TEST_BASE_IMAGE`（默认 `department-bot-project-computer:local`，任何带 `sh` 的本机镜像都可以），不拉取镜像；结束后只删除本项目的容器和网络，日志在 `.tmp/deploy-recovery/`。
 
+`npm run test:commands:docker` 使用 `BOT_TEST_BASE_IMAGE`（默认 `department-bot-project-computer:local`）叠加当前 runner，在独立项目电脑中模拟无工作区调用的真实 Docker RPC 超时，检查仅清理该 operation、runner 健康时并发任务继续、健康检查失败时停机。还验证后台服务在 runner 退出后持续输出超过管道容量、自动日志可读且 HTTP 服务仍可访问，以及普通命令的进程组回收。证据在 `.tmp/command-lifecycle-docker/`，结束后删除本次资源和临时镜像。
+
 ## CI 与合入
 
 `main` 只能经 Pull request 合入，合入方式只有 rebase，并且经合并队列（merge queue）排队，不能强推或删除。必需检查在 Pull request 和合并队列上都运行：[`checks.yml`](../.github/workflows/checks.yml) 的 `unit`（`npm run check`、`npm test` 和两个 Compose 文件的校验）与 `e2e`（`npm run test:e2e`，失败时上传 `.tmp/e2e-results`），以及 [`images.yml`](../.github/workflows/images.yml) 构建的四个镜像。新增必需检查的工作流要同时监听 `pull_request` 和 `merge_group`，否则合并队列等不到结果。版本发布见[版本发布与服务器部署](deployment.md#版本发布与服务器部署)。
