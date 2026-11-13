@@ -56,3 +56,30 @@ test('#571 模型页首屏只有默认模型，工作类型覆写用中文名称
     await page.screenshot({ path: `${out}/model-390.png`, fullPage: true });
   } finally { await h.stop(); }
 });
+
+test('#571 覆写摘要显示数量和不可用项，解析错误出现在折叠外', async ({ page }) => {
+  test.setTimeout(90000);
+  const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  try {
+    const { admin, password } = await setup(h), a = await account(admin);
+    await repository(admin, a.id, '101');
+    const modelId = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'Override model', api_url: 'https://model.invalid/v1', api_key: testPassword() })).value.model.id;
+    expect(modelId).toBeTruthy();
+    const patched = await admin('/api/repositories/101/policy', 'PATCH', { task_models: { 'review.pr': modelId, 'development.pr': 'missing-model' } });
+    if (patched.status !== 200) {
+      h.store.run("UPDATE policies SET task_models=? WHERE repository_id=?", JSON.stringify({ 'review.pr': modelId, 'development.pr': 'missing-model' }), '101');
+    }
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await loginModel(page, h, password);
+    const fold = page.getByTestId('model-overrides');
+    await expect(fold.locator('summary')).toHaveText('按任务类型覆写（已设 2 项，1 项不可用）');
+    await expect(fold).toHaveJSProperty('open', true);
+
+    h.store.run("UPDATE policies SET task_models='not-json' WHERE repository_id=?", '101');
+    await page.reload();
+    await expect(page.getByRole('heading', { name: '项目默认模型', exact: true })).toBeVisible();
+    await expect(page.getByTestId('task-models-error')).toBeVisible();
+    await expect(page.getByTestId('model-overrides')).toHaveJSProperty('open', true);
+  } finally { await h.stop(); }
+});
