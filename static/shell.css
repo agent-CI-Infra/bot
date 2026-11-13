@@ -202,7 +202,8 @@ body.console-ready .management-page { left: var(--console-rail); }
 html { scroll-padding-bottom: calc(var(--console-mobile-height,0px) + 100px); }
 @media(max-width:767px) { .console-ready #paging { padding-right:96px; } }
 
-/* #562: 390 / 768 / 1440 layout sets. Mobile nav structure is unchanged (#481 / #496). */
+/* #562: 390 / 768 / 1440 layout sets. Mobile nav structure is unchanged (#481 / #496); #481 already hides the
+   floating assistant on a phone, so there is no launcher rule here. */
 @media (max-width: 1439px) {
   .role-nav {
     flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
@@ -212,21 +213,6 @@ html { scroll-padding-bottom: calc(var(--console-mobile-height,0px) + 100px); }
 }
 
 @media (max-width: 767px) {
-  .console-ready .management-launcher {
-    right: 12px;
-    bottom: calc(var(--console-mobile-height) + 8px);
-    width: var(--control-min);
-    height: var(--control-min);
-    min-height: var(--control-min);
-    min-width: var(--control-min);
-    padding: 0;
-    gap: 0;
-    border-radius: 50%;
-    justify-content: center;
-    z-index: 46;
-  }
-  .console-ready .management-launcher-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
-  .console-ready .management-launcher-icon { width: 28px; height: 28px; font-size: 16px; }
   .roles-page .role-save { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; }
   .roles-page .role-save .muted, .roles-page .role-save [role=status], .roles-page .role-save .view-error { flex: 1 1 100%; margin: 0; }
   .roles-page .role-save button { flex: 0 1 auto; width: auto; max-width: calc(100% - 56px); }

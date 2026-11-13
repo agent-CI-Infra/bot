@@ -36,6 +36,14 @@ async function login(page, h, password) {
   // After #481, 390 puts 退出登录 in the account menu; wider screens keep the inline button.
   const account = page.locator('#console-account');
   await expect(account.or(page.getByRole('button', { name: '退出登录', exact: true })).first()).toBeVisible();
+  if (await account.isVisible()) {
+    // F7: the phone's sign-out really sits in the account menu, and the menu closes again.
+    await account.click();
+    const menu = page.locator('#console-account-menu');
+    await expect(menu.getByRole('button', { name: '退出登录', exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(menu).toBeHidden();
+  }
 }
 
 async function metrics(page, name) {
@@ -88,10 +96,13 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     expect(identity.fabHitsTarget).toBe(false);
     expect(identity.fabHitsNav).toBe(false);
     expect(identity.fabHitsLogout).toBe(false);
-    // #481 hides the floating assistant on a phone; if it is shown, it stays a compact control.
-    if (identity.fab && identity.fab.width > 0 && identity.fab.height > 0) {
-      expect(identity.fab.width).toBeLessThanOrEqual(52);
-    }
+    // F6: #481 hides the floating assistant on a phone, so there is no launcher to collide with; the assistant is the
+    // bar's 助手 destination instead.
+    await expect(page.locator('#management-launcher')).toBeHidden();
+    expect(identity.fab === null || (identity.fab.width === 0 && identity.fab.height === 0)).toBe(true);
+    const assistant = page.locator('.console-mobile-nav a[href="#/management"]');
+    await expect(assistant).toBeVisible();
+    await expect(assistant).toHaveAccessibleName(/^助手/);
     expect(identity.navDisplay).toBe('grid');
     await page.screenshot({ path: resolve(out, 'identity-390.png'), fullPage: true });
 
