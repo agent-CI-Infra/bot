@@ -411,7 +411,12 @@ addEventListener('console-scope-change', () => {
   const chat = managementChat;
   if (!chat?.client) return;
   const select = chat.panel.querySelector('select[aria-label="当前管理作用域"]');
-  if (!select || select.dataset.override === '1') return;
+  if (!select) return;
+  // #493: a page-local override keeps the scope and the conversation the reader chose, but the sentence beside the control
+  // still has to name the default the shell picker now shows; only the note is rewritten, in this same frame. Rewriting it
+  // also re-decides the override flag against that default, so a picker that lands on the page's own project clears the
+  // flag here and the next change follows it instead of rewording the sentence again.
+  if (select.dataset.override === '1') { chat.client.refreshScopeNote?.(); return; }
   const shared = typeof consoleDefaultProject === 'function' ? consoleDefaultProject() : null;
   const value = shared && [...select.options].some(option => option.value === 'project:' + shared) ? 'project:' + shared : 'platform';
   chat.client.setScope(value).catch(() => { /* the chat reports its own reconnect state */ });
@@ -444,8 +449,12 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   // A scope is an override only while it names something the shell default does not. Choosing the default's own project is
   // the default, so it keeps following the picker and the note keeps one wording instead of claiming both at once.
   const isOwnScope = value => value !== defaultScopeOf();
+  // #493: one place decides the flag, from the control's value and the default as they are now. The render, applyScope and
+  // the note a picker change rewrites all ask here, so the sentence, the control and the flag cannot disagree: a scope that
+  // the picker has since made the default stops being an override, and the next change follows it instead of only rewording.
+  const syncOverride = () => { scope.dataset.override = isOwnScope(scope.value) ? '1' : ''; };
   scope.value = projectId && available('project:' + projectId) ? 'project:' + projectId : defaultScopeOf();
-  if (isOwnScope(scope.value)) scope.dataset.override = '1';
+  syncOverride();
   const scopeNote = element('p', '', 'management-scope-note'), scopeNoteId = 'management-scope-note';
   scopeNote.id = scopeNoteId;
   const scopeCaption = () => {
@@ -860,7 +869,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   const applyScope = value => {
     const changed = scope.value !== value;
     scope.value = value;
-    scope.dataset.override = isOwnScope(value) ? '1' : '';
+    syncOverride();
     scopeNote.textContent = scopeCaption();
     return changed;
   };
@@ -870,6 +879,10 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   try { await openConversation(); } catch (err) { clearInterval(elapsedTimer); document.removeEventListener('selectionchange', selectionChanged); throw err; }
   return {
     async setScope(value) { if (!available(value)) { showError(new Error('当前账号无权管理这个项目。')); return; } if (applyScope(value)) await openConversation(); },
+    // #493: a shell-picker change may rewrite the note while an override is active; the control and the conversation stay
+    // where the reader put them, and the flag is re-decided here from the default the picker now shows. The note is still
+    // the only thing this writes, and applyScope stays the single writer of the control's value.
+    refreshScopeNote() { syncOverride(); scopeNote.textContent = scopeCaption(); },
     focus() { if (toolsOpen) toolsButton.focus(); else message.focus(); },
     dispose() { disposed = true; scopeGeneration++; formGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); document.removeEventListener('selectionchange', selectionChanged); pendingMarkdown.clear(); drafts.clear(); }
   };
