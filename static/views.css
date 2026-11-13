@@ -382,8 +382,10 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .project-page:has(.roles-page) .project-content{max-width:none;width:100%}
 .roles-page .project-table{width:100%;table-layout:auto}
 .roles-page .project-table td{min-width:0;vertical-align:top;overflow-wrap:anywhere}
-.roles-page .role-nav,.roles-page .role-editor-nav{overflow-x:auto;max-width:100%;flex-wrap:wrap}
-.roles-page .role-nav a,.roles-page .role-editor-nav button{white-space:normal;overflow-wrap:anywhere}
+/* .role-nav keeps the #562 single scrolling row below 1440px; only the editor section nav wraps. */
+.roles-page .role-nav{overflow-x:auto;max-width:100%}
+.roles-page .role-editor-nav{overflow-x:auto;max-width:100%;flex-wrap:wrap}
+.roles-page .role-editor-nav button{white-space:normal;overflow-wrap:anywhere}
 .roles-page label.check,.roles-page .role-enable{align-items:center;gap:8px;min-height:var(--control-min,44px)}
 .roles-page input[type=checkbox]{width:18px;height:18px;flex:none;accent-color:var(--color-brand,#1b6b7a);cursor:pointer}
 .roles-page input[type=checkbox]:disabled{cursor:not-allowed;accent-color:var(--color-text-muted,#607087)}
