@@ -90,4 +90,9 @@ test('only gateway faults read as an unavailable model; unusable output, oversiz
   }
   // Assistant turns have no step limit (#435); a group answer stopped in the console says so instead of a generic failure.
   assert.match(serviceFailure('conversation_stopped', '仓库问答助手'), /控制台停止.*进展消息保留/);
+  for (const code of ['service_role_unavailable', 'service_role_not_bindable']) {
+    const msg = serviceFailure(code, '仓库问答助手');
+    assert.match(msg, /个人设置 → 飞书绑定.*配置仓库与权限/, code);
+    assert.doesNotMatch(msg, /群助手设置/, code);
+  }
 });
