@@ -60,10 +60,11 @@ test('two groups on one role get separate computers and HOMEs; the next turn reu
   script(f, { [a.id]: [['read_file', { path: 'note.txt' }]] });
   assert.equal((await ask(f, 'oc_group'))[0].content, 'tmp\n', 'the next turn reuses the computer and its working directory');
   assert.equal(f.assistant.docker.created, created);
-  // A member joins: the fence changes, so the sweep removes the computer; the HOME stays the same generation.
-  f.h.store.run('UPDATE channel_chats SET context_revision=context_revision+1 WHERE id=?', a.id);
+  // A member joins or leaves: authorization and the idle computer remain usable.
+  const source=f.h.channels.turnMessages.event(f.h.store.get("SELECT * FROM channel_inbox WHERE chat_ref=? AND dedup_key LIKE 'message:%' LIMIT 1",a.id));
+  f.h.channels.ledger.accept({...source,kind:'audience_changed'});
   await f.service.sweep(); await Promise.all([...f.assistant.computers.removing.values()]);
-  assert.ok(!f.assistant.computers.leases.has(ownerA) && f.assistant.computers.leases.has(ownerB));
+  assert.ok(f.assistant.computers.leases.has(ownerA) && f.assistant.computers.leases.has(ownerB));
   script(f, { [a.id]: [['read_file', { path: '~/report.md' }]] });
   assert.equal((await ask(f, 'oc_group'))[0].content, 'group A data');
   assert.equal(f.h.store.get('SELECT generation FROM assistant_homes WHERE owner=?', ownerA).generation, 1);
@@ -112,4 +113,20 @@ test('global settings and the console show and change assistant computers; clear
   assert.ok(!existsSync(join(f.assistant.homes, owner, 'home-1', 'a.txt')) && !f.assistant.computers.leases.has(owner));
   assert.ok(f.h.store.get("SELECT 1 FROM audit WHERE action='assistant_computers.home_cleared' AND resource_id=?", owner));
   assert.equal((await f.admin('/api/assistant-computers/' + 'f'.repeat(32) + '/clear', 'POST', {})).status, 404);
+});
+
+test('recalling the current group question preserves its computer for the next question', async t => {
+  const f=await fixture(t),chat=await boundGroup(f,['101','102']),owner=ownerId({kind:'group',subject:chat.id,tenant:chat.installation_tenant});
+  script(f,{[chat.id]:[['write_file',{path:'~/kept.txt',content:'retained'}],['run_command',{command:'printf ready'}]]});const written=await ask(f,'oc_group');assert.equal(written[0]?.written,true,JSON.stringify(written));
+  assert.ok(f.assistant.computers.leases.has(owner),'run_command created the group computer');
+  const fence=f.h.channels.serviceBindings.fence(chat.id);
+  let release,started;const waiting=new Promise(r=>{started=r;}),gate=new Promise(r=>{release=r;});t.after(()=>release());
+  f.modelState.respond=async(_body,res)=>{started();await gate;reply(res,{role:'assistant',content:'不应投递'});};
+  const source=inGroup('撤回当前问题'),receipt=await post(f.h,f.id,source);await waiting;
+  await post(f.h,f.id,{header:{...source.header,event_id:'recall-'+source.header.event_id,event_type:'im.message.recalled_v1'},
+    event:{chat_id:'oc_group',message_id:source.event.message.message_id,recall_time:String(Date.now())}});
+  release();assert.equal((await done(f,receipt)).state,'failed');await f.service.sweep();
+  assert.equal(f.h.channels.serviceBindings.fence(chat.id),fence);
+  assert.ok(f.assistant.computers.leases.has(owner),'a recalled question keeps the idle computer');
+  script(f,{[chat.id]:[['read_file',{path:'~/kept.txt'}]]});assert.equal((await ask(f,'oc_group'))[0].content,'retained');
 });

@@ -127,14 +127,22 @@ test('revocation while the model waits blocks late writes, old history and prote
   assert.ok(!JSON.stringify(f.wire.sent).includes('Inspect task facts'));
 });
 
-test('recalled private sources invalidate Web context, then continue with fresh history',async t=>{
+test('recalled private history remains reachable and the same conversation projects current sources',async t=>{
   const f=await channelFixture(t);
   const initial=await im(f,'暂停任务');
   const recall={header:{...initial.event.header,event_id:'recall-personal-request',event_type:'im.message.recalled_v1'},event:{chat_id:'oc_private',message_id:initial.event.event.message.message_id,recall_time:String(Date.now())}};
   await finished(f.h,(await post(f.h,f.id,recall)).value.operation_id);
-  assert.equal((await f.admin('/api/management/conversations/'+initial.row.conversation_id+'/events')).status,409);
-  f.modelState.respond=async(body,res)=>{assert.deepEqual(input(body).history,[]);reply(res,'请重新说明要处理的项目和任务。');};
-  const fresh=await im(f,'继续');assert.equal(fresh.row.state,'completed',fresh.row.error);assert.notEqual(fresh.row.conversation_id,initial.row.conversation_id);
+  assert.equal((await f.admin('/api/management/conversations/'+initial.row.conversation_id+'/events')).status,200);
+  const writes=f.h.store.get('SELECT count(*) n FROM management_commands').n;
+  f.modelState.respond=async(body,res)=>{
+    const context=input(body);assert.equal(context.history.length,1);
+    assert.equal(context.history[0].request.content,'[消息已撤回]');assert.equal(context.history[0].reply,undefined);
+    assert.ok(context.history[0].operations.some(op=>op.operation==='task.pause'));
+    assert.ok(!JSON.stringify(context).includes('暂停任务'));assert.equal(context.source_updates.messages[0].change,'recalled');
+    reply(res,'请重新说明要处理的项目和任务。');
+  };
+  const fresh=await im(f,'继续');assert.equal(fresh.row.state,'completed',fresh.row.error);assert.equal(fresh.row.conversation_id,initial.row.conversation_id);
+  assert.equal(f.h.store.get('SELECT count(*) n FROM management_commands').n,writes);
 });
 
 test('ambiguous tasks only ask for a choice and a stale write revision cannot pause another task',async t=>{

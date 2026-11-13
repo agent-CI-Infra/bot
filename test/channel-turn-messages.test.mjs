@@ -380,13 +380,13 @@ test('queued messages accepted before a turn starts are claimed once and do not 
 for (const kind of ['sensitive', 'recalled']) test(`a ${kind} merged message is never injected or included in a final answer (#458)`, async t => {
   const f = await group(t), held = gate(t); let calls = 0, executing = false;
   f.service.serviceSessions.own.invoke = async () => { executing = true; await held.wait; return { conclusion: '完成' }; };
-  f.modelState.respond = async (body, res) => { calls++; assert.ok(!JSON.stringify(body).includes('must-stay-private')); return call(res, 'start_own_task'); };
+  f.modelState.respond = async (body, res) => { calls++; assert.ok(!JSON.stringify(body).includes('must-stay-private')); return calls===1?call(res, 'start_own_task'):say(res,'原问题正常完成'); };
   const initial = await post(f.h, f.id, inGroup('开始')); await until(() => executing);
   const event = inGroup(kind === 'sensitive' ? 'password=must-stay-private' : '将被撤回的问题'), extra = await post(f.h, f.id, event);
   if (kind === 'recalled') await post(f.h, f.id, { header: { ...event.header, event_id: 'recall-' + event.header.event_id, event_type: 'im.message.recalled_v1' },
     event: { chat_id: 'oc_group', message_id: event.event.message.message_id, recall_time: String(Date.now()) } });
-  held.release(); assert.equal((await done(f, initial)).state, 'failed'); assert.equal((await done(f, extra)).state, 'failed');
-  assert.equal(calls, 1); assert.ok(!sent(f).some(s => s.includes('不应发出的草稿') || s.includes('must-stay-private')));
+  held.release(); assert.equal((await done(f, initial)).state, 'completed'); assert.equal((await done(f, extra)).state, 'completed');
+  assert.equal(calls, 2); assert.ok(!sent(f).some(s => s.includes('不应发出的草稿') || s.includes('must-stay-private')));
 });
 
 test('private management stop also returns its merged messages to a new management turn (#458)', async t => {
@@ -505,4 +505,24 @@ test('each merged message allows one more progress message in the turn (#458)', 
   assert.deepEqual(results.slice(0, 12).map(r => r.sent), Array(12).fill(true));
   assert.deepEqual([results[11].remaining, results[12].error], [0, 'stage_message_limit']);
   assert.equal(f.h.store.get('SELECT count(*) n FROM channel_service_turn_messages').n, 12);
+});
+
+for(const personal of [false,true])test(`${personal?'private':'group'} recalling an already injected supplemental message refreshes only the active input`,async t=>{
+  const f=personal?await channelFixture(t):await group(t),first=gate(t),allowFirst=gate(t),second=gate(t),allowSecond=gate(t);let calls=0;
+  const target=personal?f.service.management:f.service.serviceSessions;
+  target.own.invoke=async()=>({conclusion:'只读旁支已完成'});
+  f.modelState.respond=async(body,res)=>{
+    calls++;
+    if(calls===1){first.release();await allowFirst.wait;return call(res,'start_own_task');}
+    if(calls===2){assert.match(JSON.stringify(body),/supplement-to-recall/);second.release();await allowSecond.wait;return say(res,'依赖撤回补充的草稿');}
+    assert.ok(!JSON.stringify(body).includes('supplement-to-recall'));
+    assert.match(JSON.stringify(body),/recalled/);return say(res,'原问题正常完成');
+  };
+  const initial=await post(f.h,f.id,personal?envelope('原问题'):inGroup('原问题'));await first.wait;
+  const event=personal?envelope('supplement-to-recall'):inGroup('supplement-to-recall'),extra=await post(f.h,f.id,event);
+  allowFirst.release();await second.wait;
+  await post(f.h,f.id,{header:{...event.header,event_id:'recall-'+event.header.event_id,event_type:'im.message.recalled_v1'},
+    event:{chat_id:event.event.message.chat_id,message_id:event.event.message.message_id,recall_time:String(Date.now())}});
+  allowSecond.release();assert.equal((await done(f,initial)).state,'completed');assert.equal((await done(f,extra)).state,'completed');
+  assert.equal(calls,3);assert.ok(!sent(f).some(text=>text.includes('依赖撤回补充的草稿')));
 });
