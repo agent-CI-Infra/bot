@@ -134,7 +134,8 @@ test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少
     await page.goto(h.admin + '/#/more');
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
     await page.screenshot({ path: `${out}/more-after-390.png`, fullPage: true });
-    // login at 390: logout first
+    // login at 390: logout first. Since #481 the phone header keeps sign-out in the account menu.
+    await page.getByRole('button', { name: '账号菜单' }).click();
     await page.getByRole('button', { name: '退出登录' }).click();
     await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();
     const login390 = await page.evaluate(contrastScript());
