@@ -70,6 +70,12 @@
 .model-overrides, .model-catalog { margin: 16px 0 0; }
 .model-overrides > summary, .model-catalog > summary {
   cursor: pointer; min-height: var(--control-min, 44px); display: flex; align-items: center;
-  font-size: 14px; font-weight: 600;
+  font-size: 14px; font-weight: 600; list-style: none;
 }
+.model-overrides > summary::-webkit-details-marker,
+.model-catalog > summary::-webkit-details-marker { display: none; }
+.model-overrides > summary::before,
+.model-catalog > summary::before { content: '▸'; margin-right: 8px; color: var(--color-text-muted, #536c78); }
+.model-overrides[open] > summary::before,
+.model-catalog[open] > summary::before { content: '▾'; }
 .model-overrides .project-table { margin-top: 12px; }

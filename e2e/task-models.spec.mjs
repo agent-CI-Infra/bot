@@ -46,7 +46,10 @@ test('角色详情查看规则来源，模型独立管理且项目不能修改�
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page).toHaveURL(/#\/projects\/101\/model$/);
     await expect(page.getByRole('table', { name: '工作流', exact: true })).toHaveCount(0);
-    await expect(page.getByRole('table', { name: '工作类型模型', exact: true })).toBeHidden();
+    // A stored override whose model was deleted stays visible on the first screen so the fault is not hidden in a fold.
+    await expect(page.getByTestId('model-overrides').locator('summary')).toContainText('项不可用');
+    await expect(page.getByTestId('model-overrides')).toHaveJSProperty('open', true);
+    await expect(page.getByRole('table', { name: '工作类型模型', exact: true })).toBeVisible();
     await openModelOverrides(page);
     await openModelCatalog(page);
     await expect(page.getByRole('table', { name: '工作类型模型', exact: true })).toBeVisible();
