@@ -4,3 +4,12 @@
 @media(max-width:760px){.schedule-panel{padding:12px}.schedule-editor-layout{display:block}.schedule-panel .schedule-time-preview{position:static;margin:16px 0}.schedule-editor-steps{display:flex;gap:6px;overflow:auto;padding-bottom:8px}.schedule-editor-steps button{flex:none;min-height:44px}.schedule-editor-steps [aria-current=step]{background:var(--color-brand-weak);color:var(--color-brand)}.schedule-editor-layout>form[data-schedule-step=content] .schedule-editor-section:not([data-step=content]),.schedule-editor-layout>form[data-schedule-step=identity] .schedule-editor-section:not([data-step=identity]),.schedule-editor-layout>form[data-schedule-step=time] .schedule-editor-section:not([data-step=time]),.schedule-editor-layout>form[data-schedule-step=destination] .schedule-editor-section:not([data-step=destination]),.schedule-editor-layout>form[data-schedule-step=limits] .schedule-editor-section:not([data-step=limits]){display:none}}
 
 .schedule-context{overflow-wrap:anywhere;font-size:12px;padding:10px;background:var(--color-surface-alt);border-left:3px solid var(--color-brand);margin:0}
+/* #572: plan templates on the first screen; advanced time, identity and subscription conditions stay folded. */
+.schedule-templates{margin:0 0 16px;padding:16px;background:var(--color-surface-alt, #f4f6f9);border-radius:var(--radius-card, 12px);display:grid;gap:12px;min-width:0}
+.schedule-templates h4{margin:0}
+.schedule-templates .actions, .schedule-templates > button{min-height:var(--control-min, 44px)}
+.schedule-templates > button{justify-self:start}
+.schedule-identity-fold > summary, .schedule-time-rules > summary, .subscription-advanced > summary{
+  cursor:pointer;min-height:var(--control-min, 44px);display:flex;align-items:center;font-weight:600;
+}
+.schedule-identity-fold, .subscription-advanced{margin:0}

@@ -118,7 +118,8 @@ async function renderSchedules(panel, project) {
   const zone = input('计划时区', 'Asia/Shanghai'), recurrence = select('重复方式', [['cron', 'Cron（本地时间）'], ['interval', '固定周期']]);
   const cron = input('Cron 表达式', '0 9 * * *'), interval = input('固定周期分钟', '1440', 'number');
   const presets=[['0 9 * * *','每天 09:00'],['0 18 * * *','每天 18:00'],['0 9 * * 1','每周一 09:00'],['custom','自定义 Cron / 固定周期']];
-  const preset=select('常用触发时间',presets),timeRules=element('details','','schedule-time-rules');
+  const preset=select('常用触发时间',presets),timeRules=element('details','','fold schedule-time-rules');
+  timeRules.dataset.testid='schedule-time-rules';
   timeRules.append(element('summary','高级时间规则（Cron / 固定周期）'),field('重复方式',recurrence),field('Cron（分 时 日 月 周）',cron),field('固定周期分钟',interval));
   const syncPreset=()=>{preset.value=recurrence.value==='cron'&&presets.some(([value])=>value===cron.value)?cron.value:'custom';timeRules.open=preset.value==='custom';};
 
@@ -127,6 +128,7 @@ async function renderSchedules(panel, project) {
   const instruction=document.createElement('textarea');instruction.rows=3;instruction.setAttribute('aria-label','定时检查内容');instruction.dataset.scheduleField='定时检查内容';
   const instructionField=field('定时检查内容',instruction);
   const misfire = select('遗漏策略', [['skip', '跳过遗漏'], ['once', '宽限期内只补一次']]), grace = input('宽限期分钟', '1', 'number');
+  timeRules.append(field('计划时区（IANA）',zone),field('有效期开始（ISO 时间）',start),field('有效期结束（可留空）',end),field('遗漏策略',misfire),field('宽限期分钟',grace));
   const limits = {};
   const budgetBox = element('details', ''); budgetBox.append(element('summary', '运行限制'));
   for (const [key, label, value] of [['concurrency', '计划并发', 1], ['runtime_ms', '最长运行毫秒', 60000], ['runs', '每天运行次数', 100], ['model_calls', '每天模型调用次数', 0], ['cost_micros', '每天费用上限（微单位）', 0], ['retries', '最大自动重试', 3], ['manual_retries', '人工补发次数上限', 1], ['notifications_per_minute', '每分钟通知数', 10]]) {
@@ -180,10 +182,17 @@ async function renderSchedules(panel, project) {
     if (!id) { await renderSchedules(container,project); return; }
     fill(); ++activePreview; showReceipt();
   };
+  const identityFold = element('details','','fold schedule-identity-fold');
+  identityFold.dataset.testid='schedule-identity-fold';
+  identityFold.append(element('summary','高级身份选项'),field('执行身份类型',kind),field('项目服务身份',actor),field('项目维护人',maintainer));
+  const syncFoldsForViewport=()=>{ if (window.innerWidth<=760) identityFold.open=true; };
+  const onFoldResize=()=>{ if (!panel.isConnected) { window.removeEventListener('resize',onFoldResize); return; } syncFoldsForViewport(); };
+  window.addEventListener('resize',onFoldResize);
+  syncFoldsForViewport();
   const sections = [
     ['content','执行内容',[field('计划名称',name),field('执行内容',workflow),instructionField]],
-    ['identity','身份与维护人',[field('执行身份类型',kind),field('项目服务身份',actor),field('项目维护人',maintainer)]],
-    ['time','触发时间',[field('计划时区（IANA）',zone),field('常用触发时间',preset),timeRules,field('有效期开始（ISO 时间）',start),field('有效期结束（可留空）',end),field('遗漏策略',misfire),field('宽限期分钟',grace)]],
+    ['identity','身份与维护人',[identityFold]],
+    ['time','触发时间',[field('常用触发时间',preset),note('先选每天或每周的常用时间；Cron、时区和有效期在「高级时间规则」里。'),timeRules]],
     ['destination','通知目的地',[field('计划目的地',destination),note('保存和发送仍会重新检查身份、目的地与接收范围；登记不表示已送达。')]],
     ['limits','运行限制',[budgetBox]],
   ];
@@ -231,6 +240,26 @@ async function renderSchedules(panel, project) {
   }
   syncPreset(); syncFields(); updateMeta(); showReceipt();
   renderSubscriptionEditor(panel, {project,destinations,read,command,model:state.subscription,busy:()=>state.sending || !!state.envelope,invalidate:revoked,active:live});
+  const applyDailyDigest=()=>{
+    name.value='每日摘要'; workflow.value='report.daily'; kind.value='personal';
+    zone.value=zone.value||'Asia/Shanghai'; recurrence.value='cron'; cron.value='0 9 * * *';
+    if (destination.options.length && !destination.value) destination.selectedIndex=0;
+    dirty=true; state.selected=''; state.fields=capture(); state.templateNotice='已套用每日摘要模板：每天 09:00 发送项目日报。可改常用触发时间和目的地后保存。';
+    if (chosen.value) { dirty=false; chosen.value=''; void renderSchedules(container,project); return; }
+    syncPreset(); syncFields(); updateMeta(); status.textContent=state.templateNotice; state.templateNotice=null;
+  };
+  const applyFailureNotice=()=>{ void state.subscription.applyFailureTemplate?.(); };
+  const templates=element('section','','schedule-templates');
+  templates.dataset.testid='schedule-templates';
+  templates.append(
+    element('h4','常用计划模板'),
+    note('先选用一个模板，再按需要改时间和目的地。不必先填完整高级表单。'),
+    button('使用每日摘要模板',applyDailyDigest),
+    button('使用失败时通知模板',applyFailureNotice)
+  );
+  const list=panel.querySelector('.schedule-list');
+  if (list) list.before(templates); else panel.prepend(templates);
+  if (state.templateNotice) { status.textContent=state.templateNotice; state.templateNotice=null; }
   renderScheduleRecords(panel, { project, read, invalidate: revoked });
   panel.append(button('刷新定时与通知', () => renderSchedules(container, project), 'quiet'));
   showReceipt();

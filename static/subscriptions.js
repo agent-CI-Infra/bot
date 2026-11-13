@@ -26,7 +26,14 @@ function renderSubscriptionEditor(host, { project, destinations, read, command, 
   for(const [key,label] of Object.entries(labels)){const input=document.createElement('input');input.type='checkbox';input.setAttribute('aria-label',label);checks[key]=input;eventFields.append(field(label,input));}
   const preview=element('div','','subscription-preview');preview.setAttribute('aria-label','事件订阅时间预览');
   const errorBox=element('p','','view-error');errorBox.setAttribute('role','alert');
-  const panes=[['events','事件与范围',[field('订阅名称',name),eventFields]],['time','聚合与静默',[field('聚合窗口分钟',aggregate),field('订阅时区（IANA）',zone),field('静默开始',start),field('静默结束',end)]],['destination','接收方',[field('订阅目的地',destination),consoleLink('#/identity','管理会话绑定和范围'),note('从已绑定的私聊或你能管理、覆盖本项目的群中选择；预览只说明时间，不会发送通知。')]],['confirm','确认与预览',[field('启用事件订阅',enabled),preview]]];
+  const subAdvanced=element('details','','fold subscription-advanced');
+  subAdvanced.dataset.testid='subscription-advanced';
+  subAdvanced.append(element('summary','高级通知条件'),field('聚合窗口分钟',aggregate),field('订阅时区（IANA）',zone),field('静默开始',start),field('静默结束',end));
+  const syncSubFold=()=>{ if (window.innerWidth<=760) subAdvanced.open=true; };
+  const onSubFoldResize=()=>{ if (!root.isConnected) { window.removeEventListener('resize',onSubFoldResize); return; } syncSubFold(); };
+  window.addEventListener('resize',onSubFoldResize);
+  syncSubFold();
+  const panes=[['events','事件与范围',[field('订阅名称',name),eventFields]],['time','聚合与静默',[note('聚合窗口、时区和静默时段在「高级通知条件」里。'),subAdvanced]],['destination','接收方',[field('订阅目的地',destination),consoleLink('#/identity','管理会话绑定和范围'),note('从已绑定的私聊或你能管理、覆盖本项目的群中选择；预览只说明时间，不会发送通知。')]],['confirm','确认与预览',[field('启用事件订阅',enabled),preview]]];
   const steps=element('div','','subscription-steps');form.prepend(steps);
   for(const [key,label,children] of panes){const pane=element('section','','subscription-pane');pane.dataset.step=key;pane.append(element('h5',label),...children);fields.append(pane);const step=button(label,()=>{model.step=key;form.dataset.step=key;for(const node of steps.children)node.setAttribute('aria-current',node===step?'step':'false');},'quiet');step.dataset.step=key;step.setAttribute('aria-current',key===(model.step||'events')?'step':'false');steps.append(step);}
   form.dataset.step=model.step||'events';
@@ -43,6 +50,15 @@ function renderSubscriptionEditor(host, { project, destinations, read, command, 
   const capture=()=>({name:name.value,destination_id:destination.value,events:Object.entries(checks).filter(([,node])=>node.checked).map(([key])=>key),projects:[project],aggregate_ms:Number(aggregate.value)*60000,timezone:zone.value,quiet_start:start.value||undefined,quiet_end:end.value||undefined,enabled:enabled.checked});
   const destinationError=error=>error.code?.startsWith('channel_')||error.code?.startsWith('schedule_destination_');
   function fill(){const spec=model.fields||selected?.spec||defaults();ensureDestination(spec.destination_id);name.value=spec.name;zone.value=spec.timezone;aggregate.value=String(spec.aggregate_ms/60000);start.value=spec.quiet_start||'';end.value=spec.quiet_end||'';destination.value=spec.destination_id;enabled.checked=spec.enabled;for(const [key,node]of Object.entries(checks))node.checked=spec.events.includes(key);}
+  model.applyFailureTemplate=async()=>{
+    if(model.selected||model.fields){await select(null);if(!live()||model.selected)return;}
+    name.value='失败时通知';
+    checks['task.failed'].checked=true;checks['ci.failed'].checked=true;checks['ci.recovered'].checked=false;checks['project.daily'].checked=false;
+    if(destination.options.length&&!destination.value)destination.selectedIndex=0;
+    enabled.checked=true;
+    changed();
+    message.textContent='已套用失败时通知模板：任务或 CI 失败时发送通知。可改接收方后保存。';
+  };
   // Freeze both versions at the first edit; a read or time preview must not silently rebase this draft.
   function changed(){if(!live())return;if(!model.fields){model.draftRevision=model.lastReadRevision;model.baseRevision=selected?.revision??null;}model.fields=capture();model.error='';model.flash='';errorBox.textContent='';++previewGeneration;preview.textContent='草稿已修改，请重新预览发送时间。';if(model.conflict)drawComparison();update();}
   fields.addEventListener('input',changed);fields.addEventListener('change',changed);
