@@ -16,6 +16,8 @@ RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是�
 
 `runRole` 就是 prepare → start → collect；角色在安全检查点因新 revision 结束时，同一 assignment 以新 run 续接。业务成功只来自通过校验的提交工具，不从文字或退出码推断；角色提交仍不是任务验收。
 
+恢复时保存主体、租户、角色及上次可见的记忆 ID 集合。只有主体范围变化，或之前可见的记忆被删除、受众收窄为不可读时，才清空会话与 Harness 恢复状态，并记录 `role_memory_view_changed`。新增记忆、授权扩大或其他角色的私有记忆变化都保留原会话；新增可读记忆通过下一轮输入的 `new_readable_memories` 列出 ID 和标题，正文仍由知识工具按当前权限读取。升级前只保存哈希的旧检查点无法确认原可见范围，首次恢复时重建一次。来源授权围栏的处理不变。
+
 ### RunContext 与 CandidateRef
 
 每个 run 的 `task_runs.run_context` 保存校验过的 RunContext：`task_id`、`assignment_id`、`run_id`、`tenant_id`、`project_id`、`principal_ref`、`source_ref`、`candidate_ref`、`configuration_snapshot_ref`（`role_snapshots:<hash>`）、`lease_epoch`、`resume_from_run_id`、`contract_revision`、`policy_revision`、`role_revision`、`harness_revision`、`skill_revisions`、`model_revision`、`budget`，以及映射到 ExecutionContext 的 `execution_context`（instance、role、kind、环境 profile）。

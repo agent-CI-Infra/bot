@@ -53,7 +53,9 @@ test('real Pi mailbox and external ACP/MCP use the same authorized memory tools 
   const previousSession=JSON.parse(s.get("SELECT harness_state FROM role_instances WHERE role='dev'").harness_state).sessionId;
   memory.save('101',item.key,{catalog:{audience:'role:dev'}},1,'user:owner','withdraw shared view');
   const resumed=await runRole(spec,'dev',undefined,'acp');assert.equal(resumed.result.read_revision,2);
-  assert.notEqual(JSON.parse(s.get("SELECT harness_state FROM role_instances WHERE role='dev'").harness_state).sessionId,previousSession);
+  // The audience narrowed for other roles, but Dev still reads this memory and keeps its own native session.
+  assert.equal(JSON.parse(s.get("SELECT harness_state FROM role_instances WHERE role='dev'").harness_state).sessionId,previousSession);
+  assert.equal(s.get("SELECT count(*) n FROM task_history WHERE type='role_memory_view_changed' AND json_extract(data,'$.role')='dev'").n,0);
   assert.equal(s.get("SELECT count(*) n FROM project_memories WHERE json_extract(data,'$.verification')='unverified'").n,2);
   assert.equal(s.get("SELECT status FROM tasks WHERE id='t'").status,'running');
   await workspace.release(false);assert.equal(memory.get('101',item.id).body,item.body,'cleaning an execution directory preserves knowledge');

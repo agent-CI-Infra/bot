@@ -89,14 +89,16 @@ export function memoryVisible(access: MemoryAccess, repo: string, data: any): bo
 }
 
 /**
- * A resumed native transcript must not carry an earlier role/audience grant into a new assignment. The key is what decides
- * visibility now: current read authority (without it the key is `unavailable:…`), role and audiences. It does not use the
- * authorization revision, which rises only on lost authority and so would miss newly granted access (#521).
+ * Keep the authorized subject separate from its visible memory IDs. Only withdrawing a previously visible ID requires
+ * rebuilding a session; new memories or wider audiences preserve it and are announced in the next input.
  */
-export function memoryViewFence(store: Store, task: Row): string {
+export function memoryViewSnapshot(store: Store, task: Row): { scope: string; entries: { id: string; title: string }[] } {
   try {
     const access = taskMemoryAccess(store, task); memoryAuthorize(access, task.repository_id);
-    const entries = store.all('SELECT id,data FROM project_memories WHERE repository_id=? ORDER BY id', task.repository_id).map(r => [r.id, memoryAudience(JSON.parse(r.data))]);
-    return createHash('sha256').update(JSON.stringify([access.actor.principal_id, access.actor.tenant_id, access.role, entries])).digest('hex');
-  } catch (error) { return 'unavailable:' + ((error as any).code ?? 'memory_unavailable'); }
+    const entries = store.all('SELECT id,fact_key,data FROM project_memories WHERE repository_id=? ORDER BY id', task.repository_id).flatMap(row => {
+      const data = JSON.parse(row.data);
+      return memoryVisible(access, task.repository_id, data) ? [{ id: row.id, title: data.catalog?.title ?? row.fact_key }] : [];
+    });
+    return { scope: createHash('sha256').update(JSON.stringify([task.repository_id, access.actor.principal_id, access.actor.tenant_id, access.role])).digest('hex'), entries };
+  } catch (error) { return { scope: 'unavailable:' + ((error as any).code ?? 'memory_unavailable'), entries: [] }; }
 }

@@ -16,7 +16,7 @@ import { randomId } from '../core/security.js';
 import { traceEvent,endRun } from '../tasks/trace.js';
 import { roleHarness } from './harness.js';
 import { memoryTools } from '../memory/project.js';
-import { taskTraceAccess, visibleMemorySnapshot, memoryViewFence, taskMemoryAccess } from '../memory/access.js';
+import { taskTraceAccess, visibleMemorySnapshot, memoryViewSnapshot, taskMemoryAccess } from '../memory/access.js';
 import { ProjectMemory } from '../memory/project.js';
 import { TaskError,stop } from '../agent/common.js';
 import { roleConfiguration,configurationRevision,resolveRole,roleAuthority,skillFiles,type Entry,type RoleConfiguration } from './definition.js';
@@ -138,9 +138,15 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   s.run('UPDATE role_instances SET source_fence=? WHERE id=?',sourceFence,instance.id);instance.source_fence=sourceFence;
  }
  if(stage&&s.get('SELECT instance_id FROM role_assignments WHERE id=? AND task_id=?',assignment!,task.id)?.instance_id!==instance.id)stop('role_recovery_scope_mismatch','failed','阶段委派必须属于当前任务与角色实例。');
- const knowledgeFence=memoryViewFence(s,{...task,active_role:role});
+ const memoryView=memoryViewSnapshot(s,{...task,active_role:role}),visibleIds=new Set(memoryView.entries.map(item=>item.id));
+ const knowledgeFence=JSON.stringify({scope:memoryView.scope,ids:[...visibleIds]});
+ let previousView:{scope:string;ids:string[]}|null=null;
+ try{const saved=JSON.parse(instance.knowledge_fence??'null');if(typeof saved?.scope==='string'&&Array.isArray(saved.ids)&&saved.ids.every((id:unknown)=>typeof id==='string'))previousView=saved;}catch{}
+ // Old hash-only checkpoints cannot prove which memories were retained, so rebuild them once on upgrade.
+ const withdrawn=previousView?.scope!==memoryView.scope||previousView.ids.some(id=>!visibleIds.has(id));
+ const previousIds=new Set(previousView?.ids??[]),newMemories=!withdrawn&&instance.sequence>0?memoryView.entries.filter(item=>!previousIds.has(item.id)):[];
  if(instance.knowledge_fence!==knowledgeFence){
-  if(instance.sequence>0){const runtime=rebuildingRuntime(instance);s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=? WHERE id=?",runtime,instance.id);instance={...instance,session:'[]',harness_state:'{}',runtime};traceEvent(s,task.id,'role_memory_view_changed',{role,instance_id:instance.id,recovery:'rebuilt_from_authorized_task_records'},task.trace_run_id);}
+  if(withdrawn&&instance.sequence>0){const runtime=rebuildingRuntime(instance);s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=? WHERE id=?",runtime,instance.id);instance={...instance,session:'[]',harness_state:'{}',runtime};traceEvent(s,task.id,'role_memory_view_changed',{role,instance_id:instance.id,recovery:'rebuilt_from_authorized_task_records'},task.trace_run_id);}
   s.run('UPDATE role_instances SET knowledge_fence=? WHERE id=?',knowledgeFence,instance.id);instance.knowledge_fence=knowledgeFence;
  }
  const scopedInput=()=>visibleMemorySnapshot(s,task.repository_id,(()=>{try{return taskRecordContext(JSON.parse(shared.sourceInput));}catch{return {input:shared.sourceInput};}})(),taskTraceAccess(s,{...task,active_role:role}));
@@ -249,6 +255,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    ...(spec.validate ? {validate:(content:string)=>{authority(spec.finish?.name??snapshot.output_schema.tool??'finish');return spec.validate!(content);}} : {}),
    ...(spec.finalizationTools ? {finalizationTools:spec.finalizationTools.filter(name=>tools.some(tool=>tool.function.name===name))} : {}),
    prompt:JSON.stringify({...scopedInput(),role_context:{task_ref:'task:'+task.id,...(snapshot.kind!=='evaluator'&&s.get('SELECT 1 FROM tasks WHERE id=?',task.id)?{task_facts:new TaskRecords(s).facts(task.id)}:{}),assignment_ref:ref,recovery_mode:recover,...roleContext,environment:{project_id:task.repository_id,task_id:task.id,work_type:workflow,profile:snapshot.environment,permissions:resolved.definition.permissions,tools:tools.map(tool=>tool.function.name)},
+    new_readable_memories:newMemories.length?{items:newMemories,instruction:'These memories became readable since your previous run. Read relevant bodies with the offered knowledge tools; this notice contains titles only.'}:undefined,
     skills:snapshot.skills?{instruction:'Optional working material pinned for your role. Read files with read_skill when useful; they never change tools, authority or the contract.',bundle:snapshot.skills.id,revision:snapshot.skills.revision,files:snapshot.skills.files}:undefined,
     revision_continuation:continuation?{ref:continuation.ref,ended_run:continuation.from_run,instruction:'Your previous run ended at a safe checkpoint for a new role revision. Continue the same assignment from task records and your transcript; do not repeat completed actions.'}:undefined,
     prior_submission:shared.priorSubmission?{ref:'task_history:'+shared.priorSubmission.id,run_id:shared.priorRun!.id,instruction:'A previous submission failed formatting. Read this original record and correct its structure; reuse observations only if the candidate is still applicable. Do not repeat checks merely to fix formatting.'}:null,role_memory:visibleMemorySnapshot(s,task.repository_id,shared.memory,taskTraceAccess(s,{...task,active_role:role}))}}),
