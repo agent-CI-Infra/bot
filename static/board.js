@@ -309,11 +309,16 @@ async function boardPoll() {
     return;
   }
   if(request!==boardRequest||me?.id!==owner||tab!=='board'||boardDragging)return;
+  // #503: a quiet read that succeeds proves the failure is over. Without this the summary keeps
+  // 「读取失败，保留上次读取结果。」 over live cards and boardContinue() stays blocked on the flag.
+  boardLoadFailed=false;
   // #503: once the reader has paged past the first page the quiet refresh only refreshes the counts. Replacing the cards
   // would drop the appended pages and the reading position, so the loaded cards stay exactly where they are.
   if(boardState.offset>0){
     Object.assign(boardState,{counts:result.counts,releaseCount:result.release_count,workCount:result.work_count,columnCounts:result.column_counts});
-    boardSummary();return;
+    boardSummary();
+    // The failure flag is gone, so paging may resume: the reader can keep reading without clicking 重试.
+    void boardContinue();return;
   }
   const signature=JSON.stringify([result.cards,result.has_more,result.counts,result.release_count,result.column_counts]);if(signature===boardState.signature){boardSummary();return;}
   Object.assign(boardState,{cards:result.cards,hasMore:result.has_more,counts:result.counts,releaseCount:result.release_count,workCount:result.work_count,columnCounts:result.column_counts,signature});boardRenderCards(true);
