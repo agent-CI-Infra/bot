@@ -183,12 +183,14 @@ test('an existing ledger is rebuilt once with a nullable repository, keeping eve
 
 
 test('the full management role cannot lend computer execution to a read-only operator',async t=>{
+  // Drain work triggered by the fixture before its provider, computers and database are closed.
+  let engine;t.after(()=>engine?.close());
   // Project computers stay with the original fake; the assistant computers are this checkout's manager code (#457).
   const assistant=await assistantManager(t),manager={async call(method,path,input,timeout){
     if(path.startsWith('/v1/assistant-computers'))return assistant.manager.call(method,path,input,timeout);
     return method==='GET'?{generation:1,state:'ready'}:{ok:true,result:{written:true}};
   }};
-  const f=await managementFixture(t,store=>({engine:new TaskEngine(store,manager),assistantHomes:assistant.homes}));
+  const f=await managementFixture(t,store=>({engine:engine=new TaskEngine(store,manager),assistantHomes:assistant.homes}));
   const reader=await f.member('computer-reader',{repository_ids:['101']});
   f.h.store.run('UPDATE scoped_grants SET capabilities=? WHERE principal_id=?',JSON.stringify(['tasks.read']),reader.id);
   f.modelState.respond=async(body,res)=>{

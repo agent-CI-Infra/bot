@@ -144,7 +144,13 @@ test('external receipts reconcile unknown Codex turns across recovery and never 
   assert.ok(f.store.all('SELECT cost FROM model_requests').every(r=>r.cost===null));
 });
 test('wall budget aborts a blocked model before its first byte',{timeout:40000},async t=>{
-  const f=await fixture(t,'native',{id:'metered',max_wall_seconds:60},true),work=f.conversations.run(f.source);
+  const f=await fixture(t,'native',{id:'metered',max_wall_seconds:60},true);
+  // Only advance the budget heartbeat; HTTP, cancellation and the database still use their real paths.
+  t.mock.timers.enable({apis:['setInterval']});
+  const work=f.conversations.run(f.source);let settled=false;
+  work.finally(()=>{settled=true;}).catch(()=>{});
   await f.started;f.store.run('UPDATE role_conversation_turns SET created_at=? WHERE state=?',Date.now()-61000,'running');
+  t.mock.timers.tick(14999);await new Promise(resolve=>setImmediate(resolve));assert.equal(settled,false);
+  t.mock.timers.tick(1);
   await assert.rejects(work,{code:'role_budget_exhausted'});assert.equal(f.requests.length,1);
 });

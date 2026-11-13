@@ -61,10 +61,19 @@ export class Store {
   constructor(path: string, key: Buffer, private readonly options: StoreOptions = {}) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
+    const empty = !this.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' LIMIT 1").get();
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.secrets = new SecretBox(key);
     this.trajectories = new Trajectories(this.db, path === ':memory:' ? null : join(dirname(path), 'trajectories'));
     this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=${walSizeLimit};`);
+    // A new schema needs one durable commit, not a disk sync for each CREATE/ALTER. Existing upgrades can toggle
+    // foreign_keys while rebuilding tables, so retain their individual transaction boundaries.
+    if (empty) {
+      try { this.transaction(() => this.initialize()); }
+      catch (error) { this.trajectories.dispose(); this.db.close(); throw error; }
+    } else this.initialize();
+  }
+  private initialize(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE UNIQUE,
