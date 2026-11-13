@@ -299,7 +299,18 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       res.setHeader('Set-Cookie', [cookie(req, sessionToken(req)), browserCookie(req, browser)]); respond(res, 201, result); return;
     }
     if (path === '/api/identity/refresh' && method === 'POST') {
-      fields(input, []); await githubIdentity?.reverify(user.id); refreshSessionRevision(store, sessionToken(req));
+      fields(input, []);
+      if (githubIdentity) {
+        // Bound so a stalled GitHub call cannot leave the console on "正在验证…" with no result.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            githubIdentity.reverify(user.id),
+            new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new HttpError(504, 'github_verification_unavailable')), 20_000); })
+          ]);
+        } finally { if (timer) clearTimeout(timer); }
+      }
+      refreshSessionRevision(store, sessionToken(req));
       respond(res, 200, { ok: true }); return;
     }
     if (path === '/api/auth/logout' && method === 'POST') {
