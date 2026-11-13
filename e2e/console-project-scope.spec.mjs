@@ -537,6 +537,37 @@ test('管理对话页切换顶栏项目时，带项目的收件箱导航链接�
   } finally { await h.stop(); }
 });
 
+// #623: the assistant needs a client before it can follow the picker, and building that client takes one round trip.
+// A picker change that lands inside that round trip used to be dropped, leaving the page's scope and the inbox link
+// describing two different projects. The first conversation read is held open until the picker has already moved, so
+// this case names the window instead of hoping to hit it.
+test('管理面板还在连接时切换顶栏项目，作用域与对话也跟上', async ({ page }) => {
+  const { h, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    let openRead = true, release;
+    const held = new Promise(resolve => { release = resolve; });
+    await page.route('**/api/management/conversations', async route => {
+      if (openRead && route.request().method() === 'GET') { openRead = false; await held; }
+      await route.continue();
+    });
+    await login(page, h, password);
+    const firstRead = page.waitForRequest(request => {
+      const url = new URL(request.url());
+      return url.pathname === '/api/management/conversations' && request.method() === 'GET';
+    });
+    await page.goto(h.admin + '/#/management');
+    await firstRead;
+    // The panel is drawn and waiting for its first answer, but it has no client yet: this is the change that got lost.
+    await page.locator('#console-project').selectOption('101');
+    const created = conversationScopeRequest(page, 'project:101');
+    release();
+    await expect(page.locator('select[aria-label="当前管理作用域"]')).toHaveValue('project:101');
+    await expect(page.locator('#console-inbox-link')).toHaveAttribute('href', '#/inbox/101');
+    await created;
+  } finally { await h.stop(); }
+});
+
 // #494 item 3: 「全部项目」 in the picker means one value for the board, usage and the assistant. Visiting the inbox with
 // no project clears the shared default as well, instead of only clearing the picker.
 test('#/inbox 的「全部项目」同时清掉共享默认，看板与用量读同一个值', async ({ page }) => {

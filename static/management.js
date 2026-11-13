@@ -65,6 +65,10 @@ const managementCommandStates = {
 const managementCommandState = state => managementCommandStates[state] ?? [state, '当前状态：' + state];
 // One authenticated chat surface survives page navigation. Minimizing it never cancels a submitted command.
 let managementChat = null;
+// #623: a picker change can arrive while a panel is still connecting, before it has a client to forward the change to.
+// Remember it on that one chat, so the connection that finishes afterwards replays it instead of keeping the scope the
+// render began with.
+const pendingScopeChange = new WeakMap();
 // #481: the phone's bottom bar is the assistant's only entry point, so it reads the same state the floating
 // launcher shows on wide screens instead of keeping a second copy of it.
 function managementChatState() {
@@ -426,6 +430,9 @@ async function openManagementChat(projectId = null, { mode = 'floating' } = {}) 
     chat.loading = renderManagement(chat.panel, projectId, activity).then(client => {
       if (managementChat !== chat) { client?.dispose(); return; }
       chat.client = client;
+      // #623: the picker may have moved while this panel was connecting, and the render chose its scope before that
+      // change. Now that a client exists, replay the change so the control, the sentence and the conversation follow.
+      if (client && pendingScopeChange.has(chat)) { pendingScopeChange.delete(chat); followSharedScope(chat); }
     }).catch(err => {
       if (managementChat !== chat) return;
       const box = consoleState('无法连接管理助手', managementAccessMessage(err), { tone: 'error', retry: () => openManagementChat(projectId, { mode: chat.mode }) });
@@ -444,9 +451,7 @@ async function openManagementChat(projectId = null, { mode = 'floating' } = {}) 
 // open chat follows the new default, so the header, the scope control and the conversation cannot describe two projects.
 // The control itself is written by setScope: writing it here first would leave its change handler convinced the scope was
 // already current, so the conversation would stay on the old project.
-addEventListener('console-scope-change', () => {
-  const chat = managementChat;
-  if (!chat?.client) return;
+function followSharedScope(chat) {
   const select = chat.panel.querySelector('select[aria-label="当前管理作用域"]');
   if (!select) return;
   // #493: a page-local override keeps the scope and the conversation the reader chose, but the sentence beside the control
@@ -457,6 +462,11 @@ addEventListener('console-scope-change', () => {
   const shared = typeof consoleDefaultProject === 'function' ? consoleDefaultProject() : null;
   const value = shared && [...select.options].some(option => option.value === 'project:' + shared) ? 'project:' + shared : 'platform';
   chat.client.setScope(value).catch(() => { /* the chat reports its own reconnect state */ });
+}
+addEventListener('console-scope-change', () => {
+  const chat = managementChat;
+  if (!chat?.client) { if (chat) pendingScopeChange.set(chat, true); return; }
+  followSharedScope(chat);
 });
 
 // Commands still use durable, versioned management messages. History and reconnect only read events.
