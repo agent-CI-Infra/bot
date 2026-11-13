@@ -11,6 +11,7 @@ import childProcess from 'node:child_process';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { harness, setup, account, repository, saveManager } from './helpers.mjs';
+import { releasePrCi } from './review-ci-helpers.mjs';
 import { agentLoop } from '../dist/agent/loop.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { resolveRules } from '../dist/rules/service.js';
@@ -195,7 +196,8 @@ test('review rules choose the triggers, and the comment language and only the ef
   assert.deepEqual([saved.review_issues, saved.review_pull_requests, saved.review_pr_updates, saved.review_language], [0, 1, 0, 'zh']);
   const pr = (action, sha) => ({ repository: { id: 101 }, action, pull_request: { number: 7, draft: false, state: 'open', head: { sha } } });
   assert.equal((await h.hook(a.path, a.secret, 'issue', { repository: { id: 101 }, action: 'opened', issue: { number: 1, title: 'x', body: 'x' } })).value.tasks_created, 0);
-  assert.equal((await h.hook(a.path, a.secret, 'pr-open', pr('opened', 'a'.repeat(40)), { 'X-GitHub-Event': 'pull_request' })).value.tasks_created, 1);
+  assert.equal((await h.hook(a.path, a.secret, 'pr-open', pr('opened', 'a'.repeat(40)), { 'X-GitHub-Event': 'pull_request' })).value.tasks_created, 0);
+  assert.equal(releasePrCi(h.store).created, 1);
   assert.equal((await h.hook(a.path, a.secret, 'pr-push', pr('synchronize', 'b'.repeat(40)), { 'X-GitHub-Event': 'pull_request' })).value.tasks_created, 0);
   const prompts = [], requestTexts=[], reply = { role: 'assistant', content: null, tool_calls: [call('f', 'finish_review', { summary: 's', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] })] };
   const server = createServer(async (req, res) => { let raw = ''; for await (const b of req) raw += b; requestTexts.push(raw);prompts.push(JSON.parse(raw).messages[0].content); res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: reply }] })); });

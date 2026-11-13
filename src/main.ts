@@ -14,6 +14,7 @@ import { GitCache } from './agent/git-cache.js';
 import { PublicBoards } from './public-board/service.js';
 import { ReleaseService } from './releases/service.js';
 import { ActionsFailures } from './actions/service.js';
+import { PrReviewCiGate } from './review/ci-gate.js';
 import { GitHubLogin } from './identity/github-login.js';
 import { deploymentOrigin, loginCallbackPath } from './onboarding/public-url.js';
 import { StallMonitor } from './core/stalls.js';
@@ -69,6 +70,7 @@ const integrations = new IntegrationChecker(store, process.env.BOT_GITHUB_API_UR
 const gateOnboarding = new GateOnboarding(store, process.env.BOT_GITHUB_API_URL || undefined);
 const releases = new ReleaseService(store, process.env.BOT_GITHUB_API_URL); releases.start();
 const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_URL); actionsFailures.start();
+const prReviewCiGate = new PrReviewCiGate(store, process.env.BOT_GITHUB_API_URL); prReviewCiGate.start();
 // Logs a blocked event loop with the requests in flight, and slow requests (see core/stalls.ts).
 const stalls = new StallMonitor(); stalls.start();
 const migration = new PayloadMigration(store), storage = new StorageReport(store, manager);

@@ -11,6 +11,7 @@ import {generateKeyPairSync} from 'node:crypto';
 import {emptyRepositoryFixture} from './empty-repository-helpers.mjs';
 import {saveManager} from './helpers.mjs';
 import {queueWebhook} from '../dist/review/queue.js';
+import {releasePrCi} from './review-ci-helpers.mjs';
 import {workspace} from '../runner/workspace.mjs';
 import {listTaskDirectories,removeTaskDirectories} from '../runner/task-dirs.mjs';
 import {estimateTokens} from '../runner/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
@@ -33,7 +34,7 @@ async function live(t,options={}){
   await writeFile(hook,`import {registerHooks} from 'node:module';registerHooks({resolve(specifier,context,next){if(context.parentURL===${JSON.stringify(entry)}&&specifier==='./workspace.mjs')return {url:${JSON.stringify(fixture)},shortCircuit:true};return next(specifier,context);}});`);
   let h,sequence=0,object={number:1,state:'open',title:'First issue',body:'Please review this project.',user:{id:5,login:'alice'},labels:[]};
   if(options.pr)object={...object,draft:false,base:{ref:'main',sha:'a'.repeat(40)},head:{ref:'change',sha:'a'.repeat(40)}};
-  const pushHead=sha=>{object={...object,head:{...object.head,sha}};return queueWebhook(h.store,'101','pull_request',{action:'synchronize',pull_request:object,sender:actor},'head-'+sha);};
+  const pushHead=sha=>{object={...object,head:{...object.head,sha}};queueWebhook(h.store,'101','pull_request',{action:'synchronize',pull_request:object,sender:actor},'head-'+sha);return releasePrCi(h.store).created;};
   const update=(text,mention=false)=>{
     object={...object,title:'Latest title '+text,body:'Latest body '+text};
     const comment={id:++sequence,body:(mention?'@bot ':'')+text,user:actor,author_association:'MEMBER'};h.comments.push(comment);

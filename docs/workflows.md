@@ -20,6 +20,9 @@
 | `issue.labeled` | 有人（不是 App）加上项目登记的标签，或开发标签（同时提供开发和回应标签的检视） | 标签列表；开发标签另有开关 |
 | `pull_request.opened` | PR 打开或 Ready for review | `review_pull_requests` |
 | `pull_request.synchronize` | PR 推送新提交 | `review_pr_updates` |
+
+`pull_request.opened` 和 `pull_request.synchronize`（以及检视发现的新 head）不会立刻交给 Manager。控制面先记下该 head，等目标分支的必需检查（规则集或分支保护）全部完成且通过后再分派 `review.pr`。检查失败或等待超时（默认 60 分钟）时不开始检视，并在 PR 上留言说明；推送新的 head 且新 head 检查通过后才会再检视。同一 SHA 只检视一次。没有配置必需检查时，等该 SHA 上已出现的检查结束；宽限期（2 分钟）内没有任何检查，按「仓库没有 CI」开始检视。有人评论、提到 bot 或提交检视等更新仍立刻分派，不等待 CI。完成检查的 webhook（`check_run`、`check_suite`、`workflow_run`、`status`）会尽快唤醒等待；未订阅这些事件时，控制面会轮询检查状态（需要 `checks:read` 与 `statuses:read`，不必把这些事件加进基线 App 订阅）。
+
 | `pull_request.updated` | PR 修改、可信讨论、提交检视、回复检视意见 | `review_pr_discussion`，默认还要 `review_pull_requests` 开着 |
 | `pull_request.mention` | PR 上的评论提到 bot | 默认跟随 `review_pull_requests` |
 | `pull_request.labeled` | 有人给 PR 加上项目登记的标签 | 标签列表 |

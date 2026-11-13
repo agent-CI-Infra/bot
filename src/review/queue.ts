@@ -6,6 +6,7 @@ import { reviewObjectState } from './sessions.js';
 import { developmentLabel } from '../rules/service.js';
 import { actionsDevelopmentAllowed, actionsReport } from '../actions/safety.js';
 import { recordEvent, type CreateOption, type EventInput } from '../dispatch/store.js';
+import { cancelPrReviewCiWaits, ciEventSha, holdPrReviewForCi, kickPrReviewCiWaits } from './ci-gate.js';
 import { eventFilters, labelDispatched, workOffered, type EventFilters } from '../work/settings.js';
 
 export const sameLabel = (name: unknown, label: string) => String(name ?? '').toLowerCase() === label.toLowerCase();
@@ -277,10 +278,17 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
     // Events of the object that the Manager has not decided yet would only start work on a closed object.
     store.run("UPDATE dispatch_events SET state='decided',decision='ignore',reason=?,lease=NULL,lease_until=NULL,decided_at=? WHERE repository_id=? AND object_type=? AND object_number=? AND state IN ('pending','failed')",
       '对象已关闭或转为草稿，事件不再分派。', new Date().toISOString(), repositoryId, event === 'issues' ? 'issue' : 'pr', number);
+    if (event === 'pull_request') cancelPrReviewCiWaits(store, repositoryId, number);
   }
   if (!policy?.enabled) return 0;
   if (event === 'issues' && !policy.actions_failures_enabled && store.get('SELECT 1 FROM actions_failure_issues WHERE repository_id=? AND number=?', repositoryId, number)) return 0;
+  if (ciEventSha(event, payload)) { kickPrReviewCiWaits(); return 0; }
   const input = webhookEvent(store, repositoryId, event, payload, delivery, currentPullRequest, eventFilters(store, repositoryId, policy));
+  if (input && (input.type === 'pull_request.opened' || input.type === 'pull_request.synchronize')) {
+    holdPrReviewForCi(store, input);
+    kickPrReviewCiWaits();
+    return 0;
+  }
   return input ? recordEvent(store, input) : 0;
 }
 /**
@@ -290,8 +298,11 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
 export function reviewNewHead(store: Store, repositoryId: string, pr: any) {
   const head = sha(pr?.head?.sha), number = Number(pr?.number);
   if (!head || !openObject(pr)) return 0;
-  return recordEvent(store, { repositoryId, key: `${repositoryId}:pull_request.synchronize:${number}:${head}`, type: 'pull_request.synchronize', source: 'review',
+  const input = { repositoryId, key: `${repositoryId}:pull_request.synchronize:${number}:${head}`, type: 'pull_request.synchronize', source: 'review',
     summary: `PR 推送新提交：${clip(pr.title, 120)} #${number}`, facts: { object: objectFacts(pr), note: 'A queued review found this new head before it ran.' }, object: { type: 'pr', number },
     options: [{ id: 'review', work: 'review.pr', title: `检视 PR #${number}（${head.slice(0, 7)}）`, default: true,
-      spec: { type: 'object', kind: 'review.pr', number, head, input: { pull_request: pr, number }, delivery: null } }] });
+      spec: { type: 'object', kind: 'review.pr', number, head, input: { pull_request: pr, number }, delivery: null } }] } satisfies EventInput;
+  holdPrReviewForCi(store, input);
+  kickPrReviewCiWaits();
+  return 0;
 }

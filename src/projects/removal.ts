@@ -39,7 +39,7 @@ export function deleteProjectRecords(store: Store, id: string): void {
     // Role configuration revisions, pinned skill bundles and run snapshots belong to the project.
     ['DELETE FROM role_snapshots WHERE repository_id=?', 1], ['DELETE FROM skill_bundle_revisions WHERE repository_id=?', 1], ['DELETE FROM role_config_revisions WHERE repository_id=?', 1],
     ["DELETE FROM settings WHERE key='roles:'||?", 1],
-    ['DELETE FROM computer_console_specs WHERE repository_id=?', 1], ['DELETE FROM manager_revisions WHERE repository_id=?', 1], ['DELETE FROM manager_migrations WHERE repository_id=?', 1], ['DELETE FROM dispatch_events WHERE repository_id=?', 1], ['DELETE FROM repository_rule_sources WHERE repository_id=?', 1],
+    ['DELETE FROM computer_console_specs WHERE repository_id=?', 1], ['DELETE FROM manager_revisions WHERE repository_id=?', 1], ['DELETE FROM manager_migrations WHERE repository_id=?', 1], ['DELETE FROM pr_review_ci_waits WHERE repository_id=?', 1], ['DELETE FROM dispatch_events WHERE repository_id=?', 1], ['DELETE FROM repository_rule_sources WHERE repository_id=?', 1],
     // Models only this repository may use, with their prices and grants; a shared model only loses its grant to this repository.
     [`UPDATE policies SET model_id=NULL WHERE model_id IN (${models})`, 1], [`DELETE FROM model_pricing WHERE model_id IN (${models})`, 1],
     [`DELETE FROM model_projects WHERE repository_id=? OR model_id IN (${models})`, 2], ['DELETE FROM policies WHERE repository_id=?', 1], ['DELETE FROM models WHERE repository_id=?', 1],

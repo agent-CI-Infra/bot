@@ -6,6 +6,7 @@ import { inlineLocation,validateReview } from '../dist/review/findings.js';
 import { Redactor, sha } from '../dist/agent/common.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { developmentReady, enqueue, queueWebhook } from '../dist/review/queue.js';
+import { releasePrCi } from './review-ci-helpers.mjs';
 import { emptyRepositoryFixture } from './empty-repository-helpers.mjs';
 import { classificationLabels, repositoryLabels } from '../dist/review/labels.js';
 import { TaskRecords } from '../dist/tasks/service.js';
@@ -89,7 +90,8 @@ test('PR conversation mentions read the current head with read-only permissions,
   const payload={repository:{id:101},action:'created',sender:{type:'User'},issue:{number:7,state:'open',pull_request:{url:'https://api.github.invalid/repos/fixture/project-101/pulls/7'}},
     comment:{id:400,body:'@Agent-CI-Infra-Bot please recheck',html_url:'https://github.invalid/issue/7#issuecomment-400'}};
   const send=(delivery,value=payload)=>h.hook(a.path,a.secret,delivery,value,{'X-GitHub-Event':'issue_comment'});
-  assert.equal((await h.hook(a.path,a.secret,'pr-opened',{repository:{id:101},action:'opened',pull_request:{...pull,head:{sha:'a'.repeat(40)}}},{'X-GitHub-Event':'pull_request'})).value.tasks_created,1);
+  assert.equal((await h.hook(a.path,a.secret,'pr-opened',{repository:{id:101},action:'opened',pull_request:{...pull,head:{sha:'a'.repeat(40)}}},{'X-GitHub-Event':'pull_request'})).value.tasks_created,0);
+  assert.equal(releasePrCi(h.store).created,1);
   assert.equal((await send('pr-comment')).value.tasks_created,1);
   const task=h.store.get("SELECT * FROM tasks WHERE unique_key='101:review.pr:7:comment:400'");
   assert.equal(task.head_sha,pull.head.sha);assert.deepEqual(JSON.parse(task.input).pull_request,pull);assert.deepEqual(JSON.parse(task.input).comment,payload.comment);
@@ -238,9 +240,12 @@ test('review queue is atomic with archive and deduplicates logical events across
   const pull={number:42,draft:true,state:'open',head:{sha:'a'.repeat(40)}};
   assert.equal((await h.hook(a.path,a.secret,'draft',{repository:{id:101},action:'opened',pull_request:pull},{'X-GitHub-Event':'pull_request'})).value.tasks_created,0);
   const opened={repository:{id:101},action:'ready_for_review',pull_request:{...pull,draft:false}};
-  assert.equal((await h.hook(a.path,a.secret,'ready',opened,{'X-GitHub-Event':'pull_request'})).value.tasks_created,1);
+  assert.equal((await h.hook(a.path,a.secret,'ready',opened,{'X-GitHub-Event':'pull_request'})).value.tasks_created,0);
+  assert.equal(releasePrCi(h.store).created,1);
   assert.equal((await h.hook(a.path,a.secret,'same-head',{...opened,action:'synchronize'},{'X-GitHub-Event':'pull_request'})).value.tasks_created,0);
-  assert.equal((await h.hook(a.path,a.secret,'new-head',{...opened,action:'synchronize',pull_request:{...pull,draft:false,head:{sha:'b'.repeat(40)}}},{'X-GitHub-Event':'pull_request'})).value.tasks_created,1);
+  assert.equal(releasePrCi(h.store).created,0);
+  assert.equal((await h.hook(a.path,a.secret,'new-head',{...opened,action:'synchronize',pull_request:{...pull,draft:false,head:{sha:'b'.repeat(40)}}},{'X-GitHub-Event':'pull_request'})).value.tasks_created,0);
+  assert.equal(releasePrCi(h.store).created,1);
 });
 test('inline positions use real hunk lines and models cannot choose approval events',()=>{
   const files=[{filename:'a.js',patch:'@@ -10,2 +10,2 @@\n-old\n+new\n context'}];

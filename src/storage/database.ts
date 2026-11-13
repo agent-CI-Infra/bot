@@ -20,6 +20,7 @@ import { actionsStorage } from '../actions/storage.js';
 import { workStorage } from '../work/settings.js';
 import { migrateWorkflows } from '../work/migration.js';
 import { dispatchStorage } from '../dispatch/store.js';
+import { ciReviewGateStorage } from '../review/ci-gate.js';
 import { githubWriteStorage } from '../github/write.js';
 import { gateOnboardingStorage } from '../projects/gate-storage.js';
 import { installationStorage } from '../installations/storage.js';
@@ -228,6 +229,7 @@ export class Store {
     trajectoryStorage(this.db);
     workStorage(this);
     dispatchStorage(this);
+    ciReviewGateStorage(this);
     githubWriteStorage(this);
     gateOnboardingStorage(this);
     taskStorage(this);

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {harness,setup,account,repository} from './helpers.mjs';
 import {enqueue,queueWebhook} from '../dist/review/queue.js';
+import {releasePrCi} from './review-ci-helpers.mjs';
 import {ReviewUpdated,latestReviewSession,saveReviewSession,reviewObjectState,pruneReviewSessions,pendingReviewUpdates} from '../dist/review/sessions.js';
 import {deleteProjectRecords} from '../dist/projects/removal.js';
 import {GitHub} from '../dist/github/client.js';
@@ -69,7 +70,8 @@ test('sessions are scoped by repository, kind and number, survive reopening/rest
 test('PR new heads queue separately without injecting into the older workspace; close and draft cancellation remain',async t=>{
   const h=await fixture(t),oldHead='a'.repeat(40),head='b'.repeat(40),pr={...issue,draft:false,head:{sha:head}};
   const old=enqueue(h.store,'101','review.pr',1,oldHead,{pull_request:{...pr,head:{sha:oldHead}}});h.store.run("UPDATE tasks SET status='running' WHERE id=?",old);
-  assert.equal(queueWebhook(h.store,'101','pull_request',{action:'synchronize',pull_request:pr,sender:user},'push'),1);
+  assert.equal(queueWebhook(h.store,'101','pull_request',{action:'synchronize',pull_request:pr,sender:user},'push'),0);
+  assert.equal(releasePrCi(h.store).created,1);
   const current=h.store.get('SELECT * FROM tasks WHERE id<>?',old);
   assert.equal(queueWebhook(h.store,'101','pull_request_review',{action:'submitted',pull_request:pr,sender:user,review:{body:'New head discussion',author_association:'MEMBER'}},'discussion'),0);
   assert.equal(pendingReviewUpdates(h.store,{id:old}).length,0);assert.equal(pendingReviewUpdates(h.store,current).length,1);

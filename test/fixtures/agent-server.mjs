@@ -182,6 +182,10 @@ export const server=createServer(async(req,res)=>{
     }
     if(suffix==='/git/commits'){const sha=objectHash('commit',Buffer.from(JSON.stringify(body))),value={sha,tree:{sha:body.tree},parents:body.parents.map(sha=>({sha}))};commits.set(sha,value);return send(value,201);}
     if(suffix.startsWith('/compare/'))return send({status:'ahead'});
+    if(/^\/commits\/[a-f0-9]{40}\/check-runs/.test(suffix))return send({total_count:1,check_runs:[{id:1,name:'unit',status:'completed',conclusion:'success'}]});
+    if(/^\/commits\/[a-f0-9]{40}\/status$/.test(suffix))return send({state:'success',statuses:[]});
+    if(suffix.startsWith('/rules/branches/'))return send([]);
+    if(/\/protection\/required_status_checks$/.test(suffix))return send({},404);
     return send({},404);
   }catch{send({error:'fixture_failure'},500);}
 });
