@@ -32,7 +32,7 @@ test('conversation shows the actual messages merged into a running turn on wide 
     await expect(inputs).toContainText('@助手');
     release(); await until(() => f.h.store.get('SELECT state FROM channel_inbox WHERE id=?', original.value.operation_id)?.state === 'completed');
     await page.getByRole('button', { name: '刷新会话', exact: true }).click();
-    await page.getByLabel('回合并入的消息').getByText('并入的消息（1）', { exact: true }).click();
+    await expect(page.getByLabel('回合并入的消息')).toHaveAttribute('open', '');
     await page.getByText('本轮生成的回答', { exact: true }).click(); await expect(page.getByLabel('消息与执行时间线')).toContainText('已一并回应两位提问人。');
     mkdirSync('.tmp/channel-console', { recursive: true });
     for (const width of [1440, 390]) {
@@ -62,7 +62,7 @@ for (const width of [1440, 390]) test(`Feishu console shows real messages, steps
     await expect(page.locator('.channel-step')).toContainText(['开始执行', '请求模型', '模型已返回', '调用工具 · 查看项目范围', '工具已返回 · 查看项目范围', '请求模型', '模型已返回', '本轮完成']);
     await page.getByText('本轮生成的回答', { exact: true }).click();
     await expect(page.getByLabel('消息与执行时间线')).toContainText('根据群里的讨论，先核对项目证据。');
-    await expect(page.getByLabel('会话派生任务')).toContainText('项目任务');
+    await expect(page.getByLabel('会话派生任务')).toBeHidden();
     await expect(thread).not.toContainText('来源或授权范围已变化');
     if (width === 1440) for (const breakpoint of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width: breakpoint, height: 1000 }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(breakpoint)).toBe(true);

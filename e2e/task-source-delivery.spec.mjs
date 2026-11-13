@@ -20,6 +20,7 @@ test('task detail names the webhook delivery that created it and opens its detai
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await page.locator('[data-task-id="source-task"]').getByRole('button', { name: '查看任务', exact: true }).click();
     const side = page.locator('#task-side');
+    await side.locator('summary').filter({ hasText: /^执行来源$/ }).click();
     const source = side.locator('[data-source-delivery]');
     await expect(source).toBeVisible();
     await expect(source).toContainText('来源投递');

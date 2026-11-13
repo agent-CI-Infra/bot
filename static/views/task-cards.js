@@ -113,33 +113,73 @@ function taskRunHistoryCard(roles) {
   }
   section.append(list); return section;
 }
+function taskDetails(title, ...content) {
+  const section = element('details', '', 'fold task-details');
+  section.append(element('summary', title), ...content); return section;
+}
+function taskOverviewCard(task) {
+  const section = card('任务目标'); section.classList.add('task-overview');
+  section.append(element('p', task.structured?.contract?.goal || task.summary || '尚未记录任务目标。', 'say'));
+  const runtime = metricRuntime(task.metrics);
+  section.append(facts([['执行耗时', runtime === '—' ? '未记录' : runtime], ['优先级', task.priority || 'P2']]),
+    mutedLine('执行耗时不含排队和等待；未记录表示没有可靠的耗时数据。'));
+  return section;
+}
+function taskAttentionCard(task, roles) {
+  const section = card('需处理事项'); section.classList.add('task-attention');
+  const fault = task.error_detail || (task.error_code === 'pr_head_pending' ? 'PR 尚未指向刚推送的提交' : ownershipErrors[task.error_code] || taskErrorText(task.error_code));
+  section.append(facts([[task.error_code === 'repository_has_no_commit' ? '等待原因' : '故障', fault],
+    ['原因', task.error_code && task.error_code !== 'repository_has_no_commit' && task.error_cause ? faultSummary(task.error_code, task.error_cause) : null],
+    ['处理', task.error_code !== 'repository_has_no_commit' ? task.error_cause?.action : null]]));
+  const record = task.structured, verdict = record?.pending || record?.acceptance;
+  if (verdict?.gaps?.length || verdict?.residuals?.length) {
+    section.append(mutedLine(verdict.candidate_id === record.candidate?.id && verdict.revision === record.revision ? '当前候选的验收记录：' : '先前候选或需求版本的验收记录：'));
+    const list = element('ul', '', 'task-fact-list');
+    for (const gap of verdict.gaps || []) list.append(element('li', gap));
+    for (const residual of verdict.residuals || []) list.append(element('li', residual.description));
+    section.append(list);
+    for (const followup of record.followups || []) section.append(button('查看遗留任务 ' + followup.issue_key, () => openTask(followup.task_id)));
+  }
+  if (!roles) section.append(mutedLine('角色运行记录读取失败，实际执行配置未知。'));
+  else if (!roles.complete) section.append(mutedLine('委派记录未完整读取，当前执行者以已读取的记录为限。'));
+  return section.querySelector('dd, li, p') ? section : null;
+}
 function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   const { task, publications } = detail, side = $('task-side'); side.replaceChildren();
   const record = task.structured;
+  side.append(taskOverviewCard(task));
+  const attention = taskAttentionCard(task, roles); if (attention) side.append(attention);
+  const result = resultCard(task) || card('任务结果');
+  if (!result.querySelector('p, dd, li')) result.append(mutedLine(terminalStates.includes(task.status) ? '没有记录任务结果，请结合实际状态和验收记录查看。' : '尚未产生任务结果。'));
+  const verdict = record?.pending || record?.acceptance;
+  if (verdict) result.append(facts([['验收', (own(acceptanceLabels, verdict.outcome) || verdict.outcome) + (record.pending ? '（待发布确认）' : '')
+    + (verdict.candidate_id !== record.candidate?.id ? '（不是当前候选）' : '') + (verdict.revision !== record.revision ? '（先前需求版本）' : '')], ['验收结论', verdict.reason]]));
+  result.classList.add('task-outcome'); side.append(result);
   // The task keeps the webhook delivery that created it; name it here so the chain can be walked back (#238).
   const sourceDelivery = record?.contract?.source?.delivery_id;
   if (task.origin || sourceDelivery) {
     const origin = card('任务来源与执行者'), served = task.origin ? [['来源消息', task.origin.source_message], ['父任务', task.origin.source_task_id]] : [];
     origin.append(note(task.origin ? taskOriginCaption(task.origin) : '来源：Webhook 投递'), facts(served));
     if (sourceDelivery) { origin.dataset.sourceDelivery = sourceDelivery; origin.append(facts([['来源投递', button('查看投递', () => openTaskDelivery(sourceDelivery).catch(error), 'quiet linkish')]])); }
-    side.append(origin);
+    side.append(taskDetails('执行来源', origin));
   }
-  if (record) side.append(taskFactsCard(task, record, publications), taskExecutionCard(task, record, roles, purposes));
-  side.append(taskRunHistoryCard(roles));
-  if (detail.dispatch?.length) side.append(taskDispatchCard(detail.dispatch));
-  const info = card('任务');
+  if (record) side.append(taskDetails('完整目标、候选与验收证据', taskFactsCard(task, record, publications)), taskDetails('执行者与完整委派', taskExecutionCard(task, record, roles, purposes)));
+  side.append(taskDetails('实际运行记录', taskRunHistoryCard(roles)));
+  if (detail.dispatch?.length) side.append(taskDetails('Manager 分派记录', taskDispatchCard(detail.dispatch)));
+  const info = card('任务技术信息');
   info.append(facts([['优先级', task.priority || 'P2'], ['入队序号', String(task.queue_seq ?? '—')], ['阶段', phaseLabels[task.phase] || task.phase], ['尝试', `第 ${task.attempt} 次`], ['提交', task.head_sha?.slice(0, 12)],
     [task.error_code==='repository_has_no_commit'?'等待原因':'故障', task.error_detail||(task.error_code==='pr_head_pending'?'PR 尚未指向刚推送的提交':ownershipErrors[task.error_code]||taskErrorText(task.error_code))],
     ['原因', task.error_code&&task.error_code!=='repository_has_no_commit'&&task.error_cause?faultSummary(task.error_code,task.error_cause):null], ['处理', task.error_code!=='repository_has_no_commit'?task.error_cause?.action:null], ['已推送提交',task.pushed_sha], ['创建', timestamp(task.created_at)], ['更新', timestamp(task.updated_at)]]));
   if (task.source_task_id) info.append(button('查看来源检视', () => openTask(task.source_task_id)));
   if (!terminalStates.includes(task.status)) {
+    const controls = card('任务操作'); controls.classList.add('task-controls');
     const priority=element('select'),reason=element('input');priority.setAttribute('aria-label','任务优先级');reason.placeholder='影响证据与调整理由';reason.style.width='100%';reason.style.boxSizing='border-box';reason.setAttribute('aria-label','优先级调整理由');
-    for(const level of ['P0','P1','P2','P3']){const option=element('option',level);option.value=level;priority.append(option);}priority.value=task.priority||'P2';
-    info.append(mutedLine('P0 紧急止损 · P1 核心阻塞 · P2 正常开发 · P3 非核心完善；改级排到新级队尾，不抢占运行。'),priority,reason,button('调整优先级',async()=>{try{await api('/api/tasks/'+task.id+'/priority','POST',{priority:priority.value,reason:reason.value});await openTask(task.id);}catch(e){notice('task-error',e.message);}}));
+    for(const level of ['P0','P1','P2','P3']){const option=element('option',level);option.value=level;priority.append(option);}priority.value=task.priority||'P2';priority.dataset.savedValue=priority.value;
+    controls.append(mutedLine('P0 紧急止损 · P1 核心阻塞 · P2 正常开发 · P3 非核心完善；改级排到新级队尾，不抢占运行。'),priority,reason,button('调整优先级',async()=>{try{await api('/api/tasks/'+task.id+'/priority','POST',{priority:priority.value,reason:reason.value});priority.dataset.savedValue=priority.value;reason.value='';await refreshTask();}catch(e){notice('task-error',e.message);}}));
+    side.append(controls);
   }
   if(record?.relations?.length){const relations=card('关联任务');for(const r of record.relations){const target=r.source_task_id===task.id?r.target_task_id:r.source_task_id;relations.append(button(shortId(target)+' · '+r.relationship,()=>openTask(target)),element('p',r.reason,'muted'));}side.append(relations);}
-  const result = resultCard(task); if (result) side.append(result);
-  side.append(info,taskMetricsCard(task), computerCard(task, environment));
+  side.append(taskDetails('用量明细', taskMetricsCard(task)), taskDetails('项目环境与操作', computerCard(task, environment)), taskDetails('任务技术信息', info));
   // A task without a structured record still lists what was written to GitHub.
   if (!record && publications?.length) {
     const section = card('GitHub 发布记录'), list = element('ul', '', 'history');
@@ -148,9 +188,9 @@ function renderTaskSide(detail, environment, roles = null, purposes = {}) {
       row.append(p.response?.html_url ? link(p.response.html_url, name) : element('span', p.kind === 'label' && Array.isArray(p.response) ? `${name} ${p.response.map(l => l.name).join('、')}` : name), badge(caption, tone));
       list.append(row);
     }
-    section.append(list); side.append(section);
+    section.append(list); side.append(taskDetails('GitHub 发布记录', section));
   }
-  if(detail.history_page){const section=card('结构化过程记录'),index=element('a','按需查看分页索引');index.href='/api/tasks/'+encodeURIComponent(task.id)+'/events?limit=50';index.target='_blank';index.rel='noopener noreferrer';section.append(index,element('p','详情只保留最近 50 条索引；记录正文通过索引中的 source 引用读取。','muted'));side.append(section);}
+  if(detail.history_page){const section=card('结构化过程记录'),index=element('a','按需查看分页索引');index.href='/api/tasks/'+encodeURIComponent(task.id)+'/events?limit=50';index.target='_blank';index.rel='noopener noreferrer';section.append(index,element('p','详情只保留最近 50 条索引；记录正文通过索引中的 source 引用读取。','muted'));side.append(taskDetails('结构化过程记录',section));}
   const raw = element('details', '', 'fold raw'); raw.append(element('summary', '原始数据'), element('pre', JSON.stringify(detail, null, 2), 'output')); side.append(raw);
 }
 function computerCard(task, environment) {

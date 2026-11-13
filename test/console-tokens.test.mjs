@@ -44,7 +44,7 @@ test('every var() a sheet reads is declared by shell.css, locally, at runtime, o
 // Sheets that predate shell.css: a value change in the contract restyles these legacy pages, so their reads are pinned.
 const moduleSheets = ['style.css', 'views.css', 'board.css', 'costs.css', 'management.css', 'channel-console.css'];
 const SHARED = {
-  '--color-surface': '#fff',
+  '--color-surface': '#fff', '--color-text': '#17243b',
   '--color-brand': '#245de0', '--color-text-muted': '#607087', '--font-size-2': '14px', '--control-min': '44px',
   '--color-brand-weak': '#edf2ff',
   '--color-border': '#dce3ed', '--color-surface-alt': '#f8fafc', '--radius-card': '12px',

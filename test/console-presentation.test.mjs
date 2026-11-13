@@ -18,16 +18,16 @@ const candidate = { id: 'cand1234567890abcdef', revision: 2, created_at: '2026-1
   evidence: [{ source: 'policy_validation', version: 'tree9876543210fedcba', verified: true }, { source: 'task_history:41', version: 'abc', verified: false }] };
 
 function taskPage(t, task, roles, handoffs = []) {
-  const page = loadConsole(['static/app.js', 'static/views.js'], (_method, path) => {
+  const page = loadConsole(['static/app.js', 'static/metrics.js', 'static/views.js'], (_method, path) => {
     if (path.endsWith('/logs')) return [200, { logs: [] }];
     if (path.includes('/roles?')) return roles ? [200, roles] : [404, { error: 'not_found' }];
     if (path.includes('/events?type=role_handoff')) return [200, { events: handoffs }];
     if (path === '/api/tasks/' + task.id) return [200, { task, publications: [] }];
     return [404, {}];
   });
-  page.run("scroller = node => node; taskMetricsCard = () => element('section','');");
+  page.run('scroller = node => node;');
   t.after(() => page.run('taskView.close(); clearTimeout(taskTimer);'));
-  return { page, open: async () => { await page.run(`openTask(${JSON.stringify(task.id)})`); page.run('clearTimeout(taskTimer)'); },
+  return { page, open: async () => { await page.run(`openTask(${JSON.stringify(task.id)})`); page.run('clearTimeout(taskTimer)'); assert.equal(text(page.$('task-error')), '', 'task details render without a caught error'); },
     next: () => page.$('task-next-text').textContent, side: () => text(page.$('task-side')),
     facts: () => page.$('task-side').querySelectorAll('.task-fact').map(part => part.dataset.fact) };
 }
@@ -72,15 +72,16 @@ test('when a page cursor stops moving the records are marked unread, and the con
   const instances = [{ id: 'i-m', role: 'manager', harness: 'pi' }, { id: 'i-t', role: 'test', harness: 'process' }];
   const done = Array.from({ length: 100 }, (_, n) => ({ sequence: n + 1, id: 'old-' + n, instance_id: 'i-t', status: 'completed' }));
   // A server answering every page with the same cursor: reading stops instead of looping, and says so.
-  const page = loadConsole(['static/app.js', 'static/views.js'], (_method, path) => {
+  const page = loadConsole(['static/app.js', 'static/metrics.js', 'static/views.js'], (_method, path) => {
     if (path.endsWith('/logs')) return [200, { logs: [] }];
     if (path.includes('/roles?')) return [200, { instances, runs: [], snapshots: {}, assignments: /after=0$/.test(path) ? done : [], next_after: 100 }];
     if (path.includes('type=role_handoff')) return [200, { events: [], next_after: null }];
     if (path === '/api/tasks/t4') return [200, { task, publications: [] }];
     return [404, {}];
   });
-  page.run("scroller = node => node; taskMetricsCard = () => element('section','');"); t.after(() => page.run('taskView.close(); clearTimeout(taskTimer);'));
+  page.run('scroller = node => node;'); t.after(() => page.run('taskView.close(); clearTimeout(taskTimer);'));
   await page.run('openTask("t4")'); page.run('clearTimeout(taskTimer)');
+  assert.equal(text(page.$('task-error')), '', 'task details render without a caught error');
   assert.equal(page.$('task-next-text').textContent, '委派记录没有读完（已读 100 条），现在说不清是谁在处理。');
   assert.match(text(page.$('task-side')), /委派记录没有读完：服务端的分页游标没有前进，下面只列出已读到的 100 条，看不出现在是谁在处理。/);
   assert.doesNotMatch(text(page.$('task-side')), /主控还没有委派工作/);
@@ -179,12 +180,12 @@ test('role overview preserves stored legacy backends and recommends Pi only for 
 async function realProject(t, files = ['static/app.js', 'static/views.js', 'static/project.js', 'static/manager.js'], rewrite = null) {
   const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
   const h = await harness(t, manager, store => ({ engine: new TaskEngine(store, manager) })), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-  const page = loadConsole(files, async (method, path, body) => { const response = await admin(path, method, body); return rewrite?.(path, response) || [response.status, response.value]; });
-  page.run("scroller = node => node; taskMetricsCard = () => element('section','');"); t.after(() => page.run('taskView.close(); clearTimeout(taskTimer);'));
+  const page = loadConsole([...files, 'static/metrics.js'], async (method, path, body) => { const response = await admin(path, method, body); return rewrite?.(path, response) || [response.status, response.value]; });
+  page.run('scroller = node => node;'); t.after(() => page.run('taskView.close(); clearTimeout(taskTimer);'));
   const now = new Date().toISOString();
   const task = (id, kind, phase = 'model') => h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,phase,attempt,created_at,updated_at) VALUES(?,'101',?,'running','Fixture task',7,?,1,?,?)", id, kind, phase, now, now);
   const instance = (id, owner, role, harness, snapshot = null) => h.store.run('INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at,snapshot_id) VALUES(?,?,?,?,?,?,?)', id, owner, role, '{}', harness, now, snapshot);
-  const open = async id => { await page.run(`openTask(${JSON.stringify(id)})`); page.run('clearTimeout(taskTimer)'); };
+  const open = async id => { await page.run(`openTask(${JSON.stringify(id)})`); page.run('clearTimeout(taskTimer)'); assert.equal(text(page.$('task-error')), '', 'task details render without a caught error'); };
   return { h, admin, page, now, task, instance, open, records: new TaskRecords(h.store), next: () => page.$('task-next-text').textContent, side: () => text(page.$('task-side')) };
 }
 // A chat model that holds every request until released, so a page can look at a QA run while it is running.
