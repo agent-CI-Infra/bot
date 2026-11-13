@@ -23,7 +23,7 @@ async function visiblePrimaryCaptions(page) {
   });
 }
 
-test('#549 项目管理员主导航不超过 4 个入口，更多不重复且 1440/768/390 无横向溢出', async ({ page }) => {
+test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可从主导航进入，更多不重复且 1440/768/390 无横向溢出', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness();
   mkdirSync(out, { recursive: true });
@@ -37,15 +37,19 @@ test('#549 项目管理员主导航不超过 4 个入口，更多不重复且 14
     await page.setViewportSize({ width: 1440, height: 900 });
     await login(page, h, 'nav-member', password);
     const desktop = await visiblePrimaryCaptions(page);
-    expect(desktop).toEqual(['项目', '管理对话', '看板', '待处理']);
+    expect(desktop).toEqual(['项目', '管理对话', '看板', '待处理', '更多功能']);
     for (const name of ['统计', 'Webhook 投递', '个人设置', '存储', '全局设置']) {
       await expect(page.locator('#console-sidebar').getByRole('button', { name, exact: true })).toBeHidden();
     }
-    await expect(page.locator('#console-sidebar').getByRole('link', { name: '更多功能', exact: true })).toHaveCount(0);
+    await expect(page.locator('#console-sidebar').getByRole('link', { name: '更多功能', exact: true })).toBeVisible();
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(1440);
     await page.screenshot({ path: `${out}/nav-member-1440.png`, fullPage: true });
 
-    await page.goto(h.admin + '/#/more');
+    await page.locator('#console-sidebar').getByRole('link', { name: '更多功能', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
+    await page.locator('.console-group a').filter({ hasText: '个人设置' }).first().click();
+    await expect(page).toHaveURL(/#\/preferences/);
+    await page.locator('#console-sidebar').getByRole('link', { name: '更多功能', exact: true }).click();
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
     const headings = await page.locator('.console-group h2').allInnerTexts();
     expect(headings).toEqual(['设置']);
@@ -58,7 +62,7 @@ test('#549 项目管理员主导航不超过 4 个入口，更多不重复且 14
 
     await page.setViewportSize({ width: 768, height: 900 });
     await expect(page.locator('#console-sidebar')).toBeVisible();
-    expect(await visiblePrimaryCaptions(page)).toEqual(['项目', '管理对话', '看板', '待处理']);
+    expect(await visiblePrimaryCaptions(page)).toEqual(['项目', '管理对话', '看板', '待处理', '更多功能']);
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(768);
     await page.screenshot({ path: `${out}/nav-member-768.png`, fullPage: true });
 

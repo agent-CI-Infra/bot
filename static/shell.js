@@ -137,8 +137,10 @@ function consoleGroups() {
   ] });
   return groups;
 }
-// #549: a project administrator's desktop primary nav is only 项目 / 管理对话 / 看板 / 待处理 (four destinations
-// aligned with the #481 bar). 统计, Webhook, 个人设置 and 存储 leave the sidebar; 个人设置 stays in the account menu and 更多.
+// #549: a project administrator's desktop primary nav is 项目 / 管理对话 / 看板 / 待处理, plus a visible
+// 更多功能 entry so 个人设置 stays reachable at desktop widths (the account menu is phone-only).
+// 统计, Webhook, 个人设置 and 存储 leave the sidebar itself; they remain in 更多 (and, for super
+// administrators, in the pinned settings nav).
 function applyConsoleNavVisibility() {
   if (!me) return;
   const isSuper = me.role === 'super_admin';
@@ -146,6 +148,8 @@ function applyConsoleNavVisibility() {
     const node = document.querySelector('#tabs [data-tab="' + tab + '"]');
     if (node) node.hidden = !isSuper;
   }
+  const more = document.getElementById('console-more-link') || document.querySelector('#tabs [data-tab="more"]');
+  if (more) more.hidden = isSuper;
 }
 function syncConsoleShell() {
   const signedIn = !!me && !$('workspace').hidden;
@@ -390,6 +394,13 @@ function initConsoleShell() {
   settings.append(tabs.querySelector('[data-tab=preferences]'), tabs.querySelector('[data-tab=settings]'));
   primary.append(kicker, ...tabs.children);
   const inbox = consoleLink('#/inbox', '待处理'); inbox.id = 'console-inbox-link'; primary.append(inbox);
+  // Project administrators have no pinned 个人设置 / 全局设置 and the account menu is phone-only, so
+  // 更多功能 has to stay visible in the desktop sidebar or those pages have no on-screen entry.
+  const more = consoleLink('#/more', '更多功能');
+  more.id = 'console-more-link';
+  more.dataset.tab = 'more';
+  more.dataset.testid = 'console-more-link';
+  primary.append(more);
   // Keep the original tabs and their click handling, but let only the work navigation scroll above the settings.
   tabs.replaceChildren(primary, settings); sidebar.append(scope, tabs);
   const locationBox = element('div', '', 'console-location'); locationBox.id = 'console-location'; locationBox.hidden = true;
