@@ -7,11 +7,11 @@ function timestamp(value) {
 }
 function options(select, rows, label) { const selected = select.value; while (select.options.length > 1) select.remove(1); rows.forEach(row => select.add(new Option(label(row), row.id))); if (rows.some(row => row.id === selected)) select.value = selected; }
 function renderCurrentUser() {
-  const who = $('who'), role = me.role === 'super_admin' ? '超级管理员' : '项目管理员';
+  const who = $('who'), role = me.role === 'super_admin' ? t('role.super_admin') : t('role.project_admin');
   who.replaceChildren();
   if (!me.github) { who.textContent = `${me.username} · ${role}`; return; }
   const avatar = document.createElement('img'); avatar.src = me.github.avatar_url;
-  avatar.alt = `${me.github.login} 的 GitHub 头像`; avatar.width = 28; avatar.height = 28; avatar.referrerPolicy = 'no-referrer';
+  avatar.alt = t('identity.avatar', { login: me.github.login }); avatar.width = 28; avatar.height = 28; avatar.referrerPolicy = 'no-referrer';
   avatar.addEventListener('error', () => avatar.remove());
   const copy = element('span', '', 'current-user-copy'), name = element('span', '@' + me.github.login, 'current-user-name');
   name.title = me.github.login; copy.append(name, element('span', role, 'current-user-role')); who.append(avatar, copy);
@@ -22,7 +22,7 @@ function showBootFailure(err) {
   document.body.classList.remove('board-mode');
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
   const message = $('boot-message');
-  message.textContent = `控制台载入失败：${err.message}。请检查网络连接或服务状态后重试。`;
+  message.textContent = t('chrome.boot_failed', { message: err.message });
   message.setAttribute('role', 'alert'); message.classList.add('view-error');
   $('boot-retry').hidden = false;
 }
@@ -36,24 +36,24 @@ async function start() {
   $('boot').hidden = true;
   $('access').hidden = !!me; $('workspace').hidden = !me; $('identity').hidden = !me; $('tabs').hidden = !me;
   if (!me) document.body.classList.remove('board-mode');
-  $('access-title').textContent = setup ? '创建第一名超级管理员' : '登录';
-  $('access-description').textContent = setup ? '初始化只成功一次。请为本部署设置独立的管理员账号。' : '使用本系统账号进入你有权访问的仓库。';
-  $('access-submit').textContent = setup ? '初始化并登录' : '登录';
+  $('access-title').textContent = setup ? t('setup.title') : t('login.title');
+  $('access-description').textContent = setup ? t('setup.description') : t('login.description');
+  $('access-submit').textContent = setup ? t('setup.submit') : t('login.submit');
   $('access-form').elements.password.autocomplete = setup ? 'new-password' : 'current-password';
-  $('access-password').type = 'password'; $('access-password-toggle').textContent = '显示密码'; $('access-password-toggle').setAttribute('aria-pressed', 'false');
+  $('access-password').type = 'password'; $('access-password-toggle').textContent = t('login.show_password'); $('access-password-toggle').setAttribute('aria-pressed', 'false');
   // The same feedback component stays next to the action that failed, including OAuth callbacks.
   (me ? $('main-content') : $('access-feedback')).append($('message'));
   $('access').dataset.mode = setup ? 'setup' : 'local'; $('access-setup-note').hidden = !setup;
   $('github-login').hidden = true; $('access-local-divider').hidden = true; $('access-provider-retry').hidden = true;
-  $('access-provider-status').textContent = ''; $('access-provider-note').textContent = setup ? '' : '使用本地账号，进入你有权管理的项目。';
+  $('access-provider-status').textContent = ''; $('access-provider-note').textContent = setup ? '' : t('login.local_note');
   if (!me && !setup) {
     try {
       const enabled = (await api('/api/auth/github/status')).enabled;
       $('github-login').hidden = !enabled; $('access-local-divider').hidden = !enabled;
       $('access').dataset.mode = enabled ? 'github' : 'local';
-      if (enabled) $('access-provider-note').textContent = 'GitHub 登录与项目授权分别核验，登录不会自动获得项目管理权限。';
+      if (enabled) $('access-provider-note').textContent = t('login.github_note');
     } catch {
-      $('access-provider-status').textContent = 'GitHub 登录入口暂不可读取。可使用本地账号，或重新读取入口。'; $('access-provider-retry').hidden = false;
+      $('access-provider-status').textContent = t('login.github_status_failed'); $('access-provider-retry').hidden = false;
     }
   }
 
@@ -74,3 +74,4 @@ async function start() {
   await route();
   if (authError) notice('message', identityError(authError));
 }
+if (typeof onLocaleChange === 'function') onLocaleChange(() => start().catch(error));

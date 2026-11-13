@@ -90,6 +90,11 @@ export function loadConsole(files, respond) {
     matchMedia: media => ({ media, matches: false, addEventListener() {} }),
     setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout, URL, URLSearchParams, console });
   context.window = context;
-  for (const file of files) vm.runInContext(readConsoleScriptSync(file), context, { filename: file });
+  context.navigator = { language: 'zh-CN' };
+  context.localStorage = { getItem() { return null; }, setItem() {}, removeItem() {} };
+  document.documentElement = document.body;
+  // t() lives in i18n.js and is used by chrome and translated pages; load it first unless the caller already did.
+  const scripts = files.includes('static/i18n.js') ? files : ['static/i18n.js', ...files];
+  for (const file of scripts) vm.runInContext(readConsoleScriptSync(file), context, { filename: file });
   return { requests, $: id => document.getElementById(id), run: code => vm.runInContext(code, context) };
 }

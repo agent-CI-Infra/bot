@@ -7,8 +7,8 @@ async function render(quiet = false) {
   // the list it started for, or step aside, and never re-point its own address at whatever `tab` became (#365).
   const pageTab = tab;
   const request=++renderVersion, taskTab = !!taskKinds[tab], isIdentity = tab === 'identity' || tab === 'preferences';
-  const identityTitle = /^#\/identity\/feishu-apps(?:\/|$)/.test(location.hash) ? '组织飞书应用'
-    : /^#\/identity\/feishu(?:$|\?|\/)/.test(location.hash) ? '飞书绑定' : titles.identity;
+  const identityTitle = /^#\/identity\/feishu-apps(?:\/|$)/.test(location.hash) ? t('nav.feishu_apps')
+    : /^#\/identity\/feishu(?:$|\?|\/)/.test(location.hash) ? t('nav.feishu') : t('identity.title');
   $('page-title').textContent = isIdentity ? identityTitle : titles[tab];
   const activeNavTab = ['preferences', 'identity', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === activeNavTab ? 'page' : 'false'));

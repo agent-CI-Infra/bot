@@ -1,4 +1,4 @@
-titles.preferences = '个人设置'; titles.conversations = '飞书会话';
+titles.preferences = t('nav.preferences'); titles.conversations = t('nav.conversations');
 
 // Whether the signed-in user may manage their organization's Feishu apps. It belongs to one user: a different sign-in
 // starts from false, and every /api/channels/bindings read updates it, so the nav never depends on the page visited first.
@@ -10,24 +10,25 @@ function notePersonalApps(data) {
 }
 function resetPersonalApps() { personalCanManageApps = false; personalAppsOwner = null; }
 function personalSettingsNav() {
+  titles.preferences = t('nav.preferences'); titles.conversations = t('nav.conversations');
   if (me && personalAppsOwner !== me.id) {
     // First personal page for this user: read the capability once instead of waiting for the identity overview.
     personalCanManageApps = false; personalAppsOwner = me.id;
     if (me.role !== 'super_admin') { const owner = me; api('/api/channels/bindings').then(data => { if (me === owner) notePersonalApps(data); }).catch(() => {}); }
   }
   const nav = element('nav', '', 'project-nav'), hash = location.hash;
-  nav.setAttribute('aria-label', '个人设置类别');
-  nav.append(element('p', '个人设置', 'console-nav-label'));
+  nav.setAttribute('aria-label', t('nav.personal_categories'));
+  const navLabel = element('p', t('nav.personal'), 'console-nav-label'); navLabel.setAttribute('data-i18n', 'nav.personal'); nav.append(navLabel);
   const activeKey = tab === 'external' ? 'external'
     : tab === 'conversations' || hash === '#/identity/feishu/conversations' ? 'conversations'
     : /^#\/identity\/feishu-apps(?:\/|$)/.test(hash) ? 'feishu-apps'
     : /^#\/identity\/feishu(?:$|\?|\/)/.test(hash) ? 'feishu' : 'identity';
   const items = [
-    ['identity', '#/identity', '身份与权限'],
-    ['feishu', '#/identity/feishu', '飞书绑定'],
-    ...(personalCanManageApps || activeKey === 'feishu-apps' ? [['feishu-apps', '#/identity/feishu-apps', '组织飞书应用']] : []),
-    ['conversations', '#/conversations', '飞书会话'],
-    ['external', '#/external', '外部执行端']
+    ['identity', '#/identity', t('nav.identity')],
+    ['feishu', '#/identity/feishu', t('nav.feishu')],
+    ...(personalCanManageApps || activeKey === 'feishu-apps' ? [['feishu-apps', '#/identity/feishu-apps', t('nav.feishu_apps')]] : []),
+    ['conversations', '#/conversations', t('nav.conversations')],
+    ['external', '#/external', t('nav.external')]
   ];
   for (const [key, href, caption] of items) {
     const item = element('a', caption); item.href = href;
@@ -38,23 +39,23 @@ function personalSettingsNav() {
 }
 
 async function channelBindingOverview(data) {
-  const owner = me, overview = element('section', '', 'feishu-overview'); overview.setAttribute('aria-label', '飞书绑定概览');
+  const owner = me, overview = element('section', '', 'feishu-overview'); overview.setAttribute('aria-label', t('feishu.overview'));
   const active = data.bindings.filter(b => b.status === 'active' && (!b.expires_at || b.expires_at > Date.now()));
   const metrics = element('div', '', 'feishu-metrics');
   const metric = (name, value, hint) => { const box = element('div', '', 'feishu-metric'); box.append(element('span', name), element('strong', value), element('small', hint)); metrics.append(box); return box; };
-  metric('已绑定身份', String(active.length), '当前账户 ' + me.username);
-  const privateCount = metric('本人私聊', '—', '正在读取'), groupCount = metric('维护的群', '—', '正在读取');
+  metric(t('feishu.bound_identities'), String(active.length), t('feishu.current_account', { name: me.username }));
+  const privateCount = metric(t('feishu.personal_chats'), '—', t('feishu.reading')), groupCount = metric(t('feishu.managed_groups'), '—', t('feishu.reading'));
   overview.append(metrics);
   const links = element('div', '', 'actions');
-  links.append(channelLink('#/identity/feishu', '管理飞书绑定', 'button-link quiet'));
+  links.append(channelLink('#/identity/feishu', t('feishu.manage'), 'button-link quiet'));
   // #555: keep the Feishu card on the identity first screen (#514), but fold leftover create/session links.
   const more = element('details', '', 'fold feishu-more-actions');
   more.setAttribute('data-testid', 'feishu-more-actions');
   more.append(
-    element('summary', '更多飞书操作'),
-    channelLink('#/identity/feishu?create=personal', '创建个人绑定', 'button-link quiet'),
-    channelLink('#/identity/feishu?create=group', '创建群绑定', 'button-link quiet'),
-    channelLink('#/conversations', '查看飞书会话', 'button-link quiet')
+    element('summary', t('feishu.more_actions')),
+    channelLink('#/identity/feishu?create=personal', t('feishu.create_personal'), 'button-link quiet'),
+    channelLink('#/identity/feishu?create=group', t('feishu.create_group'), 'button-link quiet'),
+    channelLink('#/conversations', t('feishu.view_conversations'), 'button-link quiet')
   );
   links.append(more);
   overview.append(links);
@@ -64,36 +65,36 @@ async function channelBindingOverview(data) {
     api('/api/channels/employees').then(result => {
       const belongs = (binding, chat) => binding.connector === chat.connector_id + ':' + chat.app_id && binding.external_actor === chat.actor_id && binding.external_tenant === chat.actor_tenant;
       const currentChats = result.personal_chats.filter(c => active.some(b => belongs(b, c)));
-      show(privateCount, currentChats.length, '当前绑定对应的私聊' + (result.personal_chats.length > currentChats.length ? `；另有 ${result.personal_chats.length - currentChats.length} 个历史会话` : ''));
+      show(privateCount, currentChats.length, t('feishu.personal_hint') + (result.personal_chats.length > currentChats.length ? t('feishu.personal_hint_extra', { count: result.personal_chats.length - currentChats.length }) : ''));
       for (const b of active) {
         const chats = result.personal_chats.filter(c => belongs(b, c));
         const row = element('div', '', 'feishu-summary-row');
-        const name = element('strong', b.display_name && b.display_name !== b.external_actor ? b.display_name : owner.username + ' 的飞书身份');
+        const name = element('strong', b.display_name && b.display_name !== b.external_actor ? b.display_name : t('feishu.identity_of', { name: owner.username }));
         const profile = { ...b, binding_id: b.id, can_refresh_name: !!b.can_read_name, display_name: b.display_name !== b.external_actor ? b.display_name : '' };
         row.append(name, channelProfileDetails(profile, () => { name.textContent = channelChatName(profile); }),
-          note(chats.length ? `私聊已建立 ${chats.length} 个 · 使用管理助手` : '身份已绑定，尚未建立私聊会话；请给机器人发送一条普通消息。'));
-        for (const chat of chats) row.append(channelLink('#/conversations/' + chat.id, '打开私聊会话', 'button-link quiet'));
+          note(chats.length ? t('feishu.chats_ready', { count: chats.length }) : t('feishu.chats_empty')));
+        for (const chat of chats) row.append(channelLink('#/conversations/' + chat.id, t('feishu.open_chat'), 'button-link quiet'));
         summary.append(row);
       }
-    }).catch(() => show(privateCount, '未知', '读取失败，可刷新重试')),
+    }).catch(() => show(privateCount, t('feishu.unknown'), t('feishu.read_failed'))),
     api('/api/channels/service-bindings').then(result => {
       const groups = result.bindings.filter(b => b.can_manage), activeGroups = groups.filter(b => b.enabled);
-      show(groupCount, activeGroups.length, `另有 ${groups.length - activeGroups.length} 个已停用；按管理权限统计`);
+      show(groupCount, activeGroups.length, t('feishu.groups_hint', { count: groups.length - activeGroups.length }));
       if (groups.length) {
-        const list = element('details', '', 'fold'); list.append(element('summary', '查看维护的群与绑定范围'));
+        const list = element('details', '', 'fold'); list.append(element('summary', t('feishu.groups_summary')));
         for (const b of groups) {
           const row = element('div', '', 'feishu-summary-row'), name = element('strong', channelChatName(b.chat)), rowActions = element('div', '', 'actions');
-          if (b.can_view !== false) rowActions.append(channelLink('#/conversations/' + b.chat_id, '查看聊天记录', 'button-link quiet'));
-          rowActions.append(channelLink('#/identity/feishu?group=' + b.chat_id, '配置仓库与权限', 'button-link quiet'));
+          if (b.can_view !== false) rowActions.append(channelLink('#/conversations/' + b.chat_id, t('feishu.view_history'), 'button-link quiet'));
+          rowActions.append(channelLink('#/identity/feishu?group=' + b.chat_id, t('feishu.configure'), 'button-link quiet'));
           row.append(name,
             channelProfileDetails(b.chat, () => { name.textContent = channelChatName(b.chat); }),
-            note(`${bindingStates[b.state] || b.state} · ${b.service_role.name || '服务角色已删除'} · ${b.scope.organization?.name || b.scope.repositories.map(r => r.full_name).join('、')}`),
+            note(`${( { active: t('feishu.state.active'), paused: t('feishu.state.paused'), disabled: t('feishu.state.disabled') } )[b.state] || b.state} · ${b.service_role.name || t('feishu.role_deleted')} · ${b.scope.organization?.name || b.scope.repositories.map(r => r.full_name).join('、')}`),
             rowActions);
           list.append(row);
         }
         summary.append(list);
       }
-    }).catch(() => show(groupCount, '未知', '读取失败，可刷新重试'))
+    }).catch(() => show(groupCount, t('feishu.unknown'), t('feishu.read_failed')))
   ]);
   return overview;
 }
