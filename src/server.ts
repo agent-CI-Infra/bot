@@ -415,8 +415,10 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       connectionTimer = setInterval(() => channelConnections.reconcile(), 1000); connectionTimer.unref();
     }
   });
-  server.once('close',()=>{ clearInterval(connectionTimer); channels.close(); assistants.close(); channelConnections.close(); void scheduler.close().catch(()=>{}); void managementApi.agent.close().catch(()=>{}); });
+  let drained:Promise<unknown>=Promise.resolve();
+  server.once('close',()=>{ clearInterval(connectionTimer); channels.close(); channelConnections.close(); drained=Promise.allSettled([channels.drain(),assistants.close(),scheduler.close(),managementApi.agent.close()]); });
   const close=server.close.bind(server);
-  server.close=((callback?: (error?:Error)=>void)=>close(error=>{void channels.drain().then(()=>callback?.(error));})) as typeof server.close;
+  // The caller may close SQLite after this callback; every background consumer must have finished first.
+  server.close=((callback?: (error?:Error)=>void)=>close(error=>{void drained.then(()=>callback?.(error));})) as typeof server.close;
   return { server };
 }

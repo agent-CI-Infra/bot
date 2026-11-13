@@ -228,6 +228,9 @@ export class AssistantComputerService {
   readonly active = new Map<string, AssistantComputer>();
   private readonly fences = new Map<string, FenceResolver>();
   private timers: ReturnType<typeof setInterval>[] = [];
+  private startup?: ReturnType<typeof setTimeout>;
+  private readonly maintenance = new Set<Promise<unknown>>();
+  private stopped = false;
   private reconciled = false;
   private sweeping = false;
   constructor(readonly store: Store, readonly manager?: Manager, root?: string) {
@@ -263,11 +266,20 @@ export class AssistantComputerService {
   }
   start(): void {
     if (!this.available() || this.timers.length) return;
-    this.timers = [setInterval(() => { void this.sweep(); }, 10_000), setInterval(() => { void this.retain(); }, 3600_000)];
+    this.stopped = false;
+    const run = (work: () => Promise<void>) => {
+      if(this.stopped)return;
+      const pending=work().catch(error=>console.error('[assistant-computers] maintenance failed:',error instanceof Error?error.message:'unknown')).finally(()=>this.maintenance.delete(pending));this.maintenance.add(pending);
+    };
+    this.timers = [setInterval(() => run(()=>this.sweep()), 10_000), setInterval(() => run(()=>this.retain()), 3600_000)];
     for (const timer of this.timers) timer.unref();
-    setTimeout(() => { void this.sweep(); void this.retain(); }, 1000).unref();
+    this.startup=setTimeout(() => { run(()=>this.sweep());run(()=>this.retain()); }, 1000);this.startup.unref();
   }
-  close(): void { for (const timer of this.timers) clearInterval(timer); this.timers = []; }
+  async close(): Promise<void> {
+    this.stopped=true;clearTimeout(this.startup);for(const timer of this.timers)clearInterval(timer);this.timers=[];
+    // Retention reads SQLite again after filesystem/manager awaits; finish it before the caller closes storage.
+    await Promise.allSettled([...this.maintenance]);
+  }
   async settingsView(): Promise<Json | null> {
     if (!this.available()) return null;
     return { computers: await this.manager!.call('GET', '/v1/assistant-computers/settings').catch(() => null), homes: this.homes!.view() };
