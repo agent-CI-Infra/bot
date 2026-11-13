@@ -116,7 +116,8 @@ function consoleGroups() {
     ['#/identity/feishu', '飞书绑定', '个人绑定、群绑定、仓库权限与聊天记录'],
     ['#/identity', '身份与权限', '本人绑定与当前有效授权'],
     ['#/conversations', '飞书会话', '成员消息、执行过程与派生任务']
-  ];
+  ], conversations = personal[personal.length - 1];
+  // A super administrator keeps 飞书会话 under 分析与渠道 as before #549; a project administrator sees it with personal settings.
   if (me.role !== 'super_admin') {
     groups.push({ title: '设置', items: personal });
     return groups;
@@ -127,11 +128,12 @@ function consoleGroups() {
     .map(([key, name]) => [`#/projects/${id}/${key}`, name, repo.full_name]) });
   groups.push({ title: '分析与渠道', items: [
     ['#/costs', '用量与成本', '按项目、日期与工作类型查看'],
-    ['#/events', 'Webhook 投递', '接收、验证和处理结果']
+    ['#/events', 'Webhook 投递', '接收、验证和处理结果'],
+    conversations
   ] });
   // One entry into platform settings: the section picker on that page carries the rest.
   groups.push({ title: '个人与平台', items: [
-    ...personal,
+    ...personal.filter(item => item !== conversations),
     ['#/external', '外部执行端', '接入与连接诊断'],
     ['#/settings/work-computers', '全局设置', '系统算力、接入、渠道与用户']
   ] });
