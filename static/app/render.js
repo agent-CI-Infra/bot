@@ -24,7 +24,8 @@ async function render(quiet = false) {
   $('rows').hidden=['external','board','costs','settings','identity','preferences'].includes(tab);$('external-panel').hidden=tab!=='external';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=!isIdentity;$('sync').hidden=true;$('hidden-filter-label').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = listParams();
-  $('rows').dataset.view=tab;if(!quiet){$('rows').replaceChildren(consoleState('正在加载列表','正在读取当前范围的记录。',{tone:'loading'}));listSignature='';$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');}
+  // Only lists that render into #rows show its loading state; console pages draw their own and must not keep a stale one.
+  $('rows').dataset.view=tab;if(!quiet){$('rows').replaceChildren(...($('rows').hidden||consoleTabs.includes(tab)?[]:[consoleState('正在加载列表','正在读取当前范围的记录。',{tone:'loading'})]));listSignature='';$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');}
   if(tab==='board'){try{await renderBoard(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='costs'){try{await renderCosts(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(isIdentity){try{await renderIdentity();}finally{$('rows').removeAttribute('aria-busy');}return;}

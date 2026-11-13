@@ -125,6 +125,17 @@ test('member read failures replace previous grants and project admins cannot tra
       await expect(member.locator('.project-member-list')).toContainText('project-member');
       await expect(member.getByLabel('添加项目管理员', { exact: true })).toHaveCount(0);
       await expect(member.locator('#project-page')).toContainText('不能再转授权');
+      // #553: without the super-admin-only assignment card the grants card spans the whole row instead of half of it.
+      await expect(member.locator('.members-layout > [hidden]')).toHaveCount(1);
+      await member.setViewportSize({ width: 1440, height: 900 });
+      const widths = await member.locator('.members-layout').evaluate(grid => ({ grid: grid.getBoundingClientRect().width,
+        card: [...grid.children].find(child => !child.hidden).getBoundingClientRect().width }));
+      expect(Math.abs(widths.card - widths.grid)).toBeLessThanOrEqual(1);
+      mkdirSync('.tmp/console-states-553', { recursive: true });
+      await member.screenshot({ path: '.tmp/console-states-553/members-member-1440.png', fullPage: true });
+      await member.setViewportSize({ width: 390, height: 844 });
+      expect(await member.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await member.screenshot({ path: '.tmp/console-states-553/members-member-390.png', fullPage: true });
     } finally { await context.close(); }
   } finally { await f.close(); }
 });

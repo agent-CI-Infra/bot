@@ -138,3 +138,24 @@ for(const suffix of ['', '/stats'])test(`a control-plane project 404 still clear
     await expect(page.locator('#machine-status')).toHaveCount(0);await expect(page.getByLabel('CPU（核）',{exact:true})).toHaveCount(0);
   }finally{await f.close();}
 });
+
+test('#553 an unreadable computer record shows one error state whose retry recovers the machine page',async({page})=>{
+  const f=await fixture(),out='.tmp/console-states-553';mkdirSync(out,{recursive:true});
+  try{await page.setViewportSize({width:1440,height:1000});
+    await page.route('**/api/environments/101',route=>route.fulfill({status:500,json:{error:'internal_error'}}));
+    await page.goto(f.h.admin+'/#/settings/computers/101');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);
+    await page.getByRole('button',{name:'登录',exact:true}).click();
+    const state=page.locator('#machine-status [data-testid=console-state-error]');
+    await expect(state.getByRole('heading',{name:'电脑状态未知',exact:true})).toBeVisible();
+    await expect(state).toHaveAttribute('role','alert');
+    // The retry inside the error state is the page's only refresh control, so it keeps the #computer-refresh id.
+    await expect(page.locator('#computer-refresh')).toHaveCount(1);await expect(state.locator('#computer-refresh')).toHaveText('刷新电脑状态');
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+    await page.screenshot({path:`${out}/machine-unknown-1440.png`,fullPage:true});
+    await page.setViewportSize({width:390,height:844});await page.evaluate(()=>scrollTo(0,0));
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+    await page.screenshot({path:`${out}/machine-unknown-390.png`,fullPage:true});
+    await page.unrouteAll({behavior:'wait'});await state.locator('#computer-refresh').click();
+    await expect(page.locator('#machine-status')).toContainText('运行任务记录');await expect(page.locator('[data-testid=console-state-error]')).toHaveCount(0);
+  }finally{await f.close();}
+});
