@@ -131,6 +131,18 @@ test('a stale revision is refused instead of overwriting, and the receipt page e
     await expect(result).toHaveAttribute('data-receipt-result', 'failed');
     await expect(result).toContainText('命令未执行');
     await expect(result).toContainText('提交之后项目配置的版本变了，命令没有执行；先读回当前配置再提交。');
-    await expect(result).not.toContainText('已执行。');
+    // Name the whole sentence the failure section must never show: the bare `已执行。` this used to exclude is only
+    // ever rendered as a page note outside this section, so the old assertion could not fail (#484).
+    await expect(result).not.toContainText('已执行，服务端没有记录错误。');
+    // The positive control lives in this same test: a command submitted at the current revision does succeed and its
+    // receipt page renders exactly that sentence, so the negative assertion above is known to be able to bite.
+    const currentRevision = (await query(f.admin, 'get_effective_config', { project_id: '101' })).value.revision;
+    const succeededCommand = await command(f.admin, 'workflow.update', target, { prompt: 'Second prompt.' }, 'stale-355-c', currentRevision);
+    expect(succeededCommand.status).toBe(201);
+    expect(succeededCommand.value.state).toBe('succeeded');
+    await page.goto(f.h.admin + '/#/management/commands/' + succeededCommand.value.id);
+    const succeeded = panel.locator('[data-receipt-result]');
+    await expect(succeeded).toHaveAttribute('data-receipt-result', 'succeeded');
+    await expect(succeeded).toContainText('已执行，服务端没有记录错误。');
   } finally { await f.close(); }
 });
