@@ -478,3 +478,55 @@ test('GET /api/identity names a plain GitHub connection state, the next step, an
   assert.equal(expiredAuth.action, 'reconnect');
   assert.match(expiredAuth.next_step, /重新连接/);
 });
+
+test('a deleted installation grant is revoked without repeated permission changes while verification is uncertain', async t => {
+  const f = await identityFixture(t), { h, state } = f, login = await f.login(), p = login.result.principal_id;
+  const stale = `github:${p}:github.com:123/999:tenant`;
+  // A retired installation whose derived grant is still open, exactly as production kept it after the App was deleted.
+  h.store.run(`INSERT INTO github_installations(ref,github_host,app_id,installation_id,account_id,target_id,target_type,target_login,
+    repository_selection,status,completeness,revision,scope_pending,updated_at)
+    VALUES('github.com/123/999','github.com','123','999',?,'30','Organization','retired','all','deleted','complete',3,0,?)`, f.a.id, new Date().toISOString());
+  h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,policy,evidence,
+    verified_at,expires_at,installation_ref,installation_revision)
+    VALUES(?,?,'github.com:30',NULL,'tenant','org_admin','[]','github_derived','current_github','organization_owner',1,0,'github.com/123/999',3)`, stale, p);
+  // GitHub answers the membership read with a server error, so this round is uncertain but the repository proof still stands.
+  state.membershipFailure = 503; state.admin = true;
+  const revision = () => h.store.get('SELECT authorization_revision FROM principals WHERE id=?', p).authorization_revision;
+  const bumped = () => h.store.get("SELECT count(*) n FROM authorization_events WHERE principal_id=? AND reason='github.permissions_changed'", p).n;
+  const before = revision(), seen = bumped();
+  for (let round = 0; round < 4; round++) await f.identity.reverify(p);
+  // The retired installation's grant is unusable after the first uncertain round, not renewed round after round.
+  assert.notEqual(h.store.get('SELECT revoked_at FROM scoped_grants WHERE id=?', stale).revoked_at, null);
+  assert.equal(active(h.store, p).some(g => g.grant_id === stale), false);
+  // Nothing effective was lost, so no round may report a permission change or move the revision.
+  assert.equal(bumped() - seen, 0);
+  assert.equal(revision(), before);
+  assert.equal(active(h.store, p).some(g => g.project_id === '101'), true);
+  // A confirmed loss still bumps once, and only once.
+  state.membershipFailure = 0; state.admin = false; state.owner = false;
+  await f.identity.reverify(p); await f.identity.reverify(p);
+  assert.equal(bumped() - seen, 1);
+  assert.deepEqual(active(h.store, p), []);
+});
+
+test('a console write is authorized from current permissions instead of the session revision', async t => {
+  const f = await identityFixture(t), { h, state } = f, login = await f.login(), p = login.result.principal_id;
+  const creds = session(h.store, p, login.result.identity_id);
+  const policy = body => fetch(h.admin + '/api/repositories/101/policy', { method: 'PATCH',
+    headers: { Cookie: 'bot_session=' + creds.token, 'X-CSRF-Token': creds.csrf, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  assert.equal((await policy({ review_enabled: true })).status, 200);
+  // A background gain or any other bump must not turn a permitted console write into a version conflict.
+  h.store.run('UPDATE principals SET authorization_revision=authorization_revision+1 WHERE id=?', p);
+  const permitted = await policy({ review_enabled: false });
+  assert.equal(permitted.status, 200);
+  // Losing the permission still refuses the write, reported as a permission decision rather than a stale session.
+  state.owner = false; state.admin = false; await f.identity.reverify(p);
+  const denied = await policy({ review_enabled: true });
+  assert.equal(denied.status, 403);
+  assert.notEqual((await denied.json()).error, 'authorization_changed');
+  // A disabled account and an ended session are still refused outright.
+  h.store.run('UPDATE users SET active=0 WHERE id=?', p);
+  const disabled = await policy({ review_enabled: true });
+  assert.equal([401, 403].includes(disabled.status), true);
+  assert.equal(h.store.get("SELECT review_enabled FROM policies WHERE repository_id='101'").review_enabled, 0);
+});
