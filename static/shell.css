@@ -45,7 +45,9 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--spac
 .console-ready :is(h1, h2, h3, p, label, a, pre) { overflow-wrap: anywhere; }
 .console-ready .muted { color: var(--color-text-muted); line-height: var(--line-height-relaxed); }
 .console-ready :is(.card, .side-card) { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: var(--space-6); }
-.console-ready .card.list-panel { padding: 0; overflow: hidden; }
+.console-ready .card.list-panel { padding: 0; }
+/* The board scrolls its columns sideways and opens toolbar menus past the panel edge, so it keeps board.css overflow. */
+.console-ready:not(.board-mode) .card.list-panel { overflow: hidden; }
 .console-ready .toolbar { padding: var(--space-6) var(--space-7); }
 .console-ready #paging { padding: var(--space-4) var(--space-7); }
 .console-ready .toolbar h1 { font-size: var(--font-size-5); letter-spacing: -.7px; }

@@ -21,6 +21,16 @@ const cardMetrics = async (locator) => locator.evaluate(el => {
   return { radius: s.borderRadius, border: s.borderTopColor, padding: s.padding, bg: s.backgroundColor };
 });
 
+// Enabled, visible controls under `scope` painted with the brand fill, whatever their class.
+const enabledBrandFilled = async (page, scope, brand) => page.evaluate(([sel, fill]) => {
+  const root = document.querySelector(sel) || document.body;
+  return [...root.querySelectorAll('button, a.button-link, a.btn-primary')].filter(el => {
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true' || el.closest('[hidden]')) return false;
+    const box = el.getBoundingClientRect(); const s = getComputedStyle(el);
+    return box.width > 0 && box.height > 0 && s.visibility !== 'hidden' && s.opacity !== '0' && s.backgroundColor === fill;
+  }).map(el => el.textContent.trim());
+}, [scope, brand]);
+
 test('#552 登录、项目、身份页卡片同源，每页最多一个启用的主按钮，1440 与 390 可对照', async ({ page }) => {
   test.setTimeout(60000);
   const h = await harness();
@@ -67,18 +77,13 @@ test('#552 登录、项目、身份页卡片同源，每页最多一个启用的
     await expect(filter).toHaveClass(/btn-secondary/);
     expect(await refresh.evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe(brand);
     expect(await filter.evaluate(el => getComputedStyle(el).backgroundColor)).toBe(surface);
-    const projectPrimaries = page.locator('#main-content button.btn-primary:not([disabled]), #main-content button:not(.quiet):not(.btn-secondary):not(.btn-text):not(.btn-danger):not(.status):not([disabled])').filter({ hasNot: page.locator('[hidden]') });
-    // The project list has no primary CTA; refresh and filter are secondary / text.
-    const primaryCount = await page.evaluate(() => {
-      const root = document.querySelector('#main-content') || document.body;
-      return [...root.querySelectorAll('button, a.button-link, a.btn-primary')].filter(el => {
-        if (el.disabled || el.getAttribute('aria-disabled') === 'true' || el.hidden || el.closest('[hidden]')) return false;
-        const s = getComputedStyle(el);
-        const brand = getComputedStyle(document.createElement('div'));
-        return el.classList.contains('btn-primary') && s.opacity !== '0';
-      }).length;
-    });
-    expect(primaryCount).toBe(0);
+    // The project list has no primary CTA; refresh and filter are secondary / text. Count by the painted fill, not
+    // by class: a button with no variant class still gets the brand background from shell.css and must count.
+    expect(await enabledBrandFilled(page, '#main-content', brand)).toEqual([]);
+    // The count must catch a button that forgot its variant class: shell.css paints it brand by default.
+    await page.evaluate(() => { const probe = document.createElement('button'); probe.id = 'variantless-probe'; probe.textContent = '无类按钮'; document.querySelector('#main-content').append(probe); });
+    expect(await enabledBrandFilled(page, '#main-content', brand)).toEqual(['无类按钮']);
+    await page.evaluate(() => document.getElementById('variantless-probe').remove());
     const listPanel = page.locator('.card.list-panel');
     await expect(listPanel).toBeVisible();
     expect(await listPanel.evaluate(el => getComputedStyle(el).borderRadius)).toBe(radius);
@@ -98,16 +103,13 @@ test('#552 登录、项目、身份页卡片同源，每页最多一个启用的
     }
     const advanced = page.locator('details.identity-advanced > summary');
     if (await advanced.count()) await advanced.first().click();
-    const refreshIdentity = page.getByRole('button', { name: '刷新身份与授权', exact: true });
-    await expect(refreshIdentity).toHaveClass(/btn-text/);
     const switcher = page.getByRole('button', { name: '切换组织', exact: true });
     await expect(switcher).toHaveClass(/btn-secondary/);
     const bind = page.getByRole('button', { name: '绑定 GitHub 账号', exact: true });
     await expect(bind).toHaveClass(/btn-secondary/);
     expect(await bind.isDisabled()).toBe(true);
-    const enabledIdentityPrimary = await page.evaluate(() =>
-      [...document.querySelectorAll('.identity-layout button.btn-primary, .identity-layout a.btn-primary')].filter(el => !el.disabled && !el.hidden).length);
-    expect(enabledIdentityPrimary).toBe(0);
+    // 连接 GitHub is disabled in this fixture, so no enabled control on the page may carry the brand fill.
+    expect(await enabledBrandFilled(page, '.identity-layout', brand)).toEqual([]);
     const sideCard = page.locator('.identity-layout .side-card').first();
     await expect(sideCard).toBeVisible();
     const metrics = await cardMetrics(sideCard);
