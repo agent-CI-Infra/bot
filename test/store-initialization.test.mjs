@@ -50,3 +50,23 @@ test('a late initialization failure rolls back the new schema and the empty file
   assert.ok(store.hasTable('task_workspaces'));
   assert.equal(store.get('PRAGMA integrity_check').integrity_check, 'ok');
 });
+
+test('reopening replaces board task triggers atomically against a competing connection', t => {
+  const {path,key}=database(t),initial=new Store(path,key);initial.close();
+  const competitor=new DatabaseSync(path);competitor.exec('PRAGMA busy_timeout=0');t.after(()=>competitor.close());
+  const exec=DatabaseSync.prototype.exec;let inspected=0,opening,reopened;
+  t.after(()=>reopened?reopened.close():opening?.close());
+  t.mock.method(DatabaseSync.prototype,'exec',function(sql){
+    const at=sql.indexOf('CREATE TRIGGER board_tasks_update_input');
+    if(this===competitor||at<0)return exec.call(this,sql);
+    opening=this;inspected++;
+    // Insert a competing connection precisely between DROP and CREATE, rather than relying on process timing.
+    exec.call(this,sql.slice(0,at));
+    assert.equal(competitor.prepare("SELECT count(*) n FROM sqlite_schema WHERE name='board_tasks_update_input'").get().n,1,'readers still see the complete old trigger set');
+    assert.throws(()=>competitor.exec('CREATE TRIGGER board_atomic_probe AFTER UPDATE OF input ON tasks BEGIN SELECT 1; END'),error=>error.errcode===5);
+    return exec.call(this,sql.slice(at));
+  });
+  reopened=new Store(path,key);
+  assert.equal(inspected,1);
+  assert.match(reopened.get("SELECT sql FROM sqlite_schema WHERE name='board_tasks_update_input'").sql,/NEW\.input IS NOT OLD\.input/);
+});
