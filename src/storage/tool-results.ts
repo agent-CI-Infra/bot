@@ -1,12 +1,12 @@
 import { closeSync, constants, fdatasyncSync, fstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, writeSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { TrajectoryScope } from './trajectories.js';
 
 export function toolResultStorage(db: DatabaseSync) {
   db.exec(`CREATE TABLE IF NOT EXISTS tool_result_files(file TEXT PRIMARY KEY,owner TEXT NOT NULL,source TEXT NOT NULL,
-    repository_id TEXT,task_id TEXT,conversation_id TEXT,bytes INTEGER NOT NULL,created_at TEXT NOT NULL,UNIQUE(owner,source));
+    repository_id TEXT,task_id TEXT,conversation_id TEXT,bytes INTEGER NOT NULL,created_at TEXT NOT NULL,source_context TEXT NOT NULL,UNIQUE(owner,source));
     CREATE INDEX IF NOT EXISTS tool_result_files_repository ON tool_result_files(repository_id);
     CREATE INDEX IF NOT EXISTS tool_result_files_conversation ON tool_result_files(conversation_id);`);
 }
@@ -18,7 +18,7 @@ export class ToolResultFiles {
   private row(owner: string, source: string) {
     return this.db.prepare('SELECT file,bytes FROM tool_result_files WHERE owner=? AND source=?').get(owner, source) as { file: string; bytes: number } | undefined;
   }
-  async save(owner: string, scope: TrajectoryScope, source: string, chunks: AsyncIterable<string | Buffer>, guard: () => unknown | Promise<unknown>) {
+  async save(owner: string, scope: TrajectoryScope, source: string, chunks: AsyncIterable<string | Buffer>, guard: () => unknown | Promise<unknown>, sources: ResultSource[] = []) {
     await guard();
     const previous = this.row(owner, source); if (previous) return this.reference(previous);
     const file = randomBytes(24).toString('hex'), target = this.path(file), temporary = target + '.tmp';
@@ -32,8 +32,8 @@ export class ToolResultFiles {
       }
       await guard(); fdatasyncSync(fd); closeSync(fd); closed = true;
       renameSync(temporary, target);
-      const inserted = this.db.prepare('INSERT OR IGNORE INTO tool_result_files VALUES(?,?,?,?,?,?,?,?)')
-        .run(file, owner, source, scope.repository_id, scope.task_id, scope.conversation_id, bytes, new Date().toISOString()).changes;
+      const inserted = this.db.prepare('INSERT OR IGNORE INTO tool_result_files VALUES(?,?,?,?,?,?,?,?,?)')
+        .run(file, owner, source, scope.repository_id, scope.task_id, scope.conversation_id, bytes, new Date().toISOString(),JSON.stringify(sources)).changes;
       if (!inserted) { rmSync(target, { force: true }); return this.reference(this.row(owner, source)!); }
       return this.reference({ file, bytes });
     } catch (error) {
@@ -45,8 +45,9 @@ export class ToolResultFiles {
   }
   read(owner: string, file: unknown, position: unknown = 0, length: unknown = 16384) {
     if (typeof file !== 'string' || !/^result:[a-f0-9]{48}$/.test(file)) return { error: 'tool_result_not_found' };
-    const row = this.db.prepare('SELECT file,bytes FROM tool_result_files WHERE file=? AND owner=?').get(file.slice(7), owner) as { file: string; bytes: number } | undefined;
+    const row = this.db.prepare('SELECT file,bytes,source_context FROM tool_result_files WHERE file=? AND owner=?').get(file.slice(7), owner) as { file: string; bytes: number;source_context:string } | undefined;
     if (!row) return { error: 'tool_result_not_found' };
+    if(!resultSourcesCurrent(this.db,JSON.parse(row.source_context)))return {error:'tool_result_source_changed'};
     if (!Number.isSafeInteger(position) || Number(position) < 0 || Number(position) > row.bytes || !Number.isSafeInteger(length) || Number(length) < 1 || Number(length) > 65536)
       return { error: 'tool_result_range_invalid' };
     let fd;
@@ -70,4 +71,13 @@ export class ToolResultFiles {
     for (const row of rows) rmSync(this.path(row.file), { force: true });
     this.db.prepare(`DELETE FROM tool_result_files WHERE ${column}=?`).run(value);
   }
+}
+
+export interface ResultSource {chat_id:string;message_id:string;version:string}
+const sourceDigest=(row:unknown)=>createHash('sha256').update(JSON.stringify(row)).digest('hex');
+export function messageResultSources(db:DatabaseSync,chats:string[]):ResultSource[] {
+  return [...new Set(chats)].flatMap(chat=>db.prepare("SELECT chat_id,message_id,payload,deleted,sensitive,updated_at FROM channel_messages WHERE chat_id=? ORDER BY message_id").all(chat).map(row=>({chat_id:String(row.chat_id),message_id:String(row.message_id),version:sourceDigest(row)})));
+}
+export function resultSourcesCurrent(db:DatabaseSync,sources:ResultSource[]):boolean {
+  return sources.every(source=>{const row=db.prepare('SELECT chat_id,message_id,payload,deleted,sensitive,updated_at FROM channel_messages WHERE chat_id=? AND message_id=?').get(source.chat_id,source.message_id);return !!row&&sourceDigest(row)===source.version;});
 }

@@ -233,3 +233,18 @@ test('shutdown cancels startup maintenance and waits for an already running rete
   service.start();await service.close();t.mock.timers.tick(1000);
   assert.equal(sweeps,1);assert.equal(retentions,1,'closing before startup cancels its deferred pass');
 });
+
+import {ResultSession,resultScope} from '../dist/agent/tool-results.js';
+test('assistant command results are copied before turn release and remain readable without starting a computer',async t=>{
+  const f=await fixture(t),turn=f.turn('turn-pages'),source='HEAD\n'+'中😀'.repeat(300000)+'\nTAIL\n',data=Buffer.from(source),original=f.docker.runner.bind(f.docker);let commands=0,pages=0;
+  f.docker.runner=async(name,input)=>{
+    if(input.type==='command'){commands++;return {ok:true,result:{exit_code:0,truncated:true,head:'HEAD',tail:'TAIL',output_file:'/runner/private'}};}
+    if(input.type==='tail'){pages++;let end=Math.min(input.offset+65536,data.length);while(end<data.length&&(data[end]&0xc0)===0x80)end--;return {ok:true,result:{data:data.subarray(input.offset,end).toString('utf8'),offset:end,size:data.length}};}
+    return original(name,input);
+  };
+  const session=new ResultSession(f.store,resultScope(f.store,{id:'turn-pages',conversation_id:'chat'}),()=> 'group-owner',()=>{});
+  const result=await session.execute('run_command',{},()=>turn.execute('run_command',{command:'large result'}));
+  assert.equal(result.error,undefined);assert.ok(result.file);assert.equal(result.output_file,undefined);await turn.close();
+  const before=f.docker.runs.length;assert.equal((await session.read({file:result.file})).content,source.slice(0,(await session.read({file:result.file})).content.length));
+  assert.equal(f.docker.runs.length,before);assert.equal(commands,1);assert.ok(pages>1);
+});

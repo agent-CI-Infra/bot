@@ -1,3 +1,4 @@
+import { commandResult } from '../agent/tool-results.js';
 import { randomId } from '../core/security.js';
 import { TaskError } from '../agent/common.js';
 import type { Manager } from './service.js';
@@ -17,7 +18,9 @@ export class RunEnvironmentClient {
   release(run: string) { return this.manager.call('DELETE', this.path(run)); }
   /** One runner operation in the run's own workspace (its workspace id is the run id). */
   async call(run: string, request: Record<string, unknown>, timeoutMs = 0) {
-    const response = await this.manager.call('POST', this.path(run, 'execute'), { operation_id: randomId(), request: { ...request, ...(String(request.type).startsWith('workspace_') ? { workspace_id: run } : {}) } } as any, timeoutMs);
+    const operation=randomId();
+    const response = await this.manager.call('POST', this.path(run, 'execute'), { operation_id: operation, request: { ...request, ...(String(request.type).startsWith('workspace_') ? { workspace_id: run } : {}) } } as any, timeoutMs);
+    if(response?.ok&&['command','workspace_command'].includes(String(request.type)))return commandResult(response.result,'run:'+run+':'+operation,offset=>this.manager.call('POST',this.path(run,'output'),{operation_id:operation,offset}));
     return response?.ok ? response.result : { error: response?.error ?? 'runner_operation_failed', ...(response?.detail ? { detail: response.detail } : {}) };
   }
 }

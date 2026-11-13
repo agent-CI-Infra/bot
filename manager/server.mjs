@@ -58,11 +58,12 @@ export function createManagerServer({ projects, token, runs = null, assistants =
         const input = await json(req);
         if (Object.keys(input).some(k => k !== 'tasks')) throw new ManagerError('invalid_input', 400);
         result = projects.parallelism(path.split('/')[3], input.tasks);
-      } else if (runs && /^\/v1\/projects\/[1-9]\d{0,19}\/runs(?:\/[a-f0-9]{48}(?:\/execute)?)?$/.test(path)) {
+      } else if (runs && /^\/v1\/projects\/[1-9]\d{0,19}\/runs(?:\/[a-f0-9]{48}(?:\/(?:execute|output))?)?$/.test(path)) {
         // Per-run environments of RoleRun (run-environments.mjs).
         const [, , , repo, , run, action] = path.split('/');
         if (req.method === 'POST' && !run) { const input = await json(req); if (Object.keys(input).some(k => k !== 'run')) throw new ManagerError('invalid_input', 400); result = await runs.create(repo, input.run); }
         else if (req.method === 'GET' && run && !action) result = await runs.inspect(repo, run);
+        else if (req.method === 'POST' && run && action === 'output') result = await runs.output(repo,run,await json(req));
         else if (req.method === 'POST' && run && action === 'execute') result = await runs.execute(repo, run, await json(req));
         else if (req.method === 'DELETE' && run && !action) result = await runs.release(repo, run, 'released');
         else throw new ManagerError('not_found', 404);
@@ -77,6 +78,7 @@ export function createManagerServer({ projects, token, runs = null, assistants =
         else if (req.method === 'PUT' && !action) result = await assistants.acquire(owner, await json(req));
         else if (req.method === 'GET' && !action) { const container = await assistants.inspect(owner); result = { owner, container: assistants.facts(container) }; }
         else if (req.method === 'DELETE' && !action) result = await assistants.remove(owner);
+        else if (req.method === 'POST' && action === 'output') result = await assistants.output(owner,await json(req));
         else if (req.method === 'POST' && action === 'execute') result = await assistants.execute(owner, await json(req));
         else if (req.method === 'POST' && action === 'renew') result = assistants.renew(owner, await json(req));
         else if (req.method === 'POST' && action === 'release') result = await assistants.release(owner, await json(req));

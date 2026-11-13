@@ -140,8 +140,9 @@ if (request.type === 'journal_clear' && assistant) {
     try { result = { ok: true, result: await execute(request) }; }
     catch(error) { result = { ok: false, error: 'runner_operation_failed', ...(/^(?:workspace|assistant)_/.test(request.type)?{detail:`${request.type}${request.path?' '+request.path:''}: ${String(error?.message||'operation failed').slice(0,8000)}`}:{}) }; }
     await save(request.operation_id, { state: 'completed', result });
-    // The journal now holds the full result; the live copy is no longer needed.
-    await unlink(`${journal}/${request.operation_id}.out`).catch(() => {});
+    // Small output is in the journal JSON. A preview does not replace the complete output: retain its file for the
+    // control plane's streaming copy and for idempotent retries; journal pruning removes it with the other records.
+    if(!result.result?.truncated)await unlink(`${journal}/${request.operation_id}.out`).catch(() => {});
   }
 } catch { result = { ok: false, error: 'runner_journal_failed' }; }
 process.stdout.write(JSON.stringify(result));

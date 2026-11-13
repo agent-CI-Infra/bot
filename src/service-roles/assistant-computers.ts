@@ -1,3 +1,4 @@
+import { commandResult } from '../agent/tool-results.js';
 import { chmod, lstat, mkdir, open, readdir, readlink, realpath, rm, statfs, unlink } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import type { Store, Row } from '../storage/database.js';
@@ -384,9 +385,9 @@ export class AssistantComputer {
   }
   private async run(request: Json, timeoutMs = 90_000, retry = true): Promise<Json> {
     const owner = await this.computer();
-    let result: Json;
+    let result: Json; const operation=randomId();
     try {
-      result = await this.service.manager!.call('POST', `/v1/assistant-computers/${owner}/execute`, { turn: this.options.turn, operation_id: randomId(), request }, timeoutMs + 60_000);
+      result = await this.service.manager!.call('POST', `/v1/assistant-computers/${owner}/execute`, { turn: this.options.turn, operation_id: operation, request }, timeoutMs + 60_000);
     } catch (error) {
       // The computer went away under the turn (idle sweep after a manager restart, a removal): it is taken again once.
       if (retry && error instanceof HttpError && ['assistant_computer_released', 'assistant_computer_not_acquired'].includes(error.code)) {
@@ -402,7 +403,7 @@ export class AssistantComputer {
         : /regular_file_required|EISDIR/.test(detail) ? 'regular_file_required' : /invalid_path|ENOTDIR|ELOOP/.test(detail) ? 'invalid_path' : 'assistant_computer_operation_failed',
         ...(detail ? { detail: detail.slice(0, 2000) } : {}) });
     }
-    return result.result as Json;
+    return request.type==='command'?commandResult(result.result,'assistant:'+owner+':'+operation,offset=>this.service.manager!.call('POST',`/v1/assistant-computers/${owner}/output`,{turn:this.options.turn,operation_id:operation,offset})):result.result as Json;
   }
   private drop(): void { clearInterval(this.heartbeat); this.held = false; this.service.active.delete(this.options.turn); }
   private async readComputer(path: string, limit: number): Promise<{ data: Buffer; size: number }> {

@@ -97,6 +97,15 @@ export class RunEnvironments {
         env_names: (config.Env ?? []).map(e => e.slice(0, e.indexOf('='))) } : null };
   }
   async inspect(repo, run) { this.projects.validate(repo); return this.describe(this.get(repo, run)); }
+  async output(repo, run, input) {
+    this.projects.validate(repo);
+    if(!input||Object.keys(input).some(k=>!['operation_id','offset'].includes(k))||!id48.test(input.operation_id||'')||!Number.isSafeInteger(input.offset)||input.offset<0)throw new ManagerError('invalid_operation',400);
+    const row=this.get(repo,run),container=await this.owned(row);
+    if(row.state!=='ready'||!container?.State?.Running)throw new ManagerError('run_environment_released',410);
+    const response=await this.docker.runner(this.names(repo,run).container,{type:'tail',...input});
+    if(!response.ok)throw new ManagerError('output_unavailable',503);
+    return response.result;
+  }
   async execute(repo, run, input) {
     this.projects.validate(repo);
     if (!id48.test(input?.operation_id || '') || Object.keys(input || {}).some(k => !['operation_id', 'request'].includes(k))) throw new ManagerError('invalid_operation', 400);

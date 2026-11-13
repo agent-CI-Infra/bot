@@ -1,3 +1,5 @@
+import { Store } from '../dist/storage/database.js';
+import { ResultSession, resultScope, commandResult } from '../dist/agent/tool-results.js';
 // Opt-in acceptance using real Docker execs, process groups and pipes. No deployed containers are modified.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -63,6 +65,23 @@ try{
   await command('sleep 30 & echo $! > ordinary-pid');
   const ordinary=await command('pid=$(cat ordinary-pid); test ! -e /proc/$pid/stat || grep -q ") Z " /proc/$pid/stat');
   assert.equal(ordinary.result.exit_code,0);passed('ordinary shell exit still reaps its process group');
+  const resultStore=new Store(':memory:',randomBytes(32));
+  try{
+    const session=new ResultSession(resultStore,resultScope(resultStore,{id:'command-output',conversation_id:'docker'}),()=> 'docker-owner',()=>{});
+    for(const code of [0,1]){
+      const text='HEAD\n'+'中😀'.repeat(800000)+'\nFINAL_'+code+'\n';
+      const producer="process.stdout.write('HEAD\\n'+'中😀'.repeat(800000)+'\\nFINAL_"+code+"\\n',()=>{process.exitCode="+code+"})";
+      const large=await call({type:'workspace_command',workspace_id:ws,command:'node -e '+JSON.stringify(producer),timeout_ms:30000});
+      assert.equal(large.result.exit_code,code);assert.equal(large.result.truncated,true);assert.match(large.result.tail,new RegExp('FINAL_'+code));
+      // call() chooses the operation id; the runner-owned output_file names the exact journal that produced the result.
+      const source=/\/([a-f0-9]{48})\.out$/.exec(large.result.output_file)?.[1];assert.ok(source);
+      const saved=await session.execute('run_command',{},()=>commandResult(large.result,source,offset=>projects.output(repo,source,offset)));
+      assert.equal(saved.error,undefined);assert.ok(saved.file);assert.equal(saved.output_file,undefined);
+      let position=0,complete='';for(;;){const page=await session.read({file:saved.file,position,length:65536});assert.equal(page.error,undefined);complete+=page.content;if(page.eof)break;position=page.next_position;}
+      assert.equal(complete,text);
+    }
+    passed('5 MiB success/failure commands finish in Docker and complete UTF-8 output pages without re-execution');
+  }finally{resultStore.close();}
   docker.unhealthy=true;
   await assert.rejects(call({type:'git_export'}),/docker_timeout/);
   assert.equal(projects.get(repo).state,'failed');

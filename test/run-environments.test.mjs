@@ -103,3 +103,21 @@ test('the manager API serves run environments to the control-plane client, which
   assert.equal(refused.facts.verified, false); assert.deepEqual(refused.facts.detail.violations, ['external_mount', 'docker_socket']);
   assert.equal((await client.inspect(weak)).state, 'released');
 });
+
+import {Store} from '../dist/storage/database.js';
+import {ResultSession,resultScope} from '../dist/agent/tool-results.js';
+test('isolated run output uses its run-scoped read API and persists before releasing the run',async t=>{
+  const f=await fixture(t),run=id(),token=randomBytes(32),store=new Store(':memory:',randomBytes(32));t.after(()=>store.close());
+  const {server,recovered}=createManagerServer({projects:f.projects,token,runs:f.runs});server.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));await recovered;t.after(()=>new Promise(r=>server.close(r)));
+  const client=new RunEnvironmentClient(new ManagerClient(`http://127.0.0.1:${server.address().port}`,token),'101');await client.create(spec(run));
+  let commands=0,reads=0;const original=f.docker.runner.bind(f.docker),text='HEAD\n'+'中😀'.repeat(300000)+'\nTAIL\n',bytes=Buffer.from(text);
+  f.docker.runner=async(name,input)=>{
+    if(input.type==='workspace_command'){commands++;return {ok:true,result:{exit_code:0,truncated:true,head:'HEAD',tail:'TAIL',output_file:'/runner/private'}};}
+    if(input.type==='tail'){reads++;let end=Math.min(input.offset+65536,bytes.length);while(end<bytes.length&&(bytes[end]&0xc0)===0x80)end--;return {ok:true,result:{data:bytes.subarray(input.offset,end).toString('utf8'),offset:end,size:bytes.length}};}
+    return original(name,input);
+  };
+  const session=new ResultSession(store,resultScope(store,{id:'turn',conversation_id:'run-conversation'}),()=> 'run-owner',()=>{});
+  const result=await session.execute('run_command',{},()=>client.call(run,{type:'workspace_command',command:'large output'}));
+  assert.equal(result.error,undefined);assert.ok(result.file);assert.equal(result.output_file,undefined);assert.equal(result.bytes,bytes.length);await client.release(run);
+  assert.match((await session.read({file:result.file})).content,/^HEAD/);assert.equal(commands,1);assert.ok(reads>1);
+});

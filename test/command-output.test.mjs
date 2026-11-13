@@ -44,3 +44,23 @@ test('a complete output file that cannot be written is an explicit failure',asyn
   const directory=mkdtempSync(join(tmpdir(),'command-output-error-'));t.after(()=>rmSync(directory,{recursive:true,force:true}));
   await assert.rejects(command('printf done',directory,1000,{outputFile:join(directory,'missing','output')}),/ENOENT/);
 });
+
+
+import {localCommandResult,readLocalResult,prepareLocalResults} from '../runner/tool-results.mjs';
+test('local Pi result files page an immutable command without workspace command permission',async t=>{
+  const directory=mkdtempSync(join(tmpdir(),'command-pi-pages-'));t.after(()=>rmSync(directory,{recursive:true,force:true}));await prepareLocalResults(directory);
+  const id='a'.repeat(48),path=join(directory,id+'.utf8'),body='HEAD\n'+'中😀'.repeat(800000)+'\nERROR_END\n';
+  const producer="process.stdout.write('HEAD\\n'+'中😀'.repeat(800000)+'\\nERROR_END\\n',()=>{process.exitCode=1})";
+  const raw=await command(quote(process.execPath)+' -e '+quote(producer),directory,30000,{outputFile:path});
+  const result=await localCommandResult(directory,'workspace:agent',id,raw);assert.equal(result.exit_code,1);assert.equal(result.output_file,undefined);assert.match(result.tail,/ERROR_END/);
+  let position=0,complete='';for(;;){const page=await readLocalResult(directory,'workspace:agent',{file:result.file,position,length:65536});assert.equal(page.error,undefined);complete+=page.content;if(page.eof)break;position=page.next_position;}
+  assert.equal(complete,body);assert.equal((await readLocalResult(directory,'other-agent',{file:result.file})).error,'tool_result_not_found');assert.equal((await readLocalResult(directory,'workspace:agent',{file:result.file,position:7})).error,'tool_result_range_invalid');
+});
+
+import {Docker} from '../manager/docker.mjs';
+test('Docker stdout frames may split UTF-8 characters in paginated results',async()=>{
+  const docker=new Docker(),data=Buffer.from(JSON.stringify({ok:true,result:{data:'中😀'.repeat(1000)}})),frames=[];
+  for(let offset=0;offset<data.length;offset+=17){const part=data.subarray(offset,offset+17),header=Buffer.alloc(8);header[0]=1;header.writeUInt32BE(part.length,4);frames.push(header,part);}
+  docker.request=async(_method,path)=>path.endsWith('/start')?Buffer.concat(frames):path.endsWith('/json')?{Running:false,ExitCode:0}:{Id:'exec'};
+  assert.deepEqual(await docker.runner('computer',{operation_id:'a'.repeat(48)}),{ok:true,result:{data:'中😀'.repeat(1000)}});
+});

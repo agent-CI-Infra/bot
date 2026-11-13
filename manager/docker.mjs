@@ -82,14 +82,14 @@ export class Docker {
       Cmd: ['node', '/opt/runner/runner.mjs', Buffer.from(JSON.stringify(input)).toString('base64url')] });
     if (!exec) throw new ManagerError('container_missing');
     const raw = await this.request('POST', `/exec/${exec.Id}/start`, { Detach: false, Tty: false }, true, timeout);
-    let offset = 0, stdout = '';
+    let offset = 0;const stdout = [];
     while (offset + 8 <= raw.length) {
       const size = raw.readUInt32BE(offset + 4); if (offset + 8 + size > raw.length) throw new ManagerError('runner_protocol_failed');
-      if (raw[offset] === 1) stdout += raw.subarray(offset + 8, offset + 8 + size).toString(); offset += size + 8;
+      if (raw[offset] === 1) stdout.push(raw.subarray(offset + 8, offset + 8 + size)); offset += size + 8;
     }
     const state = await this.request('GET', `/exec/${exec.Id}/json`);
     if (state?.Running || state?.ExitCode !== 0) throw new ManagerError('runner_failed');
-    try { return JSON.parse(stdout); } catch { throw new ManagerError('runner_protocol_failed'); }
+    try { return JSON.parse(Buffer.concat(stdout).toString('utf8')); } catch { throw new ManagerError('runner_protocol_failed'); }
   }
 }
 
