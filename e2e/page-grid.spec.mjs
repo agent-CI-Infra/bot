@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openBasicAdvanced, openProjectDanger, closeBasicFolds } from './open-basic-folds.mjs';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
@@ -157,11 +158,12 @@ test('#557 登录、身份、更多功能、基本设置在 1440 对齐同一栅
         parentWidth: Math.round(parent.width),
         twoCol: rows.some(r => r.length === 2),
         sameHeight: rows.filter(r => r.length === 2).every(r => Math.abs(r[0].height - r[1].height) < 2),
-        dangerFull: (() => {
-          const d = document.querySelector('.project-danger');
-          if (!d || !layout) return false;
-          const a = d.getBoundingClientRect(), b = layout.getBoundingClientRect();
-          return Math.abs(a.width - b.width) < 4;
+        // #570: 高级 and 危险区 are folds directly in the layout; each spans the whole row.
+        foldsFull: (() => {
+          const folds = layout ? [...layout.querySelectorAll(':scope > details.fold')] : [];
+          if (folds.length !== 2) return false;
+          const b = layout.getBoundingClientRect();
+          return folds.every(f => Math.abs(f.getBoundingClientRect().width - b.width) < 4);
         })(),
       };
     });
@@ -170,8 +172,24 @@ test('#557 登录、身份、更多功能、基本设置在 1440 对齐同一栅
     expect(basic.contentWidth / basic.parentWidth).toBeGreaterThan(0.9);
     expect(basic.twoCol).toBeTruthy();
     expect(basic.sameHeight).toBeTruthy();
-    expect(basic.dangerFull).toBeTruthy();
+    expect(basic.foldsFull).toBeTruthy();
     await page.screenshot({ path: `${out}/project-basic-after-1440.png`, fullPage: true });
+    // Opened, the 危险区 card keeps the full row and the 高级 cards take the fold's width.
+    await openBasicAdvanced(page);
+    await openProjectDanger(page);
+    const opened = await page.evaluate(() => {
+      const layout = document.querySelector('.project-settings-layout').getBoundingClientRect();
+      const danger = document.querySelector('.project-danger').getBoundingClientRect();
+      const inner = [...document.querySelectorAll('.basic-advanced > .side-card')].map(el => el.getBoundingClientRect());
+      return { dangerFull: Math.abs(danger.width - layout.width) < 4, advancedCards: inner.length,
+        advancedFull: inner.every(r => Math.abs(r.width - layout.width) < 4) };
+    });
+    expect(opened.dangerFull).toBeTruthy();
+    expect(opened.advancedCards).toBeGreaterThan(0);
+    expect(opened.advancedFull).toBeTruthy();
+    await page.evaluate(() => { document.activeElement?.blur(); window.scrollTo(0, 0); });
+    await page.screenshot({ path: `${out}/project-basic-open-after-1440.png`, fullPage: true });
+    await closeBasicFolds(page);
     // Review asks: the 运行状态 status grid and 全局设置 pictured at both widths.
     for (const [hash, name] of [['#/projects/101/machine', 'project-machine'], ['#/settings/work-computers', 'global-settings']]) {
       await page.goto(h.admin + '/' + hash);
@@ -185,6 +203,12 @@ test('#557 登录、身份、更多功能、基本设置在 1440 对齐同一栅
     await expect(page.locator('.project-content')).toBeVisible({ timeout: 10000 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     await page.screenshot({ path: `${out}/project-basic-after-390.png`, fullPage: true });
+    await openBasicAdvanced(page);
+    await openProjectDanger(page);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    await page.evaluate(() => { document.activeElement?.blur(); window.scrollTo(0, 0); });
+    await page.screenshot({ path: `${out}/project-basic-open-after-390.png`, fullPage: true });
+    await closeBasicFolds(page);
     for (const [hash, name] of [['#/projects/101/machine', 'project-machine'], ['#/settings/work-computers', 'global-settings']]) {
       await page.goto(h.admin + '/' + hash);
       await expect(page.locator(name === 'project-machine' ? '.project-content' : 'main')).toBeVisible({ timeout: 10000 });
