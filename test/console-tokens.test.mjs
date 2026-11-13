@@ -183,8 +183,8 @@ test('#552 named button variants and shared card component are declared', () => 
   assert.match(html, /id="refresh"[^>]*class="btn-text"/);
   assert.match(html, /data-testid="project-filter-submit"/);
   const identity = read('static/identity.js');
-  assert.match(identity, /绑定 GitHub 账号', 'btn-secondary'/);
-  assert.match(identity, /切换组织', 'btn-secondary'/);
+  assert.match(identity, /t\('identity.bind_github'\), 'btn-secondary'/);
+  assert.match(identity, /t\('identity.switch_org'\), 'btn-secondary'/);
   // The page no longer has a manual 刷新身份与授权 button (it refreshes automatically on return from GitHub).
   assert.equal(identity.includes("button('刷新身份与授权'"), false);
   const shellSheet = read('static/shell.css');
