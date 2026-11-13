@@ -33,7 +33,7 @@ test('中文界面的角色列表和详情使用完整中文名称与职责，�
     for (const name of ['Dev', 'Developer', 'Manager', 'Independent QA', 'UX reviewer']) {
       await expect(table.getByRole('link', { name, exact: true })).toHaveCount(0);
     }
-    const roleIds = ['coordinator', 'manager', 'dev', 'test', 'reviewer', 'ux_reviewer', 'qa'];
+    const roleIds = ['coordinator', 'manager', 'dev', 'test', 'reviewer', 'ux', 'qa'];
     for (const id of roleIds) {
       await expect(table.getByRole('link', { name: id, exact: true })).toHaveCount(0);
       await expect(table.getByText(id + ' 启用', { exact: true })).toHaveCount(0);
@@ -81,7 +81,7 @@ test('英文界面同一位置使用完整英文，不再中英夹杂', async ({
     }
     const enText = await table.innerText();
     expect(enText).not.toContain('启用');
-    const roleIds = ['coordinator', 'manager', 'dev', 'test', 'reviewer', 'ux_reviewer', 'qa'];
+    const roleIds = ['coordinator', 'manager', 'dev', 'test', 'reviewer', 'ux', 'qa'];
     for (const id of roleIds) {
       await expect(table.getByRole('link', { name: id, exact: true })).toHaveCount(0);
       await expect(table.getByText(id + ' Enabled', { exact: true })).toHaveCount(0);
