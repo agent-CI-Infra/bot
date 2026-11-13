@@ -372,9 +372,10 @@ function boardRenderCards(keepScroll=false) {
   if(!displayed.length)columns.append(element('p','当前筛选和分组下没有条目','board-empty'));
   if(keepScroll){columns.scrollLeft=left;columns.scrollTop=top;for(const list of columns.querySelectorAll('.board-column-list'))list.scrollTop=tops.get(list.closest('.board-column').dataset.columnId)||0;}
   else{columns.scrollLeft=0;columns.scrollTop=0;}
-  // The scroll listeners live on the nodes this render just built, so a rebuild drops them with the old nodes: no stale
-  // area keeps asking for a page the reader already left.
-  for(const area of boardScrollAreas())area.addEventListener('scroll',()=>{void boardContinue(true);},{passive:true});
+  // A desktop column list is rebuilt by every render, so its listener drops with the old node. The phone and list
+  // layouts scroll the board container itself, which survives a render: bind it once, or every render adds a listener
+  // and a single scroll reports itself several times.
+  for(const area of boardScrollAreas()){if(area.boardScrollBound)continue;area.boardScrollBound=true;area.addEventListener('scroll',()=>{void boardContinue(true);},{passive:true});}
   boardSummary();
   // A layout switch can leave a phone column empty and the container short; that still has to read on until it can scroll.
   void boardContinue();
