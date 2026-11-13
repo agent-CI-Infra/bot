@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { openRoleAdvanced, openRoleFromList, openRoleFormAdvanced } from './open-role-advanced.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
+import { consoleSave, compareWithServer, confirmDiscard } from './console-save.mjs';
 
 test('角色概览是列表，点名称打开单页表单，没有两排标签，保存后仍在', async ({ page }) => {
   test.setTimeout(90000);
@@ -49,7 +50,7 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     await expect(page.getByRole('navigation', { name: '角色列表' }).getByRole('link', { name: 'Manager', exact: true })).toHaveCount(0);
     await page.getByLabel('dev Agent 后端', { exact: true }).selectOption('native');
     await page.getByLabel('角色提示词', { exact: true }).fill('先读复现，再改代码。');
-    const save = page.getByRole('button', { name: '保存角色配置', exact: true });
+    const save = consoleSave(page);
     await expect(save).toBeVisible();
     await page.screenshot({ path: `${out}/form-1440.png`, fullPage: true });
     await save.click();

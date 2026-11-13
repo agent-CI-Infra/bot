@@ -2,6 +2,31 @@ function modelsSection() {
   const { table, body } = projectTable(['工作类型', '模型选择'], '工作类型模型');
   let overrides = {}, parseError = null;
   try { overrides = taskModelMap(current.policy); } catch (err) { parseError = err; }
+  // #567: the default model and every per-type override are one draft saved by the shared sticky save bar.
+  const draft = { defaultId: current.policy.model_id || '', initialDefault: current.policy.model_id || '', tasks: { ...overrides }, initialTasks: { ...overrides } };
+  const isDirty = () => draft.defaultId !== draft.initialDefault || JSON.stringify(draft.tasks) !== JSON.stringify(draft.initialTasks);
+  const page = element('div', '', 'models-settings');
+  const bar = consoleSaveBar({
+    status: '已保存',
+    dirty: false,
+    onSave: async () => {
+      try {
+        const payload = {};
+        if (draft.defaultId !== draft.initialDefault) payload.model_id = draft.defaultId || null;
+        if (JSON.stringify(draft.tasks) !== JSON.stringify(draft.initialTasks)) payload.task_models = draft.tasks;
+        if (!Object.keys(payload).length) return;
+        await patchPolicy(payload);
+        current.focusAnchor = 'project-default-model';
+        await reloadWith('已保存模型设置');
+      } catch (err) { bar.messageEl.textContent = err.message; }
+    },
+    onDiscard: async () => {
+      if (!isDirty()) return;
+      if (!await askConfirm({ title: '放弃未保存的更改？', body: ['将丢弃本页未保存的模型选择，并重新读取已保存的设置。'], action: '放弃更改' })) return;
+      await reloadProject();
+    },
+  });
+  const sync = () => bar.refresh({ dirty: isDirty(), status: isDirty() ? '有未保存的更改' : '已保存' });
   // Saved identifiers that are no work type (such as models of former custom workflows) stay visible so they can be removed.
   const other = Object.keys(overrides).filter(kind => !builtInTasks.some(task => task.kind === kind));
   for (const definition of [...builtInTasks, ...other.map(kind => ({ kind, title: '其他工作类型', custom: true }))]) {
@@ -9,7 +34,7 @@ function modelsSection() {
     const name = element('strong', definition.title);
     name.title = definition.custom ? definition.kind : definition.title;
     tableCell(row, '工作类型', name);
-    tableCell(row, '模型选择', taskModelEditor(definition.kind, definition.title, current.policy, current.models, definition)); body.append(row);
+    tableCell(row, '模型选择', taskModelEditor(definition.kind, definition.title, current.policy, current.models, { ...definition, draft, sync })); body.append(row);
   }
   const overrideIds = Object.values(overrides).filter(id => id);
   const unavailable = overrideIds.filter(id => !(current.models || []).some(model => model.id === id)).length;
@@ -36,5 +61,6 @@ function modelsSection() {
   catalog.dataset.testid = 'model-catalog';
   catalog.open = Boolean(catalogWasOpen);
   catalog.append(element('summary', '模型目录'), ...modelManagementSections());
-  return [projectDefaultModelCard(current.policy, current.models), parseAlert, overridesFold, catalog].filter(Boolean);
+  page.append(...[bar, projectDefaultModelCard(current.policy, current.models, draft, sync), parseAlert, overridesFold, catalog].filter(Boolean));
+  return [page];
 }

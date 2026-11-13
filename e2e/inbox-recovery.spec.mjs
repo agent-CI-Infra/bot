@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
+import { consoleSave } from './console-save.mjs';
 
 async function prepared(page, width = 390) {
   const h = await harness();
@@ -29,8 +30,8 @@ for (const width of [390, 1440]) test(`configuration recovery returns to the sam
     await expect(detail(page)).toBeHidden(); await expect(page).toHaveURL(/#\/projects\/101\/model$/);
     expect(h.store.all('SELECT * FROM audit')).toEqual(before);
     await page.getByRole('combobox', { name: '默认模型', exact: true }).selectOption(model.id);
-    await page.getByRole('button', { name: '保存默认模型', exact: true }).click();
-    await expect(page.getByText('已保存项目默认模型', { exact: true })).toBeVisible();
+    await consoleSave(page).click();
+    await expect(page.getByText('已保存模型设置', { exact: true })).toBeVisible();
     await page.getByRole('link', { name: '返回待处理列表', exact: false }).click();
     await expect(page).toHaveURL(/#\/inbox\/all\/50$/); await expect(open(page)).toBeFocused();
     // Saving configuration does not prove this task resumed; it stays until its task record actually changes.

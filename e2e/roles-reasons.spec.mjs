@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { openRoleFormAdvanced } from './open-role-advanced.mjs';
+import { consoleSave, compareWithServer, confirmDiscard } from './console-save.mjs';
 
 async function prepared(page) {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
@@ -37,7 +38,7 @@ test('an agent backend the server marks unavailable is labelled and cannot be ch
     const selectable = payload.backends.filter(backend => backend.available && backend.kinds.includes('writer'));
     expect(selectable.length).toBeGreaterThan(0);
     await picker.selectOption(selectable[0].id);
-    await expect(page.locator('[data-role-version]')).toHaveText(/草稿未保存$/);
+    await expect(page.locator('[data-role-version]')).toHaveText(/有未保存的更改/);
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

@@ -5,6 +5,7 @@ import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { goRolePage, openRoleFormAdvanced } from './open-role-advanced.mjs';
 import { RuleService } from '../dist/rules/service.js';
+import { consoleSave, compareWithServer, confirmDiscard } from './console-save.mjs';
 
 async function prepared(page) {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
@@ -58,7 +59,7 @@ test('skill editing shares the role binding draft and preserves an older pinned 
     await expect(page.getByRole('combobox', { name: 'dev 技能包', exact: true })).toHaveValue('console');
     await goRolePage(page, { view: 'skills' }); await expect(catalogue.getByLabel('文件内容', { exact: true })).toHaveValue('Keep this edited source and its role binding.');
     rules.cache('101', 'b'.repeat(40), { [path]: 'New moving-branch text.' });
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click(); await expect(page.locator('.flash')).toContainText('角色配置已保存');
+    await consoleSave(page).click(); await expect(page.locator('.flash')).toContainText('角色配置已保存');
     const next = (await admin('/api/repositories/101/roles')).value;
     expect(next.configuration.roles.find(r => r.role_id === 'dev').skill_bundle_ref.id).toBe('console');
     expect(next.skill_inputs.find(b => b.id === 'console').source.files[0].content).toBe('Keep this edited source and its role binding.');
@@ -76,10 +77,10 @@ test('a skill draft survives a version conflict, while permission loss clears pr
     await select(catalogue, 'console'); await catalogue.getByLabel('文件内容', { exact: true }).fill('Unsaved content stays here.');
     const before = (await admin('/api/repositories/101/roles')).value;
     await admin('/api/repositories/101/roles', 'PUT', { expected_revision: before.revision, enabled: false, roles: [{ role_id: 'reviewer', responsibility: 'A concurrent update.' }] });
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click(); await expect(page.getByRole('alert').filter({ hasText: '角色配置已被别人修改' })).toBeVisible();
+    await consoleSave(page).click(); await expect(page.getByRole('alert').filter({ hasText: '角色配置已被别人修改' })).toBeVisible();
     await expect(catalogue.getByLabel('文件内容', { exact: true })).toHaveValue('Unsaved content stays here.');
     await page.route('**/api/repositories/101/roles', route => route.fulfill({ status: 403, contentType: 'application/json', body: '{"error":"forbidden"}' }));
-    await page.getByRole('button', { name: '读取最新版本并比较', exact: true }).click(); await expect(page.locator('#project-page')).toContainText('已清空本页草稿');
+    await compareWithServer(page); await expect(page.locator('#project-page')).toContainText('已清空本页草稿');
     await expect(page.getByLabel('文件内容', { exact: true })).toHaveCount(0); await expect(page.locator('#project-page')).not.toContainText('Unsaved content stays here.');
   } finally { await h.stop(); }
 });

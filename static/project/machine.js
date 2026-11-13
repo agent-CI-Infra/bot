@@ -69,14 +69,16 @@ function machineSection(globalSettings = false) {
     progress(spec.packages ? '正在安装软件包并重建虚拟电脑，首次可能需要几分钟…' : spec.setup_script !== undefined || spec.rerun_setup ? '正在重建虚拟电脑并运行初始化脚本…' : '正在按新配置重建虚拟电脑…');
     await api(`/api/environments/${current.id}/configure`, 'POST', { operation_id: operationId(), generation: environment.environment.generation, spec });
     return '已保存，虚拟电脑已按新配置重建';
-  }, { editable: editable && !unread });
+  }, { editable: editable && !unread, hideActions: editable && !unread });
   form.classList.add('machine-config-card');
   const names = { cpus: 'CPU', memory_mb: '内存', pids: '进程数', tmp_mb: '/tmp', packages: '软件包', setup_script: '初始化脚本', rerun_setup: '重新初始化', egress: '网络', env: '环境变量' };
   const update = () => {
-    try { const changes = Object.keys(readSpec(form.querySelector('form'))); draft.textContent = changes.length ? '待保存草稿：' + changes.map(key => names[key]).join('、') + '。已保存配置尚未改变。' : '本组没有待保存改动。'; }
-    catch (err) { draft.textContent = '草稿尚未保存：' + err.message; }
+    try { const changes = Object.keys(readSpec(form.querySelector('form'))); draft.textContent = changes.length ? '有未保存的更改：' + changes.map(key => names[key]).join('、') : '已保存'; }
+    catch (err) { draft.textContent = '有未保存的更改：' + err.message; }
   };
   form.addEventListener('input', update); update();
+  form.settingDirty = () => { try { return !!Object.keys(readSpec(form.querySelector('form'))).length; } catch { return true; } };
+  form.settingClearDraft = () => {};
   const sourceReadError = element('p', '', 'view-error'); sourceReadError.hidden = true;
   const reread = button('重新读取电脑配置', async () => {
     const target = current, actor = me, address = location.hash, live = () => current === target && me === actor && location.hash === address;
@@ -91,11 +93,24 @@ function machineSection(globalSettings = false) {
     } catch (err) { if (live()) { sourceReadError.textContent = '重新读取失败：' + err.message; sourceReadError.setAttribute('role', 'alert'); sourceReadError.hidden = false; } }
     finally { reread.disabled = false; }
   }, 'quiet');
-  // Keep recovery outside the disabled fieldset when source data was unavailable.
-  const heading=form.querySelector('h3'),toolbar=element('div','','heading');heading.replaceWith(toolbar);toolbar.append(heading,reread);
+  const canEdit = editable && !unread;
+  const heading=form.querySelector('h3'),toolbar=element('div','','heading');heading.replaceWith(toolbar);
+  // When the unified bar is present,「重新读取」lives in its advanced fold (#567). Otherwise keep it next to the heading for recovery.
+  if (!canEdit) toolbar.append(heading, reread);
+  else toolbar.append(heading);
   toolbar.after(sourceReadError);
   if(unread)toolbar.after(note(!current.rules?'规则来源读取失败，不能确认仓库覆盖关系。请重新读取配置后保存。':'尚未读取默认分支文件，不能确认仓库覆盖关系。请重新读取配置后保存。'));
-  return [status, ...(globalSettings ? [] : [concurrencyForm()]), form];
+  const concurrency = globalSettings ? null : concurrencyForm();
+  const page = element('div', '', 'machine-settings');
+  if (concurrency) page.append(concurrency);
+  page.append(form);
+  if (canEdit) {
+    attachUnifiedSettingsBar(page, [form, concurrency].filter(Boolean), {
+      dirty: () => form.settingDirty() || !!(concurrency && concurrency.settingDirty?.()),
+      advanced: [reread],
+    });
+  }
+  return [status, page];
 }
 // How many tasks this computer runs at once: the project's own value, or empty for the global default. Project
 // administrators change it too; it never rebuilds the computer.
@@ -104,7 +119,8 @@ function concurrencyForm() {
   const value = input('task_concurrency', own ?? '', { type: 'number', min: 1, max: 32, step: 1, placeholder: `留空使用全局默认（${fallback}）` });
   return settingsForm('同时运行的任务', [field('这台虚拟电脑同时运行的任务数', value),
     note(`当前生效 ${own ?? fallback} 个（${own == null ? '全局默认' : '项目覆写'}）。这是项目任务并发，与角色并发限额分开。取 1–32，留空跟随全局默认；超出的任务继续排队。每个任务用自己的工作目录，共用这台电脑的 CPU、内存和进程数上限；保存不会重建虚拟电脑。`)],
-  form => { const text = form.elements.task_concurrency.value.trim(); return patchPolicy(changed({ task_concurrency: text === '' ? null : Number(text) }, { task_concurrency: own ?? null })); });
+  form => { const text = form.elements.task_concurrency.value.trim(); return patchPolicy(changed({ task_concurrency: text === '' ? null : Number(text) }, { task_concurrency: own ?? null })); },
+  { draftKey: 'concurrency', hideActions: true });
 }
 // Status cards of the machine section, re-rendered by the refresh loop without touching the form.
 function machineStatus() {

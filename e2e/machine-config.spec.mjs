@@ -4,6 +4,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { managerFixture } from '../test/project-manager-fixture.mjs';
 import { RuleService } from '../dist/rules/service.js';
+import { consoleSave, rereadMachine, openSaveAdvanced } from './console-save.mjs';
 
 async function fixture() {
   const cleanup = [], manager = await managerFixture({ after: action => cleanup.push(action) });
@@ -67,18 +68,18 @@ test('a stale generation retains the grouped draft and an explicit retry saves t
     await login(page, f); const form = page.locator('.machine-config-card');
     await page.getByLabel('CPU（核）', { exact: true }).fill('4');
     await page.route('**/api/environments/101/configure', route => route.fulfill({ status: 409, json: { error: 'stale_generation' } }));
-    await form.getByRole('button', { name: '保存', exact: true }).click();
+    await consoleSave(page).click();
     await expect(form.locator('[role=alert]')).toContainText('stale_generation');
     await expect(page.getByLabel('CPU（核）', { exact: true })).toHaveValue('4');
     expect(f.manager.projects.own('101').cpus).toBe(3);
-    await page.getByRole('button', { name: '重新读取电脑配置', exact: true }).click();
+    await rereadMachine(page);
     await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click();
     await expect(page.getByLabel('CPU（核）', { exact: true })).toHaveValue('4');
     await page.unroute('**/api/environments/101/configure');
-    await form.getByRole('button', { name: '保存', exact: true }).click();
+    await consoleSave(page).click();
     await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
     expect(f.manager.projects.own('101').cpus).toBe(4);
-    await expect(page.locator('.machine-config-draft')).toHaveText('本组没有待保存改动。');
+    await expect(page.locator('.machine-config-draft')).toHaveText('已保存');
   } finally { await f.close(); }
 });
 
@@ -89,9 +90,9 @@ test('an unread rule source prevents saving until an explicit read succeeds', as
     await login(page, f);
     await expect(page.locator('.machine-config-card')).toContainText('规则来源读取失败');
     await expect(page.getByLabel('CPU（核）', { exact: true })).toBeDisabled();
-    await expect(page.locator('.machine-config-card').getByRole('button', { name: '保存', exact: true })).toHaveCount(0);
+    await expect(page.getByTestId('console-save')).toHaveCount(0);
     await page.unroute('**/api/repositories/101/rules');
-    await page.getByRole('button', { name: '重新读取电脑配置', exact: true }).click();
+    await rereadMachine(page);
     await expect(page.getByLabel('CPU（核）', { exact: true })).toBeEnabled();
     await expect(configField(page, '内存（MB）')).toContainText('已保存来源：仓库文件');
   } finally { await f.close(); }
@@ -117,7 +118,7 @@ for (const width of [1440, 390]) test(`an unrefreshed default branch stays unkno
       expect(origin).toContain('来源暂未读取'); expect(origin).not.toContain('已保存来源');
     }
     await expect(page.getByLabel('CPU（核）', { exact: true })).toBeDisabled();
-    await expect(form.getByRole('button', { name: '保存', exact: true })).toHaveCount(0);
+    await expect(page.getByTestId('console-save')).toHaveCount(0);
     await expect(read).toBeEnabled();
     await read.click(); await expect(form.getByRole('alert').filter({ hasText: 'fixture_refresh_unavailable' })).toBeVisible();
     await expect(page.getByLabel('CPU（核）', { exact: true })).toBeDisabled(); expect(refreshes).toBe(1); expect(configures).toBe(0);

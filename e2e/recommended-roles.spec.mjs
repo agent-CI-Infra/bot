@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
+import { consoleSave, compareWithServer, confirmDiscard } from './console-save.mjs';
 
 const out = resolve('.tmp/recommended-roles-564');
 
@@ -45,7 +46,7 @@ test('#564 未配置项目首屏一键采用推荐配置，高级项默认折叠
     await expect(page.locator('.flash')).toContainText('已使用推荐配置');
     await expect(page.getByTestId('recommended-roles-intro')).toHaveCount(0);
     await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible();
-    await expect(page.locator('[data-role-version]').first()).toHaveText(/配置版本 \d+ · 已生效/);
+    await expect(page.locator('[data-role-version]').first()).toHaveText('已保存');
     const after = (await admin('/api/repositories/101/roles')).value;
     expect(after.configured).toBe(true);
     expect((after.configuration.roles || after.roles || []).length).toBeGreaterThan(0);

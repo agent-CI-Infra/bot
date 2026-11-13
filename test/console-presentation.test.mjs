@@ -173,7 +173,7 @@ test('role overview is a list of name, enabled, duty and status, without inline 
   assert.equal(link && link.href, '#/projects/101/roles/dev');
   assert.match(text(view.table.querySelector('tr[data-role=dev]')), /已启用/);
   const status=view.cards[0].querySelector('[data-role-version]');
-  assert.equal(status.textContent,'配置版本 4 · 已生效');
+  assert.equal(status.textContent,'已保存');
 });
 test('role list status is per-role and refreshes when enabled is toggled', () => {
   const data=roleData({schema:2,revision:4,enabled:true,controller:{role:'manager',entries},roles:team('pi'),skills:[]});

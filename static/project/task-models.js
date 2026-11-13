@@ -27,20 +27,15 @@ function modelOptions(select, models, selected, empty = null) {
   if (selected && !models.some(model => model.id === selected)) modelOption(select, selected, `模型不可用（${selected}）`);
   select.value = selected || '';
 }
-function projectDefaultModelCard(policy, models) {
+function projectDefaultModelCard(policy, models, draft, sync) {
   const section = card('项目默认模型'), select = document.createElement('select'), message = element('p', '', 'view-error');
   section.dataset.overviewAnchor = 'project-default-model'; message.setAttribute('role', 'alert');
   const selected = models.find(model => model.id === policy.model_id);
-  modelOptions(select, models, policy.model_id, '不使用默认模型（继承它的任务会等待配置）');
-  const save = button('保存默认模型', async () => {
-    save.disabled = true; message.textContent = '';
-    try { await patchPolicy({ model_id: select.value || null }); current.focusAnchor = 'project-default-model'; await reloadWith('已保存项目默认模型'); }
-    catch (err) { message.textContent = err.message; save.disabled = false; }
-  }, '');
-  const actions = element('div', '', 'actions form-actions'); actions.append(save);
+  modelOptions(select, models, draft ? draft.defaultId : policy.model_id, '不使用默认模型（继承它的任务会等待配置）');
+  select.addEventListener('change', () => { if (draft) { draft.defaultId = select.value; sync?.(); } });
   section.append(note('未单独指定模型的任务继承这里的选择。部署共享模型由超级管理员提供，本项目专属模型只对这个项目可见。'),
     note(policy.model_id && !selected ? `当前默认模型不可用（${policy.model_id}），不会自动换成其他模型。` : selected?.key_configured === false ? `当前默认模型 ${selected.model_name} 的 Key 已撤销，任务会等待配置。` : '需要时，可在下方「按任务类型覆写」里为个别工作类型单独指定。'),
-    field('默认模型', select), message, actions);
+    field('默认模型', select), message);
   return section;
 }
 function modelManagementSections() {
@@ -54,10 +49,10 @@ function modelManagementSections() {
     ...(sharedModels.length ? [providerList(sharedModels, sharedRow, reloadWith, { editable: false })] : [note('还没有可供本项目使用的共享模型，请联系超级管理员配置。')]));
   return [own, shared];
 }
-function taskModelEditor(kind, title, policy, models, { custom = false } = {}) {
+function taskModelEditor(kind, title, policy, models, { custom = false, draft = null, sync = null } = {}) {
   const section = element('section', '', 'task-model-editor'), select = document.createElement('select'), message = element('p', '', 'view-error');
   message.setAttribute('role', 'alert');
-  let initial = {}; try { initial = taskModelMap(policy); } catch (err) { message.textContent = err.message; }
+  let initial = {}; try { initial = draft ? { ...draft.tasks } : taskModelMap(policy); } catch (err) { message.textContent = err.message; }
   const configured = Object.hasOwn(initial, kind), selected = configured ? initial[kind] : policy.model_id;
   const defaultModel = models.find(model => model.id === policy.model_id);
   modelOptions(select, models, configured ? selected : '', custom ? null : `继承项目默认${defaultModel ? `（${defaultModel.model_name}）` : policy.model_id ? `（模型不可用 ${policy.model_id}）` : '（未选择）'}`);
@@ -65,19 +60,20 @@ function taskModelEditor(kind, title, policy, models, { custom = false } = {}) {
   const currentText = configured
     ? selectedModel ? `${selectedModel.model_name} · 此任务指定${selectedModel.key_configured ? '' : ' · Key 已撤销，不会自动切换'}` : `模型不可用（${selected}） · 此任务指定，不会自动切换`
     : selectedModel ? `${selectedModel.model_name} · 继承项目默认${selectedModel.key_configured ? '' : ' · Key 已撤销'}` : policy.model_id ? `模型不可用（${policy.model_id}） · 继承项目默认，不会自动切换` : '未选择项目默认模型，任务会等待配置';
-  const actions = element('div', '', 'actions form-actions');
-  const persist = async (value, notice) => {
-    message.textContent = ''; for (const control of actions.querySelectorAll('button')) control.disabled = true;
-    try {
-      const values = taskModelMap(current.policy);
-      if (value) values[kind] = value; else delete values[kind];
-      await patchPolicy({ task_models: values }); current.focusAnchor = kind; await reloadWith(notice);
-    } catch (err) { message.textContent = err.message; }
-    finally { for (const control of actions.querySelectorAll('button')) control.disabled = false; }
+  const apply = value => {
+    if (!draft) return;
+    if (value) draft.tasks[kind] = value; else delete draft.tasks[kind];
+    sync?.();
   };
-  actions.append(button('保存模型', () => persist(select.value, `已保存${title}的模型`)));
-  if (!custom && configured) actions.append(button('恢复继承', () => persist('', `已恢复${title}继承项目默认模型`)));
-  if (custom) actions.append(button('移除这项设置', () => persist('', `已移除 ${kind} 的模型设置`), 'quiet destructive'));
+  select.addEventListener('change', () => apply(select.value));
+  const actions = element('div', '', 'actions form-actions');
+  if (!custom) {
+    const inherit = button('恢复继承', () => { select.value = ''; apply(''); inherit.hidden = true; }, 'quiet');
+    inherit.hidden = !configured;
+    select.addEventListener('change', () => { inherit.hidden = !Object.hasOwn(draft ? draft.tasks : {}, kind); });
+    actions.append(inherit);
+  }
+  if (custom) actions.append(button('移除这项设置', () => { select.value = ''; apply(''); }, 'quiet destructive'));
   section.append(note(`当前使用：${currentText}`), field('任务模型', select), message, actions);
   return section;
 }

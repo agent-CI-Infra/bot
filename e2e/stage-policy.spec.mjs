@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { goRolePage } from './open-role-advanced.mjs';
+import { consoleSave, compareWithServer, confirmDiscard } from './console-save.mjs';
 
 const stage = (stage_id, depends_on = [], writer = false) => ({ stage_id, depends_on, delivery_types: ['code', 'artifact', 'no_changes'],
   role_constraints: { kinds: [writer ? 'writer' : 'observer'], role_ids: [writer ? 'dev' : 'reviewer'], independent: !writer,
@@ -22,7 +23,7 @@ async function prepared(page, stages = [stage('build', [], true), stage('review'
   } catch (error) { await h.stop(); throw error; }
 }
 const exactGroup = (page, id) => page.locator('.role-stage').filter({ has: page.locator('legend').filter({ hasText: new RegExp('^' + id + '$') }) });
-const save = page => page.getByRole('button', { name: '保存角色配置', exact: true });
+const save = page => consoleSave(page);
 const dependencies = row => row.locator('.role-choices').filter({ has: row.page().locator('legend').filter({ hasText: /^依赖阶段$/ }) });
 
 test('the same stage fields, dependency levels and reachable editor work at six widths', async ({ page }) => {
@@ -36,7 +37,7 @@ test('the same stage fields, dependency levels and reachable editor work at six 
       await preview.getByRole('button', { name: '编辑阶段 final', exact: true }).click();
       const target = exactGroup(page, 'final'); await expect(target).toBeFocused();
       expect(await target.evaluate(el => el.getBoundingClientRect().top >= document.querySelector('.role-save').getBoundingClientRect().bottom - 1)).toBe(true);
-      await expect(save(page)).toBeInViewport();
+      await expect(page.getByTestId('console-save-bar')).toBeInViewport();
       for (const caption of ['阶段标识', '执行角色类型', '最少证据数', '最多尝试次数', '阶段最多工具调用', '阶段最多秒数']) await expect(target.getByLabel(caption, { exact: true })).toHaveCount(1);
     }
     const target = exactGroup(page, 'final'); await target.getByLabel('最多尝试次数', { exact: true }).fill('5'); await target.getByLabel('阶段最多工具调用', { exact: true }).fill('40');
@@ -94,7 +95,7 @@ test('version conflicts preserve the stage draft and merge independent remote ch
     expect((await admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: false, roles: [{ role_id: 'dev', name: 'Remote Dev' }] })).status).toBe(200);
     await save(page).click(); await expect(page.getByRole('alert').filter({ hasText: '角色配置已被别人修改' })).toBeVisible();
     await expect(exactGroup(page, 'final').getByLabel('最多尝试次数', { exact: true })).toHaveValue('6');
-    await page.getByRole('button', { name: '读取最新版本并比较', exact: true }).click();
+    await compareWithServer(page);
     await page.getByRole('button', { name: '将修改应用到最新版本草稿', exact: true }).click();
     await save(page).click(); await expect(page.locator('.flash')).toBeVisible();
     const config = (await admin('/api/repositories/101/roles')).value.configuration;

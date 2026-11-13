@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { openRoleAdvanced, goRolePage, openRoleFormAdvanced } from './open-role-advanced.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
+import { consoleSave, compareWithServer, confirmDiscard } from './console-save.mjs';
 
 test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，未接入驱动明确显示', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }), maxBodyBytes: 1024 * 1024 })), errors = [];
@@ -37,7 +38,7 @@ test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，�
     await page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true }).selectOption('acp');
     await goRolePage(page, { role: 'dev' });
     await page.getByRole('combobox', { name: 'dev Agent 后端', exact: true }).selectOption('claude_code');
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
+    await consoleSave(page).click();
     await expect(page.locator('#project-page .flash')).toContainText('角色配置已保存');
     const saved = (await admin('/api/repositories/101/roles')).value;
     expect(saved.configuration.roles.find(r => r.role_id === 'manager').harness_ref.id).toBe('native');
@@ -69,12 +70,12 @@ test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，�
     const warning = page.getByText('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更', { exact: true });
     await expect(warning).toBeVisible();
     await expect(page.getByRole('combobox', { name: 'dev Agent 后端', exact: true })).toHaveValue('native');
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
-    await expect(page.locator('#project-page .flash')).toContainText('角色配置已保存');
+    // No-op save is not offered: the bar only shows「保存」when the draft differs from the server (#567).
+    await expect(consoleSave(page)).toBeHidden();
     await expect(warning).toBeVisible();
     expect((await admin('/api/repositories/101/roles')).value.configuration.roles.find(r => r.role_id === 'dev').entry_harness_source).toBeUndefined();
     await page.getByRole('combobox', { name: 'dev Agent 后端', exact: true }).selectOption('process');
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
+    await consoleSave(page).click();
     await expect(page.locator('#project-page .flash')).toContainText('角色配置已保存');
     await expect(warning).toHaveCount(0);
     await page.reload();

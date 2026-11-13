@@ -3,6 +3,7 @@ import { openProjectDanger } from './open-basic-folds.mjs';
 import { mkdirSync } from 'node:fs';
 import { identityFixture } from '../test/identity-fixture.mjs';
 import { testPassword } from '../test/helpers.mjs';
+import { consoleSave } from './console-save.mjs';
 
 const output = '.tmp/project-settings-226';
 async function login(page, f, path, username = 'administrator', password = f.password) {
@@ -20,15 +21,15 @@ test('settings preserve a draft across refresh and save errors, with separate co
     await login(page, f, '/#/projects/101/basic');
     const branch = page.getByLabel('基准分支', { exact: true });
     await branch.fill('release/next');
-    await expect(page.locator('.project-settings-layout')).toContainText('草稿未保存');
+    await expect(page.locator('.project-settings-layout')).toContainText('有未保存的更改');
     await page.getByRole('button', { name: '刷新项目设置', exact: true }).click();
     await expect(branch).toHaveValue('release/next');
     const group = branch.locator('xpath=ancestor::form');
     await page.route('**/api/repositories/101/policy', route => route.fulfill({ status: 503, json: { error: 'save_unavailable' } }));
-    await group.getByRole('button', { name: '保存', exact: true }).click();
+    await consoleSave(page).click();
     await expect(group.getByRole('alert')).toContainText('save_unavailable'); await expect(branch).toHaveValue('release/next');
     await page.unroute('**/api/repositories/101/policy');
-    await group.getByRole('button', { name: '保存', exact: true }).click();
+    await consoleSave(page).click();
     await expect(page.locator('#project-page .flash')).toHaveText('已保存');
     expect(f.h.store.get("SELECT base_branch FROM policies WHERE repository_id='101'").base_branch).toBe('release/next');
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
@@ -66,7 +67,7 @@ test('a delayed settings receipt cannot replace the next project or its unsaved 
     await page.getByLabel('基准分支', { exact: true }).fill('old-project-branch');
     const gate = new Promise(resolve => { release = resolve; });
     await page.route('**/api/repositories/101/policy', async route => { await gate; await route.continue(); });
-    await page.getByLabel('基准分支', { exact: true }).locator('xpath=ancestor::form').getByRole('button', { name: '保存', exact: true }).click();
+    await consoleSave(page).click();
     await page.evaluate(() => { location.hash = '#/projects/201/basic'; });
     await expect(page.getByRole('heading', { name: 'other/project-201', exact: true })).toBeVisible();
     await page.getByLabel('基准分支', { exact: true }).fill('new-project-draft');

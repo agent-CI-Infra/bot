@@ -125,7 +125,7 @@ test('project list shows progress while settings own mutations and project admin
       await expect(member.locator('#rows .row')).toHaveCount(1);
       await member.locator('#rows [data-repository-id="101"]').getByRole('button',{name:'设置',exact:true}).click();
       await member.getByLabel('开启自动开发',{exact:true}).check();
-      await member.getByLabel('开启自动开发',{exact:true}).locator('xpath=ancestor::form').getByRole('button',{name:'保存',exact:true}).click();
+      await member.getByTestId('console-save').click();
       await expect(member.locator('#project-page .flash')).toContainText('已保存');
       expect((await admin('/api/repositories/101')).value.policy.development_enabled).toBe(1);
     }finally{await context.close();}
