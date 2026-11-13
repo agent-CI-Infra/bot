@@ -2,8 +2,7 @@ import { knowledgeFilesApi } from './projects/knowledge-files.js';
 import { memoryApi } from './memory/api.js';
 import { registerKnowledge } from './memory/management.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readStaticAsset } from './console/modules.js';
 import { type Store } from './storage/database.js';
 import { actor, publicActor, session, sessionToken } from './app/auth.js';
 import { management } from './app/management.js';
@@ -236,7 +235,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       '/shell.js': ['shell.js', 'text/javascript'], '/shell.css': ['shell.css', 'text/css'], '/models.css': ['models.css', 'text/css'], '/management.css': ['management.css', 'text/css'], '/vendor/marked.js': ['../node_modules/marked/lib/marked.umd.js', 'text/javascript'], '/vendor/purify.js': ['../node_modules/dompurify/dist/purify.min.js', 'text/javascript'],
       '/docs/external-token-api.md': ['../docs/external-token-api.md', 'text/plain'], '/favicon.ico': ['favicon.ico', 'image/x-icon'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
     if (method === 'GET' && assets[path]) {
-      const [name, mime] = assets[path]; const bytes = await readFile(join(options.staticDirectory, name));
+      const [name, mime] = assets[path]; const bytes = await readStaticAsset(options.staticDirectory, name);
       const type = mime.startsWith('image/') ? mime : `${mime}; charset=utf-8`;
       res.writeHead(200, { 'Content-Type': type }); res.end(bytes); return;
     }

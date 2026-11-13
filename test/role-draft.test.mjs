@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-const merge = runInNewContext(readFileSync(new URL('../static/roles.js', import.meta.url), 'utf8') + ';mergeRoleDraft', { structuredClone });
+import { readConsoleScriptSync } from '../dist/console/modules.js';
+const merge = runInNewContext(readConsoleScriptSync(fileURLToPath(new URL('../static/roles.js', import.meta.url))) + ';mergeRoleDraft', { structuredClone });
 const plain = value => JSON.parse(JSON.stringify(value));
 const base = () => ({ enabled: true, controller: { entries: { development: true } }, roles: [{ role_id: 'dev', name: 'Dev', persona_prompt: 'base', permissions: { computer: 'allow' } }], skills: [], required_stages: [] });
 

@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
+import { readConsoleScriptSync } from '../dist/console/modules.js';
 
 const { stagePolicyGraph: graph, stageDependencyReferences: references, syncStageDependencies: sync } = runInNewContext(
-  readFileSync(new URL('../static/roles.js', import.meta.url), 'utf8') + ';({stagePolicyGraph,stageDependencyReferences,syncStageDependencies})', { structuredClone });
+  readConsoleScriptSync(fileURLToPath(new URL('../static/roles.js', import.meta.url))) + ';({stagePolicyGraph,stageDependencyReferences,syncStageDependencies})', { structuredClone });
 const plain = value => JSON.parse(JSON.stringify(value));
 const stage = (stage_id, depends_on = [], extra = {}) => ({ stage_id, depends_on, required: true, delivery_types: ['code'], ...extra });
 
