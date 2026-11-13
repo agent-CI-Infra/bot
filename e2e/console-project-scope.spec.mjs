@@ -568,6 +568,49 @@ test('管理面板还在连接时切换顶栏项目，作用域与对话也跟�
   } finally { await h.stop(); }
 });
 
+// #623: the same window opens the other way round. The panel is drawn before its client exists, so the reader can move
+// the page's own scope control inside that window; the change the picker makes there is not theirs to follow. The
+// connection that finishes afterwards has to name the picker's new default in the sentence and leave the control and its
+// conversation on the scope the reader chose.
+test('管理面板还在连接时选定的页内范围，不被晚到的 client 冲掉', async ({ page }) => {
+  const { h, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    let openRead = true, release;
+    const held = new Promise(resolve => { release = resolve; });
+    await page.route('**/api/management/conversations', async route => {
+      if (openRead && route.request().method() === 'GET') { openRead = false; await held; }
+      await route.continue();
+    });
+    await login(page, h, password);
+    // A scope really changed asks for a conversation; a following client must not ask for one on the picker's project.
+    const created = [];
+    page.on('request', request => {
+      const url = new URL(request.url());
+      if (url.pathname !== '/api/management/conversations' || request.method() !== 'POST') return;
+      try { created.push(JSON.parse(request.postData() || '{}').scope); } catch { /* a body without a scope is not one */ }
+    });
+    const firstRead = page.waitForRequest(request => {
+      const url = new URL(request.url());
+      return url.pathname === '/api/management/conversations' && request.method() === 'GET';
+    });
+    await page.goto(h.admin + '/#/management');
+    await firstRead;
+    // Drawn and waiting for its first answer, but still without a client: a scope chosen here is the page's own.
+    const scope = page.getByLabel('当前管理作用域', { exact: true });
+    await scope.selectOption('project:202');
+    await expect(page.locator('#management-scope-note')).toContainText('本页覆盖；顶栏未选项目');
+    // The picker moves inside the same window, so this change lands with no client to forward it to.
+    await page.locator('#console-project').selectOption('101');
+    await expect(page.locator('#console-inbox-link')).toHaveAttribute('href', '#/inbox/101');
+    release();
+    // The connection that finishes afterwards names the picker's default, in the frame it writes the note, and stops there.
+    await expect(page.locator('#management-scope-note')).toContainText('本页覆盖；顶栏默认：fixture/project-101');
+    await expect(scope).toHaveValue('project:202');
+    expect(created).not.toContain('project:101');
+  } finally { await h.stop(); }
+});
+
 // #494 item 3: 「全部项目」 in the picker means one value for the board, usage and the assistant. Visiting the inbox with
 // no project clears the shared default as well, instead of only clearing the picker.
 test('#/inbox 的「全部项目」同时清掉共享默认，看板与用量读同一个值', async ({ page }) => {
