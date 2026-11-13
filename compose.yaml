@@ -31,6 +31,7 @@ services:
       BOT_MASTER_KEY_FILE: /keys/master.key
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
       BOT_MANAGER_URL: http://manager:8793
+      BOT_COMMAND_TIMEOUT_MAX_SECONDS: "${BOT_COMMAND_TIMEOUT_MAX_SECONDS:-600}"
       BOT_GITHUB_API_URL: "${BOT_GITHUB_API_URL:-https://api.github.com}"
       BOT_MENTION_NAMES: "${BOT_MENTION_NAMES-bot,agent-ci-infra-bot}"
       BOT_FORWARD_PRIVATE_HOSTS: "${BOT_FORWARD_PRIVATE_HOSTS:-}"

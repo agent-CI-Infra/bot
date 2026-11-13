@@ -1,3 +1,4 @@
+import { commandTool, runCommand } from '../agent/command.js';
 import {versionTools,versionTool} from './versions.js';
 import {applyIntegration} from './integration.js';
 import { blobValue, storedInput } from '../storage/payloads.js';
@@ -100,7 +101,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
       if(task.phase!=='acceptance'){
         update({phase:'model'});
         const read={type:'function',function:{name:'read_file',description:'Read repository or artifact text',parameters:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}};
-        const command={type:'function',function:{name:'run_command',description:'Run bounded implementation/verification commands in this task workspace. Never publish, push, merge, use host credentials or access other tasks.',parameters:{type:'object',properties:{command:{type:'string'}},required:['command'],additionalProperties:false}}};
+        const command=commandTool(180,'Run bounded implementation/verification commands in this task workspace. Never publish, push, merge, use host credentials or access other tasks.');
         const write={type:'function',function:{name:'write_file',description:'Write a text artifact or source file within the task checkout',parameters:{type:'object',properties:{path:{type:'string'},content:{type:'string'}},required:['path','content'],additionalProperties:false}}};
         const submit={type:'function',function:{name:'submit_delivery',description:'Submit the completed bounded report/artifact for independent acceptance now. This ends execution; the framework decides pass or remediation. Do not keep probing unrelated unknowns after the report is ready.',parameters:{type:'object',properties:{summary:{type:'string'},artifacts:{type:'array',items:{type:'object',properties:{path:{type:'string'},description:{type:'string'}},required:['path','description'],additionalProperties:false}},evidence:{type:'array',items:{type:'object',properties:{source:{type:'string'},result:{type:'string'}},required:['source','result'],additionalProperties:false}},unknowns:{type:'array',items:{type:'string'}}},required:['summary','artifacts'],additionalProperties:false}}};
         if(software){Object.assign(submit.function.parameters.properties,{change_title:{type:'string'},release_label:{type:'string'},test_command:{type:'string'}});submit.function.description='Submit the fixed software candidate for policy tests and independent QA. The framework publishes its PR only after those gates pass. Include a concise change_title and any release_label required by this repository.';}
@@ -126,7 +127,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
             const beforeCommand=name==='run_command'?await spaces.current.artifact(key+':source'):null;
             const result=name==='read_file'?await spaces.current.call(key,{type:'workspace_read',path:args?.path})
               :name==='write_file'?(await spaces.current.write(key,args?.path,Buffer.from(args?.content||'')),{ok:true})
-              :await spaces.current.call(key,{type:'workspace_command',command:args?.command,timeout_ms:180000});
+              :await runCommand(spaces.current,key,args,180);
             records.history(task.id,'execution_evidence',{execution,name,version:beforeCommand?.tree_sha||(typeof result.content==='string'?blobSha(Buffer.from(result.content)):name==='write_file'?blobSha(Buffer.from(args.content)):null),arguments:redactor.clean(args),result:redactor.clean(result)},spaces.runId);return result;
           },validate:content=>{
             try {return validateReport(JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g,'')));}

@@ -20,8 +20,10 @@ import { StallMonitor } from './core/stalls.js';
 import { PayloadMigration } from './storage/migration.js';
 import { WorkspaceCleanup } from './projects/workspace-cleanup.js';
 import { StorageReport } from './app/storage.js';
+import { commandTimeoutLimit } from './agent/command.js';
 
 process.umask(0o077);
+commandTimeoutLimit();
 const keyFile = process.env.BOT_MASTER_KEY_FILE;
 if (!keyFile) throw new Error('BOT_MASTER_KEY_FILE is required');
 const databasePath = process.env.BOT_DATABASE_PATH || '/data/control.sqlite';

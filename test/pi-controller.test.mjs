@@ -214,3 +214,26 @@ test('configured code flow checks out the collected commit for both observers an
   const submitted=await workspace.artifact('later-qa-submission');assert.equal(submitted.local_sha,snapshots[0].commit_sha);assert.equal(submitted.tree_sha,snapshots[0].tree_hash);
   assert.equal(store.get("SELECT status FROM tasks WHERE id='t'").status,'running');
 });
+
+test('Pi local command execution honors the configured cap, reports it, and retains background servers', { skip, timeout: 90000 }, async t => {
+  const previous = process.env.BOT_COMMAND_TIMEOUT_MAX_SECONDS;
+  process.env.BOT_COMMAND_TIMEOUT_MAX_SECONDS = '450';
+  t.after(() => { if (previous === undefined) delete process.env.BOT_COMMAND_TIMEOUT_MAX_SECONDS; else process.env.BOT_COMMAND_TIMEOUT_MAX_SECONDS = previous; });
+  const commands = [
+    { command: 'cat ../agent/live.json' },
+    { command: 'cat ../agent/live.json', timeout_seconds: 400 },
+    { command: 'cat ../agent/live.json', timeout_seconds: 900 },
+    { command: `node -e 'const fs=require("node:fs"),s=require("node:http").createServer((q,r)=>r.end("pi-ready"));s.listen(0,"127.0.0.1",()=>fs.writeFileSync("port",String(s.address().port)))' > service.log 2>&1`, keep_background: true, timeout_seconds: 400 },
+    { command: `node -e 'fetch("http://127.0.0.1:"+require("node:fs").readFileSync("port","utf8")).then(r=>r.text()).then(console.log)'` }
+  ];
+  const f = await entryFixture(t, 'review.issue', body => {
+    const count = body.messages.filter(m => m.role === 'assistant').flatMap(m => m.tool_calls ?? []).filter(c => c.function.name === 'run_command').length;
+    return count < commands.length ? call('run_command', commands[count]) : call('finish_review', { summary: 'Verified local commands', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' });
+  });
+  assert.equal((await agentLoop(f.store, f.task, f.workspace, f.redactor, f.guard, {})).summary, 'Verified local commands');
+  const done = f.logs.filter(l => l.type === 'tool' && l.name === 'run_command').map(l => l.result);
+  assert.equal(done.length, 5);
+  assert.deepEqual(done.slice(0, 3).map(r => JSON.parse(r.output).timeout_ms), [null, 400000, 450000]);
+  assert.equal(done[2].timeout_notice.requested_seconds, 900); assert.equal(done[2].timeout_notice.max_seconds, 450);
+  assert.equal(done[3].running, true); assert.equal(done[4].output.trim(), 'pi-ready');
+});

@@ -1,3 +1,4 @@
+import { commandTool } from './command.js';
 import { type Store } from '../storage/database.js';
 import { stop } from './common.js';
 import { pricingFor } from '../metrics/accounting.js';
@@ -46,9 +47,7 @@ export function tools(profile: { workspaceWrite: boolean; completion: 'review' |
   const labels = writes.includes('labels') ? { labels: { type: 'array', items: string, description: 'Classification labels for this Issue or PR, chosen only from repository_labels. The control plane adds the valid ones after publishing; never apply labels yourself' } } : {};
   const result:any[]=[];
   if(allow(profile.read))result.push(fn('read_file','Read a file in this task workspace',{path:string},['path']));
-  if(allow(profile.shell))result.push(fn('run_command','Run a shell command in this task workspace inside the long-lived project container (internet access available for dependencies). Output is streamed to the console.',
-    {command:string,timeout_seconds:{type:'integer',minimum:1,description:'Optional. Without it the command runs until it ends; set it only for a command that might hang'},
-      keep_background:{type:'boolean',description:'Keep processes started in the background (redirect their output to a file) for later commands of this task; they stop when the task ends'}},['command']));
+  if(allow(profile.shell))result.push(commandTool(null));
   if(allow(profile.github))result.push(fn('github_read_token','Exchange a short-lived read-only GitHub token for this repository. Later run_command calls get it as GH_TOKEN and GITHUB_TOKEN for https://api.github.com; it can read code, Issues, pull requests, comments, reviews, Actions runs and checks, and cannot write anything. The token value is never shown to you',{},[]));
   if(profile.workspaceWrite||allow(profile.notes))result.push(fn('write_file',profile.workspaceWrite?'Replace a repository text file or a persistent project note at ../notes/<name>':'Replace a persistent project note at ../notes/<name> only. Repository writes are forbidden',{path:string,content:string},['path','content']));
   if(writes.includes('pull_request'))result.push(

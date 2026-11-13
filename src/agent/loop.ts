@@ -1,3 +1,4 @@
+import { commandTimeoutLimit, commandTool, runCommand } from './command.js';
 import {GitHub} from '../github/client.js';
 import { taskTraceAccess } from '../memory/access.js';
 import { taskConfiguration, taskPermissions } from '../tasks/configuration.js';
@@ -56,7 +57,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const system = profile.system + '\n' + taskRecordInstructions;
   context={...context,project_memory:new ProjectMemory(store).context(task),structured_task:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?records.context(task.id):null};
   // Only development ends with its pull request; any other work that may open one carries on to its own finish.
-  const config = { system, prompt: JSON.stringify(roleAssignmentContext(context, prompt)), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
+  const config = { command_timeout: { default_seconds: null, max_seconds: commandTimeoutLimit() }, system, prompt: JSON.stringify(roleAssignmentContext(context, prompt)), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
     finish_on_pull_request: profile.completion === 'publication', finish_tools: profile.finishTools,
     ...(profile.subagentSystem ? { subagent_system: profile.subagentSystem } : {}) };
   const repairInvalid = (error: unknown) => error instanceof TaskError && ['model_review_invalid','model_finding_invalid','release_notes_invalid','release_observation_invalid','actions_classification_invalid','gate_agent_output_invalid'].includes(error.code)
@@ -98,7 +99,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     const { repository, token, complete } = session, round = randomId(), spaces=roleWorkspaces(workspace);
     const staged=!!records.get(task.id).stage_schedule.plan_revision||!!(taskConfiguration(store,task)?.roles?.required_stages?.length);
     const execute = async (name: string, args: any) => {
-      if(staged&&spaces.role!=='dev'&&['read_file','run_command'].includes(name))return spaces.current.call('stage-observation:'+randomId(),name==='read_file'?{type:'workspace_read',path:args?.path}:{type:'workspace_command',command:args?.command,timeout_ms:120000});
+      if(staged&&spaces.role!=='dev'&&['read_file','run_command'].includes(name))return name==='run_command'?runCommand(spaces.current,'stage-observation:'+randomId(),args,120):spaces.current.call('stage-observation:'+randomId(),{type:'workspace_read',path:args?.path});
       if(staged&&spaces.role!=='dev'&&memoryTools.some(tool=>tool.function.name===name))return memoryTool(store,{...task,active_role:spaces.role,trace_run_id:spaces.runId},name,redactor.clean(args),async doc=>{const raw=await spaces.current.call('stage-memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};});
       if (Object.hasOwn(platform, name)) return platform[name]!(randomId(), args);
       if (repositoryTools.some(t => t.function.name === name)) return repository!(name, args);
@@ -119,8 +120,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
           base64: Buffer.from(args?.content ?? '').toString('base64'), offset: 0, final: true, mode: '100644' });
         await workspace.write(key, args?.path, Buffer.from(args?.content ?? '')); return { written: true };
       }
-      if (name === 'run_command') return workspace.call(key, { type: 'workspace_command', command: args?.command,
-        timeout_ms: args?.timeout_seconds > 0 ? args.timeout_seconds * 1000 : null, keep_background: args?.keep_background === true });
+      if (name === 'run_command') return runCommand(workspace, key, args, null);
       if (name === 'create_pull_request' && createPullRequest) return createPullRequest(randomId(), args);
       return { error: 'tool_not_allowed' };
     };
@@ -130,7 +130,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
         try { return await execute(name, args); }
         catch (error) { if (error instanceof TaskError) return { error: error.code }; throw error; }
       }, ...(finish ? { finish: { name: finish, validate: (value: any) => complete({ result: value }, null) }, finalizationTools: [finish] } : {}) },
-      { entry, prepare: staged?spaces.prepare:async () => {}, controller:spaces.controller,worker:spaces.worker,...(staged?{withRole:spaces.withRole,withObservers:spaces.withObservers,bindRun:spaces.bindRun,snapshot:spaces.snapshot,isolated:spaces.isolated}:{workers:['dev']}),
+      { entry, ...(staged?{observerTools:profile.tools.map(t=>t.function.name==='run_command'?commandTool(120):t)}:{}), prepare: staged?spaces.prepare:async () => {}, controller:spaces.controller,worker:spaces.worker,...(staged?{withRole:spaces.withRole,withObservers:spaces.withObservers,bindRun:spaces.bindRun,snapshot:spaces.snapshot,isolated:spaces.isolated}:{workers:['dev']}),
         executor: { round, prepare: async (instance, resolved) => resolved.snapshot.harness.id === 'pi'
           ? executorWorkspace(workspace, { config, conversation, platform, repository, token, createPullRequest, publication: profile.capabilities.github.publication, complete }, round)(instance, resolved)
           : undefined } });
