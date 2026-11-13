@@ -484,7 +484,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
       : `生效范围：${scopeName(scope.value)}（本页覆盖；顶栏默认：${scopeName(shared)}）`;
   };
   const toolsButton = button('快捷操作', () => showTools(!toolsOpen), 'quiet'); toolsButton.setAttribute('aria-expanded', 'false'); toolsButton.setAttribute('aria-controls', 'management-tools');
-  const fresh = button('＋ 新建会话', () => openConversation(true).catch(showError), 'quiet management-new-conversation');
+  const fresh = button('＋ 新建会话', () => openConversation(true).catch(showAccessError), 'quiet management-new-conversation');
   fresh.setAttribute('aria-label', '新建会话');
   header.append(field('管理范围', scope), fresh, toolsButton); scopeNote.textContent = scopeCaption(); header.append(scopeNote); panel.append(header);
   const sessions = element('details', '', 'management-sessions'), sessionBody = element('div', '', 'management-session-controls');
@@ -524,10 +524,12 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   const pendingMarkdown = new Set();
   const drafts = new Map(), turns = new Map(), messages = new Map();
   const alive = generation => !disposed && panel.isConnected && me?.id === user && generation === scopeGeneration;
-  const showError = err => { if (!disposed) { status.textContent = managementAccessMessage(err); status.classList.add('view-error'); status.setAttribute('role', 'alert'); } };
+  const showError = err => { if (!disposed) { status.textContent = err.message; status.classList.add('view-error'); status.setAttribute('role', 'alert'); } };
   const showAccessError = err => {
     if (disposed) return;
-    showError(err);
+    status.textContent = managementAccessMessage(err);
+    status.classList.add('view-error');
+    status.setAttribute('role', 'alert');
     welcome.hidden = true;
     const empty = consoleState('无法打开管理会话', managementAccessMessage(err), { tone: 'error', retry: () => openConversation().catch(showAccessError) });
     const reload = empty.querySelector('button'); if (reload) reload.textContent = '重试';
@@ -906,8 +908,8 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
     scopeNote.textContent = scopeCaption();
     return changed;
   };
-  scope.onchange = () => { applyScope(scope.value); openConversation().catch(showError); };
-  conversations.onchange = () => openConversation(false, conversations.value).catch(showError);
+  scope.onchange = () => { applyScope(scope.value); openConversation().catch(showAccessError); };
+  conversations.onchange = () => openConversation(false, conversations.value).catch(showAccessError);
   const elapsedTimer = setInterval(() => { for (const value of turns.values()) if (['pending', 'running'].includes(value.state)) paintTurn(value); }, 1000);
   try { await openConversation(); } catch (err) { clearInterval(elapsedTimer); document.removeEventListener('selectionchange', selectionChanged); throw err; }
   return {
