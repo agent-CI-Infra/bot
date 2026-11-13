@@ -182,10 +182,11 @@ body.console-ready .management-page { left: var(--console-rail); }
   header .brand { min-width: 0; }
   header .brand strong { font-size: 20px; }
   header .sub { display: none; }
-  #identity { gap: 8px; min-width: 0; }
-  #who { max-width: 100px; font-size: var(--font-size-1); }
+  #identity { gap: 8px; min-width: 0; flex-shrink: 1; }
+  #who { max-width: 11rem; font-size: var(--font-size-1); overflow-wrap: normal; }
   #who img { width: 24px; height: 24px; }
-  #identity #logout { padding: 6px 8px; font-size: var(--font-size-1); }
+  .current-user-role { display: none; }
+  #identity #logout { flex-shrink: 0; padding: 6px 8px; font-size: var(--font-size-1); }
   #console-sidebar, #console-secondary-nav { display: none; }
   body.console-ready main { margin: 0; padding: var(--space-4) var(--space-4) calc(var(--console-mobile-height) + var(--space-10)); }
   .console-ready input:not([type=checkbox]):not([type=radio]), .console-ready select, .console-ready textarea { font-size: var(--font-size-touch) !important; }
@@ -350,3 +351,46 @@ body:not(.console-ready) header .locale-switch { background: #fff; }
 /* #642: 找不到这个页面 — one primary way back, full-width buttons on a phone. */
 .page-not-found-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: 16px 0 0; }
 @media (max-width: 480px) { .page-not-found-actions > * { flex: 1 1 100%; justify-content: center; } }
+
+/* #561 long titles, repo names, chips and identity notes truncate instead of colliding with actions. */
+#who { overflow-wrap: normal; }
+.current-user-name, .current-user-role { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-title, .console-ready .row strong, .console-ready .project-head h1,
+.console-ready .toolbar h1, .console-page-head h1, .console-group h2 {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 100%;
+}
+.console-link-title, .board-card-repo {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 100%;
+}
+.console-ready .toolbar .muted, .console-ready #count, .console-ready .row p,
+.roles-page .project-table td .muted, .roles-page .project-table td p {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; overflow-wrap: anywhere;
+}
+.project-list-row .row-state, .project-list-row .project-features {
+  flex-wrap: wrap; max-height: calc(2 * (var(--font-size-1) * var(--line-height-body) + 14px) + var(--space-2));
+  overflow: hidden; min-width: 0; max-width: 100%;
+}
+.project-list-row .status {
+  max-width: 100%; white-space: normal;
+}
+@media (max-width: 767px) {
+  .console-ready .project-list-row,
+  #rows[data-view=projects] .project-list-row { grid-template-columns: minmax(0, 1fr); }
+  .console-ready .project-list-row .row-content { grid-row: 1; grid-column: 1; }
+  #rows[data-view=projects] .project-list-row > .actions,
+  .console-ready .project-list-row > .actions {
+    grid-row: 2; grid-column: 1; justify-content: flex-start;
+  }
+  #rows[data-view=projects] .project-overview,
+  .console-ready .project-list-row .row-state {
+    grid-row: 3; grid-column: 1; max-width: 100%; justify-content: flex-start;
+  }
+  .identity-layout .muted, .identity-overview .muted, .identity-layout p.muted {
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4;
+    overflow: hidden;
+  }
+  .identity-layout form, .identity-layout .actions, .identity-layout button {
+    position: relative; z-index: 1; margin-top: var(--space-3);
+  }
+}

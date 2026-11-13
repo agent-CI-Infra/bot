@@ -8,13 +8,17 @@ function timestamp(value) {
 function options(select, rows, label) { const selected = select.value; while (select.options.length > 1) select.remove(1); rows.forEach(row => select.add(new Option(label(row), row.id))); if (rows.some(row => row.id === selected)) select.value = selected; }
 function renderCurrentUser() {
   const who = $('who'), role = me.role === 'super_admin' ? t('role.super_admin') : t('role.project_admin');
-  who.replaceChildren();
-  if (!me.github) { who.textContent = `${userDisplayName(me)} · ${role}`; return; }
-  const avatar = document.createElement('img'); avatar.src = me.github.avatar_url;
-  avatar.alt = t('identity.avatar', { login: me.github.login }); avatar.width = 28; avatar.height = 28; avatar.referrerPolicy = 'no-referrer';
-  avatar.addEventListener('error', () => avatar.remove());
-  const copy = element('span', '', 'current-user-copy'), name = element('span', userDisplayName(me), 'current-user-name');
-  name.title = me.github.login; copy.append(name, element('span', role, 'current-user-role')); who.append(avatar, copy);
+  const display = userDisplayName(me);
+  const full = `${display} · ${role}`;
+  who.replaceChildren(); who.title = full;
+  const copy = element('span', '', 'current-user-copy'), name = element('span', display, 'current-user-name');
+  name.title = full; copy.append(name, element('span', role, 'current-user-role'));
+  if (me.github) {
+    const avatar = document.createElement('img'); avatar.src = me.github.avatar_url;
+    avatar.alt = t('identity.avatar', { login: me.github.login }); avatar.width = 28; avatar.height = 28; avatar.referrerPolicy = 'no-referrer';
+    avatar.addEventListener('error', () => avatar.remove());
+    who.append(avatar, copy);
+  } else who.append(copy);
 }
 function showBootFailure(err) {
   $('boot').hidden = false;

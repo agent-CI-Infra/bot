@@ -83,7 +83,10 @@ test('GitHub 页头展示用户名与头像，旧会话和改名可刷新，窄�
     await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click();
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(who).toHaveText('administrator · 管理员'); await expect(who.locator('img')).toHaveCount(0);
+    await expect(who).toHaveAttribute('title', 'administrator · 管理员');
+    await expect(who.locator('.current-user-name')).toHaveText('administrator');
+    await expect(who.locator('.current-user-role')).toHaveText('管理员');
+    await expect(who.locator('img')).toHaveCount(0);
     expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
