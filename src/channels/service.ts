@@ -411,7 +411,7 @@ export class ChannelService {
     if (['uninstalled', 'audience_changed', 'message_recalled', 'bot_removed', 'chat_archived'].includes(e.kind)) { this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return; }
     this.source(e);
     if (e.kind === 'bot_added') {
-      this.queue(e, card('机器人会在应用获准的可见范围内记录本群消息并同步历史，仅查询本地记录；平台不可见或未同步的内容会标明。群聊助手须由已绑定飞书、对相关仓库有配置权限的维护人在控制台「身份与权限 → 飞书群聊助手」另行启用，并选择服务角色和项目范围。'), row.id + ':notice', row.id);
+      this.queue(e, card('机器人会在应用获准的可见范围内记录本群消息并同步历史，仅查询本地记录；平台不可见或未同步的内容会标明。群聊助手须由已绑定飞书、对相关仓库有配置权限的维护人在控制台「个人设置 → 飞书绑定」点击「创建群绑定」另行启用，并选择服务角色和项目范围。'), row.id + ':notice', row.id);
       this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return;
     }
     // Result cards no longer carry refresh actions; a click on an older card is answered as stale.
@@ -426,7 +426,7 @@ export class ChannelService {
       reply('双端身份绑定成功。这个飞书账号已绑定到你在控制台登录的平台账户；绑定本身不会增加项目权限。');
     } else if (['绑定', '/bind', '重新认证', '/reauth'].includes(content)) {
       const binding = this.bindings.begin(e);
-      reply('飞书身份认证字符串（五分钟内有效，仅可使用一次）：\n' + binding.code + '\n请在控制台「身份与权限 → 飞书身份绑定」选择本机器人，粘贴认证字符串，核对当前平台账户后确认绑定。请勿转发认证字符串。可使用本地账户或 GitHub 登录，绑定不会授予项目权限。' + (this.options.origin ? '\n也可打开下方链接，登录后回到原私聊确认。' : ''),
+      reply('飞书身份认证字符串（五分钟内有效，仅可使用一次）：\n' + binding.code + '\n请在控制台「个人设置 → 飞书绑定」选择本机器人，粘贴认证字符串，核对当前平台账户后确认绑定。请勿转发认证字符串。可使用本地账户或 GitHub 登录，绑定不会授予项目权限。' + (this.options.origin ? '\n也可打开下方链接，登录后回到原私聊确认。' : ''),
         this.options.origin ? this.options.origin + '/auth/channels/start?challenge=' + binding.challenge : undefined);
     } else if (/^(确认绑定|\/confirm) /.test(content)) {
       await this.bindings.confirm(e, content.slice(content.indexOf(' ') + 1).trim()); reply('双端身份绑定成功。项目权限仍由统一授权服务决定。');
@@ -459,7 +459,7 @@ export class ChannelService {
         }).finally(()=>this.business.delete(chat.id));
         this.business.set(chat.id,work);return;
       }
-      reply('本群尚未绑定群聊助手。已绑定飞书的维护人可以在控制台「身份与权限 → 飞书群聊助手」为本群选择服务角色和项目范围；个人绑定请在私聊发送“绑定”。');
+      reply('本群尚未绑定群聊助手。已绑定飞书的维护人可以在控制台「个人设置 → 飞书绑定」点击「创建群绑定」为本群选择服务角色和项目范围；个人绑定请在私聊发送“绑定”。');
     }
     this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id);
   }
