@@ -17,10 +17,10 @@ function roleListStart(role, data) {
   return { ...role, harness_ref: { ...(role.harness_ref || {}), id: data.recommended_backend || 'pi' } };
 }
 function roleListStatus(role, state, start) {
-  const parts = [role.enabled ? '已启用' : '已关闭'];
-  if (!start || roleListComparable(role) !== roleListComparable(start)) parts.push('有未保存的更改');
-  else if (state.data.configured) parts.push('已保存');
-  else parts.push('推荐配置');
+  const parts = [role.enabled ? rolePageText('statusEnabled') : rolePageText('statusDisabled')];
+  if (!start || roleListComparable(role) !== roleListComparable(start)) parts.push(rolePageText('statusUnsaved'));
+  else if (state.data.configured) parts.push(rolePageText('statusSaved'));
+  else parts.push(rolePageText('statusRecommended'));
   return parts.join(' · ');
 }
 function roleOverviewCards(state, redraw) {
@@ -34,7 +34,7 @@ function roleOverviewCards(state, redraw) {
     const link = element('a', roleConfigName(role.role_id, role.name)); link.href = `#/projects/${current.id}/roles/${role.role_id}`;
     link.dataset.testid = 'role-list-' + role.role_id;
     tableCell(row, rolePageText('columns')[0], link);
-    tableCell(row, rolePageText('columns')[1], roleCheck(role.role_id + ' 启用', role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind), redraw));
+    tableCell(row, rolePageText('columns')[1], roleCheck(rolePageText('enableList') + ' ' + roleConfigName(role.role_id, role.name), role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind), redraw));
     const dutyText = roleConfigDuty(role.role_id, role.responsibility);
     const duty = note(dutyText || rolePageText('emptyDuty')); if (dutyText) duty.title = dutyText; tableCell(row, rolePageText('columns')[2], duty);
     const saved = data.configuration.roles.find(entry => entry.role_id === role.role_id);

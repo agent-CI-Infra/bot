@@ -98,6 +98,12 @@ const rolePageCopy = {
     requiredNote: '新增角色默认使用可编辑的检视模板。项目管理者、跨任务协调和独立验收是必需角色，其余角色都可以删除。',
     adopt: '使用推荐配置',
     foldAdvanced: '高级',
+    enableList: '启用',
+    statusEnabled: '已启用',
+    statusDisabled: '已关闭',
+    statusUnsaved: '有未保存的更改',
+    statusSaved: '已保存',
+    statusRecommended: '推荐配置',
   },
   en: {
     overview: 'Roles',
@@ -121,6 +127,12 @@ const rolePageCopy = {
     requiredNote: 'A new role starts from the editable review template. The Project controller, Task coordinator and Independent QA are required; every other role can be removed.',
     adopt: 'Use recommended configuration',
     foldAdvanced: 'Advanced',
+    enableList: 'Enabled',
+    statusEnabled: 'Enabled',
+    statusDisabled: 'Disabled',
+    statusUnsaved: 'Unsaved changes',
+    statusSaved: 'Saved',
+    statusRecommended: 'Recommended',
   }
 };
 
