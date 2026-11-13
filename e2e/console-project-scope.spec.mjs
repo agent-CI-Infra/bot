@@ -158,57 +158,26 @@ test('页面自己的临时过滤保持可见，与顶栏默认区分且不改�
   } finally { await h.stop(); }
 });
 
-test('桌面项目切换器正下方常驻「＋ 新建任务」，带入当前项目，宽而矮也可见', async ({ page }) => {
+test('桌面侧栏不额外提供新建任务一级入口，项目与导航范围保持不变', async ({ page }) => {
   const { h, password } = await fixture();
   try {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password);
     await page.locator('#console-project').selectOption('101');
     await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
-    const action = page.locator('#console-sidebar').getByRole('link', { name: '＋ 新建任务', exact: true });
-    await expect(action).toHaveAttribute('href', '#/new-task/101');
-    await expect(action).toBeVisible();
-    // Directly below the picker, outside the scrolling navigation.
-    const picker = await page.locator('#console-project').boundingBox();
-    const box = await action.boundingBox();
-    expect(box.y).toBeGreaterThan(picker.y + picker.height - 1);
-    expect(box.width).toBeGreaterThan(100);
-    // One line, not two: a hint beside the label used to wrap it into 「＋ 新建任 / 务」 at 1440 (#480 review).
-    const shape = el => ({
-      lines: el.querySelector('span').getClientRects().length,
-      overflows: el.scrollWidth > el.clientWidth + 1,
-      parts: el.querySelectorAll('span, small').length,
-    });
-    const lines = await action.evaluate(shape);
-    expect(lines.lines).toBe(1);
-    expect(lines.overflows).toBe(false);
-    expect(lines.parts).toBe(1);
-    // The narrow rail of a 768–1023 window is the tightest place for the same single line.
-    await page.setViewportSize({ width: 768, height: 1000 });
-    await page.goto(h.admin + '/#/projects/101/overview');
-    const narrow = await page.locator('#console-sidebar').getByRole('link', { name: '＋ 新建任务', exact: true }).evaluate(shape);
-    expect(narrow.overflows).toBe(false);
-    expect(narrow.lines).toBe(1);
-
-    // A wide but short window keeps it on screen.
+    await expect(page.locator('#console-new-task')).toHaveCount(0);
+    await expect(page.locator('#console-sidebar').getByRole('link', { name: '＋ 新建任务', exact: true })).toHaveCount(0);
+    await expect(page.locator('#console-project')).toHaveValue('101');
+    await page.screenshot({ path: '.tmp/console-project-scope/no-primary-task-1440.png', fullPage: true });
     await page.setViewportSize({ width: 1440, height: 360 });
-    await page.setViewportSize({ width: 1440, height: 360 });
-    await page.goto(h.admin + '/#/board');
-    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
-    const short = await page.locator('#console-sidebar').getByRole('link', { name: '＋ 新建任务', exact: true }).boundingBox();
-    expect(short.y).toBeGreaterThanOrEqual(0);
-    expect(short.y + short.height).toBeLessThanOrEqual(360);
-
-    // Without a project it falls back to the project-aware creation flow.
-    await page.locator('#console-project').selectOption('');
-    await expect(page.locator('#console-sidebar').getByRole('link', { name: '＋ 新建任务', exact: true }))
-      .toHaveAttribute('href', '#/new-task');
-
-    // Mobile keeps its own navigation and gains no sidebar action.
+    await expect(page.locator('#console-project')).toBeVisible();
+    await expect(page.locator('#tabs [data-tab=settings]')).toBeVisible();
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/board');
     await expect(page.locator('#console-sidebar')).toBeHidden();
+    await expect(page.locator('#console-new-task')).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/console-project-scope/no-primary-task-390.png', fullPage: true });
   } finally { await h.stop(); }
 });
 
