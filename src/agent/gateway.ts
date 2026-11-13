@@ -24,7 +24,8 @@ export interface ModelRequest {
  * Returns provider data to the trusted adapter, which validates/redacts its domain output.
  */
 export async function requestModel(input: ModelRequest): Promise<{ value: any; status: number; model: AgentModel; request_log_id: string }> {
-  const { store, task, model, redactor, body, requestId } = input;
+  const { store, task, redactor, body, requestId } = input;
+  let model = input.model;
   await input.guard?.();
   redactor.add(model.key);
   // A service role run may only use the shared model its role is configured with right now; a project run uses a model
@@ -34,10 +35,13 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
     : store.get(`SELECT m.* FROM models m WHERE m.id=? AND
     (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))`,
     model.id, task.repository_id, task.repository_id);
-  if (!current?.api_key) return stop('model_not_available', 'waiting_configuration', task.service_role_id && !task.repository_id ? '服务角色的模型已被更换、删除或撤销凭据。' : '任务模型已被删除或撤销项目访问权限。');
+  if (!current) return stop('model_not_available', 'waiting_configuration', task.service_role_id && !task.repository_id ? '服务角色的模型已被更换或删除。' : '任务模型已被删除或撤销项目访问权限。');
+  if (!current.api_key) return stop('model_not_configured', 'waiting_configuration', '固定模型的凭据已撤销；重新设置 Key 后可以继续。');
   const currentKey = String(store.secrets.open(current.api_key, `model:${current.id}`).value || '');
-  if (Number(current.version) !== model.version || String(current.api_url) !== model.url || String(current.model_name) !== model.model || currentKey !== model.key)
+  if (Number(current.version) !== model.version || String(current.api_url) !== model.url || String(current.model_name) !== model.model)
     return stop('model_configuration_changed', 'waiting_configuration', '任务运行期间模型配置已变化，请重新启动任务。');
+  // Runs pin the provider contract; every request uses its current credential, including retries after a rotation.
+  model = { ...model, key: currentKey }; redactor.add(currentKey);
   if (!body || !Array.isArray(body.messages) || Buffer.byteLength(JSON.stringify(body)) > 2 * 1024 * 1024)
     return stop('model_request_invalid', undefined, '模型请求缺少 messages 数组，或请求内容超过 2 MiB 上限。');
   const outputTokens=input.maxOutputTokens??8192;

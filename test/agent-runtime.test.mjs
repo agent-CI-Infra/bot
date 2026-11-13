@@ -183,7 +183,7 @@ test('mapping changes affect future runs while a pinned run rechecks credential 
     await services.request({messages:[]},'still-pinned');
     f.store.run("UPDATE models SET api_key=NULL WHERE id='m'");
     return services.request({messages:[]},'revoked');
-  }}),{code:'model_not_available'});
+  }}),{code:'model_not_configured'});
   assert.equal(f.requests.length,2);
   assert.ok(f.requests.every(request=>request.model==='fixture'));
   await assert.rejects(runAgent(f.spec),{code:'model_not_configured'});
