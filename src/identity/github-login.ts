@@ -1,7 +1,7 @@
 import type { Store } from '../storage/database.js';
 import { superAdmin, type Actor } from '../app/auth.js';
 import { fail, fields, text, type Json } from '../core/security.js';
-import { invalidate } from './authorization.js';
+import { activeScopes, invalidateIfLost } from './authorization.js';
 import { GitHubIdentity, type GitHubOAuthConfig } from './github.js';
 import { loginCallbackPath, verifiedOrigin } from '../onboarding/public-url.js';
 
@@ -118,12 +118,13 @@ export class GitHubLogin {
       this.store.run('DELETE FROM github_oauth_states');
       const credentialsChanged = old.client_id !== id || this.applicationType(old) !== 'oauth_app' || !config.enabled;
       for (const identity of this.store.all("SELECT id,principal_id FROM external_identities WHERE provider='github' AND status<>'revoked'")) {
+        const before = activeScopes(this.store, identity.principal_id);
         if (credentialsChanged) {
           this.store.run("UPDATE external_identities SET credentials=NULL,status='pending_verification' WHERE id=?", identity.id);
           this.store.run('DELETE FROM sessions WHERE identity_id=?', identity.id);
         }
         this.store.run("UPDATE scoped_grants SET expires_at=0 WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", identity.principal_id);
-        invalidate(this.store, identity.principal_id, 'github.login_configuration_changed');
+        invalidateIfLost(this.store, identity.principal_id, before, 'github.login_configuration_changed');
       }
       this.store.audit(user.id, config.enabled ? 'github_login.configured' : 'github_login.disabled', 'system');
     });

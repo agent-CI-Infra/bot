@@ -12,7 +12,7 @@ import { enqueueForwards } from '../external/forward.js';
 import { actionsWebhook } from '../actions/storage.js';
 import { archiveInstallationEvent, isInstallationControlEvent } from '../installations/archive.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
-import { invalidate } from '../identity/authorization.js';
+import { activeScopes, invalidate, invalidateIfLost } from '../identity/authorization.js';
 import { pruneRejectedArchive, rejectionHeaders, rejectionSummary } from './delivery-audit.js';
 
 export async function ingest(
@@ -93,8 +93,9 @@ export async function ingest(
     if (status === 200 && !duplicate && payload && (event === 'organization' && action === 'member_removed' || event === 'member' && action === 'removed')) {
       const subject = ((payload.membership as Json)?.user || payload.member || payload.user) as Json | undefined;
       for (const identity of store.all("SELECT * FROM external_identities WHERE provider='github' AND external_actor=? AND status='active'", String(subject?.id || ''))) {
-        store.run("UPDATE scoped_grants SET expires_at=? WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", Date.now(), identity.principal_id);
-        invalidate(store, identity.principal_id, 'github.membership_changed');
+        const before = activeScopes(store, identity.principal_id), now = Date.now();
+        store.run("UPDATE scoped_grants SET expires_at=? WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)", now, identity.principal_id, now);
+        invalidateIfLost(store, identity.principal_id, before, 'github.membership_changed');
       }
     }
     const sync = status === 200 && !!payload && (appControl

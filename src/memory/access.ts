@@ -88,11 +88,15 @@ export function memoryVisible(access: MemoryAccess, repo: string, data: any): bo
   try { authorize(access.actor, 'knowledge.write', { project_id: repo }); return true; } catch { return false; }
 }
 
-/** A resumed native transcript must not carry an earlier role/audience grant into a new assignment. */
+/**
+ * A resumed native transcript must not carry an earlier role/audience grant into a new assignment. The key is what decides
+ * visibility now: current read authority (without it the key is `unavailable:…`), role and audiences. It does not use the
+ * authorization revision, which rises only on lost authority and so would miss newly granted access (#521).
+ */
 export function memoryViewFence(store: Store, task: Row): string {
   try {
     const access = taskMemoryAccess(store, task); memoryAuthorize(access, task.repository_id);
     const entries = store.all('SELECT id,data FROM project_memories WHERE repository_id=? ORDER BY id', task.repository_id).map(r => [r.id, memoryAudience(JSON.parse(r.data))]);
-    return createHash('sha256').update(JSON.stringify([access.actor.principal_id, access.actor.tenant_id, access.actor.authorization_revision, access.role, entries])).digest('hex');
+    return createHash('sha256').update(JSON.stringify([access.actor.principal_id, access.actor.tenant_id, access.role, entries])).digest('hex');
   } catch (error) { return 'unavailable:' + ((error as any).code ?? 'memory_unavailable'); }
 }

@@ -77,29 +77,36 @@ export function identityStorage(store: Store): void {
     INSERT OR IGNORE INTO identity_cursors VALUES('installations',0);
     CREATE TRIGGER IF NOT EXISTS identity_user_insert AFTER INSERT ON users BEGIN
       INSERT OR IGNORE INTO principals(id,kind,user_id) VALUES(NEW.id,'human',NEW.id); END;
-    CREATE TRIGGER IF NOT EXISTS identity_user_change AFTER UPDATE OF active,role ON users BEGIN
-      UPDATE principals SET active=NEW.active,authorization_revision=authorization_revision+1 WHERE user_id=NEW.id;
-      INSERT INTO authorization_events(principal_id,reason,created_at) VALUES(NEW.id,'user.changed',unixepoch()*1000); END;
     CREATE TRIGGER IF NOT EXISTS identity_user_delete AFTER DELETE ON users BEGIN
       UPDATE principals SET active=0,authorization_revision=authorization_revision+1 WHERE user_id=OLD.id;
       UPDATE external_identities SET status='revoked',credentials=NULL WHERE principal_id=OLD.id;
       DELETE FROM scoped_grants WHERE principal_id=OLD.id; END;
   `);
-  for (const [table, field] of [['project_admin_assignments', 'repository_id'], ['project_admin_organizations', 'owner_id']] as const) {
-    for (const action of ['INSERT', 'DELETE'] as const) {
-      const row = action === 'DELETE' ? 'OLD' : 'NEW';
-      store.db.exec(`CREATE TRIGGER IF NOT EXISTS identity_${table}_${action} AFTER ${action} ON ${table} BEGIN
-        UPDATE principals SET authorization_revision=authorization_revision+1 WHERE user_id=${row}.user_id;
-        INSERT INTO authorization_events(principal_id,reason,created_at) VALUES(${row}.user_id,'delegation.changed',unixepoch()*1000);
-        ${action === 'DELETE' ? `DELETE FROM scoped_grants WHERE id='legacy:${field === 'owner_id' ? 'org' : 'repo'}:'||OLD.user_id||':'||OLD.${field};` : ''}
-      END;`);
-    }
-  }
+  // The authorization revision counts only lost authority (#521): disabling a user or removing the platform role raises it;
+  // enabling or promoting does not. Manual assignments are saved as whole lists, so saveGrants compares effective authority
+  // and their triggers only drop the matching legacy grant. Replaced on every start in one transaction: existing databases
+  // lose the older unconditional triggers, and processes starting together never see a missing or duplicate trigger.
+  store.transaction(() => store.db.exec(`
+    DROP TRIGGER IF EXISTS identity_user_change;
+    CREATE TRIGGER identity_user_change AFTER UPDATE OF active,role ON users BEGIN
+      UPDATE principals SET active=NEW.active,authorization_revision=authorization_revision+
+        (OLD.active=1 AND NEW.active<>1 OR OLD.role='super_admin' AND NEW.role<>'super_admin') WHERE user_id=NEW.id;
+      INSERT INTO authorization_events(principal_id,reason,created_at) SELECT NEW.id,'user.changed',unixepoch()*1000
+        WHERE OLD.active=1 AND NEW.active<>1 OR OLD.role='super_admin' AND NEW.role<>'super_admin'; END;
+    ${([['project_admin_assignments', 'repo', 'repository_id'], ['project_admin_organizations', 'org', 'owner_id']] as const).map(([table, kind, field]) => `
+    DROP TRIGGER IF EXISTS identity_${table}_INSERT;
+    DROP TRIGGER IF EXISTS identity_${table}_DELETE;
+    CREATE TRIGGER identity_${table}_DELETE AFTER DELETE ON ${table} BEGIN
+      DELETE FROM scoped_grants WHERE id='legacy:${kind}:'||OLD.user_id||':'||OLD.${field}; END;`).join('')}
+  `));
   const columns = store.all('PRAGMA table_info(sessions)');
-  for (const [name, type] of Object.entries({ authorization_revision: 'INTEGER', tenant_id: 'TEXT', identity_id: 'TEXT' }))
+  for (const [name, type] of Object.entries({ tenant_id: 'TEXT', identity_id: 'TEXT' }))
     if (!columns.some(c => c.name === name)) store.db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
   if (!store.all('PRAGMA table_info(bind_challenges)').some(c => c.name === 'verified_origin'))
     store.db.exec('ALTER TABLE bind_challenges ADD COLUMN verified_origin INTEGER NOT NULL DEFAULT 0');
+  // Why the latest GitHub permission check was uncertain: [{installation, code}], never a credential (#521).
+  if (!store.all('PRAGMA table_info(external_identities)').some(c => c.name === 'verification_issues'))
+    store.db.exec('ALTER TABLE external_identities ADD COLUMN verification_issues TEXT');
   store.transaction(() => {
     identityProjection(store);
     if (!store.get('SELECT 1 FROM identity_migrations WHERE version=1')) {

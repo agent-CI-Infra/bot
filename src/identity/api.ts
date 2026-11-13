@@ -1,7 +1,7 @@
 import type { Store } from '../storage/database.js';
 import { repository, superAdmin, type Actor } from '../app/auth.js';
 import { digest, fail, fields, randomId, text, type Json } from '../core/security.js';
-import { authorize, createProjectServicePrincipal, invalidate, listEffectiveScopes, migrationReport, refreshSessionRevision } from './authorization.js';
+import { activeScopes, authorize, createProjectServicePrincipal, invalidateIfLost, listEffectiveScopes, migrationReport } from './authorization.js';
 import { projectCapabilities, explicitDelegationCapabilities } from './storage.js';
 import { revokeIdentity } from './bindings.js';
 import { githubConnection } from './github-status.js';
@@ -90,7 +90,8 @@ export function identityApi(store: Store, user: Actor, token: string, method: st
       store.transaction(() => {
         store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
           VALUES(?,?,?,?,?,'delegated',?,'explicit_delegation',?,'independent','console delegation',?)`, id, principal, tenant, project || null, project ? 'project' : 'tenant', JSON.stringify(body.capabilities), context.principal_id, Date.now());
-        invalidate(store, principal, 'delegation.created'); store.audit(user.id, 'delegation.created', id, project || null);
+        // Added authority leaves the authorization revision alone (#521).
+        store.audit(user.id, 'delegation.created', id, project || null);
       }); return { grant_id: id };
     }
   }
@@ -101,10 +102,10 @@ export function identityApi(store: Store, user: Actor, token: string, method: st
     authorize(context, 'grants.manage', { tenant_id: grant.tenant_id, project_id: grant.project_id || undefined });
     if (grant.source !== 'explicit_delegation' || grant.policy === 'legacy') return fail(409, 'use_source_revocation');
     store.transaction(() => {
+      const before = activeScopes(store, grant.principal_id);
       store.run('UPDATE scoped_grants SET revoked_at=? WHERE id=?', Date.now(), grant.id);
-      invalidate(store, grant.principal_id, 'delegation.revoked'); store.audit(user.id, 'delegation.revoked', grant.id, grant.project_id);
+      invalidateIfLost(store, grant.principal_id, before, 'delegation.revoked'); store.audit(user.id, 'delegation.revoked', grant.id, grant.project_id);
     }); return { ok: true };
   }
   return undefined;
 }
-export { refreshSessionRevision };

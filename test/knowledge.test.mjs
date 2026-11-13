@@ -190,7 +190,8 @@ test('a project grant manager explicitly enables independent service review thro
   const grant=await manager('/api/identity/grants','POST',{principal_id:principal,tenant_id:'github.com:10',project_id:'101',capabilities:['knowledge.review']});
   assert.equal(grant.status,201,JSON.stringify(grant.value));
   const enabled=resolveServiceActor(s,principal);assert.ok(enabled.capabilities.includes('knowledge.review'));authorize(enabled,'knowledge.review');
-  assert.throws(()=>authorize(before,'knowledge.read'),/authorization_changed/);
+  // An added grant raises no authorization revision (#521): the earlier actor keeps working under the current grants.
+  authorize(before,'knowledge.read');authorize(before,'knowledge.review');
   assert.throws(()=>authorize(managerActor,'knowledge.review',{project_id:'101'}),/capability_forbidden/);
   assert.throws(()=>service().review('101',note.id,1,input),/memory_independent_review_required/);
   s.run("INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at) VALUES('observer','review-task','reviewer','{}','fixture','now')");

@@ -1,5 +1,5 @@
 import type { Store, Row } from '../storage/database.js';
-import { assertCurrent, authorize, invalidate, listEffectiveProjectAccess, narrowActor, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
+import { activeScopes, assertCurrent, authorize, invalidate, invalidateIfLost, listEffectiveProjectAccess, narrowActor, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { roleTaskCaller, taskSourceGuard, type TaskCaller } from '../tasks/management.js';
@@ -114,6 +114,7 @@ export class ChannelEmployees {
       assertCurrent(actor); const currentChat = this.chat(id); this.maintainer(grant, currentChat); this.member(currentChat, binding.external_actor, binding.external_tenant);
       if ((this.store.get('SELECT revision FROM channel_employee_grants WHERE chat_id=? AND project_id=?', id, project)?.revision ?? 0) !== input.expected_revision) fail(409, 'channel_revision_conflict');
       const tenant = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)!.tenant_id;
+      const before = previous ? activeScopes(this.store, grant.principal_id) : [];
       if (!previous) this.store.run("INSERT INTO principals(id,kind,project_id,tenant_id,maintenance) VALUES(?,'service',?,?,?)", grant.principal_id, project, tenant, 'channel:' + id);
       else this.store.run('UPDATE principals SET active=1,tenant_id=?,maintenance=? WHERE id=?', tenant, 'channel:' + id, grant.principal_id);
       this.store.run(`INSERT INTO channel_employee_grants VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
@@ -123,7 +124,7 @@ export class ChannelEmployees {
       this.store.run('DELETE FROM scoped_grants WHERE principal_id=?', grant.principal_id);
       this.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
         VALUES(?,?,?,?,'project','service',?,'explicit_delegation',?,'channel_employee',?,?)`, randomId(), grant.principal_id, tenant, project, grant.capabilities, actor.principal_id, 'channel:' + id, Date.now());
-      invalidate(this.store, grant.principal_id, 'channel_employee_configured');
+      invalidateIfLost(this.store, grant.principal_id, before, 'channel_employee_configured');
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', id);
       this.store.audit(actor.principal_id, 'channel.employee.configured', grant.id, project);
       return { id: grant.id, revision: grant.revision, enabled: true, conversation_id: id, principal_id: grant.principal_id };
