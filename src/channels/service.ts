@@ -270,9 +270,14 @@ export class ChannelService {
     if (previous) return { operation_id: previous.id, state: previous.state, duplicate: true };
     if (!c.enabled) fail(403, 'channel_connector_inactive');
     // Reading is independent of speaking. A delayed message still belongs in the local ledger.
-    const ambient=event.chat_type==='group'&&this.store.get(`SELECT 1 FROM channel_service_bindings b JOIN channel_chats h ON h.id=b.chat_id WHERE h.provider=? AND h.app_id=? AND h.installation_tenant=? AND h.chat_id=? AND b.enabled=1
-      AND (b.participation='all' OR (b.participation='questions' AND ?=1))`,event.provider,event.app_id,event.installation_tenant,event.chat_id,/[?？]\s*$/.test(event.content)?1:0);
+    const participation=event.chat_type==='group'?this.store.get(`SELECT b.participation FROM channel_service_bindings b JOIN channel_chats h ON h.id=b.chat_id WHERE h.provider=? AND h.app_id=? AND h.installation_tenant=? AND h.chat_id=? AND b.enabled=1`,
+      event.provider,event.app_id,event.installation_tenant,event.chat_id)?.participation as string|undefined:undefined;
+    const ambient=participation==='all'||participation==='questions'&&/[?？]\s*$/.test(event.content);
     const actionable = event.kind !== 'message' || (event.addressed||ambient) && event.sender_type === 'user' && Math.abs(Date.now() - event.created_at) <= 300_000;
+    // The processing indicator acknowledges a call: a private message, or a group message that @-mentions the bot, in every
+    // working mode. A group message without an @ never gets one, even when the assistant follows every message or every
+    // question or takes the message into a running turn, so the bot never marks people's conversation.
+    const indicates = event.kind === 'message' && actionable && (event.chat_type !== 'group' || !!event.addressed);
     const id = randomId(); let state = actionable ? 'queued' : 'completed', merged: Row | undefined;
     this.store.transaction(() => {
       this.store.run('INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,created_at) VALUES(?,?,?,?,?,?,?)',
@@ -283,9 +288,8 @@ export class ChannelService {
         this.store.run('UPDATE channel_inbox SET chat_ref=? WHERE id=?',chat.id,id);
         if(assistantMessage(event)&&this.turnMessages.merge(chat.id,this.store.get('SELECT * FROM channel_inbox WHERE id=?',id)!,!!actionable)){state='merged';merged=chat;}
       }
-      // Every message the assistant takes in shows the processing indicator, including one merged into a running turn
-      // whatever its participation; it goes once the turn's final answer is delivered (see ChannelReactions.wanted).
-      if ((actionable || state === 'merged') && event.kind === 'message')
+      // A merged message keeps its indicator until the turn's final answer is delivered (see ChannelReactions.wanted).
+      if (indicates)
         this.store.run("INSERT INTO channel_reactions(source_event,state) VALUES(?,'pending')", id);
       if (['audience_changed', 'bot_removed', 'chat_archived', 'uninstalled'].includes(event.kind)) {
         for (const chat of this.store.all(`SELECT id FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? ${event.chat_id ? 'AND chat_id=?' : ''}`,
