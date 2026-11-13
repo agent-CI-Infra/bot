@@ -29,6 +29,7 @@ test('split console pages still define their entry functions in source order', (
     'static/views.js': ['function openTask', 'function renderTimeline', 'function installedActions'],
     'static/channels.js': ['async function renderFeishuBindingsPage', 'async function channelSchedules', 'function channelLink'],
     'static/roles.js': ['function rolesConsole', 'function stagePolicyGraph'],
+    'static/settings.js': ['function settingsRoute', 'function installationDetail', 'function serviceRoleCreate'],
   };
   for (const [file, markers] of Object.entries(pages)) {
     const source = readConsoleScriptSync(file);
