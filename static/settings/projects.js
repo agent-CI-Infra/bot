@@ -24,7 +24,11 @@ async function globalProjectSettings(request, id) {
   for (const row of installed) {
     const item = element('article', '', 'channel-binding global-project-row'); item.dataset.key = row.id; item.dataset.repositoryId = row.id; item.append(element('strong', row.full_name));
     if (hidden) item.append(button('恢复', () => restoreInstalled(row, () => route()).catch(error), 'quiet'));
-    else item.append(...installedBadges(row), ...installedIntegration(null, row), projectListControls(row), installedActions(row, () => route()), consoleLink('#/projects/' + row.id + '/basic', '全局管理此项目', '启停、删除和公开可见性'));
+    else {
+      item.append(...installedBadges(row), ...installedIntegration(null, row), projectListControls(row), installedActions(row, () => route()));
+      // Only a started repository has a project page; one never started is started from its 启动 action above.
+      if (row.registered) item.append(consoleLink('#/projects/' + row.id + '/basic', '全局管理此项目', '启停、删除和公开可见性'));
+    }
     selection.append(item);
   }
   const prefix = '#/settings/projects/' + (hidden ? 'hidden.' : 'list.');

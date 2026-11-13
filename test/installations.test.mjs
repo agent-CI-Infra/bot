@@ -32,9 +32,12 @@ function verifiedScope(h, a, ...ids) {
 
 test('installed repositories are listed but only work after an administrator starts them, and can be disabled', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin), events = { 'X-GitHub-Event': 'installation_repositories' };
+  const answer = response => [response.status, response.value.error];
   assert.equal((await h.hook(a.path, a.secret, 'install-1', added(101, 202), events)).status, 200);
   let list = (await admin('/api/installations')).value.repositories;
   assert.deepEqual(list.map(r => [r.id, r.installed, r.registered, r.owner_login, r.installation_id]), [['101', true, false, 'fixture', '77'], ['202', true, false, 'fixture', '77']]);
+  // Not started means no project yet: a super administrator hears that, not an organization mismatch (it has no organization).
+  for (const path of ['/api/repositories/202', '/api/repositories/202/members']) assert.deepEqual(answer(await admin(path)), [404, 'repository_not_found']);
   const issue = (n) => ({ repository: { id: 101 }, action: 'opened', issue: { number: n, title: 'Review this', body: 'Review this' } });
   assert.equal((await h.hook(a.path, a.secret, 'before-start', issue(1))).value.tasks_created, 0);
   const shared = (await admin('/api/models', 'POST', { repository_id: null, api_url: 'https://model.invalid/v1', api_key: testPassword(), model_name: 'shared' })).value.model;
@@ -53,6 +56,8 @@ test('installed repositories are listed but only work after an administrator sta
   await admin('/api/users', 'POST', { username: 'member', password: memberPassword, repository_ids: ['101'] });
   await member('/api/auth/login', 'POST', { username: 'member', password: memberPassword });
   assert.equal((await member('/api/installations')).status, 403);
+  // Someone without the project is still refused before it is looked up, so the answer does not reveal whether it exists.
+  for (const id of ['202', '999']) assert.deepEqual(answer(await member('/api/repositories/' + id)), [403, 'repository_forbidden']);
 });
 
 test('repositories cannot be registered by hand; they come from installation sync and are started from the console', async t => {

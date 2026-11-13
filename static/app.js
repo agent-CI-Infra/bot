@@ -500,7 +500,10 @@ async function render(quiet = false) {
     if(tab==='projects'&&!hiddenView){line.classList.add('project-list-row');line.dataset.repositoryId=row.id;status.classList.add('project-overview');status.append(projectListControls(row));}
     if(taskTab&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
     if(status.childElementCount)line.append(status);
-    if(installedView){const actions=element('div','','actions'); actions.append(button('设置',()=>openProject(row.id),'quiet'));
+    // An installed repository that was never started has no project page yet; it offers 启动 instead of 设置.
+    if(installedView){const actions=element('div','','actions');
+      if(row.registered)actions.append(button('设置',()=>openProject(row.id),'quiet'));
+      else if(row.installed&&!hiddenView)actions.append(button('启动',()=>openActivation(row,()=>start()).catch(error),'quiet'));
       if(hiddenView)actions.append(button('恢复',()=>restoreInstalled(row,()=>start()).catch(error),'quiet'));
       if(actions.childElementCount)line.append(actions);}
     else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id),'quiet'));line.append(actions);}
