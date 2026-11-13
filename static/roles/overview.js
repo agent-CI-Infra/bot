@@ -35,7 +35,7 @@ function roleOverviewCards(state, redraw) {
     link.dataset.testid = 'role-list-' + role.role_id;
     tableCell(row, '角色', link);
     tableCell(row, '启用', roleCheck(role.role_id + ' 启用', role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind), redraw));
-    tableCell(row, '职责', note(role.responsibility || '未填写职责'));
+    const duty = note(role.responsibility || '未填写职责'); if (role.responsibility) duty.title = role.responsibility; tableCell(row, '职责', duty);
     const saved = data.configuration.roles.find(entry => entry.role_id === role.role_id);
     const status = note(roleListStatus(role, state, starting.get(role.role_id)));
     if (role.role_id === 'dev' && data.configured && saved?.entry_harness_source !== 'role' && saved?.harness_ref.id !== 'pi') status.append(element('span', '检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更', 'muted'));

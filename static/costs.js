@@ -107,7 +107,7 @@ async function loadCosts(version) {
   }
   body.append(chart);
   if(data.prices?.length){
-    const prices=element('section','','cost-breakdown'),table=costTable(['模型','币种','输入 / 百万 token','输出 / 百万 token','缓存命中 / 百万 token']);
+    const prices=element('section','','cost-breakdown cost-price-table'),table=costTable(['模型','币种','输入 / 百万 token','输出 / 百万 token','缓存命中 / 百万 token']);
     prices.append(element('h2','范围内已保存的单价'),element('p','按请求发生时的单价逐组列出；同一模型的多组单价分别展示。','cost-note'));
     for(const price of data.prices){const row=document.createElement('tr');row.append(element('td',price.model_name),element('td',price.currency),...['input_per_million','output_per_million','cache_per_million'].map(key=>element('td',Number(price[key]).toLocaleString('zh-CN',{maximumFractionDigits:20}))));table.body.append(row);}
     prices.append(table.wrap);body.append(prices);

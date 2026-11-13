@@ -6,3 +6,11 @@
 .statistics-task-summary.cost-table-scroll table{min-width:0}.statistics-task-summary td,.statistics-task-summary td:not(:first-child){white-space:normal}.statistics-task-summary th:first-child{width:30%}.statistics-task-summary th:nth-child(2){width:15%}
 @media(max-width:760px){.cost-filters{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding:12px}.cost-filters>label{min-width:0}.cost-filters>label:nth-child(4){grid-column:1/-1}.cost-filters input,.cost-filters select{font-size:13px;min-height:38px}.cost-summary,.cost-token-summary{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.cost-stat{padding:10px}.cost-stat strong{font-size:16px}.cost-body{padding:0 12px 12px}.cost-chart-section{padding:10px}.cost-table-scroll table{min-width:520px}.cost-note,.cost-incomplete,.cost-chart-detail{font-size:12px}}
 .storage-projects td:first-child{min-width:180px}
+
+/* #560: text left, numbers right; uniform row rhythm. */
+.cost-table-scroll th,.cost-table-scroll td{padding:var(--space-4) var(--space-5);vertical-align:middle;line-height:var(--line-height-body)}
+.cost-table-scroll th:not(:first-child),.cost-table-scroll td:not(:first-child){text-align:right;font-variant-numeric:tabular-nums}
+.cost-price-table th:nth-child(2),.cost-price-table td:nth-child(2){text-align:left;font-variant-numeric:normal}
+.statistics-undated th:nth-child(2),.statistics-undated td:nth-child(2){text-align:left;font-variant-numeric:normal}
+.statistics-task-summary th,.statistics-task-summary td{height:48px}
+.statistics-task-summary .statistics-task-count{display:inline-block;min-width:3ch;text-align:right}
