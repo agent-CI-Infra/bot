@@ -555,6 +555,21 @@ test('GET /api/identity names a plain GitHub connection state, the next step, an
   assert.equal(pending.repository_count, 0);
   assert.deepEqual(pending.pending_repositories, [{ id: '101', full_name: 'fixture/project-101' }]);
 
+  // A selected tenant must not list another organization's unstarted repositories.
+  const tenantSession = session(h.store, principal, identity);
+  const readWith = async (tenant) => {
+    h.store.run('UPDATE sessions SET tenant_id=? WHERE token_hash=?', tenant, digest(tenantSession.token));
+    const response = await fetch(h.admin + '/api/identity', { headers: { Cookie: 'bot_session=' + tenantSession.token } });
+    assert.equal(response.status, 200);
+    return (await response.json()).github_connection;
+  };
+  assert.deepEqual((await readWith('github.com:10')).pending_repositories, [{ id: '101', full_name: 'fixture/project-101' }]);
+  const otherTenant = await readWith('github.com:20');
+  assert.deepEqual(otherTenant.pending_repositories, []);
+  assert.notEqual(otherTenant.state, 'pending_activation');
+  h.store.run('UPDATE sessions SET tenant_id=NULL WHERE token_hash=?', digest(tenantSession.token));
+
+
   // Write/Maintain/Triage/Read never become management: the person is signed in, with no authorized repositories.
   // Restore a started project so membership checks have a target, then drop Admin.
   await repository(f.admin, f.a.id, '101');

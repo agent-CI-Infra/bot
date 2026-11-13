@@ -30,9 +30,11 @@ export function githubAppInstallUrl(store: Store): string | null {
   try { saved = JSON.parse(raw); } catch { return null; }
   return rewriteGithubAppInstallUrl(typeof saved.install_url === 'string' ? saved.install_url : '', typeof saved.slug === 'string' ? saved.slug : undefined);}
 
-/** Installed repositories this principal already administers, but that a platform administrator has not started. */
-export function pendingInstalledRepositories(store: Store, principal: string): GitHubRepositoryRef[] {
-  const active = listEffectiveScopes(store, principal).filter(g => g.source === 'github_derived' && g.state === 'active');
+/** Installed repositories this principal already administers, but that a platform administrator has not started.
+ *  When a tenant is selected, only grants of that tenant are considered, matching the project list. */
+export function pendingInstalledRepositories(store: Store, principal: string, tenantId?: string | null): GitHubRepositoryRef[] {
+  const active = listEffectiveScopes(store, principal).filter(g => g.source === 'github_derived' && g.state === 'active'
+    && (!tenantId || g.tenant_id === tenantId));
   const seen = new Map<string, GitHubRepositoryRef>();
   for (const grant of active) {
     const row = store.get('SELECT installation_ref,project_id FROM scoped_grants WHERE id=?', grant.grant_id);
@@ -47,10 +49,11 @@ export function pendingInstalledRepositories(store: Store, principal: string): G
   return [...seen.values()].sort(byName);
 }
 
-export function githubConnection(store: Store, principal: string): GitHubConnection {
+export function githubConnection(store: Store, principal: string, tenantId?: string | null): GitHubConnection {
   const repositories = listEffectiveProjectAccess(store, principal)
+    .filter(p => !tenantId || !!store.get('SELECT 1 FROM identity_projects WHERE project_id=? AND tenant_id=?', p.id, tenantId))
     .map(p => ({ id: p.id, full_name: p.full_name })).sort(byName);
-  const pending = pendingInstalledRepositories(store, principal);
+  const pending = pendingInstalledRepositories(store, principal, tenantId);
   const identity = store.get(`SELECT status,credentials FROM external_identities
     WHERE principal_id=? AND provider='github' AND status<>'revoked' ORDER BY verified_at DESC LIMIT 1`, principal);
   const scopes = listEffectiveScopes(store, principal);
