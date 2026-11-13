@@ -81,8 +81,13 @@ test('#555 项目、对话、身份页首屏各至多一个主按钮，次要筛
       await page.goto(h.admin + '/#/management');
       await expect(page.getByRole('heading', { name: '管理助手' }).first()).toBeVisible({ timeout: 15000 });
       await expect(page.getByRole('button', { name: '全屏显示管理助手' })).toBeVisible();
-      await expect(page.getByRole('button', { name: '发送', exact: true })).toBeVisible();
+      const send = page.getByRole('button', { name: '发送', exact: true });
+      await expect(send).toBeVisible();
       await expect(page.getByRole('button', { name: '新建会话' })).toBeVisible();
+      // #603: 发送 stays disabled until the chat history has been read (static/management.js
+      // updateBusy()), so wait for that settled state before comparing the enabled set. Reading
+      // the set while the history is still loading compares [] instead of ['发送'].
+      await expect(send).toBeEnabled({ timeout: 15000 });
       // 全屏 / 收起 / 新建会话 stay visible as quiet secondary controls so 收起 is never hidden.
       expect(await enabledPrimaries(page)).toEqual(['发送']);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
