@@ -28,7 +28,7 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-session-controls label { flex: 1; min-width: 0; gap: 4px; font-size: var(--font-size-micro); }
 .management-session-controls select { width: 100%; min-width: 0; font-size: var(--font-size-1); }
 .management-feed-wrap { position: relative; display: flex; flex: 1; min-height: 0; min-width: 0; }
-.management-feed { flex: 1; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; overflow-anchor: none; padding: 28px 20px 32px; background: #fcfdfd; }
+.management-feed { flex: 1; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; overflow-anchor: none; padding: 28px 20px 32px; background: #fcfdfd; scroll-padding-top: 24px; }
 .management-latest { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); padding: 7px 14px; border-radius: 20px; box-shadow: 0 3px 15px #123d4e18; white-space: nowrap; font-size: var(--font-size-1); }
 .management-welcome { display: flex; flex-direction: column; align-items: center; padding: 26px 0; text-align: center; color: var(--color-text); }
 .management-welcome-icon { display: grid; place-items: center; width: 54px; height: 54px; margin-bottom: 18px; border: 1px solid #d4e5e5; border-radius: 18px; background: #eef6f4; color: #2b7671; font-size: 32px; }
@@ -128,7 +128,7 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 /* A write is confirmed before it is sent (#355): the preview repeats the tool-section frame, so the pending command reads
    as one more step of 快捷操作, and long arguments wrap instead of widening the panel. */
 .management-command-preview-slot:empty { display: none; }
-.management-command-preview { display: grid; gap: 6px; padding: 12px; border: 1px solid #e2c98f; border-radius: 8px; background: #fffdf6; }
+.management-command-preview { display: grid; gap: 6px; padding: 12px; border: 1px solid #e2c98f; border-radius: 8px; background: #fffdf6; scroll-margin-top: 24px; }
 .management-command-preview h3 { margin: 0 0 4px; font-size: var(--font-size-2); }
 .management-command-preview .facts { margin: 0; }
 .management-command-preview .facts dd { white-space: pre-wrap; }
