@@ -1,7 +1,7 @@
 function machineSection(globalSettings = false) {
   const { environment } = current, pc = environment?.environment.computer, editable = me.role === 'super_admin' && !!pc;
   const status = element('div', '', 'status-grid computer-status-grid'); status.id = 'machine-status'; status.append(...machineStatus());
-  if (!pc) return [status, ...(globalSettings ? [] : [concurrencyForm()]), note('暂时读不到虚拟电脑规格。连接恢复后可重新读取本页配置；未保存改动请先保存。'),button('重新读取电脑配置',()=>reloadProject().catch(error))];
+  if (!pc) return [status, ...(globalSettings ? [] : [concurrencyPage()]), note('暂时读不到虚拟电脑规格。连接恢复后可重新读取本页配置；未保存改动请先保存。'),button('重新读取电脑配置',()=>reloadProject().catch(error))];
   const unread = !current.rules || current.rules.needs_refresh === true || !current.rules.sha;
   const effective=current.rules?.computer||pc, source=current.rules?.files.find(f=>f.path==='.bot/computer.yaml');
   const shown={...pc,...effective,network_policy:effective.egress===undefined?pc.network_policy:effective.egress?'internet egress':'internal, no egress'};
@@ -109,8 +109,18 @@ function machineSection(globalSettings = false) {
       dirty: () => form.settingDirty() || !!(concurrency && concurrency.settingDirty?.()),
       advanced: [reread],
     });
+  } else if (concurrency) {
+    // Project administrators (and super administrators while the computer spec is unread) cannot change the computer
+    // spec, but they may still change「同时运行的任务」: give that form the same bar on its own.
+    attachUnifiedSettingsBar(page, [concurrency]);
   }
   return [status, page];
+}
+// The concurrency form with its own save bar, for the page that cannot read the computer spec at all.
+function concurrencyPage() {
+  const concurrency = concurrencyForm(), page = element('div', '', 'machine-settings');
+  page.append(concurrency); attachUnifiedSettingsBar(page, [concurrency]);
+  return page;
 }
 // How many tasks this computer runs at once: the project's own value, or empty for the global default. Project
 // administrators change it too; it never rebuilds the computer.

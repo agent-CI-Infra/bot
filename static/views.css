@@ -420,7 +420,7 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .basic-advanced > .side-card, .project-danger-fold > .side-card { margin-top: 12px; }
 
 /* #567: one sticky save bar, one primary「保存」, plain status. */
-.console-save-bar { position: sticky; top: 0; z-index: 4; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 16px; padding: 12px; border: 1px solid var(--border, #d8dee9); background: var(--surface, #fff); }
+.console-save-bar { position: sticky; top: 0; z-index: 4; grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 16px; padding: 12px; border: 1px solid var(--border, #d8dee9); background: var(--surface, #fff); }
 .console-save-bar > [role=status], .console-save-bar > [role=alert] { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; }
 .console-save-bar > [role=alert]:empty { display: none; }
 .console-save-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

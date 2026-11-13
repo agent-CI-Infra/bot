@@ -90,7 +90,9 @@ test('an unread rule source prevents saving until an explicit read succeeds', as
     await login(page, f);
     await expect(page.locator('.machine-config-card')).toContainText('规则来源读取失败');
     await expect(page.getByLabel('CPU（核）', { exact: true })).toBeDisabled();
-    await expect(page.getByTestId('console-save')).toHaveCount(0);
+    // The computer spec has no save while unread; only「同时运行的任务」keeps its own (clean, so hidden) bar.
+    await expect(page.locator('.machine-config-card').getByRole('button', { name: '保存', exact: true })).toHaveCount(0);
+    await expect(consoleSave(page)).toBeHidden();
     await page.unroute('**/api/repositories/101/rules');
     await rereadMachine(page);
     await expect(page.getByLabel('CPU（核）', { exact: true })).toBeEnabled();
@@ -118,7 +120,8 @@ for (const width of [1440, 390]) test(`an unrefreshed default branch stays unkno
       expect(origin).toContain('来源暂未读取'); expect(origin).not.toContain('已保存来源');
     }
     await expect(page.getByLabel('CPU（核）', { exact: true })).toBeDisabled();
-    await expect(page.getByTestId('console-save')).toHaveCount(0);
+    await expect(form.getByRole('button', { name: '保存', exact: true })).toHaveCount(0);
+    await expect(consoleSave(page)).toBeHidden();
     await expect(read).toBeEnabled();
     await read.click(); await expect(form.getByRole('alert').filter({ hasText: 'fixture_refresh_unavailable' })).toBeVisible();
     await expect(page.getByLabel('CPU（核）', { exact: true })).toBeDisabled(); expect(refreshes).toBe(1); expect(configures).toBe(0);
