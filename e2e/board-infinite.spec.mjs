@@ -103,6 +103,33 @@ test('键盘滚动、列表视图与 390px 看板容器都能续页，末页后�
   } finally { await close(h); }
 });
 
+test('首次读取失败后，后台刷新成功会清掉失败提示并恢复数据', async ({ page }) => {
+  test.setTimeout(60000);
+  const h = await harness(), { admin, password } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101'); boardFixtures(h.store);
+  for (let i = 0; i < 130; i++) boardTask(h.store, `recover-${i}`, 100 + i, 'review.issue', 'succeeded');
+  let failOnce = true;
+  await page.route('**/api/board/cards?*', route => {
+    const offset = new URL(route.request().url()).searchParams.get('offset');
+    // Only the very first read fails: what arrives afterwards is a normal quiet refresh (boardPoll, every 15 s).
+    if (offset === '0' && failOnce) { failOnce = false; return route.fulfill({ status: 503, json: { error: 'temporary_unavailable' } }); }
+    return route.continue();
+  });
+  try {
+    await page.goto(h.admin + '/#/board');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    // A first read that failed with nothing on screen reports an unknown count, not zero.
+    await expect(page.locator('#board-status')).toContainText('工作数量未知，读取失败。');
+    // The quiet refresh is the only thing that can recover this without a click, so the stale failure text and the
+    // blocked paging must both be gone once it succeeds.
+    await expect(page.locator('#board-status')).toContainText('共 ', { timeout: 25000 });
+    await expect(page.locator('#board-status')).not.toContainText('读取失败');
+    await expect(page.locator('.board-card').first()).toBeVisible();
+  } finally { await close(h); }
+});
+
 test('续页失败只给一次性「重试」，没有自动退避重试', async ({ page }) => {
   const { h, offsets } = await fixture(page);
   try {
