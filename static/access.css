@@ -97,7 +97,9 @@
   .identity-feishu-page select { max-width: 100%; font-size: var(--font-size-touch); }
   .identity-layout :is(button, select), .onboarding-content :is(button, input, select) { min-height: var(--control-min); }
   .onboarding-content :is(input, select), .identity-layout select { font-size: var(--font-size-touch); }
-  .identity-scope-form { flex-direction: column; align-items: stretch; }
+  .identity-scope-form { flex-direction: column; align-items: flex-start; }
+  .identity-scope-form select { width: 100%; }
+  .identity-scope-form button { width: auto; max-width: calc(100% - 56px); align-self: flex-start; }
 }
 
 .identity-pending-repos { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 8px; }

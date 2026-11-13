@@ -115,8 +115,14 @@ body.console-ready.board-mode main { width: calc(100% - var(--console-rail)); pa
 body.console-ready.board-mode .console-location { flex: none; margin-bottom: 8px; }
 body.console-ready .management-page { left: var(--console-rail); }
 @media (min-width:768px) and (max-width:1439px) {
-  .console-groups { grid-template-columns: repeat(2, minmax(0,1fr)); gap: var(--space-6); }
+  .console-groups { grid-template-columns: repeat(2, minmax(0,1fr)); gap: var(--space-6); align-items: start; }
   body.console-ready main { padding-left: var(--space-6); padding-right: var(--space-6); }
+  /* One row of project section links: scroll sideways instead of wrapping onto a second row. */
+  #console-secondary-nav .project-nav {
+    flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
+  }
+  #console-secondary-nav .project-nav a,
+  #console-secondary-nav .project-nav .console-nav-label { flex: 0 0 auto; }
 }
 @media (max-width:1023px) and (min-width:768px) {
   :root { --console-rail: 192px; }
@@ -195,6 +201,44 @@ body.console-ready .management-page { left: var(--console-rail); }
    reserves the bar's height through scroll-padding-bottom, so typing never puts the field under it. */
 html { scroll-padding-bottom: calc(var(--console-mobile-height,0px) + 100px); }
 @media(max-width:767px) { .console-ready #paging { padding-right:96px; } }
+
+/* #562: 390 / 768 / 1440 layout sets. Mobile nav structure is unchanged (#481 / #496). */
+@media (max-width: 1439px) {
+  .role-nav {
+    flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
+    margin-bottom: var(--space-4); padding-bottom: var(--space-2);
+  }
+  .role-nav a { flex: 0 0 auto; white-space: nowrap; }
+}
+
+@media (max-width: 767px) {
+  .console-ready .management-launcher {
+    right: 12px;
+    bottom: calc(var(--console-mobile-height) + 8px);
+    width: var(--control-min);
+    height: var(--control-min);
+    min-height: var(--control-min);
+    min-width: var(--control-min);
+    padding: 0;
+    gap: 0;
+    border-radius: 50%;
+    justify-content: center;
+    z-index: 46;
+  }
+  .console-ready .management-launcher-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+  .console-ready .management-launcher-icon { width: 28px; height: 28px; font-size: 16px; }
+  .roles-page .role-save { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; }
+  .roles-page .role-save .muted, .roles-page .role-save [role=status], .roles-page .role-save .view-error { flex: 1 1 100%; margin: 0; }
+  .roles-page .role-save button { flex: 0 1 auto; width: auto; max-width: calc(100% - 56px); }
+  .console-ready .project-head { padding: 12px; }
+  .console-ready .project-head .actions { flex-shrink: 0; }
+  .console-groups { gap: var(--space-4); }
+  .console-group { padding: 12px; }
+  .console-group .console-link { padding: 8px 10px; min-height: var(--control-min); }
+}
+@media (min-width: 1440px) {
+  .settings-body .project-content, .console-ready .project-content { max-width: none; width: 100%; }
+}
 
 /* #481: on a phone one account control replaces the inline login, role and sign-out button; wide screens keep the
    header as it was, so this control exists only below the phone breakpoint. */
