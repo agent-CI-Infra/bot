@@ -90,8 +90,8 @@ test('tokens the module sheets read through shell.css keep their contract value'
 // the same on every page. New hard-coded values of those colours are a regression.
 const LEGACY_THEME = ['#637c89', '#5b7481', '#52707d', '#183142', '#16636b', '#f3f6f8', '#365564', '#13394b'];
 
-test('#551 style.css and access.css no longer hard-code the leftover teal theme', () => {
-  for (const name of ['style.css', 'access.css']) {
+test('#551 style.css, access.css, management.css and views.css no longer hard-code the leftover teal theme', () => {
+  for (const name of ['style.css', 'access.css', 'management.css', 'views.css']) {
     const source = read('static/' + name);
     for (const colour of LEGACY_THEME) {
       assert.equal(source.toLowerCase().includes(colour), false,
@@ -111,6 +111,31 @@ test('#551 page body, muted text and heading sizes in style.css and access.css u
   assert.match(access, /#access h1 \{[^}]*font-size:\s*var\(--font-size-5\)/);
   assert.match(access, /#access-form label \{[^}]*font-size:\s*var\(--font-size-2\)/);
   assert.match(access, /#access-description \{ color:\s*var\(--color-text-muted\)/);
+  assert.match(access, /\.identity-overview \.identity-connection-status \{ font-size:\s*var\(--font-size-4\)/);
+  assert.match(access, /\.identity-advanced > summary \{[^}]*font-size:\s*var\(--font-size-row\)/);
+});
+
+test('#551 management.css and views.css map heading, body and muted values onto shared tokens', () => {
+  const management = read('static/management.css');
+  assert.match(management, /\.management-window \{[^}]*color:\s*var\(--color-text\)/);
+  assert.match(management, /\.management-window-title h2 \{[^}]*font-size:\s*var\(--font-size-touch\)/);
+  assert.match(management, /\.management-window-title p \{[^}]*color:\s*var\(--color-text-muted\); font-size:\s*var\(--font-size-1\)/);
+  assert.match(management, /\.management-scope \.management-new-conversation \{ color:\s*var\(--color-brand\)/);
+  assert.match(management, /\.management-markdown \{ color:\s*var\(--color-text\)/);
+  assert.equal(management.includes('#183142'), false);
+  assert.equal(management.includes('#6d818a'), false);
+  assert.equal(management.includes('#16636b'), false);
+  const views = read('static/views.css');
+  assert.match(views, /\.timeline-panel h3,\.side-card h3\{[^}]*color:\s*var\(--color-text\)/);
+  assert.match(views, /\.step-meta\{[^}]*color:\s*var\(--color-text-muted\);font-size:\s*var\(--font-size-1\)/);
+  assert.match(views, /button\.linkish\{[^}]*color:\s*var\(--color-brand\)/);
+  assert.match(views, /\.choice\{[^}]*color:\s*var\(--color-text\)/);
+  assert.match(views, /pre\.command\{[^}]*background:\s*var\(--color-text\);color:\s*var\(--color-text-inverse\)/);
+  assert.equal(views.toLowerCase().includes('#637c89'), false);
+  assert.equal(views.toLowerCase().includes('#365564'), false);
+  assert.equal(views.toLowerCase().includes('#16636b'), false);
+  assert.equal(views.toLowerCase().includes('#13394b'), false);
+  assert.equal(views.toLowerCase().includes('#183142'), false);
 });
 
 const luminance = hex => {

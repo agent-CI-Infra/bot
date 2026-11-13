@@ -40,7 +40,7 @@
 
 ## 共用样式与组件
 
-`--color-*`、`--space-1..10`、`--radius-*`、`--font-size-*`、`--line-height-*`、`--control-min`、`--motion-*` 和 `--focus-ring*` 为公共变量，只在 `static/shell.css` 的 `:root` 中声明。颜色值遵循近白背景、深色文字、蓝色操作，琥珀表示关注、红色表示实际失败、绿色表示成功。模块样式（含 `style.css`、`access.css`）引用这些变量，不写第二套正文色、辅助色或字号。`--font-size-touch`（16px）是防止 iOS 聚焦输入时缩放的下限，不是字号阶梯中的一级。
+`--color-*`、`--space-1..10`、`--radius-*`、`--font-size-*`、`--line-height-*`、`--control-min`、`--motion-*` 和 `--focus-ring*` 为公共变量，只在 `static/shell.css` 的 `:root` 中声明。颜色值遵循近白背景、深色文字、蓝色操作，琥珀表示关注、红色表示实际失败、绿色表示成功。模块样式（含 `style.css`、`access.css`、`management.css`、`views.css`）引用这些变量，不写第二套正文色、辅助色或字号。`--font-size-touch`（16px）是防止 iOS 聚焦输入时缩放的下限，不是字号阶梯中的一级。
 
 `test/console-tokens.test.mjs` 同时检查变量声明与跨模块固定值。契约覆盖的模块样式新增公共变量引用时，在 `SHARED` 中登记 `static/shell.css` 的实际值，并运行主题契约测试；变量已声明并不代表其固定值已登记。
 
