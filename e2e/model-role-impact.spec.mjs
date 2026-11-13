@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openModelCatalog } from './open-model-folds.mjs';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
@@ -19,6 +20,7 @@ async function prepared(page, shared = false) {
     await page.goto(h.admin + (shared ? '/#/settings/models' : '/#/projects/101/model'));
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
+    if (!shared) await openModelCatalog(page);
     await expect(row(page)).toBeVisible(); return { h, admin, model };
   } catch (error) { await h.stop(); throw error; }
 }
@@ -77,7 +79,7 @@ test('missing metadata blocks deletion and a late detail cannot open a confirmat
     let entered; const seen = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
     await page.route(`**/api/models/${model.id}`, async route => { const response = await route.fetch(); entered(); await gate; await route.fulfill({ response }); });
     await row(page).getByRole('button', { name: '删除', exact: true }).click(); await seen;
-    await page.goto(h.admin + '/#/projects/202/model'); await expect(page.getByRole('heading', { name: '本项目专属模型', exact: true })).toBeVisible();
+    await page.goto(h.admin + '/#/projects/202/model'); await openModelCatalog(page); await expect(page.getByRole('heading', { name: '本项目专属模型', exact: true })).toBeVisible();
     release(); await expect(dialog(page)).toHaveCount(0);
   } finally { release?.(); await h.stop(); }
 });

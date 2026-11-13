@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openModelCatalog } from './open-model-folds.mjs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
@@ -28,6 +29,7 @@ test('a provider probe that never answers is reported as a timeout, not as an un
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
+    await openModelCatalog(page);
     const own = page.locator('.side-card').filter({ has: page.getByRole('heading', { name: '本项目专属模型', exact: true }) });
     await own.getByRole('button', { name: '编辑供应商', exact: true }).click();
     const editor = page.locator('#provider-edit');
