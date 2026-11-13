@@ -364,7 +364,7 @@ test('a disabled binding stops answering and history import; a bound service rol
   await f.setRole({ enabled: false }, custom.id);
   const paused = await post(h, f.id, groupMessage('还在吗？'));
   assert.equal((await done(f, paused)).state, 'failed');
-  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('可信 committer 助手」已停用')));
+  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('可信 committer 助手」已停用') && JSON.stringify(s.content).includes('个人设置 → 飞书绑定')));
   await f.setRole({ enabled: true }, custom.id);
   const disabled = await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { enabled: false, expected_revision: 1 });
   assert.equal(disabled.value.state, 'disabled');
@@ -373,7 +373,7 @@ test('a disabled binding stops answering and history import; a bound service rol
   assert.throws(() => f.service.syncGuard(h.store.get('SELECT * FROM channel_chats WHERE id=?', chat.id)), { code: 'channel_service_binding_disabled' });
   const before = f.requests.length, unbound = await post(h, f.id, groupMessage('你好'));
   assert.equal((await done(f, unbound)).state, 'completed'); assert.equal(f.requests.length, before);
-  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('本群尚未绑定群聊助手')));
+  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('本群尚未绑定群聊助手') && JSON.stringify(s.content).includes('个人设置 → 飞书绑定')));
   const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === custom.id);
   assert.equal((await f.admin('/api/service-roles/' + custom.id, 'DELETE', { expected_revision: role.revision })).status, 200);
   assert.equal((await f.admin('/api/channels/service-bindings')).value.bindings[0].service_role.name, null);

@@ -206,7 +206,7 @@ export class ChannelSchedules {
     else await this.group(row, chat, run, prompt, guard);
   }
   private frame(row: Row, prompt: string): string {
-    return `本条由本会话的定时任务「${row.name}」在 ${new Date(this.clock()).toLocaleString('zh-CN', { timeZone: row.timezone })}（${row.timezone}）触发，不是新发来的消息。请在当前权限内完成下面的任务并给出结果；如果任务说明允许在没有需要报告的内容时保持安静，而且确实没有，请只回复空内容。\n\n${prompt}`;
+    return `本条由本会话的定时任务「${row.name}」在 ${new Date(this.clock()).toLocaleString('zh-CN', { timeZone: row.timezone })}（${row.timezone}）触发，不是新发来的消息。请在当前权限内完成下面的任务并给出结果；如果任务说明允许在没有需要报告的内容时保持安静，而且确实没有，请调用 stay_silent 结束，不要回复任何文字。\n\n${prompt}`;
   }
   /** The owner's management assistant in a conversation of this timer, under the owner's current authority only. */
   private async personal(row: Row, chat: Row, run: string, prompt: string, guard: () => void): Promise<void> {
@@ -217,14 +217,15 @@ export class ChannelSchedules {
       conversation = String((management.create(actor, { scope: this.host.personalScope(actor) }).conversation as Json).id);
       this.store.run('UPDATE channel_schedules SET conversation_id=? WHERE id=?', conversation, row.id);
     }
-    const sent = management.send(actor, conversation, { content: this.frame(row, prompt), source_message: 'schedule:' + run });
+    const sent = management.send(actor, conversation, { content: this.frame(row, prompt), source_message: 'schedule:' + run }, { timer: true });
     this.store.run('UPDATE channel_schedule_runs SET message_id=? WHERE id=?', String(sent.id), run);
     await management.active.get(String(sent.id))?.work;
     guard();
     const message = this.store.get('SELECT * FROM management_messages WHERE id=?', String(sent.id))!;
     const answer = this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='reply' ORDER BY sequence DESC LIMIT 1", message.id);
     const operations = this.store.get('SELECT count(*) n FROM management_commands WHERE source_conversation=? AND source_message=?', conversation, message.source_message)!.n;
-    if (message.state === 'completed' && !operations && !String(answer ? JSON.parse(answer.data).text ?? '' : '').trim()) { this.finish(run, 'silent', null); return; }
+    const reply = answer ? JSON.parse(answer.data) : {};
+    if (message.state === 'completed' && !operations && (reply.silent || !String(reply.text ?? '').trim())) { this.finish(run, 'silent', null); return; }
     const error = this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='error' ORDER BY sequence DESC LIMIT 1", message.id);
     const outbox = this.host.post(chat, `定时任务「${row.name}」\n\n${this.host.personalReply(actor, message)}`, 'channel-schedule:' + run, 'schedule:' + run,
       { kind: 'channel_schedule', schedule_id: row.id, run_id: run, chat_id: chat.id, principal_id: actor.principal_id, authorization_revision: actor.authorization_revision });
@@ -246,7 +247,7 @@ export class ChannelSchedules {
       guard();
       this.store.transaction(()=>{
         let outbox: string | undefined;
-        if (!result.message.trim()) { this.finish(run, 'silent', null); }
+        if (result.silent || !result.message.trim()) { this.finish(run, 'silent', null); }
         else {
           outbox = this.host.post(chat, `定时任务「${row.name}」\n\n${result.message}`, 'channel-schedule:' + run, 'schedule:' + run, protection(result.id, result.fence));
           this.finish(run, 'completed', null, outbox);

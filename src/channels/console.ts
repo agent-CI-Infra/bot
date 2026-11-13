@@ -2,7 +2,7 @@ import type { ActorContext } from '../identity/authorization.js';
 import { assertCurrent, authorize } from '../identity/authorization.js';
 import { fail, HttpError, type Json } from '../core/security.js';
 import { traceClean } from '../tasks/trace.js';
-import type { Row } from '../storage/database.js';
+import type { Row, Store } from '../storage/database.js';
 import type { ChannelEvent } from './types.js';
 import type { ChannelService } from './service.js';
 import { chatProfile } from './profiles.js';
@@ -14,6 +14,12 @@ const pageOffset = (value: unknown): number => {
   const offset = Number(value ?? 0);
   if (!Number.isSafeInteger(offset) || offset < 0) fail(400, 'invalid_pagination');
   return offset;
+};
+// A group answer, and for a turn ended with stay_silent (#489) that it stayed silent on purpose and the model's reason.
+const serviceReply = (store: Store, turn: Row): Json => {
+  if (!turn.reply) return { reply: null };
+  const saved = store.secrets.open(turn.reply, 'service-turn-reply:' + turn.id);
+  return { reply: saved.message, ...(saved.silent ? { silent: true, silent_reason: String(saved.reason ?? '') } : {}) };
 };
 const denied = (error: unknown): boolean => error instanceof HttpError && error.status === 403 &&
   ['capability_forbidden', 'channel_history_forbidden', 'tenant_forbidden', 'external_binding_required', 'channel_employee_source_inactive'].includes(error.code);
@@ -118,7 +124,7 @@ export class ChannelConsole {
           role_id: roles.get(turn.service_role_id) ?? turn.service_role_id, can_stop: manageable && turn.state === 'running',
           messages: this.service.serviceSessions.messages(turn.id).map(m => ({ sequence: m.sequence, text: m.text, created_at: m.created_at })),
           incoming_messages: this.service.turnMessages.list(turn.id, senderName),
-          reply: turn.reply ? store.secrets.open(turn.reply, 'service-turn-reply:' + turn.id).message : null }
+          ...serviceReply(store, turn) }
         : { id: turn.id, source_message: turn.source_message, project_id: turn.project_id, role_id: turn.role_id, state: turn.state, error: turn.error,
           created_at: turn.created_at, updated_at: turn.updated_at, reply: turn.reply ? store.secrets.open(turn.reply, 'conversation-reply:' + turn.id).message : null }),
       has_more: turns.length > 50, next_offset: turns.length > 50 ? offset + 50 : null,
