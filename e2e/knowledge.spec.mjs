@@ -44,7 +44,7 @@ test('conflict comparisons preserve drafts and navigation asks before leaving un
     await exact(page,'← 返回目录').click();await expect(page.getByRole('dialog')).toBeVisible();await page.getByRole('dialog').getByRole('button',{name:'取消',exact:true}).click();await expect(page.getByLabel('内容',{exact:true})).toHaveValue('my unsaved draft');
     await f.admin(endpoint,'PUT',{content:'another writer',expected_revision:1});await exact(page,'保存文件').click();await expect(page.getByLabel('内容',{exact:true})).toHaveValue('my unsaved draft');await expect(page.locator('.knowledge-conflict')).toContainText('another writer');await expect(page.locator('.knowledge-status')).toContainText('草稿已保留');
     await exact(page,'基于 v2 保存草稿').click();await page.getByRole('dialog').getByRole('button',{name:'保存草稿',exact:true}).click();await expect(page.locator('.knowledge-content')).toContainText('my unsaved draft');expect((await f.admin(endpoint)).value.file.revision).toBe(3);
-    await exact(page,'编辑文件').click();await page.getByLabel('内容',{exact:true}).fill('kept after route return');await page.locator('#console-secondary-nav').getByRole('link',{name:'项目总览',exact:true}).click();await page.getByRole('dialog').getByRole('button',{name:'离开文件',exact:true}).click();await expect(page).toHaveURL(/\/overview$/);
+    await exact(page,'编辑文件').click();await page.getByLabel('内容',{exact:true}).fill('kept after route return');await page.getByTestId('project-hub-link').click();await page.getByRole('dialog').getByRole('button',{name:'离开文件',exact:true}).click();await expect(page).toHaveURL(/\/menu$/);
     await page.goto(f.h.admin+'/#/projects/101/knowledge');await expect(page.getByLabel('内容',{exact:true})).toHaveValue('kept after route return');expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });
@@ -65,7 +65,8 @@ test('late file content cannot redraw a different project section',async({page})
   try{
     await f.admin('/api/repositories/101/knowledge-files','POST',{name:'late.txt',content:'private delayed content'});await f.login();
     const gate=new Promise(resolve=>{release=resolve;});await page.route('**/api/repositories/101/knowledge-files/*',async route=>{await gate;await route.continue();});
-    await exact(page,'late.txt').click();await page.locator('#console-secondary-nav').getByRole('link',{name:'项目总览',exact:true}).click();await expect(page).toHaveURL(/\/overview$/);
+    await exact(page,'late.txt').click();await page.getByTestId('project-hub-link').click();await expect(page).toHaveURL(/\/menu$/);
+    await page.getByTestId('project-hub').getByRole('link', { name: '项目总览', exact: true }).click();await expect(page).toHaveURL(/\/overview$/);
     // Drain the delayed read before removing its backing project directory.
     const delayedResponse=page.waitForResponse(response=>response.url().includes('/api/repositories/101/knowledge-files/'));release();await(await delayedResponse).finished();
     await expect(page.locator('.workspace-overview')).toBeVisible();await expect(page.locator('.knowledge-workspace')).toHaveCount(0);await expect(page.getByText('private delayed content',{exact:true})).toHaveCount(0);expect(f.errors).toEqual([]);

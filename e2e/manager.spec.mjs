@@ -72,7 +72,7 @@ test('the Manager role edits its complete prompt and events, lists decisions and
     expect(h.store.get('SELECT state FROM dispatch_events WHERE id=?', failed.id).state).toBe('pending');
 
     // The models page lists every work type and the Manager's own dispatch model.
-    await page.locator('.project-nav').getByRole('link', { name: '模型', exact: true }).click();
+    await page.evaluate(() => { location.hash = '#/projects/101/model'; });
     await openModelOverrides(page);
     for (const kind of ['manager', 'review.issue', 'reply', 'actions.failures', 'gate.onboarding']) await expect(page.locator(`[data-task-kind="${kind}"]`)).toBeVisible();
 

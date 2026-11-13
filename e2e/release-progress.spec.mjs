@@ -19,7 +19,7 @@ test('a later workflow attempt cannot inherit a previous attempt success and sta
   const record=f.h.store.get('SELECT * FROM project_releases WHERE id=?',created.value.release.id),data=JSON.parse(record.data);data.ci_success={run_id:800,attempt:1};data.run_attempt=2;data.run={status:'in_progress',conclusion:null};f.h.store.run('UPDATE project_releases SET stage=\'running\',data=? WHERE id=?',JSON.stringify(data),record.id);
   await login(page,f);await expect(page.locator('.release-process')).toContainText('in_progress');await expect(page.locator('.release-process')).not.toContainText('attempt 1 已通过');
   const gate=new Promise(resolve=>{release=resolve;});await page.route('**/api/repositories/101/releases',async route=>{await gate;await route.fulfill({json:{releases:[{...data,id:record.id,version:'stale secret',stage:'running',target_sha:target}]}});});
-  await page.getByRole('button',{name:'刷新发布记录',exact:true}).click();await page.locator('#console-secondary-nav').getByRole('link',{name:'项目总览',exact:true}).click();release();await expect(page).toHaveURL(/\/overview$/);await expect(page.getByText('stale secret',{exact:true})).toHaveCount(0);
+  await page.getByRole('button',{name:'刷新发布记录',exact:true}).click();await page.getByTestId('project-hub-link').click();release();await expect(page).toHaveURL(/\/menu$/);await expect(page.getByText('stale secret',{exact:true})).toHaveCount(0);
  }finally{release?.();for(const close of cleanup.reverse())await close();}
 });
 

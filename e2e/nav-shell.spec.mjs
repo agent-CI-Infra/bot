@@ -19,17 +19,33 @@ test('项目导航只列真实页面，管理对话的深链不丢页，移动�
       await expect(page.locator('.workspace-overview')).toBeVisible();
     };
     await login();
-    const nav = page.locator('.project-nav'), current = nav.locator('[aria-current=page]');
+    const nav = page.getByRole('navigation', { name: '项目入口' }), current = nav.locator('[aria-current=page]');
+    const hub = () => page.getByTestId('project-hub');
+    const openHub = async () => {
+      const link = page.getByTestId('project-hub-link');
+      if (await link.count()) await link.click();
+      else await page.evaluate(() => { location.hash = '#/projects/101/menu'; });
+      await expect(hub()).toBeVisible();
+    };
+    await openHub();
     // Every entry named like a page must land on that page: the address it advertises keeps that section current.
+    // Neighbours are no longer listed on the leaf page itself (#565); they are reached from 项目入口.
     for (const caption of ['项目总览', '基本设置', '机器配置', '模型', '发版本', '计划与通知', '项目知识', '外部执行', '成员', '运行状态']) {
-      await nav.getByRole('link', { name: caption, exact: true }).click();
+      await openHub();
+      await hub().getByRole('link', { name: caption, exact: true }).click();
       await expect(current).toHaveText(caption);
       await expect(page).toHaveURL(new RegExp('#/projects/101/[a-z]+$'));
+      await expect(nav.getByRole('link', { name: '← 项目入口', exact: true })).toBeVisible();
+      // A leaf page does not expose the rest of the project sections at the same time.
+      await expect(nav.getByRole('link')).toHaveCount(2);
     }
     // 管理对话 is a chat, not a settings section: opening it keeps the settings page underneath.
-    await nav.getByRole('link', { name: '角色', exact: true }).click();
-    await nav.getByRole('link', { name: '管理对话', exact: true }).click();
+    await openHub();
+    await hub().getByRole('link', { name: '角色', exact: true }).click();
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
+    await page.getByTestId('project-open-chat').click();
+    await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
+    await expect(page.locator('#management-chat')).toBeVisible({ timeout: 15000 });
     // An older address for that chat must open the chat on a page that address still describes, not on 基本设置.
     await page.goto(h.admin + '/#/projects/101/management');
     await expect(page.locator('#management-chat')).toBeVisible({ timeout: 15000 });
@@ -52,16 +68,16 @@ test('项目导航只列真实页面，管理对话的深链不丢页，移动�
     await expect(page.locator('#console-mobile-nav')).toBeVisible();
     // Keyboard: Tab moves through the project entries in order and the focused entry draws a focus ring.
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(h.admin + '/#/projects/101/overview');
-    await expect(current).toHaveText('项目总览');
-    const first = nav.getByRole('link', { name: '项目总览', exact: true }), second = nav.getByRole('link', { name: '管理对话', exact: true });
+    await page.goto(h.admin + '/#/projects/101/menu');
+    await expect(hub()).toBeVisible();
+    const first = hub().getByRole('link', { name: '项目总览', exact: true }), second = hub().getByRole('link', { name: '管理对话', exact: true });
     await first.focus(); await page.keyboard.press('Tab');
     await expect(second).toBeFocused();
     await expect(second).toBeInViewport();
     const ring = await second.evaluate(node => { const s = getComputedStyle(node); return [s.outlineStyle, s.outlineWidth, s.boxShadow]; });
     expect(ring[0] !== 'none' && parseFloat(ring[1]) > 0 || ring[2] !== 'none').toBe(true);
     // Escape closes the floating chat and puts focus back on the entry that opened it.
-    await nav.getByRole('link', { name: '管理对话', exact: true }).click();
+    await second.click();
     await expect(page.locator('#management-chat')).toBeVisible();
     const message = page.getByLabel('管理消息', { exact: true });
     await expect(message).toBeVisible(); await message.focus();
