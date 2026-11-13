@@ -41,7 +41,7 @@ export function beginModelRequest(store: Store, task: Row, requestId: string, mo
 }
 /** `served: false` marks a request that failed before the provider returned any output (an error status, or no response
  * at all): providers do not charge for it, so a priced model records cost 0. Otherwise a request without usage keeps an
- * unknown cost, reported separately from known charges. Without this, one failed request would block a budget for good. */
+ * unknown cost, reported separately from known charges. Missing usage is never recorded as a known zero. */
 export function finishModelRequest(store: Store, id: string, usage: unknown, httpStatus: number | null, state='received', served=true): void {
   const row=store.get('SELECT * FROM model_requests WHERE id=?',id);if(!row||row.finished_at)return;
   const tokens=normalizeUsage(usage),input=tokens.input_tokens,output=tokens.output_tokens,cached=tokens.cached_input_tokens;
@@ -80,7 +80,7 @@ export function recordExternalModelRequest(store:Store,task:Row,runId:string,val
       input,input,output,output,cached,cached,value.finished?1:0,new Date().toISOString(),value.http_status??null,input??row.input_tokens,output??row.output_tokens,row.id);
     if(row.currency===null){const price=externalModelPricing(store,task,value.model);if(price)store.run('UPDATE model_requests SET currency=?,input_per_million=?,output_per_million=?,cache_per_million=?,model_name=? WHERE id=?',price.currency,price.input_per_million,price.output_per_million,price.cache_per_million,value.model,row.id);}
     // External receipts may be cumulative. Price the monotonic ledger totals, never charge each callback again.
-    store.run(`UPDATE model_requests SET cost=CASE WHEN currency IS NOT NULL AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL
+    store.run(`UPDATE model_requests SET cost=CASE WHEN currency IS NOT NULL AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND (cached_input_tokens IS NOT NULL OR input_per_million=cache_per_million)
       THEN ((input_tokens-coalesce(cached_input_tokens,0))*input_per_million+coalesce(cached_input_tokens,0)*cache_per_million+output_tokens*output_per_million)/1000000 ELSE NULL END WHERE id=?`,row.id);
     return row.id;
   });
