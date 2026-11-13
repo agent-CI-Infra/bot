@@ -31,7 +31,12 @@ test('a run environment is its own hardened container: no mounts, private tmpfs 
   assert.deepEqual([created.Config.User, host.ReadonlyRootfs, host.CapDrop, host.SecurityOpt, host.Privileged, host.NetworkMode, host.Mounts, host.Init], ['10001:10001', true, ['ALL'], ['no-new-privileges:true'], false, 'none', [], true]);
   assert.equal(host.Memory, host.MemorySwap, 'no swap beyond the memory limit');
   assert.ok(host.PidsLimit > 0 && host.NanoCpus > 0);
-  assert.match(host.Tmpfs['/workspace'], /size=\d+.*uid=10001/); assert.match(host.Tmpfs['/tmp'], /noexec.*size=\d+/);
+  assert.match(host.Tmpfs['/workspace'], /size=\d+.*uid=10001/);
+  for(const path of ['/workspace','/tmp']){
+    const options=host.Tmpfs[path].split(',');
+    for(const option of ['rw','exec','nosuid','nodev'])assert.ok(options.includes(option),`${path}: ${option}`);
+    assert.ok(!options.includes('noexec'));assert.match(host.Tmpfs[path],/size=\d+/);
+  }
   assert.deepEqual(created.Config.Env, ['HOME=/workspace/home', 'LANG=C.UTF-8']);
   assert.ok(!JSON.stringify(created).includes('project-secret-value') && !JSON.stringify(created).includes('docker.sock') && !JSON.stringify(created).includes('-notes'));
   assert.equal(created.Config.Labels['department.bot.kind'], 'run'); assert.equal(created.Config.Labels['department.bot.run'], run);
@@ -39,6 +44,10 @@ test('a run environment is its own hardened container: no mounts, private tmpfs 
   assert.ok(f.docker.containers.has(f.projects.names('101', 1).container));
   // The control plane's own check of these facts passes; the same call is idempotent.
   assert.deepEqual(verifyRunEnvironment(described, { run_id: run, network: 'none' }), { verified: true, violations: [] });
+  const checkNames=env_names=>verifyRunEnvironment({...described,container:{...described.container,env_names}},{run_id:run,network:'none'});
+  assert.equal(checkNames(['PATH','HOME','SSH_AUTH_SOCK','XAUTHORITY','DOCKER_VERSION','AWS_REGION','OPENAI_BASE_URL','BOT_LOG_LEVEL','PRIVATE_NETWORK','AUTH_SERVER','MAX_TOKENS']).verified,true);
+  for(const name of ['GITHUB_TOKEN','GH_TOKEN','AWS_SECRET_ACCESS_KEY','OPENAI_API_KEY','ANTHROPIC_API_KEY','NPM_TOKEN','BOT_PASSWORD','DOCKER_AUTHORIZATION','CREDENTIALS','custom_key','SERVICE_PASSWD'])
+    assert.deepEqual(checkNames(['HOME',name]).violations,['credential_environment:'+name]);
   assert.equal((await f.runs.create('101', spec(run))).run_id, run);
   await assert.rejects(f.runs.create('101', spec(run, { lease_epoch: 4 })), /run_id_conflict/);
   // An egress profile gets a bridge network of its own, never the project computer's.

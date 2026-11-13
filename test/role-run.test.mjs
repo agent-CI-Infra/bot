@@ -488,7 +488,7 @@ test('run environment facts are verified by the control plane; any shared mount,
   assert.deepEqual(bad({ mounts: [{ type: 'volume', source: 'dbot-x-101-g1-work', destination: '/workspace', rw: true }] }), ['external_mount']);
   assert.deepEqual(bad({ network_mode: 'dbot-x-101-g1-net' }), ['network_identity_shared']);
   assert.deepEqual(bad({ pid_mode: 'host' }), ['process_namespace_shared']);
-  assert.deepEqual(bad({ env_names: ['HOME', 'GITHUB_TOKEN'] }), ['credential_environment']);
+  assert.deepEqual(bad({ env_names: ['HOME', 'GITHUB_TOKEN'] }), ['credential_environment:GITHUB_TOKEN']);
   assert.deepEqual(bad({ cap_add: ['SYS_ADMIN'] }), ['capabilities_not_dropped']);
   assert.deepEqual(bad({ readonly_rootfs: false, memory_swap: 0 }), ['root_filesystem_writable', 'resource_limits_missing']);
 });

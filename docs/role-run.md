@@ -86,12 +86,14 @@ RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是�
 角色配置可选两个新的环境 profile：写者 `isolated-workspace`，观察者与 QA `isolated-candidate`。选中后，控制面经 manager 为这次运行创建一个容器（`POST /v1/projects/:id/runs`，`GET`/`DELETE …/runs/:run`，`POST …/runs/:run/execute`）：
 
 - 复用项目电脑的批准镜像和加固：uid 10001、只读根、丢弃全部 capability、`no-new-privileges`、init。
-- 整个 `/workspace`（含 HOME、git store、检出、缓存）和 `/tmp` 都是该容器自己的限额 tmpfs，随容器销毁；没有任何卷或 bind：不挂开发者工作区、项目笔记、宿主 HOME、Docker socket 或其他项目状态，因此也没有共享的可写依赖缓存。
+- 整个 `/workspace`（含 HOME、git store、检出、缓存）和 `/tmp` 都是该容器自己的限额 tmpfs，显式使用 `exec,nosuid,nodev`，允许直接执行编译产物和临时测试二进制，随容器销毁；没有任何卷或 bind：不挂开发者工作区、项目笔记、宿主 HOME、Docker socket 或其他项目状态，因此也没有共享的可写依赖缓存。
 - 网络默认 `none`（只有回环）；需要外网时是该 run 自己的 bridge 网络，不与项目电脑或其他 run 共享网络身份。
 - 限制 CPU、内存（不允许额外 swap）、进程数、tmpfs 大小和运行时限；命令不能超过时限，到期由 manager 删除，manager 重启时删除所有遗留的 run 容器。项目配置的环境变量不传入。
 - 操作只允许 allowlist 中的类型，且只能指向本 run 自己的 workspace id。
 
 固定候选通过 `git_export`（只含该提交的树与 blob）复制进 run 容器再检出并核对树哈希，而不是挂载开发者卷；开发者之后修改原工作区不会改变检视输入。观察者收集结果时若固定候选已变化，结果以 `candidate_changed` 拒绝，旧环境不能认证新内容。控制面用 `verifyRunEnvironment` 自行核对 manager 报告的检查结果（用户、只读根、capability、挂载、socket、网络、PID/IPC 命名空间、资源限制、凭据形状的环境变量名），任一不符即视为未验证并立即释放。
+
+镜像的环境变量名按 `TOKEN`、`SECRET`、`PASSWORD`、`KEY`、`CREDENTIALS` 等完整片段检查，而非仅凭 `GH_`、`AWS_`、`BOT_` 等前缀拒绝；`SSH_AUTH_SOCK`、`XAUTHORITY`、`DOCKER_VERSION` 可用。真实凭据名称（如 `GITHUB_TOKEN`、`AWS_SECRET_ACCESS_KEY`）仍拒绝，违规详情以 `credential_environment:<变量名>` 指出命中项，不包含变量值。
 
 这不是绝对安全保证：内核、Docker 守护进程和镜像本身仍在信任边界内；本地 `LocalManager` 没有容器，不提供 run 环境。
 

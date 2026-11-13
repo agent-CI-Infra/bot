@@ -22,7 +22,8 @@ export class RunEnvironmentClient {
   }
 }
 // Environment variable names an image may set; anything credential-shaped is a violation whatever its value.
-const credentialName = /(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE|CREDENTIAL|AUTH|^BOT_|^GH_|^GITHUB_|^AWS_|^OPENAI|^ANTHROPIC|^DOCKER_)/i;
+const safeEnvironmentNames = new Set(['SSH_AUTH_SOCK', 'XAUTHORITY', 'DOCKER_VERSION']);
+const credentialName = /(?:^|[^A-Z0-9])(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|KEY|CREDENTIALS?|AUTHORIZATION|COOKIE)(?:$|[^A-Z0-9])/i;
 /** Checks inspected facts against the isolation policy. Every violation is named; none is tolerated. */
 export function verifyRunEnvironment(facts: any, expected: { run_id: string; network: 'none' | 'egress' }) {
   const c = facts?.container, violations: string[] = [];
@@ -43,7 +44,8 @@ export function verifyRunEnvironment(facts: any, expected: { run_id: string; net
   if (c.ipc_mode && !['private', 'none'].includes(c.ipc_mode)) violations.push('ipc_namespace_shared');
   if (c.userns_mode === 'host') violations.push('user_namespace_host');
   if (!(c.memory > 0) || c.memory_swap !== c.memory || !(c.pids_limit > 0) || !(c.nano_cpus > 0)) violations.push('resource_limits_missing');
-  if (c.env_names?.some((name: string) => credentialName.test(name))) violations.push('credential_environment');
+  for (const name of c.env_names ?? [])
+    if (!safeEnvironmentNames.has(name.toUpperCase()) && credentialName.test(name)) violations.push('credential_environment:' + name);
   if (facts.run_id !== expected.run_id || facts.state !== 'ready' || !c.running) violations.push('not_this_run');
   return { verified: !violations.length, violations };
 }
