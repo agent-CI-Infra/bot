@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { identityFixture } from '../test/identity-fixture.mjs';
+import { openProjectDanger } from './open-basic-folds.mjs';
 
 // #226 项目设置 · 危险区: before disabling a project an administrator can see how much work is in flight
 // right now, and a failed count never degrades into "nothing is running".
@@ -20,6 +21,7 @@ test('the danger zone states how many tasks a disable would stop, and never repo
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
 
+    await openProjectDanger(page);
     const impact = page.locator('[data-project-danger-tasks]');
     await expect(impact).toBeVisible();
     await expect(impact).toContainText('当前 2 项任务在推进中');
