@@ -3,10 +3,9 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 
-// #559: title / filter / content / paging and card stacks share one 8-based rhythm.
+// #559: title / filter / content / paging and card stacks share one rhythm from the --space-* scale.
 const out = resolve('.tmp/section-spacing-559');
 const px = async (locator, prop) => locator.evaluate((el, p) => getComputedStyle(el)[p], prop);
-const isToken = (value, allowed) => allowed.includes(value);
 
 test('#559 项目、身份、更多功能、基本设置的区块间距来自同一套 token，1440 与 390 可对照', async ({ page }) => {
   test.setTimeout(90000);
@@ -72,5 +71,9 @@ test('#559 项目、身份、更多功能、基本设置的区块间距来自同
     await page.goto(h.admin + '/#/more');
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
     await page.screenshot({ path: `${out}/more-after-390.png`, fullPage: true });
+    await page.goto(h.admin + '/#/projects/101/basic');
+    await expect(page.locator('.project-content')).toBeVisible({ timeout: 10000 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    await page.screenshot({ path: `${out}/project-basic-after-390.png`, fullPage: true });
   } finally { await h.stop(); }
 });
