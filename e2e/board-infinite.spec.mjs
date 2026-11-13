@@ -85,18 +85,24 @@ test('键盘滚动、列表视图与 390px 看板容器都能续页，末页后�
     await expect.poll(() => continuations(offsets)).toEqual(['100']);
     // A phone has one column and the board container itself scrolls it. Switch while two pages still remain, so the
     // phone branch of boardScrollAreas() really continues instead of only finding the last page already loaded.
-    const scroll = page.locator('#board-columns');
+    const scroll = page.locator('#board-columns'), cards = page.locator('.board-card');
     await page.setViewportSize({ width: 390, height: 800 });
     await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
-    await expect.poll(async () => {
-      await scroll.evaluate(element => { element.scrollTop = element.scrollHeight; });
-      return continuations(offsets);
-    }).toEqual(['100', '200']);
+    // One reach of the phone container's end reads exactly one more page. The scroll must not repeat inside expect.poll:
+    // every attempt would then be a fresh reach of the end, so once page two is in the same attempt also reads page
+    // three, and whether the request is already counted when the list is read depends on the runner's timing.
+    const loaded = await cards.count();
+    await scroll.evaluate(element => { element.scrollTop = element.scrollHeight; });
+    await expect.poll(() => cards.count()).toBeGreaterThan(loaded);
+    // Nothing else is read until the reader scrolls again: a layout change is not a scroll.
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
+    expect(continuations(offsets)).toEqual(['100', '200']);
     // The list layout also scrolls the board container itself; its height settles a frame after the switch.
     await page.setViewportSize({ width: 1600, height: 900 });
     await page.getByRole('button', { name: '更多视图操作', exact: true }).click();
     await page.getByRole('button', { name: '切换为列表', exact: true }).click();
     await expect(page.locator('#board-columns')).toHaveClass(/board-list-layout/);
+    // This is the last page, so the repeated scroll below cannot read a fourth one.
     await expect.poll(async () => {
       await scroll.evaluate(element => { element.scrollTop = element.scrollHeight; });
       return continuations(offsets);
