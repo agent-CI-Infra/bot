@@ -248,7 +248,16 @@ async function renderManagementReceiptPage(id) {
       try { receipt = await load.promise; } finally { if (receiptLoading === load) receiptLoading = null; }
     }
   }
-  catch (err) { if (!page.hidden) content.replaceChildren(element('p', '读不到这条回执：' + err.message, 'view-error')); return; }
+  // #540: remember the id whose read failed, exactly as a completed render does. The console routes this address again
+  // by itself while the shell is still booting (#382); without the id that second route reads the receipt again and a
+  // success it did not have when the reader asked silently replaces the failure. Leaving the page clears the id and a
+  // reload is a new document, so a person who asks again still reads.
+  catch (err) {
+    if (page.hidden) return;
+    receiptShownId = id;
+    content.replaceChildren(element('p', '读不到这条回执：' + err.message, 'view-error'));
+    return;
+  }
   if (page.hidden) return;
   if (receipt.project_id) {
     const roles = element('a', '项目配置'); roles.href = '#/projects/' + receipt.project_id + '/roles';

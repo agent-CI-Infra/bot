@@ -137,3 +137,39 @@ test('the receipt card in the transcript links to that same receipt page', async
     expect(f.h.store.get('SELECT state FROM management_commands WHERE id=?', commandId).state).toBe('succeeded');
   } finally { await f.close(); }
 });
+
+test('a failed receipt read is not read again by the next automatic route', async ({ page }) => {
+  const f = await managementFixture();
+  try {
+    const receipt = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, {})).value;
+    const reads = [];
+    await page.route('**/api/management/commands/' + receipt.id, async route => {
+      reads.push(route.request().url());
+      // Only the reader's own read fails; a later read would succeed, which is exactly what must not happen by itself.
+      if (reads.length === 1) return route.fulfill({ status: 503, json: { error: 'temporary_unavailable' } });
+      return route.continue();
+    });
+    await login(page, f);
+    await page.evaluate(id => { location.hash = '#/management/commands/' + id; }, receipt.id);
+    const panel = page.locator('#management-receipt-page');
+    await expect(panel).toContainText('读不到这条回执');
+    expect(reads).toHaveLength(1);
+    // #540: the console routes the same address again on its own (#382). That route must neither read the receipt a second
+    // time nor replace the failure the reader is looking at with a success that was not there when they asked.
+    const routed = page.waitForRequest(request => new URL(request.url()).pathname === '/api/management/commands/' + receipt.id, { timeout: 4000 })
+      .then(() => true, () => false);
+    await page.evaluate(() => window.dispatchEvent(new HashChangeEvent('hashchange')));
+    expect(await routed).toBe(false);
+    await expect(panel).toContainText('读不到这条回执');
+    await expect(panel.getByRole('button')).toHaveCount(0);
+    expect(panel.locator('[data-receipt-state]')).toHaveCount(0);
+    expect(reads).toHaveLength(1);
+    // The id is only kept against the automatic route: a person who reloads the address asks again, and a read that now
+    // succeeds must still replace the failure. Every read after the first one is let through to the server.
+    await page.reload();
+    await expect(panel.locator('[data-receipt-state]')).toHaveText('已执行');
+    await expect(panel).not.toContainText('读不到这条回执');
+    expect(reads).toHaveLength(2);
+    await expect(panel.getByRole('button')).toHaveCount(0);
+  } finally { await f.close(); }
+});
