@@ -1,6 +1,11 @@
 function membersSection() {
-  const target = current, id = target.id, address = location.hash, section = card('项目成员与授权来源');
-  const live = () => current === target && location.hash === address && section.isConnected;
+  const target = current, id = target.id, address = location.hash;
+  const section = card('项目成员与授权来源');
+  const legacyHost = card('项目管理员分配');
+  legacyHost.hidden = true;
+  const wrap = element('div', '', 'members-layout');
+  wrap.append(section, legacyHost);
+  const live = () => current === target && location.hash === address && wrap.isConnected;
   let readVersion = 0;
   const load = async () => {
     const request = ++readVersion, isCurrent = () => live() && request === readVersion;
@@ -26,10 +31,16 @@ function membersSection() {
       list.append(row);
     }
     if (!data.grants.length) list.append(consoleState('没有本项目授权记录', '平台超级管理员仍可管理本项目。需要其他成员访问时，请由有转授权能力的管理员处理。'));
-    section.append(button('刷新成员权限', load, 'quiet'), list);
+    section.append(button('刷新成员权限', load, 'btn-text'), list);
     if (data.can_manage_legacy) {
-      const legacy = card('项目管理员分配'); section.append(legacy); await loadLegacy(legacy, isCurrent);
-    } else section.append(note('当前页面只展示授权。项目管理员不自动拥有 grants.manage，不能再转授权。'));
+      legacyHost.hidden = false;
+      legacyHost.replaceChildren(element('h3', '项目管理员分配'));
+      await loadLegacy(legacyHost, isCurrent);
+    } else {
+      legacyHost.hidden = true;
+      legacyHost.replaceChildren(element('h3', '项目管理员分配'));
+      section.append(note('当前页面只展示授权。项目管理员不自动拥有 grants.manage，不能再转授权。'));
+    }
   };
   const loadLegacy = async (container, isCurrent) => {
     try {
@@ -65,8 +76,8 @@ function membersSection() {
     add.append(select, button('添加', () => { const user = candidates.find(u => u.id === select.value); if (user) return update(user, [...assigned(user), id]); }));
     } catch (err) { if (isCurrent()) container.append(consoleState('项目分配读取失败', err.message, { tone: 'error', retry: () => { container.replaceChildren(element('h3', '项目管理员分配')); return loadLegacy(container, isCurrent); } })); }
   };
-  section.append(consoleState('正在读取项目授权', '按本项目范围核对有效授权和历史来源。'));
+  section.append(consoleState('正在读取项目授权', '按本项目范围核对有效授权和历史来源。', { tone: 'loading' }));
   void load();
-  return [section];
+  return [wrap];
 }
 

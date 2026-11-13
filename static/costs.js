@@ -60,8 +60,15 @@ async function renderCosts(request) {
 }
 async function loadCosts(version) {
   const request=++costRequest,owner=me.id,params=new URLSearchParams({from:costState.from,to:costState.to,currency:costState.currency,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone});if(costState.repository_id)params.set('repository_id',costState.repository_id);
-  $('cost-body').replaceChildren(element('p','正在加载统计…','muted'));
-  const data=await api('/api/costs?'+params);
+  $('cost-body').replaceChildren(consoleState('正在加载统计','正在按当前筛选读取用量。',{tone:'loading'}));
+  let data;
+  try { data=await api('/api/costs?'+params); }
+  catch (err) {
+    if(request!==costRequest||version!==renderVersion||me?.id!==owner||tab!=='costs')return;
+    $('count').textContent='读取失败';
+    $('cost-body').replaceChildren(consoleState('统计未能读取',(err.message||'请求失败')+'。这不是空结果，当前无法判断这个范围内是否有记录。',{tone:'error',retry:()=>loadCosts(version)}));
+    return;
+  }
   if(request!==costRequest||version!==renderVersion||me?.id!==owner||tab!=='costs')return;
   const body=$('cost-body');body.replaceChildren();$('count').textContent=`${data.from} 至 ${data.to} · 浏览器本地日期`;
   const summary=element('div','','cost-summary');
@@ -99,8 +106,8 @@ async function loadCosts(version) {
   }
   const projects=[...byProject.values()].sort((a,b)=>(costChartValue(b,tokenMode)||0)-(costChartValue(a,tokenMode)||0)||a.full_name.localeCompare(b.full_name));
   const chart=element('section','','cost-chart-section');chart.append(element('h2',tokenMode?'每日 token · 按项目堆叠':'每日费用 · 按项目堆叠'));
-  if(!data.summary.requests)chart.append(element('p','这个日期范围内没有模型请求记录。','cost-empty'));
-  else if(tokenMode&&costChartValue(data.summary,true)==null)chart.append(element('p','这些请求没有可靠的 token 记录，暂时无法绘制用量柱状图。','cost-empty'));
+  if(!data.summary.requests)chart.append(consoleState('没有模型请求记录','这个日期范围内没有模型请求记录。当前看到的是空结果，不是读取失败。'));
+  else if(tokenMode&&costChartValue(data.summary,true)==null)chart.append(consoleState('暂时无法绘制用量图','这些请求没有可靠的 token 记录，暂时无法绘制用量柱状图。'));
   else{
     if(tokenMode)chart.append(element('p','当前范围没有费用信息，按输入 + 输出 token 展示；缓存命中已包含在输入中，不重复相加。','cost-note'));
     costChart(chart,byDate,projects,data.currency,tokenMode);
@@ -146,7 +153,7 @@ function renderTaskStatistics(body,data) {
     entry.setAttribute('aria-label',`查看「${workflow.name}」的任务（${item?.count??0} 项）`);entry.title=`查看「${workflow.name}」的任务`;
     count.append(entry);row.append(element('td',workflow.name),count,element('td',taskStatisticsDuration(item)));summary.body.append(row);}
   section.append(summary.wrap);
-  if(!data.tasks.summary.length)section.append(element('p','这个日期范围内没有任务记录。','cost-empty'));
+  if(!data.tasks.summary.length)section.append(consoleState('没有任务记录','这个日期范围内没有任务记录。当前看到的是空结果，不是读取失败。'));
   const detail=element('details','','cost-breakdown'),daily=costTable(['日期（本地）',...workflows.flatMap(workflow=>[workflow.name+' · 数量',workflow.name+' · 耗时'])]);detail.append(element('summary','每日任务明细'));
   const days=new Map();
   for(const item of data.tasks.days){const day=days.get(item.date)||new Map(),total=day.get(statisticsKey(item))||{count:0,runtime_ms:null,incomplete_tasks:0,running_tasks:0};
@@ -193,7 +200,7 @@ async function statisticsTaskDrill(workflow,row,entry) {
       return;
     }
     if(version!==costRequest||!drill.isConnected)return;
-    if(!data.tasks.length){list.replaceChildren(element('p','没有该工作类型的任务。','cost-empty'));return;}
+    if(!data.tasks.length){list.replaceChildren(consoleState('没有该工作类型的任务','这个工作类型在当前范围内没有任务记录。'));return;}
     const total=data.summary?.all??data.tasks.length,heading=element('p',`「${workflow.name}」的任务：共 ${total} 项`+(total>data.tasks.length?`，这里列出最近 ${data.tasks.length} 项`:'')+'。','cost-note'),
       scope=element('p','这个列表按上方的项目范围列出该工作类型的全部任务；日期范围只限制上面的汇总，不限制任务列表，每一行的创建时间以本地日期显示。','cost-note'),
       table=costTable(['任务','项目','状态','创建时间']);

@@ -24,7 +24,7 @@ async function render(quiet = false) {
   $('rows').hidden=['external','board','costs','settings','identity','preferences'].includes(tab);$('external-panel').hidden=tab!=='external';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=!isIdentity;$('sync').hidden=true;$('hidden-filter-label').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = listParams();
-  $('rows').dataset.view=tab;if(!quiet){$('rows').replaceChildren();listSignature='';$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');}
+  $('rows').dataset.view=tab;if(!quiet){$('rows').replaceChildren(consoleState('正在加载列表','正在读取当前范围的记录。',{tone:'loading'}));listSignature='';$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');}
   if(tab==='board'){try{await renderBoard(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='costs'){try{await renderCosts(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(isIdentity){try{await renderIdentity();}finally{$('rows').removeAttribute('aria-busy');}return;}
@@ -51,7 +51,17 @@ async function render(quiet = false) {
   if (tab !== pageTab || consoleTabs.includes(tab)) return;
   const endpoint = taskTab ? 'tasks' : tab === 'projects' ? 'repositories' : tab;
   const address = tab === 'projects' ? projectListAddress(hiddenView, params) : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`;
-  let result;try{result=await api(address);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
+  let result;
+  try { result = await api(address); }
+  catch (err) {
+    if (request !== renderVersion) return;
+    $('rows').removeAttribute('aria-busy');
+    const heading = tab === 'projects' ? '项目列表未能读取' : tab === 'events' ? '投递记录未能读取' : '列表未能读取';
+    $('count').textContent = '读取失败';
+    $('rows').replaceChildren(consoleState(heading, (err.message || '请求失败') + '。这不是空列表，当前无法判断是否有记录。', { tone: 'error', retry: () => render().catch(error) }));
+    return;
+  }
+  finally { if (request === renderVersion) $('rows').removeAttribute('aria-busy'); }
   if(request!==renderVersion)return;const rows=result[installedView ? 'repositories' : endpoint];
   let pendingRepositories=[];
   let pendingRepositoriesError=null;
@@ -140,6 +150,14 @@ async function render(quiet = false) {
   if (tab === 'projects' && !installedView && !repositories.length && !rows.length && !pendingRepositories.length && !pendingRepositoriesError) {
     const empty = consoleState('已登录，尚无可管理的项目', '可以先查看身份与权限；安装待同步或权限待核验时，按身份页提示重新验证，或联系管理员分配项目。', { retry: () => start().catch(error) });
     empty.append(consoleLink('#/identity', '查看身份与权限')); $('rows').replaceChildren(empty);
+  } else if (tab === 'projects' && !rows.length && (hiddenView || installedView)) {
+    // Installed / hidden warehouse lists only. Do not replace a pending-activation
+    // group or a pending-read error that was just appended on the project list.
+    const empty = consoleState(
+      hiddenView ? '没有已隐藏的仓库' : '还没有仓库',
+      hiddenView ? '没有从项目列表中隐藏的仓库。当前看到的是空列表，不是读取失败。' : '安装 GitHub App 并启动仓库后，它们会出现在这里。当前看到的是空列表，不是读取失败。'
+    );
+    $('rows').replaceChildren(empty);
   }
   if(staleIntegrations)refreshStaleIntegrations();
   if(installedView&&!hiddenView&&rows.some(row=>row.permissions_stale))refreshStalePermissions();

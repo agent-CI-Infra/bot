@@ -52,7 +52,7 @@
 | `state()`、`badge()` | 复用状态字典和文字，不根据模型文本推断成功 |
 | `askConfirm()`、`confirmDialog()` | 共用危险操作说明、提交反馈、Escape 和焦点恢复 |
 | `consoleLink()` | 带可选说明的导航条目，用于更多页与公共导航 |
-| `consoleState()` | 加载、空、失败与可重试状态；失败使用 alert |
+| `consoleState(title, text, { tone, retry, retryLabel, retryId })` | 空、加载、失败共用同一组件（`.console-state`）。不传 `tone` 为空状态（`role=status`）；`tone: "loading"` 带 `aria-busy` 和旋转指示（遵循减少动画偏好）；`tone: "error"` 使用 `role=alert`，外观与空状态明显不同，不可被读成「没有数据」。可重试按钮默认为「重新加载」，可用 `retryLabel` / `retryId`（例如电脑状态的 `#computer-refresh`）。`data-testid` 为 `console-state-empty`、`console-state-loading` 或 `console-state-error`。|
 | `consoleGroups()` | 由当前项目和权限生成「更多」页入口（不重复底栏目的地）：超级管理员三组，项目管理员一组「设置」，供后续模块扩充 |
 | `syncConsoleShell()` | 登录、退出、路由完成与断点变化后同步外壳 |
 
