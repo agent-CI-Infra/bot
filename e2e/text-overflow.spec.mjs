@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 
-// #561: long titles and notes ellipsize; 390 keeps 退出登录 and 设置 visible; 1440 does not over-truncate medium names.
+// #561: long titles and notes ellipsize; 390 keeps 设置 visible and 退出登录 reachable in the #481 account menu; 1440 does not over-truncate medium names.
 const out = resolve('.tmp/text-overflow-561');
 
 /** After #514 the org-scope card lives inside a closed 高级／诊断 fold. Open it when present. */
@@ -44,38 +44,28 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(page.getByRole('button', { name: '退出登录' })).toBeVisible();
+    // After #481, 390 hides the inline 退出登录 and puts it in the account menu; the control itself must stay on-screen.
+    const accountBtn = page.locator('#console-account');
+    await expect(accountBtn).toBeVisible();
+    await accountBtn.click();
+    const accountMenu = page.locator('#console-account-menu');
+    await expect(accountMenu.getByRole('button', { name: '退出登录', exact: true })).toBeVisible();
+    await expect(accountMenu.locator('#console-account-role')).toHaveText('超级管理员');
+    await page.keyboard.press('Escape');
+    await expect(accountMenu).toBeHidden();
     await page.goto(h.admin + '/#/projects');
     await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
     await expect(page.locator('.project-list-row .row-title').filter({ hasText: longName })).toBeVisible();
 
     const header = await page.evaluate(() => {
-      const bar = document.querySelector('body > header');
-      const who = document.getElementById('who');
-      const logout = document.getElementById('logout');
-      const role = document.querySelector('.current-user-role');
-      const name = document.querySelector('.current-user-name');
-      const hb = bar.getBoundingClientRect(), wb = who.getBoundingClientRect(), lb = logout.getBoundingClientRect();
+      const account = document.getElementById('console-account');
+      const ab = account.getBoundingClientRect();
       return {
-        wrap: getComputedStyle(bar).flexWrap,
-        whoTitle: who.title,
-        nameEllipsis: getComputedStyle(name).textOverflow,
-        nameWrap: getComputedStyle(name).whiteSpace,
-        roleDisplay: role ? getComputedStyle(role).display : 'missing',
-        whoRight: wb.right, logoutLeft: lb.left, logoutRight: lb.right,
-        sameRow: Math.abs(wb.top - lb.top) < 16,
-        logoutVisible: lb.width > 0 && lb.right <= 390.5 && lb.bottom > 0 && lb.top >= 0,
+        accountVisible: ab.width > 0 && ab.height >= 44 && ab.right <= 390.5 && ab.top >= 0 && ab.bottom > 0,
         overflow: document.documentElement.scrollWidth,
       };
     });
-    expect(header.wrap).toBe('nowrap');
-    expect(header.nameEllipsis).toBe('ellipsis');
-    expect(header.nameWrap).toBe('nowrap');
-    expect(header.roleDisplay).toBe('none');
-    expect(header.whoTitle).toMatch(/超级管理员/);
-    expect(header.logoutVisible).toBe(true);
-    expect(header.whoRight).toBeLessThanOrEqual(header.logoutLeft + 1);
-    expect(header.sameRow).toBe(true);
+    expect(header.accountVisible).toBe(true);
     expect(header.overflow).toBe(390);
 
     const list = await page.evaluate((expected) => {
@@ -124,13 +114,13 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
         overlaps,
         clamp,
         btnVisible: bb.height > 0 && bb.width > 0,
-        logoutVisible: document.getElementById('logout').getBoundingClientRect().right <= 390.5,
+        accountRight: document.getElementById('console-account').getBoundingClientRect().right,
         overflow: document.documentElement.scrollWidth,
       };
     });
     expect(identity.overlaps).toBe(false);
     expect(identity.btnVisible).toBe(true);
-    expect(identity.logoutVisible).toBe(true);
+    expect(identity.accountRight).toBeLessThanOrEqual(390.5);
     expect(identity.overflow).toBe(390);
     expect(identity.clamp.some(v => v === '4')).toBeTruthy();
     await page.screenshot({ path: resolve(out, 'identity-390.png'), fullPage: true });
