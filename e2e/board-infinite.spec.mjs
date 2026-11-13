@@ -5,10 +5,10 @@ import { boardFixtures, boardTask } from '../test/board-fixtures.mjs';
 
 // #503: a board longer than one page continues by itself when the reader reaches the end of what is loaded,
 // and the permanent 「加载更多」 button is gone. 230 fixtures on top of the suite's own cards make three pages.
-async function fixture(page) {
+async function fixture(page, extra = 230) {
   const h = await harness(), { admin, password } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101'); await repository(admin, a.id, '202'); boardFixtures(h.store);
-  for (let i = 0; i < 230; i++) boardTask(h.store, `many-${i}`, 100 + i, 'review.issue', 'succeeded');
+  for (let i = 0; i < extra; i++) boardTask(h.store, `many-${i}`, 100 + i, 'review.issue', 'succeeded');
   const offsets = [];
   page.on('request', request => {
     const url = new URL(request.url());
@@ -74,7 +74,8 @@ test('继续滚动可读完全部三页，到末页后不再请求', async ({ pa
 });
 
 test('键盘滚动、列表视图与 390px 看板容器都能续页，末页后不再请求', async ({ page }) => {
-  const { h, offsets } = await fixture(page);
+  // Four pages of 100: every branch below must reach a page that is not loaded yet, otherwise it never asks.
+  const { h, offsets } = await fixture(page, 330);
   try {
     await page.getByRole('group', { name: '按…分列', exact: true }).locator('button[data-value="repository"]').click();
     // Keyboard scrolling reaches the same trigger as a pointer scroll.
@@ -82,24 +83,30 @@ test('键盘滚动、列表视图与 390px 看板容器都能续页，末页后�
     await list.evaluate(element => { element.tabIndex = 0; element.focus(); });
     await page.keyboard.press('End');
     await expect.poll(() => continuations(offsets)).toEqual(['100']);
-    // The list layout scrolls the board container itself; its height settles a frame after the switch.
+    // A phone has one column and the board container itself scrolls it. Switch while two pages still remain, so the
+    // phone branch of boardScrollAreas() really continues instead of only finding the last page already loaded.
+    const scroll = page.locator('#board-columns');
+    await page.setViewportSize({ width: 390, height: 800 });
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
+    await expect.poll(async () => {
+      await scroll.evaluate(element => { element.scrollTop = element.scrollHeight; });
+      return continuations(offsets);
+    }).toEqual(['100', '200']);
+    // The list layout also scrolls the board container itself; its height settles a frame after the switch.
+    await page.setViewportSize({ width: 1600, height: 900 });
     await page.getByRole('button', { name: '更多视图操作', exact: true }).click();
     await page.getByRole('button', { name: '切换为列表', exact: true }).click();
     await expect(page.locator('#board-columns')).toHaveClass(/board-list-layout/);
-    const scroll = page.locator('#board-columns');
     await expect.poll(async () => {
       await scroll.evaluate(element => { element.scrollTop = element.scrollHeight; });
-      return continuations(offsets).length;
-    }).toBe(2);
+      return continuations(offsets);
+    }).toEqual(['100', '200', '300']);
     await expect(page.locator('#board-status')).toContainText('已全部加载');
-    // A phone shows one column, and the board container itself scrolls it. The last page is already loaded, so reaching
-    // its end asks for nothing more and never leaves a permanent button behind.
-    await page.setViewportSize({ width: 390, height: 800 });
-    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
     await expect(page.getByRole('button', { name: '加载更多', exact: true })).toHaveCount(0);
+    // At the end of the data a further reach of the bottom asks for nothing.
     await scroll.evaluate(element => { element.scrollTop = element.scrollHeight; });
     await page.waitForTimeout(600);
-    expect(continuations(offsets)).toEqual(['100', '200']);
+    expect(continuations(offsets)).toEqual(['100', '200', '300']);
   } finally { await close(h); }
 });
 
