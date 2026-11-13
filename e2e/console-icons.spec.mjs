@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { harness, setup } from '../test/helpers.mjs';
+import { harness, setup, testPassword } from '../test/helpers.mjs';
 
 // #554: workspace navigation uses one linear SVG set; glyphs ⌂▤◷⋯ are gone,
 // and every entry keeps its visible text as the accessible name.
@@ -91,5 +91,30 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
       await stateIcon('.console-state-error', 'alert');
       await page.screenshot({ path: `${out}/state-error-${width}.png`, fullPage: true });
     }
+  } finally { await h.stop(); }
+});
+
+test('#554 项目管理员的桌面侧栏「更多功能」也用线性图标（1440）', async ({ browser }) => {
+  const h = await harness();
+  mkdirSync(out, { recursive: true });
+  try {
+    const { admin } = await setup(h);
+    const memberPassword = testPassword();
+    await admin('/api/users', 'POST', { username: 'member', password: memberPassword, role: 'project_admin', repository_ids: [] });
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } }), page = await context.newPage();
+    await page.goto(h.admin + '/#/projects');
+    await page.getByLabel('用户名', { exact: true }).fill('member');
+    await page.getByLabel('密码', { exact: true }).fill(memberPassword);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
+    await expect(page.locator('#who')).toContainText('项目管理员');
+    const more = page.locator('#console-sidebar #console-more-link');
+    await expect(more).toBeVisible();
+    await expect(more).toHaveAccessibleName('更多功能');
+    await expect(more.locator('svg.console-icon.console-icon-more')).toBeVisible();
+    expect(await page.locator('#console-sidebar').innerText()).not.toMatch(glyphs);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
+    await page.screenshot({ path: `${out}/projects-icons-project-admin-1440.png`, fullPage: true });
+    await context.close();
   } finally { await h.stop(); }
 });
