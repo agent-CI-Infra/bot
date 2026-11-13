@@ -65,24 +65,15 @@ body:not(.console-ready) main { flex: 1; display: flex; flex-direction: column; 
    so the 2-col layout has to target that box, not the details element itself. */
 .identity-layout > .identity-advanced[open] { grid-column: 1 / -1; }
 .identity-layout > .identity-advanced[open]::details-content {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-6);
   align-items: stretch;
-  gap: inherit;
   width: 100%;
-  box-sizing: border-box;
+  margin-top: var(--space-5);
 }
-.identity-layout > .identity-advanced[open] .side-card,
-.identity-layout > .identity-advanced[open]::details-content > .side-card {
-  flex: 1 1 calc((100% - var(--space-6)) / 2);
-  width: calc((100% - var(--space-6)) / 2);
-  max-width: calc((100% - var(--space-6)) / 2);
-  min-width: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
-}
+/* The cards are still DOM children of <details>; a selector cannot continue past ::details-content. */
+.identity-layout > .identity-advanced[open] > .side-card { min-width: 0; margin: 0; display: flex; flex-direction: column; }
 .identity-overview .facts { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
 .identity-overview .identity-connection-status { font-size: var(--font-size-4); font-weight: 600; line-height: 1.5; margin: 0 0 8px; }
 .identity-overview .identity-primary { margin-top: 4px; }
@@ -112,11 +103,7 @@ body:not(.console-ready) main { flex: 1; display: flex; flex-direction: column; 
   .onboarding-layout { grid-template-columns: minmax(0,1fr); gap: 16px; }
   #onboarding-panel .onboarding-progress { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .identity-layout { grid-template-columns: minmax(0,1fr); padding: var(--space-5); gap: var(--space-6); }
-  .identity-layout > .identity-advanced[open] > .side-card {
-    flex-basis: 100%;
-    width: 100%;
-    max-width: 100%;
-  }
+  .identity-layout > .identity-advanced[open]::details-content { grid-template-columns: minmax(0, 1fr); }
 }
 @media(max-width:767px) {
   #onboarding-panel { padding: 8px; }
