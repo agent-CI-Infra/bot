@@ -134,5 +134,13 @@ test('已登录但没有仓库时可以去 GitHub 选择仓库，接入向导接
     const status = await page.evaluate(async () => (await fetch('/api/onboarding')).status);
     expect(status).toBe(403);
     expect((await f.admin('/api/onboarding')).status).toBe(200);
+    mkdirSync('.tmp/ui-509', { recursive: true });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(go).toBeInViewport();
+    await page.screenshot({ path: '.tmp/ui-509/choose-repos-1440.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    await expect(go).toBeInViewport();
+    await page.screenshot({ path: '.tmp/ui-509/choose-repos-390.png', fullPage: true });
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
