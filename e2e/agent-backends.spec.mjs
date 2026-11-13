@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
+import { openRoleAdvanced } from './open-role-advanced.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 
 test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，未接入驱动明确显示', async ({ page }) => {
@@ -16,6 +17,7 @@ test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，�
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const roles = ['coordinator', 'manager', 'dev', 'test', 'reviewer', 'ux', 'qa'];
+    await openRoleAdvanced(page);
     for (const role of roles) {
       const picker = page.getByRole('combobox', { name: `${role} Agent 后端`, exact: true });
       await expect(picker).toHaveValue('pi');

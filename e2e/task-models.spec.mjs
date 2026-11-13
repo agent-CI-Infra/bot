@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
+import { openRoleAdvanced } from './open-role-advanced.mjs';
 import { RuleService } from '../dist/rules/service.js';
 
 test('角色详情查看规则来源，模型独立管理且项目不能修改共享模型', async ({ page }) => {
@@ -32,6 +33,7 @@ test('角色详情查看规则来源，模型独立管理且项目不能修改�
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
     await expect(page.getByRole('link', { name: '角色', exact: true })).toHaveAttribute('aria-current', 'page');
     for (const caption of ['使用的模型', '检视', '开发', '规则总览', '任务总览', '工作流']) await expect(page.getByRole('link', { name: caption, exact: true })).toHaveCount(0);
+    await openRoleAdvanced(page);
     await expect(page.getByRole('heading',{name:'角色概览',exact:true})).toBeVisible();
     await expect(page.locator('[data-work-type]')).toHaveCount(0);
     await page.locator('.role-nav').getByRole('link',{name:'Manager',exact:true}).click();

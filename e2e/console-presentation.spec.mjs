@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
+import { openRoleAdvanced } from './open-role-advanced.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 
 // A model the role previews can resolve; nothing here asks it anything.
@@ -30,6 +31,7 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const cardOf = title => page.locator('.side-card').filter({ has: page.getByRole('heading', { name: title, exact: true }) });
+    await openRoleAdvanced(page);
     await expect(cardOf('角色概览')).toBeVisible();
     const managerPicker=page.getByRole('combobox',{name:'manager Agent 后端',exact:true});
     await expect(managerPicker).toHaveValue('pi');
@@ -97,6 +99,7 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     // 6. Narrow screens stack the delegation lanes.
     await page.setViewportSize({ width: 390, height: 900 });
     await page.goto(h.admin + '/#/projects/101/roles');
+    await openRoleAdvanced(page);
     await expect(cardOf('角色概览')).toBeVisible();
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     await page.screenshot({ path: `${out}/roles-narrow.png`, fullPage: true });
