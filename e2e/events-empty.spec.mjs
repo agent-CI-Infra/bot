@@ -86,7 +86,7 @@ test('Webhook 投递空状态说明原因并给出下一步', async ({ page }) =
     await expect(memberEmpty).toContainText('Webhook 还没指向本部署');
     await expect(memberEmpty).toContainText('还没被管理员启动');
     await expect(memberEmpty.getByRole('link', { name: '查看身份与权限' })).toHaveAttribute('href', '#/identity');
-    await expect(memberEmpty).toContainText('联系超级管理员');
+    await expect(memberEmpty).toContainText('联系管理员');
     await expect(memberEmpty.getByRole('link', { name: '打开接入向导' })).toHaveCount(0);
     await expect(memberEmpty.getByRole('link', { name: '查看机器人账号' })).toHaveCount(0);
     await memberEmpty.getByRole('link', { name: '查看身份与权限' }).click();

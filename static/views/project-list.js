@@ -98,10 +98,9 @@ function syncSummary(syncs = []) {
   return syncs.map(s => s.error ? `${s.account_name} 同步失败（${s.error}）` : `${s.account_name} 同步于 ${timestamp(s.synced_at).slice(11, 19)}`).join(' · ');
 }
 function installedDetail(row) {
-  const parts = [row.owner_login || '所有者 ' + row.owner_id, row.private ? '私有' : '公开'];
-  if (row.account_name) parts.push(row.account_name + (row.installation_id ? ' 安装 ' + row.installation_id : ''));
-  parts.push('仓库 ID ' + row.id);
-  if (row.registered && !row.model_id) parts.push('未选模型');
+  const parts = [row.owner_login || '所有者', row.private ? '私有' : '公开'];
+  if (row.account_name) parts.push(row.account_name);
+  if (row.registered && !row.model_id) parts.push('还没有默认模型');
   return parts.join(' · ');
 }
 function installedBadges(row) {
@@ -235,7 +234,7 @@ const removalErrors = {
   tasks_still_stopping: '项目已禁用，但正在执行的任务还没停下；稍后再删除。',
   manager_unavailable: '虚拟电脑管理服务不可用，容器和网络没能去掉；项目已禁用，记录保留，稍后再删除。',
   repository_deleting: '这个项目正在删除。',
-  last_super_admin: '不能删除最后一名活跃的超级管理员。',
+  last_super_admin: '不能删除最后一名活跃的管理员。',
   account_has_projects: '还有项目使用这个账号，请先删除这些项目。',
   project_account_pending: '项目的虚拟电脑或门禁接入还有未完成的操作，稍后再删除。',
 };
@@ -286,7 +285,7 @@ function updateBoardChip(group, row) {
 }
 function installedIntegration(integration, row) {
   const gate = integration ? gateLabels[integration.gate_state] || gateLabels.unknown : null;
-  const chip = gate ? integrationChip(gate[0], gate[1], integration.gate_url, integration.gate_detail) : badge('门禁未检查', 'info');
+  const chip = gate ? integrationChip(gate[0], gate[1], integration.gate_url, integration.gate_detail) : badge('发布检查未完成', 'info');
   chip.dataset.integration = '';
   return row ? [chip, boardChip(row)] : [chip];
 }

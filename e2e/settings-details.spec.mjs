@@ -49,7 +49,7 @@ test('installation and user detail pages address one record and keep missing evi
     await expect(disable).toBeVisible();
     await disable.click();
     // The server refuses the only active super administrator; the page says why in words.
-    await expect(panel.locator('[role=alert]').last()).toContainText('最后一名活跃的超级管理员');
+    await expect(panel.locator('[role=alert]').last()).toContainText('最后一名可管理全部项目的活跃管理员');
     await expect(panel).toContainText('已启用');
 
     // Both detail pages stay readable on a phone: nothing overflows the 390px viewport.

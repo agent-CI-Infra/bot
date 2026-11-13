@@ -103,7 +103,7 @@ test('the boot state waits for setup and then opens initialization', async ({ pa
     await expect(page.locator('#access')).toBeHidden();
     release();
     await expect(page.locator('#boot')).toBeHidden();
-    await expect(page.getByRole('heading', { name: '创建第一名超级管理员', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '创建第一名管理员', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '初始化并登录', exact: true })).toBeVisible();
   } finally { release(); await h.stop(); }
 });

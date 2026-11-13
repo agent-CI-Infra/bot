@@ -21,7 +21,7 @@ test('GitHub 登录、组织切换、权限来源、撤销与本地恢复', asyn
     await expect(page.getByRole('button', { name: '全局设置', exact: true })).toBeHidden();
     const principal = f.h.store.get("SELECT principal_id FROM external_identities WHERE provider='github'").principal_id;
     await f.admin('/api/project-admin-assignments', 'PUT', { user_id: principal, repository_ids: ['101'] });
-    await page.reload(); await openIdentityAdvanced(page); await expect(page.locator('#identity-panel')).toContainText('显式委派');
+    await page.reload(); await openIdentityAdvanced(page); await expect(page.locator('#identity-panel')).toContainText('手动分配');
     await page.getByLabel('当前租户').selectOption('github.com:10');
     const switched = page.waitForResponse(r => r.url().includes('/api/identity') && r.request().method() === 'GET' && r.ok());
     await page.getByRole('button', { name: '切换组织' }).click();
@@ -38,7 +38,7 @@ test('GitHub 登录、组织切换、权限来源、撤销与本地恢复', asyn
     await reverified;
     await openIdentityAdvanced(page);
     await expect(page.locator('#identity-panel')).toContainText('已撤销');
-    await expect(page.locator('#identity-panel')).toContainText('显式委派');
+    await expect(page.locator('#identity-panel')).toContainText('手动分配');
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: resolve(output, 'revoked-mobile.png'), fullPage: true });
@@ -49,7 +49,7 @@ test('GitHub 登录、组织切换、权限来源、撤销与本地恢复', asyn
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click(); await consoleNavigate(page, '身份与权限');
     await openIdentityAdvanced(page);
-    await expect(page.locator('#identity-panel')).toContainText('平台超级管理员');
+    await expect(page.locator('#identity-panel')).toContainText('平台管理员');
     expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
@@ -83,7 +83,7 @@ test('GitHub 页头展示用户名与头像，旧会话和改名可刷新，窄�
     await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click();
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(who).toHaveText('administrator · 超级管理员'); await expect(who.locator('img')).toHaveCount(0);
+    await expect(who).toHaveText('administrator · 管理员'); await expect(who.locator('img')).toHaveCount(0);
     expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
@@ -101,7 +101,7 @@ test('绑定同一 GitHub 身份会显示冲突；本地会话可以完成新身
     await openIdentityAdvanced(page);
     await page.getByRole('button', { name: '绑定 GitHub 账号', exact: true }).click();
     await expect(page.locator('#identity-panel')).toContainText('已验证');
-    await expect(page.locator('#identity-panel')).toContainText('平台超级管理员');
+    await expect(page.locator('#identity-panel')).toContainText('平台管理员');
     await page.screenshot({ path: resolve(output, 'bound-local-account.png'), fullPage: true });
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
@@ -114,19 +114,19 @@ test('全局用户按实际项目显示 GitHub 继承与手工委派，编辑手
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const row = page.locator('#settings-panel .row').filter({ has: page.getByText('@administrator', { exact: true }) });
-    await expect(row).toContainText('当前可见项目（1）'); await expect(row).toContainText('fixture/project-101 · 可配置 · GitHub 继承权限');
+    await expect(row).toContainText('当前可见项目（1）'); await expect(row).toContainText('fixture/project-101 · 可配置 · 来自 GitHub');
     await expect(row).toContainText('手工分配：无'); await expect(row).not.toContainText('看不到任何项目'); await expect(row).not.toContainText('other/project-201');
     await row.getByRole('button', { name: '修改仓库权限', exact: true }).click();
     const editor = page.locator('#editor'), picker = editor.getByLabel('仓库权限');
     await expect(editor).toContainText('已验证的 GitHub 继承权限仍然有效');
     expect(await picker.evaluate(select => [...select.selectedOptions].map(o => o.value))).toEqual([]);
     await picker.selectOption([]); await editor.getByRole('button', { name: '保存', exact: true }).click();
-    await expect(row).toContainText('fixture/project-101 · 可配置 · GitHub 继承权限');
+    await expect(row).toContainText('fixture/project-101 · 可配置 · 来自 GitHub');
     await page.screenshot({ path: resolve(output, 'user-effective-access-desktop.png'), fullPage: true });
     await f.admin('/api/project-admin-assignments', 'PUT', { user_id: principal, repository_ids: ['201'] });
     f.h.store.run("UPDATE scoped_grants SET expires_at=0 WHERE principal_id=? AND source='github_derived'", principal);
     await page.reload(); await expect(row).toContainText('GitHub 权限待验证');
-    await expect(row).toContainText('other/project-201 · 可配置 · Bot 显式委派'); await expect(row).not.toContainText('fixture/project-101');
+    await expect(row).toContainText('other/project-201 · 可配置 · 手动分配'); await expect(row).not.toContainText('fixture/project-101');
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: resolve(output, 'user-effective-access-mobile.png'), fullPage: true });

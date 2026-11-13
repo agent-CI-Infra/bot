@@ -1,7 +1,7 @@
 // Why a user change was refused, in words instead of the bare server code.
 function userChangeMessage(err) {
   const code = err.code || String(err.message).replace(/^\d+\s*·\s*/, '');
-  if (code === 'last_super_admin') return '这是最后一名活跃的超级管理员，不能停用。先启用或新增另一名超级管理员。';
+  if (code === 'last_super_admin') return '这是最后一名可管理全部项目的活跃管理员，不能停用。先启用或新增另一名这样的管理员。';
   if (code === 'user_not_found') return '这个用户已经不存在，请刷新用户列表。';
   return err.message;
 }
@@ -23,10 +23,10 @@ function userDetail(id, users) {
     content.replaceChildren();
     if (notice) content.append(element('p', notice, 'view-success'));
     content.append(element('h4', userDisplayName(user)),
-      facts([['角色', user.role === 'super_admin' ? '超级管理员 · 管理全部项目' : '项目管理员'], ['状态', user.active ? '已启用' : '已停用'],
+      facts([['角色', user.role === 'super_admin' ? '管理员 · 可管理全部项目' : '项目管理员'], ['状态', user.active ? '已启用' : '已停用'],
         ['账号 ID', user.id], ['登录来源', user.github_login ? 'GitHub OAuth 已关联' : '本地账号']]));
     if (user.role === 'project_admin') content.append(...userAccessLines(user));
-    else content.append(note('超级管理员管理全部项目和全局设置，不需要逐个仓库授权。'));
+    else content.append(note('管理员可管理全部项目和全局设置，不需要逐个仓库授权。'));
     const toggle = button(user.active ? '停用' : '启用', async () => {
       toggle.disabled = true; message.className = 'view-error'; message.textContent = '';
       try {

@@ -325,7 +325,7 @@ test('ordinary users see connected bot names and private-chat links, confirm a p
     const local = await f.member('code-browser-user', {});
     await page.goto(f.h.admin + '/#/identity/feishu'); await login(page, f.h, local.password, 'code-browser-user');
     const identity = page.locator('#feishu-identity');
-    await expect(identity.getByText('暂无你可以使用的飞书应用。请联系超级管理员或本组织的管理员配置。', { exact: true })).toBeVisible();
+    await expect(identity.getByText('暂无你可以使用的飞书应用。请联系管理员配置。', { exact: true })).toBeVisible();
     await expect(identity.getByRole('link', { name: '连接或管理本组织的飞书应用' })).toHaveCount(0);
     await expect(identity.getByRole('link', { name: '管理员：连接或管理飞书应用' })).toHaveCount(0);
     await expect(identity.getByLabel('飞书认证字符串', { exact: true })).toHaveCount(0);

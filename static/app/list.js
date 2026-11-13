@@ -58,7 +58,7 @@ function eventsEmptyState(params) {
     empty.append(consoleLink('#/settings/accounts', '查看机器人账号', '核对 Webhook 入口和签名凭据'));
   } else {
     empty.append(consoleLink('#/identity', '查看身份与权限', '确认当前授权范围'));
-    empty.append(element('p', '若授权无误，请联系超级管理员检查 Webhook 是否指向本部署，以及相关仓库是否已启动。', 'muted'));
+    empty.append(element('p', '若授权无误，请联系管理员检查 Webhook 是否指向本部署，以及相关仓库是否已启动。', 'muted'));
   }
   return empty;
 }

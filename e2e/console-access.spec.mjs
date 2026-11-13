@@ -10,7 +10,7 @@ function shots(){mkdirSync('.tmp/console-access',{recursive:true});}
 test('first setup keeps one-time initialization and local recovery across screen sizes',async({page})=>{
   const h=await harness(),password=testPassword(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   try {
-    await page.goto(h.admin);await expect(page.getByRole('heading',{name:'创建第一名超级管理员',exact:true})).toBeVisible();
+    await page.goto(h.admin);await expect(page.getByRole('heading',{name:'创建第一名管理员',exact:true})).toBeVisible();
     await expect(page.getByRole('link',{name:'使用 GitHub 登录'})).toBeHidden();shots();
     for(const width of [320,390,768,1024,1440,1920]){
       await page.setViewportSize({width,height:900});await bounds(page);

@@ -86,8 +86,8 @@ test('project members show inherited and explicit sources, and removing a local 
     const created = await f.admin('/api/users', 'POST', { username: 'inherited-member', password, repository_ids: ['101'], organization_ids: ['10'] });
     const user = created.value.user;
     await login(page, f, '/#/projects/101/members');
-    await expect(page.locator('.project-member-list')).toContainText('组织显式委派（继承）');
-    await expect(page.locator('.project-member-list')).toContainText('项目显式委派');
+    await expect(page.locator('.project-member-list')).toContainText('来自组织授权（继承）');
+    await expect(page.locator('.project-member-list')).toContainText('本项目手动分配');
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: 900 });
       await page.evaluate(() => scrollTo(0, 0));
@@ -96,12 +96,12 @@ test('project members show inherited and explicit sources, and removing a local 
     }
     const assignment = page.locator('.history li').filter({ hasText: 'inherited-member' });
     await assignment.getByRole('button', { name: '移除', exact: true }).click();
-    const dialog = page.getByRole('dialog'); await expect(dialog).toContainText('组织继承');
+    const dialog = page.getByRole('dialog'); await expect(dialog).toContainText('来自组织和 GitHub 的权限');
     await dialog.getByRole('button', { name: '移除分配', exact: true }).click();
     await expect(assignment.getByRole('button', { name: '移除', exact: true })).toHaveCount(0);
     expect(f.h.store.get('SELECT 1 FROM project_admin_assignments WHERE user_id=? AND repository_id=?', user.id, '101')).toBeUndefined();
     expect(f.h.store.get('SELECT 1 FROM project_admin_organizations WHERE user_id=?', user.id)).toBeTruthy();
-    await expect(page.locator('.project-member-list')).toContainText('组织显式委派（继承）');
+    await expect(page.locator('.project-member-list')).toContainText('来自组织授权（继承）');
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });

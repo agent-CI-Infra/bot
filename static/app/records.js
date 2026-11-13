@@ -17,21 +17,21 @@ function userAccessLines(user) {
   const projects = user.access?.projects || [], lines = [element('p', projects.length ? `当前可见项目（${projects.length}）：` : '当前没有可访问的项目')];
   if (projects.length) {
     const list = element('ul', '', 'user-project-access');
-    for (const project of projects) list.append(element('li', `${project.full_name} · ${project.can_configure ? '可配置' : '可查看'} · ${project.sources.map(source => source === 'github_derived' ? 'GitHub 继承权限' : 'Bot 显式委派').join('、')}`));
+    for (const project of projects) list.append(element('li', `${project.full_name} · ${project.can_configure ? '可配置' : '可查看'} · ${project.sources.map(source => source === 'github_derived' ? '来自 GitHub' : '手动分配').join('、')}`));
     lines.push(list);
   }
   if (user.access?.github_pending) lines.push(element('p', 'GitHub 权限待验证，未计入当前可见项目；用户可在「身份与权限」重新验证。', 'warning'));
   lines.push(element('p', grantSummary(user))); return lines;
 }
 function userLine(row) {
-  return settingsRow(userDisplayName(row), `${row.role === 'super_admin' ? '超级管理员 · 管理全部项目' : '项目管理员'} · ID ${row.id}`, row.role === 'project_admin' ? userAccessLines(row) : [],
+  return settingsRow(userDisplayName(row), `${row.role === 'super_admin' ? '管理员 · 可管理全部项目' : '项目管理员'}`, row.role === 'project_admin' ? userAccessLines(row) : [],
     [element('span', row.active ? '已启用' : '已停用', 'status' + (row.active ? ' status-success' : ''))],
     [...(row.role === 'project_admin' ? [button('修改仓库权限', () => editGrants(row))] : []), button('删除', () => deleteUser(row).catch(error), 'quiet destructive')]);
 }
 async function deleteUser(row) {
   const self = row.id === me.id, kept = '仓库和组织授权、个人看板设置一并去掉，登录名可以重新使用；操作审计保留。';
   const deleted = await askConfirm({ title: self ? `删除你自己的账号 ${userDisplayName(row)}？` : `删除用户 ${userDisplayName(row)}？`, action: '删除', danger: true,
-    body: self ? ['只有还剩另一名活跃的超级管理员时才能删除。删除后当前会话立即失效，需要用其他超级管理员登录。', kept] : ['它的会话立即失效。', kept, '不能删除最后一名活跃的超级管理员。'],
+    body: self ? ['只有还剩另一名可管理全部项目的活跃管理员时才能删除。删除后当前会话立即失效，需要用另一名管理员登录。', kept] : ['它的会话立即失效。', kept, '不能删除最后一名可管理全部项目的活跃管理员。'],
     run: () => api('/api/users/' + encodeURIComponent(row.id), 'DELETE', { confirm: true }).catch(err => { throw new Error(removalMessage(err)); }) });
   if (!deleted) return;
   // The session ended with the user; show the login page without calling logout.
