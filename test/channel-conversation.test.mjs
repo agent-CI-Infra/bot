@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { channelFixture, inGroup, envelope, post, until } from './channel-fixture.mjs';
 import { roleApi } from '../dist/roles/api.js';
 import { resolvePrincipalActor } from '../dist/identity/authorization.js';
+import { HttpError } from '../dist/core/security.js';
+import { roleInstance } from '../dist/roles/run.js';
 import { TaskCommands } from '../dist/tasks/commands.js';
 
 // A group is served by the service role bound to it (#312); a private chat is the personal management assistant.
@@ -259,4 +261,86 @@ test('cleanup during an in-flight model erases derived content and cannot restor
   assert.equal(request.request_snapshot,null);assert.ok(!String(request.response_snapshot).includes('Old erased response'));assert.equal(request.input_tokens,12);
   assert.equal(f.h.store.get('SELECT reply FROM channel_service_turns').reply,null);
   assert.ok(!JSON.stringify(f.wire.sent).includes('Old erased response'));
+});
+
+
+for (const serviceTask of [false, true]) {
+  async function resultsFixture(t) {
+    const f=await fixture(t),first=await legacyTask(f,'First result');
+    const caller=f.service.employees.caller(f.chat.id,'101',first.receipt.value.operation_id);
+    const second=new TaskCommands(f.h.store).tool(caller,'create_task',{request:'Second result',criteria:['Return the verified report'],execute:false});
+    // Drive delivery ticks explicitly so the retry clock and cursor assertions do not race the service timer.
+    clearInterval(f.service.timer);clearInterval(f.service.syncTimer);await until(()=>!f.service.busy);
+    if(serviceTask){
+      const binding=f.service.serviceBindings.get(f.chat.id);
+      for(const task of [first.task,second])f.h.store.run('INSERT INTO channel_service_tasks VALUES(?,?,?,?,?,?)',task.id,binding.id,f.chat.id,first.receipt.value.operation_id,'fixture-command',Date.now());
+    }
+    for(const [task,summary] of [[first.task,'FIRST_RESULT_CONTENT'],[second,'SECOND_RESULT_CONTENT']])
+      f.h.store.run("UPDATE tasks SET status='completed',result=? WHERE id=?",JSON.stringify({summary}),task.id);
+    return {...f,first:first.task,second};
+  }
+  test(`result queue retries a transient failure without blocking later results (service=${serviceTask})`,async t=>{
+    const f=await resultsFixture(t),authority=f.service.resultAuthority.bind(f.service);let blocked=true;
+    f.service.resultAuthority=task=>{if(blocked&&task.id===f.first.id)throw new HttpError(503,'fixture_authority_temporarily_unavailable');return authority(task);};
+    await f.service.tick();
+    assert.equal(f.h.store.get('SELECT sequence FROM channel_result_cursor').sequence,0);
+    assert.equal(f.h.store.get('SELECT state FROM channel_task_results WHERE task_id=?',f.first.id).state,'pending');
+    await f.service.tick();assert.ok(JSON.stringify(f.wire.sent).includes('SECOND_RESULT_CONTENT'));assert.ok(!JSON.stringify(f.wire.sent).includes('FIRST_RESULT_CONTENT'));
+    const trace=f.h.store.get("SELECT data FROM task_history WHERE task_id=? AND type='channel_result_delivery'",f.first.id);
+    assert.equal(JSON.parse(trace.data).error_code,'fixture_authority_temporarily_unavailable');assert.equal(JSON.parse(trace.data).channel,f.chat.id);
+    blocked=false;f.h.store.run('UPDATE channel_task_results SET next_attempt=0');
+    await f.service.tick();await f.service.tick();
+    assert.equal(f.wire.sent.filter(s=>JSON.stringify(s.content).includes('FIRST_RESULT_CONTENT')).length,1);
+    assert.equal(f.wire.sent.filter(s=>JSON.stringify(s.content).includes('SECOND_RESULT_CONTENT')).length,1);
+    assert.equal(f.h.store.get('SELECT sequence FROM channel_result_cursor').sequence,f.h.store.get('SELECT max(id) n FROM channel_task_results').n);
+  });
+  test(`result delivery keeps retrying HTTP failures and preserves the cursor until confirmed (service=${serviceTask})`,async t=>{
+    const f=await resultsFixture(t);let failure='rate';
+    f.wire.state.sendHandler=(_url,_init,request)=>{
+      if(!failure||!request.content.includes('FIRST_RESULT_CONTENT'))return;
+      if(failure==='network')throw new TypeError('fixture connection reset before sending');
+      return Response.json({code:999,msg:'retry later'},{status:failure==='rate'?429:503});
+    };
+    await f.service.tick();await f.service.tick();
+    const pending=f.h.store.get("SELECT * FROM channel_outbox WHERE idempotency_key LIKE ? AND state='retry'",serviceTask?'service-task-result:%':'task-result:%');assert.ok(pending);
+    assert.equal(f.h.store.get('SELECT sequence FROM channel_result_cursor').sequence,0);
+    assert.ok(JSON.stringify(f.wire.sent).includes('SECOND_RESULT_CONTENT'));
+    f.h.store.run('UPDATE channel_outbox SET attempts=9,next_attempt=0 WHERE id=?',pending.id);
+    for(const problem of ['server','network']){
+      failure=problem;f.h.store.run('UPDATE channel_outbox SET next_attempt=0 WHERE id=?',pending.id);
+      await f.service.tick();assert.equal(f.h.store.get('SELECT state FROM channel_outbox WHERE id=?',pending.id).state,'retry','result retries survive the ordinary outbox retry cap: '+problem);
+    }
+    failure='';f.h.store.run('UPDATE channel_outbox SET next_attempt=0 WHERE id=?',pending.id);
+    await f.service.tick();await f.service.tick();
+    assert.equal(f.wire.sent.filter(s=>JSON.stringify(s.content).includes('FIRST_RESULT_CONTENT')).length,1);
+    assert.equal(f.h.store.get('SELECT sequence FROM channel_result_cursor').sequence,f.h.store.get('SELECT max(id) n FROM channel_task_results').n);
+    const traces=f.h.store.all("SELECT data FROM task_history WHERE task_id=? AND type='channel_result_delivery'",f.first.id).map(r=>JSON.parse(r.data));
+    assert.ok(traces.some(r=>r.phase==='delivery'&&r.state==='retry'&&r.error_code));
+  });
+  test(`real authority withdrawal records why the result was withheld and advances the cursor (service=${serviceTask})`,async t=>{
+    const f=await resultsFixture(t),task=f.h.store.get('SELECT * FROM tasks WHERE id=?',f.first.id),instance=roleInstance(f.h.store,task,'reviewer');
+    f.h.store.run('UPDATE role_instances SET source_fence=? WHERE id=?','withdrawn-fixture-fence',instance.id);
+    await f.service.tick();await f.service.tick();
+    assert.ok(!JSON.stringify(f.wire.sent).includes('FIRST_RESULT_CONTENT'));assert.ok(JSON.stringify(f.wire.sent).includes('SECOND_RESULT_CONTENT'));
+    assert.equal(f.h.store.get('SELECT state FROM channel_task_results WHERE task_id=?',f.first.id).state,'suppressed');
+    const trace=f.h.store.all("SELECT data FROM task_history WHERE task_id=? AND type='channel_result_delivery'",f.first.id).map(r=>JSON.parse(r.data));
+    assert.ok(trace.some(r=>r.error_code==='task_result_authority_changed'&&r.message==='结果未投递：权限已变化'));
+    assert.equal(f.h.store.get('SELECT sequence FROM channel_result_cursor').sequence,f.h.store.get('SELECT max(id) n FROM channel_task_results').n);
+  });
+}
+
+
+test('an unavailable result-retry store leaves the event pending and never acknowledges an unsaved card',async t=>{
+  const f=await fixture(t),{task}=await legacyTask(f,'A result whose retry record cannot be saved');
+  clearInterval(f.service.timer);clearInterval(f.service.syncTimer);await until(()=>!f.service.busy);
+  f.h.store.run("UPDATE tasks SET status='completed',result=? WHERE id=?",JSON.stringify({summary:'UNSAVED_RESULT_CONTENT'}),task.id);
+  f.h.store.db.exec("CREATE TRIGGER retry_store_full BEFORE UPDATE ON channel_task_results BEGIN SELECT RAISE(ABORT,'fixture full'); END");
+  const failures=[];const original=console.error;console.error=(...values)=>failures.push(values);t.after(()=>{console.error=original;});
+  await f.service.tick();console.error=original;
+  assert.equal(f.h.store.get('SELECT sequence FROM channel_result_cursor').sequence,0);
+  assert.equal(f.h.store.get('SELECT state FROM channel_task_results WHERE task_id=?',task.id).state,'pending');
+  assert.equal(f.h.store.get("SELECT count(*) n FROM channel_outbox WHERE idempotency_key LIKE 'task-result:%'").n,0);
+  assert.equal(failures[0][0],'channel_result_failure_record_failed');assert.equal(failures[0][1].task_id,task.id);
+  f.h.store.db.exec('DROP TRIGGER retry_store_full');await f.service.tick();await f.service.tick();
+  assert.equal(f.wire.sent.filter(s=>JSON.stringify(s.content).includes('UNSAVED_RESULT_CONTENT')).length,1);
 });

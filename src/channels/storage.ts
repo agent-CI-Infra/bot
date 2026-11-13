@@ -45,6 +45,14 @@ export function channelStorage(store: Store): void {
       AND EXISTS(SELECT 1 FROM task_origins o JOIN channel_chats c ON c.id=o.conversation_id WHERE o.task_id=NEW.id AND o.source_kind='role') BEGIN
       INSERT INTO channel_task_results(task_id) VALUES(NEW.id); END;
   `);
+  // Serialize the migration for independent workers opening the same existing database.
+  store.transaction(()=>{
+    const resultColumns = store.all('PRAGMA table_info(channel_task_results)');
+    for (const [name, definition] of Object.entries({ state: "TEXT NOT NULL DEFAULT 'pending'", attempts: 'INTEGER NOT NULL DEFAULT 0', next_attempt: 'INTEGER NOT NULL DEFAULT 0', last_error: 'TEXT', outbox_id: 'TEXT' }))
+      if (!resultColumns.some(column => column.name === name)) store.db.exec(`ALTER TABLE channel_task_results ADD COLUMN ${name} ${definition}`);
+    store.db.exec(`CREATE INDEX IF NOT EXISTS channel_task_result_pending ON channel_task_results(state,next_attempt,id);
+      CREATE INDEX IF NOT EXISTS channel_task_result_outbox ON channel_task_results(outbox_id) WHERE outbox_id IS NOT NULL;`);
+  });
   if (!store.all('PRAGMA table_info(channel_sessions)').some(c => c.name === 'context_revision'))
     store.db.exec('ALTER TABLE channel_sessions ADD COLUMN context_revision INTEGER NOT NULL DEFAULT 0');
   if (!store.all('PRAGMA table_info(channel_sessions)').some(c => c.name === 'connector_revision'))
