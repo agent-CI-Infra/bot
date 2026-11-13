@@ -46,17 +46,14 @@ export class ManagementAgent {
     if(scope==='platform'){
       // Docs: platform is "all currently authorized projects", which for a tenant- or project-scoped
       // session is that confinement — not a wider unconfined view, and not a hard 403.
+      // An empty project set is still a valid platform conversation: run() explains that there are
+      // no accessible projects and completes the turn, which IM private chats also rely on.
       if(actor.project_id){
-        const scoped=resolvePrincipalActor(this.store,actor.principal_id,actor.tenant_id,actor.project_id,actor.channel,actor);
-        if(!this.service.projects(scoped).length)fail(403,'scope_forbidden');
-        return scoped;
+        return resolvePrincipalActor(this.store,actor.principal_id,actor.tenant_id,actor.project_id,actor.channel,actor);
       }
       if(actor.tenant_id){
-        const scoped=resolvePrincipalActor(this.store,actor.principal_id,actor.tenant_id,undefined,actor.channel,actor);
-        if(!this.service.projects(scoped).length)fail(403,'scope_forbidden');
-        return scoped;
+        return resolvePrincipalActor(this.store,actor.principal_id,actor.tenant_id,undefined,actor.channel,actor);
       }
-      if(!this.service.projects(actor).length)fail(403,'scope_forbidden');
       return actor;
     }
     const project=scope.startsWith('project:')?scope.slice(8):undefined;
