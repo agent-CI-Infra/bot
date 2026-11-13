@@ -1,3 +1,4 @@
+import { consoleNavigate } from './console-navigation.mjs';
 import {test,expect} from '@playwright/test';
 import {mkdirSync,rmSync} from 'node:fs';
 import {harness,setup,account,repository,testPassword} from '../test/helpers.mjs';
@@ -6,7 +7,7 @@ import {metricTask,usageRequest} from '../test/metrics-fixtures.mjs';
 test.use({timezoneId:'Asia/Shanghai'});
 async function login(page,url,username,password){
   await page.goto(url);await page.getByLabel('用户名',{exact:true}).fill(username);await page.getByLabel('密码',{exact:true}).fill(password);
-  await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'统计',exact:true}).click();
+  await page.getByRole('button',{name:'登录',exact:true}).click();await consoleNavigate(page, '统计');
 }
 async function dates(page,from,to=from){
   await page.getByLabel('开始日期（本地）',{exact:true}).fill(from);await page.getByLabel('结束日期（本地）',{exact:true}).fill(to);

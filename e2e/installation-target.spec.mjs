@@ -1,3 +1,4 @@
+import { consoleNavigate } from './console-navigation.mjs';
 import {test,expect} from '@playwright/test';
 import {generateKeyPairSync} from 'node:crypto';
 import {mkdirSync,rmSync} from 'node:fs';
@@ -13,7 +14,7 @@ test('安装步骤支持组织与个人账号，区分新安装和设置，错�
   }})})),{admin,password}=await setup(h),errors=[];page.on('pageerror',error=>errors.push(error.message));
   try{
     const key=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({format:'pem',type:'pkcs8'}),a=await account(admin,{type:'github_app',app_id:'123',private_key:key,token:undefined});onboarding.save('app',{account_id:a.id,app_id:'123',slug:'fixture-app',install_url:'https://github.com/apps/fixture-app/installations/new'});
-    await page.goto(h.admin);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'全局设置',exact:true}).click();await page.locator('.project-nav').getByRole('link',{name:'接入向导',exact:true}).click();await page.getByRole('button',{name:'4. 安装',exact:true}).click();
+    await page.goto(h.admin);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();await consoleNavigate(page, '全局设置');await page.locator('.project-nav').getByRole('link',{name:'接入向导',exact:true}).click();await page.getByRole('button',{name:'4. 安装',exact:true}).click();
     const target=page.getByLabel('安装账号',{exact:true}),resolve=page.getByRole('button',{name:'解析账号',exact:true}),result=page.locator('.installation-target-result');
     await target.fill('https://github.com/fixture-org/private-repo/pull/7');await resolve.click();const install=page.getByRole('link',{name:'前往 fixture-org 安装',exact:true});await expect(install).toHaveAttribute('href',/^https:\/\/github\.com\/apps\/fixture-app\/installations\/new\/permissions\?suggested_target_id=10&state=[a-f0-9]{48}$/);await expect(result).toContainText('fixture-org');
     await context.route('https://github.com/**',route=>route.fulfill({contentType:'text/html',body:'<h1>GitHub installation confirmation</h1>'}));const opened=context.waitForEvent('page');await install.click();const popup=await opened;await popup.waitForLoadState('domcontentloaded');expect(new URL(popup.url()).searchParams.get('suggested_target_id')).toBe('10');await popup.close();
