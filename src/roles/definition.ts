@@ -26,7 +26,7 @@ export interface RoleDefinitionV2 {
   model_profile_ref: ModelProfileRef | null; skill_bundle_ref: SkillBundleRef | null; harness_ref: Ref; permissions: RolePermissions;
   /** Server-owned opt-in: old V2 review/Actions dev assignments used the entry's Pi executor. */
   entry_harness_source?: 'role';
-  environment_profile_ref: Ref; budget_policy_ref: Ref & { max_turns?: number; max_output_tokens?: number; max_total_tokens?: number; max_model_requests?: number; max_tool_calls?: number; max_wall_seconds?: number; max_cost?: { amount: number; currency: string } }; output_schema_ref: Ref;
+  environment_profile_ref: Ref; budget_policy_ref: Ref & { max_turns?: number; max_output_tokens?: number; max_total_tokens?: number; max_model_requests?: number; max_tool_calls?: number; max_wall_seconds?: number }; output_schema_ref: Ref;
 }
 export type Entry = 'development' | 'request' | 'review' | 'actions';
 export interface RoleConfiguration {
@@ -273,12 +273,12 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
       const b = given.budget_policy_ref, bfield = `${field}.budget_policy_ref`;
       // Integer limits and their bounds; metered adds the cumulative ones.
       const limits: Record<string, [number, number]> = { max_turns: [4, 256], max_output_tokens: [256, 32768], ...(budget.id === 'metered' ? { max_total_tokens: [1000, 100_000_000], max_model_requests: [1, 10000], max_tool_calls: [1, 10000], max_wall_seconds: [60, 86400] } : {}) };
+      // Legacy max_cost is accepted on read/save but never copied into the normalized resource limits.
       const budgetFields = ['id', 'version', ...Object.keys(limits), ...(budget.id === 'metered' ? ['max_cost'] : [])];
       const unknown = Object.keys(b).find(k => !budgetFields.includes(k)); if (unknown) invalid('unknown_field', `${bfield}.${unknown}`);
-      if (Object.keys(b).every(k => k === 'id' || k === 'version')) invalid('invalid_budget_policy', bfield);
+      if (budget.id==='bounded'&&Object.keys(b).every(k => k === 'id' || k === 'version')) invalid('invalid_budget_policy', bfield);
       for (const [key, [min, max]] of Object.entries(limits)) if (b[key] !== undefined && (!Number.isSafeInteger(b[key]) || b[key] < min || b[key] > max)) invalid('invalid_budget_policy', `${bfield}.${key}`);
-      if (b.max_cost !== undefined && (!b.max_cost || typeof b.max_cost !== 'object' || Object.keys(b.max_cost).some(k => !['amount', 'currency'].includes(k)) || typeof b.max_cost.amount !== 'number' || !(b.max_cost.amount > 0) || b.max_cost.amount > 1_000_000 || !['USD', 'CNY'].includes(b.max_cost.currency))) invalid('invalid_budget_policy', `${bfield}.max_cost`);
-      Object.assign(budget, Object.fromEntries(Object.keys(limits).filter(k => b[k] !== undefined).map(k => [k, b[k]])), b.max_cost !== undefined ? { max_cost: { amount: b.max_cost.amount, currency: b.max_cost.currency } } : {});
+      Object.assign(budget, Object.fromEntries(Object.keys(limits).filter(k => b[k] !== undefined).map(k => [k, b[k]])));
     }
     const environmentRef = pick('environment_profile_ref', environmentProfiles, allowed.environment, allowed.environment[0]!, 'environment_profile_not_allowed');
     // A per-run container profile needs a driver that runs inside it; built-in drivers do not, so they are refused here and

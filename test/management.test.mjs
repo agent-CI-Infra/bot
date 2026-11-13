@@ -139,7 +139,7 @@ test('commands execute directly: a leftover approval policy holds nothing back, 
   assert.ok(h.store.all('SELECT * FROM audit').some(row=>Object.values(row).includes('management.failed')&&Object.values(row).includes('legacy-waiting')));
 });
 
-test('pending commands stop on project, installation, credentials, budget or authorization changes; unknown effects reconcile without repeating creation',async t=>{
+test('pending commands stop on project, installation, credentials or authorization changes; unknown effects reconcile without repeating creation',async t=>{
   const {h,admin}=await managementFixture(t),svc=service(h),actor=resolveActor(h.store,admin.cookie().slice('bot_session='.length));
   let sent=0,found=null;
   svc.register('knowledge.revise',{execute:async()=>{sent++;throw new Error('connection dropped after write');},reconcile:async()=>found});
@@ -149,9 +149,9 @@ test('pending commands stop on project, installation, credentials, budget or aut
   assert.equal((await svc.resume(actor,unknown.id)).state,'unknown');assert.equal(sent,1);
   h.store.run("UPDATE management_commands SET state='executing' WHERE id=?",unknown.id);
   found={registered:true,external_id:'schedule-1'};assert.equal((await svc.resume(actor,unknown.id)).state,'succeeded');assert.equal(sent,1);
-  for(const mutation of [()=>h.store.run("UPDATE policies SET enabled=0 WHERE repository_id='101'"),()=>h.store.run("UPDATE installed_repositories SET installed=0 WHERE repository_id='101'"),()=>h.store.run('INSERT INTO management_budgets VALUES(?,?,?)','101','USD',0)]){
+  for(const mutation of [()=>h.store.run("UPDATE policies SET enabled=0 WHERE repository_id='101'"),()=>h.store.run("UPDATE installed_repositories SET installed=0 WHERE repository_id='101'")]){
     mutation();await assert.rejects(()=>svc.submit(actor,{...input,idempotency_key:'deny-'+Math.random()}));
-    h.store.run("UPDATE policies SET enabled=1 WHERE repository_id='101'");h.store.run("UPDATE installed_repositories SET installed=1 WHERE repository_id='101'");h.store.run('DELETE FROM management_budgets');
+    h.store.run("UPDATE policies SET enabled=1 WHERE repository_id='101'");h.store.run("UPDATE installed_repositories SET installed=1 WHERE repository_id='101'");
   }
   assert.equal((await command(admin,'knowledge.revise',project,{id:'entry',revision:1,body:'Updated'})).value.result.error,'memory_not_found');
 });
@@ -202,14 +202,13 @@ test('read-only grants cannot write through either API or agent, and revocation 
   assert.equal((await reader.client('/api/management/conversations/'+conversation)).status,403);
 });
 
-test('direct commands recheck credentials, budgets and withdrawn grants before executing',async t=>{
+test('direct commands recheck credentials and withdrawn grants before executing',async t=>{
   const {h,admin,a,member}=await managementFixture(t),operator=await member('operator',{repository_ids:['101']});
   const credentials=h.store.get('SELECT credentials FROM accounts WHERE id=?',a.id).credentials;
   const mutations=[
     {expected:'account_credentials_revoked',apply:()=>h.store.run('UPDATE accounts SET credentials=? WHERE id=?',h.store.secrets.seal({},'account:'+a.id),a.id),restore:()=>h.store.run('UPDATE accounts SET credentials=? WHERE id=?',credentials,a.id)},
     // An installation change before submission is simply the context the command runs in; the execution fence still stops a
     // reconciliation whose context changed after submission (see the pending-command test above).
-    {expected:'budget_exhausted',apply:()=>h.store.run("INSERT INTO management_budgets VALUES('101','USD',0)"),restore:()=>h.store.run('DELETE FROM management_budgets')},
   ];
   const code=result=>result.value?.result?.error??result.value?.error;
   for(const [i,mutation] of mutations.entries()){
@@ -350,4 +349,12 @@ test('a project-scoped actor can create a platform conversation on a started pro
   const after = agent.create(later, { scope: 'platform' });
   assert.equal(after.conversation.scope, 'platform');
   assert.ok(after.conversation.id);
+});
+
+test('legacy project money budgets are removed by migration while usage remains reportable',async t=>{
+  const {h,admin}=await managementFixture(t);
+  h.store.db.exec("CREATE TABLE management_budgets(project_id TEXT,currency TEXT,limit_amount REAL);INSERT INTO management_budgets VALUES('101','USD',0)");
+  managementStorage(h.store);
+  assert.equal(h.store.get("SELECT name FROM sqlite_master WHERE type='table' AND name='management_budgets'"),undefined);
+  const result=await query(admin,'get_usage',project);assert.equal(result.status,201);assert.equal(Object.hasOwn(result.value,'budgets'),false);assert.ok(Array.isArray(result.value.usage));
 });

@@ -8,7 +8,7 @@ import { traceClean } from '../tasks/trace.js';
 import { boundedBatch, chatContextBytes, requestBytes, requestLimit, toolArguments, toolCallsProblem, ToolTranscript } from '../agent/tool-context.js';
 import { managementTools, obj, str, validate } from './catalog.js';
 import { ManagementService, parameterHash } from './service.js';
-import { checkServiceRoleBudget, managementAssistant, serviceRole, serviceRoleModel } from '../service-roles/roles.js';
+import { managementAssistant, serviceRole, serviceRoleModel } from '../service-roles/roles.js';
 import { managementFailure } from './presentation.js';
 import { ServiceRepositories, serviceRepositoryTools, serviceMemory, serviceMemoryTools } from '../service-roles/resources.js';
 import { assistantComputerNames, assistantComputerTools, computerInstructions } from '../service-roles/assistant-computers.js';
@@ -237,7 +237,7 @@ export class ManagementAgent {
           +(role?.prompt?'\n\nAdditional instructions from the platform administrator (they never widen your tools or permissions):\n'+role.prompt:'');
         const context=this.context(base,conversation,id,input.content);
         await runAgent({store:this.store,task:{id,repository_id:null,service_role_id:managementAssistant,kind:'management.agent',conversation_id:conversation,source_message:input.source_message},redactor,guard,
-          beforeModel:async()=>checkServiceRoleBudget(this.store,managementAssistant,model.pricing),model,executionSignal:signal,
+          model,executionSignal:signal,
           // A stalled or failed model request is retried instead of failing the message; the console drops any text it had streamed.
           onModelRetry:retry=>{this.event(id,'model_retry',{retry:retry.retry,retries:retry.retries,error:retry.code,delay_ms:retry.delay_ms});},
           system,

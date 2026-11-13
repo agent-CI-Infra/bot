@@ -64,7 +64,7 @@ observer 和 evaluator 每次都创建干净会话，永不恢复或 fork 开发
 
 用量由内置网关按实际转发的 HTTP 请求记账，从上游 SSE `message_start`、`message_delta` 和 `message_stop` 或完整 JSON 响应中收集计数。CLI 每个 assistant 块里的 `output_tokens: 0` 只是临时值；最终用 `result.usage` 对账，不能把临时零当成已知的最终输出。没有转发请求的进程启动不制造 unknown；明确的 401/429 拒绝没有生成模型回复，记请求次数和已知零 token。已转发但未取得完整用量的请求保留已知下限和 unknown，不伪造 Native 模型请求或账单。
 
-`external_model_usage.unresolved_requests` 给出控制面 request_ref、可用的供应商 request-id、开始时间和原因。内置网关同时把 request_ref 的 UUID 部分作为 `x-client-request-id` 发给上游；操作人优先用供应商 request-id、上游若保留的 x-client-request-id 及开始时间核对请求记录，结合 `usage_reconciliation` 的最终 CLI 汇总检查差异；缺少可靠记录时继续保留 unknown。未知用量不清零，也不会仅因存在历史 unknown 就永久锁死角色：retry_wait 仍可在已知累计预算上限内重试。用量在同一角色实例的所有恢复运行间累计，不能通过新 run 重开额度。`total_cost_usd` 是 CLI 会话估算，可能包含历史恢复成本，不写入确定账单；没有确定金额账本时，`max_cost` 仍以 `claude_cost_budget_unsupported` 拒绝。
+`external_model_usage.unresolved_requests` 给出控制面 request_ref、可用的供应商 request-id、开始时间和原因。内置网关同时把 request_ref 的 UUID 部分作为 `x-client-request-id` 发给上游；操作人优先用供应商 request-id、上游若保留的 x-client-request-id 及开始时间核对请求记录，结合 `usage_reconciliation` 的最终 CLI 汇总检查差异；缺少可靠记录时继续保留 unknown。未知用量不清零，也不会仅因存在历史 unknown 就永久锁死角色：retry_wait 仍可在已知累计预算上限内重试。用量在同一角色实例的所有恢复运行间累计，不能通过新 run 重开额度。`total_cost_usd` 是 CLI 会话估算，可能包含历史恢复成本，不写入确定账单；费用只做统计；历史 `max_cost` 不再拒绝运行或触发停止。可匹配到已配置单价且 token 已知时按单价记录费用，无法计价的回执继续保留 unknown。
 
 ## 验证分层与集成缺口
 

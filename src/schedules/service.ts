@@ -114,7 +114,6 @@ export class ScheduleService {
     if (!account) return fail(403, 'schedule_account_unavailable');
     const credential = this.store.secrets.open(account.credentials, 'account:' + account.id);
     if (!credential.token && !credential.private_key) fail(403, 'schedule_account_credentials_revoked');
-    this.management.checkBudget(project);
   }
   /** Business handlers persist occurrence_id with their run and call this again before each tool or
    * model action, including after restart. No creator session or login token is needed. Costs are

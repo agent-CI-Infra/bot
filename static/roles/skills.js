@@ -102,11 +102,7 @@ function roleSettingsCard(role, state, redraw, access) {
       const control = input(key, role.budget_policy_ref[key] ?? '', { type: 'number', min, max, step: 1 });
       budget.append(field(title, roleBound(control, value => { if (value === '') delete role.budget_policy_ref[key]; else role.budget_policy_ref[key] = Number(value); }, state)));
     }
-    if (role.budget_policy_ref.id === 'metered') {
-      const cost = role.budget_policy_ref.max_cost, amount = input('max_cost', cost?.amount || '', { type: 'number', min: 0.000001, max: 1000000, step: 'any' });
-      const currency = roleSelect('预算币种', cost?.currency || 'USD', [['USD', '美元'], ['CNY', '人民币']], value => { if (role.budget_policy_ref.max_cost) role.budget_policy_ref.max_cost.currency = value; markRoleDirty(state); });
-      budget.append(field('任务累计金额上限（留空不设置）', roleBound(amount, value => { if (value === '') delete role.budget_policy_ref.max_cost; else role.budget_policy_ref.max_cost = { amount: Number(value), currency: currency.value }; }, state)), field('预算币种', currency));
-    }
+
   }
   if (!(state.data.required_roles || ['manager', 'coordinator', 'qa']).includes(role.role_id)) group('danger', '删除角色', advanced).append(button('删除这个角色', async () => {
     const stages = state.draft.required_stages.filter(stage => stage.role_constraints.role_ids?.includes(role.role_id));

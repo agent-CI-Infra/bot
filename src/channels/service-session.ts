@@ -9,7 +9,7 @@ import { traceClean } from '../tasks/trace.js';
 import { conversationHistoryTools } from '../roles/conversation.js';
 import { permitsTool, permitsManagement, githubReadScopes, githubWriteAllowed, type RolePermissions } from '../roles/permissions.js';
 import { githubWrite, scopedGithubWriteTool } from '../github/write.js';
-import { checkServiceRoleBudget, serviceRole, serviceRoleModel } from '../service-roles/roles.js';
+import { serviceRole, serviceRoleModel } from '../service-roles/roles.js';
 import type { ManagementService } from '../management/service.js';
 import { serviceMemory, serviceMemoryTools } from '../service-roles/resources.js';
 import { assistantComputerNames, assistantComputerTools, computerInstructions, computerPermission } from '../service-roles/assistant-computers.js';
@@ -326,7 +326,7 @@ export class ChannelServiceSessions {
       // A turn that may stay silent ends silently only through stay_silent (#489); own tasks never get the tool.
       let reply = '', mustReply = !turn.allowSilence, silence: string | undefined;
       await runAgent({ store: this.store, task: { id, repository_id: null, service_role_id: role.id, kind: 'channel.service', conversation_id: chat.id, source_message: turn.source_message },
-        redactor, guard, beforeModel: async () => { check(); checkServiceRoleBudget(this.store, role.id, model.pricing); }, model, executionSignal: controller.signal,
+        redactor,guard,model,executionSignal:controller.signal,
         // A stalled or failed model request is retried (see modelRetries in agent/runtime) instead of ending the turn; each retry is a step.
         onModelRetry: () => { event('model_retry'); },
         system, prompt: turn.request, tools: turn.allowSilence ? [...serviceTools, staySilentTool] : serviceTools,

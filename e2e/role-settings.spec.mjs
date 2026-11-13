@@ -51,6 +51,9 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     expect(dev.budget_policy_ref).toMatchObject({ id: 'bounded', max_turns: 200, max_output_tokens: 32768 });
     await openRoleFormAdvanced(page);
     mkdirSync('.tmp/role-settings', { recursive: true });
+    await page.getByLabel('预算方式',{exact:true}).selectOption('metered');
+    await expect(page.locator('input[name=max_cost]')).toHaveCount(0);
+    await expect(page.getByText('任务累计金额上限（留空不设置）',{exact:true})).toHaveCount(0);
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 1000 });
       await page.getByLabel('预算方式', { exact: true }).scrollIntoViewIfNeeded();
@@ -58,7 +61,11 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
       await expect(page.getByLabel('单次输出最多 token', { exact: true })).toHaveValue('32768');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: `.tmp/role-settings/budget-${width}.png` });
+      await page.getByLabel('任务累计秒数',{exact:true}).scrollIntoViewIfNeeded();
+      await expect(page.getByLabel('任务累计秒数',{exact:true})).toBeVisible();
+      await page.screenshot({path:`.tmp/role-settings/cost-free-${width}.png`});
     }
+    await page.getByLabel('预算方式',{exact:true}).selectOption('bounded');
     await page.setViewportSize({ width: 1440, height: 1000 });
     await goRolePage(page);
     await page.getByRole('button', { name: '添加技能包', exact: true }).click();

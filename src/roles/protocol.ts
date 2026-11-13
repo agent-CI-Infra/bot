@@ -21,7 +21,7 @@ export type CandidateRef =
 /** Limits of a run. per_run caps each run; role_instance counts every run of the role in its task. null means "not limited". */
 export interface Budget {
   policy_ref: string; accounting: 'per_run' | 'role_instance'; max_turns: number | null; max_output_tokens: number | null; max_total_tokens: number | null; max_model_requests: number | null;
-  max_tool_calls: number | null; max_wall_ms: number | null; max_concurrency: number; max_cost: { amount: number; currency: string } | null;
+  max_tool_calls: number | null; max_wall_ms: number | null; max_concurrency: number;
 }
 /** The backend's input view of a run. Every field is a reference or a version; secrets never appear here. */
 export interface RunContext {
@@ -91,15 +91,14 @@ export function validateCandidateRef(value: any, field = 'candidate_ref'): Candi
   return value as CandidateRef;
 }
 const contextKeys = ['protocol', 'task_id', 'conversation_id', 'assignment_id', 'run_id', 'tenant_id', 'project_id', 'principal_ref', 'source_ref', 'candidate_ref', 'configuration_snapshot_ref', 'lease_epoch', 'resume_from_run_id', 'contract_revision', 'policy_revision', 'role_revision', 'harness_revision', 'skill_revisions', 'model_revision', 'budget', 'execution_context','stage','stage_policy_hash'];
-const budgetKeys = ['policy_ref', 'accounting', 'max_turns', 'max_output_tokens', 'max_total_tokens', 'max_model_requests', 'max_tool_calls', 'max_wall_ms', 'max_concurrency', 'max_cost'];
+const budgetKeys = ['policy_ref', 'accounting', 'max_turns', 'max_output_tokens', 'max_total_tokens', 'max_model_requests', 'max_tool_calls', 'max_wall_ms', 'max_concurrency'];
 export function validateBudget(value: any, field = 'budget'): Budget {
-  if (!value || typeof value !== 'object' || Object.keys(value).some(k => !budgetKeys.includes(k)) || budgetKeys.some(k => !Object.hasOwn(value, k))) return invalid(field);
+  if (!value || typeof value !== 'object' || Object.keys(value).some(k => k!=='max_cost'&&!budgetKeys.includes(k)) || budgetKeys.some(k => !Object.hasOwn(value, k))) return invalid(field);
   if (typeof value.policy_ref !== 'string' || !value.policy_ref) invalid(field + '.policy_ref');
   if (!['per_run', 'role_instance'].includes(value.accounting)) invalid(field + '.accounting');
   for (const key of ['max_turns', 'max_output_tokens', 'max_total_tokens', 'max_model_requests', 'max_tool_calls', 'max_wall_ms']) if (value[key] !== null && (!Number.isSafeInteger(value[key]) || value[key] < 1)) invalid(`${field}.${key}`);
   if (!Number.isSafeInteger(value.max_concurrency) || value.max_concurrency < 1) invalid(field + '.max_concurrency');
-  if (value.max_cost !== null && (typeof value.max_cost !== 'object' || !(value.max_cost.amount > 0) || !['USD', 'CNY'].includes(value.max_cost.currency))) invalid(field + '.max_cost');
-  return value;
+  const {max_cost,...budget}=value;return budget;
 }
 export function validateRunContext(value: any): RunContext {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid('run_context');
@@ -117,7 +116,7 @@ export function validateRunContext(value: any): RunContext {
   if (!Array.isArray(value.skill_revisions) || value.skill_revisions.some((s: unknown) => typeof s !== 'string' || !s)) invalid('skill_revisions');
   if(value.stage_policy_hash!==undefined&&!hex(64).test(value.stage_policy_hash))invalid('stage_policy_hash');
   if(value.stage!==undefined&&(!value.stage||Object.keys(value.stage).some(k=>!['stage_id','plan_revision','policy_hash'].includes(k))||typeof value.stage.stage_id!=='string'||!Number.isSafeInteger(value.stage.plan_revision)||value.stage.plan_revision<1||!hex(64).test(value.stage.policy_hash)))invalid('stage');
-  validateBudget(value.budget);
+  value={...value,budget:validateBudget(value.budget)};
   assertSecretFree(value);
   return value as RunContext;
 }

@@ -32,7 +32,7 @@ const budgets = [
   { id: 'entry-default', description: 'The entry point\'s trusted turn and output limits.' },
   { id: 'bounded', description: 'Explicit per-run max_turns (4-256) and max_output_tokens (256-32768); omitted values use entry defaults.' },
   // Cumulative over every run of the role in its task (recoveries, attempts, delegations, sub-agents); see src/roles/role-run.ts.
-  { id: 'metered', description: 'bounded limits plus cumulative max_total_tokens, max_model_requests, max_tool_calls, max_wall_seconds and an estimated max_cost for the role within its task. Unknown usage is never counted as zero.' }
+  { id: 'metered', description: 'bounded limits plus cumulative max_total_tokens, max_model_requests, max_tool_calls, max_wall_seconds for the role within its task. Unknown usage is never counted as zero.' }
 ] as const;
 export const budgetPolicies = budgets.map(b => ({ ...b, version: version(b) }));
 
