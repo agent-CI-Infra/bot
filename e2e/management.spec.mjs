@@ -69,7 +69,12 @@ test('management UI, direct API and model tools agree on real persisted query, c
     await expect(feed).toContainText('操作 暂停任务 · 已执行');await expect(page.getByRole('button',{name:'停止',exact:true})).toBeHidden();
     expect((await query(admin,'get_task',{project_id:'101',task_id:'blocked'})).value.task.status).toBe('paused');expect((await admin('/api/tasks/blocked')).value.task.status).toBe('paused');
     const writes=h.store.get('SELECT count(*) n FROM management_commands').n;
-    await page.reload();await expect(page).toHaveURL(/#\/management$/);await expect(feed).toContainText('操作 暂停任务 · 已执行');expect(h.store.get('SELECT count(*) n FROM management_commands').n).toBe(writes);
+    // #480: a page-local scope is not restored on reload; the assistant opens on the shell default (none here, so platform).
+    await page.reload();await expect(page).toHaveURL(/#\/management$/);
+    await expect(page.getByLabel('当前管理作用域')).toHaveValue('platform');
+    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    // The receipt is persisted on the server, so the project's conversation still shows it once that scope is chosen.
+    await expect(feed).toContainText('操作 暂停任务 · 已执行');expect(h.store.get('SELECT count(*) n FROM management_commands').n).toBe(writes);
     // Explicit UI form shares the task command handler and updates the same persisted state.
     await page.getByRole('button',{name:'快捷操作',exact:true}).click();
     await page.getByLabel('管理任务',{exact:true}).selectOption('blocked');await page.getByRole('button',{name:'重试任务',exact:true}).click();
@@ -291,7 +296,9 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     expect(f.h.store.get("SELECT count(*) n FROM management_conversations WHERE scope='project:101'").n).toBe(1);
     await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click(); await page.reload();
     await expect(page).toHaveURL(/#\/management$/); await expect(chat).toHaveAttribute('role', 'region');
-    await expect(page.getByLabel('当前管理作用域')).toHaveValue('project:101');
+    // #480: the reload reopens on the shell default (no project picked here), not on the page-local scope chosen before it.
+    await expect(page.getByLabel('当前管理作用域')).toHaveValue('platform');
+    await page.getByLabel('当前管理作用域').selectOption('project:101');
     await message.fill('窄屏整页中的草稿'); await page.setViewportSize({ width: 390, height: 844 });
     await expect(send).toBeInViewport(); await expect(message).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);

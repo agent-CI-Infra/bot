@@ -403,6 +403,20 @@ async function openManagementChat(projectId = null, { mode = 'floating' } = {}) 
   activity(chat.active);
 }
 
+// #480: the shell picker can change while the assistant is open. An explicit page-local scope survives that; otherwise the
+// open chat follows the new default, so the header, the scope control and the conversation cannot describe two projects.
+// The control itself is written by setScope: writing it here first would leave its change handler convinced the scope was
+// already current, so the conversation would stay on the old project.
+addEventListener('console-scope-change', () => {
+  const chat = managementChat;
+  if (!chat?.client) return;
+  const select = chat.panel.querySelector('select[aria-label="当前管理作用域"]');
+  if (!select || select.dataset.override === '1') return;
+  const shared = typeof consoleDefaultProject === 'function' ? consoleDefaultProject() : null;
+  const value = shared && [...select.options].some(option => option.value === 'project:' + shared) ? 'project:' + shared : 'platform';
+  chat.client.setScope(value).catch(() => { /* the chat reports its own reconnect state */ });
+});
+
 // Commands still use durable, versioned management messages. History and reconnect only read events.
 async function renderManagement(panel, projectId = null, onActivity = () => {}) {
   const endpoint = '/api/management', user = me.id;
@@ -415,15 +429,37 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   addScope('platform', '全部有权访问的项目');
   for (const tenant of new Set(projects.map(p => p.tenant_id).filter(Boolean))) addScope('tenant:' + tenant, '组织 ' + tenant);
   for (const project of projects) addScope('project:' + project.id, project.full_name);
-  const scopeKey = 'management-scope:' + user, conversationKey = () => 'management-conversation:' + user + ':' + scope.value;
+  const conversationKey = () => 'management-conversation:' + user + ':' + scope.value;
   const stored = key => { try { return localStorage.getItem(key); } catch { return null; } };
   const remember = (key, value) => { try { localStorage.setItem(key, value); } catch { /* Session still works when storage is disabled. */ } };
   const available = value => [...scope.options].some(option => option.value === value);
-  scope.value = projectId && available('project:' + projectId) ? 'project:' + projectId : available(stored(scopeKey)) ? stored(scopeKey) : 'platform';
+  // #480: what the assistant opens on is, in order, the project this page was opened for, the shell picker's project, and
+  // the platform scope. A per-user stored scope no longer decides it (and is not rewritten here); 「全部项目」 is platform.
+  const defaultScopeOf = () => {
+    const shared = typeof consoleDefaultProject === 'function' ? consoleDefaultProject() : null;
+    return shared && available('project:' + shared) ? 'project:' + shared : 'platform';
+  };
+  const scopeName = value => value === 'platform' ? '全部有权访问的项目'
+    : (projects.find(project => 'project:' + project.id === value)?.full_name || '组织 ' + value.slice('tenant:'.length));
+  // A scope is an override only while it names something the shell default does not. Choosing the default's own project is
+  // the default, so it keeps following the picker and the note keeps one wording instead of claiming both at once.
+  const isOwnScope = value => value !== defaultScopeOf();
+  scope.value = projectId && available('project:' + projectId) ? 'project:' + projectId : defaultScopeOf();
+  if (isOwnScope(scope.value)) scope.dataset.override = '1';
+  const scopeNote = element('p', '', 'management-scope-note'), scopeNoteId = 'management-scope-note';
+  scopeNote.id = scopeNoteId;
+  const scopeCaption = () => {
+    const shared = defaultScopeOf();
+    if (!isOwnScope(scope.value)) return shared === 'platform'
+      ? '生效范围：全部有权访问的项目（顶栏未选项目）' : '生效范围：' + scopeName(shared) + '（顶栏默认）';
+    return shared === 'platform'
+      ? '生效范围：' + scopeName(scope.value) + '（本页覆盖；顶栏未选项目）'
+      : `生效范围：${scopeName(scope.value)}（本页覆盖；顶栏默认：${scopeName(shared)}）`;
+  };
   const toolsButton = button('快捷操作', () => showTools(!toolsOpen), 'quiet'); toolsButton.setAttribute('aria-expanded', 'false'); toolsButton.setAttribute('aria-controls', 'management-tools');
   const fresh = button('＋ 新建会话', () => openConversation(true).catch(showError), 'quiet management-new-conversation');
   fresh.setAttribute('aria-label', '新建会话');
-  header.append(field('管理范围', scope), fresh, toolsButton); panel.append(header);
+  header.append(field('管理范围', scope), fresh, toolsButton); scopeNote.textContent = scopeCaption(); header.append(scopeNote); panel.append(header);
   const sessions = element('details', '', 'management-sessions'), sessionBody = element('div', '', 'management-session-controls');
   sessions.append(element('summary', '会话记录'));
   const conversations = document.createElement('select'); conversations.setAttribute('aria-label', '持久会话');
@@ -751,7 +787,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   async function openConversation(create = false, selected = null) {
     if (conversation) drafts.set(conversation, message.value);
     const generation = ++scopeGeneration; formGeneration++; streamController?.abort(); conversation = null; active = null; submitting = false; historyReady = false; opening = true; updateBusy();
-    remember(scopeKey, scope.value); cursor = 0; turns.clear(); messages.clear(); pendingMarkdown.clear(); followOutput = true; unseenOutput = false; latest.hidden = true; reconnect.hidden = true; feed.replaceChildren(welcome); welcome.hidden = false; message.value = '';
+    cursor = 0; turns.clear(); messages.clear(); pendingMarkdown.clear(); followOutput = true; unseenOutput = false; latest.hidden = true; reconnect.hidden = true; feed.replaceChildren(welcome); welcome.hidden = false; message.value = '';
     forms.replaceChildren(); toolsDirty = true; status.classList.remove('view-error'); status.textContent = '正在读取会话…';
     try {
       const all = (await api(endpoint + '/conversations')).conversations.filter(item => item.scope === scope.value);
@@ -819,12 +855,21 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   message.addEventListener('keydown', event => {
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); input.requestSubmit(); }
   });
-  scope.onchange = () => openConversation().catch(showError);
+  // One place writes the control, so the note, the "override" state and the conversation always describe the same scope.
+  // It reports whether the scope really changed: a control the reader moved has already written the value itself.
+  const applyScope = value => {
+    const changed = scope.value !== value;
+    scope.value = value;
+    scope.dataset.override = isOwnScope(value) ? '1' : '';
+    scopeNote.textContent = scopeCaption();
+    return changed;
+  };
+  scope.onchange = () => { applyScope(scope.value); openConversation().catch(showError); };
   conversations.onchange = () => openConversation(false, conversations.value).catch(showError);
   const elapsedTimer = setInterval(() => { for (const value of turns.values()) if (['pending', 'running'].includes(value.state)) paintTurn(value); }, 1000);
   try { await openConversation(); } catch (err) { clearInterval(elapsedTimer); document.removeEventListener('selectionchange', selectionChanged); throw err; }
   return {
-    async setScope(value) { if (!available(value)) { showError(new Error('当前账号无权管理这个项目。')); return; } if (scope.value !== value) { scope.value = value; await openConversation(); } },
+    async setScope(value) { if (!available(value)) { showError(new Error('当前账号无权管理这个项目。')); return; } if (applyScope(value)) await openConversation(); },
     focus() { if (toolsOpen) toolsButton.focus(); else message.focus(); },
     dispose() { disposed = true; scopeGeneration++; formGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); document.removeEventListener('selectionchange', selectionChanged); pendingMarkdown.clear(); drafts.clear(); }
   };

@@ -3,6 +3,17 @@ let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts
 // Project administrators' grants and the installed repositories to choose from (users page); the user whose grants the editor changes.
 let grants = { assignments: [], organization_assignments: [], organizations: [] }, editingUser = null, editorKind = null;
 const titles = { projects: '项目', board: '看板', costs: '统计', events: 'Webhook 投递', management: '管理对话', design: '设计系统样例', 'new-task': '新建任务' };
+// #480: the shell project picker is one session-wide default scope shared by the board, usage/costs and the management
+// assistant. Deliberately memory-only: the console never persisted this choice, and a stored default would describe a
+// project the reader did not pick in this session. Every surface that overrides it has to say so next to its controls.
+let consoleDefaultScope = null;
+function consoleDefaultProject() { return consoleDefaultScope; }
+function setConsoleDefaultProject(id) {
+  const next = id === null || id === undefined || id === '' ? null : String(id);
+  if (next === consoleDefaultScope) return;
+  consoleDefaultScope = next;
+  dispatchEvent(new CustomEvent('console-scope-change'));
+}
 // Every page has an address, so a reload or a shared link opens the same page. Accounts and users live in global settings.
 const tabAddresses = { projects: '#/projects', board: '#/board', costs: '#/costs', events: '#/events',
   preferences: '#/preferences', conversations: '#/conversations', more: '#/more', inbox: '#/inbox', external: '#/external', settings: '#/settings', identity: '#/identity', management: '#/management', 'new-task': '#/new-task' }, superTabs = ['settings'];
@@ -248,6 +259,10 @@ async function route() {
   if (legacy) history.replaceState(null, '', '#/settings/onboarding/' + ([0, 1, 3, 4, 5, 6][Number(legacy[1] || 0)] ?? 0));
   // Accounts and users were tabs of their own; their old addresses open the matching settings section.
   const moved = /^#\/(accounts|users)$/.exec(location.hash); if (moved) history.replaceState(null, '', '#/settings/' + moved[1]);
+  // #480: a single project's editor lives only in the project workspace. The legacy global address keeps working as a
+  // redirect, and carries that it came from the list so deleting the project still returns to the batch list.
+  const legacyProjectSettings = /^#\/settings\/projects\/([1-9]\d*)$/.exec(location.hash);
+  if (legacyProjectSettings) history.replaceState({ projectListOrigin: true }, '', `#/projects/${legacyProjectSettings[1]}/basic`);
   // An address the console does not know keeps the current page (on a fresh load that is the projects page).
   let next = addressTab(location.hash) || tab;
   // Project administrators open global settings only for its 存储 section.

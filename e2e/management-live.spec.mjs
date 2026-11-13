@@ -11,6 +11,13 @@ async function login(page, f) {
   await page.getByLabel('当前管理作用域').selectOption('project:101');
   await expect(page.getByRole('button', { name: '发送', exact: true })).toBeEnabled();
 }
+// #480: a scope chosen on the page lasts for one opening, so a reload returns to the shell default. Reopening the scope is
+// how a test about stored messages gets back to the conversation it wrote.
+async function reopenScope(page) {
+  const scope = page.getByLabel('当前管理作用域', { exact: true });
+  await expect(scope).toHaveValue('platform');
+  await scope.selectOption('project:101');
+}
 const chunk = (res, delta, finish = null) => res.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finish }] }) + '\n\n');
 const complete = res => { chunk(res, {}, 'stop'); res.end('data: [DONE]\n\n'); };
 
@@ -68,7 +75,7 @@ test('real model streaming renders Markdown before completion, shows tool progre
     await expect(message).toBeInViewport(); await expect(page.getByRole('button', { name: '发送', exact: true })).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     await page.screenshot({ path: '.tmp/management-live/result-mobile.png' });
-    await page.reload();
+    await page.reload(); await reopenScope(page);
     await expect(feed.locator('.management-turn-state')).toHaveText('已完成'); await expect(feed.locator('.management-answer')).toHaveCount(2);
     await expect(feed.getByRole('heading', { name: '检查结果', exact: true })).toBeVisible();
     expect(requests).toHaveLength(2); expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
@@ -97,7 +104,7 @@ test('stop, model failure and restart interruption are visible and retain partia
     const last = f.h.store.get('SELECT id FROM management_messages ORDER BY rowid DESC LIMIT 1').id;
     f.h.store.run("UPDATE management_messages SET state='interrupted' WHERE id=?", last);
     f.h.store.run("DELETE FROM management_events WHERE message_id=? AND type='error'", last);
-    await page.reload(); await expect(feed.locator('.management-turn-state').last()).toHaveText('运行中断');
+    await page.reload(); await reopenScope(page); await expect(feed.locator('.management-turn-state').last()).toHaveText('运行中断');
     await expect(feed).toContainText('服务重启中断了这次处理');
     expect(f.h.store.get('SELECT count(*) n FROM management_commands').n).toBe(commands); expect(errors).toEqual([]);
   } finally { gate.resolve(); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }

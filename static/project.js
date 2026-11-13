@@ -325,7 +325,9 @@ function globalProjectControls() {
       finally { change.disabled = false; }
     }, policy.enabled ? 'destructive' : '');
     danger.append(change, button('删除项目', () => deleteProject({ id, full_name: repository.full_name, registered: true }, async () => {
-      if (current === target) { current = null; location.hash = target.globalSettings ? '#/settings/projects' : '#/projects'; }
+      // #480: a reader who arrived through the legacy single-project address still returns to the batch list.
+      const fromList = !!(history.state && history.state.projectListOrigin);
+      if (current === target) { current = null; location.hash = target.globalSettings || fromList ? '#/settings/projects' : '#/projects'; }
     }), 'quiet destructive'), feedback);
   } else danger.append(note('启用、禁用与删除项目由平台超级管理员处理。请联系该管理员；项目管理员不因页面入口获得这些能力。'));
   return [publication, danger];
