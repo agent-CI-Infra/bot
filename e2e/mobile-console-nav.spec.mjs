@@ -169,6 +169,9 @@ test('「更多」不再重复底栏目的地，按三组补充且只保留当�
     await page.goto(h.admin + '/#/more');
     const headings = await page.locator('.console-group h2').allInnerTexts();
     expect(headings).toEqual(['当前项目', '分析与渠道', '个人与平台']);
+    // #549 keeps a super administrator's 飞书会话 under 分析与渠道, as in the committed 更多 previews.
+    const channels = page.locator('.console-group').filter({ has: page.getByRole('heading', { name: '分析与渠道', exact: true }) });
+    await expect(channels.getByRole('link', { name: /飞书会话/ })).toBeVisible();
     const captions = await page.locator('.console-group a > span').allInnerTexts();
     const flat = captions.map(text => text.trim());
     // A destination that the bar already offers is not repeated as a row here.
