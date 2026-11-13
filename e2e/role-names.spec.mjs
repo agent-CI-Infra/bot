@@ -33,6 +33,11 @@ test('中文界面的角色列表和详情使用完整中文名称与职责，�
     for (const name of ['Dev', 'Developer', 'Manager', 'Independent QA', 'UX reviewer']) {
       await expect(table.getByRole('link', { name, exact: true })).toHaveCount(0);
     }
+    const roleIds = ['coordinator', 'manager', 'dev', 'test', 'reviewer', 'ux_reviewer', 'qa'];
+    for (const id of roleIds) {
+      await expect(table.getByRole('link', { name: id, exact: true })).toHaveCount(0);
+      await expect(table.getByText(id + ' 启用', { exact: true })).toHaveCount(0);
+    }
     await expect(table).toContainText('在入口已有的权限范围内实现或调查任务。');
     await expect(table).not.toContainText('Implements or investigates');
     await page.screenshot({ path: `${out}/list-zh-1440.png`, fullPage: true });
@@ -74,6 +79,14 @@ test('英文界面同一位置使用完整英文，不再中英夹杂', async ({
     for (const name of ['Dev', '开发', '项目管理者', '独立 QA', '独立验收']) {
       await expect(table.getByRole('link', { name, exact: true })).toHaveCount(0);
     }
+    const enText = await table.innerText();
+    expect(enText).not.toContain('启用');
+    const roleIds = ['coordinator', 'manager', 'dev', 'test', 'reviewer', 'ux_reviewer', 'qa'];
+    for (const id of roleIds) {
+      await expect(table.getByRole('link', { name: id, exact: true })).toHaveCount(0);
+      await expect(table.getByText(id + ' Enabled', { exact: true })).toHaveCount(0);
+      await expect(table.getByText(id + ' 启用', { exact: true })).toHaveCount(0);
+    }
     await expect(table).toContainText("Implements or investigates the task within the entry point's existing authority.");
     await openRoleFromList(page, 'Developer');
     await expect(page.getByLabel('Display name', { exact: true })).toHaveValue('Developer');
@@ -85,5 +98,8 @@ test('英文界面同一位置使用完整英文，不再中英夹杂', async ({
     await page.getByTestId('role-list-link').click();
     await expect(page.getByRole('heading', { name: 'Roles', exact: true })).toBeVisible();
     await page.screenshot({ path: `${out}/list-en-1440.png`, fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByRole('heading', { name: 'Roles', exact: true })).toBeVisible();
+    await page.screenshot({ path: `${out}/list-en-390.png`, fullPage: true });
   } finally { await h.stop(); }
 });
