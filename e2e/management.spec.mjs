@@ -445,8 +445,11 @@ test('项目管理员在没有已启动项目或接口 403 时看到原因和重
     await expect(panel.getByText('正在连接管理助手…')).toHaveCount(0);
     await expect(page.getByLabel('管理消息')).toBeDisabled();
     await page.screenshot({ path: '.tmp/ui-522/after-empty-desktop.png', fullPage: true });
-    await page.setViewportSize({ width: 600, height: 900 });
-    await page.screenshot({ path: '.tmp/ui-522/after-empty-600.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    await expect(panel.getByRole('heading', { name: '无法打开管理会话' })).toBeVisible();
+    await expect(panel.getByRole('button', { name: '重试', exact: true })).toBeInViewport();
+    await page.screenshot({ path: '.tmp/ui-522/after-empty-390.png', fullPage: true });
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(f.h.admin + '/#/projects');
@@ -466,5 +469,14 @@ test('项目管理员在没有已启动项目或接口 403 时看到原因和重
     await page.getByRole('button', { name: '重试', exact: true }).click();
     await expect(page.getByRole('button', { name: '发送', exact: true })).toBeEnabled({ timeout: 10_000 });
     await expect(page.getByRole('heading', { name: '无法打开管理会话' })).toHaveCount(0);
+
+    await page.route('**/api/management/conversations/**/messages', route => {
+      if (route.request().method() === 'POST') return route.fulfill({ status: 500, json: { error: 'send_failed' } });
+      return route.continue();
+    });
+    await page.getByLabel('管理消息', { exact: true }).fill('这条会失败');
+    await page.getByRole('button', { name: '发送', exact: true }).click();
+    await expect(page.locator('.management-status')).toContainText('send_failed');
+    await expect(page.locator('.management-status')).not.toContainText('无法打开管理会话');
   } finally { await f.close(); }
 });

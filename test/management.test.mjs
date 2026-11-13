@@ -325,3 +325,21 @@ test('a project administrator with no started project cannot create a conversati
   const project = await empty.client('/api/management/conversations', 'POST', { scope: 'project:101' });
   assert.equal(project.status, 403);
 });
+
+test('a project-scoped actor can create a platform conversation on a started project, and is refused once the grant is gone', async t => {
+  const {h, member} = await managementFixture(t);
+  const adminUser = await member('project-platform', { repository_ids: ['101'] });
+  const principal = h.store.get('SELECT id FROM principals WHERE user_id=?', adminUser.id).id;
+  const tenant = h.store.get("SELECT tenant_id FROM identity_projects WHERE project_id='101'").tenant_id;
+  const actor = resolvePrincipalActor(h.store, principal, tenant, '101');
+  assert.equal(actor.project_id, '101');
+  const agent = new ManagementAgent(h.store, service(h));
+  const created = agent.create(actor, { scope: 'platform' });
+  assert.equal(created.conversation.scope, 'platform');
+  assert.ok(created.conversation.id);
+
+  h.store.run('UPDATE scoped_grants SET revoked_at=? WHERE principal_id=?', Date.now(), principal);
+  const later = resolvePrincipalActor(h.store, principal, tenant, '101');
+  assert.equal(later.project_id, '101');
+  assert.throws(() => agent.create(later, { scope: 'platform' }), { code: 'scope_forbidden' });
+});
