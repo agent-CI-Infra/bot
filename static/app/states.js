@@ -7,6 +7,9 @@ function consoleState(title, text, { tone = '', retry, retryLabel = t('action.re
   box.setAttribute('role', kind === 'error' ? 'alert' : 'status');
   box.setAttribute('data-testid', 'console-state-' + kind);
   if (kind === 'loading') box.setAttribute('aria-busy', 'true');
+  // #554: decorative inline mark for empty and error (loading keeps its spinner); consoleIcon() lives in shell.js,
+  // which a bare test page may not load.
+  if (kind !== 'loading' && typeof consoleIcon === 'function') { const mark = consoleIcon(kind === 'error' ? 'alert' : 'tray'); mark.classList.add('console-state-icon'); box.append(mark); }
   box.append(element('h2', title), element('p', text));
   if (retry) {
     const btn = button(retryLabel, retry, 'btn-secondary');
