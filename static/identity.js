@@ -37,22 +37,15 @@ async function renderIdentity() {
     panel.replaceChildren(consoleState('正在读取飞书应用', '正在核对你可以新增和管理的飞书应用。'));
     try { await renderFeishuSetup(setup, request); }
     catch (err) { if (current()) panel.replaceChildren(consoleState('飞书应用读取失败', feishuError(err), { tone: 'error', retry: () => render().catch(error) })); return; }
-    if (current()) { $('count').textContent = ''; panel.replaceChildren(setup, channelLink('#/identity/feishu', '返回身份与权限')); }
+    if (current()) { $('count').textContent = ''; panel.replaceChildren(setup, channelLink('#/identity/feishu', '返回飞书绑定')); }
     return;
   }
-  const personalBinding = /^#\/identity\/feishu(?:$|\?)/.test(location.hash);
-  const groups = location.hash === '#/identity/feishu/groups', conversations = location.hash === '#/identity/feishu/conversations';
-  panel.classList.toggle('identity-feishu-page', personalBinding || groups || conversations);
-  if (personalBinding || groups || conversations) {
+  const feishuBindings = /^#\/identity\/feishu(?:$|\?|\/)/.test(location.hash);
+  panel.classList.toggle('identity-feishu-page', feishuBindings);
+  if (feishuBindings) {
     $('count').textContent = '';
-    panel.replaceChildren(consoleState('正在读取飞书设置', '正在核对本人的绑定或获准管理的会话。'));
-    const load = async () => {
-      try {
-        const content = await (groups ? channelServiceBindingSettings() : conversations ? channelPersonalChats() : feishuIdentityCard());
-        if (current()) panel.replaceChildren(content);
-      } catch (err) { if (current()) panel.replaceChildren(consoleState('飞书设置读取失败', err.message, { tone: 'error', retry: load })); }
-    };
-    await load(); return;
+    await renderFeishuBindingsPage(panel, current);
+    return;
   }
   let data;
   panel.replaceChildren(consoleState('正在读取身份与权限', '正在核对当前会话的组织、身份绑定和授权记录。'));

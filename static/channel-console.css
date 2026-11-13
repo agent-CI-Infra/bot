@@ -7,7 +7,7 @@
 .channel-chat-list label { margin-bottom: var(--space-4); }
 .channel-chat-choice { margin-bottom: var(--space-2); border: 1px solid transparent; }
 .channel-chat-choice[aria-current=page] { background: var(--color-brand-weak); border-color: var(--color-brand); }
-.channel-thread-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-4); border-bottom: 1px solid var(--color-border); margin-bottom: var(--space-4); }
+.channel-thread-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-4); border-bottom: 1px solid var(--color-border); margin-bottom: var(--space-4); padding-bottom: var(--space-3); }
 .channel-thread-head .actions { align-items: center; }
 .channel-thread-head .check { margin: 0; }
 .channel-messages { height: min(64vh, 820px); min-height: 320px; overflow-y: auto; padding: var(--space-4); background: var(--color-surface-alt); border-radius: var(--radius-3); overscroll-behavior: contain; }
@@ -24,11 +24,36 @@
 .channel-related-task { padding: var(--space-4) 0; border-bottom: 1px solid var(--color-border); }
 .channel-related-task > strong { display: block; margin-bottom: var(--space-3); }
 .channel-related section { margin-top: var(--space-6); }
-.feishu-metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: var(--space-4); margin: var(--space-5) 0; }
+.feishu-metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: var(--space-4); margin: var(--space-5) 0 0; }
 .feishu-metric { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-5); background: var(--color-surface-alt); border: 1px solid var(--color-border); border-radius: var(--radius-card); min-width: 0; }
 .feishu-metric strong { font-size: var(--font-size-5); }
 .feishu-metric small { color: var(--color-text-muted); }
 .feishu-summary-row { padding: var(--space-4) 0; border-bottom: 1px solid var(--color-border); }
+.feishu-page-actions:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-top: var(--space-4); }
+.feishu-section-head:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); }
+.feishu-section-head :is(h1,h2,h3) { margin: 0; }
+.feishu-inline-actions:not([hidden]) { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.feishu-inline-actions:empty { display: none; }
+.feishu-creator-panel:not([hidden]) { display: grid; gap: var(--space-4); margin: var(--space-4) 0; padding: var(--space-5); background: var(--color-surface-alt); border: 1px solid var(--color-border); border-radius: var(--radius-card); min-width: 0; }
+.feishu-creator-head:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.feishu-binding-list:not([hidden]) { display: grid; gap: var(--space-4); margin-top: var(--space-4); min-width: 0; }
+.feishu-binding-list > .feishu-binding-row:not([hidden]) { display: grid; gap: var(--space-3); padding: var(--space-5); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); min-width: 0; overflow-wrap: anywhere; }
+.feishu-binding-list > .feishu-binding-row.feishu-binding-clickable { cursor: pointer; }
+.feishu-binding-list > .feishu-binding-row.feishu-binding-clickable:hover { border-color: var(--color-brand); background: var(--color-surface-alt); }
+.feishu-row-main:not([hidden]) { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--space-4); width: 100%; min-width: 0; }
+.feishu-row-info:not([hidden]) { flex: 1 1 320px; display: grid; gap: var(--space-2); min-width: 0; }
+.feishu-row-info > p { margin: 0; }
+.feishu-row-info > p:empty { display: none; }
+.feishu-row-title:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); min-width: 0; }
+.feishu-binding-badge:not([hidden]) { display: inline-flex; align-items: center; padding: 2px var(--space-3); border-radius: var(--radius-3); background: var(--color-brand-weak); color: var(--color-brand); font-size: var(--font-size-1); font-weight: 600; }
+.feishu-binding-badge-muted { background: var(--color-surface-alt); color: var(--color-text-muted); border: 1px solid var(--color-border); }
+.feishu-perm-tags:not([hidden]) { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.feishu-perm-tag:not([hidden]) { display: inline-flex; align-items: center; padding: 2px var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-3); background: var(--color-surface); font-size: var(--font-size-1); color: var(--color-text-muted); }
+.feishu-perm-tag-active { border-color: var(--color-brand); background: var(--color-brand-weak); color: var(--color-brand); }
+.feishu-row-actions:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.feishu-row-drawer:not([hidden]) { display: grid; gap: var(--space-3); width: 100%; min-width: 0; padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
+.feishu-repo-picker:not([hidden]) { display: grid; gap: var(--space-3); min-width: 0; }
+.feishu-repo-grid:not([hidden]) { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-2); max-height: 280px; overflow-y: auto; padding: var(--space-3); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-3); min-width: 0; }
 @media (max-width: 1279px) { .channel-console-layout { grid-template-columns: 210px minmax(0,1fr); } .channel-related { grid-column: 2; } }
 @media (max-width: 767px) {
   .channel-console-layout { grid-template-columns: minmax(0,1fr); }
@@ -39,4 +64,7 @@
   .feishu-metrics { grid-template-columns: minmax(0,1fr); }
   .feishu-metric { display: grid; grid-template-columns: minmax(0,1fr) auto; padding: var(--space-4); }
   .feishu-metric small { grid-column: 1 / -1; }
+  .feishu-creator-panel:not([hidden]), .feishu-binding-list > .feishu-binding-row:not([hidden]) { padding: var(--space-4); }
+  .feishu-row-info:not([hidden]) { flex-basis: 100%; }
+  .feishu-repo-grid:not([hidden]) { grid-template-columns: minmax(0,1fr); }
 }

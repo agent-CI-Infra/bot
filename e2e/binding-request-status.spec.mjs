@@ -25,7 +25,7 @@ async function redeem(f, issued, actor, id = f.id, appId = 'cli_fixture') {
 }
 
 for (const width of [1440, 390]) {
-  test(`one private message binds and rebinds the same identity, without relying on a larger list (${width}px)`, async ({ page }) => {
+  test(`one private message binds and rebinds the same identity, with personal and group bindings unified on one page (${width}px)`, async ({ page }) => {
     test.setTimeout(60000);
     const f = await channelFixture(), errors = [];
     page.on('pageerror', error => errors.push(error.message));
@@ -35,7 +35,8 @@ for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 844 }); await login(page, f, user);
       await expect(page.locator('#count')).toHaveText('');
       await expect(page.getByRole('link', { name: '管理员：连接或管理飞书应用', exact: true })).toHaveCount(0);
-      await expect(page.getByLabel('助手所在群', { exact: true })).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: '飞书群聊助手', exact: true })).toBeVisible();
+      await expect(page.locator('#feishu-group-editor')).toBeHidden();
       await expect(page.getByLabel('飞书认证字符串', { exact: true })).toBeHidden();
       const first = await issue(page, f.id), slot = app(page, f.id).locator('.channel-binding-console');
       await slot.getByRole('button', { name: '复制绑定串', exact: true }).click();
@@ -45,6 +46,9 @@ for (const width of [1440, 390]) {
       await expect(binding).toContainText('已绑定', { timeout: 15000 });
       const identity = f.h.store.get('SELECT id FROM external_identities WHERE external_actor=?', actor);
       const count = f.h.store.get('SELECT count(*) n FROM external_identities').n;
+      // Once bound, the creator collapses so existing bindings lead; clicking 创建个人绑定 opens it with 重新绑定.
+      await expect(page.locator('#feishu-personal-creator')).toBeHidden();
+      await page.getByRole('button', { name: '创建个人绑定', exact: true }).click();
       await expect(page.locator('.feishu-binding-steps')).toBeHidden();
       await expect(app(page, f.id).getByRole('button', { name: '重新绑定', exact: true })).toBeVisible();
       page.once('dialog', dialog => dialog.accept());
@@ -58,16 +62,9 @@ for (const width of [1440, 390]) {
       await expect(app(page, f.id).locator('.channel-binding-console code')).toHaveCount(0);
       await page.goto(f.h.admin + '/#/projects'); await page.goto(f.h.admin + '/#/identity/feishu');
       await expect(binding).toContainText('已绑定');
-      const pickPage = async name => {
-        const picker = page.getByLabel('当前页面', { exact: true });
-        if (await picker.isVisible()) await picker.selectOption({ label: name });
-        else await page.getByRole('link', { name, exact: true }).click();
-      };
-      await pickPage('群助手设置');
-      await expect(page.getByRole('heading', { name: '飞书群聊助手', exact: true })).toBeVisible();
-      await expect(page.getByRole('heading', { name: '飞书身份绑定', exact: true })).toHaveCount(0);
-      await pickPage('个人飞书绑定');
-      await expect(binding).toContainText('已绑定');
+      await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('飞书绑定');
+      await page.getByRole('button', { name: '创建群绑定', exact: true }).click();
+      await expect(page.locator('#feishu-group-editor')).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       expect(errors).toEqual([]);
     } finally { await f.close(); }
@@ -103,14 +100,8 @@ test('the chosen bot has its own simple flow and a failed group-management read 
     await issue(page, other, true);
     await expect(app(page, other).locator('code')).toBeVisible();
     await expect(page.getByLabel('飞书认证字符串', { exact: true })).toBeHidden();
-    const pickPage = async name => {
-      const picker = page.getByLabel('当前页面', { exact: true });
-      if (await picker.isVisible()) await picker.selectOption({ label: name });
-      else await page.getByRole('link', { name, exact: true }).click();
-    };
-    await pickPage('群助手设置');
-    await expect(page.getByRole('heading', { name: '飞书设置读取失败', exact: true })).toBeVisible();
-    await pickPage('个人飞书绑定');
+    // On the unified page, group read failure stays isolated inside #feishu-group-bindings while personal binding keeps working.
+    await expect(page.locator('#feishu-group-bindings').getByRole('heading', { name: '飞书群绑定读取失败', exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: '飞书身份绑定', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   } finally { await f.close(); }

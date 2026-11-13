@@ -248,6 +248,8 @@ function addressTab(hash) {
 async function route() {
   renderVersion++;
   if (/^#\/channels(?:\/|$)/.test(location.hash)) history.replaceState(null, '', '#/identity/feishu');
+  if (location.hash === '#/identity/feishu/conversations') history.replaceState(null, '', '#/conversations');
+  if (location.hash === '#/identity/feishu/groups') history.replaceState(null, '', '#/identity/feishu?section=groups');
   const legacyComputer = /^#\/settings\/computers(?:\/([^/?#]+))?$/.exec(location.hash);
   if (legacyComputer) history.replaceState(null, '', legacyComputer[1] ? `#/projects/${decodeURIComponent(legacyComputer[1])}/machine` : '#/settings/work-computers');
   // A project chat link keeps the project context; the top-level management address is a page of its own.
@@ -327,7 +329,9 @@ async function render(quiet = false) {
   // the list it started for, or step aside, and never re-point its own address at whatever `tab` became (#365).
   const pageTab = tab;
   const request=++renderVersion, taskTab = !!taskKinds[tab], isIdentity = tab === 'identity' || tab === 'preferences';
-  $('page-title').textContent = tab === 'preferences' ? titles.identity : titles[tab];
+  const identityTitle = /^#\/identity\/feishu-apps(?:\/|$)/.test(location.hash) ? '组织飞书应用'
+    : /^#\/identity\/feishu(?:$|\?|\/)/.test(location.hash) ? '飞书绑定' : titles.identity;
+  $('page-title').textContent = isIdentity ? identityTitle : titles[tab];
   const activeNavTab = ['preferences', 'identity', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === activeNavTab ? 'page' : 'false'));
   $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);

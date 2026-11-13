@@ -43,7 +43,7 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     expect(JSON.stringify(groupReplies)).not.toMatch(/Project computer is stopped|environment_not_ready|Inspect task facts/);
     await page.goto(h.admin + '/#/settings/feishu/' + id + '/4');
     await expect(page.getByRole('heading', { name: '连接健康与收发记录' })).toBeVisible();
-    await expect(page.getByText('群聊的项目范围在「设置 → 群助手设置」为每个群单独设置', { exact: false })).toBeVisible();
+    await expect(page.getByText('群聊的项目范围与服务角色在「个人设置 → 飞书绑定」中为每个群单独设置', { exact: false })).toBeVisible();
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/channels-165/diagnostics-mobile.png', fullPage: true });
