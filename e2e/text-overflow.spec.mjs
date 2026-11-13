@@ -6,6 +6,25 @@ import { TaskEngine } from '../dist/agent/engine.js';
 
 // #561: long titles and notes ellipsize; 390 keeps 退出登录 and 设置 visible; 1440 does not over-truncate medium names.
 const out = resolve('.tmp/text-overflow-561');
+
+/** After #514 the org-scope card lives inside a closed 高级／诊断 fold. Open it when present. */
+async function readyIdentity(page, url) {
+  if (url) await page.goto(url);
+  await expect(page.locator('#identity-panel')).toBeVisible();
+  const org = page.getByRole('heading', { name: '当前组织与项目范围' });
+  const github = page.getByRole('heading', { name: '我的 GitHub 连接' });
+  const legacy = page.getByRole('heading', { name: '我的身份与有效权限' });
+  await expect(github.or(org).or(legacy).first()).toBeVisible({ timeout: 15000 });
+  if (await org.isVisible()) return;
+  const summary = page.locator('details.identity-advanced > summary');
+  if (await summary.count()) {
+    await summary.first().click();
+    await expect(org).toBeVisible({ timeout: 10000 });
+  }
+  const switcher = page.getByRole('button', { name: '切换组织' });
+  if (await switcher.count()) await switcher.first().scrollIntoViewIfNeeded();
+}
+
 const longName = 'fixture/an-extraordinarily-long-repository-name-used-to-verify-ellipsis-truncation-on-narrow-screens';
 
 test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名称', async ({ page }) => {
@@ -91,8 +110,7 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     expect(list.overflow).toBe(390);
     await page.screenshot({ path: resolve(out, 'projects-390.png'), fullPage: true });
 
-    await page.goto(h.admin + '/#/identity');
-    await expect(page.getByRole('heading', { name: '当前组织与项目范围' })).toBeVisible();
+    await readyIdentity(page, h.admin + '/#/identity');
     const identity = await page.evaluate(() => {
       const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '切换组织');
       const notes = [...document.querySelectorAll('.identity-layout .muted, .identity-overview .muted')];
