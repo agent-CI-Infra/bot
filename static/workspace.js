@@ -12,7 +12,7 @@ function workspaceOverview() {
   const address = (key, next = 0) => `#/projects/${id}/overview/${key}${next ? '.' + next : ''}`;
   const alive = () => root.isConnected && me?.id === owner && current?.id === id && current.section === 'overview' && location.hash === routeKey;
   const head = element('div', '', 'console-page-head'), heading = element('div');
-  heading.append(element('p', 'PROJECT OVERVIEW', 'eyebrow'), element('h2', '项目总览'), note('查看工作进展，处理阻塞，并进入项目设置。'));
+  heading.append(element('p', '总览', 'eyebrow'), element('h2', '项目总览'), note('查看工作进展，处理阻塞，并进入项目设置。'));
   const refresh = button('刷新总览', () => void update()); head.append(heading, refresh);
   const metrics = element('nav', '', 'workspace-metrics'); metrics.setAttribute('aria-label', '项目任务范围');
   const numbers = new Map();

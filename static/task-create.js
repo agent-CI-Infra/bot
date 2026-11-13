@@ -17,7 +17,7 @@ async function renderNewTask(request) {
   const root = element('section', '', 'task-create-page');
   const alive = () => root.isConnected && me?.id === owner && location.hash === address && request === renderVersion;
   const heading = element('div', '', 'console-page-head');
-  heading.append(element('p', 'NEW TASK', 'eyebrow'), element('h1', '新建任务'), note('写清需求与验收条件，提交后查看真实任务进展和证据。'));
+  heading.append(element('p', '新任务', 'eyebrow'), element('h1', '新建任务'), note('写清需求与验收条件，提交后查看真实任务进展和证据。'));
   const picker = document.createElement('select'); picker.setAttribute('aria-label', '任务项目');
   picker.add(new Option('请选择项目', '')); repositories.forEach(repo => picker.add(new Option(repo.full_name, repo.id))); picker.value = id;
   picker.addEventListener('change', () => { location.hash = '#/new-task' + (picker.value ? '/' + picker.value : ''); });
