@@ -229,7 +229,8 @@ function syncConsoleShell() {
 }
 function renderConsoleMore() {
   const page = $('console-page'); page.replaceChildren();
-  const head = element('div', '', 'console-page-head'); head.append(element('p', 'WORKSPACE', 'eyebrow'), element('h1', '更多功能'), element('p', '按工作内容找到入口，当前项目和权限范围会随你继续。', 'muted'));
+  // Complete user-visible phrases, ready to move into a locale dictionary later (#527).
+  const head = element('div', '', 'console-page-head'); head.append(element('p', '工作区', 'eyebrow'), element('h1', '更多功能'), element('p', '按工作内容找到入口，当前项目和权限范围会随你继续。', 'muted'));
   const groups = element('div', '', 'console-groups');
   for (const group of consoleGroups()) {
     const section = element('section', '', 'console-group'); section.append(element('h2', group.title));
@@ -240,7 +241,7 @@ function renderConsoleMore() {
 async function renderConsoleInbox(request) {
   const page = $('console-page'), match = consoleInboxRoute(), id = match?.[1] === 'all' ? '' : match?.[1] || '', offset = Number(match?.[2] || 0);
   const head = element('div', '', 'console-page-head'), title = element('div');
-  title.append(element('p', 'NEEDS ATTENTION', 'eyebrow'), element('h1', '待处理'), element('p', '需要关注的真实任务；自动排队和正常执行不计入。具体操作以当前权限和任务回执为准。', 'muted'));
+  title.append(element('p', '需要关注', 'eyebrow'), element('h1', '待处理'), element('p', '需要关注的真实任务；自动排队和正常执行不计入。具体操作以当前权限和任务回执为准。', 'muted'));
   head.append(title); page.replaceChildren(head);
   const filters = element('div', '', 'console-inbox-filters'), label = element('label', '项目'), picker = document.createElement('select');
   picker.add(new Option('所有有权访问的项目', '')); repositories.forEach(r => picker.add(new Option(r.full_name, r.id))); picker.value = id;
