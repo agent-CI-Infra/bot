@@ -169,7 +169,7 @@ test('「更多」不再重复底栏目的地，按三组补充且只保留当�
     await page.goto(h.admin + '/#/more');
     const headings = await page.locator('.console-group h2').allInnerTexts();
     expect(headings).toEqual(['当前项目', '个人与平台', '管理']);
-    const captions = await page.locator('.console-group a > span').allInnerTexts();
+    const captions = await page.locator('.console-group a .console-link-copy > span').allInnerTexts();
     const flat = captions.map(text => text.trim());
     // A destination that the bar already offers is not repeated as a row here.
     for (const duplicate of ['项目', '任务', '待处理', '助手', '全部项目', '任务看板', '管理对话']) {
