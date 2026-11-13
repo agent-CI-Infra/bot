@@ -112,6 +112,25 @@ test('service role budgets stop at the limit and on usage that cannot be priced'
   assert.equal((await web(f,'换币种')).events.find(e=>e.type==='error').data.error,'service_role_budget_usage_unknown');
 });
 
+test('a budgeted assistant retries a failed model request: a request that returned nothing costs nothing and never blocks the budget',async t=>{
+  const f=await managementFixture(t),{admin,h}=f;let calls=0;
+  const model=h.store.get('SELECT version FROM models WHERE id=?',f.assistantModel.id);
+  assert.equal((await admin('/api/models/'+f.assistantModel.id,'PATCH',{version:model.version,pricing:{currency:'USD',input_per_million:1000,output_per_million:1000,cache_per_million:1000}})).status,200);
+  const current=await role(admin,'management-assistant');
+  assert.equal((await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:current.revision,budget:{currency:'USD',limit_amount:1}})).status,200);
+  // A 503 and a dropped connection, then the answer: both failures are retried within the same message.
+  f.modelState.respond=async(_body,res)=>{calls++;if(calls===1){res.writeHead(503,{'Content-Type':'application/json'});res.end('{"error":"busy"}');return;}if(calls===2){res.socket.destroy();return;}reply(res,'重试后的回答');};
+  let result=await web(f,'你好');assert.equal(result.message.state,'completed',JSON.stringify(result.events));
+  assert.deepEqual(h.store.all("SELECT state,cost FROM model_requests WHERE service_role_id='management-assistant' ORDER BY rowid").map(r=>[r.state,r.cost]),
+    [['http_error',0],['transport_error',0],['received',0.018]]);
+  assert.equal((await web(f,'再问一次')).message.state,'completed');
+  // A request that failed after streaming part of an answer may have been charged: its cost stays unknown, and the budget stops.
+  calls=0;f.modelState.respond=async(_body,res)=>{if(++calls===1){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('data: '+JSON.stringify({choices:[{index:0,delta:{content:'半截'}}]})+'\n\n');setTimeout(()=>res.socket.destroy(),20);return;}reply(res,'不会发出');};
+  result=await web(f,'第三次');
+  assert.equal(result.events.find(e=>e.type==='error').data.error,'service_role_budget_usage_unknown');
+  assert.equal(h.store.get("SELECT cost FROM model_requests WHERE service_role_id='management-assistant' AND state='transport_error' ORDER BY rowid DESC LIMIT 1").cost,null);
+});
+
 test('deleting the shared model clears it from service roles and the wizard default fills built-in roles without one',async t=>{
   const f=await managementFixture(t),{admin,h}=f,before=await role(admin,'management-assistant');
   assert.equal((await admin('/api/models/'+f.assistantModel.id,'DELETE',{})).status,200);

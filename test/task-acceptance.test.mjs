@@ -65,7 +65,8 @@ test('the evaluator gets a bounded candidate: a workspace file list and old evid
  assert.equal(candidate.evidence[0].source,'task_log:0');assert.equal(candidate.evidence[0].result.omitted,true,'older previews become sources for read_evidence');
 });
 test('an evaluator outage is recoverable infrastructure failure, does not reject or complete the candidate',async t=>{
- const f=await fixture(t,(_b,n)=>n<=3?{status:503}:{role:'assistant',content:JSON.stringify(pass)});
+ // An outage that outlasts the transport's five retries (six requests).
+ const f=await fixture(t,(_b,n)=>n<=6?{status:503}:{role:'assistant',content:JSON.stringify(pass)});
  await assert.rejects(evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{}),{code:'model_http_503',state:'retry_wait'});
  assert.equal(f.records.get(f.task.id).acceptance,null);assert.equal(f.records.get(f.task.id).rounds,0);
  const verdict=await evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{});const c=f.records.get(f.task.id).candidate;f.records.decide(f.task.id,c.id,c.revision,verdict);
@@ -184,8 +185,9 @@ test('a fresh evaluation reuses hash-addressed raw verification only for the sam
  const {readEvidence,previousVerificationEvidence}=await import('../dist/tasks/evidence.js');
  const f=await fixture(t,(body,n)=>{
   if(n===1)return {role:'assistant',content:null,tool_calls:[{id:'raw-read',type:'function',function:{name:'read_file',arguments:JSON.stringify({path:'report.md'})}}]};
-  if(n>=2&&n<=4)return {status:503};
-  if(n===5){const p=JSON.parse(body.messages[1].content);assert.equal(p.previous_verification_evidence.length,1);return {role:'assistant',content:null,tool_calls:[{id:'prior-proof',type:'function',function:{name:'read_evidence',arguments:JSON.stringify({source:p.previous_verification_evidence[0].source})}}]};}
+  // The outage outlasts the transport's five retries of the second request.
+  if(n>=2&&n<=7)return {status:503};
+  if(n===8){const p=JSON.parse(body.messages[1].content);assert.equal(p.previous_verification_evidence.length,1);return {role:'assistant',content:null,tool_calls:[{id:'prior-proof',type:'function',function:{name:'read_evidence',arguments:JSON.stringify({source:p.previous_verification_evidence[0].source})}}]};}
   assert.ok(body.messages.some(m=>m.role==='tool'&&m.content.includes('Raw previously observed report')));return {role:'assistant',content:JSON.stringify(pass)};
  });
  let reads=0;const workspace={call:async()=>{reads++;return {content:'Raw previously observed report',version:'report-v1'};}};

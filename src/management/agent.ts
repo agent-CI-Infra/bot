@@ -231,7 +231,9 @@ export class ManagementAgent {
           +(role?.prompt?'\n\nAdditional instructions from the platform administrator (they never widen your tools or permissions):\n'+role.prompt:'');
         const context=this.context(base,conversation,id,input.content);
         await runAgent({store:this.store,task:{id,repository_id:null,service_role_id:managementAssistant,kind:'management.agent',conversation_id:conversation,source_message:input.source_message},redactor,guard,
-          beforeModel:async()=>checkServiceRoleBudget(this.store,managementAssistant,model.pricing),model,executionSignal:signal,modelAttempts:1,
+          beforeModel:async()=>checkServiceRoleBudget(this.store,managementAssistant,model.pricing),model,executionSignal:signal,
+          // A stalled or failed model request is retried instead of failing the message; the console drops any text it had streamed.
+          onModelRetry:retry=>{this.event(id,'model_retry',{retry:retry.retry,retries:retry.retries,error:retry.code,delay_ms:retry.delay_ms});},
           system,
           prompt:JSON.stringify(context),tools:turnTools,
           adapter:async({request})=>{
@@ -303,7 +305,9 @@ export class ManagementAgent {
         const code=error instanceof HttpError||error instanceof TaskError?error.code:'management_agent_failed';
         // Service role configuration gaps are actionable by an administrator: say where to fix them.
         const notice=code.startsWith('service_role_')?(error instanceof TaskError&&error.detail)||managementFailure(code):undefined;
-        this.store.run("UPDATE management_messages SET state='failed',updated_at=? WHERE id=?",now(),id);this.event(id,'error',{error:code,...(notice?{notice}:{})});
+        // Without a notice, the reason (for example no model output for 90 seconds through every retry) explains the failure.
+        const detail=!notice&&error instanceof TaskError&&error.detail?redactor.text(error.detail):undefined;
+        this.store.run("UPDATE management_messages SET state='failed',updated_at=? WHERE id=?",now(),id);this.event(id,'error',{error:code,...(notice?{notice}:{}),...(detail?{detail}:{})});
       }
     }finally{
       if(this.store.get('SELECT state FROM management_messages WHERE id=?',id)?.state==='completed')incoming?.finish();

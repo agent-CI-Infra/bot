@@ -120,7 +120,7 @@ export class ChannelConsole {
       turns: turns.slice(0, 50).map(turn => mode === 'management' ? { id: turn.id, source_message: turn.source_message, created_at: turn.created_at,
         state: managementStates[turn.state] ?? turn.state, request: JSON.parse(turn.input).content, messages: this.service.management.stageMessages(turn.id),
         incoming_messages: this.service.turnMessages.list(turn.id, senderName), reply: this.personalReply(turn), role_id: '管理助手' }
-        : binding ? { id: turn.id, source_message: turn.source_message, state: turn.state, error: turn.error, created_at: turn.created_at, updated_at: turn.updated_at,
+        : binding ? { id: turn.id, source_message: turn.source_message, state: turn.state, error: turn.error, ...(turn.error_detail ? { error_detail: turn.error_detail } : {}), created_at: turn.created_at, updated_at: turn.updated_at,
           role_id: roles.get(turn.service_role_id) ?? turn.service_role_id, can_stop: manageable && turn.state === 'running',
           messages: this.service.serviceSessions.messages(turn.id).map(m => ({ sequence: m.sequence, text: m.text, created_at: m.created_at })),
           incoming_messages: this.service.turnMessages.list(turn.id, senderName),

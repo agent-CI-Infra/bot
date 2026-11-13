@@ -98,7 +98,7 @@ async function channelBindingOverview(data) {
   return overview;
 }
 
-const channelStepLabels = { running: '开始执行', model_start: '请求模型', model_done: '模型已返回', model_request: '模型请求已记录', tool_call: '调用工具', tool_result: '工具已返回', tool_error: '工具调用失败', done: '本轮完成', error: '本轮失败', stopped: '已停止' };
+const channelStepLabels = { running: '开始执行', model_start: '请求模型', model_done: '模型已返回', model_request: '模型请求已记录', model_retry: '模型请求失败，等待后重试', tool_call: '调用工具', tool_result: '工具已返回', tool_error: '工具调用失败', done: '本轮完成', error: '本轮失败', stopped: '已停止' };
 const channelToolLabels = { list_projects: '查看项目范围', list_project_tasks: '查询项目任务', read_project_task: '读取任务', create_project_task: '创建项目任务', manage_project_task: '管理项目任务',
   start_own_task: '开始独立任务', continue_own_task: '继续独立任务', list_own_tasks: '查看独立任务', management_query: '查询管理信息', management_command: '执行管理操作', github_read: '读取 GitHub', github_write: '写入 GitHub', send_message: '发布进展消息' };
 const channelTime = value => timestamp(typeof value === 'number' ? value : Date.parse(value));
@@ -222,6 +222,7 @@ async function renderChannelConsole(request) {
         else if (value.silent) row.append(note('本轮保持安静，未发送回答' + (value.silent_reason ? '：' + value.silent_reason : '。')));
         else if (value.state === 'completed') row.append(note('本轮没有生成可展示的回答。'));
         if (value.error) row.append(note(employeeError(value.error)));
+        if (value.error_detail) row.append(note('原因：' + value.error_detail));
         history.append(row);
       }
     }

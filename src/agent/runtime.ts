@@ -12,7 +12,10 @@ import { ToolTranscript, toolArguments, toolCallsProblem } from './tool-context.
 export interface AgentServices {
   model: AgentModel;
   guard: () => Promise<void>;
-  request: (body: Record<string, any>, requestId: string, onToken?: (delta?: ModelDelta) => Promise<void>, onFinish?: (reason: string) => Promise<void>) => ReturnType<typeof requestModel>;
+  /** `onRetry` hears about each retry of this one request, for a caller that must keep someone waiting meanwhile.
+   * `retry: false` sends an optional request once: a caller that can do without its result should not wait out retries. */
+  request: (body: Record<string, any>, requestId: string, onToken?: (delta?: ModelDelta) => Promise<void>, onFinish?: (reason: string) => Promise<void>,
+    options?: { onRetry?: (retry: ModelRetry) => void | Promise<void>; retry?: false }) => ReturnType<typeof requestModel>;
 }
 /** Run-local measurements and the receipts needed to investigate an interrupted provider request. */
 export interface ExternalUsage {
@@ -21,6 +24,26 @@ export interface ExternalUsage {
   unresolved_requests?: { request_ref: string; provider_request_id: string | null; started_at: string; reason: string }[];
   reconciliation?: string;
 }
+/** One retry of a model request that failed transiently: which retry it is, why, and how long it waits first. */
+export interface ModelRetry { retry: number; retries: number; code: string; detail?: string; delay_ms: number; request_id: string }
+// A model request that fails transiently (no response for a while, a dropped connection or stream, 408, 429, 5xx) is sent
+// again up to five times, waiting 1, 3, 9, 27 and 60 seconds, before the turn or task fails: one stalled request should not
+// cost the work done so far. Permanent errors (authentication, other 4xx, invalid configuration) are never retried.
+export const modelRetries = 5;
+let retryBaseMs = 1000;
+export const modelRetryDelay = (retry: number): number => Math.min(60 * retryBaseMs, retryBaseMs * 3 ** (retry - 1));
+/** Tests shorten the waits; production always uses one second as the base. */
+export function configureModelRetry(options: { baseMs?: number } | null): void { retryBaseMs = options?.baseMs ?? 1000; }
+const transientModelError = (error: unknown): error is TaskError => error instanceof TaskError &&
+  (error.code === 'model_unavailable' || error.code === 'model_response_invalid' || /^model_http_(408|429|5\d\d)$/.test(error.code));
+// A wait the turn's stop or abort can end early; the guard after it then reports why.
+const pause = (ms: number, signal?: AbortSignal) => new Promise<void>(resolve => {
+  if (signal?.aborted) return resolve();
+  const timer = setTimeout(done, ms);
+  function done() { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve(); }
+  signal?.addEventListener('abort', done, { once: true });
+});
+
 export interface AgentSpec<T> {
   store: Store;
   /** Trusted preparation and run binding for external protocol drivers; never supplied by model output. */
@@ -75,6 +98,8 @@ export interface AgentSpec<T> {
   maxOutputTokens?: number;
   /** Trusted transport budget, identical in local and container execution. Includes the initial request. */
   modelAttempts?: number;
+  /** Told before each wait for a model retry, so a caller can record it and drop output the failed attempt streamed. */
+  onModelRetry?: (retry: ModelRetry) => void | Promise<void>;
   execute?: (name: string, args: any) => Promise<any>;
   validate?: (content: string) => T | Promise<T>;
   /** Trusted, opt-in format feedback; at most two corrections within the same finite run. */
@@ -106,9 +131,9 @@ export const subagentSystem = 'You are an independent agent started by the main 
  */
 export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   await spec.guard();
-  const attempts = spec.modelAttempts ?? 3;
-  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 3)
-    return stop('agent_limits_invalid', 'waiting_configuration', 'Agent 模型请求尝试次数必须为 1–3。');
+  const attempts = spec.modelAttempts ?? modelRetries + 1;
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > modelRetries + 1)
+    return stop('agent_limits_invalid', 'waiting_configuration', `Agent 模型请求尝试次数必须为 1–${modelRetries + 1}。`);
   const tools = spec.tools ?? [];
   if (!Array.isArray(tools) || tools.some(tool => !tool || tool.type !== 'function' || typeof tool.function?.name !== 'string' || !tool.function.name) ||
     new Set(tools.map(tool => tool.function.name)).size !== tools.length)
@@ -122,7 +147,7 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   spec.task.trace_run_id=run?.id;
   const services: AgentServices = {
     model, guard: spec.guard,
-    request: async (body, requestId, onToken, onFinish) => {
+    request: async (body, requestId, onToken, onFinish, options) => {
       if(spec.modelTrace?.source==='external_harness')return stop('external_harness_model_request','failed');
       if (body.tools !== undefined && (!Array.isArray(body.tools) || body.tools.some((tool: any) => !tool || tool.type !== 'function' || !allowed.has(tool.function?.name))))
         return stop('agent_tool_not_allowed', 'failed', 'Agent 请求使用未授权的工具。');
@@ -133,11 +158,19 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
       for (let attempt = 0; ; attempt++) {
         try { await spec.beforeModel?.(); return await requestModel({ ...spec, model, body: { ...body, ...(tools ? { tools } : {}) }, requestId: (spec.requestPrefix || '') + requestId, onToken, onFinish }); }
         catch (error) {
-          const transient = error instanceof TaskError && (error.code === 'model_unavailable' || error.code==='model_response_invalid' || /^model_http_(429|5\d\d)$/.test(error.code));
-          if (!transient || attempt + 1 >= attempts) {if(error instanceof TaskError&&error.code==='model_response_invalid')return stop(error.code,'retry_wait',error.detail);throw error;}
+          if (!transientModelError(error)) throw error;
+          if (attempt + 1 >= (options?.retry === false ? 1 : attempts)) {
+            // Say how often it was tried, so whoever reads the failure knows it was not a single hiccup.
+            const detail = attempt ? `${error.detail ?? error.code}（已自动重试 ${attempt} 次仍失败）` : error.detail;
+            return stop(error.code, error.code === 'model_response_invalid' ? 'retry_wait' : error.state, detail, error.retryAfterMs, error.bucket);
+          }
+          const retry: ModelRetry = { retry: attempt + 1, retries: attempts - 1, code: error.code, ...(error.detail ? { detail: error.detail } : {}),
+            delay_ms: modelRetryDelay(attempt + 1), request_id: requestId };
           if (spec.task.id && spec.store.get('SELECT id FROM tasks WHERE id=?', spec.task.id)) spec.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)', randomId(), spec.task.id,
-            JSON.stringify({ type: 'model_retry', code: error.code, request_id: requestId, retry: attempt + 1 }), new Date().toISOString());
-          await new Promise(resolve => setTimeout(resolve, 1000 * 3 ** attempt));
+            JSON.stringify({ type: 'model_retry', code: error.code, request_id: requestId, retry: retry.retry, ...(error.detail ? { detail: error.detail } : {}), delay_ms: retry.delay_ms }), new Date().toISOString());
+          await spec.onModelRetry?.(retry);
+          await options?.onRetry?.(retry);
+          await pause(retry.delay_ms, spec.executionSignal);
           await spec.guard();
         }
       }

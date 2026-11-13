@@ -49,6 +49,9 @@ export function serviceBindingStorage(store: Store): void {
       WHEN NEW.status IN ('completed','succeeded','pr_opened','cancelled','failed') AND (OLD.status<>NEW.status OR OLD.result IS NOT NEW.result OR OLD.error_code IS NOT NEW.error_code)
       AND EXISTS(SELECT 1 FROM channel_service_tasks WHERE task_id=NEW.id) BEGIN
       INSERT INTO channel_task_results(task_id) VALUES(NEW.id); END;`);
+  // Why a turn failed beyond its code, for example a model that sent nothing for 90 seconds through every retry.
+  if (!store.all('PRAGMA table_info(channel_service_turns)').some(c => c.name === 'error_detail'))
+    store.db.exec('ALTER TABLE channel_service_turns ADD COLUMN error_detail TEXT');
   // Bindings from before #424 are owned by their configurer.
   if (!store.all('PRAGMA table_info(channel_service_bindings)').some(c => c.name === 'owner_id'))
     store.db.exec("ALTER TABLE channel_service_bindings ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''");
