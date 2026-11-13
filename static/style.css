@@ -64,3 +64,7 @@ a.status-link:hover{text-decoration:underline}
 
 #channels-panel{display:grid;gap:1rem;padding:1rem}#channels-panel>.side-card{margin:0}#channels-panel form{max-width:50rem}
 .feishu-setup{display:grid;gap:14px;min-width:0}.feishu-setup>.side-card{margin:0}.feishu-setup .wizard-steps{flex-wrap:wrap;overflow:visible}.feishu-setup .wizard-steps button{white-space:normal;text-align:left}.feishu-instructions,.feishu-binding-steps{padding-left:22px;line-height:1.8}.feishu-instructions li+li,.feishu-binding-steps li+li{margin-top:8px}.channel-binding{display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:12px 0;min-width:0;overflow-wrap:anywhere}.channel-copy{display:grid;gap:6px;width:100%;min-width:0}.channel-copy textarea{font:var(--font-size-1)/1.6 ui-monospace,monospace;min-height:42px;overflow-wrap:anywhere;white-space:pre-wrap}.channel-copy button{justify-self:start}.channel-copy p:empty{display:none}#feishu-identity{scroll-margin-top:12px}.feishu-scope-check{display:grid;gap:6px;width:100%;min-width:0}.feishu-scope-check p{margin:0}.feishu-scope-missing{margin:0;padding-left:22px;line-height:1.8}.feishu-scope-check summary{cursor:pointer}
+
+/* #560: webhook / event rows share one rhythm; project list stays with #544. */
+#rows[data-view=events] .row{align-items:center;min-height:56px;padding:var(--space-4) var(--space-6)}
+#rows[data-view=events] .row>.actions{align-self:center}

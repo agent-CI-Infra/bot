@@ -307,7 +307,17 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .role-nav { display:flex; flex-wrap:wrap; gap:.4rem; margin-bottom:1rem; }
 .role-nav a { padding:.5rem .8rem; border:1px solid var(--border, #d8dee9); border-radius:6px; text-decoration:none; }
 .role-nav a[aria-current="page"] { font-weight:700; background:var(--surface-alt, #edf2fa); }
-.roles-page .project-table td { min-width:150px; vertical-align:top; }
+.roles-page .side-card:has(.project-table) { overflow-x: auto; }
+.roles-page .project-table { table-layout: auto; }
+.roles-page .project-table th { white-space: nowrap; }
+.roles-page .project-table th, .roles-page .project-table td { padding: var(--space-4); vertical-align: middle; line-height: var(--line-height-body); }
+.roles-page .project-table td[data-label="启用"] { width: 6.5em; white-space: nowrap; text-align: center; }
+.roles-page .project-table td[data-label="角色"] { white-space: nowrap; }
+.roles-page .project-table td[data-label="职责"] { max-width: 32em; overflow: hidden; }
+.roles-page .project-table td[data-label="职责"] > :is(.muted, p) {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; text-overflow: ellipsis; margin: 4px 0 0; font-size: var(--font-size-1);
+}
+
 .roles-page input:not([type="checkbox"]), .roles-page select, .roles-page textarea { box-sizing:border-box; max-width:100%; }
 .roles-page .side-card > label { display:flex; flex-direction:column; gap:.3rem; margin:.75rem 0; }
 .roles-page .side-card > label.check { flex-direction:row; }
