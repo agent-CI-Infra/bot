@@ -166,9 +166,10 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
   }
   let brief: Decision['brief'] = null;
   if (value.brief !== undefined && value.brief !== null) {
-    const goal = typeof value.brief?.goal === 'string' ? value.brief.goal.trim() : '', criteria = Array.isArray(value.brief?.criteria) ? value.brief.criteria.filter((c: unknown) => typeof c === 'string' && c.trim()).map((c: string) => c.trim().slice(0, 500)) : [];
+    const goal = typeof value.brief?.goal === 'string' ? value.brief.goal.trim() : '', criteria = value.brief?.criteria ?? [];
     if (decision !== 'create' || !goal) fail('dispatch_brief_invalid', 'brief belongs to create and needs a goal.');
-    brief = { goal: goal.slice(0, 2000), criteria: criteria.slice(0, 10) };
+    if (!Array.isArray(criteria) || criteria.some((c: unknown) => typeof c !== 'string' || !c.trim())) fail('dispatch_brief_invalid', 'brief.criteria must be an array of nonempty strings; no criteria are discarded.');
+    brief = { goal, criteria: criteria.map((c: string) => c.trim()) };
   }
   // An Issue development without a reviewed implementation goal works to the Manager's brief, so it needs one.
   const unscoped = decision === 'create' && context.options.some(option => ids.includes(option.id) && option.spec.type === 'object' && option.spec.kind === 'development.issue'

@@ -10,6 +10,8 @@ import { taskPermissions } from '../dist/tasks/configuration.js';
 import { workPermissions } from '../dist/work/settings.js';
 import { roleConfiguration, saveConfiguration } from '../dist/roles/definition.js';
 import { managerDecision } from '../dist/dispatch/manager.js';
+import { recordEvent, checkDecision, dispatchContext, applyDecision } from '../dist/dispatch/store.js';
+import { TaskRecords } from '../dist/tasks/service.js';
 
 // These tests ask the Manager for real: events wait for its model call instead of the rule decider other tests use.
 configureDispatch(null);
@@ -92,6 +94,35 @@ test('an event reaches the Manager once; its decision creates the task with the 
   // The task detail shows where it came from.
   const detail = await f.admin('/api/tasks/' + task.id + '/dispatch');
   assert.equal(detail.value.dispatch[0].reason, '新 Issue 需要检视'); assert.equal(detail.value.dispatch[0].relation, 'created');
+});
+
+test('dispatch preserves a long goal and all twelve long criteria in the task contract', async t => {
+  const f = await fixture(t), brief = { goal: 'Complete goal: ' + 'g'.repeat(2200), criteria: Array.from({ length: 12 }, (_, i) => `Criterion ${i + 1}: ` + 'c'.repeat(600)) };
+  assert.equal(recordEvent(f.h.store, { repositoryId: '101', key: 'complete-brief', type: 'schedule.due', source: 'schedule', summary: 'Scheduled verification', facts: {},
+    options: [{ id: 'check', work: 'task.request', title: 'Check', spec: { type: 'request', key: 'complete-brief', request: 'Verify the complete contract', principal: null } }] }), 1);
+  const event = events(f.h)[0], context = dispatchContext(f.h.store, event), decision = { decision: 'create', option_ids: ['check'], reason: 'Preserve the full contract', brief };
+  assert.deepEqual(checkDecision(f.h.store, context, decision).brief, brief);
+  const { created } = applyDecision(f.h.store, event, decision, null);
+  assert.equal(created.length, 1);
+  const task = tasks(f.h)[0], contract = new TaskRecords(f.h.store).get(task.id).contract;
+  assert.equal(contract.goal, brief.goal); assert.deepEqual(contract.criteria, brief.criteria);
+  assert.deepEqual(JSON.parse(task.input).manager.brief, brief);
+  assert.deepEqual(JSON.parse(events(f.h)[0].brief), brief);
+});
+
+test('invalid brief criteria are rejected instead of silently dropped and the Manager can correct them', async t => {
+  const f = await fixture(t);
+  f.state.decide = (input, round) => ({ decision: 'create', option_ids: [input.options.create.find(o => o.work === 'review.issue').id], reason: 'Check every supplied criterion',
+    brief: { goal: 'Verify the file', criteria: round === 0 ? ['Keep this criterion', 7] : ['Keep this criterion', 'Inspect the last line'] } });
+  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'repair-brief');
+  await f.run();
+  assert.equal(f.requests.length, 2);
+  assert.match(f.requests[1].messages.find(m => m.role === 'tool').content, /dispatch_brief_invalid/);
+  assert.deepEqual(JSON.parse(tasks(f.h)[0].input).manager.brief.criteria, ['Keep this criterion', 'Inspect the last line']);
+  const context = dispatchContext(f.h.store, events(f.h)[0]);
+  for (const criteria of ['not an array', ['valid', '   '], ['valid', null], {}]) {
+    assert.throws(() => checkDecision(f.h.store, context, { decision: 'create', option_ids: [context.options[0].id], reason: 'Reject invalid criteria', brief: { goal: 'Verify', criteria } }), { code: 'dispatch_brief_invalid' });
+  }
 });
 
 test('a later event on the same Issue continues the running review; ignore leaves only the reason', async t => {
