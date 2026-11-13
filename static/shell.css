@@ -110,6 +110,14 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--spac
 .console-link:hover { background: var(--color-brand-weak); color: var(--color-brand); }
 .console-link > span { font-weight: 550; }
 .console-link small { color: var(--color-text-muted); font-size: var(--font-size-1); font-weight: 400; }
+/* #554: linear SVG icons share currentColor and a 24px viewBox. */
+.console-icon { width: 22px; height: 22px; flex-shrink: 0; display: block; }
+.console-nav-icon { width: 22px; height: 22px; line-height: 0; }
+#console-sidebar #tabs button, #console-sidebar .console-link { gap: 10px; }
+.console-link-with-icon { flex-direction: row; align-items: flex-start; gap: 12px; }
+.console-link-with-icon .console-icon { margin-top: 2px; color: var(--color-brand); }
+.console-link-copy { display: flex; flex-direction: column; justify-content: center; gap: 4px; min-width: 0; }
+.console-link-copy > span { overflow-wrap: anywhere; }
 /* #553: empty, loading and error share one component (consoleState()). */
 .console-state { display: grid; justify-items: center; gap: var(--space-4); padding: var(--space-8) var(--space-6); background: var(--color-surface); text-align: center; border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
 .console-state h2 { font-size: var(--font-size-4); margin: 0; font-weight: 650; }
@@ -190,12 +198,11 @@ body.console-ready .management-page { left: var(--console-rail); }
   .console-location { flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-4); }
   .console-section-picker { display: flex; flex-basis: 100%; gap: 6px; font-size: var(--font-size-1); margin-top: 4px; }
   .console-mobile-nav { position: fixed; z-index: 48; inset: auto 0 0; display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); min-height: var(--console-mobile-height); margin: 0; padding: 4px 4px calc(4px + env(safe-area-inset-bottom)); background: var(--color-surface); border: 0; border-top: 1px solid var(--color-border); box-shadow: 0 -3px 16px #142b4b05; }
-  /* The glyph is drawn from data-glyph: the destination's text, and its accessible name, is only the label. */
-  .console-mobile-nav .console-link { position: relative; align-items: center; text-align: center; gap: 2px; padding: 4px 2px; min-height: 52px; font-size: var(--font-size-1); color: var(--color-text-muted); }
-  .console-mobile-nav .console-link::before { content: attr(data-glyph); font-size: 20px; line-height: 24px; }
+  .console-mobile-nav .console-link { position: relative; align-items: center; text-align: center; gap: 4px; padding: 6px 4px; min-height: 52px; font-size: var(--font-size-1); color: var(--color-text-muted); }
   .console-mobile-nav .console-link[aria-current=page] { color: var(--color-brand); background: var(--color-brand-weak); }
   .console-mobile-nav .console-link.console-nav-busy { color: var(--color-brand); }
-  /* A dot, not a number: the badge says a reply or a turn is waiting, and the accessible name carries the detail. */
+  .console-mobile-nav .console-nav-icon { width: 22px; height: 22px; margin: 0 auto; }
+  .console-mobile-nav .console-link-with-icon { flex-direction: column; align-items: center; gap: 4px; }
   .console-mobile-nav .console-nav-badge { position: absolute; top: 5px; left: calc(50% + 8px); display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--color-danger); }
   .console-mobile-nav a[data-active="1"] .console-nav-badge, .console-mobile-nav a[data-unread="1"] .console-nav-badge { display: block; }
   .console-nav-icon { font-size: var(--font-size-brand); line-height: 24px; }

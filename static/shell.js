@@ -338,7 +338,17 @@ function renderConsoleMore() {
   for (const group of consoleGroups()) {
     const section = element('section', '', 'console-group'); if (group.wide) section.classList.add('console-group-wide');
     if (group.testid) section.dataset.testid = group.testid; section.append(element('h2', group.title));
-    for (const [href, caption, hint] of group.items) section.append(consoleLink(href, caption, hint)); groups.append(section);
+    for (const [href, caption, hint] of group.items) {
+      const link = consoleLink(href, caption, hint);
+      const icon = consoleIcon(consoleIconName(href));
+      icon.classList.add('console-nav-icon');
+      const copy = element('div', '', 'console-link-copy');
+      while (link.firstChild) copy.append(link.firstChild);
+      link.append(icon, copy);
+      link.classList.add('console-link-with-icon');
+      section.append(link);
+    }
+    groups.append(section);
   }
   page.append(head, groups);
 }
@@ -404,6 +414,94 @@ function restoreConsolePosition() {
     if (saved?.focus) document.getElementById(saved.focus)?.focus({ preventScroll: true });
   });
 }
+
+// #554: one linear SVG set for workspace navigation. Icons are decorative
+// (aria-hidden); the visible caption remains the accessible name. The four
+// mobile destinations and their addresses are unchanged (#481 / #496).
+function consoleIcon(name) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('class', 'console-icon console-icon-' + name);
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.75');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  const shapes = (consoleIcon.shapes[name] || consoleIcon.shapes.link);
+  for (const [tag, attrs] of shapes) {
+    const node = document.createElementNS(ns, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    svg.append(node);
+  }
+  return svg;
+}
+consoleIcon.shapes = {
+  home: [['path', { d: 'M4 11.5 12 4l8 7.5' }], ['path', { d: 'M6 10.8V20a1 1 0 0 0 1 1h3.5v-6h3v6H17a1 1 0 0 0 1-1v-9.2' }]],
+  board: [['rect', { x: '3.5', y: '4', width: '5', height: '16', rx: '1' }], ['rect', { x: '9.5', y: '4', width: '5', height: '10', rx: '1' }], ['rect', { x: '15.5', y: '4', width: '5', height: '13', rx: '1' }]],
+  inbox: [['path', { d: 'M4 13h4l1.2 2.4a1 1 0 0 0 .9.6h3.8a1 1 0 0 0 .9-.6L16 13h4' }], ['path', { d: 'M5.5 13 7 20h10l1.5-7' }], ['path', { d: 'M12 4v8' }], ['path', { d: 'M8.5 8.5 12 12l3.5-3.5' }]],
+  more: [['circle', { cx: '6.5', cy: '6.5', r: '1.45', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '12', cy: '6.5', r: '1.45', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '17.5', cy: '6.5', r: '1.45', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '6.5', cy: '12', r: '1.45', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '12', cy: '12', r: '1.45', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '17.5', cy: '12', r: '1.45', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '6.5', cy: '17.5', r: '1.45', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '12', cy: '17.5', r: '1.45', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '17.5', cy: '17.5', r: '1.45', fill: 'currentColor', stroke: 'none' }]],
+  chat: [['path', { d: 'M5 6h14a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2H9l-4.5 3.2V8a2 2 0 0 1 2-2z' }]],
+  messages: [['path', { d: 'M7 15.5H5.5A1.5 1.5 0 0 1 4 14V6.5A1.5 1.5 0 0 1 5.5 5h11A1.5 1.5 0 0 1 18 6.5V8' }], ['path', { d: 'M8 10h11.5A1.5 1.5 0 0 1 21 11.5V18a1.5 1.5 0 0 1-1.5 1.5H14l-3.5 2.4V19.5H9.5A1.5 1.5 0 0 1 8 18z' }]],
+  chart: [['path', { d: 'M4 19V5' }], ['path', { d: 'M4 19h16' }], ['path', { d: 'M8 19v-6' }], ['path', { d: 'M12 19V8' }], ['path', { d: 'M16 19v-9' }]],
+  webhook: [['circle', { cx: '6.5', cy: '12', r: '2.4' }], ['circle', { cx: '17.5', cy: '6.5', r: '2.4' }], ['circle', { cx: '17.5', cy: '17.5', r: '2.4' }], ['path', { d: 'M8.7 11.1 15.3 7.5' }], ['path', { d: 'M8.7 12.9 15.3 16.5' }]],
+  user: [['circle', { cx: '12', cy: '8', r: '3.2' }], ['path', { d: 'M5 19.5c0-3.3 3.1-5.7 7-5.7s7 2.4 7 5.7' }]],
+  users: [['circle', { cx: '9', cy: '8', r: '2.8' }], ['path', { d: 'M3.5 19c0-2.9 2.5-5 5.5-5s5.5 2.1 5.5 5' }], ['circle', { cx: '16.5', cy: '8.5', r: '2.3' }], ['path', { d: 'M15 14.2c2.4.4 4.5 2.1 4.5 4.8' }]],
+  gear: [['circle', { cx: '12', cy: '12', r: '3' }], ['path', { d: 'M12 3.5v2.2M12 18.3v2.2M4.9 6.5l1.6 1.6M17.5 15.9l1.6 1.6M3.5 12h2.2M18.3 12h2.2M4.9 17.5l1.6-1.6M17.5 8.1l1.6-1.6' }]],
+  plus: [['rect', { x: '4', y: '4', width: '16', height: '16', rx: '2' }], ['path', { d: 'M12 8v8M8 12h8' }]],
+  badge: [['path', { d: 'M7 4.5h10a1.5 1.5 0 0 1 1.5 1.5v10.2l-6.5 4-6.5-4V6A1.5 1.5 0 0 1 7 4.5z' }], ['circle', { cx: '12', cy: '10', r: '2.1' }], ['path', { d: 'M8.8 16c.7-1.3 1.9-2 3.2-2s2.5.7 3.2 2' }]],
+  plug: [['path', { d: 'M9 7V3M15 7V3' }], ['path', { d: 'M8 7h8v5.5a4 4 0 0 1-3 3.87V21h-2v-4.63A4 4 0 0 1 8 12.5z' }]],
+  drive: [['rect', { x: '3.5', y: '6', width: '17', height: '12', rx: '2' }], ['path', { d: 'M3.5 13h17' }], ['circle', { cx: '16.5', cy: '16', r: '1' }]],
+  package: [['path', { d: 'M4.5 8.5 12 4.5l7.5 4V16.5L12 20.5 4.5 16.5z' }], ['path', { d: 'M12 20.5v-8' }], ['path', { d: 'M4.5 8.5 12 12.5l7.5-4' }]],
+  book: [['path', { d: 'M5 5.5A2.5 2.5 0 0 1 7.5 3H19v16.5H7.5A2.5 2.5 0 0 0 5 21z' }], ['path', { d: 'M5 5.5v15.5' }], ['path', { d: 'M8.5 7.5h7' }]],
+  pulse: [['path', { d: 'M3 12h4l2-6 4 12 2-6h6' }]],
+  sliders: [['path', { d: 'M5 8h14M5 16h14' }], ['circle', { cx: '9', cy: '8', r: '2' }], ['circle', { cx: '15', cy: '16', r: '2' }]],
+  calendar: [['rect', { x: '4', y: '5', width: '16', height: '15', rx: '2' }], ['path', { d: 'M8 3v4M16 3v4M4 10h16' }]],
+  monitor: [['rect', { x: '3.5', y: '4', width: '17', height: '12', rx: '1.5' }], ['path', { d: 'M8 20h8M12 16v4' }]],
+  cpu: [['rect', { x: '7', y: '7', width: '10', height: '10', rx: '1.5' }], ['path', { d: 'M12 3.5v3.5M12 17v3.5M3.5 12H7M17 12h3.5M6.2 6.2l2 2M15.8 15.8l2 2M17.8 6.2l-2 2M8.2 15.8l-2 2' }]],
+  map: [['path', { d: 'M9 4.5 3.5 7v13L9 17.5 15 20.5 20.5 18V5L15 7.5z' }], ['path', { d: 'M9 4.5v13M15 7.5v13' }]],
+  bot: [['rect', { x: '5', y: '8', width: '14', height: '11', rx: '2.5' }], ['path', { d: 'M12 8V4.5M9.5 4.5h5' }], ['circle', { cx: '9.2', cy: '13', r: '1' }], ['circle', { cx: '14.8', cy: '13', r: '1' }]],
+  download: [['path', { d: 'M12 4v11' }], ['path', { d: 'M8 11.5 12 15.5 16 11.5' }], ['path', { d: 'M5 19h14' }]],
+  folder: [['path', { d: 'M3.5 7.5A1.5 1.5 0 0 1 5 6h5l2 2.5h7A1.5 1.5 0 0 1 20.5 10v7.5a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18z' }]],
+  message: [['path', { d: 'M5 5.5h14A1.5 1.5 0 0 1 20.5 7v8A1.5 1.5 0 0 1 19 16.5H9L5 20v-3.5H5A1.5 1.5 0 0 1 3.5 15V7A1.5 1.5 0 0 1 5 5.5z' }]],
+  link: [['circle', { cx: '12', cy: '12', r: '8.5' }], ['path', { d: 'M12 8v8M8 12h8' }]]
+};
+function consoleIconName(href) {
+  const path = String(href || '').replace(/^#/, '');
+  if (/^\/projects\/[^/]+\/overview/.test(path) || path === '/projects') return 'home';
+  if (/^\/board/.test(path)) return 'board';
+  if (/^\/new-task/.test(path)) return 'plus';
+  if (/^\/inbox/.test(path)) return 'inbox';
+  if (/\/management(\/|$)/.test(path) || path === '/management') return 'chat';
+  if (/^\/conversations/.test(path)) return 'messages';
+  if (/^\/costs/.test(path)) return 'chart';
+  if (/^\/events/.test(path)) return 'webhook';
+  if (/feishu/.test(path)) return 'message';
+  if (/^\/identity/.test(path)) return 'badge';
+  if (/\/external(\/|$)/.test(path)) return 'plug';
+  if (/storage/.test(path)) return 'drive';
+  if (/^\/preferences/.test(path)) return 'user';
+  if (/\/release(\/|$)/.test(path)) return 'package';
+  if (/\/knowledge(\/|$)/.test(path)) return 'book';
+  if (/\/activity(\/|$)/.test(path)) return 'pulse';
+  if (/\/roles(\/|$)/.test(path)) return 'users';
+  if (/\/model(\/|$)/.test(path) || /\/models(\/|$)/.test(path)) return 'cpu';
+  if (/machine|work-computers|assistant-computers/.test(path)) return 'monitor';
+  if (/schedules/.test(path)) return 'calendar';
+  if (/\/members(\/|$)/.test(path) || /\/users(\/|$)/.test(path)) return 'users';
+  if (/\/basic(\/|$)/.test(path) || /service-roles/.test(path)) return 'sliders';
+  if (/onboarding/.test(path)) return 'map';
+  if (/\/accounts(\/|$)/.test(path)) return 'bot';
+  if (/installations/.test(path)) return 'download';
+  if (/\/access(\/|$)/.test(path)) return 'plug';
+  if (/^\/settings\/projects/.test(path)) return 'folder';
+  if (/^\/settings/.test(path)) return 'gear';
+  if (/^\/projects\//.test(path)) return 'folder';
+  return 'link';
+}
+
 function initConsoleShell() {
   const sidebar = $('console-sidebar');
   const kicker = element('p', t('nav.workspace'), 'console-nav-label'); kicker.setAttribute('data-i18n', 'nav.workspace');
@@ -441,6 +539,12 @@ function initConsoleShell() {
   primary.append(more);
   // Keep the original tabs and their click handling, but let only the work navigation scroll above the settings.
   tabs.replaceChildren(primary, settings); sidebar.append(scope, tabs);
+  const sidebarIcons = { projects: 'home', management: 'chat', board: 'board', costs: 'chart', events: 'webhook', preferences: 'user', settings: 'gear' };
+  for (const item of tabs.querySelectorAll('[data-tab], #console-inbox-link')) {
+    const name = item.id === 'console-inbox-link' ? 'inbox' : sidebarIcons[item.dataset.tab];
+    if (!name || item.querySelector('.console-icon')) continue;
+    const icon = consoleIcon(name); icon.classList.add('console-nav-icon'); item.prepend(icon);
+  }
   const locationBox = element('div', '', 'console-location'); locationBox.id = 'console-location'; locationBox.hidden = true;
   const area = element('span', '', 'eyebrow'), context = element('span'); area.id = 'console-area'; context.id = 'console-context';
   const permission = element('span', '', 'console-permission'); permission.id = 'console-permission';
@@ -451,15 +555,16 @@ function initConsoleShell() {
   const section = element('label', '', 'console-section-picker'); section.append(sectionCaption);
   const sectionPicker = document.createElement('select'); section.id = 'console-section-label'; sectionPicker.id = 'console-section'; sectionPicker.setAttribute('aria-label', t('nav.current_page')); sectionPicker.setAttribute('data-i18n', 'nav.current_page'); sectionPicker.setAttribute('data-i18n-attr', 'aria-label'); section.hidden = true;
   sectionPicker.addEventListener('change', () => { location.hash = sectionPicker.value; }); section.append(sectionPicker); locationBox.append(section);
-  // #481: five destinations own the phone's navigation. The glyph is drawn by CSS from data-glyph, so the link's text —
+  // #481: five destinations own the phone's navigation. Linear SVG icons (#554) are decorative; the link's text —
   // and its accessible name — is exactly its destination, and the badge stays decorative.
   const mobile = element('nav', '', 'console-mobile-nav'); mobile.id = 'console-mobile-nav'; mobile.hidden = true; mobile.setAttribute('aria-label', t('nav.mobile')); mobile.setAttribute('data-i18n', 'nav.mobile'); mobile.setAttribute('data-i18n-attr', 'aria-label');
-  for (const [key, href, captionKey, glyph] of [
-    ['projects', '#/projects', 'nav.projects', '⌂'], ['board', '#/board', 'nav.tasks_short', '▤'], ['inbox', '#/inbox', 'nav.inbox', '◷'],
-    ['assistant', '#/management', 'nav.assistant', '✦'], ['more', '#/more', 'nav.more_short', '⋯']]) {
+  for (const [key, href, captionKey, iconName] of [
+    ['projects', '#/projects', 'nav.projects', 'home'], ['board', '#/board', 'nav.tasks_short', 'board'], ['inbox', '#/inbox', 'nav.inbox', 'inbox'],
+    ['assistant', '#/management', 'nav.assistant', 'chat'], ['more', '#/more', 'nav.more_short', 'more']]) {
     const caption = t(captionKey);
     const a = consoleLink(href, caption);
-    a.dataset.page = key; a.dataset.glyph = glyph; a.setAttribute('aria-label', caption);
+    a.dataset.page = key; a.setAttribute('aria-label', caption);
+    const icon = consoleIcon(iconName); icon.classList.add('console-nav-icon'); a.prepend(icon);
     const mobileLabel = [...a.querySelectorAll('span')].find(s => !s.classList.contains('console-nav-badge'));
     if (mobileLabel) mobileLabel.setAttribute('data-i18n', captionKey);
     const badge = element('span', '', 'console-nav-badge'); badge.setAttribute('aria-hidden', 'true'); a.append(badge);
