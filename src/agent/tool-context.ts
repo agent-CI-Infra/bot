@@ -7,6 +7,8 @@ import { stop } from './common.js';
 /** The gateway refuses a model request over 2 MiB (model_request_invalid). */
 export const requestLimit = 2 * 1024 * 1024;
 export const requestBytes = (body: unknown) => Buffer.byteLength(JSON.stringify(body));
+/** Every built-in loop reserves the same final turns for a bounded submission. */
+export const finalizationReserve = (maxTurns: number) => Math.min(8, Math.max(2, Math.ceil(maxTurns / 4)));
 /** Chat assistants answer inside a model's context window, which is usually far below 2 MiB: older tool results are folded
  * once a request passes about 100k tokens of JSON, the window the project already assumes for Pi (128k). */
 export const chatContextBytes = 384 * 1024;

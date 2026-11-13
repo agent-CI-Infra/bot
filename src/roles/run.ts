@@ -19,6 +19,7 @@ import { memoryTools } from '../memory/project.js';
 import { taskTraceAccess, visibleMemorySnapshot, memoryViewSnapshot, taskMemoryAccess } from '../memory/access.js';
 import { ProjectMemory } from '../memory/project.js';
 import { TaskError,stop } from '../agent/common.js';
+import { finalizationReserve } from '../agent/tool-context.js';
 import { roleConfiguration,configurationRevision,resolveRole,roleAuthority,skillFiles,type Entry,type RoleConfiguration } from './definition.js';
 import type { PiRoleEnvironment } from '../agent/pi.js';
 import type { Row,Store } from '../storage/database.js';
@@ -196,6 +197,10 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const tools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)),...(snapshot.kind==='evaluator'||role==='coordinator'?[]:taskManagementTools),...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
   if(spec.finish&&!tools.some(tool=>tool.function.name===spec.finish!.name))stop('role_submission_forbidden','waiting_configuration',`${role}：当前权限禁止提交本次任务要求的结果，请在角色权限中调整。`);
   const bounded=perRunBudget(snapshot)?snapshot.budget:undefined,cumulative=cumulativeBudget(snapshot);
+  // External CLIs own their turn semantics; only these three loops share the request-based finalization reserve.
+  const reservedBackend=['native','process','pi'].includes(harness),configuredTurns=bounded?.max_turns??spec.maxTurns,limitTurns=configuredTurns??32;
+  const availableTurns=reservedBackend&&cumulative&&budget.max_model_requests!==null?Math.min(limitTurns,budget.max_model_requests-instanceUsage(s,instance.id).model_requests):limitTurns;
+  if(spec.finish&&reservedBackend&&availableTurns<=finalizationReserve(availableTurns))stop('role_budget_exhausted','waiting_configuration',`${role}：剩余 ${availableTurns} 次请求不足以保留至少一轮工作和收尾，运行尚未启动。`);
   const live:Live={bound:null,exhausted:null,stage_exhausted:null,tools:0};
   const operationId=`role-run:${instance.id}:${contentHash(scope).slice(0,16)}:${instance.sequence}`;
   // Budget exhaustion keeps what exists (a checkpoint with session, receipts and workspace) and stops this run only.
@@ -211,7 +216,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   let executionRun:string|undefined;
   const wrapped:AgentSpec<T>={...spec,model,tools,pi:env.pi??spec.pi,runEnvironment:env.environment?.handle,
    guard:async()=>{await spec.guard();authority();const b=live.bound;if(b){assertLease(s,b.run_id,b.epoch);if(!touchRunToken(s,b.token_id,tokenTtl))stop('run_token_revoked','cancelled','运行的能力令牌已撤销或过期，运行停止。');budgetGuard();}},
-   maxTurns:bounded?.max_turns??spec.maxTurns,maxOutputTokens:bounded?.max_output_tokens??spec.maxOutputTokens,
+   maxTurns:availableTurns<limitTurns?availableTurns:configuredTurns,maxOutputTokens:bounded?.max_output_tokens??spec.maxOutputTokens,
    onDenied:(name,reason)=>denied(name,reason),
    // A newer revision requested for this running instance ends the run here; the loop below continues it.
    checkpoint:async()=>{await spec.checkpoint?.();const pending=s.get('SELECT pending_revision FROM role_instances WHERE id=?',instance.id)?.pending_revision;if(pending&&pending>(instance.config_revision??0))stop('role_revision_checkpoint','retry_wait','角色在安全检查点结束，将带新 revision 续接。');},

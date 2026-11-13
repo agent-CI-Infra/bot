@@ -7,7 +7,7 @@ import { workOf } from '../work/catalog.js';
 import { requestModel, type AgentModel } from './gateway.js';
 import type { ModelDelta } from './model-stream.js';
 import type { PiRoleEnvironment } from './pi.js';
-import { ToolTranscript, toolArguments, toolCallsProblem } from './tool-context.js';
+import { ToolTranscript, toolArguments, toolCallsProblem, finalizationReserve } from './tool-context.js';
 
 export interface AgentServices {
   model: AgentModel;
@@ -207,7 +207,7 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
       messages.push({role:'user',content:'Additional user instructions for subsequent steps; the recorded contract and authority remain binding:\n'+JSON.stringify(updates)});
       instructions.splice(0,instructions.length,...updates);
     }
-    const reserve=Math.min(8,Math.max(2,Math.ceil(maxTurns/4)));
+    const reserve=finalizationReserve(maxTurns);
     const finalizing=!!spec.finish&&!!finishingNames&&turn>=maxTurns-reserve;
     const tools=finalizing?offered.filter(tool=>finishingNames!.has(tool.function.name)):offered,names=new Set(tools.map(tool=>tool.function.name));
     // Turn start: the transcript is complete, so a role run may end here and continue later from it.
