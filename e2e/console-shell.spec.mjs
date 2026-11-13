@@ -28,6 +28,7 @@ test('shared desktop rail and mobile navigation expose real destinations across 
       if(width<768){
         await expect(page.locator('#console-mobile-nav')).toBeVisible();
         await expect(page.locator('#console-mobile-nav a')).toHaveText(['项目','任务','待处理','助手','更多']);
+        await expect(page.locator('#console-mobile-nav a svg.console-icon')).toHaveCount(5);
         const boxes=await page.locator('#console-mobile-nav a').evaluateAll(nodes=>nodes.map(n=>({width:n.getBoundingClientRect().width,height:n.getBoundingClientRect().height})));
         expect(boxes.every(b=>b.width>=44&&b.height>=44)).toBe(true);
       }
