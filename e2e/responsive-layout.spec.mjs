@@ -104,35 +104,37 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     expect(projects.fabHitsNav).toBe(false);
     await page.screenshot({ path: resolve(out, 'projects-390.png'), fullPage: true });
 
+    // Since #564/#566 an unconfigured role page opens on the recommended-config intro; its primary is 使用推荐配置.
     await page.goto(h.admin + '/#/projects/101/roles');
-    await expect(page.getByRole('heading', { name: '角色概览' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '使用推荐配置', exact: true })).toBeVisible();
     const roles = await page.evaluate(() => {
       const overlap = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
-      const nav = document.querySelector('.role-nav');
-      const heading = [...document.querySelectorAll('h2, h3')].find(el => el.textContent.trim() === '角色概览');
-      const save = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '保存角色配置');
+      const adopt = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '使用推荐配置');
       const fab = document.getElementById('management-launcher');
       const bar = document.querySelector('.console-mobile-nav');
-      const ns = getComputedStyle(nav);
-      const hb = heading.getBoundingClientRect(), sb = save.getBoundingClientRect(), fb = fab.getBoundingClientRect();
+      const ab = adopt.getBoundingClientRect(), fb = fab ? fab.getBoundingClientRect() : null;
       const reserved = bar.getBoundingClientRect().top;
       return {
         overflow: document.documentElement.scrollWidth,
-        navWrap: ns.flexWrap,
-        navOverflow: ns.overflowX,
-        headingInFirstScreen: hb.top < reserved && hb.height > 0,
-        saveVisible: sb.height > 0,
-        fabHitsSave: overlap(fb, sb),
-        fabHitsHeading: overlap(fb, hb),
+        adoptInFirstScreen: ab.top >= 0 && ab.bottom <= reserved && ab.height > 0,
+        fabHitsAdopt: !!fb && fb.width > 0 && overlap(fb, ab),
       };
     });
     expect(roles.overflow).toBe(390);
-    expect(roles.navWrap).toBe('nowrap');
-    expect(roles.navOverflow).toMatch(/auto|scroll/);
-    expect(roles.headingInFirstScreen).toBe(true);
-    expect(roles.saveVisible).toBe(true);
-    expect(roles.fabHitsSave).toBe(false);
-    expect(roles.fabHitsHeading).toBe(false);
+    expect(roles.adoptInFirstScreen).toBe(true);
+    expect(roles.fabHitsAdopt).toBe(false);
+    // A role page keeps its back crumb on one scrollable row instead of wrapping.
+    await page.goto(h.admin + '/#/projects/101/roles/dev');
+    await expect(page.getByTestId('role-list-link')).toBeVisible();
+    const crumb = await page.evaluate(() => {
+      const ns = getComputedStyle(document.querySelector('.role-nav'));
+      return { wrap: ns.flexWrap, overflowX: ns.overflowX, overflow: document.documentElement.scrollWidth };
+    });
+    expect(crumb.overflow).toBe(390);
+    expect(crumb.wrap).toBe('nowrap');
+    expect(crumb.overflowX).toMatch(/auto|scroll/);
+    await page.goto(h.admin + '/#/projects/101/roles');
+    await expect(page.getByRole('button', { name: '使用推荐配置', exact: true })).toBeVisible();
     await page.screenshot({ path: resolve(out, 'roles-390.png'), fullPage: false });
 
     await page.goto(h.admin + '/#/more');
@@ -143,8 +145,8 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
 
     // --- 768 ---
     await page.setViewportSize({ width: 768, height: 1024 });
-    await page.goto(h.admin + '/#/projects/101/roles');
-    await expect(page.getByRole('heading', { name: '角色概览' })).toBeVisible();
+    await page.goto(h.admin + '/#/projects/101/roles/dev');
+    await expect(page.getByTestId('role-list-link')).toBeVisible();
     const tablet = await page.evaluate(() => {
       const nav = document.querySelector('#console-secondary-nav .project-nav');
       const sidebar = document.getElementById('console-sidebar');
@@ -195,8 +197,8 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     await page.screenshot({ path: resolve(out, 'projects-1440.png'), fullPage: true });
 
     await page.goto(h.admin + '/#/projects/101/roles');
-    await expect(page.getByRole('heading', { name: '角色概览' })).toBeVisible();
-    const deskRoles = await metrics(page, '保存角色配置');
+    await expect(page.getByRole('button', { name: '使用推荐配置', exact: true })).toBeVisible();
+    const deskRoles = await metrics(page, '使用推荐配置');
     expect(deskRoles.overflow).toBe(1440);
     expect(deskRoles.fabHitsTarget).toBe(false);
     await page.screenshot({ path: resolve(out, 'roles-1440.png'), fullPage: false });
