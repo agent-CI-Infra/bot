@@ -203,7 +203,6 @@ function syncConsoleShell() {
   if (repo && me.role === 'super_admin' && !consoleGaps.has(String(repo.id))) setTimeout(() => loadConsoleGaps(String(repo.id)), 0);
 
   $('console-inbox-link').href = '#/inbox' + (consoleProject ? '/' + consoleProject : '');
-  const newTaskLink = $('console-new-task'); if (newTaskLink) newTaskLink.href = '#/new-task' + (consoleProject ? '/' + consoleProject : '');
   const scopeKey = project ? 'project:' + project.id : platform ? 'settings' : personal ? 'personal' : '';
   const secondary = project ? $('project-page').querySelector('.project-nav')
     : platform ? $('settings-panel').querySelector('.project-nav')
@@ -320,12 +319,7 @@ function initConsoleShell() {
   primary.append(kicker, ...tabs.children);
   const inbox = consoleLink('#/inbox', '待处理'); inbox.id = 'console-inbox-link'; primary.append(inbox);
   // Keep the original tabs and their click handling, but let only the work navigation scroll above the settings.
-  // #480: the primary desktop task action sits directly under the picker, outside the scrolling navigation, so a wide
-  // but short window still shows it. It carries the current project; without one the task page asks as it already does.
-  // No hint here: a second line inside the sidebar's row layout squeezed the label into 「＋ 新建任 / 务」 (#480 review).
-  const newTask = consoleLink('#/new-task', '＋ 新建任务');
-  newTask.id = 'console-new-task'; newTask.classList.add('console-new-task'); newTask.setAttribute('aria-label', '＋ 新建任务');
-  tabs.replaceChildren(primary, settings); sidebar.append(scope, newTask, tabs);
+  tabs.replaceChildren(primary, settings); sidebar.append(scope, tabs);
   const locationBox = element('div', '', 'console-location'); locationBox.id = 'console-location'; locationBox.hidden = true;
   const area = element('span', '', 'eyebrow'), context = element('span'); area.id = 'console-area'; context.id = 'console-context';
   const permission = element('span', '', 'console-permission'); permission.id = 'console-permission';
