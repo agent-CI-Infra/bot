@@ -147,7 +147,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
             no_changes:snapshot.tree_sha===input.snapshot_tree};
           store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING',task.repository_id,branch,task.id);
           store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data',task.id,JSON.stringify(code));
-          policyEvidence=[{source:'policy_validation',version:snapshot.tree_sha,verified:validation.source==='policy'&&!validation.error&&validation.exit_code===0&&!validation.timed_out&&!validation.truncated,result:validation}];
+          policyEvidence=[{source:'policy_validation',version:snapshot.tree_sha,verified:validation.source==='policy'&&!validation.error&&validation.exit_code===0&&!validation.timed_out,result:validation}];
         }
         // Retain the explicitly delivered files independently of disposable execution workspaces.
         for(const delivered of result.artifacts.slice(0,16)){
@@ -174,7 +174,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
         if(!code.no_changes){
           const command=String(store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||'').trim();
           const proof=store.get("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_evidence' AND json_extract(data,'$.name')='policy_validation' AND json_extract(data,'$.version')=? AND json_extract(data,'$.command')=? ORDER BY id DESC LIMIT 1",task.id,candidate.artifacts.find(a=>a.kind==='code')!.version,command);
-          if(proof){const verified=JSON.parse(proof.data);if(verified.result.exit_code===0&&!verified.result.timed_out&&!verified.result.truncated&&!verified.result.error)
+          if(proof){const verified=JSON.parse(proof.data);if(verified.result.exit_code===0&&!verified.result.timed_out&&!verified.result.error)
             store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify({...code,validation:{...verified.result,command,source:'policy'}}),task.id);}
           records.stage(task.id,candidate.id,candidate.revision,verdict,task.claim_token,{policy_hash:requestPolicyHash(store,task)});update({phase:'publish',status:'result_ready'});continue;
         }

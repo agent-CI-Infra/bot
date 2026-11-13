@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, mkdtempSync, openSync, closeSync, readSync, fstatSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CommandOutput, maskedStream, outputLimit } from './command-output.mjs';
 import { local, workspaceRoot, localEnvironment, assistant, homeDirectory as home } from './paths.mjs';
 // User-level installs (pip --user, uv tool, cargo, npm prefix) land under HOME: the work volume of a project computer, the
 // persistent HOME of an assistant computer.
@@ -26,24 +27,38 @@ export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=fal
   // Local mode shares the host process namespace: use task cleanup, never name-wide kills.
   if(local&&/(?:^|[\s;&|])(?:pkill|killall)(?:\s|$)/.test(value))return Promise.resolve({exit_code:126,output:'Name-wide process termination is disabled in local mode. Let the task manager clean up task processes, or stop a specific process you started.',timed_out:false,truncated:false});
   const extra=Object.fromEntries(Object.entries(secretEnv||{}).filter(([key,secret])=>['GH_TOKEN','GITHUB_TOKEN'].includes(key)&&typeof secret==='string'&&secret.length>=8));
-  const mask=text=>Object.values(extra).reduce((masked,secret)=>masked.replaceAll(secret,'[REDACTED]'),text);
   if(keepBackground)return backgroundCommand(value,cwd,timeoutMs,{outputFile,extra,workspaceId,backgroundDirectory});
   return new Promise((resolve,reject)=>{
+    const output=new CommandOutput();let fd,logPath=outputFile;
+    if(logPath)fd=openSync(logPath,'w',0o600);
     const child=spawn('/bin/sh',['-c',value],{cwd,detached:true,env:{...environment,...workspaceTag(workspaceId),...extra},stdio:['ignore','pipe','pipe']});
-    let output='',timedOut=false,truncated=false,done=false;
+    let timedOut=false,done=false;
     const kill=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
     const timer=timeoutMs===null?null:setTimeout(()=>{timedOut=true;kill();},Math.max(100,Number(timeoutMs)||10000));
-    const collect=data=>{
-      if(Buffer.byteLength(output)+data.length>1024*1024){truncated=true;kill();return;}
-      output+=data.toString();if(outputFile)try{appendFileSync(outputFile,mask(data.toString()),{mode:0o600});}catch{/* Live output is best effort. */}
+    const close=()=>{if(fd!==undefined){closeSync(fd);fd=undefined;}};
+    const failed=error=>{if(done)return;done=true;clearTimeout(timer);kill();child.stdout.destroy();child.stderr.destroy();close();reject(error);};
+    const collect=text=>{
+      if(done)return;
+      // Direct callers need no extra file for a small result. Large results get the same complete output contract.
+      if(!logPath&&output.bytes+Buffer.byteLength(text)>outputLimit){
+        logPath=join(mkdtempSync(join(backgroundDirectory||cwd,'.command-')),'output.log');fd=openSync(logPath,'wx',0o600);
+        appendFileSync(fd,output.head.subarray(0,output.bytes));
+      }
+      if(fd!==undefined)appendFileSync(fd,text);
+      output.append(text);
     };
     const finish=(code,signal)=>{
       if(done)return;done=true;clearTimeout(timer);
-      kill();
-      resolve({exit_code:code,signal,output:mask(output),timed_out:timedOut,truncated});
+      kill();close();
+      const result=output.result();
+      resolve({exit_code:code,signal,...result,timed_out:timedOut,...(result.truncated?{output_file:logPath}:{})});
     };
-    child.stdout.on('data',collect);child.stderr.on('data',collect);
-    child.on('error',error=>{clearTimeout(timer);kill();reject(error);});
+    for(const stream of [child.stdout,child.stderr]){
+      const masked=maskedStream(Object.values(extra),collect);
+      stream.on('data',data=>{try{masked.data(data);}catch(error){failed(error);}});
+      stream.on('end',()=>{try{masked.end();}catch(error){failed(error);}});
+    }
+    child.on('error',failed);
     // By default the process group ends with the shell; keep_background leaves it running for later commands of the same task.
     child.on('exit',()=>kill());
     child.on('close',finish);
@@ -64,13 +79,21 @@ function backgroundCommand(value,cwd,timeoutMs,{outputFile,extra,workspaceId,bac
     const startup=setTimeout(()=>finish(),500);
     const finish=()=>{
       if(done)return;done=true;clearTimeout(timer);clearTimeout(startup);
-      let handle,size,bytes;const buffer=Buffer.alloc(65536);
-      try{handle=openSync(logPath,'r');size=fstatSync(handle).size;bytes=readSync(handle,buffer,0,buffer.length,0);}
-      catch(error){kill();reject(error);return;}finally{if(handle!==undefined)closeSync(handle);}
-      const output=buffer.subarray(0,bytes).toString('utf8');
-      if(outputFile)try{appendFileSync(outputFile,output,{mode:0o600});}catch{/* Live output is best effort. */}
+      let handle,mirror,size;const buffer=Buffer.alloc(65536),output=new CommandOutput();
+      try{
+        handle=openSync(logPath,'r');size=fstatSync(handle).size;
+        if(outputFile)mirror=openSync(outputFile,'w',0o600);
+        const decoded=maskedStream([],text=>{output.append(text);if(mirror!==undefined)appendFileSync(mirror,text);});
+        for(let position=0;position<size;){
+          const bytes=readSync(handle,buffer,0,Math.min(buffer.length,size-position),position);if(!bytes)throw new Error('command_output_unavailable');
+          const part=buffer.subarray(0,bytes);decoded.data(part);position+=bytes;
+        }
+        // A live logger may be in the middle of a UTF-8 write. This immutable snapshot ends at the last complete character.
+      }catch(error){kill();reject(error);return;}
+      finally{if(handle!==undefined)closeSync(handle);if(mirror!==undefined)closeSync(mirror);}
       if(child.connected)child.disconnect();child.unref();
-      resolve({exit_code:code,signal,output,timed_out:timedOut,truncated:size>65536,log_path:logPath,
+      const result=output.result();
+      resolve({exit_code:code,signal,...result,timed_out:timedOut,log_path:logPath,...(result.truncated?{output_file:outputFile||logPath}:{}),
         ...(!timedOut&&code===null&&signal===null?{running:true,pid:child.pid}:{})});
     };
     child.on('message',message=>{if(message.type==='exit'){code=message.code;signal=message.signal;}});

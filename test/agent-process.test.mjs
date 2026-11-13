@@ -517,11 +517,16 @@ test('policy failure returns output without publication and the same agent can r
   assert.equal(d.h.store.get("SELECT count(*) n FROM github_effects WHERE kind='branch'").n, 1);
 });
 
-for (const failure of [{ exit_code: 1 }, { timed_out: true }, { truncated: true }]) test('invalid policy result blocks publication: ' + JSON.stringify(failure), async t => {
+for (const failure of [{ exit_code: 1 }, { timed_out: true }, { error: 'command_output_unavailable' }]) test('invalid policy result blocks publication: ' + JSON.stringify(failure), async t => {
   const d = await developmentHarness(t, { policy: 'true', validationResult: failure, repair: false });
   assert.equal(d.replies[0].error, 'validation_failed'); assert.equal(d.candidate, undefined);
   assert.equal(d.h.store.get('SELECT count(*) n FROM github_effects').n, 0);
   assert.ok(!d.replies.some(reply => reply.pr));
+});
+
+test('a truncated successful policy preview still permits publication',async t=>{
+  const d=await developmentHarness(t,{policy:'true',validationResult:{truncated:true,output:'head\n[omitted]\ntail'},repair:false});
+  assert.equal(d.task.status,'pr_opened');assert.ok(d.replies.some(reply=>reply.pr));
 });
 
 test('an unchanged workspace ends development normally without tests, a candidate or a PR', async t => {

@@ -81,12 +81,12 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
 
   records.history(task.id,'acceptance_started',{evaluation_id:evaluationId,candidate_id:candidate.id,revision:record.revision,context:'fresh',source_tree:sourceTree||null,verification_workspace:verification.task?.workspace_id||null});
     const required=candidate.artifacts.some(a=>a.kind==='code')?String(store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||'').trim():'';
-    const proof=candidate.evidence.some(e=>e.source==='policy_validation'&&candidate.artifacts.some(a=>a.kind==='code'&&(a.version===e.version||(a.content as any)?.tree_sha===e.version))&&e.verified&&(e.result as any)?.command===required&&(e.result as any)?.exit_code===0&&!(e.result as any)?.timed_out&&!(e.result as any)?.truncated);
+    const proof=candidate.evidence.some(e=>e.source==='policy_validation'&&candidate.artifacts.some(a=>a.kind==='code'&&(a.version===e.version||(a.content as any)?.tree_sha===e.version))&&e.verified&&(e.result as any)?.command===required&&(e.result as any)?.exit_code===0&&!(e.result as any)?.timed_out);
     let additionalVerification:any=null;
     if(required&&!proof){
       additionalVerification=await verification.call(`accept:${evaluationId}:policy`,{type:'workspace_command',command:required,timeout_ms:null});
       records.history(task.id,'acceptance_evidence',{evaluation_id:evaluationId,name:'policy_validation',version:sourceTree,command:required,result:additionalVerification});
-      if(additionalVerification.error||additionalVerification.exit_code!==0||additionalVerification.timed_out||additionalVerification.truncated){
+      if(additionalVerification.error||additionalVerification.exit_code!==0||additionalVerification.timed_out){
         const verdict:Verdict={outcome:'return',reason:'Required project verification failed for the submitted candidate',gaps:[required+'; '+String(additionalVerification.output||additionalVerification.error||'verification incomplete').slice(-4000)],residuals:[],core_complete:false,required_evidence_complete:false,acceptable_risk:true};
         records.history(task.id,'acceptance_evaluated',{evaluation_id:evaluationId,candidate_id:candidate.id,elapsed_ms:Date.now()-start,verdict,method:'deterministic_policy'},verificationRun?.id);verificationOutcome=verdict.outcome;return verdict;
       }

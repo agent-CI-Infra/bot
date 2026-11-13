@@ -8,7 +8,7 @@ import type { Candidate, Evidence } from './service.js';
 export function observation(source:string,version:string,raw:string):Evidence {
   const data=JSON.parse(raw),result=data.result??data;
   const preview=(value:any):any=>typeof value==='string'&&value.length>4000?value.slice(0,4000)+' [read_evidence for full observation]':Array.isArray(value)?value.map(preview):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,preview(v)])):value;
-  return {source,version,verified:!result?.error&&!result?.timed_out&&!result?.truncated&&(result?.exit_code===undefined||result.exit_code===0),result:{...preview(data),digest:sha(raw)}};
+  return {source,version,verified:!result?.error&&!result?.timed_out&&(result?.exit_code===undefined||result.exit_code===0),result:{...preview(data),digest:sha(raw)}};
 }
 /** A candidate as agent input where its bodies matter (acceptance, a follow-up's parent delivery). Both grow with an
  * attempt: a files artifact lists every file of the workspace (1.5 MB for a 9,500-file repository) and evidence has one

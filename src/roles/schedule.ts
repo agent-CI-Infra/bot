@@ -261,7 +261,7 @@ export function recordStageResult(s: Store, assignment: string, runId: string, e
     const evidence = s.all(`SELECT id,type,data FROM task_history WHERE task_id=? AND run_id=? AND type IN (${stage.completion.evidence_types.map(() => '?').join(',')}) ORDER BY id`,binding.task_id,runId,...stage.completion.evidence_types).filter(row=>{const data=JSON.parse(row.data),snapshot=row.type==='tool_observation'?data.observation:data.result;
       if(snapshot?.schema_version===1&&!snapshot.complete)return false;
       const observation=snapshot?.schema_version===1?snapshot.data:snapshot;
-      return (!stage.completion.tools||stage.completion.tools.includes(data.name))&&observation&&typeof observation==='object'&&!observation.error&&!observation.isError&&!observation.timed_out&&!observation.truncated&&(observation.exit_code===undefined||observation.exit_code===0);
+      return (!stage.completion.tools||stage.completion.tools.includes(data.name))&&observation&&typeof observation==='object'&&!observation.error&&!observation.isError&&!observation.timed_out&&(observation.exit_code===undefined||observation.exit_code===0);
     }).map(r => ({ref:'task_history:'+r.id,type:r.type}));
     const passed = evidence.length >= stage.completion.min_evidence && (!stage.completion.no_findings || Array.isArray(raw.findings) && raw.findings.length === 0 && Array.isArray(raw.unknowns) && raw.unknowns.length === 0) && !stageBudgetExceeded(s,assignment);
     const result = {task_id:binding.task_id,plan_revision:binding.plan_revision,stage_id:stage.stage_id,definition_hash:stageHash(stage),contract_revision:ctx.contract_revision,candidate_ref:candidate,policy_hash:currentPlan(s,binding.task_id)!.policy_hash,
