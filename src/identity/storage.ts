@@ -82,10 +82,10 @@ export function identityStorage(store: Store): void {
       UPDATE external_identities SET status='revoked',credentials=NULL WHERE principal_id=OLD.id;
       DELETE FROM scoped_grants WHERE principal_id=OLD.id; END;
   `);
-  // The authorization revision counts only lost authority (#521): disabling a user or removing the platform role raises it;
-  // enabling or promoting does not. Manual assignments are saved as whole lists, so saveGrants compares effective authority
-  // and their triggers only drop the matching legacy grant. Replaced on every start in one transaction: existing databases
-  // lose the older unconditional triggers, and processes starting together never see a missing or duplicate trigger.
+  // The authorization revision counts only lost authority (#521): disabling a user or removing the platform role raises it,
+  // and so does removing a manual assignment by any path (saving, project or user removal); enabling, promoting or adding an
+  // assignment does not. Replaced on every start in one transaction: existing databases lose the older unconditional
+  // triggers, and processes starting together never see a missing or duplicate trigger.
   store.transaction(() => store.db.exec(`
     DROP TRIGGER IF EXISTS identity_user_change;
     CREATE TRIGGER identity_user_change AFTER UPDATE OF active,role ON users BEGIN
@@ -97,6 +97,8 @@ export function identityStorage(store: Store): void {
     DROP TRIGGER IF EXISTS identity_${table}_INSERT;
     DROP TRIGGER IF EXISTS identity_${table}_DELETE;
     CREATE TRIGGER identity_${table}_DELETE AFTER DELETE ON ${table} BEGIN
+      UPDATE principals SET authorization_revision=authorization_revision+1 WHERE user_id=OLD.user_id;
+      INSERT INTO authorization_events(principal_id,reason,created_at) VALUES(OLD.user_id,'delegation.changed',unixepoch()*1000);
       DELETE FROM scoped_grants WHERE id='legacy:${kind}:'||OLD.user_id||':'||OLD.${field}; END;`).join('')}
   `));
   const columns = store.all('PRAGMA table_info(sessions)');
