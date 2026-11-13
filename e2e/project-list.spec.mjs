@@ -51,6 +51,9 @@ test('项目按所有者分组，筛选和每页 50 条分页保持项目完整�
     await expect(row('101').getByRole('switch')).toHaveCount(0);
     await row('101').getByRole('button', {name: '设置', exact: true}).click(); await expect(page).toHaveURL(/#\/projects\/101\/basic$/);
     await page.getByRole('link', {name: '← 全部项目', exact: true}).click();
+    const filtersFold = page.getByTestId('project-filters-fold');
+    await expect(filtersFold).toBeVisible();
+    if (!await filtersFold.evaluate(el => el.open)) await filtersFold.locator('summary').click();
     await page.getByLabel('组织 ID', {exact: true}).fill('10'); await page.getByRole('button', {name: '筛选', exact: true}).click();
     await expect(groups(page).locator('h2')).toHaveText(['b-owner']); await expect(page.locator('#rows .row')).toHaveCount(1); await expect(row('202')).toBeVisible();
     await page.getByLabel('组织 ID', {exact: true}).fill('missing'); await page.getByRole('button', {name: '筛选', exact: true}).click();
