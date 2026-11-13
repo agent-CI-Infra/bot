@@ -1,3 +1,4 @@
+import { TaskRecords } from '../tasks/service.js';
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, confineActor, confinedTenant, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
@@ -702,7 +703,9 @@ export class ChannelService {
         this.store.run("UPDATE channel_outbox SET state='sending',attempts=attempts+1 WHERE id=?", row.id);
         try { await this.deliver(row); } catch (error) {
           if (this.stopped) return;
-          const retry = error instanceof HttpError && error.status >= 500 && row.attempts < 4;
+          const resultEvent=this.store.get('SELECT * FROM channel_task_results WHERE outbox_id=?',row.id);
+          const retry = resultEvent ? this.retryResult(error) : error instanceof HttpError && error.status >= 500 && row.attempts < 4;
+          if(resultEvent)this.resultFailure(resultEvent,error,!retry,'delivery');
           this.store.run('UPDATE channel_outbox SET state=?,last_error=?,next_attempt=? WHERE id=?', retry ? 'retry' : 'failed', errorCode(error), Date.now() + 1000 * 2 ** Math.min(row.attempts, 6), row.id);
           this.store.run('UPDATE channel_connectors SET last_error=? WHERE id=?', errorCode(error), row.connector_id);
           if(!retry){
@@ -722,39 +725,75 @@ export class ChannelService {
           }
         }
       }
-      // Notification only: tasks are created/claimed/run by the existing task service and engine.
-      // The outbox key is the receipt for each result revision, including across process restarts.
-      for(const event of this.store.all('SELECT * FROM channel_task_results WHERE id>(SELECT sequence FROM channel_result_cursor WHERE id=1) ORDER BY id LIMIT 50')){
-        try{this.store.transaction(()=>{
-        const link=this.store.get('SELECT * FROM channel_service_tasks WHERE task_id=?',event.task_id);
-        if(link){try{this.serviceTaskResult(link);}catch(error){if(!(error instanceof HttpError||error instanceof TaskError))throw error;}finally{this.store.run('UPDATE channel_result_cursor SET sequence=? WHERE id=1',event.id);}return;}
-        const task=this.store.get(`SELECT t.*,o.conversation_id,o.principal_id,o.source_message FROM tasks t JOIN task_origins o ON o.task_id=t.id
-          JOIN channel_chats c ON c.id=o.conversation_id WHERE t.id=? AND c.state='active' AND t.status IN ('completed','succeeded','pr_opened','cancelled','failed')`,event.task_id);
-        try{
-        if(!task)return;
-        const key='task-result:'+task.id+':'+digest(JSON.stringify([task.status,task.result,task.error_code,this.store.get('SELECT revision FROM task_records WHERE task_id=?',task.id)?.revision]));
-        if(this.store.get('SELECT 1 FROM channel_outbox WHERE idempotency_key=?',key))return;
-          this.resultAuthority(task);
-          const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',task.conversation_id)!,receipt=this.store.get('SELECT payload FROM channel_inbox WHERE id=?',task.source_message);
-          if(!receipt)return;const original=this.store.secrets.open(receipt.payload,'channel-event:'+task.source_message) as unknown as ChannelEvent,c=this.connector(chat.connector_id);
-          const event={...original,connector_id:c.id,connector_revision:c.revision};let protection:Json={kind:'personal_conversation',chat_id:chat.id,project_id:task.repository_id,principal_id:task.principal_id,source_message:task.source_message,task_id:task.id,source_fence:this.businessFence(chat)};
-          if(chat.chat_type==='group'){const grant=this.store.get('SELECT * FROM channel_employee_grants WHERE chat_id=? AND project_id=? AND principal_id=?',chat.id,task.repository_id,task.principal_id);if(!grant)return;
-            this.employees.assertGrant(grant);protection={...protection,kind:'employee',grant_id:grant.id,grant_revision:grant.revision};}
-          let summary='';try{const result=JSON.parse(task.result??'null');summary=String(result?.summary??result?.report?.summary??result?.pr_url??'');}catch{}
-          this.queue(event,card(`任务 ${task.id}\n状态：${task.status}\n${summary||task.summary}${task.error_code?'\n原因：'+task.error_code:''}`, (this.options.origin??'')+'/#/board'),key,task.source_message,protection);
-        }catch(error){if(!(error instanceof HttpError||error instanceof TaskError))throw error;/* Withdrawn authority cannot disclose a result. */}
-        finally{this.store.run('UPDATE channel_result_cursor SET sequence=? WHERE id=1',event.id);}
-        });}catch{break;/* Queue failure rolls back the cursor; the next tick retries the same event. */}
-      }
+      this.processTaskResults();
     } finally { this.busy = false; }
   }
+  /** Pending results have independent retry clocks; a failing old result never blocks later cards. */
+  private processTaskResults():void {
+    for(const event of this.store.all("SELECT * FROM channel_task_results WHERE id>(SELECT sequence FROM channel_result_cursor WHERE id=1) AND state='pending' AND next_attempt<=? ORDER BY id LIMIT 50",Date.now())){
+      try{this.store.transaction(()=>{
+        const outbox=this.queueTaskResult(event);
+        this.store.run('UPDATE channel_task_results SET state=?,outbox_id=?,last_error=NULL WHERE id=?',outbox?'queued':'suppressed',outbox??null,event.id);
+        if(!outbox)this.resultHistory(event,'suppressed','task_result_destination_unavailable','queue');
+      });}catch(error){
+        try{this.resultFailure(event,error,!this.retryResult(error),'queue');}
+        catch{console.error('channel_result_failure_record_failed',{task_id:event.task_id,result_id:event.id,error_code:errorCode(error)});break;}
+      }
+    }
+    // The cursor denotes terminal results, not just attempted enqueue operations. The per-result state lets later
+    // deliveries continue while an earlier one retries, and survives restart without repeating a confirmed send.
+    this.store.transaction(()=>{
+      this.store.run("UPDATE channel_task_results SET state='delivered' WHERE state='queued' AND outbox_id IN (SELECT id FROM channel_outbox WHERE state='sent')");
+      this.store.run("UPDATE channel_task_results SET state='suppressed' WHERE state='queued' AND outbox_id IN (SELECT id FROM channel_outbox WHERE state='failed')");
+      this.store.run(`UPDATE channel_result_cursor SET sequence=max(sequence,coalesce(
+        (SELECT min(id)-1 FROM channel_task_results WHERE id>sequence AND state IN ('pending','queued')),
+        (SELECT max(id) FROM channel_task_results),sequence)) WHERE id=1`);
+    });
+  }
+  private retryResult(error:unknown):boolean {
+    if(error instanceof HttpError)return [408,425,429].includes(error.status)||error.status>=500;
+    if(error instanceof TaskError)return !/authority_changed|source_changed|revoked|forbidden|scope_paused|inactive|not_found|delivery_unknown/.test(error.code);
+    return true; // Transport and local storage faults are retryable; never silently discard an unclassified failure.
+  }
+  private resultFailure(event:Row,error:unknown,terminal:boolean,phase:string):void {
+    const code=errorCode(error);
+    if(phase==='queue')this.store.run('UPDATE channel_task_results SET state=?,attempts=attempts+1,last_error=?,next_attempt=? WHERE id=?',terminal?'suppressed':'pending',code,Date.now()+Math.min(300000,1000*2**Math.min(event.attempts,9)),event.id);
+    this.resultHistory(event,terminal?'suppressed':'retry',code,phase);
+  }
+  private resultHistory(event:Row,state:string,code:string,phase:string):void {
+    const destination=this.store.get(`SELECT c.id,c.connector_id FROM channel_chats c WHERE c.id=coalesce(
+      (SELECT chat_id FROM channel_service_tasks WHERE task_id=?),(SELECT conversation_id FROM task_origins WHERE task_id=?))`,event.task_id,event.task_id);
+    new TaskRecords(this.store).history(event.task_id,'channel_result_delivery',{result_id:event.id,task_id:event.task_id,channel:destination?.id??null,connector_id:destination?.connector_id??null,state,error_code:code,phase,
+      message:state==='retry'?'结果投递失败，稍后重试':code==='task_result_authority_changed'?'结果未投递：权限已变化':code==='task_result_destination_unavailable'?'结果未投递：目标或权限不可用':'结果未投递：'+code+'（已停止自动重试）'});
+  }
+  private queueTaskResult(event:Row):string|undefined {
+    const link=this.store.get('SELECT * FROM channel_service_tasks WHERE task_id=?',event.task_id);
+    if(link)return this.serviceTaskResult(link);
+    const task=this.store.get(`SELECT t.*,o.conversation_id,o.principal_id,o.source_message FROM tasks t JOIN task_origins o ON o.task_id=t.id
+      JOIN channel_chats c ON c.id=o.conversation_id WHERE t.id=? AND c.state='active' AND t.status IN ('completed','succeeded','pr_opened','cancelled','failed')`,event.task_id);
+    if(!task)return;
+    const key='task-result:'+task.id+':'+digest(JSON.stringify([task.status,task.result,task.error_code,this.store.get('SELECT revision FROM task_records WHERE task_id=?',task.id)?.revision]));
+    const existing=this.store.get('SELECT id FROM channel_outbox WHERE idempotency_key=?',key);if(existing)return existing.id;
+    this.resultAuthority(task);
+    const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',task.conversation_id)!,receipt=this.store.get('SELECT payload FROM channel_inbox WHERE id=?',task.source_message);
+    if(!receipt)return;
+    const original=this.store.secrets.open(receipt.payload,'channel-event:'+task.source_message) as unknown as ChannelEvent,c=this.connector(chat.connector_id);
+    const source={...original,connector_id:c.id,connector_revision:c.revision};
+    let protection:Json={kind:'personal_conversation',chat_id:chat.id,project_id:task.repository_id,principal_id:task.principal_id,source_message:task.source_message,task_id:task.id,source_fence:this.businessFence(chat)};
+    if(chat.chat_type==='group'){
+      const grant=this.store.get('SELECT * FROM channel_employee_grants WHERE chat_id=? AND project_id=? AND principal_id=?',chat.id,task.repository_id,task.principal_id);if(!grant)return;
+      this.employees.assertGrant(grant);protection={...protection,kind:'employee',grant_id:grant.id,grant_revision:grant.revision};
+    }
+    let summary='';try{const result=JSON.parse(task.result??'null');summary=String(result?.summary??result?.report?.summary??result?.pr_url??'');}catch{}
+    return this.queue(source,card(`任务 ${task.id}\n状态：${task.status}\n${summary||task.summary}${task.error_code?'\n原因：'+task.error_code:''}`,(this.options.origin??'')+'/#/board'),key,task.source_message,protection);
+  }
   /** A task a group delegated reports back to that group, only while the binding may still see its repository. */
-  private serviceTaskResult(link:Row):void{
+  private serviceTaskResult(link:Row):string|undefined{
     const task=this.store.get("SELECT * FROM tasks WHERE id=? AND status IN ('completed','succeeded','pr_opened','cancelled','failed')",link.task_id);
     const chat=this.store.get("SELECT * FROM channel_chats WHERE id=? AND state='active'",link.chat_id);
     if(!task||!chat)return;
     const key='service-task-result:'+task.id+':'+digest(JSON.stringify([task.status,task.result,task.error_code,this.store.get('SELECT revision FROM task_records WHERE task_id=?',task.id)?.revision]));
-    if(this.store.get('SELECT 1 FROM channel_outbox WHERE idempotency_key=?',key))return;
+    const existing=this.store.get('SELECT id FROM channel_outbox WHERE idempotency_key=?',key);if(existing)return existing.id;
     const binding=this.serviceBindings.get(chat.id);
     if(!binding||binding.id!==link.binding_id)return;
     this.serviceBindings.assertUsable(binding);
@@ -766,7 +805,7 @@ export class ChannelService {
     const name=this.store.get('SELECT full_name FROM repositories WHERE id=?',task.repository_id)?.full_name??task.repository_id;
     const state=({completed:'已完成',succeeded:'已完成',pr_opened:'已提交 PR',cancelled:'已取消',failed:'失败'} as Record<string,string>)[task.status]??task.status;
     let summary='';try{const result=JSON.parse(task.result??'null');summary=String(result?.summary??result?.report?.summary??result?.pr_url??'');}catch{}
-    this.queue({...original,connector_id:c.id,connector_revision:c.revision},card(`${name} 的任务「${task.summary}」${state}${summary?'\n'+summary:''}${task.error_code?'\n原因：'+task.error_code:''}`,(this.options.origin??'')+'/#/board'),
+    return this.queue({...original,connector_id:c.id,connector_revision:c.revision},card(`${name} 的任务「${task.summary}」${state}${summary?'\n'+summary:''}${task.error_code?'\n原因：'+task.error_code:''}`,(this.options.origin??'')+'/#/board'),
       key,link.source_message,{kind:'service_task',chat_id:chat.id,binding_id:binding.id,project_id:task.repository_id,task_id:task.id,source_message:link.source_message});
   }
   /** A group turn's output may still be sent: its fence is current, and it completed (the answer) or still runs or completed
