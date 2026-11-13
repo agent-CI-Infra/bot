@@ -494,3 +494,80 @@ test('桌面 1440：页内覆盖被顶栏选成默认后，下一次顶栏切换
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });
+
+// #494 item 1: the single-project editor inside global settings is gone (#480 redirects numeric ids to the project
+// workspace). An id that is neither a numeric project nor a list offset must land on the batch list instead of a load
+// that never answers.
+test('非项目也非清单页的设置地址回落到批量清单，数字项目地址的跳转不变', async ({ page }) => {
+  const { h, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    for (const id of ['abc', '0']) {
+      await page.goto(h.admin + '/#/settings/projects/' + id);
+      await expect(page.getByRole('button', { name: '同步安装列表', exact: true })).toBeVisible();
+      await expect(page.locator('#settings-panel')).not.toContainText('正在加载…');
+      await expect(page.locator('.global-project-row[data-key="101"]')).toBeVisible();
+    }
+    // The numeric address still belongs to the project workspace, not to this list.
+    await page.goto(h.admin + '/#/settings/projects/101');
+    await expect(page).toHaveURL(/#\/projects\/101\/basic$/);
+    await expect(page.locator('#project-page')).toBeVisible();
+  } finally { await h.stop(); }
+});
+
+// #494 item 2: the picker now also runs on #/management, where the page does not re-render. The inbox link carries the
+// current project, so it has to follow the same value the assistant followed. (#531 removed the console's own 新建任务
+// link from the shell, so this case names the one link that still exists.)
+test('管理对话页切换顶栏项目时，带项目的收件箱导航链接跟着切换', async ({ page }) => {
+  const { h, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    await page.goto(h.admin + '/#/management');
+    await expect(page.locator('#console-project')).toHaveValue('');
+    await expect(page.locator('#console-inbox-link')).toHaveAttribute('href', '#/inbox');
+    const opened = conversationScopeRequest(page, 'project:101');
+    await page.locator('#console-project').selectOption('101');
+    await opened;
+    await expect(page.locator('#console-inbox-link')).toHaveAttribute('href', '#/inbox/101');
+    // Clearing the choice must not leave the link naming the project it just left.
+    await page.locator('#console-project').selectOption('');
+    await expect(page.locator('#console-inbox-link')).toHaveAttribute('href', '#/inbox');
+  } finally { await h.stop(); }
+});
+
+// #494 item 3: 「全部项目」 in the picker means one value for the board, usage and the assistant. Visiting the inbox with
+// no project clears the shared default as well, instead of only clearing the picker.
+test('#/inbox 的「全部项目」同时清掉共享默认，看板与用量读同一个值', async ({ page }) => {
+  const { h, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, h, password);
+    const boards = boardScopes(page);
+    await page.locator('#console-project').selectOption('101');
+    await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
+    await page.goto(h.admin + '/#/inbox');
+    await expect(page.locator('#console-project')).toHaveValue('');
+    // The board no longer reads the project the inbox left behind.
+    const boardAll = boardScopeRequest(page, '');
+    await page.goto(h.admin + '/#/board');
+    await boardAll;
+    expect(boards.at(-1)).toBe('');
+    await expect(page.locator('#board-scope')).toContainText('顶栏未选项目');
+    await expect(page.locator('#board-scope')).not.toContainText('project-101');
+    // Costs read the same value, and a later picker choice is a new default again.
+    const costAll = costScopeRequest(page, '');
+    await page.goto(h.admin + '/#/costs');
+    await costAll;
+    await expect(page.getByLabel('统计项目', { exact: true })).toHaveValue('');
+    await expect(page.locator('#costs-scope')).toContainText('顶栏未选项目');
+    // The usage page re-reads in place for a new default; the inbox then clears it again.
+    const cost202 = costScopeRequest(page, '202');
+    await page.locator('#console-project').selectOption('202');
+    await cost202;
+    await expect(page).toHaveURL(/#\/costs$/);
+    await page.goto(h.admin + '/#/inbox/all');
+    await expect(page.locator('#console-project')).toHaveValue('');
+  } finally { await h.stop(); }
+});
