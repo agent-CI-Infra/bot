@@ -418,6 +418,7 @@ test('GET /api/identity names a plain GitHub connection state, the next step, an
   assert.deepEqual(connected, {
     state: 'connected', status: '已连接 GitHub，可访问 1 个仓库', next_step: '可在项目列表中打开这些仓库。', action: null,
     repository_count: 1, repositories: [{ id: '101', full_name: 'fixture/project-101' }], pending_repositories: [],
+    install_url: null,
   });
 
   // A pending GitHub proof drops derived grants, so the person cannot see those repositories until they re-verify.
@@ -477,4 +478,43 @@ test('GET /api/identity names a plain GitHub connection state, the next step, an
   assert.equal(expiredAuth.status, 'GitHub 授权已失效');
   assert.equal(expiredAuth.action, 'reconnect');
   assert.match(expiredAuth.next_step, /重新连接/);
+});
+
+test('a signed-in user with no repositories gets a public GitHub App install URL; onboarding stays super-admin only', async t => {
+  const f = await identityFixture(t), { h } = f;
+  const saved = {
+    account_id: f.a.id, app_id: '123', slug: 'fixture-app',
+    settings_url: 'https://github.com/settings/apps/fixture-app',
+    webhook_url: 'https://hooks.invalid/secret-webhook',
+    install_url: 'https://github.com/apps/fixture-app/installations/new?next=https://evil.example',
+  };
+  h.store.run("INSERT INTO settings VALUES('onboarding.app',?)", JSON.stringify(saved));
+  f.state.owner = false; f.state.admin = false; f.state.permission = 'write';
+  const login = await f.login(), principal = login.result.principal_id;
+  const credential = session(h.store, principal, login.result.identity_id);
+  const headers = { Cookie: 'bot_session=' + credential.token };
+  const body = await (await fetch(h.admin + '/api/identity', { headers })).json();
+  const text = JSON.stringify(body);
+  assert.equal(body.github_connection.state, 'no_repositories');
+  assert.equal(body.github_connection.action, 'choose_repos');
+  assert.equal(body.github_connection.install_url, 'https://github.com/apps/fixture-app/installations/new');
+  assert.doesNotMatch(text, /settings\/apps|hooks\.invalid|secret-webhook|evil\.example/);
+  assert.equal('account_id' in body.github_connection, false);
+  assert.equal('settings_url' in body.github_connection, false);
+  assert.equal('webhook_url' in body.github_connection, false);
+  assert.equal((await fetch(h.admin + '/api/onboarding', { headers })).status, 403);
+  assert.equal((await f.admin('/api/onboarding')).status, 200);
+
+  h.store.run("UPDATE settings SET value=? WHERE key='onboarding.app'", JSON.stringify({ slug: 'from-slug', settings_url: 'https://evil.example/settings' }));
+  assert.equal((await (await fetch(h.admin + '/api/identity', { headers })).json()).github_connection.install_url,
+    'https://github.com/apps/from-slug/installations/new');
+
+  h.store.run("UPDATE settings SET value=? WHERE key='onboarding.app'", JSON.stringify({
+    slug: '../not-a-slug', install_url: 'https://evil.example/apps/fixture-app/installations/new' }));
+  assert.equal((await (await fetch(h.admin + '/api/identity', { headers })).json()).github_connection.install_url, null);
+
+  h.store.run("UPDATE settings SET value=? WHERE key='onboarding.app'", JSON.stringify({
+    install_url: 'https://github.com/apps/fixture-app/installations/select_target' }));
+  assert.equal((await (await fetch(h.admin + '/api/identity', { headers })).json()).github_connection.install_url,
+    'https://github.com/apps/fixture-app/installations/select_target');
 });

@@ -61,8 +61,18 @@ async function renderIdentity() {
   const overview = card('我的身份与有效权限'); overview.classList.add('identity-overview');
   overview.append(facts([['当前账户', me.username], ['当前组织', data.tenants.find(t => t.id === data.actor.tenant_id)?.display_name || (data.actor.tenant_id ? data.actor.tenant_id : '全部已授权范围')],
     ['有效授权', `${active.length} 条`], ['待验证或历史授权', `${pending.length} 条`], ['本次读取', timestamp(Date.now())]]),
-    note(active.length ? '下方展示本次读取时的有效授权。实际操作仍由服务端重新校验；身份绑定与项目管理权限分别核验。' : '已登录，尚无有效管理授权。请联系管理员委派，或重新验证 GitHub 权限。'),
-    button('刷新身份与授权', () => render().catch(error)));
+    note(active.length ? '下方展示本次读取时的有效授权。实际操作仍由服务端重新校验；身份绑定与项目管理权限分别核验。' : '已登录，尚无有效管理授权。请联系管理员委派，或重新验证 GitHub 权限。'));
+  if (data.github_connection) {
+    overview.append(element('p', data.github_connection.status, 'identity-connection-status'));
+    if (data.github_connection.next_step) overview.append(note(data.github_connection.next_step));
+    // A public GitHub App install URL only. The App owner's settings page is never linked here.
+    if (data.github_connection.action === 'choose_repos' && data.github_connection.install_url) {
+      const go = element('a', '去 GitHub 选择仓库', 'button-link');
+      go.href = data.github_connection.install_url; go.target = '_blank'; go.rel = 'noopener noreferrer';
+      overview.append(go);
+    }
+  }
+  overview.append(button('刷新身份与授权', () => render().catch(error)));
   const selection = card('当前组织与项目范围'), select = document.createElement('select'), form = document.createElement('form');
   select.setAttribute('aria-label', '当前租户');
   const platform = data.scopes.some(s => s.scope === 'platform');
