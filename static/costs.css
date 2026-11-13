@@ -14,3 +14,5 @@
 .statistics-undated th:nth-child(2),.statistics-undated td:nth-child(2){text-align:left;font-variant-numeric:normal}
 .statistics-task-summary th,.statistics-task-summary td{height:48px}
 .statistics-task-summary .statistics-task-count{display:inline-block;min-width:3ch;text-align:right}
+/* The task drill-down nested in the summary lists text (任务 / 项目 / 状态 / 创建时间): left aligned, natural row height. */
+.statistics-drill-body .cost-table-scroll :is(th,td){text-align:left;font-variant-numeric:normal;height:auto}
