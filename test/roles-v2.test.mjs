@@ -122,7 +122,7 @@ test('flat permissions filter actual tools and a later grant cannot widen an exi
   f.put({ roles: [{ role_id: 'dev', permissions: { repository: 'read', commands: 'deny', project_memory: 'none', role_memory: 'none' } }] });
   const old = resolveRole(f.s, 'r', 'dev', 'task.request').snapshot;
   const result = await runRole({ ...f.spec, tools: ['read_file', 'write_file', 'run_command', 'search_project_memory', 'finish'].map(tool) }, 'dev');
-  assert.deepEqual(result.result.tools, ['read_file', 'finish','list_managed_tasks','read_managed_task','create_task','manage_task','search_role_memory']);
+  assert.deepEqual(result.result.tools, ['read_file', 'finish','read_tool_result','list_managed_tasks','read_managed_task','create_task','manage_task','search_role_memory']);
   f.put({ roles: [{ role_id: 'dev', permissions: { repository: 'write', commands: 'allow' } }] });
   assert.equal(roleAuthority(f.s, 'r', old, 'write_file'), 'tool_not_in_permissions');
   assert.ok(resolveRole(f.s, 'r', 'dev', 'task.request').snapshot.capability.tools.includes('write_file'));
@@ -347,7 +347,7 @@ test('the project controller runs on the Pi harness, delegates by references and
   // The controller session is its own restricted workspace with only control-plane tools.
   const [session] = [...runner.spaces.values()].filter(sp => sp.parsed);
   assert.notEqual(session.id, workspace.task.workspace_id);
-  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['acknowledge_coordination', 'create_task', 'delegate_role', 'finish_coordination', 'list_managed_tasks', 'list_project_tasks', 'manage_task', 'nominate_delivery', 'plan_task', 'read_child_tasks', 'read_coordination', 'read_managed_task', 'read_stage_schedule', 'read_task_history', 'read_task_record', 'record_progress', 'record_scope_difference', 'relate_task', 'request_task_coordination', 'set_task_priority', 'wait_for_children', 'wait_for_tasks']);
+  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['acknowledge_coordination', 'create_task', 'delegate_role', 'finish_coordination', 'list_managed_tasks', 'list_project_tasks', 'manage_task', 'nominate_delivery', 'plan_task', 'read_child_tasks', 'read_coordination', 'read_managed_task', 'read_stage_schedule', 'read_task_history', 'read_task_record', 'read_tool_result', 'record_progress', 'record_scope_difference', 'relate_task', 'request_task_coordination', 'set_task_priority', 'wait_for_children', 'wait_for_tasks']);
   assert.deepEqual(session.parsed.control_tools.sort(), session.parsed.tools.map(t => t.function.name).sort());
   assert.deepEqual(session.parsed.capabilities.workspace, { read: false, write: false, notes: false, shell: false });
   for (const body of f.requests.filter(isController)) for (const name of ['write_file', 'run_command', 'create_pull_request', 'submit_acceptance']) assert.ok(!body.tools.some(t => t.function.name === name));

@@ -171,7 +171,7 @@ test('real Pi workers and fresh QA use controlled tools and a fixed candidate un
 
 test('a Coordinator configured with Pi gets its own real SDK session and restricted tools', { skip, timeout: 120000 }, async t => {
   const f = await fixture(t, body => {
-    assert.deepEqual(body.tools.map(t => t.function.name).sort(), ['read_project_task', 'submit_coordination']);
+    assert.deepEqual(body.tools.map(t => t.function.name).sort(), ['read_project_task', 'read_tool_result', 'submit_coordination']);
     return call('submit_coordination', { summary: 'Align the shared report', outcome: 'notices', notices: [{ task_id: 't', message: 'Recheck the shared report and obtain fresh QA', action: 'review' }] });
   });
   f.put({ roles: [{ role_id: 'coordinator', harness_ref: { id: 'pi' } }] });
