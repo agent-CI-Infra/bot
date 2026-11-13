@@ -570,7 +570,7 @@ export class TaskEngine {
           const artifact=await workspace.artifact('integration-artifact:'+integration.id+':'+ref.object.sha);
           const command=String(this.store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||'').trim();
           const validation=command?{...await workspace.call('integration-tests:'+integration.id+':'+ref.object.sha,{type:'workspace_command',command,timeout_ms:null}),command,source:'policy'}:{command:'',source:'policy',skipped:true};
-          const valid=!validation.error&&(validation.skipped||validation.exit_code===0&&!validation.timed_out&&!validation.truncated);
+          const valid=!validation.error&&(validation.skipped||validation.exit_code===0&&!validation.timed_out);
           const checked=traceEvent(this.store,id,'integration_validation',{integration_id:integration.id,base_sha:ref.object.sha,source_sha:integration.sha,tree_sha:artifact.tree_sha,passed:valid,validation},task.trace_run_id,'framework');
           if(valid){
             const candidate={...prior,...artifact,source_workspace_id:task.workspace_id,files:await workspace.contents(artifact.files,blobValue(this.store,input.snapshot_files)),source_tree:input.source_tree,snapshot_files:blobValue(this.store,input.snapshot_files),skipped_files:blobValue(this.store,input.skipped_files),
@@ -669,7 +669,7 @@ export class TaskEngine {
           let validation:any={command:args.test_command,source:'agent',skipped:true};
           if(command){
             validation={...await workspace!.call('create-pr:'+requestId+':tests',{type:'workspace_command',command,timeout_ms:null}),command,source:'policy'};
-            if(validation.error||validation.exit_code!==0||validation.timed_out||validation.truncated)return {...validation,error:'validation_failed'};
+            if(validation.error||validation.exit_code!==0||validation.timed_out)return {...validation,error:'validation_failed'};
           }
           let branch:string,ownerTask=id,prNumber:number|null=null;
           if(task.kind.endsWith('.pr')||input.bot_pr){

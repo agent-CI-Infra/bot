@@ -4,6 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { ToolResultFiles, toolResultStorage } from './tool-results.js';
 
 // Trajectories keep the bodies of agent work (model requests and responses, tool calls and results, large logs) in
 // append-only JSONL files, one per run, instead of in SQLite rows. SQLite keeps one entry per file, inserted when the
@@ -66,6 +67,7 @@ export function addColumns(db: DatabaseSync, table: string, columns: Record<stri
 export const operationRefColumns = { request_ref: 'TEXT', result_ref: 'TEXT', request_sha256: 'TEXT' };
 
 export function trajectoryStorage(db: DatabaseSync) {
+  toolResultStorage(db);
   addColumns(db, 'task_tools', operationRefColumns);
   addColumns(db, 'model_requests', { request_ref: 'TEXT', response_ref: 'TEXT' });
   addColumns(db, 'task_logs', { content_ref: 'TEXT' });
@@ -88,6 +90,7 @@ export function trajectoryStorage(db: DatabaseSync) {
 
 export class Trajectories {
   readonly root: string;
+  readonly results: ToolResultFiles;
   /** Content-addressed blobs: <blobs>/sha256/<first two hex digits>/<sha256>. */
   readonly blobs: string;
   private readonly temporary: boolean;
@@ -101,6 +104,7 @@ export class Trajectories {
     this.temporary = root === null;
     this.root = root === null ? mkdtempSync(join(tmpdir(), 'bot-trajectories-')) : resolve(root);
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    this.results = new ToolResultFiles(db, this.root);
     this.blobs = root === null ? join(this.root, '.blobs') : join(dirname(this.root), 'blobs');
     // A file nothing appended to for a while is closed; a later record opens a continuation file.
     this.timer = setInterval(() => this.closeIdle(), Math.min(idleMs, 60_000));
@@ -259,6 +263,7 @@ export class Trajectories {
   /** Removes the files of a deleted project or conversation and their entries; their totals are taken back. */
   remove(where: { repository_id?: string; conversation_id?: string }): void {
     const [column, value] = where.repository_id !== undefined ? ['repository_id', where.repository_id] : ['conversation_id', where.conversation_id!];
+    this.results.remove(column as 'repository_id' | 'conversation_id', value);
     for (const handle of [...this.open.values()]) if ((handle.scope as any)[column] === value) this.finish(handle);
     const rows = this.db.prepare(`SELECT id,repository_id,path,bytes,counts FROM trajectory_files WHERE ${column}=?`).all(value) as Record<string, any>[];
     for (const row of rows) {
