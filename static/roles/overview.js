@@ -1,6 +1,24 @@
-function roleListStatus(role, state) {
+function roleListComparable(role) {
+  return JSON.stringify({
+    role_id: role.role_id, enabled: role.enabled, name: role.name,
+    responsibility: role.responsibility, persona_prompt: role.persona_prompt,
+    model_profile_ref: role.model_profile_ref ? { model_id: role.model_profile_ref.model_id, api: role.model_profile_ref.api, tool_calls: role.model_profile_ref.tool_calls, structured_output: role.model_profile_ref.structured_output } : null,
+    skill_bundle_ref: role.skill_bundle_ref ? { id: role.skill_bundle_ref.id } : null,
+    harness_ref: role.harness_ref ? { id: role.harness_ref.id } : null,
+    permissions: role.permissions || null,
+    environment_profile_ref: role.environment_profile_ref ? { id: role.environment_profile_ref.id } : null,
+    budget_policy_ref: role.budget_policy_ref ? Object.fromEntries(Object.entries(role.budget_policy_ref).filter(([key]) => key !== 'version')) : null,
+    output_schema_ref: role.output_schema_ref ? { id: role.output_schema_ref.id } : null,
+    kind: role.kind
+  });
+}
+function roleListStart(role, data) {
+  if (data.configured !== false) return role;
+  return { ...role, harness_ref: { ...(role.harness_ref || {}), id: data.recommended_backend || 'pi' } };
+}
+function roleListStatus(role, state, start) {
   const parts = [role.enabled ? '已启用' : '已关闭'];
-  if (state.dirty) parts.push('有未保存的更改');
+  if (!start || roleListComparable(role) !== roleListComparable(start)) parts.push('有未保存的更改');
   else if (state.data.configured) parts.push('已保存');
   else parts.push('推荐配置');
   return parts.join(' · ');
@@ -10,15 +28,16 @@ function roleOverviewCards(state, redraw) {
   // The version line is the one place that says whether what is on screen is in force or still a draft.
   roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; overview.append(roleDraftStatus);
   overview.append(note('点角色名称打开完整表单，在同一页编辑并保存。列表只展示名称、是否启用、职责和状态。'));
+  const starting = new Map((data.configuration.roles || []).map(role => [role.role_id, roleListStart(role, data)]));
   for (const role of draft.roles) {
     const row = document.createElement('tr'); row.dataset.role = role.role_id;
     const link = element('a', roleLabel(role.role_id, role.name)); link.href = `#/projects/${current.id}/roles/${role.role_id}`;
     link.dataset.testid = 'role-list-' + role.role_id;
     tableCell(row, '角色', link);
-    tableCell(row, '启用', roleCheck(role.role_id + ' 启用', role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind)));
+    tableCell(row, '启用', roleCheck(role.role_id + ' 启用', role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind), redraw));
     tableCell(row, '职责', note(role.responsibility || '未填写职责'));
     const saved = data.configuration.roles.find(entry => entry.role_id === role.role_id);
-    const status = note(roleListStatus(role, state));
+    const status = note(roleListStatus(role, state, starting.get(role.role_id)));
     if (role.role_id === 'dev' && data.configured && saved?.entry_harness_source !== 'role' && saved?.harness_ref.id !== 'pi') status.append(element('span', '检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更', 'muted'));
     tableCell(row, '状态', status);
     body.append(row);
