@@ -4,6 +4,7 @@ import { digest, fail, fields, randomId, text, type Json } from '../core/securit
 import { authorize, createProjectServicePrincipal, invalidate, listEffectiveScopes, migrationReport, refreshSessionRevision } from './authorization.js';
 import { projectCapabilities, explicitDelegationCapabilities } from './storage.js';
 import { revokeIdentity } from './bindings.js';
+import { githubConnection } from './github-status.js';
 
 // A grant names two people: the holder and, when one was recorded, the person who granted it. Both resolve the same
 // way — verified GitHub identity first, then local username, then the raw id — so the console never guesses at one.
@@ -40,7 +41,8 @@ export function identityApi(store: Store, user: Actor, token: string, method: st
     const scopes = listEffectiveScopes(store, context.principal_id), platform = scopes.some(s => s.scope === 'platform');
     const tenants = store.all('SELECT * FROM tenants').filter(t => platform || scopes.some(s => s.tenant_id === t.id && s.state === 'active'));
     return { actor: context, tenants, scopes,
-      identities: store.all('SELECT id,provider,host,display_name,status,verified_at FROM external_identities WHERE principal_id=?', context.principal_id) };
+      identities: store.all('SELECT id,provider,host,display_name,status,verified_at FROM external_identities WHERE principal_id=?', context.principal_id),
+      github_connection: githubConnection(store, context.principal_id) };
   }
   if (path === '/api/identity/tenant' && method === 'POST') {
     fields(body, ['tenant_id']); const tenant = body.tenant_id === null ? null : text(body.tenant_id);
