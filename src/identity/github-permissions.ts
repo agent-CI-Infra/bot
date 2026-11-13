@@ -1,12 +1,17 @@
 import type { Store } from '../storage/database.js';
-import { fail, type Json } from '../core/security.js';
+import { fail, HttpError, type Json } from '../core/security.js';
 import { appJwt, revokeInstallationToken } from '../github/client.js';
 import { installationRef, numericId, type InstallationRef } from '../installations/archive.js';
 
 interface Access {
   target_id: string; owner: boolean; repository_ids: string[]; admin_ids: string[];
-  repository_selection: string; uncertain: boolean;
+  repository_selection: string;
+  /** Why some of this evidence could not be settled, or null when all of it was. */
+  uncertain: string | null;
 }
+
+/** A failure's error code, safe to record: never a message, URL or credential. */
+export const failureCode = (error: unknown): string => error instanceof HttpError ? error.code : 'unexpected_error';
 
 /** Identity comes from OAuth; repository authority is checked with a separate, read-only installation token. */
 export class GitHubPermissions {
@@ -54,16 +59,18 @@ export class GitHubPermissions {
         if (repos.length === count) break;
         if (repos.length > count || !data.repositories.length || page === 1000) return fail(502, 'github_incomplete_evidence');
       }
-      let owner = target.type === 'User' && targetId === user.id, uncertain = target.type === 'Organization' && !membershipReadable;
+      let owner = target.type === 'User' && targetId === user.id;
+      // The first reason wins; each names which evidence was missing, for diagnosis (#521).
+      let uncertain: string | null = target.type === 'Organization' && !membershipReadable ? 'membership_unreadable' : null;
       if (membershipReadable) {
         try {
           const member = await this.request(token, `/orgs/${encodeURIComponent(target.login)}/memberships/${encodeURIComponent(user.login)}`, undefined, true);
           if (member) {
             if (numericId((member.user as Json | undefined)?.id) !== user.id || numericId((member.organization as Json | undefined)?.id) !== targetId ||
               !['active', 'pending'].includes(String(member.state)) || !['admin', 'member'].includes(String(member.role))) return fail(502, 'github_incomplete_evidence');
-            owner = member.state === 'active' && member.role === 'admin'; uncertain ||= member.state !== 'active';
+            owner = member.state === 'active' && member.role === 'admin'; if (member.state !== 'active') uncertain ??= 'membership_pending';
           }
-        } catch { uncertain = true; }
+        } catch (error) { uncertain ??= 'membership:' + failureCode(error); }
       }
       const repositoryIds: string[] = [], adminIds: string[] = [];
       for (const repo of repos) {
@@ -78,7 +85,7 @@ export class GitHubPermissions {
           if (numericId(current?.id) !== id || numericId((current?.owner as Json | undefined)?.id) !== targetId) return fail(502, 'github_incomplete_evidence');
           if (permission.permission !== 'none') repositoryIds.push(id);
           if (permission.permission === 'admin' || ((permission.user as Json)?.permissions as Json | undefined)?.admin === true) adminIds.push(id);
-        } catch { uncertain = true; }
+        } catch (error) { uncertain ??= 'repository_permission:' + failureCode(error); }
       }
       return { target_id: targetId, owner, repository_ids: repositoryIds, admin_ids: adminIds,
         repository_selection: String(installation.repository_selection), uncertain };

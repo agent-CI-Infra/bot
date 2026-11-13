@@ -58,7 +58,8 @@ export class ExternalBindings {
       else this.store.run(`INSERT INTO external_identities(id,principal_id,provider,host,connector,external_tenant,external_actor,display_name,status,verified_at)
         VALUES(?,?,?,?,?,?,?,?,'active',?)`, id, actor.principal_id, ...subjectKeys.map(k => proof[k]), proof.external_actor, Date.now());
       this.store.run('UPDATE bind_challenges SET identity_id=?,proof_id=? WHERE challenge_hash=? AND identity_id IS NULL', id, proof.proof_id, digest(challenge));
-      invalidate(this.store, actor.principal_id, 'identity.bound'); this.store.audit(actor.principal_id, 'identity.bound', id);
+      // A new binding adds a way in; it removes nothing, so the authorization revision stays (#521).
+      this.store.audit(actor.principal_id, 'identity.bound', id);
       return { identity_id: id, principal_id: actor.principal_id };
     });
   }

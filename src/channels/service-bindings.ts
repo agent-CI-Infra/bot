@@ -1,5 +1,5 @@
 import type { Store, Row } from '../storage/database.js';
-import { assertCurrent, authorize, invalidate, listEffectiveProjectAccess, narrowActor, resolvePrincipalActor, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
+import { activeScopes, assertCurrent, authorize, invalidate, invalidateIfLost, listEffectiveProjectAccess, narrowActor, resolvePrincipalActor, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
 import { managementAssistant, repositoryAssistant, serviceItems, serviceRole } from '../service-roles/roles.js';
 import { normalizePermissions, permitsManagement, serviceCapabilities, type RolePermissions } from '../roles/permissions.js';
@@ -313,6 +313,7 @@ export class ChannelServiceBindings {
       if ((locked?.revision ?? 0) !== input.expected_revision) fail(409, 'channel_revision_conflict', 'expected_revision');
       if (locked && !this.manageable(actor, locked)) fail(403, 'channel_service_binding_forbidden');
       const time = Date.now(), principal = locked?.principal_id ?? randomId(), binding = locked?.id ?? randomId(), next = (locked?.revision ?? 0) + 1;
+      const before = locked ? activeScopes(this.store, principal) : [];
       if (locked) this.store.run('UPDATE principals SET active=1,maintenance=? WHERE id=?', 'channel-binding:' + id, principal);
       else this.store.run("INSERT INTO principals(id,kind,maintenance) VALUES(?,'service',?)", principal, 'channel-binding:' + id);
       this.store.run('DELETE FROM scoped_grants WHERE principal_id=?', principal);
@@ -321,7 +322,7 @@ export class ChannelServiceBindings {
         role.id, scope.kind, actor.principal_id, participation, next, time, binding);
       else this.store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,participation,enabled,revision,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,?,1,?,?,?)`, binding, id, role.id, scope.kind, principal, actor.principal_id, actor.principal_id, participation, next, time, time);
-      invalidate(this.store, principal, 'channel_service_binding_configured');
+      invalidateIfLost(this.store, principal, before, 'channel_service_binding_configured');
       // Summaries and replies derived under the previous scope must not return into the new one.
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', id);
       this.store.audit(actor.principal_id, 'channel.service_binding.configured', binding);

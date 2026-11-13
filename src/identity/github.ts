@@ -2,9 +2,12 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { Store, Row } from '../storage/database.js';
 import { digest, fail, randomId, HttpError, type Json } from '../core/security.js';
 import { installationRef, numericId, type InstallationIdentity, type InstallationRef, type VerifiedInstallationAccess } from '../installations/archive.js';
-import { resolveActor, invalidate, revision } from './authorization.js';
+import { activeScopes, invalidateIfLost, resolveActor, revision } from './authorization.js';
 import { identityProjection, projectCapabilities, tenantId } from './storage.js';
-import { GitHubPermissions } from './github-permissions.js';
+import { failureCode as errorCode, GitHubPermissions } from './github-permissions.js';
+
+// What made the latest permission check uncertain, kept on the identity for diagnosis; null once everything was settled.
+const issues = (list: { installation: string | null; code: string }[]): string | null => list.length ? JSON.stringify(list) : null;
 
 export interface GitHubOAuthConfig { clientId: string; clientSecret: string; redirectUri: string; apiUrl?: string; webUrl?: string; applicationType?: 'oauth_app' | 'github_app' }
 export class GitHubIdentity implements InstallationIdentity {
@@ -85,7 +88,8 @@ export class GitHubIdentity implements InstallationIdentity {
       if (!previous) this.store.run(`INSERT INTO external_identities(id,principal_id,provider,host,connector,external_tenant,external_actor,display_name,status,verified_at)
         VALUES(?,?,'github','github.com','','',?,?,'active',?)`, id, principal, userId, login, Date.now());
       else this.store.run('UPDATE external_identities SET display_name=? WHERE id=?', login, id);
-      this.saveToken(id, token); invalidate(this.store, principal, 'github.authorized'); this.store.audit(principal, 'github.authorized', id);
+      // Signing in adds or renews proof; the permission check below raises the revision only if authority was lost (#521).
+      this.saveToken(id, token); this.store.audit(principal, 'github.authorized', id);
       return { principal_id: principal, identity_id: id, setup_state: row.setup_state as string | null };
     });
     await this.refresh(result.principal_id); this.assertConfiguration(); return result;
@@ -112,22 +116,28 @@ export class GitHubIdentity implements InstallationIdentity {
   private async verifyPermissions(principal: string): Promise<void> {
     const identity = this.store.get("SELECT * FROM external_identities WHERE principal_id=? AND provider='github' AND status='active'", principal);
     if (!identity?.credentials) return;
-    const startRevision = revision(this.store, principal), now = Date.now(); let uncertain = false;
+    const startRevision = revision(this.store, principal), now = Date.now();
     if (!startRevision) return;
     const desired: { id: string; tenant: string; project: string | null; role: string; installation: Row; evidence: string }[] = [];
+    // Installations whose evidence could not be settled this round, with a reason code (never a credential). Their grants
+    // only stop counting until the next proof; grants of every other installation that are not proved again are revoked.
+    const uncertain = new Map<string, string>();
     try {
       const token = await this.token(identity), current = await this.api(token, '/user');
       if (numericId(current.id) !== identity.external_actor || typeof current.login !== 'string' || !current.login) return fail(403, 'github_identity_mismatch');
       const permissions = new GitHubPermissions(this.store, this.config.apiUrl);
       for (const snapshot of this.store.all("SELECT * FROM github_installations WHERE github_host='github.com'")) {
         const ref = snapshot.ref;
+        // Confirmed deleted or suspended: nothing to prove, and their grants are revoked below.
         if (snapshot.status === 'deleted' || snapshot.status === 'suspended') continue;
-        if (snapshot.status !== 'active' || snapshot.scope_pending || snapshot.completeness !== 'complete') { uncertain = true; continue; }
+        const pending = snapshot.status !== 'active' ? `installation_${snapshot.status}` : snapshot.scope_pending ? 'installation_scope_pending'
+          : snapshot.completeness !== 'complete' ? 'installation_incomplete' : null;
+        if (pending) { uncertain.set(ref, pending); continue; }
         try {
           const access = await permissions.read({ github_host: snapshot.github_host, app_id: snapshot.app_id, installation_id: snapshot.installation_id },
             { id: identity.external_actor, login: String(current.login) });
-          if (access.target_id !== snapshot.target_id || access.repository_selection !== snapshot.repository_selection) { uncertain = true; continue; }
-          uncertain ||= access.uncertain;
+          if (access.target_id !== snapshot.target_id || access.repository_selection !== snapshot.repository_selection) { uncertain.set(ref, 'installation_target_changed'); continue; }
+          if (access.uncertain) uncertain.set(ref, access.uncertain);
           const known = this.store.all('SELECT repository_id FROM installation_repositories WHERE installation_ref=? AND present=1', ref).map(r => r.repository_id);
           const evidence = access.owner ? snapshot.target_type === 'User' ? 'personal_owner' : 'organization_owner' : 'repository_admin';
           const tenant = tenantId(snapshot.target_id);
@@ -135,30 +145,37 @@ export class GitHubIdentity implements InstallationIdentity {
             desired.push({ id: `github:${principal}:${ref}:tenant`, tenant, project: null, role: 'org_admin', installation: snapshot, evidence });
           for (const id of known) if (access.admin_ids.includes(id))
             desired.push({ id: `github:${principal}:${ref}:${id}`, tenant, project: id, role: 'project_admin', installation: snapshot, evidence });
-        } catch { uncertain = true; }
+        } catch (error) { uncertain.set(ref, errorCode(error)); }
       }
       this.store.transaction(() => {
         this.assertConfiguration();
         if (revision(this.store, principal) !== startRevision || !this.store.get("SELECT 1 FROM external_identities WHERE id=? AND status='active'", identity.id)) return fail(409, 'authorization_changed');
         for (const item of desired) if (this.store.get('SELECT revision FROM github_installations WHERE ref=?', item.installation.ref)?.revision !== item.installation.revision) return fail(409, 'authorization_changed');
         identityProjection(this.store);
-        const old = this.store.all("SELECT id FROM scoped_grants WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", principal).map(g => g.id).sort();
-        this.store.run(`UPDATE scoped_grants SET ${uncertain ? 'expires_at' : 'revoked_at'}=? WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL`, now, principal);
+        const before = activeScopes(this.store, principal);
+        for (const grant of this.store.all("SELECT id,installation_ref,expires_at FROM scoped_grants WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", principal)) {
+          if (!uncertain.has(grant.installation_ref)) this.store.run('UPDATE scoped_grants SET revoked_at=? WHERE id=?', now, grant.id);
+          // An already expired grant keeps its expiry, so a long uncertainty leaves it untouched.
+          else if (grant.expires_at === null || grant.expires_at > now) this.store.run('UPDATE scoped_grants SET expires_at=? WHERE id=?', now, grant.id);
+        }
         for (const item of desired) this.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,policy,evidence,verified_at,expires_at,installation_ref,installation_revision)
           VALUES(?,?,?,?,?,?,?,'github_derived','current_github',?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET verified_at=excluded.verified_at,
           tenant_id=excluded.tenant_id,project_id=excluded.project_id,scope=excluded.scope,role=excluded.role,capabilities=excluded.capabilities,
           expires_at=excluded.expires_at,revoked_at=NULL,evidence=excluded.evidence,installation_revision=excluded.installation_revision`, item.id, principal, item.tenant,
           item.project, item.project ? 'project' : 'tenant', item.role, JSON.stringify(projectCapabilities), item.evidence, now, now + 5 * 60_000, item.installation.ref, item.installation.revision);
-        this.store.run('UPDATE external_identities SET display_name=?,status=?,verified_at=? WHERE id=?', String(current.login), uncertain && !desired.length ? 'pending_verification' : 'active', now, identity.id);
-        if (JSON.stringify(old) !== JSON.stringify(desired.map(g => g.id).sort())) invalidate(this.store, principal, 'github.permissions_changed');
+        this.store.run('UPDATE external_identities SET display_name=?,status=?,verified_at=?,verification_issues=? WHERE id=?', String(current.login),
+          uncertain.size && !desired.length ? 'pending_verification' : 'active', now, issues([...uncertain].map(([installation, code]) => ({ installation, code }))), identity.id);
+        // Compare what the principal can use, not grant rows: renewing, or revoking a grant that had already expired, loses nothing.
+        invalidateIfLost(this.store, principal, before, 'github.permissions_changed');
       });
     } catch (error) {
       // A transport/SSO failure is uncertainty, never evidence that someone left an organization.
       this.store.transaction(() => {
         if (revision(this.store, principal) !== startRevision || !this.store.get("SELECT 1 FROM external_identities WHERE id=? AND status='active'", identity.id)) return;
-        this.store.run("UPDATE external_identities SET status='pending_verification' WHERE id=?", identity.id);
-        this.store.run("UPDATE scoped_grants SET expires_at=? WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", Date.now(), principal);
-        invalidate(this.store, principal, 'github.verification_pending');
+        const before = activeScopes(this.store, principal), failed = Date.now();
+        this.store.run("UPDATE external_identities SET status='pending_verification',verification_issues=? WHERE id=?", issues([{ installation: null, code: errorCode(error) }]), identity.id);
+        this.store.run("UPDATE scoped_grants SET expires_at=? WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)", failed, principal, failed);
+        invalidateIfLost(this.store, principal, before, 'github.verification_pending');
       });
     }
   }
@@ -199,8 +216,11 @@ export class GitHubIdentity implements InstallationIdentity {
       if (numericId(user.id) !== identity.external_actor || typeof user.login !== 'string') return null;
       const access = await new GitHubPermissions(this.store, this.config.apiUrl).read(ref, { id: identity.external_actor, login: user.login });
       if (actor.tenant_id && actor.tenant_id !== tenantId(access.target_id) || !access.owner && !access.repository_ids.length) return null;
+      // The proof must still belong to this session's identity and organization. A revision raised meanwhile for some
+      // other loss does not void it (#521); a revoked binding or ended session does.
       const current = resolveActor(this.store, sessionRef);
-      if (current.authorization_revision !== actor.authorization_revision) return null;
+      if (current.principal_id !== actor.principal_id || current.tenant_id !== actor.tenant_id ||
+        !this.store.get("SELECT 1 FROM external_identities WHERE id=? AND status='active'", identity.id)) return null;
       return { github_user_id: identity.external_actor, target_id: access.target_id, repository_ids: access.owner ? null : access.repository_ids,
         can_manage: access.owner || access.admin_ids.length > 0, authorization_revision: String(current.authorization_revision) };
     } catch { return null; }

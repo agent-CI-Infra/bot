@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { identityFixture } from './identity-fixture.mjs';
 import { session } from '../dist/app/auth.js';
-import { authorize, resolveActor, listEffectiveScopes, resolveServiceActor, createProjectServicePrincipal, assertSessionWrite, resolvePrincipalActor, invalidate } from '../dist/identity/authorization.js';
+import { assertCurrent, authorize, resolveActor, listEffectiveScopes, resolveServiceActor, createProjectServicePrincipal, resolvePrincipalActor, invalidate } from '../dist/identity/authorization.js';
 import { InstallationSetup } from '../dist/installations/setup.js';
+import { emitInstallationEvent } from '../dist/installations/archive.js';
 import { identityStorage } from '../dist/identity/storage.js';
 import { ExternalBindings, revokeIdentity } from '../dist/identity/bindings.js';
 import { digest } from '../dist/core/security.js';
@@ -176,20 +177,22 @@ test('current GitHub owner, selected repositories, repo admin and ordinary membe
   assert.deepEqual(active(h.store, principal), []);
   state.admin = true; await f.identity.reverify(principal); actor = resolveActor(h.store, creds.token);
   state.admin = false; await f.identity.reverify(principal);
-  assert.throws(() => authorize(actor, 'config.write', { project_id: '101' }), /authorization_changed/);
+  assert.throws(() => authorize(actor, 'config.write', { project_id: '101' }), /capability_forbidden/);
   assert.deepEqual(active(h.store, principal), []); // sender/requester are never consulted.
   state.type = 'User'; f.snapshot(); await f.identity.reverify(principal);
   authorize(resolveActor(h.store, creds.token), 'config.write', { project_id: '101' });
   state.id = 43; const other = await f.login(); assert.deepEqual(active(h.store, other.result.principal_id), []);
 });
 
-test('permission downgrade blocks stale writes; explicit delegation remains independent; unknown API evidence fails closed', async t => {
+test('permission downgrade blocks only what was lost; explicit delegation remains independent; unknown API evidence fails closed', async t => {
   const f = await identityFixture(t), { h, state } = f, login = await f.login(), p = login.result.principal_id;
   const creds = session(h.store, p, login.result.identity_id), actor = resolveActor(h.store, creds.token);
   const username = h.store.get('SELECT username FROM users WHERE id=?', p).username;
   assert.equal((await f.admin('/api/project-admin-assignments', 'PUT', { user_id: p, repository_ids: ['101'] })).status, 200);
   state.owner = false; state.admin = false; await f.identity.reverify(p);
-  assert.throws(() => assertSessionWrite(h.store, creds.token, actor), /authorization_changed/);
+  // The actor predates the downgrade, but the explicit delegation still covers this write (#521); the lost owner grant does not.
+  authorize(actor, 'config.write', { project_id: '101' });
+  assert.throws(() => authorize(actor, 'config.write', { tenant_id: 'github.com:10' }), /capability_forbidden/);
   const current = resolveActor(h.store, creds.token); authorize(current, 'release.manage', { project_id: '101' });
   assert.equal(active(h.store, p).filter(g => g.source === 'explicit_delegation').length, 1);
   assert.throws(() => authorize(current, 'grants.manage', { project_id: '101' }), /forbidden/);
@@ -202,7 +205,7 @@ test('permission downgrade blocks stale writes; explicit delegation remains inde
   assert.equal(state.refreshed, 1);
   const before = resolveActor(h.store, creds.token);
   h.store.transaction(() => revokeIdentity(h.store, p, login.result.identity_id));
-  assert.throws(() => authorize(before, 'config.write', { project_id: '101' }), /authorization_changed/);
+  assert.throws(() => authorize(before, 'config.write', { project_id: '101' }), /login_required/);
   assert.throws(() => resolveActor(h.store, creds.token), /login_required/);
   assert.equal(active(h.store, p).filter(g => g.source === 'explicit_delegation').length, 1);
 });
@@ -303,17 +306,116 @@ test('the installation adapter verifies current owner and repo subsets; Setup pe
   assert.ok(!h.store.get('SELECT identity_session_ref FROM installation_setup_states WHERE state_hash=?', digest(begun.state)).identity_session_ref.includes(credentials.token));
 });
 
-test('an in-flight write cannot commit after revocation, and installation suspension blocks even before event consumption', async t => {
-  const f = await identityFixture(t), { h } = f, login = await f.login(), p = login.result.principal_id;
-  const credentials = session(h.store, p, login.result.identity_id), actor = resolveActor(h.store, credentials.token);
-  let resume; const barrier = new Promise(resolve => { resume = resolve; });
-  const write = h.store.withAuthorizationGuard(() => authorize(actor, 'config.write', { project_id: '101' }), async () => {
-    await barrier; h.store.transaction(() => h.store.run("UPDATE policies SET review_enabled=1 WHERE repository_id='101'"));
-  });
-  invalidate(h.store, p, 'test.revoked'); resume(); await assert.rejects(write, /authorization_changed/);
-  assert.equal(h.store.get("SELECT review_enabled FROM policies WHERE repository_id='101'").review_enabled, 0);
-  const current = resolveActor(h.store, credentials.token); h.store.run("UPDATE github_installations SET status='suspended' WHERE ref='github.com/123/77'");
+test('an in-flight console write rechecks what it relied on, and installation suspension blocks even before event consumption', async t => {
+  const f = await identityFixture(t), { h, state } = f, login = await f.login(), p = login.result.principal_id;
+  const credentials = session(h.store, p, login.result.identity_id), review = () => h.store.get("SELECT review_enabled FROM policies WHERE repository_id='101'").review_enabled;
+  // Like the server: the request authorizes its project once; each later write only runs the freshness guard.
+  const write = async (change, value) => {
+    const actor = resolveActor(h.store, credentials.token); authorize(actor, 'config.write', { project_id: '101' });
+    let resume; const barrier = new Promise(resolve => { resume = resolve; });
+    const pending = h.store.withAuthorizationGuard(() => assertCurrent(actor), async () => {
+      await barrier; h.store.transaction(() => h.store.run("UPDATE policies SET review_enabled=? WHERE repository_id='101'", value));
+    });
+    await change(); resume(); return pending;
+  };
+  // A revision raised for some other loss does not stop a request whose grants still hold (#521).
+  await write(() => invalidate(h.store, p, 'test.unrelated'), 1); assert.equal(review(), 1);
+  // Losing the grant it relied on stops the next write with 403, and nothing commits.
+  await assert.rejects(write(async () => { state.owner = false; state.admin = false; await f.identity.reverify(p); }, 0), /capability_forbidden/);
+  assert.equal(review(), 1);
+  state.owner = true; await f.identity.reverify(p);
+  // A disabled account and an ended session still end the request.
+  await assert.rejects(write(() => h.store.run('UPDATE users SET active=0 WHERE id=?', p), 0), /login_required/);
+  h.store.run('UPDATE users SET active=1 WHERE id=?', p);
+  await assert.rejects(write(() => h.store.run('UPDATE sessions SET expires_at=0 WHERE token_hash=?', digest(credentials.token)), 0), /login_required/);
+  assert.equal(review(), 1);
+  const fresh = session(h.store, p, login.result.identity_id), current = resolveActor(h.store, fresh.token);
+  h.store.run("UPDATE github_installations SET status='suspended' WHERE ref='github.com/123/77'");
   assert.throws(() => authorize(current, 'config.write', { project_id: '101' }), /capability_forbidden/);
+});
+
+test('console writes follow current grants, not the revision a session saw (#521)', async t => {
+  const f = await identityFixture(t), { h, state } = f, login = await f.login(), p = login.result.principal_id;
+  const credentials = session(h.store, p, login.result.identity_id);
+  const patch = body => fetch(h.admin + '/api/repositories/101/policy', { method: 'PATCH', body: JSON.stringify(body),
+    headers: { Cookie: 'bot_session=' + credentials.token, 'X-CSRF-Token': credentials.csrf, 'Content-Type': 'application/json' } });
+  // The session never re-read /api/auth/me after this revision rose; it still holds the project, so the write succeeds.
+  invalidate(h.store, p, 'test.unrelated');
+  assert.equal((await patch({ review_enabled: true })).status, 200);
+  state.owner = false; state.admin = false;
+  const denied = await patch({ review_enabled: false });
+  assert.equal(denied.status, 403); assert.match((await denied.json()).error, /forbidden/);
+  state.owner = true; assert.equal((await patch({ review_enabled: false })).status, 200);
+  h.store.run('UPDATE users SET active=0 WHERE id=?', p);
+  assert.equal((await patch({ review_enabled: true })).status, 401);
+});
+
+test('a deleted installation\'s stale grant and another uncertain installation do not raise the revision on every check (#521)', async t => {
+  const f = await identityFixture(t), { h, state } = f, login = await f.login(), p = login.result.principal_id;
+  const revision = () => h.store.get('SELECT authorization_revision FROM principals WHERE id=?', p).authorization_revision;
+  const installation = (ref, id, status, scopePending, revision) => h.store.run(`INSERT INTO github_installations(ref,github_host,app_id,installation_id,account_id,target_id,
+    target_type,target_login,repository_selection,status,completeness,revision,scope_pending,updated_at) VALUES(?,'github.com','123',?,?,'10','Organization','fixture','all',?,'complete',?,?,?)`,
+    ref, id, f.a.id, status, revision, scopePending, new Date().toISOString());
+  // Production v0.3.0: the installation was deleted, and its grant had expired without being revoked.
+  installation('github.com/123/88', '88', 'deleted', 0, 5);
+  const stale = `github:${p}:github.com/123/88:101`;
+  h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,policy,evidence,verified_at,expires_at,installation_ref,installation_revision)
+    VALUES(?,?,'github.com:10','101','project','project_admin','["tasks.read"]','github_derived','current_github','repository_admin',1,2,'github.com/123/88',3)`, stale, p);
+  // A second installation cannot be settled, which made every check uncertain.
+  installation('github.com/123/99', '99', 'active', 1, 1);
+  const start = revision();
+  for (let i = 0; i < 3; i++) await f.identity.reverify(p);
+  assert.equal(revision(), start, 'nothing the principal could use was lost');
+  assert.ok(h.store.get('SELECT revoked_at FROM scoped_grants WHERE id=?', stale).revoked_at, 'a confirmed deletion revokes its grants despite the uncertainty');
+  assert.ok(active(h.store, p).some(g => g.project_id === '101' && g.expires_at > Date.now()), 'current grants are renewed');
+  const identity = h.store.get('SELECT status,verification_issues FROM external_identities WHERE id=?', login.result.identity_id);
+  assert.equal(identity.status, 'active');
+  assert.deepEqual(JSON.parse(identity.verification_issues), [{ installation: 'github.com/123/99', code: 'installation_scope_pending' }]);
+  assert.doesNotMatch(identity.verification_issues, /fixture-|token|secret/);
+  // The proved installation turns uncertain too: its grants stop counting once, which is one loss.
+  state.membershipFailure = 500;
+  for (let i = 0; i < 3; i++) await f.identity.reverify(p);
+  assert.equal(revision(), start + 1); assert.deepEqual(active(h.store, p), []);
+  assert.ok(h.store.get("SELECT 1 FROM scoped_grants WHERE principal_id=? AND installation_ref='github.com/123/77' AND revoked_at IS NULL", p), 'uncertain grants wait, they are not revoked');
+  assert.deepEqual(JSON.parse(h.store.get('SELECT verification_issues FROM external_identities WHERE id=?', login.result.identity_id).verification_issues).map(i => i.code).sort(),
+    ['installation_scope_pending', 'membership:github_permission_pending']);
+  // Proof comes back: authority returns without raising the revision; a real loss raises it once more.
+  state.membershipFailure = 0; await f.identity.reverify(p);
+  assert.ok(active(h.store, p).length > 0); assert.equal(revision(), start + 1);
+  h.store.run("UPDATE github_installations SET status='deleted' WHERE ref='github.com/123/99'"); await f.identity.reverify(p);
+  assert.equal(h.store.get('SELECT verification_issues FROM external_identities WHERE id=?', login.result.identity_id).verification_issues, null);
+  state.owner = false; state.admin = false;
+  for (let i = 0; i < 2; i++) await f.identity.reverify(p);
+  assert.equal(revision(), start + 2);
+});
+
+test('only lost authority raises the authorization revision; unchanged or added authority does not (#521)', async t => {
+  const f = await identityFixture(t), { h, admin } = f, login = await f.login(), p = login.result.principal_id;
+  const revision = () => h.store.get('SELECT authorization_revision FROM principals WHERE id=?', p).authorization_revision;
+  let expected = revision();
+  const step = async (action, raised) => { await action(); if (raised) expected++; assert.equal(revision(), expected, String(action)); };
+  // Adding a manual project, saving the same list again, and an explicit delegation add authority only.
+  await step(() => admin('/api/project-admin-assignments', 'PUT', { user_id: p, repository_ids: ['201'] }), false);
+  await step(() => admin('/api/project-admin-assignments', 'PUT', { user_id: p, repository_ids: ['201'] }), false);
+  const grant = (await admin('/api/identity/grants', 'POST', { principal_id: p, tenant_id: 'github.com:20', project_id: '201', capabilities: ['tasks.read'] })).value.grant_id;
+  await step(() => {}, false);
+  // Revoking a delegation still covered by the manual project loses nothing; removing the project does.
+  await step(() => admin('/api/identity/grants/' + grant, 'DELETE', {}), false);
+  await step(() => admin('/api/project-admin-assignments', 'PUT', { user_id: p, repository_ids: [] }), true);
+  // Repeated proof of unchanged GitHub permissions changes nothing.
+  await step(() => f.identity.reverify(p), false);
+  // Promotion adds authority; demotion and disabling remove it; enabling again does not count.
+  await step(() => h.store.run("UPDATE users SET role='super_admin' WHERE id=?", p), false);
+  await step(() => h.store.run("UPDATE users SET role='project_admin' WHERE id=?", p), true);
+  await step(() => h.store.run('UPDATE users SET active=0 WHERE id=?', p), true);
+  await step(() => h.store.run('UPDATE users SET active=1 WHERE id=?', p), false);
+  // An installation change that leaves the derived grant stale is a loss once, however many events it emits.
+  const ref = 'github.com/123/77', row = h.store.get('SELECT * FROM github_installations WHERE ref=?', ref);
+  h.store.run('UPDATE github_installations SET revision=revision+1 WHERE ref=?', ref);
+  for (const type of ['installation.changed', 'installation.access_revoked'])
+    emitInstallationEvent(h.store, { ...row, revision: row.revision + 1 }, type, 'test');
+  await step(() => resolveActor(h.store, session(h.store, p, login.result.identity_id).token), true);
+  await step(() => f.identity.reverify(p), false);
 });
 
 

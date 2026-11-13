@@ -36,7 +36,7 @@ import { InstallationSetup } from './installations/setup.js';
 import { type GitHubIdentity, type GitHubOAuthConfig } from './identity/github.js';
 import { GitHubLogin } from './identity/github-login.js';
 import { identityApi } from './identity/api.js';
-import { assertCurrent, assertSessionWrite, authorize, refreshSessionRevision } from './identity/authorization.js';
+import { assertCurrent, authorize } from './identity/authorization.js';
 import { resolveActor } from './identity/authorization.js';
 import { ManagementService } from './management/service.js';
 import { ManagementApi } from './management/api.js';
@@ -292,7 +292,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       res.setHeader('Set-Cookie', cookie(req, credentials.token)); respond(res, 200, { ok: true, csrf_token: credentials.csrf }); return;
     }
     if (!user) return fail(401, 'login_required');
-    if (path === '/api/auth/me' && method === 'GET') { refreshSessionRevision(store, sessionToken(req)); respond(res, 200, publicActor(user)); return; }
+    if (path === '/api/auth/me' && method === 'GET') { respond(res, 200, publicActor(user)); return; }
     if (path === '/api/identity/github/bind' && method === 'POST') {
       fields(input, ['setup_state']);
       if (!githubIdentity) return fail(503, 'github_login_not_configured');
@@ -314,8 +314,6 @@ export function createControlPlane(options: Options, security: { trustedProxies?
         respond(res, 200, { ok: true, status: status ?? null }); return;
       } finally {
         if (timer) clearTimeout(timer);
-        // Reverify may have recorded pending/invalidated grants before throwing; keep the session revision current.
-        refreshSessionRevision(store, sessionToken(req));
       }
     }
     if (path === '/api/auth/logout' && method === 'POST') {
@@ -326,14 +324,12 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     }
     if (path === '/api/channels/bindings/confirm' && method === 'POST') {
       fields(input, ['code', 'connector_id']);
-      assertSessionWrite(store, sessionToken(req), user.context!);
       const result = await channels.bindings.confirmCode(text(input.code, 100), text(input.connector_id), sessionToken(req));
       respond(res, 201, { state: 'bound', ...result }); return;
     }
     if (path === '/api/channels/bindings/issue' && method === 'POST') {
       fields(input, ['connector_id']);
       // The console writes a one-time code for the chosen bot; the private-chat message carrying it completes the binding.
-      assertSessionWrite(store, sessionToken(req), user.context!);
       respond(res, 201, channels.bindings.issue(text(input.connector_id, 48), sessionToken(req))); return;
     }
     const bindingRequest = /^\/api\/channels\/bindings\/requests\/([a-f0-9]{64})$/.exec(path);
@@ -343,7 +339,6 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     if (path === '/api/channels/bindings/claim' && method === 'POST') {
       fields(input, ['challenge']);
       // Binding proves the platform session; repository grants and GitHub availability are unrelated to association.
-      assertSessionWrite(store, sessionToken(req), user.context!);
       await channels.bindings.authenticate(text(input.challenge), sessionToken(req));
       respond(res, 201, { state: 'pending_confirmation' }); return;
     }
@@ -354,13 +349,11 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     if (mutation && githubIdentity) { await githubIdentity.refresh(user.id); user = actor(store, req); }
     const current = user, context = current.context!;
     if (path.startsWith('/api/channels/')) {
-      if (mutation) assertSessionWrite(store, sessionToken(req), context);
       const result = await channelApi.api(context, method, url, input);
       if (mutation && options.channels?.longConnections !== false) channelConnections.reconcile();
       respond(res, method === 'POST' ? 201 : 200, result); return;
     }
     if(path.startsWith('/api/management/')){
-      if(mutation)assertSessionWrite(store,sessionToken(req),context);
       const managementActor=resolveActor(store,sessionToken(req),{channel:path.includes('/conversations')?'web':'api'});
       if(method==='GET'&&url.searchParams.get('stream')==='1')await managementApi.stream(managementActor,url,res);
       else respond(res,method==='POST'?201:200,(await managementApi.api(managementActor,method,url,input))!);
@@ -371,10 +364,11 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     if (taskId) resourceProject = store.get('SELECT repository_id FROM tasks WHERE id=?', taskId)?.repository_id;
     const capability = /\/releases(?:\/|$)/.test(path) ? 'release.manage' : /\/roles(?:\/|$)/.test(path) ? 'roles.edit'
       : /\/(?:memory|memories|knowledge|knowledge-files|knowledge-directories|notes)(?:\/|$)/.test(path) ? 'knowledge.write' : path.startsWith('/api/tasks') ? 'tasks.write' : 'config.write';
+    // Every write and GitHub call rechecks the current grants (#521): the guard authorizes the target project, and
+    // assertCurrent replays whatever else this request was authorized for once the principal has lost some authority.
     const guard = () => {
       assertCurrent(context);
       if (mutation) {
-        assertSessionWrite(store, sessionToken(req), context);
         if (resourceProject) {
           if (current.role !== 'super_admin' && !current.repositories.includes(resourceProject)) fail(403, 'repository_forbidden');
           authorize(context, capability, { project_id: resourceProject });

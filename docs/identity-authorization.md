@@ -27,7 +27,15 @@ GitHub 登录后的页头显示 GitHub 用户名和头像，内部账号 ID 仍�
 
 独立 OAuth App 明确请求空 scope，用户 token 仅读取 `/user`；返回额外 scope 时拒绝保存与登录。权限核验使用另行签发的只读 GitHub App 安装令牌：读取安装详情和完整仓库列表，查询 `/orgs/{org}/memberships/{username}` 和 `/repos/{owner}/{repo}/collaborators/{username}/permission`，比对数字用户、组织和仓库 ID 后形成证明。临时安装令牌只申请 Metadata 读和安装已具备的 Members 读，查询结束后撤销。组织 owner 必须得到 `active/admin` 成员证明；App 自身全仓权限、安装事件和历史操作者不构成人类管理权限。权限计算与 #162 的安装状态、仓库范围和投影版本相交。暂时失败、SSO 或权限不足显示待验证，不能把失败推断成离职，也不能继续使用过期派生权限。
 
-授权分为 `github_derived` 和 `explicit_delegation`，分别保存范围、能力、授权者、策略、证据、验证时间、有效期、撤销和安装版本。派生证明有效期 5 分钟，登录、显式刷新和写操作重新核验；进程每分钟对账，安装领域事件由持久化游标消费。安装状态也在授权与 GitHub 请求检查，事件尚未被消费时仍不能绕过暂停或卸载。授权变化递增 principal 的 `authorization_revision`，陈旧写请求返回 `409 authorization_changed`；客户端读取 `/api/auth/me` 更新会话后，仍按最新真实能力判断。
+授权分为 `github_derived` 和 `explicit_delegation`，分别保存范围、能力、授权者、策略、证据、验证时间、有效期、撤销和安装版本。派生证明有效期 5 分钟，登录、显式刷新和写操作重新核验；进程每分钟对账，安装领域事件由持久化游标消费。安装状态也在授权与 GitHub 请求检查，事件尚未被消费时仍不能绕过暂停或卸载。每轮核验按安装分别处理：已确认删除或暂停的安装，以及已确认不再具备的权限，对应派生授权被撤销；状态、安装范围或权限读取无法确定的安装，其派生授权只转为待验证，等下次证明恢复，不被撤销。造成不确定的安装和错误码记在身份的 `verification_issues`（不含凭据），全部确定后清空。
+
+## 授权版本
+
+principal 的 `authorization_revision` 只在账号失去原有有效权限时递增。判断比较变化前后实际可用的权限范围：已过期、待验证或撤销的授权不参与比较，平台角色或其他授权仍覆盖的能力不算失去；权限不变或只增加时版本不变。递增的情形包括停用账号、移除超级管理员、撤销委派或手工分配、解除身份绑定、GitHub 核验确认失去权限或转为待验证、安装变化使仍有效的派生授权失效，以及渠道员工、服务绑定停用或缩小范围。
+
+授权版本只用于后台内容类场景：管理助手对话历史按版本分段，待发送渠道消息、群定时投递和管理命令按创建时的版本校验，任务来源与个人助手电脑的围栏随版本失效，GitHub 权限核验写入授权时用它做并发保护。失去权限后，这些内容不再沿用。需要反映新增权限的视图（如项目记忆可见范围）按当前有效授权计算，不依赖版本。后台执行身份（`resolvePrincipalActor`、`resolveServiceActor`）在版本变化后返回 `409 authorization_changed`，由调用方按当前权限重新解析。
+
+网页控制台不比较会话的授权版本。写请求先重新核验 GitHub 权限，再在每次落库或调用 GitHub 前按最新有效权限判断：守卫对目标项目调用 `authorize`；请求期间版本变化时，下一次落库或 GitHub 调用前重放本请求已通过的授权检查和请求开始时的超级管理员身份，全部仍成立就继续，失去其中一项返回 `403`。账号或主体停用、会话过期或撤销返回 `401 login_required`。因此刷新页面或会话停留在旧版本不会导致写入失败，只有真实失去所需权限才会被拒绝。
 
 平台超级管理员拥有恢复和显式委派管理能力，org_admin 与 project_admin 不会取得平台能力或无限转授能力。派生 owner 不提供 `grants.manage`，不能自授或互授把派生权限固化。显式委派 API 只接受委派者有权授予的能力和范围，禁止自授与平台能力注入。普通配置修改直接保存并审计，不引入默认人工审批。
 
@@ -37,7 +45,7 @@ GitHub 登录后的页头显示 GitHub 用户名和头像，内部账号 ID 仍�
 
 `src/identity/authorization.ts` 提供 `resolveActor(store, sessionRef, options)`、`authorize(actor, capability, resource)` 和 `listEffectiveScopes(store, principalId)`。ActorContext 字段为 `principal_id, tenant_id, project_id?, channel, capabilities, authorization_revision, request_id`。它由可信服务端建立；对象副本、浏览器 JSON、IM 文本或模型参数不能成为已认证 Actor。旧 Actor 由 `src/app/auth.ts` 适配，继续用于现有控制台服务。
 
-能力包括 `tasks.read/tasks.write`、`roles.edit/roles.publish`、`knowledge.read/knowledge.write`、`schedules.manage`、`config.write`、`release.manage`；平台另外拥有授权管理能力。授权检查同时校验租户和项目归属。读取接口继续使用服务端范围过滤；写请求在事务开始或每次独立落库前检查当前版本，GitHub 请求发出前再检查。异步人类任务与发布使用发起人的当前项目能力；新项目自动化使用独立 service principal、项目显式授权和组织维护归属，不借用创建人的个人 token。创建人停用后 service principal 可以继续按项目授权执行；缺少维护归属或项目授权时暂停。调度器、管理对话与 IM SDK 属于后续模块。
+能力包括 `tasks.read/tasks.write`、`roles.edit/roles.publish`、`knowledge.read/knowledge.write`、`schedules.manage`、`config.write`、`release.manage`；平台另外拥有授权管理能力。授权检查同时校验租户和项目归属。读取接口继续使用服务端范围过滤；写请求在事务开始或每次独立落库前、GitHub 请求发出前按当前授权检查（见[授权版本](#授权版本)）。异步人类任务与发布使用发起人的当前项目能力；新项目自动化使用独立 service principal、项目显式授权和组织维护归属，不借用创建人的个人 token。创建人停用后 service principal 可以继续按项目授权执行；缺少维护归属或项目授权时暂停。调度器、管理对话与 IM SDK 属于后续模块。
 
 `src/identity/bindings.ts` 提供 `beginExternalBinding`、`completeExternalBinding`、`revokeExternalBinding`、`resolveExternalPrincipal`。服务端接入方构造 `ExternalBindings(store, verifier)`，verifier 只接受渠道侧已校验的可信证明。challenge 绑定平台会话、平台租户、provider/host、connector、外部租户、外部 actor 和 5 分钟有效期。完成时核对双方证明，事务内消费并建立唯一映射；相同完成幂等，转发、跨租户、冲突、过期和不同证明重放拒绝。撤销保留归属与审计并立即失效旧 Actor。该服务没有接受自填 open_id 的 HTTP 接口，不包含飞书 SDK 或绑定交互。
 

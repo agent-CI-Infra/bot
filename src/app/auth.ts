@@ -1,7 +1,7 @@
 import { type IncomingMessage } from 'node:http';
 import { type Store } from '../storage/database.js';
 import { digest, fail, randomId, type Json } from '../core/security.js';
-import { authorize, effectiveRepositories, resolveActor, revision, type ActorContext } from '../identity/authorization.js';
+import { authorize, effectiveRepositories, resolveActor, type ActorContext } from '../identity/authorization.js';
 
 export interface Actor { id: string; username: string; role: 'super_admin' | 'project_admin'; csrf: string; repositories: string[]; context?: ActorContext; github?: { login: string; avatar_url: string }; }
 export const sessionToken = (req: IncomingMessage): string => req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith('bot_session='))?.slice(12) || '';
@@ -39,6 +39,6 @@ export function publicActor(user: Actor): Json {
 export function session(store: Store, userId: string, identityId: string | null = null): { token: string; csrf: string } {
   const token = randomId(), csrf = randomId();
   store.run('DELETE FROM sessions WHERE expires_at<=?', Date.now());
-  store.run('INSERT INTO sessions(token_hash,user_id,csrf,expires_at,authorization_revision,identity_id) VALUES(?,?,?,?,?,?)', digest(token), userId, csrf, Date.now() + 12 * 3600_000, revision(store, userId), identityId);
+  store.run('INSERT INTO sessions(token_hash,user_id,csrf,expires_at,identity_id) VALUES(?,?,?,?,?)', digest(token), userId, csrf, Date.now() + 12 * 3600_000, identityId);
   return { token, csrf };
 }

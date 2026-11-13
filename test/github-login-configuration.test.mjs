@@ -219,7 +219,8 @@ test('disabling login ends GitHub sessions and derived authority while retaining
   const before = resolveActor(h.store, externalSession.token);
   authorize(before, 'config.write', { project_id: '101' });
   assert.equal((await admin(path, 'PUT', { enabled: false })).status, 200);
-  assert.throws(() => authorize(before, 'config.write', { project_id: '101' }), /authorization_changed/);
+  // The GitHub session itself ended; a console actor is judged by its session and current grants, not a revision (#521).
+  assert.throws(() => authorize(before, 'config.write', { project_id: '101' }), /login_required/);
   assert.throws(() => resolveActor(h.store, externalSession.token), /login_required/);
   assert.equal(h.store.get('SELECT credentials FROM external_identities WHERE id=?', result.identity_id).credentials, null);
   const scopes = listEffectiveScopes(h.store, result.principal_id).filter(g => g.state === 'active');
