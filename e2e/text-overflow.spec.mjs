@@ -143,6 +143,7 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     await page.goto(h.admin + '/#/projects');
     await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
     await expect(page.locator('.project-list-row .row-title').filter({ hasText: 'fixture/project-101' })).toBeVisible();
+    await page.evaluate(() => document.fonts.ready);
     const desktop = await page.evaluate(() => {
       const medium = [...document.querySelectorAll('.row-title')].find(el => el.textContent.trim() === 'fixture/project-101');
       const role = document.querySelector('.current-user-role');
