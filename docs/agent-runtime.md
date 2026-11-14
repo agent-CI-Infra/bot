@@ -62,7 +62,7 @@ Pi 不保证请求达到 runner 上限前一定压缩过。SDK 在每次请求�
 
 控制面自己的工具循环（`runTools`：请求任务的执行、验收、发布观察和未走 Pi 的角色）受网关的 2 MiB 请求上限约束，不套用 Pi 的上下文估算。命令的大输出先保存为结果文件，再向模型返回首尾预览；`read_tool_result` 读取同一文件，无需重跑命令。对于没有文件引用、即使省略旧结果也放不下的结果，模型收到 `tool_result_too_large` 并改读较小范围。请求前超过 2 MiB 时，从最早的工具结果开始省略，换成 `elided` 标记；已有文件引用、状态和读取提示仍保留。省略后仍超限的请求不发出，任务以 `agent_context_too_large` 失败。
 
-单条模型消息里的工具调用数量不设上限，由模型自己决定（#333）：跨十个仓库各查一次是正常用法。各工具循环只校验结构（`src/agent/tool-context.ts` 的 `toolCallsProblem`）：`tool_calls` 为数组，每项是 `function` 调用、名称非空、参数为字符串或省略，`id` 为 1–128 个可见 ASCII 字符且同一条消息内不重复；结构不合法时默认循环以 `agent_tool_calls_invalid` 停止。参数不是 JSON 时，这一项调用返回 `invalid_arguments` 观察，由模型改正。上面的省略与拦截由同一模块的 `ToolTranscript` 实现，管理助手、群聊助手和服务角色的独立任务也使用它，规则见下一段。
+单条模型消息里的工具调用数量不设上限，由模型自己决定（#333）：跨十个仓库各查一次是正常用法。各工具循环只校验结构（`src/agent/tool-context.ts` 的 `toolCallsProblem`）：`tool_calls` 为数组，每项是 `function` 调用、名称非空、参数为字符串或省略，`id` 为 1–128 个可见 ASCII 字符且同一条消息内不重复；结构不合法时默认循环以 `agent_tool_calls_invalid` 停止。参数不是 JSON 时，这一项调用返回 `invalid_arguments` 观察（Process harness 返回 `invalid_tool_arguments`），由模型改正。上面的省略与拦截由同一模块的 `ToolTranscript` 实现，管理助手、群聊助手和服务角色的独立任务也使用它，规则见下一段。
 
 管理助手、群聊助手和独立任务是对话，答案要放进模型的上下文窗口。它们在同一机制上多做两件事。第一，同批工具结果共享 256 KiB 预算（`boundedBatch`）：小于平均份额的结果原样保留，剩余预算由较大结果平分，每个至少 8 KiB；有文件引用时保留 `file`、状态、首尾预览和读取提示，其他较小顶层字段如 `revision`、`next_offset`、仓库名也保留。一个约 240 KB 的项目配置单独查询时仍完整返回。第二，请求超过 384 KiB 时，先省略模型已看过的最早工具结果；尚未交给模型的最新一批只在仍超过 2 MiB 时才省略。
 

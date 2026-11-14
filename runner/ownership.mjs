@@ -5,6 +5,17 @@ import { tasksDirectory, runnerRoot } from './paths.mjs';
 export const tasksRoot = tasksDirectory + '/';
 const idPattern = /^[a-f0-9]{48}$/, runnerPrefix = 'node ' + runnerRoot + '/runner.mjs ', agentPrefix = 'node ' + runnerRoot + '/pi-entry.mjs ' + tasksRoot;
 export const isRunner = row => row.cmdline.startsWith(runnerPrefix);
+// Remember orphaned descendants across cleanup rounds by PID and Linux start time, never by a recycled PID alone.
+export async function operationOwnership(rows, operationId, environ, known = new Map()) {
+  const current = new Map(rows.map(row => [row.pid, row]));
+  for (const [pid, started] of known) if (current.get(pid)?.started !== started) known.delete(pid);
+  for (const row of rows) if (String(await environ(row.pid)).split('\0').includes('BOT_OPERATION_ID=' + operationId)) known.set(row.pid, row.started);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const row of rows) if (!known.has(row.pid) && known.has(row.ppid)) { known.set(row.pid, row.started); changed = true; }
+  }
+  return known;
+}
 export async function ownership(rows, { environ, cwd }) {
   const byPid = new Map(rows.map(row => [row.pid, row])), direct = new Map(), resolved = new Map();
   for (const row of rows) {
