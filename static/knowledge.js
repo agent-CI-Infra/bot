@@ -15,7 +15,8 @@ window.addEventListener('hashchange', event => {
   if (!knowledgeUnsaved()) return;
   event.stopImmediatePropagation(); const destination = event.newURL; history.replaceState(null, '', event.oldURL);
   void askConfirm({ title: '离开未保存的文件？', body: ['草稿仅在本次登录期间保留；退出登录后会清除。'], action: '离开文件' }).then(leave => {
-    if (leave) { knowledgeNavigationAllowed = true; location.href = destination; }
+    // The confirmed leave drops the editor so the next page renders like any other navigation (#697).
+    if (leave) { knowledgeEditor = null; knowledgeNavigationAllowed = true; location.href = destination; }
   });
 }, true);
 

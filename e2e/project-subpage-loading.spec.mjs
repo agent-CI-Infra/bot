@@ -8,10 +8,11 @@ const out = '.tmp/project-subpage-loading-697';
 const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
 
 async function holdProject(page) {
-  const gate = { held: false, release: () => {} };
+  const waiting = [];
+  const gate = { held: false, release: () => { waiting.splice(0).forEach(resolve => resolve()); } };
   await page.route(/\/api\/repositories\/101$/, async route => {
     if (!gate.held) return route.continue();
-    await new Promise(resolve => { gate.release = resolve; });
+    await new Promise(resolve => { waiting.push(resolve); });
     await route.continue();
   });
   return gate;
@@ -55,6 +56,20 @@ test('同一项目内切换子页面立即显示新页面的加载态，「当�
     await expect(loading).toHaveCount(0);
     await expect(picker).toHaveValue('#/projects/101/release');
     await page.screenshot({ path: `${out}/switch-done-390.png` });
+
+    // Going back to the page already rendered while another page's read is out names that page again at once.
+    gate.held = true;
+    await picker.selectOption('#/projects/101/roles');
+    await expect(loading.getByRole('heading', { name: '正在打开「角色」', exact: true })).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(/#\/projects\/101\/release$/);
+    await expect(loading.getByRole('heading', { name: '正在打开「发版本」', exact: true })).toBeVisible();
+    await expect(body.getByText('正在打开「角色」', { exact: true })).toHaveCount(0);
+    await expect(picker).toHaveValue('#/projects/101/release');
+    gate.held = false; gate.release();
+    await expect(body.getByRole('heading', { name: '准备新版本', exact: true })).toBeVisible();
+    await expect(loading).toHaveCount(0);
+    await expect(picker).toHaveValue('#/projects/101/release');
 
     // 1440: the same through the address (sidebar breadcrumb instead of the picker).
     await page.setViewportSize({ width: 1440, height: 900 });
