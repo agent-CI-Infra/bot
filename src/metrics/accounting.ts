@@ -107,6 +107,11 @@ export function externalModelRecorder(store:Store,task:Row,runId:string,initialM
     if(!['turn','usage'].includes(value.type)||value.type==='usage'&&value.source!=='codex_app_server')return;
     // ACP publishes prompt attempts separately. Only the app-server has per-turn provider usage deltas.
     if(initialModel!=='codex')return;
+    // When the container model relay already recorded authoritative gateway rows for this run, do not duplicate them.
+    if(store.get("SELECT 1 FROM model_requests WHERE run_id=? AND accounting_source NOT IN ('provider_requests','codex_events')",runId)){
+      store.run("DELETE FROM model_requests WHERE run_id=? AND accounting_source='codex_events'",runId);
+      return;
+    }
     const key='codex:'+instanceId+':'+String(value.threadId??'unbound')+':'+String(value.turnId??'unconfirmed:'+runId),pending=key+':pending',
       turn=turns.get(key)??{known:0,keys:new Set<string>()};turns.set(key,turn);
     if(value.type==='usage'){

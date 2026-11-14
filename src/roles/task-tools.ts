@@ -57,7 +57,7 @@ export function createTaskToolDispatcher<T>(spec: AgentSpec<T>, options: TaskToo
 
   const checkToken = (presented: unknown) => {
     if (typeof presented !== 'string' || !presented || presented !== currentToken()) throw new TaskError('run_token_invalid', 'failed');
-    spec.runAccess?.check(presented);
+    spec.runAccess?.check(presented, 'tools:invoke');
   };
 
   const isFinishTool = (name: string) => !!spec.finish && (spec.finish.names ?? [spec.finish.name]).includes(name);
@@ -229,6 +229,11 @@ export async function handleMailboxToolRequest<T>(
     return { delivered, observation: out.observation, submitted: out.submitted };
   } catch (error) {
     const code = String((error as any)?.code ?? '');
+    if (code === 'harness_run_closed') {
+      const observation = { error: code };
+      const delivered = await deliverMailboxToolReply(observation, request.id, sendChunk).catch(() => false);
+      return { delivered, observation, submitted: false };
+    }
     if (/^(?:run_token_|lease_epoch_stale$)/.test(code)) {
       const observation = { error: code };
       const delivered = await deliverMailboxToolReply(observation, request.id, sendChunk).catch(() => false);

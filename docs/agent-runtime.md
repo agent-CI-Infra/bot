@@ -12,7 +12,7 @@
 
 - 工作区任务使用正式的 Pi harness（`src/agent/pi.ts` 的 `piAdapter`），在隔离项目电脑中读取文件、执行命令和产生修改；`loop.ts` 只组装任务的配置和工具回调。`profiles.ts` 把固定的硬限制和这类工作的 Manager 章节组合成系统提示，并按项目配置给这类工作的写入生成工具和显式 capabilities。同一个 harness 也运行项目主控会话（见 [Role-Pool](role-pool.md)）：会话配置里的 `control_tools` 由 runner 经控制邮箱交给控制面执行，等待没有期限；控制面只执行本次会话提供过的工具，并在回复里用 `finish` 标出被接受的提交。
 - Pi 入口的完成工具（检视、回复和事件工作）在会话中交给控制面校验。字段或语义不合法时，工具结果说明原因，模型可在原会话内修正两次；仍然无效才按原错误码结束。事件校验不发布结果或改变事件状态，最终通过后才由所属模块接手；恢复已提交会话时重新校验原始提交。
-- CI 观察（`release.observe`）、发行说明（`release.notes`）、Actions 失败处理（`actions.failures`）和接入门禁（`gate.onboarding`，对话的每一轮是一个任务）也是工作区任务：在项目电脑里检出相关提交，事件写在 `../context/`，用各自的结束工具交回结果，由所属模块核验后接手。运行时默认的 tool loop 用于 Native 角色后端；角色可以选择 Pi、Native、Process 或 ACP，工具和结果校验继续由调用方提供。
+- CI 观察（`release.observe`）、发行说明（`release.notes`）、Actions 失败处理（`actions.failures`）和接入门禁（`gate.onboarding`，对话的每一轮是一个任务）也是工作区任务：在项目电脑里检出相关提交，事件写在 `../context/`，用各自的结束工具交回结果，由所属模块核验后接手。运行时默认的 tool loop 用于 Native 角色后端；角色可按职责选择 Pi、Native、Process（含主控）或容器内 CLI 后端 Claude Code、Codex（工作与评估角色），工具和结果校验继续由调用方提供。
 
 发布确认、幂等 outbox、发布状态机、仓库授权和 claim 是控制面的职责，不交给提示词决定。统一 Agent 不等于移除这些安全边界。
 
@@ -34,7 +34,7 @@ Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这
 
 先调用 `github_read_token` 建立只读访问。令牌只覆盖当前接入仓库，权限取安装已授予的内容、Issue、PR、Actions 等读取项；缺少权限时返回诊断，不回退到写令牌。CI 的令牌不离开控制面。Pi 的结构化读取工具通过任务邮箱调用同一个执行器；原有命令工具继续可使用同一次签发的只读令牌，真实凭据不进入模型上下文。任务结束、失败或中止后撤销签发的令牌。
 
-`github_read_token` 与平台工具请求均按请求 ID 写入独立文件（`token-requests/<id>.json` -> `token-replies/<id>.json`，`tool-requests/<id>.json` -> `tool-replies/<id>.json`），支持同轮多个工具调用与子 Agent 并行往返。取消后立即清理对应 ID 的请求与部分回复并返回 `github_read_token_cancelled` 或 `repository_tool_cancelled`，不影响其他在途调用。
+`github_read_token`、平台工具请求与容器内模型中转请求均按请求 ID 写入独立邮箱文件（`token-requests/<id>.json` -> `token-replies/<id>.json`、`tool-requests/<id>.json` -> `tool-replies/<id>.json`、`model-requests/<id>.json` -> `model-replies/<id>.stream`/`.cursor.json`），支持同轮多个工具调用、流式模型转发与子 Agent 并行往返。取消后立即清理对应 ID 的请求与部分回复并返回 `github_read_token_cancelled` 或 `repository_tool_cancelled`，不影响其他在途调用。
 
 升级时同步更新控制面、manager 和项目电脑镜像；结构化读取、PR 发布与控制面工具统一通过 `runner/tool-dispatch.mjs` 和 `workspace_agent_tool` 邮箱操作投递，控制面由无传输绑定的 `createTaskToolDispatcher` 统一校验工具白名单、运行身份令牌与租约、项目启用状态和单次提交。项目主控另用 `workspace_agent_runtime`（报告 runner 实际安装的 Pi SDK 版本），旧项目电脑镜像会返回 `pi_runtime_unavailable` 并等待升级。Pi 的会话事件 `pi_session` 记录实际 SDK 版本、提供的工具以及没有混入的扩展、技能和上下文文件；`src/agent/pi.ts` 固定的版本与 `runner/package.json` 由 `npm run check` 核对一致。
 

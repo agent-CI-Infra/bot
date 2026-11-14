@@ -13,6 +13,7 @@ import { TaskToolGateway,gatewayToolNames,gatewayCapabilities } from './gateway.
 import { roleRunProtocol,validateCandidateRef,contentHash,protocolRecovery,type Budget,type CandidateRef,type RunContext,type RunEvent } from './protocol.js';
 import { roleCapacity } from './board.js';
 import { admitRun,allocateLease,appendRunEvent,assertLease,budgetExceeded,buildRunContext,inputCandidate,instanceUsage,issueRunToken,leaseCurrent,planRecovery,recordCheckpoint,recordRunCliVersion,revokeRunTokens,runBudget,runEvents,scopeUsage,sourceRef,touchRunToken,verifyRunToken,type EnvironmentFacts } from './role-run.js';
+import { githubReadScopes } from './permissions.js';
 import { randomId } from '../core/security.js';
 import { traceEvent,endRun } from '../tasks/trace.js';
 import { roleHarness } from './harness.js';
@@ -55,8 +56,8 @@ export interface RoleRunOptions {
  /** Rebuild transient context from caller-provided durable facts; keep the role identity and historical traces. */
  rebuildContext?: boolean;
  snapshot?:()=>Promise<{tree_sha:string;local_sha:string}|null>;
- /** Prepares the run's environment once its instance and snapshot are known (for example the Pi workspace). */
- prepare?:(instance:Row,resolved:Resolved)=>Promise<{pi?:PiRoleEnvironment;release?:()=>Promise<void>;environment?:RunEnvironmentBinding}|void>;
+ /** Prepares the run's environment once its instance and snapshot are known (for example the Pi or container CLI workspace). */
+ prepare?:(instance:Row,resolved:Resolved)=>Promise<{pi?:PiRoleEnvironment;roleWorkspace?:import('../agent/workspace.js').Workspace;containerOptions?:AgentSpec<any>['containerOptions'];release?:()=>Promise<void>;environment?:RunEnvironmentBinding}|void>;
  /** RoleRun recover: continue an earlier run of the same instance and assignment from one of its checkpoints. */
  recover?:{previous_run_id:string;checkpoint_ref?:string|null};
 }
@@ -214,9 +215,9 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   };
   const exhaustStage=(limit:string):never=>{live.stage_exhausted=limit;const b=live.bound;if(b&&leaseCurrent(s,b.run_id,b.epoch)){recordCheckpoint(s,{run_id:b.run_id,lease_epoch:b.epoch,instance_id:instance.id,reason:'stage_budget_exhausted:'+limit});appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'budget',category:'budget',data:{stage_id:stage?.stage_id,limit}});revokeRunTokens(s,b.run_id,'stage_budget_exhausted');}return stop('stage_budget_exhausted','paused',limit);};
   const budgetGuard=(pendingTools=0)=>{assertStageRun(s,task.id,assignment,snapshot.kind);const stageLimit=stageBudgetExceeded(s,assignment);if(stageLimit)exhaustStage(stageLimit);if(!cumulative||!live.bound)return;const reached=budgetExceeded(budget,instanceUsage(s,instance.id),{tool_calls:pendingTools});if(reached)exhaust(reached);};
-  const access={get token(){return live.bound?.token??'';},check(presented:unknown){const b=live.bound;if(!b||presented!==b.token)throw new TaskError('run_token_invalid','failed');verifyRunToken(s,presented,{tenant_id:b.ctx.tenant_id,project_id:b.ctx.project_id,task_id:b.ctx.task_id!,run_id:b.run_id,lease_epoch:b.epoch,role});}};
+  const access={get token(){return live.bound?.token??'';},check(presented:unknown,capability?:string){const b=live.bound;if(!b||presented!==b.token)throw new TaskError('run_token_invalid','failed');verifyRunToken(s,presented,{tenant_id:b.ctx.tenant_id,project_id:b.ctx.project_id,task_id:b.ctx.task_id!,run_id:b.run_id,lease_epoch:b.epoch,role},capability);}};
   let executionRun:string|undefined;
-  const wrapped:AgentSpec<T>={...spec,model,tools,pi:env.pi??spec.pi,runEnvironment:env.environment?.handle,
+  const wrapped:AgentSpec<T>={...spec,model,tools,pi:env.pi??spec.pi,roleWorkspace:env.roleWorkspace??spec.roleWorkspace,containerOptions:env.containerOptions?{...spec.containerOptions,...env.containerOptions}:spec.containerOptions,runEnvironment:env.environment?.handle,
    guard:async()=>{await spec.guard();authority();const b=live.bound;if(b){assertLease(s,b.run_id,b.epoch);if(!touchRunToken(s,b.token_id,tokenTtl))stop('run_token_revoked','cancelled','运行的能力令牌已撤销或过期，运行停止。');budgetGuard();}},
    maxTurns:availableTurns<limitTurns?availableTurns:configuredTurns,maxOutputTokens:bounded?.max_output_tokens??spec.maxOutputTokens,
    onDenied:(name,reason)=>denied(name,reason),
@@ -298,7 +299,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    const conflict=(snapshot.kind==='writer'||snapshot.kind==='observer')&&s.get("SELECT r.id FROM task_runs r JOIN role_snapshots p ON p.id=r.role_snapshot WHERE r.task_id=? AND r.id<>? AND r.status='running' AND (json_extract(p.snapshot,'$.kind')='writer' OR (?='writer' AND json_extract(p.snapshot,'$.kind')='observer'))",task.id,runId,snapshot.kind);if(conflict)stop('candidate_writer_busy','retry_wait');
    const lease=allocateLease(s,task.id,scope,runId,typeof task.claim_token==='string'?task.claim_token:null),previous=options.recover?.previous_run_id??lease.previous_run_id;
    const ctx=buildRunContext(s,{task,scope,run_id:runId,lease_epoch:lease.epoch,...(previous?{resume_from_run_id:previous}:{}),instance,role,snapshot,snapshot_id:resolved.id,candidate:candidate.ref});
-   if(wrapped.harnessBinding){ctx.model_revision=wrapped.harnessBinding.model_revision;ctx.harness_revision=wrapped.harnessBinding.harness_revision;}
+   if(wrapped.harnessBinding){if(wrapped.harnessBinding.model_revision)ctx.model_revision=wrapped.harnessBinding.model_revision;ctx.harness_revision=wrapped.harnessBinding.harness_revision;}
    const stageBinding=stageRunBinding(s,assignment);if(stageBinding)ctx.stage=stageBinding;
    if(role==='qa'){const hash=stagePolicyHash(s,task.id);if(hash)ctx.stage_policy_hash=hash;}
    let mode:string|null=null,plan:ReturnType<typeof planRecovery>|null=null;
@@ -309,10 +310,11 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
     mode=role==='qa'?'rebuilt_from_task_records':recover==='external_session_pending'?null:protocolRecovery(recover)??(recover==='new_session'?'rebuilt_from_task_records':plan.mode);
    }
    s.run('UPDATE task_runs SET run_context=?,resume_from_run_id=?,admission=?,protocol_recovery=?,operation_id=? WHERE id=?',JSON.stringify(ctx),previous??null,JSON.stringify(admission),mode,operationId,runId);
-   const initialCliVersion=wrapped.harnessBinding?.cli_version??(['claude_code','codex'].includes(driver.id)?driver.runtime?.version:undefined);
+   const initialCliVersion=wrapped.harnessBinding?.cli_version??(typeof (wrapped.harnessPreparation as any)?.version==='string'?(wrapped.harnessPreparation as any).version:undefined)??(['claude_code','codex'].includes(driver.id)?driver.runtime?.version:undefined);
    if(initialCliVersion)recordRunCliVersion(s,runId,initialCliVersion);
    if(ctx.task_id===null)stop('role_run_protocol_invalid','waiting_configuration','Task RoleRun requires task scope.');
-   const issued=issueRunToken(s,{tenant_id:ctx.tenant_id,project_id:ctx.project_id,task_id:ctx.task_id!,run_id:runId,lease_epoch:lease.epoch,role},[...gatewayCapabilities(snapshot),'events:write','checkpoint:write'],tokenTtl);
+   const runCapabilities=[...gatewayCapabilities(snapshot),'tools:invoke','model:invoke',...(githubReadScopes(resolved.definition.permissions).length?['github:read_token']:[]),'events:write','checkpoint:write'];
+   const issued=issueRunToken(s,{tenant_id:ctx.tenant_id,project_id:ctx.project_id,task_id:ctx.task_id!,run_id:runId,lease_epoch:lease.epoch,role},runCapabilities,tokenTtl);
    spec.redactor.add(issued.token);
    live.bound={ctx,token:issued.token,token_id:issued.id,run_id:runId,epoch:lease.epoch};
    appendRunEvent(s,{run_id:runId,lease_epoch:lease.epoch,type:'run_started',category:'progress',operation_id:operationId,data:{assignment_id:scope,resume_from_run_id:previous??null,recovery_mode:mode,start_mode:recover,candidate_ref:ctx.candidate_ref,source_ref:ctx.source_ref,budget:ctx.budget.policy_ref,admitted:admission.required}});

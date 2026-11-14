@@ -50,7 +50,7 @@ export interface AgentSpec<T> {
   store: Store;
   /** Trusted preparation and run binding for external protocol drivers; never supplied by model output. */
   harnessPreparation?: unknown;
-  harnessBinding?: { model_revision: string; harness_revision: string; cli_version?: string };
+  harnessBinding?: { model_revision?: string; harness_revision: string; cli_version?: string };
   runContext?: () => import('../roles/protocol.js').RunContext | undefined;
   /** Control-plane snapshot of the active workspace. Never populated from a CLI report. */
   candidateSnapshot?: () => Promise<{ tree_sha: string; local_sha: string } | null>;
@@ -63,13 +63,26 @@ export interface AgentSpec<T> {
   /** RoleRun cancellation (operator cancel, exhausted budget); the harness session interrupts its agent through its protocol. */
   cancelSignal?: AbortSignal;
   /** The run's capability token for adapters that present it (worker RPC, MCP), and the server-side check of a presented one. */
-  runAccess?: { readonly token: string; check: (presented: unknown) => void };
+  runAccess?: { readonly token: string; check: (presented: unknown, capability?: string) => void };
   /** Fresh external session working directory when physical context must not be resumed. */
   harnessSessionKey?:string;
   /** Public harness events of the session (session_bound, message, tool, ...), mirrored into the RoleRun event stream. */
   onHarnessEvent?: (event: { type: string; [key: string]: unknown }) => void;
   /** A per-run environment the framework provisioned and verified for this run (run_isolation profiles). */
   runEnvironment?: unknown;
+  /** Workspace checkout assigned to this role run when driving a container CLI (`claude_code` / `codex`). */
+  roleWorkspace?: import('./workspace.js').Workspace;
+  /** Trusted container harness options (never populated from model output). */
+  containerOptions?: {
+    manager?: import('../projects/service.js').Manager;
+    egress?: boolean;
+    githubApiUrl?: string;
+    allowHttpGit?: boolean;
+    extraEnv?: Record<string, string>;
+    executableOverride?: { executable: string; args?: string[]; nodeExecutable?: string; version?: string };
+    fileProvider?: import('../harness/model-gateway.js').FileBackedModelProvider;
+    keepRawTools?: boolean;
+  };
   session?: { messages:any[]; save:(messages:any[])=>void };
   onRun?: (id:string)=>void;
   roleRun?: {instance_id:string;role:string;version:string;harness:string;harness_version?:string;assignment_id?:string;recovery_mode:string;snapshot_id?:string};

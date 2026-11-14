@@ -18,9 +18,9 @@ const mib = 1024 * 1024, id48 = /^[a-f0-9]{48}$/;
 const bounds = { cpus: [0.25, 8], memory_mb: [256, 16384], pids: [64, 4096], tmp_mb: [16, 4096], workspace_mb: [64, 16384], timeout_ms: [10_000, 24 * 3600_000] };
 export const runDefaults = { cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 256, workspace_mb: 2048, timeout_ms: 3600_000 };
 // Runner operations a run container accepts; all of them act on the run's own workspace id.
-const runTypes = ['health', 'command', 'read', 'write', 'workspace_init', 'workspace_checkout', 'workspace_read','workspace_export', 'workspace_write', 'workspace_command', 'workspace_snapshot', 'workspace_finalize', 'workspace_blob', 'workspace_agent_poll', 'workspace_agent_token', 'workspace_agent_tool', 'workspace_agent_model_request', 'workspace_agent_model_reply', 'git_have', 'git_pack', 'git_import', 'git_export', 'reap'];
+const runTypes = ['health', 'command', 'read', 'write', 'workspace_init', 'workspace_checkout', 'workspace_read','workspace_export', 'workspace_write', 'workspace_command', 'workspace_snapshot', 'workspace_finalize', 'workspace_blob', 'workspace_agent_poll', 'workspace_agent_token', 'workspace_agent_tool', 'workspace_agent_model_request', 'workspace_agent_model_reply', 'workspace_harness_config', 'workspace_harness_start', 'workspace_harness_stdin', 'workspace_harness_poll', 'workspace_harness_interrupt', 'git_have', 'git_pack', 'git_import', 'git_export', 'reap'];
 // keep_background lets a role keep a process (a test server) beyond one command; the container ends with the run anyway.
-const runKeys = ['type', 'command', 'path', 'content', 'timeout_ms', 'keep_background', 'workspace_id', 'base64', 'offset', 'final', 'mode', 'snapshot', 'sha', 'tree_sha', 'pack_id', 'commits', 'request_id', 'sequence', 'status', 'headers', 'error'];
+const runKeys = ['type', 'command', 'path', 'content', 'timeout_ms', 'keep_background', 'workspace_id', 'base64', 'offset', 'final', 'mode', 'grace_ms', 'snapshot', 'sha', 'tree_sha', 'pack_id', 'commits', 'request_id', 'sequence', 'status', 'headers', 'error'];
 export function validateRun(input) {
   // lease_epoch 0: the environment is prepared before the scheduler binds the run; the binding is recorded in the task trace.
   const keys = ['run_id', 'task_id', 'lease_epoch', 'profile', 'network', 'limits'];
@@ -37,6 +37,7 @@ function validateRunCall(run, call) {
   // The run's workspace id is its run id: an operation can never name another workspace.
   if (call.workspace_id !== undefined && call.workspace_id !== run.run_id) throw new ManagerError('cross_run_workspace', 403);
   if (call.timeout_ms != null && !(Number.isFinite(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
+  if (call.grace_ms != null && !(Number.isSafeInteger(call.grace_ms) && call.grace_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
 }
 export class RunEnvironments {
   constructor(projects) {

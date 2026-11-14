@@ -13,7 +13,7 @@ export const listLimit = 5000, removeLimit = 20;
 // When a task directory was last active: the newest modification of the directory and of the files a task keeps
 // touching while it runs (its agent's events and state, the checkout's top level, its context, the reuse cache).
 export async function activeAt(dir) {
-  const times = await Promise.all(['', '/agent', '/agent/events.jsonl', '/agent/state.json', '/repo', '/context', '/review-cache.json']
+  const times = await Promise.all(['', '/agent', '/agent/events.jsonl', '/agent/state.json', '/agent/harness-state.json', '/agent/harness-stdout.bin', '/cli-state', '/repo', '/context', '/review-cache.json']
     .map(name => lstat(dir + name).then(info => info.mtimeMs, () => 0)));
   return Math.floor(Math.max(...times));
 }

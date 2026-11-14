@@ -22,19 +22,23 @@ async function prepared(page) {
 
 test('an agent backend the server marks unavailable is labelled and cannot be chosen', async ({ page }) => {
   const errors = []; page.on('pageerror', error => errors.push(error.message));
+  await page.route('**/api/repositories/101/roles', async route => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    const body = await response.json();
+    body.backends = [...body.backends, { id: 'future_backend', name: 'Future Backend', available: false, recommended: false, version: '0', kinds: ['writer'], model_source: 'project', supported_model_sources: ['gateway'], integration_issue: null, runtime_status: null }];
+    await route.fulfill({ response, json: body });
+  });
   const { h, admin } = await prepared(page);
   try {
     const payload = (await admin('/api/repositories/101/roles')).value;
-    const unavailable = payload.backends.filter(backend => !backend.available);
-    expect(unavailable.length, 'the fixture must expose at least one backend the server refuses to run').toBeGreaterThan(0);
+    expect(payload.backends.every(backend => backend.available), 'retired stub backends are absent from real server responses').toBe(true);
     const picker = page.getByLabel('dev Agent 后端', { exact: true });
     await expect(picker).toBeVisible();
-    for (const backend of unavailable) {
-      const option = picker.locator(`option[value="${backend.id}"]`);
-      await expect(option, `${backend.id} must be shown with its own label, not silently dropped`).toHaveCount(1);
-      await expect(option).toHaveText(`${backend.name}（尚不可用）`);
-      expect(await option.evaluate(element => element.disabled), `${backend.id} is not runnable, so it must not be selectable and saved as runnable`).toBe(true);
-    }
+    const option = picker.locator('option[value="future_backend"]');
+    await expect(option, 'future_backend must be shown with its own label, not silently dropped').toHaveCount(1);
+    await expect(option).toHaveText('Future Backend（尚不可用）');
+    expect(await option.evaluate(element => element.disabled), 'future_backend is not runnable, so it must not be selectable and saved as runnable').toBe(true);
     const selectable = payload.backends.filter(backend => backend.available && backend.kinds.includes('writer'));
     expect(selectable.length).toBeGreaterThan(0);
     await picker.selectOption(selectable[0].id);

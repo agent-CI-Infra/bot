@@ -67,6 +67,16 @@ test('operations act only on the run\'s own workspace and allowlisted types; rel
   const ran = await f.runs.execute('101', run, { operation_id: id(), request: { type: 'workspace_command', workspace_id: run, command: 'true', timeout_ms: 999_999_999 } });
   assert.equal(ran.ok, true);
   assert.ok(f.docker.runs.at(-1).timeout_ms <= 10_000, 'a command never outlives the run deadline');
+  const runInterrupted = await f.runs.execute('101', run, { operation_id: id(), request: { type: 'workspace_harness_interrupt', workspace_id: run, mode: 'graceful', grace_ms: 1500 } });
+  assert.equal(runInterrupted.ok, true);
+  assert.equal(f.docker.runs.at(-1).grace_ms, 1500);
+  const projectInterrupted = await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_harness_interrupt', workspace_id: run, mode: 'graceful', grace_ms: 1500 } });
+  assert.equal(projectInterrupted.ok, true);
+  assert.equal(f.docker.runs.at(-1).grace_ms, 1500);
+  for (const badGrace of [0, -1, 1.5, '1500']) {
+    await assert.rejects(f.runs.execute('101', run, { operation_id: id(), request: { type: 'workspace_harness_interrupt', workspace_id: run, mode: 'graceful', grace_ms: badGrace } }), /invalid_runner_request/);
+    await assert.rejects(f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_harness_interrupt', workspace_id: run, mode: 'graceful', grace_ms: badGrace } }), /invalid_runner_request/);
+  }
   await assert.rejects(f.runs.create('101', { ...spec(), limits: { memory_mb: 999999 } }), /invalid_run_limits/);
   await assert.rejects(f.runs.create('101', { ...spec(), mounts: ['/var/run/docker.sock'] }), /invalid_run/);
   await assert.rejects(f.runs.create('202', spec()), /environment_not_ready/);

@@ -60,12 +60,13 @@ try {
   passed('one long-lived container per repository');
   assert.equal((await manager('101','execute',{type:'write',path:'private.txt',content:'project-101-only'})).ok,true);
   assert.equal((await manager('202','execute',{type:'read',path:'private.txt'})).ok,false);
-  const c1 = inspect(name('101')), c2 = inspect(name('202'));
-  assert.notEqual(c1.Mounts[0].Name,c2.Mounts[0].Name);
+  const c1 = inspect(name('101')), c2 = inspect(name('202')), workVolume = c => c.Mounts.find(m => m.Destination === '/workspace').Name;
+  assert.notEqual(workVolume(c1),workVolume(c2));
+  assert.ok(c1.Mounts.some(m => m.Destination === '/opt/agent-tools' && m.RW === false));
   assert.notDeepEqual(Object.keys(c1.NetworkSettings.Networks),Object.keys(c2.NetworkSettings.Networks));
   assert.deepEqual(c1.HostConfig.PortBindings,{}); assert.equal(c1.Config.User,'10001:10001'); assert.equal(c1.HostConfig.ReadonlyRootfs,true);
   const socketTest = await run('101', "node -e \"require('node:fs').access('/var/run/docker.sock',e=>process.exit(e?0:1))\""); assert.equal(socketTest.result.exit_code,0);
-  const otherVolume = c1.Mounts[0].Name;
+  const otherVolume = workVolume(c1);
   const leakCheck = await run('202', `test ! -e /workspace/private.txt && test ! -e /var/lib/docker/volumes/${otherVolume} && test ! -e /keys/master.key && test ! -e /internal/manager.token && test ! -e /data/control.sqlite`); assert.equal(leakCheck.result.exit_code,0);
   passed('projects cannot read each other files, volumes, or Docker socket');
   // Start the listening operation concurrently with the connection attempt; it has no published port.
@@ -170,19 +171,19 @@ try {
   assert.equal((await manager('101','execute',{type:'read',path:'private.txt'})).result.content,'project-101-only');
   assert.equal((await manager('101')).generation,1); passed('restart rechecks runner and preserves generation and data');
   await api('/api/environments/101/stop','POST',{operation_id:id(),generation:1});
-  assert.equal(inspect(name('101')).State.Running,false); assert.ok(docker(['volume','inspect',c1.Mounts[0].Name]));
+  assert.equal(inspect(name('101')).State.Running,false); assert.ok(docker(['volume','inspect',workVolume(c1)]));
   await api('/api/environments/101/start','POST',{operation_id:id(),generation:1});
   assert.equal((await manager('101','execute',{type:'read',path:'private.txt'})).result.content,'project-101-only');
   const resetId=id(); await api('/api/environments/101/reset','POST',{operation_id:resetId,generation:1});
   assert.equal((await manager('101')).generation,2); assert.equal(inspect(name('101')).State.Running,false);
   assert.equal((await manager('101','execute',{type:'read',path:'private.txt'},2)).ok,false);
-  const oldMount=c1.Mounts[0].Name; assert.ok(docker(['volume','inspect',oldMount]));
-  assert.notEqual(inspect(name('101',2)).Mounts[0].Name,oldMount);
+  const oldMount=workVolume(c1); assert.ok(docker(['volume','inspect',oldMount]));
+  assert.notEqual(workVolume(inspect(name('101',2))),oldMount);
   await assert.rejects(run('101','true',1),/stale_generation/); passed('stop retains data; reset increments generation and retains old volume');
   await wait(async()=> (await api('/api/environments')).environments.every(e=>e.state==='ready'),'environment page readiness');
   const browser=await chromium.launch();
   try {
-    const page=await browser.newPage({viewport:{width:1365,height:900}}); const errors=[];page.on('pageerror',e=>errors.push(e.message));
+    const page=await browser.newPage({viewport:{width:1365,height:900},locale:'zh-CN'}); const errors=[];page.on('pageerror',e=>errors.push(e.message));
     await page.goto(base); await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
     await page.getByRole('button',{name:'项目',exact:true}).click();await page.locator('#rows .row').nth(1).waitFor();
     assert.equal(await page.locator('#rows .row').count(),2);await page.screenshot({path:'.tmp/project-env/admin-desktop.png',fullPage:true});
@@ -212,15 +213,16 @@ try {
   const removed=JSON.stringify({action:'deleted',installation:{account:{id:10}}});
   const removal=await fetch('http://127.0.0.1:18881'+a.endpoints[0].webhook_path,{method:'POST',headers:{'X-GitHub-Event':'installation','X-GitHub-Delivery':id(),'X-Hub-Signature-256':'sha256='+createHmac('sha256',webhookSecret).update(removed).digest('hex')},body:removed});assert.equal(removal.status,200);
   await wait(async()=> (await manager('101')).state==='stopped'&&(await manager('202')).state==='stopped','uninstallation stop');
-  assert.ok(docker(['volume','inspect',c1.Mounts[0].Name]));assert.ok(docker(['volume','inspect',c2.Mounts[0].Name]));passed('uninstallation stops environments and preserves volumes');
+  assert.ok(docker(['volume','inspect',workVolume(c1)]));assert.ok(docker(['volume','inspect',workVolume(c2)]));passed('uninstallation stops environments and preserves volumes');
   await api('/api/environments/202/delete','POST',{operation_id:id(),generation:1,confirm:true});
-  assert.equal(docker(['ps','-aq','--filter',`name=^/${name('202')}$`]).trim(),'');assert.ok(docker(['volume','inspect',c2.Mounts[0].Name]));passed('delete removes container and network while retaining volume');
+  assert.equal(docker(['ps','-aq','--filter',`name=^/${name('202')}$`]).trim(),'');assert.ok(docker(['volume','inspect',workVolume(c2)]));passed('delete removes container and network while retaining volume');
 } finally {
   // Clean only the unique deployment created by this run, including retained reset volumes.
-  compose(['down','--volumes']);
+  try { compose(['stop']); } catch {}
   if(deployment) for(const [kind,find,remove] of [['container',['ps','-aq'],['rm','-f']],['network',['network','ls','-q'],['network','rm']],['volume',['volume','ls','-q'],['volume','rm']],['image',['images','-q'],['rmi','-f']]]) {
     const names=[...new Set(docker([...find,'--filter',`label=department.bot.deployment=${deployment}`]).trim().split('\n').filter(Boolean))];
     if(names.length) docker([...remove,...names]);
   }
+  compose(['down','--volumes']);
   writeFileSync('.tmp/project-env/evidence.json',JSON.stringify(evidence,null,2));
 }

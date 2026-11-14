@@ -49,15 +49,15 @@ test('missing role records do not invent an executor, and independent QA remains
 test('under the controller the next step names the role at work, its executor and the purpose it was handed', async t => {
   const task = { id: 't2', repository_id: '101', kind: 'development.issue', object_number: 8, status: 'running', phase: 'model', attempt: 2,
     structured: record({ candidate, acceptance: { outcome: 'return', reason: 'The redirect drops the fragment', gaps: ['Keep #fragment as well'], residuals: [], candidate_id: candidate.id, revision: 2 } }) };
-  const roles = { instances: [{ id: 'i-m', role: 'manager', harness: 'pi', snapshot_id: 's-m' }, { id: 'i-d', role: 'dev', harness: 'native' }, { id: 'i-r', role: 'reviewer', harness: 'acp' }, { id: 'i-q', role: 'qa', harness: 'native' }],
+  const roles = { instances: [{ id: 'i-m', role: 'manager', harness: 'pi', snapshot_id: 's-m' }, { id: 'i-d', role: 'dev', harness: 'native' }, { id: 'i-r', role: 'reviewer', harness: 'codex' }, { id: 'i-q', role: 'qa', harness: 'native' }],
     assignments: [{ id: 'a1', instance_id: 'i-d', status: 'completed', candidate_version: null }, { id: 'a2', instance_id: 'i-r', status: 'running', candidate_version: 'tree9876543210fedcba' }],
     runs: [{ role: 'manager', status: 'running' }, { role: 'qa', status: 'completed' }], snapshots: { 's-m': { legacy: false } } };
   const handoffs = [{ data: { assignment_id: 'a1', purpose: 'Implement the redirect fix' } }, { data: { assignment_id: 'a2', purpose: 'Check the redirect against the criteria' } }];
   const view = taskPage(t, task, roles, handoffs); await view.open();
-  assert.equal(view.next(), 'Reviewer（ACP）正在做主控交给它的工作：Check the redirect against the criteria');
+  assert.equal(view.next(), 'Reviewer（Codex）正在做主控交给它的工作：Check the redirect against the criteria');
   const side = view.side();
   assert.match(side, /角色协调：主控 Manager（Pi）按需委派工作/); assert.match(side, /独立 QA\n运行过 1 次，每次都是新的上下文/);
-  assert.match(side, /委派记录\nDev\nNative\n已交回\nImplement the redirect fix/); assert.match(side, /Reviewer\nACP\n进行中\nCheck the redirect against the criteria\n看的是候选版本 tree98765432/);
+  assert.match(side, /委派记录\nDev\nNative\n已交回\nImplement the redirect fix/); assert.match(side, /Reviewer\nCodex\n进行中\nCheck the redirect against the criteria\n看的是候选版本 tree98765432/);
   // The delegation list is a record, not a plan or a grant.
   assert.match(side, /这不是预设流程，也不授予权限/);
   assert.match(side, /候选\n当前\n编号\ncand12345678/); assert.match(side, /项目测试命令\n已核验/); assert.match(side, /任务记录 #41\n未核验/); assert.match(side, /1\/2 已核验/);
@@ -134,12 +134,12 @@ test('task run history uses the executed snapshot and does not borrow the curren
 // A role as GET /api/repositories/:id/roles returns it.
 const role = (role_id, kind, harness, version = '1') => ({ role_id, kind, enabled: true, name: role_id, responsibility: '', persona_prompt: '', revision: 1, model_profile_ref: null, skill_bundle_ref: null,
   harness_ref: { id: harness, version }, permissions: {computer:'deny'}, environment_profile_ref: { id: 'env', version: '1' }, budget_policy_ref: { id: 'entry-default', version: '1' }, output_schema_ref: { id: 'out', version: '1' } });
-// Agent backends as GET /api/repositories/:id/roles lists them: peers, Pi recommended, Claude Code for worker roles only.
-const all = ['controller', 'writer', 'observer', 'evaluator'], backends = [['pi', 'Pi', '1.4.0', all], ['native', 'Native', '1', all], ['process', 'Process', '1', all], ['acp', 'ACP', '1', all], ['claude_code', 'Claude Code', '2.1.319', ['writer', 'observer', 'evaluator']]]
-  .map(([id, name, version, kinds]) => ({ id, name, version, kinds, available: true, recommended: id === 'pi', integration_issue: null })).concat([{ id: 'codex', name: 'Codex', version: null, kinds: [], available: false, recommended: false, integration_issue: 171 }]);
+// Agent backends as GET /api/repositories/:id/roles lists them: peers, Pi recommended, Claude Code and Codex for worker roles only.
+const all = ['controller', 'writer', 'observer', 'evaluator'], backends = [['pi', 'Pi', '1.4.0', all], ['native', 'Native', '1', all], ['process', 'Process', '1', all], ['claude_code', 'Claude Code', '2.1.319', ['writer', 'observer', 'evaluator']], ['codex', 'Codex', '1', ['writer', 'observer', 'evaluator']]]
+  .map(([id, name, version, kinds]) => ({ id, name, version, kinds, available: true, recommended: id === 'pi', integration_issue: null, ...(['claude_code', 'codex'].includes(id) ? { supported_model_sources: ['gateway', 'subscription'], runtime_status: { ready: false, cli_compatible_range: id === 'claude_code' ? '>=2.1.100 <3.0.0' : '>=0.160.0 <0.170.0', cli_installed_versions: [], selected_cli_version: null, model_relay_ready: true, reason: '容器工具卷 /opt/agent-tools 中尚未安装兼容版本。' } } : {}) }));
 const roleData = (config, { workflow = 'development.issue', configured = true } = {}) => ({ configuration: config, configured, revision: config.revision, workflow, backends, recommended_backend: 'pi', harnesses: backends.filter(b => b.available).map(({ id, version, kinds }) => ({ id, version, kinds })),
-  models: [], revisions: [], skill_inputs: [], preview: config.roles.map(r => ({ role: r.role_id, model: r.harness_ref.id === 'acp' ? { source: 'external_harness', name: 'external' } : { source: 'project', name: 'fixture-model' } })) });
-const team = controller => [role('manager', 'controller', controller, controller === 'pi' ? '1.4.0' : '1'), role('dev', 'writer', 'native'), role('test', 'observer', 'native'), role('reviewer', 'observer', 'acp'), role('ux', 'observer', 'native'), role('qa', 'evaluator', 'native'), role('coordinator', 'controller', 'native')];
+  models: [], revisions: [], skill_inputs: [], preview: config.roles.map(r => ({ role: r.role_id, model: { source: 'project', name: 'fixture-model' } })) });
+const team = controller => [role('manager', 'controller', controller, controller === 'pi' ? '1.4.0' : '1'), role('dev', 'writer', 'native'), role('test', 'observer', 'native'), role('reviewer', 'observer', 'codex'), role('ux', 'observer', 'native'), role('qa', 'evaluator', 'native'), role('coordinator', 'controller', 'native')];
 const entries = { development: true, request: true, review: false, actions: false };
 function rolesDraft(data) {
   return {enabled:data.configuration.enabled,controller:data.configuration.controller,roles:data.configuration.roles.map(role=>({...role,...(!data.configured?{harness_ref:{id:'pi'}}:{})})),skills:[],required_stages:[]};
@@ -202,9 +202,11 @@ test('role form edits backends without a JSON editor, and marks the draft dirty'
   const picker=(view,id)=>view.form.querySelectorAll('select').find(select=>select.getAttribute('aria-label')===id+' Agent 后端');
   assert.equal(picker(manager,'manager').value,'pi');
   assert.equal(picker(dev,'dev').value,'native');
-  assert.equal(picker(reviewer,'reviewer').value,'acp');
+  assert.equal(picker(reviewer,'reviewer').value,'codex');
   assert.ok(picker(manager,'manager').children.find(option=>option.value==='claude_code').disabled);
+  assert.ok(picker(manager,'manager').children.find(option=>option.value==='codex').disabled);
   assert.ok(!picker(dev,'dev').children.find(option=>option.value==='claude_code').disabled);
+  assert.ok(!picker(dev,'dev').children.find(option=>option.value==='codex').disabled);
   assert.doesNotMatch(text(dev.form),/能力策略|policy@|配置（JSON）|修改配置/);
   picker(dev,'dev').value='process';picker(dev,'dev').listeners.change[0]();
   assert.equal(dev.page.run("roleState.draft.roles.find(r=>r.role_id==='dev').harness_ref.id"),'process');
@@ -316,7 +318,7 @@ test('with a delegation running on the pages read and records left unread, the n
   // Real pages from the server; only the page after the first is replaced by a stalled cursor (empty, same cursor).
   let stall = false;
   const p = await realProject(t, undefined, (path, response) => stall && /\/roles\?limit=100&after=100$/.test(path) ? [200, { ...response.value, assignments: [], next_after: 100 }] : null);
-  p.task('mixed', 'task.request'); p.instance('m-manager', 'mixed', 'manager', 'pi'); p.instance('m-test', 'mixed', 'test', 'process'); p.instance('m-reviewer', 'mixed', 'reviewer', 'acp');
+  p.task('mixed', 'task.request'); p.instance('m-manager', 'mixed', 'manager', 'pi'); p.instance('m-test', 'mixed', 'test', 'process'); p.instance('m-reviewer', 'mixed', 'reviewer', 'codex');
   p.h.store.db.exec('BEGIN');
   for (let n = 1; n <= 101; n++) {
     const [owner, status, purpose] = n === 1 ? ['m-test', 'running', 'Earlier running test'] : n === 101 ? ['m-reviewer', 'running', 'Latest running review'] : ['m-test', 'completed', 'Finished check ' + n];
@@ -325,7 +327,7 @@ test('with a delegation running on the pages read and records left unread, the n
   }
   p.h.store.db.exec('COMMIT');
   // Read to the end, the newest running delegation is the one at work.
-  await p.open('mixed'); assert.equal(p.next(), 'Reviewer（ACP）正在做主控交给它的工作：Latest running review');
+  await p.open('mixed'); assert.equal(p.next(), 'Reviewer（Codex）正在做主控交给它的工作：Latest running review');
   p.page.run('taskView.close()'); stall = true; await p.open('mixed');
   const next = p.next();
   assert.equal(next, '委派记录没有读完（已读 100 条），现在说不清是谁在处理。');
@@ -343,25 +345,25 @@ test('with a delegation running on the pages read and records left unread, the n
   assert.equal(p.next(), '委派记录没有读完（已读 100 条），现在说不清是谁在处理。');
   // Read to the end, the running delegation is named, not QA.
   p.page.run('taskView.close()'); stall = false; await p.open('mixed');
-  assert.equal(p.next(), 'Reviewer（ACP）正在做主控交给它的工作：Latest running review');
+  assert.equal(p.next(), 'Reviewer（Codex）正在做主控交给它的工作：Latest running review');
 });
 
 test('a past delegation shows the harness its runs used, not the one its role instance was rebound to later', async t => {
   const p = await realProject(t);
-  p.task('historical', 'task.request'); p.instance('h-manager', 'historical', 'manager', 'pi'); p.instance('h-reviewer', 'historical', 'reviewer', 'acp');
+  p.task('historical', 'task.request'); p.instance('h-manager', 'historical', 'manager', 'pi'); p.instance('h-reviewer', 'historical', 'reviewer', 'codex');
   const run = (id, assignment, harness, status, extra = {}) => p.h.store.run(`INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,stop_reason,context_snapshot,config_snapshot,role,role_instance_id,assignment_id,harness,recovery_mode)
     VALUES(?,'historical','role',1,1,?,?,?,'{}','{}','reviewer','h-reviewer',?,?,?)`, id, p.now, status, extra.stop ?? null, assignment, harness, extra.recovery ?? null);
   p.h.store.run("INSERT INTO role_assignments VALUES('old','historical','h-reviewer',1,NULL,'completed','old-input','old-result')"); run('old-run', 'old', 'native', 'succeeded', { recovery: 'new_session' });
-  // One delegation that crossed a revision: ended at a checkpoint on Native, continued on ACP.
+  // One delegation that crossed a revision: ended at a checkpoint on Native, continued on Codex.
   p.h.store.run("INSERT INTO role_assignments VALUES('moved','historical','h-reviewer',1,NULL,'running','moved-input',NULL)");
-  run('moved-1', 'moved', 'native', 'fault', { stop: 'role_revision_checkpoint', recovery: 'new_session' }); run('moved-2', 'moved', 'acp', 'running', { recovery: 'checkpoint_transcript' });
+  run('moved-1', 'moved', 'native', 'fault', { stop: 'role_revision_checkpoint', recovery: 'new_session' }); run('moved-2', 'moved', 'codex', 'running', { recovery: 'checkpoint_transcript' });
   const roles = (await p.admin('/api/tasks/historical/roles?limit=100&after=0')).value;
-  assert.deepEqual(roles.instances.find(i => i.id === 'h-reviewer').harness, 'acp');
+  assert.deepEqual(roles.instances.find(i => i.id === 'h-reviewer').harness, 'codex');
   await p.open('historical');
   const items = p.page.$('task-side').querySelectorAll('.role-work > li').map(text);
   assert.equal(items[0], 'Reviewer\nNative\n已交回');
-  assert.equal(items[1], 'Reviewer\nNative → ACP\n进行中\n执行了 2 次：第 1 次 Native，中止（换到新 revision）；第 2 次 ACP，从检查点续接，进行中。');
-  assert.equal(p.next(), 'Reviewer（ACP）正在做主控交给它的工作。');
+  assert.equal(items[1], 'Reviewer\nNative → Codex\n进行中\n执行了 2 次：第 1 次 Native，中止（换到新 revision）；第 2 次 Codex，从检查点续接，进行中。');
+  assert.equal(p.next(), 'Reviewer（Codex）正在做主控交给它的工作。');
 });
 
 test('review and Actions summaries offer only Dev on its backend in the entry; development offers every enabled worker', async t => {

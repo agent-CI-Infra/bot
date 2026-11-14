@@ -237,7 +237,7 @@ test('admission fails closed: undeclared adapters, built-in drivers on isolated 
   // no environment is provisioned.
   // Saving an isolated profile for them is refused at the field; a run that overrides the driver is refused before any
   // environment is provisioned.
-  for (const id of ['native', 'process', 'acp'])
+  for (const id of ['native', 'process', 'pi'])
     assert.throws(() => f.put({ roles: [{ role_id: 'reviewer', harness_ref: { id }, environment_profile_ref: { id: 'isolated-candidate' } }] }), e => e.code === 'unsupported_capability' && e.field === 'roles.reviewer.environment_profile_ref.id');
   const seen = [];
   registerRoleHarness({ id: 'isolated-fixture-169', version: '1', session: 'task_records', events: 'run_events', kinds: ['writer', 'observer', 'evaluator'],

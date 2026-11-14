@@ -61,13 +61,13 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     task('coordinated', 'development.issue', 12, 'model');
     record('coordinated', { candidate, next: 'Ask Reviewer to check the redirect', acceptance: { outcome: 'return', reason: 'The redirect drops the fragment', gaps: ['Keep #fragment as well'], residuals: [], candidate_id: candidate.id, revision: 1 } });
     h.store.run("INSERT INTO role_snapshots VALUES('s-manager','101','manager',1,1,?,?)", JSON.stringify({ legacy: false, harness: { id: 'pi', source: 'role' } }), now);
-    instance('c-manager', 'coordinated', 'manager', 'pi', 's-manager'); instance('c-dev', 'coordinated', 'dev', 'native'); instance('c-reviewer', 'coordinated', 'reviewer', 'acp'); instance('c-qa', 'coordinated', 'qa', 'native');
+    instance('c-manager', 'coordinated', 'manager', 'pi', 's-manager'); instance('c-dev', 'coordinated', 'dev', 'native'); instance('c-reviewer', 'coordinated', 'reviewer', 'codex'); instance('c-qa', 'coordinated', 'qa', 'native');
     for (const [id, owner, status, version] of [['a-dev', 'c-dev', 'completed', null], ['a-reviewer', 'c-reviewer', 'running', candidate.artifacts[0].version]])
       h.store.run('INSERT INTO role_assignments VALUES(?,?,?,1,?,?,?,NULL)', id, 'coordinated', owner, version, status, 'input-' + id);
     for (const [assignment, role, purpose] of [['a-dev', 'dev', 'Implement the redirect fix'], ['a-reviewer', 'reviewer', 'Check the redirect against both criteria']])
       h.store.run("INSERT INTO task_history(task_id,type,data,created_at,actor) VALUES('coordinated','role_handoff',?,?,'role:manager')", JSON.stringify({ assignment_id: assignment, role, purpose, refs: [], revision: 1 }), now);
     run('c-manager-run', 'coordinated', 'manager', 'running'); run('c-qa-run', 'coordinated', 'qa', 'succeeded');
-    run('c-dev-run', 'coordinated', 'dev', 'succeeded', 'native', 'a-dev'); run('c-reviewer-run', 'coordinated', 'reviewer', 'running', 'acp', 'a-reviewer');
+    run('c-dev-run', 'coordinated', 'dev', 'succeeded', 'native', 'a-dev'); run('c-reviewer-run', 'coordinated', 'reviewer', 'running', 'codex', 'a-reviewer');
 
     const side = page.locator('#task-side'), fact = name => side.locator(`.task-fact[data-fact="${name}"]`);
     await page.evaluate(() => openTask('plain'));
@@ -83,7 +83,7 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     await page.locator('#task-actions').getByRole('button', { name: '关闭', exact: true }).click(); await page.waitForFunction(() => openTaskId === null);
 
     await page.evaluate(() => openTask('coordinated'));
-    await expect(next).toHaveText('Reviewer（ACP）正在做主控交给它的工作：Check the redirect against both criteria');
+    await expect(next).toHaveText('Reviewer（Codex）正在做主控交给它的工作：Check the redirect against both criteria');
     await expect(fact('目标')).toContainText('The redirect keeps ?next='); await expect(fact('候选')).toContainText('cand12345678');
     await expect(fact('证据')).toContainText('项目测试命令'); await expect(fact('证据')).toContainText('1/1 已核验');
     await expect(fact('验收')).toContainText('退回修改'); await expect(fact('验收')).toContainText('Keep #fragment as well');

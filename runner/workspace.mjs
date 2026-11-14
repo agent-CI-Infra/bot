@@ -102,7 +102,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     try{if((await handle.stat()).size!==input.offset)throw new Error('offset_mismatch');await handle.write(data,0,data.length,input.offset);}finally{await handle.close();}
     return {written:true};
   }
-  if(input.type.startsWith('workspace_agent_'))return agentOperation(input,root);
+  if(input.type.startsWith('workspace_agent_')||input.type.startsWith('workspace_harness_'))return agentOperation(input,root);
   if(input.type==='workspace_write'){
     if(typeof input.path==='string'&&input.path.startsWith('../notes/')){
       if(input.offset!==0||input.final!==true||input.mode!=='100644'||input.snapshot||typeof input.base64!=='string')throw new Error('invalid_note_write');

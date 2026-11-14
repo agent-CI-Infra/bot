@@ -20,7 +20,7 @@ import { instanceUsage } from '../dist/roles/role-run.js';
 async function fixture(t,harness,budget,stall=false){
   const store=new Store(':memory:',Buffer.alloc(32,8)),root=mkdtempSync(join(tmpdir(),'role-conversation-')),manager=new LocalManager('101',root),requests=[];
   let response=()=>({role:'assistant',content:null,tool_calls:[{id:'reply-'+requests.length,type:'function',function:{name:'finish',arguments:JSON.stringify({message:'A source-bound response'})}}]});
-  const external=['acp','codex','claude_code'].includes(harness),claudeModel='claude-sonnet-4-5-20250929';let began;const started=new Promise(resolve=>{began=resolve;});
+  const external=['codex','claude_code'].includes(harness),claudeModel='claude-sonnet-4-5-20250929';let began;const started=new Promise(resolve=>{began=resolve;});
   const server=createServer(async(req,res)=>{
     if(req.method==='GET'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({data:[{id:claudeModel}]}));return;}
     let text='';for await(const c of req)text+=c;const body=JSON.parse(text);requests.push(body);began();if(stall)await new Promise(()=>{});
@@ -28,10 +28,9 @@ async function fixture(t,harness,budget,stall=false){
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:response(body)}],usage:{prompt_tokens:9,completion_tokens:3}}));});
   server.listen(0,'127.0.0.1');await once(server,'listening');
   if(external){
-    const name=harness==='acp'?'BOT_ACP_CONFIG':harness==='codex'?'BOT_CODEX_CONFIG':'BOT_CLAUDE_CODE_CONFIG',file=join(root,'config.json'),prior=process.env[name];
+    const name=harness==='codex'?'BOT_CODEX_CONFIG':'BOT_CLAUDE_CODE_CONFIG',file=join(root,'config.json'),prior=process.env[name];
     const stateDirectory=join(root,'sessions');mkdirSync(stateDirectory,{mode:0o700});
-    const config={command:process.execPath,args:[resolve('test/fixtures/'+(harness==='acp'?'acp-agent.mjs':'codex-app-server.mjs'))],env:{FIXTURE_CONVERSATION:'true',CODEX_HOME:join(root,'codex-home')},stateDirectory,version:harness==='codex'?'0.166.0':'1',timeoutMs:8000,cancelGraceMs:400,toolStartupMs:3000};
-    if(harness==='codex')config.args.push('app-server');
+    const config={command:process.execPath,args:[resolve('test/fixtures/codex-app-server.mjs'),'app-server'],env:{FIXTURE_CONVERSATION:'true',CODEX_HOME:join(root,'codex-home')},stateDirectory,version:'0.166.0',timeoutMs:8000,cancelGraceMs:400,toolStartupMs:3000};
     if(harness==='claude_code'){const credentialFile=join(root,'provider.key');writeFileSync(credentialFile,'fixture-provider-secret',{mode:0o600});Object.assign(config,{command:resolve('test/fixtures/claude-code.mjs'),version:'2.1.319',model:claudeModel,provider:{baseUrl:'http://127.0.0.1:'+server.address().port,credentialFile}});delete config.args;delete config.env;delete config.cancelGraceMs;delete config.toolStartupMs;}
     writeFileSync(file,JSON.stringify(config));process.env[name]=file;t.after(()=>{if(prior===undefined)delete process.env[name];else process.env[name]=prior;});
   }
@@ -69,7 +68,7 @@ for(const harness of ['native','process','pi'])test(`generic conversation uses t
   assert.equal(f.store.get('SELECT sequence FROM role_instances WHERE id=?',instance.id).sequence,2);
   f.change();await assert.rejects(f.conversations.run(f.source),{code:'conversation_turn_not_replayable'});
 });
-for(const harness of ['acp','codex','claude_code'])test(`non-task ${harness} uses its real protocol adapter, persistent role instance and one external request ledger (fixtures)`,async t=>{
+for(const harness of ['codex','claude_code'])test(`non-task ${harness} uses its real protocol adapter, persistent role instance and one external request ledger (fixtures)`,async t=>{
   const f=await fixture(t,harness),result=await f.conversations.run(f.source);assert.equal(result.message,'A source-bound response');
   assert.equal(f.store.get('SELECT count(*) n FROM tasks').n,0);
   const instance=f.store.get('SELECT * FROM role_instances WHERE conversation_id=?',f.source.id);assert.equal(instance.task_id,null);
@@ -77,7 +76,6 @@ for(const harness of ['acp','codex','claude_code'])test(`non-task ${harness} use
   const context=f.store.secrets.open(event.payload,'conversation-event:'+result.id+':conversation_run').data.run_context;
   assert.equal(context.task_id,null);assert.equal(context.conversation_id,f.source.id);assert.equal(context.execution_context.role_instance_id,instance.id);
   const rows=f.store.all('SELECT * FROM model_requests');assert.equal(rows.length,1);assert.equal(rows[0].task_id,null);assert.equal(rows[0].role_id,'reviewer');assert.equal(rows[0].source_message,'source-1');assert.equal(rows[0].cost,null);
-  if(harness==='acp'){assert.equal(rows[0].input_tokens,null);assert.equal(rows[0].state,'external_usage_unknown');}
   if(harness==='codex'){assert.equal(rows[0].input_tokens,100);assert.equal(rows[0].output_tokens,10);}
   if(harness==='claude_code'){assert.equal(rows[0].input_tokens,9);assert.equal(rows[0].output_tokens,3);assert.equal(f.requests.length,1);}
   const text=JSON.stringify(f.store.all('SELECT * FROM role_conversation_events'));assert.ok(!text.includes('PRIVATE_FIXTURE_REASONING'));

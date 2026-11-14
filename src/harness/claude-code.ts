@@ -1,222 +1,712 @@
-import { spawn, execFile } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
-import { readFileSync, mkdirSync, mkdtempSync, rmSync, existsSync, readdirSync, lstatSync, realpathSync } from 'node:fs';
-import { resolve, join, dirname, isAbsolute } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { TaskError } from '../agent/common.js';
 import type { AgentSpec, ExternalUsage } from '../agent/runtime.js';
+import { executionModel } from '../tasks/configuration.js';
+import type { RuntimeModel } from '../agent/model.js';
 import type { RunContext } from '../roles/protocol.js';
 import { contentHash } from '../roles/protocol.js';
 import type { HarnessEvent } from './session.js';
 import { claudeCodeRuntime, ClaudeJsonStream, claudeUserMessage, uuidPattern, type ClaudeUsage } from './claude-code-protocol.js';
-import { claudeModelGateway, type ClaudeProvider } from './claude-gateway.js';
+import { COMPATIBLE_CLI_RANGES, DEFAULT_AGENT_TOOLS_ROOT, satisfiesCliRange, selectCompatibleCliVersion } from './agent-tools.js';
+import { readProviderCredentialFile, type FileBackedModelProvider } from './model-gateway.js';
+import { filterPlatformTools, withContainerHarnessSession } from './container-session.js';
 
-export interface ClaudeConfiguration { command?: string; version: string; stateDirectory: string; model: string; provider: ClaudeProvider; timeoutMs?: number }
-export interface ClaudePreparation { config: ClaudeConfiguration; configurationHash: string; command: string; version: string }
-const fail = (code: string, state: 'waiting_configuration' | 'retry_wait' | 'cancelled' | 'needs_replan' = 'waiting_configuration'): never => { throw new TaskError(code, state); };
-const executionFailure = (fault: string): never => fail(({ authentication: 'claude_authentication_failed', model: 'claude_model_unavailable', rate_limit: 'claude_rate_limited', transport: 'claude_transport_error' } as Record<string, string>)[fault] ?? 'claude_execution_failed', ['rate_limit', 'transport', 'execution'].includes(fault) ? 'retry_wait' : 'waiting_configuration');
-/** Only an operator-owned profile is executable input. No arbitrary argv, env, hooks or provider keys. */
+export interface ClaudeProviderConfig {
+  baseUrl: string;
+  credentialFile: string;
+}
+
+export interface ClaudeConfiguration {
+  command?: string;
+  version: string;
+  stateDirectory: string;
+  model: string;
+  provider: ClaudeProviderConfig;
+  timeoutMs?: number;
+  env?: Record<string, string>;
+}
+
+export interface ClaudePreparation {
+  mode: 'volume' | 'config_file';
+  config?: ClaudeConfiguration;
+  command: string;
+  nodeExecutable?: string;
+  version: string;
+  model: string;
+  primaryModel?: RuntimeModel;
+  fileProvider?: FileBackedModelProvider;
+  configurationHash: string;
+}
+
+const fail = (
+  code: string,
+  state: 'waiting_configuration' | 'retry_wait' | 'cancelled' | 'needs_replan' = 'waiting_configuration',
+  detail?: string,
+): never => {
+  throw new TaskError(code, state, detail);
+};
+
+const executionFailure = (fault: string): never =>
+  fail(
+    ({
+      authentication: 'claude_authentication_failed',
+      model: 'claude_model_unavailable',
+      rate_limit: 'claude_rate_limited',
+      transport: 'claude_transport_error',
+    } as Record<string, string>)[fault] ?? 'claude_execution_failed',
+    ['rate_limit', 'transport', 'execution'].includes(fault) ? 'retry_wait' : 'waiting_configuration',
+  );
+
+const FORBIDDEN_CLAUDE_TOOLS = new Set([
+  'EnterWorktree',
+  'ExitWorktree',
+  'CronCreate',
+  'CronDelete',
+  'CronList',
+  'ScheduleWakeup',
+  'PushNotification',
+]);
+
+/** Optional operator/test override file (`BOT_CLAUDE_CODE_CONFIG`); normal runs select `/opt/agent-tools/claude_code/<ver>` + project model. */
 export function claudeConfiguration(): ClaudeConfiguration {
   const path = process.env.BOT_CLAUDE_CODE_CONFIG;
   if (!path) return fail('claude_not_configured');
-  let c: any; try { c = JSON.parse(readFileSync(path, 'utf8')); } catch { return fail('claude_configuration_invalid'); }
-  if (!c || Object.keys(c).some(k => !['command', 'version', 'stateDirectory', 'model', 'provider', 'timeoutMs'].includes(k)) ||
-    c.version !== claudeCodeRuntime.version || typeof c.stateDirectory !== 'string' || !isAbsolute(c.stateDirectory) ||
-    c.command !== undefined && (typeof c.command !== 'string' || !isAbsolute(c.command)) ||
-    typeof c.model !== 'string' || !/^claude-[a-z0-9]+(?:-[a-z0-9]+)+$/.test(c.model) || /(?:^|-)latest$/.test(c.model) ||
-    c.timeoutMs !== undefined && (!Number.isSafeInteger(c.timeoutMs) || c.timeoutMs < 1000 || c.timeoutMs > 3600_000)) return fail('claude_configuration_invalid');
-  if (!c.provider || typeof c.provider !== 'object' || Array.isArray(c.provider) || Object.keys(c.provider).some(k => !['baseUrl', 'credentialFile'].includes(k)) || typeof c.provider.credentialFile !== 'string' || !isAbsolute(c.provider.credentialFile)) return fail('claude_configuration_invalid');
-  let url: URL; try { url = new URL(c.provider.baseUrl); } catch { return fail('claude_configuration_invalid'); }
-  if (url.username || url.password || url.search || url.hash || !['http:', 'https:'].includes(url.protocol) ||
-    url.protocol === 'http:' && !['127.0.0.1', '[::1]'].includes(url.hostname)) return fail('claude_configuration_invalid');
-  return { version: c.version, stateDirectory: c.stateDirectory, model: c.model,
-    ...(c.command ? { command: c.command } : {}), ...(c.timeoutMs ? { timeoutMs: c.timeoutMs } : {}),
-    provider: { baseUrl: c.provider.baseUrl, credentialFile: c.provider.credentialFile } };
+  let c: any;
+  try {
+    c = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return fail('claude_configuration_invalid');
+  }
+  if (
+    !c ||
+    Object.keys(c).some(k => !['command', 'version', 'stateDirectory', 'model', 'provider', 'timeoutMs', 'env'].includes(k)) ||
+    typeof c.version !== 'string' ||
+    !satisfiesCliRange('claude_code', c.version) ||
+    typeof c.stateDirectory !== 'string' ||
+    !isAbsolute(c.stateDirectory) ||
+    (c.command !== undefined && (typeof c.command !== 'string' || !isAbsolute(c.command))) ||
+    typeof c.model !== 'string' ||
+    !/^claude-[a-z0-9]+(?:-[a-z0-9.]+)+$/.test(c.model) ||
+    /(?:^|-)latest$/.test(c.model) ||
+    (c.timeoutMs !== undefined && (!Number.isSafeInteger(c.timeoutMs) || c.timeoutMs < 1000 || c.timeoutMs > 3600_000))
+  ) {
+    return fail('claude_configuration_invalid');
+  }
+  if (
+    !c.provider ||
+    typeof c.provider !== 'object' ||
+    Array.isArray(c.provider) ||
+    Object.keys(c.provider).some(k => !['baseUrl', 'credentialFile'].includes(k)) ||
+    typeof c.provider.credentialFile !== 'string' ||
+    !isAbsolute(c.provider.credentialFile)
+  ) {
+    return fail('claude_configuration_invalid');
+  }
+  let url: URL;
+  try {
+    url = new URL(c.provider.baseUrl);
+  } catch {
+    return fail('claude_configuration_invalid');
+  }
+  if (
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    !['http:', 'https:'].includes(url.protocol) ||
+    (url.protocol === 'http:' && !['127.0.0.1', '[::1]'].includes(url.hostname))
+  ) {
+    return fail('claude_configuration_invalid');
+  }
+  const extraEnv: Record<string, string> = {};
+  if (c.env !== undefined) {
+    if (!c.env || typeof c.env !== 'object' || Array.isArray(c.env)) return fail('claude_configuration_invalid');
+    for (const [k, v] of Object.entries(c.env)) {
+      if (typeof v !== 'string' || !/^FIXTURE_[A-Z0-9_]+$/.test(k)) return fail('claude_configuration_invalid');
+      extraEnv[k] = v;
+    }
+  }
+  return {
+    version: c.version,
+    stateDirectory: c.stateDirectory,
+    model: c.model,
+    ...(c.command ? { command: c.command } : {}),
+    ...(c.timeoutMs ? { timeoutMs: c.timeoutMs } : {}),
+    ...(Object.keys(extraEnv).length ? { env: extraEnv } : {}),
+    provider: { baseUrl: c.provider.baseUrl, credentialFile: c.provider.credentialFile },
+  };
 }
-/** Resolve the pinned native optional package directly: npm ci --ignore-scripts leaves the npm bin as a stub. */
+
+/** Resolve the devDependency CLI binary for local smoke probes when `/opt/agent-tools` is not used. */
 export function claudeBinary(): string {
   const platform = process.platform, arch = process.arch;
   if (platform !== 'linux' || !['x64', 'arm64'].includes(arch)) return fail('claude_platform_unsupported');
   const report = process.report.getReport() as { header: { glibcVersionRuntime?: string } };
   const name = `@anthropic-ai/claude-code-linux-${arch}${report.header.glibcVersionRuntime ? '' : '-musl'}`;
-  try { return join(dirname(createRequire(import.meta.url).resolve(name + '/package.json')), 'claude'); } catch { return fail('claude_binary_unavailable'); }
+  try {
+    return join(dirname(createRequire(import.meta.url).resolve(name + '/package.json')), 'claude');
+  } catch {
+    return fail('claude_binary_unavailable');
+  }
 }
+
 function privateDirectory(path: string) {
-  let ancestor = resolve(path); while (!existsSync(ancestor) && ancestor !== dirname(ancestor)) ancestor = dirname(ancestor);
+  let ancestor = resolve(path);
+  while (!existsSync(ancestor) && ancestor !== dirname(ancestor)) ancestor = dirname(ancestor);
   if (realpathSync(ancestor) !== ancestor || !lstatSync(ancestor).isDirectory()) return fail('claude_state_directory_invalid');
   mkdirSync(path, { recursive: true, mode: 0o700 });
   const stat = lstatSync(path);
-  if (realpathSync(path) !== resolve(path) || !stat.isDirectory() || (stat.mode & 0o077) !== 0) return fail('claude_state_directory_invalid');
+  if (realpathSync(path) !== resolve(path) || !stat.isDirectory() || (stat.mode & 0o077) !== 0) {
+    return fail('claude_state_directory_invalid');
+  }
 }
-function environment(home: string, tmp: string): NodeJS.ProcessEnv {
-  return { PATH: dirname(process.execPath) + ':/usr/bin:/bin', LANG: 'C.UTF-8', HOME: home, TMPDIR: tmp,
-    CLAUDE_CONFIG_DIR: join(home, '.claude'), XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'),
-    DISABLE_AUTOUPDATER: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' };
+
+function hostPreflightEnv(home: string, tmp: string): NodeJS.ProcessEnv {
+  return {
+    PATH: dirname(process.execPath) + ':/usr/bin:/bin',
+    LANG: 'C.UTF-8',
+    HOME: home,
+    TMPDIR: tmp,
+    CLAUDE_CONFIG_DIR: join(home, '.claude'),
+    XDG_CONFIG_HOME: join(home, '.config'),
+    XDG_CACHE_HOME: join(home, '.cache'),
+    DISABLE_AUTOUPDATER: '1',
+    DISABLE_TELEMETRY: '1',
+    DISABLE_ERROR_REPORTING: '1',
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+  };
 }
-/** Called by RoleRun.prepare before start: verify the selected binary and version in a fresh, empty HOME. */
-export async function prepareClaudeCode<T>(spec: AgentSpec<T>) {
-  const config = claudeConfiguration(), command = config.command ?? claudeBinary();
-  privateDirectory(config.stateDirectory);
-  const dir = mkdtempSync(join(config.stateDirectory, 'preflight-')); privateDirectory(join(dir, 'tmp'));
-  try {
-    const version = await new Promise<string>((ok, no) => execFile(command, ['--version'], { cwd: dir, env: environment(dir, join(dir, 'tmp')), timeout: 10_000, maxBuffer: 4096 }, (e, stdout) => e ? no(new TaskError('claude_binary_unavailable', 'waiting_configuration')) : ok(stdout.trim())));
-    if (version !== `${claudeCodeRuntime.version} (Claude Code)`) return fail('claude_version_unsupported');
-    if (!spec.finish || !spec.tools?.some(t => t.function.name === spec.finish!.name)) return fail('claude_submission_tool_required');
-    const prepared: ClaudePreparation = { config, command, version, configurationHash: contentHash({ ...config, command, protocol: claudeCodeRuntime.protocol }) };
-    spec.harnessPreparation = prepared;
-    spec.harnessBinding = { model_revision: `claude_code:${config.model}:${prepared.configurationHash}`, harness_revision: `claude_code@${claudeCodeRuntime.version}:${prepared.configurationHash}` };
-    spec.modelTrace = { source: 'external_harness', provider: 'anthropic_gateway', model: config.model, cli_version: claudeCodeRuntime.version, configuration_hash: prepared.configurationHash };
-    return prepared;
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+
+/** Called by RoleRun.prepare before start: select compatible CLI from `/opt/agent-tools` (or verified test config) and bind model. */
+export async function prepareClaudeCode<T>(spec: AgentSpec<T>): Promise<ClaudePreparation> {
+  if (!spec.finish || !spec.tools?.some(t => t.function.name === spec.finish!.name)) {
+    return fail('claude_submission_tool_required');
+  }
+
+  if (process.env.BOT_CLAUDE_CODE_CONFIG) {
+    const config = claudeConfiguration();
+    const command = config.command ?? claudeBinary();
+    privateDirectory(config.stateDirectory);
+    const dir = mkdtempSync(join(config.stateDirectory, 'preflight-'));
+    privateDirectory(join(dir, 'tmp'));
+    try {
+      const versionOut = await new Promise<string>((ok, no) =>
+        execFile(
+          command,
+          ['--version'],
+          { cwd: dir, env: hostPreflightEnv(dir, join(dir, 'tmp')), timeout: 10_000, maxBuffer: 4096 },
+          (e, stdout) => (e ? no(new TaskError('claude_binary_unavailable', 'waiting_configuration')) : ok(stdout.trim())),
+        ),
+      );
+      const match = /^(\d+\.\d+\.\d+)\s+\(Claude Code\)$/.exec(versionOut);
+      if (!match || match[1] !== config.version || !satisfiesCliRange('claude_code', match[1])) {
+        return fail('claude_version_unsupported');
+      }
+      const configurationHash = contentHash({ ...config, command, protocol: claudeCodeRuntime.protocol });
+      const fileProvider: FileBackedModelProvider = {
+        id: 'claude_config_provider',
+        baseUrl: config.provider.baseUrl,
+        credentialFile: config.provider.credentialFile,
+        model: config.model,
+        interfaceType: 'anthropic-messages',
+        authHeader: 'x-api-key',
+      };
+      const prepared: ClaudePreparation = {
+        mode: 'config_file',
+        config,
+        command,
+        version: match[1],
+        model: config.model,
+        fileProvider,
+        configurationHash,
+      };
+      spec.harnessPreparation = prepared;
+      spec.harnessBinding = {
+        model_revision: `claude_code:${config.model}:${configurationHash}`,
+        harness_revision: `claude_code@${match[1]}:${configurationHash}`,
+        cli_version: match[1],
+      };
+      return prepared;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const override = spec.containerOptions?.executableOverride;
+  let command: string;
+  let nodeExecutable: string | undefined;
+  let cliVersion: string;
+  if (override) {
+    command = override.executable;
+    nodeExecutable = override.nodeExecutable;
+    cliVersion = override.version ?? COMPATIBLE_CLI_RANGES.claude_code.tested;
+    if (!satisfiesCliRange('claude_code', cliVersion)) return fail('claude_version_unsupported');
+  } else {
+    const selected = selectCompatibleCliVersion(process.env.BOT_AGENT_TOOLS_DIR ?? DEFAULT_AGENT_TOOLS_ROOT, 'claude_code');
+    command = selected.container_executable;
+    nodeExecutable = selected.container_node_executable ?? undefined;
+    cliVersion = selected.version;
+  }
+
+  const fileProvider = spec.containerOptions?.fileProvider;
+  const primaryModel = fileProvider
+    ? undefined
+    : ((spec.model as RuntimeModel | undefined) ?? (executionModel(spec.store, spec.task) as RuntimeModel));
+  const modelName = fileProvider ? fileProvider.model : primaryModel!.model;
+  const configurationHash = contentHash({
+    cli: 'claude_code',
+    version: cliVersion,
+    command,
+    model: modelName,
+    model_id: primaryModel?.id ?? fileProvider?.id ?? 'provider',
+    protocol: claudeCodeRuntime.protocol,
+  });
+  const prepared: ClaudePreparation = {
+    mode: 'volume',
+    command,
+    ...(nodeExecutable ? { nodeExecutable } : {}),
+    version: cliVersion,
+    model: modelName,
+    ...(primaryModel ? { primaryModel } : {}),
+    ...(fileProvider ? { fileProvider } : {}),
+    configurationHash,
+  };
+  spec.harnessPreparation = prepared;
+  spec.harnessBinding = {
+    model_revision: primaryModel
+      ? `project_model:${primaryModel.id}@${primaryModel.version}:${modelName}`
+      : `claude_code:${modelName}:${configurationHash}`,
+    harness_revision: `claude_code@${cliVersion}:${configurationHash}`,
+    cli_version: cliVersion,
+  };
+  return prepared;
 }
-const scope = (ctx: RunContext) => ({ tenant_id: ctx.tenant_id, project_id: ctx.project_id, task_id: ctx.task_id,...(ctx.conversation_id?{conversation_id:ctx.conversation_id}:{}),instance_id: ctx.execution_context?.role_instance_id, role: ctx.execution_context?.role, assignment_id: ctx.assignment_id });
+
+const scope = (ctx: RunContext) => ({
+  tenant_id: ctx.tenant_id,
+  project_id: ctx.project_id,
+  task_id: ctx.task_id,
+  ...(ctx.conversation_id ? { conversation_id: ctx.conversation_id } : {}),
+  instance_id: ctx.execution_context?.role_instance_id,
+  role: ctx.execution_context?.role,
+  assignment_id: ctx.assignment_id,
+});
 const identity = (value: any) => value && Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'assignment_id'));
-const inputs = (ctx: RunContext) => contentHash({ source: ctx.source_ref, contract: ctx.contract_revision, candidate: ctx.candidate_ref, role: ctx.role_revision, policy: ctx.policy_revision, skills: ctx.skill_revisions, model: ctx.model_revision });
-function transcriptExists(home: string, sid: string) {
-  const root = join(home, '.claude', 'projects');
-  if (!existsSync(root) || realpathSync(root) !== resolve(root) || !lstatSync(root).isDirectory()) return false;
-  return readdirSync(root, { withFileTypes: true }).some(d => { const file = join(root, d.name, sid + '.jsonl'); return d.isDirectory() && !d.isSymbolicLink() && existsSync(file) && lstatSync(file).isFile() && !lstatSync(file).isSymbolicLink(); });
-}
-/** The gateway must authenticate this exact run capability and report the requested provider/model before CLI startup. */
-async function checkGateway(config: ClaudeConfiguration & { gatewayUrl: string }, token: string, signal: AbortSignal) {
+const inputs = (ctx: RunContext) =>
+  contentHash({
+    source: ctx.source_ref,
+    contract: ctx.contract_revision,
+    candidate: ctx.candidate_ref,
+    role: ctx.role_revision,
+    policy: ctx.policy_revision,
+    skills: ctx.skill_revisions,
+    model: ctx.model_revision,
+  });
+
+async function preflightFileProvider(provider: FileBackedModelProvider, expectedModel: string, signal: AbortSignal) {
+  let key: string;
+  try {
+    key = readProviderCredentialFile(provider.credentialFile!).key;
+  } catch {
+    return fail('claude_provider_credential_unavailable');
+  }
   let response: Response;
-  try { response = await fetch(config.gatewayUrl.replace(/\/$/, '') + '/v1/models', { headers: { 'x-api-key': token, 'anthropic-version': '2023-06-01' }, signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]), redirect: 'error' }); }
-  catch { if (signal.aborted) throw signal.reason; return fail('claude_gateway_unavailable', 'retry_wait'); }
+  const modelsUrl = provider.baseUrl.replace(/\/+$/, '').endsWith('/v1')
+    ? provider.baseUrl.replace(/\/+$/, '') + '/models'
+    : provider.baseUrl.replace(/\/+$/, '') + '/v1/models';
+  try {
+    response = await fetch(modelsUrl, {
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+      redirect: 'error',
+    });
+  } catch {
+    if (signal.aborted) throw signal.reason;
+    return fail('claude_gateway_unavailable', 'retry_wait');
+  }
   if ([401, 403].includes(response.status)) return fail('claude_authentication_failed');
   if (response.status === 429) return fail('claude_rate_limited', 'retry_wait');
   if (!response.ok) return fail('claude_gateway_unavailable', 'retry_wait');
-  let body: any; try { body = await response.json(); } catch { return fail('claude_gateway_protocol_invalid'); }
-  if (!Array.isArray(body.data) || !body.data.some((m: any) => m.id === config.model)) return fail('claude_model_unavailable');
-}
-export interface ClaudeBridge<T> { url: string; readonly submitted: boolean; readonly result: T }
-/** Executes the real native CLI. Repository operations and task references stay behind the framework's broker. */
-export async function runClaudeCode<T>(spec: AgentSpec<T>, bridge: ClaudeBridge<T>, signal: AbortSignal, emit: (e: HarnessEvent) => void): Promise<T> {
-  const prepared = spec.harnessPreparation as ClaudePreparation | undefined;
-  if (!prepared) return fail('claude_prepare_required');
-  const ctx = spec.runContext?.(); if (!ctx || !spec.runAccess?.token) return fail('claude_run_context_required');
-  if (!['writer', 'observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '')) return fail('harness_role_unsupported');
-  const gateway = await claudeModelGateway(spec, prepared.config.provider, ctx, signal);
-  try { return await runAtGateway(spec, bridge, signal, emit, { ...prepared, config: { ...prepared.config, gatewayUrl: gateway.url } }, gateway.usage); }
-  finally { await gateway.close(); }
-}
-async function runAtGateway<T>(spec: AgentSpec<T>, bridge: ClaudeBridge<T>, signal: AbortSignal, emit: (e: HarnessEvent) => void, prepared: ClaudePreparation & { config: ClaudeConfiguration & { gatewayUrl: string } }, gatewayUsage: () => ExternalUsage): Promise<T> {
-  const { config } = prepared, ctx = spec.runContext?.();
-  if (!ctx || !spec.runAccess?.token) return fail('claude_run_context_required');
-  await spec.guard(); if (signal.aborted) throw signal.reason;
-  // The CLI's dollars are an estimate for an entire native conversation, including earlier resumes. They cannot
-  // enforce a framework monetary cap without a gateway billing ledger. Refuse that policy instead of counting zero.
-  const token = spec.runAccess.token; spec.redactor.add(token);
-  await checkGateway(config, token, signal);
-  const previous = spec.harnessState?.value ?? {}, fresh = !!ctx.conversation_id || ['observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '') || spec.roleRun?.recovery_mode === 'rebuilt_from_task_records';
-  if (!fresh && previous.sessionId && previous.scope && contentHash(identity(previous.scope)) !== contentHash(identity(scope(ctx)))) return fail('claude_session_scope_mismatch');
-  const inputHash = inputs(ctx), root = join(config.stateDirectory, contentHash(scope(ctx))), compatible = !fresh && previous.sessionId && contentHash(previous.scope) === contentHash(scope(ctx)) && previous.configurationHash === prepared.configurationHash && previous.inputHash === inputHash;
-  privateDirectory(root);
-  let resume = false, sid = randomUUID(), directory = join(root, sid), recoveryMode = fresh ? 'fresh_evaluation' : previous.sessionId ? 'rebuilt_from_task_records' : 'new_session';
-  if (compatible && uuidPattern.test(previous.sessionId)) {
-    const expected = join(root, previous.sessionId);
-    if (previous.directory !== expected) return fail('claude_session_scope_mismatch');
-    if (transcriptExists(join(expected, 'home'), previous.sessionId)) { resume = true; sid = previous.sessionId; directory = expected; recoveryMode = 'native_resume'; }
+  let body: any;
+  try {
+    body = await response.json();
+  } catch {
+    return fail('claude_gateway_protocol_invalid');
   }
-  for (const d of [directory, join(directory, 'cwd'), join(directory, 'home'), join(directory, 'tmp')]) privateDirectory(d);
-  const cwd = join(directory, 'cwd'), home = join(directory, 'home'), allowed = (spec.tools ?? []).map(t => 'mcp__bot__' + t.function.name);
-  if (allowed.some(n => !/^mcp__bot__[A-Za-z0-9_]+$/.test(n))) return fail('claude_tool_name_unsupported');
-  const args = ['--bare', '--restricted', '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--tools', '',
-    '--disable-slash-commands', '--setting-sources', '', '--settings', JSON.stringify({ disableAllHooks: true, enableAllProjectMcpServers: false, autoUpdatesChannel: 'stable' }),
-    '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: { bot: { type: 'http', url: bridge.url } } }),
-    '--allowedTools', allowed.join(','), '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--no-chrome', '--model', config.model,
-    '--max-turns', String(spec.maxTurns ?? 32), '--system-prompt', spec.system + '\nUse only the offered bot MCP tools. Repository work runs on the managed project computer. Read pinned skills with read_skill. Submit through ' + spec.finish!.name + '; a submission is not task acceptance. Do not publish, merge or start agents.',
-    ...(resume ? ['--resume', sid] : ['--session-id', sid])];
-  const env = { ...environment(home, join(directory, 'tmp')), ANTHROPIC_BASE_URL: config.gatewayUrl, ANTHROPIC_API_KEY: token,
-    CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(spec.maxOutputTokens ?? 8192) };
-  const child = spawn(prepared.command, args, { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
-  let failure: unknown, initialized = false, result: any, finished = false, killTimer: ReturnType<typeof setTimeout> | undefined;
-  let cursor = 0, publicBytes = 0, truncated = false;
+  if (!Array.isArray(body?.data) || !body.data.some((m: any) => m?.id === expectedModel)) {
+    return fail('claude_model_unavailable');
+  }
+}
+
+function isAllowedClaudeTool(name: string, allowedMcpTools: Set<string>, egress: boolean): boolean {
+  if (name.startsWith('mcp__')) return allowedMcpTools.has(name);
+  if (FORBIDDEN_CLAUDE_TOOLS.has(name)) return false;
+  if (!egress && (name === 'WebFetch' || name === 'WebSearch')) return false;
+  return /^[A-Z][A-Za-z0-9_]{0,63}$/.test(name);
+}
+
+/** Drives Claude Code inside the project computer or per-run container via `container-session.ts`. */
+export async function runClaudeCode<T>(
+  spec: AgentSpec<T>,
+  signal: AbortSignal,
+  emit: (e: HarnessEvent) => void,
+): Promise<T> {
+  const prepared = (spec.harnessPreparation as ClaudePreparation | undefined) ?? (await prepareClaudeCode(spec));
+  const ctx = spec.runContext?.();
+  if (!ctx || !spec.runAccess?.token) return fail('claude_run_context_required');
+  if (!['writer', 'observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '')) {
+    return fail('harness_role_unsupported');
+  }
+  await spec.guard();
+  if (signal.aborted) throw signal.reason;
+
+  if (prepared.fileProvider?.credentialFile) {
+    await preflightFileProvider(prepared.fileProvider, prepared.model, signal);
+  }
+
+  const platformTools = filterPlatformTools(spec);
+  const allowedMcpNames = platformTools.map(t => 'mcp__bot__' + t.function.name);
+  if (allowedMcpNames.some(n => !/^mcp__bot__[A-Za-z0-9_]+$/.test(n))) {
+    return fail('claude_tool_name_unsupported');
+  }
+  const allowedMcpSet = new Set(allowedMcpNames);
+
+  const previous = spec.harnessState?.value ?? {};
+  const fresh =
+    !!ctx.conversation_id ||
+    ['observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '') ||
+    spec.roleRun?.recovery_mode === 'rebuilt_from_task_records';
+  if (!fresh && previous.sessionId && previous.scope && contentHash(identity(previous.scope)) !== contentHash(identity(scope(ctx)))) {
+    return fail('claude_session_scope_mismatch');
+  }
+
+  const inputHash = inputs(ctx);
+  const sessionKey = (spec.harnessSessionKey ?? contentHash(scope(ctx)).slice(0, 48)).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || 'default';
+  const compatible =
+    !fresh &&
+    typeof previous.sessionId === 'string' &&
+    uuidPattern.test(previous.sessionId) &&
+    contentHash(previous.scope) === contentHash(scope(ctx)) &&
+    previous.configurationHash === prepared.configurationHash &&
+    previous.inputHash === inputHash;
+
+  if (compatible && previous.sessionKey && previous.sessionKey !== sessionKey) {
+    return fail('claude_session_scope_mismatch');
+  }
+
+  const requestedSid = compatible ? String(previous.sessionId) : randomUUID();
+  const egress = Boolean(spec.containerOptions?.egress);
+  const systemPrompt =
+    spec.system +
+    '\nYou are running inside the isolated workspace container with cwd at the repository checkout. ' +
+    'Use native file, search, edit, shell, and sub-agent tools directly on the repository checkout, and use the offered bot MCP tools (mcp__bot__*) for platform task records, memory, skills, and structured submission. ' +
+    (platformTools.some(t => t.function.name === 'read_skill') ? 'Read pinned skills with mcp__bot__read_skill when applicable. ' : '') +
+    `Submit through mcp__bot__${spec.finish!.name}; a text reply alone is not a submission, and submission is followed by independent acceptance. Do not publish or push directly from shell.`;
+
+  let streamFailure: unknown = null;
+  let initialized = false;
+  let result: any;
+  let finished = false;
+  let cursor = 0;
+  let publicBytes = 0;
+  let truncated = false;
+  let submissionRepairs = 0;
+  let sid = requestedSid;
+  let recoveryMode = fresh ? 'fresh_evaluation' : previous.sessionId ? 'rebuilt_from_task_records' : 'new_session';
+  let activeSession: import('./container-session.js').RunningContainerHarness<T> | null = null;
   const seen = new Map<string, ClaudeUsage | null>();
-  const kill = () => { try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch {} };
-  const interrupt = (error: unknown) => {
-    if (failure) return; failure = error;
-    // The print stream control protocol is the first interrupt, followed by a bounded process-group reap.
-    if (child.stdin.writable) child.stdin.write(JSON.stringify({ type: 'control_request', request_id: randomUUID(), request: { subtype: 'interrupt' } }) + '\n');
-    killTimer = setTimeout(kill, 500); killTimer.unref();
+  const reportedAnomalies = new Set<string>();
+
+  const noteAnomaly = (kind: string, detail: Record<string, unknown> = {}) => {
+    const key = `${kind}:${String(detail.event_type ?? detail.block_type ?? '')}`;
+    if (reportedAnomalies.has(key)) return;
+    reportedAnomalies.add(key);
+    emit({ type: 'configuration', stage: 'protocol_anomaly', anomaly: kind, ...detail });
   };
-  const abort = () => interrupt(signal.reason ?? new TaskError('harness_cancelled', 'cancelled'));
-  signal.addEventListener('abort', abort, { once: true }); if (signal.aborted) abort();
-  // Legacy absolute timeout is not a run cancellation policy. RoleRun reports to Manager instead.
-  let checking = false;
-  const guard = setInterval(() => { if (!checking) { checking = true; void spec.guard().catch(interrupt).finally(() => { checking = false; }); } }, 100); guard.unref();
-  const save = () => spec.harnessState?.save({ sessionId: sid, previousSessionId: previous.sessionId ?? null, directory, cwd, scope: scope(ctx), inputHash,
-    configurationHash: prepared.configurationHash, version: claudeCodeRuntime.version, recoveryMode, run_id: ctx.run_id, lease_epoch: ctx.lease_epoch, raw_cursor: cursor });
-  const usage = (messageId: string, final?: ClaudeUsage | null) => {
-    // Assistant blocks are provisional: the pinned CLI emits output_tokens=0 until result.usage.
-    // The in-process gateway is authoritative when HTTP requests were forwarded, including rejected attempts.
-    const measured = gatewayUsage(), snapshot: ExternalUsage = measured.model_requests ? measured : {
-      model_requests: seen.size, input_tokens: final ? final.input_tokens + (final.cache_read_input_tokens ?? 0) + (final.cache_creation_input_tokens ?? 0) : [...seen.values()].reduce((n, u) => n + (u ? u.input_tokens + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) : 0), 0),
-      output_tokens: final?.output_tokens ?? 0, unknown_requests: final ? 0 : seen.size, semantics: final ? 'exact' : 'lower_bound', cost: 'unknown', accounting_source: final ? 'cli_result' : 'cli_provisional' };
-    spec.onExternalUsage?.(snapshot); emit({ type: 'configuration', stage: 'usage', messageId, usage: snapshot, raw_cursor: cursor });
-    if (final && measured.model_requests) emit({ type: 'configuration', stage: 'usage_reconciliation', gateway_usage: measured, cli_result_usage: final,
-      matches: measured.unknown_requests === 0 && measured.output_tokens === final.output_tokens && measured.input_tokens === final.input_tokens + (final.cache_read_input_tokens ?? 0) + (final.cache_creation_input_tokens ?? 0) });
+
+  const gatewayRequestCount = () =>
+    Number(
+      spec.store.get(
+        "SELECT count(*) n FROM model_requests WHERE run_id=? AND accounting_source NOT IN ('provider_requests','codex_events')",
+        ctx.run_id,
+      )?.n ?? 0,
+    );
+
+  const reportProvisionalUsage = (messageId: string, final?: ClaudeUsage | null) => {
+    const snapshot: ExternalUsage = {
+      model_requests: seen.size,
+      input_tokens: final
+        ? final.input_tokens + (final.cache_read_input_tokens ?? 0) + (final.cache_creation_input_tokens ?? 0)
+        : [...seen.values()].reduce(
+            (n, u) => n + (u ? u.input_tokens + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) : 0),
+            0,
+          ),
+      output_tokens: final?.output_tokens ?? 0,
+      unknown_requests: final ? 0 : seen.size,
+      semantics: final ? 'exact' : 'lower_bound',
+      cost: 'unknown',
+      accounting_source: final ? 'cli_result' : 'cli_provisional',
+    };
+    // Only record external_model_usage when no gateway model_requests rows exist for this run (prevents double-counting).
+    const gwCount = gatewayRequestCount();
+    if (gwCount === 0) {
+      spec.onExternalUsage?.(snapshot);
+    } else if (final) {
+      const gwOut = Number(
+        spec.store.get(
+          "SELECT coalesce(sum(output_tokens),0) n FROM model_requests WHERE run_id=? AND accounting_source NOT IN ('provider_requests','codex_events')",
+          ctx.run_id,
+        )?.n ?? 0,
+      );
+      emit({
+        type: 'configuration',
+        stage: 'usage_reconciliation',
+        cli_result_usage: final,
+        gateway_output_tokens: gwOut,
+        matches: gwOut === final.output_tokens,
+      });
+    }
+    emit({ type: 'configuration', stage: 'usage', messageId, usage: snapshot, raw_cursor: cursor });
   };
+
+  const saveState = () => {
+    if (!activeSession) return;
+    spec.harnessState?.save({
+      sessionId: sid,
+      previousSessionId: previous.sessionId ?? null,
+      stateWorkspaceId: activeSession.stateWorkspaceId,
+      sessionKey,
+      cwd: activeSession.started?.repo_dir ?? `/workspace/tasks/${activeSession.workspaceId}/repo`,
+      scope: scope(ctx),
+      inputHash,
+      configurationHash: prepared.configurationHash,
+      version: activeSession.cliVersion,
+      recoveryMode,
+      run_id: ctx.run_id,
+      lease_epoch: ctx.lease_epoch,
+      raw_cursor: cursor,
+    });
+  };
+
+  const interruptStream = (err: unknown) => {
+    if (streamFailure) return;
+    streamFailure = err;
+    void activeSession?.interrupt('graceful', 500);
+  };
+
   const stream = new ClaudeJsonStream((m, at) => {
-    cursor = at; if (failure) return;
-    if (result && m.type !== 'ignored') return fail('claude_protocol_incompatible');
+    cursor = at;
+    if (streamFailure) return;
+    if (m.type === 'unknown_event') {
+      noteAnomaly('unknown_event', { event_type: (m as any).event_type, raw_cursor: at });
+      return;
+    }
+    if (m.type === 'ignored') return;
+    if (result) return fail('claude_protocol_incompatible');
     if (m.session_id && m.session_id !== sid) return fail('claude_session_scope_mismatch');
     if (m.type === 'init') {
-      if (initialized || m.model !== config.model || m.tools.some((n: string) => !allowed.includes(n) && n !== 'EndConversation') || !Array.isArray(m.mcp_servers) || m.mcp_servers.length !== 1 || m.mcp_servers.some((s: any) => s.name !== 'bot' || s.status !== 'connected')) return fail('claude_capability_mismatch');
-      initialized = true; save(); emit({ type: 'session_bound', sessionRef: sid, recoveryMode, version: claudeCodeRuntime.version, configuredModel: config.model, configurationHash: prepared.configurationHash, usage: 'unknown' }); return;
+      if (
+        initialized ||
+        m.model !== prepared.model ||
+        !Array.isArray(m.tools) ||
+        m.tools.some((n: string) => !isAllowedClaudeTool(n, allowedMcpSet, egress)) ||
+        !Array.isArray(m.mcp_servers) ||
+        m.mcp_servers.length !== 1 ||
+        m.mcp_servers.some((s: any) => s.name !== 'bot' || s.status !== 'connected')
+      ) {
+        return fail('claude_capability_mismatch');
+      }
+      initialized = true;
+      saveState();
+      emit({
+        type: 'session_bound',
+        sessionRef: sid,
+        recoveryMode,
+        version: activeSession?.cliVersion ?? prepared.version,
+        configuredModel: prepared.model,
+        configurationHash: prepared.configurationHash,
+        usage: 'gateway',
+      });
+      return;
     }
     if (m.type === 'control_request') {
       emit({ type: 'permission', requestId: m.request_id, decision: 'deny' });
-      child.stdin.write(JSON.stringify({ type: 'control_response', response: { subtype: 'error', request_id: m.request_id, error: 'permission_denied' } }) + '\n'); return;
+      void activeSession?.writeStdin(
+        JSON.stringify({
+          type: 'control_response',
+          response: { subtype: 'error', request_id: m.request_id, error: 'permission_denied' },
+        }) + '\n',
+      );
+      return;
     }
     if (m.type === 'api_retry') {
       emit({ type: 'configuration', stage: 'api_retry', error: m.error, attempt: m.attempt, raw_cursor: at });
       if (m.error === 'authentication') return executionFailure(m.error);
       return;
     }
-    if (m.type === 'ignored') return;
     if (!initialized) return fail('claude_protocol_incompatible');
     if (m.type === 'assistant') {
       if (m.error) return executionFailure(m.error);
       if (typeof m.id !== 'string') return fail('claude_protocol_incompatible');
       const before = seen.get(m.id);
-      if (before && m.usage) seen.set(m.id, Object.fromEntries(['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'].map(k => [k, Math.max((before as any)[k] ?? 0, m.usage[k] ?? 0)])) as unknown as ClaudeUsage);
-      else seen.set(m.id, m.usage ?? before ?? null);
-      usage(m.id);
+      if (before && m.usage) {
+        seen.set(
+          m.id,
+          Object.fromEntries(
+            ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'].map(k => [
+              k,
+              Math.max((before as any)[k] ?? 0, m.usage[k] ?? 0),
+            ]),
+          ) as unknown as ClaudeUsage,
+        );
+      } else {
+        seen.set(m.id, m.usage ?? before ?? null);
+      }
+      reportProvisionalUsage(m.id);
     }
     for (const c of m.content ?? []) {
-      if (c.type === 'text') {
-        const text = spec.redactor.text(c.text), room = Math.max(0, 32 * 1024 - publicBytes), bounded = Buffer.from(text).subarray(0, room).toString('utf8'); publicBytes += Buffer.byteLength(bounded);
+      if (c.type === 'unknown_block') {
+        noteAnomaly('unknown_block', { block_type: (c as any).block_type, raw_cursor: at });
+      } else if (c.type === 'text') {
+        const text = spec.redactor.text(c.text);
+        const room = Math.max(0, 32 * 1024 - publicBytes);
+        const bounded = Buffer.from(text).subarray(0, room).toString('utf8');
+        publicBytes += Buffer.byteLength(bounded);
         if (bounded) emit({ type: 'message', text: bounded, raw_cursor: at });
-        if (Buffer.byteLength(text) > room && !truncated) { truncated = true; emit({ type: 'configuration', output_truncated: true, limit_bytes: 32 * 1024 }); }
+        if (Buffer.byteLength(text) > room && !truncated) {
+          truncated = true;
+          emit({ type: 'configuration', output_truncated: true, limit_bytes: 32 * 1024 });
+        }
       } else if (c.type === 'tool_use') {
-        if (!allowed.includes(c.name)) return fail('claude_tool_denied');
-        emit({ type: 'tool', callId: c.id, name: c.name, phase: 'started', raw_cursor: at });
+        if (!isAllowedClaudeTool(c.name, allowedMcpSet, egress)) {
+          spec.onDenied?.(c.name, 'not_offered');
+          return fail('claude_tool_denied');
+        }
+        // Only platform MCP tool invocations emit RoleRun tool events; native CLI commands/edits are not logged one-by-one.
+        if (c.name.startsWith('mcp__bot__')) {
+          emit({ type: 'tool', callId: c.id, name: c.name, phase: 'started', raw_cursor: at });
+        }
       }
     }
-    if (m.type === 'result') { result = m; usage('result', m.usage); child.stdin.end(); }
-    save();
+    if (m.type === 'result') {
+      reportProvisionalUsage('result', m.usage);
+      if (!m.is_error && m.subtype === 'success' && !activeSession?.dispatcher.submitted && submissionRepairs < 2) {
+        submissionRepairs++;
+        result = undefined;
+        void activeSession?.writeStdin(
+          JSON.stringify(
+            claudeUserMessage(
+              `A text response is not a submission. Call mcp__bot__${spec.finish!.name} now with the required structured result using the evidence already gathered.`,
+              sid,
+            ),
+          ) + '\n',
+        );
+      } else {
+        result = m;
+        void activeSession?.closeStdin();
+      }
+    }
+    saveState();
   });
-  child.stdout.on('data', chunk => { try { stream.push(chunk); } catch (e) { interrupt(e); } });
-  // Do not persist raw stderr: the vendor may place private or credential-bearing diagnostics there.
-  child.stderr.resume(); child.stdin.on('error', () => interrupt(new TaskError('claude_stream_interrupted', 'retry_wait')));
-  const closed = new Promise<number | null>((ok, no) => { child.once('error', () => no(new TaskError('claude_binary_unavailable', 'waiting_configuration'))); child.once('close', code => ok(code)); });
+
   try {
-    spec.onExternalUsage?.({ model_requests: 0, input_tokens: 0, output_tokens: 0, unknown_requests: 0, semantics: 'exact', cost: 'unknown' });
-    child.stdin.write(JSON.stringify(claudeUserMessage(spec.prompt + '\nRecovery: ' + recoveryMode + '. Inspect task records and unknown side effects before repeating operations.', sid)) + '\n');
-    const code = await closed;
-    if (failure) throw failure;
-    stream.end(); await spec.guard(); if (signal.aborted) throw signal.reason;
-    emit({ type: 'configuration', stage: 'process_exit', exit_code: code, result_subtype: result?.subtype ?? null });
-    // The pinned CLI exits 1 for structured errors too; its result must win over the OS exit code.
-    // waiting_configuration is automatically polled by the engine; an unchanged CLI limit must not spin new runs.
-    if (result?.subtype.startsWith('error_max_')) return fail('claude_budget_exhausted', 'needs_replan');
-    if (result && (result.is_error || result.subtype !== 'success')) return executionFailure(result.fault ?? 'execution');
-    if (code !== 0) return fail('claude_process_exit', 'retry_wait');
-    if (!result) return fail('claude_result_missing', 'retry_wait');
-    if (!bridge.submitted) return fail('claude_submission_required', 'retry_wait');
-    finished = true; return bridge.result;
+    return await withContainerHarnessSession(
+      spec,
+      {
+        cli: 'claude_code',
+        model: prepared.model,
+        systemPrompt,
+        maxTurns: spec.maxTurns ?? 32,
+        maxOutputTokens: spec.maxOutputTokens ?? 8192,
+        sessionId: requestedSid,
+        resume: Boolean(compatible),
+        sessionKey,
+        egress,
+        ...(prepared.config?.stateDirectory ? { localWorkspaceRoot: prepared.config.stateDirectory } : {}),
+        ...(prepared.config?.env ? { extraEnv: prepared.config.env } : {}),
+        ...(prepared.mode === 'config_file' || spec.containerOptions?.executableOverride
+          ? {
+              executableOverride: spec.containerOptions?.executableOverride ?? {
+                executable: prepared.command,
+                ...(prepared.nodeExecutable ? { nodeExecutable: prepared.nodeExecutable } : {}),
+                version: prepared.version,
+              },
+            }
+          : {}),
+        ...(prepared.primaryModel ? { primaryModel: prepared.primaryModel } : {}),
+        ...(prepared.fileProvider ? { fileProvider: prepared.fileProvider } : {}),
+      },
+      signal,
+      chunk => {
+        try {
+          stream.push(chunk);
+        } catch (err) {
+          interruptStream(err);
+        }
+      },
+      async session => {
+        activeSession = session;
+        sid = typeof session.started?.session_id === 'string' && session.started.session_id ? session.started.session_id : requestedSid;
+        recoveryMode = fresh
+          ? 'fresh_evaluation'
+          : session.started?.actual_resume
+            ? 'native_resume'
+            : previous.sessionId
+              ? 'rebuilt_from_task_records'
+              : 'new_session';
+
+        if (prepared.config?.timeoutMs) {
+          emit({ type: 'configuration', stage: 'legacy_timeout_ignored', configuredTimeoutMs: prepared.config.timeoutMs });
+        }
+
+        await session.writeStdin(
+          JSON.stringify(
+            claudeUserMessage(
+              spec.prompt + '\nRecovery: ' + recoveryMode + '. Inspect task records and unknown side effects before repeating operations.',
+              sid,
+            ),
+          ) + '\n',
+        );
+
+        const exit = await session.waitExit();
+        if (streamFailure) throw streamFailure;
+        try {
+          stream.end();
+        } catch (err) {
+          throw err;
+        }
+        await spec.guard();
+        if (signal.aborted) throw signal.reason;
+
+        emit({
+          type: 'configuration',
+          stage: 'process_exit',
+          exit_code: exit.exit_code,
+          result_subtype: result?.subtype ?? null,
+        });
+
+        if (result?.subtype?.startsWith('error_max_')) return fail('claude_budget_exhausted', 'needs_replan');
+        if (result && (result.is_error || result.subtype !== 'success')) return executionFailure(result.fault ?? 'execution');
+        if (exit.exit_code !== 0) {
+          const rawExitDetail = (
+            exit.stderr_tail ||
+            exit.error ||
+            (exit.signal ? `signal:${exit.signal}` : `exit_code:${String(exit.exit_code)}`)
+          ).trim();
+          const exitDetail = rawExitDetail ? spec.redactor.text(rawExitDetail).slice(0, 500) : undefined;
+          return fail('claude_process_exit', 'retry_wait', exitDetail);
+        }
+        if (!result) return fail('claude_result_missing', 'retry_wait');
+        if (!session.dispatcher.submitted) return fail('claude_submission_required', 'retry_wait');
+        finished = true;
+        return session.dispatcher.result as T;
+      },
+    );
   } finally {
-    clearInterval(guard); if (killTimer) clearTimeout(killTimer); signal.removeEventListener('abort', abort);
-    kill(); child.stdin.destroy(); if (!finished) emit({ type: 'configuration', ended_without_validated_result: true, raw_cursor: cursor });
+    if (!finished) emit({ type: 'configuration', ended_without_validated_result: true, raw_cursor: cursor });
   }
 }

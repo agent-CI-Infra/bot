@@ -4,11 +4,12 @@ import { createInterface } from 'node:readline';
 import { randomId } from '../core/security.js';
 import { runTools } from '../agent/runtime.js';
 import { managedSession } from '../harness/session.js';
-import { acpHarness } from './acp.js';
 import { claudeCodeHarness } from './claude-code.js';
 import { createTaskToolDispatcher } from './task-tools.js';
 import { prepareClaudeCode } from '../harness/claude-code.js';
 import { claudeCodeRuntime } from '../harness/claude-code-protocol.js';
+import { codexHarness, prepareCodex } from '../harness/codex.js';
+import { COMPATIBLE_CLI_RANGES } from '../harness/agent-tools.js';
 import type { AgentSpec,AgentServices } from '../agent/runtime.js';
 import { stop } from '../agent/common.js';
 import { traceEvent } from '../tasks/trace.js';
@@ -39,7 +40,7 @@ export function processHarness<T>(spec:AgentSpec<T>){return async(services:Agent
    else if(m.method==='model'){const response=await services.request(m.args,'worker:'+requests++);const message=response.value?.choices?.[0]?.message;value=spec.redactor.clean({role:'assistant',content:typeof message?.content==='string'?message.content:null,...(message?.tool_calls?{tool_calls:message.tool_calls}:{})});}
    else if(m.method==='tool'){
     // The worker presents its run token on every tool call; a revoked, expired or taken-over run is refused here.
-    if(spec.runAccess){try{spec.runAccess.check(m.args?.token);}catch(error){value={error:(error as any).code??'run_token_invalid'};spec.onDenied?.(String(m.args?.name),(error as any).code??'run_token_invalid');child.stdin.write(JSON.stringify({id:m.id,result:value})+'\n');return;}}
+    if(spec.runAccess){try{spec.runAccess.check(m.args?.token,'tools:invoke');}catch(error){value={error:(error as any).code??'run_token_invalid'};spec.onDenied?.(String(m.args?.name),(error as any).code??'run_token_invalid');child.stdin.write(JSON.stringify({id:m.id,result:value})+'\n');return;}}
     const offered=spec.tools?.some(t=>t.function.name===m.args.name);
     if(offered&&m.args.offered)spec.screen?.(m.args.name,m.args.args);
     if(!offered||!m.args.offered){value={error:'tool_not_allowed'};spec.onDenied?.(String(m.args.name),'not_offered');}
@@ -65,21 +66,16 @@ export interface RoleHarnessMetadata {id:string;version:string;session:string;ev
  /** What the driver's protocol does, checked by RoleRun admission (see protocol.ts). Undeclared means unsupported. */
  capabilities?:HarnessCapabilities}
 const openai=['openai-chat-completions'];
-// None of the built-in drivers runs its agent inside a per-run environment: Native and Pi loops and the Process worker
-// run on the control plane or the shared project computer, and an ACP or Codex agent runs on the control-plane host. Their
-// registration therefore never claims run isolation; admission refuses them for profiles that require it.
+const containerRelayApis=['openai-chat-completions','openai-responses','anthropic-messages'];
+// Built-in drivers (Native, Process, Pi) run on the control plane or shared project computer and declare isolation: 'none'.
+// Container CLI drivers (Claude Code, Codex) execute inside the project computer or per-run isolated containers (RunEnvironments),
+// communicating with the control plane exclusively through the task mailbox (model relay, stdio MCP `bot`, read-only GitHub token helpers).
 const inProcess:HarnessCapabilities={raw_evidence:'control_plane_tools',cancel:'abort_signal',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['checkpoint_restore','rebuilt_from_task_records']};
 export const harnesses:Required<RoleHarnessMetadata>[]=[
- {id:'claude_code',version:claudeCodeRuntime.version,session:'external_session',events:claudeCodeRuntime.protocol,kinds:['writer','observer','evaluator'],model_api:[],tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:{package:claudeCodeRuntime.package,version:claudeCodeRuntime.version},externalModel:true,
-  capabilities:{raw_evidence:'control_plane_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
- // A generic ACP agent with its own model; role authority stays with the control plane. It declares no project model API. Only the Bot task tools
- // are observed by the control plane; the agent's own terminal and tools are not.
- {id:'acp',version:'1',session:'external_session',events:'acp_events_and_task_tools',kinds:['controller','writer','observer','evaluator'],model_api:[],tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:null,externalModel:true,
-  capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
- // The same client speaking `codex app-server` (BOT_CODEX_CONFIG), locked to one CLI version. Its thread events, permission
- // answers and usage are structured; the agent still runs on the control-plane host with its own sandbox, so no isolation.
- {id:'codex',version:'1',session:'external_session',events:'codex_app_server_events_and_task_tools',kinds:['writer','observer','evaluator'],model_api:[],tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:{package:'@openai/codex',version:codexAppServer.cli},externalModel:true,
-  capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
+ {id:'claude_code',version:claudeCodeRuntime.version,session:'external_session',events:claudeCodeRuntime.protocol,kinds:['writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:claudeCodeRuntime.package,version:COMPATIBLE_CLI_RANGES.claude_code.tested},externalModel:false,
+  capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'run_environment',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
+ {id:'codex',version:'1',session:'external_session',events:'codex_app_server_events_and_task_tools',kinds:['writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:'@openai/codex',version:codexAppServer.cli},externalModel:false,
+  capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'run_environment',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
  {id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:inProcess},
  // A Node child process without an OS sandbox; its tool calls carry the run token over JSON-line RPC.
  {id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:{...inProcess,cancel:'protocol_then_kill'}},
@@ -87,7 +83,7 @@ export const harnesses:Required<RoleHarnessMetadata>[]=[
  {id:'pi',version:piRuntime.version,session:'native_resume',events:'pi_session_events',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:piRuntime.package,version:piRuntime.version},externalModel:false,
   capabilities:{raw_evidence:'control_plane_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}}];
 type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>;
-const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['acp',spec=>acpHarness(spec)],['codex',spec=>acpHarness(spec,'codex-app-server')],['claude_code',claudeCodeHarness],['pi',piHarness]]);
+const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['codex',codexHarness],['claude_code',claudeCodeHarness],['pi',piHarness]]);
 /** Extensions are registered by trusted integration code, never by task text or a model tool. */
 export function registerRoleHarness(metadata:RoleHarnessMetadata,factory:AdapterFactory){
  if(!/^[a-z][a-z0-9_-]{0,31}$/.test(metadata.id)||!metadata.version||!['checkpoint_transcript','task_records','native_resume','external_session'].includes(metadata.session)||!metadata.events||adapters.has(metadata.id)||typeof factory!=='function')throw new Error('invalid_or_duplicate_role_harness');
@@ -142,7 +138,7 @@ export function roleHarness(id:string){
   const external=spec.cancelSignal;if(external){const cancel=()=>void session.cancel(external.reason);if(external.aborted)cancel();else external.addEventListener('abort',cancel,{once:true});}
   return session;
  };
- return {...harnesses.find(h=>h.id===id)!,prepare:id==='claude_code'?prepareClaudeCode:undefined,createSession,adapter:<T>(spec:AgentSpec<T>)=>async(services:AgentServices)=>{
+ return {...harnesses.find(h=>h.id===id)!,prepare:id==='claude_code'?prepareClaudeCode:id==='codex'?prepareCodex:undefined,createSession,adapter:<T>(spec:AgentSpec<T>)=>async(services:AgentServices)=>{
   const session=createSession(spec,services);
   try{return await session.run();}finally{await session.close();}
  }};

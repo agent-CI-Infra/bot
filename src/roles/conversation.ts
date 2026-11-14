@@ -8,7 +8,7 @@ import { traceEvent } from '../tasks/trace.js';
 import { TaskCommands } from '../tasks/commands.js';
 import { assertTaskSource, taskManagementTools, type TaskCaller } from '../tasks/management.js';
 import { resolveRole, roleAuthority } from './definition.js';
-import { permitsTool } from './permissions.js';
+import { githubReadScopes, permitsTool } from './permissions.js';
 import { roleHarness } from './harness.js';
 import { budgetExceeded, runBudget, buildRunContext, conversationUsage } from './role-run.js';
 import { roleInstance } from './run.js';
@@ -57,7 +57,6 @@ export class RoleConversations {
     if (snapshot.kind === 'evaluator' || snapshot.role_id === 'coordinator') return fail(403,'conversation_role_unavailable');
     if (snapshot.environment.id.startsWith('isolated-')) return stop('unsupported_capability','waiting_configuration','当前会话入口尚未提供隔离运行环境，不能退回共享环境。');
     const driver = roleHarness(snapshot.harness.id), budget = runBudget(snapshot), id = randomId(), lease = randomId(), controller = new AbortController();
-    if(['acp','codex'].includes(driver.id)&&(budget.max_model_requests!==null||budget.max_total_tokens!==null))return stop('unsupported_capability','waiting_configuration','所选后端没有逐模型请求的调用前核验接口，不能静默放宽该预算。');
     let instance:Row|undefined;
     this.store.transaction(() => {
       this.store.run('INSERT OR IGNORE INTO role_conversations(id,created_at) VALUES(?,?)',source.id,Date.now());
@@ -106,17 +105,18 @@ export class RoleConversations {
           },
           roleRun:{instance_id:logicalInstance.id,role:source.caller.role!,version:snapshot.prompt.system_hash,harness:snapshot.harness.id,recovery_mode:'rebuilt_from_authorized_conversation',snapshot_id:resolved.id},
           harnessSessionKey:invocation,
-          runAccess:{token,check:(presented:unknown)=>{
+          runAccess:{token,check:(presented:unknown,capability?:string)=>{
             if(presented!==token)stop('run_token_invalid','failed');
+            if(capability==='github:read_token'&&(!source.caller.permissions||!githubReadScopes(source.caller.permissions).length||!githubReadScopes(resolved.definition.permissions).length))stop('run_token_capability_denied','failed');
             const held=this.store.get('SELECT lease,lease_until FROM role_conversations WHERE id=?',source.id);
             if(!open||controller.signal.aborted||held?.lease!==lease||held.lease_until<=Date.now()||this.store.get('SELECT state FROM role_conversation_turns WHERE id=?',id)?.state!=='running'||!this.store.get('SELECT 1 FROM policies WHERE repository_id=? AND enabled=1',source.caller.project_id)||roleAuthority(this.store,source.caller.project_id,snapshot,undefined,true))stop('run_token_revoked','cancelled');
             assertTaskSource(this.store,source.caller);source.guard();if(source.fence()!==fence)stop('run_token_revoked','cancelled');
           }},
-          ...(driver.externalModel?{onExternalRequest:accounting.request,onHarnessEvent:accounting.event}:{}),
+          ...(driver.externalModel||['claude_code','codex'].includes(driver.id)?{onExternalRequest:accounting.request,onHarnessEvent:accounting.event}:{}),
           onExternalUsage:usage=>traceEvent(this.store,id,'external_model_usage',{...usage,cost:'unknown'})};
-        if(driver.externalModel)await driver.prepare?.(spec);
+        if(driver.externalModel||['claude_code','codex'].includes(driver.id))await driver.prepare?.(spec);
         spec.runContext=()=>({...buildRunContext(this.store,{task,scope:'conversation:'+source.id+':'+source.caller.role,run_id:invocation,lease_epoch:logicalInstance.sequence,instance:logicalInstance,role:source.caller.role!,snapshot,snapshot_id:resolved.id,candidate:null}),
-          ...(spec.harnessBinding?{model_revision:spec.harnessBinding.model_revision,harness_revision:spec.harnessBinding.harness_revision}:{})});
+          ...(spec.harnessBinding?{...(spec.harnessBinding.model_revision?{model_revision:spec.harnessBinding.model_revision}:{}),harness_revision:spec.harnessBinding.harness_revision}:{})});
         traceEvent(this.store,id,'conversation_run',{run_context:spec.runContext(),recovery:'rebuilt_from_authorized_conversation'});
         if (driver.environment === 'workspace') {
           if (!this.manager) return stop('pi_environment_required','waiting_configuration','此部署未配置项目电脑，不能替换所选 Agent 后端。');
@@ -127,9 +127,12 @@ export class RoleConversations {
           const checked=async()=>{await guard();const current=await this.manager!.call('GET','/v1/projects/'+task.repository_id);if(current?.generation!==generation)fail(409,'environment_generation_changed');};
           space=new Workspace(this.store,this.manager,{...task,workspace_id:randomId()},redactor,checked,value=>traceEvent(this.store,id,'runtime_log',value));
           const ready=await space.call('initialize',{type:'workspace_init'});if(ready.error)return stop('conversation_workspace_unavailable','waiting_environment');
+          const egress=typeof environment?.computer?.egress==='boolean'?environment.computer.egress:environment?.computer?.network_policy==='internet egress';
+          spec.roleWorkspace=space;
+          spec.containerOptions={...spec.containerOptions,manager:this.manager,egress};
           spec.pi={workspace:space,key:prefix+':'+space.task.workspace_id,resume:false,runtime:{version:snapshot.harness.version,report:runtime=>traceEvent(this.store,id,'harness_started',{...runtime,recovery:'rebuilt_from_authorized_conversation'})}};
         }
-        if(driver.externalModel)await guard(true);
+        if(driver.externalModel||['claude_code','codex'].includes(driver.id))await guard(true);
         spec.adapter=driver.adapter(spec); const value=await runAgent(spec); await guard();return value;
       } finally { open=false;await space?.release(false); }
     };

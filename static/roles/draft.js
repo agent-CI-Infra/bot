@@ -68,21 +68,58 @@ function roleChoices(title, object, key, choices, state) {
   return group;
 }
 function roleModelPicker(role, state, redraw) {
-  const { data } = state, backend = data.harnesses.find(entry => entry.id === role.harness_ref.id), external = !!backend?.externalModel;
-  const select = roleSelect(role.role_id + ' 模型', role.model_profile_ref?.model_id || '', [['', external ? 'Agent 自带模型' : '继承任务模型或项目默认'], ...(data.models || []).map(model => [model.id, model.name + (model.shared ? '（共享）' : '')])], id => {
+  const { data } = state, backend = data.harnesses.find(entry => entry.id === role.harness_ref.id);
+  const subscription = role.harness_ref?.model_source === 'subscription';
+  const external = !!backend?.externalModel;
+  const defaultLabel = subscription ? '供应商订阅模式（预留 · 未实现）' : external ? 'Agent 自带模型' : '继承任务模型或项目默认';
+  const select = roleSelect(role.role_id + ' 模型', role.model_profile_ref?.model_id || '', [['', defaultLabel], ...(data.models || []).map(model => [model.id, model.name + (model.shared ? '（共享）' : '')])], id => {
     markRoleDirty(state);
     role.model_profile_ref = id ? { model_id: id, api: backend?.model_api?.[0] || 'openai-chat-completions', tool_calls: true, structured_output: backend?.structured_output?.includes('tool_call') ? 'tool_call' : backend?.structured_output?.[0] || 'tool_call' } : null;
   });
   if (redraw) select.addEventListener('change', redraw);
-  select.disabled = external; return select;
+  select.disabled = external || subscription; return select;
 }
 function roleBackendPicker(role, state, redraw) {
-  return roleSelect(role.role_id + ' Agent 后端', role.harness_ref.id, state.data.backends.map(backend => [backend.id, backend.name + (backend.recommended ? '（推荐）' : '') + (backend.available ? '' : '（尚不可用）'), !backend.available || !backend.kinds.includes(role.kind)]), id => {
-    role.harness_ref = { id }; markRoleDirty(state);
-    // A backend that brings its own model cannot accept a project model profile.
-    if (state.data.harnesses.find(backend => backend.id === id)?.externalModel) role.model_profile_ref = null;
+  return roleSelect(role.role_id + ' Agent 后端', role.harness_ref.id, state.data.backends.map(backend => [
+    backend.id,
+    backend.name + (backend.recommended ? '（推荐）' : '') + (backend.runtime_status && !backend.runtime_status.ready ? '（未就绪）' : '') + (backend.available ? '' : '（尚不可用）'),
+    !backend.available || !backend.kinds.includes(role.kind),
+  ]), id => {
+    const info = state.data.backends.find(entry => entry.id === id);
+    const keepSubscription = info?.supported_model_sources?.includes('subscription') && role.harness_ref?.model_source === 'subscription';
+    role.harness_ref = keepSubscription ? { id, model_source: 'subscription' } : { id };
+    markRoleDirty(state);
+    if (state.data.harnesses.find(backend => backend.id === id)?.externalModel || keepSubscription) role.model_profile_ref = null;
     redraw();
   });
+}
+function roleModelSourcePicker(role, state, redraw) {
+  return roleSelect(role.role_id + ' 模型来源', role.harness_ref?.model_source || 'gateway', [
+    ['gateway', '平台网关（容器内模型中转）'],
+    ['subscription', '供应商订阅（预留 · 未实现）'],
+  ], source => {
+    role.harness_ref = source === 'subscription' ? { id: role.harness_ref.id, model_source: 'subscription' } : { id: role.harness_ref.id };
+    if (source === 'subscription') role.model_profile_ref = null;
+    markRoleDirty(state);
+    redraw();
+  });
+}
+function roleBackendRuntimeBox(role, state) {
+  const info = (state.data.backends || []).find(entry => entry.id === role.harness_ref.id);
+  const rt = info?.runtime_status;
+  if (!rt) return null;
+  const box = element('div', '', 'role-backend-runtime');
+  box.dataset.testid = 'backend-runtime-status';
+  const head = element('p', '', 'muted');
+  head.append(badge(rt.ready ? '可用' : '未就绪', rt.ready ? 'success' : 'warning'), ' ', rt.ready ? `${info.name} 容器运行条件已就绪。` : (rt.reason || `${info.name} 容器运行条件尚未就绪。`));
+  box.append(head, facts([
+    ['工具卷', `${rt.volume_root}（${rt.volume_present ? '已挂载' : '未挂载'}）`],
+    ['兼容版本范围', rt.compatible_range || '—'],
+    ['已安装版本', rt.installed_versions?.length ? rt.installed_versions.join(', ') : (rt.config_override ? '本地配置覆盖' : '未安装')],
+    ['当前选用版本', rt.selected_version || (rt.config_override ? '本地配置覆盖' : '无可用兼容版本')],
+    ['容器内模型中转', rt.model_relay_ready ? `已就绪（项目可用模型 ${rt.model_count} 个）` : '未就绪（需配置项目模型与凭据）'],
+  ]));
+  return box;
 }
 const permissionModeLabels = { none: '无权限', read: '只读', write: '读写', allow: '允许', deny: '不允许', custom: '待迁移：保留原有操作' };
 function permissionEditor(permissions, items, change, prefix = '', fixed = false) {

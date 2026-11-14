@@ -541,34 +541,29 @@ test('a running old V2 review keeps its Pi binding on the next delegation; expli
   assert.deepEqual([adopted.harness.id, adopted.harness.source, adopted.config_revision], ['process', 'role', selected.revision]);
 });
 
-test('backend selection is independent of role; ACP keeps its own model and new roles default to Pi', async t => {
+test('backend selection is independent of role; container CLIs use gateway relay, reserve subscription mode, and new roles default to Pi', async t => {
   const f = await fixture(t, () => call('finish', {}));
   const put = body => roleApi(f.s, admin, 'PUT', rolesUrl, { enabled: true, ...body });
   const view = roleApi(f.s, admin, 'GET', rolesUrl, {});
-  const acp = view.harnesses.find(h => h.id === 'acp'), pi = view.harnesses.find(h => h.id === 'pi');
-  assert.deepEqual([acp.kinds, acp.session, acp.externalModel, acp.model_api], [['controller', 'writer', 'observer', 'evaluator'], 'external_session', true, []]);
+  assert.equal(view.harnesses.find(h => h.id === 'acp'), undefined);
+  const pi = view.harnesses.find(h => h.id === 'pi');
   assert.deepEqual([pi.kinds, pi.session, pi.externalModel], [['controller', 'writer', 'observer', 'evaluator'], 'native_resume', false]);
-  // Codex is the same external-session client with its own declared capabilities and locked CLI; like Claude Code it runs
-  // worker roles only, so the controller and coordinator stay on another backend.
+  // Codex and Claude Code run worker roles inside project/run containers through the platform model relay.
   const codex = view.harnesses.find(h => h.id === 'codex');
-  assert.deepEqual([codex.kinds, codex.session, codex.externalModel, codex.model_api, codex.runtime.version, codex.capabilities.isolation], [['writer', 'observer', 'evaluator'], 'external_session', true, [], '0.166.0', 'none']);
+  assert.deepEqual([codex.kinds, codex.session, codex.externalModel, codex.model_api, codex.runtime.version, codex.capabilities.isolation], [['writer', 'observer', 'evaluator'], 'external_session', false, ['openai-chat-completions', 'openai-responses', 'anthropic-messages'], '0.166.0', 'run_environment']);
   for (const role_id of ['manager', 'coordinator']) rejects(() => put({ expected_revision: 0, roles: [{ role_id, harness_ref: { id: 'codex' } }] }), 'harness_role_unsupported', `roles.${role_id}.harness_ref.id`);
-  rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'acp' }, model_profile_ref: { model_id: 'm2' } }] }), 'harness_model_profile_unsupported', 'roles.reviewer.model_profile_ref');
-  const saved = put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'acp' } }] }).configuration;
-  assert.equal(saved.roles.find(r => r.role_id === 'reviewer').harness_ref.id, 'acp');
+  const saved = put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm2' } }] }).configuration;
+  assert.equal(saved.roles.find(r => r.role_id === 'reviewer').harness_ref.id, 'codex');
   assert.deepEqual([saved.roles.find(r => r.role_id === 'manager').harness_ref.id, saved.roles.find(r => r.role_id === 'dev').harness_ref.id], ['pi', 'pi']);
-  // An external-model driver resolves no project model and records where the model comes from, without any key.
   const { snapshot, model } = resolveRole(f.s, 'r', 'reviewer', 'development.issue');
-  assert.deepEqual([snapshot.model.source, snapshot.model.id, snapshot.model.profile_hash, snapshot.harness.id, model.key], ['external_harness', 'acp', null, 'acp', '']);
+  assert.deepEqual([snapshot.model.source, snapshot.model.id, snapshot.harness.id, model.model], ['role', 'm2', 'codex', 'reviewer-model']);
   assert.ok(!JSON.stringify(snapshot).includes('fixture-private-value'));
-  // A role model written onto an ACP role some other way is still refused before any run starts, at its field.
-  const stored = JSON.parse(f.s.get("SELECT value FROM settings WHERE key='roles:r'").value);
-  stored.roles.find(r => r.role_id === 'reviewer').model_profile_ref = { model_id: 'm2', name: 'reviewer-model', profile_hash: 'x', version: 1, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' };
-  f.s.run("UPDATE settings SET value=? WHERE key='roles:r'", JSON.stringify(stored));
-  assert.throws(() => resolveRole(f.s, 'r', 'reviewer', 'development.issue'), e => e.code === 'harness_model_profile_unsupported' && e.detail.startsWith('roles.reviewer.model_profile_ref'));
-  await assert.rejects(runRole(f.spec, 'reviewer'), e => e.code === 'harness_model_profile_unsupported');
+  // Reserved subscription mode saves cleanly on external container CLIs and fails closed before any run starts.
+  put({ expected_revision: 1, roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex', model_source: 'subscription' } }] });
+  assert.throws(() => resolveRole(f.s, 'r', 'reviewer', 'development.issue'), e => e.code === 'subscription_mode_not_implemented' && e.detail.startsWith('roles.reviewer.harness_ref.model_source'));
+  await assert.rejects(runRole(f.spec, 'reviewer'), e => e.code === 'subscription_mode_not_implemented');
   assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='reviewer'").n, 0, 'nothing started');
-  assert.equal(harnesses.filter(h => ['acp', 'pi', 'native', 'process'].includes(h.id)).length, 4);
+  assert.equal(harnesses.filter(h => ['claude_code', 'codex', 'pi', 'native', 'process'].includes(h.id)).length, 5);
 });
 
 test('cancelling a Pi session ends the control-plane wait with harness_cancelled; the next run is rebuilt, never native_resume', async t => {
