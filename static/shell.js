@@ -276,8 +276,9 @@ function syncConsoleShell() {
   sectionPicker.replaceChildren();
   // #481: the picker keeps the groups the page's own navigation draws, so a long project page stays readable on a phone
   // instead of flattening every entry into one list.
-  // #565: a project page draws only the two-item breadcrumb, so the picker takes the 项目入口 hub groups instead: the
-  // breadcrumb's own links first (← 项目入口 / current), then 项目工作 / 设置 with every original entry.
+  // #565/#707: a work page draws only the two-item breadcrumb and a settings page only the settings categories, so the
+  // picker takes the 项目入口 hub groups instead: ← 项目入口 first, then 项目工作 / 设置 with every original entry. The
+  // 设置 group is the same list (projectSettingsSections) the settings nav draws, so both point at the same addresses.
   if (nav && nav.dataset.pickerProject && typeof projectSectionGroups !== 'undefined') {
     const project = nav.dataset.pickerProject, here = nav.querySelector('[aria-current=page]')?.getAttribute('href');
     sectionPicker.append(new Option('← 项目入口', `#/projects/${project}/menu`, false, here === `#/projects/${project}/menu`));

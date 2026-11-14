@@ -19,7 +19,9 @@ test('项目导航只列真实页面，管理对话的深链不丢页，移动�
       await expect(page.locator('.workspace-overview')).toBeVisible();
     };
     await login();
-    const nav = page.getByRole('navigation', { name: '项目入口' }), current = nav.locator('[aria-current=page]');
+    // A work page draws the 项目入口 breadcrumb and a settings page the 项目设置类别 nav (#707); either marks the page.
+    const nav = page.locator('#console-secondary-nav nav'), current = nav.locator('[aria-current=page]');
+    const settingsPages = ['基本设置', '机器配置', '角色', '模型', '计划与通知', '外部执行', '成员'];
     const hub = () => page.getByTestId('project-hub');
     const openHub = async () => {
       const link = page.getByTestId('project-hub-link');
@@ -29,15 +31,15 @@ test('项目导航只列真实页面，管理对话的深链不丢页，移动�
     };
     await openHub();
     // Every entry named like a page must land on that page: the address it advertises keeps that section current.
-    // Neighbours are no longer listed on the leaf page itself (#565); they are reached from 项目入口.
+    // A work page does not list its neighbours (#565); a settings page lists only the settings categories (#707).
     for (const caption of ['项目总览', '基本设置', '机器配置', '模型', '发版本', '计划与通知', '项目知识', '外部执行', '成员', '运行状态']) {
       await openHub();
       await hub().getByRole('link', { name: caption, exact: true }).click();
       await expect(current).toHaveText(caption);
       await expect(page).toHaveURL(new RegExp('#/projects/101/[a-z]+$'));
       await expect(nav.getByRole('link', { name: '← 项目入口', exact: true })).toBeVisible();
-      // A leaf page does not expose the rest of the project sections at the same time.
-      await expect(nav.getByRole('link')).toHaveCount(2);
+      if (settingsPages.includes(caption)) await expect(nav.getByRole('link')).toHaveText(['← 项目入口', ...settingsPages]);
+      else await expect(nav.getByRole('link')).toHaveCount(2);
     }
     // 管理对话 is a chat, not a settings section: opening it keeps the settings page underneath.
     await openHub();

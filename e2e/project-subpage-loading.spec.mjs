@@ -77,7 +77,7 @@ test('同一项目内切换子页面立即显示新页面的加载态，「当�
     await page.evaluate(() => { location.hash = '#/projects/101/roles'; });
     await expect(loading.getByRole('heading', { name: '正在打开「角色」', exact: true })).toBeVisible();
     await expect(body.getByRole('heading', { name: '准备新版本', exact: true })).toHaveCount(0);
-    await expect(page.getByRole('navigation', { name: '项目入口' }).locator('[aria-current=page]')).toHaveText('角色');
+    await expect(page.getByRole('navigation', { name: '项目设置类别' }).locator('[aria-current=page]')).toHaveText('角色');
     await page.screenshot({ path: `${out}/switch-loading-1440.png` });
     gate.held = false; gate.release();
     await expect(loading).toHaveCount(0);

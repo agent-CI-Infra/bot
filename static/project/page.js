@@ -152,7 +152,11 @@ function projectHeader(section = current.section) {
   chat.href = `#/projects/${current.id}/management`;
   chat.dataset.testid = 'project-open-chat';
   chat.addEventListener('click', event => { event.preventDefault(); void openManagementChat(current.id).catch(error); });
-  actions.append(chat, link(`https://github.com/${repository.full_name}`, '在 GitHub 打开', 'button-link'));
+  // #707: the way into the settings categories on every project page, including on a phone where the category nav is hidden.
+  const settings = element('a', '设置', 'button-link');
+  settings.href = `#/projects/${current.id}/${projectSettingsSections[0][0]}`;
+  settings.dataset.testid = 'project-open-settings';
+  actions.append(chat, settings, link(`https://github.com/${repository.full_name}`, '在 GitHub 打开', 'button-link'));
   if (section === 'basic') actions.append(button('刷新项目设置', () => reloadProject().catch(error)));
   head.append(trail, title, actions); return head;
 }
@@ -169,6 +173,28 @@ function projectCrumb(section) {
   here.setAttribute('aria-current', 'page');
   nav.append(back, here);
   return nav;
+}
+// #707: a settings page lists every settings category, as personal and global settings do, so switching between them is
+// one click. The way back to 项目入口 stays first. The phone's 当前页面 picker carries the same addresses (syncConsoleShell).
+function projectSettingsNav(section) {
+  const nav = element('nav', '', 'project-nav project-settings-nav');
+  nav.setAttribute('aria-label', '项目设置类别');
+  nav.dataset.pickerProject = current.id;
+  const back = element('a', '← 项目入口');
+  back.href = `#/projects/${current.id}/menu`;
+  nav.append(back, element('p', '设置', 'console-nav-label'));
+  for (const [key, caption] of projectSettingsSections) {
+    const item = element('a', caption);
+    item.href = `#/projects/${current.id}/${key}`;
+    if (key === section) item.setAttribute('aria-current', 'page');
+    nav.append(item);
+  }
+  return nav;
+}
+// The hub marks itself; a settings page gets the category nav; a work page and an unknown page keep the #565 breadcrumb.
+function projectNav(section) {
+  if (section === 'menu') return projectHubNav();
+  return projectSettingsSections.some(([key]) => key === section) ? projectSettingsNav(section) : projectCrumb(section);
 }
 function menuSection() {
   const wrap = element('div', '', 'project-hub');
@@ -211,17 +237,17 @@ function projectLoadingState(section) {
   const caption = section === 'menu' ? '项目入口' : projectSectionCaption(section);
   return consoleState(caption ? `正在打开「${caption}」` : '正在加载项目', '正在读取这个项目的最新信息。', { tone: 'loading' });
 }
-// The breadcrumb already names the new page, so the 当前页面 picker can follow it before the data arrives.
+// The nav already names the new page, so the 当前页面 picker can follow it before the data arrives.
 function projectLoadingBody(section) {
   const body = element('div', '', 'project-body'), content = element('div', '', 'project-content');
   const known = section === 'menu' || !!projectSectionCaption(section);
-  body.append(section === 'menu' ? projectHubNav() : projectCrumb(known ? section : null));
+  body.append(projectNav(known ? section : null));
   content.append(projectLoadingState(section)); body.append(content); return body;
 }
 function projectBody(section) {
   const body = element('div', '', 'project-body'), content = element('div', '', 'project-content');
   // #642: an unknown subpage has no crumb of its own; it only offers the way back to 项目入口.
-  body.append(section === 'menu' ? projectHubNav() : projectCrumb(section));
+  body.append(projectNav(section));
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
   if (!section) content.append(pageNotFoundState(current.id));
   else content.append(...({ overview: workspaceOverview, basic: basicSection, machine: machineSection, model: modelsSection, release: releaseSection, schedules: schedulesSection, knowledge: knowledgeSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection, menu: menuSection }[section])());
