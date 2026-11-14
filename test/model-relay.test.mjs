@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { Readable } from 'node:stream';
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -82,7 +83,7 @@ async function createRelayRig(t, options = {}) {
     return result;
   };
 
-  const relay = await startModelRelay({ agentDir: join(root, 'agent'), pollMs: 15, idleTimeoutMs: options.idleTimeoutMs ?? 10_000 });
+  const relay = await startModelRelay({ agentDir: join(root, 'agent'), pollMs: 15, idleTimeoutMs: options.idleTimeoutMs ?? 30_000 });
   const redactor = new Redactor();
   let gateway = null;
   let polling = true;
@@ -534,4 +535,84 @@ test('readProviderCredentialFile accepts read-only files and symlinks and report
   const hugeFile = join(dir, 'huge');
   writeFileSync(hugeFile, 'k'.repeat(40_000));
   assert.throws(() => readProviderCredentialFile(hugeFile), err => /credential_file_too_large/.test(err.detail));
+});
+
+test('pre-header keepalive heartbeats do not prematurely commit 200/application/json before slow upstream headers or errors arrive', async t => {
+  const rig = await createRelayRig(t);
+  const model = addProjectModel(rig.store, rig.repoId, {
+    url: 'http://upstream.invalid/v1',
+    key: 'sk-slow-upstream-key',
+    name: 'slow-gpt',
+    interface_type: 'openai-chat-completions',
+    auth_header: 'bearer',
+  });
+
+  let scenario = '429';
+  rig.startGateway({
+    primaryModel: model,
+    timing: { firstByteMs: 450, idleMs: 2_000, keepaliveMs: 25 },
+    fetcher: async (_url, init) => {
+      if (scenario === 'timeout') {
+        await new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(init.signal.reason ?? new Error('aborted')), { once: true });
+        });
+      }
+      // Wait long enough for multiple 25ms keepalive heartbeats to flush to cursor.json before headers arrive.
+      await new Promise(resolve => setTimeout(resolve, 90));
+      if (scenario === '429') {
+        return new Response(JSON.stringify({ error: { message: 'rate limited', type: 'rate_limit_error' } }), {
+          status: 429,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      const chunks = [
+        'data: {"id":"cmpl-slow","choices":[{"index":0,"delta":{"role":"assistant","content":"Slow "},"finish_reason":null}]}\n\n',
+        'data: {"id":"cmpl-slow","choices":[{"index":0,"delta":{"content":"stream!"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3}}\n\n',
+        'data: [DONE]\n\n',
+      ].map(chunk => Buffer.from(chunk, 'utf8'));
+      return new Response(Readable.toWeb(Readable.from(chunks)), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    },
+  });
+
+  // 1. Slow upstream 429 after multiple pre-header keepalives still delivers HTTP 429 to the client.
+  const res429 = await fetch(`${rig.relay.url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'slow-gpt', stream: false, messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  assert.equal(res429.status, 429);
+  assert.match(res429.headers.get('content-type') || '', /application\/json/);
+  const err429 = await res429.json();
+  assert.equal(err429.error.type, 'rate_limit_error');
+  assert.ok(
+    rig.runnerCalls.some(c => c.type === 'workspace_agent_model_reply' && c.sequence >= 1 && c.status === undefined),
+    'expected pre-header keepalive without premature status',
+  );
+
+  // 2. Slow upstream streaming 200 after multiple pre-header keepalives delivers text/event-stream, not application/json.
+  scenario = 'stream';
+  const resStream = await fetch(`${rig.relay.url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'slow-gpt', stream: true, messages: [{ role: 'user', content: 'stream please' }] }),
+  });
+  assert.equal(resStream.status, 200);
+  assert.match(resStream.headers.get('content-type') || '', /text\/event-stream/);
+  const sseBody = await resStream.text();
+  assert.match(sseBody, /Slow /);
+  assert.match(sseBody, /stream!/);
+
+  // 3. First-byte timeout after pre-header keepalives delivers HTTP 502 error instead of HTTP 200.
+  scenario = 'timeout';
+  const resTimeout = await fetch(`${rig.relay.url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'slow-gpt', stream: false, messages: [{ role: 'user', content: 'hang' }] }),
+  });
+  assert.equal(resTimeout.status, 502);
+  const errTimeout = await resTimeout.json();
+  assert.equal(errTimeout.error.code, 'provider_timeout');
 });

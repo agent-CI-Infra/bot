@@ -184,14 +184,14 @@ export async function agentOperation(input,root){
     const prefix=dir+'/model-replies/'+input.request_id,streamPath=prefix+'.stream',cursorTmp=prefix+'.cursor.tmp',cursorPath=prefix+'.cursor.json';
     const bytes=Buffer.from(input.base64,'base64');
     try{
-      if(input.offset===0||bytes.length>0){
+      if((input.offset===0&&(bytes.length>0||input.status!==undefined||input.final))||bytes.length>0){
         const file=await open(streamPath,input.offset===0?'w':'r+',0o600);
         try{if((await file.stat()).size!==input.offset)throw new Error('agent_reply_offset');if(bytes.length>0)await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
       }
       const prev=input.status===undefined?await currentRequestFile(cursorPath):null;
       const cursor={
-        status:input.status??prev?.status??200,
-        headers:input.headers??prev?.headers??{'content-type':'application/json'},
+        status:input.status??prev?.status??(input.final&&!input.error?200:null),
+        headers:input.headers??prev?.headers??(input.final&&!input.error?{'content-type':'application/json'}:null),
         written:input.offset+bytes.length,
         done:Boolean(input.final),
         error:typeof input.error==='string'?input.error:null,

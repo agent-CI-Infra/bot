@@ -75,7 +75,7 @@ export interface MailboxModelGatewayOptions {
   beforeModel?: () => Promise<void>;
   maxOutputTokens?: number;
   signal?: AbortSignal;
-  timing?: { firstByteMs: number; idleMs: number };
+  timing?: { firstByteMs: number; idleMs: number; keepaliveMs?: number };
   fetcher?: typeof fetch;
 }
 
@@ -131,6 +131,7 @@ export function readProviderCredentialFile(filePath: string): { key: string } {
 class StreamReplyWriter {
   private queue: Buffer[] = [];
   private offset = 0;
+  private headersReady = false;
   private statusSent = false;
   private status = 200;
   private headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -153,6 +154,7 @@ class StreamReplyWriter {
   startResponse(status: number, headers: Record<string, string>) {
     this.status = status;
     this.headers = headers;
+    this.headersReady = true;
     this.scheduleFlush();
   }
 
@@ -173,6 +175,7 @@ class StreamReplyWriter {
   }
 
   async finish(): Promise<void> {
+    this.headersReady = true;
     this.done = true;
     this.scheduleFlush();
     if (this.flushing) await this.flushing;
@@ -199,17 +202,17 @@ class StreamReplyWriter {
   private async runLoop(): Promise<void> {
     while (!this.abortedByClient && !this.fatalError) {
       const queuedBytes = this.queue.reduce((n, b) => n + b.length, 0);
-      const needHeaderOnly = !this.statusSent && queuedBytes === 0 && !this.done && !this.errorMsg;
+      const needHeaderOnly = this.headersReady && !this.statusSent && queuedBytes === 0 && !this.done && !this.errorMsg;
       if (queuedBytes === 0 && !needHeaderOnly && !this.pendingKeepalive && !this.done && !this.errorMsg) {
         await new Promise<void>(resolve => { this.notify = resolve; });
-        if (this.queue.length === 0 && !this.pendingKeepalive && !this.done && !this.errorMsg && this.statusSent) break;
+        if (this.queue.length === 0 && !this.pendingKeepalive && !this.done && !this.errorMsg && (!this.headersReady || this.statusSent)) break;
         continue;
       }
 
       const slice = this.takeBytes(maxModelReplyChunkBytes);
       const remaining = this.queue.reduce((n, b) => n + b.length, 0);
       const isFinal = (this.done || !!this.errorMsg) && remaining === 0;
-      const sendStatus = !this.statusSent;
+      const sendStatus = this.headersReady && !this.statusSent;
       this.pendingKeepalive = false;
 
       const call: Record<string, unknown> = {
@@ -226,7 +229,7 @@ class StreamReplyWriter {
 
       try {
         await this.runner(call);
-        this.statusSent = true;
+        if (sendStatus) this.statusSent = true;
         this.offset += slice.length;
       } catch (err: any) {
         const msg = String(err?.detail || err?.message || '');
@@ -650,7 +653,7 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
       }
 
       armTimeout(timing.firstByteMs);
-      heartbeat = setInterval(() => writer.keepalive(), 15_000);
+      heartbeat = setInterval(() => writer.keepalive(), timing.keepaliveMs ?? 15_000);
       heartbeat.unref?.();
 
       const pendingFetch = fetcher(wireUrl, {
@@ -789,8 +792,9 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
         }
       }
     } catch (err: any) {
+      const isTimeout = err?.message === 'provider_timeout' || (combinedSignal.aborted && (combinedSignal.reason as any)?.message === 'provider_timeout');
       if (requestLogId) {
-        const errCode = writer.abortedByClient ? 'client_cancelled' : err instanceof TaskError ? err.code : 'transport_error';
+        const errCode = writer.abortedByClient ? 'client_cancelled' : err instanceof TaskError ? err.code : isTimeout ? 'provider_timeout' : 'transport_error';
         recordResponseTrajectory({ error: errCode, detail: redactor.text(String(err?.message || errCode)).slice(0, 500) });
         const hasPartialUsage = finalUsage.input_tokens !== null || finalUsage.output_tokens !== null;
         finishModelRequest(
@@ -803,7 +807,7 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
         );
       }
       if (!writer.abortedByClient && envelope) {
-        const code = err instanceof TaskError ? err.code : 'api_error';
+        const code = err instanceof TaskError ? err.code : isTimeout ? 'provider_timeout' : 'api_error';
         if (!streamedAny) {
           await sendSimpleReply(writer, err instanceof TaskError ? 401 : 502, { 'content-type': 'application/json' }, formatErrorPayload(envelope.endpoint, code)).catch(() => {});
         } else {
