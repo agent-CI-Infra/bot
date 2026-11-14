@@ -107,8 +107,8 @@ body.board-mode .list-panel>.toolbar{display:none}
   .board-filter-controls label,.board-filter-controls select{width:100%;max-width:none}
   .board-filter-controls .board-search{max-width:none;min-width:0}
   .board-arrangement{display:grid;grid-template-columns:minmax(0,1fr) 32px auto;gap:6px}
-  .board-arrangement>.board-view-controls{grid-column:1;grid-row:2;flex-wrap:nowrap;min-width:0}
-  .board-view-controls .board-view-choice{flex:1;min-width:0}
+  .board-arrangement>.board-view-controls{grid-column:1;grid-row:2;flex-wrap:wrap;min-width:0}
+  .board-view-controls .board-view-choice{flex:1 1 130px;min-width:0}
   .board-view-controls .board-view-choice select{width:100%;max-width:none}
   .board-arrangement>.board-grouping{grid-column:1/-1;grid-row:1;flex-direction:column;gap:4px}
   .board-grouping>.board-options-label{line-height:1.4}
