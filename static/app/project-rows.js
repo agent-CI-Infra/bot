@@ -1,16 +1,35 @@
-// Group only the rows already loaded, preserving each owner's first position and the order within it.
+// #716: an installed repository that was never started can only be started by a super administrator, so the copy names
+// that role and each row offers the one next step this reader has: copy a reminder to send them. (Super administrators
+// never get this group: their project list is the installed list, where such a row already carries 启动.)
+const pendingActivationTitle = '等待超级管理员启动';
+function pendingActivationReminder(repo) {
+  const address = (location.origin || '') + (location.pathname || '/') + '#/projects';
+  return `请在 LaunchPad 控制台启动仓库 ${repo.full_name}：${address}`;
+}
+function pendingActivationAction(repo) {
+  const copy = button('复制提醒', async () => {
+    const text = pendingActivationReminder(repo);
+    try { await navigator.clipboard.writeText(text); copy.textContent = '已复制'; copy.title = text; }
+    catch { copy.textContent = '请手动复制'; copy.title = text; const box = copy.parentElement; if (box && !box.querySelector('.project-pending-manual')) box.append(element('p', text, 'project-pending-manual')); }
+  });
+  copy.setAttribute('aria-live', 'polite');
+  return copy;
+}
 function pendingActivationGroup(pending) {
   const section = element('div', '', 'project-owner-group project-pending-group');
   section.setAttribute('role', 'listitem'); section.dataset.key = 'pending-activation';
-  const list = element('div', '', 'project-owner-rows'); list.setAttribute('role', 'list'); list.setAttribute('aria-label', '等待管理员启动');
+  const list = element('div', '', 'project-owner-rows'); list.setAttribute('role', 'list'); list.setAttribute('aria-label', pendingActivationTitle);
   for (const repo of pending) {
-    const line = element('div', '', 'row project-pending-row'), content = element('div', '', 'row-content'), status = element('div', '', 'row-state');
+    const line = element('div', '', 'row project-pending-row has-actions'), content = element('div', '', 'row-content'), status = element('div', '', 'row-state'), actions = element('div', '', 'actions');
     line.setAttribute('role', 'listitem'); line.dataset.key = 'pending:' + repo.id;
-    const note = element('p', '已安装到 GitHub，等待管理员在控制台启动后即可打开。'); note.title = note.textContent; content.append(element('strong', repo.full_name), note);
-    status.append(element('span', '等待管理员启动', 'status status-warning'));
-    line.append(content, status); list.append(line);
+    const note = element('p', '已安装到 GitHub，需要超级管理员在控制台启动后才能打开。'); note.title = note.textContent; content.append(element('strong', repo.full_name), note);
+    status.append(element('span', '待超级管理员启动', 'status status-warning'));
+    actions.append(pendingActivationAction(repo));
+    line.append(content, status, actions); list.append(line);
   }
-  section.append(element('h2', '等待管理员启动', 'project-owner-title'), list, consoleLink('#/identity', '查看身份与权限'));
+  section.append(element('h2', pendingActivationTitle, 'project-owner-title'),
+    element('p', '这些仓库已装好 GitHub App，启动后会出现在上面的项目列表里。', 'project-pending-intro muted'),
+    list, consoleLink('#/identity', '查看身份与权限'));
   return section;
 }
 // #544: the shared column header for the project list; it is re-created per list render but skipped by a quiet refresh.
@@ -29,6 +48,7 @@ function ownerFoldState() {
   if (account !== ownerFoldingAccount) { ownerFolding.clear(); ownerFoldingAccount = account; }
   return ownerFolding;
 }
+// Group only the rows already loaded, preserving each owner's first position and the order within it.
 function groupProjectRows(rows, lines) {
   const groups = new Map();
   rows.forEach((row, index) => {

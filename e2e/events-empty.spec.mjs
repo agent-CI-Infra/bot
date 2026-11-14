@@ -22,7 +22,7 @@ test('Webhook 投递空状态说明原因并给出下一步', async ({ page }) =
     await expect(empty.getByRole('heading', { name: '还没有 Webhook 投递', exact: true })).toBeVisible();
     await expect(empty).toContainText('Webhook 还没指向本部署');
     await expect(empty).toContainText('验签失败或尚未启动的仓库仍会作为投递出现在本页');
-    await expect(empty).not.toContainText('还没被管理员启动，事件不会在这里形成任务');
+    await expect(empty).not.toContainText('还没被超级管理员启动，事件不会在这里形成任务');
     await expect(empty.getByRole('link', { name: '打开接入向导' })).toHaveAttribute('href', '#/settings/onboarding');
     await expect(empty.getByRole('link', { name: '查看机器人账号' })).toHaveAttribute('href', '#/settings/accounts');
     expect(await page.locator('#rows').evaluate(el => getComputedStyle(el, '::after').content)).not.toContain('暂无记录');
@@ -84,7 +84,7 @@ test('Webhook 投递空状态说明原因并给出下一步', async ({ page }) =
     const memberEmpty = page.locator('#rows .console-state');
     await expect(memberEmpty.getByRole('heading', { name: '还没有 Webhook 投递', exact: true })).toBeVisible();
     await expect(memberEmpty).toContainText('Webhook 还没指向本部署');
-    await expect(memberEmpty).toContainText('还没被管理员启动');
+    await expect(memberEmpty).toContainText('还没被超级管理员启动');
     await expect(memberEmpty.getByRole('link', { name: '查看身份与权限' })).toHaveAttribute('href', '#/identity');
     await expect(memberEmpty).toContainText('联系管理员');
     await expect(memberEmpty.getByRole('link', { name: '打开接入向导' })).toHaveCount(0);

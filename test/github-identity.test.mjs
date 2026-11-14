@@ -590,8 +590,8 @@ test('GET /api/identity names a plain GitHub connection state, the next step, an
   });
   const pending = await read(principal, identity);
   assert.equal(pending.state, 'pending_activation');
-  assert.equal(pending.status, '已登录 GitHub，有 1 个仓库已安装但还没有被管理员启动');
-  assert.match(pending.next_step, /联系管理员/);
+  assert.equal(pending.status, '已登录 GitHub，有 1 个仓库已安装但还没有被超级管理员启动');
+  assert.match(pending.next_step, /联系超级管理员/);
   assert.equal(pending.action, 'wait_activation');
   assert.deepEqual(pending.repositories, []);
   assert.equal(pending.repository_count, 0);

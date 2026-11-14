@@ -36,7 +36,7 @@ function eventsEmptyState(params) {
     } else {
       reasons.append(
         element('li', 'GitHub App 的 Webhook 还没指向本部署，或验签失败。'),
-        element('li', '仓库还没被管理员启动，事件不会在这里形成任务。'),
+        element('li', '仓库还没被超级管理员启动，事件不会在这里形成任务。'),
         element('li', '当前账号范围内确实还没有事件。')
       );
     }

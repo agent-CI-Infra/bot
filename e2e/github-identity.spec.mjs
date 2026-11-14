@@ -175,7 +175,7 @@ test('已登录但没有仓库时可以去 GitHub 选择仓库，接入向导接
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
-test('已安装但未启动的仓库在项目列表和身份页显示等待管理员启动', async ({ page }) => {
+test('已安装但未启动的仓库写明待超级管理员启动，项目管理员可复制提醒，超级管理员在仓库列表直接启动', async ({ page, context }) => {
   const f = await identityFixture();
   try {
     await page.goto(f.h.admin);
@@ -197,19 +197,42 @@ test('已安装但未启动的仓库在项目列表和身份页显示等待管�
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(f.h.admin + '/#/identity');
     await expect(page.locator('#identity-panel')).toContainText('fixture/project-101');
-    await expect(page.locator('#identity-panel')).toContainText('等待管理员启动');
-    await expect(page.locator('.identity-connection-status')).toContainText('已安装但还没有被管理员启动');
+    await expect(page.locator('#identity-panel')).toContainText('待超级管理员启动');
+    await expect(page.locator('.identity-connection-status')).toContainText('已安装但还没有被超级管理员启动');
     await shot('identity-pending', 1440);
     await shot('identity-pending', 390);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(f.h.admin + '/#/projects');
-    await expect(page.getByRole('heading', { name: '等待管理员启动' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '等待超级管理员启动' })).toBeVisible();
+    const pendingRow = page.locator('.project-pending-row');
+    await expect(pendingRow).toContainText('需要超级管理员在控制台启动后才能打开');
+    await expect(pendingRow.locator('.status')).toHaveText('待超级管理员启动');
+    await expect(page.locator('.project-pending-intro')).toHaveText('这些仓库已装好 GitHub App，启动后会出现在上面的项目列表里。');
+    await expect(pendingRow.getByRole('button', { name: '去启动' })).toHaveCount(0);
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
     await expect(page.getByRole('heading', { name: '已登录，尚无可管理的项目' })).toHaveCount(0);
-    await expect(page.locator('#count')).toContainText('0 个项目，1 个等待管理员启动');
+    await expect(page.locator('#count')).toContainText('0 个项目，1 个待超级管理员启动');
     await expect(page.locator('.project-pending-group').getByRole('link', { name: '项目总览' })).toHaveCount(0);
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await pendingRow.getByRole('button', { name: '复制提醒' }).click();
+    await expect(pendingRow.getByRole('button', { name: '已复制' })).toBeVisible();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`请在 LaunchPad 控制台启动仓库 fixture/project-101：${new URL(f.h.admin).origin}${new URL(f.h.admin).pathname}#/projects`);
     await shot('projects-pending', 1440);
     await shot('projects-pending', 390);
+    // Narrow: the repository name keeps its own line width; the button sits under it and never overlaps it.
+    const name = await pendingRow.locator('strong').boundingBox(), action = await pendingRow.getByRole('button', { name: '已复制' }).boundingBox();
+    expect(name.width).toBeGreaterThan(150);
+    expect(action.y).toBeGreaterThanOrEqual(name.y + name.height);
+    // A super administrator's project list is the installed list: the same repository carries 启动, which only opens the dialog.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.getByRole('button', { name: '退出登录' }).click();
+    await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const installedRow = page.locator('#rows .row', { hasText: 'fixture/project-101' });
+    await expect(installedRow.getByRole('button', { name: '启动', exact: true })).toBeVisible();
+    await expect(page.locator('.project-pending-group')).toHaveCount(0);
+    await installedRow.getByRole('button', { name: '启动', exact: true }).click();
+    await expect(page.locator('#activation-title')).toHaveText('启动 fixture/project-101');
   } finally { await f.close(); }
 });
 
