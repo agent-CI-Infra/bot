@@ -546,6 +546,13 @@ function initConsoleShell() {
   for (const item of tabs.querySelectorAll('[data-tab], #console-inbox-link')) {
     const name = item.id === 'console-inbox-link' ? 'inbox' : sidebarIcons[item.dataset.tab];
     if (!name || item.querySelector('.console-icon')) continue;
+    // The static tab buttons carry data-i18n themselves; a locale switch would set their textContent and drop the
+    // icon, so move the key onto a label span the way the inbox and 更多功能 links already have it.
+    const key = item.getAttribute('data-i18n');
+    if (key && !item.querySelector('[data-i18n]')) {
+      const label = document.createElement('span'); label.setAttribute('data-i18n', key); label.textContent = item.textContent;
+      item.removeAttribute('data-i18n'); item.replaceChildren(label);
+    }
     const icon = consoleIcon(name); icon.classList.add('console-nav-icon'); item.prepend(icon);
   }
   const locationBox = element('div', '', 'console-location'); locationBox.id = 'console-location'; locationBox.hidden = true;
