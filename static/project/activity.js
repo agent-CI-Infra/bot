@@ -6,10 +6,46 @@ function activitySection() { const box = element('div', '', 'status-grid'); box.
 // map kept across identities would show a project administrator names it is not allowed to read (and the reverse).
 let auditNamesCache = null;
 const auditTaskObjects = ['roles.apply', 'task.merge.authorized'];
-function auditActor(row, names) {
-  if (row.user_id === me.id) return element('span', '你');
-  const name = names.get(row.user_id); if (name) return element('span', name);
-  const id = element('code', row.user_id.slice(0, 12)); id.title = row.user_id; return id;
+// #698: a reader sees what was done in plain words; the action code and ids stay one click away under 技术信息.
+const auditActionNames = {
+  'repository.activated': '启用项目', 'repository.enabled': '启用项目', 'repository.disabled': '停用项目', 'repository.restored': '恢复项目',
+  'repository.hidden': '隐藏项目', 'repository.removed': '移出项目', 'repository.deleting': '开始删除项目', 'repository.deleted': '删除项目',
+  'repository.board.updated': '修改看板设置', 'board.value.updated': '修改看板字段', 'policy.updated': '修改项目设置', 'settings.updated': '修改设置',
+  'rules.updated': '修改规则文件', 'rules.computer_applied': '把规则应用到项目电脑', 'roles.configure': '修改角色配置', 'roles.apply': '按角色配置执行',
+  'assignments.updated': '修改任务分工', 'dispatch.retry': '重新分派事件', 'delegation.created': '新增委派授权', 'delegation.changed': '修改委派授权',
+  'delegation.revoked': '收回委派授权', 'task.create': '创建任务', 'task.retry': '重试任务', 'task.cancel': '取消任务', 'task.pause': '暂停任务',
+  'task.priority': '调整任务优先级', 'task.contract': '修改任务约定', 'task.instructions': '补充任务说明', 'task.relate': '关联任务', 'task.request': '提交任务请求',
+  'task.merge.authorized': '授权合入', 'release.save_draft': '保存发版草稿', 'release.confirm': '确认发版本', 'release.publish': '发布版本',
+  'release.observe': '查看发版进度', 'release.rerun': '重新运行发版检查', 'release.resume': '继续发版本', 'management.succeeded': '管理助手操作成功',
+  'management.failed': '管理助手操作失败', 'management.rejected': '管理助手操作被拒绝', 'management.cancelled': '管理助手操作已取消',
+  'knowledge.file.saved': '保存项目知识文件', 'knowledge.file.deleted': '删除项目知识文件', 'knowledge.file.moved': '移动项目知识文件',
+  'knowledge.file.restored': '恢复项目知识文件', 'knowledge.directory.created': '新建项目知识目录', 'knowledge.directory.deleted': '删除项目知识目录',
+  'memory.updated': '修改项目记忆', 'memory.document': '整理项目记忆', 'memory.review': '检视项目记忆', 'memory.read': '读取项目记忆',
+  'model.created': '新增模型', 'model.updated': '修改模型', 'model.deleted': '删除模型', 'model.key_revoked': '吊销模型密钥', 'model.sharing_updated': '修改模型共享',
+  'manager.migrated': '迁移管理者配置', 'project.context': '修改项目背景', 'action.authorized': '允许一次受控操作', 'action.blocked': '拦下一次受控操作'
+};
+const auditActionGroups = { repository: '项目', policy: '项目设置', settings: '设置', rules: '规则文件', roles: '角色配置', assignments: '任务分工',
+  dispatch: '事件分派', delegation: '委派授权', task: '任务', release: '发版本', management: '管理助手', knowledge: '项目知识', memory: '项目记忆',
+  model: '模型', manager: '管理者配置', project: '项目', action: '受控操作', environment: '项目电脑', github: 'GitHub', board: '看板',
+  channel: '飞书', external: '外部执行', service_role: '服务角色', business: '计划任务', occurrence: '计划任务' };
+function auditActionName(action) {
+  if (Object.hasOwn(auditActionNames, action)) return auditActionNames[action];
+  const group = String(action).split('.')[0];
+  return Object.hasOwn(auditActionGroups, group) ? `${auditActionGroups[group]} · 其他操作` : '其他操作';
+}
+function auditActorName(row, names) {
+  if (row.user_id === me.id) return '你';
+  // A project administrator cannot read account names; the id is under 技术信息 instead of in the sentence.
+  return names.get(row.user_id) || '其他成员';
+}
+function auditTech(row) {
+  const tech = element('details', '', 'audit-tech'), list = element('dl', '');
+  tech.append(element('summary', '技术信息'));
+  for (const [label, value] of [['动作标识', row.action], ['操作账号', row.user_id], ['对象', row.resource_id]]) {
+    if (!value) continue;
+    list.append(element('dt', label), element('dd', '')); list.lastChild.append(element('code', value));
+  }
+  tech.append(list); return tech;
 }
 function auditObject(row) {
   if (row.action.startsWith('management.')) { const link = element('a', '打开回执', 'linkish'); link.href = '#/management/commands/' + encodeURIComponent(row.resource_id); return link; }
@@ -40,11 +76,13 @@ function auditSection() {
       if (!current || current.id !== id || !section.isConnected) return;
       if (!audit.length) { body.replaceChildren(note('这个项目还没有操作记录。')); return; }
       const rows = audit.map(row => {
-        const item = element('li', ''), left = element('div', ''); item.dataset.auditRow = row.action;
-        left.append(element('code', row.action), document.createTextNode(' '), auditActor(row, names));
-        // Say the object cannot be opened instead of guessing a target this row does not prove.
-        left.append(document.createTextNode(' '), auditObject(row) || element('span', '无法关联', 'muted'));
-        item.append(left, element('span', timestamp(row.created_at), 'muted'), element('code', row.resource_id, 'muted wide-cell'));
+        const item = element('li', '', 'audit-row'), head = element('div', '', 'audit-row-head'), meta = element('div', '', 'audit-row-meta muted');
+        item.dataset.auditRow = row.action;
+        head.append(element('strong', auditActionName(row.action), 'audit-action'), element('span', ' · ' + auditActorName(row, names), 'audit-actor'));
+        meta.append(element('span', timestamp(row.created_at)));
+        // A row links out only where it proves the target; otherwise it says nothing rather than 无法关联.
+        const object = auditObject(row); if (object) meta.append(object);
+        item.append(head, meta, auditTech(row));
         return item;
       });
       const counts = new Map();
@@ -56,7 +94,7 @@ function auditSection() {
       const count = element('p', '', 'muted'); count.setAttribute('aria-live', 'polite'); count.dataset.auditCount = '';
       const list = element('ul', '', 'history');
       const more = button('', () => { shown += AUDIT_PAGE; paint(); });
-      const chips = [['*', `全部动作 ${audit.length}`]].concat(actions.map(action => [action, `${action} ${counts.get(action)}`]));
+      const chips = [['*', `全部动作 ${audit.length}`]].concat(actions.map(action => [action, `${auditActionName(action)} ${counts.get(action)}`]));
       const chipEls = chips.map(([key, caption]) => {
         const chip = button(caption, () => { filter = key; shown = AUDIT_PAGE; paint(); });
         chip.dataset.auditFilter = key; return chip;
