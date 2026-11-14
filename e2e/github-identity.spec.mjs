@@ -113,7 +113,7 @@ test('全局用户按实际项目显示 GitHub 继承与手工委派，编辑手
     await page.goto(f.h.admin + '/#/settings/users');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    const row = page.locator('#settings-panel .row').filter({ has: page.getByText('@administrator', { exact: true }) });
+    const row = page.locator('#settings-panel .users-table tbody tr').filter({ has: page.getByText('@administrator', { exact: true }) });
     await expect(row).toContainText('当前可见项目（1）'); await expect(row).toContainText('fixture/project-101 · 可配置 · 来自 GitHub');
     await expect(row).toContainText('手工分配：无'); await expect(row).not.toContainText('看不到任何项目'); await expect(row).not.toContainText('other/project-201');
     await row.getByRole('button', { name: '修改仓库权限', exact: true }).click();

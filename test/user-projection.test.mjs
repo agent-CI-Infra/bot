@@ -23,7 +23,7 @@ test('the user projection names each account\'s login methods and its GitHub bin
   const dave = await create(admin, 'dave'); identity(h, dave.id, 'dave-gh', 'revoked');   // unbound again
   // A GitHub-only account: an opaque local name and the external-only sentinel in place of a password.
   h.store.run("INSERT INTO users(id,username,password_hash,role) VALUES('gh-zoe','github:9001:abcd1234','!external-only','project_admin')");
-  identity(h, 'gh-zoe', 'octozoe', 'active');
+  identity(h, 'gh-zoe', 'zoe', 'active');
   // Same visible name, no binding: two separate accounts, never one row.
   const zoe = await create(admin, 'zoe');
   const erin = await create(admin, 'erin'); identity(h, erin.id, 'erin-gh', 'pending_verification');
@@ -35,7 +35,7 @@ test('the user projection names each account\'s login methods and its GitHub bin
   assert.deepEqual(list.bob.login_methods, ['local', 'github']);
   assert.deepEqual(list.bob.github, { login: 'bob-dev', status: 'active' });
   assert.equal(list.bob.github_binding, 'bound');
-  assert.equal(list.bob.display_name, '@bob-dev');
+  assert.equal(list.bob.display_name, 'bob-dev');
   assert.equal(list.carol.github_binding, 'pending_verification');
   assert.deepEqual(list.carol.github, { login: 'carol-gh', status: 'pending_verification' });
   // Unbound again: the row says so and does not keep showing the login the administrator just removed.
@@ -46,10 +46,13 @@ test('the user projection names each account\'s login methods and its GitHub bin
   const zoeGithub = list['github:9001:abcd1234'];
   assert.equal(zoeGithub.local_login, false);
   assert.deepEqual(zoeGithub.login_methods, ['github']);
-  assert.equal(zoeGithub.display_name, '@octozoe');
   assert.equal(zoeGithub.local_account, null);
+  // Same visible name, no binding: two rows, never one merged account.
+  assert.equal(zoeGithub.display_name, 'zoe');
+  assert.equal(list.zoe.display_name, 'zoe');
   assert.deepEqual(list.zoe.login_methods, ['local']);
   assert.equal(list.zoe.github_binding, 'none');
+  assert.equal((await admin('/api/users')).value.users.filter(row => row.display_name === 'zoe').length, 2);
   // A disabled account still reports its binding: switching an account off is not unbinding it.
   assert.equal(list.erin.active, false);
   assert.equal(list.erin.github_binding, 'pending_verification');
@@ -57,7 +60,8 @@ test('the user projection names each account\'s login methods and its GitHub bin
   // The list is ordered by what an administrator reads, not by the internal placeholder name, which sorts under "g".
   const shown = (await admin('/api/users')).value.users.map(user => user.display_name);
   assert.deepEqual(shown, [...shown].sort((left, right) => left.localeCompare(right, 'zh-CN')));
-  assert.ok(shown.indexOf('@octozoe') > shown.indexOf('mike'), shown.join(','));
+  assert.ok(shown.indexOf('zoe') > shown.indexOf('mike'), shown.join(','));
+  assert.equal(shown.filter(name => name === 'zoe').length, 2);
   // Nothing secret reaches the page: no password digest, no credential blob, no token.
   const text = JSON.stringify((await admin('/api/users')).value);
   assert.doesNotMatch(text, /!external-only|password_hash|credentials|access_token|refresh_token/);
