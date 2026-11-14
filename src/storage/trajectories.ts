@@ -163,14 +163,14 @@ export class Trajectories {
    * messages must be a prefix of this one's; otherwise (compaction, another conversation) the line holds them all.
    */
   appendModelRequest(scope: TrajectoryScope, id: string, body: Record<string, any>): string {
-    const handle = this.handle(scope), messages: any[] = Array.isArray(body.messages) ? body.messages : [];
-    const hashes = messages.map(message => sha256(JSON.stringify(message))), last = handle.lastRequest;
-    const delta = !!last && last.depth < maxRequestDepth && last.hashes.length <= hashes.length && last.hashes.every((hash, i) => hash === hashes[i]);
+    const handle = this.handle(scope), hasMessages = Array.isArray(body.messages), messages: any[] = hasMessages ? body.messages : [];
+    const hashes = hasMessages ? messages.map(message => sha256(JSON.stringify(message))) : [], last = handle.lastRequest;
+    const delta = hasMessages && !!last && last.depth < maxRequestDepth && last.hashes.length <= hashes.length && last.hashes.every((hash, i) => hash === hashes[i]);
     const data = delta ? { previous: last!.ref, from: last!.hashes.length, body: { ...body, messages: messages.slice(last!.hashes.length) } } : { body };
     const ref = this.append(scope, 'model_request', id, data);
     // append() may have replaced a broken handle; the chain state belongs to the file the line went to.
     const target = this.handles.get(parseRef(ref).file);
-    if (target) target.lastRequest = { ref, hashes, depth: delta && target === handle ? last!.depth + 1 : 0 };
+    if (target) target.lastRequest = hasMessages ? { ref, hashes, depth: delta && target === handle ? last!.depth + 1 : 0 } : undefined;
     return ref;
   }
 
@@ -184,6 +184,7 @@ export class Trajectories {
       parts.unshift({ from: Number(data.from ?? 0), body: data.body });
       current = data.previous;
     }
+    if (parts.length === 1 && !Array.isArray(parts[0]!.body.messages)) return { ...parts[0]!.body };
     let messages: any[] = [];
     for (const part of parts) messages = [...messages.slice(0, part.from), ...(Array.isArray(part.body.messages) ? part.body.messages : [])];
     return { ...parts.at(-1)!.body, messages };

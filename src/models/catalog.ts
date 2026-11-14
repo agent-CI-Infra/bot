@@ -1,11 +1,17 @@
 import type { Store } from '../storage/database.js';
 import { fail, fields, type Json } from '../core/security.js';
 
+export type ModelInterfaceType = 'openai-chat-completions' | 'openai-responses' | 'anthropic-messages';
+export type ModelAuthHeader = 'bearer' | 'x-api-key';
+export const modelInterfaceTypes: readonly ModelInterfaceType[] = ['openai-chat-completions', 'openai-responses', 'anthropic-messages'];
+export const modelAuthHeaders: readonly ModelAuthHeader[] = ['bearer', 'x-api-key'];
+
 export interface Capabilities { context_window: number; max_output_tokens: number; reasoning: boolean }
 export interface CatalogEntry {
   ref: string; provider: string; provider_name: string; model: string; name: string; api: string | null; doc: string | null;
   canonical: string | null; capabilities: Capabilities; attachment: boolean; modalities: { input: string[]; output: string[] };
   cost: { input: number; output: number; cache_read?: number; cache_write?: number } | null;
+  interface_type?: ModelInterfaceType; auth_header?: ModelAuthHeader;
 }
 export interface CatalogStatus {revision:number;fetched_at:string|null;last_attempt_at:string|null;last_error:string|null;rejected:number;skipped:number;source:string;entries:number}
 const defaults: Capabilities = { context_window: 128000, max_output_tokens: 8192, reasoning: false };
@@ -38,18 +44,44 @@ export function parseCatalog(value: unknown) {
       entries.push({ ref: provider + '/' + key, provider, provider_name: typeof p.name === 'string' ? p.name.slice(0,200) : provider,
         model: key, name: m.name, api: address(p.api), doc: address(p.doc), canonical: id(m.canonical_model_id) ? m.canonical_model_id : null,
         capabilities: { context_window:m.limit.context, max_output_tokens:m.limit.output, reasoning:m.reasoning }, attachment:m.attachment,
-        modalities:{input:[...m.modalities.input],output:[...m.modalities.output]}, cost });
+        modalities:{input:[...m.modalities.input],output:[...m.modalities.output]}, cost,
+        ...parseEntryProtocol(provider, p, m) });
     }
   }
   if (!entries.length) throw new Error('catalog_empty');
   return { entries, rejected, skipped };
 }
+function parseEntryProtocol(provider: string, p: Record<string, any>, m: Record<string, any>): { interface_type: ModelInterfaceType; auth_header: ModelAuthHeader } {
+  const npm = typeof m.provider?.npm === 'string' ? m.provider.npm : typeof p.npm === 'string' ? p.npm : '';
+  const explicitInterface = m.interface_type ?? p.interface_type;
+  const interface_type: ModelInterfaceType = modelInterfaceTypes.includes(explicitInterface) ? explicitInterface
+    : npm === '@ai-sdk/anthropic' || (!npm && provider.toLowerCase() === 'anthropic') ? 'anthropic-messages'
+    : npm === '@ai-sdk/openai-responses' ? 'openai-responses' : 'openai-chat-completions';
+  const explicitAuth = m.auth_header ?? p.auth_header;
+  const auth_header: ModelAuthHeader = modelAuthHeaders.includes(explicitAuth) ? explicitAuth
+    : interface_type === 'anthropic-messages' && (provider.toLowerCase() === 'anthropic' || npm === '@ai-sdk/anthropic') ? 'x-api-key' : 'bearer';
+  return { interface_type, auth_header };
+}
+
+export function inferCatalogEntryProtocol(entry: CatalogEntry | null | undefined): { interface_type: ModelInterfaceType; auth_header: ModelAuthHeader } | null {
+  if (!entry) return null;
+  if (entry.interface_type && entry.auth_header) return { interface_type: entry.interface_type, auth_header: entry.auth_header };
+  const anthropic = entry.provider.toLowerCase() === 'anthropic';
+  return {
+    interface_type: entry.interface_type ?? (anthropic ? 'anthropic-messages' : 'openai-chat-completions'),
+    auth_header: entry.auth_header ?? (anthropic ? 'x-api-key' : 'bearer'),
+  };
+}
+
 export function modelCatalogStorage(store: Pick<Store,'db'>) {
   store.db.exec(`CREATE TABLE IF NOT EXISTS model_catalog_snapshot(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL DEFAULT 0,
       fetched_at TEXT,last_attempt_at TEXT,last_error TEXT,rejected INTEGER NOT NULL DEFAULT 0,skipped INTEGER NOT NULL DEFAULT 0,data TEXT);
     INSERT OR IGNORE INTO model_catalog_snapshot(id) VALUES(1);
     CREATE TABLE IF NOT EXISTS model_catalog_overrides(model_id TEXT PRIMARY KEY REFERENCES models(id) ON DELETE CASCADE,
-      mode TEXT NOT NULL DEFAULT 'auto',catalog_ref TEXT,capabilities TEXT NOT NULL DEFAULT '{}',pricing TEXT);`);
+      mode TEXT NOT NULL DEFAULT 'auto',catalog_ref TEXT,capabilities TEXT NOT NULL DEFAULT '{}',pricing TEXT,
+      interface_type TEXT,auth_header TEXT);`);
+  const existing = new Set((store.db.prepare('PRAGMA table_info(model_catalog_overrides)').all() as { name: string }[]).map(r => r.name));
+  for (const name of ['interface_type', 'auth_header']) if (!existing.has(name)) store.db.exec(`ALTER TABLE model_catalog_overrides ADD COLUMN ${name} TEXT`);
 }
 const catalogs = new WeakMap<Store,ModelCatalog>();
 export function modelCatalog(store:Store) { let catalog=catalogs.get(store);if(!catalog){catalog=new ModelCatalog(store);catalogs.set(store,catalog);}return catalog; }
@@ -127,10 +159,30 @@ export function catalogPricing(store:Store,model:{id?:string;api_url:string;mode
   const entry=modelCatalog(store).match(model).entry;if(!entry?.cost)return null;
   return {currency:'USD' as const,input_per_million:entry.cost.input,output_per_million:entry.cost.output,cache_per_million:entry.cost.cache_read??entry.cost.input};
 }
+export function modelProtocol(store: Store, model: { id?: string; api_url: string; model_name: string }): {
+  interface_type: ModelInterfaceType; auth_header: ModelAuthHeader; source: 'manual' | 'url' | 'catalog' | 'default';
+  override: { interface_type: ModelInterfaceType | null; auth_header: ModelAuthHeader | null };
+} {
+  const saved = model.id ? store.get('SELECT interface_type,auth_header FROM model_catalog_overrides WHERE model_id=?', model.id) : undefined;
+  const manualInterface = modelInterfaceTypes.includes(saved?.interface_type) ? saved!.interface_type as ModelInterfaceType : null;
+  const manualAuth = modelAuthHeaders.includes(saved?.auth_header) ? saved!.auth_header as ModelAuthHeader : null;
+  const trimmed = String(model.api_url ?? '').replace(/\/$/, '');
+  const urlInterface: ModelInterfaceType | null = /\/messages$/.test(trimmed) ? 'anthropic-messages'
+    : /\/responses$/.test(trimmed) ? 'openai-responses'
+    : /\/chat\/completions$/.test(trimmed) ? 'openai-chat-completions' : null;
+  const matched = inferCatalogEntryProtocol(modelCatalog(store).match(model).entry);
+  const interface_type: ModelInterfaceType = manualInterface ?? urlInterface ?? matched?.interface_type ?? 'openai-chat-completions';
+  const source = manualInterface || manualAuth ? 'manual' : urlInterface ? 'url' : matched ? 'catalog' : 'default';
+  let host = ''; try { host = new URL(model.api_url).hostname.toLowerCase(); } catch {}
+  const defaultAuth: ModelAuthHeader = matched?.auth_header ?? (interface_type === 'anthropic-messages' || host === 'api.anthropic.com' || host.endsWith('.anthropic.com') ? 'x-api-key' : 'bearer');
+  return { interface_type, auth_header: manualAuth ?? defaultAuth, source, override: { interface_type: manualInterface, auth_header: manualAuth } };
+}
+
 /** Catalog choice and manual capabilities are model metadata; they do not rotate the endpoint/model identity version. */
 export function saveModelMetadata(store:Store,modelId:string,input:Json) {
   const catalog=modelCatalog(store),previous=store.get('SELECT * FROM model_catalog_overrides WHERE model_id=?',modelId);
   let mode=previous?.mode??'auto',ref=previous?.catalog_ref??null,capabilities=previous?JSON.parse(previous.capabilities):{};
+  let interfaceType: string | null = previous?.interface_type ?? null, authHeader: string | null = previous?.auth_header ?? null;
   if(input.catalog!==undefined){const value=input.catalog;if(!object(value))return fail(400,'invalid_model_catalog');fields(value,['mode','ref']);
     if(!['auto','manual','disabled'].includes(String(value.mode)))fail(400,'invalid_model_catalog');
     mode=String(value.mode);ref=mode==='manual'?value.ref:null;
@@ -138,8 +190,20 @@ export function saveModelMetadata(store:Store,modelId:string,input:Json) {
   if(input.capabilities!==undefined){const value=input.capabilities;if(!object(value))return fail(400,'invalid_model_capabilities');fields(value,['context_window','max_output_tokens','reasoning']);
     if(value.context_window!==undefined&&!positive(value.context_window,32000000)||value.max_output_tokens!==undefined&&!positive(value.max_output_tokens,16000000)||value.reasoning!==undefined&&typeof value.reasoning!=='boolean')fail(400,'invalid_model_capabilities');
     capabilities={...value};}
+  if(input.interface_type!==undefined){
+    if(input.interface_type===null||input.interface_type==='auto')interfaceType=null;
+    else if(typeof input.interface_type==='string'&&modelInterfaceTypes.includes(input.interface_type as ModelInterfaceType))interfaceType=input.interface_type;
+    else fail(400,'invalid_model_interface');
+  }
+  if(input.auth_header!==undefined){
+    if(input.auth_header===null||input.auth_header==='auto')authHeader=null;
+    else if(typeof input.auth_header==='string'&&modelAuthHeaders.includes(input.auth_header as ModelAuthHeader))authHeader=input.auth_header;
+    else fail(400,'invalid_model_auth_header');
+  }
   const identity=store.get('SELECT api_url,model_name FROM models WHERE id=?',modelId)!;
   const entry=mode==='manual'?catalog.snapshot().find(e=>e.ref===ref):mode==='disabled'?undefined:catalog.match(identity as any).entry;
   if((capabilities.max_output_tokens??entry?.capabilities.max_output_tokens??defaults.max_output_tokens)>(capabilities.context_window??entry?.capabilities.context_window??defaults.context_window))fail(400,'invalid_model_capabilities','max_output_tokens');
-  store.run(`INSERT INTO model_catalog_overrides(model_id,mode,catalog_ref,capabilities) VALUES(?,?,?,?) ON CONFLICT(model_id) DO UPDATE SET mode=excluded.mode,catalog_ref=excluded.catalog_ref,capabilities=excluded.capabilities`,modelId,mode,ref,JSON.stringify(capabilities));
+  store.run(`INSERT INTO model_catalog_overrides(model_id,mode,catalog_ref,capabilities,interface_type,auth_header) VALUES(?,?,?,?,?,?)
+    ON CONFLICT(model_id) DO UPDATE SET mode=excluded.mode,catalog_ref=excluded.catalog_ref,capabilities=excluded.capabilities,interface_type=excluded.interface_type,auth_header=excluded.auth_header`,
+    modelId,mode,ref,JSON.stringify(capabilities),interfaceType,authHeader);
 }

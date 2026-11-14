@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Store} from '../dist/storage/database.js';
-import {ModelCatalog,parseCatalog,modelCatalog,modelCapabilities,catalogPricing,saveModelMetadata} from '../dist/models/catalog.js';
+import {ModelCatalog,parseCatalog,modelCatalog,modelCapabilities,catalogPricing,modelProtocol,saveModelMetadata} from '../dist/models/catalog.js';
 
 const card=(id,extra={})=>({id,name:id,attachment:true,reasoning:true,limit:{context:1048576,output:393216},modalities:{input:['text','image'],output:['text']},cost:{input:0.15,output:0.6,cache_read:0.003},...extra});
 const data=()=>({deepseek:{name:'DeepSeek',api:'https://api.deepseek.com',doc:'https://api-docs.deepseek.com/quick_start',models:{'deepseek-flash':card('deepseek-flash',{canonical_model_id:'deepseek/deepseek-flash'})}},
@@ -106,4 +106,18 @@ test('an ambiguous relay identity remains unpriced until the administrator choos
   const catalog=await install(store,input),model=store.get("SELECT * FROM models WHERE id='m'");
   const match=catalog.match(model);assert.equal(match.state,'ambiguous');assert.deepEqual(match.candidates,['deepseek/deepseek-flash','alternate/deepseek-flash']);assert.equal(catalogPricing(store,model),null);
   saveModelMetadata(store,'m',{catalog:{mode:'manual',ref:'alternate/deepseek-flash'}});assert.equal(catalogPricing(store,model).input_per_million,1);
+});
+
+test('modelProtocol resolves interface_type and auth_header from manual overrides, URL suffixes and catalog providers',async t=>{
+  const store=storeFor(t);await install(store);
+  const model=store.get("SELECT * FROM models WHERE id='m'");
+  assert.deepEqual(modelProtocol(store,model),{interface_type:'openai-chat-completions',auth_header:'bearer',source:'catalog',override:{interface_type:null,auth_header:null}});
+  assert.equal(modelProtocol(store,{api_url:'https://relay.example/v1',model_name:'claude-sonnet-4-5'}).interface_type,'anthropic-messages');
+  assert.equal(modelProtocol(store,{api_url:'https://relay.example/v1/responses',model_name:'custom-model'}).interface_type,'openai-responses');
+  saveModelMetadata(store,'m',{interface_type:'anthropic-messages',auth_header:'bearer'});
+  assert.deepEqual(modelProtocol(store,model),{interface_type:'anthropic-messages',auth_header:'bearer',source:'manual',override:{interface_type:'anthropic-messages',auth_header:'bearer'}});
+  saveModelMetadata(store,'m',{interface_type:'auto',auth_header:null});
+  assert.equal(modelProtocol(store,model).source,'catalog');
+  assert.throws(()=>saveModelMetadata(store,'m',{interface_type:'unknown-wire'}),{code:'invalid_model_interface'});
+  assert.throws(()=>saveModelMetadata(store,'m',{auth_header:'cookie'}),{code:'invalid_model_auth_header'});
 });

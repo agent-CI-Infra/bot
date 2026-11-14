@@ -23,6 +23,34 @@ async function readRequestDirectory(subdir){
   return entries.map(entry=>entry.data);
 }
 
+async function readModelRequestsForPoll(agentDir){
+  const subdir=agentDir+'/model-requests',repDir=agentDir+'/model-replies';
+  const names=await readdir(subdir).catch(error=>{if(error.code==='ENOENT')return [];throw error;});
+  const candidates=[];
+  for(const name of names){
+    if(!/^[a-f0-9]{48}\.json$/.test(name))continue;
+    const id=name.slice(0,48),path=subdir+'/'+name;
+    if(await stat(repDir+'/'+id+'.cursor.json').catch(()=>null))continue;
+    const info=await stat(path).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
+    if(info)candidates.push({mtime:info.mtimeMs,id,path,size:info.size});
+  }
+  candidates.sort((a,b)=>a.mtime-b.mtime||a.id.localeCompare(b.id));
+  let inlineBudget=512*1024;
+  const results=[];
+  for(const item of candidates){
+    if(item.size<=256*1024&&item.size<=inlineBudget){
+      const data=await currentRequestFile(item.path);
+      if(data&&data.id===item.id){
+        inlineBudget-=item.size;
+        results.push({id:item.id,size:item.size,chunked:false,data});
+      }
+    }else if(item.size<=16*1024*1024){
+      results.push({id:item.id,size:item.size,chunked:true});
+    }
+  }
+  return results;
+}
+
 // Policy commands run while Pi waits for publication. Reap command leftovers without killing
 // that exact agent; an explicit task release still reaps everything.
 export async function waitingAgent(root,processes){
@@ -89,11 +117,12 @@ export async function agentOperation(input,root){
     const request=await readFile(dir+'/request.json','utf8').then(JSON.parse).catch(()=>null);
     const token_requests=await readRequestDirectory(dir+'/token-requests');
     const tool_requests=await readRequestDirectory(dir+'/tool-requests');
+    const model_requests=await readModelRequestsForPoll(dir);
     // An append can still be in progress, especially for large tool arguments. Only consume
     // newline-terminated records so the next poll retries the unfinished tail at the same offset.
     const lines=(await readFile(dir+'/events.jsonl','utf8').catch(()=>'')).split('\n').slice(0,-1).filter(Boolean);
     const offset=Number(input.offset)||0,events=lines.slice(offset,offset+20).map(line=>JSON.parse(line));
-    return {...state,boundary,request,token_requests,tool_requests,events,offset:offset+events.length,has_more:offset+events.length<lines.length};
+    return {...state,boundary,request,token_requests,tool_requests,model_requests,events,offset:offset+events.length,has_more:offset+events.length<lines.length};
   }
   // The answer to a github_read_token request in token-requests/<id>.json: a read-only token, or the reason there is none.
   if(input.type==='workspace_agent_token'){
@@ -139,6 +168,42 @@ export async function agentOperation(input,root){
       if((await currentRequestFile(reqPath))?.id===input.request_id)throw error;
     }
     await unlink(path).catch(()=>{});await unlink(prefix+'.json').catch(()=>{});
+    throw new Error('agent_request_changed');
+  }
+  if(input.type==='workspace_agent_model_request'){
+    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>16*1024*1024)throw new Error('invalid_model_request_read');
+    const data=await readFile(dir+'/model-requests/'+input.request_id+'.json').catch(error=>{if(error.code==='ENOENT')throw new Error('agent_request_changed');throw error;});
+    return {base64:data.subarray(input.offset,input.offset+512*1024).toString('base64'),size:data.length};
+  }
+  if(input.type==='workspace_agent_model_reply'){
+    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>32*1024*1024)throw new Error('invalid_agent_reply');
+    if(input.status!==undefined&&(!Number.isInteger(input.status)||input.status<100||input.status>599))throw new Error('invalid_agent_reply');
+    const reqPath=dir+'/model-requests/'+input.request_id+'.json';
+    if(!(await stat(reqPath).catch(()=>null)))throw new Error('agent_request_changed');
+    await mkdir(dir+'/model-replies',{recursive:true,mode:0o700});
+    const prefix=dir+'/model-replies/'+input.request_id,streamPath=prefix+'.stream',cursorTmp=prefix+'.cursor.tmp',cursorPath=prefix+'.cursor.json';
+    const bytes=Buffer.from(input.base64,'base64');
+    try{
+      if(input.offset===0||bytes.length>0){
+        const file=await open(streamPath,input.offset===0?'w':'r+',0o600);
+        try{if((await file.stat()).size!==input.offset)throw new Error('agent_reply_offset');if(bytes.length>0)await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
+      }
+      const prev=input.status===undefined?await currentRequestFile(cursorPath):null;
+      const cursor={
+        status:input.status??prev?.status??200,
+        headers:input.headers??prev?.headers??{'content-type':'application/json'},
+        written:input.offset+bytes.length,
+        done:Boolean(input.final),
+        error:typeof input.error==='string'?input.error:null,
+        keepalive:Number.isInteger(input.sequence)?input.sequence:(prev?.keepalive??0),
+      };
+      await writeFile(cursorTmp,JSON.stringify(cursor),{mode:0o600});
+      await rename(cursorTmp,cursorPath);
+      if(await stat(reqPath).catch(()=>null))return {written:true};
+    }catch(error){
+      if(await stat(reqPath).catch(()=>null))throw error;
+    }
+    await Promise.all([unlink(streamPath).catch(()=>{}),unlink(cursorTmp).catch(()=>{}),unlink(cursorPath).catch(()=>{})]);
     throw new Error('agent_request_changed');
   }
   if(input.type==='workspace_agent_reply'){

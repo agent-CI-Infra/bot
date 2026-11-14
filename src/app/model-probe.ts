@@ -1,5 +1,11 @@
-import { modelEndpoints } from '../agent/model.js';
+import { resolveModelsListUrl, resolveModelWireUrl } from '../agent/model.js';
+import type { ModelAuthHeader, ModelInterfaceType } from '../models/catalog.js';
 import { type Json } from '../core/security.js';
+
+export interface UpstreamProbeOptions {
+  interface_type?: ModelInterfaceType;
+  auth_header?: ModelAuthHeader;
+}
 
 // Listing and testing call the upstream from the management page, so they end within this time instead of holding it.
 const timeout = 15_000, listLimit = 200, testOutputTokens = 32;
@@ -35,14 +41,19 @@ async function read(response: Response, limit: number): Promise<string | null> {
   }
   return Buffer.concat(chunks).toString('utf8');
 }
+function authHeaders(key: string, authHeader: ModelAuthHeader, interfaceType: ModelInterfaceType): Record<string, string> {
+  const headers: Record<string, string> = authHeader === 'x-api-key' ? { 'x-api-key': key } : { Authorization: 'Bearer ' + key };
+  if (interfaceType === 'anthropic-messages') headers['anthropic-version'] = '2023-06-01';
+  return headers;
+}
 type Reply = { ok: true; status: number; raw: string; json: any } | { ok: false; failure: Json };
 // One upstream request. Failures carry the HTTP status (null when no response arrived), a stable code and a short message.
-async function send(url: string, key: string, init: RequestInit, limit: number): Promise<Reply> {
+async function send(url: string, key: string, init: RequestInit, limit: number, auth: Record<string, string>): Promise<Reply> {
   const failure = (status: number | null, error: string, message: string | null = null): Reply => ({ ok: false, failure: { ok: false, status, error, message } });
   const transport = (error: unknown) => (error as Error)?.name === 'TimeoutError' ? failure(null, 'upstream_timeout')
     : failure(null, 'upstream_unreachable', typeof (error as any)?.cause?.code === 'string' ? (error as any).cause.code : null);
   let response: Response;
-  try { response = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(timeout), headers: { Authorization: 'Bearer ' + key, Accept: 'application/json', ...init.headers as Record<string, string> } }); }
+  try { response = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(timeout), headers: { ...auth, Accept: 'application/json', ...init.headers as Record<string, string> } }); }
   catch (error) { return transport(error); }
   // A redirect usually means the address is not the final one; say where it points instead of following it with the key.
   if (response.status >= 300 && response.status < 400) { await response.body?.cancel().catch(() => {}); return failure(response.status, 'upstream_redirect', short(response.headers.get('location') || '', key) || null); }
@@ -55,10 +66,13 @@ async function send(url: string, key: string, init: RequestInit, limit: number):
 }
 
 // GET <base>/models with the given key. Returns at most listLimit ids, sorted, and says when the upstream had more.
-export async function listUpstreamModels(apiUrl: string, key: string): Promise<Json> {
-  const { models_url } = modelEndpoints(apiUrl), reply = await send(models_url, key, { method: 'GET' }, bodyLimit.list);
+export async function listUpstreamModels(apiUrl: string, key: string, options?: UpstreamProbeOptions): Promise<Json> {
+  const interfaceType = options?.interface_type ?? 'openai-chat-completions';
+  const authHeader = options?.auth_header ?? 'bearer';
+  const models_url = resolveModelsListUrl(apiUrl, interfaceType);
+  const reply = await send(models_url, key, { method: 'GET' }, bodyLimit.list, authHeaders(key, authHeader, interfaceType));
   if (!reply.ok) return scrub({ models_url, ...reply.failure }, key);
-  // OpenAI-compatible servers answer {data:[{id}]}; a few answer {models:[...]} or a bare array, with ids or names.
+  // OpenAI-compatible and Anthropic servers answer {data:[{id}]}; a few answer {models:[...]} or a bare array, with ids or names.
   const items = [reply.json?.data, reply.json?.models, reply.json].find(Array.isArray);
   if (!items) return scrub({ models_url, ok: false, status: reply.status, error: 'upstream_response_invalid', message: explanation(reply.raw, key) }, key);
   const ids = [...new Set(items.map((item: any) => typeof item === 'string' ? item : typeof item?.id === 'string' ? item.id : item?.name)
@@ -66,12 +80,31 @@ export async function listUpstreamModels(apiUrl: string, key: string): Promise<J
   return scrub({ models_url, ok: true, status: reply.status, total: ids.length, truncated: ids.length > listLimit, models: ids.slice(0, listLimit) }, key);
 }
 
-// One minimal Chat Completions request: a fixed prompt without project data and a single small output limit.
-export async function testUpstreamModel(apiUrl: string, key: string, model: string): Promise<Json> {
-  const { chat_url } = modelEndpoints(apiUrl), started = Date.now();
-  const body = { model, messages: [{ role: 'user', content: testPrompt }], max_completion_tokens: testOutputTokens, stream: false };
-  const reply = await send(chat_url, key, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, bodyLimit.test);
+// One minimal generation request: a fixed prompt without project data and a single small output limit.
+export async function testUpstreamModel(apiUrl: string, key: string, model: string, options?: UpstreamProbeOptions): Promise<Json> {
+  const interfaceType = options?.interface_type ?? 'openai-chat-completions';
+  const authHeader = options?.auth_header ?? 'bearer';
+  const chat_url = resolveModelWireUrl(apiUrl, interfaceType), started = Date.now();
+  const body = interfaceType === 'anthropic-messages'
+    ? { model, messages: [{ role: 'user', content: testPrompt }], max_tokens: testOutputTokens, stream: false }
+    : interfaceType === 'openai-responses'
+      ? { model, input: [{ role: 'user', content: [{ type: 'input_text', text: testPrompt }] }], max_output_tokens: testOutputTokens, stream: false }
+      : { model, messages: [{ role: 'user', content: testPrompt }], max_completion_tokens: testOutputTokens, stream: false };
+  const reply = await send(chat_url, key, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, bodyLimit.test, authHeaders(key, authHeader, interfaceType));
   if (!reply.ok) return scrub({ chat_url, ...reply.failure }, key);
+  if (interfaceType === 'anthropic-messages') {
+    if (!Array.isArray(reply.json?.content)) return scrub({ chat_url, ok: false, status: reply.status, error: 'upstream_response_invalid', message: explanation(reply.raw, key) }, key);
+    const text = reply.json.content.map((part: any) => part?.type === 'text' && typeof part.text === 'string' ? part.text : '').join('');
+    return scrub({ chat_url, ok: true, status: reply.status, model: typeof reply.json.model === 'string' ? short(reply.json.model, key, 200) : null,
+      reply: short(text, key, 200), finish_reason: typeof reply.json.stop_reason === 'string' ? reply.json.stop_reason : null, elapsed_ms: Date.now() - started }, key);
+  }
+  if (interfaceType === 'openai-responses') {
+    if (!Array.isArray(reply.json?.output) && typeof reply.json?.output_text !== 'string') return scrub({ chat_url, ok: false, status: reply.status, error: 'upstream_response_invalid', message: explanation(reply.raw, key) }, key);
+    const text = typeof reply.json.output_text === 'string' ? reply.json.output_text
+      : (reply.json.output as any[]).flatMap(item => Array.isArray(item?.content) ? item.content : []).map(part => typeof part?.text === 'string' ? part.text : '').join('');
+    return scrub({ chat_url, ok: true, status: reply.status, model: typeof reply.json.model === 'string' ? short(reply.json.model, key, 200) : null,
+      reply: short(text, key, 200), finish_reason: typeof reply.json.status === 'string' ? reply.json.status : null, elapsed_ms: Date.now() - started }, key);
+  }
   const choice = reply.json?.choices?.[0];
   if (!choice) return scrub({ chat_url, ok: false, status: reply.status, error: 'upstream_response_invalid', message: explanation(reply.raw, key) }, key);
   const content = choice.message?.content;

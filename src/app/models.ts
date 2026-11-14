@@ -1,16 +1,31 @@
-import { modelCatalog, modelCapabilities, saveModelMetadata } from '../models/catalog.js';
+import { modelAuthHeaders, modelCatalog, modelCapabilities, modelInterfaceTypes, modelProtocol, saveModelMetadata, type ModelAuthHeader, type ModelInterfaceType } from '../models/catalog.js';
 import { Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from './auth.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
 import { pricingFor, savePricing, validatePricing } from '../metrics/accounting.js';
 import { modelEndpoints } from '../agent/model.js';
-import { listUpstreamModels, testUpstreamModel } from './model-probe.js';
+import { listUpstreamModels, testUpstreamModel, type UpstreamProbeOptions } from './model-probe.js';
 import { releaseModel } from '../service-roles/roles.js';
+
+function probeProtocol(body: Json, base?: { interface_type: ModelInterfaceType; auth_header: ModelAuthHeader }): UpstreamProbeOptions {
+  let interface_type = base?.interface_type;
+  let auth_header = base?.auth_header;
+  if (body.interface_type !== undefined && body.interface_type !== null && body.interface_type !== 'auto') {
+    if (typeof body.interface_type !== 'string' || !modelInterfaceTypes.includes(body.interface_type as ModelInterfaceType)) fail(400, 'invalid_model_interface');
+    interface_type = body.interface_type as ModelInterfaceType;
+  }
+  if (body.auth_header !== undefined && body.auth_header !== null && body.auth_header !== 'auto') {
+    if (typeof body.auth_header !== 'string' || !modelAuthHeaders.includes(body.auth_header as ModelAuthHeader)) fail(400, 'invalid_model_auth_header');
+    auth_header = body.auth_header as ModelAuthHeader;
+  }
+  return { ...(interface_type ? { interface_type } : {}), ...(auth_header ? { auth_header } : {}) };
+}
 
 function publicModel(store: Store, row: Row): Json {
   return { id: row.id, repository_id: row.repository_id, api_url: row.api_url, model_name: row.model_name,
     key_configured: row.api_key !== null, trusted: true, version: row.version, updated_at: row.updated_at, pricing: pricingFor(store,String(row.id)),
     capabilities:modelCapabilities(store,row as any),capabilities_override:JSON.parse(store.get('SELECT capabilities FROM model_catalog_overrides WHERE model_id=?',row.id)?.capabilities??'{}'),
+    protocol: modelProtocol(store, row as any),
     pricing_override:store.get('SELECT currency,input_per_million,output_per_million,cache_per_million FROM model_pricing WHERE model_id=?',row.id)??JSON.parse(store.get('SELECT pricing FROM model_catalog_overrides WHERE model_id=?',row.id)?.pricing??'null'),
     pricing_source:store.get('SELECT 1 FROM model_pricing WHERE model_id=?',row.id)?'manual':store.get('SELECT pricing FROM model_catalog_overrides WHERE model_id=?',row.id)?.pricing?'mixed':pricingFor(store,row.id)?'catalog':null,
     endpoints: modelEndpoints(String(row.api_url)) };
@@ -114,12 +129,12 @@ export async function models(store: Store, user: Actor, method: string, url: URL
     });
   }
   if (path === '/api/models' && method === 'POST') {
-    fields(body, ['repository_id', 'api_url', 'api_key', 'model_name', 'pricing', 'key_from','catalog','capabilities']);
+    fields(body, ['repository_id', 'api_url', 'api_key', 'model_name', 'pricing', 'key_from','catalog','capabilities','interface_type','auth_header']);
     const repo = body.repository_id == null ? null : text(body.repository_id);
     if (repo) repository(store, user, repo); else superAdmin(user);
     // key_from adds another model of the same provider: the URL and key come from that saved model, which must belong
     // to the same project (or both are shared), so a key never reaches a scope it was not given to.
-    let endpoint: string, key: string;
+    let endpoint: string, key: string, inheritedProtocol: Json = {};
     if (body.key_from !== undefined) {
       if (body.api_url !== undefined || body.api_key !== undefined) fail(400, 'invalid_model_source');
       const source = store.get('SELECT * FROM models WHERE id=? AND repository_id IS ?', text(body.key_from), repo);
@@ -127,12 +142,17 @@ export async function models(store: Store, user: Actor, method: string, url: URL
       key = source.api_key === null ? '' : String(store.secrets.open(source.api_key, `model:${source.id}`).value || '');
       if (!key) return fail(409, 'model_key_missing');
       endpoint = apiUrl(source.api_url);
+      const sourceOverride = store.get('SELECT interface_type,auth_header FROM model_catalog_overrides WHERE model_id=?', source.id);
+      if (sourceOverride) inheritedProtocol = {
+        ...(sourceOverride.interface_type ? { interface_type: sourceOverride.interface_type } : {}),
+        ...(sourceOverride.auth_header ? { auth_header: sourceOverride.auth_header } : {}),
+      };
     } else { endpoint = apiUrl(body.api_url); key = text(body.api_key, 32768); }
     const id = randomId(), model = text(body.model_name);
     const pricing=body.pricing===undefined?null:validatePricing(body.pricing);
     return store.transaction(() => {
       store.run('INSERT INTO models VALUES(?,?,?,?,?,?,?)', id, repo, endpoint, model, store.secrets.seal({ value: key }, `model:${id}`), 1, new Date().toISOString());
-      savePricing(store,id,pricing);saveModelMetadata(store,id,body);
+      savePricing(store,id,pricing);saveModelMetadata(store,id,{...inheritedProtocol,...body});
       store.audit(user.id, 'model.created', id, repo);
       return { model: publicModel(store,store.get('SELECT * FROM models WHERE id=?', id)!) };
     });
@@ -142,11 +162,14 @@ export async function models(store: Store, user: Actor, method: string, url: URL
   // Listing and testing an unsaved model need the right to create it there. Nothing is stored and nothing is audited.
   if (['/api/models/upstream', '/api/models/test'].includes(path) && method === 'POST') {
     const test = path.endsWith('/test');
-    fields(body, ['repository_id', 'api_url', 'api_key', ...(test ? ['model_name'] : [])]);
+    fields(body, ['repository_id', 'api_url', 'api_key', 'interface_type', 'auth_header', ...(test ? ['model_name'] : [])]);
     const repo = body.repository_id == null ? null : text(body.repository_id);
     if (repo) repository(store, user, repo); else superAdmin(user);
     const endpoint = apiUrl(body.api_url), key = text(body.api_key, 32768);
-    return test ? testUpstreamModel(endpoint, key, text(body.model_name)) : listUpstreamModels(endpoint, key);
+    const modelName = test ? text(body.model_name) : '';
+    const inferred = modelProtocol(store, { api_url: endpoint, model_name: modelName });
+    const options = probeProtocol(body, inferred.source === 'url' ? inferred : undefined);
+    return test ? testUpstreamModel(endpoint, key, modelName, options) : listUpstreamModels(endpoint, key, options);
   }
   const id = path.split('/')[3] || '';
   const row = store.get(`SELECT m.* FROM models m WHERE m.id=? AND ${visible.sql}`, id, ...visible.args);
@@ -209,7 +232,7 @@ export async function models(store: Store, user: Actor, method: string, url: URL
     });
   }
   if (path === `/api/models/${id}` && method === 'PATCH') {
-    fields(body, ['api_url', 'api_key', 'model_name', 'version', 'pricing','catalog','capabilities']);
+    fields(body, ['api_url', 'api_key', 'model_name', 'version', 'pricing','catalog','capabilities','interface_type','auth_header']);
     if (body.version !== row.version) fail(409, 'version_conflict');
     const endpoint = body.api_url === undefined ? row.api_url : apiUrl(body.api_url);
     const model = body.model_name === undefined ? row.model_name : text(body.model_name);
@@ -219,7 +242,7 @@ export async function models(store: Store, user: Actor, method: string, url: URL
       const changed = store.run('UPDATE models SET api_url=?,model_name=?,api_key=?,version=version+?,updated_at=? WHERE id=? AND version=?', endpoint, model, key, endpoint!==row.api_url||model!==row.model_name?1:0, new Date().toISOString(), id, row.version);
       if (!changed.changes) fail(409, 'version_conflict');
       if(pricing!==undefined)savePricing(store,id,pricing);
-      if(body.catalog!==undefined||body.capabilities!==undefined)saveModelMetadata(store,id,body);
+      if(body.catalog!==undefined||body.capabilities!==undefined||body.interface_type!==undefined||body.auth_header!==undefined)saveModelMetadata(store,id,body);
       store.audit(user.id, 'model.updated', id, row.repository_id);
       return { model: publicModel(store,store.get('SELECT * FROM models WHERE id=?', id)!) };
     });
@@ -227,15 +250,18 @@ export async function models(store: Store, user: Actor, method: string, url: URL
   // Draft connection tests reuse the saved key under the same edit authorization, without writing configuration.
   if ([`/api/models/${id}/upstream`, `/api/models/${id}/test`].includes(path) && method === 'POST') {
     const test = path.endsWith('/test');
-    fields(body, ['api_url','api_key','version', ...(test ? ['model_name'] : [])]);
+    fields(body, ['api_url','api_key','version','interface_type','auth_header', ...(test ? ['model_name'] : [])]);
     if (test && Object.keys(body).length && body.version === undefined) fail(400,'model_version_required');
     if (body.version !== undefined && body.version !== row.version) fail(409,'version_conflict');
     const key = typeof body.api_key === 'string' && body.api_key.trim() ? text(body.api_key,32768) : row.api_key === null ? '' : String(store.secrets.open(row.api_key, `model:${id}`).value || '');
     if (!key) return fail(409, 'model_key_missing');
     // A URL saved before the query/fragment rule is checked again rather than probed as written.
     const endpoint = apiUrl(body.api_url !== undefined ? body.api_url : row.api_url);
+    const modelName = body.model_name === undefined ? String(row.model_name) : text(body.model_name);
+    const savedProtocol = modelProtocol(store, { id, api_url: endpoint, model_name: modelName });
+    const options = probeProtocol(body, savedProtocol);
     store.audit(user.id, test ? 'model.tested' : 'model.upstream_listed', id, row.repository_id);
-    return test ? testUpstreamModel(endpoint, key, body.model_name === undefined ? row.model_name : text(body.model_name)) : listUpstreamModels(endpoint, key);
+    return test ? testUpstreamModel(endpoint, key, modelName, options) : listUpstreamModels(endpoint, key, options);
   }
   if (path === `/api/models/${id}/credentials/revoke` && method === 'POST') {
     fields(body, []);

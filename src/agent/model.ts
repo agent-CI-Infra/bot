@@ -1,5 +1,5 @@
 import { readToolResult } from './tool-results.js';
-import { modelCapabilities } from '../models/catalog.js';
+import { modelCapabilities, modelProtocol, type ModelInterfaceType } from '../models/catalog.js';
 import { commandTool } from './command.js';
 import { type Store } from '../storage/database.js';
 import { stop } from './common.js';
@@ -26,10 +26,15 @@ export function selectedModel(store: Store, repositoryId: string, taskKind?: str
 export const visibleModel = (store: Store, repositoryId: string, modelId: string) => store.get(`SELECT m.* FROM models m WHERE m.id=? AND
     (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))`, modelId, repositoryId, repositoryId);
 /** The run-time model of a visible row; the key is opened here and never stored with a role snapshot. */
-export interface RuntimeModel { id:string; version:number; url:string; key:string; model:string; pricing:ReturnType<typeof pricingFor>; capabilities?:ReturnType<typeof modelCapabilities> }
+export interface RuntimeModel {
+  id: string; version: number; url: string; key: string; model: string;
+  pricing: ReturnType<typeof pricingFor>;
+  capabilities?: ReturnType<typeof modelCapabilities>;
+  protocol?: ReturnType<typeof modelProtocol>;
+}
 export function openModel(store: Store, row: Record<string, any>): RuntimeModel {
   const key=String(store.secrets.open(row.api_key,`model:${row.id}`).value||'');if(!key)return stop('model_key_missing','waiting_configuration',`模型 ${row.id} 的凭据为空，请重新配置。`);
-  return {id:String(row.id),version:Number(row.version),url:String(row.api_url),key,model:String(row.model_name),pricing:pricingFor(store,String(row.id)),capabilities:modelCapabilities(store,row as any)};
+  return {id:String(row.id),version:Number(row.version),url:String(row.api_url),key,model:String(row.model_name),pricing:pricingFor(store,String(row.id)),capabilities:modelCapabilities(store,row as any),protocol:modelProtocol(store,row as any)};
 }
 // The one place a saved model URL becomes request addresses (tasks, model listing and model tests all use it).
 // Only a trailing slash and a trailing /chat/completions are removed; /v1 is never added or removed, so the base the
@@ -38,6 +43,28 @@ export function modelEndpoints(url:string){
   const base=url.replace(/\/$/,'').replace(/\/chat\/completions$/,'');
   let path='';try{path=new URL(base).pathname;}catch{/* A saved URL was validated on write; an unparsable one simply has no /v1. */}
   return {chat_url:base+'/chat/completions',models_url:base+'/models',has_v1:/\/v1$/.test(path)};
+}
+export function resolveModelWireUrl(url: string, interfaceType: ModelInterfaceType = 'openai-chat-completions'): string {
+  const trimmed = url.replace(/\/$/, '');
+  if (interfaceType === 'openai-chat-completions') return modelEndpoints(url).chat_url;
+  if (interfaceType === 'anthropic-messages') {
+    if (trimmed.endsWith('/messages')) return trimmed;
+    const stripped = trimmed.replace(/\/(?:chat\/completions|responses)$/, '');
+    let path = ''; try { path = new URL(stripped).pathname; } catch {}
+    return /\/v1$/.test(path) ? stripped + '/messages' : stripped + '/v1/messages';
+  }
+  if (trimmed.endsWith('/responses')) return trimmed;
+  const stripped = trimmed.replace(/\/(?:chat\/completions|messages)$/, '');
+  let path = ''; try { path = new URL(stripped).pathname; } catch {}
+  return !path || path === '/' ? stripped + '/v1/responses' : stripped + '/responses';
+}
+export function resolveModelsListUrl(url: string, interfaceType: ModelInterfaceType = 'openai-chat-completions'): string {
+  if (interfaceType === 'openai-chat-completions') return modelEndpoints(url).models_url;
+  const stripped = url.replace(/\/$/, '').replace(/\/(?:chat\/completions|responses|messages|models)$/, '');
+  let path = ''; try { path = new URL(stripped).pathname; } catch {}
+  if (interfaceType === 'anthropic-messages' && !/\/v1$/.test(path)) return stripped + '/v1/models';
+  if (interfaceType === 'openai-responses' && (!path || path === '/')) return stripped + '/v1/models';
+  return stripped + '/models';
 }
 const fn=(name:string,description:string,properties:Record<string,unknown>,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
 const string={type:'string'};
