@@ -330,12 +330,12 @@ test('a task read token reaches runner commands only as GH_TOKEN and GITHUB_TOKE
   assert.equal((await command('echo "$GH_TOKEN"', dir, 10000)).output, '\n');
   // The answer to a token request goes to the request it was made for, and only that one.
   const { agentOperation } = await import('../runner/agent.mjs'), id = 'a'.repeat(48);
-  mkdirSync(join(dir, 'agent')); writeFileSync(join(dir, 'agent/token-request.json'), JSON.stringify({ id }));
-  assert.deepEqual((await agentOperation({ type: 'workspace_agent_poll' }, dir)).token_request, { id });
+  mkdirSync(join(dir, 'agent', 'token-requests'), { recursive: true }); writeFileSync(join(dir, 'agent', 'token-requests', `${id}.json`), JSON.stringify({ id }));
+  assert.deepEqual((await agentOperation({ type: 'workspace_agent_poll' }, dir)).token_requests, [{ id }]);
   const base64 = Buffer.from(JSON.stringify({ token })).toString('base64');
   await assert.rejects(agentOperation({ type: 'workspace_agent_token', request_id: 'b'.repeat(48), base64 }, dir), /agent_request_changed/);
   assert.deepEqual(await agentOperation({ type: 'workspace_agent_token', request_id: id, base64 }, dir), { written: true });
-  assert.equal(JSON.parse(readFileSync(join(dir, `agent/token-reply-${id}.json`), 'utf8')).token, token);
+  assert.equal(JSON.parse(readFileSync(join(dir, 'agent', 'token-replies', `${id}.json`), 'utf8')).token, token);
 });
 
 test('the global permission check measures only the App definition and keeps its GitHub settings link', async t => {

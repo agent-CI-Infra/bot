@@ -1,10 +1,12 @@
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { randomId } from '../core/security.js';
 import { runTools } from '../agent/runtime.js';
 import { managedSession } from '../harness/session.js';
 import { acpHarness } from './acp.js';
 import { claudeCodeHarness } from './claude-code.js';
+import { createTaskToolDispatcher } from './task-tools.js';
 import { prepareClaudeCode } from '../harness/claude-code.js';
 import { claudeCodeRuntime } from '../harness/claude-code-protocol.js';
 import type { AgentSpec,AgentServices } from '../agent/runtime.js';
@@ -109,25 +111,27 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
  const control=tools.map(t=>t.function.name).filter(name=>!own.has(name)||(finish?.names??[finish?.name]).includes(name));
  const config={...(base?.config??{capabilities:{workspace:{read:false,write:false,notes:false,shell:false},github:{permissions:{},publication:'none'},agents:false,writes:[]},finish_tools:[],finish_on_pull_request:false,review_session:false}),
   system:spec.system,prompt:spec.prompt,tools,control_tools:control,workspace_id:env.workspace.task.workspace_id};
- let submitted:{value:T}|undefined,repairs=0;
- return piAdapter<T>({store:spec.store,taskId:spec.task.id,guard:spec.guard,workspace:env.workspace,redactor:spec.redactor,config,conversation:base?.conversation,platform:base?.platform,repository:base?.repository,token:base?.token,createPullRequest:base?.createPullRequest,publication:base?.publication,
-  offered:name=>tools.some(t=>t.function.name===name),resume:env.resume,key:env.key,signal:spec.executionSignal,maxRequests:base?undefined:spec.maxTurns??32,finalizationTools:spec.finalizationTools??(finish?.names??(finish?[finish.name]:[])),finalizationMessage:finish?.finalizationMessage,checkpoint:spec.checkpoint,runtime:env.runtime,
-  // Pi may refuse a call itself (unknown tool, schema mismatch) before the control plane sees it; the model output always
-  // passes through here, so every forbidden call is recorded whatever the runtime did with it.
-  inspect:message=>{for(const call of message?.tool_calls??[]){const name=String(call.function?.name);if(!tools.some(t=>t.function.name===name)){spec.onDenied?.(name,'not_offered');continue;}let args:any=null;try{args=JSON.parse(call.function.arguments);}catch{}spec.screen?.(name,args);}},
-  control:async(name,args)=>{
-   if(finish&&(finish.names??[finish.name]).includes(name)){try{const value=await finish.validate(args,name);submitted={value};return {result:{submitted:true,submission:args,submission_name:name},finish:true};}catch(error){const feedback=spec.repairInvalid?.(error);if(!feedback||repairs++>=2)throw error;return {result:{error:'invalid_submission',message:spec.redactor.text(feedback)}};}}
-   const value=spec.execute?await spec.execute(name,args):{error:'tool_not_allowed'};
-   traceEvent(spec.store,spec.task.id,'tool_observation',{name,arguments:spec.redactor.clean(args),observation:spec.redactor.clean(value)},spec.task.trace_run_id,'tool');
-   return {result:value};
-  },
-  complete:async(state,publication)=>{
-   if(submitted)return submitted.value;
-   // A session that finished while the control plane was away carries its submission; validate it again from task facts.
-   if(finish&&state.result?.submitted===true)return finish.validate(state.result.submission,state.result.submission_name);
-   if(base?.complete)return base.complete(state,publication);
-   return stop('role_submission_required','retry_wait','Pi 会话结束但没有通过控制面提交结果。');
-  }});
+ return async(services:AgentServices):Promise<T>=>{
+  const dispatcher=createTaskToolDispatcher(spec,{maxRepairs:2,includeSubmissionDetails:true,skipScreen:true});
+  try{
+   return await piAdapter<T>({store:spec.store,taskId:spec.task.id,guard:spec.guard,workspace:env.workspace,redactor:spec.redactor,config,conversation:base?.conversation,platform:base?.platform,repository:base?.repository,token:base?.token,createPullRequest:base?.createPullRequest,publication:base?.publication,
+    offered:name=>tools.some(t=>t.function.name===name),resume:env.resume,key:env.key,signal:spec.executionSignal,maxRequests:base?undefined:spec.maxTurns??32,finalizationTools:spec.finalizationTools??(finish?.names??(finish?[finish.name]:[])),finalizationMessage:finish?.finalizationMessage,checkpoint:spec.checkpoint,runtime:env.runtime,
+    // Pi may refuse a call itself (unknown tool, schema mismatch) before the control plane sees it; the model output always
+    // passes through here, so every forbidden call is recorded whatever the runtime did with it.
+    inspect:message=>{for(const call of message?.tool_calls??[]){const name=String(call.function?.name);if(!tools.some(t=>t.function.name===name)){spec.onDenied?.(name,'not_offered');continue;}let args:any=null;try{args=JSON.parse(call.function.arguments);}catch{}spec.screen?.(name,args);}},
+    control:async(name,args,meta)=>{
+     const out=await dispatcher.call(dispatcher.token,{id:meta?.id??randomId(),name,arguments:args,transport:'mailbox'});
+     return {result:out.observation,...(out.submitted?{finish:true}:{})};
+    },
+    complete:async(state,publication)=>{
+     if(dispatcher.submitted)return dispatcher.result as T;
+     // A session that finished while the control plane was away carries its submission; validate it again from task facts.
+     if(finish&&state.result?.submitted===true)return finish.validate(state.result.submission,state.result.submission_name);
+     if(base?.complete)return base.complete(state,publication);
+     return stop('role_submission_required','retry_wait','Pi 会话结束但没有通过控制面提交结果。');
+    }})(services);
+  }finally{await dispatcher.close();}
+ };
 }
 export function roleHarness(id:string){
  if(!adapters.has(id))throw new Error('unknown_role_harness');const factory=adapters.get(id);

@@ -246,7 +246,7 @@ test('workspace development keeps publication tools and write capabilities after
       configBytes.push(Buffer.from(request.base64,'base64'));
       if (request.final) config = JSON.parse(Buffer.concat(configBytes));
     }
-    if (request.type === 'workspace_agent_poll') return published ? {state:'completed'} : {state:'running',pull_request:{id:'a'.repeat(48),arguments:{summary:'Fixed',test_command:'npm test'}}};
+    if (request.type === 'workspace_agent_poll') return published ? {state:'completed'} : {state:'running',tool_requests:[{id:'a'.repeat(48),kind:'pull_request',name:'create_pull_request',arguments:{summary:'Fixed',test_command:'npm test'}}]};
     return {};
   }};
   const result = await agentLoop(f.store,{...f.spec.task,kind:'development.issue'},workspace,f.spec.redactor,f.spec.guard,{},undefined,async()=>{published=true;return {pr:{number:1}};});

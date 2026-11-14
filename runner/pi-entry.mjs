@@ -9,6 +9,7 @@ import {commandOptions} from './command-policy.mjs';
 import {waitModelReply} from './model-reply.mjs';
 import {toolCapabilityError,platformWrites} from './capabilities.mjs';
 import {createRepositoryTool} from './repository-tool.mjs';
+import {createToolDispatch} from './tool-dispatch.mjs';
 import {createTokenExchange,createReadGrant} from './token-exchange.mjs';
 import {createToolResultGuard} from './repository-context.mjs';
 import {runSubagent} from './subagent.mjs';
@@ -30,8 +31,9 @@ const clean=value=>JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='s
 const writeEvent=value=>{const line=JSON.stringify(clean(value))+'\n';events=events.then(()=>appendFile(dir+'/events.jsonl',line,{mode:0o600}));return events;};
 // Asks the control plane for a read-only GitHub token through the task mailbox, as model requests do.
 const exchange=createTokenExchange(dir),grant=createReadGrant(exchange,token=>secrets.add(token));
-// Repository exploration and the platform's write tools run in the control plane, through one mailbox.
+// Repository exploration, publication and control-plane tools share the per-request tool mailbox with mcp-bridge.mjs.
 const repositoryTool=createRepositoryTool(dir);
+const dispatchTool=createToolDispatch(dir);
 // The tools that end the task: finish_review unless the configuration names others (a development task ends with its PR).
 const finishTools=new Set(config.finish_tools||['finish_review']);
 // The calls that end this session as the model sees them: the finish tools and, for development, create_pull_request.
@@ -44,27 +46,13 @@ const controlTools=new Set(config.control_tools||[]);
 // The SDK version that actually runs, from its installed manifest; reported with every state and session event.
 const sdk={agent:'pi',package:'@earendil-works/pi-coding-agent',version:await readFile(new URL('../package.json',import.meta.resolve('@earendil-works/pi-coding-agent')),'utf8').then(text=>JSON.parse(text).version).catch(()=>'unknown'),node:process.version};
 async function controlTool(name,args,signal){
-  const id=randomBytes(24).toString('hex'),reply=dir+'/control-reply-'+id+'.json';
-  await writeFile(dir+'/control-request.tmp',JSON.stringify({id,name,arguments:args}),{mode:0o600});await rename(dir+'/control-request.tmp',dir+'/control-request.json');
-  try{
-    for(;;){
-      if(signal?.aborted)return {result:{error:'control_tool_cancelled'}};
-      const value=await readFile(reply,'utf8').then(JSON.parse).catch(()=>null);if(value)return value;
-      await new Promise(resolve=>setTimeout(resolve,100));
-    }
-  }finally{await unlink(dir+'/control-request.json').catch(()=>{});await unlink(reply).catch(()=>{});}
+  const reply=await dispatchTool(name,args,{kind:'control',signal,cancelledError:'control_tool_cancelled'});
+  return reply&&typeof reply==='object'&&'result' in reply?reply:{result:reply};
 }
 // Publication can include a long-running policy command. Wait for the control plane instead of
 // ending the session or imposing a request deadline.
-async function createPullRequest(args){
-  const id=randomBytes(24).toString('hex'),reply=dir+'/pr-reply-'+id+'.json';
-  await writeFile(dir+'/pr-request.tmp',JSON.stringify({id,arguments:args}),{mode:0o600});await rename(dir+'/pr-request.tmp',dir+'/pr-request.json');
-  try{
-    for(;;){
-      const value=await readFile(reply,'utf8').then(JSON.parse).catch(()=>null);if(value)return value;
-      await new Promise(resolve=>setTimeout(resolve,100));
-    }
-  }finally{await unlink(dir+'/pr-request.json').catch(()=>{});await unlink(reply).catch(()=>{});}
+function createPullRequest(args,signal){
+  return dispatchTool('create_pull_request',args,{kind:'pull_request',signal,cancelledError:'pull_request_cancelled'});
 }
 // The control plane answers only between turns, after all tool results have entered history.
 async function boundary(stage){
@@ -116,7 +104,7 @@ try{
       else if(['github_read','github_search','read_job_log','read_task_history','record_progress','search_project_memory','read_project_memory','remember_project_memory'].includes(name)||Object.hasOwn(platformWrites,name)&&!agent)result=await repositoryTool(name,args,signal);
       else if(finishTools.has(name)&&!agent){finished=args;result={finished:true};}
       else if(name==='create_pull_request'&&!agent){
-        result=await createPullRequest(args);
+        result=await createPullRequest(args,signal);
         // Development ends with its pull request; other workflows publish one and carry on to their own finish.
         if(config.finish_on_pull_request!==false&&(result.pr||result.status==='no_changes')){finished={...args,...result};setTimeout(()=>void session.abort(),10);}
       }

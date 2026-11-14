@@ -91,6 +91,7 @@ export class RoleConversations {
     const invoke = async (system:string,prompt:string,tools:any[],execute:NonNullable<AgentSpec<string>['execute']>,prefix:string):Promise<string> => {
       let space:Workspace|undefined,open=true;
       const invocation=id+':'+prefix,token=randomId(),accounting=externalModelRecorder(this.store,task,invocation,driver.id,logicalInstance.id);
+      redactor.add(token);
       try {
         await guard(); const spec:AgentSpec<string>={store:this.store,task,model:resolved.model,redactor,guard,beforeModel:()=>guard(true),executionSignal:controller.signal,cancelSignal:controller.signal,
           system,prompt,tools,maxTurns:budget.max_turns??(prefix==='summary'?4:24),maxOutputTokens:budget.max_output_tokens??undefined,modelAttempts:1,
@@ -104,13 +105,16 @@ export class RoleConversations {
             traceEvent(this.store,id,'conversation_tool',{name});
           },
           roleRun:{instance_id:logicalInstance.id,role:source.caller.role!,version:snapshot.prompt.system_hash,harness:snapshot.harness.id,recovery_mode:'rebuilt_from_authorized_conversation',snapshot_id:resolved.id},
-          ...(driver.externalModel?{harnessSessionKey:invocation,runAccess:{token,check:(presented:unknown)=>{
+          harnessSessionKey:invocation,
+          runAccess:{token,check:(presented:unknown)=>{
+            if(presented!==token)stop('run_token_invalid','failed');
             const held=this.store.get('SELECT lease,lease_until FROM role_conversations WHERE id=?',source.id);
-            if(presented!==token||!open||controller.signal.aborted||held?.lease!==lease||held.lease_until<=Date.now()||this.store.get('SELECT state FROM role_conversation_turns WHERE id=?',id)?.state!=='running'||roleAuthority(this.store,source.caller.project_id,snapshot,undefined,true))stop('run_token_revoked','cancelled');
+            if(!open||controller.signal.aborted||held?.lease!==lease||held.lease_until<=Date.now()||this.store.get('SELECT state FROM role_conversation_turns WHERE id=?',id)?.state!=='running'||!this.store.get('SELECT 1 FROM policies WHERE repository_id=? AND enabled=1',source.caller.project_id)||roleAuthority(this.store,source.caller.project_id,snapshot,undefined,true))stop('run_token_revoked','cancelled');
             assertTaskSource(this.store,source.caller);source.guard();if(source.fence()!==fence)stop('run_token_revoked','cancelled');
-          }},onExternalRequest:accounting.request,onHarnessEvent:accounting.event}:{}),
+          }},
+          ...(driver.externalModel?{onExternalRequest:accounting.request,onHarnessEvent:accounting.event}:{}),
           onExternalUsage:usage=>traceEvent(this.store,id,'external_model_usage',{...usage,cost:'unknown'})};
-        if(driver.externalModel){redactor.add(token);await driver.prepare?.(spec);}
+        if(driver.externalModel)await driver.prepare?.(spec);
         spec.runContext=()=>({...buildRunContext(this.store,{task,scope:'conversation:'+source.id+':'+source.caller.role,run_id:invocation,lease_epoch:logicalInstance.sequence,instance:logicalInstance,role:source.caller.role!,snapshot,snapshot_id:resolved.id,candidate:null}),
           ...(spec.harnessBinding?{model_revision:spec.harnessBinding.model_revision,harness_revision:spec.harnessBinding.harness_revision}:{})});
         traceEvent(this.store,id,'conversation_run',{run_context:spec.runContext(),recovery:'rebuilt_from_authorized_conversation'});

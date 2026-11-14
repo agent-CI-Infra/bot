@@ -1,37 +1,45 @@
-import {readFile,writeFile,rename,unlink} from 'node:fs/promises';
-import {setTimeout as delay} from 'node:timers/promises';
-import {randomBytes} from 'node:crypto';
+import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
+import { randomBytes } from 'node:crypto';
 
-// Only token exchanges use this single-slot queue; other Pi tools remain independent.
-export function createTokenExchange(dir){
-  let pending=Promise.resolve();
-  return async function exchange(signal){
-    const cancelled={error:'github_read_token_cancelled'};
-    const run=pending.then(async()=>{
-      if(signal?.aborted)return cancelled;
-      const id=randomBytes(24).toString('hex'),reply=dir+'/token-reply-'+id;
-      try{
-        await writeFile(dir+'/token-request.tmp',JSON.stringify({id}),{mode:0o600});
-        await rename(dir+'/token-request.tmp',dir+'/token-request.json');
-        for(const end=Date.now()+120000;Date.now()<end;){
-          if(signal?.aborted)return cancelled;
-          const value=await readFile(reply+'.json','utf8').then(JSON.parse).catch(()=>null);if(value)return value;
-          await delay(100,undefined,{signal});
-        }
-        return {error:'github_read_token_timeout'};
-      }catch(error){if(signal?.aborted)return cancelled;throw error;}
-      finally{
-        const current=await readFile(dir+'/token-request.json','utf8').then(JSON.parse).catch(()=>null);
-        if(current?.id===id)await unlink(dir+'/token-request.json').catch(()=>{});
-        await unlink(reply+'.json').catch(()=>{});await unlink(reply+'.tmp').catch(()=>{});
+// Each token exchange owns token-requests/<id>.json and waits for token-replies/<id>.json,
+// allowing concurrent callers without head-of-line blocking or request collisions.
+export function createTokenExchange(dir, options = {}) {
+  const requestsDir = dir + '/token-requests', repliesDir = dir + '/token-replies';
+  const defaultToken = options.token ?? null;
+  let dirsReady;
+  const ensureDirs = () => (dirsReady ??= Promise.all([
+    mkdir(requestsDir, { recursive: true, mode: 0o700 }),
+    mkdir(repliesDir, { recursive: true, mode: 0o700 })
+  ]));
+
+  return async function exchange(signal, callOptions = {}) {
+    const cancelled = { error: 'github_read_token_cancelled' };
+    if (signal?.aborted) return cancelled;
+    await ensureDirs();
+    if (signal?.aborted) return cancelled;
+    const id = randomBytes(24).toString('hex');
+    const reqBase = `${requestsDir}/${id}`, replyBase = `${repliesDir}/${id}`;
+    const token = callOptions.token !== undefined ? callOptions.token : defaultToken;
+    try {
+      await writeFile(reqBase + '.tmp', JSON.stringify({ id, ...(token ? { token } : {}) }), { mode: 0o600 });
+      await rename(reqBase + '.tmp', reqBase + '.json');
+      for (const end = Date.now() + 120000; Date.now() < end;) {
+        if (signal?.aborted) return cancelled;
+        const value = await readFile(replyBase + '.json', 'utf8').then(JSON.parse).catch(() => null);
+        if (value) return value;
+        await delay(50, undefined, signal ? { signal } : undefined);
       }
-    });
-    pending=run.catch(()=>{});
-    if(!signal)return run;
-    // A queued cancellation returns immediately, even while an earlier caller still owns the slot.
-    let abort;
-    const interrupted=new Promise(resolve=>{abort=()=>resolve(cancelled);signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();});
-    try{return await Promise.race([run,interrupted]);}finally{signal.removeEventListener('abort',abort);}
+      return { error: 'github_read_token_timeout' };
+    } catch (error) {
+      if (signal?.aborted) return cancelled;
+      throw error;
+    } finally {
+      await unlink(reqBase + '.json').catch(() => {});
+      await unlink(reqBase + '.tmp').catch(() => {});
+      await unlink(replyBase + '.json').catch(() => {});
+      await unlink(replyBase + '.tmp').catch(() => {});
+    }
   };
 }
 

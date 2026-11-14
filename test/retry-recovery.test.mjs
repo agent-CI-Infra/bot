@@ -54,7 +54,7 @@ for(const kind of ['review.issue','development.issue'])for(const fault of ['tran
         if(request.type==='workspace_agent_poll'){
           const process=processes.get(id);assert.equal(process?.alive,true,'must start a new process instead of polling a dead PID');
           if(failing)return {ok:true,result:fault==='interrupted'?{state:'interrupted',offset:45}:{state:'running',request:{id:'c'.repeat(48),body:{messages:[{role:'user',content:'Review.'}]}}}};
-          if(kind.startsWith('development.')&&!process.published){process.published=true;return {ok:true,result:{state:'running',pull_request:{id:'d'.repeat(48),arguments:{summary:'No changes needed.',test_command:'node --test'}}}};}
+          if(kind.startsWith('development.')&&!process.published){process.published=true;return {ok:true,result:{state:'running',tool_requests:[{id:'d'.repeat(48),kind:'pull_request',name:'create_pull_request',arguments:{summary:'No changes needed.',test_command:'node --test'}}]}};}
           return {ok:true,result:{state:'completed',result:review}};
         }
         if(request.type==='workspace_finalize')return {ok:true,result:{tree_sha:'b'.repeat(40),files:[]}};

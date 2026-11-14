@@ -203,8 +203,8 @@ test('publication replies are allowed and policy cleanup preserves the waiting a
   // Cleanup after a policy command and a task's release end only that task's processes; the last task clears the computer.
   const f = fixture(t); await f.projects.register('101');
   const workspace_id = id(), execute = request => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request });
-  await execute({ type: 'workspace_agent_pull_request', workspace_id, request_id: id(), base64: Buffer.from('{}').toString('base64'), offset: 0, final: true });
-  assert.ok(f.docker.runs.some(r => r.type === 'workspace_agent_pull_request'));
+  await execute({ type: 'workspace_agent_tool', workspace_id, request_id: id(), base64: Buffer.from('{}').toString('base64'), offset: 0, final: true });
+  assert.ok(f.docker.runs.some(r => r.type === 'workspace_agent_tool'));
   for(const type of ['workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_reuse','workspace_cache','workspace_agent_progress']){
     await execute({type,workspace_id,request_id:id(),base64:Buffer.from('{}').toString('base64'),offset:0,final:true,sequence:1});
     assert.ok(f.docker.runs.some(r=>r.type===type),type);

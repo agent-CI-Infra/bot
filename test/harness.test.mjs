@@ -2,7 +2,7 @@ import test from 'node:test';import assert from 'node:assert/strict';import {ran
 import {roleHarness} from '../dist/roles/harness.js';
 import {request as httpRequest} from 'node:http';
 import {roleApi} from '../dist/roles/api.js';
-import {Store} from '../dist/storage/database.js';import {TaskRecords} from '../dist/tasks/service.js';import {runRole} from '../dist/roles/run.js';import {Redactor,TaskError} from '../dist/agent/common.js';import {managedSession} from '../dist/harness/session.js';import {taskToolServer} from '../dist/roles/task-tools.js';
+import {Store} from '../dist/storage/database.js';import {TaskRecords} from '../dist/tasks/service.js';import {runRole} from '../dist/roles/run.js';import {Redactor,TaskError} from '../dist/agent/common.js';import {managedSession} from '../dist/harness/session.js';import {taskToolServer,createTaskToolDispatcher,handleMailboxToolRequest} from '../dist/roles/task-tools.js';
 const tool=name=>({type:'function',function:{name,description:name,parameters:{type:'object',properties:{},additionalProperties:true}}});
 function fixture(t,env={}){const root=mkdtempSync(join(tmpdir(),'bot-acp-')),key=randomBytes(32),file=join(root,'db');let s=new Store(file,key);s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('r','fixture/OpenToday','o','a')");s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('t','r','task.request','running','acp fixture','{}')");new TaskRecords(s).contract('t',{goal:'acp fixture',scope:['fixture'],criteria:['Read the task fact'],endpoint:'artifact'});const config=join(root,'acp.json');writeFileSync(config,JSON.stringify({command:process.execPath,args:[resolve('test/fixtures/acp-agent.mjs')],env,stateDirectory:join(root,'sessions'),timeoutMs:5000}));const old=process.env.BOT_ACP_CONFIG;process.env.BOT_ACP_CONFIG=config;
  t.after(()=>{s.close();if(old===undefined)delete process.env.BOT_ACP_CONFIG;else process.env.BOT_ACP_CONFIG=old;rmSync(root,{recursive:true,force:true});});
@@ -53,4 +53,70 @@ test('ACP loads an ordinary pinned Skill over MCP and rebuilds an obsolete exter
  assert.equal(second.instance_id,first.instance_id);assert.notEqual(next.sessionId,binding.sessionId);assert.notEqual(next.recoveryMode,'native_resume');
  assert.equal(second.result.summary,first.result.summary);assert.ok(f.s.get("SELECT 1 FROM task_history WHERE type='role_guidance_migrated'"));
  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='skill_read'").n,2);
+});
+
+test('transport-agnostic task tool dispatcher runs non-submission tools in parallel, drains before single submission, checks policy and enforces mailbox run tokens', async t => {
+  const f = fixture(t);
+  f.s.run("INSERT INTO policies(repository_id,enabled,development_enabled) VALUES('r',1,1)");
+  const order = [], resolvers = new Map();
+  let tokenState = 'ok', validatedCount = 0;
+  const spec = {
+    ...f.spec,
+    tools: [tool('inspect_a'), tool('inspect_b'), tool('finish')],
+    runAccess: {
+      token: 'rrt_' + 'a'.repeat(12) + '.' + 'b'.repeat(43),
+      check: () => { if (tokenState !== 'ok') throw new TaskError(tokenState, 'failed'); }
+    },
+    execute: (name, args) => new Promise(resolve => {
+      resolvers.set(name, () => { order.push(name); resolve({ inspected: name, ...args }); });
+    }),
+    finish: {
+      name: 'finish',
+      validate: async v => {
+        validatedCount++;
+        order.push('validate:' + v.summary);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        return v;
+      }
+    }
+  };
+  const dispatcher = createTaskToolDispatcher(spec);
+  // Start two parallel non-submission calls and finish them out of order.
+  const callA = dispatcher.call(dispatcher.token, { id: '1'.repeat(48), name: 'inspect_a', arguments: { n: 1 }, transport: 'mailbox' });
+  const callB = dispatcher.call(dispatcher.token, { id: '2'.repeat(48), name: 'inspect_b', arguments: { n: 2 }, transport: 'mailbox' });
+  while (resolvers.size < 2) await new Promise(resolve => setTimeout(resolve, 5));
+  // Submit two concurrent finish calls while inspect_a is still in flight; inspect_b completes first, then inspect_a.
+  const fin1 = dispatcher.call(dispatcher.token, { id: '3'.repeat(48), name: 'finish', arguments: { summary: 'first' }, transport: 'mailbox' });
+  const fin2 = dispatcher.call(dispatcher.token, { id: '4'.repeat(48), name: 'finish', arguments: { summary: 'second' }, transport: 'mailbox' });
+  resolvers.get('inspect_b')();
+  assert.deepEqual((await callB).observation, { inspected: 'inspect_b', n: 2 });
+  assert.equal(validatedCount, 0, 'finish waits for in-flight non-submission tools before validating');
+  resolvers.get('inspect_a')();
+  assert.deepEqual((await callA).observation, { inspected: 'inspect_a', n: 1 });
+  const [out1, out2] = await Promise.all([fin1, fin2]);
+  assert.equal(validatedCount, 1);
+  assert.equal(out1.submitted !== out2.submitted, true);
+  assert.deepEqual(out1.submitted ? out2.observation : out1.observation, { error: 'execution_already_submitted' });
+  assert.deepEqual(order.slice(0, 2), ['inspect_b', 'inspect_a']);
+  assert.equal(dispatcher.submitted, true);
+
+  // Mailbox token enforcement: forged/missing/revoked tokens are refused, delivered to the caller and recorded as capability_denied.
+  const fresh = createTaskToolDispatcher(spec);
+  const chunks = [];
+  const forged = await handleMailboxToolRequest(fresh, spec.redactor, { id: '5'.repeat(48), name: 'inspect_a', arguments: {}, token: 'forged' }, async chunk => { chunks.push(chunk); return {}; });
+  assert.deepEqual(forged.observation, { error: 'run_token_invalid' });
+  assert.equal(chunks.length, 1);
+  tokenState = 'run_token_revoked';
+  await assert.rejects(handleMailboxToolRequest(fresh, spec.redactor, { id: '6'.repeat(48), name: 'inspect_a', arguments: {}, token: fresh.token }, async () => ({})), { code: 'run_token_revoked' });
+
+  // Disabling the repository policy refuses tool calls immediately with repository_policy_disabled.
+  tokenState = 'ok';
+  f.s.run("UPDATE policies SET enabled=0 WHERE repository_id='r'");
+  await assert.rejects(fresh.call(fresh.token, { id: '7'.repeat(48), name: 'inspect_a', arguments: {}, transport: 'mailbox' }), { code: 'repository_policy_disabled' });
+  const denied = f.s.all("SELECT data FROM task_history WHERE type='capability_denied'").map(r => JSON.parse(r.data).reason);
+  assert.ok(denied.includes('run_token_invalid'));
+  assert.ok(denied.includes('run_token_revoked'));
+  assert.ok(denied.includes('repository_policy_disabled'));
+  await dispatcher.close();
+  await fresh.close();
 });

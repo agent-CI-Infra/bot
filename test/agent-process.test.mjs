@@ -29,11 +29,11 @@ function proxyWorkspace(logs=[]) {
     if(request.type==='workspace_agent_config'){configBytes.push(Buffer.from(request.base64,'base64'));if(request.final)config=JSON.parse(Buffer.concat(configBytes));return {written:true};}
     if(request.type==='workspace_agent_start')return {started:true};
     if(request.type==='workspace_agent_reply'){replyBytes.push(Buffer.from(request.base64,'base64'));if(request.final)replied=true;return {written:true};}
-    if(request.type==='workspace_agent_pull_request'){if(request.final)publication=true;return {written:true};}
+    if(request.type==='workspace_agent_tool'){if(request.final)publication=true;return {written:true};}
     if(request.type==='workspace_agent_poll'){
       if(!replied)return {state:'running',request:{id:'a'.repeat(48),body:{stream:true,messages:[{role:'system',content:config.system},{role:'user',content:config.prompt}]}},events:[],offset:0};
       const reply=JSON.parse(Buffer.concat(replyBytes)),chunk=JSON.parse(reply.body.split('\n')[0].slice(6)),call=chunk.choices[0].delta.tool_calls[0];
-      if(call.function.name==='create_pull_request'&&!publication)return {state:'running',pull_request:{id:'b'.repeat(48),arguments:JSON.parse(call.function.arguments)}};
+      if(call.function.name==='create_pull_request'&&!publication)return {state:'running',tool_requests:[{id:'b'.repeat(48),kind:'pull_request',name:'create_pull_request',arguments:JSON.parse(call.function.arguments)}]};
       return {state:'completed',result:JSON.parse(call.function.arguments),events:[{type:'model',content:'Pi finished',tool_calls:[{name:call.function.name}]}],offset:1};
     }
     throw new Error('unexpected runner request');
@@ -229,7 +229,7 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
   const runner=()=>{const delivered=[];let phase='token';return {delivered,manager:{call:async(_method,_path,input)=>{const r=input.request;
     if(r.type==='workspace_agent_token'){delivered.push(JSON.parse(Buffer.from(r.base64,'base64')));phase='model';return {ok:true,result:{written:true}};}
     if(r.type==='workspace_agent_poll'){
-      if(phase==='token')return {ok:true,result:{state:'running',token_request:{id:'b'.repeat(48)},events:[],offset:0}};
+      if(phase==='token')return {ok:true,result:{state:'running',token_requests:[{id:'b'.repeat(48)}],events:[],offset:0}};
       if(phase==='model')return {ok:true,result:{state:'running',request:{id:'c'.repeat(48),body:{messages:[{role:'tool',content:'GH_TOKEN='+token}]}},events:[],offset:0}};
       return {ok:true,result:{state:'completed',result:finish,events:[],offset:0}};
     }
@@ -279,11 +279,11 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
     else if (r.type === 'workspace_agent_poll') {
       if (custom && terminal) value = { state: 'completed', result: { summary: 'Opened a fix for the addition.', findings: [] } };
       else if (terminal) value = { state: 'completed', result: { ...args, ...terminal } };
-      else if (custom?.issue && !filed) value = { state: 'running', repository_tool: { id: 'f'.repeat(48), name: 'github_write', arguments: { method: 'POST', path: '/issues', key: 'follow-up', body: { title: 'Follow-up: @someone document add', body: 'Ask @someone to document add.' } } } };
+      else if (custom?.issue && !filed) value = { state: 'running', tool_requests: [{ id: 'f'.repeat(48), kind: 'repository', name: 'github_write', arguments: { method: 'POST', path: '/issues', key: 'follow-up', body: { title: 'Follow-up: @someone document add', body: 'Ask @someone to document add.' } } }] };
       else {
         if (!started) { started = true; if (change) write('calc.mjs', revision ? 'export const add = (a, b) => Number(a) + Number(b);\n' : 'export const add = (a, b) => a + b;\n'); }
         ids[step] ||= randomBytes(24).toString('hex');
-        value = { state: 'running', pull_request: { id: ids[step], arguments: args } };
+        value = { state: 'running', tool_requests: [{ id: ids[step], kind: 'pull_request', name: 'create_pull_request', arguments: args }] };
       }
     } else if (r.type === 'workspace_finalize') {
       snapshots++; git('add', '--all'); const tree_sha = git('write-tree');
@@ -302,7 +302,10 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
       try { value = { exit_code: 0, output: execFileSync('/bin/sh', ['-c', r.command], { cwd: repoDirectory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), timed_out: false, truncated: false }; }
       catch (error) { value = { exit_code: error.status, output: String(error.stdout) + String(error.stderr), timed_out: false, truncated: false }; }
       if (validationResult) value = { ...value, ...validationResult };
-    } else if (r.type === 'workspace_agent_pull_request') {
+    } else if (r.type === 'workspace_agent_tool' && r.request_id === 'f'.repeat(48)) {
+      toolBytes.push(Buffer.from(r.base64, 'base64'));
+      if (r.final) { toolReplies.push(JSON.parse(Buffer.concat(toolBytes))); toolBytes = []; filed = true; }
+    } else if (r.type === 'workspace_agent_tool') {
       bytes.push(Buffer.from(r.base64, 'base64'));
       if (r.final) {
         const reply = JSON.parse(Buffer.concat(bytes)); bytes = []; replies.push(reply);
@@ -314,9 +317,6 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
         else if (repair) { assert.ok(reply.error==='validation_failed'||reply.error?.startsWith('acceptance_'));  write('ready', 'fixed\n'); write('calc.mjs', 'export const add = (a, b) => Number(a) + Number(b);\n'); step++; }
         else value = { error: 'fixture_stopped_after_reply' };
       }
-    } else if (r.type === 'workspace_agent_repository_tool') {
-      toolBytes.push(Buffer.from(r.base64, 'base64'));
-      if (r.final) { toolReplies.push(JSON.parse(Buffer.concat(toolBytes))); toolBytes = []; filed = true; }
     } else if (r.type === 'workspace_context' || r.type === 'workspace_cache') value = { written: true };
     else if (r.type !== 'reap') throw new Error('Unexpected fixture operation ' + r.type);
     return { ok: true, result: value };
@@ -419,8 +419,8 @@ test('an Actions failure analysis runs as a task in the project computer: the fa
     else if (r.type === 'workspace_cache') value = { written: true };
     else if (r.type === 'workspace_agent_config') { configBytes.push(Buffer.from(r.base64, 'base64')); if (r.final) config = JSON.parse(Buffer.concat(configBytes)); value = { written: true }; }
     else if (r.type === 'workspace_agent_start') value = { started: true };
-    else if (r.type === 'workspace_agent_poll') value = step < calls.length ? { state: 'running', repository_tool: { id: String(step).repeat(48), ...calls[step] } } : { state: 'completed', result: { summary: 'One external, one code failure.' } };
-    else if (r.type === 'workspace_agent_repository_tool') { toolBytes.push(Buffer.from(r.base64, 'base64')); if (r.final) { toolReplies.push(JSON.parse(Buffer.concat(toolBytes))); toolBytes = []; step++; } }
+    else if (r.type === 'workspace_agent_poll') value = step < calls.length ? { state: 'running', tool_requests: [{ id: String(step).repeat(48), kind: 'repository', ...calls[step] }] } : { state: 'completed', result: { summary: 'One external, one code failure.' } };
+    else if (r.type === 'workspace_agent_tool') { toolBytes.push(Buffer.from(r.base64, 'base64')); if (r.final) { toolReplies.push(JSON.parse(Buffer.concat(toolBytes))); toolBytes = []; step++; } }
     else if (r.type !== 'reap') throw new Error('Unexpected fixture operation ' + r.type);
     return { ok: true, result: value };
   } };
@@ -573,13 +573,14 @@ test('the runner mailbox waits for publication replies and preserves only the ex
   const h = await harness(t), root = join(h.directory, 'workspace'), dir = join(root, 'agent'); mkdirSync(dir, { recursive: true });
   const id = 'a'.repeat(48), args = { summary: 'Ready', test_command: 'true' };
   writeFileSync(join(dir, 'state.json'), JSON.stringify({ state: 'running', pid: 123 }));
-  writeFileSync(join(dir, 'pr-request.json'), JSON.stringify({ id, arguments: args }));
+  mkdirSync(join(dir, 'tool-requests'), { recursive: true });
+  writeFileSync(join(dir, 'tool-requests', id + '.json'), JSON.stringify({ id, kind: 'pull_request', name: 'create_pull_request', arguments: args }));
   const value = { pr: { number: 70, html_url: 'https://github.invalid/pull/70', sha: 'b'.repeat(40) } }, reply = Buffer.from(JSON.stringify(value));
   const pending = await agentOperation({ type: 'workspace_agent_poll' }, root);
-  assert.deepEqual(pending.pull_request, { id, arguments: args });
-  assert.ok(!existsSync(join(dir, 'pr-reply-' + id + '.json')));
-  for (let offset = 0; offset < reply.length; offset += 20) await agentOperation({ type: 'workspace_agent_pull_request', request_id: id, base64: reply.subarray(offset, offset + 20).toString('base64'), offset, final: offset + 20 >= reply.length }, root);
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'pr-reply-' + id + '.json'))), value);
+  assert.deepEqual(pending.tool_requests, [{ id, kind: 'pull_request', name: 'create_pull_request', arguments: args }]);
+  assert.ok(!existsSync(join(dir, 'tool-replies', id + '.json')));
+  for (let offset = 0; offset < reply.length; offset += 20) await agentOperation({ type: 'workspace_agent_tool', request_id: id, base64: reply.subarray(offset, offset + 20).toString('base64'), offset, final: offset + 20 >= reply.length }, root);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'tool-replies', id + '.json'))), value);
   const processes = [{ pid: 123, cmdline: 'node /opt/runner/pi-entry.mjs ' + root }, { pid: 124, cmdline: 'test child' }];
   assert.equal(await waitingAgent(root, processes), 123);
   assert.equal(await waitingAgent(root, [{ pid: 123, cmdline: 'another process' }]), null);

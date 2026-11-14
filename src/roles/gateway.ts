@@ -32,7 +32,7 @@ const permissionToolName: Record<string, string> = { read_task_record: 'read_tas
 /** The gateway capabilities a role's permissions allow; a token carries only these. */
 export const gatewayCapabilities = (snapshot: RoleSnapshot) => gatewayToolNames.filter(name => !snapshot.capability.tools || snapshot.capability.tools.includes(permissionToolName[name]!)).map(name => 'gateway:' + name);
 const refusal = (code: string) => ({ error: code });
-export interface GatewayRequest { tool: string; arguments?: any; run_id?: string; lease_epoch?: number; request_id?: string }
+export interface GatewayRequest { tool: string; arguments?: any; run_id?: string; lease_epoch?: number; role?: string; request_id?: string }
 
 export class TaskToolGateway {
   constructor(private readonly store: Store) {}
@@ -41,13 +41,13 @@ export class TaskToolGateway {
   async call(token: string, request: GatewayRequest): Promise<any> {
     const s = this.store, name = String(request.tool ?? '');
     let binding: ReturnType<typeof verifyRunToken>;
-    try { binding = verifyRunToken(s, token, { run_id: request.run_id, lease_epoch: request.lease_epoch }); }
+    try { binding = verifyRunToken(s, token, { run_id: request.run_id, lease_epoch: request.lease_epoch, role: request.role }); }
     catch (error) { return this.denied(null, name, (error as TaskError).code ?? 'run_token_invalid', request); }
     const run = s.get('SELECT * FROM task_runs WHERE id=?', binding.run_id), task = run ? s.get('SELECT * FROM tasks WHERE id=?', run.task_id) : undefined;
     if (!run || !task) return this.denied(null, name, 'role_run_unknown', request);
     const context = { run, task, binding };
     if (run.status !== 'running') return this.denied(context, name, 'role_run_not_running', request);
-    if (String(task.repository_id) !== binding.project_id || tenantOf(s, String(task.repository_id)) !== binding.tenant_id) return this.denied(context, name, 'run_token_scope_mismatch', request);
+    if (String(task.repository_id) !== binding.project_id || tenantOf(s, String(task.repository_id)) !== binding.tenant_id || (binding.role !== null && String(run.role ?? '') !== binding.role)) return this.denied(context, name, 'run_token_scope_mismatch', request);
     if (!gatewayToolNames.includes(name)) return this.denied(context, name, 'tool_not_allowed', request);
     if (!binding.capabilities.includes('gateway:' + name)) return this.denied(context, name, 'run_token_capability_denied', request);
     // The person behind a requested task must still hold the right; event tasks act for the installation the engine guards.

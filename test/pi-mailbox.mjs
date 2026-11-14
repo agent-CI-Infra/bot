@@ -51,9 +51,9 @@ export function fakeRunner({ version = '1.4.0', reapKills = true } = {}) {
         const offset = request.offset || 0, events = sp.events.slice(offset, offset + 20);
         return { state, pid: 1, result: sp.result, events, offset: offset + events.length, has_more: offset + events.length < sp.events.length,
           request: sp.alive && p?.kind === 'request' ? { id: p.id, body: p.body } : null,
-          control_tool: sp.alive && p?.kind === 'control_tool' ? { id: p.id, name: p.name, arguments: p.arguments } : null };
+          tool_requests: sp.alive && p?.kind === 'control_tool' ? [{ id: p.id, kind: 'control', name: p.name, arguments: p.arguments }] : [] };
       }
-      case 'workspace_agent_reply': case 'workspace_agent_control_tool': {
+      case 'workspace_agent_reply': case 'workspace_agent_tool': {
         if (sp.pending?.id !== request.request_id) throw new Error('agent_request_changed');
         const value = collect(sp, request); if (!value) return { written: true };
         const p = sp.pending; sp.pending = null;

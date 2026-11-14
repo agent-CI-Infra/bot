@@ -214,7 +214,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   };
   const exhaustStage=(limit:string):never=>{live.stage_exhausted=limit;const b=live.bound;if(b&&leaseCurrent(s,b.run_id,b.epoch)){recordCheckpoint(s,{run_id:b.run_id,lease_epoch:b.epoch,instance_id:instance.id,reason:'stage_budget_exhausted:'+limit});appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'budget',category:'budget',data:{stage_id:stage?.stage_id,limit}});revokeRunTokens(s,b.run_id,'stage_budget_exhausted');}return stop('stage_budget_exhausted','paused',limit);};
   const budgetGuard=(pendingTools=0)=>{assertStageRun(s,task.id,assignment,snapshot.kind);const stageLimit=stageBudgetExceeded(s,assignment);if(stageLimit)exhaustStage(stageLimit);if(!cumulative||!live.bound)return;const reached=budgetExceeded(budget,instanceUsage(s,instance.id),{tool_calls:pendingTools});if(reached)exhaust(reached);};
-  const access={get token(){return live.bound?.token??'';},check(presented:unknown){const b=live.bound;if(!b||presented!==b.token)throw new TaskError('run_token_invalid','failed');verifyRunToken(s,presented,{run_id:b.run_id,lease_epoch:b.epoch});}};
+  const access={get token(){return live.bound?.token??'';},check(presented:unknown){const b=live.bound;if(!b||presented!==b.token)throw new TaskError('run_token_invalid','failed');verifyRunToken(s,presented,{tenant_id:b.ctx.tenant_id,project_id:b.ctx.project_id,task_id:b.ctx.task_id!,run_id:b.run_id,lease_epoch:b.epoch,role});}};
   let executionRun:string|undefined;
   const wrapped:AgentSpec<T>={...spec,model,tools,pi:env.pi??spec.pi,runEnvironment:env.environment?.handle,
    guard:async()=>{await spec.guard();authority();const b=live.bound;if(b){assertLease(s,b.run_id,b.epoch);if(!touchRunToken(s,b.token_id,tokenTtl))stop('run_token_revoked','cancelled','运行的能力令牌已撤销或过期，运行停止。');budgetGuard();}},
@@ -249,7 +249,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
      }
      if(taskManagementTools.some(t=>t.function.name===name)){try{return new TaskCommands(s).tool(caller(),name,args);}catch(error){const code=String((error as any).code??'');if(['task_not_owned','task_not_found','task_management_forbidden','task_executor_forbidden','task_scope_forbidden'].includes(code))return {error:code,instruction:'This action was refused. Continue with the offered task records or arrange authorized work; the refusal does not authorize broader access.'};throw error;}}
      // Task facts are expanded through the gateway with this run's token: the same server-side checks for every adapter.
-     if(b&&gatewayToolNames.includes(name))return gateway(s).call(b.token,{tool:name,arguments:args,run_id:b.run_id,lease_epoch:b.epoch});
+     if(b&&gatewayToolNames.includes(name))return gateway(s).call(b.token,{tool:name,arguments:args,run_id:b.run_id,lease_epoch:b.epoch,role});
      if(name==='read_skill'&&snapshot.skills){const files=skillFiles(s,task.repository_id,snapshot.skills);if(args?.path===undefined)return {bundle:{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,source:snapshot.skills.source},files:files.map(({content,...f})=>f)};
       const file=files.find(f=>f.path===args.path);if(!file)return {error:'skill_file_not_found',files:files.map(f=>f.path)};
       traceEvent(s,task.id,'skill_read',{role,instance_id:instance.id,bundle:{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,source:snapshot.skills.source},path:file.path,sha256:file.sha256},task.trace_run_id,'role:'+role);return {path:file.path,sha256:file.sha256,content:file.content};}
@@ -306,7 +306,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    }
    s.run('UPDATE task_runs SET run_context=?,resume_from_run_id=?,admission=?,protocol_recovery=?,operation_id=? WHERE id=?',JSON.stringify(ctx),previous??null,JSON.stringify(admission),mode,operationId,runId);
    if(ctx.task_id===null)stop('role_run_protocol_invalid','waiting_configuration','Task RoleRun requires task scope.');
-   const issued=issueRunToken(s,{tenant_id:ctx.tenant_id,project_id:ctx.project_id,task_id:ctx.task_id!,run_id:runId,lease_epoch:lease.epoch},[...gatewayCapabilities(snapshot),'events:write','checkpoint:write'],tokenTtl);
+   const issued=issueRunToken(s,{tenant_id:ctx.tenant_id,project_id:ctx.project_id,task_id:ctx.task_id!,run_id:runId,lease_epoch:lease.epoch,role},[...gatewayCapabilities(snapshot),'events:write','checkpoint:write'],tokenTtl);
    spec.redactor.add(issued.token);
    live.bound={ctx,token:issued.token,token_id:issued.id,run_id:runId,epoch:lease.epoch};
    appendRunEvent(s,{run_id:runId,lease_epoch:lease.epoch,type:'run_started',category:'progress',operation_id:operationId,data:{assignment_id:scope,resume_from_run_id:previous??null,recovery_mode:mode,start_mode:recover,candidate_ref:ctx.candidate_ref,source_ref:ctx.source_ref,budget:ctx.budget.policy_ref,admitted:admission.required}});

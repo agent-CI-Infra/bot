@@ -18,12 +18,17 @@ const digest = (value: string) => createHash('sha256').update(value).digest('hex
 export function roleRunStorage(s: Store) {
   s.db.exec(`CREATE TABLE IF NOT EXISTS role_run_leases(scope TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,epoch INTEGER NOT NULL,run_id TEXT NOT NULL,claim_token TEXT,updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS role_run_tokens(id TEXT PRIMARY KEY,token_hash TEXT NOT NULL UNIQUE,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-      run_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,capabilities TEXT NOT NULL,issued_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,revoked_at INTEGER,revoke_reason TEXT);
+      run_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,role TEXT,capabilities TEXT NOT NULL,issued_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,revoked_at INTEGER,revoke_reason TEXT);
     CREATE INDEX IF NOT EXISTS role_run_tokens_run ON role_run_tokens(run_id);
     CREATE TABLE IF NOT EXISTS role_run_events(run_id TEXT NOT NULL,seq INTEGER NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,lease_epoch INTEGER NOT NULL,type TEXT NOT NULL,
       category TEXT NOT NULL,operation_id TEXT,source_version TEXT NOT NULL,digest TEXT NOT NULL,history_ref TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(run_id,seq));
     CREATE UNIQUE INDEX IF NOT EXISTS role_run_event_operation ON role_run_events(run_id,type,operation_id) WHERE operation_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS role_run_event_task ON role_run_events(task_id,type,category);`);
+  const tokenColumns = new Set(s.all('PRAGMA table_info(role_run_tokens)').map(r => r.name));
+  if (!tokenColumns.has('role')) {
+    s.db.exec('ALTER TABLE role_run_tokens ADD COLUMN role TEXT');
+    s.db.exec('UPDATE role_run_tokens SET role=(SELECT r.role FROM task_runs r WHERE r.id=role_run_tokens.run_id) WHERE role IS NULL');
+  }
   const existing = new Set(s.all('PRAGMA table_info(task_runs)').map(r => r.name));
   for (const [name, type] of Object.entries({ lease_scope: 'TEXT', lease_epoch: 'INTEGER', resume_from_run_id: 'TEXT', run_context: 'TEXT', admission: 'TEXT', protocol_recovery: 'TEXT', operation_id: 'TEXT' }))
     if (!existing.has(name)) s.db.exec(`ALTER TABLE task_runs ADD COLUMN ${name} ${type}`);
@@ -62,13 +67,14 @@ export function assertLease(s: Store, runId: string, epoch: number) {
 }
 
 // ---------------------------------------------------------------- capability tokens
-export interface RunBinding { tenant_id: string; project_id: string; task_id: string; run_id: string; lease_epoch: number }
+export interface RunBinding { tenant_id: string; project_id: string; task_id: string; run_id: string; lease_epoch: number; role?: string }
 const tokenPattern = /^rrt_([A-Za-z0-9_-]{12})\.([A-Za-z0-9_-]{43})$/;
 /** Issues a token for one run. Only its hash is stored; the value goes to the adapter and into the run's redactor. */
 export function issueRunToken(s: Store, binding: RunBinding, capabilities: string[], ttlMs = 15 * 60_000, at = Date.now()) {
   if (!Number.isSafeInteger(ttlMs) || ttlMs < 1000 || ttlMs > 60 * 60_000) throw new TaskError('run_token_ttl_invalid', 'failed');
   const id = randomBytes(9).toString('base64url'), secret = randomBytes(32).toString('base64url');
-  s.run('INSERT INTO role_run_tokens VALUES(?,?,?,?,?,?,?,?,?,?,NULL,NULL)', id, digest(secret), binding.tenant_id, binding.project_id, binding.task_id, binding.run_id, binding.lease_epoch, JSON.stringify([...new Set(capabilities)].sort()), at, at + ttlMs);
+  s.run('INSERT INTO role_run_tokens(id,token_hash,tenant_id,project_id,task_id,run_id,lease_epoch,role,capabilities,issued_at,expires_at,revoked_at,revoke_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,NULL)',
+    id, digest(secret), binding.tenant_id, binding.project_id, binding.task_id, binding.run_id, binding.lease_epoch, binding.role ?? null, JSON.stringify([...new Set(capabilities)].sort()), at, at + ttlMs);
   return { token: `rrt_${id}.${secret}`, id, expires_at: at + ttlMs };
 }
 /** Throws a TaskError whose code names the refusal: invalid, expired, revoked, another scope, a stale lease or a missing capability. */
@@ -80,11 +86,11 @@ export function verifyRunToken(s: Store, token: unknown, expect: Partial<RunBind
   if (!row || !timingSafeEqual(Buffer.from(String(row.token_hash), 'hex'), Buffer.from(digest(match[2]!), 'hex'))) return deny('run_token_invalid');
   if (row.revoked_at !== null) deny('run_token_revoked');
   if (Number(row.expires_at) <= at) deny('run_token_expired');
-  for (const [key, value] of Object.entries(expect)) if (value !== undefined && String(row[key]) !== String(value)) deny('run_token_scope_mismatch');
+  for (const [key, value] of Object.entries(expect)) if (value !== undefined && String(row[key] ?? '') !== String(value)) deny('run_token_scope_mismatch');
   if (!leaseCurrent(s, String(row.run_id), Number(row.lease_epoch))) deny('lease_epoch_stale');
   const granted: string[] = JSON.parse(String(row.capabilities));
   if (capability && !granted.includes(capability)) deny('run_token_capability_denied');
-  return { id: String(row.id), tenant_id: String(row.tenant_id), project_id: String(row.project_id), task_id: String(row.task_id), run_id: String(row.run_id), lease_epoch: Number(row.lease_epoch), capabilities: granted, expires_at: Number(row.expires_at) };
+  return { id: String(row.id), tenant_id: String(row.tenant_id), project_id: String(row.project_id), task_id: String(row.task_id), run_id: String(row.run_id), lease_epoch: Number(row.lease_epoch), role: row.role !== null && row.role !== undefined ? String(row.role) : null, capabilities: granted, expires_at: Number(row.expires_at) };
 }
 /**
  * Sliding expiry: a token stays valid only while its run keeps passing control-plane guards.

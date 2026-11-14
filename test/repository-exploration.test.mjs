@@ -86,9 +86,9 @@ test('serialized UTF-8 results use the existing 2 MiB capacity without truncatin
     else { assert.equal(result.error, 'repository_result_too_large'); assert.match(result.detail, /path.*recursive.*page/); }
     if (size === limit) {
       const root = join(f.h.directory, 'exact-mailbox'), dir = join(root, 'agent'), id = 'a'.repeat(48), reply = Buffer.from(JSON.stringify(result));
-      mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'repository-request.json'), JSON.stringify({ id }));
-      for (let offset = 0; offset < reply.length; offset += 30000) await agentOperation({ type: 'workspace_agent_repository_tool', request_id: id, base64: reply.subarray(offset, offset + 30000).toString('base64'), offset, final: offset + 30000 >= reply.length }, root);
-      assert.deepEqual(JSON.parse(readFileSync(join(dir, 'repository-reply-' + id + '.json'))), data);
+      mkdirSync(join(dir, 'tool-requests'), { recursive: true }); writeFileSync(join(dir, 'tool-requests', id + '.json'), JSON.stringify({ id, kind: 'repository', name: 'github_read' }));
+      for (let offset = 0; offset < reply.length; offset += 30000) await agentOperation({ type: 'workspace_agent_tool', request_id: id, base64: reply.subarray(offset, offset + 30000).toString('base64'), offset, final: offset + 30000 >= reply.length }, root);
+      assert.deepEqual(JSON.parse(readFileSync(join(dir, 'tool-replies', id + '.json'))), data);
     }
   }
   data = { items: [{ repository_url: f.apiUrl + '/repos/fixture/project-101', body: 'x'.repeat(limit) }] };
@@ -112,12 +112,12 @@ test('review and development Pi adapters execute the same repository tools throu
   let authorized = false, index = 0, reply = [];
   const workspace = { log() {}, async call(_key, input) {
     if (input.type !== 'workspace_agent_poll') return { written: true, started: true };
-    if (!authorized) return { state: 'running', token_request: { id: 'a'.repeat(48) } };
-    if (index < requests.length) return { state: 'running', repository_tool: { id: String(index).padStart(48, 'b'), ...requests[index] } };
+    if (!authorized) return { state: 'running', token_requests: [{ id: 'a'.repeat(48) }] };
+    if (index < requests.length) return { state: 'running', tool_requests: [{ id: String(index).padStart(48, 'b'), kind: 'repository', ...requests[index] }] };
     return { state: 'completed', result: { summary: 'Read related evidence.', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' } };
   }, async deliver(input) {
     if (input.type === 'workspace_agent_token') authorized = true;
-    if (input.type === 'workspace_agent_repository_tool') { reply.push(Buffer.from(input.base64, 'base64')); if (input.final) { replies.push(JSON.parse(Buffer.concat(reply))); reply = []; index++; } }
+    if (input.type === 'workspace_agent_tool') { reply.push(Buffer.from(input.base64, 'base64')); if (input.final) { replies.push(JSON.parse(Buffer.concat(reply))); reply = []; index++; } }
     return { written: true };
   } };
   const result = await agentLoop(f.h.store, task, workspace, f.redactor, async () => {}, {}, f.tokens);
@@ -130,14 +130,14 @@ test('review and development Pi adapters execute the same repository tools throu
   assert.match(replies[0].content, /compiler/); assert.equal(f.state.tokens.length, issued + 1);
 });
 
-test('runner repository-tool mailbox binds replies to the current request and preserves chunk order', async t => {
-  const f = await releaseFixture(t), root = join(f.h.directory, 'exploration'), dir = join(root, 'agent'); mkdirSync(dir, { recursive: true });
-  const id = 'a'.repeat(48); writeFileSync(join(dir, 'repository-request.json'), JSON.stringify({ id, name: 'github_read', arguments: { path: '/issues/42' } }));
-  assert.equal((await agentOperation({ type: 'workspace_agent_poll' }, root)).repository_tool.name, 'github_read');
-  await assert.rejects(agentOperation({ type: 'workspace_agent_repository_tool', request_id: 'b'.repeat(48), base64: '', offset: 0 }, root), /agent_request_changed/);
+test('runner tool mailbox binds replies to the matching request id and preserves chunk order', async t => {
+  const f = await releaseFixture(t), root = join(f.h.directory, 'exploration'), dir = join(root, 'agent'); mkdirSync(join(dir, 'tool-requests'), { recursive: true });
+  const id = 'a'.repeat(48); writeFileSync(join(dir, 'tool-requests', id + '.json'), JSON.stringify({ id, kind: 'repository', name: 'github_read', arguments: { path: '/issues/42' } }));
+  assert.equal((await agentOperation({ type: 'workspace_agent_poll' }, root)).tool_requests[0].name, 'github_read');
+  await assert.rejects(agentOperation({ type: 'workspace_agent_tool', request_id: 'b'.repeat(48), base64: '', offset: 0 }, root), /agent_request_changed/);
   const reply = Buffer.from(JSON.stringify({ content: '仓库内容'.repeat(100) }));
-  for (let offset = 0; offset < reply.length; offset += 25) await agentOperation({ type: 'workspace_agent_repository_tool', request_id: id, base64: reply.subarray(offset, offset + 25).toString('base64'), offset, final: offset + 25 >= reply.length }, root);
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'repository-reply-' + id + '.json'))), JSON.parse(reply));
+  for (let offset = 0; offset < reply.length; offset += 25) await agentOperation({ type: 'workspace_agent_tool', request_id: id, base64: reply.subarray(offset, offset + 25).toString('base64'), offset, final: offset + 25 >= reply.length }, root);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'tool-replies', id + '.json'))), JSON.parse(reply));
 });
 
 test('real Workspace delivery ignores only abandoned repository replies, including runner-wrapped errors', async t => {
@@ -150,25 +150,25 @@ test('real Workspace delivery ignores only abandoned repository replies, includi
   };
   const cases = [
     { error: 'agent_request_changed', continues: true },
-    { error: 'runner_operation_failed', detail: 'workspace_agent_repository_tool: agent_request_changed', continues: true },
+    { error: 'runner_operation_failed', detail: 'workspace_agent_tool: agent_request_changed', continues: true },
     { error: 'agent_reply_offset' },
-    { error: 'runner_operation_failed', detail: 'workspace_agent_repository_tool: agent_reply_offset' },
+    { error: 'runner_operation_failed', detail: 'workspace_agent_tool: agent_reply_offset' },
     { error: 'runner_operation_failed' },
     { error: 'runner_operation_failed', detail: 'workspace_agent_progress: agent_request_changed' },
-    { error: 'runner_operation_failed', detail: 'workspace_agent_repository_tool: agent_request_changed unexpectedly' }
+    { error: 'runner_operation_failed', detail: 'workspace_agent_tool: agent_request_changed unexpectedly' }
   ];
   for (const [index, { continues, ...failure }] of cases.entries()) await t.test(JSON.stringify(failure), async () => {
     const id = 'late-' + index;
     f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES(?,'101','review.issue','running','Read')", id);
     const task = f.h.store.get('SELECT * FROM tasks WHERE id=?', id), deliveries = [];
     const manager = { async call(_method, _path, { request }) {
-      if (request.type === 'workspace_agent_repository_tool') {
+      if (request.type === 'workspace_agent_tool') {
         deliveries.push(request); return { ok: false, ...failure };
       }
       if (request.type !== 'workspace_agent_poll') return { ok: true, result: {} };
       return { ok: true, result: deliveries.length
         ? { state: 'completed', result: { summary: 'Continued after the read.', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' } }
-        : { state: 'running', repository_tool: { id: 'a'.repeat(48), name: 'github_read', arguments: { path: '/issues/42/comments' } } } };
+        : { state: 'running', tool_requests: [{ id: 'a'.repeat(48), kind: 'repository', name: 'github_read', arguments: { path: '/issues/42/comments' } }] } };
     } };
     const workspace = new Workspace(f.h.store, manager, task, f.redactor, async () => {}, () => {});
     const running = agentLoop(f.h.store, task, workspace, f.redactor, async () => {}, {}, f.tokens);

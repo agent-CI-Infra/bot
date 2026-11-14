@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp,readFile,writeFile,appendFile,rm} from 'node:fs/promises';
+import {mkdir,mkdtemp,readdir,readFile,writeFile,appendFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -34,8 +34,9 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
     do{page=await agentOperation({type:'workspace_agent_poll',offset},root);all.push(...page.events);offset=page.offset;}while(page.has_more);
     return all;
   };
-  const request=await until(()=>readFile(join(dir,'token-request.json'),'utf8').then(JSON.parse).catch(()=>null));
-  await writeFile(join(dir,`token-reply-${request.id}.json`),JSON.stringify({token,expires_at:new Date(Date.now()+3600000).toISOString(),permissions:{contents:'read'},repository:'fixture/repo'}));
+  const request=await until(async()=>{const names=await readdir(join(dir,'token-requests')).catch(()=>[]);const file=names.find(n=>n.endsWith('.json'));return file&&JSON.parse(await readFile(join(dir,'token-requests',file),'utf8'));});
+  await mkdir(join(dir,'token-replies'),{recursive:true});
+  await writeFile(join(dir,'token-replies',`${request.id}.json`),JSON.stringify({token,expires_at:new Date(Date.now()+3600000).toISOString(),permissions:{contents:'read'},repository:'fixture/repo'}));
   await until(async()=>(await events()).find(event=>event.type==='tool_start'&&event.name==='run_command'));
   const pending=await events(),start=pending.find(event=>event.type==='tool_start'&&event.name==='run_command');
   assert.equal(start.command,command.replaceAll(token,'[REDACTED]'));assert.ok(!JSON.stringify(pending).includes(token));
@@ -43,10 +44,11 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
   const writeStart=pending.find(event=>event.type==='tool_start'&&event.name==='write_file');assert.equal(writeStart.path,'file.txt');assert.ok(!JSON.stringify(writeStart).includes('private body'));
   assert.equal(pending.find(event=>event.type==='tool_start'&&event.name==='read_file').path,'file.txt');
   await writeFile(join(root,'repo','release'),'');
-  const publication=await until(()=>readFile(join(dir,'pr-request.json'),'utf8').then(JSON.parse).catch(()=>null));
+  const publication=await until(async()=>{const names=await readdir(join(dir,'tool-requests')).catch(()=>[]);const file=names.find(n=>n.endsWith('.json'));return file&&JSON.parse(await readFile(join(dir,'tool-requests',file),'utf8'));});
   const publishing=await events();assert.ok(publishing.some(event=>event.type==='tool_start'&&event.name==='create_pull_request'));
   assert.ok(!publishing.some(event=>event.type==='tool'&&event.name==='create_pull_request'));
-  await writeFile(join(dir,`pr-reply-${publication.id}.json`),JSON.stringify({pr:{number:1,html_url:'https://github.invalid/pull/1'}}));
+  await mkdir(join(dir,'tool-replies'),{recursive:true});
+  await writeFile(join(dir,'tool-replies',`${publication.id}.json`),JSON.stringify({pr:{number:1,html_url:'https://github.invalid/pull/1'}}));
   const [code]=await closed;assert.equal(code,0,output);assert.equal(JSON.parse(await readFile(join(dir,'state.json'),'utf8')).state,'completed',output);
   const all=await events();assert.ok(!JSON.stringify(all).includes(token));
   assert.equal((await readFile(join(base,'project-notes/repository.md'))).length,131072);

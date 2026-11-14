@@ -28,7 +28,7 @@ test('a call that would write is refused on a full volume; reads and answers to 
   assert.equal(refused.ok, false); assert.equal(refused.error, 'disk_full');
   assert.match(refused.detail, /^workspace_command: refused, nothing was run; the work volume has 200 MiB free of 1024000 MiB$/);
   for (const type of ['command', 'workspace_checkout', 'workspace_init', 'git_import', 'workspace_write', 'workspace_agent_start']) assert.equal(refuseFull({ type }, full)?.error, 'disk_full', type);
-  for (const type of ['workspace_read', 'workspace_blob', 'workspace_agent_poll', 'workspace_agent_reply', 'workspace_agent_control_tool']) assert.equal(refuseFull({ type }, full), null, type);
+  for (const type of ['workspace_read', 'workspace_blob', 'workspace_agent_poll', 'workspace_agent_reply', 'workspace_agent_tool']) assert.equal(refuseFull({ type }, full), null, type);
   assert.equal(refuseFull({ type: 'workspace_command' }, room), null);
   assert.equal(refuseFull({ type: 'workspace_command' }, () => null), null, 'an unreadable volume refuses nothing');
 });

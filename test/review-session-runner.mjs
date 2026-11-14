@@ -78,7 +78,7 @@ async function live(t,options={}){
 test('real Pi completes concurrent repository tools, keeps local reads parallel and recovers from oversized results',async t=>{
   let d,checkedParallel=false;const grants=[];
   d=await live(t,{execute:async(request,{base})=>{
-    if(request.type==='workspace_agent_repository_tool'&&!checkedParallel){
+    if(request.type==='workspace_agent_tool'&&!checkedParallel){
       // The first repository reply waits for read_file: making all Pi tools sequential would deadlock here.
       await until(async()=>{const events=await readFile(join(base,request.workspace_id,'agent/events.jsonl'),'utf8');return events.split('\n').filter(Boolean).map(JSON.parse).some(event=>event.type==='tool'&&event.name==='read_file');});
       checkedParallel=true;
@@ -107,8 +107,8 @@ test('real Pi completes concurrent repository tools, keeps local reads parallel 
   d.h.store.run("UPDATE accounts SET type='github_app',app_id='123',credentials=? WHERE id=?",d.h.store.secrets.seal({private_key:pem},'account:'+repo.account_id),repo.account_id);
   const [task]=await d.run();
   assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
-  assert.equal(d.requests.length,4);assert.ok(checkedParallel);assert.ok(d.operations.some(o=>o.type==='workspace_agent_repository_tool'));
-  assert.equal(d.operations.filter(o=>o.type==='workspace_agent_token').length,2,'both uncached token calls finish through the single mailbox');
+  assert.equal(d.requests.length,4);assert.ok(checkedParallel);assert.ok(d.operations.some(o=>o.type==='workspace_agent_tool'));
+  assert.equal(d.operations.filter(o=>o.type==='workspace_agent_token').length,2,'both uncached token calls finish through per-request token files');
   assert.ok(grants.some(g=>g.permissions.contents==='read'&&g.permissions.issues==='read'&&Object.values(g.permissions).every(v=>v==='read')));
   assert.ok(d.h.comments.some(c=>c.body.includes('Issue #42')));
 });

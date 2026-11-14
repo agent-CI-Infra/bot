@@ -210,8 +210,8 @@ test('review and development system prompts require useful maintained notes even
     const chunks=[]; let config, published=false;
     const work={log:()=>{},call:async(_key,request)=>{
       if(request.type==='workspace_agent_config'){chunks.push(Buffer.from(request.base64,'base64'));if(request.final)config=JSON.parse(Buffer.concat(chunks));}
-      if(request.type==='workspace_agent_pull_request')published=true;
-      if(request.type==='workspace_agent_poll')return kind.startsWith('development')&&!published?{state:'running',pull_request:{id:id(),arguments:{summary:'ready',test_command:'true'}}}:{state:'completed',result:{summary:'Reviewed',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]}};
+      if(request.type==='workspace_agent_tool')published=true;
+      if(request.type==='workspace_agent_poll')return kind.startsWith('development')&&!published?{state:'running',tool_requests:[{id:id(),kind:'pull_request',name:'create_pull_request',arguments:{summary:'ready',test_command:'true'}}]}:{state:'completed',result:{summary:'Reviewed',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]}};
       return {};
     }};
     await agentLoop(h.store,{id:'prompt',repository_id:'101',workspace_id:id(),kind},work,new Redactor(),async()=>{},{effective_rules:{files:[{path:'.bot/rules/pr-review.md',source:'repository',effective:'Replacement rules'}]}},undefined,async()=>({status:'no_changes'}));

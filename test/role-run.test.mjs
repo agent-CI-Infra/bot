@@ -56,7 +56,7 @@ function bound(s, { task = 't', scope = 'assign-1', project = 'r', role = 'dev',
   s.run('UPDATE task_runs SET role=?,role_instance_id=? WHERE id=?', role, instance, run.id);
   const lease = allocateLease(s, task, scope, run.id);
   const tenant = s.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)?.tenant_id ?? 'account:a';
-  return { run, epoch: lease.epoch, binding: { tenant_id: tenant, project_id: project, task_id: task, run_id: run.id, lease_epoch: lease.epoch } };
+  return { run, epoch: lease.epoch, binding: { tenant_id: tenant, project_id: project, task_id: task, run_id: run.id, lease_epoch: lease.epoch, role } };
 }
 
 test('protocol schemas: three candidate kinds with fixed versions; RunContext rejects unknown fields, moving refs and secrets', () => {
@@ -120,12 +120,13 @@ test('capability tokens are bound to tenant, project, task, run and epoch; reuse
   const f = await fixture(t, () => call('finish', {}));
   const a = bound(f.s), other = bound(f.s, { task: 'o', project: 'other', scope: 'assign-o' });
   const issued = issueRunToken(f.s, a.binding, ['gateway:read_task_record'], 60_000);
-  assert.equal(verifyRunToken(f.s, issued.token, { run_id: a.run.id, task_id: 't' }).run_id, a.run.id);
+  assert.equal(verifyRunToken(f.s, issued.token, { run_id: a.run.id, task_id: 't', role: 'dev' }).run_id, a.run.id);
   const refuse = (token, expect, code, extra) => assert.throws(() => verifyRunToken(f.s, token, expect, extra?.capability, extra?.at), { code });
   refuse(issued.token, { project_id: 'other' }, 'run_token_scope_mismatch');
   refuse(issued.token, { task_id: 'o' }, 'run_token_scope_mismatch');
   refuse(issued.token, { run_id: other.run.id }, 'run_token_scope_mismatch');
   refuse(issued.token, { tenant_id: 'account:b' }, 'run_token_scope_mismatch');
+  refuse(issued.token, { role: 'reviewer' }, 'run_token_scope_mismatch');
   refuse(issued.token, {}, 'run_token_capability_denied', { capability: 'gateway:propose_experience' });
   refuse(issued.token, {}, 'run_token_expired', { at: issued.expires_at + 1 });
   refuse('rrt_' + 'A'.repeat(12) + '.' + 'B'.repeat(43), {}, 'run_token_invalid');
@@ -134,6 +135,7 @@ test('capability tokens are bound to tenant, project, task, run and epoch; reuse
   // The gateway answers the same refusals as tool errors and records them; another task's run cannot use this token.
   const gateway = new TaskToolGateway(f.s);
   assert.deepEqual(await gateway.call(issued.token, { tool: 'read_task_record', arguments: { ref: 'task:t' }, run_id: other.run.id }), { error: 'run_token_scope_mismatch' });
+  assert.deepEqual(await gateway.call(issued.token, { tool: 'read_task_record', arguments: { ref: 'task:t' }, role: 'reviewer' }), { error: 'run_token_scope_mismatch' });
   // A takeover (a new run of the same assignment) makes the old epoch stale and revokes its tokens.
   const next = beginRun(f.s, f.task, 'execution', {}); const takeover = allocateLease(f.s, 't', 'assign-1', next.id);
   assert.equal(takeover.epoch > a.epoch, true); assert.equal(leaseCurrent(f.s, a.run.id, a.epoch), false);

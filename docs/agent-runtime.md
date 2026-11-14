@@ -34,11 +34,11 @@ Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这
 
 先调用 `github_read_token` 建立只读访问。令牌只覆盖当前接入仓库，权限取安装已授予的内容、Issue、PR、Actions 等读取项；缺少权限时返回诊断，不回退到写令牌。CI 的令牌不离开控制面。Pi 的结构化读取工具通过任务邮箱调用同一个执行器；原有命令工具继续可使用同一次签发的只读令牌，真实凭据不进入模型上下文。任务结束、失败或中止后撤销签发的令牌。
 
-Pi 在进程内串行执行 `github_read_token` 的令牌交换，控制面继续读取单个 `token-request.json`。活动或排队中的交换取消后及时返回 `github_read_token_cancelled`，后续调用可以继续；清理请求文件前核对请求 ID，避免删除其他调用的请求。`read_file`、发布与会话 boundary 不进入令牌队列。
+`github_read_token` 与平台工具请求均按请求 ID 写入独立文件（`token-requests/<id>.json` -> `token-replies/<id>.json`，`tool-requests/<id>.json` -> `tool-replies/<id>.json`），支持同轮多个工具调用与子 Agent 并行往返。取消后立即清理对应 ID 的请求与部分回复并返回 `github_read_token_cancelled` 或 `repository_tool_cancelled`，不影响其他在途调用。
 
-升级时同步更新控制面、manager 和项目电脑镜像；Pi 的结构化读取使用新的 `workspace_agent_repository_tool` 邮箱操作，旧 manager/runner 不支持该操作。项目主控另用 `workspace_agent_runtime`（报告 runner 实际安装的 Pi SDK 版本）和 `workspace_agent_control_tool`（控制面工具的回复），旧项目电脑镜像会返回 `pi_runtime_unavailable` 并等待升级。Pi 的会话事件 `pi_session` 记录实际 SDK 版本、提供的工具以及没有混入的扩展、技能和上下文文件；`src/agent/pi.ts` 固定的版本与 `runner/package.json` 由 `npm run check` 核对一致。
+升级时同步更新控制面、manager 和项目电脑镜像；结构化读取、PR 发布与控制面工具统一通过 `runner/tool-dispatch.mjs` 和 `workspace_agent_tool` 邮箱操作投递，控制面由无传输绑定的 `createTaskToolDispatcher` 统一校验工具白名单、运行身份令牌与租约、项目启用状态和单次提交。项目主控另用 `workspace_agent_runtime`（报告 runner 实际安装的 Pi SDK 版本），旧项目电脑镜像会返回 `pi_runtime_unavailable` 并等待升级。Pi 的会话事件 `pi_session` 记录实际 SDK 版本、提供的工具以及没有混入的扩展、技能和上下文文件；`src/agent/pi.ts` 固定的版本与 `runner/package.json` 由 `npm run check` 核对一致。
 
-Pi 在仓库工具内部串行使用邮箱，其他工具仍可并行执行。每个已进入邮箱的仓库请求最多等待 120 秒，超时返回 `repository_tool_timeout`；超时或取消后的迟到回复不会中断任务。共享执行器按现有 2 MiB 邮箱容量检查脱敏后 JSON 的 UTF-8 字节数，超出时向观察循环和 Pi 返回完整的 `repository_result_too_large` 工具错误。例如 `/git/trees/<sha>?recursive=1` 的结果无法投递时，模型应缩小 path、去掉 recursive 或继续分页，并用 page/per_page 减小每页结果；不会截断 JSON 后冒充成功结果。
+每个已进入邮箱的仓库请求最多等待 120 秒，超时返回 `repository_tool_timeout`；超时或取消后的迟到回复不会中断任务。共享执行器按现有 2 MiB 邮箱容量检查脱敏后 JSON 的 UTF-8 字节数，超出时向观察循环和 Pi 返回完整的 `repository_result_too_large` 工具错误。例如 `/git/trees/<sha>?recursive=1` 的结果无法投递时，模型应缩小 path、去掉 recursive 或继续分页，并用 page/per_page 减小每页结果；不会截断 JSON 后冒充成功结果。
 
 ## GitHub 写入（github_write）
 
@@ -70,7 +70,7 @@ Native、Process 和非入口 Pi 角色采用相同的收尾预留公式：`min(
 
 Pi 会话要靠调用完成工具结束：检视是 `finish_review`，开发是 `create_pull_request`，事件类任务是各自的提交工具。模型有时没调用完成工具就停下了，比如模型服务返回空回答或错误回答，或者只写了一段文字。这时如果最后一条回答是一段 JSON 结果，就照旧把它当作结果；否则 runner 会在同一个会话里提示模型从停下的地方继续，用已经完成的工作调用完成工具，任务日志记一条 `agent_nudge`。最多提示 3 次，仍未完成就以 `agent_finish_missing` 失败，原因写明缺的是哪个完成工具。这样，偶发的空回答不会让整次尝试作废，也不会再出现与原因无关的报错。由控制面接管结束的会话（项目主控）不受影响。
 
-仓库回复投递保留 runner 错误的 `detail`：只有直接返回的 `agent_request_changed`，或 `runner_operation_failed` 且 `detail` 恰为 `workspace_agent_repository_tool: agent_request_changed` 时，控制面才停止投递旧回复并继续轮询。分块偏移错误等其他投递故障仍中断任务；其他邮箱操作的中断条件保持不变。
+仓库回复投递保留 runner 错误的 `detail`：只有直接返回的 `agent_request_changed`，或 `runner_operation_failed` 且 `detail` 恰为 `workspace_agent_tool: agent_request_changed` 时，控制面才停止投递旧回复并继续轮询。分块偏移错误等其他投递故障仍中断任务；其他邮箱操作的中断条件保持不变。
 
 读取范围扩大不改变写入范围。CI 观察仍以触发 run/attempt 为分析目标，重跑或授权变化时停止，最终 job 结论仍核对触发快照；相关运行的日志只作为带来源的旁证。检视与开发可以检查其他相关对象，但实施目标、检视结果校验、GitHub 发布授权和受控 publisher 都保留原边界。新工具固定使用 GET，不接受自选仓库、任意 URL、路径逃逸或写入方法；搜索也不能改写仓库范围。自动 Actions 失败分类与单次重试仍是既有触发流程，不由这些读取工具执行。
 
