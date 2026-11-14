@@ -18,11 +18,17 @@ export const boardStages = [
 ];
 const successes = "('pr_opened','succeeded','completed')";
 const attention = actionStatuses;
-// #655: a task the bot stopped by itself (its Issue or PR was closed or turned into a draft) is not a request for a
-// person, so the card keeps the state its newest non-stopped task reached, and stays 未检视 when there is none.
-const stoppedStage = (alias: string, done: string) => `CASE WHEN ${settledStatusSQL(alias)} IN ${successes} THEN '${done}'
-  WHEN ${actionStatusSQL(settledStatusSQL(alias))} THEN 'attention' ELSE 'unreviewed' END`;
-const developing = "('queued','running','preparing','implementing','validating','publishing','waiting_pr_head','waiting_publication','waiting_environment','result_ready')";
+// #655: the bot stops a task by itself when the Issue or PR it works on is closed or turned into a draft. That stop is
+// not a request for a person, so the card keeps the state its newest task that did not stop that way reached: a task
+// still waiting for a person keeps the card in 需要处理, a finished one keeps 已检视/已开发, and with nothing to fall
+// back to the card stays 未检视. The fallback never says 正在检视/正在开发: the object is closed, so the bot will not
+// go on by itself.
+const stoppedStage = (alias: string, done: string) => `CASE WHEN ${actionStatusSQL(settledStatusSQL(alias))} THEN 'attention'
+  WHEN ${settledStatusSQL(alias)} IN ${successes} THEN '${done}' ELSE 'unreviewed' END`;
+// A state that waits for a person is judged before the development pipeline: `waiting_environment` and
+// `waiting_publication` ask for an environment or a confirmation, so they are not 正在开发 here while the inbox and the
+// overview count them as 需要关注.
+const developing = "('queued','running','preparing','implementing','validating','publishing','waiting_pr_head','result_ready')";
 const taskTime = (alias: string) => `coalesce(nullif(${alias}.updated_at,''),${alias}.created_at)`;
 // The newest task of each work type on each object, read from the covering index board_task_cover alone. A tasks row
 // stores the task input (about 1 MB on average in production) before updated_at and result, so reading those columns
@@ -59,10 +65,8 @@ const objectStage = (category: string) => {
   if (category === 'review') return `CASE WHEN r.status IN ${attention} THEN 'attention' WHEN r.status IN ${successes} THEN 'reviewed'
     WHEN ${autoStoppedSQL('r.status')} THEN ${stoppedStage('r','reviewed')}
     WHEN r.id IS NOT NULL AND r.status<>'superseded' THEN 'reviewing' ELSE 'unreviewed' END`;
-  if (category === 'development') return `CASE WHEN d.status IN ${developing} THEN 'developing' WHEN d.status IN ${attention} THEN 'attention'
-    WHEN ${autoStoppedSQL('d.status')} THEN CASE WHEN ${settledStatusSQL('d')} IN ${developing} THEN 'developing'
-      WHEN ${actionStatusSQL(settledStatusSQL('d'))} THEN 'attention'
-      WHEN ${settledStatusSQL('d')} IN ${successes} THEN 'developed' ELSE 'unreviewed' END
+  if (category === 'development') return `CASE WHEN d.status IN ${attention} THEN 'attention' WHEN d.status IN ${developing} THEN 'developing'
+    WHEN ${autoStoppedSQL('d.status')} THEN ${stoppedStage('d','developed')}
     WHEN d.status IN ${successes} THEN 'developed' ELSE 'unreviewed' END`;
   return "'unreviewed'";
 };
@@ -172,11 +176,12 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
       p.id AS release_id,p.version AS version,p.stage AS release_stage,
       CASE WHEN json_valid(p.data) THEN json_extract(p.data,'$.release_url') END AS release_url
       FROM project_releases p JOIN repositories repos ON repos.id=p.repository_id`;
+    // A request task has no object number to look back on, so a stopped one stays 未检视 instead of claiming the bot is
+    // still developing it; its own record page carries the reason.
     const requestedSql = `SELECT 'task' AS card_type,'task.request' AS card_category,t.repository_id,'task' AS object_type,NULL AS object_number,
       t.summary AS title,NULL AS github_state,0 AS draft,${taskTime('t')} AS last_seen,repos.full_name,
       CASE WHEN t.status IN ${attention} THEN 'attention' WHEN t.status IN ${successes} THEN 'developed'
-        WHEN ${autoStoppedSQL('t.status')} THEN CASE WHEN ${settledStatusSQL('t')} IN ${successes} THEN 'developed'
-          WHEN ${actionStatusSQL(settledStatusSQL('t'))} THEN 'attention' ELSE 'unreviewed' END
+        WHEN ${autoStoppedSQL('t.status')} THEN 'unreviewed'
         ELSE 'developing' END AS bot_stage,
       ${execution('t.status')} AS execution_status,t.id AS task_id,t.status AS task_status,NULL AS review_task_id,NULL AS review_status,
       NULL AS development_task_id,NULL AS development_status,NULL AS field_value,
@@ -219,7 +224,15 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
     const prNumbers = new Map(developments.length ? store.all(`SELECT id,CASE WHEN json_valid(result) AND typeof(json_extract(result,'$.pr_number'))='integer'
       THEN json_extract(result,'$.pr_number') END AS pr_number FROM tasks WHERE id IN (${developments.map(() => '?').join(',')})`, ...developments)
       .map(row => [String(row.id), row.pr_number ?? null]) : []);
-    return { cards: page.map(row => ({ ...row, development_pr_number: row.development_task_id ? prNumbers.get(String(row.development_task_id)) ?? null : null,
+    // Why a card's task stopped lives in error_code, which the covering index does not hold and the card scan must not
+    // read. Read it for this page's stopped cards only, so the card can say the bot stopped by itself (#655) and still
+    // tell that apart from a cancellation for another reason, like a revoked claim or a disabled project.
+    const stopped = [...new Set(page.filter(row => row.task_status === 'cancelled').map(row => row.task_id).filter(Boolean).map(String))];
+    const stopReasons = new Map(stopped.length ? store.all(`SELECT id,error_code FROM tasks WHERE id IN (${stopped.map(() => '?').join(',')})`, ...stopped)
+      .map(row => [String(row.id), row.error_code ?? null]) : []);
+    return { cards: page.map(row => ({ ...row,
+      task_error_code: row.task_status === 'cancelled' ? stopReasons.get(String(row.task_id)) ?? null : null,
+      development_pr_number: row.development_task_id ? prNumbers.get(String(row.development_task_id)) ?? null : null,
       card_category_name: name(String(row.repository_id), String(row.card_category)),
       origin:row.task_id?store.get('SELECT source_kind,source_role,executor_role,conversation_id,source_message FROM task_origins WHERE task_id=?',row.task_id)??null:null })), has_more: rows.length>limit, limit, offset,
       counts: { issue: totals.get('issue') || 0, pr: totals.get('pr') || 0 }, release_count: Number(counts.releases || 0),

@@ -46,6 +46,7 @@ body.board-mode .list-panel>.toolbar{display:none}
 .board-card-meta{display:flex;align-items:center;gap:8px;min-width:0;font-size:12px;color:var(--color-text-muted)}
 .board-card-repo{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.board-card-time{flex:none;margin-left:auto}
 .board-card-badges{display:flex;flex-wrap:wrap;align-items:center;gap:4px}.board-card-badges .status{padding:1px 6px;font-size:11.5px}
+.board-card-note{margin:0;font-size:12px;line-height:1.5;color:#6b7f89;overflow-wrap:anywhere}
 .board-card-pr{font-size:12px;font-weight:600;color:#16636b;text-decoration:none}.board-card-pr:hover{text-decoration:underline}
 .board-card-field{display:block}.board-card-field select{width:auto;max-width:100%;height:26px;padding:1px 6px;border-color:#d0dce2;font-size:12px;color:#365564}
 .board-empty{margin:4px 0;padding:14px 0;border:1px dashed #cbd8df;border-radius:7px;text-align:center;color:#7a8f99;font-size:12px}
