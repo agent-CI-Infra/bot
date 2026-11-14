@@ -304,3 +304,35 @@ test('task update triggers skip JSON projection on status/lease/updated_at chang
   h.store.run("UPDATE tasks SET updated_at='2026-12-18T01:00:00.000Z' WHERE id='developing'");
   assert.equal(h.store.get("SELECT last_seen FROM board_objects WHERE repository_id='101' AND object_type='pr' AND object_number=88")?.last_seen,'2026-12-18T01:00:00.000Z');
 });
+
+// #655: the bot stops a task on its own when the Issue or PR it works on is closed or turned into a draft. That stop is
+// not a person's move: the board must put the card where the last real task left it, and the three surfaces that show
+// "what needs me" must count the same tasks.
+test('object closed or draft cancel keeps the card out of 需要处理 and the three surfaces count the same tasks',async t=>{
+  const {h,admin}=await fixture(t);
+  const closed={issue:{state:'closed'}},drafted={pr:{draft:true}};
+  boardTask(h.store,'reviewed-then-closed',1,'review.issue','succeeded',{time:'2026-10-01T10:00:00.000Z'});
+  boardTask(h.store,'stop-closed',1,'review.issue','cancelled',{time:'2026-10-02T10:00:00.000Z',input:closed,errorCode:'object_closed_or_draft'});
+  boardTask(h.store,'pr-reviewed',2,'review.pr','succeeded',{time:'2026-10-01T10:00:00.000Z'});
+  boardTask(h.store,'stop-draft',2,'review.pr','cancelled',{time:'2026-10-02T10:00:00.000Z',input:drafted,errorCode:'object_closed_or_draft'});
+  boardTask(h.store,'never-reviewed',3,'review.issue','cancelled',{time:'2026-10-02T10:00:00.000Z',input:closed,errorCode:'object_closed_or_draft'});
+  boardTask(h.store,'real-failure',4,'review.issue','failed',{time:'2026-10-02T10:00:00.000Z'});
+  const result=(await admin('/api/board/cards')).value;
+  const card=(number,category)=>result.cards.find(c=>c.object_number===number&&c.card_category===category);
+  // The card keeps the state the last real task reached instead of asking for a person who is not needed.
+  assert.equal(card(1,'review.issue').bot_stage,'reviewed');
+  assert.equal(card(2,'review.pr').bot_stage,'reviewed');
+  assert.equal(card(3,'review.issue').bot_stage,'unreviewed');
+  assert.equal(card(4,'review.issue').bot_stage,'attention');
+  // The stop itself stays on the card, with the object state that caused it, so the reader sees why nobody is working.
+  assert.deepEqual([card(1,'review.issue').task_status,card(1,'review.issue').github_state],['cancelled','closed']);
+  assert.deepEqual([card(2,'review.pr').task_status,card(2,'review.pr').draft],['cancelled',1]);
+  // One count for one set of tasks: the board column, the inbox and the overview agree.
+  assert.equal(result.column_counts.attention,1);
+  const inbox=(await admin('/api/tasks?attention=1')).value.tasks;
+  assert.deepEqual(inbox.map(row=>row.id),['real-failure']);
+  assert.equal((await admin('/api/tasks?summary=1')).value.summary.attention,1);
+  // The column hint no longer claims a cancellation is a person's work.
+  const stages=(await admin('/api/board')).value.stages;
+  assert.ok(!stages.find(stage=>stage.id==='attention').hint.includes('被取消'));
+});
