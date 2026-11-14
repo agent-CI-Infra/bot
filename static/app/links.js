@@ -1,7 +1,9 @@
 // Navigation links are also used by ordinary lists, so keep their DOM helper in the shared base layer.
 function consoleLink(href, caption, hint = '') {
   const a = element('a', '', 'console-link'); a.href = href;
-  a.append(element('span', caption)); if (hint) a.append(element('small', hint)); return a;
+  a.append(element('span', caption));
+  if (hint) { const note = element('small', hint); note.title = hint; a.append(note); }
+  return a;
 }
 // Shared with the identity page and the onboarding wizard. The general entry is select_target; a wizard URL with suggested_target_id stays on /installations/new/permissions.
 function githubAppInstallUrl(slug) {
