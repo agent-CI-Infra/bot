@@ -157,3 +157,39 @@ test('#641 手机从底栏打开管理助手：390×500 下面板与输入区都
     expect(feed.bottom).toBeLessThanOrEqual(m.field.top + 0.5);
   } finally { await f.close(); }
 });
+
+test('#641 短手机（390×500）下状态行仍在：断流后报错并给出「重新连接」', async ({ page }) => {
+  test.setTimeout(90000);
+  const f = await managementFixture();
+  try {
+    await page.setViewportSize({ width: 390, height: 500 });
+    await page.goto(f.h.admin + '/#/projects');
+    await signIn(page, f.h, f.password);
+    // The bar is the only surface that reports a failure after the first connect and carries 重新连接 when the event
+    // stream drops; at this height the panel is 308px tall, so the bar has to stay as one compact line, not be removed.
+    await page.route('**/events?stream=1&after=*', route => route.abort('failed'));
+    const navBar = page.locator('#console-mobile-nav a[data-page="assistant"]');
+    await expect(navBar).toBeVisible(); await navBar.click();
+    const panel = page.locator('#management-chat');
+    await expect(panel.getByLabel('当前管理作用域')).toBeVisible({ timeout: 15000 });
+    const message = page.getByLabel('管理消息', { exact: true });
+    await message.fill('检查任务进展'); await panel.getByRole('button', { name: '发送', exact: true }).click();
+    const statusBar = panel.locator('.management-status-bar');
+    await expect(statusBar.locator('.management-status')).toBeVisible({ timeout: 15000 });
+    await expect(statusBar.locator('.management-status')).toContainText('连接已中断');
+    await expect(statusBar.getByRole('button', { name: '重新连接', exact: true })).toBeVisible();
+    const m = await page.evaluate(() => {
+      const rect = node => { const r = node.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, height: r.height }; };
+      const win = document.getElementById('management-chat');
+      const send = [...win.querySelectorAll('button')].find(node => node.textContent.trim() === '发送');
+      return { win: rect(win), header: rect(document.querySelector('body > header')),
+        status: rect(win.querySelector('.management-status-bar')), send: rect(send) };
+    });
+    // One compact line still reporting the failure, and the composer keeps the 44px send target inside the panel.
+    expect(m.status.height).toBeLessThanOrEqual(34);
+    expect(m.status.top).toBeGreaterThanOrEqual(m.header.bottom - 0.5);
+    expect(m.status.bottom).toBeLessThanOrEqual(m.win.bottom + 0.5);
+    expect(m.send.height).toBeGreaterThanOrEqual(44);
+    expect(m.send.bottom).toBeLessThanOrEqual(m.win.bottom + 0.5);
+  } finally { await f.close(); }
+});
