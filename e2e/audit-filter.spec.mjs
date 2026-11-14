@@ -48,7 +48,9 @@ test('the audit card filters by action code and shows the rest 20 rows at a time
     const all = card.locator('[data-audit-filter="*"]');
     await expect(all).toHaveAttribute('aria-pressed', 'true');
     const roleChip = card.locator('[data-audit-filter="roles.apply"]');
-    await expect(roleChip).toContainText('roles.apply');
+    // #698: chips carry the same plain action name as the rows, with the count.
+    await expect(roleChip).toHaveText('按角色配置执行 8');
+    await expect(card.locator('[data-audit-filter="repository.enabled"]')).toHaveText('启用项目 15');
     // roleChip only filters the rows already read; it sends no request and shows every matching row.
     const before = await page.evaluate(() => performance.getEntriesByType('resource').length);
     await roleChip.click();
