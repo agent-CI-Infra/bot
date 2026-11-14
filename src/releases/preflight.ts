@@ -36,7 +36,7 @@ export async function inspect(github: GitHub, version: string, consolePrompt?: s
   // The new version must rank above the previous reachable tag in SemVer order (a prerelease ranks below its stable version).
   const suggested = previous ? nextVersions(previous.name) : [];
   const behind = previous !== null && validVersion(version) && compareVersions(version, previous.name) <= 0;
-  const checks = [{ ok: !!(config && ci), message: config && ci ? '已接入发布用的 CI' : noCI },
+  const checks = [{ ok: !!(config && ci), message: config && ci ? '已接入发布用的 CI' : noCI, code: config && ci ? undefined : 'no_ci' },
     { ok: !!(workflow?.matched && workflowId), message: workflow?.matched && workflowId ? '版本标签可触发 Release 工作流' : noRelease, reason },
     { ok: !noChanges, message: noChanges ? '没有新变更，跳过本次发布；不会创建标签或 Release。' : previous ? '本次范围有新增提交' : '首次发布，从仓库历史起算' },
     !previous ? { ok: true, message: '还没有上一枚版本标签，不比较版本号' }
