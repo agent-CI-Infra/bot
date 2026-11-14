@@ -11,7 +11,9 @@ function userLoginMethods(user) {
   const methods = user.login_methods || [];
   if (methods.includes('local') && methods.includes('github')) return '本地 + GitHub';
   if (methods.includes('github')) return '仅 GitHub';
-  return '本地';
+  if (methods.includes('local')) return '本地';
+  // Neither a local password nor a live GitHub binding: saying 本地 here would claim a way in that does not exist.
+  return '无可用登录';
 }
 function userBindingLabel(user) {
   return ({ none: '未绑定 GitHub', bound: '同一用户，已绑定', pending_verification: '待验证', revoked: '已解绑' })[user.github_binding] ?? '状态未知';

@@ -13,14 +13,23 @@ function accountLine(row) {
     [button('删除', () => deleteAccount(row).catch(error), 'quiet destructive')]);
 }
 // Session actors and user-list records carry the same GitHub login in different fields.
-function userDisplayName(user) { const login = user.github?.login || user.github_login; return login ? '@' + login : user.username; }
+// #547: a GitHub-only account whose binding was revoked has no name the server will show and no local account; its
+// username is the opaque `github:<id>:<random>` placeholder, so the server's neutral display_name stands in — never the
+// placeholder, and 账号 is only a literal fallback when even that is missing.
+function userDisplayName(user) {
+  const login = user.github?.login || user.github_login;
+  if (login) return '@' + login;
+  if (user.local_login === false) return user.display_name || '账号';
+  return user.display_name || user.username;
+}
 // #547: where one name has to stand for the whole account — a delete confirmation, a grants editor title — an account with
 // both ways in shows both, so two same-named accounts can never be mistaken for one. A GitHub-only account has no local
 // name to show: local_login is false and its username is an opaque placeholder.
 function userLabel(user) {
   const login = user.github?.login || user.github_login, local = user.local_login === false ? null : (user.local_account || user.username);
   if (login && local) return `${local}（GitHub @${login}）`;
-  return login ? '@' + login : (local || user.username);
+  if (login) return '@' + login;
+  return local || user.display_name || '账号';
 }
 function userAccessLines(user) {
   const projects = user.access?.projects || [], lines = [element('p', projects.length ? `当前可见项目（${projects.length}）：` : '当前没有可访问的项目')];

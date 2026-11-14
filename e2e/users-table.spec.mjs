@@ -25,6 +25,9 @@ test('the user list is one table: local, GitHub and both, with the binding state
     const unbind = await create(admin, 'dave'); identity(h, unbind.id, 'dave-old', 'revoked');
     h.store.run("INSERT INTO users(id,username,password_hash,role) VALUES('gh-zen','github:9002:ef567890','!external-only','project_admin')");
     identity(h, 'gh-zen', 'octozen', 'active');
+    // Neither way in is left: no local password and the GitHub binding was revoked.
+    h.store.run("INSERT INTO users(id,username,password_hash,role) VALUES('gh-lost','github:9003:deadbeef','!external-only','project_admin')");
+    identity(h, 'gh-lost', 'lost-gh', 'revoked');
     expect(local.id).toBeTruthy(); expect(pending.id).toBeTruthy();
 
     await page.goto(h.admin + '/#/settings/users');
@@ -48,6 +51,13 @@ test('the user list is one table: local, GitHub and both, with the binding state
     // A GitHub-only account: no local login, and the placeholder name is not shown as one.
     await expect(row('@octozen')).toContainText('仅 GitHub');
     await expect(row('@octozen')).toContainText('无本地登录');
+    // Unbound on both sides: the account is named after its GitHub id, never after the opaque placeholder, and the two
+    // columns that describe the binding both say 已解绑 instead of calling it a local login.
+    const lost = row('账号 #9003');
+    await expect(lost).toContainText('无可用登录');
+    await expect(lost).toContainText('无本地登录');
+    expect(((await lost.textContent()) || '').match(/已解绑/g) || []).toHaveLength(2);
+    await expect(lost).not.toContainText('github:9003');
     // The row still carries the entries the list had: detail, grants where they apply, and removal.
     await expect(row('mike').getByRole('link', { name: '详情', exact: true })).toBeVisible();
     await expect(row('mike').getByRole('button', { name: '删除', exact: true })).toBeVisible();

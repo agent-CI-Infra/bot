@@ -67,3 +67,22 @@ test('the user projection names each account\'s login methods and its GitHub bin
   assert.doesNotMatch(text, /!external-only|password_hash|credentials|access_token|refresh_token/);
   assert.ok(mike.id && zoe.id);
 });
+
+test('a GitHub-only account whose binding was revoked is named after its GitHub id, not its placeholder', async t => {
+  const h = await harness(t), { admin } = await setup(h);
+  await create(admin, 'mike');
+  // The account can no longer sign in either way: no local password, and the GitHub identity is revoked. Its username is
+  // the opaque placeholder the OAuth flow writes, which is not a name an administrator should ever read.
+  h.store.run("INSERT INTO users(id,username,password_hash,role) VALUES('gh-lost','github:9003:deadbeef','!external-only','project_admin')");
+  identity(h, 'gh-lost', 'lost-gh', 'revoked');
+  const list = (await admin('/api/users')).value.users, lost = list.find(user => user.id === 'gh-lost');
+  assert.ok(lost);
+  assert.doesNotMatch(String(lost.display_name), /^github:/);
+  assert.equal(lost.display_name, '账号 #9003');
+  assert.equal(lost.local_account, null);
+  assert.deepEqual(lost.login_methods, []);
+  // The neutral name takes part in the same ordering: it does not sit under "g" where the placeholder used to land.
+  const shown = list.map(user => user.display_name);
+  assert.deepEqual(shown, [...shown].sort((left, right) => left.localeCompare(right, 'zh-CN')));
+  assert.ok(shown.indexOf('账号 #9003') >= 0 && shown.indexOf('账号 #9003') < shown.indexOf('mike'), shown.join(','));
+});
