@@ -97,6 +97,7 @@ test('a kept service logs beyond pipe capacity after the runner exits and remain
   const script=`const fs=require('fs'),http=require('http');const s=http.createServer((q,r)=>r.end('alive'));s.listen(0,'127.0.0.1',()=>fs.writeFileSync('port',String(s.address().port)));setTimeout(()=>{process.stdout.write('x'.repeat(2*1024*1024));process.stderr.write('stderr-after-return\\n');fs.writeFileSync('printed','yes');},1200);`;
   const started=await execute({type:'workspace_command',workspace_id:id,command:`node -e ${JSON.stringify(script)}`,keep_background:true,timeout_ms:5000});
   assert.equal(started.ok,true);assert.equal(started.result.running,true);
+  assert.match(started.result.notice,/startup snapshot/);assert.match(started.result.notice,/log_path/);
   assert.ok(started.result.log_path.startsWith(join(root,'tasks',id,'logs')+'/'));
   const probe=await execute({type:'workspace_command',workspace_id:id,command:`node -e "const fs=require('fs');(async()=>{while(!fs.existsSync('printed'))await new Promise(r=>setTimeout(r,50));console.log(await (await fetch('http://127.0.0.1:'+fs.readFileSync('port','utf8'))).text())})()"`,timeout_ms:10000});
   assert.equal(probe.result.output,'alive\n');

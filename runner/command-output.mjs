@@ -1,6 +1,7 @@
 import { StringDecoder } from 'node:string_decoder';
 
 export const outputLimit = 1024 * 1024;
+export const backgroundOutputNotice = 'This output is a startup snapshot. The service continues writing to log_path; read that log with a later command for newer output.';
 
 // Separate decoders keep UTF-8 and credential prefixes intact across writes to each pipe.
 export function maskedStream(secrets, write) {
