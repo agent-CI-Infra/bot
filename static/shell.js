@@ -112,7 +112,7 @@ function consoleGroups() {
   const id = consoleScope(), repo = repositories.find(r => String(r.id) === id);
   const groups = [];
   const personal = [
-    ['#/preferences', '个人设置', '个人身份、飞书绑定与外部执行端'],
+    // #615: the old 个人设置 entry pointed at #/identity, so the directory drew the same page twice with two names.
     ['#/identity/feishu', '飞书绑定', '个人绑定、群绑定、仓库权限与聊天记录'],
     ['#/identity', '身份与权限', '本人绑定与当前有效授权'],
     ['#/conversations', '飞书会话', '成员消息、执行过程与派生任务']
@@ -480,8 +480,8 @@ function initConsoleShell() {
   const accountMenu = element('div', '', 'console-account-menu'); accountMenu.id = 'console-account-menu'; accountMenu.hidden = true;
   const accountLogin = element('p', '', 'console-account-login'), accountRole = element('p', '', 'console-account-role');
   accountLogin.id = 'console-account-login'; accountRole.id = 'console-account-role';
-  const accountPrefs = consoleLink('#/preferences', t('nav.preferences'));
-  const accountPrefsLabel = accountPrefs.querySelector('span'); if (accountPrefsLabel) accountPrefsLabel.setAttribute('data-i18n', 'nav.preferences');
+  const accountPrefs = consoleLink('#/identity', t('nav.identity'));
+  const accountPrefsLabel = accountPrefs.querySelector('span'); if (accountPrefsLabel) accountPrefsLabel.setAttribute('data-i18n', 'nav.identity');
   accountMenu.append(accountLogin, accountRole, accountPrefs, button(t('chrome.logout'), () => $('logout').click(), 'quiet console-account-signout'));
   identity.append(account, accountMenu);
   document.addEventListener('keydown', event => {

@@ -1,8 +1,10 @@
 async function renderSettings(request) {
   const route = settingsRoute(), section = route.section, nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content'), body = element('div', '', 'project-body settings-body');
   nav.setAttribute('aria-label', '全局设置类别');
-  for (const [groupTitle, items] of visibleSettingsGroups()) {
-    nav.append(element('p', groupTitle, 'console-nav-label'));
+  // #615: a group heading only earns its line when it separates groups; one category stays a plain link.
+  const groups = visibleSettingsGroups();
+  for (const [groupTitle, items] of groups) {
+    if (groups.length > 1) nav.append(element('p', groupTitle, 'console-nav-label'));
     for (const [key, caption] of items) { const item = element('a', caption); item.href = '#/settings/' + key; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item); }
   }
   // The categories are drawn at once; the chosen category's cards follow when their data arrives.

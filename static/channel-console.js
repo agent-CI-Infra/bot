@@ -18,7 +18,7 @@ function personalSettingsNav() {
   }
   const nav = element('nav', '', 'project-nav'), hash = location.hash;
   nav.setAttribute('aria-label', t('nav.personal_categories'));
-  const navLabel = element('p', t('nav.personal'), 'console-nav-label'); navLabel.setAttribute('data-i18n', 'nav.personal'); nav.append(navLabel);
+  // #615: the bar only lists pages that really open; a caption that looks clickable but goes nowhere is gone.
   const activeKey = tab === 'external' ? 'external'
     : tab === 'conversations' || hash === '#/identity/feishu/conversations' ? 'conversations'
     : /^#\/identity\/feishu-apps(?:\/|$)/.test(hash) ? 'feishu-apps'
