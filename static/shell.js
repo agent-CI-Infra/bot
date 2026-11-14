@@ -95,10 +95,16 @@ function consoleTaskRow(row, attention = false) {
   const open = button('查看任务', () => openTask(row.id).catch(error)); open.dataset.attentionTask = row.id;
   item.dataset.taskId = row.id; item.append(text, state(row.status), open); return item;
 }
+// #699: one plain sentence for where the work came from and who took it. The stored kinds (event / operator / role) and
+// role ids are not words a reader knows; role names follow the role page (roleConfigName, #608), and the conversation id
+// is left out because the task page already links the conversation.
+const taskOriginKinds = { event: 'GitHub 事件', operator: '有人手动创建', role: '角色委派' };
+function taskOriginRole(id) { return typeof roleConfigName === 'function' ? roleConfigName(id, null) : id; }
 function taskOriginCaption(origin) {
-  const source = origin.conversation_id ? '连续会话 ' + origin.conversation_id : origin.source_kind;
-  return '来源：' + source + ' · ' + (origin.source_role || '操作者') + ' → ' + (origin.executor_role || '原执行流程') +
-    (origin.source_role && origin.source_role === origin.executor_role ? '（自己执行）' : origin.source_role && origin.executor_role ? '（委派）' : '');
+  const source = origin.conversation_id ? '连续会话' : Object.hasOwn(taskOriginKinds, origin.source_kind) ? taskOriginKinds[origin.source_kind] : '其他来源';
+  const from = origin.source_role ? taskOriginRole(origin.source_role) : '', to = origin.executor_role ? taskOriginRole(origin.executor_role) : '';
+  const handoff = !to ? '按原执行流程处理' : from && origin.source_role === origin.executor_role ? `${to}自己执行` : `${from}交给${to}`;
+  return '来源：' + source + ' · ' + handoff;
 }
 function consoleScope() {
   const inbox = consoleInboxRoute();
