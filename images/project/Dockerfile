@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /opt/bot && mv /tmp/image-packages /opt/bot/image-packages \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 10001 project && useradd --uid 10001 --gid project --no-create-home project \
-    && mkdir /workspace && chown project:project /workspace && chmod 700 /workspace
+    && mkdir -p /workspace /opt/agent-tools && chown project:project /workspace && chmod 700 /workspace && chmod 755 /opt/agent-tools
 COPY runner/package.json runner/package-lock.json /opt/runner/
 RUN cd /opt/runner && npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY runner /opt/runner

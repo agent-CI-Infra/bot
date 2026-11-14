@@ -77,11 +77,11 @@ function validateCall(call) {
     : call.entries !== undefined) throw new ManagerError('invalid_runner_request', 400);
 }
 export class Projects {
-  constructor({ database, docker, deployment, image, egress = true }) {
+  constructor({ database, docker, deployment, image, egress = true, tools = '/opt/agent-tools' }) {
     // background: repository -> task workspaces whose kept processes may outlive a command.
     // gates: repository -> runner calls running now, whether a lifecycle action holds the computer, and who waits.
     // restarting: computers with a restart queued under the exclusive lock (restartAlone).
-    this.egress = egress; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
+    this.egress = egress; this.toolsMount = tools; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
     // pruned: when each computer's journal was last pruned; pruning: computers with a prune running now.
     this.pruned = new Map(); this.pruning = new Set();
     // scanning: the work volume scan running now (one computer at a time); dockerUsageAt: when Docker's usage was read.
@@ -303,6 +303,7 @@ export class Projects {
   }
   labels(repo, generation, kind) { return { 'department.bot.deployment': this.deployment, 'department.bot.repository': repo,
     'department.bot.generation': String(generation), 'department.bot.kind': kind }; }
+  async agentToolsVolume() { return this.toolsMount ? this.docker.volumeName(this.toolsMount) : null; }
   async inspect(repo, generation, kind) {
     if (!this.db.prepare('SELECT 1 FROM resources WHERE repository_id=? AND generation=?').get(repo, generation)) throw new ManagerError('unregistered_resource');
     const name = this.names(repo, generation)[kind];
@@ -339,6 +340,7 @@ export class Projects {
     if (!await this.inspect(repo, generation, 'volume')) await this.docker.request('POST', '/volumes/create', { Name: names.volume, Labels: this.labels(repo, generation, 'volume') });
     await this.inspect(repo, generation, 'volume');
     await this.notesVolume(repo);
+    const toolsVolume = await this.agentToolsVolume();
     let network = await this.inspect(repo, generation, 'network'), container = await this.inspect(repo, generation, 'container');
     // A container whose template or spec differs (approved image, init, resources, network policy) is replaced in place when
     // provisioned; the work volume and generation stay. This never happens in the middle of a command.
@@ -347,9 +349,13 @@ export class Projects {
     const current = container?.Config?.Env || [], listed = current.find(e => e.startsWith('BOT_PROJECT_ENV_KEYS='))?.slice(21).split(',').filter(Boolean) || [];
     const managed = new Set(['HOME', 'LANG', 'BOT_PROJECT_ENV_KEYS', ...Object.keys(spec.env), ...listed]);
     const envStale = container && JSON.stringify(current.filter(e => managed.has(e.slice(0, e.indexOf('=')))).sort()) !== JSON.stringify([...env].sort());
+    const toolsMountStale = toolsVolume
+      ? !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === toolsVolume && m.Target === '/opt/agent-tools' && m.ReadOnly === true)
+      : !!host?.Mounts?.some(m => m.Target === '/opt/agent-tools');
     if (container && (container.Image !== approved.Id || host?.Init !== true || networkStale || envStale || host?.Memory !== memory || host?.MemorySwap !== memory
       || host?.NanoCpus !== Math.round(spec.cpus * 1e9) || host?.PidsLimit !== spec.pids || host?.Tmpfs?.['/tmp'] !== tmpfs
-      || !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === this.notesName(repo) && m.Target === '/workspace/project-notes' && !m.ReadOnly))) {
+      || !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === this.notesName(repo) && m.Target === '/workspace/project-notes' && !m.ReadOnly)
+      || toolsMountStale)) {
       if (container.State.Running) await this.docker.request('POST', `/containers/${names.container}/stop?t=2`);
       await this.docker.request('DELETE', `/containers/${names.container}?force=true`); container = null;
     }
@@ -358,12 +364,17 @@ export class Projects {
     if (!network) await this.docker.request('POST', '/networks/create', { Name: names.network, Driver: 'bridge', Internal: !spec.egress, CheckDuplicate: true, Labels: this.labels(repo, generation, 'network') });
     await this.inspect(repo, generation, 'network');
     if (!container) {
+      const mounts = [
+        { Type: 'volume', Source: names.volume, Target: '/workspace' },
+        { Type: 'volume', Source: this.notesName(repo), Target: '/workspace/project-notes', ReadOnly: false },
+        ...(toolsVolume ? [{ Type: 'volume', Source: toolsVolume, Target: '/opt/agent-tools', ReadOnly: true }] : []),
+      ];
       await this.docker.request('POST', `/containers/create?name=${names.container}`, { Image: resource.image, User: '10001:10001', WorkingDir: '/workspace',
         Cmd: ['node', '/opt/runner/idle.mjs'], Env: env, Labels: this.labels(repo, generation, 'container'),
         HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false,
           Memory: memory, MemorySwap: memory, NanoCpus: Math.round(spec.cpus * 1e9), PidsLimit: spec.pids, NetworkMode: names.network,
           Init: true, RestartPolicy: { Name: 'no' }, Tmpfs: { '/tmp': tmpfs },
-          Mounts: [{ Type: 'volume', Source: names.volume, Target: '/workspace' }, { Type: 'volume', Source: this.notesName(repo), Target: '/workspace/project-notes', ReadOnly: false }] } });
+          Mounts: mounts } });
       container = await this.inspect(repo, generation, 'container');
     }
     this.db.prepare('UPDATE projects SET applied=? WHERE repository_id=?').run(JSON.stringify(resources(spec)), repo);

@@ -7,8 +7,12 @@ export class FakeDocker {
   images = new Map([['approved', { Id: 'sha256:fixture', Config: { Labels: { 'department.bot.toolchain': 'fixture toolchain' } } }]]); builds = []; runs = [];
   calls = [];
   async volumeSource(directory) { return directory; }
-  // The manager's own mounts: the assistant HOME volume (#457).
-  async volumeName(destination) { return destination === this.homesMount ? 'fixture-assistant-homes' : null; }
+  // The manager's own mounts: the assistant HOME volume (#457) and the read-only CLI tool volume (#705).
+  async volumeName(destination) {
+    if (destination === this.homesMount) return 'fixture-assistant-homes';
+    if (destination === this.toolsMount) return 'fixture-agent-tools';
+    return null;
+  }
   async request(method, path, body) {
     this.calls.push(method + ' ' + path);
     if (path === '/info') return this.info || {};
@@ -30,7 +34,10 @@ export class FakeDocker {
       return [...this.containers].filter(([, row]) => labels.every(l => { const [k, v] = l.split('='); return row.Config.Labels?.[k] === v; })).map(([name, row]) => ({ Id: name, Names: ['/' + name], Labels: row.Config.Labels }));
     }
     if (path.startsWith('/containers/create')) {
-      if (this.failCreate) throw new ManagerError('docker_operation_failed', 503); this.containers.set(new URL('http://docker' + path).searchParams.get('name'), { Config: body, HostConfig: body.HostConfig, Image: body.Image, State: { Running: false, StartedAt: '' } }); this.created = (this.created || 0) + 1; return {}; }
+      if (this.failCreate) throw new ManagerError('docker_operation_failed', 503);
+      const mounts = (body.HostConfig?.Mounts ?? []).map(m => ({ Type: m.Type, Name: m.Source, Source: m.Source, Destination: m.Target, RW: m.ReadOnly === false || m.ReadOnly === undefined }));
+      this.containers.set(new URL('http://docker' + path).searchParams.get('name'), { Config: body, HostConfig: body.HostConfig, Mounts: mounts, Image: body.Image, State: { Running: false, StartedAt: '' } });
+      this.created = (this.created || 0) + 1; return {}; }
     if (kind === 'containers') {
       const row = this.containers.get(name);
       if (method === 'GET') return row || null;

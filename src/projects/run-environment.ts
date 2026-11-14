@@ -37,8 +37,13 @@ export function verifyRunEnvironment(facts: any, expected: { run_id: string; net
   if (c.privileged) violations.push('privileged');
   if (!c.cap_drop?.map((x: string) => x.toUpperCase()).includes('ALL') || c.cap_add?.length) violations.push('capabilities_not_dropped');
   if (!c.security_opt?.some((o: string) => /^no-new-privileges(?::true)?$/.test(o))) violations.push('new_privileges_allowed');
-  // No volume or bind of any kind: no developer volume, notes, host HOME, Docker socket or other project state.
-  if (c.mounts?.some((m: any) => m.type !== 'tmpfs') || c.binds?.length) violations.push('external_mount');
+  // No writable or project-state mount of any kind: only tmpfs and at most one read-only agent-tools volume at /opt/agent-tools.
+  const isAllowedToolsMount = (m: any) =>
+    m?.type === 'volume' && m?.destination === '/opt/agent-tools' && m?.rw === false &&
+    typeof (m?.name ?? m?.source) === 'string' && String(m?.name ?? m?.source).length > 0 &&
+    !/(?:^|\/|-)(?:notes|assistant-homes|work|vol)$/.test(String(m?.name ?? m?.source));
+  const toolsMounts = (c.mounts ?? []).filter((m: any) => m?.destination === '/opt/agent-tools');
+  if (toolsMounts.length > 1 || c.mounts?.some((m: any) => m.type !== 'tmpfs' && !isAllowedToolsMount(m)) || c.binds?.length) violations.push('external_mount');
   if (JSON.stringify([c.mounts, c.binds]).includes('docker.sock')) violations.push('docker_socket');
   if (!c.tmpfs?.['/workspace'] || !/size=\d+/.test(c.tmpfs['/workspace']) || !c.tmpfs?.['/tmp'] || !/size=\d+/.test(c.tmpfs['/tmp'])) violations.push('workspace_not_private_tmpfs');
   const ownNetwork = expected.network === 'egress' ? new RegExp(`-run-${expected.run_id.slice(0, 20)}-net$`) : null;

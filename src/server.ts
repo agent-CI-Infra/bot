@@ -25,6 +25,8 @@ import { gateOnboardingApi } from './app/gate-onboarding.js';
 import { RuleService } from './rules/service.js';
 import { managerApi } from './work/api.js';
 import { settingsApi } from './app/settings.js';
+import { agentToolsApi } from './app/agent-tools.js';
+import { AgentToolManager, DEFAULT_AGENT_TOOLS_ROOT } from './harness/agent-tools.js';
 import { StorageReport } from './app/storage.js';
 import { serviceRolesApi } from './service-roles/api.js';
 import { ProjectRemoval } from './projects/removal.js';
@@ -60,7 +62,10 @@ interface Options { store: Store; staticDirectory: string; secureCookies?: boole
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
   imageTag?: string; boards?: PublicBoards;
   /** Where the assistant computers' HOME volume is mounted (#457); without it they are not offered. */
-  assistantHomes?: string; installationSetup?: InstallationSetup; githubOAuth?: GitHubOAuthConfig; githubIdentity?: GitHubIdentity; githubLogin?: GitHubLogin;
+  assistantHomes?: string;
+  /** Read-only CLI tool volume manager (#705), mounted at /opt/agent-tools. */
+  agentTools?: AgentToolManager;
+  installationSetup?: InstallationSetup; githubOAuth?: GitHubOAuthConfig; githubIdentity?: GitHubIdentity; githubLogin?: GitHubLogin;
   /** Times requests and reports a blocked event loop with the requests in flight. */
   stalls?: StallMonitor;
   // The storage page's report; main.ts starts its background refresh, otherwise the first view refreshes it.
@@ -97,6 +102,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   const taskCommands = new TaskCommands(store,{active:id=>!!options.engine?.active.has(id),tick:()=>{ if(options.engine)queueMicrotask(()=>options.engine!.tick()); }});
   const sharedManagement = new ManagementService(store,rules,taskCommands,options.projects?.manager??options.engine?.manager,options.githubUrl);
   const assistants = new AssistantComputerService(store, options.projects?.manager ?? options.engine?.manager, options.assistantHomes);
+  const agentTools = options.agentTools ?? new AgentToolManager({ volumeRoot: process.env.BOT_AGENT_TOOLS_DIR || DEFAULT_AGENT_TOOLS_ROOT });
   sharedManagement.assistants = assistants;
   registerKnowledge(sharedManagement,options.githubUrl);
   sharedManagement.register('configuration.pr',new ConfigurationPR(sharedManagement,options.githubUrl));
@@ -404,7 +410,8 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       }
     };
     guard();
-    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await assistantComputersApi(assistants,user,method,path) ?? await storage.api(user,method,path,input) ?? serviceRolesApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input,options.githubUrl) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
+    if (path === '/api/agent-tools/install') res.setTimeout(300_000);
+    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await agentToolsApi(store,agentTools,user,method,path,input) ?? await assistantComputersApi(assistants,user,method,path) ?? await storage.api(user,method,path,input) ?? serviceRolesApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input,options.githubUrl) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
       ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.

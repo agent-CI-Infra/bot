@@ -30,7 +30,7 @@ export function roleRunStorage(s: Store) {
     s.db.exec('UPDATE role_run_tokens SET role=(SELECT r.role FROM task_runs r WHERE r.id=role_run_tokens.run_id) WHERE role IS NULL');
   }
   const existing = new Set(s.all('PRAGMA table_info(task_runs)').map(r => r.name));
-  for (const [name, type] of Object.entries({ lease_scope: 'TEXT', lease_epoch: 'INTEGER', resume_from_run_id: 'TEXT', run_context: 'TEXT', admission: 'TEXT', protocol_recovery: 'TEXT', operation_id: 'TEXT' }))
+  for (const [name, type] of Object.entries({ lease_scope: 'TEXT', lease_epoch: 'INTEGER', resume_from_run_id: 'TEXT', run_context: 'TEXT', admission: 'TEXT', protocol_recovery: 'TEXT', operation_id: 'TEXT', cli_version: 'TEXT' }))
     if (!existing.has(name)) s.db.exec(`ALTER TABLE task_runs ADD COLUMN ${name} ${type}`);
   // A restart ends every run that was still running (interruptRuns); their tokens must not outlive them.
   s.run("UPDATE role_run_tokens SET revoked_at=?,revoke_reason='run_not_running' WHERE revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM task_runs r WHERE r.id=role_run_tokens.run_id AND r.status='running')", Date.now());
@@ -105,6 +105,14 @@ export function touchRunToken(s: Store, id: string, ttlMs = 15 * 60_000, at = Da
 }
 export function revokeRunTokens(s: Store, runId: string, reason: string, at = Date.now()) {
   return Number(s.run('UPDATE role_run_tokens SET revoked_at=?,revoke_reason=? WHERE run_id=? AND revoked_at IS NULL', at, reason, runId).changes);
+}
+
+/** Records the exact CLI binary version selected from /opt/agent-tools for this run (#705). */
+export function recordRunCliVersion(s: Store, runId: string, cliVersion: string) {
+  if (typeof cliVersion !== 'string' || !cliVersion.trim() || cliVersion.length > 64) {
+    throw new TaskError('role_run_protocol_invalid', 'failed', 'cli_version');
+  }
+  s.run('UPDATE task_runs SET cli_version=? WHERE id=?', cliVersion.trim(), runId);
 }
 
 // ---------------------------------------------------------------- normalized events

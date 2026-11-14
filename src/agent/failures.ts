@@ -4,7 +4,7 @@ export type FailureCause = 'external'|'github_access'|'github_rejected'|'model'|
 
 const causes: Record<FailureCause,{label:string,codes:string[]}> = {
   external: { label:'外部服务或网络波动', codes:['github_unavailable','github_response_unknown','github_rate_limited','model_unavailable','release_actions_incomplete','github_log_download_failed',
-    'actions_scan_incomplete','actions_completion_time_missing','claude_gateway_unavailable','claude_rate_limited','claude_transport_error'] },
+    'actions_scan_incomplete','actions_completion_time_missing','claude_gateway_unavailable','claude_rate_limited','claude_transport_error','agent_tool_download_failed'] },
   github_access: { label:'GitHub 权限或配置', codes:['github_permissions_insufficient','github_installation_owner_changed','github_installation_access_revoked','github_token_missing',
     'github_credentials_missing','github_account_missing','github_repository_scope_changed','github_actor_invalid','github_repository_invalid',
     'github_app_required','github_read_token_unavailable','github_read_token_not_read_only','github_read_token_not_allowed','branch_not_owned','release_uninstalled','release_app_required',
@@ -21,7 +21,9 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'claude_not_configured','claude_configuration_invalid','claude_restricted_gateway_required','claude_platform_unsupported','claude_binary_unavailable','claude_state_directory_invalid','claude_version_unsupported',
     'claude_protocol_incompatible','claude_gateway_scope_unverified','claude_gateway_protocol_invalid','claude_timeout','claude_stream_interrupted','claude_stream_truncated','claude_process_exit','claude_result_missing','claude_capability_mismatch',
     // #671: the data disk of the control plane or the manager is full; a repeated call whose stored result was removed.
-    'disk_full','operation_result_expired'] },
+    'disk_full','operation_result_expired',
+    // #705: read-only /opt/agent-tools CLI volume availability, compatibility and archive integrity.
+    'agent_tools_volume_missing','cli_not_installed','cli_version_incompatible','platform_arch_unsupported','agent_tool_invalid','agent_tool_hash_mismatch','agent_tool_archive_invalid'] },
   repository: { label:'仓库内容或规则', codes:['repository_has_no_commit','credential_in_repository','unsafe_repository_path','repository_path_conflict',
     'unsupported_blob_encoding','unsafe_bot_rule','pull_request_file_limit','agent_context_too_large','github_pagination_limit',
     // The repository's .bot/ rule files and .agents/skills/ are the repository's to fix.

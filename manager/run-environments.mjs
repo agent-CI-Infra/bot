@@ -71,13 +71,15 @@ export class RunEnvironments {
       const now = Date.now(), row = { run_id: spec.run_id, repository_id: repo, task_id: spec.task_id, lease_epoch: spec.lease_epoch, profile: spec.profile, network: spec.network, limits: JSON.stringify(spec.limits), image, state: 'ready', deadline: now + spec.limits.timeout_ms, created_at: now };
       this.db.prepare('INSERT INTO run_environments(run_id,repository_id,task_id,lease_epoch,profile,network,limits,image,state,deadline,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(row.run_id, repo, row.task_id, row.lease_epoch, row.profile, row.network, row.limits, image, 'ready', row.deadline, now);
       const names = this.names(repo, spec.run_id), l = spec.limits;
+      const toolsVolume = await this.projects.agentToolsVolume();
       try {
         if (spec.network === 'egress') await this.docker.request('POST', '/networks/create', { Name: names.network, Driver: 'bridge', Internal: false, CheckDuplicate: true, Labels: { ...this.labels(row), 'department.bot.kind': 'run-network' } });
         await this.docker.request('POST', `/containers/create?name=${names.container}`, { Image: image, User: '10001:10001', WorkingDir: '/workspace', Hostname: 'run',
           Cmd: ['node', '/opt/runner/idle.mjs'], Env: ['HOME=/workspace/home', 'LANG=C.UTF-8'], Labels: this.labels(row),
           HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false, Init: true, RestartPolicy: { Name: 'no' },
             Memory: l.memory_mb * mib, MemorySwap: l.memory_mb * mib, NanoCpus: Math.round(l.cpus * 1e9), PidsLimit: l.pids, IpcMode: 'private',
-            NetworkMode: spec.network === 'egress' ? names.network : 'none', Mounts: [],
+            NetworkMode: spec.network === 'egress' ? names.network : 'none',
+            Mounts: toolsVolume ? [{ Type: 'volume', Source: toolsVolume, Target: '/opt/agent-tools', ReadOnly: true }] : [],
             Tmpfs: { '/workspace': `rw,nosuid,nodev,exec,size=${l.workspace_mb * mib},uid=10001,gid=10001,mode=0700`, '/tmp': `rw,nosuid,nodev,exec,size=${l.tmp_mb * mib},mode=1777` } } });
         await this.docker.request('POST', `/containers/${names.container}/start`);
         const health = await this.docker.runner(names.container, { operation_id: randomBytes(24).toString('hex'), type: 'health' });
@@ -92,7 +94,7 @@ export class RunEnvironments {
     return { run_id: row.run_id, task_id: row.task_id, lease_epoch: row.lease_epoch, profile: row.profile, state: row.state, deadline: row.deadline, limits: JSON.parse(row.limits), image: row.image,
       container: container ? { name: this.names(row.repository_id, row.run_id).container, running: !!container.State?.Running, user: config.User ?? null, readonly_rootfs: host.ReadonlyRootfs === true, privileged: host.Privileged === true,
         cap_drop: host.CapDrop ?? [], cap_add: host.CapAdd ?? [], security_opt: host.SecurityOpt ?? [], network_mode: host.NetworkMode ?? null, networks: Object.keys(container.NetworkSettings?.Networks ?? {}),
-        mounts: (container.Mounts ?? []).map(m => ({ type: m.Type, source: m.Source ?? m.Name ?? null, destination: m.Destination, rw: !!m.RW })), binds: host.Binds ?? [], tmpfs: host.Tmpfs ?? {},
+        mounts: (container.Mounts ?? []).map(m => ({ type: m.Type, name: m.Name ?? null, source: m.Source ?? m.Name ?? null, destination: m.Destination, rw: !!m.RW })), binds: host.Binds ?? [], tmpfs: host.Tmpfs ?? {},
         memory: host.Memory ?? 0, memory_swap: host.MemorySwap ?? 0, nano_cpus: host.NanoCpus ?? 0, pids_limit: host.PidsLimit ?? 0, ipc_mode: host.IpcMode ?? null, pid_mode: host.PidMode ?? '', userns_mode: host.UsernsMode ?? '',
         env_names: (config.Env ?? []).map(e => e.slice(0, e.indexOf('='))) } : null };
   }

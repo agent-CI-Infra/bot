@@ -60,6 +60,9 @@ services:
       # Persistent HOME of every assistant computer (#457), one directory per group or person; the control plane reads,
       # writes, measures and deletes them as the computers' own user (10001).
       - assistant-homes:/assistant-homes
+      # Trusted CLI tool volume (#705): written only by verified control-plane install tasks, mounted read-only into
+      # project computers and isolated run containers at /opt/agent-tools.
+      - agent-tools:/opt/agent-tools
     networks: [control]
     read_only: true
     tmpfs:
@@ -116,6 +119,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Read-only: the manager finds the volume's name here and mounts one owner's HOME directory (a subpath) per computer.
       - assistant-homes:/assistant-homes:ro
+      # Read-only: the manager finds the tool volume's name here and mounts it read-only at /opt/agent-tools.
+      - agent-tools:/opt/agent-tools:ro
     networks: [control]
     read_only: true
     tmpfs:
@@ -134,6 +139,7 @@ services:
     security_opt: [no-new-privileges:true]
     restart: "no"
 volumes:
+  agent-tools:
   assistant-homes:
   bot-data:
   bot-keys:
