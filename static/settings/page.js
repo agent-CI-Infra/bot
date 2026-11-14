@@ -18,6 +18,41 @@ async function renderSettings(request) {
   if (request !== renderVersion) return;
   content.replaceChildren(...cards);
 }
+// #671 S1: two rows from the one /api/storage answer the page already loads, and nothing else. 可回收 is what a
+// maintenance-window VACUUM hands back — the free pages of both databases, and deliberately not the WAL: adding it would
+// mix the two meanings. 其它 is the used part of the disk this table cannot itemise — Docker images, build caches and
+// every work volume are in none of these numbers until S2′/S3′ land, and on one incident that was 181 + 64 + 61 GB — so
+// its own label says 未列明细, or the gap reads as a bug. Both databases normally live on one file system, which gives
+// one row; only when their statfs reports different disks is the row drawn once per disk, each with its own detail.
+// Pure, so the arithmetic is checked without a browser, and it adds no request and nothing to click.
+function storageSplit(view) {
+  const totals = view.totals ?? {}, control = totals.control?.database ?? null, manager = totals.manager?.database ?? null;
+  const reclaimable = [control, manager].reduce((sum, database) => sum + (Number(database?.free_bytes) || 0), 0);
+  const usageBytes = (usage, kinds, records) => {
+    if (!usage) return 0;
+    let bytes = 0;
+    for (const kind of kinds) bytes += Number(usage[kind]?.bytes) || 0;
+    if (records) for (const record of Object.values(usage.records ?? {})) bytes += Number(record?.bytes) || 0;
+    return bytes;
+  };
+  // Exactly the detail the table lists, and nothing else: both database files with their WAL, each project's own
+  // files/records/blobs/open, and the manager's files and open payloads. The manager's record copies are not a column
+  // of this table, so they stay in 其它 like every other byte the page cannot point at.
+  let controlKnown = (Number(control?.bytes) || 0) + (Number(control?.wal_bytes) || 0);
+  let managerKnown = (Number(manager?.bytes) || 0) + (Number(manager?.wal_bytes) || 0);
+  for (const project of view.projects ?? []) {
+    controlKnown += usageBytes(project, ['files', 'blobs', 'open'], true);
+    managerKnown += usageBytes(project.manager, ['files', 'open'], false);
+  }
+  const controlDisk = totals.control?.disk ?? null, managerDisk = totals.manager?.disk ?? null;
+  // The same file system: statfs reports the same size and the same free space, bar the moments between the two reads.
+  const sameDisk = !!controlDisk && !!managerDisk && Number(controlDisk.total_bytes) === Number(managerDisk.total_bytes)
+    && Math.abs(Number(controlDisk.free_bytes) - Number(managerDisk.free_bytes)) <= Math.max(64 * 1024 ** 2, Number(controlDisk.total_bytes) * 0.01);
+  const other = (disk, known) => disk ? Math.max(0, Number(disk.total_bytes) - Number(disk.free_bytes) - known) : null;
+  const others = sameDisk ? [{ where: null, bytes: other(controlDisk, controlKnown + managerKnown) }]
+    : [{ where: '控制面', disk: controlDisk, bytes: other(controlDisk, controlKnown) }, { where: 'manager', disk: managerDisk, bytes: other(managerDisk, managerKnown) }].filter(row => row.disk);
+  return { reclaimable, controlKnown, managerKnown, sameDisk, others };
+}
 // Each category loads only what its cards show.
 const settingsCards = {
   async projects(request, id) { return globalProjectSettings(request, id); },
@@ -57,11 +92,16 @@ const settingsCards = {
       cards.push(alert);
     }
     if (view.totals) {
-      const totals = card('数据库与磁盘'), side = value => value ? `${size(value.bytes)}，空闲页 ${count(value.free_pages)}（${size(value.free_bytes)}）` : '读不到';
-      totals.append(facts([['控制面数据库 control.sqlite', side(view.totals.control?.database)], ['manager 账本 manager.sqlite', side(view.totals.manager?.database)],
+      const totals = card('数据库与磁盘'), split = storageSplit(view), side = value => value ? `${size(value.bytes)}，空闲页 ${count(value.free_pages)}（${size(value.free_bytes)}）` : '读不到';
+      const detail = [['控制面数据库 control.sqlite', side(view.totals.control?.database)], ['manager 账本 manager.sqlite', side(view.totals.manager?.database)],
         ['控制面所在磁盘剩余', view.totals.control?.disk ? `${size(view.totals.control.disk.free_bytes)} / ${size(view.totals.control.disk.total_bytes)}` : '读不到'],
         ['manager 所在磁盘剩余', view.totals.manager?.disk ? `${size(view.totals.manager.disk.free_bytes)} / ${size(view.totals.manager.disk.total_bytes)}` : '读不到'],
-        ['manager 重复正文清理', expiry(view.totals.manager?.expiry)]]));
+        ['manager 重复正文清理', expiry(view.totals.manager?.expiry)]];
+      // #671 S1: what a maintenance window would hand back, and the part of the used disk this table cannot itemise. The
+      // disk alarm itself is the maintainers' own card (#671, above); this slice only adds these rows.
+      detail.push(['可回收（两个库的空闲页，做 VACUUM 能释放）', size(split.reclaimable)]);
+      for (const row of split.others) detail.push([`其它（未列明细的其它${split.others.length > 1 ? '，' + row.where + '磁盘' : ''}）`, row.bytes == null ? '读不到' : size(row.bytes)]);
+      totals.append(facts(detail));
       totals.append(note('清空正文后数据库文件不会自己变小，空出的页会留给新数据复用；要回收磁盘需要在维护窗口做 VACUUM。'));
       totals.append(note('manager 的轨迹文件只在同一操作重复调用时用来重放结果，控制面另存了同样的请求和结果。关闭超过保留天数、且其中没有仍在运行的调用的文件会在后台删除；之后重复这些调用会得到明确的「结果已过期」，不会重新执行或返回别的结果。'));
       cards.push(totals);

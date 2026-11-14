@@ -8,6 +8,7 @@ import { StorageReport } from '../dist/app/storage.js';
 import { runScope } from '../dist/storage/trajectories.js';
 import { storedInput } from '../dist/storage/payloads.js';
 import { harness, setup } from './helpers.mjs';
+import { loadConsole } from './console-page.mjs';
 
 function fixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'storage-page-')), store = new Store(join(directory, 'control.sqlite'), Buffer.alloc(32, 4));
@@ -83,4 +84,58 @@ test('the console API serves the storage view to signed-in users only', async t 
   const { admin } = await setup(h);
   const response = await admin('/api/storage');
   assert.equal(response.status, 200); assert.ok(Array.isArray(response.value.projects)); assert.ok(response.value.totals.control.database.bytes > 0);
+});
+
+test('#671 S1: the split names what a VACUUM would hand back and the part of the disk that is not itemised yet', async t => {
+  const { report } = fixture(t), view = await report.api(superAdmin, 'GET', '/api/storage');
+  const page = loadConsole(['static/settings/page.js'], () => [404, { error: 'not_found' }]);
+  const usageBytes = (usage, kinds, records) => {
+    if (!usage) return 0;
+    let bytes = 0;
+    for (const kind of kinds) bytes += usage[kind]?.bytes ?? 0;
+    if (records) for (const record of Object.values(usage.records ?? {})) bytes += record.bytes ?? 0;
+    return bytes;
+  };
+  // Exactly the detail the table lists: both database files with their WAL, each project's own numbers, and the
+  // manager's files and open payloads — its record copies are not a column here and so stay in 其它.
+  let controlKnown = view.totals.control.database.bytes + (view.totals.control.database.wal_bytes ?? 0);
+  let managerKnown = view.totals.manager.database.bytes + (view.totals.manager.database.wal_bytes ?? 0);
+  for (const project of view.projects) { controlKnown += usageBytes(project, ['files', 'blobs', 'open'], true); managerKnown += usageBytes(project.manager, ['files', 'open'], false); }
+  page.run('var view = ' + JSON.stringify(view));
+  const split = page.run('storageSplit(view)');
+  assert.deepEqual([split.controlKnown, split.managerKnown], [controlKnown, managerKnown]);
+  // 可回收 is the sum of both databases' free pages: 1 GiB and 2 GiB must read 3 GiB, never one of them, never the WAL.
+  const stubbed = { ...view, totals: { ...view.totals,
+    control: { ...view.totals.control, database: { ...view.totals.control.database, free_bytes: 1024 ** 3, wal_bytes: 999 } },
+    manager: { ...view.totals.manager, database: { ...view.totals.manager.database, free_bytes: 2 * 1024 ** 3, wal_bytes: 777 } } } };
+  page.run('var stubbed = ' + JSON.stringify(stubbed));
+  assert.equal(page.run('storageSplit(stubbed).reclaimable'), 3 * 1024 ** 3);
+  assert.equal(split.reclaimable, view.totals.control.database.free_bytes + view.totals.manager.database.free_bytes);
+  // One file system for both databases: a single 其它 row, and it subtracts every number the table lists.
+  const disk = { free_bytes: 20 * 1024 ** 3, total_bytes: 100 * 1024 ** 3 };
+  const sharedView = { ...view, totals: { ...view.totals, control: { ...view.totals.control, disk }, manager: { ...view.totals.manager, disk } } };
+  page.run('var sharedView = ' + JSON.stringify(sharedView));
+  const shared = page.run('storageSplit(sharedView)');
+  assert.equal(shared.sameDisk, true); assert.equal(shared.others.length, 1);
+  assert.equal(shared.others[0].bytes, 100 * 1024 ** 3 - 20 * 1024 ** 3 - controlKnown - managerKnown);
+  // The two databases on different disks: one row each, each with its own disk and its own detail.
+  const wide = { ...sharedView, totals: { ...sharedView.totals, manager: { ...sharedView.totals.manager, disk: { free_bytes: 5 * 1024 ** 3, total_bytes: 10 * 1024 ** 3 } } } };
+  page.run('var wide = ' + JSON.stringify(wide));
+  const split2 = page.run('storageSplit(wide)');
+  assert.equal(split2.sameDisk, false);
+  assert.deepEqual([...split2.others.map(row => row.where)], ['控制面', 'manager']);
+  assert.deepEqual([...split2.others.map(row => row.bytes)],
+    [100 * 1024 ** 3 - 20 * 1024 ** 3 - controlKnown, 10 * 1024 ** 3 - 5 * 1024 ** 3 - managerKnown]);
+  // The same size with a free space a moment apart is still one file system; a different size is not.
+  page.run('var apart = ' + JSON.stringify({ ...sharedView, totals: { ...sharedView.totals, manager: { ...sharedView.totals.manager, disk: { ...disk, free_bytes: disk.free_bytes - 1024 ** 2 } } } }));
+  assert.equal(page.run('storageSplit(apart).sameDisk'), true);
+  page.run('var bigger = ' + JSON.stringify({ ...sharedView, totals: { ...sharedView.totals, manager: { ...sharedView.totals.manager, disk: { ...disk, total_bytes: disk.total_bytes * 2 } } } }));
+  assert.equal(page.run('storageSplit(bigger).sameDisk'), false);
+  // A deployment that cannot stat its file system draws no 其它 row at all, never a made-up number.
+  page.run('var none = ' + JSON.stringify({ ...view, totals: { ...view.totals, control: { ...view.totals.control, disk: null }, manager: null } }));
+  const missing = page.run('storageSplit(none)');
+  assert.deepEqual([missing.sameDisk, missing.others.length], [false, 0]);
+  // Counters that overshoot the disk clamp at zero instead of showing a negative other.
+  page.run('var over = ' + JSON.stringify({ ...sharedView, totals: { ...sharedView.totals, control: { ...sharedView.totals.control, disk: { free_bytes: 0, total_bytes: 10 } }, manager: { ...sharedView.totals.manager, disk: { free_bytes: 0, total_bytes: 10 } } } }));
+  assert.deepEqual([...page.run('storageSplit(over).others.map(row => row.bytes)')], [0]);
 });
