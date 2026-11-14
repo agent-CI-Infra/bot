@@ -513,21 +513,28 @@ export class Projects {
       })
       .finally(() => { this.scanning = null; });
   }
-  // What Docker keeps on the host for images and the build cache (#671), read every half hour in the background: the
-  // storage page shows it with what can be reclaimed. Docker sizes volumes only on request, which can take long, so only
-  // images and the build cache are asked for; the computers' volumes are measured by their own scans.
+  // What Docker keeps on the host (#671), read every half hour in the background: the storage page shows it with what
+  // can be reclaimed, and this is the only place those numbers come from. One /system/df carries all four kinds; Docker
+  // sizes volumes by walking them, which can take long, so the read never runs on the request path. A stopped socket or
+  // an answer past the 4 MB cap in request() keeps the previous reading.
   async readDockerUsage(now = Date.now()) {
     if (now - this.dockerUsageAt < 30 * 60_000) return;
     this.dockerUsageAt = now;
     try {
-      const df = await this.docker.request('GET', '/system/df?type=image&type=build-cache');
-      const images = Array.isArray(df?.Images) ? df.Images : [], cache = Array.isArray(df?.BuildCache) ? df.BuildCache : [];
+      const df = await this.docker.request('GET', '/system/df');
+      const rows = value => Array.isArray(value) ? value : [];
+      const images = rows(df?.Images), containers = rows(df?.Containers), volumes = rows(df?.Volumes), cache = rows(df?.BuildCache);
       const sum = rows => rows.reduce((total, row) => total + Math.max(0, Number(row.Size) || 0), 0);
+      const pay = (rows, pick) => rows.reduce((total, row) => total + Math.max(0, Number(pick(row)) || 0), 0);
       // An image no container uses can be removed; its layers shared with images in use stay, so that part is not counted.
       const unused = images.filter(image => image.Containers === 0);
       const usage = { read_at: new Date(now).toISOString(),
         images: { count: images.length, bytes: Number(df?.LayersSize) || sum(images), unused_count: unused.length,
           reclaimable_bytes: unused.reduce((total, image) => total + Math.max(0, (Number(image.Size) || 0) - Math.max(0, Number(image.SharedSize) || 0)), 0) },
+        // A container takes its writable layer (SizeRw), not its whole filesystem (SizeRootFs), which is mostly its image.
+        containers: { count: containers.length, bytes: pay(containers, row => row?.SizeRw) },
+        // A volume takes the space its data uses; Docker leaves UsageData out when it did not size the volume.
+        volumes: { count: volumes.length, bytes: pay(volumes, row => row?.UsageData?.Size) },
         build_cache: { count: cache.length, bytes: sum(cache), reclaimable_bytes: sum(cache.filter(row => !row.InUse && !row.Shared)) } };
       this.db.prepare("INSERT INTO settings VALUES('docker_usage',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(usage));
     } catch (error) { logFailure('reading Docker disk usage failed', error); }

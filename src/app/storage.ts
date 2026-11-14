@@ -216,6 +216,7 @@ function summary(projects: Record<string, any>[], control: Record<string, any> |
     manager_trajectories: manager ? sum(p => bytesOf(p.manager?.files?.bytes) + bytesOf(p.manager?.open?.bytes)) : null,
     computers: manager?.computers ? sum(p => p.computer?.total_bytes) : null,
     docker_images: measured(manager?.docker?.images?.bytes), docker_build_cache: measured(manager?.docker?.build_cache?.bytes),
+    docker_containers: measured(manager?.docker?.containers?.bytes), docker_volumes: measured(manager?.docker?.volumes?.bytes),
   };
   const unmeasured = [...Object.entries(known).filter(([, value]) => value === null).map(([key]) => key), ...partial && known.computers !== null ? ['computers'] : []];
   const knownBytes = Object.values(known).reduce((total: number, value) => total + (value ?? 0), 0), disk = control?.disk;
