@@ -167,7 +167,12 @@ function boardOpenMenu(menu,open) {
 function boardShell() {
   const panel=$('board-panel');panel.replaceChildren();
   const toolbar=element('div','','board-toolbar'),category=boardCategory();
-  const filters=document.createElement('details');filters.className='board-filter-details';filters.open=boardState.filterOpen??!boardMedia.matches;filters.addEventListener('toggle',()=>{if(filters.isConnected)boardState.filterOpen=filters.open;});
+  const filters=document.createElement('details');filters.className='board-filter-details';
+  // #482: a board rendered on the desktop keeps its filters open; narrowing the window to the phone layout folds them, so
+  // the toolbar the reader sees matches the width they are at instead of the width the page was built on.
+  const syncFilterOpen=()=>{filters.open=boardMedia.matches?boardState.filterOpen===true:true;};
+  syncFilterOpen();filters.addEventListener('toggle',()=>{if(filters.isConnected)boardState.filterOpen=filters.open;});
+  boardMedia.addEventListener('change',()=>{if(filters.isConnected)syncFilterOpen();});
   const summary=element('summary','筛选');summary.addEventListener('click',()=>{boardState.filterOpen=!filters.open;});filters.append(summary);
   const controls=element('div','','board-filter-controls');controls.setAttribute('role','group');controls.setAttribute('aria-label','筛选');
   const apply=async(field,value,rebuild=false)=>{boardSetFilter(field,value);if(rebuild)boardShell();else boardChips();await boardLoadCards().catch(error);};
@@ -205,6 +210,8 @@ function boardShell() {
   });
   // #482: the active view, its unsaved state and the save action are readable without opening `⋯`.
   const views=boardSelect('视图',boardState.views.map(v=>[v.id,v.name]),boardState.viewId);views.label.className='board-field board-view-choice';views.select.id='board-view-select';
+  // #482: the caption is its own node so the narrow toolbar can drop it and keep the selector, state and save in one row.
+  views.label.replaceChildren(element('span','视图','board-view-label'),views.select);
   views.select.addEventListener('change',()=>{boardState.viewId=views.select.value;boardUseView();boardLoadCards().catch(error);});
   const viewState=element('span','','board-view-state');viewState.id='board-view-state';viewState.textContent='未保存';viewState.hidden=true;
   const save=boardButton('保存视图',boardSave,'quiet board-save');save.id='board-save';save.hidden=true;
