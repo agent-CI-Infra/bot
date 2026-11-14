@@ -109,17 +109,39 @@ test('project administrators see installed-but-not-started repositories as waiti
   page.run(`var projectRoute = () => null; me = {role: 'project_admin'}; tab = 'projects'; repositories = [];`);
   await page.run('render()');
   assert.equal(page.$('rows').querySelector('.console-state'), null, 'pending installations are not the empty-project guidance');
-  assert.equal(page.$('rows').querySelector('h2').textContent, '等待管理员启动');
+  assert.equal(page.$('rows').querySelector('h2').textContent, '等待超级管理员启动');
+  assert.equal(page.$('rows').querySelector('.project-pending-intro').textContent, '这些仓库已装好 GitHub App，启动后会出现在上面的项目列表里。');
   assert.equal(page.$('rows').querySelector('strong').textContent, 'fixture/project-101');
-  assert.ok([...page.$('rows').querySelectorAll('span')].some(el => el.textContent === '等待管理员启动'));
-  assert.equal(page.$('rows').querySelector('p').textContent, '已安装到 GitHub，等待管理员在控制台启动后即可打开。');
+  assert.ok([...page.$('rows').querySelectorAll('span')].some(el => el.textContent === '待超级管理员启动'));
+  assert.equal(page.$('rows').querySelector('.project-pending-row p').textContent, '已安装到 GitHub，需要超级管理员在控制台启动后才能打开。');
+  assert.equal(page.$('rows').querySelector('.project-pending-row button').textContent, '复制提醒', 'a project administrator copies a reminder');
   const links = [...page.$('rows').querySelectorAll('a')];
   assert.ok(links.every(a => a.href !== '#/projects/101/overview'), 'an unstarted repository has no project page');
-  assert.equal(page.$('count').textContent, '0 个项目，1 个等待管理员启动');
+  assert.equal(page.$('count').textContent, '0 个项目，1 个待超级管理员启动');
   assert.equal(links.length, 1); assert.equal(links[0].href, '#/identity');
   assert.equal(links[0].querySelector('span').textContent, '查看身份与权限');
 });
 
+
+// #716: a project administrator copies a reminder that names the repository and where to start it.
+test('pending activation rows offer 复制提醒 with 已复制 feedback and a manual fallback', async () => {
+  const page = loadConsole(['static/app.js', 'static/views.js'], () => [200, {}]);
+  page.run(`var projectRoute = () => null; location.origin = 'https://launchpad.example'; location.pathname = '/admin';`);
+  page.run(`me = {role: 'project_admin'}`);
+  page.run(`navigator.clipboard = { writeText: async text => { globalThis.__copied = text; } }`);
+  const group = page.run(`pendingActivationGroup([{ id: '101', full_name: 'fixture/project-101' }])`);
+  const copy = group.querySelector('.project-pending-row button');
+  assert.equal(copy.textContent, '复制提醒');
+  await copy.listeners.click[0]();
+  assert.equal(copy.textContent, '已复制');
+  assert.equal(page.run('globalThis.__copied'), '请在 LaunchPad 控制台启动仓库 fixture/project-101：https://launchpad.example/admin#/projects');
+  page.run(`navigator.clipboard = { writeText: async () => { throw new Error('denied'); } }`);
+  const failed = page.run(`pendingActivationGroup([{ id: '101', full_name: 'fixture/project-101' }])`).querySelector('.project-pending-row button');
+  await failed.listeners.click[0]();
+  assert.equal(failed.textContent, '请手动复制');
+  assert.match(failed.title, /fixture\/project-101/);
+  assert.match(failed.parentElement.querySelector('.project-pending-manual').textContent, /^请在 LaunchPad 控制台启动仓库 fixture\/project-101/);
+});
 
 test('a failed identity read is a retryable error, not an empty project list', async () => {
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
@@ -149,8 +171,8 @@ test('the pending-activation group is hidden while a project list filter is set'
   assert.equal(page.$('count').textContent, '0 个项目');
   page.$('owner-filter').value = '';
   await page.run('render()');
-  assert.equal(page.$('rows').querySelector('.project-pending-group h2').textContent, '等待管理员启动');
-  assert.equal(page.$('count').textContent, '0 个项目，1 个等待管理员启动');
+  assert.equal(page.$('rows').querySelector('.project-pending-group h2').textContent, '等待超级管理员启动');
+  assert.equal(page.$('count').textContent, '0 个项目，1 个待超级管理员启动');
 });
 
 test('project list endpoints filter before taking 50 rows and never expand administrator scope', async t => {

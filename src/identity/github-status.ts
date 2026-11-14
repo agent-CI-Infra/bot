@@ -104,8 +104,8 @@ export function githubConnection(store: Store, principal: string, scope: { visib
   }
   if (pending.length) {
     return result('pending_activation',
-      `已登录 GitHub，有 ${pending.length} 个仓库已安装但还没有被管理员启动`,
-      '请联系管理员在控制台启动这些仓库。', 'wait_activation');
+      `已登录 GitHub，有 ${pending.length} 个仓库已安装但还没有被超级管理员启动`,
+      '请联系超级管理员在控制台启动这些仓库。', 'wait_activation');
   }
   // "App not installed on my repos" and "I am not a repository Admin" look the same in stored data:
   // installations belong to the whole deployment, and verification does not persist non-admin membership.

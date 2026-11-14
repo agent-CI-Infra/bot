@@ -126,3 +126,12 @@ body:not(.console-ready) main { flex: 1; display: flex; flex-direction: column; 
 .identity-pending-repos li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .project-pending-group { margin-top: 16px; }
 .project-pending-row .status { white-space: nowrap; }
+.project-pending-intro { margin: 4px 0 0; font-size: var(--font-size-1); }
+/* #716: status and the one next step size to their content, so the repository name keeps the remaining width. */
+.row.project-pending-row.has-actions { grid-template-columns: minmax(0, 1fr) auto auto; }
+.project-pending-row .actions { flex-wrap: wrap; }
+.project-pending-manual { flex-basis: 100%; margin: 4px 0 0; overflow-wrap: anywhere; user-select: all; }
+@media (max-width: 760px) {
+  .row.project-pending-row.has-actions { grid-template-columns: minmax(0, 1fr) auto; }
+  .project-pending-row .row-state { max-width: none; }
+}
