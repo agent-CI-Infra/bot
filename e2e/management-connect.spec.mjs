@@ -145,5 +145,15 @@ test('#641 手机从底栏打开管理助手：390×500 下面板与输入区都
     expect(m.send.height).toBeGreaterThanOrEqual(30);
     expect(m.send.bottom).toBeLessThanOrEqual(m.win.bottom + 0.5);
     await expect(panel.getByRole('button', { name: '发送', exact: true })).toBeVisible();
+    // Review fix: the send button keeps the 44px touch target even here; the conversation is what gives up room, by
+    // scrolling inside its own box, and the session fold stays reachable instead of being removed at this height.
+    expect(m.send.height).toBeGreaterThanOrEqual(44);
+    await expect(panel.getByText('会话记录', { exact: true })).toBeVisible();
+    const feed = await page.evaluate(() => {
+      const node = document.querySelector('#management-chat .management-feed'), box = node.getBoundingClientRect();
+      return { overflowY: getComputedStyle(node).overflowY, top: box.top, bottom: box.bottom };
+    });
+    expect(['auto', 'scroll']).toContain(feed.overflowY);
+    expect(feed.bottom).toBeLessThanOrEqual(m.field.top + 0.5);
   } finally { await f.close(); }
 });
