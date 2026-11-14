@@ -107,7 +107,7 @@ manager 只在同一操作 id 重复调用时读取保存的结果，这只发�
 - 记录写进任务的 `legacy.jsonl`（`trajectories/<repository_id>/<task_id>/legacy.jsonl`，原来的运行已无从得知）或会话的 `conversations/<conversation_id>/legacy.jsonl`；会话里原先加密的正文以明文写入，库里不再留任何字段。模型快照原样保存为 `{"$snapshot":…}`，`task_history` 快照原样保存，行里留 `{"$trajectory":"<定位串>","characters":<原长度>}`。
 - 一轮走完后每 10 分钟再看一次新行（没有运行可归属、仍写在行里的记录）。
 
-迁移不缩小 SQLite 文件：清出的页留在空闲页里给新行复用。回收磁盘（维护窗口里的 `VACUUM` / `VACUUM INTO`）不在这里做，存储页会显示空闲页数供维护者判断。
+迁移不缩小 SQLite 文件：清出的页留在空闲页里给新行复用。空闲页还给磁盘由服务启动时的压缩和之后的增量回收完成，见[部署：启动时压缩数据库](deployment.md#启动时压缩数据库)。
 
 ## 命令完整输出与模型分页
 

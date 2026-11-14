@@ -176,6 +176,9 @@ jobs:
             BatchMode yes
             StrictHostKeyChecking yes
             ConnectTimeout 15
+            # The deploy waits through a start that compacts the databases (#671); keep the quiet session alive.
+            ServerAliveInterval 30
+            ServerAliveCountMax 6
             $proxy_jump
           SSHCONFIG
           chmod 600 ~/.ssh/config ~/.ssh/known_hosts
@@ -228,10 +231,14 @@ jobs:
           # interrupted deployment left. A release changes every image tag, so every container is recreated anyway and a
           # normal deployment is down no longer.
           docker compose up -d --force-recreate
-          # The control-plane image's healthcheck turns healthy once the business listener (8791) answers.
+          # The control-plane image's healthcheck turns healthy once the business listener (8791) answers. A start that
+          # compacts control.sqlite first (#671, docs/deployment.md) listens only afterwards: wait while the container keeps
+          # running, up to 90 minutes, and show the compaction's progress; a container that stops fails at once.
           bot=$(docker compose ps -q bot)
-          for _ in $(seq 1 40); do
+          for i in $(seq 1 1800); do
             if [ "$(docker inspect --format '{{.State.Health.Status}}' "$bot")" = healthy ]; then docker compose ps; exit 0; fi
+            if [ "$(docker inspect --format '{{.State.Status}}' "$bot")" != running ]; then break; fi
+            if [ $((i % 20)) = 0 ]; then docker compose logs --since 60s bot manager 2>&1 | grep -E 'compact' | tail -2 || true; fi
             sleep 3
           done
           docker compose logs --tail 50 bot
