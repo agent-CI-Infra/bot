@@ -1,6 +1,7 @@
 import type { Store } from '../storage/database.js';
 import { fail, HttpError, type Json } from '../core/security.js';
 import { appJwt, revokeInstallationToken } from '../github/client.js';
+import { refused } from '../github/rate-limits.js';
 import { installationRef, numericId, type InstallationRef } from '../installations/archive.js';
 
 interface Access {
@@ -13,9 +14,21 @@ interface Access {
 /** A failure's error code, safe to record: never a message, URL or credential. */
 export const failureCode = (error: unknown): string => error instanceof HttpError ? error.code : 'unexpected_error';
 
-/** Identity comes from OAuth; repository authority is checked with a separate, read-only installation token. */
+/** When GitHub refused a response for its rate limit, the time it may be asked again (its reset or Retry-After, else a minute); otherwise null. */
+export function rateLimitedUntil(store: Store, response: Response): number | null {
+  const limited = response.status === 429 || response.status === 403 &&
+    (response.headers.get('retry-after') !== null || response.headers.get('x-ratelimit-remaining') === '0');
+  // Without a bucket, refused() records nothing and only reads the headers.
+  return limited ? refused(store, undefined, response.headers).until : null;
+}
+
+/**
+ * Identity comes from OAuth; repository authority is checked with a separate, read-only installation token. A rate-limited
+ * response ends the read with `github_rate_limited`: nothing more is sent, and the caller keeps what it knew.
+ */
 export class GitHubPermissions {
-  constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com') {}
+  /** `limited` hears when GitHub refused a request for its rate limit, and until when. */
+  constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com', private readonly limited: (until: number) => void = () => {}) {}
   private async request(token: string, path: string, body?: Json, missing = false): Promise<Json | null> {
     let response: Response;
     try { response = await fetch(new URL(path, this.apiUrl), {
@@ -24,6 +37,8 @@ export class GitHubPermissions {
       ...(body ? { body: JSON.stringify(body) } : {}),
     }); } catch { return fail(502, 'github_verification_unavailable'); }
     if (missing && response.status === 404) return null;
+    const limit = rateLimitedUntil(this.store, response);
+    if (limit) { this.limited(limit); return fail(429, 'github_rate_limited'); }
     if (!response.ok) return fail(403, 'github_permission_pending');
     try { return await response.json() as Json; } catch { return fail(502, 'github_incomplete_evidence'); }
   }
@@ -70,7 +85,7 @@ export class GitHubPermissions {
               !['active', 'pending'].includes(String(member.state)) || !['admin', 'member'].includes(String(member.role))) return fail(502, 'github_incomplete_evidence');
             owner = member.state === 'active' && member.role === 'admin'; if (member.state !== 'active') uncertain ??= 'membership_pending';
           }
-        } catch (error) { uncertain ??= 'membership:' + failureCode(error); }
+        } catch (error) { if (failureCode(error) === 'github_rate_limited') throw error; uncertain ??= 'membership:' + failureCode(error); }
       }
       const repositoryIds: string[] = [], adminIds: string[] = [];
       for (const repo of repos) {
@@ -85,7 +100,7 @@ export class GitHubPermissions {
           if (numericId(current?.id) !== id || numericId((current?.owner as Json | undefined)?.id) !== targetId) return fail(502, 'github_incomplete_evidence');
           if (permission.permission !== 'none') repositoryIds.push(id);
           if (permission.permission === 'admin' || ((permission.user as Json)?.permissions as Json | undefined)?.admin === true) adminIds.push(id);
-        } catch (error) { uncertain ??= 'repository_permission:' + failureCode(error); }
+        } catch (error) { if (failureCode(error) === 'github_rate_limited') throw error; uncertain ??= 'repository_permission:' + failureCode(error); }
       }
       return { target_id: targetId, owner, repository_ids: repositoryIds, admin_ids: adminIds,
         repository_selection: String(installation.repository_selection), uncertain };

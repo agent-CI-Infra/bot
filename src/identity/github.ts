@@ -4,15 +4,35 @@ import { digest, fail, randomId, HttpError, type Json } from '../core/security.j
 import { installationRef, numericId, type InstallationIdentity, type InstallationRef, type VerifiedInstallationAccess } from '../installations/archive.js';
 import { activeScopes, invalidateIfLost, resolveActor, revision } from './authorization.js';
 import { identityProjection, projectCapabilities, tenantId } from './storage.js';
-import { failureCode as errorCode, GitHubPermissions } from './github-permissions.js';
+import { failureCode as errorCode, GitHubPermissions, rateLimitedUntil } from './github-permissions.js';
 
 // What made the latest permission check uncertain, kept on the identity for diagnosis; null once everything was settled.
 const issues = (list: { installation: string | null; code: string }[]): string | null => list.length ? JSON.stringify(list) : null;
 
+/** How long a GitHub-derived grant counts after the check that proved it (#708). The background refresh renews it well before. */
+export const derivedGrantValidity = 30 * 60_000;
+// A write whose proof lapsed does not repeat a check that failed this recently: a GitHub that keeps failing must not slow every write.
+const retryPause = 60_000;
+
+/**
+ * Platform super administrators and principals holding explicit delegation are never verified on GitHub (#708): their
+ * access does not depend on it, and they receive no GitHub-derived grants.
+ */
+export function verificationExempt(store: Store, principal: string): boolean {
+  return !!store.get("SELECT 1 FROM principals p JOIN users u ON u.id=p.user_id WHERE p.id=? AND u.role='super_admin'", principal) ||
+    !!store.get(`SELECT 1 FROM scoped_grants WHERE principal_id=? AND source='explicit_delegation' AND revoked_at IS NULL
+      AND (expires_at IS NULL OR expires_at>?) LIMIT 1`, principal, Date.now());
+}
+
 export interface GitHubOAuthConfig { clientId: string; clientSecret: string; redirectUri: string; apiUrl?: string; webUrl?: string; applicationType?: 'oauth_app' | 'github_app' }
 export class GitHubIdentity implements InstallationIdentity {
   private refreshing = new Map<string, Promise<void>>();
+  // When each principal's latest check ended, for the pause after a failed one.
+  private finished = new Map<string, number>();
   private tokens = new Map<string, Promise<string>>();
+  /** Until when GitHub asked this deployment to stop sending, as reported by the latest rate-limited response; the background refresh waits for it. */
+  rateLimitedUntil = 0;
+  private limited = (until: number) => { this.rateLimitedUntil = Math.max(this.rateLimitedUntil, until); };
   constructor(readonly store: Store, readonly config: GitHubOAuthConfig, private readonly assertConfiguration: () => void = () => {}) {
     const redirect = new URL(config.redirectUri);
     if (redirect.pathname !== '/auth/github/callback' || redirect.search || redirect.hash ||
@@ -52,6 +72,8 @@ export class GitHubIdentity implements InstallationIdentity {
     try { response = await fetch(new URL(path, this.config.apiUrl || 'https://api.github.com'), { redirect: 'error', signal: AbortSignal.timeout(15_000),
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } }); }
     catch { return fail(502, 'github_verification_unavailable'); }
+    const limit = rateLimitedUntil(this.store, response);
+    if (limit) { this.limited(limit); return fail(429, 'github_rate_limited'); }
     if (!response.ok) return fail(response.status === 401 ? 401 : 403, response.status === 401 ? 'github_reauthorization_required' : 'github_permission_pending');
     try { return await response.json() as Json; } catch { return fail(502, 'github_verification_unavailable'); }
   }
@@ -117,10 +139,35 @@ export class GitHubIdentity implements InstallationIdentity {
     const promise = (async () => {
       if (previous) await previous.catch(() => {});
       for (let attempt = 0; attempt < 5; attempt++) if (await this.verifyPermissions(principal) === 'done') return;
-    })().finally(() => { if (this.refreshing.get(principal) === promise) this.refreshing.delete(principal); });
+    })().finally(() => { this.finished.set(principal, Date.now()); if (this.refreshing.get(principal) === promise) this.refreshing.delete(principal); });
     this.refreshing.set(principal, promise); return promise;
   }
+  /**
+   * The background refresh and a password login (#708): join a check already in flight, else start one. An identity that a
+   * failed check left pending is tried again, as the 「重新验证」 button would.
+   */
+  renew(principal: string): Promise<void> {
+    const inflight = this.refreshing.get(principal); if (inflight) return inflight;
+    if (!verificationExempt(this.store, principal))
+      this.store.run("UPDATE external_identities SET status='active' WHERE principal_id=? AND provider='github' AND status='pending_verification' AND credentials IS NOT NULL", principal);
+    return this.refresh(principal);
+  }
+  /**
+   * Writes are decided against the stored grants and never wait for GitHub (#708), unless the principal's proof has lapsed:
+   * no check succeeded within the grants' validity. Then the request verifies once; concurrent requests share that check.
+   * A check that just failed (it left the identity pending) is not repeated by every write, nor is one while GitHub asks to
+   * wait. Resolves whether a check ran, so that the caller reads the grants again.
+   */
+  async renewIfLapsed(principal: string): Promise<boolean> {
+    const identity = this.store.get(`SELECT status,verified_at FROM external_identities WHERE principal_id=? AND provider='github'
+      AND status IN ('active','pending_verification') AND credentials IS NOT NULL`, principal), now = Date.now();
+    if (!identity || identity.verified_at > now - derivedGrantValidity || verificationExempt(this.store, principal)) return false;
+    if (!this.refreshing.has(principal) && (this.rateLimitedUntil > now ||
+      identity.status !== 'active' && now - (this.finished.get(principal) ?? 0) < retryPause)) return false;
+    await this.renew(principal); return true;
+  }
   private async verifyPermissions(principal: string): Promise<'done' | 'retry'> {
+    if (verificationExempt(this.store, principal)) { this.dropDerived(principal); return 'done'; }
     const identity = this.store.get("SELECT * FROM external_identities WHERE principal_id=? AND provider='github' AND status='active'", principal);
     if (!identity?.credentials) return 'done';
     const startRevision = revision(this.store, principal), now = Date.now();
@@ -129,10 +176,13 @@ export class GitHubIdentity implements InstallationIdentity {
     // Installations whose evidence could not be settled this round, with a reason code (never a credential). Their grants
     // only stop counting until the next proof; grants of every other installation that are not proved again are revoked.
     const uncertain = new Map<string, string>();
+    // Installations GitHub refused for its rate limit. That says nothing about the person: their grants keep the rest of
+    // their validity instead of turning pending, and the background refresh waits for GitHub before it asks again (#708).
+    const limited = new Set<string>();
     try {
       const token = await this.token(identity), current = await this.api(token, '/user');
       if (numericId(current.id) !== identity.external_actor || typeof current.login !== 'string' || !current.login) return fail(403, 'github_identity_mismatch');
-      const permissions = new GitHubPermissions(this.store, this.config.apiUrl);
+      const permissions = new GitHubPermissions(this.store, this.config.apiUrl, this.limited);
       for (const snapshot of this.store.all("SELECT * FROM github_installations WHERE github_host='github.com'")) {
         const ref = snapshot.ref;
         // Confirmed deleted or suspended: nothing to prove, and their grants are revoked below.
@@ -140,6 +190,8 @@ export class GitHubIdentity implements InstallationIdentity {
         const pending = snapshot.status !== 'active' ? `installation_${snapshot.status}` : snapshot.scope_pending ? 'installation_scope_pending'
           : snapshot.completeness !== 'complete' ? 'installation_incomplete' : null;
         if (pending) { uncertain.set(ref, pending); continue; }
+        // Once GitHub asked to wait, the rest of this check sends nothing more.
+        if (limited.size) { uncertain.set(ref, 'github_rate_limited'); limited.add(ref); continue; }
         try {
           const access = await permissions.read({ github_host: snapshot.github_host, app_id: snapshot.app_id, installation_id: snapshot.installation_id },
             { id: identity.external_actor, login: String(current.login) });
@@ -152,7 +204,7 @@ export class GitHubIdentity implements InstallationIdentity {
             desired.push({ id: `github:${principal}:${ref}:tenant`, tenant, project: null, role: 'org_admin', installation: snapshot, evidence });
           for (const id of known) if (access.admin_ids.includes(id))
             desired.push({ id: `github:${principal}:${ref}:${id}`, tenant, project: id, role: 'project_admin', installation: snapshot, evidence });
-        } catch (error) { uncertain.set(ref, errorCode(error)); }
+        } catch (error) { uncertain.set(ref, errorCode(error)); if (errorCode(error) === 'github_rate_limited') limited.add(ref); }
       }
       this.store.transaction(() => {
         this.assertConfiguration();
@@ -163,15 +215,17 @@ export class GitHubIdentity implements InstallationIdentity {
         for (const grant of this.store.all("SELECT id,installation_ref,expires_at FROM scoped_grants WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", principal)) {
           if (!uncertain.has(grant.installation_ref)) this.store.run('UPDATE scoped_grants SET revoked_at=? WHERE id=?', now, grant.id);
           // An already expired grant keeps its expiry, so a long uncertainty leaves it untouched.
-          else if (grant.expires_at === null || grant.expires_at > now) this.store.run('UPDATE scoped_grants SET expires_at=? WHERE id=?', now, grant.id);
+          else if (!limited.has(grant.installation_ref) && (grant.expires_at === null || grant.expires_at > now)) this.store.run('UPDATE scoped_grants SET expires_at=? WHERE id=?', now, grant.id);
         }
         for (const item of desired) this.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,policy,evidence,verified_at,expires_at,installation_ref,installation_revision)
           VALUES(?,?,?,?,?,?,?,'github_derived','current_github',?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET verified_at=excluded.verified_at,
           tenant_id=excluded.tenant_id,project_id=excluded.project_id,scope=excluded.scope,role=excluded.role,capabilities=excluded.capabilities,
           expires_at=excluded.expires_at,revoked_at=NULL,evidence=excluded.evidence,installation_revision=excluded.installation_revision`, item.id, principal, item.tenant,
-          item.project, item.project ? 'project' : 'tenant', item.role, JSON.stringify(projectCapabilities), item.evidence, now, now + 5 * 60_000, item.installation.ref, item.installation.revision);
+          item.project, item.project ? 'project' : 'tenant', item.role, JSON.stringify(projectCapabilities), item.evidence, now, now + derivedGrantValidity, item.installation.ref, item.installation.revision);
+        // A check cut short by a rate limit is no complete proof: verified_at stays at the last one, so a lapsed grant is still noticed.
         this.store.run('UPDATE external_identities SET display_name=?,status=?,verified_at=?,verification_issues=? WHERE id=?', String(current.login),
-          uncertain.size && !desired.length ? 'pending_verification' : 'active', now, issues([...uncertain].map(([installation, code]) => ({ installation, code }))), identity.id);
+          [...uncertain.keys()].some(ref => !limited.has(ref)) && !desired.length ? 'pending_verification' : 'active', limited.size ? identity.verified_at : now,
+          issues([...uncertain].map(([installation, code]) => ({ installation, code }))), identity.id);
         // Compare what the principal can use, not grant rows: renewing, or revoking a grant that had already expired, loses nothing.
         invalidateIfLost(this.store, principal, before, 'github.permissions_changed');
       });
@@ -179,10 +233,15 @@ export class GitHubIdentity implements InstallationIdentity {
     } catch (error) {
       // A transport/SSO failure is uncertainty, never evidence that someone left an organization.
       // A concurrent invalidate (the caller itself may have bumped the revision) must not be treated
-      // as a completed refresh: return 'retry' so login and the minute job run a fresh check.
+      // as a completed refresh: return 'retry' so login and the background refresh run a fresh check.
       let committed = false;
       this.store.transaction(() => {
         if (revision(this.store, principal) !== startRevision || !this.store.get("SELECT 1 FROM external_identities WHERE id=? AND status='active'", identity.id)) return;
+        // Rate limited before any evidence was read: nothing is known, so the grants keep the rest of their validity.
+        if (errorCode(error) === 'github_rate_limited') {
+          this.store.run('UPDATE external_identities SET verification_issues=? WHERE id=?', issues([{ installation: null, code: errorCode(error) }]), identity.id);
+          committed = true; return;
+        }
         const before = activeScopes(this.store, principal), failed = Date.now();
         this.store.run("UPDATE external_identities SET status='pending_verification',verification_issues=? WHERE id=?", issues([{ installation: null, code: errorCode(error) }]), identity.id);
         this.store.run("UPDATE scoped_grants SET expires_at=? WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)", failed, principal, failed);
@@ -192,10 +251,23 @@ export class GitHubIdentity implements InstallationIdentity {
       return committed ? 'done' : 'retry';
     }
   }
+  // An exempt principal keeps no GitHub-derived grant (#708). Revoking one that had already lapsed, or one that the
+  // principal's other grants cover, loses nothing and leaves the revision alone.
+  private dropDerived(principal: string): void {
+    if (!this.store.get("SELECT 1 FROM scoped_grants WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL LIMIT 1", principal)) return;
+    this.store.transaction(() => {
+      const before = activeScopes(this.store, principal);
+      this.store.run("UPDATE scoped_grants SET revoked_at=? WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", Date.now(), principal);
+      invalidateIfLost(this.store, principal, before, 'github.verification_exempt');
+    });
+  }
   async reverify(principal: string): Promise<string | undefined> {
+    const status = () => this.store.get("SELECT status FROM external_identities WHERE principal_id=? AND provider='github' ORDER BY verified_at DESC", principal)?.status as string | undefined;
+    // Never sent to GitHub: the check only drops leftover derived grants.
+    if (verificationExempt(this.store, principal)) { await this.refresh(principal); return status(); }
     this.store.run("UPDATE external_identities SET status='active' WHERE principal_id=? AND provider='github' AND status='pending_verification' AND credentials IS NOT NULL", principal);
     const identity = this.store.get("SELECT * FROM external_identities WHERE principal_id=? AND provider='github' AND status='active' AND credentials IS NOT NULL", principal);
-    // Login and the minute job still call refresh(), which records pending state and does not fail the caller.
+    // Login and the background refresh call refresh(), which records pending state and does not fail the caller.
     // The user-facing button must hear when GitHub requires a new authorization or did not answer.
     let surface: HttpError | undefined;
     if (identity) {
@@ -212,7 +284,7 @@ export class GitHubIdentity implements InstallationIdentity {
     }
     await this.refresh(principal);
     if (surface) throw surface;
-    return this.store.get("SELECT status FROM external_identities WHERE principal_id=? AND provider='github' ORDER BY verified_at DESC", principal)?.status as string | undefined;
+    return status();
   }
   async verifyInstallation(sessionRef: string, ref: InstallationRef): Promise<VerifiedInstallationAccess | null> {
     if (ref.github_host !== 'github.com') return null;

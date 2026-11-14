@@ -290,6 +290,9 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       // A concurrent administrator may have disabled this user during hashing.
       if (!store.get('SELECT id FROM users WHERE id=? AND active=1', row!.id)) fail(401, 'invalid_login');
       const credentials = store.transaction(() => session(store, row!.id)); loginAttempts.delete(key);
+      // Signing in to an account bound to GitHub checks its GitHub permissions again (#708). A failed check only leaves its
+      // derived grants pending; super administrators and accounts with explicit delegation are never checked.
+      try { await githubIdentity?.renew(row!.id); } catch { /* the session stands; the background refresh tries again */ }
       res.setHeader('Set-Cookie', cookie(req, credentials.token)); respond(res, 200, { ok: true, csrf_token: credentials.csrf }); return;
     }
     if (!user) return fail(401, 'login_required');
@@ -366,7 +369,9 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;
     }
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
-    if (mutation && githubIdentity) { await githubIdentity.refresh(user.id); user = actor(store, req); }
+    // Writes are decided against the stored grants (#708): only a principal whose GitHub proof lapsed verifies, once, joining
+    // a check already in flight. Everyone else's write sends nothing to GitHub.
+    if (mutation && githubIdentity && await githubIdentity.renewIfLapsed(user.id)) user = actor(store, req);
     const current = user, context = current.context!;
     if (path.startsWith('/api/channels/')) {
       const result = await channelApi.api(context, method, url, input);
