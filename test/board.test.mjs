@@ -25,8 +25,10 @@ test('board projects one card per workflow, keeps published PR separate and omit
 });
 test('each workflow retains its stage when another workflow has a newer success or failure',async t=>{
   const {h,admin}=await fixture(t);
-  const active=['queued','running','preparing','implementing','validating','publishing','waiting_pr_head','waiting_publication','waiting_environment','result_ready'];
-  for(const [i,status]of active.entries()){
+  const active=['queued','running','preparing','implementing','validating','publishing','waiting_pr_head','result_ready'];
+  // #655: waiting for an environment or a publication asks a person, so these two are not the developing stage.
+  const waiting=['waiting_publication','waiting_environment'];
+  for(const [i,status]of [...active,...waiting].entries()){
     boardTask(h.store,'r'+i,10+i,'review.issue','running');boardTask(h.store,'d'+i,10+i,'development.issue',status);
   }
   for(const [i,status]of ['failed','cancelled','waiting_configuration','waiting_permission','needs_replan','retry_wait'].entries())boardTask(h.store,'f'+i,30+i,'review.pr',status);
@@ -37,7 +39,10 @@ test('each workflow retains its stage when another workflow has a newer success 
   boardTask(h.store,'dev-success',52,'development.issue','succeeded');boardTask(h.store,'review-later',52,'review.issue','running',{time:'2026-10-02T12:00:00.000Z'});
   boardTask(h.store,'retry-fail',53,'review.issue','failed');boardTask(h.store,'retry-success',53,'review.issue','succeeded',{time:'2026-10-02T12:00:00.000Z'});
   const cards=(await admin('/api/board/cards')).value.cards;
-  assert.ok(cards.filter(c=>c.object_number>=10&&c.object_number<20&&c.card_category==='development.issue').every(c=>c.bot_stage==='developing'));
+  const stage=(number,category)=>cards.find(c=>c.object_number===number&&c.card_category===category).bot_stage;
+  assert.ok(active.every((_,i)=>stage(10+i,'development.issue')==='developing'));
+  // The same two states the inbox and the overview count as 需要关注 put the card in 需要处理, not in 正在开发.
+  assert.deepEqual(waiting.map((_,i)=>stage(10+active.length+i,'development.issue')),['attention','attention']);
   // #655: a stop the bot makes by itself leaves the card 未检视, and a retry the bot will resume is not a person's work.
   assert.deepEqual(Object.fromEntries(cards.filter(c=>c.object_number>=30&&c.object_number<36).map(c=>[c.object_number,c.bot_stage])),
     {30:'attention',31:'unreviewed',32:'attention',33:'attention',34:'attention',35:'reviewing'});
@@ -319,6 +324,16 @@ test('object closed or draft cancel keeps the card out of 需要处理 and the t
   boardTask(h.store,'stop-draft',2,'review.pr','cancelled',{time:'2026-10-02T10:00:00.000Z',input:drafted,errorCode:'object_closed_or_draft'});
   boardTask(h.store,'never-reviewed',3,'review.issue','cancelled',{time:'2026-10-02T10:00:00.000Z',input:closed,errorCode:'object_closed_or_draft'});
   boardTask(h.store,'real-failure',4,'review.issue','failed',{time:'2026-10-02T10:00:00.000Z'});
+  // A development waiting for an environment asks a person for something: the board must say what the inbox and the
+  // overview say, even though the state also sits in the development pipeline.
+  boardTask(h.store,'wait-env-dev',5,'development.issue','waiting_environment',{time:'2026-10-02T10:00:00.000Z',input:closed});
+  // A development that waited for an environment and was then stopped because its Issue closed falls back to that wait
+  // rather than to 未检视: the environment still needs a person before the work can go on.
+  boardTask(h.store,'env-dev',6,'development.issue','waiting_environment',{time:'2026-10-01T10:00:00.000Z'});
+  boardTask(h.store,'stop-env-dev',6,'development.issue','cancelled',{time:'2026-10-02T10:00:00.000Z',input:closed,errorCode:'object_closed_or_draft'});
+  // A cancellation for another reason is not the bot's own stop: the card carries that reason, so the card can tell the
+  // two apart instead of blaming the closed object.
+  boardTask(h.store,'revoked-claim',7,'review.issue','cancelled',{time:'2026-10-02T10:00:00.000Z',input:closed,errorCode:'task_claim_revoked'});
   const shownFilters=encodeURIComponent(JSON.stringify([{field:'include_closed',value:true}]));
   const result=(await admin('/api/board/cards?filters='+shownFilters)).value;
   const card=(number,category)=>result.cards.find(c=>c.object_number===number&&c.card_category===category);
@@ -327,14 +342,25 @@ test('object closed or draft cancel keeps the card out of 需要处理 and the t
   assert.equal(card(2,'review.pr').bot_stage,'reviewed');
   assert.equal(card(3,'review.issue').bot_stage,'unreviewed');
   assert.equal(card(4,'review.issue').bot_stage,'attention');
+  // A state that waits for a person keeps the card in 需要处理 on the board, like it already did in the inbox.
+  assert.equal(card(5,'development.issue').bot_stage,'attention');
+  assert.equal(card(5,'development.issue').execution_status,'waiting');
+  assert.equal(card(6,'development.issue').bot_stage,'attention');
+  assert.equal(card(6,'development.issue').task_status,'cancelled');
+  // The card says why the bot stopped, and a cancellation for another reason keeps its own reason instead.
+  assert.equal(card(1,'review.issue').task_error_code,'object_closed_or_draft');
+  assert.equal(card(6,'development.issue').task_error_code,'object_closed_or_draft');
+  assert.equal(card(7,'review.issue').task_error_code,'task_claim_revoked');
+  assert.equal(card(7,'review.issue').bot_stage,'unreviewed');
+  assert.equal(card(4,'review.issue').task_error_code,null);
   // The stop itself stays on the card, with the object state that caused it, so the reader sees why nobody is working.
   assert.deepEqual([card(1,'review.issue').task_status,card(1,'review.issue').github_state],['cancelled','closed']);
   assert.deepEqual([card(2,'review.pr').task_status,card(2,'review.pr').draft],['cancelled',1]);
   // One count for one set of tasks: the board column, the inbox and the overview agree.
-  assert.equal(result.column_counts.attention,1);
+  assert.equal(result.column_counts.attention,3);
   const inbox=(await admin('/api/tasks?attention=1')).value.tasks;
-  assert.deepEqual(inbox.map(row=>row.id),['real-failure']);
-  assert.equal((await admin('/api/tasks?summary=1')).value.summary.attention,1);
+  assert.deepEqual(inbox.map(row=>row.id).sort(),['env-dev','real-failure','wait-env-dev']);
+  assert.equal((await admin('/api/tasks?summary=1')).value.summary.attention,3);
   // The column hint no longer claims a cancellation is a person's work.
   const stages=(await admin('/api/board')).value.stages;
   assert.ok(!stages.find(stage=>stage.id==='attention').hint.includes('被取消'));

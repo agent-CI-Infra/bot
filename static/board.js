@@ -411,6 +411,13 @@ function boardTime(value) {
 }
 // The latest task of the card's work type explains why it sits in its stage, e.g. which task failed.
 function boardTaskBadge(prefix,status) { const [caption,tone]=states[status]||[status,''],b=badge(`${prefix} ${caption}`,tone);b.title=status;return b; }
+// #655: only the stop the bot makes because its object no longer needs work gets the plain sentence; a cancellation for
+// another reason (a revoked claim, a disabled project) keeps its badge alone.
+function boardStopNote(item) {
+  if(item.card_type==='release'||item.task_error_code!=='object_closed_or_draft')return '';
+  const thing=item.object_type==='pr'?'PR':'Issue',work=(item.card_category||'').startsWith('development.')?'开发':'检视';
+  return `${thing} ${item.github_state==='closed'?'已关闭':'已转草稿'}，已自动停止${work}`;
+}
 function boardCard(item) {
   const release=item.card_type==='release',customMode=!!boardCustomField()&&item.card_type!=='task',category=boardCardCategory(item);
   const label=release?`发版本 ${item.version}`:item.card_type==='task'?`任务 ${shortId(item.task_id)}`:`${boardTypeName(item.object_type)} #${item.object_number}`;
@@ -442,7 +449,10 @@ function boardCard(item) {
       const pr=boardGithub(item,'pr',item.development_pr_number),caption='→ PR #'+item.development_pr_number;badges.append(pr?link(pr,caption,'board-card-pr'):element('span',caption,'board-card-pr'));
     }
   }
-  card.append(heading,meta);if(item.origin)card.append(element('p',taskOriginCaption(item.origin),'muted'));if(badges.childElementCount)card.append(badges);
+  const stopNote=release?'':boardStopNote(item);
+  card.append(heading,meta);
+  if(stopNote){const note=element('p',stopNote,'muted board-card-note');note.dataset.cardNote='auto-stop';card.append(note);}
+  if(item.origin)card.append(element('p',taskOriginCaption(item.origin),'muted'));if(badges.childElementCount)card.append(badges);
   if(customMode&&!release){
     const custom=boardCustomField(),control=boardSelect(custom.name,[['','未设置'],...custom.options.map(o=>[o.id,o.name])],item.field_value||'');
     control.label.className='board-card-field';control.label.replaceChildren(control.select);
