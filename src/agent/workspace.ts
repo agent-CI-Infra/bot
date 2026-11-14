@@ -97,6 +97,9 @@ export class Workspace {
     else this.store.run(`UPDATE ${table} SET state='completed',result=? WHERE id=?`,conversation?this.store.secrets.seal(result,'conversation-operation:'+id+':result'):JSON.stringify(result),id);
     // Model commands are logged by the agent loop together with the tool call; others (tests) are logged here.
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'command',command:request.command,...result,output:clip(result.output)});
+    // Locks a git process that ended abnormally left in the worktree, which the runner removed before this operation (#712).
+    if(Array.isArray(result?.stale_git_locks_removed)&&result.stale_git_locks_removed.length)this.log({type:'git_locks_removed',operation:request.type,locks:result.stale_git_locks_removed,
+      detail:`${request.type} 前清理了工作区里没有 git 进程持有的遗留锁：${result.stale_git_locks_removed.map((lock:any)=>`${lock.file}（已存在 ${lock.age_seconds} 秒）`).join('、')}`});
     volumeFull(input.request,result);
     return result;
   }

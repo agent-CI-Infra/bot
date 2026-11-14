@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
-import {mkdtempSync,rmSync,writeFileSync} from 'node:fs';
+import {mkdtempSync,rmSync,mkdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
@@ -66,6 +66,7 @@ for(const action of ['continue_retry','investigate'])test(`Native Manager reads 
 test('runner finalize failure retains the Git stderr instead of an unexplained exit 128',async t=>{
  const root=mkdtempSync(join(tmpdir(),'retry-git-stderr-')),id=randomWorkspaceId();t.after(()=>rmSync(root,{recursive:true,force:true}));
  const run=request=>runnerWorkspace({...request,workspace_id:id},join(root,'tasks'),join(root,'git'),join(root,'notes'));
- await run({type:'workspace_init'});execFileSync('git',['init','-q'],{cwd:join(root,'tasks',id,'repo')});const gitdir=join(root,'tasks',id,'repo','.git');writeFileSync(join(gitdir,'index.lock'),'fixture lock');
- await assert.rejects(run({type:'workspace_finalize'}),error=>/git add failed: 128/.test(error.message)&&/index.lock/.test(error.message));
+ await run({type:'workspace_init'});execFileSync('git',['init','-q'],{cwd:join(root,'tasks',id,'repo')});const gitdir=join(root,'tasks',id,'repo','.git');mkdirSync(join(gitdir,'index'));
+ // A broken index (a lock left over is cleared before finalize since #712, so it no longer makes git fail here).
+ await assert.rejects(run({type:'workspace_finalize'}),error=>/git add failed: 128/.test(error.message)&&/\.git\/index: unable to map index file/.test(error.message));
 });
