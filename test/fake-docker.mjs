@@ -12,6 +12,7 @@ export class FakeDocker {
   async request(method, path, body) {
     this.calls.push(method + ' ' + path);
     if (path === '/info') return this.info || {};
+    if (path.startsWith('/system/df')) return this.df || { LayersSize: 0, Images: [], BuildCache: [] };
     if (path.startsWith('/images/')) return this.images.get(decodeURIComponent(path.split('/')[2])) || null;
     const [kind, named] = path.slice(1).split('/'), name = named?.split('?')[0];
     if (kind === 'volumes') {

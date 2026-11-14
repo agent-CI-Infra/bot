@@ -31,7 +31,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     await expect(nav.getByRole('link')).toHaveText(['工作电脑', '模型', '服务角色', '助手电脑', '存储', '接入向导', '公网接入', '外部执行', '机器人账号', '安装档案', '飞书连接', '项目管理', '用户']);
     for (const [caption, key, shown] of [['工作电脑', 'work-computers', ['同时运行的任务', '默认资源', '当前运行版本']], ['飞书连接', 'feishu', ['飞书应用连接']], ['公网接入', 'access', ['公网 HTTPS 地址', 'Cloudflare Tunnel', 'GitHub 登录（只读）']],
       ['机器人账号', 'accounts', ['接入向导使用的 GitHub App', '已登记的账号', 'GitHub 请求额度']], ['安装档案', 'installations', ['GitHub App 安装档案']],
-      ['模型', 'models', ['默认共享模型', '部署共享模型']], ['存储', 'storage', ['存储', '数据库与磁盘', '历史数据迁移', '按项目']], ['用户', 'users', ['用户']]]) {
+      ['模型', 'models', ['默认共享模型', '部署共享模型']], ['存储', 'storage', ['存储', '数据盘', '可回收与最近清理', '数据库与磁盘', '历史数据迁移', '按项目', '项目电脑']], ['用户', 'users', ['用户']]]) {
       await expect(nav.getByRole('link', { name: caption, exact: true })).toHaveAttribute('href', `#/settings/${key}`);
       await nav.getByRole('link', { name: caption, exact: true }).click(); await expect(page).toHaveURL(new RegExp(`#/settings/${key}$`));
       await expect(nav.locator('[aria-current=page]')).toHaveText(caption); await expect.poll(cards).toEqual(shown);
@@ -57,7 +57,8 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     await expect(member.locator('#tabs').getByRole('button', { name: '存储', exact: true })).toBeHidden();
     await member.goto(h.admin + '/#/settings/storage'); await expect(member.locator('#settings-panel')).toBeVisible();
     await expect(member.locator('.project-nav').getByRole('link')).toHaveText(['存储']);
-    await expect.poll(() => member.locator('#settings-panel h3').allInnerTexts()).toEqual(['存储', '按项目']);
+    // A project administrator sees its projects' trajectories and computers, nothing of the host (#671).
+    await expect.poll(() => member.locator('#settings-panel h3').allInnerTexts()).toEqual(['存储', '按项目', '项目电脑']);
     await expect(member.locator('#settings-panel')).toContainText('fixture/project-101'); await context.close();
     await page.setViewportSize({ width: 390, height: 844 }); await page.goto(h.admin + '/#/settings/users'); await expect(page.locator('#settings-panel')).toContainText('administrator');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); await page.screenshot({ path: '.tmp/console-addresses/settings-users-mobile.png', fullPage: true });

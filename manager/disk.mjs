@@ -10,7 +10,7 @@ export const reserveBytes = total => Math.min(Math.floor(total * 0.05), 50 * GiB
 export function diskState(path) {
   try {
     const stats = statfsSync(path), free = stats.bavail * stats.bsize, total = stats.blocks * stats.bsize, reserve = reserveBytes(total);
-    return { free_bytes: free, total_bytes: total, reserve_bytes: reserve, low: free < reserve };
+    return { free_bytes: free, total_bytes: total, used_bytes: (stats.blocks - stats.bfree) * stats.bsize, reserve_bytes: reserve, low: free < reserve };
   } catch { return null; }
 }
 

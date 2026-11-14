@@ -79,7 +79,35 @@ function pullRequests(store: Store, repo: string): PullRequests {
 
 /** The listed directories that may go now, least recently active first, each with the rule that lets it go. */
 export function removableWorkspaces(store: Store, repo: string, entries: Listed[], now = Date.now(), prs = pullRequests(store, repo)): Planned[] {
-  const names = JSON.stringify(entries.map(entry => entry.name));
+  const until = retention(store, repo, entries.map(entry => entry.name), prs), planned: Planned[] = [];
+  for (const entry of entries) {
+    const key = `${repo}:${entry.name}`;
+    if (removing.has(key) || now - (lastUse.get(key) ?? 0) < workspaceRetention.quietMs || now - entry.active_at < workspaceRetention.quietMs) continue;
+    const [time, reason] = until(entry.name, entry.active_at);
+    if (reason === 'unowned' ? now - entry.active_at > workspaceRetention.unownedMs : now >= time) planned.push({ ...entry, reason });
+  }
+  return planned;
+}
+
+/**
+ * The storage page's view of a computer's task directories (#671), from its last volume scan: how many and how much
+ * belong to tasks still running or waiting (active), are kept for a pull request that is open, or wait for their
+ * removal under the rules above (expiring, including directories no record names).
+ */
+export function workspaceClasses(store: Store, repo: string, entries: { name: string; bytes: number }[]): Record<'active' | 'pull_request' | 'expiring', { count: number; bytes: number }> {
+  const until = retention(store, repo, entries.map(entry => entry.name), pullRequests(store, repo));
+  const classes = { active: { count: 0, bytes: 0 }, pull_request: { count: 0, bytes: 0 }, expiring: { count: 0, bytes: 0 } };
+  for (const entry of entries) {
+    const [, reason] = until(entry.name, 0), target = classes[reason === 'active' || reason === 'followup' ? 'active' : reason === 'pr_open' ? 'pull_request' : 'expiring'];
+    target.count++; target.bytes += Math.max(0, Number(entry.bytes) || 0);
+  }
+  return classes;
+}
+
+// For the named directories: until when the tasks that use them need them, and why (Infinity keeps it; 'unowned' for a
+// directory no record names, whose time comes from its own activity).
+function retention(store: Store, repo: string, list: string[], prs: PullRequests): (name: string, activeAt: number) => [number, string] {
+  const names = JSON.stringify(list);
   const rows = store.all(`SELECT workspace_id,task_id,task_kind,object_number FROM task_workspaces WHERE repository_id=? AND task_id<>''
     AND workspace_id IN (SELECT value FROM json_each(?))`, repo, names);
   const owners = JSON.stringify([...new Set(rows.map(row => row.task_id))]);
@@ -106,17 +134,12 @@ export function removableWorkspaces(store: Store, repo: string, entries: Listed[
     const last = Math.max(updated.get(row.task_id) ?? 0, activeAt);
     return state === 'failed' ? [last + workspaceRetention.failedMs, 'failed'] : [last + workspaceRetention.finishedMs, 'finished'];
   };
-  const planned: Planned[] = [];
-  for (const entry of entries) {
-    const key = `${repo}:${entry.name}`;
-    if (removing.has(key) || now - (lastUse.get(key) ?? 0) < workspaceRetention.quietMs || now - entry.active_at < workspaceRetention.quietMs) continue;
-    const owned = byName.get(entry.name);
-    if (!owned) { if (now - entry.active_at > workspaceRetention.unownedMs) planned.push({ ...entry, reason: 'unowned' }); continue; }
+  return (name, activeAt) => {
+    const owned = byName.get(name);
+    if (!owned) return [activeAt + workspaceRetention.unownedMs, 'unowned'];
     // The task that needs it longest decides.
-    const [time, reason] = owned.map(row => until(row, entry.active_at)).reduce((a, b) => b[0] > a[0] ? b : a);
-    if (now >= time) planned.push({ ...entry, reason });
-  }
-  return planned;
+    return owned.map(row => until(row, activeAt)).reduce((a, b) => b[0] > a[0] ? b : a);
+  };
 }
 
 // Records for tasks that were not finished when records began: their workspace, the one a retry restores from or
@@ -226,5 +249,9 @@ export class WorkspaceCleanup {
       if (done.length) this.release(repo, done);
     }
     if (removed || skipped) console.log(`[workspaces] project ${repo}: removed ${removed} task directories (${Math.round(bytes / 1024 / 1024)} MiB), ${skipped} skipped; ${listing?.total ?? entries.length} were there`);
+    // What this sweep freed, for the storage page (#671).
+    const swept = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='workspace_cleanup'")?.value ?? '{}');
+    swept[repo] = { at: new Date().toISOString(), removed, bytes, skipped };
+    this.store.run("INSERT INTO settings VALUES('workspace_cleanup',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify(swept));
   }
 }
