@@ -1,5 +1,5 @@
 import type { Store, Row } from '../storage/database.js';
-import { GitHub, revokeInstallationToken } from './client.js';
+import { GitHub } from './client.js';
 import { publicText, actionsRedactor } from '../actions/safety.js';
 import { Redactor, TaskError } from '../agent/common.js';
 import { digest, randomId } from '../core/security.js';
@@ -240,7 +240,7 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
   const issued: GitHub[] = [];
   let sending = false;
   const client = async (permissions: Record<string, string>, requested = false) => {
-    const github = new GitHub(store, repository, redactor, context.guard, context.apiUrl);
+    const github = new GitHub(store, repository, redactor, context.guard, context.apiUrl);github.purpose = 'github_write';
     issued.push(github);
     await github.connect(false, requested ? undefined : { ...permissions, metadata: 'read' }, requested ? { ...permissions, metadata: 'read' } : undefined, false);
     return github;
@@ -300,7 +300,7 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
     await context.guard();
     return { error: error.code, detail: redactor.text(error.detail || 'The write could not be prepared; nothing was sent.') };
   } finally {
-    for (const github of issued) if (github.expiresAt && github.token) await revokeInstallationToken(github.apiUrl, github.token).catch(() => false);
+    for (const github of issued) await github.revokeTokens('github_write');
   }
 }
 const resourceName = (resource: WriteResource) => ({ issues: 'Issues', pull_requests: 'Pull requests', contents: 'Contents' })[resource];

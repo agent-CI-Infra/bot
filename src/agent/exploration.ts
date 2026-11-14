@@ -51,7 +51,9 @@ export class RepositoryExplorer {
   constructor(readonly tokens: ReadTokens, readonly redactor: Redactor, readonly guard: () => Promise<void>) {}
   async connect() {
     const key=this.tokens.allowedScopes().slice().sort().join(',');
-    if (!this.client || this.scopeKey!==key || Date.parse(this.client.expiresAt) < Date.now() + 60000) { this.client = await this.tokens.issueRepository();this.scopeKey=key; }
+    if (!this.client || this.scopeKey!==key) { this.client = await this.tokens.issueRepository();this.scopeKey=key; }
+    // Renewed with fifteen minutes left, so a Pi session asking again with ten left gets a new token (#711).
+    else await this.client.fresh();
     return this.client;
   }
 

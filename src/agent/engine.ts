@@ -294,7 +294,7 @@ export class TaskEngine {
       // The writes this task may ask for decide the platform tools; a task that may open a PR needs contents write.
       const writes=taskPermissions(this.store,task).writes,eventState:Record<string,any>={};
       // Event work reads Actions runs and logs; it writes only through its own tools.
-      const github=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await github.connect(task.kind.startsWith('development.')||writes.includes('pull_request'),undefined,
+      const github=new GitHub(this.store,repo,redactor,guard,this.githubUrl);github.purpose='task';await github.connect(task.kind.startsWith('development.')||writes.includes('pull_request'),undefined,
         event?{contents:'read',actions:'read',checks:'read',statuses:'read',issues:'write',pull_requests:'read'}:undefined);
       let input=JSON.parse(task.input),result=task.result?JSON.parse(task.result):null;
       const development=task.kind.startsWith('development.'),review=task.kind.startsWith('review.');

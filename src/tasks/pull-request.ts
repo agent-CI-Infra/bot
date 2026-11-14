@@ -1,7 +1,7 @@
 import {integratedPublication} from './integration.js';
 import type { Store, Row } from '../storage/database.js';
 import { stop, sha, type Redactor } from '../agent/common.js';
-import { GitHub, revokeInstallationToken } from '../github/client.js';
+import { GitHub } from '../github/client.js';
 import { Publisher } from '../github/publisher.js';
 import { releaseCategory } from '../github/release-label.js';
 import { roleConfiguration } from '../roles/definition.js';
@@ -44,7 +44,7 @@ export async function publishRequestPullRequest(store: Store, task: Row, redacto
     assertPublicationStages(store,task.id);
   };
   await validate();
-  const repo=store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!,github=new GitHub(store,repo,redactor,validate,apiUrl);
+  const repo=store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!,github=new GitHub(store,repo,redactor,validate,apiUrl);github.purpose='pull_request';
   github.beforeWrite=check;
   try{
     await github.connect(true);
@@ -56,6 +56,6 @@ export async function publishRequestPullRequest(store: Store, task: Row, redacto
     return {summary:candidate.summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,
       tree_sha:candidate.published_tree_sha||candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation};
   }finally{
-    if(github.expiresAt&&github.token)await revokeInstallationToken(apiUrl??'https://api.github.com',github.token).catch(()=>false);
+    await github.revokeTokens('pull_request');
   }
 }
