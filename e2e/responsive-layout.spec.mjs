@@ -172,14 +172,14 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
       const sidebar = document.getElementById('console-sidebar');
       const ns = getComputedStyle(nav);
       const links = [...nav.querySelectorAll('a')];
-      const tops = new Set(links.map(a => Math.round(a.getBoundingClientRect().top)));
+      const area = nav.getBoundingClientRect();
       const roleNav = document.querySelector('.role-nav');
       const roleTops = new Set([...roleNav.querySelectorAll('a')].map(a => Math.round(a.getBoundingClientRect().top)));
       return {
         overflow: document.documentElement.scrollWidth,
         wrap: ns.flexWrap,
-        overflowX: ns.overflowX,
-        oneRow: tops.size === 1,
+        settingsCategories: links.length,
+        allOnScreen: links.every(a => { const r = a.getBoundingClientRect(); return r.left >= area.left && r.right <= area.right && r.right <= innerWidth; }),
         roleNavOneRow: roleTops.size === 1,
         sidebarWidth: sidebar.getBoundingClientRect().width,
         sidebarVisible: getComputedStyle(sidebar).display !== 'none',
@@ -187,8 +187,10 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
       };
     });
     expect(tablet.overflow).toBe(768);
-    expect(tablet.wrap).toBe('nowrap');
-    expect(tablet.oneRow).toBe(true);
+    // #707: the project settings categories wrap instead of scrolling sideways, so all of them stay one click away.
+    expect(tablet.wrap).toBe('wrap');
+    expect(tablet.settingsCategories).toBe(8);
+    expect(tablet.allOnScreen).toBe(true);
     expect(tablet.roleNavOneRow).toBe(true);
     expect(tablet.sidebarVisible).toBe(true);
     expect(tablet.sidebarWidth).toBeGreaterThan(150);

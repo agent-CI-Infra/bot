@@ -15,9 +15,10 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await page.goto(h.admin + '/#/projects/101/roles');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    const crumb = page.getByRole('navigation', { name: '项目入口' });
-    await expect(crumb.locator('[aria-current=page]')).toHaveText('角色');
-    await expect(crumb.getByRole('link', { name: '机器配置', exact: true })).toHaveCount(0);
+    // #707: the project row is the settings categories; the role list keeps its own crumb below it.
+    const categories = page.getByRole('navigation', { name: '项目设置类别' });
+    await expect(categories.locator('[aria-current=page]')).toHaveText('角色');
+    await expect(categories.getByRole('link', { name: '项目知识', exact: true })).toHaveCount(0);
     await expect(page.getByTestId('recommended-roles-intro')).toBeVisible();
     await openRoleAdvanced(page);
     await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible();

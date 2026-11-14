@@ -167,6 +167,8 @@ body.console-ready .management-page { left: var(--console-rail); }
   }
   #console-secondary-nav .project-nav a,
   #console-secondary-nav .project-nav .console-nav-label { flex: 0 0 auto; }
+  /* #707: the project settings categories wrap instead, so at 768 every one of them stays one click away on screen. */
+  #console-secondary-nav .project-nav.project-settings-nav { flex-wrap: wrap; overflow: visible; }
   .console-group-wide { grid-template-columns: repeat(2, minmax(0,1fr)); }
 }
 @media (max-width:1023px) and (min-width:768px) {
@@ -267,7 +269,8 @@ html { scroll-padding-bottom: calc(var(--console-mobile-height,0px) + 100px); }
   .roles-page .role-save .muted, .roles-page .role-save [role=status], .roles-page .role-save .view-error { flex: 1 1 100%; margin: 0; }
   .roles-page .role-save button { flex: 0 1 auto; width: auto; max-width: calc(100% - 56px); }
   .console-ready .project-head { padding: 12px; }
-  .console-ready .project-head .actions { flex-shrink: 0; }
+  /* The header actions take their own row and wrap there, so a fourth action (#707 设置) is never cut off at 390. */
+  .console-ready .project-head .actions { flex: 1 1 100%; min-width: 0; }
   .console-groups { gap: var(--space-4); }
   .console-group { padding: 12px; }
   .console-group .console-link { padding: 8px 10px; min-height: var(--control-min); }

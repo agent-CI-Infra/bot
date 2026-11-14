@@ -190,17 +190,13 @@ try {
     await page.getByRole('button',{name:'项目',exact:true}).click();await page.locator('#rows .row').first().waitFor();assert.equal(await page.locator('#rows .row').count(),1);
     assert.ok((await page.locator('#rows').innerText()).includes('project-101'));assert.ok(!(await page.locator('#rows').innerText()).includes('project-202'));
     // The project page's machine section carries the computer's lifecycle actions.
-    // Settings opens a leaf page; reach 机器配置 from the 项目入口 hub, which lists every original entry.
+    // Settings opens 基本设置; its category nav lists every settings page, so 机器配置 is one click away (#707).
     await page.locator('#rows .row').first().getByRole('button',{name:'设置',exact:true}).click();
-    await page.getByTestId('project-hub-link').click();
-    const hub=page.getByTestId('project-hub');await hub.waitFor();
-    for (const caption of ['项目总览','管理对话','发版本','项目知识','运行状态','基本设置','机器配置','角色','模型','计划与通知','外部执行','成员'])
-      assert.equal(await hub.getByRole('link',{name:caption,exact:true}).count(),1);
-    await hub.getByRole('link',{name:'机器配置',exact:true}).click();
-    // A leaf page shows only the two-item breadcrumb, with the current section marked.
-    const machine=page.locator('#machine-status');await machine.waitFor();assert.equal(await page.locator('.project-nav a').count(),2);
-    assert.equal(await page.locator('.project-nav').getByRole('link',{name:'← 项目入口',exact:true}).count(),1);
-    assert.equal((await page.locator('.project-nav [aria-current=page]').innerText()).trim(),'机器配置');
+    const categories=page.getByRole('navigation',{name:'项目设置类别'});await categories.waitFor();
+    assert.deepEqual((await categories.getByRole('link').allInnerTexts()).map(text=>text.trim()),['← 项目入口','基本设置','机器配置','角色','模型','计划与通知','外部执行','成员']);
+    await categories.getByRole('link',{name:'机器配置',exact:true}).click();
+    const machine=page.locator('#machine-status');await machine.waitFor();
+    assert.equal((await categories.locator('[aria-current=page]').innerText()).trim(),'机器配置');
     // Check the live observation, not the same text in the folded persistent record.
     const liveState=machine.locator('.side-card').filter({has:page.getByRole('heading',{name:'机器',exact:true})}).locator(':scope > .facts .status');
     await machine.getByRole('button',{name:'停止',exact:true}).click();await liveState.filter({hasText:'已停止'}).waitFor();

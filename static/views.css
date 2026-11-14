@@ -59,7 +59,8 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 /* Project page (static/project.js): categories on the left, one category's settings on the right. */
 .project-page{background:#fff;border:1px solid #dde6eb;border-radius:7px;overflow:hidden}
 .project-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:12px 16px;border-bottom:1px solid #e3eaf0}
-.project-head .title-group{flex:1;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.project-head h1{font-size:19px;margin:0;overflow-wrap:anywhere}
+/* #707: the project name keeps 16rem; when the header actions do not fit beside it they wrap below instead of squeezing it. */
+.project-head .title-group{flex:1 1 16rem;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.project-head h1{font-size:19px;margin:0;overflow-wrap:anywhere}
 .back-link{flex-basis:100%;font-size:var(--font-size-1);color:var(--color-brand);text-decoration:none}.back-link:hover{text-decoration:underline}
 .project-trail{flex-basis:100%;display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-3) var(--space-5)}
 .project-trail .back-link{flex-basis:auto}

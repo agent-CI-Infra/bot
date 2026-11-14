@@ -218,6 +218,13 @@ test('移动「当前页面」选择器保留分组，深链仍然打开对应�
     await expect(page).toHaveURL(/#\/projects\/101\/menu$/);
     await expect(page.getByTestId('project-hub')).toBeVisible();
     await expect(page.locator('#console-section optgroup')).toHaveCount(2);
+    // #707: the settings category nav is hidden on a phone, so the header's 设置 opens the settings in one tap, and a
+    // settings page keeps the same picker groups and addresses.
+    await expect(page.locator('#console-secondary-nav')).toBeHidden();
+    await page.getByTestId('project-open-settings').click();
+    await expect(page).toHaveURL(/#\/projects\/101\/basic$/);
+    await expect(page.locator('#console-section')).toHaveValue('#/projects/101/basic');
+    expect(await page.locator('#console-section option').evaluateAll(rows => rows.map(row => [row.textContent.trim(), row.value]))).toEqual(options);
   } finally { await h.stop(); }
 });
 
