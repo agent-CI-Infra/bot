@@ -135,6 +135,24 @@ test('#557 登录、身份、更多功能、基本设置在 1440 对齐同一栅
     expect(more.wideSpans).toBeTruthy();
     expect(more.wideWidth).toBeGreaterThan(more.gridWidth * 0.9);
     await page.screenshot({ path: `${out}/more-after-1440.png`, fullPage: true });
+    // 768–1439 keeps two columns, and cards sharing a row there are bottom-aligned too.
+    await page.setViewportSize({ width: 1024, height: 1000 });
+    await expect(page.getByRole('heading', { name: '当前项目', exact: true })).toBeVisible();
+    const tablet = await page.evaluate(() => {
+      const groups = [...document.querySelectorAll('.console-group')].map(el => el.getBoundingClientRect());
+      const rows = [];
+      for (const g of groups) { const row = rows.find(r => Math.abs(r[0].top - g.top) < 4); if (row) row.push(g); else rows.push([g]); }
+      const style = getComputedStyle(document.querySelector('.console-groups'));
+      return { columns: style.gridTemplateColumns.split(' ').length, alignItems: style.alignItems,
+        sharedRows: rows.filter(r => r.length > 1).length,
+        aligned: rows.filter(r => r.length > 1).every(r => r.every(g => Math.abs(g.bottom - r[0].bottom) < 2)) };
+    });
+    expect(tablet.columns).toBe(2);
+    // Equal-height cells, not just equal content by chance: the tablet grid stretches like the base rule.
+    expect(['stretch', 'normal']).toContain(tablet.alignItems);
+    expect(tablet.sharedRows).toBeGreaterThan(0);
+    expect(tablet.aligned).toBeTruthy();
+    await page.setViewportSize({ width: 1440, height: 1000 });
 
     await page.goto(h.admin + '/#/projects/101/basic');
     await expect(page.locator('.project-content')).toBeVisible({ timeout: 10000 });

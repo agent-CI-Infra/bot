@@ -121,7 +121,7 @@ body.console-ready.board-mode main { width: calc(100% - var(--console-rail)); pa
 body.console-ready.board-mode .console-location { flex: none; margin-bottom: 8px; }
 body.console-ready .management-page { left: var(--console-rail); }
 @media (min-width:768px) and (max-width:1439px) {
-  .console-groups { grid-template-columns: repeat(2, minmax(0,1fr)); gap: var(--space-6); align-items: start; }
+  .console-groups { grid-template-columns: repeat(2, minmax(0,1fr)); gap: var(--space-6); align-items: stretch; }
   body.console-ready main { padding-left: var(--space-6); padding-right: var(--space-6); }
   /* One row of project section links: scroll sideways instead of wrapping onto a second row. */
   #console-secondary-nav .project-nav {
