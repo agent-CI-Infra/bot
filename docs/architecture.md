@@ -109,6 +109,8 @@ Pi 启用会话压缩，控制面保存压缩后的消息投影，不恢复旧�
 
 令牌经 manager 直接交给 runner，不写入 `task_tools` 或任务日志；runner 只把它放进该任务之后的 `run_command` 环境变量 `GH_TOKEN`、`GITHUB_TOKEN`，并在命令输出中替换为 `[REDACTED]`。模型拿到的工具结果只有变量名、仓库、权限和到期时间，看不到令牌本身。令牌加入任务的脱敏表，发往模型服务商的请求也会先脱敏。同一任务最多签发 10 次；模型阶段结束（完成、失败或被中止）时，控制面逐个调用 `DELETE /installation/token` 撤销。
 
+GitHub 安装令牌只有一小时，而一次检视常常跑得更久。控制面的每个 GitHub App 客户端（任务自身、只读令牌、`github_write` 等）在令牌剩余不足 15 分钟时先重新签发再发请求，权限与原令牌相同；GitHub 对 bot 自己签发的安装令牌回 401（过期或被吊销）时，重新签发并重试一次，第二次仍是 401 才进入 `waiting_permission`，诊断写明两枚令牌由哪个客户端在何时签发、何时到期、是否被 bot 吊销，不含令牌值。runner 不信任自己持有的令牌：模型每次调用 `github_read_token` 都向控制面重新换取，令牌剩余不足 10 分钟或检视会话进入下一轮（上一轮结束时控制面已撤销它）时，在下一条命令前先换取。
+
 令牌和 PR 检视时运行的仓库测试处在同一台虚拟电脑里，测试代码能读到这些环境变量，所以令牌被设计成只读、只覆盖本仓库，并在模型阶段结束时撤销；GitHub 安装令牌最长有效一小时。评论、标签、行内检视、分支和 PR 仍只由控制面用自己的令牌发布。读取 Actions 和检查状态需要 App 授予 Actions、Checks、Commit statuses 权限；接入向导生成的 manifest 申请 Actions、Checks、Commit statuses 写（写权限留给控制面发布 commit status、检查结果和重跑 CI；任务令牌仍一律降为读）。之前创建的 App 需要在 GitHub 上补加这三项权限，并由安装方同意。检视和开发的令牌刻意不申请 workflows：开发任务改到 `.github/workflows/` 时 GitHub 会拒绝发布。App 本身可以为一键接入获得 Workflows，但它只出现在接入专用的令牌里（见下文「一键接入」），检视、开发和只读令牌都不申请。也不申请 administration、secrets、security_events、vulnerability_alerts、secret_scanning_alerts：任务令牌对 PR 代码可见，不能让它读到仓库设置、密钥或未公开的漏洞告警。
 
 ## 一键接入与公共看板托管

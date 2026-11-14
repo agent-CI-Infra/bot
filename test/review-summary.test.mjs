@@ -68,7 +68,7 @@ async function fixture(t) {
     const id = enqueue(h.store, '101', 'review.pr', 7, head.repeat(40), { number: 7 }), task = h.store.get('SELECT * FROM tasks WHERE id=?', id);
     const github = new GitHub(h.store, h.store.get("SELECT * FROM repositories WHERE id='101'"), new Redactor(), async () => {}, 'http://127.0.0.1:' + server.address().port);
     // An App account keeps its JWT and installation from connect, which the fixture skips.
-    Object.assign(github, { token: 'ghs_fixture', fullName: 'fixture/project-101', actorId: '999' }, app ? { jwt: 'eyJfixture', installationId: '55' } : {});
+    Object.assign(github, { token: 'ghs_fixture', fullName: 'fixture/project-101', actorId: '999' }, app ? { jwt: 'eyJfixture', jwtAt: Date.now(), installationId: '55' } : {});
     const outputs = await new Publisher(h.store, github, task, async () => {}, undefined, entry => logs.push(entry)).review(
       { findings: [], coverage: ['all files'], ...result, reviewed_sha: head.repeat(40) }, files, options);
     h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?", id);

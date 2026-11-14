@@ -66,7 +66,14 @@ export function missingPermissions(granted: unknown, required: Record<string,str
 }
 // What a task agent may read with its own token. Every value is read; installations that lack one simply omit it.
 export const agentReadPermissions: Record<string,string> = { metadata:'read', contents:'read', issues:'read', pull_requests:'read', actions:'read', checks:'read', statuses:'read' };
-export async function revokeInstallationToken(apiUrl: string, token: string) {
+// Installation tokens this process revoked, by digest (never the value) and for two hours, so that GitHub refusing one
+// can be told apart from a token the bot itself revoked while something still held it (#711).
+const revocations = new Map<string, { at: number, by: string }>();
+function revokedByBot(token: string) { return revocations.get(digest(token)); }
+export async function revokeInstallationToken(apiUrl: string, token: string, by = 'control_plane') {
+  const now = Date.now();
+  for (const [key, value] of revocations) { if (now - value.at < 2 * 3600_000) break; revocations.delete(key); }
+  revocations.set(digest(token), { at: now, by });
   const response = await fetch(apiUrl.replace(/\/$/, '') + '/installation/token', { method:'DELETE', redirect:'error', signal:AbortSignal.timeout(10000),
     headers:{ Authorization:'Bearer ' + token, Accept:'application/vnd.github+json' } });
   return [204, 401].includes(response.status);
@@ -75,6 +82,9 @@ export async function revokeInstallationToken(apiUrl: string, token: string) {
 // account and credential rather than on every task.
 const actors = new Map<string, { at: number, id: string, login: string }>();
 const actorTtlMs = 3600_000;
+// An App client mints a new installation token once its current one has less than this left. It is longer than the ten
+// minutes after which a Pi session asks for its read token again (runner/token-exchange.mjs), so that request gets a new one.
+export const renewBeforeMs = 15 * 60_000;
 export class GitHub {
   // What the App installation itself grants and receives, read on connect; null for a bot account.
   installationEvents: string[] | null = null; installationPermissions: Record<string,string> | null = null;
@@ -87,15 +97,68 @@ export class GitHub {
   status = 0;
   // The rate-limit windows this client's credentials count against: the App's JWT, and the installation (or the bot
   // account's user) for the token.
-  private jwt = ''; private installationId = ''; private appWindow?: Bucket; private tokenWindow?: Bucket;
+  private jwt = ''; private jwtAt = 0; private installationId = ''; private appWindow?: Bucket; private tokenWindow?: Bucket;
+  // Who holds this client, named when GitHub refuses one of its tokens (#711).
+  purpose = 'control_plane';
+  // Every installation token this client minted, oldest first: an App client renews its token, and whoever revokes the
+  // client's tokens at the end revokes all of them. The permissions the tokens are minted with stay the same.
+  readonly minted: { token: string, at: number, expiresAt: string, reason: string, revoked?: boolean }[] = [];
+  private tokenRequest?: Record<string,string>;
+  // Checks each token right after it is minted (a read-only token's permissions); a failure stops before the token is used.
+  checkToken?: () => void;
   constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor,
     readonly guard: () => Promise<void>, readonly apiUrl = 'https://api.github.com') {}
   path(suffix = ''): string { return '/repos/' + this.fullName.split('/').map(encodeURIComponent).join('/') + suffix; }
-  async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false, snapshotBlob = false, jobLogs = false): Promise<any> {
+  // The App's JWT lives nine minutes; a client that outlives it signs a new one with the account's current key.
+  private appToken(): string {
+    if (this.jwt && Date.now() - this.jwtAt < 5 * 60_000) return this.jwt;
+    const account = this.store.get('SELECT * FROM accounts WHERE id=?', this.repository.account_id);
+    const key = account?.type === 'github_app' ? this.store.secrets.open(account.credentials, `account:${account.id}`).private_key : null;
+    if (!key) return stop('github_credentials_missing', 'waiting_configuration', 'GitHub App 账号未保存私钥，请重新配置凭据。');
+    this.redactor.add(String(key));
+    this.jwt = appJwt(String(account!.app_id), String(key)); this.jwtAt = Date.now(); this.redactor.add(this.jwt);
+    return this.jwt;
+  }
+  private async mint(reason: string) {
+    const access = await this.request('POST', `/app/installations/${this.installationId}/access_tokens`, { repository_ids:[Number(this.repository.id)], permissions:this.tokenRequest }, false, this.appToken());
+    const token = String(access?.token || ''); if (!token) stop('github_token_missing', 'waiting_permission', `GitHub 未返回安装 ${this.installationId} 的访问令牌。`); this.redactor.add(token);
+    this.token = token; this.expiresAt = String(access.expires_at || '');
+    this.permissions = access.permissions && typeof access.permissions === 'object' ? access.permissions : { ...this.tokenRequest };
+    this.minted.push({ token, at: Date.now(), expiresAt: this.expiresAt, reason });
+    this.checkToken?.();
+  }
+  /**
+   * An installation token lives an hour, and a review attempt often runs longer than that. An App client replaces its token
+   * once less than renewBeforeMs remain, before using it: every request does this, and so does a caller that hands the token
+   * on. The earlier token is not revoked here; whoever holds it may still finish with it before it expires.
+   */
+  async fresh() {
+    if (this.installationId && this.tokenRequest && Date.parse(this.expiresAt) - Date.now() < renewBeforeMs) await this.renew('expiring');
+    return this;
+  }
+  // Concurrent requests that find the token expiring or refused share one new token.
+  private renewing?: Promise<void>;
+  private renew(reason: string) { return this.renewing ??= this.mint(reason).finally(() => { this.renewing = undefined; }); }
+  // When and why one of this client's tokens was minted, and whether the bot revoked it; never the token itself.
+  private describe(token: string) {
+    const entry = this.minted.find(m => m.token === token), revoked = revokedByBot(token);
+    if (!entry) return `${this.purpose} 客户端未登记的令牌`;
+    return `${this.purpose} 客户端 ${new Date(entry.at).toISOString()} 签发（${entry.reason}），${entry.expiresAt || '到期时间未知'} 到期，`
+      + (revoked ? `已由 bot 的 ${revoked.by} 在 ${new Date(revoked.at).toISOString()} 吊销` : '未被 bot 吊销');
+  }
+  /** Revokes every installation token this client minted, once each; a Token account's own token is left alone. */
+  async revokeTokens(by: string) {
+    for (const entry of this.minted) if (!entry.revoked) { entry.revoked = true; await revokeInstallationToken(this.apiUrl, entry.token, by).catch(() => false); }
+  }
+  // replaced: the token a first 401 replaced. GitHub answers 401 for a token that expired or was revoked; an installation
+  // token this client minted is then minted again and the request sent once more. Only a second 401 stops the task.
+  async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false, snapshotBlob = false, jobLogs = false, replaced?: string): Promise<any> {
     await this.guard();
     this.store?.checkAuthorization();
     if (this.store && installationExecutionDenied(this.store, String(this.repository.account_id), String(this.repository.id)))
       stop('github_installation_access_revoked', 'waiting_permission', 'GitHub App 安装已暂停、卸载或正在核实范围，等待安装同步确认。');
+    const renewable = !!token && token === this.token && !!this.installationId && !!this.tokenRequest;
+    if (renewable) { await this.fresh(); token = this.token; }
     // A window that is used up (or refused a moment ago) is not sent into: the task waits until GitHub resets it.
     const window = token && token === this.token ? this.tokenWindow : token && token === this.jwt ? this.appWindow : undefined, blocked = window ? blockedUntil(this.store, window) : null;
     if (blocked) stop('github_rate_limited', 'retry_wait', `GitHub 流控：${bucketName(window!)}本小时的请求额度已用完，${utcTime(blocked)} 重置后继续（${method} ${path} 未发送）。`, blocked - Date.now(), window!.key);
@@ -121,6 +184,13 @@ export class GitHub {
       catch { return stop('github_log_download_failed', 'retry_wait', 'GitHub 日志下载失败，未转发 GitHub 令牌或记录临时下载地址。'); }
       if (!response.ok) { await response.body?.cancel(); return stop('github_log_download_failed', 'retry_wait', `GitHub 日志存储返回 HTTP ${response.status}，可稍后重试读取。`); }
     }
+    // A followed job-log redirect that fails has already stopped above, so a 401 here is GitHub's answer to the token.
+    if (response.status === 401 && renewable && !replaced) {
+      await response.body?.cancel();
+      // Another request of this client may already have replaced the refused token.
+      if (this.token === token) await this.renew('after_401'); else await this.renewing;
+      return this.request(method, path, body, allow404, this.token, allowEmptyRepository, snapshotBlob, jobLogs, token);
+    }
     if (response.status === 404 && allow404) return null;
     if (!response.ok) {
       const error=await errorBody(response),detail=errorDetail(error?.message,this.redactor,token,response.status);
@@ -142,7 +212,10 @@ export class GitHub {
       // Without a time from GitHub the task backs off on its own (a minute, doubling up to 15 minutes).
       if(limited){const now=Date.now(),{until,reported}=refused(this.store,window,response.headers,now);
         stop('github_rate_limited','retry_wait',explain(said||'rate limit exceeded',reported?`，${utcTime(until)} 后重试`:'，GitHub 未给出恢复时间，稍后重试（每次等待加倍）'),reported?until-now:undefined,window?.key);}
-      if ([401,403,404].includes(response.status)) stop('github_permission_' + response.status, 'waiting_permission',explain(said));
+      // The second 401 in a row says which tokens GitHub refused, so a person can tell a revoked installation from a bot fault.
+      const again = response.status === 401 && replaced ? this.redactor.text(
+        `。bot 签发的安装令牌被拒绝后已重新签发并重试一次，仍返回 401。被拒的令牌：${this.describe(replaced)}；重新签发的令牌：${this.describe(token)}。`) : '';
+      if ([401,403,404].includes(response.status)) stop('github_permission_' + response.status, 'waiting_permission',explain(said) + again);
       if (response.status >= 500 && method !== 'GET') stop('github_response_unknown', 'retry_wait',explain(said,'，写入结果尚未确认'));
       stop('github_http_' + response.status, response.status === 429 || response.status >= 500 ? 'retry_wait' : 'failed',explain(said));
     }
@@ -180,7 +253,7 @@ export class GitHub {
   // refuses it (422) when the installation does not grant those permissions. A Token account uses its own token.
   async withPermissions<T>(permissions:Record<string,string>,use:(token:string)=>Promise<T>):Promise<T>{
     if(!this.jwt||!this.installationId)return use(this.token);
-    const access=await this.request('POST',`/app/installations/${this.installationId}/access_tokens`,{repository_ids:[Number(this.repository.id)],permissions},false,this.jwt);
+    const access=await this.request('POST',`/app/installations/${this.installationId}/access_tokens`,{repository_ids:[Number(this.repository.id)],permissions},false,this.appToken());
     const token=String(access?.token||'');if(!token)stop('github_token_missing','waiting_permission',`GitHub 未返回安装 ${this.installationId} 的访问令牌。`);this.redactor.add(token);
     try{return await use(token);}finally{await revokeInstallationToken(this.apiUrl,token).catch(()=>false);}
   }
@@ -228,7 +301,7 @@ export class GitHub {
     } else {
       if (!secrets.private_key) stop('github_credentials_missing', 'waiting_configuration', 'GitHub App 账号未保存私钥，请重新配置凭据。');
       this.redactor.add(secrets.private_key);
-      const jwt = this.jwt = appJwt(String(account!.app_id), String(secrets.private_key)); this.redactor.add(jwt); this.appWindow = appBucket(account!.id);
+      const jwt = this.jwt = appJwt(String(account!.app_id), String(secrets.private_key)); this.jwtAt = Date.now(); this.redactor.add(jwt); this.appWindow = appBucket(account!.id);
       const actorKey = account!.id + ':' + String(account!.app_id), known = actors.get(actorKey), fresh = !!known && Date.now() - known.at < actorTtlMs;
       const app = identifyActor && !fresh ? await this.request('GET','/app', undefined, false, jwt) : null;
       const installation = await this.request('GET',this.path('/installation'), undefined, false, jwt);
@@ -241,9 +314,7 @@ export class GitHub {
       if(requiredPermissions&&Object.entries(requiredPermissions).some(([key,value])=>!installation.permissions?.[key]||value==='write'&&installation.permissions[key]!=='write'))stop('github_permissions_insufficient','waiting_permission', `GitHub App 安装 ${installation.id} 缺少本次操作所需的权限，请检查安装授权。`);
       const permissions: Record<string,string> = {};
       for (const [key,value] of Object.entries(requested)) if (installation.permissions?.[key]) permissions[key] = installation.permissions[key] === 'read' ? 'read':value;
-      const access = await this.request('POST',`/app/installations/${installation.id}/access_tokens`, { repository_ids:[Number(this.repository.id)], permissions }, false,jwt);
-      this.token = String(access.token || ''); if (!this.token) stop('github_token_missing','waiting_permission', `GitHub 未返回安装 ${installation.id} 的访问令牌。`); this.redactor.add(this.token);
-      this.expiresAt=String(access.expires_at||'');this.permissions=access.permissions&&typeof access.permissions==='object'?access.permissions:permissions;
+      this.tokenRequest = permissions; await this.mint('connect');
       if (identifyActor && fresh) Object.assign(this, { actorId: known!.id, actorLogin: known!.login });
       else if (identifyActor) {
         const actor = await this.request('GET','/users/' + encodeURIComponent(app.slug + '[bot]'));

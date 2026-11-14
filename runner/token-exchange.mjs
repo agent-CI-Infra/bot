@@ -34,3 +34,31 @@ export function createTokenExchange(dir){
     try{return await Promise.race([run,interrupted]);}finally{signal.removeEventListener('abort',abort);}
   };
 }
+
+// The read token a Pi session gives its commands as GH_TOKEN and GITHUB_TOKEN. The control plane owns it: it revokes the
+// tokens of a review round when the round ends, and replaces one that has less than fifteen minutes left. A session can
+// outlive both (it waits for the next round, or keeps running across a control-plane restart), so it never trusts a value it
+// holds: it asks again whenever the model calls github_read_token, before a command once the token has under ten minutes
+// left, and before the first command of a resumed round (#711). The control plane answers with the token it holds now.
+export function createReadGrant(exchange,mask){
+  let grant=null,stale=false;
+  const ask=async signal=>{
+    const reply=await exchange(signal);
+    // A refused or cancelled exchange leaves a token that is still good in place, but never one from an ended round.
+    if(reply.error){if(stale||grant&&Date.parse(grant.expires_at)<=Date.now()){grant=null;stale=false;}}
+    else {stale=false;grant=reply.structured_only?null:reply;if(grant)mask(grant.token);}
+    return reply;
+  };
+  return {
+    // The model asked for the token: the control plane's answer, or the reason there is none.
+    request:ask,
+    // The variables for a command, renewed first when the held token is from an ended round or about to expire.
+    async env(signal){
+      if(grant&&(stale||Date.parse(grant.expires_at)-Date.now()<10*60000))await ask(signal);
+      return grant?{GH_TOKEN:grant.token,GITHUB_TOKEN:grant.token}:undefined;
+    },
+    // A new review round: the control plane revoked the tokens of the one that ended.
+    resume(){if(grant)stale=true;},
+    get current(){return grant;}
+  };
+}

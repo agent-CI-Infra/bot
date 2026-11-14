@@ -9,7 +9,7 @@ import {commandOptions} from './command-policy.mjs';
 import {waitModelReply} from './model-reply.mjs';
 import {toolCapabilityError,platformWrites} from './capabilities.mjs';
 import {createRepositoryTool} from './repository-tool.mjs';
-import {createTokenExchange} from './token-exchange.mjs';
+import {createTokenExchange,createReadGrant} from './token-exchange.mjs';
 import {createToolResultGuard} from './repository-context.mjs';
 import {runSubagent} from './subagent.mjs';
 import {local} from './paths.mjs';
@@ -19,7 +19,7 @@ const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(
 if(local)config.system+='\nLocal execution: this is a host process, not a container. Stay inside your task workspace and project notes. Never search the host root filesystem or inspect unrelated projects or credentials. Never use pkill, killall or process-name-wide termination. Use keep_background for servers; the manager cleans your task processes when you finish. Read ../notes/environment.md for verified local tooling.';
 const boot=(await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({}))).boot;
 const save=async value=>{value={...value,pid:process.pid,boot};await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
-let steps=0,session,finished,grant=null,requestFailure,failureDetail;
+let steps=0,session,finished,requestFailure,failureDetail;
 // reserve: tokens a later request needs beyond raw, such as a compaction summary.
 const modelCapabilities=config.model??{context_window:128000,max_output_tokens:8192,reasoning:false};
 const outputReserve=config.output_tokens??modelCapabilities.max_output_tokens;
@@ -29,7 +29,7 @@ const secrets=new Set();let events=Promise.resolve();
 const clean=value=>JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='string'?[...secrets].reduce((text,secret)=>text.replaceAll(secret,'[REDACTED]'),item):item));
 const writeEvent=value=>{const line=JSON.stringify(clean(value))+'\n';events=events.then(()=>appendFile(dir+'/events.jsonl',line,{mode:0o600}));return events;};
 // Asks the control plane for a read-only GitHub token through the task mailbox, as model requests do.
-const exchange=createTokenExchange(dir);
+const exchange=createTokenExchange(dir),grant=createReadGrant(exchange,token=>secrets.add(token));
 // Repository exploration and the platform's write tools run in the control plane, through one mailbox.
 const repositoryTool=createRepositoryTool(dir);
 // The tools that end the task: finish_review unless the configuration names others (a development task ends with its PR).
@@ -134,7 +134,7 @@ try{
         if(!options.request)result={error:options.error,message:options.message};
         else {
           const outputId=randomBytes(24).toString('hex'),outputDirectory=dir+'/results';
-          const secret_env=grant?{GH_TOKEN:grant.token,GITHUB_TOKEN:grant.token}:undefined;
+          const secret_env=await grant.env(signal);
           try{await prepareLocalResults(outputDirectory);
             await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify(clean({operation_id:id,output_file:outputDirectory+'/'+outputId+'.utf8',...options.request})),{mode:0o600});
             result=await workspace({...options.request,workspace_id:cfg.workspace_id,output_file:outputDirectory+'/'+outputId+'.utf8',secret_env});
@@ -145,8 +145,9 @@ try{
         }
       }else if(name==='github_read_token'){
         // The token stays in this process and reaches later commands only as environment variables; the model sees what it can do, not the value.
-        if(!grant||Date.parse(grant.expires_at)-Date.now()<10*60000){const reply=await exchange(signal);if(reply.error)result={error:reply.error};else if(reply.structured_only)result={repository:reply.repository,permissions:reply.permissions,variables:[],instruction:reply.instruction};else {grant=reply;secrets.add(grant.token);}}
-        result??={variables:['GH_TOKEN','GITHUB_TOKEN'],api:'https://api.github.com',repository:grant.repository,permissions:grant.permissions,expires_at:grant.expires_at};
+        const reply=await grant.request(signal);
+        result=reply.error?{error:reply.error}:reply.structured_only?{repository:reply.repository,permissions:reply.permissions,variables:[],instruction:reply.instruction}
+          :{variables:['GH_TOKEN','GITHUB_TOKEN'],api:'https://api.github.com',repository:reply.repository,permissions:reply.permissions,expires_at:reply.expires_at};
       }else result={error:'tool_not_allowed'};
       // A write or command that failed because the work volume ran full ends the task as disk_full, waiting for space
       // (#671), rather than letting the model read it as a failed command or failing tests: no further model request.
@@ -235,7 +236,7 @@ try{
     await writeFile(dir+'/history.json',encoded,{mode:0o600});
     await save({state:'review_ready',result,...sdk});
     for(;;){if(await readFile(dir+'/continue.json','utf8').catch(()=>null))break;await new Promise(resolve=>setTimeout(resolve,50));}
-    await unlink(dir+'/continue.json');finished=undefined;
+    await unlink(dir+'/continue.json');finished=undefined;grant.resume();
     await save({state:'review_resuming'});
     const reply=await boundary('resume');
     // Each update remains a distinct user message, in delivery order.
