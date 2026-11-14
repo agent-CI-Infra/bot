@@ -2,6 +2,7 @@ import { type Store, type Row } from '../storage/database.js';
 import { type Manager } from './service.js';
 import { randomId, type Json } from '../core/security.js';
 import { FailureLog } from '../core/log.js';
+import { retentionSettings } from '../storage/retention.js';
 
 /*
  * Scheduled removal of task workspaces from the project computers.
@@ -18,10 +19,17 @@ import { FailureLog } from '../core/log.js';
  *   A review of a pull request that is closed goes at the next sweep too;
  * - otherwise for a day after the task's last update (succeeded, cancelled, superseded), a week when it failed.
  * A directory no record names (made before records existed, or by a conversation) goes a day after its last activity.
+ * The day and the week are the defaults of the storage settings (workspace_finished_days, workspace_failed_days, #671);
+ * a directory no record names follows the first.
  * A directory active in the last half hour, or used by this process then, stays whatever its owner.
  */
 const hour = 3600_000, day = 24 * hour;
 export const workspaceRetention = { finishedMs: day, failedMs: 7 * day, unownedMs: day, quietMs: hour / 2 };
+/** The retention now in force: the saved storage settings, else the defaults above. */
+function retentionMs(store: Store) {
+  const saved = retentionSettings(store);
+  return { finishedMs: saved.workspace_finished_days * day, failedMs: saved.workspace_failed_days * day, unownedMs: saved.workspace_finished_days * day };
+}
 // Directories per removal call, the pause between calls (other calls on the computer go first), and how long the
 // records of removed directories stay.
 export const sweepLimits = { batch: 10, pauseMs: 1000, releasedKeptMs: 30 * day };
@@ -79,12 +87,12 @@ function pullRequests(store: Store, repo: string): PullRequests {
 
 /** The listed directories that may go now, least recently active first, each with the rule that lets it go. */
 export function removableWorkspaces(store: Store, repo: string, entries: Listed[], now = Date.now(), prs = pullRequests(store, repo)): Planned[] {
-  const until = retention(store, repo, entries.map(entry => entry.name), prs), planned: Planned[] = [];
+  const until = retention(store, repo, entries.map(entry => entry.name), prs), planned: Planned[] = [], { unownedMs } = retentionMs(store);
   for (const entry of entries) {
     const key = `${repo}:${entry.name}`;
     if (removing.has(key) || now - (lastUse.get(key) ?? 0) < workspaceRetention.quietMs || now - entry.active_at < workspaceRetention.quietMs) continue;
     const [time, reason] = until(entry.name, entry.active_at);
-    if (reason === 'unowned' ? now - entry.active_at > workspaceRetention.unownedMs : now >= time) planned.push({ ...entry, reason });
+    if (reason === 'unowned' ? now - entry.active_at > unownedMs : now >= time) planned.push({ ...entry, reason });
   }
   return planned;
 }
@@ -107,7 +115,7 @@ export function workspaceClasses(store: Store, repo: string, entries: { name: st
 // For the named directories: until when the tasks that use them need them, and why (Infinity keeps it; 'unowned' for a
 // directory no record names, whose time comes from its own activity).
 function retention(store: Store, repo: string, list: string[], prs: PullRequests): (name: string, activeAt: number) => [number, string] {
-  const names = JSON.stringify(list);
+  const names = JSON.stringify(list), { finishedMs, failedMs, unownedMs } = retentionMs(store);
   const rows = store.all(`SELECT workspace_id,task_id,task_kind,object_number FROM task_workspaces WHERE repository_id=? AND task_id<>''
     AND workspace_id IN (SELECT value FROM json_each(?))`, repo, names);
   const owners = JSON.stringify([...new Set(rows.map(row => row.task_id))]);
@@ -132,11 +140,11 @@ function retention(store: Store, repo: string, list: string[], prs: PullRequests
     if (pulls.length) return pulls.some(pr => !prs.closed.has(pr)) ? [Infinity, 'pr_open'] : [0, 'pr_closed'];
     if (row.task_kind === 'review.pr' && prs.closed.has(number)) return [0, 'pr_closed'];
     const last = Math.max(updated.get(row.task_id) ?? 0, activeAt);
-    return state === 'failed' ? [last + workspaceRetention.failedMs, 'failed'] : [last + workspaceRetention.finishedMs, 'finished'];
+    return state === 'failed' ? [last + failedMs, 'failed'] : [last + finishedMs, 'finished'];
   };
   return (name, activeAt) => {
     const owned = byName.get(name);
-    if (!owned) return [activeAt + workspaceRetention.unownedMs, 'unowned'];
+    if (!owned) return [activeAt + unownedMs, 'unowned'];
     // The task that needs it longest decides.
     return owned.map(row => until(row, activeAt)).reduce((a, b) => b[0] > a[0] ? b : a);
   };

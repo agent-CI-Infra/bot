@@ -729,6 +729,13 @@ export class Projects {
     return { usage: [...usage, ...open.values()], database: { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal, auto_vacuum: value('auto_vacuum') },
       disk: this.disk.check(), migration: this.migration.state(), expiry: this.expiry.state(), computers, docker, compaction, vacuum: this.vacuum.state() };
   }
+  /** Saves the expiry window in days (1–365); the next expiry pass uses it. */
+  setRetention(input) {
+    if (!input || Object.keys(input).some(key => key !== 'payload_days') || !Number.isSafeInteger(input.payload_days) || input.payload_days < 1 || input.payload_days > 365)
+      throw new ManagerError('invalid_retention', 400);
+    this.db.prepare("INSERT INTO settings VALUES('payload_retention',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ days: input.payload_days }));
+    return this.expiry.state();
+  }
   async shutdown() {
     await this.migration.stop(); await this.expiry.stop(); await this.vacuum.stop(); await Promise.all([...this.pending]); for (const row of this.list()) await this.stopAll(row.repository_id);
     this.trajectories.closeAll(); await this.trajectories.settle(); this.db.close();

@@ -3,8 +3,9 @@ import { execFile } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import type { Store } from '../storage/database.js';
 import type { Manager } from '../projects/service.js';
-import { scope, type Actor } from './auth.js';
-import type { Json } from '../core/security.js';
+import { scope, superAdmin, type Actor } from './auth.js';
+import { retentionBounds, retentionDefaults, retentionSettings, saveRetention } from '../storage/retention.js';
+import { fail, type Json } from '../core/security.js';
 import { migrationProgress } from '../storage/migration.js';
 import { diskState } from '../storage/disk.js';
 import { workspaceClasses } from '../projects/workspace-cleanup.js';
@@ -104,11 +105,31 @@ export class StorageReport {
     return (this.store.disk?.check() ?? (this.store.trajectories.root ? diskState(dirname(this.store.trajectories.root)) : null)) as Json | null;
   }
 
-  async api(user: Actor, method: string, path: string): Promise<Json | undefined> {
+  async api(user: Actor, method: string, path: string, input: Json = {}): Promise<Json | undefined> {
+    if (path === '/api/storage/retention') return this.retention(user, method, input);
     if (path !== '/api/storage' || method !== 'GET') return undefined;
     // The first view after a start waits for the first refresh; later views read the last one.
     if (!this.snapshot) await this.refresh().catch(() => {});
     return this.view(user);
+  }
+
+  /**
+   * Cleanup by days (#671), platform administrators only: the settings with their defaults and bounds, the projects a
+   * trajectory window can be set for, the last daily cleanup, and the group chats' own retention (set per chat in the
+   * channel console), shown here so every window is in one place. PUT saves a change (validated, audited).
+   */
+  private async retention(user: Actor, method: string, input: Json): Promise<Json> {
+    superAdmin(user);
+    if (method === 'PUT') {
+      const saved = saveRetention(this.store, user.id, input);
+      // The manager uses the new window from its next pass; the daily cleanup sends it again if this fails.
+      if (input.manager_payload_days !== undefined) await this.manager?.call('PUT', '/v1/storage/retention', { payload_days: saved.manager_payload_days }).catch(() => null);
+    } else if (method !== 'GET') fail(405, 'method_not_allowed');
+    let cleanup: Json | null = null; try { cleanup = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='retention_cleanup'")?.value ?? 'null'); } catch {}
+    let chats: Json | null = null;
+    if (this.store.hasTable('channel_chats')) chats = this.store.get('SELECT count(*) AS chats,count(retention_days) AS configured,min(retention_days) AS min_days,max(retention_days) AS max_days FROM channel_chats') ?? null;
+    return { settings: retentionSettings(this.store), defaults: retentionDefaults, bounds: retentionBounds, last_cleanup: cleanup, chats,
+      projects: this.store.all('SELECT id,full_name FROM repositories ORDER BY full_name').map(row => ({ id: String(row.id), name: String(row.full_name) })) };
   }
 
   /** Projects the user may see: every one for a platform administrator (plus records without a project), else their own. */

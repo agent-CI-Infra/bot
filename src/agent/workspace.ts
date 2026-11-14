@@ -84,10 +84,14 @@ export class Workspace {
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'command',command:request.command,...result,output:clip(result.output)});
     return result;
   }
-  // A recorded call whose file fails verification stops the task: running it again could repeat its effect.
+  // A recorded call whose file fails verification stops the task: running it again could repeat its effect. One whose
+  // file was removed after its retention window (#671) cannot be answered either: a new attempt runs with new keys.
   private readable<T>(read:()=>T):T{
     try{return read();}
-    catch(error){if(error instanceof TrajectoryError)stop('trajectory_unreadable',undefined,`${error.code}: ${error.detail}`);throw error;}
+    catch(error){
+      if(error instanceof TrajectoryError&&error.code==='trajectory_expired')stop('operation_result_expired','waiting_environment',`控制面中这次调用的记录已过保留期被删除：${error.detail}`);
+      if(error instanceof TrajectoryError)stop('trajectory_unreadable',undefined,`${error.code}: ${error.detail}`);throw error;
+    }
   }
   // Hands a credential to the task agent. Unlike call(), the request is not recorded in task_tools, so the token is
   // never stored; a lost answer only means the agent asks again.
