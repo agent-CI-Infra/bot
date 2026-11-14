@@ -11,6 +11,40 @@ async function login(page, f, hash, username = 'administrator', password = f.pas
   await page.getByRole('button', { name: '登录', exact: true }).click();
 }
 
+test('an edited supplemental message has a Chinese status in the conversation at desktop and phone widths', async ({page}) => {
+  const f=await channelFixture(),errors=[];let release,executing=false,calls=0;
+  page.on('pageerror',error=>errors.push(error.message));
+  const held=new Promise(resolve=>{release=resolve;});
+  try {
+    await repositoryAssistant(f);await boundGroup(f);
+    f.service.serviceSessions.own.invoke=async()=>{executing=true;await held;return {conclusion:'核对完成'};};
+    f.modelState.respond=async(_body,res)=>{
+      const message=++calls===1?{role:'assistant',content:null,tool_calls:[{id:'own',type:'function',function:{name:'start_own_task',arguments:'{}'}}]}
+        :{role:'assistant',content:'已根据当前消息回答。'};
+      res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}]}));
+    };
+    const original=await post(f.h,f.id,inGroup('先核对项目。'));await until(()=>executing);
+    const supplemental=await post(f.h,f.id,inGroup('补充问题原文。','ou_bob'));
+    expect(supplemental.value.state).toBe('merged');
+    const row=f.h.store.get('SELECT * FROM channel_inbox WHERE id=?',supplemental.value.operation_id),event=f.service.turnMessages.event(row);
+    f.service.ledger.accept({...event,content:'补充问题已编辑。',raw_content:JSON.stringify({text:'补充问题已编辑。'}),updated_at:Date.now()+1});
+    release();await until(()=>f.h.store.get('SELECT state FROM channel_inbox WHERE id=?',original.value.operation_id)?.state==='completed');
+    expect(f.h.store.get("SELECT count(*) n FROM channel_turn_inputs WHERE state='changed'").n).toBe(1);
+    await login(page,f,'#/conversations');
+    await page.getByLabel('可查看的飞书会话').getByRole('link',{name:/群聊/}).click();
+    const incoming=page.getByLabel('回合并入的消息');await incoming.getByText('并入的消息（1）',{exact:true}).click();
+    await expect(incoming).toContainText('原消息已变更');await expect(incoming).not.toContainText(' · changed');
+    mkdirSync('.tmp/channel-source-status',{recursive:true});
+    for(const width of [1440,390]) {
+      await page.setViewportSize({width,height:1000});await incoming.scrollIntoViewIfNeeded();
+      expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+      await expect(incoming.getByText(/原消息已变更/)).toBeVisible();
+      await page.screenshot({path:`.tmp/channel-source-status/changed-${width}.png`,fullPage:true});
+    }
+    expect(errors).toEqual([]);
+  }finally{release?.();await f.close();}
+});
+
 test('conversation shows the actual messages merged into a running turn on wide and narrow screens (#458)', async ({ page }) => {
   const f = await channelFixture(); let release, calls = 0, executing = false;
   const held = new Promise(resolve => { release = resolve; });

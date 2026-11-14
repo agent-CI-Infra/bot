@@ -112,10 +112,11 @@ export class ManagementAgent {
     })).map(m=>{const reply=m.reply?String(JSON.parse(m.reply).text??''):undefined;
       return {...m,reply:reply?.slice(0,historyReplyChars),...(reply&&reply.length>historyReplyChars?{reply_truncated:true}:{})};});
     // The history has a budget of its own: the oldest rounds give way first, so long answers cannot crowd out this request.
-    let omitted=0;while(history.length>1&&Buffer.byteLength(JSON.stringify(history))>historyBytes){history.shift();omitted++;}
     const source=this.store.get('SELECT source_message FROM management_messages WHERE id=?',message)?.source_message;
-    const context={scope:row.scope,request,history,source_message:source,...(omitted?{earlier_rounds_omitted:omitted}:{})};
-    return this.sourceContext?.(conversation,context)??context;
+    const context={scope:row.scope,request,history,source_message:source};
+    const projected=this.sourceContext?.(conversation,context)??context,projectedHistory=projected.history as Json[];
+    let omitted=0;while(projectedHistory.length>1&&Buffer.byteLength(JSON.stringify(projectedHistory))>historyBytes){projectedHistory.shift();omitted++;}
+    return {...projected,...(omitted?{earlier_rounds_omitted:omitted}:{})};
   }
   /** `timer` marks a message sent by one of the user's chat timers (#330): only such a turn may end silently (#489). */
   send(base:ActorContext,conversationId:string,input:Json,options:{timer?:boolean}={}):Json{

@@ -11,7 +11,7 @@ export function commandTimeoutLimit() {
 export function commandInstructions(defaultSeconds?: number | null) {
   return `${defaultSeconds === undefined ? 'Default timeouts are 120 seconds for stage observers and independent QA, 180 seconds for role development and request execution; ordinary workflow commands wait for completion without timeout_seconds. Check the run_command description for the current entry.' : defaultSeconds === null ? 'Without timeout_seconds, this entry waits for the command to finish.' : `The default timeout is ${Math.min(defaultSeconds, commandTimeoutLimit())} seconds.`} Explicit timeouts are capped at ${commandTimeoutLimit()} seconds; larger values are reduced with a notice in the result. Use keep_background for servers and watchers; their output is automatically saved to the returned log_path, which later commands can read. Kept processes remain available until the task ends. Ordinary commands clean up their process group when the shell exits.`;
 }
-export function commandTool(defaultSeconds: number | null, description = 'Run a shell command in this task workspace inside the project container. Output is streamed to the console.') {
+export function commandTool(defaultSeconds: number | null, description = 'Run a shell command in this task workspace inside the long-lived project container, with internet access for installing dependencies. Output is streamed to the console.') {
   return { type: 'function', function: { name: 'run_command', description: description + ' ' + commandInstructions(defaultSeconds),
     parameters: { type: 'object', properties: {
       command: { type: 'string' },

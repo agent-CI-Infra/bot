@@ -252,7 +252,11 @@ export class ChannelLedger {
     const visible = this.visibility(projects, fence);
     return { revision: this.sourceVersion(id), notice: 'Messages listed here were recalled or edited. Do not quote or rely on their previous content. Recheck facts and existing write receipts before acting; never repeat a write because context was refreshed.',
       messages: this.store.all(`SELECT channel_messages.* FROM channel_messages JOIN channel_source_updates u USING(chat_id,message_id)
-        WHERE chat_id=?${visible.sql} ORDER BY u.revision DESC LIMIT 40`, id, ...visible.args).map(row => ({ ...this.view(row), change: row.deleted ? 'recalled' : 'edited' })) };
+        WHERE chat_id=?${visible.sql} ORDER BY u.revision DESC LIMIT 40`, id, ...visible.args).map(row => {
+          const message = this.view(row), content = String(message.content ?? '');
+          return { ...message, content: content.slice(0, 3000), truncated: content.length > 3000,
+            ...(content.length > 3000 ? { notice: 'Read the current full message with read_message_text.' } : {}), change: row.deleted ? 'recalled' : 'edited' };
+        }) };
   }
   /** Earlier bot text can quote any changed source. Keep stored replies, but omit such derived text from future inputs. */
   private contextView(row: Row): Json {

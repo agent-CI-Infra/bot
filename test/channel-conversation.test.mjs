@@ -159,6 +159,25 @@ test('more than 100 local messages retain old source retrieval and a rolling sou
 const seed=(f,count)=>{const now=Date.now();for(let i=0;i<count;i++)f.service.ledger.merge(f.chat,{message_id:'seed-'+String(i).padStart(3,'0'),sender_id:'ou_alice',sender_tenant:'actor-tenant',sender_type:'user',message_type:'text',content:'Seeded discussion '+i,raw_content:'{}',created_at:now-86400000+i,updated_at:now-86400000+i,parent_id:'',root_id:'',thread_id:'',deleted:false},'history');};
 const isSummary=body=>body.messages[0].content.startsWith('Summarize only');
 
+test('a backfill arriving during a summary cannot be hidden behind its through boundary',async t=>{
+  const f=await fixture(t);seed(f,80);let summaries=0;
+  f.modelState.respond=async(body,res)=>{
+    if(!isSummary(body))return say(res,'本轮继续回答');
+    if(++summaries===1) {
+      f.service.ledger.merge(f.chat,{message_id:'late-old',sender_id:'ou_alice',sender_tenant:'actor-tenant',sender_type:'user',message_type:'text',
+        content:'并发补读的旧消息',raw_content:'{}',created_at:1,updated_at:1,parent_id:'',root_id:'',thread_id:'',deleted:false},'history');
+      return say(res,'未包含补读消息的摘要');
+    }
+    assert.ok(body.messages[1].content.includes('并发补读的旧消息'));
+    return say(res,'已包含补读消息的摘要');
+  };
+  assert.equal((await complete(f,await post(f.h,f.id,inGroup('先回答','ou_bob')))).state,'completed');
+  assert.equal(f.h.store.get('SELECT count(*) n FROM channel_chat_summaries').n,0);
+  assert.equal((await complete(f,await post(f.h,f.id,inGroup('再核对旧消息','ou_bob')))).state,'completed');
+  assert.equal(summaries,2);
+  assert.ok(f.h.store.get('SELECT * FROM channel_chat_summaries'));
+});
+
 test('a few messages beyond the recent window wait for a batch: no summary request, they stay in the prompt as they are',async t=>{
   const f=await fixture(t);seed(f,50);
   const receipt=await post(f.h,f.id,inGroup('What was discussed first?','ou_bob'));

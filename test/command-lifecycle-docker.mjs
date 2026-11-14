@@ -57,6 +57,7 @@ try{
   const service=`const fs=require('fs'),http=require('http');const s=http.createServer((q,r)=>r.end('alive'));s.listen(0,'127.0.0.1',()=>fs.writeFileSync('port',String(s.address().port)));setTimeout(()=>{process.stdout.write('x'.repeat(2*1024*1024));process.stderr.write('logged-after-runner-exit\\n');fs.writeFileSync('printed','yes');},1200)`;
   const kept=await call({type:'workspace_command',workspace_id:ws,command:`node -e ${JSON.stringify(service)}`,keep_background:true,timeout_ms:5000});
   assert.equal(kept.result.running,true);assert.ok(kept.result.log_path.startsWith(`/workspace/tasks/${ws}/logs/`));
+  assert.match(kept.result.notice,/startup snapshot/);
   const probe=await command(`node -e "const fs=require('fs');(async()=>{while(!fs.existsSync('printed'))await new Promise(r=>setTimeout(r,50));console.log(await(await fetch('http://127.0.0.1:'+fs.readFileSync('port','utf8'))).text());const log=fs.readFileSync('${kept.result.log_path}','utf8');if(log.length<2097152||!log.includes('logged-after-runner-exit'))process.exit(2)})()"`);
   assert.equal(probe.result.exit_code,0,probe.result.output);assert.equal(probe.result.output,'alive\n');
   passed('background service remains reachable after runner exit and writes more than 2 MiB to the returned log');

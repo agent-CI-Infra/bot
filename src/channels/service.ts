@@ -27,6 +27,8 @@ import { assistantMessage, ChannelTurnMessages } from './turn-messages.js';
 import { ChannelMembers } from './members.js';
 
 const errorCode = (error: unknown) => error instanceof HttpError || error instanceof TaskError ? error.code : 'channel_processing_failed';
+const privateMessageText = (content: string) => content.length > 14000 ? content.slice(0, 14000)
+  + '\n[长消息的其余内容保存在本地消息账本；请用 read_message_text 分页读取当前消息，不能只根据此节选回答。]' : content;
 const card = (value: string, link?: string, token?: string): Json => ({ config: { wide_screen_mode: true },
   elements: [{ tag: 'div', text: { tag: 'plain_text', content: value } },
     ...(link ? [{ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '登录后台查看' }, url: link },
@@ -109,7 +111,8 @@ export class ChannelService {
         const event=this.turnMessages.event(source),message=this.ledger.query(chat.id,{message_id:event.message_id}).messages as Json[];
         // Replies and progress are derived from the whole supplied chat, not just their initiating message.
         const {reply,reply_truncated,progress_messages,...rest}=item;
-        return {...(changedAt>=Date.parse(String(item.created_at))?rest:item),request:{...request,content:message[0]?.content??'[消息已清理]'}};
+        const content=String(message[0]?.content??'[消息已清理]');
+        return {...(changedAt>=Date.parse(String(item.created_at))?rest:item),request:{...request,content:privateMessageText(content)}};
       });
       return {...context,history,source_updates:this.ledger.sourceUpdates(chat.id),write_receipts:{
         management:store.all('SELECT id,operation,state FROM management_commands WHERE source_conversation=? AND source_message=?',conversation,String(context.source_message)),
@@ -507,7 +510,7 @@ export class ChannelService {
       this.store.run('UPDATE channel_sessions SET conversation_id=?,context_revision=?,connector_revision=? WHERE id=?',String(conversation),revision,e.connector_revision,session.id);
       session=this.store.get('SELECT * FROM channel_sessions WHERE id=?',session.id)!;
     }
-    const request=content.length>14000?content.slice(0,14000)+'\n[长消息的其余内容保存在本地消息账本；请用 read_message_text 分页读取当前消息，不能只根据此节选回答。]':content;
+    const request=privateMessageText(content);
     const message=this.management.send(actor,session.conversation_id,{content:request,source_message:'feishu:'+row.id});
     this.store.run('UPDATE channel_sessions SET last_message_at=? WHERE id=?',e.created_at,session.id);
     this.store.run("UPDATE channel_inbox SET state='submitted',conversation_id=?,message_id=?,context_revision=? WHERE id=?",session.conversation_id,String(message.id),revision,row.id);
