@@ -1,6 +1,6 @@
 /** Credential-shaped content is distinct from trace-only field filtering and JSON formatting. */
-const credentialName = /^(?:(?:[\w-]*[_-])?(?:token|secret|password|passwd|api[ _-]?key|access[ _-]?key|credential)|authorization|cookie|set-cookie|private[_-]?key|encrypt[_-]?key|密码|凭据|私钥)$/i;
-const explicitSecretName = /^(?:authorization|cookie|set-cookie|.*(?:password|passwd|secret|api[ _-]?key|access[ _-]?key|private[_-]?key|encrypt[_-]?key)|密码|凭据|私钥)$/i;
+const credentialName = /^(?:(?:[\w-]*[_-])?(?:token|secret|secret[ _-]?key|password|passwd|api[ _-]?key|access[ _-]?key|credential|credential[ _-]?value)|authorization|cookie|set-cookie|private[_-]?key|encrypt[_-]?key|密码|凭据|私钥)$/i;
+const explicitSecretName = /^(?:authorization|cookie|set-cookie|.*(?:password|passwd|secret|secret[ _-]?key|api[ _-]?key|access[ _-]?key|private[_-]?key|encrypt[_-]?key)|密码|凭据|私钥)$/i;
 function credentialLike(value: string): boolean {
   return value.length >= 16 && /^[A-Za-z0-9._~+/=-]+$/.test(value)
     && (value.length >= 24 || /[0-9._~+/=-]/.test(value) || /[a-z]/.test(value) && /[A-Z]/.test(value));
