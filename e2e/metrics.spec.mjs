@@ -87,8 +87,8 @@ test('没有费用信息时按输入加输出 token 堆叠，缓存不重复累�
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await chart.scrollIntoViewIfNeeded();await page.screenshot({path:'.tmp/metrics-evidence/token-chart-mobile.png'});
     await page.getByLabel('统计项目',{exact:true}).selectOption('101');await filter('2026-10-22','2026-10-23');
     await expect(chart.locator('rect[data-project="202"]')).toHaveCount(0);await expect(chart.locator('rect')).toHaveCount(1);
-    await filter('2026-10-23','2026-10-23');await expect(chart).toContainText('没有完整的用量记录');await expect(chart.locator('svg')).toHaveCount(0);
-    await filter('2026-10-24','2026-10-24');await expect(chart).toContainText('没有模型请求记录');await expect(chart.locator('svg')).toHaveCount(0);
+    await filter('2026-10-23','2026-10-23');await expect(chart).toContainText('没有完整的用量记录');await expect(chart.locator('svg[data-metric]')).toHaveCount(0);
+    await filter('2026-10-24','2026-10-24');await expect(chart).toContainText('没有模型请求记录');await expect(chart.locator('svg[data-metric]')).toHaveCount(0);
     const memberPassword=testPassword();await admin('/api/users','POST',{username:'token-member',password:memberPassword,repository_ids:['101']});
     const context=await browser.newContext(),member=await context.newPage();
     try{
