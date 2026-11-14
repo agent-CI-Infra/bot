@@ -123,6 +123,13 @@ function boardAddressCategory() { return {'#/reviews':'review','#/developments':
 async function renderBoard(request,useView=false) {
   const owner=me.id,position=!useView&&boardState?.owner===me.id?boardState.positions?.[boardState.layout]:null;
   if(boardState?.owner!==owner){boardState=null;$('board-panel').replaceChildren();}
+  // #689: the list loading state lives in hidden #rows on this tab, so an empty
+  // panel must show its own loading state until /api/board returns. A refresh
+  // that still has the previous board keeps that UI instead of flashing blank.
+  const panel=$('board-panel');
+  if(panel&&!panel.childElementCount){
+    panel.replaceChildren(consoleState('正在加载看板','正在读取视图与当前范围的工作。',{tone:'loading'}));
+  }
   let data;try{data=await api('/api/board');}
   catch(err){
     if(request!==renderVersion||me?.id!==owner)return;
