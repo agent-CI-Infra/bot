@@ -8,7 +8,7 @@ test('#642 未知地址与项目内未知子页显示「找不到这个页面」
   test.setTimeout(90000);
   const h = await harness();
   try {
-    const { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+    const { admin, password: adminPassword } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
     const password = testPassword(); await admin('/api/users', 'POST', { username: 'member', password, role: 'project_admin', repository_ids: ['101'] });
     mkdirSync('.tmp/page-not-found', { recursive: true });
     for (const width of [1440, 390]) {
@@ -47,7 +47,8 @@ test('#642 未知地址与项目内未知子页显示「找不到这个页面」
         await page.goto(h.admin + '/' + address);
         const inner = page.locator('#project-page [data-page-not-found="project"]');
         await expect(inner.getByRole('heading', { name: '找不到这个页面', exact: true })).toBeVisible();
-        await expect(page).toHaveURL(new RegExp(address.replace(/[/]/g, '\\/') + '$'));
+        // Compare the address as a plain string: no RegExp is built from it, so no metacharacter needs escaping.
+        await expect.poll(() => new URL(page.url()).hash).toBe(address);
         await expect(page.locator('#project-page .project-head h1')).toHaveText('fixture/project-101');
         await expect(page.locator('#project-page h3', { hasText: '项目概况' })).toHaveCount(0);
         await expect(page).toHaveTitle('找不到页面 · launchpad 管理');
@@ -64,6 +65,29 @@ test('#642 未知地址与项目内未知子页显示「找不到这个页面」
       await page.goto(h.admin + '/#/projects/101'); await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('基本设置');
       // A broken project link that is not a project address at all is a top-level not-found.
       for (const address of ['#/projects/abc', '#/projects/101/release-notes']) { await page.goto(h.admin + '/' + address); await expect(state.getByRole('heading', { name: '找不到这个页面', exact: true })).toBeVisible(); }
+      expect(errors).toEqual([]); await context.close();
+    }
+
+    // The super administrator's shell differs (global settings, more sidebar entries); the same states hold there too.
+    for (const width of [1440, 390]) {
+      const context = await browser.newContext({ viewport: { width, height: 844 } }), page = await context.newPage(), errors = [];
+      page.on('pageerror', e => errors.push(e.message));
+      await page.goto(h.admin + '/#/nonexistent'); await page.getByLabel('用户名', { exact: true }).fill('administrator');
+      await page.getByLabel('密码', { exact: true }).fill(adminPassword); await page.getByRole('button', { name: '登录', exact: true }).click();
+      const state = page.locator('#console-page [data-page-not-found="console"]');
+      await expect(state.getByRole('heading', { name: '找不到这个页面', exact: true })).toBeVisible();
+      await expect(page.locator('#console-context')).toHaveText('找不到页面');
+      await expect(page.locator('#tabs [aria-current=page]')).toHaveCount(0);
+      await expect(page.locator('#console-mobile-nav [aria-current=page]')).toHaveCount(0);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: `.tmp/page-not-found/console-super-${width}.png`, fullPage: true });
+      await page.goto(h.admin + '/#/projects/101/bogus');
+      const inner = page.locator('#project-page [data-page-not-found="project"]');
+      await expect(inner.getByRole('heading', { name: '找不到这个页面', exact: true })).toBeVisible();
+      await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveCount(0);
+      if (width === 390) await expect(page.locator('#console-section option:checked')).toHaveText('找不到页面');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: `.tmp/page-not-found/project-super-${width}.png`, fullPage: true });
       expect(errors).toEqual([]); await context.close();
     }
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
