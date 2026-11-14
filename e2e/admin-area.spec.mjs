@@ -14,7 +14,7 @@ async function login(page, h, username, password, hash = '#/more') {
 }
 
 function adminCaptions(page) {
-  return page.getByTestId('console-admin-group').locator('a > span').allInnerTexts().then(rows => rows.map(t => t.trim()));
+  return page.getByTestId('console-admin-group').locator('a .console-link-copy > span').allInnerTexts().then(rows => rows.map(t => t.trim()));
 }
 
 test('#550 管理区按角色可见：项目管理员看不到接入向导，超级管理员能从管理区到达', async ({ page, browser }) => {
