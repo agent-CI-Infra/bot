@@ -23,7 +23,7 @@ import { roleApi } from '../dist/roles/api.js';
 import { roleWorkspaces } from '../dist/roles/workspace.js';
 
 const tag = randomBytes(4).toString('hex'), root = resolve('.tmp/role-run-docker'), work = join(root, tag);
-const deployment = 'rr169' + tag, image = `dbot-role-run-169-${tag}:test`, repo = '169' + String(parseInt(tag, 16) % 100000).padStart(5, '0');
+const deployment = 'rr169' + tag, image = `dbot-role-run-169-${tag}:test`, managerImage = `dbot-manager-705-${tag}:test`, repo = '169' + String(parseInt(tag, 16) % 100000).padStart(5, '0');
 const base = process.env.BOT_TEST_BASE_IMAGE || 'department-bot-project-computer:local';
 mkdirSync(work, { recursive: true });
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...opts });
@@ -217,16 +217,21 @@ ls /var/run/docker.sock 2>&1; touch /opt/runner/x 2>&1; touch /etc/x 2>&1; cat /
   assert.equal(store.get("SELECT count(*) n FROM task_history WHERE type='role_run_environment'").n, 1, 'no environment was provisioned for the refused driver');
   passed('RoleRun admission admits a contract adapter only in a verified run container and refuses a built-in driver before provisioning', { run: runRow.id, environment: envEvent.environment_id, inspected: inspected.output });
 
-  // 11. Real-Docker read-only /opt/agent-tools volume (#705): mounted read-only in both project computer and isolated
-  //     RunEnvironment, executable by uid 10001:10001, EROFS on write, and untrusted volumes rejected.
+  // 11. Real-Docker read-only /opt/agent-tools volume (#705): fresh Compose initialization order (manager mounts empty
+  //     volume :ro first, then uid 10001:10001 writes .staging and installs tool), mounted read-only in both project
+  //     computer and isolated RunEnvironment, executable by uid 10001:10001, EROFS on write, and untrusted volumes rejected.
   const toolsVolName = `${deployment}_agent-tools`;
   const untrustedVolName = `${deployment}_assistant-homes`;
   const seedDir = join(work, 'tools-seed', 'codex', '0.166.0', 'bin');
   mkdirSync(seedDir, { recursive: true, mode: 0o755 });
   writeFileSync(join(seedDir, 'codex'), '#!/bin/sh\necho "codex-cli 0.166.0 uid=$(id -u):$(id -g)"\n', { mode: 0o755 });
+  sh('docker', ['build', '-q', '-f', 'manager/Dockerfile', '-t', managerImage, '--label', 'department.bot.deployment=' + deployment, '.']);
   sh('docker', ['volume', 'create', '--label', 'department.bot.deployment=' + deployment, '--label', 'com.docker.compose.volume=agent-tools', '--label', 'department.bot.kind=agent-tools', toolsVolName]);
   sh('docker', ['volume', 'create', '--label', 'department.bot.deployment=' + deployment, '--label', 'com.docker.compose.volume=assistant-homes', untrustedVolName]);
-  sh('docker', ['run', '--rm', '--label', 'department.bot.deployment=' + deployment, '-u', '10001:10001', '-v', `${toolsVolName}:/opt/agent-tools`, '-v', `${join(work, 'tools-seed')}:/seed:ro`, image, 'cp', '-r', '/seed/.', '/opt/agent-tools/']);
+  // Fresh-deploy Compose order: manager starts before bot and mounts the empty named volume :ro first.
+  const seededOwner = sh('docker', ['run', '--rm', '--read-only', '--label', 'department.bot.deployment=' + deployment, '-v', `${toolsVolName}:/opt/agent-tools:ro`, managerImage, 'node', '-e', 'const st = require("node:fs").statSync("/opt/agent-tools"); console.log(st.uid + ":" + st.gid);']).trim();
+  assert.equal(seededOwner, '10001:10001', 'manager image seeds empty agent-tools volume as 10001:10001');
+  sh('docker', ['run', '--rm', '--read-only', '--label', 'department.bot.deployment=' + deployment, '-u', '10001:10001', '-v', `${toolsVolName}:/opt/agent-tools`, '-v', `${join(work, 'tools-seed')}:/seed:ro`, image, 'sh', '-ec', 'mkdir /opt/agent-tools/.staging && rmdir /opt/agent-tools/.staging && cp -r /seed/. /opt/agent-tools/']);
 
   activeToolsVolume = toolsVolName;
   await manager.call('POST', `/v1/projects/${repo}/start`, { operation_id: id(), generation: 1 }, 300000);
@@ -271,6 +276,7 @@ ls /var/run/docker.sock 2>&1; touch /opt/runner/x 2>&1; touch /etc/x 2>&1; cat /
   for (const v of own('volume')) sh('docker', ['volume', 'rm', '-f', v]);
   try { projects?.db.close(); } catch {}
   try { sh('docker', ['image', 'rm', '-f', image]); } catch {}
+  try { sh('docker', ['image', 'rm', '-f', managerImage]); } catch {}
   rmSync(work, { recursive: true, force: true });
   console.log(`${evidence.result?.toUpperCase()} ${evidence.checks.length} checks; evidence in .tmp/role-run-docker/evidence-${tag}.json`);
 }
