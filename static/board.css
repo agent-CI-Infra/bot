@@ -87,6 +87,7 @@ body.board-mode .list-panel>.toolbar{display:none}
 .board-zero-counts:empty{display:none}
 .board-scroll>.board-empty{align-self:flex-start;flex:1;margin:0;padding:24px}
 @media(min-width:761px){.board-filter-details>summary{list-style:none;pointer-events:none}}
+@media(max-width:420px){.board-view-label{display:none}}
 @media(max-width:760px){
   body.board-mode main{padding:8px 10px 10px}
   body.board-mode>header{row-gap:2px}
@@ -107,9 +108,11 @@ body.board-mode .list-panel>.toolbar{display:none}
   .board-filter-controls label,.board-filter-controls select{width:100%;max-width:none}
   .board-filter-controls .board-search{max-width:none;min-width:0}
   .board-arrangement{display:grid;grid-template-columns:minmax(0,1fr) 32px auto;gap:6px}
-  .board-arrangement>.board-view-controls{grid-column:1;grid-row:2;flex-wrap:wrap;min-width:0}
-  .board-view-controls .board-view-choice{flex:1 1 130px;min-width:0}
+  .board-arrangement>.board-view-controls{grid-column:1;grid-row:2;flex-wrap:nowrap;min-width:0}
+  .board-view-controls .board-view-choice{flex:1 1 0;min-width:0}
   .board-view-controls .board-view-choice select{width:100%;max-width:none}
+  .board-view-controls .board-save{flex:none;padding:4px 8px}
+  .board-view-controls .board-view-state{flex:none}
   .board-arrangement>.board-grouping{grid-column:1/-1;grid-row:1;flex-direction:column;gap:4px}
   .board-grouping>.board-options-label{line-height:1.4}
   .board-arrangement>.board-menu{grid-column:2;grid-row:2}
