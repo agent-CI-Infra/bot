@@ -83,13 +83,15 @@ function projectUnavailable(err, route) {
   const kind = projectUnavailableKind(err), [title, text] = projectUnavailableCopy[kind];
   const box = consoleState(title, text, { tone: 'error' });
   box.classList.add('project-unavailable'); box.dataset.projectUnavailable = kind;
+  // #715: while the session is expired consoleState already returns the shared 登录已过期 card with 重新登录.
+  if (box.dataset.sessionExpired) return box;
   const actions = element('div', '', 'actions console-state-actions'), back = element('a', '返回项目列表', 'button-link btn-primary');
   back.href = '#/projects';
   if (kind === 'forbidden') {
     const identity = element('a', '查看身份与权限', 'button-link btn-secondary'); identity.href = '#/identity';
     actions.append(back, identity);
   } else if (kind === 'missing') actions.append(back);
-  else if (kind === 'login') actions.append(button('重新登录', () => location.reload(), 'btn-primary'));
+  else if (kind === 'login') actions.append(button('重新登录', () => signInAgain(), 'btn-primary'));
   else actions.append(button('重试', () => renderProject(route).catch(error), 'btn-primary'), Object.assign(back, { className: 'button-link btn-secondary' }));
   const details = element('details', '', 'console-state-details');
   details.append(element('summary', '详细信息'), element('code', err.message));

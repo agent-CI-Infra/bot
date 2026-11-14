@@ -387,3 +387,11 @@ body:not(.console-ready) header .locale-switch { background: #fff; }
     position: relative; z-index: 1; margin-top: var(--space-3);
   }
 }
+
+/* #715: one banner for an expired session, above whatever page is open; the header names the state instead of a role. */
+.session-expired-banner { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap;
+  margin: 0 0 var(--space-3); padding: 10px 14px; border: 1px solid var(--color-warning-border); border-radius: var(--radius-3);
+  background: var(--color-warning-bg); color: var(--color-text); font-weight: 600; }
+.session-expired-banner > span { min-width: 0; overflow-wrap: anywhere; }
+.session-expired .current-user-role, .session-expired .console-account-role { color: var(--color-warning); }
+@media (max-width: 480px) { .session-expired-banner > button { flex: 1 1 100%; } }
