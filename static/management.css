@@ -195,6 +195,15 @@ body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
 }
 @media (max-height: 560px) {
   .management-window-head, :is(.management-page,.management-fullscreen) .management-window-head { padding: 8px 12px; }
+  /* #641: a short viewport keeps the floating panel under the top bar, so its box is shorter than the content used to
+     need; these lines keep the scope row and the composer inside that box instead of overflowing it. */
+  .management-window:not(.management-page):not(.management-fullscreen) .management-window-head { padding: 4px 10px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-scope { padding: 4px 10px 2px; gap: 4px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-input textarea { min-height: 40px; height: 52px; }
+  /* At this height the panel is only a few hundred pixels tall: the scope sentence and the session fold give their room
+     to the conversation and the composer, which are the parts a reader acts on. */
+  .management-window:not(.management-page):not(.management-fullscreen) .management-scope-note { display: none; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-sessions { display: none; }
   .management-window-title p { display: none; }
   .management-input textarea { min-height: 48px; height: 60px; }
   .management-status-bar { padding-top: 3px; padding-bottom: 3px; }
