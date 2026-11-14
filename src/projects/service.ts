@@ -205,7 +205,9 @@ export class ProjectService {
     const tasks = this.store.all(`SELECT id,kind,status,phase,object_number,generation,error_code,updated_at FROM tasks WHERE repository_id=?
       ORDER BY created_at DESC,id DESC LIMIT 20`, id);
     const commands: Json[] = [];
-    for (const row of this.store.all(`SELECT l.task_id,l.content,l.content_ref,l.created_at,t.kind,t.object_number FROM task_logs l JOIN tasks t ON t.id=l.task_id
+    // CROSS JOIN keeps task_logs outermost, walked newest first until 500 rows of this project: with task_logs_task the
+    // planner would otherwise fetch every log of the project's tasks and sort them (hundreds of thousands for a busy one).
+    for (const row of this.store.all(`SELECT l.task_id,l.content,l.content_ref,l.created_at,t.kind,t.object_number FROM task_logs l CROSS JOIN tasks t ON t.id=l.task_id
       WHERE t.repository_id=? ORDER BY l.rowid DESC LIMIT 500`, id)) {
       let entry: Json; try { entry = JSON.parse(row.content); } catch { continue; }
       // Only command logs are read whole: the header of a large one keeps its type and name, not its arguments.

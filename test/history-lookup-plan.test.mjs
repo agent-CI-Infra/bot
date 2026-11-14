@@ -6,6 +6,8 @@ import { runEvents, scopeUsage, toolReceipts } from '../dist/roles/role-run.js';
 import { queries } from '../dist/app/queries.js';
 import { deliveryResult } from '../dist/review/delivery.js';
 import { pruneRejectedArchive, rejectedArchiveState, rejectedAudit } from '../dist/app/delivery-audit.js';
+import { ProjectService } from '../dist/projects/service.js';
+import { readFileSync } from 'node:fs';
 
 // Production: latestRoleCandidate joined task_history on 'task_history:'||h.id, which cannot use the key, so every call
 // scanned the whole table (65 ms at 100k rows). The engine's task guard ran it several times a second per task, and with
@@ -113,4 +115,41 @@ test('the tasks a delivery created are read from a covering index, without visit
   const plan = store.all('EXPLAIN QUERY PLAN ' + sql).map(row => row.detail).join(' | ');
   assert.match(plan, /SEARCH tasks USING COVERING INDEX task_source_delivery \(source_delivery_id=\?\)/, plan);
   assert.doesNotMatch(plan, /TEMP B-TREE/, plan);
+});
+
+// Production: task_logs had no index on task_id, so every read of one task's logs scanned the whole table (1.04M rows,
+// ~0.35 s each). A running task does it on each phase start, snapshot and fault it logs, the task list does it per row
+// for the fault detail, and the log pages per page: about a tenth of the control plane's thread after v0.4.0 started.
+test("one task's logs are read through task_logs_task, never by scanning task_logs", async t => {
+  const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
+  store.db.exec('PRAGMA foreign_keys=OFF');
+  store.run("INSERT INTO repositories(id,full_name,owner_id,account_id) VALUES('repo','o/r','o','a')");
+  store.run("INSERT INTO policies(repository_id) VALUES('repo')");
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,error_code) VALUES('task','repo','review','failed','s','model_unavailable')");
+  const seen = [], all = store.all.bind(store), get = store.get.bind(store);
+  store.all = (sql, ...args) => { seen.push(sql); return all(sql, ...args); };
+  store.get = (sql, ...args) => { seen.push(sql); return get(sql, ...args); };
+  const admin = { id: 'admin', role: 'super_admin' };
+  for (const path of ['/api/tasks?limit=50', '/api/tasks/task', '/api/tasks/task/logs', '/api/tasks/task/logs?before=9', '/api/tasks/task/logs?after=1'])
+    queries(store, admin, new URL('http://local' + path));
+  await new ProjectService(store, { call: async () => { throw new Error('manager_unavailable'); } }).detail('repo').catch(() => {});
+  store.all = all; store.get = get;
+  const plan = sql => all('EXPLAIN QUERY PLAN ' + sql).map(row => row.detail).join(' | ');
+  // The running task's own lookups (phase start, snapshot, tool replay, fault) and restart recovery, as compiled.
+  const literal = file => [...readFileSync(new URL(file, import.meta.url), 'utf8').matchAll(/"(SELECT [^"]*FROM task_logs WHERE task_id=\?[^"]*)"/g)].map(match => match[1]);
+  const engine = [...literal('../dist/agent/engine.js'), ...literal('../dist/roles/recovery.js')];
+  assert.ok(engine.length >= 5, engine.join('\n'));
+  const byTask = [...seen.filter(sql => /FROM task_logs WHERE task_id=/.test(sql)), ...engine];
+  assert.ok(byTask.some(sql => /task_id=tasks\.id/.test(sql)), 'the task list and detail read the fault detail by task');
+  assert.ok(byTask.some(sql => /ORDER BY rowid (ASC|DESC) LIMIT/.test(sql)), 'the log page reads by task');
+  for (const sql of byTask) {
+    assert.match(plan(sql), /SEARCH task_logs USING (COVERING )?INDEX task_logs_task \(task_id=/, `${sql}\n${plan(sql)}`);
+    assert.doesNotMatch(plan(sql), /\bSCAN task_logs\b/, `${sql}\n${plan(sql)}`);
+  }
+  // A computer's recent commands walk the newest logs of all tasks until 500 of this project: with the task index the
+  // planner would instead gather every log of the project's tasks and sort them.
+  const [recent] = seen.filter(sql => /FROM task_logs l\b/.test(sql));
+  assert.ok(recent, 'the computer detail reads its recent commands');
+  assert.match(plan(recent), /^SCAN l\b/, plan(recent));
+  assert.doesNotMatch(plan(recent), /TEMP B-TREE/, plan(recent));
 });
