@@ -17,12 +17,35 @@ import { activateActions } from '../actions/storage.js';
 import { authorize, listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
+// A user created by signing in with GitHub has no local password: the column is NOT NULL, so it carries this sentinel
+// (src/identity/github.ts). Its username is opaque on purpose and is never a local account.
+const EXTERNAL_ONLY_PASSWORD = '!external-only';
 function userAccessView(store: Store, row: Row): Json {
-  const identity = store.get("SELECT display_name,status FROM external_identities WHERE principal_id=? AND provider='github' AND host='github.com' ORDER BY verified_at DESC LIMIT 1", row.id);
-  const scopes = listEffectiveScopes(store, row.id);
-  return { ...publicUser(row), ...(identity && identity.status !== 'revoked' ? { github_login: identity.display_name } : {}),
-    access: { projects: listEffectiveProjectAccess(store, row.id), github_pending: !!row.active && (identity?.status === 'pending_verification' ||
-      scopes.some(g => g.source === 'github_derived' && g.state === 'pending_verification')) } };
+  // One GitHub identity per host and actor; a pending one outranks a revoked one so a re-bind in flight stays visible.
+  const identity = store.get("SELECT display_name,status FROM external_identities WHERE principal_id=? AND provider='github' AND host='github.com' "
+    + "ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'pending_verification' THEN 1 ELSE 2 END, verified_at DESC LIMIT 1", row.id);
+  const scopes = listEffectiveScopes(store, row.id), status = identity ? String(identity.status) : null;
+  // #547: an unbound account is told exactly that. The login it used before is not kept on the page: once the binding is
+  // revoked the name is no longer a way in, and showing it would read as if the account could still use it.
+  const revoked = status === 'revoked';
+  const github = !identity ? null : revoked ? { status } : { login: identity.display_name, status };
+  const binding = !identity ? 'none' : status === 'active' ? 'bound' : String(status);
+  const local = String(row.password_hash ?? EXTERNAL_ONLY_PASSWORD) !== EXTERNAL_ONLY_PASSWORD;
+  // With neither way in left (a revoked GitHub binding and no local password) the username is the OAuth placeholder
+  // `github:<id>:<random>`; it is named after the GitHub id it carries instead, never printed as a person's name.
+  const placeholder = String(row.username).match(/^github:(\d+):/);
+  const neutral = `账号 #${placeholder ? placeholder[1] : String(row.id).slice(0, 8)}`;
+  // github_login stays for the callers that already read it (session header, older console helpers); the new fields carry
+  // the state it could not express.
+  return { ...publicUser(row), ...(github?.login ? { github_login: github.login } : {}),
+    local_login: local, local_account: local ? row.username : null, github, github_binding: binding,
+    // Both ways in, as the server reads them: the password sentinel for local sign-in and a live GitHub identity for OAuth.
+    login_methods: [...(local ? ['local'] : []), ...(github && !revoked ? ['github'] : [])],
+    // What an administrator reads, and what the list sorts on: the GitHub login, else the local name, else the neutral
+    // name. It takes part in the same ordering, so a GitHub-only account no longer sorts under "g" as its placeholder.
+    display_name: github?.login ? String(github.login) : local ? String(row.username) : neutral,
+    access: { projects: listEffectiveProjectAccess(store, row.id), github_pending: status === 'pending_verification' ||
+      scopes.some(g => g.source === 'github_derived' && g.state === 'pending_verification') } };
 }
 interface Grants { repositories?: string[]; organizations?: string[] }
 function grantIds(value: unknown, code: string): string[] {
@@ -126,7 +149,14 @@ export async function management(store: Store, user: Actor, method: string, url:
   const path = url.pathname;
   if (path === '/api/users') {
     superAdmin(user);
-    if (method === 'GET') return { users: store.all('SELECT id,username,role,active FROM users ORDER BY username').map(row => userAccessView(store, row)) };
+    if (method === 'GET') {
+      // Ordered by what the table shows (#547): the placeholder username of a GitHub-only account sorts under "g" and
+      // would put @zoe before every local name starting later in the alphabet.
+      const users = store.all('SELECT id,username,role,active,password_hash FROM users').map(row => userAccessView(store, row));
+      users.sort((left, right) => String(left.display_name).localeCompare(String(right.display_name), 'zh-CN')
+        || String(left.username).localeCompare(String(right.username)));
+      return { users };
+    }
     if (method === 'POST') {
       fields(body, ['username', 'password', 'role', 'repository_ids', 'organization_ids']);
       const username = text(body.username, 100), encoded = await hashPassword(password(body.password));
