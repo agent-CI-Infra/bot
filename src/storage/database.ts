@@ -243,7 +243,8 @@ export class Store {
     gateOnboardingStorage(this);
     taskStorage(this);
     priorityStorage(this);
-    traceStorage(this);
+    // Reopening workers replace trace triggers too; DROP and CREATE must be one writer transaction.
+    this.transaction(() => traceStorage(this));
     memoryStorage(this);
     integrationStorage(this);
     coordinationStorage(this);

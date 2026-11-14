@@ -70,3 +70,26 @@ test('reopening replaces board task triggers atomically against a competing conn
   assert.equal(inspected,1);
   assert.match(reopened.get("SELECT sql FROM sqlite_schema WHERE name='board_tasks_update_input'").sql,/NEW\.input IS NOT OLD\.input/);
 });
+
+for (const trigger of ['trace_history_scope', 'trace_task_tools_insert', 'trace_task_tools_update', 'trace_task_log']) {
+  test(`reopening replaces ${trigger} atomically against a competing connection`, t => {
+    const {path,key}=database(t),initial=new Store(path,key);initial.close();
+    const competitor=new DatabaseSync(path);competitor.exec('PRAGMA busy_timeout=0');t.after(()=>competitor.close());
+    const exec=DatabaseSync.prototype.exec;let inspected=0,opening,reopened;
+    t.after(()=>reopened?reopened.close():opening?.close());
+    t.mock.method(DatabaseSync.prototype,'exec',function(sql){
+      const at=sql.indexOf('CREATE TRIGGER '+trigger+' ');
+      if(this===competitor||at<0)return exec.call(this,sql);
+      opening=this;inspected++;
+      // Pause exactly after DROP: readers retain the old schema and another worker cannot create this trigger.
+      exec.call(this,sql.slice(0,at));
+      assert.equal(competitor.prepare('SELECT count(*) n FROM sqlite_schema WHERE name=?').get(trigger).n,1);
+      assert.throws(()=>competitor.exec('CREATE TRIGGER trace_atomic_probe AFTER INSERT ON settings BEGIN SELECT 1; END'),error=>error.errcode===5);
+      return exec.call(this,sql.slice(at));
+    });
+    reopened=new Store(path,key);
+    assert.equal(inspected,1);
+    assert.ok(reopened.get('SELECT sql FROM sqlite_schema WHERE name=?',trigger).sql.includes('task_history'));
+    assert.deepEqual(reopened.all('PRAGMA foreign_key_check'),[]);
+  });
+}
