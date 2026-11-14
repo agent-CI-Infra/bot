@@ -89,9 +89,18 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 
 `GET /api/costs` 的 `tasks.days` 为按任务 `created_at` 的本地日、仓库与工作类型聚合的行，`tasks.summary` 为日期范围内按工作类型的汇总（按工作类型目录顺序），`tasks.undated` 单独列出授权仓库内无可靠创建日期的历史任务，不进入日期范围内总数或每日分桶。所有任务都统计：`workflow`（沿用旧字段名）是工作类型 id，通用回复任务（包括原自定义工作流的任务）为 `reply`，其他是任务种类（如 `review.issue`、`actions.failures`、`release.observe`）；`name` 是工作类型名称。每行还含 `kind,count,runtime_ms,incomplete_tasks,running_tasks`；整段累计执行耗时计入创建日，不跨日拆分，运行中含当前已观测执行区间，不含排队与等待。缺失计时或未观测到时长的不完整历史计时返回 null，已有部分则仅累计已观测值并标记不完整。仅覆盖控制面账本与任务，不采集外部执行端自行调用或项目内其他服务。
 
-模型创建和带 `version` 的 PATCH 还可提交 `pricing:{currency,input_per_million,output_per_million,cache_per_million}`，单价为每百万 token 的非负数（最多 1000000）。`pricing:null` 清除单价；读模型时返回当前单价，原有模型凭据及共享模型编辑权限不变。每次模型请求保存价格快照，费用为 `((输入-缓存)×输入单价 + 缓存×缓存单价 + 输出×输出单价) / 1000000`。缺少用量或单价时费用为 null；未返回缓存数据且缓存价不同于普通输入价时，也不能完整计价。统计页的费用和 token 只汇总所选币种及尚未定价的请求，币种之间不作换算；另一币种的请求数在 `other_currencies` 里单独列出，所以切换币种不会让请求看起来凭空消失；币种不影响任务统计。
+模型创建和带 `version` 的 PATCH 可提交 `pricing:{currency,input_per_million?,output_per_million?,cache_per_million?}`。手填单价按字段覆盖目录，每百万 token 为 0–1000000 的有限数；`currency` 为 USD 或 CNY。未填写字段继承同币种目录值，不能把 USD 目录值与 CNY 手填值混算。`pricing:null` 清除手填并恢复目录；没有足够价格的请求保持未定价。每次请求使用开始时的价格快照，历史成本不重算。模型响应的 `pricing` 是有效价格，`pricing_override` 是手填值，`pricing_source` 为 manual、mixed、catalog 或 null。
 
-获取模型列表和测试模型的上游结果都在成功响应里返回：`ok` 表示上游是否成功，`status` 是上游的 HTTP 状态码（没有收到响应时为 null）。列表成功时返回 `models_url,total,truncated,models`，按名称排序，最多 200 个 id；测试成功时返回 `chat_url`、`model`（上游答复中的模型名）、`reply`（回复摘录，最多 200 个字符）、`finish_reason` 和 `elapsed_ms`。失败时返回 `error`（`upstream_http_error`、`upstream_timeout`、`upstream_unreachable`、`upstream_redirect`、`upstream_response_invalid`、`upstream_response_too_large`）和简短的 `message`：它只取自上游 JSON 的错误字段（`error.message`，或字符串形式的 `error`、`message`、`detail`、`msg`），重定向时是 `Location`，连接失败时是错误码；其他响应正文一律不回显。两类请求都在 15 秒后超时、不跟随重定向，结果中出现的 Key 先整体替换为 `[REDACTED]`，再截断。模型 URL 只接受 http(s)，不能带用户名、密码、查询串（`?`）或片段（`#`），否则保存、解析、获取列表和测试都返回 400 `invalid_api_url`；这条规则之前保存的这类 URL 也不能获取列表或测试。测试请求的内容是一句不含项目数据的探测，只带 `max_completion_tokens: 32`，不带 `max_tokens`；任务中的模型请求不受影响，仍只带一个输出上限字段，数值 8192。
+获取模型列表和测试模型的上游结果都在成功响应里返回：`ok` 表示上游是否成功，`status` 是上游的 HTTP 状态码（没有收到响应时为 null）。列表成功时返回 `models_url,total,truncated,models`，按名称排序，最多 200 个 id；测试成功时返回 `chat_url`、`model`（上游答复中的模型名）、`reply`（回复摘录，最多 200 个字符）、`finish_reason` 和 `elapsed_ms`。失败时返回 `error`（`upstream_http_error`、`upstream_timeout`、`upstream_unreachable`、`upstream_redirect`、`upstream_response_invalid`、`upstream_response_too_large`）和简短的 `message`：它只取自上游 JSON 的错误字段（`error.message`，或字符串形式的 `error`、`message`、`detail`、`msg`），重定向时是 `Location`，连接失败时是错误码；其他响应正文一律不回显。两类请求都在 15 秒后超时、不跟随重定向，结果中出现的 Key 先整体替换为 `[REDACTED]`，再截断。模型 URL 只接受 http(s)，不能带用户名、密码、查询串（`?`）或片段（`#`），否则保存、解析、获取列表和测试都返回 400 `invalid_api_url`；这条规则之前保存的这类 URL 也不能获取列表或测试。测试请求的内容是一句不含项目数据的探测，只带 `max_completion_tokens: 32`，不带 `max_tokens`；任务中的模型请求仍只带一个输出上限字段，优先用显式角色额度，否则使用所选模型的最大输出；未匹配时为 8192。
+
+
+模型能力与目录：
+
+- `GET /api/models/catalog?q=&offset=0&limit=100` 返回目录状态 `catalog`、规范化条目 `entries`、匹配总数与下一页偏移，limit 为 1–200。状态含来源、最近成功快照时间、最近尝试时间、刷新错误和丢弃/跳过计数。
+- `POST /api/models/catalog/refresh {}` 仅超级管理员可用。控制面启动时及每 6 小时刷新固定的 models.dev 地址；失败保留旧快照。目录校验只接受文本对话模型、合法能力/价格和有限范围数值，非法条目单独丢弃。
+- 模型 POST/PATCH 可带 `catalog:{mode:'auto'|'manual'|'disabled',ref?:'provider/model'}`、`capabilities:{context_window?,max_output_tokens?,reasoning?}`。手动模式必须指定当前目录中的 ref；空能力对象恢复目录/默认。手填能力按字段优先，不改变模型身份 version。上下文为 1–32000000，最大输出为 1–16000000，reasoning 为布尔值。
+- 模型响应含 `capabilities`（有效能力、来源和目录匹配状态）与 `capabilities_override`。自动匹配先按 provider API/官方域名，再按去前缀、忽略大小写、点与横线等价的官方模型名；不唯一时显示候选，等待手动指定。中转使用官方 USD 参考价格，不作 CNY 换算。
+- 从未成功下载或没有匹配时，能力沿用 128000 上下文、8192 最大输出、非推理模型。Pi 使用这些有效能力构建模型配置和上下文预留；显式角色输出额度保持优先。价格统计仍要求实际 token 计数；缺失缓存计数且缓存价不同时保持未知，不按零计价。
 
 
 供应商连接的批量管理沿用模型范围和规范化请求地址，不引入跨项目凭据共享：

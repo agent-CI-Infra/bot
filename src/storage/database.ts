@@ -1,3 +1,4 @@
+import { modelCatalogStorage } from '../models/catalog.js';
 import {childTaskStorage} from '../tasks/children.js';
 import {longExecutionStorage} from '../roles/long-execution.js';
 import {priorityStorage} from '../tasks/priority.js';
@@ -224,6 +225,7 @@ export class Store {
     externalStorage(this);
     boardStorage(this);
     metricsStorage(this);
+    modelCatalogStorage(this);
     // Ref columns on task_tools, model_requests and task_logs; the trace triggers below record them.
     trajectoryStorage(this.db);
     workStorage(this);

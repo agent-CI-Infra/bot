@@ -1,24 +1,37 @@
+import { catalogPricing, normalizeModelName } from '../models/catalog.js';
 import type { Store, Row } from '../storage/database.js';
 import { fail, fields, object, randomId, digest, type Json } from '../core/security.js';
 
 export interface Pricing { currency: 'USD' | 'CNY'; input_per_million: number; output_per_million: number; cache_per_million: number; }
-export function validatePricing(value: unknown): Pricing | null {
+export type PriceOverride=Partial<Pricing>&Pick<Pricing,'currency'>;
+export function validatePricing(value: unknown): PriceOverride | null {
   if (value === null) return null;
   const row=object(value);fields(row,['currency','input_per_million','output_per_million','cache_per_million']);
   if (typeof row.currency!=='string'||!['USD','CNY'].includes(row.currency)) fail(400,'invalid_pricing_currency');
   for (const name of ['input_per_million','output_per_million','cache_per_million'])
-    if (typeof row[name]!=='number'||!Number.isFinite(row[name])||row[name]<0||row[name]>1000000) fail(400,'invalid_token_price');
-  return row as unknown as Pricing;
+    if (row[name]!==undefined&&(typeof row[name]!=='number'||!Number.isFinite(row[name])||row[name]<0||row[name]>1000000)) fail(400,'invalid_token_price');
+  return row as unknown as PriceOverride;
 }
 export function pricingFor(store: Store, modelId: string): Pricing | null {
   const row=store.get('SELECT currency,input_per_million,output_per_million,cache_per_million FROM model_pricing WHERE model_id=?',modelId);
-  return row ? row as Pricing : null;
+  if(row)return row as Pricing;
+  const model=store.get('SELECT * FROM models WHERE id=?',modelId);if(!model)return null;
+  const catalog=catalogPricing(store,model as any),saved=store.get('SELECT pricing FROM model_catalog_overrides WHERE model_id=?',modelId);
+  const override=saved?.pricing?JSON.parse(saved.pricing):{};
+  const base=override.currency&&override.currency!==catalog?.currency?null:catalog;
+  const merged={...base,...override};
+  return ['input_per_million','output_per_million','cache_per_million'].every(k=>typeof merged[k]==='number')&&['USD','CNY'].includes(merged.currency)?merged as Pricing:null;
 }
-export function savePricing(store: Store, modelId: string, pricing: Pricing | null): void {
-  if (!pricing) { store.run('DELETE FROM model_pricing WHERE model_id=?',modelId);return; }
+export function savePricing(store: Store, modelId: string, pricing: PriceOverride | null): void {
+  if (!pricing) { store.run('DELETE FROM model_pricing WHERE model_id=?',modelId);store.run('UPDATE model_catalog_overrides SET pricing=NULL WHERE model_id=?',modelId);return; }
+  if(['input_per_million','output_per_million','cache_per_million'].some(k=>(pricing as any)[k]===undefined)){
+    store.run('DELETE FROM model_pricing WHERE model_id=?',modelId);
+    store.run(`INSERT INTO model_catalog_overrides(model_id,pricing) VALUES(?,?) ON CONFLICT(model_id) DO UPDATE SET pricing=excluded.pricing`,modelId,JSON.stringify(pricing));return;
+  }
+  store.run('UPDATE model_catalog_overrides SET pricing=NULL WHERE model_id=?',modelId);
   store.run(`INSERT INTO model_pricing VALUES(?,?,?,?,?) ON CONFLICT(model_id) DO UPDATE SET currency=excluded.currency,
     input_per_million=excluded.input_per_million,output_per_million=excluded.output_per_million,cache_per_million=excluded.cache_per_million`,
-    modelId,pricing.currency,pricing.input_per_million,pricing.output_per_million,pricing.cache_per_million);
+    modelId,pricing.currency,pricing.input_per_million!,pricing.output_per_million!,pricing.cache_per_million!);
 }
 const count=(value: unknown): number | null => typeof value==='number'&&Number.isSafeInteger(value)&&value>=0?value:null;
 export function normalizeUsage(value: any) {
@@ -131,11 +144,12 @@ export function withTaskMetrics<T extends Row>(store: Store, tasks: T[], now=Dat
   });
 }
 
-/** A CLI's reported model must match a visible configured model before its administrator-supplied price can be used. */
+/** Only visible configured models contribute manual prices; otherwise use an unambiguous official catalog match. */
 export function externalModelPricing(store:Store,task:Row,model:string):Pricing|null {
-  const normalize=(name:string)=>name.replace(/^[^/]+\//,'').replaceAll('.','-').toLowerCase();
   const models=task.repository_id?store.all(`SELECT m.id,m.model_name FROM models m WHERE m.repository_id=? OR m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects p WHERE p.model_id=m.id AND p.repository_id=?)`,task.repository_id,task.repository_id)
     :store.all('SELECT m.id,m.model_name FROM models m JOIN service_roles r ON r.model_id=m.id WHERE r.id=?',task.service_role_id??'');
-  const prices=models.filter(row=>normalize(row.model_name)===normalize(model)).map(row=>pricingFor(store,row.id)).filter((price):price is Pricing=>!!price);
+  const matching=models.filter(row=>normalizeModelName(row.model_name)===normalizeModelName(model));
+  if(!matching.length)return catalogPricing(store,{api_url:'',model_name:model});
+  const prices=matching.map(row=>pricingFor(store,row.id)).filter((price):price is Pricing=>!!price);
   return new Set(prices.map(price=>JSON.stringify(price))).size===1?prices[0]!:null;
 }

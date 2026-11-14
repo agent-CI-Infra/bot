@@ -93,7 +93,7 @@ export class RoleConversations {
       const invocation=id+':'+prefix,token=randomId(),accounting=externalModelRecorder(this.store,task,invocation,driver.id,logicalInstance.id);
       try {
         await guard(); const spec:AgentSpec<string>={store:this.store,task,model:resolved.model,redactor,guard,beforeModel:()=>guard(true),executionSignal:controller.signal,cancelSignal:controller.signal,
-          system,prompt,tools,maxTurns:budget.max_turns??(prefix==='summary'?4:24),maxOutputTokens:budget.max_output_tokens??8192,modelAttempts:1,
+          system,prompt,tools,maxTurns:budget.max_turns??(prefix==='summary'?4:24),maxOutputTokens:budget.max_output_tokens??undefined,modelAttempts:1,
           requestPrefix:prefix+':',finish:{name:'finish',validate:args=>reply(args,prefix==='reply'&&source.allowSilence)},execute,
           onDenied:(name,reason)=>traceEvent(this.store,id,'capability_denied',{name,reason}),
           screen:name=>{

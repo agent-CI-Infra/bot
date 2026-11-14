@@ -7,6 +7,7 @@
  * project/basic.js
  * project/machine.js
  * project/task-models.js
+ * project/model-catalog.js
  * project/model-actions.js
  * project/model-address.js
  * project/provider-editor.js

@@ -132,7 +132,9 @@ test('pricing preserves model contracts, enforces ownership and rejects stale co
   assert.equal(repriced.status,200);assert.equal(repriced.value.model.version,1);
   assert.equal((await member('/api/models/'+own.id,'PATCH',{version:1,model_name:'renamed'})).value.model.version,2);
   assert.equal((await member('/api/models/'+own.id,'PATCH',{version:1,pricing:price})).status,409);
-  for(const invalid of [{...price,input_per_million:-1},{...price,currency:'EUR'},{...price,currency:['USD']},{...price,output_per_million:'10'},{currency:'USD'}])assert.equal((await admin('/api/models/'+model.id,'PATCH',{version:model.version,pricing:invalid})).status,400);
+  for(const invalid of [{...price,input_per_million:-1},{...price,currency:'EUR'},{...price,currency:['USD']},{...price,output_per_million:'10'},{currency:'USD',input_per_million:1000001}])assert.equal((await admin('/api/models/'+model.id,'PATCH',{version:model.version,pricing:invalid})).status,400);
+  assert.equal((await admin('/api/models/'+model.id,'PATCH',{version:1,pricing:{currency:'USD',input_per_million:2}})).status,200);
+  assert.equal((await admin('/api/models/'+model.id)).value.model.pricing,null); // No catalog can supply the omitted rates.
   assert.equal((await admin('/api/models/'+model.id,'PATCH',{version:1,pricing:null})).status,200);assert.equal((await admin('/api/models/'+model.id)).value.model.pricing,null);
   assert.equal(h.store.get("SELECT sum(cost) cost FROM model_requests WHERE task_id='history'").cost,2);
 });

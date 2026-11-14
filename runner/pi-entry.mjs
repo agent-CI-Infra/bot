@@ -20,7 +20,9 @@ const boot=(await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>
 const save=async value=>{value={...value,pid:process.pid,boot};await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
 let steps=0,session,finished,grant=null,requestFailure;
 // reserve: tokens a later request needs beyond raw, such as a compaction summary.
-const modelRequestTooLarge=(raw,reserve=0)=>estimateTokens({role:'user',content:raw,timestamp:Date.now()})+8192+reserve>128000;
+const modelCapabilities=config.model??{context_window:128000,max_output_tokens:8192,reasoning:false};
+const outputReserve=config.output_tokens??modelCapabilities.max_output_tokens;
+const modelRequestTooLarge=(raw,reserve=0)=>estimateTokens({role:'user',content:raw,timestamp:Date.now()})+outputReserve+reserve>modelCapabilities.context_window;
 // Serialize model and tool events in execution order; mask every issued token before it reaches disk.
 const secrets=new Set();let events=Promise.resolve();
 const clean=value=>JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='string'?[...secrets].reduce((text,secret)=>text.replaceAll(secret,'[REDACTED]'),item):item));
@@ -87,7 +89,7 @@ async function proxy(req,res){
     const chunks=[];let bytes=0;for await(const chunk of req){bytes+=chunk.length;if(bytes<=2*1024*1024)chunks.push(chunk);}
     if(bytes>2*1024*1024)return overflow(res,`${bytes} bytes exceed the 2 MiB request limit.`);
     const raw=Buffer.concat(chunks).toString('utf8');
-    if(modelRequestTooLarge(raw))return overflow(res,'the estimated tokens plus the 8192-token output reserve exceed 128000.');
+    if(modelRequestTooLarge(raw))return overflow(res,`the estimated tokens plus the ${outputReserve}-token output reserve exceed ${modelCapabilities.context_window}.`);
     const id=randomBytes(24).toString('hex');await writeFile(dir+'/request.tmp',JSON.stringify({id,body:JSON.parse(raw)}),{mode:0o600});await rename(dir+'/request.tmp',dir+'/request.json');
     const response=await waitModelReply(dir,id);await unlink(dir+'/request.json');await unlink(dir+'/reply-'+id+'.json');
     res.writeHead(response.status,{'Content-Type':response.content_type});res.end(response.body);
@@ -96,7 +98,7 @@ async function proxy(req,res){
 server.listen(0,'127.0.0.1');await once(server,'listening');
 try{
   // This literal is not a provider credential. The local proxy ignores it and cannot reach any provider itself.
-  await writeFile(dir+'/models.json',JSON.stringify({providers:{'department-proxy':{api:'openai-completions',baseUrl:'http://127.0.0.1:'+server.address().port+'/v1',apiKey:'local-proxy',models:[{id:'selected',name:'Project model',contextWindow:128000,maxTokens:8192,reasoning:false,input:['text'],compat:{supportsStore:false,supportsDeveloperRole:false,supportsReasoningEffort:false}}]}}}),{mode:0o600});
+  await writeFile(dir+'/models.json',JSON.stringify({providers:{'department-proxy':{api:'openai-completions',baseUrl:'http://127.0.0.1:'+server.address().port+'/v1',apiKey:'local-proxy',models:[{id:'selected',name:'Project model',contextWindow:modelCapabilities.context_window,maxTokens:modelCapabilities.max_output_tokens,reasoning:modelCapabilities.reasoning,input:['text'],compat:{supportsStore:false,supportsDeveloperRole:false,supportsReasoningEffort:false}}]}}}),{mode:0o600});
   const runtime=await ModelRuntime.create({authPath:dir+'/auth.json',modelsPath:dir+'/models.json',modelsStorePath:dir+'/catalog.json',allowModelNetwork:false});
   // Tools for one agent. cfg holds that agent's trusted capabilities; agent names a sub-agent in the task log; guard
   // checks repository results against that agent's own session.

@@ -92,7 +92,7 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
       }
     }
     const model=roleExecutionModel(store,task,'qa');
-    const {result:verdict}=await runRole({store,task,redactor,guard,model,maxOutputTokens:/^deepseek/i.test(model.model)?16384:8192,system:acceptanceSystem,
+    const {result:verdict}=await runRole({store,task,redactor,guard,model,system:acceptanceSystem,
       prompt:JSON.stringify({project_memory:hasMemory?new ProjectMemory(store).context({...task,active_role:'qa',head_sha:snapshot?.local_sha||task.head_sha}):undefined,contract:record.contract,
         requirements_instruction:acceptanceRequirements(record.contract.completeness),
         scope_differences:record.scope_differences.map(d=>({...d,version_matches_candidate:candidate.artifacts.some(a=>a.version===d.source_version)})),revision:record.revision,project:record.project,candidate:boundedCandidate(candidate),previous_verification_evidence:previousVerificationEvidence(store,task.id,candidate),related_deliveries:related.map(r=>r.description),context_files:[...new Set(contextFiles)],additional_verification:additionalVerification?{...additionalVerification,output:String(additionalVerification.output||'').slice(-8000)}:undefined,previous_acceptance:record.pending||record.acceptance,prior_staged_residuals:store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_staged' AND json_array_length(json_extract(data,'$.residuals'))>0 ORDER BY id DESC LIMIT 1",task.id).map(row=>JSON.parse(row.data)),
