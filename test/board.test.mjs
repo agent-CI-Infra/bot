@@ -62,6 +62,18 @@ test('each workflow retains its stage when another workflow has a newer success 
   }
 
 });
+test('a development task that waits to retry stays 正在开发 instead of falling into 未检视',async t=>{
+  const {h,admin}=await fixture(t);
+  // #681: a retry the bot will resume by itself is still development in progress, exactly as it is still a review in
+  // progress on a review card (#655 left that side alone).
+  boardTask(h.store,'retry-development',60,'development.issue','retry_wait');
+  boardTask(h.store,'retry-review',61,'review.pr','retry_wait');
+  const cards=(await admin('/api/board/cards')).value.cards;
+  const card=(number,category)=>cards.find(c=>c.object_number===number&&c.card_category===category);
+  assert.equal(card(60,'development.issue').bot_stage,'developing');
+  assert.equal(card(60,'development.issue').execution_status,'waiting');
+  assert.equal(card(61,'review.pr').bot_stage,'reviewing');
+});
 test('verified webhooks project draft, closed and comment objects without starting tasks; preserve known metadata',async t=>{
   const {h,admin,a}=await fixture(t);
   const send=(id,payload,event='issues',secret=a.secret)=>h.hook(a.path,secret,id,{repository:{id:101},...payload},{'X-GitHub-Event':event});
