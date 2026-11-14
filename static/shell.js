@@ -230,7 +230,7 @@ function syncConsoleShell() {
   const unstarted = project && !repo ? consoleGaps.get(String(project.id)) : null;
   $('console-context').textContent = project ? (repo ? organization(repo) + ' · ' + shortName(repo)
     : unstarted?.registered === false ? organization(unstarted) + ' · ' + shortName(unstarted) + ' · ' + t('nav.unstarted')
-      : typeof current !== 'undefined' && current?.unavailable && String(current.id) === String(project.id) ? t('nav.project_unavailable') : t('nav.reading_project'))
+      : typeof current !== 'undefined' && current?.unavailable && String(current.id) === String(project.id) ? t(current.unavailable === 'missing' ? 'nav.project_not_found' : 'nav.project_unavailable') : t('nav.reading_project'))
     : tab === 'identity' || tab === 'preferences' ? personalTitle : ({ more: t('nav.more'), inbox: t('nav.inbox'), settings: t('nav.settings') }[tab] || titles[tab] || t('identity.title'));
   // A project can be reachable while some of its features cannot run; the navigation every page shares has to say so.
   // Only the installation snapshot names the gaps, and only a super administrator may read it, so nothing is invented.
