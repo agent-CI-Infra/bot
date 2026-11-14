@@ -27,6 +27,7 @@ import { managerApi } from './work/api.js';
 import { settingsApi } from './app/settings.js';
 import { agentToolsApi } from './app/agent-tools.js';
 import { AgentToolManager, DEFAULT_AGENT_TOOLS_ROOT } from './harness/agent-tools.js';
+import { activeCliVersions } from './roles/role-run.js';
 import { StorageReport } from './app/storage.js';
 import { serviceRolesApi } from './service-roles/api.js';
 import { ProjectRemoval } from './projects/removal.js';
@@ -102,7 +103,10 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   const taskCommands = new TaskCommands(store,{active:id=>!!options.engine?.active.has(id),tick:()=>{ if(options.engine)queueMicrotask(()=>options.engine!.tick()); }});
   const sharedManagement = new ManagementService(store,rules,taskCommands,options.projects?.manager??options.engine?.manager,options.githubUrl);
   const assistants = new AssistantComputerService(store, options.projects?.manager ?? options.engine?.manager, options.assistantHomes);
-  const agentTools = options.agentTools ?? new AgentToolManager({ volumeRoot: process.env.BOT_AGENT_TOOLS_DIR || DEFAULT_AGENT_TOOLS_ROOT });
+  const agentTools = options.agentTools ?? new AgentToolManager({
+    volumeRoot: process.env.BOT_AGENT_TOOLS_DIR || DEFAULT_AGENT_TOOLS_ROOT,
+    protectedVersions: cli => activeCliVersions(store, cli),
+  });
   sharedManagement.assistants = assistants;
   registerKnowledge(sharedManagement,options.githubUrl);
   sharedManagement.register('configuration.pr',new ConfigurationPR(sharedManagement,options.githubUrl));

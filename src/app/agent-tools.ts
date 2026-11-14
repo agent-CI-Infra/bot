@@ -2,6 +2,7 @@ import type { Store } from '../storage/database.js';
 import { superAdmin, type Actor } from './auth.js';
 import { fail, fields, type Json } from '../core/security.js';
 import { TaskError } from '../agent/common.js';
+import { activeCliVersions } from '../roles/role-run.js';
 import {
   AGENT_TOOL_CLIS,
   AgentToolManager,
@@ -75,7 +76,13 @@ export async function agentToolsApi(
     const sha256 = input.sha256 === undefined ? undefined : typeof input.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(input.sha256) ? input.sha256.toLowerCase() : fail(400, 'invalid_agent_tool_sha256');
     const retainCount = input.retain_count === undefined ? agentToolsRetainCount(store) : validateRetainCount(input.retain_count);
     try {
-      const outcome = await tools.install({ cli, version: ver.raw, sha256, retainCount });
+      const outcome = await tools.install({
+        cli,
+        version: ver.raw,
+        sha256,
+        retainCount,
+        protectedVersions: () => activeCliVersions(store, cli),
+      });
       store.audit(user.id, 'agent_tools.installed', `${cli}@${ver.raw}`);
       return {
         installed: outcome.installed as unknown as Json,
@@ -97,7 +104,7 @@ export async function agentToolsApi(
       store.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', RETAIN_COUNT_KEY, String(retainCount));
     }
     try {
-      const outcome = await tools.prune({ cli, retainCount });
+      const outcome = await tools.prune({ cli, retainCount, protectedVersions: c => activeCliVersions(store, c) });
       store.audit(user.id, 'agent_tools.pruned', cli ?? 'all');
       return {
         pruned: outcome.pruned as unknown as Json,

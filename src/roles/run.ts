@@ -12,7 +12,7 @@ import { environmentProfiles } from './catalog.js';
 import { TaskToolGateway,gatewayToolNames,gatewayCapabilities } from './gateway.js';
 import { roleRunProtocol,validateCandidateRef,contentHash,protocolRecovery,type Budget,type CandidateRef,type RunContext,type RunEvent } from './protocol.js';
 import { roleCapacity } from './board.js';
-import { admitRun,allocateLease,appendRunEvent,assertLease,budgetExceeded,buildRunContext,inputCandidate,instanceUsage,issueRunToken,leaseCurrent,planRecovery,recordCheckpoint,revokeRunTokens,runBudget,runEvents,scopeUsage,sourceRef,touchRunToken,verifyRunToken,type EnvironmentFacts } from './role-run.js';
+import { admitRun,allocateLease,appendRunEvent,assertLease,budgetExceeded,buildRunContext,inputCandidate,instanceUsage,issueRunToken,leaseCurrent,planRecovery,recordCheckpoint,recordRunCliVersion,revokeRunTokens,runBudget,runEvents,scopeUsage,sourceRef,touchRunToken,verifyRunToken,type EnvironmentFacts } from './role-run.js';
 import { randomId } from '../core/security.js';
 import { traceEvent,endRun } from '../tasks/trace.js';
 import { roleHarness } from './harness.js';
@@ -277,7 +277,11 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   wrapped.onExternalUsage=usage=>{const b=live.bound;if(!b)return;assertLease(s,b.run_id,b.epoch);traceEvent(s,task.id,'external_model_usage',usage,b.run_id,'harness');budgetGuard();};
   // Public harness events also enter the run's normalized stream; session_bound settles a pending recovery mode.
   wrapped.onHarnessEvent=event=>{const b=live.bound,mapped=harnessEventType[event.type];if(!b||!mapped)return;ledger()?.event(event);
-   if(event.type==='session_bound'&&b.ctx.resume_from_run_id){const mode=protocolRecovery(String(event.recoveryMode))??(['new_session','fresh_evaluation'].includes(String(event.recoveryMode))?'rebuilt_from_task_records':null);if(mode)s.run('UPDATE task_runs SET protocol_recovery=? WHERE id=?',mode,b.run_id);}
+   if(event.type==='session_bound'){
+    const reportedVer=typeof event.version==='string'&&event.version.trim()?event.version.trim():typeof (event.agentInfo as any)?.version==='string'&&String((event.agentInfo as any).version).trim()?String((event.agentInfo as any).version).trim():null;
+    if(reportedVer)recordRunCliVersion(s,b.run_id,reportedVer);
+    if(b.ctx.resume_from_run_id){const mode=protocolRecovery(String(event.recoveryMode))??(['new_session','fresh_evaluation'].includes(String(event.recoveryMode))?'rebuilt_from_task_records':null);if(mode)s.run('UPDATE task_runs SET protocol_recovery=? WHERE id=?',mode,b.run_id);}
+   }
    // A permission the agent was granted is progress; only refused ones are denials.
    appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:mapped[0],category:event.type==='permission'&&event.allowed===true?'progress':mapped[1],data:{harness_event:event.type,...Object.fromEntries(Object.entries(event).filter(([k])=>k!=='type'))}});};
   // Binding a new task_runs row: the scheduler's lease epoch, the RunContext, the recovery plan and a capability token.
@@ -305,6 +309,8 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
     mode=role==='qa'?'rebuilt_from_task_records':recover==='external_session_pending'?null:protocolRecovery(recover)??(recover==='new_session'?'rebuilt_from_task_records':plan.mode);
    }
    s.run('UPDATE task_runs SET run_context=?,resume_from_run_id=?,admission=?,protocol_recovery=?,operation_id=? WHERE id=?',JSON.stringify(ctx),previous??null,JSON.stringify(admission),mode,operationId,runId);
+   const initialCliVersion=wrapped.harnessBinding?.cli_version??(['claude_code','codex'].includes(driver.id)?driver.runtime?.version:undefined);
+   if(initialCliVersion)recordRunCliVersion(s,runId,initialCliVersion);
    if(ctx.task_id===null)stop('role_run_protocol_invalid','waiting_configuration','Task RoleRun requires task scope.');
    const issued=issueRunToken(s,{tenant_id:ctx.tenant_id,project_id:ctx.project_id,task_id:ctx.task_id!,run_id:runId,lease_epoch:lease.epoch,role},[...gatewayCapabilities(snapshot),'events:write','checkpoint:write'],tokenTtl);
    spec.redactor.add(issued.token);

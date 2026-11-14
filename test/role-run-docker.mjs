@@ -30,14 +30,18 @@ const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8',
 const evidence = { tag, deployment, base_image: base, image, repository: repo, checks: [], started_at: new Date().toISOString() };
 const passed = (name, detail = null) => { evidence.checks.push({ name, detail }); console.log('PASS ' + name); };
 // The manager on the host: notes live in a host directory, so no helper container is needed to resolve them.
-class HostDocker extends Docker { async volumeSource(directory) { return directory; } }
+let activeToolsVolume = null;
+class HostDocker extends Docker {
+  async volumeSource(directory) { return directory; }
+  async volumeName(destination) { return destination === '/opt/agent-tools' ? activeToolsVolume : null; }
+}
 const id = () => randomBytes(24).toString('hex');
 let projects, runs, server, store;
 try {
   // 1. Test image: the base project-computer image with this checkout's runner files.
   const context = join(work, 'context'); mkdirSync(join(context, 'runner'), { recursive: true });
   for (const name of readdirSync('runner')) if (name.endsWith('.mjs')) cpSync(join('runner', name), join(context, 'runner', name));
-  writeFileSync(join(context, 'Dockerfile'), `FROM ${base}\nUSER root\nCOPY runner/ /opt/runner/\nRUN for f in /opt/runner/*.mjs; do node --check "$f"; done && chmod -R a-w /opt/runner\nUSER 10001:10001\n`);
+  writeFileSync(join(context, 'Dockerfile'), `FROM ${base}\nUSER root\nCOPY runner/ /opt/runner/\nRUN mkdir -p /opt/agent-tools && chown 10001:10001 /opt/agent-tools && chmod 755 /opt/agent-tools && for f in /opt/runner/*.mjs; do node --check "$f"; done && chmod a-w /opt/runner /opt/runner/*.mjs\nUSER 10001:10001\n`);
   sh('docker', ['build', '-q', '-t', image, '--label', 'department.bot.deployment=' + deployment, context]);
   passed('test image built from ' + base);
 
@@ -160,11 +164,11 @@ ls /var/run/docker.sock 2>&1; touch /opt/runner/x 2>&1; touch /etc/x 2>&1; cat /
   passed('a writer\'s candidate reaches a reviewer as a verified commit copy, unaffected by later writer changes', { commit: produced.local_sha, tree: handoff.tree_hash });
 
   // 9. Limits: processes, memory, disk, output and run time end only the offending run.
-  const fork = await run1('for i in $(seq 1 400); do sleep 30 & done 2>&1 | tail -1; echo done');
+  const fork = await run1('out=$(for i in $(seq 1 400); do sleep 30 & done 2>&1 | tail -1); kill $(jobs -p) 2>/dev/null || true; wait 2>/dev/null || true; printf "%s\\ndone\\n" "$out"');
   assert.match(fork.output, /Resource temporarily unavailable|fork|retry/i);
   const memory = await run1('node -e "const a=[];for(;;)a.push(Buffer.alloc(16<<20,1))"; echo exit=$?');
   assert.match(memory.output, /exit=(137|134)/);
-  const disk = await run1('dd if=/dev/zero of=/workspace/fill bs=1M count=400 2>&1 | grep -E "No space|copied"; rm -f /workspace/fill');
+  const disk = await run1('out=$(dd if=/dev/zero of=/workspace/fill bs=1M count=400 2>&1 || true); rm -f /workspace/fill; printf "%s\\n" "$out" | grep -E "No space|copied"');
   assert.match(disk.output, /No space left/); assert.match(disk.output, /\(\d+ MB, 25[0-6](\.\d+)? MiB\) copied/);
   const output = await run1('yes | head -c 4000000');
   assert.equal(output.truncated, true);
@@ -213,7 +217,38 @@ ls /var/run/docker.sock 2>&1; touch /opt/runner/x 2>&1; touch /etc/x 2>&1; cat /
   assert.equal(store.get("SELECT count(*) n FROM task_history WHERE type='role_run_environment'").n, 1, 'no environment was provisioned for the refused driver');
   passed('RoleRun admission admits a contract adapter only in a verified run container and refuses a built-in driver before provisioning', { run: runRow.id, environment: envEvent.environment_id, inspected: inspected.output });
 
-  // 11. Release and manager restart remove containers; nothing of another run remains.
+  // 11. Real-Docker read-only /opt/agent-tools volume (#705): mounted read-only in both project computer and isolated
+  //     RunEnvironment, executable by uid 10001:10001, EROFS on write, and untrusted volumes rejected.
+  const toolsVolName = `${deployment}_agent-tools`;
+  const untrustedVolName = `${deployment}_assistant-homes`;
+  const seedDir = join(work, 'tools-seed', 'codex', '0.166.0', 'bin');
+  mkdirSync(seedDir, { recursive: true, mode: 0o755 });
+  writeFileSync(join(seedDir, 'codex'), '#!/bin/sh\necho "codex-cli 0.166.0 uid=$(id -u):$(id -g)"\n', { mode: 0o755 });
+  sh('docker', ['volume', 'create', '--label', 'department.bot.deployment=' + deployment, '--label', 'com.docker.compose.volume=agent-tools', '--label', 'department.bot.kind=agent-tools', toolsVolName]);
+  sh('docker', ['volume', 'create', '--label', 'department.bot.deployment=' + deployment, '--label', 'com.docker.compose.volume=assistant-homes', untrustedVolName]);
+  sh('docker', ['run', '--rm', '--label', 'department.bot.deployment=' + deployment, '-u', '10001:10001', '-v', `${toolsVolName}:/opt/agent-tools`, '-v', `${join(work, 'tools-seed')}:/seed:ro`, image, 'cp', '-r', '/seed/.', '/opt/agent-tools/']);
+
+  activeToolsVolume = toolsVolName;
+  await manager.call('POST', `/v1/projects/${repo}/start`, { operation_id: id(), generation: 1 }, 300000);
+  const projTools = await sh1('/opt/agent-tools/codex/0.166.0/bin/codex --version && (touch /opt/agent-tools/write-probe 2>&1 || echo RO_ENFORCED)');
+  assert.match(projTools.output, /codex-cli 0\.166\.0 uid=10001:10001/);
+  assert.match(projTools.output, /Read-only file system[\s\S]*RO_ENFORCED/);
+
+  const runToolsId = id();
+  const envTools = await provisionRunEnvironment(client, { run_id: runToolsId, task_id: 'task-169', lease_epoch: 10, profile: 'observer' });
+  assert.equal(envTools.facts.verified, true);
+  assert.deepEqual(envTools.facts.detail.violations, []);
+  const isoTools = await client.call(runToolsId, { type: 'command', command: '/opt/agent-tools/codex/0.166.0/bin/codex --version && (touch /opt/agent-tools/write-probe 2>&1 || echo RO_ENFORCED)', timeout_ms: 20000 });
+  assert.match(isoTools.output, /codex-cli 0\.166\.0 uid=10001:10001/);
+  assert.match(isoTools.output, /Read-only file system[\s\S]*RO_ENFORCED/);
+  await envTools.release();
+
+  activeToolsVolume = untrustedVolName;
+  await assert.rejects(() => provisionRunEnvironment(client, { run_id: id(), task_id: 'task-169', lease_epoch: 11, profile: 'observer' }), /agent_tools_volume_invalid|manager_error|503/);
+  activeToolsVolume = null;
+  passed('read-only /opt/agent-tools volume is executable by 10001:10001 and EROFS in both project and run containers; untrusted volumes refused');
+
+  // 12. Release and manager restart remove containers; nothing of another run remains.
   for (const env of [env1, env2, envW, env3]) await env.release();
   const leftover = id(); await provisionRunEnvironment(client, { run_id: leftover, task_id: 'task-169', lease_epoch: 9, profile: 'observer' });
   await new Promise(r => server.close(r)); server = null;

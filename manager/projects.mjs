@@ -303,7 +303,18 @@ export class Projects {
   }
   labels(repo, generation, kind) { return { 'department.bot.deployment': this.deployment, 'department.bot.repository': repo,
     'department.bot.generation': String(generation), 'department.bot.kind': kind }; }
-  async agentToolsVolume() { return this.toolsMount ? this.docker.volumeName(this.toolsMount) : null; }
+  async agentToolsVolume() {
+    if (!this.toolsMount) return null;
+    const name = await this.docker.volumeName(this.toolsMount);
+    if (!name) return null;
+    const volume = await this.docker.request('GET', '/volumes/' + encodeURIComponent(name));
+    const labels = volume?.Labels;
+    const trusted = typeof name === 'string' && /^(?:[a-z0-9][a-z0-9._-]*[_-])?agent-tools$/i.test(name) &&
+      labels && typeof labels === 'object' &&
+      (labels['com.docker.compose.volume'] === 'agent-tools' || labels['department.bot.kind'] === 'agent-tools');
+    if (!volume || !trusted) throw new ManagerError('agent_tools_volume_invalid', 503);
+    return name;
+  }
   async inspect(repo, generation, kind) {
     if (!this.db.prepare('SELECT 1 FROM resources WHERE repository_id=? AND generation=?').get(repo, generation)) throw new ManagerError('unregistered_resource');
     const name = this.names(repo, generation)[kind];

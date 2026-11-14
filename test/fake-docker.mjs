@@ -9,8 +9,8 @@ export class FakeDocker {
   async volumeSource(directory) { return directory; }
   // The manager's own mounts: the assistant HOME volume (#457) and the read-only CLI tool volume (#705).
   async volumeName(destination) {
-    if (destination === this.homesMount) return 'fixture-assistant-homes';
-    if (destination === this.toolsMount) return 'fixture-agent-tools';
+    if (destination === this.homesMount) return this.homesVolumeName ?? 'fixture-assistant-homes';
+    if (destination === this.toolsMount) return this.toolsVolumeName ?? 'fixture-agent-tools';
     return null;
   }
   async request(method, path, body) {
@@ -18,11 +18,15 @@ export class FakeDocker {
     if (path === '/info') return this.info || {};
     if (path.startsWith('/system/df')) return this.df || { LayersSize: 0, Images: [], BuildCache: [] };
     if (path.startsWith('/images/')) return this.images.get(decodeURIComponent(path.split('/')[2])) || null;
-    const [kind, named] = path.slice(1).split('/'), name = named?.split('?')[0];
+    const [kind, named] = path.slice(1).split('/'), name = named ? decodeURIComponent(named.split('?')[0]) : undefined;
     if (kind === 'volumes') {
       if (method === 'POST') { this.volumes.set(body.Name, { Labels: body.Labels, Options: body.DriverOpts }); return {}; }
       if (method === 'DELETE') { if (this.failVolume) throw new ManagerError('injected_volume_failure'); this.volumes.delete(name); return {}; }
-      return this.volumes.get(name) || null;
+      if (this.volumes.has(name)) return this.volumes.get(name);
+      if (this.toolsMount && name === (this.toolsVolumeName ?? 'fixture-agent-tools')) {
+        return { Name: name, Labels: this.toolsVolumeLabels ?? { 'com.docker.compose.volume': 'agent-tools', 'department.bot.kind': 'agent-tools' } };
+      }
+      return null;
     }
     if (kind === 'networks') {
       if (method === 'POST') { if (this.failNetwork) throw new ManagerError('injected_network_failure'); this.networks.set(body.Name, { Labels: body.Labels, Internal: body.Internal }); return {}; }

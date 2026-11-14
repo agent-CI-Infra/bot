@@ -9,8 +9,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { Store } from '../dist/storage/database.js';
-import { beginRun } from '../dist/tasks/trace.js';
-import { allocateLease, recordRunCliVersion, roleRunStorage } from '../dist/roles/role-run.js';
+import { beginRun, endRun } from '../dist/tasks/trace.js';
+import { Redactor } from '../dist/agent/common.js';
+import { activeCliVersions, allocateLease, recordRunCliVersion, roleRunStorage } from '../dist/roles/role-run.js';
+import { registerRoleHarness } from '../dist/roles/harness.js';
+import { runRole } from '../dist/roles/run.js';
+import { TaskRecords } from '../dist/tasks/service.js';
 import { roleApi } from '../dist/roles/api.js';
 import { agentToolsApi } from '../dist/app/agent-tools.js';
 import {
@@ -402,6 +406,94 @@ test('records selected CLI version on task_runs and serves super-admin /api/agen
   const rolesView = roleApi(store, projAdmin, 'GET', new URL('http://local/api/tasks/t1/roles'), {});
   assert.equal(rolesView.runs.length, 1);
   assert.equal(rolesView.runs[0].cli_version, '0.166.0');
+  assert.deepEqual(activeCliVersions(store, 'codex'), ['0.166.0']);
+
+  // While run is active on 0.166.0, installing newer versions with retain_count=1 and calling prune MUST retain 0.166.0!
+  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', {
+    cli: 'codex',
+    version: '0.167.0',
+    retain_count: 1,
+  });
+  assert.deepEqual(inspectAgentTools(root, { arch: 'x64' }).clis.codex.compatible_versions, ['0.167.0', '0.166.0']);
+  assert.equal(existsSync(join(root, 'codex', '0.166.0', 'bin', 'codex')), true);
+
+  const prunedWhileRunning = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/prune', {
+    cli: 'codex',
+    retain_count: 1,
+  });
+  assert.deepEqual(prunedWhileRunning.pruned.codex, []);
+  assert.equal(existsSync(join(root, 'codex', '0.166.0', 'bin', 'codex')), true);
+
+  // Installing an out-of-range version (1.0.0) while retain_count=1 compatible versions exist MUST NOT delete 1.0.0 during install!
+  const outOfRangeInstall = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', {
+    cli: 'codex',
+    version: '1.0.0',
+    retain_count: 1,
+  });
+  assert.equal(outOfRangeInstall.compatible, false);
+  assert.equal(existsSync(join(root, 'codex', '1.0.0', 'bin', 'codex')), true);
+  assert.deepEqual(outOfRangeInstall.status.clis.codex.incompatible_versions, ['1.0.0']);
+
+  // Once the active run finishes, pruning with retain_count=1 removes both 0.166.0 and out-of-range 1.0.0, keeping newest compatible 0.167.0.
+  endRun(store, run, 'completed', null);
+  assert.deepEqual(activeCliVersions(store, 'codex'), []);
+  const prunedAfterFinish = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/prune', {
+    cli: 'codex',
+    retain_count: 1,
+  });
+  assert.deepEqual(prunedAfterFinish.pruned.codex.sort(), ['0.166.0', '1.0.0']);
+  assert.deepEqual(prunedAfterFinish.status.clis.codex.compatible_versions, ['0.167.0']);
+  assert.deepEqual(prunedAfterFinish.status.clis.codex.incompatible_versions, []);
+
+  // Production runRole path records cli_version automatically via session_bound / harnessBinding.
+  registerRoleHarness(
+    {
+      id: 'cli-version-probe-705',
+      version: '1',
+      session: 'external_session',
+      events: 'probe_events',
+      kinds: ['writer', 'observer', 'evaluator'],
+      externalModel: true,
+      capabilities: {
+        raw_evidence: 'control_plane_tools',
+        cancel: 'protocol_then_kill',
+        isolation: 'none',
+        version_binding: true,
+        output_validation: true,
+        fresh_context: true,
+        recovery: ['rebuilt_from_task_records'],
+      },
+    },
+    spec => async () => {
+      spec.onHarnessEvent?.({ type: 'session_bound', sessionRef: 's1', recoveryMode: 'new_session', version: '0.167.0' });
+      return spec.finish.validate({ summary: 'done', findings: [], inspected_scope: ['README.md'], unknowns: [] });
+    },
+  );
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('t2','r','task.request','running','probe','{}',1,1)");
+  new TaskRecords(store).contract('t2', { goal: 'probe', scope: ['README.md'], criteria: ['record cli version'], endpoint: 'artifact' });
+  const rolesUrl = new URL('http://local/api/repositories/r/roles');
+  roleApi(store, projAdmin, 'PUT', rolesUrl, {
+    expected_revision: roleApi(store, projAdmin, 'GET', rolesUrl, {}).revision,
+    enabled: true,
+    roles: [{ role_id: 'reviewer', harness_ref: { id: 'cli-version-probe-705' } }],
+  });
+  const finishTool = { type: 'function', function: { name: 'finish', description: 'finish', parameters: { type: 'object', additionalProperties: true } } };
+  await runRole(
+    {
+      store,
+      task: store.get("SELECT * FROM tasks WHERE id='t2'"),
+      redactor: new Redactor(),
+      guard: async () => {},
+      system: 'sys',
+      prompt: '{}',
+      tools: [finishTool],
+      finish: { name: 'finish', validate: v => v },
+      maxTurns: 4,
+    },
+    'reviewer',
+  );
+  const probeRun = store.get("SELECT cli_version FROM task_runs WHERE task_id='t2' AND role='reviewer'");
+  assert.equal(probeRun.cli_version, '0.167.0');
 });
 
 test('project computer recreates once to mount /opt/agent-tools read-only and RunEnvironments enforce read-only /opt/agent-tools isolation', async t => {
@@ -441,27 +533,74 @@ test('project computer recreates once to mount /opt/agent-tools read-only and Ru
   const runId = hex48();
   const described = await runs.create('101', { run_id: runId, task_id: 't1', lease_epoch: 1, profile: 'writer' });
   assert.deepEqual(described.container.mounts, [
-    { type: 'volume', name: 'fixture-agent-tools', source: 'fixture-agent-tools', destination: '/opt/agent-tools', rw: false },
+    {
+      type: 'volume',
+      name: 'fixture-agent-tools',
+      source: 'fixture-agent-tools',
+      destination: '/opt/agent-tools',
+      rw: false,
+      labels: { 'com.docker.compose.volume': 'agent-tools', 'department.bot.kind': 'agent-tools' },
+    },
   ]);
   assert.deepEqual(verifyRunEnvironment(described, { run_id: runId, network: 'none' }), { verified: true, violations: [] });
+
+  // Compose-prefixed agent-tools volume with Compose label passes verification.
+  const composePrefixedGood = {
+    ...described,
+    container: {
+      ...described.container,
+      mounts: [{
+        type: 'volume',
+        name: 'myproject_agent-tools',
+        source: 'myproject_agent-tools',
+        destination: '/opt/agent-tools',
+        rw: false,
+        labels: { 'com.docker.compose.project': 'myproject', 'com.docker.compose.volume': 'agent-tools' },
+      }],
+    },
+  };
+  assert.deepEqual(verifyRunEnvironment(composePrefixedGood, { run_id: runId, network: 'none' }), { verified: true, violations: [] });
 
   // Writable /opt/agent-tools mount is refused!
   const writableTools = {
     ...described,
     container: {
       ...described.container,
-      mounts: [{ type: 'volume', name: 'fixture-agent-tools', source: 'fixture-agent-tools', destination: '/opt/agent-tools', rw: true }],
+      mounts: [{
+        type: 'volume',
+        name: 'fixture-agent-tools',
+        source: 'fixture-agent-tools',
+        destination: '/opt/agent-tools',
+        rw: true,
+        labels: { 'com.docker.compose.volume': 'agent-tools', 'department.bot.kind': 'agent-tools' },
+      }],
     },
   };
   assert.deepEqual(verifyRunEnvironment(writableTools, { run_id: runId, network: 'none' }).violations, ['external_mount']);
 
-  // Project notes or workspace volume disguised at /opt/agent-tools is refused!
-  const disguisedNotes = {
-    ...described,
-    container: {
-      ...described.container,
-      mounts: [{ type: 'volume', name: 'dbot-fixture-101-notes', source: 'dbot-fixture-101-notes', destination: '/opt/agent-tools', rw: false }],
-    },
-  };
-  assert.deepEqual(verifyRunEnvironment(disguisedNotes, { run_id: runId, network: 'none' }).violations, ['external_mount']);
+  // Every other deployment/project volume (including Compose underscore-prefixed ones and unlabeled agent-tools) is refused by both verifier and manager!
+  for (const badMount of [
+    { name: 'dbot-fixture-101-notes', labels: { 'department.bot.kind': 'notes' } },
+    { name: 'dbot-fixture-101-g1-work', labels: { 'department.bot.kind': 'volume' } },
+    { name: 'myproject_assistant-homes', labels: { 'com.docker.compose.volume': 'assistant-homes' } },
+    { name: 'myproject_bot-data', labels: { 'com.docker.compose.volume': 'bot-data' } },
+    { name: 'myproject_bot-keys', labels: { 'com.docker.compose.volume': 'bot-keys' } },
+    { name: 'myproject_internal-keys', labels: { 'com.docker.compose.volume': 'internal-keys' } },
+    { name: 'myproject_manager-data', labels: { 'com.docker.compose.volume': 'manager-data' } },
+    { name: 'myproject_tunnel-keys', labels: { 'com.docker.compose.volume': 'tunnel-keys' } },
+    { name: 'myproject_agent-tools', labels: {} },
+  ]) {
+    const candidate = {
+      ...described,
+      container: {
+        ...described.container,
+        mounts: [{ type: 'volume', name: badMount.name, source: badMount.name, destination: '/opt/agent-tools', rw: false, labels: badMount.labels }],
+      },
+    };
+    assert.deepEqual(verifyRunEnvironment(candidate, { run_id: runId, network: 'none' }).violations, ['external_mount'], `verifier must reject ${badMount.name}`);
+
+    docker.toolsVolumeName = badMount.name;
+    docker.toolsVolumeLabels = badMount.labels;
+    await assert.rejects(() => projects.agentToolsVolume(), /agent_tools_volume_invalid/, `manager must reject ${badMount.name}`);
+  }
 });

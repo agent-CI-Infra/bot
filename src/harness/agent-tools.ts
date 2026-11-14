@@ -597,6 +597,7 @@ export interface AgentToolManagerOptions {
   sources?: Partial<TrustedToolSources>;
   fetcher?: typeof fetch;
   timeoutMs?: number;
+  protectedVersions?: (cli: AgentToolCli) => Iterable<string>;
 }
 
 export class AgentToolManager {
@@ -607,6 +608,7 @@ export class AgentToolManager {
   private readonly sources: TrustedToolSources;
   private readonly fetcher: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly protectedVersions?: (cli: AgentToolCli) => Iterable<string>;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(options: AgentToolManagerOptions = {}) {
@@ -617,6 +619,7 @@ export class AgentToolManager {
     this.sources = { ...DEFAULT_TRUSTED_SOURCES, ...(options.sources ?? {}) };
     this.fetcher = options.fetcher ?? fetch;
     this.timeoutMs = options.timeoutMs ?? 180_000;
+    this.protectedVersions = options.protectedVersions;
   }
 
   private serialized<T>(fn: () => Promise<T>): Promise<T> {
@@ -821,7 +824,7 @@ export class AgentToolManager {
     if (chosenNativePkg) {
       const nativeVer = optionalDeps[chosenNativePkg]!;
       if (!parseSemver(nativeVer)) throw new TaskError('agent_tool_download_failed', 'failed', 'invalid_native_dependency_version');
-      const encodedName = chosenNativePkg.replace('/', '%2f');
+      const encodedName = chosenNativePkg.replaceAll('/', '%2f');
       const nativeMeta = await this.fetchJson(`${npmBase}/${encodedName}/${nativeVer}`, [npmBase]);
       const nativeTarballUrl = String(nativeMeta?.dist?.tarball || '');
       if (!nativeTarballUrl.startsWith(`${npmBase}/${chosenNativePkg}/-/`) && !nativeTarballUrl.startsWith(`${npmBase}/@anthropic-ai/`)) {
@@ -963,7 +966,7 @@ export class AgentToolManager {
     return selectCompatibleCliVersion(this.volumeRoot, cli, { containerRoot: this.containerRoot, arch: this.explicitArch });
   }
 
-  install(input: { cli: AgentToolCli; version: string; sha256?: string; retainCount?: number }): Promise<{
+  install(input: { cli: AgentToolCli; version: string; sha256?: string; retainCount?: number; protectedVersions?: Iterable<string> | (() => Iterable<string>) }): Promise<{
     installed: AgentToolManifest;
     compatible: boolean;
     pruned: string[];
@@ -985,7 +988,9 @@ export class AgentToolManager {
       const installed = input.cli === 'claude_code'
         ? await this.installClaudeCode(rootReal, parsed.raw, arch, input.sha256?.toLowerCase())
         : await this.installCodex(rootReal, parsed.raw, arch, input.sha256?.toLowerCase());
-      const pruned = input.retainCount !== undefined ? this.pruneLocked(rootReal, arch, input.cli, input.retainCount) : [];
+      const dynamicProtected = typeof input.protectedVersions === 'function' ? input.protectedVersions() : (input.protectedVersions ?? []);
+      const protectedSet = new Set<string>([installed.version, ...dynamicProtected]);
+      const pruned = input.retainCount !== undefined ? this.pruneLocked(rootReal, arch, input.cli, input.retainCount, protectedSet) : [];
       return {
         installed,
         compatible: satisfiesCliRange(input.cli, parsed.raw),
@@ -995,7 +1000,7 @@ export class AgentToolManager {
     });
   }
 
-  prune(options: { cli?: AgentToolCli; retainCount?: number } = {}): Promise<{ pruned: Record<AgentToolCli, string[]>; status: AgentToolsVolumeStatus }> {
+  prune(options: { cli?: AgentToolCli; retainCount?: number; protectedVersions?: Partial<Record<AgentToolCli, Iterable<string>>> | Iterable<string> | ((cli: AgentToolCli) => Iterable<string>) } = {}): Promise<{ pruned: Record<AgentToolCli, string[]>; status: AgentToolsVolumeStatus }> {
     return this.serialized(async () => {
       const retainCount = options.retainCount ?? DEFAULT_CLI_RETAIN_COUNT;
       if (!Number.isSafeInteger(retainCount) || retainCount < CLI_RETAIN_BOUNDS[0] || retainCount > CLI_RETAIN_BOUNDS[1]) {
@@ -1008,15 +1013,22 @@ export class AgentToolManager {
       const rootReal = this.requireVolumeRoot();
       const targets = options.cli ? [options.cli] : [...AGENT_TOOL_CLIS];
       const pruned: Record<AgentToolCli, string[]> = { claude_code: [], codex: [] };
+      const isFn = typeof options.protectedVersions === 'function';
+      const isIterable = !isFn && options.protectedVersions && typeof (options.protectedVersions as any)[Symbol.iterator] === 'function';
       for (const cli of targets) {
         if (!AGENT_TOOL_CLIS.includes(cli)) throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'unsupported_cli');
-        pruned[cli] = this.pruneLocked(rootReal, arch, cli, retainCount);
+        const extra = isFn
+          ? (options.protectedVersions as (cli: AgentToolCli) => Iterable<string>)(cli)
+          : isIterable
+            ? (options.protectedVersions as Iterable<string>)
+            : (options.protectedVersions as Partial<Record<AgentToolCli, Iterable<string>>> | undefined)?.[cli];
+        pruned[cli] = this.pruneLocked(rootReal, arch, cli, retainCount, extra);
       }
       return { pruned, status: this.status() };
     });
   }
 
-  private pruneLocked(rootReal: string, arch: AgentToolArch, cli: AgentToolCli, retainCount: number): string[] {
+  private pruneLocked(rootReal: string, arch: AgentToolArch, cli: AgentToolCli, retainCount: number, extraProtected?: Iterable<string>): string[] {
     if (!Number.isSafeInteger(retainCount) || retainCount < CLI_RETAIN_BOUNDS[0] || retainCount > CLI_RETAIN_BOUNDS[1]) {
       throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'invalid_retain_count');
     }
@@ -1039,6 +1051,13 @@ export class AgentToolManager {
     for (const v of incompatible) {
       if (keepSet.size >= retainCount) break;
       keepSet.add(v);
+    }
+    // Never remove versions currently bound to active running task_runs or explicitly protected (e.g. just installed).
+    for (const v of this.protectedVersions?.(cli) ?? []) {
+      if (typeof v === 'string' && v.trim()) keepSet.add(v.trim());
+    }
+    for (const v of extraProtected ?? []) {
+      if (typeof v === 'string' && v.trim()) keepSet.add(v.trim());
     }
 
     const removed: string[] = [];

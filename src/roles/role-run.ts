@@ -115,6 +115,14 @@ export function recordRunCliVersion(s: Store, runId: string, cliVersion: string)
   s.run('UPDATE task_runs SET cli_version=? WHERE id=?', cliVersion.trim(), runId);
 }
 
+/** Returns CLI versions currently bound to active running task_runs so tool pruning never removes an in-use binary (#705). */
+export function activeCliVersions(s: Store, cli?: string): string[] {
+  const rows = cli
+    ? s.all("SELECT DISTINCT cli_version FROM task_runs WHERE status='running' AND harness=? AND cli_version IS NOT NULL", cli)
+    : s.all("SELECT DISTINCT cli_version FROM task_runs WHERE status='running' AND cli_version IS NOT NULL");
+  return rows.map(r => String(r.cli_version)).filter(Boolean);
+}
+
 // ---------------------------------------------------------------- normalized events
 /**
  * Appends one event to a run's stream. The control plane numbers its own events; an adapter that numbers its own sends

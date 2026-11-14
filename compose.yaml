@@ -140,6 +140,8 @@ services:
     restart: "no"
 volumes:
   agent-tools:
+    labels:
+      department.bot.kind: agent-tools
   assistant-homes:
   bot-data:
   bot-keys:

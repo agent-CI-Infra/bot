@@ -91,10 +91,15 @@ export class RunEnvironments {
   /** Inspected facts, not a verdict: the control plane decides whether they satisfy its policy. */
   async describe(row) {
     const container = await this.owned(row), host = container?.HostConfig ?? {}, config = container?.Config ?? {};
+    const mounts = container ? await Promise.all((container.Mounts ?? []).map(async m => {
+      const vol = m.Type === 'volume' && m.Name ? await this.docker.request('GET', '/volumes/' + encodeURIComponent(m.Name)).catch(() => null) : null;
+      return { type: m.Type, name: m.Name ?? null, source: m.Source ?? m.Name ?? null, destination: m.Destination, rw: !!m.RW,
+        ...(m.Subpath ? { subpath: m.Subpath } : {}), ...(vol?.Labels ? { labels: vol.Labels } : {}) };
+    })) : [];
     return { run_id: row.run_id, task_id: row.task_id, lease_epoch: row.lease_epoch, profile: row.profile, state: row.state, deadline: row.deadline, limits: JSON.parse(row.limits), image: row.image,
       container: container ? { name: this.names(row.repository_id, row.run_id).container, running: !!container.State?.Running, user: config.User ?? null, readonly_rootfs: host.ReadonlyRootfs === true, privileged: host.Privileged === true,
         cap_drop: host.CapDrop ?? [], cap_add: host.CapAdd ?? [], security_opt: host.SecurityOpt ?? [], network_mode: host.NetworkMode ?? null, networks: Object.keys(container.NetworkSettings?.Networks ?? {}),
-        mounts: (container.Mounts ?? []).map(m => ({ type: m.Type, name: m.Name ?? null, source: m.Source ?? m.Name ?? null, destination: m.Destination, rw: !!m.RW })), binds: host.Binds ?? [], tmpfs: host.Tmpfs ?? {},
+        mounts, binds: host.Binds ?? [], tmpfs: host.Tmpfs ?? {},
         memory: host.Memory ?? 0, memory_swap: host.MemorySwap ?? 0, nano_cpus: host.NanoCpus ?? 0, pids_limit: host.PidsLimit ?? 0, ipc_mode: host.IpcMode ?? null, pid_mode: host.PidMode ?? '', userns_mode: host.UsernsMode ?? '',
         env_names: (config.Env ?? []).map(e => e.slice(0, e.indexOf('='))) } : null };
   }

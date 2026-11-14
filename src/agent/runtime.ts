@@ -50,7 +50,7 @@ export interface AgentSpec<T> {
   store: Store;
   /** Trusted preparation and run binding for external protocol drivers; never supplied by model output. */
   harnessPreparation?: unknown;
-  harnessBinding?: { model_revision: string; harness_revision: string };
+  harnessBinding?: { model_revision: string; harness_revision: string; cli_version?: string };
   runContext?: () => import('../roles/protocol.js').RunContext | undefined;
   /** Control-plane snapshot of the active workspace. Never populated from a CLI report. */
   candidateSnapshot?: () => Promise<{ tree_sha: string; local_sha: string } | null>;
