@@ -9,7 +9,10 @@ async function renderProject(route) {
     history.replaceState(null, '', `#/projects/${route.id}/roles`);
   }
   const token = ++renderToken, page = $('project-page'); clearTimeout(projectTimer);
-  if (current?.id !== route.id || current.globalSettings) { current = { id: route.id }; page.replaceChildren(element('p', '正在加载…', 'muted')); }
+  if (current?.id !== route.id || current.globalSettings) { current = { id: route.id }; page.replaceChildren(projectLoadingState(route.section)); }
+  // #697: another page of the same project shows that page's loading state at once. Keeping the previous page until
+  // loadProject() answers left the address, the 当前页面 picker and the body naming three different pages.
+  else if (current.repository && route.section !== current.section) { page.replaceChildren(projectHeader(route.section), projectLoadingBody(route.section)); if (typeof syncConsoleShell === 'function') syncConsoleShell(); }
   if (legacyFocus) current.focusAnchor = legacyFocus;
   try { await loadProject(route.id,route.section); } catch (err) {
     if (token === renderToken) { if ([401,403].includes(err.status)) { if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles(); if (current?.id === route.id) current.rolesDraft = null; }
@@ -130,12 +133,12 @@ function projectEnvironmentState() {
   const node=known?state(observed.state):badge(unknown,'warning');
   node.dataset.projectEnvironmentState='';return node;
 }
-function projectHeader() {
+function projectHeader(section = current.section) {
   const { repository, policy } = current, head = element('div', '', 'project-head'), title = element('div', '', 'title-group'), actions = element('div', '', 'actions');
   const trail = element('div', '', 'project-trail');
   const back = element('a', '← 全部项目', 'back-link'); back.href = '#/projects';
   trail.append(back);
-  if (current.section !== 'menu') {
+  if (section !== 'menu') {
     const toHub = element('a', '项目入口', 'back-link');
     toHub.href = `#/projects/${current.id}/menu`;
     toHub.dataset.testid = 'project-hub-link';
@@ -147,7 +150,7 @@ function projectHeader() {
   chat.dataset.testid = 'project-open-chat';
   chat.addEventListener('click', event => { event.preventDefault(); void openManagementChat(current.id).catch(error); });
   actions.append(chat, link(`https://github.com/${repository.full_name}`, '在 GitHub 打开', 'button-link'));
-  if (current.section === 'basic') actions.append(button('刷新项目设置', () => reloadProject().catch(error)));
+  if (section === 'basic') actions.append(button('刷新项目设置', () => reloadProject().catch(error)));
   head.append(trail, title, actions); return head;
 }
 function projectCrumb(section) {
@@ -198,6 +201,19 @@ function projectHubNav() {
   here.setAttribute('aria-current', 'page');
   nav.append(here);
   return nav;
+}
+const projectSectionCaption = section => projectSections.find(([key]) => key === section)?.[1] || null;
+// #697: the loading state names the page being opened, so the reader sees the click took effect.
+function projectLoadingState(section) {
+  const caption = section === 'menu' ? '项目入口' : projectSectionCaption(section);
+  return consoleState(caption ? `正在打开「${caption}」` : '正在加载项目', '正在读取这个项目的最新信息。', { tone: 'loading' });
+}
+// The breadcrumb already names the new page, so the 当前页面 picker can follow it before the data arrives.
+function projectLoadingBody(section) {
+  const body = element('div', '', 'project-body'), content = element('div', '', 'project-content');
+  const known = section === 'menu' || !!projectSectionCaption(section);
+  body.append(section === 'menu' ? projectHubNav() : projectCrumb(known ? section : null));
+  content.append(projectLoadingState(section)); body.append(content); return body;
 }
 function projectBody(section) {
   const body = element('div', '', 'project-body'), content = element('div', '', 'project-content');
