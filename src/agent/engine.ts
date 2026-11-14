@@ -26,6 +26,7 @@ import { TaskRecords } from '../tasks/service.js';
 import { evaluateDelivery } from '../tasks/acceptance.js';
 import { type Store, type Row } from '../storage/database.js';
 import { blobValue, insertTaskLog, logContent, storedInput } from '../storage/payloads.js';
+import { diskFull } from '../storage/disk.js';
 import { type Manager } from '../projects/service.js';
 import { randomId, fields, fail, HttpError, type Json } from '../core/security.js';
 import { type Actor, scope, repository } from '../app/auth.js';
@@ -279,6 +280,9 @@ export class TaskEngine {
         environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
         if(!environment){environment=await this.manager.call('PUT','/v1/projects/'+task.repository_id);this.granted.delete(task.repository_id);await this.share(task.repository_id);}
         if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`准备工作区时项目电脑尚未就绪，当前状态=${environment.state}。`);
+        // A task does not start writing its workspace, mirror and trajectories onto a disk that is all but full (#671).
+        const disk=this.store.disk?.check();
+        if(disk?.full)stop('disk_full','waiting_environment',`控制面数据盘只剩 ${Math.floor(disk.free_bytes/2**20)} MiB（低于 ${Math.floor(disk.floor_bytes/2**20)} MiB），任务等有空间后再准备工作区。`);
       }
       if(requestedTask(task)){await runRequest(this.store,this.manager,task,redactor,guard,log,this.githubUrl,this.gitCache);return;}
       // The writes this task may ask for decide the platform tools; a task that may open a PR needs contents write.
@@ -789,7 +793,8 @@ export class TaskEngine {
         log({type:'runtime_fault',message,...(where?{where}:{})});console.error(`[engine] task ${id} runtime fault in ${task.phase}: ${message}${where?'\n  '+where.replace(/\n/g,'\n  '):''}`);
       }
       await this.release(workspace,task);
-      const failure=error instanceof TaskError?error:new TaskError('task_runtime_failure',String((error as Error)?.message).includes('manager')?'waiting_environment':'failed',`任务在 ${task.phase} 阶段发生运行异常：${redactor.text(String((error as Error)?.message||'未知错误')).replace(/\s+/g,' ').slice(0,300)}`);
+      // A write that failed because the disk is full waits for space (#671) instead of counting as a runtime fault.
+      const failure=error instanceof TaskError?error:diskFull(error)?new TaskError('disk_full','waiting_environment',`任务在 ${task.phase} 阶段写入失败：数据盘空间不足（${redactor.text(String((error as Error)?.message||'')).replace(/\s+/g,' ').slice(0,200)}）。`):new TaskError('task_runtime_failure',String((error as Error)?.message).includes('manager')?'waiting_environment':'failed',`任务在 ${task.phase} 阶段发生运行异常：${redactor.text(String((error as Error)?.message||'未知错误')).replace(/\s+/g,' ').slice(0,300)}`);
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id);
       // A GitHub rate limit is waited out until its window resets (the task resumes then, a few seconds apart from others
       // waiting for the same window); it does not use up the five automatic retries.
@@ -830,7 +835,7 @@ export class TaskEngine {
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status)&&!['cancelled','superseded'].includes(state)&&
         state!=='waiting_coordination'&&state!=='needs_help'&&!requestedTask(task)&&failure.code!=='role_capacity'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||
         // An operation left over from an interrupted run conflicts with the same key again; a new attempt has new keys.
-        ['execution_interrupted','tool_operation_conflict'].includes(failure.code)&&task.phase!=='publish')){
+        ['execution_interrupted','tool_operation_conflict','operation_result_expired'].includes(failure.code)&&task.phase!=='publish')){
         if(replies(task.kind)&&!task.publication_started)this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,review_update_cursor:0,publication_started:0,attempt:task.attempt+1});

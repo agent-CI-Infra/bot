@@ -19,7 +19,9 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'workspace_write_failed','workspace_snapshot_mismatch','conversation_workspace_unavailable','candidate_unavailable','candidate_blob_unavailable',
     'run_candidate_export_failed','run_candidate_import_failed','run_candidate_mismatch',
     'claude_not_configured','claude_configuration_invalid','claude_restricted_gateway_required','claude_platform_unsupported','claude_binary_unavailable','claude_state_directory_invalid','claude_version_unsupported',
-    'claude_protocol_incompatible','claude_gateway_scope_unverified','claude_gateway_protocol_invalid','claude_timeout','claude_stream_interrupted','claude_stream_truncated','claude_process_exit','claude_result_missing','claude_capability_mismatch'] },
+    'claude_protocol_incompatible','claude_gateway_scope_unverified','claude_gateway_protocol_invalid','claude_timeout','claude_stream_interrupted','claude_stream_truncated','claude_process_exit','claude_result_missing','claude_capability_mismatch',
+    // #671: the data disk of the control plane or the manager is full; a repeated call whose stored result was removed.
+    'disk_full','operation_result_expired'] },
   repository: { label:'仓库内容或规则', codes:['repository_has_no_commit','credential_in_repository','unsafe_repository_path','repository_path_conflict',
     'unsupported_blob_encoding','unsafe_bot_rule','pull_request_file_limit','agent_context_too_large','github_pagination_limit',
     // The repository's .bot/ rule files and .agents/skills/ are the repository's to fix.
@@ -94,7 +96,7 @@ const automatic = new Set(['queued','retry_wait','waiting_coordination','waiting
 // A wait the engine ends by itself once its condition is gone, in a state that otherwise waits for a person.
 const resumedWaits = new Set(['github_installation_access_revoked']);
 const environmentFailures = new Set(['execution_interrupted','workspace_init_failed','workspace_write_failed',
-  'workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable']);
+  'workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable','operation_result_expired']);
 // waiting_environment covers both unmet conditions and failed attempts. Only the latter consume the retry burst;
 // configuration/PR-head waits and manager availability checks keep polling on their own schedule.
 // Waits the control plane ends by itself once the outside condition clears: they are not failed attempts, so they do not
@@ -208,6 +210,8 @@ const codeActions: Record<string,string> = {
   candidate_changed:'检视期间固定候选已变化，旧结论不能认证新内容；新的委派会针对当前候选重新执行。',
   harness_version_mismatch:'项目电脑里的 Pi 版本与角色配置固定的版本不同：升级或回退项目电脑镜像，或按新版本重新保存角色配置。',
   pi_runtime_unavailable:'项目电脑的 runner 太旧，不支持 Pi 运行时查询。同步升级控制面和项目电脑镜像后会自动继续。',
+  disk_full:'控制面或 manager 的数据盘剩余空间不足，任务停在等待环境，不会写坏数据。请管理员在全局设置的「存储」一节查看占用并清理磁盘；有了空间后任务自动继续，无需点「重试」。',
+  operation_result_expired:'这次调用在 manager 里保存的结果已过保留期被删除，无法确认原结果；任务会用新的尝试重新开始，不会采用不确定的结果。',
 };
 const causeActions: Record<FailureCause,(state:string)=>string> = {
   external: state => automatic.has(state) ? '不是配置问题，bot 会自动重试，一般无需处理。'

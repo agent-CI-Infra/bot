@@ -39,24 +39,36 @@ const settingsCards = {
     }); section.append(form); return [section];
   },
   // Storage (#436): what each project keeps in trajectory files, records and blobs, read from counters kept when files
-  // close and a background snapshot; platform administrators also see the databases, the disk and the migration.
+  // close and a background snapshot; platform administrators also see the databases, the disk and the migration, the
+  // removal of the manager's copies and an alert for a disk below its reserve (#671).
   async storage() {
     const view = await api('/api/storage'), size = value => Number.isFinite(value) ? bytes(value) : '未知', count = value => Number.isFinite(value) ? value.toLocaleString('zh-CN') : '未知';
+    const expiry = state => !state ? '读不到' : `保留 ${state.window_days} 天；` + (state.last_pass ? `最近一次 ${new Date(state.last_pass.finished_at).toLocaleString('zh-CN')} 删除 ${count(state.last_pass.files)} 个文件（${size(state.last_pass.bytes)}）` : '尚未运行')
+      + (state.last_error ? `；最近一个错误：${state.last_error}` : '');
     const cards = [], intro = card('存储');
     intro.append(note(`轨迹文件按运行保存模型请求、工具调用和大日志的正文，数据库只留状态和定位。数字来自文件关闭时累加的计数，每 5 分钟在后台刷新一次；最近刷新：${view.refreshed_at ? new Date(view.refreshed_at).toLocaleString('zh-CN') : '尚未刷新'}。`));
     cards.push(intro);
+    // A data disk below its reserve (#671): background writes pause, and tasks wait once the disk is all but full.
+    if (view.alerts?.length) {
+      const alert = card('磁盘空间告警'); alert.setAttribute('role', 'alert');
+      for (const item of view.alerts) alert.append(element('p', `${item.where === 'manager' ? 'manager' : '控制面'}所在磁盘只剩 ${size(item.free_bytes)}（共 ${size(item.total_bytes)}），低于保留空间 ${size(item.reserve_bytes)}：后台迁移已暂停；剩余空间再少时任务会停在「等待环境」（disk_full），有空间后自动继续。请清理磁盘。`, 'view-error'));
+      cards.push(alert);
+    }
     if (view.totals) {
       const totals = card('数据库与磁盘'), side = value => value ? `${size(value.bytes)}，空闲页 ${count(value.free_pages)}（${size(value.free_bytes)}）` : '读不到';
       totals.append(facts([['控制面数据库 control.sqlite', side(view.totals.control?.database)], ['manager 账本 manager.sqlite', side(view.totals.manager?.database)],
         ['控制面所在磁盘剩余', view.totals.control?.disk ? `${size(view.totals.control.disk.free_bytes)} / ${size(view.totals.control.disk.total_bytes)}` : '读不到'],
-        ['manager 所在磁盘剩余', view.totals.manager?.disk ? `${size(view.totals.manager.disk.free_bytes)} / ${size(view.totals.manager.disk.total_bytes)}` : '读不到']]));
+        ['manager 所在磁盘剩余', view.totals.manager?.disk ? `${size(view.totals.manager.disk.free_bytes)} / ${size(view.totals.manager.disk.total_bytes)}` : '读不到'],
+        ['manager 重复正文清理', expiry(view.totals.manager?.expiry)]]));
       totals.append(note('清空正文后数据库文件不会自己变小，空出的页会留给新数据复用；要回收磁盘需要在维护窗口做 VACUUM。'));
+      totals.append(note('manager 的轨迹文件只在同一操作重复调用时用来重放结果，控制面另存了同样的请求和结果。关闭超过保留天数、且其中没有仍在运行的调用的文件会在后台删除；之后重复这些调用会得到明确的「结果已过期」，不会重新执行或返回别的结果。'));
       cards.push(totals);
       const migration = card('历史数据迁移'), table = costTable(['位置', '表', '已迁移', '跳过', '失败', '已搬出', '待检查（估计）', '完成时间']);
       for (const [where, state] of [['控制面', view.totals.control?.migration], ['manager', view.totals.manager?.migration]]) {
         for (const [name, phase] of Object.entries(state?.phases ?? {})) {
           const row = document.createElement('tr');
-          for (const text of [where, name, count(phase.migrated), count(phase.skipped), count(phase.failed), size(phase.bytes), count(state.remaining?.[name]), phase.finished_at ? new Date(phase.finished_at).toLocaleString('zh-CN') : '进行中'])
+          for (const text of [where, name, count(phase.migrated), count(phase.skipped), count(phase.failed), size(phase.bytes), count(state.remaining?.[name]),
+            phase.finished_at ? new Date(phase.finished_at).toLocaleString('zh-CN') : state.paused ? '磁盘空间不足，已暂停' : '进行中'])
             row.append(element('td', text));
           table.body.append(row);
         }
@@ -71,7 +83,8 @@ const settingsCards = {
     for (const project of view.projects) {
       const row = document.createElement('tr'), record = (...types) => { const value = types.reduce((sum, type) => ({ count: sum.count + (project.records[type]?.count ?? 0), bytes: sum.bytes + (project.records[type]?.bytes ?? 0) }), { count: 0, bytes: 0 }); return `${count(value.count)} 条 · ${size(value.bytes)}`; };
       for (const text of [project.name || project.repository_id, `${count(project.files.count)} 个 · ${size(project.files.bytes)}`, record('model_request', 'model_response'), record('tool_call', 'tool_result'), record('log', 'event'),
-        `${count(project.blobs.count)} 个 · ${size(project.blobs.bytes)}`, project.manager ? `${count(project.manager.files.count + project.manager.open.count)} 个 · ${size(project.manager.files.bytes + project.manager.open.bytes)}` : '—', project.open.count ? `${count(project.open.count)} 个 · ${size(project.open.bytes)}` : '—'])
+        `${count(project.blobs.count)} 个 · ${size(project.blobs.bytes)}`, project.manager ? `${count(project.manager.files.count + project.manager.open.count)} 个 · ${size(project.manager.files.bytes + project.manager.open.bytes)}`
+          + (project.manager.expired?.count ? `（已删除 ${count(project.manager.expired.count)} 个 · ${size(project.manager.expired.bytes)}）` : '') : '—', project.open.count ? `${count(project.open.count)} 个 · ${size(project.open.bytes)}` : '—'])
         row.append(element('td', text));
       table.body.append(row);
     }

@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { ManagerError } from './docker.mjs';
 import { logFailure } from './projects.mjs';
+import { diskFull } from './disk.mjs';
 
 // Listen during recovery so callers can distinguish startup from an unreachable manager. Project APIs stay fenced
 // until every saved project has stopped uncertain work and been recovered according to its desired state.
@@ -98,7 +99,9 @@ export function createManagerServer({ projects, token, runs = null, assistants =
     } catch (error) {
       // A refusal is answered with its code; an unexpected error or a Docker failure is also logged with the request.
       if (!(error instanceof ManagerError) || error.status >= 500 && error.message !== 'manager_not_ready') logFailure(`${req.method} ${new URL(req.url, 'http://manager').pathname}`, error);
-      res.statusCode = error instanceof ManagerError ? error.status : 503; res.end(JSON.stringify({ error: error instanceof ManagerError ? error.message : 'manager_unavailable' }));
+      // A full data disk is a stable code (#671), so a task waits for space instead of failing on a random write error.
+      const known = error instanceof ManagerError ? error : diskFull(error) ? new ManagerError('disk_full', 507) : null;
+      res.statusCode = known ? known.status : 503; res.end(JSON.stringify({ error: known ? known.message : 'manager_unavailable' }));
     }
   });
   server.requestTimeout = 10000; server.headersTimeout = 5000;

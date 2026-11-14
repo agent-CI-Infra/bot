@@ -12,6 +12,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Trajectories, trajectoryStorage } from './trajectories.js';
+import { DiskGuard } from './disk.js';
 import { SecretBox, randomId } from '../core/security.js';
 import { externalStorage } from '../external/storage.js';
 import { boardStorage } from '../board/storage.js';
@@ -55,6 +56,8 @@ export class Store {
   readonly secrets: SecretBox;
   // Bodies of agent work (model requests, tool calls, large logs) in per-run JSONL files next to the database.
   readonly trajectories: Trajectories;
+  // Free space of the disk the database is on (#671); null for an in-memory store.
+  readonly disk: DiskGuard | null;
   private readonly authorizationGuard = new AsyncLocalStorage<() => void>();
   private transactionDepth = 0;
   private transactionStatements = 0;
@@ -66,6 +69,7 @@ export class Store {
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.secrets = new SecretBox(key);
     this.trajectories = new Trajectories(this.db, path === ':memory:' ? null : join(dirname(path), 'trajectories'));
+    this.disk = path === ':memory:' ? null : new DiskGuard(dirname(path));
     this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=${walSizeLimit};`);
     // A new schema needs one durable commit, not a disk sync for each CREATE/ALTER. Existing upgrades can toggle
     // foreign_keys while rebuilding tables, so retain their individual transaction boundaries.

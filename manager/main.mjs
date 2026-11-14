@@ -24,8 +24,8 @@ for (const signal of ['SIGINT','SIGTERM']) process.once(signal, () => {
 });
 await recovered;
 // Background work once the manager is ready: close trajectory files a stopped process left open, then move the bodies of
-// ledger rows written before #436 into files, slice by slice.
-if (!stopping) void projects.trajectories.seal().catch(error => console.error('[manager] sealing trajectory files failed:', error)).then(() => { if (!stopping) projects.migration.start(); });
+// ledger rows written before #436 into files, slice by slice, and remove the files no call replays any more (#671).
+if (!stopping) void projects.trajectories.seal().catch(error => console.error('[manager] sealing trajectory files failed:', error)).then(() => { if (!stopping) { projects.migration.start(); projects.expiry.start(); } });
 if (!stopping) timer = setInterval(async () => { if (checking) return; checking = true; try { await projects.check(); await runs.reap(); } finally { checking = false; } }, 5000);
 // Assistant computers keep their own timer: their idle timeouts never wait behind a slow project check.
 if (!stopping) assistantTimer = setInterval(async () => { if (checkingAssistants) return; checkingAssistants = true; try { await assistants.check(); } catch (error) { console.error('[manager] assistant computer check failed:', error); } finally { checkingAssistants = false; } }, 5000);
