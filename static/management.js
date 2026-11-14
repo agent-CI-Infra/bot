@@ -146,10 +146,11 @@ function fitManagementWindow(chat) {
   const header = document.querySelector('body > header')?.getBoundingClientRect().height || 0;
   const bar = document.querySelector('.console-mobile-nav');
   const barHeight = bar && getComputedStyle(bar).display !== 'none' ? bar.getBoundingClientRect().height : 0;
-  // A very short viewport has no room to sit under the header and still show the composer; there the panel keeps its
-  // minimum usable height instead of shrinking to a box that hides the field and the send button.
+  // A short viewport keeps the panel under the header and above the bar even when that leaves little height: at
+  // 250% zoom (768×432 CSS) the panel used to reach 24px and sit 40px under the 64px top bar. The max-height media query
+  // already compresses the composer there, so a short box stays usable, while a box over the top bar is not.
   const room = innerHeight - header - barHeight - margin * 2;
-  const maxWidth = Math.max(1, innerWidth - margin * 2), maxHeight = Math.max(1, Math.min(innerHeight - margin * 2, Math.max(room, 460)));
+  const maxWidth = Math.max(1, innerWidth - margin * 2), maxHeight = Math.max(1, room);
   const width = Math.max(Math.min(360, maxWidth), Math.min(chat.size.width, maxWidth)), height = Math.max(Math.min(460, maxHeight), Math.min(chat.size.height, maxHeight));
   chat.window.style.width = Math.round(width) + 'px'; chat.window.style.height = Math.round(height) + 'px';
 }

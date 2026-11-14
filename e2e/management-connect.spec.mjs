@@ -56,7 +56,7 @@ test('#641 连接请求一直没有返回时 10 秒内进入失败态，「重�
   }
 });
 
-test('#641 390 / 510 / 768 / 1024 / 1440 下面板四边都在视口内且不遮顶栏与「退出登录」', async ({ page }) => {
+test('#641 长视口与短视口（含 768×432 的 250% 缩放）下面板四边都在视口内且不遮顶栏与「退出登录」', async ({ page }) => {
   test.setTimeout(120000);
   const f = await managementFixture();
   try {
@@ -79,7 +79,7 @@ test('#641 390 / 510 / 768 / 1024 / 1440 下面板四边都在视口内且不遮
       return { viewport: { width: innerWidth, height: innerHeight }, win, header, logout, account,
         hitsHeader: overlap(win, header), hitsLogout: overlap(win, logout), hitsAccount: overlap(win, account) };
     });
-    for (const [width, height] of [[1440, 900], [1024, 900], [768, 900], [510, 844], [390, 844]]) {
+    for (const [width, height] of [[1440, 900], [1024, 900], [768, 900], [510, 844], [390, 844], [768, 432], [510, 410], [390, 500]]) {
       await page.setViewportSize({ width, height });
       // The panel follows a viewport change the way a reader resizing a window would see it.
       await page.waitForFunction(() => document.querySelector('#management-chat')?.getBoundingClientRect().width > 0);
