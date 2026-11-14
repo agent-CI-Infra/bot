@@ -453,12 +453,15 @@ test('the project list marks reduced permissions, refreshes stale ones once, and
   const actions = line => line.querySelectorAll('button').map(b => b.textContent);
   await page.run('render()');
   const [first, removed, third, actionsRow] = page.$('rows').querySelectorAll('.row');
-  // Every gap is an icon button; amber when it stops a feature that is on, blue when only unused features are affected.
-  assert.deepEqual([permission(first).textContent, permission(first).hidden, permission(first).tagName, permission(first).children[0].tagName], ['权限不足', false, 'BUTTON', 'SVG']);
+  // #544: a grant that was never read, or whose reading is stale, says 未检查 instead of drawing an empty cell or a
+  // possibly outdated gap; the background check below replaces it with what is really missing.
+  assert.deepEqual([permission(first).textContent, permission(first).hidden, permission(first).tagName], ['未检查', false, 'SPAN']);
   assert.ok(permission(first).classList.contains('status-info'));
-  assert.match(permission(first).title, /^Actions 需要「Read and write」，现在「Read-only」（影响发版本、Actions 失败分析）。点击查看处理方法。$/);
-  assert.equal(permission(removed).hidden, true); assert.equal(permission(removed).children.length, 0);
+  // #544: a row whose grant was never read says 未检查 too, instead of leaving the cell blank.
+  assert.deepEqual([permission(removed).textContent, permission(removed).hidden], ['未检查', false]);
+  // A known and fresh gap is an icon button that opens the fix-it dialog; amber when it stops a feature that is on.
   assert.deepEqual([permission(third).textContent, permission(third).hidden], ['事件未订阅', false]); assert.ok(permission(third).classList.contains('status-warning'));
+  assert.equal(permission(third).tagName, 'BUTTON'); assert.equal(permission(third).children[0].tagName, 'SVG');
   assert.match(permission(third).title, /未订阅事件 Issue comment（影响检视、开发）/);
   // Actions failure analysis is off here, and its missing event is still reported.
   assert.deepEqual([permission(actionsRow).textContent, permission(actionsRow).hidden], ['事件未订阅', false]); assert.ok(permission(actionsRow).classList.contains('status-info'));
