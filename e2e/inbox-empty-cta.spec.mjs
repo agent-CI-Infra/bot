@@ -31,7 +31,13 @@ test('待处理为空时给出查看看板和新建任务的下一步（#690）'
     await page.locator('.console-inbox-filters select').selectOption('101');
     await expect(page).toHaveURL(/#\/inbox\/101$/);
     await expect(empty.getByRole('heading', { name: '当前范围没有待处理任务', exact: true })).toBeVisible();
-    await expect(page.locator('.console-inbox-next').getByRole('link', { name: '新建任务', exact: true })).toHaveAttribute('href', '#/new-task/101');
+    const newTask = page.locator('.console-inbox-next').getByRole('link', { name: '新建任务', exact: true });
+    await expect(newTask).toHaveAttribute('href', '#/new-task/101');
+    await page.screenshot({ path: '.tmp/inbox-empty-690/empty-101-1440.png' });
+    await newTask.click();
+    await expect(page).toHaveURL(/#\/new-task\/101$/);
+    await expect(page.getByLabel('任务项目', { exact: true })).toHaveValue('101');
+    await expect(page.getByRole('button', { name: '提交任务', exact: true })).toBeEnabled();
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
