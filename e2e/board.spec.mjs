@@ -178,3 +178,61 @@ test('卡片只在记录到的状态能确定时写下一步，窄屏不横向�
     await screenshot(page,'mobile-next-step');
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });
+
+test('首次进入看板在数据返回前显示加载提示，而不是空白面板（#689）', async ({ page }) => {
+  const {h,password}=await fixture();
+  const loading = page.locator('#board-panel [data-testid=console-state-loading]');
+  const holdBoard = async () => {
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    await page.unroute('**/api/board').catch(() => {});
+    await page.route('**/api/board', async route => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === '/api/board' && route.request().method() === 'GET') await held;
+      await route.continue();
+    });
+    return () => release();
+  };
+  try {
+    mkdirSync('.tmp/board-loading-689', { recursive: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    const releaseFirst = await holdBoard();
+    await page.goto(h.admin + '/#/board');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(loading.getByRole('heading', { name: '正在加载看板', exact: true })).toBeVisible();
+    await expect(loading).toContainText('正在读取视图与当前范围的工作。');
+    await expect(page.locator('#board-columns')).toHaveCount(0);
+    await page.screenshot({ path: '.tmp/board-loading-689/loading-390.png' });
+    releaseFirst();
+    await expect(page.locator('#board-columns')).toBeVisible();
+    await expect(loading).toHaveCount(0);
+
+    // Reload keeps the session but starts a fresh boardState, so desktop also sees a first-load.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const releaseSecond = await holdBoard();
+    await page.reload();
+    await expect(loading.getByRole('heading', { name: '正在加载看板', exact: true })).toBeVisible();
+    await expect(page.locator('#board-columns')).toHaveCount(0);
+    await page.screenshot({ path: '.tmp/board-loading-689/loading-1440.png' });
+    releaseSecond();
+    await expect(page.locator('#board-columns')).toBeVisible();
+    await expect(loading).toHaveCount(0);
+
+    // A refresh that still has a board must keep it on screen instead of flashing blank.
+    // Don't await renderBoard: it waits on the held /api/board GET.
+    const releaseRefresh = await holdBoard();
+    const refreshStarted = page.waitForRequest(req => {
+      try { return new URL(req.url()).pathname === '/api/board' && req.method() === 'GET'; }
+      catch { return false; }
+    });
+    await page.evaluate(() => { void renderBoard(++renderVersion); });
+    await refreshStarted;
+    await expect(page.locator('#board-columns')).toBeVisible();
+    await expect(loading).toHaveCount(0);
+    await page.screenshot({ path: '.tmp/board-loading-689/refresh-keeps-board-1440.png' });
+    releaseRefresh();
+    await expect(page.locator('#board-columns')).toBeVisible();
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});
