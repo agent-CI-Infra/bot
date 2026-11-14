@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-for(const directory of ['manager','runner','tunnel','webhook','static','test/fixtures','scripts','public-board','public-board/scripts','public-board/scripts/lib','public-board/single-repo/static']){
+for(const directory of ['manager','runner','tunnel','webhook','static','test/fixtures','scripts','public-board','public-board/scripts','public-board/scripts/lib','public-board/single-repo/static','bot-acceptance','bot-acceptance/lib']){
   for(const name of readdirSync(directory))if(/\.(?:mjs|js)$/.test(name))execFileSync(process.execPath,['--check',`${directory}/${name}`],{stdio:'inherit'});
 }
 // The Pi harness pins the SDK version the project computer image installs; the two must not drift apart.
