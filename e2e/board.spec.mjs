@@ -15,7 +15,7 @@ async function login(page,url,password,username='administrator'){
   await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy','true');
 }
 const work=(page,key,category)=>page.locator(`[data-card-key="${key}"][data-card-category="${category}"]`);
-const choose=(page,label,value)=>['仓库','工作类型','执行状态','对象类型','按…分列'].includes(label)
+const choose=(page,label,value)=>['执行状态','对象类型'].includes(label)
   ?page.getByRole('group',{name:label,exact:true}).locator('button[data-value="'+value+'"]').click()
   :page.getByLabel(label,{exact:true}).selectOption(value);
 async function more(page){await page.getByRole('button',{name:'更多视图操作',exact:true}).click();}
@@ -32,10 +32,10 @@ test('每类工作的卡片在所有维度保留状态、徽章和任务目标�
   try{
     await page.setViewportSize({width:1600,height:900});await login(page,h.admin,password);
     await expect(page.getByRole('group',{name:'对象类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','');
-    await expect(page.locator('.board-filter-controls select')).toHaveCount(0);
+    await expect(page.locator('.board-filter-controls select')).toHaveCount(2);
     await expect(work(page,'101/pr/2','review.pr')).toBeVisible();await expect(work(page,'101/issue/3','review.issue')).toBeVisible();
     await expect(work(page,'101/pr/2','review.pr')).toContainText('PR #2');
-    await expect(page.getByRole('group',{name:'工作类型',exact:true}).getByRole('button')).toHaveText(['全部工作类型','检视 Issue','检视 PR','开发 Issue','跟进 bot PR','通用回复','通用任务','发版本']);
+    await expect(page.getByLabel('工作类型',{exact:true}).locator('option')).toHaveText(['全部工作类型','检视 Issue','检视 PR','开发 Issue','跟进 bot PR','通用回复','通用任务','发版本']);
     await expect(work(page,'101/issue/1',docs.id)).toContainText('通用回复 已完成');
     for(const group of ['execution_status','category','repository']){
       await choose(page,'按…分列',group);
@@ -80,24 +80,24 @@ test('旧地址只转换一次，保存视图恢复旧的工作类别、对象�
   boardTask(h.store,'follow-up',2,'development.pr','completed');
   try{
     await page.setViewportSize({width:1600,height:900});await login(page,h.admin,password);
-    await page.goto(h.admin+'/#/reviews');await expect(page).toHaveURL(/#\/board$/);await expect(page.getByRole('group',{name:'工作类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','review');
-    await more(page);await choose(page,'视图',saved.id);await expect(page.getByRole('group',{name:'工作类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','development');
+    await page.goto(h.admin+'/#/reviews');await expect(page).toHaveURL(/#\/board$/);await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue('review');
+    await choose(page,'视图',saved.id);await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue('development');
     await expect(work(page,'101/pr/2','development.pr')).toContainText('跟进 bot PR 已完成');
     // A view saved before the board listed work types keeps its family filter, offered while it is selected.
-    await expect(page.getByRole('group',{name:'工作类型',exact:true}).locator('button[aria-pressed=true]')).toHaveText('开发与跟进（Issue 与 PR）');
+    await expect(page.getByLabel('工作类型',{exact:true}).locator('option:checked')).toHaveText('开发与跟进（Issue 与 PR）');
     await page.getByRole('button',{name:'折叠 跟进 bot PR',exact:true}).click();
     await more(page);await page.getByRole('button',{name:'另存视图',exact:true}).click();await page.getByLabel('视图名称',{exact:true}).fill('My follow-ups');await page.getByRole('button',{name:'创建视图',exact:true}).click();
-    await expect(page.getByRole('group',{name:'工作类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','development');await expect(page.getByRole('group',{name:'对象类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','pr');
+    await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue('development');await expect(page.getByRole('group',{name:'对象类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','pr');
     const own=h.store.get("SELECT id FROM board_views WHERE name='My follow-ups'").id;
-    await choose(page,'对象类型','issue');await more(page);await choose(page,'视图',own);
-    await expect(page.getByRole('group',{name:'对象类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','pr');await expect(page.getByRole('group',{name:'按…分列',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','category');
+    await choose(page,'对象类型','issue');await choose(page,'视图',own);
+    await expect(page.getByRole('group',{name:'对象类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','pr');await expect(page.getByLabel('按…分列',{exact:true})).toHaveValue('category');
     await expect(page.locator('[data-column-id="development.pr"]')).toHaveClass(/board-collapsed/);
     await page.locator('#tabs').getByRole('button',{name:'项目',exact:true}).click();await page.goBack();
-    await expect(page.getByRole('group',{name:'工作类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','development');
+    await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue('development');
     await page.getByRole('button',{name:'展开 跟进 bot PR',exact:true}).click();
-    await choose(page,'对象类型','');await more(page);await page.getByRole('button',{name:'保存视图',exact:true}).click();
-    await choose(page,'对象类型','issue');await more(page);await choose(page,'视图',own);await expect(page.getByRole('group',{name:'对象类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','');
-    await page.goto(h.admin+'/#/developments');await expect(page).toHaveURL(/#\/board$/);await expect(page.getByRole('group',{name:'工作类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','development');
+    await choose(page,'对象类型','');await page.getByRole('button',{name:'保存视图',exact:true}).click();
+    await choose(page,'对象类型','issue');await choose(page,'视图',own);await expect(page.getByRole('group',{name:'对象类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','');
+    await page.goto(h.admin+'/#/developments');await expect(page).toHaveURL(/#\/board$/);await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue('development');
     await screenshot(page,'saved-view');
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });
@@ -126,7 +126,7 @@ test('390宽用分组下拉和纵向列表直接访问发版本，筛选结果�
     await screenshot(page,'mobile-options-open');
     await page.getByLabel('搜索编号或标题',{exact:true}).fill('no-matching-release');await expect(page.locator('.board-card')).toHaveCount(0);
     await expect(page.locator('.board-mobile-selected .board-empty')).toHaveText('当前筛选和分组下没有条目');
-    await page.locator('.board-filter-details>summary').click();await expect(page.getByRole('group',{name:'按…分列',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','category');await screenshot(page,'mobile-empty');await noPageScroll(page);
+    await page.locator('.board-filter-details>summary').click();await expect(page.getByLabel('按…分列',{exact:true})).toHaveValue('category');await screenshot(page,'mobile-empty');await noPageScroll(page);
     await page.getByRole('button',{name:'移除筛选 搜索：no-matching-release',exact:true}).click();await expect(page.locator('.board-card:visible')).not.toHaveCount(0);
     await screenshot(page,'mobile-filtered-release');
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
@@ -137,18 +137,18 @@ test('自定义字段保留对象值与折叠列，成员视图和卡片不泄�
   try{
     await login(page,h.admin,password);await more(page);await page.getByRole('button',{name:'新建自定义字段',exact:true}).click();
     await page.getByLabel('字段名称',{exact:true}).fill('Priority');await page.getByLabel('第一列名称',{exact:true}).fill('High');await page.getByRole('button',{name:'创建字段和视图',exact:true}).click();
-    await expect(page.locator('#board-form')).toHaveCount(0);await expect(page.getByRole('group',{name:'按…分列',exact:true}).locator('button[aria-pressed=true]')).not.toHaveAttribute('data-value','bot_stage');
-    const custom=await page.getByRole('group',{name:'按…分列',exact:true}).locator('button[aria-pressed=true]').getAttribute('data-value'),option=h.store.get("SELECT id FROM board_options WHERE name='High'").id;
+    await expect(page.locator('#board-form')).toHaveCount(0);await expect(page.getByLabel('按…分列',{exact:true})).not.toHaveValue('bot_stage');
+    const custom=await page.getByLabel('按…分列',{exact:true}).inputValue(),option=h.store.get("SELECT id FROM board_options WHERE name='High'").id;
     const card=work(page,'101/issue/3','review.issue');await card.getByLabel('Priority',{exact:true}).selectOption(option);
     await expect(page.locator('[data-column-id="'+option+'"] .board-card')).toHaveCount(2);
-    await page.getByRole('button',{name:'折叠 High',exact:true}).click();await more(page);await page.getByRole('button',{name:'保存视图',exact:true}).click();
+    await page.getByRole('button',{name:'折叠 High',exact:true}).click();await page.getByRole('button',{name:'保存视图',exact:true}).click();
     await page.getByRole('button',{name:'刷新',exact:true}).click();await expect(page.locator('[data-column-id="'+option+'"]')).toHaveClass(/board-collapsed/);
     const memberPassword=testPassword();await admin('/api/users','POST',{username:'board-member',password:memberPassword,repository_ids:['101']});
     const context=await browser.newContext(),member=await context.newPage();
     try{
       await login(member,h.admin,memberPassword,'board-member');await expect(member.locator('[data-card-key^="202/"]')).toHaveCount(0);
-      await expect(member.locator('#board-panel')).not.toContainText('v9.9.9');await expect(member.getByRole('group',{name:'仓库',exact:true}).getByRole('button')).toHaveText(['全部仓库','fixture/project-101']);
-      await expect(member.getByRole('group',{name:'按…分列',exact:true}).getByRole('button')).toHaveCount(4);await more(member);await expect(member.getByLabel('视图',{exact:true}).locator('option')).toHaveCount(1);
+      await expect(member.locator('#board-panel')).not.toContainText('v9.9.9');await expect(member.getByLabel('仓库',{exact:true}).locator('option')).toHaveText(['全部仓库','fixture/project-101']);
+      await expect(member.getByLabel('按…分列',{exact:true}).locator('option')).toHaveCount(4);await expect(member.getByLabel('视图',{exact:true}).locator('option')).toHaveCount(1);
     }finally{await context.close();}
     expect(custom).not.toBe('bot_stage');
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}

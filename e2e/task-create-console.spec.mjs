@@ -27,7 +27,7 @@ test('the mobile board keeps a compact new-task entry and carries the current pr
     await page.evaluate(() => { location.hash = '#/board'; });
     await expect(page.locator('#board-columns')).toBeVisible();
     await page.locator('.board-filter-details > summary').click();
-    await page.getByRole('group', { name: '仓库', exact: true }).locator('button[data-value="101"]').click();
+    await page.getByLabel('仓库', { exact: true }).selectOption('101');
     await page.locator('.board-filter-details > summary').click();
     const entry = page.getByRole('link', { name: '新建任务', exact: true });
     await expect(entry).toHaveAttribute('href', '#/new-task/101'); await expect(entry).toBeVisible();

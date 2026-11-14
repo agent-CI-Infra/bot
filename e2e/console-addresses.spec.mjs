@@ -22,8 +22,8 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
       if (name === '外部执行端') await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('外部执行端');
     }
     for (const [address, category] of [['#/reviews', 'review'], ['#/developments', 'development']]) {
-      await page.goto(h.admin + '/' + address); await expect(current()).toHaveText('看板'); await expect(page.getByRole('group',{name:'工作类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value',category);
-      await expect(page).toHaveURL(/#\/board$/); await page.reload(); await expect(current()).toHaveText('看板'); await expect(page.getByRole('group',{name:'工作类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','');
+      await page.goto(h.admin + '/' + address); await expect(current()).toHaveText('看板'); await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue(category);
+      await expect(page).toHaveURL(/#\/board$/); await page.reload(); await expect(current()).toHaveText('看板'); await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue('');
     }
     // Global settings: one category at a time, each with its own address; a reload keeps it.
     await tab('全局设置').click(); await expect(page).toHaveURL(/#\/settings$/);
@@ -46,7 +46,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     await page.goto(h.admin + '/#/reviews'); await expect(page.locator('.board-card')).toHaveCount(4);
     h.store.run("UPDATE tasks SET status='succeeded',phase='done' WHERE id='t1'");
     await page.evaluate(() => boardPoll()); await expect(page.locator('[data-card-key="101/issue/1"]')).toContainText('检视 Issue 已完成');
-    await expect(page.getByRole('group',{name:'工作类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','review');
+    await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue('review');
     // A project administrator has no global settings; its address falls back to the projects page.
     const memberPassword = testPassword(); await admin('/api/users', 'POST', { username: 'member', password: memberPassword, role: 'project_admin', repository_ids: ['101'] });
     const context = await browser.newContext(), member = await context.newPage(); await member.goto(h.admin + '/#/settings/users');
