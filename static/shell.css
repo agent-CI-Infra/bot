@@ -148,8 +148,8 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--spac
 @media (min-width: 1024px) { .members-layout:has(> [hidden]) > :not([hidden]) { grid-column: 1 / -1; } }
 .console-inbox-filters { display: flex; align-items: end; gap: var(--space-4); margin: 0 0 var(--space-6); }
 .console-inbox-filters label { flex: 1; max-width: 440px; }
-.console-inbox-next { display: flex; flex-wrap: wrap; gap: var(--space-4); margin: var(--space-4) 0 0; }
-@media (max-width: 480px) { .console-inbox-next { flex-direction: column; align-items: stretch; } .console-inbox-next > * { justify-content: center; } }
+/* Centred under the centred empty-state card; one row even at 390 so both links stay above the mobile bottom bar on short screens. */
+.console-inbox-next { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-4); margin: var(--space-4) 0 0; }
 .console-attention-row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: var(--space-6); align-items: center; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: var(--space-6) var(--space-7); margin-bottom: var(--space-4); }
 .console-attention-row h2 { font-size: var(--font-size-3); margin: 6px 0; }
 .console-attention-row p { margin: 5px 0; font-size: var(--font-size-label); }

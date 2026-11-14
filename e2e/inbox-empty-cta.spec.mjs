@@ -24,10 +24,35 @@ test('待处理为空时给出查看看板和新建任务的下一步（#690）'
     await expect(next.getByRole('link', { name: '新建任务', exact: true })).toHaveAttribute('href', '#/new-task');
     for (const [width, height, name] of [[390, 844, 'empty-390'], [1440, 900, 'empty-1440']]) {
       await page.setViewportSize({ width, height });
-      await expect(next.getByRole('link', { name: '查看任务看板', exact: true })).toBeInViewport();
-      await expect(next.getByRole('link', { name: '新建任务', exact: true })).toBeInViewport();
+      // Hit-test each link centre on the first screen: toBeInViewport() alone misses a link covered by the fixed mobile bottom bar.
+      const layout = await page.evaluate(() => {
+        const card = document.querySelector('.console-inbox [data-testid=console-state-empty]').getBoundingClientRect();
+        const links = [...document.querySelectorAll('.console-inbox-next a')].map(a => {
+          const box = a.getBoundingClientRect(), hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+          return { text: hit?.closest('a')?.textContent.trim(), top: box.top, left: box.left, right: box.right };
+        });
+        return { links, cardCentre: card.left + card.width / 2 };
+      });
+      expect(layout.links.map(link => link.text)).toEqual(['查看任务看板', '新建任务']);
+      // One centred row, lined up under the centred empty-state heading.
+      expect(Math.abs(layout.links[0].top - layout.links[1].top)).toBeLessThan(1);
+      const rowCentre = (layout.links[0].left + layout.links[1].right) / 2;
+      expect(Math.abs(rowCentre - layout.cardCentre)).toBeLessThan(2);
       await page.screenshot({ path: `.tmp/inbox-empty-690/${name}.png` });
     }
+    // Shorter 390 screens (390x667) put the row behind the bottom bar on the first screen; the page still scrolls far enough
+    // that each link clears the bar and takes the click, so it is never a dead end.
+    await page.setViewportSize({ width: 390, height: 667 });
+    for (const name of ['查看任务看板', '新建任务']) {
+      const hit = await next.getByRole('link', { name, exact: true }).evaluate(a => {
+        a.scrollIntoView({ block: 'center' });
+        const box = a.getBoundingClientRect(), bar = document.querySelector('#console-mobile-nav').getBoundingClientRect().top;
+        return { text: document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.closest('a')?.textContent.trim(), aboveBar: box.bottom <= bar + 1 };
+      });
+      expect(hit).toEqual({ text: name, aboveBar: true });
+    }
+    await page.screenshot({ path: '.tmp/inbox-empty-690/empty-390x667-scrolled.png' });
+    await page.setViewportSize({ width: 1440, height: 900 });
     await page.locator('.console-inbox-filters select').selectOption('101');
     await expect(page).toHaveURL(/#\/inbox\/101$/);
     await expect(empty.getByRole('heading', { name: '当前范围没有待处理任务', exact: true })).toBeVisible();
