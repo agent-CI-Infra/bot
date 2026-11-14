@@ -12,7 +12,8 @@ async function renderProject(route) {
   if (current?.id !== route.id || current.globalSettings) { current = { id: route.id }; page.replaceChildren(projectLoadingState(route.section)); }
   // #697: another page of the same project shows that page's loading state at once. Keeping the previous page until
   // loadProject() answers left the address, the 当前页面 picker and the body naming three different pages.
-  else if (current.repository && route.section !== current.section) { page.replaceChildren(projectHeader(route.section), projectLoadingBody(route.section)); if (typeof syncConsoleShell === 'function') syncConsoleShell(); }
+  // An unsaved knowledge file keeps its page: knowledge.js asks before leaving and puts the old address back.
+  else if (current.repository && route.section !== current.section && !(typeof knowledgeUnsaved === 'function' && knowledgeUnsaved())) { page.replaceChildren(projectHeader(route.section), projectLoadingBody(route.section)); if (typeof syncConsoleShell === 'function') syncConsoleShell(); }
   if (legacyFocus) current.focusAnchor = legacyFocus;
   try { await loadProject(route.id,route.section); } catch (err) {
     if (token === renderToken) { if ([401,403].includes(err.status)) { if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles(); if (current?.id === route.id) current.rolesDraft = null; }
