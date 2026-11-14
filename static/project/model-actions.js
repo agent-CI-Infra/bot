@@ -4,7 +4,7 @@ function modelActions(model, result, after = reloadWith) {
   const actions = element('div', '', 'actions'), editable = me.role === 'super_admin' || model.repository_id === current?.id;
   if (!editable) return actions;
   if (model.key_configured) actions.append(probeButton('测试模型', result, () => api(`/api/models/${model.id}/test`, 'POST', {}), testOutcome));
-  actions.append(button('修改模型名', () => modelEdit(model, after)), button('计费单价', () => modelPricing(model, after)));
+  actions.append(button('修改模型名', () => modelEdit(model, after)), button('计费单价', () => modelPricing(model, after)), button('能力与目录', () => modelCapabilitiesEditor(model,after)));
   actions.append(button('删除', async () => {
     const actor=me,target=current,address=location.hash,live=()=>me===actor&&current===target&&location.hash===address;
     let detail;

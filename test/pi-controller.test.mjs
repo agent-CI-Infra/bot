@@ -54,7 +54,7 @@ async function entryFixture(t, kind, respond, controlled = false) {
   const task = store.get("SELECT * FROM tasks WHERE id='t'"), redactor = new Redactor(), guard = async () => {}, workspace = new Workspace(store, manager, task, redactor, guard, value => logs.push(value));
   const initialized = await workspace.call('init', { type: 'workspace_init' });
   assert.equal(initialized.initialized, true);
-  return { store, task, workspace, redactor, guard, bodies, logs };
+  return { store, task, workspace, redactor, guard, bodies, logs, root };
 }
 
 for (const controlled of [false, true]) test(`Pi review entry repairs its own finish tool in one session (controlled=${controlled})`, { skip, timeout: 90000 }, async t => {
@@ -236,4 +236,18 @@ test('Pi local command execution honors the configured cap, reports it, and reta
   assert.deepEqual(done.slice(0, 3).map(r => JSON.parse(r.output).timeout_ms), [null, 400000, 450000]);
   assert.equal(done[2].timeout_notice.requested_seconds, 900); assert.equal(done[2].timeout_notice.max_seconds, 450);
   assert.equal(done[3].running, true); assert.equal(done[4].output.trim(), 'pi-ready');
+});
+
+// The SDK reads the generated file, so this covers the actual runner contract as well as the provider boundary.
+import {ModelCatalog} from '../dist/models/catalog.js';
+for (const matched of [false,true]) test(`Pi receives selected model capabilities and output budget (catalog=${matched})`, {skip,timeout:90000}, async t=>{
+  const f=await entryFixture(t,'review.issue',()=>call('finish_review',{summary:'Verified report',findings:[],requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:''}));
+  if(matched){
+    f.store.run("UPDATE models SET model_name='deepseek-flash' WHERE id='m'");
+    const catalog=new ModelCatalog(f.store,async()=>new Response(JSON.stringify({deepseek:{models:{'deepseek-flash':{id:'deepseek-flash',name:'DeepSeek Flash',canonical_model_id:'deepseek/deepseek-flash',attachment:false,reasoning:true,limit:{context:1048576,output:393216},modalities:{input:['text'],output:['text']}}}}})));await catalog.refresh();
+  }
+  await agentLoop(f.store,f.task,f.workspace,f.redactor,f.guard,{});
+  const config=JSON.parse(readFileSync(`${f.root}/tasks/${f.task.workspace_id}/agent/models.json`,'utf8')).providers['department-proxy'].models[0];
+  assert.equal(config.contextWindow,matched?1048576:128000);assert.equal(config.maxTokens,matched?393216:8192);assert.equal(config.reasoning,matched);
+  assert.equal(f.bodies[0].max_completion_tokens??f.bodies[0].max_tokens,matched?393216:8192);
 });

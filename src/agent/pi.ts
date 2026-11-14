@@ -71,7 +71,9 @@ export function piAdapter<T>(session: PiSession<T>) {
     work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
   });
   const pause = (ms: number) => abortable(new Promise(resolve => setTimeout(resolve, ms)));
-  return async ({ request, model }: AgentServices): Promise<T> => {
+  return async ({ request, model, outputTokens }: AgentServices): Promise<T> => {
+    config.model = model.capabilities ? {context_window:model.capabilities.context_window,max_output_tokens:model.capabilities.max_output_tokens,reasoning:model.capabilities.reasoning} : {context_window:128000,max_output_tokens:8192,reasoning:false};
+    config.output_tokens = outputTokens ?? config.model.max_output_tokens;
     const finishingNames=new Set(session.finalizationTools??config.finish_tools??[]);
     if(session.maxRequests!==undefined&&finishingNames.size&&session.maxRequests<=finalizationReserve(session.maxRequests))
       stop('role_budget_exhausted','waiting_configuration','剩余请求不足以保留至少一轮工作和收尾，Pi 会话尚未启动。');

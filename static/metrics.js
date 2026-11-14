@@ -28,17 +28,17 @@ function taskMetricsCard(task) {
 function modelPricing(model, after = reloadProject) {
   const modal=document.createElement('dialog');modal.id='model-pricing';
   const heading=element('h2',model.model_name+' · 计费单价');heading.id='model-pricing-title';modal.setAttribute('aria-labelledby',heading.id);
-  const form=document.createElement('form');form.append(heading,note('每百万 token 的单价，仅用于估算费用。输入单价用于未命中的输入；缓存命中 token 单独计价。保存后只影响新请求。'));
+  const form=document.createElement('form');form.append(heading,note('每百万 token 的单价，仅用于估算费用。输入单价用于未命中的输入；缓存命中 token 单独计价。留空字段继承目录；清除手填值后恢复目录单价。目录只提供 USD，不做币种换算。保存后只影响新请求。'));
   const label=element('label','币种'),currency=document.createElement('select');currency.name='currency';currency.setAttribute('aria-label','币种');
-  [['USD','美元 USD'],['CNY','人民币 CNY']].forEach(([value,name])=>currency.add(new Option(name,value)));currency.value=model.pricing?.currency||'USD';label.append(currency);form.append(label);
+  [['USD','美元 USD'],['CNY','人民币 CNY']].forEach(([value,name])=>currency.add(new Option(name,value)));currency.value=model.pricing_override?.currency||model.pricing?.currency||'USD';label.append(currency);form.append(label);
   for(const [name,caption]of [['input_per_million','输入单价 / 百万 token'],['output_per_million','输出单价 / 百万 token'],['cache_per_million','缓存命中单价 / 百万 token']]){
-    const label=element('label',caption),input=document.createElement('input');Object.assign(input,{name,type:'number',required:true,min:'0',max:'1000000',step:'any',value:model.pricing?.[name]??''});label.append(input);form.append(label);
+    const label=element('label',caption),input=document.createElement('input');Object.assign(input,{name,type:'number',required:false,min:'0',max:'1000000',step:'any',value:model.pricing_override?.[name]??'',placeholder:String(model.pricing?.[name]??'未定价')});label.append(input);form.append(label);
   }
   const message=element('p','','view-error');message.setAttribute('role','alert');
   const actions=element('div','','actions'),save=element('button','保存单价');save.type='submit';actions.append(button('取消',()=>modal.close()),save);
-  if(model.pricing)actions.append(button('清除单价',async()=>{try{await api('/api/models/'+model.id,'PATCH',{version:model.version,pricing:null});modal.close();await after(`已清除 ${model.model_name} 的计费单价`);}catch(err){message.textContent=err.message;}}));
+  if(model.pricing_override)actions.append(button('清除单价',async()=>{try{await api('/api/models/'+model.id,'PATCH',{version:model.version,pricing:null});modal.close();await after(`已清除 ${model.model_name} 的计费单价`);}catch(err){message.textContent=err.message;}}));
   form.append(message,actions);form.addEventListener('submit',async event=>{event.preventDefault();save.disabled=true;const data=Object.fromEntries(new FormData(form));
-    try{await api('/api/models/'+model.id,'PATCH',{version:model.version,pricing:{currency:data.currency,input_per_million:Number(data.input_per_million),output_per_million:Number(data.output_per_million),cache_per_million:Number(data.cache_per_million)}});modal.close();await after(`已保存 ${model.model_name} 的计费单价`);}
+    try{await api('/api/models/'+model.id,'PATCH',{version:model.version,pricing:{currency:data.currency,...Object.fromEntries(['input_per_million','output_per_million','cache_per_million'].filter(key=>data[key]!=='').map(key=>[key,Number(data[key])]))}});modal.close();await after(`已保存 ${model.model_name} 的计费单价`);}
     catch(err){message.textContent=err.message;}finally{save.disabled=false;}
   });modal.append(form);document.body.append(modal);modal.addEventListener('close',()=>modal.remove(),{once:true});modal.showModal();
 }

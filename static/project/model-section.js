@@ -60,7 +60,7 @@ function modelsSection() {
   const catalog = element('details', '', 'fold model-catalog');
   catalog.dataset.testid = 'model-catalog';
   catalog.open = Boolean(catalogWasOpen);
-  catalog.append(element('summary', '模型目录'), ...modelManagementSections());
+  catalog.append(element('summary', '模型目录'), modelCatalogPanel(), ...modelManagementSections());
   page.append(...[bar, projectDefaultModelCard(current.policy, current.models, draft, sync), parseAlert, overridesFold, catalog].filter(Boolean));
   return [page];
 }
