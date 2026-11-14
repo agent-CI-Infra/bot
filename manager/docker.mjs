@@ -21,6 +21,25 @@ export class Docker {
     const self = await this.request('GET', `/containers/${encodeURIComponent(hostname())}/json`);
     return self?.Mounts?.find(m => m.Type === 'volume' && m.Destination === destination)?.Name || null;
   }
+  // Whole-host Docker disk usage for the storage page (#671): image layers, container writable layers, volumes and the
+  // build cache. One answer lists every image, so a host with many images can exceed the 4 MB cap in request(); a
+  // stopped socket, a slow or old daemon and that cap all read as null, and the caller shows the row as unreadable
+  // instead of failing the page or inventing zeros.
+  async diskUsage() {
+    let report;
+    try { report = await this.request('GET', '/system/df', undefined, false, 30000); } catch { return null; }
+    if (!report || typeof report !== 'object' || Array.isArray(report)) return null;
+    const rows = value => Array.isArray(value) ? value : [];
+    const sum = (list, size) => list.reduce((total, row) => total + (Number(size(row)) || 0), 0);
+    return {
+      // Images share layers, so LayersSize is the space they take; adding the per-image sizes would count a shared
+      // layer once per image. A daemon that omits it falls back to that sum.
+      images_bytes: Number(report.LayersSize) || sum(rows(report.Images), row => row?.Size),
+      containers_bytes: sum(rows(report.Containers), row => row?.SizeRw),
+      volumes_bytes: sum(rows(report.Volumes), row => row?.UsageData?.Size),
+      build_cache_bytes: sum(rows(report.BuildCache), row => row?.Size),
+    };
+  }
   request(method, path, body, raw = false, timeout = 90000) {
     return new Promise((resolve, reject) => {
       const bytes = body === undefined ? null : Buffer.from(JSON.stringify(body));
