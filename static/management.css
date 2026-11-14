@@ -195,9 +195,50 @@ body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
 }
 @media (max-height: 560px) {
   .management-window-head, :is(.management-page,.management-fullscreen) .management-window-head { padding: 8px 12px; }
+  /* #641: a short viewport keeps the floating panel under the top bar, so its box is shorter than the content used to
+     need; these lines keep the scope row and the composer inside that box instead of overflowing it. */
+  .management-window:not(.management-page):not(.management-fullscreen) .management-window-head { padding: 4px 10px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-scope { padding: 4px 10px 2px; gap: 4px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-input textarea { min-height: 40px; height: 52px; }
+  /* At this height the panel is only a few hundred pixels tall, so the scope sentence gives its room to the rest; the
+     conversation itself is what gives way, by scrolling inside its own box, and the session fold stays reachable. */
+  .management-window:not(.management-page):not(.management-fullscreen) .management-scope-note { display: none; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-sessions { padding: 2px 10px 4px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-feed { padding: 12px 12px 14px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-input { padding-bottom: 8px; }
   .management-window-title p { display: none; }
   .management-input textarea { min-height: 48px; height: 60px; }
   .management-status-bar { padding-top: 3px; padding-bottom: 3px; }
+}
+/* #641: a phone that is also short (390×500) keeps the scope row on two lines, so with the touch-sized 44px controls the
+   composer was 20px taller than the clamped box and the send button got cut by the panel edge. The send button keeps the
+   full 44px touch target; the room comes from the conversation, which scrolls inside its own box, while the session fold
+   stays on screen as a 36px row. */
+@media (max-height: 560px) and (max-width: 600px) {
+  .management-window:not(.management-page):not(.management-fullscreen) .management-scope { padding: 2px 10px 1px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-scope select { min-height: 36px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-scope button { min-height: 36px; padding: 4px 8px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-window-head { padding: 0 10px; }
+  /* The status bar stays: it is the only surface that reports a send, stop, form or clipboard failure and it carries
+     `重新连接` when the event stream drops (#641 review). It gets one compact line instead of being removed; the room
+     comes from the conversation, which scrolls inside its own box. */
+  .management-window:not(.management-page):not(.management-fullscreen) .management-status-bar { padding: 0 10px; gap: 6px; align-items: center; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-status { line-height: 1.4; font-size: var(--font-size-micro); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-status-bar button { flex: 0 0 auto; min-height: 28px; padding: 0 8px; font-size: var(--font-size-micro); white-space: nowrap; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-window-title h2 { font-size: var(--font-size-2); }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-sessions { padding: 0 10px; font-size: var(--font-size-micro); }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-sessions > summary { padding: 0; line-height: 1.3; }
+  /* The fold keeps a 36px row here instead of the 44px the wide layout uses: it is a disclosure, and the room goes to the
+     conversation, which is the part this panel exists for. */
+  .management-window:not(.management-page):not(.management-fullscreen) .management-sessions > summary { min-height: 36px; display: flex; align-items: center; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-feed { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 10px 4px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-input { padding-bottom: 2px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-input-footer { margin-top: 2px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-scope label { display: flex; flex-direction: row; align-items: center; gap: 6px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-scope label select { flex: 1; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-input textarea { min-height: 36px; height: 36px; }
+  /* The composer loses height elsewhere, not on the send button: 44px is the touch target this console keeps for it. */
+  .management-window:not(.management-page):not(.management-fullscreen) .management-input-footer button { min-height: 44px; padding: 6px 12px; }
 }
 
 /* A command receipt as a page of its own (#235): the project page shell, with the state beside the title. */

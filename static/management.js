@@ -140,7 +140,17 @@ function syncManagementChat() {
 }
 // The same DOM and client serve all three presentations; changing size or mode never reopens a conversation.
 function fitManagementWindow(chat) {
-  const margin = innerWidth <= 600 ? 10 : 24, maxWidth = Math.max(1, innerWidth - margin * 2), maxHeight = Math.max(1, innerHeight - margin * 2);
+  // #641: a remembered or dragged size could push the top edge over the page header (and off screen on a phone), which
+  // covered the bar's 退出登录 / account entry. The box is clamped between the header and the bottom bar instead.
+  const margin = innerWidth <= 600 ? 10 : 24;
+  const header = document.querySelector('body > header')?.getBoundingClientRect().height || 0;
+  const bar = document.querySelector('.console-mobile-nav');
+  const barHeight = bar && getComputedStyle(bar).display !== 'none' ? bar.getBoundingClientRect().height : 0;
+  // A short viewport keeps the panel under the header and above the bar even when that leaves little height: at
+  // 250% zoom (768×432 CSS) the panel used to reach 24px and sit 40px under the 64px top bar. The max-height media query
+  // already compresses the composer there, so a short box stays usable, while a box over the top bar is not.
+  const room = innerHeight - header - barHeight - margin * 2;
+  const maxWidth = Math.max(1, innerWidth - margin * 2), maxHeight = Math.max(1, room);
   const width = Math.max(Math.min(360, maxWidth), Math.min(chat.size.width, maxWidth)), height = Math.max(Math.min(460, maxHeight), Math.min(chat.size.height, maxHeight));
   chat.window.style.width = Math.round(width) + 'px'; chat.window.style.height = Math.round(height) + 'px';
 }
@@ -412,6 +422,7 @@ function minimizeManagementChat(focus = true) {
   if (focus) { const bar = document.querySelector('#console-mobile-nav a[data-page="assistant"]'); if (bar && consoleMedia.matches) bar.focus({ preventScroll: true }); else chat.launcher.focus(); }
   if (typeof updateConsoleAssistant === 'function') updateConsoleAssistant();
 }
+const MANAGEMENT_SLOW_NOTICE = 3000, MANAGEMENT_CONNECT_TIMEOUT = 10000;
 async function openManagementChat(projectId = null, { mode = 'floating' } = {}) {
   syncManagementChat(); const chat = managementChat; if (!chat) return;
   const version = ++chat.openVersion;
@@ -426,19 +437,43 @@ async function openManagementChat(projectId = null, { mode = 'floating' } = {}) 
     if (typeof updateConsoleAssistant === 'function') updateConsoleAssistant();
   };
   if (!chat.loading && !chat.client) {
-    chat.panel.replaceChildren(note('正在连接管理助手…'));
-    chat.loading = renderManagement(chat.panel, projectId, activity).then(client => {
+    // #641: a first query that never returns used to leave the panel saying 「正在连接」 forever. Three seconds in it says
+    // the wait is slow and offers 取消; at ten seconds it stops waiting and states the failure with 重试 and 查看项目列表.
+    // The request is aborted, so a late answer cannot repaint over the failure or the reader's next choice.
+    const controller = new AbortController();
+    let timedOut = false, cancelled = false;
+    const connecting = element('div', '', 'management-connecting');
+    const slow = note('仍在连接，网络较慢时可能需要多等一会儿'); slow.hidden = true;
+    const cancel = button('取消', () => { cancelled = true; controller.abort(); minimizeManagementChat(); });
+    cancel.hidden = true;
+    connecting.append(note('正在连接管理助手…'), slow, cancel);
+    chat.panel.replaceChildren(connecting);
+    const slowTimer = setTimeout(() => {
+      if (managementChat !== chat || chat.panel.firstElementChild !== connecting) return;
+      slow.hidden = false; cancel.hidden = false;
+    }, MANAGEMENT_SLOW_NOTICE);
+    // Retrying after a timeout starts a fresh connect even though the abandoned request may still be settling.
+    const reconnect = () => { chat.loading = null; chat.client = null; openManagementChat(projectId, { mode: chat.mode }); };
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true; controller.abort();
+      if (managementChat !== chat) return;
+      const box = consoleState('管理助手暂时连不上', '可以稍后重试，或先去项目列表查看进展。', { tone: 'error', retry: reconnect, retryLabel: '重试' });
+      box.append(consoleLink('#/projects', '查看项目列表'));
+      chat.panel.replaceChildren(box);
+    }, MANAGEMENT_CONNECT_TIMEOUT);
+    chat.loading = renderManagement(chat.panel, projectId, activity, { signal: controller.signal }).then(client => {
       if (managementChat !== chat) { client?.dispose(); return; }
       chat.client = client;
       // #623: the picker may have moved while this panel was connecting, and the render chose its scope before that
       // change. Now that a client exists, replay the change so the control, the sentence and the conversation follow.
       if (client && pendingScopeChange.has(chat)) { pendingScopeChange.delete(chat); followSharedScope(chat); }
     }).catch(err => {
-      if (managementChat !== chat) return;
-      const box = consoleState('无法连接管理助手', managementAccessMessage(err), { tone: 'error', retry: () => openManagementChat(projectId, { mode: chat.mode }) });
+      if (managementChat !== chat || timedOut || cancelled) return;
+      const box = consoleState('无法连接管理助手', managementAccessMessage(err), { tone: 'error', retry: reconnect });
       box.querySelector('button').textContent = '重试';
+      box.append(consoleLink('#/projects', '查看项目列表'));
       chat.panel.replaceChildren(box);
-    }).finally(() => { chat.loading = null; });
+    }).finally(() => { clearTimeout(slowTimer); clearTimeout(timeoutTimer); chat.loading = null; });
   }
   await chat.loading;
   if (managementChat !== chat || version !== chat.openVersion || !chat.client) return;
@@ -470,9 +505,9 @@ addEventListener('console-scope-change', () => {
 });
 
 // Commands still use durable, versioned management messages. History and reconnect only read events.
-async function renderManagement(panel, projectId = null, onActivity = () => {}) {
+async function renderManagement(panel, projectId = null, onActivity = () => {}, { signal } = {}) {
   const endpoint = '/api/management', user = me.id;
-  const projects = (await api(endpoint + '/query', 'POST', { operation: 'list_projects', target: {}, arguments: { limit: 100 } })).projects;
+  const projects = (await api(endpoint + '/query', 'POST', { operation: 'list_projects', target: {}, arguments: { limit: 100 } }, { signal })).projects;
   if (!panel.isConnected || me?.id !== user) return null;
   panel.replaceChildren(); panel.className = 'management-panel';
   const header = element('div', '', 'management-scope'), scope = document.createElement('select');
