@@ -290,10 +290,11 @@ function syncConsoleShell() {
       }
       if (child.matches?.('a')) (group || sectionPicker).append(new Option(child.textContent, child.getAttribute('href'), false, child.getAttribute('aria-current') === 'page'));
     }
-    // #642: an unknown project page has no entry of its own; the picker names that instead of showing the first section.
-    if (project && $('project-page').querySelector('[data-page-not-found]')) {
-      const missing = new Option('找不到页面', '', true, true); missing.disabled = true; sectionPicker.prepend(missing);
-    }
+  }
+  // #642: an unknown project page has no entry of its own; the picker names that instead of showing the first section.
+  // This also covers the #565 hub picker, where nothing in the breadcrumb is aria-current on an unknown subpage.
+  if (nav && project && $('project-page').querySelector('[data-page-not-found]')) {
+    const missing = new Option('找不到页面', '', true, true); missing.disabled = true; sectionPicker.prepend(missing);
   }
   syncConsoleMobileCurrent();
   $('console-sidebar').classList.toggle('console-platform', platform);
