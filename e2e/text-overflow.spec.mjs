@@ -179,16 +179,21 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     await expect(page.getByRole('heading', { name: '角色概览' })).toBeVisible();
     await expect(page.locator('table[aria-label="角色解析结果"]')).toBeVisible();
     const roles = await page.evaluate(() => {
-      const muted = document.querySelector('.roles-page .project-table td .muted');
+      // The duty column, not the #569 required-role reason in the 启用 column.
+      const muted = document.querySelector('.roles-page .project-table td[data-label="职责"] .muted');
       if (!muted) return { missing: true };
       const cs = getComputedStyle(muted);
-      return { clamp: cs.webkitLineClamp, overflow: cs.overflow, title: muted.title, text: muted.textContent };
+      const reason = document.querySelector('.roles-page .project-table .role-enable-reason');
+      return { clamp: cs.webkitLineClamp, overflow: cs.overflow, title: muted.title, text: muted.textContent,
+        reasonClamp: reason ? getComputedStyle(reason).webkitLineClamp : null };
     });
     expect(roles.missing).toBeFalsy();
     expect(roles.clamp).toBe('2');
     // The clamped duty keeps its full text in title, with no textContent fallback in the assertion.
     expect(roles.title).toBeTruthy();
     expect(roles.title).toBe(roles.text);
+    // The required-role reason explains a locked switch and is never clipped.
+    expect(roles.reasonClamp === null || roles.reasonClamp === 'none').toBeTruthy();
     await page.screenshot({ path: resolve(out, 'roles-1440.png'), fullPage: true });
 
     await page.setViewportSize({ width: 390, height: 844 });
