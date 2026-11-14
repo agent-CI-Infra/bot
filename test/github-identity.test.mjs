@@ -89,11 +89,16 @@ test('global user access matches authorized project lists, including inherited, 
   assert.ok(user.access.projects.every(p => p.sources.length === 1 && p.sources[0] === 'explicit_delegation'));
   await f.admin('/api/project-admin-assignments', 'PUT', { user_id: principal, repository_ids: [] });
   assert.deepEqual((await access()).access.projects, []);
-  assert.equal((await f.admin('/api/identity/grants', 'POST', { principal_id: principal, tenant_id: 'github.com:20', project_id: '201', capabilities: ['tasks.read'] })).status, 201);
-  user = await access(); assert.deepEqual(user.access.projects, [{ id: '201', full_name: 'other/project-201', sources: ['explicit_delegation'], can_configure: false }]);
   await f.identity.reverify(principal); user = await access(); assert.equal(user.access.github_pending, false);
   h.store.run("UPDATE github_installations SET status='suspended' WHERE ref='github.com/123/77'");
-  user = await access(); assert.equal(user.access.github_pending, true); assert.deepEqual(user.access.projects.map(p => p.id), ['201']);
+  user = await access(); assert.equal(user.access.github_pending, true); assert.deepEqual(user.access.projects, []);
+  h.store.run("UPDATE github_installations SET status='active' WHERE ref='github.com/123/77'");
+  // Explicit delegation ends GitHub verification (#708): the next check sends nothing to GitHub and drops the derived grant.
+  assert.equal((await f.admin('/api/identity/grants', 'POST', { principal_id: principal, tenant_id: 'github.com:20', project_id: '201', capabilities: ['tasks.read'] })).status, 201);
+  const sent = f.state.requests.length;
+  await f.identity.reverify(principal); assert.equal(f.state.requests.length, sent);
+  user = await access();
+  assert.deepEqual(user.access, { projects: [{ id: '201', full_name: 'other/project-201', sources: ['explicit_delegation'], can_configure: false }], github_pending: false });
   await f.admin('/api/users/' + principal, 'PATCH', { active: false });
   user = (await f.admin('/api/users')).value.users.find(user => user.id === principal);
   assert.deepEqual(user.access.projects, []); assert.equal(user.access.github_pending, false);
@@ -184,25 +189,30 @@ test('current GitHub owner, selected repositories, repo admin and ordinary membe
   state.id = 43; const other = await f.login(); assert.deepEqual(active(h.store, other.result.principal_id), []);
 });
 
-test('permission downgrade blocks only what was lost; explicit delegation remains independent; unknown API evidence fails closed', async t => {
+test('unknown API evidence fails closed; explicit delegation ends GitHub verification and keeps only what it covers', async t => {
   const f = await identityFixture(t), { h, state } = f, login = await f.login(), p = login.result.principal_id;
-  const creds = session(h.store, p, login.result.identity_id), actor = resolveActor(h.store, creds.token);
+  const creds = session(h.store, p, login.result.identity_id);
   const username = h.store.get('SELECT username FROM users WHERE id=?', p).username;
+  state.failure = 403; await f.identity.reverify(p);
+  assert.equal(h.store.get('SELECT status FROM external_identities WHERE id=?', login.result.identity_id).status, 'pending_verification');
+  assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'pending_verification'));
+  assert.throws(() => authorize(resolveActor(h.store, creds.token), 'config.write', { project_id: '101' }), /capability_forbidden/);
+  state.failure = 0; h.store.run('UPDATE external_identities SET expires_at=0 WHERE id=?', login.result.identity_id); await f.identity.reverify(p);
+  assert.equal(state.refreshed, 1);
+  const actor = resolveActor(h.store, creds.token); authorize(resolveActor(h.store, creds.token), 'config.write', { tenant_id: 'github.com:10' });
+  // A manual project is explicit delegation (#708): GitHub is no longer asked, and the derived grants go at the next check.
   assert.equal((await f.admin('/api/project-admin-assignments', 'PUT', { user_id: p, repository_ids: ['101'] })).status, 200);
+  const sent = state.requests.length;
   state.owner = false; state.admin = false; await f.identity.reverify(p);
-  // The actor predates the downgrade, but the explicit delegation still covers this write (#521); the lost owner grant does not.
+  assert.equal(state.requests.length, sent);
+  // The actor predates the change, but the explicit delegation still covers this write (#521); the dropped owner grant does not.
   authorize(actor, 'config.write', { project_id: '101' });
   assert.throws(() => authorize(actor, 'config.write', { tenant_id: 'github.com:10' }), /capability_forbidden/);
   const current = resolveActor(h.store, creds.token); authorize(current, 'release.manage', { project_id: '101' });
   assert.equal(active(h.store, p).filter(g => g.source === 'explicit_delegation').length, 1);
+  assert.equal(listEffectiveScopes(h.store, p).filter(g => g.source === 'github_derived' && g.state !== 'revoked').length, 0);
   assert.throws(() => authorize(current, 'grants.manage', { project_id: '101' }), /forbidden/);
-  state.owner = true; await f.identity.reverify(p); state.failure = 403; await f.identity.reverify(p);
-  assert.equal(h.store.get('SELECT status FROM external_identities WHERE id=?', login.result.identity_id).status, 'pending_verification');
-  assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'pending_verification'));
-  authorize(resolveActor(h.store, creds.token), 'release.manage', { project_id: '101' });
   assert.equal(h.store.get('SELECT username FROM users WHERE id=?', p).username, username);
-  state.failure = 0; h.store.run('UPDATE external_identities SET expires_at=0 WHERE id=?', login.result.identity_id); await f.identity.reverify(p);
-  assert.equal(state.refreshed, 1);
   const before = resolveActor(h.store, creds.token);
   h.store.transaction(() => revokeIdentity(h.store, p, login.result.identity_id));
   assert.throws(() => authorize(before, 'config.write', { project_id: '101' }), /login_required/);
@@ -342,10 +352,13 @@ test('console writes follow current grants, not the revision a session saw (#521
   // The session never re-read /api/auth/me after this revision rose; it still holds the project, so the write succeeds.
   invalidate(h.store, p, 'test.unrelated');
   assert.equal((await patch({ review_enabled: true })).status, 200);
+  // A change on GitHub reaches writes through the next check, not through the write itself (#708).
   state.owner = false; state.admin = false;
-  const denied = await patch({ review_enabled: false });
+  assert.equal((await patch({ review_enabled: false })).status, 200);
+  await f.identity.reverify(p);
+  const denied = await patch({ review_enabled: true });
   assert.equal(denied.status, 403); assert.match((await denied.json()).error, /forbidden/);
-  state.owner = true; assert.equal((await patch({ review_enabled: false })).status, 200);
+  state.owner = true; await f.identity.reverify(p); assert.equal((await patch({ review_enabled: false })).status, 200);
   h.store.run('UPDATE users SET active=0 WHERE id=?', p);
   assert.equal((await patch({ review_enabled: true })).status, 401);
 });

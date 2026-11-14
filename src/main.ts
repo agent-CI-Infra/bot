@@ -16,6 +16,7 @@ import { PublicBoards } from './public-board/service.js';
 import { ReleaseService } from './releases/service.js';
 import { ActionsFailures } from './actions/service.js';
 import { GitHubLogin } from './identity/github-login.js';
+import { GitHubRefresh } from './identity/github-refresh.js';
 import { deploymentOrigin, loginCallbackPath } from './onboarding/public-url.js';
 import { StallMonitor } from './core/stalls.js';
 import { PayloadMigration } from './storage/migration.js';
@@ -49,12 +50,8 @@ const githubLogin = new GitHubLogin(store, {
 });
 // Validate deployment defaults at startup; a saved wizard configuration takes precedence.
 githubLogin.identity;
-const reverifyIdentities = () => {
-  for (const row of store.all("SELECT DISTINCT principal_id FROM external_identities WHERE provider='github' AND status IN ('active','pending_verification')"))
-    void githubLogin.identity?.reverify(row.principal_id).catch(() => {});
-};
-// Fire once at start: setInterval would otherwise leave derived grants untouched for the first minute.
-const identityTimer = setInterval(reverifyIdentities, 60_000); identityTimer.unref(); reverifyIdentities();
+// GitHub-derived grants of signed-in principals are checked again every ten minutes (#708); nobody else is sent to GitHub.
+const githubRefresh = new GitHubRefresh(store, () => githubLogin.identity); githubRefresh.start();
 const tokenFile = process.env.BOT_MANAGER_TOKEN_FILE;
 if (!tokenFile) throw new Error('BOT_MANAGER_TOKEN_FILE is required');
 const manager=new ManagerClient(process.env.BOT_MANAGER_URL || 'http://manager:8793',readFileSync(tokenFile));
@@ -107,7 +104,7 @@ server.listen(8791, '0.0.0.0', () => {
 let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;
-  clearInterval(timer); clearInterval(syncTimer); clearInterval(identityTimer); workspaces.close();
-  server.close(async () => { await Promise.all([modelCatalog(store).close(),installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close(),migration.stop(),vacuum.stop(),retention.stop()]); store.close(); process.exit(0); });
+  clearInterval(timer); clearInterval(syncTimer); workspaces.close();
+  server.close(async () => { await Promise.all([githubRefresh.close(),modelCatalog(store).close(),installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close(),migration.stop(),vacuum.stop(),retention.stop()]); store.close(); process.exit(0); });
   setTimeout(() => process.exit(1), 100_000).unref();
 });
