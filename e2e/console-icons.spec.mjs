@@ -37,6 +37,17 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
     await page.screenshot({ path: `${out}/projects-icons-1440.png`, fullPage: true });
 
+    // Switching the language re-translates every [data-i18n] node; the sidebar entries must keep their icons both ways.
+    const sidebarEntries = sidebar.locator('#tabs [data-tab], #console-inbox-link');
+    const entryCount = await sidebarEntries.count();
+    expect(entryCount).toBeGreaterThanOrEqual(9);
+    await page.getByRole('button', { name: 'English', exact: true }).click();
+    await expect(sidebar.getByRole('button', { name: 'Projects', exact: true })).toBeVisible();
+    for (let i = 0; i < entryCount; i++) await expect(sidebarEntries.nth(i).locator('svg.console-icon')).toHaveCount(1);
+    await page.getByRole('button', { name: '中文', exact: true }).click();
+    await expect(sidebar.getByRole('button', { name: '项目', exact: true })).toBeVisible();
+    for (let i = 0; i < entryCount; i++) await expect(sidebarEntries.nth(i).locator('svg.console-icon')).toHaveCount(1);
+
     await page.goto(h.admin + '/#/more');
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
     const moreLinks = page.locator('.console-groups .console-link-with-icon');
