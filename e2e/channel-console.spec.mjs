@@ -401,8 +401,15 @@ test('个人设置与全局设置类别只列出真正能打开的页面，目�
     await expect(nav.locator('p')).toHaveCount(0);
     await expect(nav.locator(':scope > :not(a)')).toHaveCount(0);
     await expect(nav.getByRole('link')).toHaveText(['身份与权限', '飞书绑定', '飞书会话', '外部执行端']);
+    // At 390 the horizontal bar itself is display:none, so a role query over it can never fail. The phone's real control
+    // is the 当前页面 picker, which mirrors the same groups as optgroups: no group label means no optgroup at all.
     await page.setViewportSize({ width: 390, height: 844 }); await page.goto(h.admin + '/#/identity');
-    await expect(page.getByRole('navigation', { name: '个人设置类别' }).locator('p')).toHaveCount(0);
+    await expect(page.locator('#console-secondary-nav')).toBeHidden();
+    const sectionPicker = page.locator('#console-section');
+    await expect(sectionPicker).toBeVisible(); await expect(sectionPicker).toHaveAccessibleName('当前页面');
+    await expect(sectionPicker.locator('option')).toHaveText(['身份与权限', '飞书绑定', '飞书会话', '外部执行端']);
+    await expect(sectionPicker.locator('optgroup')).toHaveCount(0);
+    await expect(sectionPicker).not.toContainText('个人设置');
     // The directory entry names the page it opens instead of pointing at 个人设置 that renders 身份与权限.
     await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(h.admin + '/#/more');
     const directory = page.locator('#console-page'), identityEntry = directory.locator('a[href="#/identity"]');
@@ -418,6 +425,12 @@ test('个人设置与全局设置类别只列出真正能打开的页面，目�
     await expect(settingsNav.getByRole('link')).toHaveText(['存储']);
     await expect(settingsNav.locator('p')).toHaveCount(0);
     await expect(member.locator('#settings-panel')).not.toContainText('系统与算力');
+    // The same check on the control a phone actually shows: one settings group, so no heading and no optgroup named 系统与算力.
+    await member.setViewportSize({ width: 390, height: 844 });
+    const memberPicker = member.locator('#console-section');
+    await expect(memberPicker).toBeVisible(); await expect(memberPicker.locator('option')).toHaveText(['存储']);
+    await expect(memberPicker.locator('optgroup')).toHaveCount(0);
+    await expect(memberPicker).not.toContainText('系统与算力');
     await context.close();
   } finally { await h.stop(); }
 });

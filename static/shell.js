@@ -149,8 +149,9 @@ function consoleGroups() {
   return groups;
 }
 // #549: a project administrator's desktop primary nav is 项目 / 管理对话 / 看板 / 待处理, plus a visible
-// 更多功能 entry so 个人设置 stays reachable at desktop widths (the account menu is phone-only).
-// 统计, Webhook, 个人设置 and 存储 leave the sidebar itself; they remain in 更多 (and, for super
+// 更多功能 entry so 身份与权限 stays reachable at desktop widths (the account menu is phone-only). That address is
+// #/identity since #615; #/preferences stays an alias so old links keep working.
+// 统计, Webhook, 身份与权限 and 存储 leave the sidebar itself; they remain in 更多 (and, for super
 // administrators, in the pinned settings nav).
 function applyConsoleNavVisibility() {
   if (!me) return;
