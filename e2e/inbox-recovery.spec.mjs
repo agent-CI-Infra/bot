@@ -7,9 +7,11 @@ async function prepared(page, width = 390) {
   const h = await harness();
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-    for (let i = 0; i < 51; i++) h.store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,phase,error_code,updated_at)
-      VALUES(?,'101','review.issue','waiting_configuration',?,'model','model_not_configured',?)`,
-      'inbox-' + i, 'Configure task ' + i, `2026-01-01T00:00:${String(i).padStart(2, '0')}Z`);
+    h.store.transaction(() => {
+      for (let i = 0; i < 51; i++) h.store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,phase,error_code,updated_at)
+        VALUES(?,'101','review.issue','waiting_configuration',?,'model','model_not_configured',?)`,
+        'inbox-' + i, 'Configure task ' + i, `2026-01-01T00:00:${String(i).padStart(2, '0')}Z`);
+    });
     await page.setViewportSize({ width, height: 844 }); await page.goto(h.admin + '/#/inbox/all/50');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -70,15 +72,17 @@ test('a rejected retry keeps the item and return focus, and recorded failures ch
 });
 
 test('a late inbox refresh after closing cannot replace a new page or steal its focus', async ({ page }) => {
-  // prepared() below already spends most of the default 30s budget on boot, 51 rows and a login, so this case needs
-  // its own budget: when it ran out, the failure surfaced as a bare "Test timeout of 30000ms exceeded" with no line.
+  // This case spans setup, dialog dismissal, a gated response and navigation. Keep each asynchronous boundary explicit
+  // so a missing refresh fails at its receipt check rather than an unbounded wait.
   test.setTimeout(120000);
   const { h } = await prepared(page); let release;
   try {
-    await open(page).click();
     let entered = 0; const gate = new Promise(resolve => { release = resolve; });
     await page.route('**/api/tasks?attention=*', async route => { const response = await route.fetch(); entered += 1; await gate; await route.fulfill({ response }); });
+    await open(page).click(); await expect(detail(page)).toBeVisible();
+    expect(entered, 'opening the task must not refresh the inbox').toBe(0);
     await page.keyboard.press('Escape');
+    await expect(detail(page)).toBeHidden();
     // Bounded instead of an unbounded `await`: a refresh that never comes must fail here, by name, rather than
     // starving the remainder of the test of its budget.
     await expect.poll(() => entered, { timeout: 30000, message: 'closing the task must request the inbox again' }).toBeGreaterThan(0);
