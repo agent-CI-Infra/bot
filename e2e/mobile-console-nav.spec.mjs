@@ -245,7 +245,7 @@ test('移动头部把身份、角色与退出登录收进账号菜单，键盘�
     await expect(trigger).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole('link', { name: '个人设置', exact: true })).toHaveAttribute('href', '#/preferences');
+    await expect(menu.getByRole('link', { name: '身份与权限', exact: true })).toHaveAttribute('href', '#/identity');
     await expect(menu.getByRole('button', { name: '退出登录', exact: true })).toBeVisible();
     // A real sign-out still works from the menu.
     await menu.getByRole('button', { name: '退出登录', exact: true }).click();
@@ -286,8 +286,8 @@ test('账号菜单跟随页面与断点关闭，不会盖在新页面或停在�
     // Choosing a destination closes the disclosure instead of leaving it open over the page it just navigated to.
     await trigger.click();
     await expect(menu).toBeVisible();
-    await menu.getByRole('link', { name: '个人设置', exact: true }).click();
-    await expect(page).toHaveURL(/#\/preferences$/);
+    await menu.getByRole('link', { name: '身份与权限', exact: true }).click();
+    await expect(page).toHaveURL(/#\/identity$/);
     await expect(menu).toBeHidden();
     await expect(trigger).toHaveAttribute('aria-expanded', 'false');
     // 768px hides the trigger itself, so a menu opened at 390px must not keep floating over the desktop header.

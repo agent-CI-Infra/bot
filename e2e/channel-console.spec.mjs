@@ -3,7 +3,7 @@ import { openProjectDanger } from './open-basic-folds.mjs';
 import { mkdirSync } from 'node:fs';
 import { channelFixture, boundGroup, privateChat, bindFixture, repositoryAssistant, scriptedModel, inGroup, envelope, post, finished, until } from '../test/channel-fixture.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
-import { testPassword } from '../test/helpers.mjs';
+import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 
 async function login(page, f, hash, username = 'administrator', password = f.password) {
   await page.goto(f.h.admin + '/' + hash);
@@ -386,4 +386,38 @@ for (const type of ['text', 'post']) test(`a mention-only ${type} message remain
     }
     expect(errors).toEqual([]);
   } finally { await f.close(); }
+});
+
+test('个人设置与全局设置类别只列出真正能打开的页面，目录文案与实际落点一致', async ({ page, browser }) => {
+  const h = await harness();
+  try {
+    const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+    await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(h.admin + '/#/identity');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const nav = page.getByRole('navigation', { name: '个人设置类别' });
+    await expect(nav).toBeVisible();
+    // The group caption was a <p> that looked clickable: every entry in this bar must be a real link.
+    await expect(nav.locator('p')).toHaveCount(0);
+    await expect(nav.locator(':scope > :not(a)')).toHaveCount(0);
+    await expect(nav.getByRole('link')).toHaveText(['身份与权限', '飞书绑定', '飞书会话', '外部执行端']);
+    await page.setViewportSize({ width: 390, height: 844 }); await page.goto(h.admin + '/#/identity');
+    await expect(page.getByRole('navigation', { name: '个人设置类别' }).locator('p')).toHaveCount(0);
+    // The directory entry names the page it opens instead of pointing at 个人设置 that renders 身份与权限.
+    await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(h.admin + '/#/more');
+    const directory = page.locator('#console-page'), identityEntry = directory.locator('a[href="#/identity"]');
+    await expect(identityEntry).toHaveCount(1); await expect(identityEntry).toContainText('身份与权限');
+    await expect(directory.locator('a[href="#/preferences"]')).toHaveCount(0); await expect(directory).not.toContainText('个人设置');
+    // A project administrator has one settings category; a lone group needs no heading, and 系统与算力 must not appear.
+    const memberPassword = testPassword(); await admin('/api/users', 'POST', { username: 'member', password: memberPassword, role: 'project_admin', repository_ids: ['101'] });
+    const context = await browser.newContext(), member = await context.newPage(); await member.goto(h.admin + '/#/settings/storage');
+    await member.getByLabel('用户名', { exact: true }).fill('member'); await member.getByLabel('密码', { exact: true }).fill(memberPassword);
+    await member.getByRole('button', { name: '登录', exact: true }).click();
+    await member.goto(h.admin + '/#/settings/storage');
+    const settingsNav = member.getByRole('navigation', { name: '全局设置类别' });
+    await expect(settingsNav.getByRole('link')).toHaveText(['存储']);
+    await expect(settingsNav.locator('p')).toHaveCount(0);
+    await expect(member.locator('#settings-panel')).not.toContainText('系统与算力');
+    await context.close();
+  } finally { await h.stop(); }
 });
