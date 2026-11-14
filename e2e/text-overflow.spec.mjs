@@ -146,14 +146,25 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     await page.evaluate(() => document.fonts.ready);
     const desktop = await page.evaluate(() => {
       const medium = [...document.querySelectorAll('.row-title')].find(el => el.textContent.trim() === 'fixture/project-101');
+      const cell = medium.closest('.project-cell[data-label="项目"]');
+      const link = cell?.querySelector(':scope > a');
+      const note = link?.querySelector('small');
       const role = document.querySelector('.current-user-role');
       const ts = getComputedStyle(medium);
+      const nameBox = medium.getBoundingClientRect();
+      const linkBox = link ? link.getBoundingClientRect() : { top: 0 };
       return {
         shown: medium.textContent,
         truncated: medium.scrollWidth > medium.clientWidth + 1,
         ellipsis: ts.textOverflow,
         roleDisplay: role ? getComputedStyle(role).display : 'missing',
         overflow: document.documentElement.scrollWidth,
+        // The overview link must sit under the name, not share its line (CI fonts used to
+        // truncate fixture/project-101 when 项目总览 and its note sat in an auto column).
+        linkBelowName: linkBox.top >= nameBox.bottom - 1,
+        linkText: link?.querySelector('span')?.textContent || '',
+        noteTitle: note?.title || '',
+        noteText: note?.textContent || '',
       };
     });
     expect(desktop.shown).toBe('fixture/project-101');
@@ -161,6 +172,10 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     expect(desktop.ellipsis).toBe('ellipsis');
     expect(desktop.roleDisplay).not.toBe('none');
     expect(desktop.overflow).toBe(1440);
+    expect(desktop.linkBelowName).toBe(true);
+    expect(desktop.linkText).toBe('项目总览');
+    expect(desktop.noteTitle).toBe(desktop.noteText);
+    expect(desktop.noteTitle).toBeTruthy();
     // A clamped list subtitle always carries its full text in title (F4: the clamp is scoped to .row-content > p).
     const subtitles = await page.evaluate(() => [...document.querySelectorAll('.console-ready .row-content > p')].map(p => ({ clamp: getComputedStyle(p).webkitLineClamp, title: p.title, text: p.textContent })));
     expect(subtitles.length).toBeGreaterThan(0);

@@ -194,11 +194,14 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 #rows[data-view=projects] .project-list-row{padding:6px 14px;min-height:44px;border-bottom:1px solid #e8eef2}
 #rows[data-view=projects] .project-list-row:hover{background:#fafcfd}
 .project-cell{min-width:0;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-/* Name and its overview link share the first line; the small detail line keeps a second, so a row is two lines tall. */
-#rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:8px;align-items:baseline}
+/* The name gets the first line to itself, so a medium-length repo such as fixture/project-101 is
+   not squeezed by the 项目总览 link and its 12-character note. The compact link and its note sit
+   under the name; the note may ellipsis, with the full text in title. The detail line stays last. */
+#rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]{display:grid;grid-template-columns:minmax(0,1fr);align-items:baseline}
 #rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]>strong{grid-column:1;grid-row:1;min-width:0}
-#rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]>a{grid-column:2;grid-row:1;white-space:nowrap}
-#rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]>p{grid-column:1/-1;grid-row:2;margin:1px 0 0}
+#rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]>a{grid-column:1;grid-row:2;display:flex;flex-direction:row;flex-wrap:nowrap;align-items:baseline;gap:6px;min-height:0;padding:0;min-width:0;max-width:100%;overflow:hidden}
+#rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]>a>small{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]>p{grid-column:1;grid-row:3;margin:1px 0 0}
 .project-list-row .project-cell .status{max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .project-list-row .project-cell>.actions{gap:4px}
 .project-empty{color:#879da7;font-size:12px}
