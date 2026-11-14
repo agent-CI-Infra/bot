@@ -208,6 +208,16 @@ body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
   .management-input textarea { min-height: 48px; height: 60px; }
   .management-status-bar { padding-top: 3px; padding-bottom: 3px; }
 }
+/* #641: a phone that is also short (390×500) keeps the scope row on two lines, so with the touch-sized 44px controls the
+   composer was 20px taller than the clamped box and the send button got cut by the panel edge. The controls stay above the
+   touch target the wide layout uses, and the composer keeps the height it needs inside the box. */
+@media (max-height: 560px) and (max-width: 600px) {
+  .management-window:not(.management-page):not(.management-fullscreen) .management-scope { padding: 3px 10px 2px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-scope select { min-height: 36px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-scope button { min-height: 36px; padding: 4px 8px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-input textarea { min-height: 36px; height: 44px; }
+  .management-window:not(.management-page):not(.management-fullscreen) .management-input-footer button { min-height: 34px; padding: 4px 10px; }
+}
 
 /* A command receipt as a page of its own (#235): the project page shell, with the state beside the title. */
 .management-receipt-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
