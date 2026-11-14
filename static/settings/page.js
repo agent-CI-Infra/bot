@@ -128,10 +128,10 @@ const settingsCards = {
       row(volumes, [project.name || project.repository_id, size(c.total_bytes) + (c.complete === false ? '（未扫完）' : '') + (capped ? `（共 ${count(c.task_count)} 个工作区，${size(c.tasks_bytes)}；分类只含最大的 ${count(classified)} 个）` : ''),
         share(c.workspaces?.active), share(c.workspaces?.pull_request), share(c.workspaces?.expiring),
         size(c.journal_bytes), size(c.store_bytes), size(c.home_bytes) + (top(c.home_entries) ? `（${top(c.home_entries)}）` : ''),
-        size((c.other_bytes ?? 0) + (c.tmp_bytes ?? 0) + (c.notes_bytes ?? 0)) + (top(c.other_entries) ? `（${top(c.other_entries)}）` : ''), time(c.scanned_at)]);
+        size((c.other_bytes ?? 0) + (c.tmp_bytes ?? 0)) + (top(c.other_entries) ? `（${top(c.other_entries)}）` : ''), time(c.scanned_at)]);
     }
     computers.append(scanned.length ? volumes.wrap : note('还没有项目电脑的扫描结果：电脑运行后会在后台扫描。'));
-    computers.append(note('任务工作区按保留规则分类：运行中（任务未结束或有后续任务）、为 PR 保留（对应的 PR 仍打开）、待删除（已结束，到期后由后台清理删除）。「其他」含 /workspace/tmp、项目笔记和卷根目录下的其他文件。'));
+    computers.append(note('任务工作区按保留规则分类：运行中（任务未结束或有后续任务）、为 PR 保留（对应的 PR 仍打开）、待删除（已结束，到期后由后台清理删除）。「其他」含 /workspace/tmp 和卷根目录下的其他文件；项目笔记是单独的卷，不计入。'));
     cards.push(computers);
     return cards;
   },

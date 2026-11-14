@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -22,16 +22,21 @@ const tree = (t, files) => {
 
 test('a computer scan splits the work volume into task workspaces, journal, git store, HOME and other files', async t => {
   const a = id(), b = id(), root = tree(t, { [`tasks/${a}/repo/big`]: 400_000, [`tasks/${b}/f`]: 100_000, '.runner-journal/x.json': 10_000, 'git/repo.git/pack': 50_000,
-    'home/.cache/pip/w': 200_000, 'home/.npm/n': 30_000, 'tmp/t': 20_000, 'stray/s': 60_000, 'loose-file': 70_000 });
+    'home/.cache/pip/w': 200_000, 'home/.npm/n': 30_000, 'tmp/t': 20_000, 'stray/s': 60_000, 'loose-file': 70_000,
+    // The project notes are another volume mounted in; their history directory is not readable by the computer's user.
+    'project-notes/notes.md': 90_000, 'project-notes/.write-history/x': 10, [`tasks/${b}/project-notes/kept`]: 30_000 });
+  chmodSync(join(root, 'project-notes/.write-history'), 0o000);
   const scan = await storageScan(root);
-  assert.equal(scan.complete, true); assert.equal(scan.task_count, 2);
+  chmodSync(join(root, 'project-notes/.write-history'), 0o700);
+  assert.equal(scan.complete, true, 'the notes mount is left out, so its unreadable history does not mark the scan incomplete'); assert.equal(scan.task_count, 2);
+  assert.ok(!scan.other_entries.some(entry => entry.name === 'project-notes')); assert.ok(scan.tasks.find(entry => entry.name === b).bytes >= 130_000, 'a directory of that name inside a task still counts');
   assert.deepEqual(scan.tasks.map(entry => entry.name), [a, b], 'largest first');
   assert.ok(scan.tasks[0].bytes >= 400_000 && scan.tasks_bytes >= 500_000);
   assert.ok(scan.journal_bytes >= 10_000 && scan.store_bytes >= 50_000 && scan.tmp_bytes >= 20_000);
   assert.deepEqual(scan.home_entries.map(entry => entry.name), ['.cache', '.npm']); assert.ok(scan.home_bytes >= 230_000);
   assert.deepEqual(scan.other_entries.map(entry => entry.name), ['stray']);
   assert.ok(scan.other_bytes >= 130_000, 'the stray directory and the loose file');
-  const parts = scan.tasks_bytes + scan.journal_bytes + scan.store_bytes + scan.home_bytes + scan.tmp_bytes + scan.notes_bytes + scan.other_bytes;
+  const parts = scan.tasks_bytes + scan.journal_bytes + scan.store_bytes + scan.home_bytes + scan.tmp_bytes + scan.other_bytes;
   assert.equal(parts, scan.total_bytes, 'the groups add up to the volume');
   assert.ok(scan.disk.total_bytes > 0);
   // The runner answers it as a repeatable call that is never journaled.
@@ -118,7 +123,7 @@ test('the view lists each computer, the host disk with other, what can be reclai
       database: { bytes: 10 * GiB, free_pages: 2, free_bytes: 8 * GiB, wal_bytes: 0 }, disk: null, migration: null, expiry: { window_days: 2, last_pass: { finished_at: '2026-11-14T03:00:00Z', files: 9, bytes: 90 * GiB } },
       docker: { images: { count: 3, bytes: 9 * GiB, unused_count: 2, reclaimable_bytes: 3 * GiB }, build_cache: { count: 2, bytes: 3 * GiB, reclaimable_bytes: 2 * GiB } },
       computers: [{ repository_id: '101', generation: 1, scanned_at: '2026-11-14T00:00:00Z', result: { complete: true, total_bytes: 100 * GiB, tasks_bytes: 70 * GiB, journal_bytes: GiB, store_bytes: 4 * GiB,
-        home_bytes: 20 * GiB, home_entries: [{ name: '.cache', bytes: 15 * GiB }], tmp_bytes: 0, notes_bytes: 0, other_bytes: 5 * GiB, tasks: [{ name: running, bytes: 30 * GiB }, { name: done, bytes: 40 * GiB }] } }] };
+        home_bytes: 20 * GiB, home_entries: [{ name: '.cache', bytes: 15 * GiB }], tmp_bytes: 0, other_bytes: 5 * GiB, tasks: [{ name: running, bytes: 30 * GiB }, { name: done, bytes: 40 * GiB }] } }] };
   } };
   const report = new StorageReport(store, manager, { git_cache: join(tmpdir(), 'missing-' + id()) });
   await report.refresh();
