@@ -28,7 +28,9 @@ const stoppedStage = (alias: string, done: string) => `CASE WHEN ${actionStatusS
 // A state that waits for a person is judged before the development pipeline: `waiting_environment` and
 // `waiting_publication` ask for an environment or a confirmation, so they are not 正在开发 here while the inbox and the
 // overview count them as 需要关注.
-const developing = "('queued','running','preparing','implementing','validating','publishing','waiting_pr_head','result_ready')";
+// #681: `retry_wait` is the bot's own backoff before it resumes the task, so a development task in it is still
+// 正在开发, exactly as a review task in it stays 正在检视. It is not in `actionStatuses`: nobody has to act on it.
+const developing = "('queued','running','preparing','implementing','validating','publishing','retry_wait','waiting_pr_head','result_ready')";
 const taskTime = (alias: string) => `coalesce(nullif(${alias}.updated_at,''),${alias}.created_at)`;
 // The newest task of each work type on each object, read from the covering index board_task_cover alone. A tasks row
 // stores the task input (about 1 MB on average in production) before updated_at and result, so reading those columns
