@@ -9,18 +9,20 @@ async function renderProject(route) {
     history.replaceState(null, '', `#/projects/${route.id}/roles`);
   }
   const token = ++renderToken, page = $('project-page'); clearTimeout(projectTimer);
-  if (current?.id !== route.id || current.globalSettings) { current = { id: route.id }; page.replaceChildren(projectLoadingState(route.section)); }
+  if (current?.id !== route.id || current.globalSettings) { current = { id: route.id, shownSection: route.section }; page.replaceChildren(projectLoadingState(route.section)); }
   // #697: another page of the same project shows that page's loading state at once. Keeping the previous page until
   // loadProject() answers left the address, the 当前页面 picker and the body naming three different pages.
   // An unsaved knowledge file keeps its page: knowledge.js asks before leaving and puts the old address back.
-  else if (current.repository && route.section !== current.section && !(typeof knowledgeUnsaved === 'function' && knowledgeUnsaved())) { page.replaceChildren(projectHeader(route.section), projectLoadingBody(route.section)); if (typeof syncConsoleShell === 'function') syncConsoleShell(); }
+  // The comparison is with the page on screen (shownSection), which includes another page's pending loading state:
+  // current.section only changes once loadProject() answers, so going back mid-read would otherwise look like a refresh.
+  else if (current.repository && route.section !== current.shownSection && !(typeof knowledgeUnsaved === 'function' && knowledgeUnsaved())) { current.shownSection = route.section; page.replaceChildren(projectHeader(route.section), projectLoadingBody(route.section)); if (typeof syncConsoleShell === 'function') syncConsoleShell(); }
   if (legacyFocus) current.focusAnchor = legacyFocus;
   try { await loadProject(route.id,route.section); } catch (err) {
     if (token === renderToken) { if ([401,403].includes(err.status)) { if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles(); if (current?.id === route.id) current.rolesDraft = null; }
       const unstarted = await unstartedProject(route.id, err);
       if (token === renderToken) {
         // #614: the scope bar must stop saying 正在读取项目… once the read has failed, whatever the reason.
-        if (current?.id === route.id) current.unavailable = unstarted ? null : projectUnavailableKind(err);
+        if (current?.id === route.id) { current.unavailable = unstarted ? null : projectUnavailableKind(err); current.shownSection = null; }
         page.replaceChildren(unstarted || projectUnavailable(err, route));
         if (typeof syncConsoleShell === 'function') syncConsoleShell();
       } }
@@ -33,7 +35,7 @@ async function renderProject(route) {
   if (!repositories.some(repo => String(repo.id) === String(current.id))) repositories.push(current.repository);
   // #642: an unknown section is not quietly replaced by another page: the address and the content have to agree.
   const missing = section !== route.section; setNotFoundTitle(missing);
-  current.section = missing ? null : section; current.item = route.item || null; page.replaceChildren(projectHeader(), projectBody(current.section));
+  current.section = missing ? null : section; current.shownSection = route.section; current.item = route.item || null; page.replaceChildren(projectHeader(), projectBody(current.section));
   const inboxReturn = typeof inboxReturnLink === 'function' ? inboxReturnLink(current.id) : null;
   if (inboxReturn) page.prepend(inboxReturn);
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
