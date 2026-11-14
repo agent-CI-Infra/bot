@@ -14,6 +14,14 @@ function accountLine(row) {
 }
 // Session actors and user-list records carry the same GitHub login in different fields.
 function userDisplayName(user) { const login = user.github?.login || user.github_login; return login ? '@' + login : user.username; }
+// #547: where one name has to stand for the whole account — a delete confirmation, a grants editor title — an account with
+// both ways in shows both, so two same-named accounts can never be mistaken for one. A GitHub-only account has no local
+// name to show: local_login is false and its username is an opaque placeholder.
+function userLabel(user) {
+  const login = user.github?.login || user.github_login, local = user.local_login === false ? null : (user.local_account || user.username);
+  if (login && local) return `${local}（GitHub @${login}）`;
+  return login ? '@' + login : (local || user.username);
+}
 function userAccessLines(user) {
   const projects = user.access?.projects || [], lines = [element('p', projects.length ? `当前可见项目（${projects.length}）：` : '当前没有可访问的项目')];
   if (projects.length) {
@@ -31,7 +39,7 @@ function userLine(row) {
 }
 async function deleteUser(row) {
   const self = row.id === me.id, kept = '仓库和组织授权、个人看板设置一并去掉，登录名可以重新使用；操作审计保留。';
-  const deleted = await askConfirm({ title: self ? `删除你自己的账号 ${userDisplayName(row)}？` : `删除用户 ${userDisplayName(row)}？`, action: '删除', danger: true,
+  const deleted = await askConfirm({ title: self ? `删除你自己的账号 ${userLabel(row)}？` : `删除用户 ${userLabel(row)}？`, action: '删除', danger: true,
     body: self ? ['只有还剩另一名可管理全部项目的活跃管理员时才能删除。删除后当前会话立即失效，需要用另一名管理员登录。', kept] : ['它的会话立即失效。', kept, '不能删除最后一名可管理全部项目的活跃管理员。'],
     run: () => api('/api/users/' + encodeURIComponent(row.id), 'DELETE', { confirm: true }).catch(err => { throw new Error(removalMessage(err)); }) });
   if (!deleted) return;
