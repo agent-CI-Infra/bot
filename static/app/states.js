@@ -3,6 +3,7 @@ function consoleState(title, text, { tone = '', retry, retryLabel = t('action.re
   // switch so existing callers keep working: '' is empty, 'loading' waits,
   // 'error' is a failure (role=alert) and must never be styled as an empty list.
   const kind = tone === 'error' ? 'error' : tone === 'loading' ? 'loading' : 'empty';
+  if (kind === 'error' && sessionExpired) return sessionExpiredState(title, text);
   const box = element('div', '', 'console-state console-state-' + kind);
   box.setAttribute('role', kind === 'error' ? 'alert' : 'status');
   box.setAttribute('data-testid', 'console-state-' + kind);

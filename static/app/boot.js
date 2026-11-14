@@ -7,7 +7,7 @@ function timestamp(value) {
 }
 function options(select, rows, label) { const selected = select.value; while (select.options.length > 1) select.remove(1); rows.forEach(row => select.add(new Option(label(row), row.id))); if (rows.some(row => row.id === selected)) select.value = selected; }
 function renderCurrentUser() {
-  const who = $('who'), role = me.role === 'super_admin' ? t('role.super_admin') : t('role.project_admin');
+  const who = $('who'), role = currentRoleText();
   const display = userDisplayName(me);
   const full = `${display} · ${role}`;
   who.replaceChildren(); who.title = full;
@@ -35,6 +35,7 @@ async function start() {
   try { setupState = await api('/api/setup'); } catch (err) { showBootFailure(err); return; }
   setup = !setupState.initialized;
   try { me = await api('/api/auth/me'); } catch { me = null; }
+  if (me) { clearSessionExpired(); restoreSessionReturn(); }
   if (typeof syncManagementChat === 'function') syncManagementChat();
   // The shell was blank until both requests above answered; the boot line covers that gap and leaves with them.
   $('boot').hidden = true;
