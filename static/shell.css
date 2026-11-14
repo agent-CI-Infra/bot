@@ -320,3 +320,6 @@ body:not(.console-ready) header .locale-switch { background: #fff; }
   body.console-ready > header { flex-wrap: wrap; row-gap: 4px; }
   body.console-ready #header-tools { flex: 1 1 100%; width: 100%; justify-content: flex-end; margin-left: 0; }
 }
+/* #642: 找不到这个页面 — one primary way back, full-width buttons on a phone. */
+.page-not-found-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: 16px 0 0; }
+@media (max-width: 480px) { .page-not-found-actions > * { flex: 1 1 100%; justify-content: center; } }

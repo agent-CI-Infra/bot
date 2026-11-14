@@ -277,6 +277,10 @@ function syncConsoleShell() {
       }
       if (child.matches?.('a')) (group || sectionPicker).append(new Option(child.textContent, child.getAttribute('href'), false, child.getAttribute('aria-current') === 'page'));
     }
+    // #642: an unknown project page has no entry of its own; the picker names that instead of showing the first section.
+    if (project && $('project-page').querySelector('[data-page-not-found]')) {
+      const missing = new Option('找不到页面', '', true, true); missing.disabled = true; sectionPicker.prepend(missing);
+    }
   }
   syncConsoleMobileCurrent();
   $('console-sidebar').classList.toggle('console-platform', platform);
@@ -285,7 +289,7 @@ function syncConsoleShell() {
 // reports it as the current destination instead of naming a page underneath it.
 function syncConsoleMobileCurrent() {
   const chat = typeof managementChatState === 'function' ? managementChatState() : null;
-  const chosen = chat?.open ? 'assistant' : ['projects', 'board', 'inbox'].includes(tab) ? tab : tab === 'design' ? '' : 'more';
+  const chosen = chat?.open ? 'assistant' : ['projects', 'board', 'inbox'].includes(tab) ? tab : ['design', 'not-found'].includes(tab) ? '' : 'more';
   for (const a of $('console-mobile-nav').querySelectorAll('a')) {
     if (a.dataset.page === 'inbox') a.href = '#/inbox' + (consoleProject ? '/' + consoleProject : '');
     if (a.dataset.page === chosen) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
@@ -358,7 +362,8 @@ async function renderConsoleInbox(request) {
   } finally { body.removeAttribute('aria-busy'); }
 }
 async function renderConsolePage(request) {
-  if (tab === 'new-task') await renderNewTask(request);
+  if (tab === 'not-found') renderNotFoundPage();
+  else if (tab === 'new-task') await renderNewTask(request);
   else if (tab === 'conversations') await renderChannelConsole(request);
   else if (tab === 'more') renderConsoleMore();
   else {

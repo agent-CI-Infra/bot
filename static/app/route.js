@@ -2,7 +2,30 @@
 const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['projects','events','external'];
 // Console pages are drawn by static/shell.js (renderConsolePage). They are not tabs of the generic list, and no list
 // read may ever build /api/<tab> from them: #/more would become GET /api/more, an endpoint that does not exist (#365).
-const consoleTabs = ['more', 'inbox', 'new-task', 'conversations'];
+const consoleTabs = ['more', 'inbox', 'new-task', 'conversations', 'not-found'];
+// #642: an address under #/ that names no page shows 找不到这个页面 instead of keeping (or silently loading) another page.
+// In-page anchors such as the skip link's #main-content are not console addresses and still keep the current page.
+function unknownAddress(hash) {
+  const path = hash.split('?')[0];
+  if (!path.startsWith('#/') || path === '#/') return false;
+  // #/projects/<anything> that is not a project address (#/projects/abc, #/projects/1/Members) is a broken project link.
+  if (/^#\/projects\/./.test(path) && !projectRoute()) return true;
+  return !addressTab(hash);
+}
+// The page title says when nothing was found, so a tab or a history entry does not read as an ordinary console page.
+function setNotFoundTitle(missing) { document.title = (missing ? '找不到页面 · ' : '') + t('meta.title'); }
+// The empty state #553 uses everywhere, with one primary way back. Inside a project it returns to that project's overview.
+function pageNotFoundState(project = null) {
+  const box = consoleState('找不到这个页面', project ? '这个项目里没有这个页面，链接可能已过期或输入有误。' : '链接可能已过期或输入有误。');
+  box.classList.add('page-not-found'); box.dataset.pageNotFound = project ? 'project' : 'console';
+  const actions = element('div', '', 'actions page-not-found-actions');
+  const primary = element('a', project ? '回到项目总览' : '回到项目列表', 'button-link btn-primary');
+  primary.href = project ? `#/projects/${project}/overview` : '#/projects';
+  const secondary = element('a', project ? '回到项目列表' : '查看身份与权限', 'button-link btn-secondary');
+  secondary.href = project ? '#/projects' : '#/identity';
+  actions.append(primary, secondary); box.append(actions); return box;
+}
+function renderNotFoundPage() { $('console-page').replaceChildren(pageNotFoundState()); }
 // Wizard steps live inside global settings; old top-level addresses are normalized by route().
 const onboardingAddress = /^#\/settings\/onboarding(?:\/([0-6]))?$/;
 const legacyOnboardingAddress = /^#onboarding(?:\/(\d+))?$/;
@@ -41,13 +64,14 @@ async function route() {
   const legacyProjectSettings = /^#\/settings\/projects\/([1-9]\d*)$/.exec(location.hash);
   if (legacyProjectSettings) history.replaceState({ projectListOrigin: true }, '', `#/projects/${legacyProjectSettings[1]}/basic`);
   // An address the console does not know keeps the current page (on a fresh load that is the projects page).
-  let next = addressTab(location.hash) || tab;
+  const missing = unknownAddress(location.hash);
+  let next = missing ? 'not-found' : addressTab(location.hash) || tab;
   // Project administrators open global settings only for its 存储 section.
   if (superTabs.includes(next) && me.role !== 'super_admin' && !(next === 'settings' && /^#\/settings(?:\/storage(?:\/.*)?)?$/.test(location.hash))) next = 'projects';
   // The sample page issues no fetch of its own - every panel is constant markup - so a client-side role check is
   // the whole gate. If it ever reads server data, it needs a server-side gate first: hiding a route is not one.
   if (next === 'design' && me.role !== 'super_admin') next = 'projects';
-  const resolved = next;
+  const resolved = next; setNotFoundTitle(missing);
   if (next !== tab) offset = 0; tab = next;
   const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
   // Global and project computer views reuse DOM ids; discard the inactive view and its scheduled reads.
