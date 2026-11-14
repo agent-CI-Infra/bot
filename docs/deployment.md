@@ -38,7 +38,7 @@ docker compose -f compose.yaml -f compose.build.yaml up -d --build
 
 部署经 SSH 把该版本的 `compose.yaml` 写到服务器目录，在同目录 `.env` 里写入 `BOT_IMAGE_TAG=<版本>`（其他设置保留），然后运行 `docker compose pull`，清理上次中断留下的替换容器，再运行 `docker compose up -d --force-recreate`，等 `bot` 的健康检查通过。`compose.yaml` 每次发布都会被覆盖，服务器自己的设置放在 `.env` 或 `compose.override.yaml`。
 
-部署要能重跑。Compose 重建一个容器时，先以 `<旧容器 id>_<项目>-<服务>-<序号>` 创建替换容器，再删掉旧容器，最后把替换容器改回 `<项目>-<服务>-<序号>`。中途退出（例如 Docker 停不掉某个容器）会给同一个服务留下第二个容器：普通 `up -d` 会沿用它并保留临时名，`--force-recreate` 则会因为旧容器还占着名字而失败。所以部署在 `up` 之前，先删掉本项目服务中名字不是 `<项目>-<服务>-<序号>` 的容器（只查 `docker compose ps` 列出的服务容器，不碰 manager 创建的项目电脑；替换容器没有数据，数据都在卷里），再用 `--force-recreate` 按该版本的 `compose.yaml` 重建全部服务。发布本来就会换掉所有镜像标签，每个容器都会重建，所以正常部署的停机时间不会因此增加。部署中断或失败后，先看日志排除原因，然后在 Actions 里对该次 Release 运行选择 Re-run failed jobs，只重跑 deploy 任务即可恢复到该版本，不需要上服务器手工处理。任何一步失败时，日志末尾都有 `docker compose ps -a` 列出的每个容器及其状态；`bot` 没有在约两分钟内变为健康时，还会附上它最近 50 行日志。manager 启动时要逐个恢复已保存的项目，期间 `up -d` 等它健康后才启动 `bot`，这段等待算在 `up -d` 里。`npm run test:deploy:docker` 用真实 Docker Compose 验收这一步，见[开发说明](development.md)。
+部署要能重跑。Compose 重建一个容器时，先以 `<旧容器 id>_<项目>-<服务>-<序号>` 创建替换容器，再删掉旧容器，最后把替换容器改回 `<项目>-<服务>-<序号>`。中途退出（例如 Docker 停不掉某个容器）会给同一个服务留下第二个容器：普通 `up -d` 会沿用它并保留临时名，`--force-recreate` 则会因为旧容器还占着名字而失败。所以部署在 `up` 之前，先删掉本项目服务中名字不是 `<项目>-<服务>-<序号>` 的容器（只查 `docker compose ps` 列出的服务容器，不碰 manager 创建的项目电脑；替换容器没有数据，数据都在卷里），再用 `--force-recreate` 按该版本的 `compose.yaml` 重建全部服务。发布本来就会换掉所有镜像标签，每个容器都会重建，所以正常部署的停机时间不会因此增加。部署中断或失败后，先看日志排除原因，然后在 Actions 里对该次 Release 运行选择 Re-run failed jobs，只重跑 deploy 任务即可恢复到该版本，不需要上服务器手工处理。任何一步失败时，日志末尾都有 `docker compose ps -a` 列出的每个容器及其状态；`bot` 容器停止，或 90 分钟内没有变为健康时，还会附上它最近 50 行日志；等待期间每分钟输出一次压缩进度（见[启动时压缩数据库](#启动时压缩数据库)）。manager 启动时要逐个恢复已保存的项目，期间 `up -d` 等它健康后才启动 `bot`，这段等待算在 `up -d` 里。`npm run test:deploy:docker` 用真实 Docker Compose 验收这一步，见[开发说明](development.md)。
 
 在仓库 Settings → Environments → `production` 中配置：
 
@@ -131,6 +131,17 @@ runner 只接受 48 位十六进制的目录名，只删除 `/workspace/tasks` �
 ## SQLite WAL 大小
 
 控制面（`control.sqlite`）和 manager（`manager.sqlite`）的连接都设置 `PRAGMA journal_size_limit=536870912`。WAL 文件会保持它到过的最大尺寸；设置后，checkpoint 把 WAL 内容全部写回数据库、下一次写入从头使用 WAL 时，SQLite 把文件截到 512 MiB。升级后已经很大的 WAL 在第一次这样的 checkpoint 后变小，启动时不读取或重写大表。
+
+## 启动时压缩数据库
+
+两个数据库建立时都是 `auto_vacuum=NONE`：清理或迁移空出的页只留在文件里给新数据复用，文件不会变小（#436 把正文搬进轨迹文件后，生产的 `control.sqlite` 128 GB 里约 101 GB、`manager.sqlite` 108 GB 里约 99 GB 是空闲页）。把空闲页还给磁盘只能重写整个文件，期间要独占数据库，所以由每个服务在启动时、开始服务之前做一次（`manager/compaction.mjs`，控制面共用同一份代码）：manager 在开始监听、报告就绪之前压缩 `manager.sqlite`，控制面在开始监听之前压缩 `control.sqlite`。这是「启动时不重写大表」的一次性例外。
+
+- **条件**：空闲页超过 30% 且超过 1 GiB，数据库还是 `auto_vacuum=NONE`，并且数据盘剩余不少于实际数据加余量（实际数据的十分之一，至少 1 GiB）。不满足时记下原因（空闲页不多、剩余空间不够，后者附需要和剩余的字节数），照常启动；存储页显示原因和「下次启动时压缩」，下次启动再试。
+- **做法**：先把 WAL 全部并入数据库（`wal_checkpoint(TRUNCATE)`）并关闭连接；在工作线程里 `VACUUM INTO <数据库>.compact`（同一个卷，临时文件也放在这里，容器的 `/tmp` 只有小的 tmpfs），新文件设为 `auto_vacuum=INCREMENTAL`；对新文件做完整的 `PRAGMA integrity_check`。通过后把旧文件硬链接为 `<数据库>.before-compact`，再把新文件原子改名为数据库（任何时刻数据库路径都是一份完整文件），打开一次，最后删掉旧文件，空间这时才还给磁盘。检查不通过或出错时删掉副本，旧文件不变。进程中途停止时，下次启动先删掉留下的副本和旧文件链接。
+- **日志**：开始时写一行数据库大小、空闲页和要复制的实际数据，之后每 15 秒写一次已复制的字节和用时（`[compaction]`，manager 为 `[manager]`），结束时写压缩前后的大小和用时。结果存在各自数据库的 `settings.compaction`，存储页显示。
+- **之后**：压缩后的数据库是 `auto_vacuum=INCREMENTAL`，后台每 10 分钟检查一次，空闲页超过 4096 页时以每步 2048 页执行 `PRAGMA incremental_vacuum`，步与步之间至少让出与这一步同样长的时间，把之后清理出的空间还给磁盘，不需要停机。
+
+**发版前**：压缩期间服务不可用，时长大致与实际数据量成正比。在一台 14 核、31 GB 内存的开发机上，一份 8.9 GiB、其中 3.1 GiB 实际数据的合成库（宽行加索引，删去三分之二）复制加完整性检查用了 11 秒，但文件刚写过、全在页缓存里。生产的库不在缓存里，实际数据还分散在大文件中，按数据盘 100–300 MB/s 的读写估算：`control.sqlite`（约 27 GB 实际数据）约 10–30 分钟，`manager.sqlite`（约 10 GB）约 5–10 分钟，以日志里的进度为准。 manager 先压缩，`bot` 等 manager 健康后才启动，所以总停机是两者之和；manager 健康检查的 `start_period` 为 30 分钟，部署步骤最多等 `bot` 90 分钟并输出压缩进度。数据盘要先留出两边实际数据之和再加余量的空间，否则这次启动跳过压缩、照常运行。
 
 ## 备份与恢复
 

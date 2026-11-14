@@ -44,7 +44,8 @@ export class StorageReport {
   private directories: { at: number; values: Record<string, Measured> } = { at: 0, values: {} };
   private readonly classified = new Map<string, { scanned_at: string; value: Json | null }>();
   private readonly paths: Record<string, string>;
-  constructor(private readonly store: Store, private readonly manager?: Manager, paths: { git_cache?: string; public_boards?: string } = {}) {
+  constructor(private readonly store: Store, private readonly manager?: Manager, paths: { git_cache?: string; public_boards?: string } = {},
+    private readonly vacuum?: { state(): unknown }) {
     const data = store.trajectories.root ? dirname(store.trajectories.root) : null;
     this.paths = Object.fromEntries(Object.entries({ git_cache: paths.git_cache ?? (data && join(data, 'git-cache')), public_boards: paths.public_boards ?? (data && join(data, 'public-boards')) })
       .filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
@@ -74,10 +75,13 @@ export class StorageReport {
         }
         const computers: Record<string, Json> = {};
         for (const row of (Array.isArray(manager?.computers) ? manager!.computers : []) as Record<string, any>[]) computers[String(row.repository_id)] = this.computer(row);
-        let cleanup: Record<string, Json> = {};
+        let cleanup: Record<string, Json> = {}, compaction: Json | null = null;
         try { cleanup = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='workspace_cleanup'")?.value ?? '{}'); } catch {}
+        try { compaction = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='compaction'")?.value ?? 'null'); } catch {}
         this.snapshot = { refreshed_at: new Date().toISOString(), open, manager, computers, cleanup,
-          control: { database: databaseSize(this.store.db), disk: this.disk(), migration: migrationProgress(this.store), directories: this.directories.values } };
+          control: { database: databaseSize(this.store.db), disk: this.disk(), migration: migrationProgress(this.store), directories: this.directories.values,
+            // The compaction at the last start and the incremental vacuum since (#671).
+            compaction, vacuum: (this.vacuum?.state() ?? null) as Json | null } };
       } finally { this.refreshing = undefined; }
     })();
   }
@@ -145,7 +149,8 @@ export class StorageReport {
     const alerts = ([['control', control?.disk], ['manager', manager?.disk]] as [string, any][]).filter(([, disk]) => disk?.low)
       .map(([where, disk]) => ({ where, free_bytes: disk.free_bytes, total_bytes: disk.total_bytes, reserve_bytes: disk.reserve_bytes }));
     return { refreshed_at: snapshot?.refreshed_at ?? null, projects: list, alerts, ...summary(list, control, manager, snapshot?.cleanup ?? {}),
-      totals: { control, manager: manager ? { database: manager.database ?? null, disk: manager.disk ?? null, migration: manager.migration ?? null, expiry: manager.expiry ?? null, docker: manager.docker ?? null } : null } };
+      totals: { control, manager: manager ? { database: manager.database ?? null, disk: manager.disk ?? null, migration: manager.migration ?? null, expiry: manager.expiry ?? null, docker: manager.docker ?? null,
+        compaction: manager.compaction ?? null, vacuum: manager.vacuum ?? null } : null } };
   }
 }
 
@@ -197,6 +202,6 @@ export function databaseSize(db: Store['db']): Json {
   const pageSize = value('page_size'), pages = value('page_count'), free = value('freelist_count');
   const file = String((db.prepare('PRAGMA database_list').all() as { name: string; file: string }[]).find(row => row.name === 'main')?.file || '');
   let wal = 0; if (file) try { wal = statSync(file + '-wal').size; } catch {}
-  return { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal };
+  return { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal, auto_vacuum: value('auto_vacuum') };
 }
 

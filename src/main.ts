@@ -21,6 +21,7 @@ import { StallMonitor } from './core/stalls.js';
 import { PayloadMigration } from './storage/migration.js';
 import { WorkspaceCleanup } from './projects/workspace-cleanup.js';
 import { StorageReport } from './app/storage.js';
+import { compactDatabase, IncrementalVacuum } from '../manager/compaction.mjs';
 import { commandTimeoutLimit } from './agent/command.js';
 
 process.umask(0o077);
@@ -30,7 +31,13 @@ if (!keyFile) throw new Error('BOT_MASTER_KEY_FILE is required');
 const databasePath = process.env.BOT_DATABASE_PATH || '/data/control.sqlite';
 // One origin for the console, login, App callbacks and webhooks; the wizard's verified address overrides it for URLs.
 const publicOrigin = deploymentOrigin(process.env, message => console.warn(message));
+// Once, before the control plane serves (#671): when free pages are most of control.sqlite and the disk has room for a
+// copy, the file is rewritten without them. The only rewrite of a large database at start; it logs its progress.
+const compaction = await compactDatabase(databasePath, { log: line => console.log('[compaction] ' + line) });
 const store = new Store(databasePath, readFileSync(keyFile));
+store.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', 'compaction', JSON.stringify(compaction));
+// Afterwards the pages later cleanups free go back to the disk in small steps.
+const vacuum = new IncrementalVacuum(store.db);
 const githubLogin = new GitHubLogin(store, {
   defaultOrigin: publicOrigin, apiUrl: process.env.BOT_GITHUB_API_URL,
   environment: () => process.env.BOT_GITHUB_OAUTH_CLIENT_ID ? {
@@ -76,7 +83,7 @@ const releases = new ReleaseService(store, process.env.BOT_GITHUB_API_URL); rele
 const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_URL); actionsFailures.start();
 // Logs a blocked event loop with the requests in flight, and slow requests (see core/stalls.ts).
 const stalls = new StallMonitor(); stalls.start();
-const migration = new PayloadMigration(store), storage = new StorageReport(store, manager, { git_cache: gitCache.root, public_boards: resolve(dirname(databasePath), 'public-boards') });
+const migration = new PayloadMigration(store), storage = new StorageReport(store, manager, { git_cache: gitCache.root, public_boards: resolve(dirname(databasePath), 'public-boards') }, vacuum);
 const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, gateOnboarding, releases, boards,
   imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls, storage,
@@ -92,12 +99,12 @@ server.listen(8791, '0.0.0.0', () => {
   // payloads written before #436 out of their rows, slice by slice.
   const seal = () => store.trajectories.seal().catch(error => console.error('[trajectories] sealing failed:', error));
   void seal().then(() => { if (!stopping) migration.start(); }); setInterval(seal, 10 * 60_000).unref();
-  storage.start();modelCatalog(store).start();
+  storage.start();modelCatalog(store).start();vacuum.start();
 });
 let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;
   clearInterval(timer); clearInterval(syncTimer); clearInterval(identityTimer); workspaces.close();
-  server.close(async () => { await Promise.all([modelCatalog(store).close(),installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close(),migration.stop()]); store.close(); process.exit(0); });
+  server.close(async () => { await Promise.all([modelCatalog(store).close(),installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close(),migration.stop(),vacuum.stop()]); store.close(); process.exit(0); });
   setTimeout(() => process.exit(1), 100_000).unref();
 });

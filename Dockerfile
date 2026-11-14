@@ -6,6 +6,7 @@ RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
 COPY runner/command-policy.mjs runner/command-policy.d.mts runner/command-output.mjs runner/command-output.d.mts ./runner/
+COPY manager/compaction.mjs manager/compaction.d.mts ./manager/
 COPY public-board ./public-board
 RUN npm run build
 
@@ -37,6 +38,8 @@ COPY skills ./skills
 # Process Harness executes this worker in the control-plane container.
 COPY runner/role-worker.mjs ./runner/role-worker.mjs
 COPY runner/command-policy.mjs runner/command-output.mjs ./runner/
+# The control plane compacts control.sqlite at start with the manager's routine (#671).
+COPY manager/compaction.mjs ./manager/compaction.mjs
 COPY scripts/external-token.mjs ./scripts/external-token.mjs
 # The entry gateway service runs from this image too (node webhook/main.mjs), as its own container.
 COPY webhook/main.mjs ./webhook/main.mjs

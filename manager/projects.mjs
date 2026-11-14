@@ -9,6 +9,7 @@ import { FileTree } from './file-tree.mjs';
 import { validNoteId } from '../runner/note-catalog.mjs';
 import { LedgerMigration, Trajectories, TrajectoryExpiry, inputHeader, trajectoryStorage } from './trajectories.mjs';
 import { DiskGuard } from './disk.mjs';
+import { IncrementalVacuum } from './compaction.mjs';
 
 const randomId = () => randomBytes(24).toString('hex');
 // One line on stderr per failure that changes a computer's state, so `docker compose logs manager` says why it happened.
@@ -110,6 +111,8 @@ export class Projects {
     // by main.mjs once the manager is ready.
     this.migration = new LedgerMigration(this.db, this.trajectories, { guard: this.disk });
     this.expiry = new TrajectoryExpiry(this.db, this.trajectories);
+    // Returns the pages later cleanups free once the ledger is compacted (auto_vacuum=INCREMENTAL, #671); main.mjs starts it.
+    this.vacuum = new IncrementalVacuum(this.db);
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'revision')) this.db.exec('ALTER TABLE projects ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
     // spec: the requested computer; build: the image built for its packages; setup: the last setup script run.
     for (const column of ['spec', 'build', 'setup']) if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === column)) this.db.exec(`ALTER TABLE projects ADD COLUMN ${column} TEXT`);
@@ -722,11 +725,12 @@ export class Projects {
     // The last scan of each computer's work volume and Docker's images and build cache, as the background work left them.
     const computers = this.db.prepare('SELECT repository_id,generation,scanned_at,result FROM computer_storage').all().map(row => ({ ...row, result: JSON.parse(row.result) }));
     const docker = JSON.parse(this.db.prepare("SELECT value FROM settings WHERE key='docker_usage'").get()?.value ?? 'null');
-    return { usage: [...usage, ...open.values()], database: { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal },
-      disk: this.disk.check(), migration: this.migration.state(), expiry: this.expiry.state(), computers, docker };
+    const compaction = JSON.parse(this.db.prepare("SELECT value FROM settings WHERE key='compaction'").get()?.value ?? 'null');
+    return { usage: [...usage, ...open.values()], database: { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal, auto_vacuum: value('auto_vacuum') },
+      disk: this.disk.check(), migration: this.migration.state(), expiry: this.expiry.state(), computers, docker, compaction, vacuum: this.vacuum.state() };
   }
   async shutdown() {
-    await this.migration.stop(); await this.expiry.stop(); await Promise.all([...this.pending]); for (const row of this.list()) await this.stopAll(row.repository_id);
+    await this.migration.stop(); await this.expiry.stop(); await this.vacuum.stop(); await Promise.all([...this.pending]); for (const row of this.list()) await this.stopAll(row.repository_id);
     this.trajectories.closeAll(); await this.trajectories.settle(); this.db.close();
   }
 }

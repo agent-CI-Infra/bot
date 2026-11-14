@@ -46,6 +46,12 @@ const settingsCards = {
   // copies and an alert for a disk below its reserve.
   async storage() {
     const view = await api('/api/storage'), size = value => Number.isFinite(value) ? bytes(value) : '未知', count = value => Number.isFinite(value) ? value.toLocaleString('zh-CN') : '未知';
+    const reasons = { disk_space: '剩余空间不够放下一份实际数据', few_free_pages: '空闲页不多，不需要', incremental: '已压缩，由后台增量回收', database_busy: '数据库正被占用', wal_not_empty: 'WAL 没能并入数据库',
+      integrity_check: '新文件没通过完整性检查，旧文件保留', error: '出错，数据库保持原样', no_database: '还没有数据库' };
+    const compacted = state => !state ? '尚未记录' : state.action === 'compacted' ? `${time(state.at)} 由 ${size(state.before?.bytes)} 压缩到 ${size(state.after_bytes)}，用时 ${Math.round(state.duration_ms / 1000)} 秒`
+      : `${time(state.at)} ${state.action === 'not_needed' ? '未压缩' : state.action === 'skipped' ? '跳过，下次启动再试' : '失败，下次启动再试'}：${reasons[state.reason] ?? state.reason}`
+        + (state.reason === 'disk_space' ? `（需要 ${size(state.required_bytes)}，剩余 ${size(state.disk_free_bytes)}）` : '');
+    const vacuumed = state => !state ? '读不到' : state.auto_vacuum !== 2 ? '未启用（压缩后启用）' : state.last ? `最近 ${time(state.last.finished_at)} 归还 ${size(state.last.bytes)}` : '已启用，暂无可归还的页';
     const expiry = state => !state ? '读不到' : `保留 ${state.window_days} 天；` + (state.last_pass ? `最近一次 ${new Date(state.last_pass.finished_at).toLocaleString('zh-CN')} 删除 ${count(state.last_pass.files)} 个文件（${size(state.last_pass.bytes)}）` : '尚未运行')
       + (state.last_error ? `；最近一个错误：${state.last_error}` : '');
     const time = value => value ? new Date(value).toLocaleString('zh-CN') : '—', row = (table, cells) => { const tr = document.createElement('tr'); for (const text of cells) tr.append(element('td', text)); table.body.append(tr); };
@@ -69,7 +75,9 @@ const settingsCards = {
       host.append(table.wrap, note('控制面、manager、项目电脑的卷和 Docker 数据在同一块数据盘上；「其他」包括助手电脑的 HOME、系统和不归 bot 管理的目录，只显示、不清理。'));
       cards.push(host);
       const reclaim = card('可回收与最近清理'), list = costTable(['类别', '可回收', '怎么回收']);
-      const how = { control_free_pages: ['control.sqlite 空闲页', '压缩数据库（维护时执行）'], manager_free_pages: ['manager.sqlite 空闲页', '压缩数据库（维护时执行）'],
+      // A database already compacted returns its free pages in the background; one not yet compacted at its next start.
+      const pages = database => database?.auto_vacuum === 2 ? '后台逐步归还磁盘' : '下次启动时压缩（空闲页超过 30% 且超过 1 GB、剩余空间够时）';
+      const how = { control_free_pages: ['control.sqlite 空闲页', pages(view.totals?.control?.database)], manager_free_pages: ['manager.sqlite 空闲页', pages(view.totals?.manager?.database)],
         expiring_workspaces: ['待删除的任务工作区', '后台按任务工作区保留规则到期删除'], docker_build_cache: ['Docker 构建缓存（未使用）', '在主机上执行 docker builder prune'],
         docker_unused_images: ['没有容器使用的 Docker 镜像', '在主机上确认后执行 docker image prune'] };
       for (const item of view.reclaimable ?? []) row(list, [how[item.key]?.[0] ?? item.key, item.bytes === null ? '尚未测量' : size(item.bytes) + (Number.isFinite(item.count) ? `（${count(item.count)} 个）` : ''), how[item.key]?.[1] ?? '']);
@@ -84,8 +92,10 @@ const settingsCards = {
       totals.append(facts([['控制面数据库 control.sqlite', side(view.totals.control?.database)], ['manager 账本 manager.sqlite', side(view.totals.manager?.database)],
         ['控制面所在磁盘剩余', view.totals.control?.disk ? `${size(view.totals.control.disk.free_bytes)} / ${size(view.totals.control.disk.total_bytes)}` : '读不到'],
         ['manager 所在磁盘剩余', view.totals.manager?.disk ? `${size(view.totals.manager.disk.free_bytes)} / ${size(view.totals.manager.disk.total_bytes)}` : '读不到'],
+        ['control.sqlite 启动时压缩', compacted(view.totals.control?.compaction)], ['manager.sqlite 启动时压缩', compacted(view.totals.manager?.compaction)],
+        ['数据库增量回收', [['控制面', view.totals.control?.vacuum], ['manager', view.totals.manager?.vacuum]].map(([where, state]) => `${where}：${vacuumed(state)}`).join('；')],
         ['manager 重复正文清理', expiry(view.totals.manager?.expiry)]]));
-      totals.append(note('清空正文后数据库文件不会自己变小，空出的页会留给新数据复用；要回收磁盘需要在维护窗口做 VACUUM。'));
+      totals.append(note('清空正文后数据库文件不会自己变小，空出的页会留给新数据复用。空闲页超过 30% 且超过 1 GB、磁盘剩余足够放下一份实际数据时，服务在下次启动、开始服务之前把数据库重写一遍（压缩），校验通过后才删除旧文件；压缩后的数据库会在后台把之后清理出的空间逐步还给磁盘。'));
       totals.append(note('manager 的轨迹文件只在同一操作重复调用时用来重放结果，控制面另存了同样的请求和结果。关闭超过保留天数、且其中没有仍在运行的调用的文件会在后台删除；之后重复这些调用会得到明确的「结果已过期」，不会重新执行或返回别的结果。'));
       cards.push(totals);
       const migration = card('历史数据迁移'), table = costTable(['位置', '表', '已迁移', '跳过', '失败', '已搬出', '待检查（估计）', '完成时间']);
