@@ -7,6 +7,7 @@ import { command,environment,workspaceTag } from './command.mjs';
 import {agentOperation} from './agent.mjs';
 import { git as storeGit, storeRoot } from './store.mjs';
 import {withWorkspaceLock} from './workspace-lock.mjs';
+import {clearStaleGitLocks,lockGraceMs} from './git-locks.mjs';
 import { Notes } from './notes.mjs';
 import { tasksDirectory, workspaceRoot as projectRoot } from './paths.mjs';
 
@@ -57,6 +58,14 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     child.on('close',(code,signal)=>code===0?res(Buffer.concat(chunks)):rej(new Error(`git ${args[0]} failed: ${signal||code}; ${Buffer.concat(errors).toString('utf8').trim()}`)));
     child.stdin.on('error',()=>{});child.stdin.end(data);
   });
+  // Before an operation writes the worktree's index or HEAD, the locks a git process that ended abnormally left there are
+  // removed and named in the result; while a git process works on the worktree the operation stops as busy, and the
+  // control plane retries it (#712).
+  const unlock=async()=>{
+    const {removed,busy}=await clearStaleGitLocks(repo,{workspaceId:input.workspace_id});
+    if(busy)throw new Error(`git_worktree_busy: ${busy.locks.join(', ')} ${busy.pids.length?'held by running git process '+busy.pids.join(', '):`created less than ${lockGraceMs/1000} seconds ago`}; retry later`);
+    return removed.length?{stale_git_locks_removed:removed}:{};
+  };
   // An evaluator gets a distinct checkout of the submitted Git object, never the executor's dirty tree/session.
   if(input.type==='workspace_acceptance'){
     if(!/^[a-f0-9]{48}$/.test(input.source_workspace_id||'')||input.source_workspace_id===input.workspace_id||!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_acceptance_snapshot');
@@ -123,7 +132,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     return {written:true};
   }
   if(input.type==='workspace_snapshot'){
-    const manifest=JSON.parse(await readFile(root+'/snapshot.json','utf8'));
+    const manifest=JSON.parse(await readFile(root+'/snapshot.json','utf8')),unlocked=await unlock();
     await git(['init','--initial-branch=bot-local']);await git(['config','core.autocrlf','false']);
     for(const [name,entry]of Object.entries(manifest)){
       const target=await path(name),data=entry.mode==='120000'?Buffer.from(await readlink(target)):await readFile(target);
@@ -132,7 +141,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     }
     const tree=(await git(['write-tree'])).toString().trim();if(tree!==input.tree_sha)throw new Error(`snapshot_tree_mismatch: expected ${input.tree_sha}, actual ${tree}`);
     const commit=(await git(['commit-tree',tree],Buffer.from('Prepare repository snapshot\n'))).toString().trim();await git(['update-ref','refs/heads/bot-local',commit]);
-    return {tree_sha:tree,local_sha:commit};
+    return {tree_sha:tree,local_sha:commit,...unlocked};
   }
   if(input.type==='workspace_source'){
     const local_sha=(await git(['rev-parse','HEAD'])).toString().trim(),tree_sha=(await git(['rev-parse','HEAD^{tree}'])).toString().trim();
@@ -146,6 +155,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
       ![input.sha,input.tree_sha,input.base_tree].every(v=>/^[a-f0-9]{40}$/.test(v||'')))throw new Error('invalid_integration_snapshot');
     const source=`${workspaceRoot}/${input.source_workspace_id}/repo`;
     if(await realpath(source)!==source)throw new Error('invalid_integration_source');
+    const unlocked=await unlock();
     await git(['fetch','--no-tags','--',source,input.sha]);
     if((await git(['rev-parse',input.sha+'^{tree}'])).toString().trim()!==input.tree_sha)throw new Error('integration_snapshot_mismatch');
     const current=(await git(['rev-parse','HEAD'])).toString().trim(),tree=(await git(['rev-parse','HEAD^{tree}'])).toString().trim();
@@ -157,7 +167,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     const conflicts=(await git(['diff','--name-only','--diff-filter=U','-z'])).toString().split('\0').filter(Boolean);
     if(!merged&&!conflicts.length)throw new Error('integration_merge_failed');
     await writeFile(root+'/integration.json',JSON.stringify({conflicts,source_sha:input.sha,target_sha:current}),{mode:0o600});
-    return {merged,conflicts,source_sha:input.sha,target_sha:current};
+    return {merged,conflicts,source_sha:input.sha,target_sha:current,...unlocked};
   }
   if(input.type==='workspace_integration_check'){
     const saved=await readFile(root+'/integration.json','utf8').then(JSON.parse).catch(()=>({conflicts:[]})),unresolved=[];
@@ -168,10 +178,11 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     if(!/^[a-f0-9]{48}$/.test(input.source_workspace_id||'')||!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_recovery_snapshot');
     const source=`${workspaceRoot}/${input.source_workspace_id}/repo`;
     if(await realpath(source)!==source)throw new Error('invalid_recovery_source');
+    const unlocked=await unlock();
     await git(['fetch','--no-tags','--',source,input.sha]);
     const tree=(await git(['rev-parse',input.sha+'^{tree}'])).toString().trim();
     if(tree!==input.tree_sha)throw new Error('recovery_snapshot_mismatch');
-    await git(['read-tree','--reset','-u',input.sha]);return {restored:true,tree_sha:tree};
+    await git(['read-tree','--reset','-u',input.sha]);return {restored:true,tree_sha:tree,...unlocked};
   }
   if(input.type==='workspace_read'){
     if(input.sha){if(!/^[a-f0-9]{40}$/.test(input.sha))throw new Error('invalid_read_commit');return {content:(await git(['show',input.sha+':'+safe(input.path)])).toString('utf8'),version:input.sha};}
@@ -198,6 +209,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   // secret_env comes only from the agent process in this container; the manager forwards no such field.
   if(input.type==='workspace_command')return command(input.command,repo,input.timeout_ms,{outputFile:input.output_file,keepBackground:input.keep_background===true,secretEnv:input.secret_env,workspaceId:input.workspace_id,backgroundDirectory:root+'/logs'});
   if(input.type==='workspace_finalize')return withWorkspaceLock(root+'/finalize.lock',async()=>{
+    const unlocked=await unlock();
     await git(['add','--all']);const tree=(await git(['write-tree'])).toString().trim();
     const raw=(await git(['ls-tree','-r','-l','-z',tree])).toString();const files=[];
     for(const row of raw.split('\0').filter(Boolean)){
@@ -210,7 +222,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     const local=(await git(['commit-tree',tree,'-p','HEAD'],Buffer.from('Project agent candidate\n'))).toString().trim();
     // SQLite references must remain readable after Git's ordinary garbage collection.
     await git(['update-ref','refs/bot/artifacts/'+local,local]);
-    return {tree_sha:tree,local_sha:local,files};
+    return {tree_sha:tree,local_sha:local,files,...unlocked};
   });
   if(input.type==='workspace_blob'){
     if(!/^[a-f0-9]{40}$/.test(input.sha||'')||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_blob');
