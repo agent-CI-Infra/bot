@@ -151,8 +151,9 @@ test('Codex cancel interrupts the turn, waits for the terminal receipt, then rec
  for(const [env,receipt] of [[{FIXTURE_WAIT:'true'},'terminal'],[{FIXTURE_WAIT:'true',FIXTURE_IGNORE_INTERRUPT:'true'},'timeout'],[{FIXTURE_LATE:'true'},'terminal']])await t.test(JSON.stringify(env),async t=>{
   const f=fixture(t,env);let cancel=false;
   const run=runRole({...f.spec,guard:async()=>{if(cancel)throw new TaskError('task_cancelled','cancelled');}},'dev',undefined,'codex');
-  const poll=setInterval(()=>{if(existsSync(join(f.home,'prompts.jsonl')))cancel=true;},20);
-  await assert.rejects(run,{code:'task_cancelled'});clearInterval(poll);
+  // The prompt file is written before the start reply; wait until the client records its turn.
+  const poll=setInterval(()=>{if(!cancel&&f.events().some(e=>e.type==='turn'&&e.phase==='started'))cancel=true;},20);
+  try{await assert.rejects(run,{code:'task_cancelled'});}finally{clearInterval(poll);}
   const turnId=f.state().lastTurnId;
   assert.deepEqual(f.lines('interrupts.jsonl').map(i=>i.turnId),[turnId]);
   const turns=f.events().filter(e=>e.type==='turn');
