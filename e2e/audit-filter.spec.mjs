@@ -25,9 +25,10 @@ test('the audit card filters by action code and shows the rest 20 rows at a time
     h.store.run('DELETE FROM audit');
     const mine = h.store.get("SELECT id FROM users WHERE username='administrator'").id;
     const audit = (id, action, resource, at) => h.store.run('INSERT INTO audit(id,user_id,repository_id,action,resource_id,created_at) VALUES(?,?,?,?,?,?)', id, mine, '101', action, resource, at);
-    // 25 rows over three action codes: 15 enabled, 8 roles.apply, 2 management.succeeded. Newest first.
+    // 25 rows over four action codes: 15 project enables (10 repository.enabled + 5 repository.activated, which share
+    // the plain name 启用项目), 8 roles.apply, 2 management.succeeded. Newest first.
     const n = 25;
-    for (let i = 0; i < 15; i++) audit('e' + i, 'repository.enabled', '101', `2026-11-10T0${(i % 5) + 1}:${String(i).padStart(2, '0')}:00Z`);
+    for (let i = 0; i < 15; i++) audit('e' + i, i < 10 ? 'repository.enabled' : 'repository.activated', '101', `2026-11-10T0${(i % 5) + 1}:${String(i).padStart(2, '0')}:00Z`);
     for (let i = 0; i < 8; i++) audit('r' + i, 'roles.apply', `task-${100 + i}`, `2026-11-10T03:${String(10 + i).padStart(2, '0')}:00Z`);
     for (let i = 0; i < 2; i++) audit('m' + i, 'management.succeeded', `command-${i}`, `2026-11-10T02:0${i}:00Z`);
     await login(page, h.admin, 'administrator', password);
@@ -42,15 +43,17 @@ test('the audit card filters by action code and shows the rest 20 rows at a time
     await expect(rows).toHaveCount(n);
     await expect(more).toHaveCount(0);
     await expect(card).toContainText('已显示全部 25 条');
-    // The filter is a set of read-only chips, one per action code the answer contains, plus 全部.
+    // The filter is a set of read-only chips, one per plain action name the answer contains, plus 全部: the two codes
+    // behind 启用项目 make one chip, not two identical ones.
     const chips = card.locator('[data-audit-filter]');
     await expect(chips).toHaveCount(4);
     const all = card.locator('[data-audit-filter="*"]');
     await expect(all).toHaveAttribute('aria-pressed', 'true');
-    const roleChip = card.locator('[data-audit-filter="roles.apply"]');
+    const roleChip = card.locator('[data-audit-filter="按角色配置执行"]');
     // #698: chips carry the same plain action name as the rows, with the count.
     await expect(roleChip).toHaveText('按角色配置执行 8');
-    await expect(card.locator('[data-audit-filter="repository.enabled"]')).toHaveText('启用项目 15');
+    await expect(card.locator('[data-audit-filter="启用项目"]')).toHaveText('启用项目 15');
+    await expect(card.getByRole('button', { name: /^启用项目/ })).toHaveCount(1);
     // roleChip only filters the rows already read; it sends no request and shows every matching row.
     const before = await page.evaluate(() => performance.getEntriesByType('resource').length);
     await roleChip.click();
@@ -62,13 +65,19 @@ test('the audit card filters by action code and shows the rest 20 rows at a time
     const after = await page.evaluate(() => performance.getEntriesByType('resource').length);
     expect(after).toBe(before);
     // A filter with more rows than one page pages on its own, and the count follows the filter.
-    await card.locator('[data-audit-filter="repository.enabled"]').click();
+    // The grouped chip shows every row under its name, whichever code wrote it.
+    await card.locator('[data-audit-filter="启用项目"]').click();
     await expect(rows).toHaveCount(15);
+    await expect(card.locator('[data-audit-row="repository.activated"]')).toHaveCount(5);
+    await expect(card.locator('[data-audit-row="repository.enabled"]')).toHaveCount(10);
     await expect(more).toHaveCount(0);
     // Back to 全部 re-pages from the top and keeps the newest row first.
     await all.click();
     await expect(rows).toHaveCount(20);
     await expect(more).toBeVisible();
+    // Each row's 技术信息 toggle names its row for a screen reader; the visible text stays 技术信息.
+    await expect(card.locator('summary').first()).toHaveText('技术信息');
+    await expect(card.locator('summary').first()).toHaveAttribute('aria-label', /^技术信息：(启用项目|按角色配置执行|管理助手操作成功)$/);
     // Read-only: the controls the slice adds are buttons inside the existing read-only card.
     expect(await card.locator('form, input, select, textarea').count()).toBe(0);
     // Chips wrap on a phone instead of pushing the page sideways.

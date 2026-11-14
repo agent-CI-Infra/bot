@@ -40,7 +40,9 @@ function auditActorName(row, names) {
 }
 function auditTech(row) {
   const tech = element('details', '', 'audit-tech'), list = element('dl', '');
-  tech.append(element('summary', '技术信息'));
+  // #698: every row has one of these; the accessible name says which row's it is, the visible text stays 技术信息.
+  const summary = element('summary', '技术信息'); summary.setAttribute('aria-label', `技术信息：${auditActionName(row.action)}`);
+  tech.append(summary);
   for (const [label, value] of [['动作标识', row.action], ['操作账号', row.user_id], ['对象', row.resource_id]]) {
     if (!value) continue;
     list.append(element('dt', label), element('dd', '')); list.lastChild.append(element('code', value));
@@ -85,23 +87,28 @@ function auditSection() {
         item.append(head, meta, auditTech(row));
         return item;
       });
-      const counts = new Map();
-      for (const row of audit) counts.set(row.action, (counts.get(row.action) || 0) + 1);
-      const actions = [...counts.keys()].sort();
+      // #698: several action codes share one plain name (启用项目, 「GitHub · 其他操作」), so the chips group by that name:
+      // one chip per name, its count is every row under it, and it filters on all of its codes.
+      const groups = new Map();
+      for (const row of audit) {
+        const name = auditActionName(row.action), group = groups.get(name) || { actions: new Set(), count: 0 };
+        group.actions.add(row.action); group.count += 1; groups.set(name, group);
+      }
+      const chipNames = [...groups.keys()].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
       let filter = '*', shown = AUDIT_PAGE;
       const filters = element('div', '', 'audit-filters');
       filters.setAttribute('role', 'group'); filters.setAttribute('aria-label', '按动作筛选操作记录');
       const count = element('p', '', 'muted'); count.setAttribute('aria-live', 'polite'); count.dataset.auditCount = '';
       const list = element('ul', '', 'history');
       const more = button('', () => { shown += AUDIT_PAGE; paint(); });
-      const chips = [['*', `全部动作 ${audit.length}`]].concat(actions.map(action => [action, `${auditActionName(action)} ${counts.get(action)}`]));
+      const chips = [['*', `全部动作 ${audit.length}`]].concat(chipNames.map(name => [name, `${name} ${groups.get(name).count}`]));
       const chipEls = chips.map(([key, caption]) => {
         const chip = button(caption, () => { filter = key; shown = AUDIT_PAGE; paint(); });
         chip.dataset.auditFilter = key; return chip;
       });
       filters.append(...chipEls);
       const paint = () => {
-        const matching = filter === '*' ? rows : rows.filter((_, index) => audit[index].action === filter);
+        const matching = filter === '*' ? rows : rows.filter((_, index) => groups.get(filter).actions.has(audit[index].action));
         const visible = matching.slice(0, shown), rest = matching.length - visible.length;
         list.replaceChildren(...visible);
         for (const [index, chip] of chipEls.entries()) chip.setAttribute('aria-pressed', chips[index][0] === filter ? 'true' : 'false');
