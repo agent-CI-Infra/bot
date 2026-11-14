@@ -101,6 +101,21 @@ async function render(quiet = false) {
       if (detail) { const detailLine = element('p', detail); if (tab === 'projects' && row.id) detailLine.title = '编号 ' + row.id; content.append(detailLine); } line.append(content);
       if(listTabs.includes(tab))status.append(taskTab ? taskState(row) : state(row.status));
     }
+    // #544: the project list is one shared-column table. Each category gets its own cell so 启用/检视/开发/权限/门禁/看板/任务
+    // line up across rows and organizations; the row keeps the selectors the rest of the console refreshes by.
+    if (tab === 'projects' && !hiddenView) {
+      const registered = row.registered !== false;
+      line.classList.add('project-list-row'); line.dataset.repositoryId = row.id;
+      content.classList.add('project-cell'); content.dataset.label = '项目'; content.setAttribute('aria-labelledby', projectColumnId('项目'));
+      const cells = projectRowCells(row, installedView ? integrationMap.get(row.id) : null, installedView);
+      const actions = element('div', '', 'actions project-cell'); actions.dataset.label = '操作'; actions.setAttribute('aria-labelledby', projectColumnId('操作'));
+      if (installedView) {
+        if (registered) actions.append(button('设置', () => openProject(row.id), 'quiet'));
+        else if (row.installed) actions.append(button('启动', () => openActivation(row, () => start()).catch(error), 'quiet'));
+      } else actions.append(button('设置', () => openProject(row.id), 'quiet'));
+      line.append(content, ...cells, actions);
+      lines.push(line); return;
+    }
     if(tab==='events'){
       for(const task of row.tasks||[])content.append(button(`${kindLabels[task.kind]||task.kind} #${task.object_number} · 查看任务`,()=>openTask(task.id),'quiet linkish'));
       // The Manager trace stays next to the outcome: what it did, or why the delivery never reached it.
@@ -138,10 +153,14 @@ async function render(quiet = false) {
     if(taskTab)content.append(taskMetricsLine(row));
     line.classList.toggle('has-actions',!!line.querySelector(':scope > .actions'));lines.push(line);
   });
-  const entries = tab === 'projects' ? groupProjectRows(rows, lines) : lines, shown = [...$('rows').children];
-  if(quiet&&shown.length===entries.length&&shown.every((node,index)=>node.dataset.key===entries[index].dataset.key))
-    shown.forEach((node,index)=>{if(rowSignatures.get(node)!==rowSignatures.get(entries[index]))node.replaceWith(entries[index]);});
-  else $('rows').replaceChildren(...entries);
+  const entries = tab === 'projects' ? groupProjectRows(rows, lines) : lines;
+  // One header owns the column definition for the whole list, so every organization's rows share the same columns.
+  const head = tab === 'projects' && !hiddenView && entries.length ? projectTableHead() : null;
+  const target = head ? [head, ...entries] : entries, shown = [...$('rows').children], first = head ? 1 : 0;
+  if(quiet&&shown.length===target.length&&(head ? shown[0].classList.contains('project-table-head') : true)
+    &&shown.slice(first).every((node,index)=>node.dataset.key===target[index+first].dataset.key))
+    shown.slice(first).forEach((node,index)=>{const next=target[index+first];if(rowSignatures.get(node)!==rowSignatures.get(next))node.replaceWith(next);});
+  else $('rows').replaceChildren(...target);
   if (tab === 'projects' && !installedView && !hiddenView && pendingRepositories.length) {
     $('rows').append(pendingActivationGroup(pendingRepositories));
   }

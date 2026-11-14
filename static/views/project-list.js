@@ -84,6 +84,10 @@ async function refreshProjectActivity() {
     for (const line of document.querySelectorAll('#rows .project-list-row, .global-project-row')) {
       const row = rows.get(line.dataset.repositoryId); if (row) {
         updateProjectTaskPreview(line.querySelector('.project-task-preview'), row);
+        // #544 review: the table keeps the board chip in its own cell and has no .project-controls group, so the same
+        // poll has to refresh that cell; the placeholder of a non-installed row is left alone.
+        const boardCell = [...line.children].find(child => child.dataset.label === '看板');
+        if (boardCell && boardCell.querySelector('[data-board-status]')) boardCell.replaceChildren(boardChip(row));
         line.querySelector('.project-controls')?.updateBoard?.(row, requestedAt);
       }
     }
@@ -97,11 +101,54 @@ function syncSummary(syncs = []) {
   if (!syncs.length) return '尚未同步';
   return syncs.map(s => s.error ? `${s.account_name} 同步失败（${s.error}）` : `${s.account_name} 同步于 ${timestamp(s.synced_at).slice(11, 19)}`).join(' · ');
 }
+// The project list shows names and state, never the installation or repository ids (#544): those stay in the API,
+// the routes and the settings panels that need them.
 function installedDetail(row) {
   const parts = [row.owner_login || '所有者', row.private ? '私有' : '公开'];
   if (row.account_name) parts.push(row.account_name);
   if (row.registered && !row.model_id) parts.push('还没有默认模型');
   return parts.join(' · ');
+}
+// #544: one shared column definition for the project list, so 启用/检视/开发/权限/门禁/看板/任务 line up across rows and
+// across organizations instead of every row laying its own badges out. Labels are only shown where the header is not.
+const projectColumnLabels = ['项目', '启用', '检视', '开发', '权限', '门禁', '看板', '任务', '操作'];
+function projectCell(label, ...nodes) {
+  const cell = element('div', '', 'project-cell'); cell.dataset.label = label;
+  cell.setAttribute('aria-labelledby', projectColumnId(label)); cell.append(...nodes); return cell;
+}
+function projectNotApplicable(label) {
+  const empty = element('span', '—', 'project-empty'); empty.setAttribute('aria-label', label + '不适用'); return empty;
+}
+function projectStatusCell(label, row, on, caption) {
+  const chip = badge(on ? '开' : '关', on ? 'info' : '');
+  chip.title = `${caption}${on ? '已开启' : '未开启'}`;
+  chip.setAttribute('aria-label', `${row.full_name} ${label}：${on ? '开' : '关'}`);
+  return projectCell(label, chip);
+}
+// The cells of one project row, in the order of projectColumnLabels; 项目 and 操作 are built by the renderer.
+function projectRowCells(row, integration, installed) {
+  const registered = row.registered !== false;
+  const availability = !registered ? badge('未启动', 'info') : row.enabled ? badge('已启用', 'success') : badge('已禁用', 'warning');
+  const state = [availability];
+  if (row.installed === false) state.push(badge('已移出安装', 'danger'));
+  else if (row.installed === null) state.push(badge('不在安装列表'));
+  const taskCell = projectCell('任务');
+  // #544: the task cell keeps the drill-down the pre-table row had; an unstarted project has no activity page yet.
+  const preview = element(registered ? 'a' : 'span', '', 'project-task-preview');
+  if (registered) preview.href = `#/projects/${row.id}/activity`;
+  updateProjectTaskPreview(preview, row); taskCell.append(preview);
+  // #544 review: the gate cell always uses the shared chip, so it carries data-integration and the first background
+  // check can replace it in place; a hand-written fallback badge left the cell out of every later refresh.
+  const gate = installed ? installedIntegration(integration)[0] : projectNotApplicable('门禁');
+  return [
+    projectCell('启用', ...state),
+    projectStatusCell('检视', row, !!row.review_enabled, '检视'),
+    projectStatusCell('开发', row, !!row.development_enabled, '开发'),
+    projectCell('权限', permissionCell(row)),
+    installed ? projectCell('门禁', gate) : projectCell('门禁', projectNotApplicable('门禁')),
+    installed ? projectCell('看板', boardChip(row)) : projectCell('看板', projectNotApplicable('看板')),
+    taskCell,
+  ];
 }
 function installedBadges(row) {
   const badges = [!row.registered ? badge('未启动', 'info') : !row.enabled ? badge('已禁用', 'warning') : badge('已启用', 'info')];
@@ -203,6 +250,18 @@ function openAccessGaps(row) {
   accessView.replaceChildren(title, element('p', '对照所有功能检查，未开启的功能也列出。改完后点「同步安装列表」重新读取。', 'muted'), list, actions);
   accessView.showModal(); close.focus();
 }
+// #544 review: the permission column names its state instead of being empty. A grant that was never read (null) or whose
+// reading is stale says 未检查, because an old reading cannot be called 正常 and a stale gap may already be fixed; a fresh
+// empty reading says 正常; a fresh gap keeps the actionable chip below. Every state carries data-permission so
+// updatePermissionBadges() can still swap it in place after the background check.
+function permissionStateChip(label, tone) {
+  const chip = badge(label, tone); chip.dataset.permission = ''; return chip;
+}
+function permissionCell(row) {
+  if (row.access_gaps == null || row.permissions_stale) return permissionStateChip('未检查', 'info');
+  if (!row.access_gaps.length) return permissionStateChip('正常', 'success');
+  return permissionBadge(row);
+}
 // Every access gap of a repository the account still lists, against every feature whether or not it is on. Warning tone
 // when a stopped feature is on; a gap only for unused features is informational. Always drawn (hidden when nothing is
 // missing) so that a later permission check can swap it in place.
@@ -221,7 +280,7 @@ function updatePermissionBadges(rows) {
   const byId = new Map(rows.map(row => [row.id, row]));
   for (const line of document.querySelectorAll('#rows .project-list-row')) {
     const row = byId.get(line.dataset.repositoryId), chip = line.querySelector('[data-permission]');
-    if (row && chip) chip.replaceWith(permissionBadge(row));
+    if (row && chip) chip.replaceWith(permissionCell(row));
   }
 }
 // Deletions answer with a stable code; the ones a person can act on get a sentence.
@@ -295,6 +354,11 @@ function updateIntegrationChips(integrations) {
   for (const line of document.querySelectorAll('#rows .project-list-row, .global-project-row')) {
     const integration = byId.get(line.dataset.repositoryId), chips = [...line.querySelectorAll('[data-integration]')];
     if (!integration || !chips.length) continue;
+    // The table keeps 门禁 and 看板 in their own cells, so only the gate chip in that cell is replaced there. The chip's
+    // own parent is that cell (the legacy row keeps its chips in .project-features), so the update never depends on a
+    // selector walk the test DOM does not model.
+    const cell = chips[0].parentElement;
+    if (cell && cell.classList.contains('project-cell')) { cell.replaceChildren(installedIntegration(integration)[0]); continue; }
     chips[0].replaceWith(...installedIntegration(integration)); chips.slice(1).forEach(chip => chip.remove());
   }
 }

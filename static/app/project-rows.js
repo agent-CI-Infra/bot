@@ -13,6 +13,22 @@ function pendingActivationGroup(pending) {
   section.append(element('h2', '等待管理员启动', 'project-owner-title'), list, consoleLink('#/identity', '查看身份与权限'));
   return section;
 }
+// #544: the shared column header for the project list; it is re-created per list render but skipped by a quiet refresh.
+// The list is a role=list of listitems, so a lone row/columnheader here would be invalid table semantics; the header is
+// the visual legend (hidden from assistive tech) and every data cell names its column through aria-labelledby.
+const projectColumnId = label => 'project-col-' + label;
+function projectTableHead() {
+  const head = element('div', '', 'project-table-head'); head.setAttribute('aria-hidden', 'true');
+  for (const label of projectColumnLabels) { const cell = element('span', label, 'project-cell'); cell.id = projectColumnId(label); head.append(cell); }
+  return head;
+}
+// Fold state per organization, scoped to the signed-in account so switching accounts never reuses another one's choices.
+const ownerFolding = new Map(); let ownerFoldingAccount = null;
+function ownerFoldState() {
+  const account = me ? String(me.id ?? me.username ?? '') : '';
+  if (account !== ownerFoldingAccount) { ownerFolding.clear(); ownerFoldingAccount = account; }
+  return ownerFolding;
+}
 function groupProjectRows(rows, lines) {
   const groups = new Map();
   rows.forEach((row, index) => {
@@ -23,11 +39,26 @@ function groupProjectRows(rows, lines) {
     group.login ||= row.owner_login;
     if (row.full_name?.includes('/')) group.name ||= row.full_name.split('/')[0];
   });
+  const folding = ownerFoldState();
   return [...groups].map(([owner, group]) => {
     const section = element('div', '', 'project-owner-group'), title = group.login || group.name || `所有者 ${owner}`;
     section.setAttribute('role', 'listitem'); section.dataset.ownerId = owner; section.dataset.key = owner;
     const list = element('div', '', 'project-owner-rows'); list.setAttribute('role', 'list'); list.setAttribute('aria-label', title);
-    list.append(...group.lines); section.append(element('h2', title, 'project-owner-title'), list);
+    list.append(...group.lines);
+    // #544: the organization title is the fold control. It keeps its own text so the heading still reads as the owner,
+    // the caret is drawn from aria-expanded, and the count says this page's size rather than pretending to be a total.
+    const heading = element('h2', '', 'project-owner-title'), toggle = element('button', title, 'project-owner-toggle btn-text');
+    toggle.setAttribute('type', 'button'); toggle.setAttribute('aria-expanded', String(!folding.has(owner)));
+    heading.append(toggle);
+    list.hidden = folding.has(owner); section.classList.toggle('is-folded', folding.has(owner));
+    toggle.addEventListener('click', () => {
+      const folded = toggle.getAttribute('aria-expanded') === 'true', states = ownerFoldState();
+      toggle.setAttribute('aria-expanded', String(!folded)); list.hidden = folded; section.classList.toggle('is-folded', folded);
+      if (folded) states.set(owner, true); else states.delete(owner);
+    });
+    const count = element('span', `本页 ${group.rows.length} 个项目`, 'project-owner-count muted');
+    const bar = element('div', '', 'project-owner-bar'); bar.append(heading, count);
+    section.append(bar, list);
     rowSignatures.set(section, JSON.stringify(group.rows));
     return section;
   });
