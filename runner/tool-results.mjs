@@ -1,5 +1,6 @@
 import { open, readFile, writeFile, mkdir, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { backgroundOutputNotice } from './command-output.mjs';
 
 // Local Pi commands use unique immutable journals in their own session directory. The manifest binds a result to the
 // workspace and sub-agent that produced it; neither a path nor a different owner's file is accepted from model output.
@@ -9,7 +10,7 @@ export async function localCommandResult(directory,owner,id,value) {
   try {
     const bytes=(await stat(directory+'/'+id+'.utf8')).size;
     await writeFile(directory+'/'+id+'.json',JSON.stringify({owner,bytes}),{mode:0o600,flag:'wx'});
-    return {...preview,file:'result:'+id,bytes,encoding:'utf-8',notice:'Read the complete immutable output with read_tool_result(file, position, length). Positions and lengths are UTF-8 bytes; follow next_position until eof. Reading never repeats the command.'};
+    return {...preview,file:'result:'+id,bytes,encoding:'utf-8',notice:'Read the complete immutable output with read_tool_result(file, position, length). Positions and lengths are UTF-8 bytes; follow next_position until eof. Reading never repeats the command.'+(value.running?' '+backgroundOutputNotice:'')};
   }catch{return {...preview,error:'tool_result_storage_failed'};}
 }
 export async function readLocalResult(directory,owner,args) {

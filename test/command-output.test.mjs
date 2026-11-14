@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -58,6 +58,17 @@ test('local Pi result files page an immutable command without workspace command 
 });
 
 import {Docker} from '../manager/docker.mjs';
+test('local Pi background files retain their startup snapshot while later logs grow',async t=>{
+  const directory=mkdtempSync(join(tmpdir(),'command-pi-background-'));t.after(()=>rmSync(directory,{recursive:true,force:true}));await prepareLocalResults(directory);
+  const id='b'.repeat(48),path=join(directory,id+'.utf8'),log=join(directory,'live.log'),startup='HEAD\n'+'中😀'.repeat(200000)+'\nSTARTED\n';
+  writeFileSync(path,startup);writeFileSync(log,startup);
+  const result=await localCommandResult(directory,'workspace:agent',id,{running:true,exit_code:null,timed_out:false,truncated:true,output_file:path,log_path:log,head:'HEAD\n',tail:'STARTED\n'});
+  assert.equal(result.error,undefined);assert.match(result.notice,/startup snapshot/);assert.match(result.notice,/read_tool_result/);assert.equal(result.log_path,log);
+  appendFileSync(log,'LATER_OUTPUT\n');let position=0,restored='';
+  for(;;){const page=await readLocalResult(directory,'workspace:agent',{file:result.file,position,length:65536});assert.equal(page.error,undefined);restored+=page.content;if(page.eof)break;position=page.next_position;}
+  assert.equal(restored,startup);assert.ok(readFileSync(log,'utf8').endsWith('LATER_OUTPUT\n'));
+});
+
 test('Docker stdout frames may split UTF-8 characters in paginated results',async()=>{
   const docker=new Docker(),data=Buffer.from(JSON.stringify({ok:true,result:{data:'中😀'.repeat(1000)}})),frames=[];
   for(let offset=0;offset<data.length;offset+=17){const part=data.subarray(offset,offset+17),header=Buffer.alloc(8);header[0]=1;header.writeUInt32BE(part.length,4);frames.push(header,part);}

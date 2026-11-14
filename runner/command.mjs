@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, mkdtempSync, openSync, closeSync, readSync, fstatSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CommandOutput, maskedStream, outputLimit } from './command-output.mjs';
+import { CommandOutput, maskedStream, outputLimit, backgroundOutputNotice } from './command-output.mjs';
 import { local, workspaceRoot, localEnvironment, assistant, homeDirectory as home } from './paths.mjs';
 // User-level installs (pip --user, uv tool, cargo, npm prefix) land under HOME: the work volume of a project computer, the
 // persistent HOME of an assistant computer.
@@ -94,7 +94,7 @@ function backgroundCommand(value,cwd,timeoutMs,{outputFile,extra,workspaceId,bac
       if(child.connected)child.disconnect();child.unref();
       const result=output.result();
       resolve({exit_code:code,signal,...result,timed_out:timedOut,log_path:logPath,...(result.truncated?{output_file:outputFile||logPath}:{}),
-        ...(!timedOut&&code===null&&signal===null?{running:true,pid:child.pid}:{})});
+        ...(!timedOut&&code===null&&signal===null?{running:true,pid:child.pid,notice:backgroundOutputNotice}:{})});
     };
     child.on('message',message=>{if(message.type==='exit'){code=message.code;signal=message.signal;}});
     child.on('exit',(exitCode,exitSignal)=>{code??=exitCode;signal??=exitSignal;finish();});

@@ -1,6 +1,6 @@
 import { resultSourcesCurrent, type ResultSource } from '../storage/tool-results.js';
 import { boundedResult, batchBytes } from './tool-context.js';
-import { maskedStream } from '../../runner/command-output.mjs';
+import { maskedStream, backgroundOutputNotice } from '../../runner/command-output.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import type { Store } from '../storage/database.js';
@@ -56,7 +56,7 @@ export async function commandResult(result: any, source: string, page: (offset: 
   }
   try {
     const reference = await session.store.trajectories.results.save(owner, session.scope, source, chunks(), guard,session.sourceContext);
-    return { ...preview, ...reference };
+    return { ...preview, ...reference, ...(result.running ? {notice:reference.notice+' '+backgroundOutputNotice} : {}) };
   } catch { await session.guard(); return { ...preview,output:String(preview.head??'').slice(0,4096)+'\n[… output file unavailable …]\n'+String(preview.tail??'').slice(-4096),head:String(preview.head??'').slice(0,4096),tail:String(preview.tail??'').slice(-4096), error: 'tool_result_storage_failed', notice: 'The complete command output could not be saved. This is not a usable result file; inspect the storage/runner failure before repeating the command.' }; }
 }
 export const resultOwner = (...parts: unknown[]) => createHash('sha256').update(JSON.stringify(parts)).digest('hex');

@@ -29,22 +29,24 @@ test('revocation while a result streams leaves no readable file or metadata',asy
 import { ResultSession, commandResult, resultOwner } from '../dist/agent/tool-results.js';
 import { boundedBatch, ToolTranscript } from '../dist/agent/tool-context.js';
 
-test('command files survive context folding, replay without source reads, and retain a bounded head and tail',async t=>{
+for (const running of [false,true]) test(`${running?'background startup snapshots':'command files'} survive context folding, replay without source reads, and retain a bounded head and tail`,async t=>{
   const store=new Store(':memory:',Buffer.alloc(32,1));t.after(()=>store.close());
   const scope=store.trajectories.scopeOf({id:'turn',repository_id:'101',conversation_id:'chat'});
   let authorized=true,owner='role-a',reads=0;
   const secrets=['sensitive-split-secret'];
   const session=new ResultSession(store,scope,()=>owner,()=>{if(!authorized)throw new Error('revoked');},secrets);
   const text='HEAD\n'+('中😀data\n'.repeat(70000))+'sensitive-split-secret\nERROR_AT_END\n';
-  const data=Buffer.from(text),preview={exit_code:1,timed_out:false,truncated:true,output_file:'/private/runner/output',head:text.slice(0,300000),tail:text.slice(-300000),output:text};
+  const data=Buffer.from(text),preview={exit_code:running?null:1,running,timed_out:false,truncated:true,output_file:'/private/runner/output',...(running?{log_path:'/runner/live-output'}:{}),head:text.slice(0,300000),tail:text.slice(-300000),output:text};
   const page=async offset=>{reads++;let end=Math.min(offset+65536,data.length);while(end<data.length&&(data[end]&0xc0)===0x80)end--;return {data:data.subarray(offset,end).toString('utf8'),offset:end,size:data.length};};
   const result=await session.execute('run_command',{},()=>commandResult(preview,'op',page));
-  assert.equal(result.error,undefined);assert.equal(result.output_file,undefined);assert.equal(result.exit_code,1);
+  assert.equal(result.error,undefined);assert.equal(result.output_file,undefined);assert.equal(result.exit_code,running?null:1);
+  if(running){assert.match(result.notice,/startup snapshot/);assert.equal(result.log_path,preview.log_path);}
   const count=reads;
   assert.equal((await session.execute('run_command',{},()=>commandResult(preview,'op',()=>assert.fail('must replay')))).file,result.file);
   const [small]=boundedBatch([result],8192);assert.equal(small.file,result.file);assert.match(small.tail,/ERROR_AT_END/);assert.match(small.head,/HEAD/);assert.ok(Buffer.byteLength(JSON.stringify(small))<=8192);
   const messages=[{role:'tool',content:JSON.stringify(small)},{role:'assistant',content:'later'}];new ToolTranscript(messages,1).fit({messages});
   const folded=JSON.parse(messages[0].content);assert.equal(folded.elided,true);assert.equal(folded.file,result.file);assert.match(folded.notice,/read_tool_result/);
+  if(running)assert.match(folded.notice,/startup snapshot/);
   let position=0,restored='';
   for(;;){const part=await session.execute('read_tool_result',{file:result.file,position,length:65536},()=>assert.fail('must not execute'));restored+=part.content;if(part.eof)break;position=part.next_position;}
   assert.equal(restored,text.replaceAll(secrets[0],'[REDACTED]'));assert.equal(reads,count);
