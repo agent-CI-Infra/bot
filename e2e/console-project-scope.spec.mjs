@@ -127,7 +127,7 @@ test('页面自己的临时过滤保持可见，与顶栏默认区分且不改�
     await page.goto(h.admin + '/#/board');
     await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
     let board202 = boardScopeRequest(page, '202');
-    await page.getByRole('group', { name: '仓库', exact: true }).locator('button[data-value="202"]').click();
+    await page.getByLabel('仓库', { exact: true }).selectOption('202');
     await board202;
     expect(boards.at(-1)).toBe('202');
     // The override is named as an override, and it still says what the shared default is.
@@ -258,8 +258,8 @@ test('保存看板视图只存页面自己的筛选，顶栏默认不进视图',
     expect(boards.at(-1)).toBe('101');
     // A page filter makes the view dirty; saving it must store that filter only.
     await page.getByLabel('搜索编号或标题', { exact: true }).fill('blocked');
-    await expect(page.locator('#board-save')).toBeHidden();
-    await page.getByRole('button', { name: '更多视图操作', exact: true }).click();
+    await expect(page.locator('#board-view-state')).toHaveText('未保存');
+    await expect(page.locator('#board-save')).toBeVisible();
     const saved = page.waitForResponse(response => response.request().method() === 'PATCH'
       && response.url().includes('/api/board/views/'));
     await page.locator('#board-save').click();

@@ -27,8 +27,8 @@ test('list and columns share filters, grouping and counts at six widths without 
   const h = await fixture(page), writes = [];
   page.on('request', req => { if (req.method() !== 'GET' && req.url().includes('/api/board/')) writes.push(req.method()); });
   try {
-    await page.getByRole('group', { name: '工作类型', exact: true }).locator('button[data-value="review.issue"]').click();
-    await page.getByRole('group', { name: '按…分列', exact: true }).locator('button[data-value="repository"]').click();
+    await page.getByLabel('工作类型', { exact: true }).selectOption('review.issue');
+    await page.getByLabel('按…分列', { exact: true }).selectOption('repository');
     const before = await keys(page), count = await page.locator('#board-status').innerText();
     await layout(page, '切换为列表');
     await expect(page.locator('#board-columns')).toHaveClass(/board-list-layout/);
@@ -41,7 +41,7 @@ test('list and columns share filters, grouping and counts at six widths without 
         mkdirSync('.tmp/board-list-227', { recursive: true });
         await page.screenshot({ path: `.tmp/board-list-227/list-${width}.png` });
       }
-      await expect(page.locator('[role=group][aria-label="工作类型"] [aria-pressed=true]')).toHaveAttribute('data-value', 'review.issue');
+      await expect(page.getByLabel('工作类型', { exact: true })).toHaveValue('review.issue');
     }
     await layout(page, '切换为分栏'); await expect(page.locator('#board-columns')).not.toHaveClass(/board-list-layout/);
     expect(await keys(page)).toEqual(before); expect(writes).toEqual([]);
@@ -52,8 +52,8 @@ test('list refresh and page return preserve the current reading position and uns
   const h = await fixture(page);
   try {
     for (let i = 0; i < 35; i++) boardTask(h.store, 'list-' + i, 100 + i, 'review.issue', 'succeeded');
-    await page.getByRole('group', { name: '工作类型', exact: true }).locator('button[data-value="review.issue"]').click();
-    await page.getByRole('group', { name: '按…分列', exact: true }).locator('button[data-value="repository"]').click();
+    await page.getByLabel('工作类型', { exact: true }).selectOption('review.issue');
+    await page.getByLabel('按…分列', { exact: true }).selectOption('repository');
     await layout(page, '切换为列表');
     await page.locator('#board-columns').evaluate(el => { el.scrollTop = 500; });
     await expect.poll(() => page.evaluate(() => boardState.positions?.list?.top)).toBe(500);
@@ -64,7 +64,7 @@ test('list refresh and page return preserve the current reading position and uns
     await expect(page.getByRole('heading', { name: '更多功能' })).toBeVisible();
     await page.goBack(); await expect(page.locator('#board-columns')).toHaveClass(/board-list-layout/);
     await expect.poll(() => page.locator('#board-columns').evaluate(el => el.scrollTop)).toBe(500);
-    await expect(page.locator('[role=group][aria-label="工作类型"] [aria-pressed=true]')).toHaveAttribute('data-value', 'review.issue');
+    await expect(page.getByLabel('工作类型', { exact: true })).toHaveValue('review.issue');
   } finally { await close(h); }
 });
 
