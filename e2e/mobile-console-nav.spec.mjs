@@ -237,7 +237,7 @@ test('移动头部把身份、角色与退出登录收进账号菜单，键盘�
     const menu = page.locator('#console-account-menu');
     await expect(menu).toBeVisible();
     await expect(trigger).toHaveAttribute('aria-expanded', 'true');
-    await expect(menu).toContainText('@administrator');
+    await expect(menu.locator('#console-account-login')).toHaveText('administrator');
     await expect(page.locator('#console-account-role')).toHaveText('管理员');
     // Escape closes the menu and returns focus to the trigger; Enter reopens it.
     await page.keyboard.press('Escape');

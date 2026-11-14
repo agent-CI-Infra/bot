@@ -43,7 +43,7 @@ async function channelBindingOverview(data) {
   const active = data.bindings.filter(b => b.status === 'active' && (!b.expires_at || b.expires_at > Date.now()));
   const metrics = element('div', '', 'feishu-metrics');
   const metric = (name, value, hint) => { const box = element('div', '', 'feishu-metric'); box.append(element('span', name), element('strong', value), element('small', hint)); metrics.append(box); return box; };
-  metric(t('feishu.bound_identities'), String(active.length), t('feishu.current_account', { name: me.username }));
+  metric(t('feishu.bound_identities'), String(active.length), t('feishu.current_account', { name: userDisplayName(owner) }));
   const privateCount = metric(t('feishu.personal_chats'), '—', t('feishu.reading')), groupCount = metric(t('feishu.managed_groups'), '—', t('feishu.reading'));
   overview.append(metrics);
   const links = element('div', '', 'actions');
@@ -69,7 +69,7 @@ async function channelBindingOverview(data) {
       for (const b of active) {
         const chats = result.personal_chats.filter(c => belongs(b, c));
         const row = element('div', '', 'feishu-summary-row');
-        const name = element('strong', b.display_name && b.display_name !== b.external_actor ? b.display_name : t('feishu.identity_of', { name: owner.username }));
+        const name = element('strong', b.display_name && b.display_name !== b.external_actor ? b.display_name : t('feishu.identity_of', { name: userDisplayName(owner) }));
         const profile = { ...b, binding_id: b.id, can_refresh_name: !!b.can_read_name, display_name: b.display_name !== b.external_actor ? b.display_name : '' };
         row.append(name, channelProfileDetails(profile, () => { name.textContent = channelChatName(profile); }),
           note(chats.length ? t('feishu.chats_ready', { count: chats.length }) : t('feishu.chats_empty')));

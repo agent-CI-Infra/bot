@@ -10,8 +10,8 @@ async function delegatedMember(f) {
   f.h.store.run("INSERT INTO users(id,username,password_hash,role) VALUES('member-237','team-member','x','project_admin')");
   // The user insert trigger creates the principal; only its tenant still has to be recorded.
   f.h.store.run("UPDATE principals SET tenant_id='github.com:10' WHERE id='member-237'");
-  f.h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at,expires_at)
-    VALUES('grant-237','member-237','github.com:10','tenant','delegated',?,'explicit_delegation',?,'independent','console delegation',?,?)`,
+  f.h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at,expires_at)
+    VALUES('grant-237','member-237','github.com:10','101','project','delegated',?,'explicit_delegation',?,'independent','console delegation',?,?)`,
     JSON.stringify(['tasks.read']), grantor, Date.now() - 86_400_000, Date.now() + 7 * 86_400_000);
   return grantor;
 }
@@ -51,6 +51,7 @@ test('组织成员授权展示授权者、最近核验与授权有效期', async
     await openIdentityAdvanced(page);
     await expect(page.getByRole('heading', { name: '组织成员授权' })).toBeVisible();
     const row = page.locator('#identity-panel .row').filter({ hasText: 'team-member' });
+    await expect(row).toContainText('项目 fixture/project-101');
     await expect(row).toContainText('授权者');
     await expect(row).toContainText('administrator');
     await expect(row).toContainText('最近核验');

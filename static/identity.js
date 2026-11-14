@@ -1,4 +1,9 @@
 titles.identity = t('identity.title');
+function identityProjectScope(projectId) {
+  // Only reuse repositories already visible to this session; historical grants may no longer expose a name.
+  const project = repositories.find(repo => String(repo.id) === String(projectId));
+  return project?.full_name ? t('identity.scope_project', { name: project.full_name }) : t('identity.scope_project_id', { id: projectId });
+}
 // Every code the GitHub login callback can put in ?auth_error (src/server.ts routes HttpError.code there), in words. A
 // code this page does not know keeps the fallback sentence, which never prints the raw code: a code names an internal
 // condition, not something the person can act on. Copy is looked up by code so it can follow the UI language (#527).
@@ -341,7 +346,7 @@ async function renderIdentity() {
   history.open = !active.length && pending.length > 0;
   for (const grant of [...active, ...pending]) {
     const row = element('div', '', 'row perm-row'), source = grantSourceText(grant.source);
-    const scope = grant.project_id ? t('identity.scope_project', { id: grant.project_id }) : grant.tenant_id || t('identity.scope_platform');
+    const scope = grant.project_id ? identityProjectScope(grant.project_id) : grant.tenant_id || t('identity.scope_platform');
     row.append(element('strong', grantRoleText(grant.role)),
       element('p', `${source} · ${scope}`),
       element('p', grantStateText(grant)), facts([[t('identity.last_verified'), grant.verified_at ? identityTime(grant.verified_at) : t('identity.verified_missing')],
@@ -392,7 +397,7 @@ async function renderIdentity() {
       members.append(note(t('identity.members_note')));
       for (const grant of grants) {
         const row = element('div', '', 'row');
-        row.append(element('strong', grant.principal_name), element('p', `${grantSourceText(grant.source)} · ${grant.project_id ? t('identity.scope_project', { id: grant.project_id }) : t('identity.scope_org')}`),
+        row.append(element('strong', grant.principal_name), element('p', `${grantSourceText(grant.source)} · ${grant.project_id ? identityProjectScope(grant.project_id) : t('identity.scope_org')}`),
           element('p', grantStateText(grant, { short: true })),
           facts([[t('identity.grantor'), grant.grantor_name || t('identity.grantor_missing')],
             [t('identity.last_verified'), grant.verified_at ? identityTime(grant.verified_at) : t('identity.verified_missing')],

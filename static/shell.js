@@ -194,7 +194,7 @@ function syncConsoleShell() {
   if (!signedIn) return;
   applyConsoleNavVisibility();
   // The menu names the same person the header used to print beside the sign-out button.
-  $('console-account-login').textContent = '@' + (me.github?.login || me.username);
+  $('console-account-login').textContent = userDisplayName(me);
   $('console-account-role').textContent = me.role === 'super_admin' ? t('role.super_admin') : t('role.project_admin');
   const project = projectRoute(), inbox = consoleInboxRoute();
   const routed = project?.id || (inbox ? (inbox[1] === 'all' ? null : inbox[1]) : null) || null;

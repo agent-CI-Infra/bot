@@ -12,7 +12,8 @@ function accountLine(row) {
     [element('span', row.credentials_configured ? '凭据已配置' : '凭据已撤销', 'status status-' + (row.credentials_configured ? 'success' : 'warning'))],
     [button('删除', () => deleteAccount(row).catch(error), 'quiet destructive')]);
 }
-function userDisplayName(user) { return user.github_login ? '@' + user.github_login : user.username; }
+// Session actors and user-list records carry the same GitHub login in different fields.
+function userDisplayName(user) { const login = user.github?.login || user.github_login; return login ? '@' + login : user.username; }
 function userAccessLines(user) {
   const projects = user.access?.projects || [], lines = [element('p', projects.length ? `当前可见项目（${projects.length}）：` : '当前没有可访问的项目')];
   if (projects.length) {

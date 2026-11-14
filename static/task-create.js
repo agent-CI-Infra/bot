@@ -63,7 +63,7 @@ async function renderNewTask(request) {
       const result = await api('/api/management/query', 'POST', { operation: 'get_effective_config', target: { project_id: id }, arguments: {} });
       if (!alive() || version !== contextVersion) return;
       effective = result;
-      contextBody.replaceChildren(element('p', '当前身份：' + me.username), element('p', '项目：' + repositories.find(repo => String(repo.id) === id).full_name),
+      contextBody.replaceChildren(element('p', '当前身份：' + userDisplayName(me)), element('p', '项目：' + repositories.find(repo => String(repo.id) === id).full_name),
         note(result.task_creation?.allowed ? '当前允许提交任务；服务端将在提交时重新核验配置、预算和授权。' : taskCreationError(result.task_creation?.reason || '无法确认创建权限')));
     } catch (err) {
       if (!alive() || version !== contextVersion) return;

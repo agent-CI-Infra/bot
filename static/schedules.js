@@ -114,7 +114,7 @@ async function renderSchedules(panel, project) {
   const form = document.createElement('form'), chosen = select('编辑计划', [['', '新建计划'], ...plans.schedules.filter(s => s.state !== 'deleted').map(s => [s.id, s.spec.name + ' · ' + s.state])]);
   const name = input('计划名称', '项目日报'), kind = select('执行身份类型', [['personal', '个人计划'], ['project', '项目服务计划']]);
   const actor = select('项目服务身份', (destinations.services ?? []).map(s => [s.id, s.maintenance + ' · ' + s.id.slice(0, 8)]));
-  const maintainer = select('项目维护人', (destinations.maintainers ?? [{ id: me.id, name: me.username }]).map(s => [s.id, s.name]));
+  const maintainer = select('项目维护人', (destinations.maintainers ?? [{ id: me.id, name: userDisplayName(me) }]).map(s => [s.id, s.name]));
   const zone = input('计划时区', 'Asia/Shanghai'), recurrence = select('重复方式', [['cron', 'Cron（本地时间）'], ['interval', '固定周期']]);
   const cron = input('Cron 表达式', '0 9 * * *'), interval = input('固定周期分钟', '1440', 'number');
   const presets=[['0 9 * * *','每天 09:00'],['0 18 * * *','每天 18:00'],['0 9 * * 1','每周一 09:00'],['custom','自定义 Cron / 固定周期']];
