@@ -119,11 +119,12 @@ test('the manager reports its storage for the storage page without reading the l
   await f.projects.operate('101', 'execute', call(generation, { type: 'workspace_command', command: 'a' }));
   await f.projects.operate('101', 'execute', reap);
   await f.projects.operate('101', 'execute', call(generation, { type: 'workspace_read', path: 'b' }, id()));
-  const report = f.projects.storage(), usage = kind => report.usage.find(row => row.repository_id === '101' && row.kind === kind);
+  const report = await f.projects.storage(), usage = kind => report.usage.find(row => row.repository_id === '101' && row.kind === kind);
   assert.equal(usage('files').count, 1, 'the reap closed the workspace file'); assert.equal(usage('records:tool_result').count, 2);
   assert.equal(usage('open').count, 1, 'the workspace file reopened after the reap is still open'); assert.ok(usage('open').bytes > 2000);
   assert.ok(report.database.bytes > 0 && Number.isSafeInteger(report.database.free_pages)); assert.ok(report.disk.total_bytes > 0);
   assert.ok('operations' in report.migration.remaining);
+  assert.deepEqual(report.host.docker, { images_bytes: 1000, containers_bytes: 20, volumes_bytes: 30, build_cache_bytes: 40 });
 });
 
 // #671: the manager's copies of runner-call bodies are removed once nothing replays them.
@@ -169,7 +170,7 @@ test('files closed longer ago than the window go in the background; their calls 
   assert.equal((await new TrajectoryExpiry(f.projects.db, f.projects.trajectories, { pauseMs: 0 }).pass()).files, 1);
   assert.equal((await f.projects.operate('101', 'execute', long)).result.output, 'done long'); assert.equal(ran, 0);
   const state = new TrajectoryExpiry(f.projects.db, f.projects.trajectories).state();
-  assert.equal(state.window_days, 2); assert.equal(state.last_pass.files, 1); assert.equal(f.projects.storage().expiry.window_days, 2);
+  assert.equal(state.window_days, 2); assert.equal(state.last_pass.files, 1); assert.equal((await f.projects.storage()).expiry.window_days, 2);
 });
 
 test('the window follows the saved setting, and a restart removes the files a stopped pass had marked', async t => {

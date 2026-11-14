@@ -9,7 +9,7 @@ import { runScope } from '../dist/storage/trajectories.js';
 import { storedInput } from '../dist/storage/payloads.js';
 import { harness, setup } from './helpers.mjs';
 
-function fixture(t) {
+function fixture(t, host = { docker: { images_bytes: 1000, containers_bytes: 30, volumes_bytes: 400, build_cache_bytes: 500 } }) {
   const directory = mkdtempSync(join(tmpdir(), 'storage-page-')), store = new Store(join(directory, 'control.sqlite'), Buffer.alloc(32, 4));
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
   store.run("INSERT INTO accounts VALUES('a','Fixture','bot_account',NULL,'{}','2026-01-01')");
@@ -27,7 +27,7 @@ function fixture(t) {
   const manager = { async call(method, path) {
     assert.equal(`${method} ${path}`, 'GET /v1/storage');
     return { usage: [{ repository_id: '101', kind: 'files', count: 4, bytes: 4000 }, { repository_id: '101', kind: 'records:tool_result', count: 9, bytes: 3000 }, { repository_id: '202', kind: 'files', count: 1, bytes: 10 }, { repository_id: '101', kind: 'open', count: 1, bytes: 7 }],
-      database: { bytes: 8192, free_pages: 1, free_bytes: 4096 }, disk: { free_bytes: 1, total_bytes: 2 }, migration: { phases: { operations: { migrated: 3 } }, remaining: { operations: 0 } } };
+      database: { bytes: 8192, free_pages: 1, free_bytes: 4096 }, disk: { free_bytes: 1, total_bytes: 2 }, migration: { phases: { operations: { migrated: 3 } }, remaining: { operations: 0 } }, host };
   } };
   return { store, report: new StorageReport(store, manager) };
 }
@@ -49,6 +49,7 @@ test('each project lists its files, records by type and blobs; platform administ
   assert.ok(view.totals.control.database.bytes > 0); assert.ok(Number.isSafeInteger(view.totals.control.database.free_pages));
   assert.ok(view.totals.control.disk.total_bytes > 0); assert.ok('task_tools' in view.totals.control.migration.remaining);
   assert.equal(view.totals.manager.database.bytes, 8192); assert.equal(view.totals.manager.migration.phases.operations.migrated, 3);
+  assert.deepEqual(view.totals.host.docker, { images_bytes: 1000, containers_bytes: 30, volumes_bytes: 400, build_cache_bytes: 500 });
   assert.ok(view.refreshed_at);
   void store;
 });
@@ -75,6 +76,15 @@ test('loading the page reads counters only: it never touches trajectory files, p
   assert.ok(seen.length > 0);
   for (const sql of seen) assert.match(sql, /FROM (repositories|trajectory_usage)\b/, sql);
   for (const sql of seen) assert.doesNotMatch(store.all('EXPLAIN QUERY PLAN ' + sql.replace(/\?/g, "'x'")).map(row => row.detail).join(' | '), /SCAN (task_tools|task_logs|model_requests|task_history|trajectory_files)/);
+});
+
+test('a host whose Docker usage cannot be read keeps the page at 200 and that row null', async t => {
+  const h = await harness(t, { async call() { return { usage: [], database: {}, disk: {}, migration: {}, expiry: {}, host: { docker: null } }; } });
+  const { admin } = await setup(h);
+  const response = await admin('/api/storage');
+  assert.equal(response.status, 200);
+  assert.equal(response.value.totals.host.docker, null);
+  assert.ok(Array.isArray(response.value.projects));
 });
 
 test('the console API serves the storage view to signed-in users only', async t => {
