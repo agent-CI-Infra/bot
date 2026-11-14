@@ -6,10 +6,12 @@ function credentialLike(value: string): boolean {
     && (value.length >= 24 || /[0-9._~+/=-]/.test(value) || /[a-z]/.test(value) && /[A-Z]/.test(value));
 }
 function secretValue(name: string, value: string, code = false): boolean {
+  name = name.replace(/([a-z0-9])([A-Z])/g, '$1_$2');
   if (!credentialName.test(name) || !value.trim() || value === '[REDACTED]') return false;
+  // A named Authorization header is a credential position, including short Basic and non-Bearer schemes.
+  if (/^authorization$/i.test(name)) return true;
   // An unquoted function call is code. Explicit password fields can contain digits or parentheses too.
   if (code && /^[\w$.]+\([^)]*\)$/.test(value) || /^\d+(?:\.\d+)?$/.test(value) && !explicitSecretName.test(name)) return false;
-  if (/^authorization$/i.test(name)) { const match=/^(?:Bearer|Basic)\s+(.+)$/i.exec(value);return credentialLike(match?.[1]??value); }
   return credentialLike(value) || explicitSecretName.test(name);
 }
 function redactText(text: string, hit: () => void): string {
@@ -18,6 +20,10 @@ function redactText(text: string, hit: () => void): string {
     .replace(/\b(?:github_pat_|gh[pousr]_)[\w]+|\b(?:sk|sk-proj)-[\w-]+|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\b(?:glpat-[\w-]+|xox[baprs]-[\w-]+|AIza[\w-]{30,})|\brrt_[\w-]{12}\.[\w-]{20,}|\beyJ[\w-]+\.[\w-]+\.[\w-]+\b/g, marker)
     .replace(/\b(authorization|cookie|set-cookie)["']?\s*[:=]\s*([^\r\n]+)/gi, (all, name: string, value: string) => secretValue(name, value.replace(/^["']|["',]$/g, '')) ? marker() : all)
     .replace(/\b(?:Bearer|Basic)\s+([A-Za-z0-9._~+/=-]+)/gi, (all, value: string) => credentialLike(value) ? marker() : all)
+    .replace(/([?&])([\w%.-]{1,128})=([^&#\s"'<>{}]*)/g, (all, separator: string, name: string, value: string) => {
+      let key=name,decoded=value;try{key=decodeURIComponent(name);decoded=decodeURIComponent(value);}catch{}
+      return secretValue(key,decoded) ? separator+name+'='+marker() : all;
+    })
     .replace(/((\b(?:api[ _-]?key|access[ _-]?key|[\w-]{1,128})|密码|凭据|私钥)["']?\s*[:=]\s*)(?:(["'])(.*?)\3|([^\s,;"'}]+))/gi,
       (all, prefix: string, name: string, _quote: string, quoted: string | undefined, unquoted: string | undefined) => secretValue(name, quoted ?? unquoted ?? '', unquoted !== undefined) ? prefix + marker() : all)
     .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, (_all, scheme: string) => scheme + marker() + '@');
@@ -40,7 +46,7 @@ function inspectCredentials<T>(value: T): { value: T; redacted: boolean } {
     }
     if (Array.isArray(item)) return item.map(visit);
     if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).map(([key, field]) => {
-      if (typeof field === 'string' && secretValue(key, field)) { hit(); return [key, '[REDACTED]']; }
+      if ((typeof field === 'string' || typeof field === 'number') && secretValue(key, String(field))) { hit(); return [key, '[REDACTED]']; }
       return [key, visit(field)];
     }));
     return item;

@@ -56,8 +56,7 @@ test('模型行显示使用位置与单价，供应商组显示 Key 状态', asy
     await page.setViewportSize({ width: 1280, height: 900 });
 
     // Revoking the provider key flips the header and the row stays readable: failure is shown, not hidden.
-    // Versions are read fresh: setting a price bumped the version of the model it was set on, and a provider edit is
-    // one snapshot of membership plus versions.
+    // A provider edit uses one fresh snapshot of membership and endpoint/name versions; pricing keeps versions fixed.
     const live = (await admin('/api/models?repository_id=101')).value.models.filter(model => model.api_url === host);
     assert.equal((await admin('/api/models/' + priced.id + '/provider', 'PATCH', { versions: live.map(model => ({ id: model.id, version: model.version })), revoke_key: true })).status, 200);
     await page.reload();

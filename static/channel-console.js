@@ -199,7 +199,7 @@ async function renderChannelConsole(request) {
           const incoming = element('details'); incoming.setAttribute('aria-label', '回合并入的消息');
           incoming.append(element('summary', '并入的消息（' + value.incoming_messages.length + '）'));
           for (const message of value.incoming_messages) {
-            const status = { pending: '尚未交给模型', injected: '已交给模型', answered: '本轮处理完成', released: '已交回待处理' }[message.state] || message.state;
+            const status = { pending: '尚未交给模型', injected: '已交给模型', answered: '本轮处理完成', released: '已交回待处理', changed: '原消息已变更' }[message.state] || message.state;
             const mention = conversationMode === 'service' ? message.is_direct_mention ? ' · @助手' : ' · 未 @助手' : '';
             // Whether a merged message needs an answer is the assistant's own judgement; the line shows who sent it and the facts.
             const sender = message.sender_name ? `${message.sender_name}（${message.sender_id}）` : message.sender_id;

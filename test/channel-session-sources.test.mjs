@@ -74,3 +74,35 @@ for(const change of ['roster','backfill'])test(`an active group turn survives ${
   release.release();assert.equal((await done(f,receipt)).state,'completed');
   assert.equal(calls,1);assert.equal(f.service.serviceBindings.fence(chat.id),fence);
 });
+
+test('private source refresh preserves message paging and applies the history budget after edits',async t=>{
+  const f=await fixture(t,true),receipts=[];
+  const long='私聊普通内容'.repeat(5000)+'UNPAGED_END';let calls=0,inspect=false;
+  f.modelState.respond=async(body,res)=>{
+    calls++;const context=JSON.parse(body.messages[1].content);
+    if(calls===2) {
+      assert.match(context.history[0].request.content,/read_message_text/);
+      assert.ok(!context.history[0].request.content.includes('UNPAGED_END'));
+    }
+    if(inspect) {
+      assert.ok(context.earlier_rounds_omitted>0);
+      assert.ok(Buffer.byteLength(JSON.stringify(context.history))<=96*1024);
+      for(const row of context.history) {
+        assert.ok(row.request.content.length<14200);
+        assert.match(row.request.content,/read_message_text/);
+        assert.ok(!row.request.content.includes('UNPAGED_END'));
+      }
+      for(const message of context.source_updates.messages) {
+        assert.equal(message.content.length,3000);assert.equal(message.truncated,true);
+        assert.match(message.notice,/read_message_text/);
+      }
+    }
+    say(res,'按需分页读取');
+  };
+  for(let i=0;i<6;i++){const receipt=await f.send(long);assert.equal((await done(f,receipt)).state,'completed');receipts.push(receipt);}
+  for(const receipt of receipts) {
+    const event=f.service.turnMessages.event(inbox(f,receipt));
+    f.service.ledger.accept({...event,content:'编辑后'+long,raw_content:JSON.stringify({text:'编辑后'+long}),updated_at:Date.now()+1});
+  }
+  inspect=true;assert.equal((await done(f,await f.send('继续核对编辑后的消息'))).state,'completed');
+});

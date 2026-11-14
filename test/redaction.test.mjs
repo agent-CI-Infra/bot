@@ -50,6 +50,27 @@ test('management input and commands accept and retain normal text without trace-
   }
   const rejected=await f.admin('/api/management/conversations/'+conversation+'/messages','POST',{source_message:'real-secret',content:'Bearer '+'a'.repeat(40)});
   assert.equal(rejected.status,400);assert.equal(rejected.value.error,'sensitive_management_input');
+  const numeric=await command(f.admin,'roles.update',{project_id:'101'},{expected_revision:0,enabled:false,roles:[{password:123456}]},'numeric-secret');
+  assert.equal(numeric.status,400);assert.equal(numeric.value.error,'sensitive_management_arguments');
+});
+
+test('camelCase credential fields, header schemes and numeric passwords retain protection', () => {
+  const value='AbCd0123456789AbCd0123456789';
+  for(const name of ['accessToken','clientSecret','refreshToken','dbPassword','apiKey']) {
+    for(const input of [{[name]:value},JSON.stringify({[name]:value}),`https://host/cb?${name}=${value}`]) {
+      assert.equal(hasCredentials(input),true,JSON.stringify(input));
+      assert.ok(!JSON.stringify(redactCredentials(input)).includes(value));
+      assert.ok(!publicText(typeof input==='string'?input:JSON.stringify(input),new Redactor(),false).includes(value));
+    }
+  }
+  for(const header of ['Basic YTpi','Bearer abcdef','Token '+value,'Digest username="u", response="fixture"']) {
+    for(const input of ['Authorization: '+header,{Authorization:header}]) {
+      assert.equal(hasCredentials(input),true);
+      assert.ok(!JSON.stringify(redactCredentials(input)).includes(header));
+    }
+  }
+  assert.deepEqual(redactCredentials({password:123456,dbPassword:987654,max_tokens:8192,maxTokens:8192}),
+    {password:'[REDACTED]',dbPassword:'[REDACTED]',max_tokens:8192,maxTokens:8192});
 });
 
 test('GitHub comments retain ordinary prose, code and JSON through the write boundary',async t=>{

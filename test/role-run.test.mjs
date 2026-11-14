@@ -39,7 +39,7 @@ async function fixture(t, handler, { usage = () => ({ prompt_tokens: 100, comple
   const server = createServer(async (req, res) => {
     try { let raw = ''; for await (const c of req) raw += c; const body = JSON.parse(raw); const message = await handler(body, ++turn);
       res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message }], usage: usage(turn) })); }
-    catch (e) { console.error(e); res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); }
+    catch (e) { console.error(e); res.writeHead(500); res.end(JSON.stringify({ error: 'fixture_model_failed' })); }
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)', 'm', 'r', 'http://127.0.0.1:' + server.address().port + '/v1', 'fixture', s.secrets.seal({ value: 'fixture-model-key-169' }, 'model:m'), 'now');

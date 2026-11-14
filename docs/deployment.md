@@ -79,6 +79,7 @@ Compose 只发布这一个端口，宿主端口默认 `8791`，默认只绑定�
 | `BOT_PUBLIC_ORIGIN` | 空 | 部署的统一入口 origin，例如 `https://bot.example.com`，不含路径；只允许 HTTPS，本机测试可用 `http://localhost` 或 `http://127.0.0.1`（可带端口），格式不符时控制面拒绝启动。它始终是写请求的合法 Origin；向导尚未验证公网地址时，也用于 GitHub 登录回调和消息链接。向导验证过的地址优先用于生成这些 URL |
 | `BOT_COOKIE_SECURE` | `false` | 设为 `true` 时强制 Secure Cookie；经 HTTPS 的统一入口或部署地址登录时也会自动使用 Secure，本机回环 HTTP 登录的 Cookie 不受影响 |
 | `BOT_WEBHOOK_PORT`、`BOT_ADMIN_PORT`、`BOT_ADMIN_ORIGIN` | — | 旧变量，处理方式见[从双端口升级](#从双端口升级) |
+| `BOT_COMMAND_TIMEOUT_MAX_SECONDS` | `600` | 模型命令显式超时的统一上限（秒，1–2147363）；超过时按上限执行并返回 `timeout_notice`，省略参数保留各入口默认值，见[执行运行时](agent-runtime.md) |
 | `BOT_PROJECT_EGRESS` | `true` | 设为 `false` 时虚拟电脑没有外网出口 |
 | `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |
 | `BOT_GITHUB_OAUTH_CLIENT_ID` | 空 | 独立 OAuth App 的 Client ID 部署默认值；也可在全局设置的接入向导配置 |
