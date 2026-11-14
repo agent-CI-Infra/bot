@@ -245,6 +245,10 @@ test('Claude Code (/v1/messages) uses OpenAI Chat Completions upstream with stre
   const recordedTurn2 = rig.store.trajectories.readModelRequest(ledger[1].request_ref);
   assert.equal(recordedTurn2.messages.length, 3);
   assert.ok(!JSON.stringify(ledger).includes(providerKey));
+  // Reading the HTTP response can finish before the relay unlinks its mailbox files. Drain cleanup before scanning.
+  await rig.relay.close();
+  assert.deepEqual(readdirSync(join(rig.root, 'agent', 'model-requests')), []);
+  assert.deepEqual(readdirSync(join(rig.root, 'agent', 'model-replies')), []);
   for (const file of collectFiles(rig.root)) {
     assert.ok(!readFileSync(file, 'utf8').includes(providerKey), `provider key leaked into ${file}`);
   }
