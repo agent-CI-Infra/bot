@@ -4,7 +4,7 @@ function catalogStatusText(status) {
 }
 function modelCatalogPanel() {
   const panel = element('section', '', 'model-catalog-status'), message = element('p', '正在读取目录…', 'muted');
-  message.setAttribute('role', 'status'); panel.append(element('h3', '在线能力与价格目录'), message, note('目录来自 models.dev，每 6 小时刷新。中转模型参考官方 USD 定价，不做人民币换算；手填值优先。'));
+  message.setAttribute('role', 'status'); panel.append(element('h4', '在线能力与价格目录'), message, note('目录来自 models.dev，每 6 小时刷新。中转模型参考官方 USD 定价，不做人民币换算；手填值优先。'));
   const actor = me, address = location.hash, live = () => me === actor && location.hash === address && panel.isConnected;
   const show = status => { if (live()) message.textContent = catalogStatusText(status); };
   if (me.role === 'super_admin') panel.append(button('立即刷新目录', async event => {
