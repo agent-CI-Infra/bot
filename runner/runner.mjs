@@ -4,7 +4,7 @@ import { resolve, dirname, sep } from 'node:path';
 import { workspace as workspaceTool } from './workspace.mjs';
 import { command } from './command.mjs';
 import { execFile } from 'node:child_process';
-import { ownership, isRunner, tasksRoot } from './ownership.mjs';
+import { ownership, operationOwnership, isRunner, tasksRoot } from './ownership.mjs';
 import { pruneJournal } from './journal.mjs';
 import { storeOperation, pruneStore } from './store.mjs';
 import { listTaskDirectories, removeTaskDirectories } from './task-dirs.mjs';
@@ -63,7 +63,7 @@ async function processes() {
   const rows = [];
   for (const name of await readdir('/proc')) if (/^\d+$/.test(name)) try {
     const stat = await readFile(`/proc/${name}/stat`, 'utf8'), fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    rows.push({ pid: Number(name), state: fields[0], ppid: Number(fields[1]), pgid: Number(fields[2]), cmdline: (await readFile(`/proc/${name}/cmdline`, 'utf8')).split('\0').filter(Boolean).join(' ') });
+    rows.push({ pid: Number(name), state: fields[0], ppid: Number(fields[1]), pgid: Number(fields[2]), started: fields[19], cmdline: (await readFile(`/proc/${name}/cmdline`, 'utf8')).split('\0').filter(Boolean).join(' ') });
   } catch { /* The process already exited. */ }
   return rows;
 }
@@ -101,15 +101,17 @@ async function reap({ workspace_id: workspaceId, keep_agent: keepAgent }) {
 // that tag. Include descendants and their process groups, but never use the computer-wide reap path here.
 async function reapOperation(operationId) {
   if(!idPattern.test(operationId||''))throw new Error('invalid_target_operation');
-  let killed=0;const owned=new Set();
+  let killed=0;const owned=new Map();
   for(let round=0;round<20;round++){
     const rows=await processes();
-    for(const row of rows)if(row.pid!==process.pid&&(await readFile(`/proc/${row.pid}/environ`,'utf8').catch(()=>''))
-      .split('\0').includes('BOT_OPERATION_ID='+operationId))owned.add(row.pid);
-    for(let changed=true;changed;){changed=false;for(const row of rows)if(!owned.has(row.pid)&&owned.has(row.ppid)){owned.add(row.pid);changed=true;}}
+    await operationOwnership(rows.filter(row=>row.pid!==process.pid),operationId,pid=>readFile(`/proc/${pid}/environ`,'utf8').catch(()=>''),owned);
     const live=rows.filter(row=>row.pid!==process.pid&&row.pid!==1&&row.state!=='Z'&&owned.has(row.pid));
     if(!live.length)return {killed,remaining:0};
-    for(const row of live)try{process.kill(row.pgid===row.pid?-row.pid:row.pid,'SIGKILL');killed++;}catch{/* Already gone. */}
+    for(const row of live)try{
+      const stat=await readFile(`/proc/${row.pid}/stat`,'utf8');
+      if(stat.slice(stat.lastIndexOf(')')+2).split(' ')[19]!==row.started)continue;
+      process.kill(row.pgid===row.pid?-row.pid:row.pid,'SIGKILL');killed++;
+    }catch{/* Already gone. */}
     await new Promise(resolve=>setTimeout(resolve,100));
   }
   throw new Error('operation_reap_incomplete');

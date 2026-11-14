@@ -4,11 +4,23 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, symlinkSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { ownership, tasksRoot } from '../runner/ownership.mjs';
+import { ownership, operationOwnership, tasksRoot } from '../runner/ownership.mjs';
 import { command, environment } from '../runner/command.mjs';
 import { workspace as runnerWorkspace } from '../runner/workspace.mjs';
 
 const id = () => randomBytes(24).toString('hex');
+
+test('operation cleanup forgets recycled PIDs and their new children while retaining the original orphan', async () => {
+  const operation=id(),known=new Map(),row=(pid,ppid,started)=>({pid,ppid,started});
+  const rows=[row(10,1,'100'),row(11,10,'101'),row(12,11,'102'),row(20,1,'200')];
+  await operationOwnership(rows,operation,async pid=>pid===10?'BOT_OPERATION_ID='+operation:'',known);
+  assert.deepEqual([...known.keys()].sort((a,b)=>a-b),[10,11,12]);
+  // PID 10 is now another operation's parent; PID 11 was reparented after the original leader exited.
+  await operationOwnership([row(10,1,'300'),row(11,1,'101'),row(13,10,'301'),row(20,1,'200')],operation,async()=>'',known);
+  assert.deepEqual([...known.keys()],[11]);
+  await operationOwnership([row(10,1,'300'),row(11,1,'400'),row(14,11,'401')],operation,async()=>'',known);
+  assert.deepEqual([...known.keys()],[]);
+});
 
 test('cleanup attributes each process to its own task workspace, so ending one task leaves the others running', async () => {
   const mine = id(), other = id(), request = value => 'node /opt/runner/runner.mjs ' + Buffer.from(JSON.stringify(value)).toString('base64url');
