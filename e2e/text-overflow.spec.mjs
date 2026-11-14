@@ -52,7 +52,7 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     await accountBtn.click();
     const accountMenu = page.locator('#console-account-menu');
     await expect(accountMenu.getByRole('button', { name: '退出登录', exact: true })).toBeVisible();
-    await expect(accountMenu.locator('#console-account-role')).toHaveText('超级管理员');
+    await expect(accountMenu.locator('#console-account-role')).toHaveText('管理员');
     await page.keyboard.press('Escape');
     await expect(accountMenu).toBeHidden();
     await page.goto(h.admin + '/#/projects');
