@@ -143,7 +143,8 @@ test('files closed longer ago than the window go in the background; their calls 
   const started = Promise.withResolvers(), finish = Promise.withResolvers(), long = { operation_id: id(), generation, request: { type: 'workspace_command', command: 'long', workspace_id: other } };
   f.docker.runner = async (_container, request) => { if (request.command === 'long') { started.resolve(); await finish.promise; } return { ok: true, result: { exit_code: 0, output: 'done ' + request.command } }; };
   const running = f.projects.operate('101', 'execute', long); await started.promise;
-  f.projects.trajectories.closeAll();
+  // Closing syncs and closes each descriptor in the background; a file is expired only once that is done.
+  f.projects.trajectories.closeAll(); await f.projects.trajectories.settle();
   // Everything but the fresh workspace's file closed three days ago.
   const freshFile = f.projects.db.prepare('SELECT input_ref FROM operations WHERE id=?').get(fresh.operation_id).input_ref.slice(0, 16);
   f.projects.db.prepare('UPDATE trajectory_files SET closed_at=? WHERE id<>?').run(daysAgo(3), freshFile);
@@ -176,7 +177,7 @@ test('the window follows the saved setting, and a restart removes the files a st
   const f = await managerFixture(t), generation = await ready(f);
   f.docker.runner = async () => ({ ok: true, result: { exit_code: 0, output: 'x' } });
   await f.projects.operate('101', 'execute', call(generation, { type: 'workspace_command', command: 'a' }));
-  f.projects.trajectories.closeAll();
+  f.projects.trajectories.closeAll(); await f.projects.trajectories.settle();
   f.projects.db.prepare('UPDATE trajectory_files SET closed_at=?').run(daysAgo(3));
   f.projects.db.prepare("INSERT INTO settings VALUES('payload_retention',?)").run(JSON.stringify({ days: 5 }));
   assert.equal((await new TrajectoryExpiry(f.projects.db, f.projects.trajectories, { pauseMs: 0 }).pass()).files, 0, 'within a 5-day window');
