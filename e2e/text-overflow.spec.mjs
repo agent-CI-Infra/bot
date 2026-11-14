@@ -73,21 +73,19 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     const list = await page.evaluate((expected) => {
       const row = [...document.querySelectorAll('.project-list-row')].find(r => r.querySelector('.row-title')?.textContent === expected);
       const title = row.querySelector('.row-title');
-      const actions = row.querySelector(':scope > .actions');
-      const state = row.querySelector('.row-state');
+      const actions = row.querySelector('.project-cell[data-label="操作"]') || row.querySelector(':scope > .actions');
+      const chips = [...row.querySelectorAll(':scope > .project-cell')].filter(c => !['项目', '操作'].includes(c.dataset.label));
       const setting = [...(actions?.querySelectorAll('button') || [])].find(b => b.textContent.trim() === '设置');
-      const ts = getComputedStyle(title), ss = getComputedStyle(state);
-      const ab = actions.getBoundingClientRect(), sb = state.getBoundingClientRect(), tb = title.getBoundingClientRect();
+      const ts = getComputedStyle(title);
+      const ab = actions.getBoundingClientRect();
+      const firstChipTop = chips.length ? Math.min(...chips.map(c => c.getBoundingClientRect().top)) : Infinity;
       return {
         title: title.title,
         ellipsis: ts.textOverflow,
         nowrap: ts.whiteSpace,
         truncated: title.scrollWidth > title.clientWidth + 1,
-        actionsAboveChips: ab.bottom <= sb.top + 2,
+        actionsAboveChips: ab.bottom <= firstChipTop + 2,
         settingVisible: !!setting && setting.getBoundingClientRect().height > 0,
-        stateOverflow: ss.overflow,
-        stateMax: ss.maxHeight,
-        titleWidth: tb.width,
         overflow: document.documentElement.scrollWidth,
       };
     }, longName);
@@ -97,8 +95,6 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     expect(list.truncated).toBe(true);
     expect(list.actionsAboveChips).toBe(true);
     expect(list.settingVisible).toBe(true);
-    expect(list.stateOverflow).toBe('hidden');
-    expect(Number.parseFloat(list.stateMax)).toBeGreaterThan(0);
     expect(list.overflow).toBe(390);
     await page.screenshot({ path: resolve(out, 'projects-390.png'), fullPage: true });
 

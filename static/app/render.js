@@ -99,7 +99,7 @@ async function render(quiet = false) {
         : installedView ? installedDetail(row) : (row.model_id ? '' : '还没有默认模型');
       // The repository number leaves the first screen but stays on hover, with or without a detail line.
       if (tab === 'projects' && row.id) content.title = '编号 ' + row.id;
-      if (detail) { const detailLine = element('p', detail); if (tab === 'projects' && row.id) detailLine.title = '编号 ' + row.id; content.append(detailLine); } line.append(content);
+      if (detail) { const detailLine = element('p', detail); detailLine.title = detail; content.append(detailLine); } line.append(content);
       if(listTabs.includes(tab))status.append(taskTab ? taskState(row) : state(row.status));
     }
     // #544: the project list is one shared-column table. Each category gets its own cell so 启用/检视/开发/权限/门禁/看板/任务
