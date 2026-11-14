@@ -73,6 +73,22 @@ test('camelCase credential fields, header schemes and numeric passwords retain p
     {password:'[REDACTED]',dbPassword:'[REDACTED]',max_tokens:8192,maxTokens:8192});
 });
 
+test('secretKey and credentialValue names protect credentials without rejecting ordinary values or code', () => {
+  const value='AbCd0123456789AbCd0123456789';
+  for(const name of ['secretKey','credentialValue','clientSecretKey']) {
+    for(const input of [{[name]:value},JSON.stringify({[name]:value}),`https://host/cb?${name}=${value}`]) {
+      assert.equal(hasCredentials(input),true,JSON.stringify(input));
+      assert.ok(!JSON.stringify(redactCredentials(input)).includes(value));
+    }
+    const code=`const ${name} = readKey();`;
+    assert.equal(hasCredentials(code),false);assert.equal(publicText(code,new Redactor(),false),code);
+  }
+  for(const input of [{credentialValue:'ordinary public value'},{credentialValue:8192},{max_tokens:8192},'This describes a secret key and a credential value.']) {
+    assert.equal(hasCredentials(input),false);assert.deepEqual(redactCredentials(input),input);
+  }
+  assert.deepEqual(redactCredentials({secretKey:123456}),{secretKey:'[REDACTED]'});
+});
+
 test('GitHub comments retain ordinary prose, code and JSON through the write boundary',async t=>{
   const {createServer}=await import('node:http'),{once}=await import('node:events');
   const {Store}=await import('../dist/storage/database.js'),{githubWrite,githubWriteStorage}=await import('../dist/github/write.js');
