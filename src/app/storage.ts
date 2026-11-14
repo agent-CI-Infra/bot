@@ -8,11 +8,12 @@ import { migrationProgress } from '../storage/migration.js';
 import { diskState } from '../storage/disk.js';
 
 // The storage page (#436): per project, what its trajectory files, records and blobs take on the control plane and its
-// runner-call files take in the manager; for platform administrators also the two databases, their disks and the
-// payload migration. A page load reads the counters added when files close (trajectory_usage, a few rows per project)
-// and a snapshot the background refresh keeps: it never walks files or scans tables. The refresh sizes the files still
-// open (one per running task) and asks the manager for its numbers. Platform administrators also get an alert for each
-// data disk below its reserve (#671), when background writes pause.
+// runner-call files take in the manager; for platform administrators also the two databases, their disks, the payload
+// migration and the host's Docker usage (images, containers, volumes and build cache, null when unreadable). A page
+// load reads the counters added when files close (trajectory_usage, a few rows per project) and a snapshot the
+// background refresh keeps: it never walks files or scans tables. The refresh sizes the files still open (one per
+// running task) and asks the manager for its numbers. Platform administrators also get an alert for each data disk
+// below its reserve (#671), when background writes pause.
 
 interface Usage { count: number; bytes: number }
 interface Snapshot { refreshed_at: string; control: Json; manager: Json | null; open: Record<string, Usage> }
@@ -92,7 +93,8 @@ export class StorageReport {
     const alerts = ([['control', control?.disk], ['manager', manager?.disk]] as [string, any][]).filter(([, disk]) => disk?.low)
       .map(([where, disk]) => ({ where, free_bytes: disk.free_bytes, total_bytes: disk.total_bytes, reserve_bytes: disk.reserve_bytes }));
     return { refreshed_at: this.snapshot?.refreshed_at ?? null, projects: [...projects.values()], alerts,
-      totals: { control, manager: manager ? { database: manager.database ?? null, disk: manager.disk ?? null, migration: manager.migration ?? null, expiry: manager.expiry ?? null } : null } };
+      totals: { control, manager: manager ? { database: manager.database ?? null, disk: manager.disk ?? null, migration: manager.migration ?? null, expiry: manager.expiry ?? null } : null,
+        host: manager ? { docker: manager.host?.docker ?? null } : null } };
   }
 }
 

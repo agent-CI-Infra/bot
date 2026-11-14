@@ -659,9 +659,10 @@ export class Projects {
   }
   // The storage page's numbers from this manager: trajectory totals per project (kind 'open' sizes the files still being
   // written, one per running task; 'expired' counts the files removed after their window), the ledger's size and free
-  // pages, the disk with its reserve, the migration and the expiry. The PRAGMAs read the database header and
-  // trajectory_usage holds a few rows per project: nothing here scans the ledger.
-  storage() {
+  // pages, the disk with its reserve, the migration, the expiry and the host's Docker usage. The PRAGMAs read the
+  // database header and trajectory_usage holds a few rows per project: nothing here scans the ledger. Docker's row is
+  // null when /system/df cannot be read (a many-image answer past the 4 MB cap, a stopped socket), never an error.
+  async storage() {
     const value = pragma => Number(Object.values(this.db.prepare('PRAGMA ' + pragma).get() ?? {})[0] ?? 0);
     const pageSize = value('page_size'), pages = value('page_count'), free = value('freelist_count'), data = dirname(this.trajectories.root);
     const usage = this.db.prepare('SELECT repository_id,kind,count,bytes FROM trajectory_usage').all(), open = new Map();
@@ -671,7 +672,7 @@ export class Projects {
     }
     let wal = 0; try { wal = statSync(data + '/manager.sqlite-wal').size; } catch {}
     return { usage: [...usage, ...open.values()], database: { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal },
-      disk: this.disk.check(), migration: this.migration.state(), expiry: this.expiry.state() };
+      disk: this.disk.check(), migration: this.migration.state(), expiry: this.expiry.state(), host: { docker: await this.docker.diskUsage() } };
   }
   async shutdown() {
     await this.migration.stop(); await this.expiry.stop(); await Promise.all([...this.pending]); for (const row of this.list()) await this.stopAll(row.repository_id);
