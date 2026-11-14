@@ -38,7 +38,7 @@ function knowledgeSection() {
   const locationText = path => path || '全部文件';
   const fileBytes = value => value == null ? '大小未知' : value < 1024 ? value + ' B' : bytes(value);
   const timestamp = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : '时间未提供';
-  const actor = value => value ? value === 'filesystem' ? '文件系统变更' : value === 'user:'+me.actor?.principal_id ? (me.username || '当前用户') : value : '修改人未提供';
+  const actor = value => value ? value === 'filesystem' ? '文件系统变更' : value === 'user:'+me.actor?.principal_id ? (userDisplayName(me) || '当前用户') : value : '修改人未提供';
   const write = () => listing?.can_write === true;
   const routeState = () => {
     const next = new URLSearchParams(); if (state.directory) next.set('directory', state.directory); if (state.query) next.set('query', state.query);

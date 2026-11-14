@@ -9,11 +9,11 @@ function options(select, rows, label) { const selected = select.value; while (se
 function renderCurrentUser() {
   const who = $('who'), role = me.role === 'super_admin' ? t('role.super_admin') : t('role.project_admin');
   who.replaceChildren();
-  if (!me.github) { who.textContent = `${me.username} · ${role}`; return; }
+  if (!me.github) { who.textContent = `${userDisplayName(me)} · ${role}`; return; }
   const avatar = document.createElement('img'); avatar.src = me.github.avatar_url;
   avatar.alt = t('identity.avatar', { login: me.github.login }); avatar.width = 28; avatar.height = 28; avatar.referrerPolicy = 'no-referrer';
   avatar.addEventListener('error', () => avatar.remove());
-  const copy = element('span', '', 'current-user-copy'), name = element('span', '@' + me.github.login, 'current-user-name');
+  const copy = element('span', '', 'current-user-copy'), name = element('span', userDisplayName(me), 'current-user-name');
   name.title = me.github.login; copy.append(name, element('span', role, 'current-user-role')); who.append(avatar, copy);
 }
 function showBootFailure(err) {

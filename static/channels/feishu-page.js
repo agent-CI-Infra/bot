@@ -45,7 +45,7 @@ async function renderFeishuBindingsPage(panel, current) {
     box.append(element('span', name), element('strong', value), element('small', hint));
     metrics.append(box); return box;
   };
-  metric('已绑定身份', String(activePersonal.length), '当前账户 ' + me.username);
+  metric(t('feishu.bound_identities'), String(activePersonal.length), t('feishu.current_account', { name: userDisplayName(me) }));
   const privateCount = metric('本人私聊', '—', '正在读取');
   const groupCount = metric('维护的群', '—', '正在读取');
   overview.append(metrics);
@@ -78,7 +78,7 @@ async function renderFeishuBindingsPage(panel, current) {
       }
     }, '');
     challengeBox.append(element('strong', '确认飞书私聊发起的绑定请求'),
-      note(`将绑定到当前平台账户：${me.username}。如需使用其他账户，请先退出登录并重新打开绑定链接。`), claim, status);
+      note(t('feishu.bind_account_link', { name: userDisplayName(me) })), claim, status);
     personalSection.append(challengeBox);
   }
 
@@ -169,7 +169,7 @@ async function renderFeishuBindingsPage(panel, current) {
     code.placeholder = '粘贴机器人私聊返回的 FSB- 开头字符串'; code.maxLength = 100;
     const status = element('p', '', 'view-error'); status.setAttribute('role', 'alert');
     const submit = element('button', '确认绑定到当前账户'); submit.type = 'submit';
-    form.append(note(`将绑定到当前平台账户：${me.username}。请仅使用本人私聊收到的认证字符串。`), status, submit);
+    form.append(note(t('feishu.bind_account_code', { name: userDisplayName(me) })), status, submit);
     form.addEventListener('submit', async event => {
       event.preventDefault(); if (submit.disabled) return;
       submit.disabled = true; status.textContent = '';
@@ -203,7 +203,7 @@ async function renderFeishuBindingsPage(panel, current) {
 
   for (const p of data.pending) {
     const pending = element('div', '', 'feishu-binding-row channel-binding'); pending.setAttribute('aria-label', '待确认的飞书身份');
-    pending.append(element('strong', '等待原飞书操作者确认'), facts([['平台账户', p.account.username],
+    pending.append(element('strong', '等待原飞书操作者确认'), facts([[t('feishu.platform_account'), userDisplayName(me)],
       ['飞书账号', '发起本次绑定的飞书账号'], ['机器人', p.app_name || '机器人名称暂未获取'],
       ['机器人所属企业', p.tenant_name || '企业名称暂未获取'], ['有效期', new Date(p.expires_at).toLocaleString()]]),
       channelCopy('在原私聊发送的确认指令', '确认绑定 ' + p.confirmation));
@@ -223,14 +223,14 @@ async function renderFeishuBindingsPage(panel, current) {
     const stateLabel = active ? '已绑定' : b.status === 'revoked' ? '已解绑' : '需要重新认证';
     const mainRow = element('div', '', 'feishu-row-main'), info = element('div', '', 'feishu-row-info'), rowActions = element('div', '', 'actions feishu-row-actions');
     const titleWrap = element('div', '', 'feishu-row-title'), title = element('strong');
-    const renderName = () => { title.textContent = `${name() || me.username + ' 的飞书账号'} · ${stateLabel}`; };
+    const renderName = () => { title.textContent = `${name() || t('feishu.account_of', { name: userDisplayName(me) })} · ${stateLabel}`; };
     renderName();
     titleWrap.append(title);
     if (active) titleWrap.append(element('span', '私聊管理助手', 'feishu-binding-badge'));
     else titleWrap.append(element('span', stateLabel, 'feishu-binding-badge feishu-binding-badge-muted'));
 
     row.setAttribute('aria-label', '我的飞书账号');
-    info.append(titleWrap, note(channelChatContext(b)), note(`关联平台账户：${me.username}`));
+    info.append(titleWrap, note(channelChatContext(b)), note(t('feishu.linked_account', { name: userDisplayName(me) })));
     const chatHint = note(active ? '正在核对私聊会话记录…' : '需要恢复时，可在原飞书私聊发送 /reauth，或点击「重新绑定」生成新绑定串。');
     info.append(chatHint);
     const nameStatus = note(name() ? '' : '飞书姓名暂不可读取，当前显示关联的平台账户。'); nameStatus.setAttribute('role', 'status');

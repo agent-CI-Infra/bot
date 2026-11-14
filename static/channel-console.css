@@ -27,8 +27,8 @@
 .feishu-metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: var(--space-4); margin: var(--space-5) 0 0; }
 .feishu-metric { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-5); background: var(--color-surface-alt); border: 1px solid var(--color-border); border-radius: var(--radius-card); min-width: 0; }
 .feishu-metric strong { font-size: var(--font-size-5); }
-.feishu-metric small { color: var(--color-text-muted); }
-.feishu-summary-row { padding: var(--space-4) 0; border-bottom: 1px solid var(--color-border); }
+.feishu-metric small { color: var(--color-text-muted); overflow-wrap: anywhere; }
+.feishu-summary-row { padding: var(--space-4) 0; border-bottom: 1px solid var(--color-border); overflow-wrap: anywhere; }
 .feishu-page-actions:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-top: var(--space-4); }
 .feishu-section-head:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); }
 .feishu-section-head :is(h1,h2,h3) { margin: 0; }
@@ -44,7 +44,7 @@
 .feishu-row-info:not([hidden]) { flex: 1 1 320px; display: grid; gap: var(--space-2); min-width: 0; }
 .feishu-row-info > p { margin: 0; }
 .feishu-row-info > p:empty { display: none; }
-.feishu-row-title:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); min-width: 0; }
+.feishu-row-title:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); min-width: 0; overflow-wrap: anywhere; }
 .feishu-binding-badge:not([hidden]) { display: inline-flex; align-items: center; padding: 2px var(--space-3); border-radius: var(--radius-3); background: var(--color-brand-weak); color: var(--color-brand); font-size: var(--font-size-1); font-weight: 600; }
 .feishu-binding-badge-muted { background: var(--color-surface-alt); color: var(--color-text-muted); border: 1px solid var(--color-border); }
 .feishu-perm-tags:not([hidden]) { display: flex; flex-wrap: wrap; gap: var(--space-2); }
