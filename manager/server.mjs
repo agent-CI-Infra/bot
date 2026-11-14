@@ -36,6 +36,8 @@ export function createManagerServer({ projects, token, runs = null, assistants =
       if (req.method === 'GET' && path === '/v1/projects') result = projects.list();
       else if (req.method === 'GET' && path === '/v1/defaults') result = await projects.defaultsView();
       else if (req.method === 'GET' && path === '/v1/storage') result = projects.storage();
+      // The window of the manager's copies of runner-call bodies, set from the control plane's storage settings (#671).
+      else if (req.method === 'PUT' && path === '/v1/storage/retention') result = projects.setRetention(await json(req));
       else if (req.method === 'PUT' && path === '/v1/defaults') result = await projects.setDefaults(await json(req));
       else if (req.method === 'GET' && output) result = await projects.output(output[1], output[2], Number(url.searchParams.get('offset') || 0));
       else if (/^\/v1\/projects\/[1-9]\d{0,19}\/file-tree(?:\/[^/]+)?(?:\/(?:versions|restore|move))?$/.test(path)) {

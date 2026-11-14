@@ -19,6 +19,47 @@ async function renderSettings(request) {
   content.replaceChildren(...cards);
 }
 // Each category loads only what its cards show.
+// Cleanup by days (#671): one form for every window, saved with PUT /api/storage/retention (platform administrators,
+// audited) and applied by the daily cleanup; group chats keep their own per-chat setting, summarised here.
+async function retentionCard(size, count, time) {
+  const view = await api('/api/storage/retention'), section = card('按天数清理'), form = element('form', '', 'project-form');
+  const { settings, defaults, bounds } = view, status = note(''); status.setAttribute('role', 'status');
+  const number = (name, value, [min, max]) => input(name, value ?? '', { type: 'number', min, max, step: 1 });
+  const fields = [
+    ['trajectory_days', '轨迹正文：任务结束后保留天数（留空不过期）', `结束的任务和 Manager 分派的轨迹文件，关闭超过这么多天后删除；会话的轨迹不删。同一次运行的模型请求、工具调用和日志在同一个文件里，所以按文件整体删除。`],
+    ['manager_payload_days', 'manager 重复正文保留天数', `默认 ${defaults.manager_payload_days} 天。控制面另存了同样的请求和结果。`],
+    ['workspace_finished_days', '任务工作区：任务结束后保留天数', `默认 ${defaults.workspace_finished_days} 天；没有任务记录的目录也按这个。为打开的 PR 保留的不受影响。`],
+    ['workspace_failed_days', '任务工作区：任务失败后保留天数', `默认 ${defaults.workspace_failed_days} 天。`],
+    ['webhook_payload_days', 'Webhook 投递正文保留天数（留空不过期）', `至少 ${bounds.webhook_payload_days[0]} 天：日报和外部执行端会读最近的投递。删除后投递记录、状态和正文的 sha256 保留。`]];
+  const controls = {};
+  for (const [key, label, help] of fields) { controls[key] = number(key, settings[key], bounds[key]); form.append(field(label, controls[key]), note(help)); }
+  const overrides = costTable(['项目', '轨迹正文保留天数（留空跟随上面的设置）']), perProject = {};
+  for (const project of view.projects) {
+    perProject[project.id] = number('trajectory_days_' + project.id, settings.trajectory_days_by_project[project.id], bounds.trajectory_days);
+    const row = document.createElement('tr'), cell = document.createElement('td'); cell.append(perProject[project.id]); row.append(element('td', project.name), cell); overrides.body.append(row);
+  }
+  if (view.projects.length) form.append(element('p', '按项目设置轨迹正文的保留天数', 'muted'), overrides.wrap);
+  const save = element('button', '保存清理设置'); save.type = 'submit';
+  form.append(status, save);
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); status.textContent = '';
+    const value = control => control.value.trim() === '' ? null : Number(control.value);
+    const body = Object.fromEntries(fields.map(([key]) => [key, value(controls[key])]));
+    for (const key of ['manager_payload_days', 'workspace_finished_days', 'workspace_failed_days']) if (body[key] === null) body[key] = defaults[key];
+    body.trajectory_days_by_project = Object.fromEntries(Object.entries(perProject).map(([id, control]) => [id, value(control)]));
+    save.disabled = true;
+    try { await api('/api/storage/retention', 'PUT', body); status.textContent = '已保存，下一次每日清理按新设置执行。'; }
+    catch (err) { status.textContent = err.message; } finally { save.disabled = false; }
+  });
+  section.append(note('设置了天数的类别，每天在后台分批清理一次：只删正文，记录行、计费、审计和哈希保留，引用到已删正文的地方会显示「已过保留期删除」。留空表示不过期。'), form);
+  const last = view.last_cleanup;
+  section.append(facts([
+    ['最近一次清理', last?.finished_at ? `${time(last.finished_at)}：轨迹文件 ${count(last.trajectories?.count ?? 0)} 个（${size(last.trajectories?.bytes ?? 0)}），Webhook 正文 ${count(last.deliveries?.count ?? 0)} 条（${size(last.deliveries?.bytes ?? 0)}）`
+      + ((last.trajectories?.failed || last.deliveries?.failed) ? `；${count((last.trajectories?.failed ?? 0) + (last.deliveries?.failed ?? 0))} 项没能清理，下次再试` : '')
+      + (last.manager_window === null ? '；manager 没有应答，保留天数下次再同步' : '') + (last.last_error ? `；最近一个错误：${last.last_error}` : '') : '尚未运行'],
+    ['群聊记录', view.chats ? `${count(view.chats.configured)} / ${count(view.chats.chats)} 个群设置了保留天数${view.chats.configured ? `（${view.chats.min_days}–${view.chats.max_days} 天）` : ''}；在频道控制台按群设置` : '没有群聊']]));
+  return section;
+}
 const settingsCards = {
   async projects(request, id) { return globalProjectSettings(request, id); },
   // Group assistants' and the management assistant's computers (#457): their timers and limits, each computer's resources
@@ -87,6 +128,7 @@ const settingsCards = {
       reclaim.append(facts((view.freed ?? []).map(item => [freed[item.key]?.[0] ?? item.key, item.at ? (freed[item.key]?.[1] ?? (() => size(item.bytes)))(item) : '尚未运行'])));
       cards.push(reclaim);
     }
+    if (view.totals) cards.push(await retentionCard(size, count, time));
     if (view.totals) {
       const totals = card('数据库与磁盘'), side = value => value ? `文件 ${size(value.bytes)}：实际数据 ${size(value.bytes - value.free_bytes)}，空闲页 ${count(value.free_pages)}（${size(value.free_bytes)}）；WAL ${size(value.wal_bytes)}` : '读不到';
       totals.append(facts([['控制面数据库 control.sqlite', side(view.totals.control?.database)], ['manager 账本 manager.sqlite', side(view.totals.manager?.database)],

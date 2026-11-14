@@ -229,7 +229,7 @@ test('removing a project deletes its trajectory files, entries and totals', t =>
   store.trajectories.append(runScope('102', 'u', 'run-o'), 'log', 'l', {});
   store.trajectories.remove({ repository_id: '101' });
   assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 0);
-  assert.equal(store.get("SELECT count FROM trajectory_usage WHERE repository_id='101' AND kind='files'").count, 0);
+  assert.equal(store.get("SELECT count(*) n FROM trajectory_usage WHERE repository_id='101'").n, 0, 'no totals of the removed project are left');
   assert.throws(() => statSync(join(directory, 'trajectories', '101')));
   assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='102'").n, 1);
 });

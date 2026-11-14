@@ -31,7 +31,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     await expect(nav.getByRole('link')).toHaveText(['工作电脑', '模型', '服务角色', '助手电脑', '存储', '接入向导', '公网接入', '外部执行', '机器人账号', '安装档案', '飞书连接', '项目管理', '用户']);
     for (const [caption, key, shown] of [['工作电脑', 'work-computers', ['同时运行的任务', '默认资源', '当前运行版本']], ['飞书连接', 'feishu', ['飞书应用连接']], ['公网接入', 'access', ['公网 HTTPS 地址', 'Cloudflare Tunnel', 'GitHub 登录（只读）']],
       ['机器人账号', 'accounts', ['接入向导使用的 GitHub App', '已登记的账号', 'GitHub 请求额度']], ['安装档案', 'installations', ['GitHub App 安装档案']],
-      ['模型', 'models', ['默认共享模型', '部署共享模型']], ['存储', 'storage', ['存储', '数据盘', '可回收与最近清理', '数据库与磁盘', '历史数据迁移', '按项目', '项目电脑']], ['用户', 'users', ['用户']]]) {
+      ['模型', 'models', ['默认共享模型', '部署共享模型']], ['存储', 'storage', ['存储', '数据盘', '可回收与最近清理', '按天数清理', '数据库与磁盘', '历史数据迁移', '按项目', '项目电脑']], ['用户', 'users', ['用户']]]) {
       await expect(nav.getByRole('link', { name: caption, exact: true })).toHaveAttribute('href', `#/settings/${key}`);
       await nav.getByRole('link', { name: caption, exact: true }).click(); await expect(page).toHaveURL(new RegExp(`#/settings/${key}$`));
       await expect(nav.locator('[aria-current=page]')).toHaveText(caption); await expect.poll(cards).toEqual(shown);

@@ -21,6 +21,7 @@ import { StallMonitor } from './core/stalls.js';
 import { PayloadMigration } from './storage/migration.js';
 import { WorkspaceCleanup } from './projects/workspace-cleanup.js';
 import { StorageReport } from './app/storage.js';
+import { RetentionCleanup } from './storage/retention.js';
 import { compactDatabase, IncrementalVacuum } from '../manager/compaction.mjs';
 import { commandTimeoutLimit } from './agent/command.js';
 
@@ -83,6 +84,8 @@ const releases = new ReleaseService(store, process.env.BOT_GITHUB_API_URL); rele
 const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_URL); actionsFailures.start();
 // Logs a blocked event loop with the requests in flight, and slow requests (see core/stalls.ts).
 const stalls = new StallMonitor(); stalls.start();
+// Cleanup by days (#671): daily, from ten minutes after the start.
+const retention = new RetentionCleanup(store, manager);
 const migration = new PayloadMigration(store), storage = new StorageReport(store, manager, { git_cache: gitCache.root, public_boards: resolve(dirname(databasePath), 'public-boards') }, vacuum);
 const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, gateOnboarding, releases, boards,
@@ -99,12 +102,12 @@ server.listen(8791, '0.0.0.0', () => {
   // payloads written before #436 out of their rows, slice by slice.
   const seal = () => store.trajectories.seal().catch(error => console.error('[trajectories] sealing failed:', error));
   void seal().then(() => { if (!stopping) migration.start(); }); setInterval(seal, 10 * 60_000).unref();
-  storage.start();modelCatalog(store).start();vacuum.start();
+  storage.start();modelCatalog(store).start();vacuum.start();retention.start();
 });
 let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;
   clearInterval(timer); clearInterval(syncTimer); clearInterval(identityTimer); workspaces.close();
-  server.close(async () => { await Promise.all([modelCatalog(store).close(),installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close(),migration.stop(),vacuum.stop()]); store.close(); process.exit(0); });
+  server.close(async () => { await Promise.all([modelCatalog(store).close(),installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close(),migration.stop(),vacuum.stop(),retention.stop()]); store.close(); process.exit(0); });
   setTimeout(() => process.exit(1), 100_000).unref();
 });

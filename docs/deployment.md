@@ -124,6 +124,8 @@ Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一�
 | 失败 | 超过 7 天后删除 |
 | 没有记录指向的目录（升级前留下的、会话和服务角色用过的） | 目录最近活动超过 1 天后删除 |
 
+上表的 1 天和 7 天是默认值，可以在全局设置「存储」的「按天数清理」里改（`workspace_finished_days`、`workspace_failed_days`，没有记录指向的目录跟随前者，见[按天数清理](trajectories.md#按天数清理)）。
+
 PR 的合并或关闭以 `pull_request` closed 事件或检视读到的 PR 状态为准（`review_objects`）。最近 30 分钟内有活动、或本进程最近 30 分钟用过的目录这一轮不删；正在删除的目录不会被新检视复用，复用找不到目录时任务重新检出。runner 删除前再看一次目录的活动时间，列出之后有写入的目录留下。升级后第一次清理前，控制面为当时未结束的任务补记它们的工作区、恢复和集成来源及后续任务的来源任务工作区。
 
 runner 只接受 48 位十六进制的目录名，只删除 `/workspace/tasks` 下真实存在的目录，不跟随符号链接，`/workspace/tasks` 本身被换成链接时拒绝执行。删除的目录在 `task_workspaces` 里记下 `released_at`、原因和释放的字节数，这些记录保留 30 天。`/workspace` 根目录下 agent 留下的其他文件和 `/workspace/home` 缓存不在清理范围内。

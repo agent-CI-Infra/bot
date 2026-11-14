@@ -1,5 +1,5 @@
 import { closeSync, existsSync, fdatasync, fdatasyncSync, close as closeAsync, ftruncateSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, renameSync, rmSync, writeSync } from 'node:fs';
-import { open as openAsync } from 'node:fs/promises';
+import { open as openAsync, rm as rmAsync } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
@@ -29,7 +29,7 @@ export interface TrajectoryScope {
 }
 
 export class TrajectoryError extends Error {
-  constructor(readonly code: 'trajectory_corrupt' | 'trajectory_truncated' | 'trajectory_missing' | 'trajectory_ref_invalid', readonly detail: string) {
+  constructor(readonly code: 'trajectory_corrupt' | 'trajectory_truncated' | 'trajectory_missing' | 'trajectory_ref_invalid' | 'trajectory_expired', readonly detail: string) {
     super(code + ': ' + detail);
   }
 }
@@ -86,6 +86,13 @@ export function trajectoryStorage(db: DatabaseSync) {
     CREATE TABLE IF NOT EXISTS trajectory_blobs(repository_id TEXT NOT NULL,sha256 TEXT NOT NULL,bytes INTEGER NOT NULL,created_at TEXT NOT NULL,
       PRIMARY KEY(repository_id,sha256));
     CREATE INDEX IF NOT EXISTS trajectory_blobs_hash ON trajectory_blobs(sha256);`);
+  // Cleanup by days (#671): expired_at: the file's records no longer resolve, refs to it read as expired; deleted_at: the
+  // file is gone from disk. The partial indexes hold the closed files of tasks and dispatches that may still expire, per
+  // project in closed_at order, and the expired ones whose file is still to be removed.
+  addColumns(db, 'trajectory_files', { expired_at: 'TEXT', deleted_at: 'TEXT' });
+  db.exec(`CREATE INDEX IF NOT EXISTS trajectory_files_expiry ON trajectory_files(repository_id,closed_at,id)
+      WHERE expired_at IS NULL AND closed_at IS NOT NULL AND conversation_id IS NULL;
+    CREATE INDEX IF NOT EXISTS trajectory_files_removal ON trajectory_files(expired_at) WHERE expired_at IS NOT NULL AND deleted_at IS NULL;`);
 }
 
 export class Trajectories {
@@ -205,6 +212,7 @@ export class Trajectories {
   async lines(file: string): Promise<TrajectoryLine[]> {
     const entry = this.db.prepare('SELECT * FROM trajectory_files WHERE id=?').get(file) as Record<string, any> | undefined;
     if (!entry) throw new TrajectoryError('trajectory_missing', file);
+    if (entry.expired_at) throw new TrajectoryError('trajectory_expired', `${entry.path}: removed after its retention window (${entry.expired_at})`);
     const scanned = await scan(join(this.root, String(entry.path)));
     if (scanned.error) throw scanned.error;
     if (scanned.partial) throw new TrajectoryError('trajectory_truncated', `${entry.path}: last line is incomplete`);
@@ -260,19 +268,48 @@ export class Trajectories {
 
   private blobPath(hash: string) { return join(this.blobs, 'sha256', hash.slice(0, 2), hash); }
 
+  /**
+   * Marks closed files expired after their retention window (#671), in one transaction: their refs read as expired from
+   * then on, and their bytes and record counts move in trajectory_usage from files and records to 'expired'. The caller
+   * removes the files and marks the entries deleted (deleted()). Entries and the rows that refer to them stay.
+   */
+  expire(files: Record<string, any>[]): void {
+    const now = new Date().toISOString();
+    atomic(this.db, () => {
+      for (const file of files) {
+        if (!this.db.prepare('UPDATE trajectory_files SET expired_at=? WHERE id=? AND expired_at IS NULL AND closed_at IS NOT NULL').run(now, file.id).changes) continue;
+        const repository = String(file.repository_id ?? ''), bytes = Number(file.bytes ?? 0);
+        let counts: Record<string, any> = {}; try { counts = JSON.parse(file.counts || '{}'); } catch {}
+        this.usage(repository, -1, -bytes, counts, -1);
+        this.addUsage(repository, 'expired', 1, bytes);
+      }
+    });
+    for (const file of files) this.paths.delete(String(file.id));
+  }
+  /** Removes the file of an expired entry from disk and records it; a file already gone is fine. */
+  async deleted(file: { id: string; path: string }): Promise<void> {
+    const path = resolve(this.root, file.path);
+    if (!path.startsWith(this.root + sep)) throw new TrajectoryError('trajectory_ref_invalid', file.path);
+    // Off the event loop: freeing a large file's blocks can take a while.
+    await rmAsync(path, { force: true });
+    this.db.prepare('UPDATE trajectory_files SET deleted_at=? WHERE id=?').run(new Date().toISOString(), file.id);
+  }
+
   /** Removes the files of a deleted project or conversation and their entries; their totals are taken back. */
   remove(where: { repository_id?: string; conversation_id?: string }): void {
     const [column, value] = where.repository_id !== undefined ? ['repository_id', where.repository_id] : ['conversation_id', where.conversation_id!];
     this.results.remove(column as 'repository_id' | 'conversation_id', value);
     for (const handle of [...this.open.values()]) if ((handle.scope as any)[column] === value) this.finish(handle);
-    const rows = this.db.prepare(`SELECT id,repository_id,path,bytes,counts FROM trajectory_files WHERE ${column}=?`).all(value) as Record<string, any>[];
+    const rows = this.db.prepare(`SELECT id,repository_id,path,bytes,counts,expired_at FROM trajectory_files WHERE ${column}=?`).all(value) as Record<string, any>[];
     for (const row of rows) {
       rmSync(join(this.root, String(row.path)), { force: true });
       this.handles.delete(String(row.id)); this.paths.delete(String(row.id));
     }
     atomic(this.db, () => {
       for (const row of rows) {
-        if (row.bytes !== null) this.usage(String(row.repository_id ?? ''), -1, -Number(row.bytes), JSON.parse(row.counts || '{}'), -1);
+        // An expired file's totals were already moved to 'expired' (expire()); they leave from there.
+        if (row.expired_at) this.addUsage(String(row.repository_id ?? ''), 'expired', -1, -Number(row.bytes ?? 0));
+        else if (row.bytes !== null) this.usage(String(row.repository_id ?? ''), -1, -Number(row.bytes), JSON.parse(row.counts || '{}'), -1);
         this.db.prepare('DELETE FROM trajectory_files WHERE id=?').run(row.id);
       }
     });
@@ -280,9 +317,10 @@ export class Trajectories {
       rmSync(join(this.root, segment(where.repository_id)), { recursive: true, force: true });
       // The project's blobs; a file another project also stored stays for that project.
       const blobs = this.db.prepare('SELECT sha256,bytes FROM trajectory_blobs WHERE repository_id=?').all(where.repository_id) as { sha256: string; bytes: number }[];
+      // Nothing of the project is left: its totals go too (a conversation's file only adjusts its project's totals).
       atomic(this.db, () => {
         this.db.prepare('DELETE FROM trajectory_blobs WHERE repository_id=?').run(where.repository_id!);
-        if (blobs.length) this.addUsage(where.repository_id!, 'blobs', -blobs.length, -blobs.reduce((sum, blob) => sum + Number(blob.bytes), 0));
+        this.db.prepare('DELETE FROM trajectory_usage WHERE repository_id=?').run(where.repository_id!);
       });
       for (const blob of blobs) if (!this.db.prepare('SELECT 1 FROM trajectory_blobs WHERE sha256=?').get(blob.sha256)) rmSync(this.blobPath(blob.sha256), { force: true });
     }
@@ -388,8 +426,9 @@ export class Trajectories {
   private pathOf(file: string): string {
     const known = this.paths.get(file);
     if (known) return known;
-    const row = this.db.prepare('SELECT path FROM trajectory_files WHERE id=?').get(file) as { path: string } | undefined;
+    const row = this.db.prepare('SELECT path,expired_at FROM trajectory_files WHERE id=?').get(file) as { path: string; expired_at: string | null } | undefined;
     if (!row) throw new TrajectoryError('trajectory_missing', file);
+    if (row.expired_at) throw new TrajectoryError('trajectory_expired', `${row.path}: removed after its retention window (${row.expired_at})`);
     if (this.paths.size > 10_000) this.paths.clear();
     this.paths.set(file, row.path);
     return row.path;
