@@ -251,7 +251,8 @@ export class Store {
     childTaskStorage(this);
     longExecutionStorage(this);
     roleStorage(this);
-    taskManagementStorage(this);
+    // Task origin inheritance must remain available while another worker reopens this database.
+    this.transaction(() => taskManagementStorage(this));
     identityStorage(this);
     managementStorage(this);
     channelStorage(this);
