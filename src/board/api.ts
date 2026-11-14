@@ -3,6 +3,7 @@ import { type Actor, repository, scope } from '../app/auth.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { workType } from '../work/catalog.js';
+import { actionStatuses, actionStatusSQL, autoStoppedSQL, settledStatusSQL } from '../app/task-states.js';
 // Saved views and links from before #207 may name a custom workflow; its cards are reply cards now.
 const customWorkflowId = /^custom\.[a-f0-9]{12}$/;
 
@@ -13,10 +14,14 @@ export const boardStages = [
   { id: 'reviewed', name: '已检视', hint: '最近一次检视已完成' },
   { id: 'developing', name: '正在开发', hint: '开发任务正在准备、实现、测试或发布', pr: { name: '正在跟进', hint: 'bot 正按检视意见修改自己开出的 PR' } },
   { id: 'developed', name: '已开发', hint: '开发已完成或已开出 PR', pr: { name: '已跟进', hint: '按检视意见的修改已完成' } },
-  { id: 'attention', name: '需要处理', hint: '最近一次任务失败、被取消，或在等待配置、权限、重试、重新规划' },
+  { id: 'attention', name: '需要处理', hint: '最近一次任务失败，或在等待配置、权限、环境、发布、重新规划' },
 ];
 const successes = "('pr_opened','succeeded','completed')";
-const attention = "('paused','failed','cancelled','waiting_configuration','waiting_permission','needs_replan','needs_help','retry_wait')";
+const attention = actionStatuses;
+// #655: a task the bot stopped by itself (its Issue or PR was closed or turned into a draft) is not a request for a
+// person, so the card keeps the state its newest non-stopped task reached, and stays 未检视 when there is none.
+const stoppedStage = (alias: string, done: string) => `CASE WHEN ${settledStatusSQL(alias)} IN ${successes} THEN '${done}'
+  WHEN ${actionStatusSQL(settledStatusSQL(alias))} THEN 'attention' ELSE 'unreviewed' END`;
 const developing = "('queued','running','preparing','implementing','validating','publishing','waiting_pr_head','waiting_publication','waiting_environment','result_ready')";
 const taskTime = (alias: string) => `coalesce(nullif(${alias}.updated_at,''),${alias}.created_at)`;
 // The newest task of each work type on each object, read from the covering index board_task_cover alone. A tasks row
@@ -52,8 +57,12 @@ const execution = (status: string) => `CASE
   ELSE 'other' END`;
 const objectStage = (category: string) => {
   if (category === 'review') return `CASE WHEN r.status IN ${attention} THEN 'attention' WHEN r.status IN ${successes} THEN 'reviewed'
+    WHEN ${autoStoppedSQL('r.status')} THEN ${stoppedStage('r','reviewed')}
     WHEN r.id IS NOT NULL AND r.status<>'superseded' THEN 'reviewing' ELSE 'unreviewed' END`;
   if (category === 'development') return `CASE WHEN d.status IN ${developing} THEN 'developing' WHEN d.status IN ${attention} THEN 'attention'
+    WHEN ${autoStoppedSQL('d.status')} THEN CASE WHEN ${settledStatusSQL('d')} IN ${developing} THEN 'developing'
+      WHEN ${actionStatusSQL(settledStatusSQL('d'))} THEN 'attention'
+      WHEN ${settledStatusSQL('d')} IN ${successes} THEN 'developed' ELSE 'unreviewed' END
     WHEN d.status IN ${successes} THEN 'developed' ELSE 'unreviewed' END`;
   return "'unreviewed'";
 };
@@ -149,6 +158,7 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
     const customSql = `SELECT 'object' AS card_type,'reply' AS card_category,o.repository_id,o.object_type,o.object_number,
         o.title,o.github_state,o.draft,coalesce(c.time,o.last_seen) AS last_seen,repos.full_name,
         CASE WHEN c.status IN ${attention} THEN 'attention' WHEN c.status IN ${successes} THEN 'reviewed'
+          WHEN ${autoStoppedSQL('c.status')} THEN ${stoppedStage('c','reviewed')}
           WHEN c.status<>'superseded' THEN 'reviewing' ELSE 'unreviewed' END AS bot_stage,${execution('c.status')} AS execution_status,
         c.id AS task_id,c.status AS task_status,NULL AS review_task_id,NULL AS review_status,NULL AS development_task_id,NULL AS development_status,
         ${fieldValue},NULL AS release_id,NULL AS version,NULL AS release_stage,NULL AS release_url
@@ -164,7 +174,10 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
       FROM project_releases p JOIN repositories repos ON repos.id=p.repository_id`;
     const requestedSql = `SELECT 'task' AS card_type,'task.request' AS card_category,t.repository_id,'task' AS object_type,NULL AS object_number,
       t.summary AS title,NULL AS github_state,0 AS draft,${taskTime('t')} AS last_seen,repos.full_name,
-      CASE WHEN t.status IN ${attention} THEN 'attention' WHEN t.status IN ${successes} THEN 'developed' ELSE 'developing' END AS bot_stage,
+      CASE WHEN t.status IN ${attention} THEN 'attention' WHEN t.status IN ${successes} THEN 'developed'
+        WHEN ${autoStoppedSQL('t.status')} THEN CASE WHEN ${settledStatusSQL('t')} IN ${successes} THEN 'developed'
+          WHEN ${actionStatusSQL(settledStatusSQL('t'))} THEN 'attention' ELSE 'unreviewed' END
+        ELSE 'developing' END AS bot_stage,
       ${execution('t.status')} AS execution_status,t.id AS task_id,t.status AS task_status,NULL AS review_task_id,NULL AS review_status,
       NULL AS development_task_id,NULL AS development_status,NULL AS field_value,
       NULL AS release_id,t.id AS version,NULL AS release_stage,NULL AS release_url
