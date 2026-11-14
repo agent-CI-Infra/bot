@@ -31,14 +31,19 @@ function userAccessView(store: Store, row: Row): Json {
   const github = !identity ? null : revoked ? { status } : { login: identity.display_name, status };
   const binding = !identity ? 'none' : status === 'active' ? 'bound' : String(status);
   const local = String(row.password_hash ?? EXTERNAL_ONLY_PASSWORD) !== EXTERNAL_ONLY_PASSWORD;
+  // With neither way in left (a revoked GitHub binding and no local password) the username is the OAuth placeholder
+  // `github:<id>:<random>`; it is named after the GitHub id it carries instead, never printed as a person's name.
+  const placeholder = String(row.username).match(/^github:(\d+):/);
+  const neutral = `账号 #${placeholder ? placeholder[1] : String(row.id).slice(0, 8)}`;
   // github_login stays for the callers that already read it (session header, older console helpers); the new fields carry
   // the state it could not express.
   return { ...publicUser(row), ...(github?.login ? { github_login: github.login } : {}),
     local_login: local, local_account: local ? row.username : null, github, github_binding: binding,
     // Both ways in, as the server reads them: the password sentinel for local sign-in and a live GitHub identity for OAuth.
     login_methods: [...(local ? ['local'] : []), ...(github && !revoked ? ['github'] : [])],
-    // What an administrator reads, and what the list sorts on: the GitHub login, else the local name.
-    display_name: github?.login ? String(github.login) : row.username,
+    // What an administrator reads, and what the list sorts on: the GitHub login, else the local name, else the neutral
+    // name. It takes part in the same ordering, so a GitHub-only account no longer sorts under "g" as its placeholder.
+    display_name: github?.login ? String(github.login) : local ? String(row.username) : neutral,
     access: { projects: listEffectiveProjectAccess(store, row.id), github_pending: status === 'pending_verification' ||
       scopes.some(g => g.source === 'github_derived' && g.state === 'pending_verification') } };
 }
