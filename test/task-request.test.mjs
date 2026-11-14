@@ -13,11 +13,13 @@ import { TaskRecords } from '../dist/tasks/service.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { LocalManager } from '../dist/projects/local-manager.js';
 import { server as github } from './fixtures/agent-server.mjs';
+import { configureModelRetry } from '../dist/agent/runtime.js';
 
 const pass={outcome:'pass',reason:'Read the actual submitted report from its pinned Git object',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
 const call=(name,args,id)=>({role:'assistant',content:null,tool_calls:[{id,type:'function',function:{name,arguments:JSON.stringify(args)}}]});
 
 test('ordinary tasks omit retired guidance, correct invalid paths, and resume only fresh acceptance after an outage',async t=>{
+ configureModelRetry({baseMs:1});t.after(()=>configureModelRetry(null));
  const root=mkdtempSync(join(tmpdir(),'bot-request-flow-')),store=new Store(':memory:',randomBytes(32)),records=new TaskRecords(store),manager=new LocalManager('101',root);
  t.after(async()=>{await manager.recover();store.close();rmSync(root,{recursive:true,force:true});});
  github.listen(0,'127.0.0.1');await once(github,'listening');t.after(()=>new Promise(r=>{github.close(r);github.closeAllConnections();}));
@@ -124,4 +126,5 @@ test('ordinary tasks omit retired guidance, correct invalid paths, and resume on
  assert.ok(siblingRead);assert.ok(inheritedContextRead);
  assert.equal(store.get('SELECT count(*) n FROM task_followups').n,2,'legacy related work must not grow a new chain');
  assert.ok(invalidPathObserved);assert.ok(acceptanceCalls>=5);
+ assert.equal(firstOutage,0);assert.equal(writeOutage,6,'all six requests fail before the saved work is restored');
 });

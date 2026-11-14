@@ -6,6 +6,7 @@ import {Store} from '../dist/storage/database.js';
 import {TaskRecords} from '../dist/tasks/service.js';
 import {assessFollowups} from '../dist/tasks/followups.js';
 import {Redactor} from '../dist/agent/common.js';
+import {configureModelRetry} from '../dist/agent/runtime.js';
 const call=(name,args)=>({role:'assistant',tool_calls:[{id:'tool',type:'function',function:{name,arguments:JSON.stringify(args)}}]});
 const residual={key:'e2e-documentation',description:'A stale E2E absence claim remains',evidence:'docs/known-issues.md versus package.json',impact:'Documentation ambiguity only',conditions:'Reading the inherited known-issues header',workaround:'Use package.json as the tooling authority',delivery_impact:'Does not block delivered functionality',nonblocking_reason:'All required product behavior and tests pass',goal:'Fix this specific stale E2E claim',criteria:['The absence claim agrees with actual scripts']};
 const verdict={outcome:'pass_with_issues',reason:'Core is verified',gaps:[],residuals:[residual],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
@@ -33,7 +34,9 @@ test('real Native Manager tool loop consumes objective QA impact, searches exist
  const accepted=f.records.decide('parent',f.candidate.id,f.candidate.revision,verdict);assert.deepEqual(accepted.followups,['existing']);assert.equal(accepted.outcome,'pass_with_issues');assert.equal(f.s.get('SELECT count(*) n FROM tasks').n,2);
 });
 test('Manager infrastructure failure does not invalidate an independent pass or stop residual queue admission',async t=>{
+ configureModelRetry({baseMs:1});t.after(()=>configureModelRetry(null));
  const f=await fixture(t,()=>{throw Error('provider unavailable');});await assessFollowups(f.s,f.task,f.candidate,verdict,f.workspace,async()=>{},new Redactor());assert.equal(f.s.get('SELECT manager_ref FROM task_followup_plans').manager_ref,'framework:default-P2');
+ assert.equal(f.requests.length,6,'the initial request and all five retries fail before the fallback');
  const accepted=f.records.decide('parent',f.candidate.id,f.candidate.revision,verdict);const child=f.s.get('SELECT * FROM tasks WHERE id=?',accepted.followups[0]);assert.equal(child.status,'queued');assert.equal(child.priority,'P2');assert.ok(f.s.get("SELECT id FROM task_history WHERE type='followup_plan_deferred'"));
 });
 
