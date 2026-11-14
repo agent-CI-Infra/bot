@@ -20,7 +20,9 @@ async function renderProject(route) {
   const section = projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin')) ? route.section : 'basic';
   // A newly granted or externally created project may not be in the list loaded at login.
   if (!repositories.some(repo => String(repo.id) === String(current.id))) repositories.push(current.repository);
-  current.section = section; current.item = route.item || null; page.replaceChildren(projectHeader(), projectBody(section));
+  // #642: an unknown section is not quietly replaced by another page: the address and the content have to agree.
+  const missing = section !== route.section; setNotFoundTitle(missing);
+  current.section = missing ? null : section; current.item = route.item || null; page.replaceChildren(projectHeader(), projectBody(current.section));
   const inboxReturn = typeof inboxReturnLink === 'function' ? inboxReturnLink(current.id) : null;
   if (inboxReturn) page.prepend(inboxReturn);
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
@@ -106,7 +108,8 @@ function projectBody(section) {
     if (key === 'management') { const project = current.id; item.addEventListener('click', event => { event.preventDefault(); void openManagementChat(project).catch(error); }); }
   }
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
-  content.append(...({ overview: workspaceOverview, basic: basicSection, machine: machineSection, model: modelsSection, release: releaseSection, schedules: schedulesSection, knowledge: knowledgeSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
+  if (!section) content.append(pageNotFoundState(current.id));
+  else content.append(...({ overview: workspaceOverview, basic: basicSection, machine: machineSection, model: modelsSection, release: releaseSection, schedules: schedulesSection, knowledge: knowledgeSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
   body.append(nav, content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();
