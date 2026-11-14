@@ -1,5 +1,25 @@
 let costState=null,costRequest=0;
 const money=(value,currency)=>currency+' '+(value>0&&value<0.000001?'< 0.000001':Number(value).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:6}));
+// #643: an axis label is a number a person reads, so the top of the chart is a round number with four equal segments
+// instead of `max * 1.1`. A token count is a whole thing, so its labels are integers abbreviated 万/亿; a cost keeps
+// two decimals, and only sub-cent amounts fall back to exponential so they do not all read `0.00`.
+function costAxis(max, tokens) {
+  const top=Number(max)>0?Number(max):0;
+  const segment=(top>0?top:4)/4,magnitude=Math.pow(10,Math.floor(Math.log10(segment)));
+  const scaled=segment/magnitude;
+  const step=(scaled<=1?1:scaled<=2?2:scaled<=5?5:10)*magnitude;
+  // A token bar above 万 can only keep whole labels if the step itself is a multiple of 万, otherwise it would read
+  // `1.5万` — a decimal again, just spelled differently.
+  const round=tokens?Math.max(top>=1e4?1e4:1,Math.ceil(step/(top>=1e4?1e4:1))*(top>=1e4?1e4:1)):step;
+  const ceiling=round*4,ticks=[0,1,2,3,4].map(index=>round*index);
+  const labels=ticks.map(value=>{
+    if(!tokens)return value===0?'0.00':value<0.01?value.toExponential(1):Number(value).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
+    if(value>=1e8&&value%1e8===0)return `${value/1e8}亿`;
+    if(value>=1e4&&value%1e4===0)return `${value/1e4}万`;
+    return String(Math.round(value));
+  });
+  return {ceiling,step:round,ticks,labels};
+}
 function costColor(id) { let hash=0;for(const char of id)hash=(hash*31+char.charCodeAt(0))>>>0;hash=Math.imul(hash^(hash>>>16),0x45d9f3b)>>>0;return `hsl(${hash%360} 57% 44%)`; }
 function costControl(caption,control) { const label=element('label',caption);label.append(control);return label; }
 const costTokenFields=[['input_tokens','输入用量'],['output_tokens','输出用量'],['cached_input_tokens','缓存命中']];
@@ -76,6 +96,13 @@ async function loadCosts(version) {
   const known=data.summary.requests-data.summary.unpriced_requests,tokenMode=known===0;
   const costItem=element('div','','cost-stat');costItem.dataset.metric='cost';
   costItem.append(element('span','已计价费用','muted'),element('strong',known?money(data.summary.cost,data.currency):data.summary.requests?'未定价':money(data.summary.cost,data.currency)));
+  // #643: 未定价 alone was a dead end — the prices are set elsewhere, and only some roles can open that page.
+  if(!known&&data.summary.requests){
+    costItem.append(element('p','还没有为这些模型设置单价，所以暂时算不出费用。','cost-note'));
+    costItem.append(me?.role==='super_admin'
+      ? consoleLink('#/settings/models','去设置模型单价')
+      : element('p','请联系管理员为这些模型设置单价。','cost-note'));
+  }
   summary.append(costItem);
   for(const [label,value]of [['模型请求',metricNumber(data.summary.requests)],['未计价请求',metricNumber(data.summary.unpriced_requests)],['用量不完整请求',metricNumber(data.summary.usage_missing_requests)]]){
     const item=element('div','','cost-stat');item.append(element('span',label,'muted'),element('strong',value));summary.append(item);
@@ -227,8 +254,8 @@ function costChart(container,byDate,projects,currency,tokens=false) {
   const ns='http://www.w3.org/2000/svg',width=Math.max(800,byDate.size*30+100),height=350,left=90,bottom=45,top=20,plot=height-bottom-top;
   const svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox',`0 0 ${width} ${height}`);svg.setAttribute('width',String(width));svg.setAttribute('height',String(height));svg.setAttribute('role','img');svg.setAttribute('aria-label',tokens?'每日模型用量，柱内不同颜色代表各项目':'每日模型估算费用，柱内不同颜色代表各项目');svg.dataset.metric=tokens?'tokens':'cost';
   const muted=(typeof getComputedStyle==='function'&&getComputedStyle(document.documentElement).getPropertyValue('--color-text-muted').trim()||'#607087'),add=(tag,attributes,text)=>{const node=document.createElementNS(ns,tag);for(const [key,value]of Object.entries(attributes))node.setAttribute(key,String(value));if(text!==undefined)node.textContent=text;svg.append(node);return node;};
-  const dates=[...byDate],max=Math.max(...dates.map(([,d])=>value(d)),0),ceiling=max>0?max*1.1:1,step=(width-left-20)/dates.length;
-  for(let i=0;i<=4;i++){const y=top+plot*(1-i/4),value=ceiling*i/4;add('line',{x1:left,y1:y,x2:width-20,y2:y,stroke:'#dce6ed'});add('text',{x:left-8,y:y+4,'text-anchor':'end',fill:muted,'font-size':12},value>0&&value<0.000001?value.toExponential(1):value.toLocaleString('zh-CN',{maximumFractionDigits:6}));}
+  const dates=[...byDate],max=Math.max(...dates.map(([,d])=>value(d)),0),axis=costAxis(max,tokens),ceiling=axis.ceiling,step=(width-left-20)/dates.length;
+  for(let i=0;i<=4;i++){const y=top+plot*(1-i/4);add('line',{x1:left,y1:y,x2:width-20,y2:y,stroke:'#dce6ed'});add('text',{x:left-8,y:y+4,'text-anchor':'end',fill:muted,'font-size':12},axis.labels[i]);}
   add('text',{x:left,y:14,fill:muted,'font-size':12},unit);
   const hover=element('p',tokens?'悬停或聚焦色块，可查看该项目当天的用量和占比。':'悬停或聚焦色块，可查看该项目当天的费用和占比。','cost-chart-detail');hover.setAttribute('aria-live','polite');
   dates.forEach(([date,day],index)=>{
