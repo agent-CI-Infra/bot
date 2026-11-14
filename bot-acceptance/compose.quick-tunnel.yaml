@@ -1,0 +1,12 @@
+# Development runs of the acceptance suite only: the tunnel service opens a Cloudflare quick tunnel (a random
+# https://<words>.trycloudflare.com host, no account or token) to the same webhook gateway the real tunnel uses.
+# Quick tunnels have no uptime guarantee; scheduled runs use the named tunnel and plain compose.yaml.
+#   docker compose -p bot-acceptance-dev -f compose.yaml -f bot-acceptance/compose.quick-tunnel.yaml up -d
+services:
+  tunnel:
+    command: ["cloudflared", "tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "--url", "http://webhook:8791"]
+    volumes:
+      # Requesting a quick tunnel is a plain HTTPS call that needs system roots, which the slim tunnel image does not
+      # carry (a named tunnel only talks to the Cloudflare edge, with roots built into cloudflared). Ubuntu hosts and
+      # GitHub runners keep the bundle here.
+      - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
