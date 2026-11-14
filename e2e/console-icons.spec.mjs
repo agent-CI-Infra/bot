@@ -78,13 +78,13 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     await page.screenshot({ path: `${out}/more-icons-390.png`, fullPage: true });
 
     // Empty and error states carry an inline SVG mark (a data: mask image would be blocked by the console CSP).
-    const stateIcon = async (selector, name) => {
+    const stateIcon = async (selector, name, size) => {
       const state = page.locator(selector).first();
       await expect(state).toBeVisible();
       const icon = state.locator('svg.console-state-icon.console-icon-' + name);
       await expect(icon).toBeVisible();
       const box = await icon.boundingBox();
-      expect(Math.round(box.width)).toBe(32);
+      expect(Math.round(box.width)).toBe(size);
       expect(await icon.evaluate(el => el.querySelectorAll('path, circle').length)).toBeGreaterThan(0);
       expect(await state.evaluate(el => getComputedStyle(el, '::before').content)).toBe('none');
     };
@@ -95,11 +95,12 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
       await page.goto(h.admin + '/#/more');
       await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
       await page.goto(h.admin + '/#/inbox');
-      await stateIcon('.console-state:not(.console-state-error)', 'tray');
+      // Pages keep other (hidden) list states in the DOM since #553; read the one on screen. Phones use a 24px mark.
+      await stateIcon('.console-state-empty:visible', 'tray', width === 390 ? 24 : 32);
       await page.screenshot({ path: `${out}/state-empty-${width}.png`, fullPage: true });
       await page.route('**/api/tasks?attention=*', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
       await page.reload();
-      await stateIcon('.console-state-error', 'alert');
+      await stateIcon('.console-state-error:visible', 'alert', width === 390 ? 24 : 32);
       await page.screenshot({ path: `${out}/state-error-${width}.png`, fullPage: true });
     }
   } finally { await h.stop(); }

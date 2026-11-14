@@ -208,7 +208,12 @@ body.console-ready .management-page { left: var(--console-rail); }
   .console-mobile-nav .console-nav-icon { width: 22px; height: 22px; margin: 0 auto; }
   .console-mobile-nav .console-nav-badge { position: absolute; top: 5px; left: calc(50% + 8px); display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--color-danger); }
   .console-mobile-nav a[data-active="1"] .console-nav-badge, .console-mobile-nav a[data-unread="1"] .console-nav-badge { display: block; }
-  .console-nav-icon { font-size: var(--font-size-brand); line-height: 24px; }
+  /* #554: a smaller state mark on phones, so a state's actions stay above the fold. */
+  .console-state-icon { width: 24px; height: 24px; }
+  /* The management feed is a short scroller above the composer: on phones its state is compact and carries no mark,
+     so 重试 stays in view at 390x844 (e2e/management.spec.mjs). */
+  .management-panel .console-state { padding: var(--space-5) var(--space-4); gap: var(--space-3); }
+  .management-panel .console-state-icon { display: none; }
   .console-page-head { margin-top: 0; margin-bottom: var(--space-6); }
   .console-page-head h1 { font-size: var(--font-size-display); }
   .console-groups { grid-template-columns: minmax(0,1fr); gap: var(--space-5); }
