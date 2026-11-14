@@ -219,5 +219,20 @@ test('首次进入看板在数据返回前显示加载提示，而不是空白�
     releaseSecond();
     await expect(page.locator('#board-columns')).toBeVisible();
     await expect(loading).toHaveCount(0);
+
+    // A refresh that still has a board must keep it on screen instead of flashing blank.
+    // Don't await renderBoard: it waits on the held /api/board GET.
+    const releaseRefresh = await holdBoard();
+    const refreshStarted = page.waitForRequest(req => {
+      try { return new URL(req.url()).pathname === '/api/board' && req.method() === 'GET'; }
+      catch { return false; }
+    });
+    await page.evaluate(() => { void renderBoard(++renderVersion); });
+    await refreshStarted;
+    await expect(page.locator('#board-columns')).toBeVisible();
+    await expect(loading).toHaveCount(0);
+    await page.screenshot({ path: '.tmp/board-loading-689/refresh-keeps-board-1440.png' });
+    releaseRefresh();
+    await expect(page.locator('#board-columns')).toBeVisible();
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
