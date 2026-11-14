@@ -250,6 +250,6 @@ const settingsCards = {
     const [{ users }, assigned] = await Promise.all([api('/api/users'), api('/api/project-admin-assignments')]);
     grants = assigned;
     if (id) return [userDetail(id, users)];
-    return [userTable(users, '项目权限由 GitHub 当前权限和 Bot 内手动分配共同决定；下面显示当前可见项目及来源。管理员管理全部项目和全局设置。')];
+    return [settingsList('用户', '项目权限由 GitHub 当前权限和 Bot 内手动分配共同决定；下面显示当前可见项目及来源。管理员管理全部项目和全局设置。', users.map(userProfileLine), '还没有用户。', '新增用户', 'users')];
   },
 };
