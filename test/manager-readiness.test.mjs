@@ -61,6 +61,8 @@ test('the manager stays fenced until every saved project has recovered and uncer
   assert.equal(docker.starts, starts + 2, 'recovery stopped and restarted both old computers');
   assert.deepEqual(projects.db.prepare('SELECT state FROM operations ORDER BY id').all().map(row => row.state), ['interrupted', 'interrupted']);
   assert.deepEqual((await client.call('GET', '/v1/projects')).map(row => row.state), ['ready', 'ready']);
+  // /v1/storage waits for the manager's own storage() and carries the host's Docker usage.
+  assert.deepEqual((await client.call('GET', '/v1/storage')).host.docker, { images_bytes: 1000, containers_bytes: 20, volumes_bytes: 30, build_cache_bytes: 40 });
   assert.equal((await fetch(base + '/v1/projects')).status, 401);
 });
 
