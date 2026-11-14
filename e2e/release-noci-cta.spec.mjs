@@ -19,16 +19,24 @@ test('没有发布 CI 时发版本页提供打开接入门禁，读取时间格�
     await expect(page.locator('#project-page')).toContainText('这个仓库还没有接入发布用的 CI。请先在「接入门禁」中创建门禁 PR。');
     const open = page.getByRole('button', { name: '打开接入门禁', exact: true });
     await expect(open).toBeVisible();
-    await expect(page.locator('#project-page')).toContainText('已有标签');
-    await expect(page.locator('#project-page')).toContainText('暂无');
     await expect(page.locator('#project-page')).not.toContainText('这是读取时间');
     await expect(page.locator('#project-page')).toContainText(/记录读取于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+    const factValue = label => page.locator('.release-preview .facts dt', { hasText: new RegExp('^' + label + '$') }).locator('xpath=following-sibling::dd[1]');
+    await expect(factValue('已有标签')).toHaveText('暂无');
+    await expect(factValue('已有 Release')).toHaveText('暂无');
     mkdirSync('.tmp/release-noci-691', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.screenshot({ path: '.tmp/release-noci-691/desktop.png', fullPage: true });
+    await expect(open).toBeVisible();
+    await page.screenshot({ path: '.tmp/release-noci-691/desktop-1440.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(open).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/release-noci-691/noci-390.png', fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 900 });
     await open.click();
     const dialog = page.getByRole('dialog');
     await expect(dialog.getByRole('heading', { name: '接入门禁 · fixture/project-101', exact: true })).toBeVisible();
+    await page.screenshot({ path: '.tmp/release-noci-691/gate-dialog-1440.png' });
     expect(errors).toEqual([]);
   } finally { for (const close of cleanup.reverse()) await close(); }
 });
