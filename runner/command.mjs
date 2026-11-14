@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CommandOutput, maskedStream, outputLimit, backgroundOutputNotice } from './command-output.mjs';
 import { local, workspaceRoot, localEnvironment, assistant, homeDirectory as home } from './paths.mjs';
+import { watchVolume } from './disk.mjs';
 // User-level installs (pip --user, uv tool, cargo, npm prefix) land under HOME: the work volume of a project computer, the
 // persistent HOME of an assistant computer.
 const userBins = ['.local/bin', '.cargo/bin', '.npm-global/bin'].map(dir => `${home}/${dir}`).join(':');
@@ -21,14 +22,16 @@ export const environment = { LANG:'C.UTF-8', ...projectEnvironment, ...localEnvi
 // secretEnv (the task's read-only GitHub token) is added to the command's environment and masked in everything it prints.
 // workspaceId marks the command and everything it starts as that task's (BOT_WORKSPACE_ID), so cleanup can end one task's
 // processes while other tasks keep running on the same computer.
+// On a project computer a command that fails while the work volume runs full is marked disk_full (runner/disk.mjs);
+// volume replaces the statfs reader in tests.
 export const workspaceTag = id => /^[a-f0-9]{48}$/.test(id || '') ? { BOT_WORKSPACE_ID: id } : {};
-export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=false,secretEnv,workspaceId,backgroundDirectory}={}) {
+export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=false,secretEnv,workspaceId,backgroundDirectory,volume}={}) {
   if(typeof value!=='string'||!value||value.length>32768)throw new Error('invalid_command');
   // Local mode shares the host process namespace: use task cleanup, never name-wide kills.
   if(local&&/(?:^|[\s;&|])(?:pkill|killall)(?:\s|$)/.test(value))return Promise.resolve({exit_code:126,output:'Name-wide process termination is disabled in local mode. Let the task manager clean up task processes, or stop a specific process you started.',timed_out:false,truncated:false});
   const extra=Object.fromEntries(Object.entries(secretEnv||{}).filter(([key,secret])=>['GH_TOKEN','GITHUB_TOKEN'].includes(key)&&typeof secret==='string'&&secret.length>=8));
-  if(keepBackground)return backgroundCommand(value,cwd,timeoutMs,{outputFile,extra,workspaceId,backgroundDirectory});
-  return new Promise((resolve,reject)=>{
+  const watch=assistant?null:watchVolume(volume);
+  const run=keepBackground?backgroundCommand(value,cwd,timeoutMs,{outputFile,extra,workspaceId,backgroundDirectory}):new Promise((resolve,reject)=>{
     const output=new CommandOutput();let fd,logPath=outputFile;
     if(logPath)fd=openSync(logPath,'w',0o600);
     const child=spawn('/bin/sh',['-c',value],{cwd,detached:true,env:{...environment,...workspaceTag(workspaceId),...extra},stdio:['ignore','pipe','pipe']});
@@ -63,6 +66,7 @@ export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=fal
     child.on('exit',()=>kill());
     child.on('close',finish);
   });
+  return watch?run.then(result=>watch.mark(result),error=>{watch.stop();throw error;}):run;
 }
 
 // A small detached logger owns the service's pipes after this request exits. Its stdout is a regular file, so neither

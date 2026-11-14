@@ -97,6 +97,26 @@ export function removableWorkspaces(store: Store, repo: string, entries: Listed[
   return planned;
 }
 
+// The most one task of each project took on its computer at the last volume scan, per store (noteTaskUsage).
+const taskUsage = new WeakMap<Store, Map<string, number>>();
+/**
+ * Records, from a computer's volume scan (the size of each task directory), the most disk one task of the project took
+ * there: its task directories together, since a task checks out one for itself and one for each role or evaluator; a
+ * directory no record names counts on its own. The directories a scan finds are the recent ones (they are removed a day
+ * or a week after their task ends). StorageReport calls it once per scan; the task-start floor reads it (taskUsageBytes).
+ */
+export function noteTaskUsage(store: Store, repo: string, entries: { name: string; bytes: number }[]): number {
+  const size = new Map(entries.map(entry => [entry.name, Math.max(0, Number(entry.bytes) || 0)])), perTask = new Map<string, number>();
+  for (const row of store.all(`SELECT workspace_id,task_id FROM task_workspaces WHERE repository_id=? AND task_id<>'' AND workspace_id IN (SELECT value FROM json_each(?))`,
+    repo, JSON.stringify([...size.keys()]))) perTask.set(row.task_id, (perTask.get(row.task_id) ?? 0) + (size.get(row.workspace_id) ?? 0));
+  const most = Math.max(0, ...perTask.values(), ...size.values());
+  let projects = taskUsage.get(store); if (!projects) taskUsage.set(store, projects = new Map());
+  projects.set(repo, most);
+  return most;
+}
+/** What noteTaskUsage last recorded for the project; 0 before its computer's first scan since this process started. */
+export const taskUsageBytes = (store: Store, repo: string): number => taskUsage.get(store)?.get(repo) ?? 0;
+
 /**
  * The storage page's view of a computer's task directories (#671), from its last volume scan: how many and how much
  * belong to tasks still running or waiting (active), are kept for a pull request that is open, or wait for their

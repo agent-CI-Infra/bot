@@ -8,7 +8,7 @@ import { retentionBounds, retentionDefaults, retentionSettings, saveRetention } 
 import { fail, type Json } from '../core/security.js';
 import { migrationProgress } from '../storage/migration.js';
 import { diskState } from '../storage/disk.js';
-import { workspaceClasses } from '../projects/workspace-cleanup.js';
+import { noteTaskUsage, workspaceClasses } from '../projects/workspace-cleanup.js';
 
 // The storage page (#436, #671): every kind of storage the bot uses. Per project, what its trajectory files, records and
 // blobs take on the control plane, its runner-call files in the manager, and its project computer's work volume (task
@@ -88,13 +88,15 @@ export class StorageReport {
   }
 
   // A computer's last volume scan without its per-directory list; its task directories counted by retention class, once
-  // per scan (classifying reads the records of up to 5000 directories).
+  // per scan (classifying reads the records of up to 5000 directories), and the most one task took there, which sets the
+  // project's task-start floor (src/storage/disk.ts).
   private computer(row: Record<string, any>): Json {
     const repo = String(row.repository_id), result = (row.result ?? {}) as Record<string, any>, { tasks, ...scan } = result;
     let classes = this.classified.get(repo);
     if (!classes || classes.scanned_at !== row.scanned_at) {
       let value: Json | null = null;
-      try { if (Array.isArray(tasks)) value = workspaceClasses(this.store, repo, tasks) as unknown as Json; } catch (error) { console.error(`[storage] classifying project ${repo} workspaces failed:`, error); }
+      try { if (Array.isArray(tasks)) { value = workspaceClasses(this.store, repo, tasks) as unknown as Json; noteTaskUsage(this.store, repo, tasks); } }
+      catch (error) { console.error(`[storage] classifying project ${repo} workspaces failed:`, error); }
       this.classified.set(repo, classes = { scanned_at: String(row.scanned_at), value });
     }
     return { ...scan, generation: row.generation, scanned_at: row.scanned_at, workspaces: classes.value };

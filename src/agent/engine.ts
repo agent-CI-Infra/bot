@@ -26,7 +26,7 @@ import { TaskRecords } from '../tasks/service.js';
 import { evaluateDelivery } from '../tasks/acceptance.js';
 import { type Store, type Row } from '../storage/database.js';
 import { blobValue, insertTaskLog, logContent, storedInput } from '../storage/payloads.js';
-import { diskFull } from '../storage/disk.js';
+import { diskFull, floorBytes } from '../storage/disk.js';
 import { type Manager } from '../projects/service.js';
 import { randomId, fields, fail, HttpError, type Json } from '../core/security.js';
 import { type Actor, scope, repository } from '../app/auth.js';
@@ -42,7 +42,7 @@ import { classificationLabels, repositoryLabels } from '../review/labels.js';
 import { agentLoop, type PlatformTools } from './loop.js';
 import { roleAssignmentContext } from './profiles.js';
 import { ReadTokens } from './read-token.js';
-import { currentOperation, Workspace } from './workspace.js';
+import { currentOperation, VolumeFull, Workspace } from './workspace.js';
 import {roleBackendWorkspace} from '../roles/workspace.js';
 import {recoverWithManager} from '../roles/manager-recovery.js';
 import { automaticState, isAttemptFailure } from './failures.js';
@@ -57,7 +57,7 @@ import { eventWork } from '../work/events.js';
 import { recordEvent } from '../dispatch/store.js';
 import { Dispatcher } from '../dispatch/worker.js';
 import { managerDecision } from '../dispatch/manager.js';
-import { workspaceRemoving } from '../projects/workspace-cleanup.js';
+import { taskUsageBytes, workspaceRemoving } from '../projects/workspace-cleanup.js';
 // The modules that own event work register it when loaded.
 import '../releases/observe.js';
 import '../releases/notes.js';
@@ -280,9 +280,11 @@ export class TaskEngine {
         environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
         if(!environment){environment=await this.manager.call('PUT','/v1/projects/'+task.repository_id);this.granted.delete(task.repository_id);await this.share(task.repository_id);}
         if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`准备工作区时项目电脑尚未就绪，当前状态=${environment.state}。`);
-        // A task does not start writing its workspace, mirror and trajectories onto a disk that is all but full (#671).
-        const disk=this.store.disk?.check();
-        if(disk?.full)stop('disk_full','waiting_environment',`控制面数据盘只剩 ${Math.floor(disk.free_bytes/2**20)} MiB（低于 ${Math.floor(disk.floor_bytes/2**20)} MiB），任务等有空间后再准备工作区。`);
+        // A task does not start writing its workspaces, mirror and trajectories while less than its floor is left on the data
+        // disk (#671), which in the Compose deployment also holds the project computers' volumes. The floor follows what the
+        // project's tasks recently took on their computer, not only the size of the disk (src/storage/disk.ts).
+        const disk=this.store.disk?.check(),used=taskUsageBytes(this.store,task.repository_id),floor=disk?floorBytes(disk.total_bytes,used):0,gib=(bytes:number)=>(bytes/2**30).toFixed(1)+' GiB';
+        if(disk&&disk.free_bytes<floor)stop('disk_full','waiting_environment',`数据盘只剩 ${gib(disk.free_bytes)}，低于任务开始所需的 ${gib(floor)}${used?`（本项目最近单个任务在项目电脑上最多占用 ${gib(used)}）`:''}，任务等有空间后再准备工作区。`);
       }
       if(requestedTask(task)){await runRequest(this.store,this.manager,task,redactor,guard,log,this.githubUrl,this.gitCache);return;}
       // The writes this task may ask for decide the platform tools; a task that may open a PR needs contents write.
@@ -834,8 +836,9 @@ export class TaskEngine {
       // starts the next attempt on a new one.
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status)&&!['cancelled','superseded'].includes(state)&&
         state!=='waiting_coordination'&&state!=='needs_help'&&!requestedTask(task)&&failure.code!=='role_capacity'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||
-        // An operation left over from an interrupted run conflicts with the same key again; a new attempt has new keys.
-        ['execution_interrupted','tool_operation_conflict','operation_result_expired'].includes(failure.code)&&task.phase!=='publish')){
+        // An operation left over from an interrupted run conflicts with the same key again, and a call the full work volume
+        // refused would get the same answer again; a new attempt has new keys.
+        (['execution_interrupted','tool_operation_conflict','operation_result_expired'].includes(failure.code)||failure instanceof VolumeFull)&&task.phase!=='publish')){
         if(replies(task.kind)&&!task.publication_started)this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,review_update_cursor:0,publication_started:0,attempt:task.attempt+1});

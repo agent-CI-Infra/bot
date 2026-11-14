@@ -11,6 +11,7 @@ import { listTaskDirectories, removeTaskDirectories } from './task-dirs.mjs';
 import { storageScan } from './storage-scan.mjs';
 import {local,workspaceRoot,assistant} from './paths.mjs';
 import { assistantFile } from './assistant-files.mjs';
+import { refuseFull, failedFull } from './disk.mjs';
 
 const workspace = workspaceRoot, journal = workspace + '/.runner-journal';
 const idPattern = /^[a-f0-9]{48}$/;
@@ -138,15 +139,18 @@ if (request.type === 'journal_clear' && assistant) {
   catch (error) { result = { ok: false, error: request.type + '_failed', ...(request.type.startsWith('tasks_') ? { detail: String(error?.message || 'operation failed').slice(0, 2000) } : {}) }; }
 } else try {
   const existing = await readFile(`${journal}/${request.operation_id}.json`, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  // A work volume that ran full answers disk_full (#671, runner/disk.mjs): the control plane stops the task waiting for space.
+  const refusal = existing ? null : refuseFull(request);
   if (existing) result = existing.state === 'completed' ? existing.result : { ok: false, error: 'operation_interrupted' };
+  else if (refusal) result = refusal;
   else {
     await save(request.operation_id, { state: 'running' });
     try { result = { ok: true, result: await execute(request) }; }
-    catch(error) { result = { ok: false, error: 'runner_operation_failed', ...(/^(?:workspace|assistant)_/.test(request.type)?{detail:`${request.type}${request.path?' '+request.path:''}: ${String(error?.message||'operation failed').slice(0,8000)}`}:{}) }; }
+    catch(error) { result = failedFull(request, error) ?? { ok: false, error: 'runner_operation_failed', ...(/^(?:workspace|assistant)_/.test(request.type)?{detail:`${request.type}${request.path?' '+request.path:''}: ${String(error?.message||'operation failed').slice(0,8000)}`}:{}) }; }
     await save(request.operation_id, { state: 'completed', result });
     // Small output is in the journal JSON. A preview does not replace the complete output: retain its file for the
     // control plane's streaming copy and for idempotent retries; journal pruning removes it with the other records.
     if(!result.result?.truncated)await unlink(`${journal}/${request.operation_id}.out`).catch(() => {});
   }
-} catch { result = { ok: false, error: 'runner_journal_failed' }; }
+} catch (error) { result = failedFull(request, error) ?? { ok: false, error: 'runner_journal_failed' }; }
 process.stdout.write(JSON.stringify(result));

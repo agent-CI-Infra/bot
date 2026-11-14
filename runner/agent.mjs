@@ -2,6 +2,7 @@ import {mkdir,readFile,writeFile,rename,open,unlink} from 'node:fs/promises';
 import {spawn} from 'node:child_process';
 import {environment,workspaceTag} from './command.mjs';
 import {runnerRoot} from './paths.mjs';
+import {volume} from './disk.mjs';
 
 async function currentRepositoryRequest(dir){
   return readFile(dir+'/repository-request.json','utf8').then(JSON.parse).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
@@ -66,6 +67,9 @@ export async function agentOperation(input,root){
   if(input.type==='workspace_agent_poll'){
     const state=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({state:'missing'}));
     if(['running','review_ready','review_resuming'].includes(state.state)&&state.pid)try{if(state.boot!==undefined&&state.boot!==boot)throw new Error();process.kill(state.pid,0);}catch{state.state='interrupted';}
+    // An agent that ended without saving why, while the work volume is full, ran out of space (#671): its last state could
+    // not be written either.
+    if(state.state==='interrupted'&&!state.error&&volume()?.full)state.error='disk_full';
     const boundary=await readFile(dir+'/boundary.json','utf8').then(JSON.parse).catch(()=>null);
     const request=await readFile(dir+'/request.json','utf8').then(JSON.parse).catch(()=>null);
     const token_request=await readFile(dir+'/token-request.json','utf8').then(JSON.parse).catch(()=>null);

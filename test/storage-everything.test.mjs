@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { storageScan } from '../runner/storage-scan.mjs';
 import { Store } from '../dist/storage/database.js';
 import { StorageReport, directoryBytes } from '../dist/app/storage.js';
-import { workspaceClasses } from '../dist/projects/workspace-cleanup.js';
+import { workspaceClasses, taskUsageBytes } from '../dist/projects/workspace-cleanup.js';
 import { managerFixture } from './project-manager-fixture.mjs';
 
 // #671: the storage page shows every kind of storage: the computers' volumes from a background scan, Docker's images and
@@ -130,6 +130,7 @@ test('the view lists each computer, the host disk with other, what can be reclai
   const admin = { id: 'admin', role: 'super_admin', repositories: [] }, view = report.view(admin), project = view.projects.find(row => row.repository_id === '101');
   assert.deepEqual(project.computer.workspaces, { active: { count: 1, bytes: 30 * GiB }, pull_request: { count: 0, bytes: 0 }, expiring: { count: 1, bytes: 40 * GiB } });
   assert.equal(project.computer.tasks, undefined, 'the per-directory list stays in the snapshot');
+  assert.equal(taskUsageBytes(store, '101'), 40 * GiB, 'the most one task took on the computer sets its task-start floor');
   assert.equal(project.computer.home_entries[0].name, '.cache'); assert.equal(project.computer.cleanup.bytes, 4000);
   assert.equal(view.projects.find(row => row.repository_id === '102').computer, null);
   assert.equal(view.host.known.computers, 100 * GiB); assert.equal(view.host.known.docker_images, 9 * GiB); assert.equal(view.host.known.manager_database, 10 * GiB);

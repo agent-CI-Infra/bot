@@ -148,6 +148,9 @@ export function piAdapter<T>(session: PiSession<T>) {
       // A failed agent carries error as well, so it takes this path and is retried in a fresh workspace; its reason is kept.
       if (state.error === 'agent_context_too_large') stop('agent_context_too_large', 'failed', '会话压缩后仍超过 2 MiB 或 128k 上下文上限；重试将使用空会话。');
       if (state.state === 'failed') workspace.log({ type: 'agent_failure', error: state.error || null, detail: redactor.text(String(state.detail || '')).slice(0, 1000) || null });
+      // A command or write of the agent failed because the project computer's work volume ran full (runner/pi-entry.mjs,
+      // runner/agent.mjs): the task waits for space (#671); the model got no further turn to read it as a failure of its own.
+      if (state.error === 'disk_full') stop('disk_full', 'waiting_environment', `项目电脑的工作卷空间不足，任务执行进程已停止${state.detail ? '：' + redactor.text(String(state.detail)).replace(/\s+/g, ' ').slice(0, 300) : ''}。`);
       if (state.error || ['interrupted', 'missing'].includes(state.state)) stop('execution_interrupted', 'waiting_environment', state.state === 'failed'
         ? `任务执行进程失败：${redactor.text(String(state.detail || '没有返回原因')).replace(/\s+/g, ' ').slice(0, 300)}。`
         : `轮询任务执行进程时中断，状态=${state.state || '未知'}，offset=${offset}。`);
