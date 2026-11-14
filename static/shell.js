@@ -368,8 +368,12 @@ async function renderConsoleInbox(request) {
     const result = await api('/api/tasks?' + params);
     if (request !== renderVersion || tab !== 'inbox' || !body.isConnected) return;
     const rows = result.tasks.slice(0, 50); body.replaceChildren();
-    if (!rows.length) body.append(consoleState('当前范围没有待处理任务', '这表示未发现上述等待或失败事项，不代表服务、CI 或其他任务已经全部成功。'));
-    else {
+    if (!rows.length) {
+      body.append(consoleState('当前范围没有待处理任务', '这表示未发现上述等待或失败事项，不代表服务、CI 或其他任务已经全部成功。'));
+      const next = element('div', '', 'console-inbox-next');
+      next.append(consoleLink('#/board', '查看任务看板'), consoleLink('#/new-task' + (id ? '/' + id : ''), '新建任务'));
+      body.append(next);
+    } else {
       body.append(element('p', `本页 ${rows.length} 项 · 按最近状态变更时间从早到晚排列`, 'muted'));
       for (const row of rows) {
         body.append(consoleTaskRow(row, true));
