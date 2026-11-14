@@ -78,12 +78,13 @@ test('loading the page reads counters only: it never touches trajectory files, p
   for (const sql of seen) assert.doesNotMatch(store.all('EXPLAIN QUERY PLAN ' + sql.replace(/\?/g, "'x'")).map(row => row.detail).join(' | '), /SCAN (task_tools|task_logs|model_requests|task_history|trajectory_files)/);
 });
 
-test('a host whose Docker usage cannot be read keeps the page at 200 and that row null', async t => {
-  const h = await harness(t, { async call() { return { usage: [], database: {}, disk: {}, migration: {}, expiry: {}, host: { docker: null } }; } });
+test('a host whose Docker usage cannot be read keeps the page at 200 with four null fields', async t => {
+  const unreadable = { images_bytes: null, containers_bytes: null, volumes_bytes: null, build_cache_bytes: null };
+  const h = await harness(t, { async call() { return { usage: [], database: {}, disk: {}, migration: {}, expiry: {}, host: { docker: unreadable } }; } });
   const { admin } = await setup(h);
   const response = await admin('/api/storage');
   assert.equal(response.status, 200);
-  assert.equal(response.value.totals.host.docker, null);
+  assert.deepEqual(response.value.totals.host.docker, unreadable);
   assert.ok(Array.isArray(response.value.projects));
 });
 

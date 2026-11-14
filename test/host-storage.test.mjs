@@ -8,6 +8,9 @@ import { join, relative } from 'node:path';
 import { Docker } from '../manager/docker.mjs';
 import { managerFixture } from './project-manager-fixture.mjs';
 
+// What Docker.diskUsage() answers when /system/df cannot be read: the four fields stay, each null.
+const unreadable = { images_bytes: null, containers_bytes: null, volumes_bytes: null, build_cache_bytes: null };
+
 // A Docker daemon stand-in on a unix socket; the path stays relative to the checkout because a unix socket path may not
 // exceed 107 bytes. `calls` records "METHOD path" so a test can tell which endpoint was read.
 async function socketDaemon(t, handler) {
@@ -40,18 +43,18 @@ test('an answer without LayersSize falls back to the listed image sizes, and mis
 test('a /system/df answer past the 4 MB cap reads as unreadable instead of failing the storage page', async t => {
   const body = JSON.stringify({ LayersSize: 1, Pad: 'x'.repeat(5 * 1024 * 1024) });
   const { socket } = await socketDaemon(t, (_req, res) => { res.on('error', () => {}); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }); res.end(body); });
-  assert.equal(await new Docker(socket).diskUsage(), null);
+  assert.deepEqual(await new Docker(socket).diskUsage(), unreadable);
 });
 
-test('an unreachable Docker socket reads as null, never as an error', async t => {
+test('an unreachable Docker socket reads as four null fields, never as an error', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'host-storage-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
-  assert.equal(await new Docker(join(relative(process.cwd(), directory), 'missing.sock')).diskUsage(), null);
+  assert.deepEqual(await new Docker(join(relative(process.cwd(), directory), 'missing.sock')).diskUsage(), unreadable);
 });
 
-test("the manager's storage reports the host's Docker usage, or null when Docker cannot be read", async t => {
+test("the manager's storage reports the host's Docker usage, with the same four null fields when Docker cannot be read", async t => {
   const f = await managerFixture(t), usage = { images_bytes: 11, containers_bytes: 22, volumes_bytes: 33, build_cache_bytes: 44 };
   f.docker.df = usage;
   assert.deepEqual((await f.projects.storage()).host, { docker: usage });
-  f.docker.df = null;
-  assert.deepEqual((await f.projects.storage()).host, { docker: null });
+  f.docker.df = unreadable;
+  assert.deepEqual((await f.projects.storage()).host, { docker: unreadable });
 });

@@ -23,12 +23,13 @@ export class Docker {
   }
   // Whole-host Docker disk usage for the storage page (#671): image layers, container writable layers, volumes and the
   // build cache. One answer lists every image, so a host with many images can exceed the 4 MB cap in request(); a
-  // stopped socket, a slow or old daemon and that cap all read as null, and the caller shows the row as unreadable
-  // instead of failing the page or inventing zeros.
+  // stopped socket, a slow or old daemon and that cap all read as unreadable. The row keeps its four fields then, each
+  // null (not zero and not a missing key), and the caller shows it as unreadable instead of failing the page.
   async diskUsage() {
+    const unreadable = () => ({ images_bytes: null, containers_bytes: null, volumes_bytes: null, build_cache_bytes: null });
     let report;
-    try { report = await this.request('GET', '/system/df', undefined, false, 30000); } catch { return null; }
-    if (!report || typeof report !== 'object' || Array.isArray(report)) return null;
+    try { report = await this.request('GET', '/system/df', undefined, false, 30000); } catch { return unreadable(); }
+    if (!report || typeof report !== 'object' || Array.isArray(report)) return unreadable();
     const rows = value => Array.isArray(value) ? value : [];
     const sum = (list, size) => list.reduce((total, row) => total + (Number(size(row)) || 0), 0);
     return {
