@@ -6,14 +6,16 @@ import { relative, sep } from 'node:path';
 // CPU priority and bounded in time; the manager runs it in the background every few hours and keeps the last answer, so
 // the page never waits for it. Sizes are disk usage in bytes (du -k). The top level of /workspace is split into the
 // task workspaces (each /workspace/tasks/<id>), the runner journal, the computer's git store, HOME (with its largest
-// entries, the caches tools keep there), /workspace/tmp, the project notes and everything else.
-const idPattern = /^[a-f0-9]{48}$/, known = { tasks: 'tasks', '.runner-journal': 'journal', git: 'store', home: 'home', tmp: 'tmp', 'project-notes': 'notes' };
+// entries, the caches tools keep there), /workspace/tmp and everything else. The project notes at
+// /workspace/project-notes are another volume (the manager's notes directory, mounted in) and are left out; their
+// history directory is the manager's alone, so the computer's user could not read it anyway.
+const idPattern = /^[a-f0-9]{48}$/, known = { tasks: 'tasks', '.runner-journal': 'journal', git: 'store', home: 'home', tmp: 'tmp' };
 export const scanLimits = { timeoutMs: 30 * 60_000, tasks: 5000, entries: 20 };
 
 export async function storageScan(root, { timeoutMs = scanLimits.timeoutMs } = {}) {
   const started = Date.now();
   // du reports what it measured even when it cannot read a directory or is stopped at the time limit; complete says so.
-  const { error, stdout } = await new Promise(resolve => execFile('nice', ['-n', '19', 'du', '-kx', '--max-depth=2', '--', root],
+  const { error, stdout } = await new Promise(resolve => execFile('nice', ['-n', '19', 'du', '-kx', '--max-depth=2', `--exclude=${root}/project-notes`, '--', root],
     { timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 }, (failure, out) => resolve({ error: failure, stdout: String(out ?? '') })));
   const top = new Map(), tasks = [], home = [], others = new Map();
   let total = null;
@@ -26,7 +28,7 @@ export async function storageScan(root, { timeoutMs = scanLimits.timeoutMs } = {
     else if (parts[0] === 'tasks' && idPattern.test(parts[1])) tasks.push({ name: parts[1], bytes });
     else if (parts[0] === 'home') home.push({ name: parts[1], bytes });
   }
-  const groups = { tasks: 0, journal: 0, store: 0, home: 0, tmp: 0, notes: 0, other: 0 };
+  const groups = { tasks: 0, journal: 0, store: 0, home: 0, tmp: 0, other: 0 };
   for (const [name, bytes] of top) {
     if (known[name]) groups[known[name]] += bytes;
     else { groups.other += bytes; others.set(name, bytes); }
