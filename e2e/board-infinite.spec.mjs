@@ -36,7 +36,7 @@ test('滚到底自动加载下一页，常驻「加载更多」按钮消失', as
   const { h, offsets } = await fixture(page);
   try {
     await page.setViewportSize({ width: 1600, height: 900 });
-    await page.getByRole('group', { name: '按…分列', exact: true }).locator('button[data-value="repository"]').click();
+    await page.getByLabel('按…分列', { exact: true }).selectOption('repository');
     await expect(page.locator('.board-card')).toHaveCount(100);
     await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
     const first = await cards(page).count();
@@ -79,7 +79,7 @@ test('键盘滚动、列表视图与 390px 看板容器都能续页，末页后�
   // Four pages of 100: every branch below must reach a page that is not loaded yet, otherwise it never asks.
   const { h, offsets } = await fixture(page, 330);
   try {
-    await page.getByRole('group', { name: '按…分列', exact: true }).locator('button[data-value="repository"]').click();
+    await page.getByLabel('按…分列', { exact: true }).selectOption('repository');
     await expect(page.locator('.board-card')).toHaveCount(100);
     await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
     // Keyboard scrolling reaches the same trigger as a pointer scroll.
