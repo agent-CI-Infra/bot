@@ -253,6 +253,7 @@ function deployment() {
   const sent = [];
   const respond = (method, path, body) => {
     if (method !== 'GET') sent.push([method, path, body]);
+    if (method === 'GET' && path.startsWith('/api/models/catalog?')) return [200, {catalog:{revision:0,fetched_at:null,last_attempt_at:null,last_error:null,rejected:0,skipped:0,source:'https://models.dev/api.json',entries:0},entries:[],total:0,next_offset:null}];
     const { onboarding } = state;
     if (path === '/api/settings') return [200, { settings: { task_concurrency: 2, task_concurrency_bounds: [1, 32] }, version: { image_tag: 'v9.9.9', source: 'image' } }];
     if (path === '/api/onboarding') return [200, onboarding];

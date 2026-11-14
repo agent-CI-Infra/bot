@@ -100,3 +100,10 @@ test('external harness receipts use official catalog prices without a configured
   assert.equal(externalModelPricing(store,task,'deepseek/deepseek-flash').currency,'CNY');assert.equal(store.get('SELECT currency FROM model_requests WHERE id=?',id).currency,'USD');
   savePricing(store,'m',null);saveModelMetadata(store,'m',{catalog:{mode:'disabled'}});assert.equal(externalModelPricing(store,task,'deepseek-flash'),null);
 });
+
+test('an ambiguous relay identity remains unpriced until the administrator chooses a catalog entry',async t=>{
+  const store=storeFor(t),input=data();input.alternate={api:'https://alternate.example',models:{'deepseek-flash':card('deepseek-flash',{canonical_model_id:'alternate/deepseek-flash',cost:{input:1,output:3}})}};
+  const catalog=await install(store,input),model=store.get("SELECT * FROM models WHERE id='m'");
+  const match=catalog.match(model);assert.equal(match.state,'ambiguous');assert.deepEqual(match.candidates,['deepseek/deepseek-flash','alternate/deepseek-flash']);assert.equal(catalogPricing(store,model),null);
+  saveModelMetadata(store,'m',{catalog:{mode:'manual',ref:'alternate/deepseek-flash'}});assert.equal(catalogPricing(store,model).input_per_million,1);
+});
