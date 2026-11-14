@@ -2,7 +2,7 @@ import { commandResult, ResultSession, resultOwner } from './tool-results.js';
 import { type Store, type Row } from '../storage/database.js';
 import { type Manager } from '../projects/service.js';
 import { GitHub, repositoryTree } from '../github/client.js';
-import { blobSha, executionBaseline, clip, describeEntries, operationId, Redactor, safePath, stop, treeSha } from './common.js';
+import { blobSha, executionBaseline, clip, describeEntries, operationId, Redactor, safePath, stop, treeSha, TaskError } from './common.js';
 import { HttpError, randomId } from '../core/security.js';
 import { eventHistory, historyOrder } from '../roles/role-run.js';
 import { type Mirror } from './git-cache.js';
@@ -21,6 +21,21 @@ const inFlight=new Map<string,Map<string,any>>();
 export function currentOperation(taskId:string):{id:string;request:any}|null{
   const last=[...inFlight.get(taskId)?.entries()??[]].at(-1);
   return last?{id:last[0],request:last[1]}:null;
+}
+
+/**
+ * The project computer's work volume ran full (#671): the runner refused a call that would write, or a call or command
+ * failed for want of space (runner/runner.mjs, runner/disk.mjs). The task waits for space as disk_full instead of handing
+ * the failure to the model or reading it as failing tests. The answer is recorded like any result, so a repeated call
+ * would get it again: the task starts a new attempt with new operation ids (engine.ts).
+ */
+export class VolumeFull extends TaskError {}
+const MiB=2**20;
+function volumeFull(request:any,result:any):void{
+  const what=request.type==='workspace_command'||request.type==='command'?String(request.command).slice(0,200):`${request.type}${request.path?' '+request.path:''}`;
+  if(result?.error==='disk_full')throw new VolumeFull('disk_full','waiting_environment',`项目电脑的工作卷空间不足，调用未完成：${result.detail||what}`);
+  const mark=result?.disk_full;
+  if(mark)throw new VolumeFull('disk_full','waiting_environment',`命令失败时项目电脑的工作卷空间不足（运行中最少剩 ${Math.floor(Number(mark.lowest_free_bytes)/MiB)} MiB，结束时剩 ${Math.floor(Number(mark.free_bytes)/MiB)} MiB，共 ${Math.floor(Number(mark.total_bytes)/MiB)} MiB）：${what}`);
 }
 
 export class Workspace {
@@ -45,7 +60,7 @@ export class Workspace {
       // Report field names only: request payloads can contain file contents, tokens and model credentials.
       stop('tool_operation_conflict',undefined,this.redactor.text(`操作 key=${key}（type=${input.request.type}）与已存请求冲突：${changed.length?changed.join('、')+' 不同':'请求内容不同'}。`));
     }
-    if(row?.state==='completed')return this.readable(()=>operationResult(this.store,table,row));
+    if(row?.state==='completed'){const result=this.readable(()=>operationResult(this.store,table,row));volumeFull(input.request,result);return result;}
     // The request and result go to the run's trajectory file; the row keeps their refs. Without a run (or conversation
     // turn) to file them under, the row keeps them as before.
     const trajectories=this.store.trajectories,scope=trajectories.scopeOf(this.task);
@@ -82,6 +97,7 @@ export class Workspace {
     else this.store.run(`UPDATE ${table} SET state='completed',result=? WHERE id=?`,conversation?this.store.secrets.seal(result,'conversation-operation:'+id+':result'):JSON.stringify(result),id);
     // Model commands are logged by the agent loop together with the tool call; others (tests) are logged here.
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'command',command:request.command,...result,output:clip(result.output)});
+    volumeFull(input.request,result);
     return result;
   }
   // A recorded call whose file fails verification stops the task: running it again could repeat its effect. One whose
@@ -100,6 +116,8 @@ export class Workspace {
     useWorkspace(this.store,this.task,request.type);
     const response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,{operation_id:randomId(),generation:this.task.generation,
       request:{...request,workspace_id:this.task.workspace_id}},90000).catch(()=>null);
+    // Nothing records this answer, so the same call can simply be made again once there is space.
+    if(response?.error==='disk_full')stop('disk_full','waiting_environment',`项目电脑的工作卷空间不足，调用未完成：${response.detail||request.type}`);
     return response?.ok?response.result:{error:response?.error||'runner_operation_failed',...(response?.detail?{detail:response.detail}:{})};
   }
   // Ends the processes this task left, kept background work included. Other tasks on the computer keep theirs; the last

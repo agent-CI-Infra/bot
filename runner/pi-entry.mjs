@@ -13,12 +13,13 @@ import {createTokenExchange} from './token-exchange.mjs';
 import {createToolResultGuard} from './repository-context.mjs';
 import {runSubagent} from './subagent.mjs';
 import {local} from './paths.mjs';
+import {noSpace,toolDiskFull} from './disk.mjs';
 
 const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
 if(local)config.system+='\nLocal execution: this is a host process, not a container. Stay inside your task workspace and project notes. Never search the host root filesystem or inspect unrelated projects or credentials. Never use pkill, killall or process-name-wide termination. Use keep_background for servers; the manager cleans your task processes when you finish. Read ../notes/environment.md for verified local tooling.';
 const boot=(await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({}))).boot;
 const save=async value=>{value={...value,pid:process.pid,boot};await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
-let steps=0,session,finished,grant=null,requestFailure;
+let steps=0,session,finished,grant=null,requestFailure,failureDetail;
 // reserve: tokens a later request needs beyond raw, such as a compaction summary.
 const modelCapabilities=config.model??{context_window:128000,max_output_tokens:8192,reasoning:false};
 const outputReserve=config.output_tokens??modelCapabilities.max_output_tokens;
@@ -133,21 +134,26 @@ try{
         if(!options.request)result={error:options.error,message:options.message};
         else {
           const outputId=randomBytes(24).toString('hex'),outputDirectory=dir+'/results';
-          await prepareLocalResults(outputDirectory);
-          await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify(clean({operation_id:id,output_file:outputDirectory+'/'+outputId+'.utf8',...options.request})),{mode:0o600});
           const secret_env=grant?{GH_TOKEN:grant.token,GITHUB_TOKEN:grant.token}:undefined;
-          try{result=await workspace({...options.request,workspace_id:cfg.workspace_id,output_file:outputDirectory+'/'+outputId+'.utf8',secret_env});
+          try{await prepareLocalResults(outputDirectory);
+            await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify(clean({operation_id:id,output_file:outputDirectory+'/'+outputId+'.utf8',...options.request})),{mode:0o600});
+            result=await workspace({...options.request,workspace_id:cfg.workspace_id,output_file:outputDirectory+'/'+outputId+'.utf8',secret_env});
             result=await localCommandResult(outputDirectory,cfg.workspace_id+':'+(agent||''),outputId,result);
             if(options.timeout_notice)result={...result,timeout_notice:options.timeout_notice};
-          }finally{await unlink(dir+'/live.json').catch(()=>{});}
+          }catch(error){if(!noSpace(error))throw error;result={error:String(error.message)};}
+          finally{await unlink(dir+'/live.json').catch(()=>{});}
         }
       }else if(name==='github_read_token'){
         // The token stays in this process and reaches later commands only as environment variables; the model sees what it can do, not the value.
         if(!grant||Date.parse(grant.expires_at)-Date.now()<10*60000){const reply=await exchange(signal);if(reply.error)result={error:reply.error};else if(reply.structured_only)result={repository:reply.repository,permissions:reply.permissions,variables:[],instruction:reply.instruction};else {grant=reply;secrets.add(grant.token);}}
         result??={variables:['GH_TOKEN','GITHUB_TOKEN'],api:'https://api.github.com',repository:grant.repository,permissions:grant.permissions,expires_at:grant.expires_at};
       }else result={error:'tool_not_allowed'};
+      // A write or command that failed because the work volume ran full ends the task as disk_full, waiting for space
+      // (#671), rather than letting the model read it as a failed command or failing tests: no further model request.
+      const full=['run_command','write_file'].includes(name)?toolDiskFull(result):null;
+      if(full&&!requestFailure){requestFailure='disk_full';failureDetail=`${name}${name==='run_command'?' '+String(args.command).slice(0,200):' '+args.path}: ${full}`;if(agent)setTimeout(()=>void session.abort(),10);}
       result=await guard.check(id,name,result);
-      await writeEvent({type:'tool',name,call_id:id,...who,arguments:args,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:{},...(submitted||finishTools.has(name)&&!agent&&!controlTools.has(name)?{terminate:true}:{})};
+      await writeEvent({type:'tool',name,call_id:id,...who,arguments:args,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:{},...(full||submitted||finishTools.has(name)&&!agent&&!controlTools.has(name)?{terminate:true}:{})};
     }}));
   // A Pi session from one configuration: its system prompt, its tools and the history it is given (none for a sub-agent).
   async function createSession(cfg,agent,history){
@@ -208,7 +214,7 @@ try{
   async function untilFinished(input){
     for(let nudge=0;;nudge++){
       try{await session.prompt(input);}catch(error){if(!finished||requestFailure)throw error;}
-      if(requestFailure)throw new Error(requestFailure);
+      if(requestFailure)throw Object.assign(new Error(requestFailure),failureDetail?{detail:failureDetail}:{});
       // A controlled session ends only through its control-plane submission; without one the control plane decides.
       if(finished||controlTools.size)return finished||null;
       const result=textResult();if(result!==undefined)return result;
@@ -238,6 +244,6 @@ try{
   }
 }catch(error){await events.catch(()=>{});
   // The reason goes into the task log; issued tokens are masked like every event.
-  const known=['agent_context_too_large','agent_finish_missing'];
-  await save({state:'failed',error:requestFailure||(known.includes(error?.message)?error.message:'pi_execution_failed'),detail:clean(String(error?.detail||error?.message||error||'unknown')).slice(0,1000)});}
+  const known=['agent_context_too_large','agent_finish_missing','disk_full'];
+  await save({state:'failed',error:requestFailure||(known.includes(error?.message)?error.message:noSpace(error)?'disk_full':'pi_execution_failed'),detail:clean(String(failureDetail||error?.detail||error?.message||error||'unknown')).slice(0,1000)});}
 finally{session?.dispose();server.closeAllConnections();server.close();}

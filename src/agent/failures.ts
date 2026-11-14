@@ -210,7 +210,7 @@ const codeActions: Record<string,string> = {
   candidate_changed:'检视期间固定候选已变化，旧结论不能认证新内容；新的委派会针对当前候选重新执行。',
   harness_version_mismatch:'项目电脑里的 Pi 版本与角色配置固定的版本不同：升级或回退项目电脑镜像，或按新版本重新保存角色配置。',
   pi_runtime_unavailable:'项目电脑的 runner 太旧，不支持 Pi 运行时查询。同步升级控制面和项目电脑镜像后会自动继续。',
-  disk_full:'控制面或 manager 的数据盘剩余空间不足，任务停在等待环境，不会写坏数据。请管理员在全局设置的「存储」一节查看占用并清理磁盘；有了空间后任务自动继续，无需点「重试」。',
+  disk_full:'数据盘剩余空间不足（控制面、manager 或项目电脑的工作卷写不下，或剩余低于任务开始所需），任务停在等待环境，不会写坏数据，也不会把写满导致的命令失败当成测试失败。请管理员在全局设置的「存储」一节查看占用并清理磁盘；有了空间后任务自动继续，无需点「重试」。',
   operation_result_expired:'这次调用在 manager 里保存的结果已过保留期被删除，无法确认原结果；任务会用新的尝试重新开始，不会采用不确定的结果。',
 };
 const causeActions: Record<FailureCause,(state:string)=>string> = {

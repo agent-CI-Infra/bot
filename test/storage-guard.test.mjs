@@ -9,16 +9,22 @@ import { PayloadMigration, migrationKey } from '../dist/storage/migration.js';
 import { DiskGuard, diskFull, diskState, floorBytes, reserveBytes } from '../dist/storage/disk.js';
 import { automaticState, explainFailure, failureCause, isAttemptFailure } from '../dist/agent/failures.js';
 import { HttpError } from '../dist/core/security.js';
+import { Redactor } from '../dist/agent/common.js';
+import { VolumeFull, Workspace } from '../dist/agent/workspace.js';
+import { noteTaskUsage, taskUsageBytes } from '../dist/projects/workspace-cleanup.js';
 import { emptyRepositoryFixture } from './empty-repository-helpers.mjs';
 
 // #671: the free-space guard, and how tasks and the storage page see a full disk or an expired manager result.
 const GiB = 1024 ** 3;
 const enospc = () => Object.assign(new Error("ENOSPC: no space left on device, write '/data/git-cache/x'"), { code: 'ENOSPC' });
-const disk = (free, total = 1000 * GiB) => ({ free_bytes: free, total_bytes: total, reserve_bytes: reserveBytes(total), floor_bytes: floorBytes(total), low: free < reserveBytes(total), full: free < floorBytes(total) });
+const disk = (free, total = 1000 * GiB) => ({ free_bytes: free, total_bytes: total, reserve_bytes: reserveBytes(total), floor_bytes: floorBytes(total), low: free < reserveBytes(total) });
 
-test('the reserve is the smaller of 5 % and 50 GiB, the floor the smaller of 1 % and 1 GiB; full-disk errors are recognized', () => {
+test('the reserve is the smaller of 5 % and 50 GiB, the task-start floor follows the workload; full-disk errors are recognized', () => {
   assert.equal(reserveBytes(1000 * GiB), 50 * GiB); assert.equal(reserveBytes(200 * GiB), 10 * GiB);
-  assert.equal(floorBytes(1000 * GiB), GiB); assert.equal(floorBytes(50 * GiB), Math.floor(0.5 * GiB));
+  // 10 GiB on a large disk, 5 % on a small one; three times the project's largest recent task when that is more, at most a quarter of the disk.
+  assert.equal(floorBytes(1000 * GiB), 10 * GiB); assert.equal(floorBytes(50 * GiB), Math.floor(2.5 * GiB));
+  assert.equal(floorBytes(1000 * GiB, 2 * GiB), 10 * GiB); assert.equal(floorBytes(1000 * GiB, 8 * GiB), 24 * GiB);
+  assert.equal(floorBytes(1000 * GiB, 400 * GiB), 250 * GiB); assert.equal(floorBytes(50 * GiB, 8 * GiB), Math.floor(12.5 * GiB));
   const state = diskState(tmpdir()); assert.ok(state.total_bytes > 0 && state.reserve_bytes > 0 && typeof state.low === 'boolean');
   assert.equal(diskState('/nonexistent-' + Date.now()), null);
   for (const error of [enospc(), Object.assign(new Error('database or disk is full'), { code: 'ERR_SQLITE_ERROR', errcode: 13 }), { errcode: 13 | (1 << 8) }, new Error('write failed: No space left on device')])
@@ -83,6 +89,54 @@ test('a repeated call whose stored result the manager removed starts a new attem
   expired = false; h.due(); task = await h.run(); assert.equal(task.status, 'succeeded');
 });
 
+const lastFault = h => h.store.all('SELECT content FROM task_logs WHERE task_id=?', h.taskId).map(row => JSON.parse(row.content)).filter(log => log.type === 'fault').at(-1);
+
+test('the task-start floor follows what one task of the project recently took on its computer', async t => {
+  const h = await emptyRepositoryFixture(t); h.setBranch('ready');
+  // The computer's last volume scan: an earlier task used two directories (3 and 5 GiB); one no record names holds 6 GiB.
+  const [own, checkout, unowned] = ['a', 'b', 'c'].map(letter => letter.repeat(48));
+  h.store.run("INSERT INTO task_workspaces(repository_id,workspace_id,task_id,kind,created_at) VALUES('101',?,'earlier','task','2026-11-14'),('101',?,'earlier','checkout','2026-11-14')", own, checkout);
+  assert.equal(taskUsageBytes(h.store, '101'), 0, 'nothing is known before the first scan');
+  assert.equal(noteTaskUsage(h.store, '101', [{ name: own, bytes: 3 * GiB }, { name: checkout, bytes: 5 * GiB }, { name: unowned, bytes: 6 * GiB }]), 8 * GiB);
+  // 20 GiB free on a 1000 GiB disk is above the 10 GiB base, but below three times 8 GiB.
+  let state = disk(20 * GiB);
+  t.mock.method(h.store.disk, 'check', () => state);
+  let task = await h.run();
+  assert.deepEqual([task.status, task.error_code, task.retry_count], ['waiting_environment', 'disk_full', 0]);
+  assert.match(lastFault(h).detail, /剩 20\.0 GiB，低于任务开始所需的 24\.0 GiB（本项目最近单个任务在项目电脑上最多占用 8\.0 GiB）/);
+  assert.deepEqual(h.operations, [], 'nothing was written to the computer');
+  state = disk(30 * GiB); h.due();
+  task = await h.run(); assert.equal(task.status, 'succeeded');
+});
+
+test('a call the full work volume refused stops the task as disk_full and starts a new attempt once', async t => {
+  let full = true;
+  const h = await emptyRepositoryFixture(t, { execute(request) {
+    if (full && request.type === 'workspace_init') return { ok: false, error: 'disk_full', detail: 'workspace_init: refused, nothing was run; the work volume has 512 MiB free of 1024000 MiB' };
+  } }); h.setBranch('ready');
+  const before = h.store.get('SELECT attempt FROM tasks WHERE id=?', h.taskId).attempt;
+  let task = await h.run();
+  assert.deepEqual([task.status, task.error_code, task.attempt, task.retry_count], ['waiting_environment', 'disk_full', before + 1, 0]);
+  assert.match(lastFault(h).detail, /项目电脑的工作卷空间不足，调用未完成：workspace_init: refused, nothing was run; the work volume has 512 MiB free/);
+  // The recorded answer belongs to the old attempt; the new one asks again with new operation ids.
+  full = false; h.due();
+  task = await h.run(); assert.deepEqual([task.status, task.attempt], ['succeeded', before + 1]);
+});
+
+test('an agent stopped by a full work volume stops the task as disk_full instead of as an interrupted run', async t => {
+  let full = true;
+  const h = await emptyRepositoryFixture(t, { execute(request) {
+    if (full && request.type === 'workspace_agent_poll') return { ok: true, result: { state: 'failed', error: 'disk_full', detail: 'run_command npm ci: the command failed while the volume ran full (0 MiB free of 1024000 MiB at the lowest)', events: [], offset: 0 } };
+  } }); h.setBranch('ready');
+  const before = h.store.get('SELECT attempt FROM tasks WHERE id=?', h.taskId).attempt;
+  let task = await h.run();
+  assert.deepEqual([task.status, task.error_code, task.retry_count], ['waiting_environment', 'disk_full', 0]);
+  assert.equal(task.attempt, before + 1, 'a model-phase stop starts a new attempt');
+  assert.match(lastFault(h).detail, /任务执行进程已停止：run_command npm ci: the command failed while the volume ran full/);
+  full = false; h.due();
+  task = await h.run(); assert.equal(task.status, 'succeeded');
+});
+
 function storeFixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'storage-guard-')), store = new Store(join(directory, 'control.sqlite'), Buffer.alloc(32, 5));
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
@@ -108,6 +162,21 @@ test('the payload migration waits while the disk is below its reserve or full, a
   await wait(() => state().phases?.task_tools?.finished_at);
   assert.equal(state().phases.task_tools.migrated, 5, 'the row that hit the full disk moved later'); assert.equal(state().phases.task_tools.failed, 0);
   assert.equal(state().paused, null);
+});
+
+test('a command the runner marked disk_full stops the task instead of reaching the model or the tests, also when its answer is replayed', async t => {
+  const store = storeFixture(t);
+  let calls = 0;
+  const manager = { async call() { calls++; return { ok: true, result: { exit_code: 1, output: 'npm ERR! code ENOSPC', truncated: false, timed_out: false,
+    disk_full: { free_bytes: 300 * 2 ** 20, lowest_free_bytes: 0, total_bytes: 1000 * GiB } } }; } };
+  const task = { ...store.get("SELECT * FROM tasks WHERE id='t'"), attempt: 1, generation: 1, workspace_id: 'a'.repeat(48) };
+  const space = new Workspace(store, manager, task, new Redactor(), async () => {}, () => {});
+  for (let i = 0; i < 2; i++) await assert.rejects(space.call('tests', { type: 'workspace_command', command: 'npm ci && npm test', timeout_ms: null }), error =>
+    error instanceof VolumeFull && error.code === 'disk_full' && error.state === 'waiting_environment' && /最少剩 0 MiB，结束时剩 300 MiB/.test(error.detail) && /npm ci && npm test/.test(error.detail));
+  assert.equal(calls, 1, 'the second call got the recorded answer');
+  // A failed command on a volume with room reaches the caller as before.
+  manager.call = async () => ({ ok: true, result: { exit_code: 1, output: 'FAIL test/a.test.mjs', truncated: false, timed_out: false } });
+  assert.equal((await space.call('tests-2', { type: 'workspace_command', command: 'npm test', timeout_ms: null })).exit_code, 1);
 });
 
 test('platform administrators see an alert for each data disk below its reserve and the manager expiry; projects see removed manager files', async t => {
