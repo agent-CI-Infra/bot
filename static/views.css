@@ -473,6 +473,12 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .audit-filters{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
 .audit-filters button{font-size:var(--font-size-1);padding:4px 10px}
 .audit-filters button[aria-pressed=true]{border-color:var(--color-brand);color:var(--color-brand);background:#e8f3f4}
+/* #698: one audit row reads as a sentence (action · who), then time and the object link; codes fold under 技术信息. */
+.history li.audit-row{display:block;padding:9px 0}
+.audit-row-head{font-size:var(--font-size-row,14px);overflow-wrap:anywhere}.audit-row-head .audit-actor{color:var(--color-text-muted,#4b5563)}
+.audit-row-meta{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;margin-top:2px}
+.audit-tech{margin-top:2px}.audit-tech>summary{cursor:pointer;color:var(--color-text-muted,#4b5563);font-size:var(--font-size-1)}
+.audit-tech dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:2px 10px;margin:4px 0 0}.audit-tech dt{color:var(--color-text-muted,#4b5563)}.audit-tech dd{margin:0;min-width:0}
 
 /* #564: recommended-config first screen; advanced role details stay folded. */
 .role-advanced { margin-top: var(--space-5, 16px); }
