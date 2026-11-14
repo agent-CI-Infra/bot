@@ -174,6 +174,11 @@ export class Store {
       CREATE INDEX IF NOT EXISTS automation_repo_time ON automation_runs(repository_id,created_at);
       PRAGMA user_version=4;`);
     extend('task_logs', { created_at: "TEXT NOT NULL DEFAULT ''" });
+    // A task's logs are read by task: on each phase start, snapshot and fault a running task writes, in restart recovery,
+    // the console's log pages, and per row of the task lists (the fault detail). Without this index every such read
+    // scanned the whole table (1.04M rows in production, ~0.35 s each, about a tenth of the control plane's thread).
+    // Building it reads task_logs once at the next start (~0.5 GB in production, a few seconds).
+    this.db.exec('CREATE INDEX IF NOT EXISTS task_logs_task ON task_logs(task_id)');
     // Review rules: which events start a review, the comment language and the administrator's project-specific guidance.
     extend('policies', { review_issues: 'INTEGER NOT NULL DEFAULT 1', review_pull_requests: 'INTEGER NOT NULL DEFAULT 1', review_pr_updates: 'INTEGER NOT NULL DEFAULT 1',
       review_issue_updates: 'INTEGER NOT NULL DEFAULT 1', review_pr_discussion: 'INTEGER NOT NULL DEFAULT 1',
