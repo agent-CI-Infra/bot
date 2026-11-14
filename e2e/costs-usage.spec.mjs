@@ -139,3 +139,69 @@ test('a work type count opens only its tasks and an empty type says there are no
     await expect(panel.locator('tr.statistics-drill')).toContainText('DEV-ISSUE-ONLY');
   } finally { await f.close(); }
 });
+
+// #643: the axis of the token chart is a whole count, not `max * 1.1` printed to six decimals. Seeded near the size
+// that produced `1,439,074.45` on the live console, so a regression prints the decimal again.
+const seedTokenAxis = h => {
+  const rows = [
+    ['643-token-a', '101', '2026-11-10T10:00:00.000Z', 900000, 400000],
+    ['643-token-b', '101', '2026-11-10T11:00:00.000Z', 100000, 40074]
+  ];
+  for (const [id, repository, at, input, output] of rows)
+    h.store.run(`INSERT INTO model_requests(id,repository_id,request_id,model_id,model_name,requested_at,state,
+      input_tokens,output_tokens,cached_input_tokens,currency,input_per_million,output_per_million,cache_per_million,cost)
+      VALUES(?,?,?,'model-fixture','fixture-model',?,'succeeded',?,?,0,null,null,null,null,null)`,
+      id, repository, 'request-' + id, at, input, output);
+};
+
+test('the token chart axis is whole numbers, abbreviated instead of printed as decimals', async ({ page }) => {
+  test.setTimeout(180000);
+  const f = await managementFixture(), { h } = f;
+  try {
+    seedTokenAxis(h);
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await page.clock.setFixedTime(new Date('2026-11-11T02:00:00Z'));
+    await page.goto(h.admin + '/#/costs');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const panel = page.locator('#costs-panel');
+    const svg = panel.locator('.cost-chart-section svg[data-metric=tokens]');
+    await expect(svg).toHaveCount(1);
+    const labels = await svg.locator('text').allTextContents();
+    expect(labels.some(label => /万$/.test(label))).toBe(true);
+    // No axis reading is a decimal any more; the date ticks below the plot are `MM-DD` and carry no dot either.
+    expect(labels.filter(label => label.includes('.'))).toEqual([]);
+    // The top of the axis still covers the tallest bar, so a whole label never cuts the data off.
+    const toValue = label => label.endsWith('亿') ? Number(label.slice(0, -1)) * 1e8
+      : label.endsWith('万') ? Number(label.slice(0, -1)) * 1e4 : Number(label);
+    const ticks = labels.filter(label => /^(\d+(?:\.\d+)?)[万亿]?$/.test(label)).map(toValue);
+    const values = await svg.locator('rect').evaluateAll(nodes => nodes.map(node => Number(node.dataset.value)));
+    expect(Math.max(...ticks)).toBeGreaterThanOrEqual(Math.max(...values));
+  } finally { await f.close(); }
+});
+
+test('an all-unpriced range says why and links a super admin to the model prices', async ({ page }) => {
+  test.setTimeout(180000);
+  const f = await managementFixture(), { h } = f;
+  try {
+    seedTokenAxis(h);
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await page.clock.setFixedTime(new Date('2026-11-11T02:00:00Z'));
+    await page.goto(h.admin + '/#/costs');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const panel = page.locator('#costs-panel');
+    const card = panel.locator('[data-metric=cost]');
+    await expect(card).toContainText('未定价');
+    await expect(card).toContainText('还没有为这些模型设置单价');
+    const link = card.getByRole('link', { name: '去设置模型单价' });
+    await expect(link).toHaveAttribute('href', '#/settings/models');
+    // 390: the sentence and the link stay inside the card instead of pushing the summary sideways.
+    await page.setViewportSize({ width: 390, height: 900 });
+    await expect(link).toBeVisible();
+    await link.click();
+    await expect(page).toHaveURL(/#\/settings\/models$/);
+  } finally { await f.close(); }
+});
