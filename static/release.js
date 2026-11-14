@@ -34,13 +34,18 @@ function releaseSection() {
       const title = element('h3', p.available ? '候选已就绪，等待确认' : p.error ? '候选状态未知' : '发布前检查'), list = element('ul', '', 'release-preflight-checks');
       for (const c of p.checks || []) {
         const item = element('li', '', c.ok ? 'release-check-ready' : p.version_valid ? 'release-check-failed' : '');
-        item.append(element('span', c.ok ? '✓' : '·'), element('span', c.message + (c.reason ? ' ' + c.reason : ''), !c.ok && p.version_valid ? 'release-check-failed' : '')); list.append(item);
+        item.append(element('span', c.ok ? '✓' : '·'), element('span', c.message + (c.reason ? ' ' + c.reason : ''), !c.ok && p.version_valid ? 'release-check-failed' : ''));
+        if (!c.ok && c.code === 'no_ci' && typeof openGateOnboarding === 'function') {
+          const name = target.repository?.full_name || (typeof repositories !== 'undefined' && repositories.find(r => String(r.id) === String(id))?.full_name) || ('仓库 ' + id);
+          item.append(button('打开接入门禁', () => openGateOnboarding({ id: String(id), full_name: name }), 'quiet'));
+        }
+        list.append(item);
       }
       preview.replaceChildren(title, list); if (p.detail) preview.append(note(p.detail));
       if (p.target_sha) preview.append(facts([['默认分支', p.default_branch], ['目标提交', link(p.target_url, p.target_sha)], ['提交标题', p.target_title],
         ['版本', !p.version_valid ? '请填写合法版本号' : p.prerelease ? '预发布' : '稳定版'], ['上一枚版本', p.previous_tag ? `${p.previous_tag.name} · ${p.previous_tag.sha}` : '从仓库历史起算'],
         ['新增提交', Number.isSafeInteger(p.commit_count) ? String(p.commit_count) : '数量未提供'], ['发行说明规则', `${({repository:'仓库文件',console:'项目设置',builtin:'内置规则'})[p.skill.source] || p.skill.source} · ${p.skill.path || p.skill.version}`],
-        ['已有标签', p.existing_tag ? p.existing_tag.commit : '无'], ['已有 Release', p.existing_release ? link(p.existing_release.url, p.existing_release.draft ? '已有草稿' : '已由仓库工作流／外部操作发布') : '无']]));
+        ['已有标签', p.existing_tag ? p.existing_tag.commit : '暂无'], ['已有 Release', p.existing_release ? link(p.existing_release.url, p.existing_release.draft ? '已有草稿' : '已由仓库工作流／外部操作发布') : '暂无']]));
       confirm.disabled = writing || !p.available;
     } catch (error) { if (!live() || token !== checking) return; target.releasePreview = null; confirm.disabled = true; if (!denied(error)) { preview.replaceChildren(note('候选读取失败，当前无法确认目标提交。')); message.textContent = error.message; } }
   };
@@ -48,7 +53,7 @@ function releaseSection() {
     const token = ++reading;
     try {
       const data = await api(endpoint); if (!live() || token !== reading) return;
-      readStatus.textContent = `记录读取于 ${new Date().toLocaleTimeString()}；这是读取时间。`;
+      readStatus.textContent = `记录读取于 ${timestamp(new Date())}`;
       if (document.activeElement?.name === 'release_body') return;
       overview.replaceChildren(...(data.releases.length ? [releaseOverview(data.releases)] : []));
       status.replaceChildren(...data.releases.map(record => releaseRecord(record, endpoint, refresh, message, { live, target })));

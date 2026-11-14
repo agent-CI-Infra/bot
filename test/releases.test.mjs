@@ -50,7 +50,9 @@ test('release preflight checks immutable files, beta exclusions and diagnostic f
   assert.ok((await f.preview('v1.2.3-beta.1')).available);
   assert.equal((await f.preview('v01.2.3')).available, false);
   delete f.state.files['.github/ci-gates.json'];
-  assert.equal((await f.preview()).checks[0].message, noCI);
+  const missing = await f.preview();
+  assert.equal(missing.checks[0].message, noCI);
+  assert.equal(missing.checks[0].code, 'no_ci');
   f.state.files['.github/ci-gates.json'] = '{}'; delete f.state.files['.github/workflows/release.yml'];
   assert.equal((await f.preview()).checks[1].message, noRelease);
   f.state.files['.github/workflows/release.yml'] = workflow.replace("['v*']", "['v*', '!v*-beta*']");
