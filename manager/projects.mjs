@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, statSync, statfsSync } from 'node:fs';
+import { mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { rm } from 'node:fs/promises';
 import { randomBytes, createHash } from 'node:crypto';
@@ -7,7 +7,8 @@ import { ManagerError } from './docker.mjs';
 import { Notes, noteName } from '../runner/notes.mjs';
 import { FileTree } from './file-tree.mjs';
 import { validNoteId } from '../runner/note-catalog.mjs';
-import { LedgerMigration, Trajectories, inputHeader, trajectoryStorage } from './trajectories.mjs';
+import { LedgerMigration, Trajectories, TrajectoryExpiry, inputHeader, trajectoryStorage } from './trajectories.mjs';
+import { DiskGuard } from './disk.mjs';
 
 const randomId = () => randomBytes(24).toString('hex');
 // One line on stderr per failure that changes a computer's state, so `docker compose logs manager` says why it happened.
@@ -101,8 +102,12 @@ export class Projects {
     for (const column of ['input_ref', 'result_ref', 'input_sha256']) if (!ledgerColumns.has(column)) this.db.exec(`ALTER TABLE operations ADD COLUMN ${column} TEXT`);
     trajectoryStorage(this.db);
     this.trajectories = new Trajectories(this.db, dirname(database) + '/trajectories');
-    // Moves the bodies of rows written before; started by main.mjs once the manager is ready.
-    this.migration = new LedgerMigration(this.db, this.trajectories);
+    // The data disk's free space; the migration waits while it is below the reserve (#671).
+    this.disk = new DiskGuard(dirname(database));
+    // Moves the bodies of rows written before, and removes the files no call replays any more (#671); both are started
+    // by main.mjs once the manager is ready.
+    this.migration = new LedgerMigration(this.db, this.trajectories, { guard: this.disk });
+    this.expiry = new TrajectoryExpiry(this.db, this.trajectories);
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'revision')) this.db.exec('ALTER TABLE projects ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
     // spec: the requested computer; build: the image built for its packages; setup: the last setup script run.
     for (const column of ['spec', 'build', 'setup']) if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === column)) this.db.exec(`ALTER TABLE projects ADD COLUMN ${column} TEXT`);
@@ -492,8 +497,12 @@ export class Projects {
         if (old.repository_id !== repo || old.action !== action || (old.input_sha256 ? old.input_sha256 !== hash : old.input !== encoded)) throw new ManagerError('operation_id_conflict');
         if (old.state === 'completed') {
           if (!old.result_ref) return JSON.parse(old.result);
-          // A recorded result that fails its hash is refused rather than run again.
-          try { return this.trajectories.read(old.result_ref).data; } catch (error) { logFailure(`operation ${input.operation_id} result`, error); throw new ManagerError('operation_record_unreadable'); }
+          // A recorded result that fails its hash is refused rather than run again; one removed after its retention
+          // window (TrajectoryExpiry) is answered as expired, never with another result.
+          try { return this.trajectories.read(old.result_ref).data; } catch (error) {
+            if (error?.code === 'trajectory_expired') throw new ManagerError('operation_result_expired', 410);
+            logFailure(`operation ${input.operation_id} result`, error); throw new ManagerError('operation_record_unreadable');
+          }
         }
         throw new ManagerError('operation_interrupted');
       }
@@ -649,8 +658,9 @@ export class Projects {
     })));
   }
   // The storage page's numbers from this manager: trajectory totals per project (kind 'open' sizes the files still being
-  // written, one per running task), the ledger's size and free pages, the disk and the migration. The PRAGMAs read the
-  // database header and trajectory_usage holds a few rows per project: nothing here scans the ledger.
+  // written, one per running task; 'expired' counts the files removed after their window), the ledger's size and free
+  // pages, the disk with its reserve, the migration and the expiry. The PRAGMAs read the database header and
+  // trajectory_usage holds a few rows per project: nothing here scans the ledger.
   storage() {
     const value = pragma => Number(Object.values(this.db.prepare('PRAGMA ' + pragma).get() ?? {})[0] ?? 0);
     const pageSize = value('page_size'), pages = value('page_count'), free = value('freelist_count'), data = dirname(this.trajectories.root);
@@ -659,13 +669,12 @@ export class Projects {
       let bytes = 0; try { bytes = statSync(this.trajectories.root + '/' + row.path).size; } catch {}
       const entry = open.get(row.repository_id) ?? { repository_id: row.repository_id, kind: 'open', count: 0, bytes: 0 }; entry.count++; entry.bytes += bytes; open.set(row.repository_id, entry);
     }
-    let disk = null; try { const stats = statfsSync(data); disk = { free_bytes: stats.bavail * stats.bsize, total_bytes: stats.blocks * stats.bsize }; } catch {}
     let wal = 0; try { wal = statSync(data + '/manager.sqlite-wal').size; } catch {}
-    return { usage: [...usage, ...open.values()], database: { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal }, disk,
-      migration: this.migration.state() };
+    return { usage: [...usage, ...open.values()], database: { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal },
+      disk: this.disk.check(), migration: this.migration.state(), expiry: this.expiry.state() };
   }
   async shutdown() {
-    await this.migration.stop(); await Promise.all([...this.pending]); for (const row of this.list()) await this.stopAll(row.repository_id);
+    await this.migration.stop(); await this.expiry.stop(); await Promise.all([...this.pending]); for (const row of this.list()) await this.stopAll(row.repository_id);
     this.trajectories.closeAll(); await this.trajectories.settle(); this.db.close();
   }
 }

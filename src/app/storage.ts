@@ -1,16 +1,18 @@
-import { statSync, statfsSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Store } from '../storage/database.js';
 import type { Manager } from '../projects/service.js';
 import { scope, type Actor } from './auth.js';
 import type { Json } from '../core/security.js';
 import { migrationProgress } from '../storage/migration.js';
+import { diskState } from '../storage/disk.js';
 
 // The storage page (#436): per project, what its trajectory files, records and blobs take on the control plane and its
 // runner-call files take in the manager; for platform administrators also the two databases, their disks and the
 // payload migration. A page load reads the counters added when files close (trajectory_usage, a few rows per project)
 // and a snapshot the background refresh keeps: it never walks files or scans tables. The refresh sizes the files still
-// open (one per running task) and asks the manager for its numbers.
+// open (one per running task) and asks the manager for its numbers. Platform administrators also get an alert for each
+// data disk below its reserve (#671), when background writes pause.
 
 interface Usage { count: number; bytes: number }
 interface Snapshot { refreshed_at: string; control: Json; manager: Json | null; open: Record<string, Usage> }
@@ -39,9 +41,14 @@ export class StorageReport {
         }
         const manager = this.manager ? await this.manager.call('GET', '/v1/storage').catch(() => null) as Json | null : null;
         this.snapshot = { refreshed_at: new Date().toISOString(), open, manager,
-          control: { database: databaseSize(this.store.db), disk: diskSpace(dirname(this.store.trajectories.root)), migration: migrationProgress(this.store) } };
+          control: { database: databaseSize(this.store.db), disk: this.disk(), migration: migrationProgress(this.store) } };
       } finally { this.refreshing = undefined; }
     })();
+  }
+
+  /** The control plane's data disk now (one statfs, cached for a few seconds). */
+  private disk(): Json | null {
+    return (this.store.disk?.check() ?? (this.store.trajectories.root ? diskState(dirname(this.store.trajectories.root)) : null)) as Json | null;
   }
 
   async api(user: Actor, method: string, path: string): Promise<Json | undefined> {
@@ -64,7 +71,8 @@ export class StorageReport {
     for (const row of this.store.all(`SELECT id,full_name FROM repositories WHERE ${visible.sql} ORDER BY full_name`, ...visible.args)) project(String(row.id), String(row.full_name));
     const allowed = (id: string) => projects.has(id) || platform && !this.store.get('SELECT 1 FROM repositories WHERE id=?', id);
     const add = (target: Record<string, any>, kind: string, value: Usage) => {
-      if (kind === 'files' || kind === 'blobs' || kind === 'open') target[kind] = value;
+      // expired: the manager's files removed after their retention window (#671).
+      if (kind === 'files' || kind === 'blobs' || kind === 'open' || kind === 'expired') target[kind] = value;
       else if (kind.startsWith('records:')) target.records[kind.slice(8)] = value;
     };
     for (const row of this.store.all('SELECT repository_id,kind,count,bytes FROM trajectory_usage ORDER BY repository_id,kind')) {
@@ -76,11 +84,15 @@ export class StorageReport {
       const id = String(row.repository_id);
       if (!allowed(id)) continue;
       const entry = project(id, null);
-      entry.manager ??= { files: { count: 0, bytes: 0 }, records: {}, open: { count: 0, bytes: 0 } };
+      entry.manager ??= { files: { count: 0, bytes: 0 }, records: {}, open: { count: 0, bytes: 0 }, expired: { count: 0, bytes: 0 } };
       add(entry.manager, String(row.kind), { count: Number(row.count), bytes: Number(row.bytes) });
     }
-    return { refreshed_at: this.snapshot?.refreshed_at ?? null, projects: [...projects.values()],
-      ...(platform ? { totals: { control: this.snapshot?.control ?? null, manager: manager ? { database: manager.database ?? null, disk: manager.disk ?? null, migration: manager.migration ?? null } : null } } : {}) };
+    if (!platform) return { refreshed_at: this.snapshot?.refreshed_at ?? null, projects: [...projects.values()] };
+    const control = this.snapshot ? { ...this.snapshot.control, disk: this.disk() } : null;
+    const alerts = ([['control', control?.disk], ['manager', manager?.disk]] as [string, any][]).filter(([, disk]) => disk?.low)
+      .map(([where, disk]) => ({ where, free_bytes: disk.free_bytes, total_bytes: disk.total_bytes, reserve_bytes: disk.reserve_bytes }));
+    return { refreshed_at: this.snapshot?.refreshed_at ?? null, projects: [...projects.values()], alerts,
+      totals: { control, manager: manager ? { database: manager.database ?? null, disk: manager.disk ?? null, migration: manager.migration ?? null, expiry: manager.expiry ?? null } : null } };
   }
 }
 
@@ -93,7 +105,3 @@ export function databaseSize(db: Store['db']): Json {
   return { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal };
 }
 
-/** Free and total space of the file system holding path, or null. */
-export function diskSpace(path: string): Json | null {
-  try { const stats = statfsSync(path); return { free_bytes: stats.bavail * stats.bsize, total_bytes: stats.blocks * stats.bsize }; } catch { return null; }
-}

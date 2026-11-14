@@ -1,6 +1,7 @@
 import type { Row, Store } from './database.js';
 import { payloadHeader, segment, type RecordType, type TrajectoryScope } from './trajectories.js';
 import { inlineLogBytes, inputBlobKeys, legacySnapshot, logData, storedInput } from './payloads.js';
+import { diskFull } from './disk.js';
 import { createHash } from 'node:crypto';
 
 // Moves payloads written before #436 out of SQLite rows into trajectory files, in the background after the control
@@ -14,8 +15,8 @@ const sha256 = (text: string) => createHash('sha256').update(text).digest('hex')
 export const migrationKey = 'trajectory_migration';
 
 export interface PhaseState { cursor: number; migrated: number; skipped: number; failed: number; bytes: number; last_error: string | null; finished_at: string | null }
-/** rate: records moved per second over the last minute. */
-export interface MigrationState { started_at: string | null; updated_at: string | null; rate: number; phases: Record<string, PhaseState> }
+/** rate: records moved per second over the last minute; paused: why it waits for disk space (#671), or null. */
+export interface MigrationState { started_at: string | null; updated_at: string | null; rate: number; paused?: 'low_disk' | 'disk_full' | null; phases: Record<string, PhaseState> }
 
 /** One row's move: the records it appended (or blobs it stored) and the update that points the row to them. */
 interface Move { refs: string[]; blobs?: string[]; bytes: number; apply: () => void }
@@ -40,7 +41,8 @@ export class PayloadMigration {
   private readonly repositories = new Map<string, string | null>();
   // Records moved per slice in the last minute: [time, records].
   private readonly recent: [number, number][] = [];
-  constructor(private readonly store: Store, private readonly options: { readMs?: number; pauseMs?: number; openFiles?: number; idleMs?: number; slowSliceMs?: number; log?: (line: string) => void; now?: () => number } = {}) {}
+  constructor(private readonly store: Store, private readonly options: { readMs?: number; pauseMs?: number; openFiles?: number; idleMs?: number; slowSliceMs?: number; lowDiskMs?: number;
+    guard?: { check(): { low: boolean } | null } | null; log?: (line: string) => void; now?: () => number } = {}) {}
 
   private get now() { return this.options.now ?? (() => performance.now()); }
   private logSlowSlice(phase: string, step: 'read' | 'verify' | 'apply', ms: number, rows: number) {
@@ -59,6 +61,14 @@ export class PayloadMigration {
 
   /** Progress for the storage page (see migrationProgress). */
   state() { return migrationProgress(this.store); }
+
+  // A slice writes the bodies once more before the rows give them up, so it waits while the disk is below its reserve or
+  // became full during the slice (#671): the rows not reached keep their payloads and move once there is space again.
+  private async waitForSpace(state: MigrationState, reason: 'low_disk' | 'disk_full') {
+    if (state.paused !== reason) { state.paused = reason; try { this.save(state); } catch {} }
+    this.closeTouched(0);
+    await this.pause(this.options.lowDiskMs ?? 60_000);
+  }
 
   private async loop() {
     const state = readState(this.store);
@@ -82,21 +92,33 @@ export class PayloadMigration {
     const next = this.store.db.prepare(`SELECT rowid AS migration_rowid,* FROM ${phase.table} WHERE rowid>? ORDER BY rowid LIMIT 1`);
     let total = 0;
     while (!this.stopped) {
+      if ((this.options.guard === undefined ? this.store.disk : this.options.guard)?.check()?.low) { await this.waitForSpace(state, 'low_disk'); continue; }
+      if (state.paused) { state.paused = null; this.save(state); }
       const started = this.now(), moves: Move[] = [];
-      let cursor = progress.cursor, skipped = 0, failed = 0, readRows = 0, error: string | null = null;
+      let cursor = progress.cursor, skipped = 0, failed = 0, readRows = 0, error: string | null = null, full = false;
       // Read at least one row, then until the slice's time is used; a single row is bounded by its own size.
       for (let read = 0; read === 0 || this.now() - started < (this.options.readMs ?? 25) && moves.length < 200; read++) {
         const row = next.get(cursor) as Row | undefined;
         if (!row) break;
         readRows++;
-        cursor = Number(row.migration_rowid);
+        const rowid = Number(row.migration_rowid);
         try { const move = phase.move(row); if (move) moves.push(move); else skipped++; }
-        catch (failure) { failed++; error = `${phase.table} rowid ${cursor}: ${String((failure as Error)?.message ?? failure).slice(0, 300)}`; }
+        catch (failure) {
+          // A full disk is not the row's fault: the slice ends before it.
+          if (diskFull(failure)) { full = true; break; }
+          failed++; error = `${phase.table} rowid ${rowid}: ${String((failure as Error)?.message ?? failure).slice(0, 300)}`;
+        }
+        cursor = rowid;
       }
       this.logSlowSlice(phase.name, 'read', this.now() - started, readRows);
-      if (cursor === progress.cursor) { progress.finished_at ??= new Date().toISOString(); this.save(state); return total; }
+      if (cursor === progress.cursor) {
+        if (full) { await this.waitForSpace(state, 'disk_full'); continue; }
+        progress.finished_at ??= new Date().toISOString(); this.save(state); return total;
+      }
       // The files reach the disk before any row stops holding its payload; each record is read back against its hash.
-      await Promise.all([...new Set(moves.map(move => move.refs.at(-1)!).filter(Boolean))].map(ref => this.store.trajectories.sync(ref)));
+      // Lines written before a failed sync are never referenced: the rows keep their payloads.
+      try { await Promise.all([...new Set(moves.map(move => move.refs.at(-1)!).filter(Boolean))].map(ref => this.store.trajectories.sync(ref))); }
+      catch (failure) { if (!diskFull(failure)) throw failure; await this.waitForSpace(state, 'disk_full'); continue; }
       const verifyStarted = this.now();
       const verified = moves.filter(move => {
         try { for (const ref of move.refs) this.store.trajectories.read(ref); for (const blob of move.blobs ?? []) this.store.trajectories.getBlob(blob); return true; }
@@ -108,15 +130,23 @@ export class PayloadMigration {
       while (this.recent.length && this.recent[0]![0] < now - 60_000) this.recent.shift();
       state.rate = Math.round(this.recent.reduce((sum, [, count]) => sum + count, 0) / Math.max(1, (now - this.recent[0]![0]) / 1000));
       const applyStarted = this.now();
-      this.store.transaction(() => {
-        for (const move of verified) move.apply();
-        Object.assign(progress, { cursor, migrated: progress.migrated + verified.length, skipped: progress.skipped + skipped, failed: progress.failed + failed,
-          bytes: progress.bytes + verified.reduce((sum, move) => sum + move.bytes, 0), last_error: error ?? progress.last_error, finished_at: null });
-        this.save(state);
-      });
+      try {
+        this.store.transaction(() => {
+          for (const move of verified) move.apply();
+          Object.assign(progress, { cursor, migrated: progress.migrated + verified.length, skipped: progress.skipped + skipped, failed: progress.failed + failed,
+            bytes: progress.bytes + verified.reduce((sum, move) => sum + move.bytes, 0), last_error: error ?? progress.last_error, finished_at: null });
+          this.save(state);
+        });
+      } catch (failure) {
+        if (!diskFull(failure)) throw failure;
+        // The progress in memory moved with the rolled back slice; the saved one did not.
+        Object.assign(progress, readState(this.store).phases[phase.name] ?? { cursor: 0, migrated: 0, skipped: 0, failed: 0, bytes: 0, last_error: null, finished_at: null });
+        await this.waitForSpace(state, 'disk_full'); continue;
+      }
       this.logSlowSlice(phase.name, 'apply', this.now() - applyStarted, verified.length);
       total += verified.length;
       this.closeTouched(this.options.openFiles ?? 32);
+      if (full) { await this.waitForSpace(state, 'disk_full'); continue; }
       // Leave at least as much time to everything else as this slice took.
       await this.pause(Math.max(this.options.pauseMs ?? 10, this.now() - started));
     }

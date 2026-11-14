@@ -3,7 +3,7 @@ import { type Store, type Row } from '../storage/database.js';
 import { type Manager } from '../projects/service.js';
 import { GitHub, repositoryTree } from '../github/client.js';
 import { blobSha, executionBaseline, clip, describeEntries, operationId, Redactor, safePath, stop, treeSha } from './common.js';
-import { randomId } from '../core/security.js';
+import { HttpError, randomId } from '../core/security.js';
 import { eventHistory, historyOrder } from '../roles/role-run.js';
 import { type Mirror } from './git-cache.js';
 import { open, rm } from 'node:fs/promises';
@@ -62,7 +62,14 @@ export class Workspace {
     const operations=inFlight.get(this.task.id)??new Map<string,any>();inFlight.set(this.task.id,operations);
     operations.delete(id);operations.set(id,input.request);
     try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
-    catch{return stop('execution_interrupted','waiting_environment',`Runner request interrupted: ${request.type}${request.path?' '+request.path:''}`);}
+    catch(error){
+      const code=error instanceof HttpError?error.code:null,what=`${request.type}${request.path?' '+request.path:''}`;
+      // The manager's data disk is full: wait for space (#671). A repeated call whose stored result the manager removed
+      // after its retention window cannot be answered: a new attempt runs with new operation ids.
+      if(code==='disk_full')return stop('disk_full','waiting_environment',`manager 的数据盘空间不足，调用未完成：${what}`);
+      if(code==='operation_result_expired')return stop('operation_result_expired','waiting_environment',`manager 中这次调用的结果已过保留期被删除：${what}`);
+      return stop('execution_interrupted','waiting_environment',`Runner request interrupted: ${what}`);
+    }
     finally{operations.delete(id);if(!operations.size&&inFlight.get(this.task.id)===operations)inFlight.delete(this.task.id);}
     let result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed',...(response.detail?{detail:response.detail}:{})});
     if(request.type==='workspace_command'&&scope)result=await commandResult(result,id,async offset=>this.manager.call('GET',`/v1/projects/${this.task.repository_id}/output/${id}?offset=${offset}`),

@@ -1,7 +1,8 @@
 import { closeSync, existsSync, fdatasync, close as closeAsync, ftruncateSync, mkdirSync, openSync, readSync, writeSync } from 'node:fs';
-import { open as openAsync } from 'node:fs/promises';
+import { open as openAsync, rm } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { dirname, join, resolve, sep } from 'node:path';
+import { diskFull } from './disk.mjs';
 
 // The manager's trajectory files: the input and result of every runner call it records, appended to JSONL files under
 // its data volume, one per project and task workspace (lifecycle calls without one share the project's file). The
@@ -31,6 +32,12 @@ export function trajectoryStorage(db) {
     CREATE INDEX IF NOT EXISTS trajectory_files_repository ON trajectory_files(repository_id,created_at);
     CREATE TABLE IF NOT EXISTS trajectory_usage(repository_id TEXT NOT NULL,kind TEXT NOT NULL,count INTEGER NOT NULL DEFAULT 0,
       bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(repository_id,kind));`);
+  // #671: expired_at: the file's records no longer resolve, refs to it read as expired; deleted_at: the file is gone from
+  // disk. The partial indexes hold the files that may expire and the expired ones whose file is still to be removed.
+  const columns = new Set(db.prepare('PRAGMA table_info(trajectory_files)').all().map(row => row.name));
+  for (const column of ['expired_at', 'deleted_at']) if (!columns.has(column)) db.exec(`ALTER TABLE trajectory_files ADD COLUMN ${column} TEXT`);
+  db.exec(`CREATE INDEX IF NOT EXISTS trajectory_files_expiry ON trajectory_files(closed_at,id) WHERE expired_at IS NULL AND closed_at IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS trajectory_files_removal ON trajectory_files(expired_at) WHERE expired_at IS NOT NULL AND deleted_at IS NULL;`);
 }
 
 export class Trajectories {
@@ -150,12 +157,15 @@ export class Trajectories {
   pathOf(file) {
     const known = this.paths.get(file);
     if (known) return known;
-    const row = this.db.prepare('SELECT path FROM trajectory_files WHERE id=?').get(file);
+    const row = this.db.prepare('SELECT path,expired_at FROM trajectory_files WHERE id=?').get(file);
     if (!row) throw new TrajectoryError('trajectory_missing', file);
+    if (row.expired_at) throw new TrajectoryError('trajectory_expired', `${row.path}: removed after its retention window (${row.expired_at})`);
     if (this.paths.size > 10_000) this.paths.clear();
     this.paths.set(file, row.path);
     return row.path;
   }
+  /** Drops a file from the path cache once it expired, so the next read sees its entry. */
+  forget(file) { this.paths.delete(file); }
   closeIdle() {
     const before = Date.now() - this.idleMs;
     for (const handle of [...this.open.values()]) if (handle.used < before) { try { this.finish(handle); } catch (error) { console.error('[manager] closing a trajectory file failed:', error); } }
@@ -194,25 +204,42 @@ export class LedgerMigration {
     state.started_at ??= new Date().toISOString();
     const progress = state.phases.operations ??= { cursor: 0, migrated: 0, skipped: 0, failed: 0, bytes: 0, last_error: null, finished_at: null };
     const next = this.db.prepare('SELECT rowid AS migration_rowid,* FROM operations WHERE rowid>? ORDER BY rowid LIMIT 1');
+    // A slice writes the bodies once more before the rows give them up, so it waits while the disk is below its reserve
+    // (#671) or became full during the slice: the rows not reached keep their bodies and move once there is space again.
+    const wait = async reason => {
+      if (state.paused !== reason) { state.paused = reason; try { this.save(state); } catch {} }
+      this.closeTouched(0);
+      await this.pause(this.options.lowDiskMs ?? 60_000);
+    };
     try {
       while (!this.stopped) {
+        if (this.options.guard?.check()?.low) { await wait('low_disk'); continue; }
+        if (state.paused) { state.paused = null; this.save(state); }
         const started = performance.now(), moves = [];
-        let cursor = progress.cursor, skipped = 0, failed = 0, error = null;
+        let cursor = progress.cursor, skipped = 0, failed = 0, error = null, full = false;
         for (let read = 0; read === 0 || performance.now() - started < (this.options.readMs ?? 25) && moves.length < 200; read++) {
           const row = next.get(cursor);
           if (!row) break;
-          cursor = Number(row.migration_rowid);
+          const rowid = Number(row.migration_rowid);
           try { const move = this.move(row); if (move) moves.push(move); else skipped++; }
-          catch (failure) { failed++; error = `operations rowid ${cursor}: ${String(failure?.message ?? failure).slice(0, 300)}`; }
+          catch (failure) {
+            // A full disk is not the row's fault: the slice ends before it.
+            if (diskFull(failure)) { full = true; break; }
+            failed++; error = `operations rowid ${rowid}: ${String(failure?.message ?? failure).slice(0, 300)}`;
+          }
+          cursor = rowid;
         }
         if (cursor === progress.cursor) {
+          if (full) { await wait('disk_full'); continue; }
           if (!progress.finished_at) { progress.finished_at = new Date().toISOString(); this.save(state); }
           this.closeTouched(0);
           // Calls finished since (their rows were running when passed) are picked up on the next look.
           await this.pause(this.options.idleMs ?? 10 * 60_000);
           continue;
         }
-        await Promise.all([...new Set(moves.map(move => move.refs.at(-1)))].map(ref => this.trajectories.sync(ref)));
+        // Lines written before a failed sync are never referenced: the rows keep their bodies.
+        try { await Promise.all([...new Set(moves.map(move => move.refs.at(-1)))].map(ref => this.trajectories.sync(ref))); }
+        catch (failure) { if (!diskFull(failure)) throw failure; await wait('disk_full'); continue; }
         const verified = moves.filter(move => { try { for (const ref of move.refs) this.trajectories.read(ref); return true; } catch (failure) { failed++; error = String(failure.message).slice(0, 300); return false; } });
         const now = Date.now();
         this.recent.push([now, verified.length]); while (this.recent[0][0] < now - 60_000) this.recent.shift();
@@ -224,8 +251,15 @@ export class LedgerMigration {
             bytes: progress.bytes + verified.reduce((sum, move) => sum + move.bytes, 0), last_error: error ?? progress.last_error, finished_at: null });
           this.save(state);
           this.db.exec('COMMIT');
-        } catch (failure) { this.db.exec('ROLLBACK'); throw failure; }
+        } catch (failure) {
+          if (this.db.isTransaction) this.db.exec('ROLLBACK');
+          if (!diskFull(failure)) throw failure;
+          // The cursor in memory moved with the rolled back slice; the saved one did not.
+          Object.assign(progress, this.state().phases.operations ?? { cursor: 0 });
+          await wait('disk_full'); continue;
+        }
         this.closeTouched(this.options.openFiles ?? 32);
+        if (full) { await wait('disk_full'); continue; }
         await this.pause(Math.max(this.options.pauseMs ?? 10, performance.now() - started));
       }
     } finally { this.closeTouched(0); }
@@ -245,6 +279,114 @@ export class LedgerMigration {
     this.db.prepare("INSERT INTO settings VALUES('trajectory_migration',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(state));
   }
   closeTouched(keep) { while (this.touched.size > keep) { const [key] = this.touched.keys(); this.touched.delete(key); this.trajectories.close(key); } }
+}
+
+const day = 24 * 3600_000;
+/** How long a closed file of runner calls is kept unless the settings say otherwise (#671). */
+export const defaultRetentionDays = 2;
+
+/**
+ * Removes the manager's copies of runner-call bodies once nothing replays them (#671). The manager reads a stored result
+ * only to answer a call repeated with the same operation id, which happens while the calling task runs (the runner's
+ * journal also covers the first day), and the control plane keeps the same request and result in its own trajectories
+ * (task_tools). A file goes once its entry closed longer ago than the window (settings payload_retention, default 2
+ * days) and it holds the input of no call still running: one short transaction marks the entry expired, so a ref to it
+ * reads as expired from then on (a repeated call is answered operation_result_expired, never with another result), and
+ * moves its bytes in trajectory_usage from files and records to 'expired'; then the file is removed off the event loop
+ * and the entry marked deleted. Ledger rows stay as they are, with their header, hash and refs: finding the rows of a
+ * file would scan the ledger, its entry is one row. Files are walked in closed_at order in bounded batches with pauses;
+ * a pass runs after the start and every hour, and first removes the files a stopped pass had marked.
+ */
+export class TrajectoryExpiry {
+  constructor(db, trajectories, options = {}) { this.db = db; this.trajectories = trajectories; this.options = options; this.stopped = false; }
+  start() { this.running ??= this.loop().catch(error => console.error('[manager] trajectory expiry stopped:', error)); }
+  async stop() { this.stopped = true; this.wake?.(); await this.running; }
+  // The pause between batches holds the process like the pass awaiting it; the hour between passes does not.
+  pause(ms, hold = false) {
+    if (this.stopped) return Promise.resolve();
+    return new Promise(resolve => { const timer = setTimeout(done, ms); if (!hold) timer.unref?.(); function done() { clearTimeout(timer); resolve(); } this.wake = done; });
+  }
+  /** The retention window in whole days. */
+  windowDays() {
+    let days; try { days = JSON.parse(this.db.prepare("SELECT value FROM settings WHERE key='payload_retention'").get()?.value ?? 'null')?.days; } catch {}
+    return Number.isSafeInteger(days) && days >= 1 ? days : defaultRetentionDays;
+  }
+  /** For the storage page: the window and the last pass; the totals removed are in trajectory_usage kind 'expired'. */
+  state() {
+    let saved = null; try { saved = JSON.parse(this.db.prepare("SELECT value FROM settings WHERE key='trajectory_expiry'").get()?.value ?? 'null'); } catch {}
+    return { window_days: this.windowDays(), last_pass: saved?.last_pass ?? null, last_error: saved?.last_error ?? null };
+  }
+  save(value) {
+    const { last_pass, last_error } = { ...this.state(), ...value };
+    this.db.prepare("INSERT INTO settings VALUES('trajectory_expiry',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ last_pass, last_error }));
+  }
+  async loop() {
+    while (!this.stopped) {
+      try { await this.pass(); }
+      catch (error) {
+        console.error('[manager] trajectory expiry pass failed:', error);
+        try { this.save({ last_error: String(error?.message ?? error).slice(0, 300) }); } catch {}
+      }
+      await this.pause(this.options.idleMs ?? 3600_000);
+    }
+  }
+  /** One pass over the files closed before the window; returns what it removed. */
+  async pass() {
+    const started = new Date().toISOString(), removed = { files: 0, bytes: 0 };
+    await this.removeMarked();
+    const before = new Date((this.options.now?.() ?? Date.now()) - this.windowDays() * day).toISOString();
+    const next = this.db.prepare(`SELECT id,repository_id,path,bytes,counts,closed_at FROM trajectory_files
+      WHERE expired_at IS NULL AND closed_at IS NOT NULL AND closed_at<? AND (closed_at,id)>(?,?) ORDER BY closed_at,id LIMIT ?`);
+    const running = this.db.prepare("SELECT input_ref FROM operations WHERE state='running' AND input_ref IS NOT NULL");
+    let after = ['', ''];
+    while (!this.stopped) {
+      const began = performance.now(), batch = next.all(before, ...after, this.options.batch ?? 20);
+      if (!batch.length) break;
+      after = [batch.at(-1).closed_at, batch.at(-1).id];
+      // A file with the input of a call still running stays (its result may still be written elsewhere); the calls
+      // running now are few and held in the partial index operations_running. A closed file never gets new lines.
+      const busy = new Set(running.all().map(row => String(row.input_ref).slice(0, 16)));
+      const expiring = batch.filter(file => !busy.has(file.id) && !this.trajectories.handles.has(file.id));
+      this.mark(expiring);
+      await this.remove(expiring);
+      removed.files += expiring.length; removed.bytes += expiring.reduce((sum, file) => sum + Number(file.bytes ?? 0), 0);
+      await this.pause(Math.max(this.options.pauseMs ?? 50, performance.now() - began), true);
+    }
+    this.save({ last_pass: { started_at: started, finished_at: new Date().toISOString(), ...removed }, last_error: null });
+    return removed;
+  }
+  mark(files) {
+    if (!files.length) return;
+    const now = new Date().toISOString(), expire = this.db.prepare('UPDATE trajectory_files SET expired_at=? WHERE id=? AND expired_at IS NULL');
+    const add = this.db.prepare(`INSERT INTO trajectory_usage(repository_id,kind,count,bytes) VALUES(?,?,?,?)
+      ON CONFLICT(repository_id,kind) DO UPDATE SET count=count+excluded.count,bytes=bytes+excluded.bytes`);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const file of files) {
+        if (!expire.run(now, file.id).changes) continue;
+        const repository = file.repository_id ?? '', bytes = Number(file.bytes ?? 0);
+        add.run(repository, 'files', -1, -bytes); add.run(repository, 'expired', 1, bytes);
+        let counts = {}; try { counts = JSON.parse(file.counts || '{}'); } catch {}
+        for (const [type, value] of Object.entries(counts)) if (Array.isArray(value)) add.run(repository, 'records:' + type, -value[0], -value[1]);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) { if (this.db.isTransaction) this.db.exec('ROLLBACK'); throw error; }
+    for (const file of files) this.trajectories.forget(file.id);
+  }
+  /** Removes the files of marked entries, oldest first, and records that they are gone. */
+  async remove(files) {
+    const done = this.db.prepare('UPDATE trajectory_files SET deleted_at=? WHERE id=?');
+    for (const file of files) {
+      const path = resolve(this.trajectories.root, file.path);
+      if (!path.startsWith(this.trajectories.root + sep)) throw new TrajectoryError('trajectory_ref_invalid', file.path);
+      await rm(path, { force: true });
+      done.run(new Date().toISOString(), file.id);
+    }
+  }
+  async removeMarked() {
+    const marked = this.db.prepare('SELECT id,path FROM trajectory_files WHERE expired_at IS NOT NULL AND deleted_at IS NULL ORDER BY expired_at LIMIT 100');
+    for (let batch = marked.all(); batch.length && !this.stopped; batch = marked.all()) await this.remove(batch);
+  }
 }
 
 /** What a ledger row keeps of a call's input once its body is in a file: the call's identity and type. */
