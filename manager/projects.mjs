@@ -83,6 +83,8 @@ export class Projects {
     this.egress = egress; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
     // pruned: when each computer's journal was last pruned; pruning: computers with a prune running now.
     this.pruned = new Map(); this.pruning = new Set();
+    // scanning: the work volume scan running now (one computer at a time); dockerUsageAt: when Docker's usage was read.
+    this.scanning = null; this.dockerUsageAt = 0;
     mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(database); this.docker = docker; this.deployment = deployment; this.image = image;
     this.notesRoot = dirname(database) + '/project-notes';
@@ -116,6 +118,8 @@ export class Projects {
     // applied: the resources the current container was created with, so a changed default shows as pending.
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'applied')) this.db.exec('ALTER TABLE projects ADD COLUMN applied TEXT');
     this.db.exec('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
+    // The last answer of each computer's work volume scan (#671): written by scanStorage, read by the storage page.
+    this.db.exec('CREATE TABLE IF NOT EXISTS computer_storage(repository_id TEXT PRIMARY KEY,generation INTEGER NOT NULL,scanned_at TEXT NOT NULL,result TEXT NOT NULL)');
     // Before the defaults could change, a saved spec held all four resources. Values equal to the built-in defaults are
     // dropped once, so those projects follow the global default from then on; any other value stays the project's own.
     if (!this.db.prepare("SELECT 1 FROM settings WHERE key='own_resources'").get()) {
@@ -382,6 +386,50 @@ export class Projects {
         error => logFailure(`project ${repo} journal prune failed`, error))
       .finally(() => this.pruning.delete(repo));
   }
+  // Measures a running computer's work volume for the storage page (#671): every six hours, one computer at a time so the
+  // scans never compete for the disk, in the background and outside the project lock (it only reads). The runner's answer
+  // is kept per project; a computer reset to a new generation is scanned again at once.
+  scanStorage(now = Date.now()) {
+    if (this.scanning) return;
+    const last = new Map(this.db.prepare('SELECT repository_id,generation,scanned_at FROM computer_storage').all().map(row => [row.repository_id, row]));
+    const due = this.list().filter(p => ['ready', 'busy'].includes(p.state)).find(p => last.get(p.repository_id)?.generation !== p.generation
+      || now - Date.parse(last.get(p.repository_id).scanned_at) >= (this.scanIntervalMs ?? 6 * 3600_000));
+    if (!due) return;
+    const repo = due.repository_id, generation = due.generation;
+    this.scanning = repo;
+    void this.docker.runner(this.names(repo, generation).container, { operation_id: randomId(), type: 'storage_scan' }, 0)
+      .then(answer => {
+        // A failed scan is retried at the next interval, like a successful one, rather than every few seconds.
+        const result = answer?.ok ? answer.result : { scanned_at: new Date().toISOString(), error: answer?.error || 'storage_scan_failed' };
+        if (!answer?.ok) logFailure(`project ${repo} storage scan failed`, answer?.error || 'no detail');
+        this.db.prepare(`INSERT INTO computer_storage VALUES(?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET generation=excluded.generation,
+          scanned_at=excluded.scanned_at,result=excluded.result`).run(repo, generation, new Date().toISOString(), JSON.stringify(result));
+      }, error => {
+        logFailure(`project ${repo} storage scan failed`, error);
+        this.db.prepare(`INSERT INTO computer_storage VALUES(?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET generation=excluded.generation,
+          scanned_at=excluded.scanned_at,result=excluded.result`).run(repo, generation, new Date().toISOString(), JSON.stringify({ error: error instanceof ManagerError ? error.message : 'storage_scan_failed' }));
+      })
+      .finally(() => { this.scanning = null; });
+  }
+  // What Docker keeps on the host for images and the build cache (#671), read every half hour in the background: the
+  // storage page shows it with what can be reclaimed. Docker sizes volumes only on request, which can take long, so only
+  // images and the build cache are asked for; the computers' volumes are measured by their own scans.
+  async readDockerUsage(now = Date.now()) {
+    if (now - this.dockerUsageAt < 30 * 60_000) return;
+    this.dockerUsageAt = now;
+    try {
+      const df = await this.docker.request('GET', '/system/df?type=image&type=build-cache');
+      const images = Array.isArray(df?.Images) ? df.Images : [], cache = Array.isArray(df?.BuildCache) ? df.BuildCache : [];
+      const sum = rows => rows.reduce((total, row) => total + Math.max(0, Number(row.Size) || 0), 0);
+      // An image no container uses can be removed; its layers shared with images in use stay, so that part is not counted.
+      const unused = images.filter(image => image.Containers === 0);
+      const usage = { read_at: new Date(now).toISOString(),
+        images: { count: images.length, bytes: Number(df?.LayersSize) || sum(images), unused_count: unused.length,
+          reclaimable_bytes: unused.reduce((total, image) => total + Math.max(0, (Number(image.Size) || 0) - Math.max(0, Number(image.SharedSize) || 0)), 0) },
+        build_cache: { count: cache.length, bytes: sum(cache), reclaimable_bytes: sum(cache.filter(row => !row.InUse && !row.Shared)) } };
+      this.db.prepare("INSERT INTO settings VALUES('docker_usage',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(usage));
+    } catch (error) { logFailure('reading Docker disk usage failed', error); }
+  }
   // The approved image, or one derived from it with the project's system packages. Built once per package set and base image,
   // and only by the manager: apt runs as root at build time, nothing inside the computer needs root.
   async resolveImage(repo, spec) {
@@ -647,6 +695,7 @@ export class Projects {
   // Liveness check of idle computers only: one with runner calls in flight is skipped rather than queued behind them.
   async check() {
     for (const row of this.list()) if (['ready', 'busy'].includes(row.state)) this.prune(row.repository_id);
+    this.scanStorage(); void this.readDockerUsage();
     await Promise.all(this.list().filter(p => p.state === 'ready' && !this.gates.has(p.repository_id)).map(row => this.lock(row.repository_id, async () => {
       const current = this.get(row.repository_id); if (current.state !== 'ready') return;
       try {
@@ -670,8 +719,11 @@ export class Projects {
       const entry = open.get(row.repository_id) ?? { repository_id: row.repository_id, kind: 'open', count: 0, bytes: 0 }; entry.count++; entry.bytes += bytes; open.set(row.repository_id, entry);
     }
     let wal = 0; try { wal = statSync(data + '/manager.sqlite-wal').size; } catch {}
+    // The last scan of each computer's work volume and Docker's images and build cache, as the background work left them.
+    const computers = this.db.prepare('SELECT repository_id,generation,scanned_at,result FROM computer_storage').all().map(row => ({ ...row, result: JSON.parse(row.result) }));
+    const docker = JSON.parse(this.db.prepare("SELECT value FROM settings WHERE key='docker_usage'").get()?.value ?? 'null');
     return { usage: [...usage, ...open.values()], database: { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal },
-      disk: this.disk.check(), migration: this.migration.state(), expiry: this.expiry.state() };
+      disk: this.disk.check(), migration: this.migration.state(), expiry: this.expiry.state(), computers, docker };
   }
   async shutdown() {
     await this.migration.stop(); await this.expiry.stop(); await Promise.all([...this.pending]); for (const row of this.list()) await this.stopAll(row.repository_id);

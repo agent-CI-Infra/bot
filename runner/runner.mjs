@@ -8,6 +8,7 @@ import { ownership, operationOwnership, isRunner, tasksRoot } from './ownership.
 import { pruneJournal } from './journal.mjs';
 import { storeOperation, pruneStore } from './store.mjs';
 import { listTaskDirectories, removeTaskDirectories } from './task-dirs.mjs';
+import { storageScan } from './storage-scan.mjs';
 import {local,workspaceRoot,assistant} from './paths.mjs';
 import { assistantFile } from './assistant-files.mjs';
 
@@ -125,11 +126,12 @@ let result;
 if (request.type === 'journal_clear' && assistant) {
   try { for (const name of await readdir(journal)) await rm(`${journal}/${name}`, { force: true }); result = { ok: true, result: { cleared: true } }; }
   catch { result = { ok: false, error: 'journal_clear_failed' }; }
-} else if (['tail', 'reap', 'reap_operation', 'usage', 'prune', 'tasks_list', 'tasks_remove'].includes(request.type)) {
-  // Reading progress or usage, stopping leftovers, removing old journal records and listing or removing task directories
-  // are repeatable and never journaled.
+} else if (['tail', 'reap', 'reap_operation', 'usage', 'storage_scan', 'prune', 'tasks_list', 'tasks_remove'].includes(request.type)) {
+  // Reading progress or usage, measuring the work volume, stopping leftovers, removing old journal records and listing or
+  // removing task directories are repeatable and never journaled.
   try {
-    result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : request.type === 'prune' ? { journal: await pruneJournal(journal), store: await pruneStore() }
+    result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : request.type === 'storage_scan' ? await storageScan(workspace)
+      : request.type === 'prune' ? { journal: await pruneJournal(journal), store: await pruneStore() }
       : request.type === 'tasks_list' ? await listTaskDirectories() : request.type === 'tasks_remove' ? await removeTaskDirectories(request.entries)
       : request.type === 'reap_operation' ? await reapOperation(request.target_operation_id) : await reap(request) };
   }

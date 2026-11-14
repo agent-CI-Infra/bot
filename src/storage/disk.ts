@@ -9,13 +9,14 @@ const GiB = 1024 ** 3;
 export const reserveBytes = (total: number) => Math.min(Math.floor(total * 0.05), 50 * GiB);
 export const floorBytes = (total: number) => Math.min(Math.floor(total * 0.01), GiB);
 
-export interface DiskState { free_bytes: number; total_bytes: number; reserve_bytes: number; floor_bytes: number; low: boolean; full: boolean }
+export interface DiskState { free_bytes: number; total_bytes: number; used_bytes: number; reserve_bytes: number; floor_bytes: number; low: boolean; full: boolean }
 
 /** Free and total bytes of the file system holding path, with its reserve and floor; null when it cannot be read. */
 export function diskState(path: string): DiskState | null {
   try {
     const stats = statfsSync(path), free = stats.bavail * stats.bsize, total = stats.blocks * stats.bsize, reserve = reserveBytes(total), floor = floorBytes(total);
-    return { free_bytes: free, total_bytes: total, reserve_bytes: reserve, floor_bytes: floor, low: free < reserve, full: free < floor };
+    // used: blocks in use, without the blocks reserved for root that free_bytes (what a process can still write) leaves out.
+    return { free_bytes: free, total_bytes: total, used_bytes: (stats.blocks - stats.bfree) * stats.bsize, reserve_bytes: reserve, floor_bytes: floor, low: free < reserve, full: free < floor };
   } catch { return null; }
 }
 

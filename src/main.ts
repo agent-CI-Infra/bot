@@ -76,7 +76,7 @@ const releases = new ReleaseService(store, process.env.BOT_GITHUB_API_URL); rele
 const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_URL); actionsFailures.start();
 // Logs a blocked event loop with the requests in flight, and slow requests (see core/stalls.ts).
 const stalls = new StallMonitor(); stalls.start();
-const migration = new PayloadMigration(store), storage = new StorageReport(store, manager);
+const migration = new PayloadMigration(store), storage = new StorageReport(store, manager, { git_cache: gitCache.root, public_boards: resolve(dirname(databasePath), 'public-boards') });
 const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, gateOnboarding, releases, boards,
   imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls, storage,

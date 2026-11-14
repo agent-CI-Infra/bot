@@ -40,15 +40,17 @@ const settingsCards = {
       catch (err) { if (request === renderVersion) status.textContent = err.message; } finally { save.disabled = false; }
     }); section.append(form); return [section];
   },
-  // Storage (#436): what each project keeps in trajectory files, records and blobs, read from counters kept when files
-  // close and a background snapshot; platform administrators also see the databases, the disk and the migration, the
-  // removal of the manager's copies and an alert for a disk below its reserve (#671).
+  // Storage (#436, #671): what each project keeps in trajectory files, records and blobs and on its project computer, read
+  // from counters kept when files close and a background snapshot; platform administrators also see the data disk with
+  // everything known on it and "other", what can be reclaimed, the databases, the migration, the removal of the manager's
+  // copies and an alert for a disk below its reserve.
   async storage() {
     const view = await api('/api/storage'), size = value => Number.isFinite(value) ? bytes(value) : '未知', count = value => Number.isFinite(value) ? value.toLocaleString('zh-CN') : '未知';
     const expiry = state => !state ? '读不到' : `保留 ${state.window_days} 天；` + (state.last_pass ? `最近一次 ${new Date(state.last_pass.finished_at).toLocaleString('zh-CN')} 删除 ${count(state.last_pass.files)} 个文件（${size(state.last_pass.bytes)}）` : '尚未运行')
       + (state.last_error ? `；最近一个错误：${state.last_error}` : '');
+    const time = value => value ? new Date(value).toLocaleString('zh-CN') : '—', row = (table, cells) => { const tr = document.createElement('tr'); for (const text of cells) tr.append(element('td', text)); table.body.append(tr); };
     const cards = [], intro = card('存储');
-    intro.append(note(`轨迹文件按运行保存模型请求、工具调用和大日志的正文，数据库只留状态和定位。数字来自文件关闭时累加的计数，每 5 分钟在后台刷新一次；最近刷新：${view.refreshed_at ? new Date(view.refreshed_at).toLocaleString('zh-CN') : '尚未刷新'}。`));
+    intro.append(note(`轨迹文件按运行保存模型请求、工具调用和大日志的正文，数据库只留状态和定位。数字来自文件关闭时累加的计数和后台快照，每 5 分钟刷新一次；项目电脑的卷每 6 小时在后台扫描一次，git 缓存和公开看板每小时测一次。打开页面不遍历文件。最近刷新：${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`));
     cards.push(intro);
     // A data disk below its reserve (#671): background writes pause, and tasks wait once the disk is all but full.
     if (view.alerts?.length) {
@@ -56,8 +58,29 @@ const settingsCards = {
       for (const item of view.alerts) alert.append(element('p', `${item.where === 'manager' ? 'manager' : '控制面'}所在磁盘只剩 ${size(item.free_bytes)}（共 ${size(item.total_bytes)}），低于保留空间 ${size(item.reserve_bytes)}：后台迁移已暂停；剩余空间再少时任务会停在「等待环境」（disk_full），有空间后自动继续。请清理磁盘。`, 'view-error'));
       cards.push(alert);
     }
+    if (view.host) {
+      const host = card('数据盘'), disk = view.host.disk, known = view.host.known ?? {};
+      host.append(facts([['总量', size(disk?.total_bytes)], ['已用', size(view.host.used_bytes)], ['剩余', size(disk?.free_bytes)], ['保留空间', size(disk?.reserve_bytes)]]));
+      const table = costTable(['占用', '大小']);
+      for (const [key, label] of [['control_database', '控制面数据库 control.sqlite（含 WAL）'], ['control_trajectories', '控制面轨迹文件与 blob'], ['git_cache', 'git 缓存 git-cache'], ['public_boards', '公开看板 public-boards'],
+        ['manager_database', 'manager 账本 manager.sqlite（含 WAL）'], ['manager_trajectories', 'manager 轨迹文件'], ['computers', '项目电脑工作卷'], ['docker_images', 'Docker 镜像'], ['docker_build_cache', 'Docker 构建缓存']])
+        row(table, [label, known[key] === null || known[key] === undefined ? '尚未测量' : size(known[key]) + ((view.host.unmeasured ?? []).includes(key) ? '（部分电脑未扫完）' : '')]);
+      row(table, ['其他（已用 − 以上合计）', size(view.host.other_bytes) + ((view.host.unmeasured ?? []).length ? '（含尚未测量的项）' : '')]);
+      host.append(table.wrap, note('控制面、manager、项目电脑的卷和 Docker 数据在同一块数据盘上；「其他」包括助手电脑的 HOME、系统和不归 bot 管理的目录，只显示、不清理。'));
+      cards.push(host);
+      const reclaim = card('可回收与最近清理'), list = costTable(['类别', '可回收', '怎么回收']);
+      const how = { control_free_pages: ['control.sqlite 空闲页', '压缩数据库（维护时执行）'], manager_free_pages: ['manager.sqlite 空闲页', '压缩数据库（维护时执行）'],
+        expiring_workspaces: ['待删除的任务工作区', '后台按任务工作区保留规则到期删除'], docker_build_cache: ['Docker 构建缓存（未使用）', '在主机上执行 docker builder prune'],
+        docker_unused_images: ['没有容器使用的 Docker 镜像', '在主机上确认后执行 docker image prune'] };
+      for (const item of view.reclaimable ?? []) row(list, [how[item.key]?.[0] ?? item.key, item.bytes === null ? '尚未测量' : size(item.bytes) + (Number.isFinite(item.count) ? `（${count(item.count)} 个）` : ''), how[item.key]?.[1] ?? '']);
+      reclaim.append(list.wrap);
+      const freed = { manager_expiry: ['最近一次 manager 重复正文清理', item => `${time(item.at)} 删除 ${count(item.count)} 个（${size(item.bytes)}）`],
+        workspace_cleanup: ['任务工作区清理（各项目最近一次之和）', item => `删除 ${count(item.count)} 个（${size(item.bytes)}），最近一次在 ${time(item.at)}`] };
+      reclaim.append(facts((view.freed ?? []).map(item => [freed[item.key]?.[0] ?? item.key, item.at ? (freed[item.key]?.[1] ?? (() => size(item.bytes)))(item) : '尚未运行'])));
+      cards.push(reclaim);
+    }
     if (view.totals) {
-      const totals = card('数据库与磁盘'), side = value => value ? `${size(value.bytes)}，空闲页 ${count(value.free_pages)}（${size(value.free_bytes)}）` : '读不到';
+      const totals = card('数据库与磁盘'), side = value => value ? `文件 ${size(value.bytes)}：实际数据 ${size(value.bytes - value.free_bytes)}，空闲页 ${count(value.free_pages)}（${size(value.free_bytes)}）；WAL ${size(value.wal_bytes)}` : '读不到';
       totals.append(facts([['控制面数据库 control.sqlite', side(view.totals.control?.database)], ['manager 账本 manager.sqlite', side(view.totals.manager?.database)],
         ['控制面所在磁盘剩余', view.totals.control?.disk ? `${size(view.totals.control.disk.free_bytes)} / ${size(view.totals.control.disk.total_bytes)}` : '读不到'],
         ['manager 所在磁盘剩余', view.totals.manager?.disk ? `${size(view.totals.manager.disk.free_bytes)} / ${size(view.totals.manager.disk.total_bytes)}` : '读不到'],
@@ -92,6 +115,24 @@ const settingsCards = {
     }
     projects.append(view.projects.length ? table.wrap : note('还没有项目的轨迹数据。'));
     cards.push(projects);
+    // Each project computer's work volume, from its last background scan.
+    const computers = card('项目电脑'), volumes = costTable(['项目', '卷合计', '运行中的工作区', '为 PR 保留', '待删除', 'runner journal', 'git 存储', 'HOME 缓存', '其他', '扫描时间']);
+    volumes.wrap.classList.add('storage-projects');
+    const share = value => value ? `${count(value.count)} 个 · ${size(value.bytes)}` : '—', top = entries => (entries ?? []).slice(0, 3).map(entry => `${entry.name} ${size(entry.bytes)}`).join('、');
+    const scanned = view.projects.filter(project => project.computer);
+    for (const project of scanned) {
+      const c = project.computer;
+      if (c.error) { row(volumes, [project.name || project.repository_id, `扫描失败：${c.error}`, '', '', '', '', '', '', '', time(c.scanned_at)]); continue; }
+      // A scan lists the 5000 largest task directories; the classes then cover only those.
+      const classified = ['active', 'pull_request', 'expiring'].reduce((total, key) => total + (c.workspaces?.[key]?.count ?? 0), 0), capped = c.task_count > classified;
+      row(volumes, [project.name || project.repository_id, size(c.total_bytes) + (c.complete === false ? '（未扫完）' : '') + (capped ? `（共 ${count(c.task_count)} 个工作区，${size(c.tasks_bytes)}；分类只含最大的 ${count(classified)} 个）` : ''),
+        share(c.workspaces?.active), share(c.workspaces?.pull_request), share(c.workspaces?.expiring),
+        size(c.journal_bytes), size(c.store_bytes), size(c.home_bytes) + (top(c.home_entries) ? `（${top(c.home_entries)}）` : ''),
+        size((c.other_bytes ?? 0) + (c.tmp_bytes ?? 0) + (c.notes_bytes ?? 0)) + (top(c.other_entries) ? `（${top(c.other_entries)}）` : ''), time(c.scanned_at)]);
+    }
+    computers.append(scanned.length ? volumes.wrap : note('还没有项目电脑的扫描结果：电脑运行后会在后台扫描。'));
+    computers.append(note('任务工作区按保留规则分类：运行中（任务未结束或有后续任务）、为 PR 保留（对应的 PR 仍打开）、待删除（已结束，到期后由后台清理删除）。「其他」含 /workspace/tmp、项目笔记和卷根目录下的其他文件。'));
+    cards.push(computers);
     return cards;
   },
   async feishu(request) {
