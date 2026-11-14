@@ -53,23 +53,35 @@ async function unstartedProject(id, err) {
   actions.append(consoleLink('#/settings/projects', '全局设置 · 项目', '启动、隐藏和公开看板'));
   box.append(actions); return box;
 }
-// #614: a project address this account cannot open. A project administrator gets repository_forbidden whether or not the
-// project exists (#595), so the page never says which one it is; the raw status and code stay under 详细信息 for support.
+// #614: a project address this account cannot open. A project administrator gets 403 repository_forbidden whether or not
+// the project exists (#595), so that state never says which one it is. Only a super administrator is answered 404
+// repository_not_found, for a repository that is not registered; for that account the project simply does not exist.
+// An expired session (401 login_required) asks to sign in again instead of blaming the network.
+// The raw status and code stay under 详细信息 for support.
 function projectUnavailableKind(err) {
-  return [403, 404].includes(err.status) || ['repository_forbidden', 'repository_not_found'].includes(err.code) ? 'forbidden' : 'failed';
+  if (err.status === 403 || err.code === 'repository_forbidden') return 'forbidden';
+  if (err.status === 404 || err.code === 'repository_not_found') return 'missing';
+  if (err.status === 401 || err.code === 'login_required') return 'login';
+  return 'failed';
 }
+const projectUnavailableCopy = {
+  forbidden: ['没有权限打开这个项目', '当前账号看不到这个项目。若你觉得自己应该有权限，可到身份与权限里核对组织范围，或联系管理员。'],
+  missing: ['找不到这个项目', '这个地址对应的项目不存在或还没有登记，链接可能已过期或输入有误。'],
+  login: ['登录已过期', '当前登录已失效，请重新登录后再打开这个项目。'],
+  failed: ['暂时打不开这个项目', '读取项目时出错，可能是网络或服务暂时不可用。请稍后重试，或先回到项目列表。']
+};
 function projectUnavailable(err, route) {
-  const forbidden = projectUnavailableKind(err) === 'forbidden';
-  const box = consoleState(forbidden ? '没有权限打开这个项目' : '暂时打不开这个项目',
-    forbidden ? '当前账号看不到这个项目。若你觉得自己应该有权限，可到身份与权限里核对组织范围，或联系管理员。'
-      : '读取项目时出错，可能是网络或服务暂时不可用。请稍后重试，或先回到项目列表。', { tone: 'error' });
-  box.classList.add('project-unavailable'); box.dataset.projectUnavailable = forbidden ? 'forbidden' : 'failed';
+  const kind = projectUnavailableKind(err), [title, text] = projectUnavailableCopy[kind];
+  const box = consoleState(title, text, { tone: 'error' });
+  box.classList.add('project-unavailable'); box.dataset.projectUnavailable = kind;
   const actions = element('div', '', 'actions console-state-actions'), back = element('a', '返回项目列表', 'button-link btn-primary');
   back.href = '#/projects';
-  if (forbidden) {
+  if (kind === 'forbidden') {
     const identity = element('a', '查看身份与权限', 'button-link btn-secondary'); identity.href = '#/identity';
     actions.append(back, identity);
-  } else actions.append(button('重试', () => renderProject(route).catch(error), 'btn-primary'), Object.assign(back, { className: 'button-link btn-secondary' }));
+  } else if (kind === 'missing') actions.append(back);
+  else if (kind === 'login') actions.append(button('重新登录', () => location.reload(), 'btn-primary'));
+  else actions.append(button('重试', () => renderProject(route).catch(error), 'btn-primary'), Object.assign(back, { className: 'button-link btn-secondary' }));
   const details = element('details', '', 'console-state-details');
   details.append(element('summary', '详细信息'), element('code', err.message));
   box.append(actions, details); return box;
