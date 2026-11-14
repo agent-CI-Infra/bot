@@ -1,8 +1,9 @@
+import { actionStatuses } from './task-states.js';
 // These are task states, not RoleRun counts or claims about environment/CI health.
 export const taskGroupSQL = {
   active: "status IN ('running','preparing','implementing','validating','publishing','result_ready')",
   queued: "status='queued'",
-  attention: "status IN ('failed','paused','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','needs_replan','needs_help')",
+  attention: `status IN ${actionStatuses}`,
 };
 // Count the whole queue, not the paginated task list. Waiting/configuration faults are not executing tasks.
 export const projectActivityColumns = `COALESCE(activity.running_tasks,0) AS running_tasks,COALESCE(activity.queued_tasks,0) AS queued_tasks`;

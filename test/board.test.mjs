@@ -38,7 +38,9 @@ test('each workflow retains its stage when another workflow has a newer success 
   boardTask(h.store,'retry-fail',53,'review.issue','failed');boardTask(h.store,'retry-success',53,'review.issue','succeeded',{time:'2026-10-02T12:00:00.000Z'});
   const cards=(await admin('/api/board/cards')).value.cards;
   assert.ok(cards.filter(c=>c.object_number>=10&&c.object_number<20&&c.card_category==='development.issue').every(c=>c.bot_stage==='developing'));
-  assert.ok(cards.filter(c=>c.object_number>=30&&c.object_number<36).every(c=>c.bot_stage==='attention'));
+  // #655: a stop the bot makes by itself leaves the card 未检视, and a retry the bot will resume is not a person's work.
+  assert.deepEqual(Object.fromEntries(cards.filter(c=>c.object_number>=30&&c.object_number<36).map(c=>[c.object_number,c.bot_stage])),
+    {30:'attention',31:'unreviewed',32:'attention',33:'attention',34:'attention',35:'reviewing'});
   const card=(number,category)=>cards.find(c=>c.object_number===number&&c.card_category===category);
   assert.equal(card(50,'review.issue').bot_stage,'reviewed');assert.equal(card(50,'development.issue').bot_stage,'attention');
   assert.equal(card(51,'review.issue').bot_stage,'attention');assert.equal(card(51,'development.issue').bot_stage,'developed');
@@ -310,14 +312,15 @@ test('task update triggers skip JSON projection on status/lease/updated_at chang
 // "what needs me" must count the same tasks.
 test('object closed or draft cancel keeps the card out of 需要处理 and the three surfaces count the same tasks',async t=>{
   const {h,admin}=await fixture(t);
-  const closed={issue:{state:'closed'}},drafted={pr:{draft:true}};
+  const closed={issue:{state:'closed'}},drafted={pull_request:{draft:true}};
   boardTask(h.store,'reviewed-then-closed',1,'review.issue','succeeded',{time:'2026-10-01T10:00:00.000Z'});
   boardTask(h.store,'stop-closed',1,'review.issue','cancelled',{time:'2026-10-02T10:00:00.000Z',input:closed,errorCode:'object_closed_or_draft'});
   boardTask(h.store,'pr-reviewed',2,'review.pr','succeeded',{time:'2026-10-01T10:00:00.000Z'});
   boardTask(h.store,'stop-draft',2,'review.pr','cancelled',{time:'2026-10-02T10:00:00.000Z',input:drafted,errorCode:'object_closed_or_draft'});
   boardTask(h.store,'never-reviewed',3,'review.issue','cancelled',{time:'2026-10-02T10:00:00.000Z',input:closed,errorCode:'object_closed_or_draft'});
   boardTask(h.store,'real-failure',4,'review.issue','failed',{time:'2026-10-02T10:00:00.000Z'});
-  const result=(await admin('/api/board/cards')).value;
+  const shownFilters=encodeURIComponent(JSON.stringify([{field:'include_closed',value:true}]));
+  const result=(await admin('/api/board/cards?filters='+shownFilters)).value;
   const card=(number,category)=>result.cards.find(c=>c.object_number===number&&c.card_category===category);
   // The card keeps the state the last real task reached instead of asking for a person who is not needed.
   assert.equal(card(1,'review.issue').bot_stage,'reviewed');
