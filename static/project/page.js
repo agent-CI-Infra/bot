@@ -14,9 +14,15 @@ async function renderProject(route) {
   try { await loadProject(route.id,route.section); } catch (err) {
     if (token === renderToken) { if ([401,403].includes(err.status)) { if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles(); if (current?.id === route.id) current.rolesDraft = null; }
       const unstarted = await unstartedProject(route.id, err);
-      if (token === renderToken) page.replaceChildren(unstarted || element('p', err.message, 'view-error')); }
+      if (token === renderToken) {
+        // #614: the scope bar must stop saying 正在读取项目… once the read has failed, whatever the reason.
+        if (current?.id === route.id) current.unavailable = unstarted ? null : projectUnavailableKind(err);
+        page.replaceChildren(unstarted || projectUnavailable(err, route));
+        if (typeof syncConsoleShell === 'function') syncConsoleShell();
+      } }
     return; }
   if (token !== renderToken) return;
+  current.unavailable = null;
   const section = projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin')) ? route.section : 'basic';
   // A newly granted or externally created project may not be in the list loaded at login.
   if (!repositories.some(repo => String(repo.id) === String(current.id))) repositories.push(current.repository);
@@ -46,6 +52,27 @@ async function unstartedProject(id, err) {
   if (row.installed) actions.append(button('启动', () => openActivation(row, () => route()).catch(error)));
   actions.append(consoleLink('#/settings/projects', '全局设置 · 项目', '启动、隐藏和公开看板'));
   box.append(actions); return box;
+}
+// #614: a project address this account cannot open. A project administrator gets repository_forbidden whether or not the
+// project exists (#595), so the page never says which one it is; the raw status and code stay under 详细信息 for support.
+function projectUnavailableKind(err) {
+  return [403, 404].includes(err.status) || ['repository_forbidden', 'repository_not_found'].includes(err.code) ? 'forbidden' : 'failed';
+}
+function projectUnavailable(err, route) {
+  const forbidden = projectUnavailableKind(err) === 'forbidden';
+  const box = consoleState(forbidden ? '没有权限打开这个项目' : '暂时打不开这个项目',
+    forbidden ? '当前账号看不到这个项目。若你觉得自己应该有权限，可到身份与权限里核对组织范围，或联系管理员。'
+      : '读取项目时出错，可能是网络或服务暂时不可用。请稍后重试，或先回到项目列表。', { tone: 'error' });
+  box.classList.add('project-unavailable'); box.dataset.projectUnavailable = forbidden ? 'forbidden' : 'failed';
+  const actions = element('div', '', 'actions console-state-actions'), back = element('a', '返回项目列表', 'button-link btn-primary');
+  back.href = '#/projects';
+  if (forbidden) {
+    const identity = element('a', '查看身份与权限', 'button-link btn-secondary'); identity.href = '#/identity';
+    actions.append(back, identity);
+  } else actions.append(button('重试', () => renderProject(route).catch(error), 'btn-primary'), Object.assign(back, { className: 'button-link btn-secondary' }));
+  const details = element('details', '', 'console-state-details');
+  details.append(element('summary', '详细信息'), element('code', err.message));
+  box.append(actions, details); return box;
 }
 async function loadProject(id,section=current.section) {
   const superUser = me.role === 'super_admin';
