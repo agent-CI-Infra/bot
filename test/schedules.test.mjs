@@ -27,10 +27,12 @@ async function command(f, operation, args, client = f.admin, key = randomId()) {
   return client('/api/management/commands', 'POST', { operation, target, arguments: args, expected_revision: revision,
     idempotency_key: key, source_conversation: 'schedule-fixture', source_message: key });
 }
-async function fixture(t) {
+async function fixture(t, timeOfDay) {
   let now = Date.now(), worker;
   const f = await channelFixture(t, { schedules: { clock: () => now, automatic: false }, onSchedules: s => { worker = s; } });
   now = Date.now();
+  // Daily quota tests must keep their successive occurrences in the same UTC day.
+  if (timeOfDay !== undefined) now = Math.floor(now / 86400000) * 86400000 + timeOfDay;
   f.worker = worker; f.advance = ms => { now += ms; }; f.now = () => now;
   f.actor = () => resolveActor(f.h.store, f.admin.cookie().split('=')[1], { project_id: '101' });
   f.destination = await registerDestination(f.admin, await privateChat(f));
@@ -258,7 +260,7 @@ test('429 backs off, attempts remain durable, retry budget dead-letters and rate
   row = f.h.store.get('SELECT * FROM notification_outbox'); assert.equal(row.state, 'dead'); assert.equal(row.attempts, 2);
 });
 test('plan/project/tenant budgets and runtime limits stop new actions, retries do not reset usage', async t => {
-  const f = await fixture(t); await f.create(f.plan({ limits: { ...defaultLimits, runs: 1 } })); f.advance(60000); await f.worker.tick();
+  const f = await fixture(t, 12 * 3600000); await f.create(f.plan({ limits: { ...defaultLimits, runs: 1 } })); f.advance(60000); await f.worker.tick();
   f.advance(60000); await f.worker.tick(); const rows = f.h.store.all('SELECT state,reason FROM schedule_occurrences ORDER BY logical_at');
   assert.equal(rows[0].state, 'succeeded'); assert.equal(rows[1].state, 'budget_exhausted');
   assert.equal(f.h.store.get("SELECT runs FROM schedule_usage WHERE scope='schedule'").runs, 1);
@@ -341,7 +343,7 @@ test('controlled workflow contract dispatches a fake business handler once, pres
   assert.equal(f.h.store.get('SELECT state FROM schedule_business_runs WHERE occurrence_id=?', pending.id).state, 'succeeded');
 });
 test('project and tenant limits bound all plans; concurrency claims, installation revocation and authorization remain live', async t => {
-  const f = await fixture(t); const a = await f.create(), b = await f.create();
+  const f = await fixture(t, 12 * 3600000); const a = await f.create(), b = await f.create();
   f.h.store.run("INSERT INTO schedule_budgets VALUES('project','101','report',?)", JSON.stringify({ ...defaultLimits, concurrency: 1, runs: 1 }));
   f.advance(60000); f.worker.produce(); const first = f.worker.claimOccurrence(); assert.ok(first); assert.equal(f.worker.claimOccurrence(), null);
   f.worker.dispatch(first); const second = f.worker.claimOccurrence(); assert.ok(second); f.worker.dispatch(second);
