@@ -53,6 +53,6 @@ function grantSummary(user) {
   return '手工分配 · ' + [organizations.length ? '整个组织：' + organizations.join('、') : '', repos.length ? '仓库：' + repos.join('、') : ''].filter(Boolean).join(' · ');
 }
 function editGrants(user) {
-  editingUser = user; editorKind = 'users'; $('editor-note').hidden = true; $('editor-title').textContent = `修改 ${userLabel(user)} 的仓库权限`;
+  editingUser = user; editorKind = 'users'; $('editor-note').hidden = true; $('editor-title').textContent = `修改 ${userDisplayName(user)} 的仓库权限`;
   $('editor-fields').replaceChildren(grantField(user)); $('editor-error').textContent = ''; $('editor').showModal();
 }
