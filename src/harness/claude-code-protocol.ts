@@ -44,7 +44,7 @@ export function claudeMessage(v: any): any {
       // Raw observations already live at the broker, with original request, exit status and candidate version.
       if (c.type === 'tool_result' && typeof c.tool_use_id === 'string') return [{ type: 'tool_result', id: c.tool_use_id, is_error: c.is_error === true }];
       if (['thinking', 'redacted_thinking'].includes(c.type)) return [];
-      return incompatible();
+      return [{ type: 'unknown_block', block_type: typeof c.type === 'string' ? c.type : 'unknown' }];
     });
     return { type: v.type, session_id: v.session_id, id: v.message.id, content, usage: v.type === 'assistant' ? wireUsage(v.message.usage) : null, error: v.error ? fault(v) : null };
   }
@@ -57,8 +57,8 @@ export function claudeMessage(v: any): any {
     return { type: v.type, request_id: v.request_id, subtype: v.request.subtype };
   }
   if (v.type === 'control_response' || v.type === 'rate_limit_event') return { type: 'ignored' };
-  // Partial messages are deliberately not requested. A changed wire protocol fails closed.
-  return incompatible();
+  // Unknown vendor event types are logged as anomalies by the session driver rather than aborting the run (#705).
+  return { type: 'unknown_event', event_type: v.type };
 }
 
 /** Fatal UTF-8, bounded lines and total stream; Buffer splits may fall inside a multibyte code point. */

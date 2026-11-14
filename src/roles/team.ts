@@ -131,7 +131,7 @@ if(value.contract_revision!==records.get(task.id).revision)return stop('role_nom
     if((error as any)?.code!=='lease_epoch_stale')s.run("UPDATE role_assignments SET status='failed' WHERE id=? AND status='running'",assignment);traceEvent(s,task.id,'role_assignment_fault',{assignment_id:assignment,role,code:(error as any).code??'runtime_fault'},task.trace_run_id,'framework');throw error;}
   }finally{await context?.();}
  }};
- const result=(await runRole(managerSpec,controller,undefined,undefined,{prepare:environment.controller})).result;
+ const result=(await runRole(managerSpec,controller,undefined,undefined,{prepare:async(i,r)=>await environment.isolated?.(i,r)??await environment.controller?.(i,r)})).result;
  const dispositionResult=(result as any)?.manager_disposition;if(dispositionResult)return stop(dispositionResult.action==='needs_help'?'manager_needs_help':'manager_deferred',dispositionResult.action==='needs_help'?'needs_help':'retry_wait',JSON.stringify(dispositionResult),dispositionResult.delay_seconds*1000);
  return result;
 }

@@ -29,9 +29,9 @@ export function isolatedRunEnvironment(workspace:Workspace,given?:RunEnvironment
    const seeded=await copyCommit({call:request=>workspace.deliver(request)},client,id,snapshot.local_sha,snapshot.tree_sha);
    traceEvent(workspace.store,workspace.task.id,'role_candidate',{role:instance.role,version:seeded.tree_hash,sha:seeded.commit_sha,workspace_id:id,environment:'run:'+id},workspace.task.trace_run_id);
   }catch(error){await env.release();throw error;}
-  // Only a writer's environment produces a candidate snapshot; an observer's build output never becomes one.
-  const snapshot=kind==='writer'?async()=>{const s=await client.call(id,{type:'workspace_finalize'});return s?.tree_sha&&s?.local_sha?{tree_sha:s.tree_sha,local_sha:s.local_sha}:null;}:undefined;
-  return {environment:{facts:env.facts,handle:{client,run_id:id},...(snapshot?{snapshot}:{})},release:env.release};
+  // Only a writer's environment produces a candidate snapshot; copy its commit back to the task workspace before release.
+  const snapshot=kind==='writer'?async()=>{const s=await client.call(id,{type:'workspace_finalize'});if(!s?.tree_sha||!s?.local_sha)return null;await copyCommit({call:request=>client.call(id,request)},{call:(_run:string,request:Record<string,unknown>)=>workspace.deliver(request)} as any,String(workspace.task.workspace_id),s.local_sha,s.tree_sha);return {tree_sha:s.tree_sha,local_sha:s.local_sha};}:undefined;
+  return {environment:{facts:env.facts,handle:{client,run_id:id},...(snapshot?{snapshot}:{})},containerOptions:{manager:workspace.manager,egress:false},release:env.release};
  };
 }
 async function observerSnapshot(workspace:Workspace) {
@@ -45,18 +45,24 @@ async function observerSnapshot(workspace:Workspace) {
 }
 /** One writer; observers get disposable checkouts bound to the writer's snapshot. */
 export function roleWorkspaces(workspace:Workspace){const context=new AsyncLocalStorage<{space:Workspace;role:string;run_id?:string;observer?:{local_sha:string;tree_sha:string}}>();let fallback=workspace;const setActive=(space:Workspace)=>{const current=context.getStore();if(current)current.space=space;else fallback=space;};return {get runId(){return context.getStore()?.run_id??workspace.task.trace_run_id;},bindRun:(id:string)=>{const current=context.getStore();if(current)current.run_id=id;},get current(){return context.getStore()?.space??fallback;},get role(){return context.getStore()?.role??workspace.task.active_role;},withObservers:async<R>(work:()=>Promise<R>)=>{const observer=await observerSnapshot(workspace);return context.run({space:workspace,role:'manager',observer},work);},withRole:<R>(role:string,work:()=>Promise<R>)=>context.run({space:workspace,role,observer:context.getStore()?.observer},work),snapshot:async()=>workspace.artifact('role-output:'+randomId()),async prepare(role:string){setActive(workspace);const snapshot=role==='dev'?await workspace.artifact('role-source:'+randomId()):(context.getStore()?.observer??await observerSnapshot(workspace));if(role==='dev'){traceEvent(workspace.store,workspace.task.id,'role_candidate',{role,version:snapshot.tree_sha,sha:snapshot.local_sha,workspace_id:workspace.task.workspace_id},workspace.task.trace_run_id);return;}const isolated=new Workspace(workspace.store,workspace.manager,{...workspace.task,workspace_id:randomId()},workspace.redactor,workspace.guard,workspace.log);const ready=await isolated.call('role-checkout:'+randomId(),{type:'workspace_acceptance',source_workspace_id:workspace.task.workspace_id,sha:snapshot.local_sha,tree_sha:snapshot.tree_sha});if(ready.error)stop('role_snapshot_unavailable','waiting_environment');traceEvent(workspace.store,workspace.task.id,'role_candidate',{role,version:snapshot.tree_sha,sha:snapshot.local_sha,workspace_id:isolated.task.workspace_id},workspace.task.trace_run_id);setActive(isolated);return async()=>{setActive(workspace);await isolated.release(false);};},
- controller:roleBackendWorkspace(workspace),worker:roleBackendWorkspace(workspace),isolated:isolatedRunEnvironment(workspace)};}
+ controller:roleBackendWorkspace(workspace),worker:roleBackendWorkspace(()=>context.getStore()?.space??fallback),isolated:isolatedRunEnvironment(workspace)};}
 
 /** The runner's view of a Pi session in one workspace; null when that workspace or session no longer exists. */
 async function piState(space:Workspace){try{const state=await space.call('pi:probe:'+randomId(),{type:'workspace_agent_poll',offset:0});return state.error?null:state;}catch{return null;}}
 const report=(space:Workspace,instance:Row,expected:string,recovery:string)=>(runtime:any)=>traceEvent(space.store,space.task.id,'harness_started',{harness:'pi',package:runtime.package,version:runtime.version,expected_version:expected,node:runtime.node,instance_id:instance.id,role:instance.role,workspace_id:space.task.workspace_id,recovery},space.task.trace_run_id);
+const computerEgress=(environment:any)=>typeof environment?.computer?.egress==='boolean'?environment.computer.egress:environment?.computer?.network_policy==='internet egress';
 /**
- * A Pi backend session lives in a separate empty workspace. Every role tool is forwarded to its existing control-plane
- * callback, so writer/observer/QA tools still address the correct task or fixed-candidate workspace. Selecting Pi never
- * gives a role a broader local tool profile. QA and coordination always rebuild from their supplied durable facts.
+ * A Pi backend session lives in a separate empty workspace; `claude_code` and `codex` run directly inside the active
+ * task/candidate checkout (`<task_dir>/repo`) with in-container model relay and stdio MCP platform tools (#705).
  */
-export function roleBackendWorkspace(workspace:Workspace):NonNullable<RoleRunOptions['prepare']>{
+export function roleBackendWorkspace(workspaceOrGetter:Workspace|(()=>Workspace)):NonNullable<RoleRunOptions['prepare']>{
  return async(instance,resolved)=>{
+  const workspace=typeof workspaceOrGetter==='function'?workspaceOrGetter():workspaceOrGetter;
+  if(['claude_code','codex'].includes(resolved.snapshot.harness.id)){
+   let egress=false;
+   try{const env=await workspace.manager.call('GET','/v1/projects/'+workspace.task.repository_id);egress=computerEgress(env);}catch{}
+   return {roleWorkspace:workspace,containerOptions:{manager:workspace.manager,egress}};
+  }
   if(resolved.snapshot.harness.id!=='pi')return;
   const {store,task}=workspace,runtime=instance.runtime?JSON.parse(instance.runtime):null;
   const last=store.get('SELECT status FROM task_runs WHERE role_instance_id=? ORDER BY rowid DESC LIMIT 1',instance.id);

@@ -25,6 +25,12 @@ export class ReadTokens {
     if (Object.keys(github.permissions).some(key => !(key in permissions))) return stop('github_read_token_not_read_only', undefined, 'GitHub 返回了超出运行观察范围的令牌权限，已拒绝交付。');
     return github;
   }
+  async issueContents() {
+    const permissions = { contents: 'read', metadata: 'read' };
+    const github = await this.connect(permissions, false);
+    if (Object.keys(github.permissions).some(key => !(key in permissions))) return stop('github_read_token_not_read_only', undefined, 'GitHub 返回了超出仓库内容读取范围的令牌权限，已拒绝交付。');
+    return { token: github.token, expires_at: github.expiresAt, permissions: github.permissions, repository: github.fullName };
+  }
   private async connect(required?: Record<string, string>, identifyActor = true) {
     if (this.issued >= 10) stop('github_read_token_limit', undefined, '当前任务已达到 GitHub 只读令牌的 10 次签发上限。');
     // A bot account has one long-lived token that can write; only a GitHub App can mint a narrower one.

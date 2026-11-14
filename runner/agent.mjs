@@ -1,7 +1,8 @@
-import {mkdir,readdir,readFile,writeFile,rename,open,stat,unlink} from 'node:fs/promises';
+import {mkdir,readdir,readFile,writeFile,rename,open,stat,unlink,appendFile,rm} from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import {spawn} from 'node:child_process';
 import {environment,workspaceTag} from './command.mjs';
-import {runnerRoot} from './paths.mjs';
+import {local,runnerRoot} from './paths.mjs';
 import {volume} from './disk.mjs';
 
 async function currentRequestFile(path){
@@ -55,7 +56,20 @@ async function readModelRequestsForPoll(agentDir){
 // that exact agent; an explicit task release still reaps everything.
 export async function waitingAgent(root,processes){
   const state=await readFile(root+'/agent/state.json','utf8').then(JSON.parse).catch(()=>null);
-  return state?.state==='running'&&processes.some(p=>p.pid===state.pid&&p.cmdline==='node '+runnerRoot+'/pi-entry.mjs '+root)?state.pid:null;
+  if(state?.state==='running'&&processes.some(p=>p.pid===state.pid&&p.cmdline==='node '+runnerRoot+'/pi-entry.mjs '+root))return state.pid;
+  const harness=await readFile(root+'/agent/harness-state.json','utf8').then(JSON.parse).catch(()=>null);
+  if(harness?.state==='running'&&processes.some(p=>p.pid===harness.pid&&p.cmdline.includes(runnerRoot+'/harness-entry.mjs '+root))){
+    const spared=new Set([harness.pid]);
+    for(const p of processes)if(p.pgid===harness.pid)spared.add(p.pid);
+    for(let added=true;added;){
+      added=false;
+      for(const p of processes){
+        if(!spared.has(p.pid)&&spared.has(p.ppid)){spared.add(p.pid);added=true;}
+      }
+    }
+    return [...spared];
+  }
+  return null;
 }
 
 // The project has no path to the control network. A task-owned mailbox transports model data, never provider keys.
@@ -214,6 +228,123 @@ export async function agentOperation(input,root){
     try{if((await file.stat()).size!==input.offset)throw new Error('agent_reply_offset');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
     if(input.final)await rename(path,prefix+'.json');
     return {written:true};
+  }
+  if(input.type==='workspace_harness_config'){
+    if(typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_harness_config');
+    const path=dir+'/harness.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
+    try{if((await file.stat()).size!==input.offset)throw new Error('harness_config_offset');const bytes=Buffer.from(input.base64,'base64');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
+    if(input.final){
+      const parsed=JSON.parse(await readFile(path,'utf8'));
+      const mcpTools=Array.isArray(parsed.mcp_tools)?parsed.mcp_tools:[];
+      delete parsed.mcp_tools;
+      await Promise.all([
+        unlink(dir+'/harness-state.json').catch(()=>{}),
+        unlink(dir+'/harness-stdout.bin').catch(()=>{}),
+        unlink(dir+'/harness-stdin.jsonl').catch(()=>{}),
+        unlink(dir+'/harness-interrupt.json').catch(()=>{}),
+        rm(dir+'/tool-requests',{recursive:true,force:true}),
+        rm(dir+'/tool-replies',{recursive:true,force:true}),
+        rm(dir+'/model-requests',{recursive:true,force:true}),
+        rm(dir+'/model-replies',{recursive:true,force:true}),
+        rm(dir+'/token-requests',{recursive:true,force:true}),
+        rm(dir+'/token-replies',{recursive:true,force:true}),
+      ]);
+      await writeFile(dir+'/mcp-tools.json.tmp',JSON.stringify(mcpTools),{mode:0o600});
+      await rename(dir+'/mcp-tools.json.tmp',dir+'/mcp-tools.json');
+      await writeFile(path,JSON.stringify(parsed),{mode:0o600});
+      await rename(path,dir+'/harness.json');
+    }
+    return {written:true};
+  }
+  if(input.type==='workspace_harness_start'){
+    const old=await readFile(dir+'/harness-state.json','utf8').then(JSON.parse).catch(()=>null);
+    if(old?.state==='running'&&old.pid){
+      try{if(old.boot!==boot&&old.boot!=='local')throw new Error();process.kill(old.pid,0);return {started:true,...old};}catch{}
+    }
+    JSON.parse(await readFile(dir+'/harness.json','utf8'));
+    await mkdir(root+'/repo',{recursive:true});
+    const out=await open(dir+'/harness-process.log','a',0o600);
+    let childPid;
+    try{
+      const extraLocalEnv=local?{
+        ...(process.env.BOT_AGENT_TOOLS_DIR?{BOT_AGENT_TOOLS_DIR:process.env.BOT_AGENT_TOOLS_DIR}:{}),
+        ...(process.env.BOT_REAL_GH_BIN?{BOT_REAL_GH_BIN:process.env.BOT_REAL_GH_BIN}:{}),
+      }:{};
+      const child=spawn(process.execPath,[runnerRoot+'/harness-entry.mjs',root],{
+        cwd:root+'/repo',
+        env:{...environment,...workspaceTag(input.workspace_id),...extraLocalEnv},
+        detached:true,
+        stdio:['ignore',out.fd,out.fd],
+      });
+      childPid=child.pid;
+      await writeFile(dir+'/harness-state.json',JSON.stringify({state:'starting',pid:child.pid,boot}),{mode:0o600});
+      child.unref();
+    }finally{await out.close();}
+    for(const end=Date.now()+15000;Date.now()<end;){
+      const cur=await readFile(dir+'/harness-state.json','utf8').then(JSON.parse).catch(()=>null);
+      if(cur&&cur.state!=='starting')return {started:true,...cur};
+      try{process.kill(childPid,0);}catch{
+        const finalState=await readFile(dir+'/harness-state.json','utf8').then(JSON.parse).catch(()=>null);
+        return {started:false,...(finalState||{state:'failed',error:'harness_exited_during_startup'})};
+      }
+      await delay(25);
+    }
+    const last=await readFile(dir+'/harness-state.json','utf8').then(JSON.parse).catch(()=>({state:'starting',pid:childPid}));
+    return {started:true,...last};
+  }
+  if(input.type==='workspace_harness_stdin'){
+    const hasBytes=typeof input.base64==='string'&&input.base64.length>0;
+    if(input.base64!==undefined&&(typeof input.base64!=='string'||input.base64.length>65536))throw new Error('invalid_harness_stdin');
+    let lines='';
+    if(hasBytes)lines+=JSON.stringify({chunk_base64:input.base64})+'\n';
+    if(input.final===true)lines+=JSON.stringify({close:true})+'\n';
+    if(lines)await appendFile(dir+'/harness-stdin.jsonl',lines,{mode:0o600});
+    return {written:true};
+  }
+  if(input.type==='workspace_harness_poll'){
+    const state=await readFile(dir+'/harness-state.json','utf8').then(JSON.parse).catch(()=>({state:'missing'}));
+    if(['starting','running'].includes(state.state)&&state.pid){
+      try{if(state.boot&&state.boot!=='local'&&state.boot!==boot)throw new Error();process.kill(state.pid,0);}
+      catch{
+        const reread=await readFile(dir+'/harness-state.json','utf8').then(JSON.parse).catch(()=>null);
+        if(reread&&!['starting','running'].includes(reread.state))Object.assign(state,reread);
+        else state.state='interrupted';
+      }
+    }
+    if(state.state==='interrupted'&&!state.error&&volume()?.full)state.error='disk_full';
+    const offset=Number.isSafeInteger(input.offset)&&input.offset>=0?input.offset:0;
+    let stdout_base64='',next_offset=offset,stdout_size=0;
+    const stdoutHandle=await open(dir+'/harness-stdout.bin','r').catch(()=>null);
+    if(stdoutHandle){
+      try{
+        stdout_size=(await stdoutHandle.stat()).size;
+        const readLen=Math.max(0,Math.min(65536,stdout_size-offset));
+        if(readLen>0){
+          const buf=Buffer.alloc(readLen);
+          const {bytesRead}=await stdoutHandle.read(buf,0,readLen,offset);
+          stdout_base64=buf.subarray(0,bytesRead).toString('base64');
+          next_offset=offset+bytesRead;
+        }
+      }finally{await stdoutHandle.close();}
+    }
+    const token_requests=await readRequestDirectory(dir+'/token-requests');
+    const tool_requests=await readRequestDirectory(dir+'/tool-requests');
+    const model_requests=await readModelRequestsForPoll(dir);
+    return {...state,stdout_base64,next_offset,stdout_size,has_more:next_offset<stdout_size,token_requests,tool_requests,model_requests};
+  }
+  if(input.type==='workspace_harness_interrupt'){
+    const mode=input.mode==='kill'?'kill':'graceful';
+    const grace_ms=Number.isSafeInteger(input.grace_ms)&&input.grace_ms>0?input.grace_ms:undefined;
+    await writeFile(dir+'/harness-interrupt.json.tmp',JSON.stringify({mode,...(grace_ms?{grace_ms}:{}),at:Date.now()}),{mode:0o600});
+    await rename(dir+'/harness-interrupt.json.tmp',dir+'/harness-interrupt.json');
+    const state=await readFile(dir+'/harness-state.json','utf8').then(JSON.parse).catch(()=>null);
+    if(mode==='kill'&&state){
+      if(state.cli_pid)try{process.kill(state.cli_pid,'SIGKILL');}catch{}
+      if(state.pid)try{process.kill(-state.pid,'SIGKILL');}catch{try{process.kill(state.pid,'SIGKILL');}catch{}}
+      await writeFile(dir+'/harness-state.json.tmp',JSON.stringify({...state,state:'interrupted'}),{mode:0o600});
+      await rename(dir+'/harness-state.json.tmp',dir+'/harness-state.json');
+    }
+    return {interrupted:true,mode};
   }
   throw new Error('unknown_agent_operation');
 }

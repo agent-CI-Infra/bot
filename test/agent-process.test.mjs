@@ -586,6 +586,14 @@ test('the runner mailbox waits for publication replies and preserves only the ex
   assert.equal(await waitingAgent(root, [{ pid: 123, cmdline: 'another process' }]), null);
   writeFileSync(join(dir, 'state.json'), JSON.stringify({ state: 'completed', pid: 123 }));
   assert.equal(await waitingAgent(root, processes), null);
+  writeFileSync(join(dir, 'harness-state.json'), JSON.stringify({ state: 'running', pid: 200 }));
+  const harnessProcs = [
+    { pid: 200, ppid: 1, pgid: 200, cmdline: 'node /opt/runner/harness-entry.mjs ' + root },
+    { pid: 201, ppid: 200, pgid: 200, cmdline: '/opt/agent-tools/codex/0.166.0/bin/codex app-server' },
+    { pid: 202, ppid: 201, pgid: 202, cmdline: 'node /opt/runner/mcp-bridge.mjs' },
+    { pid: 300, ppid: 1, pgid: 300, cmdline: 'sh -c leftover' },
+  ];
+  assert.deepEqual(await waitingAgent(root, harnessProcs), [200, 201, 202]);
 });
 
 for(const outcome of ['return','insufficient_evidence'])test('independent acceptance '+outcome+' feeds back to the same development agent and completes after repair',async t=>{

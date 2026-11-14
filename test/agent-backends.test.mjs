@@ -60,7 +60,7 @@ test('new roles default to Pi; general backends preserve role authority and Clau
   const f = await fixture(t, () => call('finish', {}));
   const config = f.put({ roles: [{ role_id: 'security' }] });
   assert.ok(config.roles.every(r => r.harness_ref.id === 'pi'));
-  for (const backend of ['native', 'process', 'acp', 'pi']) {
+  for (const backend of ['native', 'process', 'pi']) {
     const saved = f.put({ roles: config.roles.map(r => ({ role_id: r.role_id, harness_ref: { id: backend } })) });
     assert.ok(saved.roles.every(r => r.harness_ref.id === backend));
     assert.equal(saved.roles.find(r => r.role_id === 'manager').permissions.delegation, 'allow');
@@ -69,18 +69,20 @@ test('new roles default to Pi; general backends preserve role authority and Clau
   const claude = f.view().backends.find(b => b.id === 'claude_code');
   assert.equal(claude.available, true);
   assert.deepEqual(claude.kinds, ['writer', 'observer', 'evaluator']);
+  assert.deepEqual(claude.supported_model_sources, ['gateway', 'subscription']);
+  assert.ok(claude.runtime_status && typeof claude.runtime_status.compatible_range === 'string');
   const saved = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' } }] });
   assert.equal(saved.roles.find(r => r.role_id === 'dev').harness_ref.id, 'claude_code');
   for (const role of ['coordinator', 'manager']) assert.throws(() => f.put({ roles: [{ role_id: role, harness_ref: { id: 'claude_code' } }] }), { code: 'harness_role_unsupported' });
-  // Codex App Server (#171) is a registered worker backend like Claude Code.
+  // Codex App Server (#171 / #705) is a container worker backend like Claude Code.
   const codex = f.view().backends.find(b => b.id === 'codex');
-  assert.deepEqual([codex.available, codex.kinds, codex.model_source, codex.integration_issue], [true, ['writer', 'observer', 'evaluator'], 'external_harness', 171]);
+  assert.deepEqual([codex.available, codex.kinds, codex.model_source, codex.supported_model_sources, codex.integration_issue], [true, ['writer', 'observer', 'evaluator'], 'project', ['gateway', 'subscription'], null]);
   assert.equal(f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }] }).roles.find(r => r.role_id === 'dev').harness_ref.id, 'codex');
   for (const role of ['coordinator', 'manager']) assert.throws(() => f.put({ roles: [{ role_id: role, harness_ref: { id: 'codex' } }] }), { code: 'harness_role_unsupported' });
-  for (const backend of ['opencode']) {
-    const view = f.view(), entry = view.backends.find(b => b.id === backend);
-    assert.equal(entry.available, false); assert.ok(entry.integration_issue);
-    assert.throws(() => f.put({ roles: [{ role_id: 'dev', harness_ref: { id: backend } }] }), e => e.code === 'agent_backend_unavailable' && e.field === 'roles.dev.harness_ref.id');
+  for (const backend of ['acp', 'opencode']) {
+    const view = f.view();
+    assert.equal(view.backends.find(b => b.id === backend), undefined);
+    assert.throws(() => f.put({ roles: [{ role_id: 'dev', harness_ref: { id: backend } }] }), e => e.code === 'unknown_role_harness' && e.field === 'roles.dev.harness_ref.id');
     assert.equal(f.view().revision, view.revision);
   }
   assert.equal(f.view().recommended_backend, 'pi');
@@ -106,11 +108,11 @@ test('non-entry Pi reserves four of sixteen requests and refuses closed explorat
   assert.equal(f.s.get("SELECT status FROM task_runs WHERE role='dev'").status,'succeeded');
 });
 
-test('external role models and an explicit QA model do not require an unrelated project default', async t => {
+test('explicit role models on active roles do not require an unrelated project default', async t => {
   const f = await fixture(t, () => call('submit_acceptance', verdict));
-  f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'acp' } }, { role_id: 'qa', harness_ref: { id: 'native' }, model_profile_ref: { model_id: 'm' } }] });
+  f.put({ roles: [{ role_id: 'manager', harness_ref: { id: 'native' }, model_profile_ref: { model_id: 'm' } }, { role_id: 'qa', harness_ref: { id: 'native' }, model_profile_ref: { model_id: 'm' } }] });
   f.s.run("UPDATE policies SET model_id=NULL WHERE repository_id='101'");
-  assert.equal(roleExecutionModel(f.s, f.task, 'manager').id, 'acp');
+  assert.equal(roleExecutionModel(f.s, f.task, 'manager').id, 'm');
   assert.equal(roleExecutionModel(f.s, f.task, 'qa').id, 'm');
   new TaskRecords(f.s).submit('t', [{ kind: 'report', reference: 'report', version: 'v1', content: 'baseline' }], [], {});
   assert.equal((await evaluateDelivery(f.s, f.task, f.workspace, f.redactor, f.guard)).outcome, 'pass');

@@ -85,8 +85,8 @@ async function reap({ workspace_id: workspaceId, keep_agent: keepAgent }) {
   const idle = (await processes()).filter(p => p.ppid === 1 && p.cmdline === 'node /opt/runner/idle.mjs').sort((a, b) => a.pid - b.pid)[0];
   if (idle) keep.add(idle.pid);
   if (scoped && keepAgent) {
-    const {waitingAgent}=await import('./agent.mjs'),pid=await waitingAgent(`${tasksRoot}${workspaceId}`,await processes());
-    if(pid)keep.add(pid);
+    const {waitingAgent}=await import('./agent.mjs'),pids=await waitingAgent(`${tasksRoot}${workspaceId}`,await processes());
+    for(const pid of Array.isArray(pids)?pids:pids?[pids]:[])keep.add(pid);
   }
   let killed = 0;
   for (let round = 0; round < 20; round++) {

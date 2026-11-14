@@ -4,7 +4,7 @@ function roleListComparable(role) {
     responsibility: role.responsibility, persona_prompt: role.persona_prompt,
     model_profile_ref: role.model_profile_ref ? { model_id: role.model_profile_ref.model_id, api: role.model_profile_ref.api, tool_calls: role.model_profile_ref.tool_calls, structured_output: role.model_profile_ref.structured_output } : null,
     skill_bundle_ref: role.skill_bundle_ref ? { id: role.skill_bundle_ref.id } : null,
-    harness_ref: role.harness_ref ? { id: role.harness_ref.id } : null,
+    harness_ref: role.harness_ref ? { id: role.harness_ref.id, ...(role.harness_ref.model_source && role.harness_ref.model_source !== 'gateway' ? { model_source: role.harness_ref.model_source } : {}) } : null,
     permissions: role.permissions || null,
     environment_profile_ref: role.environment_profile_ref ? { id: role.environment_profile_ref.id } : null,
     budget_policy_ref: role.budget_policy_ref ? Object.fromEntries(Object.entries(role.budget_policy_ref).filter(([key]) => key !== 'version')) : null,
@@ -22,6 +22,27 @@ function roleListStatus(role, state, start) {
   else if (state.data.configured) parts.push(rolePageText('statusSaved'));
   else parts.push(rolePageText('statusRecommended'));
   return parts.join(' · ');
+}
+function roleBackendAvailabilityCard(state) {
+  const containerBackends = (state.data.backends || []).filter(entry => entry.runtime_status);
+  if (!containerBackends.length) return null;
+  const section = card('容器内 Agent 后端可用性');
+  section.dataset.testid = 'backend-availability-card';
+  section.append(note('Claude Code 与 Codex 在项目容器或隔离运行容器内执行，从只读工具卷 /opt/agent-tools 加载二进制，并经容器内模型中转调用平台配置的模型。'));
+  const { table, body } = projectTable(['后端', '状态', '已安装版本', '兼容范围', '说明'], '容器内 Agent 后端状态');
+  for (const backend of containerBackends) {
+    const rt = backend.runtime_status;
+    const row = document.createElement('tr');
+    row.dataset.backend = backend.id;
+    tableCell(row, '后端', element('strong', backend.name));
+    tableCell(row, '状态', badge(rt.ready ? '可用' : '未就绪', rt.ready ? 'success' : 'warning'));
+    tableCell(row, '已安装版本', note(rt.installed_versions?.length ? `${rt.installed_versions.join(', ')}${rt.selected_version ? '（选用 ' + rt.selected_version + '）' : ''}` : rt.config_override ? '本地配置覆盖' : '未安装'));
+    tableCell(row, '兼容范围', element('code', rt.compatible_range || '—'));
+    tableCell(row, '说明', note(rt.ready ? `容器内模型中转就绪（可用模型 ${rt.model_count} 个）` : (rt.reason || '尚未就绪')));
+    body.append(row);
+  }
+  section.append(table);
+  return section;
 }
 function roleOverviewCards(state, redraw) {
   const { data, draft } = state, overview = card(rolePageText('overview')), { table, body } = projectTable(rolePageText('columns'), rolePageText('tableLabel'));
@@ -53,5 +74,6 @@ function roleOverviewCards(state, redraw) {
     const defaults = structuredClone(Object.hasOwn(data.role_defaults, name.value) ? data.role_defaults[name.value] : data.role_defaults.observer);
     draft.roles.push({ role_id: name.value, enabled: true, name: name.value, responsibility: '', persona_prompt: Object.hasOwn(data.role_templates || {}, name.value) ? data.role_templates[name.value] : data.role_templates.observer, model_profile_ref: null, skill_bundle_ref: null, harness_ref: { id: data.recommended_backend || 'pi' }, budget_policy_ref: { id: 'entry-default' }, ...defaults }); draft.deleted_roles = (draft.deleted_roles || []).filter(id => id !== name.value); markRoleDirty(state); redraw();
   }), note(rolePageText('requiredNote')), error);
-  return [overview, coordination, roleSkillsCard(state, redraw), roleStagesCard(state, redraw), custom];
+  const availability = roleBackendAvailabilityCard(state);
+  return [overview, coordination, ...(availability ? [availability] : []), roleSkillsCard(state, redraw), roleStagesCard(state, redraw), custom];
 }

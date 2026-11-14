@@ -133,7 +133,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       { entry, ...(staged?{observerTools:profile.tools.map(t=>t.function.name==='run_command'?commandTool(120):t)}:{}), prepare: staged?spaces.prepare:async () => {}, controller:spaces.controller,worker:spaces.worker,...(staged?{withRole:spaces.withRole,withObservers:spaces.withObservers,bindRun:spaces.bindRun,snapshot:spaces.snapshot,isolated:spaces.isolated}:{workers:['dev']}),
         executor: { round, prepare: async (instance, resolved) => resolved.snapshot.harness.id === 'pi'
           ? executorWorkspace(workspace, { config, conversation, platform, repository, token, createPullRequest, publication: profile.capabilities.github.publication, complete }, round)(instance, resolved)
-          : undefined } });
+          : await spaces.isolated(instance, resolved) ?? await spaces.worker(instance, resolved) } });
   }
   // Legacy single-executor entries use the same role policy as team runs. A broad runner profile cannot bypass it.
   const allowed=()=>profile.tools.filter(tool=>taskRolePolicies(store,task).every(p=>permissionTools(p).includes(tool.function.name))&&taskToolAllowed(store,task,'dev',tool.function.name));

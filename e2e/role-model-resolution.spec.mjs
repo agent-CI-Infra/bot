@@ -66,13 +66,20 @@ test('withdrawn work type models and changed configuration do not show a substit
     await expect(page.getByLabel('角色提示词', { exact: true })).toHaveValue('Still my draft');
   } finally { await h.stop(); }
 });
-test('an external backend reports its own model instead of fabricating a project model version', async ({ page }) => {
+test('container CLI backends resolve project models in gateway mode and reject reserved subscription mode without substituting', async ({ page }) => {
   const { h, admin, revision } = await prepared(page);
   try {
-    expect((await admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: false, roles: [{ role_id: 'dev', harness_ref: { id: 'codex' }, model_profile_ref: null }] })).status).toBe(200);
+    const gwSave = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: false, roles: [{ role_id: 'dev', harness_ref: { id: 'codex' }, model_profile_ref: null }] });
+    expect(gwSave.status).toBe(200);
     await page.reload(); await openRoleFormAdvanced(page); await expect(panel(page)).toBeVisible(); await read(page).click();
-    await expect(fact(page, '模型来源')).toHaveText('执行器自带模型'); await expect(fact(page, '模型记录版本')).toHaveText('不适用');
-    await expect(fact(page, '模型名称')).toHaveText('由执行器管理，不使用项目模型');
+    await expect(fact(page, 'Agent 后端')).toContainText('Codex');
+    await expect(fact(page, '模型来源')).toHaveText('项目默认');
+    await expect(fact(page, '模型名称')).toHaveText('Project base');
+    const subSave = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: gwSave.value.configuration.revision, enabled: false, roles: [{ role_id: 'dev', harness_ref: { id: 'codex', model_source: 'subscription' }, model_profile_ref: null }] });
+    expect(subSave.status).toBe(200);
+    await page.reload(); await openRoleFormAdvanced(page); await expect(panel(page)).toBeVisible(); await read(page).click();
+    await expect(panel(page).getByRole('status')).toContainText('解析失败，当前结果未知：供应商订阅模式未实现，任务不会静默回退到平台模型网关。');
+    await expect(panel(page).locator('dd')).toHaveCount(0);
   } finally { await h.stop(); }
 });
 test('late resolutions cannot replace another project and a forbidden preview clears the shared draft', async ({ page }) => {

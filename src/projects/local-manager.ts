@@ -29,7 +29,14 @@ export class LocalManager implements Manager {
     return new Promise((resolveResult, reject) => {
       // Deliberately do not inherit the control plane's environment or credentials.
       const child = spawn(process.execPath, [this.runner, Buffer.from(JSON.stringify(input)).toString('base64url')], {
-        env: { PATH: dirname(process.execPath) + ':/usr/local/bin:/usr/bin:/bin', LANG: 'C.UTF-8', BOT_LOCAL_EXECUTION: 'true', BOT_LOCAL_WORKSPACE: this.root },
+        env: {
+          PATH: dirname(process.execPath) + ':/usr/local/bin:/usr/bin:/bin',
+          LANG: 'C.UTF-8',
+          BOT_LOCAL_EXECUTION: 'true',
+          BOT_LOCAL_WORKSPACE: this.root,
+          ...(process.env.BOT_AGENT_TOOLS_DIR ? { BOT_AGENT_TOOLS_DIR: process.env.BOT_AGENT_TOOLS_DIR } : {}),
+          ...(process.env.BOT_REAL_GH_BIN ? { BOT_REAL_GH_BIN: process.env.BOT_REAL_GH_BIN } : {}),
+        },
         stdio: ['ignore','pipe','pipe'] });
       let out = '', err = '';
       const timer = timeoutMs ? setTimeout(() => { child.kill('SIGKILL'); reject(new Error('local_runner_timeout')); }, timeoutMs) : undefined;

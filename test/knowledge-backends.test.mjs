@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { Store } from '../dist/storage/database.js';
@@ -23,7 +23,7 @@ const call=(name,args)=>({role:'assistant',content:null,tool_calls:[{id:'call_'+
 
 const sdk=existsSync('runner/node_modules/@earendil-works/pi-coding-agent/package.json');
 const skip=!sdk&&process.env.BOT_REQUIRE_PI!=='1'?'Pi SDK not installed: npm ci --prefix runner --omit=dev --ignore-scripts':false;
-test('real Pi mailbox and external ACP/MCP use the same authorized memory tools and trace exact versions', {timeout:120000,skip}, async t=>{
+test('real Pi mailbox and container Codex stdio MCP use the same authorized memory tools and trace exact versions', {timeout:120000,skip}, async t=>{
   assert.ok(existsSync('runner/node_modules/@earendil-works/pi-coding-agent/package.json'),'install runner dependencies before backend acceptance');
   const root=mkdtempSync(join(tmpdir(),'knowledge-backend-')),s=new Store(join(root,'knowledge.sqlite'),randomBytes(32)),manager=new LocalManager('101',join(root,'workspace'));
   t.after(async()=>{await manager.recover();s.close();rmSync(root,{recursive:true,force:true});});
@@ -43,16 +43,18 @@ test('real Pi mailbox and external ACP/MCP use the same authorized memory tools 
   const config={system:'Use offered knowledge tools and submit finish. Do not use files or shell.',prompt:'Search socket reset, read its exact revision, retain an unverified experience, then finish.',tools,control_tools:tools.map(t=>t.function.name),finish_tools:[],finish_on_pull_request:false,workspace_id:task.workspace_id,capabilities:{workspace:{read:false,write:false,notes:false,shell:false},github:{permissions:{},publication:'none'},agents:false,writes:[]}};
   const result=await runAgent({store:s,task,redactor,guard,system:config.system,prompt:config.prompt,tools,maxTurns:8,adapter:piAdapter({store:s,taskId:'t',guard,workspace,redactor,config,offered:name=>tools.some(t=>t.function.name===name),control:async(name,args)=>name==='finish'?{result:args,finish:true}:{result:await execute(name,args)},complete:state=>state.result})});
   assert.equal(result.summary,'Pi knowledge tools completed');assert.equal(step,4);
-  const acpConfig=join(root,'acp.json');writeFileSync(acpConfig,JSON.stringify({command:process.execPath,args:[resolve('test/fixtures/acp-agent.mjs')],env:{FIXTURE_KNOWLEDGE:'true'},stateDirectory:join(root,'acp-sessions'),timeoutMs:5000}));
-  const previous=process.env.BOT_ACP_CONFIG;process.env.BOT_ACP_CONFIG=acpConfig;t.after(()=>{if(previous===undefined)delete process.env.BOT_ACP_CONFIG;else process.env.BOT_ACP_CONFIG=previous;});
-  const spec={store:s,task,redactor,guard,system:'Knowledge transport fixture',prompt:'Search socket reset and read the offered revision.',tools,execute,finish:{name:'finish',validate:v=>v},maxTurns:8};
-  const external=await runRole(spec,'dev',undefined,'acp');assert.equal(external.result.read_revision,1);assert.equal(external.result.note_verification,'unverified');
-  const readonly=await runRole(spec,'reviewer',undefined,'acp');assert.equal(readonly.result.read_revision,1);assert.equal(readonly.result.write_error,'tool_not_allowed');
+  const codexHome=join(root,'codex-home'),codexSessions=join(root,'codex-sessions');
+  mkdirSync(codexHome,{recursive:true,mode:0o700});mkdirSync(codexSessions,{recursive:true,mode:0o700});
+  const codexConfig=join(root,'codex.json');writeFileSync(codexConfig,JSON.stringify({command:process.execPath,args:[resolve('test/fixtures/codex-app-server.mjs'),'app-server'],version:'0.166.0',env:{CODEX_HOME:codexHome,FIXTURE_KNOWLEDGE:'true'},stateDirectory:codexSessions,cancelGraceMs:400,toolStartupMs:3000}));
+  const previous=process.env.BOT_CODEX_CONFIG;process.env.BOT_CODEX_CONFIG=codexConfig;t.after(()=>{if(previous===undefined)delete process.env.BOT_CODEX_CONFIG;else process.env.BOT_CODEX_CONFIG=previous;});
+  const spec={store:s,task,redactor,guard,roleWorkspace:workspace,system:'Knowledge transport fixture',prompt:'Search socket reset and read the offered revision.',tools,execute,finish:{name:'finish',validate:v=>v},maxTurns:8};
+  const external=await runRole(spec,'dev',undefined,'codex');assert.equal(external.result.read_revision,1);assert.equal(external.result.note_verification,'unverified');
+  const readonly=await runRole(spec,'reviewer',undefined,'codex');assert.equal(readonly.result.read_revision,1);assert.equal(readonly.result.write_error,'tool_not_allowed');
   const reads=s.all("SELECT data FROM task_history WHERE type='memory_read'").map(r=>JSON.parse(r.data));assert.equal(reads.length,3);assert.ok(reads.every(r=>r.revision===1&&r.memory_source===`project_memories:${item.id}:1`&&r.content_sha256&&r.characters===item.body.length));
   assert.equal(traceSource(s,'t',reads[0].memory_source,{actor}).data.body,item.body);
   const previousSession=JSON.parse(s.get("SELECT harness_state FROM role_instances WHERE role='dev'").harness_state).sessionId;
   memory.save('101',item.key,{catalog:{audience:'role:dev'}},1,'user:owner','withdraw shared view');
-  const resumed=await runRole(spec,'dev',undefined,'acp');assert.equal(resumed.result.read_revision,2);
+  const resumed=await runRole(spec,'dev',undefined,'codex');assert.equal(resumed.result.read_revision,2);
   // The audience narrowed for other roles, but Dev still reads this memory and keeps its own native session.
   assert.equal(JSON.parse(s.get("SELECT harness_state FROM role_instances WHERE role='dev'").harness_state).sessionId,previousSession);
   assert.equal(s.get("SELECT count(*) n FROM task_history WHERE type='role_memory_view_changed' AND json_extract(data,'$.role')='dev'").n,0);

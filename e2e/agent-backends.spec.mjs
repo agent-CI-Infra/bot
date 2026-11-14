@@ -5,7 +5,7 @@ import { openRoleAdvanced, goRolePage, openRoleFormAdvanced } from './open-role-
 import { TaskEngine } from '../dist/agent/engine.js';
 import { consoleSave, compareWithServer, confirmDiscard } from './console-save.mjs';
 
-test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，未接入驱动明确显示', async ({ page }) => {
+test('角色按能力选择 Agent 后端：仅开放 Claude Code 与 Codex 外部后端，展示容器工具卷状态与订阅预留提示', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }), maxBodyBytes: 1024 * 1024 })), errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
@@ -19,45 +19,64 @@ test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，�
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const roles = ['coordinator', 'manager', 'dev', 'test', 'reviewer', 'ux', 'qa'];
     await openRoleAdvanced(page);
+    await expect(page.getByTestId('backend-availability-card')).toBeVisible();
+    await expect(page.getByTestId('backend-availability-card')).toContainText('Claude Code');
+    await expect(page.getByTestId('backend-availability-card')).toContainText('Codex');
     for (const role of roles) {
       await goRolePage(page, { role });
       const picker = page.getByTestId('role-form').getByRole('combobox', { name: `${role} Agent 后端`, exact: true });
       await expect(picker).toHaveValue('pi');
+      const optionValues = await picker.locator('option').evaluateAll(els => els.map(el => el.value));
+      expect(optionValues).toEqual(['pi', 'claude_code', 'codex', 'native', 'process']);
       const optionDisabled = (value) => picker.locator(`option[value="${value}"]`).evaluate(el => el.disabled);
-      for (const backend of ['pi', 'native', 'process', 'acp']) expect(await optionDisabled(backend)).toBe(false);
-      // Claude Code and Codex App Server are worker-only backends.
+      for (const backend of ['pi', 'native', 'process']) expect(await optionDisabled(backend)).toBe(false);
+      // Claude Code and Codex App Server are worker-only backends (writer / observer / evaluator).
       for (const backend of ['claude_code', 'codex']) {
         if (['coordinator', 'manager'].includes(role)) expect(await optionDisabled(backend)).toBe(true);
         else expect(await optionDisabled(backend)).toBe(false);
       }
-      expect(await optionDisabled('opencode')).toBe(true);
     }
     await goRolePage(page, { role: 'manager' });
     await page.getByRole('combobox', { name: 'manager Agent 后端', exact: true }).selectOption('native');
     await goRolePage(page, { role: 'reviewer' });
-    await page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true }).selectOption('acp');
+    await page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true }).selectOption('codex');
+    await expect(page.getByTestId('backend-runtime-status')).toBeVisible();
+    const reviewerModelSource = page.getByRole('combobox', { name: 'reviewer 模型来源', exact: true });
+    await expect(reviewerModelSource).toHaveValue('gateway');
+    await reviewerModelSource.selectOption('subscription');
+    await expect(page.getByTestId('subscription-not-implemented')).toBeVisible();
+    await expect(page.getByTestId('subscription-not-implemented')).toContainText('未实现');
+    await reviewerModelSource.selectOption('gateway');
+    await expect(page.getByTestId('subscription-not-implemented')).toHaveCount(0);
     await goRolePage(page, { role: 'dev' });
     await page.getByRole('combobox', { name: 'dev Agent 后端', exact: true }).selectOption('claude_code');
+    await expect(page.getByTestId('backend-runtime-status')).toBeVisible();
     await consoleSave(page).click();
     await expect(page.locator('#project-page .flash')).toContainText('角色配置已保存');
     const saved = (await admin('/api/repositories/101/roles')).value;
     expect(saved.configuration.roles.find(r => r.role_id === 'manager').harness_ref.id).toBe('native');
-    expect(saved.configuration.roles.find(r => r.role_id === 'reviewer').harness_ref.id).toBe('acp');
+    expect(saved.configuration.roles.find(r => r.role_id === 'reviewer').harness_ref.id).toBe('codex');
     expect(saved.configuration.roles.find(r => r.role_id === 'dev').harness_ref.id).toBe('claude_code');
     expect(saved.configuration.roles.find(r => r.role_id === 'qa').harness_ref.id).toBe('pi');
     await page.reload();
     await goRolePage(page, { role: 'manager' });
     await expect(page.getByRole('combobox', { name: 'manager Agent 后端', exact: true })).toHaveValue('native');
     await goRolePage(page, { role: 'reviewer' });
-    await expect(page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true })).toHaveValue('acp');
+    await expect(page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true })).toHaveValue('codex');
     await goRolePage(page, { role: 'dev' });
     await expect(page.getByRole('combobox', { name: 'dev Agent 后端', exact: true })).toHaveValue('claude_code');
     mkdirSync('.tmp/agent-backends', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.screenshot({ path: '.tmp/agent-backends/desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByTestId('backend-runtime-status')).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await goRolePage(page, { role: 'qa' });
     await expect(page.getByRole('combobox', { name: 'qa Agent 后端', exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await goRolePage(page);
+    await openRoleAdvanced(page);
+    await expect(page.getByTestId('backend-availability-card')).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/agent-backends/mobile.png', fullPage: true });
     // Load an unmarked old V2 definition: the UI always resubmits its saved harness id.

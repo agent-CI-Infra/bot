@@ -268,16 +268,15 @@ function usageOf(s: Store, column: 'lease_scope' | 'role_instance_id', value: st
   const m = s.get(`SELECT count(*) n,coalesce(sum(input_tokens),0) i,coalesce(sum(output_tokens),0) o,sum(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) unknown,sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced FROM model_requests WHERE run_id IN (${marks}) AND accounting_source NOT IN ('provider_requests','codex_events')`, ...ids)!;
   const costs = s.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE run_id IN (${marks}) AND cost IS NOT NULL GROUP BY currency`, ...ids).map(r => ({ currency: String(r.currency), amount: Number(r.amount) }));
   const tools = Number(s.get(`SELECT count(*) n FROM task_history WHERE run_id IN (${marks}) AND type='tool_observation'`, ...ids)!.n);
-  // An external agent with its own model (Codex) reports usage per model response as thread-total deltas; each report is one
-  // request; pricing is accounted separately. A turn without any report is one unknown request, never zero: once it ended, or once its run ended
-  // without its terminal status (the stream broke, the interrupt timed out). A start the server never answered is such a turn
-  // too, identified by the turn id its notifications carried; with reports for that id it is already counted, and without any
-  // id no report can belong to it.
-  const reported = s.get(`SELECT count(*) n,coalesce(sum(json_extract(data,'$.delta.input_tokens')),0) i,coalesce(sum(json_extract(data,'$.delta.output_tokens')),0) o FROM task_history WHERE run_id IN (${marks}) AND type='harness_event' AND json_extract(data,'$.type')='usage'`, ...ids)!;
+  // An external agent without gateway-managed model_requests rows reports usage per model response as thread-total deltas;
+  // when a run's requests go through the platform model relay (accounting_source='gateway'), model_requests above is already
+  // authoritative, so reported/unreported only cover runs without gateway rows (never counting both).
+  const gatewayManaged = (runExpr: string) => `EXISTS (SELECT 1 FROM model_requests mr WHERE mr.run_id=${runExpr} AND mr.accounting_source NOT IN ('provider_requests','codex_events'))`;
+  const reported = s.get(`SELECT count(*) n,coalesce(sum(json_extract(h.data,'$.delta.input_tokens')),0) i,coalesce(sum(json_extract(h.data,'$.delta.output_tokens')),0) o FROM task_history h WHERE h.run_id IN (${marks}) AND NOT ${gatewayManaged('h.run_id')} AND h.type='harness_event' AND json_extract(h.data,'$.type')='usage'`, ...ids)!;
   // One unknown request per turn id (whatever records name it: started, answered, an unanswered start with its id), unless a
   // usage report for that id exists in any run of the scope; a started turn counts once it or its run ended. An unanswered
   // start without any id cannot be matched and counts by itself.
-  const turnEvent = (alias: string, phases: string) => `${alias}.run_id IN (${marks}) AND ${alias}.type='harness_event' AND json_extract(${alias}.data,'$.type')='turn' AND json_extract(${alias}.data,'$.phase') IN (${phases})`;
+  const turnEvent = (alias: string, phases: string) => `${alias}.run_id IN (${marks}) AND NOT ${gatewayManaged(`${alias}.run_id`)} AND ${alias}.type='harness_event' AND json_extract(${alias}.data,'$.type')='turn' AND json_extract(${alias}.data,'$.phase') IN (${phases})`;
   const unreported = Number(s.get(`SELECT
       (SELECT count(DISTINCT json_extract(t.data,'$.turnId')) FROM task_history t JOIN task_runs r ON r.id=t.run_id
         WHERE ${turnEvent('t', "'started','answered','start_unconfirmed'")} AND json_extract(t.data,'$.turnId') IS NOT NULL
@@ -354,7 +353,7 @@ export function admitRun(s: Store, input: { task: Row; role: string; kind: strin
 // Codex bindings add the wire protocol, the model/provider the thread runs on, the turn the binding follows and its confirmed
 // status, the last turn known to exist, and the thread's cumulative usage, so a resume can check ownership and version,
 // reconcile an unconfirmed turn and not count a restated total twice.
-const retainedState = ['sessionId', 'previousSessionId', 'recoveryMode', 'agentInfo', 'version', 'configurationHash', 'cwd', 'scope', 'inputHash', 'run_id', 'lease_epoch', 'raw_cursor', 'protocol', 'model', 'modelProvider', 'cliVersion', 'lastTurnId', 'lastTurnStatus', 'knownTurnId', 'usage'];
+const retainedState = ['sessionId', 'previousSessionId', 'recoveryMode', 'agentInfo', 'version', 'configurationHash', 'cwd', 'scope', 'inputHash', 'run_id', 'lease_epoch', 'raw_cursor', 'protocol', 'model', 'modelProvider', 'cliVersion', 'lastTurnId', 'lastTurnStatus', 'knownTurnId', 'usage', 'stateWorkspaceId', 'sessionKey'];
 export function sessionReference(s: Store, instanceId: string) {
   const row = s.get('SELECT session,harness_state,runtime FROM role_instances WHERE id=?', instanceId);
   if (!row) return null;

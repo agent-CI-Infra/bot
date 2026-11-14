@@ -37,6 +37,7 @@ function roleModelResolution(role, state, access) {
       const reasons = { role_configuration_changed: '配置版本已变化，请读取最新角色配置并比较草稿后再检查。', role_disabled: '此角色已停用。',
         role_model_not_available: '显式选择的角色模型已删除、撤销或不可访问，不会换用其他模型。', role_model_profile_changed: '角色模型的地址或名称已变化，需要重新保存角色配置。',
         model_unavailable: '继承的模型当前不可用，不会换用其他模型。', model_not_configured: '此工作类型没有可用的已配置模型。',
+        subscription_mode_not_implemented: '供应商订阅模式未实现，任务不会静默回退到平台模型网关。',
         harness_model_profile_unsupported: '此执行器使用自带模型，不能指定项目模型。', harness_role_unsupported: '执行器不支持此角色类型。' };
       status.textContent = `解析失败，当前结果未知：${reasons[err.code] || err.message}${err.field ? '（配置项：' + err.field + '）' : ''}`;
     } finally { if (live() && sequence === request) read.disabled = false; }
@@ -59,7 +60,23 @@ function roleSettingsCard(role, state, redraw, access) {
   basic.append(roleText(rolePageText('displayName'), role, 'name', state, { maxLength: 80 }),
     roleText(rolePageText('duty'), role, 'responsibility', state, { multiline: true, rows: 3, maxLength: 2000 }));
   const agent = group('agent', rolePageText('agent'));
-  agent.append(note('已保存 · ' + workTypeName(state.data.workflow) + '：' + roleModelText(state.data.preview.find(row => row.role === role.role_id))), note('下面是待保存的选择；修改不会重写运行中任务的模型快照。'), field('Agent 后端', roleBackendPicker(role, state, redraw)), field('模型', roleModelPicker(role, state, redraw)));
+  const backendInfo = (state.data.backends || []).find(entry => entry.id === role.harness_ref.id);
+  const runtimeBox = roleBackendRuntimeBox(role, state);
+  agent.append(
+    note('已保存 · ' + workTypeName(state.data.workflow) + '：' + roleModelText(state.data.preview.find(row => row.role === role.role_id))),
+    note('下面是待保存的选择；修改不会重写运行中任务的模型快照。'),
+    field('Agent 后端', roleBackendPicker(role, state, redraw)),
+    ...(runtimeBox ? [runtimeBox] : []),
+  );
+  if (backendInfo?.supported_model_sources?.includes('subscription')) {
+    agent.append(field('模型来源', roleModelSourcePicker(role, state, redraw)));
+    if (role.harness_ref?.model_source === 'subscription') {
+      const subWarn = element('p', '供应商订阅模式未实现（subscription_mode_not_implemented）：保存后任务启动时将明确拒绝执行，不会回退到平台模型网关。日常运行请选择「平台网关（容器内模型中转）」。', 'view-error');
+      subWarn.dataset.testid = 'subscription-not-implemented';
+      agent.append(subWarn);
+    }
+  }
+  agent.append(field('模型', roleModelPicker(role, state, redraw)));
   const saved = state.data.configuration.roles.find(entry => entry.role_id === role.role_id);
   if (role.role_id === 'dev' && state.data.configured && saved?.entry_harness_source !== 'role' && saved?.harness_ref.id !== 'pi') {
     agent.append(note('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更'));

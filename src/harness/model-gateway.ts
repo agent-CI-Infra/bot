@@ -328,7 +328,7 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
 
   const checkLiveAuthorization = async (token: unknown) => {
     if (closed || gatewayAbort.signal.aborted) throw new TaskError('run_token_revoked', 'cancelled');
-    runAccess.check(token);
+    runAccess.check(token, 'model:invoke');
     if (task.repository_id) {
       const policy = store.get('SELECT enabled FROM policies WHERE repository_id=?', task.repository_id);
       if (policy && !policy.enabled) throw new TaskError('repository_policy_disabled', 'cancelled', '项目已停用');
@@ -574,7 +574,9 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
       }
 
       const downstreamFormat = endpointToFormat(envelope.endpoint);
-      const rawBody = envelope.body;
+      const rawBody = envelope.body && typeof envelope.body === 'object' && !Array.isArray(envelope.body)
+        ? redactor.clean(envelope.body)
+        : envelope.body;
       if (!rawBody || typeof rawBody !== 'object' || Array.isArray(rawBody)) {
         await sendSimpleReply(writer, 400, { 'content-type': 'application/json' }, formatErrorPayload(envelope.endpoint, 'invalid_request_error'));
         return;
@@ -628,16 +630,18 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
       );
       const scope = store.trajectories.scopeOf(task);
       const capturedRequest = redactor.clean(rawBody);
+      const recordedRunId = task.trace_run_id ?? runId;
+      store.run("DELETE FROM model_requests WHERE run_id=? AND accounting_source='codex_events'", recordedRunId);
       if (scope) {
         store.run(
           'UPDATE model_requests SET run_id=?,request_ref=? WHERE id=?',
-          task.trace_run_id ?? runId,
+          recordedRunId,
           store.trajectories.appendModelRequest(scope, requestLogId, capturedRequest),
           requestLogId,
         );
       } else {
         const snap = task.conversation_id ? store.secrets.seal({ snapshot: traceSnapshot(capturedRequest) }, 'conversation-model-request:' + requestLogId) : traceSnapshot(capturedRequest);
-        store.run('UPDATE model_requests SET run_id=?,request_snapshot=? WHERE id=?', task.trace_run_id ?? runId, snap, requestLogId);
+        store.run('UPDATE model_requests SET run_id=?,request_ref=NULL,request_snapshot=? WHERE id=?', recordedRunId, snap, requestLogId);
       }
 
       const wireUrl = resolveModelWireUrl(target.url, target.interfaceType)
@@ -684,7 +688,12 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
         let parsedErr: any = null;
         try { parsedErr = JSON.parse(rawErr); } catch {}
         recordResponseTrajectory(parsedErr ?? { status: upstream.status, error: rawErr.slice(0, 2000) });
-        finishModelRequest(store, requestLogId, null, upstream.status, 'http_error', false);
+        // A completed 4xx client/rate-limit rejection did not generate a model response and is not an unknown bill;
+        // 5xx/transport errors stay null so unknown usage remains explicit.
+        const rejectedClientUsage = upstream.status >= 400 && upstream.status < 500
+          ? { input_tokens: 0, output_tokens: 0, input_tokens_details: { cached_tokens: 0 } }
+          : null;
+        finishModelRequest(store, requestLogId, rejectedClientUsage, upstream.status, 'http_error', false);
         const errOut = passthrough && parsedErr
           ? JSON.stringify(redactor.clean(parsedErr))
           : formatErrorPayload(
