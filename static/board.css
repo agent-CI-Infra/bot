@@ -66,20 +66,22 @@ body.board-mode .list-panel>.toolbar{display:none}
 .board-toolbar .board-option{height:auto;min-height:32px;padding:4px 10px;font-size:13px;font-weight:500;white-space:normal;overflow-wrap:anywhere}
 .board-option[aria-pressed=true]{background:#16636b;color:#fff;border-color:#16636b}
 .board-option[aria-pressed=true]:hover{background:#12535a}
-.board-filter-controls>.board-options:first-child{flex-basis:100%}
 .board-grouping{flex:0 1 auto}
 .board-filter-controls>label{min-width:0;gap:4px;font-size:12px}
 .board-filter-controls select,.board-search input{height:32px;padding:4px 8px;font-size:13px}
 .board-filter-controls .board-search{flex:1;min-width:170px;max-width:300px}
 .board-filter-controls .board-check{align-self:center;flex-direction:row}
 .board-arrangement{display:flex;align-items:center;gap:8px;min-width:0}
+/* #482: the view selector, the unsaved state and the save action are toolbar controls, not menu items. */
+.board-view-controls{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap}
+.board-view-controls .board-view-choice select{max-width:180px}
+.board-view-state{flex:none;padding:2px 7px;border-radius:999px;background:#f6efe2;color:#7a5310;font-size:12px;line-height:18px;white-space:nowrap}
+.board-view-controls .board-save{flex:none}
 .board-spacer{flex:1}
 .board-chips{display:flex;gap:6px;flex-wrap:wrap}
 .board-chips:empty{display:none}
 .board-chip{display:inline-flex;align-items:center;gap:4px;padding:2px 3px 2px 9px;border-radius:6px;background:#e3eef0;color:#234b5b;font-size:12px;max-width:100%;overflow-wrap:anywhere}
 .board-menu-panel{left:auto;right:0;min-width:210px}
-.board-menu-panel .board-view-choice{display:flex;flex-direction:column;align-items:stretch;padding:6px}
-.board-menu-panel .board-view-choice select{width:100%;max-width:none}
 .board-mobile-group{display:none}
 .board-zero-counts{font-size:12px;color:var(--color-text-muted)}
 .board-zero-counts:empty{display:none}
@@ -98,7 +100,6 @@ body.board-mode .list-panel>.toolbar{display:none}
   .board-filter-controls>*{flex:none;max-width:100%}
   .board-filter-controls>.board-search{order:-2}
   .board-filter-controls>.board-check{order:-1}
-  .board-filter-controls>.board-options:first-child{flex-basis:auto}
   .board-filter-controls .board-options{flex-direction:column;gap:4px}
   .board-filter-controls .board-options-label{line-height:1.4}
   .board-toolbar .board-option{font-size:12px;padding:4px 8px}
@@ -106,11 +107,14 @@ body.board-mode .list-panel>.toolbar{display:none}
   .board-filter-controls label,.board-filter-controls select{width:100%;max-width:none}
   .board-filter-controls .board-search{max-width:none;min-width:0}
   .board-arrangement{display:grid;grid-template-columns:minmax(0,1fr) 32px auto;gap:6px}
+  .board-arrangement>.board-view-controls{grid-column:1;grid-row:2;flex-wrap:nowrap;min-width:0}
+  .board-view-controls .board-view-choice{flex:1;min-width:0}
+  .board-view-controls .board-view-choice select{width:100%;max-width:none}
   .board-arrangement>.board-grouping{grid-column:1/-1;grid-row:1;flex-direction:column;gap:4px}
   .board-grouping>.board-options-label{line-height:1.4}
   .board-arrangement>.board-menu{grid-column:2;grid-row:2}
   .board-arrangement>button{grid-column:3;grid-row:2}
-  .board-status{grid-row:2;grid-column:1;font-size:var(--font-size-1);white-space:normal;flex-wrap:wrap}
+  .board-status{grid-row:3;grid-column:1/-1;font-size:var(--font-size-1);white-space:normal;flex-wrap:wrap}
   .board-spacer{display:none}
   .board-menu-panel{right:0}
   .board-mobile-group{display:flex;flex-direction:row;align-items:center;gap:8px;font-size:12px}
