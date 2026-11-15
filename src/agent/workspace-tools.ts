@@ -20,20 +20,24 @@ export const workspaceTools = [
 ];
 export const workspaceToolNames = workspaceTools.map(t => t.function.name);
 
-/** The system prompt's rule for an agent or controller offered the tools. */
+/** The system prompt's rule for an agent offered the tools. */
 export const workspaceInstructions = 'Repository workspace: this task holds no worktree until it first needs repository files (see context.workspace). The first repository read or command binds the system\'s choice. To choose yourself, do it before that: use_workspace or create_workspace (list_workspaces shows the computer\'s worktrees), or no_workspace when the task needs no repository files.';
+/** The same rule for a task's controller, given with its workspace in the prompt: its roles work in the worktree it chooses. */
+export const controllerWorkspaceInstructions = 'This task holds no worktree yet. The first repository read or command of the task, yours or a delegated role\'s, binds the system\'s choice above, which suits most tasks. To choose instead, do it before delegating: use_workspace or create_workspace (list_workspaces shows the computer\'s worktrees), or no_workspace when the task needs no repository files. Delegated roles work in the worktree you choose and cannot choose one themselves.';
 
-/** What the prompt tells about the task's workspace when it prepared without one; null when it holds one. */
-export function workspaceContext(plan: Pick<WorktreePlan, 'head_sha' | 'mode'>) {
+/** What the prompt tells about the task's workspace while it holds none: the system's choice to come, or none chosen. */
+export function workspaceContext(plan: Pick<WorktreePlan, 'head_sha' | 'mode'> & Partial<Pick<WorktreePlan, 'state' | 'reason'>>) {
+  if (plan.state === 'none') return { commit: plan.head_sha, mode: plan.mode, worktree: 'none', reason: plan.reason ?? null };
   return { commit: plan.head_sha, mode: plan.mode, worktree: 'not_bound',
     binding: plan.mode === 'read' ? 'The first repository read or command binds an unchanged worktree of this commit that no task holds, or a new one.' : 'The first repository read or command binds a new worktree of this commit.' };
 }
 
-/** A review's coverage as published: a task that chose to work without files says so instead of naming a checkout. */
+/** A review's coverage as published: a task that chose to work without files says so, and who chose, instead of naming a checkout. */
 export function workspaceCoverage(workspace: Workspace, coverage: string[] = []) {
   const plan = workspace.plannedWorktree?.();
   if (plan?.state !== 'none') return coverage;
-  return coverage.map(line => line.startsWith('Checkout:') ? `No checkout: the agent worked without the repository files (${plan.reason})` : line);
+  const chose = plan.decided_by === 'agent' ? 'the agent worked' : `the controller (${plan.decided_by}) chose to work`;
+  return coverage.map(line => line.startsWith('Checkout:') ? `No checkout: ${chose} without the repository files (${plan.reason})` : line);
 }
 
 // The worktree the system would give the task now.

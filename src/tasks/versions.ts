@@ -24,7 +24,10 @@ export async function versionTool(s:Store,task:Row,workspace:Workspace,name:stri
   const input=JSON.parse(s.get('SELECT input FROM tasks WHERE id=?',task.id)?.input||'{}');
   const row=s.get("SELECT data FROM task_history WHERE task_id=? AND type='artifact_checkpoint' ORDER BY id DESC LIMIT 1",task.id),checkpoint=row?JSON.parse(row.data):null;
   const saved=s.get('SELECT data FROM development_candidates WHERE task_id=?',task.id),candidate=checkpoint??(saved?JSON.parse(saved.data):null),publication=saved?JSON.parse(saved.data):null;
-  const head=await workspace.call('version-head:'+randomId(),{type:'workspace_source'});
+  // Reading the versions takes no worktree (#769): a task that holds none yet reports its planned commit instead of HEAD,
+  // so the controller can still choose the task's worktree after reading them.
+  const plan=workspace.plannedWorktree?.(),unbound=plan&&plan.state!=='bound'?{worktree:plan.state==='none'?'none':'not_bound',commit:plan.head_sha,tree_sha:plan.tree_sha}:null;
+  const head=unbound?null:await workspace.call('version-head:'+randomId(),{type:'workspace_source'});
   const record=(purpose:string,commit:any,tree:any,availability:string)=>commit||tree?traceEvent(s,task.id,'version_reference',{purpose,commit_sha:commit??null,tree_sha:tree??null,local_availability:availability,workspace_id:workspace.task.workspace_id,attempt:task.attempt,repository_id:task.repository_id},task.trace_run_id):null;
   const baselineCommit=input.snapshot_sha??candidate?.base_sha??task.head_sha,baselineRef=record('baseline',baselineCommit,input.snapshot_tree??candidate?.base_tree,'unknown');
   let remoteFacts:any={availability:'not_offered'};
@@ -41,7 +44,7 @@ export async function versionTool(s:Store,task:Row,workspace:Workspace,name:stri
     }catch(error){if(!String((error as any).code||'').startsWith('github_'))throw error;remoteFacts.main_changes={availability:'unavailable',error:(error as any).code,left_ref:baselineRef,right_ref:mainRef};}
 
   }catch(error){if(!String((error as any).code||'').startsWith('github_'))throw error;remoteFacts={availability:'unavailable',error:(error as any).code};}
-  return {baseline_ref:baselineRef,candidate_ref:record('candidate',candidate?.sha??candidate?.local_sha,candidate?.tree_sha,'unknown'),publication_ref:record('publication',publication?.branch_confirmed?.sha??publication?.published?.sha,publication?.published_tree_sha,'unknown'),publication_discovery:{tool:'read_publication_context',arguments:{}},workspace_head_ref:record('workspace_head',head?.local_sha,head?.tree_sha,head?.error?'unavailable':'confirmed'),remote:remoteFacts,instruction};
+  return {baseline_ref:baselineRef,candidate_ref:record('candidate',candidate?.sha??candidate?.local_sha,candidate?.tree_sha,'unknown'),publication_ref:record('publication',publication?.branch_confirmed?.sha??publication?.published?.sha,publication?.published_tree_sha,'unknown'),publication_discovery:{tool:'read_publication_context',arguments:{}},workspace_head_ref:head?record('workspace_head',head.local_sha,head.tree_sha,head.error?'unavailable':'confirmed'):null,...(unbound?{workspace:unbound}:{}),remote:remoteFacts,instruction};
  }
  const version=(ref:any,sha:any)=>ref?resolveVersion(s,task,ref):/^[a-f0-9]{40}$/.test(String(sha))?{commit_sha:sha,tree_sha:null}:null;
  if(name==='read_version_file'){

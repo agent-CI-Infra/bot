@@ -11,7 +11,7 @@ import { open, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { payloadHeader, TrajectoryError } from '../storage/trajectories.js';
 import { operationRequestText, operationResult } from '../storage/payloads.js';
-import { useWorkspace } from '../projects/workspace-cleanup.js';
+import { useWorkspace, workspaceRemoving } from '../projects/workspace-cleanup.js';
 import { claimWorktree, decidePlan, movePlan, planWorktree, refuseWorktree, registerWorktree, releaseBinding, releaseWorktrees, reusableWorktrees, taskPlan, taskWorktree, worktreeRestored, type WorktreeMode } from '../projects/worktrees.js';
 
 // Operations each task is waiting on in this process, oldest first. The console shows the newest as the command the task
@@ -55,8 +55,13 @@ function serialized<T>(key:string,work:()=>Promise<T>):Promise<T>{
   void tail.then(()=>{if(queues.get(key)===tail)queues.delete(key);});
   return next;
 }
-/** The answer to a call that needs the repository when the task chose to work without one. */
-export const noWorkspace=(reason:string|null)=>({error:'no_workspace',message:`This task chose to work without repository files${reason?` (${reason})`:''}. Choose a workspace with use_workspace or create_workspace before reading repository files or running commands.`});
+/**
+ * The answer to a call that needs the repository when the task chose to work without one. An agent that chose can still
+ * change its mind; a role whose controller chose cannot, so it is told to say it needs the files instead.
+ */
+export const noWorkspace=(reason:string|null,by:string|null='agent')=>({error:'no_workspace',message:by==='agent'
+  ?`This task chose to work without repository files${reason?` (${reason})`:''}. Choose a workspace with use_workspace or create_workspace before reading repository files or running commands.`
+  :`The task's controller (${by}) chose to work without repository files${reason?` (${reason})`:''}. Only it can choose a workspace: if you need repository files or commands, say so in your result.`});
 
 export class Workspace {
   // The task workspace this object saw holding its worktree (or needing none), so later calls do not ask again.
@@ -213,7 +218,7 @@ export class Workspace {
     return serialized(`${this.task.id}:${this.task.workspace_id}`,async()=>{
       if(this.settled&&this.settled===this.task.workspace_id)return {};
       const plan=taskPlan(this.store,this.task);
-      if(plan?.state==='none')return noWorkspace(plan.reason);
+      if(plan?.state==='none')return noWorkspace(plan.reason,plan.decided_by);
       if(!plan||plan.state==='bound'&&taskWorktree(this.store,this.task)){this.settled=String(this.task.workspace_id);return {};}
       const taken=await this.take(plan.head_sha,plan.tree_sha,plan.mode,plan.author_email,'system');
       if(!taken)return {error:'workspace_unavailable',message:'No worktree could be made for this task on the project computer.'};
@@ -287,7 +292,8 @@ export class Workspace {
     }
     if(!/^[a-f0-9]{48}$/.test(String(args.worktree_id||'')))return {error:'invalid_arguments',message:'worktree_id is the id list_workspaces shows.'};
     const row=this.store.get("SELECT * FROM worktrees WHERE repository_id=? AND id=? AND generation=? AND state<>'removed'",repo,String(args.worktree_id),Number(this.task.generation));
-    if(!row)return {error:'workspace_not_found',message:'No such worktree of this project on this computer; call list_workspaces.'};
+    // One the cleanup is removing right now is not listed, nor handed over: its directory may be gone the next moment.
+    if(!row||workspaceRemoving(repo,row.id))return {error:'workspace_not_found',message:'No such worktree of this project on this computer; call list_workspaces.'};
     // A reader shares a worktree with other readers; a writer takes one nobody holds.
     const binding=claimWorktree(this.store,this.task,row,mode,true,plan.head_sha,plan.tree_sha);
     if(binding===null)return {error:'workspace_busy',message:mode==='write'?'Another unfinished task holds this worktree; a writer needs one nobody holds.':'An unfinished task holds this worktree for writing.'};
@@ -330,6 +336,8 @@ export class Workspace {
     if(plan&&plan.state!=='bound'){movePlan(this.store,this.task,commitSha,listing.tree_sha);return {...this.checkedOut(commitSha,listing,mirror,packed,'已改为新提交，worktree 在第一次用到文件时建立；共'),previous_sha:plan.head_sha,saved:null};}
     const moved=await this.call(`advance:${key}:${commitSha}`,{type:'workspace_advance',sha:commitSha,tree_sha:listing.tree_sha});
     if(moved.error||moved.tree_sha!==listing.tree_sha)return null;
+    // The task now works on the new commit: list_workspaces compares worktrees with it, its own included.
+    if(plan)movePlan(this.store,this.task,commitSha,listing.tree_sha);
     return {...this.checkedOut(commitSha,listing,mirror,packed,'已移到新提交'),previous_sha:String(moved.previous_sha),saved:moved.saved??null};
   }
   // The files of a commit the mirror holds, after the checks every checkout makes; null when the mirror lacks it.

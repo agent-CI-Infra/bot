@@ -41,7 +41,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
   const executeAgent:typeof runAgent=ownRole&&origin.source_kind!=='operator'?async(spec)=>spaces.withRole(ownRole,async()=>{
     // This is the task's executor workspace. Independent inspection stages still use disposable fixed candidates.
     return (await runRole(spec,ownRole,undefined,undefined,{prepare:async(i,r)=>await spaces.isolated(i,r)??await spaces.worker(i,r)})).result;
-  }):controlled(store,task,entry)?async(spec)=>runTeam(spec,{...spaces,entry}):runAgent;
+  }):controlled(store,task,entry)?async(spec)=>runTeam(spec,{...spaces,entry,workspace}):runAgent;
   // github_write (#381): role runs keep it only for roles whose GitHub permissions allow a write; a plain agent gets it only
   // when the policies over this task allow one. Every call is checked again against the acting role.
   const roleRuns=executeAgent!==runAgent,githubWrite=taskGithubWrite(store,task,redactor,guard,githubUrl);
