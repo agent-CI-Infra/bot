@@ -21,7 +21,7 @@ body.board-mode .list-panel>.toolbar{display:none}
 .board-toolbar .board-link,.board-status .board-link{height:auto;min-height:0;padding:2px 4px;border:0;background:transparent;color:var(--color-brand);font-weight:600}.board-link:hover{text-decoration:underline}
 .board-scroll{flex:1;min-height:0;display:flex;align-items:stretch;gap:10px;overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;padding-bottom:4px;scrollbar-width:thin}
 .board-scroll[aria-busy=true]{opacity:.65;transition:opacity .2s .15s}
-.board-column{--stage:var(--color-status-neutral);flex:1 1 0;min-width:250px;max-width:420px;min-height:0;display:flex;flex-direction:column;padding:8px 4px 0 8px;border-radius:var(--radius-card);background:var(--color-status-neutral-bg)}
+.board-column{--stage:var(--color-status-neutral);flex:1 1 0;min-width:250px;max-width:720px;min-height:0;display:flex;flex-direction:column;padding:8px 4px 0 8px;border-radius:var(--radius-card);background:var(--color-status-neutral-bg)}
 .board-column[data-stage=reviewing]{--stage:var(--color-info)}.board-column[data-stage=reviewed]{--stage:var(--color-success)}.board-column[data-stage=developing]{--stage:var(--color-brand)}
 .board-column[data-stage=developed]{--stage:var(--color-success)}.board-column[data-stage=attention]{--stage:var(--color-warning);background:var(--color-warning-bg)}
 .board-column-heading{flex:none;display:flex;align-items:center;gap:7px;padding:2px 4px 8px 2px;cursor:default}
@@ -31,6 +31,10 @@ body.board-mode .list-panel>.toolbar{display:none}
 .board-collapse{flex:none;display:grid;place-items:center;width:24px;height:24px;min-height:0;padding:0;border:0;background:transparent;color:var(--color-text-muted);font-size:var(--font-size-3);line-height:1}.board-collapse:hover{background:var(--color-hover);color:var(--color-text)}
 .board-column-list{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;padding:0 4px 10px 0;overflow-x:hidden;overflow-y:auto;overscroll-behavior-y:contain;scrollbar-width:thin}
 .board-column.board-collapsed{flex:0 0 44px;min-width:44px;max-width:44px;padding:8px 0;cursor:pointer}
+/* #838: when only one column is rendered on desktop, it may grow past 420px up to 720px; empty stage columns stay hidden. */
+@media(min-width:761px){
+  .board-scroll:not(.board-list-layout):has(> .board-column:only-child) .board-column:not(.board-collapsed){min-width:min(560px,100%);max-width:720px}
+}
 .board-collapsed .board-column-heading{flex:1;min-height:0;flex-direction:column;gap:10px;padding:0;cursor:pointer}.board-collapsed .board-collapse{order:-1}
 /* One character per line instead of writing-mode: vertical CJK text collapses to zero height with some fonts. */
 .board-collapsed h2{flex:0 1 auto;width:1.15em;min-height:0;max-height:min(320px,50dvh);white-space:normal;word-break:break-all;text-overflow:clip;text-align:center;line-height:1.25}
