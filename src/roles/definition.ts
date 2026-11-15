@@ -66,6 +66,7 @@ export function roleStorageV2(s: Store) {
   `);
   resetBuiltinRolePermissions(s);
   retireAcpRoleBindings(s);
+  retireAcpTaskExecutionConfigs(s);
 }
 
 /**
@@ -93,6 +94,68 @@ export function retireAcpRoleBindings(s: Store) {
       s.run('INSERT INTO role_config_revisions VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING', repositoryId, saved.revision, JSON.stringify(saved), short(config), 'migration:705', now);
       s.run('UPDATE settings SET value=? WHERE key=?', JSON.stringify(saved), row.key);
     }
+    s.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO NOTHING', marker, new Date().toISOString());
+  });
+  retireAcpTaskExecutionConfigs(s);
+}
+
+/**
+ * One-time migration (#705): tasks created before ACP retirement froze `roles` inside `task_execution_configs` (and legacy
+ * `settings` / `role_instances` may also name `acp`). Re-saving the project role page does not rewrite frozen task snapshots,
+ * so migrate frozen `acp` role bindings to `pi` so in-flight/waiting tasks can resume without `unknown_role_harness`.
+ */
+export function retireAcpTaskExecutionConfigs(s: Store) {
+  const marker = 'migration:705:retire-acp-task-configs';
+  if (s.get('SELECT 1 FROM settings WHERE key=?', marker)) return;
+  if (!s.hasTable('task_execution_configs')) return;
+  const fallback = harnessRef(recommendedBackend);
+  s.transaction(() => {
+    for (const row of s.all("SELECT key,value FROM settings WHERE key LIKE 'roles:%' AND value LIKE '%acp%'")) {
+      let stored: any; try { stored = JSON.parse(String(row.value)); } catch { continue; }
+      if (stored?.schema === 2 || !stored?.harnesses || typeof stored.harnesses !== 'object') continue;
+      let changed = false;
+      const harnessesMap = { ...stored.harnesses };
+      for (const [roleId, h] of Object.entries(harnessesMap)) {
+        if (h === 'acp') { harnessesMap[roleId] = recommendedBackend; changed = true; }
+      }
+      if (changed) s.run('UPDATE settings SET value=? WHERE key=?', JSON.stringify({ ...stored, harnesses: harnessesMap }), row.key);
+    }
+
+    for (const row of s.all("SELECT c.task_id,c.snapshot,t.repository_id FROM task_execution_configs c LEFT JOIN tasks t ON t.id=c.task_id WHERE c.snapshot LIKE '%acp%'")) {
+      let snap: any; try { snap = JSON.parse(String(row.snapshot)); } catch { continue; }
+      if (!snap || typeof snap !== 'object' || !snap.roles || typeof snap.roles !== 'object') continue;
+      let changed = false;
+      if (snap.roles.schema === 2 && Array.isArray(snap.roles.roles)) {
+        const roles = snap.roles.roles.map((role: any) => {
+          if (role?.harness_ref?.id !== 'acp') return role;
+          changed = true;
+          return { ...role, harness_ref: fallback, revision: Number(role.revision ?? 0) + 1 };
+        });
+        if (changed) {
+          const latestRev = row.repository_id ? roleConfiguration(s, String(row.repository_id)).revision : 0;
+          snap = {
+            ...snap,
+            roles: {
+              ...snap.roles,
+              roles,
+              revision: Math.max(Number(snap.roles.revision ?? 0) + 1, latestRev),
+            },
+          };
+        }
+      } else if (snap.roles.harnesses && typeof snap.roles.harnesses === 'object') {
+        const harnessesMap = { ...snap.roles.harnesses };
+        for (const [roleId, h] of Object.entries(harnessesMap)) {
+          if (h === 'acp') { harnessesMap[roleId] = recommendedBackend; changed = true; }
+        }
+        if (changed) snap = { ...snap, roles: { ...snap.roles, harnesses: harnessesMap } };
+      }
+      if (changed) s.run('UPDATE task_execution_configs SET snapshot=? WHERE task_id=?', JSON.stringify(snap), row.task_id);
+    }
+
+    if (s.hasTable('role_instances')) {
+      s.run("UPDATE role_instances SET harness=?,session='[]',harness_state='{}' WHERE harness='acp'", recommendedBackend);
+    }
+
     s.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO NOTHING', marker, new Date().toISOString());
   });
 }

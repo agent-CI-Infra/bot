@@ -27,10 +27,10 @@
 }
 ```
 
-- **平台网关模式（`model_source: "gateway"`，默认）**：按“角色显式 `model_profile_ref` → 工作类型模型 `task_models` → 项目默认模型”解析模型，经容器内回环模型中转与控制面多格式模型网关访问上游（支持 Anthropic Messages、OpenAI Responses、OpenAI Chat Completions 双向协议转换）。
-- **供应商订阅模式（`model_source: "subscription"`，预留）**：接口与数据结构（`src/harness/subscription.ts`、角色配置页选择器）已预留，当前未实现；选择后保存配置会记录 `model_source: "subscription"`，控制台展示“未实现”，解析与运行准备阶段明确以 `subscription_mode_not_implemented` 拒绝，不会静默回退到网关或宿主凭据。
+- **平台网关模式（`model_source: "gateway"`，默认）**：默认按“角色显式 `model_profile_ref` → 工作类型模型 `task_models` → 项目默认模型”解析主模型，同时允许容器内 CLI 主会话与原生子 Agent 通过环境变量或配置选用当前项目可见且具备凭据的已授权模型（`allowVisibleModels: true`；跨项目或未授权模型直接拒绝）。控制面多格式模型网关根据 CLI 下游请求端点（Claude Code `/v1/messages`、Codex `/v1/responses`）与上游模型配置的协议自动选择或双向转换协议（Anthropic Messages、OpenAI Responses、OpenAI Chat Completions），无需在角色页手动指定协议覆盖。
+- **供应商订阅模式（`model_source: "subscription"`，预留）**：接口与数据结构（`src/harness/subscription.ts`、角色配置页选择器）已预留，当前未实现；选择后保存配置会记录 `model_source: "subscription"`，切回平台网关保存后显式发送 `model_source: "gateway"` 并清除原订阅标记。订阅模式在控制台展示“未实现”，解析与运行准备阶段明确以 `subscription_mode_not_implemented` 拒绝，不会静默回退到网关或宿主凭据。
 
-角色配置页展示 `claude_code` 的工具卷挂载状态、已安装版本、所选版本、兼容版本范围、模型中转就绪状态及不可用原因。模型完整 ID、CLI 版本和启动配置哈希进入 `RunContext` 和运行快照；同一角色 revision 恢复时变更模型或启动配置会以 `model_revision_changed` 拒绝，不静默换模型。
+角色配置页展示 `claude_code` 与 `codex` 的工具卷挂载状态、已安装版本、所选版本、兼容版本范围、实际解析模型配置就绪状态与上游连通性状态（区分“连通性未探测”“连通正常”“连通失败”，并提供“探测模型连通性”操作）及不可用原因。模型完整 ID、CLI 版本和启动配置哈希进入 `RunContext` 和运行快照；同一角色 revision 恢复时变更模型或启动配置会以 `model_revision_changed` 拒绝，不静默换模型。
 
 ## 容器内模型中转、身份令牌与 GitHub 短期只读凭据
 

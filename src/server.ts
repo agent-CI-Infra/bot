@@ -419,7 +419,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.
-    const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/(?:restore|board))?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|knowledge-files|knowledge-directories|releases)(?:\/.*)?$/.test(path);
+    const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/(?:restore|board))?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|knowledge-files|knowledge-directories|releases|roles\/(?:resolve|probe-model))(?:\/.*)?$/.test(path);
     if (mutation && !consoleOnly && (path.startsWith('/api/repositories') || path.startsWith('/api/installations') || path === '/api/settings')) void options.projects?.reconcile().catch(() => {});
     respond(res, method === 'POST' ? 201 : 200, result);
   }));

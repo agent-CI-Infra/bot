@@ -1,8 +1,9 @@
 import { stageTimeline } from './schedule.js';
 import {harnesses} from './harness.js';
-import {agentBackends,recommendedBackend} from './backends.js';
+import {agentBackends,modelConnectivity,probeRepositoryModel,recommendedBackend} from './backends.js';
 import type {Store} from '../storage/database.js';
 import {repository,scope,type Actor} from '../app/auth.js';
+import {authorize} from '../identity/authorization.js';
 import {fields,fail,type Json} from '../core/security.js';
 import {TaskError} from '../agent/common.js';
 import {traceEvent} from '../tasks/trace.js';
@@ -28,14 +29,15 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
    const revision=url.searchParams.get('revision');
    if(revision!==null){if(!/^\d+$/.test(revision))fail(400,'invalid_revision');const old=configurationRevision(s,repo,Number(revision));if(!old)fail(404,'role_configuration_revision_not_found');return {configuration:old};}
    const current=roleConfiguration(s,repo),workflow=url.searchParams.get('workflow')||'development.issue';
-   const models=s.all(`SELECT m.id,m.model_name,m.api_url,m.version,m.repository_id FROM models m WHERE m.api_key IS NOT NULL AND (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?))) ORDER BY m.model_name,m.id`,repo,repo)
-    .map(m=>({id:m.id,name:m.model_name,host:host(m.api_url),version:m.version,profile_hash:modelProfileHash(m),shared:m.repository_id==null}));
+   const models=s.all(`SELECT m.id,m.model_name,m.api_url,m.version,m.updated_at,m.repository_id FROM models m WHERE m.api_key IS NOT NULL AND (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?))) ORDER BY m.model_name,m.id`,repo,repo)
+    .map(m=>({id:m.id,name:m.model_name,host:host(m.api_url),version:m.version,profile_hash:modelProfileHash(m),shared:m.repository_id==null,connectivity:modelConnectivity(s,repo,m)}));
    const source=s.hasTable('repository_rule_sources')?s.get('SELECT sha,files FROM repository_rule_sources WHERE repository_id=?',repo):undefined;
    const preview=current.roles.filter(r=>r.enabled).map(r=>{try{const {id,snapshot}=resolveRole(s,repo,r.role_id,workflow,{persist:false});return {role:r.role_id,snapshot_id:id,model:snapshot.model,harness:snapshot.harness,skills:snapshot.skills&&{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash}};}catch(error){if(error instanceof TaskError)return {role:r.role_id,error:error.code,detail:error.detail??null};throw error;}});
    // The editable sources of the current bundles, so a console edit can resave them unchanged.
    const skill_inputs=current.skills.map(b=>{const row=s.get('SELECT source,files FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?',repo,b.id,b.revision),source=JSON.parse(row?.source??'{}'),files=JSON.parse(row?.files??'[]');
     return {id:b.id,source:['inline','builtin'].includes(source.type)?{type:'inline',files:files.map((f:any)=>({path:f.path,content:f.content}))}:{type:'repository',commit:source.commit,paths:source.paths}};});
-   return {configuration:current,configured:!!s.get('SELECT value FROM settings WHERE key=?','roles:'+repo),revision:current.revision,workflow,preview,system_prompt:systemInstructions,role_templates:{observer:roleTemplate('observer'),...Object.fromEntries(rolePool.map(role=>[role.id,roleTemplate(role.id)]))},required_roles:requiredRoles,role_defaults:{observer:{kind:'observer',permissions:defaultPermissions('observer','observer'),environment_profile_ref:{id:'candidate-checkout'},output_schema_ref:{id:'role-findings'}},...Object.fromEntries(roleConfiguration(s,repo,{enabled:false,harnesses:{}}).roles.map(({role_id,kind,permissions,environment_profile_ref,output_schema_ref})=>[role_id,{kind,permissions,environment_profile_ref,output_schema_ref}]))},stage_capabilities:capabilityNames.map(id=>({id,name:({fixed_candidate_read:'读取固定候选',raw_evidence:'提供原始证据',run_isolation:'运行隔离',cancel:'可中断',version_binding:'绑定执行版本',output_validation:'校验输出',fresh_context:'全新上下文'})[id]})),harnesses,backends:agentBackends(s,repo),recommended_backend:recommendedBackend,...catalog(),models,skill_inputs,
+    const can_edit=(()=>{try{if(user.context)authorize(user.context,'roles.edit',{project_id:repo});return true;}catch{return false;}})();
+    return {configuration:current,configured:!!s.get('SELECT value FROM settings WHERE key=?','roles:'+repo),can_edit,revision:current.revision,workflow,preview,system_prompt:systemInstructions,role_templates:{observer:roleTemplate('observer'),...Object.fromEntries(rolePool.map(role=>[role.id,roleTemplate(role.id)]))},required_roles:requiredRoles,role_defaults:{observer:{kind:'observer',permissions:defaultPermissions('observer','observer'),environment_profile_ref:{id:'candidate-checkout'},output_schema_ref:{id:'role-findings'}},...Object.fromEntries(roleConfiguration(s,repo,{enabled:false,harnesses:{}}).roles.map(({role_id,kind,permissions,environment_profile_ref,output_schema_ref})=>[role_id,{kind,permissions,environment_profile_ref,output_schema_ref}]))},stage_capabilities:capabilityNames.map(id=>({id,name:({fixed_candidate_read:'读取固定候选',raw_evidence:'提供原始证据',run_isolation:'运行隔离',cancel:'可中断',version_binding:'绑定执行版本',output_validation:'校验输出',fresh_context:'全新上下文'})[id]})),harnesses,backends:agentBackends(s,repo,undefined,workflow),recommended_backend:recommendedBackend,...catalog(),models,skill_inputs,
     skill_sources:{repository:source?{commit:source.sha,paths:Object.keys(JSON.parse(source.files)).filter(p=>p.startsWith('.agents/skills/'))}:null},
     revisions:s.all('SELECT revision,hash,actor,created_at FROM role_config_revisions WHERE repository_id=? ORDER BY revision DESC LIMIT 20',repo)};
   }
@@ -62,4 +64,20 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
   const ids=[...new Set([...instances.map(i=>i.snapshot_id),...runs.map(r=>r.role_snapshot)].filter(Boolean))];
   const snapshots=Object.fromEntries(ids.map(id=>[id,JSON.parse(s.get('SELECT snapshot FROM role_snapshots WHERE id=?',id)?.snapshot??'null')]));
   return {instances,assignments,runs,snapshots,stage_schedule:stageTimeline(s,task[1]!),next_after:more?assignments.at(-1)!.sequence:null};}
+}
+export async function roleProbeApi(s:Store,user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
+ const match=/^\/api\/repositories\/([^/]+)\/roles\/probe-model$/.exec(url.pathname);
+ if(!match)return undefined;
+ if(method!=='POST')return fail(405,'method_not_allowed');
+ const repo=match[1]!;repository(s,user,repo);
+ if(user.context)authorize(user.context,'roles.edit',{project_id:repo});
+ fields(input,['role','model_id','workflow']);
+ if(input.role!==undefined&&typeof input.role!=='string')fail(400,'invalid_role_probe');
+ if(input.model_id!==undefined&&typeof input.model_id!=='string')fail(400,'invalid_role_probe');
+ if(input.workflow!==undefined&&typeof input.workflow!=='string')fail(400,'invalid_role_probe');
+ try{
+  const connectivity=await probeRepositoryModel(s,repo,{role:input.role as string|undefined,modelId:input.model_id as string|undefined,workflow:input.workflow as string|undefined});
+  s.audit(user.id,'roles.probe_model',connectivity.model_id??repo,repo);
+  return {connectivity};
+ }catch(error){if(error instanceof TaskError)return fail(409,error.code);throw error;}
 }

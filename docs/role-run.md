@@ -79,7 +79,7 @@ RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是�
 | `fresh_context` | QA | 驱动声明，且本次没有会话与外部状态 |
 | `run_isolation` | 选了隔离环境 profile 的角色 | 驱动声明 `isolation: run_environment`，且控制面复核了这个容器的检查结果 |
 
-内置驱动的声明见 `src/roles/harness.ts`：Native/Pi/Process 声明 `control_plane_tools` 且 `isolation: none`（选隔离环境 profile 时在创建任何环境之前即被准入拒绝）；Claude Code 与 Codex 在容器内执行，声明 `control_plane_tools`（`claude_code`）/ `task_tools`（`codex`）以及 `isolation: run_environment`，同时支持项目容器与每运行隔离容器（`isolated-workspace`、`isolated-candidate`）。`registerRoleHarness` 只接受协议词汇的 `capabilities`，未声明即不支持，因此未声明的扩展驱动不能用于任何正式阶段。
+内置驱动的声明见 `src/roles/harness.ts`：Native/Pi/Process 声明 `control_plane_tools` 且 `isolation: none`（选隔离环境 profile 时在创建任何环境之前即被准入拒绝）；Claude Code 与 Codex 在容器内执行，均声明 `task_tools` 以及 `isolation: run_environment`，同时支持项目容器与每运行隔离容器（`isolated-workspace`、`isolated-candidate`）。`registerRoleHarness` 只接受协议词汇的 `capabilities`，未声明即不支持，因此未声明的扩展驱动不能用于任何正式阶段。
 
 ## 每次运行的隔离环境
 
