@@ -1,11 +1,31 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, posix, resolve, sep } from 'node:path';
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fchmodSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
+import { dirname, isAbsolute, posix, relative, resolve, sep } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { TaskError } from '../agent/common.js';
 
 export type AgentToolCli = 'claude_code' | 'codex';
 export type AgentToolArch = 'x64' | 'arm64';
+export type AgentToolLibc = 'glibc' | 'musl';
 
 export interface Semver {
   major: number;
@@ -57,6 +77,7 @@ export interface AgentToolManifest {
   cli: AgentToolCli;
   version: string;
   arch: AgentToolArch;
+  libc?: AgentToolLibc;
   installed_at: string;
   container_executable: string;
   container_node_executable: string | null;
@@ -145,6 +166,16 @@ export function resolveSupportedArch(arch = process.arch): AgentToolArch | null 
   return null;
 }
 
+export function detectHostLibc(): AgentToolLibc {
+  if (process.platform === 'linux') {
+    const report = typeof process.report?.getReport === 'function'
+      ? (process.report.getReport() as { header?: { glibcVersionRuntime?: string } })
+      : null;
+    if (report && !report.header?.glibcVersionRuntime) return 'musl';
+  }
+  return 'glibc';
+}
+
 function isSubpath(rootReal: string, targetReal: string): boolean {
   return targetReal === rootReal || targetReal.startsWith(rootReal.endsWith(sep) ? rootReal : rootReal + sep);
 }
@@ -170,12 +201,22 @@ function brokenManifestNodeVersion(rootReal: string, version: string): string | 
   } catch { return null; }
 }
 
+function inferClaudeNativeBinaryLibc(artifacts: AgentToolArtifact[]): AgentToolLibc | null {
+  for (const art of artifacts) {
+    if (art.role !== 'native_binary') continue;
+    const m = /claude-code-linux-(?:x64|arm64)(-musl)?(?:\/|-)/.exec(art.source_url);
+    if (m) return m[1] ? 'musl' : 'glibc';
+  }
+  return null;
+}
+
 function readValidCliManifest(
   rootReal: string,
   cli: AgentToolCli,
   version: string,
   arch: AgentToolArch,
   containerRoot: string,
+  libc: AgentToolLibc = detectHostLibc(),
 ): AgentToolManifest | null {
   if (!parseSemver(version)) return null;
   const versionDir = resolve(rootReal, cli, version);
@@ -189,6 +230,7 @@ function readValidCliManifest(
     const parsed = JSON.parse(readFileSync(manifestPath, 'utf8'));
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
     if (parsed.schema !== 'bot.agent-tools/1' || parsed.cli !== cli || parsed.version !== version || parsed.arch !== arch) return null;
+    if (parsed.libc !== undefined && parsed.libc !== 'glibc' && parsed.libc !== 'musl') return null;
     if (typeof parsed.installed_at !== 'string' || !parsed.installed_at) return null;
     const expectedExec = posix.join(containerRoot, cli, version, 'bin', cli === 'claude_code' ? 'claude' : 'codex');
     if (parsed.container_executable !== expectedExec) return null;
@@ -211,6 +253,10 @@ function readValidCliManifest(
       if (!['package', 'native_binary', 'node_runtime', 'static_binary'].includes(art.role)) return null;
       if (typeof art.source_url !== 'string' || !art.source_url || !SHA256_RE.test(String(art.sha256 || ''))) return null;
       if (!Number.isSafeInteger(art.bytes) || art.bytes <= 0) return null;
+    }
+    if (cli === 'claude_code') {
+      const effectiveLibc = (parsed.libc as AgentToolLibc | undefined) ?? inferClaudeNativeBinaryLibc(parsed.artifacts as AgentToolArtifact[]);
+      if (effectiveLibc && effectiveLibc !== libc) return null;
     }
     return parsed as AgentToolManifest;
   } catch {
@@ -248,11 +294,12 @@ function listValidNodeVersions(rootReal: string, arch: AgentToolArch): string[] 
 export function inspectCliAvailability(
   volumeRoot: string,
   cli: AgentToolCli,
-  options: { containerRoot?: string; arch?: AgentToolArch | null } = {},
+  options: { containerRoot?: string; arch?: AgentToolArch | null; libc?: AgentToolLibc } = {},
 ): CliAvailabilityStatus {
   const range = COMPATIBLE_CLI_RANGES[cli];
   const containerRoot = options.containerRoot ?? DEFAULT_AGENT_TOOLS_ROOT;
   const arch = options.arch === undefined ? resolveSupportedArch() : options.arch;
+  const libc = options.libc ?? detectHostLibc();
   const base: CliAvailabilityStatus = {
     cli,
     available: false,
@@ -292,7 +339,7 @@ export function inspectCliAvailability(
 
   const manifests: AgentToolManifest[] = [];
   for (const entry of dirEntries) {
-    const manifest = readValidCliManifest(rootReal, cli, entry, arch, containerRoot);
+    const manifest = readValidCliManifest(rootReal, cli, entry, arch, containerRoot, libc);
     if (manifest) manifests.push(manifest);
   }
   manifests.sort((a, b) => compareSemver(b.version, a.version));
@@ -319,10 +366,11 @@ export function inspectCliAvailability(
 
 export function inspectAgentTools(
   volumeRoot = DEFAULT_AGENT_TOOLS_ROOT,
-  options: { containerRoot?: string; arch?: AgentToolArch | null } = {},
+  options: { containerRoot?: string; arch?: AgentToolArch | null; libc?: AgentToolLibc } = {},
 ): AgentToolsVolumeStatus {
   const containerRoot = options.containerRoot ?? DEFAULT_AGENT_TOOLS_ROOT;
   const arch = options.arch === undefined ? resolveSupportedArch() : options.arch;
+  const libc = options.libc;
   let volumePresent = false;
   let nodeVersions: string[] = [];
   if (volumeRoot && isAbsolute(volumeRoot) && existsSync(volumeRoot)) {
@@ -341,8 +389,8 @@ export function inspectAgentTools(
     arch,
     node_versions: nodeVersions,
     clis: {
-      claude_code: inspectCliAvailability(volumeRoot, 'claude_code', { containerRoot, arch }),
-      codex: inspectCliAvailability(volumeRoot, 'codex', { containerRoot, arch }),
+      claude_code: inspectCliAvailability(volumeRoot, 'claude_code', { containerRoot, arch, libc }),
+      codex: inspectCliAvailability(volumeRoot, 'codex', { containerRoot, arch, libc }),
     },
   };
 }
@@ -350,7 +398,7 @@ export function inspectAgentTools(
 export function selectCompatibleCliVersion(
   volumeRoot: string,
   cli: AgentToolCli,
-  options: { containerRoot?: string; arch?: AgentToolArch | null } = {},
+  options: { containerRoot?: string; arch?: AgentToolArch | null; libc?: AgentToolLibc } = {},
 ): SelectedCliVersion {
   const status = inspectCliAvailability(volumeRoot, cli, options);
   if (!status.available || !status.selected_version) {
@@ -486,21 +534,30 @@ export function extractTarGz(
     }
 
     if (typeflag === '5') {
-      mkdirSync(targetPath, { recursive: true, mode: 0o755 });
+      ensureSafeArchiveDirectory(destReal, targetPath, relPath);
       continue;
     }
 
-    mkdirSync(dirname(targetPath), { recursive: true, mode: 0o755 });
-    const parentReal = realpathSync(dirname(targetPath));
-    if (!isSubpath(destReal, parentReal)) {
-      throw new TaskError('agent_tool_archive_invalid', 'failed', `archive_symlink_escape:${relPath}`);
-    }
+    ensureSafeArchiveDirectory(destReal, dirname(targetPath), relPath);
 
     if (typeflag === '0') {
+      const existing = safeLstat(targetPath);
+      if (existing && (existing.isSymbolicLink() || existing.isDirectory())) {
+        throw new TaskError('agent_tool_archive_invalid', 'failed', `archive_symlink_escape:${relPath}`);
+      }
       const execBit = (mode & 0o111) !== 0;
       const safeMode = execBit ? 0o755 : 0o644;
-      writeFileSync(targetPath, body, { mode: safeMode });
-      chmodSync(targetPath, safeMode);
+      const fd = openSync(
+        targetPath,
+        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW,
+        safeMode,
+      );
+      try {
+        if (body.length > 0) writeSync(fd, body, 0, body.length, 0);
+        fchmodSync(fd, safeMode);
+      } finally {
+        closeSync(fd);
+      }
     } else if (typeflag === '2') {
       if (!rawLink || rawLink.startsWith('/')) {
         throw new TaskError('agent_tool_archive_invalid', 'failed', `unsafe_symlink:${relPath}`);
@@ -509,10 +566,96 @@ export function extractTarGz(
       if (!isSubpath(destReal, resolvedLinkTarget)) {
         throw new TaskError('agent_tool_archive_invalid', 'failed', `symlink_escape:${relPath}`);
       }
-      rmSync(targetPath, { force: true });
+      const existing = safeLstat(targetPath);
+      if (existing) {
+        if (existing.isDirectory() && !existing.isSymbolicLink()) {
+          throw new TaskError('agent_tool_archive_invalid', 'failed', `archive_symlink_escape:${relPath}`);
+        }
+        unlinkSync(targetPath);
+      }
       symlinkSync(rawLink, targetPath);
     } else {
       throw new TaskError('agent_tool_archive_invalid', 'failed', `unsupported_tar_type:${typeflag}`);
+    }
+  }
+
+  verifyExtractedSymlinks(destReal);
+}
+
+function safeLstat(targetPath: string) {
+  try {
+    return lstatSync(targetPath);
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+function ensureSafeArchiveDirectory(destReal: string, dirPath: string, relPath: string): void {
+  if (!isSubpath(destReal, dirPath)) {
+    throw new TaskError('agent_tool_archive_invalid', 'failed', `archive_escape:${relPath}`);
+  }
+  if (dirPath === destReal) return;
+  const rel = relative(destReal, dirPath);
+  let cur = destReal;
+  for (const part of rel.split(sep)) {
+    if (!part || part === '.') continue;
+    cur = resolve(cur, part);
+    const st = safeLstat(cur);
+    if (!st) {
+      mkdirSync(cur, { mode: 0o755 });
+    } else if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new TaskError('agent_tool_archive_invalid', 'failed', `archive_symlink_escape:${relPath}`);
+    }
+  }
+  if (!isSubpath(destReal, realpathSync(dirPath))) {
+    throw new TaskError('agent_tool_archive_invalid', 'failed', `archive_symlink_escape:${relPath}`);
+  }
+}
+
+function resolveArchiveSymlink(destReal: string, linkPath: string, depth: number): string {
+  const relPath = relative(destReal, linkPath);
+  if (depth > 16) {
+    throw new TaskError('agent_tool_archive_invalid', 'failed', `symlink_loop:${relPath}`);
+  }
+  const raw = readlinkSync(linkPath);
+  if (!raw || raw.startsWith('/')) {
+    throw new TaskError('agent_tool_archive_invalid', 'failed', `unsafe_symlink:${relPath}`);
+  }
+  let cur = dirname(linkPath);
+  for (const seg of raw.split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') {
+      cur = resolve(cur, '..');
+      if (!isSubpath(destReal, cur)) {
+        throw new TaskError('agent_tool_archive_invalid', 'failed', `symlink_escape:${relPath}`);
+      }
+      continue;
+    }
+    const next = resolve(cur, seg);
+    if (!isSubpath(destReal, next)) {
+      throw new TaskError('agent_tool_archive_invalid', 'failed', `symlink_escape:${relPath}`);
+    }
+    const st = safeLstat(next);
+    cur = st?.isSymbolicLink() ? resolveArchiveSymlink(destReal, next, depth + 1) : next;
+  }
+  if (existsSync(linkPath) && !isSubpath(destReal, realpathSync(linkPath))) {
+    throw new TaskError('agent_tool_archive_invalid', 'failed', `symlink_escape:${relPath}`);
+  }
+  return cur;
+}
+
+function verifyExtractedSymlinks(destReal: string): void {
+  const stack = [destReal];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = resolve(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        resolveArchiveSymlink(destReal, fullPath, 0);
+      } else if (entry.isDirectory()) {
+        stack.push(fullPath);
+      }
     }
   }
 }
@@ -602,6 +745,7 @@ export interface AgentToolManagerOptions {
   volumeRoot?: string;
   containerRoot?: string;
   arch?: AgentToolArch;
+  libc?: AgentToolLibc;
   nodeVersion?: string;
   sources?: Partial<TrustedToolSources>;
   fetcher?: typeof fetch;
@@ -613,6 +757,7 @@ export class AgentToolManager {
   readonly volumeRoot: string;
   readonly containerRoot: string;
   readonly nodeVersion: string;
+  readonly libc: AgentToolLibc;
   private readonly explicitArch?: AgentToolArch;
   private readonly sources: TrustedToolSources;
   private readonly fetcher: typeof fetch;
@@ -627,6 +772,7 @@ export class AgentToolManager {
     this.volumeRoot = options.volumeRoot ?? DEFAULT_AGENT_TOOLS_ROOT;
     this.containerRoot = options.containerRoot ?? DEFAULT_AGENT_TOOLS_ROOT;
     this.nodeVersion = options.nodeVersion ?? BUNDLED_NODE_VERSION;
+    this.libc = options.libc ?? detectHostLibc();
     this.explicitArch = options.arch;
     this.sources = { ...DEFAULT_TRUSTED_SOURCES, ...(options.sources ?? {}) };
     this.fetcher = options.fetcher ?? fetch;
@@ -778,8 +924,9 @@ export class AgentToolManager {
   /** True when an active claude_code run's manifest names this Node version, so replacing Node would break that run. */
   private activeClaudeDependsOnNode(rootReal: string, active: Iterable<string>, nodeVer: string, arch: AgentToolArch): boolean {
     for (const version of active) {
-      const manifest = readValidCliManifest(rootReal, 'claude_code', version, arch, this.containerRoot);
-      if (manifest?.node_version === nodeVer) return true;
+      const manifest = readValidCliManifest(rootReal, 'claude_code', version, arch, this.containerRoot, this.libc);
+      const named = manifest?.node_version ?? brokenManifestNodeVersion(rootReal, version);
+      if (named === nodeVer) return true;
     }
     return false;
   }
@@ -870,10 +1017,12 @@ export class AgentToolManager {
     const optionalDeps = (pkgMeta.optionalDependencies && typeof pkgMeta.optionalDependencies === 'object')
       ? pkgMeta.optionalDependencies as Record<string, string>
       : {};
-    // Prefer musl static build so custom project container libc changes cannot break execution; fall back to glibc linux package.
-    const muslPkg = `@anthropic-ai/claude-code-linux-${arch}-musl`;
+    // Match the target container libc (`node:22-bookworm-slim` is glibc; the `-musl` package is dynamically linked
+    // against `/lib/ld-musl-*.so.1` and cannot execute on glibc).
     const glibcPkg = `@anthropic-ai/claude-code-linux-${arch}`;
-    const chosenNativePkg = optionalDeps[muslPkg] ? muslPkg : optionalDeps[glibcPkg] ? glibcPkg : null;
+    const muslPkg = `@anthropic-ai/claude-code-linux-${arch}-musl`;
+    const desiredNativePkg = this.libc === 'musl' ? muslPkg : glibcPkg;
+    const chosenNativePkg = optionalDeps[desiredNativePkg] ? desiredNativePkg : null;
 
     let nativeBytes: Buffer | null = null;
     if (chosenNativePkg) {
@@ -909,7 +1058,7 @@ export class AgentToolManager {
         hasNativeBinary = true;
       }
 
-      const jsCandidates = ['cli.js', 'cli.mjs', 'cli-wrapper.cjs'];
+      const jsCandidates = ['cli.js', 'cli.mjs'];
       const jsEntry = jsCandidates.find(rel => existsSync(resolve(pkgDir, rel)) && lstatSync(resolve(pkgDir, rel)).isFile()) ?? null;
 
       const binDir = resolve(stageDir, 'bin');
@@ -924,6 +1073,7 @@ export class AgentToolManager {
         cli: 'claude_code',
         version,
         arch,
+        libc: this.libc,
         installed_at: new Date().toISOString(),
         container_executable: posix.join(this.containerRoot, 'claude_code', version, 'bin', 'claude'),
         container_node_executable: posix.join(this.containerRoot, 'node', this.nodeVersion, 'bin', 'node'),
@@ -1012,11 +1162,11 @@ export class AgentToolManager {
   }
 
   status(): AgentToolsVolumeStatus {
-    return inspectAgentTools(this.volumeRoot, { containerRoot: this.containerRoot, arch: this.explicitArch });
+    return inspectAgentTools(this.volumeRoot, { containerRoot: this.containerRoot, arch: this.explicitArch, libc: this.libc });
   }
 
   select(cli: AgentToolCli): SelectedCliVersion {
-    return selectCompatibleCliVersion(this.volumeRoot, cli, { containerRoot: this.containerRoot, arch: this.explicitArch });
+    return selectCompatibleCliVersion(this.volumeRoot, cli, { containerRoot: this.containerRoot, arch: this.explicitArch, libc: this.libc });
   }
 
   install(input: { cli: AgentToolCli; version: string; sha256?: string; retainCount?: number; protectedVersions?: Iterable<string> | (() => Iterable<string>) }): Promise<{
@@ -1068,7 +1218,7 @@ export class AgentToolManager {
           compatible: satisfiesCliRange(input.cli, parsed.raw),
           pruned: sweep.removed,
           protected_invalid: sweep.protectedInvalid,
-          status: inspectCliAvailability(this.volumeRoot, input.cli, { containerRoot: this.containerRoot, arch }),
+          status: inspectCliAvailability(this.volumeRoot, input.cli, { containerRoot: this.containerRoot, arch, libc: this.libc }),
         };
       } finally {
         this.activeVersionProvider = null;
@@ -1117,7 +1267,7 @@ export class AgentToolManager {
     const validVersions: string[] = [];
     const brokenDirs: string[] = [];
     for (const entry of readdirSync(cliDir)) {
-      const manifest = readValidCliManifest(rootReal, cli, entry, arch, this.containerRoot);
+      const manifest = readValidCliManifest(rootReal, cli, entry, arch, this.containerRoot, this.libc);
       if (manifest) validVersions.push(manifest.version);
       else brokenDirs.push(entry);
     }
@@ -1176,7 +1326,7 @@ export class AgentToolManager {
 
   private pruneUnreferencedNodeRuntimes(rootReal: string, arch: AgentToolArch, unreadable: string[] = []): void {
     const referencedNodes = new Set<string>();
-    const claudeStatus = inspectCliAvailability(rootReal, 'claude_code', { containerRoot: this.containerRoot, arch });
+    const claudeStatus = inspectCliAvailability(rootReal, 'claude_code', { containerRoot: this.containerRoot, arch, libc: this.libc });
     for (const m of claudeStatus.installed_manifests) {
       if (m.node_version) referencedNodes.add(m.node_version);
     }

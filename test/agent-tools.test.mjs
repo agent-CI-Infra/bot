@@ -97,32 +97,49 @@ async function startMockToolUpstream(t, arch = 'x64') {
   const nodeHash = hashes(nodeTar);
 
   const claudeVersions = new Map();
-  for (const ver of ['1.9.0', '2.1.310', '2.1.319', '3.0.0']) {
+  for (const ver of ['1.9.0', '2.1.310', '2.1.315', '2.1.319', '3.0.0']) {
+    const muslOnlyWrapper = ver === '2.1.315';
     const pkgTar = buildTarGz([
       {
         name: 'package/package.json',
         mode: 0o644,
         content: JSON.stringify({ name: '@anthropic-ai/claude-code', version: ver }),
       },
-      {
-        name: 'package/cli.js',
-        mode: 0o755,
-        content: `echo "${ver} (Claude Code) node=$(command -v node)"\n`,
-      },
+      muslOnlyWrapper
+        ? {
+            name: 'package/cli-wrapper.cjs',
+            mode: 0o755,
+            content: 'throw new Error("cli-wrapper.cjs requires node_modules");\n',
+          }
+        : {
+            name: 'package/cli.js',
+            mode: 0o755,
+            content: `echo "${ver} (Claude Code) node=$(command -v node)"\n`,
+          },
     ]);
-    const nativeTar = buildTarGz([
+    const glibcNativeTar = buildTarGz([
       {
         name: 'package/claude',
         mode: 0o755,
-        content: `#!/bin/sh\necho "${ver} (Claude Code) path=$PATH"\n`,
+        content: `#!/bin/sh\necho "${ver} (Claude Code) libc=glibc path=$PATH"\n`,
+      },
+    ]);
+    const muslNativeTar = buildTarGz([
+      {
+        name: 'package/claude',
+        mode: 0o755,
+        content: `#!/bin/sh\necho "${ver} (Claude Code) libc=musl path=$PATH"\n`,
       },
     ]);
     claudeVersions.set(ver, {
       pkgTar,
       pkgHash: hashes(pkgTar),
-      nativeTar,
-      nativeHash: hashes(nativeTar),
-      hasNative: ver !== '2.1.310', // exercise both native binary and JS-via-bundled-Node launch modes!
+      glibcNativeTar,
+      glibcNativeHash: hashes(glibcNativeTar),
+      muslNativeTar,
+      muslNativeHash: hashes(muslNativeTar),
+      hasGlibcNative: ver !== '2.1.310' && !muslOnlyWrapper,
+      hasMuslNative: ver !== '2.1.310',
     });
   }
 
@@ -165,11 +182,15 @@ async function startMockToolUpstream(t, arch = 'x64') {
       const item = claudeVersions.get(ver);
       if (!item) { res.writeHead(404); res.end('{}'); return; }
       const badSha1 = '0'.repeat(40);
+      const optionalDependencies = {
+        ...(item.hasGlibcNative ? { [`@anthropic-ai/claude-code-linux-${arch}`]: ver } : {}),
+        ...(item.hasMuslNative ? { [`@anthropic-ai/claude-code-linux-${arch}-musl`]: ver } : {}),
+      };
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
         name: '@anthropic-ai/claude-code',
         version: ver,
-        optionalDependencies: item.hasNative ? { [`@anthropic-ai/claude-code-linux-${arch}-musl`]: ver } : {},
+        optionalDependencies,
         dist: {
           tarball: `${base}/npm/@anthropic-ai/claude-code/-/claude-code-${ver}.tgz`,
           shasum: tamperClaudeHash ? badSha1 : item.pkgHash.sha1,
@@ -179,19 +200,37 @@ async function startMockToolUpstream(t, arch = 'x64') {
       return;
     }
 
-    const nativeMeta = new RegExp(`^/npm/@anthropic-ai%2fclaude-code-linux-${arch}-musl/([^/]+)$`).exec(u.pathname);
-    if (nativeMeta) {
-      const ver = nativeMeta[1];
+    const glibcNativeMeta = new RegExp(`^/npm/@anthropic-ai%2fclaude-code-linux-${arch}/([^/]+)$`).exec(u.pathname);
+    if (glibcNativeMeta) {
+      const ver = glibcNativeMeta[1];
       const item = claudeVersions.get(ver);
-      if (!item) { res.writeHead(404); res.end('{}'); return; }
+      if (!item || !item.hasGlibcNative) { res.writeHead(404); res.end('{}'); return; }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        name: `@anthropic-ai/claude-code-linux-${arch}`,
+        version: ver,
+        dist: {
+          tarball: `${base}/npm/@anthropic-ai/claude-code-linux-${arch}/-/claude-code-linux-${arch}-${ver}.tgz`,
+          shasum: item.glibcNativeHash.sha1,
+          integrity: item.glibcNativeHash.integrity,
+        },
+      }));
+      return;
+    }
+
+    const muslNativeMeta = new RegExp(`^/npm/@anthropic-ai%2fclaude-code-linux-${arch}-musl/([^/]+)$`).exec(u.pathname);
+    if (muslNativeMeta) {
+      const ver = muslNativeMeta[1];
+      const item = claudeVersions.get(ver);
+      if (!item || !item.hasMuslNative) { res.writeHead(404); res.end('{}'); return; }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
         name: `@anthropic-ai/claude-code-linux-${arch}-musl`,
         version: ver,
         dist: {
           tarball: `${base}/npm/@anthropic-ai/claude-code-linux-${arch}-musl/-/claude-code-linux-${arch}-musl-${ver}.tgz`,
-          shasum: item.nativeHash.sha1,
-          integrity: item.nativeHash.integrity,
+          shasum: item.muslNativeHash.sha1,
+          integrity: item.muslNativeHash.integrity,
         },
       }));
       return;
@@ -205,11 +244,19 @@ async function startMockToolUpstream(t, arch = 'x64') {
       return;
     }
 
-    const nativeTarMatch = new RegExp(`^/npm/@anthropic-ai/claude-code-linux-${arch}-musl/-/claude-code-linux-${arch}-musl-([^/]+)\\.tgz$`).exec(u.pathname);
-    if (nativeTarMatch) {
-      const item = nativeVersionsOr(claudeVersions, nativeTarMatch[1]);
+    const glibcNativeTarMatch = new RegExp(`^/npm/@anthropic-ai/claude-code-linux-${arch}/-/claude-code-linux-${arch}-([^/]+)\\.tgz$`).exec(u.pathname);
+    if (glibcNativeTarMatch) {
+      const item = nativeVersionsOr(claudeVersions, glibcNativeTarMatch[1]);
       res.writeHead(200, { 'content-type': 'application/gzip' });
-      res.end(item.nativeTar);
+      res.end(item.glibcNativeTar);
+      return;
+    }
+
+    const muslNativeTarMatch = new RegExp(`^/npm/@anthropic-ai/claude-code-linux-${arch}-musl/-/claude-code-linux-${arch}-musl-([^/]+)\\.tgz$`).exec(u.pathname);
+    if (muslNativeTarMatch) {
+      const item = nativeVersionsOr(claudeVersions, muslNativeTarMatch[1]);
+      res.writeHead(200, { 'content-type': 'application/gzip' });
+      res.end(item.muslNativeTar);
       return;
     }
 
@@ -341,10 +388,14 @@ test('installs Claude Code (with bundled Node runtime) and Codex (static build),
   await manager.install({ cli: 'codex', version: '1.0.0' });
 
   // Runtime selector picks newest compatible version (2.1.319 and 0.167.0), ignoring 3.0.0 and 1.0.0!
+  // On glibc (project/run base image node:22-bookworm-slim), installer selects @anthropic-ai/claude-code-linux-x64, never -musl.
   const claudeSel = manager.select('claude_code');
   assert.equal(claudeSel.version, '2.1.319');
   assert.equal(claudeSel.compatible_range, COMPATIBLE_CLI_RANGES.claude_code.range);
-  assert.match(execFileSync(claudeSel.host_executable, ['--version'], { encoding: 'utf8' }), /2\.1\.319 \(Claude Code\)/);
+  assert.match(execFileSync(claudeSel.host_executable, ['--version'], { encoding: 'utf8' }), /2\.1\.319 \(Claude Code\) libc=glibc/);
+  const nativeArtifact = claudeSel.manifest.artifacts.find(a => a.role === 'native_binary');
+  assert.ok(nativeArtifact?.source_url.includes('/@anthropic-ai/claude-code-linux-x64/-/'));
+  assert.equal(nativeArtifact?.source_url.includes('-musl'), false);
 
   const codexSel = manager.select('codex');
   assert.equal(codexSel.version, '0.167.0');
@@ -360,15 +411,115 @@ test('installs Claude Code (with bundled Node runtime) and Codex (static build),
   assert.deepEqual(pruned.status.node_versions, ['22.15.0']);
 });
 
-test('extractTarGz rejects path traversal and escaping symlinks', t => {
-  const dir = mkdtempSync(join(tmpdir(), 'tar-guard-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+test('AgentToolManager selects musl native package only when libc=musl and refuses musl-only wrapper packages on glibc', async t => {
+  const upstream = await startMockToolUpstream(t, 'x64');
+
+  const glibcRoot = mkdtempSync(join(tmpdir(), 'agent-tools-glibc-'));
+  t.after(() => rmSync(glibcRoot, { recursive: true, force: true }));
+  const glibcManager = new AgentToolManager({
+    volumeRoot: glibcRoot,
+    containerRoot: glibcRoot,
+    arch: 'x64',
+    libc: 'glibc',
+    sources: upstream.sources,
+  });
+  await assert.rejects(
+    glibcManager.install({ cli: 'claude_code', version: '2.1.315' }),
+    { code: 'agent_tool_archive_invalid' },
+  );
+  assert.equal(existsSync(join(glibcRoot, 'claude_code', '2.1.315')), false);
+
+  const muslRoot = mkdtempSync(join(tmpdir(), 'agent-tools-musl-'));
+  t.after(() => rmSync(muslRoot, { recursive: true, force: true }));
+  const muslManager = new AgentToolManager({
+    volumeRoot: muslRoot,
+    containerRoot: muslRoot,
+    arch: 'x64',
+    libc: 'musl',
+    sources: upstream.sources,
+  });
+  await muslManager.install({ cli: 'claude_code', version: '2.1.315' });
+  const muslSel = muslManager.select('claude_code');
+  assert.equal(muslSel.manifest.libc, 'musl');
+  assert.match(execFileSync(muslSel.host_executable, ['--version'], { encoding: 'utf8' }), /2\.1\.315 \(Claude Code\) libc=musl/);
+  assert.ok(muslSel.manifest.artifacts.find(a => a.role === 'native_binary')?.source_url.includes('-musl'));
+
+  // A glibc runtime rejects a volume entry built for musl — both when manifest.libc is recorded and on legacy manifests
+  // that only have the -musl native_binary source_url — instead of selecting a binary whose dynamic loader is missing.
+  const glibcOnMuslVolume = new AgentToolManager({
+    volumeRoot: muslRoot,
+    containerRoot: muslRoot,
+    arch: 'x64',
+    libc: 'glibc',
+    sources: upstream.sources,
+  });
+  assert.equal(glibcOnMuslVolume.status().clis.claude_code.available, false);
+  assert.equal(glibcOnMuslVolume.status().clis.claude_code.reason, 'cli_not_installed');
+  assert.throws(() => glibcOnMuslVolume.select('claude_code'), { code: 'cli_not_installed' });
+
+  const legacyManifestPath = join(muslRoot, 'claude_code', '2.1.315', 'manifest.json');
+  const legacyManifest = JSON.parse(readFileSync(legacyManifestPath, 'utf8'));
+  delete legacyManifest.libc;
+  writeFileSync(legacyManifestPath, JSON.stringify(legacyManifest, null, 2));
+  assert.equal(glibcOnMuslVolume.status().clis.claude_code.available, false);
+  assert.throws(() => glibcOnMuslVolume.select('claude_code'), { code: 'cli_not_installed' });
+  assert.equal(muslManager.select('claude_code').version, '2.1.315');
+});
+
+test('extractTarGz rejects path traversal, symlink-chain escapes, and symlink loops while allowing safe internal symlinks', t => {
+  const outer = mkdtempSync(join(tmpdir(), 'tar-guard-'));
+  t.after(() => rmSync(outer, { recursive: true, force: true }));
+  const dir = join(outer, 'a', 'b', 'c');
+  mkdirSync(dir, { recursive: true });
 
   const traversal = buildTarGz([{ name: '../escaped.txt', content: 'nope' }]);
   assert.throws(() => extractTarGz(traversal, dir), { code: 'agent_tool_archive_invalid' });
 
   const badSymlink = buildTarGz([{ name: 'bin/escape', type: 'symlink', linkname: '../../outside' }]);
-  assert.throws(() => extractTarGz(badSymlink, dir), { code: 'agent_tool_archive_invalid' });
+  assert.throws(() => extractTarGz(badSymlink, join(dir, 's1')), { code: 'agent_tool_archive_invalid' });
+
+  // Multi-hop symlink chain: lexically `x/x/x/../../../outside.txt` stays at `<dest>/outside.txt`,
+  // but `x -> .` keeps traversal at `<dest>` so `../../..` escapes 3 directories upward (#705 M8).
+  const chainEscape = buildTarGz([
+    { name: 'x', type: 'symlink', linkname: '.' },
+    { name: 'q', type: 'symlink', linkname: 'x/x/x/../../../escaped-chain.txt' },
+    { name: 'q', content: 'escaped!' },
+  ]);
+  assert.throws(() => extractTarGz(chainEscape, join(dir, 's2')), { code: 'agent_tool_archive_invalid' });
+  assert.equal(existsSync(join(outer, 'escaped-chain.txt')), false);
+  assert.equal(existsSync(join(outer, 'a', 'escaped-chain.txt')), false);
+
+  // Dangling symlink chain without a trailing file write is also rejected on verification.
+  const danglingChain = buildTarGz([
+    { name: 'x', type: 'symlink', linkname: '.' },
+    { name: 'q', type: 'symlink', linkname: 'x/x/x/../../../dangling-target' },
+  ]);
+  assert.throws(() => extractTarGz(danglingChain, join(dir, 's3')), { code: 'agent_tool_archive_invalid' });
+
+  // Directory write through a symlinked parent component is rejected.
+  const dirViaSymlink = buildTarGz([
+    { name: 'sub', type: 'symlink', linkname: '.' },
+    { name: 'escape_dir', type: 'symlink', linkname: 'sub/sub/../../escaped-dir' },
+    { name: 'escape_dir/pwn.txt', content: 'nope' },
+  ]);
+  assert.throws(() => extractTarGz(dirViaSymlink, join(dir, 's4')), { code: 'agent_tool_archive_invalid' });
+  assert.equal(existsSync(join(outer, 'a', 'escaped-dir')), false);
+
+  // Symlink cycle is rejected cleanly rather than recursing infinitely.
+  const loopArchive = buildTarGz([
+    { name: 'loopA', type: 'symlink', linkname: 'loopB' },
+    { name: 'loopB', type: 'symlink', linkname: 'loopA' },
+  ]);
+  assert.throws(() => extractTarGz(loopArchive, join(dir, 's5')), { code: 'agent_tool_archive_invalid' });
+
+  // Benign internal relative symlink remains supported.
+  const okDir = join(dir, 'ok');
+  const benignSymlink = buildTarGz([
+    { name: 'lib/entry.txt', content: 'safe-internal\n' },
+    { name: 'bin/entry', type: 'symlink', linkname: '../lib/entry.txt' },
+  ]);
+  extractTarGz(benignSymlink, okDir);
+  assert.equal(readFileSync(join(okDir, 'bin', 'entry'), 'utf8'), 'safe-internal\n');
 });
 
 test('records selected CLI version on task_runs and serves super-admin /api/agent-tools endpoints', async t => {

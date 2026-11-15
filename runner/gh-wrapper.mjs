@@ -73,6 +73,7 @@ cleanEnv.GITHUB_TOKEN = grant.token;
 cleanEnv.GH_PROMPT_DISABLED = '1';
 if (process.env.BOT_GITHUB_HOST && process.env.BOT_GITHUB_HOST !== 'github.com') {
   cleanEnv.GH_HOST = process.env.BOT_GITHUB_HOST;
+  cleanEnv.GH_ENTERPRISE_TOKEN = grant.token;
 }
 
 const child = spawn(realGh, args, {

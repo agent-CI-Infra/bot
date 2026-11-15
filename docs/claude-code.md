@@ -45,7 +45,7 @@
 CLI 工作目录固定为容器内任务仓库检出 `<task_dir>/repo`；`HOME` 与 `CLAUDE_CONFIG_DIR` 指向角色实例专属状态目录 `/workspace/tasks/<state_workspace_id>/cli-state/<session_key>/`，随 `WorkspaceCleanup` 生命周期清理。
 
 - **开放容器原生工具**：启用 `--tools default` 与 `--dangerously-skip-permissions`（安全边界由容器只读根、非特权 UID 10001、capability 丢弃、网络隔离与短期凭据提供），角色可直接在 `<task_dir>/repo` 中使用原生终端（`Bash`）、文件读写与编辑（`Read`、`Write`、`Edit`）、搜索（`Glob`、`Grep`）及原生子 Agent（`Agent`/`Task`）。无外网权限（`!egress`）时通过 `--disallowedTools` 禁用 `WebFetch`、`WebSearch`，同时禁用 `EnterWorktree`/`ExitWorktree` 及无关的宿主计划任务工具。
-- **平台管理工具桥（`runner/mcp-bridge.mjs`）**：通过 `--strict-mcp-config` 仅注入 stdio MCP 服务 `bot`，并设置 `MCP_TOOL_TIMEOUT=3600000` 以容纳长耗时平台操作。桥接器经文件邮箱（`tool-requests/`、`tool-replies/`）调用控制面 `createTaskToolDispatcher`，提供任务记录读取（`read_task_record`）、角色记忆、技能读取（`read_skill`）、结构化 GitHub 读取/写入及结果提交工具（`finish` 等）；已被 CLI 原生工具替代的底层 `read_file`/`write_file`/`run_command`/`start_agent` 不再重复暴露在 MCP 中。
+- **平台管理工具桥（`runner/mcp-bridge.mjs`）**：通过 `--strict-mcp-config` 仅注入 stdio MCP 服务 `bot`，并设置 `MCP_TOOL_TIMEOUT=3600000` 与 `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=3600000` 以容纳长耗时平台操作。桥接器经文件邮箱（`tool-requests/`、`tool-replies/`）调用控制面 `createTaskToolDispatcher`，提供任务记录读取（`read_task_record`）、角色记忆、技能读取（`read_skill`）、结构化 GitHub 读取/写入及结果提交工具（`finish` 等）；已被 CLI 原生工具替代的底层 `read_file`/`write_file`/`run_command`/`start_agent` 不再重复暴露在 MCP 中。
 - **防仓库投毒**：固定携带 `--disable-slash-commands --setting-sources "" --strict-mcp-config`，并在独立 `settings.json` 中设置 `disableAllHooks: true`、`enableAllProjectMcpServers: false`，仓库检出内的 `.claude/settings.json`、`.mcp.json`、`CLAUDE.md` 钩子或恶意 MCP 配置不会自动执行。
 - **安静的命令日志**：容器内原生命令与文件操作不再逐条刷写控制面运行事件日志；控制面只记录平台 MCP 工具调用回执、模型网关请求轨迹与公开消息摘要。
 

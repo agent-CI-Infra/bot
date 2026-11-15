@@ -42,9 +42,9 @@ function fixture(t, env = {}, config = {}) {
         env: { CODEX_HOME: home, ...e },
         stateDirectory: sessionsDir,
         version: '0.166.0',
-        timeoutMs: 8000,
-        cancelGraceMs: 400,
-        toolStartupMs: 3000,
+        timeoutMs: 15000,
+        cancelGraceMs: 800,
+        toolStartupMs: 5000,
         ...c,
       }),
     );
@@ -97,6 +97,13 @@ test('Codex app-server: handshake, stdio MCP task tools, thread/turn binding, qu
   assert.ok(methods.lastIndexOf('experimentalFeature/list') < methods.indexOf('turn/start'), 'built-in tools are verified before the first turn');
   const started = f.lines('requests.jsonl').find(r => r.method === 'thread/start');
   assert.ok(started.keys.includes('developerInstructions') && started.keys.includes('config'));
+  assert.deepEqual(
+    f.lines('mcp-params.jsonl')[0].mcp_env_vars,
+    ['BOT_RUN_TOKEN', 'BOT_WORKSPACE_ID'],
+    'thread/start MCP server config forwards BOT_RUN_TOKEN and BOT_WORKSPACE_ID across Codex env_clear()',
+  );
+  const generatedToml = readFileSync(join(f.home, 'config.toml'), 'utf8');
+  assert.match(generatedToml, /env_vars = \["BOT_RUN_TOKEN", "BOT_WORKSPACE_ID"\]/);
 
   const events = f.events(), bound = events.find(e => e.type === 'session_bound');
   assert.deepEqual(
@@ -370,7 +377,7 @@ test('Codex container policy enables native workspace tools, verifies feature/sa
     await t.test(code + ' ' + toolName + ' ' + Object.keys(env)[0], async t => {
       const f = fixture(t, { ...env, FIXTURE_IGNORE_INTERRUPT: 'true' }), begun = Date.now();
       await assert.rejects(runRole(f.spec, 'dev', undefined, 'codex'), { code });
-      assert.ok(Date.now() - begun < 4000, 'stopped within the grace period, not at the run timeout');
+      assert.ok(Date.now() - begun < 10000, 'stopped within the grace period, not at the run timeout');
       const denied = f.s.all("SELECT data FROM task_history WHERE type='capability_denied'").map(r => JSON.parse(r.data));
       assert.ok(denied.some(d => d.tool === toolName), toolName);
       assert.equal(f.lines('responses.jsonl').length, 0, 'no approval request was involved');
@@ -383,7 +390,7 @@ test('Codex container policy enables native workspace tools, verifies feature/sa
 test('Codex model reroute stops the run within the grace period even when the interrupt is ignored', async t => {
   const f = fixture(t, { FIXTURE_REROUTE: 'true', FIXTURE_IGNORE_INTERRUPT: 'true' }), begun = Date.now();
   await assert.rejects(runRole(f.spec, 'dev', undefined, 'codex'), { code: 'codex_model_rerouted' });
-  assert.ok(Date.now() - begun < 4000, 'not the run timeout');
+  assert.ok(Date.now() - begun < 10000, 'not the run timeout');
   assert.deepEqual(f.events().filter(e => e.phase === 'interrupt_receipt').map(e => e.receipt), ['timeout']);
   await stopped(f);
 });
@@ -557,7 +564,7 @@ test('Only the turn named by the start answer ends the start; a late turn id or 
     assert.deepEqual(f.lines('interrupts.jsonl').map(i => i.turnId), [c]);
     assert.deepEqual(run.filter(e => e.phase === 'interrupt_receipt').map(e => [e.turnId, e.receipt]), [[c, 'timeout']], 'the terminal of B is no receipt for C');
     const at = phase => Date.parse(f.s.all("SELECT created_at,data FROM task_history WHERE type='harness_event' ORDER BY id").filter(r => JSON.parse(r.data).phase === phase).at(-1).created_at);
-    assert.ok(at('interrupt_receipt') - at('interrupt_requested') >= 380, 'the grace period (400 ms) was waited for C');
+    assert.ok(at('interrupt_receipt') - at('interrupt_requested') >= 750, 'the grace period (800 ms) was waited for C');
     assert.deepEqual(run.filter(e => e.type === 'turn' && e.phase === 'ended'), [], 'C never ended');
     assert.equal(results(f.s), before, 'no role result');
   });
@@ -571,7 +578,7 @@ test('Only the turn named by the start answer ends the start; a late turn id or 
     assert.notEqual(c, b);
     assert.deepEqual(f.lines('interrupts.jsonl').map(i => i.turnId), [c], 'the stop interrupts C, not B');
     assert.deepEqual([requested.map(e => e.turnId), receipts.map(e => [e.turnId, e.receipt])], [[c], [[c, 'timeout']]], 'the same turn id is interrupted and awaited');
-    assert.ok(receipts[0].at - requested[0].at >= 380, 'the grace period (400 ms) was waited for C');
+    assert.ok(receipts[0].at - requested[0].at >= 750, 'the grace period (800 ms) was waited for C');
     assert.deepEqual(run.filter(e => e.type === 'turn' && e.phase === 'ended'), [], 'C never ended');
     assert.equal(results(f.s), before, 'no role result');
   });

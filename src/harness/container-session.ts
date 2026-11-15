@@ -327,7 +327,7 @@ export async function withContainerHarnessSession<T, R>(
   const scopeInfo = computeAllowedGithubScopes(spec);
   const githubApiUrl = spec.containerOptions?.githubApiUrl;
   const readTokens = repoRow && scopeInfo.initial.length
-    ? new ReadTokens(spec.store, repoRow, spec.redactor, spec.guard, githubApiUrl, scopeInfo.initial, scopeInfo.live)
+    ? new ReadTokens(spec.store, repoRow, spec.redactor, spec.guard, githubApiUrl, scopeInfo.initial, scopeInfo.live, 64)
     : null;
 
   const mcpTools = platformTools.map(t => ({

@@ -80,6 +80,7 @@ function buildCodexConfigToml({ model, relayUrl, egress, nodeExec, mcpBridgePath
     `[mcp_servers.bot]`,
     `command = ${tomlString(nodeExec)}`,
     `args = [${tomlString(mcpBridgePath)}, ${tomlString(agentDir)}]`,
+    `env_vars = ["BOT_RUN_TOKEN", "BOT_WORKSPACE_ID"]`,
     `tool_timeout_sec = 3600`,
     `startup_timeout_sec = 30`,
     ``,
@@ -282,6 +283,29 @@ try {
   );
   await chmod(`${wrapperBinDir}/gh`, 0o700);
 
+  // Login shells (`bash -lc` / `sh -lc`, used by Claude Code's shell snapshot and Codex's shell tool) source
+  // `/etc/profile`, which overwrites PATH on Debian. Restore the wrapper and bundled runtime directories at the front.
+  const loginProfile = [
+    '# Managed by Bot container harness (#705)',
+    'case "${PATH:-}" in',
+    '  "${BOT_NODE_BIN_DIR}:"*|"${BOT_WRAPPER_BIN_DIR}:${BOT_NODE_BIN_DIR}:"*) ;;',
+    '  *) [ -n "${BOT_NODE_BIN_DIR:-}" ] && PATH="${BOT_NODE_BIN_DIR}${PATH:+:$PATH}" ;;',
+    'esac',
+    'case "${PATH:-}" in',
+    '  "${BOT_WRAPPER_BIN_DIR}:"*) ;;',
+    '  *) [ -n "${BOT_WRAPPER_BIN_DIR:-}" ] && PATH="${BOT_WRAPPER_BIN_DIR}${PATH:+:$PATH}" ;;',
+    'esac',
+    'export PATH',
+    '',
+  ].join('\n');
+  const bashProfile = 'if [ -f "$HOME/.profile" ]; then\n  . "$HOME/.profile"\nfi\n';
+  for (const [name, content] of [['.profile', loginProfile], ['.bash_profile', bashProfile]]) {
+    const tmpProfile = `${homeDir}/${name}.tmp`;
+    await unlink(tmpProfile).catch(() => {});
+    await writeFile(tmpProfile, content, { mode: 0o600 });
+    await rename(tmpProfile, `${homeDir}/${name}`);
+  }
+
   relay = await startModelRelay({ agentDir, signal: runAbort.signal });
   credHelper = await startCredentialHelperServer({ agentDir, runToken, addSecret, signal: runAbort.signal });
 
@@ -306,6 +330,7 @@ try {
     BOT_CREDENTIAL_HELPER_URL: credHelper.url,
     BOT_CREDENTIAL_HELPER_SECRET: credHelper.secret,
     BOT_WRAPPER_BIN_DIR: wrapperBinDir,
+    BOT_NODE_BIN_DIR: nodeBinDir,
     BOT_GITHUB_HOST: githubHost,
     ...(allowHttpGit ? { BOT_ALLOW_HTTP_GIT_CREDENTIAL: 'true' } : {}),
     ...(local && process.env.BOT_REAL_GH_BIN ? { BOT_REAL_GH_BIN: process.env.BOT_REAL_GH_BIN } : {}),
@@ -394,6 +419,7 @@ try {
       CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(rawConfig.max_output_tokens || 8192),
       MCP_TIMEOUT: '60000',
       MCP_TOOL_TIMEOUT: '3600000',
+      CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: '3600000',
       ENABLE_TOOL_SEARCH: 'false',
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
       DISABLE_AUTOUPDATER: '1',
