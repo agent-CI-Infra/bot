@@ -24,7 +24,7 @@ function feishuError(err) {
     channel_transport_forbidden: '组织的应用只能使用企业自建应用和 SDK 长连接；HTTP 回调和商店应用只能由超级管理员配置。',
     channel_application_immutable: '应用创建后，App ID、安装企业和所属组织都不能修改。需要换用其他应用时，请新增一个连接。',
     organization_not_found: '所选组织不存在，请刷新本页后重新选择。' };
-  return Object.entries(reasons).find(([code]) => err.message.includes(code))?.[1] || err.message;
+  return Object.entries(reasons).find(([code]) => err.message.includes(code))?.[1] || readErrorText(err);
 }
 // The required scopes come from the server list, so the wizard and every connection import and check the same set.
 const feishuScopeJSON = (scopes, type) => JSON.stringify({ scopes: { tenant: scopes.filter(s => !s.enterprise_only || type === 'enterprise').map(s => s.scope), user: [] } }, null, 2);

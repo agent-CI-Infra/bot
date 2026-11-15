@@ -90,7 +90,7 @@ async function renderManagementReceiptPage(id) {
   catch (err) {
     if (page.hidden) return;
     receiptShownId = id;
-    content.replaceChildren(element('p', '读不到这条回执：' + err.message, 'view-error'));
+    content.replaceChildren(element('p', '读不到这条回执：' + readErrorText(err), 'view-error'));
     return;
   }
   if (page.hidden) return;

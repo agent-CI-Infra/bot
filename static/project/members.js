@@ -13,7 +13,7 @@ function membersSection() {
     try { data = await api(`/api/repositories/${id}/members`); }
     catch (err) {
       if (isCurrent()) section.replaceChildren(element('h3', '项目成员与授权来源'), consoleState('成员权限读取失败',
-        err.status === 403 ? '需要本项目配置权限。请联系组织或平台管理员；身份绑定不会自动增加成员管理能力。' : err.message,
+        err.status === 403 ? '需要本项目配置权限。请联系组织或平台管理员；身份绑定不会自动增加成员管理能力。' : readErrorText(err),
         { tone: 'error', retry: load }));
       return;
     }
@@ -104,7 +104,7 @@ function membersSection() {
     select.setAttribute('aria-label', '添加项目管理员');
     select.add(new Option(candidates.length ? '选择项目管理员' : '没有可添加的项目管理员（在“用户”页创建）', '')); candidates.forEach(u => select.add(new Option(u.username, u.id)));
     add.append(select, button('添加', () => { const user = candidates.find(u => u.id === select.value); if (user) return update(user, [...assigned(user), id]); }));
-    } catch (err) { if (isCurrent()) container.append(consoleState('项目分配读取失败', err.message, { tone: 'error', retry: () => { container.replaceChildren(element('h3', '项目管理员分配')); return loadLegacy(container, isCurrent); } })); }
+    } catch (err) { if (isCurrent()) container.append(consoleState('项目分配读取失败', readErrorText(err), { tone: 'error', retry: () => { container.replaceChildren(element('h3', '项目管理员分配')); return loadLegacy(container, isCurrent); } })); }
   };
   section.append(consoleState('正在读取项目授权', '按本项目范围核对有效授权和历史来源。', { tone: 'loading' }));
   void load();

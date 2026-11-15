@@ -67,7 +67,7 @@ async function renderNewTask(request) {
         note(result.task_creation?.allowed ? '当前允许提交任务；服务端将在提交时重新核验配置、预算和授权。' : taskCreationError(result.task_creation?.reason || '无法确认创建权限')));
     } catch (err) {
       if (!alive() || version !== contextVersion) return;
-      if (!revoked(err)) contextBody.replaceChildren(consoleState('执行上下文未能读取', err.message, { tone: 'error' }));
+      if (!revoked(err)) contextBody.replaceChildren(consoleState('执行上下文未能读取', readErrorText(err), { tone: 'error' }));
     } finally { if (alive() && version === contextVersion) sync(); }
   }
   function showReceipt() {

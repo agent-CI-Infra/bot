@@ -57,7 +57,7 @@
 | `consoleState(title, text, { tone, retry, retryLabel, retryId })` | 空、加载、失败共用同一组件（`.console-state`）。不传 `tone` 为空状态（`role=status`）；`tone: "loading"` 带 `aria-busy` 和旋转指示（遵循减少动画偏好）；`tone: "error"` 使用 `role=alert`，外观与空状态明显不同，不可被读成「没有数据」。可重试按钮默认为「重新加载」，可用 `retryLabel` / `retryId`（例如电脑状态的 `#computer-refresh`）。`data-testid` 为 `console-state-empty`、`console-state-loading` 或 `console-state-error`。|
 | `consoleGroups()` | 由当前项目和权限生成「更多」页入口（不重复底栏目的地）：超级管理员「当前项目 / 个人与平台 / 管理」，项目管理员「设置 / 管理」，供后续模块扩充 |
 | `syncConsoleShell()` | 登录、退出、路由完成与断点变化后同步外壳 |
-| `readErrorText(err)` | 读取失败卡片的正文文案（#800）：按错误种类选词而不是匹配某一种浏览器原文——`AbortError` 是页面切换主动取消（`请求已取消。`）、`TypeError` 或跨 realm 的 `name === 'TypeError'` 是网络不可达（`网络连接失败，请稍后重试。`），服务端已答的错误保留自己的文案（技术码仍走 #715 的技术信息）。所有 `consoleState(..., { tone: 'error' })` 的读取失败正文都用它，禁止直接拼 `err.message` 露出 `Failed to fetch` / `NetworkError when attempting to fetch resource.` / `Load failed`。 |
+| `readErrorText(err)` | 读取失败卡片的正文文案（#800）：按错误种类选词而不是匹配某一种浏览器原文——`AbortError` 是页面切换主动取消（`请求已取消`）、`TypeError` 或跨 realm 的 `name === 'TypeError'` 是网络不可达（`网络连接失败，请稍后重试`），服务端已答的错误保留自己的文案（技术码仍走 #715 的技术信息）。**返回值不带句号**，由调用方收尾；兜底是 `请求失败`。读取失败的位置一律用它，禁止直接拼 `err.message` 露出 `Failed to fetch` / `NetworkError when attempting to fetch resource.` / `Load failed`：读取失败卡（`consoleState(..., { tone: 'error' })`）与行内读取状态（会话刷新、总览、计划记录、事件订阅、发布记录、回执）都已换上。 |
 
 区块间距（#559）：标题、筛选、内容、分页和卡片之间的垂直节奏使用 `--space-*` 阶梯（4/6/8/12/16/20/24/32/40/48px；本单主要用 `--space-4` 12px 与 `--space-6` 20px）。桌面主栏底部留白从 112px 收为 `--space-10`（有悬浮管理助手入口时，`management.css` 为它保留的 96px 底部留白优先）；「更多功能」分组标题与入口的间距为 `--space-5`。不改按钮和卡片外观。
 
