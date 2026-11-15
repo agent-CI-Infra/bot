@@ -12,6 +12,8 @@ async function login(page, h, password, hash = '#/projects', username = 'adminis
   await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
   await expect(page.locator('#workspace')).toBeVisible();
+  // start() exposes the workspace before its first route finishes and closes any open account menu.
+  await expect.poll(() => page.evaluate(() => announcedPage)).not.toBeNull();
 }
 
 async function fixture() {
@@ -298,6 +300,7 @@ test('账号菜单跟随页面与断点关闭，不会盖在新页面或停在�
     await menu.getByRole('link', { name: '身份与权限', exact: true }).click();
     await expect(page).toHaveURL(/#\/identity$/);
     await expect(menu).toBeHidden();
+    await expect.poll(() => page.evaluate(() => announcedPage)).toBe('page:identity');
     await expect(trigger).toHaveAttribute('aria-expanded', 'false');
     // 768px hides the trigger itself, so a menu opened at 390px must not keep floating over the desktop header.
     await trigger.click();
