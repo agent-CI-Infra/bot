@@ -605,3 +605,21 @@ test('extensions keep the IM source guard across asynchronous steps before any e
   const op = await until(() => h.store.get("SELECT * FROM management_commands WHERE channel='im'"), row => row && !['pending', 'executing'].includes(row.state));
   assert.equal(writes, 0); assert.equal(op.state, 'unknown'); assert.equal(JSON.parse(op.result).error, 'external_binding_required');
 });
+
+test('an event whose create_time is empty, null or not a decimal count is rejected instead of being dated to 1970', async t => {
+  const { h, id } = await channelFixture(t);
+  // Number('') is 0, so these values used to pass the check and store a message dated 1970-01-01.
+  for (const create_time of ['', ' ', null, '0x10', '1e3', '-1', 1.5]) {
+    const result = await post(h, id, envelope('bad time', { message: { create_time } }));
+    assert.equal(result.status, 400, `${JSON.stringify(create_time)} answered ${result.status}: ${JSON.stringify(result.value)}`);
+    assert.equal(result.value.error, 'channel_message_time_invalid');
+  }
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_messages').n, 0, 'no message is stored with a fabricated time');
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_inbox').n, 0, 'nothing is recorded for a rejected event');
+  // Real timestamps keep working, including the microseconds some SDK headers carry.
+  const now = Date.now();
+  assert.equal((await post(h, id, envelope('ms', { message: { create_time: String(now) } }))).status, 200);
+  assert.equal((await post(h, id, envelope('us', { message: { create_time: String(now * 1000) } }))).status, 200);
+  const rows = h.store.all('SELECT created_at FROM channel_messages ORDER BY created_at');
+  assert.deepEqual(rows.map(row => row.created_at), [now, now]);
+});
