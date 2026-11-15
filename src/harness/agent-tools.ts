@@ -610,6 +610,9 @@ export class AgentToolManager {
   private readonly timeoutMs: number;
   private readonly protectedVersions?: (cli: AgentToolCli) => Iterable<string>;
   private queue: Promise<unknown> = Promise.resolve();
+  // The provider and the volume root in effect for the install running right now, so installClaudeCode/installCodex/
+  // ensureNodeRuntime can re-read the active set at the point where they replace a directory (see replaceVersionDir).
+  private activeVersionProvider: (() => Iterable<string>) | null = null;
 
   constructor(options: AgentToolManagerOptions = {}) {
     this.volumeRoot = options.volumeRoot ?? DEFAULT_AGENT_TOOLS_ROOT;
@@ -720,6 +723,36 @@ export class AgentToolManager {
     }
   }
 
+  /** The versions active runs hold, read now: the provider queries the store on every call. */
+  private activeVersions(): Set<string> {
+    const active = new Set<string>();
+    const provider = this.activeVersionProvider;
+    if (!provider) return active;
+    for (const version of provider()) {
+      if (typeof version === 'string' && version.trim()) active.add(version.trim());
+    }
+    return active;
+  }
+
+  /**
+   * Replace the final directory with the staged one, refusing when an active run would lose what it is executing.
+   * install() already refuses early, but a run admitted while the downloads were in flight is not in that snapshot;
+   * re-reading the active set here leaves only the two filesystem calls below as a window.
+   */
+  private replaceVersionDir(
+    stageDir: string,
+    finalDir: string,
+    target: { cli: AgentToolCli | 'node'; version: string; rootReal: string; arch: AgentToolArch },
+  ): void {
+    const active = this.activeVersions();
+    const inUse = target.cli === 'node'
+      ? this.activeClaudeDependsOnNode(target.rootReal, active, target.version, target.arch)
+      : active.has(target.version);
+    if (inUse) throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `${target.cli}@${target.version}`);
+    if (existsSync(finalDir)) rmSync(finalDir, { recursive: true, force: true });
+    renameSync(stageDir, finalDir);
+  }
+
   /** The Node runtime already on the volume when it can be reused as-is; null means the install would replace it. */
   private existingNodeRuntime(rootReal: string, arch: AgentToolArch, nodeVer: string): NodeRuntimeManifest | null {
     const finalDir = resolve(rootReal, 'node', nodeVer);
@@ -734,12 +767,10 @@ export class AgentToolManager {
   }
 
   /** True when an active claude_code run's manifest names this Node version, so replacing Node would break that run. */
-  private activeClaudeDependsOnNode(rootReal: string, active: Iterable<string>, nodeVer: string): boolean {
+  private activeClaudeDependsOnNode(rootReal: string, active: Iterable<string>, nodeVer: string, arch: AgentToolArch): boolean {
     for (const version of active) {
-      try {
-        const manifest = JSON.parse(readFileSync(resolve(rootReal, 'claude_code', version, 'manifest.json'), 'utf8')) as AgentToolManifest;
-        if (manifest?.cli === 'claude_code' && manifest.node_version === nodeVer) return true;
-      } catch {}
+      const manifest = readValidCliManifest(rootReal, 'claude_code', version, arch, this.containerRoot);
+      if (manifest?.node_version === nodeVer) return true;
     }
     return false;
   }
@@ -798,8 +829,7 @@ export class AgentToolManager {
       };
       writeFileSync(resolve(stageDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { mode: 0o644 });
       mkdirSync(resolve(rootReal, 'node'), { recursive: true, mode: 0o755 });
-      if (existsSync(finalDir)) rmSync(finalDir, { recursive: true, force: true });
-      renameSync(stageDir, finalDir);
+      this.replaceVersionDir(stageDir, finalDir, { cli: 'node', version: nodeVer, rootReal, arch });
       return { role: 'node_runtime', source_url: tarballUrl, sha256: actualSha256, bytes: archiveBytes.length };
     } finally {
       rmSync(stageDir, { recursive: true, force: true });
@@ -895,8 +925,7 @@ export class AgentToolManager {
 
       const finalDir = resolve(rootReal, 'claude_code', version);
       mkdirSync(dirname(finalDir), { recursive: true, mode: 0o755 });
-      if (existsSync(finalDir)) rmSync(finalDir, { recursive: true, force: true });
-      renameSync(stageDir, finalDir);
+      this.replaceVersionDir(stageDir, finalDir, { cli: 'claude_code', version, rootReal, arch });
       return manifest;
     } finally {
       rmSync(stageDir, { recursive: true, force: true });
@@ -966,8 +995,7 @@ export class AgentToolManager {
 
       const finalDir = resolve(rootReal, 'codex', version);
       mkdirSync(dirname(finalDir), { recursive: true, mode: 0o755 });
-      if (existsSync(finalDir)) rmSync(finalDir, { recursive: true, force: true });
-      renameSync(stageDir, finalDir);
+      this.replaceVersionDir(stageDir, finalDir, { cli: 'codex', version, rootReal, arch });
       return manifest;
     } finally {
       rmSync(stageDir, { recursive: true, force: true });
@@ -1001,31 +1029,37 @@ export class AgentToolManager {
       }
       const arch = this.requireArch();
       const rootReal = this.requireVolumeRoot();
-      const dynamicProtected = typeof input.protectedVersions === 'function' ? input.protectedVersions() : (input.protectedVersions ?? []);
-      const active = new Set<string>([...dynamicProtected]);
-      // Reinstalling a version an active run is executing would delete its directory before the replacement is ready,
-      // so refuse while it runs. Prune keeps protecting the same set further down; that path is unchanged.
-      if (active.has(parsed.raw)) {
-        throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `${input.cli}@${parsed.raw}`);
-      }
-      if (input.cli === 'claude_code') {
-        const nodeVer = parseSemver(this.nodeVersion)?.raw;
-        // Only refuse when this install would really replace Node: a reusable runtime is left alone by ensureNodeRuntime.
-        if (nodeVer && !this.existingNodeRuntime(rootReal, arch, nodeVer) && this.activeClaudeDependsOnNode(rootReal, active, nodeVer)) {
-          throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `node@${nodeVer}`);
+      const supplied = input.protectedVersions;
+      this.activeVersionProvider = typeof supplied === 'function' ? supplied : () => supplied ?? [];
+      try {
+        const active = this.activeVersions();
+        // Reinstalling a version an active run is executing would delete its directory before the replacement is ready,
+        // so refuse while it runs. replaceVersionDir() repeats the check where the directory is actually swapped for one
+        // admitted during the download; prune keeps protecting the same set further down.
+        if (active.has(parsed.raw)) {
+          throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `${input.cli}@${parsed.raw}`);
         }
+        if (input.cli === 'claude_code') {
+          const nodeVer = parseSemver(this.nodeVersion)?.raw;
+          // Only refuse when this install would really replace Node: a reusable runtime is left alone by ensureNodeRuntime.
+          if (nodeVer && !this.existingNodeRuntime(rootReal, arch, nodeVer) && this.activeClaudeDependsOnNode(rootReal, active, nodeVer, arch)) {
+            throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `node@${nodeVer}`);
+          }
+        }
+        const installed = input.cli === 'claude_code'
+          ? await this.installClaudeCode(rootReal, parsed.raw, arch, input.sha256?.toLowerCase())
+          : await this.installCodex(rootReal, parsed.raw, arch, input.sha256?.toLowerCase());
+        const protectedSet = new Set<string>([installed.version, ...active]);
+        const pruned = input.retainCount !== undefined ? this.pruneLocked(rootReal, arch, input.cli, input.retainCount, protectedSet) : [];
+        return {
+          installed,
+          compatible: satisfiesCliRange(input.cli, parsed.raw),
+          pruned,
+          status: inspectCliAvailability(this.volumeRoot, input.cli, { containerRoot: this.containerRoot, arch }),
+        };
+      } finally {
+        this.activeVersionProvider = null;
       }
-      const installed = input.cli === 'claude_code'
-        ? await this.installClaudeCode(rootReal, parsed.raw, arch, input.sha256?.toLowerCase())
-        : await this.installCodex(rootReal, parsed.raw, arch, input.sha256?.toLowerCase());
-      const protectedSet = new Set<string>([installed.version, ...active]);
-      const pruned = input.retainCount !== undefined ? this.pruneLocked(rootReal, arch, input.cli, input.retainCount, protectedSet) : [];
-      return {
-        installed,
-        compatible: satisfiesCliRange(input.cli, parsed.raw),
-        pruned,
-        status: inspectCliAvailability(this.volumeRoot, input.cli, { containerRoot: this.containerRoot, arch }),
-      };
     });
   }
 
@@ -1094,6 +1128,9 @@ export class AgentToolManager {
     mkdirSync(stagingTrash, { recursive: true, mode: 0o700 });
 
     for (const bad of brokenDirs) {
+      // A protected name is a version an active run is executing: its manifest may be unreadable, but the directory is
+      // what the run spawns, so pruning it would break the run. Only names the caller protects are kept.
+      if (keepSet.has(bad)) continue;
       const badPath = resolve(cliDir, bad);
       if (isSubpath(rootReal, badPath) && badPath !== cliDir) rmSync(badPath, { recursive: true, force: true });
     }
