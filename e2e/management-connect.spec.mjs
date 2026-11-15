@@ -243,3 +243,21 @@ test('#641 短手机（390×500）断流后错误文案与「重新连接」可�
     expect(m.send.bottom).toBeLessThanOrEqual(m.win.bottom + 0.5);
   } finally { await f.close(); }
 });
+
+test('#641 桌面 1440 打开对话页时不套紧凑布局：标题说明仍在，窗口不带 data-compact', async ({ page }) => {
+  test.setTimeout(90000);
+  const f = await managementFixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(f.h.admin + '/#/management');
+    // The deep link opens the conversation page itself, so the console shell (#workspace) stays hidden here.
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible({ timeout: 15000 });
+    const panel = page.locator('#management-chat');
+    // The compact rules hide the title sentence and shrink the composer; they belong to the short floating panel only.
+    expect(await panel.evaluate(node => node.hasAttribute('data-compact'))).toBe(false);
+    await expect(panel.locator('.management-window-title p')).toBeVisible();
+  } finally { await f.close(); }
+});
