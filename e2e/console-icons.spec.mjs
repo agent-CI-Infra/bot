@@ -28,7 +28,7 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
     await expect(sidebar.getByRole('button', { name: '管理助手', exact: true }).locator('svg.console-icon')).toBeVisible();
     await expect(sidebar.getByRole('button', { name: '任务看板', exact: true }).locator('svg.console-icon')).toBeVisible();
     await expect(sidebar.getByRole('button', { name: '用量与成本', exact: true }).locator('svg.console-icon')).toBeVisible();
-    await expect(sidebar.getByRole('button', { name: 'Webhook 投递', exact: true }).locator('svg.console-icon')).toBeVisible();
+    await expect(sidebar.getByRole('button', { name: '仓库事件', exact: true }).locator('svg.console-icon')).toBeVisible();
     await expect(sidebar.getByRole('link', { name: '待处理', exact: true }).locator('svg.console-icon')).toBeVisible();
     await expect(sidebar.getByRole('button', { name: '个人设置', exact: true }).locator('svg.console-icon')).toBeVisible();
     await expect(sidebar.getByRole('button', { name: '全局设置', exact: true }).locator('svg.console-icon')).toBeVisible();

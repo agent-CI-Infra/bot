@@ -32,6 +32,13 @@ test('webhook list and detail separate reception, signature and processing outco
 
   const row = key => page.locator(`#rows [data-delivery-key="${key}"]`), facet = (key, kind) => row(key).locator(`[data-delivery-facet="${kind}"]`);
   await expect(page.locator('#rows [data-delivery-record]')).toHaveCount(7);
+  const titles = await page.locator('#rows [data-delivery-record] .row-title').allTextContents();
+  const outcomes = await page.locator('#rows [data-delivery-record] .row-event-outcome').allTextContents();
+  for (const value of [...titles, ...outcomes]) {
+    if (/workflow_run|未交给 Manager|deliveries:/.test(value)) throw new Error('first screen still has technical copy: ' + value);
+  }
+  await expect(page.locator('#rows')).toContainText('不会创建任务');
+  await expect(page.locator('#rows details.row-tech summary')).toHaveCount(7);
 
   // Processed success: reception and signature are positive, processing says a task was created.
   await expect(facet('delivery-success', 'reception')).toHaveText('已接收');
@@ -103,7 +110,7 @@ test('webhook list and detail separate reception, signature and processing outco
   await row('delivery-duplicate').getByRole('button', { name: '查看详情', exact: true }).click();
   await expect(dialog.locator('[data-detail-section="processing"]')).toContainText('重复，不重复建任务');
   await expect(dialog.locator('[data-detail-section="processing"]')).not.toContainText('失败');
-  await expect(dialog.locator('[data-detail-section="dispatch"]')).toContainText('未交给 Manager');
+  await expect(dialog.locator('[data-detail-section="dispatch"]')).toContainText('不会再次创建任务');
 
   await dialog.getByRole('button', { name: '关闭', exact: true }).click();
   await row('delivery-bad-signature').getByRole('button', { name: '查看详情', exact: true }).click();

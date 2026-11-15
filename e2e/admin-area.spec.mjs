@@ -32,7 +32,7 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
     await login(page, h, 'administrator', password);
     await expect(page.getByRole('heading', { name: '管理', exact: true })).toBeVisible();
     expect(await adminCaptions(page)).toEqual([
-      '用量与成本', 'Webhook 投递', '外部执行端', '存储', '接入向导', '安装档案', '机器人账号', '全局设置'
+      '用量与成本', '仓库事件', '外部执行端', '存储', '接入向导', '安装档案', '机器人账号', '全局设置'
     ]);
     await page.getByTestId('console-admin-group').getByRole('link', { name: /^接入向导/ }).click();
     await expect(page).toHaveURL(/#\/settings\/onboarding/);
@@ -53,10 +53,10 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
     try {
       await member.setViewportSize({ width: 1440, height: 900 });
       await login(member, h, 'admin-area-member', memberPassword);
-      for (const name of ['用量与成本', 'Webhook 投递', '存储', '全局设置']) {
+      for (const name of ['用量与成本', '仓库事件', '存储', '全局设置']) {
         await expect(member.locator('#console-sidebar').getByRole('button', { name, exact: true })).toBeHidden();
       }
-      expect(await adminCaptions(member)).toEqual(['用量与成本', 'Webhook 投递', '外部执行端', '存储']);
+      expect(await adminCaptions(member)).toEqual(['用量与成本', '仓库事件', '外部执行端', '存储']);
       for (const name of ['接入向导', '安装档案', '机器人账号', '全局设置']) {
         await expect(member.getByTestId('console-admin-group').getByRole('link', { name, exact: true })).toHaveCount(0);
         await expect(member.locator('#console-page')).not.toContainText(name);
@@ -70,7 +70,7 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
       await member.setViewportSize({ width: 390, height: 844 });
       await member.locator('#console-mobile-nav').getByRole('link', { name: '更多', exact: true }).click();
       await expect(member.getByTestId('console-admin-group')).toBeVisible();
-      expect(await adminCaptions(member)).toEqual(['用量与成本', 'Webhook 投递', '外部执行端', '存储']);
+      expect(await adminCaptions(member)).toEqual(['用量与成本', '仓库事件', '外部执行端', '存储']);
       await expect(member.locator('#console-page')).not.toContainText('接入向导');
       await expect(member.locator('#console-page')).not.toContainText('全局设置');
       await expect(member.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);

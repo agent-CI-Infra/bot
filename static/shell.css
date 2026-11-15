@@ -378,6 +378,21 @@ body:not(.console-ready) header .locale-switch { background: #fff; }
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   overflow: hidden; overflow-wrap: anywhere;
 }
+/* #798: event rows must keep the repo name and the outcome readable at 390, not ellipsis them away. */
+#rows[data-view=events] .row-title,
+#rows[data-view=events] .row strong {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+}
+#rows[data-view=events] .row-content > p,
+#rows[data-view=events] .row-event-outcome {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+#rows[data-view=events] .row-tech { margin-top: 4px; }
+
 /* #544 already turns the project list into labelled cells below 1280px. On a phone, put
    设置 directly under the name and ahead of the status cells (the #561 390 criterion). */
 @media (max-width: 599px) {

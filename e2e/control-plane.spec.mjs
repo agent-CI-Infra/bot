@@ -18,8 +18,8 @@ test('管理员完成初始化、登记账号、查看投递，项目管理员�
     await expect(page.getByRole('heading', { name: '项目' })).toBeVisible();
     // Repositories come only from installation sync; there is no manual registration form.
     await expect(page.getByRole('button', { name: '新增', exact: true })).toHaveCount(0); await expect(page.getByRole('button', { name: '手动登记仓库' })).toHaveCount(0);
-    await consoleNavigate(page, 'Webhook 投递');
-    await expect(page.getByText('本页 0 条投递')).toBeVisible();
+    await consoleNavigate(page, '仓库事件');
+    await expect(page.getByText('本页 0 条事件')).toBeVisible();
     await admin('/api/auth/login', 'POST', { username: 'administrator', password });
     // Accounts live in global settings.
     await page.getByRole('button', { name: '全局设置', exact: true }).click(); await page.locator('.project-nav').getByRole('link', { name: '机器人账号', exact: true }).click();
@@ -36,8 +36,8 @@ test('管理员完成初始化、登记账号、查看投递，项目管理员�
     await admin('/api/users', 'POST', { username: 'project-admin', password: memberPassword, repository_ids: ['101'] });
     await h.hook(a.endpoints[0].webhook_path, secret, 'browser-own', { repository: { id: 101 }, action: 'opened', issue: { number: 1 } });
     await h.hook(a.endpoints[0].webhook_path, secret, 'browser-other', { repository: { id: 202 }, action: 'opened' });
-    await consoleNavigate(page, 'Webhook 投递');
-    await expect(page.getByText('本页 2 条投递')).toBeVisible();
+    await consoleNavigate(page, '仓库事件');
+    await expect(page.getByText('本页 2 条事件')).toBeVisible();
     await page.getByRole('button', { name: '查看详情', exact: true }).first().click();
     await expect(page.locator('#detail-body')).toContainText('"tasks_created": 0');
     await page.getByRole('button', { name: '关闭', exact: true }).click();
@@ -50,8 +50,8 @@ test('管理员完成初始化、登记账号、查看投递，项目管理员�
     // Each project row opens its settings page through the "设置" action.
     await page.locator('#rows .row').filter({ hasText: 'fixture/project-101' }).getByRole('button', { name: '设置', exact: true }).click();
     await expect(page).toHaveURL(/#\/projects\/101\/basic$/); await expect(page.getByRole('link', { name: '基本设置', exact: true })).toBeVisible();
-    await consoleNavigate(page, 'Webhook 投递');
-    await expect(page.getByText('本页 1 条投递')).toBeVisible();
+    await consoleNavigate(page, '仓库事件');
+    await expect(page.getByText('本页 1 条事件')).toBeVisible();
     await expect(page.getByRole('button', { name: '全局设置', exact: true })).toBeHidden(); await expect(page.getByRole('button', { name: '接入向导', exact: true })).toBeHidden();
     await expect(page.locator('#rows')).toContainText('browser-own'); await expect(page.locator('#rows')).not.toContainText('browser-other');
     await page.setViewportSize({ width: 390, height: 844 });
