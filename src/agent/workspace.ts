@@ -57,11 +57,11 @@ function serialized<T>(key:string,work:()=>Promise<T>):Promise<T>{
 }
 /**
  * The answer to a call that needs the repository when the task chose to work without one. An agent that chose can still
- * change its mind; a role whose controller chose cannot, so it is told to say it needs the files instead.
+ * change its mind; a role whose controller chose cannot, and the choice holds for the attempt, so it says it needs the files.
  */
 export const noWorkspace=(reason:string|null,by:string|null='agent')=>({error:'no_workspace',message:by==='agent'
   ?`This task chose to work without repository files${reason?` (${reason})`:''}. Choose a workspace with use_workspace or create_workspace before reading repository files or running commands.`
-  :`The task's controller (${by}) chose to work without repository files${reason?` (${reason})`:''}. Only it can choose a workspace: if you need repository files or commands, say so in your result.`});
+  :`The task's controller (${by}) chose to work without repository files${reason?` (${reason})`:''}. Work from ../context/ and the task records; if the task needs repository files or commands, say so in your result.`});
 
 export class Workspace {
   // The task workspace this object saw holding its worktree (or needing none), so later calls do not ask again.

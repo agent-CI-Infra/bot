@@ -464,6 +464,22 @@ test('#769 the Manager chooses the task\'s worktree before delegating; its roles
   const executor = c.runner.spaces.get(review.row.workspace_id).parsed;
   assert.ok(executor.tools.some(tool => tool.function.name === 'finish_review'));
   assert.ok(!executor.tools.some(tool => tool.function.name === 'list_workspaces') && !executor.control_tools.includes('use_workspace'));
+  // A Manager that chose no files and delegated cannot switch to a worktree in the same attempt: the entry executor already
+  // ran as the task workspace's one session, so delegating again would only return its result. It is told to continue in a
+  // new attempt instead, and nothing is bound.
+  first = null; script = body => {
+    const done = results(body.messages), task = JSON.parse(body.messages[1].content).task_ref;
+    if (!done.length) return call('no_workspace', { reason: 'The comment only thanks the author.' });
+    if (done.length === 1) return call('delegate_role', { role: 'dev', purpose: 'Answer the comment', refs: [task] });
+    if (done.length === 2) return call('use_workspace', { worktree_id: free, mode: 'read' });
+    return call('nominate_delivery', { result_ref: done[1].result_ref });
+  };
+  const none = task('rv-none');
+  assert.equal((await agentLoop(f.s, none.row, none.workspace, f.spec.redactor, async () => {}, { mode: 'review', materials: [] })).summary, 'Reviewed.');
+  const switched = results(f.requests.filter(isController).at(-1).messages)[2];
+  assert.equal(switched.error, 'workspace_choice_final'); assert.match(switched.message, /finish_coordination \(action continue\): the next attempt prepares the task again/);
+  assert.deepEqual({ ...f.s.get("SELECT state,decided_by FROM worktree_plans WHERE task_id='rv-none'") }, { state: 'none', decided_by: 'manager' });
+  assert.deepEqual([f.s.get("SELECT count(*) n FROM worktree_bindings WHERE task_id='rv-none'").n, f.s.get("SELECT count(*) n FROM task_runs WHERE task_id='rv-none' AND role='dev'").n], [0, 1]);
   // A task that already holds its worktree gives its Manager nothing to choose.
   first = null; script = controllerScript();
   const held = task('rv2'); await held.workspace.ensure();
