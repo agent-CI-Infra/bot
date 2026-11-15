@@ -44,6 +44,14 @@ export function channelStorage(store: Store): void {
       WHEN NEW.status IN ('completed','succeeded','pr_opened','cancelled','failed') AND (OLD.status<>NEW.status OR OLD.result IS NOT NEW.result OR OLD.error_code IS NOT NEW.error_code)
       AND EXISTS(SELECT 1 FROM task_origins o JOIN channel_chats c ON c.id=o.conversation_id WHERE o.task_id=NEW.id AND o.source_kind='role') BEGIN
       INSERT INTO channel_task_results(task_id) VALUES(NEW.id); END;
+    -- Tasks the management assistant created during a private-chat turn (#844), so their results return to that chat. The task
+    -- keeps its console-style origin: the chat is only where results go, not a source of authority for running it.
+    CREATE TABLE IF NOT EXISTS channel_personal_tasks(task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,chat_id TEXT NOT NULL,
+      principal_id TEXT NOT NULL,source_message TEXT NOT NULL,command_id TEXT NOT NULL,created_at INTEGER NOT NULL);
+    CREATE TRIGGER IF NOT EXISTS channel_personal_task_result AFTER UPDATE OF status,result,error_code ON tasks
+      WHEN NEW.status IN ('completed','succeeded','pr_opened','cancelled','failed') AND (OLD.status<>NEW.status OR OLD.result IS NOT NEW.result OR OLD.error_code IS NOT NEW.error_code)
+      AND EXISTS(SELECT 1 FROM channel_personal_tasks WHERE task_id=NEW.id) BEGIN
+      INSERT INTO channel_task_results(task_id) VALUES(NEW.id); END;
   `);
   // Serialize the migration for independent workers opening the same existing database.
   store.transaction(()=>{
