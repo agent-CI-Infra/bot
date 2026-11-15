@@ -2,6 +2,14 @@ import{test,expect}from'@playwright/test';import{mkdirSync,rmSync}from'node:fs';
 import{harness,setup,account,repository,testPassword}from'../test/helpers.mjs';import{TaskEngine}from'../dist/agent/engine.js';import{Onboarding}from'../dist/onboarding/service.js';import{RuleService}from'../dist/rules/service.js';
 import { goRolePage } from './open-role-advanced.mjs';
 
+async function captureWizardStep(page, name) {
+ for (const width of [1440,390]) {
+  await page.setViewportSize({width,height:1000});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await page.screenshot({path:`.tmp/onboarding/${name}-${width}.png`,fullPage:true});
+ }
+}
+
 test('接入向导验证地址、准备 manifest、跳过安装、保存模型并查看项目规则来源',async({page})=>{
  let onboarding;const h=await harness(undefined,undefined,store=>({engine:new TaskEngine(store,{call:async()=>null}),onboarding:onboarding=new Onboarding(store,{probe:async raw=>{const u=new URL(raw);return u.pathname.includes('probe')?{status:200,body:JSON.stringify(onboarding.probe(u.searchParams.get('nonce'),'webhook'))}:{status:404,body:'{}'};}})}));
  const{admin,password}=await setup(h),errors=[];page.on('pageerror',error=>errors.push(error.message));
@@ -12,7 +20,11 @@ test('接入向导验证地址、准备 manifest、跳过安装、保存模型�
   await page.getByRole('button',{name:'2. GitHub App',exact:true}).click();await page.getByLabel('App 所属组织',{exact:true}).fill('fixture');await page.getByLabel('App 名称',{exact:true}).fill('Fixture bot');await page.getByRole('button',{name:'准备 GitHub 确认页',exact:true}).click();const manifestForm=page.locator('#onboarding-panel form[target=_blank]');await expect(manifestForm).toBeVisible();expect(await manifestForm.getAttribute('action')).toMatch(/^https:\/\/github.com\/organizations\/fixture\/settings\/apps\/new\?state=/);const manifest=JSON.parse(await manifestForm.locator('textarea[name=manifest]').inputValue());expect(manifest.default_events).toEqual(['issues','pull_request','issue_comment','pull_request_review','pull_request_review_comment','organization']);await expect(manifestForm).toContainText('订阅 issues、pull_request、issue_comment、pull_request_review 和 pull_request_review_comment');await expect(page.locator('#onboarding-panel')).toContainText('已有 App 不会随代码更新自动新增事件订阅');await expect(page.locator('#onboarding-panel')).toContainText('Permissions & events 中勾选 Issue comment、Pull request review、Pull request review comment 并保存');expect(manifest.default_permissions.contents).toBe('write');expect(manifest.default_permissions.members).toBe('read');expect(manifest.callback_urls).toBeUndefined();expect(manifest.setup_url).toBe('https://hooks.invalid/onboarding/github/setup');expect(manifest.redirect_url).toBe(h.admin+'/onboarding/github/callback');
   await page.getByRole('button',{name:'4. 安装',exact:true}).click();await page.getByRole('button',{name:'暂时跳过安装',exact:true}).click();await expect(page.locator('.wizard-notice')).toContainText('仓库检视不会开始');
   await page.getByLabel('接口 URL',{exact:true}).fill('https://model.invalid/v1');await page.getByLabel('API Key',{exact:true}).fill(testPassword());await page.getByLabel('模型名',{exact:true}).fill('fixture-model');await page.getByRole('button',{name:'保存并继续',exact:true}).click();await expect(page.locator('#onboarding-panel')).toContainText('.bot/rules/issue-development.md');expect((await admin('/api/models')).value.models[0].api_key).toBeUndefined();
-  await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/onboarding/wizard-mobile.png',fullPage:true});
+  await expect(page.locator('#onboarding-panel')).toContainText('项目「监听与触发」页配置事件来源、标签触发和检视/自动开发许可');
+  await captureWizardStep(page,'wizard-rules');
+  await page.getByRole('button',{name:'7. 完成',exact:true}).click();
+  await expect(page.locator('#onboarding-panel')).toContainText('自动开发默认关闭，在对应项目的「监听与触发」中单独开启');
+  await captureWizardStep(page,'wizard-complete');
   const a=await account(admin);await repository(admin,a.id,'101');const rules=new RuleService(h.store);rules.cache('101','a'.repeat(40),{'.bot/guide.md':'Repository behavior override','.agents/skills/demo/SKILL.md':'Demo skill'});
   await page.goto(h.admin+'/#/projects/101/workflows/rules.files');await expect(page).toHaveURL(/#\/projects\/101\/roles$/);await goRolePage(page, { role: 'Manager' });const guideSource=page.locator('[data-rule-file=".bot/guide.md"] [data-rule-source]');await expect(guideSource).toHaveText('仓库文件');await expect(page.getByRole('table',{name:'规则文件',exact:true})).toContainText('.agents/skills/demo/SKILL.md');await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.locator('#project-page .project-content').screenshot({path:'.tmp/onboarding/rules-overview-mobile.png'});
