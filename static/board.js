@@ -412,11 +412,17 @@ function boardTime(value) {
 // The latest task of the card's work type explains why it sits in its stage, e.g. which task failed.
 function boardTaskBadge(prefix,status) { const [caption,tone]=states[status]||[status,''],b=badge(`${prefix} ${caption}`,tone);b.title=status;return b; }
 // #655: only the stop the bot makes because its object no longer needs work gets the plain sentence; a cancellation for
-// another reason (a revoked claim, a disabled project) keeps its badge alone.
+// another reason (a revoked claim, a disabled project) keeps its badge alone. #713: so does a task the bot moved out of
+// 待处理 as obsolete, which is the card's newest task when nothing newer took over.
 function boardStopNote(item) {
-  if(item.card_type==='release'||item.task_error_code!=='object_closed_or_draft')return '';
+  if(item.card_type==='release')return '';
   const thing=item.object_type==='pr'?'PR':'Issue',work=(item.card_category||'').startsWith('development.')?'开发':'检视';
-  return `${thing} ${item.github_state==='closed'?'已关闭':'已转草稿'}，已自动停止${work}`;
+  if(item.task_error_code==='object_closed_or_draft')return `${thing} ${item.github_state==='closed'?'已关闭':'已转草稿'}，已自动停止${work}`;
+  // A task card has no Issue or PR of its own: the sweep dismissed it for the one its source task works on.
+  if(item.task_error_code==='obsolete_closed')return `${item.card_type==='task'?'来源 Issue 或 PR':thing} 已关闭或合入，已自动移出待处理`;
+  if(item.task_error_code==='obsolete_superseded')return `已有更新的${work}任务接手，已自动移出待处理`;
+  if(item.task_error_code==='obsolete_expired')return '很久以前的平台类失败，之后没有新动静，已自动移出待处理';
+  return '';
 }
 // The next move is stated only when the recorded state names it; a status without one, or no status at all, stays silent.
 const boardNextSteps={waiting_configuration:'补齐配置后重试',waiting_environment:'修复环境后重试',waiting_permission:'处理权限后重试',
