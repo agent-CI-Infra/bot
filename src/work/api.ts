@@ -97,6 +97,9 @@ export function workflowUpdate(store: Store, repositoryId: string, workflowId: s
 
 /** GET of the Manager configuration and the dispatch records; PUT goes through the management service (see ManagementApi). */
 export async function managerApi(store: Store, rules: RuleService, user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
+  // #736: a dispatch event id arrives percent-encoded. decodeURIComponent throws on a malformed segment, and a thrown
+  // URIError is no HttpError, so the server's wrapper answers 503 service_unavailable for what is a bad path.
+  const dispatchEventId = (segment: string): string => { try { return decodeURIComponent(segment); } catch { return fail(400, 'invalid_dispatch_event'); } };
   const removed = /^\/api\/repositories\/([^/]+)\/workflows(?:\/.*)?$/.exec(url.pathname);
   // The workflow API is gone; its replacement is named so older clients can follow it.
   if (removed) { repository(store, user, removed[1]!); throw Object.assign(new HttpError(410, 'workflows_removed'), { detail: `工作流已由项目 Manager 取代：GET/PUT /api/repositories/${removed[1]}/manager` }); }
@@ -108,11 +111,12 @@ export async function managerApi(store: Store, rules: RuleService, user: Actor, 
     if (!events[2] && method === 'GET') {
       return dispatchList(store, repositoryId, url.searchParams);
     }
-    if (events[2] && !events[3] && method === 'GET') return dispatchDetail(store, repositoryId, decodeURIComponent(events[2]));
+    if (events[2] && !events[3] && method === 'GET') return dispatchDetail(store, repositoryId, dispatchEventId(events[2]));
     if (events[2] && events[3] && method === 'POST') {
       fields(input, []);
-      if (!retryEvent(store, repositoryId, decodeURIComponent(events[2]))) fail(409, 'dispatch_event_not_failed');
-      store.audit(user.id, 'dispatch.retry', events[2], repositoryId); return { ok: true };
+      const eventId = dispatchEventId(events[2]);
+      if (!retryEvent(store, repositoryId, eventId)) fail(409, 'dispatch_event_not_failed');
+      store.audit(user.id, 'dispatch.retry', eventId, repositoryId); return { ok: true };
     }
     return fail(405, 'method_not_allowed');
   }

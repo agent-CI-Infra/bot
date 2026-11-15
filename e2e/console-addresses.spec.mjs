@@ -42,6 +42,17 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     // The old addresses of the two removed tabs open their settings category.
     await page.goto(h.admin + '/#/accounts'); await expect(page).toHaveURL(/#\/settings\/accounts$/); await expect(page.locator('#settings-panel')).toContainText('Test account');
     mkdirSync('.tmp/console-addresses', { recursive: true }); await page.screenshot({ path: '.tmp/console-addresses/settings-accounts-desktop.png', fullPage: true });
+    // #736: a malformed percent-encoding is an unknown address like any other, not a URIError shown to the reader.
+    await page.goto(h.admin + '/#/settings/computers/%E0%A4%A');
+    await expect(page.locator('#console-page [data-page-not-found="console"]')).toBeVisible();
+    await expect(page.locator('#settings-panel h3')).toHaveCount(0);
+    await expect(page.locator('#message')).not.toContainText('URI malformed');
+    await page.screenshot({ path: '.tmp/console-addresses/malformed-address-desktop.png', fullPage: true });
+    // A settings detail id that cannot be decoded reads as "no id": that section still opens as a list.
+    await page.goto(h.admin + '/#/settings/users/%E0%A4%A');
+    await expect(page.locator('#settings-panel')).toContainText('administrator');
+    await expect(page.locator('#console-page [data-page-not-found="console"]')).toHaveCount(0);
+    await expect(page.locator('#message')).not.toContainText('URI malformed');
     // A changed task is picked up by the board's quiet refresh without leaving the selected category.
     await page.goto(h.admin + '/#/reviews'); await expect(page.locator('.board-card')).toHaveCount(4);
     h.store.run("UPDATE tasks SET status='succeeded',phase='done' WHERE id='t1'");

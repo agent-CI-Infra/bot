@@ -23,7 +23,8 @@ function settingsRoute() {
   if (/^#\/settings\/onboarding(?:\/|$)/.test(location.hash)) return { section: 'onboarding', id: null };
   if (/^#\/settings\/feishu(?:\/|$)/.test(location.hash)) return { section: 'feishu', id: null };
   const match = /^#\/settings\/([a-z-]+)(?:\/(.+))?$/.exec(location.hash), key = match?.[1], sections = visibleSettingsSections();
-  return { section: sections.some(([name]) => name === key) ? key : sections[0][0], id: match?.[2] ? decodeURIComponent(match[2]) : null };
+  // #736: an id that is not valid percent-encoding reads as no id, so the section opens as its list instead of throwing.
+  return { section: sections.some(([name]) => name === key) ? key : sections[0][0], id: match?.[2] ? safeDecode(match[2]) : null };
 }
 // What the cards draw from; the model cards are redrawn together because deleting the default model clears it.
 let settingsView = null;
