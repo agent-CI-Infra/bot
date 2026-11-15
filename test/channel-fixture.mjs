@@ -183,11 +183,18 @@ export function managementOutcome(h, inbox) {
   const error = message ? h.store.get("SELECT data FROM management_events WHERE message_id=? AND type='error' ORDER BY sequence DESC LIMIT 1", message.id) : null;
   return { state: row?.state, error: row?.error ?? (error ? JSON.parse(error.data).error : null), message: message?.state ?? null, input: message ? JSON.parse(message.input) : null };
 }
+/** A group's model must serve every project in its scope (#849): authorize the shared fixture model to every fixture project,
+ * as a deployment authorizes its shared model to the projects it starts. Call again after adding projects. */
+export async function shareAssistantModel(f) {
+  const result = await f.admin('/api/models/' + f.assistantModel.id + '/projects', 'PUT', { repository_ids: f.h.store.all('SELECT id FROM repositories ORDER BY id').map(r => r.id) });
+  if (result.status !== 200) throw new Error(JSON.stringify(result.value));
+}
 /** Give the repository assistant the shared fixture model. What a group may do is its binding's level (#849): items given
  * here are what the next boundGroup grants its group, on top of the read level. */
 export async function repositoryAssistant(f, permissions) {
   const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
   const result = await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id });
   if (result.status !== 200) throw new Error(JSON.stringify(result.value));
+  await shareAssistantModel(f);
   f.groupPermissions = permissions;
 }

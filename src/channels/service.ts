@@ -514,11 +514,11 @@ export class ChannelService {
           if(turn)this.turnMessages.release(turn.id);
           if(this.stopped)return;
           this.store.run("UPDATE channel_inbox SET state='failed',error=? WHERE id=?",errorCode(error),row.id);
-          try { this.source(e);this.queue(e,card(serviceFailure(errorCode(error),serviceRole(this.store,binding.service_role_id)?.name??'群助手')),row.id+':business-error',row.id); } catch {}
+          try { this.source(e);this.queue(e,card(serviceFailure(errorCode(error),serviceRole(this.store,binding.service_role_id)?.name??'群助手',error instanceof TaskError?error.detail:undefined)),row.id+':business-error',row.id); } catch {}
         }).finally(()=>this.business.delete(chat.id));
         this.business.set(chat.id,work);return;
       }
-      reply('本群尚未绑定群聊助手。已绑定飞书的维护人可以在控制台「个人设置 → 飞书绑定」点击「创建群绑定」为本群选择服务角色和项目范围；个人绑定请在私聊发送“绑定”。');
+      reply('本群尚未绑定群聊助手。已绑定飞书的维护人可以在控制台「个人设置 → 飞书绑定」点击「创建群绑定」为本群选择项目范围、权限档位和助手角色；个人绑定请在私聊发送“绑定”。');
     }
     this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id);
   }

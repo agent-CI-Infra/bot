@@ -25,6 +25,13 @@ function bindingItemsEditor(permissions, items) {
   }
   return box;
 }
+// A refused save in words, naming the projects that do not fit the chosen role (#849).
+function bindingSaveError(err) {
+  const projects = (err.detail?.projects || []).join('、');
+  if (err.code === 'service_role_project_scope') return `「${err.detail?.project || '所选项目'}」的专属助手角色只能用于范围只有这个项目的群${projects ? `；${projects} 不属于它` : ''}。请改选全局角色，或把范围缩小到这个项目。`;
+  if (err.code === 'channel_service_model_unavailable') return `所选助手角色的模型没有授权给 ${projects || '范围内的部分项目'}。群助手只能用对范围内每个项目都可用的模型：请换一个角色，或请超级管理员把共享模型授权给这些项目。`;
+  return employeeError(err.message);
+}
 // One line per binding: the level, or for an advanced binding the items it opens.
 function bindingLevelSummary(b, items) {
   if (b.level !== 'custom') return bindingLevelName(b.level);
@@ -149,7 +156,8 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
   form.append(levels);
 
   // The assistant role: its prompt and model only.
-  const role = channelSelect(form, '助手角色', 'binding_role', data.service_roles.map(r => [r.id, r.name + (r.recommended ? '（推荐）' : '')]));
+  // Global templates, then the roles of projects this person configures (#849), which fit only groups scoped to that project.
+  const role = channelSelect(form, '助手角色', 'binding_role', data.service_roles.map(r => [r.id, r.name + (r.project ? `（${r.project.full_name} 专属）` : '') + (r.recommended ? '（推荐）' : '')]));
   const roleNote = note('');
   form.append(roleNote, note(me.role === 'super_admin' ? '助手角色只决定提示词和模型，不决定群能做什么；角色在「全局设置 → 服务角色」维护。' : '助手角色只决定提示词和模型，不决定群能做什么。'));
 
@@ -165,7 +173,12 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
   let expected = 0;
   const unavailable = !chats.size || !data.service_roles.length || !data.projects.length && !data.organizations.length;
   const roleById = new Map(data.service_roles.map(r => [r.id, r]));
-  const describeRole = () => { const r = roleById.get(role.value); roleNote.textContent = r ? r.responsibility || '自定义服务角色' : ''; };
+  const describeRole = () => {
+    const r = roleById.get(role.value);
+    if (!r) { roleNote.textContent = ''; return; }
+    const model = r.model ? `模型：${r.model.model_name}${r.model.project_id ? '（项目专属）' : '（共享）'}` : '尚未配置模型';
+    roleNote.textContent = [r.responsibility || '自定义服务角色', model, r.project ? `只能用于范围只有 ${r.project.full_name} 的群` : ''].filter(Boolean).join('；') + '。';
+  };
   const showScope = () => {
     repositoriesWrap.hidden = !repositoriesKind.checked;
     organizationField.hidden = !organizationKind.checked;
@@ -212,7 +225,7 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
         ...(level === 'custom' ? { permissions: edited } : { level }), enabled: true, expected_revision: expected });
       if (location.hash.includes('?')) history.replaceState(null, '', '#/identity/feishu');
       await start();
-    } catch (err) { status.textContent = employeeError(err.message); save.disabled = false; }
+    } catch (err) { status.textContent = bindingSaveError(err); save.disabled = false; }
   });
 
   if (!chats.size) editorWrap.append(note('尚无可选择的群。请先完成个人绑定，在机器人已加入的目标群发一条消息，再刷新本页。'));
@@ -270,6 +283,7 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
       note(`负责人：${b.owner || '账户已删除'}${b.configured_by && b.configured_by !== b.owner ? '；最近修改：' + b.configured_by : ''}`),
       channelProfileDetails(b.chat, () => { groupName.textContent = channelChatName(b.chat); updateOption(b.chat); }),
       ...(b.paused.length ? [note('暂停的仓库（配置人权限已变化）：' + b.paused.join('、'))] : []),
+      ...(b.model_gaps?.length ? [note('助手角色的模型没有授权给：' + b.model_gaps.join('、') + '。本群暂停回答，直到换一个对范围内每个项目都可用的角色或调整范围。')] : []),
       ...(b.migrated ? [note('由旧群员工自动迁移为仓库问答助手。')] : []),
       ...(b.error ? [note(employeeError(b.error))] : []),
       ...(!canViewChat ? [note('需要该群负责人或拥有全部绑定范围的配置权限才能查看聊天记录。')] : []));

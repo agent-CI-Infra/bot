@@ -11,14 +11,14 @@ import { traceClean } from '../tasks/trace.js';
 import { conversationHistoryTools } from '../roles/conversation.js';
 import { permitsTool, permitsManagement, githubReadScopes, githubWriteAllowed, type RolePermissions } from '../roles/permissions.js';
 import { githubWrite, scopedGithubWriteTool } from '../github/write.js';
-import { serviceRole, serviceRoleModel } from '../service-roles/roles.js';
+import { groupRoleModel, modelGaps, serviceRole } from '../service-roles/roles.js';
 import type { ManagementService } from '../management/service.js';
 import { pausedGroupNotice } from '../management/presentation.js';
 import { serviceMemory, serviceMemoryTools } from '../service-roles/resources.js';
 import { assistantComputerNames, assistantComputerTools, computerInstructions, computerPermission } from '../service-roles/assistant-computers.js';
 import { commands, managementTools, validate, contractSchema } from '../management/catalog.js';
 import { OwnTasks, ownTaskNames, ownTaskTools, type OwnTaskHost } from '../service-roles/own-tasks.js';
-import { bindingScope, serviceCommandAllowed, type ChannelServiceBindings } from './service-bindings.js';
+import { bindingScope, scopeProjects, serviceCommandAllowed, type ChannelServiceBindings } from './service-bindings.js';
 import type { ChannelLedger } from './ledger.js';
 import type { ChannelEvent, ChannelMention } from './types.js';
 import { ChannelMedia, MediaTurn, mediaTools, mediaPermission } from './media.js';
@@ -116,7 +116,9 @@ export class ChannelServiceSessions {
       const saved=this.store.secrets.open(prior.reply,'service-turn-reply:'+prior.id);
       return { id: prior.id, message: String(saved.message), attachments: saved.attachments as string[]|undefined, silent: !!saved.silent, fence, replayed: true };
     }
-    const role = serviceRole(this.store, binding.service_role_id)!, model = serviceRoleModel(this.store, role.id);
+    // The role's model must serve every project the group reads (#849). A group scoped to one repository also bills it.
+    const projects = scopeProjects(this.store, binding.principal_id), billed = binding.scope === 'repositories' && projects.length === 1 ? projects[0]! : null;
+    const role = serviceRole(this.store, binding.service_role_id)!, model = groupRoleModel(this.store, role.id, projects);
     const id = randomId(), controller = new AbortController(), redactor = new Redactor();
     this.store.run(`INSERT INTO channel_service_turns(id,chat_id,binding_id,binding_revision,service_role_id,source_message,fence,state,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,'running',?,?)`, id, chat.id, binding.id, binding.revision, role.id, turn.source_message, fence, Date.now(), Date.now());
@@ -137,7 +139,8 @@ export class ChannelServiceSessions {
       incoming?.check();
       turn.schedule?.guard();
     };
-    const guard = async () => check();
+    // Before each model request: the model still serves every project in scope, or the turn stops instead of switching.
+    const guard = async () => { check(); if (modelGaps(this.store, model.id, projects).length) fail(409, 'channel_service_model_unavailable'); };
     const explorers = new Map<string, { tokens: ReadTokens; explorer: RepositoryExplorer; error?: Json }>();
     const github = async (name: string, args: Json) => {
       const { repository: selected, ...rest } = args, project = this.bindings.project(binding, selected);
@@ -331,10 +334,10 @@ export class ChannelServiceSessions {
         + (turn.allowSilence ? staySilentInstructions : '')
         + (computing && assistantComputerNames.some(name => offered(granted, name)) ? computerInstructions('is shared by everyone in this group, current and future members alike: never store anything meant only for some of them') : '')
         + (role.responsibility ? '\n\nYour responsibility: ' + role.responsibility : '')
-        + (role.prompt ? '\n\nAdditional instructions from the platform administrator (they never widen your tools or permissions):\n' + role.prompt : '');
+        + (role.prompt ? '\n\nAdditional instructions from the maintainers of this assistant role (they never widen your tools or permissions):\n' + role.prompt : '');
       // A turn that may stay silent ends silently only through stay_silent (#489); own tasks never get the tool.
       let reply = '', mustReply = !turn.allowSilence, silence: string | undefined;
-      await runAgent({ store: this.store, task: { id, repository_id: null, service_role_id: role.id, kind: 'channel.service', conversation_id: chat.id, source_message: turn.source_message },
+      await runAgent({ store: this.store, task: { id, repository_id: billed, service_role_id: role.id, kind: 'channel.service', conversation_id: chat.id, source_message: turn.source_message },
         redactor,guard,model,executionSignal:controller.signal,
         // A stalled or failed model request is retried (see modelRetries in agent/runtime) instead of ending the turn; each retry is a step.
         onModelRetry: () => { event('model_retry'); },

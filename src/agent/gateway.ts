@@ -30,14 +30,14 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
   let model = input.model;
   await input.guard?.();
   redactor.add(model.key);
-  // A service role run may only use the shared model its role is configured with right now; a project run uses a model
-  // the project owns or was granted.
-  const current = task.service_role_id && !task.repository_id
-    ? store.get('SELECT m.* FROM models m JOIN service_roles s ON s.model_id=m.id WHERE m.id=? AND m.repository_id IS NULL AND s.id=? AND s.enabled=1', model.id, task.service_role_id)
-    : store.get(`SELECT m.* FROM models m WHERE m.id=? AND
-    (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))`,
-    model.id, task.repository_id, task.repository_id);
-  if (!current) return stop('model_not_available', 'waiting_configuration', task.service_role_id && !task.repository_id ? '服务角色的模型已被更换或删除。' : '任务模型已被删除或撤销项目访问权限。');
+  // A service role run may only use the model its role is configured with right now: a shared one, or for a group scoped to
+  // one project (#849, billed to it) one that project owns or was granted. A project run uses a model the project owns or was granted.
+  const project = `(m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))`;
+  const current = task.service_role_id
+    ? store.get(`SELECT m.* FROM models m JOIN service_roles s ON s.model_id=m.id WHERE m.id=? AND s.id=? AND s.enabled=1 AND ${task.repository_id ? project : 'm.repository_id IS NULL'}`,
+      model.id, task.service_role_id, ...(task.repository_id ? [task.repository_id, task.repository_id] : []))
+    : store.get(`SELECT m.* FROM models m WHERE m.id=? AND ${project}`, model.id, task.repository_id, task.repository_id);
+  if (!current) return stop('model_not_available', 'waiting_configuration', task.service_role_id ? '服务角色的模型已被更换、删除或不再授权给这个项目。' : '任务模型已被删除或撤销项目访问权限。');
   if (!current.api_key) return stop('model_not_configured', 'waiting_configuration', '固定模型的凭据已撤销；重新设置 Key 后可以继续。');
   const currentKey = String(store.secrets.open(current.api_key, `model:${current.id}`).value || '');
   if (Number(current.version) !== model.version || String(current.api_url) !== model.url || String(current.model_name) !== model.model)

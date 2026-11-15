@@ -4,9 +4,11 @@ import { stop } from '../agent/common.js';
 import { openModel } from '../agent/model.js';
 import { permissionItems, fullPermissions, normalizePermissions, type RolePermissions } from '../roles/permissions.js';
 
-// Service roles are platform-level assistants (the console/personal management assistant, group chat assistants). They are
-// not bound to one project: their model comes from the shared models, their usage is billed to the role, not a project.
+// Service roles are the assistants outside project work: the console/personal management assistant and group chat assistants.
 // A group assistant role is only a prompt and a model: what a group may do is the permission level of its binding (#849).
+// Super administrators keep the global templates, which use shared models. A project administrator may also keep roles owned
+// by one project (project_id): they may use that project's own model, and bind only to groups scoped to that project.
+// Usage is billed to the role; a group scoped to one project also counts in that project's costs.
 // The management assistant keeps its fixed items, intersected with the current user's authority.
 // Project work roles (Manager, Dev, QA ...) stay in each project's role configuration.
 export const managementAssistant = 'management-assistant';
@@ -32,6 +34,8 @@ export function serviceRoleStorage(store: Store): void {
     revision INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`);
   // Built-in roles are written once and then belong to the administrator; a restart never overwrites their edits.
   // A deployment that already chose a default shared model in the wizard starts them with it.
+  // The project owning a group assistant role (#849); global templates have none.
+  if (!store.all('PRAGMA table_info(service_roles)').some(c => c.name === 'project_id')) store.db.exec('ALTER TABLE service_roles ADD COLUMN project_id TEXT');
   const model = defaultSharedModel(store), time = now();
   for (const role of builtins) store.run(`INSERT OR IGNORE INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,revision,created_at,updated_at)
     VALUES(?,1,1,?,?,'',?,?,NULL,1,?,?)`, role.id, role.name, role.responsibility, model, role.permissions ? JSON.stringify(role.permissions) : null, time, time);
@@ -66,6 +70,31 @@ export function serviceRole(store: Store, id: string): Row | undefined {
   const row=store.get('SELECT * FROM service_roles WHERE id=?', id);
   return row ? {...row,permissions:JSON.stringify(id===managementAssistant?fullPermissions():normalizePermissions(JSON.parse(row.permissions??'{}'),true))} : undefined;
 }
+/**
+ * Whether a model may serve a project (#849): a project's own model serves only that project; a shared model the projects it
+ * is authorized to. A project's model is trusted with that project's code only, so a group reading several projects may only
+ * use a model every one of them has.
+ */
+export function modelServes(store: Store, model: Row, project: string): boolean {
+  return model.repository_id === project || model.repository_id === null && !!store.get('SELECT 1 FROM model_projects WHERE model_id=? AND repository_id=?', model.id, project);
+}
+/** The projects (id and full name) among `projects` a model may not serve, in their order. */
+export function modelGaps(store: Store, modelId: string, projects: string[]): { id: string; full_name: string }[] {
+  const model = store.get('SELECT * FROM models WHERE id=?', modelId);
+  return projects.filter(project => !model || !modelServes(store, model, project))
+    .map(id => ({ id, full_name: String(store.get('SELECT full_name FROM repositories WHERE id=?', id)?.full_name ?? id) }));
+}
+/** A group's model for one turn: its role's model, available to every project in the group's scope. When it is not, the
+ * turn stops naming the projects; it never switches to another model. */
+export function groupRoleModel(store: Store, id: string, projects: string[]) {
+  const role = serviceRole(store, id);
+  if (!role?.enabled) return stop('service_role_unavailable', 'waiting_configuration', `服务角色 ${id} 不存在或已停用。`);
+  const row = role.model_id ? store.get('SELECT * FROM models WHERE id=?', role.model_id) : undefined;
+  if (!row?.api_key) return stop('service_role_model_not_configured', 'waiting_configuration', `群助手角色「${role.name}」尚未配置可用的模型；不会改用其他模型。`);
+  const gaps = modelGaps(store, row.id, projects);
+  if (gaps.length) return stop('channel_service_model_unavailable', 'waiting_configuration', `模型「${row.model_name}」没有授权给 ${gaps.map(p => p.full_name).join('、')}；不会改用其他模型。`);
+  return openModel(store, row);
+}
 /** The role's own shared model, opened for one run. Without one the run stops; it never borrows a project's model. */
 export function serviceRoleModel(store: Store, id: string) {
   const role = serviceRole(store, id);
@@ -83,9 +112,10 @@ export function serviceRoleUsage(store: Store, id: string): Json {
     usage_missing_requests: total.usage_missing_requests ?? 0, unpriced_requests: total.unpriced_requests ?? 0, last_requested_at: total.last_requested_at, costs };
 }
 export function serviceRoleView(store: Store, row: Row): Json {
-  const model = row.model_id ? store.get('SELECT id,model_name,api_url,api_key FROM models WHERE id=? AND repository_id IS NULL', row.model_id) : undefined;
+  const model = row.model_id ? store.get('SELECT id,model_name,api_url,api_key,repository_id FROM models WHERE id=?', row.model_id) : undefined;
   return { id: row.id, builtin: !!row.builtin, enabled: !!row.enabled, name: row.name, responsibility: row.responsibility, prompt: row.prompt,
-    model_id: row.model_id, model: model ? { id: model.id, model_name: model.model_name, api_url: model.api_url, key_configured: !!model.api_key } : null,
+    project: row.project_id ? { id: row.project_id, full_name: store.get('SELECT full_name FROM repositories WHERE id=?', row.project_id)?.full_name ?? row.project_id } : null,
+    model_id: row.model_id, model: model ? { id: model.id, model_name: model.model_name, api_url: model.api_url, key_configured: !!model.api_key, project_id: model.repository_id ?? null } : null,
     ...(row.id === managementAssistant ? { permissions: fullPermissions() } : {}), permissions_fixed: row.id===managementAssistant,
     revision: row.revision, created_at: row.created_at, updated_at: row.updated_at, usage: serviceRoleUsage(store, row.id) };
 }
@@ -94,16 +124,19 @@ function optionalText(value: unknown, max: number): string {
   if (typeof value !== 'string' || value.length > max || value.includes('\0')) return fail(400, 'invalid_field');
   return value.trim();
 }
-function sharedModel(store: Store, value: unknown): string | null {
+/** A global template uses a shared model; a project's role may also use that project's own model or a shared one it is
+ * authorized to. */
+function roleModel(store: Store, value: unknown, project: string | null): string | null {
   if (value === null) return null;
-  const id = text(value, 128);
-  if (!store.get('SELECT 1 FROM models WHERE id=? AND repository_id IS NULL', id)) fail(400, 'shared_model_required', 'model_id');
+  const id = text(value, 128), model = store.get('SELECT * FROM models WHERE id=?', id);
+  if (!project) { if (model?.repository_id !== null) fail(400, 'shared_model_required', 'model_id'); }
+  else if (!model || !modelServes(store, model, project)) fail(400, 'project_model_required', 'model_id');
   return id;
 }
 // Accept legacy budget payloads for older clients; definition ignores them and clears the stored value.
 const editable = ['name', 'responsibility', 'prompt', 'model_id', 'permissions', 'budget', 'enabled'];
 /** Field values for an insert or update; `current` is the stored row when editing. */
-function definition(store: Store, input: Json, current?: Row) {
+function definition(store: Store, input: Json, current?: Row, project?: string | null) {
   const builtin = !!current?.builtin, fixed = current?.id === managementAssistant;
   if (input.permissions !== undefined && fixed) {
     const given=object(input.permissions),full=fullPermissions();
@@ -117,7 +150,7 @@ function definition(store: Store, input: Json, current?: Row) {
     name: input.name !== undefined ? text(input.name, 80) : current?.name ?? fail(400, 'invalid_field', 'name'),
     responsibility: input.responsibility !== undefined ? optionalText(input.responsibility, 2000) : current?.responsibility ?? '',
     prompt: input.prompt !== undefined ? optionalText(input.prompt, 32000) : current?.prompt ?? '',
-    model_id: input.model_id !== undefined ? sharedModel(store, input.model_id) : current?.model_id ?? null,
+    model_id: input.model_id !== undefined ? roleModel(store, input.model_id, current ? current.project_id ?? null : project ?? null) : current?.model_id ?? null,
     // Kept as they were: only bindings migrated before #849 read them, once. New roles carry none.
     permissions: fixed ? JSON.stringify(fullPermissions()) : current ? store.get('SELECT permissions FROM service_roles WHERE id=?', current.id)?.permissions ?? null : null,
     budget: null,
@@ -129,18 +162,20 @@ function revisionOf(input: Json): number {
   return input.expected_revision as number;
 }
 
-/** Super administrators maintain service roles; every change checks the expected revision and leaves an audit record. */
-export function createServiceRole(store: Store, userId: string, input: Json): Json {
-  fields(input, editable);
-  const id = 'custom-' + randomId().slice(0, 12), value = definition(store, input), time = now();
+/** Super administrators maintain the global templates, project administrators the roles of their projects (the caller checks
+ * who); every change checks the expected revision and leaves an audit record. A role's project never changes. */
+export function createServiceRole(store: Store, userId: string, input: Json, project: string | null = null): Json {
+  fields(input, [...editable, 'project_id']);
+  const id = 'custom-' + randomId().slice(0, 12), value = definition(store, input, undefined, project), time = now();
   store.transaction(() => {
-    store.run(`INSERT INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,revision,created_at,updated_at)
-      VALUES(?,0,?,?,?,?,?,?,?,1,?,?)`, id, value.enabled, value.name, value.responsibility, value.prompt, value.model_id, value.permissions, value.budget, time, time);
-    store.audit(userId, 'service_role.created', id);
+    store.run(`INSERT INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,revision,created_at,updated_at,project_id)
+      VALUES(?,0,?,?,?,?,?,?,?,1,?,?,?)`, id, value.enabled, value.name, value.responsibility, value.prompt, value.model_id, value.permissions, value.budget, time, time, project);
+    store.audit(userId, 'service_role.created', id, project);
   });
   return serviceRoleView(store, serviceRole(store, id)!);
 }
-export function updateServiceRole(store: Store, userId: string, id: string, input: Json): Json {
+/** `modelCheck` refuses a new model a group bound to the role could not use (#849); it runs inside the transaction. */
+export function updateServiceRole(store: Store, userId: string, id: string, input: Json, modelCheck?: (role: Row, model: string) => void): Json {
   fields(input, [...editable, 'expected_revision']);
   const expected = revisionOf(input);
   return store.transaction(() => {
@@ -148,9 +183,10 @@ export function updateServiceRole(store: Store, userId: string, id: string, inpu
     if (!current) return fail(404, 'service_role_not_found');
     if (current.revision !== expected) return fail(409, 'service_role_revision_conflict', 'expected_revision');
     const value = definition(store, input, current);
+    if (value.model_id && value.model_id !== current.model_id) modelCheck?.(current, value.model_id);
     store.run(`UPDATE service_roles SET name=?,responsibility=?,prompt=?,model_id=?,permissions=?,budget=?,enabled=?,revision=revision+1,updated_at=?
       WHERE id=? AND revision=?`, value.name, value.responsibility, value.prompt, value.model_id, value.permissions, value.budget, value.enabled, now(), id, expected);
-    store.audit(userId, 'service_role.updated', id);
+    store.audit(userId, 'service_role.updated', id, current.project_id ?? null);
     return serviceRoleView(store, serviceRole(store, id)!);
   });
 }
@@ -166,12 +202,14 @@ export function deleteServiceRole(store: Store, userId: string, id: string, inpu
     if (store.get('SELECT 1 FROM channel_service_bindings WHERE service_role_id=? AND enabled=1', id)) return fail(409, 'service_role_in_use');
     // The usage ledger keeps service_role_id: past requests stay attributed to the deleted role.
     store.run('DELETE FROM service_roles WHERE id=?', id);
-    store.audit(userId, 'service_role.deleted', id);
+    store.audit(userId, 'service_role.deleted', id, current.project_id ?? null);
     return { ok: true, id };
   });
 }
-export function listServiceRoles(store: Store): Json {
-  // Built-in roles first, then custom roles in creation order.
-  const rows = store.all('SELECT * FROM service_roles ORDER BY builtin DESC,CASE id WHEN ? THEN 0 ELSE 1 END,created_at,id', managementAssistant);
+/** Roles the caller may see: every role, or (`projects` given) only the roles owned by those projects. */
+export function listServiceRoles(store: Store, projects?: string[]): Json {
+  // Built-in roles first, then global templates, then project roles, each in creation order.
+  const rows = store.all('SELECT * FROM service_roles ORDER BY builtin DESC,CASE id WHEN ? THEN 0 ELSE 1 END,project_id IS NOT NULL,created_at,id', managementAssistant)
+    .filter(row => !projects || row.project_id && projects.includes(row.project_id));
   return { service_roles: rows.map(row => serviceRoleView(store, row)), permission_items: serviceItems };
 }

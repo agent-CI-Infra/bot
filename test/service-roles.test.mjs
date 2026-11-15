@@ -33,8 +33,8 @@ test('built-in service roles are seeded once, edited with revisions and audit, a
   assert.equal(Object.hasOwn(repository,'permissions'),false);assert.equal(repository.permissions_fixed,false);
   assert.deepEqual((await admin('/api/service-roles')).value.permission_items.map(i=>[i.id,i.modes]),
     permissionItems.map(i=>[i.id,i.modes]));
-  // Project administrators neither read nor change platform service roles.
-  assert.equal((await member.client('/api/service-roles')).status,403);
+  // Project administrators neither read nor change platform service roles; they only see their own projects' roles (#849).
+  assert.deepEqual((await member.client('/api/service-roles')).value.service_roles,[]);
   assert.equal((await member.client('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,name:'x'})).status,403);
 
   const saved=await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,name:'Committer 助手',budget:{currency:'USD',limit_amount:5}});

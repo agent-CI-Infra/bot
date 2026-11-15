@@ -290,10 +290,11 @@ const settingsCards = {
   // Platform assistants that are not bound to one project: a card per role, then the form for a new custom role.
   async 'service-roles'(request) {
     const [{ service_roles: roles, permission_items: items }, { models }] = await Promise.all([api('/api/service-roles'), api('/api/models')]);
-    const view = { request, roles, items, models: models.filter(model => model.repository_id === null) };
+    // Roles owned by a project are maintained with its group bindings (#849); this page keeps the global templates.
+    const view = { request, roles: roles.filter(role => !role.project), items, models: models.filter(model => model.repository_id === null) };
     const intro = card('服务角色');
-    intro.append(note('服务角色是平台级的助手：管理助手服务于控制台页面和个人私聊，仓库问答助手是群聊的默认推荐角色。它们不属于某个项目，使用部署共享模型，用量按角色单独记录，不计入任何项目。群聊助手角色只决定提示词和模型，群能做什么由每个群绑定的权限档位决定。项目里的 Manager、Dev、QA 等工作角色在各项目的「角色」页配置。'));
-    return [intro, ...roles.map(role => serviceRoleCard(view, role)), serviceRoleCreate(view)];
+    intro.append(note('服务角色是平台级的助手：管理助手服务于控制台页面和个人私聊，仓库问答助手是群聊的默认推荐角色。它们不属于某个项目，使用部署共享模型，用量按角色单独记录，不计入任何项目。群聊助手角色只决定提示词和模型，群能做什么由每个群绑定的权限档位决定。这里维护全局模板；项目管理员为自己项目建的群助手角色在「个人设置 → 飞书绑定」维护。项目里的 Manager、Dev、QA 等工作角色在各项目的「角色」页配置。'));
+    return [intro, ...view.roles.map(role => serviceRoleCard(view, role)), serviceRoleCreate(view)];
   },
   async users(request, id) {
     const [{ users }, assigned] = await Promise.all([api('/api/users'), api('/api/project-admin-assignments')]);

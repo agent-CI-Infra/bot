@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
-import { channelFixture, inGroup, post, until, bindFixture } from './channel-fixture.mjs';
+import { channelFixture, inGroup, post, until, bindFixture, shareAssistantModel } from './channel-fixture.mjs';
 import { repository } from './helpers.mjs';
 import { knowledgeActor } from './knowledge-fixture.mjs';
 import { authorize, invalidate, resolvePrincipalActor, revision } from '../dist/identity/authorization.js';
@@ -14,6 +14,8 @@ import { assertManagedExecution } from '../dist/tasks/management.js';
 import { serviceRole } from '../dist/service-roles/roles.js';
 import { digest } from '../dist/core/security.js';
 import { ChannelServiceBindings } from '../dist/channels/service-bindings.js';
+import { serviceRolesApi } from '../dist/service-roles/api.js';
+import { deleteProjectRecords } from '../dist/projects/removal.js';
 
 // Groups bind one service role and one project scope (#312). All GitHub and Feishu traffic goes to local protocol fixtures.
 const key = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
@@ -53,6 +55,7 @@ async function fixture(t) {
   h.store.run("UPDATE accounts SET type='github_app',app_id='123',credentials=? WHERE id=?", h.store.secrets.seal({ ...secrets, token: undefined, private_key: key }, 'account:' + account.id), account.id);
   const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
   assert.equal((await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id })).status, 200);
+  await shareAssistantModel(f);
   const discovery = groupMessage('Group discussion before binding', 'ou_alice'); discovery.event.message.mentions = []; await post(h, f.id, discovery);
   const chat = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
   const bind = (input = {}, chatId = chat.id) => f.admin('/api/channels/chats/' + chatId + '/service-binding', 'PUT', { service_role_id: 'repository-assistant',
@@ -470,7 +473,8 @@ test('a group assistant works a side question in its own task with the same tool
     return main(body, res, seen);
   };
   main = (body, res, seen) => !seen.length ? call(res, 'start_own_task', { title: '整理未关闭的 PR', instruction: '列出 bot 仓库未关闭的 PR' }) : say(res, '整理好了：' + seen[0].conclusion);
-  const roleRequests = () => f.h.store.get("SELECT count(*) n FROM model_requests WHERE service_role_id='repository-assistant' AND repository_id IS NULL").n;
+  // A group scoped to one repository bills the role and that project (#849).
+  const roleRequests = () => f.h.store.get("SELECT count(*) n FROM model_requests WHERE service_role_id='repository-assistant' AND repository_id='101'").n;
   const billed = roleRequests();
   assert.equal((await done(f, await post(f.h, f.id, groupMessage('有哪些未关闭的 PR？')))).state, 'completed');
   await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('整理好了') && JSON.stringify(s.content).includes('#7')));
@@ -482,7 +486,7 @@ test('a group assistant works a side question in its own task with the same tool
   const row = f.h.store.get('SELECT * FROM service_role_own_tasks');
   assert.equal(row.owner_kind, 'channel'); assert.equal(row.owner_id, binding.id); assert.equal(row.principal_id, binding.principal_id);
   assert.equal(row.state, 'completed'); assert.equal(row.rounds, 1); assert.ok(!row.history.includes('#7'), 'history is sealed');
-  // Billed to the service role like the turn itself: main turn requests plus the own task's two.
+  // Billed like the turn itself: main turn requests plus the own task's two.
   assert.ok(roleRequests() >= billed + 4);
   // Roster changes retain the exact stored owner key, including its pre-existing context revision.
   const beforeFence=f.service.serviceBindings.fence(f.chat.id),memoryOwner={service_role_id:binding.service_role_id,kind:'channel',owner_id:f.chat.id,principal_id:binding.principal_id,fence:beforeFence};
@@ -513,6 +517,7 @@ test('a group assistant reads ten repositories with one tool call each in a sing
   const f = await fixture(t), ids = ['101', '102', '103', '104', '105', '106', '107', '108', '109', '110'];
   for (const id of ids.slice(2)) await repository(f.admin, f.a.id, id);
   f.h.store.run("UPDATE repositories SET full_name='agent-test-zone/admin-fixture-'||id,owner_id='10' WHERE id<>'201'");
+  await shareAssistantModel(f);
   const bound = await f.bind({ scope: { kind: 'repositories', repositories: ids } }); assert.equal(bound.status, 200, JSON.stringify(bound.value));
   assert.equal(bound.value.reachable.length, 10);
   // Every repository has many open PRs with long Chinese titles: each result alone is larger than its share.
@@ -715,4 +720,104 @@ test('upgrading moves each binding\'s role items onto the binding unchanged: sam
   const [created, paused] = observations(f.requests.at(-1));
   assert.equal(created.state, 'succeeded', JSON.stringify(created)); assert.equal(paused.error, 'operation_not_allowed', 'pausing was never part of the old set');
   assert.match(system, /先说结论/);
+});
+
+/** A project administrator as the console sees one: a platform account with config.write on the given projects. */
+function projectAdmin(f, name, projects, open_id) {
+  const context = maintainer(f, name, projects, open_id);
+  return { context, user: { id: name, username: name, role: 'project_admin', csrf: '', repositories: projects, context } };
+}
+const roles = (f, user, method, path, body = {}) => { try { return { status: 200, value: serviceRolesApi(f.h.store, user, method, path, body) }; } catch (error) { return { status: error.status, value: { error: error.code, detail: error.detail } }; } };
+
+test('a project administrator keeps an assistant role with the project\'s own model; it binds only to groups scoped to that project and bills it (#849)', async t => {
+  const f = await fixture(t), { h } = f, bindings = f.service.serviceBindings;
+  const second = groupMessage('Second group discussion', 'ou_alice', 'oc_group_2'); second.event.message.mentions = []; await post(h, f.id, second);
+  const chatB = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group_2'");
+  // config.write on 101 and 102: a refusal below is about the role, never about the administrator's authority.
+  const pa = projectAdmin(f, 'project-admin', ['101', '102'], 'ou_project_admin');
+  const own = (await f.admin('/api/models', 'POST', { repository_id: '101', model_name: 'Project 101 model', api_url: f.assistantModel.api_url, api_key: 'fixture-provider-key' })).value.model;
+  const other = (await f.admin('/api/models', 'POST', { repository_id: '102', model_name: 'Project 102 model', api_url: f.assistantModel.api_url, api_key: 'fixture-provider-key' })).value.model;
+  // Without a super administrator: a role of project 101 with 101's own model.
+  const created = roles(f, pa.user, 'POST', '/api/service-roles', { project_id: '101', name: '101 群助手', model_id: own.id, prompt: '先给结论。' });
+  assert.equal(created.status, 200, JSON.stringify(created.value));
+  const role = created.value.service_role;
+  assert.deepEqual([role.project.id, role.model.project_id], ['101', '101']);
+  // Only their own projects' roles, never another project's model, a global template or a built-in role.
+  for (const [method, path, body, error] of [['POST', '/api/service-roles', { project_id: '101', name: 'x', model_id: other.id }, 'project_model_required'],
+    ['POST', '/api/service-roles', { project_id: '201', name: 'x' }, 'repository_forbidden'], ['POST', '/api/service-roles', { name: 'x' }, 'super_admin_required'],
+    ['PATCH', '/api/service-roles/repository-assistant', { expected_revision: 1, name: 'x' }, 'super_admin_required']])
+    assert.equal(roles(f, pa.user, method, path, body).value.error, error, path + ' ' + JSON.stringify(body));
+  assert.equal((await f.admin('/api/service-roles', 'POST', { name: 'Global', model_id: own.id })).value.error, 'shared_model_required');
+  assert.deepEqual(roles(f, pa.user, 'GET', '/api/service-roles').value.service_roles.map(r => r.id), [role.id]);
+  // It binds to a group scoped to 101; a group that also covers 102 is refused, naming 102.
+  const bound = await bindings.configure(pa.context, f.chat.id, { service_role_id: role.id, scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0 });
+  assert.equal(bound.state, 'active');
+  await assert.rejects(bindings.configure(pa.context, chatB.id, { service_role_id: role.id, scope: { kind: 'repositories', repositories: ['101', '102'] }, enabled: true, expected_revision: 0 }),
+    error => error.code === 'service_role_project_scope' && JSON.stringify(error.detail) === JSON.stringify({ project: repo(101), projects: [repo(102)] }));
+  const listed = (await bindings.list(pa.context)).service_roles.find(r => r.id === role.id);
+  assert.deepEqual([listed.project.full_name, listed.model.project_id], [repo(101), '101']);
+  // Its turns use the project's model and count in the project's costs as well as on the role.
+  f.modelState.respond = async (body, res) => say(res, '项目专属助手已回答。');
+  assert.equal((await done(f, await post(h, f.id, groupMessage('你好')))).state, 'completed');
+  const billed = h.store.all('SELECT repository_id,service_role_id,model_id FROM model_requests WHERE conversation_id=?', f.chat.id).map(r => ({ ...r }));
+  assert.ok(billed.length && billed.every(r => r.repository_id === '101' && r.service_role_id === role.id && r.model_id === own.id), JSON.stringify(billed));
+  assert.match(f.requests.at(-1).messages[0].content, /maintainers of this assistant role[^]*先给结论/);
+  // A project administrator of 101 deletes the role once no group uses it.
+  const disabled = await bindings.configure(pa.context, f.chat.id, { enabled: false, expected_revision: 1 });
+  assert.equal(disabled.state, 'disabled');
+  const current = roles(f, pa.user, 'GET', '/api/service-roles').value.service_roles[0];
+  assert.equal(roles(f, pa.user, 'DELETE', '/api/service-roles/' + role.id, { expected_revision: current.revision }).value.ok, true);
+});
+
+test('a group may only use a model every project in its scope has: saves, role changes and each turn refuse otherwise, naming the projects (#849)', async t => {
+  const f = await fixture(t), { h } = f;
+  const share = repositories => f.admin('/api/models/' + f.assistantModel.id + '/projects', 'PUT', { repository_ids: repositories });
+  // The shared model is authorized to 101 only: a group over 101 and 102 is refused, naming 102.
+  await share(['101']);
+  const refused = await f.bind();
+  assert.deepEqual([refused.status, refused.value.error, refused.value.detail], [409, 'channel_service_model_unavailable', { projects: [repo(102)] }]);
+  const bound = await f.bind({ scope: { kind: 'repositories', repositories: ['101'] } }); assert.equal(bound.status, 200, JSON.stringify(bound.value));
+  // A group over one repository bills it; its model is checked against that repository per request too.
+  f.modelState.respond = async (body, res) => say(res, '已回答。');
+  assert.equal((await done(f, await post(h, f.id, groupMessage('第一次提问')))).state, 'completed');
+  assert.ok(h.store.all('SELECT repository_id FROM model_requests WHERE conversation_id=?', f.chat.id).every(r => r.repository_id === '101'));
+  // Changing the role to a model the group's project lacks is refused, naming the project, instead of the group stopping later.
+  const lacking = (await f.admin('/api/models', 'POST', { model_name: 'Unshared', api_url: f.assistantModel.api_url, api_key: 'fixture-provider-key' })).value.model;
+  const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
+  const change = await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: lacking.id });
+  assert.deepEqual([change.status, change.value.error, change.value.detail], [409, 'channel_service_model_unavailable', { projects: [repo(101)] }]);
+  // Withdrawn later: the next turn answers that the model is unavailable, names the project and sends no model request.
+  await share([]);
+  const before = f.requests.length;
+  const row = await done(f, await post(h, f.id, groupMessage('第二次提问')));
+  assert.deepEqual([row.state, row.error], ['failed', 'channel_service_model_unavailable']);
+  assert.equal(f.requests.length, before, 'never another model');
+  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('模型不可用') && JSON.stringify(s.content).includes(repo(101))));
+  const view = (await f.admin('/api/channels/service-bindings')).value.bindings[0];
+  assert.deepEqual([view.state, view.error, view.model_gaps], ['paused', 'channel_service_model_unavailable', [repo(101)]]);
+});
+
+test('upgrading authorizes each enabled group\'s shared model to the projects it already read, so no group stops (#849)', async t => {
+  const f = await fixture(t), { h } = f;
+  assert.equal((await f.bind()).status, 200);
+  // Before the model rule a group's model needed no authorization to its projects.
+  h.store.run('DELETE FROM model_projects WHERE model_id=?', f.assistantModel.id);
+  h.store.run("DELETE FROM settings WHERE key='channel_service_binding_models_migrated'");
+  await h.stop(); await h.start();
+  assert.deepEqual(h.store.all('SELECT repository_id FROM model_projects WHERE model_id=? ORDER BY repository_id', f.assistantModel.id).map(r => r.repository_id), ['101', '102']);
+  assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE action='model.sharing_migrated'").n, 2);
+  assert.deepEqual((await f.admin('/api/channels/service-bindings')).value.bindings[0].model_gaps, []);
+});
+
+test('removing a project deletes its unused assistant roles; one a group still names stays, disabled, and loses the project\'s model (#849)', async t => {
+  const f = await fixture(t), { h } = f;
+  const own = (await f.admin('/api/models', 'POST', { repository_id: '101', model_name: 'Project 101 model', api_url: f.assistantModel.api_url, api_key: 'fixture-provider-key' })).value.model;
+  const create = async (project, model_id) => (await f.admin('/api/service-roles', 'POST', { project_id: project, name: 'role ' + project, model_id })).value.service_role;
+  const bound = await create('101', own.id), unused = await create('101', f.assistantModel.id), other = await create('102', f.assistantModel.id);
+  assert.equal((await f.bind({ service_role_id: bound.id, scope: { kind: 'repositories', repositories: ['101'] } })).status, 200);
+  h.store.transaction(() => deleteProjectRecords(h.store, '101'));
+  const row = id => h.store.get('SELECT enabled,model_id FROM service_roles WHERE id=?', id);
+  assert.deepEqual({ ...row(bound.id) }, { enabled: 0, model_id: null }, 'kept for the group that names it, disabled, without the deleted project model');
+  assert.equal(row(unused.id), undefined);
+  assert.deepEqual({ ...row(other.id) }, { enabled: 1, model_id: f.assistantModel.id });
 });

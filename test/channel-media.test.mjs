@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { channelFixture, envelope, post, until, finished, privateChat, boundGroup, inGroup } from './channel-fixture.mjs';
+import { channelFixture, envelope, post, until, finished, privateChat, boundGroup, inGroup, shareAssistantModel } from './channel-fixture.mjs';
 import { feishuMarkdown, markdownPosts, postText } from '../dist/channels/format.js';
 import { MediaTurn, incomingFiles, inboundBytes, safeFilename } from '../dist/channels/media.js';
 import { ChannelService } from '../dist/channels/service.js';
@@ -17,7 +17,7 @@ const delivered = (f, source) => until(() => f.h.store.get('SELECT * FROM channe
 const fileEvent = (key, chat = 'oc_private', name = 'notes.txt') => envelope('', { message: { chat_id: chat, message_type: 'file', content: JSON.stringify({ file_key: key, file_name: name }) } });
 async function group(f) {
   const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
-  await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id });
+  await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id }); await shareAssistantModel(f);
   return boundGroup(f);
 }
 function localTurn(f, chat, event) {

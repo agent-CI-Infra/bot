@@ -168,7 +168,8 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' https://avatars.githubusercontent.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://github.com");
     try { await fn(req, res); }
     catch (error) {
-      if (!res.headersSent) respond(res, error instanceof HttpError ? error.status : 503, { error: error instanceof HttpError ? error.code : 'service_unavailable', ...(error instanceof HttpError && error.field ? { field: error.field } : {}) });
+      if (!res.headersSent) respond(res, error instanceof HttpError ? error.status : 503, { error: error instanceof HttpError ? error.code : 'service_unavailable', ...(error instanceof HttpError && error.field ? { field: error.field } : {}),
+        ...(error instanceof HttpError && error.detail ? { detail: error.detail } : {}) });
       else res.end();
     }
   };
