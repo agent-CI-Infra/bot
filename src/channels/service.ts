@@ -34,6 +34,11 @@ const card = (value: string, link?: string, token?: string): Json => ({ config: 
   elements: [{ tag: 'div', text: { tag: 'plain_text', content: value } },
     ...(link ? [{ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '登录后台查看' }, url: link },
       ...(token ? [{ tag: 'button', text: { tag: 'plain_text', content: '刷新执行状态' }, value: { token } }] : [])] }] : [])] });
+/** Why a private-chat task result was not sent (#844), by the code its recheck failed with. */
+const personalResultReasons: Record<string, string> = {
+  external_binding_required: '创建者的飞书绑定已解除或失效', channel_personal_source_mismatch: '创建者的飞书绑定已解除或失效',
+  channel_employee_source_inactive: '私聊或飞书连接已停用', capability_forbidden: '创建者已没有该仓库的读取权限',
+  tenant_forbidden: '创建者已没有该仓库的读取权限', principal_inactive: '创建者的账号已停用' };
 /** The deployment's GitHub permission checks, as far as Feishu turns use them (#846). */
 export interface GitHubProofs { lapsed(principal: string): boolean; renewIfLapsed(principal: string): Promise<boolean> }
 export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; manager?: Manager; githubUrl?: string; github?: () => GitHubProofs | undefined; }
@@ -90,7 +95,8 @@ export class ChannelService {
     this.schedules = new ChannelSchedules(store, this);
     // Tasks a group delegated are linked to it when created, and stop once that group may no longer delegate there.
     this.employees.bindingGuard = origin => this.serviceBindings.guardTask(origin);
-    management.service.taskCreated = (command, task) => this.serviceBindings.linkTask(command, task);
+    // Tasks the management assistant creates in a private chat report back to that chat (#844).
+    management.service.taskCreated = (command, task) => { this.serviceBindings.linkTask(command, task); this.linkPersonalTask(command, task); };
     // A group's computer (#457) is bound to its fence; a changed fence or a binding no longer usable removes it at once.
     management.service.assistants?.resolve('group', row => {
       const binding = this.serviceBindings.active(row.subject); if (!binding) return null;
@@ -619,10 +625,11 @@ export class ChannelService {
   private async deliver(row: Row): Promise<void> {
     const { event, delivery, protection } = this.store.secrets.open(row.payload, 'channel-outbox:' + row.id) as any;
     const c = this.source(event);
-    if(['employee','personal_conversation','service_binding','service_task','channel_schedule'].includes(protection?.kind)){
+    if(['employee','personal_conversation','personal_task','service_binding','service_task','channel_schedule'].includes(protection?.kind)){
       const guard=()=>{
         this.source(event);if(this.stopped)fail(409,'channel_stopped');
         if(protection.kind==='channel_schedule'){this.schedules.guardDelivery(protection);return;}
+        if(protection.kind==='personal_task'){this.personalTaskAllowed(protection);return;}
         if(protection.kind==='service_task'){
           const binding=this.serviceBindings.get(protection.chat_id);
           if(!binding||binding.id!==protection.binding_id)fail(409,'conversation_source_changed');
@@ -648,7 +655,8 @@ export class ChannelService {
           if(turn?.state!=='completed'||turn.fence!==protection.source_fence||this.businessFence(this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!)!==turn.fence)fail(409,'conversation_source_changed');}
       };
       guard();const remote=await this.sendParts(row,event,delivery,protection,guard,(remote,part)=>{
-        if(protection.kind==='channel_schedule'&&!protection.binding_id)return;
+        // Private timer results and private-chat task results are personal replies: they join no group's context.
+        if(protection.kind==='personal_task'||protection.kind==='channel_schedule'&&!protection.binding_id)return;
         const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!;
         const content=part.message_type==='post'?String((part.content.zh_cn as any)?.content?.[0]?.[0]?.text??''):part.message_type==='image'?'[图片附件]':part.message_type==='file'?'[文件附件]':String((part.content.elements as any)?.[0]?.text?.content??'');
         this.ledger.merge(chat,{message_id:remote,sender_id:c.bot_open_id,sender_tenant:c.installation_tenant,sender_type:'app',message_type:part.message_type??'interactive',content,raw_content:JSON.stringify(part.content),created_at:Date.now(),updated_at:Date.now(),parent_id:event.message_id,root_id:event.root_id??'',thread_id:event.thread_id,deleted:false},'live');
@@ -812,6 +820,8 @@ export class ChannelService {
     // The cursor denotes terminal results, not just attempted enqueue operations. The per-result state lets later
     // deliveries continue while an earlier one retries, and survives restart without repeating a confirmed send.
     this.store.transaction(()=>{
+      for(const event of this.store.all("SELECT r.* FROM channel_task_results r JOIN channel_outbox o ON o.id=r.outbox_id WHERE r.state='queued' AND o.state='sent'"))
+        this.resultHistory(event,'delivered','','delivery');
       this.store.run("UPDATE channel_task_results SET state='delivered' WHERE state='queued' AND outbox_id IN (SELECT id FROM channel_outbox WHERE state='sent')");
       this.store.run("UPDATE channel_task_results SET state='suppressed' WHERE state='queued' AND outbox_id IN (SELECT id FROM channel_outbox WHERE state='failed')");
       this.store.run(`UPDATE channel_result_cursor SET sequence=max(sequence,coalesce(
@@ -830,14 +840,19 @@ export class ChannelService {
     this.resultHistory(event,terminal?'suppressed':'retry',code,phase);
   }
   private resultHistory(event:Row,state:string,code:string,phase:string):void {
-    const destination=this.store.get(`SELECT c.id,c.connector_id FROM channel_chats c WHERE c.id=coalesce(
-      (SELECT chat_id FROM channel_service_tasks WHERE task_id=?),(SELECT conversation_id FROM task_origins WHERE task_id=?))`,event.task_id,event.task_id);
-    new TaskRecords(this.store).history(event.task_id,'channel_result_delivery',{result_id:event.id,task_id:event.task_id,channel:destination?.id??null,connector_id:destination?.connector_id??null,state,error_code:code,phase,
-      message:state==='retry'?'结果投递失败，稍后重试':code==='task_result_authority_changed'?'结果未投递：权限已变化':code==='task_result_destination_unavailable'?'结果未投递：目标或权限不可用':'结果未投递：'+code+'（已停止自动重试）'});
+    const destination=this.store.get(`SELECT c.id,c.connector_id,c.chat_type FROM channel_chats c WHERE c.id=coalesce(
+      (SELECT chat_id FROM channel_service_tasks WHERE task_id=?),(SELECT chat_id FROM channel_personal_tasks WHERE task_id=?),
+      (SELECT conversation_id FROM task_origins WHERE task_id=?))`,event.task_id,event.task_id,event.task_id);
+    // A private-chat result (#844) stops for reasons its creator can act on; name them instead of the bare code.
+    const personal=this.store.get('SELECT 1 FROM channel_personal_tasks WHERE task_id=?',event.task_id)?personalResultReasons[code]:undefined;
+    new TaskRecords(this.store).history(event.task_id,'channel_result_delivery',{result_id:event.id,task_id:event.task_id,channel:destination?.id??null,connector_id:destination?.connector_id??null,state,error_code:code||null,phase,
+      message:state==='delivered'?'结果已发送到飞书'+(destination?.chat_type==='p2p'?'私聊':'群'):state==='retry'?'结果投递失败，稍后重试':personal?'结果未投递：'+personal:code==='task_result_authority_changed'?'结果未投递：权限已变化':code==='task_result_destination_unavailable'?'结果未投递：目标或权限不可用':'结果未投递：'+code+'（已停止自动重试）'});
   }
   private queueTaskResult(event:Row):string|undefined {
     const link=this.store.get('SELECT * FROM channel_service_tasks WHERE task_id=?',event.task_id);
     if(link)return this.serviceTaskResult(link);
+    const personal=this.store.get('SELECT * FROM channel_personal_tasks WHERE task_id=?',event.task_id);
+    if(personal)return this.personalTaskResult(personal);
     const task=this.store.get(`SELECT t.*,o.conversation_id,o.principal_id,o.source_message FROM tasks t JOIN task_origins o ON o.task_id=t.id
       JOIN channel_chats c ON c.id=o.conversation_id WHERE t.id=? AND c.state='active' AND t.status IN ('completed','succeeded','pr_opened','cancelled','failed')`,event.task_id);
     if(!task)return;
@@ -871,11 +886,44 @@ export class ChannelService {
     // A task a group's timer delegated (#330) has no source message; its result goes to the same group.
     const receipt=this.store.get('SELECT payload FROM channel_inbox WHERE id=?',link.source_message);if(!receipt&&!String(link.source_message).startsWith('schedule:'))return;
     const original=receipt?this.store.secrets.open(receipt.payload,'channel-event:'+link.source_message) as unknown as ChannelEvent:this.chatEvent(chat),c=this.connector(chat.connector_id);
+    return this.queue({...original,connector_id:c.id,connector_revision:c.revision},this.taskResultCard(task),
+      key,link.source_message,{kind:'service_task',chat_id:chat.id,binding_id:binding.id,project_id:task.repository_id,task_id:task.id,source_message:link.source_message});
+  }
+  /** What a group or private chat is told about a finished task: its repository, title, state, summary, PR and failure code. */
+  private taskResultCard(task:Row):Json{
     const name=this.store.get('SELECT full_name FROM repositories WHERE id=?',task.repository_id)?.full_name??task.repository_id;
     const state=({completed:'已完成',succeeded:'已完成',pr_opened:'已提交 PR',cancelled:'已取消',failed:'失败'} as Record<string,string>)[task.status]??task.status;
-    let summary='';try{const result=JSON.parse(task.result??'null');summary=String(result?.summary??result?.report?.summary??result?.pr_url??'');}catch{}
-    return this.queue({...original,connector_id:c.id,connector_revision:c.revision},card(`${name} 的任务「${task.summary}」${state}${summary?'\n'+summary:''}${task.error_code?'\n原因：'+task.error_code:''}`,(this.options.origin??'')+'/#/board'),
-      key,link.source_message,{kind:'service_task',chat_id:chat.id,binding_id:binding.id,project_id:task.repository_id,task_id:task.id,source_message:link.source_message});
+    let summary='',pr='';try{const result=JSON.parse(task.result??'null');summary=String(result?.summary??result?.report?.summary??result?.pr_url??'');pr=String(result?.pr_url??'');}catch{}
+    return card(`${name} 的任务「${task.summary}」${state}${summary?'\n'+summary:''}${pr&&pr!==summary?'\nPR：'+pr:''}${task.error_code?'\n原因：'+task.error_code:''}`,(this.options.origin??'')+'/#/board');
+  }
+  /**
+   * A task the management assistant created in a private chat (#844) is linked to that chat and the message that asked for it,
+   * so its result comes back there. Console conversations, group bindings and timer runs have no such source message.
+   */
+  private linkPersonalTask(command:Row,task:string):void{
+    if(command.channel!=='im'||command.operation!=='task.create')return;
+    const source=this.store.get('SELECT id,chat_ref FROM channel_inbox WHERE conversation_id=? AND id=?',command.source_conversation,String(command.source_message).replace(/^feishu:/,''));
+    const chat=source&&this.store.get(`SELECT c.id FROM channel_chats c JOIN channel_personal_owners o ON o.chat_id=c.id
+      WHERE c.id=? AND c.chat_type='p2p' AND o.principal_id=?`,source.chat_ref,command.principal_id);
+    if(chat)this.store.run('INSERT OR IGNORE INTO channel_personal_tasks VALUES(?,?,?,?,?,?)',task,chat.id,command.principal_id,source.id,command.id,Date.now());
+  }
+  /** A private-chat task's result goes out only while its creator still owns the chat through an active Feishu binding and may
+   * still read the repository. Checked when the result is queued and again before every send. */
+  private personalTaskAllowed(target:{chat_id:string;principal_id:string;source_message:string;project_id:string}):void{
+    this.employees.guardPersonal(target.chat_id,target.principal_id,target.source_message,false);
+    authorize(resolvePrincipalActor(this.store,target.principal_id,null,target.project_id,'im'),'tasks.read',{project_id:target.project_id});
+  }
+  private personalTaskResult(link:Row):string|undefined{
+    const task=this.store.get("SELECT * FROM tasks WHERE id=? AND status IN ('completed','succeeded','pr_opened','cancelled','failed')",link.task_id);
+    const chat=this.store.get("SELECT * FROM channel_chats WHERE id=? AND state='active'",link.chat_id);
+    if(!task||!chat)return;
+    const key='personal-task-result:'+task.id+':'+digest(JSON.stringify([task.status,task.result,task.error_code,this.store.get('SELECT revision FROM task_records WHERE task_id=?',task.id)?.revision]));
+    const existing=this.store.get('SELECT id FROM channel_outbox WHERE idempotency_key=?',key);if(existing)return existing.id;
+    const target={chat_id:chat.id,principal_id:link.principal_id,source_message:link.source_message,project_id:task.repository_id};
+    this.personalTaskAllowed(target);
+    const receipt=this.store.get('SELECT payload FROM channel_inbox WHERE id=?',link.source_message);if(!receipt)return;
+    const original=this.store.secrets.open(receipt.payload,'channel-event:'+link.source_message) as unknown as ChannelEvent,c=this.connector(chat.connector_id);
+    return this.queue({...original,connector_id:c.id,connector_revision:c.revision},this.taskResultCard(task),key,link.source_message,{kind:'personal_task',...target,task_id:task.id});
   }
   /** A group turn's output may still be sent: its fence is current, and it completed (the answer) or still runs or completed
    * (a progress message, #435). Shared by message answers and group timers. */
