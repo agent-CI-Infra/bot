@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 
 // #238 webhooks slice: one delivery is three facts, not one status. Reception (did the request arrive),
@@ -23,6 +24,8 @@ test('webhook list and detail separate reception, signature and processing outco
   await h.hook(a.path, 'wrong-secret', 'delivery-bad-signature', opened);
   // A delivery to an endpoint this account does not have is archived before any signature check: it is unchecked, not failed.
   await h.hook('/hooks/github/' + a.id + '/' + 'f'.repeat(48), a.secret, 'delivery-unknown-endpoint', opened);
+  const longName = 'organization-with-a-very-long-name/repository-name-that-must-wrap-at-three-ninety-pixels';
+  h.store.run('UPDATE repositories SET full_name=? WHERE id=?', longName, '101');
 
   await page.goto(h.admin);
   await page.getByLabel('用户名', { exact: true }).fill('administrator');
@@ -39,6 +42,10 @@ test('webhook list and detail separate reception, signature and processing outco
   }
   await expect(page.locator('#rows')).toContainText('不会创建任务');
   await expect(page.locator('#rows details.row-tech summary')).toHaveCount(7);
+  await expect(page.locator('#rows')).toContainText('organization-with-a-very-long-name/repository-name-that-must-wrap-at-three-ninety-pixels');
+  mkdirSync('.tmp/events-plain-798', { recursive: true });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.screenshot({ path: '.tmp/events-plain-798/events-1440.png', fullPage: true });
 
   // Processed success: reception and signature are positive, processing says a task was created.
   await expect(facet('delivery-success', 'reception')).toHaveText('已接收');
@@ -132,4 +139,17 @@ test('webhook list and detail separate reception, signature and processing outco
   await expect(page.locator('#rows [data-delivery-record]')).toHaveCount(7);
   await expect(facet('delivery-bad-signature', 'signature')).toHaveText('签名无效');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const longRow = row('delivery-success');
+  await longRow.scrollIntoViewIfNeeded();
+  await expect(longRow.locator('.row-title')).toContainText(longName);
+  for (const sel of ['.row-title', '.row-event-outcome']) {
+    const m = await longRow.locator(sel).evaluate(e => ({
+      ws: getComputedStyle(e).whiteSpace,
+      clip: e.scrollWidth > e.clientWidth + 1,
+      overflow: getComputedStyle(e).textOverflow,
+    }));
+    expect(m.ws).toBe('normal');
+    expect(m.clip).toBe(false);
+  }
+  await page.screenshot({ path: '.tmp/events-plain-798/events-390.png' });
 });

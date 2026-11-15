@@ -54,6 +54,10 @@ test('events list uses plain event names and keeps technical identifiers folded'
 test('deliveryEventName falls back to 其他事件 for unknown routes', () => {
   const page = loadConsole(['static/app.js']);
   assert.equal(page.run("deliveryEventName('workflow_run.completed')"), '工作流已完成');
+  assert.equal(page.run("deliveryEventName('issue_comment.created')"), 'Issue 有新评论');
+  assert.equal(page.run("deliveryEventName('issue_comment')"), 'Issue 有新评论');
+  assert.equal(page.run("deliveryEventName('pull_request_review.submitted')"), 'Pull Request 收到检视意见');
+  assert.equal(page.run("deliveryEventName('pull_request_review_comment.created')"), 'Pull Request 有行内评论');
   assert.equal(page.run("deliveryEventName('mystery.happened')"), '其他事件');
   assert.equal(page.run("deliveryEventName('', 'issues')"), 'Issue');
 });
