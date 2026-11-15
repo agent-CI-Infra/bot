@@ -3,6 +3,7 @@ import { modelCapabilities, modelProtocol, type ModelInterfaceType } from '../mo
 import { commandTool } from './command.js';
 import { type Store } from '../storage/database.js';
 import { stop } from './common.js';
+import { loopbackHostname } from '../core/security.js';
 import { pricingFor } from '../metrics/accounting.js';
 import { githubWriteTool } from '../github/write.js';
 // Exact task-profile overrides are trusted administrator configuration, never model/tool input.
@@ -33,6 +34,12 @@ export interface RuntimeModel {
   protocol?: ReturnType<typeof modelProtocol>;
 }
 export function openModel(store: Store, row: Record<string, any>): RuntimeModel {
+  // A row saved before the write-side rule can still hold a public http URL; sending the key there in the clear is the
+  // leak this refuses. wait for a person to change the address rather than retrying with the same one.
+  const savedUrl = String(row.api_url ?? '');
+  let parsed: URL | null = null; try { parsed = new URL(savedUrl); } catch {}
+  if (parsed?.protocol === 'http:' && !loopbackHostname(parsed.hostname))
+    return stop('model_url_insecure','waiting_configuration',`模型 ${row.id} 的地址是明文 HTTP 且不是本机，请改成 https 或本机地址后重试。`);
   const key=String(store.secrets.open(row.api_key,`model:${row.id}`).value||'');if(!key)return stop('model_key_missing','waiting_configuration',`模型 ${row.id} 的凭据为空，请重新配置。`);
   return {id:String(row.id),version:Number(row.version),url:String(row.api_url),key,model:String(row.model_name),pricing:pricingFor(store,String(row.id)),capabilities:modelCapabilities(store,row as any),protocol:modelProtocol(store,row as any)};
 }

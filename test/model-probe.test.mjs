@@ -7,6 +7,7 @@ import { harness, setup, account, repository, testPassword } from './helpers.mjs
 import { agentLoop } from '../dist/agent/loop.js';
 import { Redactor } from '../dist/agent/common.js';
 import { testPrompt } from '../dist/app/model-probe.js';
+import { openModel } from '../dist/agent/model.js';
 
 // A fake OpenAI-compatible upstream. /v1 answers normally; /echo answers 401 and repeats the key it was given,
 // the way a careless proxy might, and /reply-echo puts it in a successful reply. /creds and /text stand for internal
@@ -245,4 +246,56 @@ test('draft provider tests reuse only an authorized saved key, require a version
   assert.equal(echoed.value.status,401);assert.ok(!JSON.stringify(echoed.value).includes(replacement));
   assert.ok(!JSON.stringify((await admin('/api/audit')).value).includes(replacement));
   assert.equal(h.store.secrets.open(h.store.get('SELECT api_key FROM models WHERE id=?',own.id).api_key,'model:'+own.id).value,savedKey);
+});
+
+test('plain HTTP model URLs are limited to this machine on every write and before any saved one is used (#755)', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin), fake = await upstream(t); await repository(admin, a.id, '101');
+  const key = testPassword(), calls = fake.requests.length;
+  const create = api_url => admin('/api/models', 'POST', { repository_id: '101', api_url, api_key: key, model_name: 'm' });
+  const rows = () => h.store.get('SELECT count(*) n FROM models').n;
+
+  // Public plain HTTP is refused on write, and nothing is stored or sent.
+  for (const api_url of ['http://example.com/v1', 'http://10.0.0.1/v1', 'http://169.254.169.254/latest/meta-data', 'http://0.0.0.0/v1', 'http://127.0.0.1.nip.io/v1', 'http://localhost./v1']) {
+    const refused = await create(api_url);
+    assert.equal(refused.status, 400, api_url);
+    assert.deepEqual(refused.value, { error: 'insecure_api_url', field: 'api_url' }, api_url);
+  }
+  assert.equal(rows(), 0, 'no refused URL is stored');
+  assert.equal(fake.requests.length, calls, 'no request carries the key');
+  // https and every spelling of this machine still pass; new URL() normalises the numeric forms.
+  for (const api_url of ['https://example.com/v1', `http://127.0.0.1:${fake.origin.split(':')[2]}/v1`, 'http://localhost:8000/v1',
+    'http://127.0.0.10:8000/v1', 'http://2130706433:8000/v1', 'http://0x7f000001:8000/v1', 'http://127.1:8000/v1'])
+    assert.equal((await create(api_url)).status, 201, api_url);
+  // key_from copies the source URL, so an old row with a public http address cannot smuggle the key in.
+  const source = (await create('https://example.com/v1')).value.model;
+  h.store.run('UPDATE models SET api_url=? WHERE id=?', 'http://example.com/v1', source.id);
+  const before = rows();
+  const inherited = await admin('/api/models', 'POST', { repository_id: '101', key_from: source.id, model_name: 'child' });
+  assert.deepEqual(inherited.value, { error: 'insecure_api_url', field: 'api_url' });
+  assert.equal(rows(), before, 'no model is inserted from an insecure source URL');
+  // Endpoints, listing and testing take unsaved URLs, so they get the same rule and send nothing.
+  const unsaved = 'http://example.com/v1';
+  assert.equal((await admin('/api/models/endpoints?api_url=' + encodeURIComponent(unsaved))).status, 400);
+  for (const path of ['/api/models/upstream', '/api/models/test']) {
+    const refused = await admin(path, 'POST', { repository_id: '101', api_url: unsaved, api_key: key, ...(path.endsWith('test') ? { model_name: 'm' } : {}) });
+    assert.deepEqual(refused.value, { error: 'insecure_api_url', field: 'api_url' }, path);
+  }
+  assert.equal(fake.requests.length, calls, 'none of the refused paths reached the network');
+  // A row saved before the rule is refused at use time, so the key never leaves in the clear.
+  const legacy = h.store.get('SELECT * FROM models WHERE id=?', source.id);
+  h.store.run('UPDATE models SET api_url=? WHERE id=?', 'http://example.com/v1', legacy.id);
+  assert.throws(() => openModel(h.store, h.store.get('SELECT * FROM models WHERE id=?', legacy.id)), { code: 'model_url_insecure', state: 'waiting_configuration' });
+});
+
+test('a probe never follows a redirect away from the address the key was meant for (#755)', async t => {
+  const h = await harness(t), { admin } = await setup(h), fake = await upstream(t);
+  const key = testPassword(), calls = fake.requests.length;
+  const redirect = createServer((req, res) => { res.writeHead(302, { location: fake.origin + '/v1/models' }); res.end(); });
+  redirect.listen(0, '127.0.0.1'); await once(redirect, 'listening'); t.after(() => new Promise(resolve => { redirect.close(resolve); redirect.closeAllConnections(); }));
+  const origin = `http://127.0.0.1:${redirect.address().port}`;
+  for (const path of ['/api/models/upstream', '/api/models/test']) {
+    const result = (await admin(path, 'POST', { repository_id: null, api_url: origin + '/v1', api_key: key, ...(path.endsWith('test') ? { model_name: 'm' } : {}) })).value;
+    assert.equal(result.ok, false, path); assert.equal(result.error, 'upstream_redirect', path); assert.equal(result.status, 302, path);
+  }
+  assert.equal(fake.requests.length, calls, 'the redirect target is never contacted with the key');
 });

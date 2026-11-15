@@ -1,7 +1,7 @@
 import { modelAuthHeaders, modelCatalog, modelCapabilities, modelInterfaceTypes, modelProtocol, saveModelMetadata, type ModelAuthHeader, type ModelInterfaceType } from '../models/catalog.js';
 import { Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from './auth.js';
-import { fail, fields, randomId, text, type Json } from '../core/security.js';
+import { fail, fields, loopbackHostname, randomId, text, type Json } from '../core/security.js';
 import { pricingFor, savePricing, validatePricing } from '../metrics/accounting.js';
 import { modelEndpoints } from '../agent/model.js';
 import { listUpstreamModels, testUpstreamModel, type UpstreamProbeOptions } from './model-probe.js';
@@ -75,8 +75,11 @@ function rolesUsingModel(store: Store, user: Actor, id: string): Json[] {
 // leave the requested path to whoever wrote the URL. Such a URL never reached a model route, so it is refused.
 function apiUrl(value: unknown): string {
   const result = text(value, 2048);
-  try { const url = new URL(result); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || /[?#]/.test(result)) throw new Error(); }
-  catch { return fail(400, 'invalid_api_url'); }
+  let url: URL;
+  try { url = new URL(result); } catch { return fail(400, 'invalid_api_url'); }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || /[?#]/.test(result)) return fail(400, 'invalid_api_url');
+  // A key would travel in the clear to any host but this machine; the page shows this code as "plain HTTP only for localhost".
+  if (url.protocol === 'http:' && !loopbackHostname(url.hostname)) return fail(400, 'insecure_api_url', 'api_url');
   return result;
 }
 function modelNames(value: unknown, required = false): string[] {

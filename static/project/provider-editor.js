@@ -128,7 +128,9 @@ function watchEndpoint(url, preview, changed = () => {}) {
     if (!value) { preview.replaceChildren(); return; }
     timer = setTimeout(async () => {
       try { const endpoints = await api('/api/models/endpoints?api_url=' + encodeURIComponent(value)); if (request === previewRequest) preview.replaceChildren(...endpointFacts(endpoints)); }
-      catch { if (request === previewRequest) preview.replaceChildren(element('p', '地址无效：需要 http:// 或 https://，不能包含用户名、密码、? 或 #。', 'endpoint-warning')); }
+      catch (err) { if (request === previewRequest) preview.replaceChildren(element('p', String(err?.message || '').includes('insecure_api_url')
+        ? '明文 HTTP 只允许本机地址（localhost、127.0.0.1 或 [::1]）；其他地址请用 https://。'
+        : '地址无效：需要 http:// 或 https://，不能包含用户名、密码、? 或 #。', 'endpoint-warning')); }
     }, 250);
   });
 }
