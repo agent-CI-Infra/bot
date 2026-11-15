@@ -255,7 +255,7 @@ test('plain HTTP model URLs are limited to this machine on every write and befor
   const rows = () => h.store.get('SELECT count(*) n FROM models').n;
 
   // Public plain HTTP is refused on write, and nothing is stored or sent.
-  for (const api_url of ['http://example.com/v1', 'http://10.0.0.1/v1', 'http://169.254.169.254/latest/meta-data', 'http://0.0.0.0/v1', 'http://127.0.0.1.nip.io/v1', 'http://localhost./v1']) {
+  for (const api_url of ['http://example.com/v1', 'http://10.0.0.1/v1', 'http://169.254.169.254/latest/meta-data', 'http://0.0.0.0/v1', 'http://127.0.0.1.nip.io/v1', 'http://localhost./v1', 'http://localhost.evil.com/v1', 'http://127.0.0.1.evil.com/v1']) {
     const refused = await create(api_url);
     assert.equal(refused.status, 400, api_url);
     assert.deepEqual(refused.value, { error: 'insecure_api_url', field: 'api_url' }, api_url);
@@ -273,6 +273,11 @@ test('plain HTTP model URLs are limited to this machine on every write and befor
   const inherited = await admin('/api/models', 'POST', { repository_id: '101', key_from: source.id, model_name: 'child' });
   assert.deepEqual(inherited.value, { error: 'insecure_api_url', field: 'api_url' });
   assert.equal(rows(), before, 'no model is inserted from an insecure source URL');
+  // PATCH is the other write path: the same rule refuses a public http address and keeps the stored one.
+  const patchable = h.store.get("SELECT * FROM models WHERE repository_id='101' ORDER BY updated_at LIMIT 1");
+  const patched = await admin(`/api/models/${patchable.id}`, 'PATCH', { version: patchable.version, api_url: 'http://example.com/v1' });
+  assert.deepEqual(patched.value, { error: 'insecure_api_url', field: 'api_url' });
+  assert.equal(h.store.get('SELECT api_url FROM models WHERE id=?', patchable.id).api_url, patchable.api_url, 'the refused PATCH changes nothing');
   // Endpoints, listing and testing take unsaved URLs, so they get the same rule and send nothing.
   const unsaved = 'http://example.com/v1';
   assert.equal((await admin('/api/models/endpoints?api_url=' + encodeURIComponent(unsaved))).status, 400);
