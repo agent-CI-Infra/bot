@@ -75,6 +75,9 @@ function confirmDialog({ title, body = [], action = '确认', danger = false, in
     const settle = value => { if (settleConfirm !== settle) return; settleConfirm = null; confirmBusy = false; if (confirmView.open) confirmView.close(); resolve(value); };
     settleConfirm = settle;
     const form = element('form', '', 'confirm-form'), head = element('div', '', 'confirm-head'), text = element('div', '', 'confirm-body');
+    // #749: the body is what a screen reader was missing — including a list of what a delete stops or removes. The one
+    // body container carries a fixed id, so the dialog can name it without collecting a second id on every open.
+    text.id = 'confirm-description';
     const heading = element('h2', title); heading.id = 'confirm-title';
     head.append(element('span', danger ? '!' : '?', 'confirm-icon' + (danger ? ' danger' : '')), heading);
     for (const item of body) {
@@ -99,7 +102,11 @@ function confirmDialog({ title, body = [], action = '确认', danger = false, in
       try { await run(value); settle(value); }
       catch (err) { if (settleConfirm !== settle) return; confirmBusy = false; cancel.disabled = submit.disabled = false; status.className = 'confirm-status error'; status.textContent = err.message; }
     });
-    confirmView.replaceChildren(form); confirmView.showModal(); (field || cancel).focus();
+    confirmView.replaceChildren(form);
+    // A request without a body points at nothing: a dangling aria-describedby would be worse than none, and an input's
+    // own <label> still names the field. The id stays on the container either way.
+    if (body.length) confirmView.setAttribute('aria-describedby', 'confirm-description'); else confirmView.removeAttribute('aria-describedby');
+    confirmView.showModal(); (field || cancel).focus();
   });
 }
 const askConfirm = options => confirmDialog(options).then(value => value === true);
