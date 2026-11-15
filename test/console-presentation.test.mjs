@@ -136,7 +136,7 @@ const role = (role_id, kind, harness, version = '1') => ({ role_id, kind, enable
   harness_ref: { id: harness, version }, permissions: {computer:'deny'}, environment_profile_ref: { id: 'env', version: '1' }, budget_policy_ref: { id: 'entry-default', version: '1' }, output_schema_ref: { id: 'out', version: '1' } });
 // Agent backends as GET /api/repositories/:id/roles lists them: peers, Pi recommended, Claude Code and Codex for worker roles only.
 const all = ['controller', 'writer', 'observer', 'evaluator'], backends = [['pi', 'Pi', '1.4.0', all], ['native', 'Native', '1', all], ['process', 'Process', '1', all], ['claude_code', 'Claude Code', '2.1.319', ['writer', 'observer', 'evaluator']], ['codex', 'Codex', '1', ['writer', 'observer', 'evaluator']]]
-  .map(([id, name, version, kinds]) => ({ id, name, version, kinds, available: true, recommended: id === 'pi', integration_issue: null, ...(['claude_code', 'codex'].includes(id) ? { supported_model_sources: ['gateway', 'subscription'], runtime_status: { ready: false, cli_compatible_range: id === 'claude_code' ? '>=2.1.100 <3.0.0' : '>=0.160.0 <0.170.0', cli_installed_versions: [], selected_cli_version: null, model_relay_ready: true, reason: '容器工具卷 /opt/agent-tools 中尚未安装兼容版本。' } } : {}) }));
+  .map(([id, name, version, kinds]) => ({ id, name, version, kinds, available: true, recommended: id === 'pi', integration_issue: null, ...(['claude_code', 'codex'].includes(id) ? { supported_model_sources: ['gateway', 'subscription'], runtime_status: { ready: false, status: 'unavailable', volume_root: '/opt/agent-tools', volume_present: true, cli_installed: false, compatible_range: id === 'claude_code' ? '>=2.1.0 <3.0.0' : '>=0.166.0 <1.0.0', tested_version: id === 'claude_code' ? '2.1.319' : '0.166.0', installed_versions: [], compatible_versions: [], incompatible_versions: [], selected_version: null, node_version: null, config_override: false, model_relay_ready: true, model_count: 1, resolved_model: { id: 'm1', name: 'fixture-model', source: 'project' }, connectivity: { state: 'untested', source: null, model_id: 'm1', model_name: 'fixture-model', checked_at: null, http_status: null, error: null, detail: null }, reason_code: 'cli_not_installed', reason: `工具卷 /opt/agent-tools 中尚未安装 ${name} CLI。` } } : {}) }));
 const roleData = (config, { workflow = 'development.issue', configured = true } = {}) => ({ configuration: config, configured, revision: config.revision, workflow, backends, recommended_backend: 'pi', harnesses: backends.filter(b => b.available).map(({ id, version, kinds }) => ({ id, version, kinds })),
   models: [], revisions: [], skill_inputs: [], preview: config.roles.map(r => ({ role: r.role_id, model: { source: 'project', name: 'fixture-model' } })) });
 const team = controller => [role('manager', 'controller', controller, controller === 'pi' ? '1.4.0' : '1'), role('dev', 'writer', 'native'), role('test', 'observer', 'native'), role('reviewer', 'observer', 'codex'), role('ux', 'observer', 'native'), role('qa', 'evaluator', 'native'), role('coordinator', 'controller', 'native')];
@@ -449,4 +449,45 @@ test('a source-owned task shows its actual role without inventing a controller o
     const active=view.page.run(`taskNextStep(${JSON.stringify(task)},${JSON.stringify(record())},{complete:true,instances:[],runs:[],assignments:[{id:'own-run',status:'running',role:'reviewer',name:'Reviewer',harness:'native'}]})`);
     assert.match(active,/正在处理任务/);assert.doesNotMatch(active,/主控交给/);
   }
+});
+
+test('container backend cards distinguish CLI installation, model selection, and upstream connectivity state', () => {
+  const data = roleData({ schema: 2, revision: 4, enabled: true, controller: { role: 'manager', entries }, roles: team('pi'), skills: [] });
+  data.models = [{ id: 'm1', name: 'fixture-model', shared: false, connectivity: { state: 'untested', source: null, model_id: 'm1', model_name: 'fixture-model', checked_at: null, http_status: null, error: null, detail: null } }];
+  const codex = data.backends.find(b => b.id === 'codex');
+  Object.assign(codex.runtime_status, {
+    ready: true,
+    status: 'ready',
+    cli_installed: true,
+    installed_versions: ['0.166.0'],
+    compatible_versions: ['0.166.0'],
+    selected_version: '0.166.0',
+    reason_code: null,
+    reason: null,
+  });
+  const overview = rolesPage(data);
+  const availCard = overview.cards.find(c => c.dataset?.testid === 'backend-availability-card');
+  assert.ok(availCard);
+  assert.match(text(availCard.querySelector('tr[data-backend=claude_code]')), />=2\.1\.0 <3\.0\.0/);
+  assert.match(text(availCard.querySelector('tr[data-backend=claude_code]')), /未安装/);
+  assert.match(text(availCard.querySelector('tr[data-backend=codex]')), /0\.166\.0（选用 0\.166\.0）/);
+  assert.match(text(availCard.querySelector('tr[data-backend=codex]')), /已配置模型 fixture-model（项目默认 · 连通性未探测）/);
+
+  const detail = roleForm(data, 'reviewer');
+  const box = detail.form.querySelector('[data-testid=backend-runtime-status]');
+  assert.ok(box);
+  assert.match(text(box), /模型连通性未探测/);
+  assert.ok(box.querySelector('[data-testid=probe-role-model]'));
+
+  // Read-only viewers without roles.edit can read status, without an uncallable probe button.
+  const readOnlyDetail = roleForm({ ...data, can_edit: false }, 'reviewer');
+  assert.equal(readOnlyDetail.form.querySelector('[data-testid=probe-role-model]'), null);
+
+  // Failed probe surfaces warning instead of claiming healthy relay.
+  codex.runtime_status.connectivity = { state: 'failed', source: 'probe', model_id: 'm1', model_name: 'fixture-model', checked_at: '2026-11-15T08:00:00Z', http_status: 401, error: 'HTTP 401', detail: 'HTTP 401 · Invalid API key' };
+  data.models[0].connectivity = codex.runtime_status.connectivity;
+  const failedOverview = rolesPage(data);
+  const failedCard = failedOverview.cards.find(c => c.dataset?.testid === 'backend-availability-card');
+  assert.match(text(failedCard.querySelector('tr[data-backend=codex]')), /连通异常/);
+  assert.match(text(failedCard.querySelector('tr[data-backend=codex]')), /连通失败：HTTP 401/);
 });

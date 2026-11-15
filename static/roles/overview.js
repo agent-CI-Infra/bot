@@ -32,13 +32,29 @@ function roleBackendAvailabilityCard(state) {
   const { table, body } = projectTable(['后端', '状态', '已安装版本', '兼容范围', '说明'], '容器内 Agent 后端状态');
   for (const backend of containerBackends) {
     const rt = backend.runtime_status;
+    const conn = rt.connectivity;
+    const connFailed = rt.ready && conn?.state === 'failed';
+    const srcLabels = { project: '项目默认', workflow: '工作类型', role: '角色指定' };
+    let detailText;
+    if (!rt.ready) {
+      detailText = rt.reason || '尚未就绪';
+    } else if (rt.resolved_model) {
+      const src = srcLabels[rt.resolved_model.source] || rt.resolved_model.source;
+      if (conn?.state === 'ok') detailText = `模型 ${rt.resolved_model.name}（${src}）· 连通正常${conn.http_status ? '（HTTP ' + conn.http_status + '）' : ''}`;
+      else if (conn?.state === 'failed') detailText = `模型 ${rt.resolved_model.name}（${src}）· 连通失败：${conn.detail || conn.error || '请求失败'}`;
+      else detailText = `已配置模型 ${rt.resolved_model.name}（${src} · 连通性未探测）`;
+    } else if (rt.config_override) {
+      detailText = '本地配置覆盖（连通性未探测）';
+    } else {
+      detailText = '已配置模型（连通性未探测）';
+    }
     const row = document.createElement('tr');
     row.dataset.backend = backend.id;
     tableCell(row, '后端', element('strong', backend.name));
-    tableCell(row, '状态', badge(rt.ready ? '可用' : '未就绪', rt.ready ? 'success' : 'warning'));
+    tableCell(row, '状态', badge(!rt.ready ? '未就绪' : connFailed ? '连通异常' : '可用', !rt.ready || connFailed ? 'warning' : 'success'));
     tableCell(row, '已安装版本', note(rt.installed_versions?.length ? `${rt.installed_versions.join(', ')}${rt.selected_version ? '（选用 ' + rt.selected_version + '）' : ''}` : rt.config_override ? '本地配置覆盖' : '未安装'));
     tableCell(row, '兼容范围', element('code', rt.compatible_range || '—'));
-    tableCell(row, '说明', note(rt.ready ? `容器内模型中转就绪（可用模型 ${rt.model_count} 个）` : (rt.reason || '尚未就绪')));
+    tableCell(row, '说明', note(detailText));
     body.append(row);
   }
   section.append(table);

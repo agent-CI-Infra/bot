@@ -86,8 +86,9 @@ function roleBackendPicker(role, state, redraw) {
     !backend.available || !backend.kinds.includes(role.kind),
   ]), id => {
     const info = state.data.backends.find(entry => entry.id === id);
-    const keepSubscription = info?.supported_model_sources?.includes('subscription') && role.harness_ref?.model_source === 'subscription';
-    role.harness_ref = keepSubscription ? { id, model_source: 'subscription' } : { id };
+    const supportsSubscription = !!info?.supported_model_sources?.includes('subscription');
+    const keepSubscription = supportsSubscription && role.harness_ref?.model_source === 'subscription';
+    role.harness_ref = supportsSubscription ? { id, model_source: keepSubscription ? 'subscription' : 'gateway' } : { id };
     markRoleDirty(state);
     if (state.data.harnesses.find(backend => backend.id === id)?.externalModel || keepSubscription) role.model_profile_ref = null;
     redraw();
@@ -98,7 +99,7 @@ function roleModelSourcePicker(role, state, redraw) {
     ['gateway', '平台网关（容器内模型中转）'],
     ['subscription', '供应商订阅（预留 · 未实现）'],
   ], source => {
-    role.harness_ref = source === 'subscription' ? { id: role.harness_ref.id, model_source: 'subscription' } : { id: role.harness_ref.id };
+    role.harness_ref = { id: role.harness_ref.id, model_source: source === 'subscription' ? 'subscription' : 'gateway' };
     if (source === 'subscription') role.model_profile_ref = null;
     markRoleDirty(state);
     redraw();
@@ -108,17 +109,90 @@ function roleBackendRuntimeBox(role, state) {
   const info = (state.data.backends || []).find(entry => entry.id === role.harness_ref.id);
   const rt = info?.runtime_status;
   if (!rt) return null;
+  const cliReady = !!(rt.config_override || rt.selected_version);
+  const isSubscription = role.harness_ref?.model_source === 'subscription';
+  let roleModelReady = false, targetModelId = null, targetModelName = null, targetSourceLabel = '', conn = null, relayText = '';
+  if (isSubscription) {
+    relayText = '未就绪（供应商订阅模式预留未实现，请切换回平台网关）';
+  } else if (role.model_profile_ref?.model_id) {
+    const chosen = (state.data.models || []).find(entry => entry.id === role.model_profile_ref.model_id);
+    if (chosen) {
+      roleModelReady = true; targetModelId = chosen.id; targetModelName = chosen.name; targetSourceLabel = '角色指定模型'; conn = chosen.connectivity || null;
+    } else {
+      relayText = '未就绪（本角色指定的模型不可用或缺少凭据）';
+    }
+  } else if (rt.resolved_model && rt.resolved_model.source !== 'role') {
+    const chosen = (state.data.models || []).find(entry => entry.id === rt.resolved_model.id);
+    roleModelReady = true; targetModelId = rt.resolved_model.id; targetModelName = rt.resolved_model.name;
+    targetSourceLabel = rt.resolved_model.source === 'workflow' ? '工作类型模型' : '项目默认模型';
+    conn = chosen?.connectivity || rt.connectivity || null;
+  } else if (rt.config_override) {
+    roleModelReady = true;
+    relayText = '本地配置覆盖（连通性未探测）';
+  } else {
+    relayText = rt.model_count > 0
+      ? `未配置默认或工作类型模型（项目已有 ${rt.model_count} 个带密钥模型，请在项目设置选择默认模型或为本角色指定模型）`
+      : '未配置（需先添加上游模型与凭据）';
+  }
+  if (roleModelReady && targetModelName) {
+    if (conn?.state === 'ok') relayText = `已配置 ${targetModelName}（${targetSourceLabel}）· 连通正常${conn.http_status ? '（HTTP ' + conn.http_status + '）' : ''}`;
+    else if (conn?.state === 'failed') relayText = `已配置 ${targetModelName}（${targetSourceLabel}）· 连通失败：${conn.detail || conn.error || '请求失败'}`;
+    else relayText = `已配置 ${targetModelName}（${targetSourceLabel} · 连通性未探测）`;
+  }
+  const overallReady = cliReady && roleModelReady;
+  const connFailed = overallReady && conn?.state === 'failed';
   const box = element('div', '', 'role-backend-runtime');
   box.dataset.testid = 'backend-runtime-status';
   const head = element('p', '', 'muted');
-  head.append(badge(rt.ready ? '可用' : '未就绪', rt.ready ? 'success' : 'warning'), ' ', rt.ready ? `${info.name} 容器运行条件已就绪。` : (rt.reason || `${info.name} 容器运行条件尚未就绪。`));
+  const statusLabel = !overallReady ? '未就绪' : connFailed ? '连通异常' : '可用';
+  const statusTone = !overallReady || connFailed ? 'warning' : 'success';
+  const summaryText = !cliReady
+    ? (rt.reason || `${info.name} 容器运行条件尚未就绪。`)
+    : !roleModelReady
+      ? relayText
+      : connFailed
+        ? `${info.name} CLI 已就绪，但模型 ${targetModelName} 连通探测或最近请求失败（${conn.detail || conn.error || '请求失败'}）。`
+        : `${info.name} 容器运行配置已就绪（${conn?.state === 'ok' ? '最近连通正常' : '模型连通性未探测'}）。`;
+  head.append(badge(statusLabel, statusTone), ' ', summaryText);
   box.append(head, facts([
     ['工具卷', `${rt.volume_root}（${rt.volume_present ? '已挂载' : '未挂载'}）`],
     ['兼容版本范围', rt.compatible_range || '—'],
     ['已安装版本', rt.installed_versions?.length ? rt.installed_versions.join(', ') : (rt.config_override ? '本地配置覆盖' : '未安装')],
     ['当前选用版本', rt.selected_version || (rt.config_override ? '本地配置覆盖' : '无可用兼容版本')],
-    ['容器内模型中转', rt.model_relay_ready ? `已就绪（项目可用模型 ${rt.model_count} 个）` : '未就绪（需配置项目模型与凭据）'],
+    ['容器内模型中转', relayText],
   ]));
+  if (overallReady && targetModelId && state.data.can_edit !== false && typeof current === 'object' && current?.id) {
+    const repoId = current.id, tokenSnapshot = typeof renderToken === 'number' ? renderToken : 0;
+    const probeNote = element('span', '', 'muted');
+    const probeBtn = button(state.probingModel ? '正在探测…' : '探测模型连通性', async () => {
+      if (state.probingModel) return;
+      state.probingModel = true; probeBtn.disabled = true; probeBtn.textContent = '正在探测…'; probeNote.textContent = '';
+      try {
+        const res = await api(`/api/repositories/${repoId}/roles/probe-model`, 'POST', { model_id: targetModelId, role: role.role_id, workflow: state.data.workflow });
+        if (res?.connectivity) {
+          const modelEntry = (state.data.models || []).find(entry => entry.id === targetModelId);
+          if (modelEntry) modelEntry.connectivity = res.connectivity;
+          for (const b of state.data.backends || []) {
+            if (b.runtime_status?.resolved_model?.id === targetModelId) b.runtime_status.connectivity = res.connectivity;
+          }
+        }
+        state.probingModel = false;
+        if (current?.id === repoId && current?.section === 'roles' && (typeof renderToken !== 'number' || renderToken === tokenSnapshot)) state.redraw?.();
+      } catch (err) {
+        state.probingModel = false;
+        if (current?.id === repoId && current?.section === 'roles' && (typeof renderToken !== 'number' || renderToken === tokenSnapshot) && probeBtn.isConnected) {
+          probeBtn.disabled = false;
+          probeBtn.textContent = '探测模型连通性';
+          probeNote.textContent = `探测失败：${err.message || err.code || '请求错误'}`;
+        }
+      }
+    }, 'quiet');
+    probeBtn.dataset.testid = 'probe-role-model';
+    probeBtn.disabled = !!state.probingModel;
+    const actions = element('p', '', 'role-runtime-actions');
+    actions.append(probeBtn, ' ', probeNote);
+    box.append(actions);
+  }
   return box;
 }
 const permissionModeLabels = { none: '无权限', read: '只读', write: '读写', allow: '允许', deny: '不允许', custom: '待迁移：保留原有操作' };

@@ -16,7 +16,7 @@ import {ObsoleteSweep} from '../tasks/obsolete.js';
 import {recordRetryFailure,resolveExecutionRetries,retryNeedsInvestigation} from '../tasks/retries.js';
 import { controlled,roleConfig,roleExecutionModel } from '../roles/run.js';
 import { mergeApi } from '../roles/merge.js';
-import { roleApi } from '../roles/api.js';
+import { roleApi, roleProbeApi } from '../roles/api.js';
 import { memoryApi } from '../memory/api.js';
 import { interruptRuns, traceEvent, beginRun, endRun } from '../tasks/trace.js';
 import { observation } from '../tasks/evidence.js';
@@ -936,6 +936,7 @@ export class TaskEngine {
   async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
     const coordination=coordinationApi(this.store,user,method,url,input);if(coordination!==undefined)return coordination;
     const merge=await mergeApi(this.store,user,method,url,input,this.githubUrl);if(merge!==undefined)return merge;
+    const probed=await roleProbeApi(this.store,user,method,url,input);if(probed!==undefined)return probed;
     const roles=roleApi(this.store,user,method,url,input);if(roles!==undefined)return roles;
     const memory=await memoryApi(this.store,user,method,url,input,this.githubUrl);if(memory!==undefined)return memory;
     const live=/^\/api\/tasks\/([^/]+)\/live$/.exec(url.pathname);

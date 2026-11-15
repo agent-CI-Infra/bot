@@ -5,6 +5,7 @@ import { fail, fields, loopbackHostname, randomId, text, type Json } from '../co
 import { pricingFor, savePricing, validatePricing } from '../metrics/accounting.js';
 import { modelEndpoints } from '../agent/model.js';
 import { listUpstreamModels, testUpstreamModel, type UpstreamProbeOptions } from './model-probe.js';
+import { recordModelProbeResult } from '../roles/backends.js';
 import { releaseModel } from '../service-roles/roles.js';
 
 function probeProtocol(body: Json, base?: { interface_type: ModelInterfaceType; auth_header: ModelAuthHeader }): UpstreamProbeOptions {
@@ -264,7 +265,12 @@ export async function models(store: Store, user: Actor, method: string, url: URL
     const savedProtocol = modelProtocol(store, { id, api_url: endpoint, model_name: modelName });
     const options = probeProtocol(body, savedProtocol);
     store.audit(user.id, test ? 'model.tested' : 'model.upstream_listed', id, row.repository_id);
-    return test ? testUpstreamModel(endpoint, key, modelName, options) : listUpstreamModels(endpoint, key, options);
+    if (!test) return listUpstreamModels(endpoint, key, options);
+    const probeResult = await testUpstreamModel(endpoint, key, modelName, options);
+    if (body.api_url === undefined && body.api_key === undefined && body.model_name === undefined && body.interface_type === undefined && body.auth_header === undefined) {
+      recordModelProbeResult(store, row, probeResult);
+    }
+    return probeResult;
   }
   if (path === `/api/models/${id}/credentials/revoke` && method === 'POST') {
     fields(body, []);
