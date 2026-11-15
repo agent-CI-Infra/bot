@@ -145,7 +145,7 @@ function consoleGroups() {
     groups.push({ title: '设置', wide: true, items: personal }, { ...adminGroup, wide: true });
     return groups;
   }
-  // 管理对话 is the bar's 助手 destination, and each project section is one address the phone can reach from here.
+  // 管理助手 is the bar's 助手 destination, and each project section is one address the phone can reach from here.
   if (repo) groups.push({ title: '当前项目', items: projectSections
     .filter(([key]) => key !== 'management')
     .map(([key, name]) => [`#/projects/${id}/${key}`, name, repo.full_name]) });
@@ -154,10 +154,10 @@ function consoleGroups() {
   groups.push({ title: '个人与平台', items: personal }, { ...adminGroup, wide: true });
   return groups;
 }
-// #549: a project administrator's desktop primary nav is 项目 / 管理对话 / 看板 / 待处理, plus a visible
+// #549: a project administrator's desktop primary nav is 项目 / 管理助手 / 任务看板 / 待处理, plus a visible
 // 更多功能 entry so 身份与权限 stays reachable at desktop widths (the account menu is phone-only). That address is
 // #/identity since #615; #/preferences stays an alias so old links keep working.
-// 统计, Webhook, 身份与权限 and 存储 leave the sidebar itself; they remain in 更多 (and, for super
+// 用量与成本, Webhook, 身份与权限 and 存储 leave the sidebar itself; they remain in 更多 (and, for super
 // administrators, in the pinned settings nav).
 function applyConsoleNavVisibility() {
   if (!me) return;

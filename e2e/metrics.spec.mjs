@@ -33,7 +33,7 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
     await expect(page.getByLabel('输入单价 / 百万 token',{exact:true})).toHaveValue('2');await page.getByLabel('输入单价 / 百万 token',{exact:true}).fill('5');
     await page.getByRole('button',{name:'保存单价',exact:true}).click();await expect(page.locator('#model-pricing')).toHaveCount(0);
     expect(h.store.get("SELECT cost FROM model_requests WHERE task_id='review-usage'").cost).toBe(1.56);
-    await page.getByRole('button',{name:'统计',exact:true}).click();
+    await page.getByRole('button',{name:'用量与成本',exact:true}).click();
     // #480: the project page this run came through is now the shell default, so a cross-project report starts by choosing
     // 全部项目. The totals, the chart and the permission rules below are unchanged.
     await page.locator('#console-project').selectOption('');
@@ -75,7 +75,7 @@ test('没有费用信息时按输入加输出 token 堆叠，缓存不重复累�
     await page.getByRole('button',{name:'查看统计',exact:true}).click();
   };
   try{
-    await page.setViewportSize({width:1440,height:1000});await login(page,h.admin,'administrator',password);await page.getByRole('button',{name:'统计',exact:true}).click();await filter('2026-10-22','2026-10-23');
+    await page.setViewportSize({width:1440,height:1000});await login(page,h.admin,'administrator',password);await page.getByRole('button',{name:'用量与成本',exact:true}).click();await filter('2026-10-22','2026-10-23');
     await expect(page.getByRole('heading',{name:'每日用量 · 按项目堆叠',exact:true})).toBeVisible();
     const chart=page.locator('.cost-chart-section');await expect(chart.locator('svg')).toHaveAttribute('data-metric','tokens');await expect(chart.locator('rect')).toHaveCount(2);
     // The axis unit is 用量 too, so no literal token shows unless the reader opens 统计说明.

@@ -37,8 +37,8 @@ test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可
     await page.setViewportSize({ width: 1440, height: 900 });
     await login(page, h, 'nav-member', password);
     const desktop = await visiblePrimaryCaptions(page);
-    expect(desktop).toEqual(['项目', '管理对话', '看板', '待处理', '更多功能']);
-    for (const name of ['统计', 'Webhook 投递', '个人设置', '存储', '全局设置']) {
+    expect(desktop).toEqual(['项目', '管理助手', '任务看板', '待处理', '更多功能']);
+    for (const name of ['用量与成本', 'Webhook 投递', '个人设置', '存储', '全局设置']) {
       await expect(page.locator('#console-sidebar').getByRole('button', { name, exact: true })).toBeHidden();
     }
     await expect(page.locator('#console-sidebar').getByRole('link', { name: '更多功能', exact: true })).toBeVisible();
@@ -60,14 +60,14 @@ test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可
     expect(settings).toEqual(['飞书绑定', '身份与权限', '飞书会话']);
     const management = (await page.getByTestId('console-admin-group').locator('a .console-link-copy > span').allInnerTexts()).map(t => t.trim());
     expect(management).toEqual(['用量与成本', 'Webhook 投递', '外部执行端', '存储']);
-    for (const duplicate of ['项目', '任务', '待处理', '助手', '全部项目', '任务看板', '管理对话', '看板', '全局设置', '接入向导', '安装档案', '机器人账号']) {
+    for (const duplicate of ['项目', '任务', '待处理', '助手', '全部项目', '任务看板', '管理助手', '全局设置', '接入向导', '安装档案', '机器人账号']) {
       expect([...settings, ...management]).not.toContain(duplicate);
     }
     await page.screenshot({ path: `${out}/more-member-1440.png`, fullPage: true });
 
     await page.setViewportSize({ width: 768, height: 900 });
     await expect(page.locator('#console-sidebar')).toBeVisible();
-    expect(await visiblePrimaryCaptions(page)).toEqual(['项目', '管理对话', '看板', '待处理', '更多功能']);
+    expect(await visiblePrimaryCaptions(page)).toEqual(['项目', '管理助手', '任务看板', '待处理', '更多功能']);
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(768);
     await page.screenshot({ path: `${out}/nav-member-768.png`, fullPage: true });
 

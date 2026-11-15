@@ -40,7 +40,7 @@ test('统计按浏览器本地日显示费用、token、各工作类型的任务
   const taskRow=(target,kind)=>target.locator(`.statistics-task-summary tr[data-kind="${kind}"]`);
   try{
     await page.clock.setFixedTime(new Date('2026-11-03T16:45:00Z'));
-    await login(page,h.admin,'administrator',password);await expect(page.getByRole('heading',{name:'统计',exact:true})).toBeVisible();
+    await login(page,h.admin,'administrator',password);await expect(page.getByRole('heading',{name:'用量与成本',exact:true})).toBeVisible();
     await expect(page.getByLabel('结束日期（本地）',{exact:true})).toHaveValue('2026-11-04');
     await dates(page,'2026-11-04');await expect(page.locator('.cost-summary')).toContainText('USD 5.00');
     await expect(page.locator('.cost-token-summary')).toContainText('2,000,000');

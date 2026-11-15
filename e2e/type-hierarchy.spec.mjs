@@ -52,7 +52,7 @@ test('#558 项目、身份、统计、登录的标题层级与行长，1440 与 
     await page.screenshot({ path: `${out}/identity-after-1440.png`, fullPage: true });
 
     await page.goto(h.admin + '/#/costs');
-    await expect(page.getByRole('heading', { name: '统计', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible();
     const note = page.locator('.cost-note, .cost-scope').first();
     await expect(note).toBeVisible();
     const noteMeasure = await note.evaluate(el => {
@@ -71,7 +71,7 @@ test('#558 项目、身份、统计、登录的标题层级与行长，1440 与 
     for (const [hash, shot, heading] of [
       ['#/projects', 'projects-after-390.png', '项目'],
       ['#/identity', 'identity-after-390.png', '身份与权限'],
-      ['#/costs', 'costs-after-390.png', '统计'],
+      ['#/costs', 'costs-after-390.png', '用量与成本'],
     ]) {
       await page.setViewportSize({ width: 1440, height: 1000 });
       await page.goto(h.admin + '/');

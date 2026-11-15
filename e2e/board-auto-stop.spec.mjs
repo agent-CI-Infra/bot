@@ -30,7 +30,7 @@ test('自动停下的任务不算需要处理：看板列、总览与待处理�
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.locator('#tabs').getByRole('button', { name: '看板', exact: true }).click();
+    await page.locator('#tabs').getByRole('button', { name: '任务看板', exact: true }).click();
     await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
     // The two stopped objects only show once the closed ones are included, which is what the person asked for.
     await page.getByRole('checkbox', { name: '含已关闭' }).check();

@@ -71,7 +71,7 @@ async function renderManagementReceiptPage(id) {
   // A completed render of this id is already on screen: show it instead of reading the same receipt again.
   if (receiptShownId === id) { page.hidden = false; return; }
   page.hidden = false;
-  const back = element('a', '返回管理对话'); back.href = '#/management'; nav.replaceChildren(back);
+  const back = element('a', '返回管理助手'); back.href = '#/management'; nav.replaceChildren(back);
   content.replaceChildren(element('p', '正在加载命令回执…', 'muted'));
   let receipt;
   try {
@@ -199,11 +199,11 @@ function managementReceiptBody(receipt) {
   if (outcome.configuration_url) recordBox.append(managementReceiptLink(String(outcome.configuration_url), '查看当前配置'));
   const taskId = receipt.target?.task_id ?? (receipt.operation === 'task.create' ? outcome.id : null);
   if (taskId) recordBox.append(managementReceiptLink('#/projects/' + receipt.project_id + '/activity', '查看任务 ' + taskId));
-  if (outcome.rollback) recordBox.append(element('p', '这条回执带有原值回滚；需要回滚时在管理对话里发起，会重新校验权限与版本。', 'muted'));
+  if (outcome.rollback) recordBox.append(element('p', '这条回执带有原值回滚；需要回滚时在管理助手里发起，会重新校验权限与版本。', 'muted'));
   const record = element('p', ''); record.append('回执 ID ' + receipt.id + ' · ', managementReceiptLink('/api/management/commands/' + receipt.id, '原始回执（JSON）'));
   recordBox.append(record);
   recordCard.append(recordBox); nodes.push(recordCard);
   // Read-only by design: retry and reconcile are executions, and they belong to the conversation that can show them.
-  nodes.push(element('p', '这一页只读：不提供批准、重试或对账。需要重试或对账时回管理对话，那里的操作会重新校验权限与版本。', 'management-receipt-page-note'));
+  nodes.push(element('p', '这一页只读：不提供批准、重试或对账。需要重试或对账时回管理助手，那里的操作会重新校验权限与版本。', 'management-receipt-page-note'));
   return nodes;
 }

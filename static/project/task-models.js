@@ -12,7 +12,7 @@ const builtInTasks = [
   { kind: 'actions.failures', group: 'Actions', title: 'Actions 失败处理', description: '分析默认分支 Actions 运行失败的原因，外部原因重跑一次，其他提报 Issue。' },
   { kind: 'gate.onboarding', group: '门禁', title: '接入门禁', description: '「接入门禁」对话的每一轮。' },
   { kind: 'task.development', group: '开发', title: '开发任务', description: '直接创建或由 Manager 拆解的开发任务，沿用项目开发授权、角色团队和独立 QA。' },
-  { kind: 'task.request', group: '通用', title: '普通任务与定时检查', description: '管理对话、接口或定时检查发起的通用任务。' }
+  { kind: 'task.request', group: '通用', title: '普通任务与定时检查', description: '管理助手、接口或定时检查发起的通用任务。' }
 ];
 const releaseNotesSkill = '.agents/skills/release-notes/SKILL.md';
 function taskModelMap(policy) {

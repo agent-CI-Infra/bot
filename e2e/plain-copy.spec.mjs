@@ -119,7 +119,7 @@ test('#556 登录、项目、身份、统计、成员首屏不再出现术语，
 
     await page.setViewportSize({ width: 1440, height: 1100 });
     await page.goto(h.admin + '/#/costs');
-    await expect(page.getByRole('heading', { name: '统计', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible();
     // trigger load
     const view = page.getByRole('button', { name: '查看统计', exact: true });
     if (await view.isVisible()) await view.click();

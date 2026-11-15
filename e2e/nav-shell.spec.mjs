@@ -4,7 +4,7 @@ import { harness, setup, account, repository } from '../test/helpers.mjs';
 
 // #224 slice 2: the shell navigation must only offer destinations that really render, and an older project address must
 // survive a refresh instead of silently landing on another section.
-test('项目导航只列真实页面，管理对话的深链不丢页，移动底栏与更多页在 390 可用', async ({ page }) => {
+test('项目导航只列真实页面，管理助手的深链不丢页，移动底栏与更多页在 390 可用', async ({ page }) => {
   const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
   const h = await harness(undefined, manager), errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -41,7 +41,7 @@ test('项目导航只列真实页面，管理对话的深链不丢页，移动�
       if (settingsPages.includes(caption)) await expect(nav.getByRole('link')).toHaveText(['← 项目入口', ...settingsPages]);
       else await expect(nav.getByRole('link')).toHaveCount(2);
     }
-    // 管理对话 is a chat, not a settings section: opening it keeps the settings page underneath.
+    // 管理助手 is a chat, not a settings section: opening it keeps the settings page underneath.
     await openHub();
     await hub().getByRole('link', { name: '角色', exact: true }).click();
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
@@ -72,7 +72,7 @@ test('项目导航只列真实页面，管理对话的深链不丢页，移动�
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(h.admin + '/#/projects/101/menu');
     await expect(hub()).toBeVisible();
-    const first = hub().getByRole('link', { name: '项目总览', exact: true }), second = hub().getByRole('link', { name: '管理对话', exact: true });
+    const first = hub().getByRole('link', { name: '项目总览', exact: true }), second = hub().getByRole('link', { name: '管理助手', exact: true });
     await first.focus(); await page.keyboard.press('Tab');
     await expect(second).toBeFocused();
     await expect(second).toBeInViewport();

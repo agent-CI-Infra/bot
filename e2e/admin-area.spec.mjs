@@ -53,7 +53,7 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
     try {
       await member.setViewportSize({ width: 1440, height: 900 });
       await login(member, h, 'admin-area-member', memberPassword);
-      for (const name of ['统计', 'Webhook 投递', '存储', '全局设置']) {
+      for (const name of ['用量与成本', 'Webhook 投递', '存储', '全局设置']) {
         await expect(member.locator('#console-sidebar').getByRole('button', { name, exact: true })).toBeHidden();
       }
       expect(await adminCaptions(member)).toEqual(['用量与成本', 'Webhook 投递', '外部执行端', '存储']);

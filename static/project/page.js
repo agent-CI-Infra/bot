@@ -150,7 +150,7 @@ function projectHeader(section = current.section) {
     trail.append(toHub);
   }
   const heading = element('h1', repository.full_name); heading.title = repository.full_name; title.append(heading, ...projectStatus());
-  const chat = element('a', '管理对话', 'button-link');
+  const chat = element('a', '管理助手', 'button-link');
   chat.href = `#/projects/${current.id}/management`;
   chat.dataset.testid = 'project-open-chat';
   chat.addEventListener('click', event => { event.preventDefault(); void openManagementChat(current.id).catch(error); });

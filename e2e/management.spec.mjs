@@ -173,7 +173,7 @@ test('project chat links select the project, and a delayed old read cannot repla
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
     await page.getByRole('button', { name: '打开管理助手', exact: true }).click();
     await expect(scope).toHaveValue('project:102'); await expect(message).toHaveValue('102 的草稿');
-    await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click();
+    await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click();
     await expect(scope).toHaveValue('project:101'); await expect(message).toHaveValue('101 的草稿');
     await expect(page).toHaveURL(/#\/management$/); await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible();
     await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click(); await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
@@ -281,8 +281,8 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await expect(page.getByRole('button', { name: '退出管理助手全屏', exact: true })).toBeFocused();
     await page.keyboard.press('Escape'); const restored = await chat.boundingBox();
     expect(Math.abs(restored.width - resized.width)).toBeLessThan(2); expect(Math.abs(restored.height - resized.height)).toBeLessThan(2);
-    await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click();
-    await expect(page).toHaveURL(/#\/management$/); await expect(page.locator('#tabs [aria-current=page]')).toHaveText('管理对话');
+    await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click();
+    await expect(page).toHaveURL(/#\/management$/); await expect(page.locator('#tabs [aria-current=page]')).toHaveText('管理助手');
     await expect(chat).toHaveAttribute('role', 'region'); await expect(grip).toBeHidden(); await expect(launcher).toBeHidden();
     const pageBox = await chat.boundingBox(), header = await page.locator('body > header').boundingBox();
     const rail = await page.locator('#console-sidebar').boundingBox();
@@ -293,12 +293,12 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await page.getByRole('button', { name: '退出管理助手全屏', exact: true }).click(); await expect(chat).toHaveAttribute('role', 'region');
     await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click();
     await expect(page).toHaveURL(/#\/projects$/); expect(Math.abs((await chat.boundingBox()).width - resized.width)).toBeLessThan(2);
-    await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click();
+    await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click();
     await consoleNavigate(page, '身份与权限');
     await expect(chat).toBeHidden(); await launcher.click(); await expect(message).toHaveValue('保留这条尚未发送的草稿');
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
     expect(f.h.store.get("SELECT count(*) n FROM management_conversations WHERE scope='project:101'").n).toBe(1);
-    await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click(); await page.reload();
+    await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click(); await page.reload();
     await expect(page).toHaveURL(/#\/management$/); await expect(chat).toHaveAttribute('role', 'region');
     // #480: the reload reopens on the shell default (no project picked here), not on the page-local scope chosen before it.
     await expect(page.getByLabel('当前管理作用域')).toHaveValue('platform');

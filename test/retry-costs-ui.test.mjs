@@ -46,6 +46,9 @@ test('cost view shows token totals, per-project and daily tokens, and all saved 
   page.run("me={id:'admin'};tab='costs';costState={from:'2026-10-22',to:'2026-10-23',currency:'USD'};document.createTextNode=text=>element('span',text);costChart=()=>{};");
   await page.run('loadCosts(0)');const body=page.$('cost-body');
   assert.match(text(body),/输入用量包含缓存命中/);const totals=body.querySelector('.cost-token-summary');
+  const children=[...body.children],chart=children.findIndex(node=>node.classList.contains('cost-chart-section')),help=children.findIndex(node=>node.classList.contains('advanced-help'));
+  assert.ok(chart>children.findIndex(node=>node.classList.contains('cost-summary')),'key numbers come before the chart');
+  assert.ok(help>chart,'methodology help comes after the key numbers and chart');
   for(const token of ['3,000','300','1,750'])assert.ok(text(totals).includes(token));
   const tables=body.querySelectorAll('tbody');assert.equal(tables.length,3);
   assert.equal(tables[0].children.length,2);assert.match(text(tables[0]),/fixture-model USD 2 10 0.0002/);assert.match(text(tables[0]),/fixture-model USD 3 10 0.0002/);

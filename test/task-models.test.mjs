@@ -109,7 +109,7 @@ test('project model console preserves custom task IDs, shows stale models and re
   assert.deepEqual(JSON.parse(page.run('JSON.stringify(draft.tasks)')), {});
   await persist();
   assert.deepEqual(bodies[2], {task_models: {}}); assert.equal(page.run('reloads'), 3);
-  assert.equal(page.run("projectSections.map(([id,title])=>id+':'+title).join(',')"), 'overview:项目总览,management:管理对话,release:发版本,knowledge:项目知识,activity:运行状态,basic:基本设置,machine:机器配置,roles:角色,model:模型,schedules:计划与通知,external:外部执行,members:成员');
+  assert.equal(page.run("projectSections.map(([id,title])=>id+':'+title).join(',')"), 'overview:项目总览,management:管理助手,release:发版本,knowledge:项目知识,activity:运行状态,basic:基本设置,machine:机器配置,roles:角色,model:模型,schedules:计划与通知,external:外部执行,members:成员');
   assert.equal(page.run("kindLabels['release.observe']+'/'+kindLabels['release.notes']"), 'CI 观察/发行说明');
 });
 

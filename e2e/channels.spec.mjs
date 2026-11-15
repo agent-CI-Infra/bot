@@ -20,7 +20,7 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     const changed = await post(h, id, envelope('修改 agent-test-zone/admin-fixture-101 项目的提示词')); const result = await finished(h, changed.value.operation_id);
     const operation = h.store.get("SELECT * FROM management_commands WHERE channel='im'"); expect(operation.state).toBe('succeeded');
     await until(() => wire.sent.some(s => JSON.stringify(s.content).includes('已执行')));
-    await page.getByRole('button', { name: '管理对话', exact: true }).click();
+    await page.getByRole('button', { name: '管理助手', exact: true }).click();
     await page.getByLabel('当前管理作用域').selectOption('platform');
     await page.getByText('会话记录', { exact: true }).click();
     await page.getByLabel('持久会话').selectOption(result.conversation_id);

@@ -118,7 +118,7 @@ async function loadCosts(version) {
   if(data.summary.unpriced_requests) notes.push(element('p',`有 ${data.summary.unpriced_requests} 次请求缺少单价或完整用量，`+(tokenMode?'当前按已记录的用量绘图。':'未计入柱状图金额。占比仅针对已计价费用。'),'cost-incomplete'));
   notes.push(element('p','统计开始于 '+timestamp(data.collection_started_at)+'；此前未记录的用量与费用无法补算。','cost-note'));
   notes.push(element('p','范围：费用和用量只统计通过本系统发出的模型请求，任务只统计本系统自己的任务；不含外部执行端自行发起的模型调用及项目容器内其他服务。','cost-note'));
-  body.append(summary,tokens,advancedHelp('统计说明', ...notes));
+  body.append(summary,tokens);
   // #357 acceptance 1: costs are never converted or summed across currencies, but one currency's total was still
   // readable as the whole bill. The same answer already carries the other currency's request count for exactly this
   // filter (`other_currencies` excludes both the shown currency and unpriced rows with no currency), so the hint costs
@@ -143,7 +143,7 @@ async function loadCosts(version) {
     if(tokenMode)chart.append(element('p','当前范围没有费用信息，按输入加输出用量展示；缓存命中已包含在输入中，不重复相加。','cost-note'));
     costChart(chart,byDate,projects,data.currency,tokenMode);
   }
-  body.append(chart);
+  body.append(chart,advancedHelp('统计说明', ...notes));
   if(data.prices?.length){
     const prices=element('section','','cost-breakdown cost-price-table'),table=costTable(['模型','币种','输入 / 百万用量','输出 / 百万用量','缓存命中 / 百万用量']);
     prices.append(element('h2','范围内已保存的单价'),element('p','按请求发生时的单价逐组列出；同一模型的多组单价分别展示。','cost-note'));
