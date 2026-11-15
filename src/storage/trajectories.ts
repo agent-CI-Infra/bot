@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fdatasync, fdatasyncSync, close as closeAsync, ftruncateSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fdatasync, fdatasyncSync, close as closeAsync, ftruncateSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 import { open as openAsync, rm as rmAsync } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -375,6 +375,20 @@ export class Trajectories {
       return 0;
     }
     const rows = this.db.prepare('SELECT id,repository_id,path,bytes,counts FROM trajectory_files WHERE expired_at IS NULL AND deleted_at IS NULL').all() as Record<string, any>[];
+    // The constructor recreates the root, so a restore that brought the database without the file tree leaves an empty
+    // root next to live entries — every entry would read as an orphan in that one pass (#803).
+    if (rows.length) {
+      let entries: string[];
+      try { entries = readdirSync(this.root); }
+      catch (error) {
+        console.error('[trajectories] orphan sweep skipped, the root cannot be listed:', (error as NodeJS.ErrnoException).code);
+        return 0;
+      }
+      if (!entries.length) {
+        console.error('[trajectories] orphan sweep skipped, the root is empty while entries exist:', rows.length);
+        return 0;
+      }
+    }
     // Only a path that is not there is missing: a file the process cannot inspect (EACCES, EIO) still exists, and its
     // entry is the only reference to it (#803).
     const missing = rows.filter(row => {
