@@ -166,9 +166,10 @@ test('「更多」不再重复底栏目的地，按三组补充且只保留当�
     await login(page, h, password);
     await page.goto(h.admin + '/#/projects/101/overview');
     await expect(page.locator('#project-page')).toBeVisible();
+    // The project container is shown before bootstrap has populated the shell's repository picker.
+    await expect(page.locator('#console-project')).toHaveValue('101');
     await page.goto(h.admin + '/#/more');
-    const headings = await page.locator('.console-group h2').allInnerTexts();
-    expect(headings).toEqual(['当前项目', '个人与平台', '管理']);
+    await expect(page.locator('.console-group h2')).toHaveText(['当前项目', '个人与平台', '管理']);
     const captions = await page.locator('.console-group a .console-link-copy > span').allInnerTexts();
     const flat = captions.map(text => text.trim());
     // A destination that the bar already offers is not repeated as a row here.
@@ -190,6 +191,7 @@ test('「更多」不再重复底栏目的地，按三组补充且只保留当�
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.locator('#workspace')).toBeVisible();
     await page.goto(h.admin + '/#/more');
+    await expect(page.locator('.console-group h2')).toHaveText(['设置', '管理']);
     expect(await page.locator('.console-group h2').allInnerTexts()).not.toContain('个人与平台');
     expect(await page.locator('#console-page').innerText()).not.toContain('全局设置');
   } finally { await h.stop(); }

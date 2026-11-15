@@ -83,8 +83,11 @@ test('#554 侧栏与移动端底栏使用线性图标，1440 与 390 可识别�
       await expect(state).toBeVisible();
       const icon = state.locator('svg.console-state-icon.console-icon-' + name);
       await expect(icon).toBeVisible();
-      const box = await icon.boundingBox();
-      expect(Math.round(box.width)).toBe(size);
+      // Bootstrap can replace the visible list state between locating its icon and measuring it.
+      await expect.poll(async () => {
+        const box = await icon.boundingBox();
+        return box ? Math.round(box.width) : null;
+      }).toBe(size);
       expect(await icon.evaluate(el => el.querySelectorAll('path, circle').length)).toBeGreaterThan(0);
       expect(await state.evaluate(el => getComputedStyle(el, '::before').content)).toBe('none');
     };
