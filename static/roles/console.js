@@ -57,8 +57,9 @@ function rolesConsole() {
     else if (auxiliaryView === 'stages') { roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus, roleStageWorkspace(state, draw)); }
     else if (current.item && !role) fields.append(note('这个角色已不存在，请在概览选择角色。'));
     else if (role) {
-      roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus, roleSettingsCard(role, state, draw, { live, failed }));
+      roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus);
       if (role.role_id === 'manager') fields.append(...managerSection(state.data));
+      fields.append(roleSettingsCard(role, state, draw, { live, failed }));
     } else {
       const cards = roleOverviewCards(state, draw);
       const unconfiguredOverview = state.data.configured === false && !current.item && !auxiliaryView;

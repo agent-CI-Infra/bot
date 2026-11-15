@@ -1,7 +1,7 @@
 import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { harness,setup,account,repository } from './helpers.mjs';
+import { harness,setup,account,repository,pinLegacyTaskConfiguration } from './helpers.mjs';
 import { inlineLocation,validateReview } from '../dist/review/findings.js';
 import { Redactor, sha } from '../dist/agent/common.js';
 import { TaskEngine } from '../dist/agent/engine.js';
@@ -148,7 +148,7 @@ test('a comment continues the published Issue review as its next round, with tri
   assert.equal(queueWebhook(h.store,'101','issue_comment',{repository:{id:101},action:'created',sender:{type:'User'},issue,comment},h.store.get('SELECT source_delivery_id FROM tasks WHERE id=?',h.taskId).source_delivery_id),0);
   const task={id:h.taskId};assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,1);
   assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n,0);
-  h.engine.tick();await Promise.all(h.engine.active.values());
+  pinLegacyTaskConfiguration(h.store);h.engine.tick();await Promise.all(h.engine.active.values());
   assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?',task.id).status,'waiting_permission');
   assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n,0);assert.equal(h.comments.length,0);
   const prompt=JSON.parse(JSON.parse(Buffer.concat(config).toString()).prompt);

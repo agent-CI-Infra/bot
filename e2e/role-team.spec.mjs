@@ -40,11 +40,12 @@ test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生�
     await page.getByLabel('dev 使用虚拟电脑权限', { exact: true }).selectOption(dev.permissions.computer === 'allow' ? 'deny' : 'allow'); await dirty(); await discard();
     await goRolePage(page);
     const row = table.locator('tr[data-role=dev]');
-    await page.getByLabel('开启角色协调', { exact: true }).setChecked(!config.configuration.enabled); await dirty();
+    await expect(page.getByLabel('开启角色协调', { exact: true })).toHaveCount(0);
+    await row.getByRole('checkbox').uncheck(); await dirty();
 
     await expect(table.getByRole('columnheader', { name: '职责', exact: true })).toBeVisible();
     await expect(table.getByRole('columnheader', { name: '状态', exact: true })).toBeVisible();
-    await expect(row).toContainText('在入口已有的权限范围内实现或调查任务。'); await expect(row).toContainText('已启用');
+    await expect(row).toContainText('在入口已有的权限范围内实现或调查任务。'); await expect(row).toContainText('未保存');
     await expect(table.locator('tr[data-role]')).toHaveCount(config.configuration.roles.length);
     await consoleSave(page).click();
     await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
@@ -124,7 +125,7 @@ test('尚未配置过角色的项目保持「尚未保存。可先使用推荐�
     const status = page.locator('[data-role-version]').first();
     await expect(status).toHaveText('尚未保存。可先使用推荐配置。');
     await openRoleAdvanced(page);
-    await page.getByLabel('开启角色协调', { exact: true }).setChecked(true);
+    await page.locator('tr[data-role=dev]').getByRole('checkbox').uncheck();
     await expect(status).toHaveText('有未保存的更改');
     await expect(status).not.toContainText('配置版本 0');
   } finally { await h.stop(); }

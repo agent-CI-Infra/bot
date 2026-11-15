@@ -1,3 +1,4 @@
+import { pinLegacyTaskConfiguration } from './helpers.mjs';
 import { knowledgeActor, authorizeKnowledgeTask } from './knowledge-fixture.mjs';
 import { ProjectMemory } from '../dist/memory/project.js';
 import test from 'node:test';
@@ -18,7 +19,7 @@ import { configureModelRetry } from '../dist/agent/runtime.js';
 const pass={outcome:'pass',reason:'Read the actual submitted report from its pinned Git object',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
 const call=(name,args,id)=>({role:'assistant',content:null,tool_calls:[{id,type:'function',function:{name,arguments:JSON.stringify(args)}}]});
 
-test('ordinary tasks omit retired guidance, correct invalid paths, and resume only fresh acceptance after an outage',async t=>{
+test('historical ordinary tasks omit retired guidance, correct invalid paths, and resume only fresh acceptance after an outage',async t=>{
  configureModelRetry({baseMs:1});t.after(()=>configureModelRetry(null));
  const root=mkdtempSync(join(tmpdir(),'bot-request-flow-')),store=new Store(':memory:',randomBytes(32)),records=new TaskRecords(store),manager=new LocalManager('101',root);
  t.after(async()=>{await manager.recover();store.close();rmSync(root,{recursive:true,force:true});});
@@ -86,22 +87,23 @@ test('ordinary tasks omit retired guidance, correct invalid paths, and resume on
  store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
  const memorySeed=new ProjectMemory(store,{actor:knowledgeActor(store,'owner','101')}).save('101','memory.reuse',{kind:'implementation',body:'Inspect calc.mjs and actual observations before reporting. fixture-model-token',sources:[{reference:'controlled repository fixture'}],scope:{module:'memory'}},0,'user:owner','seed retrieval integration');
  const engine=new TaskEngine(store,manager,gh+'/github');
+ const runLegacy = (id, token) => { pinLegacyTaskConfiguration(store, id); return engine.run(id, token); };
  for(const mode of ['single','multiple','return','insufficient_evidence','write-outage']){
   const id=randomBytes(24).toString('hex'),contract={goal:'Write an observed report '+mode,scope:['report'],criteria:['Report a concrete repository observation'],endpoint:'report',source:'request'};
   store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,claim_token) VALUES(?,'101','task.request','running',?,?,'claim')",id,mode,JSON.stringify({request:mode+' guide report',contract,...(mode==='multiple'?{context_files:{'parent-proof.txt':'PARENT_AUTHORIZED_CONTEXT'}}:{})}));
   authorizeKnowledgeTask(store,id);store.run("INSERT INTO task_claims VALUES(?,'101','claim','now')",id);
   records.history(id,'execution_evidence',{execution:'old-execution',name:'run_command',version:'old-tree',result:{exit_code:0,output:'STALE_EVIDENCE_SENTINEL'}});
-  await engine.run(id,'claim');
+  await runLegacy(id,'claim');
   if(mode==='single'){
    let row=store.get('SELECT * FROM tasks WHERE id=?',id);assert.equal(row.status,'retry_wait',JSON.stringify(store.all('SELECT content FROM task_logs WHERE task_id=?',id)));assert.equal(row.phase,'acceptance');
-   const callsBefore=executionCalls;await engine.run(id,'claim');assert.equal(executionCalls,callsBefore,'restart must not repeat successful execution');
+   const callsBefore=executionCalls;await runLegacy(id,'claim');assert.equal(executionCalls,callsBefore,'restart must not repeat successful execution');
   }
   if(mode==='write-outage'){
    const row=store.get('SELECT * FROM tasks WHERE id=?',id);assert.equal(row.status,'retry_wait');assert.equal(row.phase,'model');assert.ok(JSON.parse(row.input).recovery);
-   store.run("UPDATE tasks SET status='running',workspace_id=NULL,generation=NULL,attempt=attempt+1 WHERE id=?",id);await engine.run(id,'claim');
+   store.run("UPDATE tasks SET status='running',workspace_id=NULL,generation=NULL,attempt=attempt+1 WHERE id=?",id);await runLegacy(id,'claim');
    assert.ok(restoredLateWrite);assert.ok(store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='checkpoint_restored'",id));
   }
-  if(store.get('SELECT status FROM tasks WHERE id=?',id).status==='queued')await engine.run(id,'claim');
+  if(store.get('SELECT status FROM tasks WHERE id=?',id).status==='queued')await runLegacy(id,'claim');
   const result=records.get(id);assert.equal(result.progress.status,'completed',JSON.stringify(store.all('SELECT content FROM task_logs WHERE task_id=?',id)));
   assert.equal(result.selections.length,0);assert.equal(result.acceptance.outcome,mode==='multiple'?'pass_with_issues':'pass');
   if(['return','insufficient_evidence'].includes(mode)){
@@ -119,7 +121,7 @@ test('ordinary tasks omit retired guidance, correct invalid paths, and resume on
  const children=store.all("SELECT t.* FROM tasks t JOIN task_followups f ON f.task_id=t.id WHERE t.source_task_id IS NOT NULL AND t.kind='task.request' ORDER BY f.issue_key");assert.equal(children.length,2);
  for(const child of children){
  store.run("UPDATE tasks SET status='running',claim_token='child-claim' WHERE id=?",child.id);authorizeKnowledgeTask(store,child.id);store.run("INSERT INTO task_claims VALUES(?,'101','child-claim','now')",child.id);
- await engine.run(child.id,'child-claim');assert.equal(records.get(child.id).progress.status,'completed',JSON.stringify(store.all('SELECT content FROM task_logs WHERE task_id=?',child.id)));
+ await runLegacy(child.id,'child-claim');assert.equal(records.get(child.id).progress.status,'completed',JSON.stringify(store.all('SELECT content FROM task_logs WHERE task_id=?',child.id)));
  assert.ok(inheritedRead);assert.ok(store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='inherited_artifact'",child.id));
  if(JSON.parse(child.input).contract.source.residual==='follow-report')writeFileSync(join(root,'tasks',store.get('SELECT workspace_id FROM tasks WHERE id=?',child.id).workspace_id,'repo','report.md'),'MUTATED_AFTER_ACCEPTANCE');
  }
@@ -127,4 +129,44 @@ test('ordinary tasks omit retired guidance, correct invalid paths, and resume on
  assert.equal(store.get('SELECT count(*) n FROM task_followups').n,2,'legacy related work must not grow a new chain');
  assert.ok(invalidPathObserved);assert.ok(acceptanceCalls>=5);
  assert.equal(firstOutage,0);assert.equal(writeOutage,6,'all six requests fail before the saved work is restored');
+});
+
+test('default and saved-disabled projects execute an ordinary request with Manager, Dev and fresh QA',async t=>{
+ for(const saved of [false,true])await t.test(saved?'saved disabled coordination':'no role configuration',async t=>{
+  const root=mkdtempSync(join(tmpdir(),'manager-default-')),store=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root);
+  github.listen(0,'127.0.0.1');await once(github,'listening');
+  const gh='http://127.0.0.1:'+github.address().port;
+  await fetch(gh+'/fixture/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({github_token:'manager-fixture-token'})});
+  const model=createServer(async(req,res)=>{
+   let raw='';for await(const b of req)raw+=b;const body=JSON.parse(raw),messages=body.messages;
+   const toolResults=messages.filter(m=>m.role==='tool').map(m=>{try{return JSON.parse(m.content);}catch{return {};}});
+   const names=messages.filter(m=>m.role==='assistant').flatMap(m=>m.tool_calls||[]).map(c=>c.function.name);
+   let message;
+   if(body.tools?.some(tool=>tool.function.name==='delegate_role')){
+    const ref=toolResults.find(result=>result.result_ref)?.result_ref;
+    message=!ref?call('delegate_role',{role:'dev',purpose:'Write the requested report',refs:[JSON.parse(messages[1].content).task_ref]},'delegate')
+     :!names.includes('read_task_record')?call('read_task_record',{ref},'read-result'):call('nominate_delivery',{result_ref:ref},'nominate');
+   }else if(messages[0].content.includes('independent delivery acceptance evaluator')){
+    message=!names.includes('read_file')?call('read_file',{path:'report.md'},'qa-read'):{role:'assistant',content:JSON.stringify(pass)};
+   }else message=!names.includes('write_file')?call('write_file',{path:'report.md',content:'Observed repository fact: calc.mjs contains arithmetic.'},'write')
+    :call('submit_delivery',{summary:'Observed report',artifacts:[{path:'report.md',description:'Observed report'}],evidence:[],unknowns:[]},'submit');
+   res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message}]}));
+  });
+  model.listen(0,'127.0.0.1');await once(model,'listening');
+  const engine=new TaskEngine(store,manager,gh+'/github');
+  t.after(async()=>{await engine.close();await manager.recover();await new Promise(resolve=>{model.close(resolve);model.closeAllConnections();});await new Promise(resolve=>{github.close(resolve);github.closeAllConnections();});store.close();rmSync(root,{recursive:true,force:true});});
+  store.run('INSERT INTO accounts VALUES(?,?,?,?,?,?)','a','fixture','bot_account',null,store.secrets.seal({token:'manager-fixture-token'},'account:a'),'now');
+  store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
+  store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101','http://127.0.0.1:'+model.address().port+'/v1','fixture',store.secrets.seal({value:'manager-model-token'},'model:m'),'now');
+  store.run("INSERT INTO policies(repository_id,model_id,enabled) VALUES('101','m',1)");
+  if(saved)store.run("INSERT INTO settings VALUES('roles:101',?)",JSON.stringify({enabled:false,harnesses:{}}));
+  const contract={goal:'Write an observed report',scope:['report'],criteria:['Report an observed repository fact'],endpoint:'report'};
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,claim_token) VALUES('request','101','task.request','running','report',?,'claim')",JSON.stringify({request:'Write an observed report',contract}));
+  authorizeKnowledgeTask(store,'request');store.run("INSERT INTO task_claims VALUES('request','101','claim','now')");
+  await engine.run('request','claim');
+  assert.equal(new TaskRecords(store).get('request').progress.status,'completed',JSON.stringify(store.all("SELECT content FROM task_logs WHERE task_id='request'")));
+  assert.deepEqual(store.all("SELECT DISTINCT role FROM task_runs WHERE task_id='request' AND role IS NOT NULL ORDER BY role").map(row=>row.role),['dev','manager','qa']);
+  assert.equal(new TaskRecords(store).get('request').acceptance.outcome,'pass');
+  assert.equal(store.get("SELECT actions_failures_enabled FROM policies WHERE repository_id='101'").actions_failures_enabled,0);
+ });
 });

@@ -10,8 +10,9 @@ import { execFileSync } from 'node:child_process';
 import childProcess from 'node:child_process';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
-import { harness, setup, account, repository, saveManager } from './helpers.mjs';
+import { harness, setup, account, repository, saveManager, pinLegacyTaskConfiguration } from './helpers.mjs';
 import { agentLoop } from '../dist/agent/loop.js';
+const legacyAgentLoop = (store, task, ...args) => { pinLegacyTaskConfiguration(store, task.id); return agentLoop(store, task, ...args); };
 import { Workspace } from '../dist/agent/workspace.js';
 import { resolveRules } from '../dist/rules/service.js';
 import { Redactor, TaskError } from '../dist/agent/common.js';
@@ -48,7 +49,7 @@ test('the control plane relays Pi model requests with the configured model and k
   await admin('/api/repositories/101/policy','PATCH',{model_id:model.id,review_enabled:true});
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('process','101','review.pr','running','pr',4,'claim')");
   const logs=[],workspace=proxyWorkspace(logs),requests=[],original=workspace.call;workspace.call=async(...args)=>{requests.push(args[1]);return original(...args);};
-  const result=await agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='process'"),workspace,new Redactor(),async()=>{},{mode:'review',materials:[{path:'a.js',content:'code'}]});
+  const result=await legacyAgentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='process'"),workspace,new Redactor(),async()=>{},{mode:'review',materials:[{path:'a.js',content:'code'}]});
   assert.equal(result.summary,'Short summary.');assert.equal(received[0].authorization,'Bearer process-fixture-key');assert.equal(received[0].body.model,'fixture');assert.ok(!JSON.stringify(requests).includes('process-fixture-key'));assert.equal(logs[0].tool_calls[0].name,'finish_review');
   const usage=h.store.get('SELECT * FROM model_requests');assert.equal(usage.task_id,'process');assert.equal(usage.state,'received');assert.equal(usage.input_tokens,1000);assert.equal(usage.cached_input_tokens,750);assert.equal(usage.cost,0.00265);
 });
@@ -72,7 +73,7 @@ test('a task may make any number of model requests, and a request still visible 
     if(input.type==='workspace_agent_reply'){stale=step%10===0;return {written:true};}
     return {written:true,started:true};
   }};
-  const started=Date.now(),result=await agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='many'"),workspace,new Redactor(),async()=>{},{mode:'review'});
+  const started=Date.now(),result=await legacyAgentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='many'"),workspace,new Redactor(),async()=>{},{mode:'review'});
   assert.equal(result.summary,'Done after many steps.');assert.equal(received,total);
   assert.equal(h.store.get('SELECT count(*) n FROM model_requests').n,total,'stale polls do not create extra usage entries');
   // Answered requests are followed by an immediate poll, so 40 steps do not wait 40 polling intervals.
@@ -93,7 +94,7 @@ test('the control plane drains paged events before returning a completed or fail
       polls++;const offset=input.offset+20;
       return {state,result,events:events.slice(input.offset,offset),offset:Math.min(offset,events.length),has_more:offset<events.length};
     }};
-    const running=agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='pages'"),workspace,new Redactor(),async()=>{},{mode:'review'});
+    const running=legacyAgentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='pages'"),workspace,new Redactor(),async()=>{},{mode:'review'});
     if(state==='completed')assert.equal((await running).summary,result.summary);
     else await assert.rejects(running,error=>error.code==='pi_execution_failed');
     // A failed agent adds the reason it gave (none here) after its events.
@@ -118,7 +119,7 @@ test('a relayed model request carries exactly one output limit, the field the ru
       :{state:'completed',result:finish,events:[],offset:0};
     return {written:true,started:true};
   }};
-  await agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='limit'"),workspace,new Redactor(),async()=>{},{mode:'review'});
+  await legacyAgentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='limit'"),workspace,new Redactor(),async()=>{},{mode:'review'});
   assert.equal(received.length,shapes.length);
   received.forEach((body,i)=>{
     const field=shapes[i][1],other=field==='max_tokens'?'max_completion_tokens':'max_tokens';
@@ -204,14 +205,14 @@ test('review rules choose the triggers, and the comment language and only the ef
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
   let workspace = proxyWorkspace(); const rules = { language: 'zh', instructions: 'Focus on API compatibility.' };
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('r','101','review.pr','running','pr',7,'c'),('d','101','development.issue','running','dev',1,'c')");
-  await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='r'"), workspace, new Redactor(), async () => {}, { mode: 'review', review_rules: rules, effective_rules:{files:[{path:'.bot/rules/pr-review.md',source:'repository',effective:'Repository review content.'}]} });
+  await legacyAgentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='r'"), workspace, new Redactor(), async () => {}, { mode: 'review', review_rules: rules, effective_rules:{files:[{path:'.bot/rules/pr-review.md',source:'repository',effective:'Repository review content.'}]} });
   assert.match(prompts[0], /Simplified Chinese/); assert.doesNotMatch(prompts[0], /Administrator review guidance|Focus on API compatibility/);assert.match(prompts[0],/Repository review content\./);assert.doesNotMatch(requestTexts[0],/Focus on API compatibility|Administrator review guidance/);
   reply.tool_calls = [call('g', 'create_pull_request', { summary: 'done', test_command: 'true' })]; workspace=proxyWorkspace();
-  await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', review_rules: rules }, undefined, async()=>({status:'no_changes'}));
+  await legacyAgentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', review_rules: rules }, undefined, async()=>({status:'no_changes'}));
   assert.doesNotMatch(prompts[1], /Focus on API compatibility/);
   // With no console layer or repository file, the system prompt carries each docs/prompts file in full.
   workspace=proxyWorkspace();
-  await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', effective_rules: resolveRules({}, {}) }, undefined, async()=>({status:'no_changes'}));
+  await legacyAgentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', effective_rules: resolveRules({}, {}) }, undefined, async()=>({status:'no_changes'}));
   for (const name of ['labels.md', 'issue-review.md', 'pr-review.md', 'issue-development.md'])
     assert.ok(prompts[2].includes(`## .bot/rules/${name} (builtin)\n` + readFileSync(new URL('../docs/prompts/' + name, import.meta.url), 'utf8')), name);
 });
@@ -239,7 +240,7 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
   const redactor=new Redactor(),logs=[];let revoked=0;
   const tokens={allowedScopes:()=>['contents','issues','pull_requests','actions','checks','statuses','metadata'],issueRepository:async()=>{redactor.add(token);return {token,expiresAt:'2099-01-01T00:00:00Z',permissions:{contents:'read',actions:'read'},fullName:'fixture/project-101'};},revoke:async()=>{revoked++;}};
   let task=h.store.get("SELECT * FROM tasks WHERE id='tok'"),fake=runner();
-  const result=await agentLoop(h.store,task,new Workspace(h.store,fake.manager,task,redactor,async()=>{},value=>logs.push(value)),redactor,async()=>{},{mode:'review'},tokens);
+  const result=await legacyAgentLoop(h.store,task,new Workspace(h.store,fake.manager,task,redactor,async()=>{},value=>logs.push(value)),redactor,async()=>{},{mode:'review'},tokens);
   assert.equal(result.summary,'Read the checks.');assert.equal(fake.delivered[0].token,token);assert.equal(revoked,1);
   assert.ok(!JSON.stringify(h.store.all('SELECT * FROM task_tools')).includes('workspace_agent_token'),'the delivery is not recorded');
   assert.ok(!bodies[0].includes(token)&&bodies[0].includes('[REDACTED]'),'the provider never sees the token');
@@ -247,11 +248,11 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
   // Partial resource policies keep the raw token out of the runner; structured tools still have the permitted scopes.
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,generation,workspace_id) VALUES('partial','101','review.pr','running','pr',6,'claim',1,?)",'f'.repeat(48));
   task=h.store.get("SELECT * FROM tasks WHERE id='partial'");tokens.allowedScopes=()=>['contents'];fake=runner();
-  await agentLoop(h.store,task,new Workspace(h.store,fake.manager,task,redactor,async()=>{},()=>{}),redactor,async()=>{},{mode:'review'},tokens);
+  await legacyAgentLoop(h.store,task,new Workspace(h.store,fake.manager,task,redactor,async()=>{},()=>{}),redactor,async()=>{},{mode:'review'},tokens);
   assert.equal(fake.delivered[0].structured_only,true);assert.equal(fake.delivered[0].token,undefined);
   // Without a token issuer the agent gets the reason and the task carries on.
   task=h.store.get("SELECT * FROM tasks WHERE id='none'");fake=runner();
-  await agentLoop(h.store,task,new Workspace(h.store,fake.manager,task,new Redactor(),async()=>{},()=>{}),new Redactor(),async()=>{},{mode:'review'});
+  await legacyAgentLoop(h.store,task,new Workspace(h.store,fake.manager,task,new Redactor(),async()=>{},()=>{}),new Redactor(),async()=>{},{mode:'review'});
   assert.deepEqual(fake.delivered,[{error:'github_read_token_unavailable'}]);
 });
 
@@ -334,6 +335,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,input,created_at) VALUES(?,'101',?,'running','dev',1,'claim',?,?)", taskId, custom ? 'workflow.issue' : 'development.issue', JSON.stringify(input), new Date().toISOString());
   h.store.run("INSERT INTO task_claims VALUES(?,'101','claim',?)", taskId, new Date().toISOString());
   const engine = new TaskEngine(h.store, manager, endpoint + '/github', undefined, acceptor);
+  pinLegacyTaskConfiguration(h.store, taskId);
   await engine.run(taskId, 'claim');
   const task = h.store.get('SELECT * FROM tasks WHERE id=?', taskId), saved = h.store.get('SELECT data FROM development_candidates WHERE task_id=?', taskId);
   const continueIssue = async () => {
@@ -342,6 +344,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
     const nextId = randomBytes(24).toString('hex');
     h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,input,created_at) VALUES(?,'101','development.issue','running','dev',1,'claim',?,?)", nextId, JSON.stringify(input), new Date().toISOString());
     h.store.run('DELETE FROM task_claims'); h.store.run("INSERT INTO task_claims VALUES(?,'101','claim',?)", nextId, new Date().toISOString());
+    pinLegacyTaskConfiguration(h.store, nextId);
     await engine.run(nextId, 'claim');
     return { task: h.store.get('SELECT * FROM tasks WHERE id=?', nextId), candidate: JSON.parse(h.store.get('SELECT data FROM development_candidates WHERE task_id=?', nextId)?.data || 'null') };
   };
@@ -434,6 +437,7 @@ test('an Actions failure analysis runs as a task in the project computer: the fa
       { job_id: 92, name: 'test', failed_steps: [{ number: 3, name: 'Test' }], failed_step_output: 'AssertionError: 1 + 1 !== 2' }] };
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,head_sha,claim_token,created_at) VALUES('analysis','101','actions.failures','running','analysis','101:actions.failures:800:1',?,?,'claim',?)", JSON.stringify(input), head, new Date().toISOString());
   h.store.run("INSERT INTO task_claims VALUES('analysis','101','claim',?)", new Date().toISOString());
+  pinLegacyTaskConfiguration(h.store, 'analysis');
   await new TaskEngine(h.store, manager, endpoint + '/github', undefined, acceptanceFixture).run('analysis', 'claim');
   const task = h.store.get("SELECT * FROM tasks WHERE id='analysis'");
   assert.equal(task.status, 'succeeded', JSON.stringify(h.store.all("SELECT content FROM task_logs WHERE task_id='analysis'")));
@@ -562,7 +566,7 @@ test('fresh start keys reuse a living runner PID without killing it or spawning 
     }};
     h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,workspace_id,generation) VALUES('living','101','review.issue','running','living',1,'living-workspace',1)");
     const task=h.store.get("SELECT * FROM tasks WHERE id='living'"),workspace=new Workspace(h.store,manager,task,new Redactor(),async()=>{},()=>{});
-    for(let i=0;i<2;i++)await agentLoop(h.store,task,workspace,new Redactor(),async()=>{},{mode:'review'});
+    for(let i=0;i<2;i++)await legacyAgentLoop(h.store,task,workspace,new Redactor(),async()=>{},{mode:'review'});
     assert.equal(new Set(starts).size,2);assert.equal(signals.mock.callCount(),2);assert.equal(spawned.mock.callCount(),0);
     assert.deepEqual(JSON.parse(readFileSync(join(dir,'state.json'),'utf8')),saved);
   }finally{read.mock.restore();spawned.mock.restore();signals.mock.restore();syncBuiltinESMExports();}

@@ -31,6 +31,7 @@ export interface RoleDefinitionV2 {
 }
 export type Entry = 'development' | 'request' | 'review' | 'actions';
 export interface RoleConfiguration {
+  // enabled/entries remain readable in historical task snapshots; current projects always use the Manager.
   schema: 2; revision: number; enabled: boolean; legacy?: boolean;
   controller: { role: string; entries: Record<Entry, boolean> };
   required_stages?: StageDefinition[];
@@ -190,10 +191,15 @@ export function resetBuiltinRolePermissions(s: Store) {
   });
 }
 
-/** The stored configuration as V2. A configuration saved before V2 keeps running as before (legacy) until it is saved again. */
+/** Current project defaults use the Manager. An explicit stored value is a historical/task configuration, kept intact. */
 export function roleConfiguration(s: Store, repositoryId: string, stored?: any): RoleConfiguration {
-  const saved = stored===undefined?s.get('SELECT value FROM settings WHERE key=?', 'roles:' + repositoryId):undefined;
-  const value = stored??(saved ? JSON.parse(saved.value) : { enabled: false, harnesses: {} });
+  if (stored === undefined) {
+    const saved = s.get('SELECT value FROM settings WHERE key=?', 'roles:' + repositoryId);
+    const config = roleConfiguration(s, repositoryId, saved ? JSON.parse(saved.value) : { enabled: false, harnesses: {} });
+    // Resolve the retired switches without rewriting revisions, permissions, event filters or frozen task snapshots.
+    return { ...config, enabled: true, controller: { ...config.controller, entries: managerEntries() } };
+  }
+  const value = stored;
   if (value.schema === 2) {
     const roles = value.roles.map((role: any) => {
       const { capability_policy_ref, ...definition } = role;
@@ -212,6 +218,7 @@ export function roleConfiguration(s: Store, repositoryId: string, stored?: any):
         budget_policy_ref: catalogRef(budgetPolicies, 'entry-default'), output_schema_ref: catalogRef(outputSchemas,r.id==='coordinator'?'coordination-result':allowedFor(kind).output[0]!) }; }) };
 }
 export const entryEnabled = (config: RoleConfiguration, entry: Entry) => config.enabled && config.controller.entries[entry] === true;
+const managerEntries = (): Record<Entry, boolean> => ({ development: true, request: true, review: true, actions: true });
 
 /** The model profile a role may pin: endpoint and model name fixed by hash; a rotated key keeps the same profile. */
 export const modelProfileHash = (row: Record<string, any>) => short([String(row.api_url), String(row.model_name)]);
@@ -289,7 +296,7 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
   if (Object.keys(input).some(k => !['expected_revision', 'enabled', 'controller', 'roles', 'skills', 'required_stages', 'deleted_roles'].includes(k))) invalid('unknown_field', Object.keys(input).find(k => !['expected_revision', 'enabled', 'controller', 'roles', 'skills', 'required_stages', 'deleted_roles'].includes(k))!);
   if (!Number.isSafeInteger(input.expected_revision) || input.expected_revision < 0) invalid('expected_revision_required', 'expected_revision');
   if (input.expected_revision !== current.revision) fail(409, 'role_configuration_conflict', 'expected_revision');
-  if (typeof input.enabled !== 'boolean') invalid('invalid_role_configuration', 'enabled');
+  if (input.enabled !== undefined && typeof input.enabled !== 'boolean') invalid('invalid_role_configuration', 'enabled');
   // Skill bundles first: a role may reference a bundle saved in this same request.
   const skillInput = input.skills ?? [];
   if (!Array.isArray(skillInput) || skillInput.length > 16) invalid('invalid_skill_bundles', 'skills');
@@ -409,7 +416,8 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
   if (controllerRole==='coordinator'||roles.find(r => r.role_id === controllerRole)?.kind !== 'controller') invalid('invalid_controller', 'controller.role');
   const entryInput = controllerInput.entries ?? current.controller.entries;
   if (!entryInput || typeof entryInput !== 'object' || Object.keys(entryInput).some(k => !entries.includes(k as Entry)) || Object.values(entryInput).some(v => typeof v !== 'boolean')) invalid('invalid_controller_entries', 'controller.entries');
-  const config: RoleConfiguration = { schema: 2, revision: current.revision + 1, enabled: input.enabled, controller: { role: controllerRole, entries: Object.fromEntries(entries.map(e => [e, entryInput[e] ?? false])) as Record<Entry, boolean> }, roles, skills, required_stages: validateStages(input.required_stages ?? current.required_stages ?? [], roles) };
+  // Accept retired booleans from older clients, but they no longer opt work out of Manager execution.
+  const config: RoleConfiguration = { schema: 2, revision: current.revision + 1, enabled: true, controller: { role: controllerRole, entries: managerEntries() }, roles, skills, required_stages: validateStages(input.required_stages ?? current.required_stages ?? [], roles) };
   if (Buffer.byteLength(JSON.stringify(config)) > 512 * 1024) invalid('role_configuration_too_large', 'roles');
   return { config, added };
 }
@@ -532,14 +540,13 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
 
 /**
  * Live authority of a running role. A snapshot explains what a run started with; it never keeps authority that has since
- * been withdrawn. Disabling the role, switching coordination off or narrowing its permissions stops further tool use.
+ * been withdrawn. Disabling the role or narrowing its permissions stops further tool use.
  */
 export function roleAuthority(s: Store, repositoryId: string, snapshot: RoleSnapshot, tool?: string, direct=false): string | null {
   const config = roleConfiguration(s, repositoryId);
   const definition = config.roles.find(r => r.role_id === snapshot.role_id);
   if (!definition) return 'role_removed';
   if (!definition.enabled) return 'role_disabled';
-  if (!direct && !config.enabled && !config.legacy && snapshot.kind !== 'evaluator') return 'role_coordination_disabled';
   const live = definition.permissions;
   const reads=snapshot.capability.permissions?githubReadScopes(snapshot.capability.permissions)
     :snapshot.capability.tools?.includes('github_read_token')?['issues','pull_requests','contents','actions','checks','statuses']:[];

@@ -329,6 +329,16 @@ function controllerScript(extra = []) {
     return call('nominate_delivery', { result_ref: ref });
   };
 }
+test('an unconfigured project runs its ordinary task through Manager and delegates without opting in', async t => {
+  const script = controllerScript(), f = await fixture(t, body => isController(body) ? script(body) : call('finish', { summary: 'default team delivered' }));
+  const result = await runTeam(f.spec, { prepare: async () => {} });
+  assert.equal(result.summary, 'default team delivered');
+  assert.deepEqual(f.s.all('SELECT DISTINCT role FROM task_runs ORDER BY role').map(row => row.role), ['dev', 'manager']);
+  assert.equal(f.s.get("SELECT 1 FROM settings WHERE key='roles:r'"), undefined);
+  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='delivery_nominated'").n, 1);
+  assert.equal(f.records.get('t').acceptance, null, 'Manager nomination cannot replace independent QA');
+});
+
 test('the project controller runs on the Pi harness, delegates by references and cannot write, publish, accept, merge or over-delegate', async t => {
   const forbidden = [{ name: 'write_file', args: { path: 'src/a.js', content: 'x' } }, { name: 'create_pull_request', args: { summary: 'x', test_command: 'x' } },
     { name: 'submit_acceptance', args: { outcome: 'pass' } }, { name: 'merge_pull_request', args: { sha: 'x' } },
@@ -394,7 +404,7 @@ test('controller recovery records native resume of a live Pi session after a res
   assert.equal(f.s.get("SELECT count(*) n FROM role_assignments WHERE status='completed'").n, completed, 'the completed delegation was reused, not repeated');
 });
 
-test('review under the controller keeps its task, executor, tools and completion; switching the entry off restores the direct executor', async t => {
+test('review under the controller keeps its task, executor, tools and completion; retired switches keep Manager execution', async t => {
   const finish = { summary: 'Short summary.', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] };
   const script = controllerScript();
   const f = await fixture(t, body => isController(body) ? script(body) : call('finish_review', finish));
@@ -412,12 +422,31 @@ test('review under the controller keeps its task, executor, tools and completion
   const dev = f.s.get("SELECT * FROM task_runs WHERE task_id='rv' AND role='dev'"), devSnapshot = JSON.parse(f.s.get('SELECT snapshot FROM role_snapshots WHERE id=?', dev.role_snapshot).snapshot);
   assert.deepEqual([dev.harness, devSnapshot.harness.source], ['pi', 'role']);
   assert.equal(JSON.parse(f.s.get("SELECT data FROM task_history WHERE task_id='rv' AND type='controller_entry'").data).entry, 'review');
-  // Turning the entry off returns to the direct executor for the same task id.
+  // Retired entry switches cannot return newly resolved work to the direct executor.
   f.put({ controller: { entries: { development: true, request: true, review: false, actions: false } } });
-  const direct = await run();
-  assert.equal(direct.result.summary, 'Short summary.');
-  assert.deepEqual(direct.runner.spaces.get('b'.repeat(48)).parsed.control_tools, ['finish_review']);
-  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE task_id='rv' AND role='manager'").n, 1);
+  const again = await run();
+  assert.equal(again.result.summary, 'Short summary.');
+  assert.equal(f.s.get("SELECT harness FROM role_instances WHERE task_id='rv' AND role='dev'").harness, 'native');
+  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE task_id='rv' AND role='manager'").n, 2);
+});
+
+for (const saved of [false, true]) for (const kind of ['review.pr', 'actions.failures']) test(`${kind} enters Manager execution with ${saved ? 'saved disabled switches' : 'no role settings'}`, async t => {
+  const finish = kind === 'review.pr' ? { summary: 'Default review.', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] } : { summary: 'Default Actions analysis.' };
+  const script = controllerScript(), f = await fixture(t, body => isController(body) ? script(body) : call(kind === 'review.pr' ? 'finish_review' : 'finish_analysis', finish));
+  f.s.run("UPDATE tasks SET kind=?,object_number=4 WHERE id='t'", kind);
+  if (saved) {
+    const config = roleApi(f.s, admin, 'GET', rolesUrl, {}).configuration;
+    config.enabled = false; config.controller.entries = { development: false, request: false, review: false, actions: false };
+    f.s.run("INSERT INTO settings VALUES('roles:r',?)", JSON.stringify(config));
+  }
+  const before = f.s.get("SELECT value FROM settings WHERE key='roles:r'")?.value;
+  const task = { ...f.s.get("SELECT * FROM tasks WHERE id='t'"), workspace_id: 'b'.repeat(48) }, runner = fakeRunner();
+  const workspace = new Workspace(f.s, runner.manager, task, f.spec.redactor, async () => {}, () => {});
+  const result = await agentLoop(f.s, task, workspace, f.spec.redactor, async () => {}, {});
+  assert.equal(result.summary, finish.summary);
+  assert.deepEqual(f.s.all("SELECT DISTINCT role FROM task_runs WHERE task_id='t' ORDER BY role").map(row => row.role), ['dev', 'manager']);
+  assert.equal(JSON.parse(f.s.get("SELECT data FROM task_history WHERE task_id='t' AND type='controller_entry'").data).entry, kind === 'review.pr' ? 'review' : 'actions');
+  assert.equal(f.s.get("SELECT value FROM settings WHERE key='roles:r'")?.value, before);
 });
 
 test('a review entry honors Native worker and Manager selections instead of forcing Pi', async t => {

@@ -1,3 +1,4 @@
+import { pinLegacyTaskConfiguration } from './helpers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
@@ -15,7 +16,7 @@ async function withBusyComputer(h,check){
     if(id!=='other-task')return run(id,token);
     await held;h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?",id);
   };
-  h.engine.tick();const work=h.engine.active.get('other-task');
+  pinLegacyTaskConfiguration(h.store);h.engine.tick();const work=h.engine.active.get('other-task');
   try{assert.ok(work);await check();}finally{release();await work;h.engine.run=run;}
 }
 
@@ -130,7 +131,7 @@ test('retry queues behind another task in the same repository and rejects only t
   await withBusyComputer(h,async()=>{
     assert.equal((await retry()).status,201);const task=h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId);
     assert.equal(task.status,'queued');assert.equal(task.error_code,null);assert.equal(task.next_run_at,0);assert.equal(h.operations.length,0);
-    h.engine.tick();assert.equal(h.operations.length,0);
+    pinLegacyTaskConfiguration(h.store);h.engine.tick();assert.equal(h.operations.length,0);
     for(const status of ['queued','running']){h.store.run('UPDATE tasks SET status=? WHERE id=?',status,h.taskId);assert.deepEqual((await retry()).value,{error:'task_already_running'});assert.equal((await retry()).status,409);}
     for(const status of ['succeeded','completed','pr_opened','cancelled','superseded']){h.store.run('UPDATE tasks SET status=? WHERE id=?',status,h.taskId);const result=await retry();assert.equal(result.status,409);assert.equal(result.value.error,'task_not_retryable');}
     h.store.run("UPDATE tasks SET status='waiting_pr_head' WHERE id=?",h.taskId);assert.equal((await retry()).status,201);

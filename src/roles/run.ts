@@ -22,7 +22,7 @@ import { taskTraceAccess, visibleMemorySnapshot, memoryViewSnapshot, taskMemoryA
 import { ProjectMemory } from '../memory/project.js';
 import { TaskError,stop } from '../agent/common.js';
 import { finalizationReserve } from '../agent/tool-context.js';
-import { roleConfiguration,configurationRevision,resolveRole,roleAuthority,skillFiles,type Entry,type RoleConfiguration } from './definition.js';
+import { roleConfiguration,configurationRevision,resolveRole,roleAuthority,skillFiles,entryEnabled,type Entry,type RoleConfiguration } from './definition.js';
 import type { PiRoleEnvironment } from '../agent/pi.js';
 import type { Row,Store } from '../storage/database.js';
 import { assertManagedTask, assertManagedExecution, assertTaskRole, managedTaskOrigin, roleTaskCaller, taskExecutor, taskAuthorizationFence, taskManagementTools, taskToolAllowed, withTaskPermissions } from '../tasks/management.js';
@@ -32,7 +32,7 @@ import { externalModelRecorder } from '../metrics/accounting.js';
 /** The project's role configuration in its V2 form (legacy configurations are presented as V2 with legacy:true). */
 export function roleConfig(store:AgentSpec<any>['store'],task:AgentSpec<any>['task']){return roleConfiguration(store,task.repository_id,taskConfiguration(store,task)?.roles);}
 /** Whether this entry point runs under the project controller. */
-export const controlled=(store:Store,task:Row,entry:Entry)=>{const config=roleConfig(store,task);return config.enabled&&config.controller.entries[entry]===true;};
+export const controlled=(store:Store,task:Row,entry:Entry)=>entryEnabled(roleConfig(store,task),entry);
 type Resolved=ReturnType<typeof resolveRole>;
 // Task defaults stay fixed; only an explicit role apply may move an existing instance to a newer V2 revision.
 function taskRole(s:Store,task:Row,role:string,harness?:string,pinned=false,override?:RoleConfiguration,model?:AgentSpec<any>['model'],entryExecutor=false){

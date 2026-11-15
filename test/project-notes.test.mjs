@@ -13,7 +13,7 @@ import { Notes } from '../runner/notes.mjs';
 import { createManagerServer } from '../manager/server.mjs';
 import { ManagerClient } from '../dist/projects/service.js';
 import { Docker } from '../manager/docker.mjs';
-import { harness, setup, account, repository, testPassword } from './helpers.mjs';
+import { harness, setup, account, repository, testPassword, pinLegacyTaskConfiguration } from './helpers.mjs';
 import { agentLoop } from '../dist/agent/loop.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { Redactor, treeSha } from '../dist/agent/common.js';
@@ -225,7 +225,9 @@ test('review and development system prompts require useful maintained notes even
       if(request.type==='workspace_agent_poll')return kind.startsWith('development')&&!published?{state:'running',tool_requests:[{id:id(),kind:'pull_request',name:'create_pull_request',arguments:{summary:'ready',test_command:'true'}}]}:{state:'completed',result:{summary:'Reviewed',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]}};
       return {};
     }};
-    await agentLoop(h.store,{id:'prompt',repository_id:'101',workspace_id:id(),kind},work,new Redactor(),async()=>{},{effective_rules:{files:[{path:'.bot/rules/pr-review.md',source:'repository',effective:'Replacement rules'}]}},undefined,async()=>({status:'no_changes'}));
+    h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES(?,'101',?,'running','fixture')", kind, kind);
+    pinLegacyTaskConfiguration(h.store, kind);
+    await agentLoop(h.store,{id:kind,repository_id:'101',workspace_id:id(),kind},work,new Redactor(),async()=>{},{effective_rules:{files:[{path:'.bot/rules/pr-review.md',source:'repository',effective:'Replacement rules'}]}},undefined,async()=>({status:'no_changes'}));
     for(const text of ['At task start','../notes/','repository.md','preferences.md','corrections.md','correct or remove','Do not create empty','Issue or PR language','existing language','not rules','change review events','override .bot rules','Notes are never committed','Replacement rules'])assert.ok(config.system.includes(text),kind+': '+text);
     // Only a workflow without the code write is told to leave the checkout alone.
     assert.equal(config.system.includes('must not modify files in the repository checkout'),!kind.startsWith('development'),kind);
@@ -250,6 +252,7 @@ test('model responses preserve known credentials in note writes while other outp
     if(input.type==='workspace_agent_poll')return replied?{state:'completed',result:finish}:{state:'running',request:{id:id(),body:{messages:[{role:'user',content:'review'}]}}};
     return {};
   }};
+  pinLegacyTaskConfiguration(h.store, 'model-secret');
   await agentLoop(h.store,{id:'model-secret',repository_id:'101',kind:'review.pr',workspace_id:id()},work,new Redactor(),async()=>{},{});
   const reply=JSON.parse(Buffer.concat(replies));assert.ok(!('rejected_note_calls' in reply));
   assert.equal(JSON.parse(JSON.parse(reply.body).choices[0].message.tool_calls[0].function.arguments).content,key);

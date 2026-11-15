@@ -142,7 +142,7 @@ const roleData = (config, { workflow = 'development.issue', configured = true } 
 const team = controller => [role('manager', 'controller', controller, controller === 'pi' ? '1.4.0' : '1'), role('dev', 'writer', 'native'), role('test', 'observer', 'native'), role('reviewer', 'observer', 'codex'), role('ux', 'observer', 'native'), role('qa', 'evaluator', 'native'), role('coordinator', 'controller', 'native')];
 const entries = { development: true, request: true, review: false, actions: false };
 function rolesDraft(data) {
-  return {enabled:data.configuration.enabled,controller:data.configuration.controller,roles:data.configuration.roles.map(role=>({...role,...(!data.configured?{harness_ref:{id:'pi'}}:{})})),skills:[],required_stages:[]};
+  return {controller:{role:data.configuration.controller.role},roles:data.configuration.roles.map(role=>({...role,...(!data.configured?{harness_ref:{id:'pi'}}:{})})),skills:[],required_stages:[]};
 }
 function rolesPage(data) {
   data.permission_items = [{id:'computer',name:'使用虚拟电脑',group:'platform',modes:['deny','allow'],detail:'读取、修改工作区文件和执行命令。'}];

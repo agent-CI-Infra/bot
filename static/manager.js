@@ -32,8 +32,10 @@ function managerSection(roles) {
 // Saves part of the configuration at the revision this page read; a conflict asks for a refresh instead of overwriting.
 const saveManagerChange = change => api(`/api/repositories/${current.id}/manager`, 'PUT', { expected_revision: current.manager.prompt.revision, ...change });
 function managerCards(manager, roles, refresh, notice) {
-  return [...(notice ? [Object.assign(element('p', notice, 'view-success flash'), { role: 'status' })] : []), managerPromptCard(manager, refresh), taskModelEditor('manager', 'Manager 分派', current.policy, current.models),
-    eventFiltersCard(manager, refresh), dispatchCard(), managerRulesCard(), ...(manager.migration ? [migrationCard(manager.migration)] : [])];
+  const behavior = card('项目 Manager 设置');
+  behavior.append(note('新任务默认由 Manager 安排角色和执行方式，按任务需要委派工作，无需另开协调开关。下方选择哪些外部事件可以启动自动处理。项目停用或暂停、已授予的权限、预算、独立 QA 与发布检查继续生效。'));
+  return [...(notice ? [Object.assign(element('p', notice, 'view-success flash'), { role: 'status' })] : []), behavior, eventFiltersCard(manager, refresh), managerPromptCard(manager, refresh), taskModelEditor('manager', 'Manager 分派', current.policy, current.models),
+    dispatchCard(), managerRulesCard(), ...(manager.migration ? [migrationCard(manager.migration)] : [])];
 }
 
 function managerPromptCard(manager, refresh) {
@@ -73,6 +75,7 @@ function eventFiltersCard(manager, refresh) {
   const section = card('交给 Manager 的事件'), form = document.createElement('form'), message = element('p', '', 'view-error'), events = manager.events;
   section.dataset.overviewAnchor = 'manager-events'; form.className = 'project-form'; message.setAttribute('role', 'alert');
   section.append(note(`草稿、已关闭的对象、bot 自己写的内容和仓库外人员的评论始终不会交给 Manager。这里关掉的事件同样不会到达 Manager，也不会产生分派调用；被接收的事件各进入一次 Manager 分派，分派中可以进行多轮模型和工具调用。提到 bot 指评论里写了 ${manager.mention_names.map(name => '@' + name).join('、') || '（部署关闭了提及）'}。`));
+  section.append(note('开启 Actions 失败事件后，系统会扫描默认分支的失败运行并交给 Manager 安排分析；关闭后停止接收和扫描。开启事件不会增加 GitHub 写权限。'));
   const boxes = element('div', '', 'manager-events');
   for (const [key, caption] of eventCaptions) boxes.append(checkbox('event:' + key, events[key], caption));
   const labels = (key, caption) => field(caption, input(key, events[key].join(', '), { placeholder: '逗号分隔；留空表示加标签不交给 Manager' }));

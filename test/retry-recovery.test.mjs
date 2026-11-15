@@ -1,3 +1,4 @@
+import { pinLegacyTaskConfiguration } from './helpers.mjs';
 import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -185,10 +186,10 @@ test('different transient failures reset the consecutive count, and entering the
   const first=task.retry_cycle_started_at;
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('later','101','review.issue','queued','later')");
   let now=Date.now()+123456;t.mock.method(Date,'now',()=>now);
-  for(let i=0;i<5;i++){h.store.run("UPDATE tasks SET next_run_at=0 WHERE id='later'");h.engine.tick();await Promise.all(h.engine.active.values());}
+  for(let i=0;i<5;i++){h.store.run("UPDATE tasks SET next_run_at=0 WHERE id='later'");pinLegacyTaskConfiguration(h.store);h.engine.tick();await Promise.all(h.engine.active.values());}
   const later=h.store.get("SELECT * FROM tasks WHERE id='later'");assert.equal(later.next_run_at,later.retry_cycle_started_at+cycleMs);assert.ok(later.retry_cycle_started_at-first>=123456);
   // A new transient cause inside the cycle keeps the task in that cycle instead of resetting to five fast retries.
-  code=502;now=task.next_run_at;h.engine.tick();await Promise.all(h.engine.active.values());task=h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId);
+  code=502;now=task.next_run_at;pinLegacyTaskConfiguration(h.store);h.engine.tick();await Promise.all(h.engine.active.values());task=h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId);
   assert.equal(task.retry_count,1);assert.equal(task.retry_cycle_started_at,first);assert.equal(task.next_run_at,first+2*cycleMs);
 });
 
