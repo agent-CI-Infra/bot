@@ -1,4 +1,4 @@
-let openTaskId = null, taskTimer = null, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null, taskLogState = null, taskReadVersion = 0, taskInboxOrigin = null;
+let openTaskId = null, taskRetryStep = 0, taskTimer = null, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null, taskLogState = null, taskReadVersion = 0, taskInboxOrigin = null;
 function resetTaskRendering() {
   renderedLogs = new Set(); liveCommand = null; snapshotProgress = null;
   delete $('task-actions').dataset.signature;
@@ -7,7 +7,7 @@ async function openTask(id) {
   if (!taskView.open) taskInboxOrigin = typeof captureConsoleInbox === 'function' ? captureConsoleInbox(id) : null;
   taskReadVersion++; taskLogState = { id, logs: [], page: null, error: '', olderPending: false };
   $('task-log-controls').replaceChildren();
-  openTaskId = id; resetTaskRendering(); $('timeline-command').hidden = true; clearTimeout(taskTimer);
+  openTaskId = id; taskRetryStep = 0; resetTaskRendering(); $('timeline-command').hidden = true; clearTimeout(taskTimer);
   $('task-picker').hidden = true; $('task-layout').hidden = false; $('task-next').hidden = true; $('task-next-text').textContent = '';
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = '正在加载…'; notice('task-error'); $('timeline-live').hidden = true;
@@ -56,7 +56,7 @@ async function refreshTask() {
     const roles = roleRecords(roleView), purposes = await rolePurposes(id, roles);
     if (!current()) return;
     renderTaskHeader(detail.task); renderTaskNext(detail.task, roles, purposes);
-    if (logResult.error && [401, 403, 404].includes(logResult.error.status)) throw logResult.error;
+    if (logResult.error && pollAfterError(logResult.error) === 'terminal') throw logResult.error;
     if (logResult.error) logState.error = logResult.error.message;
     else {
       logState.error = ''; mergeTaskLogs(logState, logResult, !after); renderTimeline(detail.task, logState.logs);
@@ -64,18 +64,31 @@ async function refreshTask() {
     logState.task = detail.task; updateTaskLogControls(logState);
     await refreshLive(detail.task, current); if (!current()) return;
     keepOpen($('task-side'), () => renderTaskSide(detail, environment, roles, purposes));
+    taskRetryStep = 0;
     if (!terminalStates.includes(detail.task.status)) taskTimer = setTimeout(refreshTask, detail.task.status.startsWith('waiting_') ? 5000 : 2000);
   } catch (err) {
     if (!current()) return;
-    if ([401, 403, 404].includes(err.status)) {
+    if (pollAfterError(err) === 'terminal') {
+      // #739: a missing, out-of-scope or session-less read is terminal. Stop here instead of scheduling another poll;
+      // the reader's own 「重新读取」 is the only retry, so a task they can never see is not requested forever and the
+      // notice does not come back every few seconds.
       resetTaskRendering();
       taskLogState = { id, logs: [], page: null, error: '', olderPending: false };
       for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions', 'task-log-controls']) $(part).replaceChildren();
       $('task-next').hidden = $('timeline-command').hidden = $('timeline-live').hidden = true;
-      $('task-title').textContent = '任务暂不可访问';
-      $('task-actions').append(button('关闭', () => taskView.close()));
+      const missing = err.status === 404;
+      $('task-title').textContent = missing ? '任务不存在或已删除' : '任务暂不可访问';
+      $('task-actions').replaceChildren(button('关闭', () => taskView.close()));
+      $('timeline').replaceChildren(consoleState('读取已停止',
+        missing ? '这个任务不存在，或已不在当前账号可访问的范围内。' : '当前账号无法读取这个任务，重新登录或有权限后再试。',
+        { tone: 'error', retryLabel: '重新读取', retry: () => { taskRetryStep = 0; refreshTask().catch(() => {}); } }));
+      notice('task-error', err.message);
+      return;
     }
-    notice('task-error', err.message); taskTimer = setTimeout(refreshTask, 5000);
+    // #739: only a recoverable failure keeps polling, on a 2/5/15/30s backoff instead of a flat five seconds.
+    const delay = [2, 5, 15, 30][Math.min(taskRetryStep, 3)];
+    taskRetryStep++;
+    notice('task-error', err.message); taskTimer = setTimeout(refreshTask, delay * 1000);
   }
 }
 function mergeTaskLogs(cache, result, initial = false) {

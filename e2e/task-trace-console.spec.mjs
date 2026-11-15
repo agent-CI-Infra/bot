@@ -71,7 +71,10 @@ test('a log outage keeps readable evidence, while a revoked task read clears all
     await expect(page.getByRole('heading', { name: '任务暂不可访问', exact: true })).toBeVisible();
     await expect(page.locator('#timeline .step')).toHaveCount(0); await expect(page.locator('#task-side')).toBeEmpty();
     await page.unroute('**/api/tasks/trace-page');
-    // The same open dialog recovers on its regular poll, rebuilding logs and the complete action bar.
+    // #739: a 403 is terminal now, so the open dialog no longer rebuilds itself on the next poll; the reader's own
+    // 「重新读取」 is the way back and it rebuilds the logs and the complete action bar.
+    await expect(page.locator('#timeline').getByRole('button', { name: '重新读取', exact: true })).toBeVisible();
+    await page.locator('#timeline').getByRole('button', { name: '重新读取', exact: true }).click();
     await expect(page.locator('#timeline .step')).toHaveCount(100, { timeout: 10000 });
     await expect(page.getByRole('button', { name: '刷新任务', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '重试', exact: true })).toBeVisible();

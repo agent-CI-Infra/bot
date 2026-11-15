@@ -5,6 +5,10 @@
 let sessionExpired = false, sessionBanner = null;
 const sessionReturnKey = 'launchpad.session_return_hash';
 function isSessionExpiry(status, code) { return code === 'login_required' || (status === 401 && code !== 'invalid_login'); }
+// #739: whether a failed read should schedule another one. A missing resource (404), a read the account may not make
+// (403) and a session that expired (401) are one dead end: another request cannot succeed, so the caller stops and
+// offers its own 「重新读取」. Anything else (5xx, network, timeout) is recoverable and keeps the caller's backoff.
+function pollAfterError(err) { return isSessionExpiry(err?.status, err?.code) || [403, 404].includes(err?.status) ? 'terminal' : 'retry'; }
 function markSessionExpired() {
   if (sessionExpired || !me) return;
   sessionExpired = true; document.body.classList.add('session-expired');
