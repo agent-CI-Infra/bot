@@ -397,7 +397,7 @@ test('#769 reading the versions binds no worktree; a bound review that moves kee
   assert.equal((await workspaceTool(b.workspace, 'no_workspace', { reason: 'The comment only thanks the author.' }, 'manager')).ok, true);
   const refused = await b.workspace.call('read', { type: 'workspace_read', path: 'README.md' });
   assert.equal(refused.error, 'no_workspace');
-  assert.match(refused.message, /^The task's controller \(manager\) chose to work without repository files \(The comment only thanks the author\.\)\. Only it can choose a workspace/);
+  assert.match(refused.message, /^The task's controller \(manager\) chose to work without repository files \(The comment only thanks the author\.\)\. Work from \.\.\/context\/ and the task records; if the task needs repository files or commands, say so in your result\.$/);
   assert.deepEqual(workspaceCoverage(b.workspace, ['Checkout: 3 files at x']), ['No checkout: the controller (manager) chose to work without the repository files (The comment only thanks the author.)']);
   assert.deepEqual((await versionTool(b.store, b.store.get('SELECT * FROM tasks WHERE id=?', 'task-' + b.id), b.workspace, 'read_version_context', {})).workspace, { worktree: 'none', commit: u.second, tree_sha: git(u.bare, 'rev-parse', u.second + '^{tree}') });
 });
