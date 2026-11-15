@@ -57,7 +57,7 @@ $('refresh').addEventListener('click', () => start().catch(error));
 // The onboarding dialog calls this once a run reaches a terminal state.
 window.refreshIntegrations = () => api('/api/integrations/check', 'POST', {}).then(() => start()).catch(() => {});
 $('sync').addEventListener('click', async () => {
-  $('sync').disabled = true; $('message').textContent = '正在从 GitHub 同步安装列表…';
+  $('sync').disabled = true; notice('message', '正在从 GitHub 同步安装列表…');
   try { const result = await api('/api/installations/sync', 'POST', {}); if (typeof forgetConsoleGaps === 'function') forgetConsoleGaps(); await start(); const conclusion = installationSyncNotice(result); notice('message', conclusion.text, conclusion.tone); }
   catch (err) { notice('message', '安装列表同步失败：' + err.message + '，还不能判断全部正常。', '', 'alert'); } finally { $('sync').disabled = false; }
 });

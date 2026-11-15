@@ -71,8 +71,13 @@ async function api(path, method = 'GET', body, { signal } = {}) {
 function notice(id, text = '', tone = '', kind = 'status') {
   const box = $(id); box.replaceChildren();
   if (!text) return;
-  box.setAttribute('role', kind === 'alert' ? 'alert' : 'status');
-  box.setAttribute('aria-live', kind === 'alert' ? 'assertive' : 'polite');
+  // #738 review: the shared strip carries the semantics of whichever message it now holds, while a box a page authored
+  // keeps its own — #task-error is created as a role=alert box that only ever holds an error, so a caller that forgets
+  // `kind` must not downgrade it to a polite status. An explicit `kind: 'alert'` still wins anywhere, and aria-live
+  // always follows the role that is written, so a static aria-live in the markup can never contradict it.
+  const alert = kind === 'alert' || (id !== 'message' && box.getAttribute('role') === 'alert');
+  box.setAttribute('role', alert ? 'alert' : 'status');
+  box.setAttribute('aria-live', alert ? 'assertive' : 'polite');
   const close = element('button', '关闭提示', 'quiet'); close.type = 'button'; close.addEventListener('click', () => notice(id));
   box.append(element('span', text, tone), close);
 }
