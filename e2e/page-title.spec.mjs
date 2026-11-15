@@ -41,6 +41,12 @@ test('#737 标题随路由更新：列表、控制台页、全局设置、项目
     await expect(page).toHaveTitle('fixture/project-101 · 项目总览' + zh);
     await page.evaluate(() => { location.hash = '#/projects/101/activity'; });
     await expect(page).toHaveTitle('fixture/project-101 · 运行状态' + zh);
+    // 项目入口 is a project page the settings catalog does not list, and the title still names it.
+    await page.evaluate(() => { location.hash = '#/projects/101/menu'; });
+    await expect(page).toHaveTitle('fixture/project-101 · 项目入口' + zh);
+    // A shared link to a project this reader cannot reach must not keep the name of the project before it.
+    await page.evaluate(() => { location.hash = '#/projects/999/overview'; });
+    await expect(page).toHaveTitle('项目总览' + zh);
     // An address the console does not know says so in the title, and a real page afterwards recomputes it.
     await page.evaluate(() => { location.hash = '#/nonexistent'; });
     await expect(page.locator('#console-page [data-page-not-found="console"]')).toBeVisible();
@@ -66,6 +72,10 @@ test('#737 英文界面下页面名与 404 前缀都是英文', async ({ page })
     await page.evaluate(() => { location.hash = '#/nonexistent'; });
     await expect(page).toHaveTitle('Page not found' + en);
     // Switching the interface language recomputes the title the route already set instead of leaving the old one.
+    await page.locator('#locale-switch').getByRole('button', { name: '中文', exact: true }).click();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
+    await expect(page).toHaveTitle('找不到页面' + zh);
+    // The language already in effect is a no-op for the interface, and it must stay a no-op for the page name too.
     await page.locator('#locale-switch').getByRole('button', { name: '中文', exact: true }).click();
     await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
     await expect(page).toHaveTitle('找不到页面' + zh);
@@ -104,6 +114,28 @@ test('#737 真实的地址变化把焦点移到新页面标题，同地址重绘
     await expect(page.locator('#project-page .project-head h1')).toHaveText('fixture/project-101');
     await expect.poll(() => page.evaluate(() => document.activeElement?.textContent?.trim() || null)).toBe('fixture/project-101');
     expect(await page.evaluate(() => document.activeElement?.tagName)).toBe('H1');
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});
+
+test('#737 390 宽度跟随手机底部导航切换页面也会把焦点交给新页面', async ({ page }) => {
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  const { h, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(h.admin + '/#/projects');
+    await signIn(page, password, zhLogin);
+    await expect(page.locator('#rows')).toContainText('fixture/project-101');
+    // The phone navigates through its own list of destinations (#481); those links carry data-page, not data-tab.
+    await page.locator('#console-mobile-nav a[data-page="board"]').click();
+    await expect(page.locator('#board-panel')).toBeVisible();
+    await expect(page).toHaveTitle('看板' + zh);
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id || null)).toBe('main-content');
+    // A console page in the same list lands on its own heading rather than the skip-link target.
+    await page.locator('#console-mobile-nav a[data-page="more"]').click();
+    await expect(page.locator('#console-page h1')).toBeVisible();
+    await expect.poll(() => page.evaluate(() => document.activeElement?.tagName || null)).toBe('H1');
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });

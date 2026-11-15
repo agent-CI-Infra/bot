@@ -108,7 +108,9 @@ async function route() {
   }
   if (typeof syncConsoleShell === 'function') syncConsoleShell(target);
   if (typeof restoreConsolePosition === 'function') restoreConsolePosition();
-  // #737: the page a navigation landed on says its name in the title, and a real address change hands it the focus.
+  // #737: the page a navigation landed on says its name in the title, and a real address change hands it the focus -
+  // unless a later address arrived during the render above and owns the page by now.
+  if (resolved !== tab) return;
   announcePage(missing, target, focusBefore);
 }
 window.addEventListener('hashchange', () => { if (me) route().catch(error); });
