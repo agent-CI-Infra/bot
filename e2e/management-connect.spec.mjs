@@ -261,3 +261,33 @@ test('#641 桌面 1440 打开对话页时不套紧凑布局：标题说明仍在
     await expect(panel.locator('.management-window-title p')).toBeVisible();
   } finally { await f.close(); }
 });
+
+test('#641 离开悬浮面板时不继承短盒紧凑布局：全屏与对话页都清掉 data-compact', async ({ page }) => {
+  test.setTimeout(90000);
+  const f = await managementFixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(f.h.admin + '/#/projects');
+    await signIn(page, f.h, f.password);
+    await page.locator('#management-launcher').click();
+    const panel = page.locator('#management-chat');
+    await expect(panel.getByLabel('当前管理作用域')).toBeVisible({ timeout: 20000 });
+    // Shrink the floating panel below 520px with its own resize grip: that is the state whose tag must not survive.
+    const grip = panel.locator('.management-size-handle');
+    await grip.focus();
+    for (let i = 0; i < 4; i++) await page.keyboard.press('Shift+ArrowDown');
+    await expect.poll(() => panel.evaluate(node => Math.round(node.getBoundingClientRect().height))).toBeLessThan(520);
+    expect(await panel.evaluate(node => node.hasAttribute('data-compact'))).toBe(true);
+    // 全屏 inherits nothing: the wide layout comes back with its title sentence.
+    await panel.getByRole('button', { name: '全屏显示管理助手', exact: true }).click();
+    expect(await panel.evaluate(node => node.hasAttribute('data-compact'))).toBe(false);
+    await expect(panel.locator('.management-window-title p')).toBeVisible();
+    // Back to the short floating box (tag on again), then the conversation page from inside the app.
+    await panel.getByRole('button', { name: '退出管理助手全屏', exact: true }).click();
+    await expect.poll(() => panel.evaluate(node => node.hasAttribute('data-compact'))).toBe(true);
+    await page.evaluate(() => { location.hash = '#/management'; });
+    await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible({ timeout: 20000 });
+    expect(await panel.evaluate(node => node.hasAttribute('data-compact'))).toBe(false);
+    await expect(panel.locator('.management-window-title p')).toBeVisible();
+  } finally { await f.close(); }
+});

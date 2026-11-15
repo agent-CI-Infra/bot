@@ -106,6 +106,9 @@ function syncManagementChat() {
   const updateViewport = () => {
     box.style.setProperty('--management-header-height', (header?.getBoundingClientRect().height || 0) + 'px');
     if (chat.mode === 'floating') fitManagementWindow(chat);
+    // fitManagementWindow only runs for the floating panel, so leaving it has to clear the short-box tag here: the page
+    // and fullscreen views lay themselves out from the viewport and must not inherit it from a shrunk floating box.
+    else box.removeAttribute('data-compact');
   };
   chat.updateViewport = updateViewport;
   const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(updateViewport) : null;
