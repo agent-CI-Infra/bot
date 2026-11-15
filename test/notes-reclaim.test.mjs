@@ -105,3 +105,23 @@ test('a post-commit cleanup failure is audited for projects and conversations al
   assert.ok(h.store.get("SELECT 1 FROM audit WHERE resource_id='chat-1' AND action='channel.history_cleanup_failed'"), 'the conversation files left behind are audited');
   assert.equal((await remove(admin, '101')).status, 200, 'the deletion still reports the committed rows');
 });
+
+test('the conversation directory is not reported as an orphan trajectory directory', async t => {
+  const f = await managerFixture(t), h = await harness(t, f.manager);
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(join(h.store.trajectories.root, 'conversations', 'c1'), { recursive: true });
+  const reclaim = await import('../dist/projects/reclaim.js');
+  assert.deepEqual(reclaim.orphanTrajectoryDirectories(h.store), [], 'per-conversation trajectories are not per-project orphans');
+});
+
+test('a second failed deletion of the same repository is a new intent even when an earlier reclaim answered the first', async t => {
+  const f = await managerFixture(t), h = await harness(t, f.manager);
+  const audit = (action, at) => h.store.run("INSERT INTO audit(id,user_id,repository_id,action,resource_id,created_at) VALUES(?,?,?,?,?,?)",
+    action + at, 'system', '101', action, '101', at);
+  audit('repository.notes_removal_failed', '2026-01-01T00:00:00.000Z');
+  audit('repository.notes_volume_reclaimed', '2026-01-01T00:01:00.000Z');
+  audit('repository.notes_removal_failed', '2026-01-02T00:00:00.000Z');
+  const reclaim = await import('../dist/projects/reclaim.js');
+  assert.deepEqual(reclaim.notesOrphanIntents(h.store), [{ repository_id: '101', first_failed_at: '2026-01-02T00:00:00.000Z' }],
+    'only the failure no later reclaim answers is an open intent');
+});

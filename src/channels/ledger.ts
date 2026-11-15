@@ -238,7 +238,14 @@ export class ChannelLedger {
     });
     // A failure here is recorded by the store's cleanup hook (channel.history_cleanup_failed) instead of escaping after
     // the rows committed, the same way a project deletion records files it could not remove (#771).
-    for (const conversation of removedConversations) this.store.trajectories.remove({conversation_id:conversation});
+    for (const conversation of removedConversations) {
+      try { this.store.trajectories.remove({conversation_id: conversation}); }
+      catch (error) {
+        // Even a store failure here (a file system error inside the cleanup) must not undo the committed rows.
+        console.error('[ledger] history cleanup failed for ' + conversation + ':', error);
+        this.store.audit('system', 'channel.history_cleanup_failed', conversation, null);
+      }
+    }
   }
   private view(row:Row):Json {
     const payload=this.store.secrets.open(row.payload,'channel-message:'+row.chat_id+':'+row.message_id);

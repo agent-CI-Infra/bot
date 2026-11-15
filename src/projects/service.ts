@@ -84,18 +84,35 @@ export class ProjectService {
       try { await step; } finally { this.working.delete(repo.id); }
     }
   }
-  /** True while a committed deletion of this repository never got its notes volume removed (#771). */
-  private notesUnreclaimed(id: string): boolean {
-    return !!this.store.get(`SELECT 1 FROM audit f WHERE f.repository_id=? AND f.action='repository.notes_removal_failed'
-      AND NOT EXISTS (SELECT 1 FROM audit r WHERE r.repository_id=f.repository_id AND r.action='repository.notes_volume_reclaimed')`, id);
+  /**
+   * When the latest committed deletion of this repository that still owes a notes removal happened (#771), or null.
+   * The reclaim audit only answers failures it is newer than: a repository connected, deleted and failed again has a
+   * new intent even though an earlier reclaim answered the earlier one.
+   */
+  private notesUnreclaimedAt(id: string): string | null {
+    const row = this.store.get(`SELECT max(f.created_at) t FROM audit f WHERE f.repository_id=? AND f.action='repository.notes_removal_failed'
+      AND NOT EXISTS (SELECT 1 FROM audit r WHERE r.repository_id=f.repository_id AND r.action='repository.notes_volume_reclaimed' AND r.created_at >= f.created_at)`, id);
+    return row?.t ? String(row.t) : null;
   }
   private async reconcileProject(repo: Row): Promise<void> {
     try {
       // The repository is connected again while the notes volume of the project it used to be is still there: the old
       // notes must never be readable by the new project, so the volume goes before anything can start against it (#771).
-      if (this.notesUnreclaimed(repo.id)) {
-        await this.reclaimNotes(repo.id);
-        this.store.audit('system', 'repository.notes_volume_reclaimed', repo.id, repo.id);
+      const failedAt = this.notesUnreclaimedAt(repo.id);
+      if (failedAt) {
+        const listed = await this.manager.call('GET', '/v1/notes-volumes').catch(() => null);
+        const volumes = (Array.isArray(listed) ? listed : Array.isArray((listed as any)?.volumes) ? (listed as any).volumes : null) as
+          { repository_id?: unknown; created_at?: unknown }[] | null;
+        // A manager that cannot list its volumes is asked again on the next pass; deleting blind is what lost real notes.
+        if (volumes) {
+          const volume = volumes.find(row => String(row.repository_id) === repo.id);
+          // A volume created after the failure belongs to the project connected since: the notes of the deleted project
+          // are already gone, so only the intent closes. An old volume, or none at all, is the residue that must go.
+          const stale = !volume || !volume.created_at || !Number.isFinite(Date.parse(String(volume.created_at))) ||
+            Date.parse(String(volume.created_at)) <= Date.parse(failedAt);
+          if (stale) await this.reclaimNotes(repo.id);
+          this.store.audit('system', 'repository.notes_volume_reclaimed', repo.id, repo.id);
+        }
       }
       let state = await this.manager.call('GET', '/v1/projects/' + repo.id);
       if (this.removing.has(repo.id)) return;

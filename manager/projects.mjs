@@ -562,9 +562,6 @@ export class Projects {
         this.db.prepare('DELETE FROM operations WHERE repository_id=?').run(repo);
         this.db.prepare('DELETE FROM projects WHERE repository_id=?').run(repo);
       }
-      // A repository connected again must not read the notes of the project this deployment used to have: the previous
-      // volume can outlive a deletion that could not remove it, so it goes before the new project exists (#771, #774).
-      await this.reclaimNotes(repo);
       this.db.prepare("INSERT INTO projects(repository_id,generation,state,desired,error,started_at) VALUES(?,1,'provisioning','ready',NULL,NULL)").run(repo);
       try { return await this.provision(repo); }
       catch (error) { logFailure(`project ${repo} first provision failed`, error); this.update(repo, 'failed', 'ready', error instanceof ManagerError ? error.message : 'provision_failed'); throw error; }

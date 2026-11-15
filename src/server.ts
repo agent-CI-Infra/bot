@@ -76,6 +76,8 @@ interface Options { store: Store; staticDirectory: string; secureCookies?: boole
   notesOrphanThreshold?: number;
   /** Age at which an unreclaimed notes volume fails readiness, and the warning tier below it, in milliseconds. */
   notesOrphanMaxAgeMs?: number; notesOrphanWarnAgeMs?: number;
+  /** The long-lived reclaimer started with the control plane; readiness reads its counters, never a fresh instance (#771). */
+  notesReclaimer?: NotesReclaimer;
   channels?: ChannelOptions; onChannels?: (service: ChannelService) => void;
   schedules?: { clock?: () => number; automatic?: boolean }; onSchedules?: (scheduler: Scheduler) => void; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
@@ -95,7 +97,9 @@ function respond(res: ServerResponse, status: number, value: Json): void {
 async function notesReport(store: Store, options: Options): Promise<ReclaimReport> {
   const threshold = options.notesOrphanThreshold ?? 10, maxAgeMs = options.notesOrphanMaxAgeMs ?? 7 * 24 * 3600_000;
   const warnAgeMs = options.notesOrphanWarnAgeMs ?? 24 * 3600_000;
-  if (options.projects) return await new NotesReclaimer(store, options.projects).report(threshold, maxAgeMs, warnAgeMs);
+  // One instance per process: a reclaimer created per readiness call would report retrying/abandoned as zero forever.
+  const reclaimer = options.notesReclaimer ?? (options.projects ? new NotesReclaimer(store, options.projects) : null);
+  if (reclaimer) return await reclaimer.report(threshold, maxAgeMs, warnAgeMs);
   const intents = notesOrphanIntents(store), ages = intents.map(intent => Date.parse(intent.first_failed_at)).filter(Number.isFinite);
   const oldest = ages.length ? Math.max(0, Math.round((Date.now() - Math.min(...ages)) / 1000)) : null;
   return { orphans: intents.length, threshold, oldest_seconds: oldest, max_age_seconds: Math.round(maxAgeMs / 1000), warn_age_seconds: Math.round(warnAgeMs / 1000),
