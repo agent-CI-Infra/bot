@@ -287,6 +287,36 @@ test('removing a project removes the conversation turn files under conversations
   assert.equal(existsSync(conversation), false, 'the project deletion takes its conversation turn files with it');
 });
 
+test('a project deletion keeps the conversation turns of the projects that still share the conversation', t => {
+  const { directory, path } = database(t), store = new Store(path, key); t.after(() => store.close());
+  // One chat can hold a grant per project, so one conversation directory holds the turns of several projects (#787).
+  const mine = store.trajectories.scopeOf({ id: 'turn-a', conversation_id: 'chat-1', repository_id: '101' });
+  const theirs = store.trajectories.scopeOf({ id: 'turn-b', conversation_id: 'chat-1', repository_id: '102' });
+  store.trajectories.append(mine, 'log', 'l', { text: 'a' }); store.trajectories.close(mine.key);
+  store.trajectories.append(theirs, 'log', 'l', { text: 'b' }); store.trajectories.close(theirs.key);
+  const conversation = join(directory, 'trajectories', 'conversations', 'chat-1');
+  assert.ok(existsSync(join(conversation, 'turn-a.jsonl')) && existsSync(join(conversation, 'turn-b.jsonl')), 'both projects write into the same conversation directory');
+  store.trajectories.remove({ repository_id: '101' });
+  assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 0);
+  assert.equal(existsSync(join(conversation, 'turn-a.jsonl')), false, 'the deleted project takes its own turn file');
+  assert.ok(existsSync(join(conversation, 'turn-b.jsonl')), "another project's turn file stays");
+  assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='102'").n, 1, 'and so does its entry');
+  assert.equal(store.trajectories.sweepOrphans(), 0, 'so the sweep has nothing to collect');
+  assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='102'").n, 1, 'and the entry survives the sweep');
+});
+
+test('a failure before the entries are deleted still lets the cleanup delete them', t => {
+  const { path } = database(t), store = new Store(path, key); t.after(() => store.close());
+  const scope = runScope('101', 't', 'run-f'); store.trajectories.append(scope, 'log', 'l', {}); store.trajectories.close(scope.key);
+  const failures = [];
+  store.trajectories.onCleanupFailure = (where, error) => failures.push([where.repository_id ?? where.conversation_id, error.message]);
+  // #787's first failure injection: the tool-result rows cannot be removed, which happens before the entry rows.
+  store.trajectories.results.remove = () => { throw new Error('results locked'); };
+  store.trajectories.remove({ repository_id: '101' });
+  assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 0, 'the entries are deleted although the results removal failed');
+  assert.deepEqual(failures.map(failure => failure[0]), ['101'], 'the failure is recorded through the cleanup hook');
+});
+
 test('trajectory lookups use their indexes', t => {
   const store = new Store(':memory:', key); t.after(() => store.close());
   const plan = sql => store.all('EXPLAIN QUERY PLAN ' + sql).map(row => row.detail).join(' | ');
