@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../dist/storage/database.js';
@@ -232,6 +232,30 @@ test('removing a project deletes its trajectory files, entries and totals', t =>
   assert.equal(store.get("SELECT count(*) n FROM trajectory_usage WHERE repository_id='101'").n, 0, 'no totals of the removed project are left');
   assert.throws(() => statSync(join(directory, 'trajectories', '101')));
   assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='102'").n, 1);
+});
+
+test('a cleanup whose file cannot be removed still deletes the entry, and an entry whose file is gone is swept', t => {
+  const { directory, path } = database(t), store = new Store(path, key); t.after(() => store.close());
+  // Rows are committed before the files go, so a file this process cannot remove cannot keep its entry alive.
+  const scope = runScope('101', 't', 'run-x'); const ref = store.trajectories.append(scope, 'log', 'l', { text: 'x' });
+  store.trajectories.close(scope.key);
+  const entry = fileOf(store, ref), file = join(directory, 'trajectories', entry.path);
+  rmSync(file); mkdirSync(file); writeFileSync(join(file, 'left'), 'x');
+  store.trajectories.remove({ repository_id: '101' });
+  assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 0, 'the entry is gone even though its path was a directory');
+  assert.equal(store.get("SELECT count(*) n FROM trajectory_usage WHERE repository_id='101'").n, 0, 'its totals are gone too');
+  // The opposite order of a crash, a file removed behind the store's back, is swept: the entry goes and the totals are
+  // taken back, while another project's entries stay.
+  const kept = store.trajectories.append(runScope('102', 'u', 'run-k'), 'log', 'l', { text: 'y' });
+  store.trajectories.close(runScope('102', 'u', 'run-k').key);
+  const lostScope = runScope('103', 'v', 'run-l'), lost = store.trajectories.append(lostScope, 'log', 'l', { text: 'z' });
+  store.trajectories.close(lostScope.key);
+  rmSync(join(directory, 'trajectories', fileOf(store, lost).path));
+  assert.equal(store.trajectories.sweepOrphans(), 1);
+  assert.equal(store.get('SELECT count(*) n FROM trajectory_files WHERE id=?', lost.split(':')[0]).n, 0, 'the orphaned entry is deleted');
+  assert.equal(store.get("SELECT count FROM trajectory_usage WHERE repository_id='103' AND kind='files'").count, 0, 'its totals are taken back');
+  assert.equal(store.get('SELECT count(*) n FROM trajectory_files WHERE id=?', kept.split(':')[0]).n, 1, 'other entries are untouched');
+  assert.equal(store.trajectories.sweepOrphans(), 0, 'a second pass finds nothing');
 });
 
 test('trajectory lookups use their indexes', t => {
