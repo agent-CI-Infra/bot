@@ -6,6 +6,9 @@ import { stop } from '../agent/common.js';
 
 /** A progress checkpoint retains unpublished code/artifacts without pretending they passed acceptance. */
 export async function checkpoint(store:Store,task:Row,workspace:Workspace){
+  // A task that holds no worktree yet (#769) has changed nothing to save: finalizing would bind one only to find it empty,
+  // for example when its Manager stops before delegating.
+  const plan=workspace.plannedWorktree?.();if(plan&&plan.state!=='bound')return null;
   const input=JSON.parse(store.get('SELECT input FROM tasks WHERE id=?',task.id)!.input),records=new TaskRecords(store);
   const revision=records.get(task.id).revision;
   const snapshot=await workspace.artifact('checkpoint:'+randomId());
