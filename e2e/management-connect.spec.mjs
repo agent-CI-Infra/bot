@@ -312,3 +312,29 @@ test('#641 1440×600 直接打开对话页：浮窗夹到 <520 也不把页面�
     expect(await panel.locator('textarea').evaluate(node => node.getBoundingClientRect().height)).toBeGreaterThan(60);
   } finally { await f.close(); }
 });
+
+test('#641 768×432 直接打开对话页：页面视图按自身盒高进紧凑布局，发送键留在框内', async ({ page }) => {
+  test.setTimeout(90000);
+  const f = await managementFixture();
+  try {
+    // 250% zoom on a laptop: the page view's own box is 368px tall, so the compact rules have to follow the box, not the mode.
+    await page.setViewportSize({ width: 768, height: 432 });
+    await page.goto(f.h.admin + '/#/management');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible({ timeout: 20000 });
+    const panel = page.locator('#management-chat');
+    expect(await panel.evaluate(node => node.hasAttribute('data-compact'))).toBe(true);
+    const m = await panel.evaluate(node => {
+      const send = [...node.querySelectorAll('button')].find(b => b.textContent.trim() === '发送');
+      const box = node.getBoundingClientRect(), s = send.getBoundingClientRect();
+      const at = document.elementFromPoint(s.left + s.width / 2, s.top + s.height / 2);
+      return { winBottom: box.bottom, winHeight: box.height, sendBottom: s.bottom, sendHeight: s.height,
+        inside: !!(at && send.contains(at)), hit: at ? at.tagName : null };
+    });
+    expect(m.sendBottom).toBeLessThanOrEqual(m.winBottom + 0.5);
+    expect(m.sendHeight).toBeGreaterThanOrEqual(30);
+    expect(m.inside).toBe(true);
+  } finally { await f.close(); }
+});

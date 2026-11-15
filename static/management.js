@@ -106,9 +106,10 @@ function syncManagementChat() {
   const updateViewport = () => {
     box.style.setProperty('--management-header-height', (header?.getBoundingClientRect().height || 0) + 'px');
     if (chat.mode === 'floating') fitManagementWindow(chat);
-    // fitManagementWindow only runs for the floating panel, so leaving it has to clear the short-box tag here: the page
-    // and fullscreen views lay themselves out from the viewport and must not inherit it from a shrunk floating box.
-    else box.removeAttribute('data-compact');
+    // The tag follows the box's own height in every mode: a page/fullscreen view that is itself short (768x432 at 250%
+    // zoom) needs the compact rules just as the floating panel does, and a tall page view must not inherit the tag from a
+    // shrunk floating box. Measured here, after setManagementPresentation removed the inline size.
+    else box.toggleAttribute('data-compact', box.getBoundingClientRect().height < 520);
   };
   chat.updateViewport = updateViewport;
   const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(updateViewport) : null;
@@ -442,9 +443,10 @@ async function openManagementChat(projectId = null, { mode = 'floating' } = {}) 
   const version = ++chat.openVersion;
   setManagementPresentation(chat, mode);
   chat.window.hidden = false; chat.launcher.hidden = true; chat.launcher.setAttribute('aria-expanded', 'true'); chat.unread = false;
-  // The presentation was set while the window was still hidden, so the bar it takes off screen was still measured: fit
-  // again now that the window is visible (#641 F5).
-  if (mode === 'floating') chat.updateViewport();
+  // The presentation was set while the window was still hidden, so a hidden box measured 0: the bar it takes off screen
+  // was still in the layout, and a page view's own height was not readable yet. Measure again now that it is visible —
+  // the floating panel re-fits (#641 F5), and a page/fullscreen view settles its own compact tag.
+  chat.updateViewport();
   const focusAtOpen = document.activeElement;
   const activity = (active, received = false) => {
     if (managementChat !== chat) return;
