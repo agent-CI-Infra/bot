@@ -603,8 +603,10 @@ function applyStaticTranslations() {
     if (attr) el.setAttribute(attr, t(key));
     else el.textContent = t(key);
   });
-  // #737: the page title is not the chrome name - static/app/page-title.js derives it from the page the reader is
-  // on and recomputes it on the same language change (including a click on the language already in effect).
+  // #737: on the sign-in/setup screen there is no page to name, so the title is the translated chrome name; once a
+  // console page is rendered, static/app/page-title.js owns the title (it derives the page name and recomputes it on
+  // the same language change), and writing the chrome name here would erase the page name - the old defect.
+  if (typeof me === 'undefined' || !me) document.title = t('meta.title');
   const group = document.getElementById('locale-switch');
   if (group) {
     group.setAttribute('aria-label', t('chrome.language'));
