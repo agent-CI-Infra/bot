@@ -239,7 +239,8 @@ test('#769 without a role team the review agent chooses its workspace: no_worksp
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'fixture-model-key', model_name: 'fixture' })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, model_id: model.id });
   await h.hook(a.path, a.secret, 'issue-1', { repository: { id: 101 }, action: 'opened', issue: { number: 1, title: 'Release', body: 'How do releases work?' } });
-  engine.tick(); await Promise.all(engine.active.values());
+  // This fixture exercises the historical route without a role team; current projects use Manager by default.
+  pinLegacyTaskConfiguration(h.store); engine.tick(); await Promise.all(engine.active.values());
   const task = h.store.get('SELECT * FROM tasks');
   assert.equal(task.status, 'succeeded', task.error_code);
   // The agent was offered the four tools, as control-plane tools, with the rule in its system prompt and its commit in context.
