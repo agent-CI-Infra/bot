@@ -153,6 +153,12 @@ export class ProjectService {
    * keeps its own project row, so the deletion still works; nothing is saved back, the project no longer exists here for
    * the save to refer to. The caller records a failure instead of reporting the committed deletion as failed.
    */
+  /** Every notes volume the manager owns, including ones no project row here refers to any more (#771). */
+  async notesVolumes(): Promise<{ name: string; repository_id: string; created_at: string | null }[]> {
+    return await this.manager.call('GET', '/v1/notes-volumes') as { name: string; repository_id: string; created_at: string | null }[];
+  }
+  /** Idempotent, name-based reclaim: it works after the project row is gone, which a retried deletion needs (#771). */
+  async reclaimNotes(id: string, waitMs = 120_000): Promise<void> { await this.manager.call('POST', `/v1/projects/${id}/notes/reclaim`, {}, waitMs); }
   async removeNotes(id: string, waitMs = 120_000): Promise<void> {
     const state = await this.manager.call('GET', '/v1/projects/' + id);
     // Without the manager's state the volume cannot be identified, so the caller's audit names a removal that did not

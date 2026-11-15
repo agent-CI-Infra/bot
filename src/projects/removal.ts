@@ -50,9 +50,10 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
     const table = /^(?:DELETE FROM|UPDATE) (\w+)/.exec(sql)![1]!;
     if (store.hasTable(table)) store.run(sql, ...Array<string>(count).fill(id));
   }
-  // The project's trajectory files (its runs' model requests, tool calls and logs) go with the rows that referred to them.
-  // The real deletion leaves this to the caller after the transaction commits; only then are the files removed.
-  if (options.files !== false) store.trajectories.remove({ repository_id: id });
+  // The project's trajectory files (its runs' model requests, tool calls and logs) are removed only when the caller asks
+  // for it, after the transaction committed: the default keeps the files, so a dry run or an interrupted caller cannot
+  // destroy evidence the rows still point at (#771).
+  if (options.files === true) store.trajectories.remove({ repository_id: id });
 }
 
 // Both project-removal endpoints share environment and record cleanup. Off-installation removal first checks GitHub.

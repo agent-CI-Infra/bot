@@ -4,7 +4,7 @@ import { registerKnowledge } from './memory/management.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readStaticAsset } from './console/modules.js';
 import { type Store } from './storage/database.js';
-import { actor, publicActor, session, sessionToken } from './app/auth.js';
+import { actor, publicActor, session, sessionToken, superAdmin } from './app/auth.js';
 import { management } from './app/management.js';
 import { models } from './app/models.js';
 import { queries } from './app/queries.js';
@@ -31,6 +31,7 @@ import { activeCliVersions } from './roles/role-run.js';
 import { StorageReport } from './app/storage.js';
 import { serviceRolesApi } from './service-roles/api.js';
 import { ProjectRemoval } from './projects/removal.js';
+import { NotesReclaimer, notesOrphanIntents, orphanTrajectoryDirectories, orphanNotesVolumes, type ReclaimReport } from './projects/reclaim.js';
 import { ReleaseService } from './releases/service.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
 
@@ -71,6 +72,10 @@ interface Options { store: Store; staticDirectory: string; secureCookies?: boole
   stalls?: StallMonitor;
   // The storage page's report; main.ts starts its background refresh, otherwise the first view refreshes it.
   storage?: StorageReport;
+  /** Orphaned notes volumes `/readyz` tolerates before it reports the deployment unhealthy (#771). */
+  notesOrphanThreshold?: number;
+  /** Age at which an unreclaimed notes volume fails readiness, and the warning tier below it, in milliseconds. */
+  notesOrphanMaxAgeMs?: number; notesOrphanWarnAgeMs?: number;
   channels?: ChannelOptions; onChannels?: (service: ChannelService) => void;
   schedules?: { clock?: () => number; automatic?: boolean }; onSchedules?: (scheduler: Scheduler) => void; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
@@ -84,6 +89,18 @@ async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffe
 }
 function respond(res: ServerResponse, status: number, value: Json): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value));
+}
+// The notes-volume half of readiness: the volumes the manager still owns for repositories this deployment no longer has,
+// with their count, their oldest age and the tiers that decide when the deployment reports itself unhealthy (#771).
+async function notesReport(store: Store, options: Options): Promise<ReclaimReport> {
+  const threshold = options.notesOrphanThreshold ?? 10, maxAgeMs = options.notesOrphanMaxAgeMs ?? 7 * 24 * 3600_000;
+  const warnAgeMs = options.notesOrphanWarnAgeMs ?? 24 * 3600_000;
+  if (options.projects) return await new NotesReclaimer(store, options.projects).report(threshold, maxAgeMs, warnAgeMs);
+  const intents = notesOrphanIntents(store), ages = intents.map(intent => Date.parse(intent.first_failed_at)).filter(Number.isFinite);
+  const oldest = ages.length ? Math.max(0, Math.round((Date.now() - Math.min(...ages)) / 1000)) : null;
+  return { orphans: intents.length, threshold, oldest_seconds: oldest, max_age_seconds: Math.round(maxAgeMs / 1000), warn_age_seconds: Math.round(warnAgeMs / 1000),
+    retrying: 0, abandoned: 0, trajectory_orphans: orphanTrajectoryDirectories(store).length,
+    over_threshold: intents.length > threshold, over_age: oldest !== null && oldest * 1000 > maxAgeMs };
 }
 // Deployment-level trust for the password-login limit, kept out of the shared options object: only the login route
 // reads it, and it never travels with requests into the rest of the control plane.
@@ -160,6 +177,13 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       if (await options.boards.serve(req, res, url)) return;
     }
     if (req.method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
+    // Readiness carries the data condition liveness must not (#771): a deletion answers 200 once its rows commit and
+    // reclaims the notes volume afterwards (#758), so a volume left behind is a promise to watch, not to restart for.
+    if (req.method === 'GET' && path === '/readyz') {
+      store.get('SELECT 1');
+      const report = await notesReport(store, options);
+      respond(res, report.over_threshold || report.over_age ? 503 : 200, { ok: !report.over_threshold && !report.over_age, notes_volumes: report }); return;
+    }
     const feishu = /^\/hooks\/feishu\/([a-f0-9]{48})$/.exec(path);
     if (req.method === 'POST' && feishu) {
       const raw = await body(req, 2 * 1024 * 1024); if (!raw.complete) fail(413, 'payload_too_large');
@@ -376,6 +400,13 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       // Binding proves the platform session; repository grants and GitHub availability are unrelated to association.
       await channels.bindings.authenticate(text(input.challenge), sessionToken(req));
       respond(res, 201, { state: 'pending_confirmation' }); return;
+    }
+    if (path === '/api/maintenance/orphans' && method === 'GET') {
+      superAdmin(user);
+      // The listing names what cannot be reclaimed yet, so an operator sees the volume, its repository and its age.
+      const report = await notesReport(store, options);
+      respond(res, 200, { notes_volumes: options.projects ? await orphanNotesVolumes(store, options.projects)
+        : notesOrphanIntents(store).map(intent => ({ ...intent, name: '' })), trajectories: orphanTrajectoryDirectories(store), report }); return;
     }
     if (path === '/api/status' && method === 'GET') {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;

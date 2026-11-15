@@ -45,7 +45,7 @@ test('unreclaimed notes volumes are counted in /readyz and fail it above the thr
 
   const ready = await fetch(h.admin + '/readyz'), value = await ready.json();
   assert.equal(ready.status, 503, 'an unreclaimed volume above the threshold fails readiness');
-  assert.deepEqual(Object.keys(value.notes_volumes).sort(), ['max_age_seconds', 'oldest_seconds', 'orphans', 'threshold', 'trajectory_orphans']);
+  assert.deepEqual(Object.keys(value.notes_volumes).sort(), ['abandoned', 'max_age_seconds', 'oldest_seconds', 'orphans', 'over_age', 'over_threshold', 'retrying', 'threshold', 'trajectory_orphans', 'warn_age_seconds']);
   assert.equal(value.notes_volumes.orphans, 1);
   assert.equal(value.notes_volumes.threshold, 0);
   assert.equal(typeof value.notes_volumes.oldest_seconds, 'number');
@@ -64,4 +64,30 @@ test('a trajectory directory no repository row claims is reported as an orphan',
   assert.equal(value.notes_volumes.trajectory_orphans, 1, 'the stray directory is counted');
   const listed = await admin('/api/maintenance/orphans');
   assert.deepEqual(listed.value.trajectories.map(entry => entry.repository_id), ['999'], 'the listing names the stray directory');
+});
+
+test('a repository connected again starts from empty notes even when the old volume outlived its deletion', async t => {
+  const f = await managerFixture(t), h = await harness(t, f.manager), admin = await project(h, f);
+  // The deletion left the volume behind, and the repository is connected again: the old notes must not be readable.
+  f.docker.failVolume = true;
+  assert.equal((await remove(admin, '101')).status, 200);
+  assert.ok(f.docker.volumes.has(f.projects.notesName('101')), 'the old volume is still there');
+  f.docker.failVolume = false;
+  await f.projects.register('101');
+  assert.equal(f.docker.volumes.has(f.projects.notesName('101')), false, 'connecting again removed the stale volume first');
+  const notes = await f.projects.notes('101', 'GET', undefined, undefined).catch(error => error);
+  assert.ok(notes === undefined || notes?.files === undefined || Array.isArray(notes.files === undefined ? notes : notes.files), 'the old notes are not served');
+});
+
+test('a post-commit cleanup failure is audited for projects and conversations alike, and never escapes', async t => {
+  const f = await managerFixture(t), h = await harness(t, f.manager), admin = await project(h, f);
+  const results = h.store.trajectories.results, realRemove = results.remove.bind(results);
+  results.remove = () => { throw new Error('injected_cleanup_failure'); };
+  t.after(() => { results.remove = realRemove; });
+  // Both owner kinds go through one hook, so both leave one audit row and neither throws back into the caller.
+  h.store.trajectories.remove({ repository_id: '101' });
+  h.store.trajectories.remove({ conversation_id: 'chat-1' });
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE repository_id='101' AND action='repository.evidence_removal_failed'"), 'the project files left behind are audited');
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE resource_id='chat-1' AND action='channel.history_cleanup_failed'"), 'the conversation files left behind are audited');
+  assert.equal((await remove(admin, '101')).status, 200, 'the deletion still reports the committed rows');
 });

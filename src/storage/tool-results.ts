@@ -69,6 +69,8 @@ export class ToolResultFiles {
   remove(column: 'repository_id' | 'conversation_id', value: string) {
     const rows = this.db.prepare(`SELECT file FROM tool_result_files WHERE ${column}=?`).all(value) as { file: string }[];
     // Rows first: a failure between the two steps leaves an unreferenced file to sweep, never a row whose content is gone.
+    // A file that cannot be removed throws once the rows are gone; the caller (Trajectories) records it through the
+    // store's cleanup hook and keeps cleaning the rest, so no post-commit cleanup failure escapes as a request error.
     this.db.prepare(`DELETE FROM tool_result_files WHERE ${column}=?`).run(value);
     for (const row of rows) rmSync(this.path(row.file), { force: true });
   }

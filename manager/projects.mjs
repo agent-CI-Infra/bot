@@ -216,6 +216,22 @@ export class Projects {
   }
   notesName(repo) { return `dbot-${this.deployment}-${repo}-notes`; }
   notesLabels(repo) { return { 'department.bot.deployment': this.deployment, 'department.bot.repository': repo, 'department.bot.kind': 'notes' }; }
+  // Every notes volume this deployment owns, whether or not a project row still refers to it: the control plane uses
+  // this to find volumes a committed deletion left behind and to clear stale notes before a repository is connected again.
+  async notesVolumes() {
+    const filters = JSON.stringify({ label: [`department.bot.deployment=${this.deployment}`, 'department.bot.kind=notes'] });
+    const listed = await this.docker.request('GET', '/volumes?filters=' + encodeURIComponent(filters));
+    return (listed?.Volumes ?? []).map(volume => ({ name: String(volume.Name), repository_id: String(volume.Labels?.['department.bot.repository'] ?? ''), created_at: volume.CreatedAt ?? null }));
+  }
+  // Idempotent name-based reclaim: it never needs the project row, so it also works once a project is gone here. It is
+  // how a retried deletion finishes, and how a reconnected repository starts from empty notes instead of old ones.
+  async reclaimNotes(repo) {
+    const volume = await this.docker.request('GET', '/volumes/' + this.notesName(repo));
+    if (volume && Object.entries(this.notesLabels(repo)).some(([key, value]) => volume.Labels?.[key] !== value)) throw new ManagerError('resource_ownership_mismatch', 403);
+    if (volume) await this.docker.request('DELETE', '/volumes/' + this.notesName(repo));
+    await rm(this.notesRoot + '/' + repo, { recursive: true, force: true });
+    return { reclaimed: true, repository_id: repo, volume: !!volume };
+  }
   async notesVolume(repo, create = true) {
     const name = this.notesName(repo), labels = this.notesLabels(repo);
     let volume = await this.docker.request('GET', '/volumes/' + name);
@@ -534,8 +550,19 @@ export class Projects {
   register(repo) {
     this.validate(repo);
     return this.lock(repo, async () => {
-      if (this.get(repo)) return this.get(repo);
+      const existing = this.get(repo);
+      if (existing && existing.state !== 'deleted') return existing;
+      // A deletion that committed but could not remove its notes volume still owes that cleanup (#774).
       await this.reclaimStaleNotes(repo);
+      if (existing) {
+        // The project was deleted but its row stayed: connecting the repository again starts a new project, not the old one.
+        this.db.prepare('DELETE FROM resources WHERE repository_id=?').run(repo);
+        this.db.prepare('DELETE FROM operations WHERE repository_id=?').run(repo);
+        this.db.prepare('DELETE FROM projects WHERE repository_id=?').run(repo);
+      }
+      // A repository connected again must not read the notes of the project this deployment used to have: the previous
+      // volume can outlive a deletion that could not remove it, so it goes before the new project exists (#771, #774).
+      await this.reclaimNotes(repo);
       this.db.prepare("INSERT INTO projects(repository_id,generation,state,desired,error,started_at) VALUES(?,1,'provisioning','ready',NULL,NULL)").run(repo);
       try { return await this.provision(repo); }
       catch (error) { logFailure(`project ${repo} first provision failed`, error); this.update(repo, 'failed', 'ready', error instanceof ManagerError ? error.message : 'provision_failed'); throw error; }

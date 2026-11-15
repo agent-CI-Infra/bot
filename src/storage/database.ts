@@ -69,6 +69,13 @@ export class Store {
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.secrets = new SecretBox(key);
     this.trajectories = new Trajectories(this.db, path === ':memory:' ? null : join(dirname(path), 'trajectories'));
+    // One place turns a post-commit cleanup failure into an audit row, whether the files belonged to a project or a
+    // conversation, and whether the removal came from a deletion, a retention sweep or a retried reclaim (#771).
+    this.trajectories.onCleanupFailure = (where, error) => {
+      const repository = where.repository_id ?? null, resource = where.repository_id ?? where.conversation_id ?? '';
+      this.audit('system', repository ? 'repository.evidence_removal_failed' : 'channel.history_cleanup_failed', resource, repository);
+      console.error('[cleanup] files of ' + resource + ' left behind:', error);
+    };
     this.disk = path === ':memory:' ? null : new DiskGuard(dirname(path));
     this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=${walSizeLimit};`);
     // A new schema needs one durable commit, not a disk sync for each CREATE/ALTER. Existing upgrades can toggle
