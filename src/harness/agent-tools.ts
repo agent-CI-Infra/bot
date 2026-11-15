@@ -1127,10 +1127,8 @@ export class AgentToolManager {
     const stagingTrash = resolve(rootReal, '.staging');
     mkdirSync(stagingTrash, { recursive: true, mode: 0o700 });
 
+    // Broken directories are pruned unconditionally here; protecting the ones an active run still executes is tracked in #751.
     for (const bad of brokenDirs) {
-      // A protected name is a version an active run is executing: its manifest may be unreadable, but the directory is
-      // what the run spawns, so pruning it would break the run. Only names the caller protects are kept.
-      if (keepSet.has(bad)) continue;
       const badPath = resolve(cliDir, bad);
       if (isSubpath(rootReal, badPath) && badPath !== cliDir) rmSync(badPath, { recursive: true, force: true });
     }

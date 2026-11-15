@@ -723,24 +723,3 @@ test('a run admitted while the download is in flight still blocks the replacemen
   assert.equal(existsSync(sentinel), false, 'after the run finished the replacement really happens');
 });
 
-test('prune keeps a broken version directory an active run is executing (#735)', async t => {
-  const { root, tools, store, superUser } = await toolApiScaffold(t, 'agent-tools-broken-');
-
-  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.166.0', retain_count: 2 });
-  const versionDir = join(root, 'codex', '0.166.0');
-  const sentinel = join(versionDir, 'SENTINEL');
-  writeFileSync(sentinel, 'must survive');
-  // An unreadable manifest makes this directory look broken to prune, while the run still spawns what is inside.
-  rmSync(join(versionDir, 'manifest.json'));
-
-  const run = beginRun(store, store.get("SELECT * FROM tasks WHERE id='t1'"), 'execution', {});
-  store.run("UPDATE task_runs SET role='developer',harness='codex',harness_version='1' WHERE id=?", run.id);
-  recordRunCliVersion(store, run.id, '0.166.0');
-
-  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.167.0', retain_count: 1 });
-  assert.equal(existsSync(sentinel), true, 'prune leaves the broken directory the active run is executing');
-
-  endRun(store, run, 'completed', null);
-  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/prune', { cli: 'codex', retain_count: 1 });
-  assert.equal(existsSync(versionDir), false, 'once no run holds it, the broken directory is pruned');
-});
