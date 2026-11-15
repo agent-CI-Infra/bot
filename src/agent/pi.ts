@@ -37,6 +37,8 @@ export interface PiSession<T> {
   createPullRequest?: (id: string, args: any) => Promise<any>;
   /** capabilities.github.publication: only 'pull_request' may answer create_pull_request. */
   publication?: string;
+  /** Binds the task's worktree when a file tool or command of the session finds none (#769): the choice made, or the system's. */
+  ensureWorkspace?: () => Promise<{ error?: string; message?: string } & Record<string, unknown>>;
   /** Control-plane tools named in config.control_tools. The runner waits for them without a deadline. */
   control?: (name: string, args: any, meta?: { id: string; token?: unknown }) => Promise<{ result: any; finish?: boolean }>;
   /** The session ended: turn the runner's final state, and a publication answered during it, into the run result. */
@@ -203,6 +205,12 @@ export function piAdapter<T>(session: PiSession<T>) {
               if (kind === 'pull_request' || (name === 'create_pull_request' && !(config.control_tools || []).includes(name)))
                 stop('model_request_invalid', undefined, 'create_pull_request 请求 ID 格式无效，应为 48 位十六进制字符。');
               stop('model_request_invalid');
+            }
+            // Not a model tool: the runner asks for the task's worktree before a file tool or command can run (#769).
+            if (kind === 'workspace') {
+              const reply = session.ensureWorkspace ? await abortable(session.ensureWorkspace()) : { error: 'workspace_unavailable' };
+              await deliverMailboxToolReply(redactor.clean(reply), id, chunk => workspace.deliver(chunk), '发送工作区结果时中断。');
+              return;
             }
             if (kind === 'control' || (config.control_tools || []).includes(name)) {
               const allowed = session.control && session.offered(name) && (config.control_tools || []).includes(name) && (!finalizing || finishingNames.has(name));

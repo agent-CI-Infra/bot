@@ -67,7 +67,8 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
   let verification=workspace;
   try {
   const sourceInput=JSON.parse(task.input||'{}');
-  if(!snapshot?.local_sha&&task.workspace_id&&sourceInput.snapshot_tree){
+  // A report whose task chose to work without repository files (#769) has no source checkout to verify against.
+  if(!snapshot?.local_sha&&task.workspace_id&&sourceInput.snapshot_tree&&workspace.plannedWorktree?.()?.state!=='none'){
     const source=await workspace.call(`accept:${evaluationId}:source`,{type:'workspace_source',tree_sha:sourceInput.snapshot_tree});
     if(source.error)return stop('acceptance_snapshot_unavailable','waiting_environment','无法确认检视报告所依据的原始源码快照。');
     snapshot=source;sourceTree=source.tree_sha;

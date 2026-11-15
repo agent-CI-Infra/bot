@@ -19,6 +19,12 @@ import { useWorkspace, workspaceRemoving } from './workspace-cleanup.js';
  * A binding holds until its task takes another workspace (a new attempt) or ends; one whose task ended is released when
  * found. Each binding also adds a task_workspaces row for the worktree, so the scheduled cleanup keeps it while any task
  * that used it needs it, by the same rules as task directories (src/projects/workspace-cleanup.ts).
+ *
+ * A task that prepares through the computer's git store gets no worktree right away: `worktree_plans` records the commit it
+ * works on and the mode the system would give it. The task's controller, or its agent when the project has no role team,
+ * may choose (list_workspaces, use_workspace, create_workspace, no_workspace; src/agent/workspace-tools.ts); when the task
+ * first needs its files without a choice, the system's choice above applies. A plan is `planned` until then, `bound` once
+ * the task holds a worktree, `none` when it chose to work without one.
  */
 export type WorktreeMode = 'read' | 'write';
 const ended = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'superseded', 'failed'];
@@ -32,7 +38,10 @@ export function worktreeStorage(store: Store): void {
     CREATE TABLE IF NOT EXISTS worktree_bindings(id INTEGER PRIMARY KEY,repository_id TEXT NOT NULL,worktree_id TEXT NOT NULL,task_id TEXT NOT NULL,
       workspace_id TEXT NOT NULL,mode TEXT NOT NULL,head_sha TEXT NOT NULL,tree_sha TEXT NOT NULL,bound_at TEXT NOT NULL,released_at TEXT,release_reason TEXT);
     CREATE INDEX IF NOT EXISTS worktree_bindings_worktree ON worktree_bindings(repository_id,worktree_id,released_at);
-    CREATE INDEX IF NOT EXISTS worktree_bindings_task ON worktree_bindings(task_id,released_at);`);
+    CREATE INDEX IF NOT EXISTS worktree_bindings_task ON worktree_bindings(task_id,released_at);
+    CREATE TABLE IF NOT EXISTS worktree_plans(task_id TEXT NOT NULL,workspace_id TEXT NOT NULL,repository_id TEXT NOT NULL,head_sha TEXT NOT NULL,tree_sha TEXT NOT NULL,
+      mode TEXT NOT NULL,author_email TEXT,state TEXT NOT NULL,decided_by TEXT,reason TEXT,created_at TEXT NOT NULL,decided_at TEXT,PRIMARY KEY(task_id,workspace_id));
+    CREATE INDEX IF NOT EXISTS worktree_plans_workspace ON worktree_plans(repository_id,workspace_id);`);
 }
 
 const now = () => new Date().toISOString();
@@ -61,6 +70,33 @@ export function taskWorktree(store: Store, task: Row): Row | undefined {
   return store.get('SELECT * FROM worktree_bindings WHERE task_id=? AND workspace_id=? AND released_at IS NULL ORDER BY id DESC LIMIT 1', task.id, task.workspace_id);
 }
 
+/** What a task is to get when it first needs its files (#769), for its current workspace. */
+export interface WorktreePlan { task_id: string; workspace_id: string; repository_id: string; head_sha: string; tree_sha: string; mode: WorktreeMode; author_email: string | null;
+  state: 'planned' | 'bound' | 'none'; decided_by: string | null; reason: string | null }
+export function taskPlan(store: Store, task: Row): WorktreePlan | undefined {
+  return task.workspace_id ? store.get('SELECT * FROM worktree_plans WHERE task_id=? AND workspace_id=?', String(task.id), String(task.workspace_id)) as WorktreePlan | undefined : undefined;
+}
+/** Records the plan of the task's current workspace; a plan made again (a retry of the same workspace) is replaced. */
+export function planWorktree(store: Store, task: Row, head: string, tree: string, mode: WorktreeMode, author: string | null): void {
+  store.run(`INSERT INTO worktree_plans(task_id,workspace_id,repository_id,head_sha,tree_sha,mode,author_email,state,created_at) VALUES(?,?,?,?,?,?,?,'planned',?)
+    ON CONFLICT(task_id,workspace_id) DO UPDATE SET head_sha=excluded.head_sha,tree_sha=excluded.tree_sha,mode=excluded.mode,author_email=excluded.author_email,state='planned',
+      decided_by=NULL,reason=NULL,decided_at=NULL`, String(task.id), String(task.workspace_id), String(task.repository_id), head, tree, mode, author, now());
+}
+/** The plan was carried out (state bound) or the task chose to work without files (state none). */
+export function decidePlan(store: Store, task: Row, state: 'planned' | 'bound' | 'none', by: string, reason: string | null = null): void {
+  store.run('UPDATE worktree_plans SET state=?,decided_by=?,reason=?,decided_at=? WHERE task_id=? AND workspace_id=?', state, by, reason, now(), String(task.id), String(task.workspace_id));
+}
+/** A review's workspace that has no worktree yet follows a new head of its pull request by its plan alone (#770). */
+export function movePlan(store: Store, task: Row, head: string, tree: string): void {
+  store.run("UPDATE worktree_plans SET head_sha=?,tree_sha=? WHERE task_id=? AND workspace_id=? AND state<>'bound'", head, tree, String(task.id), String(task.workspace_id));
+}
+
+/** The project's worktrees on the computer of this generation, newest use first, with the bindings that hold each. */
+export function listWorktrees(store: Store, repo: string, generation: number, limit = 30): (Row & { holders: Row[] })[] {
+  return store.all("SELECT * FROM worktrees WHERE repository_id=? AND generation=? AND state<>'removed' ORDER BY used_at DESC,id LIMIT ?", repo, generation, limit)
+    .filter(row => !workspaceRemoving(repo, row.id)).map(row => ({ ...row, holders: heldBy(store, repo, row.id) }));
+}
+
 /** Worktrees a reading task may take for this commit: made for reading, ready, held by no unfinished task, newest use first. */
 export function reusableWorktrees(store: Store, repo: string, generation: number, head: string): Row[] {
   return store.all(`SELECT * FROM worktrees WHERE repository_id=? AND generation=? AND head_sha=? AND state='ready' AND mode='read' ORDER BY used_at DESC,id LIMIT 20`,
@@ -76,13 +112,15 @@ function bind(store: Store, task: Row, worktree: string, mode: WorktreeMode, hea
 }
 
 /**
- * Takes an existing worktree for the task before the runner checks it, in one transaction with the check that nobody else
- * holds it. Null when it is taken meanwhile.
+ * Takes an existing worktree for the task before the runner checks it, in one transaction with the check of who else holds
+ * it: a writer only one nobody holds; a reader one no writer holds, and with `share` false (the system's own choice) one
+ * nobody holds. The binding records the commit the task asked for. Null when it is taken meanwhile.
  */
-export function claimWorktree(store: Store, task: Row, worktree: Row, mode: WorktreeMode): number | null {
+export function claimWorktree(store: Store, task: Row, worktree: Row, mode: WorktreeMode, share = false, head = String(worktree.head_sha), tree = String(worktree.tree_sha)): number | null {
   return store.transaction(() => {
-    if (heldBy(store, String(task.repository_id), worktree.id).length) return null;
-    return bind(store, task, worktree.id, mode, worktree.head_sha, worktree.tree_sha);
+    const held = heldBy(store, String(task.repository_id), worktree.id).filter(row => row.task_id !== task.id || row.workspace_id !== task.workspace_id);
+    if (mode === 'write' || !share ? held.length : held.some(row => row.mode === 'write')) return null;
+    return bind(store, task, worktree.id, mode, head, tree);
   });
 }
 
@@ -106,6 +144,11 @@ export function refuseWorktree(store: Store, repo: string, worktree: string, bin
     store.run('UPDATE worktree_bindings SET released_at=?,release_reason=? WHERE id=? AND released_at IS NULL', now(), reason, binding);
     store.run("UPDATE worktrees SET state=?,state_reason=? WHERE repository_id=? AND id=? AND state='ready'", reason === 'workspace_missing' ? 'removed' : 'refused', reason, repo, worktree);
   });
+}
+
+/** A handover with reset restored the worktree to the commit the task asked for: it may be handed over again. */
+export function worktreeRestored(store: Store, repo: string, worktree: string, head: string, tree: string): void {
+  store.run("UPDATE worktrees SET head_sha=?,tree_sha=?,state='ready',state_reason=NULL,used_at=? WHERE repository_id=? AND id=? AND state<>'removed'", head, tree, now(), repo, worktree);
 }
 
 /** The worktree moved to another commit while its task held it (#770); later handovers check against the new one. */

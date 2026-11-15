@@ -214,7 +214,9 @@ export async function agentOperation(input,root){
     if(old){if(old.state==='running')try{if(old.boot!==boot)throw new Error();process.kill(old.pid,0);}catch{return {error:'agent_interrupted'};}return {started:true};}
     JSON.parse(await readFile(dir+'/input.json','utf8'));
     const out=await open(dir+'/process.log','a',0o600);
-    try{const child=spawn('node',[runnerRoot+'/pi-entry.mjs',root],{cwd:root+'/repo',env:{...environment,...workspaceTag(input.workspace_id)},detached:true,stdio:['ignore',out.fd,out.fd]});
+    // A task gets its worktree when it first needs one (#769): until then the session starts in the task directory.
+    const cwd=await stat(root+'/repo').then(()=>root+'/repo',()=>root);
+    try{const child=spawn('node',[runnerRoot+'/pi-entry.mjs',root],{cwd,env:{...environment,...workspaceTag(input.workspace_id)},detached:true,stdio:['ignore',out.fd,out.fd]});
       await writeFile(dir+'/state.json',JSON.stringify({state:'running',pid:child.pid,boot}),{mode:0o600});child.unref();}
     finally{await out.close();}return {started:true};
   }

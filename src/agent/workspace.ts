@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import { payloadHeader, TrajectoryError } from '../storage/trajectories.js';
 import { operationRequestText, operationResult } from '../storage/payloads.js';
 import { useWorkspace } from '../projects/workspace-cleanup.js';
-import { claimWorktree, refuseWorktree, registerWorktree, releaseBinding, releaseWorktrees, reusableWorktrees, taskWorktree, type WorktreeMode } from '../projects/worktrees.js';
+import { claimWorktree, decidePlan, movePlan, planWorktree, refuseWorktree, registerWorktree, releaseBinding, releaseWorktrees, reusableWorktrees, taskPlan, taskWorktree, worktreeRestored, type WorktreeMode } from '../projects/worktrees.js';
 
 // Operations each task is waiting on in this process, oldest first. The console shows the newest as the command the task
 // is running. task_tools cannot answer that: it has no task index (2.8M rows in production, so finding a task's pending
@@ -32,6 +32,8 @@ export function currentOperation(taskId:string):{id:string;request:any}|null{
  * would get it again: the task starts a new attempt with new operation ids (engine.ts).
  */
 export class VolumeFull extends TaskError {}
+// Who made a workspace choice, as the console names it.
+const who=(by:string)=>by==='system'?'系统':by==='agent'?'执行 agent ':`主控 ${by} `;
 const MiB=2**20;
 function volumeFull(request:any,result:any):void{
   const what=request.type==='workspace_command'||request.type==='command'?String(request.command).slice(0,200):`${request.type}${request.path?' '+request.path:''}`;
@@ -40,11 +42,31 @@ function volumeFull(request:any,result:any):void{
   if(mark)throw new VolumeFull('disk_full','waiting_environment',`命令失败时项目电脑的工作卷空间不足（运行中最少剩 ${Math.floor(Number(mark.lowest_free_bytes)/MiB)} MiB，结束时剩 ${Math.floor(Number(mark.free_bytes)/MiB)} MiB，共 ${Math.floor(Number(mark.total_bytes)/MiB)} MiB）：${what}`);
 }
 
+// What works before the task has a worktree (#769): the task context, its agent's mailbox and session, the project notes, the
+// computer's git store, and making, taking or inspecting worktrees. Everything else runs in the checkout.
+const aside=(request:any)=>/^(workspace_agent_|workspace_harness_|git_)/.test(request.type)
+  ||['workspace_context','workspace_init','workspace_checkout','workspace_worktree_create','workspace_worktree_bind','workspace_worktree_inspect','workspace_acceptance'].includes(request.type)
+  ||['workspace_read','workspace_write'].includes(request.type)&&!request.sha&&typeof request.path==='string'&&(request.path.startsWith('../notes/')||request.type==='workspace_read'&&request.path.startsWith('../context/'));
+// One binding or choice at a time per task workspace in this process, whichever Workspace object asks: a read that binds
+// the system's choice and the agent's own choice in the same turn must not both take a worktree.
+const queues=new Map<string,Promise<unknown>>();
+function serialized<T>(key:string,work:()=>Promise<T>):Promise<T>{
+  const next=(queues.get(key)??Promise.resolve()).then(work),tail=next.then(()=>{},()=>{});queues.set(key,tail);
+  void tail.then(()=>{if(queues.get(key)===tail)queues.delete(key);});
+  return next;
+}
+/** The answer to a call that needs the repository when the task chose to work without one. */
+export const noWorkspace=(reason:string|null)=>({error:'no_workspace',message:`This task chose to work without repository files${reason?` (${reason})`:''}. Choose a workspace with use_workspace or create_workspace before reading repository files or running commands.`});
+
 export class Workspace {
+  // The task workspace this object saw holding its worktree (or needing none), so later calls do not ask again.
+  private settled?:string;
   constructor(readonly store:Store,readonly manager:Manager,readonly task:Row,readonly redactor:Redactor,readonly guard:()=>Promise<void>,readonly log:(value:unknown)=>void,
     readonly operations?:'service_role_operations'){}
   async call(key:string,request:any){
     await this.guard();
+    // A task gets its worktree when it first needs one (#769): the one its controller or agent chose, or the system's.
+    if(!aside(request)){const ready=await this.ensure();if(ready.error)return ready;}
     useWorkspace(this.store,this.task,request.type);
     request=this.redactor.clean(request);
     const id=operationId(`${this.task.id}:${this.task.attempt}:${key}`),input={operation_id:id,generation:this.task.generation,request:{...request,workspace_id:this.task.workspace_id}};
@@ -159,33 +181,140 @@ export class Workspace {
   async bind(github:GitHub,commitSha:string,mirror:Mirror,also:string[],mode:WorktreeMode){
     const listing=await this.listing(commitSha,mirror,`正在准备工作区：在虚拟电脑上取固定提交 ${commitSha} 的 git worktree…`);if(!listing)return null;
     const packed=await this.transfer(commitSha,mirror,also);if(packed===null)return null;
-    const repo=String(this.task.repository_id),author=github.authorEmail();
+    const taken=await this.take(commitSha,listing.tree_sha,mode,github.authorEmail(),'system');if(!taken)return null;
+    const snapshot=this.checkedOut(commitSha,listing,mirror,packed,taken.reused?`已复用 worktree ${taken.id.slice(0,12)}（同一提交、没有改动），共`:`已新建 worktree ${taken.id.slice(0,12)} 并检出`);
+    return {...snapshot,worktree:taken};
+  }
+  /**
+   * Prepares the commit like bind() but leaves the worktree for later (#769): the computer's store gets the commits, and the
+   * task records what it is to get (taskPlan). The task's controller, or its agent without a role team, may choose a
+   * worktree or none first (choose()); the first call that needs the files without a choice binds the system's (ensure()).
+   * A workspace that already holds a worktree (the same workspace preparing again) is checked again at once, as bind() does.
+   * Returns null when this way is not available.
+   */
+  async plan(github:GitHub,commitSha:string,mirror:Mirror,also:string[],mode:WorktreeMode){
+    if(taskWorktree(this.store,this.task))return this.bind(github,commitSha,mirror,also,mode);
+    const listing=await this.listing(commitSha,mirror,`正在准备提交 ${commitSha}：工作区在任务第一次用到仓库文件时建立…`);if(!listing)return null;
+    const packed=await this.transfer(commitSha,mirror,also);if(packed===null)return null;
+    // Bindings of earlier workspaces of this task (an earlier attempt) end now: this workspace has none yet.
+    releaseWorktrees(this.store,String(this.task.id),'new_workspace',this.task.workspace_id);
+    planWorktree(this.store,this.task,commitSha,listing.tree_sha,mode,github.authorEmail());this.settled=undefined;
+    return {...this.checkedOut(commitSha,listing,mirror,packed,'提交已就绪，worktree 在第一次用到文件时建立；共'),worktree:null};
+  }
+  /** The plan of the task's current workspace (#769), if it was prepared by plan(). */
+  plannedWorktree(){return taskPlan(this.store,this.task);}
+  /**
+   * Binds the task's worktree if the task needs one and holds none yet: the system's choice (bind()'s rule) for a task
+   * that prepared by plan() and did not choose. An error answer when it has none: it chose to work without files
+   * (no_workspace), or no worktree could be made.
+   */
+  async ensure():Promise<{error?:string;message?:string;worktree?:{id:string;mode:string;reused:boolean}}>{
+    if(this.settled&&this.settled===this.task.workspace_id)return {};
+    return serialized(`${this.task.id}:${this.task.workspace_id}`,async()=>{
+      if(this.settled&&this.settled===this.task.workspace_id)return {};
+      const plan=taskPlan(this.store,this.task);
+      if(plan?.state==='none')return noWorkspace(plan.reason);
+      if(!plan||plan.state==='bound'&&taskWorktree(this.store,this.task)){this.settled=String(this.task.workspace_id);return {};}
+      const taken=await this.take(plan.head_sha,plan.tree_sha,plan.mode,plan.author_email,'system');
+      if(!taken)return {error:'workspace_unavailable',message:'No worktree could be made for this task on the project computer.'};
+      this.settled=String(this.task.workspace_id);
+      return {worktree:taken};
+    });
+  }
+  /**
+   * The system's choice for one commit: the worktree this workspace holds when it is still at the commit, else for a
+   * reader a free unchanged one made for reading, else a new one. Returns null when none could be made.
+   */
+  private async take(commitSha:string,tree:string,mode:WorktreeMode,author:string|null,by:string){
+    const repo=String(this.task.repository_id),email=author??undefined;
     // Bindings of earlier workspaces of this task (an earlier attempt) end; one this workspace already took is checked again.
     releaseWorktrees(this.store,String(this.task.id),'new_workspace',this.task.workspace_id);
     const own=taskWorktree(this.store,this.task);
-    if(own&&(own.head_sha!==commitSha||own.tree_sha!==listing.tree_sha))releaseBinding(this.store,Number(own.id),'task_commit_changed');
-    const offered=own&&own.head_sha===commitSha&&own.tree_sha===listing.tree_sha?[{id:own.worktree_id,binding:Number(own.id)}]:[];
+    if(own&&(own.head_sha!==commitSha||own.tree_sha!==tree))releaseBinding(this.store,Number(own.id),'task_commit_changed');
+    const offered=own&&own.head_sha===commitSha&&own.tree_sha===tree?[{id:own.worktree_id,binding:Number(own.id)}]:[];
     if(!offered.length&&mode==='read')for(const row of reusableWorktrees(this.store,repo,Number(this.task.generation),commitSha))
-      if(row.tree_sha===listing.tree_sha){const binding=claimWorktree(this.store,this.task,row,mode);if(binding){offered.push({id:row.id,binding});break;}}
+      if(row.tree_sha===tree){const binding=claimWorktree(this.store,this.task,row,mode);if(binding){offered.push({id:row.id,binding});break;}}
     for(const {id,binding} of offered){
-      const bound=await this.call(`worktree:bind:${id}:${this.task.workspace_id}`,{type:'workspace_worktree_bind',worktree_id:id,sha:commitSha,tree_sha:listing.tree_sha,author_email:author});
-      if(!bound.error&&!bound.refused&&bound.tree_sha===listing.tree_sha)return this.bound(commitSha,listing,mirror,packed,id,mode,true);
+      const bound=await this.call(`worktree:bind:${id}:${this.task.workspace_id}`,{type:'workspace_worktree_bind',worktree_id:id,sha:commitSha,tree_sha:tree,author_email:email});
+      if(!bound.error&&!bound.refused&&bound.tree_sha===tree)return this.bound(id,mode,true,commitSha,tree,by);
       // Changed by its last task, moved or gone: it is not offered again, and the task gets a new one.
       refuseWorktree(this.store,repo,id,binding,String(bound.refused||'bind_failed'));
       // Shown in the console's snapshot block with the other preparation steps.
       this.log({type:'snapshot_progress',sha:commitSha,worktree_refused:{worktree_id:id,reason:bound.refused||bound.error,head:bound.head??null,changed_count:bound.changed_count??null},
         detail:`worktree ${id.slice(0,12)} 未通过交接核对（${bound.refused||bound.detail||bound.error}${bound.changed_count?`，有 ${bound.changed_count} 个文件改动`:''}），改为新建 worktree。`});
     }
-    const id=randomId(),binding=registerWorktree(this.store,this.task,id,mode,commitSha,listing.tree_sha);
-    const created=await this.call('worktree:create:'+id,{type:'workspace_worktree_create',worktree_id:id,sha:commitSha,tree_sha:listing.tree_sha,author_email:author});
-    if(created.error||created.refused||created.tree_sha!==listing.tree_sha){refuseWorktree(this.store,repo,id,binding,String(created.refused||'create_failed'));return null;}
-    return this.bound(commitSha,listing,mirror,packed,id,mode,false);
+    const id=randomId(),binding=registerWorktree(this.store,this.task,id,mode,commitSha,tree);
+    const created=await this.call('worktree:create:'+id,{type:'workspace_worktree_create',worktree_id:id,sha:commitSha,tree_sha:tree,author_email:email});
+    if(created.error||created.refused||created.tree_sha!==tree){refuseWorktree(this.store,repo,id,binding,String(created.refused||'create_failed'));return null;}
+    return this.bound(id,mode,false,commitSha,tree,by);
   }
-  // The checkout's description, and the task history's evidence of which worktree this run uses at which commit.
-  private bound(commitSha:string,listing:{tree:any[];tree_sha:string},mirror:Mirror,packed:number,id:string,mode:WorktreeMode,reused:boolean){
-    traceEvent(this.store,String(this.task.id),'workspace_bound',{worktree_id:id,workspace_id:this.task.workspace_id,mode,reused,head_sha:commitSha,tree_sha:listing.tree_sha,attempt:this.task.attempt},this.task.trace_run_id);
-    const snapshot=this.checkedOut(commitSha,listing,mirror,packed,reused?`已复用 worktree ${id.slice(0,12)}（同一提交、没有改动），共`:`已新建 worktree ${id.slice(0,12)} 并检出`);
-    return {...snapshot,worktree:{id,mode,reused}};
+  /**
+   * The task's own choice (#769), made by its controller or by its agent (`by`): an existing worktree of the project
+   * computer (`use`, read or write), a new one (`create`), or none (`none`). The handover checks are the runner's, as for
+   * the system's choice; a worktree with changes, or at another commit, is taken only with on_changes (reset restores it
+   * to the task's commit first, saving its changes as a patch into ../context/; keep_changes takes it as it is, at the
+   * task's commit, for writing). A task that writes cannot work without files, nor read only. Once the task holds a
+   * worktree, it keeps it for this attempt.
+   */
+  choose(action:'use'|'create'|'none',args:{worktree_id?:string;mode?:string;on_changes?:string;reason?:string},by:string,callId=randomId()):Promise<any>{
+    return serialized(`${this.task.id}:${this.task.workspace_id}`,()=>this.chooseNow(action,args,by,callId));
+  }
+  private async chooseNow(action:'use'|'create'|'none',args:{worktree_id?:string;mode?:string;on_changes?:string;reason?:string},by:string,callId:string):Promise<any>{
+    const plan=taskPlan(this.store,this.task),repo=String(this.task.repository_id);
+    if(!plan)return {error:'workspace_not_selectable',message:'This task\'s workspace was prepared without the computer\'s git store; it cannot be chosen.'};
+    const held=taskWorktree(this.store,this.task);
+    if(held)return {error:'workspace_already_bound',message:'This task already holds a worktree for this attempt; it keeps it.',worktree_id:held.worktree_id,mode:held.mode,head:held.head_sha};
+    if(action==='none'){
+      if(plan.mode==='write')return {error:'workspace_required',message:'This task changes repository files, so it needs a worktree.'};
+      const reason=typeof args.reason==='string'&&args.reason.trim()?args.reason.trim().slice(0,500):null;if(!reason)return {error:'invalid_arguments',message:'Give the reason this task needs no repository files.'};
+      decidePlan(this.store,this.task,'none',by,reason);
+      traceEvent(this.store,String(this.task.id),'workspace_none',{workspace_id:this.task.workspace_id,decided_by:by,reason,attempt:this.task.attempt},this.task.trace_run_id);
+      this.log({type:'workspace_chosen',decided_by:by,choice:'none',reason,detail:`${who(by)}决定不用工作区：${reason}`});
+      return {ok:true,workspace:'none',message:'This task now works without repository files: ../context/ and ../notes/ stay readable. To read repository files later, call use_workspace or create_workspace first.'};
+    }
+    const mode=args.mode===undefined?plan.mode:args.mode;
+    if(mode!=='read'&&mode!=='write')return {error:'invalid_arguments',message:'mode is read or write.'};
+    if(plan.mode==='write'&&mode==='read')return {error:'workspace_mode_not_allowed',message:'This task changes repository files, so it takes its worktree for writing.'};
+    const onChanges=args.on_changes;
+    if(onChanges!==undefined&&onChanges!=='reset'&&onChanges!=='keep_changes')return {error:'invalid_arguments',message:'on_changes is reset or keep_changes.'};
+    if(onChanges==='keep_changes'&&mode!=='write')return {error:'workspace_mode_not_allowed',message:'Only a writer keeps a worktree\'s changes.'};
+    if(action==='create'){
+      const id=randomId(),binding=registerWorktree(this.store,this.task,id,mode,plan.head_sha,plan.tree_sha);
+      const created=await this.call('worktree:create:'+id,{type:'workspace_worktree_create',worktree_id:id,sha:plan.head_sha,tree_sha:plan.tree_sha,author_email:plan.author_email??undefined});
+      if(created.error||created.refused||created.tree_sha!==plan.tree_sha){refuseWorktree(this.store,repo,id,binding,String(created.refused||'create_failed'));return {error:'workspace_unavailable',message:String(created.detail||created.refused||created.error||'the worktree could not be made')};}
+      this.bound(id,mode,false,plan.head_sha,plan.tree_sha,by);
+      return {worktree_id:id,mode,created:true,head:plan.head_sha,tree_sha:plan.tree_sha,changed_count:0,changed:[]};
+    }
+    if(!/^[a-f0-9]{48}$/.test(String(args.worktree_id||'')))return {error:'invalid_arguments',message:'worktree_id is the id list_workspaces shows.'};
+    const row=this.store.get("SELECT * FROM worktrees WHERE repository_id=? AND id=? AND generation=? AND state<>'removed'",repo,String(args.worktree_id),Number(this.task.generation));
+    if(!row)return {error:'workspace_not_found',message:'No such worktree of this project on this computer; call list_workspaces.'};
+    // A reader shares a worktree with other readers; a writer takes one nobody holds.
+    const binding=claimWorktree(this.store,this.task,row,mode,true,plan.head_sha,plan.tree_sha);
+    if(binding===null)return {error:'workspace_busy',message:mode==='write'?'Another unfinished task holds this worktree; a writer needs one nobody holds.':'An unfinished task holds this worktree for writing.'};
+    const bound=await this.call(`worktree:use:${callId}`,{type:'workspace_worktree_bind',worktree_id:row.id,sha:plan.head_sha,tree_sha:plan.tree_sha,author_email:plan.author_email??undefined,...(onChanges?{on_changes:onChanges}:{})});
+    if(bound.error||bound.refused||bound.tree_sha!==plan.tree_sha){
+      // A refused choice changes nothing: the worktree stays as it is for others; one that is gone is not listed again.
+      if(bound.refused==='workspace_missing')refuseWorktree(this.store,repo,row.id,binding,'workspace_missing');else releaseBinding(this.store,binding,'choice_refused');
+      const refused=bound.refused||'workspace_unavailable';
+      return {error:refused,head:bound.head??null,tree_sha:bound.tree_sha??null,changed_count:bound.changed_count??null,changed:bound.changed??undefined,...(bound.detail?{detail:String(bound.detail)}:{}),
+        message:refused==='workspace_mismatch'?`This worktree is at ${bound.head}, not at the task's commit ${plan.head_sha}${mode==='write'?'; on_changes reset restores it to the task\'s commit (saving its changes as a patch)':''}.`
+          :refused==='workspace_dirty'?`This worktree has ${bound.changed_count} changed files${mode==='write'?'; choose on_changes reset (saves them as a patch, then restores the worktree) or keep_changes (work on top of them)':'; a reader only takes an unchanged one'}.`
+          :refused==='workspace_missing'?'This worktree is gone from the computer.':'The runner could not hand the worktree over.'};
+    }
+    if(onChanges==='reset')worktreeRestored(this.store,repo,row.id,plan.head_sha,plan.tree_sha);
+    this.bound(row.id,mode,true,plan.head_sha,plan.tree_sha,by,onChanges,bound.saved);
+    return {worktree_id:row.id,mode,head:bound.head,tree_sha:bound.tree_sha,changed_count:bound.changed_count,changed:bound.changed,...(bound.saved?{saved_changes:bound.saved}:{})};
+  }
+  // The task history's evidence of which worktree this run uses at which commit, and who chose it.
+  private bound(id:string,mode:WorktreeMode,reused:boolean,head:string,tree:string,by:string,onChanges?:string,saved?:any){
+    traceEvent(this.store,String(this.task.id),'workspace_bound',{worktree_id:id,workspace_id:this.task.workspace_id,mode,reused,head_sha:head,tree_sha:tree,attempt:this.task.attempt,decided_by:by,...(onChanges?{on_changes:onChanges}:{}),...(saved?{saved_changes:saved}:{})},this.task.trace_run_id);
+    if(taskPlan(this.store,this.task)){
+      decidePlan(this.store,this.task,'bound',by);
+      this.log({type:'workspace_chosen',decided_by:by,choice:reused?'use':'create',worktree_id:id,mode,head,...(onChanges?{on_changes:onChanges}:{}),...(saved?{saved_changes:saved}:{}),
+        detail:`${who(by)}${reused?`选用 worktree ${id.slice(0,12)}`:`新建 worktree ${id.slice(0,12)}`}（${mode==='read'?'读':'写'}，提交 ${head.slice(0,7)}）${onChanges==='reset'?`，先还原${saved?`，原有改动（${saved.count} 个文件）已保存到 ${saved.path}`:''}`:onChanges==='keep_changes'?'，保留其中的改动':''}。`});
+    }
+    this.settled=String(this.task.workspace_id);
+    return {id,mode,reused};
   }
   /**
    * Moves this task's worktree to another commit in place (#770), keeping the directory, its untracked files and the
@@ -196,6 +325,9 @@ export class Workspace {
   async advance(commitSha:string,mirror:Mirror,also:string[],key:string){
     const listing=await this.listing(commitSha,mirror,`正在把工作区移到新提交 ${commitSha}…`);if(!listing)return null;
     const packed=await this.transfer(commitSha,mirror,also);if(packed===null)return null;
+    // A workspace without its worktree yet follows the new commit by its plan alone (#769).
+    const plan=taskPlan(this.store,this.task);
+    if(plan&&plan.state!=='bound'){movePlan(this.store,this.task,commitSha,listing.tree_sha);return {...this.checkedOut(commitSha,listing,mirror,packed,'已改为新提交，worktree 在第一次用到文件时建立；共'),previous_sha:plan.head_sha,saved:null};}
     const moved=await this.call(`advance:${key}:${commitSha}`,{type:'workspace_advance',sha:commitSha,tree_sha:listing.tree_sha});
     if(moved.error||moved.tree_sha!==listing.tree_sha)return null;
     return {...this.checkedOut(commitSha,listing,mirror,packed,'已移到新提交'),previous_sha:String(moved.previous_sha),saved:moved.saved??null};

@@ -24,6 +24,7 @@ import { type ReadTokens } from './read-token.js';
 import type { AgentModel } from './gateway.js';
 import { RepositoryExplorer, repositoryTools } from './exploration.js';
 import { permissionTools } from '../roles/permissions.js';
+import { workspaceInstructions, workspaceTool, workspaceToolNames, workspaceTools } from './workspace-tools.js';
 import { taskReadScopes, taskRolePolicies, taskToolAllowed, withTaskPermissions } from '../tasks/management.js';
 
 export interface ReviewConversation { history?: any[]; resume?: boolean; offset?: number; model?: AgentModel; boundary(stage: string): Promise<{prompt?: string, messages?: string[]}> }
@@ -54,7 +55,13 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     };
   }
   for(const tool of memoryTools){if(tool.function.name==='remember_project_memory'&&!profile.capabilities.workspace.notes&&!profile.capabilities.workspace.write)continue;profile.tools.push(tool as any);platform[tool.function.name]=async(_id,args)=>{await guard();return memoryTool(store,task,tool.function.name,redactor.clean(args),async doc=>{const raw=await workspace.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};});};}
-  const system = profile.system + '\n' + taskRecordInstructions;
+  // Review and Actions analysis under the project controller, and development under its team, run through runTeam below.
+  const entry = String(task.kind).startsWith('review.') ? 'review' : task.kind === 'actions.failures' ? 'actions' : null;
+  const team = !!entry && controlled(store, task, entry) || profile.completion === 'publication' && !!createPullRequest && controlled(store, task, 'development');
+  // Without a role team the executing agent chooses the task's workspace itself (#769), while it holds none yet.
+  const plan = workspace.plannedWorktree?.(), choosing = !team && !!plan && plan.state !== 'bound';
+  if (choosing) profile.tools.push(...workspaceTools as any);
+  const system = profile.system + '\n' + taskRecordInstructions + (choosing ? '\n' + workspaceInstructions : '');
   context={...context,project_memory:new ProjectMemory(store).context(task),structured_task:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?records.context(task.id):null};
   // Only development ends with its pull request; any other work that may open one carries on to its own finish.
   const config = { command_timeout: { default_seconds: null, max_seconds: commandTimeoutLimit() }, system, prompt: JSON.stringify(roleAssignmentContext(context, prompt)), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
@@ -64,7 +71,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     ? `Correct the submission and call the finish tool again using the evidence already available. ${error.code}: ${error.detail ?? ''}` : undefined;
   if(profile.completion==='publication'&&createPullRequest&&controlled(store,task,'development'))return developmentTeam(workspace,system,config.prompt,createPullRequest,profile.capabilities.workspace,platform.github_write&&(args=>platform.github_write!(randomId(),args)),tokens?.allowedScopes().includes('contents')?async()=>{const github=new GitHub(store,tokens.repository,redactor,guard,tokens.apiUrl);await github.connect(false,undefined,{contents:'read',...(tokens.allowedScopes().includes('pull_requests')?{pull_requests:'read'}:{})},false);return github;}:undefined);
   // The work type's own executor: one Pi session in the task workspace (the formal Pi harness, src/agent/pi.ts).
-  const session: PiSession<any> = { store, taskId: task.id, guard, workspace, redactor, config, conversation, platform, createPullRequest,
+  const session: PiSession<any> = { store, taskId: task.id, guard, workspace, redactor, config, conversation, platform, createPullRequest, ensureWorkspace: async () => workspace.ensure?.() ?? {},
     offered: name => profile.tools.some(tool => tool.function.name === name), publication: profile.capabilities.github.publication,
     repository: async (name, args) => {
       const allowed = repositoryTools.some(tool => tool.function.name === name);
@@ -94,7 +101,6 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     } };
   // Review and Actions analysis retain their task/tools/completion as the dev assignment. Both the controller and
   // that assignment use their selected backend; old V2 entries retain Pi until the dev backend changes.
-  const entry = String(task.kind).startsWith('review.') ? 'review' : task.kind === 'actions.failures' ? 'actions' : null;
   if (entry && controlled(store, task, entry)) {
     const { repository, token, complete } = session, round = randomId(), spaces=roleWorkspaces(workspace);
     const staged=!!records.get(task.id).stage_schedule.plan_revision||!!(taskConfiguration(store,task)?.roles?.required_stages?.length);
@@ -151,8 +157,9 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   // in the runner receipt so a control-plane restart can validate it again without publishing anything twice.
   const complete=session.complete;
   let submitted:{value:any}|undefined,repairs=0;
-  Object.assign(config,{control_tools:profile.finishTools.filter(name=>initial.includes(name))});
-  session.control=async(name,args)=>{
+  Object.assign(config,{control_tools:[...profile.finishTools,...choosing?workspaceToolNames:[]].filter(name=>initial.includes(name))});
+  session.control=async(name,args,meta)=>{
+    if(choosing&&workspaceToolNames.includes(name))return {result:redactor.clean(await workspaceTool(workspace,name,redactor.clean(args),'agent',meta?.id))};
     if(!profile.finishTools.includes(name))return {result:{error:'tool_not_allowed'}};
     try {const value=await complete({result:args},null);submitted={value};return {result:{submitted:true,submission:args,submission_name:name},finish:true};}
     catch(error){const feedback=repairInvalid(error);if(!feedback||repairs++>=2)throw error;return {result:{error:'invalid_submission',message:redactor.text(feedback)}};}

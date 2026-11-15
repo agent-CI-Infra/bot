@@ -45,7 +45,10 @@ export const basicTools = ['read_tool_result','read_child_tasks','wait_for_child
   'finish_analysis','finish_observation','finish_release_notes','submit_gate_plan','submit_acceptance',
   // Framework deliveries (#381): a tested PR from the task's candidate, Actions reruns and failure reports. The work type's
   // writes decide whether a task offers them; the executing role needs no GitHub write for them.
-  'create_pull_request','publish_candidate','rerun_failed_run','report_failure'];
+  'create_pull_request','publish_candidate','rerun_failed_run','report_failure',
+  // The task's own workspace choice (#769): which worktree of the project computer it works in, or none. They read and write
+  // no files themselves, so they need no computer permission.
+  'list_workspaces','use_workspace','create_workspace','no_workspace'];
 const githubReads = ['github_read_token','github_read','github_search'];
 const platform = (item: PermissionItem) => ({ ...item, group: 'platform' });
 const github = (item: PermissionItem) => ({ ...item, group: 'github' });
