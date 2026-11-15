@@ -202,11 +202,15 @@ const interruptFile = agentDir + '/harness-interrupt.json';
 const bootLine = await readFile('/proc/1/stat', 'utf8').catch(() => '');
 const boot = bootLine ? bootLine.slice(bootLine.lastIndexOf(')') + 2).split(' ')[19] : 'local';
 
+let instanceId = null;
+let hasWrittenRunning = false;
+
 let currentState = {
   state: 'starting',
   pid: process.pid,
   cli_pid: null,
   boot,
+  instance_id: null,
   relay_url: null,
   session_id: null,
   actual_resume: false,
@@ -216,13 +220,26 @@ let currentState = {
   stderr_tail: '',
 };
 
+async function ownsStateFile() {
+  const onDisk = await readFile(stateFile, 'utf8').then(JSON.parse).catch(() => null);
+  if (onDisk) {
+    if (instanceId && onDisk.instance_id && onDisk.instance_id !== instanceId) return false;
+    if (onDisk.pid && onDisk.pid !== process.pid) return false;
+    return true;
+  }
+  return !hasWrittenRunning;
+}
+
 let stateWriteChain = Promise.resolve();
 const writeState = patch => {
   currentState = { ...currentState, ...patch };
+  const isRunningPatch = patch.state === 'running';
   const snapshot = JSON.stringify(currentState);
   stateWriteChain = stateWriteChain.then(async () => {
+    if (!(await ownsStateFile())) return;
     await writeFile(stateFile + '.tmp', snapshot, { mode: 0o600 });
     await rename(stateFile + '.tmp', stateFile);
+    if (isRunningPatch) hasWrittenRunning = true;
   }).catch(() => {});
   return stateWriteChain;
 };
@@ -250,6 +267,10 @@ const shutdown = async (finalPatch = {}) => {
 
 try {
   const rawConfig = JSON.parse(await readFile(agentDir + '/harness.json', 'utf8'));
+  if (ID48_RE.test(rawConfig.instance_id || '')) {
+    instanceId = rawConfig.instance_id;
+    currentState.instance_id = instanceId;
+  }
   const runToken = String(rawConfig.run_token || '');
   if (!runToken) throw new Error('harness_run_token_missing');
   addSecret(runToken);
@@ -498,7 +519,7 @@ try {
     if (pollingStdin || !cliChild) return;
     pollingStdin = true;
     try {
-      if (!existsSync(agentDir)) {
+      if (!existsSync(agentDir) || !(await ownsStateFile())) {
         interruptHandled = true;
         killHandled = true;
         try { cliChild.kill('SIGKILL'); } catch {}
@@ -519,7 +540,7 @@ try {
 
       if (!killHandled) {
         const intr = await readFile(interruptFile, 'utf8').then(JSON.parse).catch(() => null);
-        if (intr) {
+        if (intr && (!intr.instance_id || !instanceId || intr.instance_id === instanceId)) {
           if (intr.mode === 'kill') {
             interruptHandled = true;
             killHandled = true;

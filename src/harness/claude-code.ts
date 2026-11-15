@@ -628,15 +628,16 @@ export async function runClaudeCode<T>(
         egress,
         ...(prepared.config?.stateDirectory ? { localWorkspaceRoot: prepared.config.stateDirectory } : {}),
         ...(prepared.config?.env ? { extraEnv: prepared.config.env } : {}),
-        ...(prepared.mode === 'config_file' || spec.containerOptions?.executableOverride
+        executableOverride: spec.containerOptions?.executableOverride
           ? {
-              executableOverride: spec.containerOptions?.executableOverride ?? {
-                executable: prepared.command,
-                ...(prepared.nodeExecutable ? { nodeExecutable: prepared.nodeExecutable } : {}),
-                version: prepared.version,
-              },
+              ...spec.containerOptions.executableOverride,
+              version: spec.containerOptions.executableOverride.version ?? prepared.version,
             }
-          : {}),
+          : {
+              executable: prepared.command,
+              ...(prepared.nodeExecutable ? { nodeExecutable: prepared.nodeExecutable } : {}),
+              version: prepared.version,
+            },
         ...(prepared.primaryModel ? { primaryModel: prepared.primaryModel } : {}),
         ...(prepared.fileProvider ? { fileProvider: prepared.fileProvider } : {}),
       },

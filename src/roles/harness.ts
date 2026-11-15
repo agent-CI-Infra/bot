@@ -109,6 +109,8 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
   system:spec.system,prompt:spec.prompt,tools,control_tools:control,workspace_id:env.workspace.task.workspace_id};
  return async(services:AgentServices):Promise<T>=>{
   const dispatcher=createTaskToolDispatcher(spec,{maxRepairs:2,includeSubmissionDetails:true,skipScreen:true});
+  const onAbort=()=>dispatcher.halt();
+  if(spec.executionSignal){if(spec.executionSignal.aborted)onAbort();else spec.executionSignal.addEventListener('abort',onAbort,{once:true});}
   try{
    return await piAdapter<T>({store:spec.store,taskId:spec.task.id,guard:spec.guard,workspace:env.workspace,redactor:spec.redactor,config,conversation:base?.conversation,platform:base?.platform,repository:base?.repository,token:base?.token,createPullRequest:base?.createPullRequest,publication:base?.publication,
     offered:name=>tools.some(t=>t.function.name===name),resume:env.resume,key:env.key,signal:spec.executionSignal,maxRequests:base?undefined:spec.maxTurns??32,finalizationTools:spec.finalizationTools??(finish?.names??(finish?[finish.name]:[])),finalizationMessage:finish?.finalizationMessage,checkpoint:spec.checkpoint,runtime:env.runtime,
@@ -126,7 +128,7 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
      if(base?.complete)return base.complete(state,publication);
      return stop('role_submission_required','retry_wait','Pi 会话结束但没有通过控制面提交结果。');
     }})(services);
-  }finally{await dispatcher.close();}
+  }finally{spec.executionSignal?.removeEventListener('abort',onAbort);await dispatcher.close();}
  };
 }
 export function roleHarness(id:string){

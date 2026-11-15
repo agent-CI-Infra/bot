@@ -325,18 +325,14 @@ export async function runCodex<T>(
         ...(prepared.config?.stateDirectory ? { localWorkspaceRoot: prepared.config.stateDirectory } : {}),
         ...(prepared.config?.env?.CODEX_HOME ? { codexHomeOverride: prepared.config.env.CODEX_HOME } : {}),
         ...(prepared.config?.env ? { extraEnv: prepared.config.env } : {}),
-        ...(prepared.mode === 'config_file' || spec.containerOptions?.executableOverride
-          ? {
-              executableOverride: {
-                executable: prepared.command,
-                ...(prepared.executableArgs.length ? { args: prepared.executableArgs } : {}),
-                ...(spec.containerOptions?.executableOverride?.nodeExecutable
-                  ? { nodeExecutable: spec.containerOptions.executableOverride.nodeExecutable }
-                  : {}),
-                version: prepared.version,
-              },
-            }
-          : {}),
+        executableOverride: {
+          executable: prepared.command,
+          ...(prepared.executableArgs.length ? { args: prepared.executableArgs } : {}),
+          ...(spec.containerOptions?.executableOverride?.nodeExecutable
+            ? { nodeExecutable: spec.containerOptions.executableOverride.nodeExecutable }
+            : {}),
+          version: prepared.version,
+        },
         ...(prepared.primaryModel ? { primaryModel: prepared.primaryModel } : {}),
         ...(prepared.fileProvider ? { fileProvider: prepared.fileProvider } : {}),
         manualCancel: reason => {

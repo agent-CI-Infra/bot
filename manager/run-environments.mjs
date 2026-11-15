@@ -20,7 +20,7 @@ export const runDefaults = { cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 256, w
 // Runner operations a run container accepts; all of them act on the run's own workspace id.
 const runTypes = ['health', 'command', 'read', 'write', 'workspace_init', 'workspace_checkout', 'workspace_read','workspace_export', 'workspace_write', 'workspace_command', 'workspace_snapshot', 'workspace_finalize', 'workspace_blob', 'workspace_agent_poll', 'workspace_agent_token', 'workspace_agent_tool', 'workspace_agent_model_request', 'workspace_agent_model_reply', 'workspace_harness_config', 'workspace_harness_start', 'workspace_harness_stdin', 'workspace_harness_poll', 'workspace_harness_interrupt', 'git_have', 'git_pack', 'git_import', 'git_export', 'reap'];
 // keep_background lets a role keep a process (a test server) beyond one command; the container ends with the run anyway.
-const runKeys = ['type', 'command', 'path', 'content', 'timeout_ms', 'keep_background', 'workspace_id', 'base64', 'offset', 'final', 'mode', 'grace_ms', 'snapshot', 'sha', 'tree_sha', 'pack_id', 'commits', 'request_id', 'sequence', 'status', 'headers', 'error'];
+const runKeys = ['type', 'command', 'path', 'content', 'timeout_ms', 'keep_background', 'workspace_id', 'base64', 'offset', 'final', 'mode', 'grace_ms', 'instance_id', 'wait_ms', 'known_tool_ids', 'known_token_ids', 'known_model_ids', 'snapshot', 'sha', 'tree_sha', 'pack_id', 'commits', 'request_id', 'sequence', 'status', 'headers', 'error'];
 export function validateRun(input) {
   // lease_epoch 0: the environment is prepared before the scheduler binds the run; the binding is recorded in the task trace.
   const keys = ['run_id', 'task_id', 'lease_epoch', 'profile', 'network', 'limits'];
@@ -32,12 +32,20 @@ export function validateRun(input) {
   for (const [key, [min, max]] of Object.entries(bounds)) if (typeof limits[key] !== 'number' || !Number.isFinite(limits[key]) || limits[key] < min || limits[key] > max || key !== 'cpus' && !Number.isInteger(limits[key])) throw new ManagerError('invalid_run_limits', 400);
   return { run_id: input.run_id, task_id: input.task_id, lease_epoch: input.lease_epoch, profile: input.profile, network: input.network ?? 'none', limits };
 }
+function validIdArray(value) {
+  return Array.isArray(value) && value.length <= 512 && value.every(id => typeof id === 'string' && id48.test(id));
+}
 function validateRunCall(run, call) {
   if (!call || !runTypes.includes(call.type) || Object.keys(call).some(k => !runKeys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
   // The run's workspace id is its run id: an operation can never name another workspace.
   if (call.workspace_id !== undefined && call.workspace_id !== run.run_id) throw new ManagerError('cross_run_workspace', 403);
   if (call.timeout_ms != null && !(Number.isFinite(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
   if (call.grace_ms != null && !(Number.isSafeInteger(call.grace_ms) && call.grace_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
+  if (call.instance_id !== undefined && !id48.test(call.instance_id)) throw new ManagerError('invalid_runner_request', 400);
+  if (call.wait_ms !== undefined && !(Number.isSafeInteger(call.wait_ms) && call.wait_ms >= 0 && call.wait_ms <= 1000)) throw new ManagerError('invalid_runner_request', 400);
+  for (const key of ['known_tool_ids', 'known_token_ids', 'known_model_ids']) {
+    if (call[key] !== undefined && !validIdArray(call[key])) throw new ManagerError('invalid_runner_request', 400);
+  }
 }
 export class RunEnvironments {
   constructor(projects) {
@@ -69,10 +77,10 @@ export class RunEnvironments {
       // The project's approved image (its packages included); the computer itself is not touched.
       const image = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, project.generation)?.image;
       if (!image) throw new ManagerError('environment_not_ready');
+      const toolsVolume = await this.projects.agentToolsVolume();
       const now = Date.now(), row = { run_id: spec.run_id, repository_id: repo, task_id: spec.task_id, lease_epoch: spec.lease_epoch, profile: spec.profile, network: spec.network, limits: JSON.stringify(spec.limits), image, state: 'ready', deadline: now + spec.limits.timeout_ms, created_at: now };
       this.db.prepare('INSERT INTO run_environments(run_id,repository_id,task_id,lease_epoch,profile,network,limits,image,state,deadline,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(row.run_id, repo, row.task_id, row.lease_epoch, row.profile, row.network, row.limits, image, 'ready', row.deadline, now);
       const names = this.names(repo, spec.run_id), l = spec.limits;
-      const toolsVolume = await this.projects.agentToolsVolume();
       try {
         if (spec.network === 'egress') await this.docker.request('POST', '/networks/create', { Name: names.network, Driver: 'bridge', Internal: false, CheckDuplicate: true, Labels: { ...this.labels(row), 'department.bot.kind': 'run-network' } });
         await this.docker.request('POST', `/containers/create?name=${names.container}`, { Image: image, User: '10001:10001', WorkingDir: '/workspace', Hostname: 'run',

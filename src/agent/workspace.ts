@@ -123,6 +123,13 @@ export class Workspace {
     if(response?.error==='disk_full')stop('disk_full','waiting_environment',`项目电脑的工作卷空间不足，调用未完成：${response.detail||request.type}`);
     return response?.ok?response.result:{error:response?.error||'runner_operation_failed',...(response?.detail?{detail:response.detail}:{})};
   }
+  // Delivers teardown/interrupt signals when a run is cancelling or closing, even after the task guard no longer passes.
+  async deliverCleanup(request:any,timeoutMs=15000){
+    if(!this.task.generation||!this.task.workspace_id)return {error:'workspace_unavailable'};
+    const response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,{operation_id:randomId(),generation:this.task.generation,
+      request:{...request,workspace_id:this.task.workspace_id}},timeoutMs).catch(()=>null);
+    return response?.ok?response.result:{error:response?.error||'runner_operation_failed',...(response?.detail?{detail:response.detail}:{})};
+  }
   // Ends the processes this task left, kept background work included. Other tasks on the computer keep theirs; the last
   // task to finish (idle) clears every leftover process, so the next task starts on a clean project computer.
   async release(idle=true){

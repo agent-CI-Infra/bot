@@ -20,8 +20,11 @@ import {
   writeSync,
 } from 'node:fs';
 import { dirname, isAbsolute, posix, relative, resolve, sep } from 'node:path';
-import { gunzipSync } from 'node:zlib';
+import { promisify } from 'node:util';
+import { gunzip, gunzipSync } from 'node:zlib';
 import { TaskError } from '../agent/common.js';
+
+const gunzipAsync = promisify(gunzip);
 
 export type AgentToolCli = 'claude_code' | 'codex';
 export type AgentToolArch = 'x64' | 'arm64';
@@ -468,18 +471,47 @@ function normalizeArchiveRelativePath(rawPath: string, stripComponents: number):
   return parts.slice(stripComponents).join('/');
 }
 
+interface ExtractTarOptions {
+  stripComponents?: number;
+  include?: (relPath: string) => boolean;
+  writeImpl?: (fd: number, buffer: Buffer, offset: number, length: number) => number;
+}
+
 export function extractTarGz(
   compressed: Buffer,
   destDir: string,
-  options: { stripComponents?: number; include?: (relPath: string) => boolean } = {},
+  options: ExtractTarOptions = {},
 ): void {
-  const stripComponents = options.stripComponents ?? 0;
   let tar: Buffer;
   try {
     tar = gunzipSync(compressed, { maxOutputLength: MAX_UNCOMPRESSED_BYTES });
   } catch {
     throw new TaskError('agent_tool_archive_invalid', 'failed', 'gunzip_failed_or_too_large');
   }
+  extractTarBuffer(tar, destDir, options);
+}
+
+export async function extractTarGzAsync(
+  compressed: Buffer,
+  destDir: string,
+  options: ExtractTarOptions = {},
+): Promise<void> {
+  let tar: Buffer;
+  try {
+    tar = await gunzipAsync(compressed, { maxOutputLength: MAX_UNCOMPRESSED_BYTES });
+  } catch {
+    throw new TaskError('agent_tool_archive_invalid', 'failed', 'gunzip_failed_or_too_large');
+  }
+  extractTarBuffer(tar, destDir, options);
+}
+
+function extractTarBuffer(
+  tar: Buffer,
+  destDir: string,
+  options: ExtractTarOptions = {},
+): void {
+  const writeChunk = options.writeImpl ?? ((fd: number, buffer: Buffer, offset: number, length: number) => writeSync(fd, buffer, offset, length));
+  const stripComponents = options.stripComponents ?? 0;
 
   mkdirSync(destDir, { recursive: true, mode: 0o755 });
   const destReal = realpathSync(destDir);
@@ -552,11 +584,31 @@ export function extractTarGz(
         fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW,
         safeMode,
       );
+      let closed = false;
       try {
-        if (body.length > 0) writeSync(fd, body, 0, body.length, 0);
+        let written = 0;
+        while (written < body.length) {
+          let n: number;
+          try {
+            n = writeChunk(fd, body, written, body.length - written);
+          } catch (err: any) {
+            if (err?.code === 'EINTR') continue;
+            throw err;
+          }
+          if (n <= 0) throw new TaskError('agent_tool_archive_invalid', 'failed', `short_write:${relPath}`);
+          written += n;
+        }
         fchmodSync(fd, safeMode);
-      } finally {
         closeSync(fd);
+        closed = true;
+      } catch (err: any) {
+        if (!closed) {
+          try { closeSync(fd); } catch {}
+        }
+        try { unlinkSync(targetPath); } catch {}
+        if (err instanceof TaskError) throw err;
+        if (err?.code === 'ENOSPC') throw new TaskError('disk_full', 'waiting_environment', `archive_extract_enospc:${relPath}`);
+        throw new TaskError('agent_tool_archive_invalid', 'failed', `short_write:${relPath}:${err?.code ?? 'io_error'}`);
       }
     } else if (typeflag === '2') {
       if (!rawLink || rawLink.startsWith('/')) {
@@ -965,7 +1017,7 @@ export class AgentToolManager {
     mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
     const stageDir = resolve(stagingRoot, `node-${nodeVer}-${randomBytes(8).toString('hex')}`);
     try {
-      extractTarGz(archiveBytes, stageDir, {
+      await extractTarGzAsync(archiveBytes, stageDir, {
         stripComponents: 1,
         include: rel => rel === 'bin/node' || rel === 'LICENSE',
       });
@@ -992,7 +1044,7 @@ export class AgentToolManager {
     }
   }
 
-  private async installClaudeCode(rootReal: string, version: string, arch: AgentToolArch, expectedSha256?: string): Promise<AgentToolManifest> {
+  private async installClaudeCode(rootReal: string, version: string, arch: AgentToolArch, expectedSha256?: string, expectedNativeSha256?: string): Promise<AgentToolManifest> {
     const nodeArtifact = await this.ensureNodeRuntime(rootReal, arch);
     const npmBase = this.sources.npmRegistryBase.replace(/\/+$/, '');
     const pkgMetaUrl = `${npmBase}/@anthropic-ai%2fclaude-code/${version}`;
@@ -1037,7 +1089,10 @@ export class AgentToolManager {
       nativeBytes = await this.fetchBytes(nativeTarballUrl, [npmBase]);
       verifyNpmIntegrity(nativeBytes, nativeMeta.dist.integrity, nativeMeta.dist.shasum);
       const nativeSha256 = createHash('sha256').update(nativeBytes).digest('hex');
+      if (expectedNativeSha256) verifyDigestHex(nativeSha256, expectedNativeSha256, 'claude_code_native_binary');
       artifacts.push({ role: 'native_binary', source_url: nativeTarballUrl, sha256: nativeSha256, bytes: nativeBytes.length });
+    } else if (expectedNativeSha256) {
+      throw new TaskError('agent_tool_hash_mismatch', 'failed', 'claude_code_native_binary_missing');
     }
 
     const stagingRoot = resolve(rootReal, '.staging');
@@ -1045,12 +1100,12 @@ export class AgentToolManager {
     const stageDir = resolve(stagingRoot, `claude_code-${version}-${randomBytes(8).toString('hex')}`);
     try {
       const pkgDir = resolve(stageDir, 'package');
-      extractTarGz(pkgBytes, pkgDir, { stripComponents: 1 });
+      await extractTarGzAsync(pkgBytes, pkgDir, { stripComponents: 1 });
 
       let hasNativeBinary = false;
       if (nativeBytes) {
         const nativeDir = resolve(stageDir, 'native');
-        extractTarGz(nativeBytes, nativeDir, { stripComponents: 1 });
+        await extractTarGzAsync(nativeBytes, nativeDir, { stripComponents: 1 });
         const nativeBin = resolve(nativeDir, 'claude');
         if (!verifySafeExecutable(stageDir, nativeBin)) {
           throw new TaskError('agent_tool_archive_invalid', 'failed', 'claude_native_binary_missing');
@@ -1121,7 +1176,7 @@ export class AgentToolManager {
     const stageDir = resolve(stagingRoot, `codex-${version}-${randomBytes(8).toString('hex')}`);
     try {
       const unpackDir = resolve(stageDir, 'unpacked');
-      extractTarGz(archiveBytes, unpackDir, { stripComponents: 0 });
+      await extractTarGzAsync(archiveBytes, unpackDir, { stripComponents: 0 });
       const extractedBin = existsSync(resolve(unpackDir, binaryName))
         ? resolve(unpackDir, binaryName)
         : existsSync(resolve(unpackDir, 'codex'))
@@ -1169,7 +1224,7 @@ export class AgentToolManager {
     return selectCompatibleCliVersion(this.volumeRoot, cli, { containerRoot: this.containerRoot, arch: this.explicitArch, libc: this.libc });
   }
 
-  install(input: { cli: AgentToolCli; version: string; sha256?: string; retainCount?: number; protectedVersions?: Iterable<string> | (() => Iterable<string>) }): Promise<{
+  install(input: { cli: AgentToolCli; version: string; sha256?: string; nativeSha256?: string; retainCount?: number; protectedVersions?: Iterable<string> | (() => Iterable<string>) }): Promise<{
     installed: AgentToolManifest;
     compatible: boolean;
     pruned: string[];
@@ -1187,8 +1242,12 @@ export class AgentToolManager {
       if (input.sha256 !== undefined && !SHA256_RE.test(input.sha256.toLowerCase())) {
         throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'invalid_sha256');
       }
+      if (input.nativeSha256 !== undefined && (!SHA256_RE.test(input.nativeSha256.toLowerCase()) || input.cli !== 'claude_code')) {
+        throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'invalid_native_sha256');
+      }
       const arch = this.requireArch();
       const rootReal = this.requireVolumeRoot();
+      rmSync(resolve(rootReal, '.staging'), { recursive: true, force: true });
       const supplied = input.protectedVersions;
       this.activeVersionProvider = typeof supplied === 'function' ? supplied : () => supplied ?? [];
       try {
@@ -1207,7 +1266,7 @@ export class AgentToolManager {
           }
         }
         const installed = input.cli === 'claude_code'
-          ? await this.installClaudeCode(rootReal, parsed.raw, arch, input.sha256?.toLowerCase())
+          ? await this.installClaudeCode(rootReal, parsed.raw, arch, input.sha256?.toLowerCase(), input.nativeSha256?.toLowerCase())
           : await this.installCodex(rootReal, parsed.raw, arch, input.sha256?.toLowerCase());
         const protectedSet = new Set<string>([installed.version, ...active]);
         const sweep = input.retainCount !== undefined
@@ -1237,6 +1296,7 @@ export class AgentToolManager {
         return { pruned: { claude_code: [], codex: [] }, protected_invalid: { claude_code: [], codex: [] }, status: this.status() };
       }
       const rootReal = this.requireVolumeRoot();
+      rmSync(resolve(rootReal, '.staging'), { recursive: true, force: true });
       const targets = options.cli ? [options.cli] : [...AGENT_TOOL_CLIS];
       const pruned: Record<AgentToolCli, string[]> = { claude_code: [], codex: [] };
       const protectedInvalid: Record<AgentToolCli, string[]> = { claude_code: [], codex: [] };

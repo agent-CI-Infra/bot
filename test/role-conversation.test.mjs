@@ -15,15 +15,16 @@ import { knowledgeActor } from './knowledge-fixture.mjs';
 import { LocalManager } from '../dist/projects/local-manager.js';
 import { DatabaseSync } from 'node:sqlite';
 import { beginModelRequest,finishModelRequest,externalModelRecorder } from '../dist/metrics/accounting.js';
-import { instanceUsage } from '../dist/roles/role-run.js';
+import { instanceUsage, activeCliVersions } from '../dist/roles/role-run.js';
+import { interruptRuns } from '../dist/tasks/trace.js';
 
 async function fixture(t,harness,budget,stall=false){
   const store=new Store(':memory:',Buffer.alloc(32,8)),root=mkdtempSync(join(tmpdir(),'role-conversation-')),manager=new LocalManager('101',root),requests=[];
   let response=()=>({role:'assistant',content:null,tool_calls:[{id:'reply-'+requests.length,type:'function',function:{name:'finish',arguments:JSON.stringify({message:'A source-bound response'})}}]});
-  const external=['codex','claude_code'].includes(harness),claudeModel='claude-sonnet-4-5-20250929';let began;const started=new Promise(resolve=>{began=resolve;});
+  const external=['codex','claude_code'].includes(harness),claudeModel='claude-sonnet-4-5-20250929';let began,releaseStall;const started=new Promise(resolve=>{began=resolve;}),stallGate=new Promise(resolve=>{releaseStall=resolve;});
   const server=createServer(async(req,res)=>{
     if(req.method==='GET'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({data:[{id:claudeModel}]}));return;}
-    let text='';for await(const c of req)text+=c;const body=JSON.parse(text);requests.push(body);began();if(stall)await new Promise(()=>{});
+    let text='';for await(const c of req)text+=c;const body=JSON.parse(text);requests.push(body);began();if(stall)await stallGate;
     if(harness==='claude_code'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({id:'fixture-provider-response',type:'message',model:claudeModel,role:'assistant',content:[{type:'text',text:'Fixture response'}],usage:{input_tokens:9,output_tokens:3}}));return;}
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:response(body)}],usage:{prompt_tokens:9,completion_tokens:3}}));});
   server.listen(0,'127.0.0.1');await once(server,'listening');
@@ -43,7 +44,7 @@ async function fixture(t,harness,budget,stall=false){
   const actor=knowledgeActor(store,'reader','101',['tasks.read','knowledge.read']),caller=roleTaskCaller(store,'101','reviewer',{actor,conversation_id:'one-logical-conversation',source_message:'source-1',guard(){}});
   const conversations=new RoleConversations(store,new TaskCommands(store),manager);let current='original';
   const source={id:'one-logical-conversation',source_message:'source-1',caller,request:'Read the local context',guard(){},fence:()=>current,context:()=>({fixture_mode:'conversation',messages:[{content:'Local context'}]}),query:()=>({messages:[]}),summary:()=>({state:'none'})};
-  return {store,requests,started,conversations,source,respond:handler=>{response=handler;},next:()=>({...source,source_message:'source-2',caller:roleTaskCaller(store,'101','reviewer',{actor,conversation_id:source.id,source_message:'source-2',guard(){}})}),change:()=>{current='changed';}};
+  return {store,requests,started,releaseStall,conversations,source,respond:handler=>{response=handler;},next:()=>({...source,source_message:'source-2',caller:roleTaskCaller(store,'101','reviewer',{actor,conversation_id:source.id,source_message:'source-2',guard(){}})}),change:()=>{current='changed';}};
 }
 for(const harness of ['native','process','pi'])test(`generic conversation uses the configured ${harness} harness without a business task or fake writer`,async t=>{
   const f=await fixture(t,harness),result=await f.conversations.run(f.source);
@@ -71,6 +72,9 @@ for(const harness of ['native','process','pi'])test(`generic conversation uses t
 for(const harness of ['codex','claude_code'])test(`non-task ${harness} uses its real protocol adapter, persistent role instance and one external request ledger (fixtures)`,async t=>{
   const f=await fixture(t,harness),result=await f.conversations.run(f.source);assert.equal(result.message,'A source-bound response');
   assert.equal(f.store.get('SELECT count(*) n FROM tasks').n,0);
+  const turn=f.store.get('SELECT * FROM role_conversation_turns WHERE id=?',result.id);
+  assert.equal(turn.harness,harness);
+  assert.equal(turn.cli_version,harness==='codex'?'0.166.0':'2.1.319');
   const instance=f.store.get('SELECT * FROM role_instances WHERE conversation_id=?',f.source.id);assert.equal(instance.task_id,null);
   const event=f.store.get("SELECT payload FROM role_conversation_events WHERE type='conversation_run'");
   const context=f.store.secrets.open(event.payload,'conversation-event:'+result.id+':conversation_run').data.run_context;
@@ -167,4 +171,23 @@ test('wall budget aborts a blocked model before its first byte',{timeout:40000},
   t.mock.timers.tick(14999);await new Promise(resolve=>setImmediate(resolve));assert.equal(settled,false);
   t.mock.timers.tick(1);
   await assert.rejects(work,{code:'role_budget_exhausted'});assert.equal(f.requests.length,1);
+});
+
+test('running container CLI conversation turns protect their activeCliVersions against prune until finished or interrupted',async t=>{
+  const f=await fixture(t,'claude_code',undefined,true);
+  const running=f.conversations.run(f.source);
+  running.catch(()=>{});
+  await f.started;
+  assert.deepEqual(activeCliVersions(f.store,'claude_code'),['2.1.319']);
+  assert.deepEqual(activeCliVersions(f.store,'codex'),[]);
+
+  interruptRuns(f.store);
+  const turn=f.store.get('SELECT * FROM role_conversation_turns');
+  const conv=f.store.get('SELECT * FROM role_conversations WHERE id=?',f.source.id);
+  assert.equal(turn.state,'interrupted');
+  assert.equal(conv.lease,null);
+  assert.equal(conv.lease_until,0);
+  assert.deepEqual(activeCliVersions(f.store,'claude_code'),[]);
+  f.releaseStall();
+  await running.catch(()=>{});
 });

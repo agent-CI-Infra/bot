@@ -11,7 +11,7 @@ import type { Workspace } from '../agent/workspace.js';
 import { useWorkspace } from '../projects/workspace-cleanup.js';
 import type { RunEnvironmentClient } from '../projects/run-environment.js';
 import { createTaskToolDispatcher, handleMailboxToolRequest, type TaskToolDispatcher } from '../roles/task-tools.js';
-import { recordRunCliVersion } from '../roles/role-run.js';
+import { recordConversationCliVersion, recordRunCliVersion } from '../roles/role-run.js';
 import { githubReadScopes, githubResources } from '../roles/permissions.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { taskPermissions } from '../tasks/configuration.js';
@@ -73,6 +73,7 @@ export interface ContainerHarnessLaunch {
   fileProvider?: FileBackedModelProvider;
   primaryModel?: RuntimeModel;
   gatewayTiming?: { firstByteMs: number; idleMs: number; keepaliveMs?: number };
+  pollWaitMs?: number;
   manualCancel?: (reason: unknown) => void;
   onExit?: (exit: ContainerHarnessExit) => void;
 }
@@ -104,7 +105,8 @@ interface RunnerTransport {
   stateWorkspaceId: string;
   egress: boolean;
   deliver: (request: Record<string, unknown>) => Promise<any>;
-  reap: () => Promise<void>;
+  deliverCleanup: (request: Record<string, unknown>) => Promise<any>;
+  reap: (instanceId: string, superseded: boolean) => Promise<void>;
 }
 
 function createDirectLocalRunner(root: string) {
@@ -160,8 +162,11 @@ function resolveRunnerTransport<T>(spec: AgentSpec<T>, launch: ContainerHarnessL
       stateWorkspaceId: runId,
       egress: launch.egress ?? spec.containerOptions?.egress ?? false,
       deliver: request => client.call(runId, request, 90_000),
-      reap: async () => {
-        await client.call(runId, { type: 'workspace_harness_interrupt', mode: 'kill' }, 15_000).catch(() => {});
+      deliverCleanup: request => client.call(runId, request, 15_000),
+      reap: async (instanceId, superseded) => {
+        if (superseded) return;
+        const intRes = await client.call(runId, { type: 'workspace_harness_interrupt', mode: 'kill', instance_id: instanceId }, 15_000).catch(() => null);
+        if (intRes?.stale_instance) return;
         await client.call(runId, { type: 'reap' }, 15_000).catch(() => {});
       },
     };
@@ -184,9 +189,12 @@ function resolveRunnerTransport<T>(spec: AgentSpec<T>, launch: ContainerHarnessL
       stateWorkspaceId,
       egress: launch.egress ?? spec.containerOptions?.egress ?? false,
       deliver: request => space.deliver(request),
-      reap: async () => {
-        await space.deliver({ type: 'workspace_harness_interrupt', mode: 'kill' }).catch(() => {});
-        await space.deliver({ type: 'reap' }).catch(() => {});
+      deliverCleanup: request => space.deliverCleanup(request, 15_000),
+      reap: async (instanceId, superseded) => {
+        if (superseded) return;
+        const intRes = await space.deliverCleanup({ type: 'workspace_harness_interrupt', mode: 'kill', instance_id: instanceId }, 15_000).catch(() => null);
+        if (intRes?.stale_instance) return;
+        await space.deliverCleanup({ type: 'reap' }, 15_000).catch(() => {});
       },
     };
   }
@@ -211,8 +219,11 @@ function resolveRunnerTransport<T>(spec: AgentSpec<T>, launch: ContainerHarnessL
       stateWorkspaceId,
       egress: launch.egress ?? spec.containerOptions?.egress ?? false,
       deliver: request => execLocal({ ...request, workspace_id: workspaceId }),
-      reap: async () => {
-        await execLocal({ type: 'workspace_harness_interrupt', mode: 'kill', workspace_id: workspaceId }, 15_000).catch(() => {});
+      deliverCleanup: request => execLocal({ ...request, workspace_id: workspaceId }, 15_000),
+      reap: async (instanceId, superseded) => {
+        if (superseded) return;
+        const intRes = await execLocal({ type: 'workspace_harness_interrupt', mode: 'kill', instance_id: instanceId, workspace_id: workspaceId }, 15_000).catch(() => null);
+        if (intRes?.stale_instance) return;
         await execLocal({ type: 'reap', workspace_id: workspaceId }, 15_000).catch(() => {});
       },
     };
@@ -295,6 +306,8 @@ export async function withContainerHarnessSession<T, R>(
   const boundRunId = spec.runContext?.()?.run_id ?? spec.task?.trace_run_id;
   if (boundRunId && spec.store.get('SELECT 1 FROM task_runs WHERE id=?', boundRunId)) {
     recordRunCliVersion(spec.store, String(boundRunId), cliVersion);
+  } else if (spec.task?.id && spec.store.hasTable('role_conversation_turns') && spec.store.get('SELECT 1 FROM role_conversation_turns WHERE id=?', spec.task.id)) {
+    recordConversationCliVersion(spec.store, String(spec.task.id), launch.cli, cliVersion);
   }
   const runRow = boundRunId
     ? spec.store.get('SELECT lease_epoch FROM task_runs WHERE id=?', boundRunId)
@@ -336,7 +349,9 @@ export async function withContainerHarnessSession<T, R>(
     inputSchema: t.function.parameters,
   }));
 
+  const instanceId = randomId();
   const harnessConfig = {
+    instance_id: instanceId,
     harness: launch.cli,
     executable,
     ...(executableArgs.length ? { executable_args: executableArgs } : {}),
@@ -380,13 +395,15 @@ export async function withContainerHarnessSession<T, R>(
     if (configBytes.length === 0) break;
   }
 
-  const started = await transport.deliver({ type: 'workspace_harness_start' });
-  if (started?.error && !started?.started) {
-    stop('execution_interrupted', 'waiting_environment', `启动容器内 ${launch.cli} 失败：${spec.redactor.text(String(started.detail || started.error))}。`);
+  const started = await transport.deliver({ type: 'workspace_harness_start', instance_id: instanceId });
+  if (!started?.started) {
+    const reason = started?.detail || started?.error || (started?.state ? `state:${String(started.state)}` : 'startup_failed');
+    stop('execution_interrupted', 'waiting_environment', `启动容器内 ${launch.cli} 失败：${spec.redactor.text(String(reason))}。`);
   }
-  if (!started?.started && started?.state === 'failed') {
-    stop('execution_interrupted', 'waiting_environment', `容器内 ${launch.cli} 启动阶段退出：${spec.redactor.text(String(started.error || 'unknown'))}。`);
-  }
+  const startedPid = typeof started?.pid === 'number' ? started.pid : null;
+  const pollWaitMs = Number.isSafeInteger(launch.pollWaitMs) && (launch.pollWaitMs as number) >= 0
+    ? Math.min(launch.pollWaitMs as number, 1000)
+    : 150;
 
   let stdoutOffset = 0;
   let exitInfo: ContainerHarnessExit | null = null;
@@ -399,9 +416,11 @@ export async function withContainerHarnessSession<T, R>(
   exitPromise.catch(() => {});
 
   const answered = new Set<string>();
+  const failed = new Set<string>();
   const inFlight = new Map<string, Promise<void>>();
   let backgroundError: unknown = null;
   let stopPolling = false;
+  let superseded = false;
   let cancelSignaled = false;
   let wakePoll: (() => void) | null = null;
   let wakePending = false;
@@ -435,11 +454,33 @@ export async function withContainerHarnessSession<T, R>(
   };
 
   const startBackground = (idKey: string, work: () => Promise<void>) => {
-    if (answered.has(idKey) || inFlight.has(idKey)) return;
+    if (answered.has(idKey) || failed.has(idKey) || inFlight.has(idKey) || backgroundError !== null) return;
+    if (answered.size > 4096) {
+      const oldest = answered.values().next().value;
+      if (oldest) answered.delete(oldest);
+    }
     const job = work()
-      .then(() => { answered.add(idKey); }, err => { backgroundError ??= err; })
+      .then(() => { answered.add(idKey); }, err => { failed.add(idKey); backgroundError ??= err; })
       .finally(() => { inFlight.delete(idKey); notifyWake(); });
     inFlight.set(idKey, job);
+  };
+
+  const collectKnownIds = (prefix: 'tool:' | 'token:', limit = 512): string[] => {
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    const add = (key: string) => {
+      if (!key.startsWith(prefix)) return;
+      const raw = key.slice(prefix.length);
+      if (/^[a-f0-9]{48}$/.test(raw) && !seen.has(raw)) {
+        seen.add(raw);
+        ids.push(raw);
+      }
+    };
+    for (const k of inFlight.keys()) { add(k); if (ids.length >= limit) return ids; }
+    for (const k of failed) { add(k); if (ids.length >= limit) return ids; }
+    const recent = [...answered];
+    for (let i = recent.length - 1; i >= 0 && ids.length < limit; i--) add(recent[i]!);
+    return ids;
   };
 
   const handleTokenRequest = async (tokenRequest: any) => {
@@ -512,20 +553,41 @@ export async function withContainerHarnessSession<T, R>(
   };
 
   const pollLoop = (async () => {
+    let idlePolls = 0;
     try {
       while (!stopPolling) {
         if (backgroundError !== null) throw backgroundError;
         wakePending = false;
 
-        const polled = await transport.deliver({ type: 'workspace_harness_poll', offset: stdoutOffset });
+        const polled = await transport.deliver({
+          type: 'workspace_harness_poll',
+          offset: stdoutOffset,
+          instance_id: instanceId,
+          wait_ms: pollWaitMs,
+          known_tool_ids: collectKnownIds('tool:'),
+          known_token_ids: collectKnownIds('token:'),
+          known_model_ids: modelGateway.knownIds(),
+        });
         if (polled?.error === 'disk_full') {
           stop('disk_full', 'waiting_environment', '项目容器工作卷空间不足，容器内 Agent 已停止。');
         }
         if (polled?.error) {
           stop('execution_interrupted', 'waiting_environment', `轮询容器内 ${launch.cli} 失败：${spec.redactor.text(String(polled.detail || polled.error))}。`);
         }
+        if (
+          polled?.state === 'superseded' ||
+          (typeof polled?.instance_id === 'string' && polled.instance_id && polled.instance_id !== instanceId) ||
+          (startedPid !== null && typeof polled?.pid === 'number' && polled.pid !== startedPid)
+        ) {
+          superseded = true;
+          stop('execution_interrupted', 'waiting_environment', `容器内 ${launch.cli} 会话已被新运行接管或进程身份不匹配。`);
+        }
 
+        const prevOffset = stdoutOffset;
         drainStdoutFromPoll(polled);
+        const hadStdout = stdoutOffset > prevOffset;
+
+        if (backgroundError !== null) throw backgroundError;
 
         if (launch.manualCancel) {
           if (!cancelSignaled) {
@@ -548,27 +610,50 @@ export async function withContainerHarnessSession<T, R>(
           if (signal.aborted) throw signal.reason ?? new TaskError('harness_cancelled', 'cancelled');
         }
 
+        let hadNewRequests = false;
         if (!cancelSignaled) {
           for (const tokenReq of polled.token_requests ?? []) {
+            if (tokenReq?.stub) continue;
             const id = String(tokenReq?.id ?? '');
-            if (id) startBackground('token:' + id, () => handleTokenRequest(tokenReq));
+            if (id) {
+              hadNewRequests = true;
+              startBackground('token:' + id, () => handleTokenRequest(tokenReq));
+            }
           }
         }
 
         for (const toolReq of polled.tool_requests ?? []) {
+          if (toolReq?.stub) continue;
           const id = String(toolReq?.id ?? '');
-          if (id) {
+          if (!id) continue;
+          hadNewRequests = true;
+          if (toolReq?.oversized) {
             startBackground('tool:' + id, async () => {
-              await handleMailboxToolRequest(dispatcher, spec.redactor, toolReq, chunk => transport.deliver(chunk));
+              await transport.deliver({
+                type: 'workspace_agent_tool',
+                request_id: id,
+                offset: 0,
+                final: true,
+                base64: Buffer.from(JSON.stringify({ error: 'tool_request_too_large' })).toString('base64'),
+              });
             });
+            continue;
           }
+          startBackground('tool:' + id, async () => {
+            await handleMailboxToolRequest(dispatcher, spec.redactor, toolReq, chunk => transport.deliver(chunk));
+          });
         }
 
+        const modelEntries = polled.model_requests as PolledModelRequestEntry[] | undefined;
         if (!cancelSignaled) {
-          modelGateway.dispatchPoll(polled.model_requests as PolledModelRequestEntry[] | undefined);
+          if (Array.isArray(modelEntries) && modelEntries.some(e => !e?.stub)) hadNewRequests = true;
+          modelGateway.dispatchPoll(modelEntries);
         }
 
-        if (polled.has_more) continue;
+        if (polled.has_more) {
+          idlePolls = 0;
+          continue;
+        }
 
         if (['completed', 'failed', 'interrupted', 'missing'].includes(String(polled.state ?? ''))) {
           if (inFlight.size) await Promise.allSettled([...inFlight.values()]);
@@ -588,7 +673,13 @@ export async function withContainerHarnessSession<T, R>(
           return;
         }
 
-        await waitNextPoll(25);
+        if (hadStdout || hadNewRequests) {
+          idlePolls = 0;
+          await waitNextPoll(15);
+        } else {
+          idlePolls++;
+          await waitNextPoll(Math.min(300, 25 * (2 ** Math.min(idlePolls - 1, 4))));
+        }
       }
     } catch (err) {
       rejectExit(err);
@@ -611,9 +702,14 @@ export async function withContainerHarnessSession<T, R>(
         const isLast = at + 36_000 >= bytes.length;
         const res = await transport.deliver({
           type: 'workspace_harness_stdin',
+          instance_id: instanceId,
           ...(slice.length ? { base64: slice.toString('base64') } : {}),
           ...(closeAfter && isLast ? { final: true } : {}),
         });
+        if (res?.stale_instance) {
+          superseded = true;
+          throw new TaskError('execution_interrupted', 'waiting_environment', 'harness_instance_superseded');
+        }
         if (res?.error) throw new TaskError('execution_interrupted', 'waiting_environment', String(res.detail || res.error));
         if (bytes.length === 0) break;
       }
@@ -622,16 +718,19 @@ export async function withContainerHarnessSession<T, R>(
 
   const closeStdin = () =>
     enqueueStdin(async () => {
-      await transport.deliver({ type: 'workspace_harness_stdin', final: true }).catch(() => {});
+      const send = signal.aborted || cancelSignaled || stopPolling ? transport.deliverCleanup : transport.deliver;
+      await send({ type: 'workspace_harness_stdin', instance_id: instanceId, final: true }).catch(() => {});
       notifyWake();
     });
 
   const interrupt = async (mode: 'graceful' | 'kill' = 'graceful', graceMs?: number) => {
-    await transport.deliver({
+    const res = await transport.deliverCleanup({
       type: 'workspace_harness_interrupt',
       mode,
+      instance_id: instanceId,
       ...(graceMs ? { grace_ms: graceMs } : {}),
-    }).catch(() => {});
+    }).catch(() => null);
+    if (res?.stale_instance) superseded = true;
     notifyWake();
   };
 
@@ -675,7 +774,7 @@ export async function withContainerHarnessSession<T, R>(
       modelGateway.close(),
       dispatcher.close(),
       readTokens?.revoke(),
-      transport.reap(),
+      transport.reap(instanceId, superseded),
     ]);
   }
 }

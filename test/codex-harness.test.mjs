@@ -377,7 +377,9 @@ test('Codex container policy enables native workspace tools, verifies feature/sa
     await t.test(code + ' ' + toolName + ' ' + Object.keys(env)[0], async t => {
       const f = fixture(t, { ...env, FIXTURE_IGNORE_INTERRUPT: 'true' }), begun = Date.now();
       await assert.rejects(runRole(f.spec, 'dev', undefined, 'codex'), { code });
-      assert.ok(Date.now() - begun < 10000, 'stopped within the grace period, not at the run timeout');
+      const ended = Date.now();
+      const interruptedAt = Date.parse(f.s.all("SELECT created_at,data FROM task_history WHERE type='harness_event' ORDER BY id").filter(r => JSON.parse(r.data).phase === 'interrupt_requested').at(-1).created_at);
+      assert.ok(ended - interruptedAt < 3500 && ended - begun < 10000, 'stopped promptly within the grace window, not at the 15s run timeout');
       const denied = f.s.all("SELECT data FROM task_history WHERE type='capability_denied'").map(r => JSON.parse(r.data));
       assert.ok(denied.some(d => d.tool === toolName), toolName);
       assert.equal(f.lines('responses.jsonl').length, 0, 'no approval request was involved');
@@ -390,7 +392,9 @@ test('Codex container policy enables native workspace tools, verifies feature/sa
 test('Codex model reroute stops the run within the grace period even when the interrupt is ignored', async t => {
   const f = fixture(t, { FIXTURE_REROUTE: 'true', FIXTURE_IGNORE_INTERRUPT: 'true' }), begun = Date.now();
   await assert.rejects(runRole(f.spec, 'dev', undefined, 'codex'), { code: 'codex_model_rerouted' });
-  assert.ok(Date.now() - begun < 10000, 'not the run timeout');
+  const ended = Date.now();
+  const interruptedAt = Date.parse(f.s.all("SELECT created_at,data FROM task_history WHERE type='harness_event' ORDER BY id").filter(r => JSON.parse(r.data).phase === 'interrupt_requested').at(-1).created_at);
+  assert.ok(ended - interruptedAt < 3500 && ended - begun < 10000, 'stopped promptly after interrupt_requested, not at the 15s run timeout');
   assert.deepEqual(f.events().filter(e => e.phase === 'interrupt_receipt').map(e => e.receipt), ['timeout']);
   await stopped(f);
 });

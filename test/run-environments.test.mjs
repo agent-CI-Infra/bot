@@ -131,3 +131,53 @@ test('isolated run output uses its run-scoped read API and persists before relea
   assert.equal(result.error,undefined);assert.ok(result.file);assert.equal(result.output_file,undefined);assert.equal(result.bytes,bytes.length);await client.release(run);
   assert.match((await session.read({file:result.file})).content,/^HEAD/);assert.equal(commands,1);assert.ok(reads>1);
 });
+
+test('run environment creation leaves no orphan database row if agentToolsVolume fails and validates harness poll fields', async t => {
+  const f = await fixture(t), run = id();
+  const originalTools = f.projects.agentToolsVolume.bind(f.projects);
+  let failVolume = true;
+  f.projects.agentToolsVolume = async () => {
+    if (failVolume) throw new Error('docker_volume_inspect_failed');
+    return originalTools();
+  };
+  await assert.rejects(f.runs.create('101', spec(run)), /docker_volume_inspect_failed/);
+  assert.equal(f.projects.db.prepare('SELECT count(*) n FROM run_environments WHERE run_id=?').get(run).n, 0);
+
+  failVolume = false;
+  const created = await f.runs.create('101', spec(run));
+  assert.equal(created.run_id, run);
+
+  const inst = id(), toolId = id();
+  const polled = await f.runs.execute('101', run, {
+    operation_id: id(),
+    request: {
+      type: 'workspace_harness_poll',
+      workspace_id: run,
+      offset: 0,
+      instance_id: inst,
+      wait_ms: 150,
+      known_tool_ids: [toolId],
+      known_token_ids: [],
+      known_model_ids: [],
+    },
+  });
+  assert.equal(polled.ok, true);
+  assert.equal(f.docker.runs.at(-1).instance_id, inst);
+  assert.equal(f.docker.runs.at(-1).wait_ms, 150);
+
+  for (const bad of [
+    { instance_id: 'not-48-hex' },
+    { wait_ms: -1 },
+    { wait_ms: 1001 },
+    { known_tool_ids: ['short'] },
+  ]) {
+    await assert.rejects(
+      f.runs.execute('101', run, { operation_id: id(), request: { type: 'workspace_harness_poll', workspace_id: run, ...bad } }),
+      /invalid_runner_request/,
+    );
+    await assert.rejects(
+      f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_harness_poll', workspace_id: run, ...bad } }),
+      /invalid_runner_request/,
+    );
+  }
+});

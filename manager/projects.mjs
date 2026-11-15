@@ -52,12 +52,33 @@ const digest = value => createHash('sha256').update(value).digest('hex');
 const commandTypes = ['command', 'workspace_command'];
 export const parallelBounds = [1, 32];
 const runnerTypes = ['command','read','write','workspace_init','workspace_acceptance','workspace_source','workspace_restore','workspace_integrate','workspace_integration_check','workspace_checkout','workspace_advance','workspace_context','git_have','git_pack','git_import','git_export','workspace_write','workspace_snapshot','workspace_read','workspace_export','workspace_command','workspace_finalize','workspace_blob','workspace_reuse','workspace_cache','workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_tool','workspace_agent_model_request','workspace_agent_model_reply','workspace_agent_live','workspace_agent_runtime','workspace_harness_config','workspace_harness_start','workspace_harness_stdin','workspace_harness_poll','workspace_harness_interrupt','reap','tasks_list','tasks_remove'];
-const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','base_tree','base64','offset','author_email','final','mode','grace_ms','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits','entries','status','headers','error'];
+const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','base_tree','base64','offset','author_email','final','mode','grace_ms','instance_id','wait_ms','known_tool_ids','known_token_ids','known_model_ids','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits','entries','status','headers','error'];
+const RUN_TOKEN_PATTERN = /\brrt_[A-Za-z0-9_-]{12}\.[A-Za-z0-9_-]{43}\b/g;
+function sanitizeTrajectoryValue(value) {
+  if (typeof value === 'string') return value.includes('rrt_') ? value.replace(RUN_TOKEN_PATTERN, '[redacted:run_token]') : value;
+  if (Array.isArray(value)) return value.map(sanitizeTrajectoryValue);
+  if (!value || typeof value !== 'object') return value;
+  const out = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if ((key === 'run_token' || key === 'token') && typeof entry === 'string' && entry.length > 0) out[key] = '[redacted]';
+    else out[key] = sanitizeTrajectoryValue(entry);
+  }
+  return out;
+}
+function sanitizeTrajectoryInput(input) {
+  if (input?.request && ['workspace_harness_config', 'workspace_agent_token'].includes(input.request.type) && typeof input.request.base64 === 'string') {
+    return sanitizeTrajectoryValue({ ...input, request: { ...input.request, base64: '[redacted]' } });
+  }
+  return sanitizeTrajectoryValue(input);
+}
 // The control plane's workspace cleanup: list the task directories, remove a few of them per call (runner/task-dirs.mjs).
 const cleanupTypes = ['tasks_list', 'tasks_remove'];
 // WAL files keep the largest size they ever reached; after a checkpoint resets the log, SQLite truncates it to this.
 // The control plane uses the same limit (src/storage/database.ts).
 export const walSizeLimit = 512 * 1024 * 1024;
+function validIdArray(value) {
+  return Array.isArray(value) && value.length <= 512 && value.every(id => typeof id === 'string' && /^[a-f0-9]{48}$/.test(id));
+}
 // A runner request is checked before it can touch the computer, so a malformed one never interrupts other tasks.
 function validateCall(call) {
   if (!call || !runnerTypes.includes(call.type) || Object.keys(call).some(k => !runnerKeys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
@@ -71,6 +92,11 @@ function validateCall(call) {
   if (call.type === 'workspace_integrate' && (![call.sha,call.tree_sha,call.base_tree].every(value => /^[a-f0-9]{40}$/.test(value || '')) || call.source_workspace_id === call.workspace_id)) throw new ManagerError('invalid_runner_request', 400);
   if (call.timeout_ms != null && !(Number.isFinite(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
   if (call.grace_ms != null && !(Number.isSafeInteger(call.grace_ms) && call.grace_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
+  if (call.instance_id !== undefined && !/^[a-f0-9]{48}$/.test(call.instance_id)) throw new ManagerError('invalid_runner_request', 400);
+  if (call.wait_ms !== undefined && !(Number.isSafeInteger(call.wait_ms) && call.wait_ms >= 0 && call.wait_ms <= 1000)) throw new ManagerError('invalid_runner_request', 400);
+  for (const key of ['known_tool_ids', 'known_token_ids', 'known_model_ids']) {
+    if (call[key] !== undefined && !validIdArray(call[key])) throw new ManagerError('invalid_runner_request', 400);
+  }
   // A cleanup call names task directories only by their ids, at most 20 at a time, and carries nothing else.
   if (cleanupTypes.includes(call.type) ? Object.keys(call).some(k => !['type', 'entries'].includes(k)) || (call.type === 'tasks_list' ? call.entries !== undefined
     : !Array.isArray(call.entries) || !call.entries.length || call.entries.length > 20 || call.entries.some(entry => !entry || typeof entry !== 'object'
@@ -607,6 +633,18 @@ export class Projects {
     if (!result.ok) throw new ManagerError('output_unavailable', 503);
     return result.result;
   }
+  async executeHarnessPoll(repo, input) {
+    const project = this.get(repo);
+    if (!project) throw new ManagerError('project_not_registered', 404);
+    if (project.generation !== input.generation) throw new ManagerError('stale_generation');
+    if (!['ready', 'busy'].includes(project.state)) throw new ManagerError('environment_not_ready');
+    const container = await this.inspect(repo, project.generation, 'container');
+    if (!container?.State.Running || container.State.StartedAt !== project.started_at) {
+      this.restartAlone(repo, input.generation, 'its container stopped or restarted outside the manager');
+      throw new ManagerError('recovery_required');
+    }
+    return this.docker.runner(this.names(repo, project.generation).container, { ...input.request, operation_id: input.operation_id }, 90000);
+  }
   async operate(repo, action, input) {
     this.validate(repo);
     if (!['start', 'stop', 'reset', 'delete', 'execute', 'configure', 'refresh'].includes(action) || !/^[a-f0-9]{48}$/.test(input.operation_id || '') || !Number.isSafeInteger(input.generation)) throw new ManagerError('invalid_operation', 400);
@@ -614,6 +652,12 @@ export class Projects {
     if (action === 'configure') validateSpec(input.request);
     if (action === 'execute') validateCall(input.request);
     if (action === 'delete' && input.request !== undefined && (!input.request || Object.keys(input.request).some(key => key !== 'delete_notes') || input.request.delete_notes !== true)) throw new ManagerError('invalid_operation', 400);
+    // Read-only container harness polling runs outside the shared parallel slot (unless a lifecycle action holds the
+    // exclusive lock) and skips ledger/trajectory fsyncs so active polling neither starves concurrent mailbox replies nor
+    // bloats the manager database (#705).
+    if (action === 'execute' && input.request.type === 'workspace_harness_poll') {
+      return this.gates.get(repo)?.exclusive ? this.lock(repo, () => this.executeHarnessPoll(repo, input), true) : this.executeHarnessPoll(repo, input);
+    }
     // Running commands hold their slots; a new stop, reset or delete interrupts all of them by stopping the container.
     if (['stop', 'reset', 'delete'].includes(action) && this.running(repo) && !this.db.prepare('SELECT 1 FROM operations WHERE id=?').get(input.operation_id)
       && this.get(repo)?.generation === input.generation) await this.stopGeneration(repo, input.generation).catch(() => {});
@@ -642,7 +686,7 @@ export class Projects {
       // The input goes to the file of the project and task workspace first; the row keeps its header, hash and ref.
       const scope = Trajectories.scope(repo, action === 'execute' ? input.request.workspace_id : undefined);
       this.db.prepare("INSERT INTO operations(id,repository_id,action,generation,input,state,result,input_ref,input_sha256) VALUES(?,?,?,?,?,'running',NULL,?,?)")
-        .run(input.operation_id, repo, action, input.generation, JSON.stringify(inputHeader(input)), this.trajectories.append(scope, 'tool_call', input.operation_id, input), hash);
+        .run(input.operation_id, repo, action, input.generation, JSON.stringify(inputHeader(input)), this.trajectories.append(scope, 'tool_call', input.operation_id, sanitizeTrajectoryInput(input)), hash);
       try {
         let result;
         if (action === 'configure') {
@@ -720,7 +764,8 @@ export class Projects {
           }
         }
         // A repeated call replays this result: it is on disk before the row points to it.
-        const resultRef = this.trajectories.append(scope, 'tool_result', input.operation_id, result);
+        const trajectoryResult = action === 'execute' && input.request.type === 'workspace_agent_poll' ? sanitizeTrajectoryValue(result) : result;
+        const resultRef = this.trajectories.append(scope, 'tool_result', input.operation_id, trajectoryResult);
         await this.trajectories.sync(resultRef);
         this.db.prepare("UPDATE operations SET state='completed',result=NULL,result_ref=? WHERE id=?").run(resultRef, input.operation_id);
         // A task's release ends its workspace's calls: its file is complete.

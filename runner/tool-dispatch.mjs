@@ -44,8 +44,10 @@ export function createToolDispatch(dir, options = {}) {
       const end = timeoutMs !== null ? Date.now() + timeoutMs : Infinity;
       for (;;) {
         if (signal?.aborted) return { error: cancelledError };
-        const value = await readFile(replyBase + '.json', 'utf8').then(JSON.parse).catch(() => null);
-        if (value !== null) return value;
+        const reply = await readFile(replyBase + '.json', 'utf8')
+          .then(raw => ({ ok: true, value: JSON.parse(raw) }))
+          .catch(() => null);
+        if (reply !== null) return reply.value;
         if (Date.now() >= end) return { error: timeoutError };
         try {
           await delay(pollMs, undefined, signal ? { signal } : undefined);
