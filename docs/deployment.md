@@ -118,7 +118,7 @@ Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一�
 
 worktree 的登记在 `worktrees` 表：所在电脑代次、HEAD 和 HEAD 的 tree、为读还是写而建、能否交出（`ready`、`refused`、`removed`）。每次任务拿到一个 worktree 记一行 `worktree_bindings`（任务、任务目录、读或写、拿到时的提交），同时写任务历史 `workspace_bound`（含 `decided_by`：`system`、`agent` 或主控角色），这就是“这次运行用了哪个 worktree、哪个提交、谁选的”的记录。
 
-准备阶段只把提交传到电脑上的对象库，不建 worktree：`worktree_plans` 记下任务目录要用的提交和读写方式（`planned`），任务上下文的 `workspace` 字段写明还没有绑定。没有角色团队的项目，执行任务的 agent 可以先自己选（`list_workspaces`、`use_workspace`、`create_workspace`、`no_workspace`，见下）；没人选时，任务第一次读仓库文件或运行命令时，由系统按下面的规则选，agent 不需要多一个回合。runner 的文件工具和命令找不到 `repo` 时经邮箱请控制面绑定后重做一次；任务上下文（`../context/`）、项目笔记和 agent 会话不需要 worktree。Git 缓存不可用时的文件拷贝、需求任务和集成照旧在准备阶段建好。系统的选择：
+准备阶段只把提交传到电脑上的对象库，不建 worktree：`worktree_plans` 记下任务目录要用的提交和读写方式（`planned`），任务上下文的 `workspace` 字段写明还没有绑定。任务的主控（Manager）可以在委派之前先替任务选（`list_workspaces`、`use_workspace`、`create_workspace`、`no_workspace`，见下），被委派的角色就在它选的 worktree 里工作，自己不能再选；按旧配置快照、没有角色团队运行的任务由执行任务的 agent 自己选。主控读 `read_version_context` 不会占用 worktree：任务还没绑定时，结果里没有 `workspace_head_ref`，而是 `workspace` 写明计划的提交。主控跑在 Claude Code 或 Codex 上时，CLI 在任务的检出里启动，启动前就按系统规则绑定，所以不提供这四个工具。没人选时，任务第一次读仓库文件或运行命令时，由系统按下面的规则选，不需要多一个回合。runner 的文件工具和命令找不到 `repo` 时经邮箱请控制面绑定后重做一次；任务上下文（`../context/`）、项目笔记和 agent 会话不需要 worktree。Git 缓存不可用时的文件拷贝、需求任务和集成照旧在准备阶段建好。系统的选择：
 
 - 只读的任务（检视、事件任务）先找同一提交、为读而建、状态 `ready`、没有未结束任务占着的 worktree。runner 交出前核对它的 HEAD、tree，并确认没有改动（已跟踪文件的修改和未被忽略的未跟踪文件；被 `.gitignore` 忽略的依赖和构建产物不算改动，留给下一个任务）。核对不过就记为 `refused`、以后不再交出，任务改为新建；有改动的 worktree 不会被重置或丢弃。
 - 会写的任务（开发、需求任务）总是新建自己的 worktree，系统不会把它交给别的任务。
@@ -127,7 +127,7 @@ worktree 的登记在 `worktrees` 表：所在电脑代次、HEAD 和 HEAD 的 t
 任务自己选时，系统仍保证：
 - `use_workspace(worktree_id, mode, on_changes)` 拿本项目这台电脑上的一个 worktree。读者可以和其他读者共用，写者要求没有未结束任务占着；会写的任务只能以写方式拿。runner 照样核对 HEAD、tree 和改动：有改动或不在任务提交上的 worktree 只有明确选了 `on_changes` 才交出。`reset` 先把改动（已跟踪文件的修改和未被忽略的未跟踪文件）存成任务的 `../context/saved-changes-<worktree>-<旧 head>.patch`，再还原到任务提交，被忽略的依赖和构建产物保留，`refused` 的 worktree 由此恢复为 `ready`；`keep_changes` 只用于写、且 HEAD 已是任务提交，在原有改动上继续。核对不过的选择不改动 worktree，也不把它记为 `refused`。
 - `create_workspace(mode)` 新建任务提交的 worktree。
-- `no_workspace(reason)` 只给不改文件的任务：不建也不占 worktree，此后需要仓库文件的调用回答 `no_workspace` 及原因；检视发布的 coverage 写明没有检出，QA 不再检出源码快照。之后仍可改用 `use_workspace` 或 `create_workspace`。
+- `no_workspace(reason)` 只给不改文件的任务：不建也不占 worktree，此后需要仓库文件的调用回答 `no_workspace` 及原因（主控选的，会告诉被委派的角色只有主控能改选，需要文件就在结果里说明）；检视发布的 coverage 写明没有检出及是谁决定的，QA 不再检出源码快照。之后仍可改用 `use_workspace` 或 `create_workspace`。
 - 任务拿到 worktree 后，本轮尝试不再换。`list_workspaces` 列出本项目在这台电脑当前代次的 worktree（最多 30 个）：HEAD、是否是任务的提交、runner 现在看到的改动、最近交出时间、哪些未结束任务以读或写占着、是否在运行，以及系统此刻会给的选择。
 
 控制面启动 5 分钟后清理一次，之后每小时一次，逐台处理运行中的项目电脑：先经 runner 列出任务目录（只返回目录名和最近活动时间），再按下表决定，然后经 runner 每次删除最多 10 个目录，两次之间停 1 秒，让同一电脑上的任务调用先走；之后用同样的方式和同一张表处理 `/workspace/worktrees`（`worktrees_list`、`worktrees_remove`）。一个目录或 worktree 被多个任务用过时，以最晚才能删的那个任务为准，所以 worktree 只在所有用过它的任务都不再需要、且过了保留天数后才删除。删除任务目录只删掉其中的链接，worktree 留下。

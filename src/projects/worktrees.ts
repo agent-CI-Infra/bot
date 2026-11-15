@@ -21,8 +21,8 @@ import { useWorkspace, workspaceRemoving } from './workspace-cleanup.js';
  * that used it needs it, by the same rules as task directories (src/projects/workspace-cleanup.ts).
  *
  * A task that prepares through the computer's git store gets no worktree right away: `worktree_plans` records the commit it
- * works on and the mode the system would give it. The task's controller, or its agent when the project has no role team,
- * may choose (list_workspaces, use_workspace, create_workspace, no_workspace; src/agent/workspace-tools.ts); when the task
+ * works on and the mode the system would give it. The task's controller (runTeam), or its agent when the task runs without
+ * a role team, may choose (list_workspaces, use_workspace, create_workspace, no_workspace; src/agent/workspace-tools.ts); when the task
  * first needs its files without a choice, the system's choice above applies. A plan is `planned` until then, `bound` once
  * the task holds a worktree, `none` when it chose to work without one.
  */
@@ -86,9 +86,12 @@ export function planWorktree(store: Store, task: Row, head: string, tree: string
 export function decidePlan(store: Store, task: Row, state: 'planned' | 'bound' | 'none', by: string, reason: string | null = null): void {
   store.run('UPDATE worktree_plans SET state=?,decided_by=?,reason=?,decided_at=? WHERE task_id=? AND workspace_id=?', state, by, reason, now(), String(task.id), String(task.workspace_id));
 }
-/** A review's workspace that has no worktree yet follows a new head of its pull request by its plan alone (#770). */
+/**
+ * A review moved to a new head of its pull request (#770): one without a worktree yet follows it by its plan alone, one
+ * holding a worktree after the worktree moved in place. Either way the plan names the commit the task now works on.
+ */
 export function movePlan(store: Store, task: Row, head: string, tree: string): void {
-  store.run("UPDATE worktree_plans SET head_sha=?,tree_sha=? WHERE task_id=? AND workspace_id=? AND state<>'bound'", head, tree, String(task.id), String(task.workspace_id));
+  store.run('UPDATE worktree_plans SET head_sha=?,tree_sha=? WHERE task_id=? AND workspace_id=?', head, tree, String(task.id), String(task.workspace_id));
 }
 
 /** The project's worktrees on the computer of this generation, newest use first, with the bindings that hold each. */

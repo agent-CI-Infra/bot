@@ -23,6 +23,7 @@ import { queueWebhook } from '../dist/review/queue.js';
 import { dispatchContext } from '../dist/dispatch/store.js';
 import { Store } from '../dist/storage/database.js';
 import { listWorkspaces, workspaceTool, workspaceCoverage } from '../dist/agent/workspace-tools.js';
+import { versionTool } from '../dist/tasks/versions.js';
 
 const token = 'ghs_' + 'f'.repeat(36);
 // A task gets its worktree when it first needs one (#769). The fixture's agent reads a repository file before anything
@@ -371,6 +372,31 @@ test('#769 the task\'s own choice: share a reader\'s worktree, take a changed on
   const made = await workspaceTool(f.workspace, 'create_workspace', {}, 'agent');
   assert.deepEqual([made.created, made.mode, (await f.workspace.call('read2', { type: 'workspace_read', path: 'README.md' })).content], [true, 'read', 'second\n']);
   assert.notEqual(made.worktree_id, held.id);
+});
+
+test('#769 reading the versions binds no worktree; a bound review that moves keeps its plan on the new commit; a controller\'s no_workspace names it', async t => {
+  const u = await upstream(t), mirror = await u.cache.open('101', { url: u.url, token, commits: [u.first, u.second] });
+  const a = plannedTask(u.root), planned = await a.plan(u.first, mirror), row = () => a.store.get('SELECT * FROM tasks WHERE id=?', 'task-' + a.id);
+  // A controller reads the versions before it chooses: the planned commit instead of HEAD, and no runner call.
+  const sent = a.calls.length, unbound = await versionTool(a.store, row(), a.workspace, 'read_version_context', {});
+  assert.deepEqual([unbound.workspace_head_ref, unbound.workspace, a.calls.length, exists(a.repo)], [null, { worktree: 'not_bound', commit: u.first, tree_sha: planned.tree_sha }, sent, false]);
+  await a.workspace.ensure();
+  const bound = await versionTool(a.store, row(), a.workspace, 'read_version_context', {});
+  assert.deepEqual([typeof bound.workspace_head_ref, 'workspace' in bound, a.calls.at(-1)], ['string', false, 'workspace_source']);
+  // The pull request moves on while the review holds its worktree: the worktree moves in place, and the plan with it, so
+  // list_workspaces compares with the commit the task now works on.
+  await a.workspace.advance(u.second, mirror, [], '1');
+  const listed = await listWorkspaces(a.workspace), held = a.store.get('SELECT worktree_id FROM worktree_bindings WHERE task_id=?', 'task-' + a.id).worktree_id;
+  assert.deepEqual([a.workspace.plannedWorktree().head_sha, listed.task.commit, listed.task.holds.worktree_id], [u.second, u.second, held]);
+  assert.deepEqual(listed.worktrees.map(w => [w.worktree_id, w.head, w.at_task_commit]), [[held, u.second, true]]);
+  // A controller chose no files: the roles it delegates to hear that only it can choose, and the summary says who chose.
+  const b = plannedTask(u.root); await b.plan(u.second, mirror);
+  assert.equal((await workspaceTool(b.workspace, 'no_workspace', { reason: 'The comment only thanks the author.' }, 'manager')).ok, true);
+  const refused = await b.workspace.call('read', { type: 'workspace_read', path: 'README.md' });
+  assert.equal(refused.error, 'no_workspace');
+  assert.match(refused.message, /^The task's controller \(manager\) chose to work without repository files \(The comment only thanks the author\.\)\. Only it can choose a workspace/);
+  assert.deepEqual(workspaceCoverage(b.workspace, ['Checkout: 3 files at x']), ['No checkout: the controller (manager) chose to work without the repository files (The comment only thanks the author.)']);
+  assert.deepEqual((await versionTool(b.store, b.store.get('SELECT * FROM tasks WHERE id=?', 'task-' + b.id), b.workspace, 'read_version_context', {})).workspace, { worktree: 'none', commit: u.second, tree_sha: git(u.bare, 'rev-parse', u.second + '^{tree}') });
 });
 
 test('a task checks out a git worktree with the history; the computer store receives only the commits it lacks', async t => {

@@ -8,6 +8,9 @@ import { Store } from '../dist/storage/database.js';
 import { WorkspaceCleanup, useWorkspace, workspaceRemoving } from '../dist/projects/workspace-cleanup.js';
 import { reviewObjectState } from '../dist/review/sessions.js';
 import { listTaskDirectories, removeTaskDirectories } from '../runner/task-dirs.mjs';
+import { Workspace } from '../dist/agent/workspace.js';
+import { Redactor } from '../dist/agent/common.js';
+import { planWorktree } from '../dist/projects/worktrees.js';
 
 const id = () => randomBytes(24).toString('hex'), hour = 3600_000, day = 24 * hour, iso = time => new Date(time).toISOString();
 
@@ -22,7 +25,7 @@ function fixture(t, onRemove) {
   const calls = [], manager = { async call(method, _path, input) {
     if (method === 'GET') return { repository_id: '101', state: 'ready', generation: 1 };
     const request = input.request; calls.push(request);
-    if (request.type === 'tasks_remove') await onRemove?.(request);
+    if (request.type.endsWith('_remove')) await onRemove?.(request);
     // The shared worktrees (#769) are listed and removed the same way, in their own directory.
     const root = request.type.startsWith('worktrees_') ? worktrees : tasks;
     try { return { ok: true, result: request.type.endsWith('_list') ? await listTaskDirectories(root) : await removeTaskDirectories(request.entries, root, join(dir, 'store')) }; }
@@ -123,7 +126,9 @@ test('a workspace another task reuses, one used in the last half hour and one wr
 });
 
 test('#769 a shared worktree stays while any task that used it needs it, then goes by the same rules; its record follows', async t => {
-  const f = fixture(t), bind = (task, worktree) => useWorkspace(f.store, { id: task.id, repository_id: '101', kind: 'review.issue', object_number: 1, workspace_id: worktree }, 'worktree', Date.now() - 3 * day);
+  // While the sweep removes a worktree, a task that chooses it is told it does not exist instead of getting a vanishing directory.
+  let chosen = null;
+  const f = fixture(t, async request => { if (request.type === 'worktrees_remove') chosen = await choose(request.entries.map(entry => entry.name).find(name => name === done)); }), bind = (task, worktree) => useWorkspace(f.store, { id: task.id, repository_id: '101', kind: 'review.issue', object_number: 1, workspace_id: worktree }, 'worktree', Date.now() - 3 * day);
   const record = worktree => f.store.run(`INSERT INTO worktrees(repository_id,id,generation,head_sha,tree_sha,mode,state,created_by,created_at,used_at) VALUES('101',?,1,?,?,'read','ready','t',?,?)`,
     worktree, 'a'.repeat(40), 'b'.repeat(40), iso(Date.now() - 3 * day), iso(Date.now() - 3 * day));
   // Two reviews used one worktree; the second is still running.
@@ -133,7 +138,12 @@ test('#769 a shared worktree stays while any task that used it needs it, then go
   bind(ended, shared); bind(running, shared); bind(finished, done);
   // A recorded worktree whose directory is gone.
   const gone = id(); record(gone); bind(finished, gone);
+  const chooser = { id: id(), repository_id: '101', kind: 'review.pr', generation: 1, attempt: 1, workspace_id: id() };
+  planWorktree(f.store, chooser, 'a'.repeat(40), 'b'.repeat(40), 'read', null);
+  const choose = worktree => new Workspace(f.store, null, chooser, new Redactor(), async () => {}, () => {}).choose('use', { worktree_id: worktree, mode: 'read' }, 'manager');
   await f.sweep();
+  assert.equal(chosen?.error, 'workspace_not_found');
+  assert.equal(f.store.get('SELECT count(*) n FROM worktree_bindings WHERE task_id=?', chooser.id).n, 0);
   assert.deepEqual(f.worktrees(), sorted(shared, young));
   assert.deepEqual(f.released(done).map(row => [row.kind, row.release_reason, row.freed_bytes > 0]), [['worktree', 'finished', true]]);
   assert.deepEqual(f.released(orphan).map(row => row.release_reason), ['unowned']);

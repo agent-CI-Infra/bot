@@ -24,6 +24,10 @@ import { agentLoop } from '../dist/agent/loop.js';
 import { fakeRunner } from './pi-mailbox.mjs';
 import { captureTaskConfiguration } from '../dist/tasks/configuration.js';
 import { roleConfig } from '../dist/roles/run.js';
+import { planWorktree } from '../dist/projects/worktrees.js';
+import { environment } from '../runner/command.mjs';
+import { git } from './git-server.mjs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
 const call = (name, args, id = 'c' + randomBytes(3).toString('hex')) => ({ role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
@@ -402,6 +406,69 @@ test('controller recovery records native resume of a live Pi session after a res
   assert.equal(runs.at(-1).recovery_mode, 'rebuilt_from_task_records');
   assert.equal([...runner.spaces.values()].filter(sp => sp.parsed).length, 2);
   assert.equal(f.s.get("SELECT count(*) n FROM role_assignments WHERE status='completed'").n, completed, 'the completed delegation was reused, not repeated');
+});
+
+// A project computer for #769: task directories, shared worktrees and the git store are the real runner's, in a temporary
+// directory, with one commit in the store; Pi sessions are the fake runner's.
+async function computer(t) {
+  const root = await mkdtemp(join(tmpdir(), 'team-workspaces-')), work = join(root, 'work'), previous = { HOME: environment.HOME, TMPDIR: environment.TMPDIR };
+  t.after(() => { Object.assign(environment, previous); return rm(root, { recursive: true, force: true }); });
+  Object.assign(environment, { HOME: root, TMPDIR: root });
+  mkdirSync(work); git(work, 'init', '-q', '-b', 'main'); writeFileSync(join(work, 'README.md'), 'fixture\n'); git(work, 'add', '.'); git(work, 'commit', '-qm', 'first');
+  mkdirSync(join(root, 'store')); git(root, 'clone', '-q', '--bare', work, join(root, 'store', 'repo.git'));
+  const runner = fakeRunner(), real = request => runnerWorkspace(request, join(root, 'tasks'), join(root, 'store'), undefined, join(root, 'worktrees'));
+  const manager = { async call(method, path, input) {
+    if (!/^workspace_(worktree_|read$|source$|context$)/.test(input.request.type)) return runner.manager.call(method, path, input);
+    return real(input.request).then(result => ({ ok: true, result }), error => ({ ok: false, error: 'runner_operation_failed', detail: error.message }));
+  } };
+  return { runner, manager, head: git(work, 'rev-parse', 'HEAD'), tree: git(work, 'rev-parse', 'HEAD^{tree}') };
+}
+
+test('#769 the Manager chooses the task\'s worktree before delegating; its roles cannot choose, and a bound task offers nothing to choose', async t => {
+  const finish = { summary: 'Reviewed.', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] };
+  let first = null;
+  // The Manager lists the computer's worktrees, takes the free one of its commit for reading, then delegates as usual.
+  const choosing = body => {
+    const done = results(body.messages), task = JSON.parse(body.messages[1].content).task_ref;
+    if (!done.length) return call('list_workspaces', {});
+    if (done.length === 1) return call('use_workspace', { worktree_id: done[0].worktrees[0].worktree_id, mode: 'read' });
+    if (done.length === 2) return call('delegate_role', { role: 'dev', purpose: 'Review the pull request', refs: [task] });
+    if (done.length === 3) return call('read_task_record', { ref: done[2].result_ref });
+    return call('nominate_delivery', { result_ref: done[2].result_ref });
+  };
+  let script = choosing;
+  const f = await fixture(t, body => isController(body) ? (first ??= body, script(body)) : call('finish_review', finish)), c = await computer(t);
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'pi' } }] });
+  const task = (id, status = 'running') => {
+    f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,input,attempt,generation,workspace_id) VALUES(?,'r','review.pr',?,'pr',4,'{}',1,1,?)", id, status, randomBytes(24).toString('hex'));
+    const row = f.s.get('SELECT * FROM tasks WHERE id=?', id); planWorktree(f.s, row, c.head, c.tree, 'read', null);
+    return { row, workspace: new Workspace(f.s, c.manager, row, f.spec.redactor, async () => {}, () => {}) };
+  };
+  // An earlier review of the commit left a free worktree made for reading.
+  const earlier = task('earlier'); const free = (await earlier.workspace.ensure()).worktree.id; f.s.run("UPDATE tasks SET status='succeeded' WHERE id='earlier'");
+  const review = task('rv'), result = await agentLoop(f.s, review.row, review.workspace, f.spec.redactor, async () => {}, { mode: 'review', materials: [{ path: 'a.js', content: 'code' }] });
+  assert.equal(result.summary, 'Reviewed.');
+  // The Manager was offered the four tools with its rule and the task's planned commit.
+  assert.ok(['list_workspaces', 'use_workspace', 'create_workspace', 'no_workspace'].every(name => first.tools.some(tool => tool.function.name === name)));
+  const offered = JSON.parse(first.messages[1].content).workspace;
+  assert.deepEqual({ ...offered, instruction: undefined }, { commit: c.head, mode: 'read', worktree: 'not_bound', instruction: undefined,
+    binding: 'The first repository read or command binds an unchanged worktree of this commit that no task holds, or a new one.' });
+  assert.match(offered.instruction, /^This task holds no worktree yet\. .*To choose instead, do it before delegating: .*Delegated roles work in the worktree you choose/);
+  const manager = f.requests.filter(isController).at(-1), [listed, used] = results(manager.messages);
+  assert.deepEqual([listed.task.system_choice, listed.worktrees.map(w => [w.worktree_id, w.at_task_commit, w.holders.length])], [{ action: 'use', worktree_id: free, mode: 'read' }, [[free, true, 0]]]);
+  assert.deepEqual([used.worktree_id, used.mode, used.head, used.changed_count], [free, 'read', c.head, 0]);
+  const bound = f.s.all("SELECT data FROM task_history WHERE task_id='rv' AND type='workspace_bound'").map(row => JSON.parse(row.data));
+  assert.deepEqual(bound.map(entry => [entry.worktree_id, entry.mode, entry.reused, entry.decided_by]), [[free, 'read', true, 'manager']]);
+  assert.deepEqual({ ...f.s.get("SELECT state,decided_by FROM worktree_plans WHERE task_id='rv'") }, { state: 'bound', decided_by: 'manager' });
+  // The executor it delegated to works in that worktree and has no tools to choose another.
+  const executor = c.runner.spaces.get(review.row.workspace_id).parsed;
+  assert.ok(executor.tools.some(tool => tool.function.name === 'finish_review'));
+  assert.ok(!executor.tools.some(tool => tool.function.name === 'list_workspaces') && !executor.control_tools.includes('use_workspace'));
+  // A task that already holds its worktree gives its Manager nothing to choose.
+  first = null; script = controllerScript();
+  const held = task('rv2'); await held.workspace.ensure();
+  assert.equal((await agentLoop(f.s, held.row, held.workspace, f.spec.redactor, async () => {}, { mode: 'review', materials: [] })).summary, 'Reviewed.');
+  assert.ok(!first.tools.some(tool => tool.function.name === 'list_workspaces')); assert.equal(JSON.parse(first.messages[1].content).workspace, undefined);
 });
 
 test('review under the controller keeps its task, executor, tools and completion; retired switches keep Manager execution', async t => {
