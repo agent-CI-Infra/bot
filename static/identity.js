@@ -239,7 +239,8 @@ async function renderIdentity() {
   } else if (!connection) overview.append(note(active.length ? t('identity.overview_note_advanced') : t('identity.overview_note_connect')));
   // #825: in the connected state, started repositories are the ones "可访问 N 个仓库" talks about.
   // List them by name and link into the project; pending installations stay a separate list.
-  const startedRepos = (connection && connection.repositories) || [];
+  // repositories can also be present when disconnected or reauthorization_required; only list them when connected.
+  const startedRepos = connection && connection.state === 'connected' ? connection.repositories || [] : [];
   const pendingRepos = (connection && connection.pending_repositories) || [];
   if (startedRepos.length) {
     const list = element('ul', '', 'identity-openable-repos');
