@@ -45,6 +45,9 @@ async function refreshActionsFailureStatus(token) {
     // #743: 401/403/404 will not turn readable by asking again, so the scan stops and says why once; anything else keeps
     // the last visible status and lets the next poll try again.
     if (pollAfterError(error).terminal) {
+      // A read that was in flight when the reader switched page or project must not paint this page: the token the
+      // request was started under decides, as it does on the success branch above.
+      if (token !== renderToken) return;
       const message = document.querySelector('[data-actions-status]');
       if (message) { message.className = 'endpoint-warning'; message.textContent = '配置检查已停止：当前身份无法读取这个仓库的设置。请刷新身份或联系管理员后重新打开本页。'; }
       return;
