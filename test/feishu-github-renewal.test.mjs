@@ -80,3 +80,23 @@ test('a group whose grantor has no console session is not paused, and a grantor 
   await f.sent('agent-test-zone/admin-fixture-101 暂停使用：本群的授权人 stale-grantor 的 GitHub 授权已失效。请 stale-grantor 登录控制台并用 GitHub 重新登录');
   assert.equal(f.requests.length, requests);
 });
+
+test('a group binding disabled while its grantor is checked gets no paused-scope notice (#854 review)', async t => {
+  const f = await fixture(t); await repositoryAssistant(f);
+  const grantor = await f.person(56, 'held-grantor', 'ou_held_grantor'), chat = await boundGroup(f, ['101']);
+  f.h.store.run("UPDATE scoped_grants SET grantor_id=? WHERE policy='channel_service_binding'", grantor); lapse(f.h, grantor);
+  // GitHub holds the grantor's check, then refuses the authorization; the binding is disabled meanwhile.
+  let release, reached; const held = new Promise(resolve => { release = resolve; }), arrived = new Promise(resolve => { reached = resolve; });
+  f.github.state.apiGate = async path => { if (path === '/user') { reached(); await held; } };
+  const requests = f.requests.length, receipt = await post(f.h, f.id, inGroup('本群能看哪些仓库？'));
+  await arrived;
+  const revision = f.h.store.get('SELECT revision FROM channel_service_bindings WHERE chat_id=?', chat.id).revision;
+  const disabled = await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: false, expected_revision: revision });
+  assert.equal(disabled.status, 200, JSON.stringify(disabled.value));
+  f.github.state.failure = 401; f.github.state.apiGate = undefined; release();
+  const row = await finished(f.h, receipt.value.operation_id);
+  assert.equal(row.state, 'failed'); assert.equal(row.error, 'conversation_source_changed');
+  await f.sent('本群助手的配置或来源消息刚刚变化');
+  assert.ok(!JSON.stringify(f.wire.sent).includes('暂停使用'), 'no notice explaining a binding that is gone');
+  assert.equal(f.requests.length, requests, 'no model call');
+});
