@@ -177,7 +177,9 @@ test('stopping during a file sync commits the current slice without waiting for 
 });
 
 test('slices stay short: the event loop is never blocked for long while the migration runs', async t => {
-  const store = open(t, database(t)); legacy(store, { tasks: 20, operations: 30, size: 40_000 });
+  const store = open(t, database(t));
+  // Prepare the legacy state before timing migration, without a durable commit for every fixture write.
+  store.transaction(() => legacy(store, { tasks: 20, operations: 30, size: 40_000 }));
   const delay = monitorEventLoopDelay({ resolution: 5 }); delay.enable();
   await migrate(store, { readMs: 25 });
   delay.disable();
