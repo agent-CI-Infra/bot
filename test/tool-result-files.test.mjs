@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Store } from '../dist/storage/database.js';
 
 async function* chunks(value){const bytes=Buffer.from(value);for(let offset=0;offset<bytes.length;offset+=10001)yield bytes.subarray(offset,offset+10001);}
@@ -17,6 +19,22 @@ test('immutable result files page UTF-8 without re-running their source and isol
   assert.equal(files.read('role-a',ref.file,0,1).error,'tool_result_range_invalid');assert.equal(files.read('role-a',ref.file,ref.bytes).eof,true);
   assert.equal((await files.save('role-a',scope,'operation',(async function*(){assert.fail('replay must not fetch the source again');})(),()=>{})).file,ref.file);
   store.trajectories.remove({conversation_id:'chat'});assert.equal(files.read('role-a',ref.file).error,'tool_result_not_found');
+});
+
+test('a failing removal deletes the rows first, so a leftover file is unreferenced and no row loses its content',async t=>{
+  const store=new Store(':memory:',Buffer.alloc(32,1));t.after(()=>store.close());
+  const files=store.trajectories.results,scope=store.trajectories.scopeOf({id:'turn',repository_id:'101',conversation_id:'chat'});
+  const kept=await files.save('role-a',store.trajectories.scopeOf({id:'turn-2',repository_id:'101',conversation_id:'other'}),'kept',chunks('kept'),()=>{});
+  const ref=await files.save('role-a',scope,'removed',chunks('removed'),()=>{});
+  const target=join(store.trajectories.root,'results',ref.file.slice(7)+'.utf8');
+  // The rows go before the files: making the file step fail leaves no row whose content is missing.
+  rmSync(target);mkdirSync(target);writeFileSync(join(target,'leftover'),'x');
+  assert.throws(()=>files.remove('conversation_id','chat'),/EISDIR/);
+  assert.equal(store.get("SELECT count(*) n FROM tool_result_files WHERE conversation_id='chat'").n,0,'the row is already gone');
+  assert.equal(existsSync(target),true,'the leftover file remains for a later sweep');
+  assert.equal(files.read('role-a',ref.file).error,'tool_result_not_found','no row refers to the removed result');
+  for(const row of store.all('SELECT file FROM tool_result_files'))assert.equal(existsSync(join(store.trajectories.root,'results',row.file+'.utf8')),true,'every remaining row still has its content');
+  assert.equal(files.read('role-a',kept.file).content,'kept');
 });
 
 test('revocation while a result streams leaves no readable file or metadata',async t=>{
