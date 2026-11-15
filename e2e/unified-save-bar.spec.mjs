@@ -196,30 +196,32 @@ test('读不到电脑记录时，「同时运行的任务」仍有保存栏可�
   } finally { await h.stop(); }
 });
 
-test('基本设置的「高级」里可以只放弃一组更改，另一组草稿保留', async ({ page }) => {
+test('基本设置放弃分支草稿时保留 Manager 页的策略草稿', async ({ page }) => {
   test.setTimeout(90000);
-  const h = await harness();
+  const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
     await page.setViewportSize({ width: 1440, height: 900 });
     await loginAs(page, h.admin + '/#/projects/101/basic', 'administrator', password);
-    const branch = page.getByLabel('基准分支', { exact: true }), review = page.getByLabel('开启 Issue 与 PR 检视', { exact: true });
+    const branch = page.getByLabel('基准分支', { exact: true });
     await expect(branch).toBeVisible();
-    const before = await review.isChecked(), initialBranch = await branch.inputValue();
+    const initialBranch = await branch.inputValue();
     await branch.fill('feature/group-discard');
-    await review.setChecked(!before);
     await expect(consoleSaveStatus(page)).toHaveText('有未保存的更改');
     // The bar spans the two-column basic-settings layout instead of taking one cell.
     const widths = await page.evaluate(() => [document.querySelector('.console-save-bar').getBoundingClientRect().width, document.querySelector('.project-settings-layout').getBoundingClientRect().width]);
     expect(widths[0]).toBeGreaterThan(widths[1] * 0.9);
-    await openSaveAdvanced(page);
-    await page.getByRole('button', { name: '放弃「分支」的更改', exact: true }).click();
-    await page.getByRole('dialog').getByRole('button', { name: '放弃本组更改', exact: true }).click();
-    await expect(page.getByLabel('基准分支', { exact: true })).toHaveValue(initialBranch);
-    await expect(page.getByLabel('开启 Issue 与 PR 检视', { exact: true })).toBeChecked({ checked: !before });
-    await expect(consoleSaveStatus(page)).toHaveText('有未保存的更改');
-    await consoleSave(page).click();
+    await page.getByRole('link', { name: /项目 Manager 设置/ }).click();
+    const review = page.getByLabel('开启 Issue 与 PR 检视', { exact: true });
+    const before = await review.isChecked(); await review.setChecked(!before);
+    await page.locator('.project-nav a[href="#/projects/101/basic"]').click();
+    await expect(branch).toHaveValue('feature/group-discard');
+    await confirmDiscard(page);
+    await expect(branch).toHaveValue(initialBranch);
+    await page.getByRole('link', { name: /项目 Manager 设置/ }).click();
+    await expect(review).toBeChecked({ checked: !before });
+    await page.getByRole('button', { name: '保存检视与开发策略', exact: true }).click();
     await expect.poll(async () => !!(await admin('/api/repositories/101')).value.policy.review_enabled).toBe(!before);
     expect((await admin('/api/repositories/101')).value.policy.base_branch || '').toBe(initialBranch);
   } finally { await h.stop(); }

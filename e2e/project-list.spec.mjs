@@ -1,3 +1,4 @@
+import { TaskEngine } from '../dist/agent/engine.js';
 import {test,expect} from '@playwright/test';
 import { openProjectDanger } from './open-basic-folds.mjs';
 import {mkdirSync,rmSync} from 'node:fs';
@@ -102,7 +103,7 @@ test('项目按所有者分组，筛选和每页 50 条分页保持项目完整�
 });
 
 test('project list shows progress while settings own mutations and project admins change only their own policies',async({page,browser})=>{
-  const h=await harness(),{admin,password}=await setup(h),a=await account(admin);
+  const h=await harness(undefined,undefined,store=>({engine:new TaskEngine(store,{call:async()=>null})})),{admin,password}=await setup(h),a=await account(admin);
   try{
     for(const id of ['101','202'])await repository(admin,a.id,id);
     h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('active','101','review.issue','running','Review in progress')");
@@ -125,8 +126,9 @@ test('project list shows progress while settings own mutations and project admin
       await member.goto(h.admin+'/#/projects');await member.getByLabel('用户名',{exact:true}).fill('project-admin');await member.getByLabel('密码',{exact:true}).fill(memberPassword);await member.getByRole('button',{name:'登录',exact:true}).click();
       await expect(member.locator('#rows .row')).toHaveCount(1);
       await member.locator('#rows [data-repository-id="101"]').getByRole('button',{name:'设置',exact:true}).click();
+      await member.getByRole('link',{name:/项目 Manager 设置/}).click();
       await member.getByLabel('开启自动开发',{exact:true}).check();
-      await member.getByTestId('console-save').click();
+      await member.getByRole('button',{name:'保存检视与开发策略',exact:true}).click();
       await expect(member.locator('#project-page .flash')).toContainText('已保存');
       expect((await admin('/api/repositories/101')).value.policy.development_enabled).toBe(1);
     }finally{await context.close();}
