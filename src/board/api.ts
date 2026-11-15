@@ -15,16 +15,18 @@ export const boardStages = [
   { id: 'developing', name: '正在开发', hint: '开发任务正在准备、实现、测试或发布', pr: { name: '正在跟进', hint: 'bot 正按检视意见修改自己开出的 PR' } },
   { id: 'developed', name: '已开发', hint: '开发已完成或已开出 PR', pr: { name: '已跟进', hint: '按检视意见的修改已完成' } },
   { id: 'attention', name: '需要处理', hint: '最近一次任务失败，或在等待配置、权限、环境、发布、重新规划' },
+  // #826: a card the bot auto-stopped, with no completed stage to fall back to, is not 未检视.
+  { id: 'stopped', name: '已停止', hint: '这项工作已自动停止，bot 不会再检视' },
 ];
 const successes = "('pr_opened','succeeded','completed')";
 const attention = actionStatuses;
 // #655: the bot stops a task by itself when the Issue or PR it works on is closed or turned into a draft. That stop is
 // not a request for a person, so the card keeps the state its newest task that did not stop that way reached: a task
-// still waiting for a person keeps the card in 需要处理, a finished one keeps 已检视/已开发, and with nothing to fall
-// back to the card stays 未检视. The fallback never says 正在检视/正在开发: the object is closed, so the bot will not
-// go on by itself.
+// still waiting for a person keeps the card in 需要处理, a finished one keeps 已检视/已开发. #826: with nothing to fall
+// back to the card is 已停止, not 未检视 — 未检视 is only work the bot has not started and may still review. The
+// fallback never says 正在检视/正在开发: the object is closed, so the bot will not go on by itself.
 const stoppedStage = (alias: string, done: string) => `CASE WHEN ${actionStatusSQL(settledStatusSQL(alias))} THEN 'attention'
-  WHEN ${settledStatusSQL(alias)} IN ${successes} THEN '${done}' ELSE 'unreviewed' END`;
+  WHEN ${settledStatusSQL(alias)} IN ${successes} THEN '${done}' ELSE 'stopped' END`;
 // A state that waits for a person is judged before the development pipeline: `waiting_environment` and
 // `waiting_publication` ask for an environment or a confirmation, so they are not 正在开发 here while the inbox and the
 // overview count them as 需要关注.
@@ -178,12 +180,12 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
       p.id AS release_id,p.version AS version,p.stage AS release_stage,
       CASE WHEN json_valid(p.data) THEN json_extract(p.data,'$.release_url') END AS release_url
       FROM project_releases p JOIN repositories repos ON repos.id=p.repository_id`;
-    // A request task has no object number to look back on, so a stopped one stays 未检视 instead of claiming the bot is
-    // still developing it; its own record page carries the reason.
+    // A request task has no object number to look back on, so a stopped one is 已停止 instead of claiming the bot is
+    // still developing it, or of sitting in 未检视; its own record page carries the reason.
     const requestedSql = `SELECT 'task' AS card_type,'task.request' AS card_category,t.repository_id,'task' AS object_type,NULL AS object_number,
       t.summary AS title,NULL AS github_state,0 AS draft,${taskTime('t')} AS last_seen,repos.full_name,
       CASE WHEN t.status IN ${attention} THEN 'attention' WHEN t.status IN ${successes} THEN 'developed'
-        WHEN ${autoStoppedSQL('t.status')} THEN 'unreviewed'
+        WHEN ${autoStoppedSQL('t.status')} THEN 'stopped'
         ELSE 'developing' END AS bot_stage,
       ${execution('t.status')} AS execution_status,t.id AS task_id,t.status AS task_status,NULL AS review_task_id,NULL AS review_status,
       NULL AS development_task_id,NULL AS development_status,NULL AS field_value,
