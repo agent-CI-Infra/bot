@@ -62,7 +62,7 @@ export class RoleConversations {
       this.store.run('INSERT OR IGNORE INTO role_conversations(id,created_at) VALUES(?,?)',source.id,Date.now());
       this.store.run("UPDATE role_conversation_turns SET state='interrupted',error='conversation_interrupted',updated_at=? WHERE conversation_id=? AND state='running' AND EXISTS(SELECT 1 FROM role_conversations c WHERE c.id=? AND c.lease_until<=?)",Date.now(),source.id,source.id,Date.now());
       if (!this.store.run('UPDATE role_conversations SET lease=?,lease_until=?,project_id=? WHERE id=? AND lease_until<?',lease,Date.now()+120000,source.caller.project_id,source.id,Date.now()).changes) fail(409,'conversation_busy');
-      this.store.run("INSERT INTO role_conversation_turns(id,conversation_id,source_message,project_id,role_id,principal_id,fence,snapshot_id,state,reply,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'running',NULL,NULL,?,?)",id,source.id,source.source_message,source.caller.project_id,source.caller.role,source.caller.principal_id,fence,resolved.id,Date.now(),Date.now());
+      this.store.run("INSERT INTO role_conversation_turns(id,conversation_id,source_message,project_id,role_id,principal_id,fence,snapshot_id,harness,state,reply,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'running',NULL,NULL,?,?)",id,source.id,source.source_message,source.caller.project_id,source.caller.role,source.caller.principal_id,fence,resolved.id,snapshot.harness.id,Date.now(),Date.now());
       instance=roleInstance(this.store,{id,kind:'role.conversation',conversation_id:source.id,repository_id:source.caller.project_id,authority_fence:fence},source.caller.role!);
     });
     this.active.set(id,controller);

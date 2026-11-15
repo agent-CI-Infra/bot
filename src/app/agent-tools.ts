@@ -70,17 +70,19 @@ export async function agentToolsApi(
 
   if (path === '/api/agent-tools/install') {
     if (method !== 'POST') return fail(405, 'method_not_allowed');
-    fields(input, ['cli', 'version', 'sha256', 'retain_count']);
+    fields(input, ['cli', 'version', 'sha256', 'native_sha256', 'retain_count']);
     const cli = validateCli(input.cli);
     const ver = parseSemver(input.version);
     if (!ver) return fail(400, 'invalid_agent_tool_version');
     const sha256 = input.sha256 === undefined ? undefined : typeof input.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(input.sha256) ? input.sha256.toLowerCase() : fail(400, 'invalid_agent_tool_sha256');
+    const nativeSha256 = input.native_sha256 === undefined ? undefined : cli === 'claude_code' && typeof input.native_sha256 === 'string' && /^[a-f0-9]{64}$/i.test(input.native_sha256) ? input.native_sha256.toLowerCase() : fail(400, 'invalid_agent_tool_native_sha256');
     const retainCount = input.retain_count === undefined ? agentToolsRetainCount(store) : validateRetainCount(input.retain_count);
     try {
       const outcome = await tools.install({
         cli,
         version: ver.raw,
         sha256,
+        nativeSha256,
         retainCount,
         protectedVersions: () => activeCliVersions(store, cli),
       });

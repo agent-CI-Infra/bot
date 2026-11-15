@@ -115,12 +115,30 @@ export function recordRunCliVersion(s: Store, runId: string, cliVersion: string)
   s.run('UPDATE task_runs SET cli_version=? WHERE id=?', cliVersion.trim(), runId);
 }
 
-/** Returns CLI versions currently bound to active running task_runs so tool pruning never removes an in-use binary (#705). */
+/** Records the exact CLI binary version selected from /opt/agent-tools for a role conversation turn (#705). */
+export function recordConversationCliVersion(s: Store, turnId: string, harness: string, cliVersion: string) {
+  if (typeof cliVersion !== 'string' || !cliVersion.trim() || cliVersion.length > 64) {
+    throw new TaskError('role_run_protocol_invalid', 'failed', 'cli_version');
+  }
+  if (!s.hasTable('role_conversation_turns')) return;
+  s.run('UPDATE role_conversation_turns SET harness=coalesce(harness,?),cli_version=? WHERE id=?', harness, cliVersion.trim(), turnId);
+}
+
+/** Returns CLI versions currently bound to active running task_runs or leased role_conversation_turns so tool pruning never removes an in-use binary (#705). */
 export function activeCliVersions(s: Store, cli?: string): string[] {
-  const rows = cli
+  const versions = new Set<string>();
+  const runRows = cli
     ? s.all("SELECT DISTINCT cli_version FROM task_runs WHERE status='running' AND harness=? AND cli_version IS NOT NULL", cli)
     : s.all("SELECT DISTINCT cli_version FROM task_runs WHERE status='running' AND cli_version IS NOT NULL");
-  return rows.map(r => String(r.cli_version)).filter(Boolean);
+  for (const r of runRows) if (r.cli_version) versions.add(String(r.cli_version));
+  if (s.hasTable('role_conversation_turns') && s.hasTable('role_conversations')) {
+    const at = Date.now();
+    const convRows = cli
+      ? s.all("SELECT DISTINCT t.cli_version FROM role_conversation_turns t JOIN role_conversations c ON c.id=t.conversation_id WHERE t.state='running' AND c.lease_until>? AND t.harness=? AND t.cli_version IS NOT NULL", at, cli)
+      : s.all("SELECT DISTINCT t.cli_version FROM role_conversation_turns t JOIN role_conversations c ON c.id=t.conversation_id WHERE t.state='running' AND c.lease_until>? AND t.cli_version IS NOT NULL", at);
+    for (const r of convRows) if (r.cli_version) versions.add(String(r.cli_version));
+  }
+  return [...versions];
 }
 
 // ---------------------------------------------------------------- normalized events

@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -312,6 +312,7 @@ async function startMockToolUpstream(t, arch = 'x64') {
     setTamperClaudeHash: v => { tamperClaudeHash = v; },
     setUntrustedRedirect: v => { untrustedRedirect = v; },
     setBeforeCodexDownload: fn => { beforeCodexDownload = fn; },
+    claudeVersions,
   };
 }
 
@@ -520,6 +521,56 @@ test('extractTarGz rejects path traversal, symlink-chain escapes, and symlink lo
   ]);
   extractTarGz(benignSymlink, okDir);
   assert.equal(readFileSync(join(okDir, 'bin', 'entry'), 'utf8'), 'safe-internal\n');
+
+  // Short writes loop until full body is written; zero/partial failure unlinks the truncated file instead of succeeding.
+  const payload = Buffer.alloc(614400, 0x61);
+  const largeArchive = buildTarGz([{ name: 'bin/big', mode: 0o755, content: payload }]);
+  const chunkedDir = join(dir, 'chunked');
+  let writeCalls = 0;
+  let injectedEintr = false;
+  extractTarGz(largeArchive, chunkedDir, {
+    writeImpl: (fd, buf, off, len) => {
+      writeCalls++;
+      if (!injectedEintr && writeCalls === 3) {
+        injectedEintr = true;
+        throw Object.assign(new Error('interrupted'), { code: 'EINTR' });
+      }
+      return writeSync(fd, buf, off, Math.min(len, 65536));
+    },
+  });
+  assert.ok(injectedEintr && writeCalls >= 11);
+  assert.equal(readFileSync(join(chunkedDir, 'bin', 'big')).length, payload.length);
+
+  const stalledDir = join(dir, 'stalled');
+  assert.throws(
+    () =>
+      extractTarGz(largeArchive, stalledDir, {
+        writeImpl: (fd, buf, off, len) => (off === 0 ? writeSync(fd, buf, off, Math.min(len, 409600)) : 0),
+      }),
+    { code: 'agent_tool_archive_invalid' },
+  );
+  assert.equal(existsSync(join(stalledDir, 'bin', 'big')), false);
+
+  if (process.platform === 'linux') {
+    const rlimitDir = join(dir, 'rlimit');
+    const archiveFile = join(dir, 'large.tgz');
+    writeFileSync(archiveFile, largeArchive);
+    assert.throws(() =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          'ulimit -f 400 && exec "$1" --input-type=module -e "import { readFileSync } from \'node:fs\'; import { extractTarGz } from \'./dist/harness/agent-tools.js\'; process.on(\'SIGXFSZ\', () => {}); extractTarGz(readFileSync(process.argv[1]), process.argv[2]);" -- "$2" "$3"',
+          'bash',
+          process.execPath,
+          archiveFile,
+          rlimitDir,
+        ],
+        { cwd: process.cwd(), stdio: 'pipe' },
+      ),
+    );
+    assert.equal(existsSync(join(rlimitDir, 'bin', 'big')), false);
+  }
 });
 
 test('records selected CLI version on task_runs and serves super-admin /api/agent-tools endpoints', async t => {
@@ -1058,4 +1109,55 @@ test('an unreadable manifest still names the Node runtime to keep', async t => {
   assert.deepEqual(pruned.protected_invalid.claude_code, ['2.1.310']);
   assert.equal(existsSync(join(root, 'node', '22.15.0', 'bin', 'node')), true, 'the runtime the manifest text names is kept');
   assert.equal(existsSync(join(root, 'node', '23.9.9')), false, 'the runtime nothing names is still reclaimed');
+});
+
+test('install verifies optional native_sha256 for claude_code and sweeps leftover .staging directories on install and prune', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-tools-native-sha-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const upstream = await startMockToolUpstream(t, 'x64');
+  const manager = new AgentToolManager({ volumeRoot: root, containerRoot: root, arch: 'x64', libc: 'glibc', sources: upstream.sources });
+  const store = new Store(':memory:', randomBytes(32));
+  t.after(() => store.close());
+  roleRunStorage(store);
+  const superUser = { id: 'u-super', role: 'super_admin', repositories: [] };
+
+  // Leftover .staging directory from an interrupted process is swept automatically on install.
+  mkdirSync(join(root, '.staging', 'interrupted-claude-run'), { recursive: true });
+  writeFileSync(join(root, '.staging', 'interrupted-claude-run', 'partial.bin'), 'stale');
+
+  await assert.rejects(
+    () => agentToolsApi(store, manager, superUser, 'POST', '/api/agent-tools/install', {
+      cli: 'codex',
+      version: '0.166.0',
+      native_sha256: 'a'.repeat(64),
+    }),
+    { status: 400, code: 'invalid_agent_tool_native_sha256' },
+  );
+
+  await assert.rejects(
+    () => agentToolsApi(store, manager, superUser, 'POST', '/api/agent-tools/install', {
+      cli: 'claude_code',
+      version: '2.1.319',
+      native_sha256: 'f'.repeat(64),
+    }),
+    { status: 502, code: 'agent_tool_hash_mismatch' },
+  );
+  assert.equal(existsSync(join(root, 'claude_code', '2.1.319')), false);
+  assert.equal(existsSync(join(root, '.staging', 'interrupted-claude-run')), false, 'install swept stale .staging directory');
+
+  const expectedNativeSha256 = upstream.claudeVersions.get('2.1.319').glibcNativeHash.sha256;
+  const installed = await agentToolsApi(store, manager, superUser, 'POST', '/api/agent-tools/install', {
+    cli: 'claude_code',
+    version: '2.1.319',
+    native_sha256: expectedNativeSha256,
+  });
+  assert.equal(installed.compatible, true);
+  assert.equal(installed.status.clis.claude_code.selected_version, '2.1.319');
+
+  // Leftover .staging directory is also swept during prune.
+  mkdirSync(join(root, '.staging', 'another-crashed-stage'), { recursive: true });
+  writeFileSync(join(root, '.staging', 'another-crashed-stage', 'partial.bin'), 'stale');
+  await manager.prune({ retainCount: 2 });
+  assert.equal(existsSync(join(root, '.staging', 'another-crashed-stage')), false);
+  assert.equal(existsSync(join(root, 'claude_code', '2.1.319', 'bin', 'claude')), true);
 });

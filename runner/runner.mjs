@@ -127,16 +127,17 @@ let result;
 if (request.type === 'journal_clear' && assistant) {
   try { for (const name of await readdir(journal)) await rm(`${journal}/${name}`, { force: true }); result = { ok: true, result: { cleared: true } }; }
   catch { result = { ok: false, error: 'journal_clear_failed' }; }
-} else if (['tail', 'reap', 'reap_operation', 'usage', 'storage_scan', 'prune', 'tasks_list', 'tasks_remove'].includes(request.type)) {
+} else if (['tail', 'reap', 'reap_operation', 'usage', 'storage_scan', 'prune', 'tasks_list', 'tasks_remove', 'workspace_harness_poll'].includes(request.type)) {
   // Reading progress or usage, measuring the work volume, stopping leftovers, removing old journal records and listing or
   // removing task directories are repeatable and never journaled.
   try {
     result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : request.type === 'storage_scan' ? await storageScan(workspace)
       : request.type === 'prune' ? { journal: await pruneJournal(journal), store: await pruneStore() }
       : request.type === 'tasks_list' ? await listTaskDirectories() : request.type === 'tasks_remove' ? await removeTaskDirectories(request.entries)
-      : request.type === 'reap_operation' ? await reapOperation(request.target_operation_id) : await reap(request) };
+      : request.type === 'reap_operation' ? await reapOperation(request.target_operation_id)
+      : request.type === 'workspace_harness_poll' ? await execute(request) : await reap(request) };
   }
-  catch (error) { result = { ok: false, error: request.type + '_failed', ...(request.type.startsWith('tasks_') ? { detail: String(error?.message || 'operation failed').slice(0, 2000) } : {}) }; }
+  catch (error) { result = { ok: false, error: request.type === 'workspace_harness_poll' ? 'runner_operation_failed' : request.type + '_failed', ...(request.type.startsWith('tasks_') || request.type === 'workspace_harness_poll' ? { detail: String(error?.message || 'operation failed').slice(0, 2000) } : {}) }; }
 } else try {
   const existing = await readFile(`${journal}/${request.operation_id}.json`, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
   // A work volume that ran full answers disk_full (#671, runner/disk.mjs): the control plane stops the task waiting for space.

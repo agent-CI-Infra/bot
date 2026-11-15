@@ -47,7 +47,8 @@ export interface FileBackedModelProvider {
 export interface PolledModelRequestEntry {
   id: string;
   size: number;
-  chunked: boolean;
+  chunked?: boolean;
+  stub?: boolean;
   data?: MailboxModelEnvelope;
 }
 
@@ -938,7 +939,7 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
     dispatchPoll(entries: PolledModelRequestEntry[] | undefined) {
       if (closed || !Array.isArray(entries)) return;
       for (const entry of entries) {
-        if (!entry?.id || inFlight.has(entry.id) || handledIds.has(entry.id)) continue;
+        if (!entry?.id || entry.stub || inFlight.has(entry.id) || handledIds.has(entry.id)) continue;
         handledIds.add(entry.id);
         if (handledIds.size > 4096) {
           const oldest = handledIds.values().next().value;
@@ -947,6 +948,19 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
         const p = handleRequest(entry).finally(() => { inFlight.delete(entry.id); });
         inFlight.set(entry.id, p);
       }
+    },
+    knownIds(limit = 512): string[] {
+      const ids: string[] = [];
+      for (const id of inFlight.keys()) {
+        if (/^[a-f0-9]{48}$/.test(id)) ids.push(id);
+        if (ids.length >= limit) return ids;
+      }
+      const recent = [...handledIds];
+      for (let i = recent.length - 1; i >= 0 && ids.length < limit; i--) {
+        const id = recent[i]!;
+        if (!inFlight.has(id) && /^[a-f0-9]{48}$/.test(id)) ids.push(id);
+      }
+      return ids;
     },
     get activeCount() {
       return inFlight.size;
