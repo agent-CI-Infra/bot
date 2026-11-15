@@ -21,7 +21,6 @@ for (const role of ['super_admin', 'project_admin']) test(`${role} configures pr
   page.on('request', request => { if (/\/api\/repositories\/101\/roles(?:\?|$)/.test(request.url())) roleReads.push(request.url()); });
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-    const initial = h.store.get("SELECT review_enabled,development_enabled FROM policies WHERE repository_id='101'");
     const memberPassword = testPassword();
     await admin('/api/users', 'POST', { username: 'project-manager', password: memberPassword, repository_ids: ['101'] });
     const { configuration } = (await admin('/api/repositories/101/roles')).value;
@@ -31,7 +30,7 @@ for (const role of ['super_admin', 'project_admin']) test(`${role} configures pr
     await page.getByLabel('密码', { exact: true }).fill(role === 'super_admin' ? password : memberPassword);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const entry = page.getByRole('link', { name: /监听与触发设置/ });
-    await expect(entry).toBeVisible(); await expect(page.getByLabel('开启自动开发', { exact: true })).toHaveCount(0);
+    await expect(entry).toBeVisible(); await expect(page.getByLabel('可开发并开 PR', { exact: true })).toHaveCount(0);
     await screenshots(page, role, 'basic', entry);
     await entry.focus(); await page.keyboard.press('Enter');
     await expect(page).toHaveURL(/\/triggers$/);
@@ -39,10 +38,12 @@ for (const role of ['super_admin', 'project_admin']) test(`${role} configures pr
     await expect(page.getByRole('heading', { name: '监听的事件来源', exact: true })).toBeVisible();
     expect(roleReads).toEqual([]); // Project listeners do not need to load any role definition.
     await expect(page.getByLabel('Manager 提示词', { exact: true })).toHaveCount(0);
-    const reviews = page.getByLabel('开启 Issue 与 PR 检视', { exact: true }), development = page.getByLabel('开启自动开发', { exact: true });
-    expect(await reviews.isChecked()).toBe(!!initial.review_enabled); expect(await development.isChecked()).toBe(!!initial.development_enabled);
-    await reviews.check(); await development.check(); await page.getByRole('button', { name: '保存检视与开发策略', exact: true }).click();
+    // The capability ceiling (#850): the test repository starts at read.
+    const readOnly = page.getByLabel('只读问答', { exact: true }), development = page.getByLabel('可开发并开 PR', { exact: true });
+    await expect(readOnly).toBeChecked(); await expect(page.getByLabel('可评论和打标签', { exact: true })).not.toBeChecked();
+    await development.check(); await page.getByRole('button', { name: '保存能力上限', exact: true }).click();
     await expect(page.locator('.flash')).toHaveText('已保存');
+    expect((await admin('/api/repositories/101/policy')).value.policy.capability_ceiling).toBe('develop');
     const actions = page.getByLabel('接收默认分支的 Actions 失败事件', { exact: true });
     await expect(actions).not.toBeChecked(); await actions.check();
     await page.getByLabel('PR 推送新提交', { exact: true }).uncheck();
@@ -55,7 +56,7 @@ for (const role of ['super_admin', 'project_admin']) test(`${role} configures pr
     await page.getByRole('navigation', { name: '项目设置类别' }).getByRole('link', { name: '角色', exact: true }).click();
     await page.getByTestId('role-list-manager').click();
     await expect(page.getByLabel('Manager 提示词', { exact: true })).toBeVisible();
-    await expect(actions).toHaveCount(0); await expect(reviews).toHaveCount(0); await expect(development).toHaveCount(0);
+    await expect(actions).toHaveCount(0); await expect(readOnly).toHaveCount(0); await expect(development).toHaveCount(0);
     await page.getByLabel('Manager 提示词', { exact: true }).fill('Choose useful work within the project authority.');
     await page.getByRole('button', { name: '保存 Manager 提示词', exact: true }).click();
     await expect(page.getByText('已保存 Manager 提示词', { exact: true })).toBeVisible();
@@ -63,14 +64,15 @@ for (const role of ['super_admin', 'project_admin']) test(`${role} configures pr
     await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
     await screenshots(page, role, 'manager', page.getByRole('heading', { name: '项目 Manager 设置', exact: true }));
     await page.getByRole('link', { name: /监听与触发设置/ }).click();
-    await expect(actions).toBeChecked(); await expect(reviews).toBeChecked(); await expect(development).toBeChecked();
+    await expect(actions).toBeChecked(); await expect(development).toBeChecked();
     await actions.uncheck(); await page.getByRole('button', { name: '保存事件开关', exact: true }).click();
     await expect(page.getByText('已保存事件开关', { exact: true })).toBeVisible();
-    await reviews.uncheck(); await development.uncheck(); await page.getByRole('button', { name: '保存检视与开发策略', exact: true }).click();
+    await readOnly.check(); await page.getByRole('button', { name: '保存能力上限', exact: true }).click();
     await expect(page.locator('.flash')).toHaveText('已保存');
-    await page.reload(); await expect(actions).not.toBeChecked(); await expect(reviews).not.toBeChecked(); await expect(development).not.toBeChecked();
+    await page.reload(); await expect(actions).not.toBeChecked(); await expect(readOnly).toBeChecked(); await expect(development).not.toBeChecked();
+    expect((await admin('/api/repositories/101/policy')).value.policy.capability_ceiling).toBe('read');
     expect((await admin('/api/repositories/101/manager')).value.manager.events['pull_request.synchronize']).toBe(false);
-    await screenshots(page, role, 'policy', page.getByRole('heading', { name: '检视与开发策略', exact: true }));
+    await screenshots(page, role, 'policy', page.getByRole('heading', { name: '能力上限', exact: true }));
     await screenshots(page, role, 'events', page.getByRole('heading', { name: '监听的事件来源', exact: true }));
     await page.getByRole('navigation', { name: '项目设置类别' }).getByRole('link', { name: '角色', exact: true }).click();
     await expect(page.getByLabel('开启角色协调', { exact: true })).toHaveCount(0);

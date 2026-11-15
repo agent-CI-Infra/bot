@@ -9,6 +9,7 @@ import { stop } from '../agent/common.js';
 import { developmentLabel, ruleErrors } from '../rules/service.js';
 import { workActive, eventFilters } from '../work/settings.js';
 import { recordEvent } from '../dispatch/store.js';
+import { covers, projectCeiling } from '../work/ceiling.js';
 
 // Use the caller's lookups so development follows the same ownership and label checks as task execution.
 export interface DevelopmentContext {
@@ -74,13 +75,13 @@ export async function developmentWait(context:DevelopmentContext,github:GitHub,t
 /**
  * A published review is an event for the Manager when it may lead to development: an Issue review published while a
  * person's development label is on the Issue, or a review of the bot's own pull request that took on change requests or
- * found actionable problems. The control plane's conditions (development switch, a person's label, Actions clearance,
+ * found actionable problems. The control plane's conditions (the capability ceiling at develop, a person's label, Actions clearance,
  * budgets, one revision at a time) decide whether development is offered at all; the Manager decides whether to start it,
  * reading what the review found and who is assigned.
  */
 export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:Row,input:any,result:any,approved:GoAhead|null=null,requests:RevisionRequest[]=[]){
   const policy=context.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
-  if(!policy?.enabled||!policy.development_enabled||task.kind!=='review.issue'&&result.clarification_required)return;
+  if(!policy?.enabled||!covers(projectCeiling(context.store,task.repository_id,policy),'develop')||task.kind!=='review.issue'&&result.clarification_required)return;
   const filters=eventFilters(context.store,task.repository_id,policy),number=task.object_number;
   const facts={review_task:task.id,object:{number,title:String(input.object?.title||'').slice(0,300),url:input.object?.html_url??null},
     review:{summary:String(result.summary||'').slice(0,1500),requires_code_change:!!result.requires_code_change,implementation_goal:String(result.implementation_goal||'').slice(0,1500),

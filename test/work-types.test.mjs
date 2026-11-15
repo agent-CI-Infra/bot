@@ -83,7 +83,7 @@ test('a Manager section is the console layer of its rule file; the repository fi
 
 test('reading is open to every work type; writes are chosen per work type within what it can do', async t => {
   const { h, admin } = await project(t);
-  const defaults = { 'review.issue': ['reply', 'labels'], 'review.pr': ['reply', 'labels'], 'development.issue': ['code', 'pull_request'], 'release.observe': [], 'release.notes': ['release_notes'], 'actions.failures': ['issue', 'actions_rerun'], reply: ['reply'], 'gate.onboarding': ['gate_plan'], 'task.request': [] };
+  const defaults = { 'review.issue': ['reply', 'labels'], 'review.pr': ['reply', 'labels'], 'development.issue': ['code', 'pull_request'], 'release.observe': [], 'release.notes': ['release_notes'], 'actions.failures': ['issue', 'actions_rerun'], reply: ['reply'], 'gate.onboarding': ['gate_plan'], 'task.request': ['code', 'pull_request'] };
   for (const [id, writes] of Object.entries(defaults)) {
     assert.deepEqual(defaultWrites(id), writes, id);
     assert.deepEqual(workflowAccess(id), { workspace: { read: true, write: writes.includes('code'), notes: true, shell: true }, github: githubScopes, agents: true, writes }, id);
@@ -95,6 +95,9 @@ test('reading is open to every work type; writes are chosen per work type within
     assert.equal((await put(id, writes)).value.error, 'invalid_work_writes', id + ' ' + writes);
   assert.equal((await saveManager(admin, '101', { work: { 'custom.abc': { enabled: true } } })).value.error, 'unknown_work_type');
   assert.equal((await put('review.pr', ['reply', 'code', 'pull_request'])).status, 200);
+  // Saved writes take effect within the project's capability ceiling (#850); the test repository starts at read.
+  assert.deepEqual(workPermissions(h.store, '101', 'review.pr').writes, []);
+  await admin('/api/repositories/101/policy', 'PATCH', { capability_ceiling: 'develop' });
   const permissions = workPermissions(h.store, '101', 'review.pr');
   assert.deepEqual(permissions.writes, ['reply', 'code', 'pull_request']); assert.equal(permissions.workspace.write, true);
   assert.deepEqual(writeOptions('review.pr').map(option => [option.id, option.locked]), [['reply', true], ['labels', false], ['code', false], ['pull_request', false]]);

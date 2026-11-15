@@ -127,10 +127,11 @@ test('project list shows progress while settings own mutations and project admin
       await expect(member.locator('#rows .row')).toHaveCount(1);
       await member.locator('#rows [data-repository-id="101"]').getByRole('button',{name:'设置',exact:true}).click();
       await member.getByRole('link',{name:/监听与触发设置/}).click();
-      await member.getByLabel('开启自动开发',{exact:true}).check();
-      await member.getByRole('button',{name:'保存检视与开发策略',exact:true}).click();
+      await member.getByLabel('可开发并开 PR',{exact:true}).check();
+      await member.getByRole('button',{name:'保存能力上限',exact:true}).click();
       await expect(member.locator('#project-page .flash')).toContainText('已保存');
       expect((await admin('/api/repositories/101')).value.policy.development_enabled).toBe(1);
+      expect((await admin('/api/repositories/101')).value.policy.capability_ceiling).toBe('develop');
     }finally{await context.close();}
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });

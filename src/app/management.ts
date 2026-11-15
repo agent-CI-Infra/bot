@@ -15,6 +15,7 @@ import { concurrencyValue, defaultConcurrency } from './settings.js';
 import { policyView, roleBoard, roleConcurrency, roleConcurrencyValue } from '../roles/board.js';
 import { activateActions } from '../actions/storage.js';
 import { authorize, listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
+import { isCeiling, legacySwitchCeiling, projectCeiling, setCeiling, type Ceiling } from '../work/ceiling.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
 // A user created by signing in with GitHub has no local password: the column is NOT NULL, so it carries this sentinel
@@ -311,7 +312,7 @@ export async function management(store: Store, user: Actor, method: string, url:
   if (path === '/api/repositories') {
     if (method === 'GET') {
       const filter = scope(user, 'r.id');
-      return { repositories: projectListPage(store.all(`SELECT r.*,p.model_id,p.review_enabled,p.development_enabled,p.enabled,p.automation,${projectActivityColumns} FROM repositories r
+      return { repositories: projectListPage(store.all(`SELECT r.*,p.model_id,p.review_enabled,p.development_enabled,p.capability_ceiling,p.enabled,p.automation,${projectActivityColumns} FROM repositories r
         JOIN policies p ON p.repository_id=r.id ${projectActivityJoin} WHERE ${filter.sql} ORDER BY r.full_name`, ...filter.args), url) };
     }
   }
@@ -358,7 +359,7 @@ export function taskModelEntries(value:unknown):[string,string][] {
 export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
   repository(store,user,id);
       // Review guidance and the review label are rule files (PUT /api/repositories/:id/rules), not policy fields.
-      fields(body, ['model_id', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','max_revisions','base_branch','automation',
+      fields(body, ['model_id', 'capability_ceiling', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','max_revisions','base_branch','automation',
         'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models','role_concurrency']);
       const taskConcurrency = body.task_concurrency === undefined || body.task_concurrency === null ? body.task_concurrency : concurrencyValue(body.task_concurrency);
       // Per-role limits are an inner limit inside the project concurrency, never a replacement for it; null unsets one role.
@@ -367,6 +368,10 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
       if (body.review_language !== undefined && (typeof body.review_language !== 'string' || !['auto', 'zh', 'en'].includes(body.review_language))) fail(400, 'invalid_review_language');
       for (const key of ['review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
       const previous = store.get('SELECT * FROM policies WHERE repository_id=?', id)!;
+      // The capability ceiling (#850) is the one setting of what the bot may write; the former review and development switches
+      // are still accepted and move it (see legacySwitchCeiling), never both in one request.
+      if (body.capability_ceiling !== undefined && (!isCeiling(body.capability_ceiling) || body.review_enabled !== undefined || body.development_enabled !== undefined)) fail(400, 'invalid_capability_ceiling', 'capability_ceiling');
+      const ceiling = body.capability_ceiling !== undefined ? body.capability_ceiling as Ceiling : legacySwitchCeiling(projectCeiling(store, id, previous), body.review_enabled, body.development_enabled);
       if(body.test_command!==undefined&&(typeof body.test_command!=='string'||body.test_command.length>2048))fail(400,'invalid_test_command');
       if(body.base_branch!==undefined&&(typeof body.base_branch!=='string'||body.base_branch.length>256||body.base_branch.includes('\0')))fail(400,'invalid_base_branch');
       if(body.max_revisions!==undefined&&(!Number.isSafeInteger(body.max_revisions)||Number(body.max_revisions)<0||Number(body.max_revisions)>10))fail(400,'invalid_revision_budget');
@@ -401,10 +406,8 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
           store.run('UPDATE policies SET actions_failures_enabled=? WHERE repository_id=?', Number(body.actions_failures_enabled), id);
           if (body.actions_failures_enabled && !previous.actions_failures_enabled) activateActions(store, id);
         }
-        store.run('UPDATE policies SET model_id=?,review_enabled=?,development_enabled=?,enabled=? WHERE repository_id=?', model,
-          body.review_enabled === undefined ? previous.review_enabled : Number(body.review_enabled),
-          body.development_enabled === undefined ? previous.development_enabled : Number(body.development_enabled),
-          body.enabled === undefined ? previous.enabled : Number(body.enabled), id);
+        store.run('UPDATE policies SET model_id=?,enabled=? WHERE repository_id=?', model, body.enabled === undefined ? previous.enabled : Number(body.enabled), id);
+        setCeiling(store, id, ceiling, user.id);
         if (grant) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', model, id);
         if (taskModels !== undefined) {
           for (const chosen of taskModelGrants) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', chosen, id);

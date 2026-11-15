@@ -6,9 +6,32 @@
 
 ## 项目监听与触发
 
-项目设置中的「监听与触发」（`#/projects/<id>/triggers`）集中管理项目整体的事件来源、标签触发和检视/自动开发许可。它是项目设置的一级入口，不属于 Manager 角色；基本设置、角色概览和 Manager 页只提供链接。Manager 提示词、模型、角色权限与预算仍在「角色 → Manager」编辑，分派记录也保留在那里。
+项目设置中的「监听与触发」（`#/projects/<id>/triggers`）集中管理项目的能力上限、事件来源和标签触发。它是项目设置的一级入口，不属于 Manager 角色；基本设置、角色概览和 Manager 页只提供链接。Manager 提示词、模型、角色权限与预算仍在「角色 → Manager」编辑，分派记录也保留在那里。
 
 新启动的开发、普通任务、检视和 Actions 分析默认由 Manager 安排，无需协调总开关或按任务类型交给主控。项目启停、任务暂停、事件信任与防循环、已授予的权限、预算、独立 QA 及发布检查继续生效。
+
+## 项目能力上限
+
+每个项目有一个能力上限（策略字段 `capability_ceiling`，#850），决定 bot 在这个项目里最多能写到哪一步：
+
+| 档位 | 含义 | GitHub 写入 |
+| --- | --- | --- |
+| `read` 只读问答 | 在飞书和控制台里回答、检视讨论 | 无 |
+| `comment` 可评论和打标签 | 评论、加标签、提 Issue、发检视，Actions 失败可以重跑一次 | Issues、Pull requests |
+| `develop` 可开发并开 PR | 还可以改代码、交付 bot PR | 再加 Contents（文件、分支和引用、合并 PR） |
+
+合并 PR 是 Contents 写，包含在 `develop` 里，Manager 默认就有，不单设一档。bot 的每一次写入都在上限之内：
+
+- 工作类型：检视、通用回复和 Actions 失败处理要 `comment`，开发和开发任务要 `develop`；普通事项、CI 观察、发行说明和接入门禁在任何档位都能运行。工作类型的写入（默认值或项目保存的值）超过上限的部分不生效，降回上限后自动恢复。普通事项的写入默认继承上限：`develop` 时可以修改代码并交付 PR。
+- `github_write`：Issues 和 Pull requests 路由要 `comment`，Contents 路由要 `develop`。项目角色、飞书群、管理助手都经同一个入口，超过上限时返回 `capability_ceiling`，带 `needed`（需要的档位）和 `ceiling`（项目当前档位），不发出任何请求。角色的 GitHub 写权限、群档位和私聊里本人的权限都只能在上限之下再收窄。
+- 交付代码：上限低于 `develop` 时，建开发任务返回 403 `capability_ceiling`（`detail.needed` 为 `develop`），Manager 的 `create_task` 得到同样的拒绝并可以改做报告。
+- 事件开关只决定哪些 GitHub 事件交给 Manager，不增加写权限。
+
+调低上限不会取消任务：需要更高档位的任务在下一个工具调用前停下，状态为 `waiting_permission`、原因 `capability_ceiling_lowered`，已有改动保留；调回足够的档位后点「重试」继续。项目禁用（`enabled=false`）仍会结束任务。
+
+策略接口直接设 `capability_ceiling`。原来的 `review_enabled`、`development_enabled` 仍然可以写，并换算成上限：检视开是至少 `comment`、关是 `read`，开发开是 `develop`、关是至多 `comment`；同一请求里不能和 `capability_ceiling` 同时出现，也不能"开开发、关检视"。读到的这两个字段总是与上限一致。
+
+升级时每个项目按原来的开关和写入取最窄的一档：开发开是 `develop`；否则检视开、Actions 失败处理开或通用回复开是 `comment`；否则 `read`。原来开着开发却关着检视的项目，上限为 `develop`，同时把两个检视工作类型关掉，保持升级前的写入不变。审计里记录每个项目的 `policy.capability_ceiling_migrated`，之后每次修改记 `policy.capability_ceiling`。
 
 升级或移动页面不会开启以前关闭的事件来源，也不会增加写授权；旧任务的配置快照和执行路线保留。开启 Actions 失败来源后即可进入自动分析流程，仍须满足项目启用、模型与实际授权等既有条件。项目监听、任务许可、Manager 提示词及角色设置分别保存，互不覆盖。现有 `GET/PUT /api/repositories/:id/manager` 保留为兼容接口；事件数据仍是项目策略，不因此归属于 Manager 角色。
 
@@ -45,7 +68,7 @@
 
 每个事件写成 `dispatch_events` 里的一条记录，`event_key` 唯一，同一事件只记录一次（重复投递、同一 PR head 的 webhook 都是同一个事件）。记录里有控制面算好的选项：
 
-- **新建选项**：完整的任务规格（类型、对象、head、输入、唯一键），只在开发开关、人加的开发标签、修订预算、一次一个修订等控制面条件满足时才出现。检视结论是否支持开发、有没有指派人，是 Manager 的判断，写在事件的 `facts` 里；
+- **新建选项**：完整的任务规格（类型、对象、head、输入、唯一键），只在项目能力上限为 `develop`、人加的开发标签、修订预算、一次一个修订等控制面条件满足时才出现。检视结论是否支持开发、有没有指派人，是 Manager 的判断，写在事件的 `facts` 里；
 - **续接选项**：同一项目同一对象上排队、执行中或发布中的检视；没有这些时，是这个对象最近一次已发布的检视，续接后它作为同一任务的下一轮继续（#770）。选项在分派时重新查询。PR 推送新提交也是更新：续接的检视把工作区移到新 head 继续，发布中的检视发完后在下一轮看新 head（见[架构](architecture.md#检视与开发数据流)）。还有检视可续接时，推送事件不提供「检视 PR」新建选项，同一次推送不会有两条检视。
 
 后台的分派器逐条认领事件（带租约），交给 Manager 跑一轮普通的 agent 循环（#381）：系统提示是固定的分派规则，后面是完整 Manager 分派提示词；用户消息是事件摘要、同一对象上最近的任务、选项（每个新建选项附带它的写入）和本事件已经做过的 GitHub 写入。循环里 Manager 可以按角色权限用 `github_read`、`github_search`、`read_job_log` 读取事件所在仓库，用 `github_write` 写这个仓库（例如请作者补充信息的评论、分类标签），每一步之前续租。工具说明见[共享 Agent 后端](agent-runtime.md#github-写入github_write)。最多 16 步，最后一步只能分派。模型最后用 `dispatch` 工具回答一种结果：
@@ -85,13 +108,13 @@ Manager 分派提示词在「角色 → Manager」里作为一份完整文本编
 | 发行说明 `release.notes` | `release.notes` | 写发行说明（默认） |
 | Actions 失败处理 `actions.failures` | `actions.failures` | 重跑失败的运行、提报 Issue（默认）；默认关闭 |
 | 接入门禁 `gate.onboarding` | `gate.onboarding` | 提交门禁方案（固定） |
-| 定时检查 `task.request` | `task.request` | 修改代码、开 PR（默认都不选） |
+| 定时检查 `task.request` | `task.request` | 修改代码、开 PR（默认都选，随能力上限生效） |
 
-每个工作类型在项目配置里有开关和写入（策略的 `work_settings`，Actions 失败处理沿用 `actions_failures_enabled`），模型在 `task_models` 里按工作类型 id 保存。检视和开发类型还受项目的检视、开发总开关约束。写入只能在可选范围内选，固定的写入不能去掉，开 PR 必须同时允许修改代码；不合规时返回 400 `invalid_work_writes`。
+每个工作类型在项目配置里有开关和写入（策略的 `work_settings`，Actions 失败处理沿用 `actions_failures_enabled`），模型在 `task_models` 里按工作类型 id 保存。工作类型和它的写入都在项目能力上限之内生效（见上文「项目能力上限」）。写入只能在可选范围内选，固定的写入不能去掉，开 PR 必须同时允许修改代码；不合规时返回 400 `invalid_work_writes`。
 
-一个任务实际可用的写入是三者的交集：项目当前的写入、任务创建时的快照、Manager 为它收窄后的写入。之后收窄项目写入会立刻收窄运行中的任务；放宽项目写入不会让已有任务超过它创建时的范围。事件内容和 Manager 都不能扩大写入。所有 GitHub 写入仍由控制面完成，agent 只拿得到只读令牌。
+一个任务实际可用的写入是三者的交集：项目当前的写入（已按能力上限收窄）、任务创建时的快照、Manager 为它收窄后的写入。之后收窄项目写入会立刻收窄运行中的任务；放宽项目写入不会让已有任务超过它创建时的范围。事件内容和 Manager 都不能扩大写入。所有 GitHub 写入仍由控制面完成，agent 只拿得到只读令牌。
 
-工作类型的写入是框架交付：检视结论（`finish_review`）、从测试通过的候选发布 PR、Actions 重跑与失败提报、发行说明和门禁方案。它们沿用各自的流程，只看工作类型的写入，不再要求执行角色有 GitHub 写权限（#381），所以只读的内置角色照常交付。除此之外的直接写入（例如提报一个后续 Issue）统一用 `github_write`，由执行角色的 GitHub 资源权限决定是否提供；「提报 Issue」写入只留给 Actions 失败处理的 `report_failure`，升级时其他工作类型保存过的这项写入会被忽略。
+工作类型的写入是框架交付：检视结论（`finish_review`）、从测试通过的候选发布 PR、Actions 重跑与失败提报、发行说明和门禁方案。它们沿用各自的流程，只看工作类型的写入，不再要求执行角色有 GitHub 写权限（#381），所以只读的内置角色照常交付。除此之外的直接写入（例如提报一个后续 Issue）统一用 `github_write`，由执行角色的 GitHub 资源权限和项目能力上限决定是否可用；「提报 Issue」写入只留给 Actions 失败处理的 `report_failure`，升级时其他工作类型保存过的这项写入会被忽略。
 
 ## 控制面模块
 

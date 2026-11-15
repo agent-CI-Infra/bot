@@ -12,7 +12,8 @@ function settingsForm(title, nodes, save, { editable = true, caption = '保存',
   const key = draftKey && `${me.id}:${me.actor?.tenant_id || ''}:${target.id}:${draftKey}`;
   const draftNotice = element('p', '', 'muted'); draftNotice.setAttribute('role', 'status');
   if (key && editable) {
-    const valueOf = control => control.type === 'checkbox' ? control.checked : control.value;
+    // A radio group drafts the value of its checked option.
+    const valueOf = control => control.type === 'checkbox' ? control.checked : control.type === 'radio' ? form.elements[control.name].value : control.value;
     const baseline = Object.fromEntries([...form.elements].filter(c => c.name).map(c => [c.name, valueOf(c)]));
     const draft = { ...projectSettingDrafts.get(key) };
     for (const [name, value] of Object.entries(draft)) {

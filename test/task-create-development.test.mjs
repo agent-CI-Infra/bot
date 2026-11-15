@@ -25,21 +25,24 @@ test('D admission uses ordinary development authority, with identical independen
  assert.ok(plain.id);assert.ok(child.id);assert.notEqual(plain.id,child.id);
  for(const result of [plain,child]){const task=s.get('SELECT * FROM tasks WHERE id=?',result.id);assert.equal(task.kind,'task.development');assert.equal(task.object_number,null);assertRequestPullRequest(s,task);assert.deepEqual(taskPermissions(s,task).writes,['code','pull_request']);assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?',task.id).executor_role,null);assert.equal(taskToolAllowed(s,task,'dev','write_file'),true);assert.equal(commands.tool(caller,'create_task',{...args,...(result===child?{as_child:true}:{})}).id,result.id);}
  assert.equal(s.get('SELECT count(*) n FROM task_children').n,1);
- const report=commands.tool(caller,'create_task',{request:'Observe repository facts',criteria:['Factual report']});assert.equal(s.get('SELECT kind FROM tasks WHERE id=?',report.id).kind,'task.request');assert.deepEqual(taskPermissions(s,s.get('SELECT * FROM tasks WHERE id=?',report.id)).writes,[]);
+ const report=commands.tool(caller,'create_task',{request:'Observe repository facts',criteria:['Factual report']});assert.equal(s.get('SELECT kind FROM tasks WHERE id=?',report.id).kind,'task.request');
+ // An ordinary task inherits the capability ceiling (#850): at develop it holds code and PR writes too.
+ assert.deepEqual(taskPermissions(s,s.get('SELECT * FROM tasks WHERE id=?',report.id)).writes,['code','pull_request']);
 });
 test('refused development creation returns useful feedback, leaves no task and allows a different decision',t=>{
- const {s,caller,commands,args}=fixture(t);s.run('UPDATE policies SET development_enabled=0');const before=s.get('SELECT count(*) n FROM tasks').n;
- const refused=commands.tool(caller,'create_task',{...args,as_child:true});assert.equal(refused.error,'task_software_disabled');assert.equal(refused.created,false);assert.match(refused.instruction,/Project development/);assert.equal(s.get('SELECT count(*) n FROM tasks').n,before);assert.equal(s.get('SELECT count(*) n FROM task_children').n,0);
+ const {s,caller,commands,args}=fixture(t);s.run("UPDATE policies SET capability_ceiling='comment'");const before=s.get('SELECT count(*) n FROM tasks').n;
+ const refused=commands.tool(caller,'create_task',{...args,as_child:true});assert.equal(refused.error,'capability_ceiling');assert.equal(refused.needed,'develop');assert.equal(refused.ceiling,'comment');assert.equal(refused.created,false);assert.match(refused.instruction,/capability ceiling/);assert.equal(s.get('SELECT count(*) n FROM tasks').n,before);assert.equal(s.get('SELECT count(*) n FROM task_children').n,0);
  assert.ok(commands.tool(caller,'create_task',{request:'Report missing development setup',criteria:['Name missing setup']}).id);
 });
 test('development intent and parent linkage cannot turn an ordinary report into source write authority',t=>{
- const {s,commands,args}=fixture(t);s.run("UPDATE tasks SET kind='task.request' WHERE id='parent'");
+ // Ordinary tasks inherit the ceiling (#850); one an administrator narrowed to no writes lends none.
+ const {s,commands,args}=fixture(t);s.run("UPDATE tasks SET kind='task.request' WHERE id='parent'");s.run(`UPDATE policies SET work_settings='{"task.request":{"writes":[]}}'`);
  const caller=roleTaskCaller(s,'r','manager',{source_task_id:'parent',guard(){}});
  for(const as_child of [false,true])assert.equal(commands.tool(caller,'create_task',{...args,as_child}).error,'task_external_write_forbidden');
  assert.equal(s.get('SELECT count(*) n FROM tasks').n,1);
 });
 test('task creation feedback never swallows live cancellation; ordinary development can be revoked',t=>{
- const {s,caller,commands,args}=fixture(t);const {id}=commands.tool(caller,'create_task',args);s.run('UPDATE policies SET development_enabled=0');assert.throws(()=>assertRequestPullRequest(s,s.get('SELECT * FROM tasks WHERE id=?',id)),{code:'task_software_disabled'});
+ const {s,caller,commands,args}=fixture(t);const {id}=commands.tool(caller,'create_task',args);s.run("UPDATE policies SET capability_ceiling='comment'");assert.throws(()=>assertRequestPullRequest(s,s.get('SELECT * FROM tasks WHERE id=?',id)),{code:'capability_ceiling'});
  s.run("UPDATE tasks SET status='cancelled' WHERE id='parent'");assert.throws(()=>commands.tool(caller,'create_task',args),{code:'task_claim_revoked'});
 });
 

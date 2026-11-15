@@ -48,3 +48,10 @@ function parseEnv(text) {
   });
   return env;
 }
+// The project's capability ceiling (#850): the one setting of what the bot may write here. Work-type writes, role GitHub
+// writes, Feishu group levels and personal grants all stay at or below it.
+const projectCeilingOptions = [
+  ['read', '只读问答', '在飞书和控制台里回答、检视讨论；不在 GitHub 上写任何内容。'],
+  ['comment', '可评论和打标签', '在 GitHub 上评论、加标签、提 Issue、发检视；Actions 失败可以重跑一次。不改代码。'],
+  ['develop', '可开发并开 PR', '还可以改代码、交付 bot PR；Manager 默认还能合并 PR 和直接写分支（Contents 写）。']];
+const projectCeilingOf = policy => policy.capability_ceiling || (policy.development_enabled ? 'develop' : policy.review_enabled ? 'comment' : 'read');

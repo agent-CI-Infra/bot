@@ -204,6 +204,7 @@ test('review rules choose the triggers, and the comment language and only the ef
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: `http://127.0.0.1:${server.address().port}/v1`, api_key: 'rules-fixture-key', model_name: 'fixture' })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
   let workspace = proxyWorkspace(); const rules = { language: 'zh', instructions: 'Focus on API compatibility.' };
+  h.store.run("UPDATE policies SET capability_ceiling='develop' WHERE repository_id='101'");
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('r','101','review.pr','running','pr',7,'c'),('d','101','development.issue','running','dev',1,'c')");
   await legacyAgentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='r'"), workspace, new Redactor(), async () => {}, { mode: 'review', review_rules: rules, effective_rules:{files:[{path:'.bot/rules/pr-review.md',source:'repository',effective:'Repository review content.'}]} });
   assert.match(prompts[0], /Simplified Chinese/); assert.doesNotMatch(prompts[0], /Administrator review guidance|Focus on API compatibility/);assert.match(prompts[0],/Repository review content\./);assert.doesNotMatch(requestTexts[0],/Focus on API compatibility|Administrator review guidance/);
@@ -332,7 +333,8 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
   await fetch(endpoint + '/fixture/labels', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repository_id: 101, labels: repositoryLabels ?? null }) });
   if (faults) await fetch(endpoint + '/fixture/faults', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(faults) });
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'publication-fixture-key', model_name: 'fixture' })).value.model;
-  await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, development_enabled: custom?.development ?? true, test_command: policy });
+  // development: false keeps the project's capability ceiling at comment (#850), so replies still post but deliver no code.
+  await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, capability_ceiling: custom?.development === false ? 'comment' : 'develop', test_command: policy });
   const taskId = randomBytes(24).toString('hex'), input = custom ? {} : { review: { implementation_goal: 'Fix requested addition' } };
   // A reply task (the work type of former custom workflows) follows the Manager's reply section with the project's writes.
   if (custom) assert.equal((await saveManager(admin, '101', { content: '## 通用回复 `reply`\n\nFix what the Issue asks.\n', work: { reply: { enabled: true, writes: custom.writes } } })).status, 200);
@@ -399,9 +401,13 @@ test('a reply task whose role only reads is not offered github_write: a forced c
   assert.deepEqual(d.h.store.all('SELECT kind FROM github_effects ORDER BY rowid').map(row => row.kind), ['branch', 'pull_request', 'comment']);
 });
 
-test('a reply task cannot open a PR while the project development switch is off, and keeps going', async t => {
+test('a reply task is not offered a PR while the project capability ceiling is below develop (#850)', async t => {
   const d = await developmentHarness(t, { custom: { writes: ['reply', 'code', 'pull_request'], development: false }, repair: false });
-  assert.equal(d.replies[0].error, 'development_disabled');
+  // The saved PR write waits for the ceiling: the run is configured without the publication tool, so nothing is published.
+  const config = JSON.parse(Buffer.concat(d.requests.filter(r => r.type === 'workspace_agent_config').map(r => Buffer.from(r.base64, 'base64'))).toString());
+  assert.deepEqual(config.capabilities.writes, ['reply']); assert.equal(config.capabilities.github.publication, 'none');
+  assert.ok(!config.tools.some(tool => (tool.function?.name ?? tool.name) === 'create_pull_request'));
+  assert.deepEqual(d.replies, []);
   // The fixture GitHub is shared by this file's tests, so the absence of writes is read from this task's own outbox.
   assert.equal(d.h.store.get('SELECT count(*) n FROM github_effects').n, 0); assert.equal(d.h.store.get('SELECT count(*) n FROM development_candidates').n, 0);
 });
@@ -434,7 +440,8 @@ test('an Actions failure analysis runs as a task in the project computer: the fa
   repoDirectory = join(h.directory, 'repo'); mkdirSync(repoDirectory);
   await fetch(endpoint + '/fixture/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ github_token: a.token }) });
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'analysis-fixture-key', model_name: 'fixture' })).value.model;
-  await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, actions_failures_enabled: true });
+  // Rerunning and filing an Issue need the capability ceiling at comment (#850).
+  await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, actions_failures_enabled: true, capability_ceiling: 'comment' });
   h.store.run("INSERT INTO actions_failure_attempts(repository_id,run_id,attempt) VALUES('101',800,1)");
   const input = { run: { id: 800, attempt: 1, workflow: 'CI', head_sha: head, url: 'https://github.com/fixture/project-101/actions/runs/800' },
     failed_jobs: [{ job_id: 91, name: 'install', failed_steps: [{ number: 2, name: 'Install' }], failed_step_output: 'HTTPError: HTTP 429 Too Many Requests' },

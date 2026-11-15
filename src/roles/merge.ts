@@ -11,6 +11,7 @@ import { traceEvent } from '../tasks/trace.js';
 import {authorizeMerge,requestIntegration,integrationStorage} from '../tasks/integration.js';
 import {mergeQueue} from '../projects/gate-facts.js';
 import {recordRetryFailure,resolveRetry} from '../tasks/retries.js';
+import {covers,projectCeiling} from '../work/ceiling.js';
 
 async function checks(s:Store,github:GitHub,taskId:string,head:string){
  const runs:any[]=[];
@@ -74,14 +75,14 @@ async function mergeRequest(s:Store,user:Actor,method:string,url:URL,input:Json,
  assertCoordinationCurrent(s,task!.id,record.candidate);
  const policy=s.get('SELECT * FROM policies WHERE repository_id=?',task!.repository_id);
  assertRequiredStages(s,task!.id,deliveryCandidate(new TaskRecords(s).get(task!.id).candidate,task!.kind));
- if(!policy?.enabled||!policy.development_enabled||accepted.policy_hash!==sha(String(policy.test_command||'')))fail(409,'merge_policy_changed');
+ if(!policy?.enabled||!covers(projectCeiling(s,task!.repository_id,policy),'develop')||accepted.policy_hash!==sha(String(policy.test_command||'')))fail(409,'merge_policy_changed');
  const owned=s.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task!.repository_id,result.pr_number);if(!owned||owned.sha!==head)fail(409,'merge_requires_owned_head');
  const github=new GitHub(s,s.get('SELECT * FROM repositories WHERE id=?',task!.repository_id)!,new Redactor(),async()=>{},githubUrl);await github.connect(true,undefined,{contents:'write',pull_requests:'write',checks:'read',statuses:'read'},false);
  let pr:any;
  const validate=async()=>{
   const current=new TaskRecords(s).get(task!.id);if(!['pr_opened','completed'].includes(current.progress.status)||current.revision!==record.revision||current.candidate?.id!==record.candidate?.id||current.acceptance?.candidate_id!==accepted.candidate_id)fail(409,'merge_context_changed');
   assertCoordinationCurrent(s,task!.id,current.candidate);
-  const currentPolicy=s.get('SELECT * FROM policies WHERE repository_id=?',task!.repository_id);if(!currentPolicy?.enabled||!currentPolicy.development_enabled||sha(String(currentPolicy.test_command||''))!==accepted.policy_hash)fail(409,'merge_policy_changed');
+  const currentPolicy=s.get('SELECT * FROM policies WHERE repository_id=?',task!.repository_id);if(!currentPolicy?.enabled||!covers(projectCeiling(s,task!.repository_id,currentPolicy),'develop')||sha(String(currentPolicy.test_command||''))!==accepted.policy_hash)fail(409,'merge_policy_changed');
   pr=await github.object('review.pr',result.pr_number);if(pr.head?.sha!==head||pr.base?.ref!==github.defaultBranch||pr.draft||pr.state!=='open'&&!pr.merged)fail(409,'merge_head_or_target_changed');
  };
  await validate();authorizeMerge(s,task!,user,head,String(input.merge_method));

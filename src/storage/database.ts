@@ -21,6 +21,7 @@ import { rateLimitStorage } from '../github/rate-limits.js';
 import { actionsStorage } from '../actions/storage.js';
 import { workStorage } from '../work/settings.js';
 import { migrateWorkflows } from '../work/migration.js';
+import { ceilingStorage } from '../work/ceiling.js';
 import { dispatchStorage } from '../dispatch/store.js';
 import { githubWriteStorage } from '../github/write.js';
 import { gateOnboardingStorage } from '../projects/gate-storage.js';
@@ -278,6 +279,8 @@ export class Store {
     worktreeStorage(this);
     // Workflows became the Manager and project configuration (#207); an upgraded database moves them once.
     migrateWorkflows(this);
+    // One capability ceiling per project (#850), derived once from the switches and writes it replaces.
+    ceilingStorage(this);
   }
   private get now() { return this.options.now ?? (() => performance.now()); }
   private logSlow(ms: number, op: string, detail: string | (() => string)) {

@@ -216,7 +216,7 @@ test('project removal deletes notes after the rows commit, and a notes volume it
 test('review and development system prompts require useful maintained notes even when repository rules replace built-ins', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin,a.id,'101');
   const model=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://model.invalid/v1',api_key:'prompt-fixture-key',model_name:'fixture'})).value.model;
-  await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
+  await admin('/api/repositories/101/policy','PATCH',{model_id:model.id,capability_ceiling:'develop'});
   for (const kind of ['review.issue','review.pr','development.issue']) {
     const chunks=[]; let config, published=false;
     const work={log:()=>{},call:async(_key,request)=>{

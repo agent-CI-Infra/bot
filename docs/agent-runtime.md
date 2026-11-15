@@ -45,6 +45,7 @@ Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这
 所有 agent 用同一个写工具（#381，`src/github/write.ts`）：`github_write {method, path, body?, key}`，形状和 GitHub REST 一致。`method` 是 `POST`、`PATCH`、`PUT` 或 `DELETE`，`path` 相对仓库、不带查询串（例如 `POST /issues`、`POST /issues/12/comments`、`POST /issues/12/labels`、`PATCH /issues/12`、`POST /pulls`、`POST /pulls/7/reviews`、`PUT /pulls/7/merge`、`PUT /contents/docs/a.md`、`POST /git/refs`），`body` 是 REST 请求体。服务多个仓库的入口（群聊助手、管理助手）另带 `repository`；任务入口和 Manager 固定为任务或事件所在仓库。
 
 - **授权**：每条路由按 GitHub 细粒度权限归到一个资源：Issue（Issue、评论、标签、指派人、里程碑）、Pull Request（PR、检视、行内评论、请求检视人、更新分支）、Contents（文件、Git 对象和引用、合并 PR）。按编号操作的 `/issues/{n}/…` 先用只读令牌查清对象是 Issue 还是 PR，再按它的资源判断；评论编号先查到所属对象。调用方角色对该资源有读写（或旧配置里对应的创建、评论、分类标签子集）才允许，发送前再核对一次实时权限。仓库外和未列出的路由一律拒绝。
+- **能力上限**：项目的能力上限（#850）是每个调用方的顶：Issue 和 Pull Request 路由要 `comment`，Contents 路由要 `develop`。超过时返回 `capability_ceiling`，带 `needed`、`ceiling` 和说明，不签发令牌、不发出请求，并记一条 `refused`；签发令牌后、发送前再按当时的上限核对一次。见[项目能力上限](workflows.md#项目能力上限)。
 - **令牌**：控制面为这一次调用签发只含该资源写权限加 Metadata 读的安装令牌，发送后撤销；GitHub 返回的令牌权限多于请求时不发送。Token 账号使用账号自身的令牌。agent 和命令环境只拿得到只读令牌。
 - **文本**：给人看的 `title`、`body`（Issue、评论、PR、检视及其行内评论）转义 `@`，并按公开文本规则脱敏；其他字符串（代码、提交说明、引用）只去掉已知密钥，不转义。Base64 文件内容是 UTF-8 时按文本脱敏，二进制内容含已知密钥时拒绝。正文末尾加 `<!-- dept-bot-write:… -->` 标记，Token 账号以普通用户身份写入时，bot 自己的评论不会再作为新事件回来；角色任务或 Manager 开的 Issue、PR 也不作为新事件交给 Manager。
 - **去重**：key 在一个范围内唯一：一个任务（重试同一任务不会重复写）、一个分派事件、一轮群聊或管理助手对话。已经写成功的 key 直接返回上次的结果（`replayed: true`）；同一 key 换了请求返回 `github_write_key_conflict`；结果未确认时返回 `github_write_unknown`，由 agent 先读 GitHub 核对，再换新 key 写。

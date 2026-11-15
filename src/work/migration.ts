@@ -134,6 +134,8 @@ export function migrateWorkflows(store: Store) {
         WHERE repository_id=?`, Number(filters['issue.opened']), Number(filters['issue.updated']), Number(filters['pull_request.opened']), Number(filters['pull_request.synchronize']),
         Number(filters['pull_request.updated']), JSON.stringify(work), JSON.stringify(saved), JSON.stringify(taskModels), repositoryId);
       if (policyColumns.has('rule_overrides')) store.run('UPDATE policies SET rule_overrides=? WHERE repository_id=?', JSON.stringify(ruleOverrides(content, overrides)), repositoryId);
+      // The capability ceiling (#850) is derived again from the switches and writes written here (see ceilingStorage).
+      if (policyColumns.has('capability_ceiling')) store.run('UPDATE policies SET capability_ceiling=NULL WHERE repository_id=?', repositoryId);
       store.run('INSERT INTO manager_revisions VALUES(?,?,?,?,?,?,?,?)', repositoryId, 1, content, JSON.stringify(work), JSON.stringify(eventFilters(store, repositoryId)), 'migration', null, now);
       const report = { manager_revision: 1, sections: [...parseSections(content).sections.keys()], work_settings: work, event_filters: filters,
         models: { reply: taskModels.reply ?? null }, custom_workflows: customs.map(custom => ({ id: custom.id, name: custom.name, enabled: !!custom.enabled })), warnings };

@@ -30,13 +30,16 @@ const projectTriggerError = err => {
 };
 
 function projectWorkPolicyCard() {
-  const target = current, policy = target.policy, id = target.id;
-  return settingsForm('检视与开发策略', [
-    checkbox('review_enabled', policy.review_enabled, '开启 Issue 与 PR 检视'), checkbox('development_enabled', policy.development_enabled, '开启自动开发'),
-    note('事件来源决定项目接收哪些通知；这里决定项目可以启动检视或自动开发任务。开启任务类型不会增加 GitHub 写权限，项目禁用或任务暂停时仍不会执行。')],
-    form => api(`/api/repositories/${id}/policy`, 'PATCH', changed({ review_enabled: form.elements.review_enabled.checked, development_enabled: form.elements.development_enabled.checked },
-      { review_enabled: !!policy.review_enabled, development_enabled: !!policy.development_enabled })),
-    { editable: target.canConfigure !== false, draftKey: 'automation', caption: '保存检视与开发策略' });
+  const target = current, policy = target.policy, id = target.id, saved = projectCeilingOf(policy);
+  const choices = element('fieldset', '', 'project-ceiling-choices'); choices.append(element('legend', 'bot 在这个项目里最多能写到哪一步'));
+  for (const [level, title, detail] of projectCeilingOptions) {
+    const label = element('label', '', 'check'); label.append(input('capability_ceiling', level, { type: 'radio', checked: level === saved }), ' ' + title);
+    choices.append(label, note(detail));
+  }
+  return settingsForm('能力上限', [choices,
+    note('工作类型的写入、角色的 GitHub 写、飞书群档位和私聊个人权限都以这一档为上限，只能更窄。调低后，受影响的任务在下一个工具调用前停下并写明原因，不会被取消；调回后可以重试。事件来源只决定哪些 GitHub 事件交给 Manager，不增加写权限。')],
+    async form => { const level = form.elements.capability_ceiling.value; if (level !== saved) await api(`/api/repositories/${id}/policy`, 'PATCH', { capability_ceiling: level }); },
+    { editable: target.canConfigure !== false, draftKey: 'automation', caption: '保存能力上限' });
 }
 
 function projectEventFiltersCard(manager, target, live) {

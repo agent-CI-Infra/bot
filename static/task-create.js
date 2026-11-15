@@ -7,7 +7,8 @@ function taskCreationError(value) {
   const messages = { capability_forbidden: '当前身份没有创建此项目任务的权限。', project_disabled: '项目已禁用，请先由有权管理员启用。',
     installation_unavailable: '项目安装当前不可用，请先检查接入状态。', installation_scope_changed: '安装仓库范围已变化，请重新同步。',
     management_revision_conflict: '项目配置已变化。重新读取执行上下文后再提交。', task_pull_request_forbidden: '项目或执行角色未获代码与 PR 写入权限，请核对配置。',
-    task_software_disabled: '项目尚未启用普通任务的软件交付，请核对工作类型与开发设置。' };
+    task_software_disabled: '项目尚未启用普通任务的软件交付，请核对工作类型与开发设置。',
+    capability_ceiling: '项目能力上限不是「可开发并开 PR」，不能交付代码；请项目管理员在「项目设置 → 监听与触发」调整。' };
   return messages[code] || code;
 }
 async function renderNewTask(request) {

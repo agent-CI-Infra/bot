@@ -213,16 +213,17 @@ test('基本设置放弃分支草稿时保留 监听与触发页的策略草稿'
     const widths = await page.evaluate(() => [document.querySelector('.console-save-bar').getBoundingClientRect().width, document.querySelector('.project-settings-layout').getBoundingClientRect().width]);
     expect(widths[0]).toBeGreaterThan(widths[1] * 0.9);
     await page.getByRole('link', { name: /监听与触发设置/ }).click();
-    const review = page.getByLabel('开启 Issue 与 PR 检视', { exact: true });
-    const before = await review.isChecked(); await review.setChecked(!before);
+    // A choice of the capability ceiling (#850) is a draft of its own: the test repository starts at read.
+    const develop = page.getByLabel('可开发并开 PR', { exact: true });
+    await expect(page.getByLabel('只读问答', { exact: true })).toBeChecked(); await develop.check();
     await page.locator('.project-nav a[href="#/projects/101/basic"]').click();
     await expect(branch).toHaveValue('feature/group-discard');
     await confirmDiscard(page);
     await expect(branch).toHaveValue(initialBranch);
     await page.getByRole('link', { name: /监听与触发设置/ }).click();
-    await expect(review).toBeChecked({ checked: !before });
-    await page.getByRole('button', { name: '保存检视与开发策略', exact: true }).click();
-    await expect.poll(async () => !!(await admin('/api/repositories/101')).value.policy.review_enabled).toBe(!before);
+    await expect(develop).toBeChecked();
+    await page.getByRole('button', { name: '保存能力上限', exact: true }).click();
+    await expect.poll(async () => (await admin('/api/repositories/101')).value.policy.capability_ceiling).toBe('develop');
     expect((await admin('/api/repositories/101')).value.policy.base_branch || '').toBe(initialBranch);
   } finally { await h.stop(); }
 });
