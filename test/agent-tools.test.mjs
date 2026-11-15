@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { Store } from '../dist/storage/database.js';
 import { beginRun, endRun } from '../dist/tasks/trace.js';
-import { Redactor } from '../dist/agent/common.js';
+import { Redactor, TaskError } from '../dist/agent/common.js';
 import { activeCliVersions, allocateLease, recordRunCliVersion, roleRunStorage } from '../dist/roles/role-run.js';
 import { registerRoleHarness } from '../dist/roles/harness.js';
 import { runRole } from '../dist/roles/run.js';
