@@ -56,8 +56,12 @@ test('deliveryEventName falls back to 其他事件 for unknown routes', () => {
   assert.equal(page.run("deliveryEventName('workflow_run.completed')"), '工作流已完成');
   assert.equal(page.run("deliveryEventName('issue_comment.created')"), 'Issue 有新评论');
   assert.equal(page.run("deliveryEventName('issue_comment')"), 'Issue 有新评论');
+  assert.equal(page.run("deliveryEventName('issue_comment.edited')"), 'Issue 评论已编辑');
+  assert.equal(page.run("deliveryEventName('issue_comment.deleted')"), 'Issue 评论已删除');
   assert.equal(page.run("deliveryEventName('pull_request_review.submitted')"), 'Pull Request 收到检视意见');
+  assert.equal(page.run("deliveryEventName('pull_request_review.dismissed')"), 'Pull Request 检视已撤销');
   assert.equal(page.run("deliveryEventName('pull_request_review_comment.created')"), 'Pull Request 有行内评论');
+  assert.equal(page.run("deliveryEventName('pull_request_review_comment.deleted')"), 'Pull Request 行内评论已删除');
   assert.equal(page.run("deliveryEventName('mystery.happened')"), '其他事件');
   assert.equal(page.run("deliveryEventName('', 'issues')"), 'Issue');
 });
