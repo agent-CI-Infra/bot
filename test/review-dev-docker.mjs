@@ -189,7 +189,7 @@ try{
   assert.deepEqual((await api('/api/status')),{review_available:true,development_available:true,project_environments_available:true,model_calls_available:true});
   const browser=await chromium.launch();try{
     const page=await browser.newPage({viewport:{width:1365,height:900}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
-    await page.goto(base);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'看板',exact:true}).click();await page.locator('#board-columns').getByText(/fixture\/project-101/).first().waitFor();
+    await page.goto(base);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'任务看板',exact:true}).click();await page.locator('#board-columns').getByText(/fixture\/project-101/).first().waitFor();
     assert.ok((await page.locator('#board-columns').innerText()).includes('fixture/project-101'));assert.ok((await page.locator('#board-columns').innerText()).includes('fixture/project-202'));await page.screenshot({path:'.tmp/review-dev/admin-desktop.png'});
     // The process view shows the model's steps and the commands it ran in the project computer.
     await page.locator('[data-card-key="101/issue/1"][data-card-category="review.issue"] .board-card-title').click();await page.locator('#timeline .step-model').first().waitFor();
@@ -197,8 +197,8 @@ try{
     await page.getByRole('button',{name:'打开项目机器配置',exact:true}).click();await page.locator('#machine-status').waitFor();
     await page.getByTestId('project-hub-link').click();
     await page.getByTestId('project-hub').getByRole('link',{name:'运行状态',exact:true}).click();await page.locator('#activity-status').getByRole('heading',{name:'最近任务',exact:true}).waitFor();
-    await page.getByRole('button',{name:'看板',exact:true}).click();await page.locator('[data-card-key="101/issue/1"][data-card-category="development.issue"]').waitFor();
-    await page.getByRole('button',{name:'退出登录',exact:true}).click();await page.getByLabel('用户名',{exact:true}).fill('member');await page.getByLabel('密码',{exact:true}).fill(memberPassword);await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'看板',exact:true}).click();await page.locator('#board-columns').getByText(/fixture\/project-101/).first().waitFor();
+    await page.getByRole('button',{name:'任务看板',exact:true}).click();await page.locator('[data-card-key="101/issue/1"][data-card-category="development.issue"]').waitFor();
+    await page.getByRole('button',{name:'退出登录',exact:true}).click();await page.getByLabel('用户名',{exact:true}).fill('member');await page.getByLabel('密码',{exact:true}).fill(memberPassword);await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'任务看板',exact:true}).click();await page.locator('#board-columns').getByText(/fixture\/project-101/).first().waitFor();
     assert.ok(!(await page.locator('#board-columns').innerText()).includes('fixture/project-202'));await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:'.tmp/review-dev/project-mobile.png'});assert.deepEqual(errors,[]);
     const foreignTask=(await tasks('202',3,'development.issue'))[0].id;
     const beforeRetry=(await api('/api/tasks/'+foreignTask)).task;

@@ -10,7 +10,7 @@ import { TaskEngine } from '../dist/agent/engine.js';
 const out = resolve('.tmp/flatten-settings-nav');
 const work = [
   ['项目总览', /#\/projects\/101\/overview$/],
-  ['管理对话', null], // opens the chat, does not change the address
+  ['管理助手', null], // opens the chat, does not change the address
   ['发版本', /#\/projects\/101\/release$/],
   ['项目知识', /#\/projects\/101\/knowledge$/],
   ['运行状态', /#\/projects\/101\/activity$/]
@@ -59,7 +59,7 @@ test('项目入口总览可到达全部页面，页头有设置入口，设置�
       await page.evaluate(() => { location.hash = '#/projects/101/menu'; });
       await expect(hub()).toBeVisible();
       await hub().getByRole('link', { name: caption, exact: true }).click();
-      if (caption === '管理对话') {
+      if (caption === '管理助手') {
         await expect(page).toHaveURL(/#\/projects\/101\/menu$/);
         await expect(page.locator('#management-chat')).toBeVisible({ timeout: 15000 });
         await page.getByRole('button', { name: '收起管理助手', exact: true }).click();

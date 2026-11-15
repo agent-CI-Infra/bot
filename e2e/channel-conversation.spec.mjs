@@ -36,7 +36,7 @@ for (const width of [1440, 390]) test(`continuous group assistant and private ma
     await personal.locator('.feishu-row-title strong').click();
     await expect(page.getByLabel('消息与执行时间线')).toContainText('你好');
     await expect(page.getByLabel('消息与执行时间线')).toContainText('你好！可按项目名称管理任务，私信沿用同一会话。');
-    await expect(page.getByRole('link', { name: '打开管理对话与执行记录', exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: '打开管理助手与执行记录', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     mkdirSync('.tmp/channel-conversation-312', { recursive: true }); await page.screenshot({ path: `.tmp/channel-conversation-312/conversation-${width}.png`, fullPage: true });
     expect(errors).toEqual([]);

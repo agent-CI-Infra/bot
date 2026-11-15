@@ -16,14 +16,14 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     // Accounts, users, review and development no longer have top-level tabs.
     for (const gone of ['机器人账号', '用户', '检视', '开发', '接入向导', '消息渠道']) await expect(page.locator('#tabs').getByRole('button', { name: gone, exact: true })).toHaveCount(0);
     const tab = name => ({ click: () => consoleNavigate(page, name) }), current = () => page.locator('#tabs [aria-current=page]');
-    for (const [name, address] of [['看板', '#/board'], ['统计', '#/costs'], ['Webhook 投递', '#/events'], ['外部执行端', '#/external'], ['管理对话', '#/management'], ['项目', '#/projects']]) {
+    for (const [name, address] of [['任务看板', '#/board'], ['用量与成本', '#/costs'], ['Webhook 投递', '#/events'], ['外部执行端', '#/external'], ['管理助手', '#/management'], ['项目', '#/projects']]) {
       await tab(name).click(); await expect(page).toHaveURL(new RegExp(address.replace(/[#/]/g, '\\$&') + '$'));
       await page.reload(); await expect(current()).toHaveText(name === '外部执行端' ? '个人设置' : name);
       if (name === '外部执行端') await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('外部执行端');
     }
     for (const [address, category] of [['#/reviews', 'review'], ['#/developments', 'development']]) {
-      await page.goto(h.admin + '/' + address); await expect(current()).toHaveText('看板'); await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue(category);
-      await expect(page).toHaveURL(/#\/board$/); await page.reload(); await expect(current()).toHaveText('看板'); await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue('');
+      await page.goto(h.admin + '/' + address); await expect(current()).toHaveText('任务看板'); await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue(category);
+      await expect(page).toHaveURL(/#\/board$/); await page.reload(); await expect(current()).toHaveText('任务看板'); await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue('');
     }
     // Global settings: one category at a time, each with its own address; a reload keeps it.
     await tab('全局设置').click(); await expect(page).toHaveURL(/#\/settings$/);

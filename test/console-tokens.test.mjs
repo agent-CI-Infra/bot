@@ -69,8 +69,9 @@ const SHARED = {
   // Review of #584: 对话 headings and captions that had no scale step get one instead of a literal.
   '--font-size-caption': '10px', '--font-size-title': '20px', '--font-size-hero': '28px', '--font-size-brand': '22px',
   '--line-height-body': '1.5', '--line-height-tight': '1.35', '--line-height-relaxed': '1.65',
-  '--radius-1': '4px', '--radius-2': '5px',
-  '--shadow-card': '0 2px 6px #182d4b03',
+  '--radius-1': '4px', '--radius-2': '5px', '--radius-control': '7px',
+  '--shadow-card': '0 2px 6px #182d4b03', '--shadow-card-hover': '0 3px 10px #182d4b14',
+  '--shadow-popover': '0 8px 24px #182d4b26',
 
 };
 
@@ -89,6 +90,16 @@ test('tokens the module sheets read through shell.css keep their contract value'
       assert.ok(fallback, `${name} reads var(${token}) with no fallback and shell.css does not declare it`);
     }
   }
+});
+
+test('#482 board.css reads shared colour, radius and typography tokens instead of a second theme', () => {
+  const source = read('static/board.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.deepEqual(source.match(/#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})\b/gi) ?? [],
+    [], 'board colours must be shared tokens, including borders, shadows and stage colours');
+  assert.deepEqual(source.match(/font-size:\s*\d+(?:\.\d+)?px/gi) ?? [],
+    [], 'board text must use the shared type scale');
+  assert.match(source, /\.board-option\[aria-pressed=true\]\{background:var\(--color-brand\);color:var\(--color-text-inverse\);border-color:var\(--color-brand\)\}/);
+  assert.match(source, /\.board-card:focus-within\{outline:2px solid var\(--focus-ring\)/);
 });
 
 // #551: the leftover teal palette in style.css was a second theme. Login, projects and
@@ -209,4 +220,9 @@ test('#584 neutral status badges keep AA text contrast and the info alert ring s
   assert.match(source, /\.status-info\.status-alert\{box-shadow:inset 0 0 0 1px var\(--color-info-border\)\}/);
   assert.ok(contrast(SHARED['--color-status-neutral'], SHARED['--color-status-neutral-bg']) >= 4.5, 'neutral badge text must stay at WCAG AA for 12px text');
   assert.ok(contrast(SHARED['--color-info-border'], SHARED['--color-info-bg']) >= 1.3, 'info alert ring must be distinguishable from the info badge fill');
+});
+
+test('#482 board empty text keeps AA contrast on the shared neutral column surface', () => {
+  assert.match(read('static/board.css'), /\.board-empty\{[^}]*color:var\(--color-status-neutral\)/);
+  assert.ok(contrast(SHARED['--color-status-neutral'], SHARED['--color-status-neutral-bg']) >= 4.5);
 });

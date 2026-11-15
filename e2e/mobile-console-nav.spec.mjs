@@ -172,7 +172,7 @@ test('「更多」不再重复底栏目的地，按三组补充且只保留当�
     const captions = await page.locator('.console-group a .console-link-copy > span').allInnerTexts();
     const flat = captions.map(text => text.trim());
     // A destination that the bar already offers is not repeated as a row here.
-    for (const duplicate of ['项目', '任务', '待处理', '助手', '全部项目', '任务看板', '管理对话']) {
+    for (const duplicate of ['项目', '任务', '待处理', '助手', '全部项目', '任务看板', '管理助手']) {
       expect(flat).not.toContain(duplicate);
     }
     // Substantially shorter than the site map it replaces (which was ~40 links for a super administrator with a project).

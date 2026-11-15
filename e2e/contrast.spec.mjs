@@ -107,7 +107,7 @@ test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少
     await page.screenshot({ path: `${out}/projects-after-1440.png`, fullPage: true });
 
     await page.goto(h.admin + '/#/costs');
-    await expect(page.getByRole('heading', { name: '统计', exact: true })).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible({ timeout: 10000 });
     const costs = await page.evaluate(contrastScript());
     const note = costs.mutedText;
     expect(note).toBeTruthy();
@@ -129,7 +129,7 @@ test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少
     await page.goto(h.admin + '/');
     // already logged in — go via logout? login is only signed-out. Just shot costs and more.
     await page.goto(h.admin + '/#/costs');
-    await expect(page.getByRole('heading', { name: '统计', exact: true })).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible({ timeout: 10000 });
     await page.screenshot({ path: `${out}/costs-after-390.png`, fullPage: true });
     await page.goto(h.admin + '/#/more');
     await expect(page.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();

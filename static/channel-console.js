@@ -283,7 +283,7 @@ async function renderChannelConsole(request) {
       } else {
         bindingMeta.hidden = true;
         if (result.conversation.mode === 'management' && result.conversation.can_continue) {
-          contextActions.append(channelLink('#/management', '打开管理对话与执行记录', 'button-link quiet'));
+          contextActions.append(channelLink('#/management', '打开管理助手与执行记录', 'button-link quiet'));
         }
       }
       diagnosticText.textContent = `本地同步：${channelSyncText(result.sync_state)}。缺口：${result.gaps.map(g => channelGapText(g.reason)).join('、') || '本次未报告'}。可见范围受飞书权限与保留策略约束。模型请求 ${result.conversation.usage.requests || 0} 次；未知费用不按零处理。`;

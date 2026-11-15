@@ -27,7 +27,7 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
     await expect(page.getByRole('button', { name: '退出登录' })).toBeVisible();
 
     await page.goto(h.admin + '/#/costs');
-    await expect(page.getByRole('heading', { name: '统计', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: '任务统计' })).toBeVisible();
     // start() may route again after login; resolve the cells again if that redraw replaces the table.
     const summary = page.locator('.statistics-task-summary');
@@ -102,7 +102,7 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
     expect(mobile.overflow).toBe(390);
     await page.screenshot({ path: `${out}/roles-after-390.png`, fullPage: true });
     await page.goto(h.admin + '/#/costs');
-    await expect(page.getByRole('heading', { name: '统计', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     await page.screenshot({ path: `${out}/costs-after-390.png`, fullPage: true });
     await page.goto(h.admin + '/#/events');

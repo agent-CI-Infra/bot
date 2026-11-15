@@ -291,7 +291,7 @@ const settingsCards = {
     const [{ service_roles: roles, permission_items: items }, { models }] = await Promise.all([api('/api/service-roles'), api('/api/models')]);
     const view = { request, roles, items, models: models.filter(model => model.repository_id === null) };
     const intro = card('服务角色');
-    intro.append(note('服务角色是平台级的助手：管理助手用于控制台管理对话和个人私聊，仓库问答助手是群聊的默认推荐角色。它们不属于某个项目，使用部署共享模型，用量按角色单独记录，不计入任何项目。项目里的 Manager、Dev、QA 等工作角色在各项目的「角色」页配置。'));
+    intro.append(note('服务角色是平台级的助手：管理助手服务于控制台页面和个人私聊，仓库问答助手是群聊的默认推荐角色。它们不属于某个项目，使用部署共享模型，用量按角色单独记录，不计入任何项目。项目里的 Manager、Dev、QA 等工作角色在各项目的「角色」页配置。'));
     return [intro, ...roles.map(role => serviceRoleCard(view, role)), serviceRoleCreate(view)];
   },
   async users(request, id) {

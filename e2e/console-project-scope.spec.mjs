@@ -324,7 +324,7 @@ test('页内显式管理范围不被顶栏切换冲掉，跟随默认的那种�
     // The address names the project the assistant opens on. Because that address also becomes the shell default, the two
     // agree, and one scope gets one wording: it is reported as the default it is, not as an override it is not.
     await page.goto(h.admin + '/#/projects/101/overview');
-    await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click();
+    await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click();
     await expect(scope).toHaveValue('project:101');
     await expect(page.locator('#console-project')).toHaveValue('101');
     await expect(page.locator('#management-scope-note')).toContainText('顶栏默认');
@@ -519,7 +519,7 @@ test('非项目也非清单页的设置地址回落到批量清单，数字项�
 // #494 item 2: the picker now also runs on #/management, where the page does not re-render. The inbox link carries the
 // current project, so it has to follow the same value the assistant followed. (#531 removed the console's own 新建任务
 // link from the shell, so this case names the one link that still exists.)
-test('管理对话页切换顶栏项目时，带项目的收件箱导航链接跟着切换', async ({ page }) => {
+test('管理助手页切换顶栏项目时，带项目的收件箱导航链接跟着切换', async ({ page }) => {
   const { h, password } = await fixture();
   try {
     await page.setViewportSize({ width: 1440, height: 1000 });

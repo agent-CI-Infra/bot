@@ -11,7 +11,7 @@ async function fixture() {
 async function login(page, url, password) {
   await page.goto(url); await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
-  await page.locator('#tabs').getByRole('button', { name: '看板', exact: true }).click();
+  await page.locator('#tabs').getByRole('button', { name: '任务看板', exact: true }).click();
   await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
 }
 
