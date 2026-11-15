@@ -74,12 +74,35 @@ function projectListControls(row) {
   if (registered) preview.href = `#/projects/${row.id}/activity`;
   updateProjectTaskPreview(preview, row); features.append(preview); group.append(features, feedback); return group;
 }
-let projectActivityPending = false;
-async function refreshProjectActivity() {
-  if (projectActivityPending) return; projectActivityPending = true; const request = renderVersion, requestedAt = Date.now();
+// #790: this read is re-asked every five seconds. 401/403/404 will answer the same way however often it is asked, so
+// the poll stops and says so above the rows it keeps; anything else may clear on its own, so it keeps asking on a delay
+// that doubles up to half a minute, and one success puts the five-second cadence back.
+let projectActivityPending = false, projectActivityDelay = 0, projectActivityStopped = false, projectActivityNextAt = 0;
+function projectActivityDue() { return !projectActivityStopped && Date.now() >= projectActivityNextAt; }
+function clearProjectActivityStatus() {
+  for (const status of document.querySelectorAll('#rows .project-activity-status')) status.remove();
+}
+function showProjectActivityStatus(text) {
+  clearProjectActivityStatus();
+  const status = element('p', text, 'view-warning project-activity-status');
+  status.setAttribute('role', 'status'); status.setAttribute('data-testid', 'project-activity-status');
+  // A stopped listing is read again by hand; a delayed one is still retried by the poll itself.
+  if (projectActivityStopped) status.append(button('重新读取任务数', () => {
+    projectActivityStopped = false; projectActivityDelay = 0; projectActivityNextAt = 0; return refreshProjectActivity(true);
+  }, 'quiet'));
+  $('rows').prepend(status);
+}
+// The project list render reads the same endpoint, so a list that draws again lifts a stop or a delay left by the poll.
+function resetProjectActivityPoll() {
+  projectActivityStopped = false; projectActivityDelay = 0; projectActivityNextAt = 0; clearProjectActivityStatus();
+}
+async function refreshProjectActivity(force = false) {
+  if (projectActivityPending || (!force && !projectActivityDue())) return;
+  projectActivityPending = true; const request = renderVersion, requestedAt = Date.now();
   try {
     const {repositories} = await api(projectListAddress());
     if (request !== renderVersion || tab !== 'projects' || projectRoute()) return;
+    projectActivityStopped = false; projectActivityDelay = 0; projectActivityNextAt = 0; clearProjectActivityStatus();
     const rows = new Map(repositories.map(row => [row.id, row]));
     for (const line of document.querySelectorAll('#rows .project-list-row, .global-project-row')) {
       const row = rows.get(line.dataset.repositoryId); if (row) {
@@ -92,7 +115,13 @@ async function refreshProjectActivity() {
       }
     }
   } catch (err) {
-    if (request === renderVersion) for (const preview of document.querySelectorAll('#rows .project-task-preview')) preview.title = `任务数更新失败：${err.message}；点击刷新重试`;
+    if (request !== renderVersion || tab !== 'projects' || projectRoute()) return;
+    const poll = pollAfterError(err, projectActivityDelay);
+    projectActivityStopped = poll.terminal; projectActivityDelay = poll.delay;
+    projectActivityNextAt = poll.terminal ? 0 : Date.now() + poll.delay;
+    showProjectActivityStatus(poll.terminal
+      ? `任务数已停止更新：${err.message}。已有任务数保留；重新登录，或点「重新读取任务数」再读一次。`
+      : `任务数更新失败：${err.message}；${Math.ceil(poll.delay / 1000)} 秒后重试。`);
   } finally { projectActivityPending = false; }
 }
 
