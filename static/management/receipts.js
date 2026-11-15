@@ -13,7 +13,7 @@ const managementAccessHints = {
 function managementAccessMessage(err) {
   if (err && err.code && managementAccessHints[err.code]) return managementAccessHints[err.code];
   if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) return '读取管理会话超时，请重试。这不代表你的权限被撤销。';
-  return (err && err.message) ? '无法打开管理会话：' + err.message : '暂时无法连接管理助手，请重试。';
+  return (err && err.message) ? '无法打开管理会话：' + readErrorText(err) : '暂时无法连接管理助手，请重试。';
 }
 
 const managementFailureHints = {

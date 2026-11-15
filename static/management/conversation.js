@@ -139,7 +139,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   }
   async function refreshTools() {
     const generation = scopeGeneration;
-    try { await configureForms(); } catch (err) { if (alive(generation)) { toolsDirty = true; forms.replaceChildren(note('快捷操作暂不可用：' + err.message), button('重新读取', refreshTools, 'quiet')); } }
+    try { await configureForms(); } catch (err) { if (alive(generation)) { toolsDirty = true; forms.replaceChildren(note('快捷操作暂不可用：' + readErrorText(err)), button('重新读取', refreshTools, 'quiet')); } }
   }
   const target = () => scope.value.startsWith('project:') ? { project_id: scope.value.slice(8) } : {};
   const query = (operation, targetValue = target()) => submit({ query: { operation, target: targetValue, arguments: {} } });

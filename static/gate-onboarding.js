@@ -120,7 +120,7 @@ function gateOnboardingError(err, context = gateOnboardingContext) {
     $('gate-onboarding-error').textContent = '当前项目访问权限已失效，请关闭后按当前授权重新进入。'; return;
   }
   const code = err.code || String(err.message || '').split(' · ')[1];
-  $('gate-onboarding-error').textContent = gateOnboardingErrors[code] || err.message;
+  $('gate-onboarding-error').textContent = gateOnboardingErrors[code] || readErrorText(err);
 }
 function gateOnboardingPane(pane) {
   if (!['plan','files','verify','confirm'].includes(pane)) return;

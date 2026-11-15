@@ -15,7 +15,7 @@ async function channelSchedules(chatId) {
   const load = async () => {
     box.replaceChildren(element('strong', '定时任务'), note('到点后用这里的提示词唤醒本会话的助手，在本会话的权限内查询、汇总或处理，再把结果发回本会话；超出权限的项目和操作会被拒绝。私聊用管理助手和你本人的当前权限，群聊用本群绑定的服务角色和项目范围。模型用量记在对应的服务角色上。'));
     let data;
-    try { data = await api('/api/channels/chats/' + chatId + '/schedules'); } catch (err) { box.append(note(scheduleError(err.message))); return; }
+    try { data = await api('/api/channels/chats/' + chatId + '/schedules'); } catch (err) { box.append(note(scheduleError(readErrorText(err)))); return; }
     const list = element('div');
     let fill = () => {};
     for (const s of data.schedules) {

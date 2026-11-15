@@ -90,7 +90,7 @@ function machineSection(globalSettings = false) {
       // Re-reading an uncached local projection cannot discover repository overrides; fetch the branch first.
       if (unread && target.rules) await api(`/api/repositories/${target.id}/rules/refresh`, 'POST', {});
       if (live()) await reloadProject();
-    } catch (err) { if (live()) { sourceReadError.textContent = '重新读取失败：' + err.message; sourceReadError.setAttribute('role', 'alert'); sourceReadError.hidden = false; } }
+    } catch (err) { if (live()) { sourceReadError.textContent = '重新读取失败：' + readErrorText(err); sourceReadError.setAttribute('role', 'alert'); sourceReadError.hidden = false; } }
     finally { reread.disabled = false; }
   }, 'quiet');
   const canEdit = editable && !unread;
