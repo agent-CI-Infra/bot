@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConsole } from './console-page.mjs';
+import { readFileSync } from 'node:fs';
 
 // #790: the project list asks for its task counts every five seconds. A 401/403/404 will answer the same way however
 // often it is asked, so the poll stops and says so where the reader can see it, with one manual way to read again;
@@ -89,4 +90,12 @@ test('the visible stop offers one manual read, and it works once the listing is 
   await retry.listeners.click[0]();
   assert.equal(reads, before + 1, 'the control reads the list again by hand');
   assert.equal(page.$('rows').querySelector('[data-testid=project-activity-status]'), null);
+});
+
+// The review's second point: the status line names .view-warning, so that class has to carry a visible warning style;
+// otherwise the stop is drawn as ordinary body text.
+test('the visible warning has its own stylesheet rule', () => {
+  const css = readFileSync(new URL('../static/views.css', import.meta.url), 'utf8');
+  assert.match(css, /\.view-warning\{[^}]*background:/, 'a .view-warning rule must give the status line its own background');
+  assert.match(css, /\.view-warning\{[^}]*color:/, 'and its own text colour');
 });
