@@ -75,14 +75,19 @@ function grantExpiryText(grant) {
   return identityExpiry(grant.expires_at);
 }
 // github_connection.status / next_step from the API are Chinese; the page translates by state code (#527).
+// #848: waiting repositories of a trusted organization are the person's own to start, so their sentences say so.
+function pendingVariant(connection) {
+  const pending = connection.pending_repositories || [], own = pending.filter(repo => repo.self_start).length;
+  return connection.state !== 'pending_activation' || !own ? connection.state : own === pending.length ? 'pending_self_start' : 'pending_mixed';
+}
 function githubConnectionStatus(connection) {
   if (!connection || !connection.state) return '';
   const pending = (connection.pending_repositories || []).length;
-  return t('identity.github.status.' + connection.state, { count: connection.repository_count, pending, hidden: connection.hidden_repository_count ?? 0 });
+  return t('identity.github.status.' + pendingVariant(connection), { count: connection.repository_count, pending, hidden: connection.hidden_repository_count ?? 0 });
 }
 function githubConnectionNextStep(connection) {
   if (!connection || !connection.state) return '';
-  const key = 'identity.github.next.' + connection.state;
+  const key = 'identity.github.next.' + pendingVariant(connection);
   const text = t(key, { hidden: connection.hidden_repository_count ?? 0, organization: connection.tenant_name || '' });
   return text === key ? (connection.next_step || '') : text;
 }
@@ -254,13 +259,14 @@ async function renderIdentity() {
     }
     overview.append(list);
   }
-  if (startedRepos.length && pendingRepos.length) overview.append(note(t('identity.github.pending_also', { pending: pendingRepos.length })));
+  if (startedRepos.length && pendingRepos.length) overview.append(note(t(pendingRepos.some(repo => repo.self_start) ? 'identity.github.pending_also_unstarted' : 'identity.github.pending_also', { pending: pendingRepos.length })));
   if (pendingRepos.length) {
     const list = element('ul', '', 'identity-pending-repos');
     list.setAttribute('aria-label', t('identity.pending_repos'));
     for (const repo of pendingRepos) {
       const item = element('li', '');
-      item.append(element('strong', repo.full_name), element('span', t('identity.pending_repo_status'), 'status status-warning'));
+      item.append(element('strong', repo.full_name), repo.self_start ? element('span', t('identity.pending_repo_self_start'), 'status status-info')
+        : element('span', t('identity.pending_repo_status'), 'status status-warning'));
       list.append(item);
     }
     overview.append(list);

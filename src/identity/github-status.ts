@@ -9,9 +9,11 @@ export type GitHubConnectionState = 'disconnected' | 'reauthorization_required' 
   | 'connected' | 'outside_tenant' | 'not_listed' | 'pending_activation' | 'no_repositories';
 export type GitHubConnectionAction = 'connect' | 'reconnect' | 'reverify' | 'choose_repos' | 'wait_activation' | 'switch_tenant' | null;
 export interface GitHubRepositoryRef { id: string; full_name: string }
+/** An installed repository waiting to be started; `self_start` when its owner is trusted, so its administrator starts it (#848). */
+export interface PendingRepository extends GitHubRepositoryRef { self_start: boolean }
 export interface GitHubConnection {
   state: GitHubConnectionState; status: string; next_step: string; action: GitHubConnectionAction;
-  repository_count: number; repositories: GitHubRepositoryRef[]; pending_repositories: GitHubRepositoryRef[];
+  repository_count: number; repositories: GitHubRepositoryRef[]; pending_repositories: PendingRepository[];
   install_url: string | null;
   /** Granted repositories the session's project list does not show (`outside_tenant` / `not_listed`), else 0. */
   hidden_repository_count: number;
@@ -36,19 +38,19 @@ export function githubAppInstallUrl(store: Store): string | null {
 
 /** Installed repositories this principal already administers, but that a platform administrator has not started.
  *  When a tenant is selected, only grants of that tenant are considered, matching the project list. */
-export function pendingInstalledRepositories(store: Store, principal: string, tenantId?: string | null): GitHubRepositoryRef[] {
+export function pendingInstalledRepositories(store: Store, principal: string, tenantId?: string | null): PendingRepository[] {
   // Only administration counts: a collaborator's derived grant (#847) does not make a repository theirs to start.
   const active = listEffectiveScopes(store, principal).filter(g => g.source === 'github_derived' && g.state === 'active'
     && (g.role === 'project_admin' || g.role === 'org_admin') && (!tenantId || g.tenant_id === tenantId));
-  const seen = new Map<string, GitHubRepositoryRef>();
+  const seen = new Map<string, PendingRepository>();
   for (const grant of active) {
     const row = store.get('SELECT installation_ref,project_id FROM scoped_grants WHERE id=?', grant.grant_id);
     if (!row?.installation_ref) continue;
-    const repos = store.all(`SELECT r.repository_id AS id,r.full_name FROM installation_repositories r
+    const repos = store.all(`SELECT r.repository_id AS id,r.full_name,EXISTS(SELECT 1 FROM trusted_organizations o WHERE o.owner_id=r.owner_id) AS self_start FROM installation_repositories r
       WHERE r.installation_ref=? AND r.present=1 AND NOT EXISTS(SELECT 1 FROM repositories p WHERE p.id=r.repository_id)
       AND (? IS NULL OR r.repository_id=?)`, row.installation_ref, row.project_id, row.project_id);
     for (const repo of repos) {
-      if (typeof repo.id === 'string' && typeof repo.full_name === 'string' && repo.full_name) seen.set(repo.id, { id: repo.id, full_name: repo.full_name });
+      if (typeof repo.id === 'string' && typeof repo.full_name === 'string' && repo.full_name) seen.set(repo.id, { id: repo.id, full_name: repo.full_name, self_start: !!repo.self_start });
     }
   }
   return [...seen.values()].sort(byName);
@@ -104,9 +106,12 @@ export function githubConnection(store: Store, principal: string, scope: { visib
     return result('pending_verification', 'GitHub 授权待验证', '重新验证 GitHub 权限；若安装还在同步，请稍后再试。', 'reverify');
   }
   if (pending.length) {
+    // In a trusted organization the next step is the person's own (#848): 「启动」 in the project list.
     return result('pending_activation',
-      `已登录 GitHub，有 ${pending.length} 个仓库已安装但还没有被超级管理员启动`,
-      '请联系超级管理员在控制台启动这些仓库。', 'wait_activation');
+      `已登录 GitHub，有 ${pending.length} 个仓库已安装但还没有${pending.some(repo => repo.self_start) ? '' : '被超级管理员'}启动`,
+      pending.every(repo => repo.self_start) ? '这些仓库所属的组织已受信任，请在项目列表里点「启动」。'
+        : pending.some(repo => repo.self_start) ? '在项目列表里可以自己启动所属组织已受信任的仓库，其余的请联系超级管理员在控制台启动。'
+        : '请联系超级管理员在控制台启动这些仓库。', 'wait_activation');
   }
   // "App not installed on my repos" and "I am not a collaborator there" look the same in stored data:
   // installations belong to the whole deployment, and verification persists no grant for repositories without access.

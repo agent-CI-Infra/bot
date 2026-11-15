@@ -84,7 +84,7 @@ async function render(quiet = false) {
   // The probe row is part of the signature: when the 51st row appears or goes, only `next` changes, and a quiet refresh
   // that compared the drawn rows alone would return early and leave the pager stale (#747).
   const signature=tab+'\n'+(hiddenView?'hidden\n':'')+params+'\n'+String(hasMore)+'\n'+JSON.stringify(rows)+'\n'+JSON.stringify(pendingRepositories)+'\n'+String(!!pendingRepositoriesError);if(quiet&&signature===listSignature)return;listSignature=signature;
-  const lines=[]; $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条事件` : hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目${pendingRepositories.length?`，${pendingRepositories.length} 个待超级管理员启动`:pendingRepositoriesError?'，等待启动的仓库暂时无法读取':''}` : `${rows.length} 条记录`;
+  const lines=[]; $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条事件` : hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目${pendingRepositories.length?`，${pendingRepositories.length} 个待${pendingRepositories.some(repo=>repo.self_start)?'':'超级管理员'}启动`:pendingRepositoriesError?'，等待启动的仓库暂时无法读取':''}` : `${rows.length} 条记录`;
   const count = $('count'); if (count) count.title = count.textContent;
   $('previous').disabled = offset === 0; $('next').disabled = !hasMore; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
