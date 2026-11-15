@@ -194,12 +194,16 @@ test('project removal deletes notes after the rows commit, and a notes volume it
   f.docker.request = async (method,path,...args) => { if (method==='DELETE'&&path.startsWith('/networks/')) throw new Error('injected environment failure'); return original(method,path,...args); };
   await failRemoval('101'); f.docker.request=original;
   // The volume goes only after the row transaction committed, so a manager that cannot delete it no longer fails the
-  // deletion: the project is gone, the volume may be left behind, and the failure is audited against the project.
+  // deletion: the project is gone, the volume stays behind, and the failure is audited against the project. Retrying the
+  // deletion cannot clean it up — the repository row is gone, so the request never reaches the manager again; the orphan
+  // volume is left for the outbox reconciliation tracked in #771.
   f.docker.failVolume=true;
   assert.equal((await admin('/api/projects/202','DELETE',{})).status,200);
   assert.ok(!h.store.get("SELECT id FROM repositories WHERE id='202'"),'the committed project rows are gone');
-  assert.ok(f.docker.volumes.has(f.projects.notesName('202')),'the volume the manager could not delete may remain');
+  assert.ok(f.docker.volumes.has(f.projects.notesName('202')),'the volume the manager could not delete stays behind');
   assert.ok(h.store.get("SELECT 1 FROM audit WHERE repository_id='202' AND action='repository.notes_removal_failed'"),'the failed notes removal is audited');
+  assert.equal((await admin('/api/projects/202','DELETE',{})).status,404,'a retry finds no repository and touches no manager');
+  assert.ok(f.docker.volumes.has(f.projects.notesName('202')),'the retry leaves the orphan volume alone');
   f.docker.failVolume=false;
   h.store.db.exec("CREATE TRIGGER refuse_project_deletion BEFORE DELETE ON repositories WHEN OLD.id='303' BEGIN SELECT RAISE(ABORT,'injected record failure'); END");
   await failRemoval('303');
