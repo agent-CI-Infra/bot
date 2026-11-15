@@ -149,3 +149,44 @@ test('a JSON answer written as text still finishes the session without asking it
   assert.equal(state.state,'completed');assert.equal(state.result.summary,'Text result');
   assert.equal(events.filter(e=>e.type==='agent_nudge').length,0);
 });
+
+// #769: a task gets its worktree when it first needs one. A file tool that finds no checkout asks the control plane through
+// the mailbox (kind workspace, not a model tool) and runs again with the answer; ../context/ needs no checkout at all.
+test('a file tool without a checkout asks the control plane for the task worktree once, then runs; a refusal is the tool result',async t=>{
+  const base=await mkdtemp(join(tmpdir(),'pi-workspace-')),id=randomWorkspaceId(),root=join(base,id),dir=join(root,'agent');
+  await mkdir(dir,{recursive:true});await mkdir(join(root,'context'));await writeFile(join(root,'context','object.json'),'{"title":"Fix"}');t.after(()=>rm(base,{recursive:true,force:true}));
+  const calls=[{name:'read_file',args:{path:'../context/object.json'}},{name:'read_file',args:{path:'README.md'}},{name:'run_command',args:{command:'cat README.md'}},{name:'finish_review',args:{summary:'Done'}}];
+  await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:id,system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),
+    tools:['read_file','run_command','finish_review'].map(name=>({function:{name,parameters:{type:'object'}}}))}));
+  const entry=pathToFileURL(resolve('runner/pi-entry.mjs')).href,fixture=pathToFileURL(resolve('test/fixtures/pi-session.mjs')).href,hook=join(base,'hooks.mjs');
+  await writeFile(hook,`import {registerHooks} from 'node:module';registerHooks({resolve(specifier,context,next){if(specifier==='@earendil-works/pi-coding-agent'||context.parentURL===${JSON.stringify(entry)}&&specifier==='./workspace.mjs')return {url:${JSON.stringify(fixture)},shortCircuit:true};return next(specifier,context);}});`);
+  const child=spawn(process.execPath,['--import',hook,resolve('runner/pi-entry.mjs'),root],{cwd:root,env:{...process.env,BOT_RUNNER_TEST_ROOT:base},stdio:['ignore','pipe','pipe']}),closed=once(child,'close');
+  let output='';child.stderr.on('data',chunk=>output+=chunk);t.after(async()=>{child.kill('SIGKILL');await closed;});
+  // The control plane binds the worktree (here: a checkout directory appears) and answers.
+  const request=await until(async()=>{const names=await readdir(join(dir,'tool-requests')).catch(()=>[]);const file=names.find(n=>n.endsWith('.json'));return file&&JSON.parse(await readFile(join(dir,'tool-requests',file),'utf8'));});
+  assert.deepEqual([request.name,request.kind,request.arguments],['ensure_workspace','workspace',{}]);
+  await mkdir(join(root,'repo'));await writeFile(join(root,'repo','README.md'),'fixture readme\n');
+  await mkdir(join(dir,'tool-replies'),{recursive:true});await writeFile(join(dir,'tool-replies',`${request.id}.json`),JSON.stringify({worktree:{id:'x',mode:'read',reused:false}}));
+  assert.equal((await closed)[0],0,output);
+  const events=(await readFile(join(dir,'events.jsonl'),'utf8')).trim().split('\n').map(JSON.parse),results=events.filter(e=>e.type==='tool').map(e=>e.result);
+  assert.deepEqual([results[0].content,results[1].content,results[2].output],['{"title":"Fix"}','fixture readme\n','fixture readme\n']);
+  assert.deepEqual(await readdir(join(dir,'tool-requests')),[],'one request, for the first repository read');
+});
+
+test('a task that chose no workspace answers its file tools with the control plane\'s reason',async t=>{
+  const base=await mkdtemp(join(tmpdir(),'pi-workspace-')),id=randomWorkspaceId(),root=join(base,id),dir=join(root,'agent');
+  await mkdir(dir,{recursive:true});t.after(()=>rm(base,{recursive:true,force:true}));
+  const calls=[{name:'read_file',args:{path:'README.md'}},{name:'finish_review',args:{summary:'Done'}}];
+  await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:id,system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),
+    tools:['read_file','finish_review'].map(name=>({function:{name,parameters:{type:'object'}}}))}));
+  const entry=pathToFileURL(resolve('runner/pi-entry.mjs')).href,fixture=pathToFileURL(resolve('test/fixtures/pi-session.mjs')).href,hook=join(base,'hooks.mjs');
+  await writeFile(hook,`import {registerHooks} from 'node:module';registerHooks({resolve(specifier,context,next){if(specifier==='@earendil-works/pi-coding-agent'||context.parentURL===${JSON.stringify(entry)}&&specifier==='./workspace.mjs')return {url:${JSON.stringify(fixture)},shortCircuit:true};return next(specifier,context);}});`);
+  const child=spawn(process.execPath,['--import',hook,resolve('runner/pi-entry.mjs'),root],{cwd:root,env:{...process.env,BOT_RUNNER_TEST_ROOT:base},stdio:['ignore','pipe','pipe']}),closed=once(child,'close');
+  t.after(async()=>{child.kill('SIGKILL');await closed;});
+  const request=await until(async()=>{const names=await readdir(join(dir,'tool-requests')).catch(()=>[]);const file=names.find(n=>n.endsWith('.json'));return file&&JSON.parse(await readFile(join(dir,'tool-requests',file),'utf8'));});
+  await mkdir(join(dir,'tool-replies'),{recursive:true});
+  await writeFile(join(dir,'tool-replies',`${request.id}.json`),JSON.stringify({error:'no_workspace',message:'This task chose to work without repository files.'}));
+  assert.equal((await closed)[0],0);
+  const events=(await readFile(join(dir,'events.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.find(e=>e.type==='tool'&&e.name==='read_file').result,{error:'no_workspace',message:'This task chose to work without repository files.'});
+});

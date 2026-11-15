@@ -213,8 +213,14 @@ test('publication replies are allowed and policy cleanup preserves the waiting a
   // replaced are gone.
   const worktree_id=id(),commit={sha:'a'.repeat(40),tree_sha:'b'.repeat(40)};
   for(const type of ['workspace_worktree_create','workspace_worktree_bind']){await execute({type,workspace_id,worktree_id,...commit});assert.ok(f.docker.runs.some(r=>r.type===type&&r.worktree_id===worktree_id),type);}
+  // A chosen worktree may be taken with its changes kept or reset; the worktrees list_workspaces inspects are named by id.
+  for(const on_changes of ['reset','keep_changes']){await execute({type:'workspace_worktree_bind',workspace_id,worktree_id,on_changes,...commit});assert.ok(f.docker.runs.some(r=>r.on_changes===on_changes),on_changes);}
+  await execute({type:'workspace_worktree_inspect',workspace_id,worktree_ids:[worktree_id]});assert.ok(f.docker.runs.some(r=>r.type==='workspace_worktree_inspect'&&r.worktree_ids?.[0]===worktree_id));
   for(const request of [{type:'workspace_worktree_bind',workspace_id,...commit},{type:'workspace_worktree_bind',workspace_id,worktree_id:'x',...commit},{type:'workspace_read',workspace_id,worktree_id,path:'a'},
-    {type:'workspace_reuse',workspace_id,...commit},{type:'workspace_cache',workspace_id,...commit},{type:'worktrees_list',entries:[]}])
+    {type:'workspace_reuse',workspace_id,...commit},{type:'workspace_cache',workspace_id,...commit},{type:'worktrees_list',entries:[]},
+    {type:'workspace_worktree_bind',workspace_id,worktree_id,on_changes:'discard',...commit},{type:'workspace_worktree_create',workspace_id,worktree_id,on_changes:'reset',...commit},
+    {type:'workspace_worktree_inspect',workspace_id},{type:'workspace_worktree_inspect',workspace_id,worktree_ids:['x']},{type:'workspace_worktree_inspect',workspace_id,worktree_ids:Array.from({length:31},id)},
+    {type:'workspace_read',workspace_id,worktree_ids:[worktree_id],path:'a'}])
     await assert.rejects(execute(request),/invalid_runner_request/,JSON.stringify(request));
   for(const type of ['worktrees_list','tasks_list']){await execute({type});assert.ok(f.docker.runs.some(r=>r.type===type),type);}
   await execute({ type: 'workspace_command', workspace_id, command: 'node --test', timeout_ms: null });

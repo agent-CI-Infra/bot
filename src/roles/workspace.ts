@@ -59,6 +59,9 @@ export function roleBackendWorkspace(workspaceOrGetter:Workspace|(()=>Workspace)
  return async(instance,resolved)=>{
   const workspace=typeof workspaceOrGetter==='function'?workspaceOrGetter():workspaceOrGetter;
   if(['claude_code','codex'].includes(resolved.snapshot.harness.id)){
+   // The CLI works in the checkout with its own file tools, so the task's worktree is bound before it starts (#769); a task
+   // that chose none gives it an empty directory.
+   const ready=await workspace.ensure?.()??{};if(ready.error&&ready.error!=='no_workspace')stop('workspace_unavailable','waiting_environment',ready.message);
    let egress=false;
    try{const env=await workspace.manager.call('GET','/v1/projects/'+workspace.task.repository_id);egress=computerEgress(env);}catch{}
    return {roleWorkspace:workspace,containerOptions:{manager:workspace.manager,egress}};

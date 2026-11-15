@@ -1,5 +1,6 @@
 // Drive the real Pi entry point without a provider or SDK installation. File and command tools still run normally.
 import {workspace as run} from '../../runner/workspace.mjs';
+export {notSelected} from '../../runner/workspace.mjs';
 import {environment} from '../../runner/command.mjs';
 
 Object.assign(environment,{HOME:process.env.BOT_RUNNER_TEST_ROOT,TMPDIR:process.env.BOT_RUNNER_TEST_ROOT});

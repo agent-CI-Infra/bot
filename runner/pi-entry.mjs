@@ -4,7 +4,7 @@ import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {randomBytes} from 'node:crypto';
 import {createAgentSession,createExtensionRuntime,ModelRuntime,SessionManager,SettingsManager,estimateTokens} from '@earendil-works/pi-coding-agent';
-import {workspace} from './workspace.mjs';
+import {workspace as runnerWorkspace,notSelected} from './workspace.mjs';
 import {commandOptions} from './command-policy.mjs';
 import {waitModelReply} from './model-reply.mjs';
 import {toolCapabilityError,platformWrites} from './capabilities.mjs';
@@ -16,6 +16,8 @@ import {runSubagent} from './subagent.mjs';
 import {local} from './paths.mjs';
 import {noSpace,toolDiskFull} from './disk.mjs';
 
+// The model works in the checkout, root/repo, also before the task has its worktree (#769): the first repository read or
+// command binds it there. Tools resolve repository paths against it on every call.
 const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
 if(local)config.system+='\nLocal execution: this is a host process, not a container. Stay inside your task workspace and project notes. Never search the host root filesystem or inspect unrelated projects or credentials. Never use pkill, killall or process-name-wide termination. Use keep_background for servers; the manager cleans your task processes when you finish. Read ../notes/environment.md for verified local tooling.';
 const boot=(await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({}))).boot;
@@ -45,6 +47,18 @@ const finishNudges=3;
 const controlTools=new Set(config.control_tools||[]);
 // The SDK version that actually runs, from its installed manifest; reported with every state and session event.
 const sdk={agent:'pi',package:'@earendil-works/pi-coding-agent',version:await readFile(new URL('../package.json',import.meta.resolve('@earendil-works/pi-coding-agent')),'utf8').then(text=>JSON.parse(text).version).catch(()=>'unknown'),node:process.version};
+// A task gets its worktree when it first needs one (#769). A file tool or command that finds none asks the control plane to
+// bind it, the one the agent chose or the system's choice, and runs again; it answers with the control plane's reason when
+// the task has none (the agent chose no workspace).
+async function workspace(request,signal){
+  try{return await runnerWorkspace(request);}
+  catch(error){
+    if(!String(error?.message).startsWith(notSelected))throw error;
+    const reply=await dispatchTool('ensure_workspace',{},{kind:'workspace',signal,cancelledError:'workspace_cancelled'});
+    if(reply?.error)return {error:reply.error,...(reply.message?{message:reply.message}:{})};
+    return runnerWorkspace(request);
+  }
+}
 async function controlTool(name,args,signal){
   const reply=await dispatchTool(name,args,{kind:'control',signal,cancelledError:'control_tool_cancelled'});
   return reply&&typeof reply==='object'&&'result' in reply?reply:{result:reply};
@@ -111,10 +125,10 @@ try{
       // A sub-agent is a new session built from its own configuration; it never sees this conversation.
       else if(name==='start_agent'&&!agent)result=await runSubagent({config:cfg,args,id:'agent-'+randomBytes(6).toString('hex'),createSession:(child,childId)=>createSession(child,childId,[]),writeEvent});
       else if(name==='read_tool_result')result=await readLocalResult(dir+'/results',cfg.workspace_id+':'+(agent||''),args);
-      else if(name==='read_file')result=await workspace({type:'workspace_read',workspace_id:cfg.workspace_id,path:args.path});
+      else if(name==='read_file')result=await workspace({type:'workspace_read',workspace_id:cfg.workspace_id,path:args.path},signal);
       else if(name==='write_file'){
         const note=typeof args.path==='string'&&args.path.startsWith('../notes/');
-        try{const data=Buffer.from(args.content);if(!note&&data.length>48000)throw new Error('file_too_large');result=await workspace({type:'workspace_write',workspace_id:cfg.workspace_id,path:args.path,base64:data.toString('base64'),offset:0,final:true,mode:'100644'});}
+        try{const data=Buffer.from(args.content);if(!note&&data.length>48000)throw new Error('file_too_large');result=await workspace({type:'workspace_write',workspace_id:cfg.workspace_id,path:args.path,base64:data.toString('base64'),offset:0,final:true,mode:'100644'},signal);}
         catch(error){result={error:String(error.message)};}
       }else if(name==='run_command'){
         const policy=cfg.command_timeout??{default_seconds:null,max_seconds:600};
@@ -125,7 +139,7 @@ try{
           const secret_env=await grant.env(signal);
           try{await prepareLocalResults(outputDirectory);
             await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify(clean({operation_id:id,output_file:outputDirectory+'/'+outputId+'.utf8',...options.request})),{mode:0o600});
-            result=await workspace({...options.request,workspace_id:cfg.workspace_id,output_file:outputDirectory+'/'+outputId+'.utf8',secret_env});
+            result=await workspace({...options.request,workspace_id:cfg.workspace_id,output_file:outputDirectory+'/'+outputId+'.utf8',secret_env},signal);
             result=await localCommandResult(outputDirectory,cfg.workspace_id+':'+(agent||''),outputId,result);
             if(options.timeout_notice)result={...result,timeout_notice:options.timeout_notice};
           }catch(error){if(!noSpace(error))throw error;result={error:String(error.message)};}

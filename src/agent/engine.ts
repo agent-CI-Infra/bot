@@ -46,6 +46,7 @@ import { agentLoop, type PlatformTools } from './loop.js';
 import { roleAssignmentContext } from './profiles.js';
 import { ReadTokens } from './read-token.js';
 import { currentOperation, VolumeFull, Workspace } from './workspace.js';
+import { workspaceContext, workspaceCoverage } from './workspace-tools.js';
 import {roleBackendWorkspace} from '../roles/workspace.js';
 import {recoverWithManager} from '../roles/manager-recovery.js';
 import { automaticState, isAttemptFailure } from './failures.js';
@@ -491,8 +492,9 @@ export class TaskEngine {
           if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库行为规则失败（${error.code}）${detail?'：'+detail:''}，请检查 .bot/ 和 .agents/skills/ 配置。`);}
           throw error;
         }
-        // Event work only reads the repository: it shares a worktree of the commit with other readers (#769).
-        let snapshot:any=mirror?await workspace.bind(github,target.sha,mirror,[],'read'):null;
+        // Event work only reads the repository: its worktree is one of the commit it may share with other readers, bound when it
+        // first needs its files (#769).
+        let snapshot:any=mirror?await workspace.plan(github,target.sha,mirror,[],'read'):null;
         if(!snapshot){if(mirror?.has(target.sha))update({workspace_id:randomId()});snapshot=await workspace.prepare(github,target.sha,mirror);}
         const computer=computerRequest(effectiveRules.computer,environment.computer);
         if(computer){
@@ -504,6 +506,7 @@ export class TaskEngine {
         await workspace.context({...target.files,...Object.fromEntries(skills.map(skill=>[skill.file,skill.content]))});
         input={...input,snapshot_sha:target.sha,snapshot_tree:snapshot.tree_sha,source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,coverage:snapshot.coverage,
           context:{mode:'event',repository:github.fullName,reviewed_sha:target.sha,context_files:target.contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
+            ...(snapshot.worktree===null?{workspace:workspaceContext({head_sha:target.sha,mode:'read'})}:{}),
             effective_rules:effectiveRules,computer:computerSummary(environment.computer),...managerContext(input),...target.context}};
         update({input:storedInput(this.store,redactor.clean(input),task.repository_id),head_sha:target.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:target.sha});
       }
@@ -560,10 +563,11 @@ export class TaskEngine {
           if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库行为规则失败（${error.code}）${detail?'：'+detail:''}，请检查 .bot/ 和 .agents/skills/ 配置。`);}
           throw error;
         }
-        // A git worktree from the computer's store when the mirror has the commit (#769): a review shares one of the commit
-        // with other readers, a task that writes gets its own. Otherwise files are copied as before, in a fresh workspace,
-        // so nothing a checkout left halfway is in the way.
-        let snapshot:any=mirror?await workspace.bind(github,ref.object.sha,mirror,prBase?[prBase]:[],review?'read':'write'):null;
+        // A git worktree from the computer's store when the mirror has the commit (#769), bound when the task first needs its
+        // files: the one its agent or controller chose, else a review shares one of the commit with other readers and a task
+        // that writes gets its own. Otherwise files are copied as before, in a fresh workspace, so nothing a checkout left
+        // halfway is in the way.
+        let snapshot:any=mirror?await workspace.plan(github,ref.object.sha,mirror,prBase?[prBase]:[],review?'read':'write'):null;
         if(!snapshot){if(mirror?.has(ref.object.sha))update({workspace_id:randomId()});snapshot=await workspace.prepare(github,ref.object.sha,mirror);}
         if(development&&input.integration){
           input.integration=await applyIntegration(this.store,task,workspace,ref.object.sha,input.integration);
@@ -604,6 +608,7 @@ export class TaskEngine {
             ...(pr?{pull_request:{base:{ref:object.base?.ref||null,sha:prBase},head:{ref:object.head?.ref||null,sha:object.head?.sha||null},
               diff:snapshot.history&&prBase?`git diff ${prBase}...${object.head?.sha}`:null}}:{}),
             context_files:contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
+            ...(snapshot.worktree===null?{workspace:workspaceContext({head_sha:ref.object.sha,mode:review?'read':'write'})}:{}),
             implementation_goal:implementationGoal,actionable_findings:actionableFindings,
             // Work saved on an earlier head (the pull request got other commits meanwhile) is not restored over the new one.
             ...(development&&input.recovery?.sha&&input.recovery.base_sha!==ref.object.sha?{earlier_work:{commit:input.recovery.sha,base:input.recovery.base_sha,
@@ -755,7 +760,7 @@ export class TaskEngine {
           // A pull request this task published on the way is part of its result.
           const candidate=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),published=candidate?JSON.parse(candidate.data).published:null;
           result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,
-            ...(input.heads?.length>1?{reviewed_heads:input.heads}:{}),coverage:input.coverage,object_hash:input.object_hash,...(published?{pull_request:published}:{})};
+            ...(input.heads?.length>1?{reviewed_heads:input.heads}:{}),coverage:workspaceCoverage(workspace!,input.coverage),object_hash:input.object_hash,...(published?{pull_request:published}:{})};
           await acceptReport(result);
           update({result:JSON.stringify(result),phase:'publish'});validatedPhase='publish';
         }else if(task.phase!=='done')stop('create_pull_request_required',undefined,`开发执行结束时仍处于 ${task.phase} 阶段，未完成 create_pull_request。`);

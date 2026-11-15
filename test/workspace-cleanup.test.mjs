@@ -65,8 +65,12 @@ test('finished tasks go after a day, failed ones after a week, and directories n
   const gone = [f.task('succeeded'), f.task('cancelled'), f.task('superseded'), f.task('completed', { kind: 'reply' }), f.task('failed', { age: 8 * day })].map(task => task.workspace);
   const kept = [f.task('succeeded', { age: 12 * hour }), f.task('failed', { age: 6 * day })].map(task => task.workspace);
   const orphan = f.directory(2 * day), young = f.directory(12 * hour);
+  // #769: a task directory's plan of the worktree it was to get goes with the directory.
+  const plan = (task, workspace) => f.store.run("INSERT INTO worktree_plans(task_id,workspace_id,repository_id,head_sha,tree_sha,mode,state,created_at) VALUES(?,?,'101',?,?,'read','none',?)", task, workspace, 'a'.repeat(40), 'b'.repeat(40), iso(Date.now()));
+  plan('gone', gone[0]); plan('kept', kept[0]);
   await f.sweep();
   assert.deepEqual(f.left(), sorted(...kept, young));
+  assert.deepEqual(f.store.all('SELECT task_id FROM worktree_plans').map(row => row.task_id), ['kept']);
   assert.deepEqual(f.released(gone[0]).map(row => row.release_reason), ['finished']); assert.ok(f.released(gone[0])[0].freed_bytes >= 4096);
   assert.deepEqual(f.released(gone[4]).map(row => row.release_reason), ['failed']);
   // A directory no record named is recorded when it goes.

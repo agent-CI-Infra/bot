@@ -239,6 +239,8 @@ export class WorkspaceCleanup {
     const now = new Date().toISOString();
     this.store.transaction(() => { for (const item of items) {
       if (worktrees) worktreesRemoved(this.store, repo, [item.name], item.reason);
+      // A task directory's plan of the worktree it was to get (#769) goes with the directory.
+      else this.store.run('DELETE FROM worktree_plans WHERE repository_id=? AND workspace_id=?', repo, item.name);
       const changed = this.store.run(`UPDATE task_workspaces SET released_at=?,release_reason=?,freed_bytes=? WHERE repository_id=? AND workspace_id=?`,
         now, item.reason, item.bytes, repo, item.name).changes;
       if (!Number(changed)) this.store.run(`INSERT OR IGNORE INTO task_workspaces(repository_id,workspace_id,task_id,kind,created_at,released_at,release_reason,freed_bytes)
