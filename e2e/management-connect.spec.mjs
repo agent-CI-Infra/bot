@@ -291,3 +291,24 @@ test('#641 离开悬浮面板时不继承短盒紧凑布局：全屏与对话页
     await expect(panel.locator('.management-window-title p')).toBeVisible();
   } finally { await f.close(); }
 });
+
+test('#641 1440×600 直接打开对话页：浮窗夹到 <520 也不把页面视图带进紧凑布局', async ({ page }) => {
+  test.setTimeout(90000);
+  const f = await managementFixture();
+  try {
+    // The viewport the reviewer named: the floating clamp leaves a box under 520px, while the page view itself is taller.
+    await page.setViewportSize({ width: 1440, height: 600 });
+    await page.goto(f.h.admin + '/#/management');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible({ timeout: 20000 });
+    const panel = page.locator('#management-chat');
+    expect(await panel.evaluate(node => node.hasAttribute('data-compact'))).toBe(false);
+    const title = panel.locator('.management-window-title p');
+    await expect(title).toBeVisible();
+    await expect(title).toHaveText('从了解情况，到推进下一步');
+    // The compact composer is 60px tall; the page view keeps its own height.
+    expect(await panel.locator('textarea').evaluate(node => node.getBoundingClientRect().height)).toBeGreaterThan(60);
+  } finally { await f.close(); }
+});
