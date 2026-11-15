@@ -9,6 +9,7 @@
  * app/delivery.js
  * app/boot.js
  * app/verification.js
+ * app/page-title.js
  * app/route.js
  * app/list.js
  * app/render.js

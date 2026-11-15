@@ -37,7 +37,7 @@ test('#642 未知地址与项目内未知子页显示「找不到这个页面」
       }
       await page.screenshot({ path: `.tmp/page-not-found/console-${width}.png`, fullPage: true });
       await state.getByRole('link', { name: '回到项目列表', exact: true }).click();
-      await expect(page).toHaveURL(/#\/projects$/); await expect(page.locator('#rows')).toContainText('fixture/project-101'); await expect(page).toHaveTitle('launchpad 管理');
+      await expect(page).toHaveURL(/#\/projects$/); await expect(page.locator('#rows')).toContainText('fixture/project-101'); await expect(page).toHaveTitle('项目 · launchpad 管理');
       // The skip link's in-page anchor is not an address and keeps the current page.
       await page.evaluate(() => { location.hash = '#main-content'; }); await expect(page.locator('#rows')).toContainText('fixture/project-101');
       await expect(page.locator('[data-page-not-found]')).toHaveCount(0);
@@ -60,7 +60,7 @@ test('#642 未知地址与项目内未知子页显示「找不到这个页面」
       await page.screenshot({ path: `.tmp/page-not-found/project-${width}.png`, fullPage: true });
       await page.locator('#project-page').getByRole('link', { name: '回到项目总览', exact: true }).click();
       await expect(page).toHaveURL(/#\/projects\/101\/overview$/); await expect(page.locator('#project-page [data-page-not-found]')).toHaveCount(0);
-      await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('项目总览'); await expect(page).toHaveTitle('launchpad 管理');
+      await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('项目总览'); await expect(page).toHaveTitle('fixture/project-101 · 项目总览 · launchpad 管理');
       // A project address with no section still opens 基本设置, as before.
       await page.goto(h.admin + '/#/projects/101'); await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('基本设置');
       // A broken project link that is not a project address at all is a top-level not-found.

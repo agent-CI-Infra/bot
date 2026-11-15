@@ -6,6 +6,8 @@ const I18N_LOCALES = ['zh-CN', 'en'];
 const i18nMessages = {
   'zh-CN': {
     'meta.title': 'launchpad 管理',
+    'page.not_found': '找不到页面',
+    'page.design': '设计系统样例',
     'chrome.skip': '跳到主要内容',
     'chrome.subtitle': '管理控制台',
     'chrome.logout': '退出登录',
@@ -281,6 +283,8 @@ const i18nMessages = {
   },
   en: {
     'meta.title': 'launchpad Admin',
+    'page.not_found': 'Page not found',
+    'page.design': 'Design samples',
     'chrome.skip': 'Skip to main content',
     'chrome.subtitle': 'Admin console',
     'chrome.logout': 'Sign out',

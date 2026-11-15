@@ -12,8 +12,6 @@ function unknownAddress(hash) {
   if (/^#\/projects\/./.test(path) && !projectRoute()) return true;
   return !addressTab(hash);
 }
-// The page title says when nothing was found, so a tab or a history entry does not read as an ordinary console page.
-function setNotFoundTitle(missing) { document.title = (missing ? '找不到页面 · ' : '') + t('meta.title'); }
 // The empty state #553 uses everywhere, with one primary way back. Inside a project it returns to that project's overview.
 function pageNotFoundState(project = null) {
   const box = consoleState('找不到这个页面', project ? '这个项目里没有这个页面，链接可能已过期或输入有误。' : '链接可能已过期或输入有误。');
@@ -45,6 +43,8 @@ function addressTab(hash) {
 }
 async function route() {
   renderVersion++;
+  // #737: the focus the redraw may take away, so a change the reader asked for can hand it to the page it opens.
+  const focusBefore = document.activeElement;
   if (/^#\/channels(?:\/|$)/.test(location.hash)) history.replaceState(null, '', '#/identity/feishu');
   if (location.hash === '#/identity/feishu/conversations') history.replaceState(null, '', '#/conversations');
   if (location.hash === '#/identity/feishu/groups') history.replaceState(null, '', '#/identity/feishu?section=groups');
@@ -71,9 +71,10 @@ async function route() {
   // The sample page issues no fetch of its own - every panel is constant markup - so a client-side role check is
   // the whole gate. If it ever reads server data, it needs a server-side gate first: hiding a route is not one.
   if (next === 'design' && me.role !== 'super_admin') next = 'projects';
-  const resolved = next; setNotFoundTitle(missing);
-  if (next !== tab) offset = 0; tab = next;
+  const resolved = next; if (next !== tab) offset = 0; tab = next;
   const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
+  // #737: the title names the page this address belongs to, before anything of it is drawn.
+  applyDocumentTitle(missing, target);
   // Global and project computer views reuse DOM ids; discard the inactive view and its scheduled reads.
   if (!target && typeof leaveProjectPage === 'function') leaveProjectPage();
   if (tab !== 'settings') $('settings-panel').replaceChildren();
@@ -107,5 +108,7 @@ async function route() {
   }
   if (typeof syncConsoleShell === 'function') syncConsoleShell(target);
   if (typeof restoreConsolePosition === 'function') restoreConsolePosition();
+  // #737: the page a navigation landed on says its name in the title, and a real address change hands it the focus.
+  announcePage(missing, target, focusBefore);
 }
 window.addEventListener('hashchange', () => { if (me) route().catch(error); });

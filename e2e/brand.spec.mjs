@@ -21,7 +21,9 @@ test('浏览器标题与页头品牌在登录页和管理控制台都是 launchp
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('button', { name: '退出登录', exact: true })).toBeVisible();
     // The console route keeps the same title and brand; the name is not only on the login page.
-    await expect(page).toHaveTitle(brand + ' 管理');
+    // #737: the console page names itself in front of the brand, so a tab reads as the page it belongs to. A first
+    // sign-in with no robot account lands on the access wizard, which is a global-settings page.
+    await expect(page).toHaveTitle('全局设置 · ' + brand + ' 管理');
     await expect(page.locator('header .brand strong')).toHaveText(brand);
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
