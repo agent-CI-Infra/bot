@@ -194,7 +194,7 @@ try {
     // Settings opens 基本设置; its category nav lists every settings page, so 机器配置 is one click away (#707).
     await page.locator('#rows .row').first().getByRole('button',{name:'设置',exact:true}).click();
     const categories=page.getByRole('navigation',{name:'项目设置类别'});await categories.waitFor();
-    assert.deepEqual((await categories.getByRole('link').allInnerTexts()).map(text=>text.trim()),['← 项目入口','基本设置','机器配置','角色','模型','计划与通知','外部执行','成员']);
+    assert.deepEqual((await categories.getByRole('link').allInnerTexts()).map(text=>text.trim()),['← 项目入口','基本设置','监听与触发','机器配置','角色','模型','计划与通知','外部执行','成员']);
     await categories.getByRole('link',{name:'机器配置',exact:true}).click();
     const machine=page.locator('#machine-status');await machine.waitFor();
     assert.equal((await categories.locator('[aria-current=page]').innerText()).trim(),'机器配置');
