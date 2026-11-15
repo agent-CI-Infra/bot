@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../dist/storage/database.js';
@@ -315,6 +315,26 @@ test('a failure before the entries are deleted still lets the cleanup delete the
   store.trajectories.remove({ repository_id: '101' });
   assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 0, 'the entries are deleted although the results removal failed');
   assert.deepEqual(failures.map(failure => failure[0]), ['101'], 'the failure is recorded through the cleanup hook');
+});
+
+test('the orphan sweep leaves an entry whose file cannot be inspected', t => {
+  const { directory, path } = database(t), store = new Store(path, key); t.after(() => store.close());
+  const scope = runScope('101', 't', 'run-u'), ref = store.trajectories.append(scope, 'log', 'l', {});
+  store.trajectories.close(scope.key);
+  const entry = fileOf(store, ref), parent = join(directory, 'trajectories', '101', 't');
+  chmodSync(parent, 0o000);
+  try {
+    assert.equal(store.trajectories.sweepOrphans(), 0, 'a file the sweep cannot inspect is not a missing file');
+    assert.equal(store.get('SELECT count(*) n FROM trajectory_files WHERE id=?', entry.id).n, 1, 'so its entry stays');
+  } finally { chmodSync(parent, 0o700); }
+});
+
+test('the orphan sweep does nothing while the trajectories root is not there', t => {
+  const { directory, path } = database(t), store = new Store(path, key); t.after(() => store.close());
+  const scope = runScope('101', 't', 'run-m'); store.trajectories.append(scope, 'log', 'l', {}); store.trajectories.close(scope.key);
+  rmSync(join(directory, 'trajectories'), { recursive: true, force: true });
+  assert.equal(store.trajectories.sweepOrphans(), 0, 'an absent root is not an empty one');
+  assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 1, 'its entries stay');
 });
 
 test('trajectory lookups use their indexes', t => {
