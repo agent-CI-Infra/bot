@@ -582,7 +582,8 @@ export class ChannelService {
     this.store.run('UPDATE channel_inbox SET conversation_id=? WHERE id=?',chat.id,row.id);
     // The group runs on its grantors' authority: lapsed GitHub proofs are checked before it is read (#846).
     await this.renewal(this.serviceBindings.grants(binding).map(g=>String(g.grantor_id)));
-    const reach=this.serviceBindings.reach(binding);
+    // The binding may have changed while the check ran: decide on the current one, as the turn itself would.
+    const reach=this.serviceBindings.reach(this.serviceBindings.assertUsable(binding));
     if(e.addressed&&!reach.projects.length&&reach.paused.length){
       // Nothing in scope is usable: say who has to act instead of answering as if the group had no repositories.
       this.queue(e,card(pausedGroupNotice(this.store,reach.paused)),row.id+':paused',row.id);

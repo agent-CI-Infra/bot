@@ -237,15 +237,18 @@ export class ChannelSchedules {
   private async group(row: Row, chat: Row, run: string, prompt: string, guard: () => void): Promise<void> {
     const binding = this.host.serviceBindings.active(chat.id);
     if (!binding) return fail(403, 'channel_service_binding_disabled');
-    // The group runs on its grantors' authority: lapsed GitHub proofs are checked first (#846).
-    await this.host.renewal(this.host.serviceBindings.grants(binding).map(g => String(g.grantor_id)));
     const protection = (turn: string, fence: string) => ({ kind: 'channel_schedule', schedule_id: row.id, run_id: run, chat_id: chat.id, binding_id: binding.id,
       binding_revision: binding.revision, turn_id: turn, source_fence: fence });
-    // Progress messages (#435) reach the group while the run is live, under the same protection as its result.
-    const result = await this.host.exclusive(chat.id, () => this.host.serviceSessions.run({ chat, binding, source_message: 'schedule:' + run,
-      request: this.frame(row, prompt), allowSilence: true, schedule: { name: row.name, guard },
-      stage: m => this.host.post(chat, `定时任务「${row.name}」\n\n${m.text}`, 'channel-schedule:' + run + ':stage:' + m.sequence, 'schedule:' + run,
-        { ...protection(m.turn_id, m.fence), stage: m.sequence }) }));
+    // Progress messages (#435) reach the group while the run is live, under the same protection as its result. The group runs on
+    // its grantors' authority: lapsed GitHub proofs are checked first (#846), while the run already holds the chat, so a message
+    // arriving meanwhile waits for it instead of taking the chat from the timer.
+    const result = await this.host.exclusive(chat.id, async () => {
+      await this.host.renewal(this.host.serviceBindings.grants(binding).map(g => String(g.grantor_id)));
+      return this.host.serviceSessions.run({ chat, binding, source_message: 'schedule:' + run,
+        request: this.frame(row, prompt), allowSilence: true, schedule: { name: row.name, guard },
+        stage: m => this.host.post(chat, `定时任务「${row.name}」\n\n${m.text}`, 'channel-schedule:' + run + ':stage:' + m.sequence, 'schedule:' + run,
+          { ...protection(m.turn_id, m.fence), stage: m.sequence }) });
+    });
     this.store.run('UPDATE channel_schedule_runs SET turn_id=? WHERE id=?', result.id, run);
     try {
       guard();
