@@ -97,6 +97,30 @@ test('#769 evaluators, restores and moves work from a task whose checkout is a l
   assert.equal(moved.local_sha,c.next.sha);assert.equal(c.git(c.wt(other),['rev-parse','HEAD']),c.next.sha);assert.equal(moved.saved.files.includes('added.txt'),true);
 });
 
+test('#769 an observer reads a writer\'s candidate in a worktree of the store with a copy of the writer\'s context; a source that is not there makes nothing',async t=>{
+  const c=computer(t),writer=randomWorkspaceId(),observer=randomWorkspaceId(),id=randomWorkspaceId(),read=randomWorkspaceId();
+  await c.run(writer,{type:'workspace_worktree_create',worktree_id:id,sha:c.base.sha,tree_sha:c.base.tree});
+  await c.run(writer,{type:'workspace_context',path:'issue.json',base64:Buffer.from('{"number":7}').toString('base64'),offset:0});
+  writeFileSync(join(c.wt(id),'added.txt'),'added\n');
+  // The writer's candidate commit is made in its worktree, so it is in the computer's store: no clone of the writer needed.
+  const candidate=await c.run(writer,{type:'workspace_finalize'});
+  const made=await c.run(observer,{type:'workspace_worktree_create',worktree_id:read,sha:candidate.local_sha,tree_sha:candidate.tree_sha,source_workspace_id:writer});
+  assert.deepEqual([made.head,made.tree_sha,made.changed_count],[candidate.local_sha,candidate.tree_sha,0]);
+  assert.equal(readlinkSync(c.repo(observer)),c.wt(read));assert.equal(readFileSync(join(c.repo(observer),'added.txt'),'utf8'),'added\n');
+  assert.equal(readFileSync(join(c.tasks,observer,'context','issue.json'),'utf8'),'{"number":7}');
+  // What the writer does next is not in the observer's checkout.
+  writeFileSync(join(c.wt(id),'added.txt'),'later\n');assert.equal(readFileSync(join(c.repo(observer),'added.txt'),'utf8'),'added\n');
+  // Binding it again for another observer copies that observer its context too.
+  const again=randomWorkspaceId();
+  assert.equal((await c.run(again,{type:'workspace_worktree_bind',worktree_id:read,sha:candidate.local_sha,tree_sha:candidate.tree_sha,source_workspace_id:writer})).head,candidate.local_sha);
+  assert.equal(readFileSync(join(c.tasks,again,'context','issue.json'),'utf8'),'{"number":7}');
+  for(const source of [randomWorkspaceId(),observer.replace(/^./,'x'),undefined]){
+    const missing=randomWorkspaceId(),other=randomWorkspaceId();
+    await assert.rejects(c.run(missing,{type:'workspace_worktree_create',worktree_id:other,sha:candidate.local_sha,tree_sha:candidate.tree_sha,source_workspace_id:source??missing}),/invalid_source_workspace/);
+    assert.equal(existsSync(c.wt(other)),false);
+  }
+});
+
 test('#769 the cleanup lists and removes worktrees like task directories; removing a task directory keeps its worktree',async t=>{
   const c=computer(t),task=randomWorkspaceId(),id=randomWorkspaceId();
   await c.run(task,{type:'workspace_worktree_create',worktree_id:id,sha:c.base.sha,tree_sha:c.base.tree});

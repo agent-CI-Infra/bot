@@ -4,7 +4,7 @@ import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import {scopeInstructions} from './scope.js';
 import { taskTraceAccess } from '../memory/access.js';
 import { runRole,roleExecutionModel } from '../roles/run.js';
-import { isolatedRunEnvironment,roleBackendWorkspace } from '../roles/workspace.js';
+import { isolatedRunEnvironment,roleBackendWorkspace,candidateCheckout } from '../roles/workspace.js';
 import { ProjectMemory,memoryTools,memoryTool } from '../memory/project.js';
 import { beginRun, endRun } from './trace.js';
 import { relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
@@ -64,7 +64,7 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
   const previousRun=task.trace_run_id;
   const verificationRun=beginRun(store,task,'verification',{evaluation_id:evaluationId,role:'qa',prompt_source:'configured_role',shell,source_tree:sourceTree});task.trace_run_id=verificationRun?.id;
   let verificationOutcome:string|undefined,verificationFault:string|undefined;
-  let verification=workspace;
+  let verification=workspace,releaseVerification:(()=>Promise<void>)|null=null;
   try {
   const sourceInput=JSON.parse(task.input||'{}');
   // A report whose task chose to work without repository files (#769) has no source checkout to verify against.
@@ -73,14 +73,15 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
     if(source.error)return stop('acceptance_snapshot_unavailable','waiting_environment','无法确认检视报告所依据的原始源码快照。');
     snapshot=source;sourceTree=source.tree_sha;
   }
+  // QA checks the submitted candidate in a checkout of its own (#769: a worktree read at the candidate's commit).
+  let verificationWorktree:string|null=null;
   if(snapshot?.local_sha&&sourceTree&&task.workspace_id){
-    const verifier={...task,workspace_id:randomId()};
-    verification=new Workspace(store,workspace.manager,verifier,redactor,guard,value=>workspace.log(value));
-    const copied=await verification.call(`accept:${evaluationId}:snapshot`,{type:'workspace_acceptance',source_workspace_id:task.workspace_id,sha:snapshot.local_sha,tree_sha:sourceTree});
-    if(copied.error)return stop('acceptance_snapshot_unavailable','waiting_environment','无法准备已提交候选的独立验收工作区。');
+    const checkout=await candidateCheckout({store,manager:workspace.manager,task,redactor,guard,log:value=>workspace.log(value)},snapshot.local_sha,sourceTree,`accept:${evaluationId}:snapshot`);
+    if(!checkout)return stop('acceptance_snapshot_unavailable','waiting_environment','无法准备已提交候选的独立验收工作区。');
+    verification=checkout.space;verificationWorktree=checkout.worktree_id;releaseVerification=checkout.release;
   }
 
-  records.history(task.id,'acceptance_started',{evaluation_id:evaluationId,candidate_id:candidate.id,revision:record.revision,context:'fresh',source_tree:sourceTree||null,verification_workspace:verification.task?.workspace_id||null});
+  records.history(task.id,'acceptance_started',{evaluation_id:evaluationId,candidate_id:candidate.id,revision:record.revision,context:'fresh',source_tree:sourceTree||null,verification_workspace:verification.task?.workspace_id||null,...(verificationWorktree?{verification_worktree:verificationWorktree}:{})});
     const required=candidate.artifacts.some(a=>a.kind==='code')?String(store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||'').trim():'';
     const proof=candidate.evidence.some(e=>e.source==='policy_validation'&&candidate.artifacts.some(a=>a.kind==='code'&&(a.version===e.version||(a.content as any)?.tree_sha===e.version))&&e.verified&&(e.result as any)?.command===required&&(e.result as any)?.exit_code===0&&!(e.result as any)?.timed_out);
     let additionalVerification:any=null;
@@ -125,5 +126,5 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
     }
     if((error as any).code==='agent_turn_limit')return stop('acceptance_output_invalid','retry_wait','独立验收达到本轮工具预算，候选已保留，自动重新验收。');
     throw error;
-  } finally {try{if(verification!==workspace)await verification.release(false);}finally{endRun(store,verificationRun,verificationOutcome?'succeeded':'fault',verificationFault||verificationOutcome);task.trace_run_id=previousRun;}}
+  } finally {try{if(releaseVerification)await releaseVerification();}finally{endRun(store,verificationRun,verificationOutcome?'succeeded':'fault',verificationFault||verificationOutcome);task.trace_run_id=previousRun;}}
 }
