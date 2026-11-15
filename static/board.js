@@ -18,7 +18,8 @@ function boardPollStopped(err) {
   $('board-status')?.replaceChildren(element('span', `看板刷新已停止：服务端返回 ${err.status}。`),
     boardButton('重新读取看板', () => renderBoard(++renderVersion), 'board-link'));
 }
-function resetBoard() { boardPollStop();boardRequest++;boardState=null;boardDragging=false;$('board-panel')?.replaceChildren(); }
+// #789 review: a new session starts at the first step of the backoff, not at whatever delay the previous one ended on.
+function resetBoard() { boardPollStop();boardPollBackoff=0;boardRequest++;boardState=null;boardDragging=false;$('board-panel')?.replaceChildren(); }
 const boardPageSize = 100, boardTypes = [['', '全部对象'], ['issue', 'Issue'], ['pr', 'PR'], ['task', '通用任务']];
 const boardMedia = matchMedia('(max-width:760px)');
 function boardButton(name, action, className = 'quiet') {
@@ -158,8 +159,9 @@ async function renderBoard(request,useView=false) {
   if(request!==renderVersion||me?.id!==owner)return;
   if(!boardState)boardState={owner,viewId:'default',type:'all',layout:'columns'};
   Object.assign(boardState,data);
-  // The quiet refresh starts with the page it refreshes, not with the module being loaded.
-  boardPollSchedule();
+  // The quiet refresh starts with the page it refreshes, not with the module being loaded; a full read also proves the
+  // earlier failure is over, so the next failure waits the first step again.
+  boardPollBackoff=0;boardPollSchedule();
   if(!boardState.views.some(v=>v.id===boardState.viewId)){boardState.viewId='default';useView=true;}
   if(useView||!boardState.filters)boardUseView();else boardShell();
   const category=boardAddressCategory();if(category){
@@ -354,7 +356,11 @@ async function boardPoll() {
   try{result=await api('/api/board/cards?'+boardParams(0));}
   catch(err){
     if(boardAccessLost(err,request,owner))return;
-    if(request!==boardRequest||me?.id!==owner||tab!=='board')return;
+    // #789 review: only signing out or leaving the board ends the chain. A newer read (the toolbar's 刷新, a view or
+    // filter change) bumps boardRequest, and this poll's answer is then stale — but the chain still has to keep going,
+    // or the quiet refresh stops for good until the board is rendered again.
+    if(me?.id!==owner||tab!=='board'){boardPollStop();return;}
+    if(request!==boardRequest||boardDragging){boardPollSchedule();return;}
     const answer=pollAfterError(err,boardPollBackoff);
     if(answer.terminal){boardPollStopped(err);return;}
     // Anything else may clear on its own: keep the cards, say how long the next read waits, and leave the same control.
@@ -364,7 +370,9 @@ async function boardPoll() {
     boardPollSchedule(answer.delay);
     return;
   }
-  if(request!==boardRequest||me?.id!==owner||tab!=='board'||boardDragging)return;
+  // Same rule on the success path: a superseded answer is dropped, the chain is not.
+  if(me?.id!==owner||tab!=='board'){boardPollStop();return;}
+  if(request!==boardRequest||boardDragging){boardPollSchedule();return;}
   boardPollBackoff=0;boardPollSchedule();
   // #503: a quiet read that succeeds proves the failure is over. Without this the summary keeps
   // 「读取失败，保留上次读取结果。」 over live cards and boardContinue() stays blocked on the flag.
