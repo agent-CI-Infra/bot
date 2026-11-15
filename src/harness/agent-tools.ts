@@ -11,6 +11,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -169,13 +170,79 @@ export function resolveSupportedArch(arch = process.arch): AgentToolArch | null 
   return null;
 }
 
-export function detectHostLibc(): AgentToolLibc {
-  if (process.platform === 'linux') {
-    const report = typeof process.report?.getReport === 'function'
-      ? (process.report.getReport() as { header?: { glibcVersionRuntime?: string } })
-      : null;
-    if (report && !report.header?.glibcVersionRuntime) return 'musl';
+export function detectElfInterpreterLibc(execPath: string): AgentToolLibc | null {
+  let fd: number | null = null;
+  try {
+    fd = openSync(execPath, 'r');
+    const hdr = Buffer.alloc(64);
+    if (readSync(fd, hdr, 0, 64, 0) < 52) return null;
+    if (hdr[0] !== 0x7f || hdr[1] !== 0x45 || hdr[2] !== 0x4c || hdr[3] !== 0x46) return null;
+    const is64 = hdr[4] === 2;
+    const is32 = hdr[4] === 1;
+    const isLE = hdr[5] === 1;
+    const isBE = hdr[5] === 2;
+    if ((!is64 && !is32) || (!isLE && !isBE)) return null;
+    if (is64 && hdr.length < 64) return null;
+
+    const u16 = (buf: Buffer, off: number) => (isLE ? buf.readUInt16LE(off) : buf.readUInt16BE(off));
+    const u32 = (buf: Buffer, off: number) => (isLE ? buf.readUInt32LE(off) : buf.readUInt32BE(off));
+    const u64 = (buf: Buffer, off: number) => Number(isLE ? buf.readBigUInt64LE(off) : buf.readBigUInt64BE(off));
+
+    const phoff = is64 ? u64(hdr, 32) : u32(hdr, 28);
+    const phentsize = u16(hdr, is64 ? 54 : 42);
+    const phnum = u16(hdr, is64 ? 56 : 44);
+    const minEntSize = is64 ? 56 : 32;
+    if (phoff <= 0 || phentsize < minEntSize || phnum <= 0 || phnum > 128) return null;
+
+    const totalBytes = phentsize * phnum;
+    const phdrs = Buffer.alloc(totalBytes);
+    if (readSync(fd, phdrs, 0, totalBytes, phoff) < totalBytes) return null;
+    for (let i = 0; i < phnum; i++) {
+      const base = i * phentsize;
+      if (u32(phdrs, base) !== 3) continue; // PT_INTERP
+      const interpOffset = is64 ? u64(phdrs, base + 8) : u32(phdrs, base + 4);
+      const interpFilesz = is64 ? u64(phdrs, base + 32) : u32(phdrs, base + 16);
+      if (interpOffset <= 0 || interpFilesz <= 0 || interpFilesz > 4096) return null;
+      const interpBuf = Buffer.alloc(interpFilesz);
+      if (readSync(fd, interpBuf, 0, interpFilesz, interpOffset) < interpFilesz) return null;
+      const interp = interpBuf.toString('utf8').replace(/\0+.*$/s, '');
+      if (interp.includes('musl')) return 'musl';
+      if (interp.includes('ld-linux') || interp.includes('ld.so')) return 'glibc';
+      return null;
+    }
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch {}
+    }
   }
+  return null;
+}
+
+let cachedHostLibc: AgentToolLibc | null = null;
+
+/**
+ * Detect host Linux libc without calling `process.report.getReport()`: generating a diagnostic report walks V8 heap,
+ * libuv handles, and native symbol tables synchronously (~5s per call on a long-lived control-plane process).
+ */
+export function detectHostLibc(): AgentToolLibc {
+  if (cachedHostLibc) return cachedHostLibc;
+  if (process.platform === 'linux') {
+    const fromElf = detectElfInterpreterLibc(process.execPath);
+    if (fromElf) {
+      cachedHostLibc = fromElf;
+      return fromElf;
+    }
+    try {
+      const maps = readFileSync('/proc/self/maps', 'utf8');
+      if (maps.includes('ld-musl-')) {
+        cachedHostLibc = 'musl';
+        return 'musl';
+      }
+    } catch {}
+  }
+  cachedHostLibc = 'glibc';
   return 'glibc';
 }
 
@@ -373,7 +440,7 @@ export function inspectAgentTools(
 ): AgentToolsVolumeStatus {
   const containerRoot = options.containerRoot ?? DEFAULT_AGENT_TOOLS_ROOT;
   const arch = options.arch === undefined ? resolveSupportedArch() : options.arch;
-  const libc = options.libc;
+  const libc = options.libc ?? detectHostLibc();
   let volumePresent = false;
   let nodeVersions: string[] = [];
   if (volumeRoot && isAbsolute(volumeRoot) && existsSync(volumeRoot)) {
@@ -514,6 +581,7 @@ function extractTarBuffer(
   const stripComponents = options.stripComponents ?? 0;
 
   mkdirSync(destDir, { recursive: true, mode: 0o755 });
+  chmodSync(destDir, 0o755);
   const destReal = realpathSync(destDir);
 
   let offset = 0;
@@ -656,6 +724,7 @@ function ensureSafeArchiveDirectory(destReal: string, dirPath: string, relPath: 
     const st = safeLstat(cur);
     if (!st) {
       mkdirSync(cur, { mode: 0o755 });
+      chmodSync(cur, 0o755);
     } else if (st.isSymbolicLink() || !st.isDirectory()) {
       throw new TaskError('agent_tool_archive_invalid', 'failed', `archive_symlink_escape:${relPath}`);
     }
@@ -848,7 +917,9 @@ export class AgentToolManager {
     if (!this.volumeRoot || !isAbsolute(this.volumeRoot)) {
       throw new TaskError('agent_tools_volume_missing', 'waiting_configuration', 'invalid_volume_root');
     }
+    const createdRoot = !existsSync(this.volumeRoot);
     mkdirSync(this.volumeRoot, { recursive: true, mode: 0o755 });
+    if (createdRoot) chmodSync(this.volumeRoot, 0o755);
     const st = lstatSync(this.volumeRoot);
     if (!st.isDirectory() || st.isSymbolicLink()) {
       throw new TaskError('agent_tools_volume_missing', 'waiting_configuration', 'volume_root_not_directory');
@@ -1017,6 +1088,8 @@ export class AgentToolManager {
     mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
     const stageDir = resolve(stagingRoot, `node-${nodeVer}-${randomBytes(8).toString('hex')}`);
     try {
+      mkdirSync(stageDir, { recursive: true, mode: 0o755 });
+      chmodSync(stageDir, 0o755);
       await extractTarGzAsync(archiveBytes, stageDir, {
         stripComponents: 1,
         include: rel => rel === 'bin/node' || rel === 'LICENSE',
@@ -1035,8 +1108,12 @@ export class AgentToolManager {
         sha256: actualSha256,
         bytes: archiveBytes.length,
       };
-      writeFileSync(resolve(stageDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { mode: 0o644 });
-      mkdirSync(resolve(rootReal, 'node'), { recursive: true, mode: 0o755 });
+      const manifestPath = resolve(stageDir, 'manifest.json');
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', { mode: 0o644 });
+      chmodSync(manifestPath, 0o644);
+      const nodeParent = resolve(rootReal, 'node');
+      mkdirSync(nodeParent, { recursive: true, mode: 0o755 });
+      chmodSync(nodeParent, 0o755);
       this.replaceVersionDir(stageDir, finalDir, { cli: 'node', version: nodeVer, rootReal, arch });
       return { role: 'node_runtime', source_url: tarballUrl, sha256: actualSha256, bytes: archiveBytes.length };
     } finally {
@@ -1099,6 +1176,8 @@ export class AgentToolManager {
     mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
     const stageDir = resolve(stagingRoot, `claude_code-${version}-${randomBytes(8).toString('hex')}`);
     try {
+      mkdirSync(stageDir, { recursive: true, mode: 0o755 });
+      chmodSync(stageDir, 0o755);
       const pkgDir = resolve(stageDir, 'package');
       await extractTarGzAsync(pkgBytes, pkgDir, { stripComponents: 1 });
 
@@ -1118,6 +1197,7 @@ export class AgentToolManager {
 
       const binDir = resolve(stageDir, 'bin');
       mkdirSync(binDir, { recursive: true, mode: 0o755 });
+      chmodSync(binDir, 0o755);
       const launcher = buildClaudeLauncherScript(this.containerRoot, version, this.nodeVersion, hasNativeBinary, jsEntry);
       const launcherPath = resolve(binDir, 'claude');
       writeFileSync(launcherPath, launcher, { mode: 0o755 });
@@ -1135,10 +1215,14 @@ export class AgentToolManager {
         node_version: this.nodeVersion,
         artifacts,
       };
-      writeFileSync(resolve(stageDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { mode: 0o644 });
+      const manifestPath = resolve(stageDir, 'manifest.json');
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', { mode: 0o644 });
+      chmodSync(manifestPath, 0o644);
 
       const finalDir = resolve(rootReal, 'claude_code', version);
-      mkdirSync(dirname(finalDir), { recursive: true, mode: 0o755 });
+      const claudeParent = dirname(finalDir);
+      mkdirSync(claudeParent, { recursive: true, mode: 0o755 });
+      chmodSync(claudeParent, 0o755);
       this.replaceVersionDir(stageDir, finalDir, { cli: 'claude_code', version, rootReal, arch });
       return manifest;
     } finally {
@@ -1152,20 +1236,30 @@ export class AgentToolManager {
     const assetName = `${binaryName}.tar.gz`;
     const apiBase = this.sources.githubApiBase.replace(/\/+$/, '');
     const releaseUrl = `${apiBase}/repos/openai/codex/releases/tags/rust-v${version}`;
-    const release = await this.fetchJson(releaseUrl, [apiBase]);
-
-    const assets = Array.isArray(release?.assets) ? release.assets : [];
-    const asset = assets.find((a: any) => a?.name === assetName);
-    if (!asset || typeof asset.browser_download_url !== 'string') {
-      throw new TaskError('agent_tool_download_failed', 'failed', `codex_release_asset_missing:${assetName}`);
+    let downloadUrl: string;
+    let releaseSha256: string | null = null;
+    try {
+      const release = await this.fetchJson(releaseUrl, [apiBase]);
+      const assets = Array.isArray(release?.assets) ? release.assets : [];
+      const asset = assets.find((a: any) => a?.name === assetName);
+      if (!asset || typeof asset.browser_download_url !== 'string') {
+        throw new TaskError('agent_tool_download_failed', 'failed', `codex_release_asset_missing:${assetName}`);
+      }
+      const digestMatch = typeof asset.digest === 'string' ? /^sha256:([a-f0-9]{64})$/i.exec(asset.digest.trim()) : null;
+      releaseSha256 = digestMatch ? digestMatch[1]!.toLowerCase() : null;
+      downloadUrl = String(asset.browser_download_url);
+    } catch (err) {
+      const primaryOrigin = this.sources.githubDownloadOrigins[0]?.replace(/\/+$/, '');
+      const detail = err instanceof TaskError ? String(err.detail ?? '') : '';
+      const isRateOrApiFailure = err instanceof TaskError && err.code === 'agent_tool_download_failed' && !detail.startsWith('codex_release_asset_missing:');
+      if (!expectedSha256 || !primaryOrigin || !isRateOrApiFailure) {
+        throw err;
+      }
+      downloadUrl = `${primaryOrigin}/openai/codex/releases/download/rust-v${version}/${assetName}`;
     }
-    const digestMatch = typeof asset.digest === 'string' ? /^sha256:([a-f0-9]{64})$/i.exec(asset.digest.trim()) : null;
-    const releaseSha256 = digestMatch ? digestMatch[1]!.toLowerCase() : null;
     if (!releaseSha256 && !expectedSha256) {
       throw new TaskError('agent_tool_hash_mismatch', 'failed', `codex_release_digest_missing:${assetName}`);
     }
-
-    const downloadUrl = String(asset.browser_download_url);
     const archiveBytes = await this.fetchBytes(downloadUrl, this.sources.githubDownloadOrigins);
     const actualSha256 = createHash('sha256').update(archiveBytes).digest('hex');
     if (releaseSha256) verifyDigestHex(actualSha256, releaseSha256, assetName);
@@ -1175,6 +1269,8 @@ export class AgentToolManager {
     mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
     const stageDir = resolve(stagingRoot, `codex-${version}-${randomBytes(8).toString('hex')}`);
     try {
+      mkdirSync(stageDir, { recursive: true, mode: 0o755 });
+      chmodSync(stageDir, 0o755);
       const unpackDir = resolve(stageDir, 'unpacked');
       await extractTarGzAsync(archiveBytes, unpackDir, { stripComponents: 0 });
       const extractedBin = existsSync(resolve(unpackDir, binaryName))
@@ -1187,6 +1283,7 @@ export class AgentToolManager {
       }
       const binDir = resolve(stageDir, 'bin');
       mkdirSync(binDir, { recursive: true, mode: 0o755 });
+      chmodSync(binDir, 0o755);
       const targetBin = resolve(binDir, 'codex');
       renameSync(extractedBin, targetBin);
       chmodSync(targetBin, 0o755);
@@ -1205,10 +1302,14 @@ export class AgentToolManager {
           { role: 'static_binary', source_url: downloadUrl, sha256: actualSha256, bytes: archiveBytes.length },
         ],
       };
-      writeFileSync(resolve(stageDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { mode: 0o644 });
+      const manifestPath = resolve(stageDir, 'manifest.json');
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', { mode: 0o644 });
+      chmodSync(manifestPath, 0o644);
 
       const finalDir = resolve(rootReal, 'codex', version);
-      mkdirSync(dirname(finalDir), { recursive: true, mode: 0o755 });
+      const codexParent = dirname(finalDir);
+      mkdirSync(codexParent, { recursive: true, mode: 0o755 });
+      chmodSync(codexParent, 0o755);
       this.replaceVersionDir(stageDir, finalDir, { cli: 'codex', version, rootReal, arch });
       return manifest;
     } finally {

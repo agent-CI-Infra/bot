@@ -20,6 +20,8 @@ import { agentToolsApi } from '../dist/app/agent-tools.js';
 import {
   AgentToolManager,
   COMPATIBLE_CLI_RANGES,
+  detectElfInterpreterLibc,
+  detectHostLibc,
   extractTarGz,
   inspectAgentTools,
   parseSemver,
@@ -158,6 +160,7 @@ async function startMockToolUpstream(t, arch = 'x64') {
 
   let tamperClaudeHash = false;
   let untrustedRedirect = false;
+  let rateLimitGithubApi = false;
   // Runs while the codex archive is being served, i.e. after install() passed its entry check and before the replace.
   let beforeCodexDownload = null;
 
@@ -262,6 +265,11 @@ async function startMockToolUpstream(t, arch = 'x64') {
 
     const codexRelMatch = /^\/gh-api\/repos\/openai\/codex\/releases\/tags\/rust-v([^/]+)$/.exec(u.pathname);
     if (codexRelMatch) {
+      if (rateLimitGithubApi) {
+        res.writeHead(403, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ message: 'API rate limit exceeded' }));
+        return;
+      }
       const ver = codexRelMatch[1];
       const item = codexVersions.get(ver);
       if (!item) { res.writeHead(404); res.end('{}'); return; }
@@ -311,8 +319,10 @@ async function startMockToolUpstream(t, arch = 'x64') {
     },
     setTamperClaudeHash: v => { tamperClaudeHash = v; },
     setUntrustedRedirect: v => { untrustedRedirect = v; },
+    setRateLimitGithubApi: v => { rateLimitGithubApi = v; },
     setBeforeCodexDownload: fn => { beforeCodexDownload = fn; },
     claudeVersions,
+    codexVersions,
   };
 }
 
@@ -1160,4 +1170,101 @@ test('install verifies optional native_sha256 for claude_code and sweeps leftove
   await manager.prune({ retainCount: 2 });
   assert.equal(existsSync(join(root, '.staging', 'another-crashed-stage')), false);
   assert.equal(existsSync(join(root, 'claude_code', '2.1.319', 'bin', 'claude')), true);
+});
+
+function buildSyntheticElf64WithInterp(interp) {
+  const interpBytes = Buffer.from(interp + '\0', 'utf8');
+  const hdrSize = 64;
+  const phdrSize = 56;
+  const interpOffset = hdrSize + phdrSize;
+  const buf = Buffer.alloc(interpOffset + interpBytes.length);
+  // ELF magic + 64-bit little-endian
+  buf[0] = 0x7f; buf[1] = 0x45; buf[2] = 0x4c; buf[3] = 0x46;
+  buf[4] = 2; // EI_CLASS = ELFCLASS64
+  buf[5] = 1; // EI_DATA = ELFDATA2LSB
+  buf[6] = 1; // EI_VERSION
+  buf.writeBigUInt64LE(BigInt(hdrSize), 32); // e_phoff
+  buf.writeUInt16LE(phdrSize, 54); // e_phentsize
+  buf.writeUInt16LE(1, 56); // e_phnum
+  // Program header 0: PT_INTERP (p_type = 3)
+  buf.writeUInt32LE(3, hdrSize);
+  buf.writeBigUInt64LE(BigInt(interpOffset), hdrSize + 8); // p_offset
+  buf.writeBigUInt64LE(BigInt(interpBytes.length), hdrSize + 32); // p_filesz
+  interpBytes.copy(buf, interpOffset);
+  return buf;
+}
+
+test('detectElfInterpreterLibc and detectHostLibc avoid process.report.getReport event-loop stalls', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'agent-tools-elf-libc-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const glibcElf = join(dir, 'node-glibc');
+  writeFileSync(glibcElf, buildSyntheticElf64WithInterp('/lib64/ld-linux-x86-64.so.2'));
+  assert.equal(detectElfInterpreterLibc(glibcElf), 'glibc');
+
+  const muslX64Elf = join(dir, 'node-musl-x64');
+  writeFileSync(muslX64Elf, buildSyntheticElf64WithInterp('/lib/ld-musl-x86_64.so.1'));
+  assert.equal(detectElfInterpreterLibc(muslX64Elf), 'musl');
+
+  const muslArm64Elf = join(dir, 'node-musl-arm64');
+  writeFileSync(muslArm64Elf, buildSyntheticElf64WithInterp('/lib/ld-musl-aarch64.so.1'));
+  assert.equal(detectElfInterpreterLibc(muslArm64Elf), 'musl');
+
+  const nonElf = join(dir, 'not-an-elf');
+  writeFileSync(nonElf, '#!/bin/sh\necho hi\n');
+  assert.equal(detectElfInterpreterLibc(nonElf), null);
+
+  const origGetReport = process.report?.getReport;
+  if (process.report && typeof origGetReport === 'function') {
+    process.report.getReport = () => {
+      throw new Error('process.report.getReport must never be called by detectHostLibc or inspectAgentTools');
+    };
+    t.after(() => { process.report.getReport = origGetReport; });
+  }
+
+  const libc = detectHostLibc();
+  assert.ok(libc === 'glibc' || libc === 'musl');
+  const status = inspectAgentTools(dir, { arch: 'x64' });
+  assert.equal(status.volume_present, true);
+});
+
+test('installCodex falls back to deterministic release URL when GitHub API is rate-limited and sha256 is pinned', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-tools-codex-ratelimit-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const upstream = await startMockToolUpstream(t, 'x64');
+  upstream.setRateLimitGithubApi(true);
+  const manager = new AgentToolManager({ volumeRoot: root, containerRoot: root, arch: 'x64', sources: upstream.sources });
+
+  // Without a pinned sha256, rate-limited GitHub API must still fail rather than trusting an unverified archive.
+  await assert.rejects(
+    () => manager.install({ cli: 'codex', version: '0.166.0' }),
+    { code: 'agent_tool_download_failed' },
+  );
+
+  // With a pinned sha256, a wrong digest is still rejected.
+  await assert.rejects(
+    () => manager.install({ cli: 'codex', version: '0.166.0', sha256: '0'.repeat(64) }),
+    { code: 'agent_tool_hash_mismatch' },
+  );
+
+  // With the authentic pinned sha256, installation succeeds directly from the configured download origin,
+  // even when process.umask(0o077) is active as in src/main.ts.
+  const prevUmask = process.umask(0o077);
+  t.after(() => { process.umask(prevUmask); });
+  const expectedSha256 = upstream.codexVersions.get('0.166.0').hash.sha256;
+  const out = await manager.install({ cli: 'codex', version: '0.166.0', sha256: expectedSha256 });
+  assert.equal(out.compatible, true);
+  assert.equal(out.installed.version, '0.166.0');
+  assert.equal(existsSync(join(root, 'codex', '0.166.0', 'bin', 'codex')), true);
+  assert.equal(statSync(join(root, 'codex')).mode & 0o777, 0o755);
+  assert.equal(statSync(join(root, 'codex', '0.166.0')).mode & 0o777, 0o755);
+  assert.equal(statSync(join(root, 'codex', '0.166.0', 'bin')).mode & 0o777, 0o755);
+  assert.equal(statSync(join(root, 'codex', '0.166.0', 'manifest.json')).mode & 0o777, 0o644);
+  const claudeOut = await manager.install({ cli: 'claude_code', version: '2.1.319' });
+  assert.equal(claudeOut.compatible, true);
+  assert.equal(statSync(join(root, 'claude_code')).mode & 0o777, 0o755);
+  assert.equal(statSync(join(root, 'claude_code', '2.1.319')).mode & 0o777, 0o755);
+  assert.equal(statSync(join(root, 'claude_code', '2.1.319', 'bin')).mode & 0o777, 0o755);
+  assert.equal(statSync(join(root, 'claude_code', '2.1.319', 'manifest.json')).mode & 0o777, 0o644);
+  assert.equal(statSync(join(root, 'node')).mode & 0o777, 0o755);
 });
