@@ -6,7 +6,10 @@ async function globalProjectSettings(request, id) {
   // offset is the only id the list itself reads, so any other id falls through to the list instead of starting a project
   // load that cannot answer (#/settings/projects/abc and #/settings/projects/0 used to stay at 正在加载…).
   if (!listing) id = null;
-  const { repositories: installed } = await api('/api/installations' + (hidden ? '/hidden' : '') + '?offset=' + offset + '&limit=50');
+  // #747: the batch list asks for one row past the page for the same reason the shared list does — a total that is a
+  // multiple of 50 used to add an empty page whose number kept counting.
+  const { repositories: received } = await api('/api/installations' + (hidden ? '/hidden' : '') + '?offset=' + offset + '&limit=51');
+  const installed = received.slice(0, 50), hasMore = received.length > 50;
   const selector = document.createElement('select'); selector.setAttribute('aria-label', '全局设置中的项目');
   selector.add(new Option('选择项目', ''));
   for (const repo of installed) selector.add(new Option(repo.full_name, repo.id)); selector.value = '';
@@ -34,7 +37,7 @@ async function globalProjectSettings(request, id) {
   const prefix = '#/settings/projects/' + (hidden ? 'hidden.' : 'list.');
   const paging = element('nav', '', 'actions'); paging.setAttribute('aria-label', '全局项目分页');
   if (offset) paging.append(consoleLink(prefix + Math.max(0, offset - 50), '上一页'));
-  if (installed.length === 50) paging.append(consoleLink(prefix + (offset + 50), '下一页')); selection.append(paging);
+  if (hasMore) paging.append(consoleLink(prefix + (offset + 50), '下一页')); selection.append(paging);
   if (!hidden) void api('/api/integrations').then(result => {
     if (request === renderVersion) updateIntegrationChips(result.integrations || []);
   }).catch(() => { if (request === renderVersion) updateIntegrationChips(installed.map(row => ({ repository_id: row.id, gate_state: 'unknown' }))); });

@@ -63,7 +63,10 @@ async function render(quiet = false) {
     return;
   }
   finally { if (request === renderVersion) $('rows').removeAttribute('aria-busy'); }
-  if(request!==renderVersion)return;const rows=result[installedView ? 'repositories' : endpoint];
+  if(request!==renderVersion)return;const received=result[installedView ? 'repositories' : endpoint];
+  // #747: the page is the first 50 rows of a 51-row probe; the row beyond the page is the "there is more" signal, and it is
+  // never drawn or counted.
+  const hasMore=received.length>50, rows=received.slice(0,50);
   let pendingRepositories=[];
   let pendingRepositoriesError=null;
   const projectListFiltered=!!(params.get('repository_id')||params.get('account_id')||params.get('owner_id'));
@@ -72,13 +75,15 @@ async function render(quiet = false) {
     // the installations admin API stays closed to project users. A list filter hides the unfiltered pending group.
     try{pendingRepositories=(await api('/api/identity')).github_connection?.pending_repositories||[];}catch(err){pendingRepositoriesError=err;pendingRepositories=[];}
     if(request!==renderVersion)return;
-    const started=new Set(rows.map(row=>String(row.id)));
+    const started=new Set(received.map(row=>String(row.id)));
     pendingRepositories=pendingRepositories.filter(repo=>repo&&repo.full_name&&!started.has(String(repo.id)));
   }
-  const signature=tab+'\n'+(hiddenView?'hidden\n':'')+params+'\n'+JSON.stringify(rows)+'\n'+JSON.stringify(pendingRepositories)+'\n'+String(!!pendingRepositoriesError);if(quiet&&signature===listSignature)return;listSignature=signature;
+  // The probe row is part of the signature: when the 51st row appears or goes, only `next` changes, and a quiet refresh
+  // that compared the drawn rows alone would return early and leave the pager stale (#747).
+  const signature=tab+'\n'+(hiddenView?'hidden\n':'')+params+'\n'+String(hasMore)+'\n'+JSON.stringify(rows)+'\n'+JSON.stringify(pendingRepositories)+'\n'+String(!!pendingRepositoriesError);if(quiet&&signature===listSignature)return;listSignature=signature;
   const lines=[]; $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目${pendingRepositories.length?`，${pendingRepositories.length} 个待超级管理员启动`:pendingRepositoriesError?'，等待启动的仓库暂时无法读取':''}` : `${rows.length} 条记录`;
   const count = $('count'); if (count) count.title = count.textContent;
-  $('previous').disabled = offset === 0; $('next').disabled = rows.length < 50; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
+  $('previous').disabled = offset === 0; $('next').disabled = !hasMore; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
     const line = element('div', '', 'row'), content = element('div', '', 'row-content'), status=element('div','','row-state');line.setAttribute('role','listitem');line.dataset.key=String(row.id);rowSignatures.set(line,JSON.stringify(row));
     if (tab === 'events') {
