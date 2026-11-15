@@ -144,6 +144,9 @@ test('#641 手机从底栏打开管理助手：390×500 下面板与输入区都
     expect(m.field.bottom).toBeLessThanOrEqual(m.win.bottom + 0.5);
     expect(m.send.height).toBeGreaterThanOrEqual(30);
     expect(m.send.bottom).toBeLessThanOrEqual(m.win.bottom + 0.5);
+    // F5: the floating panel hides the bottom bar, so the bar's 64px must not be subtracted from the room it gets.
+    expect(m.win.height).toBeGreaterThanOrEqual(350);
+    expect(m.win.top).toBeLessThanOrEqual(120);
     await expect(panel.getByRole('button', { name: '发送', exact: true })).toBeVisible();
     // Review fix: the send button keeps the 44px touch target even here; the conversation is what gives up room, by
     // scrolling inside its own box, and the session fold stays reachable instead of being removed at this height.
@@ -181,7 +184,8 @@ test('#641 短手机（390×500）连接后状态栏可见且是单行（有文�
       return { height: r.height, whiteSpace: style.whiteSpace, overflowY: style.overflowY, textHeight: text.clientHeight };
     });
     expect(box.whiteSpace).toBe('nowrap');
-    expect(box.height).toBeLessThanOrEqual(34);
+    // The bar stays one line and may grow to hold a 44px recovery control (#641 accessibility).
+    expect(box.height).toBeLessThanOrEqual(46);
     expect(box.textHeight).toBeLessThanOrEqual(24);
   } finally { await f.close(); }
 });
@@ -207,6 +211,9 @@ test('#641 短手机（390×500）断流后错误文案与「重新连接」可�
     const reconnect = statusBar.getByRole('button', { name: '重新连接', exact: true });
     await expect(reconnect).toBeVisible();
     await expect(reconnect).toBeEnabled();
+    // #641 accessibility: the only recovery control on a phone keeps the console's 44px touch target.
+    const reconnectBox = await reconnect.boundingBox();
+    expect(reconnectBox.height).toBeGreaterThanOrEqual(44);
     await page.unroute('**/events?stream=1&after=*');
     await reconnect.click();
     await expect(status).toBeVisible();
