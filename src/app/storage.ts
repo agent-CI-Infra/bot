@@ -25,7 +25,10 @@ import { noteTaskUsage, workspaceClasses } from '../projects/workspace-cleanup.j
 
 interface Usage { count: number; bytes: number }
 interface Measured { bytes: number | null; measured_at: string }
-interface Snapshot { refreshed_at: string; control: Json; manager: Json | null; open: Record<string, Usage>; computers: Record<string, Json>; cleanup: Record<string, Json> }
+// manager_error: why the last refresh could not read the manager (null once a read succeeds); manager_read_at: when the
+// numbers in `manager` and `computers` were read, kept as they are across a failed refresh (#793).
+interface Snapshot { refreshed_at: string; control: Json; manager: Json | null; open: Record<string, Usage>; computers: Record<string, Json>; cleanup: Record<string, Json>;
+  manager_error: string | null; manager_read_at: string | null }
 
 const hour = 3600_000;
 const run = (command: string, args: string[], timeout: number) => new Promise<{ error: Error | null; stdout: string }>(resolve =>
@@ -68,18 +71,26 @@ export class StorageReport {
           let bytes = 0; try { bytes = statSync(join(this.store.trajectories.root, String(row.path))).size; } catch {}
           const entry = open[row.repository_id ?? ''] ??= { count: 0, bytes: 0 }; entry.count++; entry.bytes += bytes;
         }
-        const manager = this.manager ? await this.manager.call('GET', '/v1/storage').catch(() => null) as Json | null : null;
+        // A read that fails keeps the numbers the manager gave last (#793): a timeout or a 5xx must not turn the project
+        // computers, its database and disk figures and its alerts into "unknown" until it answers again.
+        const previous = this.snapshot;
+        let manager = previous?.manager ?? null, managerError: string | null = null, managerReadAt = previous?.manager_read_at ?? null;
+        if (this.manager) {
+          try { manager = await this.manager.call('GET', '/v1/storage') as Json; managerReadAt = new Date().toISOString(); }
+          catch (error) { managerError = String((error as Error)?.message ?? error).slice(0, 300) || 'manager_unavailable'; }
+        }
         if (Date.now() - this.directories.at >= hour) {
           const values: Record<string, Measured> = {};
           for (const [name, path] of Object.entries(this.paths)) values[name] = { bytes: await directoryBytes(path), measured_at: new Date().toISOString() };
           this.directories = { at: Date.now(), values };
         }
-        const computers: Record<string, Json> = {};
-        for (const row of (Array.isArray(manager?.computers) ? manager!.computers : []) as Record<string, any>[]) computers[String(row.repository_id)] = this.computer(row);
+        // A failed read keeps the computers of the last one; only a read that answered replaces them.
+        const computers: Record<string, Json> = managerError ? { ...(previous?.computers ?? {}) } : {};
+        if (!managerError) for (const row of (Array.isArray(manager?.computers) ? manager!.computers : []) as Record<string, any>[]) computers[String(row.repository_id)] = this.computer(row);
         let cleanup: Record<string, Json> = {}, compaction: Json | null = null;
         try { cleanup = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='workspace_cleanup'")?.value ?? '{}'); } catch {}
         try { compaction = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='compaction'")?.value ?? 'null'); } catch {}
-        this.snapshot = { refreshed_at: new Date().toISOString(), open, manager, computers, cleanup,
+        this.snapshot = { refreshed_at: new Date().toISOString(), open, manager, computers, cleanup, manager_error: managerError, manager_read_at: managerReadAt,
           control: { database: databaseSize(this.store.db), disk: this.disk(), migration: migrationProgress(this.store), directories: this.directories.values,
             // The compaction at the last start and the incremental vacuum since (#671).
             compaction, vacuum: (this.vacuum?.state() ?? null) as Json | null } };
@@ -167,11 +178,13 @@ export class StorageReport {
     // A computer whose project is not listed yet (only its scan is known) still counts for platform administrators.
     for (const id of Object.keys(snapshot?.computers ?? {})) if (allowed(id)) project(id, null);
     const list = [...projects.values()];
-    if (!platform) return { refreshed_at: snapshot?.refreshed_at ?? null, projects: list };
+    const managerError = snapshot?.manager_error ?? null, managerReadAt = snapshot?.manager_read_at ?? null;
+    if (!platform) return { refreshed_at: snapshot?.refreshed_at ?? null, manager_read_at: managerReadAt, manager_error: managerError, projects: list };
     const control = snapshot ? { ...snapshot.control as Record<string, any>, disk: this.disk() as Record<string, any> | null } : null;
+    // An alert the manager's last read raised stays, marked stale when the numbers beside it could not be read again (#793).
     const alerts = ([['control', control?.disk], ['manager', manager?.disk]] as [string, any][]).filter(([, disk]) => disk?.low)
-      .map(([where, disk]) => ({ where, free_bytes: disk.free_bytes, total_bytes: disk.total_bytes, reserve_bytes: disk.reserve_bytes }));
-    return { refreshed_at: snapshot?.refreshed_at ?? null, projects: list, alerts, ...summary(list, control, manager, snapshot?.cleanup ?? {}),
+      .map(([where, disk]) => ({ where, free_bytes: disk.free_bytes, total_bytes: disk.total_bytes, reserve_bytes: disk.reserve_bytes, stale: where === 'manager' && managerError !== null }));
+    return { refreshed_at: snapshot?.refreshed_at ?? null, manager_read_at: managerReadAt, manager_error: managerError, projects: list, alerts, ...summary(list, control, manager, snapshot?.cleanup ?? {}),
       totals: { control, manager: manager ? { database: manager.database ?? null, disk: manager.disk ?? null, migration: manager.migration ?? null, expiry: manager.expiry ?? null, docker: manager.docker ?? null,
         compaction: manager.compaction ?? null, vacuum: manager.vacuum ?? null } : null } };
   }

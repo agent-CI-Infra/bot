@@ -100,7 +100,7 @@ test('the storage page says the manager read failed and marks the alert it kept'
   assert.match(shown, /上次读取于/, 'the page names when the numbers were read');
   assert.match(shown, /manager 读取失败/, 'and says this read failed');
   assert.match(shown, /可能过期/, 'so the reader knows they may be stale');
-  assert.match(shown, /manager 所在磁盘/, 'the alert it kept is still shown');
+  assert.match(shown, /manager所在磁盘/, 'the alert it kept is still shown');
   assert.match(shown, /上次已知状态/, 'marked as the last known state');
   // A read that succeeded has neither sentence.
   view = { refreshed_at: '2026-11-15T08:05:00.000Z', manager_read_at: '2026-11-15T08:05:00.000Z', manager_error: null, projects: [], alerts: [] };

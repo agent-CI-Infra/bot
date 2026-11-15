@@ -97,12 +97,15 @@ const settingsCards = {
       + (state.last_error ? `；最近一个错误：${state.last_error}` : '');
     const time = value => value ? new Date(value).toLocaleString('zh-CN') : '—', row = (table, cells) => { const tr = document.createElement('tr'); for (const text of cells) tr.append(element('td', text)); table.body.append(tr); };
     const cards = [], intro = card('存储');
-    intro.append(note(`轨迹文件按运行保存模型请求、工具调用和大日志的正文，数据库只留状态和定位。数字来自文件关闭时累加的计数和后台快照，每 5 分钟刷新一次；项目电脑的卷每 6 小时在后台扫描一次，git 缓存和公开看板每小时测一次。打开页面不遍历文件。最近刷新：${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`));
+    intro.append(note(`轨迹文件按运行保存模型请求、工具调用和大日志的正文，数据库只留状态和定位。数字来自文件关闭时累加的计数和后台快照，每 5 分钟刷新一次；项目电脑的卷每 6 小时在后台扫描一次，git 缓存和公开看板每小时测一次。打开页面不遍历文件。最近刷新：${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`
+      // A failed manager read keeps the numbers it gave last (#793), so the page says which read they come from.
+      + (view.manager_error ? `上次读取于 ${view.manager_read_at ? time(view.manager_read_at) : '—'}；本次 manager 读取失败（${view.manager_error}），manager 的数字保留上次结果，可能过期。` : '')));
     cards.push(intro);
     // A data disk below its reserve (#671): background writes pause, and tasks wait once the disk is all but full.
     if (view.alerts?.length) {
       const alert = card('磁盘空间告警'); alert.setAttribute('role', 'alert');
-      for (const item of view.alerts) alert.append(element('p', `${item.where === 'manager' ? 'manager' : '控制面'}所在磁盘只剩 ${size(item.free_bytes)}（共 ${size(item.total_bytes)}），低于保留空间 ${size(item.reserve_bytes)}：后台迁移已暂停；剩余空间再少时任务会停在「等待环境」（disk_full），有空间后自动继续。请清理磁盘。`, 'view-error'));
+      for (const item of view.alerts) alert.append(element('p', `${item.where === 'manager' ? 'manager' : '控制面'}所在磁盘只剩 ${size(item.free_bytes)}（共 ${size(item.total_bytes)}），低于保留空间 ${size(item.reserve_bytes)}：后台迁移已暂停；剩余空间再少时任务会停在「等待环境」（disk_full），有空间后自动继续。请清理磁盘。`
+        + (item.stale ? '（上次已知状态，可能已过期：本次 manager 读取失败。）' : ''), 'view-error'));
       cards.push(alert);
     }
     if (view.host) {
