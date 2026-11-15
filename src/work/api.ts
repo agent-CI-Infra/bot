@@ -5,6 +5,7 @@ import type { RuleService } from '../rules/service.js';
 import { workTypes, workType, sections, section, writeOptions } from './catalog.js';
 import { managerPrompt, parseSections, workEnabled, workActive, workPermissions, workSettings, eventFilters, saveManager, sectionText, withSection } from './settings.js';
 import { retryEvent } from '../dispatch/worker.js';
+import { covers, projectCeiling, workLevel, writeLevel } from './ceiling.js';
 import { activateActions } from '../actions/storage.js';
 import { dispatchPrompt } from '../dispatch/manager.js';
 import { taskDispatch } from '../dispatch/store.js';
@@ -23,7 +24,7 @@ function model(policy: Row, id: string) {
  * the migration record of an upgraded project and the latest dispatch decisions.
  */
 export async function managerView(store: Store, rules: RuleService, repositoryId: string) {
-  const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId)!, prompt = managerPrompt(store, repositoryId);
+  const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId)!, prompt = managerPrompt(store, repositoryId), ceiling = projectCeiling(store, repositoryId, policy);
   const parsed = parseSections(prompt.content), view = await rules.view(repositoryId), settings = workSettings(store, repositoryId, policy);
   const files = new Map<string, any>(view.files.map((file: any) => [file.path, file]));
   const migration = store.get('SELECT migrated_at,report FROM manager_migrations WHERE repository_id=?', repositoryId);
@@ -39,9 +40,9 @@ export async function managerView(store: Store, rules: RuleService, repositoryId
     }),
     work: workTypes.map(type => ({ id: type.id, name: type.name, description: type.description, kinds: type.kinds, section: type.section,
       enabled: workEnabled(store, repositoryId, type.id, policy), active: workActive(store, repositoryId, type.id, policy),
-      project_switch: type.family === 'review' ? { key: 'review_enabled', title: '项目的检视开关', on: !!policy.review_enabled }
-        : type.family === 'development' ? { key: 'development_enabled', title: '项目的开发开关', on: !!policy.development_enabled } : null,
-      writes: workPermissions(store, repositoryId, type.id, policy).writes, write_options: writeOptions(type.id), model: model(policy, type.id), events: settings[type.id]?.events ?? null,
+      // The level of the project's capability ceiling the work type needs (#850); writes above the ceiling are not in `writes`.
+      ceiling: { needed: workLevel(type.id), covered: covers(ceiling, workLevel(type.id)) },
+      writes: workPermissions(store, repositoryId, type.id, policy).writes, write_options: writeOptions(type.id).map(write => ({ ...write, needed: writeLevel(write.id) })), model: model(policy, type.id), events: settings[type.id]?.events ?? null,
       version: Number(settings[type.id]?.version ?? 0) })),
     dispatch_model: model(policy, 'manager'),
     events: eventFilters(store, repositoryId, policy),

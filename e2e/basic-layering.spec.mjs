@@ -25,8 +25,8 @@ test('#570 基本设置首屏只有常用项，技术信息和危险操作默认
     await page.setViewportSize({ width: 1440, height: 900 });
     await loginBasic(page, h, password);
     await expect(page.getByRole('link', { name: /监听与触发设置/ })).toBeVisible();
-    await expect(page.getByLabel('开启 Issue 与 PR 检视', { exact: true })).toHaveCount(0);
-    await expect(page.getByLabel('开启自动开发', { exact: true })).toHaveCount(0);
+    await expect(page.getByLabel('只读问答', { exact: true })).toHaveCount(0);
+    await expect(page.getByLabel('可开发并开 PR', { exact: true })).toHaveCount(0);
     await expect(page.getByLabel('基准分支', { exact: true })).toBeVisible();
     // Technical identifiers and danger actions are in the document but not on the first screen.
     await expect(page.getByText('仓库 ID', { exact: true })).toBeHidden();

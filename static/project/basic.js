@@ -48,7 +48,7 @@ function basicSection() {
   const machineSize = current.rules?.computer?.cpus
     ? `${current.rules.computer.cpus} CPU · ${current.rules.computer.memory_mb} MB`
     : environment?.environment.computer ? `${environment.environment.computer.cpus} CPU · ${environment.environment.computer.memory_mb} MB` : null;
-  summary.append(facts([['检视', policy.review_enabled ? '开启' : '关闭'], ['自动开发', policy.development_enabled ? '开启' : '关闭'],
+  summary.append(facts([['能力上限', Object.fromEntries(projectCeilingOptions.map(([level, title]) => [level, title]))[projectCeilingOf(policy)]],
     ['模型', current.models.find(m=>m.id===policy.model_id)?.model_name || (policy.model_id?'模型不可用':'未选择，任务会等待配置')],
     ['机器', machineSize]]));
   summary.append(consoleLink(`#/projects/${id}/triggers`, '监听与触发设置', '项目整体的事件来源与自动处理范围'));

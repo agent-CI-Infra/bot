@@ -58,6 +58,7 @@ import { continueFinishedReview, continuationContext, resumeFinishedReviews } fr
 import { type GitCache } from './git-cache.js';
 import { workOf } from '../work/catalog.js';
 import { workEnabled } from '../work/settings.js';
+import { covers, projectCeiling, stopAboveCeiling, workLevel } from '../work/ceiling.js';
 import { eventWork } from '../work/events.js';
 import { Dispatcher } from '../dispatch/worker.js';
 import { managerDecision } from '../dispatch/manager.js';
@@ -246,8 +247,11 @@ export class TaskEngine {
         stop(installationWait,'waiting_permission','安装已失效或正在核实范围，任务等待安装同步。');
       const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number});
       if(actionsIssue!==null&&(!policy?.actions_failures_enabled||task.kind.startsWith('development.')&&!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue)))stop('actions_development_disabled','cancelled');
+      if(!policy?.enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用。`);
+      // A capability ceiling lowered below what this task needs (#850) stops it before its next tool call, with its work kept;
+      // raising the ceiling again lets it be retried. It is never cancelled for this.
+      stopAboveCeiling(this.store,task.repository_id,workLevel(workOf(task as any)),'capability_ceiling_lowered',policy);
       if(task.kind==='task.development')assertRequestPullRequest(this.store,task);
-      if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用，或已关闭 ${task.kind} 类型任务。`);
       // A work type that was switched off in the project configuration stops its tasks the same way.
       if(!requestedTask(task)&&!workEnabled(this.store,task.repository_id,workOf(task as any)))stop('work_disabled','cancelled',`项目已关闭 ${workOf(task as any)} 这类工作。`);
       // The guard runs on every poll, tool call and streamed reply of every task: read only the columns this check needs, and
@@ -701,11 +705,12 @@ export class TaskEngine {
           return result;
         };
         result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl,taskPermissions(this.store,task).github,()=>taskReadScopes(this.store,task)),writes.includes('pull_request')?async(requestId,args)=>{
-          // Any task other than development may publish one PR, while the project's development switch is on,
+          // Any task other than development may publish one PR, while the project's capability ceiling is develop (#850),
           // from an Issue or onto the bot's own PR.
           if(!development){
-            if(!this.store.get('SELECT development_enabled FROM policies WHERE repository_id=?',task.repository_id)?.development_enabled)
-              return {error:'development_disabled',message:'The project\'s development switch is off, so no pull request can be published. Finish without one.'};
+            const ceiling=projectCeiling(this.store,task.repository_id);
+            if(!covers(ceiling,'develop'))
+              return {error:'capability_ceiling',needed:'develop',ceiling,message:`The project's capability ceiling is ${ceiling}; publishing a pull request needs develop. Finish without one.`};
             const earlier=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),published=earlier?JSON.parse(earlier.data).published:null;
             if(published)return {error:'pull_request_already_published',pr:published,message:'This task already published its pull request.'};
             if(task.kind.endsWith('.pr')&&!this.store.get('SELECT 1 FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number))
@@ -811,7 +816,7 @@ export class TaskEngine {
           // otherwise the labeled webhook offers it later. A failed check counts as no go-ahead.
           const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
           let approved:GoAhead|null=null;
-          if(task.kind==='review.issue'&&policy?.development_enabled){
+          if(task.kind==='review.issue'&&covers(projectCeiling(this.store,task.repository_id,policy),'develop')){
             approved=await this.developmentApproved(github,task).catch(()=>null);
             // The log names the reason the summary comment gave: no label yet, or a label added by an app.
             if(!approved&&reviewRequestsCode(input.object,result))log({type:'development_waiting',reason:development?.reason||'label'});

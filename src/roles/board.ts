@@ -1,4 +1,5 @@
 import { roleKind } from './catalog.js';
+import { projectCeiling } from '../work/ceiling.js';
 import { createHash } from 'node:crypto';
 import type { Store } from '../storage/database.js';
 import { fail, type Json } from '../core/security.js';
@@ -80,7 +81,7 @@ export function roleConcurrencyValue(store: Store, repositoryId: string, value: 
 /** The policy row as the console reads it: limits as an object, never a JSON string, and no invented default number. */
 export function policyView(store: Store, policy: Json | undefined, repositoryId: string): Json | undefined {
   if (!policy) return policy;
-  return { ...policy, role_concurrency: roleConcurrency(store, repositoryId) };
+  return { ...policy, capability_ceiling: projectCeiling(store, repositoryId, policy), role_concurrency: roleConcurrency(store, repositoryId) };
 }
 
 // Stages are validated acyclic when saved; ordering them here keeps the queue projection deterministic.

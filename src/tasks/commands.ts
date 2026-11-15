@@ -19,6 +19,7 @@ import { readEvidence } from './evidence.js';
 import { obsoleteOrigin } from './obsolete.js';
 import { taskTraceAccess,taskControllerReads } from '../memory/access.js';
 import { assertRequestPullRequest, softwareRequest } from './pull-request.js';
+import { assertCeiling } from '../work/ceiling.js';
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
 /** Shared task mutation boundary for the console, management tools and future message adapters. */
@@ -115,6 +116,7 @@ export class TaskCommands {
         this.store.run('DELETE FROM development_candidates WHERE task_id=?',task!.id);
         traceEvent(this.store,task!.id,'intervention',{action:'contract_revision',before:new TaskRecords(this.store).get(task!.id).revision-1,after:contract,reason:'explicit user contract revision',stage_plan:stageReplanContext(this.store,task!.id)},null,'user:'+user.id);
         const revised=this.store.get('SELECT * FROM tasks WHERE id=?',task!.id)!;
+        if(softwareRequest(revised))assertCeiling(this.store,String(revised.repository_id),'develop');
         if(softwareRequest(revised))try{assertRequestPullRequest(this.store,revised);}catch(error){if(error instanceof TaskError)fail(403,error.code);throw error;}
         this.store.audit(user.id,'task.contract',task!.id,task!.repository_id);
       });this.hooks.tick?.();return {task:new TaskRecords(this.store).get(task!.id)};
@@ -145,6 +147,7 @@ export class TaskCommands {
         if(caller!.permissions?.delegation!=='allow'||definition?.permissions.delegation!=='allow')fail(403,'task_delegation_forbidden');}
       if(development){
         // Development uses the project's ordinary development work type. Parent linkage adds no authority.
+        assertCeiling(this.store,String(input.repository_id),'develop');
         try{assertRequestPullRequest(this.store,{id:'',kind,repository_id:input.repository_id,input:JSON.stringify({contract})});}catch(error){if(error instanceof TaskError)fail(403,error.code);throw error;}
         if(caller?.source_task_id){const source=this.store.get('SELECT * FROM tasks WHERE id=? AND repository_id=?',caller.source_task_id,caller.project_id);
           if(!source||!['code','pull_request'].every(write=>taskPermissions(this.store,source).writes.includes(write)))fail(403,'task_external_write_forbidden');}
@@ -256,9 +259,10 @@ export class TaskCommands {
           contract:{goal:args.request,criteria:args.criteria,scope:[String(args.request).slice(0,2000)],endpoint:args.endpoint??(intent==='development'?'reviewable_pull_request':'report')},
           ...(intent!==undefined?{intent}:{}),...(args.executor_role!==undefined?{executor_role:args.executor_role}:{}),...(args.execute!==undefined?{execute:args.execute}:{}),...(args.as_child!==undefined?{as_child:args.as_child}:{})},caller)!;
       }catch(error){
-        const expected=['invalid_task_intent','invalid_task_endpoint','invalid_task_request','invalid_task_contract','invalid_task_executor','invalid_child_task','child_task_manager_required','task_executor_unavailable','task_delegation_forbidden','task_external_write_forbidden','task_pull_request_forbidden','task_software_disabled'];
+        const expected=['invalid_task_intent','invalid_task_endpoint','invalid_task_request','invalid_task_contract','invalid_task_executor','invalid_child_task','child_task_manager_required','task_executor_unavailable','task_delegation_forbidden','task_external_write_forbidden','task_pull_request_forbidden','task_software_disabled','capability_ceiling'];
         if(!(error instanceof HttpError||error instanceof TaskError)||!expected.includes(error.code))throw error;
-        return {error:error.code,stage:'task_creation',created:false,project_id:caller.project_id,source_ref:caller.source_task_id?'task:'+caller.source_task_id:null,requested_endpoint:args.endpoint??(args.intent==='development'?'reviewable_pull_request':'report'),instruction:error.code==='task_external_write_forbidden'?'The source task has no code/PR authority to delegate. Keep the original goal and coordinate or request the missing authority.':error.code==='task_software_disabled'?'Project development or this work type is disabled. Ask the project administrator to enable it; no task was created.':error.code==='task_pull_request_forbidden'?'The selected executor or work type cannot edit code and deliver a PR. A Task Manager can delegate to the normal project team within existing development authority.':error.code==='invalid_task_contract'?'Provide a goal, scope, nonempty observable criteria and a supported delivery endpoint.':error.code==='task_delegation_forbidden'?'This caller cannot delegate to the selected executor or project team. Continue within current authority or request the missing delegation grant.':error.code==='invalid_task_endpoint'?'Use report for factual artifacts or development/PR delivery for working code; intent and endpoint must agree.':error.message};
+        return {error:error.code,stage:'task_creation',created:false,project_id:caller.project_id,source_ref:caller.source_task_id?'task:'+caller.source_task_id:null,requested_endpoint:args.endpoint??(args.intent==='development'?'reviewable_pull_request':'report'),...(error.code==='capability_ceiling'&&error instanceof HttpError?{needed:(error.detail as any)?.needed,ceiling:(error.detail as any)?.ceiling}:{}),
+          instruction:error.code==='capability_ceiling'?'The project\'s capability ceiling is below develop, so no code can be delivered and no task was created. Keep the goal: report what you found instead, or ask a project administrator to raise the ceiling.':error.code==='task_external_write_forbidden'?'The source task has no code/PR authority to delegate. Keep the original goal and coordinate or request the missing authority.':error.code==='task_software_disabled'?'Project development or this work type is disabled. Ask the project administrator to enable it; no task was created.':error.code==='task_pull_request_forbidden'?'The selected executor or work type cannot edit code and deliver a PR. A Task Manager can delegate to the normal project team within existing development authority.':error.code==='invalid_task_contract'?'Provide a goal, scope, nonempty observable criteria and a supported delivery endpoint.':error.code==='task_delegation_forbidden'?'This caller cannot delegate to the selected executor or project team. Continue within current authority or request the missing delegation grant.':error.code==='invalid_task_endpoint'?'Use report for factual artifacts or development/PR delivery for working code; intent and endpoint must agree.':error.message};
       }
     }
     if(name==='manage_task'){

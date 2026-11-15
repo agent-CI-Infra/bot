@@ -13,6 +13,7 @@ import { installationSnapshot, installationRef, accountRef, queueInstallationSyn
 import { pendingInstalledRepositories } from '../identity/github-status.js';
 import { trustedOrganization, trustOrganization } from './trusted-organizations.js';
 import { assertSyncClaim, claimInstallationSync, commitInstallationProjection, finishInstallationSync, validateInstallation, type SyncClaim } from '../installations/projection.js';
+import { covers, projectCeiling, setCeiling } from '../work/ceiling.js';
 
 // Installation scope: which repositories each account can see on GitHub. Seeing a repository never registers or
 // enables it; an administrator starts it in the console, and can disable it again.
@@ -428,7 +429,7 @@ function readEvents(value: string | null): { missing: string[] | null; unreadabl
 }
 // One row per repository: what GitHub shows as installed, merged with registration, policy and environment.
 function list(store: Store, url?: URL): Json {
-  const registered = new Map(store.all(`SELECT r.id,r.full_name,r.owner_id,r.account_id,p.enabled,p.review_enabled,p.development_enabled,p.actions_failures_enabled,p.model_id,
+  const registered = new Map(store.all(`SELECT r.id,r.full_name,r.owner_id,r.account_id,p.enabled,p.review_enabled,p.development_enabled,p.capability_ceiling,p.actions_failures_enabled,p.model_id,
     e.state AS environment_state,${projectActivityColumns} FROM repositories r JOIN policies p ON p.repository_id=r.id LEFT JOIN project_environments e ON e.repository_id=r.id ${projectActivityJoin}`).map(r => [r.id, r]));
   const scope = new Map<string, Row>();
   for (const row of store.all('SELECT i.*,a.name AS account_name,a.type AS account_type FROM installed_repositories i JOIN accounts a ON a.id=i.account_id WHERE i.hidden=0 ORDER BY i.installed DESC')) {
@@ -447,7 +448,7 @@ function list(store: Store, url?: URL): Json {
     return { id, full_name: reg?.full_name || seen!.full_name, owner_id: reg?.owner_id || seen!.owner_id, owner_login: seen?.owner_login || '', private: !!seen?.private,
       account_id: reg?.account_id || seen!.account_id, account_name: seen?.account_name || null, installation_id: seen?.installation_id || null,
       installed: seen ? !!seen.installed : null, synced_at: seen?.synced_at || null, registered: !!reg, enabled: !!reg?.enabled,
-      review_enabled: !!reg?.review_enabled, development_enabled: !!reg?.development_enabled, actions_failures_enabled: !!reg?.actions_failures_enabled, model_id: reg?.model_id || null, environment_state: reg?.environment_state || null,
+      review_enabled: !!reg?.review_enabled, development_enabled: !!reg?.development_enabled, capability_ceiling: reg ? projectCeiling(store, String(reg.id), reg) : null, actions_failures_enabled: !!reg?.actions_failures_enabled, model_id: reg?.model_id || null, environment_state: reg?.environment_state || null,
       running_tasks: reg?.running_tasks || 0, queued_tasks: reg?.queued_tasks || 0, ...permissions,
       events_unreadable: events.unreadable,
       board_enabled: publication.enabled, board_state: publication.state, board_url: publication.url,
@@ -525,8 +526,10 @@ function activate(store: Store, user: Actor, id: string, input: Json, check: () 
     // A deployment-shared model becomes available to this repository when chosen here.
     if (modelRow && modelRow.repository_id === null) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', model, id);
     const policy = store.get('SELECT * FROM policies WHERE repository_id=?', id)!;
-    store.run('UPDATE policies SET enabled=1,review_enabled=1,development_enabled=?,model_id=? WHERE repository_id=?',
-      input.development_enabled === undefined ? policy.development_enabled : Number(input.development_enabled), model ?? policy.model_id, id);
+    store.run('UPDATE policies SET enabled=1,model_id=? WHERE repository_id=?', model ?? policy.model_id, id);
+    // Starting lets the project review at least (comment); development_enabled asks for develop (#850).
+    const level = projectCeiling(store, id, policy);
+    setCeiling(store, id, input.development_enabled === true ? 'develop' : input.development_enabled === false || !covers(level, 'comment') ? 'comment' : level, user.id);
     store.audit(user.id, registered ? 'repository.enabled' : 'repository.activated', id, id);
     if (input.trust_organization === true) trustOrganization(store, user.id, String((chosen || registered)!.owner_id),
       { model_id: modelRow?.repository_id === null ? model : null, development_enabled: input.development_enabled === true });

@@ -24,7 +24,7 @@ for(const scenario of ['report','reviewable_pull_request','revoked_after_qa','po
     await fetch(gh+'/fixture/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({github_token:f.a.token})});
     f.h.store.run("UPDATE repositories SET full_name='fixture/project-101' WHERE id='101'");
     f.h.store.run("UPDATE tasks SET status='cancelled'");
-    f.h.store.run("UPDATE policies SET development_enabled=?,test_command=?,work_settings=? WHERE repository_id='101'",software?1:0,software?'node --input-type=module -e "import { verified } from \'./feature.mjs\'; if(verified!==true)process.exit(1)"':'',JSON.stringify({'task.request':{writes:software?['code','pull_request']:[]}}));
+    f.h.store.run("UPDATE policies SET capability_ceiling=?,development_enabled=?,test_command=?,work_settings=? WHERE repository_id='101'",software?'develop':'comment',software?1:0,software?'node --input-type=module -e "import { verified } from \'./feature.mjs\'; if(verified!==true)process.exit(1)"':'',JSON.stringify({'task.request':{writes:software?['code','pull_request']:[]}}));
     roleApi(f.h.store,{id:f.principal,role:'super_admin',repositories:[]},'PUT',new URL('http://local/api/repositories/101/roles'),{expected_revision:0,enabled:false,roles:[
       {role_id:role,harness_ref:{id:'native'},permissions:{task_management:'write',delegation:'deny',...(software?{}:{commands:'deny'})}},
       {role_id:'qa',harness_ref:{id:'native'}}]});

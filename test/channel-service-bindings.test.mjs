@@ -578,6 +578,8 @@ test('a group whose level writes Issues files one in a repository in scope with 
   const f = await fixture(t), offered = [];
   assert.equal((await f.bind()).status, 200);
   await f.setLevel({ github_issues: 'write' });
+  // The project's capability ceiling (#850) is the top of the group's level: Issues need comment.
+  f.h.store.run("UPDATE policies SET capability_ceiling='comment' WHERE repository_id='101'");
   const write = (repository, key) => ['github_write', { repository, method: 'POST', path: '/issues', key, body: { title: 'Parser drops the last line', body: 'Reported in the group by @carol.' } }];
   f.modelState.respond = async (body, res) => {
     offered.push(body.tools.map(tool => tool.function.name));

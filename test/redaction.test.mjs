@@ -94,7 +94,7 @@ test('GitHub comments retain ordinary prose, code and JSON through the write bou
   const {Store}=await import('../dist/storage/database.js'),{githubWrite,githubWriteStorage}=await import('../dist/github/write.js');
   const store=new Store(':memory:',Buffer.alloc(32,7));t.after(()=>store.close());githubWriteStorage(store);
   store.run("INSERT INTO accounts VALUES('a','fixture','bot_account','1',?,'now')",store.secrets.seal({token:'fixture-github-credential'},'account:a'));
-  store.run("INSERT INTO repositories VALUES('r','fixture/redaction','10','a')");
+  store.run("INSERT INTO repositories VALUES('r','fixture/redaction','10','a')");store.run("INSERT INTO policies(repository_id,enabled,capability_ceiling) VALUES('r',1,'comment')");
   const posted=[],server=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;
     res.setHeader('Content-Type','application/json');
     if(req.method==='POST'){posted.push(JSON.parse(raw));res.statusCode=201;return res.end(JSON.stringify({id:posted.length,html_url:'https://github.invalid/comment/'+posted.length}));}

@@ -187,3 +187,23 @@ test('server preflight blocks a disabled project and a late context response can
     await expect(page.getByRole('button', { name: '提交任务', exact: true })).toBeEnabled(); expect(createCount(f)).toBe(0);
   } finally { release(); await f.close(); }
 });
+
+test('a code delivery in a project below the develop capability ceiling is refused with the level it needs (#850)', async ({ page }) => {
+  const f = await fixture(), errors = []; page.on('pageerror', err => errors.push(err.message));
+  try {
+    expect((await f.admin('/api/repositories/101/policy', 'PATCH', { capability_ceiling: 'comment' })).status).toBe(200);
+    await login(page, f); await fill(page);
+    await page.getByLabel('交付类型', { exact: true }).selectOption('reviewable_pull_request');
+    await page.getByRole('button', { name: '提交任务', exact: true }).click();
+    const message = page.getByText('项目能力上限不是「可开发并开 PR」，不能交付代码；请项目管理员在「项目设置 → 监听与触发」调整。', { exact: true });
+    await expect(message).toBeVisible();
+    expect(f.h.store.get("SELECT count(*) n FROM tasks WHERE kind='task.development'").n).toBe(0);
+    mkdirSync('.tmp/task-create-850', { recursive: true });
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 1000 }); await message.scrollIntoViewIfNeeded();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: `.tmp/task-create-850/refused-${width}.png` });
+    }
+    expect(errors).toEqual([]);
+  } finally { await f.close(); }
+});

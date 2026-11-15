@@ -47,7 +47,7 @@ export async function emptyRepositoryFixture(t,options={}){
   if(options.taskKind){
     // Set up the requested task family before execution, rather than revising an already fixed review configuration.
     h.store.run('UPDATE tasks SET kind=? WHERE id=?',options.taskKind,taskId);
-    if(options.taskKind.startsWith('development.'))h.store.run("UPDATE policies SET development_enabled=1 WHERE repository_id='101'");
+    if(options.taskKind.startsWith('development.'))h.store.run("UPDATE policies SET capability_ceiling='develop',development_enabled=1 WHERE repository_id='101'");
     h.store.run('DELETE FROM task_execution_configs WHERE task_id=?',taskId);captureTaskConfiguration(h.store,taskId);
   }
   pinLegacyTaskConfiguration(h.store, taskId);

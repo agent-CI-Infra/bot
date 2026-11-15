@@ -30,7 +30,7 @@ export const writeCatalog: WriteDefinition[] = [
   { id: 'reply', title: '回复评论', tool: 'finish_review', detail: '结束时交出回复；控制面发一条评论，PR 上有真实 diff 位置的意见作为 COMMENT 行内检视发出。' },
   { id: 'labels', title: '加分类标签', tool: 'finish_review', detail: '在回复里给出分类标签；控制面只加仓库里已有、对象上还没有的标签，从不加检视标签和开发标签。' },
   { id: 'code', title: '修改工作区代码', tool: 'write_file', detail: '只改这次任务的检出，不直接写 GitHub。' },
-  { id: 'pull_request', title: '开或更新 bot PR', tool: 'create_pull_request', detail: '控制面固定快照、跑项目测试命令，通过后才推 bot 分支、开或更新 PR；检视和通用回复还要求项目的开发开关打开，只能在 Issue 上开新 PR 或更新 bot 自己的 PR。' },
+  { id: 'pull_request', title: '开或更新 bot PR', tool: 'create_pull_request', detail: '控制面固定快照、跑项目测试命令，通过后才推 bot 分支、开或更新 PR；要求项目能力上限为「可开发并开 PR」，检视和通用回复只能在 Issue 上开新 PR 或更新 bot 自己的 PR。' },
   { id: 'issue', title: '提报 Issue', tool: 'report_failure', detail: '登记失败的 job、类别和引用的日志行；控制面核验引用确实是失败 step 打印的，再新建或评论 Issue，同一失败只报一次。' },
   { id: 'actions_rerun', title: '重跑失败的 Actions 运行', tool: 'rerun_failed_run', detail: '登记后由控制面执行：每个原始运行最多重跑一次，只重跑支持 workflow_dispatch 的运行。' },
   { id: 'release_notes', title: '写发行说明', tool: 'finish_release_notes', detail: '交出已核验来源的分组；控制面核验每个来源恰好出现一次，再写出正文。' },
@@ -49,14 +49,15 @@ const writeSets: Record<Base, { options: string[]; defaults: string[]; locked: s
   'release.notes': { options: ['release_notes'], defaults: ['release_notes'], locked: [] },
   actions: { options: ['actions_rerun', 'issue'], defaults: ['actions_rerun', 'issue'], locked: [] },
   gate: { options: ['gate_plan'], defaults: ['gate_plan'], locked: ['gate_plan'] },
-  // Ordinary tasks remain free of writes by default; PR delivery needs the project's explicit grant.
-  request: { options: ['code', 'pull_request'], defaults: [], locked: [] }
+  // Ordinary tasks inherit the capability ceiling (#850): at develop they may change code and deliver a PR like a development
+  // task; below it the ceiling removes both. An administrator can still narrow them.
+  request: { options: ['code', 'pull_request'], defaults: ['code', 'pull_request'], locked: [] }
 };
 export const githubScopes = ['contents', 'issues', 'pull_requests', 'actions', 'checks', 'statuses', 'metadata'];
 
 /**
  * A work type. `kinds` are the task kinds it runs as; `section` is the chapter of the Manager prompt that describes it;
- * `family` names the project-wide switch (review_enabled, development_enabled) that also gates it.
+ * `family` groups reviews and development. What level of the project's capability ceiling it needs is workLevel (ceiling.ts).
  */
 export interface WorkType {
   id: string; name: string; description: string; base: Base; object: 'issue' | 'pr' | 'any' | 'release' | 'actions' | 'repository' | 'schedule';
@@ -84,7 +85,7 @@ export const workTypes: WorkType[] = [
   { id: 'task.development', name: '开发任务', base: 'development', object: 'schedule', kinds: ['task.development'], section: 'development', family: 'development', defaultEnabled: true,
     description: '直接创建的开发任务，复用项目开发授权、测试、独立 QA 和 PR 交付；可独立执行或关联父任务，不需要虚构 GitHub Issue。' },
   { id: 'task.request', name: '普通事项与定时检查', base: 'request', object: 'schedule', kinds: ['task.request'], section: 'schedule', defaultEnabled: true,
-    description: '处理直接创建的普通事项或 Manager 接受的定时检查。默认不写 GitHub；交付 PR 需项目显式允许，仍经测试及独立 QA；执行角色有 GitHub 写权限时可以用 github_write 直接写，例如提报 Issue。' }
+    description: '处理直接创建的普通事项或 Manager 接受的定时检查。写入默认继承项目能力上限：可开发时可以交付 PR，仍经测试及独立 QA；执行角色有 GitHub 写权限时可以在上限内用 github_write 直接写，例如提报 Issue。' }
 ];
 export const workType = (id: string) => workTypes.find(work => work.id === id);
 /** The work type a task belongs to: reply tasks (including those of former custom workflows) are one work type. */

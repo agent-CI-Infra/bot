@@ -1,4 +1,5 @@
 import { roleConfiguration, rolePrompt } from '../roles/definition.js';
+import { covers, projectCeiling } from '../work/ceiling.js';
 import { githubReadScopes, githubWriteAllowed, permitsTool } from '../roles/permissions.js';
 import type { Store } from '../storage/database.js';
 import { dispatchScope } from '../storage/trajectories.js';
@@ -67,7 +68,8 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
   const offered = () => {
     const p = live(), read = githubReadScopes(p);
     return [...repositoryTools.filter(t => permitsTool(p, t.function.name) && read.length).map(t => ({ ...t, function: { ...t.function, description: t.function.description.replace(/\s*Call github_read_token first\./g, '') } })),
-      ...(permitsTool(p, 'github_write') ? [githubWriteTool] : []), tool];
+      // github_write also needs the project's capability ceiling at comment or more (#850); each call is checked again.
+      ...(permitsTool(p, 'github_write') && covers(projectCeiling(store, repositoryId), 'comment') ? [githubWriteTool] : []), tool];
   };
   const execute = async (name: string, args: unknown): Promise<unknown> => {
     if (!offered().some(t => t.function.name === name)) return { error: 'tool_not_allowed' };

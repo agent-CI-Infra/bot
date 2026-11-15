@@ -60,7 +60,7 @@ export class ManagementApi {
     if(Number(input.expected_revision)!==managerPrompt(this.service.store,project).revision)fail(409,'manager_revision_conflict','expected_revision');
     const receipt=await this.service.submit(actor,{operation:'manager.update',target:{project_id:project},arguments:input,
       expected_revision:this.service.revision({project_id:project}),idempotency_key:'console:'+randomId(),source_conversation:'console:manager',source_message:actor.request_id});
-    if(receipt.state!=='succeeded')fail(Number((receipt.result as Json)?.http_status??409),String((receipt.result as Json)?.error??'management_command_failed'),(receipt.result as {field?:string})?.field);
+    if(receipt.state!=='succeeded')fail(Number((receipt.result as Json)?.http_status??409),String((receipt.result as Json)?.error??'management_command_failed'),(receipt.result as {field?:string})?.field,(receipt.result as {detail?:Json})?.detail);
     return {manager:await managerView(this.service.store,this.service.rules,project),management:receipt};
   }
   async task(actor:ActorContext,method:string,url:URL,input:Json):Promise<Json|undefined>{
@@ -83,7 +83,7 @@ export class ManagementApi {
     }
     const target={project_id:project,...(match?{task_id:match[1]!}:{})};
     const receipt=await this.service.submit(actor,{operation,target,arguments:args,expected_revision:this.service.revision(target),idempotency_key:'console:'+randomId(),source_conversation:'console:'+operation,source_message:actor.request_id});
-    if(receipt.state!=='succeeded')fail(Number((receipt.result as Json)?.http_status??409),String((receipt.result as Json)?.error??'management_command_failed'),(receipt.result as {field?:string})?.field);
+    if(receipt.state!=='succeeded')fail(Number((receipt.result as Json)?.http_status??409),String((receipt.result as Json)?.error??'management_command_failed'),(receipt.result as {field?:string})?.field,(receipt.result as {detail?:Json})?.detail);
     if(rules)return {rules:await this.service.rules.view(project),management:receipt};
     return {...receipt.result as Json,management:receipt};
   }

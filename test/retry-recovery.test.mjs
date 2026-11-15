@@ -62,7 +62,7 @@ for(const kind of ['review.issue','development.issue'])for(const fault of ['tran
       },
     });
     h.setBranch('ready');
-    h.store.run("UPDATE policies SET development_enabled=1 WHERE repository_id='101'");
+    h.store.run("UPDATE policies SET capability_ceiling='develop',development_enabled=1 WHERE repository_id='101'");
     h.store.run('UPDATE tasks SET attempt=3 WHERE id=?',h.taskId);
     for(let failure=1;failure<=5;failure++){
       h.due();const before=Date.now(),task=await h.run();
@@ -123,7 +123,7 @@ for(const phase of ['model','publish'])for(const [condition,kind,status,code] of
       if(res.req.method!=='GET')writes++;
       if(path.endsWith('/issues/1')||path.endsWith('/pulls/1')){send(condition==='bot_pr_closed'&&path.endsWith('/pulls/1')?botPR:object);return true;}
     }});h.setBranch('ready');
-    h.store.run("UPDATE policies SET development_enabled=1,enabled=? WHERE repository_id='101'",condition==='policy'?0:1);
+    h.store.run("UPDATE policies SET capability_ceiling='develop',development_enabled=1,enabled=? WHERE repository_id='101'",condition==='policy'?0:1);
     const input={object:issue,object_hash:sha(JSON.stringify([issue.title,issue.body])),context:{mode:kind.startsWith('development.')?'development':'review'},files:[],...(condition==='bot_pr_closed'?{bot_pr:pull}:{})};
     const entered=Date.now()-cycleMs;
     h.store.run("UPDATE tasks SET kind=?,status='retry_wait',phase=?,input=?,head_sha=?,workspace_id='old',generation=1,retry_count=5,retry_error_code='model_unavailable',retry_cycle_started_at=?,next_run_at=? WHERE id=?",

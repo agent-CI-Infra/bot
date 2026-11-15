@@ -105,13 +105,15 @@ test('live revocation and pinned ceilings survive recovery; granting a newer per
 
 test('a source role cannot lend GitHub writes, commands, subagents or another role through its own task', t => {
   const { s, caller, create, save } = fixture(t);
+  // Ordinary tasks inherit the capability ceiling (#850); this project narrowed them to no writes.
+  s.run(`UPDATE policies SET work_settings='{"task.request":{"writes":[]}}'`);
   save('reviewer', { task_management: 'write', computer: 'deny', subagents: 'deny', issues: 'deny' });
   const task = s.get('SELECT * FROM tasks WHERE id=?', create(caller()).id);
   assert.equal(taskToolAllowed(s, task, 'reviewer', 'write_file'), false);
   assert.equal(taskToolAllowed(s,task,'reviewer','start_agent'),true);
   for (const name of ['github_write', 'run_command', 'delegate_role']) assert.equal(taskToolAllowed(s, task, 'reviewer', name), false, name);
   assert.throws(() => assertTaskRole(s, task, 'manager'), { code: 'task_delegation_forbidden' });
-  // A PR is a framework delivery (#381): the project's work type decides, and this task's work type has no PR write.
+  // A PR is a framework delivery (#381): the project's work type decides, and this task's work type was narrowed to no PR write.
   assert.throws(() => assertTaskExternalEffect(s, task, 'pull_request'), { code: 'task_external_write_forbidden' });
   assertTaskRole(s, task, 'qa'); assert.equal(taskToolAllowed(s, task, 'qa', 'submit_acceptance'), true);
   save('reviewer', { github_issues: 'write' });

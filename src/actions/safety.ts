@@ -1,6 +1,7 @@
 import { redactCredentials } from '../core/redaction.js';
 import type { Store } from '../storage/database.js';
 import { Redactor } from '../agent/common.js';
+import { covers, projectCeiling } from '../work/ceiling.js';
 
 // Configuration errors that stop Actions failure handling until an App manager or installation owner acts.
 export const actionsConfigurationErrors = ['actions_permission_missing', 'actions_workflow_run_subscription_missing'];
@@ -56,7 +57,7 @@ export function actionsDevelopmentAllowed(store: Store, id: string, number: numb
   const source = store.get('SELECT classification FROM actions_failure_issues WHERE repository_id=? AND number=?', id, number);
   if (!source) return true;
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', id);
-  if (source.classification !== 'code' || !policy?.enabled || !policy.actions_failures_enabled || !policy.review_enabled || !policy.development_enabled) return false;
+  if (source.classification !== 'code' || !policy?.enabled || !policy.actions_failures_enabled || !covers(projectCeiling(store, id, policy), 'develop')) return false;
   const config = store.get('SELECT configured_at,error FROM actions_failure_scans WHERE repository_id=?', id);
   if (!config?.configured_at || actionsConfigurationErrors.includes(config.error)) return false;
   if (!issue) return true;

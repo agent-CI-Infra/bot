@@ -293,7 +293,7 @@ test('public task creation accepts development intent and PR endpoint inference 
  }
  const before=h.store.get('SELECT count(*) n FROM tasks').n;await admin('/api/repositories/101/policy','PATCH',{development_enabled:false});
  const refused=await admin('/api/tasks','POST',{repository_id:'101',request:'No grant',intent:'development',contract:{goal:'No grant',scope:['project'],criteria:['result'],endpoint:'reviewable_pull_request'}});
- assert.equal(refused.status,403);assert.equal(refused.value.error,'task_software_disabled');assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,before);
+ assert.equal(refused.status,403);assert.equal(refused.value.error,'capability_ceiling');assert.equal(refused.value.detail?.needed,'develop',JSON.stringify(refused.value));assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,before);
 });
 
 test('a project administrator can list and open conversations on a started project, including when the session is tenant-scoped', async t => {

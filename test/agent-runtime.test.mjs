@@ -30,7 +30,7 @@ async function fixture(t) {
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
   store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','r',?,?,?,?)",
     `http://127.0.0.1:${server.address().port}`, 'fixture', store.secrets.seal({ value: 'secret-model-key' }, 'model:m'), new Date().toISOString());
-  store.run("INSERT INTO policies(repository_id,model_id) VALUES('r','m')");
+  store.run("INSERT INTO policies(repository_id,model_id,capability_ceiling) VALUES('r','m','develop')");
   const spec = { store, task: { id: 'domain-run', repository_id: 'r', kind: 'custom.analysis' }, redactor: new Redactor(), guard: async () => {}, system: 'Analyze only.', prompt: 'input' };
   return { store, spec, requests, respond(fn) { respond = fn; } };
 }

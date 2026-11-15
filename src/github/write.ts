@@ -3,6 +3,7 @@ import { GitHub } from './client.js';
 import { publicText, actionsRedactor } from '../actions/safety.js';
 import { Redactor, TaskError } from '../agent/common.js';
 import { digest, randomId } from '../core/security.js';
+import { covers, projectCeiling, resourceLevel } from '../work/ceiling.js';
 
 /**
  * github_write: one GitHub write tool for every agent, shaped like the GitHub REST API (#381).
@@ -81,7 +82,7 @@ const fn = (name: string, description: string, properties: any, required: string
 const description = 'Write to GitHub through the control plane, exactly like the GitHub REST API: method and a path relative to the repository (/repos/{owner}/{repo} is implied), with the REST JSON body. '
   + 'Examples: POST /issues {title, body}; POST /issues/12/comments {body}; POST /issues/12/labels {labels}; PATCH /issues/12 {state}; POST /pulls {title, head, base, body}; '
   + 'POST /pulls/7/reviews {event, body, comments}; PUT /pulls/7/merge; PUT /contents/docs/a.md {message, content (base64), sha?, branch?}; POST /git/refs {ref, sha}. '
-  + 'Allowed only where your role has write on the route\'s GitHub resource (Issues, Pull requests or Contents); other repositories and other routes are refused. '
+  + 'Allowed only where your role has write on the route\'s GitHub resource (Issues, Pull requests or Contents) and the project\'s capability ceiling allows it (comment for Issues and pull requests, develop for Contents); other repositories and other routes are refused. '
   + 'Mentions (@) in titles and bodies people read are escaped and secrets are removed. key: a short stable name for this write (for example "triage-comment"); calling again with the same key returns the earlier result instead of writing twice, so keep it when retrying and use a new key for a different write. '
   + 'Use github_read to check state before writing; write only what your task needs.';
 const properties = { method: { type: 'string', enum: [...writeMethods] }, path: { type: 'string', description: 'Repository-relative REST path, such as /issues/12/comments. No query string.' },
@@ -217,7 +218,13 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
   };
   const audit = (state: string, status: number | null, url: string | null) => store.audit(auditActor(context.actor), 'github.write.' + state,
     `${method} ${path}${status ? ' ' + status : ''}${url ? ' ' + url : ''}`, String(repository.id));
-  const refuse = (error: string, detail?: string) => { record('refused', { error }); return { error, ...(detail ? { detail } : {}) }; };
+  const refuse = (error: string, detail?: string, extra: Record<string, unknown> = {}) => { record('refused', { error }); return { error, ...extra, ...(detail ? { detail } : {}) }; };
+  // The project's capability ceiling (#850) bounds every caller's writes: Issues and pull requests need comment, Contents
+  // (files, refs, merging) develop. It is read live, like the caller's own permission.
+  const aboveCeiling = (resource: WriteResource) => {
+    const ceiling = projectCeiling(store, String(repository.id)), needed = resourceLevel(resource);
+    return covers(ceiling, needed) ? null : refuse('capability_ceiling', `This project's capability ceiling is ${ceiling}; ${resourceName(resource)} writes need ${needed}. Nothing was sent; a project administrator can raise the ceiling.`, { needed, ceiling });
+  };
   if (!entry) return refuse('github_write_route_unsupported', `${method} ${path} is not a supported repository write. Supported: Issues, comments, labels, assignees, milestones, pull requests, reviews, review comments, files and Git refs, merges.`);
   let body: unknown;
   try { body = sanitize(entry, input.body, redactor, `<!-- dept-bot-write:${marker} -->`); }
@@ -237,6 +244,9 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
   const candidates: WriteResource[] = entry.resource === 'shared' || entry.resource === 'comment' ? ['issues', 'pull_requests'] : [entry.resource];
   const permitted = candidates.filter(resource => context.allowed(resource, entry.operation));
   if (!permitted.length) return refuse('github_resource_forbidden', `Your role has no write on ${candidates.map(resourceName).join(' or ')} for ${method} ${path}.`);
+  // Issues and pull requests share one level, so a route on either is checked before its object is read.
+  const ceilingRefusal = aboveCeiling(permitted[0]!);
+  if (ceilingRefusal) return ceilingRefusal;
   const issued: GitHub[] = [];
   let sending = false;
   const client = async (permissions: Record<string, string>, requested = false) => {
@@ -268,6 +278,8 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
     await context.guard();
     // Authority is live: a permission revoked while the token was issued refuses the write.
     if (!context.allowed(resource, entry.operation)) return refuse('github_resource_forbidden', `Your role no longer has write on ${resourceName(resource)}.`);
+    const lowered = aboveCeiling(resource);
+    if (lowered) return lowered;
     // No await between this check and the inflight record: one key reaches GitHub at most once.
     const again = earlier();
     if (again) return again;

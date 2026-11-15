@@ -14,6 +14,7 @@ import { archiveInstallationEvent, isInstallationControlEvent } from '../install
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { activeScopes, invalidate, invalidateIfLost } from '../identity/authorization.js';
 import { pruneRejectedArchive, rejectionHeaders, rejectionSummary } from './delivery-audit.js';
+import { covers, projectCeiling } from '../work/ceiling.js';
 
 export async function ingest(
   store: Store,
@@ -123,7 +124,7 @@ export async function ingest(
       }
       const policy=store.get('SELECT * FROM policies WHERE repository_id=?',String(owner.id)),pr=payload.pull_request as Json|undefined;
       // A disabled project archives everything, whatever its review switch says; the deliveries page says which one held it back.
-      Object.assign(response,{review_outcome:pr?.draft===true?'draft':policy&&!policy.enabled?'project_disabled':!policy?.review_enabled?'review_disabled':'not_trigger'});
+      Object.assign(response,{review_outcome:pr?.draft===true?'draft':policy&&!policy.enabled?'project_disabled':!covers(projectCeiling(store,String(owner.id),policy),'comment')?'review_disabled':'not_trigger'});
       response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id, currentPullRequest);
       // Rules never write to GitHub here: the run is a plan, applied later by the executor (#1).
       const fallback = repositoryConfigs?.get(String(owner.full_name || '').toLowerCase());

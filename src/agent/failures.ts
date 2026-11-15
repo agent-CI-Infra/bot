@@ -41,6 +41,8 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'actions_jobs_identity_changed','actions_development_disabled','actions_development_not_approved',
     // A work type switched off while its task waited or ran (workflow_* before #207).
     'work_disabled','workflow_disabled','workflow_not_found','task_software_disabled',
+    // #850: the project's capability ceiling is below what the step needs, or was lowered while the task waited or ran.
+    'capability_ceiling','capability_ceiling_lowered',
     // A newer gate onboarding conversation, or a repository stopped while the agent was answering.
     'gate_session_superseded','gate_repository_stopped',
     // The workflow assistant's run was stopped by the person who started it.
@@ -215,6 +217,8 @@ const codeActions: Record<string,string> = {
   bot_rule_too_large:'规则文件和 skill 已不再限制大小，点「重试」即可继续。',
   too_many_bot_skills:'.agents/skills/ 下最多 32 个 SKILL.md：合并或删掉一些，提交到默认分支后点「重试」。',
   pull_request_file_limit:'PR 改动文件过多，bot 无法确认完整差异。拆小 PR 后会重新检视。',
+  capability_ceiling:'项目能力上限不够这一步（详情写明需要的档位），任务已停下，已有改动保留。需要时由项目管理员在「项目设置 → 监听与触发」调高上限后点「重试」。',
+  capability_ceiling_lowered:'项目能力上限已调低，任务在下一个工具调用前停下，已有改动保留，没有取消。调回足够的档位后点「重试」继续；不再需要时可以取消。',
   task_software_disabled:'项目未开启开发或普通事项。核对项目开关与普通事项配置后重试；报告终点不会因此变为 PR 交付。',
   task_pull_request_forbidden:'核对普通事项的 code／pull_request 写集合，以及来源与当前执行角色修改代码的能力（PR 本身是框架交付，不需要角色的 GitHub 写权限）。任务管理和委派不会增加写权限；旧请求的授权上限不会因后来加权而自动扩大。',
   role_authority_revoked:'角色或其权限在运行中被收回，后续能力调用已停止。恢复相应角色及权限配置后点「重试」继续。',

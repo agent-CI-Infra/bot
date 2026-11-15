@@ -290,7 +290,7 @@ export class ManagementService {
       });
     }catch(error){
       const row=this.store.get('SELECT state FROM management_commands WHERE id=?',id);
-      this.finish(id,row?.state==='executing'?'unknown':'failed',{error:error instanceof HttpError||error instanceof TaskError?error.code:'management_tool_failed',http_status:error instanceof HttpError?error.status:503,...(error instanceof HttpError&&error.field?{field:error.field}:{}),...(row?.state==='executing'?{reconcile_required:true}:{})});
+      this.finish(id,row?.state==='executing'?'unknown':'failed',{error:error instanceof HttpError||error instanceof TaskError?error.code:'management_tool_failed',http_status:error instanceof HttpError?error.status:503,...(error instanceof HttpError&&error.field?{field:error.field}:{}),...(error instanceof HttpError&&error.detail?{detail:error.detail}:{}),...(row?.state==='executing'?{reconcile_required:true}:{})});
     }
     return this.receipt(this.store.get('SELECT * FROM management_commands WHERE id=?',id)!);
   }

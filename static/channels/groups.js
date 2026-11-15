@@ -152,7 +152,7 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     showItems();
   });
   levels.append(itemsWrap,
-    element('p', '保存后，群内所有成员（包括没有平台账号的人和其他企业的外部成员）都按这一档使用助手，不核对发言人。实际能做的还不超过你本人在这些仓库的当前权限和 GitHub App 的安装权限。', 'endpoint-warning'));
+    element('p', '保存后，群内所有成员（包括没有平台账号的人和其他企业的外部成员）都按这一档使用助手，不核对发言人。实际能做的还不超过你本人在这些仓库的当前权限、各项目的能力上限和 GitHub App 的安装权限。', 'endpoint-warning'));
   form.append(levels);
 
   // The assistant role: its prompt and model only.

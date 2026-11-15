@@ -2,6 +2,7 @@ import type { Store, Row } from '../storage/database.js';
 import { fail, HttpError } from '../core/security.js';
 import { workTypes, workType, sections, section, savedWrites, workAccess, validateWrites, type WorkPermissions } from './catalog.js';
 import { resolveRules } from '../rules/service.js';
+import { covers, projectCeiling, withinCeiling, workLevel } from './ceiling.js';
 
 /**
  * Project configuration of the Manager: its prompt (the project's only flow definition), and per work type the switch and
@@ -112,13 +113,11 @@ export function workEnabled(store: Store, repositoryId: string, id: string, poli
   const saved = workSettings(store, repositoryId, policy)[id]?.enabled;
   return typeof saved === 'boolean' ? saved : work.defaultEnabled;
 }
-/** Runs now: the project is on, its review or development switch for those types, and the work type itself. */
+/** Runs now: the project is on, its capability ceiling allows the work type (#850), and the work type itself is on. */
 export function workActive(store: Store, repositoryId: string, id: string, policy = policyOf(store, repositoryId)): boolean {
   const work = workType(id);
   if (!work || !policy?.enabled || !workEnabled(store, repositoryId, id, policy)) return false;
-  if (work.family === 'review') return !!policy.review_enabled;
-  if (work.family === 'development') return !!policy.development_enabled;
-  return true;
+  return covers(projectCeiling(store, repositoryId, policy), workLevel(id));
 }
 /** Whether the Manager may be offered this work type for an event of this type: active, and the event is one it runs on. */
 export function workOffered(store: Store, repositoryId: string, id: string, eventType: string, policy = policyOf(store, repositoryId)): boolean {
@@ -126,9 +125,12 @@ export function workOffered(store: Store, repositoryId: string, id: string, even
   const events = workSettings(store, repositoryId, policy)[id]?.events;
   return !Array.isArray(events) || events.includes(eventType);
 }
-/** What a task of this work type may do, read from trusted storage: reading is open, writing is the saved writes. */
+/**
+ * What a task of this work type may do, read from trusted storage: reading is open; writing is the saved writes (or the work
+ * type's defaults), within the project's capability ceiling (#850). A saved write above the ceiling waits for it.
+ */
 export function workPermissions(store: Store, repositoryId: string, id: string, policy = policyOf(store, repositoryId)): WorkPermissions {
-  return workAccess(id, savedWrites(workSettings(store, repositoryId, policy)[id]?.writes, id));
+  return workAccess(id, withinCeiling(projectCeiling(store, repositoryId, policy), savedWrites(workSettings(store, repositoryId, policy)[id]?.writes, id)));
 }
 /** How often a work type's settings or Manager section changed since the upgrade; a stage gate reads it (see roles/schedule.ts). */
 export const workVersion = (store: Store, repositoryId: string, id: string) => Number(workSettings(store, repositoryId)[id]?.version ?? 0);

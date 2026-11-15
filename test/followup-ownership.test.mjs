@@ -113,12 +113,14 @@ test('a follow-up whose executor lacks a permission it needs is refused until th
  assert.deepEqual(f.refusals()[0].reasons,[{code:'followup_executor_unauthorized',detail:"The follow-up executor (dev) cannot edit_files, github_write under the project's permissions."}]);
 
  const granted=fixture(t,{kind:'task.request',input:{request:'Check the docs'}});
- granted.s.run('UPDATE policies SET work_settings=? WHERE repository_id=?',JSON.stringify({'task.request':{writes:['code']}}),'r');
+ // Code changes need the project's capability ceiling at develop (#850), and the work type's writes to include them.
+ granted.s.run("UPDATE policies SET capability_ceiling='develop',work_settings=? WHERE repository_id=?",JSON.stringify({'task.request':{writes:['code']}}),'r');
  granted.plan([item({needs:['edit_files','run_commands']})]);
  assert.equal(granted.decide().followups.length,1);assert.equal(granted.refusals().length,0);
 
  // Supplementing an unfinished development task does the work there, and development tasks change code.
  const supplement=fixture(t,{kind:'task.request',input:{request:'Check the docs'}});
+ supplement.s.run("UPDATE policies SET capability_ceiling='develop' WHERE repository_id='r'");
  supplement.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,created_at,updated_at) VALUES('develop','r','task.development','queued','develop','{}','now','now')");
  supplement.plan([item({action:'supplement',task_id:'develop',needs:['edit_files']})]);
  assert.deepEqual(supplement.decide().followups,['develop']);assert.equal(supplement.refusals().length,0);
