@@ -65,6 +65,20 @@ test('a recoverable failure keeps polling, backing off instead of retrying every
   assert.equal(detailReads(requests), 5);
 });
 
+// A backoff belongs to the task that paid it: without this reset, a task opened later in the same page session starts its
+// own first recoverable failure where the previous task stopped (review of #745, non-blocking).
+test('a task opened after another backed off starts its first retry at five seconds', async t => {
+  const { page } = taskPage([503, { error: 'unavailable' }]);
+  t.after(() => page.run('taskView.close(); clearTimeout(taskTimer);'));
+  await page.run('openTask("t9")');
+  await page.run('(async () => { clearTimeout(taskTimer); await refreshTask(); })()');
+  assert.equal(page.run('taskRetryDelay'), 10000, 'the first task has backed off');
+  page.run('openTaskChoices("全部任务", [])');
+  assert.equal(page.run('taskRetryDelay'), 0, 'the picker clears the delay the previous task reached');
+  await page.run('openTask("t9")');
+  assert.equal(page.run('taskRetryDelay'), 5000, 'the next task waits five seconds, not the delay the previous one reached');
+});
+
 // The decision lives in one helper so every polled page (task detail, channels, release, model fields) stops on the same
 // statuses instead of each page deciding for itself.
 test('pollAfterError is one rule: access lost stops, anything else backs off to half a minute', async () => {
