@@ -327,7 +327,8 @@ export class Trajectories {
       }
     });
     if (where.repository_id !== undefined) {
-      rmSync(join(this.root, segment(where.repository_id)), { recursive: true, force: true });
+      try { rmSync(join(this.root, segment(where.repository_id)), { recursive: true, force: true }); }
+      catch (error) { this.cleanupFailed(where, error); }
       // The project's blobs; a file another project also stored stays for that project.
       const blobs = this.db.prepare('SELECT sha256,bytes FROM trajectory_blobs WHERE repository_id=?').all(where.repository_id) as { sha256: string; bytes: number }[];
       // Nothing of the project is left: its totals go too (a conversation's file only adjusts its project's totals).
@@ -335,9 +336,16 @@ export class Trajectories {
         this.db.prepare('DELETE FROM trajectory_blobs WHERE repository_id=?').run(where.repository_id!);
         this.db.prepare('DELETE FROM trajectory_usage WHERE repository_id=?').run(where.repository_id!);
       });
-      for (const blob of blobs) if (!this.db.prepare('SELECT 1 FROM trajectory_blobs WHERE sha256=?').get(blob.sha256)) rmSync(this.blobPath(blob.sha256), { force: true });
+      for (const blob of blobs) {
+        if (this.db.prepare('SELECT 1 FROM trajectory_blobs WHERE sha256=?').get(blob.sha256)) continue;
+        try { rmSync(this.blobPath(blob.sha256), { force: true }); }
+        catch (error) { this.cleanupFailed(where, error); }
+      }
     }
-    else rmSync(join(this.root, 'conversations', segment(where.conversation_id)), { recursive: true, force: true });
+    else {
+      try { rmSync(join(this.root, 'conversations', segment(where.conversation_id)), { recursive: true, force: true }); }
+      catch (error) { this.cleanupFailed(where, error); }
+    }
   }
 
   /**

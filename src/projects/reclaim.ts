@@ -14,11 +14,15 @@ export interface NotesOrphan { repository_id: string; name: string; first_failed
 export interface OrphanTrajectory { repository_id: string; path: string }
 export interface NotesVolumes { notesVolumes(): Promise<{ name: string; repository_id: string; created_at: string | null }[]> ; reclaimNotes(id: string, waitMs?: number): Promise<void> }
 
-/** Deletions whose notes volume was never deleted: the failed-removal audit that no reclaim audit answers. */
+/**
+ * Deletions whose notes volume was never deleted: the failed-removal audit that no *later* reclaim audit answers.
+ * The comparison is on timestamps, not on existence: a repository connected again, deleted again and failed again has a
+ * new intent even though an older reclaim answered the previous one (#771).
+ */
 export function notesOrphanIntents(store: Store): { repository_id: string; first_failed_at: string }[] {
-  return store.all(`SELECT f.repository_id repository_id, min(f.created_at) first_failed_at FROM audit f
+  return store.all(`SELECT f.repository_id repository_id, max(f.created_at) first_failed_at FROM audit f
     WHERE f.action=? AND f.repository_id IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM audit r WHERE r.action=? AND r.repository_id=f.repository_id)
+      AND NOT EXISTS (SELECT 1 FROM audit r WHERE r.action=? AND r.repository_id=f.repository_id AND r.created_at >= f.created_at)
     GROUP BY f.repository_id ORDER BY first_failed_at, f.repository_id`, notesRemovalFailed, notesVolumeReclaimed)
     .map(row => ({ repository_id: String(row.repository_id), first_failed_at: String(row.first_failed_at) }));
 }
@@ -46,7 +50,7 @@ export async function orphanNotesVolumes(store: Store, projects: NotesVolumes): 
 export function orphanTrajectoryDirectories(store: Store): OrphanTrajectory[] {
   const known = new Set(store.all('SELECT id FROM repositories').map(row => String(row.id)));
   // The root also holds the content-addressed blob store and the tool-result files, which are not per-project.
-  const reserved = new Set(['.blobs', 'sha256', 'results', 'tmp']);
+  const reserved = new Set(['.blobs', 'sha256', 'results', 'tmp', 'conversations']);
   return readdirSync(store.trajectories.root, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && !reserved.has(entry.name) && !known.has(entry.name))
     .map(entry => ({ repository_id: entry.name, path: store.trajectories.root + '/' + entry.name }))

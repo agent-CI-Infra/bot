@@ -69,10 +69,18 @@ engine.obsolete.start();
 const external=new ExternalService(store,{githubUrl:process.env.BOT_GITHUB_API_URL,privateHosts:(process.env.BOT_FORWARD_PRIVATE_HOSTS||'').split(',').map(v=>v.trim().toLowerCase()).filter(Boolean)});external.forwarder.start();
 void projects.reconcile();
 const timer = setInterval(() => { void projects.reconcile().catch(error => console.error('[projects] reconciliation failed:', error)); }, 5000);
+// A count read from the environment, or the default when unset; a value that is not a positive integer stops startup
+// instead of turning into NaN, which would make a threshold that never fires (#771).
+const count = (name: string, fallback: number, min = 1): number => {
+  const raw = process.env[name]; if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min) { console.error(`${name} must be an integer >= ${min}, got ${JSON.stringify(raw)}`); process.exit(1); }
+  return value;
+};
 // A deletion that could not delete its notes volume is retried with backoff; what stays behind fails `/readyz` (#771).
 const reclaimer = new NotesReclaimer(store, projects, {
-  maxAttempts: Number(process.env.BOT_NOTES_RECLAIM_ATTEMPTS || 6),
-  baseDelayMs: Number(process.env.BOT_NOTES_RECLAIM_DELAY_MS || 60_000),
+  maxAttempts: count('BOT_NOTES_RECLAIM_ATTEMPTS', 6),
+  baseDelayMs: count('BOT_NOTES_RECLAIM_DELAY_MS', 60_000),
 });
 const reclaimTimer = setInterval(() => void reclaimer.sweep().catch(error => console.error('[reclaim] sweep failed:', error)), 5 * 60_000);
 void reclaimer.sweep().catch(error => console.error('[reclaim] first sweep failed:', error));
@@ -98,9 +106,10 @@ const { server } = createControlPlane({ store, staticDirectory: resolve(import.m
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, gateOnboarding, releases, boards,
   imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls, storage,
   // The thresholds are configuration, not magic numbers: who operates the deployment sets what it tolerates (#771).
-  notesOrphanThreshold: Number(process.env.BOT_NOTES_ORPHAN_THRESHOLD || 10),
-  notesOrphanMaxAgeMs: Number(process.env.BOT_NOTES_ORPHAN_MAX_AGE_MS || 7 * 24 * 3600_000),
-  notesOrphanWarnAgeMs: Number(process.env.BOT_NOTES_ORPHAN_WARN_AGE_MS || 24 * 3600_000),
+  notesReclaimer: reclaimer,
+  notesOrphanThreshold: count('BOT_NOTES_ORPHAN_THRESHOLD', 10),
+  notesOrphanMaxAgeMs: count('BOT_NOTES_ORPHAN_MAX_AGE_MS', 7 * 24 * 3600_000, 1000),
+  notesOrphanWarnAgeMs: count('BOT_NOTES_ORPHAN_WARN_AGE_MS', 24 * 3600_000, 1000),
   // The assistant computers' HOME volume (compose.yaml); a control plane without it offers no assistant computer.
   assistantHomes: existsSync(process.env.BOT_ASSISTANT_HOMES || '/assistant-homes') ? process.env.BOT_ASSISTANT_HOMES || '/assistant-homes' : undefined },
   // BOT_TRUSTED_PROXIES: comma-separated proxy addresses/CIDRs allowed to name the password-login client.

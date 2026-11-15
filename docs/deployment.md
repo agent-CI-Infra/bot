@@ -86,6 +86,8 @@ Compose 只发布这一个端口，宿主端口默认 `8791`，默认只绑定�
 | `BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE` | `/run/secrets/github-oauth-client-secret`（Compose） | 使用环境变量启用 OAuth 时读取的只读 Client secret 文件；向导配置不需要此文件 |
 | `BOT_MENTION_NAMES` | `bot,agent-ci-infra-bot` | 评论中提到时一定再检视一次的 `@名字`，逗号分隔、忽略大小写；设置后替换默认值，`off` 关闭提到触发。不提到名字的评论是否触发，由项目「检视」里的更新开关决定 |
 | `BOT_OBSOLETE_FAILURE_DAYS` | `7` | 平台类或临时原因的失败（限流、GitHub 或模型不可用、上下文或响应超限、运行异常等）在这么多天里没有新动静后自动移出「待处理」，见[日常使用](admin.md#日常使用) |
+| `BOT_NOTES_RECLAIM_ATTEMPTS`、`BOT_NOTES_RECLAIM_DELAY_MS` | `6`、`60000` | 已提交删除留下的笔记卷的重试次数与首次重试间隔（毫秒，逐次翻倍，上限 1 小时）；次数用尽记 `repository.notes_volume_abandoned` 审计并计入 `/readyz` 的 `abandoned`。两项都必须是正整数，否则控制面拒绝启动 |
+| `BOT_NOTES_ORPHAN_THRESHOLD`、`BOT_NOTES_ORPHAN_MAX_AGE_MS`、`BOT_NOTES_ORPHAN_WARN_AGE_MS` | `10`、`604800000`、`86400000` | `/readyz` 的孤儿笔记卷阈值：数量超过阈值或最老一份超过最大年龄时返回 503；警告年龄只报告不判失败。毫秒值必须 ≥ 1000，非法值使控制面拒绝启动 |
 | `BOT_FORWARD_PRIVATE_HOSTS` | 空 | 外部执行端允许转发到的内网主机名，逗号分隔，见[外部执行端](external-executors.md) |
 | `BOT_TRUSTED_PROXIES` | 空 | 密码登录限流信任的代理 IP 或 CIDR，逗号分隔；默认不信任转发头，只按连接来源计数。只填写受控代理的地址或专用代理网络，配置方式见下文 |
 | `BOT_AGENT_TOOLS_DIR` | `/opt/agent-tools` | 控制面进程读取与安装受信任 Agent CLI（Claude Code、Codex）二进制的目录；Compose 中固定挂在具名卷 `agent-tools`，本机源码直接运行时可指定本地目录 |
