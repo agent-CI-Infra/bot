@@ -22,8 +22,8 @@ function eventsEmptyState(params) {
   const text = paged
     ? '已经翻过第一页，这一页没有记录。可以回到上一页，或调整筛选后再看。'
     : filtered
-      ? '这个仓库、账号或组织范围内还没有投递记录。投递可能在其他筛选条件下，或 Webhook 尚未把事件送到本部署。'
-      : '下面是常见原因。有投递之后，这里会列出接收、验签和处理结果。';
+      ? '这个仓库、账号或组织范围内还没有仓库事件。事件可能在其他筛选条件下，或 Webhook 尚未把事件送到本部署。'
+      : '下面是常见原因。有事件之后，这里会列出接收、验签和处理结果。';
   const empty = consoleState(title, text);
   if (!filtered && !paged) {
     const reasons = document.createElement('ul');
@@ -33,7 +33,7 @@ function eventsEmptyState(params) {
     if (me.role === 'super_admin') {
       reasons.append(
         element('li', 'GitHub App 的 Webhook 还没指向本部署，事件没有到达这里。'),
-        element('li', '当前确实还没有事件。验签失败或尚未启动的仓库仍会作为投递出现在本页。')
+        element('li', '当前确实还没有事件。验签失败或尚未启动的仓库仍会作为事件出现在本页。')
       );
     } else {
       reasons.append(

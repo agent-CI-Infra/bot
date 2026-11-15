@@ -21,7 +21,7 @@ test('仓库事件空状态说明原因并给出下一步', async ({ page }) => 
     const empty = page.locator('#rows .console-state');
     await expect(empty.getByRole('heading', { name: '还没有仓库事件', exact: true })).toBeVisible();
     await expect(empty).toContainText('Webhook 还没指向本部署');
-    await expect(empty).toContainText('验签失败或尚未启动的仓库仍会作为投递出现在本页');
+    await expect(empty).toContainText('验签失败或尚未启动的仓库仍会作为事件出现在本页');
     await expect(empty).not.toContainText('还没被超级管理员启动，事件不会在这里形成任务');
     await expect(empty.getByRole('link', { name: '打开接入向导' })).toHaveAttribute('href', '#/settings/onboarding');
     await expect(empty.getByRole('link', { name: '查看机器人账号' })).toHaveAttribute('href', '#/settings/accounts');
@@ -48,7 +48,7 @@ test('仓库事件空状态说明原因并给出下一步', async ({ page }) => 
     await page.getByRole('button', { name: '筛选', exact: true }).click();
     await expect(page.getByText('本页 0 条事件')).toBeVisible();
     await expect(empty.getByRole('heading', { name: '当前筛选下没有事件', exact: true })).toBeVisible();
-    await expect(empty).toContainText('这个仓库、账号或组织范围内还没有投递记录');
+    await expect(empty).toContainText('这个仓库、账号或组织范围内还没有仓库事件');
     await page.screenshot({ path: '.tmp/ui-523/filtered-empty-1440.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);

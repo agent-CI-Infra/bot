@@ -57,7 +57,7 @@ async function render(quiet = false) {
   catch (err) {
     if (request !== renderVersion) return;
     $('rows').removeAttribute('aria-busy');
-    const heading = tab === 'projects' ? '项目列表未能读取' : tab === 'events' ? '投递记录未能读取' : '列表未能读取';
+    const heading = tab === 'projects' ? '项目列表未能读取' : tab === 'events' ? '仓库事件未能读取' : '列表未能读取';
     $('count').textContent = '读取失败';
     $('rows').replaceChildren(consoleState(heading, (err.message || '请求失败') + '。这不是空列表，当前无法判断是否有记录。', { tone: 'error', retry: () => render().catch(error) }));
     return;
