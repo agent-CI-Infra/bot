@@ -313,8 +313,9 @@ export class Trajectories {
     try { this.results.remove(column as 'repository_id' | 'conversation_id', value); } catch (error) { this.cleanupFailed(where, error); }
     for (const handle of [...this.open.values()]) if ((handle.scope as any)[column] === value) this.finish(handle);
     const rows = this.db.prepare(`SELECT id,repository_id,conversation_id,path,bytes,counts,expired_at FROM trajectory_files WHERE ${column}=?`).all(value) as Record<string, any>[];
-    // Rows first: a process that dies between the two steps leaves a byte on disk for sweepOrphans() to collect, never a
-    // row whose file this process already removed (#787).
+    // Rows first: a process that dies between the two steps leaves a byte on disk that no entry names any more, never a
+    // row whose file this process already removed (#787). The opposite case — a file removed behind the store's back —
+    // is what sweepOrphans() collects.
     atomic(this.db, () => {
       for (const row of rows) {
         // An expired file's totals were already moved to 'expired' (expire()); they leave from there.
@@ -329,8 +330,16 @@ export class Trajectories {
       try { rmSync(join(this.root, segment(where.repository_id)), { recursive: true, force: true }); }
       catch (error) { this.cleanupFailed(where, error); }
       // A conversation turn lives under conversations/<conversation_id>/ rather than under the project's own directory,
-      // so the project's turns are removed by conversation after its rows are gone (#787).
+      // and one conversation can hold the turns of several projects (one chat holds a grant per project), so this deletes
+      // the project's own turn files by path and drops the conversation directory only when no entry refers to it any
+      // more (#787).
+      for (const row of rows) {
+        if (!row.conversation_id) continue;
+        try { rmSync(join(this.root, String(row.path)), { force: true }); }
+        catch (error) { this.cleanupFailed({ conversation_id: String(row.conversation_id), repository_id: where.repository_id }, error); }
+      }
       for (const conversation of new Set(rows.map(row => row.conversation_id).filter(Boolean))) {
+        if (this.db.prepare('SELECT 1 FROM trajectory_files WHERE conversation_id=? LIMIT 1').get(String(conversation))) continue;
         try { rmSync(join(this.root, 'conversations', segment(conversation)), { recursive: true, force: true }); }
         catch (error) { this.cleanupFailed({ conversation_id: String(conversation), repository_id: where.repository_id }, error); }
       }
@@ -352,13 +361,13 @@ export class Trajectories {
   }
 
   /**
-   * Deletes entries whose file is gone. remove() deletes rows before files, so a crash there leaves a file to collect;
-   * the opposite (a file removed behind the store's back) would leave a row the reader reports as truncated (#787).
+   * Deletes the live entries whose file is gone, the counterpart of remove(): a file removed behind the store's back
+   * would otherwise be read as a truncated one instead of an absent one (#787).
    * An entry retention expired on purpose is not an orphan: its file is meant to be gone and the entry stays, so a ref
    * of it reads as expired instead of the work running again (#803). Sweeping it would also take its totals back twice.
    */
   sweepOrphans(): number {
-    const rows = this.db.prepare('SELECT id,repository_id,path,bytes,counts FROM trajectory_files WHERE expired_at IS NULL').all() as Record<string, any>[];
+    const rows = this.db.prepare('SELECT id,repository_id,path,bytes,counts FROM trajectory_files WHERE expired_at IS NULL AND deleted_at IS NULL').all() as Record<string, any>[];
     const missing = rows.filter(row => !existsSync(join(this.root, String(row.path))));
     if (!missing.length) return 0;
     atomic(this.db, () => {
