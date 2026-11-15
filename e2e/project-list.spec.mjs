@@ -256,6 +256,15 @@ test('项目列表：组织可折叠、状态按类别成列对齐、主列表�
       await expect(member.locator('#rows .project-list-row')).toHaveCount(2);
       expect(await member.locator('#rows').innerText()).not.toMatch(/仓库 ID|安装 \d+/);
       await expect(member.locator('#rows .project-owner-group h2 button')).toHaveAttribute('aria-expanded', 'true');
+      // #823: /api/repositories omits access_gaps, so the permission column is an explained placeholder, not 未检查.
+      const memberPermission = member.locator('#rows .project-list-row .project-cell[data-label="权限"] [data-permission]');
+      await expect(memberPermission).toHaveText(['—', '—']);
+      await expect(memberPermission.first()).toHaveAttribute('title', '仓库安装权限由管理员在安装列表中核对');
+      await expect(memberPermission.first()).toHaveAttribute('aria-label', '仓库安装权限由管理员在安装列表中核对');
+      await expect(member.locator('#rows')).not.toContainText('未检查');
+      const memberLefts = await member.locator('#rows .project-list-row').first().locator(':scope > .project-cell').evaluateAll(cells => cells.map(cell => Math.round(cell.getBoundingClientRect().left)));
+      const memberSecond = await member.locator('#rows .project-list-row').nth(1).locator(':scope > .project-cell').evaluateAll(cells => cells.map(cell => Math.round(cell.getBoundingClientRect().left)));
+      expect(memberSecond).toEqual(memberLefts);
     } finally { await context.close(); }
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, {recursive: true, force: true}); }
