@@ -29,18 +29,16 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
     await page.goto(h.admin + '/#/costs');
     await expect(page.getByRole('heading', { name: '统计', exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: '任务统计' })).toBeVisible();
-    const costs = await page.evaluate(() => {
-      const th = [...document.querySelectorAll('.statistics-task-summary th')].map(el => ({
-        text: el.textContent.trim(),
-        align: getComputedStyle(el).textAlign,
-      }));
-      const td = [...document.querySelectorAll('.statistics-task-summary tbody tr:first-child td')].map(el => getComputedStyle(el).textAlign);
-      return { th, td };
-    });
-    expect(costs.th[0].align === 'left' || costs.th[0].align === 'start').toBeTruthy();
-    expect(costs.th.slice(1).every(c => c.align === 'right')).toBeTruthy();
-    expect(costs.td[0] === 'left' || costs.td[0] === 'start').toBeTruthy();
-    expect(costs.td.slice(1).every(a => a === 'right')).toBeTruthy();
+    // start() may route again after login; resolve the cells again if that redraw replaces the table.
+    const summary = page.locator('.statistics-task-summary');
+    const headers = summary.locator('th');
+    const cells = summary.locator('tbody tr').first().locator('td');
+    await expect(headers).toHaveText(['任务类别', '任务数', '累计执行耗时']);
+    await expect(cells).toHaveCount(3);
+    for (const row of [headers, cells]) {
+      await expect(row.nth(0)).toHaveCSS('text-align', /^(left|start)$/);
+      for (const column of [1, 2]) await expect(row.nth(column)).toHaveCSS('text-align', 'right');
+    }
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
     await page.screenshot({ path: `${out}/costs-after-1440.png`, fullPage: true });
 
