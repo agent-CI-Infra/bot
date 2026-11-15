@@ -783,3 +783,67 @@ test('the directory kept for an active run is cleared by the next prune once tha
   assert.deepEqual(after.pruned.codex, []);
   assert.equal(existsSync(join(root, 'codex', '0.166.0')), false);
 });
+
+test('prune keeps the Node runtime a protected claude_code directory can no longer name', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-tools-protected-node-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const upstream = await startMockToolUpstream(t, 'x64');
+  const manager = new AgentToolManager({ volumeRoot: root, containerRoot: root, arch: 'x64', sources: upstream.sources });
+  const store = new Store(':memory:', randomBytes(32));
+  t.after(() => store.close());
+  roleRunStorage(store);
+  store.run("INSERT INTO accounts VALUES('a','org','github_app','1','{}','now')");
+  store.run("INSERT INTO repositories VALUES('r','org/repo','org','a')");
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('t1','r','task.request','running','test','{}',1,1)");
+
+  // The JS-package claude_code version launches through the bundled Node runtime, named only in its manifest.
+  await manager.install({ cli: 'claude_code', version: '2.1.310' });
+  const run = beginRun(store, store.get("SELECT * FROM tasks WHERE id='t1'"), 'execution', {});
+  store.run("UPDATE task_runs SET role='developer',harness='claude_code',harness_version='1' WHERE id=?", run.id);
+  allocateLease(store, 't1', 'assign-1', run.id);
+  recordRunCliVersion(store, run.id, '2.1.310');
+
+  // The run executes 2.1.319 and its manifest has become unreadable, so nothing can say which Node runtime it needs.
+  // Keeping the directory but deleting that runtime would still take the binary away from the run.
+  writeFileSync(join(root, 'claude_code', '2.1.310', 'manifest.json'), '{"schema":');
+  const pruned = await manager.prune({ cli: 'claude_code', retainCount: 1, protectedVersions: c => activeCliVersions(store, c) });
+  assert.deepEqual(pruned.protected_invalid.claude_code, ['2.1.310']);
+  assert.equal(existsSync(join(root, 'claude_code', '2.1.310', 'bin', 'claude')), true);
+  assert.equal(existsSync(join(root, 'node', '22.15.0', 'bin', 'node')), true, 'the Node runtime the kept directory executes is kept too');
+
+  // With the run over, the directory goes and the runtime it was the last user of goes with it.
+  endRun(store, run, 'completed', null);
+  const after = await manager.prune({ cli: 'claude_code', retainCount: 1, protectedVersions: c => activeCliVersions(store, c) });
+  assert.deepEqual(after.protected_invalid.claude_code, []);
+  assert.equal(existsSync(join(root, 'claude_code', '2.1.310')), false);
+  assert.equal(existsSync(join(root, 'node', '22.15.0')), false);
+});
+
+test('a broken version no run holds is still cleared while the protected one is kept', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-tools-protected-and-broken-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const upstream = await startMockToolUpstream(t, 'x64');
+  const manager = new AgentToolManager({ volumeRoot: root, containerRoot: root, arch: 'x64', sources: upstream.sources });
+  const store = new Store(':memory:', randomBytes(32));
+  t.after(() => store.close());
+  roleRunStorage(store);
+  store.run("INSERT INTO accounts VALUES('a','org','github_app','1','{}','now')");
+  store.run("INSERT INTO repositories VALUES('r','org/repo','org','a')");
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('t1','r','task.request','running','test','{}',1,1)");
+
+  await manager.install({ cli: 'codex', version: '0.166.0' });
+  await manager.install({ cli: 'codex', version: '0.167.0' });
+  const run = beginRun(store, store.get("SELECT * FROM tasks WHERE id='t1'"), 'execution', {});
+  store.run("UPDATE task_runs SET role='developer',harness='codex',harness_version='1' WHERE id=?", run.id);
+  allocateLease(store, 't1', 'assign-1', run.id);
+  recordRunCliVersion(store, run.id, '0.166.0');
+
+  // Two directories stopped parsing: one is executed by the run, the other is a broken leftover no run points at.
+  writeFileSync(join(root, 'codex', '0.166.0', 'manifest.json'), '{"schema":');
+  writeFileSync(join(root, 'codex', '0.167.0', 'manifest.json'), '{"schema":');
+  const pruned = await manager.prune({ cli: 'codex', retainCount: 2, protectedVersions: c => activeCliVersions(store, c) });
+  assert.deepEqual(pruned.protected_invalid.codex, ['0.166.0'], 'only the protected directory is reported');
+  assert.deepEqual(pruned.pruned.codex, [], 'a leftover broken directory is cleared silently, not reported as pruned');
+  assert.equal(existsSync(join(root, 'codex', '0.166.0', 'bin', 'codex')), true);
+  assert.equal(existsSync(join(root, 'codex', '0.167.0')), false, 'the unprotected broken directory is still cleared');
+});
