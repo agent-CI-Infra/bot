@@ -27,5 +27,6 @@ test('the not-found state has one primary way back: the project list, or the pro
   assert.equal(inner.dataset.pageNotFound, 'project');
   assert.deepEqual(links(inner), [['回到项目总览', '#/projects/101/overview', true], ['回到项目列表', '#/projects', false]]);
   page.run('setNotFoundTitle(true)'); assert.equal(page.run('document.title'), '找不到页面 · launchpad 管理');
-  page.run('setNotFoundTitle(false)'); assert.equal(page.run('document.title'), 'launchpad 管理');
+  // #737: the title names the page the address belongs to; the default tab here is 项目.
+  page.run('setNotFoundTitle(false)'); assert.equal(page.run('document.title'), '项目 · launchpad 管理');
 });

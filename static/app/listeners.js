@@ -45,7 +45,7 @@ $('access-form').addEventListener('submit', async event => {
 // keeps its address (onboarding.js resets it to the first step).
 $('logout').addEventListener('click', async () => {
   if (typeof confirmKnowledgeLeave === 'function' && !await confirmKnowledgeLeave(true)) return;
-  try { await api('/api/auth/logout', 'POST', {}); renderVersion++; me = null; tab = 'projects'; if (!onboardingAddress.test(location.hash)) history.replaceState(null, '', location.pathname); repositories=[];accounts=[]; $('rows').replaceChildren();$('detail-body').replaceChildren(); await start(); } catch (err) { error(err); } });
+  try { await api('/api/auth/logout', 'POST', {}); renderVersion++; me = null; if (typeof resetAnnouncedPage === 'function') resetAnnouncedPage(); tab = 'projects'; if (!onboardingAddress.test(location.hash)) history.replaceState(null, '', location.pathname); repositories=[];accounts=[]; $('rows').replaceChildren();$('detail-body').replaceChildren(); await start(); } catch (err) { error(err); } });
 // The address is written without waiting for hashchange, so the page switches in the same click; back and forward still
 // fire hashchange and draw the page they return to.
 // A click can land on a tab's icon or label span (#554), so resolve the tab from the nearest [data-tab] ancestor.

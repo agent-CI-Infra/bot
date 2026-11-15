@@ -603,7 +603,8 @@ function applyStaticTranslations() {
     if (attr) el.setAttribute(attr, t(key));
     else el.textContent = t(key);
   });
-  if (document.title !== undefined) document.title = t('meta.title');
+  // #737: the page title is not the chrome name - static/app/page-title.js derives it from the page the reader is
+  // on and recomputes it on the same language change (including a click on the language already in effect).
   const group = document.getElementById('locale-switch');
   if (group) {
     group.setAttribute('aria-label', t('chrome.language'));

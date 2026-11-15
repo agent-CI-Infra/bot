@@ -14,8 +14,11 @@ function pageTitleFor(missing, target) {
     // 项目入口 is a project page too, but it is not one of the settings categories the catalog lists.
     const caption = projectSectionCaption(target.section) || (target.section === 'menu' ? '项目入口' : null);
     if (!caption) return t('page.not_found');
-    const project = repositories.find(row => String(row.id) === String(target.id))?.full_name
-      || document.querySelector('#project-page .project-head h1')?.textContent.trim();
+    // The heading is only the name of the project the address asks for when that project is the one drawn: a project
+    // the reader cannot start or reach leaves the previous page's header in place, and its name is not this page's.
+    const rendered = typeof current !== 'undefined' && current && String(current.id) === String(target.id)
+      ? document.querySelector('#project-page .project-head h1')?.textContent.trim() : null;
+    const project = repositories.find(row => String(row.id) === String(target.id))?.full_name || rendered;
     return project ? `${project} · ${caption}` : caption;
   }
   const key = pageTitleKeys[tab];
@@ -46,7 +49,8 @@ let announcedPage = null;
 // page that is still standing after the redraw is left alone: a page that focuses something of its own while it draws
 // (returning to the item a reader came from) keeps it, and so does a control that survives the redraw.
 function pageChangeWasAsked(from, active) {
-  if (from && from.isConnected && from.closest('#tabs, #console-secondary-nav, [data-tab]')) return true;
+  // The phone's navigation is its own list of destinations (#481): the links carry data-page, not data-tab.
+  if (from && from.isConnected && from.closest('#tabs, #console-secondary-nav, #console-mobile-nav, [data-tab]')) return true;
   return !active || active === document.body || !active.isConnected;
 }
 function announcePage(missing, target, previousFocus = null) {
@@ -63,6 +67,12 @@ function announcePage(missing, target, previousFocus = null) {
   if (!heading.hasAttribute('tabindex')) heading.setAttribute('tabindex', '-1');
   heading.focus({ preventScroll: true });
 }
-// A language switch applies the static translations (which put the generic title back) before this listener runs, so the
-// title is recomputed from the page the reader is still on rather than left at the chrome name.
-if (typeof onLocaleChange === 'function') onLocaleChange(() => applyDocumentTitle(unknownAddress(location.hash)));
+// A language switch keeps the title of the page the reader is on, including a click on the language already in effect.
+// Before the console has a page (the login form, the boot screen) there is no page identity to name, so nothing is
+// written there and the document keeps the title its own markup carries.
+if (typeof onLocaleChange === 'function') onLocaleChange(() => {
+  if (typeof me === 'undefined' || !me) return;
+  applyDocumentTitle(unknownAddress(location.hash));
+});
+// Signing out ends the reader's pages; the next sign-in opens a page of its own and may announce it once like any other.
+function resetAnnouncedPage() { announcedPage = null; }
