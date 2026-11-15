@@ -337,6 +337,17 @@ test('the orphan sweep does nothing while the trajectories root is not there', t
   assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 1, 'its entries stay');
 });
 
+test('the orphan sweep does nothing while the root is empty but entries exist', t => {
+  const { directory, path } = database(t), store = new Store(path, key); t.after(() => store.close());
+  const scope = runScope('101', 't', 'run-e1'); store.trajectories.append(scope, 'log', 'l', {}); store.trajectories.close(scope.key);
+  // A restore can bring the database without the file tree, and the constructor recreates the root, so an empty root
+  // next to live entries is a store that lost its files, not a store whose files were all deleted on purpose (#803).
+  const root = join(directory, 'trajectories');
+  rmSync(root, { recursive: true, force: true }); mkdirSync(root);
+  assert.equal(store.trajectories.sweepOrphans(), 0, 'an empty root is not an empty store');
+  assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 1, 'its entries stay');
+});
+
 test('trajectory lookups use their indexes', t => {
   const store = new Store(':memory:', key); t.after(() => store.close());
   const plan = sql => store.all('EXPLAIN QUERY PLAN ' + sql).map(row => row.detail).join(' | ');
