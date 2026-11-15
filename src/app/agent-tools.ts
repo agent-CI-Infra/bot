@@ -38,6 +38,7 @@ function validateCli(value: unknown): AgentToolCli {
 function mapToolError(err: unknown): never {
   if (err instanceof TaskError) {
     const status = err.code === 'agent_tool_invalid' ? 400
+      : err.code === 'agent_tool_version_in_use' ? 409
       : err.code === 'agent_tool_download_failed' || err.code === 'agent_tool_hash_mismatch' || err.code === 'agent_tool_archive_invalid' ? 502
       : 503;
     return fail(status, err.code, err.detail);
