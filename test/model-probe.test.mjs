@@ -255,7 +255,7 @@ test('plain HTTP model URLs are limited to this machine on every write and befor
   const rows = () => h.store.get('SELECT count(*) n FROM models').n;
 
   // Public plain HTTP is refused on write, and nothing is stored or sent.
-  for (const api_url of ['http://example.com/v1', 'http://10.0.0.1/v1', 'http://169.254.169.254/latest/meta-data', 'http://0.0.0.0/v1', 'http://127.0.0.1.nip.io/v1', 'http://localhost./v1', 'http://localhost.evil.com/v1', 'http://127.0.0.1.evil.com/v1']) {
+  for (const api_url of ['http://example.com/v1', 'http://10.0.0.1/v1', 'http://169.254.169.254/latest/meta-data', 'http://0.0.0.0/v1', 'http://127.0.0.1.nip.io/v1', 'http://localhost./v1', 'http://localhost.evil.com/v1', 'http://127.0.0.1.evil.com/v1', 'http://[fd00::1]/v1', 'http://[::ffff:a00:1]/v1']) {
     const refused = await create(api_url);
     assert.equal(refused.status, 400, api_url);
     assert.deepEqual(refused.value, { error: 'insecure_api_url', field: 'api_url' }, api_url);
@@ -278,6 +278,11 @@ test('plain HTTP model URLs are limited to this machine on every write and befor
   const patched = await admin(`/api/models/${patchable.id}`, 'PATCH', { version: patchable.version, api_url: 'http://example.com/v1' });
   assert.deepEqual(patched.value, { error: 'insecure_api_url', field: 'api_url' });
   assert.equal(h.store.get('SELECT api_url FROM models WHERE id=?', patchable.id).api_url, patchable.api_url, 'the refused PATCH changes nothing');
+  // The batch provider path is a transaction: a refused URL must insert none of its models.
+  const beforeProvider = rows();
+  const provider = await admin('/api/models/provider', 'POST', { repository_id: '101', api_url: 'http://example.com/v1', api_key: key, model_names: ['a', 'b'] });
+  assert.deepEqual(provider.value, { error: 'insecure_api_url', field: 'api_url' });
+  assert.equal(rows(), beforeProvider, 'the provider transaction inserted nothing');
   // Endpoints, listing and testing take unsaved URLs, so they get the same rule and send nothing.
   const unsaved = 'http://example.com/v1';
   assert.equal((await admin('/api/models/endpoints?api_url=' + encodeURIComponent(unsaved))).status, 400);
