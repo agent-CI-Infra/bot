@@ -34,7 +34,7 @@ import { type Actor, scope, repository } from '../app/auth.js';
 import { GitHub } from '../github/client.js';
 import { repositoryExecutionDenied } from '../installations/archive.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
-import { releaseCategory } from '../github/release-label.js';
+import { checkPullRequestLabels } from '../github/pull-request-labels.js';
 import { testEvidence, reviewLanguage, promptedBy, type DevelopmentWait } from '../github/text.js';
 import { developmentReady, reviewRequestsCode } from '../review/queue.js';
 import { actionableFinding, developmentGoal, discussionRequests, developmentApproved, developmentWait,
@@ -711,11 +711,10 @@ export class TaskEngine {
             if(task.kind.endsWith('.pr')&&!this.store.get('SELECT 1 FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number))
               return {error:'pull_request_not_owned',message:'This pull request is not the bot\'s own, so its branch cannot be updated. Report your changes in your reply instead.'};
           }
-          // A missing category can be corrected in the same tool conversation, before any branch is published.
-          try{await releaseCategory(github,args.release_label);}catch(error){
-            if(error instanceof TaskError&&error.code==='pr_release_category_required')return {error:error.code,message:'Read the current contribution guide and create-github-pr skill, choose exactly one release:* category, and call create_pull_request again with release_label.'};
-            throw error;
-          }
+          // Labels are checked against the repository before any branch is published, so a refusal can be corrected in the
+          // same tool conversation (#845); the publisher adds the accepted ones once the pull request exists.
+          const labels=await checkPullRequestLabels(github,args.labels,[input.review_label,input.development_label]);
+          if('error' in labels)return labels;
           if(input.integration){
             const checked=await workspace!.call('integration-check:'+requestId,{type:'workspace_integration_check'});
             if(checked.error||checked.unresolved?.length)return {error:'integration_conflict_unresolved',conflicts:checked.unresolved,integration_ref:input.integration.result_ref};
@@ -741,7 +740,7 @@ export class TaskEngine {
             const pr=input.bot_pr||input.object,owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,pr.number);
             assertOwnedPR(owned,pr,github.actorId,task.repository_id);branch=owned!.branch;prNumber=owned!.number;ownerTask=owned!.source_task_id;
           }else{branch=`bot/issue-${task.object_number}-${id}`;this.store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING',task.repository_id,branch,id);}
-          const candidate={...snapshot,source_workspace_id:task.workspace_id,files:await workspace!.contents(snapshot.files,blobValue(this.store,input.snapshot_files)),source_tree:input.source_tree,snapshot_files:blobValue(this.store,input.snapshot_files),skipped_files:blobValue(this.store,input.skipped_files),summary:args.summary,change_title:args.change_title,test_command:args.test_command,release_label:args.release_label,
+          const candidate={...snapshot,source_workspace_id:task.workspace_id,files:await workspace!.contents(snapshot.files,blobValue(this.store,input.snapshot_files)),source_tree:input.source_tree,snapshot_files:blobValue(this.store,input.snapshot_files),skipped_files:blobValue(this.store,input.skipped_files),summary:args.summary,change_title:args.change_title,test_command:args.test_command,labels:labels.labels,
             implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,base_branch:input.base_branch,
             publication_key:input.publication_key||input.integration?.id,...(input.integration?{integration:input.integration}:{}),branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation};
           this.store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data',id,JSON.stringify(candidate));

@@ -6,6 +6,7 @@ import { stop } from './common.js';
 import { loopbackHostname } from '../core/security.js';
 import { pricingFor } from '../metrics/accounting.js';
 import { githubWriteTool } from '../github/write.js';
+import { pullRequestLabelsSchema } from '../github/pull-request-labels.js';
 // Exact task-profile overrides are trusted administrator configuration, never model/tool input.
 // Keep invalid/deleted overrides visible: falling back would silently change the user's chosen model.
 export function selectedModel(store: Store, repositoryId: string, taskKind?: string) {
@@ -90,7 +91,7 @@ export function tools(profile: { workspaceWrite: boolean; completion: 'review' |
   if(writes.includes('pull_request'))result.push(
     fn('create_pull_request',(development?'Create or update the bot pull request from the working tree now.':'Publish the working-tree changes as a bot pull request now: a new one when the task is an Issue, or an update of this bot\'s own pull request. It does not end the task; finish as usual afterwards.')+' test_command records a command you already ran; only the project policy command is run by the control plane. On validation_failed, fix the problem and call again. Remove generated files before calling',
       {summary:string,test_command:string,change_title:{type:'string',description:'Concise code-change subject only. No review passphrase or review template.'},
-        release_label:{type:'string',description:'For openJiuwen-ai/sciencediscovery: choose exactly one release:* category using current CONTRIBUTING.md, .github/release.yml and .agents/skills/create-github-pr/SKILL.md. Category follows the change, not its author. Other repositories may omit this.'}},['summary','test_command','change_title']));
+        labels:pullRequestLabelsSchema},['summary','test_command','change_title']));
   result.push(githubWriteTool);
   // Development ends with its PR; an event workflow ends with its own finishing tool (eventTools).
   if(development||profile.completion==='event')return result;

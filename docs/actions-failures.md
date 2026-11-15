@@ -67,10 +67,10 @@ Issue 正文为英文，包含 job URL、run URL、SHA、分类和最多 2,400 �
 
 code 来源还必须保留 Current behavior、Expected behavior、Requested code change 正文，检视明确返回 `product_defect=true`，通过现有 `requires_code_change`、`issue_requests_code`、无需澄清、非空目标和原文 quote 检查，并由人应用配置的开发标签。quote 必须来自日志区之前的正文。Bot 不加开发标签。进入开发及发布前继续检查功能开关、开发开关、实际安装的事件订阅、Issue 开放、标签仍在且无人指派；对应 bot PR 的修订也保留原 Issue 的开关和批准边界。仍由现有流程测试、发布 `bot/issue-...` 分支和 PR，不合并。
 
-面向 `openJiuwen-ai/sciencediscovery` 的 PR 通过工具参数 `release_label` 指定类别；实现任务需要读取当前 CONTRIBUTING、release.yml 和 create-github-pr skill 选择类别。控制面再次读取这三份文件，校验类别来自当前分组，添加后读回实际标签并确认恰好一个 `release:*`。有冲突或无法添加则报告发布未完成，不声称标签已就位。其他仓库不受该目标仓库契约影响。
+PR 需要的标签（例如仓库要求的一个 `release:*` 类别）由仓库自己的规则告诉 agent，经 `create_pull_request` 的 `labels` 提交，规则见[架构](architecture.md#检视与开发数据流)。
 
 ## 验证
 
-`test/actions-failures.test.mjs` 通过签名 webhook、独立控制面 SQLite、HTTP GitHub 夹具和扮演分析任务的假 agent（`test/event-tasks.mjs`）覆盖分析结果的核验与降级、扫描、分页断点、重启、一次重跑、未知响应对账、提报去重、凭据过滤和现有开发门槛。`test/release-label.test.mjs` 验证类别读回及失败状态。`e2e/actions-failures.spec.mjs` 覆盖真实管理页面的默认关闭、开关保存、配置错误和窄屏展示。现有开发测试继续验证批准和发布前检查。
+`test/actions-failures.test.mjs` 通过签名 webhook、独立控制面 SQLite、HTTP GitHub 夹具和扮演分析任务的假 agent（`test/event-tasks.mjs`）覆盖分析结果的核验与降级、扫描、分页断点、重启、一次重跑、未知响应对账、提报去重、凭据过滤和现有开发门槛。`test/pull-request-labels.test.mjs` 验证 PR 标签的规则、可改正的拒绝和幂等添加。`e2e/actions-failures.spec.mjs` 覆盖真实管理页面的默认关闭、开关保存、配置错误和窄屏展示。现有开发测试继续验证批准和发布前检查。
 
 真实验收只在专门用于测试的 GitHub 组织里进行。若该组织中的安装未订阅 `workflow_run`，应记录现场阻断，不能修改生产配置来绕过它；不得在生产仓库试重跑、试打标签或创建自动化失败 Issue。生产仓库开启开关是验证完成后的独立配置步骤。

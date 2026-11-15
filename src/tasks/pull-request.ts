@@ -3,7 +3,6 @@ import type { Store, Row } from '../storage/database.js';
 import { stop, sha, type Redactor } from '../agent/common.js';
 import { GitHub } from '../github/client.js';
 import { Publisher } from '../github/publisher.js';
-import { releaseCategory } from '../github/release-label.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { permitsTool } from '../roles/permissions.js';
 import { assertPublicationStages } from '../roles/schedule.js';
@@ -49,7 +48,6 @@ export async function publishRequestPullRequest(store: Store, task: Row, redacto
   try{
     await github.connect(true);
     const candidate=JSON.parse(store.get('SELECT data FROM development_candidates WHERE task_id=?',task.id)!.data);
-    await releaseCategory(github,candidate.release_label);
     const publisher=new Publisher(store,github,task,validate,undefined,log),commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
     await validate();
     integratedPublication(store,task,commit);

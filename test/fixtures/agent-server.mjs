@@ -99,6 +99,8 @@ export const server=createServer(async(req,res)=>{
       repo.refs[body.branch]=body.sha||commit(trees.get(commits.get(current).tree.sha),current,'upstream '+current);return send({sha:repo.refs[body.branch],previous:current});
     }
     if(url.pathname==='/fixture/pr'&&method==='POST'){const pr=repositories.get(String(body.repository_id)).pulls.get(Number(body.number));Object.assign(pr,body.values);return send(pr);}
+    // Repository labels (#845) exist only where a test sets them; elsewhere GET /labels stays unanswered as before.
+    if(url.pathname==='/fixture/labels'&&method==='POST'){repositories.get(String(body.repository_id)).repositoryLabels=body.labels;return send({});}
     if(url.pathname==='/fixture/state')return send({...stats,repositories:[...repositories.values()].map(r=>({...publicRepo(r),refs:r.refs,createdPrs:r.createdPrs}))});
     if(url.pathname==='/model/chat/completions'){
       if(req.headers.authorization!=='Bearer '+config.model_key)return send({error:'bad key'},401);
@@ -114,6 +116,7 @@ export const server=createServer(async(req,res)=>{
     const repo=repositories.get(match[1]),suffix=match[2];if(!repo)return send({},404);
     if(!suffix)return send(publicRepo(repo));
     let m;
+    if(suffix==='/labels'&&repo.repositoryLabels)return send(Number(url.searchParams.get('page')||1)===1?repo.repositoryLabels.map(name=>({name})):[]);
     if((m=/^\/issues\/(\d+)\/comments$/.exec(suffix))){
       const number=Number(m[1]),comments=repo.comments.get(number)||[];
       if(method==='GET')return send(Number(url.searchParams.get('page')||1)===1?comments:[]);
