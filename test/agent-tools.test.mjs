@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -603,4 +603,76 @@ test('project computer recreates once to mount /opt/agent-tools read-only and Ru
     docker.toolsVolumeLabels = badMount.labels;
     await assert.rejects(() => projects.agentToolsVolume(), /agent_tools_volume_invalid/, `manager must reject ${badMount.name}`);
   }
+});
+
+const toolApiScaffold = async (t, prefix) => {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const upstream = await startMockToolUpstream(t, 'x64');
+  const tools = new AgentToolManager({ volumeRoot: root, containerRoot: '/opt/agent-tools', arch: 'x64', sources: upstream.sources });
+  const store = new Store(':memory:', randomBytes(32));
+  t.after(() => store.close());
+  roleRunStorage(store);
+  store.run("INSERT INTO accounts VALUES('a','org','github_app','1','{}','now')");
+  store.run("INSERT INTO repositories VALUES('r','org/repo','org','a')");
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('t1','r','task.request','running','test','{}',1,1)");
+  return { root, tools, store, superUser: { id: 'u-super', role: 'super_admin', repositories: [] } };
+};
+
+test('reinstalling the CLI version an active run is using is refused with 409 and leaves the install untouched (#735)', async t => {
+  const { root, tools, store, superUser } = await toolApiScaffold(t, 'agent-tools-in-use-');
+
+  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.166.0', retain_count: 2 });
+  const versionDir = join(root, 'codex', '0.166.0');
+  const sentinel = join(versionDir, 'SENTINEL');
+  writeFileSync(sentinel, 'must survive');
+  const manifestBefore = readFileSync(join(versionDir, 'manifest.json'));
+
+  const run = beginRun(store, store.get("SELECT * FROM tasks WHERE id='t1'"), 'execution', {});
+  store.run("UPDATE task_runs SET role='developer',harness='codex',harness_version='1' WHERE id=?", run.id);
+  recordRunCliVersion(store, run.id, '0.166.0');
+
+  await assert.rejects(
+    () => agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.166.0', retain_count: 2 }),
+    { status: 409, code: 'agent_tool_version_in_use' },
+    'reinstalling the version an active run holds is refused, not mapped to 503',
+  );
+  assert.equal(existsSync(sentinel), true, 'the in-use directory must not be removed before the replacement is ready');
+  assert.deepEqual(readFileSync(join(versionDir, 'manifest.json')), manifestBefore, 'the in-use manifest is byte-for-byte unchanged');
+
+  // A version that no run holds can still be installed next to the in-use one.
+  const other = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.167.0', retain_count: 2 });
+  assert.equal(other.installed.version, '0.167.0');
+
+  // Once the run finishes the same request is allowed again and really reinstalls.
+  endRun(store, run, 'completed', null);
+  const again = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.166.0', retain_count: 2 });
+  assert.equal(again.installed.version, '0.166.0');
+  assert.equal(existsSync(sentinel), false, 'the reinstall after the run finished replaces the directory');
+});
+
+test('a claude install that would replace the Node runtime an active claude run uses is refused with 409 (#735)', async t => {
+  const { root, tools, store, superUser } = await toolApiScaffold(t, 'agent-tools-node-in-use-');
+
+  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'claude_code', version: '2.1.319', retain_count: 2 });
+  const nodeDir = join(root, 'node', '22.15.0');
+  const sentinel = join(nodeDir, 'SENTINEL');
+  writeFileSync(sentinel, 'node must survive');
+  const nodeBinBefore = readFileSync(join(nodeDir, 'bin', 'node'));
+
+  const run = beginRun(store, store.get("SELECT * FROM tasks WHERE id='t1'"), 'execution', {});
+  store.run("UPDATE task_runs SET role='developer',harness='claude_code',harness_version='1' WHERE id=?", run.id);
+  recordRunCliVersion(store, run.id, '2.1.319');
+
+  // An invalid Node manifest sends the next claude install down the replace path.
+  rmSync(join(nodeDir, 'manifest.json'));
+
+  await assert.rejects(
+    () => agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'claude_code', version: '2.1.310', retain_count: 2 }),
+    { status: 409, code: 'agent_tool_version_in_use' },
+    'replacing the Node runtime an active claude run depends on is refused',
+  );
+  assert.equal(existsSync(sentinel), true, 'the Node directory is not removed');
+  assert.deepEqual(readFileSync(join(nodeDir, 'bin', 'node')), nodeBinBefore, 'the Node binary is byte-for-byte unchanged');
+  assert.equal(existsSync(join(root, 'claude_code', '2.1.310')), false, 'the refused install leaves nothing behind');
 });

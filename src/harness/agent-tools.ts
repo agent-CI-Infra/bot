@@ -720,20 +720,36 @@ export class AgentToolManager {
     }
   }
 
+  /** The Node runtime already on the volume when it can be reused as-is; null means the install would replace it. */
+  private existingNodeRuntime(rootReal: string, arch: AgentToolArch, nodeVer: string): NodeRuntimeManifest | null {
+    const finalDir = resolve(rootReal, 'node', nodeVer);
+    const existingManifestPath = resolve(finalDir, 'manifest.json');
+    const existingBinPath = resolve(finalDir, 'bin', 'node');
+    if (!existsSync(existingManifestPath) || !verifySafeExecutable(rootReal, existingBinPath)) return null;
+    try {
+      const existing = JSON.parse(readFileSync(existingManifestPath, 'utf8')) as NodeRuntimeManifest;
+      if (existing.schema === 'bot.agent-tools-node/1' && existing.version === nodeVer && existing.arch === arch && SHA256_RE.test(existing.sha256)) return existing;
+    } catch {}
+    return null;
+  }
+
+  /** True when an active claude_code run's manifest names this Node version, so replacing Node would break that run. */
+  private activeClaudeDependsOnNode(rootReal: string, active: Iterable<string>, nodeVer: string): boolean {
+    for (const version of active) {
+      try {
+        const manifest = JSON.parse(readFileSync(resolve(rootReal, 'claude_code', version, 'manifest.json'), 'utf8')) as AgentToolManifest;
+        if (manifest?.cli === 'claude_code' && manifest.node_version === nodeVer) return true;
+      } catch {}
+    }
+    return false;
+  }
+
   private async ensureNodeRuntime(rootReal: string, arch: AgentToolArch): Promise<AgentToolArtifact> {
     const nodeVer = parseSemver(this.nodeVersion)?.raw;
     if (!nodeVer) throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'invalid_node_version');
     const finalDir = resolve(rootReal, 'node', nodeVer);
-    const existingManifestPath = resolve(finalDir, 'manifest.json');
-    const existingBinPath = resolve(finalDir, 'bin', 'node');
-    if (existsSync(existingManifestPath) && verifySafeExecutable(rootReal, existingBinPath)) {
-      try {
-        const existing = JSON.parse(readFileSync(existingManifestPath, 'utf8')) as NodeRuntimeManifest;
-        if (existing.schema === 'bot.agent-tools-node/1' && existing.version === nodeVer && existing.arch === arch && SHA256_RE.test(existing.sha256)) {
-          return { role: 'node_runtime', source_url: existing.source_url, sha256: existing.sha256, bytes: existing.bytes };
-        }
-      } catch {}
-    }
+    const existing = this.existingNodeRuntime(rootReal, arch, nodeVer);
+    if (existing) return { role: 'node_runtime', source_url: existing.source_url, sha256: existing.sha256, bytes: existing.bytes };
 
     const nodeArch = arch === 'x64' ? 'x64' : 'arm64';
     const archiveName = `node-v${nodeVer}-linux-${nodeArch}.tar.gz`;
@@ -985,11 +1001,24 @@ export class AgentToolManager {
       }
       const arch = this.requireArch();
       const rootReal = this.requireVolumeRoot();
+      const dynamicProtected = typeof input.protectedVersions === 'function' ? input.protectedVersions() : (input.protectedVersions ?? []);
+      const active = new Set<string>([...dynamicProtected]);
+      // Reinstalling a version an active run is executing would delete its directory before the replacement is ready,
+      // so refuse while it runs. Prune keeps protecting the same set further down; that path is unchanged.
+      if (active.has(parsed.raw)) {
+        throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `${input.cli}@${parsed.raw}`);
+      }
+      if (input.cli === 'claude_code') {
+        const nodeVer = parseSemver(this.nodeVersion)?.raw;
+        // Only refuse when this install would really replace Node: a reusable runtime is left alone by ensureNodeRuntime.
+        if (nodeVer && !this.existingNodeRuntime(rootReal, arch, nodeVer) && this.activeClaudeDependsOnNode(rootReal, active, nodeVer)) {
+          throw new TaskError('agent_tool_version_in_use', 'waiting_configuration', `node@${nodeVer}`);
+        }
+      }
       const installed = input.cli === 'claude_code'
         ? await this.installClaudeCode(rootReal, parsed.raw, arch, input.sha256?.toLowerCase())
         : await this.installCodex(rootReal, parsed.raw, arch, input.sha256?.toLowerCase());
-      const dynamicProtected = typeof input.protectedVersions === 'function' ? input.protectedVersions() : (input.protectedVersions ?? []);
-      const protectedSet = new Set<string>([installed.version, ...dynamicProtected]);
+      const protectedSet = new Set<string>([installed.version, ...active]);
       const pruned = input.retainCount !== undefined ? this.pruneLocked(rootReal, arch, input.cli, input.retainCount, protectedSet) : [];
       return {
         installed,
