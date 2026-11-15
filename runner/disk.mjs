@@ -32,7 +32,7 @@ export const describeVolume = state => state ? `${Math.floor(state.free_bytes / 
 // of runner_operation_failed. Calls that only read, or keep a small cache of what they read, are left as they are;
 // answers to a running agent are small and never refused, so an agent about to finish still can. An assistant
 // computer's volumes are its own business (manager/assistant-computers.mjs).
-const reads = new Set(['read', 'workspace_read', 'workspace_source', 'workspace_integration_check', 'workspace_reuse', 'workspace_blob', 'workspace_export',
+const reads = new Set(['read', 'workspace_read', 'workspace_source', 'workspace_integration_check', 'workspace_blob', 'workspace_export',
   'git_have', 'git_export', 'workspace_agent_poll', 'workspace_agent_live', 'workspace_agent_session', 'workspace_agent_runtime', 'workspace_harness_poll']);
 const guarded = type => !assistant && !reads.has(type);
 const answer = (input, reason, state) => ({ ok: false, error: 'disk_full', detail: `${input.type}${input.path ? ' ' + input.path : ''}: ${String(reason).slice(0, 2000)}; the work volume has ${describeVolume(state)}` });

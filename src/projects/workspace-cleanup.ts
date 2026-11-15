@@ -3,6 +3,7 @@ import { type Manager } from './service.js';
 import { randomId, type Json } from '../core/security.js';
 import { FailureLog } from '../core/log.js';
 import { retentionSettings } from '../storage/retention.js';
+import { worktreesRemoved } from './worktrees.js';
 
 /*
  * Scheduled removal of task workspaces from the project computers.
@@ -52,7 +53,10 @@ export function workspaceStorage(store: Store): void {
 const lastUse = new Map<string, number>(), recorded = new Set<string>(), removing = new Set<string>();
 const bounded = (collection: Map<string, number> | Set<string>) => { if (collection.size > 50_000) collection.delete(collection.keys().next().value!); };
 
-/** Records that a task uses a workspace, before a runner call for it. Workspace.call and deliver call it. */
+/**
+ * Records that a task uses a workspace, before a runner call for it. Workspace.call and deliver call it for the task
+ * directory; binding a shared worktree (src/projects/worktrees.ts) calls it with the worktree's id and type 'worktree'.
+ */
 export function useWorkspace(store: Store | null, task: Row, type: string, now = Date.now()): void {
   if (!workspaceId.test(String(task.workspace_id || ''))) return;
   const key = `${task.repository_id}:${task.workspace_id}`, pair = `${key}:${task.id}`;
@@ -61,7 +65,7 @@ export function useWorkspace(store: Store | null, task: Row, type: string, now =
   if (!store || task.conversation_id || recorded.has(pair)) return;
   store.run(`INSERT INTO task_workspaces(repository_id,workspace_id,task_id,task_kind,object_number,kind,created_at) VALUES(?,?,?,?,?,?,?)
     ON CONFLICT(repository_id,workspace_id,task_id) DO UPDATE SET released_at=NULL,release_reason=NULL,freed_bytes=NULL WHERE released_at IS NOT NULL`,
-  String(task.repository_id), task.workspace_id, String(task.id), task.kind ?? null, task.object_number ?? null, type === 'workspace_acceptance' ? 'checkout' : 'task', new Date(now).toISOString());
+  String(task.repository_id), task.workspace_id, String(task.id), task.kind ?? null, task.object_number ?? null, type === 'workspace_acceptance' ? 'checkout' : type === 'worktree' ? 'worktree' : 'task', new Date(now).toISOString());
   recorded.add(pair); bounded(recorded);
 }
 /** True while a removal call is deleting the workspace: a review must not reuse it. */
@@ -231,9 +235,10 @@ export class WorkspaceCleanup {
     if (!response?.ok) throw new Error(`${request.type}: ${response?.error || 'no answer'}${response?.detail ? ` (${response.detail})` : ''}`);
     return response.result;
   }
-  private release(repo: string, items: { name: string; bytes: number | null; reason: string; active_at?: number }[]): void {
+  private release(repo: string, items: { name: string; bytes: number | null; reason: string; active_at?: number }[], worktrees = false): void {
     const now = new Date().toISOString();
     this.store.transaction(() => { for (const item of items) {
+      if (worktrees) worktreesRemoved(this.store, repo, [item.name], item.reason);
       const changed = this.store.run(`UPDATE task_workspaces SET released_at=?,release_reason=?,freed_bytes=? WHERE repository_id=? AND workspace_id=?`,
         now, item.reason, item.bytes, repo, item.name).changes;
       if (!Number(changed)) this.store.run(`INSERT OR IGNORE INTO task_workspaces(repository_id,workspace_id,task_id,kind,created_at,released_at,release_reason,freed_bytes)
@@ -243,18 +248,29 @@ export class WorkspaceCleanup {
   private async project(repo: string): Promise<void> {
     const environment = await this.manager.call('GET', '/v1/projects/' + repo);
     if (!environment || !['ready', 'busy'].includes(environment.state)) return;
-    const listing = await this.runner(repo, environment.generation, { type: 'tasks_list' }, 10 * 60_000);
+    const prs = pullRequests(this.store, repo), tasks = await this.pass(repo, environment.generation, prs, false), worktrees = await this.pass(repo, environment.generation, prs, true);
+    const removed = tasks.removed + worktrees.removed, bytes = tasks.bytes + worktrees.bytes, skipped = tasks.skipped + worktrees.skipped;
+    if (removed || skipped) console.log(`[workspaces] project ${repo}: removed ${tasks.removed} task directories and ${worktrees.removed} worktrees (${Math.round(bytes / 1024 / 1024)} MiB), ${skipped} skipped; ${tasks.total} and ${worktrees.total} were there`);
+    // What this sweep freed, for the storage page (#671).
+    const swept = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='workspace_cleanup'")?.value ?? '{}');
+    swept[repo] = { at: new Date().toISOString(), removed, bytes, skipped };
+    this.store.run("INSERT INTO settings VALUES('workspace_cleanup',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify(swept));
+  }
+  // One kind of directory on the computer: the task directories, or the shared worktrees (#769), each listed and removed
+  // through its own runner calls. A worktree's rows (kind 'worktree') come from its bindings; the same retention applies.
+  private async pass(repo: string, generation: number, prs: PullRequests, worktrees: boolean): Promise<{ removed: number; bytes: number; skipped: number; total: number }> {
+    const listing = await this.runner(repo, generation, { type: worktrees ? 'worktrees_list' : 'tasks_list' }, 10 * 60_000);
     const entries: Listed[] = (Array.isArray(listing?.entries) ? listing.entries : [])
       .filter((entry: any) => workspaceId.test(String(entry?.name)) && Number.isSafeInteger(entry.active_at));
-    // With the whole tasks directory listed, recorded workspaces it lacks are gone (removed by hand, or a reset started a
-    // new work volume). A record younger than an hour may be one whose directory the runner is creating right now.
+    // With the whole directory listed, recorded workspaces it lacks are gone (removed by hand, or a reset started a new
+    // work volume). A record younger than an hour may be one whose directory the runner is creating right now.
     if (listing?.total === entries.length) {
       const present = new Set(entries.map(entry => entry.name)), before = new Date(Date.now() - hour).toISOString();
-      const gone = this.store.all('SELECT DISTINCT workspace_id FROM task_workspaces WHERE repository_id=? AND released_at IS NULL AND created_at<?', repo, before)
+      const gone = this.store.all(`SELECT DISTINCT workspace_id FROM task_workspaces WHERE repository_id=? AND released_at IS NULL AND created_at<? AND kind${worktrees ? '=' : '<>'}'worktree'`, repo, before)
         .filter(row => !present.has(row.workspace_id)).map(row => ({ name: String(row.workspace_id), bytes: null, reason: 'missing' }));
-      if (gone.length) this.release(repo, gone);
+      if (gone.length) this.release(repo, gone, worktrees);
     }
-    const prs = pullRequests(this.store, repo), planned = removableWorkspaces(this.store, repo, entries, Date.now(), prs);
+    const planned = removableWorkspaces(this.store, repo, entries, Date.now(), prs);
     let removed = 0, bytes = 0, skipped = 0;
     for (let index = 0; index < planned.length && !this.closing; index += sweepLimits.batch) {
       if (index) await new Promise(resolve => setTimeout(resolve, this.options.pauseMs ?? sweepLimits.pauseMs));
@@ -263,7 +279,7 @@ export class WorkspaceCleanup {
       if (!batch.length) continue;
       const keys = batch.map(entry => `${repo}:${entry.name}`); for (const key of keys) removing.add(key);
       let result: any;
-      try { result = await this.runner(repo, environment.generation, { type: 'tasks_remove', entries: batch.map(({ name, active_at }) => ({ name, active_at })) }, 60 * 60_000); }
+      try { result = await this.runner(repo, generation, { type: worktrees ? 'worktrees_remove' : 'tasks_remove', entries: batch.map(({ name, active_at }) => ({ name, active_at })) }, 60 * 60_000); }
       finally { for (const key of keys) removing.delete(key); }
       const reasons = new Map(batch.map(entry => [entry.name, entry])), done: { name: string; bytes: number | null; reason: string; active_at?: number }[] = [];
       for (const item of Array.isArray(result?.removed) ? result.removed : []) if (reasons.has(item.name)) {
@@ -274,12 +290,8 @@ export class WorkspaceCleanup {
         if (item?.reason === 'missing' && reasons.has(item.name)) done.push({ name: item.name, bytes: null, reason: 'missing', active_at: reasons.get(item.name)!.active_at });
         else skipped++;
       }
-      if (done.length) this.release(repo, done);
+      if (done.length) this.release(repo, done, worktrees);
     }
-    if (removed || skipped) console.log(`[workspaces] project ${repo}: removed ${removed} task directories (${Math.round(bytes / 1024 / 1024)} MiB), ${skipped} skipped; ${listing?.total ?? entries.length} were there`);
-    // What this sweep freed, for the storage page (#671).
-    const swept = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='workspace_cleanup'")?.value ?? '{}');
-    swept[repo] = { at: new Date().toISOString(), removed, bytes, skipped };
-    this.store.run("INSERT INTO settings VALUES('workspace_cleanup',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify(swept));
+    return { removed, bytes, skipped, total: Number(listing?.total ?? entries.length) };
   }
 }

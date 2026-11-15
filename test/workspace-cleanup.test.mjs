@@ -14,16 +14,18 @@ const id = () => randomBytes(24).toString('hex'), hour = 3600_000, day = 24 * ho
 // A control-plane store with project 101, and a stand-in manager whose project computer is a directory: its runner
 // calls go to the real runner functions. Every runner request is kept in calls.
 function fixture(t, onRemove) {
-  const dir = mkdtempSync(join(tmpdir(), 'workspace-cleanup-')), tasks = join(dir, 'tasks'), store = new Store(join(dir, 'control.sqlite'), randomBytes(32));
+  const dir = mkdtempSync(join(tmpdir(), 'workspace-cleanup-')), tasks = join(dir, 'tasks'), worktrees = join(dir, 'worktrees'), store = new Store(join(dir, 'control.sqlite'), randomBytes(32));
   t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
-  mkdirSync(tasks);
+  mkdirSync(tasks); mkdirSync(worktrees);
   store.run("INSERT INTO accounts(id,name,type,credentials,created_at) VALUES('a','Fixture','bot_account','{}',?)", iso(Date.now()));
   store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')"); store.run("INSERT INTO policies(repository_id) VALUES('101')");
   const calls = [], manager = { async call(method, _path, input) {
     if (method === 'GET') return { repository_id: '101', state: 'ready', generation: 1 };
     const request = input.request; calls.push(request);
     if (request.type === 'tasks_remove') await onRemove?.(request);
-    try { return { ok: true, result: request.type === 'tasks_list' ? await listTaskDirectories(tasks) : await removeTaskDirectories(request.entries, tasks, join(dir, 'store')) }; }
+    // The shared worktrees (#769) are listed and removed the same way, in their own directory.
+    const root = request.type.startsWith('worktrees_') ? worktrees : tasks;
+    try { return { ok: true, result: request.type.endsWith('_list') ? await listTaskDirectories(root) : await removeTaskDirectories(request.entries, root, join(dir, 'store')) }; }
     catch (error) { return { ok: false, error: request.type + '_failed', detail: error.message }; }
   } };
   // A task directory last active `age` ago.
@@ -39,7 +41,12 @@ function fixture(t, onRemove) {
     return { id: taskId, workspace };
   };
   const cleanup = new WorkspaceCleanup(store, manager, { firstDelayMs: hour, pauseMs: 0 });
-  return { store, calls, directory, task, tasks, cleanup, sweep: () => cleanup.run(), left: () => readdirSync(tasks).sort(),
+  // A worktree last active `age` ago (no git registration: removal prunes nothing then).
+  const worktree = (age, name = id()) => {
+    mkdirSync(join(worktrees, name), { recursive: true }); writeFileSync(join(worktrees, name, 'file'), 'x'.repeat(5000));
+    const time = (Date.now() - age) / 1000; utimesSync(join(worktrees, name), time, time); return name;
+  };
+  return { store, calls, directory, worktree, task, tasks, cleanup, sweep: () => cleanup.run(), left: () => readdirSync(tasks).sort(), worktrees: () => readdirSync(worktrees).sort(),
     released: workspace => store.all('SELECT task_id,kind,release_reason,freed_bytes FROM task_workspaces WHERE workspace_id=? AND released_at IS NOT NULL', workspace) };
 }
 const sorted = (...names) => names.sort();
@@ -50,7 +57,7 @@ test('workspaces of tasks that are not finished stay whatever their age', async 
     .map(status => f.task(status, { age: 30 * day }).workspace);
   await f.sweep();
   assert.deepEqual(f.left(), sorted(...kept));
-  assert.deepEqual(f.calls.map(call => call.type), ['tasks_list']);
+  assert.deepEqual(f.calls.map(call => call.type), ['tasks_list', 'worktrees_list']);
 });
 
 test('finished tasks go after a day, failed ones after a week, and directories no task names after a day', async t => {
@@ -100,15 +107,38 @@ test('a workspace another task reuses, one used in the last half hour and one wr
   const first = f.task('succeeded', { age: 3 * day }); f.task('running', { age: 3 * day, workspace: first.workspace });
   // A succeeded task whose workspace this process used a few minutes ago.
   const recent = f.task('succeeded', { age: 3 * day });
-  useWorkspace(f.store, { id: 'another', repository_id: '101', conversation_id: 'c', workspace_id: recent.workspace }, 'workspace_reuse', Date.now() - 5 * 60_000);
+  useWorkspace(f.store, { id: 'another', repository_id: '101', conversation_id: 'c', workspace_id: recent.workspace }, 'workspace_read', Date.now() - 5 * 60_000);
   const written = f.task('succeeded', { age: 3 * day }), gone = f.task('succeeded', { age: 3 * day });
   touched = written.workspace;
   await f.sweep();
   assert.deepEqual(f.left(), sorted(first.workspace, recent.workspace, written.workspace));
-  assert.deepEqual(f.calls.at(-1).entries.map(entry => entry.name).sort(), sorted(written.workspace, gone.workspace));
+  assert.deepEqual(f.calls.filter(call => call.type === 'tasks_remove').at(-1).entries.map(entry => entry.name).sort(), sorted(written.workspace, gone.workspace));
   assert.deepEqual(during, [true, true]); assert.equal(workspaceRemoving('101', gone.workspace), false);
   // A directory written since the listing keeps its record unreleased.
   assert.deepEqual(f.released(written.workspace), []);
+});
+
+test('#769 a shared worktree stays while any task that used it needs it, then goes by the same rules; its record follows', async t => {
+  const f = fixture(t), bind = (task, worktree) => useWorkspace(f.store, { id: task.id, repository_id: '101', kind: 'review.issue', object_number: 1, workspace_id: worktree }, 'worktree', Date.now() - 3 * day);
+  const record = worktree => f.store.run(`INSERT INTO worktrees(repository_id,id,generation,head_sha,tree_sha,mode,state,created_by,created_at,used_at) VALUES('101',?,1,?,?,'read','ready','t',?,?)`,
+    worktree, 'a'.repeat(40), 'b'.repeat(40), iso(Date.now() - 3 * day), iso(Date.now() - 3 * day));
+  // Two reviews used one worktree; the second is still running.
+  const shared = f.worktree(3 * day), done = f.worktree(3 * day), orphan = f.worktree(2 * day), young = f.worktree(12 * hour);
+  for (const name of [shared, done]) record(name);
+  const ended = f.task('succeeded', { age: 3 * day }), running = f.task('running', { age: 3 * day }), finished = f.task('succeeded', { age: 3 * day });
+  bind(ended, shared); bind(running, shared); bind(finished, done);
+  // A recorded worktree whose directory is gone.
+  const gone = id(); record(gone); bind(finished, gone);
+  await f.sweep();
+  assert.deepEqual(f.worktrees(), sorted(shared, young));
+  assert.deepEqual(f.released(done).map(row => [row.kind, row.release_reason, row.freed_bytes > 0]), [['worktree', 'finished', true]]);
+  assert.deepEqual(f.released(orphan).map(row => row.release_reason), ['unowned']);
+  assert.deepEqual(f.store.all('SELECT id,state,state_reason FROM worktrees ORDER BY id').map(row => [row.id, row.state, row.state_reason]),
+    [[shared, 'ready', null], [done, 'removed', 'finished'], [gone, 'removed', 'missing']].sort((a, b) => a[0] < b[0] ? -1 : 1));
+  // The task directories are swept on their own: none of them is a worktree.
+  assert.deepEqual(f.calls.map(call => call.type), ['tasks_list', 'tasks_remove', 'worktrees_list', 'worktrees_remove']);
+  f.store.run("UPDATE tasks SET status='succeeded' WHERE id=?", running.id); await f.sweep();
+  assert.deepEqual(f.worktrees(), [young]);
 });
 
 test("a follow-up that is not finished keeps its parent's workspace", async t => {

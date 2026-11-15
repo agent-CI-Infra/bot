@@ -60,7 +60,8 @@ import { workEnabled } from '../work/settings.js';
 import { eventWork } from '../work/events.js';
 import { Dispatcher } from '../dispatch/worker.js';
 import { managerDecision } from '../dispatch/manager.js';
-import { taskUsageBytes, workspaceRemoving } from '../projects/workspace-cleanup.js';
+import { taskUsageBytes } from '../projects/workspace-cleanup.js';
+import { heldBy, releaseWorktrees, taskWorktree, worktreeMoved } from '../projects/worktrees.js';
 // The modules that own event work register it when loaded.
 import '../releases/observe.js';
 import '../releases/notes.js';
@@ -373,16 +374,18 @@ export class TaskEngine {
         const heads:string[]=Array.isArray(input.heads)&&input.heads.length?input.heads:[previous];
         const mirror=this.gitCache&&github.cloneUrl?await this.gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[next,...(base?[base]:[])],
           refs:[`refs/pull/${number}/head`,...(base&&object.base?.ref?[`refs/heads/${object.base.ref}`]:[])]}):undefined;
-        const moved=mirror?await workspace!.advance(next,mirror,base?[base]:[],String(heads.length)):null;
+        // A worktree another unfinished task holds too (#769) stays where it is: the task moves to a new workspace instead.
+        const held=taskWorktree(this.store,task),shared=!!held&&heldBy(this.store,String(task.repository_id),held.worktree_id).some(row=>row.task_id!==task.id);
+        const moved=mirror&&!shared?await workspace!.advance(next,mirror,base?[base]:[],String(heads.length)):null;
         if(!moved){
           update({input:JSON.stringify({...JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),session_attempt:task.attempt+1})});
-          return stop('pull_request_head_changed','queued',`PR #${number} 有了新提交 ${next}，工作区不能原地移到新提交（${mirror?'不是 git worktree，或移动失败':'Git 缓存不可用'}），任务在新工作区按新提交重新准备。`);
+          return stop('pull_request_head_changed','queued',`PR #${number} 有了新提交 ${next}，工作区不能原地移到新提交（${!mirror?'Git 缓存不可用':shared?'这个 worktree 还有别的任务在用':'不是 git worktree，或移动失败'}），任务在新工作区按新提交重新准备。`);
         }
         const compare=await github.request('GET',github.path(`/compare/${previous}...${next}`)).then(headComparison,(error:any)=>({error:String(error?.code||'compare_unavailable')}));
         const files=await github.pages(github.path(`/pulls/${number}/files`));
         if(files.length>=3000)stop('pull_request_file_limit','failed',`PR #${number} 返回 ${files.length} 个文件，已达到 GitHub 的 3000 文件列表上限，无法确认完整差异。`);
-        // The checkout cache follows the move, so the next review of this head can reuse the worktree.
-        await workspace!.context({'files.json':JSON.stringify(files,null,2)});await workspace!.deliver({type:'workspace_cache',sha:next,tree_sha:moved.tree_sha});
+        // The worktree's record follows the move, so a later review of this head can take it over (#769).
+        await workspace!.context({'files.json':JSON.stringify(files,null,2)});if(held)worktreeMoved(this.store,String(task.repository_id),held.worktree_id,next,moved.tree_sha);
         const latest=JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),context=input.context||{};
         input={...input,...latest,snapshot_sha:next,snapshot_tree:moved.tree_sha,source_tree:moved.source_tree_sha,snapshot_files:moved.files,skipped_files:moved.skipped_files,
           coverage:moved.coverage,files,heads:[...heads,next],behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),
@@ -488,9 +491,9 @@ export class TaskEngine {
           if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库行为规则失败（${error.code}）${detail?'：'+detail:''}，请检查 .bot/ 和 .agents/skills/ 配置。`);}
           throw error;
         }
-        let snapshot:any=mirror?await workspace.checkout(github,target.sha,mirror,[]):null;
+        // Event work only reads the repository: it shares a worktree of the commit with other readers (#769).
+        let snapshot:any=mirror?await workspace.bind(github,target.sha,mirror,[],'read'):null;
         if(!snapshot){if(mirror?.has(target.sha))update({workspace_id:randomId()});snapshot=await workspace.prepare(github,target.sha,mirror);}
-        await workspace.deliver({type:'workspace_cache',sha:target.sha,tree_sha:snapshot.tree_sha});
         const computer=computerRequest(effectiveRules.computer,environment.computer);
         if(computer){
           this.rules.rememberComputer(task.repository_id,environment.computer);
@@ -557,18 +560,10 @@ export class TaskEngine {
           if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库行为规则失败（${error.code}）${detail?'：'+detail:''}，请检查 .bot/ 和 .agents/skills/ 配置。`);}
           throw error;
         }
-        // A git worktree from the computer's store when the mirror has the commit. Otherwise files are copied as before, in a
-        // fresh workspace, so nothing a checkout left halfway is in the way.
-        let snapshot:any=null;
-        // A workspace the cleanup is deleting right now is not reused; the task checks out afresh.
-        if(prior&&prior.generation===environment.generation&&prior.head_sha===ref.object.sha&&prior.workspace_id&&!workspaceRemoving(task.repository_id,prior.workspace_id)
-          &&!this.store.get("SELECT 1 FROM tasks WHERE workspace_id=? AND id<>? AND status IN ('running','publishing','preparing')",prior.workspace_id,id)){
-          const ownWorkspace=task.workspace_id;update({workspace_id:prior.workspace_id});
-          const reused=await workspace.deliver({type:'workspace_reuse',sha:ref.object.sha,tree_sha:JSON.parse(prior.snapshot).snapshot_tree});
-          if(reused.reused){const cached=JSON.parse(prior.snapshot);snapshot={files:blobValue(this.store,cached.snapshot_files),skipped_files:blobValue(this.store,cached.skipped_files),tree_sha:cached.snapshot_tree,source_tree_sha:cached.source_tree,coverage:cached.coverage,history:cached.history};}
-          else update({workspace_id:ownWorkspace});
-        }
-        if(!snapshot)snapshot=mirror?await workspace.checkout(github,ref.object.sha,mirror,prBase?[prBase]:[]):null;
+        // A git worktree from the computer's store when the mirror has the commit (#769): a review shares one of the commit
+        // with other readers, a task that writes gets its own. Otherwise files are copied as before, in a fresh workspace,
+        // so nothing a checkout left halfway is in the way.
+        let snapshot:any=mirror?await workspace.bind(github,ref.object.sha,mirror,prBase?[prBase]:[],review?'read':'write'):null;
         if(!snapshot){if(mirror?.has(ref.object.sha))update({workspace_id:randomId()});snapshot=await workspace.prepare(github,ref.object.sha,mirror);}
         if(development&&input.integration){
           input.integration=await applyIntegration(this.store,task,workspace,ref.object.sha,input.integration);
@@ -576,7 +571,6 @@ export class TaskEngine {
           // The next model/controller input explains the new baseline and the exact retained delta.
           input.context={...input.context,integration:input.integration};
         }
-        if(!development)await workspace.deliver({type:'workspace_cache',sha:ref.object.sha,tree_sha:snapshot.tree_sha});
         const files=task.kind.endsWith('.pr')?await github.pages(github.path(`/pulls/${task.object_number}/files`)):[];
         if(files.length>=3000)stop('pull_request_file_limit','failed',`PR #${task.object_number} 返回 ${files.length} 个文件，已达到 GitHub 的 3000 文件列表上限，无法确认完整差异。`);
         const computer=computerRequest(effectiveRules.computer,environment.computer);
@@ -918,7 +912,9 @@ export class TaskEngine {
       const last=previous?JSON.parse(previous.content):null,detail=redactor.clean(failure.detail);
       if(current?.error_code!==failure.code||last?.code!==failure.code||last?.state!==state||last?.retry_cycle_started_at!==(cycle??undefined)||(last?.detail_sha||sha(last?.detail||''))!==sha(detail||''))
         log({type:'fault',state,code:failure.code,...(cycle!=null?{retry_cycle_started_at:cycle}:{}),...(detail?{detail,detail_sha:sha(detail)}:{})});
-    }finally{const current=this.store.get('SELECT status,error_code FROM tasks WHERE id=?',id);if(['completed','succeeded','pr_opened'].includes(current?.status))resolveExecutionRetries(this.store,id);endRun(this.store,attemptRun,['completed','succeeded','pr_opened'].includes(current?.status)?'succeeded':'stopped',current?.error_code);}
+    }finally{const current=this.store.get('SELECT status,error_code FROM tasks WHERE id=?',id);if(['completed','succeeded','pr_opened'].includes(current?.status))resolveExecutionRetries(this.store,id);
+      // A task that ended lets go of its worktree (#769); one that waits or retries keeps it until it prepares again.
+      if(['completed','succeeded','pr_opened','failed','cancelled','superseded'].includes(current?.status))releaseWorktrees(this.store,id,'task_ended');endRun(this.store,attemptRun,['completed','succeeded','pr_opened'].includes(current?.status)?'succeeded':'stopped',current?.error_code);}
   }
   // The command a running task is executing right now, with its output so far, read from the project computer.
   async live(user:Actor,id:string,url:URL):Promise<Json>{

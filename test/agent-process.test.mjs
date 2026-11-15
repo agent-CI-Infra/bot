@@ -317,7 +317,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
         else if (repair) { assert.ok(reply.error==='validation_failed'||reply.error?.startsWith('acceptance_'));  write('ready', 'fixed\n'); write('calc.mjs', 'export const add = (a, b) => Number(a) + Number(b);\n'); step++; }
         else value = { error: 'fixture_stopped_after_reply' };
       }
-    } else if (r.type === 'workspace_context' || r.type === 'workspace_cache') value = { written: true };
+    } else if (r.type === 'workspace_context') value = { written: true };
     else if (r.type !== 'reap') throw new Error('Unexpected fixture operation ' + r.type);
     return { ok: true, result: value };
   } };
@@ -416,7 +416,6 @@ test('an Actions failure analysis runs as a task in the project computer: the fa
     else if (r.type === 'workspace_write') write(r.path, Buffer.from(r.base64, 'base64'));
     else if (r.type === 'workspace_snapshot') { git('add', '--all'); value = { tree_sha: git('write-tree') }; }
     else if (r.type === 'workspace_context') { context[r.path] = (context[r.path] || '') + Buffer.from(r.base64, 'base64').toString(); value = { written: true }; }
-    else if (r.type === 'workspace_cache') value = { written: true };
     else if (r.type === 'workspace_agent_config') { configBytes.push(Buffer.from(r.base64, 'base64')); if (r.final) config = JSON.parse(Buffer.concat(configBytes)); value = { written: true }; }
     else if (r.type === 'workspace_agent_start') value = { started: true };
     else if (r.type === 'workspace_agent_poll') value = step < calls.length ? { state: 'running', tool_requests: [{ id: String(step).repeat(48), kind: 'repository', ...calls[step] }] } : { state: 'completed', result: { summary: 'One external, one code failure.' } };

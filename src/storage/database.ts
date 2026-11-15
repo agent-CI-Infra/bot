@@ -35,6 +35,7 @@ import { conversationStorage } from '../roles/conversation-storage.js';
 import { serviceRoleStorage } from '../service-roles/roles.js';
 import { serviceBindingStorage } from '../channels/service-bindings.js';
 import { workspaceStorage } from '../projects/workspace-cleanup.js';
+import { worktreeStorage } from '../projects/worktrees.js';
 
 export type Row = Record<string, any>;
 export interface StoreOptions { slowSqlMs?: number; log?: (line: string) => void; now?: () => number }
@@ -270,6 +271,8 @@ export class Store {
     scheduleStorage(this);
     // Which task uses which workspace on the project computers, for their scheduled removal (#444).
     workspaceStorage(this);
+    // The computers' shared git worktrees and which task held each when (#769).
+    worktreeStorage(this);
     // Workflows became the Manager and project configuration (#207); an upgraded database moves them once.
     migrateWorkflows(this);
   }

@@ -5,12 +5,14 @@ import { GitHub, repositoryTree } from '../github/client.js';
 import { blobSha, executionBaseline, clip, describeEntries, operationId, Redactor, safePath, stop, treeSha, TaskError } from './common.js';
 import { HttpError, randomId } from '../core/security.js';
 import { eventHistory, historyOrder } from '../roles/role-run.js';
+import { traceEvent } from '../tasks/trace.js';
 import { type Mirror } from './git-cache.js';
 import { open, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { payloadHeader, TrajectoryError } from '../storage/trajectories.js';
 import { operationRequestText, operationResult } from '../storage/payloads.js';
 import { useWorkspace } from '../projects/workspace-cleanup.js';
+import { claimWorktree, refuseWorktree, registerWorktree, releaseBinding, releaseWorktrees, reusableWorktrees, taskWorktree, type WorktreeMode } from '../projects/worktrees.js';
 
 // Operations each task is waiting on in this process, oldest first. The console shows the newest as the command the task
 // is running. task_tools cannot answer that: it has no task index (2.8M rows in production, so finding a task's pending
@@ -73,7 +75,7 @@ export class Workspace {
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'phase',phase:'validate',operation_id:id,command:request.command,detail:`正在运行测试：${request.command}`});
     let response;
     // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
-    const wait=['workspace_acceptance','workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','git_import'].includes(request.type)?0:request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
+    const wait=['workspace_acceptance','workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','git_import'].includes(request.type)?0:request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
     const operations=inFlight.get(this.task.id)??new Map<string,any>();inFlight.set(this.task.id,operations);
     operations.delete(id);operations.set(id,input.request);
     try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
@@ -145,16 +147,45 @@ export class Workspace {
       if(result.error)stop('workspace_write_failed','waiting_environment',`Could not write ${path} at offset ${offset}: ${result.detail||result.error}`);
     }
   }
-  // The repository at one fixed commit as a git worktree on the project computer, with the repository's history. The
-  // computer's git store receives what it lacks of the mirror as a pack: the whole history the first time, then only new
-  // commits. `also` are further commits the task needs there, such as a pull request's base. Returns null when this way
-  // is not available (the caller then copies files as before); a reason to stop the task still stops it.
-  async checkout(github:GitHub,commitSha:string,mirror:Mirror,also:string[]=[]){
-    const listing=await this.listing(commitSha,mirror,`正在准备工作区：在虚拟电脑上检出固定提交 ${commitSha}…`);if(!listing)return null;
+  /**
+   * The repository at one fixed commit as a git worktree on the project computer, with the repository's history (#769).
+   * The computer's git store receives what it lacks of the mirror as a pack: the whole history the first time, then only
+   * new commits. `also` are further commits the task needs there, such as a pull request's base. A task that only reads
+   * takes a worktree made for reading at this commit that no unfinished task holds, after the runner checked it (HEAD,
+   * tree, no changes); a task that writes, or a reader that finds none, gets a new worktree. Either way the task directory
+   * links to it as repo. Returns null when this way is not available (the caller then copies files as before); a reason to
+   * stop the task still stops it.
+   */
+  async bind(github:GitHub,commitSha:string,mirror:Mirror,also:string[],mode:WorktreeMode){
+    const listing=await this.listing(commitSha,mirror,`正在准备工作区：在虚拟电脑上取固定提交 ${commitSha} 的 git worktree…`);if(!listing)return null;
     const packed=await this.transfer(commitSha,mirror,also);if(packed===null)return null;
-    const ready=await this.call('checkout:worktree:'+this.task.workspace_id,{type:'workspace_checkout',sha:commitSha,tree_sha:listing.tree_sha,author_email:github.authorEmail()});
-    if(ready.error||ready.tree_sha!==listing.tree_sha)return null;
-    return this.checkedOut(commitSha,listing,mirror,packed,'已检出');
+    const repo=String(this.task.repository_id),author=github.authorEmail();
+    // Bindings of earlier workspaces of this task (an earlier attempt) end; one this workspace already took is checked again.
+    releaseWorktrees(this.store,String(this.task.id),'new_workspace',this.task.workspace_id);
+    const own=taskWorktree(this.store,this.task);
+    if(own&&(own.head_sha!==commitSha||own.tree_sha!==listing.tree_sha))releaseBinding(this.store,Number(own.id),'task_commit_changed');
+    const offered=own&&own.head_sha===commitSha&&own.tree_sha===listing.tree_sha?[{id:own.worktree_id,binding:Number(own.id)}]:[];
+    if(!offered.length&&mode==='read')for(const row of reusableWorktrees(this.store,repo,Number(this.task.generation),commitSha))
+      if(row.tree_sha===listing.tree_sha){const binding=claimWorktree(this.store,this.task,row,mode);if(binding){offered.push({id:row.id,binding});break;}}
+    for(const {id,binding} of offered){
+      const bound=await this.call(`worktree:bind:${id}:${this.task.workspace_id}`,{type:'workspace_worktree_bind',worktree_id:id,sha:commitSha,tree_sha:listing.tree_sha,author_email:author});
+      if(!bound.error&&!bound.refused&&bound.tree_sha===listing.tree_sha)return this.bound(commitSha,listing,mirror,packed,id,mode,true);
+      // Changed by its last task, moved or gone: it is not offered again, and the task gets a new one.
+      refuseWorktree(this.store,repo,id,binding,String(bound.refused||'bind_failed'));
+      // Shown in the console's snapshot block with the other preparation steps.
+      this.log({type:'snapshot_progress',sha:commitSha,worktree_refused:{worktree_id:id,reason:bound.refused||bound.error,head:bound.head??null,changed_count:bound.changed_count??null},
+        detail:`worktree ${id.slice(0,12)} 未通过交接核对（${bound.refused||bound.detail||bound.error}${bound.changed_count?`，有 ${bound.changed_count} 个文件改动`:''}），改为新建 worktree。`});
+    }
+    const id=randomId(),binding=registerWorktree(this.store,this.task,id,mode,commitSha,listing.tree_sha);
+    const created=await this.call('worktree:create:'+id,{type:'workspace_worktree_create',worktree_id:id,sha:commitSha,tree_sha:listing.tree_sha,author_email:author});
+    if(created.error||created.refused||created.tree_sha!==listing.tree_sha){refuseWorktree(this.store,repo,id,binding,String(created.refused||'create_failed'));return null;}
+    return this.bound(commitSha,listing,mirror,packed,id,mode,false);
+  }
+  // The checkout's description, and the task history's evidence of which worktree this run uses at which commit.
+  private bound(commitSha:string,listing:{tree:any[];tree_sha:string},mirror:Mirror,packed:number,id:string,mode:WorktreeMode,reused:boolean){
+    traceEvent(this.store,String(this.task.id),'workspace_bound',{worktree_id:id,workspace_id:this.task.workspace_id,mode,reused,head_sha:commitSha,tree_sha:listing.tree_sha,attempt:this.task.attempt},this.task.trace_run_id);
+    const snapshot=this.checkedOut(commitSha,listing,mirror,packed,reused?`已复用 worktree ${id.slice(0,12)}（同一提交、没有改动），共`:`已新建 worktree ${id.slice(0,12)} 并检出`);
+    return {...snapshot,worktree:{id,mode,reused}};
   }
   /**
    * Moves this task's worktree to another commit in place (#770), keeping the directory, its untracked files and the
