@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
 import { InstallationSync } from '../dist/app/installations.js';
 import { Store } from '../dist/storage/database.js';
@@ -13,6 +13,7 @@ import { Projects } from '../manager/projects.mjs';
 import { FakeDocker } from './fake-docker.mjs';
 import { loadConsole } from './console-page.mjs';
 import { externalFixture } from './external-helpers.mjs';
+import { deleteProjectRecords } from '../dist/projects/removal.js';
 
 const events = ['issues', 'pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment'];
 const full = { contents: 'write', issues: 'write', pull_requests: 'write', statuses: 'write', actions: 'write', checks: 'write', metadata: 'read' };
@@ -276,7 +277,7 @@ test('a bot account project is not deletable while it is still listed, even with
   const limited = await remove(admin, '101');
   assert.deepEqual([limited.status, limited.value.error], [502, 'github_rate_limited']); assert.ok(h.store.get("SELECT 1 FROM repositories WHERE id='101'"));
   github.rateLimited = false;
-  assert.equal((await remove(admin, '101')).status, 200);
+  const retried = await remove(admin, '101'); console.error('RETRY', JSON.stringify(retried)); assert.equal(retried.status, 200);
 });
 
 test('the permission check refreshes installation permissions and events and excludes suspended installations', async t => {
@@ -563,4 +564,56 @@ test('global project actions remove a started project from this system, never Gi
   // The GitHub-checked installation deletion is not used for a started project.
   assert.ok(!page.requests.some(request => request.startsWith('DELETE /api/installations/')));
   assert.equal(page.run('startCalls'), 1);
+});
+
+test('a failed deletion keeps the project trajectory files, blobs and notes volume, and they go only after the rows commit', async t => {
+  const github = await fakeGitHub(t), env = managerFixture(t); let workingTasks = []; const engine = { working: () => workingTasks, api: async () => undefined };
+  let sync; const h = await harness(t, env.manager, store => ({ installations: sync = new InstallationSync(store, github.url), engine }));
+  const { admin } = await setup(h), a = await account(admin), now = new Date().toISOString();
+  await repository(admin, a.id, '101');
+  for (let i = 0; i < 3; i++) await h.projects.reconcile();
+
+  // One trajectory file and one blob of project 101, on disk and in the database.
+  const record = join(h.store.trajectories.root, '101', 'task', 'run', 'record.jsonl');
+  mkdirSync(dirname(record), { recursive: true }); writeFileSync(record, '{"type":"log"}\n');
+  h.store.run("INSERT INTO trajectory_files(id,repository_id,path,created_at,bytes,records,counts) VALUES('tf-101','101','101/task/run/record.jsonl',?,10,1,'{}')", now);
+  const hash = 'a'.repeat(64), blob = join(h.store.trajectories.blobs, 'sha256', hash.slice(0, 2), hash);
+  mkdirSync(dirname(blob), { recursive: true }); writeFileSync(blob, 'blob');
+  h.store.run("INSERT INTO trajectory_blobs(repository_id,sha256,bytes,created_at) VALUES('101',?,4,?)", hash, now);
+
+  // The read-only check only validates the database rows: it must touch no file.
+  h.store.db.exec('SAVEPOINT project_removal_check');
+  try { deleteProjectRecords(h.store, '101', { files: false }); } finally { h.store.db.exec('ROLLBACK TO project_removal_check; RELEASE project_removal_check'); }
+  assert.equal(existsSync(record), true, 'the pre-check leaves the trajectory file');
+  assert.equal(existsSync(blob), true, 'the pre-check leaves the blob');
+  assert.equal(h.store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 1, 'the rollback restores the rows');
+
+  // A failed second environment removal leaves the project and its evidence in place.
+  const realRemove = h.projects.removeEnvironment.bind(h.projects);
+  let calls = 0; h.projects.removeEnvironment = async (...args) => { calls += 1; if (calls === 1) throw new Error('container_removal_failed'); return realRemove(...args); };
+  const failed = await remove(admin, '101');
+  assert.ok(failed.status >= 500, 'the failed deletion is reported, not swallowed');
+  assert.ok(h.store.get("SELECT 1 FROM repositories WHERE id='101'"), 'the project records stay');
+  assert.equal(existsSync(record), true, 'the trajectory file survives the failed removal');
+  assert.equal(existsSync(blob), true, 'the blob survives the failed removal');
+  assert.equal(h.store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 1, 'the rows still point at it');
+  assert.ok(env.docker.volumes.has(env.projects.notesName('101')), 'the notes volume survives the failed removal');
+
+  // A final commit refused because a task is still stopping also leaves the evidence and the notes volume alone.
+  h.projects.removeEnvironment = realRemove;
+  workingTasks = ['task-101'];
+  const refused = await remove(admin, '101');
+  assert.equal(refused.status, 409);
+  assert.ok(h.store.get("SELECT 1 FROM repositories WHERE id='101'"), 'the refused commit keeps the project');
+  assert.equal(existsSync(record), true, 'the refused commit keeps the trajectory file');
+  assert.equal(existsSync(blob), true, 'the refused commit keeps the blob');
+  assert.ok(env.docker.volumes.has(env.projects.notesName('101')), 'the refused commit keeps the notes volume');
+
+  // The successful retry removes the files and the notes volume, after the rows are committed.
+  workingTasks = [];
+  assert.equal((await remove(admin, '101')).status, 200);
+  assert.equal(existsSync(record), false, 'the trajectory file goes with the deleted project');
+  assert.equal(existsSync(blob), false, 'the blob goes too');
+  assert.equal(h.store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 0);
+  assert.equal(env.docker.volumes.has(env.projects.notesName('101')), false, 'the notes volume goes only after the commit');
 });

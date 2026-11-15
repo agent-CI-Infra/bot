@@ -148,6 +148,17 @@ export class ProjectService {
     this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, id, 'delete', JSON.stringify(input));
     await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
   }
+  /**
+   * Deletes only the project's notes volume, after the control plane's rows for the project are committed away. The
+   * manager keeps its own project row, so the deletion still works; nothing is saved back, the project no longer exists
+   * here for the save to refer to.
+   */
+  async removeNotes(id: string, waitMs = 120_000): Promise<void> {
+    const state = await this.manager.call('GET', '/v1/projects/' + id);
+    if (!state) return;
+    const input = { operation_id: randomId(), generation: state.generation, request: { delete_notes: true } };
+    await this.manager.call('POST', `/v1/projects/${id}/delete`, input, waitMs);
+  }
   endRemoval(id: string): void { this.removing.delete(id); }
   /** True while the project is being deleted; background work leaves its computer alone. */
   isRemoving(id: string): boolean { return this.removing.has(id); }
