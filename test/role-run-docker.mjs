@@ -4,9 +4,10 @@
 //   npm run test:isolation:docker            (BOT_TEST_BASE_IMAGE overrides the base image)
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, cpSync, rmSync, readdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, cpSync, rmSync, readdirSync, existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomBytes, createHash, generateKeyPairSync } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { Docker } from '../manager/docker.mjs';
@@ -25,6 +26,8 @@ import { registerRoleHarness } from '../dist/roles/harness.js';
 import { roleApi } from '../dist/roles/api.js';
 import { roleWorkspaces } from '../dist/roles/workspace.js';
 import { persistentCliStateWorkspaceId } from '../dist/harness/container-session.js';
+import { AgentToolManager } from '../dist/harness/agent-tools.js';
+import { claudeBinary } from '../dist/harness/claude-code.js';
 
 const tag = randomBytes(4).toString('hex'), root = resolve('.tmp/role-run-docker'), work = join(root, tag);
 const deployment = 'rr169' + tag, image = `dbot-role-run-169-${tag}:test`, managerImage = `dbot-manager-705-${tag}:test`, repo = '169' + String(parseInt(tag, 16) % 100000).padStart(5, '0');
@@ -50,11 +53,14 @@ try {
   for (const name of readdirSync('runner')) if (name.endsWith('.mjs')) cpSync(join('runner', name), join(context, 'runner', name));
   writeFileSync(join(context, 'Dockerfile'), `FROM ${base}\nUSER root\nCOPY runner/ /opt/runner/\nRUN mkdir -p /opt/agent-tools && chown 10001:10001 /opt/agent-tools && chmod 755 /opt/agent-tools && for f in /opt/runner/*.mjs; do node --check "$f"; done && chmod a-w /opt/runner /opt/runner/*.mjs\nUSER 10001:10001\n`);
   sh('docker', ['build', '-q', '-t', image, '--label', 'department.bot.deployment=' + deployment, context]);
+  sh('docker', ['build', '-q', '-f', 'manager/Dockerfile', '-t', managerImage, '--label', 'department.bot.deployment=' + deployment, '.']);
   passed('test image built from ' + base);
 
   projects = new Projects({ database: join(work, 'manager.sqlite'), docker: new HostDocker(), deployment, image, egress: false });
   runs = new RunEnvironments(projects);
   const token = randomBytes(32), created = createManagerServer({ projects, token, runs }); server = created.server;
+  server.keepAliveTimeout = 120_000;
+  server.headersTimeout = 125_000;
   server.listen(0, '127.0.0.1'); await new Promise(r => server.once('listening', r)); await created.recovered;
   const manager = new ManagerClient('http://127.0.0.1:' + server.address().port, token), client = new RunEnvironmentClient(manager, repo);
   await manager.call('PUT', `/v1/projects/${repo}`, undefined, 300000);
@@ -234,7 +240,42 @@ ls /var/run/docker.sock 2>&1; touch /opt/runner/x 2>&1; touch /etc/x 2>&1; cat /
   const sha256File = p => createHash('sha256').update(cpBuffer(p)).digest('hex');
   function cpBuffer(p) { return execFileSync('cat', [p]); }
 
-  // Seed bundled Node 22.15.0, Claude Code 2.1.319, and Codex 0.166.0 with verified manifests + container executables.
+  // Seed bundled Node 22.15.0, install Claude Code 2.1.318 through real AgentToolManager.install (with both glibc and musl
+  // native packages advertised, proving glibc ELF selection on node:22-bookworm-slim), and seed protocol fixtures 2.1.319 / 0.166.0.
+  const buildTarGz = entries => {
+    const blocks = [];
+    for (const entry of entries) {
+      const header = Buffer.alloc(512, 0);
+      Buffer.from(entry.name, 'utf8').copy(header, 0);
+      const mode = entry.mode ?? 0o644;
+      const body = Buffer.isBuffer(entry.content) ? entry.content : Buffer.from(entry.content ?? '', 'utf8');
+      header.write(mode.toString(8).padStart(7, '0') + '\0', 100, 8, 'ascii');
+      header.write('0000000\0', 108, 8, 'ascii');
+      header.write('0000000\0', 116, 8, 'ascii');
+      header.write(body.length.toString(8).padStart(11, '0') + '\0', 124, 12, 'ascii');
+      header.write(Math.floor(Date.now() / 1000).toString(8).padStart(11, '0') + '\0', 136, 12, 'ascii');
+      header.fill(0x20, 148, 156);
+      header[156] = '0'.charCodeAt(0);
+      header.write('ustar\0', 257, 6, 'ascii');
+      header.write('00', 263, 2, 'ascii');
+      let sum = 0;
+      for (let i = 0; i < 512; i++) sum += header[i];
+      header.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
+      blocks.push(header);
+      if (body.length > 0) {
+        blocks.push(body);
+        const rem = body.length % 512;
+        if (rem > 0) blocks.push(Buffer.alloc(512 - rem, 0));
+      }
+    }
+    blocks.push(Buffer.alloc(1024, 0));
+    return gzipSync(Buffer.concat(blocks));
+  };
+  const npmHashes = bytes => ({
+    sha1: createHash('sha1').update(bytes).digest('hex'),
+    integrity: 'sha512-' + createHash('sha512').update(bytes).digest('base64'),
+  });
+
   const nodeSeedDir = join(toolsSeedRoot, 'node', '22.15.0');
   mkdirSync(join(nodeSeedDir, 'bin'), { recursive: true, mode: 0o755 });
   const nodeBinScript = '#!/bin/sh\nif [ -x /usr/local/bin/node ]; then exec /usr/local/bin/node "$@"; fi\nexec /usr/bin/node "$@"\n';
@@ -249,6 +290,78 @@ ls /var/run/docker.sock 2>&1; touch /opt/runner/x 2>&1; touch /etc/x 2>&1; cat /
     sha256: sha256File(join(nodeSeedDir, 'bin', 'node')),
     bytes: Buffer.byteLength(nodeBinScript),
   }, null, 2));
+
+  // Build real dynamically-linked glibc vs musl ELF binaries inside the project container image, then install 2.1.318 via AgentToolManager.
+  const elfDir = join(work, 'elf-build');
+  mkdirSync(elfDir, { recursive: true });
+  writeFileSync(join(elfDir, 'claude.c'), '#include <stdio.h>\nint main(void) { puts("2.1.318 (Claude Code) glibc-elf"); return 0; }\n');
+  const muslLd = hostArch === 'arm64' ? '/lib/ld-musl-aarch64.so.1' : '/lib/ld-musl-x86_64.so.1';
+  const [glibcB64, muslB64] = sh('docker', [
+    'run', '--rm', '--label', 'department.bot.deployment=' + deployment,
+    '-v', `${elfDir}:/elf:ro`, image,
+    'sh', '-ec', `gcc -O2 /elf/claude.c -o /tmp/claude-glibc && gcc -O2 -Wl,--dynamic-linker=${muslLd} /elf/claude.c -o /tmp/claude-musl && base64 -w0 /tmp/claude-glibc && echo && base64 -w0 /tmp/claude-musl`,
+  ]).trim().split('\n');
+  const pkg218 = buildTarGz([
+    { name: 'package/package.json', content: JSON.stringify({ name: '@anthropic-ai/claude-code', version: '2.1.318' }) },
+    { name: 'package/cli-wrapper.cjs', mode: 0o755, content: 'process.exit(99);\n' },
+  ]);
+  const glibcTar218 = buildTarGz([{ name: 'package/claude', mode: 0o755, content: Buffer.from(glibcB64, 'base64') }]);
+  const muslTar218 = buildTarGz([{ name: 'package/claude', mode: 0o755, content: Buffer.from(muslB64, 'base64') }]);
+  const pkg218H = npmHashes(pkg218), glibc218H = npmHashes(glibcTar218), musl218H = npmHashes(muslTar218);
+  const toolUpstream = createServer((req, res) => {
+    const origin = `http://127.0.0.1:${toolUpstream.address().port}`;
+    const u = new URL(req.url, origin);
+    if (u.pathname === '/npm/@anthropic-ai%2fclaude-code/2.1.318') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        name: '@anthropic-ai/claude-code',
+        version: '2.1.318',
+        optionalDependencies: {
+          [`@anthropic-ai/claude-code-linux-${hostArch}`]: '2.1.318',
+          [`@anthropic-ai/claude-code-linux-${hostArch}-musl`]: '2.1.318',
+        },
+        dist: { tarball: `${origin}/npm/@anthropic-ai/claude-code/-/claude-code-2.1.318.tgz`, ...pkg218H },
+      }));
+      return;
+    }
+    if (u.pathname === `/npm/@anthropic-ai%2fclaude-code-linux-${hostArch}/2.1.318`) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        name: `@anthropic-ai/claude-code-linux-${hostArch}`,
+        version: '2.1.318',
+        dist: { tarball: `${origin}/npm/@anthropic-ai/claude-code-linux-${hostArch}/-/claude-code-linux-${hostArch}-2.1.318.tgz`, ...glibc218H },
+      }));
+      return;
+    }
+    if (u.pathname === `/npm/@anthropic-ai%2fclaude-code-linux-${hostArch}-musl/2.1.318`) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        name: `@anthropic-ai/claude-code-linux-${hostArch}-musl`,
+        version: '2.1.318',
+        dist: { tarball: `${origin}/npm/@anthropic-ai/claude-code-linux-${hostArch}-musl/-/claude-code-linux-${hostArch}-musl-2.1.318.tgz`, ...musl218H },
+      }));
+      return;
+    }
+    if (u.pathname === '/npm/@anthropic-ai/claude-code/-/claude-code-2.1.318.tgz') { res.writeHead(200); res.end(pkg218); return; }
+    if (u.pathname === `/npm/@anthropic-ai/claude-code-linux-${hostArch}/-/claude-code-linux-${hostArch}-2.1.318.tgz`) { res.writeHead(200); res.end(glibcTar218); return; }
+    if (u.pathname === `/npm/@anthropic-ai/claude-code-linux-${hostArch}-musl/-/claude-code-linux-${hostArch}-musl-2.1.318.tgz`) { res.writeHead(200); res.end(muslTar218); return; }
+    res.writeHead(404); res.end('{}');
+  });
+  toolUpstream.listen(0, '127.0.0.1');
+  await once(toolUpstream, 'listening');
+  try {
+    const toolOrigin = `http://127.0.0.1:${toolUpstream.address().port}`;
+    const realInstaller = new AgentToolManager({
+      volumeRoot: toolsSeedRoot,
+      containerRoot: '/opt/agent-tools',
+      arch: hostArch,
+      sources: { npmRegistryBase: `${toolOrigin}/npm`, allowLoopbackHttp: true },
+    });
+    await realInstaller.install({ cli: 'claude_code', version: '2.1.318' });
+    rmSync(join(toolsSeedRoot, '.staging'), { recursive: true, force: true });
+  } finally {
+    await new Promise(r => toolUpstream.close(r));
+  }
 
   const claudeSeedDir = join(toolsSeedRoot, 'claude_code', '2.1.319');
   mkdirSync(join(claudeSeedDir, 'bin'), { recursive: true, mode: 0o755 });
@@ -296,7 +409,6 @@ ls /var/run/docker.sock 2>&1; touch /opt/runner/x 2>&1; touch /etc/x 2>&1; cat /
     }],
   }, null, 2));
 
-  sh('docker', ['build', '-q', '-f', 'manager/Dockerfile', '-t', managerImage, '--label', 'department.bot.deployment=' + deployment, '.']);
   sh('docker', ['volume', 'create', '--label', 'department.bot.deployment=' + deployment, '--label', 'com.docker.compose.volume=agent-tools', '--label', 'department.bot.kind=agent-tools', toolsVolName]);
   sh('docker', ['volume', 'create', '--label', 'department.bot.deployment=' + deployment, '--label', 'com.docker.compose.volume=assistant-homes', untrustedVolName]);
   // Fresh-deploy Compose order: manager starts before bot and mounts the empty named volume :ro first.
@@ -306,7 +418,8 @@ ls /var/run/docker.sock 2>&1; touch /opt/runner/x 2>&1; touch /etc/x 2>&1; cat /
 
   activeToolsVolume = toolsVolName;
   await manager.call('POST', `/v1/projects/${repo}/start`, { operation_id: id(), generation: 1 }, 300000);
-  const projTools = await sh1('/opt/agent-tools/codex/0.166.0/bin/codex --version && (touch /opt/agent-tools/write-probe 2>&1 || echo RO_ENFORCED)');
+  const projTools = await sh1('/opt/agent-tools/claude_code/2.1.318/bin/claude --version && /opt/agent-tools/codex/0.166.0/bin/codex --version && (touch /opt/agent-tools/write-probe 2>&1 || echo RO_ENFORCED)');
+  assert.match(projTools.output, /2\.1\.318 \(Claude Code\) glibc-elf/);
   assert.match(projTools.output, /codex-cli 0\.166\.0 uid=10001:10001/);
   assert.match(projTools.output, /Read-only file system[\s\S]*RO_ENFORCED/);
 
@@ -314,10 +427,23 @@ ls /var/run/docker.sock 2>&1; touch /opt/runner/x 2>&1; touch /etc/x 2>&1; cat /
   const envTools = await provisionRunEnvironment(client, { run_id: runToolsId, task_id: 'task-169', lease_epoch: 10, profile: 'observer' });
   assert.equal(envTools.facts.verified, true);
   assert.deepEqual(envTools.facts.detail.violations, []);
-  const isoTools = await client.call(runToolsId, { type: 'command', command: '/opt/agent-tools/codex/0.166.0/bin/codex --version && (touch /opt/agent-tools/write-probe 2>&1 || echo RO_ENFORCED)', timeout_ms: 20000 });
+  const isoTools = await client.call(runToolsId, { type: 'command', command: '/opt/agent-tools/claude_code/2.1.318/bin/claude --version && /opt/agent-tools/codex/0.166.0/bin/codex --version && (touch /opt/agent-tools/write-probe 2>&1 || echo RO_ENFORCED)', timeout_ms: 20000 });
+  assert.match(isoTools.output, /2\.1\.318 \(Claude Code\) glibc-elf/);
   assert.match(isoTools.output, /codex-cli 0\.166\.0 uid=10001:10001/);
   assert.match(isoTools.output, /Read-only file system[\s\S]*RO_ENFORCED/);
   await envTools.release();
+
+  let realClaudeBin = null;
+  try { realClaudeBin = claudeBinary(); } catch {}
+  if (realClaudeBin && existsSync(realClaudeBin)) {
+    const realVerOut = sh('docker', [
+      'run', '--rm', '--read-only', '--network', 'none',
+      '--label', 'department.bot.deployment=' + deployment,
+      '-v', `${realClaudeBin}:/opt/real-claude:ro`,
+      image, '/opt/real-claude', '--version',
+    ]).trim();
+    assert.match(realVerOut, /^2\.1\.319 \(Claude Code\)/, 'real glibc Claude Code binary executes inside node:22-bookworm-slim --network none container');
+  }
 
   activeToolsVolume = untrustedVolName;
   await assert.rejects(() => provisionRunEnvironment(client, { run_id: id(), task_id: 'task-169', lease_epoch: 11, profile: 'observer' }), /agent_tools_volume_invalid|manager_error|503/);
@@ -480,7 +606,7 @@ ls /var/run/docker.sock 2>&1; touch /opt/runner/x 2>&1; touch /etc/x 2>&1; cat /
 
   const claudeIsoSpec = {
     ...spec,
-    prompt: JSON.stringify({ fixture_mode: 'native_workspace', fixture_test_git_cred: true }),
+    prompt: JSON.stringify({ fixture_mode: 'native_workspace', fixture_test_git_cred: true, fixture_test_login_gh: true }),
     tools: [readRecordTool, finishTool],
     containerOptions: { githubApiUrl: ghApiUrl },
   };
@@ -488,6 +614,8 @@ ls /var/run/docker.sock 2>&1; touch /opt/runner/x 2>&1; touch /etc/x 2>&1; cat /
   assert.equal(claudeIsoOut.result.summary, 'native container tools verified');
   assert.equal(claudeIsoOut.result.shellOut, 'written natively by claude_code');
   assert.equal(claudeIsoOut.result.gitCredMatched, true, 'git credential helper obtained short-lived read-only token over file mailbox inside --network none');
+  assert.match(claudeIsoOut.result.loginGhPath, /^\/workspace\/tasks\/[a-f0-9]{48}\/agent\/bin\/gh$/, 'login shell bash -lc preserves gh wrapper ahead of /usr/bin/gh after /etc/profile');
+  assert.match(claudeIsoOut.result.loginGhVersion, /^gh version /, 'gh wrapper authenticates over file mailbox and invokes /usr/bin/gh inside --network none');
   assert.match(claudeIsoOut.result.cwd, /^\/workspace\/tasks\/[a-f0-9]{48}\/repo$/);
 
   const claudeIsoRun = store.get("SELECT * FROM task_runs WHERE role='dev' ORDER BY rowid DESC LIMIT 1");
@@ -520,6 +648,7 @@ ls /var/run/docker.sock 2>&1; touch /opt/runner/x 2>&1; touch /etc/x 2>&1; cat /
   const codexIsoOut = await runRole(codexIsoSpec, 'reviewer', 'iso-codex-rev', undefined, { prepare: prepareHybrid });
   assert.equal(codexIsoOut.result.summary, 'codex native container verified');
   assert.equal(codexIsoOut.result.shellOut, 'written natively by codex');
+  assert.match(codexIsoOut.result.loginGhPath, /^\/workspace\/tasks\/[a-f0-9]{48}\/agent\/bin\/gh$/, 'Codex login shell bash -lc preserves gh wrapper ahead of /usr/bin/gh');
   assert.equal(codexIsoOut.result.relayStatus, 200);
   assert.match(codexIsoOut.result.cwd, /^\/workspace\/tasks\/[a-f0-9]{48}\/repo$/);
 

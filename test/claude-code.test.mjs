@@ -342,7 +342,11 @@ test('Claude Code protocol fixture: native container tools, loopback relay, gh w
   // Configure GitHub App credentials + fake gh binary to verify short-lived read-only token injection and masking end-to-end.
   f.s.run("UPDATE accounts SET credentials=? WHERE id='a'", f.s.secrets.seal({ private_key: pem }, 'account:a'));
   const fakeGh = join(f.root, 'fake-gh');
-  writeFileSync(fakeGh, `#!${process.execPath}\nconsole.log('gh-ok:' + Boolean(process.env.GH_TOKEN) + ':' + process.env.GH_TOKEN);\n`, { mode: 0o755 });
+  writeFileSync(
+    fakeGh,
+    `#!${process.execPath}\nconsole.log('gh-ok:' + Boolean(process.env.GH_TOKEN) + ':' + Boolean(process.env.GH_ENTERPRISE_TOKEN) + ':' + process.env.GH_HOST + ':' + process.env.GH_TOKEN);\n`,
+    { mode: 0o755 },
+  );
   chmodSync(fakeGh, 0o755);
   const prevRealGh = process.env.BOT_REAL_GH_BIN;
   process.env.BOT_REAL_GH_BIN = fakeGh;
@@ -355,7 +359,10 @@ test('Claude Code protocol fixture: native container tools, loopback relay, gh w
   const out = await runRole(f.spec, 'dev', undefined, 'claude_code');
   assert.equal(out.result.summary, 'native container tools verified');
   assert.equal(out.result.fileContent, 'written natively by claude_code');
-  assert.equal(out.result.ghOut, 'gh-ok:true:[REDACTED]');
+  assert.equal(out.result.ghOut, `gh-ok:true:true:127.0.0.1:${ghServer.address().port}:[REDACTED]`);
+  const launchState = f.state();
+  const launchInfo = JSON.parse(readFileSync(join(f.cliHome(launchState), 'launch.json'), 'utf8'));
+  assert.ok(launchInfo.env_names.includes('CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT'));
 
   // Native Bash execution is NOT logged one-by-one as tool_started/tool_observation; only MCP tools and gateway model_requests are recorded.
   const toolEvents = f.s.all("SELECT data FROM task_history WHERE type='harness_event' AND json_extract(data,'$.type')='tool'").map(r => JSON.parse(r.data));

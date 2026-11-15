@@ -53,10 +53,32 @@ function stopMcpChild() {
 process.on('exit', stopMcpChild);
 process.stdin.on('end', stopMcpChild);
 
+// Match Codex 0.166.0 `codex_utils_pty::Command::new` (`env_clear()`) + `create_env_for_mcp_server`:
+// stdio MCP servers inherit ONLY `DEFAULT_ENV_VARS`, explicit `mcp_servers.<name>.env`, and names listed in `env_vars`.
+const CODEX_MCP_DEFAULT_ENV_VARS = ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'USER', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ'];
+
+function buildMcpEnv(cfg) {
+  const out = {};
+  for (const key of CODEX_MCP_DEFAULT_ENV_VARS) {
+    if (process.env[key] !== undefined) out[key] = process.env[key];
+  }
+  if (cfg?.env && typeof cfg.env === 'object') {
+    for (const [k, v] of Object.entries(cfg.env)) {
+      if (typeof v === 'string') out[k] = v;
+    }
+  }
+  if (Array.isArray(cfg?.env_vars)) {
+    for (const key of cfg.env_vars) {
+      if (typeof key === 'string' && process.env[key] !== undefined) out[key] = process.env[key];
+    }
+  }
+  return out;
+}
+
 function ensureStdioMcp() {
   if (mcpChild || !mcpConfig?.command) return;
   mcpChild = spawn(mcpConfig.command, mcpConfig.args ?? [], {
-    env: { ...process.env, ...(mcpConfig.env ?? {}) },
+    env: buildMcpEnv(mcpConfig),
     stdio: ['pipe', 'pipe', 'inherit'],
   });
   mcpChild.unref();
@@ -150,6 +172,7 @@ const bind = params => {
     web_search: params.config?.web_search ?? null,
   };
   log('thread-params.jsonl', { method: params.threadId ? 'thread/resume' : 'thread/start', ...policy });
+  log('mcp-params.jsonl', { mcp_env_vars: params.config?.mcp_servers?.bot?.env_vars ?? null });
   stopMcpChild();
   mcpConfig = params.config.mcp_servers.bot;
 };
@@ -246,7 +269,8 @@ async function runTurn(turnId, prompt) {
   if (flag('NATIVE_WORKSPACE') || /"fixture_mode":"native_workspace"/.test(String(prompt))) {
     const target = join(thread.cwd, 'native-codex.txt');
     writeFileSync(target, 'written natively by codex\n');
-    const shellOut = execFileSync('/bin/sh', ['-c', 'cat native-codex.txt'], { cwd: thread.cwd, encoding: 'utf8' }).trim();
+    const shellOut = execFileSync('/bin/bash', ['-lc', 'cat native-codex.txt'], { cwd: thread.cwd, encoding: 'utf8' }).trim();
+    const loginGhPath = execFileSync('/bin/bash', ['-lc', 'command -v gh'], { cwd: thread.cwd, encoding: 'utf8' }).trim();
     const relayResp = await fetch(env.OPENAI_BASE_URL + '/responses', {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + env.OPENAI_API_KEY, 'Content-Type': 'application/json' },
@@ -256,7 +280,7 @@ async function runTurn(turnId, prompt) {
     const tools = (await rpc('tools/list', {})).tools.map(t => t.name);
     if (tools.includes('read_task_record')) await tool('read_task_record', { ref: taskRef });
     const observerFields = /"fixture_observer":true/.test(String(prompt)) ? { findings: [], inspected_scope: ['a.txt'], unknowns: [] } : {};
-    await tool('finish', { summary: 'codex native container verified', ...observerFields, cwd: thread.cwd, shellOut, relayStatus: relayResp.status, relayId: relayJson.id ?? null });
+    await tool('finish', { summary: 'codex native container verified', ...observerFields, cwd: thread.cwd, shellOut, loginGhPath, relayStatus: relayResp.status, relayId: relayJson.id ?? null });
     finish(turnId, 'completed');
     return;
   }

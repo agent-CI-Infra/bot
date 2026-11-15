@@ -188,7 +188,13 @@ for await (const line of createInterface({ input: process.stdin })) {
     const shellOut = execFileSync('/bin/sh', ['-c', 'cat native-claude.txt'], { cwd: process.cwd(), encoding: 'utf8' }).trim();
     let ghOut = null;
     if (process.env.FIXTURE_TEST_GH === 'true') {
-      ghOut = execFileSync('gh', ['pr', 'view', '705'], { cwd: process.cwd(), encoding: 'utf8' }).trim();
+      ghOut = execFileSync('/bin/bash', ['-lc', 'gh pr view 705'], { cwd: process.cwd(), encoding: 'utf8' }).trim();
+    }
+    let loginGhPath = null;
+    let loginGhVersion = null;
+    if (/"fixture_test_login_gh":true/.test(prompt)) {
+      loginGhPath = execFileSync('/bin/bash', ['-lc', 'command -v gh'], { cwd: process.cwd(), encoding: 'utf8' }).trim();
+      loginGhVersion = execFileSync('/bin/bash', ['-lc', 'gh --version'], { cwd: process.cwd(), encoding: 'utf8' }).trim();
     }
     let gitCredMatched = false;
     if (/"fixture_test_git_cred":true/.test(prompt)) {
@@ -229,6 +235,8 @@ for await (const line of createInterface({ input: process.stdin })) {
       cwd: process.cwd(),
       shellOut,
       ghOut,
+      loginGhPath,
+      loginGhVersion,
       gitCredMatched,
       fileContent: readFileSync(targetFile, 'utf8').trim(),
     });

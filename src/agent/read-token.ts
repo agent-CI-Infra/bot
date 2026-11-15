@@ -9,7 +9,7 @@ export class ReadTokens {
   // Every client this agent was issued; each may have renewed its token, and revoke() revokes all of them (#711).
   private readonly clients: GitHub[] = []; private issued = 0;
   // scopes: the workflow's saved GitHub read scopes; a token never carries a scope the workflow does not have.
-  constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor, readonly guard: () => Promise<void>, readonly apiUrl?: string, readonly scopes?: string[], readonly liveScopes?:()=>string[]) {}
+  constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor, readonly guard: () => Promise<void>, readonly apiUrl?: string, readonly scopes?: string[], readonly liveScopes?:()=>string[], readonly maxIssued = 10) {}
   allowedScopes():string[] { return (this.scopes??Object.keys(agentReadPermissions)).filter(scope=>!this.liveScopes||this.liveScopes().includes(scope)); }
   async issue() {
     const github = await this.connect();
@@ -32,7 +32,7 @@ export class ReadTokens {
     return { token: github.token, expires_at: github.expiresAt, permissions: github.permissions, repository: github.fullName };
   }
   private async connect(required?: Record<string, string>, identifyActor = true) {
-    if (this.issued >= 10) stop('github_read_token_limit', undefined, '当前任务已达到 GitHub 只读令牌的 10 次签发上限。');
+    if (this.issued >= this.maxIssued) stop('github_read_token_limit', undefined, `当前任务已达到 GitHub 只读令牌的 ${this.maxIssued} 次签发上限。`);
     // A bot account has one long-lived token that can write; only a GitHub App can mint a narrower one.
     if (this.store.get('SELECT type FROM accounts WHERE id=?', this.repository.account_id)?.type !== 'github_app') stop('github_app_required', undefined, '签发仓库只读令牌需要 GitHub App 账号，当前账号类型不支持。');
     const github = new GitHub(this.store, this.repository, this.redactor, this.guard, this.apiUrl);github.purpose = 'read_token';

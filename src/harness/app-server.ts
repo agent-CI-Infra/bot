@@ -695,6 +695,7 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
             bot: {
               command: ctx.mcpCommand,
               args: ctx.mcpArgs,
+              env_vars: ['BOT_RUN_TOKEN', 'BOT_WORKSPACE_ID'],
               tool_timeout_sec: 3600,
               startup_timeout_sec: 30,
             },
