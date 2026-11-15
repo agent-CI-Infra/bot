@@ -88,7 +88,7 @@ test('项目按所有者分组，筛选和每页 50 条分页保持项目完整�
     const next = page.getByRole('button', {name: '下一页', exact: true});
     await next.scrollIntoViewIfNeeded();
     expect(await next.evaluate(node => {const box = node.getBoundingClientRect();return node.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));})).toBe(true);
-    const nextResponse = page.waitForResponse(response => response.url().endsWith('/api/installations?offset=50&limit=50'));
+    const nextResponse = page.waitForResponse(response => response.url().endsWith('/api/installations?offset=50&limit=51'));
     await next.click(); await nextResponse;
     await expect(page.locator('#rows .row')).toHaveCount(4);
     const second = (await groupedIds(page)).flatMap(group => group.ids);

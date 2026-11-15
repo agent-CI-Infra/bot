@@ -227,14 +227,14 @@ test('a background check of stale integration chips updates them in place and ne
   let check = () => [200, { integrations: [integration('live', true)] }];
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
     if (path === '/api/integrations') return [200, { integrations: [integration('configured', true)] }];
-    if (path === '/api/installations?offset=0&limit=50') return [200, { syncs: [], repositories: [{ id: '101', full_name: 'fixture/project-101', owner_id: '10', installed: true,
+    if (path === '/api/installations?offset=0&limit=51') return [200, { syncs: [], repositories: [{ id: '101', full_name: 'fixture/project-101', owner_id: '10', installed: true,
       registered: true, enabled: true, review_enabled: true, development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0 }] }];
     if (method === 'POST' && path === '/api/integrations/check') return check();
     return [404, { error: 'not_found' }];
   });
   page.run("var startCalls = 0; start = async () => { startCalls++; }; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
   const settle = () => new Promise(r => setTimeout(r, 50)), gate = line => line.querySelectorAll('[data-integration]').map(chip => chip.textContent);
-  const once = ['GET /api/integrations', 'GET /api/installations?offset=0&limit=50', 'POST /api/integrations/check'];
+  const once = ['GET /api/integrations', 'GET /api/installations?offset=0&limit=51', 'POST /api/integrations/check'];
   await page.run('render()'); const [line] = page.$('rows').querySelectorAll('.row');
   const globalLine = page.run("var globalLine = element('article', '', 'global-project-row'); globalLine.dataset.repositoryId = '101'; globalLine.append(...installedIntegration({ gate_state: 'configured' }, { board_enabled: false })); document.getElementById('global-project-test').append(globalLine); globalLine;");
   assert.deepEqual(gate(line), ['门禁已配置']);
@@ -466,8 +466,8 @@ test('global project actions offer deletion and an installed but never started p
   const hiddenRow = { ...row('404'), hidden: true, installed: false };
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
     if (path === '/api/integrations') return [200, { integrations: [] }];
-    if (path === '/api/installations?offset=0&limit=50') return [200, { syncs: [], repositories: listing }];
-    if (path === '/api/installations/hidden?offset=0&limit=50') return [200, { repositories: [hiddenRow] }];
+    if (path === '/api/installations?offset=0&limit=51') return [200, { syncs: [], repositories: listing }];
+    if (path === '/api/installations/hidden?offset=0&limit=51') return [200, { repositories: [hiddenRow] }];
     if (method === 'DELETE' && path === '/api/installations/101') return [200, { hidden: true }];
     if (method === 'POST' && path === '/api/installations/404/restore') return [200, { hidden: false }];
     return [404, { error: 'not_found' }];
