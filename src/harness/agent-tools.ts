@@ -161,6 +161,15 @@ function verifySafeExecutable(rootReal: string, filePath: string): boolean {
   }
 }
 
+// The `node_version` a claude_code manifest still names, read from the raw file when it no longer parses into a manifest.
+function brokenManifestNodeVersion(rootReal: string, version: string): string | null {
+  try {
+    const raw = readFileSync(resolve(rootReal, 'claude_code', version, 'manifest.json'), 'utf8');
+    const named = /"node_version"\s*:\s*"([^"]+)"/.exec(raw)?.[1] ?? null;
+    return named && parseSemver(named) ? named : null;
+  } catch { return null; }
+}
+
 function readValidCliManifest(
   rootReal: string,
   cli: AgentToolCli,
@@ -1158,15 +1167,26 @@ export class AgentToolManager {
       removed.push(ver);
     }
 
-    this.pruneUnreferencedNodeRuntimes(rootReal, arch);
+    // Node runtimes are launched by claude_code alone and only its manifests name them, so this sweep follows that pass
+    // (a codex-only sweep would otherwise delete the runtime a kept claude_code directory still executes, the same way
+    // the directory itself was being deleted before #751).
+    if (cli === 'claude_code') this.pruneUnreferencedNodeRuntimes(rootReal, arch, protectedInvalid);
     return { removed, protectedInvalid };
   }
 
-  private pruneUnreferencedNodeRuntimes(rootReal: string, arch: AgentToolArch): void {
+  private pruneUnreferencedNodeRuntimes(rootReal: string, arch: AgentToolArch, unreadable: string[] = []): void {
     const referencedNodes = new Set<string>();
     const claudeStatus = inspectCliAvailability(rootReal, 'claude_code', { containerRoot: this.containerRoot, arch });
     for (const m of claudeStatus.installed_manifests) {
       if (m.node_version) referencedNodes.add(m.node_version);
+    }
+    // A protected directory whose manifest no longer validates is still the one a run executes, and the runtime it
+    // launches is still named in the text of that manifest even when the file has stopped parsing. When not even the
+    // text names it, nothing on the volume can say which runtime it needs, so the sweep keeps them all: a runtime kept
+    // one sweep too long costs disk, a deleted one takes the binary away from a live run.
+    for (const version of unreadable) {
+      const named = brokenManifestNodeVersion(rootReal, version);
+      if (named) referencedNodes.add(named); else return;
     }
     const nodeRoot = resolve(rootReal, 'node');
     if (!existsSync(nodeRoot)) return;
