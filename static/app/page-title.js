@@ -21,6 +21,8 @@ function pageTitleFor(missing, target) {
     const project = repositories.find(row => String(row.id) === String(target.id))?.full_name || rendered;
     return project ? `${project} · ${caption}` : caption;
   }
+  // #799: a settings page that names its own category (存储) is titled after it, not after the whole platform.
+  if (tab === 'settings' && typeof settingsPageTitle === 'function') return settingsPageTitle();
   const key = pageTitleKeys[tab];
   return key ? t(key) : '';
 }

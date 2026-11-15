@@ -421,7 +421,7 @@ test('个人设置与全局设置类别只列出真正能打开的页面，目�
     await member.getByLabel('用户名', { exact: true }).fill('member'); await member.getByLabel('密码', { exact: true }).fill(memberPassword);
     await member.getByRole('button', { name: '登录', exact: true }).click();
     await member.goto(h.admin + '/#/settings/storage');
-    const settingsNav = member.getByRole('navigation', { name: '全局设置类别' });
+    const settingsNav = member.getByRole('navigation', { name: '设置类别' });
     await expect(settingsNav.getByRole('link')).toHaveText(['存储']);
     await expect(settingsNav.locator('p')).toHaveCount(0);
     await expect(member.locator('#settings-panel')).not.toContainText('系统与算力');

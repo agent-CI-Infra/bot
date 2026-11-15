@@ -9,7 +9,8 @@ async function render(quiet = false) {
   const request=++renderVersion, taskTab = !!taskKinds[tab], isIdentity = tab === 'identity' || tab === 'preferences';
   const identityTitle = /^#\/identity\/feishu-apps(?:\/|$)/.test(location.hash) ? t('nav.feishu_apps')
     : /^#\/identity\/feishu(?:$|\?|\/)/.test(location.hash) ? t('nav.feishu') : t('identity.title');
-  $('page-title').textContent = isIdentity ? identityTitle : titles[tab];
+  const settingsTitle = tab === 'settings' && typeof settingsPageTitle === 'function' ? settingsPageTitle() : null;
+  $('page-title').textContent = isIdentity ? identityTitle : settingsTitle || titles[tab];
   const activeNavTab = ['preferences', 'identity', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === activeNavTab ? 'page' : 'false'));
   $('filters').hidden = !listTabs.includes(tab);

@@ -1,6 +1,7 @@
 async function renderSettings(request) {
   const route = settingsRoute(), section = route.section, nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content'), body = element('div', '', 'project-body settings-body');
-  nav.setAttribute('aria-label', '全局设置类别');
+  // A project administrator reaches only 存储, so their category bar must not claim to be global settings (#799).
+  nav.setAttribute('aria-label', typeof me === 'object' && me && me.role === 'super_admin' ? '全局设置类别' : '设置类别');
   // #615: a group heading only earns its line when it separates groups; one category stays a plain link.
   const groups = visibleSettingsGroups();
   for (const [groupTitle, items] of groups) {
@@ -97,7 +98,7 @@ const settingsCards = {
       + (state.last_error ? `；最近一个错误：${state.last_error}` : '');
     const time = value => value ? new Date(value).toLocaleString('zh-CN') : '—', row = (table, cells) => { const tr = document.createElement('tr'); for (const text of cells) tr.append(element('td', text)); table.body.append(tr); };
     const cards = [], intro = card('存储');
-    intro.append(note(`轨迹文件按运行保存模型请求、工具调用和大日志的正文，数据库只留状态和定位。数字来自文件关闭时累加的计数和后台快照，每 5 分钟刷新一次；项目电脑的卷每 6 小时在后台扫描一次，git 缓存和公开看板每小时测一次。打开页面不遍历文件。最近刷新：${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`
+    intro.append(note(`这里统计 bot 使用的各类存储：轨迹文件、控制面与 manager 的数据库、项目电脑的工作卷和整块数据盘，以及哪些空间可以回收。数字来自后台快照，每 5 分钟更新一次；项目电脑的卷每 6 小时扫描一次，打开页面不遍历文件。最近刷新：${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`
       // A failed manager read keeps the numbers it gave last (#793), so the page says which read they come from.
       + (view.manager_error ? view.manager_read_at
         ? `上次读取于 ${time(view.manager_read_at)}；本次 manager 读取失败（${view.manager_error}），manager 的数字保留上次结果，可能过期。`
@@ -161,7 +162,7 @@ const settingsCards = {
       migration.append(note(`当前速度：${rates}。` + [view.totals.control?.migration, view.totals.manager?.migration].flatMap(state => Object.values(state?.phases ?? {}).map(phase => phase.last_error).filter(Boolean)).slice(0, 1).map(error => `最近一个错误：${error}`).join('')));
       cards.push(migration);
     }
-    const projects = card('按项目'), table = costTable(['项目', '轨迹文件', '模型请求/响应', '工具调用/结果', '日志', 'blob', 'manager 轨迹', '写入中的文件']);
+    const projects = card('按项目'), table = costTable(['项目', '轨迹文件', '模型请求/响应', '工具调用/结果', '日志', ['文件块', 'blob'], ['管理过程记录', 'manager 轨迹'], '写入中的文件']);
     table.wrap.classList.add('storage-projects');
     for (const project of view.projects) {
       const row = document.createElement('tr'), record = (...types) => { const value = types.reduce((sum, type) => ({ count: sum.count + (project.records[type]?.count ?? 0), bytes: sum.bytes + (project.records[type]?.bytes ?? 0) }), { count: 0, bytes: 0 }); return `${count(value.count)} 条 · ${size(value.bytes)}`; };
@@ -174,7 +175,7 @@ const settingsCards = {
     projects.append(view.projects.length ? table.wrap : note('还没有项目的轨迹数据。'));
     cards.push(projects);
     // Each project computer's work volume, from its last background scan.
-    const computers = card('项目电脑'), volumes = costTable(['项目', '卷合计', '运行中的工作区', '为 PR 保留', '待删除', 'runner journal', 'git 存储', 'HOME 缓存', '其他', '扫描时间']);
+    const computers = card('项目电脑'), volumes = costTable(['项目', '卷合计', '运行中的工作区', '为 PR 保留', '待删除', ['运行日志', 'runner journal'], ['Git 仓库缓存', 'git 存储'], ['工作目录缓存', 'HOME 缓存'], '其他', '扫描时间']);
     volumes.wrap.classList.add('storage-projects');
     const share = value => value ? `${count(value.count)} 个 · ${size(value.bytes)}` : '—', top = entries => (entries ?? []).slice(0, 3).map(entry => `${entry.name} ${size(entry.bytes)}`).join('、');
     const scanned = view.projects.filter(project => project.computer);
