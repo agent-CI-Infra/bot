@@ -32,3 +32,28 @@ test('#738: notice() writes role and aria-live for the message it shows, so an e
   assert.equal(message.getAttribute('role'), 'status');
   assert.equal(message.getAttribute('aria-live'), 'polite');
 });
+
+// #738 review: `#task-error` is created by static/views/widgets.js as a role=alert box that only ever holds an error, and
+// every caller (task-session.js, task-cards.js) passes it an error message. Treating it like the shared strip and
+// defaulting it to `kind: 'status'` made it polite, so a failed task read or a failed retry was announced after the page
+// had moved on. A box a page authored keeps its own role unless the caller says otherwise; aria-live follows the role that
+// is actually written, so the announcement stays assertive either way.
+test('#738: a notice in an authored alert box stays an alert, and an explicit kind still wins', async () => {
+  const page = loadConsole(['static/app/state.js', 'static/app/api.js'], async () => [200, {}]);
+  const taskError = page.$('task-error');
+  taskError.setAttribute('role', 'alert');
+
+  page.run(`notice('task-error', '503 · service_unavailable')`);
+  assert.equal(taskError.getAttribute('role'), 'alert');
+  assert.equal(taskError.getAttribute('aria-live'), 'assertive');
+  assert.equal(taskError.querySelector('span').textContent, '503 · service_unavailable');
+
+  // A box without an authored role is not silently promoted to an alert, but a caller can still ask for one.
+  const editorError = page.$('editor-error');
+  page.run(`notice('editor-error', '保存失败：权限不足')`);
+  assert.equal(editorError.getAttribute('role'), 'status');
+  assert.equal(editorError.getAttribute('aria-live'), 'polite');
+  page.run(`notice('editor-error', '保存失败：权限不足', '', 'alert')`);
+  assert.equal(editorError.getAttribute('role'), 'alert');
+  assert.equal(editorError.getAttribute('aria-live'), 'assertive');
+});

@@ -321,7 +321,7 @@ async function hideInstalled(row, after) {
   return hidden;
 }
 async function restoreInstalled(row, after) {
-  try { await api(`/api/installations/${row.id}/restore`, 'POST', {}); $('message').textContent = ''; } catch (err) { error(err); }
+  try { await api(`/api/installations/${row.id}/restore`, 'POST', {}); notice('message'); } catch (err) { error(err); }
   await after();
 }
 const gateLabels = { none: ['门禁未接入', 'info'], configured: ['门禁已配置', 'warning'], live: ['门禁已生效', 'success'], unknown: ['门禁未知', 'info'] };
@@ -365,8 +365,8 @@ function updateIntegrationChips(integrations) {
 function installedActions(row, after) {
   const actions = element('div', '', 'actions');
   const call = async (path, body, caption) => {
-    actions.querySelectorAll('button').forEach(b => { b.disabled = true; }); $('message').textContent = caption;
-    try { await api(`/api/installations/${row.id}/${path}`, 'POST', body); $('message').textContent = ''; } catch (err) { error(err); }
+    actions.querySelectorAll('button').forEach(b => { b.disabled = true; }); notice('message', caption);
+    try { await api(`/api/installations/${row.id}/${path}`, 'POST', body); notice('message'); } catch (err) { error(err); }
     await after();
   };
   // Gate onboarding is a conversation in static/gate-onboarding.js; boards are managed by the list switch.
