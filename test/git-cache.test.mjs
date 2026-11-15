@@ -24,6 +24,7 @@ import { dispatchContext } from '../dist/dispatch/store.js';
 import { Store } from '../dist/storage/database.js';
 import { listWorkspaces, workspaceTool, workspaceCoverage } from '../dist/agent/workspace-tools.js';
 import { versionTool } from '../dist/tasks/versions.js';
+import { checkpoint } from '../dist/tasks/checkpoint.js';
 
 const token = 'ghs_' + 'f'.repeat(36);
 // A task gets its worktree when it first needs one (#769). The fixture's agent reads a repository file before anything
@@ -380,6 +381,8 @@ test('#769 reading the versions binds no worktree; a bound review that moves kee
   // A controller reads the versions before it chooses: the planned commit instead of HEAD, and no runner call.
   const sent = a.calls.length, unbound = await versionTool(a.store, row(), a.workspace, 'read_version_context', {});
   assert.deepEqual([unbound.workspace_head_ref, unbound.workspace, a.calls.length, exists(a.repo)], [null, { worktree: 'not_bound', commit: u.first, tree_sha: planned.tree_sha }, sent, false]);
+  // A task stopping before it touched its files (its Manager asked for help, say) has nothing to save, and makes no worktree to find that out.
+  assert.deepEqual([await checkpoint(a.store, row(), a.workspace), a.calls.length, exists(a.repo)], [null, sent, false]);
   await a.workspace.ensure();
   const bound = await versionTool(a.store, row(), a.workspace, 'read_version_context', {});
   assert.deepEqual([typeof bound.workspace_head_ref, 'workspace' in bound, a.calls.at(-1)], ['string', false, 'workspace_source']);
