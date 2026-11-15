@@ -114,6 +114,7 @@ test('modelProtocol resolves interface_type and auth_header from manual override
   assert.deepEqual(modelProtocol(store,model),{interface_type:'openai-chat-completions',auth_header:'bearer',source:'catalog',override:{interface_type:null,auth_header:null}});
   assert.equal(modelProtocol(store,{api_url:'https://relay.example/v1',model_name:'claude-sonnet-4-5'}).interface_type,'anthropic-messages');
   assert.equal(modelProtocol(store,{api_url:'https://relay.example/v1/responses',model_name:'custom-model'}).interface_type,'openai-responses');
+  assert.equal(modelProtocol(store,{api_url:'https://api.openai.com/v1',model_name:'gpt-5-codex'}).interface_type,'openai-responses');
   saveModelMetadata(store,'m',{interface_type:'anthropic-messages',auth_header:'bearer'});
   assert.deepEqual(modelProtocol(store,model),{interface_type:'anthropic-messages',auth_header:'bearer',source:'manual',override:{interface_type:'anthropic-messages',auth_header:'bearer'}});
   saveModelMetadata(store,'m',{interface_type:'auto',auth_header:null});

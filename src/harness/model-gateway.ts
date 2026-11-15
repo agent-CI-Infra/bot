@@ -20,6 +20,7 @@ import {
   accountingUsagePayload,
   DownstreamResponseBuilder,
   endpointToFormat,
+  formatSseErrorEvent,
   parseDownstreamRequest,
   patchPassthroughRequest,
   serializeUpstreamRequest,
@@ -128,6 +129,10 @@ export function readProviderCredentialFile(filePath: string): { key: string } {
   return { key };
 }
 
+export const abandonedModelRequest = (sent: { error?: string; detail?: string } | null | undefined): boolean =>
+  sent?.error === 'agent_request_changed'
+  || (sent?.error === 'runner_operation_failed' && typeof sent?.detail === 'string' && sent.detail.includes('agent_request_changed'));
+
 class StreamReplyWriter {
   private queue: Buffer[] = [];
   private offset = 0;
@@ -150,6 +155,14 @@ class StreamReplyWriter {
     private readonly runner: (input: Record<string, unknown>) => Promise<any>,
     private readonly onClientAbort: () => void,
   ) {}
+
+  get headersCommitted(): boolean {
+    return this.headersReady;
+  }
+
+  get responseContentType(): string {
+    return String(this.headers?.['content-type'] || '');
+  }
 
   startResponse(status: number, headers: Record<string, string>) {
     this.status = status;
@@ -228,7 +241,17 @@ class StreamReplyWriter {
       };
 
       try {
-        await this.runner(call);
+        const res = await this.runner(call);
+        if (abandonedModelRequest(res)) {
+          this.abortedByClient = true;
+          this.onClientAbort();
+          return;
+        }
+        if (res && typeof res === 'object' && typeof (res as any).error === 'string') {
+          this.fatalError = Object.assign(new Error(String((res as any).detail || (res as any).error)), { code: (res as any).error });
+          this.onClientAbort();
+          return;
+        }
         if (sendStatus) this.statusSent = true;
         this.offset += slice.length;
       } catch (err: any) {
@@ -423,7 +446,16 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
     };
   };
 
-  const resolveTargetModel = (requestedModel: string): ResolvedTargetModel | null => {
+  const resolveTargetModel = (requestedModel: string, downstreamFormat: ModelInterfaceType): ResolvedTargetModel | null => {
+    const isOpenAiOfficialHost = (url: string) => {
+      try {
+        const host = new URL(url).hostname.toLowerCase();
+        return host === 'api.openai.com' || host.endsWith('.openai.com');
+      } catch {
+        return false;
+      }
+    };
+
     if (fileProvider && matchesModelIdentity(store, { api_url: fileProvider.baseUrl, model_name: fileProvider.model }, requestedModel)) {
       const key = fileProvider.apiKey ? fileProvider.apiKey : readProviderCredentialFile(fileProvider.credentialFile || '').key;
       redactor.add(key);
@@ -434,7 +466,14 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
       const urlInterface: ModelInterfaceType | null = /\/messages$/.test(trimmed) ? 'anthropic-messages'
         : /\/responses$/.test(trimmed) ? 'openai-responses'
         : /\/chat\/completions$/.test(trimmed) ? 'openai-chat-completions' : null;
-      const interfaceType = fileProvider.interfaceType ?? urlInterface ?? inferred?.interface_type ?? 'anthropic-messages';
+      const baseInterface = fileProvider.interfaceType ?? urlInterface ?? inferred?.interface_type ?? 'anthropic-messages';
+      const interfaceType: ModelInterfaceType = !fileProvider.interfaceType
+        && !urlInterface
+        && downstreamFormat === 'openai-responses'
+        && baseInterface === 'openai-chat-completions'
+        && isOpenAiOfficialHost(fileProvider.baseUrl)
+        ? 'openai-responses'
+        : baseInterface;
       const authHeader = fileProvider.authHeader ?? inferred?.auth_header ?? (interfaceType === 'anthropic-messages' || host === 'api.anthropic.com' || host.endsWith('.anthropic.com') ? 'x-api-key' : 'bearer');
       const maxOut = explicitMaxTokens ?? entry?.capabilities.max_output_tokens ?? 8192;
       const pricing: Pricing | null = fileProvider.pricing !== undefined ? fileProvider.pricing : entry?.cost
@@ -460,6 +499,13 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
       const opened = openModel(store, row);
       redactor.add(opened.key);
       const proto = opened.protocol ?? modelProtocol(store, row as any);
+      const interfaceType: ModelInterfaceType = downstreamFormat === 'openai-responses'
+        && proto.source !== 'manual'
+        && proto.source !== 'url'
+        && proto.interface_type === 'openai-chat-completions'
+        && isOpenAiOfficialHost(opened.url)
+        ? 'openai-responses'
+        : proto.interface_type;
       const maxOut = explicitMaxTokens ?? opened.capabilities?.max_output_tokens ?? 8192;
       return {
         id: opened.id,
@@ -467,7 +513,7 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
         url: opened.url,
         key: opened.key,
         pricing: pricingFor(store, opened.id),
-        interfaceType: proto.interface_type,
+        interfaceType,
         authHeader: proto.auth_header,
         maxOutputTokens: maxOut,
       };
@@ -492,12 +538,22 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
     const parts: Buffer[] = [];
     let offset = 0;
     for (;;) {
-      const res = await runner({
-        type: 'workspace_agent_model_request',
-        ...(workspaceId ? { workspace_id: workspaceId } : {}),
-        request_id: requestId,
-        offset,
-      });
+      let res: any;
+      try {
+        res = await runner({
+          type: 'workspace_agent_model_request',
+          ...(workspaceId ? { workspace_id: workspaceId } : {}),
+          request_id: requestId,
+          offset,
+        });
+      } catch (err: any) {
+        if (String(err?.detail || err?.message || '').includes('agent_request_changed')) return null;
+        throw err;
+      }
+      if (abandonedModelRequest(res)) return null;
+      if (res && typeof res === 'object' && typeof res.error === 'string') {
+        throw new Error(String(res.detail || res.error));
+      }
       const chunk = Buffer.from(String(res.base64 || ''), 'base64');
       parts.push(chunk);
       offset += chunk.length;
@@ -592,7 +648,7 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
 
       let target: ResolvedTargetModel | null;
       try {
-        target = resolveTargetModel(canonical.model);
+        target = resolveTargetModel(canonical.model, downstreamFormat);
       } catch (err) {
         const code = err instanceof TaskError ? err.code : 'model_not_available';
         const msg = err instanceof TaskError && err.detail ? err.detail : code;
@@ -722,104 +778,152 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
       const downstreamHeaders: Record<string, string> = {
         'content-type': passthrough ? upstreamContentType : canonical.stream ? 'text/event-stream; charset=utf-8' : 'application/json',
       };
-      if (passthrough || canonical.stream) writer.startResponse(200, downstreamHeaders);
+      const pushBodyChunk = (chunk: Buffer | string) => {
+        if (!chunk.length) return;
+        if (!writer.headersCommitted) writer.startResponse(200, downstreamHeaders);
+        streamedAny = true;
+        writer.push(chunk);
+      };
 
       let totalBytes = 0;
       let lastAuthCheck = Date.now();
-      let passthroughSsePending = '';
-      const passthroughTextDecoder = passthrough ? new TextDecoder('utf-8', { fatal: false }) : null;
+      let passthroughPending = '';
+      const passthroughTextDecoder = passthrough && secretToScrub ? new TextDecoder('utf-8', { fatal: false }) : null;
 
       if (upstream.body) {
-        for await (const rawChunk of Readable.fromWeb(upstream.body as any)) {
-          armTimeout(timing.idleMs);
-          const buf = Buffer.from(rawChunk);
-          totalBytes += buf.length;
-          if (totalBytes > maxUpstreamResponseBytes) throw new Error('response_limit');
-          if (combinedSignal.aborted) throw combinedSignal.reason ?? new Error('aborted');
-          if (Date.now() - lastAuthCheck >= 1000) {
-            lastAuthCheck = Date.now();
-            await checkLiveAuthorization(envelope.token);
-          }
+        const bodyStream = Readable.fromWeb(upstream.body as any);
+        const onAbortStream = () => {
+          bodyStream.destroy((combinedSignal.reason as Error) ?? new Error('aborted'));
+        };
+        if (combinedSignal.aborted) onAbortStream();
+        else combinedSignal.addEventListener('abort', onAbortStream, { once: true });
+        try {
+          for await (const rawChunk of bodyStream) {
+            armTimeout(timing.idleMs);
+            const buf = Buffer.from(rawChunk);
+            totalBytes += buf.length;
+            if (totalBytes > maxUpstreamResponseBytes) throw new Error('response_limit');
+            if (writer.abortedByClient || writer.fatalError || combinedSignal.aborted) {
+              throw writer.fatalError ?? combinedSignal.reason ?? new Error('aborted');
+            }
+            if (Date.now() - lastAuthCheck >= 1000) {
+              lastAuthCheck = Date.now();
+              await checkLiveAuthorization(envelope.token);
+            }
 
-          const events = decoder.push(buf);
-          finalUsage = decoder.usage;
-          if (passthrough) {
-            responseBuilder.push(events);
-            streamedAny = true;
-            if (upstreamIsSse && secretToScrub) {
-              passthroughSsePending += passthroughTextDecoder!.decode(buf, { stream: true });
-              let m: RegExpExecArray | null;
-              let safeOut = '';
-              while ((m = /\r?\n\r?\n/.exec(passthroughSsePending))) {
-                const endIdx = m.index + m[0].length;
-                safeOut += scrubSecret(passthroughSsePending.slice(0, endIdx), secretToScrub);
-                passthroughSsePending = passthroughSsePending.slice(endIdx);
+            const events = decoder.push(buf);
+            finalUsage = decoder.usage;
+            if (passthrough) {
+              responseBuilder.push(events);
+              if (passthroughTextDecoder) {
+                passthroughPending += passthroughTextDecoder.decode(buf, { stream: true });
+                if (upstreamIsSse) {
+                  let m: RegExpExecArray | null;
+                  let safeOut = '';
+                  while ((m = /\r?\n\r?\n/.exec(passthroughPending))) {
+                    const endIdx = m.index + m[0].length;
+                    safeOut += scrubSecret(passthroughPending.slice(0, endIdx), secretToScrub);
+                    passthroughPending = passthroughPending.slice(endIdx);
+                  }
+                  if (safeOut) pushBodyChunk(safeOut);
+                } else {
+                  passthroughPending = scrubSecret(passthroughPending, secretToScrub);
+                  const hold = Math.max(0, secretToScrub.length - 1);
+                  if (passthroughPending.length > hold) {
+                    let emitLen = passthroughPending.length - hold;
+                    const lastUnit = passthroughPending.charCodeAt(emitLen - 1);
+                    if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) emitLen -= 1;
+                    if (emitLen > 0) {
+                      pushBodyChunk(passthroughPending.slice(0, emitLen));
+                      passthroughPending = passthroughPending.slice(emitLen);
+                    }
+                  }
+                }
+              } else {
+                pushBodyChunk(buf);
               }
-              if (safeOut) writer.push(safeOut);
             } else {
-              writer.push(secretToScrub ? scrubSecret(buf.toString('utf8'), secretToScrub) : buf);
-            }
-          } else {
-            trajectoryTapBuilder.push(events);
-            const rendered = responseBuilder.push(events);
-            if (canonical.stream && rendered) {
-              streamedAny = true;
-              writer.push(scrubSecret(rendered, secretToScrub));
+              trajectoryTapBuilder.push(events);
+              const rendered = responseBuilder.push(events);
+              if (canonical.stream && rendered) {
+                pushBodyChunk(scrubSecret(rendered, secretToScrub));
+              }
             }
           }
+        } finally {
+          combinedSignal.removeEventListener('abort', onAbortStream);
         }
+      }
+
+      if (writer.abortedByClient || writer.fatalError || combinedSignal.aborted) {
+        throw writer.fatalError ?? combinedSignal.reason ?? new Error('aborted');
       }
 
       const tailEvents = decoder.end();
       finalUsage = decoder.usage;
       if (passthrough) {
         responseBuilder.push(tailEvents);
-        if (upstreamIsSse && secretToScrub) {
-          const rest = passthroughSsePending + passthroughTextDecoder!.decode();
-          if (rest) writer.push(scrubSecret(rest, secretToScrub));
+        if (passthroughTextDecoder) {
+          const rest = passthroughPending + passthroughTextDecoder.decode();
+          if (rest) pushBodyChunk(scrubSecret(rest, secretToScrub));
         }
         const { jsonSnapshot } = responseBuilder.finalize();
+        if (!writer.headersCommitted) writer.startResponse(200, downstreamHeaders);
+        await writer.finish();
+        if (writer.abortedByClient || writer.fatalError) {
+          throw writer.fatalError ?? new Error('client_cancelled');
+        }
         recordResponseTrajectory(jsonSnapshot);
         finishModelRequest(store, requestLogId, accountingUsagePayload(finalUsage), upstream.status, 'received', true);
-        await writer.finish();
       } else {
         trajectoryTapBuilder.push(tailEvents);
         const tailRendered = responseBuilder.push(tailEvents);
         if (canonical.stream && tailRendered) {
-          streamedAny = true;
-          writer.push(scrubSecret(tailRendered, secretToScrub));
+          pushBodyChunk(scrubSecret(tailRendered, secretToScrub));
         }
-        const { body: finalBody, jsonSnapshot } = responseBuilder.finalize();
+        const { body: finalBody } = responseBuilder.finalize();
         const { jsonSnapshot: trajectorySnap } = trajectoryTapBuilder.finalize();
-        recordResponseTrajectory(trajectorySnap);
-        finishModelRequest(store, requestLogId, accountingUsagePayload(finalUsage), upstream.status, 'received', true);
         if (canonical.stream) {
-          if (finalBody) writer.push(scrubSecret(finalBody, secretToScrub));
+          if (finalBody) pushBodyChunk(scrubSecret(finalBody, secretToScrub));
+          if (!writer.headersCommitted) writer.startResponse(200, downstreamHeaders);
           await writer.finish();
         } else {
           await sendSimpleReply(writer, 200, downstreamHeaders, scrubSecret(finalBody, secretToScrub));
         }
+        if (writer.abortedByClient || writer.fatalError) {
+          throw writer.fatalError ?? new Error('client_cancelled');
+        }
+        recordResponseTrajectory(trajectorySnap);
+        finishModelRequest(store, requestLogId, accountingUsagePayload(finalUsage), upstream.status, 'received', true);
       }
     } catch (err: any) {
       const isTimeout = err?.message === 'provider_timeout' || (combinedSignal.aborted && (combinedSignal.reason as any)?.message === 'provider_timeout');
       if (requestLogId) {
-        const errCode = writer.abortedByClient ? 'client_cancelled' : err instanceof TaskError ? err.code : isTimeout ? 'provider_timeout' : 'transport_error';
-        recordResponseTrajectory({ error: errCode, detail: redactor.text(String(err?.message || errCode)).slice(0, 500) });
-        const hasPartialUsage = finalUsage.input_tokens !== null || finalUsage.output_tokens !== null;
-        finishModelRequest(
-          store,
-          requestLogId,
-          hasPartialUsage ? accountingUsagePayload(finalUsage) : null,
-          upstreamStatus,
-          errCode === 'client_cancelled' ? 'cancelled' : err instanceof TaskError ? 'guard_failed' : 'transport_error',
-          streamedAny || hasPartialUsage,
-        );
+        try {
+          const errCode = writer.abortedByClient ? 'client_cancelled' : err instanceof TaskError ? err.code : isTimeout ? 'provider_timeout' : 'transport_error';
+          recordResponseTrajectory({ error: errCode, detail: redactor.text(String(err?.message || errCode)).slice(0, 500) });
+          const hasPartialUsage = finalUsage.input_tokens !== null || finalUsage.output_tokens !== null;
+          finishModelRequest(
+            store,
+            requestLogId,
+            hasPartialUsage ? accountingUsagePayload(finalUsage) : null,
+            upstreamStatus,
+            errCode === 'client_cancelled' ? 'cancelled' : err instanceof TaskError ? 'guard_failed' : 'transport_error',
+            streamedAny || hasPartialUsage,
+          );
+        } catch {
+          // Storage failure during error cleanup must not escape handleRequest or block stream termination.
+        }
       }
       if (!writer.abortedByClient && envelope) {
         const code = err instanceof TaskError ? err.code : isTimeout ? 'provider_timeout' : 'api_error';
-        if (!streamedAny) {
-          await sendSimpleReply(writer, err instanceof TaskError ? 401 : 502, { 'content-type': 'application/json' }, formatErrorPayload(envelope.endpoint, code)).catch(() => {});
+        const detail = redactor.text(String(err?.message || code)).slice(0, 300);
+        if (!writer.headersCommitted) {
+          await sendSimpleReply(writer, err instanceof TaskError ? 401 : 502, { 'content-type': 'application/json' }, formatErrorPayload(envelope.endpoint, code, detail)).catch(() => {});
         } else {
+          if (writer.responseContentType.includes('text/event-stream') && envelope.endpoint !== 'models') {
+            writer.push(formatSseErrorEvent(envelope.endpoint, code, detail));
+          }
           await writer.fail(code).catch(() => {});
         }
       }

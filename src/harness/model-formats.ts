@@ -9,10 +9,16 @@ export interface CanonicalUsage {
   cached_input_tokens: number | null;
 }
 
+export interface CanonicalImageSource {
+  mediaType: string;
+  data?: string;
+  url?: string;
+}
+
 export type CanonicalUserPart =
   | { type: 'text'; text: string }
-  | { type: 'image'; mediaType: string; data?: string; url?: string }
-  | { type: 'tool_result'; callId: string; content: string; isError?: boolean };
+  | ({ type: 'image' } & CanonicalImageSource)
+  | { type: 'tool_result'; callId: string; content: string; images?: CanonicalImageSource[]; isError?: boolean };
 
 export type CanonicalAssistantPart =
   | { type: 'thinking'; text: string }
@@ -72,24 +78,61 @@ export function accountingUsagePayload(usage: CanonicalUsage) {
   };
 }
 
-function parseDataUrl(url: string): { mediaType: string; data?: string; url?: string } {
+function parseDataUrl(url: string): CanonicalImageSource {
   const match = /^data:([^;,]+);base64,(.+)$/s.exec(url);
   if (match) return { mediaType: match[1]!, data: match[2]! };
   return { mediaType: 'image/png', url };
 }
 
-function stringifyToolContent(content: unknown): string {
-  if (typeof content === 'string') return content;
+function extractToolResultPayload(content: unknown): { content: string; images: CanonicalImageSource[] } {
+  if (typeof content === 'string') return { content, images: [] };
+  if (content === null || content === undefined) return { content: '', images: [] };
   if (Array.isArray(content)) {
-    const texts = content.map(part => {
-      if (typeof part === 'string') return part;
-      if (part && typeof part === 'object' && typeof (part as any).text === 'string') return (part as any).text;
-      return JSON.stringify(part);
-    });
-    return texts.join('\n');
+    const texts: string[] = [];
+    const images: CanonicalImageSource[] = [];
+    for (const part of content) {
+      if (typeof part === 'string') {
+        texts.push(part);
+        continue;
+      }
+      if (!part || typeof part !== 'object') {
+        texts.push(JSON.stringify(part));
+        continue;
+      }
+      const p = part as Record<string, any>;
+      if ((p.type === 'text' || p.type === 'input_text' || p.type === 'output_text' || !p.type) && typeof p.text === 'string') {
+        texts.push(p.text);
+      } else if (p.type === 'image' && p.source && typeof p.source === 'object') {
+        if (p.source.type === 'base64' && typeof p.source.data === 'string') {
+          images.push({ mediaType: String(p.source.media_type || 'image/png'), data: p.source.data });
+        } else if (p.source.type === 'url' && typeof p.source.url === 'string') {
+          images.push({ mediaType: 'image/png', url: p.source.url });
+        } else {
+          texts.push(JSON.stringify(part));
+        }
+      } else if (p.type === 'image' && typeof p.data === 'string') {
+        images.push({ mediaType: String(p.mimeType || p.media_type || 'image/png'), data: p.data });
+      } else if (p.type === 'input_image' || p.type === 'image_url') {
+        const rawUrl = typeof p.image_url === 'string' ? p.image_url : typeof p.image_url?.url === 'string' ? p.image_url.url : typeof p.url === 'string' ? p.url : '';
+        if (rawUrl) images.push(parseDataUrl(rawUrl));
+        else texts.push(JSON.stringify(part));
+      } else {
+        texts.push(JSON.stringify(part));
+      }
+    }
+    return { content: texts.join('\n'), images };
   }
-  if (content === null || content === undefined) return '';
-  return JSON.stringify(content);
+  return { content: JSON.stringify(content), images: [] };
+}
+
+export function formatSseErrorEvent(endpoint: DownstreamEndpoint, code: string, message = code): string {
+  if (endpoint === 'messages') {
+    return `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: code, message } })}\n\n`;
+  }
+  if (endpoint === 'responses') {
+    return `event: error\ndata: ${JSON.stringify({ type: 'error', code, message, param: null })}\n\n`;
+  }
+  return `data: ${JSON.stringify({ error: { message, type: code, code } })}\n\n`;
 }
 
 function pushUserPart(turns: CanonicalTurn[], part: CanonicalUserPart) {
@@ -135,7 +178,14 @@ export function parseDownstreamRequest(format: ModelInterfaceType, body: Record<
               else if (block.source.type === 'url' && typeof block.source.url === 'string')
                 pushUserPart(turns, { type: 'image', mediaType: 'image/png', url: block.source.url });
             } else if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-              pushUserPart(turns, { type: 'tool_result', callId: block.tool_use_id, content: stringifyToolContent(block.content), isError: block.is_error === true });
+              const extracted = extractToolResultPayload(block.content);
+              pushUserPart(turns, {
+                type: 'tool_result',
+                callId: block.tool_use_id,
+                content: extracted.content,
+                ...(extracted.images.length ? { images: extracted.images } : {}),
+                isError: block.is_error === true,
+              });
             }
           }
         }
@@ -193,7 +243,13 @@ export function parseDownstreamRequest(format: ModelInterfaceType, body: Record<
           continue;
         }
         if (item.type === 'function_call_output' || item.type === 'custom_tool_call_output') {
-          pushUserPart(turns, { type: 'tool_result', callId: String(item.call_id || ''), content: stringifyToolContent(item.output) });
+          const extracted = extractToolResultPayload(item.output);
+          pushUserPart(turns, {
+            type: 'tool_result',
+            callId: String(item.call_id || ''),
+            content: extracted.content,
+            ...(extracted.images.length ? { images: extracted.images } : {}),
+          });
           continue;
         }
         if (item.type === 'reasoning') {
@@ -306,7 +362,13 @@ export function parseDownstreamRequest(format: ModelInterfaceType, body: Record<
         }
       }
     } else if (msg.role === 'tool') {
-      pushUserPart(turns, { type: 'tool_result', callId: String(msg.tool_call_id || ''), content: stringifyToolContent(msg.content) });
+      const extracted = extractToolResultPayload(msg.content);
+      pushUserPart(turns, {
+        type: 'tool_result',
+        callId: String(msg.tool_call_id || ''),
+        content: extracted.content,
+        ...(extracted.images.length ? { images: extracted.images } : {}),
+      });
     }
   }
   const tools: CanonicalTool[] = Array.isArray(body.tools) ? body.tools.filter((t: any) => t?.function?.name).map((t: any) => ({
@@ -346,7 +408,17 @@ export function serializeUpstreamRequest(format: ModelInterfaceType, ir: Canonic
         const toolResults: any[] = [], rest: any[] = [];
         for (const part of turn.parts) {
           if (part.type === 'tool_result') {
-            toolResults.push({ type: 'tool_result', tool_use_id: mapId(part.callId), content: part.content, ...(part.isError ? { is_error: true } : {}) });
+            if (part.images?.length) {
+              const blocks: any[] = [];
+              if (part.content) blocks.push({ type: 'text', text: part.content });
+              for (const img of part.images) {
+                if (img.data) blocks.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } });
+                else if (img.url) blocks.push({ type: 'image', source: { type: 'url', url: img.url } });
+              }
+              toolResults.push({ type: 'tool_result', tool_use_id: mapId(part.callId), content: blocks.length ? blocks : part.content, ...(part.isError ? { is_error: true } : {}) });
+            } else {
+              toolResults.push({ type: 'tool_result', tool_use_id: mapId(part.callId), content: part.content, ...(part.isError ? { is_error: true } : {}) });
+            }
           } else if (part.type === 'text') {
             if (part.text) rest.push({ type: 'text', text: part.text });
           } else if (part.type === 'image') {
@@ -404,7 +476,17 @@ export function serializeUpstreamRequest(format: ModelInterfaceType, ir: Canonic
         for (const part of turn.parts) {
           if (part.type === 'tool_result') {
             flushUser();
-            input.push({ type: 'function_call_output', call_id: part.callId, output: part.content });
+            if (part.images?.length) {
+              const outItems: any[] = [];
+              if (part.content) outItems.push({ type: 'input_text', text: part.content });
+              for (const img of part.images) {
+                const imageUrl = img.data ? `data:${img.mediaType};base64,${img.data}` : img.url;
+                if (imageUrl) outItems.push({ type: 'input_image', image_url: imageUrl });
+              }
+              input.push({ type: 'function_call_output', call_id: part.callId, output: outItems.length ? outItems : part.content });
+            } else {
+              input.push({ type: 'function_call_output', call_id: part.callId, output: part.content });
+            }
           } else if (part.type === 'text') {
             userContent.push({ type: 'input_text', text: part.text });
           } else if (part.type === 'image') {
@@ -456,17 +538,18 @@ export function serializeUpstreamRequest(format: ModelInterfaceType, ir: Canonic
   if (ir.system.length) messages.push({ role: 'system', content: ir.system.join('\n\n') });
   for (const turn of ir.turns) {
     if (turn.role === 'user') {
-      let userParts: any[] = [];
-      const flushUser = () => {
-        if (!userParts.length) return;
-        if (userParts.length === 1 && userParts[0].type === 'text') messages.push({ role: 'user', content: userParts[0].text });
-        else messages.push({ role: 'user', content: userParts });
-        userParts = [];
-      };
+      const toolImages: any[] = [];
+      const userParts: any[] = [];
       for (const part of turn.parts) {
         if (part.type === 'tool_result') {
-          flushUser();
-          messages.push({ role: 'tool', tool_call_id: part.callId, content: part.content });
+          const hasImg = Boolean(part.images?.length);
+          messages.push({ role: 'tool', tool_call_id: part.callId, content: part.content || (hasImg ? '[image attached in user message]' : '') });
+          if (part.images) {
+            for (const img of part.images) {
+              const url = img.data ? `data:${img.mediaType};base64,${img.data}` : img.url;
+              if (url) toolImages.push({ type: 'image_url', image_url: { url } });
+            }
+          }
         } else if (part.type === 'text') {
           userParts.push({ type: 'text', text: part.text });
         } else if (part.type === 'image') {
@@ -474,7 +557,12 @@ export function serializeUpstreamRequest(format: ModelInterfaceType, ir: Canonic
           userParts.push({ type: 'image_url', image_url: { url } });
         }
       }
-      flushUser();
+      const combinedUserParts = [...toolImages, ...userParts];
+      if (combinedUserParts.length === 1 && combinedUserParts[0].type === 'text') {
+        messages.push({ role: 'user', content: combinedUserParts[0].text });
+      } else if (combinedUserParts.length > 0) {
+        messages.push({ role: 'user', content: combinedUserParts });
+      }
     } else {
       const texts: string[] = [], toolCalls: any[] = [];
       for (const part of turn.parts) {
@@ -586,6 +674,7 @@ export class UpstreamStreamDecoder {
   private thinkingBlockIndex: number | null = null;
   private toolIndices = new Map<string | number, number>();
   private hasToolCalls = false;
+  private pendingChatStopReason: CanonicalStopReason | null = null;
   usage: CanonicalUsage = { input_tokens: null, output_tokens: null, cached_input_tokens: null };
   responseId = 'msg_' + randomUUID().replace(/-/g, '').slice(0, 24);
   model: string;
@@ -629,7 +718,9 @@ export class UpstreamStreamDecoder {
     if (rest) this.consumeSseFrame(rest, events);
     if (!this.finished && this.started) {
       this.finished = true;
-      events.push({ type: 'finish', stopReason: this.hasToolCalls ? 'tool_use' : 'end_turn' });
+      const stopReason = this.pendingChatStopReason ?? (this.hasToolCalls ? 'tool_use' : 'end_turn');
+      this.pendingChatStopReason = null;
+      events.push({ type: 'finish', stopReason });
     }
     return events;
   }
@@ -651,7 +742,15 @@ export class UpstreamStreamDecoder {
       else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
     }
     const data = dataLines.join('\n').trim();
-    if (!data || data === '[DONE]') return;
+    if (!data) return;
+    if (data === '[DONE]') {
+      if (!this.finished && this.pendingChatStopReason !== null) {
+        this.finished = true;
+        events.push({ type: 'finish', stopReason: this.pendingChatStopReason });
+        this.pendingChatStopReason = null;
+      }
+      return;
+    }
     const payload = JSON.parse(data);
     if (this.format === 'anthropic-messages') this.consumeAnthropicEvent(eventName || payload?.type, payload, events);
     else if (this.format === 'openai-responses') this.consumeResponsesEvent(eventName || payload?.type, payload, events);
@@ -766,17 +865,28 @@ export class UpstreamStreamDecoder {
       events.push({ type: 'usage', usage: { ...this.usage } });
     }
     const choice = payload.choices?.[0];
-    if (!choice) return;
+    if (!choice) {
+      if (payload.usage && this.pendingChatStopReason !== null && !this.finished) {
+        this.finished = true;
+        events.push({ type: 'finish', stopReason: this.pendingChatStopReason });
+        this.pendingChatStopReason = null;
+      }
+      return;
+    }
     const delta = choice.delta ?? {};
     if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+      this.textBlockIndex = null;
       if (this.thinkingBlockIndex === null) this.thinkingBlockIndex = this.nextIndex++;
       events.push({ type: 'thinking_delta', index: this.thinkingBlockIndex, delta: delta.reasoning_content });
     }
     if (typeof delta.content === 'string' && delta.content) {
+      this.thinkingBlockIndex = null;
       if (this.textBlockIndex === null) this.textBlockIndex = this.nextIndex++;
       events.push({ type: 'text_delta', index: this.textBlockIndex, delta: delta.content });
     }
-    if (Array.isArray(delta.tool_calls)) {
+    if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
+      this.textBlockIndex = null;
+      this.thinkingBlockIndex = null;
       for (const tc of delta.tool_calls) {
         const key = Number(tc.index ?? 0);
         let blockIdx = this.toolIndices.get(key);
@@ -797,8 +907,18 @@ export class UpstreamStreamDecoder {
       }
     }
     if (choice.finish_reason && !this.finished) {
+      const stopReason = mapChatStopReason(choice.finish_reason, this.hasToolCalls);
+      if (payload.usage) {
+        this.finished = true;
+        this.pendingChatStopReason = null;
+        events.push({ type: 'finish', stopReason });
+      } else {
+        this.pendingChatStopReason = stopReason;
+      }
+    } else if (payload.usage && this.pendingChatStopReason !== null && !this.finished) {
       this.finished = true;
-      events.push({ type: 'finish', stopReason: mapChatStopReason(choice.finish_reason, this.hasToolCalls) });
+      events.push({ type: 'finish', stopReason: this.pendingChatStopReason });
+      this.pendingChatStopReason = null;
     }
   }
 
@@ -942,7 +1062,8 @@ export class DownstreamResponseBuilder {
 
   private getOrCreateBlock(index: number, kind: BlockAccum['kind'], callId?: string, name?: string): BlockAccum {
     let b = this.blocks.get(index);
-    if (!b) {
+    if (!b || b.closed) {
+      if (b?.closed) this.anthropicIndexMap.delete(index);
       const prefix = kind === 'tool' ? 'fc_' : kind === 'thinking' ? 'rs_' : 'msg_';
       b = {
         kind,
@@ -994,6 +1115,9 @@ export class DownstreamResponseBuilder {
     let out = this.emitStart();
     if (this.activeAnthropicBlock !== null && this.activeAnthropicBlock !== srcIndex) {
       const prevOut = this.anthropicIndexMap.get(this.activeAnthropicBlock)!;
+      const prevBlock = this.blocks.get(this.activeAnthropicBlock);
+      if (prevBlock) prevBlock.closed = true;
+      this.anthropicIndexMap.delete(this.activeAnthropicBlock);
       out += this.sseEvent('content_block_stop', { type: 'content_block_stop', index: prevOut });
       this.activeAnthropicBlock = null;
     }
@@ -1001,6 +1125,8 @@ export class DownstreamResponseBuilder {
       const outIdx = this.anthropicOutIndex++;
       this.anthropicIndexMap.set(srcIndex, outIdx);
       this.activeAnthropicBlock = srcIndex;
+      const curBlock = this.blocks.get(srcIndex);
+      if (curBlock) curBlock.opened = true;
       out += this.sseEvent('content_block_start', { type: 'content_block_start', index: outIdx, content_block: contentBlock });
     }
     return out;

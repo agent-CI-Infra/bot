@@ -40,6 +40,27 @@ function pickForwardHeaders(headers) {
   return out;
 }
 
+function waitForDrain(res, req, signal, isClosed) {
+  if (isClosed() || res.destroyed || res.writableEnded) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const done = ok => {
+      res.off('drain', onDrain);
+      res.off('close', onStop);
+      res.off('error', onStop);
+      req.off('aborted', onStop);
+      signal?.removeEventListener('abort', onStop);
+      resolve(ok);
+    };
+    const onDrain = () => done(true);
+    const onStop = () => done(false);
+    res.once('drain', onDrain);
+    res.once('close', onStop);
+    res.once('error', onStop);
+    req.once('aborted', onStop);
+    signal?.addEventListener('abort', onStop, { once: true });
+  });
+}
+
 export async function startModelRelay({
   agentDir,
   signal,
@@ -186,7 +207,10 @@ export async function startModelRelay({
                   readOffset += bytesRead;
                   lastActivity = Date.now();
                   const slice = bytesRead === len ? buf : buf.subarray(0, bytesRead);
-                  if (!res.write(slice)) await once(res, 'drain');
+                  if (!res.write(slice)) {
+                    const drained = await waitForDrain(res, req, signal, () => clientClosed || closing);
+                    if (!drained) break;
+                  }
                 }
               } finally {
                 await handle.close();
@@ -195,6 +219,7 @@ export async function startModelRelay({
           }
           if (cursor.error) {
             if (!headersSent) sendError(502, 'api_error', String(cursor.error));
+            else if (String(cursor.headers?.['content-type'] || '').includes('text/event-stream')) res.end();
             else res.destroy();
             break;
           }

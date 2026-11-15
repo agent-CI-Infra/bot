@@ -208,6 +208,7 @@ test('Claude Code (/v1/messages) uses OpenAI Chat Completions upstream with stre
   assert.match(turn1Sse, /"text":"Checking "/);
   assert.match(turn1Sse, /"type":"tool_use","id":"call_bash_1","name":"Bash"/);
   assert.match(turn1Sse, /"stop_reason":"tool_use"/);
+  assert.match(turn1Sse, /"usage":\{"input_tokens":100,"output_tokens":30,"cache_read_input_tokens":20\}/);
   assert.match(turn1Sse, /event: message_stop/);
 
   assert.equal(upstreamReqs.length, 1);
@@ -619,4 +620,342 @@ test('pre-header keepalive heartbeats do not prematurely commit 200/application/
   assert.equal(resTimeout.status, 502);
   const errTimeout = await resTimeout.json();
   assert.equal(errTimeout.error.code, 'provider_timeout');
+});
+
+test('propagates client cancellation to upstream when runner returns {error, detail} objects like Workspace.deliver', async t => {
+  const rig = await createRelayRig(t);
+  // Wrap runner to match runner/runner.mjs + Workspace.deliver: catch agentOperation errors and return {error, detail}.
+  const wrappedRunner = async input => {
+    try {
+      return await rig.runner(input);
+    } catch (err) {
+      return {
+        error: 'runner_operation_failed',
+        detail: `${input.type}: ${String(err?.message || 'operation failed')}`,
+      };
+    }
+  };
+
+  const model = addProjectModel(rig.store, rig.repoId, {
+    url: 'https://upstream.invalid/v1',
+    key: 'sk-cancel-test-secret',
+    name: 'cancel-model',
+    interface_type: 'anthropic-messages',
+    auth_header: 'x-api-key',
+  });
+
+  let upstreamAborted = false;
+  let releaseSecondChunk;
+  const secondChunkGate = new Promise(resolve => { releaseSecondChunk = resolve; });
+
+  rig.startGateway({
+    primaryModel: model,
+    runner: wrappedRunner,
+    fetcher: async (_url, init) => {
+      init.signal?.addEventListener('abort', () => {
+        upstreamAborted = true;
+        releaseSecondChunk();
+      }, { once: true });
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue(Buffer.from('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"cancel-model","content":[],"usage":{"input_tokens":50,"output_tokens":0}}}\n\n'));
+          controller.enqueue(Buffer.from('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'));
+          controller.enqueue(Buffer.from('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"First chunk"}}\n\n'));
+          for (let i = 0; i < 40 && !init.signal?.aborted; i++) {
+            await new Promise(resolve => setTimeout(resolve, 35));
+            if (init.signal?.aborted) break;
+            controller.enqueue(Buffer.from(`event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" more-${i}"}}\n\n`));
+          }
+          await secondChunkGate;
+          try { controller.close(); } catch {}
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+
+  const clientAbort = new AbortController();
+  const res = await fetch(`${rig.relay.url}/v1/messages`, {
+    method: 'POST',
+    headers: { 'x-api-key': rig.token, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'cancel-model', max_tokens: 512, stream: true, messages: [{ role: 'user', content: 'stream until cancelled' }] }),
+    signal: clientAbort.signal,
+  });
+  assert.equal(res.status, 200);
+  const reader = res.body.getReader();
+  const first = await reader.read();
+  assert.equal(first.done, false);
+  clientAbort.abort();
+  await reader.cancel().catch(() => {});
+
+  const deadline = Date.now() + 3000;
+  while (!upstreamAborted && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(upstreamAborted, true, 'expected upstream fetch signal to abort after client disconnect');
+
+  let row = null;
+  while (Date.now() < deadline) {
+    row = rig.store.get('SELECT * FROM model_requests WHERE task_id=?', rig.taskId);
+    if (row?.state && row.state !== 'pending') break;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(row?.state, 'cancelled');
+});
+
+test('preserves tool-result images, multi-byte UTF-8 across chunks, text-tool-text blocks, mid-stream SSE errors, and OpenAI protocol auto-selection', async t => {
+  const rig = await createRelayRig(t);
+  const secretKey = 'sk-utf8-secret-key-998877';
+  const pngBase64 = Buffer.from('fake-png-binary-payload').toString('base64');
+  let capturedChatBody = null;
+  let capturedResponsesBody = null;
+  let capturedOpenAiUrls = [];
+
+  const chatModel = addProjectModel(rig.store, rig.repoId, {
+    url: 'https://chat-provider.internal/v1',
+    key: secretKey,
+    name: 'vision-chat-model',
+    interface_type: 'openai-chat-completions',
+    auth_header: 'bearer',
+  });
+  addProjectModel(rig.store, rig.repoId, {
+    url: 'https://api.openai.com/v1',
+    key: 'sk-openai-official-key',
+    name: 'gpt-4.1',
+  });
+
+  rig.startGateway({
+    primaryModel: chatModel,
+    allowVisibleModels: true,
+    fetcher: async (url, init) => {
+      if (url.startsWith('https://api.openai.com/')) {
+        capturedOpenAiUrls.push(url);
+        if (url.endsWith('/responses')) {
+          capturedResponsesBody = JSON.parse(init.body);
+          return new Response(JSON.stringify({
+            id: 'resp_openai_1',
+            object: 'response',
+            status: 'completed',
+            model: 'gpt-4.1',
+            output: [{ id: 'msg_1', type: 'message', status: 'completed', role: 'assistant', content: [{ type: 'output_text', text: 'Direct responses OK', annotations: [] }] }],
+            usage: { input_tokens: 25, output_tokens: 5, input_tokens_details: { cached_tokens: 0 } },
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({
+          id: 'cmpl_openai_1',
+          object: 'chat.completion',
+          model: 'gpt-4.1',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'Converted chat OK' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 25, completion_tokens: 5 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+
+      const parsed = JSON.parse(init.body);
+      const lastMsg = parsed.messages?.at(-1);
+      // 1. Non-streaming passthrough with multi-byte UTF-8 & secret split mid-character across chunks.
+      if (parsed.stream === false && lastMsg?.content === 'split-utf8') {
+        const fullBytes = Buffer.from(JSON.stringify({
+          id: 'cmpl-utf8',
+          object: 'chat.completion',
+          model: 'vision-chat-model',
+          choices: [{ index: 0, message: { role: 'assistant', content: `中文测试🚀多字节边界 key=${secretKey} 结束` }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 12 },
+        }), 'utf8');
+        const parts = [];
+        // Slice every 5 bytes so 3-byte Chinese chars, 4-byte emoji, and secretKey all split across chunks.
+        for (let i = 0; i < fullBytes.length; i += 5) parts.push(fullBytes.subarray(i, i + 5));
+        return new Response(Readable.toWeb(Readable.from(parts)), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+
+      // 2a. Immediate stream error before any chunk flushes -> upgraded to HTTP 502 JSON.
+      if (lastMsg?.content === 'immediate-stream-error') {
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(Buffer.from('data: {"error":{"message":"immediate failure"}}\n\n'));
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }
+
+      // 2b. Mid-stream SSE error after initial text chunk has already flushed to downstream.
+      if (lastMsg?.content === 'mid-stream-error') {
+        const stream = new ReadableStream({
+          async start(controller) {
+            controller.enqueue(Buffer.from('data: {"id":"cmpl-err","model":"vision-chat-model","choices":[{"index":0,"delta":{"role":"assistant","content":"Partial "},"finish_reason":null}]}\n\n'));
+            await new Promise(resolve => setTimeout(resolve, 60));
+            controller.enqueue(Buffer.from('data: {"error":{"message":"upstream overloaded"}}\n\n'));
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }
+
+      // 3. Tool-result image conversion + text -> tool_call -> text + trailing usage chunk.
+      capturedChatBody = parsed;
+      const chunks = [
+        `data: ${JSON.stringify({ id: 'cmpl-ttt', model: 'vision-chat-model', choices: [{ index: 0, delta: { role: 'assistant', content: 'Before tool.' }, finish_reason: null }] })}\n\n`,
+        `data: ${JSON.stringify({ id: 'cmpl-ttt', model: 'vision-chat-model', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_next', type: 'function', function: { name: 'Read', arguments: '{"path":"a"}' } }] }, finish_reason: null }] })}\n\n`,
+        `data: ${JSON.stringify({ id: 'cmpl-ttt', model: 'vision-chat-model', choices: [{ index: 0, delta: { content: 'After tool.' }, finish_reason: null }] })}\n\n`,
+        `data: ${JSON.stringify({ id: 'cmpl-ttt', model: 'vision-chat-model', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`,
+        `data: ${JSON.stringify({ id: 'cmpl-ttt', model: 'vision-chat-model', choices: [], usage: { prompt_tokens: 90, completion_tokens: 22, prompt_tokens_details: { cached_tokens: 10 } } })}\n\n`,
+        'data: [DONE]\n\n',
+      ].map(s => Buffer.from(s, 'utf8'));
+      return new Response(Readable.toWeb(Readable.from(chunks)), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+
+  // Case A: Non-streaming passthrough preserves split multi-byte UTF-8 and scrubs split secret.
+  const utf8Res = await fetch(`${rig.relay.url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'vision-chat-model', stream: false, messages: [{ role: 'user', content: 'split-utf8' }] }),
+  });
+  assert.equal(utf8Res.status, 200);
+  const utf8Json = await utf8Res.json();
+  assert.equal(utf8Json.choices[0].message.content, '中文测试🚀多字节边界 key=[REDACTED] 结束');
+  assert.ok(!utf8Json.choices[0].message.content.includes('\uFFFD'));
+
+  // Case B: Tool result with image converts cleanly (no base64 JSON text in tool message) & text->tool->text opens 3 Anthropic blocks.
+  const tttRes = await fetch(`${rig.relay.url}/v1/messages`, {
+    method: 'POST',
+    headers: { 'x-api-key': rig.token, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'vision-chat-model',
+      max_tokens: 1024,
+      stream: true,
+      messages: [
+        { role: 'user', content: 'Take screenshot and check status' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', id: 'call_shot', name: 'Screenshot', input: {} },
+            { type: 'tool_use', id: 'call_stat', name: 'Status', input: {} },
+          ],
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'call_shot',
+              content: [
+                { type: 'text', text: 'Captured screen' },
+                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
+              ],
+            },
+            { type: 'tool_result', tool_use_id: 'call_stat', content: 'OK' },
+          ],
+        },
+      ],
+    }),
+  });
+  assert.equal(tttRes.status, 200);
+  const tttSse = await tttRes.text();
+  // Verify all tool messages precede the trailing user image_url message and base64 is not JSON.stringified into tool content.
+  const roles = capturedChatBody.messages.map(m => m.role);
+  assert.deepEqual(roles, ['user', 'assistant', 'tool', 'tool', 'user']);
+  assert.equal(capturedChatBody.messages[2].content, 'Captured screen');
+  assert.equal(capturedChatBody.messages[3].content, 'OK');
+  assert.deepEqual(capturedChatBody.messages[4].content, [
+    { type: 'image_url', image_url: { url: `data:image/png;base64,${pngBase64}` } },
+  ]);
+
+  // Verify 3 distinct Anthropic content blocks (0: text, 1: tool_use, 2: text) and non-zero usage on message_delta.
+  const blockStarts = [...tttSse.matchAll(/event: content_block_start\ndata: ([^\n]+)/g)].map(m => JSON.parse(m[1]));
+  const blockStops = [...tttSse.matchAll(/event: content_block_stop\ndata: ([^\n]+)/g)].map(m => JSON.parse(m[1]));
+  assert.deepEqual(blockStarts.map(b => [b.index, b.content_block.type]), [[0, 'text'], [1, 'tool_use'], [2, 'text']]);
+  assert.deepEqual(blockStops.map(b => b.index), [0, 1, 2]);
+  assert.match(tttSse, /"usage":\{"input_tokens":80,"output_tokens":22,"cache_read_input_tokens":10\}/);
+
+  // Case C1: Immediate upstream SSE error before first flush returns HTTP 502 JSON instead of 200 + raw JSON.
+  const immErrRes = await fetch(`${rig.relay.url}/v1/messages`, {
+    method: 'POST',
+    headers: { 'x-api-key': rig.token, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'vision-chat-model', max_tokens: 256, stream: true, messages: [{ role: 'user', content: 'immediate-stream-error' }] }),
+  });
+  assert.equal(immErrRes.status, 502);
+  const immErrJson = await immErrRes.json();
+  assert.equal(immErrJson.error.type, 'api_error');
+  assert.match(immErrJson.error.message, /immediate failure/);
+
+  // Case C2: Mid-stream SSE error after first chunk flushed emits SSE `event: error` frame instead of silent truncation.
+  const midErrRes = await fetch(`${rig.relay.url}/v1/messages`, {
+    method: 'POST',
+    headers: { 'x-api-key': rig.token, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'vision-chat-model', max_tokens: 256, stream: true, messages: [{ role: 'user', content: 'mid-stream-error' }] }),
+  });
+  assert.equal(midErrRes.status, 200);
+  const midErrSse = await midErrRes.text();
+  assert.match(midErrSse, /"text":"Partial "/);
+  assert.match(midErrSse, /event: error\ndata: \{"type":"error","error":\{"type":"api_error","message":"upstream overloaded"\}\}/);
+
+  // Case D: Official OpenAI base URL automatically uses /v1/responses for Codex (/v1/responses) and /v1/chat/completions for Claude Code (/v1/messages).
+  const codexOpenAiRes = await fetch(`${rig.relay.url}/v1/responses`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${rig.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gpt-4.1', stream: false, input: 'Hello from Codex' }),
+  });
+  assert.equal(codexOpenAiRes.status, 200);
+  const codexOpenAiJson = await codexOpenAiRes.json();
+  assert.equal(codexOpenAiJson.output[0].content[0].text, 'Direct responses OK');
+  assert.equal(capturedResponsesBody.input, 'Hello from Codex');
+
+  const claudeOpenAiRes = await fetch(`${rig.relay.url}/v1/messages`, {
+    method: 'POST',
+    headers: { 'x-api-key': rig.token, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gpt-4.1', max_tokens: 256, stream: false, messages: [{ role: 'user', content: 'Hello from Claude Code' }] }),
+  });
+  assert.equal(claudeOpenAiRes.status, 200);
+  assert.equal((await claudeOpenAiRes.json()).content[0].text, 'Converted chat OK');
+  assert.deepEqual(capturedOpenAiUrls, [
+    'https://api.openai.com/v1/responses',
+    'https://api.openai.com/v1/chat/completions',
+  ]);
+});
+
+test('model relay close() resolves promptly when a slow client disconnects during response backpressure', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'relay-drain-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const relay = await startModelRelay({ agentDir: dir, pollMs: 10 });
+
+  const { connect } = await import('node:net');
+  const sock = connect(relay.port, '127.0.0.1');
+  await once(sock, 'connect');
+  // Pause reading on the client socket so a large response triggers socket write backpressure.
+  sock.pause();
+  const reqBody = JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'hi' }] });
+  sock.write(
+    `POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer tok_drain\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(reqBody)}\r\n\r\n${reqBody}`,
+  );
+
+  let reqId = null;
+  const deadline = Date.now() + 3000;
+  while (!reqId && Date.now() < deadline) {
+    const files = readdirSync(join(dir, 'model-requests')).filter(f => f.endsWith('.json'));
+    if (files.length) reqId = files[0].slice(0, -5);
+    else await new Promise(resolve => setTimeout(resolve, 15));
+  }
+  assert.ok(reqId, 'expected relay request file');
+
+  // Write 4 MiB into the reply stream so res.write() hits highWaterMark and awaits drain.
+  const payload = Buffer.alloc(4 * 1024 * 1024, 0x61);
+  writeFileSync(join(dir, 'model-replies', `${reqId}.stream`), payload);
+  writeFileSync(join(dir, 'model-replies', `${reqId}.cursor.json`), JSON.stringify({
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+    written: payload.length,
+    done: false,
+    error: null,
+    keepalive: 0,
+  }));
+
+  await new Promise(resolve => setTimeout(resolve, 80));
+  sock.destroy();
+
+  const closeResult = await Promise.race([
+    relay.close().then(() => 'closed'),
+    new Promise(resolve => setTimeout(() => resolve('hung'), 2000)),
+  ]);
+  assert.equal(closeResult, 'closed');
 });

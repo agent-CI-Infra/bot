@@ -51,12 +51,17 @@ export function parseCatalog(value: unknown) {
   if (!entries.length) throw new Error('catalog_empty');
   return { entries, rejected, skipped };
 }
+function isOpenAiCodexResponsesModel(provider: string, npm: string, modelId: string): boolean {
+  return (provider.toLowerCase() === 'openai' || npm === '@ai-sdk/openai' || npm === '@ai-sdk/openai-responses')
+    && /(?:^|[-/])codex(?:[-.]|$)/i.test(modelId);
+}
 function parseEntryProtocol(provider: string, p: Record<string, any>, m: Record<string, any>): { interface_type: ModelInterfaceType; auth_header: ModelAuthHeader } {
   const npm = typeof m.provider?.npm === 'string' ? m.provider.npm : typeof p.npm === 'string' ? p.npm : '';
   const explicitInterface = m.interface_type ?? p.interface_type;
   const interface_type: ModelInterfaceType = modelInterfaceTypes.includes(explicitInterface) ? explicitInterface
     : npm === '@ai-sdk/anthropic' || (!npm && provider.toLowerCase() === 'anthropic') ? 'anthropic-messages'
-    : npm === '@ai-sdk/openai-responses' ? 'openai-responses' : 'openai-chat-completions';
+    : npm === '@ai-sdk/openai-responses' || isOpenAiCodexResponsesModel(provider, npm, String(m.id ?? '')) ? 'openai-responses'
+    : 'openai-chat-completions';
   const explicitAuth = m.auth_header ?? p.auth_header;
   const auth_header: ModelAuthHeader = modelAuthHeaders.includes(explicitAuth) ? explicitAuth
     : interface_type === 'anthropic-messages' && (provider.toLowerCase() === 'anthropic' || npm === '@ai-sdk/anthropic') ? 'x-api-key' : 'bearer';
@@ -171,9 +176,14 @@ export function modelProtocol(store: Store, model: { id?: string; api_url: strin
     : /\/responses$/.test(trimmed) ? 'openai-responses'
     : /\/chat\/completions$/.test(trimmed) ? 'openai-chat-completions' : null;
   const matched = inferCatalogEntryProtocol(modelCatalog(store).match(model).entry);
-  const interface_type: ModelInterfaceType = manualInterface ?? urlInterface ?? matched?.interface_type ?? 'openai-chat-completions';
-  const source = manualInterface || manualAuth ? 'manual' : urlInterface ? 'url' : matched ? 'catalog' : 'default';
   let host = ''; try { host = new URL(model.api_url).hostname.toLowerCase(); } catch {}
+  const codexDefault: ModelInterfaceType | null = !matched
+    && (host === 'api.openai.com' || host.endsWith('.openai.com'))
+    && /(?:^|[-/])codex(?:[-.]|$)/i.test(model.model_name)
+    ? 'openai-responses'
+    : null;
+  const interface_type: ModelInterfaceType = manualInterface ?? urlInterface ?? matched?.interface_type ?? codexDefault ?? 'openai-chat-completions';
+  const source = manualInterface || manualAuth ? 'manual' : urlInterface ? 'url' : matched ? 'catalog' : 'default';
   const defaultAuth: ModelAuthHeader = matched?.auth_header ?? (interface_type === 'anthropic-messages' || host === 'api.anthropic.com' || host.endsWith('.anthropic.com') ? 'x-api-key' : 'bearer');
   return { interface_type, auth_header: manualAuth ?? defaultAuth, source, override: { interface_type: manualInterface, auth_header: manualAuth } };
 }
