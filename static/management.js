@@ -155,6 +155,10 @@ function fitManagementWindow(chat) {
   const maxWidth = Math.max(1, innerWidth - margin * 2), maxHeight = Math.max(1, room);
   const width = Math.max(Math.min(360, maxWidth), Math.min(chat.size.width, maxWidth)), height = Math.max(Math.min(460, maxHeight), Math.min(chat.size.height, maxHeight));
   chat.window.style.width = Math.round(width) + 'px'; chat.window.style.height = Math.round(height) + 'px';
+  // #641 review: the compact layout follows the box's own height, not the viewport's. Between 561 and ~660px of viewport
+  // the clamp below leaves a box under 520px while no max-height media query matches, so the composer overflowed the box
+  // and the send button landed outside both the panel and the screen.
+  chat.window.dataset.compact = height < 520 ? '1' : '';
 }
 function resizeManagementWindow(chat, width, height) {
   chat.size = { width, height }; fitManagementWindow(chat);
