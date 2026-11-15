@@ -7,7 +7,8 @@ async function openTask(id) {
   if (!taskView.open) taskInboxOrigin = typeof captureConsoleInbox === 'function' ? captureConsoleInbox(id) : null;
   taskReadVersion++; taskLogState = { id, logs: [], page: null, error: '', olderPending: false };
   $('task-log-controls').replaceChildren();
-  openTaskId = id; resetTaskRendering(); $('timeline-command').hidden = true; clearTimeout(taskTimer);
+  // A new task starts its own backoff: the delay task A reached must not decide task B's first retry (#745 review).
+  openTaskId = id; resetTaskRendering(); $('timeline-command').hidden = true; clearTimeout(taskTimer); taskRetryDelay = 0;
   $('task-picker').hidden = true; $('task-layout').hidden = false; $('task-next').hidden = true; $('task-next-text').textContent = '';
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = '正在加载…'; notice('task-error'); $('timeline-live').hidden = true;
@@ -23,7 +24,7 @@ async function openTaskDelivery(deliveryId) {
 }
 function openTaskChoices(label, tasks, hasMore = false, onMore = null) {
   taskReadVersion++; taskLogState = null;
-  resetTaskRendering();
+  resetTaskRendering(); taskRetryDelay = 0;
   openTaskId = null; clearTimeout(taskTimer); $('timeline-command').hidden = true; $('timeline-live').hidden = true; notice('task-error');
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = `${label} · 选择任务`; $('task-actions').append(button('关闭', () => taskView.close()));
@@ -45,7 +46,8 @@ function openTaskChoices(label, tasks, hasMore = false, onMore = null) {
   if (!taskView.open) taskView.showModal();
 }
 async function refreshTask() {
-  clearTimeout(taskTimer); const id = openTaskId; if (!id || !taskView.open) return;
+  // Clearing the handle is not enough: a terminal answer must leave no timer at all, so the state says what happened.
+  clearTimeout(taskTimer); taskTimer = null; const id = openTaskId; if (!id || !taskView.open) return;
   if (!taskLogState || taskLogState.id !== id) taskLogState = { id, logs: [], page: null, error: '', olderPending: false };
   const request = ++taskReadVersion, logState = taskLogState;
   const current = () => openTaskId === id && taskView.open && request === taskReadVersion;
@@ -57,7 +59,8 @@ async function refreshTask() {
     if (!current()) return;
     taskRetryDelay = 0;
     renderTaskHeader(detail.task); renderTaskNext(detail.task, roles, purposes);
-    if (logResult.error && [401, 403, 404].includes(logResult.error.status)) throw logResult.error;
+    // The log read asks the same rule as the detail read, so a change to the terminal statuses reaches both (#745 review).
+    if (logResult.error && pollAfterError(logResult.error).terminal) throw logResult.error;
     if (logResult.error) logState.error = logResult.error.message;
     else {
       logState.error = ''; mergeTaskLogs(logState, logResult, !after); renderTimeline(detail.task, logState.logs);
