@@ -283,10 +283,25 @@ function openAccessGaps(row) {
 // reading is stale says 未检查, because an old reading cannot be called 正常 and a stale gap may already be fixed; a fresh
 // empty reading says 正常; a fresh gap keeps the actionable chip below. Every state carries data-permission so
 // updatePermissionBadges() can still swap it in place after the background check.
+// #823: GET /api/repositories omits access_gaps / permissions_stale entirely. That is not an unread installation
+// reading, so the project-admin list shows an explained placeholder instead of 未检查. Installations rows still send
+// access_gaps: null when a grant was never read, and that stays 未检查.
 function permissionStateChip(label, tone) {
   const chip = badge(label, tone); chip.dataset.permission = ''; return chip;
 }
+function permissionReading(row) {
+  return 'access_gaps' in row || 'permissions_stale' in row;
+}
+function permissionPlaceholder() {
+  const placeholder = element('span', '—', 'project-empty');
+  placeholder.dataset.permission = '';
+  const explanation = '仓库安装权限由管理员在安装列表中核对';
+  placeholder.title = explanation;
+  placeholder.setAttribute('aria-label', explanation);
+  return placeholder;
+}
 function permissionCell(row) {
+  if (!permissionReading(row)) return permissionPlaceholder();
   if (row.access_gaps == null || row.permissions_stale) return permissionStateChip('未检查', 'info');
   if (!row.access_gaps.length) return permissionStateChip('正常', 'success');
   return permissionBadge(row);

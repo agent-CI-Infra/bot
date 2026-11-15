@@ -82,6 +82,37 @@ test('the table names the permission state and keeps the gate, permission and bo
   assert.equal(cell('101', '看板').querySelector('[data-board-status]').textContent, '查看看板');
 });
 
+// #823: the project-admin list comes from GET /api/repositories, which omits access_gaps / permissions_stale.
+// That missing reading is not "never checked"; the column keeps its place with an explained placeholder.
+test('the project-admin list does not call an omitted permission reading 未检查', async () => {
+  const rows = [
+    { id: '101', owner_id: '10', full_name: 'fixture/started', registered: true, enabled: true, running_tasks: 0, queued_tasks: 0,
+      review_enabled: true, development_enabled: false, model_id: 'm' },
+  ];
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path.startsWith('/api/integrations')) return [200, { integrations: [] }];
+    if (path.startsWith('/api/identity')) return [200, { github_connection: { pending_repositories: [] } }];
+    if (path.startsWith('/api/installations')) return [403, { error: 'forbidden' }];
+    return [200, { repositories: rows, syncs: [] }];
+  });
+  page.run(`var projectRoute = () => null; me = {role: 'project_admin'}; tab = 'projects';`);
+  await page.run('render()');
+  await new Promise(r => setTimeout(r, 20));
+  const line = page.$('rows').querySelector('.project-list-row');
+  const cell = [...line.children].find(child => child.dataset.label === '权限');
+  const chip = cell.querySelector('[data-permission]');
+  assert.equal(chip.textContent, '—');
+  assert.equal(chip.getAttribute('aria-label'), '仓库安装权限由管理员在安装列表中核对');
+  assert.equal(chip.title, '仓库安装权限由管理员在安装列表中核对');
+  assert.ok(chip.classList.contains('project-empty'));
+  assert.equal(page.$('rows').textContent.includes('未检查'), false);
+  assert.equal(page.requests.some(req => req.includes('/api/installations/permissions/check')), false);
+  // An installations row that explicitly sends access_gaps: null is still 未检查, even if rendered by the same cell helper.
+  page.run(`document.body.append(permissionCell(${JSON.stringify({ id: '202', access_gaps: null })}))`);
+  const unread = page.run(`document.body.querySelectorAll('[data-permission]')`);
+  assert.equal(unread[unread.length - 1].textContent, '未检查');
+});
+
 test('project list read failure is an error state, not an empty list', async () => {
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
     if (path.startsWith('/api/integrations')) return [200, {integrations: []}];
