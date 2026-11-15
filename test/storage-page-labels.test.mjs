@@ -6,10 +6,12 @@ import { loadConsole } from './console-page.mjs';
 // category bar is not "全局设置", the two tables name what they count, and the original terms stay in the th title.
 const scripts = ['static/app.js', 'static/views.js', 'static/costs.js', 'static/project.js', 'static/settings.js', 'static/onboarding.js'];
 const textOf = node => [node.textContent, ...node.children.flatMap(textOf)].join(' ');
-const byTag = (node, tag) => node.children.flatMap(child => [...(child.tagName === tag ? [child] : []), ...byTag(child, tag)]);
+const byTag = (node, tag) => node.children.flatMap(child => [...(child.tagName === tag.toUpperCase() ? [child] : []), ...byTag(child, tag)]);
 const pageFor = role => {
   const page = loadConsole(scripts, (method, path) => {
-    if (method === 'GET' && path === '/api/storage') return [200, { refreshed_at: null, projects: [], alerts: [] }];
+    if (method === 'GET' && path === '/api/storage') return [200, { refreshed_at: '2026-11-15T08:00:00.000Z', alerts: [], projects: [{ repository_id: '101', name: 'fixture/project-101',
+      files: { count: 1, bytes: 10 }, records: {}, blobs: { count: 0, bytes: 0 }, open: { count: 0, bytes: 0 }, manager: null,
+      computer: { total_bytes: 100, complete: true, scanned_at: '2026-11-15T08:00:00.000Z' } }] }];
     throw new Error('Unexpected request: ' + method + ' ' + path);
   });
   page.run(`me = { role: '${role}', repositories: ['101'], csrf_token: 'csrf' }; location.hash = '#/settings/storage';`);
