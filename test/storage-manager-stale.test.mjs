@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { loadConsole } from './console-page.mjs';
 import { Store } from '../dist/storage/database.js';
 import { StorageReport } from '../dist/app/storage.js';
+import { HttpError } from '../dist/core/security.js';
 
 // The storage page keeps the last manager snapshot when a read fails (#793): a timeout or a 5xx must not turn the
 // project computers, the manager's database and Docker figures and the disk alert into "unknown", and the page has to
@@ -18,7 +19,7 @@ function fixture(t) {
   const state = { error: null, reads: 0, answer: null };
   const manager = { async call(method, path) {
     assert.equal(`${method} ${path}`, 'GET /v1/storage'); state.reads++;
-    if (state.error) throw new Error(state.error);
+    if (state.error) throw state.error;
     return state.answer;
   } };
   state.answer = {
@@ -47,9 +48,9 @@ test('a manager read that fails keeps the last snapshot and says so; a recovery 
   assert.deepEqual(first.alerts.map(alert => [alert.where, alert.stale]), [['manager', false]]);
 
   // The manager answers 503 this time: the page keeps the numbers it already had.
-  state.error = 'manager answered 503'; await report.refresh();
+  state.error = new HttpError(503, 'manager_unavailable'); await report.refresh();
   const stale = await report.api(admin, 'GET', '/api/storage');
-  assert.equal(stale.manager_error, 'manager answered 503', 'the failed read is reported');
+  assert.equal(stale.manager_error, 'manager_unavailable', 'the failed read is reported by its code');
   assert.equal(stale.manager_read_at, first.manager_read_at, 'the time of the last successful read stays');
   assert.equal(stale.totals.manager.database.bytes, 8192, 'the manager database figure stays');
   assert.equal(stale.totals.manager.disk.free_bytes, 100, 'and so does its disk figure');
@@ -74,10 +75,13 @@ test('a manager read that fails keeps the last snapshot and says so; a recovery 
 
 test('a manager that never answered reports the error without inventing numbers', async t => {
   const { report, state } = fixture(t);
-  state.error = 'manager did not answer';
+  // A failure that is not the manager client's own refusal (an unexpected socket error, for instance) must not put its
+  // message into the answer: the page gets the code, never a host, address or manager response body.
+  state.error = new Error('connect ECONNREFUSED 10.0.0.5:8080');
   await report.refresh();
   const view = await report.api(admin, 'GET', '/api/storage');
-  assert.equal(view.manager_error, 'manager did not answer');
+  assert.equal(view.manager_error, 'manager_unavailable', 'an unexpected failure is reported by its code');
+  assert.doesNotMatch(JSON.stringify(view), /ECONNREFUSED|10\.0\.0\.5/, 'the raw failure message never leaves the server');
   assert.equal(view.manager_read_at, null, 'no read has succeeded yet');
   assert.equal(view.totals.manager, null, 'no manager figures are made up');
   assert.deepEqual(view.alerts, []);
@@ -88,7 +92,7 @@ test('a manager that never answered reports the error without inventing numbers'
 const scripts = ['static/app.js', 'static/views.js', 'static/costs.js', 'static/project.js', 'static/settings.js', 'static/onboarding.js'];
 const textOf = node => [node.textContent, ...node.children.flatMap(textOf)].join(' ');
 test('the storage page says the manager read failed and marks the alert it kept', async () => {
-  let view = { refreshed_at: '2026-11-15T08:00:00.000Z', manager_read_at: '2026-11-15T07:55:00.000Z', manager_error: 'manager answered 503', projects: [],
+  let view = { refreshed_at: '2026-11-15T08:00:00.000Z', manager_read_at: '2026-11-15T07:55:00.000Z', manager_error: 'manager_unavailable', projects: [],
     alerts: [{ where: 'manager', free_bytes: 1024, total_bytes: 4096, reserve_bytes: 2048, stale: true }] };
   const page = loadConsole(scripts, (method, path) => {
     if (method === 'GET' && path === '/api/storage') return [200, view];
