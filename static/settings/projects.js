@@ -18,7 +18,7 @@ async function globalProjectSettings(request, id) {
     const control = event.currentTarget, owner = me; control.disabled = true;
     try { const result = await api('/api/installations/sync', 'POST', {}); if (me !== owner) return;
       forgetConsoleGaps(); syncConsoleShell(); if (request !== renderVersion) return; const conclusion = installationSyncNotice(result); notice('message', conclusion.text, conclusion.tone); await route();
-    } catch (err) { if (request === renderVersion) notice('message', err.message); } finally { control.disabled = false; }
+    } catch (err) { if (request === renderVersion) notice('message', err.message, '', 'alert'); } finally { control.disabled = false; }
   }), consoleLink('#/settings/projects/' + (hidden ? 'list.0' : 'hidden.0'), hidden ? '返回项目管理' : '管理已隐藏仓库'));
   selection.append(tools, note(`${hidden ? '已隐藏仓库' : '项目'} · 第 ${offset / 50 + 1} 页 · 本页 ${installed.length} 个`));
   for (const row of installed) {

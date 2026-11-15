@@ -147,7 +147,7 @@ async function render(quiet = false) {
         const retry=element('button','重试','quiet');retry.addEventListener('click',async()=>{
           retry.disabled=true;const address=tab+':'+location.hash;
           try{await api('/api/tasks/'+row.id+'/retry','POST',{});if(address!==tab+':'+location.hash)return;notice('message');await render();}
-          catch(err){if(address===tab+':'+location.hash)notice('message',retryErrorText(err));retry.disabled=false;}
+          catch(err){if(address===tab+':'+location.hash)notice('message',retryErrorText(err),'','alert');retry.disabled=false;}
         });actions.append(retry);
       }line.append(actions);
     }

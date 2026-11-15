@@ -63,9 +63,16 @@ async function api(path, method = 'GET', body, { signal } = {}) {
   if (!response.ok) throw Object.assign(new Error(value.error === 'authorization_changed' ? '权限已变化，请刷新页面后按当前权限重试。' : value.error === 'note_revision_changed' ? '文件已被其他操作更新，请刷新后再保存。' : `${response.status} · ${value.error}`), { status: response.status, code: typeof value.error === 'string' ? value.error : undefined, ...(value.field ? { field: value.field } : {}) });
   return value;
 }
-function notice(id, text = '', tone = '') {
+// #738: the strip carries the semantics of the message now in it, not of whatever error came last. `kind` is the
+// announcement — alert writes role=alert and aria-live=assertive, status writes role=status and aria-live=polite — and it
+// is written on every notice, so an error cannot leave the strip assertive for the next ordinary message. The static
+// aria-live in index.html is overridden either way, which is why both attributes are written. `tone` stays the visual
+// class ('view-success' or ''), because it never says whether a message is a failure.
+function notice(id, text = '', tone = '', kind = 'status') {
   const box = $(id); box.replaceChildren();
   if (!text) return;
+  box.setAttribute('role', kind === 'alert' ? 'alert' : 'status');
+  box.setAttribute('aria-live', kind === 'alert' ? 'assertive' : 'polite');
   const close = element('button', '关闭提示', 'quiet'); close.type = 'button'; close.addEventListener('click', () => notice(id));
   box.append(element('span', text, tone), close);
 }
@@ -74,7 +81,7 @@ function retryErrorText(err) {
   if (/\btask_not_retryable\b/.test(err.message)) return '这个任务已经结束，不能重试。';
   return err.message;
 }
-function error(err) { if (sessionExpired && isSessionExpiry(err?.status, err?.code)) return; if (!$('message').childElementCount) notice('message', err.message); if ($('editor').open) $('editor-error').textContent = err.message; }
+function error(err) { if (sessionExpired && isSessionExpiry(err?.status, err?.code)) return; if (!$('message').childElementCount) notice('message', err.message, '', 'alert'); if ($('editor').open) $('editor-error').textContent = err.message; }
 function element(tag, text, className) { const el = document.createElement(tag); el.textContent = text; if (className) el.className = className; return el; }
 // Fold technical terms out of a first screen: the summary stays visible, the body opens on demand.
 function advancedHelp(summary, ...content) {
