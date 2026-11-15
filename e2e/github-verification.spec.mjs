@@ -125,3 +125,51 @@ test('核验进行中会话过期时，不再跟进核验进度，交给「登�
     expect(errors).toEqual([]);
   } finally { f.state.apiGate = undefined; release(); await f.close(); }
 });
+
+// #754: the progress of a running check is read from /api/auth/me, and that read can fail for reasons other than an
+// expired session. It must not keep asking at the pace of a healthy read: the wait doubles, the line says the reading
+// failed once three in a row have, a button reads at once, and a hidden tab reads nothing.
+test('核验进度读取连续失败时按指数退避、显示失败提示，恢复后继续核验', async ({ page }) => {
+  const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.route('https://avatars.githubusercontent.com/**', route => route.abort());
+  let release; const held = new Promise(resolve => { release = resolve; });
+  f.state.apiGate = async path => { if (path === '/app/installations/77') await held; };
+  await page.clock.install();
+  let reads = 0; page.on('request', request => { if (new URL(request.url()).pathname === '/api/auth/me') reads++; });
+  const count = () => reads;
+  try {
+    await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    const line = page.locator('#github-verification');
+    await expect(line).toBeVisible();
+    await expect(line).toHaveText('正在核验 GitHub 权限（已核对 0/1 个安装），完成后显示你可以管理的项目。');
+    // Every progress read now fails, the way a control plane that is down answers.
+    await page.route('**/api/auth/me', route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'fixture_unavailable' }) }));
+    const before = await count();
+    // Healthy pace: one read every 1.5 s. Doubling means the same span yields fewer reads as failures pile up.
+    await page.clock.runFor(1500); await expect.poll(count).toBe(before + 1);
+    await page.clock.runFor(1500); await expect.poll(count).toBe(before + 1);
+    await page.clock.runFor(1500); await expect.poll(count).toBe(before + 2);
+    await page.clock.runFor(3000); await expect.poll(count).toBe(before + 2);
+    await page.clock.runFor(3000); await expect.poll(count).toBe(before + 3);
+    // Three failures in a row: the line says the reading failed and offers a read now.
+    await expect(line).toHaveText('核验进度读取失败，正在自动重试。立即重新读取');
+    await expect(line).toHaveAttribute('data-state', 'failed');
+    await expect(page.getByRole('button', { name: '立即重新读取', exact: true })).toBeVisible();
+    // The endpoint recovers; the button reads at once rather than waiting out the 12 s the third failure asked for.
+    await page.unroute('**/api/auth/me');
+    await page.getByRole('button', { name: '立即重新读取', exact: true }).click();
+    await expect(line).toHaveText('正在核验 GitHub 权限（已核对 0/1 个安装），完成后显示你可以管理的项目。');
+    await expect(line).not.toHaveAttribute('data-state', 'failed');
+    const recovered = await count();
+    // A successful read clears the failure count: the next wait is the healthy 1.5 s again.
+    await page.clock.runFor(1400); await page.waitForTimeout(100); expect(await count()).toBe(recovered);
+    await page.clock.runFor(200); await expect.poll(count).toBe(recovered + 1);
+    // A hidden tab reads nothing at all, and coming back reads at once instead of waiting out a delay.
+    await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange')); });
+    const hidden = await count();
+    await page.clock.runFor(60000); await page.waitForTimeout(200); expect(await count()).toBe(hidden);
+    await page.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')); });
+    await expect.poll(count).toBe(hidden + 1);
+    expect(errors).toEqual([]);
+  } finally { f.state.apiGate = undefined; release(); await f.close(); }
+});
