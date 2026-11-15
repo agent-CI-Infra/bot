@@ -162,11 +162,13 @@ function fitManagementWindow(chat) {
   // #641 review: the compact layout follows the box's own height, not the viewport's. Between 561 and ~660px of viewport
   // the clamp below leaves a box under 520px while no max-height media query matches, so the composer overflowed the box
   // and the send button landed outside both the panel and the screen.
-  // The compact rules only target the floating panel; the full-page and fullscreen views lay themselves out from the
-  // viewport and must keep the wide layout even when this clamp hands them a small height.
+  // This path writes the tag for the floating panel only, from the height the clamp just produced. The page and
+  // fullscreen views get theirs from updateViewport(), which measures their own box after setManagementPresentation
+  // removed the inline size — a short page view (768×432 at 250% zoom) needs the compact rules too, so the tag is not
+  // simply cleared when the panel leaves the floating mode. toggleAttribute, not dataset = '': an empty attribute still
+  // matches [data-compact]. A hidden window measures 0px, which is why openManagementChat calls updateViewport() again
+  // once chat.window.hidden is false.
   const floating = !chat.window.classList.contains('management-page') && !chat.window.classList.contains('management-fullscreen');
-  // toggleAttribute, not dataset = '': an empty attribute still matches [data-compact] and would put the full-page view
-  // into the compact layout too.
   chat.window.toggleAttribute('data-compact', floating && height < 520);
 }
 function resizeManagementWindow(chat, width, height) {

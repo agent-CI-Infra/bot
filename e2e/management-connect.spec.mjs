@@ -210,6 +210,11 @@ test('#641 短手机（390×500）断流后错误文案与「重新连接」可�
     await page.setViewportSize({ width: 390, height: 500 });
     await page.goto(f.h.admin + '/#/projects');
     await signIn(page, f.h, f.password);
+    // #641 review: the stream only opens while a turn is in flight. With the fixture model free to answer, the first
+    // read can already see the turn finished — no stream request is made at all, this route has nothing to abort, and the
+    // bar legitimately says 「就绪」 (the merge-queue run failed exactly here). Holding the model keeps the turn pending,
+    // so the read opens the stream and the abort always hits it.
+    f.modelState.gate = new Promise(() => {});
     await page.route('**/events?stream=1&after=*', route => route.abort('failed'));
     const navBar = page.locator('#console-mobile-nav a[data-page="assistant"]');
     await expect(navBar).toBeVisible(); await navBar.click();
