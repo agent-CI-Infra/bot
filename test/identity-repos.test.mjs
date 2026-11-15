@@ -62,3 +62,17 @@ test('pending-only identity keeps pending_activation copy and does not say the r
   assert.equal(panel.querySelector('.identity-pending-repos strong').textContent, 'ThinkFlowLab/FlyBot');
   assert.equal(panel.querySelector('.identity-pending-repos .status').textContent, '待超级管理员启动');
 });
+
+test('disconnected identity does not list started repositories even when the payload still carries them', async () => {
+  const page = load({
+    state: 'disconnected',
+    repository_count: 1,
+    repositories: [{ id: '101', full_name: 'open-x-agents/Douya' }],
+    pending_repositories: [{ id: '202', full_name: 'ThinkFlowLab/FlyBot' }],
+  });
+  const panel = await draw(page);
+  assert.equal(panel.querySelector('.identity-openable-repos'), null);
+  const texts = [...panel.querySelectorAll('p, .note, .muted, li, a')].map(node => node.textContent).join('\n');
+  assert.equal(texts.includes('另有'), false);
+  assert.equal(texts.includes('open-x-agents/Douya'), false);
+});
