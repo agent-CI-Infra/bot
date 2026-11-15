@@ -29,7 +29,7 @@ async function renderSchedules(panel, project) {
   catch (error) {
     if (!live()) return;
     if (revoked(error)) return;
-    status.textContent = '计划上下文未能读取，数量及状态未知：' + error.message;
+    status.textContent = '计划上下文未能读取，数量及状态未知：' + readErrorText(error);
     panel.append(button('重新读取计划上下文', () => renderSchedules(container, project), 'quiet')); return;
   }
   if (!live()) return;

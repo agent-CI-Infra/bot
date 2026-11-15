@@ -228,7 +228,7 @@ async function renderIdentity() {
   panel.replaceChildren(consoleState(t('identity.loading'), t('identity.loading_detail')));
   try { data = await api('/api/identity'); }
   catch (err) {
-    if (current()) panel.replaceChildren(consoleState(t('identity.load_failed'), err.message, { tone: 'error', retry: () => render().catch(error) }));
+    if (current()) panel.replaceChildren(consoleState(t('identity.load_failed'), readErrorText(err), { tone: 'error', retry: () => render().catch(error) }));
     return;
   }
   if (!current()) return;
@@ -411,11 +411,11 @@ async function renderIdentity() {
       const primaryDisabled = !enabled && githubEnabledButtons.some(b => overview.contains(b));
       disabledHint.textContent = disabledText;
       disabledHint.hidden = !primaryDisabled;
-    } catch (err) { if (current()) provider.replaceChildren(consoleState(t('identity.github_status_failed'), err.message, { tone: 'error', retry: () => loadProvider() })); }
+    } catch (err) { if (current()) provider.replaceChildren(consoleState(t('identity.github_status_failed'), readErrorText(err), { tone: 'error', retry: () => loadProvider() })); }
   };
   const loadFeishu = async () => {
     try { const data = await api('/api/channels/bindings'), feishu = card(t('identity.feishu_card')); if (typeof notePersonalApps === 'function') notePersonalApps(data); feishu.append(await channelBindingOverview(data)); if (!current()) return; feishuSlot.replaceChildren(feishu); }
-    catch (err) { if (current()) feishuSlot.replaceChildren(consoleState(t('identity.feishu_failed'), err.message, { tone: 'error', retry: () => loadFeishu() })); }
+    catch (err) { if (current()) feishuSlot.replaceChildren(consoleState(t('identity.feishu_failed'), readErrorText(err), { tone: 'error', retry: () => loadFeishu() })); }
   };
   const loading = [loadProvider(), loadFeishu()];
   if (data.actor.tenant_id && data.scopes.some(g => g.state === 'active' && (g.scope === 'platform' || g.scope === 'tenant' && g.tenant_id === data.actor.tenant_id))) {
@@ -423,7 +423,7 @@ async function renderIdentity() {
     const loadMembers = async () => {
       let grants;
       try { ({ grants } = await api('/api/identity/grants?tenant_id=' + encodeURIComponent(data.actor.tenant_id))); }
-      catch (err) { if (current()) members.replaceChildren(element('h3', t('identity.members')), consoleState(t('identity.members_failed'), err.message, { tone: 'error', retry: () => loadMembers() })); return; }
+      catch (err) { if (current()) members.replaceChildren(element('h3', t('identity.members')), consoleState(t('identity.members_failed'), readErrorText(err), { tone: 'error', retry: () => loadMembers() })); return; }
       if (!current()) return; members.replaceChildren(element('h3', t('identity.members')));
       members.append(note(t('identity.members_note')));
       for (const grant of grants) {

@@ -60,7 +60,7 @@ async function render(quiet = false) {
     $('rows').removeAttribute('aria-busy');
     const heading = tab === 'projects' ? '项目列表未能读取' : tab === 'events' ? '仓库事件未能读取' : '列表未能读取';
     $('count').textContent = '读取失败';
-    $('rows').replaceChildren(consoleState(heading, (err.message || '请求失败') + '。这不是空列表，当前无法判断是否有记录。', { tone: 'error', retry: () => render().catch(error) }));
+    $('rows').replaceChildren(consoleState(heading, readErrorText(err) + '。这不是空列表，当前无法判断是否有记录。', { tone: 'error', retry: () => render().catch(error) }));
     return;
   }
   finally { if (request === renderVersion) $('rows').removeAttribute('aria-busy'); }
@@ -178,7 +178,7 @@ async function render(quiet = false) {
     $('rows').append(pendingActivationGroup(pendingRepositories));
   }
   if (tab === 'projects' && !installedView && !hiddenView && pendingRepositoriesError) {
-    $('rows').append(consoleState('等待启动的仓库暂时无法读取', pendingRepositoriesError.message || '请稍后重试。', { tone: 'error', retry: () => start().catch(error) }));
+    $('rows').append(consoleState('等待启动的仓库暂时无法读取', readErrorText(pendingRepositoriesError), { tone: 'error', retry: () => start().catch(error) }));
   }
   if (tab === 'events' && !rows.length) $('rows').replaceChildren(eventsEmptyState(params));
   // #708: while the GitHub permission check that follows signing in runs, an empty list means "not known yet", not "none".

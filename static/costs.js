@@ -86,7 +86,7 @@ async function loadCosts(version) {
   catch (err) {
     if(request!==costRequest||version!==renderVersion||me?.id!==owner||tab!=='costs')return;
     $('count').textContent='读取失败';
-    $('cost-body').replaceChildren(consoleState('统计未能读取',(err.message||'请求失败')+'。这不是空结果，当前无法判断这个范围内是否有记录。',{tone:'error',retry:()=>loadCosts(version)}));
+    $('cost-body').replaceChildren(consoleState('统计未能读取',readErrorText(err)+'。这不是空结果，当前无法判断这个范围内是否有记录。',{tone:'error',retry:()=>loadCosts(version)}));
     return;
   }
   if(request!==costRequest||version!==renderVersion||me?.id!==owner||tab!=='costs')return;

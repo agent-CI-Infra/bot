@@ -395,7 +395,7 @@ async function renderConsoleInbox(request) {
     body.append(paging);
   } catch (err) {
     if (request !== renderVersion || !body.isConnected) return;
-    body.replaceChildren(consoleState('待处理事项未能读取', err.message + '。尚不能判断是否有待处理任务。', { tone: 'error', retry: () => renderConsoleInbox(++renderVersion) }));
+    body.replaceChildren(consoleState('待处理事项未能读取', readErrorText(err) + '。尚不能判断是否有待处理任务。', { tone: 'error', retry: () => renderConsoleInbox(++renderVersion) }));
   } finally { body.removeAttribute('aria-busy'); }
 }
 async function renderConsolePage(request) {

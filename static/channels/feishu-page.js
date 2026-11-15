@@ -11,7 +11,7 @@ async function renderFeishuBindingsPage(panel, current) {
   let data;
   try { data = await api('/api/channels/bindings'); }
   catch (err) {
-    if (current()) panel.replaceChildren(consoleState('飞书绑定读取失败', err.message, { tone: 'error', retry: () => renderFeishuBindingsPage(panel, current) }));
+    if (current()) panel.replaceChildren(consoleState('飞书绑定读取失败', readErrorText(err), { tone: 'error', retry: () => renderFeishuBindingsPage(panel, current) }));
     return;
   }
   if (!current()) return;
@@ -381,7 +381,7 @@ async function renderFeishuBindingsPage(panel, current) {
       if (!current() || !groupSection.isConnected) return;
       showMetric(groupCount, '未知', '读取失败，可重试');
       retryGroups = () => { void loadGroups(); };
-      groupBody.replaceChildren(consoleState('飞书群绑定读取失败', err.message, { tone: 'error', retry: () => { void loadGroups(); } }));
+      groupBody.replaceChildren(consoleState('飞书群绑定读取失败', readErrorText(err), { tone: 'error', retry: () => { void loadGroups(); } }));
     }
   };
   void loadGroups();

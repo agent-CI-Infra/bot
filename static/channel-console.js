@@ -117,7 +117,7 @@ async function renderChannelConsole(request) {
     if (!alive()) return;
     if ([401, 403, 404].includes(err.status)) {
       layout.replaceChildren(consoleState('会话访问已变化', '无法继续读取这些会话。请重新加载当前身份和授权。', { tone: 'error', retry: () => render().catch(error) }));
-    } else target.replaceChildren(consoleState('会话读取失败', err.message, { tone: 'error', retry }));
+    } else target.replaceChildren(consoleState('会话读取失败', readErrorText(err), { tone: 'error', retry }));
   };
   let allChats = [], listOffset = 0, pending = false, messageCursor = null, turnOffset = null, taskOffset = 0, sampledAt = null;
   const search = input('conversation_search', '', { type: 'search', placeholder: '搜索姓名、群名、企业或机器人' }); search.setAttribute('aria-label', '搜索飞书会话');
