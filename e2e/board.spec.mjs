@@ -241,3 +241,63 @@ test('首次进入看板在数据返回前显示加载提示，而不是空白�
     await expect(page.locator('#board-columns')).toBeVisible();
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
+
+test('桌面上一列超过 420px 且不超过 720px，两列时每列也超过 420px 且等宽，390 与列表布局仍铺满滚动容器，页面不出现横向滚动（#838）', async ({ page }) => {
+  test.setTimeout(60000);
+  const {h,password}=await fixture();
+  const column=page.locator('#board-columns>.board-column');
+  const noPageX=async()=>expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  const widthOf=el=>el.evaluate(node=>node.getBoundingClientRect().width);
+  const fillsScroll=async(sel)=>{
+    const {col,scroll}=await page.evaluate(selector=>{
+      const box=document.querySelector('#board-columns');
+      const node=[...box.querySelectorAll(selector)].find(item=>item.getClientRects().length);
+      return {col:node.getBoundingClientRect().width,scroll:box.clientWidth};
+    },sel);
+    expect(col).toBeGreaterThan(scroll-16);
+    expect(col).toBeLessThanOrEqual(scroll+1);
+  };
+  try{
+    await page.setViewportSize({width:1280,height:900});
+    await login(page,h.admin,password);
+    // Two rendered columns must be wider than the old 420px cap and stay equal (covers the base max-width bump).
+    await choose(page,'工作类型','review.issue');
+    await expect(column).toHaveCount(2);
+    for(const [width,height] of [[1280,900],[1440,900]]){
+      await page.setViewportSize({width,height});
+      await expect(column).toHaveCount(2);
+      const widths=await column.evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().width));
+      expect(widths[0]).toBeGreaterThan(420);
+      expect(widths[1]).toBeGreaterThan(420);
+      expect(Math.abs(widths[0]-widths[1])).toBeLessThan(3);
+      await noPageX();
+    }
+    await page.getByRole('button',{name:'移除筛选 工作类型：检视 Issue',exact:true}).click();
+    await choose(page,'仓库','101');
+    await choose(page,'按…分列','repository');
+    await expect(column).toHaveCount(1);
+    await expect(column).toHaveAttribute('data-column-id','101');
+    for(const [width,height] of [[1280,900],[1440,900]]){
+      await page.setViewportSize({width,height});
+      await expect(column).toHaveCount(1);
+      const colWidth=await widthOf(column);
+      expect(colWidth).toBeGreaterThan(420);
+      expect(colWidth).toBeGreaterThanOrEqual(560);
+      expect(colWidth).toBeLessThanOrEqual(720);
+      await noPageX();
+    }
+    await more(page);
+    await page.getByRole('button',{name:'切换为列表',exact:true}).click();
+    await expect(page.locator('#board-columns')).toHaveClass(/board-list-layout/);
+    await fillsScroll('.board-column');
+    await noPageX();
+    await more(page);
+    await page.getByRole('button',{name:'切换为分栏',exact:true}).click();
+    await expect(page.locator('#board-columns')).not.toHaveClass(/board-list-layout/);
+    await page.setViewportSize({width:390,height:844});
+    await expect(page.locator('.board-column:visible')).toHaveCount(1);
+    await fillsScroll('.board-column');
+    expect(await page.locator('#board-columns').evaluate(el=>el.scrollWidth<=el.clientWidth)).toBe(true);
+    await noPageX();
+  }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
+});
