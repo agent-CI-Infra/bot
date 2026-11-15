@@ -257,7 +257,7 @@ async function renderChannelConsole(request) {
     for (const task of result.own_tasks) { const row = element('article', '', 'channel-related-task'); row.append(element('strong', task.title), state(task.state));
       if (task.last_conclusion) { const detail = element('details'); detail.append(element('summary', '查看最近结论'), element('p', task.last_conclusion, 'channel-message-body')); row.append(detail); } own.append(row); }
     if (!result.own_tasks.length) own.append(note('当前会话暂无可见独立任务。'));
-    related.append(projectTasks, own, consoleLink(conversationMode === 'service' ? '#/identity/feishu?group=' + selected : '#/identity/feishu', '飞书绑定', '管理个人绑定、群仓库范围与角色权限'));
+    related.append(projectTasks, own, consoleLink(conversationMode === 'service' ? '#/identity/feishu?group=' + selected : '#/identity/feishu', '飞书绑定', '管理个人绑定、群仓库范围与权限档位'));
   }
   async function update(more) {
     if (pending || !alive()) return; pending = true; refresh.disabled = moreMessages.disabled = moreTurns.disabled = true; clearTimeout(refreshTimer);

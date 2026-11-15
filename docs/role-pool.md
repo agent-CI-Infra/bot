@@ -52,7 +52,7 @@ One `(task, role)` instance persists its conversation and sequence. Review findi
 
 ## Shared role permissions
 
-Project work roles and platform service roles use the same catalog and operation checks in `src/roles/permissions.ts`. The console presents two groups; it does not present basic own-task actions as permissions. An entry supplies tools only when it actually supports them. A role setting cannot create an API or a GitHub installation grant.
+Project work roles, the management assistant and Feishu group bindings (whose levels are fixed sets of these items, see [message channels](message-channels.md#群聊助手绑定)) use the same catalog and operation checks in `src/roles/permissions.ts`. The console presents two groups; it does not present basic own-task actions as permissions. An entry supplies tools only when it actually supports them. A role setting cannot create an API or a GitHub installation grant.
 
 | Group | Setting | Levels | Actual operations |
 | --- | --- | --- | --- |

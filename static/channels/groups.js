@@ -1,5 +1,36 @@
 const participationOptions = [['mentions', '仅回应 @'], ['questions', '回应 @ 及以问号结尾的文字'], ['all', '读取每条新文字后判断是否发言']];
 const bindingStates = { active: '生效中', paused: '已暂停', disabled: '已停用' };
+// What a group may do is its binding's level (#849); each level adds to the one before it.
+const bindingLevelOptions = [
+  ['read', '只读问答', '读取范围内仓库的 Issue、PR、代码和 Actions，查本群会话记录；不写 GitHub，不建任务。'],
+  ['comment', '可评论和打标签', '另外可以在 Issue 和 PR 上评论、加删标签、指派人、新建 Issue；PR 读写也包括开 PR、发检视（含批准和要求修改）和请求检视人。不改代码，不合并。'],
+  ['dispatch', '可派活', '另外可以把工作交给项目 Manager 新建任务，并查看、追加说明、修改约定、暂停、重试或取消范围内的任务；任务按项目自己的设置和模型执行。'],
+  ['custom', '高级：逐项设置', '按下面每一项单独选择。Contents 读写（提交文件、推送分支、在群里合并 PR）只能在这里打开。'],
+];
+const bindingLevelName = level => bindingLevelOptions.find(([id]) => id === level)?.[1] || level;
+// The individual items of a binding, for the advanced level. Transitional values migrated from an older role stay
+// selectable until another mode is chosen.
+function bindingItemsEditor(permissions, items) {
+  const box = element('div', '', 'role-permissions');
+  for (const [group, title] of [['platform', '平台能力'], ['github', 'GitHub']]) {
+    const section = element('fieldset', '', 'role-permission-group'); section.append(element('legend', title));
+    for (const item of items.filter(item => item.group === group)) {
+      const choices = item.modes.map(mode => [mode, permissionModeLabels[mode]]);
+      if (permissions[item.id] === 'custom') choices.unshift(['custom', permissionModeLabels.custom]);
+      const row = element('div', '', 'role-permission-row');
+      row.append(field(item.name, roleSelect(item.name, permissions[item.id], choices, value => { permissions[item.id] = value; })), note(item.detail));
+      section.append(row);
+    }
+    box.append(section);
+  }
+  return box;
+}
+// One line per binding: the level, or for an advanced binding the items it opens.
+function bindingLevelSummary(b, items) {
+  if (b.level !== 'custom') return bindingLevelName(b.level);
+  const open = items.filter(item => !['none', 'deny'].includes(b.permissions[item.id])).map(item => `${item.name} ${permissionModeLabels[b.permissions[item.id]] || b.permissions[item.id]}`);
+  return '高级：' + (open.join('；') || '全部关闭');
+}
 
 // Group bindings list + on-demand creator/permission editor.
 async function buildGroupBindingsSection(data, { initialOpen = false, initialChat = null } = {}) {
@@ -10,7 +41,7 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
   const editorHead = element('div', '', 'feishu-creator-head'), editorTitle = element('strong', '创建群绑定');
   editorHead.append(editorTitle, button('收起配置', () => { editorWrap.hidden = true; }, 'quiet'));
   editorWrap.append(editorHead,
-    note('第一个配置的维护人成为该群助手负责人（需已绑定个人飞书、在该群中，并对所选仓库或组织有配置权限）；之后负责人、所属组织管理员和超级管理员均可在此修改仓库范围与服务角色。'));
+    note('第一个配置的维护人成为该群助手负责人（需已绑定个人飞书、在该群中，并对所选仓库或组织有配置权限）；之后负责人、所属组织管理员和超级管理员均可在此修改仓库范围、权限档位与助手角色。'));
 
   const chatOrganization = new Map([...data.chats.map(c => [c.id, c.organization || null]), ...data.bindings.map(b => [b.chat_id, b.chat.organization || null])]);
   const profiles = new Map([...data.chats.map(c => [c.id, c]), ...data.bindings.map(b => [b.chat_id, b.chat])]);
@@ -92,12 +123,35 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     ...(data.organizations.length ? [] : [note('你没有组织级配置权限，只能按单个仓库勾选。')]));
   form.append(scope);
 
-  // Service role & concrete permissions
-  const role = channelSelect(form, '服务角色', 'binding_role', data.service_roles.map(r => [r.id, r.name + (r.recommended ? '（推荐）' : '')]));
-  const roleNote = note(''), rolePermTags = element('div', '', 'feishu-perm-tags');
-  form.append(roleNote, rolePermTags, note(me.role === 'super_admin'
-    ? '群聊助手的实际操作权限 = 所选「服务角色权限」∩ 上方「仓库访问范围」。如需开启 GitHub 写入、任务创建或派活，可在「全局设置 → 服务角色」新增或调整角色。'
-    : '群聊助手的实际操作权限 = 所选「服务角色权限」∩ 上方「仓库访问范围」。如需可写或可派活角色，请联系超级管理员在「全局设置 → 服务角色」中配置。'));
+  // The group's permission level (#849): one choice here decides what everyone in the group may do.
+  const levels = element('fieldset', '', 'feishu-level-choices'); levels.append(element('legend', '本群权限档位'));
+  const levelControls = new Map(), itemsWrap = element('div', '', 'feishu-level-items');
+  // `edited` is what the advanced editor changes; it starts from `startFrom`, the binding's items or the level chosen last,
+  // so switching to the advanced level never widens anything by itself.
+  let edited = {}, startFrom = null;
+  for (const [id, title, detail] of bindingLevelOptions) {
+    const control = document.createElement('input'); control.type = 'radio'; control.name = 'binding_level'; control.value = id;
+    const label = element('label', '', 'check'); label.append(control, ' ' + title);
+    levels.append(label, note(detail)); levelControls.set(id, control);
+  }
+  const presetOf = id => data.levels.find(level => level.id === id)?.permissions;
+  const chosenLevel = () => [...levelControls].find(([, control]) => control.checked)?.[0] || 'read';
+  const showItems = () => {
+    itemsWrap.hidden = chosenLevel() !== 'custom';
+    if (!itemsWrap.hidden && !itemsWrap.childElementCount) { edited = structuredClone(startFrom || {}); itemsWrap.append(bindingItemsEditor(edited, data.permission_items)); }
+  };
+  for (const [id, control] of levelControls) control.addEventListener('change', () => {
+    if (id !== 'custom') { startFrom = presetOf(id); itemsWrap.replaceChildren(); }
+    showItems();
+  });
+  levels.append(itemsWrap,
+    element('p', '保存后，群内所有成员（包括没有平台账号的人和其他企业的外部成员）都按这一档使用助手，不核对发言人。实际能做的还不超过你本人在这些仓库的当前权限和 GitHub App 的安装权限。', 'endpoint-warning'));
+  form.append(levels);
+
+  // The assistant role: its prompt and model only.
+  const role = channelSelect(form, '助手角色', 'binding_role', data.service_roles.map(r => [r.id, r.name + (r.recommended ? '（推荐）' : '')]));
+  const roleNote = note('');
+  form.append(roleNote, note(me.role === 'super_admin' ? '助手角色只决定提示词和模型，不决定群能做什么；角色在「全局设置 → 服务角色」维护。' : '助手角色只决定提示词和模型，不决定群能做什么。'));
 
   const participation = channelSelect(form, '助手发言范围', 'binding_participation', participationOptions);
   form.append(note('注意：群内所有成员都能看到助手读取的所选仓库内容（包括私有仓库），由配置人负责控制范围。所有获准消息都会存入本地；扩大发言范围会增加模型用量，用量记在服务角色上，不计入项目。'));
@@ -111,21 +165,7 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
   let expected = 0;
   const unavailable = !chats.size || !data.service_roles.length || !data.projects.length && !data.organizations.length;
   const roleById = new Map(data.service_roles.map(r => [r.id, r]));
-  const formatRoleSummary = roleId => {
-    const r = roleById.get(roleId);
-    if (!r) return '角色已停用或不可用';
-    return data.permission_items.map(item => `${item.name} ${permissionModeLabels[r.permissions[item.id]] || r.permissions[item.id] || '无权限'}`).join('；');
-  };
-  const describeRole = () => {
-    const r = roleById.get(role.value);
-    rolePermTags.replaceChildren();
-    if (!r) { roleNote.textContent = ''; return; }
-    roleNote.textContent = `${r.responsibility || '自定义服务角色'} 权限：${formatRoleSummary(r.id)}。`;
-    for (const item of data.permission_items) {
-      const mode = r.permissions[item.id] || 'none', active = mode !== 'none' && mode !== 'deny';
-      rolePermTags.append(element('span', `${item.name}：${permissionModeLabels[mode] || mode}`, 'feishu-perm-tag' + (active ? ' feishu-perm-tag-active' : '')));
-    }
-  };
+  const describeRole = () => { const r = roleById.get(role.value); roleNote.textContent = r ? r.responsibility || '自定义服务角色' : ''; };
   const showScope = () => {
     repositoriesWrap.hidden = !repositoriesKind.checked;
     organizationField.hidden = !organizationKind.checked;
@@ -149,6 +189,10 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     ownership.textContent = locked ? `这个群的助手由 ${current.owner || '原负责人'} 负责；只有负责人、所属组织的管理员和超级管理员可以修改。` : current?.owner ? '负责人：' + current.owner : '';
     save.disabled = unavailable || locked;
     role.value = current?.enabled && data.service_roles.some(r => r.id === current.service_role.id) ? current.service_role.id : (data.service_roles.find(r => r.recommended) || data.service_roles[0])?.id || '';
+    // A disabled binding is enabled again at its last level; a new one starts at read.
+    const level = current?.level || 'read';
+    for (const [id, control] of levelControls) control.checked = id === level;
+    startFrom = current?.permissions || presetOf('read'); itemsWrap.replaceChildren(); showItems();
     participation.value = current?.participation || 'mentions';
     const org = current?.enabled && current.scope.organization;
     organizationKind.checked = !!org && !organizationKind.disabled; repositoriesKind.checked = !organizationKind.checked;
@@ -163,7 +207,9 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     event.preventDefault(); save.disabled = true; status.textContent = '正在核验你的飞书绑定、群成员身份和所选范围的配置权限…';
     const selected = organizationKind.checked ? { kind: 'organization', organization: organization.value } : { kind: 'repositories', repositories: [...boxes].filter(([, control]) => control.checked).map(([id]) => id) };
     try {
-      await api('/api/channels/chats/' + chat.value + '/service-binding', 'PUT', { service_role_id: role.value, scope: selected, participation: participation.value, enabled: true, expected_revision: expected });
+      const level = chosenLevel();
+      await api('/api/channels/chats/' + chat.value + '/service-binding', 'PUT', { service_role_id: role.value, scope: selected, participation: participation.value,
+        ...(level === 'custom' ? { permissions: edited } : { level }), enabled: true, expected_revision: expected });
       if (location.hash.includes('?')) history.replaceState(null, '', '#/identity/feishu');
       await start();
     } catch (err) { status.textContent = employeeError(err.message); save.disabled = false; }
@@ -197,7 +243,7 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
   const list = element('div', '', 'feishu-binding-list');
   list.setAttribute('aria-label', '飞书群绑定列表');
   if (!data.bindings.length) {
-    list.append(element('p', '当前尚无已绑定的飞书群。点击「创建群绑定」可为机器人所在群配置仓库范围与角色权限。', 'muted'));
+    list.append(element('p', '当前尚无已绑定的飞书群。点击「创建群绑定」可为机器人所在群配置仓库范围与权限档位。', 'muted'));
   }
 
   for (const b of data.bindings) {
@@ -219,7 +265,7 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
     info.append(titleWrap,
       note('项目范围：' + scopeText),
       ...(b.scope.organization && b.enabled ? [note(b.reachable.length ? `可达仓库（${b.reachable.length}）：${b.reachable.join('、')}` : '当前组织范围下暂无可达仓库')] : []),
-      note('角色权限：' + formatRoleSummary(b.service_role.id)),
+      note('权限档位：' + bindingLevelSummary(b, data.permission_items)),
       note('发言范围：' + (participationOptions.find(([id]) => id === b.participation)?.[1] || b.participation)),
       note(`负责人：${b.owner || '账户已删除'}${b.configured_by && b.configured_by !== b.owner ? '；最近修改：' + b.configured_by : ''}`),
       channelProfileDetails(b.chat, () => { groupName.textContent = channelChatName(b.chat); updateOption(b.chat); }),

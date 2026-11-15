@@ -56,7 +56,7 @@ export const serviceTools = [readToolResult,
   ...ownTaskTools, ...serviceMemoryTools, ...assistantComputerTools, ...managementTools, ...mediaTools, sendMessageTool,
 ];
 // Delegation reaches a project only through its Manager: create a task, find it again, change or cancel it as a whole.
-// Every other tool is governed by a unified permission item of the service role; the scope listing, progress messages
+// Every other tool is governed by a permission item of the binding's level (#849); the scope listing, progress messages
 // (#435) and the role's own independent tasks need none (own tasks only lend the tools this turn already has).
 // Tools that need the conversation's assistant computer (#457), including attachments moved to or from it.
 const computerTool = (name: string) => assistantComputerNames.includes(name) || name === 'import_message_resource' || name === 'attach_workspace_file';
@@ -126,8 +126,8 @@ export class ChannelServiceSessions {
     const event = (type: string, name = '') => this.store.run('INSERT INTO channel_service_events(turn_id,type,name,created_at) VALUES(?,?,?,?)', id, type,
       !name || name === staySilentName || serviceTools.some(tool => tool.function.name === name) ? name : 'unknown_tool', Date.now());
     event('running');
-    // Read per call: revoking a permission item refuses the next tool call (and changes the fence, ending this turn).
-    const permissions = () => JSON.parse(serviceRole(this.store, role.id)?.permissions ?? '{}') as RolePermissions;
+    // The binding's level (#849), not the role's: changing it is a new binding revision, so check() ends this turn first.
+    const permissions = (): RolePermissions => this.bindings.permissions(binding);
     const check = () => {
       if (this.stopped || controller.signal.aborted) fail(409, 'conversation_stopped');
       if (this.store.get('SELECT state FROM channel_service_turns WHERE id=?', id)?.state !== 'running') fail(409, 'conversation_turn_inactive');
@@ -152,8 +152,8 @@ export class ChannelServiceSessions {
       }
       return entry.error ?? { repository: project.full_name, result: await entry.explorer.execute(name, rest) };
     };
-    // github_write (#381): only where the role has write, only in repositories of the group's scope, and only while the person
-    // who configured the binding may still write tasks there. Keys are unique within this turn.
+    // github_write (#381): only where the binding's level has write, only in repositories of the group's scope, and only while
+    // the person who configured the binding may still write tasks there. Keys are unique within this turn.
     const write = async (args: Json) => {
       // The grantor's authority, not the service role's task capabilities: reach checks it per project, live.
       const { repository: selected, ...rest } = args, reachable = () => this.bindings.project(binding, selected, ['tasks.read', 'tasks.write']), project = reachable();
@@ -189,7 +189,7 @@ export class ChannelServiceSessions {
       fields(args, ['repository', 'task_id', 'operation', 'instruction', 'contract', 'expected_revision']);
       const operation = String(args.operation);
       if (!['pause', 'cancel', 'retry', 'instructions', 'contract'].includes(operation)) return { error: 'invalid_arguments' };
-      if (!serviceCommandAllowed(permissions(), 'task.' + operation)) return { error: 'operation_not_allowed', detail: '当前服务角色的权限不允许这个任务操作。' };
+      if (!serviceCommandAllowed(permissions(), 'task.' + operation)) return { error: 'operation_not_allowed', detail: '本群的权限档位不允许这个任务操作。' };
       // The same command contract as the console: revision check, idempotency and an auditable receipt.
       return this.management.submit(actor, { operation: 'task.' + operation, target: { project_id: project.id, task_id: text(args.task_id) },
         arguments: operation === 'instructions' ? { instruction: text(args.instruction, 8000) } : operation === 'contract' ? { contract: args.contract } : {},

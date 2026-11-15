@@ -20,7 +20,7 @@ async function renderFeishuBindingsPage(panel, current) {
   const activePersonal = data.bindings.filter(b => b.status === 'active' && (!b.expires_at || b.expires_at > Date.now()));
   const overview = element('section', '', 'side-card feishu-overview');
   overview.setAttribute('aria-label', '飞书绑定概览');
-  overview.append(note('在同一页查看与管理个人飞书绑定和群绑定。列表直接展示仓库范围与角色权限，点击已建立会话的绑定条目（或「查看聊天记录」）即可查看聊天记录。'));
+  overview.append(note('在同一页查看与管理个人飞书绑定和群绑定。列表直接展示仓库范围与权限档位，点击已建立会话的绑定条目（或「查看聊天记录」）即可查看聊天记录。'));
 
   let openPersonalCreator = () => {}, openGroupEditor = null, pendingGroupEditor = false, pendingGroupChat = null, retryGroups = null;
   const requestGroupEditor = (chatId = null) => {
@@ -289,9 +289,9 @@ async function renderFeishuBindingsPage(panel, current) {
   groupSection.id = 'feishu-group-bindings';
   const groupHead = element('div', '', 'feishu-section-head'), groupHeadActions = element('div', '', 'actions');
   groupHead.append(element('h3', '飞书群聊助手'), groupHeadActions);
-  if (me.role === 'super_admin') groupHeadActions.append(channelLink('#/settings/service-roles', '管理服务角色与读写权限', 'button-link quiet'));
+  if (me.role === 'super_admin') groupHeadActions.append(channelLink('#/settings/service-roles', '管理助手角色', 'button-link quiet'));
   groupSection.append(groupHead,
-    note('为机器人所在的群配置服务角色与仓库访问范围（可按单个仓库勾选或授权整个组织）。群成员无需绑定本人飞书即可按本群权限使用助手；点击条目可查看群聊天记录。'));
+    note('为机器人所在的群选择仓库范围（可按单个仓库勾选或授权整个组织）、本群权限档位和助手角色。群里的每个人，包括没有平台账号的人和外部成员，都按本群的档位使用助手，不核对发言人；点击条目可查看群聊天记录。'));
   const groupBody = element('div');
   groupBody.append(consoleState('正在读取群绑定', '个人飞书绑定已就绪，正在读取可查看或管理的群绑定。'));
   groupSection.append(groupBody);
@@ -395,6 +395,8 @@ const employeeErrors = { channel_employee_revalidation_required: '群成员正�
   channel_service_binding_forbidden: '只有这个群聊助手的负责人、其项目范围所属组织的管理员或超级管理员可以修改、停用、转交它或停止它的回答。', channel_service_scope_invalid: '请至少选择一个仓库，或选择一个组织。',
   channel_service_scope_outside_organization: '这个群使用的是组织的飞书应用，只能选择该组织的仓库或整个组织。',
   channel_service_owner_ineligible: '新负责人需要对当前全部项目范围有配置权限，且账户处于启用状态。',
+  channel_service_level_invalid: '请选择一个权限档位。', channel_service_level_conflict: '权限档位和逐项设置只能二选一，请刷新本页后重新保存。',
+  channel_service_permission_invalid: '逐项设置里有无效的选项，请刷新本页后重新选择。',
   service_role_model_not_configured: '服务角色尚未配置模型，请超级管理员在「全局设置 → 服务角色」中选择。' };
 const employeeError = value => Object.entries(employeeErrors).find(([key]) => String(value).includes(key))?.[1] || String(value);
 
