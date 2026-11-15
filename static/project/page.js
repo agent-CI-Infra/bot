@@ -150,16 +150,17 @@ function projectHeader(section = current.section) {
     trail.append(toHub);
   }
   const heading = element('h1', repository.full_name); heading.title = repository.full_name; title.append(heading, ...projectStatus());
-  const chat = element('a', '管理助手', 'button-link');
+  const chat = element('a', '管理助手', 'button-link btn-primary');
   chat.href = `#/projects/${current.id}/management`;
   chat.dataset.testid = 'project-open-chat';
   chat.addEventListener('click', event => { event.preventDefault(); void openManagementChat(current.id).catch(error); });
   // #707: the way into the settings categories on every project page, including on a phone where the category nav is hidden.
-  const settings = element('a', '设置', 'button-link');
+  const settings = element('a', '设置', 'button-link btn-secondary');
   settings.href = `#/projects/${current.id}/${projectSettingsSections[0][0]}`;
   settings.dataset.testid = 'project-open-settings';
-  actions.append(chat, settings, link(`https://github.com/${repository.full_name}`, '在 GitHub 打开', 'button-link'));
-  if (section === 'basic') actions.append(button('刷新项目设置', () => reloadProject().catch(error)));
+  // #839: only 管理助手 is the primary header action; 设置 and the GitHub link stay available as secondary.
+  actions.append(chat, settings, link(`https://github.com/${repository.full_name}`, '在 GitHub 打开', 'button-link btn-secondary'));
+  if (section === 'basic') actions.append(button('刷新项目设置', () => reloadProject().catch(error), 'btn-secondary'));
   head.append(trail, title, actions); return head;
 }
 function projectCrumb(section) {
