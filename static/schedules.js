@@ -121,7 +121,15 @@ async function renderSchedules(panel, project) {
   const preset=select('常用触发时间',presets),timeRules=element('details','','fold schedule-time-rules');
   timeRules.dataset.testid='schedule-time-rules';
   timeRules.append(element('summary','高级时间规则（Cron / 固定周期）'),field('重复方式',recurrence),field('Cron（分 时 日 月 周）',cron),field('固定周期分钟',interval));
-  const syncPreset=()=>{preset.value=recurrence.value==='cron'&&presets.some(([value])=>value===cron.value)?cron.value:'custom';timeRules.open=preset.value==='custom';};
+  // #744: the summary and the advanced fold follow every edit of the time fields, not only the load,
+  // the first screen and the template. A hand-typed Cron that matches a preset shows that preset; one
+  // that does not shows 自定义 and keeps the advanced rules open. `collapsePreset` is only passed by
+  // the internal syncs, so typing never shuts a fold the operator opened themselves.
+  const syncPreset = (collapsePreset = false) => {
+    const matched = recurrence.value === 'cron' && presets.some(([value]) => value === cron.value);
+    preset.value = matched ? cron.value : 'custom';
+    if (!matched) timeRules.open = true; else if (collapsePreset) timeRules.open = false;
+  };
 
   const start = input('有效期开始', new Date().toISOString(), 'text'), end = input('有效期结束（可留空）', '', 'text');
   const destination = select('计划目的地', destinationOptions), workflow = select('执行内容', [['report.daily', '项目日报'], ['manager.check', 'Manager 定时检查'], ['release.scheduled', '定时发布（处理器未就绪时不支持）']]);
@@ -154,7 +162,8 @@ async function renderSchedules(panel, project) {
     if (cron.parentElement) cron.parentElement.hidden = recurrence.value !== 'cron';
     if (interval.parentElement) interval.parentElement.hidden = recurrence.value !== 'interval';
   };
-  kind.onchange = syncFields; recurrence.onchange = syncFields; workflow.onchange=syncFields;
+  kind.onchange = syncFields; recurrence.onchange = () => { syncFields(); syncPreset(); }; workflow.onchange=syncFields;
+  for (const node of [cron, interval]) { node.addEventListener('input', () => syncPreset()); node.addEventListener('change', () => syncPreset()); }
   preset.onchange=()=>{if(preset.value!=='custom'){recurrence.value='cron';cron.value=preset.value;}timeRules.open=preset.value==='custom';syncFields();};
   const spec = () => ({ ...(original?.spec ?? {}), name: name.value, kind: kind.value, actor_id: kind.value === 'personal' ? me.id : actor.value,
     owner_id: original?.spec.owner_id ?? me.id, maintainer_id: kind.value === 'personal' ? me.id : maintainer.value,
@@ -173,7 +182,7 @@ async function renderSchedules(panel, project) {
     start.value = new Date(p.start_at).toISOString(); end.value = p.end_at ? new Date(p.end_at).toISOString() : ''; destination.value = p.destination_id; workflow.value = p.workflow;
     misfire.value = p.misfire; grace.value = String(p.grace_ms / 60000); for (const [k, v] of Object.entries(p.limits)) limits[k].value = String(v);
     parsed.textContent = original.state + (original.reason ? ' · ' + original.reason : '') + '\n时区：' + p.timezone + '\n下次触发：' + (original.next_at ? new Date(original.next_at).toISOString() : '无') + '\n最近成功：' + (original.last_success ? new Date(original.last_success).toISOString() : '尚无') + '\n处理器：' + (original.supported ? '可用' : '不支持') + '\n维护人：' + p.maintainer_id;
-    instruction.value=p.parameters?.instruction || ''; syncPreset(); syncFields(); updateMeta();
+    instruction.value=p.parameters?.instruction || ''; syncPreset(true); syncFields(); updateMeta();
   };
   chosen.onchange = async () => {
     const id = chosen.value;
@@ -238,7 +247,7 @@ async function renderSchedules(panel, project) {
       if(!live())return;state.conflict=false;comparison.remove();showReceipt();
     },'quiet'));editor.prepend(comparison);
   }
-  syncPreset(); syncFields(); updateMeta(); showReceipt();
+  syncPreset(true); syncFields(); updateMeta(); showReceipt();
   renderSubscriptionEditor(panel, {project,destinations,read,command,model:state.subscription,busy:()=>state.sending || !!state.envelope,invalidate:revoked,active:live});
   const applyDailyDigest=()=>{
     name.value='每日摘要'; workflow.value='report.daily'; kind.value='personal';
@@ -246,7 +255,7 @@ async function renderSchedules(panel, project) {
     if (destination.options.length && !destination.value) destination.selectedIndex=0;
     dirty=true; state.selected=''; state.fields=capture(); state.templateNotice='已套用每日摘要模板：每天 09:00 发送项目日报。可改常用触发时间和目的地后保存。';
     if (chosen.value) { dirty=false; chosen.value=''; void renderSchedules(container,project); return; }
-    syncPreset(); syncFields(); updateMeta(); status.textContent=state.templateNotice; state.templateNotice=null;
+    syncPreset(true); syncFields(); updateMeta(); status.textContent=state.templateNotice; state.templateNotice=null;
   };
   const applyFailureNotice=()=>{ void state.subscription.applyFailureTemplate?.(); };
   const templates=element('section','','schedule-templates');
