@@ -803,7 +803,7 @@ test('prune keeps the Node runtime a protected claude_code directory can no long
   allocateLease(store, 't1', 'assign-1', run.id);
   recordRunCliVersion(store, run.id, '2.1.310');
 
-  // The run executes 2.1.319 and its manifest has become unreadable, so nothing can say which Node runtime it needs.
+  // The run executes 2.1.310 and its manifest has become unreadable, so nothing can say which Node runtime it needs.
   // Keeping the directory but deleting that runtime would still take the binary away from the run.
   writeFileSync(join(root, 'claude_code', '2.1.310', 'manifest.json'), '{"schema":');
   const pruned = await manager.prune({ cli: 'claude_code', retainCount: 1, protectedVersions: c => activeCliVersions(store, c) });
@@ -846,4 +846,65 @@ test('a broken version no run holds is still cleared while the protected one is 
   assert.deepEqual(pruned.pruned.codex, [], 'a leftover broken directory is cleared silently, not reported as pruned');
   assert.equal(existsSync(join(root, 'codex', '0.166.0', 'bin', 'codex')), true);
   assert.equal(existsSync(join(root, 'codex', '0.167.0')), false, 'the unprotected broken directory is still cleared');
+});
+
+test('a codex-only prune never reclaims Node runtimes', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-tools-node-gate-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const upstream = await startMockToolUpstream(t, 'x64');
+  const manager = new AgentToolManager({ volumeRoot: root, containerRoot: root, arch: 'x64', sources: upstream.sources });
+  const store = new Store(':memory:', randomBytes(32));
+  t.after(() => store.close());
+  roleRunStorage(store);
+  store.run("INSERT INTO accounts VALUES('a','org','github_app','1','{}','now')");
+  store.run("INSERT INTO repositories VALUES('r','org/repo','org','a')");
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('t1','r','task.request','running','test','{}',1,1)");
+
+  await manager.install({ cli: 'claude_code', version: '2.1.310' });
+  await manager.install({ cli: 'codex', version: '0.166.0' });
+  await manager.install({ cli: 'codex', version: '0.167.0' });
+  const run = beginRun(store, store.get("SELECT * FROM tasks WHERE id='t1'"), 'execution', {});
+  store.run("UPDATE task_runs SET role='developer',harness='claude_code',harness_version='1' WHERE id=?", run.id);
+  allocateLease(store, 't1', 'assign-1', run.id);
+  recordRunCliVersion(store, run.id, '2.1.310');
+  writeFileSync(join(root, 'claude_code', '2.1.310', 'manifest.json'), '{"schema":');
+
+  // Node runtimes are launched by claude_code alone and only its manifests name them, so a codex-only sweep cannot
+  // know which runtime a kept claude_code directory executes. It must not walk node/ at all: the directory here is
+  // protected and its manifest unreadable, exactly the case the claude_code pass keeps the runtime for.
+  const pruned = await manager.prune({ cli: 'codex', retainCount: 1, protectedVersions: c => activeCliVersions(store, c) });
+  assert.deepEqual(pruned.pruned.codex, ['0.166.0']);
+  assert.deepEqual(pruned.protected_invalid.codex, [], 'the claude_code directory is not the codex pass to judge');
+  assert.equal(existsSync(join(root, 'node', '22.15.0', 'bin', 'node')), true, 'a codex-only prune leaves the Node runtimes alone');
+  assert.equal(existsSync(join(root, 'claude_code', '2.1.310', 'bin', 'claude')), true, 'the claude_code directory is untouched by it too');
+});
+
+test('an unreadable manifest still names the Node runtime to keep', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-tools-node-lenient-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const upstream = await startMockToolUpstream(t, 'x64');
+  const manager = new AgentToolManager({ volumeRoot: root, containerRoot: root, arch: 'x64', sources: upstream.sources });
+  const store = new Store(':memory:', randomBytes(32));
+  t.after(() => store.close());
+  roleRunStorage(store);
+  store.run("INSERT INTO accounts VALUES('a','org','github_app','1','{}','now')");
+  store.run("INSERT INTO repositories VALUES('r','org/repo','org','a')");
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('t1','r','task.request','running','test','{}',1,1)");
+
+  await manager.install({ cli: 'claude_code', version: '2.1.310' });
+  // A second runtime left behind by an earlier claude_code install, which nothing on the volume references any more.
+  mkdirSync(join(root, 'node', '23.9.9', 'bin'), { recursive: true });
+  writeFileSync(join(root, 'node', '23.9.9', 'bin', 'node'), '');
+  const run = beginRun(store, store.get("SELECT * FROM tasks WHERE id='t1'"), 'execution', {});
+  store.run("UPDATE task_runs SET role='developer',harness='claude_code',harness_version='1' WHERE id=?", run.id);
+  allocateLease(store, 't1', 'assign-1', run.id);
+  recordRunCliVersion(store, run.id, '2.1.310');
+
+  // The manifest stopped parsing, but its text still names the runtime the directory launches. Reading that name out of
+  // the raw file keeps exactly one runtime instead of keeping every runtime on the volume for one more sweep.
+  writeFileSync(join(root, 'claude_code', '2.1.310', 'manifest.json'), '{"schema": "broken", "node_version": "22.15.0", ');
+  const pruned = await manager.prune({ cli: 'claude_code', retainCount: 1, protectedVersions: c => activeCliVersions(store, c) });
+  assert.deepEqual(pruned.protected_invalid.claude_code, ['2.1.310']);
+  assert.equal(existsSync(join(root, 'node', '22.15.0', 'bin', 'node')), true, 'the runtime the manifest text names is kept');
+  assert.equal(existsSync(join(root, 'node', '23.9.9')), false, 'the runtime nothing names is still reclaimed');
 });
