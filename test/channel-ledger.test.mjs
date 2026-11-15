@@ -158,6 +158,24 @@ test('429 honors Retry-After, transient failures retry, permanent visibility err
   ledger.resync(chat.id); await sync.tick(); assert.equal(calls, 4);
 });
 
+test('an unparsable history item time blocks the sync job instead of retrying that page hourly', async t => {
+  const { store, ledger, chat } = fixture(t);
+  let calls = 0;
+  const sync = new ChannelHistorySync(store, ledger, () => ({ history: async () => {
+    calls++;
+    // The adapter turns a bad item time into this permanent error (#792 follow-up); a blocked job is not retried.
+    throw new ChannelHistoryError('channel_history_invalid', true);
+  } }));
+  await sync.tick();
+  const job = store.get('SELECT * FROM channel_sync_jobs');
+  assert.equal(job.state, 'blocked');
+  assert.equal(job.last_error, 'channel_history_invalid');
+  assert.equal(ledger.diagnostics(chat.id).sync_state, 'blocked');
+  store.run('UPDATE channel_sync_jobs SET next_attempt=0');
+  await sync.tick();
+  assert.equal(calls, 1, 'a blocked job is never retried');
+});
+
 test('repeated and cycling pagination tokens stop the job instead of looping or importing a suspect page', async t => {
   for (const sequence of [['x', 'x'], ['x', 'y', 'x'], ['']]) {
     const { store, ledger, chat } = fixture(t); let n = 0;
