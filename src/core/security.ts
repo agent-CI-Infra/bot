@@ -8,6 +8,12 @@ export class HttpError extends Error {
   constructor(readonly status: number, readonly code: string, readonly field?: string) { super(code); }
 }
 export const fail = (status: number, code: string, field?: string): never => { throw new HttpError(status, code, field); };
+// Plain HTTP may only reach this machine: model keys travel in the request, so anything off this host would leak them.
+// Only the parsed hostname is inspected; new URL() already normalises the numeric IPv4 forms (127.1, decimal, hex, octal).
+export function loopbackHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return host === 'localhost' || host === '[::1]' || host === '[::ffff:7f00:1]' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
 export type Json = Record<string, unknown>;
 export function object(value: unknown): Json {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return fail(400, 'expected_object');
