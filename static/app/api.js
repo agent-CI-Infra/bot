@@ -70,7 +70,9 @@ async function api(path, method = 'GET', body, { signal } = {}) {
 // class ('view-success' or ''), because it never says whether a message is a failure.
 function notice(id, text = '', tone = '', kind = 'status') {
   const box = $(id); box.replaceChildren();
-  if (!text) return;
+  // #738 review: clearing the shared strip puts its semantics back too — a failed login's alert used to survive into the
+  // next message because the only reset lived in the login handler.
+  if (!text) { if (id === 'message') { box.setAttribute('role', 'status'); box.setAttribute('aria-live', 'polite'); } return; }
   // #738 review: the shared strip carries the semantics of whichever message it now holds, while a box a page authored
   // keeps its own — #task-error is created as a role=alert box that only ever holds an error, so a caller that forgets
   // `kind` must not downgrade it to a polite status. An explicit `kind: 'alert'` still wins anywhere, and aria-live
