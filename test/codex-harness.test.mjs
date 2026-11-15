@@ -298,7 +298,12 @@ test('Codex cancel interrupts the turn, waits for the terminal receipt, then rec
     [{ FIXTURE_LATE: 'true' }, 'terminal'],
   ]) {
     await t.test(JSON.stringify(env), async t => {
-      const f = fixture(t, env);
+      // The fixture answers turn/interrupt and then completes the turn, so a terminal receipt has to cross one
+      // synchronous tools/call round trip. That round trip can outlast the 400 ms knob the rest of this file keeps
+      // (and the 4 s budget at the tool-refusal cases below depends on that knob staying small); only the cancel case
+      // gets a grace wide enough to measure what it is about, and a run that really ignores the interrupt still
+      // reports 'timeout'.
+      const f = fixture(t, env, { cancelGraceMs: 2000 });
       let cancel = false;
       const run = runRole({ ...f.spec, guard: async () => { if (cancel) throw new TaskError('task_cancelled', 'cancelled'); } }, 'dev', undefined, 'codex');
       // The prompt file is written before the start reply; wait until the client records its turn (or fallback to prompts.jsonl).
