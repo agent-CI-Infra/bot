@@ -5,6 +5,7 @@ import { identityFixture } from './identity-fixture.mjs';
 import { session } from '../dist/app/auth.js';
 import { resolveActor, authorize, invalidate, narrowActor, resolvePrincipalActor } from '../dist/identity/authorization.js';
 import { ChannelConnections } from '../dist/channels/connections.js';
+import { ChannelHistoryError } from '../dist/channels/feishu.js';
 import { channelFixture, transport, connector, envelope, post, until, finished, bindFixture, inGroup, cardEvent, cardToken, digest, credentials, scriptedModel, managementOutcome, privateChat, boundGroup, registerDestination, repositoryAssistant } from './channel-fixture.mjs';
 
 // Private chats are the management assistant and groups are their bound service role (#312): no message text is a command.
@@ -634,12 +635,17 @@ test('a message whose optional update_time is empty keeps its create_time instea
   assert.equal(row.updated_at, row.created_at, 'updated_at falls back to create_time');
 });
 
-test('a history page with one bad item time is invalid upstream data (502), not a retryable 400', async t => {
+test('a history page with one bad item time is a permanent history error, and an empty update_time keeps its create_time', async t => {
   const f = await channelFixture(t), adapter = f.service.adapter(f.service.connector(f.id));
-  const item = (createTime, id) => ({ message_id: id, msg_type: 'text', create_time: createTime, deleted: false,
+  const item = (createTime, id, updateTime) => ({ message_id: id, msg_type: 'text', create_time: createTime, update_time: updateTime, deleted: false,
     body: { content: JSON.stringify({ text: 'x' }) }, sender: { id: 'ou_alice', tenant_key: 'tenant', sender_type: 'user' }, mentions: [] });
-  adapter.api = async () => ({ data: { items: [item('1700000000000', 'om_ok'), item('', 'om_bad')], has_more: false } });
+  adapter.api = async () => ({ data: { items: [item('1700000000000', 'om_ok', ''), item('', 'om_bad')], has_more: false } });
   await assert.rejects(() => adapter.history({ container_type: 'chat', container_id: 'oc_x', start_time: 0, end_time: 1 }),
-    (error) => error?.status === 502 && /channel_history_invalid/.test(String(error?.message)),
-    'the page is invalid upstream data: history-sync must not retry it forever');
+    (error) => error instanceof ChannelHistoryError && error.permanent === true && error.code === 'channel_history_invalid',
+    'a permanent history error blocks the page instead of retrying it forever');
+  // The same page without the bad item is accepted, and an empty update_time falls back to create_time.
+  adapter.api = async () => ({ data: { items: [item('1700000000000', 'om_ok', '')], has_more: false } });
+  const page = await adapter.history({ container_type: 'chat', container_id: 'oc_x', start_time: 0, end_time: 1 });
+  assert.equal(page.items[0].created_at, 1700000000000);
+  assert.equal(page.items[0].updated_at, 1700000000000);
 });
