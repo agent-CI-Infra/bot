@@ -6,8 +6,7 @@ import { GitHubLogin } from '../dist/identity/github-login.js';
 import { harness, setup, account, repository } from './helpers.mjs';
 
 // Real HTTP OAuth and GitHub endpoints, confined to this test's random loopback port.
-export async function identityFixture(t, options = {}) {
-  const { wizardOnly = false, ...serverOptions } = options;
+export async function githubIdentityServer(t) {
   const state = { id: 42, login: 'administrator', owner: true, admin: false, type: 'Organization', selection: 'all', failure: 0,
     accessible: ['101'], codes: new Map(), exchanges: 0, requests: [], refreshed: 0 };
   const server = createServer(async (req, res) => {
@@ -43,28 +42,37 @@ export async function identityFixture(t, options = {}) {
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t?.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
   const base = `http://127.0.0.1:${server.address().port}`;
+  return { state, base, server };
+}
+/** The deployment's installation 77 of App 123, as the installation sync leaves it, covering repository 101. */
+export function seedInstallation(h, accountId, state) {
+  const projectOwner = () => state.type === 'User' ? '42' : '10';
+  h.store.run(`INSERT INTO github_installations(ref,github_host,app_id,installation_id,account_id,target_id,target_type,target_login,
+    repository_selection,status,completeness,revision,scope_pending,updated_at) VALUES('github.com/123/77','github.com','123','77',?,?,?,'fixture',?,'active','complete',1,0,?)
+    ON CONFLICT(ref) DO UPDATE SET target_id=excluded.target_id,target_type=excluded.target_type,repository_selection=excluded.repository_selection,revision=revision+1`,
+    accountId, projectOwner(), state.type, state.selection, new Date().toISOString());
+  h.store.run("UPDATE repositories SET owner_id=? WHERE id='101'", projectOwner());
+  h.store.run(`INSERT OR REPLACE INTO installation_repositories VALUES('github.com/123/77','101','fixture/project-101',?,'fixture',1,1,?)`, projectOwner(), new Date().toISOString());
+}
+/** Signs in through the fake GitHub as `state.id`. Signing in does not wait for the permission check (#708); this does. */
+export async function githubSignIn(identity, mode = 'login', session = '', browser = 'test-browser') {
+  const begun = identity.begin(browser, mode, session), url = new URL(begun.url);
+  const authorized = await fetch(begun.url, { redirect: 'manual' }), code = new URL(authorized.headers.get('location')).searchParams.get('code');
+  const result = await identity.callback(browser, url.searchParams.get('state'), code, session); await result.verification;
+  return { result, url, code, browser };
+}
+
+export async function identityFixture(t, options = {}) {
+  const { wizardOnly = false, ...serverOptions } = options;
+  const { state, base, server } = await githubIdentityServer(t);
   let identity, githubLogin;
   const h = await harness(t, undefined, store => { identity = new GitHubIdentity(store, { clientId: 'fixture-client', clientSecret: 'fixture-secret', redirectUri: 'http://127.0.0.1/auth/github/callback', apiUrl: base, webUrl: base }); githubLogin = wizardOnly ? new GitHubLogin(store, { apiUrl: base, webUrl: base }) : undefined; return { ...(githubLogin ? { githubLogin } : { githubIdentity: identity }), ...serverOptions }; });
   identity.config.redirectUri = h.admin + '/auth/github/callback';
   const { admin, password } = await setup(h), a = await account(admin, { type: 'github_app', app_id: '123', token: undefined, private_key: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) }); await repository(admin, a.id, '101');
   // Another tenant has an enabled project. It is never in the user's App installation.
   await repository(admin, a.id, '201'); h.store.run("UPDATE repositories SET owner_id='20',full_name='other/project-201' WHERE id='201'");
-  const projectOwner = () => state.type === 'User' ? '42' : '10';
-  const snapshot = () => {
-    h.store.run(`INSERT INTO github_installations(ref,github_host,app_id,installation_id,account_id,target_id,target_type,target_login,
-      repository_selection,status,completeness,revision,scope_pending,updated_at) VALUES('github.com/123/77','github.com','123','77',?,?,?,'fixture',?,'active','complete',1,0,?)
-      ON CONFLICT(ref) DO UPDATE SET target_id=excluded.target_id,target_type=excluded.target_type,repository_selection=excluded.repository_selection,revision=revision+1`,
-      a.id, projectOwner(), state.type, state.selection, new Date().toISOString());
-    h.store.run("UPDATE repositories SET owner_id=? WHERE id='101'", projectOwner());
-    h.store.run(`INSERT OR REPLACE INTO installation_repositories VALUES('github.com/123/77','101','fixture/project-101',?,'fixture',1,1,?)`, projectOwner(), new Date().toISOString());
-  }; snapshot();
-  async function login(mode = 'login', session = '', browser = 'test-browser') {
-    const begun = identity.begin(browser, mode, session), url = new URL(begun.url);
-    const authorized = await fetch(begun.url, { redirect: 'manual' }), code = new URL(authorized.headers.get('location')).searchParams.get('code');
-    // Signing in does not wait for the permission check (#708); tests that use the grants wait for it here.
-    const result = await identity.callback(browser, url.searchParams.get('state'), code, session); await result.verification;
-    return { result, url, code, browser };
-  }
+  const snapshot = () => seedInstallation(h, a.id, state); snapshot();
+  const login = (mode = 'login', session = '', browser = 'test-browser') => githubSignIn(identity, mode, session, browser);
   return { h, admin, password, state, a, get identity() { return identity; }, get githubLogin() { return githubLogin; }, base, snapshot, login, close: async () => { await h.stop(); await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); } };
 }
 

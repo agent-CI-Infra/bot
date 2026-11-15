@@ -11,12 +11,18 @@ export interface GitHubRefreshOptions {
   stagger?: number;
 }
 
+// Who still uses GitHub-derived authority without signing in to the console (#846): a person with an active Feishu binding,
+// and the grantor of an enabled group binding, whose grants the group runs on. `?` is the principal.
+const feishuUser = `EXISTS(SELECT 1 FROM external_identities f WHERE f.principal_id=? AND f.provider='feishu' AND f.status='active')`;
+const groupGrantor = `EXISTS(SELECT 1 FROM scoped_grants g JOIN channel_service_bindings b ON b.principal_id=g.principal_id
+  WHERE g.grantor_id=? AND g.policy='channel_service_binding' AND g.revoked_at IS NULL AND b.enabled=1)`;
+
 /**
- * Keeps GitHub-derived grants of signed-in principals proved (#708). Every round checks again each principal that has a live
- * console session and a GitHub identity that can still be checked; a principal that is not signed in is never sent to
- * GitHub, and one whose sessions ended while the round waited is skipped. Super administrators and principals holding
- * explicit delegation are never checked. When GitHub reports a rate limit, the round stops and the next ones wait until
- * GitHub said requests may go again.
+ * Keeps GitHub-derived grants proved for the people who use them (#708, #846). Every round checks again each principal with
+ * a GitHub identity that can still be checked and either a live console session, an active Feishu binding, or an enabled
+ * group binding they granted. Nobody else is sent to GitHub, and one who stopped qualifying while the round waited is
+ * skipped. Super administrators and principals holding explicit delegation are never checked. When GitHub reports a rate
+ * limit, the round stops and the next ones wait until GitHub said requests may go again.
  */
 export class GitHubRefresh {
   private timer?: ReturnType<typeof setTimeout>;
@@ -31,7 +37,7 @@ export class GitHubRefresh {
     this.concurrency = options.concurrency ?? 2;
     this.stagger = options.stagger ?? 2_000;
   }
-  /** The first round runs at once, so that grants which lapsed while the control plane was down are renewed for those signed in. */
+  /** The first round runs at once, so that grants which lapsed while the control plane was down are renewed for those who use them. */
   start(): void {
     if (this.started || this.closed) return; this.started = true;
     const tick = () => {
@@ -42,16 +48,18 @@ export class GitHubRefresh {
     tick();
   }
   async close(): Promise<void> { this.closed = true; clearTimeout(this.timer); await this.round; }
+  /** A console session, a Feishu binding or a group binding still needs the principal's GitHub-derived grants. */
   private live(principal: string): boolean {
-    return !!this.store.get('SELECT 1 FROM sessions WHERE user_id=? AND expires_at>? LIMIT 1', principal, Date.now());
+    return !!this.store.get(`SELECT 1 WHERE EXISTS(SELECT 1 FROM sessions WHERE user_id=? AND expires_at>?) OR ${feishuUser} OR ${groupGrantor}`,
+      principal, Date.now(), principal, principal);
   }
   /** One round. Principals proved within the last half interval (at sign-in, say) wait for the next one. */
   async run(): Promise<void> {
     const identity = this.identity(), now = Date.now();
     if (!identity || identity.rateLimitedUntil > now) return;
-    const due = this.store.all(`SELECT DISTINCT i.principal_id FROM external_identities i JOIN sessions s ON s.user_id=i.principal_id
-      WHERE i.provider='github' AND i.status IN ('active','pending_verification') AND i.credentials IS NOT NULL AND s.expires_at>? AND i.verified_at<=?`,
-    now, now - this.interval / 2).map(row => row.principal_id as string).filter(principal => !verificationExempt(this.store, principal));
+    const due = this.store.all(`SELECT DISTINCT i.principal_id FROM external_identities i
+      WHERE i.provider='github' AND i.status IN ('active','pending_verification') AND i.credentials IS NOT NULL AND i.verified_at<=?`,
+    now - this.interval / 2).map(row => row.principal_id as string).filter(principal => this.live(principal) && !verificationExempt(this.store, principal));
     let next = 0, slot = now;
     const worker = async () => {
       while (next < due.length) {

@@ -51,7 +51,7 @@ const githubLogin = new GitHubLogin(store, {
 });
 // Validate deployment defaults at startup; a saved wizard configuration takes precedence.
 githubLogin.identity;
-// GitHub-derived grants of signed-in principals are checked again every ten minutes (#708); nobody else is sent to GitHub.
+// GitHub-derived grants are checked again every ten minutes for console, Feishu and group-binding users (#708, #846); nobody else is sent to GitHub.
 const githubRefresh = new GitHubRefresh(store, () => githubLogin.identity); githubRefresh.start();
 const tokenFile = process.env.BOT_MANAGER_TOKEN_FILE;
 if (!tokenFile) throw new Error('BOT_MANAGER_TOKEN_FILE is required');

@@ -117,8 +117,8 @@ export class ChannelServiceBindings {
       grants: binding ? this.grants(binding).map(g => [g.id, revision(this.store, g.grantor_id)]) : [] }));
   }
   /** Projects inside the binding's grants, split by whether each grantor still holds config.write and the capability there. */
-  reach(binding: Row, capabilities = ['tasks.read']): { projects: Reachable[]; paused: Reachable[] } {
-    const grantors = new Map<string, ActorContext | null>(), projects: Reachable[] = [], paused: Reachable[] = [], seen = new Set<string>();
+  reach(binding: Row, capabilities = ['tasks.read']): { projects: Reachable[]; paused: (Reachable & { grantor_id: string })[] } {
+    const grantors = new Map<string, ActorContext | null>(), projects: Reachable[] = [], paused: (Reachable & { grantor_id: string })[] = [], seen = new Set<string>();
     const grantor = (id: string) => {
       if (!grantors.has(id)) { try { grantors.set(id, resolvePrincipalActor(this.store, id, null, undefined, 'service')); } catch (error) { if (!terminal(error)) throw error; grantors.set(id, null); } }
       return grantors.get(id)!;
@@ -130,7 +130,8 @@ export class ChannelServiceBindings {
       for (const p of candidates) {
         if (seen.has(p.id)) continue; seen.add(p.id);
         const actor = grantor(g.grantor_id), project = { id: p.id, full_name: p.full_name, private: p.private !== 0, enabled: !!p.enabled };
-        (actor && allows(actor, p.id, capabilities) ? projects : paused).push(project);
+        // A paused project names the grantor whose authority no longer covers it, for the group's explanation (#846).
+        if (actor && allows(actor, p.id, capabilities)) projects.push(project); else paused.push({ ...project, grantor_id: g.grantor_id });
       }
     }
     return { projects, paused };

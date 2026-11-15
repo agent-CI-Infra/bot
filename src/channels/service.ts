@@ -4,7 +4,8 @@ import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, confineActor, confinedTenant, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
 import { ManagementAgent } from '../management/agent.js';
-import { managementFailure, managementStates, serviceFailure } from '../management/presentation.js';
+import { managementFailure, managementStates, pausedGroupNotice, serviceFailure } from '../management/presentation.js';
+import { githubProof } from '../identity/github.js';
 import { commands } from '../management/catalog.js';
 import { managementAssistant, serviceRole } from '../service-roles/roles.js';
 import { ChannelBindings, externalSubject } from './binding.js';
@@ -33,7 +34,11 @@ const card = (value: string, link?: string, token?: string): Json => ({ config: 
   elements: [{ tag: 'div', text: { tag: 'plain_text', content: value } },
     ...(link ? [{ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '登录后台查看' }, url: link },
       ...(token ? [{ tag: 'button', text: { tag: 'plain_text', content: '刷新执行状态' }, value: { token } }] : [])] }] : [])] });
-export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; manager?: Manager; githubUrl?: string; }
+/** The deployment's GitHub permission checks, as far as Feishu turns use them (#846). */
+export interface GitHubProofs { lapsed(principal: string): boolean; renewIfLapsed(principal: string): Promise<boolean> }
+export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; manager?: Manager; githubUrl?: string; github?: () => GitHubProofs | undefined; }
+// A principal a Feishu turn just checked is not checked again for each of its next messages, whatever the check found.
+const renewalPause = 60_000;
 /** Transport replies and authorized destination registration. Durable scheduling lives in schedules/. */
 export class ChannelService {
   readonly bindings: ChannelBindings;
@@ -48,6 +53,9 @@ export class ChannelService {
   readonly turnMessages: ChannelTurnMessages;
   readonly members: ChannelMembers;
   private readonly business = new Map<string,Promise<void>>();
+  // GitHub checks Feishu turns started (#846), and when the latest one of each principal ended.
+  private readonly renewals = new Map<string,Promise<void>>();
+  private readonly renewed = new Map<string,number>();
   private timer?: ReturnType<typeof setInterval>;
   private syncTimer?: ReturnType<typeof setInterval>;
   private busy = false;
@@ -338,6 +346,26 @@ export class ChannelService {
     // An organization's app carries its users' authority only inside that organization (#424).
     return c.owner_tenant ? confineActor(actor, c.owner_tenant) : actor;
   }
+  /**
+   * Feishu turns decide on the stored grants, as console writes do (#708). Before a private-chat turn, a group turn or a chat
+   * timer resolves authority, each principal it runs on whose GitHub proof lapsed is checked once, joining a check already in
+   * flight (#846). Resolves when those checks end, or undefined when none is needed. A principal checked here within the last
+   * minute is not checked again for every message: a failing GitHub must not slow each one.
+   */
+  renewal(principals: Iterable<string>): Promise<void> | undefined {
+    const github = this.options.github?.(), now = Date.now(), waits: Promise<void>[] = [];
+    if (!github) return;
+    for (const [principal, at] of this.renewed) if (now - at >= renewalPause) this.renewed.delete(principal);
+    for (const principal of new Set(principals)) {
+      let work = this.renewals.get(principal);
+      if (!work && !this.renewed.has(principal) && github.lapsed(principal)) {
+        work = github.renewIfLapsed(principal).then(() => {}, () => {}).finally(() => { this.renewals.delete(principal); this.renewed.set(principal, Date.now()); });
+        this.renewals.set(principal, work);
+      }
+      if (work) waits.push(work);
+    }
+    return waits.length ? Promise.all(waits).then(() => {}) : undefined;
+  }
   /** A private chat's owner, with the authority the chat's app lets them use (see actor), for work without a live message. */
   personalActor(principal: string, chat: Row, channel: ActorContext['channel']): ActorContext {
     const actor = resolvePrincipalActor(this.store, principal, null, undefined, channel), owner = this.applicationTenant(chat);
@@ -465,6 +493,8 @@ export class ChannelService {
       const binding = chat && e.chat_type==='group' ? this.serviceBindings.active(chat.id) : undefined;
       if(e.chat_type==='p2p'){
         if(!chat)return fail(403,'channel_chat_not_found');
+        // While a GitHub check for the chat's owner runs (#846), its later messages wait behind the first, in order.
+        if(this.business.has(chat.id)){this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return;}
         await this.personalMessage(row,e,chat,content);return;
       }
       if (binding && chat) {
@@ -488,9 +518,18 @@ export class ChannelService {
   }
   private async personalMessage(row:Row,e:ChannelEvent,chat:Row,content:string):Promise<void>{
     const actor=await this.actor(e);
+    // A lapsed GitHub proof is checked first (#846). The check runs in the background and the message waits in the inbox, so a
+    // slow GitHub never holds up other chats; the next tick takes the message again with the grants the check left.
+    const renewal=this.renewal([actor.principal_id]);
+    if(renewal){
+      this.business.set(chat.id,renewal.finally(()=>this.business.delete(chat.id)));
+      this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return;
+    }
     this.employees.personalOwner(chat.id,e,actor);
-    // Through an organization's app a person without any project there has nothing to manage.
-    if(confinedTenant(actor)&&!this.management.service.projects(actor).length)fail(403,'channel_application_tenant_forbidden');
+    // Through an organization's app a person without any project there has nothing to manage; one whose GitHub authorization
+    // GitHub no longer accepts is told to sign in again instead.
+    if(confinedTenant(actor)&&!this.management.service.projects(actor).length)
+      fail(403,githubProof(this.store,actor.principal_id)?.state==='reauthorize'?'github_reauthorization_required':'channel_application_tenant_forbidden');
     const revision=chat.context_revision;
     restrictActor(actor,()=>{
       if(this.stopped)fail(409,'channel_stopped');
@@ -535,6 +574,14 @@ export class ChannelService {
     const message=(this.ledger.query(chat.id,{message_id:e.message_id}).messages as Json[])[0];
     if(!message||message.sensitive||message.deleted)fail(403,'channel_sensitive_message');
     this.store.run('UPDATE channel_inbox SET conversation_id=? WHERE id=?',chat.id,row.id);
+    // The group runs on its grantors' authority: lapsed GitHub proofs are checked before it is read (#846).
+    await this.renewal(this.serviceBindings.grants(binding).map(g=>String(g.grantor_id)));
+    const reach=this.serviceBindings.reach(binding);
+    if(e.addressed&&!reach.projects.length&&reach.paused.length){
+      // Nothing in scope is usable: say who has to act instead of answering as if the group had no repositories.
+      this.queue(e,card(pausedGroupNotice(this.store,reach.paused)),row.id+':paused',row.id);
+      this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?",row.id);return;
+    }
     const protection=(fence:string,turn:string)=>({kind:'service_binding',chat_id:chat.id,binding_id:binding.id,binding_revision:binding.revision,source_message:row.id,source_fence:fence,turn_id:turn});
     // Progress messages (#435) go out while the turn runs, as replies to the same message; attachments only with the answer.
     const result=await this.serviceSessions.run({chat,binding,source_message:row.id,event:e,request:content,allowSilence:!e.addressed,

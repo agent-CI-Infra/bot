@@ -1,3 +1,9 @@
+import type { Store } from '../storage/database.js';
+import { githubProof } from '../identity/github.js';
+import { pendingInstalledRepositories } from '../identity/github-status.js';
+
+const reauthorize='你的 GitHub 授权已失效（可能已在 GitHub 上撤销，或需要重新授权），平台暂时无法确认你在仓库上的权限。请登录控制台并用 GitHub 重新登录，完成后再发消息。';
+
 // Only gateway and provider faults mean the model service or its configuration is unavailable. An answer the loop could
 // not use and a context over the request limit are different failures with different fixes (#333). Assistant turns have no
 // step limit since #435: they end with an answer, a stop or a loss of authorization.
@@ -17,6 +23,7 @@ export function managementFailure(code:string):string {
   if(outputFault.test(code))return '管理助手的模型返回了无法处理的结果，本次未完成；请重试，持续出现时请在控制台查看执行记录。';
   if(contextFault.test(code))return '本次请求需要的上下文超过模型请求上限，请缩小范围（例如指定项目或时间段）后重试。';
   if(/authorization_changed|conversation_source_changed|channel_message_changed|channel_sensitive_message/.test(code))return '身份、权限或来源消息已变化，请核对当前范围后重新说明请求。';
+  if(code==='github_reauthorization_required')return reauthorize;
   if(code==='channel_application_tenant_forbidden')return '这个飞书机器人属于一个 GitHub 组织，经它只能使用你在该组织内的权限，而你在该组织还没有可访问的项目。请改用其他机器人，或请组织管理员为你授权。';
   if(/binding|principal_inactive/.test(code))return '当前飞书身份尚未有效绑定，请在私聊发送“绑定”或“重新认证”。';
   if(/forbidden|scope|required.*permission/.test(code))return '当前账户或会话没有访问此对象或执行此操作的权限，请检查身份与权限。';
@@ -36,5 +43,32 @@ export function serviceFailure(code:string,role:string):string {
   if(code==='conversation_stopped')return `群助手「${role}」的本次回答已在控制台停止，不再发送最终回答；已经发出的进展消息保留。`;
   if(/conversation_source_changed|channel_service_binding|channel_sensitive_message|channel_source_message/.test(code))return '本群助手的配置或来源消息刚刚变化，本次回答已停止，请重新发送请求。';
   return `群助手本次未完成（${code}），请稍后重试，或请维护人在控制台检查本群助手的配置。`;
+}
+/** What the management assistant answers a person who can open no project (#846): why, as GitHub's latest check tells it. */
+export function noProjectsReply(store:Store,principal:string):string {
+  const proof=githubProof(store,principal);
+  if(proof?.state==='reauthorize')return reauthorize;
+  if(proof?.state==='pending')return '暂时无法在 GitHub 上核验你的仓库权限，平台会自动重试；请稍后再发消息。持续出现时，请在控制台「身份与权限」点击「重新验证 GitHub 权限」。';
+  const pending=proof?pendingInstalledRepositories(store,principal).length:0;
+  if(pending)return `你在 GitHub 上管理的 ${pending} 个仓库已安装，但还没有被超级管理员启动，所以当前没有可访问的项目。请联系超级管理员在控制台启动这些仓库。`;
+  if(proof)return 'GitHub 的最新核验显示，你在已接入的仓库上没有可用的权限，所以当前没有可访问的项目。如果刚在 GitHub 上调整过权限，请联系仓库管理员；详情见控制台「身份与权限」。';
+  return '当前账户没有可访问的项目。身份绑定不会增加项目权限；请先在身份与权限页面检查授权，或联系项目管理员。';
+}
+/**
+ * Why a group's repositories are paused (#846): per grantor whose authority no longer covers them, who they are and what has
+ * to happen, so that the group is not left with an assistant that silently sees nothing.
+ */
+export function pausedGroupNotice(store:Store,paused:{full_name:string;grantor_id:string}[]):string {
+  const byGrantor=new Map<string,string[]>();
+  for(const project of paused)byGrantor.set(project.grantor_id,[...byGrantor.get(project.grantor_id)??[],project.full_name]);
+  return [...byGrantor].map(([grantor,repositories])=>{
+    const proof=githubProof(store,grantor),name=proof?.login||store.get('SELECT username FROM users WHERE id=?',grantor)?.username||'本群的授权人';
+    const list=repositories.slice(0,3).join('、')+(repositories.length>3?` 等 ${repositories.length} 个仓库`:'');
+    if(!store.get('SELECT 1 FROM principals p JOIN users u ON u.id=p.user_id WHERE p.id=? AND p.active=1 AND u.active=1',grantor))
+      return `${list} 暂停使用：本群的授权人 ${name} 的账号已停用。请项目管理员在控制台「个人设置 → 飞书绑定」重新配置本群。`;
+    if(proof?.state==='reauthorize')return `${list} 暂停使用：本群的授权人 ${name} 的 GitHub 授权已失效。请 ${name} 登录控制台并用 GitHub 重新登录，本群随后自动恢复。`;
+    if(proof?.state==='pending')return `${list} 暂停使用：暂时无法在 GitHub 上核验本群授权人 ${name} 的权限，平台会自动重试；持续出现时，请 ${name} 登录控制台查看「身份与权限」。`;
+    return `${list} 暂停使用：本群的授权人 ${name} 在这些仓库上已没有配置权限。请有权限的项目管理员在控制台「个人设置 → 飞书绑定」重新配置本群。`;
+  }).join('\n');
 }
 export const managementStates:Record<string,string>={pending:'等待处理',running:'处理中',completed:'处理完成',succeeded:'已执行',failed:'未完成',unknown:'执行结果待确认，请先对账，勿重复提交',rejected:'审批已拒绝',interrupted:'服务重启中断，请检查已有回执',stopped:'已停止后续调用',executing:'正在执行'};

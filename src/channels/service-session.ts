@@ -13,6 +13,7 @@ import { permitsTool, permitsManagement, githubReadScopes, githubWriteAllowed, t
 import { githubWrite, scopedGithubWriteTool } from '../github/write.js';
 import { serviceRole, serviceRoleModel } from '../service-roles/roles.js';
 import type { ManagementService } from '../management/service.js';
+import { pausedGroupNotice } from '../management/presentation.js';
 import { serviceMemory, serviceMemoryTools } from '../service-roles/resources.js';
 import { assistantComputerNames, assistantComputerTools, computerInstructions, computerPermission } from '../service-roles/assistant-computers.js';
 import { commands, managementTools, validate, contractSchema } from '../management/catalog.js';
@@ -237,7 +238,7 @@ export class ChannelServiceSessions {
           fields(input, []);
           const reach = this.bindings.reach(binding);
           return { scope: binding.scope, projects: reach.projects.map(p => ({ repository: p.full_name, url: 'https://github.com/' + p.full_name, private: p.private, enabled: p.enabled })),
-            ...(reach.paused.length ? { paused_repositories: reach.paused.length, notice: '部分仓库因配置人的权限变化暂不可用。' } : {}) };
+            ...(reach.paused.length ? { paused_repositories: reach.paused.length, notice: pausedGroupNotice(this.store, reach.paused) } : {}) };
         }
         if (name === 'search_conversation_history') {
           fields(input, Object.keys(conversationHistoryTools[0]!.function.parameters.properties));
@@ -379,7 +380,8 @@ export class ChannelServiceSessions {
               current_message: turn.event ? { message_id: turn.event.message_id, sender_id: turn.event.actor_id,
                 ...(requester ? { sender_name: requester } : {}), is_direct_mention: directMention(turn.event), mentions: turn.event.mentions ?? [] } : null,
               ...(earlier.length ? unsummarized : {}), recent_messages: recent.map(m => excerpt(named(m), 3000)), history: this.ledger.diagnostics(chat.id),
-              scope: { kind: binding.scope, repositories: reach.projects.slice(0, 50).map(p => p.full_name), more_repositories: Math.max(0, reach.projects.length - 50), paused_repositories: reach.paused.length },
+              scope: { kind: binding.scope, repositories: reach.projects.slice(0, 50).map(p => p.full_name), more_repositories: Math.max(0, reach.projects.length - 50), paused_repositories: reach.paused.length,
+                ...(reach.paused.length ? { paused_notice: pausedGroupNotice(this.store, reach.paused) } : {}) },
               permissions: granted }, summary: saved, source_updates: this.ledger.sourceUpdates(chat.id,scope,fence) }) }];
           // Results share a budget per batch and older ones fold away, so many parallel calls stay within the model's context.
           const transcript = new ToolTranscript(messages, chatContextBytes);

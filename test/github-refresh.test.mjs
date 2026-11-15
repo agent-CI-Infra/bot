@@ -133,6 +133,34 @@ test('the background refresh checks signed-in principals only, and never super a
   assert.deepEqual(derived(h, A), []); assert.deepEqual(derived(h, B), []);
 });
 
+test('the background refresh also checks Feishu users and group grantors who never sign in to the console (#846)', async t => {
+  const f = await identityFixture(t), { h, state } = f;
+  const a = await f.login(); state.id = 43; const b = await f.login(); state.id = 44; const c = await f.login();
+  const [A, B, C] = [a, b, c].map(login => login.result.principal_id);
+  const refresh = new GitHubRefresh(h.store, () => f.identity, { stagger: 0 });
+  const due = () => h.store.run("UPDATE external_identities SET verified_at=1 WHERE provider='github'");
+  const reads = () => [42, 43, 44].map(id => userReads(f, id));
+  // Nobody has a console session. A is bound to Feishu; B granted an enabled group binding; C only signed in once.
+  h.store.run(`INSERT INTO external_identities(id,principal_id,provider,host,connector,external_tenant,external_actor,display_name,status,verified_at)
+    VALUES('feishu-a',?,'feishu','open.feishu.cn','connector:cli','tenant','ou_a','ou_a','active',?)`, A, Date.now());
+  h.store.run(`INSERT INTO channel_chats(id,provider,app_id,installation_tenant,chat_id,chat_type,connector_id,created_at,last_received_at)
+    VALUES('chat-g','feishu','cli','tenant','oc_g','group','connector',?,?)`, Date.now(), Date.now());
+  h.store.run("INSERT INTO principals(id,kind,maintenance) VALUES('binding-g','service','channel-binding:chat-g')");
+  h.store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,created_at,updated_at)
+    VALUES('binding','chat-g','repository-assistant','repositories','binding-g',?,?,?,?)`, B, B, Date.now(), Date.now());
+  h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
+    VALUES('group-grant','binding-g','github.com:10','101','project','service','["tasks.read"]','explicit_delegation',?,'channel_service_binding','channel:chat-g',?)`, B, Date.now());
+  h.store.run('DELETE FROM sessions'); due();
+  let before = reads(); await refresh.run();
+  assert.deepEqual(reads().map((n, i) => n - before[i]), [1, 1, 0]);
+  assert.ok(identity(h, A).verified_at > 1 && identity(h, B).verified_at > 1); assert.equal(identity(h, C).verified_at, 1);
+  // Unbound and disabled: neither is sent to GitHub any more.
+  h.store.run("UPDATE external_identities SET status='revoked' WHERE id='feishu-a'");
+  h.store.run("UPDATE channel_service_bindings SET enabled=0 WHERE id='binding'"); due();
+  before = reads(); await refresh.run();
+  assert.deepEqual(reads().map((n, i) => n - before[i]), [0, 0, 0]);
+});
+
 test('a GitHub rate limit pauses the refresh, and grants keep the rest of their validity', async t => {
   const f = await identityFixture(t), { h, state } = f;
   const a = await f.login(); state.id = 43; const b = await f.login();
