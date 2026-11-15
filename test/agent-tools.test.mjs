@@ -23,6 +23,7 @@ import {
   detectElfInterpreterLibc,
   detectHostLibc,
   extractTarGz,
+  extractTarGzAsync,
   inspectAgentTools,
   parseSemver,
   satisfiesCliRange,
@@ -475,6 +476,35 @@ test('AgentToolManager selects musl native package only when libc=musl and refus
   assert.equal(glibcOnMuslVolume.status().clis.claude_code.available, false);
   assert.throws(() => glibcOnMuslVolume.select('claude_code'), { code: 'cli_not_installed' });
   assert.equal(muslManager.select('claude_code').version, '2.1.315');
+});
+
+test('archive entry points preserve filtering, modes, safe links, and failure cleanup', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'tar-entry-points-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const archive = buildTarGz([
+    { name: 'package/lib/value', content: 'kept', mode: 0o644 },
+    { name: 'package/bin/value', type: 'symlink', linkname: '../lib/value' },
+    { name: 'package/bin/run', content: 'executable', mode: 0o755 },
+    { name: 'package/ignore.txt', content: 'excluded' },
+  ]);
+  for (const [name, extract] of [['sync', extractTarGz], ['async', extractTarGzAsync]]) {
+    await t.test(name, async () => {
+      const dest = join(root, name);
+      await extract(archive, dest, { stripComponents: 1, include: path => path !== 'ignore.txt' });
+      assert.equal(readFileSync(join(dest, 'bin/value'), 'utf8'), 'kept');
+      assert.equal(statSync(join(dest, 'lib/value')).mode & 0o777, 0o644);
+      assert.equal(statSync(join(dest, 'bin/run')).mode & 0o777, 0o755);
+      assert.equal(existsSync(join(dest, 'ignore.txt')), false);
+      await assert.rejects(async () => extract(Buffer.from('invalid gzip'), join(dest, 'bad')), { code: 'agent_tool_archive_invalid' });
+      await assert.rejects(async () => extract(buildTarGz([
+        { name: 'escape', type: 'symlink', linkname: '../../outside' },
+      ]), join(dest, 'links')), { code: 'agent_tool_archive_invalid' });
+      await assert.rejects(async () => extract(archive, join(dest, 'partial'), {
+        stripComponents: 1, writeImpl: () => 0,
+      }), { code: 'agent_tool_archive_invalid' });
+      assert.equal(existsSync(join(dest, 'partial/lib/value')), false);
+    });
+  }
 });
 
 test('extractTarGz rejects path traversal, symlink-chain escapes, and symlink loops while allowing safe internal symlinks', t => {
