@@ -10,6 +10,7 @@ for (const role of ['super_admin','project_admin']) test(`${role} finds one Mana
   page.on('pageerror',error=>errors.push(error.message));
   try {
     const {admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+    const initialPolicy=h.store.get("SELECT review_enabled,development_enabled FROM policies WHERE repository_id='101'");
     const memberPassword=testPassword();
     await admin('/api/users','POST',{username:'project-manager',password:memberPassword,repository_ids:['101']});
     // Emulate a saved pre-upgrade project whose duplicate switches were all closed.
@@ -22,6 +23,7 @@ for (const role of ['super_admin','project_admin']) test(`${role} finds one Mana
     await page.getByRole('button',{name:'登录',exact:true}).click();
     const entry=page.getByRole('link',{name:/项目 Manager 设置/});
     await expect(entry).toBeVisible();
+    await expect(page.getByLabel('开启自动开发',{exact:true})).toHaveCount(0);
     mkdirSync('.tmp/manager-settings',{recursive:true});
     for(const width of [1440,390]) {
       await page.setViewportSize({width,height:1000});await entry.scrollIntoViewIfNeeded();
@@ -32,6 +34,11 @@ for (const role of ['super_admin','project_admin']) test(`${role} finds one Mana
     await expect(page).toHaveURL(/roles\/manager$/);
     const events=page.locator('[data-overview-anchor=manager-events]');
     await expect(events.getByRole('heading',{name:'交给 Manager 的事件',exact:true})).toBeVisible();
+    const reviews=page.getByLabel('开启 Issue 与 PR 检视',{exact:true}),development=page.getByLabel('开启自动开发',{exact:true});
+    expect(await reviews.isChecked()).toBe(!!initialPolicy.review_enabled);expect(await development.isChecked()).toBe(!!initialPolicy.development_enabled);
+    await reviews.check();await development.check();
+    await page.getByRole('button',{name:'保存检视与开发策略',exact:true}).click();
+    await expect(page.locator('.flash')).toHaveText('已保存');
     await expect(page.getByLabel('开启角色协调',{exact:true})).toHaveCount(0);
     await expect(page.getByText(/交给主控（/)).toHaveCount(0);
     const actions=page.getByLabel('接收默认分支的 Actions 失败事件',{exact:true});
@@ -52,12 +59,19 @@ for (const role of ['super_admin','project_admin']) test(`${role} finds one Mana
     await actions.uncheck();await page.getByRole('button',{name:'保存事件开关',exact:true}).click();
     await expect(page.getByText('已保存事件开关',{exact:true})).toBeVisible();
     await page.reload();await expect(actions).not.toBeChecked();
+    await expect(reviews).toBeChecked();await expect(development).toBeChecked();
+    await reviews.uncheck();await development.uncheck();
+    await page.getByRole('button',{name:'保存检视与开发策略',exact:true}).click();
+    await expect(page.locator('.flash')).toHaveText('已保存');
+    await page.reload();await expect(reviews).not.toBeChecked();await expect(development).not.toBeChecked();
     const saved=(await admin('/api/repositories/101/manager')).value.manager.events;
     expect([saved['actions.run_failed'],saved['pull_request.synchronize']]).toEqual([false,false]);
     mkdirSync('.tmp/manager-settings',{recursive:true});
     for(const width of [1440,390]) {
       await page.setViewportSize({width,height:1000});
       await page.getByRole('heading',{name:'项目 Manager 设置',exact:true}).scrollIntoViewIfNeeded();
+      await page.getByRole('heading',{name:'检视与开发策略',exact:true}).scrollIntoViewIfNeeded();
+      await page.screenshot({path:`.tmp/manager-settings/policy-${role}-${width}.png`});
       await actions.scrollIntoViewIfNeeded();
       expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
       await expect(actions).toBeInViewport();

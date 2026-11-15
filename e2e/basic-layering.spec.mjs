@@ -24,8 +24,9 @@ test('#570 基本设置首屏只有常用项，技术信息和危险操作默认
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await loginBasic(page, h, password);
-    await expect(page.getByLabel('开启 Issue 与 PR 检视', { exact: true })).toBeVisible();
-    await expect(page.getByLabel('开启自动开发', { exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: /项目 Manager 设置/ })).toBeVisible();
+    await expect(page.getByLabel('开启 Issue 与 PR 检视', { exact: true })).toHaveCount(0);
+    await expect(page.getByLabel('开启自动开发', { exact: true })).toHaveCount(0);
     await expect(page.getByLabel('基准分支', { exact: true })).toBeVisible();
     // Technical identifiers and danger actions are in the document but not on the first screen.
     await expect(page.getByText('仓库 ID', { exact: true })).toBeHidden();
@@ -48,7 +49,8 @@ test('#570 基本设置首屏只有常用项，技术信息和危险操作默认
     await page.setViewportSize({ width: 390, height: 844 });
     await page.evaluate(() => window.scrollTo(0, 0));
     await expect(page.getByLabel('基准分支', { exact: true })).toBeVisible();
-    await expect(page.getByLabel('开启 Issue 与 PR 检视', { exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: /项目 Manager 设置/ })).toBeVisible();
+    await expect(page.getByLabel('开启 Issue 与 PR 检视', { exact: true })).toHaveCount(0);
     await expect(page.getByText('仓库 ID', { exact: true })).toBeHidden();
     await expect(page.getByRole('button', { name: '禁用项目', exact: true })).toBeHidden();
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);

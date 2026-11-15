@@ -5,7 +5,7 @@ const projectSections = [['overview', '项目总览'], ['management', '管理助
 // #707: the settings categories are also the secondary nav of every settings page, so the hub, that nav and the phone's
 // 当前页面 picker all read this one list.
 const projectSettingsSections = [
-  ['basic', '基本设置', '名称、分支与常用开关'],
+  ['basic', '基本设置', '项目概况、分支与启停'],
   ['machine', '机器配置', '虚拟电脑与运行环境'],
   ['roles', '角色', '角色分工与权限'],
   ['model', '模型', '项目默认模型'],

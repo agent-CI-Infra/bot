@@ -34,8 +34,18 @@ const saveManagerChange = change => api(`/api/repositories/${current.id}/manager
 function managerCards(manager, roles, refresh, notice) {
   const behavior = card('项目 Manager 设置');
   behavior.append(note('新任务默认由 Manager 安排角色和执行方式，按任务需要委派工作，无需另开协调开关。下方选择哪些外部事件可以启动自动处理。项目停用或暂停、已授予的权限、预算、独立 QA 与发布检查继续生效。'));
-  return [...(notice ? [Object.assign(element('p', notice, 'view-success flash'), { role: 'status' })] : []), behavior, eventFiltersCard(manager, refresh), managerPromptCard(manager, refresh), taskModelEditor('manager', 'Manager 分派', current.policy, current.models),
+  return [...(notice ? [Object.assign(element('p', notice, 'view-success flash'), { role: 'status' })] : []), behavior, managerWorkPolicyCard(), eventFiltersCard(manager, refresh), managerPromptCard(manager, refresh), taskModelEditor('manager', 'Manager 分派', current.policy, current.models),
     dispatchCard(), managerRulesCard(), ...(manager.migration ? [migrationCard(manager.migration)] : [])];
+}
+
+function managerWorkPolicyCard() {
+  const target = current, policy = target.policy, id = target.id;
+  return settingsForm('检视与开发策略', [
+    checkbox('review_enabled', policy.review_enabled, '开启 Issue 与 PR 检视'), checkbox('development_enabled', policy.development_enabled, '开启自动开发'),
+    note('事件来源决定哪些通知可以交给 Manager；这里决定它可以安排检视或自动开发任务。开启任务类型不会增加 GitHub 写权限，项目禁用或任务暂停时仍不会执行。')],
+    form => api(`/api/repositories/${id}/policy`, 'PATCH', changed({ review_enabled: form.elements.review_enabled.checked, development_enabled: form.elements.development_enabled.checked },
+      { review_enabled: !!policy.review_enabled, development_enabled: !!policy.development_enabled })),
+    { editable: target.canConfigure !== false, draftKey: 'automation', caption: '保存检视与开发策略' });
 }
 
 function managerPromptCard(manager, refresh) {
