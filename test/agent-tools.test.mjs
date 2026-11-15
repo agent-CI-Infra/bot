@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -141,6 +141,8 @@ async function startMockToolUpstream(t, arch = 'x64') {
 
   let tamperClaudeHash = false;
   let untrustedRedirect = false;
+  // Runs while the codex archive is being served, i.e. after install() passed its entry check and before the replace.
+  let beforeCodexDownload = null;
 
   const server = createServer((req, res) => {
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -236,6 +238,7 @@ async function startMockToolUpstream(t, arch = 'x64') {
         return;
       }
       const item = codexVersions.get(codexDlMatch[1]);
+      beforeCodexDownload?.(codexDlMatch[1]);
       res.writeHead(200, { 'content-type': 'application/gzip' });
       res.end(item.tar);
       return;
@@ -261,6 +264,7 @@ async function startMockToolUpstream(t, arch = 'x64') {
     },
     setTamperClaudeHash: v => { tamperClaudeHash = v; },
     setUntrustedRedirect: v => { untrustedRedirect = v; },
+    setBeforeCodexDownload: fn => { beforeCodexDownload = fn; },
   };
 }
 
@@ -616,7 +620,7 @@ const toolApiScaffold = async (t, prefix) => {
   store.run("INSERT INTO accounts VALUES('a','org','github_app','1','{}','now')");
   store.run("INSERT INTO repositories VALUES('r','org/repo','org','a')");
   store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('t1','r','task.request','running','test','{}',1,1)");
-  return { root, tools, store, superUser: { id: 'u-super', role: 'super_admin', repositories: [] } };
+  return { root, tools, store, upstream, superUser: { id: 'u-super', role: 'super_admin', repositories: [] } };
 };
 
 test('reinstalling the CLI version an active run is using is refused with 409 and leaves the install untouched (#735)', async t => {
@@ -664,6 +668,11 @@ test('a claude install that would replace the Node runtime an active claude run 
   store.run("UPDATE task_runs SET role='developer',harness='claude_code',harness_version='1' WHERE id=?", run.id);
   recordRunCliVersion(store, run.id, '2.1.319');
 
+  // A reusable Node runtime is left alone: another claude version still installs beside the active one.
+  const reused = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'claude_code', version: '1.9.0', retain_count: 2 });
+  assert.equal(reused.installed.version, '1.9.0');
+  assert.equal(existsSync(sentinel), true, 'the reusable Node runtime is not touched');
+
   // An invalid Node manifest sends the next claude install down the replace path.
   rmSync(join(nodeDir, 'manifest.json'));
 
@@ -675,4 +684,63 @@ test('a claude install that would replace the Node runtime an active claude run 
   assert.equal(existsSync(sentinel), true, 'the Node directory is not removed');
   assert.deepEqual(readFileSync(join(nodeDir, 'bin', 'node')), nodeBinBefore, 'the Node binary is byte-for-byte unchanged');
   assert.equal(existsSync(join(root, 'claude_code', '2.1.310')), false, 'the refused install leaves nothing behind');
+});
+
+test('a run admitted while the download is in flight still blocks the replacement (#735)', async t => {
+  const { root, tools, store, upstream, superUser } = await toolApiScaffold(t, 'agent-tools-admit-');
+
+  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.166.0', retain_count: 2 });
+  const versionDir = join(root, 'codex', '0.166.0');
+  const sentinel = join(versionDir, 'SENTINEL');
+  writeFileSync(sentinel, 'must survive');
+  const manifestBefore = readFileSync(join(versionDir, 'manifest.json'));
+  const inodeBefore = statSync(versionDir).ino;
+
+  // Nothing is active when install() starts; the run is admitted while the codex archive is being downloaded, so only
+  // the check at the replacement point can see it.
+  let admitted = null;
+  upstream.setBeforeCodexDownload(version => {
+    if (version !== '0.166.0' || admitted) return;
+    admitted = beginRun(store, store.get("SELECT * FROM tasks WHERE id='t1'"), 'execution', {});
+    store.run("UPDATE task_runs SET role='developer',harness='codex',harness_version='1' WHERE id=?", admitted.id);
+    recordRunCliVersion(store, admitted.id, '0.166.0');
+  });
+
+  await assert.rejects(
+    () => agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.166.0', retain_count: 2 }),
+    { status: 409, code: 'agent_tool_version_in_use' },
+    'the replacement is refused even though the entry check saw no active run',
+  );
+  upstream.setBeforeCodexDownload(null);
+  assert.notEqual(admitted, null, 'the mock admitted the run during the download');
+  assert.equal(existsSync(sentinel), true, 'the in-use directory is not removed by the in-flight install');
+  assert.deepEqual(readFileSync(join(versionDir, 'manifest.json')), manifestBefore, 'the in-use manifest is byte-for-byte unchanged');
+  assert.equal(statSync(versionDir).ino, inodeBefore, 'the in-use directory is the same inode, never replaced');
+
+  endRun(store, admitted, 'completed', null);
+  const again = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.166.0', retain_count: 2 });
+  assert.equal(again.installed.version, '0.166.0');
+  assert.equal(existsSync(sentinel), false, 'after the run finished the replacement really happens');
+});
+
+test('prune keeps a broken version directory an active run is executing (#735)', async t => {
+  const { root, tools, store, superUser } = await toolApiScaffold(t, 'agent-tools-broken-');
+
+  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.166.0', retain_count: 2 });
+  const versionDir = join(root, 'codex', '0.166.0');
+  const sentinel = join(versionDir, 'SENTINEL');
+  writeFileSync(sentinel, 'must survive');
+  // An unreadable manifest makes this directory look broken to prune, while the run still spawns what is inside.
+  rmSync(join(versionDir, 'manifest.json'));
+
+  const run = beginRun(store, store.get("SELECT * FROM tasks WHERE id='t1'"), 'execution', {});
+  store.run("UPDATE task_runs SET role='developer',harness='codex',harness_version='1' WHERE id=?", run.id);
+  recordRunCliVersion(store, run.id, '0.166.0');
+
+  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.167.0', retain_count: 1 });
+  assert.equal(existsSync(sentinel), true, 'prune leaves the broken directory the active run is executing');
+
+  endRun(store, run, 'completed', null);
+  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/prune', { cli: 'codex', retain_count: 1 });
+  assert.equal(existsSync(versionDir), false, 'once no run holds it, the broken directory is pruned');
 });

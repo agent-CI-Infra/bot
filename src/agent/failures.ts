@@ -48,7 +48,9 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     // A RoleRun whose lease was taken over, whose fixed candidate changed, or a second run of one assignment.
     'candidate_writer_busy','required_stages_incomplete','lease_epoch_stale','candidate_changed','role_run_already_active','run_token_revoked','run_token_expired',
     // A role at its concurrency limit: nothing ran, so the queue retries it without spending an attempt.
-    'role_capacity','task_children_pending','manager_execution_stopped'] },
+    'role_capacity','task_children_pending','manager_execution_stopped',
+    // #735: the install named a CLI version (or Node runtime) an active run is still executing; it waits for that run.
+    'agent_tool_version_in_use'] },
   // The project's RoleDefinitionV2 configuration: a pinned reference became unusable, or an authority was withdrawn.
   role_configuration: { label:'角色配置', codes:['stage_budget_exhausted','stage_policy_changed','stage_retry_exhausted','stage_plan_stale','role_configuration_changed','unknown_role','role_disabled','unknown_role_harness','agent_backend_unavailable','harness_version_unavailable','harness_role_unsupported',
     'task_pull_request_forbidden','role_model_not_available','role_model_profile_changed','role_submission_forbidden','skill_bundle_unavailable','role_authority_revoked','harness_version_mismatch',
