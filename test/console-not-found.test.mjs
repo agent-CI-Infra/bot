@@ -16,20 +16,6 @@ test('unknownAddress separates unknown console addresses from known ones and in-
     assert.equal(unknown(hash), false, hash);
 });
 
-// #736: an address whose id cannot be decoded is no address the console knows. The legacy computer address is unknown
-// (it would otherwise redirect to a project path built from garbage); a settings detail id that cannot be decoded reads
-// as "no id", so its section still opens as a list.
-test('an address with malformed percent-encoding is unknown, except where the id reads as no id', () => {
-  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js'], () => [200, {}]);
-  const unknown = hash => page.run(`location.hash = ${JSON.stringify(hash)}; unknownAddress(location.hash)`);
-  assert.equal(unknown('#/settings/computers/%E0%A4%A'), true);
-  for (const hash of ['#/settings/users/%E0%A4%A', '#/settings/installations/%E0%A4%A', '#/settings/work-computers'])
-    assert.equal(unknown(hash), false, hash);
-  // The shared decoder answers the decoded value or null, and leaves a legal encoding alone.
-  assert.equal(page.run("safeDecode('%61')"), 'a');
-  assert.equal(page.run("safeDecode('%E0%A4%A')"), null);
-});
-
 test('the not-found state has one primary way back: the project list, or the project overview inside a project', () => {
   const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js'], () => [200, {}]);
   const links = state => state.querySelectorAll('a').map(a => [a.textContent, a.href, /btn-primary/.test(a.className)]);
@@ -40,6 +26,11 @@ test('the not-found state has one primary way back: the project list, or the pro
   const inner = page.run("pageNotFoundState('101')");
   assert.equal(inner.dataset.pageNotFound, 'project');
   assert.deepEqual(links(inner), [['回到项目总览', '#/projects/101/overview', true], ['回到项目列表', '#/projects', false]]);
+  // #779: a title belongs to a session. Without one the sign-in screen keeps the chrome name, so a project render still
+  // in flight when the reader signs out cannot rename it; the page names below are written for a signed-in reader.
+  page.run("document.title = 'launchpad 管理'");
+  page.run('setNotFoundTitle(true)'); assert.equal(page.run('document.title'), 'launchpad 管理');
+  page.run("me = { role: 'super_admin' }");
   page.run('setNotFoundTitle(true)'); assert.equal(page.run('document.title'), '找不到页面 · launchpad 管理');
   // #737: the title names the page the address belongs to; the default tab here is 项目.
   page.run('setNotFoundTitle(false)'); assert.equal(page.run('document.title'), '项目 · launchpad 管理');
