@@ -362,7 +362,12 @@ function messageText(type: string, raw: string, mentions: ChannelMention[] = [],
 }
 
 function eventTime(value: unknown): number {
-  let number = Number(value);
+  // Only a non-empty decimal count is a time: Number('') and Number(null) are 0, which used to pass the range check and
+  // date a message to 1970 (#792). Hexadecimal, exponent and fractional values are rejected the same way.
+  const text = typeof value === 'number' ? (Number.isSafeInteger(value) ? String(value) : '')
+    : typeof value === 'string' ? value.trim() : '';
+  if (!/^\d+$/.test(text)) return fail(400, 'channel_message_time_invalid');
+  let number = Number(text);
   // Header timestamps from some SDK versions are microseconds; message timestamps are milliseconds.
   if (number > 100_000_000_000_000) number = Math.floor(number / 1000);
   if (!Number.isSafeInteger(number) || number < 0) return fail(400, 'channel_message_time_invalid');
