@@ -21,6 +21,10 @@ test('自动停下的任务不算需要处理：看板列、总览与待处理�
   boardTask(h.store, 'stop-env-dev', 5, 'development.issue', 'cancelled', { time: '2026-10-02T10:00:00.000Z', title: '等待环境后关闭的开发', input: { issue: { state: 'closed' } }, errorCode: stop });
   // Cancelled for another reason: the card must not borrow the bot's own stop sentence for it.
   boardTask(h.store, 'revoked-review', 6, 'review.issue', 'cancelled', { time: '2026-10-02T10:00:00.000Z', title: '执行权撤销的 Issue', input: { issue: { state: 'closed' } }, errorCode: 'task_claim_revoked' });
+  // #713: tasks moved out of 待处理 as obsolete are the bot's own stop as well, and their cards say why.
+  boardTask(h.store, 'closed-earlier-review', 7, 'review.issue', 'succeeded', { time: '2026-10-01T10:00:00.000Z', title: '关闭后移出的 Issue' });
+  boardTask(h.store, 'closed-obsolete', 7, 'review.issue', 'cancelled', { time: '2026-10-02T10:00:00.000Z', title: '关闭后移出的 Issue', input: { issue: { state: 'closed' } }, errorCode: 'obsolete_closed' });
+  boardTask(h.store, 'expired-obsolete', 8, 'review.issue', 'cancelled', { time: '2026-10-02T10:00:00.000Z', title: '过期后移出的失败', errorCode: 'obsolete_expired' });
   try {
     await page.goto(h.admin);
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
@@ -48,6 +52,10 @@ test('自动停下的任务不算需要处理：看板列、总览与待处理�
     await expect(page.locator('[data-column-id=unreviewed] [data-card-key="101/issue/6"][data-card-category="review.issue"]')).toBeVisible();
     await expect(work(page, '101/issue/6', 'review.issue').locator('[data-card-note=auto-stop]')).toHaveCount(0);
     await expect(work(page, '101/issue/6', 'review.issue').locator('.board-card-badges')).toContainText('已取消');
+    await expect(page.locator('[data-column-id=reviewed] [data-card-key="101/issue/7"][data-card-category="review.issue"]')).toBeVisible();
+    await expect(work(page, '101/issue/7', 'review.issue').locator('[data-card-note=auto-stop]')).toHaveText('Issue 已关闭或合入，已自动移出待处理');
+    await expect(page.locator('[data-column-id=unreviewed] [data-card-key="101/issue/8"][data-card-category="review.issue"]')).toBeVisible();
+    await expect(work(page, '101/issue/8', 'review.issue').locator('[data-card-note=auto-stop]')).toHaveText('很久以前的平台类失败，之后没有新动静，已自动移出待处理');
     // The note stays inside the card at phone and desktop widths instead of spilling out of it.
     for (const width of [390, 1440]) {
       await page.setViewportSize({ width, height: 900 });
