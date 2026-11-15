@@ -46,7 +46,8 @@ test('#779 自助删号与登出走同一套会话清理：标题回到界面名
     await page.getByLabel('密码', { exact: true }).fill(second);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page).toHaveTitle('项目' + zh);
-    expect(await page.evaluate(() => announcedPage)).toBe('page:projects');
+    // route() names the page before its asynchronous render; announcement records that render's completion.
+    await expect.poll(() => page.evaluate(() => announcedPage)).toBe('page:projects');
     expect(await page.evaluate(() => !!document.activeElement?.closest('#project-page, #console-page, #settings-panel'))).toBe(false);
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
