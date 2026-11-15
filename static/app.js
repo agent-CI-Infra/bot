@@ -1,5 +1,6 @@
 /** @console-modules
  * app/state.js
+ * app/session.js
  * app/scope.js
  * app/addresses.js
  * app/api.js

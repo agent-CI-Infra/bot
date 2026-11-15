@@ -41,11 +41,10 @@ $('access-form').addEventListener('submit', async event => {
     submit.textContent = setup ? t('setup.submit') : t('login.submit'); $('github-login').removeAttribute('aria-disabled');
   }
 });
-// Signing out returns to the default page, so whoever signs in next does not land on the previous user's page; the wizard
-// keeps its address (onboarding.js resets it to the first step).
+// Signing out ends the session through the one shared cleanup (session.js), then redraws the sign-in screen.
 $('logout').addEventListener('click', async () => {
   if (typeof confirmKnowledgeLeave === 'function' && !await confirmKnowledgeLeave(true)) return;
-  try { await api('/api/auth/logout', 'POST', {}); renderVersion++; me = null; if (typeof resetAnnouncedPage === 'function') resetAnnouncedPage(); if (typeof applyStaticTranslations === 'function') applyStaticTranslations(); tab = 'projects'; if (!onboardingAddress.test(location.hash)) history.replaceState(null, '', location.pathname); repositories=[];accounts=[]; $('rows').replaceChildren();$('detail-body').replaceChildren(); await start(); } catch (err) { error(err); } });
+  try { await api('/api/auth/logout', 'POST', {}); endSession(); await start(); } catch (err) { error(err); } });
 // The address is written without waiting for hashchange, so the page switches in the same click; back and forward still
 // fire hashchange and draw the page they return to.
 // A click can land on a tab's icon or label span (#554), so resolve the tab from the nearest [data-tab] ancestor.

@@ -52,8 +52,9 @@ async function deleteUser(row) {
     body: self ? ['只有还剩另一名可管理全部项目的活跃管理员时才能删除。删除后当前会话立即失效，需要用另一名管理员登录。', kept] : ['它的会话立即失效。', kept, '不能删除最后一名可管理全部项目的活跃管理员。'],
     run: () => api('/api/users/' + encodeURIComponent(row.id), 'DELETE', { confirm: true }).catch(err => { throw new Error(removalMessage(err)); }) });
   if (!deleted) return;
-  // The session ended with the user; show the login page without calling logout.
-  if (self) { renderVersion++; me = null; tab = 'projects'; repositories = []; accounts = []; $('rows').replaceChildren(); }
+  // The session ended with the user; show the sign-in screen through the same cleanup as signing out, without a logout
+  // request: the server session is already gone with the account.
+  if (self) endSession();
   await start();
 }
 async function deleteAccount(row) {

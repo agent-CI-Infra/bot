@@ -25,6 +25,9 @@ function pageTitleFor(missing, target) {
   return key ? t(key) : '';
 }
 function applyDocumentTitle(missing = false, target = null) {
+  // #779: no session, no page to name. A project render still in flight when the reader signed out (or deleted their own
+  // account) must not rename the sign-in screen; the late call arrives here after endSession() already restored it.
+  if (typeof me === 'undefined' || !me) return;
   const name = pageTitleFor(missing, target || projectRoute());
   document.title = name ? `${name} · ${t('meta.title')}` : t('meta.title');
 }
