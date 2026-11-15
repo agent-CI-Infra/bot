@@ -66,7 +66,7 @@ async function start() {
   const channelChallenge = /^#\/identity\/feishu\?challenge=([a-f0-9]{48})$/.exec(location.hash)?.[1];
   $('github-login').href = '/auth/github/start' + (channelChallenge ? '?channel_challenge=' + channelChallenge : '');
   const authError = new URLSearchParams(location.search).get('auth_error');
-  if (authError) notice('message', identityError(authError));
+  if (authError) notice('message', identityError(authError), '', 'alert');
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
   if (!me) return;
   renderCurrentUser();
@@ -78,6 +78,6 @@ async function start() {
   options($('repository-filter'), repositories, r => r.full_name); options($('account-filter'), accounts, a => a.name);
   if(me.role==='super_admin'&&!accounts.length&&!location.hash)history.replaceState(null,'','#/settings/onboarding/0');
   await route();
-  if (authError) notice('message', identityError(authError));
+  if (authError) notice('message', identityError(authError), '', 'alert');
 }
 if (typeof onLocaleChange === 'function') onLocaleChange(() => start().catch(error));
