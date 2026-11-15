@@ -35,6 +35,11 @@ function validateCli(value: unknown): AgentToolCli {
   return value as AgentToolCli;
 }
 
+/** The one writer of the saved default: call it only on the success path, so a failed call never changes the setting. */
+function saveRetainCount(store: Store, retainCount: number): void {
+  store.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', RETAIN_COUNT_KEY, String(retainCount));
+}
+
 function mapToolError(err: unknown): never {
   if (err instanceof TaskError) {
     const status = err.code === 'agent_tool_invalid' ? 400
@@ -86,6 +91,8 @@ export async function agentToolsApi(
         retainCount,
         protectedVersions: () => activeCliVersions(store, cli),
       });
+      // The installer has already pruned to retainCount; save it only now, so a failed install keeps the old default.
+      if (input.retain_count !== undefined) saveRetainCount(store, retainCount);
       store.audit(user.id, 'agent_tools.installed', `${cli}@${ver.raw}`);
       return {
         installed: outcome.installed as unknown as Json,
@@ -104,11 +111,9 @@ export async function agentToolsApi(
     fields(input, ['cli', 'retain_count']);
     const cli = input.cli === undefined ? undefined : validateCli(input.cli);
     const retainCount = input.retain_count === undefined ? agentToolsRetainCount(store) : validateRetainCount(input.retain_count);
-    if (input.retain_count !== undefined) {
-      store.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', RETAIN_COUNT_KEY, String(retainCount));
-    }
     try {
       const outcome = await tools.prune({ cli, retainCount, protectedVersions: c => activeCliVersions(store, c) });
+      if (input.retain_count !== undefined) saveRetainCount(store, retainCount);
       store.audit(user.id, 'agent_tools.pruned', cli ?? 'all');
       return {
         pruned: outcome.pruned as unknown as Json,
