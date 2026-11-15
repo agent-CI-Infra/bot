@@ -63,6 +63,13 @@ function toolCaption(call) {
   return { run_command: '执行命令：' + clipText(args.command, 80), read_file: '读取 ' + (args.path || '文件'), write_file: '写入 ' + (args.path || '文件'),
     finish_review: '提交检视结论', create_pull_request: '创建 PR' }[call.name] || call.name;
 }
+const shortSha = sha => String(sha || '').slice(0, 7);
+// One update a task took, in the words of the timeline: a person's comment, an edit, a review, a label or new commits.
+function updateCaption(value) {
+  if (value.reason === 'pull_request_head_changed') return `新提交：工作区从 ${shortSha(value.previous_head)} 移到 ${shortSha(value.current_head)}`;
+  return ({ comment: '的评论', mention: '提到 bot 的评论', issue_edited: '修改了 Issue', pull_request_edited: '修改了 PR', review_submitted: '的检视',
+    review_comment: '的行内评论', review_reply: '回复了行内评论', labeled: '加了标签', pushed: `推送了新提交 ${shortSha(value.after)}` })[value.reason] || '的更新';
+}
 function step(log) {
   let value; try { value = JSON.parse(log.content); } catch { value = { type: 'raw' }; }
   const item = element('li', '', 'step step-' + value.type), head = element('div', '', 'step-head'), title = element('strong', ''), meta = element('span', '', 'step-meta');
@@ -134,6 +141,16 @@ function step(log) {
   }
   else if (value.type === 'revision_deferred') { title.textContent = '修订顺延'; add(element('p', value.detail || '', 'muted')); }
   else if (value.type === 'restart_attempt') { title.textContent = '重新开始一次尝试'; add(element('p', '中断的工作目录保留，新的尝试使用新目录。', 'muted')); }
+  // #770: what the Manager decided for this task, and the updates the task took instead of being replaced.
+  else if (value.type === 'dispatch') { title.textContent = value.relation === 'continued' ? 'Manager 续接更新' : 'Manager 新建任务'; add(element('p', value.reason || value.detail || '', 'say')); }
+  else if (value.type === 'review_update') {
+    title.textContent = '接收更新';
+    const what = updateCaption(value), line = element('p', '', 'say');
+    line.append(value.actor ? `@${value.actor} ` : '', value.url ? link(value.url, what) : what);
+    add(line);
+  }
+  else if (value.type === 'head_moved') { title.textContent = 'PR 有新提交'; add(element('p', value.detail || `${shortSha(value.previous_head)} → ${shortSha(value.current_head)}`, 'say')); }
+  else if (value.type === 'continued') { title.textContent = `第 ${value.round} 轮`; meta.prepend(badge('续接', 'info')); add(element('p', value.detail || '', 'say')); }
   else if (value.type === 'runtime_fault') { title.textContent = '运行故障'; add(element('p', value.message || '', 'muted')); if (value.where) add(collapsible('出错位置', value.where)); }
   else if (value.type === 'agent_failure') { title.textContent = '执行进程失败'; add(element('p', value.detail || '执行进程没有给出原因。', 'say')); if (value.error) add(element('p', '错误码 ' + value.error, 'muted')); }
   else { title.textContent = value.type === 'tool' ? '工具 ' + value.name : '记录'; add(element('pre', log.content, 'output')); }

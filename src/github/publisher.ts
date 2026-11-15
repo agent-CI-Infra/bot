@@ -16,12 +16,15 @@ export function recordRevision(store:Store,task:Row,number:number,sha:string){
   const requested=JSON.parse(task.input||'{}').revision?.source==='request';
   store.run('UPDATE bot_pull_requests SET revisions=revisions+CASE WHEN sha<>? AND ? THEN 1 ELSE 0 END,sha=? WHERE repository_id=? AND number=?',sha,requested?0:1,sha,task.repository_id,number);
 }
+/** The key space of a task's GitHub writes: each later round of a review (#770) publishes anew, round 1 keeps the task's own. */
+export const publicationScope=(task:Row)=>{let round=1;try{round=Number(JSON.parse(task.input||'{}').round)||1;}catch{round=1;}return round>1?`${task.id}:round:${round}`:String(task.id);};
 export class Publisher {
-  constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>, readonly headDelays = [0, 250, 750, 1500, 2500],readonly log:(value:any)=>void=()=>{},readonly beforeWrite?:()=>void){}
+  private readonly scope:string;
+  constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>, readonly headDelays = [0, 250, 750, 1500, 2500],readonly log:(value:any)=>void=()=>{},readonly beforeWrite?:()=>void){this.scope=publicationScope(task);}
   // replayable effects (such as adding a label) are idempotent on GitHub, so an unknown response may be sent again.
   async effect(key:string,kind:string,request:any,send:()=>Promise<any>,find:()=>Promise<any>,replayable=false){
     assertTaskExternalEffect(this.store,this.task,kind);
-    const id=operationId(this.task.id+':'+key),marker=`<!-- dept-bot:${id} -->`;
+    const id=operationId(this.scope+':'+key),marker=`<!-- dept-bot:${id} -->`;
     let row=this.store.get('SELECT * FROM github_effects WHERE id=?',id);
     if(!row){this.store.run("INSERT INTO github_effects VALUES(?,?,?,?, 'pending',NULL,?)",id,this.task.id,kind,JSON.stringify(request),marker);row=this.store.get('SELECT * FROM github_effects WHERE id=?',id);}
     if(kind==='branch' && row!.request!==JSON.stringify(request))stop('publication_receipt_mismatch','needs_replan','Publication request differs from its retained receipt. Query read_publication_context before deciding how to continue.');
@@ -41,7 +44,7 @@ export class Publisher {
     catch(error){this.store.run('UPDATE github_effects SET state=? WHERE id=?',error instanceof TaskError&&error.code==='github_response_unknown'?'unknown':'pending',id);throw error;}
     finally{this.github.beforeWrite=previous;}
   }
-  marker(key:string){return `<!-- dept-bot:${operationId(this.task.id+':'+key)} -->`;}
+  marker(key:string){return `<!-- dept-bot:${operationId(this.scope+':'+key)} -->`;}
   async discussion(key:string,body:string){
     const path=this.github.path(`/issues/${this.task.object_number}/comments`),marker=this.marker(key),payload={body:body+'\n\n'+marker};
     return this.effect(key,'comment',payload,()=>this.github.request('POST',path,payload),async()=>
@@ -92,7 +95,7 @@ export class Publisher {
       const comments=await this.github.pages(path+'/'+review.id+'/comments');
       const output={...review,inline_comments:comments.map(c=>({id:c.id,html_url:c.html_url,path:c.path,line:c.line,commit_id:c.commit_id,
         finding_id:result.findings.find((f:any)=>String(c.body).includes('dept-bot-finding:'+f.id))?.id||null}))};
-      this.store.run('UPDATE github_effects SET response=? WHERE id=?',JSON.stringify(output),operationId(this.task.id+':inline'));outputs.push(output);
+      this.store.run('UPDATE github_effects SET response=? WHERE id=?',JSON.stringify(output),operationId(this.scope+':inline'));outputs.push(output);
     }
     const urls=new Map<string,string>([...(outputs[0]?.inline_comments||[]).filter((c:any)=>c.finding_id).map((c:any)=>[c.finding_id,c.html_url]),
       ...[...kept].map(([id,c]):[string,string]=>[id,String(c.html_url||'')])]);
@@ -106,10 +109,10 @@ export class Publisher {
     outputs.push({...await this.summary(body),...(resolved.length?{resolved_threads:resolved.map(r=>r.id)}:{})});
     await this.validate();return outputs;
   }
-  // How many other reviews of this Issue or PR published a summary comment.
+  // How many other reviews of this Issue or PR published a summary comment: other tasks, and this task's earlier rounds.
   earlierReviews():number{
-    return Number(this.store.get(`SELECT count(DISTINCT e.task_id) AS n FROM github_effects e JOIN tasks t ON t.id=e.task_id WHERE t.repository_id=? AND t.object_number=?
-      AND t.kind IN ('review.issue','review.pr') AND e.kind='comment' AND e.state='sent' AND e.task_id<>?`,this.task.repository_id,this.task.object_number,this.task.id)!.n);
+    return Number(this.store.get(`SELECT count(*) AS n FROM github_effects e JOIN tasks t ON t.id=e.task_id WHERE t.repository_id=? AND t.object_number=?
+      AND t.kind IN ('review.issue','review.pr') AND e.kind='comment' AND e.state='sent' AND e.id<>?`,this.task.repository_id,this.task.object_number,operationId(this.scope+':discussion'))!.n);
   }
   // The summary comment later reviews edit: the one recorded for the object, or for objects reviewed before that was
   // recorded, the earliest summary comment a review of it published.
@@ -117,7 +120,7 @@ export class Publisher {
     const row=this.store.get('SELECT comment_id FROM review_summaries WHERE repository_id=? AND object_number=?',this.task.repository_id,this.task.object_number);
     if(row)return String(row.comment_id);
     const first=this.store.get(`SELECT e.response FROM github_effects e JOIN tasks t ON t.id=e.task_id WHERE t.repository_id=? AND t.object_number=?
-      AND t.kind IN ('review.issue','review.pr') AND e.kind='comment' AND e.state='sent' AND e.task_id<>? ORDER BY t.created_at,t.rowid LIMIT 1`,this.task.repository_id,this.task.object_number,this.task.id);
+      AND t.kind IN ('review.issue','review.pr') AND e.kind='comment' AND e.state='sent' AND e.id<>? ORDER BY t.created_at,t.rowid LIMIT 1`,this.task.repository_id,this.task.object_number,operationId(this.scope+':discussion'));
     const id=first?.response?JSON.parse(first.response)?.id:null;return /^[1-9]\d*$/.test(String(id??''))?String(id):null;
   }
   // The first review posts the summary comment; later ones replace its body (an edit, so it is safe to repeat). A comment

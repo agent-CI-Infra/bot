@@ -63,9 +63,10 @@ async function fixture(t) {
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(resolve => server.close(resolve)));
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   const logs = [];
-  // Each review is its own task at its own head, as the engine queues them.
-  const review = async (head, result, options = { language: 'zh' }, app = true) => {
-    const id = enqueue(h.store, '101', 'review.pr', 7, head.repeat(40), { number: 7 }), task = h.store.get('SELECT * FROM tasks WHERE id=?', id);
+  // Each review is its own task at its own head, as the engine queues them; `round` publishes a later round of task `id` (#770).
+  const review = async (head, result, options = { language: 'zh' }, app = true, next = null) => {
+    if (next) h.store.run("UPDATE tasks SET head_sha=?,input=json_set(input,'$.round',?) WHERE id=?", head.repeat(40), next.round, next.id);
+    const id = next?.id ?? enqueue(h.store, '101', 'review.pr', 7, head.repeat(40), { number: 7 }), task = h.store.get('SELECT * FROM tasks WHERE id=?', id);
     const github = new GitHub(h.store, h.store.get("SELECT * FROM repositories WHERE id='101'"), new Redactor(), async () => {}, 'http://127.0.0.1:' + server.address().port);
     // An App account keeps its JWT and installation from connect, which the fixture skips.
     Object.assign(github, { token: 'ghs_fixture', fullName: 'fixture/project-101', actorId: '999' }, app ? { jwt: 'eyJfixture', jwtAt: Date.now(), installationId: '55' } : {});
@@ -160,6 +161,22 @@ test('a summary comment someone deleted is posted again, and later reviews edit 
   await f.review('b', { summary: 'second' }, { language: 'en' });
   assert.equal(f.state.comments.length, 1); assert.notEqual(f.state.comments[0].id, gone.id);
   assert.equal(f.h.store.get('SELECT comment_id FROM review_summaries').comment_id, String(f.state.comments[0].id));
+  await f.review('c', { summary: 'third' }, { language: 'en' });
+  assert.equal(f.state.comments.length, 1); assert.match(f.state.comments[0].body, /^\*Review 3,.*\n\nthird/);
+});
+
+test('a later round of the same review publishes anew and edits the summary comment, counted as another review', async t => {
+  const f = await fixture(t);
+  const { id } = await f.review('a', { summary: 'first', findings: [inlineFinding] }, { language: 'en' });
+  // Round 2 of the same task, on a new head: its writes have keys of their own, so the inline review is posted rather than
+  // answered from round 1's receipt, and the one summary comment is edited.
+  await f.review('b', { summary: 'second', findings: [{ ...inlineFinding, id: 'f-round-2', body: 'Still off by one.' }] }, { language: 'en' }, true, { id, round: 2 });
+  assert.equal(f.state.comments.length, 1); assert.match(f.state.comments[0].body, /^\*Review 2,.*reviewed commit bbbbbbb.*\n\nsecond/);
+  assert.deepEqual(f.state.reviews.map(r => r.commit_id), ['a'.repeat(40), 'b'.repeat(40)]);
+  assert.equal(f.h.store.get("SELECT count(*) n FROM github_effects WHERE task_id=? AND kind='comment' AND state='sent'", id).n, 2);
+  // Publishing the same round again is answered from its receipt; another review task counts as the next review.
+  await f.review('b', { summary: 'second', findings: [{ ...inlineFinding, id: 'f-round-2', body: 'Still off by one.' }] }, { language: 'en' }, true, { id, round: 2 });
+  assert.equal(f.state.reviews.length, 2);
   await f.review('c', { summary: 'third' }, { language: 'en' });
   assert.equal(f.state.comments.length, 1); assert.match(f.state.comments[0].body, /^\*Review 3,.*\n\nthird/);
 });

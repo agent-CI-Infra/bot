@@ -105,15 +105,19 @@ export function retryEvent(store: Store, repositoryId: string, id: string) {
 /**
  * The deterministic decision of the control plane before #207, for tests that exercise everything after dispatch: an
  * update (a new pull request head included, #770) joins a running review, otherwise the options the old triggers created are
- * created. Production never uses it.
+ * created. A finished review takes an update as its next round (#770) where the old triggers would have created a review.
+ * Production never uses it.
  */
 export function ruleDecider(context: DispatchContext): Decision {
   const updates = ['issue.updated', 'pull_request.updated', 'pull_request.synchronize', 'issue.mention', 'pull_request.mention', 'issue.labeled', 'pull_request.labeled'];
   const defaults = context.options.filter(option => option.default);
   const reviews = defaults.filter(option => option.work.startsWith('review.')), others = defaults.filter(option => !option.work.startsWith('review.'));
-  if (updates.includes(String(context.event.type)) && context.continuations.length && !others.length)
-    return { decision: 'continue', option_ids: [context.continuations[0]!.id], reason: 'rule: update joins the running review', model: 'rule' };
-  const chosen = [...others, ...(updates.includes(String(context.event.type)) && context.continuations.length ? [] : reviews)];
+  // The event's own options, before a joinable review hid the ones offered only when nothing can be continued.
+  const reviewed = (JSON.parse(String(context.event.options || '[]')) as CreateOption[]).some(option => option.default && option.work.startsWith('review.'));
+  const joinable = context.continuations.filter(option => option.status !== 'succeeded' || reviewed);
+  if (updates.includes(String(context.event.type)) && joinable.length && !others.length)
+    return { decision: 'continue', option_ids: [joinable[0]!.id], reason: 'rule: update joins the review', model: 'rule' };
+  const chosen = [...others, ...(updates.includes(String(context.event.type)) && joinable.length ? [] : reviews)];
   return chosen.length ? { decision: 'create', option_ids: chosen.slice(0, 3).map(option => option.id), reason: 'rule: default work for this event', model: 'rule' }
     : { decision: 'ignore', option_ids: [], reason: 'rule: no default work', model: 'rule' };
 }
