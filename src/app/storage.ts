@@ -5,7 +5,7 @@ import type { Store } from '../storage/database.js';
 import type { Manager } from '../projects/service.js';
 import { scope, superAdmin, type Actor } from './auth.js';
 import { retentionBounds, retentionDefaults, retentionSettings, saveRetention } from '../storage/retention.js';
-import { fail, type Json } from '../core/security.js';
+import { fail, HttpError, type Json } from '../core/security.js';
 import { migrationProgress } from '../storage/migration.js';
 import { diskState } from '../storage/disk.js';
 import { noteTaskUsage, workspaceClasses } from '../projects/workspace-cleanup.js';
@@ -77,7 +77,11 @@ export class StorageReport {
         let manager = previous?.manager ?? null, managerError: string | null = null, managerReadAt = previous?.manager_read_at ?? null;
         if (this.manager) {
           try { manager = await this.manager.call('GET', '/v1/storage') as Json; managerReadAt = new Date().toISOString(); }
-          catch (error) { managerError = String((error as Error)?.message ?? error).slice(0, 300) || 'manager_unavailable'; }
+          catch (error) {
+            // Only the client's own code leaves the server: an unexpected error's message may carry a host, an address or
+            // text out of a manager response, and the API never returns those (docs/api.md).
+            managerError = error instanceof HttpError && /^[a-z][a-z0-9_]{0,63}$/.test(error.code) ? error.code : 'manager_unavailable';
+          }
         }
         if (Date.now() - this.directories.at >= hour) {
           const values: Record<string, Measured> = {};
