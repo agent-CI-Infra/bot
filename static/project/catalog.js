@@ -1,11 +1,12 @@
 // Project pages: one settings page per repository (#/projects/<id>/<section>). The 项目入口 hub (#/projects/<id>/menu) lists
 // every page; a work page shows a two-item breadcrumb and a settings page lists every settings category.
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['overview', '项目总览'], ['management', '管理助手'], ['release', '发版本'], ['knowledge', '项目知识'], ['activity', '运行状态'], ['basic', '基本设置'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['schedules', '计划与通知'], ['external', '外部执行'], ['members', '成员']];
+const projectSections = [['overview', '项目总览'], ['management', '管理助手'], ['release', '发版本'], ['knowledge', '项目知识'], ['activity', '运行状态'], ['basic', '基本设置'], ['triggers', '监听与触发'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['schedules', '计划与通知'], ['external', '外部执行'], ['members', '成员']];
 // #707: the settings categories are also the secondary nav of every settings page, so the hub, that nav and the phone's
 // 当前页面 picker all read this one list.
 const projectSettingsSections = [
   ['basic', '基本设置', '项目概况、分支与启停'],
+  ['triggers', '监听与触发', '项目事件来源与自动处理范围'],
   ['machine', '机器配置', '虚拟电脑与运行环境'],
   ['roles', '角色', '角色分工与权限'],
   ['model', '模型', '项目默认模型'],

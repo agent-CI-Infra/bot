@@ -8,8 +8,8 @@ import { RuleService } from '../dist/rules/service.js';
 import { configureDispatch, ruleDecider } from '../dist/dispatch/worker.js';
 import { queueWebhook } from '../dist/review/queue.js';
 
-// The Manager role page edits a complete prompt and lists event filters and decisions.
-test('the Manager role edits its complete prompt and events, lists decisions and opens from old workflow addresses', async ({ page }) => {
+// The Manager role owns its prompt/decisions; project listeners own event subscriptions.
+test('the Manager edits its prompt and decisions, while project listeners own event intake', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({engine:new TaskEngine(store,{call:async()=>null})})), errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -49,7 +49,9 @@ test('the Manager role edits its complete prompt and events, lists decisions and
     await expect(prompt).toHaveValue(plain);await page.reload();await expect(prompt).toHaveValue(plain);
     expect((await admin('/api/repositories/101/manager')).value.manager.prompt.content).toBe(plain);
 
-    // Events: PR pushes stop reaching the Manager; a label is dispatched.
+    // Events are configured at project scope, outside the Manager role.
+    await page.getByRole('link', { name: /监听与触发设置/ }).click();
+    await expect(page).toHaveURL(/\/triggers$/);
     await page.getByLabel('PR 推送新提交', { exact: true }).uncheck();
     await page.getByLabel('有人给 Issue 加上这些标签时', { exact: true }).fill('needs-triage, docs');
     await page.getByRole('button', { name: '保存事件开关', exact: true }).click();
@@ -57,6 +59,8 @@ test('the Manager role edits its complete prompt and events, lists decisions and
     const events = (await admin('/api/repositories/101/manager')).value.manager.events;
     expect([events['pull_request.synchronize'], events['issue.labels']]).toEqual([false, ['needs-triage', 'docs']]);
 
+    await page.getByRole('navigation', { name: '项目设置类别' }).getByRole('link', { name: '角色', exact: true }).click();
+    await goRolePage(page, { role: 'Manager' });
     // The decisions: the reason of an ignored event, and a failed one a person retries.
     const decisions = page.locator('.manager-dispatch');
     await expect(decisions.locator(`[data-dispatch-event="${decided.id}"]`)).toContainText('重复的问题，已有 Issue 在处理');

@@ -1,4 +1,4 @@
-// The Manager role page: one complete prompt, event filters, decisions and task rule sources.
+// The Manager role page: its prompt, model, decisions and task rule sources. Project listeners live in triggers.js.
 
 const managerErrors = {
   invalid_dispatch_filter: '分派筛选无效，请检查时间范围、状态或事件类型。', invalid_dispatch_cursor: '当前分页位置已失效，请重新读取分派。', dispatch_event_not_found: '未找到本项目中的这条分派记录。',
@@ -8,9 +8,6 @@ const managerErrors = {
 };
 // api() reports "<status> · <code>"; a known code gets its explanation.
 const managerError = err => { const code = /· (\w+)$/.exec(err.message)?.[1] ?? err.message; return managerErrors[code] ? `${managerErrors[code]}（${code}）` : err.message; };
-const eventCaptions = [['actions.run_failed', '接收默认分支的 Actions 失败事件'], ['issue.opened', 'Issue 打开'], ['issue.updated', 'Issue 修改或可信评论'], ['issue.mention', 'Issue 评论提到 bot'], ['issue.development_label', '有人加上开发标签'],
-  ['pull_request.opened', 'PR 打开或 Ready for review'], ['pull_request.synchronize', 'PR 推送新提交'], ['pull_request.updated', 'PR 修改、讨论或检视'], ['pull_request.mention', 'PR 评论提到 bot'],
-  ['review.published.issue', 'Issue 检视发布（可能开始开发）'], ['review.published.pr', 'bot PR 检视发布（可能修订 PR）']];
 const dispatchEventNames = { 'issue.opened': 'Issue 打开', 'issue.updated': 'Issue 更新', 'issue.mention': 'Issue 提及', 'issue.labeled': 'Issue 加标签', 'pull_request.opened': 'PR 打开',
   'pull_request.synchronize': 'PR 推送', 'pull_request.updated': 'PR 讨论', 'pull_request.mention': 'PR 提及', 'pull_request.labeled': 'PR 加标签', 'review.published': '检视发布',
   'release.manual': '发版本', 'actions.run_failed': 'Actions 失败', 'gate.manual': '接入门禁', 'schedule.due': '定时检查' };
@@ -29,23 +26,11 @@ function managerSection(roles) {
   };
   void refresh(); return [holder, message];
 }
-// Saves part of the configuration at the revision this page read; a conflict asks for a refresh instead of overwriting.
-const saveManagerChange = change => api(`/api/repositories/${current.id}/manager`, 'PUT', { expected_revision: current.manager.prompt.revision, ...change });
 function managerCards(manager, roles, refresh, notice) {
   const behavior = card('项目 Manager 设置');
-  behavior.append(note('新任务默认由 Manager 安排角色和执行方式，按任务需要委派工作，无需另开协调开关。下方选择哪些外部事件可以启动自动处理。项目停用或暂停、已授予的权限、预算、独立 QA 与发布检查继续生效。'));
-  return [...(notice ? [Object.assign(element('p', notice, 'view-success flash'), { role: 'status' })] : []), behavior, managerWorkPolicyCard(), eventFiltersCard(manager, refresh), managerPromptCard(manager, refresh), taskModelEditor('manager', 'Manager 分派', current.policy, current.models),
+  behavior.append(note('新任务默认由 Manager 安排角色与执行方式，按任务需要委派工作。角色权限、预算、独立 QA 和发布检查继续生效。'), consoleLink(`#/projects/${current.id}/triggers`, '监听与触发设置', '项目整体的事件来源与自动处理范围'));
+  return [...(notice ? [Object.assign(element('p', notice, 'view-success flash'), { role: 'status' })] : []), behavior, managerPromptCard(manager, refresh), taskModelEditor('manager', 'Manager 分派', current.policy, current.models),
     dispatchCard(), managerRulesCard(), ...(manager.migration ? [migrationCard(manager.migration)] : [])];
-}
-
-function managerWorkPolicyCard() {
-  const target = current, policy = target.policy, id = target.id;
-  return settingsForm('检视与开发策略', [
-    checkbox('review_enabled', policy.review_enabled, '开启 Issue 与 PR 检视'), checkbox('development_enabled', policy.development_enabled, '开启自动开发'),
-    note('事件来源决定哪些通知可以交给 Manager；这里决定它可以安排检视或自动开发任务。开启任务类型不会增加 GitHub 写权限，项目禁用或任务暂停时仍不会执行。')],
-    form => api(`/api/repositories/${id}/policy`, 'PATCH', changed({ review_enabled: form.elements.review_enabled.checked, development_enabled: form.elements.development_enabled.checked },
-      { review_enabled: !!policy.review_enabled, development_enabled: !!policy.development_enabled })),
-    { editable: target.canConfigure !== false, draftKey: 'automation', caption: '保存检视与开发策略' });
 }
 
 function managerPromptCard(manager, refresh) {
@@ -81,29 +66,6 @@ async function managerChanged() {
     if (held && held.editor.value === held.initial) { held.editor.value = manager.prompt.content; held.initial = manager.prompt.content; Object.assign(current.managerDraft, { value: manager.prompt.content, revision: manager.prompt.revision, dirty: false }); }
   } catch { /* The next visit reads it again. */ }
 }
-function eventFiltersCard(manager, refresh) {
-  const section = card('交给 Manager 的事件'), form = document.createElement('form'), message = element('p', '', 'view-error'), events = manager.events;
-  section.dataset.overviewAnchor = 'manager-events'; form.className = 'project-form'; message.setAttribute('role', 'alert');
-  section.append(note(`草稿、已关闭的对象、bot 自己写的内容和仓库外人员的评论始终不会交给 Manager。这里关掉的事件同样不会到达 Manager，也不会产生分派调用；被接收的事件各进入一次 Manager 分派，分派中可以进行多轮模型和工具调用。提到 bot 指评论里写了 ${manager.mention_names.map(name => '@' + name).join('、') || '（部署关闭了提及）'}。`));
-  section.append(note('开启 Actions 失败事件后，系统会扫描默认分支的失败运行并交给 Manager 安排分析；关闭后停止接收和扫描。开启事件不会增加 GitHub 写权限。'));
-  const boxes = element('div', '', 'manager-events');
-  for (const [key, caption] of eventCaptions) boxes.append(checkbox('event:' + key, events[key], caption));
-  const labels = (key, caption) => field(caption, input(key, events[key].join(', '), { placeholder: '逗号分隔；留空表示加标签不交给 Manager' }));
-  const submit = element('button', '保存事件开关'), buttons = element('div', '', 'actions form-actions'); submit.type = 'submit'; buttons.append(submit);
-  const status = element('p', '', 'muted'); status.dataset.actionsStatus = '';
-  if (current.policy.actions_failures_enabled) showActionsFailureStatus(status, current.actionsFailures); else status.textContent = '未开启。';
-  form.append(boxes, status, labels('issue.labels', '有人给 Issue 加上这些标签时'), labels('pull_request.labels', '有人给 PR 加上这些标签时'), message, buttons);
-  form.addEventListener('submit', async event => {
-    event.preventDefault(); submit.disabled = true; message.textContent = '';
-    const list = key => form.elements[key].value.split(',').map(label => label.trim()).filter(Boolean);
-    // Every switch is saved, so each stands on its own afterwards.
-    const value = Object.fromEntries(eventCaptions.map(([key]) => [key, form.elements['event:' + key].checked]));
-    try { await saveManagerChange({ events: { ...value, 'issue.labels': list('issue.labels'), 'pull_request.labels': list('pull_request.labels') } }); await reloadWith('已保存事件开关'); }
-    catch (err) { message.textContent = managerError(err); submit.disabled = false; }
-  });
-  section.append(form); return section;
-}
-
 // This reader belongs to one mounted project page; a newer permission error invalidates every older response.
 function dispatchCard() {
   const target = current, token = renderToken, id = target.id, section = card('最近的分派');

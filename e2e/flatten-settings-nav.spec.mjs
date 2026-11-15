@@ -16,7 +16,7 @@ const work = [
   ['运行状态', /#\/projects\/101\/activity$/]
 ];
 const settings = [
-  ['基本设置', 'basic'], ['机器配置', 'machine'], ['角色', 'roles'], ['模型', 'model'],
+  ['基本设置', 'basic'], ['监听与触发', 'triggers'], ['机器配置', 'machine'], ['角色', 'roles'], ['模型', 'model'],
   ['计划与通知', 'schedules'], ['外部执行', 'external'], ['成员', 'members']
 ];
 const pages = [...work, ...settings.map(([caption, key]) => [caption, new RegExp(`#/projects/101/${key}$`)])];
@@ -70,7 +70,7 @@ test('项目入口总览可到达全部页面，页头有设置入口，设置�
       // Every project page carries the header's 设置 entry.
       await expect(openSettings).toBeVisible();
       if (settings.some(([name]) => name === caption)) {
-        // A settings page: ← 项目入口 and all seven categories, the current one marked; no work page is listed.
+        // A settings page: ← 项目入口 and all settings categories, the current one marked; no work page is listed.
         await expect(crumb).toHaveCount(0);
         await expect(categories.getByRole('link')).toHaveText(['← 项目入口', ...settings.map(([name]) => name)]);
         expect(await categories.getByRole('link').evaluateAll(links => links.map(link => link.getAttribute('href')))).toEqual(settingsHrefs);

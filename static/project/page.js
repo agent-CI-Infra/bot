@@ -46,7 +46,7 @@ async function renderProject(route) {
   // Opening a rule file from the overview, or saving one, brings its card into view.
   if (current.focusRule) { page.querySelector(`[data-rule-path="${CSS.escape(current.focusRule)}"]`)?.scrollIntoView({ block: 'start' }); current.focusRule = null; }
   if (['machine', 'activity'].includes(section)) refreshProjectStatus(token);
-  if (section === 'roles' && current.policy.actions_failures_enabled) projectTimer = setTimeout(() => refreshActionsFailureStatus(token), 5000);
+  if (section === 'triggers' && current.policy.actions_failures_enabled) projectTimer = setTimeout(() => refreshActionsFailureStatus(token), 5000);
 }
 // The address of an installed repository nobody has started yet (a bookmark, or a link from elsewhere): it has no project
 // page until it is started, so a super administrator gets that explanation and the 启动 action instead of a bare 404.
@@ -252,7 +252,7 @@ function projectBody(section) {
   body.append(projectNav(section));
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
   if (!section) content.append(pageNotFoundState(current.id));
-  else content.append(...({ overview: workspaceOverview, basic: basicSection, machine: machineSection, model: modelsSection, release: releaseSection, schedules: schedulesSection, knowledge: knowledgeSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection, menu: menuSection }[section])());
+  else content.append(...({ overview: workspaceOverview, basic: basicSection, triggers: projectTriggersSection, machine: machineSection, model: modelsSection, release: releaseSection, schedules: schedulesSection, knowledge: knowledgeSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection, menu: menuSection }[section])());
   body.append(content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();

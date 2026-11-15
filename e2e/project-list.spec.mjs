@@ -126,7 +126,7 @@ test('project list shows progress while settings own mutations and project admin
       await member.goto(h.admin+'/#/projects');await member.getByLabel('用户名',{exact:true}).fill('project-admin');await member.getByLabel('密码',{exact:true}).fill(memberPassword);await member.getByRole('button',{name:'登录',exact:true}).click();
       await expect(member.locator('#rows .row')).toHaveCount(1);
       await member.locator('#rows [data-repository-id="101"]').getByRole('button',{name:'设置',exact:true}).click();
-      await member.getByRole('link',{name:/项目 Manager 设置/}).click();
+      await member.getByRole('link',{name:/监听与触发设置/}).click();
       await member.getByLabel('开启自动开发',{exact:true}).check();
       await member.getByRole('button',{name:'保存检视与开发策略',exact:true}).click();
       await expect(member.locator('#project-page .flash')).toContainText('已保存');
