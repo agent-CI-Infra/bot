@@ -566,7 +566,7 @@ test('global project actions remove a started project from this system, never Gi
   assert.equal(page.run('startCalls'), 1);
 });
 
-test('a failed deletion keeps the project trajectory files, blobs and notes volume, and they go only after the rows commit', async t => {
+test('a failed deletion keeps the project trajectory files, blobs and notes volume, and they go only once the checks pass', async t => {
   const github = await fakeGitHub(t), env = managerFixture(t); let workingTasks = []; const engine = { working: () => workingTasks, api: async () => undefined };
   let sync; const h = await harness(t, env.manager, store => ({ installations: sync = new InstallationSync(store, github.url), engine }));
   const { admin } = await setup(h), a = await account(admin), now = new Date().toISOString();
@@ -609,11 +609,37 @@ test('a failed deletion keeps the project trajectory files, blobs and notes volu
   assert.equal(existsSync(blob), true, 'the refused commit keeps the blob');
   assert.ok(env.docker.volumes.has(env.projects.notesName('101')), 'the refused commit keeps the notes volume');
 
-  // The successful retry removes the files and the notes volume, after the rows are committed.
+  // The successful retry removes the notes volume once every statement passed, and the evidence files after the commit.
   workingTasks = [];
   assert.equal((await remove(admin, '101')).status, 200);
   assert.equal(existsSync(record), false, 'the trajectory file goes with the deleted project');
   assert.equal(existsSync(blob), false, 'the blob goes too');
   assert.equal(h.store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 0);
-  assert.equal(env.docker.volumes.has(env.projects.notesName('101')), false, 'the notes volume goes only after the commit');
+  assert.equal(env.docker.volumes.has(env.projects.notesName('101')), false, 'the notes volume goes once the deletion can no longer be refused');
+});
+
+test('a blob another project also stored survives this project deletion', async t => {
+  const github = await fakeGitHub(t), env = managerFixture(t);
+  let sync; const h = await harness(t, env.manager, store => ({ installations: sync = new InstallationSync(store, github.url), engine: { working: () => [], api: async () => undefined } }));
+  const { admin } = await setup(h), a = await account(admin), now = new Date().toISOString();
+  await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
+  for (let i = 0; i < 2; i++) await h.projects.reconcile();
+  // The same content stored by both projects: the blob belongs to neither alone.
+  const hash = 'b'.repeat(64), blob = join(h.store.trajectories.blobs, 'sha256', hash.slice(0, 2), hash);
+  mkdirSync(dirname(blob), { recursive: true }); writeFileSync(blob, 'shared');
+  for (const id of ['101', '202']) {
+    h.store.run("INSERT INTO trajectory_blobs(repository_id,sha256,bytes,created_at) VALUES(?,?,6,?)", id, hash, now);
+    h.store.run("INSERT INTO trajectory_usage(repository_id,kind,count,bytes) VALUES(?,'files',1,6)", id);
+  }
+  const record = join(h.store.trajectories.root, '101', 'task', 'run', 'record.jsonl');
+  mkdirSync(dirname(record), { recursive: true }); writeFileSync(record, '{"type":"log"}\n');
+  h.store.run("INSERT INTO trajectory_files(id,repository_id,path,created_at,bytes,records,counts) VALUES('tf-shared','101','101/task/run/record.jsonl',?,11,1,'{}')", now);
+  assert.equal((await remove(admin, '101')).status, 200);
+  assert.equal(existsSync(record), false, 'the deleted project keeps no file');
+  assert.ok(h.store.get("SELECT 1 FROM trajectory_blobs WHERE repository_id='202' AND sha256=?", hash), 'the other project keeps its row');
+  assert.equal(h.store.get("SELECT count(*) n FROM trajectory_usage WHERE repository_id='101'").n, 0, 'the deleted project takes its usage totals with it');
+  assert.equal(h.store.get("SELECT bytes FROM trajectory_usage WHERE repository_id='202' AND kind='files'").bytes, 6, 'another project keeps its own totals unchanged');
+  assert.equal(existsSync(blob), true, 'the shared blob is not removed while another project refers to it');
+  assert.equal((await remove(admin, '202')).status, 200);
+  assert.equal(existsSync(blob), false, 'the last project to hold it removes it');
 });

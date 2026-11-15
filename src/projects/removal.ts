@@ -114,19 +114,23 @@ export class ProjectRemoval {
       this.store.db.exec('SAVEPOINT project_removal_check');
       try { deleteProjectRecords(this.store, id, { files: false }); this.store.audit(user.id, 'repository.deleted', id, id); }
       finally { this.store.db.exec('ROLLBACK TO project_removal_check; RELEASE project_removal_check'); }
+      // A deletion still refused at this point (a task that started again, or one the engine reported as working before
+      // the settle wait finished) must fail while the project, its notes and its evidence are all still there.
+      if (this.engine?.working(id).length) fail(409, 'tasks_still_stopping');
+      // The notes volume goes before the rows are committed, but only after the dry run above accepted every statement:
+      // a manager that cannot delete it fails the deletion with the project records, the volume and the notes intact.
+      await this.projects?.removeNotes(id, this.settleMs);
       const removed = this.store.transaction(() => {
         if (this.engine?.working(id).length) fail(409, 'tasks_still_stopping');
         deleteProjectRecords(this.store, id, { files: false });
         this.store.audit(user.id, 'repository.deleted', id, id);
         return { deleted: true, repository_id: id, registered: true };
       });
-      // Only now that the rows are committed do the evidence files and the notes volume leave: a rolled back transaction,
-      // or a refused final commit, keeps everything the failed deletion would otherwise have destroyed.
-      this.store.trajectories.remove({ repository_id: id });
-      // The notes volume goes last, after the commit: until then a refusal must leave it readable. A manager that cannot
-      // delete it now leaves the volume behind, recorded, instead of failing a deletion that already committed.
-      try { await this.projects?.removeNotes(id, this.settleMs); }
-      catch { this.store.audit(user.id, 'repository.notes_removal_failed', id, id); }
+      // The evidence files go only once the rows are committed: a refused commit keeps the trajectory files and blobs on
+      // disk, so what a failed deletion leaves behind still explains itself. A cleanup that fails is recorded, not
+      // reported as the deletion having been rolled back.
+      try { this.store.trajectories.remove({ repository_id: id }); }
+      catch { this.store.audit(user.id, 'repository.evidence_removal_failed', id, id); }
       return removed;
     } finally { this.projects?.endRemoval(id); }
   }
