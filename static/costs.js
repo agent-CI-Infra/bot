@@ -247,7 +247,7 @@ async function statisticsTaskDrill(workflow,row,entry) {
   await load();
 }
 function costTable(headers) {
-  const wrap=element('div','','cost-table-scroll'),table=document.createElement('table'),head=document.createElement('thead'),row=document.createElement('tr');headers.forEach(name=>{const th=element('th',name);th.scope='col';row.append(th);});head.append(row);const body=document.createElement('tbody');table.append(head,body);wrap.append(table);return {wrap,body};
+  const wrap=element('div','','cost-table-scroll'),table=document.createElement('table'),head=document.createElement('thead'),row=document.createElement('tr');headers.forEach(name=>{const [caption,title]=Array.isArray(name)?name:[name];const th=element('th',caption);th.scope='col';if(title)th.setAttribute('title',title);row.append(th);});head.append(row);const body=document.createElement('tbody');table.append(head,body);wrap.append(table);return {wrap,body};
 }
 function costChart(container,byDate,projects,currency,tokens=false) {
   const unit=tokens?'用量':currency,value=row=>costChartValue(row,tokens)||0;

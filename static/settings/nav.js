@@ -12,6 +12,10 @@ const settingsGroups = [
   ['仓库与用户', [['projects', '项目管理'], ['users', '用户']]]
 ];
 const settingsSections = settingsGroups.flatMap(([, items]) => items);
+// #799: the settings shell names the category it shows, not the whole platform: 存储 is a page a project administrator
+// may open, and the first crumb says 工作区 for them, 平台管理 only for a super administrator.
+function settingsPageTitle(section = settingsRoute().section) { return section === 'storage' ? t('nav.storage') : t('nav.settings'); }
+function settingsScope() { return typeof me === 'object' && me && me.role === 'super_admin' ? t('nav.platform') : t('nav.workspace'); }
 // A project administrator reaches global settings only for 存储, which lists their own projects.
 const visibleSettingsGroups = () => typeof me === 'object' && me && me.role !== 'super_admin'
   ? settingsGroups.map(([title, items]) => [title, items.filter(([key]) => key === 'storage')]).filter(([, items]) => items.length) : settingsGroups;

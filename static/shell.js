@@ -235,8 +235,9 @@ function syncConsoleShell() {
     picker.value = consoleProject || '';
   }
   const platform = tab === 'settings', personal = !project && ['preferences', 'identity', 'external', 'conversations'].includes(tab);
+  const settingsContext = platform && typeof settingsPageTitle === 'function' ? settingsPageTitle() : t('nav.settings');
   $('console-project').closest('label').hidden = platform;
-  $('console-area').textContent = platform ? t('nav.platform') : project ? t('nav.project_workspace') : personal ? t('nav.personal') : t('nav.workspace');
+  $('console-area').textContent = platform ? (typeof settingsScope === 'function' ? settingsScope() : t('nav.platform')) : project ? t('nav.project_workspace') : personal ? t('nav.personal') : t('nav.workspace');
   // The scope bar names both halves of the current address: a project name alone does not say which organization it is in.
   const shortName = r => (r.full_name || '').includes('/') ? r.full_name.split('/').slice(1).join('/') : r.full_name;
   // #558: the identity page already has a single h1; repeating the same words in the
@@ -246,7 +247,7 @@ function syncConsoleShell() {
   $('console-context').textContent = project ? (repo ? organization(repo) + ' · ' + shortName(repo)
     : unstarted?.registered === false ? organization(unstarted) + ' · ' + shortName(unstarted) + ' · ' + t('nav.unstarted')
       : typeof current !== 'undefined' && current?.unavailable && String(current.id) === String(project.id) ? t(current.unavailable === 'missing' ? 'nav.project_not_found' : 'nav.project_unavailable') : t('nav.reading_project'))
-    : tab === 'identity' || tab === 'preferences' ? '' : ({ more: t('nav.more'), inbox: t('nav.inbox'), settings: t('nav.settings') }[tab] || titles[tab] || t('identity.title'));
+    : tab === 'identity' || tab === 'preferences' ? '' : ({ more: t('nav.more'), inbox: t('nav.inbox'), settings: settingsContext }[tab] || titles[tab] || t('identity.title'));
   // A project can be reachable while some of its features cannot run; the navigation every page shares has to say so.
   // Only the installation snapshot names the gaps, and only a super administrator may read it, so nothing is invented.
   const permission = $('console-permission');
