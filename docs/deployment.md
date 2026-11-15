@@ -114,9 +114,15 @@ Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一�
 
 ## 任务工作区清理
 
-每个任务在项目电脑上有自己的目录 `/workspace/tasks/<工作区 ID>`，里面是仓库检出、任务上下文和 agent 状态，测试装的依赖和临时文件也在这里。控制面在 `task_workspaces` 表里记录每个工作区被哪些任务用过：任务自己的检出、评估者和其他角色检出的固定候选、重试恢复或集成用到的旧工作区，以及后续检视复用的工作区（每个用到它的任务各一行）。重试和重置会把 `tasks.workspace_id` 清空，旧目录仍能按这份记录找到所属任务。
+每个任务在项目电脑上有自己的目录 `/workspace/tasks/<工作区 ID>`，里面是任务上下文和 agent 状态。仓库检出（#769）是共享的 git worktree，放在 `/workspace/worktrees/<worktree ID>`，任务目录里的 `repo` 是指向它的链接，测试装的依赖和构建产物在 worktree 里；Git 缓存不可用时的文件拷贝、隔离运行环境和评估者的检出仍是任务目录里自己的 `repo`。控制面在 `task_workspaces` 表里记录每个任务目录和 worktree 被哪些任务用过：任务自己的目录、评估者和其他角色检出的固定候选、重试恢复或集成用到的旧工作区，以及任务用过的 worktree（`kind` 为 `worktree`，每个用到它的任务各一行）。重试和重置会把 `tasks.workspace_id` 清空，旧目录仍能按这份记录找到所属任务。
 
-控制面启动 5 分钟后清理一次，之后每小时一次，逐台处理运行中的项目电脑：先经 runner 列出任务目录（只返回目录名和最近活动时间），再按下表决定，然后经 runner 每次删除最多 10 个目录，两次之间停 1 秒，让同一电脑上的任务调用先走。一个目录被多个任务用过时，以最晚才能删的那个任务为准。
+worktree 的登记在 `worktrees` 表：所在电脑代次、HEAD 和 HEAD 的 tree、为读还是写而建、能否交出（`ready`、`refused`、`removed`）。每次任务拿到一个 worktree 记一行 `worktree_bindings`（任务、任务目录、读或写、拿到时的提交），同时写任务历史 `workspace_bound`，这就是“这次运行用了哪个 worktree、哪个提交”的记录。主控还不能自己选，准备阶段由系统按下面的规则选：
+
+- 只读的任务（检视、事件任务）先找同一提交、为读而建、状态 `ready`、没有未结束任务占着的 worktree。runner 交出前核对它的 HEAD、tree，并确认没有改动（已跟踪文件的修改和未被忽略的未跟踪文件；被 `.gitignore` 忽略的依赖和构建产物不算改动，留给下一个任务）。核对不过就记为 `refused`、以后不再交出，任务改为新建；有改动的 worktree 不会被重置或丢弃。
+- 会写的任务（开发、需求任务）总是新建自己的 worktree，系统不会把它交给别的任务。
+- 一个任务占着 worktree，直到它换了新的任务目录（新一轮尝试）或结束；结束后的占用在下次挑选时释放。被别的未结束任务占着的 worktree 不会被原地移到新提交（#770），检视改在新工作区重新准备。
+
+控制面启动 5 分钟后清理一次，之后每小时一次，逐台处理运行中的项目电脑：先经 runner 列出任务目录（只返回目录名和最近活动时间），再按下表决定，然后经 runner 每次删除最多 10 个目录，两次之间停 1 秒，让同一电脑上的任务调用先走；之后用同样的方式和同一张表处理 `/workspace/worktrees`（`worktrees_list`、`worktrees_remove`）。一个目录或 worktree 被多个任务用过时，以最晚才能删的那个任务为准，所以 worktree 只在所有用过它的任务都不再需要、且过了保留天数后才删除。删除任务目录只删掉其中的链接，worktree 留下。
 
 | 用到目录的任务 | 规则 |
 |---|---|
@@ -130,9 +136,9 @@ Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一�
 
 上表的 1 天和 7 天是默认值，可以在全局设置「存储」的「按天数清理」里改（`workspace_finished_days`、`workspace_failed_days`，没有记录指向的目录跟随前者，见[按天数清理](trajectories.md#按天数清理)）。
 
-PR 的合并或关闭以 `pull_request` closed 事件或检视读到的 PR 状态为准（`review_objects`）。最近 30 分钟内有活动、或本进程最近 30 分钟用过的目录这一轮不删；正在删除的目录不会被新检视复用，复用找不到目录时任务重新检出。runner 删除前再看一次目录的活动时间，列出之后有写入的目录留下。升级后第一次清理前，控制面为当时未结束的任务补记它们的工作区、恢复和集成来源及后续任务的来源任务工作区。
+PR 的合并或关闭以 `pull_request` closed 事件或检视读到的 PR 状态为准（`review_objects`）。最近 30 分钟内有活动、或本进程最近 30 分钟用过的目录这一轮不删；正在删除的 worktree 不会被交给新任务，交出时找不到目录就记为 `removed`、任务新建。每次交出都会更新 worktree 目录的修改时间，runner 删除前再看一次活动时间，列出之后有写入或被交出的目录留下。删除或发现已不存在的 worktree 在 `worktrees` 里记为 `removed`，它的占用一并释放。升级后第一次清理前，控制面为当时未结束的任务补记它们的工作区、恢复和集成来源及后续任务的来源任务工作区。
 
-runner 只接受 48 位十六进制的目录名，只删除 `/workspace/tasks` 下真实存在的目录，不跟随符号链接，`/workspace/tasks` 本身被换成链接时拒绝执行。删除的目录在 `task_workspaces` 里记下 `released_at`、原因和释放的字节数，这些记录保留 30 天。`/workspace` 根目录下 agent 留下的其他文件和 `/workspace/home` 缓存不在清理范围内。
+runner 只接受 48 位十六进制的目录名，只删除 `/workspace/tasks` 或 `/workspace/worktrees` 下真实存在的目录，不跟随符号链接，这两个目录本身被换成链接时拒绝执行；删除后清理电脑 Git 对象库里的 worktree 登记。删除的目录在 `task_workspaces` 里记下 `released_at`、原因和释放的字节数，这些记录保留 30 天。`/workspace` 根目录下 agent 留下的其他文件和 `/workspace/home` 缓存不在清理范围内。
 
 ## SQLite WAL 大小
 

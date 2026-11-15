@@ -3,17 +3,19 @@ import { execFile } from 'node:child_process';
 import { tasksDirectory } from './paths.mjs';
 import { git, storeRoot } from './store.mjs';
 
-// Task directories for the control plane's workspace cleanup. The control plane decides from its records which
-// directories go; the computer only lists /workspace/tasks/<id> (names and when each was last active) and removes the
-// directories it is sent, a few per call. Nothing outside the tasks directory can be named: an entry is a 48-hex id, the
-// tasks directory itself must be a real directory, and an entry that is a symbolic link or no directory is left alone.
+// Task directories and shared worktrees for the control plane's workspace cleanup. The control plane decides from its
+// records which directories go; the computer only lists /workspace/tasks/<id> or /workspace/worktrees/<id> (names and
+// when each was last active) and removes the directories it is sent, a few per call. Nothing outside these directories
+// can be named: an entry is a 48-hex id, the directory itself must be a real directory, and an entry that is a symbolic
+// link or no directory is left alone. A task directory's repo may be a link to a worktree: rm removes the link only.
 const idPattern = /^[a-f0-9]{48}$/;
 export const listLimit = 5000, removeLimit = 20;
 
 // When a task directory was last active: the newest modification of the directory and of the files a task keeps
-// touching while it runs (its agent's events and state, the checkout's top level, its context, the reuse cache).
+// touching while it runs (its agent's events and state, the checkout's top level, its context). For a worktree: the
+// directory, which each handover to a task touches (runner/workspace.mjs), and its .git file.
 export async function activeAt(dir) {
-  const times = await Promise.all(['', '/agent', '/agent/events.jsonl', '/agent/state.json', '/agent/harness-state.json', '/agent/harness-stdout.bin', '/cli-state', '/repo', '/context', '/review-cache.json']
+  const times = await Promise.all(['', '/agent', '/agent/events.jsonl', '/agent/state.json', '/agent/harness-state.json', '/agent/harness-stdout.bin', '/cli-state', '/repo', '/context', '/.git']
     .map(name => lstat(dir + name).then(info => info.mtimeMs, () => 0)));
   return Math.floor(Math.max(...times));
 }
@@ -68,7 +70,7 @@ export async function removeTaskDirectories(entries, root = tasksDirectory, gitR
     try { await removeTree(path); removed.push({ name, bytes }); }
     catch (error) { skipped.push({ name, reason: 'remove_failed', detail: error.message }); }
   }
-  // A removed checkout was a worktree of the computer's git store; its registration goes too.
+  // A removed checkout or shared worktree was a worktree of the computer's git store; its registration goes too.
   if (removed.length) await git(['worktree', 'prune'], { cwd: gitRoot + '/repo.git' }).catch(() => {});
   return { removed, skipped };
 }

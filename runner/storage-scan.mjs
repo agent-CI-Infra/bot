@@ -9,7 +9,9 @@ import { relative, sep } from 'node:path';
 // entries, the caches tools keep there), /workspace/tmp and everything else. The project notes at
 // /workspace/project-notes are another volume (the manager's notes directory, mounted in) and are left out; their
 // history directory is the manager's alone, so the computer's user could not read it anyway.
-const idPattern = /^[a-f0-9]{48}$/, known = { tasks: 'tasks', '.runner-journal': 'journal', git: 'store', home: 'home', tmp: 'tmp' };
+// The shared worktrees (/workspace/worktrees/<id>, #769) count with the task workspaces: a task's repo is a link to one,
+// which du does not follow, so each worktree is counted once, under its own id.
+const idPattern = /^[a-f0-9]{48}$/, known = { tasks: 'tasks', worktrees: 'tasks', '.runner-journal': 'journal', git: 'store', home: 'home', tmp: 'tmp' };
 export const scanLimits = { timeoutMs: 30 * 60_000, tasks: 5000, entries: 20 };
 
 export async function storageScan(root, { timeoutMs = scanLimits.timeoutMs } = {}) {
@@ -25,7 +27,7 @@ export async function storageScan(root, { timeoutMs = scanLimits.timeoutMs } = {
     const parts = relative(root, path).split(sep).filter(Boolean), bytes = kib * 1024;
     if (!parts.length) total = bytes;
     else if (parts.length === 1) top.set(parts[0], bytes);
-    else if (parts[0] === 'tasks' && idPattern.test(parts[1])) tasks.push({ name: parts[1], bytes });
+    else if ((parts[0] === 'tasks' || parts[0] === 'worktrees') && idPattern.test(parts[1])) tasks.push({ name: parts[1], bytes });
     else if (parts[0] === 'home') home.push({ name: parts[1], bytes });
   }
   const groups = { tasks: 0, journal: 0, store: 0, home: 0, tmp: 0, other: 0 };

@@ -205,10 +205,18 @@ test('publication replies are allowed and policy cleanup preserves the waiting a
   const workspace_id = id(), execute = request => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request });
   await execute({ type: 'workspace_agent_tool', workspace_id, request_id: id(), base64: Buffer.from('{}').toString('base64'), offset: 0, final: true });
   assert.ok(f.docker.runs.some(r => r.type === 'workspace_agent_tool'));
-  for(const type of ['workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_reuse','workspace_cache','workspace_agent_progress']){
+  for(const type of ['workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_agent_progress']){
     await execute({type,workspace_id,request_id:id(),base64:Buffer.from('{}').toString('base64'),offset:0,final:true,sequence:1});
     assert.ok(f.docker.runs.some(r=>r.type===type),type);
   }
+  // #769: a shared worktree is named only by the calls that create or bind it, by a 48-hex id; the review cache calls it
+  // replaced are gone.
+  const worktree_id=id(),commit={sha:'a'.repeat(40),tree_sha:'b'.repeat(40)};
+  for(const type of ['workspace_worktree_create','workspace_worktree_bind']){await execute({type,workspace_id,worktree_id,...commit});assert.ok(f.docker.runs.some(r=>r.type===type&&r.worktree_id===worktree_id),type);}
+  for(const request of [{type:'workspace_worktree_bind',workspace_id,...commit},{type:'workspace_worktree_bind',workspace_id,worktree_id:'x',...commit},{type:'workspace_read',workspace_id,worktree_id,path:'a'},
+    {type:'workspace_reuse',workspace_id,...commit},{type:'workspace_cache',workspace_id,...commit},{type:'worktrees_list',entries:[]}])
+    await assert.rejects(execute(request),/invalid_runner_request/,JSON.stringify(request));
+  for(const type of ['worktrees_list','tasks_list']){await execute({type});assert.ok(f.docker.runs.some(r=>r.type===type),type);}
   await execute({ type: 'workspace_command', workspace_id, command: 'node --test', timeout_ms: null });
   assert.deepEqual([f.docker.runs.at(-1).type, f.docker.runs.at(-1).workspace_id, f.docker.runs.at(-1).keep_agent], ['reap', workspace_id, true]);
   await execute({ type: 'reap', workspace_id });

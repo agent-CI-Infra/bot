@@ -1,4 +1,4 @@
-import { cp,mkdir,readFile,writeFile,open,realpath,symlink,unlink,readlink,chmod,rename,rm,stat } from 'node:fs/promises';
+import { cp,mkdir,readFile,writeFile,open,realpath,symlink,unlink,readlink,chmod,rename,rm,stat,lstat,utimes } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { resolve,dirname,sep } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -9,20 +9,50 @@ import { git as storeGit, storeRoot } from './store.mjs';
 import {withWorkspaceLock} from './workspace-lock.mjs';
 import {clearStaleGitLocks,lockGraceMs} from './git-locks.mjs';
 import { Notes } from './notes.mjs';
-import { tasksDirectory, workspaceRoot as projectRoot } from './paths.mjs';
+import { tasksDirectory, worktreesDirectory, workspaceRoot as projectRoot } from './paths.mjs';
 
 function safe(value){if(typeof value!=='string'||!value||value.length>1024||value.startsWith('/')||value.includes('\\')||value.includes('\0')||value.split('/').some(p=>!p||['.','..','.git'].includes(p.toLowerCase())))throw new Error('invalid_path');return value;}
-export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=storeRoot,notesRoot=projectRoot+'/project-notes'){
-  if(!/^[a-f0-9]{48}$/.test(input.workspace_id||''))throw new Error('invalid_workspace');
+const id48=/^[a-f0-9]{48}$/,names=buffer=>buffer.toString('utf8').split('\0').filter(Boolean);
+// What a task's <task>/repo holds: a directory of its own (a file copy, or a worktree workspace_checkout made there), or a
+// link to one of the computer's shared worktrees (#769). Returns the real directory; a link anywhere else, or a directory
+// replaced by a link, means the workspace was replaced and nothing is done in it.
+export async function checkoutDirectory(repo,worktreeRoot=worktreesDirectory){
+  const info=await lstat(repo);
+  if(info.isSymbolicLink()){
+    const target=await readlink(repo);
+    if(!target.startsWith(worktreeRoot+'/')||!id48.test(target.slice(worktreeRoot.length+1))||await realpath(repo)!==target)throw new Error(`workspace_replaced: ${repo} links to ${target}`);
+    return target;
+  }
+  const actual=await realpath(repo);if(actual!==repo)throw new Error(`workspace_replaced: expected ${repo}, actual ${actual}`);
+  return repo;
+}
+// A worktree's tracked changes against HEAD and its untracked files that are not ignored. Ignored files (installed
+// dependencies, build output) are no change: they stay with the worktree for the next task.
+async function changedFiles(dir){
+  const tracked=names(await storeGit(['diff','--name-only','-z','HEAD'],{cwd:dir})),untracked=names(await storeGit(['ls-files','-z','--others','--exclude-standard'],{cwd:dir}));
+  return [...new Set([...tracked,...untracked])];
+}
+export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=storeRoot,notesRoot=projectRoot+'/project-notes',worktreeRoot=worktreesDirectory){
+  if(!id48.test(input.workspace_id||''))throw new Error('invalid_workspace');
   const root=`${workspaceRoot}/${input.workspace_id}`,repo=root+'/repo';
   const notes=new Notes(notesRoot),linkNotes=async()=>{
     try{await symlink(notesRoot,root+'/notes');}catch(error){if(error.code!=='EEXIST'||await readlink(root+'/notes')!==notesRoot)throw new Error('invalid_notes_link');}
   };
+  // The checkout's real directory, read once per call: file tools stay inside it, through the link too.
+  let checkout=null;const base=async()=>checkout??=await checkoutDirectory(repo,worktreeRoot);
   const path=async(value,create=false)=>{
-    const target=resolve(repo,safe(value));
+    const target=resolve(repo,safe(value)),inside=await base();
     if(create)await mkdir(dirname(target),{recursive:true});
-    const parent=await realpath(dirname(target));if(parent!==repo&&!parent.startsWith(repo+sep))throw new Error('invalid_parent');return target;
+    const parent=await realpath(dirname(target));if(parent!==inside&&!parent.startsWith(inside+sep))throw new Error('invalid_parent');return target;
   };
+  // Removes what the task directory has as its checkout: a link goes alone, a directory of its own with its worktree
+  // registration in the store.
+  const dropCheckout=async()=>{
+    const info=await lstat(repo).catch(()=>null);if(!info)return;
+    if(info.isSymbolicLink()){await unlink(repo);return;}
+    await rm(repo,{recursive:true,force:true});await storeGit(['worktree','prune'],{cwd:gitRoot+'/repo.git'}).catch(()=>{});
+  };
+  const writeAuthor=async email=>{if(!email)return;if(!/^[1-9]\d*\+[a-zA-Z0-9-]+(?:\[bot\])?@users\.noreply\.github\.com$/.test(email))throw new Error('invalid_author_email');await writeFile(root+'/author.json',JSON.stringify({email}),{mode:0o600});};
   // Task context the control plane writes (the Issue or PR, its comments, the project's skills) sits next to the checkout.
   // The agent reads it as ../context/<path>; it is not part of the repository and never part of a candidate.
   const context=root+'/context',contextPath=async(value,create=false)=>{
@@ -30,21 +60,6 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     if(create)await mkdir(dirname(target),{recursive:true});
     const parent=await realpath(dirname(target));if(parent!==context&&!parent.startsWith(context+sep))throw new Error('invalid_parent');return target;
   };
-  if(input.type==='workspace_cache'){
-    await writeFile(root+'/review-cache.json',JSON.stringify({sha:input.sha,tree_sha:input.tree_sha}),{mode:0o600});return {written:true};
-  }
-  if(input.type==='workspace_reuse'){
-    const cache=await readFile(root+'/review-cache.json','utf8').then(JSON.parse).catch(()=>null);
-    if(!cache||cache.sha!==input.sha||!await realpath(repo).then(actual=>actual===repo,()=>false))return {reused:false};
-    const dirty=await storeGit(['status','--porcelain'],{cwd:repo}).catch(()=>Buffer.from('missing'));
-    const tree=(await storeGit(['rev-parse','HEAD^{tree}'],{cwd:repo}).catch(()=>Buffer.from(''))).toString().trim();
-    if(dirty.length||tree!==input.tree_sha)return {reused:false};
-    if(await stat(repo+'/.git').then(s=>s.isFile(),()=>false)){
-      const head=(await storeGit(['rev-parse','HEAD'],{cwd:repo})).toString().trim();if(head!==input.sha)return {reused:false};
-    }
-    // Only the checkout is cached. The agent, mailbox and session belong to the new task.
-    await rm(root+'/agent',{recursive:true,force:true});return {reused:true,tree_sha:cache.tree_sha};
-  }
   const authorFile=root+'/author.json';
   const author=await readFile(authorFile,'utf8').then(JSON.parse).catch(()=>({email:'department-bot@invalid.local'}));
   // Snapshot plumbing has no command timeout or execFile output cap. Large cat-file output goes to disk.
@@ -62,16 +77,16 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   // removed and named in the result; while a git process works on the worktree the operation stops as busy, and the
   // control plane retries it (#712).
   const unlock=async()=>{
-    const {removed,busy}=await clearStaleGitLocks(repo,{workspaceId:input.workspace_id});
+    const {removed,busy}=await clearStaleGitLocks(await base(),{workspaceId:input.workspace_id});
     if(busy)throw new Error(`git_worktree_busy: ${busy.locks.join(', ')} ${busy.pids.length?'held by running git process '+busy.pids.join(', '):`created less than ${lockGraceMs/1000} seconds ago`}; retry later`);
     return removed.length?{stale_git_locks_removed:removed}:{};
   };
   // An evaluator gets a distinct checkout of the submitted Git object, never the executor's dirty tree/session.
   if(input.type==='workspace_acceptance'){
-    if(!/^[a-f0-9]{48}$/.test(input.source_workspace_id||'')||input.source_workspace_id===input.workspace_id||!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_acceptance_snapshot');
+    if(!id48.test(input.source_workspace_id||'')||input.source_workspace_id===input.workspace_id||!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_acceptance_snapshot');
     const source=`${workspaceRoot}/${input.source_workspace_id}/repo`;
-    if(await realpath(source)!==source)throw new Error('invalid_acceptance_source');
-    await mkdir(root,{recursive:true});await rm(repo,{recursive:true,force:true});
+    await checkoutDirectory(source,worktreeRoot).catch(()=>{throw new Error('invalid_acceptance_source');});
+    await mkdir(root,{recursive:true});await dropCheckout();
     await storeGit(['clone','--shared','--no-checkout','--',source,repo],{cwd:root});
     await git(['checkout','--detach',input.sha]);
     const tree=(await git(['rev-parse','HEAD^{tree}'])).toString().trim();
@@ -82,9 +97,11 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     return {tree_sha:tree,sha:input.sha};
   }
   if(input.type==='workspace_init'){
+    // A file copy is the task's own: a link to a shared worktree an earlier preparation left there goes first.
+    if(await lstat(repo).then(info=>info.isSymbolicLink(),()=>false))await unlink(repo);
     await mkdir(repo,{recursive:true});
     await linkNotes();
-    if(input.author_email){if(!/^[1-9]\d*\+[a-zA-Z0-9-]+(?:\[bot\])?@users\.noreply\.github\.com$/.test(input.author_email))throw new Error('invalid_author_email');await writeFile(authorFile,JSON.stringify({email:input.author_email}),{mode:0o600});author.email=input.author_email;}
+    if(input.author_email){await writeAuthor(input.author_email);author.email=input.author_email;}
     try{await writeFile(root+'/snapshot.json','{}',{flag:'wx',mode:0o600});}catch(e){if(e.code!=='EEXIST')throw e;}
     return {initialized:true};
   }
@@ -93,7 +110,9 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     if(!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_commit');
     await mkdir(root,{recursive:true});
     await linkNotes();
-    if(input.author_email){if(!/^[1-9]\d*\+[a-zA-Z0-9-]+(?:\[bot\])?@users\.noreply\.github\.com$/.test(input.author_email))throw new Error('invalid_author_email');await writeFile(authorFile,JSON.stringify({email:input.author_email}),{mode:0o600});}
+    await writeAuthor(input.author_email);
+    // A link to a shared worktree is not this task's own checkout; it is replaced, the worktree stays.
+    if(await lstat(repo).then(info=>info.isSymbolicLink(),()=>false))await unlink(repo);
     // An existing directory counts only as a worktree of the store at exactly this commit; anything else there, such as an
     // earlier file copy of the same tree (its own repository, without history), is replaced.
     const worktree=await stat(repo+'/.git').then(s=>s.isFile(),()=>false),current=worktree?(await storeGit(['rev-parse','HEAD'],{cwd:repo}).catch(()=>Buffer.from(''))).toString().trim():'';
@@ -102,14 +121,41 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     if(tree!==input.tree_sha)throw new Error(`checkout_tree_mismatch: expected ${input.tree_sha}, actual ${tree}`);
     return {tree_sha:tree,local_sha:head};
   }
+  // A shared worktree for the task (#769): workspace_worktree_create makes /workspace/worktrees/<id> at one commit,
+  // workspace_worktree_bind takes an existing one. Either way the worktree is handed over only when its HEAD and HEAD's tree are the ones asked for
+  // and it has no changes; ignored files (installed dependencies, build output) are no change and stay. A worktree that
+  // fails the check is refused with what it holds instead, and nothing is changed: the control plane picks another.
+  // The task directory then points at it with <task>/repo.
+  if(input.type==='workspace_worktree_create'||input.type==='workspace_worktree_bind'){
+    if(!id48.test(input.worktree_id||'')||!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_worktree');
+    const target=`${worktreeRoot}/${input.worktree_id}`,run=args=>storeGit(args,{cwd:target});
+    if(input.type==='workspace_worktree_create'){
+      // A new id names no directory; one that is there belongs to another worktree.
+      if(await lstat(target).then(()=>true,()=>false))throw new Error('worktree_exists');
+      await mkdir(worktreeRoot,{recursive:true});
+      await storeGit(['worktree','add','--detach',target,input.sha],{cwd:gitRoot+'/repo.git'});
+    }else{
+      const info=await lstat(target).catch(()=>null);
+      if(!info?.isDirectory()||!await lstat(target+'/.git').then(s=>s.isFile(),()=>false))return {refused:'workspace_missing'};
+    }
+    const head=(await run(['rev-parse','HEAD'])).toString().trim(),tree=(await run(['rev-parse','HEAD^{tree}'])).toString().trim();
+    const changed=await changedFiles(target),state={head,tree_sha:tree,changed_count:changed.length,changed:changed.slice(0,200)};
+    if(head!==input.sha||tree!==input.tree_sha)return {refused:'workspace_mismatch',...state};
+    if(changed.length)return {refused:'workspace_dirty',...state};
+    await mkdir(root,{recursive:true});await linkNotes();await writeAuthor(input.author_email);
+    await dropCheckout();await symlink(target,repo);
+    // The handover counts as activity of the worktree: the cleanup leaves a worktree alone that was used since it listed it.
+    const now=new Date();await utimes(target,now,now);
+    return {worktree_id:input.worktree_id,...state,local_sha:head};
+  }
   // The task's worktree moves to another commit in place (#770): a pull request got new commits while its task ran. The
   // directory stays, and so do untracked and ignored files (installed dependencies, build output). What the agent changed
   // in tracked files, and untracked files the new commit would overwrite, is first saved as a patch next to the checkout,
   // so nothing is discarded silently.
   if(input.type==='workspace_advance'){
     if(!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_commit');
-    if(!await stat(repo+'/.git').then(s=>s.isFile(),()=>false))throw new Error('workspace_not_worktree');
-    const run=(args,data)=>storeGit(args,{cwd:repo,...(data?{input:data}:{})}),names=buffer=>buffer.toString('utf8').split('\0').filter(Boolean);
+    await base();if(!await stat(repo+'/.git').then(s=>s.isFile(),()=>false))throw new Error('workspace_not_worktree');
+    const run=(args,data)=>storeGit(args,{cwd:repo,...(data?{input:data}:{})});
     const previous=(await run(['rev-parse','HEAD'])).toString().trim();
     let saved=null,unlocked={};
     if(previous!==input.sha){
@@ -130,7 +176,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     if(head!==input.sha||tree!==input.tree_sha)throw new Error(`checkout_tree_mismatch: expected ${input.tree_sha}, actual ${tree}`);
     return {tree_sha:tree,local_sha:head,previous_sha:previous,saved,...unlocked};
   }
-  const actual=await realpath(repo);if(actual!==repo)throw new Error(`workspace_replaced: expected ${repo}, actual ${actual}`);
+  await base();
   if(input.type==='workspace_context'){
     // The control plane sends context in 45,000-byte chunks, 60,000 base64 characters.
     if(typeof input.base64!=='string'||input.base64.length>61440||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
@@ -182,7 +228,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     if(!/^[a-f0-9]{48}$/.test(input.source_workspace_id||'')||input.source_workspace_id===input.workspace_id||
       ![input.sha,input.tree_sha,input.base_tree].every(v=>/^[a-f0-9]{40}$/.test(v||'')))throw new Error('invalid_integration_snapshot');
     const source=`${workspaceRoot}/${input.source_workspace_id}/repo`;
-    if(await realpath(source)!==source)throw new Error('invalid_integration_source');
+    await checkoutDirectory(source,worktreeRoot).catch(()=>{throw new Error('invalid_integration_source');});
     const unlocked=await unlock();
     await git(['fetch','--no-tags','--',source,input.sha]);
     if((await git(['rev-parse',input.sha+'^{tree}'])).toString().trim()!==input.tree_sha)throw new Error('integration_snapshot_mismatch');
@@ -205,7 +251,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   if(input.type==='workspace_restore'){
     if(!/^[a-f0-9]{48}$/.test(input.source_workspace_id||'')||!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_recovery_snapshot');
     const source=`${workspaceRoot}/${input.source_workspace_id}/repo`;
-    if(await realpath(source)!==source)throw new Error('invalid_recovery_source');
+    await checkoutDirectory(source,worktreeRoot).catch(()=>{throw new Error('invalid_recovery_source');});
     const unlocked=await unlock();
     await git(['fetch','--no-tags','--',source,input.sha]);
     const tree=(await git(['rev-parse',input.sha+'^{tree}'])).toString().trim();

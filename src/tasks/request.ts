@@ -68,7 +68,8 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
     const target=software&&input.integration?(await github.ref(input.bot_pr?.base?.ref||github.defaultBranch))?.object?.sha:input.snapshot_sha||inheritedBase||(await github.ref(github.defaultBranch))?.object?.sha;
     if(!target)stop('repository_has_no_commit','waiting_configuration');
     const mirror=gitCache&&github.cloneUrl?await gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[target],refs:[`refs/heads/${github.defaultBranch}`]}):undefined;
-    const snapshot=(mirror?await workspace.checkout(github,target,mirror,[]):null)||await workspace.prepare(github,target,mirror);
+    // A request may write in its checkout: it gets a worktree of its own (#769).
+    const snapshot=(mirror?await workspace.bind(github,target,mirror,[],'write'):null)||await workspace.prepare(github,target,mirror);
     Object.assign(input,{snapshot_sha:target,snapshot_tree:snapshot.tree_sha,snapshot_files:snapshot.files,source_tree:snapshot.source_tree_sha,skipped_files:snapshot.skipped_files,base_branch:github.defaultBranch});
     update({head_sha:target,error_code:null,input:storedInput(store,input,task.repository_id)});
   }
