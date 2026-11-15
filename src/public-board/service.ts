@@ -84,20 +84,46 @@ export class PublicBoards {
     if (path === '/dashboard') { res.writeHead(308, { Location: '/dashboard/' }); res.end(); return true; }
     const repos = publishedRepositories(this.store), available = repos.filter(row => row.active_path);
     const json = (value: unknown) => { res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(req.method === 'HEAD' ? undefined : JSON.stringify(value)); return true; };
-    const load = async (repo: Row, name: string) => JSON.parse(await readFile(join(repo.active_path, name), 'utf8'));
-    if (path === '/dashboard/data/index.json') return json({ generatedAt: new Date().toISOString(), repos: await Promise.all(available.map(row => load(row, 'summary.json'))) });
-    if (path === '/dashboard/data/gate/index.json') return json({ generatedAt: new Date().toISOString(), windowDays: 7,
-      sources: (await Promise.all(available.map(row => load(row, 'gate.json')))).filter(data => data.branchData.length).map(data => { return { id: data.id, owner: data.owner, name: data.name, file: `${data.owner}/${data.name}.json`, level: data.level, stage: data.stage, boardUrl: data.boardUrl }; }) });
+    type Loaded<T> = { ok: true; data: T } | { ok: false; reason: 'read_failed' | 'invalid_json' };
+    // One repository's export is read on its own: a missing or corrupt file only marks that repository unavailable.
+    const loadOptional = async <T>(repo: Row, name: string): Promise<Loaded<T>> => {
+      let text: string;
+      try { text = await readFile(join(repo.active_path, name), 'utf8'); } catch { return { ok: false, reason: 'read_failed' }; }
+      try { return { ok: true, data: JSON.parse(text) as T }; } catch { return { ok: false, reason: 'invalid_json' }; }
+    };
+    // Aggregates keep the healthy repositories and name the unavailable ones by file and stable reason, never by path.
+    const aggregate = async <T>(rows: Row[], name: string) => {
+      const results = await Promise.all(rows.map(async row => ({ row, loaded: await loadOptional<T>(row, name) })));
+      return {
+        data: results.flatMap(item => item.loaded.ok ? [item.loaded.data] : []),
+        unavailable: results.flatMap(item => item.loaded.ok ? [] : [{ repository: String(item.row.full_name), file: name, reason: item.loaded.reason }]),
+      };
+    };
+    if (path === '/dashboard/data/index.json') {
+      const summaries = await aggregate<any>(available, 'summary.json');
+      return json({ generatedAt: new Date().toISOString(), repos: summaries.data, unavailable: summaries.unavailable });
+    }
+    if (path === '/dashboard/data/gate/index.json') {
+      const gates = await aggregate<any>(available, 'gate.json');
+      return json({ generatedAt: new Date().toISOString(), windowDays: 7, unavailable: gates.unavailable,
+        sources: gates.data.filter(data => data.branchData.length).map(data => { return { id: data.id, owner: data.owner, name: data.name, file: `${data.owner}/${data.name}.json`, level: data.level, stage: data.stage, boardUrl: data.boardUrl }; }) });
+    }
     if (path === '/dashboard/data/config.json') {
-      const configs = await Promise.all(available.map(row => load(row, 'config.json')));
-      return json({ ...(configs[0] || { bots: [], longOpenIssueDays: 30 }), internalContributors: Object.assign({}, ...configs.map(c => c.internalContributors)) });
+      const configs = (await aggregate<any>(available, 'config.json'));
+      return json({ ...(configs.data[0] || { bots: [], longOpenIssueDays: 30 }), internalContributors: Object.assign({}, ...configs.data.map(c => c.internalContributors)), unavailable: configs.unavailable });
     }
     if (path === '/boards' || path === '/dashboard/boards/') { res.writeHead(308, { Location: '/boards/' }); res.end(); return true; }
     if (path === '/boards/') {
       const moduleUrl = pathToFileURL(resolve('public-board/index.mjs')).href;
       const { renderIndex } = await import(moduleUrl);
-      const html = renderIndex(await Promise.all(repos.map(async row => ({ repository: { name: row.full_name }, label: row.full_name,
-        boardUrl: `/boards/${String(row.full_name).toLowerCase()}/`, generatedAt: row.active_path ? (await load(row, 'board/data/snapshot.json')).generated_at : null }))));
+      const html = renderIndex(await Promise.all(repos.map(async row => {
+        let generatedAt: string | null = null;
+        if (row.active_path) {
+          const snapshot = await loadOptional<{ generated_at?: string }>(row, 'board/data/snapshot.json');
+          if (snapshot.ok) generatedAt = snapshot.data.generated_at ?? null;
+        }
+        return { repository: { name: row.full_name }, label: row.full_name, boardUrl: `/boards/${String(row.full_name).toLowerCase()}/`, generatedAt };
+      })));
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(req.method === 'HEAD' ? undefined : html); return true;
     }
     const gate = /^\/dashboard\/data\/gate\/([^/]+\/[^/]+)\.json$/.exec(path);
