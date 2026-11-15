@@ -10,8 +10,9 @@ export interface RunningTasks { working(repositoryId: string): Promise<unknown>[
 const finished = "('succeeded','pr_opened','completed','cancelled','superseded','failed')";
 
 // Removes everything that belongs only to this repository, children before parents (no foreign key cascades on delete).
-// The audit stays: it names repositories without a foreign key.
-export function deleteProjectRecords(store: Store, id: string): void {
+// The audit stays: it names repositories without a foreign key. `files: false` deletes only rows, so a read-only check
+// can run this inside a savepoint and roll it back without touching the trajectory files or blobs on disk.
+export function deleteProjectRecords(store: Store, id: string, options: { files?: boolean } = {}): void {
   const clients = 'SELECT id FROM external_clients WHERE repository_id=?', subscriptions = `SELECT id FROM external_subscriptions WHERE repository_id=? OR client_id IN (${clients})`;
   const deliveries = 'SELECT id FROM deliveries WHERE repository_id=?', tasks = 'SELECT id FROM tasks WHERE repository_id=?', models = 'SELECT id FROM models WHERE repository_id=?';
   const schedules = 'SELECT id FROM schedules WHERE project_id=?', notifications = 'SELECT id FROM notification_outbox WHERE project_id=?';
@@ -50,7 +51,8 @@ export function deleteProjectRecords(store: Store, id: string): void {
     if (store.hasTable(table)) store.run(sql, ...Array<string>(count).fill(id));
   }
   // The project's trajectory files (its runs' model requests, tool calls and logs) go with the rows that referred to them.
-  store.trajectories.remove({ repository_id: id });
+  // The real deletion leaves this to the caller after the transaction commits; only then are the files removed.
+  if (options.files !== false) store.trajectories.remove({ repository_id: id });
 }
 
 // Both project-removal endpoints share environment and record cleanup. Off-installation removal first checks GitHub.
@@ -110,15 +112,22 @@ export class ProjectRemoval {
       // Check child ordering, constraints and deletion triggers before destroying the persistent notes. Roll back this
       // dry run: environment failures must leave the project records available for inspection and retry.
       this.store.db.exec('SAVEPOINT project_removal_check');
-      try { deleteProjectRecords(this.store, id); this.store.audit(user.id, 'repository.deleted', id, id); }
+      try { deleteProjectRecords(this.store, id, { files: false }); this.store.audit(user.id, 'repository.deleted', id, id); }
       finally { this.store.db.exec('ROLLBACK TO project_removal_check; RELEASE project_removal_check'); }
-      await this.projects?.removeEnvironment(id, this.settleMs, true);
-      return this.store.transaction(() => {
+      const removed = this.store.transaction(() => {
         if (this.engine?.working(id).length) fail(409, 'tasks_still_stopping');
-        deleteProjectRecords(this.store, id);
+        deleteProjectRecords(this.store, id, { files: false });
         this.store.audit(user.id, 'repository.deleted', id, id);
         return { deleted: true, repository_id: id, registered: true };
       });
+      // Only now that the rows are committed do the evidence files and the notes volume leave: a rolled back transaction,
+      // or a refused final commit, keeps everything the failed deletion would otherwise have destroyed.
+      this.store.trajectories.remove({ repository_id: id });
+      // The notes volume goes last, after the commit: until then a refusal must leave it readable. A manager that cannot
+      // delete it now leaves the volume behind, recorded, instead of failing a deletion that already committed.
+      try { await this.projects?.removeNotes(id, this.settleMs); }
+      catch { this.store.audit(user.id, 'repository.notes_removal_failed', id, id); }
+      return removed;
     } finally { this.projects?.endRemoval(id); }
   }
   private async settled(id: string): Promise<boolean> {

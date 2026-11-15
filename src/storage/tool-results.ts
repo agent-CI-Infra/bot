@@ -68,8 +68,9 @@ export class ToolResultFiles {
   }
   remove(column: 'repository_id' | 'conversation_id', value: string) {
     const rows = this.db.prepare(`SELECT file FROM tool_result_files WHERE ${column}=?`).all(value) as { file: string }[];
-    for (const row of rows) rmSync(this.path(row.file), { force: true });
+    // Rows first: a failure between the two steps leaves an unreferenced file to sweep, never a row whose content is gone.
     this.db.prepare(`DELETE FROM tool_result_files WHERE ${column}=?`).run(value);
+    for (const row of rows) rmSync(this.path(row.file), { force: true });
   }
 }
 

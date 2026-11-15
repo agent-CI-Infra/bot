@@ -187,6 +187,9 @@ export class ChannelLedger {
   }
   cleanup(id: string, before: number, revision: number): void {
     if (!Number.isSafeInteger(before) || before < 0 || before > Date.now()) fail(400, 'channel_retention_invalid');
+    // Trajectory files are removed only after the transaction commits: a later failure rolls the rows back, and the files
+    // of a conversation that is still kept must not disappear with it.
+    const removedConversations = new Set<string>();
     this.store.transaction(() => {
       const chat = this.store.get('SELECT * FROM channel_chats WHERE id=? AND revision=?', id, revision);
       if (!chat) return fail(409, 'channel_revision_conflict');
@@ -209,7 +212,7 @@ export class ChannelLedger {
           this.store.run("UPDATE management_messages SET input=?,state=CASE WHEN state IN ('pending','running') THEN 'interrupted' ELSE state END WHERE id=?",
             JSON.stringify({source_message:message.source_message,content:'本地保留范围已清理。'}),message.id);
         this.store.run('UPDATE model_requests SET request_snapshot=NULL,response_snapshot=NULL,request_ref=NULL,response_ref=NULL WHERE conversation_id=?',conversation);
-        this.store.trajectories.remove({conversation_id:conversation});
+        removedConversations.add(conversation);
       }
       if(this.store.hasTable('channel_service_turns'))
         this.store.run("UPDATE channel_service_turns SET reply=NULL,updated_at=CASE WHEN state='running' THEN ? ELSE updated_at END,state=CASE WHEN state='running' THEN 'interrupted' ELSE state END,error=CASE WHEN state='running' THEN 'conversation_history_cleaned' ELSE error END WHERE chat_id=?",Date.now(),id);
@@ -219,7 +222,7 @@ export class ChannelLedger {
         this.store.run('DELETE FROM role_conversation_events WHERE turn_id IN (SELECT id FROM role_conversation_turns WHERE conversation_id=?)',id);
         this.store.run('DELETE FROM role_conversation_operations WHERE turn_id IN (SELECT id FROM role_conversation_turns WHERE conversation_id=?)',id);
         this.store.run('UPDATE model_requests SET request_snapshot=NULL,response_snapshot=NULL,request_ref=NULL,response_ref=NULL WHERE conversation_id=?',id);
-        this.store.trajectories.remove({conversation_id:id});
+        removedConversations.add(id);
       }
       for(const row of this.store.all('SELECT id,payload,state FROM channel_outbox WHERE connector_id=?',chat.connector_id)){
         const payload=this.store.secrets.open(row.payload,'channel-outbox:'+row.id) as any;
@@ -233,6 +236,7 @@ export class ChannelLedger {
         }
       }
     });
+    for (const conversation of removedConversations) this.store.trajectories.remove({conversation_id:conversation});
   }
   private view(row:Row):Json {
     const payload=this.store.secrets.open(row.payload,'channel-message:'+row.chat_id+':'+row.message_id);
