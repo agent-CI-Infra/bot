@@ -566,7 +566,7 @@ test('global project actions remove a started project from this system, never Gi
   assert.equal(page.run('startCalls'), 1);
 });
 
-test('a failed deletion keeps the project trajectory files, blobs and notes volume, and they go only once the checks pass', async t => {
+test('a deletion stopped by an environment failure or by a task still working at the settle stage keeps the trajectory files, blobs and notes volume; a successful retry removes them', async t => {
   const github = await fakeGitHub(t), env = managerFixture(t); let workingTasks = []; const engine = { working: () => workingTasks, api: async () => undefined };
   let sync; const h = await harness(t, env.manager, store => ({ installations: sync = new InstallationSync(store, github.url), engine }));
   const { admin } = await setup(h), a = await account(admin), now = new Date().toISOString();
@@ -599,15 +599,16 @@ test('a failed deletion keeps the project trajectory files, blobs and notes volu
   assert.equal(h.store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 1, 'the rows still point at it');
   assert.ok(env.docker.volumes.has(env.projects.notesName('101')), 'the notes volume survives the failed removal');
 
-  // A final commit refused because a task is still stopping also leaves the evidence and the notes volume alone.
+  // A task that is already working is refused at the settle stage: removal.ts:111 fails before the dry run and before
+  // removeNotes(), so nothing was deleted yet and this is not an in-transaction refusal that preserved the notes volume.
   h.projects.removeEnvironment = realRemove;
   workingTasks = ['task-101'];
   const refused = await remove(admin, '101');
   assert.equal(refused.status, 409);
-  assert.ok(h.store.get("SELECT 1 FROM repositories WHERE id='101'"), 'the refused commit keeps the project');
-  assert.equal(existsSync(record), true, 'the refused commit keeps the trajectory file');
-  assert.equal(existsSync(blob), true, 'the refused commit keeps the blob');
-  assert.ok(env.docker.volumes.has(env.projects.notesName('101')), 'the refused commit keeps the notes volume');
+  assert.ok(h.store.get("SELECT 1 FROM repositories WHERE id='101'"), 'the settle-stage refusal keeps the project');
+  assert.equal(existsSync(record), true, 'the settle-stage refusal keeps the trajectory file');
+  assert.equal(existsSync(blob), true, 'the settle-stage refusal keeps the blob');
+  assert.ok(env.docker.volumes.has(env.projects.notesName('101')), 'the settle-stage refusal never removed the notes volume');
 
   // The successful retry removes the notes volume once every statement passed, and the evidence files after the commit.
   workingTasks = [];
@@ -615,7 +616,73 @@ test('a failed deletion keeps the project trajectory files, blobs and notes volu
   assert.equal(existsSync(record), false, 'the trajectory file goes with the deleted project');
   assert.equal(existsSync(blob), false, 'the blob goes too');
   assert.equal(h.store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 0);
-  assert.equal(env.docker.volumes.has(env.projects.notesName('101')), false, 'the notes volume goes once the deletion can no longer be refused');
+  assert.equal(env.docker.volumes.has(env.projects.notesName('101')), false, 'the notes volume goes after the dry run accepted every statement');
+});
+
+test('a deletion whose manager cannot identify the notes volume fails and keeps the project row and the notes volume', async t => {
+  const github = await fakeGitHub(t), env = managerFixture(t);
+  let sync; const h = await harness(t, env.manager, store => ({ installations: sync = new InstallationSync(store, github.url), engine: { working: () => [], api: async () => undefined } }));
+  const { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101');
+  for (let i = 0; i < 3; i++) await h.projects.reconcile();
+  // The environment deletion still finds the project; the read before the notes deletion has no state, so the volume is unknown.
+  const realCall = env.manager.call; let reads = 0;
+  env.manager.call = async (method, path, input, timeout) => {
+    if (method === 'GET' && path === '/v1/projects/101' && ++reads > 1) return undefined;
+    return realCall(method, path, input, timeout);
+  };
+  const failed = await remove(admin, '101');
+  assert.equal(failed.status, 503);
+  assert.equal(failed.value.error, 'manager_project_missing');
+  assert.ok(h.store.get("SELECT 1 FROM repositories WHERE id='101'"), 'the project rows stay because the deletion failed');
+  assert.ok(env.docker.volumes.has(env.projects.notesName('101')), 'the notes volume stays because it was never identified');
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE repository_id='101' AND action='repository.notes_removal_failed'"), 'the missing notes removal is audited');
+  assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE repository_id='101' AND action='repository.deleted'").n, 0, 'the deletion is not reported as committed');
+});
+
+test('the in-transaction working-task re-check refuses the deletion after the notes volume is gone and keeps the project rows', async t => {
+  const github = await fakeGitHub(t), env = managerFixture(t);
+  // Empty at settled() and at the pre-transaction check; the task appears only for the transaction's own re-check.
+  let calls = 0; const engine = { working: () => (++calls > 2 ? ['task-101'] : []), api: async () => undefined };
+  let sync; const h = await harness(t, env.manager, store => ({ installations: sync = new InstallationSync(store, github.url), engine }));
+  const { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101');
+  for (let i = 0; i < 3; i++) await h.projects.reconcile();
+  const realNotes = h.projects.removeNotes.bind(h.projects), notesRemoved = [];
+  h.projects.removeNotes = async (id, waitMs) => { notesRemoved.push(id); return realNotes(id, waitMs); };
+  const refused = await remove(admin, '101');
+  assert.equal(refused.status, 409);
+  assert.equal(refused.value.error, 'tasks_still_stopping');
+  assert.equal(calls, 3, 'settled, the pre-transaction check and the re-check each asked the engine');
+  assert.deepEqual(notesRemoved, ['101'], 'the notes volume went before the transaction refused');
+  assert.ok(h.store.get("SELECT 1 FROM repositories WHERE id='101'"), 'the project rows stay');
+  assert.ok(h.store.get("SELECT 1 FROM policies WHERE repository_id='101'"), 'the policy row stays');
+  assert.equal(env.docker.volumes.has(env.projects.notesName('101')), false, 'the notes volume was already deleted');
+  assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE repository_id='101' AND action='repository.deleted'").n, 0, 'no audit claims a committed deletion');
+});
+
+test('a deletion whose evidence cleanup fails still succeeds, is audited against the project, and leaves no project rows', async t => {
+  const github = await fakeGitHub(t), env = managerFixture(t);
+  let sync; const h = await harness(t, env.manager, store => ({ installations: sync = new InstallationSync(store, github.url), engine: { working: () => [], api: async () => undefined } }));
+  const { admin } = await setup(h), a = await account(admin), now = new Date().toISOString();
+  await repository(admin, a.id, '101');
+  for (let i = 0; i < 3; i++) await h.projects.reconcile();
+  // The rows are committed before the evidence files go, so a failing cleanup must be audited rather than fail the deletion.
+  const record = join(h.store.trajectories.root, '101', 'task', 'run', 'record.jsonl');
+  mkdirSync(dirname(record), { recursive: true }); writeFileSync(record, '{"type":"log"}\n');
+  h.store.run("INSERT INTO trajectory_files(id,repository_id,path,created_at,bytes,records,counts) VALUES('tf-101','101','101/task/run/record.jsonl',?,10,1,'{}')", now);
+  const removeEvidence = h.store.trajectories.remove.bind(h.store.trajectories);
+  h.store.trajectories.remove = () => { throw new Error('evidence_removal_failed'); };
+  t.after(() => { h.store.trajectories.remove = removeEvidence; });
+  const response = await remove(admin, '101');
+  assert.equal(response.status, 200, 'the committed deletion is not reported as failed');
+  assert.deepEqual(response.value, { deleted: true, repository_id: '101', registered: true });
+  assert.equal(h.store.get("SELECT 1 FROM repositories WHERE id='101'"), undefined, 'the committed project row is gone');
+  assert.equal(h.store.get("SELECT 1 FROM policies WHERE repository_id='101'"), undefined, 'the committed policy row is gone');
+  const audit = h.store.get("SELECT repository_id,resource_id FROM audit WHERE action='repository.evidence_removal_failed'");
+  assert.deepEqual([audit.repository_id, audit.resource_id], ['101', '101'], 'the failed evidence cleanup names the deleted project');
+  assert.equal(existsSync(record), true, 'the evidence the audit names is still on disk');
+  assert.equal(h.store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 1, 'its row stays as evidence until a later sweep');
 });
 
 test('a blob another project also stored survives this project deletion', async t => {

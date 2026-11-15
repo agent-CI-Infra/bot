@@ -7,7 +7,7 @@ import { ChannelHistoryError, ChannelRateLimitError } from '../dist/channels/fei
 import { channelFixture, envelope, post, finished, credentials, until } from './channel-fixture.mjs';
 import { ChannelConnections } from '../dist/channels/connections.js';
 import { WSClient } from '@larksuiteoapi/node-sdk';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -200,6 +200,25 @@ test('local pagination searches decrypted safe text and metadata, hides sensitiv
   const current = store.get('SELECT * FROM channel_chats WHERE id=?', chat.id);
   assert.equal(ledger.merge(current, message('m001', 1), 'history'), false);
   assert.ok(ledger.query(chat.id).gaps.some(g => g.reason === 'retention'));
+});
+
+test('a failure inside cleanup rolls the rows back and keeps the selected conversations\' trajectory files on disk', t => {
+  const { store, ledger, chat } = fixture(t);
+  ledger.merge(chat, message('old', 10), 'live');
+  // A management conversation selected from the inbox, with a trajectory file of its own.
+  store.run(`INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,conversation_id,created_at,context_revision)
+    VALUES('inbox-1','connector','event-1','dedup-1',?,'completed','conversation-1',10,1)`,
+    store.secrets.seal({ chat_id: 'group', installation_tenant: 'tenant', app_id: 'app', created_at: 10 }, 'channel-event:inbox-1'));
+  store.trajectories.append(store.trajectories.scopeOf({ id: 'turn', conversation_id: 'conversation-1' }), 'log', 'record', {});
+  const file = join(store.trajectories.root, store.get("SELECT path FROM trajectory_files WHERE conversation_id='conversation-1'").path);
+  assert.equal(existsSync(file), true);
+  // An unreadable outbox payload fails the transaction after the conversation was selected.
+  store.run("INSERT INTO channel_outbox(id,connector_id,idempotency_key,payload,state,attempts,next_attempt,created_at) VALUES('outbox-1','connector','key-1','not-sealed','pending',0,0,10)");
+  assert.throws(() => ledger.cleanup(chat.id, 100, store.get('SELECT revision FROM channel_chats WHERE id=?', chat.id).revision), /invalid ciphertext/);
+  assert.equal(store.get("SELECT count(*) n FROM channel_messages WHERE chat_id=? AND created_at<100", chat.id).n, 1, 'the message rows rolled back');
+  assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE conversation_id='conversation-1'").n, 1, 'the trajectory row rolled back');
+  assert.equal(existsSync(file), true, 'the trajectory file was never removed');
+  assert.equal(store.get('SELECT retained_after FROM channel_chats WHERE id=?', chat.id).retained_after, 0, 'the chat row rolled back');
 });
 
 test('explicit cleanup during an awaited history page fences that page and later full-resync pages', async t => {
