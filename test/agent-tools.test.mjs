@@ -723,3 +723,63 @@ test('a run admitted while the download is in flight still blocks the replacemen
   assert.equal(existsSync(sentinel), false, 'after the run finished the replacement really happens');
 });
 
+
+test('prune keeps a protected version whose manifest is no longer readable and reports it instead of deleting it', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-tools-protected-invalid-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const upstream = await startMockToolUpstream(t, 'x64');
+  const manager = new AgentToolManager({ volumeRoot: root, containerRoot: root, arch: 'x64', sources: upstream.sources });
+  const store = new Store(':memory:', randomBytes(32));
+  t.after(() => store.close());
+  roleRunStorage(store);
+  store.run("INSERT INTO accounts VALUES('a','org','github_app','1','{}','now')");
+  store.run("INSERT INTO repositories VALUES('r','org/repo','org','a')");
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('t1','r','task.request','running','test','{}',1,1)");
+
+  await manager.install({ cli: 'codex', version: '0.166.0' });
+  await manager.install({ cli: 'codex', version: '0.167.0' });
+  const run = beginRun(store, store.get("SELECT * FROM tasks WHERE id='t1'"), 'execution', {});
+  store.run("UPDATE task_runs SET role='developer',harness='codex',harness_version='1' WHERE id=?", run.id);
+  allocateLease(store, 't1', 'assign-1', run.id);
+  recordRunCliVersion(store, run.id, '0.166.0');
+
+  // The running task executes 0.166.0 while that directory's manifest has become unreadable. The directory is still
+  // the one the run executes, so the sweep must keep it and report it, not delete it as a broken leftover.
+  writeFileSync(join(root, 'codex', '0.166.0', 'manifest.json'), '{"schema":');
+  const pruned = await manager.prune({ cli: 'codex', retainCount: 1, protectedVersions: c => activeCliVersions(store, c) });
+  assert.deepEqual(pruned.protected_invalid.codex, ['0.166.0']);
+  assert.deepEqual(pruned.pruned.codex, []);
+  assert.equal(existsSync(join(root, 'codex', '0.166.0', 'bin', 'codex')), true);
+});
+
+test('the directory kept for an active run is cleared by the next prune once that run ends', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-tools-protected-invalid-after-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const upstream = await startMockToolUpstream(t, 'x64');
+  const manager = new AgentToolManager({ volumeRoot: root, containerRoot: root, arch: 'x64', sources: upstream.sources });
+  const store = new Store(':memory:', randomBytes(32));
+  t.after(() => store.close());
+  roleRunStorage(store);
+  store.run("INSERT INTO accounts VALUES('a','org','github_app','1','{}','now')");
+  store.run("INSERT INTO repositories VALUES('r','org/repo','org','a')");
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('t1','r','task.request','running','test','{}',1,1)");
+
+  await manager.install({ cli: 'codex', version: '0.166.0' });
+  await manager.install({ cli: 'codex', version: '0.167.0' });
+  const run = beginRun(store, store.get("SELECT * FROM tasks WHERE id='t1'"), 'execution', {});
+  store.run("UPDATE task_runs SET role='developer',harness='codex',harness_version='1' WHERE id=?", run.id);
+  allocateLease(store, 't1', 'assign-1', run.id);
+  recordRunCliVersion(store, run.id, '0.166.0');
+  writeFileSync(join(root, 'codex', '0.166.0', 'manifest.json'), '{"schema":');
+
+  const kept = await manager.prune({ cli: 'codex', retainCount: 1, protectedVersions: c => activeCliVersions(store, c) });
+  assert.deepEqual(kept.protected_invalid.codex, ['0.166.0']);
+  assert.equal(existsSync(join(root, 'codex', '0.166.0')), true);
+
+  // Nothing protects the directory once the run is over, so the very next sweep clears it and reports nothing left.
+  endRun(store, run, 'completed', null);
+  const after = await manager.prune({ cli: 'codex', retainCount: 1, protectedVersions: c => activeCliVersions(store, c) });
+  assert.deepEqual(after.protected_invalid.codex, []);
+  assert.deepEqual(after.pruned.codex, []);
+  assert.equal(existsSync(join(root, 'codex', '0.166.0')), false);
+});
