@@ -25,9 +25,12 @@ test('#738: notice() writes role and aria-live for the message it shows, so an e
   assert.equal(message.getAttribute('role'), 'alert');
   assert.equal(message.getAttribute('aria-live'), 'assertive');
 
-  // Clearing the strip leaves nothing to announce, and the next status message is polite again.
+  // Clearing the strip leaves nothing to announce, and it must not keep the previous message's role: a failed login's
+  // alert used to survive into the retry because the old reset was the only thing that put role=status back.
   page.run(`notice('message')`);
   assert.equal(message.childElementCount, 0);
+  assert.equal(message.getAttribute('role'), 'status');
+  assert.equal(message.getAttribute('aria-live'), 'polite');
   page.run(`notice('message', '安装列表已同步', 'view-success')`);
   assert.equal(message.getAttribute('role'), 'status');
   assert.equal(message.getAttribute('aria-live'), 'polite');
