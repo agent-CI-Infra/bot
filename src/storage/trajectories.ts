@@ -313,19 +313,18 @@ export class Trajectories {
     try { this.results.remove(column as 'repository_id' | 'conversation_id', value); } catch (error) { this.cleanupFailed(where, error); }
     for (const handle of [...this.open.values()]) if ((handle.scope as any)[column] === value) this.finish(handle);
     const rows = this.db.prepare(`SELECT id,repository_id,path,bytes,counts,expired_at FROM trajectory_files WHERE ${column}=?`).all(value) as Record<string, any>[];
-    for (const row of rows) {
-      try { rmSync(join(this.root, String(row.path)), { force: true }); }
-      catch (error) { this.cleanupFailed(where, error); }
-      this.handles.delete(String(row.id)); this.paths.delete(String(row.id));
-    }
+    // Rows first: a process that dies between the two steps leaves a byte on disk for sweepOrphans() to collect, never a
+    // row whose file this process already removed (#787).
     atomic(this.db, () => {
       for (const row of rows) {
         // An expired file's totals were already moved to 'expired' (expire()); they leave from there.
         if (row.expired_at) this.addUsage(String(row.repository_id ?? ''), 'expired', -1, -Number(row.bytes ?? 0));
         else if (row.bytes !== null) this.usage(String(row.repository_id ?? ''), -1, -Number(row.bytes), JSON.parse(row.counts || '{}'), -1);
         this.db.prepare('DELETE FROM trajectory_files WHERE id=?').run(row.id);
+        this.handles.delete(String(row.id)); this.paths.delete(String(row.id));
       }
     });
+    // The files and directories go afterwards; the per-file removal is covered by the recursive removal below.
     if (where.repository_id !== undefined) {
       try { rmSync(join(this.root, segment(where.repository_id)), { recursive: true, force: true }); }
       catch (error) { this.cleanupFailed(where, error); }
@@ -336,16 +335,34 @@ export class Trajectories {
         this.db.prepare('DELETE FROM trajectory_blobs WHERE repository_id=?').run(where.repository_id!);
         this.db.prepare('DELETE FROM trajectory_usage WHERE repository_id=?').run(where.repository_id!);
       });
-      for (const blob of blobs) {
-        if (this.db.prepare('SELECT 1 FROM trajectory_blobs WHERE sha256=?').get(blob.sha256)) continue;
-        try { rmSync(this.blobPath(blob.sha256), { force: true }); }
-        catch (error) { this.cleanupFailed(where, error); }
+      for (const blob of blobs) if (!this.db.prepare('SELECT 1 FROM trajectory_blobs WHERE sha256=?').get(blob.sha256)) {
+        try { rmSync(this.blobPath(blob.sha256), { force: true }); } catch (error) { this.cleanupFailed(where, error); }
       }
     }
     else {
       try { rmSync(join(this.root, 'conversations', segment(where.conversation_id)), { recursive: true, force: true }); }
       catch (error) { this.cleanupFailed(where, error); }
     }
+  }
+
+  /**
+   * Deletes entries whose file is gone. remove() deletes rows before files, so a crash there leaves a file to collect;
+   * the opposite (a file removed behind the store's back) would leave a row the reader reports as truncated (#787).
+   */
+  sweepOrphans(): number {
+    const rows = this.db.prepare('SELECT id,repository_id,path,bytes,counts,expired_at FROM trajectory_files').all() as Record<string, any>[];
+    const missing = rows.filter(row => !existsSync(join(this.root, String(row.path))));
+    if (!missing.length) return 0;
+    atomic(this.db, () => {
+      for (const row of missing) {
+        // An expired file's totals were already moved to 'expired' (expire()); they leave from there, as in remove().
+        if (row.expired_at) this.addUsage(String(row.repository_id ?? ''), 'expired', -1, -Number(row.bytes ?? 0));
+        else if (row.bytes !== null) this.usage(String(row.repository_id ?? ''), -1, -Number(row.bytes), JSON.parse(row.counts || '{}'), -1);
+        this.db.prepare('DELETE FROM trajectory_files WHERE id=?').run(row.id);
+        this.handles.delete(String(row.id)); this.paths.delete(String(row.id));
+      }
+    });
+    return missing.length;
   }
 
   /**

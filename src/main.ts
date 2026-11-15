@@ -100,6 +100,13 @@ const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_UR
 // Logs a blocked event loop with the requests in flight, and slow requests (see core/stalls.ts).
 const stalls = new StallMonitor(); stalls.start();
 // Cleanup by days (#671): daily, from ten minutes after the start.
+// Entries whose file is gone are swept, so a cleanup interrupted between its rows and its files cannot leave a row the
+// reader reports as a truncated file (#787). Ten minutes is the same cadence as the installation sync.
+const trajectorySweep = setInterval(() => {
+  try { store.trajectories.sweepOrphans(); } catch (error) { console.error('[trajectories] orphan sweep failed:', error); }
+}, 10 * 60_000);
+trajectorySweep.unref?.();
+try { store.trajectories.sweepOrphans(); } catch (error) { console.error('[trajectories] first orphan sweep failed:', error); }
 const retention = new RetentionCleanup(store, manager);
 const migration = new PayloadMigration(store), storage = new StorageReport(store, manager, { git_cache: gitCache.root, public_boards: resolve(dirname(databasePath), 'public-boards') }, vacuum);
 const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
@@ -127,7 +134,7 @@ server.listen(8791, '0.0.0.0', () => {
 let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;
-  clearInterval(timer); clearInterval(syncTimer); clearInterval(reclaimTimer); workspaces.close(); engine.obsolete.close();
+  clearInterval(timer); clearInterval(syncTimer); clearInterval(trajectorySweep); clearInterval(reclaimTimer); workspaces.close(); engine.obsolete.close();
   server.close(async () => { await Promise.all([githubRefresh.close(),modelCatalog(store).close(),installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close(),migration.stop(),vacuum.stop(),retention.stop()]); store.close(); process.exit(0); });
   setTimeout(() => process.exit(1), 100_000).unref();
 });
