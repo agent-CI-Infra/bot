@@ -16,7 +16,7 @@ test('board projects one card per workflow, keeps published PR separate and omit
   const combined=own.find(c=>c.object_number===3&&c.card_category==='development.issue');assert.equal(combined.review_task_id,'source-review');assert.equal(combined.development_task_id,'developing');
   assert.equal(own.find(c=>c.object_number===4).development_pr_number,40);assert.equal(combined.development_pr_number,null);
   assert.deepEqual(result.value.counts,{issue:5,pr:2});
-  const stages=(await admin('/api/board')).value.stages;assert.deepEqual(stages.map(s=>s.id),['unreviewed','reviewing','reviewed','developing','developed','attention']);
+  const stages=(await admin('/api/board')).value.stages;assert.deepEqual(stages.map(s=>s.id),['unreviewed','reviewing','reviewed','developing','developed','attention','stopped']);
   assert.equal(stages.find(s=>s.id==='developing').pr.name,'正在跟进');assert.ok(stages.every(s=>s.hint));
   assert.equal(own.find(c=>c.object_number===40).object_type,'pr');
   assert.equal(JSON.stringify(result.value).includes('input'),false);assert.equal(JSON.stringify(result.value).includes('result'),false);
@@ -43,9 +43,9 @@ test('each workflow retains its stage when another workflow has a newer success 
   assert.ok(active.every((_,i)=>stage(10+i,'development.issue')==='developing'));
   // The same two states the inbox and the overview count as 需要关注 put the card in 需要处理, not in 正在开发.
   assert.deepEqual(waiting.map((_,i)=>stage(10+active.length+i,'development.issue')),['attention','attention']);
-  // #655: a stop the bot makes by itself leaves the card 未检视, and a retry the bot will resume is not a person's work.
+  // #655/#826: a cancellation with no completed stage is 已停止, not 未检视; a retry the bot will resume is not a person's work.
   assert.deepEqual(Object.fromEntries(cards.filter(c=>c.object_number>=30&&c.object_number<36).map(c=>[c.object_number,c.bot_stage])),
-    {30:'attention',31:'unreviewed',32:'attention',33:'attention',34:'attention',35:'reviewing'});
+    {30:'attention',31:'stopped',32:'attention',33:'attention',34:'attention',35:'reviewing'});
   const card=(number,category)=>cards.find(c=>c.object_number===number&&c.card_category===category);
   assert.equal(card(50,'review.issue').bot_stage,'reviewed');assert.equal(card(50,'development.issue').bot_stage,'attention');
   assert.equal(card(51,'review.issue').bot_stage,'attention');assert.equal(card(51,'development.issue').bot_stage,'developed');
@@ -352,7 +352,8 @@ test('object closed or draft cancel keeps the card out of 需要处理 and the t
   // The card keeps the state the last real task reached instead of asking for a person who is not needed.
   assert.equal(card(1,'review.issue').bot_stage,'reviewed');
   assert.equal(card(2,'review.pr').bot_stage,'reviewed');
-  assert.equal(card(3,'review.issue').bot_stage,'unreviewed');
+  // #826: auto-stopped with no completed stage is 已停止, not 未检视.
+  assert.equal(card(3,'review.issue').bot_stage,'stopped');
   assert.equal(card(4,'review.issue').bot_stage,'attention');
   // A state that waits for a person keeps the card in 需要处理 on the board, like it already did in the inbox.
   assert.equal(card(5,'development.issue').bot_stage,'attention');
@@ -363,11 +364,17 @@ test('object closed or draft cancel keeps the card out of 需要处理 and the t
   assert.equal(card(1,'review.issue').task_error_code,'object_closed_or_draft');
   assert.equal(card(6,'development.issue').task_error_code,'object_closed_or_draft');
   assert.equal(card(7,'review.issue').task_error_code,'task_claim_revoked');
-  assert.equal(card(7,'review.issue').bot_stage,'unreviewed');
+  assert.equal(card(7,'review.issue').bot_stage,'stopped');
   assert.equal(card(4,'review.issue').task_error_code,null);
   // The stop itself stays on the card, with the object state that caused it, so the reader sees why nobody is working.
   assert.deepEqual([card(1,'review.issue').task_status,card(1,'review.issue').github_state],['cancelled','closed']);
   assert.deepEqual([card(2,'review.pr').task_status,card(2,'review.pr').draft],['cancelled',1]);
+  // #826: 未检视 does not collect the auto-stopped cards; they have their own column and stay findable.
+  assert.equal(result.column_counts.unreviewed||0,0);
+  assert.equal(result.column_counts.stopped,2);
+  const stopped=(await admin('/api/board/cards?filters='+encodeURIComponent(JSON.stringify([{field:'include_closed',value:true},{field:'bot_stage',value:'stopped'}])))).value;
+  assert.deepEqual(stopped.cards.map(c=>c.object_number).sort(),[3,7]);
+  assert.equal(stopped.column_counts.stopped,2);
   // One count for one set of tasks: the board column, the inbox and the overview agree.
   assert.equal(result.column_counts.attention,3);
   const inbox=(await admin('/api/tasks?attention=1')).value.tasks;
