@@ -16,7 +16,7 @@
 
 控制面先按确定的条件过滤，被过滤的事件不会到达 Manager，也不写事件记录：
 
-- 安装范围、项目未启用、仓库外人员的评论（只认对象作者和 `OWNER`、`MEMBER`、`COLLABORATOR`）、bot 自己写的内容（例外：bot 自己开的 PR 上，其他检视机器人的评论和检视）、草稿和已关闭的对象、PR head 校验；
+- 安装范围、项目未启用、仓库外人员的更新类评论和检视（`issue.updated`、`pull_request.updated` 只认对象作者和 `OWNER`、`MEMBER`、`COLLABORATOR`；提到 bot 的评论不按评论人过滤，见下文）、bot 自己写的内容（例外：bot 自己开的 PR 上，其他检视机器人的评论和检视）、草稿和已关闭的对象、PR head 校验；
 - 项目关掉的事件（见下表）；
 - 没有任何可选处理方式的事件：它能导致的工作类型都关着，也没有可以续接的任务。
 
@@ -37,6 +37,8 @@
 | `gate.manual` | 「接入门禁」对话里开始或回复 | 接入门禁的开关 |
 | `schedule.due` | `manager.check` 定时计划到期 | 定时检查的开关 |
 
+提到 bot 的评论（`issue.mention`、`pull_request.mention`）不按评论人过滤：任何人在打开的 Issue 或 PR 上 `@bot`，包括公开仓库里的仓库外人员，都会交给 Manager 分派一次，由它按提示词决定回答、检视还是不处理。这类事件只提供检视、通用回复和续接选项，不提供开发；开发仍要有人加开发标签，外人的评论不作为开发依据。Manager 自己的 `github_write` 不受事件来源限制，回应外人时由 Manager 提示词把握。
+
 五个策略字段沿用原来的名字和 `PATCH /api/repositories/:id/policy`，含义从「检视这类事件」变为「把这类事件交给 Manager」。其余开关和标签列表保存在策略的 `event_filters` 里；在「监听与触发」页单独保存过的开关不再跟随打开开关。
 
 ## 分派
@@ -54,7 +56,7 @@
 
 三种结果都必须写理由。选「开发 Issue」而检视没有给出实现目标时必须附简要说明。选了没提供的选项、缺少必需的简要说明、多要写入或格式不对时，在同一轮里把错误交回模型改一次，仍不合格就按失败处理。模型优先读 `task_models.manager`，没有时用项目默认模型。分派不保留会话，每次只读取事件和任务事实。
 
-Manager 的写入只能落在本事件所在的仓库：`github_write` 没有仓库参数，路径相对这个仓库，不设次数上限，每次写入都记审计。每次写入带 key，按事件去重：重新分派时用户消息列出已经做过的写入，同一个 key 直接返回上次的结果，不会再写一遍。默认只有 Manager 有 GitHub 写权限（Issue、Pull Request、Contents）；在「角色 → Manager」把这些资源改成只读后，分派时不再提供 `github_write`。
+Manager 的写入只能落在本事件所在的仓库：`github_write` 没有仓库参数，路径相对这个仓库，不设次数上限，每次写入都记审计。每次写入带 key，按事件去重：重新分派时用户消息列出已经做过的写入，同一个 key 直接返回上次的结果，不会再写一遍。默认只有 Manager 有 GitHub 写权限（Issue、Pull Request、Contents）。Contents 写包括合并 PR 和写分支（包括默认分支），所以 Manager 默认可以经 `github_write` 合并 PR；这不经过 `POST /api/tasks/:id/merge` 的校验，能否合入由仓库的分支保护和必需检查决定，见[角色池](role-pool.md#authorized-merge)。在「角色 → Manager」把这些资源改成只读后，分派时不再提供相应的写入；全部改成只读时不再提供 `github_write`。
 
 决定在一个事务里落地：新建任务、写续接、记录理由，并通知拥有这个事件的模块。新建任务的输入里有 `manager`（事件 id、理由、简要说明、收窄后的写入），执行时作为说明交给 agent，不能扩大范围、写入或控制面条件；任务日志有一条 `dispatch` 记录，`task_events` 把任务和事件关联起来。
 

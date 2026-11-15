@@ -136,7 +136,8 @@ CI-workflow 原来的 build 和 pr-ready 都是每次 PR 提交、更新就跑�
 
 1. **确认方案并合并门禁 PR**：在接入对话里确认各 lane 的命令，PR 上的 Actions 跑过后再合入；是否在 Release workflow 里发布包或镜像由本仓库开发者决定；空命令 lane 只表示还没有配置；
 2. **确认私有仓快照是否可以公开**：需要公开时，由超管在仓库列表开启看板；公开仓不需要这一步；
-3. **给需要开发的 Issue 加 `bot-develop` 标签**：bot 只处理带这个标签的 Issue，这是"允许 bot 改代码"的唯一开关。
+3. **给需要开发的 Issue 加 `bot-develop` 标签**：GitHub 上的开发任务只为带这个标签的 Issue 启动，标签要由人加；
+4. **打开分支保护和必需检查**：bot 的 Manager 默认有 Contents 写权限，可以经 `github_write` 合并 PR、写分支（包括默认分支），控制面不限制目标分支，也不替它跑合并前的校验，见[角色池](role-pool.md#authorized-merge)。所以请给默认分支打开分支保护（或规则集），把门禁 `gate` 等检查设为必需检查，启用 merge queue 时要求经队列合入；这样 bot 和人的合并都要先过这些检查。不希望 Manager 合并时，在「角色 → Manager」把 Contents 改成只读。
 
 ---
 

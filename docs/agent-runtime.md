@@ -50,7 +50,7 @@ Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这
 - **去重**：key 在一个范围内唯一：一个任务（重试同一任务不会重复写）、一个分派事件、一轮群聊或管理助手对话。已经写成功的 key 直接返回上次的结果（`replayed: true`）；同一 key 换了请求返回 `github_write_key_conflict`；结果未确认时返回 `github_write_unknown`，由 agent 先读 GitHub 核对，再换新 key 写。
 - **结果与审计**：返回 GitHub 响应里有用的部分（编号、链接、sha、状态等）和 HTTP 状态。每次调用写一条 `github_writes`：范围、key、调用方（角色和任务、Manager 和事件、服务角色和会话、管理助手的用户）、仓库、方法、路径、请求摘要、状态、GitHub 状态码和结果链接；被拒绝的调用也记录。项目审计（`audit`）同时记一条 `github.write.<状态>`。
 
-工具出现在每个工作类型、Pi 角色、Manager 分派、群聊助手和管理助手里，再按调用方角色的 GitHub 权限过滤：没有任何资源读写的角色看不到它，硬调也被拒绝。委派的任务还受来源角色的上限约束，角色不能把自己没有的写权限借给别人。内置角色默认只有 Manager 可写（Issue、Pull Request、Contents），其他内置角色对全部 GitHub 资源只读；升级时已保存的内置角色权限一次性重置为这些默认值（模型、后端和提示词等设置保留，自定义角色不变），配置记一个由 `migration:381` 保存的新版本。
+工具出现在每个工作类型、Pi 角色、Manager 分派、群聊助手和管理助手里，再按调用方角色的 GitHub 权限过滤：没有任何资源读写的角色看不到它，硬调也被拒绝。委派的任务还受来源角色的上限约束，角色不能把自己没有的写权限借给别人。内置角色默认只有 Manager 可写（Issue、Pull Request、Contents），其他内置角色对全部 GitHub 资源只读。合并 PR 是 Contents 写，所以 Manager 默认可以经 `PUT /pulls/{n}/merge` 合并 PR，经 `PUT /contents/...`、`POST /git/refs`、`PATCH /git/refs/...` 写分支；没有单独的「可合并」权限，其他角色、群助手和管理助手按各自的 Contents 写（管理助手另要本人对该仓库有 `tasks.write`）。路由不检查目标分支，这类合并也不经过 `POST /api/tasks/:id/merge` 的候选、QA 和检查校验，能否合入由仓库的分支保护（或规则集）和必需检查决定，见[角色池](role-pool.md#authorized-merge)。升级时已保存的内置角色权限一次性重置为这些默认值（模型、后端和提示词等设置保留，自定义角色不变），配置记一个由 `migration:381` 保存的新版本。
 
 框架交付不经过 `github_write`，也不需要角色的写权限：检视结论、测试通过的 PR、Actions 重跑与失败提报、发行说明和门禁方案沿用原流程，只看项目工作类型的写入，见 [Manager 与工作类型](workflows.md)。
 
