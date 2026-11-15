@@ -3,7 +3,22 @@
 let boardState = null, boardRequest = 0, boardDragging = false;
 // #503: one page read at a time, and a failed page stops the auto-loading until the reader asks for it again.
 let boardPending = 0, boardLoadFailed = false;
-function resetBoard() { boardRequest++;boardState=null;boardDragging=false;$('board-panel')?.replaceChildren(); }
+// #789: the quiet refresh runs on a chain of its own instead of an unconditional interval, so a terminal answer can stop
+// it and a failure can back off. The delay in millis is kept for the next poll.js decision.
+let boardPollTimer = null, boardPollBackoff = 0;
+function boardPollStop() { if (boardPollTimer !== null) { clearTimeout(boardPollTimer); boardPollTimer = null; } }
+// One tick at a time: the next is scheduled only after this one is answered, so a slow server never stacks requests.
+function boardPollSchedule(delay = 15000) {
+  boardPollStop();
+  boardPollTimer = setTimeout(() => { boardPollTimer = null; boardPoll().catch(() => {}); }, delay);
+}
+// A 404 (or 401/403) answers the same way however often it is asked: stop, say so once and leave the reader a control.
+function boardPollStopped(err) {
+  boardPollStop(); boardPollBackoff = 0;
+  $('board-status')?.replaceChildren(element('span', `看板刷新已停止：服务端返回 ${err.status}。`),
+    boardButton('重新读取看板', () => renderBoard(++renderVersion), 'board-link'));
+}
+function resetBoard() { boardPollStop();boardRequest++;boardState=null;boardDragging=false;$('board-panel')?.replaceChildren(); }
 const boardPageSize = 100, boardTypes = [['', '全部对象'], ['issue', 'Issue'], ['pr', 'PR'], ['task', '通用任务']];
 const boardMedia = matchMedia('(max-width:760px)');
 function boardButton(name, action, className = 'quiet') {
@@ -143,6 +158,8 @@ async function renderBoard(request,useView=false) {
   if(request!==renderVersion||me?.id!==owner)return;
   if(!boardState)boardState={owner,viewId:'default',type:'all',layout:'columns'};
   Object.assign(boardState,data);
+  // The quiet refresh starts with the page it refreshes, not with the module being loaded.
+  boardPollSchedule();
   if(!boardState.views.some(v=>v.id===boardState.viewId)){boardState.viewId='default';useView=true;}
   if(useView||!boardState.filters)boardUseView();else boardShell();
   const category=boardAddressCategory();if(category){
@@ -328,17 +345,27 @@ async function boardLoadCards(more=false) {
 }
 // Stages change while the bot works. Refresh the first page quietly unless the person is in the middle of something.
 async function boardPoll() {
-  if(!me||tab!=='board'||projectRoute()||document.hidden||boardDragging||boardState?.owner!==me.id)return;
+  // Signing out or leaving the board ends the chain; the next render of the board starts it again.
+  if(!me||tab!=='board'||!boardState||boardState.owner!==me.id){boardPollStop();return;}
   const columns=$('board-columns');
-  if(!columns||columns.hasAttribute('aria-busy')||columns.contains(document.activeElement)||document.querySelector('dialog[open],.board-menu.open'))return;
+  if(!columns||columns.hasAttribute('aria-busy')||columns.contains(document.activeElement)||document.querySelector('dialog[open],.board-menu.open')
+    ||projectRoute()||document.hidden||boardDragging){boardPollSchedule();return;}
   const request=boardRequest,owner=me.id;let result;
   try{result=await api('/api/board/cards?'+boardParams(0));}
   catch(err){
-    if(!boardAccessLost(err,request,owner)&&request===boardRequest&&owner===me?.id&&tab==='board')
-      $('board-status').textContent='刷新失败，保留上次读取结果。可点击刷新重试。';
+    if(boardAccessLost(err,request,owner))return;
+    if(request!==boardRequest||me?.id!==owner||tab!=='board')return;
+    const answer=pollAfterError(err,boardPollBackoff);
+    if(answer.terminal){boardPollStopped(err);return;}
+    // Anything else may clear on its own: keep the cards, say how long the next read waits, and leave the same control.
+    boardPollBackoff=answer.delay;
+    $('board-status')?.replaceChildren(element('span',`刷新失败，保留上次读取结果。${Math.round(answer.delay/1000)} 秒后自动重试…`),
+      boardButton('重新读取看板',()=>renderBoard(++renderVersion),'board-link'));
+    boardPollSchedule(answer.delay);
     return;
   }
   if(request!==boardRequest||me?.id!==owner||tab!=='board'||boardDragging)return;
+  boardPollBackoff=0;boardPollSchedule();
   // #503: a quiet read that succeeds proves the failure is over. Without this the summary keeps
   // 「读取失败，保留上次读取结果。」 over live cards and boardContinue() stays blocked on the flag.
   boardLoadFailed=false;
@@ -353,7 +380,6 @@ async function boardPoll() {
   const signature=JSON.stringify([result.cards,result.has_more,result.counts,result.release_count,result.column_counts]);if(signature===boardState.signature){boardSummary();return;}
   Object.assign(boardState,{cards:result.cards,hasMore:result.has_more,counts:result.counts,releaseCount:result.release_count,workCount:result.work_count,columnCounts:result.column_counts,signature});boardRenderCards(true);
 }
-setInterval(()=>boardPoll().catch(()=>{}),15000);
 function boardToggleColumn(id) {
   boardState.hidden=boardState.hidden.includes(id)?boardState.hidden.filter(c=>c!==id):[...boardState.hidden,id];boardDirty();boardRenderCards(true);
 }
