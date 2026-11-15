@@ -96,7 +96,7 @@ function renderSubscriptionEditor(host, { project, destinations, read, command, 
       if(model.fields&&(model.conflict||model.draftRevision!==value.revision||model.selected&&model.baseRevision!==selected?.revision)){model.conflict=true;model.candidate={revision:value.revision,record:selected};}
       else if(!model.fields){model.baseRevision=selected?.revision??null;model.conflict=false;model.candidate=null;}
       message.textContent=rows.length?'已读取 '+rows.length+' 条事件订阅 · '+observedAt:'当前项目没有事件订阅；事件尚未到达也不会生成通知。';fill();drawList();drawComparison();update();
-    }catch(error){if(!live()||request!==generation||invalidate(error))return;ready=false;message.textContent='事件订阅读取失败，最新状态未知。'+(rows.length?'保留上次读取的 '+rows.length+' 条（'+observedAt+'）。':'')+error.message;}
+    }catch(error){if(!live()||request!==generation||invalidate(error))return;ready=false;message.textContent='事件订阅读取失败，最新状态未知。'+(rows.length?'保留上次读取的 '+rows.length+' 条（'+observedAt+'）。':'')+readErrorText(error)+'。';}
     finally{if(live()&&request===generation){loading=false;update();}}
   }
   model.update=()=>{if(!live())return;update();};fill();update();void load(false);

@@ -200,7 +200,7 @@ const settingsCards = {
   async onboarding(request) {
     const panel = element('div', ''); panel.id = 'onboarding-panel';
     try { await renderOnboarding(request, panel); }
-    catch (err) { if (request === renderVersion) panel.replaceChildren(consoleState('接入状态读取失败', err.message, { tone: 'error', retry: () => render().catch(error) })); }
+    catch (err) { if (request === renderVersion) panel.replaceChildren(consoleState('接入状态读取失败', readErrorText(err), { tone: 'error', retry: () => render().catch(error) })); }
     return [panel];
   },
   async installations(request, ref) {

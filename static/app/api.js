@@ -93,7 +93,7 @@ function readErrorText(err) {
   const name = err && err.name;
   if (name === 'AbortError') return '请求已取消';
   if (err instanceof TypeError || name === 'TypeError' || /failed to fetch|networkerror|network error|load failed|network request failed/i.test(err?.message || '')) return '网络连接失败，请稍后重试';
-  return (err && err.message) || '请求失败。';
+  return (err && err.message) || '请求失败';
 }
 function retryErrorText(err) {
   if (/\btask_already_running\b/.test(err.message)) return '这个任务已经在执行或排队，不用再次重试。';

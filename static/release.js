@@ -59,7 +59,7 @@ function releaseSection() {
     } catch (error) {
       if (!live() || token !== reading) return 'stale';
       if (denied(error)) return 'terminal';
-      readStatus.textContent = '发布记录读取失败；保留上次内容，当前状态未确认。'; message.textContent = error.message;
+      readStatus.textContent = '发布记录读取失败；保留上次内容，当前状态未确认。'; message.textContent = readErrorText(error) + '。';
       return 'retry';
     }
   };

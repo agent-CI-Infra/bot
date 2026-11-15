@@ -74,7 +74,7 @@ function auditSection() {
       body.replaceChildren(filters, count, list);
       paint();
     } catch (err) {
-      body.replaceChildren(consoleState('操作记录读取失败', err.status === 403 ? '需要本项目的配置权限才能读这张表。' : err.message, { tone: 'error', retry: load }));
+      body.replaceChildren(consoleState('操作记录读取失败', err.status === 403 ? '需要本项目的配置权限才能读这张表。' : readErrorText(err), { tone: 'error', retry: load }));
     }
   };
   void load();

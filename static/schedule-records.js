@@ -146,7 +146,7 @@ function renderScheduleRecords(host, { project, read, invalidate }) {
       status.textContent=records.length ? '已读取 '+records.length+' 条记录 · '+at(observedAt)+'。这是保存记录，实际发送仍会重新核验。' : '该范围没有保存的记录；不能据此判定全部发送成功。';
     } catch (error) {
       if (!live() || request!==generation || refused(error)) return;
-      status.textContent='本次读取失败，最新状态未知'+(records.length ? '；保留上次读取的 '+records.length+' 条。读取于 '+at(observedAt)+'。' : '。')+' '+error.message;
+      status.textContent='本次读取失败，最新状态未知'+(records.length ? '；保留上次读取的 '+records.length+' 条。读取于 '+at(observedAt)+'。' : '。')+' '+readErrorText(error)+'。';
     } finally { if (live() && request===generation) { loading=false; draw(); } }
   }
   for (const [key,label] of Object.entries(labels)) tabs.append(button(label,()=>{

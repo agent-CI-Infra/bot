@@ -289,7 +289,7 @@ async function renderChannelConsole(request) {
       diagnosticText.textContent = `本地同步：${channelSyncText(result.sync_state)}。缺口：${result.gaps.map(g => channelGapText(g.reason)).join('、') || '本次未报告'}。可见范围受飞书权限与保留策略约束。模型请求 ${result.conversation.usage.requests || 0} 次；未知费用不按零处理。`;
       drawTimeline(); await readTasks();
     } catch (err) {
-      if (sampledAt && ![401, 403, 404].includes(err.status) && alive()) status.textContent = `刷新失败：${err.message}。保留 ${channelTime(sampledAt)} 的旧记录，可能已过期。`;
+      if (sampledAt && ![401, 403, 404].includes(err.status) && alive()) status.textContent = `刷新失败：${readErrorText(err)}。保留 ${channelTime(sampledAt)} 的旧记录，可能已过期。`;
       else failRead(history, err, () => update());
     } finally {
       pending = false; refresh.disabled = moreMessages.disabled = moreTurns.disabled = false;
