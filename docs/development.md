@@ -62,6 +62,8 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 `npm run test:agent` 同样从源码构建，使用假 GitHub、假模型和真实项目容器验收完整旅程，包括 Manager 创建／续接／忽略及检视后开发分派、Issue 到 bot PR、草稿忽略、COMMENT 行内评论、别人 PR 不推送、bot PR 跟进、重复投递／未知响应对账、测试失败、tree 不一致、模型配置故障、manager 中断恢复、凭据隔离及任务页面角色范围。Manager 通过真实模型网关选择请求提供的选项；Webhook 接收成功后，测试等待分派事件和任务结果，不把响应中的 `tasks_created` 当作已经建成的任务数。浏览器使用 lockfile 中的 Playwright。测试使用独立镜像标签、Compose 项目和 18891–18894 端口，与部署和人类试用数据隔离，结束后清理测试容器、网络和卷；产物放 `.tmp/review-dev/`，失败时保存任务、分派事件、假服务状态和服务日志并遮盖测试凭据。
 
+`npm run test:agent` 和 `npm run test:pi:docker` 的模型夹具通过回环地址到达：控制面只允许明文 HTTP 连本机，所以 Compose 覆盖文件里多一个 `model-forwarder` 服务，它与 bot 共用网络命名空间（`network_mode: service:bot`），把容器内 `127.0.0.1:9100` 的连接转发到 `fixtures:9100`；模型地址因此在测试栈里写成 `http://127.0.0.1:9100/…`，产品的回环判定与允许名单不变。转发由 `test/fixtures/forward.mjs` 承担——测试镜像（`node:22-bookworm-slim`）里没有 socat，用同一个 Node 运行时写这段 TCP 转发，省掉一次镜像拉取。如果哪天转发不能跑，退路是把夹具改成自签 TLS 并只在这两个测试栈里通过 `NODE_EXTRA_CA_CERTS` 信任其 CA，而不是放宽产品规则或加环境变量式的私网白名单。
+
 `npm run test:external:docker` 使用独立临时镜像和无外网容器验证签名转发、兑换临时令牌和 Bot 身份评论；GitHub 为本地测试服务，结束后清理本次镜像及容器，不修改运行实例。
 
 `npm run test:isolation:docker` 验收每次角色运行的独立容器：以本机已有的项目电脑镜像（`BOT_TEST_BASE_IMAGE`，默认 `department-bot-project-computer:local`）为底叠加本检出的 runner，构建带随机标签的测试镜像，在进程内启动本检出的 manager（独立 deployment id），检查 HOME／进程／环境／卷／网络隔离、恶意路径与符号链接、缓存污染、固定候选复制、资源与时限，以及 RoleRun 准入；结束后只删除该 deployment 标签下的容器、网络、卷和测试镜像，证据在 `.tmp/role-run-docker/`。

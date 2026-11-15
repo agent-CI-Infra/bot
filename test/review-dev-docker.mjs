@@ -26,6 +26,17 @@ writeFileSync(override,`services:
     ports: ["127.0.0.1:18894:9100"]
     read_only: true
     cap_drop: [ALL]
+  # The product only accepts plain HTTP to this machine (#755), so the model fixture is reached as 127.0.0.1:9100
+  # inside the bot container's own network namespace; this process forwards that loopback port to the fixture.
+  model-forwarder:
+    image: node:22-bookworm-slim
+    command: [node, /fixtures/forward.mjs, 127.0.0.1:9100, fixtures:9100]
+    volumes: [${JSON.stringify(resolve('test/fixtures')+':/fixtures:ro')}]
+    network_mode: "service:bot"
+    read_only: true
+    cap_drop: [ALL]
+    depends_on:
+      - bot
   bot:
     image: ${image('control-plane')}
     environment:
@@ -81,16 +92,16 @@ try{
   await api('/api/installations/sync','POST',{});for(const repo of ['101','202'])await api(`/api/installations/${repo}/activate`,'POST',{account_id:account.id});
   await api('/api/repositories/202/policy','PATCH',{review_enabled:false});
   await api('/api/users','POST',{username:'member',password:memberPassword,repository_ids:['101']});
-  const model=(await api('/api/models','POST',{repository_id:'101',api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
-  const coding=(await api('/api/models','POST',{repository_id:'101',api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'coding-model'})).model;
-  const manager=(await api('/api/models','POST',{repository_id:'101',api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'manager-model'})).model;
+  const model=(await api('/api/models','POST',{repository_id:'101',api_url:'http://127.0.0.1:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
+  const coding=(await api('/api/models','POST',{repository_id:'101',api_url:'http://127.0.0.1:9100/model',api_key:modelKey,model_name:'coding-model'})).model;
+  const manager=(await api('/api/models','POST',{repository_id:'101',api_url:'http://127.0.0.1:9100/model',api_key:modelKey,model_name:'manager-model'})).model;
   await api('/api/repositories/101/policy','PATCH',{model_id:null,task_models:{manager:manager.id,'review.issue':model.id,'review.pr':model.id,'development.issue':coding.id,'development.pr':coding.id},review_enabled:true,development_enabled:true,test_command:'node --test',max_revisions:2});
   const disabled=await hook('202',2);assert.equal(disabled.tasks_created,0);passed('review-disabled repository only archives');
   // The account sees three repositories; 303 is installed but not started, so its events only archive until an administrator starts it.
   const listed=(await api('/api/installations/sync','POST',{})).repositories;
   assert.deepEqual(listed.map(r=>[r.id,r.registered,r.installed]).sort(),[['101',true,true],['202',true,true],['303',false,true]]);
   assert.equal((await hook('303',2)).tasks_created,0);
-  const shared=(await api('/api/models','POST',{repository_id:null,api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
+  const shared=(await api('/api/models','POST',{repository_id:null,api_url:'http://127.0.0.1:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
   const started=(await api('/api/installations/303/activate','POST',{model_id:shared.id})).repository;assert.deepEqual([started.registered,started.enabled,started.review_enabled,started.development_enabled],[true,true,true,false]);
   await hook('303',2);await done('303',2,'review.issue','succeeded');assert.equal((await decided('303',2,'issue.opened','create')).result.created.length,1);
   await api('/api/installations/303/disable','POST',{});assert.equal((await hook('303',4)).tasks_created,0);
@@ -141,7 +152,7 @@ try{
   await api('/api/repositories/202/policy','PATCH',{review_enabled:true});await hook('202',2);
   const unconfigured=await wait(async()=>(await dispatches('202',2)).find(e=>e.error?.code==='model_not_configured'),'Manager configuration fault');
   assert.equal(unconfigured.state,'pending');assert.equal((await tasks('202',2)).length,0);
-  const model2=(await api('/api/models','POST',{repository_id:'202',api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
+  const model2=(await api('/api/models','POST',{repository_id:'202',api_url:'http://127.0.0.1:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
   await api('/api/repositories/202/policy','PATCH',{task_models:{manager:model2.id}});
   await wait(async()=>(await dispatches('202',2)).find(e=>e.state==='decided'),'Manager resumes after configuration');
   const missing=await done('202',2,'review.issue','waiting_configuration');assert.equal(missing.error_code,'model_not_configured');

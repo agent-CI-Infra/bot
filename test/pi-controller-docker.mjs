@@ -28,6 +28,17 @@ writeFileSync(override, `services:
     ports: ["127.0.0.1:18874:9100"]
     read_only: true
     cap_drop: [ALL]
+  # The product only accepts plain HTTP to this machine (#755), so the model fixture is reached as 127.0.0.1:9100
+  # inside the bot container's own network namespace; this process forwards that loopback port to the fixture.
+  model-forwarder:
+    image: node:22-bookworm-slim
+    command: [node, /fixtures/forward.mjs, 127.0.0.1:9100, fixtures:9100]
+    volumes: [${JSON.stringify(resolve('test/fixtures') + ':/fixtures:ro')}]
+    network_mode: "service:bot"
+    read_only: true
+    cap_drop: [ALL]
+    depends_on:
+      - bot
   bot:
     image: ${image('control-plane')}
     environment:
@@ -65,7 +76,7 @@ try {
   await api('/api/setup', 'POST', { username: 'administrator', password });
   const account = (await api('/api/accounts', 'POST', { name: 'Integration fixture', type: 'bot_account', token: githubToken, webhook_secret: webhookSecret })).account;
   await api('/api/installations/sync', 'POST', {}); await api('/api/installations/101/activate', 'POST', { account_id: account.id });
-  const model = (await api('/api/models', 'POST', { repository_id: '101', api_url: 'http://fixtures:9100/pi-model', api_key: modelKey, model_name: 'controller-fixture' })).model;
+  const model = (await api('/api/models', 'POST', { repository_id: '101', api_url: 'http://127.0.0.1:9100/pi-model', api_key: modelKey, model_name: 'controller-fixture' })).model;
   await api('/api/repositories/101/policy', 'PATCH', { model_id: model.id, review_enabled: false, development_enabled: true });
   await wait(async () => (await api('/api/environments/101')).environment?.state === 'ready', 'project computer ready');
   // Field-located configuration errors, then a valid V2 configuration whose controller persona asks for power it cannot get.
