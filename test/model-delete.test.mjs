@@ -117,11 +117,14 @@ async function saveRole(client, repo, modelId, { expected_revision = 0, enabled 
 test('model detail counts saved role-only references, including disabled roles, without counting historical revisions or mutating configuration', async t => {
   const { h, admin, member, create } = await fixture(t, true), model = await create(member, '101');
   const revision = await saveRole(member, '101', model.id, { enabled: false });
+  // An upgraded project may still store the retired master switch as false.
+  const legacy = JSON.parse(h.store.get("SELECT value FROM settings WHERE key='roles:101'").value);
+  legacy.enabled = false; h.store.run("UPDATE settings SET value=? WHERE key='roles:101'", JSON.stringify(legacy));
   const before = ['settings', 'role_config_revisions', 'role_snapshots', 'audit'].map(table => h.store.all(`SELECT * FROM ${table}`));
   const detail = (await member(`/api/models/${model.id}`)).value.model;
   assert.deepEqual(detail.used_by, []); assert.equal(detail.onboarding_default, false);
   assert.deepEqual(detail.role_used_by, [{ type: 'project_role', repository_id: '101', full_name: 'fixture/project-101',
-    role_id: 'reviewer', name: 'Role-only reviewer', enabled: false, configuration_enabled: false }]);
+    role_id: 'reviewer', name: 'Role-only reviewer', enabled: false, configuration_enabled: true }]);
   assert.ok(!JSON.stringify(detail).includes('Private role prompt')); assert.ok(!JSON.stringify(detail).includes(model.key));
   assert.deepEqual(['settings', 'role_config_revisions', 'role_snapshots', 'audit'].map(table => h.store.all(`SELECT * FROM ${table}`)), before);
   assert.ok(!('role_used_by' in (await member('/api/models?repository_id=101')).value.models[0]));

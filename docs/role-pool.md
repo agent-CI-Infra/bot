@@ -1,14 +1,14 @@
 # Role-Pool and task coordination
 
-Tasks retain goals, criteria, candidates and final delivery authority. A project can opt into role coordination without changing its existing queue, GitHub event entry points, policy validation or publisher. Existing projects remain on their previous executor until enabled; QA always runs as a recorded role with a fresh evaluation context.
+Tasks retain goals, criteria, candidates and final delivery authority. New work always uses the project Manager without changing its existing queue, GitHub event entry points, policy validation or publisher. Saved coordination switches no longer select the route for new work; QA always runs as a recorded role with a fresh evaluation context.
 
 ## Configuration and execution
 
 `GET/PUT /api/repositories/:repository/roles` uses existing project administration grants; the console Roles page and later management entry points call the same service. A PUT carries `expected_revision` (the current revision, `0` before the first save) and the full RoleDefinitionV2 configuration:
 
 ```json
-{"expected_revision":3,"enabled":true,
- "controller":{"role":"manager","entries":{"development":true,"request":true,"review":true,"actions":false}},
+{"expected_revision":3,
+ "controller":{"role":"manager"},
  "skills":[{"id":"review-kit","source":{"type":"repository","commit":"<40-hex sha>","paths":[".agents/skills/review/SKILL.md"]}}],
  "roles":[{"role_id":"reviewer","harness_ref":{"id":"process"},"model_profile_ref":{"model_id":"<model id>"},"skill_bundle_ref":{"id":"review-kit"},"persona_prompt":"Focus on input boundaries."}]}
 ```
@@ -26,7 +26,7 @@ Models resolve in order: the role's explicit profile, then the work type's model
 
 The role detail's Agent/model section can check a selected work type against the saved role configuration, including custom types already present in the project model map. It shows the model's source and record version, backend, role/configuration versions and resolution identifier; selecting reserved subscription mode reports `subscription_mode_not_implemented` without substituting another model. This read does not submit the editable draft, persist a snapshot or start a task. Switching work type clears the previous result, and failures show an unknown result instead of substituting another model. A changed configuration revision requires refreshing/comparing the shared draft. Existing runs remain explained by their stored snapshots; the preview of a legacy developer role also distinguishes its role definition from the Pi override still used by development entry points until its backend selection changes.
 
-With coordination enabled, the entries switched on in `controller.entries` run under the project controller with its selected backend. Development and ordinary requests use Manager → selected role runs → nominated delivery → independent QA → existing delivery/publisher. Review and Actions failure analysis retain their entry-specific tools, workspace and completion as the `dev` assignment, using that role's configured backend subject to the old-V2 compatibility rule below; the controller delegates it, reads its result by reference and nominates it, and the existing publication and QA follow. Each attempt records a `controller_entry` event with the configuration revision. Tasks keep their id, contract, candidate and history when an entry is switched either way; other work types keep their established executor.
+New development, ordinary request, review and Actions analysis tasks run under the project controller with its selected backend. Development and ordinary requests use Manager → selected role runs → nominated delivery → independent QA → existing delivery/publisher. Review and Actions failure analysis retain their entry-specific tools, workspace and completion as the `dev` assignment, using that role's configured backend subject to the old-V2 compatibility rule below; the controller delegates it, reads its result by reference and nominates it, and the existing publication and QA follow. Each attempt records a `controller_entry` event with the configuration revision. Historical execution snapshots retain their original route, id, contract, candidate and history; other work types keep their established executor.
 
 The controller runs on its configured backend. Pi sessions use an empty workspace on the project computer and forward only the offered tools to the control plane. Native/Process use the same controller tools and result validators through their own runtime. Each run is bounded; a role backend cannot grant itself product or publication tools. It only has task record, progress, bound Skill and delegation tools, all executed by the control plane through the runner's control mailbox. It cannot edit product files, run commands, publish, accept, complete, override QA, merge or grant permissions. A call to any other tool, delegation to QA, the controller itself or an unoffered role, and a delegation carrying extra fields (tools, models, permissions) are refused and recorded as `capability_denied`. Prompts, repository content and CLI output cannot change these checks. `nominate_delivery` selects the latest dev output for QA; it does not change task status to completed. Custom roles follow the observer result contract. Dev is the only writable role; observers receive separate disposable checkouts of a fixed dev snapshot. Their command side effects do not become the delivery tree. Each formal QA evaluation is fresh, even though its role instance and previous evidence remain queryable.
 
@@ -118,6 +118,10 @@ The default-branch ref is read directly before deciding whether integration is n
 ### On-demand Task Coordinator
 
 Concrete cross-task issues use a persistent request, not a synchronous wait on an occupied task slot. The restricted Coordinator sends advice for the affected Task Managers to acknowledge; it cannot execute code, change acceptance criteria, override QA or merge. Requests survive restart and only explicit requests wake the worker. See [coordination lifecycle and query API](task-coordination.md). Planning scope differences alone still use the normal Dev → Review → QA path.
+
+## Retired coordination switches
+
+The current project configuration resolves `enabled` and every `controller.entries` value to `true`. These fields are deprecated compatibility output: older PUT clients may still send boolean values, which are validated but ignored. New clients omit them. This effective projection does not rewrite stored revisions or historical task snapshots, nor change role permissions, budgets, backends, event subscriptions or work-type writes. An explicit historical configuration, including a frozen task snapshot, retains its original flags. Saving a role configuration writes the next revision with Manager execution enabled; ordinary event/prompt saves do not write role settings. Stop a project/task or revoke the relevant role permission to halt work.
 
 ## Unified Agent backend selection
 

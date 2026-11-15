@@ -16,7 +16,7 @@ import { listTaskDirectories, removeTaskDirectories } from '../runner/task-dirs.
 import { environment } from '../runner/command.mjs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { harness, setup, account, repository } from './helpers.mjs';
+import { harness, setup, account, repository, pinLegacyTaskConfiguration } from './helpers.mjs';
 import { Workspace as ControlWorkspace } from '../dist/agent/workspace.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { queueWebhook } from '../dist/review/queue.js';
@@ -179,7 +179,7 @@ test('review tasks on one commit share the mirror and the computer store: the se
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'fixture-model-key', model_name: 'fixture' })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, model_id: model.id });
   for (const number of [1, 2]) await h.hook(a.path, a.secret, 'issue-' + number, { repository: { id: 101 }, action: 'opened', issue: { number, title: 'Review', body: 'Please review.' } });
-  const run = async () => { engine.tick(); await Promise.all(engine.active.values()); };
+  const run = async () => { pinLegacyTaskConfiguration(h.store); engine.tick(); await Promise.all(engine.active.values()); };
   await run(); const fetched = u.server.requests.length; await run();
   const tasks = h.store.all('SELECT * FROM tasks ORDER BY object_number');
   assert.deepEqual(tasks.map(task => task.status), ['succeeded', 'succeeded']); assert.ok(fetched > 0); assert.equal(u.server.requests.length, fetched);
@@ -598,7 +598,7 @@ test('a push while a review runs joins it: the worktree moves to the new head an
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'fixture-model-key', model_name: 'fixture' })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, model_id: model.id });
   assert.equal(queueWebhook(h.store, '101', 'pull_request', { repository: { id: 101 }, action: 'opened', pull_request: pr, sender: user }, 'opened'), 1);
-  engine.tick(); await Promise.all(engine.active.values());
+  pinLegacyTaskConfiguration(h.store); engine.tick(); await Promise.all(engine.active.values());
 
   const task = h.store.get('SELECT * FROM tasks');
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 1); assert.equal(joined, 0);

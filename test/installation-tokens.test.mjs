@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { harness, setup, account, repository } from './helpers.mjs';
+import { harness, setup, account, repository, pinLegacyTaskConfiguration } from './helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { enqueue } from '../dist/review/queue.js';
 import { GitHub, revokeInstallationToken } from '../dist/github/client.js';
@@ -94,6 +94,7 @@ const review = { summary: 'Reviewed.', findings: [], requires_code_change: false
 async function runReview(f) {
   f.h.store.transaction(() => enqueue(f.h.store, '101', 'review.pr', 7, head, { number: 7 }));
   const task = f.h.store.get("SELECT * FROM tasks WHERE kind='review.pr' AND object_number=7");
+  pinLegacyTaskConfiguration(f.h.store, task.id);
   f.engine.tick(); await f.engine.active.get(task.id);
   return f.h.store.get('SELECT * FROM tasks WHERE id=?', task.id);
 }

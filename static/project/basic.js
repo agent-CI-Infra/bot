@@ -1,5 +1,4 @@
 // Shared role labels and editable definitions; roles.js renders the overview and role forms.
-const roleEntries = [['development', '开发', '开发 Issue、跟进 bot PR'], ['request', '普通任务', '管理助手或接口创建的任务'], ['review', '检视', '检视 Issue、检视 PR'], ['actions', 'Actions 失败分析', 'Actions 失败处理']];
 const modelSources = { role: '角色', workflow: '工作类型', project: '项目默认' };
 
 /**
@@ -52,6 +51,7 @@ function basicSection() {
   summary.append(facts([['检视', policy.review_enabled ? '开启' : '关闭'], ['自动开发', policy.development_enabled ? '开启' : '关闭'],
     ['模型', current.models.find(m=>m.id===policy.model_id)?.model_name || (policy.model_id?'模型不可用':'未选择，任务会等待配置')],
     ['机器', machineSize]]));
+  summary.append(consoleLink(`#/projects/${id}/roles/manager`, '项目 Manager 设置', '事件接收、任务安排、提示词与权限'));
   const advanced = element('details', '', 'fold basic-advanced');
   advanced.dataset.testid = 'basic-advanced';
   advanced.append(element('summary', '高级'));

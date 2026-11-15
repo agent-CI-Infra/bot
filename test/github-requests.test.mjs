@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
-import { harness, setup, account, repository } from './helpers.mjs';
+import { harness, setup, account, repository, pinLegacyTaskConfiguration } from './helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { enqueue } from '../dist/review/queue.js';
 
@@ -58,7 +58,7 @@ async function reviewFixture(t) {
   return { h, engine, requests, reviews, comments, computer: value => { state = value; }, run: async (number = 7) => {
     h.store.transaction(() => enqueue(h.store, '101', 'review.pr', number, head, { number }));
     const task = h.store.get("SELECT * FROM tasks WHERE kind='review.pr' AND object_number=?", number);
-    requests.length = 0; engine.tick(); await engine.active.get(task.id);
+    pinLegacyTaskConfiguration(h.store, task.id); requests.length = 0; engine.tick(); await engine.active.get(task.id);
     return h.store.get('SELECT * FROM tasks WHERE id=?', task.id);
   } };
 }

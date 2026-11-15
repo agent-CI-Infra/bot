@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { harness, setup, account, repository, testPassword } from './helpers.mjs';
+import { harness, setup, account, repository, testPassword, pinLegacyTaskConfiguration } from './helpers.mjs';
 import { agentLoop } from '../dist/agent/loop.js';
 import { Redactor } from '../dist/agent/common.js';
 import { testPrompt } from '../dist/app/model-probe.js';
@@ -218,6 +218,7 @@ test('task model calls use the shared address rule and keep their single 8192 ou
     if (asked) return { state: 'completed', result: finish, events: [], offset: 0 };
     asked = true; return { state: 'running', request: { id: '1'.padStart(48, '0'), body: { model: 'runner', messages: [{ role: 'user', content: 'hi' }], max_tokens: 100 } }, events: [], offset: 0 };
   } };
+  pinLegacyTaskConfiguration(h.store, 'probe');
   await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='probe'"), workspace, new Redactor(), async () => {}, { mode: 'review' });
   const call = fake.requests.find(r => r.method === 'POST');
   assert.equal(call.path, '/v1/chat/completions'); assert.equal(call.body.max_tokens, 8192); assert.ok(!('max_completion_tokens' in call.body));

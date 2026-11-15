@@ -219,7 +219,7 @@ const codeActions: Record<string,string> = {
   pull_request_file_limit:'PR 改动文件过多，bot 无法确认完整差异。拆小 PR 后会重新检视。',
   task_software_disabled:'项目未开启开发或普通事项。核对项目开关与普通事项配置后重试；报告终点不会因此变为 PR 交付。',
   task_pull_request_forbidden:'核对普通事项的 code／pull_request 写集合，以及来源与当前执行角色修改代码的能力（PR 本身是框架交付，不需要角色的 GitHub 写权限）。任务管理和委派不会增加写权限；旧请求的授权上限不会因后来加权而自动扩大。',
-  role_authority_revoked:'角色的权限、角色本身或角色协作在运行中被收回，后续能力调用已停止。恢复角色协调或相应权限配置后点「重试」继续。',
+  role_authority_revoked:'角色或其权限在运行中被收回，后续能力调用已停止。恢复相应角色及权限配置后点「重试」继续。',
   role_revision_checkpoint:'角色在安全检查点结束本次运行，同一任务和角色实例会带新 revision 自动续接。',
   unsupported_capability:'角色选用的执行后端或运行环境缺少这个阶段要求的能力（例如隔离、原始证据、取消或固定候选），运行没有启动，也不会换用其他后端。到「角色」页改用满足要求的执行后端或环境，保存后任务自动继续。',
   role_budget_exhausted:'这个角色在本任务中的累计预算已用尽，运行已取消，已有产物和检查点保留。确认用量后在「角色」页提高该角色的预算策略并保存；已开始的任务固定了启动时的配置，用 POST /api/tasks/:id/roles/apply 把新 revision 应用到这个角色后再重试。不会换模型重开预算。',

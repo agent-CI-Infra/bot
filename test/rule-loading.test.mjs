@@ -1,6 +1,6 @@
 import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';import{createServer}from'node:http';import{once}from'node:events';import{createHash}from'node:crypto';import{rmSync}from'node:fs';
-import{harness,setup,account,repository}from'./helpers.mjs';import{TaskEngine}from'../dist/agent/engine.js';import{blobSha}from'../dist/agent/common.js';
+import{harness,setup,account,repository,pinLegacyTaskConfiguration}from'./helpers.mjs';import{TaskEngine}from'../dist/agent/engine.js';import{blobSha}from'../dist/agent/common.js';
 import{RuleService,resolveRules,developmentLabel,skillIndex}from'../dist/rules/service.js';import{explainFailure}from'../dist/agent/failures.js';
 
 const id=value=>createHash('sha1').update(JSON.stringify(value)).digest('hex');
@@ -50,7 +50,7 @@ async function repositoryFixture(t,{stopModel=false}={}){
   const model=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://model.invalid/v1',api_key:'fixture-key',model_name:'fixture-model'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,development_enabled:true,model_id:model.id});
   Object.assign(fixture,{...h,admin,account:a,
-    async run(taskId){h.store.run('UPDATE tasks SET next_run_at=0 WHERE id=?',taskId);engine.tick();await Promise.all(engine.active.values());return h.store.get('SELECT * FROM tasks WHERE id=?',taskId);},
+    async run(taskId){h.store.run('UPDATE tasks SET next_run_at=0 WHERE id=?',taskId);pinLegacyTaskConfiguration(h.store);engine.tick();await Promise.all(engine.active.values());return h.store.get('SELECT * FROM tasks WHERE id=?',taskId);},
     logs:taskId=>h.store.all('SELECT content FROM task_logs WHERE task_id=? ORDER BY rowid',taskId).map(row=>JSON.parse(row.content))});
   t.after(async()=>{await engine.close();await h.stop();await new Promise(resolve=>server.close(resolve));rmSync(h.directory,{recursive:true,force:true});});
   return fixture;

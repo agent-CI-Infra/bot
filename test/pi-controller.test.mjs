@@ -1,3 +1,4 @@
+import { pinLegacyTaskConfiguration } from './helpers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -51,6 +52,7 @@ async function entryFixture(t, kind, respond, controlled = false) {
   }
   // Recording a new contract invalidates the old workspace; the engine allocates its replacement afterwards.
   store.run("UPDATE tasks SET workspace_id=?,generation=? WHERE id='t'", randomBytes(24).toString('hex'), environment.generation);
+  if (!controlled) pinLegacyTaskConfiguration(store, 't');
   const task = store.get("SELECT * FROM tasks WHERE id='t'"), redactor = new Redactor(), guard = async () => {}, workspace = new Workspace(store, manager, task, redactor, guard, value => logs.push(value));
   const initialized = await workspace.call('init', { type: 'workspace_init' });
   assert.equal(initialized.initialized, true);
@@ -246,6 +248,7 @@ for (const matched of [false,true]) test(`Pi receives selected model capabilitie
     f.store.run("UPDATE models SET model_name='deepseek-flash' WHERE id='m'");
     const catalog=new ModelCatalog(f.store,async()=>new Response(JSON.stringify({deepseek:{models:{'deepseek-flash':{id:'deepseek-flash',name:'DeepSeek Flash',canonical_model_id:'deepseek/deepseek-flash',attachment:false,reasoning:true,limit:{context:1048576,output:393216},modalities:{input:['text'],output:['text']}}}}})));await catalog.refresh();
   }
+  f.store.run("DELETE FROM task_execution_configs WHERE task_id='t'"); pinLegacyTaskConfiguration(f.store, 't');
   await agentLoop(f.store,f.task,f.workspace,f.redactor,f.guard,{});
   const config=JSON.parse(readFileSync(`${f.root}/tasks/${f.task.workspace_id}/agent/models.json`,'utf8')).providers['department-proxy'].models[0];
   assert.equal(config.contextWindow,matched?1048576:128000);assert.equal(config.maxTokens,matched?393216:8192);assert.equal(config.reasoning,matched);

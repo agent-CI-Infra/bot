@@ -59,7 +59,7 @@ function rolesUsingModel(store: Store, user: Actor, id: string): Json[] {
   const visible = scope(user, 'r.id');
   const rows = store.all(`SELECT r.id repository_id,r.full_name,json_extract(role.value,'$.role_id') role_id,
     json_extract(role.value,'$.name') name,json_extract(role.value,'$.enabled') enabled,
-    json_extract(config.value,'$.enabled') configuration_enabled
+    1 configuration_enabled
     FROM repositories r JOIN settings config ON config.key='roles:'||r.id
     JOIN json_each(CASE WHEN json_extract(config.value,'$.schema')=2 THEN json_extract(config.value,'$.roles') ELSE '[]' END) role
     WHERE json_extract(role.value,'$.model_profile_ref.model_id')=? AND ${visible.sql}

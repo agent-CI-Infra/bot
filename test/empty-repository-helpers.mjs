@@ -2,7 +2,7 @@ import { acceptanceFixture } from './acceptance-fixture.mjs';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {rmSync} from 'node:fs';
-import {harness,setup,account,repository} from './helpers.mjs';
+import {harness,setup,account,repository,pinLegacyTaskConfiguration} from './helpers.mjs';
 import {TaskEngine} from '../dist/agent/engine.js';
 import {treeSha} from '../dist/agent/common.js';
 import {captureTaskConfiguration} from '../dist/tasks/configuration.js';
@@ -50,10 +50,11 @@ export async function emptyRepositoryFixture(t,options={}){
     if(options.taskKind.startsWith('development.'))h.store.run("UPDATE policies SET development_enabled=1 WHERE repository_id='101'");
     h.store.run('DELETE FROM task_execution_configs WHERE task_id=?',taskId);captureTaskConfiguration(h.store,taskId);
   }
+  pinLegacyTaskConfiguration(h.store, taskId);
   const result={...h,adminBase:h.admin,admin,password,engine,taskId,githubUrl,comments,operations,commit,
     setBranch(value){branch=value;},
     setGeneration(value){generation=value;},
-    async run(){engine.tick();await Promise.all(engine.active.values());return h.store.get('SELECT * FROM tasks WHERE id=?',taskId);},
+    async run(){pinLegacyTaskConfiguration(h.store);engine.tick();await Promise.all(engine.active.values());return h.store.get('SELECT * FROM tasks WHERE id=?',taskId);},
     due(){h.store.run('UPDATE tasks SET next_run_at=0 WHERE id=?',taskId);},
     async close(){await engine.close();await h.stop();await new Promise(resolve=>server.close(resolve));rmSync(h.directory,{recursive:true,force:true});}};
   if(t)t.after(()=>result.close());return result;

@@ -1,3 +1,4 @@
+import { pinLegacyTaskConfiguration } from './helpers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -222,6 +223,7 @@ test('workspace review conversations retain history and boundaries while using t
       return {};
     }};
     const conversation = {history,boundary:async stage => {stages.push(stage);return {prompt:'Current discussion'};}};
+    pinLegacyTaskConfiguration(f.store,task.id);
     const running = agentLoop(f.store,task,workspace,f.spec.redactor,f.spec.guard,{},undefined,undefined,conversation);
     if (changeModel) await assert.rejects(running,{code:'model_configuration_changed'});
     else {
@@ -241,6 +243,8 @@ test('workspace review conversations retain history and boundaries while using t
 
 test('workspace development keeps publication tools and write capabilities after session integration', async t => {
   const f = await fixture(t), configBytes = []; let config, published = false;
+  f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('domain-run','r','development.issue','running','fixture','{}')");
+  pinLegacyTaskConfiguration(f.store, 'domain-run');
   const workspace = {log(){},async call(_key,request){
     if (request.type === 'workspace_agent_config') {
       configBytes.push(Buffer.from(request.base64,'base64'));

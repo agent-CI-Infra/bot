@@ -1,3 +1,4 @@
+import { pinLegacyTaskConfiguration } from './helpers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
@@ -7,6 +8,7 @@ import { RepositoryExplorer, repositoryTools } from '../dist/agent/exploration.j
 import { ReadTokens } from '../dist/agent/read-token.js';
 import { Redactor } from '../dist/agent/common.js';
 import { agentLoop } from '../dist/agent/loop.js';
+const legacyAgentLoop = (store, task, ...args) => { pinLegacyTaskConfiguration(store, task.id); return agentLoop(store, task, ...args); };
 import { Workspace } from '../dist/agent/workspace.js';
 import { workspaceProfile } from '../dist/agent/profiles.js';
 import { agentOperation } from '../runner/agent.mjs';
@@ -120,13 +122,13 @@ test('review and development Pi adapters execute the same repository tools throu
     if (input.type === 'workspace_agent_tool') { reply.push(Buffer.from(input.base64, 'base64')); if (input.final) { replies.push(JSON.parse(Buffer.concat(reply))); reply = []; index++; } }
     return { written: true };
   } };
-  const result = await agentLoop(f.h.store, task, workspace, f.redactor, async () => {}, {}, f.tokens);
+  const result = await legacyAgentLoop(f.h.store, task, workspace, f.redactor, async () => {}, {}, f.tokens);
   assert.match(result.summary, /related/); assert.match(replies[0].content, /compiler/); assert.match(replies[1][0].body, /Related/); assert.equal(replies[2][0].filename, 'src/build.ts');
   assert.ok(!JSON.stringify(replies).includes('fixture-installation-'));
   assert.ok(f.state.requests.some(r => r.method === 'DELETE' && r.path === '/installation/token'));
   // The runner can survive a control-plane restart and go straight to a read with its cached grant.
   const issued = f.state.tokens.length; index = 0; replies.length = 0;
-  await agentLoop(f.h.store, task, workspace, f.redactor, async () => {}, {}, f.tokens);
+  await legacyAgentLoop(f.h.store, task, workspace, f.redactor, async () => {}, {}, f.tokens);
   assert.match(replies[0].content, /compiler/); assert.equal(f.state.tokens.length, issued + 1);
 });
 
@@ -171,7 +173,7 @@ test('real Workspace delivery ignores only abandoned repository replies, includi
         : { state: 'running', tool_requests: [{ id: 'a'.repeat(48), kind: 'repository', name: 'github_read', arguments: { path: '/issues/42/comments' } }] } };
     } };
     const workspace = new Workspace(f.h.store, manager, task, f.redactor, async () => {}, () => {});
-    const running = agentLoop(f.h.store, task, workspace, f.redactor, async () => {}, {}, f.tokens);
+    const running = legacyAgentLoop(f.h.store, task, workspace, f.redactor, async () => {}, {}, f.tokens);
     if (continues) assert.match((await running).summary, /Continued/);
     else await assert.rejects(running, { code: 'execution_interrupted' });
     assert.equal(deliveries.length, 1, 'stop sending chunks after the first rejected delivery');

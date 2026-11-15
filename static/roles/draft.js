@@ -257,7 +257,7 @@ function mergeRoleDraft(base, draft, latest, choices = {}) {
 }
 function editableRoleDraft(data, recommend = false) {
   const config = data.configuration;
-  return { enabled: config.enabled, controller: structuredClone(config.controller),
+  return { controller: { role: config.controller.role },
     roles: config.roles.map(role => ({ ...editableRole(role), kind: role.kind,
       ...(recommend && !data.configured ? { harness_ref: { id: data.recommended_backend || 'pi' } } : {}) })),
     skills: structuredClone(data.skill_inputs), required_stages: structuredClone(config.required_stages || []) };

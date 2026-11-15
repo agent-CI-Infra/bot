@@ -105,10 +105,9 @@ function explicitReplan(s:Store,taskId:string) {
 export function assertStageWaits(s:Store,taskId:string,waiting:{stage_id:string;reason:string|null}[]) {
   const task=s.get('SELECT status FROM tasks WHERE id=?',taskId);
   if(task&&['paused','cancelled','superseded'].includes(task.status))stop('task_claim_revoked',task.status==='paused'?'paused':'cancelled',task.status);
-  const hard=waiting.find(wait=>['stage_policy_changed','stage_plan_stale','stage_retry_exhausted','stage_budget_exhausted','project_disabled','role_coordination_disabled','task_inactive'].includes(wait.reason??''));
+  const hard=waiting.find(wait=>['stage_policy_changed','stage_plan_stale','stage_retry_exhausted','stage_budget_exhausted','project_disabled','task_inactive'].includes(wait.reason??''));
   if(!hard)return;
   if(hard.reason==='project_disabled')stop('repository_policy_disabled','cancelled');
-  if(hard.reason==='role_coordination_disabled')stop('role_authority_revoked','paused');
   if(hard.reason==='task_inactive')stop('task_claim_revoked','cancelled');
   stop(hard.reason!,'paused',JSON.stringify(waiting));
 }
@@ -163,7 +162,7 @@ export function reconcileAssignments(s: Store, taskId: string, candidate = lates
     const active = assignments.some(a => a.status === 'running');
     const attempts = stageRuns(s,taskId,plan,stage.stage_id).length;
     const deps = stage.depends_on.filter(id => !passed.has(id));
-    const reason = ['cancelled','superseded','paused'].includes(f.task.status) ? 'task_inactive' : !f.policy?.enabled ? 'project_disabled' : !f.live.enabled ? 'role_coordination_disabled'
+    const reason = ['cancelled','superseded','paused'].includes(f.task.status) ? 'task_inactive' : !f.policy?.enabled ? 'project_disabled'
       : policyChanged || plan.policy_hash !== f.policyHash ? 'stage_policy_changed' : plan.contract_revision !== f.record.revision ? 'stage_plan_stale'
       : passed.has(stage.stage_id) ? null : active ? 'running' : deps.length ? 'dependencies' : attempts >= stage.retry.max_attempts ? 'stage_retry_exhausted' : stage.role_constraints.kinds.includes('observer') && !candidate ? 'candidate_required' : null;
     return {...stage,status:reason ? 'waiting' : passed.has(stage.stage_id) ? 'passed' : 'ready',waiting_reason:reason,waiting_for:deps,attempts,assignments,results:results.filter((r: any) => r.stage_id === stage.stage_id)};

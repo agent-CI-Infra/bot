@@ -150,39 +150,24 @@ test('a past explicit retry does not authorize a later policy change',async t=>{
   assert.throws(()=>f.plan(),{code:'stage_policy_changed',state:'paused'});f.retry();assert.equal(f.plan().revision,2);
 });
 
-test('disabling only coordination after a stage passes pauses every delivery gate and can be retried',async t=>{
+test('retired coordination switches cannot bypass required stages or revoke a verified delivery',async t=>{
   const required=[stage('dev',{writer:true})],f=await fixture(t,{stages:required});const plan=f.plan();await f.writer();
   const candidate=f.records.submit('t',[{kind:'code',reference:'source',version:tree('b'),content:{local_sha:tree('a')}}],[],{}),verdict={outcome:'pass',reason:'verified',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
   traceEvent(f.s,'t','acceptance_started',{candidate_id:candidate.id,source_tree:tree('b'),context:'fresh'});await runRole({...f.spec(),system:'QA verified'},'qa');f.records.decide('t',candidate.id,candidate.revision,verdict,'pr_opened');
-  f.s.run("UPDATE tasks SET phase='publish',result=? WHERE id='t'",JSON.stringify({pr_number:1,sha:tree('a')}));
-  saveConfiguration(f.s,'r',{expected_revision:1,enabled:false,roles:[],required_stages:required},'owner');
-  const expected={code:'role_authority_revoked',state:'paused'},current=()=>latestRoleCandidate(f.s,'t');
-  assert.equal(f.s.get("SELECT enabled FROM policies WHERE repository_id='r'").enabled,1);
-  assert.deepEqual(evaluateRequiredStages(f.s,'t',current()).waiting,[{stage_id:'dev',reason:'role_coordination_disabled'}]);
-  assert.throws(()=>assertRequiredStages(f.s,'t',current()),expected);assert.throws(()=>f.plan(),expected);
-  assert.throws(()=>f.records.stage('t',candidate.id,candidate.revision,verdict),expected);
-  await assert.rejects(evaluateDelivery(f.s,f.spec().task,{},new Redactor(),async()=>{}),expected);
+  const saved=saveConfiguration(f.s,'r',{expected_revision:1,enabled:false,controller:{entries:{development:false}},roles:[],required_stages:required},'owner');
+  assert.equal(saved.enabled,true);assert.equal(saved.controller.entries.development,true);
+  const current=()=>latestRoleCandidate(f.s,'t');assert.equal(evaluateRequiredStages(f.s,'t',current()).satisfied,true);assert.equal(f.plan().revision,plan.revision);
   const github={};let sends=0;const publisher=new Publisher(f.s,github,f.spec().task,async()=>{}),send=async()=>{github.beforeWrite?.();sends++;return {ok:true};};
-  await assert.rejects(publisher.effect('resume','comment',{},send,async()=>null),expected);
-  await assert.rejects(mergeApi(f.s,{id:'owner',role:'project_admin',repositories:['r']},'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:tree('a'),merge_method:'squash'}),expected);
-  const engine=new TaskEngine(f.s,{call:async()=>null});t.after(()=>engine.close());
-  f.s.run("UPDATE tasks SET status='running',claim_token='claim' WHERE id='t'");f.s.run("INSERT INTO task_claims VALUES('t','r','claim','now')");
-  await engine.run('t','claim');assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'paused');
-  assert.equal(f.s.get("SELECT error_code FROM tasks WHERE id='t'").error_code,'role_authority_revoked');
-  const message=explainFailure('role_authority_revoked','paused');assert.equal(message.automatic,false);assert.match(message.action,/恢复角色协调.*重试/);assert.doesNotMatch(message.action,/自动继续/);
-  saveConfiguration(f.s,'r',{expected_revision:2,enabled:true,roles:[],required_stages:required},'owner');
-  new TaskCommands(f.s).api({id:'owner',role:'project_admin',repositories:['r']},'POST',new URL('http://local/api/tasks/t/retry'),{});
-  assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'queued');assert.equal(f.plan().revision,plan.revision);
-  assert.equal(evaluateRequiredStages(f.s,'t',current()).satisfied,true);await publisher.effect('resume','comment',{},send,async()=>null);assert.equal(sends,1);
+  await publisher.effect('resume','comment',{},send,async()=>null);assert.equal(sends,1);
   f.s.run("UPDATE policies SET enabled=0 WHERE repository_id='r'");assert.throws(()=>assertRequiredStages(f.s,'t',current()),{code:'repository_policy_disabled',state:'cancelled'});
 });
 
-test('a running manager preserves role_authority_revoked when coordination is disabled after preflight',async t=>{
+test('a running manager stops when its GitHub read authority is revoked after preflight',async t=>{
   let written;const required=[stage('dev',{writer:true})],f=await fixture(t,{stages:required,handler:body=>{
-    if(body.tools.some(tool=>tool.function.name==='nominate_delivery')){saveConfiguration(f.s,'r',{expected_revision:1,enabled:false,roles:[],required_stages:required},'owner');return call('nominate_delivery',{result_ref:written.reference});}
+    if(body.tools.some(tool=>tool.function.name==='nominate_delivery')){saveConfiguration(f.s,'r',{expected_revision:1,roles:[{role_id:'manager',permissions:{github_issues:'none'}}],required_stages:required},'owner');return call('nominate_delivery',{result_ref:written.reference});}
     return call('finish',{summary:'implemented'});
   }});f.plan();written=await f.writer();
-  await assert.rejects(runTeam(f.spec(),{prepare:async()=>{}}),{code:'role_authority_revoked',state:'paused'});
+  await assert.rejects(runTeam(f.spec(),{prepare:async()=>{}}),{code:'role_authority_revoked',state:'waiting_configuration'});
   assert.equal(f.s.get("SELECT stop_reason FROM task_runs WHERE role='manager'").stop_reason,'role_authority_revoked');
   assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='delivery_nominated'").n,0);
 });

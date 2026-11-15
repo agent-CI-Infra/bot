@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { harness, setup, account, repository } from './helpers.mjs';
+import { harness, setup, account, repository, pinLegacyTaskConfiguration } from './helpers.mjs';
 import { FailureLog } from '../dist/core/log.js';
 import { fail } from '../dist/core/security.js';
 import { agentLoop } from '../dist/agent/loop.js';
@@ -34,6 +34,7 @@ test('an agent that fails keeps its reason in the task log and the stop message,
   const redactor = new Redactor(), secret = 'ghs_' + 'x'.repeat(36); redactor.add(secret);
   const logs = [], workspace = { log: entry => logs.push(entry), call: async (_key, input) => input.type === 'workspace_agent_poll'
     ? { state: 'failed', error: 'pi_execution_failed', detail: `final answer is not JSON: Unexpected token 'S' (token ${secret})`, events: [], offset: 0 } : { written: true, started: true } };
+  pinLegacyTaskConfiguration(h.store, 'agent');
   await assert.rejects(agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='agent'"), workspace, redactor, async () => {}, { mode: 'review' }), error => {
     assert.deepEqual([error.code, error.state], ['execution_interrupted', 'waiting_environment']);
     assert.match(error.detail, /^任务执行进程失败：final answer is not JSON: Unexpected token 'S'/); assert.ok(!error.detail.includes(secret)); return true;

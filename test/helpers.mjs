@@ -8,6 +8,7 @@ import { createControlPlane } from '../dist/server.js';
 import { ProjectService } from '../dist/projects/service.js';
 import { configureDispatch, ruleDecider } from '../dist/dispatch/worker.js';
 import { configureModelRetry } from '../dist/agent/runtime.js';
+import { captureTaskConfiguration, taskConfiguration } from '../dist/tasks/configuration.js';
 
 // A failed model request is retried five times with waits of 1, 3, 9, 27 and 60 seconds; tests keep the schedule in
 // milliseconds so a provider failure fixture ends quickly. Tests that check the waits themselves set their own base.
@@ -94,3 +95,15 @@ export async function saveManager(admin, id, change) {
 }
 // The text a Manager section takes effect with (a repository file, the project's section, or the built-in text).
 export const managerSection = async (admin, id, section) => (await admin(`/api/repositories/${id}/manager`)).value.manager.sections.find(entry => entry.id === section).effective;
+
+// Protocol fixtures for the retained direct executor represent pre-Manager task snapshots, not project defaults.
+// Current/default Manager routing is exercised separately by manager-settings and roles-v2.
+export function pinLegacyTaskConfiguration(store, id) {
+  const tasks = id ? store.all('SELECT * FROM tasks WHERE id=?', id) : store.all('SELECT * FROM tasks');
+  for (const task of tasks) {
+    captureTaskConfiguration(store, task.id);
+    const fixed = taskConfiguration(store, task); if (!fixed) continue;
+    fixed.roles = { ...fixed.roles, enabled: false };
+    store.run('UPDATE task_execution_configs SET snapshot=? WHERE task_id=?', JSON.stringify(fixed), task.id);
+  }
+}
