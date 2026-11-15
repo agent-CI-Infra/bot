@@ -121,6 +121,9 @@ export class Projects {
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'parallel')) this.db.exec('ALTER TABLE projects ADD COLUMN parallel INTEGER NOT NULL DEFAULT 1');
     // applied: the resources the current container was created with, so a changed default shows as pending.
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'applied')) this.db.exec('ALTER TABLE projects ADD COLUMN applied TEXT');
+    // notes_purge: a committed deletion whose notes volume could not be removed owes this cleanup (#774). A deletion the
+    // control plane refused leaves its notes alone, so the row being deleted is not enough to decide.
+    if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'notes_purge')) this.db.exec('ALTER TABLE projects ADD COLUMN notes_purge INTEGER NOT NULL DEFAULT 0');
     this.db.exec('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
     // The last answer of each computer's work volume scan (#671): written by scanStorage, read by the storage page.
     this.db.exec('CREATE TABLE IF NOT EXISTS computer_storage(repository_id TEXT PRIMARY KEY,generation INTEGER NOT NULL,scanned_at TEXT NOT NULL,result TEXT NOT NULL)');
@@ -225,11 +228,32 @@ export class Projects {
     }
     return volume;
   }
+  // #774: a deletion whose notes removal failed leaves the volume under the name this.notesName(repo) derives from the
+  // repository id, with the previous project's notes in the directory it binds. A project that is not live (no row, or a
+  // row a committed deletion left deleted) must never adopt that residue: the volume and its directory go before the first
+  // notes read or write, and a Docker that refuses the volume removal fails the entry instead of serving the old content.
+  async reclaimStaleNotes(repo) {
+    const row = this.get(repo);
+    // A purge is owed only by a committed deletion whose notes removal failed; a deletion the control plane refused keeps
+    // its notes, and a project that failed for another reason keeps real user notes. A repository with no row at all is a
+    // reconnect or a first creation: nothing names those notes as still in use, so they go before the new project reads.
+    if (row && !(row.state === 'deleted' && Number(row.notes_purge) === 1)) return false;
+    const name = this.notesName(repo), volume = await this.docker.request('GET', '/volumes/' + name);
+    if (volume) {
+      if (Object.entries(this.notesLabels(repo)).some(([key, value]) => volume.Labels?.[key] !== value)) throw new ManagerError('resource_ownership_mismatch', 403);
+      try { await this.docker.request('DELETE', '/volumes/' + name); }
+      catch (error) { throw new ManagerError('notes_residue_unclearable', 503); }
+    }
+    await rm(this.notesRoot + '/' + repo, { recursive: true, force: true });
+    if (row) this.db.prepare('UPDATE projects SET notes_purge=0 WHERE repository_id=?').run(repo);
+    return true;
+  }
   async notes(repo, method, name, input = {}) {
     this.validate(repo); if (name !== undefined) { try { noteName(name); } catch { throw new ManagerError('invalid_note_name', 400); } }
     if (!['GET','PUT','DELETE'].includes(method) || method !== 'GET' && name === undefined || Object.keys(input).some(key => key !== 'content')) throw new ManagerError('invalid_notes_request', 400);
     return this.lock(repo, async () => {
       // A page can edit notes before the first boot. Register only the stopped metadata, never provision a computer.
+      await this.reclaimStaleNotes(repo);
       if (!this.get(repo)) this.db.prepare("INSERT INTO projects(repository_id,generation,state,desired) VALUES(?,1,'stopped','stopped')").run(repo);
       await this.notesVolume(repo);
       const notes = new Notes(this.notesRoot + '/' + repo);
@@ -250,6 +274,7 @@ export class Projects {
     if (method !== 'GET' && (!Number.isSafeInteger(input.expected_revision) || input.expected_revision < 0)) throw new ManagerError('invalid_note_revision', 400);
     if (input.actor !== undefined && (typeof input.actor !== 'string' || input.actor.length > 240)) throw new ManagerError('invalid_input', 400);
     return this.lock(repo, async () => {
+      await this.reclaimStaleNotes(repo);
       if (!this.get(repo)) this.db.prepare("INSERT INTO projects(repository_id,generation,state,desired) VALUES(?,1,'stopped','stopped')").run(repo);
       await this.notesVolume(repo); const notes = new Notes(this.notesRoot + '/' + repo);
       try {
@@ -278,6 +303,7 @@ export class Projects {
     if(id!==undefined&&!directories&&method!=='GET'&&(!Number.isSafeInteger(input.expected_revision)||input.expected_revision<1))throw new ManagerError('invalid_note_revision',400);
     if(action==='restore'&&(!Number.isSafeInteger(input.revision)||input.revision<1))throw new ManagerError('invalid_note_revision',400);
     return this.lock(repo,async()=>{
+      await this.reclaimStaleNotes(repo);
       if(!this.get(repo))this.db.prepare("INSERT INTO projects(repository_id,generation,state,desired) VALUES(?,1,'stopped','stopped')").run(repo);
       await this.notesVolume(repo);const tree=new FileTree(this.notesRoot+'/'+repo),actor=input.actor??'console';
       try{
@@ -509,6 +535,7 @@ export class Projects {
     this.validate(repo);
     return this.lock(repo, async () => {
       if (this.get(repo)) return this.get(repo);
+      await this.reclaimStaleNotes(repo);
       this.db.prepare("INSERT INTO projects(repository_id,generation,state,desired,error,started_at) VALUES(?,1,'provisioning','ready',NULL,NULL)").run(repo);
       try { return await this.provision(repo); }
       catch (error) { logFailure(`project ${repo} first provision failed`, error); this.update(repo, 'failed', 'ready', error instanceof ManagerError ? error.message : 'provision_failed'); throw error; }
@@ -635,6 +662,9 @@ export class Projects {
             }
           }
         } else {
+          // #774: re-enabling or resetting a project a committed deletion left behind reclaims the old notes first, so the
+          // new generation cannot read them; a refusal here leaves the row deleted instead of starting on top of the residue.
+          if (['start', 'reset'].includes(action) && project.state === 'deleted') await this.reclaimStaleNotes(repo);
           this.update(repo, action === 'reset' ? 'resetting' : 'recovering', action === 'stop' ? 'stopped' : action === 'delete' ? 'deleted' : 'ready');
           await this.stopAll(repo);
           if (action === 'reset') this.db.prepare('UPDATE projects SET generation=generation+1 WHERE repository_id=?').run(repo);
@@ -647,8 +677,16 @@ export class Projects {
               }
               // Deleting just a computer keeps project notes; only the project-removal flow requests their deletion.
               if (input.request?.delete_notes) {
-                if (await this.notesVolume(repo, false)) await this.docker.request('DELETE', '/volumes/' + this.notesName(repo));
-                await rm(this.notesRoot + '/' + repo, { recursive: true, force: true });
+                try {
+                  if (await this.notesVolume(repo, false)) await this.docker.request('DELETE', '/volumes/' + this.notesName(repo));
+                  await rm(this.notesRoot + '/' + repo, { recursive: true, force: true });
+                  this.db.prepare('UPDATE projects SET notes_purge=0 WHERE repository_id=?').run(repo);
+                } catch (error) {
+                  // The deletion is committed; the volume it could not remove is owed a purge, which the next enable, a
+                  // notes read of the still-deleted project, or the sweep performs (#774).
+                  this.db.prepare('UPDATE projects SET notes_purge=1 WHERE repository_id=?').run(repo);
+                  throw error;
+                }
               }
             }
             const state = action === 'stop' && project.state === 'reset_failed' ? 'reset_failed' : action === 'stop' ? 'stopped' : 'deleted';
@@ -699,7 +737,13 @@ export class Projects {
         // A failed lifecycle action or a runner that cannot be recovered still stops the computer.
         logFailure(`project ${repo} ${action === 'execute' ? input.request.type : action} failed, computer stopped`, error);
         try { await this.stopAll(repo); } catch {}
-        this.update(repo, action === 'reset' ? 'reset_failed' : 'failed', 'stopped', error instanceof ManagerError ? error.message : 'operation_failed');
+        // A deletion that only failed to remove the notes volume stays deleted: the rows and the computer are gone, and the
+        // leftover volume is what #774's reclaim and sweep clean up (#758 already reports it instead of failing the call).
+        // A re-enable that failed before it changed the row (the residue could not be cleared) stays deleted for the same
+        // reason: turning it 'failed' would make the next notes read mistake the residue for a live project's notes.
+        const staysDeleted = action === 'delete' || this.get(repo)?.state === 'deleted';
+        this.update(repo, staysDeleted ? 'deleted' : action === 'reset' ? 'reset_failed' : 'failed',
+          staysDeleted ? 'deleted' : 'stopped', error instanceof ManagerError ? error.message : 'operation_failed');
         this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id);
         throw error;
       }
