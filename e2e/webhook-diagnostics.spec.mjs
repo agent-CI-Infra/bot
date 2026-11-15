@@ -142,14 +142,27 @@ test('webhook list and detail separate reception, signature and processing outco
   const longRow = row('delivery-success');
   await longRow.scrollIntoViewIfNeeded();
   await expect(longRow.locator('.row-title')).toContainText(longName);
-  for (const sel of ['.row-title', '.row-event-outcome']) {
-    const m = await longRow.locator(sel).evaluate(e => ({
-      ws: getComputedStyle(e).whiteSpace,
-      clip: e.scrollWidth > e.clientWidth + 1,
-      overflow: getComputedStyle(e).textOverflow,
-    }));
-    expect(m.ws).toBe('normal');
-    expect(m.clip).toBe(false);
-  }
+  const titleM = await longRow.locator('.row-title').evaluate(e => ({
+    ws: getComputedStyle(e).whiteSpace,
+    clip: e.scrollWidth > e.clientWidth + 1,
+    overflow: getComputedStyle(e).textOverflow,
+  }));
+  expect(titleM.ws).toBe('normal');
+  expect(titleM.clip).toBe(false);
+  // Line-clamp clips vertically, so a scrollWidth check would still pass if the
+  // #798 exception were removed. Assert the computed wrap rules themselves.
+  const outcomeM = await longRow.locator('.row-event-outcome').evaluate(e => {
+    const s = getComputedStyle(e);
+    return {
+      display: s.display,
+      clamp: s.webkitLineClamp,
+      overflow: s.overflow,
+      clipped: e.scrollHeight > e.clientHeight + 1,
+    };
+  });
+  expect(outcomeM.display).toBe('block');
+  expect(outcomeM.clamp).toBe('none');
+  expect(outcomeM.overflow).toBe('visible');
+  expect(outcomeM.clipped).toBe(false);
   await page.screenshot({ path: '.tmp/events-plain-798/events-390.png' });
 });

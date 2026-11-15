@@ -25,8 +25,11 @@ const deliveryEventNames = {
   'check_suite.completed':'检查套件已完成', 'check_run.completed':'检查已完成', 'release.published':'版本已发布',
   'create':'创建引用', 'delete':'删除引用',
   'issue_comment':'Issue 有新评论', 'issue_comment.created':'Issue 有新评论',
+  'issue_comment.edited':'Issue 评论已编辑', 'issue_comment.deleted':'Issue 评论已删除',
   'pull_request_review':'Pull Request 收到检视意见', 'pull_request_review.submitted':'Pull Request 收到检视意见',
-  'pull_request_review_comment':'Pull Request 有行内评论', 'pull_request_review_comment.created':'Pull Request 有行内评论'
+  'pull_request_review.edited':'Pull Request 检视已编辑', 'pull_request_review.dismissed':'Pull Request 检视已撤销',
+  'pull_request_review_comment':'Pull Request 有行内评论', 'pull_request_review_comment.created':'Pull Request 有行内评论',
+  'pull_request_review_comment.edited':'Pull Request 行内评论已编辑', 'pull_request_review_comment.deleted':'Pull Request 行内评论已删除'
 };
 
 function deliveryEventName(route, event){
