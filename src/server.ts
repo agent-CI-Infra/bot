@@ -132,7 +132,9 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   registerKnowledge(sharedManagement,options.githubUrl);
   sharedManagement.register('configuration.pr',new ConfigurationPR(sharedManagement,options.githubUrl));
   const managementApi = new ManagementApi(sharedManagement);
-  const channels = new ChannelService(store, managementApi.agent, { ...options.channels, githubUrl:options.channels?.githubUrl??options.githubUrl, manager:options.channels?.manager??options.projects?.manager??options.engine?.manager, get origin() { return options.channels?.origin || githubLogin.origin || options.publicOrigin; } });
+  // Feishu turns renew a lapsed GitHub proof the way console writes do (#846), with the deployment's current GitHub login.
+  const channels = new ChannelService(store, managementApi.agent, { ...options.channels, githubUrl:options.channels?.githubUrl??options.githubUrl, manager:options.channels?.manager??options.projects?.manager??options.engine?.manager,
+    github: () => githubLogin.identity, get origin() { return options.channels?.origin || githubLogin.origin || options.publicOrigin; } });
   const channelApi = new ChannelApi(channels), channelConnections = new ChannelConnections(channels);
   options.onChannels?.(channels);
   const schedules = new ScheduleService(store, sharedManagement, channels, options.schedules?.clock);

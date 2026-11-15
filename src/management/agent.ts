@@ -11,7 +11,7 @@ import { boundedBatch, chatContextBytes, requestBytes, requestLimit, toolArgumen
 import { managementTools, obj, str, validate } from './catalog.js';
 import { ManagementService, parameterHash } from './service.js';
 import { managementAssistant, serviceRole, serviceRoleModel } from '../service-roles/roles.js';
-import { managementFailure } from './presentation.js';
+import { managementFailure, noProjectsReply } from './presentation.js';
 import { ServiceRepositories, serviceRepositoryTools, serviceMemory, serviceMemoryTools } from '../service-roles/resources.js';
 import { assistantComputerNames, assistantComputerTools, computerInstructions } from '../service-roles/assistant-computers.js';
 import { revision } from '../identity/authorization.js';
@@ -229,7 +229,7 @@ export class ManagementAgent {
       else if(input.command)await execute('management_command',input.command,'direct-command');
       else{
         if(!this.service.projects(actor).length){
-          this.event(id,'reply',{text:'当前账户没有可访问的项目。身份绑定不会增加项目权限；请先在身份与权限页面检查授权，或联系项目管理员。',authority:'current authorization'});
+          this.event(id,'reply',{text:noProjectsReply(this.store,actor.principal_id),authority:'current authorization'});
           await guard();this.store.run("UPDATE management_messages SET state='completed',updated_at=? WHERE id=?",now(),id);this.event(id,'done',{state:'completed'});return;
         }
         // The management assistant is a service role: its own shared model, budget and usage ledger, never a project's.

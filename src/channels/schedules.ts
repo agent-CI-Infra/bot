@@ -210,6 +210,8 @@ export class ChannelSchedules {
   }
   /** The owner's management assistant in a conversation of this timer, under the owner's current authority only. */
   private async personal(row: Row, chat: Row, run: string, prompt: string, guard: () => void): Promise<void> {
+    // A lapsed GitHub proof of the owner is checked before their authority is read (#846).
+    await this.host.renewal([row.owner_id]);
     const owner = this.owner(chat, row.owner_id);
     const actor = restrictActor(this.host.personalActor(owner.principal_id, chat, 'api'), guard), management = this.host.management;
     let conversation = row.conversation_id as string | null;
@@ -235,6 +237,8 @@ export class ChannelSchedules {
   private async group(row: Row, chat: Row, run: string, prompt: string, guard: () => void): Promise<void> {
     const binding = this.host.serviceBindings.active(chat.id);
     if (!binding) return fail(403, 'channel_service_binding_disabled');
+    // The group runs on its grantors' authority: lapsed GitHub proofs are checked first (#846).
+    await this.host.renewal(this.host.serviceBindings.grants(binding).map(g => String(g.grantor_id)));
     const protection = (turn: string, fence: string) => ({ kind: 'channel_schedule', schedule_id: row.id, run_id: run, chat_id: chat.id, binding_id: binding.id,
       binding_revision: binding.revision, turn_id: turn, source_fence: fence });
     // Progress messages (#435) reach the group while the run is live, under the same protection as its result.

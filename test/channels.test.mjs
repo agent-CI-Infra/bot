@@ -13,6 +13,8 @@ const read = (project = '101', task = 'blocked') => ['management_query', { opera
 const readNamed = (done, context) => { const m = /(\d+)\/(\w+)/.exec(String(context.request)); return read(m[1], m[2]); };
 const ask = (project = '101', task = 'blocked') => `看看 ${project}/${task} 任务的进展`;
 const noProjects = '当前账户没有可访问的项目';
+// A GitHub user whose check found no permission is told what GitHub's latest check said (#846).
+const noGitHubPermission = 'GitHub 的最新核验显示，你在已接入的仓库上没有可用的权限';
 import { managerSection } from './helpers.mjs';
 
 test('Feishu verifies raw signatures, decryption and app/tenant before persisting all delivered messages independently of addressing', async t => {
@@ -122,7 +124,7 @@ test('dual-end binding supports optional browser-bound GitHub login; forwarding,
   assert.equal(h.store.get('SELECT count(*) n FROM scoped_grants').n, before);
   const noPermission = await post(h, id, envelope(ask(), { sender: { tenant_key: 'external-tenant', sender_id: { open_id: 'ou_unprivileged' } } }));
   assert.equal((await finished(h, noPermission.value.operation_id)).state, 'completed');
-  await until(() => wire.sent.some(s => JSON.stringify(s.content).includes(noProjects)));
+  await until(() => wire.sent.some(s => JSON.stringify(s.content).includes(noGitHubPermission)));
   assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE channel='im'").n, 0);
   const late = service.bindings.begin({ ...event, actor_id: 'ou_expired' }); service.bindings.associateOAuth(late.challenge, 'late-state');
   await service.bindings.githubAuthenticated('late-state', unprivilegedSession.token);

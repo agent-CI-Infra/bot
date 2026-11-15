@@ -24,6 +24,24 @@ export function verificationExempt(store: Store, principal: string): boolean {
       AND (expires_at IS NULL OR expires_at>?) LIMIT 1`, principal, Date.now());
 }
 
+// Check failures that only a new GitHub sign-in mends: GitHub refused the stored authorization, or it now names someone else.
+const reauthorization = ['github_reauthorization_required', 'github_oauth_failed', 'github_identity_mismatch'];
+/**
+ * Where a principal's GitHub proof stands, for replies outside the console (#846), or null without a GitHub identity.
+ * `reauthorize`: only a new GitHub sign-in proves it again (the authorization was revoked, dropped when the login
+ * configuration changed, or refused by GitHub). `pending`: the latest check could not settle, or none succeeded within the
+ * grants' validity. `checked`: a recent check settled, so missing grants mean GitHub gives no authority there.
+ */
+export function githubProof(store: Store, principal: string): { state: 'reauthorize' | 'pending' | 'checked'; login: string } | null {
+  const identity = store.get(`SELECT status,credentials IS NULL missing,display_name,verified_at,verification_issues FROM external_identities
+    WHERE principal_id=? AND provider='github' ORDER BY status='revoked',verified_at DESC LIMIT 1`, principal);
+  if (!identity) return null;
+  const codes = (JSON.parse(identity.verification_issues ?? '[]') as { code: string }[]).map(issue => issue.code);
+  const state = identity.status === 'revoked' || identity.missing || identity.status === 'pending_verification' && codes.some(code => reauthorization.includes(code)) ? 'reauthorize'
+    : identity.status === 'pending_verification' || identity.verified_at <= Date.now() - derivedGrantValidity ? 'pending' : 'checked';
+  return { state, login: String(identity.display_name) };
+}
+
 export interface GitHubOAuthConfig { clientId: string; clientSecret: string; redirectUri: string; apiUrl?: string; webUrl?: string; applicationType?: 'oauth_app' | 'github_app' }
 export class GitHubIdentity implements InstallationIdentity {
   private refreshing = new Map<string, Promise<void>>();
@@ -172,12 +190,16 @@ export class GitHubIdentity implements InstallationIdentity {
    * wait. Resolves whether a check ran, so that the caller reads the grants again.
    */
   async renewIfLapsed(principal: string): Promise<boolean> {
+    if (!this.lapsed(principal)) return false;
+    await this.renew(principal); return true;
+  }
+  /** Whether renewIfLapsed would check now (or join the check in flight). Feishu turns use it to wait without blocking (#846). */
+  lapsed(principal: string): boolean {
     const identity = this.store.get(`SELECT status,verified_at FROM external_identities WHERE principal_id=? AND provider='github'
       AND status IN ('active','pending_verification') AND credentials IS NOT NULL`, principal), now = Date.now();
     if (!identity || identity.verified_at > now - derivedGrantValidity || verificationExempt(this.store, principal)) return false;
-    if (!this.refreshing.has(principal) && (this.rateLimitedUntil > now ||
-      identity.status !== 'active' && now - (this.finished.get(principal) ?? 0) < retryPause)) return false;
-    await this.renew(principal); return true;
+    return this.refreshing.has(principal) || !(this.rateLimitedUntil > now ||
+      identity.status !== 'active' && now - (this.finished.get(principal) ?? 0) < retryPause);
   }
   private async verifyPermissions(principal: string): Promise<'done' | 'retry'> {
     if (verificationExempt(this.store, principal)) { this.dropDerived(principal); return 'done'; }
