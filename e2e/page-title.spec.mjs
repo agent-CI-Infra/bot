@@ -83,6 +83,31 @@ test('#737 英文界面下页面名与 404 前缀都是英文', async ({ page })
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
 
+test('#737 登录页的标题是界面名，切换语言也不冒充任何控制台页', async ({ page }) => {
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  const { h, password } = await fixture();
+  try {
+    await page.addInitScript(() => localStorage.setItem('launchpad.locale', 'en'));
+    await page.goto(h.admin + '/#/projects');
+    // Before a console page exists the title is the translated chrome name - never the default tab's name.
+    await expect(page.locator('#access')).toBeVisible();
+    await expect(page).toHaveTitle('launchpad Admin');
+    await page.locator('#locale-switch').getByRole('button', { name: '中文', exact: true }).click();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
+    await expect(page).toHaveTitle('launchpad 管理');
+    // Signing out ends the page the reader was on; the sign-in screen is back to the chrome name.
+    await signIn(page, password, zhLogin);
+    await expect(page.locator('#rows')).toContainText('fixture/project-101');
+    await page.evaluate(() => { location.hash = '#/board'; });
+    await expect(page).toHaveTitle('看板' + zh);
+    await page.locator('#logout').click();
+    await expect(page.locator('#access')).toBeVisible();
+    await expect(page).toHaveTitle('launchpad 管理');
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});
+
 test('#737 真实的地址变化把焦点移到新页面标题，同地址重绘不再搬焦点', async ({ page }) => {
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
