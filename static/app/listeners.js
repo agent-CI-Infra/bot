@@ -65,4 +65,4 @@ $('filters').addEventListener('submit', event => { event.preventDefault(); offse
 $('hidden-filter').addEventListener('change', () => { offset = 0; render().catch(error); });
 for (const [id, delta] of [['previous', -50], ['next', 50]]) $(id).addEventListener('click', () => { offset += delta; render().catch(error); });
 document.addEventListener('DOMContentLoaded',()=>start().catch(error),{once:true});
-setInterval(()=>{if(me&&tab==='projects'&&!$('hidden-filter').checked&&!projectRoute()&&!document.querySelector('dialog[open]'))refreshProjectActivity();},5000);
+setInterval(()=>{if(me&&tab==='projects'&&!$('hidden-filter').checked&&!projectRoute()&&!document.querySelector('dialog[open]')&&projectActivityDue())refreshProjectActivity();},5000);

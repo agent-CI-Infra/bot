@@ -64,6 +64,8 @@ async function render(quiet = false) {
   }
   finally { if (request === renderVersion) $('rows').removeAttribute('aria-busy'); }
   if(request!==renderVersion)return;const received=result[installedView ? 'repositories' : endpoint];
+  // #790: a project list that reads again lifts a stop or a delay the five-second task-count poll left behind.
+  if (tab === 'projects' && typeof resetProjectActivityPoll === 'function') resetProjectActivityPoll();
   // #747: the page is the first 50 rows of a 51-row probe; the row beyond the page is the "there is more" signal, and it is
   // never drawn or counted.
   const hasMore=received.length>50, rows=received.slice(0,50);
