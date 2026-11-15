@@ -4,6 +4,7 @@ dialog.wide[open]{display:flex;flex-direction:column}
 .view-head{display:flex;justify-content:space-between;align-items:center;gap:10px 16px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid #e3eaf0}
 .view-head h2{font-size:var(--font-size-3)}.view-head .title-group{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
 .view-error{margin:0;padding:8px 16px;color:#a2292b;background:#fbeaea}.view-error:empty{display:none}
+.view-warning{margin:0;padding:8px 16px;color:#7a4a00;background:#fff4e0}.view-warning:empty{display:none}
 .button-link{display:inline-flex;align-items:center;min-height:var(--control-min);padding:6px 12px;border:1px solid var(--color-border);border-radius:var(--radius-2);color:var(--color-text);background:var(--color-surface);font-weight:600;text-decoration:none;white-space:nowrap}
 .task-layout{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,380px)}
 .task-picker{flex:1;min-height:0;overflow:auto;padding:16px}.task-picker>.muted{margin:0 0 12px}.task-choice-list{display:grid;gap:8px;max-width:900px;margin-bottom:12px}
