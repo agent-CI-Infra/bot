@@ -81,7 +81,10 @@ test('#641 长视口与短视口（含 768×432 的 250% 缩放）下面板四�
       return { viewport: { width: innerWidth, height: innerHeight }, win, header, logout, account, field, send,
         hitsHeader: overlap(win, header), hitsLogout: overlap(win, logout), hitsAccount: overlap(win, account) };
     });
-    for (const [width, height] of [[1440, 900], [1024, 900], [768, 900], [510, 844], [390, 844], [768, 432], [510, 410], [390, 500]]) {
+    // 320×568, 390×600, 360×640 are the band where the viewport is taller than 560px but the clamped panel is not: the
+    // compact layout used to hang on the viewport height alone, so the composer overflowed the box and the send button
+    // ended up outside both the panel and the screen (#641 review).
+    for (const [width, height] of [[1440, 900], [1024, 900], [768, 900], [510, 844], [390, 844], [768, 432], [510, 410], [390, 500], [320, 568], [390, 600], [360, 640]]) {
       await page.setViewportSize({ width, height });
       // The panel follows a viewport change the way a reader resizing a window would see it; measure once the box and the
       // composer have stopped moving, so a frame in the middle of that resize cannot produce a stray reading.
@@ -106,6 +109,16 @@ test('#641 长视口与短视口（含 768×432 的 250% 缩放）下面板四�
       expect(m.field.bottom).toBeLessThanOrEqual(m.win.bottom + 0.5);
       expect(m.send.height).toBeGreaterThanOrEqual(30);
       expect(m.send.bottom).toBeLessThanOrEqual(m.win.bottom + 0.5);
+      // The box can be the right size while the composer is not reachable: a control under the fixed bottom bar or the
+      // status bar still fails the reader. Its own centre must hit the button.
+      const hit = await page.evaluate(() => {
+        const win = document.getElementById('management-chat');
+        const send = [...win.querySelectorAll('button')].find(node => node.textContent.trim() === '发送');
+        const r = send.getBoundingClientRect();
+        const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return { tag: at ? at.tagName : null, inside: !!(at && send.contains(at)) };
+      });
+      expect(hit.inside).toBe(true);
     }
     // The corner glyph is the resize grip, not decoration: it keeps a stated name at every width.
     await expect(page.locator('#management-chat .management-size-handle')).toHaveAccessibleName('调整管理助手窗口大小');
