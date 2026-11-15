@@ -58,6 +58,11 @@ test('a manager read that fails keeps the last snapshot and says so; a recovery 
   assert.equal(project(stale, '101').manager.files.count, 4, 'and the manager usage of the project stays');
   assert.deepEqual(stale.alerts.map(alert => [alert.where, alert.stale]), [['manager', true]], 'the disk alert stays, marked stale');
   assert.equal(state.reads, 2);
+  // A project administrator gets the same failure state and read time, without the platform totals (#793 review).
+  const memberView = await report.api({ id: 'm', role: 'project_admin', repositories: ['101'] }, 'GET', '/api/storage');
+  assert.equal(memberView.manager_error, 'manager_unavailable', 'the failure is visible to a project administrator');
+  assert.equal(memberView.manager_read_at, first.manager_read_at, 'and so is the time of the last successful read');
+  assert.equal(memberView.totals, undefined, 'a project administrator still has no platform totals');
 
   // The manager comes back with different numbers: the error clears and the figures move.
   state.error = null;
@@ -112,4 +117,11 @@ test('the storage page says the manager read failed and marks the alert it kept'
   const fresh = textOf(page.$('settings-panel'));
   assert.doesNotMatch(fresh, /manager 读取失败/);
   assert.doesNotMatch(fresh, /可能过期/);
+  // Never read: there is no earlier snapshot to keep, so the page must not claim one was.
+  view = { refreshed_at: '2026-11-15T08:10:00.000Z', manager_read_at: null, manager_error: 'manager_unavailable', projects: [], alerts: [] };
+  await page.run('renderSettings(renderVersion)');
+  const never = textOf(page.$('settings-panel'));
+  assert.match(never, /还没有读到过 manager 的数字/, 'the never-read state says there are no numbers yet');
+  assert.doesNotMatch(never, /上次读取于/, 'it does not claim a previous read time');
+  assert.doesNotMatch(never, /保留上次结果/, 'and it does not claim it kept results');
 });
