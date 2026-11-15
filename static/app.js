@@ -3,6 +3,7 @@
  * app/scope.js
  * app/addresses.js
  * app/api.js
+ * app/poll.js
  * app/links.js
  * app/states.js
  * app/delivery.js
