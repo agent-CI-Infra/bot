@@ -1268,3 +1268,51 @@ test('installCodex falls back to deterministic release URL when GitHub API is ra
   assert.equal(statSync(join(root, 'claude_code', '2.1.319', 'manifest.json')).mode & 0o777, 0o644);
   assert.equal(statSync(join(root, 'node')).mode & 0o777, 0o755);
 });
+
+test('install saves retain_count only after it succeeds, and a later prune without the field keeps using it', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-tools-retain-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const upstream = await startMockToolUpstream(t, 'x64');
+  const tools = new AgentToolManager({ volumeRoot: root, containerRoot: '/opt/agent-tools', arch: 'x64', sources: upstream.sources });
+  const store = new Store(':memory:', randomBytes(32)); t.after(() => store.close());
+  const superUser = { id: 'u-super', role: 'super_admin', repositories: [] };
+  const installed = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.166.0', retain_count: 2 });
+  assert.equal(installed.status.retain_count, 2, 'the install response reports the value it saved');
+  assert.equal((await agentToolsApi(store, tools, superUser, 'GET', '/api/agent-tools', {})).retain_count, 2);
+  // Installs that omit the field keep the saved default; a prune that omits it prunes to 2, not to the built-in 3.
+  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.167.0' });
+  await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.165.0' });
+  const pruned = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/prune', { cli: 'codex' });
+  assert.deepEqual(pruned.pruned.codex, ['0.165.0']);
+  assert.equal(pruned.status.retain_count, 2);
+});
+
+test('a failed install or prune never changes the saved retain_count', async t => {
+  const store = new Store(':memory:', randomBytes(32)); t.after(() => store.close());
+  const superUser = { id: 'u-super', role: 'super_admin', repositories: [] };
+  const failing = { status: () => ({ clis: {} }),
+    install: async () => { throw new TaskError('agent_tool_invalid'); },
+    prune: async () => { throw new TaskError('agent_tool_invalid'); } };
+  await assert.rejects(agentToolsApi(store, failing, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.166.0', retain_count: 2 }),
+    { status: 400, code: 'agent_tool_invalid' });
+  assert.equal(store.get('SELECT value FROM settings WHERE key=?', 'agent_tools.retain_count'), undefined);
+  await assert.rejects(agentToolsApi(store, failing, superUser, 'POST', '/api/agent-tools/prune', { retain_count: 1 }),
+    { status: 400, code: 'agent_tool_invalid' });
+  assert.equal(store.get('SELECT value FROM settings WHERE key=?', 'agent_tools.retain_count'), undefined, 'a failed prune leaves no saved count behind');
+  assert.equal((await agentToolsApi(store, failing, superUser, 'GET', '/api/agent-tools', {})).retain_count, 3);
+});
+
+test('a failed prune that finishes after a successful install does not overwrite the saved count', async t => {
+  const store = new Store(':memory:', randomBytes(32)); t.after(() => store.close());
+  const superUser = { id: 'u-super', role: 'super_admin', repositories: [] };
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const tools = { status: () => ({ clis: {} }),
+    install: async () => ({ installed: { cli: 'codex', version: '0.166.0' }, compatible: true, pruned: { claude_code: [], codex: [] }, protected_invalid: [] }),
+    prune: async () => { await gate; throw new TaskError('agent_tool_invalid'); } };
+  const pending = agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/prune', { retain_count: 1 });
+  const installed = await agentToolsApi(store, tools, superUser, 'POST', '/api/agent-tools/install', { cli: 'codex', version: '0.166.0', retain_count: 2 });
+  assert.equal(installed.status.retain_count, 2);
+  release();
+  await assert.rejects(pending, { status: 400, code: 'agent_tool_invalid' });
+  assert.equal(store.get('SELECT value FROM settings WHERE key=?', 'agent_tools.retain_count').value, '2');
+});
