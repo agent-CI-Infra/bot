@@ -145,6 +145,8 @@ function fitManagementWindow(chat) {
   const margin = innerWidth <= 600 ? 10 : 24;
   const header = document.querySelector('body > header')?.getBoundingClientRect().height || 0;
   const bar = document.querySelector('.console-mobile-nav');
+  // The bar is measured as it is right now: shell.css hides it only on a short phone (≤767x560) while the floating panel
+  // is up, and that is why the fit below runs again once the window is visible (#641 F5).
   const barHeight = bar && getComputedStyle(bar).display !== 'none' ? bar.getBoundingClientRect().height : 0;
   // A short viewport keeps the panel under the header and above the bar even when that leaves little height: at
   // 250% zoom (768×432 CSS) the panel used to reach 24px and sit 40px under the 64px top bar. The max-height media query
@@ -428,6 +430,9 @@ async function openManagementChat(projectId = null, { mode = 'floating' } = {}) 
   const version = ++chat.openVersion;
   setManagementPresentation(chat, mode);
   chat.window.hidden = false; chat.launcher.hidden = true; chat.launcher.setAttribute('aria-expanded', 'true'); chat.unread = false;
+  // The presentation was set while the window was still hidden, so the bar it takes off screen was still measured: fit
+  // again now that the window is visible (#641 F5).
+  if (mode === 'floating') chat.updateViewport();
   const focusAtOpen = document.activeElement;
   const activity = (active, received = false) => {
     if (managementChat !== chat) return;
