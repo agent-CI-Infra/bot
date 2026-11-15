@@ -28,6 +28,13 @@ async function fixture() {
     const body = JSON.parse(Buffer.concat(chunks).toString()), accepting = body.tools.some(t => t.function.name === 'submit_acceptance');
     requests.push({ accepting, body });
     const names = body.messages.filter(m => m.role === 'assistant').flatMap(m => m.tool_calls || []).map(c => c.function.name);
+    if (body.tools.some(t => t.function.name === 'delegate_role')) {
+      const results = body.messages.filter(m => m.role === 'tool').map(m => { try { return JSON.parse(m.content); } catch { return {}; } });
+      const ref = results.find(result => result.result_ref)?.result_ref;
+      if (!ref) return send(res, call('delegate_role', { role: 'dev', purpose: 'Produce the observed report', refs: [JSON.parse(body.messages[1].content).task_ref] }, 'delegate-report'));
+      if (!names.includes('read_task_record')) return send(res, call('read_task_record', { ref }, 'read-report'));
+      return send(res, call('nominate_delivery', { result_ref: ref }, 'nominate-report'));
+    }
     if (accepting) {
       startedQA(); await qaGate;
       if (!names.includes('read_file')) return send(res, call('read_file', { path: 'report.md' }, 'qa-read'));
@@ -65,7 +72,7 @@ async function fixture() {
     expect((await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.value.model.id, development_enabled: true })).status).toBe(200);
     const roles = (await admin('/api/repositories/101/roles')).value;
     expect((await admin('/api/repositories/101/roles', 'PUT', { expected_revision: roles.revision, enabled: false,
-      roles: [{ role_id: 'qa', harness_ref: { id: 'native' } }] })).status).toBe(200);
+      roles: ['manager', 'dev', 'qa'].map(role_id => ({ role_id, harness_ref: { id: 'native' } })) })).status).toBe(200);
     return { h, admin, password, requests, qaStarted, releaseQA, close,
       run() { advance = true; engine.tick(); return Promise.all(engine.active.values()); } };
   } catch (error) { await close(); throw error; }
@@ -108,7 +115,8 @@ for (const width of [1440, 390]) test(`a new report survives pause/retry and sho
     await expect(dialog).toContainText('没有写到 GitHub');
     await expect(dialog.getByRole('heading', { name: '任务结果', exact: true })).toBeVisible();
     await expect(dialog.getByRole('heading', { name: '开发结果', exact: true })).toHaveCount(0);
-    await expect(dialog.locator('.task-execution')).toContainText('实际 Agent 和模型以运行记录为准');
+    await expect(dialog.locator('.task-execution')).toContainText('主控 Manager');
+    expect(f.h.store.all('SELECT DISTINCT role FROM task_runs WHERE task_id=? AND role IS NOT NULL ORDER BY role', id).map(row => row.role)).toEqual(['dev', 'manager', 'qa']);
     await expect(dialog.locator('.task-execution')).not.toContainText('Pi 进程');
     const result = (await f.admin('/api/tasks/' + id)).value.task;
     expect(result.structured.acceptance.candidate_id).toBe(candidate.id);
