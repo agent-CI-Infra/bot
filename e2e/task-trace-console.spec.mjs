@@ -71,7 +71,12 @@ test('a log outage keeps readable evidence, while a revoked task read clears all
     await expect(page.getByRole('heading', { name: '任务暂不可访问', exact: true })).toBeVisible();
     await expect(page.locator('#timeline .step')).toHaveCount(0); await expect(page.locator('#task-side')).toBeEmpty();
     await page.unroute('**/api/tasks/trace-page');
-    // The same open dialog recovers on its regular poll, rebuilding logs and the complete action bar.
+    // A terminal answer ends the poll, so nothing is read again until the person asks for it.
+    let reads = 0; page.on('request', request => { if (new URL(request.url()).pathname === '/api/tasks/trace-page') reads++; });
+    await page.waitForTimeout(6500);
+    expect(reads, 'a terminal read failure must not poll again').toBe(0);
+    // The explicit read in the same open dialog rebuilds the logs and the complete action bar.
+    await page.getByRole('button', { name: '重新读取', exact: true }).click();
     await expect(page.locator('#timeline .step')).toHaveCount(100, { timeout: 10000 });
     await expect(page.getByRole('button', { name: '刷新任务', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '重试', exact: true })).toBeVisible();
