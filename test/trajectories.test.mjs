@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../dist/storage/database.js';
@@ -256,6 +256,35 @@ test('a cleanup whose file cannot be removed still deletes the entry, and an ent
   assert.equal(store.get("SELECT count FROM trajectory_usage WHERE repository_id='103' AND kind='files'").count, 0, 'its totals are taken back');
   assert.equal(store.get('SELECT count(*) n FROM trajectory_files WHERE id=?', kept.split(':')[0]).n, 1, 'other entries are untouched');
   assert.equal(store.trajectories.sweepOrphans(), 0, 'a second pass finds nothing');
+});
+
+test('the orphan sweep leaves the entries retention expired on purpose, and their totals', async t => {
+  const { directory, path } = database(t), store = new Store(path, key); t.after(() => store.close());
+  const scope = runScope('101', 't', 'run-e'), ref = store.trajectories.append(scope, 'log', 'l', { text: 'kept' });
+  store.trajectories.close(scope.key);
+  const entry = fileOf(store, ref);
+  // Retention marks an ended task's entry expired and then removes its file on purpose (#671); the entry stays, and a
+  // ref of it reads as expired instead of running the work again.
+  store.trajectories.expire([store.get('SELECT * FROM trajectory_files WHERE id=?', entry.id)]);
+  await store.trajectories.deleted({ id: entry.id, path: entry.path });
+  const expired = store.get("SELECT * FROM trajectory_usage WHERE repository_id='101' AND kind='expired'");
+  assert.equal(existsSync(join(directory, 'trajectories', entry.path)), false, 'the file is gone by choice, not behind the store');
+  assert.equal(store.trajectories.sweepOrphans(), 0, 'an expired entry has no file on purpose, so it is not an orphan');
+  assert.ok(store.get('SELECT expired_at FROM trajectory_files WHERE id=?', entry.id).expired_at, 'its entry stays: a ref of it reads as expired');
+  assert.deepEqual(store.get("SELECT * FROM trajectory_usage WHERE repository_id='101' AND kind='expired'"), expired, 'its expired totals are not taken back a second time');
+});
+
+test('removing a project removes the conversation turn files under conversations/', t => {
+  const { directory, path } = database(t), store = new Store(path, key); t.after(() => store.close());
+  const scope = runScope('101', 't', 'run-v'); store.trajectories.append(scope, 'log', 'l', {}); store.trajectories.close(scope.key);
+  const turn = store.trajectories.scopeOf({ id: 'turn-1', conversation_id: 'c1', repository_id: '101' });
+  store.trajectories.append(turn, 'log', 'l', { text: 'hello' }); store.trajectories.close(turn.key);
+  const conversation = join(directory, 'trajectories', 'conversations', 'c1');
+  assert.ok(existsSync(join(conversation, 'turn-1.jsonl')), 'a conversation turn is written under conversations/<conversation>/');
+  store.trajectories.remove({ repository_id: '101' });
+  assert.equal(store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 0);
+  assert.throws(() => statSync(join(directory, 'trajectories', '101')));
+  assert.equal(existsSync(conversation), false, 'the project deletion takes its conversation turn files with it');
 });
 
 test('trajectory lookups use their indexes', t => {
