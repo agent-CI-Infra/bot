@@ -67,7 +67,9 @@ test('the user list is one table: local, GitHub and both, with the binding state
     await expect(row('mike').getByRole('link', { name: '详情', exact: true })).toBeVisible();
     await expect(row('mike').getByRole('button', { name: '删除', exact: true })).toBeVisible();
 
-    // At desktop width the table fits its card: the wrapper has no horizontal overflow to scroll.
+    // The desktop reading and its screenshot are both taken at 1440, the width the file is named after.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(row('mike')).toBeVisible();
     const desktop = await widths(page);
     expect(desktop, 'desktop keeps the table in a wrapper').not.toBeNull();
     expect(desktop.scroll, 'the desktop table fits its card').toBeLessThanOrEqual(desktop.client + 1);
@@ -80,9 +82,23 @@ test('the user list is one table: local, GitHub and both, with the binding state
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       const scrolls = await widths(page);
       expect(scrolls, `${width}px keeps the table in a wrapper`).not.toBeNull();
-      // A narrow viewport scrolls the table inside its wrapper; the page itself never scrolls sideways.
-      expect(scrolls.scroll).toBeGreaterThanOrEqual(scrolls.client);
-      if (width < 760) expect(await panel.getByRole('link', { name: '详情', exact: true }).first().isVisible()).toBe(true);
+      if (width >= 760) {
+        // 768 still draws the table, wider than its card: the wrapper is the element that scrolls, and its last cell
+        // (the actions column with 删除) can be brought into view without moving the page sideways.
+        expect(scrolls.scroll, 'the 768 table overflows its card').toBeGreaterThan(scrolls.client);
+        const moved = await page.evaluate(() => {
+          const wrap = document.querySelector('#settings-panel .rule-table-wrap');
+          wrap.scrollLeft = wrap.scrollWidth;
+          return { wrap: wrap.scrollLeft, page: document.documentElement.scrollLeft };
+        });
+        expect(moved.wrap, 'the wrapper scrolls sideways').toBeGreaterThan(0);
+        expect(moved.page, 'the page itself does not').toBe(0);
+        await expect(table.getByRole('row').filter({ hasText: 'mike' }).getByRole('button', { name: '删除', exact: true })).toBeVisible();
+      } else {
+        // Below 760 the rows are cards: nothing overflows, so there is nothing to scroll inside the wrapper.
+        expect(scrolls.scroll, `${width}px cards fit their card`).toBeLessThanOrEqual(scrolls.client + 1);
+        expect(await panel.getByRole('link', { name: '详情', exact: true }).first().isVisible()).toBe(true);
+      }
       await page.screenshot({ path: resolve(output, `after-${width}.png`), fullPage: true });
     }
     // 200% zoom of a 1440px window is a 720 CSS px viewport: the card layout, with 详情 still reachable.
