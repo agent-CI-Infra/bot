@@ -84,8 +84,19 @@ export class ProjectService {
       try { await step; } finally { this.working.delete(repo.id); }
     }
   }
+  /** True while a committed deletion of this repository never got its notes volume removed (#771). */
+  private notesUnreclaimed(id: string): boolean {
+    return !!this.store.get(`SELECT 1 FROM audit f WHERE f.repository_id=? AND f.action='repository.notes_removal_failed'
+      AND NOT EXISTS (SELECT 1 FROM audit r WHERE r.repository_id=f.repository_id AND r.action='repository.notes_volume_reclaimed')`, id);
+  }
   private async reconcileProject(repo: Row): Promise<void> {
     try {
+      // The repository is connected again while the notes volume of the project it used to be is still there: the old
+      // notes must never be readable by the new project, so the volume goes before anything can start against it (#771).
+      if (this.notesUnreclaimed(repo.id)) {
+        await this.reclaimNotes(repo.id);
+        this.store.audit('system', 'repository.notes_volume_reclaimed', repo.id, repo.id);
+      }
       let state = await this.manager.call('GET', '/v1/projects/' + repo.id);
       if (this.removing.has(repo.id)) return;
       if (!state && repo.enabled) state = await this.manager.call('PUT', '/v1/projects/' + repo.id);

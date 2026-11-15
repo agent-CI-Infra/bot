@@ -551,7 +551,9 @@ export class Projects {
     this.validate(repo);
     return this.lock(repo, async () => {
       const existing = this.get(repo);
-      if (existing && existing.state !== 'deleted') return existing;
+      // A project on its way out (`desired` deleted, whether the row still says deleted or failed) is not a running
+      // project: connecting the repository again starts a new one, and the old notes must not be read by it.
+      if (existing && existing.desired !== 'deleted') return existing;
       // A deletion that committed but could not remove its notes volume still owes that cleanup (#774).
       await this.reclaimStaleNotes(repo);
       if (existing) {

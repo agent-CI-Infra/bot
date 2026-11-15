@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { managerFixture } from './project-manager-fixture.mjs';
 import { harness, setup, account, repository } from './helpers.mjs';
 
@@ -13,11 +15,11 @@ async function project(h, f) {
   await repository(admin, a.id, '101');
   await f.projects.register('101');
   await f.projects.notes('101', 'PUT', 'repository.md', { content: 'keep-101' });
-  return admin;
+  return { admin, a };
 }
 
 test('a notes volume a committed deletion could not remove is found by one reconciliation pass and deleted on retry', async t => {
-  const f = await managerFixture(t), h = await harness(t, f.manager), admin = await project(h, f);
+  const f = await managerFixture(t), h = await harness(t, f.manager), { admin } = await project(h, f);
   // The manager cannot delete the volume: the deletion still commits (logical delete) and records the intent.
   f.docker.failVolume = true;
   assert.equal((await remove(admin, '101')).status, 200, 'a volume the manager cannot delete does not fail the deletion');
@@ -38,7 +40,7 @@ test('a notes volume a committed deletion could not remove is found by one recon
 });
 
 test('unreclaimed notes volumes are counted in /readyz and fail it above the threshold', async t => {
-  const f = await managerFixture(t), h = await harness(t, f.manager, { notesOrphanThreshold: 0 }), admin = await project(h, f);
+  const f = await managerFixture(t), h = await harness(t, f.manager, { notesOrphanThreshold: 0 }), { admin } = await project(h, f);
   f.docker.failVolume = true;
   assert.equal((await remove(admin, '101')).status, 200, 'the deletion is still reported as committed');
   assert.ok(f.docker.volumes.has(f.projects.notesName('101')), 'the volume stays behind');
@@ -57,7 +59,7 @@ test('unreclaimed notes volumes are counted in /readyz and fail it above the thr
 });
 
 test('a trajectory directory no repository row claims is reported as an orphan', async t => {
-  const f = await managerFixture(t), h = await harness(t, f.manager), admin = await project(h, f);
+  const f = await managerFixture(t), h = await harness(t, f.manager), { admin } = await project(h, f);
   const { mkdirSync } = await import('node:fs');
   mkdirSync(h.store.trajectories.root + '/999', { recursive: true });
   const ready = await fetch(h.admin + '/readyz'), value = await ready.json();
@@ -67,20 +69,25 @@ test('a trajectory directory no repository row claims is reported as an orphan',
 });
 
 test('a repository connected again starts from empty notes even when the old volume outlived its deletion', async t => {
-  const f = await managerFixture(t), h = await harness(t, f.manager), admin = await project(h, f);
+  const f = await managerFixture(t), h = await harness(t, f.manager), { admin, a } = await project(h, f);
   // The deletion left the volume behind, and the repository is connected again: the old notes must not be readable.
   f.docker.failVolume = true;
   assert.equal((await remove(admin, '101')).status, 200);
   assert.ok(f.docker.volumes.has(f.projects.notesName('101')), 'the old volume is still there');
   f.docker.failVolume = false;
-  await f.projects.register('101');
-  assert.equal(f.docker.volumes.has(f.projects.notesName('101')), false, 'connecting again removed the stale volume first');
-  const notes = await f.projects.notes('101', 'GET', undefined, undefined).catch(error => error);
-  assert.ok(notes === undefined || notes?.files === undefined || Array.isArray(notes.files === undefined ? notes : notes.files), 'the old notes are not served');
+  // The repository is connected again: the control plane registers the project again and reconciles it, which reclaims
+  // the stale notes volume before the project can start against it.
+  await repository(admin, a.id, '101');
+  await h.projects.reconcile();
+  // The volume the project gets is a fresh one: the stale volume was reclaimed before it could be mounted, so nothing the
+  // old project wrote is readable and the notes directory starts empty.
+  await assert.rejects(readFile(join(f.projects.notesRoot, '101', 'repository.md')), /ENOENT/, 'the old notes file is gone');
+  const listed = await f.projects.notes('101', 'GET', undefined, {});
+  assert.deepEqual(listed.files ?? listed, [], 'the reconnected project starts with empty notes');
 });
 
 test('a post-commit cleanup failure is audited for projects and conversations alike, and never escapes', async t => {
-  const f = await managerFixture(t), h = await harness(t, f.manager), admin = await project(h, f);
+  const f = await managerFixture(t), h = await harness(t, f.manager), { admin } = await project(h, f);
   const results = h.store.trajectories.results, realRemove = results.remove.bind(results);
   results.remove = () => { throw new Error('injected_cleanup_failure'); };
   t.after(() => { results.remove = realRemove; });
