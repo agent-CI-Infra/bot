@@ -66,3 +66,61 @@ test('390 下视图名与未保存状态同样在工具栏里，筛选面板关�
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
+
+// #482 review: on a narrow phone the unsaved state next to the selector used to eat the selector's own width — at 320
+// it collapsed to 18px so the view name could not be read, and the save action overlapped the `⋯` button by 22px, so
+// the right part of "保存视图" opened the view menu instead of saving. Reading the active view and saving it must both
+// work with nothing overlapping at 320 and 390.
+test('320/390 未保存态：视图名读得到，「保存视图」与「更多视图操作」不重叠', async ({ page }) => {
+  const { h, admin, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 }); await login(page, h.admin, password);
+    // Editing a filter is what turns a saved view into an unsaved one; the narrow layout must then still show it.
+    await page.getByLabel('工作类型', { exact: true }).selectOption('review.issue');
+    await expect(page.locator('#board-view-state')).toHaveText('未保存');
+    for (const [width, height] of [[320, 800], [390, 844]]) {
+      await page.setViewportSize({ width, height });
+      await expect(page.locator('#board-view-state')).toBeVisible();
+      await expect(page.getByLabel('视图', { exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: '保存视图', exact: true })).toBeVisible();
+      const m = await page.evaluate(() => {
+        const box = node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }; };
+        const overlap = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+        const select = document.getElementById('board-view-select');
+        const save = document.getElementById('board-save');
+        const more = document.querySelector('#board-view-menu .board-menu-toggle');
+        const style = getComputedStyle(select), canvas = document.createElement('canvas'), ctx = canvas.getContext('2d');
+        ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+        const selected = select.options[select.selectedIndex];
+        const name = selected ? selected.text : '';
+        const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+        const saveBox = box(save);
+        const hit = (fx) => { const e = document.elementFromPoint(saveBox.left + saveBox.width * fx, saveBox.top + saveBox.height / 2); return e ? (e.id || e.tagName.toLowerCase()) : null; };
+        return { select: box(select), save: saveBox, more: box(more), name, textWidth: ctx.measureText(name).width, padding,
+          overlaps: overlap(box(select), box(more)) || overlap(saveBox, box(more)),
+          hitAtSaveCentre: hit(0.5), hitAtSaveRight: hit(0.95), docWidth: document.documentElement.scrollWidth, innerWidth };
+      });
+      // The view name has to fit inside the selector: its text plus the control's own padding and its arrow.
+      expect(m.select.width - m.padding - 16).toBeGreaterThanOrEqual(m.textWidth);
+      expect(m.select.width).toBeGreaterThanOrEqual(110);
+      // Neither the selector nor the save action may sit under the `⋯` button: both must be clickable where they show.
+      expect(m.overlaps).toBe(false);
+      expect(m.hitAtSaveCentre).toBe('board-save');
+      expect(m.hitAtSaveRight).toBe('board-save');
+      expect(m.docWidth).toBeLessThanOrEqual(m.innerWidth);
+    }
+    // The same collision appears at 768 in the clean state (the selector's right edge ran 4px under `⋯`).
+    await page.setViewportSize({ width: 768, height: 900 });
+    await page.getByRole('button', { name: '保存视图', exact: true }).click().catch(() => {});
+    await expect(page.locator('#board-view-state')).toBeHidden();
+    await page.waitForTimeout(300);
+    const clean = await page.evaluate(() => {
+      const box = node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; };
+      const overlap = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+      const select = document.getElementById('board-view-select');
+      const more = document.querySelector('#board-view-menu .board-menu-toggle');
+      return { selects: box(select), more: box(more), overlaps: overlap(box(select), box(more)) };
+    });
+    expect(clean.overlaps).toBe(false);
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});
