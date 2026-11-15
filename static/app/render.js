@@ -83,7 +83,7 @@ async function render(quiet = false) {
   // The probe row is part of the signature: when the 51st row appears or goes, only `next` changes, and a quiet refresh
   // that compared the drawn rows alone would return early and leave the pager stale (#747).
   const signature=tab+'\n'+(hiddenView?'hidden\n':'')+params+'\n'+String(hasMore)+'\n'+JSON.stringify(rows)+'\n'+JSON.stringify(pendingRepositories)+'\n'+String(!!pendingRepositoriesError);if(quiet&&signature===listSignature)return;listSignature=signature;
-  const lines=[]; $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目${pendingRepositories.length?`，${pendingRepositories.length} 个待超级管理员启动`:pendingRepositoriesError?'，等待启动的仓库暂时无法读取':''}` : `${rows.length} 条记录`;
+  const lines=[]; $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条事件` : hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目${pendingRepositories.length?`，${pendingRepositories.length} 个待超级管理员启动`:pendingRepositoriesError?'，等待启动的仓库暂时无法读取':''}` : `${rows.length} 条记录`;
   const count = $('count'); if (count) count.title = count.textContent;
   $('previous').disabled = offset === 0; $('next').disabled = !hasMore; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
@@ -92,13 +92,17 @@ async function render(quiet = false) {
       line.dataset.deliveryKey = String(row.delivery_id || ''); line.dataset.deliveryRecord = String(row.id);
       line.dataset.deliverySource = row.source?.reference || 'deliveries:' + row.id;
     }
-    const name = taskTab ? `${row.kind === 'development.pr' ? '跟进 ' : ''}${objectLabel(row)} · ${row.full_name || '仓库 ' + row.repository_id}` : (tab==='events'?(row.full_name?row.full_name+' · '+row.route:row.route):row.full_name) || row.name || row.username || row.model_name || row.summary || row.route || '未知事件';
-    const heading = element('strong', name); heading.title = name; heading.classList.add('row-title'); content.append(heading);
+    const eventLabel = tab==='events' ? deliveryEventName(row.route, row.event) : '';
+    const name = taskTab ? `${row.kind === 'development.pr' ? '跟进 ' : ''}${objectLabel(row)} · ${row.full_name || '仓库 ' + row.repository_id}` : (tab==='events'?(row.full_name?row.full_name+' · '+eventLabel:eventLabel):row.full_name) || row.name || row.username || row.model_name || row.summary || row.route || '未知事件';
+    const heading = element('strong', name); heading.title = tab==='events' ? [row.full_name, row.route || row.event].filter(Boolean).join(' · ') || name : name; heading.classList.add('row-title'); content.append(heading);
     if (tab === 'projects' && !hiddenView && row.registered !== false) content.append(consoleLink(`#/projects/${row.id}/overview`, '项目总览', '查看工作进展与待处理事项'));
     if (tab === 'events') {
-      // The delivery ID and the archive reference are the two handles a maintainer copies when checking GitHub's own log.
-      content.append(element('p', `${timestamp(row.received_at)} · ${row.event || '未知事件'} · 来源 ${line.dataset.deliverySource}`));
-      const delivery = element('code', String(row.delivery_id || '')); delivery.dataset.deliveryId = ''; delivery.title = 'GitHub delivery ID'; content.append(delivery);
+      content.append(element('p', timestamp(row.received_at) || '', 'row-event-time'));
+      const tech = element('details', '', 'row-tech');
+      const summary = element('summary', '技术信息'); tech.append(summary);
+      const id = element('code', String(row.delivery_id || '')); id.dataset.deliveryId = ''; id.title = 'GitHub delivery ID';
+      tech.append(element('p', `事件标识：${row.route || row.event || '未知'}`), id, element('p', `来源 ${line.dataset.deliverySource}`));
+      content.append(tech);
       line.append(content);
       status.append(...['reception','signature','processing'].map(kind => deliveryFacet(kind, row)));
     } else {
@@ -126,10 +130,8 @@ async function render(quiet = false) {
     }
     if(tab==='events'){
       for(const task of row.tasks||[])content.append(button(`${kindLabels[task.kind]||task.kind} #${task.object_number} · 查看任务`,()=>openTask(task.id),'quiet linkish'));
-      // The Manager trace stays next to the outcome: what it did, or why the delivery never reached it.
-      const managerRow=(row.dispatch||[])[0];
-      if(managerRow)content.append(element('p','Manager 分派：'+dispatchCaption(managerRow)+(managerRow.reason?' · '+managerRow.reason:''),'muted'));
-      else if(row.processing_result&&deliveryIgnoreReasons[row.processing_result])content.append(element('p','未交给 Manager：'+deliveryIgnoreReasons[row.processing_result],'muted'));
+      const outcome=deliveryDispatchLine(row);
+      if(outcome)content.append(element('p',outcome,'muted row-event-outcome'));
     }
     if(installedView){status.append(...installedBadges(row));if(!hiddenView)status.append(...installedIntegration(integrationMap.get(row.id),row));}
     if(tab==='projects'&&!hiddenView){line.classList.add('project-list-row');line.dataset.repositoryId=row.id;status.classList.add('project-overview');status.append(projectListControls(row));}

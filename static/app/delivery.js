@@ -8,12 +8,36 @@ const deliveryOutcomes = {
   invalid_signature:['未处理：签名无效','danger'], invalid_payload:['未处理：正文无效','danger'], payload_too_large:['未处理：正文过大','danger'],
   unknown_endpoint:['未处理：入口不存在','danger'], missing_event_or_delivery:['未处理：投递信息不全','danger'] };
 const deliveryIgnoreReasons = {
-  duplicate:'同一入口已经处理过这个 delivery ID，未再次分派。', draft:'草稿 PR 不交给 Manager。',
-  project_disabled:'项目已禁用，事件只归档，未交给 Manager。', review_disabled:'检视未开启，事件只归档，未交给 Manager。',
-  not_trigger:'这个事件或动作不触发任务，未交给 Manager。', unregistered_repository:'仓库未启动，事件只归档，未交给 Manager。',
+  duplicate:'不会再次创建任务：同一条通知已经处理过。', draft:'不会创建任务：这是草稿 Pull Request。',
+  project_disabled:'不会创建任务：项目已停用，这条通知只保存下来。', review_disabled:'不会创建任务：检视功能未开启，这条通知只保存下来。',
+  not_trigger:'不会创建任务：这类通知不会启动任务。', unregistered_repository:'不会创建任务：仓库尚未启动，这条通知只保存下来。',
   invalid_signature:'签名无效，未通过验签，未进入处理。', invalid_payload:'正文不是合法 JSON，未进入处理。',
-  payload_too_large:'正文超过大小上限，未读取签名与入口。', unknown_endpoint:'账号下没有这个 Webhook 入口，未验签、未处理。',
-  missing_event_or_delivery:'缺少事件名或 delivery ID，未进入处理。' };
+  payload_too_large:'正文超过大小上限，未读取签名与入口。', unknown_endpoint:'账号下没有这个通知入口，未验签、未处理。',
+  missing_event_or_delivery:'缺少事件名或投递编号，未进入处理。' };
+// List rows use a plain name; the raw GitHub event/action stays in 技术信息.
+const deliveryEventNames = {
+  'workflow_run.completed':'工作流已完成', 'workflow_run.in_progress':'工作流进行中', 'workflow_run.requested':'工作流已请求',
+  'workflow_run':'工作流', 'issue.opened':'Issue 已打开', 'issue.closed':'Issue 已关闭', 'issue.reopened':'Issue 已重新打开',
+  'issue.edited':'Issue 已编辑', 'issue':'Issue', 'issues':'Issue', 'pull_request.opened':'Pull Request 已打开',
+  'pull_request.closed':'Pull Request 已关闭', 'pull_request.synchronize':'Pull Request 有新提交',
+  'pull_request.ready_for_review':'Pull Request 待检视', 'pull_request.review_requested':'Pull Request 请求检视',
+  'pull_request.reopened':'Pull Request 已重新打开', 'pull_request':'Pull Request', 'push':'代码推送',
+  'check_suite.completed':'检查套件已完成', 'check_run.completed':'检查已完成', 'release.published':'版本已发布',
+  'create':'创建引用', 'delete':'删除引用'
+};
+function deliveryEventName(route, event){
+  const key = route || event || '';
+  if (!key) return '未知事件';
+  if (deliveryEventNames[key]) return deliveryEventNames[key];
+  const stem = key.split('.')[0];
+  return deliveryEventNames[stem] || '其他事件';
+}
+function deliveryDispatchLine(row){
+  const item = (row.dispatch || [])[0];
+  if (item) return '任务分派：' + dispatchCaption(item) + (item.reason ? ' · ' + item.reason : '');
+  if (row.processing_result && deliveryIgnoreReasons[row.processing_result]) return deliveryIgnoreReasons[row.processing_result];
+  return '';
+}
 function deliveryOutcome(row){ const result=row.processing_result; return deliveryOutcomes[result]||[deliveryCaption(row),'']; }
 function deliveryFacet(kind,row){
   const reception=row.reception||{}, signature=row.signature||{};
@@ -62,11 +86,11 @@ function deliveryDetail(value){
         element('span',' · '+task.status,'muted')); tasks.append(item); }
     processing.append(tasks); }
   nodes.push(processing);
-  const dispatch=element('section','','detail-section'); dispatch.dataset.detailSection='dispatch'; dispatch.append(element('h3','Manager 分派'));
+  const dispatch=element('section','','detail-section'); dispatch.dataset.detailSection='dispatch'; dispatch.append(element('h3','任务分派'));
   if((event.dispatch||[]).length)for(const item of event.dispatch){
     const entry=element('div','','dispatch-entry'); entry.append(element('p',`${dispatchCaption(item)} · ${item.type||item.source||'事件'}`),
       element('p',item.reason?'原因：'+item.reason:'没有记录原因','muted'), element('p',timestamp(item.decided_at||item.created_at),'muted')); dispatch.append(entry); }
-  else dispatch.append(element('p','未交给 Manager：'+(deliveryIgnoreReasons[event.processing_result]||'这个投递没有分派记录。'),'muted'));
+  else dispatch.append(element('p',deliveryIgnoreReasons[event.processing_result]||'这条通知没有分派记录。','muted'));
   nodes.push(dispatch);
   // The read path replaces the closed set of credential keys (token, secret, password, authorization, cookie,
   // private_key) at every depth of request_headers, payload and response, and a body it cannot filter comes back as a

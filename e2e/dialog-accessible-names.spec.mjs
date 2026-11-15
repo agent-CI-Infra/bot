@@ -28,8 +28,8 @@ test('#756: #editor and #detail take their accessible name from their visible ti
 
     // The delivery dialog names itself after the heading the reader sees: 投递详情.
     await h.hook(a.path, a.secret, 'dialog-name-1', { repository: { id: 101 }, action: 'opened', issue: { number: 1 } });
-    await consoleNavigate(page, 'Webhook 投递');
-    await expect(page.getByText('本页 1 条投递')).toBeVisible();
+    await consoleNavigate(page, '仓库事件');
+    await expect(page.getByText('本页 1 条事件')).toBeVisible();
     await page.getByRole('button', { name: '查看详情', exact: true }).first().click();
     const detail = page.locator('#detail');
     await expect(detail.getByRole('heading', { name: '投递详情', exact: true })).toBeVisible();

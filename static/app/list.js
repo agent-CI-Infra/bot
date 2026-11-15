@@ -18,7 +18,7 @@ function projectListAddress(hidden = false, params = listParams()) {
 function eventsEmptyState(params) {
   const filtered = !!(params.get('repository_id') || params.get('account_id') || params.get('owner_id'));
   const paged = Number(params.get('offset') || 0) > 0;
-  const title = paged ? '本页没有投递' : filtered ? '当前筛选下没有投递' : '还没有 Webhook 投递';
+  const title = paged ? '本页没有事件' : filtered ? '当前筛选下没有事件' : '还没有仓库事件';
   const text = paged
     ? '已经翻过第一页，这一页没有记录。可以回到上一页，或调整筛选后再看。'
     : filtered

@@ -2,7 +2,7 @@
 // #549: a project administrator no longer has 用量与成本 / Webhook / 个人设置 / 存储 on the sidebar;
 // if the visible nav does not carry the destination, the helper follows the address (permissions are unchanged).
 const addresses = {
-  '全局设置': '#/settings/work-computers', 'Webhook 投递': '#/events', '外部执行端': '#/external',
+  '全局设置': '#/settings/work-computers', '仓库事件': '#/events', '外部执行端': '#/external',
   '身份与权限': '#/identity', '飞书绑定': '#/identity/feishu', '设置': '#/preferences',
   '飞书会话': '#/conversations', '任务看板': '#/board', '用量与成本': '#/costs', '管理助手': '#/management', '项目': '#/projects'
 };

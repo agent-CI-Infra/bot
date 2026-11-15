@@ -53,7 +53,7 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
 
     // #560 also evens out the Webhook delivery rows.
     await page.goto(h.admin + '/#/events');
-    await expect(page.getByRole('heading', { name: 'Webhook 投递', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '仓库事件', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
     await page.screenshot({ path: `${out}/events-after-1440.png`, fullPage: true });
 
@@ -106,7 +106,7 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     await page.screenshot({ path: `${out}/costs-after-390.png`, fullPage: true });
     await page.goto(h.admin + '/#/events');
-    await expect(page.getByRole('heading', { name: 'Webhook 投递', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '仓库事件', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     await page.screenshot({ path: `${out}/events-after-390.png`, fullPage: true });
   } finally { await h.stop(); }

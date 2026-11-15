@@ -128,7 +128,7 @@ function consoleGroups() {
   // a project administrator only sees the pages their role can already open.
   const management = [
     ['#/costs', '用量与成本', '按项目、日期与工作类型查看'],
-    ['#/events', 'Webhook 投递', '接收、验证和处理结果'],
+    ['#/events', '仓库事件', '仓库推送来的通知与处理结果'],
     ['#/external', '外部执行端', '接入与连接诊断'],
     ['#/settings/storage', '存储', '本人项目的轨迹与数据量']
   ];
