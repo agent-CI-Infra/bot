@@ -19,6 +19,8 @@ import { once } from 'node:events';
 import { harness, setup, account, repository } from './helpers.mjs';
 import { Workspace as ControlWorkspace } from '../dist/agent/workspace.js';
 import { TaskEngine } from '../dist/agent/engine.js';
+import { queueWebhook } from '../dist/review/queue.js';
+import { dispatchContext } from '../dist/dispatch/store.js';
 
 const token = 'ghs_' + 'f'.repeat(36);
 // An upstream repository with a regular file, an executable, a symlink and a submodule entry, served over Git HTTP.
@@ -293,4 +295,101 @@ test('a pack left by an interrupted transfer is removed after a few hours', asyn
   assert.deepEqual(readdirSync(join(root, 'incoming')), [pack + '.pack']);
   assert.deepEqual(await pruneStore(Date.now() + 60_000, root), { packs: 0 }); assert.equal(readdirSync(join(root, 'incoming')).length, 1);
   assert.deepEqual(await pruneStore(Date.now() + 7 * 3600 * 1000, root), { packs: 1 }); assert.deepEqual(readdirSync(join(root, 'incoming')), []);
+});
+
+test('a worktree moves to a new head in place: untracked files stay, and changes are saved as a patch first', async t => {
+  const u = await upstream(t);
+  // A third commit adds a file the task already has, untracked.
+  writeFileSync(join(u.work, 'NEW.md'), 'upstream\n'); git(u.work, 'add', 'NEW.md'); git(u.work, 'commit', '-qm', 'third');
+  const third = git(u.work, 'rev-parse', 'HEAD'); git(u.work, 'push', '-q', u.bare, `${third}:refs/heads/main`);
+  const mirror = await u.cache.open('101', { url: u.url, token, commits: [u.first, third] }), a = computerTask(u.root);
+  await a.workspace.checkout(a.github, u.first, mirror);
+  writeFileSync(join(a.repo, 'README.md'), 'edited by the agent\n'); writeFileSync(join(a.repo, 'NEW.md'), 'mine\n');
+  mkdirSync(join(a.repo, 'build')); writeFileSync(join(a.repo, 'build', 'out.txt'), 'kept\n');
+  const moved = await a.workspace.advance(third, mirror, [], '1');
+  assert.equal(git(a.repo, 'rev-parse', 'HEAD'), third); assert.equal(moved.previous_sha, u.first); assert.equal(moved.tree_sha, git(u.bare, 'rev-parse', third + '^{tree}'));
+  assert.equal(readFileSync(join(a.repo, 'README.md'), 'utf8'), 'second\n'); assert.equal(readFileSync(join(a.repo, 'NEW.md'), 'utf8'), 'upstream\n');
+  assert.equal(readFileSync(join(a.repo, 'build', 'out.txt'), 'utf8'), 'kept\n');
+  assert.deepEqual([moved.saved.path, moved.saved.count, [...moved.saved.files].sort()], [`../context/saved-changes-${u.first.slice(0, 12)}.patch`, 2, ['NEW.md', 'README.md']]);
+  const patch = readFileSync(join(a.root, 'context', `saved-changes-${u.first.slice(0, 12)}.patch`), 'utf8');
+  assert.match(patch, /^\+edited by the agent$/m); assert.match(patch, /^\+mine$/m);
+  // At the commit already there is nothing to move or save; a file copy has no worktree to move.
+  assert.equal((await a.workspace.advance(third, mirror, [], '2')).saved, null);
+  const copy = computerTask(u.root); await copy.workspace.prepare(copy.github, u.first, mirror);
+  assert.equal(await copy.workspace.advance(third, mirror, [], '1'), null);
+});
+
+test('a push while a review runs joins it: the worktree moves to the new head and the agent hears what changed (#770)', async t => {
+  const u = await upstream(t), user = { type: 'User', login: 'alice', id: 5 }, replies = {}, published = [];
+  let pr = { number: 7, state: 'open', draft: false, title: 'Change', body: 'Please review.', user: { id: 5 }, head: { sha: u.first, ref: 'feature' }, base: { sha: u.first, ref: 'main' } };
+  let engine, h, polls = 0, joined = 0, context;
+  const manager = { call: async (_method, path, body) => {
+    if (!path.endsWith('/execute')) return { repository_id: '101', state: 'ready', generation: 1, desired: 'ready', revision: 1 };
+    const request = body.request, answer = run => run.then(result => ({ ok: true, result }), error => ({ ok: false, error: 'runner_operation_failed', detail: error.message }));
+    if (['workspace_init', 'workspace_write', 'workspace_snapshot', 'workspace_checkout', 'workspace_advance', 'workspace_context', 'workspace_read', 'workspace_cache'].includes(request.type))
+      return answer(runnerWorkspace(request, join(u.root, 'tasks'), join(u.root, 'store')));
+    if (request.type.startsWith('git_')) return answer(storeOperation(request, join(u.root, 'store')));
+    if (request.type === 'workspace_agent_boundary') {
+      replies[request.request_id] = (replies[request.request_id] || '') + Buffer.from(request.base64, 'base64').toString('utf8'); return { ok: true, result: {} };
+    }
+    if (request.type !== 'workspace_agent_poll') return { ok: true, result: {} };
+    if (++polls === 1) return { ok: true, result: { state: 'running', boundary: { id: '1'.repeat(48), stage: 'start' } } };
+    if (polls === 2) {
+      // The author pushes while the agent works. The push joins this review instead of starting another one.
+      pr = { ...pr, head: { ...pr.head, sha: u.second } };
+      joined = queueWebhook(h.store, '101', 'pull_request', { repository: { id: 101 }, action: 'synchronize', before: u.first, pull_request: pr, sender: user }, 'push');
+      context = dispatchContext(h.store, h.store.get("SELECT * FROM dispatch_events WHERE type='pull_request.synchronize'"));
+      return { ok: true, result: { state: 'running', boundary: { id: '2'.repeat(48), stage: 'turn' } } };
+    }
+    return { ok: true, result: { state: 'completed', result: { summary: 'Reviewed.', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' } } };
+  } };
+  const github = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    const path = new URL(req.url, 'http://fixture').pathname, send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
+    if (req.method === 'POST') published.push({ path, body: raw ? JSON.parse(raw) : null });
+    if (path === '/user') return send({ id: 999, login: 'fixture-bot' });
+    if (path === '/repositories/101') return send({ id: 101, owner: { id: 10 }, full_name: 'fixture/project-101', default_branch: 'main', clone_url: u.url });
+    if (path.endsWith('/git/ref/heads/main')) return send({ object: { sha: u.first } });
+    if (path.endsWith('/pulls/7')) return send(pr);
+    if (path.endsWith(`/compare/${u.first}...${u.second}`)) return send({ status: 'ahead', ahead_by: 1, behind_by: 0, total_commits: 1,
+      commits: [{ sha: u.second, author: { login: 'alice' }, commit: { message: 'second\n\nWith a body.' } }], files: [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 1 }] });
+    if (path.endsWith('/pulls/7/files')) return send([{ filename: 'README.md', status: 'modified', patch: '@@ -1 +1 @@\n-first\n+second' }]);
+    if (/\/(pulls\/7\/(reviews|comments)|issues\/7\/comments)$/.test(path)) return req.method === 'POST' ? send({ id: published.length, html_url: 'https://github.invalid/r', user: { id: 999 } }, 201) : send([]);
+    if (path.endsWith('/labels')) return send([]);
+    return send({}, 404);
+  });
+  github.listen(0, '127.0.0.1'); await once(github, 'listening'); t.after(() => new Promise(resolve => github.close(resolve)));
+  h = await harness(t, manager, store => ({ engine: engine = new TaskEngine(store, manager, 'http://127.0.0.1:' + github.address().port, u.cache, acceptanceFixture) }));
+  t.after(() => engine.close());
+  const { admin } = await setup(h), a = await account(admin, { token }); await repository(admin, a.id, '101');
+  const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'fixture-model-key', model_name: 'fixture' })).value.model;
+  await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, model_id: model.id });
+  assert.equal(queueWebhook(h.store, '101', 'pull_request', { repository: { id: 101 }, action: 'opened', pull_request: pr, sender: user }, 'opened'), 1);
+  engine.tick(); await Promise.all(engine.active.values());
+
+  const task = h.store.get('SELECT * FROM tasks');
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 1); assert.equal(joined, 0);
+  // While a review can take the push, a second review of the PR is not even offered.
+  assert.deepEqual([context.continuations.map(option => option.task_id), context.options.some(option => option.id === 'review')], [[task.id], false]);
+  assert.deepEqual([task.status, task.head_sha], ['succeeded', u.second]);
+  assert.equal(git(join(u.root, 'tasks', task.workspace_id, 'repo'), 'rev-parse', 'HEAD'), u.second);
+  // The checkout cache names the new head, so the next review of it can reuse this worktree.
+  assert.equal(JSON.parse(readFileSync(join(u.root, 'tasks', task.workspace_id, 'review-cache.json'), 'utf8')).sha, u.second);
+  const result = JSON.parse(task.result);
+  assert.deepEqual([result.reviewed_sha, result.reviewed_heads], [u.second, [u.first, u.second]]);
+  // The agent got one message for the push: both heads, the commits and files between them, and who pushed.
+  const [message, ...others] = JSON.parse(replies['2'.repeat(48)]).messages.map(text => JSON.parse(text));
+  assert.deepEqual(others, []); assert.match(message.instruction, /^The task you are working on has an update: the pull request has new commits/);
+  assert.deepEqual([message.update.reason, message.update.previous_head, message.update.current_head, message.update.pushed_by, message.reviewed_sha],
+    ['pull_request_head_changed', u.first, u.second, ['alice'], u.second]);
+  assert.deepEqual(message.update.compare.commits, [{ sha: u.second, author: 'alice', message: 'second' }]);
+  assert.deepEqual(message.update.compare.files, [{ path: 'README.md', status: 'modified', additions: 1, deletions: 1 }]);
+  assert.equal(message.update.saved_changes, null);
+  // The published review is of the new head.
+  // The published summary is of the new head and names the head the review read before it.
+  const summary = published.find(entry => entry.path.endsWith('/issues/7/comments')).body.body;
+  assert.match(summary, new RegExp(`Reviewed commit: ${u.second}\nEarlier heads this review also read: ${u.first}\n`));
+  const logs = h.store.all('SELECT content FROM task_logs WHERE task_id=?', task.id).map(row => JSON.parse(row.content));
+  assert.ok(logs.some(log => log.type === 'head_moved' && log.current_head === u.second));
+  assert.deepEqual(logs.filter(log => log.type === 'fault'), []);
 });

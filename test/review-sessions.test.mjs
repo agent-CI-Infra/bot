@@ -66,13 +66,18 @@ test('sessions are scoped by repository, kind and number, survive reopening/rest
   deleteProjectRecords(h.store,'101');assert.equal(h.store.get('SELECT count(*) n FROM review_sessions').n,0);assert.equal(h.store.get('SELECT count(*) n FROM review_objects').n,0);
 });
 
-test('PR new heads queue separately without injecting into the older workspace; close and draft cancellation remain',async t=>{
+test('a new PR head joins the running review as an update, like discussion of any head; close and draft cancellation remain',async t=>{
   const h=await fixture(t),oldHead='a'.repeat(40),head='b'.repeat(40),pr={...issue,draft:false,head:{sha:head}};
   const old=enqueue(h.store,'101','review.pr',1,oldHead,{pull_request:{...pr,head:{sha:oldHead}}});h.store.run("UPDATE tasks SET status='running' WHERE id=?",old);
-  assert.equal(queueWebhook(h.store,'101','pull_request',{action:'synchronize',pull_request:pr,sender:user},'push'),1);
-  const current=h.store.get('SELECT * FROM tasks WHERE id<>?',old);
+  assert.equal(queueWebhook(h.store,'101','pull_request',{action:'synchronize',before:oldHead,pull_request:pr,sender:user},'push'),0);
   assert.equal(queueWebhook(h.store,'101','pull_request_review',{action:'submitted',pull_request:pr,sender:user,review:{body:'New head discussion',author_association:'MEMBER'}},'discussion'),0);
-  assert.equal(pendingReviewUpdates(h.store,{id:old}).length,0);assert.equal(pendingReviewUpdates(h.store,current).length,1);
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,1);
+  assert.deepEqual(pendingReviewUpdates(h.store,{id:old}).map(row=>JSON.parse(row.data)).map(({reason,before,after})=>({reason,before,after})),
+    [{reason:'pushed',before:oldHead,after:head},{reason:'review_submitted',before:undefined,after:undefined}]);
+  assert.deepEqual(JSON.parse(h.store.get('SELECT input FROM tasks WHERE id=?',old).input).merged_updates.map(update=>update.reason),['pushed','review_submitted']);
+  // A review that has started publishing takes nothing more: the push reviews its head separately.
+  h.store.run('UPDATE tasks SET publication_started=1 WHERE id=?',old);
+  assert.equal(queueWebhook(h.store,'101','pull_request',{action:'synchronize',pull_request:{...pr,head:{sha:'c'.repeat(40)}},sender:user},'push-2'),1);
   queueWebhook(h.store,'101','pull_request',{action:'converted_to_draft',pull_request:{...pr,draft:true},sender:user},'draft');
   assert.deepEqual(h.store.all('SELECT status,error_code FROM tasks').map(t=>[t.status,t.error_code]),[['cancelled','object_closed_or_draft'],['cancelled','object_closed_or_draft']]);
   const dev=enqueue(h.store,'101','development.issue',1,null,{});queueWebhook(h.store,'101','issues',{action:'closed',issue:{...issue,state:'closed'},sender:user},'close');

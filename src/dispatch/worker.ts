@@ -104,10 +104,11 @@ export function retryEvent(store: Store, repositoryId: string, id: string) {
 
 /**
  * The deterministic decision of the control plane before #207, for tests that exercise everything after dispatch: an
- * update joins a running review, otherwise the options the old triggers created are created. Production never uses it.
+ * update (a new pull request head included, #770) joins a running review, otherwise the options the old triggers created are
+ * created. Production never uses it.
  */
 export function ruleDecider(context: DispatchContext): Decision {
-  const updates = ['issue.updated', 'pull_request.updated', 'issue.mention', 'pull_request.mention', 'issue.labeled', 'pull_request.labeled'];
+  const updates = ['issue.updated', 'pull_request.updated', 'pull_request.synchronize', 'issue.mention', 'pull_request.mention', 'issue.labeled', 'pull_request.labeled'];
   const defaults = context.options.filter(option => option.default);
   const reviews = defaults.filter(option => option.work.startsWith('review.')), others = defaults.filter(option => !option.work.startsWith('review.'));
   if (updates.includes(String(context.event.type)) && context.continuations.length && !others.length)

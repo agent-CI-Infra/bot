@@ -36,7 +36,7 @@ import { repositoryExecutionDenied } from '../installations/archive.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { releaseCategory } from '../github/release-label.js';
 import { testEvidence, reviewLanguage, promptedBy, type DevelopmentWait } from '../github/text.js';
-import { developmentReady, reviewRequestsCode, reviewNewHead } from '../review/queue.js';
+import { developmentReady, reviewRequestsCode } from '../review/queue.js';
 import { actionableFinding, developmentGoal, discussionRequests, developmentApproved, developmentWait,
   ownedPullRequest, developmentLabelForTask, queueDevelopment, revisionRequests, type GoAhead, type RevisionRequest } from '../review/development.js';
 import { actionsConfigurationError, actionsDevelopmentAllowed, actionsIssueAssigned, actionsSourceIssue } from '../actions/safety.js';
@@ -303,13 +303,24 @@ export class TaskEngine {
         event?{contents:'read',actions:'read',checks:'read',statuses:'read',issues:'write',pull_requests:'read'}:undefined);
       let input=JSON.parse(task.input),result=task.result?JSON.parse(task.result):null;
       const development=task.kind.startsWith('development.'),review=task.kind.startsWith('review.');
-      // Only reviews continue an earlier conversation; a reply task starts fresh every time.
-      const prior=review&&task.attempt===1?latestReviewSession(this.store,task):undefined;
+      // Only reviews continue an earlier conversation; a reply task starts fresh every time. A retry starts with an empty one,
+      // except the attempt a new head started in a fresh workspace (head_restart_attempt, see moveHead).
+      const prior=review&&(task.attempt===1||input.head_restart_attempt===task.attempt)?latestReviewSession(this.store,task):undefined;
       // An Issue development was started by the Manager on a person's label, which is the human decision a review asked for.
       if(task.kind==='development.pr'&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan','检视结果要求先由人确认需求，开发任务等待重新规划。');
       // validate(object) checks an object just read instead of reading it again; seen is the last object it checked.
       let seen:any=null;
-      const validate=async(fetched?:any)=>{
+      // A new head of the pull request (#770) never replaces the task working on it. While preparing, the task takes it. A
+      // review moves its worktree to it when no tool runs there (`move`, or before publication) and the agent hears of it
+      // at its next turn; one that has started publishing finishes on the head it reviewed. A development stops for
+      // replanning with its work saved (see the catch below). A reply task answers on the head it read.
+      const headMoved=async(head:string,current:any,move:boolean)=>{
+        if(task.phase==='prepare'){update({head_sha:head});return;}
+        if(development)stop('pull_request_head_changed','needs_replan',`PR #${current.number} 有了别人推送的新提交：任务提交 ${task.head_sha}，当前 ${head}。已有改动保存为进度检查点，开发按新提交重新准备。`);
+        if(review&&(move||task.phase==='publish')&&!task.publication_started)await moveHead(current);
+      };
+      // move: nothing runs in the workspace now, so a review may move it to a new head.
+      const validate=async(fetched?:any,move=false)=>{
         await guard();
         if(event){event.validate(this.store,task,input);return;}
         const current=seen=fetched||await github.object(task.kind,task.object_number);
@@ -319,12 +330,7 @@ export class TaskEngine {
           if(development)this.owned(github,task,current);
           const candidateRow=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=candidateRow?JSON.parse(candidateRow.data):null;
           // This task's own push (development, or any task that updated the bot's PR) moved the head on purpose.
-          if(current.head?.sha!==task.head_sha&&!(candidate?.remote_sha===current.head?.sha)){
-            // A stale comment or update review must not turn into a head-triggered review that could start a bot PR revision.
-            // The new head reaches the Manager as the push it is (one event with the push's own webhook).
-            if(task.kind==='review.pr'&&!input.comment&&!input.trigger)this.store.transaction(()=>reviewNewHead(this.store,task.repository_id,current));
-            stop('pull_request_head_changed','superseded',`PR #${task.object_number} 的 head 已变化：预期 ${task.head_sha}，当前 ${current.head?.sha}。`);
-          }
+          if(current.head?.sha!==task.head_sha&&!(candidate?.remote_sha===current.head?.sha))await headMoved(String(current.head?.sha),current,move);
         }else if(development&&input.object_hash&&sha(JSON.stringify([current.title,current.body]))!==input.object_hash)stop('issue_needs_replan','needs_replan',`Issue #${task.object_number} 的标题或正文已变化，需要重新规划。`);
         // The go-ahead must still hold until publication: the person's development label stays on the Issue (and an Issue
         // filed from an Actions failure stays unassigned).
@@ -349,9 +355,42 @@ export class TaskEngine {
             const pr=await github.object('review.pr',input.bot_pr.number),owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,pr.number);
             assertOwnedPR(owned,pr,github.actorId,task.repository_id);
             if(pr.state!=='open'||pr.draft===true)stop('object_closed_or_draft','cancelled',`PR #${pr.number} 已关闭或变为草稿，state=${pr.state}，draft=${pr.draft===true}。`);
-            if(pr.head.sha!==task.head_sha&&pr.head.sha!==candidate?.remote_sha)stop('pull_request_head_changed','superseded',`PR #${pr.number} 的 head 已变化：任务提交 ${task.head_sha}，当前 ${pr.head.sha}。`);
+            if(pr.head.sha!==task.head_sha&&pr.head.sha!==candidate?.remote_sha)await headMoved(String(pr.head.sha),pr,move);
           }
         }
+      };
+      // Moves a review's worktree to the pull request's current head and records that as an update the agent reads at its next
+      // turn: the old and new head, the commits and files between them, and where its own changes were saved. A workspace
+      // that cannot move in place (a file copy, no Git cache) is prepared afresh on the new head instead.
+      const moveHead=async(object:any)=>{
+        const previous=String(task.head_sha),next=String(object.head.sha),number=task.object_number;
+        const base=/^[a-f0-9]{40}$/.test(String(object.base?.sha||''))?String(object.base.sha):null;
+        const heads:string[]=Array.isArray(input.heads)&&input.heads.length?input.heads:[previous];
+        const mirror=this.gitCache&&github.cloneUrl?await this.gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[next,...(base?[base]:[])],
+          refs:[`refs/pull/${number}/head`,...(base&&object.base?.ref?[`refs/heads/${object.base.ref}`]:[])]}):undefined;
+        const moved=mirror?await workspace!.advance(next,mirror,base?[base]:[],String(heads.length)):null;
+        if(!moved){
+          update({input:JSON.stringify({...JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),head_restart_attempt:task.attempt+1})});
+          return stop('pull_request_head_changed','queued',`PR #${number} 有了新提交 ${next}，工作区不能原地移到新提交（${mirror?'不是 git worktree，或移动失败':'Git 缓存不可用'}），任务在新工作区按新提交重新准备。`);
+        }
+        const compare=await github.request('GET',github.path(`/compare/${previous}...${next}`)).then(headComparison,(error:any)=>({error:String(error?.code||'compare_unavailable')}));
+        const files=await github.pages(github.path(`/pulls/${number}/files`));
+        if(files.length>=3000)stop('pull_request_file_limit','failed',`PR #${number} 返回 ${files.length} 个文件，已达到 GitHub 的 3000 文件列表上限，无法确认完整差异。`);
+        // The checkout cache follows the move, so the next review of this head can reuse the worktree.
+        await workspace!.context({'files.json':JSON.stringify(files,null,2)});await workspace!.deliver({type:'workspace_cache',sha:next,tree_sha:moved.tree_sha});
+        const latest=JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),context=input.context||{};
+        input={...input,...latest,snapshot_sha:next,snapshot_tree:moved.tree_sha,source_tree:moved.source_tree_sha,snapshot_files:moved.files,skipped_files:moved.skipped_files,
+          coverage:moved.coverage,files,heads:[...heads,next],behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),
+          context:{...context,reviewed_sha:next,coverage:moved.coverage,
+            ...(context.pull_request?{pull_request:{...context.pull_request,head:{ref:object.head?.ref||null,sha:next},diff:base?`git diff ${base}...${next}`:null}}:{}),
+            context_files:(context.context_files||[]).map((file:any)=>file.path==='../context/files.json'?{...file,content:`The ${files.length} changed files with GitHub's patch of each`}:file)}};
+        records.atomic(()=>{
+          update({input:storedInput(this.store,redactor.clean(input),task.repository_id),head_sha:next});
+          this.store.run('INSERT OR IGNORE INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',id,`${id}:head:${heads.length}:${next}`,
+            JSON.stringify({reason:'pull_request_head_changed',previous_head:previous,current_head:next,compare,saved_changes:moved.saved}));
+        });
+        log({type:'head_moved',previous_head:previous,current_head:next,saved_changes:moved.saved,
+          detail:`PR #${number} 有新提交：工作区已从 ${previous.slice(0,7)} 移到 ${next.slice(0,7)}${moved.saved?`，原有改动（${moved.saved.count} 个文件）已保存到 ${moved.saved.path}`:''}。`});
       };
       workspace=new Workspace(this.store,this.manager,task,redactor,guard,log);
       await assessRetryReport(this.store,task,workspace,github,guard,redactor);
@@ -559,14 +598,17 @@ export class TaskEngine {
         const labels=!labeling?[]:await github.pages(github.path('/labels')).then(repositoryLabels,error=>{if(error instanceof TaskError&&error.code.startsWith('github_permission_'))return [];throw error;});
         input={...input,...JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
           source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,
-          files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':review?'review':'workflow',repository:github.fullName,reviewed_sha:ref.object.sha,...(development?{}:{bot_login:github.actorLogin||null}),
+          files,...(pr?{heads:[...(input.heads||[]).filter((head:string)=>head!==ref.object.sha),ref.object.sha]}:{}),coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':review?'review':'workflow',repository:github.fullName,reviewed_sha:ref.object.sha,...(development?{}:{bot_login:github.actorLogin||null}),
             ...(!pr ? {actions_failure:this.store.get('SELECT classification FROM actions_failure_issues WHERE repository_id=? AND number=?',task.repository_id,task.object_number)||null} : {}),
             object:{number:object.number,title:object.title,state:object.state,author:object.user?.login||null,html_url:object.html_url||null,labels:(object.labels||[]).map((l:any)=>typeof l==='string'?l:l.name),
               ...(pr?{draft:object.draft===true}:{}),body_excerpt:String(object.body||'').slice(0,1000)},
             ...(pr?{pull_request:{base:{ref:object.base?.ref||null,sha:prBase},head:{ref:object.head?.ref||null,sha:object.head?.sha||null},
               diff:snapshot.history&&prBase?`git diff ${prBase}...${object.head?.sha}`:null}}:{}),
             context_files:contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
-            implementation_goal:implementationGoal,actionable_findings:actionableFindings,...(input.integration?{integration:{...input.integration,instruction:'Continue the same task on the current main checkout with your earlier delta preserved. Resolve listed conflicts, inspect failed integration checks, rerun required policy, and submit a NEW candidate; historical QA does not approve it.'}}:{}),
+            implementation_goal:implementationGoal,actionable_findings:actionableFindings,
+            // Work saved on an earlier head (the pull request got other commits meanwhile) is not restored over the new one.
+            ...(development&&input.recovery?.sha&&input.recovery.base_sha!==ref.object.sha?{earlier_work:{commit:input.recovery.sha,base:input.recovery.base_sha,
+              instruction:`This task worked on ${input.recovery.base_sha} before the pull request moved to ${ref.object.sha}; that work is saved as commit ${input.recovery.sha}. If git cat-file -e ${input.recovery.sha} succeeds here, git diff ${input.recovery.base_sha} ${input.recovery.sha} shows it: re-apply what still applies to the new head.`}}:{}),...(input.integration?{integration:{...input.integration,instruction:'Continue the same task on the current main checkout with your earlier delta preserved. Resolve listed conflicts, inspect failed integration checks, rerun required policy, and submit a NEW candidate; historical QA does not approve it.'}}:{}),
             // On a revision people or other review bots asked for: their comments, which the findings above carry out.
             ...(development&&input.revision?.requests?.length?{revision_requests:input.revision.requests}:{}),review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
             ...(input.comment?{trigger_comment:input.comment}:{}),...(input.trigger?{trigger:input.trigger}:{}),
@@ -603,9 +645,10 @@ export class TaskEngine {
       if(task.phase==='validate')stop('create_pull_request_required','needs_replan','任务停在 validate 阶段，需要重新规划并通过 create_pull_request 提交候选修改。');
       // Every attempt refreshes GitHub before its first request. Turn boundaries do the same for pending updates.
       const conversation=!review?undefined:{history:prior?JSON.parse(prior.messages):[],resume:false,boundary:async(stage:string)=>{
+        if(stage!=='start'&&!pendingReviewUpdates(this.store,task).length)return {messages:[]};
+        // Between turns nothing runs in the workspace: a new head moves it there, which is an update of its own.
+        const object=await github.object(task.kind,task.object_number);await validate(object,true);
         const updates=pendingReviewUpdates(this.store,task);
-        if(stage!=='start'&&!updates.length)return {messages:[]};
-        const object=await github.object(task.kind,task.object_number);await validate(object);
         const pr=task.kind==='review.pr',comments=await github.pages(github.path(`/issues/${task.object_number}/comments`));
         const reviews=pr?await github.pages(github.path(`/pulls/${task.object_number}/reviews`)):[],reviewComments=pr?await github.pages(github.path(`/pulls/${task.object_number}/comments`)):[];
         await workspace!.context({'object.json':JSON.stringify(object,null,2),'comments.json':JSON.stringify(comments,null,2),
@@ -623,8 +666,7 @@ export class TaskEngine {
         if(updates.length)this.store.run('UPDATE tasks SET review_update_cursor=? WHERE id=?',updates.at(-1)!.id,id);
         if(stage!=='start')for(const row of updates){const data=JSON.parse(row.data);log({type:'review_update',actor:data.actor,reason:data.reason,detail:JSON.stringify(data)});}
         return stage==='start'?{prompt:JSON.stringify(roleAssignmentContext({...input.context,structured_task:records.context(id)}))}
-          :{messages:updates.map(row=>JSON.stringify({instruction:'A person updated this review. Respond to this update and revise the final result before publication. Discussion files have been refreshed.',
-            update:JSON.parse(row.data),current_object:object,reviewed_sha:task.head_sha}))};
+          :{messages:updateMessages(updates.map(row=>JSON.parse(row.data)),object,String(task.head_sha))};
       }};
       if(development&&task.phase==='model'&&controlled(this.store,task,'development'))recoverRoleCheckpoint(this.store,task,input.snapshot_sha);
       if(development&&task.phase==='model')await restoreCheckpoint(this.store,task,workspace,input.snapshot_sha);
@@ -637,7 +679,8 @@ export class TaskEngine {
       for(;;){
       try{
       if(task.phase==='model'){
-        if(validatedPhase!=='model')await validate();
+        // The agent is idle here unless a restart found its process still running: then the next turn's boundary moves it.
+        if(validatedPhase!=='model')await validate(undefined,!!conversation?.resume||!this.store.get('SELECT model_started FROM tasks WHERE id=?',id)?.model_started);
         validatedPhase=undefined;
         log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
         // github_write: a direct write the acting role's GitHub permissions allow (#381), keyed per task so a retried attempt
@@ -709,7 +752,8 @@ export class TaskEngine {
           if(review&&input.behavior_changes?.length){result.behavior_changes=input.behavior_changes;result.clarification_required=true;}
           // A pull request this task published on the way is part of its result.
           const candidate=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),published=candidate?JSON.parse(candidate.data).published:null;
-          result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,coverage:input.coverage,object_hash:input.object_hash,...(published?{pull_request:published}:{})};
+          result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,
+            ...(input.heads?.length>1?{reviewed_heads:input.heads}:{}),coverage:input.coverage,object_hash:input.object_hash,...(published?{pull_request:published}:{})};
           await acceptReport(result);
           update({result:JSON.stringify(result),phase:'publish'});validatedPhase='publish';
         }else if(task.phase!=='done')stop('create_pull_request_required',undefined,`开发执行结束时仍处于 ${task.phase} 阶段，未完成 create_pull_request。`);
@@ -721,7 +765,7 @@ export class TaskEngine {
         update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log,development?undefined:()=>{
           // No await between checking the inbox and fencing the first GitHub write.
           if(this.store.get('SELECT publication_started FROM tasks WHERE id=?',id)?.publication_started)return;
-          if(review&&pendingReviewUpdates(this.store,task).length)throw new ReviewUpdated();
+          if(review&&pendingReviewUpdates(this.store,task).some(row=>JSON.parse(row.data).reason!=='pushed'))throw new ReviewUpdated();
           update({publication_started:1});
         });
         if(!development&&!review){
@@ -811,21 +855,27 @@ export class TaskEngine {
       // waiting for the same window); it does not use up the five automatic retries.
       const limited=failure.code==='github_rate_limited';
       if((failure.state==='needs_replan'||failure.code==='manager_execution_stopped'||['stage_budget_exhausted','role_budget_exhausted'].includes(failure.code))&&!['development_not_approved','actions_development_not_approved'].includes(failure.code)){const saved=JSON.parse(current?.input||'{}');update({input:JSON.stringify({...saved,manager_feedback:{code:failure.code,detail:redactor.text(String(failure.detail||'')),at:new Date().toISOString()}})});}
-      if(['branch_head_changed','branch_disappeared','publication_receipt_mismatch'].includes(failure.code)&&failure.state==='needs_replan'&&controlled(this.store,task,'development')){
+      // A development whose pull request got someone else's commits (#770) keeps what it did: the workspace is saved as a
+      // progress checkpoint, and the next attempt prepares the new head and is told where that work is (earlier_work).
+      const headMoved=failure.code==='pull_request_head_changed'&&failure.state==='needs_replan'&&task.kind.startsWith('development.')&&current?.claim_token===token;
+      if(headMoved&&workspace&&task.phase==='model'&&task.workspace_id){try{await checkpoint(this.store,task,workspace);}catch(saved){records.history(id,'checkpoint_fault',{phase:'head_change',code:(saved as any).code||'snapshot_failed'});}}
+      if(headMoved||['branch_head_changed','branch_disappeared','publication_receipt_mismatch'].includes(failure.code)&&failure.state==='needs_replan'&&controlled(this.store,task,'development')){
         const row=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=row?JSON.parse(row.data):null,saved=JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)?.input||'{}');
         const recovery=candidate?.local_sha?{source_workspace_id:candidate.source_workspace_id??task.workspace_id,base_sha:candidate.base_sha,revision:records.get(id).revision,sha:candidate.local_sha,tree_sha:candidate.tree_sha,created_at:new Date().toISOString()}:saved.recovery;
-        update({input:JSON.stringify({...saved,recovery,manager_feedback:{code:failure.code,detail:redactor.text(String(failure.detail||'')),discovery:{tool:'read_publication_context',arguments:{}}}}),phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,publication_started:0,attempt:task.attempt+1});
-        traceEvent(this.store,id,'manager_recovery_queued',{code:failure.code,previous_status:current?.status,discovery:{tool:'read_publication_context',arguments:{}}},attemptRun?.id,'framework');
+        const discovery=controlled(this.store,task,'development')?{discovery:{tool:'read_publication_context',arguments:{}}}:{};
+        update({input:JSON.stringify({...saved,recovery,manager_feedback:{code:failure.code,detail:redactor.text(String(failure.detail||'')),...discovery}}),phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,publication_started:0,attempt:task.attempt+1});
+        traceEvent(this.store,id,'manager_recovery_queued',{code:failure.code,previous_status:current?.status,...discovery},attemptRun?.id,'framework');
       }
       const managerFault=this.store.get("SELECT role,status FROM task_runs WHERE task_id=? AND role IS NOT NULL ORDER BY rowid DESC LIMIT 1",id);
       const managerRetry=failure.state==='needs_replan'||failure.code==='manager_execution_stopped'||managerFault?.role===roleConfig(this.store,task).controller.role&&managerFault?.status==='fault';
       const state=managerRetry&&failure.state==='failed'? 'retry_wait':automaticState(failure.code,failure.state),retrying=automaticRetry.has(state),counted=isAttemptFailure(failure.code,state),now=Date.now();
       const previousCode=current?.retry_error_code||current?.error_code;
-      const retries=counted?(previousCode===failure.code?Number(current?.retry_count||0):0)+1:retrying?Number(current?.retry_count||0):0;
+      // A development that prepares a new head (headMoved) starts over: earlier failures were about the old one.
+      const retries=headMoved?0:counted?(previousCode===failure.code?Number(current?.retry_count||0):0)+1:retrying?Number(current?.retry_count||0):0;
       // Once in the slow cycle, a task never starts another burst. Its slots stay relative to its own entry time,
       // including after a restart or a different transient failure. Conditions and rate limits preserve the burst
       // and cycle but use their own wait, so a computer becoming ready need not wait for an eight-hour slot.
-      const cycle=managerRetry?null:retrying?(current?.retry_cycle_started_at??(counted&&retries>=5?now:null)):null;
+      const cycle=managerRetry||headMoved?null:retrying?(current?.retry_cycle_started_at??(counted&&retries>=5?now:null)):null;
       // The same stop again waits twice as long as the last time, up to a cap; a different stop starts over. Automatic
       // retries back off too (5 s, 15 s, 45 s, 135 s), so a GitHub or model outage of a few minutes is outlasted.
       const waits=current?.error_code===failure.code?Number(current?.wait_count||0)+1:0,grow=(base:number,cap:number)=>Math.min(base*2**waits,cap);
@@ -835,7 +885,7 @@ export class TaskEngine {
       // The module of event work hears that its task ended without a result (a waiting or retried task has not ended).
       if(event&&current?.claim_token===token&&['failed','cancelled','superseded','needs_replan'].includes(state))event.ended?.(this.store,task,failure.code,redactor.text(String(failure.detail||'')));
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,wait_count:waits,
-        retry_error_code:counted?failure.code:retrying?current?.retry_error_code??null:null,retry_cycle_started_at:cycle,
+        retry_error_code:counted?failure.code:retrying&&!headMoved?current?.retry_error_code??null:null,retry_cycle_started_at:cycle,
         rate_limit_bucket:limited?failure.bucket??null:null,next_run_at:now+delay});
       if(counted&&current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))recordRetryFailure(this.store,task,{group:'execution:'+failure.code,occurrence:attemptRun!.id,code:failure.code,detail:redactor.text(String(failure.detail||''))});
       if(workspace&&task.phase==='model'&&controlled(this.store,task,'development')&&task.kind.startsWith('development.')&&task.workspace_id){try{await checkpoint(this.store,task,workspace);}catch(saved){records.history(id,'checkpoint_fault',{phase:'role_failure_recovery',code:(saved as any).code||'snapshot_failed'});}}
@@ -896,3 +946,25 @@ export class TaskEngine {
 
 // Why the Manager created this task, and its brief: shown as an explanation, never as scope or authority.
 const managerContext=(input:any)=>input?.manager?{manager:{reason:String(input.manager.reason||''),brief:input.manager.brief??null}}:{};
+
+// What changed between two heads of a pull request, from GitHub's compare: the commits and files, bounded. `diverged` or a
+// `behind_by` above 0 means the earlier head was rewritten (a force push).
+const headComparison=(compare:any)=>({status:compare?.status??null,ahead_by:compare?.ahead_by??null,behind_by:compare?.behind_by??null,total_commits:compare?.total_commits??null,
+  commits:(compare?.commits||[]).slice(-50).map((c:any)=>({sha:c.sha,author:c.author?.login||c.commit?.author?.name||null,message:String(c.commit?.message||'').split('\n')[0]!.slice(0,200)})),
+  files:(compare?.files||[]).slice(0,300).map((f:any)=>({path:f.filename,status:f.status,additions:f.additions,deletions:f.deletions,...(f.previous_filename?{previous_path:f.previous_filename}:{})})),
+  ...((compare?.files||[]).length>300?{files_truncated:true}:{})});
+/**
+ * The user messages a review gets at a turn boundary, one per update in arrival order (#770). A push is told together with
+ * the head change it caused (the worktree has moved by then); a push to a head the task already took needs no message.
+ */
+function updateMessages(updates:any[],object:any,head:string):string[]{
+  const pushed=[...new Set(updates.filter(update=>update.reason==='pushed'&&update.actor).map(update=>String(update.actor)))];
+  return updates.filter(update=>update.reason!=='pushed').map(update=>JSON.stringify(update.reason==='pull_request_head_changed'?{
+    instruction:`The task you are working on has an update: the pull request has new commits. Your checkout has moved from ${update.previous_head} to ${update.current_head}`
+      +`${update.saved_changes?`, and the changes you had made in it are saved as ${update.saved_changes.path}`:''}. ../context/files.json and the discussion files are refreshed. `
+      +'Continue from the new situation: review what the new commits changed, check your earlier findings against the new head (drop those it fixed), and revise the final result before publication.',
+    update:{...update,...(pushed.length?{pushed_by:pushed}:{}),commands:{log:`git log --oneline ${update.previous_head}..${update.current_head}`,diff:`git diff ${update.previous_head} ${update.current_head}`}},
+    current_object:object,reviewed_sha:head}:{
+    instruction:'The task you are working on has an update. Continue from the new situation: respond to this update and revise the final result before publication. Discussion files have been refreshed.',
+    update,current_object:object,reviewed_sha:head}));
+}

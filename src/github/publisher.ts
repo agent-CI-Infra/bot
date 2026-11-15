@@ -80,7 +80,9 @@ export class Publisher {
       const location=locations.get(finding.id);
       if(location)inline.push({body:finding.body+`\n\n<!-- dept-bot-finding:${finding.id} -->`,...location});
     }
-    const coverage=`Reviewed commit: ${result.reviewed_sha}\nCoverage: ${result.coverage.join('; ')}`;
+    // A review that moved to new commits while it ran (#770) also names the heads it read before.
+    const earlierHeads=(result.reviewed_heads||[]).filter((head:string)=>head!==result.reviewed_sha);
+    const coverage=`Reviewed commit: ${result.reviewed_sha}${earlierHeads.length?`\nEarlier heads this review also read: ${earlierHeads.join(', ')}`:''}\nCoverage: ${result.coverage.join('; ')}`;
     const outputs:any[]=[];
     if(inline.length){
       const path=this.github.path(`/pulls/${this.task.object_number}/reviews`),marker=this.marker('inline');

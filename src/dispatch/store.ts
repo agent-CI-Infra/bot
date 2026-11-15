@@ -50,7 +50,9 @@ export type CreateSpec =
   | { type: 'request'; key: string; request: string; principal: { principal_id: string; tenant_id: string } | null };
 export interface CreateOption { id: string; work: string; title: string; spec: CreateSpec; hook?: string; ref?: Json;
   /** What the control plane did before #207 for this event; only the rule decider used in tests reads it, never the Manager. */
-  default?: boolean }
+  default?: boolean;
+  /** Offered only while no task can take the event (#770): a push belongs to the review already working on the pull request. */
+  unless_continued?: boolean }
 export interface EventInput {
   repositoryId: string; key: string; type: string; source: string; summary: string; facts: Json;
   object?: { type: 'issue' | 'pr'; number: number } | null; delivery?: string | null; options: CreateOption[];
@@ -104,9 +106,9 @@ export function recordEvent(store: Store, input: EventInput): number {
 }
 
 /**
- * Tasks the event may join: on the same object, of a kind that answers updates, publication not started, the same head for
- * a PR. Of the running ones only the most recently claimed counts (older runs are about to be replaced), then the waiting
- * ones, as updates were always merged.
+ * Tasks the event may join: on the same object, of a kind that answers updates, publication not started. A new pull request
+ * head is one of those updates (#770): the task moves to it instead of being replaced. Of the running ones only the most
+ * recently claimed counts (older runs are about to be replaced), then the waiting ones, as updates were always merged.
  */
 export function continuations(store: Store, event: Record<string, any>): ContinueOption[] {
   const merge = event.merge ? JSON.parse(String(event.merge)) : null;
@@ -116,20 +118,21 @@ export function continuations(store: Store, event: Record<string, any>): Continu
     ORDER BY CASE WHEN t.status IN ('running','preparing','publishing','result_ready') THEN 0 ELSE 1 END,(SELECT claimed_at FROM task_claims WHERE task_id=t.id) DESC,t.created_at DESC,t.rowid DESC`,
     String(event.repository_id), Number(event.object_number), ...merge.kinds, ...activeStates);
   const running = (task: Row) => ['running', 'preparing', 'publishing', 'result_ready'].includes(String(task.status));
-  const fits = (task: Row) => !task.publication_started && (!String(task.kind).endsWith('.pr') || !merge.head || task.head_sha === merge.head);
+  const fits = (task: Row) => !task.publication_started;
   const latest = active.find(running);
   return [...(latest && fits(latest) ? [latest] : []), ...active.filter(task => !running(task) && fits(task))].slice(0, 5)
     .map(task => ({ id: 'continue:' + task.id, task_id: String(task.id), kind: String(task.kind), status: String(task.status), summary: String(task.summary), created_at: String(task.created_at) }));
 }
 /** What the Manager reads: the event, the offered options and the tasks already on the same object. */
 export function dispatchContext(store: Store, event: Row): DispatchContext {
-  const options = (JSON.parse(event.options) as CreateOption[]).filter(option => workOffered(store, event.repository_id, option.work, event.type));
+  const joinable = continuations(store, event);
+  const options = (JSON.parse(event.options) as CreateOption[]).filter(option => workOffered(store, event.repository_id, option.work, event.type) && !(option.unless_continued && joinable.length));
   const related = event.object_number ? store.all(`SELECT id,kind,status,summary,error_code,created_at,updated_at,result FROM tasks WHERE repository_id=? AND object_number=?
     AND kind NOT IN ('release.observe','release.notes','actions.failures','gate.onboarding','task.request','task.development') ORDER BY created_at DESC,rowid DESC LIMIT 8`, event.repository_id, event.object_number).map(task => {
     let outcome: unknown = null; try { const result = JSON.parse(task.result || 'null'); outcome = result?.summary ? String(result.summary).slice(0, 300) : result?.pr_url ?? null; } catch { outcome = null; }
     return { id: task.id, kind: task.kind, status: task.status, summary: task.summary, error_code: task.error_code ?? null, created_at: task.created_at, outcome };
   }) : [];
-  return { event, facts: JSON.parse(event.facts), options, continuations: continuations(store, event), related };
+  return { event, facts: JSON.parse(event.facts), options, continuations: joinable, related };
 }
 
 /** How long a dispatcher's claim on an event lasts; the Manager's turn renews it before every step. */

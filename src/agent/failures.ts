@@ -106,8 +106,9 @@ const environmentFailures = new Set(['execution_interrupted','workspace_init_fai
 // waiting_environment covers both unmet conditions and failed attempts. Only the latter consume the retry burst;
 // configuration/PR-head waits and manager availability checks keep polling on their own schedule.
 // Waits the control plane ends by itself once the outside condition clears: they are not failed attempts, so they do not
-// consume the retry burst. A role at its concurrency limit is one of them — nothing about the run was tried.
-const capacityWaits = new Set(['manager_deferred','github_rate_limited','role_capacity','task_children_pending','manager_execution_stopped']);
+// consume the retry burst. A role at its concurrency limit is one of them — nothing about the run was tried. A pull request
+// that got new commits (#770) is not a failure either: the task prepares the new head with its work kept.
+const capacityWaits = new Set(['manager_deferred','github_rate_limited','role_capacity','task_children_pending','manager_execution_stopped','pull_request_head_changed']);
 export function isAttemptFailure(code: string|null|undefined, state: string) {
   return state==='retry_wait'&&!capacityWaits.has(code||'')||state==='waiting_environment'&&environmentFailures.has(code||'');
 }
@@ -193,7 +194,7 @@ const codeActions: Record<string,string> = {
   workflow_disabled:'这条工作流已关闭或删除，任务已结束。',
   workflow_not_found:'这条工作流已删除，任务已结束。',
   github_read_token_not_allowed:'启动这个子 agent 时关掉了 GitHub 读取；主 agent 仍可读取，需要时让它不带 github_read:false 再启动子 agent。',
-  pull_request_head_changed:'PR 有了新的提交，这个任务已被取代，无需处理。',
+  pull_request_head_changed:'PR 有了新的提交：检视转到新提交继续，开发保存已有改动后按新提交重新准备，无需处理。',
   branch_head_changed:'发布分支与预期不一致；Manager 可查询 read_publication_context 和原始记录，再决定重试、协调、集成或求助。',
   branch_disappeared:'待更新的分支已被删除，这个任务已被取代，无需处理。',
   review_requires_human_decision:'检视认为需要人先确认需求：在 Issue 下补充说明后提及 bot 重新检视。重试这个任务不会改变结论。',

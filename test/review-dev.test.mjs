@@ -90,6 +90,10 @@ test('PR conversation mentions read the current head with read-only permissions,
     comment:{id:400,body:'@Agent-CI-Infra-Bot please recheck',html_url:'https://github.invalid/issue/7#issuecomment-400'}};
   const send=(delivery,value=payload)=>h.hook(a.path,a.secret,delivery,value,{'X-GitHub-Event':'issue_comment'});
   assert.equal((await h.hook(a.path,a.secret,'pr-opened',{repository:{id:101},action:'opened',pull_request:{...pull,head:{sha:'a'.repeat(40)}}},{'X-GitHub-Event':'pull_request'})).value.tasks_created,1);
+  // A mention joins a review of the PR that has not published yet, at any head (#770); once that review is done it starts its own.
+  const opened=h.store.get('SELECT id FROM tasks').id;
+  assert.equal((await send('pr-comment-joins',{...payload,comment:{...payload.comment,id:399}})).value.tasks_created,0);assert.equal(h.store.get('SELECT count(*) n FROM review_updates WHERE task_id=?',opened).n,1);
+  h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?",opened);
   assert.equal((await send('pr-comment')).value.tasks_created,1);
   const task=h.store.get("SELECT * FROM tasks WHERE unique_key='101:review.pr:7:comment:400'");
   assert.equal(task.head_sha,pull.head.sha);assert.deepEqual(JSON.parse(task.input).pull_request,pull);assert.deepEqual(JSON.parse(task.input).comment,payload.comment);
@@ -215,12 +219,17 @@ test('active Issue development blocks another task, and a PR comment review revi
   assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.pr'").n,1);
 });
 
-test('a stale PR comment review cannot become a head-triggered task that starts development',async t=>{
-  const current={number:1,state:'open',draft:false,head:{sha:'d'.repeat(40)}};
-  const h=await emptyRepositoryFixture(t,{github:(path,send)=>{if(path.endsWith('/pulls/1')){send(current);return true;}}});
-  h.store.run("UPDATE tasks SET kind='review.pr',head_sha=?,unique_key='101:review.pr:1:comment:502',input=? WHERE id=?",'c'.repeat(40),JSON.stringify({comment:{id:502,body:'@bot review this PR'}}),h.taskId);
-  const task=await h.run();assert.equal(task.status,'superseded');assert.equal(task.error_code,'pull_request_head_changed');
-  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,1);assert.equal(h.comments.length,0);
+test('a queued PR comment review takes the new head before it starts, and creates no other task',async t=>{
+  // The fixture serves the files of commit a…a, the PR's head by now.
+  const current={number:1,state:'open',draft:false,title:'Change',body:'',head:{sha:'a'.repeat(40)},base:{ref:'main'}};
+  const h=await emptyRepositoryFixture(t,{github:(path,send)=>{
+    if(path.endsWith('/pulls/1')){send(current);return true;}
+    if(/\/pulls\/1\/(files|reviews|comments)$/.test(path)){send([]);return true;}
+  }});
+  h.setBranch('ready');h.store.run("UPDATE tasks SET kind='review.pr',head_sha=?,unique_key='101:review.pr:1:comment:502',input=? WHERE id=?",'c'.repeat(40),JSON.stringify({comment:{id:502,body:'@bot review this PR'}}),h.taskId);
+  const task=await h.run();assert.equal(task.status,'succeeded');assert.equal(task.head_sha,current.head.sha);
+  assert.equal(JSON.parse(task.result).reviewed_sha,current.head.sha);assert.deepEqual(JSON.parse(task.input).heads,[current.head.sha]);
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,1);assert.equal(h.store.get("SELECT count(*) n FROM dispatch_events WHERE type='pull_request.synchronize'").n,0);
 });
 
 test('review queue is atomic with archive and deduplicates logical events across deliveries',async t=>{
@@ -240,7 +249,11 @@ test('review queue is atomic with archive and deduplicates logical events across
   const opened={repository:{id:101},action:'ready_for_review',pull_request:{...pull,draft:false}};
   assert.equal((await h.hook(a.path,a.secret,'ready',opened,{'X-GitHub-Event':'pull_request'})).value.tasks_created,1);
   assert.equal((await h.hook(a.path,a.secret,'same-head',{...opened,action:'synchronize'},{'X-GitHub-Event':'pull_request'})).value.tasks_created,0);
-  assert.equal((await h.hook(a.path,a.secret,'new-head',{...opened,action:'synchronize',pull_request:{...pull,draft:false,head:{sha:'b'.repeat(40)}}},{'X-GitHub-Event':'pull_request'})).value.tasks_created,1);
+  // A new head joins the review that waits (#770); it reviews a head of its own once no review can take it.
+  const push=head=>h.hook(a.path,a.secret,'push-'+head[0],{...opened,action:'synchronize',pull_request:{...pull,draft:false,head:{sha:head}}},{'X-GitHub-Event':'pull_request'});
+  assert.equal((await push('b'.repeat(40))).value.tasks_created,0);assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='review.pr'").n,1);
+  h.store.run("UPDATE tasks SET status='succeeded' WHERE kind='review.pr'");
+  assert.equal((await push('c'.repeat(40))).value.tasks_created,1);
 });
 test('inline positions use real hunk lines and models cannot choose approval events',()=>{
   const files=[{filename:'a.js',patch:'@@ -10,2 +10,2 @@\n-old\n+new\n context'}];

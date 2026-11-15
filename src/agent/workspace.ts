@@ -73,7 +73,7 @@ export class Workspace {
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'phase',phase:'validate',operation_id:id,command:request.command,detail:`正在运行测试：${request.command}`});
     let response;
     // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
-    const wait=['workspace_acceptance','workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','git_import'].includes(request.type)?0:request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
+    const wait=['workspace_acceptance','workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','git_import'].includes(request.type)?0:request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
     const operations=inFlight.get(this.task.id)??new Map<string,any>();inFlight.set(this.task.id,operations);
     operations.delete(id);operations.set(id,input.request);
     try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
@@ -143,36 +143,60 @@ export class Workspace {
   // commits. `also` are further commits the task needs there, such as a pull request's base. Returns null when this way
   // is not available (the caller then copies files as before); a reason to stop the task still stops it.
   async checkout(github:GitHub,commitSha:string,mirror:Mirror,also:string[]=[]){
+    const listing=await this.listing(commitSha,mirror,`正在准备工作区：在虚拟电脑上检出固定提交 ${commitSha}…`);if(!listing)return null;
+    const packed=await this.transfer(commitSha,mirror,also);if(packed===null)return null;
+    const ready=await this.call('checkout:worktree:'+this.task.workspace_id,{type:'workspace_checkout',sha:commitSha,tree_sha:listing.tree_sha,author_email:github.authorEmail()});
+    if(ready.error||ready.tree_sha!==listing.tree_sha)return null;
+    return this.checkedOut(commitSha,listing,mirror,packed,'已检出');
+  }
+  /**
+   * Moves this task's worktree to another commit in place (#770), keeping the directory, its untracked files and the
+   * agent's session. Tracked changes, and untracked files the commit would overwrite, are saved as a patch under
+   * ../context/ first (`saved`). `key` tells moves of one attempt apart. Returns null when the workspace is not a
+   * worktree of the computer's store or the move fails: the caller then prepares a fresh workspace.
+   */
+  async advance(commitSha:string,mirror:Mirror,also:string[],key:string){
+    const listing=await this.listing(commitSha,mirror,`正在把工作区移到新提交 ${commitSha}…`);if(!listing)return null;
+    const packed=await this.transfer(commitSha,mirror,also);if(packed===null)return null;
+    const moved=await this.call(`advance:${key}:${commitSha}`,{type:'workspace_advance',sha:commitSha,tree_sha:listing.tree_sha});
+    if(moved.error||moved.tree_sha!==listing.tree_sha)return null;
+    return {...this.checkedOut(commitSha,listing,mirror,packed,'已移到新提交'),previous_sha:String(moved.previous_sha),saved:moved.saved??null};
+  }
+  // The files of a commit the mirror holds, after the checks every checkout makes; null when the mirror lacks it.
+  private async listing(commitSha:string,mirror:Mirror,detail:string){
     const listing=mirror.has(commitSha)?await mirror.listing(commitSha):null;if(!listing)return null;
-    this.log({type:'phase',phase:'prepare',sha:commitSha,detail:`正在准备工作区：在虚拟电脑上检出固定提交 ${commitSha}…`});
+    this.log({type:'phase',phase:'prepare',sha:commitSha,detail});
     const unsafe=listing.tree.find(f=>f.mode==='120000'&&(f.path.startsWith('.bot/')||/^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(f.path)));
     if(unsafe)stop('unsafe_bot_rule','waiting_configuration',`Repository rule is a symbolic link: ${unsafe.path}`);
     // The task's own credentials must not be in files the agent reads; the mirror is searched instead of copying the files.
     const leaked=await mirror.secrets(commitSha,this.redactor.values);
     if(leaked.length)stop('credential_in_repository',undefined,`Credential found in repository file: ${leaked[0]}`);
+    return listing;
+  }
+  // Sends the computer's git store what it lacks of these commits, as a pack. Returns the bytes sent, or null when this
+  // way is not available.
+  private async transfer(commitSha:string,mirror:Mirror,also:string[]):Promise<number|null>{
     const have=await this.deliver({type:'git_have'});if(have.error||!Array.isArray(have.commits))return null;
     const missing=[...new Set([commitSha,...also])].filter(sha=>mirror.has(sha)&&!have.commits.includes(sha));
-    let packed=0;
-    if(missing.length){
-      const pack=await mirror.pack(missing,have.commits),id=randomId(),file=await open(pack.file,'r');
-      try{
-        // Chunks go straight to the computer: a first pack holds the whole repository and is not kept with the task.
-        const chunk=Buffer.alloc(45000);
-        for(let offset=0;offset<pack.size;offset+=45000){
-          const {bytesRead}=await file.read(chunk,0,chunk.length,offset);
-          const sent=await this.deliver({type:'git_pack',pack_id:id,base64:chunk.subarray(0,bytesRead).toString('base64'),offset});
-          if(sent.error)return null;
-          if(offset%(45000*200)===0)this.log({type:'snapshot_progress',sha:commitSha,bytes:offset+bytesRead,detail:`正在把仓库历史传到虚拟电脑：${offset+bytesRead}／${pack.size} 字节`});
-        }
-      }finally{await file.close();await rm(pack.file,{force:true});}
-      const imported=await this.call('checkout:import:'+id,{type:'git_import',pack_id:id,commits:missing});if(imported.error)return null;
-      packed=pack.size;
-    }
-    const ready=await this.call('checkout:worktree:'+this.task.workspace_id,{type:'workspace_checkout',sha:commitSha,tree_sha:listing.tree_sha,author_email:github.authorEmail()});
-    if(ready.error||ready.tree_sha!==listing.tree_sha)return null;
+    if(!missing.length)return 0;
+    const pack=await mirror.pack(missing,have.commits),id=randomId(),file=await open(pack.file,'r');
+    try{
+      // Chunks go straight to the computer: a first pack holds the whole repository and is not kept with the task.
+      const chunk=Buffer.alloc(45000);
+      for(let offset=0;offset<pack.size;offset+=45000){
+        const {bytesRead}=await file.read(chunk,0,chunk.length,offset);
+        const sent=await this.deliver({type:'git_pack',pack_id:id,base64:chunk.subarray(0,bytesRead).toString('base64'),offset});
+        if(sent.error)return null;
+        if(offset%(45000*200)===0)this.log({type:'snapshot_progress',sha:commitSha,bytes:offset+bytesRead,detail:`正在把仓库历史传到虚拟电脑：${offset+bytesRead}／${pack.size} 字节`});
+      }
+    }finally{await file.close();await rm(pack.file,{force:true});}
+    const imported=await this.call('checkout:import:'+id,{type:'git_import',pack_id:id,commits:missing});if(imported.error)return null;
+    return pack.size;
+  }
+  private checkedOut(commitSha:string,listing:{tree:any[];tree_sha:string},mirror:Mirror,packed:number,done:string){
     const files=listing.tree.filter(f=>f.type==='blob'),skipped=listing.tree.filter(f=>f.type!=='blob');
     this.log({type:'snapshot',sha:commitSha,files:files.length,bytes:files.reduce((sum,f)=>sum+(f.size||0),0),skipped:skipped.length,source:'git_worktree',cache:mirror.state,pack_bytes:packed,
-      detail:`已检出 ${files.length} 个文件（git worktree，含仓库历史）${packed?`，本次向虚拟电脑传送 ${packed} 字节的 git 对象`:'，虚拟电脑已有所需提交'}${skipped.length?`；${skipped.length} 个子模块条目未检出`:''}`});
+      detail:`${done} ${files.length} 个文件（git worktree，含仓库历史）${packed?`，本次向虚拟电脑传送 ${packed} 字节的 git 对象`:'，虚拟电脑已有所需提交'}${skipped.length?`；${skipped.length} 个子模块条目未检出`:''}`});
     return {files:files.map(({path,sha,mode})=>({path,sha,mode})),skipped_files:skipped.map(({path,sha,mode})=>({path,sha,mode})),materials:[],tree_sha:listing.tree_sha,
       source_tree_sha:listing.tree_sha,history:true,coverage:[`Checkout: ${files.length} files at ${commitSha} in a git worktree with the repository's history${skipped.length?`; ${skipped.length} submodule entries not checked out`:''}`]};
   }
