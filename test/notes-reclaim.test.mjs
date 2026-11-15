@@ -77,8 +77,15 @@ test('a repository connected again starts from empty notes even when the old vol
   f.docker.failVolume = false;
   // The repository is connected again: the control plane registers the project again and reconciles it, which reclaims
   // the stale notes volume before the project can start against it.
+  const before = f.docker.calls.length, volume = f.projects.notesName('101');
   await repository(admin, a.id, '101');
   await h.projects.reconcile();
+  const calls = f.docker.calls.slice(before), removed = calls.indexOf('DELETE /volumes/' + volume);
+  assert.ok(removed >= 0, 'the stale volume is deleted, not merely left unmounted');
+  const started = calls.findIndex(call => call.startsWith('POST /containers/create') && call.includes('101'));
+  assert.ok(started < 0 || removed < started, 'the stale volume is deleted before the project container is created');
+  // The project that starts afterwards gets a new, empty volume; the old one is gone before it can be mounted.
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE repository_id='101' AND action='repository.notes_volume_reclaimed'"), 'the reclaim is recorded');
   // The volume the project gets is a fresh one: the stale volume was reclaimed before it could be mounted, so nothing the
   // old project wrote is readable and the notes directory starts empty.
   await assert.rejects(readFile(join(f.projects.notesRoot, '101', 'repository.md')), /ENOENT/, 'the old notes file is gone');
