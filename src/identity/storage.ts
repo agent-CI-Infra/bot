@@ -1,6 +1,9 @@
 import type { Store } from '../storage/database.js';
 
 export const projectCapabilities = ['tasks.read', 'tasks.manage_own', 'tasks.write', 'roles.edit', 'roles.publish', 'knowledge.read', 'knowledge.write', 'schedules.manage', 'config.write', 'release.manage'];
+// What GitHub collaborators get by default (#847): Write and Maintain ask, create tasks and manage their own; Triage and Read ask.
+export const memberCapabilities = ['tasks.read', 'tasks.write', 'tasks.manage_own'];
+export const readerCapabilities = ['tasks.read'];
 // A grant manager may explicitly delegate these; default/derived project grants never include them.
 export const explicitDelegationCapabilities = ['knowledge.review'];
 export const tenantId = (owner: string): string => `github.com:${owner}`;

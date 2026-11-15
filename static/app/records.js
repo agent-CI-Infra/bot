@@ -35,7 +35,7 @@ function userAccessLines(user) {
   const projects = user.access?.projects || [], lines = [element('p', projects.length ? `当前可见项目（${projects.length}）：` : '当前没有可访问的项目')];
   if (projects.length) {
     const list = element('ul', '', 'user-project-access');
-    for (const project of projects) list.append(element('li', `${project.full_name} · ${project.can_configure ? '可配置' : '可查看'} · ${project.sources.map(source => source === 'github_derived' ? '来自 GitHub' : '手动分配').join('、')}`));
+    for (const project of projects) list.append(element('li', `${project.full_name} · ${project.can_configure ? '可配置' : project.can_write ? '可提问和派任务' : '可查看'} · ${project.sources.map(source => source === 'github_derived' ? '来自 GitHub' : '手动分配').join('、')}`));
     lines.push(list);
   }
   if (user.access?.github_pending) lines.push(element('p', 'GitHub 权限待验证，未计入当前可见项目；用户可在「身份与权限」重新验证。', 'warning'));

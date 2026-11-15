@@ -2,14 +2,10 @@
 // GitHub, Feishu and the model are local protocol fixtures.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync } from 'node:crypto';
-import { channelFixture, envelope, post, finished, until, bindFixture, inGroup, boundGroup, privateChat, repositoryAssistant, scriptedModel } from './channel-fixture.mjs';
-import { githubIdentityServer, seedInstallation, githubSignIn } from './identity-fixture.mjs';
-import { GitHubIdentity } from '../dist/identity/github.js';
+import { githubChannelFixture as fixture, post, finished, until, inGroup, boundGroup, privateChat, repositoryAssistant, scriptedModel } from './channel-fixture.mjs';
 import { GitHubRefresh } from '../dist/identity/github-refresh.js';
 import { listEffectiveScopes, resolvePrincipalActor } from '../dist/identity/authorization.js';
 
-const key = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
 const say = (res, content) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content } }], usage: { prompt_tokens: 12, completion_tokens: 4 } })); };
 const usable = (h, p) => listEffectiveScopes(h.store, p).filter(g => g.source === 'github_derived' && g.state === 'active');
 // No check succeeded for 31 minutes: the stored proof and the grants it gave have lapsed, as a day after signing out.
@@ -17,31 +13,6 @@ const lapse = (h, p) => {
   h.store.run("UPDATE external_identities SET verified_at=? WHERE principal_id=? AND provider='github'", Date.now() - 31 * 60_000, p);
   h.store.run("UPDATE scoped_grants SET expires_at=? WHERE principal_id=? AND source='github_derived'", Date.now() - 60_000, p);
 };
-
-async function fixture(t) {
-  const github = await githubIdentityServer(t); let identity;
-  const f = await channelFixture(t, store => ({ githubIdentity: identity = new GitHubIdentity(store, { clientId: 'fixture-client', clientSecret: 'fixture-secret',
-    redirectUri: 'http://127.0.0.1/auth/github/callback', apiUrl: github.base, webUrl: github.base }) }));
-  // Permission checks read the installation with App 123's key.
-  const account = f.h.store.get('SELECT * FROM accounts WHERE id=?', f.a.id), secrets = f.h.store.secrets.open(account.credentials, 'account:' + account.id);
-  f.h.store.run("UPDATE accounts SET type='github_app',app_id='123',credentials=? WHERE id=?", f.h.store.secrets.seal({ ...secrets, token: undefined, private_key: key }, 'account:' + account.id), account.id);
-  seedInstallation(f.h, f.a.id, github.state);
-  const reads = id => github.state.requests.filter(r => r.path === '/user' && r.authorization === 'Bearer fixture-user-' + id).length;
-  // A GitHub user who signed in once, bound to Feishu as `actor`, whose console sessions have all ended. The fake GitHub then
-  // answers as this user until the next one signs in.
-  const person = async (id, login, actor) => {
-    Object.assign(github.state, { id, login });
-    const principal = (await githubSignIn(identity)).result.principal_id;
-    bindFixture(f.h, f.id, principal, actor); f.h.store.run('DELETE FROM sessions WHERE user_id=?', principal);
-    return principal;
-  };
-  const sent = text => until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes(text)));
-  const privately = async (actor, content) => {
-    const receipt = await post(f.h, f.id, envelope(content, { sender: { sender_id: { open_id: actor } }, message: { chat_id: 'oc_' + actor } }));
-    return finished(f.h, receipt.value.operation_id);
-  };
-  return { ...f, github, identity: () => identity, reads, person, sent, privately };
-}
 
 test('a private chat renews a lapsed proof once and keeps working without a console session', async t => {
   const f = await fixture(t), p = await f.person(50, 'feishu-admin', 'ou_feishu_admin');

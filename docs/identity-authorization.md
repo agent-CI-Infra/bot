@@ -24,7 +24,8 @@ GitHub 登录后的页头显示 GitHub 用户名和头像，内部账号 ID 仍�
 | 组织 owner，all 安装 | 租户 org_admin；仅覆盖有效安装中的项目 |
 | 组织 owner，selected 安装 | 选中的已安装项目管理 |
 | 仓库 admin | 对应已安装项目管理 |
-| 仓库 Write、Maintain、Triage、Read | 不自动授予管理权限；可由 Bot 管理员显式委派 |
+| 仓库 Write、Maintain | 对应已安装项目的成员（`project_member`）：`tasks.read`、`tasks.write`、`tasks.manage_own`，即提问、创建任务、管理自己发起的任务 |
+| 仓库 Triage、Read | 对应已安装项目的读者（`project_reader`）：`tasks.read`，即提问和查看任务 |
 | 普通成员、历史 sender、requester | 不自动授予管理权限 |
 
 独立 OAuth App 明确请求空 scope，用户 token 仅读取 `/user`；返回额外 scope 时拒绝保存与登录。权限核验使用另行签发的只读 GitHub App 安装令牌：读取安装详情和完整仓库列表，查询 `/orgs/{org}/memberships/{username}` 和 `/repos/{owner}/{repo}/collaborators/{username}/permission`，比对数字用户、组织和仓库 ID 后形成证明。临时安装令牌只申请 Metadata 读和安装已具备的 Members 读，查询结束后撤销。组织 owner 必须得到 `active/admin` 成员证明；App 自身全仓权限、安装事件和历史操作者不构成人类管理权限。权限计算与 #162 的安装状态、仓库范围和投影版本相交。暂时失败、SSO 或权限不足显示待验证，不能把失败推断成离职，也不能继续使用过期派生权限；GitHub 流控不算失败，见[何时核验 GitHub 权限](#何时核验-github-权限)。
@@ -39,7 +40,7 @@ GitHub 登录后的页头显示 GitHub 用户名和头像，内部账号 ID 仍�
 - **后台刷新**：每 10 分钟一轮，核验仍在使用派生授权的账号：有未过期控制台会话的账号、有启用中飞书个人绑定的账号，以及启用中群绑定的授权人；5 分钟内刚核验过的（例如刚登录）留到下一轮。同时最多核验 2 个账号，相邻两次开始至少间隔 2 秒，等待期间不再符合这些条件的账号跳过。三者都不是的账号不发任何 GitHub 请求，其派生授权 30 分钟后过期，下次登录时重新核验。
 - **飞书回合先补核验**：飞书私聊回合、群回合（核验该绑定的授权人）和会话定时任务在读取权限前，与写请求一样，对证明已过期的账号先核验一次，共用正在进行的核验。私聊消息在核验期间留在待处理队列，同一私聊之后的消息按顺序排在它后面，不阻塞其他会话；一分钟内由飞书回合核验过的账号不因后续消息重复核验。
 - **写请求不等待 GitHub**：按已保存的授权（最新有效权限，见[授权版本](#授权版本)）判断，不发 GitHub 请求。只有账号的 GitHub 证明已过期，即 30 分钟内没有一次核验成功时，这个请求才先核验一次，并发请求共用同一次核验。刚失败的核验（身份转为待验证）一分钟内不因写请求重复，GitHub 要求等待期间也不重复。
-- **从不核验**：平台超级管理员，以及持有有效显式委派（包括控制台手工分配的项目或组织）的账号。他们的访问不依赖 GitHub，也不再获得 GitHub 派生授权：下一次登录或「重新验证」时撤销已有派生授权，不发 GitHub 请求。
+- **从不核验**：平台超级管理员，以及持有有效显式委派（包括控制台手工分配的项目或组织）的账号；项目管理员授予的委派不在此列，见[项目内委派](#项目内委派)。他们的访问不依赖 GitHub，也不再获得 GitHub 派生授权：下一次登录或「重新验证」时撤销已有派生授权，不发 GitHub 请求。
 - **流控**：GitHub 报告流控时（429，或 403 带 `Retry-After`、`X-RateLimit-Remaining: 0`），本次核验不再发送请求；受影响安装的派生授权保留剩余有效期，身份不转为待验证、最近核验时间不变，`verification_issues` 记 `github_rate_limited`。后台刷新暂停到 GitHub 给出的恢复时间，未给出时暂停一分钟。
 
 撤权时效：webhook 带来的撤权立即生效。用户撤销 App 授权（`github_app_authorization` `revoked`）撤销身份并结束其会话；组织成员移除（`organization` `member_removed`、`member` `removed`）使该账号的派生授权立即过期，仍成立的部分在下一次核验时恢复；安装删除或暂停使对应派生授权立即失效。GitHub 上的其他变化，如移除 owner、收回仓库 admin，在下一次核验时生效：后台刷新覆盖的账号（控制台会话、飞书个人绑定、群绑定授权人）不超过 10 分钟，其他账号在下次登录时。
@@ -56,11 +57,17 @@ principal 的 `authorization_revision` 只在账号失去原有有效权限时�
 
 网页控制台不比较会话的授权版本。写请求不等待 GitHub 核验（见[何时核验 GitHub 权限](#何时核验-github-权限)），在每次落库或调用 GitHub 前按最新有效权限判断：守卫对目标项目调用 `authorize`；请求期间版本变化时，下一次落库或 GitHub 调用前重放本请求已通过的授权检查和请求开始时的超级管理员身份，全部仍成立就继续，失去其中一项返回 `403`。账号或主体停用、会话过期或撤销返回 `401 login_required`。因此刷新页面或会话停留在旧版本不会导致写入失败，只有真实失去所需权限才会被拒绝。
 
-平台超级管理员拥有恢复和显式委派管理能力，org_admin 与 project_admin 不会取得平台能力或无限转授能力。派生 owner 不提供 `grants.manage`，不能自授或互授把派生权限固化。显式委派 API 只接受委派者有权授予的能力和范围，禁止自授与平台能力注入。普通配置修改直接保存并审计，不引入默认人工审批。
+平台超级管理员拥有恢复和显式委派管理能力，org_admin 与 project_admin 不会取得平台能力或无限转授能力。派生 owner 不提供 `grants.manage`。显式委派 API 只接受委派者有权授予的能力和范围，禁止自授与平台能力注入。普通配置修改直接保存并审计，不引入默认人工审批。
+
+### 项目内委派
+
+项目管理员（在该项目有 `config.write`，无论来自 GitHub、组织授权还是委派）可以在这个项目里授出和撤销自己拥有的能力，包括任命其他项目管理员；整个组织的授权、平台角色和 `knowledge.review` 这类只能由授权管理员开启的能力仍只归超级管理员。项目管理员授出的授权记为 `policy: project_delegation`，只在授予人仍然拥有这些能力时有效：授予人失去 GitHub 权限、被撤销或停用后，这条授权显示为暂停（`state: suspended`，`reason: grantor_authority`），授予人恢复后自动生效。判断授予人的权限时，不计入经由已在这条委派链上的人得到的委派，所以两位管理员互相授权也不能在 GitHub 收回权限后保住对方，派生权限无法这样固化。这类委派是在 GitHub 权限之外追加的，持有人仍按[何时核验 GitHub 权限](#何时核验-github-权限)核验，派生授权不受影响。超级管理员授出的委派（`policy: independent`）与以前一样独立保存。
 
 ## 服务端契约
 
-`GET /api/repositories/:id/members` 是按项目过滤的只读授权投影，要求当前项目的 `tasks.read` 与 `config.write`。它只返回该项目或其组织范围内的授权摘要；组织级 GitHub 派生授权还须命中该安装的当前仓库范围。响应不包含身份凭据或授权证据原文，也不会开放组织级成员列表。`can_manage_legacy` 仅说明当前平台管理员能否使用原有项目分配接口，既有写入能力和服务端版本检查保持不变。项目详情返回 `can_configure`，供只读页面隐藏修改入口。
+`GET /api/repositories/:id/members` 是按项目过滤的只读授权投影，要求当前项目的 `tasks.read` 与 `config.write`。它只返回该项目或其组织范围内的授权摘要；组织级 GitHub 派生授权还须命中该安装的当前仓库范围。响应不包含身份凭据或授权证据原文，也不会开放组织级成员列表。每条授权带 `grantor_name` 和 `can_revoke`（当前用户能否在这里撤销），响应另有 `tenant_id`、`can_delegate` 和 `delegable_capabilities`（当前用户能在本项目授出的能力）。`can_manage_legacy` 仅说明当前平台管理员能否使用原有项目分配接口，既有写入能力和服务端版本检查保持不变。项目详情返回 `can_configure`，供只读页面隐藏修改入口。
+
+`POST /api/identity/grants` 接受 `tenant_id`、可选的 `project_id`、`capabilities`，以及 `principal_id` 或 `github_login` 二选一（`github_login` 按 GitHub 最近报告的用户名匹配已用 GitHub 登录过的账号，找不到返回 `404 principal_not_found`，多个账号同名返回 `409 github_login_ambiguous`）。超级管理员可授出任意范围；项目管理员只能授出所在项目、自己拥有的能力，且只能授给人，不带 `project_id` 返回 `403 organization_delegation_forbidden`，超出自己的能力返回 `403 capability_forbidden`。`DELETE /api/identity/grants/:id` 同样允许项目管理员撤销本项目里不超出自己能力的委派；来自 GitHub、旧版分配和群绑定的授权返回 `409 use_source_revocation`。项目「成员」页按 GitHub 用户名提供只读、成员、项目管理员三档授权和逐条撤销。
 
 `src/identity/authorization.ts` 提供 `resolveActor(store, sessionRef, options)`、`authorize(actor, capability, resource)` 和 `listEffectiveScopes(store, principalId)`。ActorContext 字段为 `principal_id, tenant_id, project_id?, channel, capabilities, authorization_revision, request_id`。它由可信服务端建立；对象副本、浏览器 JSON、IM 文本或模型参数不能成为已认证 Actor。旧 Actor 由 `src/app/auth.ts` 适配，继续用于现有控制台服务。
 

@@ -6,6 +6,8 @@ import { installationRef, numericId, type InstallationRef } from '../installatio
 
 interface Access {
   target_id: string; owner: boolean; repository_ids: string[]; admin_ids: string[];
+  /** Repositories where the person is a Write or Maintain collaborator, and where Triage or Read (#847); admins are in neither. */
+  write_ids: string[]; read_ids: string[];
   repository_selection: string;
   /** Why some of this evidence could not be settled, or null when all of it was. */
   uncertain: string | null;
@@ -87,7 +89,7 @@ export class GitHubPermissions {
           }
         } catch (error) { if (failureCode(error) === 'github_rate_limited') throw error; uncertain ??= 'membership:' + failureCode(error); }
       }
-      const repositoryIds: string[] = [], adminIds: string[] = [];
+      const repositoryIds: string[] = [], adminIds: string[] = [], writeIds: string[] = [], readIds: string[] = [];
       for (const repo of repos) {
         const id = numericId(repo.id)!;
         if (owner) { repositoryIds.push(id); adminIds.push(id); continue; }
@@ -99,10 +101,14 @@ export class GitHubPermissions {
           const current = await this.request(token, `/repos/${String(repo.full_name).split('/').map(encodeURIComponent).join('/')}`);
           if (numericId(current?.id) !== id || numericId((current?.owner as Json | undefined)?.id) !== targetId) return fail(502, 'github_incomplete_evidence');
           if (permission.permission !== 'none') repositoryIds.push(id);
+          // GitHub's `permission` folds Maintain into write and Triage into read; `role_name` names the role itself. Either decides.
+          const level = [String(permission.permission), String(permission.role_name ?? '')];
           if (permission.permission === 'admin' || ((permission.user as Json)?.permissions as Json | undefined)?.admin === true) adminIds.push(id);
+          else if (level.some(value => value === 'write' || value === 'maintain')) writeIds.push(id);
+          else if (level.some(value => value === 'read' || value === 'triage')) readIds.push(id);
         } catch (error) { if (failureCode(error) === 'github_rate_limited') throw error; uncertain ??= 'repository_permission:' + failureCode(error); }
       }
-      return { target_id: targetId, owner, repository_ids: repositoryIds, admin_ids: adminIds,
+      return { target_id: targetId, owner, repository_ids: repositoryIds, admin_ids: adminIds, write_ids: writeIds, read_ids: readIds,
         repository_selection: String(installation.repository_selection), uncertain };
     } finally {
       await revokeInstallationToken(this.apiUrl, token).catch(() => false);

@@ -37,8 +37,9 @@ export function githubAppInstallUrl(store: Store): string | null {
 /** Installed repositories this principal already administers, but that a platform administrator has not started.
  *  When a tenant is selected, only grants of that tenant are considered, matching the project list. */
 export function pendingInstalledRepositories(store: Store, principal: string, tenantId?: string | null): GitHubRepositoryRef[] {
+  // Only administration counts: a collaborator's derived grant (#847) does not make a repository theirs to start.
   const active = listEffectiveScopes(store, principal).filter(g => g.source === 'github_derived' && g.state === 'active'
-    && (!tenantId || g.tenant_id === tenantId));
+    && (g.role === 'project_admin' || g.role === 'org_admin') && (!tenantId || g.tenant_id === tenantId));
   const seen = new Map<string, GitHubRepositoryRef>();
   for (const grant of active) {
     const row = store.get('SELECT installation_ref,project_id FROM scoped_grants WHERE id=?', grant.grant_id);
@@ -107,9 +108,9 @@ export function githubConnection(store: Store, principal: string, scope: { visib
       `已登录 GitHub，有 ${pending.length} 个仓库已安装但还没有被超级管理员启动`,
       '请联系超级管理员在控制台启动这些仓库。', 'wait_activation');
   }
-  // "App not installed on my repos" and "I am not a repository Admin" look the same in stored data:
-  // installations belong to the whole deployment, and verification does not persist non-admin membership.
+  // "App not installed on my repos" and "I am not a collaborator there" look the same in stored data:
+  // installations belong to the whole deployment, and verification persists no grant for repositories without access.
   // A single state avoids telling the person they lack Admin rights on someone else's installation.
   return result('no_repositories', '已登录 GitHub，但还没有授权任何仓库',
-    '请到 GitHub 选择要授权的仓库；你需要是这些仓库的管理员。若已经安装仍看不到，请联系管理员启动或委派。', 'choose_repos');
+    '请到 GitHub 选择要授权的仓库；你需要是这些仓库的协作者（Read 及以上），管理员才能配置。若已经安装仍看不到，请联系管理员启动或委派。', 'choose_repos');
 }

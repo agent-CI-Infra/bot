@@ -1,9 +1,11 @@
-import { createCipheriv, createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { managementFixture } from './management-fixture.mjs';
 import { digest, randomId } from '../dist/core/security.js';
 import { FEISHU_SCOPES } from '../dist/channels/feishu.js';
 import { resolvePrincipalActor } from '../dist/identity/authorization.js';
+import { GitHubIdentity } from '../dist/identity/github.js';
+import { githubIdentityServer, seedInstallation, githubSignIn } from './identity-fixture.mjs';
 
 export const credentials = { app_secret: 'fixture-feishu-app-secret', encrypt_key: 'fixture-feishu-encrypt-key', verification_token: 'fixture-feishu-verification-token' };
 export function transport() {
@@ -190,4 +192,30 @@ export async function repositoryAssistant(f, permissions) {
   const result = await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id });
   if (result.status !== 200) throw new Error(JSON.stringify(result.value));
   f.groupPermissions = permissions;
+}
+/** A channel fixture whose control plane checks GitHub permissions against a local GitHub (#846, #847): `person` signs someone
+ * in with GitHub and binds them to Feishu, `privately` sends their private message and waits for it. */
+export async function githubChannelFixture(t) {
+  const github = await githubIdentityServer(t); let identity;
+  const f = await channelFixture(t, store => ({ githubIdentity: identity = new GitHubIdentity(store, { clientId: 'fixture-client', clientSecret: 'fixture-secret',
+    redirectUri: 'http://127.0.0.1/auth/github/callback', apiUrl: github.base, webUrl: github.base }) }));
+  // Permission checks read the installation with App 123's key.
+  const account = f.h.store.get('SELECT * FROM accounts WHERE id=?', f.a.id), secrets = f.h.store.secrets.open(account.credentials, 'account:' + account.id);
+  f.h.store.run("UPDATE accounts SET type='github_app',app_id='123',credentials=? WHERE id=?", f.h.store.secrets.seal({ ...secrets, token: undefined, private_key: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) }, 'account:' + account.id), account.id);
+  seedInstallation(f.h, f.a.id, github.state);
+  const reads = id => github.state.requests.filter(r => r.path === '/user' && r.authorization === 'Bearer fixture-user-' + id).length;
+  // A GitHub user who signed in once, bound to Feishu as `actor`, whose console sessions have all ended. The fake GitHub then
+  // answers as this user until the next one signs in.
+  const person = async (id, login, actor) => {
+    Object.assign(github.state, { id, login });
+    const principal = (await githubSignIn(identity)).result.principal_id;
+    bindFixture(f.h, f.id, principal, actor); f.h.store.run('DELETE FROM sessions WHERE user_id=?', principal);
+    return principal;
+  };
+  const sent = text => until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes(text)));
+  const privately = async (actor, content) => {
+    const receipt = await post(f.h, f.id, envelope(content, { sender: { sender_id: { open_id: actor } }, message: { chat_id: 'oc_' + actor } }));
+    return finished(f.h, receipt.value.operation_id);
+  };
+  return { ...f, github, identity: () => identity, reads, person, sent, privately };
 }
