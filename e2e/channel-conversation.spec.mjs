@@ -1,13 +1,13 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
-import { channelFixture, inGroup, envelope, post, until } from '../test/channel-fixture.mjs';
+import { channelFixture, inGroup, envelope, post, until, shareAssistantModel } from '../test/channel-fixture.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 
 for (const width of [1440, 390]) test(`continuous group assistant and private management conversations open from unified bindings list at ${width}px (protocol/model fixtures)`, async ({ page }) => {
   const f = await channelFixture(undefined, store => ({ engine: new TaskEngine(store, { call: async () => ({ state: 'stopped' }) }) })), errors = []; page.on('pageerror', error => errors.push(error.message));
   try {
     const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
-    await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id });
+    await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id }); await shareAssistantModel(f);
     const quiet = inGroup('', 'ou_alice'); quiet.event.message.mentions = []; quiet.event.message.content = JSON.stringify({ text: '未 @ 的共同决定：先核对本地证据' }); await post(f.h, f.id, quiet);
     const chat = f.h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
     expect((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0 })).status).toBe(200);

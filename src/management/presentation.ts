@@ -33,9 +33,11 @@ export function managementFailure(code:string):string {
   return '本次请求未完成，请登录控制台查看执行记录；已有操作以回执为准。';
 }
 /** What a group sees when its assistant cannot answer: who can fix it and where, without request data or internal IDs. */
-export function serviceFailure(code:string,role:string):string {
+export function serviceFailure(code:string,role:string,detail?:string):string {
   if(/^channel_(resource|image|binary)/.test(code))return managementFailure(code);
-  if(code==='service_role_model_not_configured')return `群助手「${role}」尚未配置模型，请超级管理员在控制台「全局设置 → 服务角色」中为它选择共享模型。`;
+  if(code==='service_role_model_not_configured')return `群助手「${role}」尚未配置模型，请维护人在控制台为它选择模型（全局角色在「全局设置 → 服务角色」，项目角色在「个人设置 → 飞书绑定」）。`;
+  // #849: the model must serve every project the group reads; detail names the projects it does not. Never another model.
+  if(code==='channel_service_model_unavailable')return `群助手「${role}」的模型不可用：${detail??'它没有授权给本群范围内的全部项目。'}请项目管理员在控制台「个人设置 → 飞书绑定」为本群换一个对范围内每个项目都可用的助手角色，或调整范围。`;
   if(code==='service_role_unavailable'||code==='service_role_not_bindable')return `群助手「${role}」已停用或不能用于群聊，请维护人在控制台「个人设置 → 飞书绑定」点击本群「配置仓库与权限」重新选择服务角色。`;
   if(modelFault.test(code))return `群助手「${role}」的模型服务暂不可用，请稍后重试；持续失败时请超级管理员检查模型设置。`;
   if(outputFault.test(code))return `群助手「${role}」的模型返回了无法处理的结果，本次未完成；请重试，持续出现时请维护人在控制台查看本群助手的会话记录。`;

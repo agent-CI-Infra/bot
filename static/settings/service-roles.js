@@ -2,11 +2,16 @@
 // elsewhere in the meantime is reported as a conflict instead of being overwritten.
 const serviceRoleErrors = { service_role_permissions_fixed: '管理助手固定允许全部能力，实际操作仍受当前用户授权约束。', service_role_revision_conflict: '这个角色已被其他操作修改，请刷新本页、核对当前配置后重新保存。',
   shared_model_required: '只能选择部署共享模型。', builtin_service_role_required: '内置角色不能停用或删除。',
-  service_role_permissions_moved: '群能做什么已改在每个群绑定的权限档位里设置（个人设置 → 飞书绑定），服务角色只保留提示词和模型。' };
+  service_role_permissions_moved: '群能做什么已改在每个群绑定的权限档位里设置（个人设置 → 飞书绑定），服务角色只保留提示词和模型。',
+  project_model_required: '项目角色只能选择本项目的专属模型，或已授权给本项目的共享模型。' };
 // The API's stable error codes, in words for the person who saved.
 async function serviceRoleRequest(path, method, body) {
   try { return await api(path, method, body); }
-  catch (err) { const code = /· (\w+)$/.exec(err.message)?.[1]; throw serviceRoleErrors[code] ? new Error(serviceRoleErrors[code]) : err; }
+  catch (err) {
+    // #849: a group bound to this role reads projects the new model does not serve; say which.
+    if (err.code === 'channel_service_model_unavailable') throw new Error(`这个模型没有授权给 ${(err.detail?.projects || []).join('、') || '用这个角色的群范围内的部分项目'}；用这个角色的群会因此停下，所以没有保存。请选择对这些项目都可用的模型，或先调整这些群。`);
+    const code = /· (\w+)$/.exec(err.message)?.[1]; throw serviceRoleErrors[code] ? new Error(serviceRoleErrors[code]) : err;
+  }
 }
 
 function serviceUsageText(usage) {
@@ -19,18 +24,21 @@ function serviceUsageText(usage) {
 function serviceRoleCard(view, initial) {
   let role = initial;
   const live = liveCard(role.name, redraw => {
-    const kind = [role.builtin ? badge('内置', 'info') : badge('自定义', ''), role.enabled ? badge('已启用', 'success') : badge('已停用', 'warning')], head = element('p', '');
+    const kind = [role.builtin ? badge('内置', 'info') : badge(role.project ? '项目角色' : '自定义', ''), role.enabled ? badge('已启用', 'success') : badge('已停用', 'warning')], head = element('p', '');
     head.append(...kind.flatMap(node => [node, ' ']));
     const model = role.model ? `${role.model.model_name} · ${hostOf(role.model.api_url)}${role.model.key_configured ? '' : '（Key 已撤销）'}` : '未配置';
     // Only the management assistant has items (all of them, within the user's own authority); a group's are on its binding (#849).
     const permissions = role.permissions_fixed ? '全部能力已允许' : '由每个群绑定的权限档位决定';
-    const nodes = [head, facts([['职责', role.responsibility || '—'], ['模型', model], ['权限', permissions],
+    const nodes = [head, facts([...(role.project ? [['所属项目', role.project.full_name]] : []), ['职责', role.responsibility || '—'], ['模型', model], ['权限', permissions],
       ['累计用量', serviceUsageText(role.usage)], ['最近请求', role.usage.last_requested_at ? timestamp(role.usage.last_requested_at) : null], ['配置版本', String(role.revision)]])];
     if (!role.model) nodes.push(element('p', '没有配置模型时，这个角色的对话会直接提示到这里配置，不会改用其他模型。', 'endpoint-warning'));
     const name = input('name', role.name, { maxLength: 80, required: true }), responsibility = textarea('responsibility', role.responsibility, { maxLength: 2000, rows: 2 });
     const prompt = textarea('prompt', role.prompt, { maxLength: 32000, rows: 4, placeholder: '附加在内置安全提示之后的说明；不能扩大工具或权限' });
     const modelSelect = document.createElement('select'), none = element('option', '不使用模型'); modelSelect.name = 'model_id'; none.value = ''; modelSelect.append(none);
-    for (const shared of view.models) { const option = element('option', `${shared.model_name} · ${hostOf(shared.api_url)}${shared.key_configured ? '' : '（Key 已撤销）'}`); option.value = shared.id; modelSelect.append(option); }
+    // A global template chooses among shared models; a project's role also among that project's own models (#849).
+    for (const choice of view.modelsFor?.(role) ?? view.models) {
+      const option = element('option', `${choice.model_name} · ${hostOf(choice.api_url)}${choice.repository_id ? '（项目专属）' : ''}${choice.key_configured ? '' : '（Key 已撤销）'}`); option.value = choice.id; modelSelect.append(option);
+    }
     modelSelect.value = role.model_id ?? '';
 
     const grid = role.permissions_fixed ? permissionEditor(structuredClone(role.permissions), view.items, () => {}, '', true)
@@ -42,7 +50,7 @@ function serviceRoleCard(view, initial) {
       try { await serviceRoleRequest('/api/service-roles/' + role.id, 'DELETE', { expected_revision: role.revision }); live.section.replaceChildren(element('h3', role.name), element('p', '已删除', 'view-success')); }
       catch (err) { remove.disabled = false; error(err); }
     }, 'quiet destructive');
-    nodes.push(actionForm([field('名称', name), field('职责说明', responsibility), field('提示词', prompt), field('模型（部署共享模型）', modelSelect),
+    nodes.push(actionForm([field('名称', name), field('职责说明', responsibility), field('提示词', prompt), field(role.project ? '模型（本项目可用的模型）' : '模型（部署共享模型）', modelSelect),
       grid,
       ...(enabled ? [enabled] : [])], '保存', async () => {
       const change = { expected_revision: role.revision, name: name.value, responsibility: responsibility.value, prompt: prompt.value, model_id: modelSelect.value || null };

@@ -371,6 +371,10 @@ async function renderFeishuBindingsPage(panel, current) {
       if (!current() || !groupSection.isConnected) return;
       openGroupEditor = rendered.openEditor;
       groupBody.replaceChildren(rendered.root);
+      // Project administrators manage their projects' assistant roles next to the groups that use them (#849).
+      if (groupData.projects.length) void buildProjectRolesSection(groupData, () => { void loadGroups(); }).then(roles => {
+        if (current() && groupBody.isConnected && groupBody.contains(rendered.root)) groupBody.append(roles);
+      }).catch(err => { if (current() && groupBody.isConnected) groupBody.append(consoleState('项目群助手角色读取失败', err.message, { tone: 'error' })); });
       if (initialOpen) rendered.editorWrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       else if (querySection === 'groups') groupSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (err) {
@@ -397,6 +401,7 @@ const employeeErrors = { channel_employee_revalidation_required: '群成员正�
   channel_service_owner_ineligible: '新负责人需要对当前全部项目范围有配置权限，且账户处于启用状态。',
   channel_service_level_invalid: '请选择一个权限档位。', channel_service_level_conflict: '权限档位和逐项设置只能二选一，请刷新本页后重新保存。',
   channel_service_permission_invalid: '逐项设置里有无效的选项，请刷新本页后重新选择。',
+  channel_service_model_unavailable: '助手角色的模型没有授权给本群范围内的全部项目，本群暂停回答。',
   service_role_model_not_configured: '服务角色尚未配置模型，请超级管理员在「全局设置 → 服务角色」中选择。' };
 const employeeError = value => Object.entries(employeeErrors).find(([key]) => String(value).includes(key))?.[1] || String(value);
 

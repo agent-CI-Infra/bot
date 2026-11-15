@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { channelFixture, inGroup, post, until, boundGroup } from './channel-fixture.mjs';
+import { channelFixture, inGroup, post, until, boundGroup, shareAssistantModel } from './channel-fixture.mjs';
 import { assistantManager } from './assistant-computer-fixture.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { ownerId } from '../dist/service-roles/assistant-computers.js';
@@ -20,7 +20,7 @@ async function fixture(t) {
     : Promise.resolve(method === 'GET' ? { generation: 1, state: 'ready' } : { ok: true, result: {} }) };
   const f = await channelFixture(t, store => ({ engine: new TaskEngine(store, manager), assistantHomes: assistant.homes }));
   const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
-  assert.equal((await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id })).status, 200);
+  assert.equal((await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id })).status, 200); await shareAssistantModel(f);
   // Every group bound below may use its assistant computer (#849: an item of the binding's level).
   f.groupPermissions = { computer: 'allow' };
   const service = f.service.management.service.assistants;

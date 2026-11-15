@@ -42,6 +42,10 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
     ["DELETE FROM settings WHERE key='roles:'||?", 1],
     ['DELETE FROM computer_console_specs WHERE repository_id=?', 1], ['DELETE FROM manager_revisions WHERE repository_id=?', 1], ['DELETE FROM manager_migrations WHERE repository_id=?', 1], ['DELETE FROM dispatch_events WHERE repository_id=?', 1], ['DELETE FROM repository_rule_sources WHERE repository_id=?', 1],
     // Models only this repository may use, with their prices and grants; a shared model only loses its grant to this repository.
+    // Group assistant roles of this project (#849) go with it; one still named by a group binding stays, disabled (and
+    // without its model if that was this project's), so the group explains why it stopped instead of switching roles.
+    [`UPDATE service_roles SET model_id=NULL WHERE model_id IN (${models})`, 1],
+    ['DELETE FROM service_roles WHERE project_id=? AND id NOT IN (SELECT service_role_id FROM channel_service_bindings)', 1], ['UPDATE service_roles SET enabled=0 WHERE project_id=?', 1],
     [`UPDATE policies SET model_id=NULL WHERE model_id IN (${models})`, 1], [`DELETE FROM model_pricing WHERE model_id IN (${models})`, 1],
     [`DELETE FROM model_projects WHERE repository_id=? OR model_id IN (${models})`, 2], ['DELETE FROM policies WHERE repository_id=?', 1], ['DELETE FROM models WHERE repository_id=?', 1],
     ['DELETE FROM project_admin_assignments WHERE repository_id=?', 1], ['DELETE FROM repo_integrations WHERE repository_id=?', 1],

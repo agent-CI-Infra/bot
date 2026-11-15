@@ -4,10 +4,11 @@ export const randomId = () => randomBytes(24).toString('hex');
 export const digest = (text: string) => createHash('sha256').update(text).digest('hex');
 
 export class HttpError extends Error {
-  /** field names the configuration path that caused the error, never request contents or credentials. */
-  constructor(readonly status: number, readonly code: string, readonly field?: string) { super(code); }
+  /** field names the configuration path that caused the error, never request contents or credentials. detail carries
+   * configuration facts the person needs to fix it (for example the projects a model is not available to). */
+  constructor(readonly status: number, readonly code: string, readonly field?: string, readonly detail?: Json) { super(code); }
 }
-export const fail = (status: number, code: string, field?: string): never => { throw new HttpError(status, code, field); };
+export const fail = (status: number, code: string, field?: string, detail?: Json): never => { throw new HttpError(status, code, field, detail); };
 // Plain HTTP may only reach this machine: model keys travel in the request, so anything off this host would leak them.
 // Only the parsed hostname is inspected; new URL() already normalises the numeric IPv4 forms (127.1, decimal, hex, octal).
 export function loopbackHostname(hostname: string): boolean {

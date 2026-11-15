@@ -90,7 +90,8 @@ test('a group timer runs the bound service role within the group scope and its t
   const system = f.requests.at(-1).messages[0].content;
   // Only the timer branch is appended, never the one for a group message without an @ (both turns allow silence).
   assert.match(system, /started by one of this group's timers/); assert.doesNotMatch(system, /This message did not mention you\./);
-  assert.ok(f.h.store.all('SELECT * FROM model_requests WHERE conversation_id=?', group.id).every(r => r.repository_id === null && r.service_role_id === 'repository-assistant'));
+  // Billed to the role; the group is scoped to one repository, so its usage also counts in that project (#849).
+  assert.ok(f.h.store.all('SELECT * FROM model_requests WHERE conversation_id=?', group.id).every(r => r.repository_id === '101' && r.service_role_id === 'repository-assistant'));
   // The report joins the group's own context under the binding, like the assistant's answers.
   const binding = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', group.id);
   await until(() => f.h.store.get('SELECT 1 FROM channel_message_scopes WHERE chat_id=? AND project_id=?', group.id, 'binding:' + binding.id));

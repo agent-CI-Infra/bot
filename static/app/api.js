@@ -60,7 +60,7 @@ async function api(path, method = 'GET', body, { signal } = {}) {
   // authorization_changed has its own guidance; field names the configuration path a validation error concerns
   // (for example roles.reviewer.harness_ref.id).
   if (!response.ok && isSessionExpiry(response.status, value?.error)) markSessionExpired();
-  if (!response.ok) throw Object.assign(new Error(value.error === 'authorization_changed' ? '权限已变化，请刷新页面后按当前权限重试。' : value.error === 'note_revision_changed' ? '文件已被其他操作更新，请刷新后再保存。' : `${response.status} · ${value.error}`), { status: response.status, code: typeof value.error === 'string' ? value.error : undefined, ...(value.field ? { field: value.field } : {}) });
+  if (!response.ok) throw Object.assign(new Error(value.error === 'authorization_changed' ? '权限已变化，请刷新页面后按当前权限重试。' : value.error === 'note_revision_changed' ? '文件已被其他操作更新，请刷新后再保存。' : `${response.status} · ${value.error}`), { status: response.status, code: typeof value.error === 'string' ? value.error : undefined, ...(value.field ? { field: value.field } : {}), ...(value.detail ? { detail: value.detail } : {}) });
   return value;
 }
 // #738: the strip carries the semantics of the message now in it, not of whatever error came last. `kind` is the
