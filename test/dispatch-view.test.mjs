@@ -79,6 +79,18 @@ test('failure history and retry state roll back together if recording a retry fa
   const detail = (await admin('/api/repositories/101/dispatch/failed')).value; assert.equal(detail.event.state, 'failed'); assert.equal(detail.event.error.code, 'fixture_failure'); assert.equal(detail.retries.length, 0);
 });
 
+test('a malformed percent-encoded event id is a bad request, not a service outage', async t => {
+  const { admin, add } = await fixture(t); add('event', { state: 'failed' });
+  // #736: decodeURIComponent('%E0%A4%A') throws a URIError, which the server's wrapper turns into 503 service_unavailable.
+  const detail = await admin('/api/repositories/101/dispatch/%E0%A4%A');
+  assert.equal(detail.status, 400); assert.equal(detail.value.error, 'invalid_dispatch_event');
+  const retry = await admin('/api/repositories/101/dispatch/%E0%A4%A/retry', 'POST', {});
+  assert.equal(retry.status, 400); assert.equal(retry.value.error, 'invalid_dispatch_event');
+  // A legal percent-encoded id still resolves to the event it names.
+  const encoded = await admin('/api/repositories/101/dispatch/ev%65nt');
+  assert.equal(encoded.status, 200); assert.equal(encoded.value.event.id, 'event');
+});
+
 test('project authorization fences the list, detail and retry even for a known event id', async t => {
   const { h, admin, add } = await fixture(t); add('secret', { repository_id: '102', state: 'failed' });
   const password = testPassword(); await admin('/api/users', 'POST', { username: 'scoped', password, repository_ids: ['101'] });

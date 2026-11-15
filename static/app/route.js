@@ -8,6 +8,10 @@ const consoleTabs = ['more', 'inbox', 'new-task', 'conversations', 'not-found'];
 function unknownAddress(hash) {
   const path = hash.split('?')[0];
   if (!path.startsWith('#/') || path === '#/') return false;
+  // #736: the legacy computer address redirects to a project only when its id can be decoded. A malformed one names no
+  // page at all, so it reads as unknown instead of becoming a project address built from garbage.
+  const legacyComputerId = legacyComputerAddress.exec(path)?.[1];
+  if (legacyComputerId && safeDecode(legacyComputerId) === null) return true;
   // #/projects/<anything> that is not a project address (#/projects/abc, #/projects/1/Members) is a broken project link.
   if (/^#\/projects\/./.test(path) && !projectRoute()) return true;
   return !addressTab(hash);
@@ -27,6 +31,8 @@ function renderNotFoundPage() { $('console-page').replaceChildren(pageNotFoundSt
 // Wizard steps live inside global settings; old top-level addresses are normalized by route().
 const onboardingAddress = /^#\/settings\/onboarding(?:\/([0-6]))?$/;
 const legacyOnboardingAddress = /^#onboarding(?:\/(\d+))?$/;
+// #736: the old global computer address #/settings/computers/<id> named one machine of a project, with an encoded id.
+const legacyComputerAddress = /^#\/settings\/computers(?:\/([^/?#]+))?$/;
 // A project page (#/projects/<id>/<section>) replaces the list; any other address shows the current tab's list.
 // The tab an address names: #/<tab>, a project page, a wizard step, or an older address (#external, #/accounts, #/users).
 function addressTab(hash) {
@@ -48,8 +54,11 @@ async function route() {
   if (/^#\/channels(?:\/|$)/.test(location.hash)) history.replaceState(null, '', '#/identity/feishu');
   if (location.hash === '#/identity/feishu/conversations') history.replaceState(null, '', '#/conversations');
   if (location.hash === '#/identity/feishu/groups') history.replaceState(null, '', '#/identity/feishu?section=groups');
-  const legacyComputer = /^#\/settings\/computers(?:\/([^/?#]+))?$/.exec(location.hash);
-  if (legacyComputer) history.replaceState(null, '', legacyComputer[1] ? `#/projects/${decodeURIComponent(legacyComputer[1])}/machine` : '#/settings/work-computers');
+  // #736: the id is decoded here, so a malformed one keeps its address (and reads as unknown below) instead of
+  // redirecting to a project path built from an undecodable segment.
+  const legacyComputer = legacyComputerAddress.exec(location.hash);
+  if (legacyComputer?.[1]) { const id = safeDecode(legacyComputer[1]); if (id !== null) history.replaceState(null, '', `#/projects/${id}/machine`); }
+  else if (legacyComputer) history.replaceState(null, '', '#/settings/work-computers');
   // A project chat link keeps the project context; the top-level management address is a page of its own.
   const chatProject = /^#\/projects\/([^/]+)\/management$/.exec(location.hash)?.[1];
   // The project chat trigger has no settings section of its own: keep the project, open its first page underneath,
