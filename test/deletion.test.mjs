@@ -600,7 +600,7 @@ test('a deletion stopped by an environment failure or by a task still working at
   assert.ok(env.docker.volumes.has(env.projects.notesName('101')), 'the notes volume survives the failed removal');
 
   // A task that is already working is refused at the settle stage: removal.ts:111 fails before the dry run and before
-  // removeNotes(), so nothing was deleted yet and this is not an in-transaction refusal that preserved the notes volume.
+  // the notes removal, which now runs only after the rows commit.
   h.projects.removeEnvironment = realRemove;
   workingTasks = ['task-101'];
   const refused = await remove(admin, '101');
@@ -610,37 +610,38 @@ test('a deletion stopped by an environment failure or by a task still working at
   assert.equal(existsSync(blob), true, 'the settle-stage refusal keeps the blob');
   assert.ok(env.docker.volumes.has(env.projects.notesName('101')), 'the settle-stage refusal never removed the notes volume');
 
-  // The successful retry removes the notes volume once every statement passed, and the evidence files after the commit.
+  // The successful retry removes the notes volume once the rows committed, and the evidence files after that.
   workingTasks = [];
   assert.equal((await remove(admin, '101')).status, 200);
   assert.equal(existsSync(record), false, 'the trajectory file goes with the deleted project');
   assert.equal(existsSync(blob), false, 'the blob goes too');
   assert.equal(h.store.get("SELECT count(*) n FROM trajectory_files WHERE repository_id='101'").n, 0);
-  assert.equal(env.docker.volumes.has(env.projects.notesName('101')), false, 'the notes volume goes after the dry run accepted every statement');
+  assert.equal(env.docker.volumes.has(env.projects.notesName('101')), false, 'the notes volume goes after the rows committed');
 });
 
-test('a deletion whose manager cannot identify the notes volume fails and keeps the project row and the notes volume', async t => {
+test('a deletion whose manager cannot identify the notes volume still commits and audits the leftover volume', async t => {
   const github = await fakeGitHub(t), env = managerFixture(t);
   let sync; const h = await harness(t, env.manager, store => ({ installations: sync = new InstallationSync(store, github.url), engine: { working: () => [], api: async () => undefined } }));
   const { admin } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101');
   for (let i = 0; i < 3; i++) await h.projects.reconcile();
-  // The environment deletion still finds the project; the read before the notes deletion has no state, so the volume is unknown.
+  await env.projects.notes('101', 'PUT', 'repository.md', { content: 'keep-101' });
+  // The environment deletion still finds the project; the read before the notes removal has no state, so the volume is unknown.
   const realCall = env.manager.call; let reads = 0;
   env.manager.call = async (method, path, input, timeout) => {
     if (method === 'GET' && path === '/v1/projects/101' && ++reads > 1) return undefined;
     return realCall(method, path, input, timeout);
   };
-  const failed = await remove(admin, '101');
-  assert.equal(failed.status, 503);
-  assert.equal(failed.value.error, 'manager_project_missing');
-  assert.ok(h.store.get("SELECT 1 FROM repositories WHERE id='101'"), 'the project rows stay because the deletion failed');
-  assert.ok(env.docker.volumes.has(env.projects.notesName('101')), 'the notes volume stays because it was never identified');
+  const response = await remove(admin, '101');
+  assert.equal(response.status, 200, 'the committed deletion is not reported as failed');
+  assert.equal(h.store.get("SELECT 1 FROM repositories WHERE id='101'"), undefined, 'the committed project row is gone');
+  assert.ok(env.docker.volumes.has(env.projects.notesName('101')), 'the volume stays because it was never identified');
+  assert.equal((await env.projects.notes('101', 'GET', 'repository.md')).content, 'keep-101', 'the notes stay readable with the volume');
   assert.ok(h.store.get("SELECT 1 FROM audit WHERE repository_id='101' AND action='repository.notes_removal_failed'"), 'the missing notes removal is audited');
-  assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE repository_id='101' AND action='repository.deleted'").n, 0, 'the deletion is not reported as committed');
+  assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE repository_id='101' AND action='repository.deleted'").n, 1, 'the committed deletion is audited once');
 });
 
-test('the in-transaction working-task re-check refuses the deletion after the notes volume is gone and keeps the project rows', async t => {
+test('the in-transaction working-task re-check refuses the deletion and keeps the rows, the notes volume and its notes', async t => {
   const github = await fakeGitHub(t), env = managerFixture(t);
   // Empty at settled() and at the pre-transaction check; the task appears only for the transaction's own re-check.
   let calls = 0; const engine = { working: () => (++calls > 2 ? ['task-101'] : []), api: async () => undefined };
@@ -648,16 +649,18 @@ test('the in-transaction working-task re-check refuses the deletion after the no
   const { admin } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101');
   for (let i = 0; i < 3; i++) await h.projects.reconcile();
+  await env.projects.notes('101', 'PUT', 'repository.md', { content: 'keep-101' });
   const realNotes = h.projects.removeNotes.bind(h.projects), notesRemoved = [];
   h.projects.removeNotes = async (id, waitMs) => { notesRemoved.push(id); return realNotes(id, waitMs); };
   const refused = await remove(admin, '101');
   assert.equal(refused.status, 409);
   assert.equal(refused.value.error, 'tasks_still_stopping');
   assert.equal(calls, 3, 'settled, the pre-transaction check and the re-check each asked the engine');
-  assert.deepEqual(notesRemoved, ['101'], 'the notes volume went before the transaction refused');
+  assert.deepEqual(notesRemoved, [], 'the notes removal runs only after the rows commit, and they did not');
   assert.ok(h.store.get("SELECT 1 FROM repositories WHERE id='101'"), 'the project rows stay');
   assert.ok(h.store.get("SELECT 1 FROM policies WHERE repository_id='101'"), 'the policy row stays');
-  assert.equal(env.docker.volumes.has(env.projects.notesName('101')), false, 'the notes volume was already deleted');
+  assert.ok(env.docker.volumes.has(env.projects.notesName('101')), 'the notes volume is still there');
+  assert.equal((await env.projects.notes('101', 'GET', 'repository.md')).content, 'keep-101', 'the notes are still readable');
   assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE repository_id='101' AND action='repository.deleted'").n, 0, 'no audit claims a committed deletion');
 });
 

@@ -181,7 +181,7 @@ test('project-page HTTP APIs accept Unicode names and large contents through bot
   assert.equal((await admin(path+'/'+encodeURIComponent('name #?% with spaces'),'DELETE',{})).status,200);
 });
 
-test('project removal deletes notes, but environment, volume or record-deletion failures retain project records and notes', async t => {
+test('project removal deletes notes after the rows commit, and a notes volume it cannot delete is audited instead of failing the deletion', async t => {
   const f = await managerFixture(t), h = await harness(t,f.manager), { admin } = await setup(h), a = await account(admin);
   for (const repo of ['101','202','303','404']) { await repository(admin,a.id,repo); await f.projects.register(repo); await f.projects.notes(repo,'PUT','repository.md',{content:'keep-'+repo}); }
   const failRemoval = async repo => {
@@ -193,7 +193,14 @@ test('project removal deletes notes, but environment, volume or record-deletion 
   const original = f.docker.request.bind(f.docker);
   f.docker.request = async (method,path,...args) => { if (method==='DELETE'&&path.startsWith('/networks/')) throw new Error('injected environment failure'); return original(method,path,...args); };
   await failRemoval('101'); f.docker.request=original;
-  f.docker.failVolume=true; await failRemoval('202'); f.docker.failVolume=false;
+  // The volume goes only after the row transaction committed, so a manager that cannot delete it no longer fails the
+  // deletion: the project is gone, the volume may be left behind, and the failure is audited against the project.
+  f.docker.failVolume=true;
+  assert.equal((await admin('/api/projects/202','DELETE',{})).status,200);
+  assert.ok(!h.store.get("SELECT id FROM repositories WHERE id='202'"),'the committed project rows are gone');
+  assert.ok(f.docker.volumes.has(f.projects.notesName('202')),'the volume the manager could not delete may remain');
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE repository_id='202' AND action='repository.notes_removal_failed'"),'the failed notes removal is audited');
+  f.docker.failVolume=false;
   h.store.db.exec("CREATE TRIGGER refuse_project_deletion BEFORE DELETE ON repositories WHEN OLD.id='303' BEGIN SELECT RAISE(ABORT,'injected record failure'); END");
   await failRemoval('303');
   assert.equal((await admin('/api/projects/404','DELETE',{})).status,200);

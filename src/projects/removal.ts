@@ -109,23 +109,25 @@ export class ProjectRemoval {
       // Stopping the computer also interrupts the command a running task is waiting for.
       await this.projects?.removeEnvironment(id, this.settleMs);
       if (!await this.settled(id)) fail(409, 'tasks_still_stopping');
-      // Check child ordering, constraints and deletion triggers before destroying the persistent notes. Roll back this
-      // dry run: environment failures must leave the project records available for inspection and retry.
+      // Check child ordering, constraints and deletion triggers before committing the real transaction. Roll back this
+      // dry run: a refusal here must leave the project records, the notes volume and the evidence intact for retry.
       this.store.db.exec('SAVEPOINT project_removal_check');
       try { deleteProjectRecords(this.store, id, { files: false }); this.store.audit(user.id, 'repository.deleted', id, id); }
       finally { this.store.db.exec('ROLLBACK TO project_removal_check; RELEASE project_removal_check'); }
       // A deletion still refused at this point (a task that started again, or one the engine reported as working before
       // the settle wait finished) must fail while the project, its notes and its evidence are all still there.
       if (this.engine?.working(id).length) fail(409, 'tasks_still_stopping');
-      // The notes volume goes before the rows are committed, but only after the dry run above accepted every statement:
-      // a manager that cannot delete it fails the deletion with the project records, the volume and the notes intact.
-      await this.projects?.removeNotes(id, this.settleMs);
       const removed = this.store.transaction(() => {
         if (this.engine?.working(id).length) fail(409, 'tasks_still_stopping');
         deleteProjectRecords(this.store, id, { files: false });
         this.store.audit(user.id, 'repository.deleted', id, id);
         return { deleted: true, repository_id: id, registered: true };
       });
+      // The notes volume goes only once the rows are committed: a refusal before or inside the transaction leaves the
+      // project, its notes and its evidence intact, and a manager that cannot delete the volume no longer turns a
+      // committed deletion into an error. The failure is recorded, and the volume may be left behind.
+      try { await this.projects?.removeNotes(id, this.settleMs); }
+      catch { this.store.audit(user.id, 'repository.notes_removal_failed', id, id); }
       // The evidence files go only once the rows are committed: a refused commit keeps the trajectory files and blobs on
       // disk, so what a failed deletion leaves behind still explains itself. A cleanup that fails is recorded, not
       // reported as the deletion having been rolled back.

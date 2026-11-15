@@ -149,15 +149,15 @@ export class ProjectService {
     await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
   }
   /**
-   * Deletes only the project's notes volume: after the savepoint dry run accepted every statement and before the
-   * row-deleting transaction commits. The manager keeps its own project row, so the deletion still works; nothing is
-   * saved back, the project no longer exists here for the save to refer to.
+   * Deletes only the project's notes volume, best effort, after the row-deleting transaction has committed. The manager
+   * keeps its own project row, so the deletion still works; nothing is saved back, the project no longer exists here for
+   * the save to refer to. The caller records a failure instead of reporting the committed deletion as failed.
    */
   async removeNotes(id: string, waitMs = 120_000): Promise<void> {
     const state = await this.manager.call('GET', '/v1/projects/' + id);
-    // Without the manager's state the volume cannot be identified: fail the deletion instead of committing the rows and
-    // leaking the volume silently. The retry takes the normal deletion path again.
-    if (!state) { this.store.audit('system', 'repository.notes_removal_failed', id, id); fail(503, 'manager_project_missing'); }
+    // Without the manager's state the volume cannot be identified, so the caller's audit names a removal that did not
+    // happen; the volume, if any, is left behind for a later sweep.
+    if (!state) fail(503, 'manager_project_missing');
     const input = { operation_id: randomId(), generation: state.generation, request: { delete_notes: true } };
     await this.manager.call('POST', `/v1/projects/${id}/delete`, input, waitMs);
   }
