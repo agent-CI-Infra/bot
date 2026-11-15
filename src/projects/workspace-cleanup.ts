@@ -55,7 +55,8 @@ const bounded = (collection: Map<string, number> | Set<string>) => { if (collect
 
 /**
  * Records that a task uses a workspace, before a runner call for it. Workspace.call and deliver call it for the task
- * directory; binding a shared worktree (src/projects/worktrees.ts) calls it with the worktree's id and type 'worktree'.
+ * directory; binding a shared worktree (src/projects/worktrees.ts) calls it with the worktree's id and type 'worktree', and
+ * an observer's or evaluator's directory that reads one is recorded with type 'checkout' (Workspace.observe).
  */
 export function useWorkspace(store: Store | null, task: Row, type: string, now = Date.now()): void {
   if (!workspaceId.test(String(task.workspace_id || ''))) return;
@@ -65,7 +66,7 @@ export function useWorkspace(store: Store | null, task: Row, type: string, now =
   if (!store || task.conversation_id || recorded.has(pair)) return;
   store.run(`INSERT INTO task_workspaces(repository_id,workspace_id,task_id,task_kind,object_number,kind,created_at) VALUES(?,?,?,?,?,?,?)
     ON CONFLICT(repository_id,workspace_id,task_id) DO UPDATE SET released_at=NULL,release_reason=NULL,freed_bytes=NULL WHERE released_at IS NOT NULL`,
-  String(task.repository_id), task.workspace_id, String(task.id), task.kind ?? null, task.object_number ?? null, type === 'workspace_acceptance' ? 'checkout' : type === 'worktree' ? 'worktree' : 'task', new Date(now).toISOString());
+  String(task.repository_id), task.workspace_id, String(task.id), task.kind ?? null, task.object_number ?? null, type === 'workspace_acceptance' || type === 'checkout' ? 'checkout' : type === 'worktree' ? 'worktree' : 'task', new Date(now).toISOString());
   recorded.add(pair); bounded(recorded);
 }
 /** True while a removal call is deleting the workspace: a review must not reuse it. */

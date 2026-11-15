@@ -470,8 +470,14 @@ test('Docker manager forwards versioned acceptance/recovery operations and rejec
   const call=f.docker.runs.at(-1);assert.equal(call.type,type);assert.equal(call.source_workspace_id,request.source_workspace_id);
   if(type!=='workspace_source')assert.equal(call.wait,0,'local Git copy/restore follows checkout’s unbounded execution timeout');
  }
+ // An observer's worktree (#769) may name the task directory whose context it copies; it need not.
+ for(const source_workspace_id of [source,undefined]){
+  const request={type:'workspace_worktree_create',workspace_id:workspace,worktree_id:'e'.repeat(48),sha,tree_sha:tree,...(source_workspace_id?{source_workspace_id}:{})};
+  await f.projects.operate('101','execute',{operation_id:id(),generation:1,request});assert.equal(f.docker.runs.at(-1).source_workspace_id,source_workspace_id);
+ }
  const count=f.docker.runs.length;
- for(const request of [{type:'workspace_restore',workspace_id:workspace,source_workspace_id:'../other'}, {type:'workspace_acceptance',workspace_id:workspace}, {type:'workspace_command',workspace_id:workspace,source_workspace_id:source,command:'true'}])
+ for(const request of [{type:'workspace_restore',workspace_id:workspace,source_workspace_id:'../other'}, {type:'workspace_acceptance',workspace_id:workspace}, {type:'workspace_command',workspace_id:workspace,source_workspace_id:source,command:'true'},
+  {type:'workspace_worktree_bind',workspace_id:workspace,worktree_id:'e'.repeat(48),sha,tree_sha:tree,source_workspace_id:'../other'}])
   await assert.rejects(f.projects.operate('101','execute',{operation_id:id(),generation:1,request}),/invalid_runner_request/);
  assert.equal(f.docker.runs.length,count);assert.equal(f.projects.get('101').state,'ready');
 });

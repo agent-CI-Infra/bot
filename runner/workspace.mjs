@@ -160,8 +160,12 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   // Only an explicit choice (on_changes) takes a worktree that fails it: keep_changes takes one at the commit asked for with
   // its changes; reset first saves its changes as a patch into this task's ../context/, then restores it to the commit asked
   // for, keeping ignored files. The task directory then points at it with <task>/repo.
+  // An observer's or evaluator's directory names the task directory it checks (source_workspace_id): it gets a copy of that
+  // directory's ../context/, as workspace_acceptance gives one.
   if(input.type==='workspace_worktree_create'||input.type==='workspace_worktree_bind'){
     if(!id48.test(input.worktree_id||'')||!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||'')||input.on_changes!==undefined&&!['reset','keep_changes'].includes(input.on_changes))throw new Error('invalid_worktree');
+    const source=input.source_workspace_id===undefined?null:`${workspaceRoot}/${input.source_workspace_id}`;
+    if(source&&(!id48.test(input.source_workspace_id)||input.source_workspace_id===input.workspace_id||!await stat(source).then(s=>s.isDirectory(),()=>false)))throw new Error('invalid_source_workspace');
     const target=`${worktreeRoot}/${input.worktree_id}`;
     if(input.type==='workspace_worktree_create'){
       // A new id names no directory; one that is there belongs to another worktree.
@@ -188,6 +192,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     if(state.changed_count&&input.on_changes!=='keep_changes')return {refused:'workspace_dirty',...state};
     await mkdir(root,{recursive:true});await linkNotes();await writeAuthor(input.author_email);
     await dropCheckout();await symlink(target,repo);
+    if(source&&await stat(source+'/context').then(s=>s.isDirectory(),()=>false))await cp(source+'/context',context,{recursive:true,dereference:false});
     // The handover counts as activity of the worktree: the cleanup leaves a worktree alone that was used since it listed it.
     const now=new Date();await utimes(target,now,now);
     return {worktree_id:input.worktree_id,...state,local_sha:state.head,...(saved?{saved}:{}),...unlocked};

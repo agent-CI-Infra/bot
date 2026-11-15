@@ -87,8 +87,9 @@ function validateCall(call) {
   // The three-way integration the control plane starts when a branch fell behind main names the workspace it integrates
   // from (src/tasks/integration.ts:52); runner/workspace.mjs refuses a snapshot without a 40-hex sha, tree and base tree
   // and a source other than its own workspace, so the manager refuses it before the call reaches the computer.
-  const sourced = ['workspace_acceptance','workspace_restore','workspace_integrate'];
-  if (call.source_workspace_id !== undefined && (!sourced.includes(call.type) || !/^[a-f0-9]{48}$/.test(call.source_workspace_id))) throw new ManagerError('invalid_runner_request', 400);
+  // An observer's or evaluator's worktree (#769) may name the task directory whose context it copies.
+  const sourced = ['workspace_acceptance','workspace_restore','workspace_integrate'], mayName = [...sourced, 'workspace_worktree_create', 'workspace_worktree_bind'];
+  if (call.source_workspace_id !== undefined && (!mayName.includes(call.type) || !/^[a-f0-9]{48}$/.test(call.source_workspace_id))) throw new ManagerError('invalid_runner_request', 400);
   if (sourced.includes(call.type) && !/^[a-f0-9]{48}$/.test(call.source_workspace_id || '')) throw new ManagerError('invalid_runner_request', 400);
   if (call.type === 'workspace_integrate' && (![call.sha,call.tree_sha,call.base_tree].every(value => /^[a-f0-9]{40}$/.test(value || '')) || call.source_workspace_id === call.workspace_id)) throw new ManagerError('invalid_runner_request', 400);
   // A shared worktree (#769) is named only by the calls that create or bind it, by its 48-hex id.

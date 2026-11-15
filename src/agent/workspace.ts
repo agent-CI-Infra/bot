@@ -231,16 +231,39 @@ export class Workspace {
    * reader a free unchanged one made for reading, else a new one. Returns null when none could be made.
    */
   private async take(commitSha:string,tree:string,mode:WorktreeMode,author:string|null,by:string){
-    const repo=String(this.task.repository_id),email=author??undefined;
     // Bindings of earlier workspaces of this task (an earlier attempt) end; one this workspace already took is checked again.
     releaseWorktrees(this.store,String(this.task.id),'new_workspace',this.task.workspace_id);
     const own=taskWorktree(this.store,this.task);
     if(own&&(own.head_sha!==commitSha||own.tree_sha!==tree))releaseBinding(this.store,Number(own.id),'task_commit_changed');
     const offered=own&&own.head_sha===commitSha&&own.tree_sha===tree?[{id:own.worktree_id,binding:Number(own.id)}]:[];
+    return this.handOver(commitSha,tree,mode,author,by,offered);
+  }
+  /**
+   * A checkout of a fixed candidate for an observer role or the acceptance check (#769), in this workspace: a task
+   * directory of its own next to the task's workspace `source` (the task as it is there), which made the candidate. When
+   * `source` holds a worktree, its commits are in the computer's git store, so this workspace takes a worktree made for
+   * reading at the candidate's commit by the system's rule (a free, unchanged one, else a new one) instead of cloning
+   * `source`, and gets a copy of `source`'s ../context/. Observers may run at once and run tests, so they do not share one.
+   * The binding holds until releaseWorktree(). Null when `source` holds no worktree (a file copy) or none could be made:
+   * the caller clones as before.
+   */
+  async observe(source:Row,commitSha:string,tree:string){
+    if(!taskWorktree(this.store,source))return null;
+    useWorkspace(this.store,this.task,'checkout');
+    return serialized(`${this.task.id}:${this.task.workspace_id}`,()=>this.handOver(commitSha,tree,'read',null,'system',[],{source_workspace_id:String(source.workspace_id)}));
+  }
+  /** This workspace's run is over (an observer's or the acceptance check's): the worktree it read may go to the next reader. */
+  releaseWorktree(reason:string){const own=taskWorktree(this.store,this.task);if(own)releaseBinding(this.store,Number(own.id),reason);}
+  /**
+   * Hands a worktree to this workspace: the one offered (the workspace's own), else for a reader a free unchanged one made
+   * for reading at the commit, else a new one. `extra` goes with each runner call. Null when none could be made.
+   */
+  private async handOver(commitSha:string,tree:string,mode:WorktreeMode,author:string|null,by:string,offered:{id:string;binding:number}[],extra:Record<string,string>={}){
+    const repo=String(this.task.repository_id),email=author??undefined;
     if(!offered.length&&mode==='read')for(const row of reusableWorktrees(this.store,repo,Number(this.task.generation),commitSha))
       if(row.tree_sha===tree){const binding=claimWorktree(this.store,this.task,row,mode);if(binding){offered.push({id:row.id,binding});break;}}
     for(const {id,binding} of offered){
-      const bound=await this.call(`worktree:bind:${id}:${this.task.workspace_id}`,{type:'workspace_worktree_bind',worktree_id:id,sha:commitSha,tree_sha:tree,author_email:email});
+      const bound=await this.call(`worktree:bind:${id}:${this.task.workspace_id}`,{type:'workspace_worktree_bind',worktree_id:id,sha:commitSha,tree_sha:tree,author_email:email,...extra});
       if(!bound.error&&!bound.refused&&bound.tree_sha===tree)return this.bound(id,mode,true,commitSha,tree,by);
       // Changed by its last task, moved or gone: it is not offered again, and the task gets a new one.
       refuseWorktree(this.store,repo,id,binding,String(bound.refused||'bind_failed'));
@@ -249,7 +272,7 @@ export class Workspace {
         detail:`worktree ${id.slice(0,12)} 未通过交接核对（${bound.refused||bound.detail||bound.error}${bound.changed_count?`，有 ${bound.changed_count} 个文件改动`:''}），改为新建 worktree。`});
     }
     const id=randomId(),binding=registerWorktree(this.store,this.task,id,mode,commitSha,tree);
-    const created=await this.call('worktree:create:'+id,{type:'workspace_worktree_create',worktree_id:id,sha:commitSha,tree_sha:tree,author_email:email});
+    const created=await this.call('worktree:create:'+id,{type:'workspace_worktree_create',worktree_id:id,sha:commitSha,tree_sha:tree,author_email:email,...extra});
     if(created.error||created.refused||created.tree_sha!==tree){refuseWorktree(this.store,repo,id,binding,String(created.refused||'create_failed'));return null;}
     return this.bound(id,mode,false,commitSha,tree,by);
   }
