@@ -9,16 +9,7 @@ import { digest } from '../dist/core/security.js';
 
 const active = (s, p) => listEffectiveScopes(s, p).filter(g => g.state === 'active');
 
-test('only repository Admin automatically grants management; Write, Maintain, Triage and Read do not', async t => {
-  const f = await identityFixture(t); f.state.owner = false;
-  const login = await f.login(), principal = login.result.principal_id;
-  for (const permission of ['write', 'maintain', 'triage', 'read', 'none', 'admin']) {
-    f.state.permission = permission; await f.identity.reverify(principal);
-    const user = (await f.admin('/api/users')).value.users.find(user => user.id === principal);
-    assert.deepEqual(user.access.projects.map(p => p.id), permission === 'admin' ? ['101'] : [], permission);
-  }
-});
-
+// What Write, Maintain, Triage and Read collaborators get is in project-delegation.test.mjs (#847).
 test('current GitHub owner, selected repositories, repo admin and ordinary members follow installation scope', async t => {
   const f = await identityFixture(t), { h, state } = f, first = await f.login(), principal = first.result.principal_id;
   const creds = session(h.store, principal, first.result.identity_id);

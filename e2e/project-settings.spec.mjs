@@ -106,9 +106,11 @@ test('project members show inherited and explicit sources, and removing a local 
   } finally { await f.close(); }
 });
 
-test('member read failures replace previous grants and project admins cannot transfer authority', async ({ page, browser }) => {
+test('member read failures replace previous grants, and a project administrator delegates and revokes by GitHub login (#847)', async ({ page, browser }) => {
   const f = await identityFixture(); let blocked = false;
   try {
+    // Someone who signed in with GitHub once, without any permission on the repository.
+    Object.assign(f.state, { id: 43, login: 'helper', owner: false, permission: 'none' }); await f.login();
     const password = testPassword(); await f.admin('/api/users', 'POST', { username: 'project-member', password, repository_ids: ['101'] });
     await login(page, f, '/#/projects/101/members');
     await expect(page.locator('.project-member-list')).toContainText('project-member');
@@ -125,7 +127,21 @@ test('member read failures replace previous grants and project admins cannot tra
       await expect(member.getByLabel('当前页面',{exact:true})).toHaveValue('#/projects/101/members');
       await expect(member.locator('.project-member-list')).toContainText('project-member');
       await expect(member.getByLabel('添加项目管理员', { exact: true })).toHaveCount(0);
-      await expect(member.locator('#project-page')).toContainText('不能再转授权');
+      // #847: a project administrator delegates inside the project, by GitHub login, and revokes it again.
+      await expect(member.getByRole('heading', { name: '授权成员', exact: true })).toBeVisible();
+      const githubLogin = member.getByLabel('被授权人的 GitHub 用户名', { exact: true });
+      await githubLogin.fill('nobody-here'); await member.getByRole('button', { name: '授权', exact: true }).click();
+      await expect(member.getByText('没有找到用这个 GitHub 用户名登录过本平台的账号。')).toBeVisible();
+      await githubLogin.fill('helper');
+      await member.getByLabel('授权级别', { exact: true }).selectOption({ label: '成员：提问、创建任务、管理自己发起的任务' });
+      await member.getByRole('button', { name: '授权', exact: true }).click();
+      const delegated = member.locator('.project-member', { hasText: 'helper' });
+      await expect(delegated).toContainText('项目管理员 project-member 授予');
+      await expect(githubLogin).toHaveValue('');
+      await delegated.getByRole('button', { name: '撤销这条授权', exact: true }).click();
+      await member.getByRole('dialog').getByRole('button', { name: '撤销', exact: true }).click();
+      await expect(member.locator('.project-member', { hasText: 'helper' })).toContainText('已撤销');
+      await expect(member.locator('.project-member', { hasText: 'helper' }).getByRole('button', { name: '撤销这条授权' })).toHaveCount(0);
       // #553: without the super-admin-only assignment card the grants card spans the whole row instead of half of it.
       await expect(member.locator('.members-layout > [hidden]')).toHaveCount(1);
       await member.setViewportSize({ width: 1440, height: 900 });

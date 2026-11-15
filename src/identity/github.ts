@@ -3,7 +3,7 @@ import type { Store, Row } from '../storage/database.js';
 import { digest, fail, randomId, HttpError, type Json } from '../core/security.js';
 import { installationRef, numericId, type InstallationIdentity, type InstallationRef, type VerifiedInstallationAccess } from '../installations/archive.js';
 import { activeScopes, invalidateIfLost, resolveActor, revision } from './authorization.js';
-import { identityProjection, projectCapabilities, tenantId } from './storage.js';
+import { identityProjection, memberCapabilities, projectCapabilities, readerCapabilities, tenantId } from './storage.js';
 import { failureCode as errorCode, GitHubPermissions, rateLimitedUntil } from './github-permissions.js';
 
 // What made the latest permission check uncertain, kept on the identity for diagnosis; null once everything was settled.
@@ -16,11 +16,12 @@ const retryPause = 60_000;
 
 /**
  * Platform super administrators and principals holding explicit delegation are never verified on GitHub (#708): their
- * access does not depend on it, and they receive no GitHub-derived grants.
+ * access does not depend on it, and they receive no GitHub-derived grants. A project administrator's delegation (#847) is
+ * not that kind: it adds to what GitHub gives its holder, so they keep being checked.
  */
 export function verificationExempt(store: Store, principal: string): boolean {
   return !!store.get("SELECT 1 FROM principals p JOIN users u ON u.id=p.user_id WHERE p.id=? AND u.role='super_admin'", principal) ||
-    !!store.get(`SELECT 1 FROM scoped_grants WHERE principal_id=? AND source='explicit_delegation' AND revoked_at IS NULL
+    !!store.get(`SELECT 1 FROM scoped_grants WHERE principal_id=? AND source='explicit_delegation' AND policy<>'project_delegation' AND revoked_at IS NULL
       AND (expires_at IS NULL OR expires_at>?) LIMIT 1`, principal, Date.now());
 }
 
@@ -207,7 +208,7 @@ export class GitHubIdentity implements InstallationIdentity {
     if (!identity?.credentials) return 'done';
     const startRevision = revision(this.store, principal), now = Date.now();
     if (!startRevision) return 'done';
-    const desired: { id: string; tenant: string; project: string | null; role: string; installation: Row; evidence: string }[] = [];
+    const desired: { id: string; tenant: string; project: string | null; role: string; capabilities: string[]; installation: Row; evidence: string }[] = [];
     // Installations whose evidence could not be settled this round, with a reason code (never a credential). Their grants
     // only stop counting until the next proof; grants of every other installation that are not proved again are revoked.
     const uncertain = new Map<string, string>();
@@ -239,9 +240,15 @@ export class GitHubIdentity implements InstallationIdentity {
           const evidence = access.owner ? snapshot.target_type === 'User' ? 'personal_owner' : 'organization_owner' : 'repository_admin';
           const tenant = tenantId(snapshot.target_id);
           if (access.owner && snapshot.repository_selection === 'all' && snapshot.target_type === 'Organization' && known.every(id => access.repository_ids.includes(id)))
-            desired.push({ id: `github:${principal}:${ref}:tenant`, tenant, project: null, role: 'org_admin', installation: snapshot, evidence });
-          for (const id of known) if (access.admin_ids.includes(id))
-            desired.push({ id: `github:${principal}:${ref}:${id}`, tenant, project: id, role: 'project_admin', installation: snapshot, evidence });
+            desired.push({ id: `github:${principal}:${ref}:tenant`, tenant, project: null, role: 'org_admin', capabilities: projectCapabilities, installation: snapshot, evidence });
+          // Admin → project administrator; Write/Maintain → member; Triage/Read → reader (#847). One grant per repository, so a
+          // changed GitHub role updates it in place and a narrower one counts as lost authority.
+          for (const id of known) {
+            const grant = access.admin_ids.includes(id) ? { role: 'project_admin', capabilities: projectCapabilities, evidence }
+              : access.write_ids.includes(id) ? { role: 'project_member', capabilities: memberCapabilities, evidence: 'repository_write' }
+              : access.read_ids.includes(id) ? { role: 'project_reader', capabilities: readerCapabilities, evidence: 'repository_read' } : null;
+            if (grant) desired.push({ id: `github:${principal}:${ref}:${id}`, tenant, project: id, ...grant, installation: snapshot });
+          }
         } catch (error) { uncertain.set(ref, errorCode(error)); if (errorCode(error) === 'github_rate_limited') limited.add(ref); }
       }
       progress.checked = snapshots.length;
@@ -260,7 +267,7 @@ export class GitHubIdentity implements InstallationIdentity {
           VALUES(?,?,?,?,?,?,?,'github_derived','current_github',?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET verified_at=excluded.verified_at,
           tenant_id=excluded.tenant_id,project_id=excluded.project_id,scope=excluded.scope,role=excluded.role,capabilities=excluded.capabilities,
           expires_at=excluded.expires_at,revoked_at=NULL,evidence=excluded.evidence,installation_revision=excluded.installation_revision`, item.id, principal, item.tenant,
-          item.project, item.project ? 'project' : 'tenant', item.role, JSON.stringify(projectCapabilities), item.evidence, now, now + derivedGrantValidity, item.installation.ref, item.installation.revision);
+          item.project, item.project ? 'project' : 'tenant', item.role, JSON.stringify(item.capabilities), item.evidence, now, now + derivedGrantValidity, item.installation.ref, item.installation.revision);
         // A check cut short by a rate limit is no complete proof: verified_at stays at the last one, so a lapsed grant is still noticed.
         this.store.run('UPDATE external_identities SET display_name=?,status=?,verified_at=?,verification_issues=? WHERE id=?', String(current.login),
           [...uncertain.keys()].some(ref => !limited.has(ref)) && !desired.length ? 'pending_verification' : 'active', limited.size ? identity.verified_at : now,

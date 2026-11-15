@@ -147,7 +147,7 @@ test('已登录但没有仓库时可以去 GitHub 选择仓库，接入向导接
       webhook_url: 'https://hooks.invalid/secret-webhook',
       install_url: 'https://github.com/apps/fixture-app/installations/new',
     }));
-    f.state.owner = false; f.state.admin = false; f.state.permission = 'write';
+    f.state.owner = false; f.state.admin = false; f.state.permission = 'none';
     await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
     await expect(page.locator('#identity-panel')).toContainText('已登录 GitHub，但还没有授权任何仓库');
     const go = page.getByRole('link', { name: '去 GitHub 选择仓库', exact: true });
@@ -280,7 +280,7 @@ test('身份页概览在 1440 与 390 下完整可见，展开的高级区占满
       account_id: f.a.id, app_id: '123', slug: 'fixture-app',
       install_url: 'https://github.com/apps/fixture-app/installations/select_target',
     }));
-    f.state.owner = false; f.state.admin = false; f.state.permission = 'write';
+    f.state.owner = false; f.state.admin = false; f.state.permission = 'none';
     await f.identity.reverify(identity.principal_id);
     await page.reload();
     await expect(page.locator('.identity-connection-status')).toContainText('还没有授权任何仓库');

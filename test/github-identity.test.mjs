@@ -78,7 +78,7 @@ test('global user access matches authorized project lists, including inherited, 
     return user;
   };
   let user = await access(); assert.equal(user.github_login, 'administrator');
-  assert.deepEqual(user.access, { projects: [{ id: '101', full_name: 'fixture/project-101', sources: ['github_derived'], can_configure: true }], github_pending: false });
+  assert.deepEqual(user.access, { projects: [{ id: '101', full_name: 'fixture/project-101', sources: ['github_derived'], can_configure: true, can_write: true }], github_pending: false });
   await f.admin('/api/project-admin-assignments', 'PUT', { user_id: principal, repository_ids: ['101', '201'] });
   user = await access(); assert.deepEqual(user.access.projects.map(p => p.id).sort(), ['101', '201']);
   assert.deepEqual(user.access.projects.find(p => p.id === '101').sources.sort(), ['explicit_delegation', 'github_derived']);
@@ -97,7 +97,7 @@ test('global user access matches authorized project lists, including inherited, 
   const sent = f.state.requests.length;
   await f.identity.reverify(principal); assert.equal(f.state.requests.length, sent);
   user = await access();
-  assert.deepEqual(user.access, { projects: [{ id: '201', full_name: 'other/project-201', sources: ['explicit_delegation'], can_configure: false }], github_pending: false });
+  assert.deepEqual(user.access, { projects: [{ id: '201', full_name: 'other/project-201', sources: ['explicit_delegation'], can_configure: false, can_write: false }], github_pending: false });
   await f.admin('/api/users/' + principal, 'PATCH', { active: false });
   user = (await f.admin('/api/users')).value.users.find(user => user.id === principal);
   assert.deepEqual(user.access.projects, []); assert.equal(user.access.github_pending, false);
@@ -421,10 +421,10 @@ test('GET /api/identity names a plain GitHub connection state, the next step, an
   h.store.run('UPDATE sessions SET tenant_id=NULL WHERE token_hash=?', digest(tenantSession.token));
 
 
-  // Write/Maintain/Triage/Read never become management: the person is signed in, with no authorized repositories.
-  // Restore a started project so membership checks have a target, then drop Admin.
+  // Without any permission on the repository the person is signed in, with no authorized repositories. (Write, Maintain,
+  // Triage and Read give access since #847.) Restore a started project so membership checks have a target, then drop Admin.
   await repository(f.admin, f.a.id, '101');
-  f.state.owner = false; f.state.permission = 'write'; await f.identity.reverify(principal);
+  f.state.owner = false; f.state.permission = 'none'; await f.identity.reverify(principal);
   const member = await read(principal, identity);
   assert.equal(member.state, 'no_repositories');
   assert.equal(member.status, '已登录 GitHub，但还没有授权任何仓库');
@@ -460,7 +460,7 @@ test('a signed-in user with no repositories gets a public GitHub App install URL
     install_url: 'https://github.com/apps/fixture-app/installations/new?next=https://evil.example',
   };
   h.store.run("INSERT INTO settings VALUES('onboarding.app',?)", JSON.stringify(saved));
-  f.state.owner = false; f.state.admin = false; f.state.permission = 'write';
+  f.state.owner = false; f.state.admin = false; f.state.permission = 'none';
   const login = await f.login(), principal = login.result.principal_id;
   const credential = session(h.store, principal, login.result.identity_id);
   const headers = { Cookie: 'bot_session=' + credential.token };

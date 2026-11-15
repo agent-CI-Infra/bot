@@ -377,7 +377,7 @@ async function renderIdentity() {
       element('p', grantStateText(grant)), facts([[t('identity.last_verified'), grant.verified_at ? identityTime(grant.verified_at) : t('identity.verified_missing')],
         [t('identity.expires'), grantExpiryText(grant)]]));
     const capabilities = element('details', '', 'fold'); capabilities.append(element('summary', t('identity.capabilities')), element('p', t('identity.capabilities_prefix') + grant.capabilities.join(', '))); row.append(capabilities);
-    if (grant.state !== 'active') row.append(note(grant.state === 'revoked' ? t('identity.revoked_note') : t('identity.inactive_note')));
+    if (grant.state !== 'active') row.append(note(grant.state === 'revoked' ? t('identity.revoked_note') : grant.state === 'suspended' ? t('identity.suspended_note') : t('identity.inactive_note')));
     (grant.state === 'active' ? activeList : history).append(row);
   }
   permissions.append(activeList); if (pending.length) permissions.append(history);

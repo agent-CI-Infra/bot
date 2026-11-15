@@ -5,7 +5,8 @@ import { GitHubIdentity } from '../dist/identity/github.js';
 import { GitHubLogin } from '../dist/identity/github-login.js';
 import { harness, setup, account, repository } from './helpers.mjs';
 
-// Real HTTP OAuth and GitHub endpoints, confined to this test's random loopback port.
+// Real HTTP OAuth and GitHub endpoints, confined to this test's random loopback port. A repository permission is
+// `state.permission` when set, else admin or none by `state.admin` (unset: no usable answer).
 export async function githubIdentityServer(t) {
   const state = { id: 42, login: 'administrator', owner: true, admin: false, type: 'Organization', selection: 'all', failure: 0,
     accessible: ['101'], codes: new Map(), exchanges: 0, requests: [], refreshed: 0 };
@@ -36,7 +37,7 @@ export async function githubIdentityServer(t) {
     if (path === '/installation/repositories') return send({ total_count: state.repositoryTotal || state.accessible.length, repositories: state.accessible.map(id => ({ id: Number(id), full_name: 'fixture/project-' + id, owner: target })) });
     if (path.startsWith('/orgs/fixture/memberships/')) return state.membershipFailure ? send({}, state.membershipFailure) : send({ state: 'active', role: state.owner ? 'admin' : 'member', organization: target, user: { id: state.membershipUserId || state.id } });
     if (/^\/repos\/fixture\/project-\d+$/.test(path)) return send({ id: state.repositoryProofId || Number(path.split('-').at(-1)), owner: target });
-    if (/^\/repos\/fixture\/project-\d+\/collaborators\/[^/]+\/permission$/.test(path)) return send({ permission: state.permission ?? (state.admin === undefined ? null : state.admin ? 'admin' : 'read'), user: { id: state.permissionUserId || state.id } });
+    if (/^\/repos\/fixture\/project-\d+\/collaborators\/[^/]+\/permission$/.test(path)) return send({ permission: state.permission ?? (state.admin === undefined ? null : state.admin ? 'admin' : 'none'), user: { id: state.permissionUserId || state.id } });
     send({}, 404);
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');

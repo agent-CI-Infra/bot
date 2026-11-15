@@ -10,7 +10,7 @@ export interface ActorContext {
 // Why a grant is not usable yet, for the three conditions a client can act on differently. Additive: a
 // grant that is `pending_verification` for any other reason (an expired grant, or no active GitHub proof)
 // carries no `reason`, and a client falls back to its combined wording exactly as before.
-export type ScopeReason = 'installation_pending' | 'permission_pending' | 'tenant_missing';
+export type ScopeReason = 'installation_pending' | 'permission_pending' | 'tenant_missing' | 'grantor_authority';
 export interface EffectiveScope {
   grant_id: string; tenant_id: string | null; project_id: string | null; scope: string; role: string;
   capabilities: string[]; source: string; verified_at: number; expires_at: number | null; state: string;
@@ -119,9 +119,14 @@ export function consumeInstallationChanges(store: Store): void {
     });
   }
 }
-export function listEffectiveScopes(store: Store, principal: string): EffectiveScope[] {
+/**
+ * `chain` lists the principals whose project delegations led here (see grantorHolds); callers outside this module leave it
+ * empty.
+ */
+export function listEffectiveScopes(store: Store, principal: string, chain: ReadonlySet<string> = new Set()): EffectiveScope[] {
   const user = store.get('SELECT u.role FROM users u JOIN principals p ON p.user_id=u.id WHERE p.id=? AND p.active=1 AND u.active=1', principal);
   if (!revision(store, principal)) return [];
+  const visited = new Set([...chain, principal]);
   const result: EffectiveScope[] = user?.role === 'super_admin' ? [{ grant_id: 'platform', tenant_id: null, project_id: null, scope: 'platform', role: 'super_admin',
     capabilities: ['*'], source: 'explicit_delegation', verified_at: 0, expires_at: null, state: 'active' }] : [];
   for (const g of store.all('SELECT * FROM scoped_grants WHERE principal_id=?', principal)) {
@@ -136,12 +141,23 @@ export function listEffectiveScopes(store: Store, principal: string): EffectiveS
         reason = !installation || installation.revision !== g.installation_revision ? 'installation_pending'
           : installation.status !== 'active' || installation.scope_pending ? 'permission_pending' : undefined;
     }
+    if (state === 'active' && g.policy === 'project_delegation' && !grantorHolds(store, g, visited)) { state = 'suspended'; reason = 'grantor_authority'; }
     if (!g.tenant_id || !store.get('SELECT 1 FROM tenants WHERE id=?', g.tenant_id)) { state = 'quarantined'; reason = 'tenant_missing'; }
     result.push({ grant_id: g.id, tenant_id: g.tenant_id, project_id: g.project_id, scope: g.scope, role: g.role,
       capabilities: JSON.parse(g.capabilities), source: g.source, verified_at: g.verified_at, expires_at: g.expires_at, state,
       ...(reason ? { reason } : {}) });
   }
   return result;
+}
+/**
+ * A project administrator's delegation (#847) counts only while its grantor still holds every delegated capability in that
+ * project. The grantor's authority is read without delegations that lead back to someone already on the chain, so two
+ * administrators who delegated to each other cannot keep each other's authority once GitHub took theirs away.
+ */
+function grantorHolds(store: Store, grant: Row, chain: ReadonlySet<string>): boolean {
+  if (!grant.grantor_id || chain.has(grant.grantor_id)) return false;
+  const scopes = listEffectiveScopes(store, grant.grantor_id, chain);
+  return (JSON.parse(grant.capabilities) as string[]).every(capability => scopes.some(scope => grantMatches(store, scope, capability, grant.tenant_id, grant.project_id ?? undefined)));
 }
 export function resolveActor(store: Store, sessionRef: string, options: { channel?: ActorContext['channel']; project_id?: string } = {}): ActorContext {
   identityProjection(store); consumeInstallationChanges(store);
@@ -236,14 +252,15 @@ function grantMatches(store: Store, g: EffectiveScope, capability: string, tenan
     (g.source !== 'github_derived' || !project || !!store.get(`SELECT 1 FROM installation_repositories r JOIN scoped_grants s ON s.installation_ref=r.installation_ref
       WHERE s.id=? AND r.repository_id=? AND r.present=1`, g.grant_id, project));
 }
-export function listEffectiveProjectAccess(store: Store, principal: string): { id: string; full_name: string; sources: string[]; can_configure: boolean }[] {
+export function listEffectiveProjectAccess(store: Store, principal: string): { id: string; full_name: string; sources: string[]; can_configure: boolean; can_write: boolean }[] {
   const scopes = listEffectiveScopes(store, principal);
   return store.all(`SELECT r.id,r.full_name,p.tenant_id FROM repositories r JOIN identity_projects p ON p.project_id=r.id
     WHERE p.tenant_id IS NOT NULL ORDER BY r.full_name`).flatMap(project => {
     const grants = matchingGrants(store, scopes, 'tasks.read', project.tenant_id, project.id);
     const configuration = matchingGrants(store, scopes, 'config.write', project.tenant_id, project.id);
+    // can_write: may ask and create tasks there (a GitHub Write collaborator, say, #847), whether or not they configure it.
     return grants.length ? [{ id: project.id, full_name: project.full_name, sources: [...new Set([...grants, ...configuration].map(g => g.source))],
-      can_configure: configuration.length > 0 }] : [];
+      can_configure: configuration.length > 0, can_write: matchingGrants(store, scopes, 'tasks.write', project.tenant_id, project.id).length > 0 }] : [];
   });
 }
 export function effectiveRepositories(store: Store, actor: ActorContext): string[] {
