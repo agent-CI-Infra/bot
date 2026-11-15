@@ -386,7 +386,7 @@ test('rejects missing, invalid, other-run, wrong-role and revoked tokens, unconf
   const rig = await createRelayRig(t);
   let upstreamCalled = 0;
   const model = addProjectModel(rig.store, rig.repoId, {
-    url: 'http://relay.internal:8080/v1',
+    url: 'https://relay.internal:8080/v1',
     key: 'sk-non-loopback-secret',
     name: 'qwen3-coder',
     interface_type: 'openai-chat-completions',
@@ -396,7 +396,7 @@ test('rejects missing, invalid, other-run, wrong-role and revoked tokens, unconf
     primaryModel: model,
     fetcher: async (url, init) => {
       upstreamCalled++;
-      assert.equal(url, 'http://relay.internal:8080/v1/chat/completions');
+      assert.equal(url, 'https://relay.internal:8080/v1/chat/completions');
       assert.equal(init.headers['x-api-key'], 'sk-non-loopback-secret');
       assert.equal(init.headers.Authorization, undefined);
       return new Response(JSON.stringify({
@@ -458,7 +458,7 @@ test('supports parallel sub-agent requests, >256 KiB chunked prompts and >90 KiB
   const rig = await createRelayRig(t);
   const largeOutput = 'A'.repeat(95_000);
   const model = addProjectModel(rig.store, rig.repoId, {
-    url: 'http://relay.internal:8080/v1',
+    url: 'https://relay.internal:8080/v1',
     key: 'sk-parallel-key-secret',
     name: 'glm-5',
     interface_type: 'openai-chat-completions',
@@ -544,7 +544,7 @@ test('readProviderCredentialFile accepts read-only files and symlinks and report
 test('pre-header keepalive heartbeats do not prematurely commit 200/application/json before slow upstream headers or errors arrive', async t => {
   const rig = await createRelayRig(t);
   const model = addProjectModel(rig.store, rig.repoId, {
-    url: 'http://upstream.invalid/v1',
+    url: 'https://upstream.invalid/v1',
     key: 'sk-slow-upstream-key',
     name: 'slow-gpt',
     interface_type: 'openai-chat-completions',

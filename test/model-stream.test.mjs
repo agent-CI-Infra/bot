@@ -21,7 +21,7 @@ async function until(check){
 
 async function fixture(t,{stream=true,failDelivery=false,failures=0}={}){
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
-  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:'http://model.invalid/v1',api_key:key,model_name:'fixture'})).value.model;
+  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://model.invalid/v1',api_key:key,model_name:'fixture'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('stream','101','review.pr','running','fixture')");
   const root=h.directory+'/runner',dir=root+'/agent';await mkdir(dir,{recursive:true});
@@ -40,7 +40,7 @@ async function fixture(t,{stream=true,failDelivery=false,failures=0}={}){
     return {};
   }};
   const fetchMock=t.mock.method(globalThis,'fetch',async(url,options)=>{
-    assert.equal(url,'http://model.invalid/v1/chat/completions');
+    assert.equal(url,'https://model.invalid/v1/chat/completions');
     const body=JSON.parse(options.body);assert.equal(body.stream,true);assert.deepEqual(body.stream_options,{include_usage:true});
     assert.equal(body.max_completion_tokens,8192);assert.ok(!('max_tokens' in body));
     // A provider that is briefly unavailable answers 503 to the first requests.
