@@ -30,6 +30,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { managementStorage } from '../management/storage.js';
 import { channelStorage } from '../channels/storage.js';
 import { scheduleStorage } from '../schedules/storage.js';
+import { trustedOrganizationStorage } from '../app/trusted-organizations.js';
 import { taskManagementStorage } from '../tasks/management.js';
 import { conversationStorage } from '../roles/conversation-storage.js';
 import { serviceRoleStorage } from '../service-roles/roles.js';
@@ -269,6 +270,8 @@ export class Store {
     // Group bindings reference service roles and migrate legacy group employees once (#312).
     serviceBindingStorage(this);
     scheduleStorage(this);
+    // GitHub owners whose repository administrators start their own repositories (#848).
+    trustedOrganizationStorage(this);
     // Which task uses which workspace on the project computers, for their scheduled removal (#444).
     workspaceStorage(this);
     // The computers' shared git worktrees and which task held each when (#769).

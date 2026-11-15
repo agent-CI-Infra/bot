@@ -10,6 +10,8 @@ import { appBucket, installationBucket, observe, observeAll, rateLimitView, refu
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { accessGaps, appGaps } from './access.js';
 import { installationSnapshot, installationRef, accountRef, queueInstallationSync, installationExecutionDenied } from '../installations/archive.js';
+import { pendingInstalledRepositories } from '../identity/github-status.js';
+import { trustedOrganization, trustOrganization } from './trusted-organizations.js';
 import { assertSyncClaim, claimInstallationSync, commitInstallationProjection, finishInstallationSync, validateInstallation, type SyncClaim } from '../installations/projection.js';
 
 // Installation scope: which repositories each account can see on GitHub. Seeing a repository never registers or
@@ -353,6 +355,8 @@ export async function installationApi(store: Store, sync: InstallationSync | und
   const probe = /^\/api\/accounts\/([^/]+)\/rate-limits\/probe$/.exec(path);
   if (probe && method === 'POST') { superAdmin(user); fields(input, []); if (!sync) return fail(503, 'sync_not_configured'); return sync.probe(probe[1]!); }
   if (!path.startsWith('/api/installations')) return undefined;
+  const start = /^\/api\/installations\/([1-9]\d*)\/activate$/.exec(path);
+  if (start && method === 'POST' && user.role !== 'super_admin') return selfStart(store, user, start[1]!, input);
   if (user.role !== 'super_admin' && identity && user.context) {
     const match = /^\/api\/installations\/archive\/([^/]+)\/([1-9]\d*)\/([1-9]\d*)(?:\/(repositories|sync))?$/.exec(path);
     if (!match) return fail(403, 'installation_forbidden');
@@ -439,7 +443,9 @@ function list(store: Store, url?: URL): Json {
       installed: seen ? !!seen.installed : null, synced_at: seen?.synced_at || null, registered: !!reg, enabled: !!reg?.enabled,
       review_enabled: !!reg?.review_enabled, development_enabled: !!reg?.development_enabled, actions_failures_enabled: !!reg?.actions_failures_enabled, model_id: reg?.model_id || null, environment_state: reg?.environment_state || null,
       running_tasks: reg?.running_tasks || 0, queued_tasks: reg?.queued_tasks || 0, ...permissions,
-      board_enabled: publication.enabled, board_state: publication.state, board_url: publication.url };
+      board_enabled: publication.enabled, board_state: publication.state, board_url: publication.url,
+      // Whether the owner is trusted (#848): its repository administrators start repositories like this one themselves.
+      organization_trusted: !!trustedOrganization(store, String(reg?.owner_id || seen!.owner_id)) };
   }).sort((a, b) => Number(b.registered) - Number(a.registered) || a.full_name.localeCompare(b.full_name));
   return { repositories: url ? projectListPage(repositories, url) : repositories,
     syncs: store.all('SELECT s.*,a.name AS account_name FROM installation_syncs s JOIN accounts a ON a.id=s.account_id') };
@@ -466,9 +472,34 @@ function setHidden(store: Store, user: Actor, id: string, input: Json, hidden: b
     return { hidden };
   });
 }
-function activate(store: Store, user: Actor, id: string, input: Json): Json {
-  fields(input, ['account_id', 'model_id', 'development_enabled']);
+/**
+ * A project administrator starts a never-started repository themselves (#848): GitHub makes them its administrator (an
+ * active derived grant), and a super administrator trusts its owner. They choose nothing: the organization's defaults pick
+ * the model and whether development starts enabled, resources follow the global defaults, and machine configuration stays
+ * with super administrators. Starting again a project that was disabled stays with super administrators.
+ */
+function selfStart(store: Store, user: Actor, id: string, input: Json): Json {
+  fields(input, []);
+  if (!user.context || store.get('SELECT 1 FROM repositories WHERE id=?', id)) return fail(403, 'installation_forbidden');
+  if (!pendingInstalledRepositories(store, user.context.principal_id).some(repo => repo.id === id)) return fail(403, 'repository_admin_required');
+  const owner = store.get('SELECT owner_id FROM installed_repositories WHERE repository_id=? AND installed=1', id)?.owner_id;
+  const trusted = owner && trustedOrganization(store, owner);
+  if (!trusted) return fail(403, 'organization_not_trusted');
+  // A default model deleted or no longer shared since it was chosen is skipped; the project then waits for a model.
+  const model = trusted.model_id && store.get('SELECT 1 FROM models WHERE id=? AND repository_id IS NULL', trusted.model_id) ? trusted.model_id : null;
+  return activate(store, user, id, { model_id: model, development_enabled: !!trusted.development_enabled }, () => {
+    if (trustedOrganization(store, owner)?.updated_at !== trusted.updated_at) fail(409, 'organization_trust_changed');
+  });
+}
+/**
+ * `trust_organization` (super administrators, #848): trust the repository's owner as this start does, with the shared model
+ * chosen here (if it is one) and this development choice as the organization's defaults. `check` runs inside the start's
+ * transaction, for a decision made before it.
+ */
+function activate(store: Store, user: Actor, id: string, input: Json, check: () => void = () => {}): Json {
+  fields(input, ['account_id', 'model_id', 'development_enabled', 'trust_organization']);
   if (input.development_enabled !== undefined && typeof input.development_enabled !== 'boolean') fail(400, 'invalid_policy');
+  if (input.trust_organization !== undefined && typeof input.trust_organization !== 'boolean') fail(400, 'invalid_field', 'trust_organization');
   const registered = store.get('SELECT * FROM repositories WHERE id=?', id);
   const candidates = store.all('SELECT * FROM installed_repositories WHERE repository_id=? AND installed=1', id);
   const chosen = input.account_id ? candidates.find(c => c.account_id === text(input.account_id)) : candidates[0];
@@ -478,6 +509,7 @@ function activate(store: Store, user: Actor, id: string, input: Json): Json {
   const modelRow = model ? store.get('SELECT * FROM models WHERE id=? AND (repository_id IS NULL OR repository_id=?)', model, id) : null;
   if (model && !modelRow) fail(400, 'model_not_available');
   return store.transaction(() => {
+    check();
     if (!registered) {
       if (store.get('SELECT id FROM repositories WHERE full_name=?', chosen!.full_name)) fail(409, 'repository_exists');
       store.run('INSERT INTO repositories VALUES(?,?,?,?)', id, chosen!.full_name, chosen!.owner_id, chosen!.account_id);
@@ -489,6 +521,8 @@ function activate(store: Store, user: Actor, id: string, input: Json): Json {
     store.run('UPDATE policies SET enabled=1,review_enabled=1,development_enabled=?,model_id=? WHERE repository_id=?',
       input.development_enabled === undefined ? policy.development_enabled : Number(input.development_enabled), model ?? policy.model_id, id);
     store.audit(user.id, registered ? 'repository.enabled' : 'repository.activated', id, id);
+    if (input.trust_organization === true) trustOrganization(store, user.id, String((chosen || registered)!.owner_id),
+      { model_id: modelRow?.repository_id === null ? model : null, development_enabled: input.development_enabled === true });
     return { repository: (list(store).repositories as Json[]).find(r => r.id === id)! };
   });
 }

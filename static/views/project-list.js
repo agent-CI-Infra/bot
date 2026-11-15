@@ -435,6 +435,7 @@ activationView.innerHTML = `<form id="activation-form" method="dialog"><h2 id="a
 <p class="muted">启动后为这个仓库创建虚拟电脑，并开始检视新打开的 Issue 和 PR。启动前收到的事件只存档，不会补跑。</p>
 <label>检视和开发使用的模型<select name="model_id"></select></label>
 <label class="check"><input type="checkbox" name="development_enabled"> 同时开启自动开发：Issue 明确要求改代码时，在虚拟电脑里实现、测试并开 bot PR</label>
+<label class="check" id="activation-trust"><input type="checkbox" name="trust_organization"> </label>
 <p id="activation-error" class="view-error" role="alert"></p>
 <div class="actions"><button type="button" class="quiet" id="activation-cancel">取消</button><button type="submit">启动</button></div></form>`;
 document.body.append(activationView);
@@ -445,6 +446,10 @@ async function openActivation(row, after) {
   const models = (await api('/api/models')).models.filter(m => m.repository_id === null || m.repository_id === row.id);
   for (const m of models) select.add(new Option(`${m.model_name} · ${m.repository_id ? '本仓库专属' : '部署共享'}${m.key_configured ? '' : '（Key 已撤销）'}`, m.id));
   select.add(new Option('暂不选择（任务会等待模型配置）', ''));
+  // #848: the organization's first start can also trust it; this start's shared model and development choice become its defaults.
+  const owner = row.owner_login || String(row.full_name || '').split('/')[0], trust = $('activation-trust');
+  trust.hidden = !!row.organization_trusted;
+  trust.replaceChildren(trust.querySelector('input'), ` 信任 ${owner}：以后由它的仓库管理员自行启动仓库，默认使用这里选的共享模型和开发设置（可在「全局设置 → 项目管理」修改或撤销）`);
   activationView.showModal();
 }
 $('activation-cancel').addEventListener('click', () => activationView.close());
@@ -452,7 +457,8 @@ $('activation-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.currentTarget, submit = form.querySelector('[type=submit]'), target = activationTarget; if (!target) return;
   submit.disabled = true;
   try {
-    await api(`/api/installations/${target.row.id}/activate`, 'POST', { model_id: form.elements.model_id.value || null, development_enabled: form.elements.development_enabled.checked });
+    await api(`/api/installations/${target.row.id}/activate`, 'POST', { model_id: form.elements.model_id.value || null, development_enabled: form.elements.development_enabled.checked,
+      ...(target.row.organization_trusted ? {} : { trust_organization: form.elements.trust_organization.checked }) });
     activationView.close(); await target.after();
   } catch (err) { $('activation-error').textContent = err.message; } finally { submit.disabled = false; }
 });

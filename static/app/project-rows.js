@@ -1,6 +1,7 @@
-// #716: an installed repository that was never started can only be started by a super administrator, so the copy names
-// that role and each row offers the one next step this reader has: copy a reminder to send them. (Super administrators
-// never get this group: their project list is the installed list, where such a row already carries 启动.)
+// #716: an installed repository that was never started is started by a super administrator, so the copy names that role
+// and each row offers the one next step this reader has: copy a reminder to send them. In a trusted organization (#848) its
+// administrator starts it, and the row carries 启动 instead. (Super administrators never get this group: their project list
+// is the installed list, where such a row already carries 启动.)
 const pendingActivationTitle = '等待超级管理员启动';
 function pendingActivationReminder(repo) {
   const address = (location.origin || '') + (location.pathname || '/') + '#/projects';
@@ -15,19 +16,31 @@ function pendingActivationAction(repo) {
   copy.setAttribute('aria-live', 'polite');
   return copy;
 }
+// #848: in an organization a super administrator trusts, the repository's administrator starts it here. The organization's
+// defaults choose the model and development; nothing else is asked.
+function pendingStartAction(repo) {
+  const start = button('启动', async () => {
+    start.disabled = true; notice('message', `正在启动 ${repo.full_name}…`);
+    try { await api(`/api/installations/${repo.id}/activate`, 'POST', {}); notice('message', `已启动 ${repo.full_name}。`); await route(); }
+    catch (err) { start.disabled = false; notice('message', err.message, '', 'alert'); }
+  });
+  return start;
+}
 function pendingActivationGroup(pending) {
-  const section = element('div', '', 'project-owner-group project-pending-group');
+  const section = element('div', '', 'project-owner-group project-pending-group'), own = pending.some(repo => repo.self_start);
+  const title = own ? '待启动的仓库' : pendingActivationTitle;
   section.setAttribute('role', 'listitem'); section.dataset.key = 'pending-activation';
-  const list = element('div', '', 'project-owner-rows'); list.setAttribute('role', 'list'); list.setAttribute('aria-label', pendingActivationTitle);
+  const list = element('div', '', 'project-owner-rows'); list.setAttribute('role', 'list'); list.setAttribute('aria-label', title);
   for (const repo of pending) {
     const line = element('div', '', 'row project-pending-row has-actions'), content = element('div', '', 'row-content'), status = element('div', '', 'row-state'), actions = element('div', '', 'actions');
     line.setAttribute('role', 'listitem'); line.dataset.key = 'pending:' + repo.id;
-    const note = element('p', '已安装到 GitHub，需要超级管理员在控制台启动后才能打开。'); note.title = note.textContent; content.append(element('strong', repo.full_name), note);
-    status.append(element('span', '待超级管理员启动', 'status status-warning'));
-    actions.append(pendingActivationAction(repo));
+    const note = element('p', repo.self_start ? '已安装到 GitHub，所属组织已受信任，你可以直接启动；模型和开发设置用组织的默认值。' : '已安装到 GitHub，需要超级管理员在控制台启动后才能打开。');
+    note.title = note.textContent; content.append(element('strong', repo.full_name), note);
+    status.append(repo.self_start ? element('span', '可自行启动', 'status status-info') : element('span', '待超级管理员启动', 'status status-warning'));
+    actions.append(repo.self_start ? pendingStartAction(repo) : pendingActivationAction(repo));
     line.append(content, status, actions); list.append(line);
   }
-  section.append(element('h2', pendingActivationTitle, 'project-owner-title'),
+  section.append(element('h2', title, 'project-owner-title'),
     element('p', '这些仓库已装好 GitHub App，启动后会出现在上面的项目列表里。', 'project-pending-intro muted'),
     list, consoleLink('#/identity', '查看身份与权限'));
   return section;

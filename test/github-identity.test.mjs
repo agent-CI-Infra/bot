@@ -404,7 +404,7 @@ test('GET /api/identity names a plain GitHub connection state, the next step, an
   assert.equal(pending.action, 'wait_activation');
   assert.deepEqual(pending.repositories, []);
   assert.equal(pending.repository_count, 0);
-  assert.deepEqual(pending.pending_repositories, [{ id: '101', full_name: 'fixture/project-101' }]);
+  assert.deepEqual(pending.pending_repositories, [{ id: '101', full_name: 'fixture/project-101', self_start: false }]);
 
   // A selected tenant must not list another organization's unstarted repositories.
   const tenantSession = session(h.store, principal, identity);
@@ -414,7 +414,7 @@ test('GET /api/identity names a plain GitHub connection state, the next step, an
     assert.equal(response.status, 200);
     return (await response.json()).github_connection;
   };
-  assert.deepEqual((await readWith('github.com:10')).pending_repositories, [{ id: '101', full_name: 'fixture/project-101' }]);
+  assert.deepEqual((await readWith('github.com:10')).pending_repositories, [{ id: '101', full_name: 'fixture/project-101', self_start: false }]);
   const otherTenant = await readWith('github.com:20');
   assert.deepEqual(otherTenant.pending_repositories, []);
   assert.notEqual(otherTenant.state, 'pending_activation');
