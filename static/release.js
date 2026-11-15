@@ -8,10 +8,12 @@ function releaseSection() {
   message.setAttribute('role', 'alert'); readStatus.setAttribute('role', 'status');
   let checking = 0, reading = 0, writing = false;
   const live = () => section.isConnected && current === target && current.section === 'release' && me?.id === owner;
+  // #743: 401/403/404 mean the signed-in actor can no longer read this repository's release records; asking again every
+  // five seconds cannot change that answer, so the poll stops here. Anything else may clear on its own and keeps going.
   const denied = error => {
-    if (![401,403].includes(error.status)) return false;
+    if (!pollAfterError(error).terminal) return false;
     checking++; reading++; target.releasePreview = null; target.releaseEdits?.clear(); confirm.disabled = true;
-    preview.replaceChildren(); status.replaceChildren(); overview.replaceChildren(); message.textContent = '发布权限已失效，请刷新项目或联系管理员。'; return true;
+    preview.replaceChildren(); status.replaceChildren(); overview.replaceChildren(); message.textContent = '发布记录已不可读取：发布权限已失效或仓库已不可访问，请刷新项目或联系管理员。'; return true;
   };
   const confirm = button('确认打标签', async () => {
     const p = target.releasePreview;
@@ -47,13 +49,19 @@ function releaseSection() {
   const refresh = async () => {
     const token = ++reading;
     try {
-      const data = await api(endpoint); if (!live() || token !== reading) return;
+      const data = await api(endpoint); if (!live() || token !== reading) return 'stale';
       readStatus.textContent = `记录读取于 ${new Date().toLocaleTimeString()}；这是读取时间。`;
-      if (document.activeElement?.name === 'release_body') return;
+      if (document.activeElement?.name === 'release_body') return 'ok';
       overview.replaceChildren(...(data.releases.length ? [releaseOverview(data.releases)] : []));
       status.replaceChildren(...data.releases.map(record => releaseRecord(record, endpoint, refresh, message, { live, target })));
       if (!data.releases.length) status.append(note('还没有发布记录。'));
-    } catch (error) { if (!live() || token !== reading) return; if (!denied(error)) { readStatus.textContent = '发布记录读取失败；保留上次内容，当前状态未确认。'; message.textContent = error.message; } }
+      return 'ok';
+    } catch (error) {
+      if (!live() || token !== reading) return 'stale';
+      if (denied(error)) return 'terminal';
+      readStatus.textContent = '发布记录读取失败；保留上次内容，当前状态未确认。'; message.textContent = error.message;
+      return 'retry';
+    }
   };
   version.addEventListener('input', () => { checking++; target.releasePreview = null; target.releaseVersion = version.value; confirm.disabled = true; });
   version.addEventListener('change', check);
@@ -61,7 +69,7 @@ function releaseSection() {
   preparation.append(element('h3', '准备新版本'), note('确认版本与精确提交后创建标签。检查通过只生成草稿；正式发布需要再次确认。'), field('版本号', version), controls);
   layout.append(preparation, preview); const historyHead = element('div', '', 'heading'); historyHead.append(element('h3', '发布记录'), button('刷新发布记录', refresh, 'quiet'));
   section.append(layout, message, historyHead, overview, readStatus, status); void check(); void refresh();
-  const poll = async () => { if (!live()) return; await refresh(); if (live()) projectTimer = setTimeout(poll, 5000); };
+  const poll = async () => { if (!live()) return; const outcome = await refresh(); if (live() && outcome !== 'terminal') projectTimer = setTimeout(poll, 5000); };
   projectTimer = setTimeout(poll, 5000); return [section];
 }
 function releaseProcess(record) {
@@ -208,4 +216,3 @@ function releaseRecord(r, endpoint, refresh, message, context) {
   } else if (r.body) { const body = element('pre', r.body); section.append(body); }
   return section;
 }
-
