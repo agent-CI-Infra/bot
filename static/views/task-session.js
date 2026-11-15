@@ -1,4 +1,4 @@
-let openTaskId = null, taskTimer = null, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null, taskLogState = null, taskReadVersion = 0, taskInboxOrigin = null;
+let openTaskId = null, taskTimer = null, taskRetryDelay = 0, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null, taskLogState = null, taskReadVersion = 0, taskInboxOrigin = null;
 function resetTaskRendering() {
   renderedLogs = new Set(); liveCommand = null; snapshotProgress = null;
   delete $('task-actions').dataset.signature;
@@ -55,6 +55,7 @@ async function refreshTask() {
     const environment = await api('/api/environments/' + detail.task.repository_id).catch(() => null);
     const roles = roleRecords(roleView), purposes = await rolePurposes(id, roles);
     if (!current()) return;
+    taskRetryDelay = 0;
     renderTaskHeader(detail.task); renderTaskNext(detail.task, roles, purposes);
     if (logResult.error && [401, 403, 404].includes(logResult.error.status)) throw logResult.error;
     if (logResult.error) logState.error = logResult.error.message;
@@ -67,15 +68,23 @@ async function refreshTask() {
     if (!terminalStates.includes(detail.task.status)) taskTimer = setTimeout(refreshTask, detail.task.status.startsWith('waiting_') ? 5000 : 2000);
   } catch (err) {
     if (!current()) return;
-    if ([401, 403, 404].includes(err.status)) {
+    // A task this page is no longer allowed to read stays unreadable however often it is asked; the poll then stops and
+    // the failure is stated once, with an explicit read left to the person.
+    const poll = pollAfterError(err, taskRetryDelay);
+    if (poll.terminal) {
       resetTaskRendering();
       taskLogState = { id, logs: [], page: null, error: '', olderPending: false };
       for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions', 'task-log-controls']) $(part).replaceChildren();
       $('task-next').hidden = $('timeline-command').hidden = $('timeline-live').hidden = true;
       $('task-title').textContent = '任务暂不可访问';
-      $('task-actions').append(button('关闭', () => taskView.close()));
+      $('task-actions').append(button('关闭', () => taskView.close()), button('重新读取', () => refreshTask()));
+      notice('task-error', err.message); taskRetryDelay = 0;
+      return;
     }
-    notice('task-error', err.message); taskTimer = setTimeout(refreshTask, 5000);
+    // Anything else may clear on its own, so it keeps polling — backing off so a failing endpoint is not hit every five
+    // seconds, and no slower than half a minute.
+    notice('task-error', err.message);
+    taskTimer = setTimeout(refreshTask, taskRetryDelay = poll.delay);
   }
 }
 function mergeTaskLogs(cache, result, initial = false) {
