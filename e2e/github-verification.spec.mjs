@@ -161,9 +161,12 @@ test('核验进度读取连续失败时按指数退避、显示失败提示，�
     await expect(line).toHaveText('正在核验 GitHub 权限（已核对 0/1 个安装），完成后显示你可以管理的项目。');
     await expect(line).not.toHaveAttribute('data-state', 'failed');
     const recovered = await count();
-    // A successful read clears the failure count: the next wait is the healthy 1.5 s again.
-    await page.clock.runFor(1400); await page.waitForTimeout(100); expect(await count()).toBe(recovered);
-    await page.clock.runFor(200); await expect.poll(count).toBe(recovered + 1);
+    // A successful read clears the failure count: the next wait is the healthy 1.5 s again, not the 12 s the third
+    // failure asked for. Other console work can read /api/auth/me too, so assert the healthy read arrives rather than
+    // an exact total.
+    await page.clock.runFor(1400);
+    await expect(line).toHaveText('正在核验 GitHub 权限（已核对 0/1 个安装），完成后显示你可以管理的项目。');
+    await page.clock.runFor(200); await expect.poll(count).toBeGreaterThan(recovered);
     // A hidden tab reads nothing at all, and coming back reads at once instead of waiting out a delay.
     await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange')); });
     const hidden = await count();
