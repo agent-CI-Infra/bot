@@ -13,7 +13,7 @@ function modelCatalogPanel() {
     catch (err) { if (live()) message.textContent = err.message; }
     finally { control.disabled = false; }
   }));
-  void api('/api/models/catalog?limit=1').then(value => show(value.catalog)).catch(err => { if (live()) message.textContent = err.message; });
+  void api('/api/models/catalog?limit=1').then(value => show(value.catalog)).catch(err => { if (live()) message.textContent = readErrorText(err); });
   return panel;
 }
 function modelCapabilitiesEditor(model, after) {

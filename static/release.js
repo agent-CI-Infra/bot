@@ -44,7 +44,7 @@ function releaseSection() {
         ['新增提交', Number.isSafeInteger(p.commit_count) ? String(p.commit_count) : '数量未提供'], ['发行说明规则', `${({repository:'仓库文件',console:'项目设置',builtin:'内置规则'})[p.skill.source] || p.skill.source} · ${p.skill.path || p.skill.version}`],
         ['已有标签', p.existing_tag ? p.existing_tag.commit : '无'], ['已有 Release', p.existing_release ? link(p.existing_release.url, p.existing_release.draft ? '已有草稿' : '已由仓库工作流／外部操作发布') : '无']]));
       confirm.disabled = writing || !p.available;
-    } catch (error) { if (!live() || token !== checking) return; target.releasePreview = null; confirm.disabled = true; if (!denied(error)) { preview.replaceChildren(note('候选读取失败，当前无法确认目标提交。')); message.textContent = error.message; } }
+    } catch (error) { if (!live() || token !== checking) return; target.releasePreview = null; confirm.disabled = true; if (!denied(error)) { preview.replaceChildren(note('候选读取失败，当前无法确认目标提交。')); message.textContent = readErrorText(error); } }
   };
   const refresh = async () => {
     const token = ++reading;

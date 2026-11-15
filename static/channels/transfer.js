@@ -103,7 +103,7 @@ async function channelHistory(connector, panel) {
           element('p', m.content || '此消息没有可显示的文本'), ...(m.resources || []).map(r => note(`附件：${r.name} · ${{ pending: '待下载', ready: '可用', failed: '读取失败' }[r.state] || r.state}${r.size === null ? '' : ' · ' + r.size + ' 字节'}${r.mime ? ' · ' + r.mime : ''}${r.error ? ' · ' + r.error : ''}`)), ...(m.thread_id ? [note('话题 ' + m.thread_id)] : [])); results.append(item);
       }
       next.hidden = !result.has_more;
-    } catch (err) { status.textContent = err.message; } finally { queryButton.disabled = !chats.length; }
+    } catch (err) { status.textContent = readErrorText(err); } finally { queryButton.disabled = !chats.length; }
   };
   const next = button('读取下一页本地消息', () => search(true), 'quiet'); next.hidden = true;
   controls.append(next, button('显式重新同步可见历史', async () => {
