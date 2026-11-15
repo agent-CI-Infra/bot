@@ -158,7 +158,12 @@ function fitManagementWindow(chat) {
   // #641 review: the compact layout follows the box's own height, not the viewport's. Between 561 and ~660px of viewport
   // the clamp below leaves a box under 520px while no max-height media query matches, so the composer overflowed the box
   // and the send button landed outside both the panel and the screen.
-  chat.window.dataset.compact = height < 520 ? '1' : '';
+  // The compact rules only target the floating panel; the full-page and fullscreen views lay themselves out from the
+  // viewport and must keep the wide layout even when this clamp hands them a small height.
+  const floating = !chat.window.classList.contains('management-page') && !chat.window.classList.contains('management-fullscreen');
+  // toggleAttribute, not dataset = '': an empty attribute still matches [data-compact] and would put the full-page view
+  // into the compact layout too.
+  chat.window.toggleAttribute('data-compact', floating && height < 520);
 }
 function resizeManagementWindow(chat, width, height) {
   chat.size = { width, height }; fitManagementWindow(chat);
