@@ -99,7 +99,10 @@ const settingsCards = {
     const cards = [], intro = card('存储');
     intro.append(note(`轨迹文件按运行保存模型请求、工具调用和大日志的正文，数据库只留状态和定位。数字来自文件关闭时累加的计数和后台快照，每 5 分钟刷新一次；项目电脑的卷每 6 小时在后台扫描一次，git 缓存和公开看板每小时测一次。打开页面不遍历文件。最近刷新：${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`
       // A failed manager read keeps the numbers it gave last (#793), so the page says which read they come from.
-      + (view.manager_error ? `上次读取于 ${view.manager_read_at ? time(view.manager_read_at) : '—'}；本次 manager 读取失败（${view.manager_error}），manager 的数字保留上次结果，可能过期。` : '')));
+      + (view.manager_error ? view.manager_read_at
+        ? `上次读取于 ${time(view.manager_read_at)}；本次 manager 读取失败（${view.manager_error}），manager 的数字保留上次结果，可能过期。`
+        : `本次 manager 读取失败（${view.manager_error}），还没有读到过 manager 的数字。`
+        : '')));
     cards.push(intro);
     // A data disk below its reserve (#671): background writes pause, and tasks wait once the disk is all but full.
     if (view.alerts?.length) {
