@@ -94,15 +94,25 @@ test('#552 登录、项目、身份页卡片同源，每页最多一个启用的
 
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(h.admin + '/#/identity');
-    await expect(page.locator('.identity-layout, #identity-panel').first()).toBeVisible({ timeout: 15000 });
+    // #821: wait for the identity content, not its container. `#identity-panel` is the shell that becomes visible the
+    // moment the route runs, so combining it with `.identity-layout` let `.first()` resolve on the shell and everything
+    // below ran against the loading card — that is how 切换组织 timed out under parallel load. `.identity-layout` is
+    // only built after /api/identity answers, so the 15 s budget here is what a slow read actually needs.
+    await expect(page.locator('.identity-layout')).toBeVisible({ timeout: 15000 });
     // After #514 the first-screen primary is 连接 GitHub (disabled until GitHub login is configured).
     const connect = page.getByRole('button', { name: '连接 GitHub', exact: true });
-    if (await connect.count()) {
-      await expect(connect).toHaveClass(/btn-primary/);
-      expect(await connect.isDisabled()).toBe(true);
-    }
-    const advanced = page.locator('details.identity-advanced > summary');
-    if (await advanced.count()) await advanced.first().click();
+    await expect(connect).toHaveCount(1);
+    await expect(connect).toHaveClass(/btn-primary/);
+    expect(await connect.isDisabled()).toBe(true);
+    // #821: 切换组织 lives inside the fold, so opening it is required, not conditional. A skipped click used to turn a
+    // button that was not there yet into a 5 s timeout at the class assertion; re-render can replace the fold, hence
+    // the whole open-and-check step retries against the fold that is actually on the page.
+    await expect(async () => {
+      const fold = page.locator('details.identity-advanced');
+      if (!(await fold.evaluate(el => el.open))) await fold.locator(':scope > summary').click();
+      await expect(fold).toHaveJSProperty('open', true, { timeout: 1000 });
+      await expect(fold.locator('.side-card').first()).toBeVisible({ timeout: 1000 });
+    }).toPass({ timeout: 15000 });
     const switcher = page.getByRole('button', { name: '切换组织', exact: true });
     await expect(switcher).toHaveClass(/btn-secondary/);
     const bind = page.getByRole('button', { name: '绑定 GitHub 账号', exact: true });
