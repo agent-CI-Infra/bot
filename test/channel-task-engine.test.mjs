@@ -49,7 +49,7 @@ for(const scenario of ['report','reviewable_pull_request','revoked_after_qa','po
         executing=true;await gate;
         if(!names.includes('read_file'))return send('read_file',{path:'calc.mjs'});
         if(software&&!names.includes('write_file'))return send('write_file',{path:'feature.mjs',content:'export const verified = true;\n'});
-        return send('submit_delivery',{summary:software?'Verified software delivered from the group':'Verified report delivered from the group',artifacts:software?[{path:'feature.mjs',description:'Verified module'}]:[],evidence:[],unknowns:[],...(software?{change_title:'feat: add verified module',release_label:'release:patch',test_command:'Project policy check'}:{})});
+        return send('submit_delivery',{summary:software?'Verified software delivered from the group':'Verified report delivered from the group',artifacts:software?[{path:'feature.mjs',description:'Verified module'}]:[],evidence:[],unknowns:[],...(software?{change_title:'feat: add verified module',test_command:'Project policy check'}:{})});
       }
       throw new Error('unexpected model request: '+tools.join(','));
     }catch(error){modelError=error;if(!res.writableEnded){res.statusCode=500;res.end(JSON.stringify({error:{message:'Local fixture assertion failed'}}));}}};

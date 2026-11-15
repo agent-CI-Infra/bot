@@ -11,7 +11,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'actions_app_required','actions_permission_missing','actions_workflow_run_subscription_missing','gate_repository_unreadable'] },
   github_rejected: { label:'GitHub 拒绝了请求', codes:[] },
   model: { label:'模型服务或模型配置', codes:['role_nomination_stages_incomplete','role_submission_required','acp_submission_required','codex_submission_required','codex_authentication_failed','codex_model_unavailable','codex_model_mismatch','codex_model_rerouted','codex_resume_incompatible','codex_turn_failed','codex_subagent_refused','role_delivery_invalid','role_result_invalid','role_nomination_invalid','role_nomination_required','acceptance_unavailable','acceptance_output_invalid','acceptance_budget_exhausted','model_not_configured','service_role_model_not_configured','service_role_unavailable','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
-    'model_response_too_large','model_finding_invalid','model_review_invalid','model_url_insecure','create_pull_request_required','create_pull_request_not_allowed',
+    'model_response_too_large','model_finding_invalid','model_review_invalid','model_url_insecure','create_pull_request_required','create_pull_request_not_allowed','pull_request_labels_refused',
     'release_notes_model_failed','release_notes_invalid','release_notes_dispatch_failed','manager_dispatch_failed','dispatch_decision_invalid','dispatch_model_invalid','release_observation_failed','release_observation_invalid','actions_classification_invalid','agent_tool_not_allowed','agent_output_invalid','agent_output_budget_exhausted','agent_tool_calls_invalid','agent_turn_limit','gate_agent_output_invalid',
     'claude_submission_required','claude_authentication_failed','claude_model_unavailable','claude_execution_failed','claude_budget_exhausted','claude_output_limit','claude_provider_credential_unavailable','provider_credential_unavailable'] },
   environment: { label:'项目电脑或运行环境', codes:['integration_unavailable','pi_runtime_unavailable','controller_workspace_unavailable','container_workspace_required','acp_not_configured','acp_configuration_invalid','acp_protocol_unsupported','acp_mcp_http_unsupported','harness_timeout','acp_turn_incomplete','acp_execution_failed',
@@ -30,7 +30,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     // The repository's .bot/ rule files and .agents/skills/ are the repository's to fix.
     'bot_rule_too_large','too_many_bot_skills','invalid_bot_rule_file','invalid_rule_content','invalid_bot_label','invalid_bot_computer',
     'release_file_invalid','release_tag_invalid','release_sensitive_body','release_notes_too_large','release_empty_repository','release_ci_unsuccessful',
-    'actions_scan_window_overflow','actions_report_sensitive','pr_contributing_contract_missing','pr_release_config_invalid','pr_release_category_required'] },
+    'actions_scan_window_overflow','actions_report_sensitive'] },
   task_changed: { label:'任务条件已变化', codes:['obsolete_superseded','obsolete_closed','obsolete_expired','manager_deferred','manager_needs_help','task_coordination_requested','task_coordination_pending','coordination_source_cancelled','coordination_claim_revoked','role_revision_checkpoint','harness_cancelled','harness_run_closed','team_no_progress','role_nomination_stale','acceptance_publication_changed','acceptance_context_changed','checkpoint_context_changed','acceptance_return','acceptance_insufficient_evidence','acceptance_needs_human','acceptance_no_progress','object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
     'task_claim_revoked','task_actor_permission_revoked','release_actor_permission_revoked','repository_policy_disabled','review_requires_human_decision','issue_needs_replan','development_not_approved',
     'base_branch_changed','bot_branch_history_changed','revision_scope_unconfirmed','pr_head_pending','bot_pr_identity_changed',
@@ -38,7 +38,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'release_disabled','release_run_changed','release_attempt_changed','release_duplicate','release_range_changed','release_record_changed',
     'release_lease_lost','release_tag_conflict','release_run_ambiguous','release_run_missing','release_rerun_unavailable','release_tag_missing','release_ci_evidence_changed',
     'actions_failures_disabled','actions_lease_lost','actions_run_identity_changed','actions_rerun_identity_changed','actions_attempt_identity_changed',
-    'actions_jobs_identity_changed','actions_development_disabled','actions_development_not_approved','pr_release_label_conflict',
+    'actions_jobs_identity_changed','actions_development_disabled','actions_development_not_approved',
     // A work type switched off while its task waited or ran (workflow_* before #207).
     'work_disabled','workflow_disabled','workflow_not_found','task_software_disabled',
     // A newer gate onboarding conversation, or a repository stopped while the agent was answering.
@@ -58,7 +58,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     // RoleRun admission, budgets and recovery (#169): fail closed instead of downgrading or switching silently.
     'unsupported_capability','role_budget_exhausted','role_usage_unknown','conversation_harness_context_required','model_revision_changed','role_recovery_unsupported','claude_usage_budget_unknown','claude_tool_name_unsupported','claude_submission_tool_required',
     'subscription_mode_not_implemented'] },
-  publication: { label:'GitHub 写入结果未知', codes:['github_publication_unknown','release_write_unknown','actions_report_write_unknown','pr_release_label_incomplete'] },
+  publication: { label:'GitHub 写入结果未知', codes:['github_publication_unknown','release_write_unknown','actions_report_write_unknown'] },
   bot: { label:'Bot 自身问题', codes:['pi_environment_required','external_harness_model_request','acceptance_required','task_runtime_failure','agent_limits_invalid','agent_tools_invalid','tool_operation_conflict','pi_execution_failed','model_request_invalid','github_read_token_limit',
     'github_tree_mismatch','github_commit_tree_mismatch','github_blob_mismatch','candidate_blob_mismatch','candidate_blob_invalid','branch_not_confirmed','publication_receipt_mismatch',
     'github_invalid_response','github_invalid_page','github_response_too_large','repository_blob_invalid','repository_tree_invalid','repository_blob_limit_or_hash','release_operation_changed',
@@ -205,9 +205,7 @@ const codeActions: Record<string,string> = {
   actions_permission_missing:'该仓库使用的 App 安装没有 Actions 权限：App 管理员在 Permissions & events 把 Actions 设为「Read and write」（读取运行只需只读，重跑需要写），再由安装所有者接受新权限。不需要 Workflows 权限。',
   actions_workflow_run_subscription_missing:'请 App 管理员在该仓库实际使用的 App 的 Permissions & events → Subscribe to events 勾选「Workflow run」并保存。这是 Webhook 事件订阅，只要求 Actions 读权限，不需要 Workflows 权限；安装设置出现待批准的变更时接受即可。',
   actions_report_write_unknown:'提报写入结果不明，本功能只通过原 Issue 或评论 marker 对账，不盲目重发。',
-  pr_release_label_incomplete:'PR 已存在，但 release:* 标签未完成；维护者按当前贡献约定补齐唯一类别后再重试，不要重复开 PR。',
-  pr_release_label_conflict:'PR 上已有其他 release:* 类别，请维护者按当前贡献约定核对唯一类别。',
-  pr_release_category_required:'按当前 CONTRIBUTING、release.yml 和 create-github-pr skill 选择一个 release:* 类别，再提交发布请求。',
+  pull_request_labels_refused:'模型多次给 PR 选了仓库里没有或保留的标签；点「重试」重新执行，必要时在仓库的贡献规则或 skill 里写清要用的标签。',
   base_branch_changed:'版本差异已记录，Manager 可查看原始证据并决定验证、集成或继续交付。',
   bot_branch_history_changed:'点「重试」会基于当前分支重新规划。',
   revision_scope_unconfirmed:'在 PR 上给出明确的修改意见后点「重试」。',

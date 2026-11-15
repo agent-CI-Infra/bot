@@ -260,7 +260,7 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
 // The manager substitutes for the project computer; no deployment or external API is used.
 // custom: run a reply task with these writes instead of development; it files an Issue (github_write, when custom.issue),
 // opens the PR and replies. custom.permissions: the executing dev role's saved permissions.
-async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true, faults, custom, acceptor = acceptanceFixture } = {}) {
+async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true, faults, custom, acceptor = acceptanceFixture, labels, repositoryLabels } = {}) {
   githubFixture.listen(0, '127.0.0.1'); await once(githubFixture, 'listening');
   t.after(() => new Promise(resolve => { githubFixture.close(resolve); githubFixture.closeAllConnections(); }));
   const endpoint = 'http://127.0.0.1:' + githubFixture.address().port;
@@ -284,7 +284,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
       else {
         if (!started) { started = true; if (change) write('calc.mjs', revision ? 'export const add = (a, b) => Number(a) + Number(b);\n' : 'export const add = (a, b) => a + b;\n'); }
         ids[step] ||= randomBytes(24).toString('hex');
-        value = { state: 'running', tool_requests: [{ id: ids[step], kind: 'pull_request', name: 'create_pull_request', arguments: args }] };
+        value = { state: 'running', tool_requests: [{ id: ids[step], kind: 'pull_request', name: 'create_pull_request', arguments: labels ? { ...args, labels: labels[Math.min(step, labels.length - 1)] } : args }] };
       }
     } else if (r.type === 'workspace_finalize') {
       snapshots++; git('add', '--all'); const tree_sha = git('write-tree');
@@ -315,6 +315,8 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
           assert.equal(h.store.get('SELECT count(*) n FROM github_effects').n, 0);
         }
         if (reply.pr || reply.status === 'no_changes') terminal = reply;
+        // Refused labels (#845) are corrected by calling again with the next labels; nothing else changes.
+        else if (repair && reply.error === 'pull_request_labels_refused') step++;
         else if (repair) { assert.ok(reply.error==='validation_failed'||reply.error?.startsWith('acceptance_'));  write('ready', 'fixed\n'); write('calc.mjs', 'export const add = (a, b) => Number(a) + Number(b);\n'); step++; }
         else value = { error: 'fixture_stopped_after_reply' };
       }
@@ -326,6 +328,8 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
   repoDirectory = join(h.directory, 'repo'); mkdirSync(repoDirectory);
   if (custom?.permissions) saveConfiguration(h.store, '101', { expected_revision: roleConfiguration(h.store, '101').revision, enabled: false, roles: [{ role_id: 'dev', permissions: custom.permissions }] }, 'fixture');
   await fetch(endpoint + '/fixture/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ github_token: a.token }) });
+  // Set, or clear what an earlier test in this file set: the fixture server keeps its state between tests.
+  await fetch(endpoint + '/fixture/labels', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repository_id: 101, labels: repositoryLabels ?? null }) });
   if (faults) await fetch(endpoint + '/fixture/faults', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(faults) });
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'publication-fixture-key', model_name: 'fixture' })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, development_enabled: custom?.development ?? true, test_command: policy });
@@ -518,6 +522,22 @@ test('policy failure returns output without publication and the same agent can r
   assert.equal(d.replies[0].error, 'validation_failed'); assert.equal(d.replies[0].exit_code, 1); assert.match(d.replies[0].output, /not ready/);
   assert.ok(d.replies[1].pr); assert.ok(d.candidate.files.some(f => f.path === 'ready'));
   assert.equal(d.h.store.get("SELECT count(*) n FROM github_effects WHERE kind='branch'").n, 1);
+});
+
+test('create_pull_request refuses labels the repository lacks or reserves, and the corrected labels go on the new PR', async t => {
+  const d = await developmentHarness(t, { repositoryLabels: ['release:fix', 'release:feature', 'agent/ok', 'bot-develop'],
+    labels: [['release:invented', 'agent/ok', 'bot-develop'], ['Release:Fix']] });
+  assert.equal(d.task.status, 'pr_opened', d.task.error_code);
+  // The refusal is a tool result the agent corrects in the same conversation; nothing was published for it.
+  assert.equal(d.replies[0].error, 'pull_request_labels_refused');
+  assert.deepEqual(d.replies[0].refused, [{ name: 'release:invented', reason: 'not_in_repository' }, { name: 'agent/ok', reason: 'reserved' }, { name: 'bot-develop', reason: 'reserved' }]);
+  assert.match(d.replies[0].message, /must already exist in the repository/);
+  // The accepted label keeps the repository's spelling and goes on the pull request once it exists.
+  assert.deepEqual(d.candidate.labels, ['release:fix']);
+  const state = await fetch(d.endpoint + '/fixture/state').then(r => r.json()), pr = d.replies[1].pr;
+  assert.deepEqual(state.labels.filter(l => l.number === pr.number), [{ repository_id: 101, number: pr.number, labels: ['release:fix'] }]);
+  const logged = d.h.store.all('SELECT content FROM task_logs WHERE task_id=?', d.task.id).map(r => JSON.parse(r.content)).find(l => l.type === 'pr_labels');
+  assert.deepEqual([logged.pr_number, logged.added], [pr.number, ['release:fix']]);
 });
 
 for (const failure of [{ exit_code: 1 }, { timed_out: true }, { error: 'command_output_unavailable' }]) test('invalid policy result blocks publication: ' + JSON.stringify(failure), async t => {

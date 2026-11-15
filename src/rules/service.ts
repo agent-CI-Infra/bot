@@ -106,14 +106,21 @@ function declaredLabel(text: string, key: string, path: string) {
   if (label.length > 50 || label !== label.trim() || /\p{Cc}/u.test(label)) ruleError('invalid_bot_label', `${path} 的 ${key} 不合法（最长 50 个字符，首尾不能有空白，不能含控制字符）`);
   return label;
 }
-// The development label from the saved rule layers, without calling GitHub or the manager.
-export function developmentLabel(store: Store, repositoryId: string) {
-  const path = '.bot/rules/issue-development.md', policy = store.get('SELECT rule_overrides FROM policies WHERE repository_id=?', repositoryId);
+// A label declared by the saved rule layers, without calling GitHub or the manager.
+function savedLabel(store: Store, repositoryId: string, path: string, key: string) {
+  const policy = store.get('SELECT rule_overrides FROM policies WHERE repository_id=?', repositoryId);
   const saved = store.get('SELECT files FROM repository_rule_sources WHERE repository_id=?', repositoryId);
   const files = saved ? JSON.parse(saved.files) : {}, overrides = JSON.parse(policy?.rule_overrides || '{}');
   const text = Object.hasOwn(files, path) ? files[path] : Object.hasOwn(overrides, path) ? overrides[path] : defaults[path]!;
   if (text.includes('\0')) ruleError('invalid_rule_content', `${path} 不是文本文件（含 NUL 字节）`);
-  return declaredLabel(text, 'development_label', path) || defaultDevelopmentLabel;
+  return declaredLabel(text, key, path);
+}
+export function developmentLabel(store: Store, repositoryId: string) {
+  return savedLabel(store, repositoryId, '.bot/rules/issue-development.md', 'development_label') || defaultDevelopmentLabel;
+}
+/** The bot's own review and development labels from the saved rule layers: no agent chooses them for a pull request (#845). */
+export function ownLabels(store: Store, repositoryId: string): string[] {
+  return [savedLabel(store, repositoryId, '.bot/rules/labels.md', 'review_label'), developmentLabel(store, repositoryId)].filter(Boolean);
 }
 export class RuleService {
   constructor(readonly store: Store, readonly manager?: Manager, readonly githubUrl?: string) {

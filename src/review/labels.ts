@@ -7,6 +7,24 @@ const axis = (name: string) => name.includes('/') ? name.slice(0, name.indexOf('
 // Opt-in, veto, hold and gate labels are human or automation decisions.
 const reserved = (name: string) => /^(agent|pr|gate)\//i.test(name) || /^(blocker|priority\/critical)$/i.test(name);
 
+/**
+ * The labels an agent asks to put on its pull request (#845), checked by the rules above before anything is published: each must
+ * already exist in the repository and must be neither reserved nor one of the bot's own labels. Returns the repository's spelling
+ * of the accepted names (at most 8, like classification) and every refused name with why, so the agent can correct its call.
+ */
+export function pullRequestLabels(requested: unknown, available: unknown, own: string[]): { labels: string[]; refused: { name: string; reason: 'not_in_repository' | 'reserved' | 'too_many' }[] } {
+  const existing = new Map(names(available).map(name => [name.toLowerCase(), name])), ownNames = own.filter(Boolean).map(name => name.toLowerCase());
+  const labels: string[] = [], refused: { name: string; reason: 'not_in_repository' | 'reserved' | 'too_many' }[] = [];
+  for (const raw of Array.isArray(requested) ? requested : []) {
+    const wanted = String(raw).trim(), name = existing.get(wanted.toLowerCase());
+    if (!name) refused.push({ name: wanted, reason: 'not_in_repository' });
+    else if (reserved(name) || ownNames.includes(name.toLowerCase())) refused.push({ name, reason: 'reserved' });
+    else if (!labels.includes(name)) labels.push(name);
+  }
+  refused.push(...labels.splice(8).map(name => ({ name, reason: 'too_many' as const })));
+  return { labels, refused };
+}
+
 export function repositoryLabels(rows: unknown): { name: string; description: string }[] {
   return (Array.isArray(rows) ? rows : []).filter(row => typeof row?.name === 'string' && row.name)
     .map(row => ({ name: String(row.name), description: String(row.description || '').slice(0, 200) })).slice(0, 200);

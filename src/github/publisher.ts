@@ -5,7 +5,7 @@ import { GitHub } from './client.js';
 import { blobSha, operationId, sha, stop, TaskError, treeSha } from '../agent/common.js';
 import { implementationText, reviewText, summaryComment, humanItems, markHuman, type HumanItem, type Place, type Prompted, type DevelopmentWait } from './text.js';
 import { inlineLocation } from '../review/findings.js';
-import { applyReleaseCategory, releaseCategory } from './release-label.js';
+import { applyPullRequestLabels } from './pull-request-labels.js';
 import { assertTaskExternalEffect } from '../tasks/management.js';
 
 /**
@@ -259,7 +259,6 @@ export class Publisher {
     return commit.sha;
   }
   async pullRequest(candidate:any,sha:string){
-    const releaseLabel = await releaseCategory(this.github, candidate.release_label);
     if(candidate.pr_number){
       const owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',this.task.repository_id,candidate.pr_number);
       let pr:any;
@@ -279,7 +278,7 @@ export class Publisher {
         return current.head.sha===sha&&current.title===payload.title&&current.body===payload.body?current:null;
       },true);
       recordRevision(this.store,this.task,candidate.pr_number,sha);
-      await applyReleaseCategory(this.github, pr.number, releaseLabel);
+      await applyPullRequestLabels(this.github, pr.number, candidate.labels, value => this.log(value));
       publicationFact(this.store,this.task,'pr_confirmed',{pr_number:pr.number,commit_sha:sha});
       return {...pr,...payload};
     }
@@ -289,7 +288,7 @@ export class Publisher {
       (await this.github.pages(path+'?state=all&head='+encodeURIComponent(this.github.fullName.split('/')[0]+':'+candidate.branch))).find(p=>p.head?.ref===candidate.branch&&String(p.head?.repo?.id)===this.task.repository_id&&String(p.body).includes(marker)));
     if(String(pr.user?.id)!==this.github.actorId||String(pr.head?.repo?.id)!==this.task.repository_id||pr.head?.ref!==candidate.branch||pr.head.sha!==sha)stop('bot_pr_ownership_unconfirmed','waiting_permission',`新建 PR #${pr.number} 的作者、来源仓库、分支或提交与候选分支 ${candidate.branch} 不一致。`);
     this.store.run(`INSERT INTO bot_pull_requests VALUES(?,?,?,?,?,?,?,?,0) ON CONFLICT(repository_id,number) DO NOTHING`,this.task.repository_id,pr.number,String(pr.id),String(pr.user.id),String(pr.head.repo.id),candidate.branch,sha,this.task.id);
-    await applyReleaseCategory(this.github, pr.number, releaseLabel);
+    await applyPullRequestLabels(this.github, pr.number, candidate.labels, value => this.log(value));
     publicationFact(this.store,this.task,'pr_confirmed',{pr_number:pr.number,commit_sha:sha});
     return pr;
   }
