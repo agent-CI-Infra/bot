@@ -210,10 +210,13 @@ test('keyboard users reach the directory, the file, its history and restore in o
     const base='/api/repositories/101/knowledge-files',file=(await f.admin(base,'POST',{path:'手册/笔记.md',content:'# 第一版'})).value.file;
     await f.admin(base+'/'+encodeURIComponent(file.id),'PUT',{content:'# 第二版',expected_revision:file.revision});
     await f.login();
-    const panel=page=>page.locator('.knowledge-main'),focused=()=>page.evaluate(()=>{const el=document.activeElement;return el?.getAttribute('aria-label')||el?.textContent?.trim()||'';});
+    const panel=page=>page.locator('.knowledge-main'),
+      // A redraw replaces the whole workspace, so a focused control can vanish and focus fall back to <body>; that is a
+      // lost focus, not an element named after the body's text (which is the whole page).
+      focused=()=>page.evaluate(()=>{const el=document.activeElement;if(!el||el===document.body||el===document.documentElement)return '';return el.getAttribute('aria-label')||el.textContent?.trim()||'';});
     // The tree is redrawn while the page settles, so wait for the entry, focus it, and confirm focus landed before
-    // counting Tabs; a redraw that drops focus to the document restarts the walk from the same entry.
-    const focusEntry=async(name,scope=page.locator('.knowledge-tree'))=>{const node=scope.getByRole('button',{name,exact:true});await expect(node).toBeVisible();await node.focus();await expect.poll(focused).toBe(name);return node;};
+    // counting Tabs; focusing again inside the poll keeps a redraw from leaving the walk to start over at <body>.
+    const focusEntry=async(name,scope=page.locator('.knowledge-tree'))=>{const node=scope.getByRole('button',{name,exact:true});await expect(node).toBeVisible();await expect.poll(async()=>{await node.focus({timeout:2000}).catch(()=>{});return focused();}).toBe(name);return node;};
     const tabTo=async(start,target,limit=40,scope)=>{await focusEntry(start,scope);const seen=[];
       for(let i=0;i<limit;i++){await page.keyboard.press('Tab');const current=await focused();seen.push(current);
         if(current===target)return seen;if(!current)await focusEntry(start,scope);}

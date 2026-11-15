@@ -143,11 +143,16 @@ test('files closed longer ago than the window go in the background; their calls 
   const started = Promise.withResolvers(), finish = Promise.withResolvers(), long = { operation_id: id(), generation, request: { type: 'workspace_command', command: 'long', workspace_id: other } };
   f.docker.runner = async (_container, request) => { if (request.command === 'long') { started.resolve(); await finish.promise; } return { ok: true, result: { exit_code: 0, output: 'done ' + request.command } }; };
   const running = f.projects.operate('101', 'execute', long); await started.promise;
-  // Closing syncs and closes each descriptor in the background; a file is expired only once that is done.
+  // Closing syncs and closes each descriptor in the background; a pass skips a file whose descriptor is still listed, so
+  // wait for that to finish and start from none: otherwise the pass legitimately removes nothing and the failure looks
+  // like a wrong count instead of a file that was still open.
   f.projects.trajectories.closeAll(); await f.projects.trajectories.settle();
-  // Everything but the fresh workspace's file closed three days ago.
+  assert.equal(f.projects.trajectories.handles.size, 0, 'every closed descriptor is released before the pass');
+  // Everything but the fresh workspace's file closed days ago; the old workspace's file is the oldest, so the batch of
+  // one below meets it first instead of depending on which random file id sorts first.
   const freshFile = f.projects.db.prepare('SELECT input_ref FROM operations WHERE id=?').get(fresh.operation_id).input_ref.slice(0, 16);
   f.projects.db.prepare('UPDATE trajectory_files SET closed_at=? WHERE id<>?').run(daysAgo(3), freshFile);
+  f.projects.db.prepare('UPDATE trajectory_files SET closed_at=? WHERE workspace_id=?').run(daysAgo(4), workspace);
   const before = Object.fromEntries(f.projects.db.prepare("SELECT kind,count,bytes FROM trajectory_usage WHERE repository_id='101'").all().map(row => [row.kind, row]));
   const removed = await new TrajectoryExpiry(f.projects.db, f.projects.trajectories, { batch: 1, pauseMs: 0 }).pass();
   const rows = entries(f.projects), byWorkspace = name => rows.filter(row => row.workspace_id === name);
