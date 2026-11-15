@@ -70,8 +70,8 @@ test('390 下视图名与未保存状态同样在工具栏里，筛选面板关�
 // #482 review: on a narrow phone the unsaved state next to the selector used to eat the selector's own width — at 320
 // it collapsed to 18px so the view name could not be read, and the save action overlapped the `⋯` button by 22px, so
 // the right part of "保存视图" opened the view menu instead of saving. Reading the active view and saving it must both
-// work with nothing overlapping at 320 and 390.
-test('320/390 未保存态：视图名读得到，「保存视图」与「更多视图操作」不重叠', async ({ page }) => {
+// work with nothing overlapping at 320 and 390, including the separately styled new-task entry.
+test('320/390 未保存态：视图、保存、新建任务与更多操作互不重叠', async ({ page }) => {
   const { h, admin, password } = await fixture();
   try {
     await page.setViewportSize({ width: 1440, height: 900 }); await login(page, h.admin, password);
@@ -89,6 +89,8 @@ test('320/390 未保存态：视图名读得到，「保存视图」与「更多
         const select = document.getElementById('board-view-select');
         const save = document.getElementById('board-save');
         const more = document.querySelector('#board-view-menu .board-menu-toggle');
+        const state = document.getElementById('board-view-state');
+        const create = document.getElementById('board-create-task');
         const style = getComputedStyle(select), canvas = document.createElement('canvas'), ctx = canvas.getContext('2d');
         ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
         const selected = select.options[select.selectedIndex];
@@ -96,15 +98,19 @@ test('320/390 未保存态：视图名读得到，「保存视图」与「更多
         const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
         const saveBox = box(save);
         const hit = (fx) => { const e = document.elementFromPoint(saveBox.left + saveBox.width * fx, saveBox.top + saveBox.height / 2); return e ? (e.id || e.tagName.toLowerCase()) : null; };
+        const controls = [['view', select], ['state', state], ['save', save], ['more', more], ['create', create]];
+        const overlaps = [];
+        for (let i = 0; i < controls.length; i += 1) for (let j = i + 1; j < controls.length; j += 1) {
+          if (overlap(box(controls[i][1]), box(controls[j][1]))) overlaps.push([controls[i][0], controls[j][0]]);
+        }
         return { select: box(select), save: saveBox, more: box(more), name, textWidth: ctx.measureText(name).width, padding,
-          overlaps: overlap(box(select), box(more)) || overlap(saveBox, box(more)),
-          hitAtSaveCentre: hit(0.5), hitAtSaveRight: hit(0.95), docWidth: document.documentElement.scrollWidth, innerWidth };
+          overlaps, hitAtSaveCentre: hit(0.5), hitAtSaveRight: hit(0.95), docWidth: document.documentElement.scrollWidth, innerWidth };
       });
       // The view name has to fit inside the selector: its text plus the control's own padding and its arrow.
       expect(m.select.width - m.padding - 16).toBeGreaterThanOrEqual(m.textWidth);
       expect(m.select.width).toBeGreaterThanOrEqual(110);
-      // Neither the selector nor the save action may sit under the `⋯` button: both must be clickable where they show.
-      expect(m.overlaps).toBe(false);
+      // The view controls and the other toolbar actions must not sit under one another.
+      expect(m.overlaps).toEqual([]);
       expect(m.hitAtSaveCentre).toBe('board-save');
       expect(m.hitAtSaveRight).toBe('board-save');
       expect(m.docWidth).toBeLessThanOrEqual(m.innerWidth);
