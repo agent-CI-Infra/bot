@@ -146,7 +146,8 @@ export async function boundGroup(f, projects = ['101'], chat = 'oc_group', clien
   const quiet = inGroup('Group discussion', 'ou_alice'); quiet.event.message.mentions = []; quiet.event.message.chat_id = chat; await post(f.h, f.id, quiet);
   const row = f.h.store.get('SELECT * FROM channel_chats WHERE chat_id=?', chat);
   const revision = f.h.store.get('SELECT revision FROM channel_service_bindings WHERE chat_id=?', row.id)?.revision ?? 0;
-  const result = await client('/api/channels/chats/' + row.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: projects }, enabled: true, expected_revision: revision });
+  const result = await client('/api/channels/chats/' + row.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: projects }, enabled: true, expected_revision: revision,
+    ...(f.groupPermissions ? { permissions: f.groupPermissions } : {}) });
   if (result.status !== 200) throw new Error(JSON.stringify(result.value));
   return row;
 }
@@ -182,9 +183,11 @@ export function managementOutcome(h, inbox) {
   const error = message ? h.store.get("SELECT data FROM management_events WHERE message_id=? AND type='error' ORDER BY sequence DESC LIMIT 1", message.id) : null;
   return { state: row?.state, error: row?.error ?? (error ? JSON.parse(error.data).error : null), message: message?.state ?? null, input: message ? JSON.parse(message.input) : null };
 }
-/** Give the repository assistant the shared fixture model and, optionally, other permission items. */
+/** Give the repository assistant the shared fixture model. What a group may do is its binding's level (#849): items given
+ * here are what the next boundGroup grants its group, on top of the read level. */
 export async function repositoryAssistant(f, permissions) {
   const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
-  const result = await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id, ...(permissions ? { permissions } : {}) });
+  const result = await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id });
   if (result.status !== 200) throw new Error(JSON.stringify(result.value));
+  f.groupPermissions = permissions;
 }

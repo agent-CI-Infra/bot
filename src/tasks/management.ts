@@ -244,7 +244,8 @@ export function taskRolePolicies(store:Store,task:Row):RolePermissions[]{
   for(const origin of origins){
     if(origin.source_kind==='role'&&origin.source_role){result.push(JSON.parse(origin.permissions));const source=roleOf(store,task.repository_id,origin.source_role);if(source)result.push(source.permissions);}
     if(origin.principal_id&&store.hasTable('channel_service_bindings')){
-      const service=store.get('SELECT r.permissions FROM channel_service_bindings b JOIN service_roles r ON r.id=b.service_role_id WHERE b.principal_id=?',origin.principal_id);
+      // A task a group created is capped by that group's binding level (#849), read live like the other sources.
+      const service=store.get('SELECT permissions FROM channel_service_bindings WHERE principal_id=?',origin.principal_id);
       if(service)result.push(JSON.parse(service.permissions??'{}'));
     }
   }

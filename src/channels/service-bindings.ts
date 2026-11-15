@@ -2,17 +2,19 @@ import type { Store, Row } from '../storage/database.js';
 import { activeScopes, assertCurrent, authorize, invalidate, invalidateIfLost, listEffectiveProjectAccess, narrowActor, resolvePrincipalActor, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
 import { managementAssistant, repositoryAssistant, serviceItems, serviceRole } from '../service-roles/roles.js';
-import { normalizePermissions, permitsManagement, serviceCapabilities, type RolePermissions } from '../roles/permissions.js';
+import { normalizePermissions, permissionItems, permitsManagement, serviceCapabilities, updatePermissions, validPermissionInput, type RolePermissions } from '../roles/permissions.js';
 import { commands } from '../management/catalog.js';
 import type { ChannelEmployees } from './employees.js';
 import type { ChannelEvent } from './types.js';
 import { tenantName } from './applications.js';
 import { chatProfile } from './profiles.js';
 
-// A group binds one service role and one project scope (a whole organization or chosen repositories). The scope is held as
-// scoped_grants of a principal owned by the binding; each grant names the maintainer who granted it. At run time a group
-// can use a project only while the binding, the role and that grantor's own current authority all still allow it.
-// Speakers are not checked: the console configuration alone decides what the group may do.
+// A group binds one service role, one project scope (a whole organization or chosen repositories) and the group's own
+// permission level (#849). The scope is held as scoped_grants of a principal owned by the binding; each grant names the
+// maintainer who granted it. At run time a group can use a project only while the binding's level and that grantor's own
+// current authority both still allow it; GitHub writes are further limited by what the App installation grants. The role
+// supplies the prompt and the model only. Speakers are not checked: the console configuration alone decides what the
+// group may do, for every member alike.
 // The first configurer owns the binding (owner_id); configured_by is whoever changed it last. Only the owner, organization
 // admins of every tenant in its scope and platform administrators change or disable it (#424).
 
@@ -20,6 +22,29 @@ import { chatProfile } from './profiles.js';
 export const bindingScope = (id: string) => 'binding:' + id;
 const participations = ['mentions', 'questions', 'all'];
 const terminal = (error: unknown) => error instanceof HttpError && error.status < 500;
+
+/**
+ * The three permission levels a binding offers (#849), as items of the shared permission catalog. Each level adds to the
+ * previous one: read is GitHub reads plus the conversation tools every group has; comment adds github_write on Issues and
+ * pull requests (comments, labels, assignees, new Issues); dispatch adds creating and managing project tasks through the
+ * Manager. Contents write, and so merging from the group, is only available as an individual item (custom).
+ */
+export const bindingLevels = ['read', 'comment', 'dispatch'] as const;
+export type BindingLevel = typeof bindingLevels[number] | 'custom';
+export function levelPermissions(level: typeof bindingLevels[number]): RolePermissions {
+  const p = normalizePermissions({ github: 'read' }, true);
+  if (level !== 'read') { p.github_issues = 'write'; p.github_pull_requests = 'write'; }
+  if (level === 'dispatch') { p.delegation = 'allow'; p.project_tasks = 'write'; }
+  return p;
+}
+/** The level a set of items equals exactly, or custom: a binding never reads as a level wider or narrower than it is. */
+export function bindingLevel(value: RolePermissions): BindingLevel {
+  const p = normalizePermissions(value, true);
+  if (Object.keys(p).some(key => key.startsWith('legacy_'))) return 'custom';
+  return bindingLevels.find(level => { const preset = levelPermissions(level); return permissionItems.every(item => p[item.id] === preset[item.id]); }) ?? 'custom';
+}
+/** The stored form: normalized like a service role's items, so a migrated binding keeps the authorization fence it had. */
+const stored = (p: RolePermissions) => JSON.stringify(normalizePermissions(p, true));
 /**
  * Which management commands a group may submit. Delegation hands work to a project only through its Manager: creating a task,
  * changing its contract, adding an instruction or cancelling it, never choosing or steering a role. project_tasks write keeps
@@ -57,6 +82,24 @@ export function serviceBindingStorage(store: Store): void {
     store.db.exec("ALTER TABLE channel_service_bindings ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''");
   store.run("UPDATE channel_service_bindings SET owner_id=configured_by WHERE owner_id=''");
   migrateEmployees(store);
+  migrateLevels(store);
+}
+/** Once per binding (#849): what a group may do moves from its service role onto the binding. Each binding gets exactly the
+ * items its role grants now, so it reads as the matching level and is never wider; a binding whose role is gone (only
+ * possible while disabled) starts at read. The revision stays: nothing the group may do changes, so no turn is stopped. */
+function migrateLevels(store: Store): void {
+  if (!store.all('PRAGMA table_info(channel_service_bindings)').some(c => c.name === 'permissions'))
+    store.db.exec('ALTER TABLE channel_service_bindings ADD COLUMN permissions TEXT');
+  const pending = store.all('SELECT id,service_role_id FROM channel_service_bindings WHERE permissions IS NULL ORDER BY created_at,id');
+  if (!pending.length) return;
+  store.transaction(() => {
+    for (const binding of pending) {
+      const role = serviceRole(store, binding.service_role_id);
+      store.run('UPDATE channel_service_bindings SET permissions=? WHERE id=? AND permissions IS NULL',
+        role && role.id !== managementAssistant ? stored(JSON.parse(role.permissions)) : stored(levelPermissions('read')), binding.id);
+      store.audit('system', 'channel.service_binding.level_migrated', binding.id);
+    }
+  });
 }
 /** Once: a group with enabled legacy employees gets one repository assistant binding over the same projects, each keeping its
  * original maintainer as grantor. The legacy grants stay only to authorize the tasks they already created. */
@@ -72,16 +115,21 @@ function migrateEmployees(store: Store): void {
       store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,participation,enabled,revision,migrated_from,created_at,updated_at)
         VALUES(?,?,?,'repositories',?,?,?,?,1,1,'channel_employee',?,?)`, id, chat_id, repositoryAssistant, principal, grants[0]!.maintainer_id, grants[0]!.maintainer_id,
         modes.size === 1 ? grants[0]!.participation : 'mentions', time, time);
-      for (const g of grants) grant(store, principal, chat_id, g.tenant_id, g.project_id, g.maintainer_id, time);
+      for (const g of grants) grant(store, principal, chat_id, g.tenant_id, g.project_id, g.maintainer_id, time, levelPermissions('read'));
       store.audit(grants[0]!.maintainer_id, 'channel.service_binding.migrated', id);
     }
     store.run("INSERT INTO settings VALUES('channel_service_bindings_migrated',?) ON CONFLICT(key) DO NOTHING", new Date().toISOString());
   });
 }
-function grant(store: Store, principal: string, chat: string, tenant: string, project: string | null, grantor: string, time: number, permissions?: RolePermissions): void {
+/** One scope grant of a binding's principal, carrying only the capabilities the binding's level uses. */
+function grant(store: Store, principal: string, chat: string, tenant: string, project: string | null, grantor: string, time: number, permissions: RolePermissions): void {
   store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
     VALUES(?,?,?,?,?,'service',?,'explicit_delegation',?,'channel_service_binding',?,?)`, randomId(), principal, tenant, project, project ? 'project' : 'tenant',
-    JSON.stringify(serviceCapabilities(permissions??JSON.parse(store.get('SELECT r.permissions FROM channel_service_bindings b JOIN service_roles r ON r.id=b.service_role_id WHERE b.principal_id=?',principal)?.permissions??'{}'))), grantor, 'channel:' + chat, time);
+    JSON.stringify(serviceCapabilities(permissions)), grantor, 'channel:' + chat, time);
+}
+/** A binding's own permission items (#849). Read by the group's tools, its commands and the tasks it created. */
+export function bindingPermissions(binding: Row): RolePermissions {
+  return normalizePermissions(JSON.parse(binding.permissions ?? '{}'), true);
 }
 interface Reachable { id: string; full_name: string; private: boolean; enabled: boolean }
 
@@ -93,10 +141,8 @@ export class ChannelServiceBindings {
   grants(binding: Row): Row[] {
     return this.store.all("SELECT * FROM scoped_grants WHERE principal_id=? AND policy='channel_service_binding' AND revoked_at IS NULL ORDER BY scope,tenant_id,project_id", binding.principal_id);
   }
-  permissions(binding: Row): RolePermissions {
-    const role = serviceRole(this.store, binding.service_role_id);
-    return normalizePermissions(JSON.parse(role?.permissions??'{}'));
-  }
+  /** What the group may do: its binding's level. Every change of it is a new binding revision. */
+  permissions(binding: Row): RolePermissions { return bindingPermissions(binding); }
   /** The binding is still the chat's current, enabled binding and its role can serve a group. */
   assertUsable(binding: Row): Row {
     const current = this.get(binding.chat_id);
@@ -105,15 +151,16 @@ export class ChannelServiceBindings {
     this.employees.chat(current.chat_id);
     const role = serviceRole(this.store, current.service_role_id);
     if (!role?.enabled) return fail(403, 'service_role_unavailable');
-    if (!role.permissions) return fail(403, 'service_role_not_bindable');
+    if (role.id === managementAssistant) return fail(403, 'service_role_not_bindable');
     return current;
   }
-  /** Changes whenever what the group may see changes: chat sources, binding, role permissions or any grantor's authority. */
+  /** Changes whenever what the group may see changes: chat sources, binding (its level included), role or any grantor's
+   * authority. The level sits where the role's items used to, so a binding migrated with its role's items keeps its fence. */
   fence(chat: string): string {
     const binding = this.get(chat), role = binding && serviceRole(this.store, binding.service_role_id);
     return digest(JSON.stringify({ context: this.store.get('SELECT context_revision FROM channel_chats WHERE id=?', chat)?.context_revision,
       binding: binding ? [binding.id, binding.revision, binding.enabled, revision(this.store, binding.principal_id)] : null,
-      role: role ? [role.id, role.enabled, role.permissions] : null,
+      role: role ? [role.id, role.enabled, stored(this.permissions(binding!))] : null,
       grants: binding ? this.grants(binding).map(g => [g.id, revision(this.store, g.grantor_id)]) : [] }));
   }
   /** Projects inside the binding's grants, split by whether each grantor still holds config.write and the capability there. */
@@ -166,7 +213,7 @@ export class ChannelServiceBindings {
     for (const capability of capabilities) authorize(scoped, capability, { project_id: project });
     return scoped;
   }
-  /** A management command submitted from a group: binding, source chat, role permission and grantor authority must still hold. */
+  /** A management command submitted from a group: binding, source chat, the binding's level and grantor authority must still hold. */
   guardCommand(binding: Row, command: Row, event?: ChannelEvent): void {
     const current = this.assertUsable(binding);
     // Without a message (a timer run of the group, checked by its caller) the command's own conversation is the group.
@@ -186,7 +233,7 @@ export class ChannelServiceBindings {
       String(command.source_message).replace(/^feishu:/, ''), command.id, Date.now());
   }
   /**
-   * A delegated task keeps running only while its group may still delegate there: the binding is current and enabled, its role
+   * A delegated task keeps running only while its group may still delegate there: the binding is current and enabled, its level
    * still allows delegation, and the grantor still holds the repository. Checked whenever the task engine rechecks a task's source.
    */
   guardTask(origin: Row): void {
@@ -284,12 +331,29 @@ export class ChannelServiceBindings {
     }) };
   }
   /**
+   * The binding's next items: a level, individual items over the current ones (advanced), or, when neither is given, what
+   * it has now (a new binding starts at read). Retired transitional values are kept only while they are unchanged.
+   */
+  private levelInput(input: Json, previous?: Row): RolePermissions {
+    if (input.level !== undefined && input.permissions !== undefined) return fail(400, 'channel_service_level_conflict', 'permissions');
+    if (input.level !== undefined) {
+      if (!(bindingLevels as readonly unknown[]).includes(input.level)) return fail(400, 'channel_service_level_invalid', 'level');
+      return levelPermissions(input.level as typeof bindingLevels[number]);
+    }
+    const base = previous ? this.permissions(previous) : levelPermissions('read');
+    if (input.permissions === undefined) return base;
+    const given = object(input.permissions);
+    for (const [key, mode] of Object.entries(given))
+      if (!key.startsWith('legacy_') && !permissionItems.some(item => item.id === key) || !validPermissionInput(key, mode, base)) fail(400, 'channel_service_permission_invalid', 'permissions.' + key);
+    return updatePermissions(base, given as RolePermissions, true);
+  }
+  /**
    * Bind (or rebind) a group. The editor holds config.write over the whole new scope. The first configurer becomes the owner
    * and must be bound to Feishu through the group's app and currently in the group; the owner's later edits need the same.
    * Changing an existing binding needs its owner or someone who governs it, who may do so from outside the group.
    */
   async configure(actor: ActorContext, id: string, input: Json): Promise<Json> {
-    fields(input, ['service_role_id', 'scope', 'participation', 'enabled', 'expected_revision']);
+    fields(input, ['service_role_id', 'scope', 'participation', 'level', 'permissions', 'enabled', 'expected_revision']);
     assertCurrent(actor);
     if (!Number.isSafeInteger(input.expected_revision)) fail(400, 'expected_revision_required', 'expected_revision');
     if (typeof input.enabled !== 'boolean') fail(400, 'invalid_field', 'enabled');
@@ -302,9 +366,10 @@ export class ChannelServiceBindings {
     const role = serviceRole(this.store, text(input.service_role_id, 64));
     if (!role) return fail(404, 'service_role_not_found', 'service_role_id');
     if (!role.enabled) fail(409, 'service_role_unavailable', 'service_role_id');
-    if (!role.permissions || role.id === managementAssistant) fail(400, 'service_role_not_bindable', 'service_role_id');
+    if (role.id === managementAssistant) fail(400, 'service_role_not_bindable', 'service_role_id');
     const participation = input.participation ?? previous?.participation ?? 'mentions';
     if (!participations.includes(String(participation))) fail(400, 'channel_participation_invalid', 'participation');
+    const permissions = this.levelInput(input, previous);
     this.scopeInput(actor, input.scope, chat);
     const identity = !previous || !this.governs(actor, previous) ? this.employees.feishuIdentity(chat, actor.principal_id) : undefined;
     // The audience lookup is a network call; the decision below reads the snapshot it stored, inside the transaction.
@@ -321,11 +386,13 @@ export class ChannelServiceBindings {
       if (locked) this.store.run('UPDATE principals SET active=1,maintenance=? WHERE id=?', 'channel-binding:' + id, principal);
       else this.store.run("INSERT INTO principals(id,kind,maintenance) VALUES(?,'service',?)", principal, 'channel-binding:' + id);
       this.store.run('DELETE FROM scoped_grants WHERE principal_id=?', principal);
-      for (const row of scope.rows) grant(this.store, principal, id, row.tenant_id, row.project_id, actor.principal_id, time, JSON.parse(role.permissions));
-      if (locked) this.store.run('UPDATE channel_service_bindings SET service_role_id=?,scope=?,configured_by=?,participation=?,enabled=1,revision=?,updated_at=? WHERE id=?',
-        role.id, scope.kind, actor.principal_id, participation, next, time, binding);
-      else this.store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,participation,enabled,revision,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,1,?,?,?)`, binding, id, role.id, scope.kind, principal, actor.principal_id, actor.principal_id, participation, next, time, time);
+      // The revision check above makes `previous` the binding as it is now, so an advanced edit never builds on a stale copy.
+      const items = permissions;
+      for (const row of scope.rows) grant(this.store, principal, id, row.tenant_id, row.project_id, actor.principal_id, time, items);
+      if (locked) this.store.run('UPDATE channel_service_bindings SET service_role_id=?,scope=?,configured_by=?,participation=?,permissions=?,enabled=1,revision=?,updated_at=? WHERE id=?',
+        role.id, scope.kind, actor.principal_id, participation, stored(items), next, time, binding);
+      else this.store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,owner_id,participation,permissions,enabled,revision,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)`, binding, id, role.id, scope.kind, principal, actor.principal_id, actor.principal_id, participation, stored(items), next, time, time);
       invalidateIfLost(this.store, principal, before, 'channel_service_binding_configured');
       // Summaries and replies derived under the previous scope must not return into the new one.
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', id);
@@ -358,6 +425,7 @@ export class ChannelServiceBindings {
       service_role: role ? { id: role.id, name: role.name, enabled: !!role.enabled } : { id: binding.service_role_id, name: null, enabled: false },
       scope: { kind: binding.scope, organization: organization ? { id: organization.tenant_id, name: tenantName(this.store, organization.tenant_id) } : null,
         repositories: grants.filter(g => g.scope === 'project').map(g => ({ id: g.project_id, full_name: this.store.get('SELECT full_name FROM repositories WHERE id=?', g.project_id)?.full_name ?? g.project_id })) },
+      level: bindingLevel(this.permissions(binding)), permissions: this.permissions(binding),
       participation: binding.participation, enabled: !!binding.enabled, revision: binding.revision, migrated: binding.migrated_from === 'channel_employee',
       owner: username(binding.owner_id), configured_by: username(binding.configured_by),
       state, error, reachable: reach.projects.map(p => p.full_name), reachable_projects: reach.projects.map(p => ({ id: p.id, full_name: p.full_name })), paused: reach.paused.map(p => p.full_name), created_at: binding.created_at, updated_at: binding.updated_at };
@@ -368,18 +436,18 @@ export class ChannelServiceBindings {
     let platform = false; try { authorize(actor, 'platform.manage'); platform = true; } catch (error) { if (!terminal(error)) throw error; }
     const bindings = this.store.all('SELECT * FROM channel_service_bindings ORDER BY created_at,id').filter(b => platform || chats.some(c => c.id === b.chat_id) ||
       b.owner_id === actor.principal_id || b.configured_by === actor.principal_id || this.grants(b).some(g => g.grantor_id === actor.principal_id) || this.governs(actor, b));
-    const items = serviceItems;
     return { bindings: bindings.map(b => { const governs = this.governs(actor, b);
       return { ...this.view(b), can_manage: governs || b.owner_id === actor.principal_id, can_view: platform || !!this.canView(actor, b.chat_id),
         can_transfer: governs, ...(governs ? { owner_candidates: this.owners(b) } : {}) }; }), chats,
       service_roles: this.store.all('SELECT * FROM service_roles WHERE enabled=1 AND id<>? ORDER BY builtin DESC,created_at,id',managementAssistant)
-        .map(r => ({ id: r.id, name: r.name, responsibility: r.responsibility, permissions: JSON.parse(serviceRole(this.store,r.id)!.permissions), builtin: !!r.builtin, recommended: r.id === repositoryAssistant })),
+        .map(r => ({ id: r.id, name: r.name, responsibility: r.responsibility, builtin: !!r.builtin, recommended: r.id === repositoryAssistant })),
+      levels: bindingLevels.map(level => ({ id: level, permissions: levelPermissions(level) })),
       organizations: this.store.all('SELECT * FROM tenants ORDER BY display_name').filter(t => {
         try { authorize(actor, 'config.write', { tenant_id: t.id }); return true; } catch (error) { if (!terminal(error)) throw error; return false; }
       }).map(t => ({ id: t.id, name: tenantName(this.store, t.id) })),
       projects: listEffectiveProjectAccess(this.store, actor.principal_id).filter(p => p.can_configure)
         .map(p => ({ id: p.id, full_name: p.full_name, organization: this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', p.id)?.tenant_id ?? null })),
-      permission_items: items.map(item => ({ id: item.id, name: item.name, modes: item.modes })), legacy_employees: this.employees.legacy(actor) };
+      permission_items: serviceItems.map(item => ({ id: item.id, name: item.name, modes: item.modes, group: item.group, detail: item.detail })), legacy_employees: this.employees.legacy(actor) };
   }
 }
 /** Only an authorization refusal means "no"; a changed authorization or a server fault still propagates. */

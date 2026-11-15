@@ -4,7 +4,7 @@ import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { transport, connector, bindFixture, inGroup, post } from '../test/channel-fixture.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 
-for (const width of [1440, 390]) test(`maintainer binds a group to the repository assistant over chosen repositories, edits permissions, adds a prompt timer, clicks to view chat history and disables it at ${width}px (protocol fixtures)`, async ({ page }) => {
+for (const width of [1440, 390]) test(`maintainer binds a group to the repository assistant over chosen repositories, chooses its permission level, adds a prompt timer, clicks to view chat history and disables it at ${width}px (protocol fixtures)`, async ({ page }) => {
   const wire = transport(), errors = [], h = await harness(undefined, undefined, store => ({
     engine: new TaskEngine(store, { call: async () => null }), channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false }
   }));
@@ -20,22 +20,39 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await expect(page.getByRole('heading', { name: '飞书群聊助手', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '创建个人绑定', exact: true })).toBeVisible();
     await page.getByRole('button', { name: '创建群绑定', exact: true }).click();
-    await expect(page.getByLabel('服务角色', { exact: true })).toHaveValue('repository-assistant');
-    await expect(page.locator('#feishu-group-editor')).toContainText('Issue：只读');
-    await expect(page.locator('#feishu-group-editor')).toContainText('Pull Request：只读');
+    await expect(page.getByLabel('助手角色', { exact: true })).toHaveValue('repository-assistant');
+    // A new group starts at read; the page says that everyone in the group, external members included, acts with the level (#849).
+    await expect(page.getByLabel('只读问答', { exact: true })).toBeChecked();
+    await expect(page.locator('#feishu-group-editor')).toContainText('包括没有平台账号的人和其他企业的外部成员');
+    await expect(page.getByLabel('Contents', { exact: true })).toBeHidden();
     await expect(page.getByText(/群内所有成员都能看到助手读取的所选仓库内容/)).toBeVisible();
     await page.getByLabel('fixture/project-101', { exact: true }).check(); await page.getByLabel('fixture/project-102', { exact: true }).check();
     await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
     await expect(binding.getByText('生效中 · 仓库问答助手', { exact: true })).toBeVisible();
     await expect(binding.getByText('项目范围：fixture/project-101、fixture/project-102', { exact: true })).toBeVisible();
-    await expect(binding).toContainText('角色权限：');
+    await expect(binding.getByText('权限档位：只读问答', { exact: true })).toBeVisible();
     await expect(binding.getByText('负责人：administrator', { exact: true })).toBeVisible();
-    // Repository & role permissions remain one click away on an existing group binding row.
+    // Repositories and the level remain one click away on an existing group binding row.
     await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
     await expect(page.locator('#feishu-group-editor')).toBeVisible();
     await expect(page.getByLabel('fixture/project-101', { exact: true })).toBeChecked();
     await expect(page.getByLabel('fixture/project-102', { exact: true })).toBeChecked();
+    await page.getByLabel('可派活', { exact: true }).check();
+    await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
+    await expect(binding.getByText('权限档位：可派活', { exact: true })).toBeVisible();
+    expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ delegation: 'allow', project_tasks: 'write', github_issues: 'write', github_contents: 'read' });
+    // Merging from the group (Contents write) is only an individual item, starting from the level chosen before.
+    await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
+    await expect(page.getByLabel('可派活', { exact: true })).toBeChecked();
+    await page.getByLabel('高级：逐项设置', { exact: true }).check();
+    await expect(page.getByLabel('指派其他角色', { exact: true })).toHaveValue('allow');
+    await page.getByLabel('Contents', { exact: true }).selectOption('write');
+    await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
+    await expect(binding.getByText(/^权限档位：高级：.*Contents 读写/)).toBeVisible();
+    expect(JSON.parse(h.store.get('SELECT permissions FROM channel_service_bindings').permissions)).toMatchObject({ delegation: 'allow', github_contents: 'write' });
+    await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
+    await expect(page.getByLabel('高级：逐项设置', { exact: true })).toBeChecked(); await expect(page.getByLabel('Contents', { exact: true })).toHaveValue('write');
     await page.locator('#feishu-group-editor').getByRole('button', { name: '收起配置', exact: true }).click();
     await expect(page.locator('#feishu-group-editor')).toBeHidden();
     const row = h.store.get('SELECT * FROM channel_service_bindings');

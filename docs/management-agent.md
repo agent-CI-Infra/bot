@@ -59,7 +59,7 @@ RoleDefinitionV2 的显式角色 apply 仍在安全检查点结束旧 run，并�
 
 `POST /conversations/:id/messages` 接受一个自然语言 content、结构化 query 或 command，以及唯一 `source_message`。消息先持久化再运行，重复消息不会再次执行。`GET /conversations/:id/events?after=<sequence>&stream=1` 输出 NDJSON；重连只读事件。阶段消息是 `message` 事件，数据为 `{text,sequence,remaining}`；最终回答仍是 `reply` 事件。`POST /conversations/:id/messages/:message/stop` 停止后续模型/工具调用，已提交命令保留回执。重启将未完成消息标记为 interrupted，不能自动重放外部写入。
 
-授权范围内的命令直接执行，没有审批或人工确认步骤：一个人或服务角色能做什么，都在控制台的授权和角色权限里配置好。旧版本的组织审批策略 `management_policies.approval_operations` 不再读取；升级时仍在等待审批的命令标记为失败（`approval_retired`），不会执行，需要时重新发起。以前的审批记录和“已拒绝”回执保留可查。日志、引用文本和模型回复都不能授权操作。
+授权范围内的命令直接执行，没有审批或人工确认步骤：一个人或一个群能做什么，都在控制台的授权、角色权限和群绑定的权限档位里配置好。旧版本的组织审批策略 `management_policies.approval_operations` 不再读取；升级时仍在等待审批的命令标记为失败（`approval_retired`），不会执行，需要时重新发起。以前的审批记录和“已拒绝”回执保留可查。日志、引用文本和模型回复都不能授权操作。
 
 管理会话有新内容时才显示「回到最新消息」。阅读旧记录、选中回复文字或在输入框起草下一条消息时，新内容不会把记录区自动滚到底；明确点击该按钮后才回到最新位置。正在选中的回答暂缓 Markdown 重绘，避免流式回复替换节点后丢失选区；取消选区后补齐内容并保留阅读位置。停止生成、收起窗口和取消已提交业务操作仍按各自的原语义处理。
 

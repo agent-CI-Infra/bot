@@ -2,23 +2,29 @@ import type { Store, Row } from '../storage/database.js';
 import { fail, fields, object, randomId, text, type Json } from '../core/security.js';
 import { stop } from '../agent/common.js';
 import { openModel } from '../agent/model.js';
-import { permissionItems, fullPermissions, normalizePermissions, updatePermissions, validPermissionInput, type RolePermissions } from '../roles/permissions.js';
+import { permissionItems, fullPermissions, normalizePermissions, type RolePermissions } from '../roles/permissions.js';
 
 // Service roles are platform-level assistants (the console/personal management assistant, group chat assistants). They are
 // not bound to one project: their model comes from the shared models, their usage is billed to the role, not a project.
+// A group assistant role is only a prompt and a model: what a group may do is the permission level of its binding (#849).
+// The management assistant keeps its fixed items, intersected with the current user's authority.
 // Project work roles (Manager, Dev, QA ...) stay in each project's role configuration.
 export const managementAssistant = 'management-assistant';
 export const repositoryAssistant = 'repository-assistant';
 
 const now = () => new Date().toISOString();
 export const serviceItems = permissionItems;
+/** What the repository assistant granted before #849; bindings migrated from it read as the read level. */
 export const repositoryAssistantPermissions: RolePermissions = normalizePermissions({ github: 'read' });
 const builtins = [
   { id: managementAssistant, name: '管理助手', permissions: fullPermissions(),
     responsibility: '控制台管理对话和个人私聊使用的助手。使用统一权限机制，固定允许全部已接入能力，实际操作仍受当前用户有效授权和项目范围约束。' },
   { id: repositoryAssistant, name: '仓库问答助手', permissions: repositoryAssistantPermissions,
-    responsibility: '群聊默认推荐的助手：查询 GitHub Issue 和 PR、解释代码仓，不给工作角色派活。' },
+    responsibility: '群聊默认推荐的助手：查询 GitHub Issue 和 PR、解释代码仓；能否写入和派活由本群的权限档位决定。' },
 ];
+// The responsibility the repository assistant was seeded with before #849. It reaches the system prompt, so a group at the
+// dispatch level would be told never to delegate; an administrator's own wording is kept.
+const retiredResponsibility = '群聊默认推荐的助手：查询 GitHub Issue 和 PR、解释代码仓，不给工作角色派活。';
 
 export function serviceRoleStorage(store: Store): void {
   store.db.exec(`CREATE TABLE IF NOT EXISTS service_roles(id TEXT PRIMARY KEY,builtin INTEGER NOT NULL DEFAULT 0,enabled INTEGER NOT NULL DEFAULT 1,
@@ -29,6 +35,8 @@ export function serviceRoleStorage(store: Store): void {
   const model = defaultSharedModel(store), time = now();
   for (const role of builtins) store.run(`INSERT OR IGNORE INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,revision,created_at,updated_at)
     VALUES(?,1,1,?,?,'',?,?,NULL,1,?,?)`, role.id, role.name, role.responsibility, model, role.permissions ? JSON.stringify(role.permissions) : null, time, time);
+  if (store.run('UPDATE service_roles SET responsibility=?,revision=revision+1,updated_at=? WHERE id=? AND responsibility=?', builtins[1]!.responsibility, time, repositoryAssistant, retiredResponsibility).changes)
+    store.audit('system', 'service_role.responsibility_migrated', repositoryAssistant);
   const old = store.get('SELECT permissions FROM service_roles WHERE id=?',managementAssistant);
   if (old && !old.permissions) {
     store.run('UPDATE service_roles SET permissions=?,revision=revision+1,updated_at=? WHERE id=?',JSON.stringify(fullPermissions()),now(),managementAssistant);
@@ -78,18 +86,13 @@ export function serviceRoleView(store: Store, row: Row): Json {
   const model = row.model_id ? store.get('SELECT id,model_name,api_url,api_key FROM models WHERE id=? AND repository_id IS NULL', row.model_id) : undefined;
   return { id: row.id, builtin: !!row.builtin, enabled: !!row.enabled, name: row.name, responsibility: row.responsibility, prompt: row.prompt,
     model_id: row.model_id, model: model ? { id: model.id, model_name: model.model_name, api_url: model.api_url, key_configured: !!model.api_key } : null,
-    permissions: row.id===managementAssistant?fullPermissions():normalizePermissions(JSON.parse(row.permissions??'{}'),true), permissions_inherited: false, permissions_fixed: row.id===managementAssistant,
+    ...(row.id === managementAssistant ? { permissions: fullPermissions() } : {}), permissions_fixed: row.id===managementAssistant,
     revision: row.revision, created_at: row.created_at, updated_at: row.updated_at, usage: serviceRoleUsage(store, row.id) };
 }
 
 function optionalText(value: unknown, max: number): string {
   if (typeof value !== 'string' || value.length > max || value.includes('\0')) return fail(400, 'invalid_field');
   return value.trim();
-}
-function permissionsInput(value: unknown, base: RolePermissions): RolePermissions {
-  const given = object(value);
-  for (const [key,mode] of Object.entries(given)) if (!validPermissionInput(key,mode,base)) fail(400,'invalid_service_role_permission','permissions.'+key);
-  return updatePermissions(base,given as RolePermissions,true);
 }
 function sharedModel(store: Store, value: unknown): string | null {
   if (value === null) return null;
@@ -106,15 +109,17 @@ function definition(store: Store, input: Json, current?: Row) {
     const given=object(input.permissions),full=fullPermissions();
     if(Object.keys(given).length!==Object.keys(full).length||Object.entries(full).some(([key,mode])=>given[key]!==mode))fail(400,'service_role_permissions_fixed','permissions');
   }
+  // A group's permissions are set on its binding; a role edit can no longer change what any group may do.
+  if (input.permissions !== undefined && !fixed) fail(400, 'service_role_permissions_moved', 'permissions');
   if (input.enabled !== undefined && typeof input.enabled !== 'boolean') fail(400, 'invalid_field', 'enabled');
   if (builtin && input.enabled === false) fail(409, 'builtin_service_role_required', 'enabled');
-  const base = current?.permissions ? normalizePermissions(JSON.parse(current.permissions),true) : repositoryAssistantPermissions;
   return {
     name: input.name !== undefined ? text(input.name, 80) : current?.name ?? fail(400, 'invalid_field', 'name'),
     responsibility: input.responsibility !== undefined ? optionalText(input.responsibility, 2000) : current?.responsibility ?? '',
     prompt: input.prompt !== undefined ? optionalText(input.prompt, 32000) : current?.prompt ?? '',
     model_id: input.model_id !== undefined ? sharedModel(store, input.model_id) : current?.model_id ?? null,
-    permissions: JSON.stringify(fixed?fullPermissions():input.permissions !== undefined ? permissionsInput(input.permissions,base):base),
+    // Kept as they were: only bindings migrated before #849 read them, once. New roles carry none.
+    permissions: fixed ? JSON.stringify(fullPermissions()) : current ? store.get('SELECT permissions FROM service_roles WHERE id=?', current.id)?.permissions ?? null : null,
     budget: null,
     enabled: input.enabled !== undefined ? (input.enabled ? 1 : 0) : current?.enabled ?? 1,
   };

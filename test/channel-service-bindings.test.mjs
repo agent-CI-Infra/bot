@@ -6,11 +6,14 @@ import { generateKeyPairSync } from 'node:crypto';
 import { channelFixture, inGroup, post, until, bindFixture } from './channel-fixture.mjs';
 import { repository } from './helpers.mjs';
 import { knowledgeActor } from './knowledge-fixture.mjs';
-import { authorize, invalidate, resolvePrincipalActor } from '../dist/identity/authorization.js';
+import { authorize, invalidate, resolvePrincipalActor, revision } from '../dist/identity/authorization.js';
 import { roleApi } from '../dist/roles/api.js';
 import { serviceMemory } from '../dist/service-roles/resources.js';
 import { TaskCommands } from '../dist/tasks/commands.js';
 import { assertManagedExecution } from '../dist/tasks/management.js';
+import { serviceRole } from '../dist/service-roles/roles.js';
+import { digest } from '../dist/core/security.js';
+import { ChannelServiceBindings } from '../dist/channels/service-bindings.js';
 
 // Groups bind one service role and one project scope (#312). All GitHub and Feishu traffic goes to local protocol fixtures.
 const key = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
@@ -58,7 +61,15 @@ async function fixture(t) {
     const current = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === id);
     const result = await f.admin('/api/service-roles/' + id, 'PATCH', { expected_revision: current.revision, ...input }); assert.equal(result.status, 200, JSON.stringify(result.value)); return result.value.service_role;
   };
-  return { ...f, gh, chat, bind, setRole };
+  /** Change what the group may do (#849): a level name, or individual items as the advanced editor sends them. */
+  const setLevel = async (value, chatId = chat.id) => {
+    const current = (await f.admin('/api/channels/service-bindings')).value.bindings.find(b => b.chat_id === chatId);
+    const scope = current.scope.organization ? { kind: 'organization', organization: current.scope.organization.id } : { kind: 'repositories', repositories: current.scope.repositories.map(r => r.id) };
+    const result = await f.admin('/api/channels/chats/' + chatId + '/service-binding', 'PUT', { service_role_id: current.service_role.id, scope, participation: current.participation,
+      enabled: true, expected_revision: current.revision, ...(typeof value === 'string' ? { level: value } : { permissions: value }) });
+    assert.equal(result.status, 200, JSON.stringify(result.value)); return result.value;
+  };
+  return { ...f, gh, chat, bind, setRole, setLevel };
 }
 /** A platform user with config.write (and task access) on the given projects, resolved without a session tenant. */
 function maintainer(f, name, projects, open_id) {
@@ -250,7 +261,7 @@ test('an app without a member-reading scope refuses the binding with an actionab
   assert.equal(bound.status, 200, JSON.stringify(bound.value)); assert.equal(bound.value.state, 'active');
 });
 
-test('other roles\' tasks follow the role permission: read lists progress, write pauses through the management service, revocation refuses the next call', async t => {
+test('other roles\' tasks follow the binding\'s items: read lists progress, write pauses through the management service, revocation refuses the next call', async t => {
   const f = await fixture(t); assert.equal((await f.bind({ scope: { kind: 'repositories', repositories: ['101'] } })).status, 200);
   const binding = f.h.store.get('SELECT * FROM channel_service_bindings');
   let script, tools;
@@ -260,7 +271,7 @@ test('other roles\' tasks follow the role permission: read lists progress, write
   assert.equal((await done(f, await post(f.h, f.id, groupMessage('blocked 任务进展如何？')))).state, 'completed');
   assert.ok(!tools.includes('list_project_tasks')); assert.equal(observations(f.requests.at(-1))[0].error, 'tool_not_allowed');
   // read: list and read progress, no write tool.
-  await f.setRole({ permissions: { project_tasks: 'read' } });
+  await f.setLevel({ project_tasks: 'read' });
   script = (body, res, seen) => !seen.length ? call(res, 'list_project_tasks', { repository: repo(101) }) : seen.length === 1 ? call(res, 'read_project_task', { repository: repo(101), task_id: 'blocked' }) : say(res, '任务在等待项目电脑。');
   assert.equal((await done(f, await post(f.h, f.id, groupMessage('blocked 任务进展如何？')))).state, 'completed');
   assert.ok(tools.includes('list_project_tasks') && tools.includes('read_project_task') && !tools.includes('manage_project_task'));
@@ -269,7 +280,7 @@ test('other roles\' tasks follow the role permission: read lists progress, write
   assert.ok(!listed.tasks.some(item => item.task_id === 'foreign'), 'another organization\'s task is not listed');
   assert.equal(detail.task.id, 'blocked'); assert.equal(detail.revision, task.revision);
   // write: pause through ManagementService, with the same receipt the console shows.
-  await f.setRole({ permissions: { project_tasks: 'write' } });
+  await f.setLevel({ project_tasks: 'write' });
   script = (body, res, seen) => !seen.length ? call(res, 'read_project_task', { repository: repo(101), task_id: 'blocked' })
     : seen.length === 1 ? call(res, 'manage_project_task', { repository: repo(101), task_id: 'blocked', operation: 'pause', expected_revision: seen[0].revision }) : say(res, '已暂停 blocked 任务。');
   const pause = await post(f.h, f.id, groupMessage('暂停 blocked 任务'));
@@ -288,12 +299,12 @@ test('other roles\' tasks follow the role permission: read lists progress, write
   let release, started; const gate = new Promise(r => { release = r; }), seen = new Promise(r => { started = r; });
   script = async (body, res, observed) => { if (!observed.length) { started(); await gate; return call(res, 'list_project_tasks', { repository: repo(101) }); } return say(res, 'This late reply must be withheld'); };
   const slow = await post(f.h, f.id, groupMessage('列出任务')); await seen;
-  await f.setRole({ permissions: { project_tasks: 'none' } }); release();
+  await f.setLevel({ project_tasks: 'none' }); release();
   const failed = await done(f, slow); assert.equal(failed.state, 'failed'); assert.equal(failed.error, 'conversation_source_changed');
   await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('配置或来源消息刚刚变化')));
   assert.ok(!JSON.stringify(f.wire.sent).includes('This late reply must be withheld'));
-  // Approval or a later resume cannot use a revoked permission either.
-  assert.throws(() => f.service.serviceBindings.guardCommand(binding, command, f.h.store.secrets.open(f.h.store.get('SELECT payload FROM channel_inbox WHERE id=?', pause.value.operation_id).payload, 'channel-event:' + pause.value.operation_id)),
+  // Approval or a later resume cannot use a revoked permission either: it is checked against the binding as it is now.
+  assert.throws(() => f.service.serviceBindings.guardCommand(f.h.store.get('SELECT * FROM channel_service_bindings'), command, f.h.store.secrets.open(f.h.store.get('SELECT payload FROM channel_inbox WHERE id=?', pause.value.operation_id).payload, 'channel-event:' + pause.value.operation_id)),
     { code: 'channel_service_permission_revoked' });
 });
 
@@ -358,7 +369,7 @@ test('legacy group employees migrate once to a repository assistant binding; the
 
 test('a disabled binding stops answering and history import; a bound service role cannot be deleted', async t => {
   const f = await fixture(t), { h, chat } = f;
-  const custom = (await f.admin('/api/service-roles', 'POST', { name: '可信 committer 助手', model_id: f.assistantModel.id, permissions: { project_tasks: 'write' } })).value.service_role;
+  const custom = (await f.admin('/api/service-roles', 'POST', { name: '可信 committer 助手', model_id: f.assistantModel.id })).value.service_role;
   assert.equal((await f.bind({ service_role_id: custom.id })).status, 200);
   assert.equal((await f.admin('/api/service-roles/' + custom.id, 'DELETE', { expected_revision: custom.revision })).value.error, 'service_role_in_use');
   // Disabling the role pauses the group with an explanation instead of switching roles.
@@ -381,18 +392,18 @@ test('a disabled binding stops answering and history import; a bound service rol
 });
 
 const contract = { goal: '群聊卡片的“登录后台查看”链接可以点击', scope: ['static/channels.js'], criteria: ['链接在桌面和手机上都能打开'], endpoint: '合入修复 PR' };
-test('delegation hands work to a project only through its Manager: create, change and cancel tasks, never steer a role; results return to the group', async t => {
+test('the dispatch level hands work to a project only through its Manager: create, change and cancel tasks, never steer a role; results return to the group', async t => {
   const f = await fixture(t); assert.equal((await f.bind({ scope: { kind: 'repositories', repositories: ['101'] } })).status, 200);
   const binding = f.h.store.get('SELECT * FROM channel_service_bindings');
   let script, tools, system;
   f.modelState.respond = async (body, res) => { tools = body.tools.map(tool => tool.function.name); system = body.messages[0].content; return script(body, res, observations(body)); };
-  // deny (the repository assistant's default): no task tools, and the prompt says so.
+  // read (a new binding's level): no task tools, and the prompt says so.
   script = (body, res, seen) => seen.length ? say(res, '不能派活。') : call(res, 'create_project_task', { repository: repo(101), request: '修复卡片链接', contract });
   await done(f, await post(f.h, f.id, groupMessage('帮忙建个任务修复卡片链接')));
   assert.ok(!tools.includes('create_project_task')); assert.equal(observations(f.requests.at(-1))[0].error, 'tool_not_allowed');
   assert.match(system, /cannot create, delegate or assign work/);
-  // allow: a new task goes to the project team through the management service, as the binding principal.
-  await f.setRole({ permissions: { conversation_history: 'read', github: 'read', project_tasks: 'none', delegation: 'allow' } });
+  // dispatch: a new task goes to the project team through the management service, as the binding principal.
+  assert.equal((await f.setLevel('dispatch')).level, 'dispatch');
   const before = f.h.store.get('SELECT count(*) n FROM tasks').n;
   script = (body, res, seen) => seen.length ? say(res, '已交给 Manager。') : call(res, 'create_project_task', { repository: repo(101), request: '修复群聊卡片链接无法点击的问题', contract });
   const created = await post(f.h, f.id, groupMessage('帮忙建个任务修复卡片链接'));
@@ -412,14 +423,12 @@ test('delegation hands work to a project only through its Manager: create, chang
   assert.ok(!f.h.store.get('SELECT executor_role FROM task_origins WHERE task_id=?', task.id).executor_role);
   assert.deepEqual({ ...f.h.store.get('SELECT binding_id,chat_id,source_message FROM channel_service_tasks WHERE task_id=?', task.id) },
     { binding_id: binding.id, chat_id: f.chat.id, source_message: created.value.operation_id });
-  // Change the task as a whole: an instruction and a new contract are allowed; pausing needs project_tasks write.
+  // Change the task as a whole: an instruction and a new contract, through the same revision check as the console.
   script = (body, res, seen) => !seen.length ? call(res, 'read_project_task', { repository: repo(101), task_id: task.id })
-    : seen.length === 1 ? call(res, 'manage_project_task', { repository: repo(101), task_id: task.id, operation: 'instructions', instruction: '优先修手机端', expected_revision: seen[0].revision })
-    : seen.length === 2 ? call(res, 'manage_project_task', { repository: repo(101), task_id: task.id, operation: 'pause', expected_revision: seen[0].revision }) : say(res, '已补充说明。');
-  await done(f, await post(f.h, f.id, groupMessage('补充：优先修手机端，然后先暂停')));
-  const [, instruction, pause] = observations(f.requests.at(-1));
+    : seen.length === 1 ? call(res, 'manage_project_task', { repository: repo(101), task_id: task.id, operation: 'instructions', instruction: '优先修手机端', expected_revision: seen[0].revision }) : say(res, '已补充说明。');
+  await done(f, await post(f.h, f.id, groupMessage('补充：优先修手机端')));
+  const [, instruction] = observations(f.requests.at(-1));
   assert.equal(instruction.state, 'succeeded', JSON.stringify(instruction)); assert.equal(instruction.operation, 'task.instructions');
-  assert.equal(pause.error, 'operation_not_allowed'); assert.notEqual(f.h.store.get('SELECT status FROM tasks WHERE id=?', task.id).status, 'paused');
   script = (body, res, seen) => !seen.length ? call(res, 'read_project_task', { repository: repo(101), task_id: task.id })
     : seen.length === 1 ? call(res, 'manage_project_task', { repository: repo(101), task_id: task.id, operation: 'contract', contract: { ...contract, criteria: ['链接在桌面和手机上都能打开', '有回归测试'] }, expected_revision: seen[0].revision })
     : seen.length === 2 ? call(res, 'read_project_task', { repository: repo(101), task_id: task.id })
@@ -439,10 +448,10 @@ test('delegation hands work to a project only through its Manager: create, chang
   assert.equal(scoped.project_id, 'binding:' + binding.id); assert.equal(scoped.fence, f.service.serviceBindings.fence(f.chat.id));
   // A group without delegation can no longer create or resume the work it delegated, and its tasks stop at the next source check.
   const event = f.h.store.secrets.open(f.h.store.get('SELECT payload FROM channel_inbox WHERE id=?', created.value.operation_id).payload, 'channel-event:' + created.value.operation_id);
-  f.service.serviceBindings.guardCommand(binding, command, event);
+  f.service.serviceBindings.guardCommand(f.h.store.get('SELECT * FROM channel_service_bindings'), command, event);
   assert.doesNotThrow(() => assertManagedExecution(f.h.store, f.h.store.get('SELECT * FROM tasks WHERE id=?', task.id)));
-  await f.setRole({ permissions: { conversation_history: 'read', github: 'read', project_tasks: 'write', delegation: 'deny' } });
-  assert.throws(() => f.service.serviceBindings.guardCommand(binding, command, event), { code: 'channel_service_permission_revoked' });
+  assert.equal((await f.setLevel({ delegation: 'deny' })).level, 'custom');
+  assert.throws(() => f.service.serviceBindings.guardCommand(f.h.store.get('SELECT * FROM channel_service_bindings'), command, event), { code: 'channel_service_permission_revoked' });
   assert.throws(() => assertManagedExecution(f.h.store, f.h.store.get('SELECT * FROM tasks WHERE id=?', task.id)), { code: 'channel_service_delegation_revoked' });
 });
 
@@ -492,8 +501,8 @@ test('a group assistant works a side question in its own task with the same tool
   const second = ownBodies.at(-1);
   assert.match(JSON.parse(second.messages[1].content).own_task.previous_rounds[0].conclusion, /#7/);
   assert.equal(f.h.store.get('SELECT rounds FROM service_role_own_tasks').rounds, 2);
-  // A changed role permission changes the group's fence: the old own task is no longer visible or continuable.
-  await f.setRole({ permissions: { conversation_history: 'read', github: 'read', project_tasks: 'read', delegation: 'deny' } });
+  // A changed level changes the group's fence: the old own task is no longer visible or continuable.
+  await f.setLevel({ project_tasks: 'read' });
   main = (body, res, seen) => !seen.length ? call(res, 'list_own_tasks', {}) : seen.length === 1 ? call(res, 'continue_own_task', { task_id: row.id, instruction: '继续' }) : say(res, '没有可继续的独立任务。');
   assert.equal((await done(f, await post(f.h, f.id, groupMessage('继续刚才的独立任务')))).state, 'completed');
   const [hidden, refused] = observations(f.requests.at(-1));
@@ -537,8 +546,7 @@ test('a group assistant reads ten repositories with one tool call each in a sing
 });
 
 test('a group timer hands work to the Manager like a message would; the task is linked to the group and its result returns there (#330)', async t => {
-  const f = await fixture(t); assert.equal((await f.bind()).status, 200);
-  await f.setRole({ permissions: { conversation_history: 'read', github: 'read', project_tasks: 'none', delegation: 'allow' } });
+  const f = await fixture(t); assert.equal((await f.bind({ level: 'dispatch' })).status, 200);
   f.modelState.respond = async (body, res) => observations(body).length ? say(res, '已交给 Manager。') : call(res, 'create_project_task', { repository: repo(101), request: '修复群聊卡片链接无法点击的问题', contract });
   const created = await f.admin('/api/channels/chats/' + f.chat.id + '/schedules', 'POST', { name: '每周派活', prompt: '把群聊卡片链接的修复交给 bot 仓库的项目团队。', timezone: 'Asia/Shanghai', cron: '0 10 * * 1' });
   assert.equal(created.status, 201, JSON.stringify(created.value));
@@ -561,10 +569,10 @@ test('a group timer hands work to the Manager like a message would; the task is 
   await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('已取消') && JSON.stringify(s.content).includes(repo(101))));
 });
 
-test('a group assistant whose role writes Issues files one in a repository in scope with github_write; with read the tool is not offered and a forced call is refused (#381)', async t => {
+test('a group whose level writes Issues files one in a repository in scope with github_write; with read the tool is not offered and a forced call is refused (#381)', async t => {
   const f = await fixture(t), offered = [];
   assert.equal((await f.bind()).status, 200);
-  await f.setRole({ permissions: { github_issues: 'write' } });
+  await f.setLevel({ github_issues: 'write' });
   const write = (repository, key) => ['github_write', { repository, method: 'POST', path: '/issues', key, body: { title: 'Parser drops the last line', body: 'Reported in the group by @carol.' } }];
   f.modelState.respond = async (body, res) => {
     offered.push(body.tools.map(tool => tool.function.name));
@@ -590,11 +598,121 @@ test('a group assistant whose role writes Issues files one in a repository in sc
   assert.deepEqual([ledger.repository_id, ledger.method, ledger.path, ledger.status, ledger.html_url], ['101', 'POST', '/issues', 201, 'https://github.com/agent-test-zone/admin-fixture-101/issues/44']);
   assert.deepEqual([actor.kind, actor.service_role_id, actor.conversation_id], ['service', 'repository-assistant', f.chat.id]); assert.ok(actor.grantor_id);
   // With Issues read only, the tool is not offered and a call the model makes anyway is refused before GitHub.
-  await f.setRole({ permissions: { github_issues: 'read' } }); offered.length = 0;
+  await f.setLevel('read'); offered.length = 0;
   f.modelState.respond = async (body, res) => { offered.push(body.tools.map(tool => tool.function.name)); return observations(body).length ? say(res, '不能提报。') : call(res, ...write(repo(101), 'again')); };
   const second = await done(f, await post(f.h, f.id, groupMessage('bot 再提报一个')));
   assert.equal(second.state, 'completed', second.error);
   assert.ok(!offered[0].includes('github_write'));
   assert.equal(observations(f.requests.at(-1))[0].error, 'tool_not_allowed');
   assert.equal(f.gh.state.requests.filter(r => r.method === 'POST' && r.path.endsWith('/issues')).length, 1);
+});
+
+test('a project administrator binds one group at read and another at dispatch; every member of the dispatch group creates tasks, nobody in the read group writes (#849)', async t => {
+  const f = await fixture(t), { h } = f, bindings = f.service.serviceBindings;
+  const second = groupMessage('Second group discussion', 'ou_alice', 'oc_group_2'); second.event.message.mentions = []; await post(h, f.id, second);
+  const chatB = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group_2'");
+  // A project administrator of 101 only, no super administrator involved.
+  const admin = maintainer(f, 'project-admin', ['101'], 'ou_project_admin');
+  const scope = { kind: 'repositories', repositories: ['101'] };
+  const a = await bindings.configure(admin, f.chat.id, { service_role_id: 'repository-assistant', scope, level: 'read', enabled: true, expected_revision: 0 });
+  const b = await bindings.configure(admin, chatB.id, { service_role_id: 'repository-assistant', scope, level: 'dispatch', enabled: true, expected_revision: 0 });
+  assert.deepEqual([a.level, b.level, a.owner, b.owner], ['read', 'dispatch', 'project-admin', 'project-admin']);
+  assert.equal(b.permissions.github_contents, 'read', 'dispatch never includes Contents write');
+  const grants = chat => JSON.parse(h.store.get("SELECT g.capabilities FROM scoped_grants g JOIN channel_service_bindings b ON b.principal_id=g.principal_id WHERE b.chat_id=?", chat).capabilities);
+  assert.deepEqual([grants(f.chat.id), grants(chatB.id)], [['tasks.read'], ['tasks.read', 'tasks.write']]);
+  let offered;
+  const create = (seen, res, request) => seen.length ? say(res, '已处理。') : call(res, 'create_project_task', { repository: repo(101), request, contract });
+  // Group B: a member without a platform account and one with only read access both hand work to the Manager.
+  knowledgeActor(h.store, 'reader', '101', ['tasks.read']); bindFixture(h, f.id, 'reader', 'ou_reader');
+  for (const [speaker, request] of [['ou_stranger', '外部成员请求修复卡片链接'], ['ou_reader', '只读成员请求补充回归测试']]) {
+    f.modelState.respond = async (body, res) => { offered = body.tools.map(tool => tool.function.name); return create(observations(body), res, request); };
+    assert.equal((await done(f, await post(h, f.id, groupMessage(request, speaker, 'oc_group_2')))).state, 'completed');
+    const receipt = observations(f.requests.at(-1))[0];
+    assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt));
+    assert.equal(h.store.get('SELECT chat_id FROM channel_service_tasks WHERE task_id=?', receipt.result.id).chat_id, chatB.id);
+    assert.ok(offered.includes('create_project_task') && offered.includes('manage_project_task') && offered.includes('github_write'));
+  }
+  assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE external_actor='ou_stranger'").n, 0, 'the speaker never needed an account');
+  // Group A: neither a task nor a GitHub write, whoever asks, and a forced call is refused before anything is sent.
+  const tasks = h.store.get('SELECT count(*) n FROM tasks').n;
+  for (const [name, args] of [['create_project_task', { repository: repo(101), request: '不该创建', contract }],
+    ['github_write', { repository: repo(101), method: 'POST', path: '/issues', key: 'read-group', body: { title: 'No' } }]]) {
+    f.modelState.respond = async (body, res) => { offered = body.tools.map(tool => tool.function.name); return observations(body).length ? say(res, '本群只读。') : call(res, name, args); };
+    assert.equal((await done(f, await post(h, f.id, groupMessage('帮忙写一下', 'ou_project_admin')))).state, 'completed');
+    assert.equal(observations(f.requests.at(-1))[0].error, 'tool_not_allowed');
+    for (const tool of ['create_project_task', 'manage_project_task', 'github_write']) assert.ok(!offered.includes(tool), tool);
+  }
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, tasks);
+  assert.ok(!f.gh.state.requests.some(r => r.method === 'POST' && r.path.endsWith('/issues')));
+});
+
+test('a binding takes a level or individual items; levels are exact sets and Contents write is only an individual item (#849)', async t => {
+  const f = await fixture(t);
+  for (const [input, error] of [[{ level: 'admin' }, 'channel_service_level_invalid'], [{ level: 'read', permissions: { delegation: 'allow' } }, 'channel_service_level_conflict'],
+    [{ permissions: { github: 'read' } }, 'channel_service_permission_invalid'], [{ permissions: { delegation: 'write' } }, 'channel_service_permission_invalid'],
+    [{ permissions: { project_tasks: 'custom' } }, 'channel_service_permission_invalid']]) {
+    const refused = await f.bind(input); assert.equal(refused.status, 400); assert.equal(refused.value.error, error, JSON.stringify(input));
+  }
+  // Without a level a new binding starts at read; a level stays until it is changed.
+  const bound = await f.bind(); assert.equal(bound.value.level, 'read');
+  assert.equal((await f.setLevel('comment')).level, 'comment');
+  assert.equal((await f.bind({ participation: 'questions', expected_revision: 2 })).value.level, 'comment');
+  const merging = await f.setLevel({ github_contents: 'write' });
+  assert.deepEqual([merging.level, merging.permissions.github_contents, merging.permissions.github_issues], ['custom', 'write', 'write']);
+  // Choosing items that equal a level reads as that level again.
+  assert.equal((await f.setLevel({ github_contents: 'read' })).level, 'comment');
+  const listed = (await f.admin('/api/channels/service-bindings')).value;
+  assert.deepEqual(listed.levels.map(l => l.id), ['read', 'comment', 'dispatch']);
+  assert.ok(listed.levels.every(l => l.permissions.github_contents === 'read'));
+  assert.ok(listed.permission_items.some(item => item.id === 'github_contents' && item.group === 'github'));
+  assert.ok(listed.service_roles.every(role => !('permissions' in role)), 'a role no longer describes what a group may do');
+});
+
+test('upgrading moves each binding\'s role items onto the binding unchanged: same level, same fence, no wider; role items no longer apply (#849)', async t => {
+  const f = await fixture(t), { h } = f;
+  const custom = (await f.admin('/api/service-roles', 'POST', { name: '派活助手', model_id: f.assistantModel.id, prompt: '先说结论。' })).value.service_role;
+  // A role saved before #849 carried the group's items, here an old delegating role (create, then change or cancel its tasks).
+  h.store.run('UPDATE service_roles SET permissions=? WHERE id=?', JSON.stringify({ conversation_history: 'read', github: 'read', project_tasks: 'none', delegation: 'allow' }), custom.id);
+  const second = groupMessage('Second group discussion', 'ou_alice', 'oc_group_2'); second.event.message.mentions = []; await post(h, f.id, second);
+  const chatB = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group_2'");
+  assert.equal((await f.bind({ service_role_id: custom.id, scope: { kind: 'repositories', repositories: ['101'] } })).status, 200);
+  assert.equal((await f.bind({}, chatB.id)).status, 200);
+  // Before the upgrade the binding had no items of its own; the fence was built from the role's items.
+  h.store.run('UPDATE channel_service_bindings SET permissions=NULL');
+  const previousFence = chat => {
+    const binding = h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat), role = serviceRole(h.store, binding.service_role_id);
+    return digest(JSON.stringify({ context: h.store.get('SELECT context_revision FROM channel_chats WHERE id=?', chat).context_revision,
+      binding: [binding.id, binding.revision, binding.enabled, revision(h.store, binding.principal_id)], role: [role.id, role.enabled, role.permissions],
+      grants: h.store.all("SELECT * FROM scoped_grants WHERE principal_id=? AND policy='channel_service_binding' AND revoked_at IS NULL ORDER BY scope,tenant_id,project_id", binding.principal_id)
+        .map(g => [g.id, revision(h.store, g.grantor_id)]) }));
+  };
+  const fences = [previousFence(f.chat.id), previousFence(chatB.id)], revisions = h.store.all('SELECT revision FROM channel_service_bindings ORDER BY chat_id').map(r => r.revision);
+  // The repository assistant's seeded responsibility said it never delegates; it reaches the prompt, so it is reworded once.
+  h.store.run("UPDATE service_roles SET responsibility='群聊默认推荐的助手：查询 GitHub Issue 和 PR、解释代码仓，不给工作角色派活。' WHERE id='repository-assistant'");
+  await h.stop(); await h.start();
+  assert.match(h.store.get("SELECT responsibility FROM service_roles WHERE id='repository-assistant'").responsibility, /由本群的权限档位决定/);
+  // The restarted store has its own channel service; the fence reads only the store.
+  const restarted = new ChannelServiceBindings(h.store, undefined);
+  assert.deepEqual([restarted.fence(f.chat.id), restarted.fence(chatB.id)], fences);
+  assert.deepEqual(h.store.all('SELECT revision FROM channel_service_bindings ORDER BY chat_id').map(r => r.revision), revisions);
+  assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE action='channel.service_binding.level_migrated'").n, 2);
+  const views = (await f.admin('/api/channels/service-bindings')).value.bindings, view = chat => views.find(b => b.chat_id === chat);
+  // The repository assistant's group reads as read; the old delegating role's group keeps exactly its transitional set.
+  assert.equal(view(chatB.id).level, 'read');
+  assert.deepEqual([view(f.chat.id).level, view(f.chat.id).service_role.id, view(f.chat.id).permissions.legacy_delegation_controls], ['custom', custom.id, 'allow']);
+  // Its role stays the prompt and model; its items can no longer be edited there and never reach a group again.
+  const edit = await f.admin('/api/service-roles/' + custom.id, 'PATCH', { expected_revision: custom.revision, permissions: { project_tasks: 'write' } });
+  assert.deepEqual([edit.status, edit.value.error], [400, 'service_role_permissions_moved']);
+  h.store.run('UPDATE service_roles SET permissions=? WHERE id=?', JSON.stringify({ github: 'none', delegation: 'deny' }), custom.id);
+  let system;
+  f.modelState.respond = async (body, res) => {
+    system = body.messages[0].content; const seen = observations(body);
+    if (!seen.length) return call(res, 'create_project_task', { repository: repo(101), request: '迁移后仍可派活', contract });
+    if (seen.length === 1) return call(res, 'manage_project_task', { repository: repo(101), task_id: seen[0].result.id, operation: 'pause', expected_revision: 'x' });
+    return say(res, '已派活。');
+  };
+  assert.equal((await done(f, await post(h, f.id, groupMessage('迁移后派个活')))).state, 'completed');
+  const [created, paused] = observations(f.requests.at(-1));
+  assert.equal(created.state, 'succeeded', JSON.stringify(created)); assert.equal(paused.error, 'operation_not_allowed', 'pausing was never part of the old set');
+  assert.match(system, /先说结论/);
 });

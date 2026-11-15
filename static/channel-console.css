@@ -47,12 +47,13 @@
 .feishu-row-title:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); min-width: 0; overflow-wrap: anywhere; }
 .feishu-binding-badge:not([hidden]) { display: inline-flex; align-items: center; padding: 2px var(--space-3); border-radius: var(--radius-3); background: var(--color-brand-weak); color: var(--color-brand); font-size: var(--font-size-1); font-weight: 600; }
 .feishu-binding-badge-muted { background: var(--color-surface-alt); color: var(--color-text-muted); border: 1px solid var(--color-border); }
-.feishu-perm-tags:not([hidden]) { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-.feishu-perm-tag:not([hidden]) { display: inline-flex; align-items: center; padding: 2px var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-3); background: var(--color-surface); font-size: var(--font-size-1); color: var(--color-text-muted); }
-.feishu-perm-tag-active { border-color: var(--color-brand); background: var(--color-brand-weak); color: var(--color-brand); }
 .feishu-row-actions:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
 .feishu-row-drawer:not([hidden]) { display: grid; gap: var(--space-3); width: 100%; min-width: 0; padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
 .feishu-repo-picker:not([hidden]) { display: grid; gap: var(--space-3); min-width: 0; }
+/* The group's permission level (#849): one option per line, each explained right below it. */
+.feishu-level-choices { display: grid; gap: var(--space-2); margin: var(--space-3) 0; min-width: 0; }
+.feishu-level-choices > label + p { margin: 0 0 var(--space-2) 1.6rem; }
+.feishu-level-items:not([hidden]) { display: grid; gap: var(--space-3); min-width: 0; }
 .feishu-repo-grid:not([hidden]) { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-2); max-height: 280px; overflow-y: auto; padding: var(--space-3); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-3); min-width: 0; }
 @media (max-width: 1279px) { .channel-console-layout { grid-template-columns: 210px minmax(0,1fr); } .channel-related { grid-column: 2; } }
 @media (max-width: 767px) {
