@@ -235,10 +235,11 @@ export class FeishuAdapter implements ChannelAdapter {
     const result = await this.api('/im/v1/messages?' + query, { method: 'GET' });
     const data = result.data;
     if (!data || !Array.isArray(data.items) || typeof data.has_more !== 'boolean' || data.has_more && typeof data.page_token !== 'string') fail(502, 'channel_history_invalid');
-    // A bad timestamp in one item must not become a bare 400: history-sync only treats ChannelHistoryError as
-    // permanent, so a 400 would retry the same page forever. The page is invalid upstream data, like a bad body (#792).
+    // A bad timestamp in one item is invalid upstream data, like a bad body (#792). It must be a permanent
+    // ChannelHistoryError: history-sync only blocks a page on that type (a bare HttpError would retry it forever,
+    // once an hour, without advancing the cursor).
     const itemTime = (value: unknown): number => {
-      try { return eventTime(value); } catch { return fail(502, 'channel_history_invalid'); }
+      try { return eventTime(value); } catch { throw new ChannelHistoryError('channel_history_invalid', true); }
     };
     const items: StoredMessage[] = data.items.map((item: any) => {
       const raw = String(item.body?.content_v2 ?? item.body?.content ?? ''), messageType = text(item.msg_type, 80);
