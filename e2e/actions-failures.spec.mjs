@@ -9,10 +9,10 @@ test('项目默认关闭 Actions 失败处理，保存开关并清晰显示独�
   mkdirSync('.tmp/actions-failures', { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-    await page.goto(h.admin + '/#/projects/101/roles/manager');
+    await page.goto(h.admin + '/#/projects/101/triggers');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    // Failed Actions runs are an event source, configured alongside the other Manager event filters.
+    // Failed Actions runs are an event source, configured alongside the other project event sources.
     const toggle=page.getByLabel('接收默认分支的 Actions 失败事件',{exact:true}), save=page.getByRole('button',{name:'保存事件开关',exact:true});
     await expect(toggle).not.toBeChecked();
     const status = page.locator('[data-actions-status]');

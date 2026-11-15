@@ -35,7 +35,7 @@ function showActionsFailureStatus(message, status) {
     : status ? '配置检查通过后每分钟扫描；重复事件和人工重跑共用原运行的一次自动重试预算。' : '等待检查 App 事件订阅。';
 }
 async function refreshActionsFailureStatus(token) {
-  if (token !== renderToken || current?.section !== 'roles' || !current.policy.actions_failures_enabled) return;
+  if (token !== renderToken || current?.section !== 'triggers' || !current.policy.actions_failures_enabled) return;
   try {
     const value = await api('/api/repositories/' + current.id);
     if (token !== renderToken) return;

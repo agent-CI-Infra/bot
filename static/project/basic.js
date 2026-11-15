@@ -51,7 +51,7 @@ function basicSection() {
   summary.append(facts([['检视', policy.review_enabled ? '开启' : '关闭'], ['自动开发', policy.development_enabled ? '开启' : '关闭'],
     ['模型', current.models.find(m=>m.id===policy.model_id)?.model_name || (policy.model_id?'模型不可用':'未选择，任务会等待配置')],
     ['机器', machineSize]]));
-  summary.append(consoleLink(`#/projects/${id}/roles/manager`, '项目 Manager 设置', '事件接收、任务安排、提示词与权限'));
+  summary.append(consoleLink(`#/projects/${id}/triggers`, '监听与触发设置', '项目整体的事件来源与自动处理范围'));
   const advanced = element('details', '', 'fold basic-advanced');
   advanced.dataset.testid = 'basic-advanced';
   advanced.append(element('summary', '高级'));

@@ -25,7 +25,7 @@ test('a manifest that does not match the grammar is refused', () => {
 // listed too early or too late fails here before a browser test has to draw the page.
 test('split console pages still define their entry functions in source order', () => {
   const pages = {
-    'static/project.js': ['function renderProject', 'function membersSection', 'function schedulesSection'],
+    'static/project.js': ['function renderProject', 'function projectTriggersSection', 'function membersSection', 'function schedulesSection'],
     'static/views.js': ['function openTask', 'function renderTimeline', 'function installedActions'],
     'static/channels.js': ['async function renderFeishuBindingsPage', 'async function channelSchedules', 'function channelLink'],
     'static/roles.js': ['function rolesConsole', 'function stagePolicyGraph'],

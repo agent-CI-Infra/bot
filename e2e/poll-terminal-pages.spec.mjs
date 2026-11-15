@@ -54,12 +54,12 @@ test('#743 发布页：5xx 仍会继续轮询', async ({ page }) => {
   } finally { for (const close of cleanup.reverse()) await close(); }
 });
 
-test('#743 角色页：403 之后停止 Actions 配置检查并写终态文案', async ({ page }) => {
+test('#743 监听与触发页：403 之后停止 Actions 配置检查并写终态文案', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101');
-    await loginAs(page, h.admin + '/#/projects/101/roles/manager', password);
+    await loginAs(page, h.admin + '/#/projects/101/triggers', password);
     // Enable the event source through its own switch, the way the page turns the check on.
     await page.getByLabel('接收默认分支的 Actions 失败事件', { exact: true }).check();
     await page.getByRole('button', { name: '保存事件开关', exact: true }).click();

@@ -81,7 +81,7 @@ function roleOverviewCards(state, redraw) {
     body.append(row);
   }
   overview.append(table);
-  overview.append(consoleLink(`#/projects/${current.id}/roles/manager`, '项目 Manager 设置', '管理接收的事件、提示词与角色权限；新任务默认由 Manager 安排'));
+  overview.append(consoleLink(`#/projects/${current.id}/triggers`, '监听与触发设置', '配置项目整体的事件来源；新任务默认由 Manager 安排'));
   const custom = card('自定义角色'), name = input('new_role', '', { placeholder: '如 security_checker', maxLength: 32 });
   const error = element('p', '', 'view-error'); custom.append(field('新角色标识', name), button('添加角色', () => {
     if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name.value) || draft.roles.some(role => role.role_id === name.value)) { error.textContent = '使用小写字母开头的唯一名称，可包含数字、下划线或连字符。'; return; }

@@ -344,7 +344,7 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .roles-delegation>h4{margin-top:14px}.role-coordinator{display:grid;grid-template-columns:minmax(0,420px);margin-top:6px}
 @media(max-width:900px){.role-lanes{grid-template-columns:minmax(0,1fr)}.role-lane-arrow{justify-self:center;transform:rotate(90deg)}}
 /* The Manager page: the prompt editor with its sections, the work type table, event switches and the latest decisions. */
-.manager-holder,.manager-page{display:grid;gap:16px;min-width:0}.manager-prompt textarea.code{min-height:320px;width:100%;box-sizing:border-box}
+.manager-holder,.manager-page,.project-triggers-page{display:grid;gap:16px;min-width:0}.manager-prompt textarea.code{min-height:320px;width:100%;box-sizing:border-box}
 .manager-sections{list-style:none;margin:0;padding:0;display:grid;gap:8px}.manager-sections>li{display:grid;gap:4px;padding:8px 0;border-bottom:1px solid #eef3f5}
 .manager-section-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}.manager-sections button{justify-self:start}
 .manager-section-list>summary{cursor:pointer;font-weight:600;margin:8px 0}.manager-writes{display:grid;gap:4px}.manager-writes .check{font-size:var(--font-size-label)}

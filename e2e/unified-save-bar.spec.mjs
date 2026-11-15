@@ -196,7 +196,7 @@ test('读不到电脑记录时，「同时运行的任务」仍有保存栏可�
   } finally { await h.stop(); }
 });
 
-test('基本设置放弃分支草稿时保留 Manager 页的策略草稿', async ({ page }) => {
+test('基本设置放弃分支草稿时保留 监听与触发页的策略草稿', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
   try {
@@ -212,14 +212,14 @@ test('基本设置放弃分支草稿时保留 Manager 页的策略草稿', async
     // The bar spans the two-column basic-settings layout instead of taking one cell.
     const widths = await page.evaluate(() => [document.querySelector('.console-save-bar').getBoundingClientRect().width, document.querySelector('.project-settings-layout').getBoundingClientRect().width]);
     expect(widths[0]).toBeGreaterThan(widths[1] * 0.9);
-    await page.getByRole('link', { name: /项目 Manager 设置/ }).click();
+    await page.getByRole('link', { name: /监听与触发设置/ }).click();
     const review = page.getByLabel('开启 Issue 与 PR 检视', { exact: true });
     const before = await review.isChecked(); await review.setChecked(!before);
     await page.locator('.project-nav a[href="#/projects/101/basic"]').click();
     await expect(branch).toHaveValue('feature/group-discard');
     await confirmDiscard(page);
     await expect(branch).toHaveValue(initialBranch);
-    await page.getByRole('link', { name: /项目 Manager 设置/ }).click();
+    await page.getByRole('link', { name: /监听与触发设置/ }).click();
     await expect(review).toBeChecked({ checked: !before });
     await page.getByRole('button', { name: '保存检视与开发策略', exact: true }).click();
     await expect.poll(async () => !!(await admin('/api/repositories/101')).value.policy.review_enabled).toBe(!before);

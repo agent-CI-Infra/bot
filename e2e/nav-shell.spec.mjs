@@ -21,7 +21,7 @@ test('项目导航只列真实页面，管理助手的深链不丢页，移动�
     await login();
     // A work page draws the 项目入口 breadcrumb and a settings page the 项目设置类别 nav (#707); either marks the page.
     const nav = page.locator('#console-secondary-nav nav'), current = nav.locator('[aria-current=page]');
-    const settingsPages = ['基本设置', '机器配置', '角色', '模型', '计划与通知', '外部执行', '成员'];
+    const settingsPages = ['基本设置', '监听与触发', '机器配置', '角色', '模型', '计划与通知', '外部执行', '成员'];
     const hub = () => page.getByTestId('project-hub');
     const openHub = async () => {
       const link = page.getByTestId('project-hub-link');
@@ -32,7 +32,7 @@ test('项目导航只列真实页面，管理助手的深链不丢页，移动�
     await openHub();
     // Every entry named like a page must land on that page: the address it advertises keeps that section current.
     // A work page does not list its neighbours (#565); a settings page lists only the settings categories (#707).
-    for (const caption of ['项目总览', '基本设置', '机器配置', '模型', '发版本', '计划与通知', '项目知识', '外部执行', '成员', '运行状态']) {
+    for (const caption of ['项目总览', '基本设置', '监听与触发', '机器配置', '模型', '发版本', '计划与通知', '项目知识', '外部执行', '成员', '运行状态']) {
       await openHub();
       await hub().getByRole('link', { name: caption, exact: true }).click();
       await expect(current).toHaveText(caption);
@@ -99,7 +99,7 @@ test('项目导航只列真实页面，管理助手的深链不丢页，移动�
     const more = page.locator('#console-page');
     await expect(more.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
     for (const group of ['当前项目', '个人与平台', '管理']) await expect(more.getByRole('heading', { name: group, exact: true })).toBeVisible();
-    for (const entry of ['项目总览', '基本设置', '机器配置', '模型', '发版本', '计划与通知', '项目知识', '外部执行', '成员', '运行状态', '用量与成本', '身份与权限'])
+    for (const entry of ['项目总览', '基本设置', '监听与触发', '机器配置', '模型', '发版本', '计划与通知', '项目知识', '外部执行', '成员', '运行状态', '用量与成本', '身份与权限'])
       await expect(more.getByRole('link', { name: new RegExp('^' + entry) }).first()).toBeVisible();
     expect(await more.locator('a').evaluateAll(ns => ns.every(n => n.getAttribute('href')?.startsWith('#')))).toBe(true);
     mkdirSync('.tmp/nav-shell', { recursive: true });
