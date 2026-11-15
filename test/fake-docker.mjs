@@ -18,7 +18,13 @@ export class FakeDocker {
     if (path === '/info') return this.info || {};
     if (path.startsWith('/system/df')) return this.df || { LayersSize: 0, Images: [], BuildCache: [] };
     if (path.startsWith('/images/')) return this.images.get(decodeURIComponent(path.split('/')[2])) || null;
-    const [kind, named] = path.slice(1).split('/'), name = named ? decodeURIComponent(named.split('?')[0]) : undefined;
+    const [kind, named] = path.slice(1).split('?')[0].split('/'), name = named ? decodeURIComponent(named.split('?')[0]) : undefined;
+    if (kind === 'volumes' && !named) {
+      // Docker's volume listing with label filters, as the manager reads it to find notes volumes.
+      const filters = JSON.parse(new URL('http://docker' + path).searchParams.get('filters') || '{}').label || [];
+      return { Volumes: [...this.volumes].filter(([, row]) => filters.every(label => { const [k, v] = label.split('='); return row.Labels?.[k] === v; }))
+        .map(([name, row]) => ({ Name: name, Labels: row.Labels, CreatedAt: 'fixture' })) };
+    }
     if (kind === 'volumes') {
       if (method === 'POST') { this.volumes.set(body.Name, { Labels: body.Labels, Options: body.DriverOpts }); return {}; }
       if (method === 'DELETE') { if (this.failVolume) throw new ManagerError('injected_volume_failure'); this.volumes.delete(name); return {}; }

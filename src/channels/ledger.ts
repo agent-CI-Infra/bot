@@ -236,6 +236,8 @@ export class ChannelLedger {
         }
       }
     });
+    // A failure here is recorded by the store's cleanup hook (channel.history_cleanup_failed) instead of escaping after
+    // the rows committed, the same way a project deletion records files it could not remove (#771).
     for (const conversation of removedConversations) this.store.trajectories.remove({conversation_id:conversation});
   }
   private view(row:Row):Json {

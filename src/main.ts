@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { Store } from './storage/database.js';
 import { createControlPlane } from './server.js';
 import { ManagerClient, ProjectService } from './projects/service.js';
+import { NotesReclaimer } from './projects/reclaim.js';
 import { TaskEngine } from './agent/engine.js';
 import { loadRepositoryConfigs, repositoryConfigMap } from './automation/repository-config.js';
 import { InstallationSync } from './app/installations.js';
@@ -68,6 +69,13 @@ engine.obsolete.start();
 const external=new ExternalService(store,{githubUrl:process.env.BOT_GITHUB_API_URL,privateHosts:(process.env.BOT_FORWARD_PRIVATE_HOSTS||'').split(',').map(v=>v.trim().toLowerCase()).filter(Boolean)});external.forwarder.start();
 void projects.reconcile();
 const timer = setInterval(() => { void projects.reconcile().catch(error => console.error('[projects] reconciliation failed:', error)); }, 5000);
+// A deletion that could not delete its notes volume is retried with backoff; what stays behind fails `/readyz` (#771).
+const reclaimer = new NotesReclaimer(store, projects, {
+  maxAttempts: Number(process.env.BOT_NOTES_RECLAIM_ATTEMPTS || 6),
+  baseDelayMs: Number(process.env.BOT_NOTES_RECLAIM_DELAY_MS || 60_000),
+});
+const reclaimTimer = setInterval(() => void reclaimer.sweep().catch(error => console.error('[reclaim] sweep failed:', error)), 5 * 60_000);
+void reclaimer.sweep().catch(error => console.error('[reclaim] first sweep failed:', error));
 // Finished tasks' workspaces leave the project computers: first five minutes after start, then every hour.
 const workspaces = new WorkspaceCleanup(store, manager, { skip: id => projects.isRemoving(id) }); workspaces.start();
 // Installed repositories are listed on start and every ten minutes; webhook events update them in between.
@@ -89,6 +97,10 @@ const migration = new PayloadMigration(store), storage = new StorageReport(store
 const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, gateOnboarding, releases, boards,
   imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls, storage,
+  // The thresholds are configuration, not magic numbers: who operates the deployment sets what it tolerates (#771).
+  notesOrphanThreshold: Number(process.env.BOT_NOTES_ORPHAN_THRESHOLD || 10),
+  notesOrphanMaxAgeMs: Number(process.env.BOT_NOTES_ORPHAN_MAX_AGE_MS || 7 * 24 * 3600_000),
+  notesOrphanWarnAgeMs: Number(process.env.BOT_NOTES_ORPHAN_WARN_AGE_MS || 24 * 3600_000),
   // The assistant computers' HOME volume (compose.yaml); a control plane without it offers no assistant computer.
   assistantHomes: existsSync(process.env.BOT_ASSISTANT_HOMES || '/assistant-homes') ? process.env.BOT_ASSISTANT_HOMES || '/assistant-homes' : undefined },
   // BOT_TRUSTED_PROXIES: comma-separated proxy addresses/CIDRs allowed to name the password-login client.
@@ -106,7 +118,7 @@ server.listen(8791, '0.0.0.0', () => {
 let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;
-  clearInterval(timer); clearInterval(syncTimer); workspaces.close(); engine.obsolete.close();
+  clearInterval(timer); clearInterval(syncTimer); clearInterval(reclaimTimer); workspaces.close(); engine.obsolete.close();
   server.close(async () => { await Promise.all([githubRefresh.close(),modelCatalog(store).close(),installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close(),migration.stop(),vacuum.stop(),retention.stop()]); store.close(); process.exit(0); });
   setTimeout(() => process.exit(1), 100_000).unref();
 });

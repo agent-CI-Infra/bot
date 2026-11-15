@@ -16,6 +16,9 @@ export async function managerFixture(t) {
   const manager = { async call(method, path, input) {
     try {
     const url = new URL('http://manager'+path);
+    if (url.pathname === '/v1/notes-volumes') return projects.notesVolumes();
+    const reclaim = /^\/v1\/projects\/(\d+)\/notes\/reclaim$/.exec(url.pathname);
+    if (reclaim) return await projects.reclaimNotes(reclaim[1]);
     if (url.pathname === '/v1/projects') return projects.list();
     if (url.pathname === '/v1/defaults') return projects.defaultsView();
     const match = /^\/v1\/projects\/(\d+)(?:\/([\w-]+)(?:\/([^/]+))?(?:\/(versions|restore|move))?)?$/.exec(url.pathname);

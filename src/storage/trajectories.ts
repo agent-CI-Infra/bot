@@ -105,6 +105,8 @@ export class Trajectories {
   private readonly handles = new Map<string, Handle>();
   private readonly paths = new Map<string, string>();
   private timer?: ReturnType<typeof setInterval>;
+  /** Set by the store: a post-commit cleanup failure is audited instead of escaping or disappearing. */
+  onCleanupFailure?: (where: { repository_id?: string; conversation_id?: string }, error: unknown) => void;
 
   /** root: the directory that holds the files; null keeps them in a temporary directory (an in-memory database). */
   constructor(private readonly db: DatabaseSync, root: string | null, readonly idleMs = 30 * 60_000) {
@@ -296,14 +298,24 @@ export class Trajectories {
     this.db.prepare('UPDATE trajectory_files SET deleted_at=? WHERE id=?').run(new Date().toISOString(), file.id);
   }
 
-  /** Removes the files of a deleted project or conversation and their entries; their totals are taken back. */
+  private cleanupFailed(where: { repository_id?: string; conversation_id?: string }, error: unknown): void {
+    console.error('[trajectories] cleanup failed for ' + (where.repository_id ?? where.conversation_id) + ':', error);
+    this.onCleanupFailure?.(where, error);
+  }
+
+  /**
+   * Removes the files of a deleted project or conversation and their entries; their totals are taken back. This runs
+   * after the caller's rows committed, so it never throws: a file that cannot be removed is recorded through
+   * onCleanupFailure (the store audits it) and the rest of the cleanup still runs (#771).
+   */
   remove(where: { repository_id?: string; conversation_id?: string }): void {
     const [column, value] = where.repository_id !== undefined ? ['repository_id', where.repository_id] : ['conversation_id', where.conversation_id!];
-    this.results.remove(column as 'repository_id' | 'conversation_id', value);
+    try { this.results.remove(column as 'repository_id' | 'conversation_id', value); } catch (error) { this.cleanupFailed(where, error); }
     for (const handle of [...this.open.values()]) if ((handle.scope as any)[column] === value) this.finish(handle);
     const rows = this.db.prepare(`SELECT id,repository_id,path,bytes,counts,expired_at FROM trajectory_files WHERE ${column}=?`).all(value) as Record<string, any>[];
     for (const row of rows) {
-      rmSync(join(this.root, String(row.path)), { force: true });
+      try { rmSync(join(this.root, String(row.path)), { force: true }); }
+      catch (error) { this.cleanupFailed(where, error); }
       this.handles.delete(String(row.id)); this.paths.delete(String(row.id));
     }
     atomic(this.db, () => {
