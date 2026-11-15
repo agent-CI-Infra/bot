@@ -217,11 +217,18 @@ test('without a request, an update review of the bot\'s PR never revises, and it
   const result = { requires_code_change: true, clarification_required: false, findings: [finding(null)] };
   engine.queueDevelopment({}, task, { object: {}, trigger: { reason: 'pull_request_edited' } }, result, true);
   assert.equal(revisions().length, 0);
+  // One that took a push meanwhile is the review of that head; the budget (5 used of 1) still applies.
+  engine.queueDevelopment({}, task, { object: {}, trigger: { reason: 'pull_request_edited' }, merged_updates: [{ reason: 'pushed' }] }, result, true);
+  assert.equal(revisions().length, 0);
   // A head review with only its own findings: the budget (5 used of 1) stops it.
   engine.queueDevelopment({}, task, { object: {} }, result, true); assert.equal(revisions().length, 0);
   h.store.run('UPDATE bot_pull_requests SET revisions=0');
   engine.queueDevelopment({}, task, { object: {} }, result, true); assert.equal(revisions().length, 1);
   assert.equal(JSON.parse(revisions()[0].input).revision.source, 'review');
+  // A comment review that moved to a pushed head meanwhile revises like the review of that head it stands for.
+  h.store.run("UPDATE tasks SET status='completed' WHERE kind='development.pr'");
+  engine.queueDevelopment({}, { ...task, head_sha: 'd'.repeat(40) }, { object: {}, comment: { id: 5 }, heads: ['c'.repeat(40), 'd'.repeat(40)] }, result, true);
+  assert.equal(revisions().length, 2);
 });
 
 test('a revision someone asked for does not use the revision budget; one from the bot\'s own review does', async t => {
@@ -273,11 +280,15 @@ test('an Issue review continues the bot PR for that Issue only within the revisi
   engine.queueDevelopment({}, task, { object, trigger: { reason: 'comment' } }, requested, goAhead); assert.equal(development(), 1);
 });
 
-test('a stale PR update review is superseded without queueing a head-triggered review', async t => {
-  const current = { number: 1, state: 'open', draft: false, head: { sha: 'd'.repeat(40) } };
-  const h = await emptyRepositoryFixture(t, { github: (path, send) => { if (path.endsWith('/pulls/1')) { send(current); return true; } } });
-  h.store.run("UPDATE tasks SET kind='review.pr',head_sha=?,unique_key='101:review.pr:1:update:x',input=? WHERE id=?", 'c'.repeat(40), JSON.stringify({ trigger: { reason: 'pull_request_edited' } }), h.taskId);
-  const task = await h.run(); assert.equal(task.status, 'superseded'); assert.equal(task.error_code, 'pull_request_head_changed');
+test('a queued PR update review prepares the current head instead of being superseded', async t => {
+  // The fixture serves the files of commit a…a, the PR's head by now.
+  const current = { number: 1, state: 'open', draft: false, title: 'Change', body: '', head: { sha: 'a'.repeat(40) }, base: { ref: 'main' } };
+  const h = await emptyRepositoryFixture(t, { github: (path, send) => {
+    if (path.endsWith('/pulls/1')) { send(current); return true; }
+    if (/\/pulls\/1\/(files|reviews|comments)$/.test(path)) { send([]); return true; }
+  } });
+  h.setBranch('ready'); h.store.run("UPDATE tasks SET kind='review.pr',head_sha=?,unique_key='101:review.pr:1:update:x',input=? WHERE id=?", 'c'.repeat(40), JSON.stringify({ trigger: { reason: 'pull_request_edited' } }), h.taskId);
+  const task = await h.run(); assert.equal(task.status, 'succeeded'); assert.equal(task.head_sha, current.head.sha);
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 1);
 });
 

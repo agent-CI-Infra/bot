@@ -389,18 +389,20 @@ test('a failed model attempt retries with an empty history and the latest comple
   assert.match(text(messages[1]),/latest before retry/);assert.doesNotMatch(text(messages[1]),/Done 1/);
 });
 
-test('a new PR head supersedes the running review and resumes the last successful history in a new checkout',async t=>{
+test('a new PR head joins the running review, which restarts on it in a fresh checkout with the last successful history when it cannot move in place',async t=>{
   const head='b'.repeat(40);
   const d=await live(t,{pr:true,model:async(request,n,{pushHead})=>{
-    if(n===2){assert.equal(pushHead(head),1);return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:[call('read_file',{path:'../context/object.json'})]}}]}};}
+    if(n===2){assert.equal(pushHead(head),0);return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:[call('read_file',{path:'../context/object.json'})]}}]}};}
   }});
   const [first]=await d.run();assert.equal(first.status,'succeeded');d.update('old head follow-up');
-  const tasks=await d.run(),superseded=tasks[1];assert.equal(superseded.status,'superseded');assert.equal(superseded.error_code,'pull_request_head_changed');
-  assert.equal(tasks[2].status,'queued');assert.equal(d.h.store.get('SELECT task_id FROM review_sessions').task_id,first.id);
-  const current=(await d.run()).at(-1);assert.equal(current.status,'succeeded');assert.equal(current.head_sha,head);assert.notEqual(current.workspace_id,first.workspace_id);
+  // This harness copies files instead of using a Git cache, so the checkout cannot move in place: the same task starts over.
+  const tasks=await d.run(),review=tasks[1];assert.equal(tasks.length,2);
+  assert.deepEqual([review.status,review.error_code,review.attempt],['queued','pull_request_head_changed',2]);
+  assert.equal(d.h.store.get('SELECT task_id FROM review_sessions').task_id,first.id);
+  d.h.store.run('UPDATE tasks SET next_run_at=0 WHERE id=?',review.id);
+  const current=(await d.run()).at(-1);assert.equal(current.id,review.id);assert.equal(current.status,'succeeded');assert.equal(current.head_sha,head);assert.notEqual(current.workspace_id,first.workspace_id);
   assert.match(text(d.requests.at(-1).messages.at(-1)),new RegExp('Current checkout/head: '+head));
   assert.match(JSON.stringify(d.requests.at(-1).messages),/Done 1/);
-  assert.equal(d.h.store.get('SELECT count(*) n FROM review_updates WHERE task_id=?',superseded.id).n,0);
 });
 
 test('real Pi compacts restored history, uses current rules, and charges compaction to the new review',async t=>{

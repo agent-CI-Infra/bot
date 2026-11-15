@@ -122,10 +122,12 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
     const botDone=(r:RevisionRequest)=>!!context.store.get("SELECT 1 FROM bot_pr_requests WHERE repository_id=? AND number=? AND author_id=? AND author_type='Bot' AND state='done'",task.repository_id,number,r.author_id);
     const accepted=requests.filter(r=>!done(r)&&(r.author_type!=='Bot'||!botDone(r)));
     // The bot's own findings revise the pull request after a review of a new head, within the revision budget; a review that
-    // revises for a request anyway takes them along. A mention or a discussion alone never starts a revision of them.
+    // revises for a request anyway takes them along. A mention or a discussion alone never starts a revision of them, but a
+    // review that took a push meanwhile (#770) is a review of that head too: no other review of the push follows.
     const taken=new Set(requests.flatMap(r=>r.findings));
     const own=result.findings.filter((f:any)=>actionableFinding(f)&&!f.requested_in&&!taken.has(f));
-    const ownAllowed=accepted.length>0||!input.comment&&!input.trigger&&!!result.requires_code_change&&owned.revisions<policy.max_revisions;
+    const pushed=input.heads?.length>1||(input.merged_updates||[]).some((update:any)=>update?.reason==='pushed');
+    const ownAllowed=accepted.length>0||(pushed||!input.comment&&!input.trigger)&&!!result.requires_code_change&&owned.revisions<policy.max_revisions;
     const findings=[...new Set(accepted.flatMap(r=>r.findings)),...(ownAllowed?own:[])];
     if(!findings.length)return;
     const plain=accepted.map(({findings,...request})=>request);

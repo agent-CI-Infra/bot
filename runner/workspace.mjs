@@ -102,6 +102,34 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     if(tree!==input.tree_sha)throw new Error(`checkout_tree_mismatch: expected ${input.tree_sha}, actual ${tree}`);
     return {tree_sha:tree,local_sha:head};
   }
+  // The task's worktree moves to another commit in place (#770): a pull request got new commits while its task ran. The
+  // directory stays, and so do untracked and ignored files (installed dependencies, build output). What the agent changed
+  // in tracked files, and untracked files the new commit would overwrite, is first saved as a patch next to the checkout,
+  // so nothing is discarded silently.
+  if(input.type==='workspace_advance'){
+    if(!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_commit');
+    if(!await stat(repo+'/.git').then(s=>s.isFile(),()=>false))throw new Error('workspace_not_worktree');
+    const run=(args,data)=>storeGit(args,{cwd:repo,...(data?{input:data}:{})}),names=buffer=>buffer.toString('utf8').split('\0').filter(Boolean);
+    const previous=(await run(['rev-parse','HEAD'])).toString().trim();
+    let saved=null,unlocked={};
+    if(previous!==input.sha){
+      unlocked=await unlock();
+      const incoming=new Set(names(await run(['ls-tree','-r','-z','--name-only',input.sha])));
+      const overwritten=names(await run(['ls-files','-z','--others','--exclude-standard'])).filter(name=>incoming.has(name));
+      // Intent-to-add puts those files into the diff below; the checkout resets the index afterwards anyway.
+      if(overwritten.length)await run(['add','--intent-to-add','--pathspec-from-file=-','--pathspec-file-nul'],Buffer.from(overwritten.join('\0')+'\0'));
+      const changed=names(await run(['diff','--name-only','-z','HEAD']));
+      if(changed.length){
+        const name=`saved-changes-${previous.slice(0,12)}.patch`;
+        await mkdir(context,{recursive:true});await writeFile(context+'/'+name,await run(['diff','--binary','HEAD']),{mode:0o600});
+        saved={path:'../context/'+name,count:changed.length,files:changed.slice(0,200)};
+      }
+      await run(['checkout','--detach','--force',input.sha]);
+    }
+    const tree=(await run(['rev-parse','HEAD^{tree}'])).toString().trim(),head=(await run(['rev-parse','HEAD'])).toString().trim();
+    if(head!==input.sha||tree!==input.tree_sha)throw new Error(`checkout_tree_mismatch: expected ${input.tree_sha}, actual ${tree}`);
+    return {tree_sha:tree,local_sha:head,previous_sha:previous,saved,...unlocked};
+  }
   const actual=await realpath(repo);if(actual!==repo)throw new Error(`workspace_replaced: expected ${repo}, actual ${actual}`);
   if(input.type==='workspace_context'){
     // The control plane sends context in 45,000-byte chunks, 60,000 base64 characters.

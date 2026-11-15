@@ -95,8 +95,10 @@ const conditions=[
   ['closed','development.issue','cancelled','object_closed_or_draft'],
   ['draft','review.pr','cancelled','object_closed_or_draft'],
   ['draft','development.pr','cancelled','object_closed_or_draft'],
-  ['head','review.pr','superseded','pull_request_head_changed'],
-  ['head','development.pr','superseded','pull_request_head_changed'],
+  // A new head no longer supersedes (#770): the review prepares it afresh (this fixture has no Git cache to move the worktree
+  // in place) and the development stops to prepare it with its work saved.
+  ['head','review.pr','queued','pull_request_head_changed'],
+  ['head','development.pr','retry_wait','pull_request_head_changed'],
   ['policy','review.issue','cancelled','repository_policy_disabled'],
   ['policy','development.issue','cancelled','repository_policy_disabled'],
   ['goal','development.issue','retry_wait','issue_needs_replan'],
@@ -135,12 +137,20 @@ for(const phase of ['model','publish'])for(const [condition,kind,status,code] of
     assert.deepEqual([task.status,task.error_code],[status,code]);
     assert.equal(task.retry_cycle_started_at,null);assert.equal(writes,0);
     assert.equal(h.operations.includes('workspace_agent_start'),false);assert.equal(h.store.get('SELECT count(*) n FROM model_requests').n,0);
+    // The task starts its next attempt on the new head, told why; a development's work is saved first.
+    if(condition==='head'){
+      assert.equal(task.phase,'prepare');
+      if(kind==='development.pr'){assert.equal(JSON.parse(task.input).manager_feedback.code,code);assert.deepEqual([task.retry_count,task.retry_error_code],[0,null]);
+        if(phase==='model')assert.ok(h.store.get("SELECT 1 FROM task_history WHERE task_id=? AND type IN ('artifact_checkpoint','checkpoint_fault')",h.taskId));}
+    }
     // Cancelled, superseded and replan/permission tasks never become eligible just because another slot passed.
     const attempt=task.attempt;h.due();await h.run();assert.equal(h.store.get('SELECT attempt FROM tasks WHERE id=?',h.taskId).attempt,attempt);
+    // A review prepares the new head at once; a development first has the Manager decide how it continues (manager_feedback).
+    if(condition==='head'&&kind==='review.pr')assert.equal(h.store.get('SELECT head_sha FROM tasks WHERE id=?',h.taskId).head_sha,object.head.sha);
   });
 }
 
-for(const [change,status,code] of [['closed','cancelled','object_closed_or_draft'],['draft','cancelled','object_closed_or_draft'],['head','superseded','pull_request_head_changed']]){
+for(const [change,status,code] of [['closed','cancelled','object_closed_or_draft'],['draft','cancelled','object_closed_or_draft'],['head','queued','pull_request_head_changed']]){
   test(`ReviewUpdated rechecks ${change} before continuing the model in the same run`,async t=>{
     let h,inserted=false,resumeChecks=0;const object=structuredClone(pull);
     h=await emptyRepositoryFixture(t,{github(path,send){

@@ -165,7 +165,7 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
   const p = payload as any, action = String(p.action || ''), actor = String(p.sender?.login || '');
   const base = (type: string, key: string, object: 'issue' | 'pr', number: number, summary: string, facts: Json): Omit<EventInput, 'options'> =>
     ({ repositoryId, key: `${repositoryId}:${key}`, type, source: 'github', summary, facts: { event, action, actor, ...facts }, object: { type: object, number }, delivery });
-  // An update or mention: a review that answers it, joining a running review of the same object (and head) instead.
+  // An update or mention: a review that answers it, joining a running review of the same object instead.
   const update = (type: string, object: 'issue' | 'pr', number: number, target: any, trigger: Json, merge: string, review: { commentId?: string; updateId?: string }, extra: Json = {}): EventInput => {
     const kind = object === 'pr' ? 'review.pr' : 'review.issue', head = object === 'pr' ? sha(target?.head?.sha) : null;
     const input = { ...payload, trigger, ...(object === 'pr' ? { pull_request: target } : {}) };
@@ -211,9 +211,14 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
     if (opened && rolePublicationEcho(store, repositoryId, pr.body)) return null;
     if (opened || pushed) {
       const type = opened ? 'pull_request.opened' : 'pull_request.synchronize';
-      return { ...base(type, `${type}:${number}:${head}`, 'pr', number, `${opened ? 'PR 打开' : 'PR 推送新提交'}：${clip(pr.title, 120)} #${number}`, { object: objectFacts(pr) }),
-        options: [{ id: 'review', work: 'review.pr', title: `检视 PR #${number}（${head.slice(0, 7)}）`, default: true, spec: { type: 'object', kind: 'review.pr', number, head, input: payload, delivery } },
-          replyOption('pr', number, head, { ...payload, pull_request: pr }, head, delivery)] };
+      // A push joins the review already working on the pull request, which moves to the new head (#770). A new review of
+      // the head is offered only when no review can take it, so two reviews never cover the same push.
+      const trigger = { event, action, reason: 'pushed', actor, before: sha(p.before), after: head };
+      return { ...base(type, `${type}:${number}:${head}`, 'pr', number, `${opened ? 'PR 打开' : 'PR 推送新提交'}：${clip(pr.title, 120)} #${number}`, { object: objectFacts(pr), ...(pushed ? { push: trigger } : {}) }),
+        options: [{ id: 'review', work: 'review.pr', title: `检视 PR #${number}（${head.slice(0, 7)}）`, default: true, ...(pushed ? { unless_continued: true } : {}),
+          spec: { type: 'object', kind: 'review.pr', number, head, input: payload, delivery } },
+          replyOption('pr', number, head, { ...payload, pull_request: pr }, head, delivery)],
+        ...(pushed ? { merge: { key: `${repositoryId}:review.pr:${number}:head:${head}`, data: trigger, trigger, head, kinds: ['review.pr'] } } : {}) };
     }
     if (action === 'labeled' && openObject(pr) && p.sender?.type === 'User' && typeof p.label?.name === 'string' && labelDispatched(filters, 'pull_request', String(p.label.name)))
       return update('pull_request.labeled', 'pr', number, pr, { event, action, reason: 'labeled', actor, label: p.label.name }, 'delivery:' + delivery, { updateId: delivery }, { label: p.label.name });
@@ -282,16 +287,4 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
   if (event === 'issues' && !policy.actions_failures_enabled && store.get('SELECT 1 FROM actions_failure_issues WHERE repository_id=? AND number=?', repositoryId, number)) return 0;
   const input = webhookEvent(store, repositoryId, event, payload, delivery, currentPullRequest, eventFilters(store, repositoryId, policy));
   return input ? recordEvent(store, input) : 0;
-}
-/**
- * A pull request review found the head moved before it ran (and no comment or update asked for it): the new head is a
- * push the Manager hears about, under the same key as the webhook of that push, so the two are one event.
- */
-export function reviewNewHead(store: Store, repositoryId: string, pr: any) {
-  const head = sha(pr?.head?.sha), number = Number(pr?.number);
-  if (!head || !openObject(pr)) return 0;
-  return recordEvent(store, { repositoryId, key: `${repositoryId}:pull_request.synchronize:${number}:${head}`, type: 'pull_request.synchronize', source: 'review',
-    summary: `PR 推送新提交：${clip(pr.title, 120)} #${number}`, facts: { object: objectFacts(pr), note: 'A queued review found this new head before it ran.' }, object: { type: 'pr', number },
-    options: [{ id: 'review', work: 'review.pr', title: `检视 PR #${number}（${head.slice(0, 7)}）`, default: true,
-      spec: { type: 'object', kind: 'review.pr', number, head, input: { pull_request: pr, number }, delivery: null } }] });
 }
