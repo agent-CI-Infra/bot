@@ -1015,6 +1015,7 @@ export class AgentToolManager {
     compatible: boolean;
     pruned: string[];
     status: CliAvailabilityStatus;
+    protected_invalid: string[];
   }> {
     return this.serialized(async () => {
       if (!AGENT_TOOL_CLIS.includes(input.cli)) {
@@ -1050,11 +1051,14 @@ export class AgentToolManager {
           ? await this.installClaudeCode(rootReal, parsed.raw, arch, input.sha256?.toLowerCase())
           : await this.installCodex(rootReal, parsed.raw, arch, input.sha256?.toLowerCase());
         const protectedSet = new Set<string>([installed.version, ...active]);
-        const pruned = input.retainCount !== undefined ? this.pruneLocked(rootReal, arch, input.cli, input.retainCount, protectedSet) : [];
+        const sweep = input.retainCount !== undefined
+          ? this.pruneLocked(rootReal, arch, input.cli, input.retainCount, protectedSet)
+          : { removed: [], protectedInvalid: [] };
         return {
           installed,
           compatible: satisfiesCliRange(input.cli, parsed.raw),
-          pruned,
+          pruned: sweep.removed,
+          protected_invalid: sweep.protectedInvalid,
           status: inspectCliAvailability(this.volumeRoot, input.cli, { containerRoot: this.containerRoot, arch }),
         };
       } finally {
@@ -1063,7 +1067,7 @@ export class AgentToolManager {
     });
   }
 
-  prune(options: { cli?: AgentToolCli; retainCount?: number; protectedVersions?: Partial<Record<AgentToolCli, Iterable<string>>> | Iterable<string> | ((cli: AgentToolCli) => Iterable<string>) } = {}): Promise<{ pruned: Record<AgentToolCli, string[]>; status: AgentToolsVolumeStatus }> {
+  prune(options: { cli?: AgentToolCli; retainCount?: number; protectedVersions?: Partial<Record<AgentToolCli, Iterable<string>>> | Iterable<string> | ((cli: AgentToolCli) => Iterable<string>) } = {}): Promise<{ pruned: Record<AgentToolCli, string[]>; protected_invalid: Record<AgentToolCli, string[]>; status: AgentToolsVolumeStatus }> {
     return this.serialized(async () => {
       const retainCount = options.retainCount ?? DEFAULT_CLI_RETAIN_COUNT;
       if (!Number.isSafeInteger(retainCount) || retainCount < CLI_RETAIN_BOUNDS[0] || retainCount > CLI_RETAIN_BOUNDS[1]) {
@@ -1071,11 +1075,12 @@ export class AgentToolManager {
       }
       const arch = this.requireArch();
       if (!existsSync(this.volumeRoot)) {
-        return { pruned: { claude_code: [], codex: [] }, status: this.status() };
+        return { pruned: { claude_code: [], codex: [] }, protected_invalid: { claude_code: [], codex: [] }, status: this.status() };
       }
       const rootReal = this.requireVolumeRoot();
       const targets = options.cli ? [options.cli] : [...AGENT_TOOL_CLIS];
       const pruned: Record<AgentToolCli, string[]> = { claude_code: [], codex: [] };
+      const protectedInvalid: Record<AgentToolCli, string[]> = { claude_code: [], codex: [] };
       const isFn = typeof options.protectedVersions === 'function';
       const isIterable = !isFn && options.protectedVersions && typeof (options.protectedVersions as any)[Symbol.iterator] === 'function';
       for (const cli of targets) {
@@ -1085,18 +1090,20 @@ export class AgentToolManager {
           : isIterable
             ? (options.protectedVersions as Iterable<string>)
             : (options.protectedVersions as Partial<Record<AgentToolCli, Iterable<string>>> | undefined)?.[cli];
-        pruned[cli] = this.pruneLocked(rootReal, arch, cli, retainCount, extra);
+        const sweep = this.pruneLocked(rootReal, arch, cli, retainCount, extra);
+        pruned[cli] = sweep.removed;
+        protectedInvalid[cli] = sweep.protectedInvalid;
       }
-      return { pruned, status: this.status() };
+      return { pruned, protected_invalid: protectedInvalid, status: this.status() };
     });
   }
 
-  private pruneLocked(rootReal: string, arch: AgentToolArch, cli: AgentToolCli, retainCount: number, extraProtected?: Iterable<string>): string[] {
+  private pruneLocked(rootReal: string, arch: AgentToolArch, cli: AgentToolCli, retainCount: number, extraProtected?: Iterable<string>): { removed: string[]; protectedInvalid: string[] } {
     if (!Number.isSafeInteger(retainCount) || retainCount < CLI_RETAIN_BOUNDS[0] || retainCount > CLI_RETAIN_BOUNDS[1]) {
       throw new TaskError('agent_tool_invalid', 'waiting_configuration', 'invalid_retain_count');
     }
     const cliDir = resolve(rootReal, cli);
-    if (!existsSync(cliDir)) return [];
+    if (!existsSync(cliDir)) return { removed: [], protectedInvalid: [] };
 
     const validVersions: string[] = [];
     const brokenDirs: string[] = [];
@@ -1124,13 +1131,23 @@ export class AgentToolManager {
     }
 
     const removed: string[] = [];
+    const protectedInvalid: string[] = [];
     const stagingTrash = resolve(rootReal, '.staging');
     mkdirSync(stagingTrash, { recursive: true, mode: 0o700 });
 
-    // Broken directories are pruned unconditionally here; protecting the ones an active run still executes is tracked in #751.
+    // A directory whose manifest cannot be read is normally a leftover of an interrupted install and is cleared here.
+    // The exception is a directory one of the protected names still points at — an active run executes it, or it was
+    // just installed — because deleting it would break that run even though nothing can describe the directory any more.
+    // Those are kept and reported instead (#751), so the caller can show them rather than silently losing a version.
+    const protectedNames = new Set<string>();
+    for (const name of [...(this.protectedVersions?.(cli) ?? []), ...(extraProtected ?? [])]) {
+      if (typeof name === 'string' && name.trim()) protectedNames.add(name.trim());
+    }
     for (const bad of brokenDirs) {
       const badPath = resolve(cliDir, bad);
-      if (isSubpath(rootReal, badPath) && badPath !== cliDir) rmSync(badPath, { recursive: true, force: true });
+      if (!isSubpath(rootReal, badPath) || badPath === cliDir) continue;
+      if (protectedNames.has(bad)) { protectedInvalid.push(bad); continue; }
+      rmSync(badPath, { recursive: true, force: true });
     }
     for (const ver of validVersions) {
       if (keepSet.has(ver)) continue;
@@ -1142,7 +1159,7 @@ export class AgentToolManager {
     }
 
     this.pruneUnreferencedNodeRuntimes(rootReal, arch);
-    return removed;
+    return { removed, protectedInvalid };
   }
 
   private pruneUnreferencedNodeRuntimes(rootReal: string, arch: AgentToolArch): void {

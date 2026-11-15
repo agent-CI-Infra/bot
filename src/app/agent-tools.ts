@@ -89,6 +89,7 @@ export async function agentToolsApi(
         installed: outcome.installed as unknown as Json,
         compatible: outcome.compatible,
         pruned: outcome.pruned,
+        protected_invalid: outcome.protected_invalid as unknown as Json,
         status: view(),
       };
     } catch (err) {
@@ -109,6 +110,7 @@ export async function agentToolsApi(
       store.audit(user.id, 'agent_tools.pruned', cli ?? 'all');
       return {
         pruned: outcome.pruned as unknown as Json,
+        protected_invalid: outcome.protected_invalid as unknown as Json,
         status: view(),
       };
     } catch (err) {
