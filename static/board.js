@@ -172,7 +172,6 @@ function boardShell() {
   // the toolbar the reader sees matches the width they are at instead of the width the page was built on.
   const syncFilterOpen=()=>{filters.open=boardMedia.matches?boardState.filterOpen===true:true;};
   syncFilterOpen();filters.addEventListener('toggle',()=>{if(filters.isConnected)boardState.filterOpen=filters.open;});
-  boardMedia.addEventListener('change',()=>{if(filters.isConnected)syncFilterOpen();});
   const summary=element('summary','筛选');summary.addEventListener('click',()=>{boardState.filterOpen=!filters.open;});filters.append(summary);
   const controls=element('div','','board-filter-controls');controls.setAttribute('role','group');controls.setAttribute('aria-label','筛选');
   const apply=async(field,value,rebuild=false)=>{boardSetFilter(field,value);if(rebuild)boardShell();else boardChips();await boardLoadCards().catch(error);};
