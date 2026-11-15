@@ -63,7 +63,7 @@ function taskNextStep(task, record, roles, purposes = {}) {
     const accepted = record?.acceptance && ['pass', 'pass_with_issues'].includes(record.acceptance.outcome) && record.candidate?.id === record.acceptance.candidate_id && record.revision === record.acceptance.revision;
     return `${caption}：${accepted ? '独立 QA 对当前候选的验收已通过。' : '没有读取到当前候选的有效独立 QA 通过记录，请核对任务事实。'}${task.status === 'pr_opened' ? 'PR 已创建，合入与 GitHub CI 状态需分别核对。' : '任务执行已结束。'}`;
   }
-  if (task.status === 'cancelled') return '已取消，没有下一步。';
+  if (task.status === 'cancelled') return obsoleteTask(task) && cause ? '已取消：' + cause.action : '已取消，没有下一步。';
   if (task.status === 'superseded') return '已过时：同一对象有更新的任务接手，这个任务不再继续。';
   if (task.status === 'failed') return '已失败' + (cause ? `：${cause.label}。${cause.action}` : `（${task.error_code || '没有错误码'}）。`);
   if (task.status === 'queued') return '排队中：等这个仓库的项目电脑空闲后开始。';

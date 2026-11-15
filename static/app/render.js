@@ -143,7 +143,7 @@ async function render(quiet = false) {
     if(taskTab){
       const actions=element('div','','actions'),detail=element('button','查看过程','quiet');
       detail.addEventListener('click',()=>openTask(row.id).catch(error));actions.append(detail);
-      if(retryableStates.includes(row.status)){
+      if(taskRetryable(row)){
         const retry=element('button','重试','quiet');retry.addEventListener('click',async()=>{
           retry.disabled=true;const address=tab+':'+location.hash;
           try{await api('/api/tasks/'+row.id+'/retry','POST',{});if(address!==tab+':'+location.hash)return;notice('message');await render();}

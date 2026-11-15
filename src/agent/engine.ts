@@ -12,6 +12,7 @@ import { TaskCommands } from '../tasks/commands.js';
 import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
 import { recoverRoleCheckpoint } from '../roles/recovery.js';
 import {assessRetryReport} from '../roles/retries.js';
+import {ObsoleteSweep} from '../tasks/obsolete.js';
 import {recordRetryFailure,resolveExecutionRetries,retryNeedsInvestigation} from '../tasks/retries.js';
 import { controlled,roleConfig,roleExecutionModel } from '../roles/run.js';
 import { mergeApi } from '../roles/merge.js';
@@ -112,9 +113,11 @@ export class TaskEngine {
   private readonly granted=new Map<string,number>();
   private timer:ReturnType<typeof setInterval>|undefined;private closing=false;private readonly merging=new Map<string,Promise<unknown>>();
   readonly rules:RuleService;readonly coordinator:CoordinationWorker;
+  // #713: moves tasks nobody needs to act on out of 待处理; main.ts runs it in the background, run() for its own work.
+  readonly obsolete:ObsoleteSweep;
   // Decides the Manager events in the background; a decided event's new tasks start on the next tick.
   readonly dispatcher:Dispatcher;
-  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);this.coordinator=new CoordinationWorker(store,manager);this.dispatcher=new Dispatcher(store,(s,context)=>managerDecision(s,context,githubUrl),()=>queueMicrotask(()=>this.tick()));}
+  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);this.obsolete=new ObsoleteSweep(store);this.coordinator=new CoordinationWorker(store,manager);this.dispatcher=new Dispatcher(store,(s,context)=>managerDecision(s,context,githubUrl),()=>queueMicrotask(()=>this.tick()));}
   // The running tasks of one repository, for callers that must wait until they have stopped.
   working(repositoryId:string):Promise<void>[]{return [...this.running.get(repositoryId)||[]].map(id=>this.active.get(id)).filter((work):work is Promise<void>=>!!work);}
   start(){
@@ -275,6 +278,8 @@ export class TaskEngine {
       const config=entry&&controlled(this.store,task,entry)?roleExecutionModel(this.store,task,roleConfig(this.store,task).controller.role):executionModel(this.store,task,workOf(task as any));
       redactor.add(config.key);await this.share(task.repository_id);
       attemptRun=beginRun(this.store,task,'attempt',{phase:task.phase,kind:task.kind,model:{id:config.id,name:config.model,version:config.version},policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)});task.trace_run_id=attemptRun?.id;
+      // #713: older tasks of this same work that wait for a person are obsolete once a newer one runs.
+      if(task.object_number!=null)this.obsolete.run({repository_id:String(task.repository_id),kind:String(task.kind),object_number:Number(task.object_number)});
       const repo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
       await recoverWithManager(this.store,task,guard,redactor,async()=>{if(requestedTask(task))return {request:JSON.parse(task.input||'{}').request,contract:records.get(id).contract};const reader=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await reader.connect(false,undefined,{contents:'read',issues:'read',pull_requests:'read'});return reader.object(task.kind,task.object_number);},async(instance,resolved)=>{if(resolved.snapshot.harness.id!=='pi')return;const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment','Manager backend is waiting for the configured project computer.');return roleBackendWorkspace(new Workspace(this.store,this.manager,{...task,generation:environment.generation},redactor,guard,log))(instance,resolved);},async()=>{const reader=new GitHub(this.store,repo,redactor,guard,this.githubUrl);const scopes=taskReadScopes(this.store,task);if(!scopes.includes('contents'))stop('github_read_token_not_allowed','waiting_permission');await reader.connect(false,undefined,{contents:'read',...(scopes.includes('pull_requests')?{pull_requests:'read'}:{})},false);return reader;});
       // A task waiting for its computer retries every few seconds, so it checks the computer before it asks GitHub for

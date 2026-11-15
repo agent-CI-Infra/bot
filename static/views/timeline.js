@@ -110,6 +110,8 @@ function step(log) {
   } else if(value.type==='pr_head_wait'){
     title.textContent='等待 GitHub 更新 PR head';add(element('p','已推送 '+value.expected_sha),element('p','当前 PR '+value.observed_sha+'；自动重读，确认后继续。','muted'));
   } else if (value.type === 'completed') { title.textContent = '任务结束'; meta.prepend(state(value.status)); }
+  // #713: the sweep took a task nobody needs to act on out of 待处理; the detail names the reason and the state it left.
+  else if (value.type === 'obsolete') { title.textContent = '自动移出待处理'; meta.prepend(state(value.status)); add(element('p', value.detail || '', 'say'), element('p', '原因码 ' + value.code, 'muted')); }
   else if (value.type === 'fault') {
     const empty = value.code === 'repository_has_no_commit' && value.state === 'waiting_configuration';
     if (empty) item.classList.replace('step-fault', 'step-waiting');
