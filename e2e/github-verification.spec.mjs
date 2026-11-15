@@ -46,6 +46,66 @@ test('GitHub 登录不等权限核验：先进控制台并显示核验进度，�
   } finally { f.state.apiGate = undefined; release(); await f.close(); }
 });
 
+// #757: the check ends in the background, so it must not take away what the reader is typing. The identity sub-pages
+// hold forms of their own (the app wizard's credentials, the binding page's confirmation string) and nothing the check
+// proves changes them; the pages that do list the new grants are still drawn again.
+const setupStub = route => route.fulfill({ status: 200, contentType: 'application/json',
+  body: JSON.stringify({ platform: true, organizations: [], connectors: [], feishu_scopes: [] }) });
+// A child of the identity panel: it survives the check only if the panel is not drawn again.
+const markPanel = page => page.evaluate(() => {
+  const marker = document.createElement('span'); marker.id = 'repaint-probe'; marker.textContent = 'probe';
+  document.getElementById('identity-panel').append(marker); return marker.id;
+});
+
+test('核验结束时，身份子页上正在填写的凭据不被重绘清掉', async ({ page }) => {
+  const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.route('https://avatars.githubusercontent.com/**', route => route.abort());
+  await page.route('**/api/channels/setup', setupStub);
+  let release; const held = new Promise(resolve => { release = resolve; });
+  f.state.apiGate = async path => { if (path === '/app/installations/77') await held; };
+  try {
+    await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    await expect(page.locator('#github-verification')).toBeVisible();
+    // The reader is on the wizard's credentials step while the check runs, and has typed into it.
+    await page.goto(f.h.admin + '/#/identity/feishu-apps/new/1');
+    await expect(page.locator('input[name="app_id"]')).toBeVisible();
+    await page.locator('input[name="app_id"]').fill('cli_typed_by_person');
+    await page.locator('input[name="app_secret"]').fill('secret_typed_by_person');
+    await markPanel(page);
+    // The check ends: the line goes and the newly proved projects arrive, but the page being filled stays as it is.
+    release();
+    await expect(page.locator('#github-verification')).toBeHidden();
+    await expect(page.locator('#console-project option', { hasText: 'fixture/project-101' })).toHaveCount(1);
+    await expect(page.locator('input[name="app_id"]')).toHaveValue('cli_typed_by_person');
+    await expect(page.locator('input[name="app_secret"]')).toHaveValue('secret_typed_by_person');
+    await expect(page.locator('#repaint-probe')).toHaveCount(1);
+    await expect(page).toHaveURL(/#\/identity\/feishu-apps\/new\/1$/);
+    expect(errors).toEqual([]);
+  } finally { f.state.apiGate = undefined; release(); await f.close(); }
+});
+
+test('核验结束时，没有人填写的身份子页仍然重绘，授权页面照旧跟随', async ({ page }) => {
+  const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.route('https://avatars.githubusercontent.com/**', route => route.abort());
+  await page.route('**/api/channels/setup', setupStub);
+  let release; const held = new Promise(resolve => { release = resolve; });
+  f.state.apiGate = async path => { if (path === '/app/installations/77') await held; };
+  try {
+    await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    await expect(page.locator('#github-verification')).toBeVisible();
+    await page.goto(f.h.admin + '/#/identity/feishu-apps/new/1');
+    await expect(page.locator('input[name="app_id"]')).toBeVisible();
+    await markPanel(page);
+    release();
+    await expect(page.locator('#github-verification')).toBeHidden();
+    // Nothing was typed: the sub-page follows the check as before, and the project picker still gains the new project.
+    await expect(page.locator('#repaint-probe')).toHaveCount(0);
+    await expect(page.locator('#identity-panel')).toContainText('飞书应用连接向导');
+    await expect(page.locator('#console-project option', { hasText: 'fixture/project-101' })).toHaveCount(1);
+    expect(errors).toEqual([]);
+  } finally { f.state.apiGate = undefined; release(); await f.close(); }
+});
+
 test('核验进行中会话过期时，不再跟进核验进度，交给「登录已过期」提示', async ({ page }) => {
   const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.route('https://avatars.githubusercontent.com/**', route => route.abort());

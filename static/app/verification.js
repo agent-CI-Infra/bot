@@ -33,8 +33,21 @@ function watchGithubVerification() {
   };
   githubVerificationTimer = setTimeout(poll, GITHUB_VERIFICATION_POLL_MS);
 }
-// The check ended: read the projects the person may now manage. The project list and the identity page are drawn again;
-// any other page (a form being edited, say) is left alone, and only the project picker beside it follows.
+// #757: the identity sub-pages carry forms of their own — the Feishu app wizard's credentials, the binding page's
+// confirmation string — and none of it depends on the grants a check proves. Ending a check over one of them must not
+// redraw it, or the reader loses what they typed, silently.
+const identityFormAddress = /^#\/identity\/(?:feishu|feishu-apps)(?:[?/]|$)/;
+const typedEntry = field => !['checkbox', 'radio', 'hidden', 'submit', 'button', 'reset', 'file', 'image', 'range', 'color'].includes(String(field.type || '').toLowerCase());
+function identityFormBeingEdited() {
+  if (!identityFormAddress.test(location.hash)) return false;
+  const panel = $('identity-panel'); if (!panel) return false;
+  if ([...panel.querySelectorAll('dialog')].some(dialog => dialog.open)) return true;
+  const active = document.activeElement;
+  if (active && typeof panel.contains === 'function' && panel.contains(active)) return true;
+  return [...panel.querySelectorAll('input, textarea, select')].some(field => typedEntry(field) && String(field.value ?? '') !== '');
+}
+// The check ended: read the projects the person may now manage. The project list and the identity page's root view are
+// drawn again; a page whose form is being filled is left alone, and only the project picker beside it follows.
 async function finishGithubVerification(next) {
   me = next; showGithubVerification();
   const listed = (await api('/api/repositories')).repositories;
@@ -42,6 +55,7 @@ async function finishGithubVerification(next) {
   if (!me || me.id !== next.id) return;
   repositories = listed;
   options($('repository-filter'), repositories, r => r.full_name);
-  if (!projectRoute() && ['projects', 'identity'].includes(tab)) await route();
+  const editing = tab === 'identity' && identityFormBeingEdited();
+  if (!editing && !projectRoute() && ['projects', 'identity'].includes(tab)) await route();
   else if (typeof syncConsoleShell === 'function') syncConsoleShell(projectRoute());
 }
