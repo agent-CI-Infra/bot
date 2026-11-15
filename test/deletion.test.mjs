@@ -277,7 +277,7 @@ test('a bot account project is not deletable while it is still listed, even with
   const limited = await remove(admin, '101');
   assert.deepEqual([limited.status, limited.value.error], [502, 'github_rate_limited']); assert.ok(h.store.get("SELECT 1 FROM repositories WHERE id='101'"));
   github.rateLimited = false;
-  const retried = await remove(admin, '101'); console.error('RETRY', JSON.stringify(retried)); assert.equal(retried.status, 200);
+  const retried = await remove(admin, '101'); assert.equal(retried.status, 200);
 });
 
 test('the permission check refreshes installation permissions and events and excludes suspended installations', async t => {
