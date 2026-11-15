@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {setImmediate as turn} from 'node:timers/promises';
-import {harness,setup,account,repository} from './helpers.mjs';
+import {harness,setup,account,repository,pinLegacyTaskConfiguration} from './helpers.mjs';
 import {agentLoop} from '../dist/agent/loop.js';
 import {Redactor} from '../dist/agent/common.js';
 import {readModelResponse} from '../dist/agent/model-stream.js';
@@ -24,6 +24,7 @@ async function fixture(t,{stream=true,failDelivery=false,failures=0}={}){
   const model=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://model.invalid/v1',api_key:key,model_name:'fixture'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('stream','101','review.pr','running','fixture')");
+  pinLegacyTaskConfiguration(h.store, 'stream');
   const root=h.directory+'/runner',dir=root+'/agent';await mkdir(dir,{recursive:true});
   await writeFile(dir+'/request.json',JSON.stringify({id:requestId}));
   const requests=[],progress=[],replies=[];let replied=false,source,signal;

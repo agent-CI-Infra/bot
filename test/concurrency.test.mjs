@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { harness, setup, account, repository, testPassword } from './helpers.mjs';
+import { harness, setup, account, repository, testPassword, pinLegacyTaskConfiguration } from './helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { treeSha } from '../dist/agent/common.js';
 import { Onboarding } from '../dist/onboarding/service.js';
@@ -38,6 +38,7 @@ async function fixture(t, { holdReaps = 0, beforeQueue = null } = {}) {
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(resolve => server.close(resolve)));
   // Each task's first agent poll waits for finish(issue); reached(issue) resolves once that task's agent is working.
   const gates = new Map(), gate = number => { if (!gates.has(number)) { let reach, release; gates.set(number, { reached: new Promise(r => { reach = r; }), released: new Promise(r => { release = r; }), reach, release }); } return gates.get(number); };
+  t.after(() => { for (const g of gates.values()) g.release(); });
   const calls = [], heldReaps = [];
   let h;
   const manager = { call: async (method, path, body) => {
@@ -64,6 +65,7 @@ async function fixture(t, { holdReaps = 0, beforeQueue = null } = {}) {
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, model_id: model.id });
   await beforeQueue?.({h,admin,model});
   for (const number of [1, 2, 3]) await h.hook(a.path, a.secret, 'issue-' + number, { repository: { id: 101 }, action: 'opened', issue: { number, title: 'Issue ' + number, body: 'Please review.' } });
+  pinLegacyTaskConfiguration(h.store);
   const task = number => h.store.get('SELECT * FROM tasks WHERE object_number=?', number);
   const statuses = () => [1, 2, 3].map(number => task(number).status);
   const finish = async number => { const id = task(number).id; gate(number).release(); await engine.active.get(id); };
