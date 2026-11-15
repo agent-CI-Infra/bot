@@ -31,7 +31,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'bot_rule_too_large','too_many_bot_skills','invalid_bot_rule_file','invalid_rule_content','invalid_bot_label','invalid_bot_computer',
     'release_file_invalid','release_tag_invalid','release_sensitive_body','release_notes_too_large','release_empty_repository','release_ci_unsuccessful',
     'actions_scan_window_overflow','actions_report_sensitive','pr_contributing_contract_missing','pr_release_config_invalid','pr_release_category_required'] },
-  task_changed: { label:'任务条件已变化', codes:['manager_deferred','manager_needs_help','task_coordination_requested','task_coordination_pending','coordination_source_cancelled','coordination_claim_revoked','role_revision_checkpoint','harness_cancelled','harness_run_closed','team_no_progress','role_nomination_stale','acceptance_publication_changed','acceptance_context_changed','checkpoint_context_changed','acceptance_return','acceptance_insufficient_evidence','acceptance_needs_human','acceptance_no_progress','object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
+  task_changed: { label:'任务条件已变化', codes:['obsolete_superseded','obsolete_closed','obsolete_expired','manager_deferred','manager_needs_help','task_coordination_requested','task_coordination_pending','coordination_source_cancelled','coordination_claim_revoked','role_revision_checkpoint','harness_cancelled','harness_run_closed','team_no_progress','role_nomination_stale','acceptance_publication_changed','acceptance_context_changed','checkpoint_context_changed','acceptance_return','acceptance_insufficient_evidence','acceptance_needs_human','acceptance_no_progress','object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
     'task_claim_revoked','task_actor_permission_revoked','release_actor_permission_revoked','repository_policy_disabled','review_requires_human_decision','issue_needs_replan','development_not_approved',
     'base_branch_changed','bot_branch_history_changed','revision_scope_unconfirmed','pr_head_pending','bot_pr_identity_changed',
     'bot_pr_author_changed','bot_pr_head_repository_changed','bot_pr_branch_changed','bot_pr_ownership_unconfirmed',
@@ -114,6 +114,10 @@ export function isAttemptFailure(code: string|null|undefined, state: string) {
 const ended = new Set(['cancelled','superseded']);
 const retry = '改好后点「重试」。';
 const codeActions: Record<string,string> = {
+  // #713: tasks moved out of 待处理 because nobody needs to act on them; their original failure stays in the timeline.
+  obsolete_superseded:'同一 Issue 或 PR 上已有更新的同类任务接手，这个旧任务已自动移出待处理，无需处理。原来的失败保留在时间线里；仍需要时可以点「重试」。',
+  obsolete_closed:'Issue 或 PR（或这个任务来源的那个）已关闭或合入，任务已自动移出待处理，无需处理。原来的失败保留在时间线里；仍需要时可以点「重试」。',
+  obsolete_expired:'这是很久以前因平台或临时原因（限流、服务不可用、上下文或响应超限、运行异常等）留下的失败，之后没有新的动静，已自动移出待处理，无需处理。原来的失败保留在时间线里；仍需要时可以点「重试」。',
   task_children_pending:'正在等待子任务返回；任一结果到达后由父任务 Manager 自动继续协调，无需人工重试。',
   manager_execution_stopped:'Manager 已停止本次角色执行；已有产物和证据保留，接下来由 Manager 决定恢复或调整安排。',
   stage_policy_changed:'阶段策略已变化，任务已暂停。等到安全检查点后采用新配置，旧 run 和证据保留为历史。',

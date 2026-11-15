@@ -140,7 +140,7 @@ function renderTaskHeader(task) {
     if (typeof rememberInboxReturn === 'function') rememberInboxReturn(taskInboxOrigin, task.repository_id);
     taskView.close(); openProject(task.repository_id, destination.section);
   }));
-  if (retryableStates.includes(task.status)) actions.append(button('重试', async event => {
+  if (taskRetryable(task)) actions.append(button('重试', async event => {
     const retry = event.currentTarget; retry.disabled = true;
     try { await api('/api/tasks/' + task.id + '/retry', 'POST', {}); if(openTaskId===task.id){notice('task-error');notice('message');} }
     catch (err) { if(openTaskId===task.id)notice('task-error',retryErrorText(err)); }

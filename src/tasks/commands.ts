@@ -16,6 +16,7 @@ import { stageReplanContext } from '../roles/schedule.js';
 import { assertManagedTask, assertManagedExecution, assertTaskCaller, createManagedTask, operatorTaskCaller, taskCallerActor, type TaskCaller } from './management.js';
 import { TaskError } from '../agent/common.js';
 import { readEvidence } from './evidence.js';
+import { obsoleteOrigin } from './obsolete.js';
 import { taskTraceAccess,taskControllerReads } from '../memory/access.js';
 import { assertRequestPullRequest, softwareRequest } from './pull-request.js';
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
@@ -184,8 +185,10 @@ export class TaskCommands {
       });this.hooks.tick?.();return {id};
     }
     const match=/^\/api\/tasks\/([^/]+)\/retry$/.exec(url.pathname);if(!match||method!=='POST')return undefined;
-    fields(input,[]);const filter=scope(user,'repository_id'),task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,match[1]!,...filter.args);
+    fields(input,[]);const filter=scope(user,'repository_id');let task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,match[1]!,...filter.args);
     if(!task)return fail(404,'task_not_found');
+    // #713: a task moved out of 待处理 as obsolete is retried as the state it left, with what that state needs.
+    const left=obsoleteOrigin(this.store,task);if(left)task={...task,status:left.status};
     if(this.hooks.active?.(task.id)||['queued','running','preparing','implementing','validating','publishing','result_ready'].includes(task.status))fail(409,'task_already_running');
     if(!['paused','waiting_coordination','failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan','needs_help'].includes(task.status))fail(409,'task_not_retryable');
     this.store.transaction(()=>{
