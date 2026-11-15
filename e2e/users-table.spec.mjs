@@ -5,10 +5,15 @@ import { harness, setup, testPassword } from '../test/helpers.mjs';
 
 // #547: one platform user per row, with the login methods and the GitHub binding the server reports. A phone keeps the
 // table readable: the wrapper scrolls on its own, the page does not, and every row's entries stay reachable.
-const output = resolve('docs/verification/547');
+// Playwright results and screenshots live under .tmp/ (docs/development.md); nothing here writes into the tracked tree.
+const output = resolve('.tmp/users-table-547');
 const identity = (h, principal, login, status) => h.store.run(`INSERT INTO external_identities(id,principal_id,provider,host,
   connector,external_tenant,external_actor,display_name,status,verified_at) VALUES(?,?,'github','github.com','','',?,?,?,?)`,
   'ext-' + principal, principal, 'gh-' + principal, login, status, Date.now());
+const widths = view => view.evaluate(() => {
+  const wrap = document.querySelector('#settings-panel .rule-table-wrap');
+  return wrap ? { scroll: wrap.scrollWidth, client: wrap.clientWidth } : null;
+});
 const create = async (admin, username) => {
   const created = await admin('/api/users', 'POST', { username, password: testPassword() });
   expect(created.status).toBe(201);
@@ -62,6 +67,10 @@ test('the user list is one table: local, GitHub and both, with the binding state
     await expect(row('mike').getByRole('link', { name: '详情', exact: true })).toBeVisible();
     await expect(row('mike').getByRole('button', { name: '删除', exact: true })).toBeVisible();
 
+    // At desktop width the table fits its card: the wrapper has no horizontal overflow to scroll.
+    const desktop = await widths(page);
+    expect(desktop, 'desktop keeps the table in a wrapper').not.toBeNull();
+    expect(desktop.scroll, 'the desktop table fits its card').toBeLessThanOrEqual(desktop.client + 1);
     mkdirSync(output, { recursive: true });
     await page.screenshot({ path: resolve(output, 'after-1440.png'), fullPage: true });
     for (const width of [768, 390, 320]) {
@@ -69,14 +78,17 @@ test('the user list is one table: local, GitHub and both, with the binding state
       await page.waitForTimeout(200);
       // The table scrolls inside its wrapper; the page itself must not, and the actions stay reachable.
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      const scrolls = await page.evaluate(() => {
-        const wrap = document.querySelector('#settings-panel .rule-table-wrap');
-        return wrap ? { scroll: wrap.scrollWidth, client: wrap.clientWidth } : null;
-      });
+      const scrolls = await widths(page);
       expect(scrolls, `${width}px keeps the table in a wrapper`).not.toBeNull();
+      // A narrow viewport scrolls the table inside its wrapper; the page itself never scrolls sideways.
+      expect(scrolls.scroll).toBeGreaterThanOrEqual(scrolls.client);
       if (width < 760) expect(await panel.getByRole('link', { name: '详情', exact: true }).first().isVisible()).toBe(true);
       await page.screenshot({ path: resolve(output, `after-${width}.png`), fullPage: true });
     }
+    // 200% zoom of a 1440px window is a 720 CSS px viewport: the card layout, with 详情 still reachable.
+    await page.setViewportSize({ width: 720, height: 900 });
+    await expect(panel.getByRole('link', { name: '详情', exact: true }).first()).toBeVisible();
+    await page.screenshot({ path: resolve(output, 'after-zoom200.png'), fullPage: true });
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });
