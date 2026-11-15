@@ -104,7 +104,7 @@ export class FeishuAdapter implements ChannelAdapter {
     return { ...base, actor_tenant: actorTenant, actor_id: text(id.open_id ?? id.app_id), chat_id: text(message.chat_id),
       chat_type: message.chat_type as 'p2p' | 'group', message_id: text(message.message_id), thread_id: String(message.thread_id ?? ''),
       parent_id: String(message.parent_id ?? ''), root_id: String(message.root_id ?? ''), created_at: eventTime(message.create_time),
-      updated_at: eventTime(message.update_time ?? message.create_time), kind: 'message', content, command_text: commandText, mentions, raw_content: raw,
+      updated_at: eventTime(message.update_time || message.create_time), kind: 'message', content, command_text: commandText, mentions, raw_content: raw,
       message_type: messageType, sender_type: String(sender.sender_type ?? 'unknown'), addressed: addressed && sender.sender_type === 'user' && id.open_id !== this.connector.bot_open_id };
   }
   private async api(path: string, init: RequestInit, authenticated = true, binary = false): Promise<any> {
@@ -235,6 +235,11 @@ export class FeishuAdapter implements ChannelAdapter {
     const result = await this.api('/im/v1/messages?' + query, { method: 'GET' });
     const data = result.data;
     if (!data || !Array.isArray(data.items) || typeof data.has_more !== 'boolean' || data.has_more && typeof data.page_token !== 'string') fail(502, 'channel_history_invalid');
+    // A bad timestamp in one item must not become a bare 400: history-sync only treats ChannelHistoryError as
+    // permanent, so a 400 would retry the same page forever. The page is invalid upstream data, like a bad body (#792).
+    const itemTime = (value: unknown): number => {
+      try { return eventTime(value); } catch { return fail(502, 'channel_history_invalid'); }
+    };
     const items: StoredMessage[] = data.items.map((item: any) => {
       const raw = String(item.body?.content_v2 ?? item.body?.content ?? ''), messageType = text(item.msg_type, 80);
       const mentions = item.deleted ? [] : messageMentions(item.mentions, this.connector.bot_open_id, this.connector.app_name);
@@ -245,7 +250,7 @@ export class FeishuAdapter implements ChannelAdapter {
       }
       return { message_id: text(item.message_id), sender_id: String(item.sender?.id ?? ''), sender_tenant: String(item.sender?.tenant_key ?? ''),
         sender_type: String(item.sender?.sender_type ?? 'unknown'), message_type: messageType, content, command_text: commandText, mentions, raw_content: raw,
-        created_at: eventTime(item.create_time), updated_at: eventTime(item.update_time ?? item.create_time), deleted: !!item.deleted,
+        created_at: itemTime(item.create_time), updated_at: itemTime(item.update_time || item.create_time), deleted: !!item.deleted,
         parent_id: String(item.parent_id ?? ''), root_id: String(item.root_id ?? ''), thread_id: String(item.thread_id ?? '') };
     });
     return { items, has_more: data.has_more, page_token: data.page_token ?? '' };

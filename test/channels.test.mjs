@@ -623,3 +623,23 @@ test('an event whose create_time is empty, null or not a decimal count is reject
   const rows = h.store.all('SELECT created_at FROM channel_messages ORDER BY created_at');
   assert.deepEqual(rows.map(row => row.created_at), [now, now]);
 });
+
+test('a message whose optional update_time is empty keeps its create_time instead of being dropped', async t => {
+  const { h, id } = await channelFixture(t);
+  const data = envelope('update time empty', { message: { update_time: '' } });
+  const result = await post(h, id, data);
+  assert.equal(result.status, 200, 'an optional empty field does not reject the message');
+  const row = h.store.get('SELECT created_at,updated_at FROM channel_messages WHERE message_id=?', data.event.message.message_id);
+  assert.ok(row, 'the message is stored');
+  assert.equal(row.updated_at, row.created_at, 'updated_at falls back to create_time');
+});
+
+test('a history page with one bad item time is invalid upstream data (502), not a retryable 400', async t => {
+  const f = await channelFixture(t), adapter = f.service.adapter(f.service.connector(f.id));
+  const item = (createTime, id) => ({ message_id: id, msg_type: 'text', create_time: createTime, deleted: false,
+    body: { content: JSON.stringify({ text: 'x' }) }, sender: { id: 'ou_alice', tenant_key: 'tenant', sender_type: 'user' }, mentions: [] });
+  adapter.api = async () => ({ data: { items: [item('1700000000000', 'om_ok'), item('', 'om_bad')], has_more: false } });
+  await assert.rejects(() => adapter.history({ container_type: 'chat', container_id: 'oc_x', start_time: 0, end_time: 1 }),
+    (error) => error?.status === 502 && /channel_history_invalid/.test(String(error?.message)),
+    'the page is invalid upstream data: history-sync must not retry it forever');
+});
