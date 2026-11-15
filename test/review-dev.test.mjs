@@ -22,7 +22,7 @@ function mentionNames(t,value) {
   if(value===undefined)delete process.env.BOT_MENTION_NAMES;else process.env.BOT_MENTION_NAMES=value;
 }
 
-test('Issue comment mentions join pending reviews, queue after success and deduplicate comments and deliveries',async t=>{
+test('Issue comment mentions join pending reviews, continue it after success and deduplicate comments and deliveries',async t=>{
   mentionNames(t,undefined);
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   // Only the mention rule here; comments and edits as updates are covered in test/review-updates.test.mjs.
@@ -39,10 +39,11 @@ test('Issue comment mentions join pending reviews, queue after success and dedup
   const replay=(await send('comment')).value;assert.equal(replay.duplicate,true);assert.equal(replay.tasks_created,0);
   assert.equal((await send('same-comment-new-delivery')).value.tasks_created,0);
   assert.equal(h.store.get('SELECT count(*) n FROM review_updates').n,1);
-  h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?",task.id);
-  assert.equal((await send('another-comment',{...payload,comment:{...comment,id:124,body:'Please, @Agent-CI-Infra-Bot!'}})).value.tasks_created,1);
-  assert.ok(h.store.get("SELECT id FROM tasks WHERE unique_key='101:review.issue:1:comment:124'"));
-  assert.ok(h.store.get("SELECT id FROM tasks WHERE unique_key='101:review.issue:1:opened'"));
+  // The review answered the comment and published; the next mention continues it as its next round (#770).
+  h.store.run("UPDATE tasks SET status='succeeded',review_update_cursor=(SELECT max(id) FROM review_updates) WHERE id=?",task.id);
+  assert.equal((await send('another-comment',{...payload,comment:{...comment,id:124,body:'Please, @Agent-CI-Infra-Bot!'}})).value.tasks_created,0);
+  const round=h.store.get('SELECT status,input FROM tasks WHERE id=?',task.id);
+  assert.equal(round.status,'queued');assert.equal(JSON.parse(round.input).round,2);assert.equal(JSON.parse(round.input).comment.id,124);
   assert.equal((await h.hook(a.path,a.secret,'opened-again',opened)).value.tasks_created,0);
   for(const [index,body] of ['No mention here','user@bot','1@bot','@bot-extra','@bot2','@botany','@agent-ci-infra-bot-extra'].entries())
     assert.equal((await send('text-'+index,{...payload,comment:{...comment,id:200+index,body}})).value.tasks_created,0,body);
@@ -54,7 +55,7 @@ test('Issue comment mentions join pending reviews, queue after success and dedup
   assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n,0);
   // Comment deliveries do not start an external event's 24-hour authorization window.
   assert.equal(h.store.get('SELECT count(*) n FROM external_events').n,2);
-  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,2);
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,1);
 });
 
 test('mention configuration can disable comments or replace default names, with literal case-insensitive boundaries',async t=>{
@@ -66,8 +67,11 @@ test('mention configuration can disable comments or replace default names, with 
   for(const off of ['off',' OFF ']){process.env.BOT_MENTION_NAMES=off;assert.equal((await send('@bot @agent-ci-infra-bot')).value.tasks_created,0);}
   process.env.BOT_MENTION_NAMES='  Custom-Reviewer , Robot.v2 , ';
   for(const body of ['@bot','@agent-ci-infra-bot','@custom-reviewer-extra','mail@custom-reviewer','@robotXv2'])assert.equal((await send(body)).value.tasks_created,0,body);
-  for(const body of ['@CUSTOM-reviewer please','(@Robot.v2)','_@custom-reviewer','-@custom-reviewer']){assert.equal((await send(body)).value.tasks_created,1,body);h.store.run("UPDATE tasks SET status='succeeded'");}
-  process.env.BOT_MENTION_NAMES='';assert.equal((await send('@bot')).value.tasks_created,0);
+  // The first mention reviews the Issue; each later one continues that review as its next round (#770).
+  const queued=()=>h.store.get("SELECT count(*) n FROM tasks WHERE status='queued'").n,done=()=>h.store.run("UPDATE tasks SET status='succeeded',review_update_cursor=coalesce((SELECT max(id) FROM review_updates),0)");
+  for(const [index,body] of ['@CUSTOM-reviewer please','(@Robot.v2)','_@custom-reviewer','-@custom-reviewer'].entries()){assert.equal((await send(body)).value.tasks_created,index?0:1,body);assert.equal(queued(),1,body);done();}
+  process.env.BOT_MENTION_NAMES='';assert.equal((await send('@bot')).value.tasks_created,0);assert.equal(queued(),0);
+  assert.equal(JSON.parse(h.store.get('SELECT input FROM tasks').input).round,4);
 });
 
 test('PR conversation mentions read the current head with read-only permissions, without looking up users',async t=>{
@@ -90,16 +94,17 @@ test('PR conversation mentions read the current head with read-only permissions,
     comment:{id:400,body:'@Agent-CI-Infra-Bot please recheck',html_url:'https://github.invalid/issue/7#issuecomment-400'}};
   const send=(delivery,value=payload)=>h.hook(a.path,a.secret,delivery,value,{'X-GitHub-Event':'issue_comment'});
   assert.equal((await h.hook(a.path,a.secret,'pr-opened',{repository:{id:101},action:'opened',pull_request:{...pull,head:{sha:'a'.repeat(40)}}},{'X-GitHub-Event':'pull_request'})).value.tasks_created,1);
-  // A mention joins a review of the PR that has not published yet, at any head (#770); once that review is done it starts its own.
+  // A mention joins a review of the PR that has not published yet, at any head (#770); once that review is done it continues
+  // it as its next round, which prepares the PR's current head.
   const opened=h.store.get('SELECT id FROM tasks').id;
   assert.equal((await send('pr-comment-joins',{...payload,comment:{...payload.comment,id:399}})).value.tasks_created,0);assert.equal(h.store.get('SELECT count(*) n FROM review_updates WHERE task_id=?',opened).n,1);
-  h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?",opened);
-  assert.equal((await send('pr-comment')).value.tasks_created,1);
-  const task=h.store.get("SELECT * FROM tasks WHERE unique_key='101:review.pr:7:comment:400'");
-  assert.equal(task.head_sha,pull.head.sha);assert.deepEqual(JSON.parse(task.input).pull_request,pull);assert.deepEqual(JSON.parse(task.input).comment,payload.comment);
+  h.store.run("UPDATE tasks SET status='succeeded',review_update_cursor=(SELECT max(id) FROM review_updates) WHERE id=?",opened);
+  assert.equal((await send('pr-comment')).value.tasks_created,0);
+  const task=h.store.get('SELECT * FROM tasks WHERE id=?',opened);
+  assert.equal(task.status,'queued');assert.equal(JSON.parse(task.input).round,2);assert.deepEqual(JSON.parse(task.input).comment,payload.comment);
   const count=requests.length;assert.equal((await send('pr-comment')).value.tasks_created,0);assert.equal(requests.length,count);
   assert.equal((await send('another-pr-comment',{...payload,comment:{...payload.comment,id:'401'}})).value.tasks_created,0);
-  assert.equal(JSON.parse(h.store.get('SELECT data FROM review_updates WHERE task_id=?',task.id).data).comment.id,'401');
+  assert.equal(JSON.parse(h.store.get('SELECT data FROM review_updates WHERE task_id=? ORDER BY id DESC',task.id).data).comment.id,'401');
   for(const [id,change] of [[402,{draft:true}],[403,{state:'closed'}],[404,{head:{sha:'bad'}}]]){
     const previous=pull;pull={...pull,...change};assert.equal((await send('skip-'+id,{...payload,comment:{...payload.comment,id}})).value.tasks_created,0);pull=previous;
   }
@@ -110,7 +115,7 @@ test('PR conversation mentions read the current head with read-only permissions,
   const concurrent=await Promise.all([send('concurrent',{...payload,comment:{...payload.comment,id:406}}),send('concurrent',{...payload,comment:{...payload.comment,id:406}})]);
   assert.equal(concurrent.reduce((sum,response)=>sum+response.value.tasks_created,0),0);
   assert.equal(concurrent.filter(response=>response.value.duplicate).length,1);
-  assert.equal(h.store.get('SELECT count(*) n FROM review_updates WHERE task_id=?',task.id).n,3);
+  assert.equal(h.store.get('SELECT count(*) n FROM review_updates WHERE task_id=?',task.id).n,5);
   const reads=requests.length;
   for(const change of [{sender:{type:'Bot'}},{action:'edited'},{comment:{...payload.comment,body:'No mention'}},{issue:{...payload.issue,state:'closed'}}])assert.equal((await send('no-read-'+requests.length+JSON.stringify(change),{...payload,...change})).value.tasks_created,0);
   await admin('/api/repositories/101/policy','PATCH',{review_pull_requests:false});assert.equal((await send('pr-disabled')).value.tasks_created,0);
@@ -119,7 +124,7 @@ test('PR conversation mentions read the current head with read-only permissions,
   assert.doesNotMatch(JSON.stringify(h.store.all('SELECT input FROM tasks')),/comment-read-token|PRIVATE KEY/);
 });
 
-test('comment Issue reviews publish with trigger context before starting authorized development',async t=>{
+test('a comment continues the published Issue review as its next round, with trigger context, before starting authorized development',async t=>{
   mentionNames(t,undefined);
   const issue={id:1,number:1,state:'open',title:'Fix the bug.',body:'Please fix.',labels:[{name:'bot-develop'}],assignees:[]};
   const review={summary:'A code fix is requested.',findings:[],requires_code_change:true,issue_requests_code:true,clarification_required:false,implementation_goal:'Fix the bug.',request_quote:'Fix the bug.'};
@@ -139,8 +144,9 @@ test('comment Issue reviews publish with trigger context before starting authori
   h.setBranch('ready');h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?",h.taskId);
   await h.admin('/api/repositories/101/policy','PATCH',{development_enabled:true});
   const comment={id:500,body:'@bot review the updated requirements',html_url:'https://github.invalid/issue/1#issuecomment-500'};
-  assert.equal(queueWebhook(h.store,'101','issue_comment',{repository:{id:101},action:'created',sender:{type:'User'},issue,comment},h.store.get('SELECT source_delivery_id FROM tasks WHERE id=?',h.taskId).source_delivery_id),1);
-  const task=h.store.get("SELECT id FROM tasks WHERE unique_key='101:review.issue:1:comment:500'");
+  // The Issue's review has published; the comment continues it as its next round (#770) instead of starting another review.
+  assert.equal(queueWebhook(h.store,'101','issue_comment',{repository:{id:101},action:'created',sender:{type:'User'},issue,comment},h.store.get('SELECT source_delivery_id FROM tasks WHERE id=?',h.taskId).source_delivery_id),0);
+  const task={id:h.taskId};assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,1);
   assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n,0);
   h.engine.tick();await Promise.all(h.engine.active.values());
   assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?',task.id).status,'waiting_permission');
@@ -149,6 +155,8 @@ test('comment Issue reviews publish with trigger context before starting authori
   // The whole discussion is a file the agent reads on demand, no longer the latest 50 comments in the prompt.
   assert.deepEqual(prompt.trigger_comment,comment);assert.equal(prompt.comments,undefined);
   assert.equal(prompt.context_files.find(file=>file.path==='../context/comments.json').content,'All 55 conversation comments, oldest first');
+  // The first round left no conversation here, so the round is told about the result it published instead.
+  assert.equal(prompt.continuation.round,2);assert.equal(prompt.continuation.previous_result.round,1);assert.match(prompt.continuation.instruction,/previous_result/);
   failPublication=false;assert.equal((await h.admin('/api/tasks/'+task.id+'/retry','POST',{})).status,201);
   await Promise.all(h.engine.active.values());
   assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?',task.id).status,'succeeded');assert.equal(h.comments.length,1);
@@ -252,8 +260,11 @@ test('review queue is atomic with archive and deduplicates logical events across
   // A new head joins the review that waits (#770); it reviews a head of its own once no review can take it.
   const push=head=>h.hook(a.path,a.secret,'push-'+head[0],{...opened,action:'synchronize',pull_request:{...pull,draft:false,head:{sha:head}}},{'X-GitHub-Event':'pull_request'});
   assert.equal((await push('b'.repeat(40))).value.tasks_created,0);assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='review.pr'").n,1);
-  h.store.run("UPDATE tasks SET status='succeeded' WHERE kind='review.pr'");
-  assert.equal((await push('c'.repeat(40))).value.tasks_created,1);
+  // Once that review has published, the next push is its next round.
+  h.store.run("UPDATE tasks SET status='succeeded',review_update_cursor=(SELECT max(id) FROM review_updates) WHERE kind='review.pr'");
+  assert.equal((await push('c'.repeat(40))).value.tasks_created,0);
+  const review=h.store.get("SELECT status,input FROM tasks WHERE kind='review.pr'");
+  assert.equal(review.status,'queued');assert.deepEqual(JSON.parse(review.input).merged_updates.map(update=>update.after),['c'.repeat(40)]);
 });
 test('inline positions use real hunk lines and models cannot choose approval events',()=>{
   const files=[{filename:'a.js',patch:'@@ -10,2 +10,2 @@\n-old\n+new\n context'}];

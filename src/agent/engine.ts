@@ -52,7 +52,8 @@ import { automaticState, isAttemptFailure } from './failures.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
 import { RuleService, resolveRules, behaviorPath, ruleErrors, skillIndex, computerRequest } from '../rules/service.js';
 import { repositoryConcurrency } from '../app/settings.js';
-import { ReviewUpdated, latestReviewSession, saveReviewSession, pendingReviewUpdates, pruneReviewSessions, reviewObjectState } from '../review/sessions.js';
+import { ReviewUpdated, latestReviewSession, saveReviewSession, pendingReviewUpdates, pruneReviewSessions, reviewObjectState, reviewUpdateLog } from '../review/sessions.js';
+import { continueFinishedReview, continuationContext, resumeFinishedReviews } from '../review/continuation.js';
 import { type GitCache } from './git-cache.js';
 import { workOf } from '../work/catalog.js';
 import { workEnabled } from '../work/settings.js';
@@ -126,6 +127,7 @@ export class TaskEngine {
     this.store.run('DELETE FROM task_claims');interruptRuns(this.store);this.coordinator.recover();
     this.store.run(`UPDATE tasks SET status='queued',claim_token=NULL WHERE ${engineKinds} AND status IN ('running','preparing','implementing','validating','publishing','result_ready')`);
     this.store.run("UPDATE tasks SET status='waiting_pr_head',error_code='pr_head_pending',next_run_at=0 WHERE status='waiting_permission' AND error_code='bot_pr_ownership_changed' AND phase='publish' AND kind='development.pr'");
+    resumeFinishedReviews(this.store);
     this.timer=setInterval(()=>this.tick(),1000);this.tick();this.dispatcher.start();
   }
   tick(){
@@ -162,6 +164,8 @@ export class TaskEngine {
       const work=this.run(task.id,token).finally(()=>{
         this.store.run('DELETE FROM task_claims WHERE task_id=? AND token=?',task.id,token);
         this.active.delete(task.id);this.finishing.delete(task.id);running.delete(task.id);if(!running.size&&this.running.get(repo)===running)this.running.delete(repo);
+        // #770: updates that joined a review while it published (or just after) start its next round once its run has let go.
+        if(String(task.kind).startsWith('review.'))try{if(continueFinishedReview(this.store,task.id))queueMicrotask(()=>this.tick());}catch(error){console.error(`[engine] task ${task.id} next round: ${(error as Error)?.message}`);}
       });this.active.set(task.id,work);
     }
   }
@@ -304,8 +308,9 @@ export class TaskEngine {
       let input=JSON.parse(task.input),result=task.result?JSON.parse(task.result):null;
       const development=task.kind.startsWith('development.'),review=task.kind.startsWith('review.');
       // Only reviews continue an earlier conversation; a reply task starts fresh every time. A retry starts with an empty one,
-      // except the attempt a new head started in a fresh workspace (head_restart_attempt, see moveHead).
-      const prior=review&&(task.attempt===1||input.head_restart_attempt===task.attempt)?latestReviewSession(this.store,task):undefined;
+      // except the attempt that continues the last published one (session_attempt): a finished review's next round (#770), or
+      // the attempt a new head started in a fresh workspace (see moveHead).
+      const prior=review&&(task.attempt===1||input.session_attempt===task.attempt)?latestReviewSession(this.store,task):undefined;
       // An Issue development was started by the Manager on a person's label, which is the human decision a review asked for.
       if(task.kind==='development.pr'&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan','检视结果要求先由人确认需求，开发任务等待重新规划。');
       // validate(object) checks an object just read instead of reading it again; seen is the last object it checked.
@@ -370,7 +375,7 @@ export class TaskEngine {
           refs:[`refs/pull/${number}/head`,...(base&&object.base?.ref?[`refs/heads/${object.base.ref}`]:[])]}):undefined;
         const moved=mirror?await workspace!.advance(next,mirror,base?[base]:[],String(heads.length)):null;
         if(!moved){
-          update({input:JSON.stringify({...JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),head_restart_attempt:task.attempt+1})});
+          update({input:JSON.stringify({...JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),session_attempt:task.attempt+1})});
           return stop('pull_request_head_changed','queued',`PR #${number} 有了新提交 ${next}，工作区不能原地移到新提交（${mirror?'不是 git worktree，或移动失败':'Git 缓存不可用'}），任务在新工作区按新提交重新准备。`);
         }
         const compare=await github.request('GET',github.path(`/compare/${previous}...${next}`)).then(headComparison,(error:any)=>({error:String(error?.code||'compare_unavailable')}));
@@ -612,6 +617,8 @@ export class TaskEngine {
             // On a revision people or other review bots asked for: their comments, which the findings above carry out.
             ...(development&&input.revision?.requests?.length?{revision_requests:input.revision.requests}:{}),review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
             ...(input.comment?{trigger_comment:input.comment}:{}),...(input.trigger?{trigger:input.trigger}:{}),
+            // A finished review's next round (#770): what it continues and how to see what changed since.
+            ...(review&&Number(input.round)>1?{continuation:continuationContext(input,ref.object.sha,pr,!!prior)}:{}),
             // On a pull request this bot opened: the comments, reviews and inline comments this review answers. Each change the
             // review takes on from one of them names it in requested_in.
             ...(review&&pr&&this.store.get('SELECT 1 FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number)
@@ -664,7 +671,8 @@ export class TaskEngine {
           conversation_notice:`Current checkout/head: ${task.head_sha}. Read the current checkout, .bot rules, skills and ../notes/ for this task. Historical code conclusions may refer to an earlier head.`};
         update({input:storedInput(this.store,redactor.clean(input),task.repository_id)});
         if(updates.length)this.store.run('UPDATE tasks SET review_update_cursor=? WHERE id=?',updates.at(-1)!.id,id);
-        if(stage!=='start')for(const row of updates){const data=JSON.parse(row.data);log({type:'review_update',actor:data.actor,reason:data.reason,detail:JSON.stringify(data)});}
+        // The timeline lists every update the agent took, at its first turn too (those that came while it waited).
+        for(const row of updates)log(reviewUpdateLog(JSON.parse(row.data)));
         return stage==='start'?{prompt:JSON.stringify(roleAssignmentContext({...input.context,structured_task:records.context(id)}))}
           :{messages:updateMessages(updates.map(row=>JSON.parse(row.data)),object,String(task.head_sha))};
       }};
@@ -900,7 +908,9 @@ export class TaskEngine {
         (['execution_interrupted','tool_operation_conflict','operation_result_expired'].includes(failure.code)||failure instanceof VolumeFull)&&task.phase!=='publish')){
         if(replies(task.kind)&&!task.publication_started)this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
-        update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,review_update_cursor:0,publication_started:0,attempt:task.attempt+1});
+        // The next attempt takes again the updates of its round (a review's later round starts past those of earlier rounds).
+        const roundCursor=Number(this.store.get("SELECT json_extract(input,'$.round_update_cursor') c FROM tasks WHERE id=?",id)?.c||0);
+        update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,review_update_cursor:roundCursor,publication_started:0,attempt:task.attempt+1});
       }
       // Waiting conditions can be polled every five seconds; retain one copy of an unchanged reason. The state is the one
       // the task is left in; entering the slow cycle is a distinct event even when the reason stays the same.

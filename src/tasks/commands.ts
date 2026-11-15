@@ -195,7 +195,8 @@ export class TaskCommands {
       // A publish-phase task restarts only when re-planning it cannot strand a branch or PR it already wrote.
       const wrote=!!this.store.get("SELECT 1 FROM github_effects WHERE task_id=? AND state<>'pending'",task.id);
       if(!requestedTask(task)&&(replies(task.kind)&&!wrote || (task.phase!=='publish'||task.status==='needs_replan'&&!wrote)&&['failed','waiting_environment','needs_replan'].includes(task.status))){
-        this.store.run("UPDATE tasks SET phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,review_update_cursor=0,publication_started=0,attempt=attempt+1 WHERE id=?",task.id);
+        // The attempt takes again the updates of its round (#770: a review's later round starts past those of earlier rounds).
+        this.store.run("UPDATE tasks SET phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,review_update_cursor=coalesce(json_extract(input,'$.round_update_cursor'),0),publication_started=0,attempt=attempt+1 WHERE id=?",task.id);
         if(replies(task.kind))this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",task.id);
         this.store.run('DELETE FROM development_candidates WHERE task_id=?',task.id);
       }

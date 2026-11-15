@@ -4,6 +4,7 @@ import { TaskError } from '../agent/common.js';
 import { captureTaskConfiguration } from '../tasks/configuration.js';
 import { TaskRecords } from '../tasks/service.js';
 import { enqueue } from '../review/queue.js';
+import { continueFinishedReview } from '../review/continuation.js';
 import { enqueueEventTask } from '../work/events.js';
 import { workOffered, workPermissions } from '../work/settings.js';
 import { narrowWrites, workType } from '../work/catalog.js';
@@ -106,22 +107,30 @@ export function recordEvent(store: Store, input: EventInput): number {
 }
 
 /**
- * Tasks the event may join: on the same object, of a kind that answers updates, publication not started. A new pull request
- * head is one of those updates (#770): the task moves to it instead of being replaced. Of the running ones only the most
- * recently claimed counts (older runs are about to be replaced), then the waiting ones, as updates were always merged.
+ * Tasks the event may join: on the same object, of a kind that answers updates (#770). A running or waiting task takes it
+ * as an update, a new pull request head included (the task moves to it instead of being replaced); one that is publishing
+ * finishes that publication first. Of the running ones only the most recently claimed counts (older runs are about to be
+ * replaced), then the waiting ones. With none of them, the object's last finished review takes it as its next round.
  */
 export function continuations(store: Store, event: Record<string, any>): ContinueOption[] {
   const merge = event.merge ? JSON.parse(String(event.merge)) : null;
   if (!merge?.kinds?.length || !event.object_number) return [];
-  const active = store.all(`SELECT t.* FROM tasks t WHERE t.repository_id=? AND t.object_number=? AND t.kind IN (${merge.kinds.map(() => '?').join(',')})
+  const kinds = merge.kinds.map(() => '?').join(',');
+  const active = store.all(`SELECT t.id,t.kind,t.status,t.summary,t.created_at FROM tasks t WHERE t.repository_id=? AND t.object_number=? AND t.kind IN (${kinds})
     AND t.status IN (${activeStates.map(() => '?').join(',')})
     ORDER BY CASE WHEN t.status IN ('running','preparing','publishing','result_ready') THEN 0 ELSE 1 END,(SELECT claimed_at FROM task_claims WHERE task_id=t.id) DESC,t.created_at DESC,t.rowid DESC`,
     String(event.repository_id), Number(event.object_number), ...merge.kinds, ...activeStates);
   const running = (task: Row) => ['running', 'preparing', 'publishing', 'result_ready'].includes(String(task.status));
-  const fits = (task: Row) => !task.publication_started;
   const latest = active.find(running);
-  return [...(latest && fits(latest) ? [latest] : []), ...active.filter(task => !running(task) && fits(task))].slice(0, 5)
-    .map(task => ({ id: 'continue:' + task.id, task_id: String(task.id), kind: String(task.kind), status: String(task.status), summary: String(task.summary), created_at: String(task.created_at) }));
+  const joinable = [...(latest ? [latest] : []), ...active.filter(task => !running(task))].slice(0, 5);
+  if (!joinable.length) {
+    // The one that published the object's conversation, which its next round resumes; else the most recently finished.
+    const finished = store.get(`SELECT id,kind,status,summary,created_at FROM tasks t WHERE repository_id=? AND object_number=? AND kind IN (${kinds}) AND kind LIKE 'review.%'
+      AND status='succeeded' ORDER BY EXISTS(SELECT 1 FROM review_sessions s WHERE s.task_id=t.id) DESC,updated_at DESC,rowid DESC LIMIT 1`,
+      String(event.repository_id), Number(event.object_number), ...merge.kinds);
+    if (finished) joinable.push(finished);
+  }
+  return joinable.map(task => ({ id: 'continue:' + task.id, task_id: String(task.id), kind: String(task.kind), status: String(task.status), summary: String(task.summary), created_at: String(task.created_at) }));
 }
 /** What the Manager reads: the event, the offered options and the tasks already on the same object. */
 export function dispatchContext(store: Store, event: Row): DispatchContext {
@@ -232,7 +241,10 @@ function create(store: Store, event: Row, option: CreateOption, decision: Decisi
   if (spec.principal) store.run('INSERT INTO task_authorizations VALUES(?,?,?,?,?)', id, spec.principal.principal_id, spec.principal.tenant_id, repo, 'tasks.write');
   return id;
 }
-/** Adds the event to a running task: an update it answers before publication, and a reference in its facts. */
+/**
+ * Adds the event to a task: an update it answers at its next turn (or after the publication it is in), and a reference in
+ * its facts. A finished review takes it as its next round (#770).
+ */
 function join(store: Store, event: Row, taskId: string, decision: Decision) {
   const merge = JSON.parse(event.merge), task = store.get('SELECT * FROM tasks WHERE id=?', taskId)!;
   const inserted = store.run('INSERT OR IGNORE INTO review_updates(task_id,event_key,data) VALUES(?,?,?)', taskId, merge.key, JSON.stringify(merge.data));
@@ -241,6 +253,7 @@ function join(store: Store, event: Row, taskId: string, decision: Decision) {
     store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ ...input, merged_updates: [...(input.merged_updates || []), merge.trigger] }), taskId);
   }
   log(store, taskId, { type: 'dispatch', relation: 'continued', event_id: event.id, event_type: event.type, reason: decision.reason, detail: `Manager 把事件「${event.summary}」续接到这个任务：${decision.reason}` });
+  if (task.status === 'succeeded') continueFinishedReview(store, taskId);
 }
 
 /**

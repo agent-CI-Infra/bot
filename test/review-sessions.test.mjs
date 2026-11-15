@@ -4,6 +4,7 @@ import {harness,setup,account,repository} from './helpers.mjs';
 import {enqueue,queueWebhook} from '../dist/review/queue.js';
 import {ReviewUpdated,latestReviewSession,saveReviewSession,reviewObjectState,pruneReviewSessions,pendingReviewUpdates} from '../dist/review/sessions.js';
 import {deleteProjectRecords} from '../dist/projects/removal.js';
+import {continueFinishedReview,resumeFinishedReviews} from '../dist/review/continuation.js';
 import {GitHub} from '../dist/github/client.js';
 import {Publisher} from '../dist/github/publisher.js';
 import {Redactor} from '../dist/agent/common.js';
@@ -29,17 +30,58 @@ for(const status of ['queued','retry_wait','waiting_configuration','waiting_envi
   assert.equal(h.store.get('SELECT count(*) n FROM review_updates').n,count);
 });
 
-test('parallel reviews receive updates on the most recently claimed task and a fenced publication defers them',async t=>{
+test('parallel reviews receive updates on the most recently claimed task, which answers those after its publication in its next round',async t=>{
   const h=await fixture(t),old=enqueue(h.store,'101','review.issue',1,null,{},null,null,null,'older'),recent=enqueue(h.store,'101','review.issue',1,null,{},null,null,null,'recent');
   h.store.run("UPDATE tasks SET status='running'");h.store.run("INSERT INTO task_claims VALUES(?,'101','old','2026-11-01T00:00:00Z')",old);
   h.store.run("INSERT INTO task_claims VALUES(?,'101','recent','2026-11-01T01:00:00Z')",recent);
   const send=n=>queueWebhook(h.store,'101','issue_comment',{action:'created',issue,sender:user,comment:{id:n,body:'@bot update '+n}},'update-'+n);
   assert.equal(send(1),0);assert.equal(h.store.get('SELECT task_id FROM review_updates').task_id,recent);
-  h.store.run('UPDATE tasks SET publication_started=1 WHERE id=?',recent);
-  assert.equal(send(2),1);assert.equal(send(3),0);
-  const next=h.store.get("SELECT * FROM tasks WHERE status='queued'");assert.equal(JSON.parse(next.input).wait_for_review,recent);
-  assert.equal(pendingReviewUpdates(h.store,{id:old}).length,0);
-  assert.deepEqual(h.store.all("SELECT status FROM tasks WHERE id IN (?,?)",old,recent).map(t=>t.status),['running','running']);
+  // The agent took the first update; then the review started publishing. It finishes that publication, and what comes
+  // meanwhile still joins it (#770) instead of queueing another review.
+  h.store.run('UPDATE tasks SET publication_started=1,review_update_cursor=(SELECT max(id) FROM review_updates) WHERE id=?',recent);
+  assert.equal(send(2),0);assert.equal(send(3),0);
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,2);
+  assert.equal(pendingReviewUpdates(h.store,{id:recent}).length,2);assert.equal(pendingReviewUpdates(h.store,{id:old}).length,0);
+  // The publication succeeded, but its run still holds the claim: the next round starts when the engine lets go.
+  h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?",recent);
+  assert.equal(continueFinishedReview(h.store,recent),false);
+  h.store.run('DELETE FROM task_claims WHERE task_id=?',recent);assert.equal(continueFinishedReview(h.store,recent),true);
+  const next=h.store.get('SELECT * FROM tasks WHERE id=?',recent),input=JSON.parse(next.input);
+  assert.deepEqual([next.status,next.phase,next.attempt,input.round,input.session_attempt],['queued','prepare',2,2,2]);
+  // Shaped like a review those updates would have created: the latest comment is the trigger, the earlier one is merged.
+  assert.equal(input.comment.id,3);assert.equal(input.trigger.source.id,3);assert.deepEqual(input.merged_updates.map(update=>update.source.id),[2]);
+  assert.equal(continueFinishedReview(h.store,recent),false);
+  assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?',old).status,'running');
+});
+
+test('a finished review takes the next update as its next round, once; a push of a head it read needs none',async t=>{
+  const h=await fixture(t),head='a'.repeat(40),pr={...issue,draft:false,head:{sha:head}};
+  const id=enqueue(h.store,'101','review.pr',1,head,{pull_request:pr});
+  h.store.run("UPDATE tasks SET status='succeeded',phase='done',result=?,input=json_set(input,'$.heads',json_array(?)) WHERE id=?",
+    JSON.stringify({summary:'One finding.',reviewed_sha:head,findings:[{body:'Off by one.',format:'inline',path:'a.js',line:3}],outputs:[{html_url:'https://github.invalid/c/1'}]}),head,id);
+  // A push of the head the review already published on (the webhook came late): answered, no round, and not asked again.
+  h.store.run("INSERT INTO review_updates(task_id,event_key,data) VALUES(?,'late',?)",id,JSON.stringify({reason:'pushed',after:head}));
+  assert.equal(continueFinishedReview(h.store,id),false);
+  assert.equal(h.store.get('SELECT review_update_cursor c FROM tasks WHERE id=?',id).c,h.store.get('SELECT max(id) m FROM review_updates').m);
+  // The Manager is offered the finished review to continue, and no new review of the push.
+  const next='b'.repeat(40);
+  assert.equal(queueWebhook(h.store,'101','pull_request',{action:'synchronize',before:head,pull_request:{...pr,head:{sha:next}},sender:user},'push'),0);
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,1);
+  const task=h.store.get('SELECT * FROM tasks WHERE id=?',id),input=JSON.parse(task.input);
+  assert.deepEqual([task.status,task.attempt,input.round,input.session_attempt],['queued',2,2,2]);
+  // A push asks nobody's question: no trigger, the push is the update; the earlier result is summarized for a fresh session.
+  assert.equal(input.trigger,undefined);assert.deepEqual(input.merged_updates.map(update=>[update.reason,update.after]),[['pushed',next]]);
+  const {finished_at,...previous}=input.previous_result;assert.ok(finished_at);
+  assert.deepEqual(previous,{round:1,reviewed_sha:head,summary:'One finding.',findings:[{body:'Off by one.',format:'inline',path:'a.js',line:3}],published:['https://github.invalid/c/1']});
+  const log=h.store.all('SELECT content FROM task_logs WHERE task_id=?',id).map(row=>JSON.parse(row.content)).find(value=>value.type==='continued');
+  assert.deepEqual([log.round,log.updates,log.reasons],[2,1,['pushed']]);
+  // While the round waits, the next push joins it as an ordinary update.
+  assert.equal(queueWebhook(h.store,'101','pull_request',{action:'synchronize',before:next,pull_request:{...pr,head:{sha:'c'.repeat(40)}},sender:user},'push-2'),0);
+  assert.equal(JSON.parse(h.store.get('SELECT input FROM tasks WHERE id=?',id).input).round,2);
+  // After a restart, a finished review whose round was due (its run ended as the process stopped) starts it.
+  h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?",id);
+  resumeFinishedReviews(h.store);
+  assert.deepEqual(Object.values(h.store.get('SELECT status,attempt FROM tasks WHERE id=?',id)),['queued',3]);
 });
 
 test('sessions are scoped by repository, kind and number, survive reopening/restart, expire after 15 days and delete with the project',async t=>{
@@ -50,8 +92,10 @@ test('sessions are scoped by repository, kind and number, survive reopening/rest
   saveReviewSession(h.store,task);
   assert.equal(latestReviewSession(h.store,task).task_id,id);
   for(const other of [{...task,kind:'review.pr'},{...task,object_number:2},{...task,repository_id:'102'}])assert.equal(latestReviewSession(h.store,other),undefined);
-  for(const status of ['failed','cancelled','superseded','running']){
-    h.store.run('UPDATE tasks SET status=? WHERE id=?',status,id);assert.equal(latestReviewSession(h.store,task),undefined);
+  // A session is saved only when a review publishes. It stays the source while its task runs a next round, and after that
+  // round failed or was stopped (#770).
+  for(const status of ['queued','running','failed','cancelled','superseded']){
+    h.store.run('UPDATE tasks SET status=? WHERE id=?',status,id);assert.equal(latestReviewSession(h.store,task).task_id,id);
   }
   h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?",id);
   await h.stop();await h.start();assert.equal(latestReviewSession(h.store,task).task_id,id);
@@ -75,11 +119,12 @@ test('a new PR head joins the running review as an update, like discussion of an
   assert.deepEqual(pendingReviewUpdates(h.store,{id:old}).map(row=>JSON.parse(row.data)).map(({reason,before,after})=>({reason,before,after})),
     [{reason:'pushed',before:oldHead,after:head},{reason:'review_submitted',before:undefined,after:undefined}]);
   assert.deepEqual(JSON.parse(h.store.get('SELECT input FROM tasks WHERE id=?',old).input).merged_updates.map(update=>update.reason),['pushed','review_submitted']);
-  // A review that has started publishing takes nothing more: the push reviews its head separately.
+  // A review that has started publishing finishes on the head it reviewed; a push meanwhile still joins it, for its next round.
   h.store.run('UPDATE tasks SET publication_started=1 WHERE id=?',old);
-  assert.equal(queueWebhook(h.store,'101','pull_request',{action:'synchronize',pull_request:{...pr,head:{sha:'c'.repeat(40)}},sender:user},'push-2'),1);
+  assert.equal(queueWebhook(h.store,'101','pull_request',{action:'synchronize',pull_request:{...pr,head:{sha:'c'.repeat(40)}},sender:user},'push-2'),0);
+  assert.equal(JSON.parse(pendingReviewUpdates(h.store,{id:old}).at(-1).data).after,'c'.repeat(40));
   queueWebhook(h.store,'101','pull_request',{action:'converted_to_draft',pull_request:{...pr,draft:true},sender:user},'draft');
-  assert.deepEqual(h.store.all('SELECT status,error_code FROM tasks').map(t=>[t.status,t.error_code]),[['cancelled','object_closed_or_draft'],['cancelled','object_closed_or_draft']]);
+  assert.deepEqual(h.store.all('SELECT status,error_code FROM tasks').map(t=>[t.status,t.error_code]),[['cancelled','object_closed_or_draft']]);
   const dev=enqueue(h.store,'101','development.issue',1,null,{});queueWebhook(h.store,'101','issues',{action:'closed',issue:{...issue,state:'closed'},sender:user},'close');
   assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?',dev).status,'cancelled');
 });

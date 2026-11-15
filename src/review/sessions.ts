@@ -17,10 +17,14 @@ export function reviewObjectState(store: Store, repository: string, kind: string
     DO UPDATE SET closed_at=CASE WHEN excluded.closed_at IS NULL THEN NULL ELSE coalesce(review_objects.closed_at,excluded.closed_at) END`,
     repository, kind, number, closed ? now : null);
 }
+/**
+ * The object's last published review conversation. A session is saved only when a review publishes, so it stays the source
+ * whatever its task does next (#770): that task may run its next round, or that round may fail or be stopped.
+ */
 export function latestReviewSession(store: Store, task: Row) {
   pruneReviewSessions(store);
   return store.get(`SELECT s.* FROM review_sessions s JOIN tasks t ON t.id=s.task_id WHERE s.repository_id=? AND s.kind=?
-    AND s.object_number=? AND t.status='succeeded'`, task.repository_id, task.kind, task.object_number);
+    AND s.object_number=?`, task.repository_id, task.kind, task.object_number);
 }
 export function saveReviewSession(store: Store, task: Row) {
   const messages = store.get('SELECT messages FROM tasks WHERE id=?', task.id)?.messages;
@@ -33,6 +37,13 @@ export function saveReviewSession(store: Store, task: Row) {
     head_sha=excluded.head_sha,snapshot=excluded.snapshot`, task.repository_id, task.kind, task.object_number, task.id, messages,
     task.workspace_id, task.generation, task.head_sha, snapshot);
   store.run('UPDATE tasks SET messages=NULL WHERE id=?', task.id);
+}
+/** The timeline entry of an update a review took (#770): who, what, a link, and the heads of a push or of a head move. */
+export function reviewUpdateLog(data: any) {
+  return { type: 'review_update', actor: data?.actor ?? null, reason: data?.reason ?? null, url: data?.url || data?.comment?.html_url || null,
+    ...(data?.reason === 'pull_request_head_changed' ? { previous_head: data.previous_head, current_head: data.current_head } : {}),
+    ...(data?.reason === 'pushed' ? { after: data.after ?? null } : {}),
+    detail: JSON.stringify({ ...data, object: undefined, comment: undefined, review: undefined }) };
 }
 export function pendingReviewUpdates(store: Store, task: Row) {
   const cursor = store.get('SELECT review_update_cursor FROM tasks WHERE id=?', task.id)?.review_update_cursor || 0;
