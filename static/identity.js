@@ -237,7 +237,23 @@ async function renderIdentity() {
   if (connection && connection.state) {
     const next = githubConnectionNextStep(connection); if (next) overview.append(note(next));
   } else if (!connection) overview.append(note(active.length ? t('identity.overview_note_advanced') : t('identity.overview_note_connect')));
+  // #825: in the connected state, started repositories are the ones "可访问 N 个仓库" talks about.
+  // List them by name and link into the project; pending installations stay a separate list.
+  const startedRepos = (connection && connection.repositories) || [];
   const pendingRepos = (connection && connection.pending_repositories) || [];
+  if (startedRepos.length) {
+    const list = element('ul', '', 'identity-openable-repos');
+    list.setAttribute('aria-label', t('identity.openable_repos'));
+    for (const repo of startedRepos) {
+      const item = element('li', '');
+      const link = element('a', repo.full_name);
+      link.href = `#/projects/${repo.id}/overview`;
+      item.append(link);
+      list.append(item);
+    }
+    overview.append(list);
+  }
+  if (startedRepos.length && pendingRepos.length) overview.append(note(t('identity.github.pending_also', { pending: pendingRepos.length })));
   if (pendingRepos.length) {
     const list = element('ul', '', 'identity-pending-repos');
     list.setAttribute('aria-label', t('identity.pending_repos'));

@@ -289,6 +289,41 @@ test('身份页概览在 1440 与 390 下完整可见，展开的高级区占满
   } finally { await f.close(); }
 });
 
+test('身份页同时列出已启动的项目和待启动仓库，两句话不会混在一起', async ({ page }) => {
+  const f = await identityFixture();
+  try {
+    await page.goto(f.h.admin);
+    await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    await expect(page.locator('.identity-overview')).toBeVisible();
+    const owner = f.h.store.get("SELECT owner_id FROM installation_repositories WHERE repository_id='101'")?.owner_id || '10';
+    f.h.store.run("UPDATE repositories SET full_name='open-x-agents/Douya' WHERE id='101'");
+    f.h.store.run("UPDATE installation_repositories SET full_name='open-x-agents/Douya' WHERE repository_id='101'");
+    f.h.store.run(`INSERT OR REPLACE INTO installation_repositories VALUES('github.com/123/77','102','ThinkFlowLab/FlyBot',?,?,1,1,?)`,
+      owner, 'ThinkFlowLab', new Date().toISOString());
+    await page.goto(f.h.admin + '/#/projects');
+    await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
+    await page.goto(f.h.admin + '/#/identity');
+    await expect(page.locator('.identity-connection-status')).toHaveText('已连接 GitHub，可访问 1 个仓库');
+    await expect(page.locator('#identity-panel')).toContainText('可在项目列表中打开这些仓库。');
+    const openable = page.locator('.identity-openable-repos a');
+    await expect(openable).toHaveText('open-x-agents/Douya');
+    await expect(openable).toHaveAttribute('href', '#/projects/101/overview');
+    await expect(page.locator('#identity-panel')).toContainText('另有 1 个仓库已安装，等待超级管理员启动');
+    const pending = page.locator('.identity-pending-repos li');
+    await expect(pending).toContainText('ThinkFlowLab/FlyBot');
+    await expect(pending.locator('.status')).toHaveText('待超级管理员启动');
+    await expect(page.locator('.identity-openable-repos')).not.toContainText('待超级管理员启动');
+    mkdirSync('.tmp/ui-825', { recursive: true });
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      if (width === 390) expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+      await page.screenshot({ path: `.tmp/ui-825/identity-openable-${width}.png`, fullPage: true });
+    }
+    await openable.click();
+    await expect(page).toHaveURL(/#\/projects\/101\/overview/);
+  } finally { await f.close(); }
+});
+
 test('会话限定在别的组织时，身份页不再说「可在项目列表中打开」，一键切回后项目列表能看到仓库', async ({ page }) => {
   const f = await identityFixture(), output = '.tmp/ui-identity-scope';
   mkdirSync(output, { recursive: true });
