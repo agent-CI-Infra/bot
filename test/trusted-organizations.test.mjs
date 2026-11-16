@@ -4,6 +4,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { identityFixture } from './identity-fixture.mjs';
 import { session } from '../dist/app/auth.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Store } from '../dist/storage/database.js';
 
 // A console client of a session: JSON in and out, with the session's CSRF token on writes.
 const client = (f, credentials) => async (path, method = 'GET', body) => {
@@ -39,16 +43,23 @@ test('project administrators start repositories of a trusted organization with i
   const trusted = await admin('/api/trusted-organizations/10', 'PUT', { model_id: model.id, development_enabled: true });
   assert.equal(trusted.status, 200, JSON.stringify(trusted.value));
   assert.deepEqual({ ...trusted.value.organization, trusted_at: undefined, updated_at: undefined },
-    { owner_id: '10', owner_login: 'fixture', trusted_by: 'administrator', trusted_at: undefined, updated_at: undefined, model: { id: model.id, name: 'Shared fixture' }, development_enabled: true });
+    { owner_id: '10', owner_login: 'fixture', trusted_by: 'administrator', trusted_at: undefined, updated_at: undefined, model: { id: model.id, name: 'Shared fixture' }, capability_ceiling: 'develop', development_enabled: true });
   assert.deepEqual(audits(f, 'organization.trusted').map(row => row.resource_id), ['10']);
+  // Changing the defaults (#850): the capability ceiling replaces the development choice, which is still accepted.
+  for (const change of [{ capability_ceiling: 'merge' }, { capability_ceiling: 'read', development_enabled: false }])
+    assert.equal((await admin('/api/trusted-organizations/10', 'PUT', change)).value.error, 'invalid_capability_ceiling', JSON.stringify(change));
+  const updated = await admin('/api/trusted-organizations/10', 'PUT', { model_id: model.id, capability_ceiling: 'comment' });
+  assert.deepEqual([updated.value.organization.capability_ceiling, updated.value.organization.development_enabled], ['comment', false]);
+  assert.deepEqual(audits(f, 'organization.trust_updated'), audits(f, 'organization.trusted'));
+  assert.equal((await admin('/api/trusted-organizations/10', 'PUT', { model_id: model.id, capability_ceiling: 'develop' })).value.organization.capability_ceiling, 'develop');
   assert.deepEqual(await pending(), [['103', true], ['104', true]]);
 
   // The administrator starts 103: no choices, the organization's defaults, and the start is audited as theirs.
   assert.equal((await byAdmin('/api/installations/103/activate', 'POST', { model_id: own.id })).value.error, 'unknown_field');
   const started = await byAdmin('/api/installations/103/activate', 'POST', {});
   assert.equal(started.status, 201, JSON.stringify(started.value));
-  assert.deepEqual({ ...h.store.get("SELECT enabled,review_enabled,development_enabled,model_id FROM policies WHERE repository_id='103'") },
-    { enabled: 1, review_enabled: 1, development_enabled: 1, model_id: model.id });
+  assert.deepEqual({ ...h.store.get("SELECT enabled,capability_ceiling,review_enabled,development_enabled,model_id FROM policies WHERE repository_id='103'") },
+    { enabled: 1, capability_ceiling: 'develop', review_enabled: 1, development_enabled: 1, model_id: model.id });
   assert.ok(h.store.get("SELECT 1 FROM model_projects WHERE model_id=? AND repository_id='103'", model.id), 'the default model is authorized to the new project');
   assert.deepEqual(audits(f, 'repository.activated').filter(row => row.resource_id === '103'), [{ user_id: principal, resource_id: '103' }]);
   assert.ok((await byAdmin('/api/repositories')).value.repositories.some(repo => repo.id === '103'));
@@ -70,11 +81,25 @@ test('project administrators start repositories of a trusted organization with i
   assert.equal((await byAdmin('/api/installations/104/activate', 'POST', {})).value.error, 'organization_not_trusted');
   assert.equal((await admin('/api/trusted-organizations/10', 'DELETE', {})).value.error, 'organization_not_trusted');
 
-  // A super administrator's start can trust the organization again, with this start's shared model and development choice.
+  // A super administrator's start can trust the organization again, with this start's shared model and capability ceiling.
   const list = (await admin('/api/installations')).value.repositories;
   assert.equal(list.find(repo => repo.id === '104').organization_trusted, false);
   assert.equal((await admin('/api/installations/104/activate', 'POST', { model_id: model.id, development_enabled: false, trust_organization: true })).status, 201);
   const again = (await admin('/api/trusted-organizations')).value;
-  assert.deepEqual(again.organizations.map(o => [o.owner_id, o.model?.id, o.development_enabled]), [['10', model.id, false]]);
+  assert.deepEqual(again.organizations.map(o => [o.owner_id, o.model?.id, o.capability_ceiling, o.development_enabled]), [['10', model.id, 'comment', false]]);
   assert.equal((await admin('/api/installations')).value.repositories.find(repo => repo.id === '104').organization_trusted, true);
+});
+
+test('saved trust defaults become a capability ceiling without widening them (#850)', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'trust-ceiling-')), database = join(directory, 'control.sqlite'), key = Buffer.alloc(32, 3);
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  // Defaults saved before #850: only whether development started enabled.
+  let store = new Store(database, key);
+  store.db.exec('ALTER TABLE trusted_organizations DROP COLUMN capability_ceiling');
+  for (const [owner, development] of [['10', 1], ['20', 0]])
+    store.run("INSERT INTO trusted_organizations(owner_id,owner_login,trusted_by,trusted_at,development_enabled,updated_at) VALUES(?,?,'admin','now',?,'now')", owner, 'org-' + owner, development);
+  store.close(); store = new Store(database, key); t.after(() => store.close());
+  // Starting always reviewed: development on is develop, off is comment.
+  assert.deepEqual(store.all('SELECT owner_id,capability_ceiling,development_enabled FROM trusted_organizations ORDER BY owner_id').map(row => ({ ...row })),
+    [{ owner_id: '10', capability_ceiling: 'develop', development_enabled: 1 }, { owner_id: '20', capability_ceiling: 'comment', development_enabled: 0 }]);
 });

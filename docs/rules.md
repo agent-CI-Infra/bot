@@ -80,7 +80,7 @@ development_label: bot-develop
 
 - 有人（不是 App）给 Issue 加上这个标签，是[自动开发](#自动开发什么时候开始)的条件之一。比较标签名时不区分大小写。
 - 写法和限制同检视标签：可以写成 `development_label: "<name>"`；名字最长 50 个字符，不能有首尾空白和控制字符；控制面采用文件里第一次出现的这一行。
-- 去掉这一行、冒号后留空（`development_label:`），或写成 `development_label: ""`，标签名仍是 `bot-develop`。不能靠改规则关掉这道要求；不想让 bot 自动开发，请管理员关掉该项目的开发开关。
+- 去掉这一行、冒号后留空（`development_label:`），或写成 `development_label: ""`，标签名仍是 `bot-develop`。不能靠改规则关掉这道要求；不想让 bot 自动开发，请管理员把该项目的能力上限设在「可开发并开 PR」以下。
 
 ## 自动开发什么时候开始
 

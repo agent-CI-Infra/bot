@@ -30,16 +30,17 @@ test('a trusted organization lets its repository administrator start a repositor
     await expect(member.getByRole('heading', { name: '等待超级管理员启动' })).toBeVisible();
     await expect(member.locator('[data-key="pending:103"]').getByRole('button', { name: '复制提醒' })).toBeVisible();
 
-    // The super administrator trusts fixture in the settings card, with the shared model and development on.
+    // The super administrator trusts fixture in the settings card, with the shared model and the develop ceiling.
     await login(page, f, '/#/settings/projects');
     const card = page.locator('section.side-card', { has: page.getByRole('heading', { name: '受信任的组织' }) });
     await expect(card).toContainText('还没有受信任的组织');
     await card.getByLabel('要信任的组织', { exact: true }).selectOption('10');
     await card.getByLabel('新组织 的默认模型', { exact: true }).selectOption({ label: '共享模型 A' });
-    await card.locator('.trusted-organization-add').getByLabel('启动时同时开启自动开发').check();
+    await card.getByLabel('新组织 的默认能力上限', { exact: true }).selectOption('develop');
     await card.getByRole('button', { name: '信任', exact: true }).click();
     await expect(card.locator('.trusted-organization')).toContainText('由 administrator 于');
     await expect(card.getByLabel('fixture 的默认模型', { exact: true })).toHaveValue(model.id);
+    await expect(card.getByLabel('fixture 的默认能力上限', { exact: true })).toHaveValue('develop');
 
     // The repository administrator now starts 103 themselves, with the organization's defaults.
     await member.reload();
@@ -48,16 +49,22 @@ test('a trusted organization lets its repository administrator start a repositor
     await expect(row).toContainText('可自行启动');
     await row.getByRole('button', { name: '启动', exact: true }).click();
     await expect(member.locator('[data-key="103"]').first()).toContainText('fixture/project-103');
-    expect({ ...f.h.store.get("SELECT enabled,development_enabled,model_id FROM policies WHERE repository_id='103'") }).toEqual({ enabled: 1, development_enabled: 1, model_id: model.id });
+    expect({ ...f.h.store.get("SELECT enabled,capability_ceiling,development_enabled,model_id FROM policies WHERE repository_id='103'") }).toEqual({ enabled: 1, capability_ceiling: 'develop', development_enabled: 1, model_id: model.id });
 
     // An untrusted owner's repository: the super administrator's start dialog offers to trust it.
     await page.goto(f.h.admin + '/#/projects');
     await page.locator('[data-key="105"]').first().getByRole('button', { name: '启动', exact: true }).click();
     await expect(page.locator('#activation-trust')).toContainText('信任 other-org');
+    // The start chooses the project's capability ceiling; it reviews by default.
+    const ceiling = page.locator('#activation-form').getByLabel(/^能力上限：/);
+    await expect(ceiling).toHaveValue('comment');
+    await ceiling.selectOption('read');
+    await expect(page.locator('#activation-ceiling-detail')).toContainText('不在 GitHub 上写任何内容');
     await page.locator('#activation-trust').getByRole('checkbox').check();
     await page.locator('#activation-form').getByRole('button', { name: '启动', exact: true }).click();
     await expect(page.locator('#activation-view')).not.toBeVisible();
-    expect(f.h.store.get("SELECT owner_login FROM trusted_organizations WHERE owner_id='30'")?.owner_login).toBe('other-org');
+    expect({ ...f.h.store.get("SELECT owner_login,capability_ceiling FROM trusted_organizations WHERE owner_id='30'") }).toEqual({ owner_login: 'other-org', capability_ceiling: 'read' });
+    expect(f.h.store.get("SELECT capability_ceiling FROM policies WHERE repository_id='105'")?.capability_ceiling).toBe('read');
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });

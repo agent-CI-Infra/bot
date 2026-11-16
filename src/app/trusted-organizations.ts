@@ -1,15 +1,31 @@
 import type { Store, Row } from '../storage/database.js';
 import { fail, fields, type Json } from '../core/security.js';
 import { type Actor, superAdmin } from './auth.js';
+import { isCeiling, type Ceiling } from '../work/ceiling.js';
 
 // Trusted organizations (#848): a GitHub owner (organization or personal account) whose repository administrators start
 // their own repositories. Only super administrators trust or untrust one; trust only decides who may start a repository
 // later, so revoking it leaves projects already started as they are. Optional defaults apply to repositories started under
-// it: a deployment-shared model, authorized to each such project, and whether development starts enabled.
+// it: a deployment-shared model, authorized to each such project, and the capability ceiling they start with (#850).
 
 export function trustedOrganizationStorage(store: Store): void {
   store.db.exec(`CREATE TABLE IF NOT EXISTS trusted_organizations(owner_id TEXT PRIMARY KEY,owner_login TEXT NOT NULL,trusted_by TEXT NOT NULL,
     trusted_at TEXT NOT NULL,model_id TEXT,development_enabled INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL)`);
+  // The default capability ceiling replaced the development choice (#850). Starting always reviewed, so a saved choice
+  // becomes develop (development on) or comment, the level the same start gave before; development_enabled stays equal to
+  // it for older readers.
+  if (!store.all('PRAGMA table_info(trusted_organizations)').some(column => column.name === 'capability_ceiling')) {
+    store.db.exec('ALTER TABLE trusted_organizations ADD COLUMN capability_ceiling TEXT');
+    store.run("UPDATE trusted_organizations SET capability_ceiling=CASE WHEN development_enabled=1 THEN 'develop' ELSE 'comment' END");
+  }
+}
+/** The ceiling repositories started under a trusted organization get. */
+export const trustCeiling = (row: Row): Ceiling => isCeiling(row.capability_ceiling) ? row.capability_ceiling : row.development_enabled ? 'develop' : 'comment';
+/** The level a start or a trust asks for: capability_ceiling, or the former development_enabled (on: develop, off: comment). */
+export function requestedCeiling(input: { capability_ceiling?: unknown; development_enabled?: unknown }): Ceiling | undefined {
+  if (input.capability_ceiling !== undefined && (!isCeiling(input.capability_ceiling) || input.development_enabled !== undefined)) fail(400, 'invalid_capability_ceiling', 'capability_ceiling');
+  if (input.development_enabled !== undefined && typeof input.development_enabled !== 'boolean') fail(400, 'invalid_field', 'development_enabled');
+  return input.capability_ceiling !== undefined ? input.capability_ceiling as Ceiling : input.development_enabled === undefined ? undefined : input.development_enabled ? 'develop' : 'comment';
 }
 export function trustedOrganization(store: Store, owner: string): Row | undefined {
   return store.get('SELECT * FROM trusted_organizations WHERE owner_id=?', owner);
@@ -25,14 +41,16 @@ function sharedModel(store: Store, value: unknown): string | null {
   return value;
 }
 /** Trusts an owner, or changes its defaults. Runs inside the caller's transaction when there is one. */
-export function trustOrganization(store: Store, actor: string, owner: string, input: { model_id?: unknown; development_enabled?: unknown }): Row {
+export function trustOrganization(store: Store, actor: string, owner: string, input: { model_id?: unknown; capability_ceiling?: unknown; development_enabled?: unknown }): Row {
   const known = knownOwner(store, owner);
   if (!known) return fail(404, 'organization_not_found');
-  if (input.development_enabled !== undefined && typeof input.development_enabled !== 'boolean') fail(400, 'invalid_field', 'development_enabled');
+  // Without a choice the default is comment: started projects review, as starting always did.
+  const level = requestedCeiling(input) ?? 'comment';
   const model = sharedModel(store, input.model_id), now = new Date().toISOString(), previous = trustedOrganization(store, owner);
-  store.run(`INSERT INTO trusted_organizations(owner_id,owner_login,trusted_by,trusted_at,model_id,development_enabled,updated_at) VALUES(?,?,?,?,?,?,?)
-    ON CONFLICT(owner_id) DO UPDATE SET owner_login=excluded.owner_login,model_id=excluded.model_id,development_enabled=excluded.development_enabled,updated_at=excluded.updated_at`,
-  owner, String(known.owner_login || owner), actor, now, model, Number(input.development_enabled === true), now);
+  store.run(`INSERT INTO trusted_organizations(owner_id,owner_login,trusted_by,trusted_at,model_id,development_enabled,capability_ceiling,updated_at) VALUES(?,?,?,?,?,?,?,?)
+    ON CONFLICT(owner_id) DO UPDATE SET owner_login=excluded.owner_login,model_id=excluded.model_id,development_enabled=excluded.development_enabled,
+      capability_ceiling=excluded.capability_ceiling,updated_at=excluded.updated_at`,
+  owner, String(known.owner_login || owner), actor, now, model, Number(level === 'develop'), level, now);
   store.audit(actor, previous ? 'organization.trust_updated' : 'organization.trusted', owner);
   return trustedOrganization(store, owner)!;
 }
@@ -42,7 +60,7 @@ function view(store: Store, row: Row): Json {
     trusted_by: store.get("SELECT display_name FROM external_identities WHERE principal_id=? AND provider='github' AND status<>'revoked'", row.trusted_by)?.display_name
       || store.get('SELECT username FROM users WHERE id=?', row.trusted_by)?.username || null,
     // A default model deleted or no longer shared since reads as none: later starts go without one.
-    model: model ? { id: model.id, name: model.model_name } : null, development_enabled: !!row.development_enabled };
+    model: model ? { id: model.id, name: model.model_name } : null, capability_ceiling: trustCeiling(row), development_enabled: trustCeiling(row) === 'develop' };
 }
 /** GET, PUT and DELETE /api/trusted-organizations[/<owner id>], for super administrators only. */
 export function trustedOrganizationsApi(store: Store, user: Actor, method: string, path: string, input: Json): Json | undefined {
@@ -58,7 +76,7 @@ export function trustedOrganizationsApi(store: Store, user: Actor, method: strin
   const owner = /^\/api\/trusted-organizations\/([1-9]\d*)$/.exec(path)?.[1];
   if (!owner) return fail(404, 'not_found');
   if (method === 'PUT') {
-    fields(input, ['model_id', 'development_enabled']);
+    fields(input, ['model_id', 'capability_ceiling', 'development_enabled']);
     return { organization: view(store, store.transaction(() => trustOrganization(store, user.id, owner, input))) };
   }
   if (method === 'DELETE') {

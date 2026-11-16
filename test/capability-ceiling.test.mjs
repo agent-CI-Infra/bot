@@ -37,6 +37,8 @@ test('upgrading gives each project the narrowest level its switches and writes a
   assert.equal(workActive(store, 'develop-only', 'review.issue'), false); assert.equal(workActive(store, 'develop-only', 'development.issue'), true);
   assert.equal(workActive(store, 'review', 'review.issue'), true); assert.equal(workActive(store, 'review', 'development.issue'), false);
   assert.equal(workActive(store, 'actions', 'actions.failures'), true); assert.equal(workActive(store, 'quiet', 'reply'), false);
+  // Ordinary tasks wrote nothing unless an administrator chose their writes; at develop they would now inherit code delivery.
+  assert.deepEqual(workPermissions(store, 'develop', 'task.request').writes, []); assert.deepEqual(workPermissions(store, 'develop', 'task.development').writes, ['code', 'pull_request']);
   assert.equal(store.get("SELECT count(*) n FROM audit WHERE action='policy.capability_ceiling_migrated'").n, 6);
   // It happens once.
   store.close(); store = new Store(database, key); t.after(() => store.close());
