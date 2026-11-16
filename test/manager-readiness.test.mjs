@@ -68,7 +68,10 @@ test('the manager stays fenced until every saved project has recovered and uncer
   projects.dockerUsageAt = 0; await projects.readDockerUsage();
   const storage = await client.call('GET', '/v1/storage');
   assert.deepEqual(storage.docker.containers, { count: 1, bytes: 20 });
-  assert.equal(storage.docker.volumes, undefined);
+  // The deployment's own volumes are not in this fixture, so the row #968 added is a measured zero, not a missing key;
+  // no assistant HOME volume is listed either.
+  assert.deepEqual(storage.docker.volumes, { count: 0, bytes: 0 });
+  assert.equal(storage.docker.assistant_homes, null);
   assert.equal((await fetch(base + '/v1/projects')).status, 401);
 });
 

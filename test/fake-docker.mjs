@@ -29,7 +29,7 @@ export class FakeDocker {
       if (!types.length) return df;
       return { LayersSize: types.includes('image') ? df.LayersSize : 0,
         Images: types.includes('image') ? df.Images ?? [] : [], Containers: types.includes('container') ? df.Containers ?? [] : [],
-        BuildCache: types.includes('build-cache') ? df.BuildCache ?? [] : [] };
+        BuildCache: types.includes('build-cache') ? df.BuildCache ?? [] : [], Volumes: types.includes('volume') ? df.Volumes ?? [] : [] };
     }
     if (path.startsWith('/images/')) return this.images.get(decodeURIComponent(path.split('/')[2])) || null;
     const [kind, named] = path.slice(1).split('?')[0].split('/'), name = named ? decodeURIComponent(named.split('?')[0]) : undefined;
