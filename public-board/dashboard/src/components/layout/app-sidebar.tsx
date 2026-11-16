@@ -20,8 +20,7 @@ const NAV_LABEL: Record<string, I18nKey> = {
   '/versions': 'nav.community.versions',
   '/ecosystem': 'nav.community.ecosystem',
   '/about': 'nav.about',
-  '/gate': 'nav.qualityGates',
-  '/gate-onboarding': 'gate.onboarding.entry',
+  '/boards/': 'nav.boards',
 }
 
 /** Fallback for group titles when no route-specific label applies. */

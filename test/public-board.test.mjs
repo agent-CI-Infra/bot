@@ -21,11 +21,15 @@ test('verified deliveries update both public contracts through the real local co
   assert.equal(snapshot.repository.name, 'octo/hello');
   assert.equal(snapshot.repository.stars, 1);
   assert.ok(snapshot.sections.ci);
+  // Generic data only (#938): no gate lanes, test reports or coverage, whatever the repository's CI looks like.
+  assert.equal(snapshot.schema_version, 3);
+  assert.deepEqual(Object.keys(snapshot.sections).sort(), ['ci', 'issues', 'ops', 'prs', 'repo']);
+  assert.equal(snapshot.sections.ci.data.lanes, undefined); assert.equal(snapshot.sections.ci.data.gates, undefined);
   assert.equal((await get('/boards/octo/hello/data/history/manifest.json')).status, 200);
-  assert.equal((await get('/boards/octo/hello/data/e2e/index.json')).status, 200);
   assert.deepEqual((await get('/dashboard/data/index.json')).data.repos.map(r => r.fullName), ['octo/hello']);
-  assert.deepEqual((await get('/dashboard/data/gate/index.json')).data.sources.map(r => r.id), ['octo/hello']);
-  assert.equal((await get('/dashboard/data/gate/octo/hello.json')).data.boardUrl, '/boards/octo/hello/');
+  // The gate page's data and the E2E records are gone with them.
+  for (const path of ['/dashboard/data/gate/index.json', '/dashboard/data/gate/octo/hello.json', '/boards/octo/hello/data/e2e/index.json', '/boards/octo/hello/e2e/1/index.html'])
+    assert.equal((await get(path)).status, 404, path);
   assert.equal((await get('/dashboard/data/octo/hello/latest.json')).data.repo.stars, 1);
   const html = await (await fetch(h.webhook + '/dashboard/')).text();
   for (const asset of [...html.matchAll(/(?:src|href)="(\/dashboard\/[^"#]+)"/g)].map(m => m[1])) assert.equal((await fetch(h.webhook + asset)).status, 200, asset);
@@ -54,12 +58,13 @@ test('verified deliveries update both public contracts through the real local co
   assert.deepEqual((await get('/dashboard/data/index.json')).data.repos, []);
 });
 
-test('installation seeds initial collection and repositories without CI retain community data without fabricated gate rows', async t => {
+test('installation seeds initial collection and repositories without CI still get their community data and board', async t => {
   const { boards, state, get } = await publicBoardFixture(t);
   state.runs = false; boards.seed(); await boards.drain();
   assert.equal((await get('/dashboard/data/index.json')).data.repos.length, 1);
-  assert.deepEqual((await get('/dashboard/data/gate/index.json')).data.sources, []);
-  assert.equal((await get('/boards/octo/hello/data/snapshot.json')).data.repository.name, 'octo/hello');
+  const snapshot = (await get('/boards/octo/hello/data/snapshot.json')).data;
+  assert.equal(snapshot.repository.name, 'octo/hello');
+  assert.deepEqual(snapshot.sections.ci.data.workflows.filter(w => w.all.total), []);
 });
 
 test('private exports stay absent until explicit local consent and are withdrawn immediately on uninstall', async t => {
@@ -76,7 +81,7 @@ test('private exports stay absent until explicit local consent and are withdrawn
   assert.ok(!state.requests.some(r => r.path.includes('/dashboard') || r.path.endsWith('/pulls') && r.method === 'POST'));
   h.store.run('UPDATE installed_repositories SET installed=0');
   assert.equal((await fetch(h.webhook + '/boards/octo/hello/data/snapshot.json')).status, 404);
-  assert.deepEqual((await get('/dashboard/data/gate/index.json')).data.sources, []);
+  assert.deepEqual((await get('/dashboard/data/index.json')).data.repos, []);
 });
 
 test('pending generations survive service restart, failures preserve data, and events arriving during collection are retained', async t => {
@@ -118,18 +123,15 @@ test('list switches work before project activation, public defaults on, and priv
   assert.equal((await listed()).board_enabled, false);
 });
 
-test('turning off removes snapshots and both dashboard datasets immediately and persists through restart', async t => {
+test('turning off removes snapshots and the dashboard data immediately and persists through restart', async t => {
   const { h, boards, admin, hook, get } = await publicBoardFixture(t);
   await hook('publish'); await boards.drain();
   const generation = h.store.get('SELECT generation FROM public_board_jobs').generation;
   assert.equal((await get('/dashboard/data/index.json')).data.repos.length, 1);
-  assert.equal((await get('/dashboard/data/gate/index.json')).data.sources.length, 1);
   assert.equal((await admin('/api/installations/101/board', 'PATCH', { enabled: false })).status, 200);
   assert.equal((await get('/boards/octo/hello/data/snapshot.json')).status, 404);
   assert.equal((await get('/dashboard/data/octo/hello/latest.json')).status, 404);
-  assert.equal((await get('/dashboard/data/gate/octo/hello.json')).status, 404);
   assert.deepEqual((await get('/dashboard/data/index.json')).data.repos, []);
-  assert.deepEqual((await get('/dashboard/data/gate/index.json')).data.sources, []);
   await hook('while-off'); boards.seed(); await boards.drain();
   assert.equal(h.store.get('SELECT generation FROM public_board_jobs').generation, generation);
   await h.stop(); await h.start();
@@ -138,7 +140,6 @@ test('turning off removes snapshots and both dashboard datasets immediately and 
   assert.equal((await admin('/api/installations/101/board', 'PATCH', { enabled: true })).status, 200);
   assert.equal((await get('/boards/octo/hello/data/snapshot.json')).status, 200);
   assert.equal((await get('/dashboard/data/index.json')).data.repos.length, 1);
-  assert.equal((await get('/dashboard/data/gate/index.json')).data.sources.length, 1);
 });
 
 test('saved choices survive visibility changes while unsaved repositories follow the new default', async t => {
@@ -194,4 +195,41 @@ test('turning off during collection prevents the in-flight snapshot from being p
   release(); await work;
   assert.equal(h.store.get('SELECT active_path FROM public_board_jobs').active_path, null);
   assert.equal((await get('/boards/octo/hello/data/snapshot.json')).status, 404);
+});
+
+// #938: a board published by an older version still has the gate page's data, E2E record pages and, in its private
+// state, tagged catalogs, coverage stores and run records with test reports. The next collection removes them.
+test('collecting again after the upgrade removes what the gate, coverage and E2E views left, published and private', async t => {
+  const { h, boards, hook, get } = await publicBoardFixture(t);
+  const { join } = await import('node:path'), { existsSync } = await import('node:fs');
+  await hook('first'); await boards.drain();
+  const job = h.store.get('SELECT * FROM public_board_jobs'), stateDir = join(boards.directory, job.account_id, job.repository_id, 'state');
+  // What the older collector wrote beside the generic data.
+  await writeFile(join(job.active_path, 'gate.json'), '{"branchData":[]}');
+  for (const dir of ['board/e2e/7', 'board/data/e2e']) await mkdir(join(job.active_path, dir), { recursive: true });
+  await writeFile(join(job.active_path, 'board/e2e/7/index.html'), '<p>old</p>');
+  await writeFile(join(job.active_path, 'board/data/e2e/index.json'), '{"records":[]}');
+  for (const name of ['tagged.json', 'coverage.json', 'coverage-sources.json']) await writeFile(join(stateDir, '.sync', name), '{}');
+  const sync = JSON.parse(await readFile(join(stateDir, '.sync/state.json'), 'utf8'));
+  delete sync.retired_fields; await writeFile(join(stateDir, '.sync/state.json'), JSON.stringify(sync));
+  const records = join(stateDir, 'site/data/history/records/runs'), [shard] = await readdir(records);
+  const stored = JSON.parse(await readFile(join(records, shard), 'utf8'));
+  for (const run of Object.values(stored)) Object.assign(run, { channel: 'gate', tests: [{ name: 'ut-results', counts: { tests: 3 } }], coverage: [{ lines: 80 }], reports_status: 'available' });
+  await writeFile(join(records, shard), JSON.stringify(stored));
+
+  await hook('after-upgrade'); await boards.drain();
+  const active = h.store.get('SELECT active_path FROM public_board_jobs').active_path;
+  assert.notEqual(active, job.active_path);
+  for (const path of ['gate.json', 'board/e2e', 'board/data/e2e']) assert.equal(existsSync(join(active, path)), false, path);
+  for (const name of ['tagged.json', 'coverage.json', 'coverage-sources.json']) assert.equal(existsSync(join(stateDir, '.sync', name)), false, name);
+  // The run records, private and published, keep only the generic fields; the former "gate" channel is "ci".
+  for (const file of [join(records, shard), join(active, 'board/data/history/records/runs', shard)]) {
+    const runs = Object.values(JSON.parse(await readFile(file, 'utf8')));
+    assert.ok(runs.length > 0, file);
+    for (const run of runs) {
+      assert.equal(run.channel, 'ci', file);
+      for (const field of ['tests', 'coverage', 'reports_status']) assert.equal(field in run, false, `${file}: ${field}`);
+    }
+  }
+  assert.equal((await get('/boards/octo/hello/data/snapshot.json')).data.schema_version, 3);
 });

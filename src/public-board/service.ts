@@ -103,11 +103,6 @@ export class PublicBoards {
       const summaries = await aggregate<any>(available, 'summary.json');
       return json({ generatedAt: new Date().toISOString(), repos: summaries.data, unavailable: summaries.unavailable });
     }
-    if (path === '/dashboard/data/gate/index.json') {
-      const gates = await aggregate<any>(available, 'gate.json');
-      return json({ generatedAt: new Date().toISOString(), windowDays: 7, unavailable: gates.unavailable,
-        sources: gates.data.filter(data => data.branchData.length).map(data => { return { id: data.id, owner: data.owner, name: data.name, file: `${data.owner}/${data.name}.json`, level: data.level, stage: data.stage, boardUrl: data.boardUrl }; }) });
-    }
     if (path === '/dashboard/data/config.json') {
       const configs = (await aggregate<any>(available, 'config.json'));
       return json({ ...(configs.data[0] || { bots: [], longOpenIssueDays: 30 }), internalContributors: Object.assign({}, ...configs.data.map(c => c.internalContributors)), unavailable: configs.unavailable });
@@ -126,16 +121,15 @@ export class PublicBoards {
       })));
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(req.method === 'HEAD' ? undefined : html); return true;
     }
-    const gate = /^\/dashboard\/data\/gate\/([^/]+\/[^/]+)\.json$/.exec(path);
     const community = /^\/dashboard\/data\/([^/]+\/[^/]+)\/(meta|latest|history|pulls|issues|contributors|releases)\.json$/.exec(path);
     const board = /^\/boards\/([^/]+\/[^/]+)(?:\/(.*))?$/.exec(path);
     let file: string;
-    if (gate || community || board) {
-      const key = (gate?.[1] || community?.[1] || board?.[1] || '').toLowerCase(), repo = repos.find(row => String(row.full_name).toLowerCase() === key);
+    if (community || board) {
+      const key = (community?.[1] || board?.[1] || '').toLowerCase(), repo = repos.find(row => String(row.full_name).toLowerCase() === key);
       if (!repo) return fail(404, 'not_found');
-      if (gate || community) {
+      if (community) {
         if (!repo.active_path) return fail(503, 'board_collecting');
-        file = gate ? join(repo.active_path, 'gate.json') : join(repo.active_path, 'public/data', repo.full_name, community![2] + '.json');
+        file = join(repo.active_path, 'public/data', repo.full_name, community[2] + '.json');
       } else {
         if (!path.endsWith('/') && !board![2]) { res.writeHead(308, { Location: `/boards/${key}/` }); res.end(); return true; }
         let asset: string;
@@ -143,7 +137,7 @@ export class PublicBoards {
         if (/^[a-z0-9-]+\.(html|css|js)$/.test(asset)) file = resolve('public-board/single-repo/static', asset);
         else {
           // Only exported evidence is reachable. Collector state and arbitrary filesystem paths never are.
-          if (!/^(data|e2e)\//.test(asset) || /[\x00-\x1f\\]/.test(asset) || asset.split('/').some(p => p === '.' || p === '..' || p.startsWith('.'))) return fail(404, 'not_found');
+          if (!/^data\//.test(asset) || /[\x00-\x1f\\]/.test(asset) || asset.split('/').some(p => p === '.' || p === '..' || p.startsWith('.'))) return fail(404, 'not_found');
           if (!repo.active_path) return fail(503, 'board_collecting');
           file = join(repo.active_path, 'board', asset);
         }

@@ -1,6 +1,6 @@
 import type { Lang } from '@/lib/i18n'
 
-export type NeedKind = 'required' | 'optional' | 'gateRequired'
+export type NeedKind = 'required' | 'optional'
 
 export type AboutCopy = {
   hero: { title: string; subtitle: string }
@@ -27,13 +27,10 @@ export type AboutCopy = {
     needLabels: Record<NeedKind, string>
     rows: { label: string; need: NeedKind; detail: string }[]
   }
-  gate: {
+  boards: {
     title: string
     description: string
-    intro: string
-    configIntro: string
     bullets: string[]
-    footer: string
   }
   data: {
     title: string
@@ -54,40 +51,6 @@ export const ADD_SNIPPET = `{
   "your-org/another-repo": []
 }`
 
-export const GATE_SNIPPET = `{
-  "id": "your-repo",
-  "name": "your-repo",
-  "owner": "your-org",
-  "defaultBranch": "main",
-  "type": "status-board-lanes",
-  "url": "/boards/your-org/your-repo/data/snapshot.json",
-  "dashboardUrl": "/boards/your-org/your-repo/#overview",
-  "boardBaseUrl": "/boards/your-org/your-repo/",
-  "channelMap": [
-    { "channel": "gate", "workflow": ["CI"] },
-    { "channel": "daily", "workflow": ["Nightly"] },
-    { "channel": "release", "workflow": ["Release"] }
-  ],
-  "laneRules": {
-    "pr": { "channel": ["gate"], "event": ["pull_request"] },
-    "main": { "channel": ["gate"], "event": ["push", "workflow_dispatch"] },
-    "daily": { "channel": ["daily"] },
-    "release": { "channel": ["release"] }
-  },
-  "coverageLine": "main",
-  "coverage": {
-    "artifacts": ["node-coverage-summary"],
-    "summaryPaths": ["summary.json", "coverage/summary.json"]
-  },
-  "caseLayers": [
-    {
-      "name": "UT",
-      "artifacts": ["ut-results"],
-      "summaries": ["ut/tagged/group-*/summary.json"]
-    }
-  ]
-}`
-
 const ZH: AboutCopy = {
   hero: {
     title: '关于本站',
@@ -96,11 +59,11 @@ const ZH: AboutCopy = {
   },
   site: {
     title: '站点与源码',
-    description: '一个纯静态的监控看板：社区指标 + 可选接入的质量门禁。',
+    description: '一个纯静态的监控看板：社区指标，以及每个仓库的单仓看板。',
     repoLabel: '仓库：',
     siteLabel: '在线访问：',
     p1: '前端不携带任何 Token，所有展示数据都来自 bot 在 webhook 入口提供的公开数据快照；GitHub Token 只在数据采集时通过环境变量注入，不会写入任何产物。',
-    p2: '页面包括社区总览、Pull Requests、Issues、社区成长、生态影响力（暂未开放）与质量门禁。已安装的公开仓默认进入汇总，私有仓需要管理员在仓库列表开启看板；{config} 仅保留内部贡献者分类规则。',
+    p2: '页面包括社区总览、Pull Requests、Issues、贡献者、社区成长、版本管理、生态影响力（暂未开放），以及每个仓库的单仓看板。已安装的公开仓默认进入汇总，私有仓需要管理员在仓库列表开启看板；{config} 仅保留内部贡献者分类规则。',
   },
   add: {
     title: '新增一个受监控仓库',
@@ -127,7 +90,7 @@ const ZH: AboutCopy = {
   },
   info: {
     title: '需要提供的信息',
-    description: '除仓库全名外都可以后补：先接社区指标，再按需接入质量门禁。',
+    description: '除仓库全名外都可以后补；任何仓库安装后就有社区指标和单仓看板，不需要按约定配置 CI。',
     columns: {
       name: '信息',
       required: '是否必须',
@@ -136,7 +99,6 @@ const ZH: AboutCopy = {
     needLabels: {
       required: '必填',
       optional: '可选',
-      gateRequired: '接入门禁时必填',
     },
     rows: [
       {
@@ -153,36 +115,7 @@ const ZH: AboutCopy = {
       {
         label: '默认分支',
         need: 'optional',
-        detail: '默认 `main`；接入质量门禁时用于定位覆盖率与分支线。',
-      },
-      {
-        label: '是否接入质量门禁',
-        need: 'optional',
-        detail: '不接入时只展示社区指标；接入后质量门禁页增加该仓库一行。',
-      },
-      {
-        label: '门禁看板快照',
-        need: 'gateRequired',
-        detail:
-          'status board 的 `snapshot.json` 地址：`/boards/<owner>/<repo>/data/snapshot.json`',
-      },
-      {
-        label: '门禁看板地址',
-        need: 'optional',
-        detail:
-          '指标 pill 的深链，例如看板的 overview 页：`/boards/<owner>/<repo>/#overview`',
-      },
-      {
-        label: '覆盖率产物',
-        need: 'optional',
-        detail:
-          '覆盖率阈值为 75%；产物为 Actions artifact 名称前缀与包内 summary 路径，例如 `node-coverage-summary` 和 `summary.json`。',
-      },
-      {
-        label: '用例分层',
-        need: 'optional',
-        detail:
-          '层级名、artifact 前缀、summary glob，例如 `UT` / `ut-results` / `ut/tagged/group-*/summary.json`。',
+        detail: '默认 `main`；单仓看板按它区分默认分支与 PR 的 CI 运行。',
       },
       {
         label: '联系人',
@@ -191,23 +124,15 @@ const ZH: AboutCopy = {
       },
     ],
   },
-  gate: {
-    title: '可选：接入质量门禁',
-    description:
-      '按仓库 / 分支展示 PR-READY、PR-MERGE、DAILY、RELEASE 通过率与 UT 覆盖率，支持 24h / 7d / 30d 窗口。',
-    intro:
-      '质量门禁页的列与 SD status board 的车道一一对应：`pr → PR-READY`、`main → PR-MERGE`（SD 的「主干」）、`daily → DAILY`、`release → RELEASE`。`BUILD` 列保留但 SD 看板没有对应车道，因此为空。合并队列（`gh-readonly-queue/...`）会归到目标分支；cancelled / skipped 等未决结果不计入通过率分母。',
-    configIntro: 'bot 从本地快照自动生成门禁来源，启用方式见 {gateConfig}。数据契约示例：',
+  boards: {
+    title: '单仓看板',
+    description: '每个开启看板的仓库都有自己的看板（`/boards/<owner>/<repo>/`），只用 GitHub 原生数据，不需要按约定配置 CI。',
     bullets: [
-      '`url` / `dashboardUrl`：看板快照与看板入口；`boardBaseUrl` 用于生成指标深链。',
-      '看板快照的 lane key 必须与上面的列映射一致（即 `pr`、`main`、`daily`、`release` 四种），否则该车道不会显示。',
-      '`channelMap` / `laneRules`：把 workflow 名称归到 gate / daily / release 通道，并按 event / channel 定位每条车道的最新运行。',
-      '`coverageLine` / `coverage`：在指定分支线上展示 UT 行覆盖率；缺少产物时显示为空，不影响通过率。',
-      '`caseLayers`：每个测试层级的 artifact 前缀与 summary 文件，用于在门禁单元格上显示用例数；需要配合 `laneRules` 才能定位到最新运行。',
-      '没有 status board 时，也可以用 `type: "actions-api"` 直接读 GitHub Actions，并在 `categoryMap` 中把 event / channel 映射到五个门禁列；具体匹配规则见 {gateCollect} 中的说明。',
+      '**总览**：需要处理的问题（默认分支或定时运行失败、PR 检查失败、超期未评审），以及运行最多的 workflow 和最新版本。',
+      '**Issue / PR**：开放项、存活时间、按标签分布，以及每日新增、关闭、合入和存量的趋势图。',
+      '**CI**：每个 workflow 的成功率和耗时、各 job 的成功率和常失败步骤，以及最近的运行；有长期分支线时可以切换。',
+      '采集只用只读安装令牌，不提交、不触发 workflow、不部署；单个仓库采集失败时保留上一次有效数据并退避重试。',
     ],
-    footer:
-      '已验证的 webhook 触发本地采集，门禁汇总与单仓快照一起更新。单仓采集失败时保留上一次有效数据并重试。',
   },
   data: {
     title: '数据产物与更新节奏',
@@ -225,10 +150,6 @@ const ZH: AboutCopy = {
         codes: ['pulls.json', 'issues.json', 'contributors.json'],
         note: '明细记录',
       },
-      {
-        codes: ['gate/index.json', 'gate/<owner>/<name>.json'],
-        note: '门禁聚合数据',
-      },
     ],
     bullets: [
       '**托管**：bot 在 webhook 入口直接提供 Dashboard 和单仓看板。',
@@ -245,7 +166,7 @@ const ZH: AboutCopy = {
       '**内 / 外部**：白名单制，按仓库区分；bot 记为未知，不计入内部或外部，各页面口径一致。',
       '**时间**：数据按 UTC 天切分存储，页面按访问者本地时区展示时间。',
       '**空值**：`null` 表示没有样本，`0` 表示真实的零，两者在图表和表格中不会混用。',
-      '**门禁通过率**：窗口内 success 计为通过，failure / timed_out / startup_failure 计为失败，cancelled / skipped / neutral / stale / action_required 不计入分母；覆盖率低于 75% 标红。',
+      '**CI 成功率**：success 计为成功，failure / timed_out 计为失败，cancelled / skipped 等不计入分母。',
     ],
   },
   notes: {
@@ -262,7 +183,7 @@ const ZH: AboutCopy = {
   feedback: {
     title: '反馈问题',
     p1: '接入过程中遇到问题，可以在 {issues} 提问。',
-    p2: '提交 Issue 时请附上仓库全名、期望接入的页面（社区指标 / 质量门禁）、以及相关的 Actions 运行链接，便于快速定位。',
+    p2: '提交 Issue 时请附上仓库全名、期望查看的页面（社区指标 / 单仓看板）、以及相关的 Actions 运行链接，便于快速定位。',
   },
 }
 
@@ -275,11 +196,11 @@ const EN: AboutCopy = {
   site: {
     title: 'Site and source',
     description:
-      'A fully static dashboard: community metrics plus optional Quality Gates.',
+      'A fully static dashboard: community metrics, plus a board for each repository.',
     repoLabel: 'Repository:',
     siteLabel: 'Live site:',
     p1: 'The frontend holds no tokens. All displayed data comes from public snapshots served by the bot on its webhook listener; the GitHub token is injected only as an environment variable during collection and is never written to any artifact.',
-    p2: 'The site covers Community Overview, Pull Requests, Issues, Growth, Ecosystem (not yet available), and Quality Gates. The monitored list is defined by the keys in the {config} file: add a key to monitor another repository.',
+    p2: 'The site covers Community Overview, Pull Requests, Issues, Contributors, Growth, Versions, Ecosystem (not yet available), and a board for each repository. The monitored list is defined by the keys in the {config} file: add a key to monitor another repository.',
   },
   add: {
     title: 'Add a monitored repository',
@@ -309,7 +230,7 @@ const EN: AboutCopy = {
   info: {
     title: 'What to provide',
     description:
-      'Everything except the full repository name can be added later: start with community metrics, then connect Quality Gates when needed.',
+      'Everything except the full repository name can be added later. Every installed repository gets community metrics and its own board; no CI convention is required.',
     columns: {
       name: 'Item',
       required: 'Required?',
@@ -318,7 +239,6 @@ const EN: AboutCopy = {
     needLabels: {
       required: 'Required',
       optional: 'Optional',
-      gateRequired: 'Required (Gates)',
     },
     rows: [
       {
@@ -337,37 +257,7 @@ const EN: AboutCopy = {
         label: 'Default branch',
         need: 'optional',
         detail:
-          'Defaults to `main`. Used by Quality Gates to locate coverage and branch lines.',
-      },
-      {
-        label: 'Connect Quality Gates?',
-        need: 'optional',
-        detail:
-          'If omitted, only community metrics are shown. When connected, the repository gets a row on the Quality Gates page.',
-      },
-      {
-        label: 'Gate board snapshot',
-        need: 'gateRequired',
-        detail:
-          'The status board’s `snapshot.json` URL: `/boards/<owner>/<repo>/data/snapshot.json`',
-      },
-      {
-        label: 'Gate board URL',
-        need: 'optional',
-        detail:
-          'Deep link for metric pills, such as the board overview: `/boards/<owner>/<repo>/#overview`',
-      },
-      {
-        label: 'Coverage artifacts',
-        need: 'optional',
-        detail:
-          'The threshold is 75%. Provide the Actions artifact name prefix and the summary path inside the artifact, for example `node-coverage-summary` and `summary.json`.',
-      },
-      {
-        label: 'Test case layers',
-        need: 'optional',
-        detail:
-          'Layer name, artifact prefix, and summary glob, for example `UT` / `ut-results` / `ut/tagged/group-*/summary.json`.',
+          'Defaults to `main`. The repository board uses it to tell default-branch CI runs from pull request runs.',
       },
       {
         label: 'Contact',
@@ -376,24 +266,15 @@ const EN: AboutCopy = {
       },
     ],
   },
-  gate: {
-    title: 'Optional: connect Quality Gates',
-    description:
-      'Shows PR-READY, PR-MERGE, DAILY, and RELEASE pass rates plus UT coverage per repository and branch, with 24h / 7d / 30d windows.',
-    intro:
-      'The columns on the Quality Gates page map one-to-one to the SD status board lanes: `pr → PR-READY`, `main → PR-MERGE` (the SD “mainline”), `daily → DAILY`, and `release → RELEASE`. The `BUILD` column is kept but has no corresponding lane on the SD board, so it stays empty. Merge-queue refs (`gh-readonly-queue/...`) are attributed to the target branch; unresolved results such as cancelled / skipped are excluded from the pass-rate denominator.',
-    configIntro:
-      'The bot generates sources from its local snapshots; see {gateConfig} for enabling repositories. Data contract example:',
+  boards: {
+    title: 'Repository boards',
+    description: 'Every repository with its board on has one (`/boards/<owner>/<repo>/`), built from GitHub data alone; no CI convention is required.',
     bullets: [
-      '`url` / `dashboardUrl`: the board snapshot and board entry point. `boardBaseUrl` is used to build metric deep links.',
-      'The lane keys in the board snapshot must match the column mapping above (`pr`, `main`, `daily`, `release`). Otherwise the lane is not displayed.',
-      '`channelMap` / `laneRules`: map workflow names to the gate / daily / release channels and locate the latest run for each lane by event / channel.',
-      '`coverageLine` / `coverage`: show UT line coverage on the specified branch line. When artifacts are missing the value is blank and does not affect the pass rate.',
-      '`caseLayers`: the artifact prefix and summary file for each test layer, used to show case counts in gate cells. It relies on `laneRules` to find the latest run.',
-      'Without a status board, use `type: "actions-api"` to read GitHub Actions directly and map events / channels to the five gate columns in `categoryMap`. See {gateCollect} for the exact matching rules.',
+      '**Overview**: what needs attention (a failed default-branch or scheduled run, failing pull request checks, overdue reviews), the busiest workflows and the latest release.',
+      '**Issues / PRs**: open items, their age, labels, and daily charts of opened, closed, merged and open counts.',
+      '**CI**: each workflow’s success rate and duration, each job’s success rate and most frequently failing steps, and recent runs; long-lived branch lines can be switched.',
+      'Collection uses a read-only installation token and never commits, triggers workflows or deploys. When one repository fails, its last valid data is kept and collection retries with backoff.',
     ],
-    footer:
-      'Verified webhooks update local repository snapshots and gate datasets together. Collection failures retain the last valid data and retry.',
   },
   data: {
     title: 'Data artifacts and refresh cadence',
@@ -417,10 +298,6 @@ const EN: AboutCopy = {
         codes: ['pulls.json', 'issues.json', 'contributors.json'],
         note: 'detailed records',
       },
-      {
-        codes: ['gate/index.json', 'gate/<owner>/<name>.json'],
-        note: 'aggregated Quality Gates data',
-      },
     ],
     bullets: [
       '**Hosting**: the bot directly serves Dashboard and repository boards on the webhook listener.',
@@ -437,7 +314,7 @@ const EN: AboutCopy = {
       '**Internal / external**: allowlist-based and per repository. Bots are unknown and belong to neither group; every page uses the same rule.',
       '**Time**: data is bucketed by UTC day and rendered in the visitor’s local time zone.',
       '**Empty values**: `null` means no sample, while `0` means a real zero. Charts and tables never mix the two.',
-      '**Gate pass rate**: within the window, success counts as passed; failure / timed_out / startup_failure count as failed; cancelled / skipped / neutral / stale / action_required are excluded from the denominator. Coverage below 75% is shown in red.',
+      '**CI success rate**: success counts as succeeded and failure / timed_out as failed; cancelled, skipped and other conclusions are excluded from the denominator.',
     ],
   },
   notes: {
@@ -454,7 +331,7 @@ const EN: AboutCopy = {
   feedback: {
     title: 'Feedback',
     p1: 'If you run into a problem while connecting a repository, ask in {issues}.',
-    p2: 'When opening an Issue, include the full repository name, the page you want to connect (community metrics / Quality Gates), and links to the relevant Actions runs so we can investigate quickly.',
+    p2: 'When opening an Issue, include the full repository name, the page you want to see (community metrics / repository board), and links to the relevant Actions runs so we can investigate quickly.',
   },
 }
 

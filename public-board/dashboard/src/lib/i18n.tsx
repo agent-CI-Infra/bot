@@ -16,8 +16,8 @@ const LANG_COOKIE = 'vite-ui-lang'
 /** zh/en string pairs for every UI string. */
 const DICT = {
   'app.tagline': {
-    zh: '社区运营与质量门禁',
-    en: 'Community & quality gates',
+    zh: '社区运营与仓库健康度',
+    en: 'Community & repository health',
   },
   'nav.community.group': { zh: '社区概览', en: 'Community' },
   'nav.community.pulls': { zh: 'Pull Requests', en: 'Pull Requests' },
@@ -27,7 +27,7 @@ const DICT = {
   'nav.community.versions': { zh: '版本管理', en: 'Versions' },
   'nav.community.ecosystem': { zh: '生态影响力', en: 'Ecosystem' },
   'nav.about': { zh: '关于本站', en: 'About' },
-  'nav.qualityGates': { zh: '质量门禁', en: 'Quality Gates' },
+  'nav.boards': { zh: '单仓看板', en: 'Repository boards' },
 
   'search.placeholder': {
     zh: '搜索仓库 / PR / 运行 ID',
@@ -95,148 +95,6 @@ const DICT = {
   },
   'state.retry': { zh: '重试', en: 'Retry' },
 
-  'gate.title': { zh: '质量门禁', en: 'Quality Gates' },
-  'gate.subtitle': {
-    zh: '各仓库门禁通过率',
-    en: 'Per-repository quality gate performance',
-  },
-  'gate.windowSelect': {
-    zh: '切换统计窗口',
-    en: 'Change the measurement window',
-  },
-  'gate.col.repo': { zh: '仓库', en: 'Repository' },
-  'gate.col.build': { zh: '构建', en: 'Build' },
-  'gate.col.ready': { zh: 'PR-Ready', en: 'PR-Ready' },
-  'gate.col.merge': { zh: 'PR-Merge', en: 'PR-Merge' },
-  'gate.col.daily': { zh: '每日', en: 'Daily' },
-  'gate.col.release': { zh: '发布', en: 'Release' },
-  'gate.col.coverage': { zh: '覆盖率', en: 'Coverage' },
-  'gate.live': { zh: '实时 · 30s', en: 'Live · 30s' },
-  'gate.branches': { zh: '分支', en: 'Branches' },
-  'gate.demo': { zh: '演示', en: 'Demo' },
-  'gate.casesPlanned': { zh: '计划', en: 'planned' },
-  'gate.level': { zh: '等级', en: 'Level' },
-  'gate.levelHint': { zh: '合规等级 C0–C4', en: 'Compliance level C0–C4' },
-  'gate.stage.discovered': { zh: '已发现', en: 'Discovered' },
-  'gate.stage.gatesRunning': { zh: '运行中', en: 'Running' },
-  'gate.stage.casesPending': { zh: '待填用例', en: 'Cases pending' },
-  'gate.stage.observing': { zh: '观察中', en: 'Observing' },
-  'gate.stage.enforced': { zh: '已生效', en: 'Enforced' },
-  'gate.stage.failing': { zh: '失败', en: 'Failing' },
-  'gate.cases.todo': { zh: '待填 {n}', en: '{n} to fill' },
-  'gate.cases.notRun': { zh: '未执行 {n}', en: '{n} not run' },
-  'gate.cases.ready': {
-    zh: '用例 {ready}/{total}',
-    en: 'Cases {ready}/{total}',
-  },
-  'gate.openBoard': { zh: '打开完整看板', en: 'Open full board' },
-  'gate.funnel.title': { zh: '接入漏斗', en: 'Onboarding funnel' },
-  'gate.casesHint': {
-    zh: '用例数：通过/计划（最近一次运行）',
-    en: 'Cases passed/planned in the latest run',
-  },
-  'gate.openSource': {
-    zh: '在数据来源看板中查看',
-    en: 'View on the source dashboard',
-  },
-  'gate.demoHint': {
-    zh: '该仓库尚未接入真实门禁数据，数值为设计占位',
-    en: 'Real gate data is not wired in yet — these numbers are placeholders',
-  },
-  'gate.switchBranch': { zh: '切换分支', en: 'Switch branch' },
-  'gate.synced': {
-    zh: '数据同步自 GitHub · 2 分钟前',
-    en: 'Synced from GitHub · 2 min ago',
-  },
-  'gate.summary': {
-    zh: '{total} 个仓库 · {passed} 通过 · {failed} 失败 · {running} 运行中',
-    en: '{total} repositories · {passed} passing · {failed} failing · {running} running',
-  },
-  'gate.boards.entry': { zh: '单仓看板', en: 'Repo boards' },
-  'gate.onboarding.entry': { zh: '接入门禁', en: 'Add gates' },
-  'gate.onboarding.title': { zh: '接入门禁', en: 'Add gates to your repo' },
-  'gate.onboarding.subtitle': {
-    zh: '把 CI-workflow 模板复制到你的仓库，四步跑通五条 lane。',
-    en: 'Copy the CI-workflow template into your repository and run five lanes in four steps.',
-  },
-  'gate.onboarding.back': {
-    zh: '返回质量门禁',
-    en: 'Back to Quality Gates',
-  },
-  'gate.onboarding.hero.title': {
-    zh: '从模板到自动门禁',
-    en: 'From template to automatic gates',
-  },
-  'gate.onboarding.hero.desc': {
-    zh: '门禁接入发生在源仓；单仓看板由本仓统一托管和汇总，不需要另建看板仓。',
-    en: 'Gate onboarding happens in the source repository; this site hosts and aggregates repository boards, with no separate board repository.',
-  },
-  'gate.onboarding.issueHint': {
-    zh: '公开仓默认开启看板；私有仓请管理员在仓库列表开启看板。',
-    en: 'Boards are enabled by default for installed public repositories; ask an administrator to enable private snapshots locally in the repository list using the Board switch.',
-  },
-  'gate.onboarding.tutorial': {
-    zh: '打开模板教程',
-    en: 'Open template guide',
-  },
-  'gate.onboarding.request': {
-    zh: '提交接入申请',
-    en: 'Request onboarding',
-  },
-  'gate.onboarding.step1.title': { zh: '复制模板', en: 'Copy the template' },
-  'gate.onboarding.step1.body': {
-    zh: '在仓库根目录执行；如果已有 .github 或 scripts，合并而不是覆盖。',
-    en: 'Run from the repository root; merge instead of overwriting existing .github or scripts.',
-  },
-  'gate.onboarding.step2.title': {
-    zh: '配置 lane 命令',
-    en: 'Configure lane commands',
-  },
-  'gate.onboarding.step2.body': {
-    zh: '编辑 .github/ci-gates.json，把 build / lint / test 换成项目真实命令。',
-    en: 'Edit .github/ci-gates.json and replace build / lint / test with your real commands.',
-  },
-  'gate.onboarding.step3.title': { zh: '登记用例', en: 'Register cases' },
-  'gate.onboarding.step3.body': {
-    zh: '在 test/cases/case-catalog.yaml 中加用例；ready 用例需要 file、owner 和 case 标记。',
-    en: 'Add cases to test/cases/case-catalog.yaml; ready cases need file, owner and a case marker.',
-  },
-  'gate.onboarding.step4.title': {
-    zh: '设置 required check',
-    en: 'Require the check',
-  },
-  'gate.onboarding.step4.body': {
-    zh: '管理员在 Rulesets / Branch protection 中把 CI Gates / gate 设为必需检查。',
-    en: 'An admin makes CI Gates / gate a required check in Rulesets / Branch protection.',
-  },
-  'gate.onboarding.step4.mergeQueue': {
-    zh: '启用 merge queue 后，merge_group 会自动跑 build + pr-merge。',
-    en: 'With merge queue enabled, merge_group runs build + pr-merge automatically.',
-  },
-  'gate.onboarding.board.title': {
-    zh: '单仓看板由公仓托管',
-    en: 'Repository boards are hosted here',
-  },
-  'gate.onboarding.boardNote': {
-    zh: '公开仓安装后默认提供 /boards/<owner>/<repo>/ 看板，由已验证 webhook 更新；私有仓需要管理员在仓库列表开启看板，启用后快照对外公开。门禁报告仍显示 lane 结论与用例数。',
-    en: 'Installed public repositories default to hosting boards at /boards/<owner>/<repo>/ and updated by verified webhooks. An administrator must enable private snapshots locally in the repository list using the Board switch before they become public. Gate reports retain lane verdicts and case counts.',
-  },
-  'gate.onboarding.boardTemplate': {
-    zh: '查看单仓看板',
-    en: 'Browse repository boards',
-  },
-  'gate.onboarding.boardCreate': {
-    zh: '查看托管看板',
-    en: 'View hosted boards',
-  },
-  'gate.onboarding.boardLink': {
-    zh: '查看当前门禁看板',
-    en: 'View the current gate board',
-  },
-  'gate.empty': {
-    zh: '没有匹配的仓库',
-    en: 'No repositories match the current search',
-  },
 } as const
 
 export type I18nKey = keyof typeof DICT

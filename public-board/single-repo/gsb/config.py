@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,8 +25,6 @@ class Config:
     cache_dir: Path = ROOT / ".cache"
     data_dir: Path = ROOT / ".data"        # board fields, rules, aliases (user data, kept across restarts)
     static_dir: Path = ROOT / "static"
-    # Actions artifacts that carry test results; parsed for the test tab.
-    artifact_names: list[str] = field(default_factory=lambda: ["ut-results", "st-results", "e2e-results", "real-e2e-results"])
     artifact_max_bytes: int = 80 * 1024 * 1024
     review_sla_days: int = 3              # open PR without review after this many days is "waiting too long"
     stale_days: int = 30                  # issue with no update for this long counts as stale
@@ -56,9 +54,6 @@ class Config:
             disk_cache=os.environ.get("GSB_DISK_CACHE", "1").strip().lower() not in ("0", "false", "no", "off"),
             allow_private=os.environ.get("GSB_ALLOW_PRIVATE", "0").strip().lower() in ("1", "true", "yes", "on"),
         )
-        names = os.environ.get("GSB_TEST_ARTIFACTS")
-        if names:
-            cfg.artifact_names = [n.strip() for n in names.split(",") if n.strip()]
         cache = os.environ.get("GSB_CACHE_DIR")
         if cache:
             cfg.cache_dir = Path(cache).expanduser()
