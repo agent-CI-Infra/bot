@@ -44,7 +44,8 @@ export async function harness(t, manager, options = {}) {
   h.client = () => {
     let cookie = '', csrf = '';
     const client = async (path, method = 'GET', data, headers = {}) => {
-      const r = await fetch(h.admin + path, { method, headers: { 'Content-Type': 'application/json', Cookie: cookie, 'X-CSRF-Token': csrf, ...headers },
+      // Synchronous fixture writes can outlive the server's idle timeout before either side processes the socket close.
+      const r = await fetch(h.admin + path, { method, headers: { 'Content-Type': 'application/json', Connection: 'close', Cookie: cookie, 'X-CSRF-Token': csrf, ...headers },
         ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
       const value = await r.json(); if (r.headers.get('set-cookie')) cookie = r.headers.get('set-cookie').split(';')[0];
       if (value.csrf_token) csrf = value.csrf_token;
