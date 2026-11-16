@@ -24,6 +24,8 @@ function probeProtocol(body: Json, base?: { interface_type: ModelInterfaceType; 
 
 function publicModel(store: Store, row: Row): Json {
   return { id: row.id, repository_id: row.repository_id, api_url: row.api_url, model_name: row.model_name,
+    // A shared model serves every project unless a super administrator restricted it (#850).
+    all_projects: row.repository_id === null ? !row.restricted : null,
     key_configured: row.api_key !== null, trusted: true, version: row.version, updated_at: row.updated_at, pricing: pricingFor(store,String(row.id)),
     capabilities:modelCapabilities(store,row as any),capabilities_override:JSON.parse(store.get('SELECT capabilities FROM model_catalog_overrides WHERE model_id=?',row.id)?.capabilities??'{}'),
     protocol: modelProtocol(store, row as any),
@@ -95,7 +97,7 @@ function providerModels(store: Store, row: Row): Row[] {
 }
 function createModel(store: Store, repo: string | null, endpoint: string, key: string, name: string): Row {
   const id = randomId();
-  store.run('INSERT INTO models VALUES(?,?,?,?,?,?,?)', id, repo, endpoint, name, store.secrets.seal({value:key}, `model:${id}`), 1, new Date().toISOString());
+  store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,version,updated_at) VALUES(?,?,?,?,?,?,?)', id, repo, endpoint, name, store.secrets.seal({value:key}, `model:${id}`), 1, new Date().toISOString());
   return store.get('SELECT * FROM models WHERE id=?', id)!;
 }
 export async function models(store: Store, user: Actor, method: string, url: URL, body: Json): Promise<Json | undefined> {
@@ -110,12 +112,12 @@ export async function models(store: Store, user: Actor, method: string, url: URL
   if(path==='/api/models/catalog/refresh'&&method==='POST'){superAdmin(user);fields(body,[]);return {catalog:await modelCatalog(store).refresh()};}
   const modelScope = scope(user, 'm.repository_id'), sharedScope = scope(user, 'mp.repository_id');
   const visible = user.role === 'super_admin' ? { sql: '1=1', args: [] } : {
-    sql: `(${modelScope.sql} OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND ${sharedScope.sql})))`,
+    sql: `(${modelScope.sql} OR (m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND ${sharedScope.sql}))))`,
     args: [...modelScope.args, ...sharedScope.args] };
   if (path === '/api/models' && method === 'GET') {
     const repo = url.searchParams.get('repository_id');
     if (repo) repository(store, user, repo);
-    const extra = repo ? ' AND (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))' : '';
+    const extra = repo ? ' AND (m.repository_id=? OR (m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?))))' : '';
     const rows = store.all(`SELECT m.* FROM models m WHERE ${visible.sql}${extra} ORDER BY m.updated_at`, ...visible.args, ...(repo ? [repo, repo] : []));
     const usage = usageByModel(store, user, rows.map(row => String(row.id)));
     return { models: rows.map(row => ({ ...publicModel(store, row), used_by: usage[String(row.id)] ?? [] })) };
@@ -155,7 +157,7 @@ export async function models(store: Store, user: Actor, method: string, url: URL
     const id = randomId(), model = text(body.model_name);
     const pricing=body.pricing===undefined?null:validatePricing(body.pricing);
     return store.transaction(() => {
-      store.run('INSERT INTO models VALUES(?,?,?,?,?,?,?)', id, repo, endpoint, model, store.secrets.seal({ value: key }, `model:${id}`), 1, new Date().toISOString());
+      store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,version,updated_at) VALUES(?,?,?,?,?,?,?)', id, repo, endpoint, model, store.secrets.seal({ value: key }, `model:${id}`), 1, new Date().toISOString());
       savePricing(store,id,pricing);saveModelMetadata(store,id,{...inheritedProtocol,...body});
       store.audit(user.id, 'model.created', id, repo);
       return { model: publicModel(store,store.get('SELECT * FROM models WHERE id=?', id)!) };
@@ -280,16 +282,18 @@ export async function models(store: Store, user: Actor, method: string, url: URL
       return { model: publicModel(store,store.get('SELECT * FROM models WHERE id=?', id)!) };
     });
   }
+  // A shared model serves every project unless restricted (#850): a list restricts it to those projects, null lifts that.
   if (path === `/api/models/${id}/projects` && method === 'PUT') {
     superAdmin(user); fields(body, ['repository_ids']);
-    if (row.repository_id || !Array.isArray(body.repository_ids)) return fail(400, 'shared_model_required');
-    const ids = [...new Set(body.repository_ids.map(value => text(value)))];
+    if (row.repository_id || body.repository_ids !== null && !Array.isArray(body.repository_ids)) return fail(400, 'shared_model_required');
+    const ids = Array.isArray(body.repository_ids) ? [...new Set(body.repository_ids.map(value => text(value)))] : [];
     ids.forEach(repo => repository(store, user, repo));
     return store.transaction(() => {
       store.run('DELETE FROM model_projects WHERE model_id=?', id);
       ids.forEach(repo => store.run('INSERT INTO model_projects VALUES(?,?)', id, repo));
-      store.audit(user.id, 'model.sharing_updated', id);
-      return { ok: true };
+      store.run('UPDATE models SET restricted=? WHERE id=?', Number(body.repository_ids !== null), id);
+      store.audit(user.id, body.repository_ids === null ? 'model.sharing_all_projects' : 'model.sharing_updated', id);
+      return { ok: true, all_projects: body.repository_ids === null };
     });
   }
   return undefined;

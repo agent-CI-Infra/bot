@@ -156,27 +156,38 @@ test('authentication, CSRF, origin and strict input checks guard management muta
   assert.equal((await h.client()('/api/auth/login', 'POST', { username: 'administrator', password: testPassword() })).status, 401);
 });
 
-test('shared model access requires explicit project grants and never grants credential editing', async t => {
+test('shared models serve every project unless a super administrator restricts them, and never grant credential editing (#850)', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
   const password = testPassword(); await admin('/api/users', 'POST', { username: 'member', password, repository_ids: ['101'] });
   const member = h.client(); await member('/api/auth/login', 'POST', { username: 'member', password });
   const key = testPassword();
   const model = (await admin('/api/models', 'POST', { api_url: 'https://model.invalid', api_key: key, model_name: 'shared' })).value.model;
-  assert.equal((await member('/api/models/' + model.id)).status, 404);
-  await admin(`/api/models/${model.id}/projects`, 'PUT', { repository_ids: ['101'] });
-  const list = (await member('/api/models')).value.models;
-  assert.deepEqual(list.map(r => r.id), [model.id]); assert.ok(!JSON.stringify(list).includes(key));
+  // A new shared model serves every project: the project administrator sees and chooses it without any grant.
+  assert.equal(model.all_projects, true);
+  let list = (await member('/api/models')).value.models;
+  assert.deepEqual(list.map(r => [r.id, r.all_projects]), [[model.id, true]]); assert.ok(!JSON.stringify(list).includes(key));
   assert.equal((await member(`/api/models/${model.id}/credentials/revoke`, 'POST', {})).status, 403);
   assert.equal((await member(`/api/models/${model.id}/projects`, 'PUT', { repository_ids: ['202'] })).status, 403);
   assert.equal((await member(`/api/models/${model.id}`, 'PATCH', { version: 1, api_key: testPassword() })).status, 403);
   assert.equal((await member('/api/repositories/101/policy', 'PATCH', { model_id: model.id })).status, 200);
-  // A super administrator may grant a shared model by choosing it; the project administrator above could only use an existing grant.
-  assert.equal((await admin('/api/repositories/202/policy', 'PATCH', { model_id: model.id })).status, 200);
-  assert.ok(h.store.get('SELECT 1 FROM model_projects WHERE model_id=? AND repository_id=?', model.id, '202'));
-  await admin('/api/repositories/202/policy', 'PATCH', { model_id: null });
+  assert.equal((await member('/api/repositories/101/policy', 'PATCH', { model_id: null })).status, 200);
+  // Restricted to 202, it no longer serves 101.
+  assert.equal((await admin(`/api/models/${model.id}/projects`, 'PUT', { repository_ids: ['202'] })).value.all_projects, false);
+  assert.equal((await member('/api/models/' + model.id)).status, 404);
+  assert.equal((await member('/api/repositories/101/policy', 'PATCH', { model_id: model.id })).value.error, 'model_not_available');
+  // A super administrator may still grant a restricted model to another project by choosing it.
+  assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id })).status, 200);
+  assert.ok(h.store.get('SELECT 1 FROM model_projects WHERE model_id=? AND repository_id=?', model.id, '101'));
+  assert.equal((await member('/api/models')).value.models.find(r => r.id === model.id).all_projects, false);
+  await admin('/api/repositories/101/policy', 'PATCH', { model_id: null });
   await admin(`/api/models/${model.id}/projects`, 'PUT', { repository_ids: [] });
   assert.equal((await member('/api/models/' + model.id)).status, 404);
+  // null lifts the restriction again.
+  assert.equal((await admin(`/api/models/${model.id}/projects`, 'PUT', { repository_ids: null })).value.all_projects, true);
+  assert.equal((await member('/api/models/' + model.id)).status, 200);
+  assert.deepEqual(h.store.all("SELECT action FROM audit WHERE action LIKE 'model.sharing%' ORDER BY rowid").map(row => row.action),
+    ['model.sharing_updated', 'model.sharing_updated', 'model.sharing_all_projects']);
   const b = await account(admin);
   await h.hook(b.path, b.secret, 'other-account', { repository: { id: 101 } });
   assert.equal(h.store.get("SELECT repository_id FROM deliveries WHERE delivery_id='other-account'").repository_id, null);

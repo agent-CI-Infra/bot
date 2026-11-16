@@ -1,4 +1,5 @@
 import { modelCatalogStorage } from '../models/catalog.js';
+import { sharedModelStorage } from '../models/sharing.js';
 import {childTaskStorage} from '../tasks/children.js';
 import {longExecutionStorage} from '../roles/long-execution.js';
 import {priorityStorage} from '../tasks/priority.js';
@@ -244,6 +245,8 @@ export class Store {
     boardStorage(this);
     metricsStorage(this);
     modelCatalogStorage(this);
+    // Shared models serve every project unless restricted (#850).
+    sharedModelStorage(this);
     // Ref columns on task_tools, model_requests and task_logs; the trace triggers below record them.
     trajectoryStorage(this.db);
     workStorage(this);

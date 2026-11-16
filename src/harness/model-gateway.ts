@@ -366,7 +366,7 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
     }
     if (task.repository_id) {
       return store.all(
-        `SELECT m.* FROM models m WHERE m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)) ORDER BY m.updated_at DESC`,
+        `SELECT m.* FROM models m WHERE m.repository_id=? OR (m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?))) ORDER BY m.updated_at DESC`,
         task.repository_id,
         task.repository_id,
       );

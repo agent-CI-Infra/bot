@@ -175,12 +175,14 @@ test('only super administrators change the computer spec, which is forwarded to 
   assert.equal(h.store.get("SELECT enabled FROM policies WHERE repository_id='101'").enabled, 1);
 });
 
-test('a super administrator choosing a shared model grants it to the repository; a project administrator cannot', async t => {
+test('a super administrator choosing a restricted shared model grants it to the repository; a project administrator cannot', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   const shared = (await admin('/api/models', 'POST', { repository_id: null, api_url: 'https://model.invalid/v1', api_key: randomBytes(12).toString('hex'), model_name: 'shared' })).value.model;
   const member = h.client(), memberPassword = randomBytes(16).toString('hex');
   await admin('/api/users', 'POST', { username: 'member', password: memberPassword, repository_ids: ['101'] });
   await member('/api/auth/login', 'POST', { username: 'member', password: memberPassword });
+  // Shared models serve every project unless restricted (#850); restricted to none, 101 may not choose it.
+  await admin(`/api/models/${shared.id}/projects`, 'PUT', { repository_ids: [] });
   assert.equal((await member('/api/repositories/101/policy', 'PATCH', { model_id: shared.id })).status, 400);
   assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { model_id: shared.id, test_command: 'npm test', max_revisions: 2 })).value.policy.model_id, shared.id);
   assert.ok(h.store.get('SELECT 1 FROM model_projects WHERE model_id=? AND repository_id=?', shared.id, '101'));

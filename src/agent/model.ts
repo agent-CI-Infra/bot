@@ -26,7 +26,7 @@ export function selectedModel(store: Store, repositoryId: string, taskKind?: str
 }
 /** A model this project may use: its own, or a shared one granted to it. Returns the row without opening its key. */
 export const visibleModel = (store: Store, repositoryId: string, modelId: string) => store.get(`SELECT m.* FROM models m WHERE m.id=? AND
-    (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))`, modelId, repositoryId, repositoryId);
+    (m.repository_id=? OR (m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?))))`, modelId, repositoryId, repositoryId);
 /** The run-time model of a visible row; the key is opened here and never stored with a role snapshot. */
 export interface RuntimeModel {
   id: string; version: number; url: string; key: string; model: string;

@@ -79,8 +79,8 @@ export class ManagementService {
       manager:managerPrompt(this.store,target.project_id).revision,
       roles:this.store.get('SELECT value FROM settings WHERE key=?','roles:'+target.project_id),
       sources:this.store.get('SELECT sha,files FROM repository_rule_sources WHERE repository_id=?',target.project_id),
-      models:this.store.all(`SELECT id,version,model_name,api_url,api_key FROM models WHERE repository_id=? OR (repository_id IS NULL AND EXISTS
-        (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?)) ORDER BY id`,target.project_id,target.project_id)});
+      models:this.store.all(`SELECT id,version,model_name,api_url,api_key FROM models WHERE repository_id=? OR (repository_id IS NULL AND (models.restricted=0 OR EXISTS
+        (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?))) ORDER BY id`,target.project_id,target.project_id)});
   }
   private policy(actor:ActorContext,project:string): Row|undefined {
     const tenant=this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',project)?.tenant_id;

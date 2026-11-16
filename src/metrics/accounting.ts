@@ -151,7 +151,7 @@ export function withTaskMetrics<T extends Row>(store: Store, tasks: T[], now=Dat
 
 /** Only visible configured models contribute manual prices; otherwise use an unambiguous official catalog match. */
 export function externalModelPricing(store:Store,task:Row,model:string):Pricing|null {
-  const models=task.repository_id?store.all(`SELECT m.id,m.model_name FROM models m WHERE m.repository_id=? OR m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects p WHERE p.model_id=m.id AND p.repository_id=?)`,task.repository_id,task.repository_id)
+  const models=task.repository_id?store.all(`SELECT m.id,m.model_name FROM models m WHERE m.repository_id=? OR m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects p WHERE p.model_id=m.id AND p.repository_id=?))`,task.repository_id,task.repository_id)
     :store.all('SELECT m.id,m.model_name FROM models m JOIN service_roles r ON r.model_id=m.id WHERE r.id=?',task.service_role_id??'');
   const matching=models.filter(row=>normalizeModelName(row.model_name)===normalizeModelName(model));
   if(!matching.length)return catalogPricing(store,{api_url:'',model_name:model});

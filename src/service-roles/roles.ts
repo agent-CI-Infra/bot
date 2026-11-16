@@ -1,4 +1,5 @@
 import type { Store, Row } from '../storage/database.js';
+import { modelServes } from '../models/sharing.js';
 import { fail, fields, object, randomId, text, type Json } from '../core/security.js';
 import { stop } from '../agent/common.js';
 import { openModel } from '../agent/model.js';
@@ -75,9 +76,8 @@ export function serviceRole(store: Store, id: string): Row | undefined {
  * is authorized to. A project's model is trusted with that project's code only, so a group reading several projects may only
  * use a model every one of them has.
  */
-export function modelServes(store: Store, model: Row, project: string): boolean {
-  return model.repository_id === project || model.repository_id === null && !!store.get('SELECT 1 FROM model_projects WHERE model_id=? AND repository_id=?', model.id, project);
-}
+/** Whether a model serves a project (see models/sharing.ts): the group model rule reads it for every project in scope. */
+export { modelServes };
 /** The projects (id and full name) among `projects` a model may not serve, in their order. */
 export function modelGaps(store: Store, modelId: string, projects: string[]): { id: string; full_name: string }[] {
   const model = store.get('SELECT * FROM models WHERE id=?', modelId);

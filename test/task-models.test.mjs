@@ -30,6 +30,8 @@ test('task model overrides are exact, extensible and persisted, unspecified task
 
 test('task model configuration enforces repository scope and grants shared models only through an administrator', async t => {
   const {h, admin, member, review, other, shared} = await fixture(t);
+  // Shared models serve every project unless restricted (#850); this one is restricted to none.
+  await admin(`/api/models/${shared.id}/projects`, 'PUT', {repository_ids: []});
   for (const model of [other.id, shared.id, 'unknown']) {
     const denied = await member('/api/repositories/101/policy', 'PATCH', {task_models: {'review.pr': model}});
     assert.deepEqual([denied.status, denied.value.error], [400, 'model_not_available']);
