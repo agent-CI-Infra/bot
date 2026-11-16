@@ -161,6 +161,12 @@ function roleBackendRuntimeBox(role, state) {
     ['当前选用版本', rt.selected_version || (rt.config_override ? '本地配置覆盖' : '无可用兼容版本')],
     ['容器内模型中转', relayText],
   ]));
+  // #740: an uninstalled tool volume used to end here. A super administrator gets the way in; anyone else is told who
+  // can install it, because global settings only offers 存储 to a project administrator.
+  if (!cliReady) {
+    if (typeof me === 'object' && me && me.role === 'super_admin') box.append(consoleLink('#/settings/agent-tools', '打开工具卷设置', '安装或清理 Claude Code 与 Codex 的版本'));
+    else box.append(note('请平台管理员在「全局设置 → Agent CLI 工具卷」中安装兼容版本。'));
+  }
   if (overallReady && targetModelId && state.data.can_edit !== false && typeof current === 'object' && current?.id) {
     const repoId = current.id, tokenSnapshot = typeof renderToken === 'number' ? renderToken : 0;
     const probeNote = element('span', '', 'muted');

@@ -1,6 +1,7 @@
 /** @console-modules
  * settings/nav.js
  * settings/page.js
+ * settings/agent-tools.js
  * settings/projects.js
  * settings/resources.js
  * settings/assistant-computers.js
