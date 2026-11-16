@@ -68,6 +68,13 @@ test('repository list switches replace legacy board execution and control public
     await expect(row('101')).toContainText('未启动');
     // Gate onboarding is gone (#931): the row offers no CI entry of its own.
     await expect(row('101').getByRole('button', { name: '接入门禁', exact: true })).toHaveCount(0);
+    mkdirSync('.tmp/project-list-931', { recursive: true });
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 }); await row('101').scrollIntoViewIfNeeded();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true);
+      await page.screenshot({ path: `.tmp/project-list-931/row-${width}.png` });
+    }
+    await page.setViewportSize({ width: 1920, height: 900 });
     await page.route('**/api/installations/101/board', route => route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"temporary_unavailable"}' }));
     await privateSwitch.click();
     await dialog.getByRole('button', {name: '开启公开看板', exact: true}).click();

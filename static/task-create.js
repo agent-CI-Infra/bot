@@ -45,7 +45,7 @@ async function renderNewTask(request) {
   // A CI change (#931): only a project administrator confirms that a code PR may change .github/workflows/.
   const workflows = document.createElement('input'); workflows.type = 'checkbox'; workflows.name = 'workflow_changes'; workflows.checked = draft.workflowChanges;
   workflows.addEventListener('change', () => { draft.workflowChanges = workflows.checked; });
-  const workflowsLabel = element('label', '', 'task-create-check'); workflowsLabel.append(workflows, element('span', '允许修改 .github/workflows/（CI 改动）'));
+  const workflowsLabel = element('label', '', 'check task-create-check'); workflowsLabel.append(workflows, element('span', '允许修改 .github/workflows/（CI 改动）'));
   const workflowsBox = element('div', '', 'task-create-ci');
   workflowsBox.append(workflowsLabel, note('只有项目管理员可以勾选。bot 推送这个任务的分支时才申请 Workflows 权限；CI 改动以 PR 交付，由人检视合并后才生效。不勾选时，改到 workflow 的分支 GitHub 会拒绝发布。'));
   set.append(field('原始需求', original), field('任务目标', goal), field('工作范围（每行一项）', scope), field('验收条件（每行一项）', criteria), field('交付类型', endpoint), workflowsBox);

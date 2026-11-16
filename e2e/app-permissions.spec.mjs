@@ -86,7 +86,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await expect(items.nth(1)).toContainText('经确认的 CI 改动（手动使用时）：推不了改动 .github/workflows 的 bot 分支，这类 PR 开不出来');
     await expect(items.nth(4)).toContainText('Actions 失败分析在读取运行之前停止：不分类、不重跑、不提报 Issue。涉及：Actions 失败分析（未开启）');
     await expect(items.nth(4)).toContainText('勾选 Workflow run 并保存。这是事件订阅，不是 Workflows 权限');
-    for (const [width, height] of [[1365, 900], [390, 844]]) {
+    for (const [width, height] of [[1365, 900], [1440, 900], [390, 844]]) {
       await page.setViewportSize({ width, height });
       await page.screenshot({ path: `.tmp/app-permissions/gaps-dialog-${width}.png` });
       expect(await gapsView.evaluate(view => view.scrollWidth <= view.clientWidth)).toBe(true);

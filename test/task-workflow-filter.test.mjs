@@ -30,7 +30,7 @@ test('the task list filters by work type and combines with kind as an intersecti
   assert.deepEqual(await ids('?kind=review'), ['ri', 'rp']);
   assert.deepEqual(await ids('?kind=development'), ['di']);
   // A valid work type with no task is an empty list, never a 404.
-  const empty = await admin('/api/tasks?workflow=release.notes');
+  const empty = await admin('/api/tasks?workflow=actions.failures');
   assert.deepEqual([empty.status, empty.value.tasks], [200, []]);
   // Unknown values are refused with a stable code so the console can tell a typo from an empty result.
   for (const query of ['?workflow=nope', '?workflow=Review.pr']) {
