@@ -31,16 +31,21 @@ test('task details show the granted writes, their changes and each run\'s delive
     await page.setViewportSize({ width: 1440, height: 900 });
     await login(page, h.admin + '/#/inbox/101', password);
     await page.locator(`[data-task-id="${id}"]`).getByRole('button', { name: '查看任务', exact: true }).click();
+    // The task page keeps these records in its folded archive section (#952): open it as a person would.
+    await page.locator('details.task-archive-fold > summary').click();
     const card = page.locator('#task-side section').filter({ hasText: '授权写入与交付工具' });
+    await expect(card).toBeVisible();
     await expect(card).toContainText('已授予开或更新 bot PR');
     await expect(card).toContainText('交付工具交报告、开 PR');
     await expect(card).toContainText('开 PR 前需要独立 QA 通过');
-    await expect(card).toContainText('授予 开或更新 bot PR · role:manager：报告发现 calc.mjs 需要改');
-    await expect(card).toContainText('创建时授予 无（只能交报告）');
+    await expect(card).toContainText('授予 开或更新 bot PR · 角色 manager：报告发现 calc.mjs 需要改');
+    await expect(card).toContainText('创建时授予 无（只能交报告） · 人工 administrator');
     await expect(card).toContainText('第 1 次尝试 · dev · 交报告、开 PR');
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 }); await card.scrollIntoViewIfNeeded();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      // The card scrolls nothing sideways inside the task view either (a long person id once did at 390 px).
+      expect(await card.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       if (shots) { mkdirSync(shots, { recursive: true }); await page.screenshot({ path: `${shots}/task-writes-${width}.png` }); }
     }
     expect(errors).toEqual([]);

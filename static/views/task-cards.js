@@ -98,6 +98,8 @@ function taskDispatchCard(entries) {
 const writeTitles = { pull_request: '开或更新 bot PR', review: '发布 PR 检视', github: '评论、标签和 Issue' };
 const deliveryToolTitles = { submit_report: '交报告', open_pull_request: '开 PR', post_review: '发检视', github_write: '直接写 GitHub' };
 const writeList = writes => writes?.length ? writes.map(write => writeTitles[write] || write).join('、') : '无（只能交报告）';
+// Who changed the grant: a role by name, a person by account id (the list wraps long ids, see .history.wrap).
+const grantActor = actor => /^role:/.test(actor || '') ? '角色 ' + actor.slice(5) : /^user:/.test(actor || '') ? '人工 ' + actor.slice(5) : actor || '—';
 function taskWritesCard(writes) {
   const section = card('授权写入与交付工具');
   const narrowed = writes.granted.filter(write => !writes.effective.includes(write));
@@ -105,16 +107,16 @@ function taskWritesCard(writes) {
     ['交付工具', writes.tools.map(tool => deliveryToolTitles[tool] || tool).join('、')],
     ['开 PR 前', writes.pull_request_qa ? '需要独立 QA 通过' : '项目已关闭独立 QA 门槛，仍要通过项目测试命令']]));
   if (writes.changes?.length) {
-    const list = element('ul', '', 'history');
+    const list = element('ul', '', 'history wrap');
     for (const change of writes.changes) {
       const what = change.initial ? '创建时授予 ' + writeList(change.writes)
         : [change.added?.length ? '授予 ' + writeList(change.added) : '', change.removed?.length ? '收回 ' + writeList(change.removed) : ''].filter(Boolean).join('，') || '未变化';
-      list.append(element('li', `${timestamp(change.at)} · ${what} · ${change.actor || '—'}${change.reason ? '：' + change.reason : ''}`));
+      list.append(element('li', `${timestamp(change.at)} · ${what} · ${grantActor(change.actor)}${change.reason ? '：' + change.reason : ''}`));
     }
     section.append(element('p', '授予记录', 'muted'), list);
   }
   if (writes.runs?.length) {
-    const list = element('ul', '', 'history');
+    const list = element('ul', '', 'history wrap');
     for (const run of writes.runs) list.append(element('li', `第 ${run.attempt} 次尝试${run.role ? ' · ' + run.role : ''} · ${run.tools.map(tool => deliveryToolTitles[tool] || tool).join('、')}`));
     section.append(element('p', '各次运行开始时的交付工具', 'muted'), list);
   }
