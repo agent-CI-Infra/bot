@@ -12,6 +12,7 @@ import { storageScan } from './storage-scan.mjs';
 import {local,workspaceRoot,assistant,worktreesDirectory} from './paths.mjs';
 import { assistantFile } from './assistant-files.mjs';
 import { refuseFull, failedFull } from './disk.mjs';
+import { reapBrowserSession } from './browser-session.mjs';
 
 const workspace = workspaceRoot, journal = workspace + '/.runner-journal';
 const idPattern = /^[a-f0-9]{48}$/;
@@ -84,6 +85,7 @@ async function reap({ workspace_id: workspaceId, keep_agent: keepAgent }) {
   // The idle keeper is the first child of the container init; later processes cannot take a lower PID.
   const idle = (await processes()).filter(p => p.ppid === 1 && p.cmdline === 'node /opt/runner/idle.mjs').sort((a, b) => a.pid - b.pid)[0];
   if (idle) keep.add(idle.pid);
+  if (scoped) await reapBrowserSession(workspaceId);
   if (scoped && keepAgent) {
     const {waitingAgent}=await import('./agent.mjs'),pids=await waitingAgent(`${tasksRoot}${workspaceId}`,await processes());
     for(const pid of Array.isArray(pids)?pids:pids?[pids]:[])keep.add(pid);

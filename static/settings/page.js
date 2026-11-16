@@ -39,7 +39,7 @@ async function retentionCard(size, count, time) {
   const { settings, defaults, bounds } = view, status = note(''); status.setAttribute('role', 'status');
   const number = (name, value, [min, max]) => input(name, value ?? '', { type: 'number', min, max, step: 1 });
   const fields = [
-    ['trajectory_days', '轨迹正文：任务结束后保留天数（留空不过期）', `结束的任务和 Manager 分派的轨迹文件，关闭超过这么多天后删除；会话的轨迹不删。同一次运行的模型请求、工具调用和日志在同一个文件里，所以按文件整体删除。`],
+    ['trajectory_days', '轨迹正文：任务结束后保留天数（留空不过期）', `结束的任务和 Manager 分派的轨迹文件，关闭超过这么多天后删除；会话的轨迹不删。同一次运行的模型请求、工具调用和日志在同一个文件里，所以按文件整体删除。同一窗口也清理 bot-data 上已结束任务的 browser-evidence/ 截图目录；没有对应任务的目录视为遗留并删除。`],
     ['manager_payload_days', 'manager 重复正文保留天数', `默认 ${defaults.manager_payload_days} 天。控制面另存了同样的请求和结果。`],
     ['workspace_finished_days', '任务工作区：任务结束后保留天数', `默认 ${defaults.workspace_finished_days} 天；没有任务记录的目录也按这个。为打开的 PR 保留的不受影响。`],
     ['workspace_failed_days', '任务工作区：任务失败后保留天数', `默认 ${defaults.workspace_failed_days} 天。`],
@@ -70,8 +70,8 @@ async function retentionCard(size, count, time) {
   section.append(note('设置了天数的类别，每天在后台分批清理一次：只删正文，记录行、计费、审计和哈希保留，引用到已删正文的地方会显示「已过保留期删除」。留空表示不过期。'), form);
   const last = view.last_cleanup;
   section.append(facts([
-    ['最近一次清理', last?.finished_at ? `${time(last.finished_at)}：轨迹文件 ${count(last.trajectories?.count ?? 0)} 个（${size(last.trajectories?.bytes ?? 0)}），Webhook 正文 ${count(last.deliveries?.count ?? 0)} 条（${size(last.deliveries?.bytes ?? 0)}），提交检查记录 ${count(last.commit_checks?.count ?? 0)} 条`
-      + ((last.trajectories?.failed || last.deliveries?.failed || last.commit_checks?.failed) ? `；${count((last.trajectories?.failed ?? 0) + (last.deliveries?.failed ?? 0) + (last.commit_checks?.failed ?? 0))} 项没能清理，下次再试` : '')
+    ['最近一次清理', last?.finished_at ? `${time(last.finished_at)}：轨迹文件 ${count(last.trajectories?.count ?? 0)} 个（${size(last.trajectories?.bytes ?? 0)}），Webhook 正文 ${count(last.deliveries?.count ?? 0)} 条（${size(last.deliveries?.bytes ?? 0)}），浏览器证据 ${count(last.evidence?.count ?? 0)} 个目录（${size(last.evidence?.bytes ?? 0)}），提交检查记录 ${count(last.commit_checks?.count ?? 0)} 条`
+      + ((last.trajectories?.failed || last.deliveries?.failed || last.evidence?.failed || last.commit_checks?.failed) ? `；${count((last.trajectories?.failed ?? 0) + (last.deliveries?.failed ?? 0) + (last.evidence?.failed ?? 0) + (last.commit_checks?.failed ?? 0))} 项没能清理，下次再试` : '')
       + (last.manager_window === null ? '；manager 没有应答，保留天数下次再同步' : '') + (last.last_error ? `；最近一个错误：${last.last_error}` : '') : '尚未运行'],
     ['群聊记录', view.chats ? `${count(view.chats.configured)} / ${count(view.chats.chats)} 个群设置了保留天数${view.chats.configured ? `（${view.chats.min_days}–${view.chats.max_days} 天）` : ''}；在频道控制台按群设置` : '没有群聊']]));
   return section;
@@ -113,7 +113,7 @@ const settingsCards = {
       + (state.last_error ? `；最近一个错误：${state.last_error}` : '');
     const time = value => value ? new Date(value).toLocaleString('zh-CN') : '—', row = (table, cells) => { const tr = document.createElement('tr'); for (const text of cells) tr.append(element('td', text)); table.body.append(tr); };
     const cards = [], intro = card('存储');
-    intro.append(note(`这里统计 bot 使用的各类存储：轨迹文件、控制面与 manager 的数据库、项目电脑的工作卷和整块数据盘，以及哪些空间可以回收。数字来自后台快照，每 5 分钟更新一次；项目电脑的卷每 6 小时扫描一次，打开页面不遍历文件。最近刷新：${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`
+    intro.append(note(`这里统计 bot 使用的各类存储：轨迹文件、浏览器截图证据、控制面与 manager 的数据库、项目电脑的工作卷和整块数据盘，以及哪些空间可以回收。数字来自后台快照，每 5 分钟更新一次；项目电脑的卷每 6 小时扫描一次，打开页面不遍历文件。最近刷新：${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`
       // A failed manager read keeps the numbers it gave last (#793), so the page says which read they come from.
       + (view.manager_error ? view.manager_read_at
         ? `上次读取于 ${time(view.manager_read_at)}；本次 manager 读取失败（${view.manager_error}），manager 的数字保留上次结果，可能过期。`
@@ -131,7 +131,7 @@ const settingsCards = {
       const host = card('数据盘'), disk = view.host.disk, known = view.host.known ?? {};
       host.append(facts([['总量', size(disk?.total_bytes)], ['已用', size(view.host.used_bytes)], ['剩余', size(disk?.free_bytes)], ['保留空间', size(disk?.reserve_bytes)]]));
       const table = costTable(['占用', '大小']);
-      for (const [key, label] of [['control_database', '控制面数据库 control.sqlite（含 WAL）'], ['control_trajectories', '控制面轨迹文件与 blob'], ['git_cache', 'git 缓存 git-cache'], ['public_boards', '公开看板 public-boards'],
+      for (const [key, label] of [['control_database', '控制面数据库 control.sqlite（含 WAL）'], ['control_trajectories', '控制面轨迹文件与 blob'], ['git_cache', 'git 缓存 git-cache'], ['public_boards', '公开看板 public-boards'], ['browser_evidence', '浏览器截图证据 browser-evidence'],
         ['manager_database', 'manager 账本 manager.sqlite（含 WAL）'], ['manager_trajectories', 'manager 轨迹文件'], ['computers', '项目电脑工作卷'], ['docker_images', 'Docker 镜像'], ['docker_containers', 'Docker 容器可写层'], ['docker_build_cache', 'Docker 构建缓存']])
         row(table, [label, known[key] === null || known[key] === undefined ? '尚未测量' : size(known[key]) + ((view.host.unmeasured ?? []).includes(key) ? '（部分电脑未扫完）' : '')]);
       row(table, ['其他（已用 − 以上合计）', size(view.host.other_bytes) + ((view.host.unmeasured ?? []).length ? '（含尚未测量的项）' : '')]);

@@ -14,6 +14,8 @@ export class LocalManager implements Manager {
     if (!/^[1-9]\d*$/.test(repositoryId) || !root.startsWith('/')) throw new Error('invalid_local_project');
     mkdirSync(root, { recursive: true, mode: 0o700 });
     mkdirSync(root + '/project-notes', { recursive: true, mode: 0o700 });
+    mkdirSync(root + '/home', { recursive: true, mode: 0o700 });
+    mkdirSync(root + '/tmp', { recursive: true, mode: 0o700 });
     this.file = root + '/local-state.json';
     this.runner = resolve(import.meta.dirname, '../../runner/runner.mjs');
     try { this.state = JSON.parse(readFileSync(this.file, 'utf8')); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
@@ -36,6 +38,8 @@ export class LocalManager implements Manager {
           BOT_LOCAL_WORKSPACE: this.root,
           ...(process.env.BOT_AGENT_TOOLS_DIR ? { BOT_AGENT_TOOLS_DIR: process.env.BOT_AGENT_TOOLS_DIR } : {}),
           ...(process.env.BOT_REAL_GH_BIN ? { BOT_REAL_GH_BIN: process.env.BOT_REAL_GH_BIN } : {}),
+          ...(process.env.BOT_BROWSER_EXECUTABLE ? { BOT_BROWSER_EXECUTABLE: process.env.BOT_BROWSER_EXECUTABLE } : {}),
+          ...(process.env.PLAYWRIGHT_BROWSERS_PATH ? { PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH } : {}),
         },
         stdio: ['ignore','pipe','pipe'] });
       let out = '', err = '';

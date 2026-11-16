@@ -237,10 +237,12 @@ $('logout').addEventListener('click', () => { if (taskView.open) leaveTaskDetail
 
 function browserEvidenceCard(task, evidence) {
   const section = card('浏览器证据');
+  const total = Number(evidence.total_steps || evidence.steps.length) || evidence.steps.length;
   const shots = evidence.steps.filter(step => step.screenshot);
-  section.append(element('p', shots.length ? `共 ${evidence.steps.length} 步，其中 ${shots.length} 张截图可打开查看。` : `共 ${evidence.steps.length} 步，没有可查看的截图。`, 'muted'));
+  const listed = evidence.truncated ? `仅展示最近 ${evidence.steps.length} 步（共 ${total} 步）` : `共 ${total} 步`;
+  section.append(element('p', shots.length ? `${listed}，其中 ${shots.length} 张截图可打开查看。` : `${listed}，没有可查看的截图。`, 'muted'));
   const list = element('ol', '', 'browser-evidence');
-  for (const step of evidence.steps) {
+  evidence.steps.forEach((step, index) => {
     const item = element('li', '');
     item.append(element('span', `${step.action} · ${step.result}`, step.error ? 'call' : ''));
     if (step.title) item.append(element('p', step.title, 'muted'));
@@ -251,12 +253,25 @@ function browserEvidenceCard(task, evidence) {
       link.rel = 'noopener noreferrer';
       link.textContent = '打开截图';
       const img = document.createElement('img');
-      img.src = step.screenshot.url;
       img.alt = `${step.action} 第 ${step.n} 步截图`;
+      img.loading = 'lazy';
+      // Only the first two screenshots are fetched immediately so a long run does not download every PNG at once.
+      if (index < 2) img.src = step.screenshot.url;
+      else {
+        img.dataset.src = step.screenshot.url;
+        const watch = new IntersectionObserver(entries => {
+          for (const entry of entries) if (entry.isIntersecting) {
+            img.src = img.dataset.src;
+            delete img.dataset.src;
+            watch.disconnect();
+          }
+        }, { rootMargin: '200px' });
+        watch.observe(img);
+      }
       item.append(img, link);
     }
     list.append(item);
-  }
+  });
   section.append(list);
   return section;
 }
