@@ -12,11 +12,14 @@ const files = {
 
 test('project and control-plane images preinstall Chromium at the documented path', () => {
   for (const [name, text] of [['project', files.project], ['control', files.control]]) {
-    assert.match(text, /\bchromium\b/, `${name} image must install the chromium package`);
+    assert.match(text, /chromium fonts-liberation/, `${name} image must apt-install the chromium package`);
     assert.match(text, /fonts-noto-cjk/, `${name} image must include a CJK font for evidence screenshots`);
     assert.match(text, /COPY scripts\/bot-chromium\.sh \/usr\/local\/bin\/bot-chromium/);
     assert.match(text, /ENV BOT_BROWSER_EXECUTABLE=\/usr\/local\/bin\/bot-chromium/);
   }
+  assert.match(files.wrapper, /HOME="\$\{BOT_BROWSER_HOME:-\/tmp\/bot-chromium-home\}"/);
+  assert.match(files.wrapper, /export HOME/);
+  assert.match(files.wrapper, /mkdir -p "\$HOME"/);
   assert.match(files.wrapper, /exec \/usr\/bin\/chromium/);
   assert.match(files.wrapper, /--no-sandbox/);
   assert.equal(files.manager.includes('bot-chromium'), false, 'manager image must not gain a browser runtime');
