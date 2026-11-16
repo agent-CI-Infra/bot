@@ -202,7 +202,9 @@ jobs:
       - name: Deploy
         if: github.event_name == 'push' && steps.ssh.outputs.configured == 'true'
         # Under the job's 150 minutes, so the step that hangs fails first and shows its own log. Inside it the pull and
-        # the recreate carry a bound of their own (15 + 35 minutes) and the health loop below allows 90.
+        # the recreate carry a bound of their own (15 + 35 minutes) and the health loop below allows 85 (#923: about 88
+        # minutes of wall clock, because each round also makes one docker inspect round trip), so the step's remaining
+        # minutes cover the SSH session, the container sweep before the pull and the EXIT trap.
         timeout-minutes: 145
         env:
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
@@ -223,8 +225,10 @@ jobs:
           echo "BOT_IMAGE_TAG=$2" >> .env
           # Pull and recreate run under the server's own timeout: a bound on the local ssh would only end the client and
           # leave the command running here. 15 minutes for the pull and 35 for the recreate (the manager may take its
-          # 30-minute start period), leaving the health wait below its 90 and the step inside its budget.
-          timeout 15m docker compose pull
+          # 30-minute start period), leaving the health wait below its 85 and the step inside its budget. -k 30s adds the
+          # kill grace period: compose stops a container by asking the same daemon that may be the hang, so SIGTERM alone
+          # can wait forever and the bound would never fire (#923).
+          timeout -k 30s 15m docker compose pull
           # Compose names a service container <project>-<service>-<number>. To recreate one it creates the replacement as
           # <old id>_<project>-<service>-<number>, removes the old container and only then renames the replacement. A
           # deployment interrupted in between leaves a second container for the service: a plain `up -d` adopts it under
@@ -241,12 +245,13 @@ jobs:
           # Recreate every service from this release's compose.yaml, so running this job again converges whatever an
           # interrupted deployment left. A release changes every image tag, so every container is recreated anyway and a
           # normal deployment is down no longer.
-          timeout 35m docker compose up -d --force-recreate
+          timeout -k 30s 35m docker compose up -d --force-recreate
           # The control-plane image's healthcheck turns healthy once the business listener (8791) answers. A start that
           # compacts control.sqlite first (#671, docs/deployment.md) listens only afterwards: wait while the container keeps
-          # running, up to 90 minutes, and show the compaction's progress; a container that stops fails at once.
+          # running, up to 85 minutes (1700 rounds of 3 seconds, plus one docker inspect round trip each, so about 88
+          # minutes of wall clock at most), and show the compaction's progress; a container that stops fails at once.
           bot=$(docker compose ps -q bot)
-          for i in $(seq 1 1800); do
+          for i in $(seq 1 1700); do
             if [ "$(docker inspect --format '{{.State.Health.Status}}' "$bot")" = healthy ]; then docker compose ps; exit 0; fi
             if [ "$(docker inspect --format '{{.State.Status}}' "$bot")" != running ]; then break; fi
             if [ $((i % 20)) = 0 ]; then docker compose logs --since 60s bot manager 2>&1 | grep -E 'compact' | tail -2 || true; fi

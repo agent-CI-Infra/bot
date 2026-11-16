@@ -36,9 +36,9 @@ docker compose -f compose.yaml -f compose.build.yaml up -d --build
 
 要给某次推送到 `main` 的最新提交打标签：合并队列一次合入多个 PR 时只有最后一个提交发布镜像，`main` 的新推送也会取消旧提交还没完成的发布，这些提交打标签会失败。
 
-部署经 SSH 把该版本的 `compose.yaml` 写到服务器目录，在同目录 `.env` 里写入 `BOT_IMAGE_TAG=<版本>`（其他设置保留），然后运行 `docker compose pull`，清理上次中断留下的替换容器，再运行 `docker compose up -d --force-recreate`，等 `bot` 的健康检查通过。`compose.yaml` 每次发布都会被覆盖，服务器自己的设置放在 `.env` 或 `compose.override.yaml`。
+部署经 SSH 把该版本的 `compose.yaml` 写到服务器目录，在同目录 `.env` 里写入 `BOT_IMAGE_TAG=<版本>`（其他设置保留），然后运行 `docker compose pull`，清理上次中断留下的替换容器，再运行 `docker compose up -d --force-recreate`，等 `bot` 的健康检查通过。服务器上这两条命令由 GNU coreutils 的 `timeout` 限时：pull 最多 15 分钟，重建最多 35 分钟（manager 可能用满 30 分钟的启动宽限），再加上 `bot` 最多 85 分钟的健康等待，都算在部署步骤的 145 分钟里。到点先发 SIGTERM，30 秒宽限期后仍未退出就以 SIGKILL 结束，本次部署以非零状态失败（正常到点是 124，用到宽限期时是 137），与健康检查失败的报错分开；排除原因后重跑同一次运行即可收敛。`compose.yaml` 每次发布都会被覆盖，服务器自己的设置放在 `.env` 或 `compose.override.yaml`。
 
-部署要能重跑。Compose 重建一个容器时，先以 `<旧容器 id>_<项目>-<服务>-<序号>` 创建替换容器，再删掉旧容器，最后把替换容器改回 `<项目>-<服务>-<序号>`。中途退出（例如 Docker 停不掉某个容器）会给同一个服务留下第二个容器：普通 `up -d` 会沿用它并保留临时名，`--force-recreate` 则会因为旧容器还占着名字而失败。所以部署在 `up` 之前，先删掉本项目服务中名字不是 `<项目>-<服务>-<序号>` 的容器（只查 `docker compose ps` 列出的服务容器，不碰 manager 创建的项目电脑；替换容器没有数据，数据都在卷里），再用 `--force-recreate` 按该版本的 `compose.yaml` 重建全部服务。发布本来就会换掉所有镜像标签，每个容器都会重建，所以正常部署的停机时间不会因此增加。部署中断或失败后，先看日志排除原因，然后在 Actions 里对该次 Release 运行选择 Re-run failed jobs，只重跑 deploy 任务即可恢复到该版本，不需要上服务器手工处理。任何一步失败时，日志末尾都有 `docker compose ps -a` 列出的每个容器及其状态；`bot` 容器停止，或 90 分钟内没有变为健康时，还会附上它最近 50 行日志；等待期间每分钟输出一次压缩进度（见[启动时压缩数据库](#启动时压缩数据库)）。manager 启动时要逐个恢复已保存的项目，期间 `up -d` 等它健康后才启动 `bot`，这段等待算在 `up -d` 里。`npm run test:deploy:docker` 用真实 Docker Compose 验收这一步，见[开发说明](development.md)。
+部署要能重跑。Compose 重建一个容器时，先以 `<旧容器 id>_<项目>-<服务>-<序号>` 创建替换容器，再删掉旧容器，最后把替换容器改回 `<项目>-<服务>-<序号>`。中途退出（例如 Docker 停不掉某个容器）会给同一个服务留下第二个容器：普通 `up -d` 会沿用它并保留临时名，`--force-recreate` 则会因为旧容器还占着名字而失败。所以部署在 `up` 之前，先删掉本项目服务中名字不是 `<项目>-<服务>-<序号>` 的容器（只查 `docker compose ps` 列出的服务容器，不碰 manager 创建的项目电脑；替换容器没有数据，数据都在卷里），再用 `--force-recreate` 按该版本的 `compose.yaml` 重建全部服务。发布本来就会换掉所有镜像标签，每个容器都会重建，所以正常部署的停机时间不会因此增加。部署中断或失败后，先看日志排除原因，然后在 Actions 里对该次 Release 运行选择 Re-run failed jobs，只重跑 deploy 任务即可恢复到该版本，不需要上服务器手工处理。任何一步失败时，日志末尾都有 `docker compose ps -a` 列出的每个容器及其状态；`bot` 容器停止，或 85 分钟内没有变为健康时，还会附上它最近 50 行日志；等待期间每分钟输出一次压缩进度（见[启动时压缩数据库](#启动时压缩数据库)）。manager 启动时要逐个恢复已保存的项目，期间 `up -d` 等它健康后才启动 `bot`，这段等待算在 `up -d` 里。`npm run test:deploy:docker` 用真实 Docker Compose 验收这一步，见[开发说明](development.md)。
 
 在仓库 Settings → Environments → `production` 中配置：
 
@@ -46,7 +46,7 @@ docker compose -f compose.yaml -f compose.build.yaml up -d --build
 | --- | --- | --- |
 | `DEPLOY_HOST` | 变量 | 服务器地址；不设置时只发布、不部署 |
 | `DEPLOY_PORT` | 变量 | SSH 端口，默认 `22` |
-| `DEPLOY_USER` | 变量 | SSH 用户，需要能运行 `docker compose` |
+| `DEPLOY_USER` | 变量 | SSH 用户，需要能运行 `docker compose`，以及 GNU coreutils 的 `timeout`（要能解析 `15m`、`35m` 这类时长后缀，缺了会在 pull 前以 127 失败） |
 | `DEPLOY_PATH` | 变量 | 服务器上放 `compose.yaml` 的目录。目录名就是 Compose 项目名，接管已有部署时用它原来的目录，才会沿用原来的卷 |
 | `DEPLOY_KNOWN_HOSTS` | 变量 | 服务器的 `known_hosts` 行，可用 `ssh-keyscan -p <端口> <地址>` 获取，核对指纹后填写；主机密钥不符时部署停止 |
 | `DEPLOY_SSH_KEY` | Secret | 部署用 SSH 私钥 |
@@ -161,7 +161,7 @@ runner 只接受 48 位十六进制的目录名，只删除 `/workspace/tasks` �
 - **日志**：开始时写一行数据库大小、空闲页和要复制的实际数据，之后每 15 秒写一次已复制的字节和用时（`[compaction]`，manager 为 `[manager]`），结束时写压缩前后的大小和用时。结果存在各自数据库的 `settings.compaction`，存储页显示。
 - **之后**：压缩后的数据库是 `auto_vacuum=INCREMENTAL`，后台每 10 分钟检查一次，空闲页超过 4096 页时以每步 2048 页执行 `PRAGMA incremental_vacuum`，步与步之间至少让出与这一步同样长的时间，把之后清理出的空间还给磁盘，不需要停机。
 
-**发版前**：压缩期间服务不可用，时长大致与实际数据量成正比。在一台 14 核、31 GB 内存的开发机上，一份 8.9 GiB、其中 3.1 GiB 实际数据的合成库（宽行加索引，删去三分之二）复制加完整性检查用了 11 秒，但文件刚写过、全在页缓存里。生产的库不在缓存里，实际数据还分散在大文件中，按数据盘 100–300 MB/s 的读写估算：`control.sqlite`（约 27 GB 实际数据）约 10–30 分钟，`manager.sqlite`（约 10 GB）约 5–10 分钟，以日志里的进度为准。 manager 先压缩，`bot` 等 manager 健康后才启动，所以总停机是两者之和；manager 健康检查的 `start_period` 为 30 分钟，部署步骤最多等 `bot` 90 分钟并输出压缩进度。数据盘要先留出两边实际数据之和再加余量的空间，否则这次启动跳过压缩、照常运行。
+**发版前**：压缩期间服务不可用，时长大致与实际数据量成正比。在一台 14 核、31 GB 内存的开发机上，一份 8.9 GiB、其中 3.1 GiB 实际数据的合成库（宽行加索引，删去三分之二）复制加完整性检查用了 11 秒，但文件刚写过、全在页缓存里。生产的库不在缓存里，实际数据还分散在大文件中，按数据盘 100–300 MB/s 的读写估算：`control.sqlite`（约 27 GB 实际数据）约 10–30 分钟，`manager.sqlite`（约 10 GB）约 5–10 分钟，以日志里的进度为准。 manager 先压缩，`bot` 等 manager 健康后才启动，所以总停机是两者之和；manager 健康检查的 `start_period` 为 30 分钟，部署步骤最多等 `bot` 85 分钟并输出压缩进度。数据盘要先留出两边实际数据之和再加余量的空间，否则这次启动跳过压缩、照常运行。
 
 ## 备份与恢复
 
