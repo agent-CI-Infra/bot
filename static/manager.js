@@ -149,7 +149,10 @@ function dispatchCard() {
     const event = value.event, position = dialog.scrollTop; body.replaceChildren();
     const group = (title, ...children) => { const el = element('section'); el.append(element('h3', title), ...children); body.append(el); return el; };
     group('触发事件', facts([['事件编号', event.id], ['事件类型', dispatchEventNames[event.type] || event.type], ['来源', event.source], ['收到时间', timestamp(event.created_at)], ['对象', event.object_number ? `${event.object_type} #${event.object_number}` : '未记录对象'], ['投递编号', event.delivery_id || '未记录']]), element('p', event.summary));
-    group(event.state === 'filtered' ? '控制面过滤（没有交给 Manager）' : 'Manager 判断', facts([['状态', dispatchState(event)], ['决定时间', event.decided_at ? timestamp(event.decided_at) : event.state === 'decided' ? '未记录决定时间' : '尚未决定'], ['记录的模型名称', event.model || '未记录；不能用当前配置推断历史模型'], ['当前轮尝试次数', String(event.attempts)]]), element('p', event.reason || '尚无已保存的决定理由。'));
+    // A filtered event never reached the Manager: nothing was decided, no model ran, no attempt was made (#815).
+    const judged = event.state === 'filtered' ? [['状态', dispatchState(event)], ['原因代码', event.result?.filtered || '未记录'], ['记录时间', timestamp(event.decided_at || event.created_at)]]
+      : [['状态', dispatchState(event)], ['决定时间', event.decided_at ? timestamp(event.decided_at) : event.state === 'decided' ? '未记录决定时间' : '尚未决定'], ['记录的模型名称', event.model || '未记录；不能用当前配置推断历史模型'], ['当前轮尝试次数', String(event.attempts)]];
+    group(event.state === 'filtered' ? '控制面过滤（没有交给 Manager）' : 'Manager 判断', facts(judged), element('p', event.reason || '尚无已保存的决定理由。'));
     if (event.brief?.goal) body.lastChild.append(element('p', '任务目标：' + event.brief.goal), note((event.brief.criteria || []).join('；')));
     if (event.error) body.lastChild.append(element('p', '最近失败：' + event.error.code + (event.error.detail ? ' · ' + event.error.detail : ''), 'view-error'));
     // What the control plane refused when the Manager tried to create work (#815), with the reason it was given.

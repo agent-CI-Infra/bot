@@ -53,43 +53,75 @@ function rolePublicationEcho(store: Store, repository: string, body: unknown): b
 }
 const botWrote = (payload: any, body: unknown) => payload?.sender?.type === 'Bot' || botMarker.test(String(body ?? ''));
 const clip = (value: unknown, limit = 4000) => { const text = String(value ?? ''); return text.length > limit ? text.slice(0, limit) + '…' : text; };
+// Why a webhook delivery that a person caused reaches no Manager (#815): kept on a filtered event so the console can say it.
+type Stopped = { stopped: { code: string; reason: string } };
+const stopped = (code: string, reason: string): Stopped => ({ stopped: { code, reason } });
+const isStopped = (value: unknown): value is Stopped => !!value && typeof value === 'object' && 'stopped' in value;
+const botContent = () => stopped('bot_own_content', '这是 bot 或其他 App 写的内容。');
+const filterOff = (what: string) => stopped('event_filter_off', `项目没有把「${what}」交给 Manager（监听与触发）。`);
+// A closed object or a draft pull request; null for an object that is open, or whose state is unknown.
+const closedOrDraft = (object: any, pr: boolean) => object?.state === 'closed' ? stopped('object_closed', `${pr ? 'PR' : 'Issue'} 已关闭。`)
+  : object?.draft === true ? stopped('object_draft', 'PR 是草稿。') : null;
+type UpdateTrigger = { kind: 'review.issue' | 'review.pr', number: number, pullRequest?: Json, trigger: Json };
 // A person updated an open Issue or PR after it was opened: edited its title or body, commented, submitted a review or replied
 // to review comments. Returns the review kind and what triggered it, or null. Opening, new commits and mentions have their
 // own events; drafts, closed objects and the bot's own writing never trigger. `otherBot` is set for another review bot's
 // comment or review on a pull request this bot opened (see otherBotOnBotPullRequest): it counts like a member's.
-export function updateTrigger(event: string, payload: Json, otherBot = false): { kind: 'review.issue' | 'review.pr', number: number, pullRequest?: Json, trigger: Json } | null {
+export function updateTrigger(event: string, payload: Json, otherBot = false): UpdateTrigger | null {
+  const checked = updateCheck(event, payload, otherBot);
+  return checked && !isStopped(checked) ? checked : null;
+}
+// updateTrigger, with the condition that stopped an update a person made; null when the delivery is no update at all (an
+// approval without a body, an edit that changed neither title nor body).
+function updateCheck(event: string, payload: Json, otherBot: boolean): UpdateTrigger | Stopped | null {
   const p = payload as any, action = p.action, actor = String(p.sender?.login || ''), edited = (changes: any) => ['title', 'body'].filter(key => changes && key in changes);
   // Anyone can comment on a public repository: a comment or review counts only from the object's author or from someone
   // with a role in the repository, so strangers cannot spend the model budget. Editing a title or body on GitHub already
   // takes one of those.
   const trusted = (association: unknown, author: any) => otherBot || ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(String(association))
     || author?.id != null && String(author.id) === String(p.sender?.id ?? '');
+  const outsider = () => stopped('outsider_comment', '评论人在仓库里没有角色，也不是作者；外人的评论只有提到 bot 时才交给 Manager。');
   const byBot = (payload: any, body: unknown) => otherBot ? botMarker.test(String(body ?? '')) : botWrote(payload, body);
   const by = otherBot ? { actor_type: 'Bot' } : {};
   // Which comment, review or inline comment this is, so a review of the bot's own pull request can name it as a request.
   const source = (type: string, id: unknown) => /^[1-9]\d*$/.test(String(id ?? '')) ? { source: { type, id: Number(id) }, actor_id: String(p.sender?.id ?? '') } : {};
   const open = (object: any) => object?.state === 'open' && object.draft !== true && Number.isSafeInteger(object.number) && object.number > 0;
-  if (event === 'issues' && action === 'edited' && open(p.issue) && !p.issue.pull_request && edited(p.changes).length && !byBot(p, null))
+  if (event === 'issues' && action === 'edited' && p.issue && !p.issue.pull_request && edited(p.changes).length) {
+    if (!open(p.issue)) return closedOrDraft(p.issue, false);
+    if (byBot(p, null)) return botContent();
     return { kind: 'review.issue', number: p.issue.number, trigger: { reason: 'issue_edited', actor, changed: edited(p.changes),
       previous: Object.fromEntries(edited(p.changes).map(key => [key, clip(p.changes[key]?.from)])) } };
-  if (event === 'issue_comment' && action === 'created' && p.issue?.state === 'open' && Number.isSafeInteger(p.issue.number) && p.issue.number > 0
-    && typeof p.comment?.body === 'string' && !byBot(p, p.comment.body) && trusted(p.comment.author_association, p.issue.user))
+  }
+  if (event === 'issue_comment' && action === 'created' && p.issue) {
+    if (p.issue.state !== 'open') return closedOrDraft(p.issue, !!p.issue.pull_request);
+    if (!Number.isSafeInteger(p.issue.number) || p.issue.number < 1 || typeof p.comment?.body !== 'string') return null;
+    if (byBot(p, p.comment.body)) return botContent();
+    if (!trusted(p.comment.author_association, p.issue.user)) return outsider();
     return { kind: p.issue.pull_request ? 'review.pr' : 'review.issue', number: p.issue.number, trigger: { reason: 'comment', actor, ...by, url: String(p.comment.html_url || ''), ...source('comment', p.comment.id) } };
+  }
   const pr = p.pull_request;
-  // A bot account editing its own PR description is the bot, even though GitHub reports a user.
-  if (event === 'pull_request' && action === 'edited' && open(pr) && edited(p.changes).length && !byBot(p, null)
-    && !(String(pr.user?.id ?? '') === String(p.sender?.id ?? '') && botMarker.test(String(pr.body ?? ''))))
+  if (event === 'pull_request' && action === 'edited' && pr && edited(p.changes).length) {
+    if (!open(pr)) return closedOrDraft(pr, true);
+    // A bot account editing its own PR description is the bot, even though GitHub reports a user.
+    if (byBot(p, null) || String(pr.user?.id ?? '') === String(p.sender?.id ?? '') && botMarker.test(String(pr.body ?? ''))) return botContent();
     return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: 'pull_request_edited', actor, changed: edited(p.changes),
       previous: Object.fromEntries(edited(p.changes).map(key => [key, clip(p.changes[key]?.from)])) } };
-  if (event === 'pull_request_review_comment' && action === 'created' && open(pr) && typeof p.comment?.body === 'string' && !byBot(p, p.comment.body)
-    && trusted(p.comment.author_association, pr.user))
+  }
+  if (event === 'pull_request_review_comment' && action === 'created' && pr && typeof p.comment?.body === 'string') {
+    if (!open(pr)) return closedOrDraft(pr, true);
+    if (byBot(p, p.comment.body)) return botContent();
+    if (!trusted(p.comment.author_association, pr.user)) return outsider();
     return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: p.comment.in_reply_to_id ? 'review_reply' : 'review_comment', actor, ...by,
       url: String(p.comment.html_url || ''), path: String(p.comment.path || ''), line: p.comment.line ?? null, ...source('review_comment', p.comment.id) } };
+  }
   // Every reply to a review thread also arrives as a review without a body; that one is the comment event above.
-  if (event === 'pull_request_review' && action === 'submitted' && open(pr) && !byBot(p, p.review?.body) && trusted(p.review?.author_association, pr.user)
-    && (String(p.review?.body || '').trim() || p.review?.state === 'changes_requested'))
+  if (event === 'pull_request_review' && action === 'submitted' && pr && (String(p.review?.body || '').trim() || p.review?.state === 'changes_requested')) {
+    if (!open(pr)) return closedOrDraft(pr, true);
+    if (byBot(p, p.review?.body)) return botContent();
+    if (!trusted(p.review?.author_association, pr.user)) return outsider();
     return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: 'review_submitted', actor, ...by, state: String(p.review.state || ''),
       body: clip(p.review.body), url: String(p.review.html_url || ''), ...source('review', p.review.id) } };
+  }
   return null;
 }
 // Another review bot's conversation comment, review or inline comment on a pull request this bot opened. The pull request's
@@ -174,8 +206,10 @@ function replyOption(object: 'issue' | 'pr', number: number, head: string | null
 /**
  * The Manager event of one webhook delivery, after the control plane's filters: drafts, closed objects, the bot's own
  * writing, comments of people without a role in the repository and switched-off event kinds never reach the Manager.
+ * A delivery a filter stops returns that filter's reason (#815), decided here so it always names what stopped the event;
+ * null for deliveries that are no event at all.
  */
-function webhookEvent(store: Store, repositoryId: string, event: string, payload: Json, delivery: string, currentPullRequest: Json | undefined, filters: EventFilters): EventInput | null {
+function webhookEvent(store: Store, repositoryId: string, event: string, payload: Json, delivery: string, currentPullRequest: Json | undefined, filters: EventFilters): EventInput | Stopped | null {
   const p = payload as any, action = String(p.action || ''), actor = String(p.sender?.login || '');
   const base = (type: string, key: string, object: 'issue' | 'pr', number: number, summary: string, facts: Json): Omit<EventInput, 'options'> =>
     ({ repositoryId, key: `${repositoryId}:${key}`, type, source: 'github', summary, facts: { event, action, actor, ...facts }, object: { type: object, number }, delivery });
@@ -193,13 +227,22 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
   };
   // An opening counts unless the object is already closed (or a draft), as before; later events need an open object.
   const notClosed = (object: any) => object && object.state !== 'closed' && object.draft !== true && Number.isSafeInteger(Number(object.number)) && Number(object.number) > 0;
-  if (event === 'issues' && !p.issue?.pull_request && notClosed(p.issue)) {
+  // A label counts when a person adds it to an open object.
+  const labelUsable = (object: any) => openObject(object) && typeof p.label?.name === 'string';
+  const byApp = () => stopped('label_by_app', '标签不是人加的。');
+  if (event === 'issues' && p.issue && !p.issue.pull_request) {
     const issue = p.issue, number = Number(issue.number);
-    if (action === 'opened' && rolePublicationEcho(store, repositoryId, issue.body)) return null;
-    if (action === 'opened' && filters['issue.opened']) return { ...base('issue.opened', `issue.opened:${number}`, 'issue', number, `Issue 打开：${clip(issue.title, 120)} #${number}`, { object: objectFacts(issue) }),
-      options: [{ id: 'review', work: 'review.issue', title: `检视 Issue #${number}`, default: true, spec: { type: 'object', kind: 'review.issue', number, head: null, input: payload, delivery } },
-        replyOption('issue', number, null, payload, 'opened', delivery)] };
-    if (action === 'labeled' && openObject(issue) && p.sender?.type === 'User' && typeof p.label?.name === 'string') {
+    if (!notClosed(issue)) return closedOrDraft(issue, false);
+    if (action === 'opened') {
+      if (!filters['issue.opened']) return filterOff('Issue 打开');
+      if (rolePublicationEcho(store, repositoryId, issue.body)) return botContent();
+      return { ...base('issue.opened', `issue.opened:${number}`, 'issue', number, `Issue 打开：${clip(issue.title, 120)} #${number}`, { object: objectFacts(issue) }),
+        options: [{ id: 'review', work: 'review.issue', title: `检视 Issue #${number}`, default: true, spec: { type: 'object', kind: 'review.issue', number, head: null, input: payload, delivery } },
+          replyOption('issue', number, null, payload, 'opened', delivery)] };
+    }
+    if (action === 'labeled') {
+      if (!labelUsable(issue)) return null;
+      if (p.sender?.type !== 'User') return byApp();
       const label = String(p.label.name), options: CreateOption[] = [];
       // A person's development label always reaches the Manager (#815): when the project does not develop now, development is
       // listed as work it does not allow, with the reason, so the Manager can answer the person instead of staying silent.
@@ -216,15 +259,20 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
         const answers = relabel.options.map(option => option.id === 'review' && !dispatched ? { ...option, default: false } : option);
         return { ...relabel, options: [...options, ...answers] };
       }
-      return null;
+      let developmentLabelName: string | null = null; try { developmentLabelName = developmentLabel(store, repositoryId); } catch { /* no label configured */ }
+      if (developmentLabelName === null || !sameLabel(label, developmentLabelName)) return stopped('label_not_dispatched', `标签「${label}」不在交给 Manager 的标签里（监听与触发）。`);
+      return filters['issue.development_label'] ? null : filterOff('开发标签');
     }
   }
-  if (event === 'pull_request' && notClosed(p.pull_request) && sha(p.pull_request.head?.sha)) {
-    const pr = p.pull_request, number = Number(pr.number), head = sha(pr.head.sha)!;
-    const opened = ['opened', 'ready_for_review'].includes(action) && filters['pull_request.opened'], pushed = action === 'synchronize' && filters['pull_request.synchronize'];
-    if (opened && rolePublicationEcho(store, repositoryId, pr.body)) return null;
+  if (event === 'pull_request' && p.pull_request) {
+    const pr = p.pull_request, number = Number(pr.number), head = sha(pr.head?.sha);
+    // Every event below needs an open pull request with a head; anything else on a closed or draft one stops the same way.
+    if (!notClosed(pr) || !head) return closedOrDraft(pr, true);
+    const opened = ['opened', 'ready_for_review'].includes(action), pushed = action === 'synchronize';
     if (opened || pushed) {
       const type = opened ? 'pull_request.opened' : 'pull_request.synchronize';
+      if (!filters[type]) return filterOff(opened ? 'PR 打开' : 'PR 推送新提交');
+      if (opened && rolePublicationEcho(store, repositoryId, pr.body)) return botContent();
       // A push joins the review already working on the pull request, which moves to the new head (#770). A new review of
       // the head is offered only when no review can take it, so two reviews never cover the same push.
       const trigger = { event, action, reason: 'pushed', actor, before: sha(p.before), after: head };
@@ -234,29 +282,40 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
           replyOption('pr', number, head, { ...payload, pull_request: pr }, head, delivery)],
         ...(pushed ? { merge: { key: `${repositoryId}:review.pr:${number}:head:${head}`, data: trigger, trigger, head, kinds: ['review.pr'] } } : {}) };
     }
-    if (action === 'labeled' && openObject(pr) && p.sender?.type === 'User' && typeof p.label?.name === 'string' && labelDispatched(filters, 'pull_request', String(p.label.name)))
+    if (action === 'labeled') {
+      if (!labelUsable(pr)) return null;
+      if (p.sender?.type !== 'User') return byApp();
+      if (!labelDispatched(filters, 'pull_request', String(p.label.name))) return stopped('label_not_dispatched', `标签「${p.label.name}」不在交给 Manager 的标签里（监听与触发）。`);
       return update('pull_request.labeled', 'pr', number, pr, { event, action, reason: 'labeled', actor, label: p.label.name }, 'delivery:' + delivery, { updateId: delivery }, { label: p.label.name });
+    }
   }
   // A PR conversation comment carries only the PR number; the webhook read the current PR before archiving.
   const commented = p.issue?.pull_request ? currentPullRequest as any : null;
   const pullRequestOk = (pr: any, number: number) => openObject(pr) && pr.number === number && !!sha(pr.head?.sha);
+  // A mention the project does not take, or one on a closed or draft pull request, may still count as an update; when it
+  // does not, the mention's reason is the one kept.
+  let mention: Stopped | null = null;
   if (event === 'issue_comment' && mentionsBot(event, payload)) {
     const object = p.issue.pull_request ? 'pr' : 'issue', number = Number(p.issue.number), type = object === 'pr' ? 'pull_request.mention' : 'issue.mention';
-    if (filters[type] && (object === 'issue' || pullRequestOk(commented, number))) {
+    if (!filters[type]) mention = filterOff(object === 'pr' ? 'PR 里提到 bot' : 'Issue 里提到 bot');
+    else if (object === 'issue' || pullRequestOk(commented, number)) {
       const trigger = { event, action, reason: 'mention', actor, url: String(p.comment.html_url || ''), source: { type: 'comment', id: Number(p.comment.id) }, actor_id: String(p.sender?.id ?? '') };
       const kind = object === 'pr' ? 'review.pr' : 'review.issue';
       return update(type, object, number, object === 'pr' ? commented : p.issue, trigger, `${repositoryId}:${kind}:${number}:comment:${p.comment.id}`, { commentId: String(p.comment.id) }, { comment: commentFacts(p.comment) });
-    }
+    } else mention = closedOrDraft(commented, true);
   }
-  const changed = updateTrigger(event, payload, otherBotOnBotPullRequest(store, repositoryId, event, payload));
-  if (changed) {
-    const object = changed.kind === 'review.pr' ? 'pr' : 'issue', type = object === 'pr' ? 'pull_request.updated' : 'issue.updated';
-    const target = object === 'pr' ? (changed.pullRequest || commented) as any : p.issue;
-    if (!filters[type] || object === 'pr' && !pullRequestOk(target, changed.number)) return null;
-    return update(type, object, changed.number, target, { event, action, ...changed.trigger as any }, 'delivery:' + delivery, { updateId: delivery },
-      { ...(p.comment ? { comment: commentFacts(p.comment) } : {}), ...(p.review ? { review: { state: p.review.state ?? null, body: clip(p.review.body, 2000), author: p.review.user?.login ?? null } } : {}) });
-  }
-  return null;
+  const changed = updateCheck(event, payload, otherBotOnBotPullRequest(store, repositoryId, event, payload));
+  if (!changed || isStopped(changed)) return mention ?? changed;
+  const object = changed.kind === 'review.pr' ? 'pr' : 'issue', type = object === 'pr' ? 'pull_request.updated' : 'issue.updated';
+  // A PR conversation comment is checked against the pull request the webhook read: a draft or closed one stops it whatever
+  // the switches say. That read happens only when a switch would let the comment through.
+  const target = object === 'pr' ? (changed.pullRequest || commented) as any : p.issue, usable = object === 'issue' || pullRequestOk(target, changed.number);
+  if (!usable && closedOrDraft(target, true)) return closedOrDraft(target, true);
+  const edit = ['issue_edited', 'pull_request_edited'].includes(String((changed.trigger as any).reason));
+  if (!filters[type]) return mention ?? filterOff(object === 'pr' ? (edit ? 'PR 的编辑' : 'PR 的评论和检视') : edit ? 'Issue 的编辑' : 'Issue 的评论和编辑');
+  if (!usable) return mention;
+  return update(type, object, changed.number, target, { event, action, ...changed.trigger as any }, 'delivery:' + delivery, { updateId: delivery },
+    { ...(p.comment ? { comment: commentFacts(p.comment) } : {}), ...(p.review ? { review: { state: p.review.state ?? null, body: clip(p.review.body, 2000), author: p.review.user?.login ?? null } } : {}) });
 }
 // A person adding the development label offers development to the Manager, which judges from these facts whether the
 // Issue can be developed now. Only the go-ahead itself is a control-plane condition: an open Issue, the label added by a
@@ -302,10 +361,9 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
   if (!policy?.enabled) return filtered('project_disabled', '项目已停用，事件不交给 Manager。');
   if (event === 'issues' && !policy.actions_failures_enabled && store.get('SELECT 1 FROM actions_failure_issues WHERE repository_id=? AND number=?', repositoryId, number))
     return filtered('actions_failures_disabled', '这是 Actions 失败提报的 Issue，项目关闭了 Actions 失败处理。');
-  const filters = eventFilters(store, repositoryId, policy), input = webhookEvent(store, repositoryId, event, payload, delivery, currentPullRequest, filters);
-  if (input) return recordEvent(store, input);
-  const reason = filterReason(store, repositoryId, event, payload, filters);
-  return reason ? filtered(reason.code, reason.reason) : 0;
+  const input = webhookEvent(store, repositoryId, event, payload, delivery, currentPullRequest, eventFilters(store, repositoryId, policy));
+  if (isStopped(input)) return filtered(input.stopped.code, input.stopped.reason);
+  return input ? recordEvent(store, input) : 0;
 }
 
 /** The record of a filtered event: only what a person did on an Issue or pull request (#815). */
@@ -321,36 +379,4 @@ function filteredEvent(repositoryId: string, event: string, payload: Json, deliv
   const type = types[`${event}:${action}`]; if (!type) return null;
   return { repositoryId, key: `${repositoryId}:filtered:${delivery}`, type, summary: `${clip(object.title, 120)} #${number}（${String(p.sender?.login || '')}）`,
     object: { type: pr ? 'pr' as const : 'issue' as const, number }, delivery, facts: { event, action, actor: String(p.sender?.login || '') } };
-}
-/**
- * Why webhookEvent offered nothing for an event a person caused (#815), in the order its filters apply; null for events
- * that are not about people (an approval without a body, an edit that changed nothing) and are not kept.
- */
-function filterReason(store: Store, repositoryId: string, event: string, payload: Json, filters: EventFilters): { code: string; reason: string } | null {
-  const p = payload as any, action = String(p.action || ''), object = p.pull_request ?? p.issue, pr = !!p.pull_request || !!p.issue?.pull_request;
-  if (!object) return null;
-  const comment = p.comment ?? p.review, body = comment?.body ?? (action === 'opened' ? object.body : null);
-  if (object.state === 'closed') return { code: 'object_closed', reason: `${pr ? 'PR' : 'Issue'} 已关闭。` };
-  if (object.draft === true) return { code: 'object_draft', reason: 'PR 是草稿。' };
-  if (action === 'labeled' && p.sender?.type !== 'User') return { code: 'label_by_app', reason: '标签不是人加的。' };
-  if (botWrote(p, body) || action === 'opened' && rolePublicationEcho(store, repositoryId, object.body)) return { code: 'bot_own_content', reason: '这是 bot 或其他 App 写的内容。' };
-  const off = (key: keyof EventFilters, what: string) => !filters[key] ? { code: 'event_filter_off', reason: `项目没有把「${what}」交给 Manager（监听与触发）。` } : null;
-  if (event === 'issues' && action === 'opened') return off('issue.opened', 'Issue 打开');
-  if (event === 'pull_request' && ['opened', 'ready_for_review'].includes(action)) return off('pull_request.opened', 'PR 打开');
-  if (event === 'pull_request' && action === 'synchronize') return off('pull_request.synchronize', 'PR 推送新提交');
-  if (action === 'labeled') {
-    const label = String(p.label?.name ?? ''), development = event === 'issues' && sameLabel(label, developmentLabel(store, repositoryId));
-    if (development && !filters['issue.development_label']) return off('issue.development_label', '开发标签');
-    return development ? null : { code: 'label_not_dispatched', reason: `标签「${label}」不在交给 Manager 的标签里（监听与触发）。` };
-  }
-  if (event === 'issue_comment' && mentionsBot(event, payload)) return off(pr ? 'pull_request.mention' : 'issue.mention', pr ? 'PR 里提到 bot' : 'Issue 里提到 bot');
-  if (comment && ['issue_comment', 'pull_request_review', 'pull_request_review_comment'].includes(event)) {
-    const association = String(comment.author_association ?? ''), author = String(object.user?.id ?? '') === String(p.sender?.id ?? '');
-    if (!['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association) && !author)
-      return { code: 'outsider_comment', reason: '评论人在仓库里没有角色，也不是作者；外人的评论只有提到 bot 时才交给 Manager。' };
-    if (event === 'pull_request_review' && !String(comment.body || '').trim() && comment.state !== 'changes_requested') return null;
-    return off(pr ? 'pull_request.updated' : 'issue.updated', pr ? 'PR 的评论和检视' : 'Issue 的评论和编辑');
-  }
-  if (action === 'edited') return p.changes && ('title' in p.changes || 'body' in p.changes) ? off(pr ? 'pull_request.updated' : 'issue.updated', pr ? 'PR 的编辑' : 'Issue 的编辑') : null;
-  return null;
 }

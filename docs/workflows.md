@@ -76,7 +76,7 @@
 - `continue_task`：续接一个运行中的任务，事件作为更新交给那个检视，它在发布前回应（新提交时先转到新 head）；
 - `ignore_event`：不创建或续接任务；此前已授权工具操作的结果保留在各自的写入账本中。
 
-三种决定都必须写理由（#815 之前是一个 `dispatch` 工具在预先算好的选项里选）。`create_task` 在调用时由控制面检查：项目现在是否允许这项工作、对象上是否已有未结束的同类开发或修订、这个事件的任务是否已经建过。被拒绝时什么都不建，拒绝的代码和原因返回给 Manager 并记在事件的 `refusals` 里（分派详情里的「控制面拒绝」）；Manager 可以先用 `github_write` 回复提出请求的人，再 `ignore_event`，或者改选别的工作。一轮里被拒绝 3 次时按 `ignore` 结束，拒绝记录保留。选「开发 Issue」而检视没有给出实现目标时必须附简要说明。缺少必需的简要说明、多要写入或格式不对时，在同一轮里把错误交回模型改一次，仍不合格就按失败处理。模型优先读 `task_models.manager`，没有时用项目默认模型。分派不保留会话，每次只读取事件和任务事实。
+三种决定都必须写理由（#815 之前是一个 `dispatch` 工具在预先算好的选项里选）。`create_task` 在调用时由控制面检查：项目现在是否允许这项工作、这个事件能否新建这项工作、Issue 上是否已有未结束的开发、Actions 失败提报的 Issue 是否允许开发。被拒绝时什么都不建，拒绝的代码和原因返回给 Manager 并记在事件的 `refusals` 里（分派详情里的「控制面拒绝」）。有两种情况不算拒绝，不返回给 Manager，也不记进 `refusals`：这个事件的任务已经建过（例如重启后同一事件再次决定），不再新建；bot PR 已有未结束的修订，新的修订请求留到那次修订推送的新 head 的检视里再提出。两种情况下这项工作只记在事件结果的 `declined` 里。被拒绝后，Manager 可以先用 `github_write` 回复提出请求的人，再 `ignore_event`，或者改选别的工作。一轮里被拒绝 3 次时按 `ignore` 结束，拒绝记录保留。选「开发 Issue」而检视没有给出实现目标时必须附简要说明。缺少必需的简要说明、多要写入或格式不对时，在同一轮里把错误交回模型改一次，仍不合格就按失败处理。模型优先读 `task_models.manager`，没有时用项目默认模型。分派不保留会话，每次只读取事件和任务事实。
 
 Manager 的写入只能落在本事件所在的仓库：`github_write` 没有仓库参数，路径相对这个仓库，不设次数上限，每次写入都记审计。每次写入带 key，按事件去重：重新分派时用户消息列出已经做过的写入，同一个 key 直接返回上次的结果，不会再写一遍。默认只有 Manager 有 GitHub 写权限（Issue、Pull Request、Contents）。Contents 写包括合并 PR 和写分支（包括默认分支），所以 Manager 默认可以经 `github_write` 合并 PR；这不经过 `POST /api/tasks/:id/merge` 的校验，能否合入由仓库的分支保护和必需检查决定，见[角色池](role-pool.md#authorized-merge)。在「角色 → Manager」把这些资源改成只读后，分派时不再提供相应的写入；全部改成只读时不再提供 `github_write`。
 
@@ -148,8 +148,8 @@ Manager 分派提示词在「角色 → Manager」里作为一份完整文本编
 | --- | --- | --- |
 | `/api/repositories/:id/manager` | GET | 提示词（`revision`、`content`）、各章节（内置文本、是否写过、实际来源和生效文本）、工作类型（开关、写入、可选写入、模型）、分派模型、事件开关和迁移记录 |
 | `/api/repositories/:id/manager` | PUT | `expected_revision` 必填，`prompt`（完整分派提示词）、旧 `content`（任务规则）、`work`（`{<工作类型>: {enabled, writes}}`）、`events`（事件开关和标签列表）可选；经管理服务的 `manager.update` 命令执行，审计相同；版本不一致返回 409 `manager_revision_conflict` |
-| `/api/repositories/:id/dispatch` | GET | 事件记录，最新在前：类型、摘要、状态、结果、理由、简要说明、新建或续接的任务、模型、失败原因；`state`、`decision`（create/continue/ignore）、`type`、`from`（含）/`until`（不含，UTC ISO 时间）、`limit`（1–100）可选；`next_cursor` 用于更早分页，原 `offset` 仍兼容但不能和 cursor 同用。游标绑定项目与筛选，改变筛选后重新读取首页 |
-| `/api/repositories/:id/dispatch/:event` | GET | 本项目的事件摘要、来源、原投递编号、已记录的模型名称、当前状态、实际关联任务和最近 50 条人工重试。排除原始 facts、候选任务输入、租约及凭据；不以当前模型配置补写历史 |
+| `/api/repositories/:id/dispatch` | GET | 事件记录，最新在前：类型、摘要、状态、结果、理由、简要说明、新建或续接的任务、模型、失败原因、控制面拒绝（`refusals`：工作、代码、原因、时间）；`state`（含 `filtered`，即被过滤的事件）、`decision`（create/continue/ignore）、`type`、`from`（含）/`until`（不含，UTC ISO 时间）、`limit`（1–100）可选；`next_cursor` 用于更早分页，原 `offset` 仍兼容但不能和 cursor 同用。游标绑定项目与筛选，改变筛选后重新读取首页 |
+| `/api/repositories/:id/dispatch/:event` | GET | 本项目的事件摘要、来源、原投递编号、已记录的模型名称、当前状态、控制面拒绝（`refusals`）、实际关联任务和最近 50 条人工重试；被过滤的事件在 `result.filtered` 里给出原因代码。排除原始 facts、候选任务输入、租约及凭据；不以当前模型配置补写历史 |
 | `/api/repositories/:id/dispatch/:event/retry` | POST | 重试失败的分派 |
 | `/api/tasks/:id/dispatch` | GET | 任务因哪些事件新建或续接，以及 Manager 的理由 |
 | `/api/repositories/:id/workflows[/...]` | 任意 | 410 `workflows_removed`，说明里给出替代路径 |
