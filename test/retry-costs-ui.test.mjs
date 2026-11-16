@@ -72,9 +72,10 @@ test('unpriced charts stack recorded input and output tokens, without counting c
   const bars=svg.querySelectorAll('rect');assert.equal(bars.length,2);
   assert.deepEqual(bars.map(bar=>Number(bar.dataset.value)),[2200,1100]);assert.ok(bars.every(bar=>Number(bar.getAttribute('height'))>0));
   assert.match(bars[1].getAttribute('aria-label'),/1,100（输入 1,000，输出 100） · 当日 33.3%/);
-  assert.match(text(body.querySelectorAll('thead')[0]),/用量占比/);
-  assert.match(text(body.querySelectorAll('tbody')[0]),/66.7%/);
-  const missing=body.querySelectorAll('tbody')[0].children.find(row=>text(row).includes('missing'));
+  const share=[...body.querySelectorAll('section.cost-breakdown')].find(section=>text(section).includes('项目占比'));
+  assert.match(text(share.querySelector('thead')),/用量占比/);
+  assert.match(text(share.querySelector('tbody')),/66.7%/);
+  const missing=[...share.querySelector('tbody').children].find(row=>text(row).includes('missing'));
   assert.equal(missing.children[2].textContent,'—','unknown project usage is not a measured zero share');
 });
 test('known zero pricing and partially priced ranges retain currency charts; missing tokens stay unknown',async()=>{

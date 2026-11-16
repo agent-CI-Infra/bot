@@ -275,7 +275,7 @@ svg.setAttribute('role','group');svg.setAttribute('aria-label',tokens?'每日模
   const legend=element('div','','cost-legend');for(const project of projects){const entry=element('span',''),dot=element('span','','cost-color');dot.style.backgroundColor=costColor(project.repository_id);entry.append(dot,document.createTextNode(project.full_name));legend.append(entry);}container.append(legend);
   // #875: the two tables below the chart sum by project and by day, so neither carries the value behind one bar. This
   // third table is the chart itself, one row per bar, with the same date · project · amount · share the bar announces.
-  const bars=element('details','','cost-breakdown cost-chart-table'),table=costTable(['日期','项目',tokens?'用量':'金额','当日占比','未计价请求']);
+  const bars=element('details','','cost-breakdown cost-chart-table'),table=costTable(['日期（本地）','项目',tokens?'用量':'金额','当日占比','未计价请求']);
   bars.append(element('summary',tokens?'日期 × 项目用量明细':'日期 × 项目费用明细'));
   for(const [date,day]of dates)for(const project of projects){
     const row=day.rows.find(item=>item.repository_id===project.repository_id),amount=row&&value(row);
@@ -287,5 +287,5 @@ svg.setAttribute('role','group');svg.setAttribute('aria-label',tokens?'每日模
     line.append(element('td',date),name,element('td',tokens?metricNumber(amount):money(amount,currency)),element('td',(amount/value(day)*100).toFixed(1)+'%'),element('td',String(row.unpriced_requests||0)));
     table.body.append(line);
   }
-  bars.append(table.wrap);container.append(bars);
+  if(table.body.children.length){bars.append(table.wrap);container.append(bars);}
 }
