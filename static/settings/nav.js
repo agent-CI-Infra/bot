@@ -6,7 +6,7 @@ titles.settings = '全局设置';
 // waiting_token with a saved token means this deployment has no tunnel status endpoint to read.
 const tunnelStates = { waiting_token: '读不到状态', not_running: 'tunnel 服务未运行', connecting: '正在连接', connected: '已连接' };
 const settingsGroups = [
-  ['系统与算力', [['work-computers', '工作电脑'], ['models', '模型'], ['service-roles', '服务角色'], ['assistant-computers', '助手电脑'], ['storage', '存储']]],
+  ['系统与算力', [['work-computers', '工作电脑'], ['models', '模型'], ['service-roles', '服务角色'], ['assistant-computers', '助手电脑'], ['agent-tools', 'Agent CLI 工具卷'], ['storage', '存储']]],
   ['接入与网络', [['onboarding', '接入向导'], ['access', '公网接入'], ['external', '外部执行']]],
   ['连接与渠道', [['accounts', '机器人账号'], ['installations', '安装档案'], ['feishu', '飞书连接']]],
   ['仓库与用户', [['projects', '项目管理'], ['users', '用户']]]
