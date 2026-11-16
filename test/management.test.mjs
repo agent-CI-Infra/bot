@@ -168,6 +168,9 @@ test('persistent conversations execute actual model tools, replay messages and s
   assert.equal((await admin('/api/management/conversations/'+conversation+'/messages','POST',body)).value.id,sent.value.id);
   assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE source_conversation=?",conversation).n,1);assert.ok(result.events.some(e=>e.type==='tool_result'&&e.data.result.state==='succeeded'));
   assert.ok(!JSON.stringify(requests).includes('fixture-provider-key'));
+  // The assistant is not told about a repository .bot/ layer: none exists since #935, and a workflow.update takes effect.
+  const system=requests[0].messages[0].content;assert.doesNotMatch(system,/\.bot\b/);assert.match(system,/configuration pull request \(a repository skill\)/);
+  assert.equal(result.events.find(e=>e.type==='tool_result'&&e.data.result.state==='succeeded').data.result.result.effective,true);
   const starts=result.events.filter(e=>e.type==='model_start');assert.deepEqual(starts.map(e=>e.data.turn),[0,1,2]);
   for(const call of result.events.filter(e=>e.type==='tool_call')){
     assert.ok(call.data.call_id);

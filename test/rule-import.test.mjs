@@ -105,6 +105,27 @@ test('a project on the built-in texts keeps the built-in labels, and an invalid 
   assert.doesNotMatch(defaults['.bot/rules/labels.md'], /^review_label:/m); assert.doesNotMatch(defaults['.bot/rules/issue-development.md'], /^development_label:/m);
 });
 
+test('an empty repository file is the layer it was, and one project that cannot be imported keeps its rules without stopping the others', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101'); await repository(admin, a.id, '202'); await repository(admin, a.id, '303');
+  const store = h.store; beforeUpgrade(store);
+  // 101: an empty labels.md took effect: no review label and an empty labeling text.
+  store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)', '101', sha, JSON.stringify({ '.bot/rules/labels.md': '' }), 'now');
+  // 202: the cache is not JSON; 303: a rule_overrides value that is not JSON.
+  store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)', '202', sha, '{not json', 'now');
+  store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)', '303', sha, JSON.stringify({ '.bot/rules/pr-review.md': 'Rule.' }), 'now');
+  store.run("UPDATE policies SET rule_overrides='{broken' WHERE repository_id='303'");
+  new RuleService(store);
+  assert.deepEqual(projectLabels(store, '101'), { review_label: '', development_label: 'bot-develop' });
+  assert.equal(managerSection(store, '101', 'labels'), `由 \`.bot/rules/labels.md\` 导入（提交 ${sha.slice(0, 7)}）。`);
+  for (const id of ['202', '303']) {
+    const { report: failed } = report(store, id);
+    assert.deepEqual([failed.files, failed.sections], [[], []], id); assert.match(failed.warnings[0], /^导入失败，沿用控制台和内置规则/, id);
+  }
+  assert.equal(managerSection(store, '303', 'review.pr'), undefined);
+  assert.ok(store.get("SELECT 1 FROM settings WHERE key='rules.bot_imported'"));
+});
+
 test('rules.update answers 410 with what replaces it', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   const capabilities = (await admin('/api/management/query', 'POST', { query: 'get_capabilities', target: { project_id: '101' } })).value;

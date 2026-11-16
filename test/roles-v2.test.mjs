@@ -93,7 +93,7 @@ test('editable project rules, language and work prompts survive removal of fixed
   f.put({roles:[{role_id:'dev',persona_prompt:'My complete role.'}]});
   const {result} = await runRole({...f.spec,system:'Hidden fixed entry duties.',prompt:JSON.stringify(prompt)},'dev');
   // The rules are the Manager's sections by id and title (#935), never a .bot/ file name.
-  assert.deepEqual(result.input.project_instructions, { rules:[{section:'guide',title:'行为指南',source:'console',content:'Preserve the project convention.'}], language:'zh', work_prompt:'Apply the editable reply instructions.', work_name:'Project reply' });
+  assert.deepEqual(result.input.project_instructions, { rules:[{section:'guide',title:'Behavior guide',source:'console',content:'Preserve the project convention.'}], language:'zh', work_prompt:'Apply the editable reply instructions.', work_name:'Project reply' });
   assert.ok(!result.system.includes('Hidden fixed entry duties.'));
   assert.equal(result.input.effective_rules,undefined);
 });
