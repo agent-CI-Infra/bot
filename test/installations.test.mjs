@@ -364,7 +364,7 @@ test('the global permission check measures only the App definition and keeps its
   // Even when installation listing is unavailable, a complete App definition passes; workflow_run is not required.
   app.events = events; report = await check(); assert.equal(report.ok, true); assert.deepEqual(report.app.missing, []);
   // What only gate onboarding and Actions failure analysis need is reported beside the baseline without failing it.
-  assert.deepEqual(report.app.feature_gaps, [{ kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['gate'] },
+  assert.deepEqual(report.app.feature_gaps, [{ kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['ci_changes'] },
     { kind: 'event', name: 'workflow_run', features: ['actions_failures'] }]);
   app.permissions = { ...full, workflows: 'write' }; app.events = [...events, 'workflow_run']; report = await check();
   assert.deepEqual([report.ok, report.app.feature_gaps], [true, []]);
@@ -398,8 +398,8 @@ test('sync conclusions count installations and retain gaps, account failures and
   assert.match(message(unchecked), /App 定义暂时无法核对/);
   // Bot accounts have no installation snapshot; their repositories carry the gaps, and an App-only feature gap counts.
   const bot = structuredClone(good); bot.repositories[0] = { id: '303', full_name: 'fixture/project-303', installation_id: null,
-    access_gaps: [{ kind: 'account', name: 'github_app', features: ['release', 'gate', 'actions_failures'] }] };
-  assert.equal(message(bot), '安装列表已同步，权限和事件订阅并非全部正常。fixture/project-303：项目挂在机器人账号上，不是 GitHub App 安装（影响发版本、接入门禁、Actions 失败分析）。点仓库行上的提示查看处理方法。');
+    access_gaps: [{ kind: 'account', name: 'github_app', features: ['release', 'ci_changes', 'actions_failures'] }] };
+  assert.equal(message(bot), '安装列表已同步，权限和事件订阅并非全部正常。fixture/project-303：项目挂在机器人账号上，不是 GitHub App 安装（影响发版本、经确认的 CI 改动、Actions 失败分析）。点仓库行上的提示查看处理方法。');
   assert.equal(conclusion(bot).tone, '');
   const appFeatures = structuredClone(good); appFeatures.results[0].app.feature_gaps = [{ kind: 'event', name: 'workflow_run', features: ['actions_failures'] }];
   assert.match(message(appFeatures), /App 定义仍有缺口/);

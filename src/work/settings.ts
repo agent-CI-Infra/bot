@@ -1,6 +1,6 @@
 import type { Store, Row } from '../storage/database.js';
 import { fail, HttpError } from '../core/security.js';
-import { workTypes, workType, sections, section, savedWrites, workAccess, validateWrites, type WorkPermissions } from './catalog.js';
+import { workTypes, workType, sections, section, retiredSections, savedWrites, workAccess, validateWrites, type WorkPermissions } from './catalog.js';
 import { resolveRules } from '../rules/service.js';
 import { covers, projectCeiling, withinCeiling, workLevel } from './ceiling.js';
 
@@ -48,13 +48,15 @@ const heading = /^##[ \t]+(.*?)[ \t]*`([a-z][a-z0-9._-]*)`[ \t]*$/;
 export function parseSections(content: string): { preamble: string; sections: Map<string, { title: string; body: string }> } {
   const found = new Map<string, { title: string; body: string }>(), lines = content.replace(/\r\n/g, '\n').split('\n'), preamble: string[] = [];
   let current = null as { id: string; title: string; lines: string[] } | null, fence = false;
-  const close = () => { if (current) found.set(current.id, { title: current.title, body: current.lines.join('\n').replace(/^\n+|\s+$/g, '') }); };
+  const close = () => { if (current && !retiredSections.has(current.id)) found.set(current.id, { title: current.title, body: current.lines.join('\n').replace(/^\n+|\s+$/g, '') }); };
   for (const line of lines) {
     // A heading inside a fenced block (for example a quoted prompt) is text, not a section.
     if (/^\s*(```|~~~)/.test(line)) fence = !fence;
     const match = !fence && heading.exec(line);
     if (match) {
       const id = match[2]!;
+      // A removed work type's section, in an older revision or snapshot: its text is dropped, not read as an error.
+      if (retiredSections.has(id)) { close(); current = { id, title: '', lines: [] }; continue; }
       if (!section(id)) throw Object.assign(new HttpError(400, 'unknown_manager_section', 'content'), { detail: `没有章节 ${id}；可用：${sections.map(s => s.id).join('、')}` });
       if (found.has(id) || current?.id === id) throw Object.assign(new HttpError(400, 'duplicate_manager_section', 'content'), { detail: `章节 ${id} 出现了两次` });
       close(); current = { id, title: match[1] || section(id)!.title, lines: [] }; continue;
@@ -150,7 +152,7 @@ export interface EventFilters {
   'review.published.issue': boolean; 'review.published.pr': boolean; 'actions.run_failed': boolean;
 }
 export const dispatchEventTypes = ['issue.opened', 'issue.updated', 'issue.mention', 'issue.labeled', 'pull_request.opened', 'pull_request.synchronize', 'pull_request.updated',
-  'pull_request.mention', 'pull_request.labeled', 'review.published', 'release.manual', 'actions.run_failed', 'gate.manual', 'schedule.due'];
+  'pull_request.mention', 'pull_request.labeled', 'review.published', 'release.manual', 'actions.run_failed', 'schedule.due'];
 export const filterColumns: Record<string, string> = { 'issue.opened': 'review_issues', 'issue.updated': 'review_issue_updates', 'pull_request.opened': 'review_pull_requests',
   'pull_request.synchronize': 'review_pr_updates', 'pull_request.updated': 'review_pr_discussion', 'actions.run_failed': 'actions_failures_enabled' };
 const filterFlags = ['issue.mention', 'issue.development_label', 'pull_request.mention', 'review.published.issue', 'review.published.pr'];

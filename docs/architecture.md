@@ -129,7 +129,7 @@ GitHub 安装令牌只有一小时，而一次检视常常跑得更久。控制�
 
 ## 一键接入与公共看板托管
 
-仓库列表直接提供「看板」开关，与检视、开发开关并列；无需启动项目。公开仓默认开启，私有仓默认关闭。超管可以为任意已安装仓库保存开启或关闭状态，开关同时控制单仓页面与公共 Dashboard 汇总。关闭后立即停止对外提供旧快照，webhook 和后台采集也不能重新开启它。「接入门禁」仅保留原门禁 PR 流程，不再包含单仓看板或 Dashboard 登记执行项。
+仓库列表直接提供「看板」开关，与检视、开发开关并列；无需启动项目。公开仓默认开启，私有仓默认关闭。超管可以为任意已安装仓库保存开启或关闭状态，开关同时控制单仓页面与公共 Dashboard 汇总。关闭后立即停止对外提供旧快照，webhook 和后台采集也不能重新开启它。
 
 公共 Dashboard 位于已验证的公网地址 `/dashboard/`，单仓看板位于 `/boards/<owner>/<repo>/`（小写），看板目录位于 `/boards/`。三者和控制台由同一个业务端口 8791 提供，但不需要控制台登录，使用自己的内容安全策略；控制台的「任务看板」页面是另一页面，仍需登录。公共地址沿用安装向导验证的 `onboarding.public.origin`。
 
@@ -141,12 +141,11 @@ GitHub 安装令牌只有一小时，而一次检视常常跑得更久。控制�
 
 | 操作 | 目标 | 权限 |
 | --- | --- | --- |
-| 接入门禁的每一轮 | 源仓 | `gate.onboarding` 任务的令牌：读取门禁事实和 agent 的仓库只读工具，没有 workflows 写 |
-| 门禁 PR（人确认后） | 源仓 | contents 写、pull_requests 写、workflows 写、metadata 读 |
+| 改 CI 的 bot PR（项目管理员确认为 CI 改动的开发任务） | 源仓 | 推送 bot 分支时 contents 写、issues 写、pull_requests 写、workflows 写，按安装实际授权裁剪；其他推送和 `github_write` 都没有 workflows |
 | 看板采集 | 源仓 | contents、issues、pull_requests、actions、metadata 只读，按安装实际授权裁剪 |
 | 看板开关 | bot 本地 | 控制台超管；不向 GitHub 写配置 |
 
-每次采集使用源仓自己的只读安装令牌并在结束时撤销，不再需要外部 dashboard 的 App 安装或 `PRIVATE_SOURCE_TOKEN`。门禁 PR 只从 CI-workflow 读取 `scripts/gate/gate.mjs`；门禁 job 和 `ci-gates.json` 由控制面按确认的方案生成，或合并进仓库已有的文件（只补触发事件、替换门禁 job、改方案改了的 lane），agent 在项目电脑里分析和试跑，只能通过结束工具 `submit_gate_plan` 交回工具链版本、安装命令、各 lane 命令、observe 和门禁 job 的位置；触发事件、权限、job 结构、检出的提交和每个事件跑哪些 lane（`ci-gates.json` 的 `events`）由控制面按仓库事实决定。
+每次采集使用源仓自己的只读安装令牌并在结束时撤销，不再需要外部 dashboard 的 App 安装或 `PRIVATE_SOURCE_TOKEN`。bot 不再生成门禁文件：CI 改动由开发任务按仓库自己的情况修改 workflow，以 bot PR 交付，人合并后才生效（见[接入说明](onboarding-guide.md#22-ci-改动走-bot-pr)）。
 
 ## 代码快照与发布
 

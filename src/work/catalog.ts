@@ -33,11 +33,10 @@ export const writeCatalog: WriteDefinition[] = [
   { id: 'pull_request', title: '开或更新 bot PR', tool: 'create_pull_request', detail: '控制面固定快照、跑项目测试命令，通过后才推 bot 分支、开或更新 PR；要求项目能力上限为「可开发并开 PR」，检视和通用回复只能在 Issue 上开新 PR 或更新 bot 自己的 PR。' },
   { id: 'issue', title: '提报 Issue', tool: 'report_failure', detail: '调查后按原因显式选择值得提报的问题，关联受影响的检查并保留完整诊断；控制面核验来源后新建或评论 Issue，同一原因只报一次。' },
   { id: 'actions_rerun', title: '重跑失败的 Actions 运行', tool: 'rerun_failed_run', detail: '登记后由控制面执行：每个原始运行最多重跑一次，只重跑支持 workflow_dispatch 的运行。' },
-  { id: 'release_notes', title: '写发行说明', tool: 'finish_release_notes', detail: '交出已核验来源的分组；控制面核验每个来源恰好出现一次，再写出正文。' },
-  { id: 'gate_plan', title: '提交门禁方案', tool: 'submit_gate_plan', detail: '交出回复和门禁方案；控制面核对后显示在接入门禁对话里，人看过将提交的文件并确认后，才由控制面开门禁 PR。' }
+  { id: 'release_notes', title: '写发行说明', tool: 'finish_release_notes', detail: '交出已核验来源的分组；控制面核验每个来源恰好出现一次，再写出正文。' }
 ];
 const writeIds = writeCatalog.map(write => write.id);
-type Base = 'review' | 'development' | 'reply' | 'release.observe' | 'release.notes' | 'actions' | 'gate' | 'request';
+type Base = 'review' | 'development' | 'reply' | 'release.observe' | 'release.notes' | 'actions' | 'request';
 // Which writes a work type can be given, which it starts with and which it cannot drop (the write that ends its task).
 // Filing an Issue is a delivery only for Actions failure handling (report_failure); elsewhere it is a direct write through
 // github_write, governed by the role (#381).
@@ -48,7 +47,6 @@ const writeSets: Record<Base, { options: string[]; defaults: string[]; locked: s
   'release.observe': { options: [], defaults: [], locked: [] },
   'release.notes': { options: ['release_notes'], defaults: ['release_notes'], locked: [] },
   actions: { options: ['actions_rerun', 'issue'], defaults: ['actions_rerun', 'issue'], locked: [] },
-  gate: { options: ['gate_plan'], defaults: ['gate_plan'], locked: ['gate_plan'] },
   // Ordinary tasks inherit the capability ceiling (#850): at develop they may change code and deliver a PR like a development
   // task; below it the ceiling removes both. An administrator can still narrow them.
   request: { options: ['code', 'pull_request'], defaults: ['code', 'pull_request'], locked: [] }
@@ -60,7 +58,7 @@ export const githubScopes = ['contents', 'issues', 'pull_requests', 'actions', '
  * `family` groups reviews and development. What level of the project's capability ceiling it needs is workLevel (ceiling.ts).
  */
 export interface WorkType {
-  id: string; name: string; description: string; base: Base; object: 'issue' | 'pr' | 'any' | 'release' | 'actions' | 'repository' | 'schedule';
+  id: string; name: string; description: string; base: Base; object: 'issue' | 'pr' | 'any' | 'release' | 'actions' | 'schedule';
   kinds: string[]; section: string; family?: 'review' | 'development'; defaultEnabled: boolean;
 }
 export const workTypes: WorkType[] = [
@@ -80,8 +78,6 @@ export const workTypes: WorkType[] = [
     description: '把已核验的提交和合并 PR 整理成发行说明；起草与正式发布仍留在「发版本」。' },
   { id: 'actions.failures', name: 'Actions 失败处理', base: 'actions', object: 'actions', kinds: ['actions.failures'], section: 'actions.failures', defaultEnabled: false,
     description: '调查默认分支的 Actions 失败，按原因决定是否提报完整诊断；合并连带检查，外部原因最多重跑原运行一次。' },
-  { id: 'gate.onboarding', name: '接入门禁', base: 'gate', object: 'repository', kinds: ['gate.onboarding'], section: 'gate.onboarding', defaultEnabled: true,
-    description: '在「接入门禁」对话里分析仓库、设计各 lane 的门禁命令并回答问题；人确认方案后，控制面才开门禁 PR。' },
   { id: 'task.development', name: '开发任务', base: 'development', object: 'schedule', kinds: ['task.development'], section: 'development', family: 'development', defaultEnabled: true,
     description: '直接创建的开发任务，复用项目开发授权、测试、独立 QA 和 PR 交付；可独立执行或关联父任务，不需要虚构 GitHub Issue。' },
   { id: 'task.request', name: '普通事项与定时检查', base: 'request', object: 'schedule', kinds: ['task.request'], section: 'schedule', defaultEnabled: true,
@@ -107,10 +103,11 @@ export const sections: SectionDefinition[] = [
   { id: 'release.observe', title: 'CI 观察', builtin: () => prompt('release-observe.md') },
   { id: 'release.notes', title: '发行说明', repository: '.agents/skills/release-notes/SKILL.md', builtin: () => '' },
   { id: 'actions.failures', title: 'Actions 失败处理', builtin: () => prompt('actions-failures.md') },
-  { id: 'gate.onboarding', title: '接入门禁', builtin: () => prompt('gate-onboarding.md') },
   { id: 'schedule', title: '定时检查', builtin: () => '' }
 ];
 export const section = (id: string) => sections.find(entry => entry.id === id);
+/** Sections of removed work types (see retired.ts): older revisions and task snapshots may still have them; they are skipped. */
+export const retiredSections = new Set(['gate.onboarding']);
 
 /** The writes a work type can be given: each with its tool and whether it is locked. */
 export function writeOptions(id: string) {

@@ -82,7 +82,7 @@ const fn = (name: string, description: string, properties: any, required: string
 const description = 'Write to GitHub through the control plane, exactly like the GitHub REST API: method and a path relative to the repository (/repos/{owner}/{repo} is implied), with the REST JSON body. '
   + 'Examples: POST /issues {title, body}; POST /issues/12/comments {body}; POST /issues/12/labels {labels}; PATCH /issues/12 {state}; POST /pulls {title, head, base, body}; '
   + 'POST /pulls/7/reviews {event, body, comments}; PUT /pulls/7/merge; PUT /contents/docs/a.md {message, content (base64), sha?, branch?}; POST /git/refs {ref, sha}. '
-  + 'Allowed only where your role has write on the route\'s GitHub resource (Issues, Pull requests or Contents) and the project\'s capability ceiling allows it (comment for Issues and pull requests, develop for Contents); other repositories and other routes are refused. '
+  + 'Allowed only where your role has write on the route\'s GitHub resource (Issues, Pull requests or Contents) and the project\'s capability ceiling allows it (comment for Issues and pull requests, develop for Contents); other repositories, other routes and changes to .github/workflows/ are refused. '
   + 'Mentions (@) in titles and bodies people read are escaped and secrets are removed. key: a short stable name for this write (for example "triage-comment"); calling again with the same key returns the earlier result instead of writing twice, so keep it when retrying and use a new key for a different write. '
   + 'Use github_read to check state before writing; write only what your task needs.';
 const properties = { method: { type: 'string', enum: [...writeMethods] }, path: { type: 'string', description: 'Repository-relative REST path, such as /issues/12/comments. No query string.' },
@@ -121,6 +121,11 @@ function writePath(path: unknown): string | null {
   } catch { return null; }
   return path;
 }
+/** A path writePath accepted, with each segment decoded the way GitHub reads it. */
+const decodedPath = (path: string) => path.split('/').map(part => {
+  for (let next = decodeURIComponent(part); next !== part; next = decodeURIComponent(part)) part = next;
+  return part;
+}).join('/');
 /** The route a write names, or null when no resource covers it. */
 export function writeRoute(method: string, path: string): (Route & { number?: number; comment?: number }) | null {
   for (const entry of routes) {
@@ -226,6 +231,11 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
     return covers(ceiling, needed) ? null : refuse('capability_ceiling', `This project's capability ceiling is ${ceiling}; ${resourceName(resource)} writes need ${needed}. Nothing was sent; a project administrator can raise the ceiling.`, { needed, ceiling });
   };
   if (!entry) return refuse('github_write_route_unsupported', `${method} ${path} is not a supported repository write. Supported: Issues, comments, labels, assignees, milestones, pull requests, reviews, review comments, files and Git refs, merges.`);
+  // CI changes are bot pull requests that people review and merge (#931). github_write's token never has the Workflows
+  // permission, so GitHub refuses a ref update that would change .github/workflows/; a file write there is refused here,
+  // matched on the decoded path GitHub will see (writePath already refused segments that do not decode).
+  if (entry.resource === 'contents' && /^\/contents\/\.github\/workflows(?:\/|$)/i.test(decodedPath(path)))
+    return refuse('github_workflow_write_forbidden', 'github_write never changes .github/workflows/. A CI change is delivered as a bot pull request: a development task a project administrator confirmed as a CI change, reviewed and merged by people.');
   let body: unknown;
   try { body = sanitize(entry, input.body, redactor, `<!-- dept-bot-write:${marker} -->`); }
   catch (error) { if (error instanceof Unsendable) return refuse(error.code, error.detail); throw error; }

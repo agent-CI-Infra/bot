@@ -9,7 +9,7 @@ import { Redactor,sha } from '../agent/common.js';
 import { TaskRecords } from '../tasks/service.js';
 import { traceEvent } from '../tasks/trace.js';
 import {authorizeMerge,requestIntegration,integrationStorage} from '../tasks/integration.js';
-import {mergeQueue} from '../projects/gate-facts.js';
+import {mergeQueue} from '../github/merge-queue.js';
 import {recordRetryFailure,resolveRetry} from '../tasks/retries.js';
 import {covers,projectCeiling} from '../work/ceiling.js';
 

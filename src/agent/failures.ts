@@ -8,11 +8,11 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
   github_access: { label:'GitHub 权限或配置', codes:['github_permissions_insufficient','github_installation_owner_changed','github_installation_access_revoked','github_token_missing',
     'github_credentials_missing','github_account_missing','github_repository_scope_changed','github_actor_invalid','github_repository_invalid',
     'github_app_required','github_read_token_unavailable','github_read_token_not_read_only','github_read_token_not_allowed','branch_not_owned','release_uninstalled','release_app_required',
-    'actions_app_required','actions_permission_missing','actions_workflow_run_subscription_missing','gate_repository_unreadable'] },
+    'actions_app_required','actions_permission_missing','actions_workflow_run_subscription_missing'] },
   github_rejected: { label:'GitHub 拒绝了请求', codes:[] },
   model: { label:'模型服务或模型配置', codes:['role_nomination_stages_incomplete','role_submission_required','acp_submission_required','codex_submission_required','codex_authentication_failed','codex_model_unavailable','codex_model_mismatch','codex_model_rerouted','codex_resume_incompatible','codex_turn_failed','codex_subagent_refused','role_delivery_invalid','role_result_invalid','role_nomination_invalid','role_nomination_required','acceptance_unavailable','acceptance_output_invalid','acceptance_budget_exhausted','model_not_configured','service_role_model_not_configured','channel_service_model_unavailable','service_role_unavailable','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
     'model_response_too_large','model_finding_invalid','model_review_invalid','model_url_insecure','create_pull_request_required','create_pull_request_not_allowed','pull_request_labels_refused',
-    'release_notes_model_failed','release_notes_invalid','release_notes_dispatch_failed','manager_dispatch_failed','dispatch_decision_invalid','dispatch_model_invalid','release_observation_failed','release_observation_invalid','actions_classification_invalid','agent_tool_not_allowed','agent_output_invalid','agent_output_budget_exhausted','agent_tool_calls_invalid','agent_turn_limit','gate_agent_output_invalid',
+    'release_notes_model_failed','release_notes_invalid','release_notes_dispatch_failed','manager_dispatch_failed','dispatch_decision_invalid','dispatch_model_invalid','release_observation_failed','release_observation_invalid','actions_classification_invalid','agent_tool_not_allowed','agent_output_invalid','agent_output_budget_exhausted','agent_tool_calls_invalid','agent_turn_limit',
     'claude_submission_required','claude_authentication_failed','claude_model_unavailable','claude_execution_failed','claude_budget_exhausted','claude_output_limit','claude_provider_credential_unavailable','provider_credential_unavailable'] },
   environment: { label:'项目电脑或运行环境', codes:['integration_unavailable','pi_runtime_unavailable','controller_workspace_unavailable','container_workspace_required','acp_not_configured','acp_configuration_invalid','acp_protocol_unsupported','acp_mcp_http_unsupported','harness_timeout','acp_turn_incomplete','acp_execution_failed',
     'codex_not_configured','codex_configuration_invalid','codex_execution_failed','codex_output_limit',
@@ -41,10 +41,10 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'actions_jobs_identity_changed','actions_development_disabled','actions_development_not_approved','actions_analysis_not_succeeded','write_not_allowed',
     // A work type switched off while its task waited or ran (workflow_* before #207).
     'work_disabled','workflow_disabled','workflow_not_found','task_software_disabled',
+    // A work type removed from the bot (gate onboarding, #931): its unfinished tasks end at the upgrade.
+    'work_removed',
     // #850: the project's capability ceiling is below what the step needs, or was lowered while the task waited or ran.
     'capability_ceiling','capability_ceiling_lowered',
-    // A newer gate onboarding conversation, or a repository stopped while the agent was answering.
-    'gate_session_superseded','gate_repository_stopped',
     // The workflow assistant's run was stopped by the person who started it.
     'assistant_cancelled',
     // A RoleRun whose lease was taken over, whose fixed candidate changed, or a second run of one assignment.
@@ -195,6 +195,7 @@ const codeActions: Record<string,string> = {
   work_disabled:'项目策略关闭了这类工作，任务已结束；请项目管理员在管理对话中调整策略后重新提交任务。',
   workflow_disabled:'这条工作流已关闭或删除，任务已结束。',
   workflow_not_found:'这条工作流已删除，任务已结束。',
+  work_removed:'这类工作已从 bot 中删除，未完成的任务在升级时结束，无需处理。',
   github_read_token_not_allowed:'启动这个子 agent 时关掉了 GitHub 读取；主 agent 仍可读取，需要时让它不带 github_read:false 再启动子 agent。',
   pull_request_head_changed:'PR 有了新的提交：检视转到新提交继续，开发保存已有改动后按新提交重新准备，无需处理。',
   branch_head_changed:'发布分支与预期不一致；Manager 可查询 read_publication_context 和原始记录，再决定重试、协调、集成或求助。',

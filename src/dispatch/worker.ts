@@ -84,7 +84,7 @@ export class Dispatcher {
         const failed = !waiting && Number(current.attempts) >= maxAttempts;
         this.store.run('UPDATE dispatch_events SET state=?,lease=NULL,lease_until=NULL,next_run_at=?,error=? WHERE id=?', failed ? 'failed' : 'pending',
           Date.now() + backoff(Number(current.attempts)), JSON.stringify({ code, detail: detail.slice(0, 600) }), event.id);
-        // A module waiting for the outcome (a release observation, a gate turn) stops waiting when no decision will come.
+        // A module waiting for the outcome (a release observation) stops waiting when no decision will come.
         if (failed) for (const option of JSON.parse(current.options) as CreateOption[]) if (option.hook) dispatchHook(option.hook)?.declined(this.store, current, 'dispatch_failed', option.ref ?? null);
       });
     }

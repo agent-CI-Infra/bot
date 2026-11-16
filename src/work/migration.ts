@@ -10,7 +10,7 @@ import { section } from './catalog.js';
  * and only while that table still exists, so it happens exactly once.
  *
  * - prompts: console rule overrides become the review, development, labels and guide sections; console prompts of CI
- *   observation, release notes, Actions failure handling and gate onboarding become their sections; custom workflows
+ *   observation, release notes and Actions failure handling become their sections; custom workflows
  *   become subsections of the reply section, with their triggers and writes written out.
  * - switches and writes: per work type in policies.work_settings (Actions failures keeps its policy switch).
  * - models: built-in workflows already used task_models; a custom workflow's model becomes the reply model.
@@ -21,16 +21,16 @@ const builtinTriggers: Record<string, string[]> = {
   'review.issue': ['issue.opened', 'issue.updated', 'issue.labeled', 'comment.mention'],
   'review.pr': ['pull_request.opened', 'pull_request.synchronize', 'pull_request.updated', 'pull_request.labeled', 'comment.mention'],
   'development.issue': ['review.published', 'issue.labeled'], 'development.pr': ['review.published'],
-  'release.observe': ['release.manual'], 'release.notes': ['release.manual'], 'actions.failures': ['actions.run_failed'], 'gate.onboarding': ['gate.manual']
+  'release.observe': ['release.manual'], 'release.notes': ['release.manual'], 'actions.failures': ['actions.run_failed']
 };
 const customTriggers = ['issue.opened', 'issue.updated', 'issue.labeled', 'pull_request.opened', 'pull_request.synchronize', 'pull_request.updated', 'pull_request.labeled', 'comment.mention'];
 const labelTriggers = new Set(['issue.labeled', 'pull_request.labeled']);
 const triggerTitles: Record<string, string> = { 'issue.opened': 'Issue 打开', 'issue.updated': 'Issue 标题或正文修改、有可信评论', 'issue.labeled': '有人给 Issue 加上标签',
   'pull_request.opened': 'PR 打开或 Ready for review', 'pull_request.synchronize': 'PR 推送新提交', 'pull_request.updated': 'PR 修改、讨论、检视或回复检视',
   'pull_request.labeled': '有人给 PR 加上标签', 'comment.mention': '评论提到 bot', 'review.published': '检视发布结论', 'release.manual': '「发版本」页的操作',
-  'actions.run_failed': '默认分支的 Actions 运行失败', 'gate.manual': '「接入门禁」对话' };
+  'actions.run_failed': '默认分支的 Actions 运行失败' };
 const builtinNames: Record<string, string> = { 'review.issue': '检视 Issue', 'review.pr': '检视 PR', 'development.issue': '开发 Issue', 'development.pr': '跟进 bot PR',
-  'release.observe': 'CI 观察', 'release.notes': '发行说明', 'actions.failures': 'Actions 失败处理', 'gate.onboarding': '接入门禁' };
+  'release.observe': 'CI 观察', 'release.notes': '发行说明', 'actions.failures': 'Actions 失败处理' };
 type Trigger = { id: string; label?: string };
 const parse = (text: unknown): Trigger[] | null => {
   if (text == null) return null;
@@ -116,7 +116,7 @@ export function migrateWorkflows(store: Store) {
       for (const entry of ['review.issue', 'review.pr', 'development', 'labels', 'guide']) {
         const rule = section(entry)!.rule!; if (Object.hasOwn(overrides, rule)) content = withSection(content, entry, escaped(String(overrides[rule]), rule));
       }
-      for (const id of ['release.observe', 'release.notes', 'actions.failures', 'gate.onboarding']) if (row(id)?.prompt != null) content = withSection(content, id, escaped(String(row(id)!.prompt), id));
+      for (const id of ['release.observe', 'release.notes', 'actions.failures']) if (row(id)?.prompt != null) content = withSection(content, id, escaped(String(row(id)!.prompt), id));
       if (customs.length) content = withSection(content, 'reply', ['升级前的自定义工作流迁移到这里。Manager 新建「通用回复」任务时，任务按下面对应的小节执行；理由和简要说明写明是哪一节。', '',
         ...customs.flatMap(custom => {
           const triggers = legacyTriggers(String(custom.id), custom, policy).map(trigger => (triggerTitles[trigger.id] ?? trigger.id) + (trigger.label ? `「${trigger.label}」` : '')).join('、') || '无';

@@ -8,6 +8,7 @@ import {relateTasks} from './followups.js';
 import {setTaskPriority} from './priority.js';
 import type { Store, Row } from '../storage/database.js';
 import { randomId, fields, fail, digest, object, HttpError, type Json } from '../core/security.js';
+import { authorize } from '../identity/authorization.js';
 import { type Actor, scope, repository } from '../app/auth.js';
 import { TaskRecords } from './service.js';
 import { traceEvent } from './trace.js';
@@ -132,7 +133,7 @@ export class TaskCommands {
       this.store.audit(user.id,'project.context',contextMatch[1]!,contextMatch[1]!);return {context:records.project(contextMatch[1]!)};
     }
     if(url.pathname==='/api/tasks'&&method==='POST') {
-      fields(input,['repository_id','request','contract','intent',...(caller?['executor_role','execute','as_child']:[])]);
+      fields(input,['repository_id','request','contract','intent',...(caller?['executor_role','execute','as_child']:['workflow_changes'])]);
       if(typeof input.repository_id!=='string'||typeof input.request!=='string'||!input.request.trim()||input.request.length>60000)fail(400,'invalid_task_request');
       repository(this.store,user,input.repository_id as string);
       const id=randomId(),now=new Date().toISOString();
@@ -141,6 +142,11 @@ export class TaskCommands {
       if(input.intent!==undefined&&!['report','development'].includes(String(input.intent)))fail(400,'invalid_task_intent');
       const development=input.intent==='development'||input.intent===undefined&&contract.endpoint==='reviewable_pull_request',kind=development?'task.development':'task.request';
       if(development&&contract.endpoint!=='reviewable_pull_request'||input.intent==='report'&&contract.endpoint!=='report')fail(400,'invalid_task_endpoint');
+      // A CI change (#931): a project administrator confirms that this development may change .github/workflows/. Only then
+      // does its bot branch push ask for the Workflows permission (see pull-request.ts); nothing else ever does.
+      if(input.workflow_changes!==undefined&&typeof input.workflow_changes!=='boolean'||input.workflow_changes&&!development)fail(400,'invalid_workflow_changes');
+      if(input.workflow_changes){if(user.context)authorize(user.context,'config.write',{project_id:String(input.repository_id)});else if(!['super_admin','project_admin'].includes(user.role))fail(403,'capability_forbidden');}
+      const workflowChanges=input.workflow_changes?{confirmed_by:user.id,confirmed_at:now}:undefined;
       const controller=roleConfiguration(this.store,String(input.repository_id)).controller.role;
       const team=!!caller&&caller.role===controller&&input.executor_role===undefined;
       if(team){const definition=roleConfiguration(this.store,caller!.project_id).roles.find(r=>r.role_id===caller!.role);
@@ -170,15 +176,16 @@ export class TaskCommands {
       const previous=key?this.store.get('SELECT id FROM tasks WHERE unique_key=?',key)??(legacyKey?this.store.get("SELECT id FROM tasks WHERE unique_key=? AND kind='task.request'",legacyKey):undefined):undefined;
       if(previous){assertManagedTask(this.store,caller!,previous.id,true);return {id:previous.id,replayed:true};}
       this.store.transaction(()=>{createManagedTask(this.store,caller??operatorTaskCaller(this.store,user,String(input.repository_id)),input.executor_role as string|undefined,()=>{
-        this.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,unique_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",id,input.repository_id as string,kind,input.execute===false?'paused':'queued',(input.request as string).slice(0,160),JSON.stringify({request:input.request,contract}),key,now,now);
+        this.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,unique_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",id,input.repository_id as string,kind,input.execute===false?'paused':'queued',(input.request as string).slice(0,160),JSON.stringify({request:input.request,contract,...(workflowChanges?{workflow_changes:workflowChanges}:{})}),key,now,now);
         try {new TaskRecords(this.store).contract(id,{...contract,source:{type:'request',actor:user.id},completeness:'explicit'});}catch{fail(400,'invalid_task_contract');}
         // Persist the authoritative validated contract for executor recovery.
-        this.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({request:input.request,contract:new TaskRecords(this.store).get(id).contract}),id);
+        this.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({request:input.request,contract:new TaskRecords(this.store).get(id).contract,...(workflowChanges?{workflow_changes:workflowChanges}:{})}),id);
         captureTaskConfiguration(this.store,id);
         if(input.as_child)attachChild(this.store,caller!.source_task_id!,id);
         if (user.context) this.store.run('INSERT INTO task_authorizations VALUES(?,?,?,?,?)', id, user.context.principal_id,
           this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', input.repository_id as string)!.tenant_id, input.repository_id as string, caller?'tasks.manage_own':'tasks.write');
         this.store.audit(user.id,'task.create',id,input.repository_id as string);
+        if(workflowChanges)this.store.audit(user.id,'task.workflow_changes',id,input.repository_id as string);
         return id;
       });
       // The Task Manager coordinates the same project team, independently of parent linkage.

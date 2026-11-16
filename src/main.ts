@@ -11,7 +11,6 @@ import { InstallationSync } from './app/installations.js';
 import { ExternalService } from './external/service.js';
 import { Onboarding } from './onboarding/service.js';
 import { IntegrationChecker } from './projects/integrations.js';
-import { GateOnboarding } from './projects/gate-onboarding.js';
 import { GitCache } from './agent/git-cache.js';
 import { PublicBoards } from './public-board/service.js';
 import { ReleaseService } from './releases/service.js';
@@ -94,7 +93,6 @@ setTimeout(() => void installations.syncAll(), 5000).unref();
 const syncTimer = setInterval(() => void installations.syncAll(), 10 * 60_000);
 const boards = new PublicBoards(store, resolve(dirname(databasePath), 'public-boards'), process.env.BOT_GITHUB_API_URL); boards.start();
 const integrations = new IntegrationChecker(store, process.env.BOT_GITHUB_API_URL || undefined);
-const gateOnboarding = new GateOnboarding(store, process.env.BOT_GITHUB_API_URL || undefined);
 const releases = new ReleaseService(store, process.env.BOT_GITHUB_API_URL); releases.start();
 const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_URL); actionsFailures.start();
 // Logs a blocked event loop with the requests in flight, and slow requests (see core/stalls.ts).
@@ -110,7 +108,7 @@ try { store.trajectories.sweepOrphans(); } catch (error) { console.error('[traje
 const retention = new RetentionCleanup(store, manager);
 const migration = new PayloadMigration(store), storage = new StorageReport(store, manager, { git_cache: gitCache.root, public_boards: resolve(dirname(databasePath), 'public-boards') }, vacuum);
 const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
-  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, gateOnboarding, releases, boards,
+  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, releases, boards,
   imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls, storage,
   // The thresholds are configuration, not magic numbers: who operates the deployment sets what it tolerates (#771).
   notesReclaimer: reclaimer,

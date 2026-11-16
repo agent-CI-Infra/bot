@@ -5,8 +5,8 @@ import { releaseWorkflow } from './workflow.js';
 import { file, tag, releases, skillPath } from './github.js';
 import type { GitHub } from '../github/client.js';
 import { previousTag, newCommits } from './range.js';
-export const noCI = '这个仓库还没有接入发布用的 CI。请先在「接入门禁」中创建门禁 PR。';
-export const noRelease = '已接入门禁，但默认分支没有由版本标签触发的 Release 工作流，发版本不可用。';
+export const noCI = '这个仓库还没有发布用的 CI（.github/ci-gates.json 和运行它的 ci.yml）。需要时创建一个开发任务，由 bot 以 PR 补上。';
+export const noRelease = '已有发布用的 CI，但默认分支没有由版本标签触发的 Release 工作流，发版本不可用。';
 export const versionNotHigher = (version: string, previous: string) =>
   `版本 ${version} 不高于上一枚版本标签 ${previous}，不能发布。请填写更高的版本，例如 ${nextVersions(previous).join(' 或 ')}。`;
 export const builtinRule = 'release-notes-v1: list only verified commits and merged pull requests with source links; never infer features, tests or performance.';
@@ -36,7 +36,7 @@ export async function inspect(github: GitHub, version: string, consolePrompt?: s
   // The new version must rank above the previous reachable tag in SemVer order (a prerelease ranks below its stable version).
   const suggested = previous ? nextVersions(previous.name) : [];
   const behind = previous !== null && validVersion(version) && compareVersions(version, previous.name) <= 0;
-  const checks = [{ ok: !!(config && ci), message: config && ci ? '已接入发布用的 CI' : noCI },
+  const checks = [{ ok: !!(config && ci), message: config && ci ? '已有发布用的 CI' : noCI },
     { ok: !!(workflow?.matched && workflowId), message: workflow?.matched && workflowId ? '版本标签可触发 Release 工作流' : noRelease, reason },
     { ok: !noChanges, message: noChanges ? '没有新变更，跳过本次发布；不会创建标签或 Release。' : previous ? '本次范围有新增提交' : '首次发布，从仓库历史起算' },
     !previous ? { ok: true, message: '还没有上一枚版本标签，不比较版本号' }

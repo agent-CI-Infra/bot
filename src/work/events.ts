@@ -7,7 +7,7 @@ import { randomId } from '../core/security.js';
 
 /**
  * Work that runs on an event rather than an Issue or PR: a release run to explain, release notes to draft, an Actions run
- * that failed, a gate onboarding turn. Its task runs like every other in the project computer, on a checkout of the commit
+ * that failed. Its task runs like every other in the project computer, on a checkout of the commit
  * concerned; the module that owns the event prepares the context, checks the binding still holds, offers its own write
  * tools and takes the finished result back.
  */

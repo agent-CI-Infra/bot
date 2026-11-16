@@ -22,7 +22,7 @@
 
 合并 PR 是 Contents 写，包含在 `develop` 里，Manager 默认就有，不单设一档。上限在启动项目时选择（默认 `comment`；受信任组织可以预设它下面的项目启动时的档位，见[管理员手册](admin.md)），之后由项目管理员在「监听与触发」修改。bot 的每一次写入都在上限之内：
 
-- 工作类型：检视、通用回复和 Actions 失败处理要 `comment`，开发和开发任务要 `develop`；普通事项、CI 观察、发行说明和接入门禁在任何档位都能运行。工作类型的写入（默认值或项目保存的值）超过上限的部分不生效，降回上限后自动恢复。普通事项的写入默认继承上限：`develop` 时可以修改代码并交付 PR。
+- 工作类型：检视、通用回复和 Actions 失败处理要 `comment`，开发和开发任务要 `develop`；普通事项、CI 观察和发行说明在任何档位都能运行。工作类型的写入（默认值或项目保存的值）超过上限的部分不生效，降回上限后自动恢复。普通事项的写入默认继承上限：`develop` 时可以修改代码并交付 PR。
 - `github_write`：Issues 和 Pull requests 路由要 `comment`，Contents 路由要 `develop`。项目角色、飞书群、管理助手都经同一个入口，超过上限时返回 `capability_ceiling`，带 `needed`（需要的档位）和 `ceiling`（项目当前档位），不发出任何请求。角色的 GitHub 写权限、群档位和私聊里本人的权限都只能在上限之下再收窄。
 - 交付代码：上限低于 `develop` 时，建开发任务返回 403 `capability_ceiling`（`detail.needed` 为 `develop`），Manager 的 `create_task` 得到同样的拒绝并可以改做报告。
 - 事件开关只决定哪些 GitHub 事件交给 Manager，不增加写权限。
@@ -57,7 +57,6 @@
 | `review.published` | 检视发布：Issue 上有人加的开发标签时的 Issue 检视，或 bot PR 的检视采纳了修改要求、发现可执行问题 | `review.published.issue`、`review.published.pr` |
 | `release.manual` | 「发版本」页请求 CI 观察或起草发行说明 | 对应工作类型的开关 |
 | `actions.run_failed` | 默认分支的 Actions 运行失败 | Actions 失败处理的开关 |
-| `gate.manual` | 「接入门禁」对话里开始或回复 | 接入门禁的开关 |
 | `schedule.due` | `manager.check` 定时计划到期 | 定时检查的开关 |
 
 提到 bot 的评论（`issue.mention`、`pull_request.mention`）不按评论人过滤：任何人在打开的 Issue 或 PR 上 `@bot`，包括公开仓库里的仓库外人员，都会交给 Manager 分派一次，由它按提示词决定回答、检视还是不处理。这类事件只提供检视、通用回复和续接选项，不提供开发；开发仍要有人加开发标签，外人的评论不作为开发依据。Manager 自己的 `github_write` 不受事件来源限制，回应外人时由 Manager 提示词把握。
@@ -107,14 +106,13 @@ Manager 分派提示词在「角色 → Manager」里作为一份完整文本编
 | CI 观察 `release.observe` | `release.observe` | 无 |
 | 发行说明 `release.notes` | `release.notes` | 写发行说明（默认） |
 | Actions 失败处理 `actions.failures` | `actions.failures` | 重跑失败的运行、提报 Issue（默认）；默认关闭 |
-| 接入门禁 `gate.onboarding` | `gate.onboarding` | 提交门禁方案（固定） |
 | 定时检查 `task.request` | `task.request` | 修改代码、开 PR（默认都选，随能力上限生效） |
 
 每个工作类型在项目配置里有开关和写入（策略的 `work_settings`，Actions 失败处理沿用 `actions_failures_enabled`），模型在 `task_models` 里按工作类型 id 保存。工作类型和它的写入都在项目能力上限之内生效（见上文「项目能力上限」）。写入只能在可选范围内选，固定的写入不能去掉，开 PR 必须同时允许修改代码；不合规时返回 400 `invalid_work_writes`。
 
 一个任务实际可用的写入是三者的交集：项目当前的写入（已按能力上限收窄）、任务创建时的快照、Manager 为它收窄后的写入。之后收窄项目写入会立刻收窄运行中的任务；放宽项目写入不会让已有任务超过它创建时的范围。事件内容和 Manager 都不能扩大写入。所有 GitHub 写入仍由控制面完成，agent 只拿得到只读令牌。
 
-工作类型的写入是框架交付：检视结论（`finish_review`）、从测试通过的候选发布 PR、Actions 重跑与失败提报、发行说明和门禁方案。它们沿用各自的流程，只看工作类型的写入，不再要求执行角色有 GitHub 写权限（#381），所以只读的内置角色照常交付。除此之外的直接写入（例如提报一个后续 Issue）统一用 `github_write`，由执行角色的 GitHub 资源权限和项目能力上限决定是否可用；「提报 Issue」写入只留给 Actions 失败处理的 `report_failure`，升级时其他工作类型保存过的这项写入会被忽略。
+工作类型的写入是框架交付：检视结论（`finish_review`）、从测试通过的候选发布 PR、Actions 重跑与失败提报和发行说明。它们沿用各自的流程，只看工作类型的写入，不再要求执行角色有 GitHub 写权限（#381），所以只读的内置角色照常交付。除此之外的直接写入（例如提报一个后续 Issue）统一用 `github_write`，由执行角色的 GitHub 资源权限和项目能力上限决定是否可用；「提报 Issue」写入只留给 Actions 失败处理的 `report_failure`，升级时其他工作类型保存过的这项写入会被忽略。
 
 ## 控制面模块
 
@@ -123,7 +121,6 @@ Manager 分派提示词在「角色 → Manager」里作为一份完整文本编
 - **CI 观察**：请求写成事件，发布记录在 `observation_event` 里等待决定；建了任务才有 `observation_task`，不处理时 `observation_error` 写明 Manager 的理由。
 - **发行说明**：控制面核验每个来源恰好出现一次，标题和链接由控制面写出；Manager 不处理时按内置规则直接列出来源。
 - **Actions 失败处理**：日志引用核验、单次重跑预算和同一失败只报一次不变；Manager 不处理时这次失败记为 `ignored`，不重跑也不提报。
-- **接入门禁**：方案只回到对话里，人确认后才开门禁 PR；Manager 不处理时对话里写明原因，可以再发一次。
 - **定时检查**：计划的 `workflow` 写 `manager.check`，`parameters.instruction` 写要检查什么；到期时成为 `schedule.due` 事件，Manager 可以新建一项不交付代码的通用任务（授权身份是计划的服务主体，由 Manager 角色执行）；能力上限至少为 `comment` 时它可以经 `github_write` 提报 Issue 和评论，见[定时任务](schedules.md)。
 - 合并队列、发布 outbox、对账、PR head 校验、bot 分支归属、开发标签必须由人加上并在发布前仍在、发布前测试都不变。
 
@@ -131,11 +128,13 @@ Manager 分派提示词在「角色 → Manager」里作为一份完整文本编
 
 升级后第一次启动时，控制面对每个项目做一次迁移，在一个事务里完成后删除 `workflows` 表：
 
-- 规则文件的控制台覆盖成为检视、开发、标签、行为指南章节；CI 观察、发行说明、Actions 失败处理、接入门禁的控制台提示词成为对应章节；
+- 规则文件的控制台覆盖成为检视、开发、标签、行为指南章节；CI 观察、发行说明、Actions 失败处理的控制台提示词成为对应章节；
 - 自定义工作流成为「通用回复」章节下的小节，写明原来的说明、触发源和写入；它们的写入取并集作为「通用回复」的写入，模型成为 `task_models.reply`，有任一开着的自定义工作流时「通用回复」打开；
 - 内置工作流保存过的开关和写入成为工作类型的设置；
 - 开着的工作流的触发源取并集成为事件开关和标签列表；触发源和默认流程不一致时（保存过触发源、关掉过内置工作流或有自定义工作流），「分派」章节附一张「升级前的触发配置」表，按事件列出原来启动的工作，Manager 按表分派；
 - 原来的工作流行、相关策略字段和迁移报告（含需要人留意的差异，例如写入取并集、多个模型）保存在 `manager_migrations`，迁移产生的提示词是第 1 版，来源 `migration`，审计记录 `manager.migrated`。
+
+「接入门禁」（`gate.onboarding`）已删除（#931）：升级时去掉它保存的开关、模型和 Manager 章节（章节的删除记为来源 `upgrade` 的新版本，旧版本和任务快照里的这一章节读取时跳过），结束未完成的门禁任务（`work_removed`），删除门禁对话记录；已完成的任务照常可读，仓库里已有的门禁文件和已开出的门禁 PR 不受影响。CI 改动改为普通开发任务交付的 bot PR，见[接入说明](onboarding-guide.md#22-ci-改动走-bot-pr)。
 
 迁移前已经开始的阶段计划继续使用原来工作流行的指纹，不会因为升级暂停；之后改动某个工作类型的设置或章节，才会像以前修改工作流一样使旧的阶段结果失效。
 

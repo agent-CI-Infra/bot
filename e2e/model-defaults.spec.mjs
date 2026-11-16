@@ -30,7 +30,6 @@ test('#571 模型页首屏只有默认模型，工作类型覆写用中文名称
     await expect(page.getByRole('table', { name: '工作类型模型', exact: true })).toBeHidden();
     await expect(page.getByRole('heading', { name: '本项目专属模型', exact: true })).toBeHidden();
     await expect(page.getByText('review.issue', { exact: true })).toHaveCount(0);
-    await expect(page.getByText('gate-onboarding', { exact: true })).toHaveCount(0);
     await page.screenshot({ path: `${out}/model-1440.png`, fullPage: true });
 
     await openModelOverrides(page);
@@ -41,7 +40,6 @@ test('#571 模型页首屏只有默认模型，工作类型覆写用中文名称
     await expect(table.locator('code')).toHaveCount(0);
     await expect(table).not.toContainText('review.issue');
     await expect(table).not.toContainText('development_pr');
-    await expect(table).not.toContainText('gate-onboarding');
     await openModelCatalog(page);
     await expect(page.getByRole('heading', { name: '本项目专属模型', exact: true })).toBeVisible();
     await page.screenshot({ path: `${out}/model-advanced-1440.png`, fullPage: true });

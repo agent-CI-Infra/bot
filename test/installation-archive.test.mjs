@@ -12,7 +12,6 @@ import { GitHub, appPermissions, appEvents } from '../dist/github/client.js';
 import { Redactor } from '../dist/agent/common.js';
 import { loadConsole } from './console-page.mjs';
 import { ProjectRemoval } from '../dist/projects/removal.js';
-import { GateOnboarding } from '../dist/projects/gate-onboarding.js';
 import { TaskEngine, resumeInstallationWaits } from '../dist/agent/engine.js';
 import { enqueue } from '../dist/review/queue.js';
 import { explainFailure } from '../dist/agent/failures.js';
@@ -230,22 +229,18 @@ test('deleted installation IDs remain terminal and every GitHub operation is fen
   assert.equal(f.snapshot().status, 'deleted'); assert.equal(f.h.store.get('SELECT installed FROM installed_repositories').installed, 0);
 });
 
-test('repository removal fences cached GitHub and gate-onboarding tokens and domain events can be replayed without repeating unchanged snapshots', async t => {
+test('repository removal fences cached GitHub tokens and domain events can be replayed without repeating unchanged snapshots', async t => {
   const f = await fixture(t); await f.hook('domain-created'); await f.sync().sync(f.a.id); await f.admin('/api/installations/101/activate', 'POST', {});
   const events = readInstallationDomainEvents(f.h.store); assert.equal(events.length, 2);
   await f.sync().sync(f.a.id); assert.deepEqual(readInstallationDomainEvents(f.h.store), events);
   const github = new GitHub(f.h.store, f.h.store.get('SELECT * FROM repositories'), new Redactor(), async () => {}, f.apiUrl);
-  const gate = new GateOnboarding(f.h.store, f.apiUrl), app = gate.source('101').app;
-  const token = await gate.token(app, installation(), { contents: 'write' }, { repository_ids: [101] });
   await f.hook('removed', { action: 'removed', installation: installation(), repositories_removed: [{ id: 101 }], repositories_added: [] }, 'installation_repositories');
   const count = f.state.requests.length;
   await assert.rejects(github.request('POST', '/fixture/write'), error => error.code === 'github_installation_access_revoked');
-  await assert.rejects(gate.request('POST', '/fixture/write', token, {}), error => error.code === 'installation_access_revoked');
   assert.equal(f.state.requests.length, count);
   const next = readInstallationDomainEvents(f.h.store, events.at(-1).sequence);
   assert.equal(next.filter(row => row.event.type === 'installation.access_revoked').length, 1);
   assert.deepEqual(next.find(row => row.event.type === 'installation.access_revoked').event.repository_ids, ['101']);
-  assert.ok(!JSON.stringify(next).includes(token)); await gate.revoke(app);
 });
 
 test('tasks stopped while access was revoked or being re-verified resume once the projection allows the repository, and only then', async t => {

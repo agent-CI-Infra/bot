@@ -1,10 +1,11 @@
 import { appEvents, appPermissions, missingEvents, missingPermissions } from '../github/client.js';
 
 // What each console feature needs from a repository's GitHub account. Review and development make up the baseline that
-// onboarding asks for (appPermissions/appEvents). Gate onboarding commits .github/workflows/ (workflows) and Actions
-// failure analysis needs workflow_run; both, like releases, run only through a GitHub App installation. Tokens still
-// request only what each use needs; this table only says which features a missing grant stops.
-export const features = ['review', 'review_threads', 'development', 'ci_reads', 'board', 'release', 'gate', 'actions_failures'] as const;
+// onboarding asks for (appPermissions/appEvents). A bot pull request that changes .github/workflows/ needs workflows (only
+// for a task a person confirmed as a CI change, see tasks/pull-request.ts) and Actions failure analysis needs workflow_run;
+// both, like releases, run only through a GitHub App installation. Tokens still request only what each use needs; this
+// table only says which features a missing grant stops.
+export const features = ['review', 'review_threads', 'development', 'ci_reads', 'board', 'release', 'ci_changes', 'actions_failures'] as const;
 export type Feature = typeof features[number];
 interface Needs { permissions: Record<string, string>; events?: string[]; app?: boolean }
 export const featureNeeds: Record<Feature, Needs> = {
@@ -17,7 +18,7 @@ export const featureNeeds: Record<Feature, Needs> = {
   ci_reads: { permissions: { actions: 'read', checks: 'read', statuses: 'read' } },
   board: { permissions: { metadata: 'read', contents: 'read', issues: 'read', pull_requests: 'read', actions: 'read' } },
   release: { app: true, permissions: { metadata: 'read', contents: 'write', actions: 'write', pull_requests: 'read' } },
-  gate: { app: true, permissions: { metadata: 'read', contents: 'write', pull_requests: 'write', workflows: 'write' } },
+  ci_changes: { app: true, permissions: { metadata: 'read', contents: 'write', pull_requests: 'write', workflows: 'write' } },
   actions_failures: { app: true, permissions: { metadata: 'read', contents: 'read', actions: 'write', issues: 'write' }, events: ['workflow_run'] },
 };
 const rank: Record<string, number> = { read: 1, write: 2, admin: 3 };

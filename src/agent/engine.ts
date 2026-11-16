@@ -77,7 +77,7 @@ const automaticRetry=new Set(['retry_wait','waiting_configuration','waiting_envi
 const retryCycleMs=8*60*60*1000;
 // Reviews and reply tasks answer on the object; development publishes a branch and PR.
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
-const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%' OR kind IN ('release.observe','release.notes','actions.failures','gate.onboarding','task.request','task.development'))";
+const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%' OR kind IN ('release.observe','release.notes','actions.failures','task.request','task.development'))";
 // A task stopped here waits for the installation projection, not for a person: the installation was suspended or
 // uninstalled, the repository left it, or its scope was being re-verified (scope_pending, set by every scope-changing
 // webhook and by the first sync after an upgrade). The GitHub client stops on the same check before each request.

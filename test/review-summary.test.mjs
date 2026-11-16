@@ -233,7 +233,7 @@ test('the first line names what the person did, and an Issue ready for developme
 test('an installation with contents: read reports that fixed review threads are not closed', () => {
   const granted = { metadata: 'read', contents: 'read', issues: 'write', pull_requests: 'write', statuses: 'write', actions: 'write', checks: 'write', workflows: 'write' };
   const contents = appGaps(granted, ['issues', 'issue_comment', 'pull_request', 'pull_request_review', 'pull_request_review_comment', 'workflow_run']).find(gap => gap.name === 'contents');
-  assert.deepEqual(contents, { kind: 'permission', name: 'contents', required: 'write', current: 'read', features: ['review_threads', 'development', 'release', 'gate'] });
+  assert.deepEqual(contents, { kind: 'permission', name: 'contents', required: 'write', current: 'read', features: ['review_threads', 'development', 'release', 'ci_changes'] });
 });
 
 test('what a person must do keeps identifiers as written: underscores and code spans stay, emphasis and heading marks go', () => {

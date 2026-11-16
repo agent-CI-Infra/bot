@@ -42,17 +42,17 @@ export function projectCeiling(store: Store, repositoryId: string, policy: Row |
 }
 
 /**
- * The level a work-type write needs. Release notes and the gate plan are written only after a person confirms them in the
- * console (发版本, 接入门禁), as that person's operation, so they need none.
+ * The level a work-type write needs. Release notes are written only after a person confirms them in the console (发版本),
+ * as that person's operation, so they need none.
  */
 const writeLevels: Record<string, Ceiling> = { reply: 'comment', labels: 'comment', issue: 'comment', actions_rerun: 'comment', code: 'develop', pull_request: 'develop',
-  release_notes: 'read', gate_plan: 'read' };
+  release_notes: 'read' };
 export const writeLevel = (write: string): Ceiling => writeLevels[write] ?? 'develop';
 /** The level a github_write on a GitHub resource needs: merging a PR and pushing are Contents writes. */
 export const resourceLevel = (resource: string): Ceiling => resource === 'contents' ? 'develop' : 'comment';
 /**
  * The level a work type needs to run at all: reviews, replies and Actions failure handling write on GitHub, development
- * delivers code. Ordinary tasks, CI observation, release notes and gate onboarding run at any level; their writes are
+ * delivers code. Ordinary tasks, CI observation and release notes run at any level; their writes are
  * still capped one by one.
  */
 export function workLevel(id: string): Ceiling {
