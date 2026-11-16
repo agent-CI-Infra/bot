@@ -391,7 +391,8 @@ test('待启动仓库很多时项目列表和身份页默认折叠，可按名�
       await route.fulfill({ response, json: body });
     });
     mkdirSync('.tmp/ui-979', { recursive: true });
-    for (const width of [1280, 390]) {
+    // 1440 is the repository evidence width; 1280 is named in #979 and is the project-table breakpoint; 390 is the narrow width.
+    for (const width of [1440, 1280, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       // A reload starts a fresh page: the fold remembers its state only within one page session.
       await page.goto(f.h.admin + '/#/projects'); await page.reload();
@@ -429,6 +430,48 @@ test('待启动仓库很多时项目列表和身份页默认折叠，可按名�
       await identityFold.getByLabel('按名称查找').fill('waiting-13');
       await expect(identityFold.locator('.identity-pending-repos li:visible')).toHaveCount(1);
       await expect(identityFold.locator('.identity-pending-repos li:visible')).toContainText('fixture/waiting-13');
+      await page.screenshot({ path: `.tmp/ui-979/identity-search-${width}.png`, fullPage: true });
+    }
+
+    // #980 review B1: also capture the trusted-organization variant, where some pending rows keep 启动 / 可自行启动.
+    await page.unroute('**/api/identity');
+    await page.route('**/api/identity', async route => {
+      const response = await route.fetch(), body = await response.json();
+      const fixturePending = (body.github_connection.pending_repositories || []).map(repo => ({ ...repo, self_start: true }));
+      const extra = Array.from({ length: 14 }, (_, i) => ({
+        id: String(9000 + i),
+        full_name: `fixture/waiting-${String(i).padStart(2, '0')}`,
+        self_start: i < 8,
+      }));
+      body.github_connection.pending_repositories = [...fixturePending, ...extra];
+      await route.fulfill({ response, json: body });
+    });
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      await page.goto(f.h.admin + '/#/projects'); await page.reload();
+      await expect(page.getByRole('heading', { name: '待启动的仓库' })).toBeVisible();
+      await expect(page.locator('#count')).toContainText('0 个项目，15 个待启动');
+      const fold = page.locator('#rows [data-testid=pending-repo-fold]');
+      await expect(fold.locator('summary')).toHaveText('查看 15 个待启动仓库');
+      await expect(page.locator('.project-pending-intro')).toHaveText('这些仓库已装好 GitHub App，启动后会出现在上面的项目列表里。');
+      if (width === 390) expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+      await page.screenshot({ path: `.tmp/ui-979/projects-self-start-folded-${width}.png`, fullPage: true });
+      await fold.locator('summary').click();
+      await expect(page.locator('[data-key="pending:9000"]')).toContainText('可自行启动');
+      await expect(page.locator('[data-key="pending:9000"]').getByRole('button', { name: '启动', exact: true })).toBeVisible();
+      await expect(page.locator('[data-key="pending:9008"]')).toContainText('待超级管理员启动');
+      await expect(page.locator('[data-key="pending:9008"]').getByRole('button', { name: '复制提醒' })).toBeVisible();
+      if (width === 390) expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+      await page.screenshot({ path: `.tmp/ui-979/projects-self-start-${width}.png`, fullPage: true });
+
+      await page.goto(f.h.admin + '/#/identity');
+      const identityFold = page.locator('#identity-panel [data-testid=pending-repo-fold]');
+      await expect(identityFold.locator('summary')).toHaveText('查看 15 个待启动仓库');
+      await identityFold.locator('summary').click();
+      await expect(identityFold.locator('.identity-pending-repos').getByText('可自行启动').first()).toBeVisible();
+      await expect(identityFold.locator('.identity-pending-repos').getByText('待超级管理员启动').first()).toBeVisible();
+      if (width === 390) expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+      await page.screenshot({ path: `.tmp/ui-979/identity-self-start-${width}.png`, fullPage: true });
     }
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
