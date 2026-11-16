@@ -103,3 +103,20 @@ test('saved trust defaults become a capability ceiling without widening them (#8
   assert.deepEqual(store.all('SELECT owner_id,capability_ceiling,development_enabled FROM trusted_organizations ORDER BY owner_id').map(row => ({ ...row })),
     [{ owner_id: '10', capability_ceiling: 'develop', development_enabled: 1 }, { owner_id: '20', capability_ceiling: 'comment', development_enabled: 0 }]);
 });
+
+test('a new project of a GitHub App installation starts with Actions failure handling on, unless it starts read-only (#851)', async t => {
+  const f = await identityFixture(t), { h, admin } = f;
+  installed(f, '103'); installed(f, '104');
+  assert.equal((await admin('/api/installations/103/activate', 'POST', {})).status, 201);
+  assert.equal((await admin('/api/installations/104/activate', 'POST', { capability_ceiling: 'read' })).status, 201);
+  const actions = id => ({ enabled: h.store.get('SELECT actions_failures_enabled FROM policies WHERE repository_id=?', id).actions_failures_enabled,
+    scanning: !!h.store.get('SELECT 1 FROM actions_failure_scans WHERE repository_id=?', id) });
+  // Analyze, rerun once and file an Issue: the work type writes within comment; nothing develops below develop.
+  assert.deepEqual(actions('103'), { enabled: 1, scanning: true });
+  assert.deepEqual(actions('104'), { enabled: 0, scanning: false });
+  // Starting a disabled project again keeps its own choice.
+  assert.equal((await admin('/api/repositories/103/policy', 'PATCH', { actions_failures_enabled: false })).status, 200);
+  assert.equal((await admin('/api/installations/103/disable', 'POST', {})).status, 201);
+  assert.equal((await admin('/api/installations/103/activate', 'POST', {})).status, 201);
+  assert.equal(actions('103').enabled, 0);
+});

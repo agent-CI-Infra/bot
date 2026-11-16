@@ -183,6 +183,8 @@ test('已安装但未启动的仓库写明待超级管理员启动，项目管�
     await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
     f.h.store.transaction(() => {
       f.h.store.run("DELETE FROM policies WHERE repository_id='101'");
+      // A started project has Actions failure handling on (#851).
+      f.h.store.run("DELETE FROM actions_failure_scans WHERE repository_id='101'");
       f.h.store.run("DELETE FROM identity_projects WHERE project_id='101'");
       f.h.store.run("DELETE FROM repositories WHERE id='101'");
     });

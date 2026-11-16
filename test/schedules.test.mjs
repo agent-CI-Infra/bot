@@ -14,6 +14,7 @@ import { scheduleStorage } from '../dist/schedules/storage.js';
 import { defaultLimits } from '../dist/schedules/types.js';
 import { nextTime, previewTimes, quietUntil } from '../dist/schedules/time.js';
 import { HttpError, randomId } from '../dist/core/security.js';
+import { projectCapabilities } from '../dist/identity/storage.js';
 import { configureDispatch, ruleDecider } from '../dist/dispatch/worker.js';
 import { taskGithubWrite } from '../dist/tasks/github-write.js';
 import { taskActingRole } from '../dist/tasks/management.js';
@@ -190,8 +191,32 @@ test('project service uses explicit minimum capabilities, survives creator depar
   f.h.store.run('UPDATE scoped_grants SET revoked_at=? WHERE id=?', f.now(), grant); invalidate(f.h.store, service, 'fixture revoke');
   await f.worker.tick(); assert.equal(f.h.store.get('SELECT state FROM schedules').state, 'paused');
 });
+test('a project administrator sets up a project Manager check without a super administrator (#851)', async t => {
+  const f = await fixture(t), owner = await f.member('project-owner-851', { repository_ids: ['101'] }), other = await f.member('other-owner-851', { repository_ids: ['102'] });
+  // The schedule panel offers project plans, and creating the project's service identity, to the project's administrators.
+  assert.equal((await query(f, 'list_schedule_destinations', {}, owner.client)).can_manage_project, true);
+  assert.equal((await other.client('/api/identity/service-principals', 'POST', { project_id: '101', maintenance: '项目定时检查' })).status, 403);
+  const made = await owner.client('/api/identity/service-principals', 'POST', { project_id: '101', maintenance: '项目定时检查' });
+  assert.equal(made.status, 201, JSON.stringify(made.value));
+  // The identity holds what its creator holds in 101, as their delegation: it lasts only while they hold it (#847).
+  const service = made.value.principal_id, grant = f.h.store.get('SELECT * FROM scoped_grants WHERE principal_id=?', service);
+  assert.deepEqual([grant.policy, grant.grantor_id, grant.project_id], ['project_delegation', owner.id, '101']);
+  assert.deepEqual(new Set(JSON.parse(grant.capabilities)), new Set(projectCapabilities));
+  assert.deepEqual((await query(f, 'list_schedule_destinations', {}, owner.client)).services.map(s => s.id), [service]);
+  const destination = await registerDestination(f.admin, await keptGroup(f));
+  const plan = f.plan({ name: '每日检查', kind: 'project', actor_id: service, owner_id: owner.id, maintainer_id: owner.id, workflow: 'manager.check',
+    parameters: { instruction: 'Check main CI and new Issues.' }, destination_id: destination });
+  const registered = await command(f, 'schedule.register', { plan }, owner.client);
+  assert.equal(registered.value.state, 'succeeded', JSON.stringify(registered.value));
+  const schedule = registered.value.result.schedule;
+  assert.equal(f.h.store.get("SELECT initiator FROM schedule_audit WHERE action='schedule.register'").initiator, owner.id);
+  // Its administrators pause it; nobody needed grants.manage.
+  const paused = await command(f, 'schedule.pause', { id: schedule.id, revision: schedule.revision }, owner.client);
+  assert.equal(paused.value.state, 'succeeded', JSON.stringify(paused.value));
+});
 test('an authorized administrator hands over a service plan after owner departure without changing its identity or capabilities', async t => {
   const f = await fixture(t), admin = await f.member('handover-admin', { role: 'super_admin' }), first = await f.member('first-maintainer', { repository_ids: ['101'] }), replacement = await f.member('replacement-maintainer', { repository_ids: ['101'] });
+  const outsider = await f.member('other-project-admin', { repository_ids: ['102'] });
   const plan = await projectPlan(f, first.id), original = await f.create(plan), store = f.h.store;
   assert.equal((await admin.client('/api/users/' + f.principal, 'PATCH', { active: false })).status, 200);
   f.advance(60000); await f.worker.tick();
@@ -199,8 +224,11 @@ test('an authorized administrator hands over a service plan after owner departur
   assert.equal(store.get('SELECT count(*) n FROM schedule_business_runs').n, 1);
   const preview = await query(f, 'preview_schedule', { plan, schedule_id: original.id }, admin.client); assert.equal(preview.plan.owner_id, f.principal);
   const noId = await admin.client('/api/management/query', 'POST', { operation: 'preview_schedule', target, arguments: { plan } }); assert.equal(noId.value.error, 'schedule_owner_required');
-  const denied = await command(f, 'schedule.update', { id: original.id, revision: 1, plan: { ...plan, maintainer_id: replacement.id } }, first.client);
-  assert.notEqual(denied.value.state, 'succeeded'); assert.equal(denied.value.result.error, 'capability_forbidden'); assert.equal(store.get('SELECT revision FROM schedules').revision, 1);
+  // Project plans are managed by the project's administrators (#851); an administrator of another project cannot change it.
+  const key = randomId(), { revision } = await query(f, 'list_schedules', {}, admin.client);
+  const denied = await outsider.client('/api/management/commands', 'POST', { operation: 'schedule.update', target, arguments: { id: original.id, revision: 1, plan: { ...plan, maintainer_id: replacement.id } },
+    expected_revision: revision, idempotency_key: key, source_conversation: 'schedule-fixture', source_message: key });
+  assert.notEqual(denied.value.state, 'succeeded', JSON.stringify(denied.value)); assert.equal(store.get('SELECT revision FROM schedules').revision, 1);
   assert.equal((await admin.client('/api/users/' + first.id, 'PATCH', { active: false })).status, 200);
   await f.worker.tick(); const paused = store.get('SELECT * FROM schedules'); assert.equal(paused.state, 'paused');
   assert.throws(() => f.worker.service.actor(paused, plan), /principal_inactive/);

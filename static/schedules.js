@@ -153,11 +153,12 @@ async function renderSchedules(panel, project) {
     summary.append(row);
   }
   if (!plans.schedules.length) summary.append(note('当前项目没有计划。')); panel.append(summary);
-  let original = null, dirty = false;
+  let original = null, dirty = false, serviceMissing = null;
 
   const syncFields = () => {
     instructionField.hidden=workflow.value!=='manager.check';
     if (actor.parentElement) actor.parentElement.hidden = kind.value === 'personal';
+    if (serviceMissing) serviceMissing.hidden = kind.value === 'personal';
     if (maintainer.parentElement) maintainer.parentElement.hidden = kind.value === 'personal';
     if (cron.parentElement) cron.parentElement.hidden = recurrence.value !== 'cron';
     if (interval.parentElement) interval.parentElement.hidden = recurrence.value !== 'interval';
@@ -194,7 +195,19 @@ async function renderSchedules(panel, project) {
   };
   const identityFold = element('details','','fold schedule-identity-fold');
   identityFold.dataset.testid='schedule-identity-fold';
-  identityFold.append(element('summary','高级身份选项'),field('执行身份类型',kind),field('项目服务身份',actor),field('项目维护人',maintainer));
+  identityFold.append(element('summary','高级身份选项'),field('执行身份类型',kind),field('项目服务身份',actor));
+  // #851: the project's administrators create its service identity here; project plans (Manager checks) run as it.
+  if (destinations.can_manage_project && !(destinations.services ?? []).length) {
+    const create = button('创建项目服务身份', async () => {
+      create.disabled = true;
+      try { await api('/api/identity/service-principals', 'POST', { project_id: project, maintenance: '项目定时检查' }); if (live()) await renderSchedules(panel, project); }
+      catch (err) { create.disabled = false; if (live()) status.textContent = readErrorText(err); }
+    }, 'quiet');
+    serviceMissing = element('div', '', 'schedule-service-missing');
+    serviceMissing.append(note('本项目还没有服务身份。项目服务计划以它的身份运行，它只拿到你本人在本项目拥有的权限，你失去这些权限时计划随之暂停。'), create);
+    identityFold.append(serviceMissing);
+  }
+  identityFold.append(field('项目维护人',maintainer));
   const syncFoldsForViewport=()=>{ if (window.innerWidth<=760) identityFold.open=true; };
   const onFoldResize=()=>{ if (!panel.isConnected) { window.removeEventListener('resize',onFoldResize); return; } syncFoldsForViewport(); };
   window.addEventListener('resize',onFoldResize);

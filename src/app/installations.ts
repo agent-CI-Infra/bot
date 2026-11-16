@@ -14,6 +14,7 @@ import { pendingInstalledRepositories } from '../identity/github-status.js';
 import { requestedCeiling, trustCeiling, trustedOrganization, trustOrganization } from './trusted-organizations.js';
 import { assertSyncClaim, claimInstallationSync, commitInstallationProjection, finishInstallationSync, validateInstallation, type SyncClaim } from '../installations/projection.js';
 import { covers, projectCeiling, setCeiling } from '../work/ceiling.js';
+import { activateActions } from '../actions/storage.js';
 
 // Installation scope: which repositories each account can see on GitHub. Seeing a repository never registers or
 // enables it; an administrator starts it in the console, and can disable it again.
@@ -532,6 +533,12 @@ function activate(store: Store, user: Actor, id: string, input: Json, check: () 
     store.run('UPDATE policies SET enabled=1,model_id=? WHERE repository_id=?', model ?? policy.model_id, id);
     const level = projectCeiling(store, id, policy), ceiling = chosenCeiling ?? (covers(level, 'comment') ? level : 'comment');
     setCeiling(store, id, ceiling, user.id);
+    // #851: a new project starts with Actions failure handling on: analyze, rerun a failed run at most once and file an Issue;
+    // it never develops by itself. It needs a GitHub App installation, and the ceiling's comment level to write anything.
+    if (!registered && covers(ceiling, 'comment') && store.get('SELECT type FROM accounts WHERE id=?', chosen!.account_id)?.type === 'github_app') {
+      store.run('UPDATE policies SET actions_failures_enabled=1 WHERE repository_id=?', id);
+      activateActions(store, id);
+    }
     store.audit(user.id, registered ? 'repository.enabled' : 'repository.activated', id, id);
     if (input.trust_organization === true) trustOrganization(store, user.id, String((chosen || registered)!.owner_id),
       { model_id: modelRow?.repository_id === null ? model : null, capability_ceiling: ceiling });
