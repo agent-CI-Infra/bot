@@ -34,6 +34,13 @@ export class ManagementApi {
         return this.agent.send(actor,id,input);
       }
     }
+    // Repository onboarding (#930): the repository's session, opened or closed; its conversation uses the routes above.
+    const onboarding=/^\/api\/management\/onboarding\/([1-9]\d*)(?:\/(close))?$/.exec(path);
+    if(onboarding){
+      const repository=onboarding[1]!;
+      if(method==='GET'&&!onboarding[2])return this.agent.onboarding.view(actor,repository);
+      if(method==='POST'){fields(input,[]);return onboarding[2]?this.agent.onboarding.close(actor,repository):this.agent.onboarding.open(actor,repository);}
+    }
     return fail(404,'management_endpoint_not_found');
   }
   async stream(actor:ActorContext,url:URL,res:ServerResponse):Promise<void>{

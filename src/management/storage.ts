@@ -28,6 +28,7 @@ export function managementStorage(store: Store): void {
       revision INTEGER NOT NULL,snapshot TEXT NOT NULL,created_at TEXT NOT NULL);
   `);
   retireAcpTaskExecutionConfigs(store);
+  onboardingStorage(store);
   // A command still waiting for approval from before the approval flow was retired never runs: it ends as failed.
   const waiting = store.all("SELECT id,principal_id,project_id FROM management_commands WHERE state='awaiting_approval'");
   if (waiting.length) store.transaction(() => {
@@ -37,4 +38,23 @@ export function managementStorage(store: Store): void {
       store.audit(row.principal_id, 'management.failed', row.id, row.project_id);
     }
   });
+}
+
+// Repository onboarding sessions and plan drafts (#930, see onboarding.ts).
+function onboardingStorage(store: Store): void {
+  store.db.exec(`
+    CREATE TABLE IF NOT EXISTS onboarding_sessions(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,conversation_id TEXT NOT NULL,state TEXT NOT NULL,
+      questions TEXT,created_by TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,closed_by TEXT,closed_at TEXT);
+    CREATE UNIQUE INDEX IF NOT EXISTS onboarding_open_session ON onboarding_sessions(repository_id) WHERE state='open';
+    CREATE INDEX IF NOT EXISTS onboarding_session_conversation ON onboarding_sessions(conversation_id);
+    -- Plan drafts by repository and version; a later version replaces the earlier draft.
+    CREATE TABLE IF NOT EXISTS onboarding_plans(id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES onboarding_sessions(id),repository_id TEXT NOT NULL,
+      version INTEGER NOT NULL,plan TEXT NOT NULL,message_id TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(repository_id,version));
+  `);
+}
+
+/** Starting a project bills its onboarding usage so far to it (#930): those turns ran before the project existed. */
+export function adoptOnboardingUsage(store: Store, repositoryId: string): void {
+  store.run(`UPDATE model_requests SET repository_id=? WHERE repository_id IS NULL AND service_role_id=? AND conversation_id IN
+    (SELECT conversation_id FROM onboarding_sessions WHERE repository_id=?)`, repositoryId, 'management-assistant', repositoryId);
 }

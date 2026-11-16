@@ -5,7 +5,7 @@ const names = (labels: unknown): string[] => (Array.isArray(labels) ? labels : [
   .map(label => typeof label === 'string' ? label : (label as any)?.name).filter((name): name is string => typeof name === 'string' && !!name);
 const axis = (name: string) => name.includes('/') ? name.slice(0, name.indexOf('/')).toLowerCase() : null;
 // Opt-in, veto, hold and gate labels are human or automation decisions.
-const reserved = (name: string) => /^(agent|pr|gate)\//i.test(name) || /^(blocker|priority\/critical)$/i.test(name);
+export const reservedLabel = (name: string) => /^(agent|pr|gate)\//i.test(name) || /^(blocker|priority\/critical)$/i.test(name);
 
 /**
  * The labels an agent asks to put on its pull request (#845), checked by the rules above before anything is published: each must
@@ -18,7 +18,7 @@ export function pullRequestLabels(requested: unknown, available: unknown, own: s
   for (const raw of Array.isArray(requested) ? requested : []) {
     const wanted = String(raw).trim(), name = existing.get(wanted.toLowerCase());
     if (!name) refused.push({ name: wanted, reason: 'not_in_repository' });
-    else if (reserved(name) || ownNames.includes(name.toLowerCase())) refused.push({ name, reason: 'reserved' });
+    else if (reservedLabel(name) || ownNames.includes(name.toLowerCase())) refused.push({ name, reason: 'reserved' });
     else if (!labels.includes(name)) labels.push(name);
   }
   refused.push(...labels.splice(8).map(name => ({ name, reason: 'too_many' as const })));
@@ -36,7 +36,7 @@ export function classificationLabels(suggested: unknown, available: unknown, cur
   const chosen: string[] = [];
   for (const raw of Array.isArray(suggested) ? suggested : []) {
     const name = existing.get(String(raw).trim().toLowerCase());
-    if (!name || reserved(name) || ownNames.includes(name.toLowerCase()) || have.includes(name.toLowerCase()) || chosen.includes(name)) continue;
+    if (!name || reservedLabel(name) || ownNames.includes(name.toLowerCase()) || have.includes(name.toLowerCase()) || chosen.includes(name)) continue;
     const group = axis(name);
     if (group && taken.has(group)) continue;
     if (group === 'priority' && chosen.some(label => axis(label) === 'priority')) continue;

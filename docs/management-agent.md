@@ -63,8 +63,25 @@ RoleDefinitionV2 的显式角色 apply 仍在安全检查点结束旧 run，并�
 
 管理会话有新内容时才显示「回到最新消息」。阅读旧记录、选中回复文字或在输入框起草下一条消息时，新内容不会把记录区自动滚到底；明确点击该按钮后才回到最新位置。正在选中的回答暂缓 Markdown 重绘，避免流式回复替换节点后丢失选区；取消选区后补齐内容并保留阅读位置。停止生成、收起窗口和取消已提交业务操作仍按各自的原语义处理。
 
+## 仓库接入向导
+
+接入向导（#929）让仓库的管理员在项目启动之前，先和管理助手谈清楚 bot 在这个仓库能做什么、该怎样配置。这一步只读：不写 GitHub，不启动项目，不用项目电脑，也不改任何设置；人确认方案之后的应用另见后续说明。
+
+**谁能打开**：已启动的项目，要求项目管理员权限（`config.write`，含委派）；已安装但没有启动的仓库，要求 GitHub 认定的仓库管理员或组织所有者（与 #848 自己启动的条件相同），或者超级管理员。仓库必须在本部署某个 GitHub App 安装之下。其他人（例如只有 Write 的协作者）得到 403 `repository_admin_required`。控制台会话限定了组织或项目时，只能打开其中的仓库。
+
+**会话**：`POST /api/management/onboarding/<仓库 id>` 打开这个仓库的向导会话，已有进行中的会话就返回它；`GET` 读取页面状态；`POST .../close` 结束会话，之后再打开会新建一个。一个仓库同时只有一个进行中的会话，它属于仓库而不属于个人：每位管理员打开的都是同一个会话，都能读到全部消息（会话里只有这个仓库的事实），它不出现在个人的管理会话列表里，也不能经 `/api/management/conversations` 以 `onboarding:` 范围新建。对话、流式事件和停止都沿用上面的会话接口；向导里只接受自然语言消息，不接受直接的 query 或 command（`onboarding_content_required`），并且同一时间只跑一轮（`onboarding_turn_running`），会话结束后再发消息得到 `onboarding_session_closed`。
+
+**读取**：管理助手只能读这一个仓库，工具是 `github_read`、`github_search`、`read_job_log`。每轮按需为这个仓库签发安装令牌，权限只有 Metadata、Contents、Issues、Pull requests、Actions、Checks、Statuses 的读，本轮结束即撤销；令牌只在控制面里使用，不进入模型请求、事件和日志。系统提示词是 [`docs/prompts/onboarding.md`](prompts/onboarding.md) 的原文，加上超级管理员给管理助手写的补充说明。已启动的项目还会带上它当前的能力上限、事件开关、测试命令和检视语言，供重新运行时只提出差异。
+
+**两个工具**：
+
+- `ask_onboarding_questions`：一次至多 5 个问题，每题 2～5 个选项，带推荐答案（必须是其中一个选项）和理由。最新一组问题保存在会话里，页面据此显示；人可以选、可以改，也可以直接用自然语言回答。
+- `propose_onboarding_plan`：提交结构化方案，控制面校验后保存为新一版草稿（按仓库递增版本），不应用。方案项只对应现有设置：能力档 `capability_ceiling`、交给 Manager 的事件 `events`（与 Manager 的事件开关同一套键和校验，含 `actions.run_failed`）、`test_command`（启动后才验证）、`review_language`、要新建或沿用的标签 `labels`（名称、颜色、说明；不能用保留标签 `agent/*`、`pr/*`、`gate/*`、`blocker`、`priority/critical`，不能重名）、写进角色提示词的约定 `conventions`（标签用法、检视重点、"简单问题"的界定）、CI 建议 `ci`（文字和要改的文件）、定时巡检 `schedules`（名称、五段 cron、时区、检查内容）和飞书群建议 `feishu`（档位与理由），另有仓库画像摘要 `profile`（含读过的来源）。不合法时工具结果给出 `error` 和出错的 `field`（以及原因），交还模型改正，不让整轮失败。
+
+**模型与用量**：仓库所属组织受信任（#848）且设了默认模型、该模型仍是共享模型时用它，否则用管理助手自己的共享模型；都没有时这一轮失败并提示请超级管理员先配置，不会改用其他模型（也不用项目自己的模型），页面在发送之前就能从 `model.available` 看到。启动前后用同一个模型：项目只承担用量，所以共享模型即使只限定给其他项目，也照样运行已启动项目的向导。用量记在管理助手名下，并记在这个仓库上：已启动的项目直接计入项目用量；项目还没启动时，模型请求按会话保存（`model_requests.repository_id` 外键指向已启动的项目，这时还没有这一行），启动项目的同一事务里改记到该项目，之后在项目用量里可见。页面状态里的 `usage` 是本次会话的请求数、令牌和费用。
+
 ## 扩展与验证
 
 `ManagementService.register` 为配置发布、知识修订、计划和通知提供可信 execute / reconcile 注册接口。`knowledgeSearch` 是受限检索接入点。计划和通知由 [持久化调度模块](schedules.md) 注册，表单和管理工具走同一服务；未注册的业务工作流处理器明确不支持。知识模块未注册时返回明确不可用。角色配置沿用 RoleDefinitionV2 接口与版本检查；Pi prepare、角色快照和显式 revision 续接与项目主控共用现有实现。
 
-`e2e/management-live.spec.mjs` 通过真实模型 SSE 和管理事件流验证完成前渲染、工具进展、多轮文本、Markdown 安全边界、停止、失败、重连、滚动及历史回读。阶段消息（事件流、10 条上限、私聊送达）和不限步数由 `test/channel-stage-messages.test.mjs` 与 `e2e/stage-messages.spec.mjs` 覆盖。`test/management.test.mjs` 覆盖权限、并发、幂等、配置来源、直接执行（旧审批策略不再生效、遗留待审批命令不执行）、未知结果、停止和会话隔离；`e2e/management.spec.mjs` 使用独立 SQLite、随机监听端口和本地模型协议夹具验证真实持久化查询、配置修改、任务管理及浏览器/API 一致性。全部临时产物应放在工作树 `.tmp/`，运行测试时设置 `TMPDIR` 为该目录。
+`e2e/management-live.spec.mjs` 通过真实模型 SSE 和管理事件流验证完成前渲染、工具进展、多轮文本、Markdown 安全边界、停止、失败、重连、滚动及历史回读。`test/repository-onboarding.test.mjs` 覆盖接入向导：未启动仓库的只读分析（只签发一次只读令牌并在本轮后撤销、令牌不进模型与事件、GitHub 没有写入、项目仍未启动）、非管理员的错误码、多人共用同一会话、问题与方案草稿的校验和保存、一次一轮、启动后用量转记到项目、已启动项目带当前设置，以及受信任组织的默认模型。阶段消息（事件流、10 条上限、私聊送达）和不限步数由 `test/channel-stage-messages.test.mjs` 与 `e2e/stage-messages.spec.mjs` 覆盖。`test/management.test.mjs` 覆盖权限、并发、幂等、配置来源、直接执行（旧审批策略不再生效、遗留待审批命令不执行）、未知结果、停止和会话隔离；`e2e/management.spec.mjs` 使用独立 SQLite、随机监听端口和本地模型协议夹具验证真实持久化查询、配置修改、任务管理及浏览器/API 一致性。全部临时产物应放在工作树 `.tmp/`，运行测试时设置 `TMPDIR` 为该目录。

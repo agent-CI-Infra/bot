@@ -12,6 +12,7 @@ import { accessGaps, appGaps } from './access.js';
 import { installationSnapshot, installationRef, accountRef, queueInstallationSync, installationExecutionDenied } from '../installations/archive.js';
 import { pendingInstalledRepositories } from '../identity/github-status.js';
 import { requestedCeiling, trustCeiling, trustedOrganization, trustOrganization } from './trusted-organizations.js';
+import { adoptOnboardingUsage } from '../management/storage.js';
 import { assertSyncClaim, claimInstallationSync, commitInstallationProjection, finishInstallationSync, validateInstallation, type SyncClaim } from '../installations/projection.js';
 import { covers, projectCeiling, setCeiling } from '../work/ceiling.js';
 import { activateActions } from '../actions/storage.js';
@@ -540,6 +541,8 @@ function activate(store: Store, user: Actor, id: string, input: Json, check: () 
       activateActions(store, id);
     }
     store.audit(user.id, registered ? 'repository.enabled' : 'repository.activated', id, id);
+    // Onboarding turns that ran before the project existed are billed to it from now on (#930).
+    if (!registered) adoptOnboardingUsage(store, id);
     if (input.trust_organization === true) trustOrganization(store, user.id, String((chosen || registered)!.owner_id),
       { model_id: modelRow?.repository_id === null ? model : null, capability_ceiling: ceiling });
     return { repository: (list(store).repositories as Json[]).find(r => r.id === id)! };
