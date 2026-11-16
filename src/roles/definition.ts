@@ -9,6 +9,7 @@ import { harnesses } from './harness.js';
 import { defaultPermissions, migratePermissions, githubReadScopes, validPermissionInput, updatePermissions, permissionSnapshot, permitsTool, type RolePermissions } from './permissions.js';
 import { recommendedBackend, plannedBackend } from './backends.js';
 import { validateStages, type StageDefinition } from './stage-policy.js';
+import { cachedRuleFiles } from '../rules/service.js';
 import { assertHarnessModelSourceImplemented, isHarnessModelSource, type HarnessModelSource } from '../harness/subscription.js';
 
 /**
@@ -259,7 +260,7 @@ function pinSkill(s: Store, repositoryId: string, input: any, index: number, pre
     // Repository skills come from the rule cache at exactly the named commit; a moved branch never changes a pinned bundle.
     if (typeof source.commit !== 'string' || !/^[a-f0-9]{40}$/.test(source.commit)) invalid('invalid_skill_source', field + '.source.commit');
     if (!Array.isArray(source.paths) || !source.paths.length || source.paths.length > 32 || source.paths.some((p: any) => typeof p !== 'string')) invalid('invalid_skill_source', field + '.source.paths');
-    const cached = s.hasTable('repository_rule_sources') ? s.get('SELECT sha,files FROM repository_rule_sources WHERE repository_id=?', repositoryId) : undefined;
+    const cached = cachedRuleFiles(s, repositoryId);
     if (!cached || cached.sha !== source.commit) {
       // Re-saving an unchanged pinned source must not follow a moving rule cache. Only this configuration's exact
       // existing bundle may supply those old files; a new id, path or commit still requires the matching cache.
@@ -268,8 +269,8 @@ function pinSkill(s: Store, repositoryId: string, input: any, index: number, pre
       if (!saved || saved.type !== 'repository' || saved.commit !== source.commit || JSON.stringify([...saved.paths].sort()) !== JSON.stringify([...source.paths].sort())) fail(409, 'skill_source_commit_unavailable', field + '.source.commit');
       files = JSON.parse(String(stored!.files)).map((file: { path: string; content: string }) => ({ path: file.path, content: file.content }));
     } else {
-      const available = JSON.parse(cached.files);
-      for (const path of source.paths) { if (!/^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(path) || !Object.hasOwn(available, path)) invalid('skill_file_not_found', field + '.source.paths'); files.push({ path, content: available[path] }); }
+      const available = cached.files;
+      for (const path of source.paths) { if (!/^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(path) || !Object.hasOwn(available, path)) invalid('skill_file_not_found', field + '.source.paths'); files.push({ path, content: available[path]! }); }
     }
     descriptor = { type: 'repository', path_root: '.agents/skills', commit: source.commit, paths: [...source.paths].sort() };
   } else if (source.type === 'inline') {

@@ -139,6 +139,18 @@ export function ownLabels(store: Store, repositoryId: string): string[] {
   return [labels.review_label, labels.development_label].filter(Boolean);
 }
 export const rulesUpdateRemoved = '规则文件和它们的控制台覆盖已不再使用：检视、开发和标签的规则改在 Manager 提示词对应的章节（PUT /api/repositories/:id/manager，管理命令 manager.update）和角色配置（管理命令 roles.update）里修改，标签名在项目设置里修改。';
+/**
+ * The repository files the bot last read for a project (its skills, and the names of retired .bot/ files), or null when
+ * it has read none, or when the stored value cannot be read: that is derived data, and the next task or refresh reads
+ * the branch again, so a damaged row must not make the project's rules unreadable.
+ */
+export function cachedRuleFiles(store: Store, repositoryId: string): { sha: string; files: Record<string, string>; updated_at: string } | null {
+  const row = store.hasTable('repository_rule_sources') ? store.get('SELECT sha,files,updated_at FROM repository_rule_sources WHERE repository_id=?', repositoryId) : undefined;
+  if (!row) return null;
+  try { const files = JSON.parse(String(row.files)); return files && typeof files === 'object' && !Array.isArray(files) ? { sha: String(row.sha), files, updated_at: String(row.updated_at) } : null; }
+  catch { return null; }
+}
+const importReport = (text: unknown) => { try { const value = JSON.parse(String(text)); return value && typeof value === 'object' ? value : {}; } catch { return {}; } };
 export class RuleService {
   constructor(readonly store: Store, readonly manager?: Manager, readonly githubUrl?: string) {
     if (!store.all('PRAGMA table_info(policies)').some(r => r.name === 'rule_overrides')) store.db.exec("ALTER TABLE policies ADD COLUMN rule_overrides TEXT NOT NULL DEFAULT '{}'");
@@ -196,11 +208,11 @@ export class RuleService {
     return files;
   }
   async view(id: string) {
-    const saved = this.store.get('SELECT * FROM repository_rule_sources WHERE repository_id=?', id), policy = this.store.get('SELECT * FROM policies WHERE repository_id=?', id)!;
+    const saved = cachedRuleFiles(this.store, id), policy = this.store.get('SELECT * FROM policies WHERE repository_id=?', id)!;
     const env = await this.manager?.call('GET', '/v1/projects/' + id).catch(() => null);
     const imported = this.store.get('SELECT sha,imported_at,report FROM rule_imports WHERE repository_id=?', id);
-    return { ...resolveRules(policy, saved ? JSON.parse(saved.files) : {}, this.consoleComputer(id,env?.computer), projectLabels(this.store, id)), sha: saved?.sha || null, updated_at: saved?.updated_at || null, needs_refresh: !saved,
-      imported: imported ? { sha: imported.sha, imported_at: imported.imported_at, ...JSON.parse(imported.report) } : null };
+    return { ...resolveRules(policy, saved ? saved.files : {}, this.consoleComputer(id,env?.computer), projectLabels(this.store, id)), sha: saved?.sha || null, updated_at: saved?.updated_at || null, needs_refresh: !saved,
+      imported: imported ? { sha: imported.sha, imported_at: imported.imported_at, ...importReport(imported.report) } : null };
   }
   async api(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
     const match = /^\/api\/repositories\/([^/]+)\/rules(?:\/(refresh|apply-computer))?$/.exec(url.pathname); if (!match) return undefined;

@@ -1,7 +1,7 @@
 import { GitHub, revokeInstallationToken } from '../github/client.js';
 import { Redactor, blobSha } from '../agent/common.js';
 import { fail, type Json } from '../core/security.js';
-import { resolveRules } from '../rules/service.js';
+import { cachedRuleFiles, resolveRules } from '../rules/service.js';
 import { type ManagementCommand, type ManagementExtension, ManagementService } from './service.js';
 import type { ActorContext } from '../identity/authorization.js';
 
@@ -31,10 +31,10 @@ export class ConfigurationPR implements ManagementExtension {
     const gh=await this.client(actor,command);
     try{
       const existing=await this.find(gh,key);if(existing)return existing;
-      const source=this.service.store.get('SELECT * FROM repository_rule_sources WHERE repository_id=?',command.target.project_id);
+      const source=cachedRuleFiles(this.service.store,command.target.project_id);
       const ref=await gh.ref(gh.defaultBranch);
       if(!source||!ref||source.sha!==ref.object?.sha)fail(409,'refresh_repository_sources_first');
-      resolveRules(this.service.store.get('SELECT * FROM policies WHERE repository_id=?',command.target.project_id)!,{...JSON.parse(source!.files),[path]:content});
+      resolveRules(this.service.store.get('SELECT * FROM policies WHERE repository_id=?',command.target.project_id)!,{...source!.files,[path]:content});
       gh.beforeWrite=()=>{
         this.service.check(actor,command);
         if(this.service.revision(command.target)!==command.expected_revision)fail(409,'management_revision_conflict');
