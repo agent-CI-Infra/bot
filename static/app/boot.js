@@ -83,11 +83,20 @@ async function start() {
   try {
     listed = (await api('/api/repositories')).repositories;
     if (me.role === 'super_admin') listedAccounts = (await api('/api/accounts')).accounts;
-  } catch (err) { showBootFailure(err, { keepSession: true }); return; }
-  repositories = listed; accounts = listedAccounts;
-  options($('repository-filter'), repositories, r => r.full_name); options($('account-filter'), accounts, a => a.name);
+  } catch (err) {
+    // #945: the console is already up and the notice already says this one list could not be read — its button is the
+    // retry. A refresh whose read fails again keeps that page and that one retry instead of taking both off the screen.
+    if (typeof githubRepositoriesUnreadShowing === 'function' && githubRepositoriesUnreadShowing()) {
+      await showRepositoriesUnread(me, err).catch(error); return;
+    }
+    showBootFailure(err, { keepSession: true }); return;
+  }
+  accounts = listedAccounts; options($('account-filter'), accounts, a => a.name);
   if(me.role==='super_admin'&&!accounts.length&&!location.hash)history.replaceState(null,'','#/settings/onboarding/0');
-  await route();
+  // #945: this read of the whole list is the same read the notice's button makes, so it goes through the one function that
+  // counts it as the recovery — clearing the notice and drawing the project picker and the pages from the new list.
+  await applyGithubRepositories(me, listed);
+  if (!['projects', 'identity'].includes(tab) || projectRoute()) await route();
   if (authError) notice('message', identityError(authError), '', 'alert');
 }
 if (typeof onLocaleChange === 'function') onLocaleChange(() => start().catch(error));

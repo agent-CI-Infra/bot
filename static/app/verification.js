@@ -21,6 +21,10 @@ function githubVerificationText(progress) {
 function showGithubVerification(failures = 0) {
   const line = $('github-verification'); if (!line) return;
   const progress = me && me.github_verification;
+  // #945: while no check is running the notice outlives a redraw — it is the whole-list read's only retry. A new check
+  // replaces it and takes its owner with it, so the notice never sits under a progress line that has its own state.
+  if (progress) repositoriesUnreadOwner = null;
+  else if (githubRepositoriesUnreadShowing()) { drawGithubRepositoriesUnread(); return; }
   line.hidden = !progress;
   if (!progress) { line.textContent = ''; line.removeAttribute('data-state'); return; }
   if (failures < GITHUB_VERIFICATION_FAILURES_SHOWN) {
@@ -129,7 +133,9 @@ async function applyGithubRepositories(next, listed) {
 async function showRepositoriesUnread(next, err) {
   const editing = tab === 'identity' && identityFormBeingEdited();
   if (!editing && tab === 'identity') await route().catch(error);
-  else if (!projectRoute() && tab === 'projects' && $('rows')) {
+  // #945: only the page that reads this very list shows the failed read. A super administrator's list page reads
+  // /api/installations, so its rows stay whatever that read answered.
+  else if (!projectRoute() && tab === 'projects' && $('rows') && me && me.role !== 'super_admin') {
     $('rows').removeAttribute('aria-busy');
     $('count').textContent = '读取失败';
     $('rows').replaceChildren(consoleState('项目列表未能读取',
@@ -140,8 +146,16 @@ async function showRepositoriesUnread(next, err) {
   showGithubRepositoriesUnread(next);
 }
 function showGithubRepositoriesUnread(next) {
-  const line = $('github-verification'); if (!line) return;
   repositoriesUnreadOwner = next.id;
+  drawGithubRepositoriesUnread();
+}
+// The line the failed read leaves behind, drawn from the owner alone: a redraw of the console (a refresh, a page
+// redrawn after the check) must not take it away while that read still has no answer (#945).
+function githubRepositoriesUnreadShowing() {
+  return repositoriesUnreadOwner != null && !!me && me.id === repositoriesUnreadOwner;
+}
+function drawGithubRepositoriesUnread() {
+  const line = $('github-verification'), next = me; if (!line || !next) return;
   line.hidden = false; line.dataset.state = 'failed';
   line.replaceChildren(element('span', t('verification.repositories_failed')),
     button(t('verification.repositories_retry'), () => readGithubRepositoriesAgain(next), 'btn-secondary'));
