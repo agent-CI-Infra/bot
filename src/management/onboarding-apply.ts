@@ -7,7 +7,7 @@ import { Redactor } from '../agent/common.js';
 import { agentReadPermissions } from '../github/client.js';
 import { githubWrite } from '../github/write.js';
 import { installationApi } from '../app/installations.js';
-import { trustedOrganization } from '../app/trusted-organizations.js';
+import { trustCeiling, trustedOrganization } from '../app/trusted-organizations.js';
 import { projectCeiling } from '../work/ceiling.js';
 import { eventFilters, managerPrompt } from '../work/settings.js';
 import { dispatchPrompt } from '../dispatch/manager.js';
@@ -48,6 +48,10 @@ type Outcome = { state: 'succeeded' | 'exists'; detail?: Json };
 
 /** The heading that marks one plan version's conventions in a prompt; its presence means they were appended already. */
 const conventionsMark = (version: number) => `## 本仓库约定（接入向导第 ${version} 版`;
+/** The onboarding sections of a prompt: from each such heading to the next level-two heading. */
+function onboardingSections(text: string): string[] {
+  return text.split(/^(?=## )/m).filter(part => part.startsWith('## 本仓库约定（接入向导第 '));
+}
 function conventionsBlock(plan: Json, version: number, date: string): string {
   const c = plan.conventions as Json, parts = [`${conventionsMark(version)}，${date}）`, '以下约定由项目管理员在接入向导里确认，适用于本仓库的所有工作。'];
   if (c.label_usage) parts.push('### 标签用法\n' + c.label_usage);
@@ -57,6 +61,7 @@ function conventionsBlock(plan: Json, version: number, date: string): string {
 }
 
 export class OnboardingApply {
+  // Repositories with an application being applied in this control plane: one at a time per repository.
   private readonly applying = new Set<string>();
   constructor(readonly host: ApplyHost) {}
   get store() { return this.host.store; }
@@ -69,7 +74,11 @@ export class OnboardingApply {
     const plan = JSON.parse(planRow.plan) as Json, id = String(repository.id), started = !!this.store.get('SELECT 1 FROM repositories WHERE id=?', id);
     const policy = started ? this.store.get('SELECT * FROM policies WHERE repository_id=?', id) : undefined;
     const out: Json[] = [], add = (item: OnboardingItem, current: unknown, proposed: unknown, extra: Json = {}) => out.push({ item, where: where[item], current: current ?? null, proposed, ...extra });
-    if (!started) add('start', null, { capability_ceiling: (plan.capability_ceiling as Json | undefined)?.value ?? null, organization_trusted: !!trustedOrganization(this.store, String(repository.owner_id)) });
+    if (!started) {
+      // A trusted organization's start uses the organization's level; the level item then moves it to the plan's.
+      const trusted = trustedOrganization(this.store, String(repository.owner_id));
+      add('start', null, { capability_ceiling: (plan.capability_ceiling as Json | undefined)?.value ?? null, organization_trusted: !!trusted, ...(trusted ? { organization_capability_ceiling: trustCeiling(trusted) } : {}) });
+    }
     const value = (key: string) => (plan[key] as Json | undefined)?.value;
     if (value('capability_ceiling') !== undefined) { const current = policy ? projectCeiling(this.store, id, policy) : null; if (current !== value('capability_ceiling')) add('capability_ceiling', current, value('capability_ceiling')); }
     if (value('events') !== undefined) {
@@ -95,9 +104,12 @@ export class OnboardingApply {
   }
   revision(changes: Json[]): string { return hash(changes); }
 
-  /** Whether every part of these conventions is in the Manager prompt and the roles' prompts already, from any plan version. */
+  /**
+   * Whether an onboarding section (of any plan version) in the Manager prompt and in every working role's prompt already holds
+   * each part of these conventions. Only those sections count: the same words elsewhere in a prompt are not this item.
+   */
   private conventionsPresent(id: string, conventions: Json): boolean {
-    const parts = Object.values(conventions).map(String), has = (text: string) => parts.every(part => text.includes(part));
+    const parts = Object.values(conventions).map(String), has = (text: string) => onboardingSections(text).some(section => parts.every(part => section.includes(part)));
     return has(managerText(this.store, id)) && roleTargets(this.store, id).every(role => has(String(role.persona_prompt)));
   }
   private scheduleNamed(id: string, name: string): Row | undefined {
@@ -114,7 +126,7 @@ export class OnboardingApply {
     if (!row) return null;
     const receipts = this.store.all('SELECT * FROM onboarding_receipts WHERE application_id=? ORDER BY position', row.id)
       .map(r => ({ item: r.item, where: where[r.item as OnboardingItem], state: r.state, error: r.error ?? null, detail: r.detail ? JSON.parse(r.detail) : null, executed_by: r.executed_by ?? null, attempts: r.attempts, updated_at: r.updated_at }));
-    return { id: row.id, plan_id: row.plan_id, version: row.version, confirmed_by: row.confirmed_by, confirmed_at: row.confirmed_at, applying: this.applying.has(row.id), receipts };
+    return { id: row.id, plan_id: row.plan_id, version: row.version, confirmed_by: row.confirmed_by, confirmed_at: row.confirmed_at, applying: this.applying.has(repositoryId), receipts };
   }
 
   /**
@@ -126,6 +138,8 @@ export class OnboardingApply {
     const actor = this.host.actor(base, repositoryId), repository = this.host.repository(repositoryId)!;
     if (input.version !== plan.version) fail(409, 'onboarding_plan_outdated', 'version');
     if (this.store.get('SELECT 1 FROM onboarding_applications WHERE plan_id=?', plan.id)) return;
+    // The difference is read while no other confirmation is applying, so the "already done" checks see its writes.
+    if (this.applying.has(repositoryId)) fail(409, 'onboarding_apply_running');
     const changes = this.changes(repository, plan);
     if (!changes.length) fail(409, 'onboarding_nothing_to_apply');
     if (input.changes_revision !== this.revision(changes)) fail(409, 'onboarding_changes_outdated', 'changes_revision');
@@ -156,6 +170,8 @@ export class OnboardingApply {
     const receipt = this.store.get('SELECT * FROM onboarding_receipts WHERE application_id=? AND item=?', application.id, item);
     if (!receipt) return fail(404, 'onboarding_item_not_found');
     if (receipt.state !== 'failed') fail(409, 'onboarding_item_not_failed');
+    // Refused before the receipt changes: a retry that cannot run now leaves the item failed, to be retried later.
+    if (this.applying.has(repositoryId)) fail(409, 'onboarding_apply_running');
     if (input.schedule_destination_id !== undefined) {
       if (typeof input.schedule_destination_id !== 'string' || !input.schedule_destination_id) fail(400, 'invalid_schedule_destination', 'schedule_destination_id');
       this.store.run('UPDATE onboarding_applications SET options=? WHERE id=?', JSON.stringify({ ...JSON.parse(application.options), schedule_destination_id: input.schedule_destination_id }), application.id);
@@ -164,16 +180,20 @@ export class OnboardingApply {
     await this.run(base, String(application.id));
   }
 
-  /** Runs the pending items in order. Without a started project the remaining items wait for the start. */
+  /**
+   * Runs the pending items in order, one application per repository at a time. Each next item is read again, so the order
+   * holds whatever became pending meanwhile. Without a started project the remaining items wait for the start.
+   */
   private async run(base: ActorContext, applicationId: string): Promise<void> {
-    if (this.applying.has(applicationId)) fail(409, 'onboarding_apply_running');
-    this.applying.add(applicationId);
+    const application = this.store.get('SELECT * FROM onboarding_applications WHERE id=?', applicationId)!, id = String(application.repository_id);
+    if (this.applying.has(id)) fail(409, 'onboarding_apply_running');
+    this.applying.add(id);
     try {
-      const application = this.store.get('SELECT * FROM onboarding_applications WHERE id=?', applicationId)!;
       const plan = JSON.parse(this.store.get('SELECT plan FROM onboarding_plans WHERE id=?', application.plan_id)!.plan) as Json;
-      const id = String(application.repository_id);
-      for (const receipt of this.store.all("SELECT * FROM onboarding_receipts WHERE application_id=? AND state='pending' ORDER BY position", applicationId)) {
-        const item = receipt.item as OnboardingItem;
+      const seen: string[] = [];
+      for (let receipt; (receipt = this.store.get(`SELECT * FROM onboarding_receipts WHERE application_id=? AND state='pending'
+        AND item NOT IN (SELECT value FROM json_each(?)) ORDER BY position LIMIT 1`, applicationId, JSON.stringify(seen)));) {
+        const item = receipt.item as OnboardingItem; seen.push(item);
         if (item !== 'start' && !this.store.get('SELECT 1 FROM repositories WHERE id=?', id)) {
           this.store.run("UPDATE onboarding_receipts SET error='project_not_started',updated_at=? WHERE application_id=? AND item=?", now(), applicationId, item); continue;
         }
@@ -184,13 +204,13 @@ export class OnboardingApply {
         try { this.finish(applicationId, item, actor.principal_id, await this.apply(item, { base, actor, id, application, plan, attempt, item })); }
         catch (error) { this.finish(applicationId, item, actor.principal_id, error); }
       }
-    } finally { this.applying.delete(applicationId); }
+    } finally { this.applying.delete(id); }
   }
   private finish(applicationId: string, item: string, principal: string, result: Outcome | unknown): void {
     const outcome = result instanceof Error || !(result as Outcome)?.state ? undefined : result as Outcome;
     // Anything but a refusal (a bug, a broken response) still ends the item as failed, so the others go on and it can be retried.
     const error = outcome ? null : result instanceof HttpError ? result : new HttpError(500, 'onboarding_item_error');
-    const state = outcome?.state ?? 'failed', detail = outcome?.detail ?? (error?.field || error?.detail ? { ...(error.field ? { field: error.field } : {}), ...(error.detail ? { detail: error.detail } : {}) } : null);
+    const state = outcome?.state ?? 'failed', detail = outcome?.detail ?? (error?.field || error?.detail ? { ...(error.field ? { field: error.field } : {}), ...(error.detail as Json | undefined) } : null);
     this.store.transaction(() => {
       this.store.run('UPDATE onboarding_receipts SET state=?,error=?,detail=?,updated_at=? WHERE application_id=? AND item=?', state, error?.code ?? null, detail ? JSON.stringify(detail) : null, now(), applicationId, item);
       this.store.audit(principal, 'onboarding.item.' + state, `${applicationId}:${item}`, String(this.store.get('SELECT repository_id FROM onboarding_applications WHERE id=?', applicationId)!.repository_id));
@@ -297,7 +317,9 @@ export class OnboardingApply {
     try {
       for (let page = 1; page <= 10; page++) {
         const read = await reads.execute('github_read', { repository: repository.full_name, path: `/labels?per_page=100&page=${page}` }) as Json;
-        if (read.error || !Array.isArray(read.result)) return fail(502, 'labels_unreadable', undefined, read.error ? { error: read.error } : undefined);
+        // github_read reports its own failures inside the result.
+        const failure = read.error ?? (read.result as Json | undefined)?.error;
+        if (failure || !Array.isArray(read.result)) return fail(502, 'labels_unreadable', undefined, failure ? { reason: failure } : undefined);
         for (const label of read.result as Json[]) existing.add(String(label.name).toLowerCase());
         if ((read.result as Json[]).length < 100) break;
       }
@@ -348,6 +370,10 @@ export class OnboardingApply {
    * and a person merges its PR.
    */
   private async ci(c: ItemContext): Promise<Outcome> {
+    // An earlier attempt whose task was created before the receipt could say so (a restart in between) is that task.
+    const earlier = this.store.get("SELECT id,result FROM management_commands WHERE idempotency_key LIKE ? AND operation='task.create' AND state='succeeded' ORDER BY rowid LIMIT 1",
+      `onboarding:${c.application.id}:ci:%`);
+    if (earlier) return { state: 'succeeded', detail: { command_id: earlier.id, task_id: JSON.parse(earlier.result).id ?? null } };
     const ci = c.plan.ci as Json, files = (ci.files as string[]).length ? ci.files as string[] : ['.github/workflows/'];
     const created = await this.command(c, 'task.create', { intent: 'development', workflow_changes: true, request: `接入向导第 ${c.application.version} 版确认的 CI 建议：\n\n${ci.summary}`,
       contract: { goal: `按接入向导确认的建议调整本仓库的 CI：${String(ci.summary).slice(0, 2000)}`, scope: files.slice(0, 50),
