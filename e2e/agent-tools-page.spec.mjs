@@ -114,3 +114,29 @@ test('the tool volume page installs a CLI, reports a refused download and keeps 
     await h.stop();
   }
 });
+
+// A deployment with no tool volume is the state #740 exists for, and the one a missing volume/architecture branch has to
+// survive: the page must open with the deployment guidance and disabled forms instead of taking the console down. A
+// shimmed unit test cannot catch a DOM API misuse here (its `querySelectorAll` returns an array), so this uses a browser.
+test('an unmounted tool volume still renders the page, the deployment guidance and disabled forms', async ({ page }) => {
+  const h = await harness(undefined, undefined, {
+    agentTools: new AgentToolManager({ volumeRoot: join(tmpdir(), 'agent-tools-absent-740', 'missing'), containerRoot: '/opt/agent-tools', arch: 'x64' }),
+  });
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    const { password } = await setup(h);
+    await fill(page, h.admin + '/#/settings/agent-tools', 'administrator', password);
+    await expect(page.getByRole('heading', { name: '工具卷', exact: true })).toBeVisible();
+    await expect(page.locator('#settings-panel')).not.toContainText('控制台载入失败');
+    await expect(page.locator('.agent-tools-volume')).toContainText('工具卷未挂载');
+    await expect(page.locator('.agent-tools-volume')).toContainText('BOT_AGENT_TOOLS_DIR');
+    await expect(page.locator('.agent-tools-install button[type="submit"]')).toBeDisabled();
+    await expect(page.locator('.agent-tools-prune button[type="submit"]')).toBeDisabled();
+    // The forms are still readable at the narrowest width while disabled.
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/agent-tools-page/unmounted-390.png', fullPage: true });
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); }
+});

@@ -23,6 +23,7 @@
 | `#/settings/projects` | 超级管理员的仓库安装批量清单与已隐藏仓库恢复；`hidden.0` 管理已隐藏仓库，`list.<offset>` 按 50 项分页 |
 | `#/settings/projects/<id>` | 兼容旧深链，自动重定向至 `#/projects/<id>/basic`（唯一的单项目配置入口）；`全局设置 → 项目管理` 只保留仓库批量清单与同步 |
 | `#/settings/computers/<id>` | 兼容旧深链，自动重定向至 `#/projects/<id>/machine` |
+| `#/settings/agent-tools` | 超级管理员的 Agent CLI 工具卷：卷状态、每个 CLI 的已安装/兼容版本与 manifest、安装与清理表单；卷未挂载或读不到架构时给部署指引并禁用提交，非超管没有入口 |
 | `#/preferences`、`#/identity` | 个人设置入口，直接呈现身份与权限及横向个人设置二级导航 |
 | `#/conversations`、`#/conversations/<chat-id>` | 飞书会话列表与消息、执行过程、派生任务管理页（位于个人设置二级导航） |
 | `#/external` | 个人外部执行端接入与连接诊断（位于个人设置二级导航） |
