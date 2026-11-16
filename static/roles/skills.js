@@ -39,7 +39,7 @@ function roleModelResolution(role, state, access) {
         model_unavailable: '继承的模型当前不可用，不会换用其他模型。', model_not_configured: '此工作类型没有可用的已配置模型。',
         subscription_mode_not_implemented: '供应商订阅模式未实现，任务不会静默回退到平台模型网关。',
         harness_model_profile_unsupported: '此执行器使用自带模型，不能指定项目模型。', harness_role_unsupported: '执行器不支持此角色类型。' };
-      status.textContent = `解析失败，当前结果未知：${reasons[err.code] || err.message}${err.field ? '（配置项：' + err.field + '）' : ''}`;
+      status.textContent = `解析失败，当前结果未知：${reasons[err.code] || readErrorText(err)}${err.field ? '（配置项：' + err.field + '）' : ''}`;
     } finally { if (live() && sequence === request) read.disabled = false; }
   });
   region.append(field('解析工作类型', selector), read, status, result); return region;

@@ -159,7 +159,7 @@ $('external-form').onsubmit=async event=>{
     if(live()&&[401,403].includes(err.status)){
       externalDialog.close();clearExternalCredential();if(project&&current?.id===project)current.external=null;
       $(project?'project-page':'external-panel').replaceChildren(consoleState('外部执行端暂不可访问','权限已变化，原记录和输入已清除。请重新读取这一页。',{tone:'error'}));
-    }else if(live())$('external-error').textContent=({invalid_client_public_key:'请填写 2048–4096 位 RSA 公钥（BEGIN PUBLIC KEY），不要提交私钥。',invalid_token_audience:'请填写以 /external/token 结尾的 HTTPS 地址，不能带查询参数、用户名或密码。'})[err.message]||err.message;
+    }else if(live())$('external-error').textContent=({invalid_client_public_key:'请填写 2048–4096 位 RSA 公钥（BEGIN PUBLIC KEY），不要提交私钥。',invalid_token_audience:'请填写以 /external/token 结尾的 HTTPS 地址，不能带查询参数、用户名或密码。'})[err.message]|| readErrorText(err);
   }
   finally{if(externalEditorVersion===version)submit.disabled=false;}
 };

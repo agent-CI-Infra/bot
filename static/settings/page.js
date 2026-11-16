@@ -50,7 +50,7 @@ async function retentionCard(size, count, time) {
     body.trajectory_days_by_project = Object.fromEntries(Object.entries(perProject).map(([id, control]) => [id, value(control)]));
     save.disabled = true;
     try { await api('/api/storage/retention', 'PUT', body); status.textContent = '已保存，下一次每日清理按新设置执行。'; }
-    catch (err) { status.textContent = err.message; } finally { save.disabled = false; }
+    catch (err) { status.textContent = readErrorText(err); } finally { save.disabled = false; }
   });
   section.append(note('设置了天数的类别，每天在后台分批清理一次：只删正文，记录行、计费、审计和哈希保留，引用到已删正文的地方会显示「已过保留期删除」。留空表示不过期。'), form);
   const last = view.last_cleanup;
@@ -66,7 +66,7 @@ const settingsCards = {
   // Group assistants' and the management assistant's computers (#457): their timers and limits, each computer's resources
   // (the counterpart of the work computers' default resources), and every HOME.
   async 'assistant-computers'(request) {
-    const [{ settings }, overview] = await Promise.all([api('/api/settings'), api('/api/assistant-computers').catch(err => ({ error: err.message }))]);
+    const [{ settings }, overview] = await Promise.all([api('/api/settings'), api('/api/assistant-computers').catch(err => ({ error: readErrorText(err) }))]);
     const view = { settings: settings.assistant_computers, overview };
     if (!view.settings) return [consoleState('助手电脑不可用', '这个部署没有挂载助手 HOME 卷或连不上 manager，群聊助手和管理助手的电脑工具不会提供。', { tone: 'error' })];
     const homes = liveCard('HOME 占用', redraw => assistantHomesBody(view, redraw, request));
@@ -79,7 +79,7 @@ const settingsCards = {
     form.append(field('兑换地址', address), note('填写执行端访问的 HTTPS /external/token 地址。此设置影响全部项目的签名 audience。'), status, save);
     form.addEventListener('submit', async event => { event.preventDefault(); save.disabled = true;
       try { await api('/api/external/settings', 'PUT', { token_audience: address.value.trim() }); if (request === renderVersion) status.textContent = '兑换地址已保存。'; }
-      catch (err) { if (request === renderVersion) status.textContent = err.message; } finally { save.disabled = false; }
+      catch (err) { if (request === renderVersion) status.textContent = readErrorText(err); } finally { save.disabled = false; }
     }); section.append(form); return [section];
   },
   // Storage (#436, #671): what each project keeps in trajectory files, records and blobs and on its project computer, read
@@ -256,7 +256,7 @@ const settingsCards = {
       try {
         const saved = await api('/api/settings', 'PATCH', { task_concurrency: Number(value.value) });
         value.value = saved.settings.task_concurrency; message.className = 'view-success'; message.textContent = '已保存，新任务按这个并发数排队';
-      } catch (err) { message.textContent = err.message; } finally { submit.disabled = false; }
+      } catch (err) { message.textContent = readErrorText(err); } finally { submit.disabled = false; }
     });
     concurrency.append(form);
     const resources = { computer: settings.computer_defaults };

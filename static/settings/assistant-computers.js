@@ -58,7 +58,7 @@ function assistantHomesBody(view, redraw, request) {
       if (!await askConfirm({ title: `清空${owner}的 HOME？`, body: ['删除这个 HOME 的全部文件（包括封存的旧代次），并删除它正在运行的电脑；正在进行的回合中的命令会被中断。', '这一操作不能撤销。'], action: '清空', danger: true })) return;
       clear.disabled = true;
       try { await api(`/api/assistant-computers/${home.owner}/clear`, 'POST', {}); view.overview = await api('/api/assistant-computers'); if (request === renderVersion) redraw(`已清空${owner}的 HOME`); }
-      catch (err) { clear.disabled = false; message.textContent = err.message; }
+      catch (err) { clear.disabled = false; message.textContent = readErrorText(err); }
     });
     row.append(cell(0, owner), cell(1, gigabytes(home.bytes)), cell(2, home.files == null ? '未统计' : String(home.files)), cell(3, timestamp(home.active_at)), cell(4, state), cell(5, clear));
     body.append(row);

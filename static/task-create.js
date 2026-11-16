@@ -85,7 +85,7 @@ async function renderNewTask(request) {
     receiptBox.append(element('h2', receipt.state === 'succeeded' && !created ? '命令完成，任务编号待核验' : names[receipt.state] || '命令状态：' + receipt.state), note('回执编号：' + receipt.id));
     if (receipt.state === 'succeeded' && typeof receipt.result?.id === 'string') {
       receiptBox.append(note('任务编号：' + receipt.result.id), button('查看已创建的任务', async () => {
-        try { await openTask(receipt.result.id); } catch (err) { if (alive()) feedback.textContent = err.message; }
+        try { await openTask(receipt.result.id); } catch (err) { if (alive()) feedback.textContent = readErrorText(err); }
       }), button('再建一个任务', () => { taskCreationDrafts.delete(id); void renderNewTask(++renderVersion); }, 'quiet'));
     } else if (receipt.state === 'failed' || receipt.state === 'rejected') {
       receiptBox.append(note(taskCreationError(receipt.result?.error || receipt.state)), button('返回草稿并重新核验', async () => {
@@ -96,7 +96,7 @@ async function renderNewTask(request) {
       const refresh = button('刷新创建回执', async () => {
         refresh.disabled = true;
         try { const result = await api('/api/management/commands/' + receipt.id); draft.receipt = result; if (alive()) showReceipt(); }
-        catch (err) { if (alive() && !revoked(err)) feedback.textContent = err.message; }
+        catch (err) { if (alive() && !revoked(err)) feedback.textContent = readErrorText(err); }
         finally { refresh.disabled = false; }
       }, 'quiet'); receiptBox.append(refresh);
     }
@@ -113,9 +113,9 @@ async function renderNewTask(request) {
       // A definitive pre-command rejection permits editing. An uncertain earlier attempt keeps its original key.
       if (!replay && err.status >= 400 && err.status < 500 && !/idempotency_conflict/.test(err.message)) {
         draft.envelope = null;
-        draft.error = err.message + '。草稿已保留，请核对执行上下文后重试。';
+        draft.error = readErrorText(err) + '。草稿已保留，请核对执行上下文后重试。';
         if (alive() && !revoked(err)) await readContext();
-      } else { draft.uncertain = true; draft.error = err.message + '。请核对同一次提交；不自动重新创建。'; if (alive()) revoked(err); }
+      } else { draft.uncertain = true; draft.error = readErrorText(err) + '。请核对同一次提交；不自动重新创建。'; if (alive()) revoked(err); }
     }
     finally { draft.sending = false; draft.update?.(); }
   }

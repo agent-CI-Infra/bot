@@ -42,7 +42,7 @@ function renderSubscriptionEditor(host, { project, destinations, read, command, 
     try{const result=await read('preview_subscription',{subscription:spec});if(!live()||request!==previewGeneration||signature!==JSON.stringify(capture()))return;
       const at=value=>value==null?'未安排发送':new Intl.DateTimeFormat('zh-CN',{timeZone:result.timezone,dateStyle:'medium',timeStyle:'medium',hour12:false}).format(new Date(value))+' · '+result.timezone;
       preview.replaceChildren(note('假设此刻收到一条事件；这不是已经安排的触发或实际通知。'),facts([['事件收到',at(result.event_received_at)],['聚合结束',at(result.aggregation_ends_at)],['最早发送',at(result.first_send_at)],['接收方',destinationLabel(result.destination.id)]]));errorBox.textContent='';
-    }catch(error){if(!live()||request!==previewGeneration)return;if(!destinationError(error)&&invalidate(error))return;preview.textContent='发送时间未知，请修正后重新预览。';errorBox.textContent=destinationError(error)?'目的地或受众需要重新核验；草稿已保留。'+error.message:error.message;}
+    }catch(error){if(!live()||request!==previewGeneration)return;if(!destinationError(error)&&invalidate(error))return;preview.textContent='发送时间未知，请修正后重新预览。';errorBox.textContent=destinationError(error)?'目的地或受众需要重新核验；草稿已保留。'+readErrorText(error):readErrorText(error);}
   },'quiet');
   const save=element('button','保存事件订阅');save.type='submit';save.dataset.subscriptionWrite='1';
   const actions=element('div','','subscription-form-actions');actions.append(previewButton,save);const confirmation=element('p');confirmation.setAttribute('role','status');form.append(confirmation,errorBox,actions);editor.append(form);

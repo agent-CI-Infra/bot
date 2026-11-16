@@ -154,7 +154,7 @@ function releaseRecord(r, endpoint, refresh, message, context) {
       if (!live()) return;
       pending.add(key); control.disabled = true; control.textContent = caption + '…';
       try { if (!live()) return; await api(endpoint + '/' + r.id + '/' + suffix, 'POST', { revision: r.revision }); }
-      catch (err) { message.textContent = err.message; }
+      catch (err) { message.textContent = readErrorText(err); }
       finally { pending.delete(key); await refresh(); }
     });
     control.disabled = pending.has(key); return control;
@@ -200,7 +200,7 @@ function releaseRecord(r, endpoint, refresh, message, context) {
         if (!live()) return; save.disabled = true;
         const saved = await api(endpoint + '/' + r.id + '/draft', 'PATCH', { body: editor.value, revision: edit.revision, body_revision: edit.body_revision });
         target.releaseEdits.delete(r.id); await refresh(); message.textContent = saved.release.stage === 'draft' ? '草稿已保存' : '已由仓库工作流／外部操作发布';
-      } catch (err) { message.textContent = err.message; await refresh(); } finally { save.disabled = false; }
+      } catch (err) { message.textContent = readErrorText(err); await refresh(); } finally { save.disabled = false; }
     });
     const edits = element('div', '', 'actions');
     edits.append(save, button('丢弃本地编辑并刷新正文', async () => { target.releaseEdits.delete(r.id); message.textContent = ''; await refresh(); }));
@@ -211,7 +211,7 @@ function releaseRecord(r, endpoint, refresh, message, context) {
       try {
         if (!live()) return; publish.disabled = true;
         await api(endpoint + '/' + r.id + '/publish', 'POST', { revision: r.revision, body_revision: r.body_revision }); await refresh();
-      } catch (err) { message.textContent = err.message; await refresh(); } finally { publish.disabled = false; }
+      } catch (err) { message.textContent = readErrorText(err); await refresh(); } finally { publish.disabled = false; }
     }); edits.append(publish);
   } else if (r.body) { const body = element('pre', r.body); section.append(body); }
   return section;

@@ -12,7 +12,7 @@ function appBody(view, redraw) {
       if (!selected && !await askConfirm({ title: `改用 ${app.name}？`, body: ['接入向导的安装和启用步骤改用这个 App；已启用的项目继续使用各自的账号。', `GitHub 上这个 App 的 webhook 会改为 ${origin} 下的地址。`], action: '改用' })) return;
       use.disabled = true; message.textContent = '';
       try { view.onboarding.app = (await api('/api/onboarding/use-app', 'POST', { account_id: app.id, update_webhook: true })).app; redraw(selected ? '已重新检查，webhook 指向当前公网地址' : `已改用 ${app.name}`); }
-      catch (err) { use.disabled = false; message.textContent = err.message; }
+      catch (err) { use.disabled = false; message.textContent = readErrorText(err); }
     });
     use.disabled = !origin; row.append(name, use); list.append(row);
   }

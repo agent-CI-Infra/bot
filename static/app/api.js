@@ -100,7 +100,7 @@ function retryErrorText(err) {
   if (/\btask_not_retryable\b/.test(err.message)) return '这个任务已经结束，不能重试。';
   return err.message;
 }
-function error(err) { if (sessionExpired && isSessionExpiry(err?.status, err?.code)) return; if (!$('message').childElementCount) notice('message', err.message, '', 'alert'); if ($('editor').open) $('editor-error').textContent = err.message; }
+function error(err) { if (sessionExpired && isSessionExpiry(err?.status, err?.code)) return; if (!$('message').childElementCount) notice('message', readErrorText(err), '', 'alert'); if ($('editor').open) $('editor-error').textContent = readErrorText(err); }
 function element(tag, text, className) { const el = document.createElement(tag); el.textContent = text; if (className) el.className = className; return el; }
 // Fold technical terms out of a first screen: the summary stays visible, the body opens on demand.
 function advancedHelp(summary, ...content) {

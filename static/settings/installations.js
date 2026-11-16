@@ -89,7 +89,7 @@ function installationDetailBody(base, snapshot, repositories, deliveries, redraw
   const sync = button('重新同步', async () => {
     sync.disabled = true;
     try { await api(base + '/sync', 'POST', {}); await redraw('已排队重新同步：完成后刷新这一页查看新状态。'); }
-    catch (err) { await redraw('重新同步失败：' + err.message, 'view-error'); }
+    catch (err) { await redraw('重新同步失败：' + readErrorText(err), 'view-error'); }
     finally { sync.disabled = false; }
   });
   const actions = element('div', '', 'actions'); actions.append(sync); nodes.push(actions);

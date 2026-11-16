@@ -52,7 +52,7 @@ function modelManagementSections() {
 function taskModelEditor(kind, title, policy, models, { custom = false, draft = null, sync = null } = {}) {
   const section = element('section', '', 'task-model-editor'), select = document.createElement('select'), message = element('p', '', 'view-error');
   message.setAttribute('role', 'alert');
-  let initial = {}; try { initial = draft ? { ...draft.tasks } : taskModelMap(policy); } catch (err) { message.textContent = err.message; }
+  let initial = {}; try { initial = draft ? { ...draft.tasks } : taskModelMap(policy); } catch (err) { message.textContent = readErrorText(err); }
   const configured = Object.hasOwn(initial, kind), selected = configured ? initial[kind] : policy.model_id;
   const defaultModel = models.find(model => model.id === policy.model_id);
   modelOptions(select, models, configured ? selected : '', custom ? null : `继承项目默认${defaultModel ? `（${defaultModel.model_name}）` : policy.model_id ? `（模型不可用 ${policy.model_id}）` : '（未选择）'}`);
@@ -69,7 +69,7 @@ function taskModelEditor(kind, title, policy, models, { custom = false, draft = 
         const values = taskModelMap(current.policy);
         if (value) values[kind] = value; else delete values[kind];
         await patchPolicy({ task_models: values }); current.focusAnchor = kind; await reloadWith(notice);
-      } catch (err) { message.textContent = err.message; }
+      } catch (err) { message.textContent = readErrorText(err); }
       finally { for (const control of actions.querySelectorAll('button')) control.disabled = false; }
     };
     actions.append(button('保存模型', () => persist(select.value, `已保存${title}的模型`)));

@@ -183,7 +183,7 @@ function roleBackendRuntimeBox(role, state) {
         if (current?.id === repoId && current?.section === 'roles' && (typeof renderToken !== 'number' || renderToken === tokenSnapshot) && probeBtn.isConnected) {
           probeBtn.disabled = false;
           probeBtn.textContent = '探测模型连通性';
-          probeNote.textContent = `探测失败：${err.message || err.code || '请求错误'}`;
+          probeNote.textContent = `探测失败：${err.message ? readErrorText(err) : (err.code || '请求错误')}`;
         }
       }
     }, 'quiet');

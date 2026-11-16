@@ -33,7 +33,7 @@ function membersSection() {
         : delegated ? '只在授予它的项目管理员仍有这些权限时有效。' : '管理员单独指定的权限独立保存；撤销其他来源不会移除这条授权。'));
       if (grant.can_revoke) row.append(button('撤销这条授权', async () => {
         if (!await askConfirm({ title: `撤销 ${grant.principal_name} 在本项目的这条授权？`, body: ['只撤销这一条；来自 GitHub 和其他来源的权限不受影响。'], action: '撤销', danger: true })) return;
-        try { await api('/api/identity/grants/' + encodeURIComponent(grant.id), 'DELETE', {}); } catch (err) { if (live()) delegateMessage.textContent = '撤销失败：' + err.message; return; }
+        try { await api('/api/identity/grants/' + encodeURIComponent(grant.id), 'DELETE', {}); } catch (err) { if (live()) delegateMessage.textContent = '撤销失败：' + readErrorText(err); return; }
         if (live()) await load();
       }, 'btn-text destructive'));
       list.append(row);
@@ -64,7 +64,7 @@ function membersSection() {
       const name = login.value.trim(); if (!name || !live()) return;
       submit.disabled = true; delegateMessage.textContent = '';
       try { await api('/api/identity/grants', 'POST', { github_login: name, tenant_id: data.tenant_id, project_id: id, capabilities: levels[Number(level.value)][1] }); login.value = ''; if (live()) await load(); }
-      catch (err) { if (live()) delegateMessage.textContent = (err.status === 404 ? '没有找到用这个 GitHub 用户名登录过本平台的账号。' : '授权失败：') + (err.status === 404 ? '' : err.message); }
+      catch (err) { if (live()) delegateMessage.textContent = (err.status === 404 ? '没有找到用这个 GitHub 用户名登录过本平台的账号。' : '授权失败：') + (err.status === 404 ? '' : readErrorText(err)); }
       finally { submit.disabled = false; }
     });
     form.append(login, level, submit);
@@ -88,7 +88,7 @@ function membersSection() {
       if (pending || !live()) return; pending = true;
       container.querySelectorAll('button,select').forEach(control => control.disabled = true); message.textContent = '';
       try { await api('/api/project-admin-assignments', 'PUT', { user_id: user.id, repository_ids: ids.filter(id => grantable.has(id)) }); if (live()) await load(); }
-      catch (err) { if (live()) message.textContent = '项目分配保存失败：' + err.message; }
+      catch (err) { if (live()) message.textContent = '项目分配保存失败：' + readErrorText(err); }
       finally { pending = false; container.querySelectorAll('button,select').forEach(control => control.disabled = false); }
     };
     for (const user of users.filter(u => u.role === 'project_admin' && (assigned(u).includes(id) || wholeOrganization(u)))) {

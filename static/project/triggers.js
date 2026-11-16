@@ -26,7 +26,7 @@ function projectTriggersSection() {
 const projectTriggerError = err => {
   const code = err.code || /· (\w+)$/.exec(err.message)?.[1];
   return code === 'manager_revision_conflict' ? '项目配置已被修改，请刷新后再保存监听与触发设置。'
-    : code === 'invalid_event_filters' ? '事件开关或标签无效：标签最多 50 个字符，最多 30 个。' : err.message;
+    : code === 'invalid_event_filters' ? '事件开关或标签无效：标签最多 50 个字符，最多 30 个。' : readErrorText(err);
 };
 
 function projectWorkPolicyCard() {

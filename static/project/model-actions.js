@@ -45,7 +45,7 @@ function modelEdit(model, after) {
     event.preventDefault();const value=name.value.trim();if(!value){message.textContent='请填写模型名';return;}
     if(value===model.model_name){modal.close();return;}save.disabled=true;
     try{await api('/api/models/'+model.id,'PATCH',{version:model.version,model_name:value});modal.close();await after(`已保存模型名 ${value}`);}
-    catch(err){message.textContent=err.message;}finally{save.disabled=false;}
+    catch(err){message.textContent = readErrorText(err);}finally{save.disabled=false;}
   });
   modal.append(form);document.body.append(modal);modal.addEventListener('close',()=>modal.remove(),{once:true});modal.showModal();
 }

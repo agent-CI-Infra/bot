@@ -36,9 +36,9 @@ function modelPricing(model, after = reloadProject) {
   }
   const message=element('p','','view-error');message.setAttribute('role','alert');
   const actions=element('div','','actions'),save=element('button','保存单价');save.type='submit';actions.append(button('取消',()=>modal.close()),save);
-  if(model.pricing_override)actions.append(button('清除单价',async()=>{try{await api('/api/models/'+model.id,'PATCH',{version:model.version,pricing:null});modal.close();await after(`已清除 ${model.model_name} 的计费单价`);}catch(err){message.textContent=err.message;}}));
+  if(model.pricing_override)actions.append(button('清除单价',async()=>{try{await api('/api/models/'+model.id,'PATCH',{version:model.version,pricing:null});modal.close();await after(`已清除 ${model.model_name} 的计费单价`);}catch(err){message.textContent = readErrorText(err);}}));
   form.append(message,actions);form.addEventListener('submit',async event=>{event.preventDefault();save.disabled=true;const data=Object.fromEntries(new FormData(form));
     try{await api('/api/models/'+model.id,'PATCH',{version:model.version,pricing:{currency:data.currency,...Object.fromEntries(['input_per_million','output_per_million','cache_per_million'].filter(key=>data[key]!=='').map(key=>[key,Number(data[key])]))}});modal.close();await after(`已保存 ${model.model_name} 的计费单价`);}
-    catch(err){message.textContent=err.message;}finally{save.disabled=false;}
+    catch(err){message.textContent = readErrorText(err);}finally{save.disabled=false;}
   });modal.append(form);document.body.append(modal);modal.addEventListener('close',()=>modal.remove(),{once:true});modal.showModal();
 }

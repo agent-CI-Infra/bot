@@ -83,7 +83,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   const pendingMarkdown = new Set();
   const drafts = new Map(), turns = new Map(), messages = new Map();
   const alive = generation => !disposed && panel.isConnected && me?.id === user && generation === scopeGeneration;
-  const showError = err => { if (!disposed) { status.textContent = err.message; status.classList.add('view-error'); status.setAttribute('role', 'alert'); } };
+  const showError = err => { if (!disposed) { status.textContent = readErrorText(err); status.classList.add('view-error'); status.setAttribute('role', 'alert'); } };
   const showAccessError = err => {
     if (disposed) return;
     status.textContent = managementAccessMessage(err);
@@ -380,7 +380,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
             let at; while ((at = text.indexOf('\n')) >= 0) { const line = text.slice(0, at); text = text.slice(at + 1); if (line) event(JSON.parse(line)); }
           }
         }
-      } catch (err) { if (alive(generation)) { reconnect.hidden = false; showError(new Error('连接已中断，已提交的操作会继续。点击重新连接以读取进展。' + err.message)); } }
+      } catch (err) { if (alive(generation)) { reconnect.hidden = false; showError(new Error('连接已中断，已提交的操作会继续。点击重新连接以读取进展。' + readErrorText(err))); } }
     })();
     reading = work;
     try { await work; } finally { if (reading === work) reading = null; if (!disposed && generation !== scopeGeneration && conversation) void read(); }
@@ -443,7 +443,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     for(const t of tasks){const o=element('option',t.task.summary+' · '+t.task.status);o.value=t.task.id;task.append(o);}
     const taskBox=element('section','');taskBox.append(element('h3','任务管理'),field('任务',task));
     taskBox.append(button('查看阻塞原因',()=>query('get_task',{project_id:project,task_id:task.value}), 'quiet'));
-    for(const [action,caption] of [['pause','暂停任务'],['cancel','取消任务'],['retry','重试任务'],['adopt-config','采用新执行配置']])taskBox.append(button(caption,async()=>{try{const current=await api(endpoint+'/query','POST',{operation:'get_task',target:{project_id:project,task_id:task.value},arguments:{}});confirmCommand({operation:'task.'+action,target:{project_id:project,task_id:task.value},arguments:{},expected_revision:current.revision},{project,task:tasks.find(item=>item.task.id===task.value)?.task.summary});}catch(e){status.textContent=e.message;}},'quiet'));
+    for(const [action,caption] of [['pause','暂停任务'],['cancel','取消任务'],['retry','重试任务'],['adopt-config','采用新执行配置']])taskBox.append(button(caption,async()=>{try{const current=await api(endpoint+'/query','POST',{operation:'get_task',target:{project_id:project,task_id:task.value},arguments:{}});confirmCommand({operation:'task.'+action,target:{project_id:project,task_id:task.value},arguments:{},expected_revision:current.revision},{project,task:tasks.find(item=>item.task.id===task.value)?.task.summary});}catch(e){status.textContent = readErrorText(e);}},'quiet'));
     const instruction=textarea('instruction','',{rows:2});instruction.setAttribute('aria-label','补充指令');taskBox.append(field('追加补充指令',instruction),button('追加指令',async()=>{const current=await api(endpoint+'/query','POST',{operation:'get_task',target:{project_id:project,task_id:task.value},arguments:{}});confirmCommand({operation:'task.instructions',target:{project_id:project,task_id:task.value},arguments:{instruction:instruction.value},expected_revision:current.revision},{project,task:tasks.find(item=>item.task.id===task.value)?.task.summary});},'quiet'));
     forms.append(taskBox, previewSlot);
     if (typeof renderSchedules === 'function') {

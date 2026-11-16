@@ -18,7 +18,7 @@ function modelsSection() {
         await patchPolicy(payload);
         current.focusAnchor = 'project-default-model';
         await reloadWith('已保存模型设置');
-      } catch (err) { bar.messageEl.textContent = err.message; }
+      } catch (err) { bar.messageEl.textContent = readErrorText(err); }
     },
     onDiscard: async () => {
       if (!isDirty()) return;

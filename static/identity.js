@@ -334,7 +334,7 @@ async function renderIdentity() {
     e.preventDefault(); if (switcher.disabled) return;
     switcher.disabled = true; select.disabled = true; switchMessage.textContent = '';
     try { await api('/api/identity/tenant', 'POST', { tenant_id: select.value || null }); if (current()) await start(); }
-    catch (err) { if (current()) switchMessage.textContent = err.message; }
+    catch (err) { if (current()) switchMessage.textContent = readErrorText(err); }
     finally { switcher.disabled = false; select.disabled = false; }
   });
   form.className = 'identity-scope-form';
@@ -365,7 +365,7 @@ async function renderIdentity() {
       revoke.addEventListener('click', async () => {
         if (!confirm(t('identity.unbind_confirm'))) return;
         revoke.disabled = true; advancedFeedback.textContent = '';
-        try { await api('/api/identity/bindings/' + encodeURIComponent(identity.id), 'DELETE', {}); if (current()) await start(); } catch (err) { if (current()) advancedFeedback.textContent = err.message; revoke.disabled = false; }
+        try { await api('/api/identity/bindings/' + encodeURIComponent(identity.id), 'DELETE', {}); if (current()) await start(); } catch (err) { if (current()) advancedFeedback.textContent = readErrorText(err); revoke.disabled = false; }
       }); row.append(revoke);
     }
     identities.append(row);

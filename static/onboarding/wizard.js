@@ -1,7 +1,7 @@
 function wizardForm(title,fields,submit,save){
   const section=card(title),form=element('form','','project-form'),message=element('p','','view-error');message.setAttribute('role','alert');
   const action=element('button',submit);action.type='submit';form.append(...fields,message,action);section.append(form);
-  form.onsubmit=async event=>{event.preventDefault();action.disabled=true;message.textContent='';try{if(await save(Object.fromEntries(new FormData(form)),form)!==false)await render();}catch(error){message.textContent=error.message;}finally{action.disabled=false;}};return section;
+  form.onsubmit=async event=>{event.preventDefault();action.disabled=true;message.textContent='';try{if(await save(Object.fromEntries(new FormData(form)),form)!==false)await render();}catch(error){message.textContent = readErrorText(error);}finally{action.disabled=false;}};return section;
 }
 function wizardDetails(title,...nodes){
   const details=element('details','','fold');details.append(element('summary',title),...nodes);return details;

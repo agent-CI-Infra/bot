@@ -10,7 +10,7 @@ function modelCatalogPanel() {
   if (me.role === 'super_admin') panel.append(button('立即刷新目录', async event => {
     const control = event.currentTarget; control.disabled = true;
     try { const { catalog } = await api('/api/models/catalog/refresh', 'POST', {}); show(catalog); if (live()) await (current && projectRoute() ? reloadProject() : refreshSettingsModels()); }
-    catch (err) { if (live()) message.textContent = err.message; }
+    catch (err) { if (live()) message.textContent = readErrorText(err); }
     finally { control.disabled = false; }
   }));
   void api('/api/models/catalog?limit=1').then(value => show(value.catalog)).catch(err => { if (live()) message.textContent = readErrorText(err); });
@@ -37,7 +37,7 @@ function modelCapabilitiesEditor(model, after) {
       if (selected && !entries.some(entry => entry.ref === selected)) choices.add(new Option(selected,selected));
       if (selected) choices.value = selected;
       results.textContent = `共 ${value.total} 个匹配条目${value.next_offset !== null ? '，请继续输入以缩小范围' : ''}`;
-    } catch (err) { if (modal.isConnected && request === generation) results.textContent = err.message; }
+    } catch (err) { if (modal.isConnected && request === generation) results.textContent = readErrorText(err); }
   };
   const pick = field('目录条目',choices), searchField = field('搜索目录',search);
   const sync = () => { pick.hidden = searchField.hidden = results.hidden = mode.value !== 'manual'; choices.required = mode.value === 'manual'; };
@@ -59,7 +59,7 @@ function modelCapabilitiesEditor(model, after) {
     for (const key of ['context_window','max_output_tokens']) if (data[key] !== '') capabilities[key] = Number(data[key]);
     if (data.reasoning !== '') capabilities.reasoning = data.reasoning === 'true';
     try {await api('/api/models/'+model.id,'PATCH',{version:model.version,capabilities,catalog:{mode:mode.value,...(mode.value==='manual'?{ref:choices.value}:{})}});if(live()){modal.close();await after('已保存模型能力与目录');}}
-    catch(err){if(live())message.textContent=err.message;}finally{save.disabled=false;}
+    catch(err){if(live())message.textContent = readErrorText(err);}finally{save.disabled=false;}
   });
   modal.append(form); document.body.append(modal); modal.addEventListener('close',()=>{generation++;modal.remove();},{once:true});modal.showModal();
 }

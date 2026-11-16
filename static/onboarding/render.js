@@ -94,7 +94,7 @@ async function renderOnboarding(request,panel,feedback=''){
     const finish=button('完成向导',async()=>{
       if(finish.disabled)return;finish.disabled=true;message.textContent='';
       try{await api('/api/onboarding/complete','POST',{});if(!current())return;history.replaceState(null,'','#/projects');await start();}
-      catch(err){if(!current())return;if(err.message.includes('onboarding_incomplete'))await refreshReadiness();else{message.textContent=err.message;finish.disabled=false;}}
+      catch(err){if(!current())return;if(err.message.includes('onboarding_incomplete'))await refreshReadiness();else{message.textContent = readErrorText(err);finish.disabled=false;}}
     },'');
     finish.disabled=missing.length>0;actions.append(finish,consoleLink('#/projects','返回项目，稍后继续'));panel.append(projects,actions,message);
   }
