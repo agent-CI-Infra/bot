@@ -3,15 +3,14 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { setImmediate as nextTurn } from 'node:timers/promises';
-import { harness } from './helpers.mjs';
+import { fixtureClient } from './helpers.mjs';
 
 async function fixture(t, handler) {
-  const h = await harness(t), server = createServer(handler);
+  const server = createServer(handler);
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
-  h.admin = `http://127.0.0.1:${server.address().port}`;
-  return { server, client: h.client() };
+  return { server, client: fixtureClient({ admin: `http://127.0.0.1:${server.address().port}` }) };
 }
 
 test('fixture clients retain cookies, CSRF and JSON after the server closes idle connections', async t => {
