@@ -125,7 +125,7 @@ test('confirming a started project\'s plan applies each item through its channel
   assert.match(dispatchPrompt(h.store, '101'), /^本项目的分派说明。\n\n## 本仓库约定（接入向导第 3 版，[^\n]+\n[\s\S]*检视先看错误处理。/);
 });
 
-test('a repository that is not started starts first: approval needed, a trusted organization starts it, a super administrator with the plan\'s level (#932)', async t => {
+test('a repository that is not started starts first: a trusted organization starts it itself, a super administrator with the plan\'s level (#932)', async t => {
   const f = await identityFixture(t, { github: true }), { h, admin, state } = f, model = await planner(t);
   installed(f, '103'); installed(f, '104'); state.accessible = ['101', '103', '104']; repositoryRoutes(f);
   await assistantModel(admin, model);
@@ -139,23 +139,22 @@ test('a repository that is not started starts first: approval needed, a trusted 
   // The start comes first and cannot be left out.
   let view = await prepare(repoAdmin, '103');
   assert.deepEqual(items(view), ['start', 'capability_ceiling', 'events', 'test_command', 'review_language', 'conventions', 'labels', 'schedules', 'ci']);
-  const listed = items(view), all = listed.filter(item => item !== 'schedules');
+  const all = items(view).filter(item => item !== 'schedules');
   assert.equal((await repoAdmin('/api/management/onboarding/103/confirm', 'POST', { version: view.plan.version, changes_revision: view.plan.changes_revision, items: ['test_command'] })).value.error, 'onboarding_start_required');
 
-  // Neither super administrator nor trusted organization: the start waits for approval (#933), the rest for the start.
-  view = (await repoAdmin('/api/management/onboarding/103/confirm', 'POST', { version: view.plan.version, changes_revision: view.plan.changes_revision, items: all })).value;
-  assert.deepEqual(view.application.receipts.map(r => [r.item, r.state, r.error]), listed.map(item =>
-    item === 'start' ? [item, 'failed', 'start_approval_required'] : item === 'schedules' ? [item, 'skipped', null] : [item, 'pending', 'project_not_started']));
-  assert.equal(h.store.get("SELECT 1 FROM repositories WHERE id='103'"), undefined);
-
-  // Once the organization is trusted, retrying the start starts it with the organization's level and applies the rest.
+  // A trusted organization's administrator starts it with the organization's level; the level item then moves it to the plan's.
   assert.equal((await admin('/api/trusted-organizations/10', 'PUT', { capability_ceiling: 'comment' })).status, 200);
-  view = (await repoAdmin('/api/management/onboarding/103/items/start/retry', 'POST', {})).value;
+  // Trusting the organization changed the difference (how the start goes): the page reads it again before confirming.
+  assert.equal((await repoAdmin('/api/management/onboarding/103/confirm', 'POST', { version: view.plan.version, changes_revision: view.plan.changes_revision, items: all })).value.error, 'onboarding_changes_outdated');
+  view = (await repoAdmin('/api/management/onboarding/103')).value;
+  assert.equal(view.plan.changes[0].proposed.organization_trusted, true);
+  view = (await repoAdmin('/api/management/onboarding/103/confirm', 'POST', { version: view.plan.version, changes_revision: view.plan.changes_revision, items: all })).value;
   assert.deepEqual(receipts(view), { start: 'succeeded', capability_ceiling: 'succeeded', events: 'succeeded', test_command: 'succeeded', review_language: 'succeeded',
     conventions: 'succeeded', labels: 'succeeded', schedules: 'skipped', ci: 'succeeded' }, JSON.stringify(view.application.receipts, null, 1));
   assert.deepEqual(view.application.receipts[0].detail.by, 'trusted_organization');
   assert.deepEqual([view.application.receipts[0].detail.capability_ceiling, projectCeiling(h.store, '103')], ['comment', 'develop']);
   assert.equal(view.repository.started, true);
+  assert.equal(view.request, null);
 
   // A super administrator starts with the plan's level: the level item is then as planned already.
   assert.equal((await admin('/api/trusted-organizations/10', 'DELETE', {})).status, 200);
