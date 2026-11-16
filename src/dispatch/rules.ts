@@ -30,7 +30,7 @@ export const builtinRules: StandingRule[] = [
   { id: 'issue-opened', event: 'issue.opened', action: 'create', work: 'review.issue', reason: '常设规则：新 Issue 交给 Issue 检视。' },
   { id: 'pull-request-opened', event: 'pull_request.opened', action: 'create', work: 'review.pr', reason: '常设规则：新 PR 交给 PR 检视。' },
   { id: 'pull-request-push', event: 'pull_request.synchronize', action: 'continue_or_create', work: 'review.pr', reason: '常设规则：新提交交给这个 PR 的检视，没有就检视这个 head。' },
-  { id: 'issue-update', event: 'issue.updated', action: 'continue_active', reason: '常设规则：更新并入还在进行的 Issue 检视。' },
+  { id: 'issue-update', event: 'issue.updated', action: 'continue_active', reason: '常设规则：更新并入还在进行的 Issue 检视或开发。' },
   { id: 'pull-request-update', event: 'pull_request.updated', action: 'continue_active', reason: '常设规则：更新并入还在进行的 PR 检视。' },
 ];
 

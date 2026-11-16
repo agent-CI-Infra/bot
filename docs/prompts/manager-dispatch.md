@@ -22,8 +22,9 @@ permissions.
 | Event | Outcome |
 | --- | --- |
 | Issue opened | create **Review Issue** |
-| Issue edited, a trusted comment, a comment that mentions the bot | continue the Issue's review, whether it is running, waiting or finished; otherwise create **Review Issue** |
-| A person added the development label | judge it as described in "Starting development" below: create **Develop Issue**, or create **Review Issue** so the bot answers what is missing |
+| Issue edited, a trusted comment, a comment that mentions the bot | continue the Issue's development while it runs (it reads the update); otherwise continue the Issue's review, whether it is running, waiting or finished; otherwise create **Review Issue** |
+| A person added the development label | judge it as described in "Starting development" below: create **Develop Issue**, or create **Review Issue** so the bot answers what is missing. A development of the Issue that waits because the label had been removed is in `work.continue`: continue it |
+| The Issue's development stopped (`development.stopped`: the development label was removed) | answer the person when they need to know what happens now (create **Review Issue**, or a comment), otherwise ignore |
 | Another label a person added that this project dispatches | treat it like an update of the Issue or pull request |
 | Pull request opened or ready for review | create **Review PR** for that head |
 | A new head pushed | continue the pull request's review: it moves to the new head and reviews what changed. Otherwise create **Review PR** for that head |

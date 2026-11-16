@@ -10,7 +10,7 @@ const managerErrors = {
 // api() reports "<status> · <code>"; a known code gets its explanation.
 const managerError = err => { const code = /· (\w+)$/.exec(err.message)?.[1] ?? err.message; return managerErrors[code] ? `${managerErrors[code]}（${code}）` : readErrorText(err); };
 const dispatchEventNames = { 'issue.opened': 'Issue 打开', 'issue.updated': 'Issue 更新', 'issue.mention': 'Issue 提及', 'issue.labeled': 'Issue 加标签', 'pull_request.opened': 'PR 打开',
-  'pull_request.synchronize': 'PR 推送', 'pull_request.updated': 'PR 讨论', 'pull_request.mention': 'PR 提及', 'pull_request.labeled': 'PR 加标签', 'review.published': '检视发布',
+  'pull_request.synchronize': 'PR 推送', 'pull_request.updated': 'PR 讨论', 'pull_request.mention': 'PR 提及', 'pull_request.labeled': 'PR 加标签', 'review.published': '检视发布', 'development.stopped': '开发停下',
   'release.manual': '发版本', 'actions.run_failed': 'Actions 失败', 'schedule.due': '定时检查' };
 const decisionNames = { create: ['新建任务', 'success'], continue: ['续接任务', 'info'], ignore: ['不分派任务', ''] };
 function managerSection(roles) {
@@ -189,6 +189,8 @@ function dispatchCard() {
       group('控制面拒绝', note('Manager 选的这些工作没有建出来；拒绝原因也返回给了 Manager，它可以据此回复提出请求的人。'), list);
     }
     if (event.state === 'pending' && event.next_run_at) body.lastChild.append(note('下次允许自动尝试：' + timestamp(new Date(event.next_run_at).toISOString())));
+    // #815: after the attempts ran out the Manager gets one more round to answer the person; only then is the event failed.
+    if (event.answer_round && event.state !== 'decided') body.lastChild.append(note(event.state === 'failed' ? '自动尝试用完后已交给 Manager 再判断一轮，仍然失败；可以人工重试。' : '自动尝试已用完：这一轮交给 Manager 再判断一次，告诉它之前的失败，让它回应提出请求的人。'));
     const tasks = group('关联任务');
     if (!value.tasks.length) tasks.append(note(event.state === 'decided' && event.decision === 'ignore' ? '本次没有关联的新建或续接任务。工具操作应结合已保存理由与实际记录核对。' : '当前没有可读取的关联任务；分派结果不等于任务已完成。'));
     for (const task of value.tasks) tasks.append(button(`${task.relation === 'created' ? '新建' : '续接'} · ${task.kind} · ${task.id.slice(0, 8)} · ${task.status}`, () => { dialog.close(); if (live()) openTask(task.id).catch(error); }));

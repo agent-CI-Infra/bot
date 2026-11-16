@@ -73,7 +73,7 @@ export class TaskRecords {
   }
   /** Bounded factual navigation, with original evidence retained in existing records. No diagnosis or next-step gate. */
   facts(id:string){
-    const task=this.store.get('SELECT status,phase,attempt,result FROM tasks WHERE id=?',id)!,record=this.get(id),candidate=record.candidate;
+    const task=this.store.get('SELECT kind,status,phase,attempt,result FROM tasks WHERE id=?',id)!,record=this.get(id),candidate=record.candidate;
     const recent=(types:string[],limit:number)=>this.store.all(`SELECT id,type,data,created_at FROM task_history WHERE task_id=? AND type IN (SELECT value FROM json_each(?)) ORDER BY id DESC LIMIT ?`,id,JSON.stringify(types),limit);
     return {publication_discovery:{tool:'read_publication_context',arguments:{}},contract_ref:'contract:revision:'+record.revision,revision:record.revision,attempt:task.attempt,
       candidate:candidate?{id:candidate.id,revision:candidate.revision,artifacts:candidate.artifacts.slice(0,8).map(({kind,reference,version})=>({kind,reference,version})),evidence:candidate.evidence.slice(-8).map(({source,version,verified})=>({source,version,verified})),artifact_count:candidate.artifacts.length,evidence_count:candidate.evidence.length}:null,
@@ -84,6 +84,13 @@ export class TaskRecords {
       recovery_events:recent(['manager_recovery_queued'],1).map(r=>{const d=JSON.parse(r.data);return {ref:'task_history:'+r.id,created_at:r.created_at,code:d.code,previous_status:d.previous_status};}),
       recent_failures:recent(['retry_failure','role_assignment_fault','acceptance_fault'],3).map(r=>{const d=JSON.parse(r.data);return {ref:'task_history:'+r.id,type:r.type,created_at:r.created_at,code:d.code,group:d.group,count:d.count,attempt:d.attempt,phase:d.phase,source_ref:d.source_ref};}),
       recent_verifications:recent(['acceptance_evaluated','merge_checks','stage_result'],5).map(r=>{const d=JSON.parse(r.data);return {ref:'task_history:'+r.id,type:r.type,created_at:r.created_at,candidate_id:d.candidate_id??d.candidate_ref?.id,revision:d.revision,version:d.sha??d.source_version,outcome:d.verdict?.outcome,failed:d.failed,pending:d.pending};}),
+      // What a development took on while it ran (#815): edits of its Issue and the events the Manager continued it with. A role
+      // assignment that starts later reads them here; a session already running hears of them once the Harness session layer
+      // delivers updates (#834).
+      ...(String(task.kind).startsWith('development.')?{updates:this.store.all('SELECT id,data FROM review_updates WHERE task_id=? ORDER BY id DESC LIMIT 10',id).reverse().map(row=>{
+        const d=JSON.parse(row.data),clip=(value:unknown,limit:number)=>value==null?null:String(value).slice(0,limit);
+        return {reason:d.reason??null,actor:d.actor??null,changed:d.changed??null,url:d.url??null,title:clip(d.object?.title,300),
+          ...(d.reason==='issue_edited'?{body_excerpt:clip(d.object?.body,1500)}:{}),...(d.comment?.body?{comment:clip(d.comment.body,1500)}:{}),at:d.at??null};})}:{}),
       history:{tool:'read_task_history',arguments:{offset:0,limit:10},instruction:'Page older attempts with next_offset; read originals by offered reference. Historical observations are bound to their recorded versions, not an approval of the current workspace.'}};
   }
   project(id: string) { const row=this.store.get('SELECT * FROM project_context WHERE repository_id=?',id);return row?{revision:row.revision,facts:JSON.parse(row.facts),updated_at:row.updated_at}:null; }

@@ -1,7 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { fail } from '../core/security.js';
 
-const columns = 'id,type,source,object_type,object_number,summary,state,decision,reason,brief,result,model,attempts,error,refusals,rule,created_at,decided_at';
+const columns = 'id,type,source,object_type,object_number,summary,state,decision,reason,brief,result,model,attempts,answer_round,error,refusals,rule,created_at,decided_at';
 const parsed = (value: unknown) => { try { return JSON.parse(String(value)); } catch { return null; } };
 const project = (row: Row) => ({ ...row, brief: parsed(row.brief), result: parsed(row.result), error: parsed(row.error), refusals: parsed(row.refusals) ?? [], rule: parsed(row.rule) });
 

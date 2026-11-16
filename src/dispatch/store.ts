@@ -41,6 +41,8 @@ export function dispatchStorage(store: Store) {
   if (!store.all('PRAGMA table_info(dispatch_events)').some(column => column.name === 'refusals')) store.db.exec('ALTER TABLE dispatch_events ADD COLUMN refusals TEXT');
   // The standing rule (id and revision) that decided the event without a model call (#815).
   if (!store.all('PRAGMA table_info(dispatch_events)').some(column => column.name === 'rule')) store.db.exec('ALTER TABLE dispatch_events ADD COLUMN rule TEXT');
+  // 1 once the event's attempts ran out and it went back to the Manager for one more round to answer the person (#815).
+  if (!store.all('PRAGMA table_info(dispatch_events)').some(column => column.name === 'answer_round')) store.db.exec('ALTER TABLE dispatch_events ADD COLUMN answer_round INTEGER NOT NULL DEFAULT 0');
 }
 
 /** A task the control plane would create for this event, fully specified before the Manager sees it. */
@@ -125,8 +127,8 @@ export function recordEvent(store: Store, input: EventInput): number {
 /**
  * Tasks the event may join: on the same object, of a kind that answers updates (#770). A running or waiting task takes it
  * as an update, a new pull request head included (the task moves to it instead of being replaced); one that is publishing
- * finishes that publication first. Of the running ones only the most recently claimed counts (older runs are about to be
- * replaced), then the waiting ones. With none of them, the object's last finished review takes it as its next round.
+ * finishes that publication first. The event's first kind comes first (an Issue edit: its development, #815); of the
+ * running ones only the most recently claimed counts (older runs are about to be replaced), then the waiting ones. With none of them, the object's last finished review takes it as its next round.
  */
 export function continuations(store: Store, event: Record<string, any>): ContinueOption[] {
   const merge = event.merge ? JSON.parse(String(event.merge)) : null;
@@ -134,8 +136,8 @@ export function continuations(store: Store, event: Record<string, any>): Continu
   const kinds = merge.kinds.map(() => '?').join(',');
   const active = store.all(`SELECT t.id,t.kind,t.status,t.summary,t.created_at FROM tasks t WHERE t.repository_id=? AND t.object_number=? AND t.kind IN (${kinds})
     AND t.status IN (${activeStates.map(() => '?').join(',')})
-    ORDER BY CASE WHEN t.status IN ('running','preparing','publishing','result_ready') THEN 0 ELSE 1 END,(SELECT claimed_at FROM task_claims WHERE task_id=t.id) DESC,t.created_at DESC,t.rowid DESC`,
-    String(event.repository_id), Number(event.object_number), ...merge.kinds, ...activeStates);
+    ORDER BY CASE WHEN t.kind=? THEN 0 ELSE 1 END,CASE WHEN t.status IN ('running','preparing','publishing','result_ready') THEN 0 ELSE 1 END,(SELECT claimed_at FROM task_claims WHERE task_id=t.id) DESC,t.created_at DESC,t.rowid DESC`,
+    String(event.repository_id), Number(event.object_number), ...merge.kinds, ...activeStates, merge.kinds[0]);
   const running = (task: Row) => ['running', 'preparing', 'publishing', 'result_ready'].includes(String(task.status));
   const latest = active.find(running);
   const joinable = [...(latest ? [latest] : []), ...active.filter(task => !running(task))].slice(0, 5);
@@ -324,6 +326,12 @@ function join(store: Store, event: Row, taskId: string, decision: Decision) {
   }
   log(store, taskId, { type: 'dispatch', relation: 'continued', event_id: event.id, event_type: event.type, reason: decision.reason, detail: `Manager 把事件「${event.summary}」续接到这个任务：${decision.reason}` });
   if (task.status === 'succeeded') continueFinishedReview(store, taskId);
+  // A development that stopped because the development label was removed resumes when a person adds the label again and
+  // the Manager continues it with that labeling (#815); the engine checks the label again before it publishes.
+  const facts = JSON.parse(String(event.facts || '{}'));
+  if (task.kind === 'development.issue' && task.status === 'waiting_permission' && task.error_code === 'development_not_approved' && event.type === 'issue.labeled' && facts.development?.label
+    && store.run("UPDATE tasks SET status='queued',error_code=NULL,next_run_at=0,retry_count=0,wait_count=0,retry_error_code=NULL,retry_cycle_started_at=NULL WHERE id=? AND status='waiting_permission'", taskId).changes)
+    log(store, taskId, { type: 'resumed', reason: 'development_label_added', event_id: event.id, detail: `开发标签重新加上（${String(facts.label ?? facts.development.label)}），Manager 续接，开发继续。` });
 }
 
 /**
