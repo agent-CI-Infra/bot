@@ -426,7 +426,9 @@ export async function installationApi(store: Store, sync: InstallationSync | und
 // row's subscription reads as unknown and `events_unreadable` names it, while every other row keeps its own answer.
 function readEvents(value: string | null): { missing: string[] | null; unreadable: boolean } {
   if (!value) return { missing: null, unreadable: false };
-  try { return { missing: missingEvents(JSON.parse(value)), unreadable: false }; } catch { return { missing: null, unreadable: true }; }
+  // Parsing alone is not enough: a value that is not the array of subscribed events is as unknown as invalid JSON, so
+  // this row and its `access_gaps` (which already treats it as unknown) cannot disagree about the same column.
+  try { const parsed: unknown = JSON.parse(value); return Array.isArray(parsed) ? { missing: missingEvents(parsed), unreadable: false } : { missing: null, unreadable: true }; } catch { return { missing: null, unreadable: true }; }
 }
 // One row per repository: what GitHub shows as installed, merged with registration, policy and environment.
 function list(store: Store, url?: URL): Json {
