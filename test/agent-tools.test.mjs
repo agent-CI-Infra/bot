@@ -507,6 +507,32 @@ test('archive entry points preserve filtering, modes, safe links, and failure cl
   }
 });
 
+test('extractTarGz accepts the ordinary ./ prefix of tar writers and still refuses .. escapes', t => {
+  const outer = mkdtempSync(join(tmpdir(), 'tar-dot-prefix-'));
+  t.after(() => rmSync(outer, { recursive: true, force: true }));
+  // Many tar writers prefix every entry with `./`; that is not a traversal and must not fail the install.
+  const archive = buildTarGz([
+    { name: './bin/tool', content: 'cli', mode: 0o755 },
+    { name: './lib/value', content: 'kept' },
+    { name: './', type: 'directory' },
+  ]);
+  const dest = join(outer, 'plain');
+  extractTarGz(archive, dest);
+  assert.equal(readFileSync(join(dest, 'bin/tool'), 'utf8'), 'cli');
+  assert.equal(statSync(join(dest, 'bin/tool')).mode & 0o777, 0o755);
+  assert.equal(readFileSync(join(dest, 'lib/value'), 'utf8'), 'kept');
+  // The dot segment is dropped before stripComponents counts, so `./package/...` strips like `package/...`.
+  const stripped = join(outer, 'stripped');
+  extractTarGz(archive, stripped, { stripComponents: 1 });
+  assert.equal(readFileSync(join(stripped, 'tool'), 'utf8'), 'cli');
+  assert.equal(readFileSync(join(stripped, 'value'), 'utf8'), 'kept');
+  // A real escape is still refused, with or without a dot prefix.
+  for (const name of ['../outside', './../outside', 'a/./../../outside'])
+    assert.throws(() => extractTarGz(buildTarGz([{ name, content: 'nope' }]), join(outer, 'bad-' + name.replace(/\W+/g, '_'))),
+      { code: 'agent_tool_archive_invalid' });
+  assert.equal(existsSync(join(outer, 'outside')), false);
+});
+
 test('extractTarGz rejects path traversal, symlink-chain escapes, and symlink loops while allowing safe internal symlinks', t => {
   const outer = mkdtempSync(join(tmpdir(), 'tar-guard-'));
   t.after(() => rmSync(outer, { recursive: true, force: true }));
