@@ -224,10 +224,10 @@ test('a repository that leaves the installation drops its cached integration sta
 });
 
 test('a background check of stale integration chips updates them in place and never reloads the project list', async () => {
-  const integration = (gate_state, stale) => ({ repository_id: '101', gate_state, gate_detail: '', dashboard_state: 'none', dashboard_detail: '', checked_at: '', stale });
+  const integration = (gate_state, stale, checked_at = '') => ({ repository_id: '101', gate_state, gate_detail: '', dashboard_state: 'none', dashboard_detail: '', checked_at, stale });
   let check = () => [200, { integrations: [integration('live', true)] }];
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
-    if (path === '/api/integrations') return [200, { integrations: [integration('configured', true)] }];
+    if (path === '/api/integrations') return [200, { integrations: [integration('configured', true, '2026-01-01T00:00:00.000Z')] }];
     if (path === '/api/installations?offset=0&limit=51') return [200, { syncs: [], repositories: [{ id: '101', full_name: 'fixture/project-101', owner_id: '10', installed: true,
       registered: true, enabled: true, review_enabled: true, development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0 }] }];
     if (method === 'POST' && path === '/api/integrations/check') return check();
@@ -252,6 +252,22 @@ test('a background check of stale integration chips updates them in place and ne
   await page.run('render()'); const [next] = page.$('rows').querySelectorAll('.row'); await settle();
   assert.equal(page.run('startCalls'), 0); assert.deepEqual(page.requests, once);
   assert.equal(page.$('rows').querySelector('.row'), next); assert.deepEqual(gate(next), ['门禁已配置']);
+  // #869: the failure is said in words above the rows, with the reading the badges still show and one manual read — and
+  // the failure itself scheduled nothing (the request set is still the same three).
+  const status = page.$('rows').querySelector('[data-testid=project-check-status]');
+  assert.ok(status, 'the failed gate check is stated on the list');
+  assert.equal(status.getAttribute('role'), 'status');
+  assert.equal(status.dataset.check, 'integrations');
+  assert.match(status.textContent, /门禁与看板接入检查读取失败（502 · github_unavailable）/);
+  assert.match(status.textContent, /上次读到的结果/);
+  assert.match(status.querySelector('span').textContent, /^上次成功读取：2026-01-01 \d{2}:00:00$/);
+  assert.equal(status.querySelector('button').textContent, '重新检查门禁');
+  // The single manual read replaces the line and the badge together.
+  check = () => [200, { integrations: [integration('live', false, '2026-01-02T00:00:00.000Z')] }];
+  status.querySelector('button').listeners.click[0](); await settle();
+  assert.equal(page.$('rows').querySelector('[data-testid=project-check-status]'), null);
+  assert.deepEqual(gate(next), ['门禁已生效']);
+  assert.equal(page.requests.at(-1), 'POST /api/integrations/check');
   // Refresh still reloads the page; the manual integration-check control has been removed.
   page.$('refresh').listeners.click[0]();
   assert.equal(page.run('startCalls'), 1);

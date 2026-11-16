@@ -82,6 +82,50 @@ test('the table names the permission state and keeps the gate, permission and bo
   assert.equal(cell('101', '看板').querySelector('[data-board-status]').textContent, '查看看板');
 });
 
+// #869: the permission check runs in the background and used to swallow its failure. The column keeps the reading it
+// already showed, and the list says which check failed, that the badges are the previous reading, when it was taken, and
+// offers the one read that can replace it; that read succeeds and takes the statement away.
+test('a failed permission check is stated above the rows and cleared by its one manual read', async () => {
+  const base = { owner_id: '10', full_name: 'fixture/project-101', registered: true, enabled: true, installed: true, running_tasks: 0, queued_tasks: 0,
+    review_enabled: true, development_enabled: false, model_id: 'm', board_enabled: false, board_state: 'none', access_gaps: [] };
+  const stale = { ...base, id: '101', permissions_stale: true, permissions_checked_at: '2026-01-01T00:00:00.000Z' };
+  let rows = [stale], check = () => [503, { error: 'github_unavailable' }];
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path.startsWith('/api/integrations')) return [200, { integrations: [] }];
+    if (method === 'POST' && path === '/api/installations/permissions/check') return check();
+    return [200, { repositories: rows, syncs: [] }];
+  });
+  page.run(`var projectRoute = () => null; me = {role: 'super_admin'}; tab = 'projects';`);
+  const settle = () => new Promise(r => setTimeout(r, 50));
+  await page.run('render()'); await settle();
+  const chip = () => page.$('rows').querySelectorAll('.project-list-row')[0].querySelector('[data-permission]');
+  assert.equal(chip().textContent, '未检查', 'the failed check leaves the reading the column already had');
+  const status = page.$('rows').querySelector('[data-testid=project-check-status]');
+  assert.ok(status, 'the failed permission check is stated on the list');
+  assert.equal(status.dataset.check, 'permissions');
+  assert.match(status.textContent, /安装权限检查读取失败（503 · github_unavailable）/);
+  assert.match(status.textContent, /上次读到的结果/);
+  assert.match(status.querySelector('span').textContent, /^上次成功读取：2026-01-01 \d{2}:00:00$/);
+  const button = status.querySelector('button');
+  assert.equal(button.textContent, '重新检查权限');
+  // One request, and nothing scheduled behind the reader's back.
+  assert.deepEqual(page.requests.filter(req => req === 'POST /api/installations/permissions/check'), ['POST /api/installations/permissions/check']);
+  await settle();
+  assert.equal(page.requests.filter(req => req === 'POST /api/installations/permissions/check').length, 1);
+  // The manual read replaces the reading and removes the statement together.
+  check = () => [200, { repositories: [{ ...base, id: '101', permissions_stale: false, permissions_checked_at: '2026-01-02T00:00:00.000Z' }] }];
+  button.listeners.click[0](); await settle();
+  assert.equal(page.$('rows').querySelector('[data-testid=project-check-status]'), null);
+  assert.equal(chip().textContent, '正常');
+  // A check outlives the page that started it: its statement is not drawn onto whatever list is on screen now, and it is
+  // still there when the project list comes back.
+  check = () => [503, { error: 'github_unavailable' }];
+  page.run("tab = 'tasks'"); await page.run('refreshStalePermissions()'); await settle();
+  assert.equal(page.$('rows').querySelector('[data-testid=project-check-status]'), null);
+  page.run("tab = 'projects'; drawProjectCheckStatus()");
+  assert.ok(page.$('rows').querySelector('[data-testid=project-check-status]'), 'the statement belongs to the project list');
+});
+
 // #823: the project-admin list comes from GET /api/repositories, which omits access_gaps / permissions_stale.
 // That missing reading is not "never checked"; the column keeps its place with an explained placeholder.
 test('the project-admin list does not call an omitted permission reading 未检查', async () => {
