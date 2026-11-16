@@ -49,9 +49,9 @@ function pendingActivationGroup(pending) {
 // The list is a role=list of listitems, so a lone row/columnheader here would be invalid table semantics; the header is
 // the visual legend (hidden from assistive tech) and every data cell names its column through aria-labelledby.
 const projectColumnId = label => 'project-col-' + label;
-function projectTableHead() {
+function projectTableHead(labels = projectColumnLabels) {
   const head = element('div', '', 'project-table-head'); head.setAttribute('aria-hidden', 'true');
-  for (const label of projectColumnLabels) { const cell = element('span', label, 'project-cell'); cell.id = projectColumnId(label); head.append(cell); }
+  for (const label of labels) { const cell = element('span', label, 'project-cell'); cell.id = projectColumnId(label); head.append(cell); }
   return head;
 }
 // Fold state per organization, scoped to the signed-in account so switching accounts never reuses another one's choices.

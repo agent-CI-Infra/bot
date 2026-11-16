@@ -401,8 +401,8 @@ body:not(.console-ready) header .locale-switch { background: #fff; }
 /* #544 already turns the project list into labelled cells below 1280px. On a phone, put
    设置 directly under the name and ahead of the status cells (the #561 390 criterion). */
 @media (max-width: 599px) {
-  #rows[data-view=projects] .project-list-row > .project-cell[data-label="项目"] { grid-row: 1; }
-  #rows[data-view=projects] .project-list-row > .project-cell[data-label="操作"] {
+  :is(#rows[data-view=projects], .global-project-table) .project-list-row > .project-cell[data-label="项目"] { grid-row: 1; }
+  :is(#rows[data-view=projects], .global-project-table) .project-list-row > .project-cell[data-label="操作"] {
     grid-row: 2; grid-column: 1 / -1; justify-content: flex-start;
   }
 }

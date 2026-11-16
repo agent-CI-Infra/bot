@@ -272,3 +272,57 @@ test('项目列表：组织可折叠、状态按类别成列对齐、主列表�
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, {recursive: true, force: true}); }
 });
+
+test('全局设置的项目管理复用紧凑表格，保留管理操作且宽窄屏不溢出', async ({page}) => {
+  const h = await harness(), {admin, password} = await setup(h), a = await account(admin), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const row = id => page.locator(`.global-project-row[data-repository-id="${id}"]`);
+  const lefts = id => row(id).locator(':scope > .project-cell').evaluateAll(cells => cells.map(cell => Math.round(cell.getBoundingClientRect().left)));
+  try {
+    for (const id of ['101', '202']) await repository(admin, a.id, id);
+    h.store.run(`INSERT INTO installed_repositories(account_id,repository_id,full_name,owner_id,owner_login,private,installed,synced_at)
+      VALUES(?,'501','fixture/unstarted','10','fixture',0,1,?)`, a.id, new Date().toISOString());
+    for (const id of ['601', '602']) h.store.run(`INSERT INTO installed_repositories(account_id,repository_id,full_name,owner_id,owner_login,private,installed,hidden,synced_at)
+      VALUES(?,?,?,?,?,0,1,1,?)`, a.id, id, `fixture/hidden-${id}`, '10', 'fixture', new Date().toISOString());
+    await page.goto(h.admin + '/#/settings/projects');
+    await page.getByLabel('用户名', {exact: true}).fill('administrator'); await page.getByLabel('密码', {exact: true}).fill(password);
+    await page.getByRole('button', {name: '登录', exact: true}).click();
+    const table = page.locator('.global-project-table');
+    await expect(table).toBeVisible(); await expect(page.locator('.global-project-row')).toHaveCount(3);
+    await expect(table.locator('.project-table-head .project-cell')).toHaveText(['项目', '启用', '检视', '开发', '权限', '门禁', '看板', '任务', '操作']);
+    await expect(page.getByLabel('全局设置中的项目')).toHaveCount(0);
+    for (const id of ['101', '202', '501']) await expect(row(id).locator(':scope > .project-cell')).toHaveCount(9);
+    await expect(row('101').getByRole('link', {name: /全局管理此项目/})).toBeVisible();
+    await expect(row('101').getByRole('button', {name: '设置', exact: true})).toHaveCount(0);
+    await expect(row('101').getByRole('switch', {name: /看板/})).toBeVisible();
+    await expect(row('501').getByRole('button', {name: '启动', exact: true})).toBeVisible();
+    await expect(row('501').getByRole('link', {name: /全局管理此项目/})).toHaveCount(0);
+    await page.setViewportSize({width: 1440, height: 900});
+    expect(await lefts('202')).toEqual(await lefts('101'));
+    mkdirSync('.tmp/global-project-table', {recursive: true});
+    await page.screenshot({path: '.tmp/global-project-table/desktop.png', fullPage: true});
+    for (const [label, width, height] of [['compact', 1024, 900], ['mobile', 390, 844], ['narrow', 320, 700]]) {
+      await page.setViewportSize({width, height});
+      await expect(row('101')).toBeVisible();
+      await page.screenshot({path: `.tmp/global-project-table/${label}.png`, fullPage: true});
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true);
+      expect(await page.locator('.global-project-row').evaluateAll(rows => rows.every(line => line.scrollWidth <= line.clientWidth + 1))).toBe(true);
+      await expect(row('101').locator('.project-cell[data-label="权限"]')).toBeVisible();
+    }
+    await page.goto(h.admin + '/#/settings/projects/hidden.0');
+    const hiddenTable = page.locator('.global-project-table.is-hidden');
+    await expect(hiddenTable).toBeVisible();
+    await expect(row('601')).toBeVisible(); await expect(row('602')).toBeVisible();
+    await page.setViewportSize({width: 1440, height: 900});
+    await expect(hiddenTable.locator('.project-table-head .project-cell')).toHaveText(['项目', '操作']);
+    for (const id of ['601', '602']) await expect(row(id).locator(':scope > .project-cell')).toHaveCount(2);
+    expect(await lefts('602')).toEqual(await lefts('601'));
+    await page.screenshot({path: '.tmp/global-project-table/hidden-desktop.png', fullPage: true});
+    await page.setViewportSize({width: 390, height: 844});
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(await page.locator('.global-project-row').evaluateAll(rows => rows.every(line => line.scrollWidth <= line.clientWidth + 1))).toBe(true);
+    await expect(row('601').getByRole('button', {name: '恢复', exact: true})).toBeVisible();
+    await page.screenshot({path: '.tmp/global-project-table/hidden-mobile.png', fullPage: true});
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); rmSync(h.directory, {recursive: true, force: true}); }
+});

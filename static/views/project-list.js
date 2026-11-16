@@ -16,13 +16,15 @@ async function confirmBoardVisibility(repository, enabled) {
   // A choice made on a previous page or by a previous signed-in account cannot authorize this write.
   return confirmed && me === actor && location.hash === address;
 }
-function projectListControls(row) {
+function projectListControls(row, { showStatus = true, showTasks = true } = {}) {
   const registered = row.registered !== false, group = element('div', '', 'project-controls'), features = element('div', '', 'project-features');
   group.setAttribute('role', 'group'); group.setAttribute('aria-label', row.full_name + ' 功能与任务');
-  const availability = badge(!registered ? '未启动' : row.enabled ? '已启用' : '已禁用', !registered ? 'info' : row.enabled ? 'success' : 'warning');
-  features.append(availability);
-  if (row.installed === false) features.append(badge('已移出安装', 'danger'));
-  else if (row.installed === null) features.append(badge('不在安装列表'));
+  if (showStatus) {
+    const availability = badge(!registered ? '未启动' : row.enabled ? '已启用' : '已禁用', !registered ? 'info' : row.enabled ? 'success' : 'warning');
+    features.append(availability);
+    if (row.installed === false) features.append(badge('已移出安装', 'danger'));
+    else if (row.installed === null) features.append(badge('不在安装列表'));
+  }
   const feedback = element('p', '', 'project-control-feedback'); feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite');
   let pending = false, boardSavedAt = 0; const switches = [];
   const sync = () => switches.forEach(({control, value, key, caption}) => {
@@ -70,9 +72,12 @@ function projectListControls(row) {
     sync(); updateBoardChip(group, row);
   };
   sync();
-  const preview = element(registered ? 'a' : 'span', '', 'project-task-preview');
-  if (registered) preview.href = `#/projects/${row.id}/activity`;
-  updateProjectTaskPreview(preview, row); features.append(preview); group.append(features, feedback); return group;
+  if (showTasks) {
+    const preview = element(registered ? 'a' : 'span', '', 'project-task-preview');
+    if (registered) preview.href = `#/projects/${row.id}/activity`;
+    updateProjectTaskPreview(preview, row); features.append(preview);
+  }
+  group.append(features, feedback); return group;
 }
 // #790: this read is re-asked every five seconds. 401/403/404 will answer the same way however often it is asked, so
 // the poll stops and says so above the rows it keeps; anything else may clear on its own, so it keeps asking on a delay
@@ -107,10 +112,9 @@ async function refreshProjectActivity(force = false) {
     for (const line of document.querySelectorAll('#rows .project-list-row, .global-project-row')) {
       const row = rows.get(line.dataset.repositoryId); if (row) {
         updateProjectTaskPreview(line.querySelector('.project-task-preview'), row);
-        // #544 review: the table keeps the board chip in its own cell and has no .project-controls group, so the same
-        // poll has to refresh that cell; the placeholder of a non-installed row is left alone.
-        const boardCell = [...line.children].find(child => child.dataset.label === '看板');
-        if (boardCell && boardCell.querySelector('[data-board-status]')) boardCell.replaceChildren(boardChip(row));
+        // Replace only the chip so sibling controls are not redrawn; the placeholder of a non-installed row is left alone.
+        const boardCell = [...line.children].find(child => child.dataset.label === '看板'), chip = boardCell?.querySelector('[data-board-status]');
+        if (chip) chip.replaceWith(boardChip(row));
         line.querySelector('.project-controls')?.updateBoard?.(row, requestedAt);
       }
     }
@@ -406,7 +410,7 @@ function updateIntegrationChips(integrations) {
     chips[0].replaceWith(...installedIntegration(integration)); chips.slice(1).forEach(chip => chip.remove());
   }
 }
-function installedActions(row, after) {
+function installedActions(row, after, { includeSettings = true } = {}) {
   const actions = element('div', '', 'actions');
   const call = async (path, body, caption) => {
     actions.querySelectorAll('button').forEach(b => { b.disabled = true; }); notice('message', caption);
@@ -414,15 +418,15 @@ function installedActions(row, after) {
     await after();
   };
   // Gate onboarding is a conversation in static/gate-onboarding.js; boards are managed by the list switch.
-  actions.append(button('接入门禁', () => openGateOnboarding(row, after), ''));
+  actions.append(button('接入门禁', () => openGateOnboarding(row, after), 'quiet'));
   if (!row.registered && row.installed) actions.append(button('启动', () => openActivation(row, after), ''));
   // Review has its own switch; this action resumes a disabled project.
-  if (row.registered && !row.enabled) actions.append(button('启用', () => call('activate', {}, `正在启用 ${row.full_name}…`)));
+  if (row.registered && !row.enabled) actions.append(button('启用', () => call('activate', {}, `正在启用 ${row.full_name}…`), 'quiet'));
   if (row.registered && row.enabled) actions.append(button('禁用', async () => {
     if (await askConfirm({ title: `禁用 ${row.full_name}？`, body: ['新的 Issue／PR 不再处理，正在执行的任务会中止，虚拟电脑停止但数据保留，之后可以再启用。'], action: '禁用', danger: true }))
       call('disable', {}, `正在禁用 ${row.full_name}…`);
-  }));
-  if (row.registered) actions.append(button('设置', () => openProject(row.id), 'quiet'));
+  }, 'quiet'));
+  if (row.registered && includeSettings) actions.append(button('设置', () => openProject(row.id), 'quiet'));
   // A project still off the installation is deleted only after GitHub confirms the account lost it; a started project can
   // also be deleted here from the control plane alone; an installed but never started repository is only hidden.
   if (row.installed !== true) actions.append(button('删除', () => deleteProject(row, after), 'quiet destructive'));

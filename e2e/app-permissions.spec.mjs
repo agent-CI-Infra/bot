@@ -96,7 +96,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await expect(message).toContainText('App 定义仍有缺口，请到「全局设置 → 机器人账号」查看。');
     app.events = allEvents; installations[0].permissions = everything; await sync.click();
     await expect(chip('101')).toHaveText('事件未订阅');
-    await row('101').getByRole('button', { name: '设置', exact: true }).click();
+    await row('101').getByRole('link', { name: /全局管理此项目/ }).click();
     await expect(page.locator('.project-head [data-permission]')).toHaveText('事件未订阅');
     await expect(page.locator('.project-head [data-permission]')).toHaveAttribute('title', /Pull request review comment.*Workflow run/);
     await page.getByRole('link', { name: '← 全部项目', exact: true }).click(); await page.goto(h.admin + '/#/settings/projects');
