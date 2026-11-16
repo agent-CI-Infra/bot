@@ -8,8 +8,10 @@ import { managerDecision } from './manager.js';
 export type Decider = (store: Store, context: DispatchContext) => Promise<Decision>;
 const leaseMs = dispatchLeaseMs, maxAttempts = 8;
 // A failed attempt waits 5 s, 15 s, 45 s … up to 10 minutes. A model that cannot be reached or is not configured is retried
-// until it can; other failures (an invalid decision, a runtime fault) are marked failed for a person after eight attempts.
+// until it can; other failures (an invalid decision, a runtime fault) go back to the Manager for one more round after eight attempts, then are marked failed for a person.
 const backoff = (attempts: number) => Math.min(5000 * 3 ** Math.max(0, attempts - 1), 10 * 60000);
+// The answer round after the attempts ran out waits a little longer, so a passing fault of the model has time to clear.
+const answerDelay = 15 * 60000;
 
 /**
  * Decides pending events in the background. Each event is claimed with a lease, decided by one Manager call and applied in
@@ -89,9 +91,12 @@ export class Dispatcher {
         if (!current) return;
         // A model that is down or not configured is waited out, like a task waits for it; only real failures run out.
         const waiting = error instanceof TaskError && ['retry_wait', 'waiting_configuration', 'waiting_environment'].includes(String(error.state));
-        const failed = !waiting && Number(current.attempts) >= maxAttempts;
-        this.store.run('UPDATE dispatch_events SET state=?,lease=NULL,lease_until=NULL,next_run_at=?,error=? WHERE id=?', failed ? 'failed' : 'pending',
-          Date.now() + backoff(Number(current.attempts)), JSON.stringify({ code, detail: detail.slice(0, 600) }), event.id);
+        const spent = !waiting && Number(current.attempts) >= maxAttempts;
+        // Spent attempts go back to the Manager once more (#815), told that deciding failed, so it can answer the person
+        // instead of the event waiting for someone to press retry. Only when that round fails too is the event failed.
+        const answer = spent && !Number(current.answer_round), failed = spent && !answer;
+        this.store.run('UPDATE dispatch_events SET state=?,lease=NULL,lease_until=NULL,next_run_at=?,error=?,answer_round=? WHERE id=?', failed ? 'failed' : 'pending',
+          Date.now() + (answer ? answerDelay : backoff(Number(current.attempts))), JSON.stringify({ code, detail: detail.slice(0, 600) }), answer ? 1 : Number(current.answer_round || 0), event.id);
         // A module waiting for the outcome (a release observation) stops waiting when no decision will come.
         if (failed) for (const option of JSON.parse(current.options) as CreateOption[]) if (option.hook) dispatchHook(option.hook)?.declined(this.store, current, 'dispatch_failed', option.ref ?? null);
       });
@@ -106,7 +111,7 @@ export function retryEvent(store: Store, repositoryId: string, id: string) {
     if (!previous) return false;
     // Keep the failure a person retried even after the existing event advances to its next result.
     store.run('INSERT INTO dispatch_retries(id,event_id,requested_at,previous_attempts,previous_error) VALUES(?,?,?,?,?)', randomId(), id, new Date().toISOString(), previous.attempts, previous.error);
-    return store.run("UPDATE dispatch_events SET state='pending',attempts=0,next_run_at=0,error=NULL WHERE id=? AND repository_id=? AND state='failed'", id, repositoryId).changes > 0;
+    return store.run("UPDATE dispatch_events SET state='pending',attempts=0,answer_round=0,next_run_at=0,error=NULL WHERE id=? AND repository_id=? AND state='failed'", id, repositoryId).changes > 0;
   });
 }
 

@@ -129,6 +129,24 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
 export interface GoAhead { label:string; labeled_by:string; assignees:string[] }
 // The goal of a development: the Manager's brief for an Issue (#815); a revision of a bot pull request carries the goal of the
 // development that opened it (input.review.implementation_goal is set by the control plane, never by a review since #815).
+/**
+ * A development that stopped because its go-ahead no longer holds (the development label was removed, or an Issue filed from
+ * an Actions failure got an assignee) goes back to the Manager (#815), instead of waiting for someone to press retry: it can
+ * answer the person on the Issue (a review that replies, or a comment with github_write) or ignore it. When a person adds
+ * the label again, the labeling offers the waiting development under work.continue, and continuing it resumes the task.
+ */
+export function developmentStopped(store:Store,task:Row,detail:string){
+  const policy=store.get('SELECT enabled FROM policies WHERE repository_id=?',task.repository_id);if(!policy?.enabled)return;
+  const number=Number(task.object_number),input=JSON.parse(task.input||'{}'),stopped=randomId().slice(0,16);
+  const trigger={reason:'development_stopped',task_id:String(task.id),code:'development_not_approved',detail:detail.slice(0,600)};
+  recordEvent(store,{repositoryId:task.repository_id,key:`${task.repository_id}:development.stopped:${task.id}:${stopped}`,type:'development.stopped',source:'control_plane',
+    summary:`开发停下：Issue #${number} 不再满足开发条件`,object:{type:'issue',number},delivery:task.source_delivery_id??null,
+    facts:{development:{task_id:String(task.id),status:'waiting_permission',detail:detail.slice(0,600),label:developmentLabel(store,task.repository_id)},
+      object:{number,title:String(input.object?.title||'').slice(0,300),url:input.object?.html_url??null}},
+    options:[{id:'review',work:'review.issue',title:`检视 Issue #${number}（回应开发停下）`,
+      spec:{type:'object',kind:'review.issue',number,head:null,input:{trigger},delivery:task.source_delivery_id??null,update_id:`stopped-${stopped}`}}],
+    merge:{key:`${task.repository_id}:development.stopped:${task.id}:${stopped}`,data:trigger,trigger,head:null,kinds:['review.issue']}});
+}
 export const developmentGoal=(input:any)=>String(input?.review?.implementation_goal||input?.manager?.brief?.goal||'');
 export const actionableFinding=(finding:any)=>finding.actionable===true&&finding.within_goal===true&&finding.requires_human_decision===false;
 /**

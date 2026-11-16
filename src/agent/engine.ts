@@ -39,7 +39,7 @@ import { testEvidence, reviewLanguage, promptedBy } from '../github/text.js';
 import { developmentReady } from '../review/queue.js';
 import { taskBasis } from '../dispatch/basis.js';
 import { actionableFinding, developmentGoal, discussionRequests, developmentApproved,
-  ownedPullRequest, developmentLabelForTask, queueDevelopment, revisionRequests, type GoAhead, type RevisionRequest } from '../review/development.js';
+  ownedPullRequest, developmentLabelForTask, developmentStopped, queueDevelopment, revisionRequests, type GoAhead, type RevisionRequest } from '../review/development.js';
 import { actionsConfigurationError, actionsDevelopmentAllowed, actionsIssueAssigned, actionsSourceIssue } from '../actions/safety.js';
 import { taskGithubWrite } from '../tasks/github-write.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
@@ -333,6 +333,20 @@ export class TaskEngine {
         if(development)stop('pull_request_head_changed','needs_replan',`PR #${current.number} 有了别人推送的新提交：任务提交 ${task.head_sha}，当前 ${head}。已有改动保存为进度检查点，开发按新提交重新准备。`);
         if(review&&(move||task.phase==='publish')&&!task.publication_started)await moveHead(current);
       };
+      // An edit of the Issue's title or body is an update of its development, not a reason to stop it (#815): the task takes
+      // the current text and keeps the edit with its updates, which a role assignment starting later reads in its task facts.
+      // Handing it to a session that is already running is the Harness session layer's (#834).
+      const issueEdited=(current:any)=>{
+        const hash=sha(JSON.stringify([current.title,current.body])),previous=input.object??{};
+        const changed=['title','body'].filter(key=>String(current[key]??'')!==String(previous[key]??''));
+        // The Manager may already have continued this task with the edit's own event (same text): one update is enough.
+        const known=this.store.all('SELECT data FROM review_updates WHERE task_id=?',id).some(row=>{const object=JSON.parse(row.data).object;return object&&sha(JSON.stringify([object.title,object.body]))===hash;});
+        if(!known)this.store.run('INSERT OR IGNORE INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',id,`${id}:issue:${hash}`,JSON.stringify({reason:'issue_edited',changed,
+          object:{number:current.number,title:current.title,body:String(current.body??'').slice(0,4000)},url:current.html_url??null,at:new Date().toISOString()}));
+        input={...input,object:current,object_hash:hash,...(input.context?.object?{context:{...input.context,object:{...input.context.object,title:current.title,body_excerpt:String(current.body||'').slice(0,1000)}}}:{})};
+        update({input:storedInput(this.store,redactor.clean(input),task.repository_id)});
+        log({type:'issue_updated',changed,detail:`Issue #${task.object_number} 的${changed.map(key=>key==='title'?'标题':'正文').join('和')||'内容'}在开发期间被修改：任务继续，修改作为更新交给之后开始的角色。`});
+      };
       // move: nothing runs in the workspace now, so a review may move it to a new head.
       const validate=async(fetched?:any,move=false)=>{
         await guard();
@@ -345,7 +359,7 @@ export class TaskEngine {
           const candidateRow=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=candidateRow?JSON.parse(candidateRow.data):null;
           // This task's own push (development, or any task that updated the bot's PR) moved the head on purpose.
           if(current.head?.sha!==task.head_sha&&!(candidate?.remote_sha===current.head?.sha))await headMoved(String(current.head?.sha),current,move);
-        }else if(development&&input.object_hash&&sha(JSON.stringify([current.title,current.body]))!==input.object_hash)stop('issue_needs_replan','needs_replan',`Issue #${task.object_number} 的标题或正文已变化，需要重新规划。`);
+        }else if(development&&input.object_hash&&sha(JSON.stringify([current.title,current.body]))!==input.object_hash)issueEdited(current);
         // The go-ahead must still hold until publication: a development started on the label keeps it on the Issue (#815:
         // other bases do not need it; older developments have no recorded basis and still do), and an Issue filed from an
         // Actions failure stays unassigned.
@@ -900,6 +914,9 @@ export class TaskEngine {
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,wait_count:waits,
         retry_error_code:counted?failure.code:retrying&&!headMoved?current?.retry_error_code??null:null,retry_cycle_started_at:cycle,
         rate_limit_bucket:limited?failure.bucket??null:null,next_run_at:now+delay});
+      // A development whose go-ahead no longer holds goes back to the Manager to answer the person (#815), not to a retry button.
+      if(failure.code==='development_not_approved'&&task.kind==='development.issue'&&state==='waiting_permission'&&current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))
+        developmentStopped(this.store,{...task,input:this.store.get('SELECT input FROM tasks WHERE id=?',id)?.input??task.input},redactor.text(String(failure.detail||'')));
       if(counted&&current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))recordRetryFailure(this.store,task,{group:'execution:'+failure.code,occurrence:attemptRun!.id,code:failure.code,detail:redactor.text(String(failure.detail||''))});
       if(workspace&&task.phase==='model'&&controlled(this.store,task,'development')&&task.kind.startsWith('development.')&&task.workspace_id){try{await checkpoint(this.store,task,workspace);}catch(saved){records.history(id,'checkpoint_fault',{phase:'role_failure_recovery',code:(saved as any).code||'snapshot_failed'});}}
       // release() reaps the agent. Its cached pi:start receipt describes that dead process, so every model-phase

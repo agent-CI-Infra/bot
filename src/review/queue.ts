@@ -207,6 +207,9 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
   const p = payload as any, action = String(p.action || ''), actor = String(p.sender?.login || '');
   const base = (type: string, key: string, object: 'issue' | 'pr', number: number, summary: string, facts: Json): Omit<EventInput, 'options'> =>
     ({ repositoryId, key: `${repositoryId}:${key}`, type, source: 'github', summary, facts: { event, action, actor, ...facts }, object: { type: object, number }, delivery });
+  // An edit of an Issue's title or body is first an update of its running development (#815): the development takes the
+  // current text instead of stopping. Comments and mentions ask for an answer, which a review gives.
+  const updateKinds = (object: 'issue' | 'pr', kind: string, trigger: Json) => object === 'issue' && (trigger as any).reason === 'issue_edited' ? ['development.issue', kind] : [kind];
   // An update or mention: a review that answers it, joining a running review of the same object instead.
   const update = (type: string, object: 'issue' | 'pr', number: number, target: any, trigger: Json, merge: string, review: { commentId?: string; updateId?: string }, extra: Json = {}): EventInput => {
     const kind = object === 'pr' ? 'review.pr' : 'review.issue', head = object === 'pr' ? sha(target?.head?.sha) : null;
@@ -220,7 +223,7 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
       options: [{ id: 'review', work: kind, title: `${object === 'pr' ? '检视 PR' : '检视 Issue'} #${number}`, default: true,
         spec: { type: 'object', kind, number, head, input, delivery, comment_id: review.commentId ?? null, update_id: review.commentId ? null : delivery } },
         replyOption(object, number, head, input, discriminator, delivery), ...(development ? [development.option] : [])],
-      merge: { key: merge, data: { ...trigger, object: p.issue || p.pull_request, comment: p.comment, review: p.review }, trigger, head, kinds: [kind] } };
+      merge: { key: merge, data: { ...trigger, object: p.issue || p.pull_request, comment: p.comment, review: p.review }, trigger, head, kinds: updateKinds(object, kind, trigger) } };
   };
   // An opening counts unless the object is already closed (or a draft), as before; later events need an open object.
   const notClosed = (object: any) => object && object.state !== 'closed' && object.draft !== true && Number.isSafeInteger(Number(object.number)) && Number(object.number) > 0;
@@ -254,6 +257,8 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
         const trigger = { event, action, reason: 'labeled', actor, label };
         const relabel = update('issue.labeled', 'issue', number, issue, trigger, 'delivery:' + delivery, { updateId: delivery },
           { label, ...(development ? { development: development.facts } : {}) });
+        // A development that waits because the label had been removed is continued with this labeling, which resumes it (#815).
+        if (development && relabel.merge) relabel.merge.kinds = ['development.issue', ...relabel.merge.kinds];
         // Before #207 only a dispatched label started a review; the rule decider used in tests keeps that.
         const answers = relabel.options.filter(option => !(development && option.id === 'development')).map(option => option.id === 'review' && !dispatched ? { ...option, default: false } : option);
         return { ...relabel, options: [...options, ...answers] };
