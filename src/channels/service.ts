@@ -93,6 +93,9 @@ export class ChannelService {
       },senderName:event=>senderName(chat)(event),request:event});
     };
     this.schedules = new ChannelSchedules(store, this);
+    // The assistants manage their conversation's timers (#851): the group sessions directly, the management assistant for
+    // the owner of the private chat its conversation belongs to.
+    this.serviceSessions.schedules = this.schedules;
     // Tasks a group delegated are linked to it when created, and stop once that group may no longer delegate there.
     this.employees.bindingGuard = origin => this.serviceBindings.guardTask(origin);
     // Tasks the management assistant creates in a private chat report back to that chat (#844).
@@ -116,6 +119,10 @@ export class ChannelService {
     };
     const personalChat=(conversation:string)=>store.get('SELECT h.* FROM channel_sessions s JOIN channel_chats h ON h.connector_id=s.connector_id AND h.chat_id=s.chat_id WHERE s.conversation_id=?',conversation);
     management.sourceVersion=conversation=>{const chat=personalChat(conversation);return chat?this.ledger.sourceVersion(chat.id):0;};
+    management.conversationSchedules=(actor,conversation)=>{
+      const chat=personalChat(conversation);if(!chat||chat.chat_type!=='p2p')return;
+      return args=>this.schedules.conversation(chat.id,{actor},args);
+    };
     management.sourceContext=(conversation,context)=>{
       const chat=personalChat(conversation);if(!chat)return context;
       const changedAt=Number(store.get('SELECT coalesce(max(observed_at),0) time FROM channel_source_updates WHERE chat_id=?',chat.id)!.time);

@@ -18,7 +18,8 @@ const sent=(f,id)=>until(()=>f.wire.sent.find(s=>JSON.stringify(s.content).inclu
 test('multi-project greetings use the shared management agent and private history shows the actual answer',async t=>{
   const f=await channelFixture(t);let channel=true;
   f.modelState.respond=async(body,res)=>{
-    assert.deepEqual(body.tools.map(t=>t.function.name),['read_tool_result','management_query','management_command','start_own_task','continue_own_task','list_own_tasks','read_own_task','manage_own_task','search_role_memory','read_role_memory','remember_role_memory','github_read','github_search','read_job_log','github_write',
+    // A private chat's conversation also manages that chat's timers (#851); a console conversation has no chat.
+    assert.deepEqual(body.tools.map(t=>t.function.name),['read_tool_result','management_query','management_command',...(channel?['conversation_schedules']:[]),'start_own_task','continue_own_task','list_own_tasks','read_own_task','manage_own_task','search_role_memory','read_role_memory','remember_role_memory','github_read','github_search','read_job_log','github_write',
       ...(channel?['list_message_resources','read_message_text','read_message_resource','view_message_image','attach_message_resource','create_reply_file']:[]),'send_message']);
     assert.equal(input(body).scope,'platform');assert.equal(input(body).request,'你好');
     assert.match(body.messages[0].content,/No project is preselected/);

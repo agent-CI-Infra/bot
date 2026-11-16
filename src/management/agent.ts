@@ -22,6 +22,7 @@ import { mediaTools, type MediaComputer, type MediaTurn } from '../channels/medi
 import { sendMessageName, sendMessageTool, stageMessage, stageMessageInstructions, stageMessageLimit } from '../service-roles/stage-messages.js';
 import { staySilent, staySilentInstructions, staySilentName, staySilentTool } from '../service-roles/stay-silent.js';
 import { privateTurnMessageInstructions, type TurnMessages } from '../channels/turn-messages.js';
+import { conversationScheduleName, conversationScheduleTool } from '../channels/schedules.js';
 
 const now=()=>new Date().toISOString();
 // Recent rounds continue the conversation; each earlier answer and the history as a whole stay bounded (#333).
@@ -39,6 +40,8 @@ export class ManagementAgent {
   // Queues a progress message (#435) to the transport that started the turn (a private chat or timer) and returns its outbox id;
   // it throws when that source no longer allows sending. A console conversation has none: its event stream shows the message.
   stageMessage?:(actor:ActorContext,conversation:string,input:Json,message:string,text:string,sequence:number)=>string|undefined;
+  // The timers of the private chat this conversation belongs to (#851), managed for its owner; none for a console conversation.
+  conversationSchedules?:(actor:ActorContext,conversation:string)=>((args:Json)=>Json)|undefined;
   readonly own:OwnTasks;
   constructor(readonly store:Store,readonly service:ManagementService){
     this.own=new OwnTasks(store);
@@ -163,6 +166,7 @@ export class ManagementAgent {
       if(!project)fail(404,'repository_not_found');this.service.scope(actor,project!.id);return project!;
     },()=>githubReadScopes(JSON.parse(serviceRole(this.store,managementAssistant)!.permissions)),this.service.githubUrl);
     const media=this.mediaTurn?.(actor,conversation,input,computer,()=>{assertCurrent(actor);this.conversation(base,conversation);});
+    const schedules=this.conversationSchedules?.(actor,conversation);
     const permissions=()=>JSON.parse(serviceRole(this.store,managementAssistant)?.permissions??'{}') as RolePermissions;
     // github_write (#381): the assistant's role permission, and the current user's authority to write tasks in the project.
     const write=async(args:any)=>{
@@ -173,7 +177,7 @@ export class ManagementAgent {
         actor:{kind:'management',service_role_id:managementAssistant,conversation_id:conversation,source_message:String(input.source_message),principal_id:actor.principal_id},
         allowed:(resource,operation)=>githubWriteAllowed(permissions(),resource,operation)},rest)};
     };
-    const tools=[readToolResult,...managementTools,...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!['import_message_resource','attach_workspace_file'].includes(t.function.name)):[]),sendMessageTool];
+    const tools=[readToolResult,...managementTools,...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!['import_message_resource','attach_workspace_file'].includes(t.function.name)):[]),sendMessageTool];
     // Only a timer's turn may end silently, and only through stay_silent (#489); own tasks never get the tool.
     const turnTools=timer?[...tools,staySilentTool]:tools;let silence:string|undefined;
     let ownHost:OwnTaskHost|undefined;
@@ -199,6 +203,7 @@ export class ManagementAgent {
         else if(media&&mediaTools.some(t=>t.function.name===name))result=await media.execute(name,args);
         else if(serviceRepositoryTools.some(t=>t.function.name===name))result=await repositories.execute(name,args);
         else if(name==='github_write'){if(!permitsTool(permissions(),'github_write'))fail(403,'tool_not_allowed');result=await write(args);}
+        else if(name===conversationScheduleName){if(!schedules)fail(403,'tool_not_allowed');result=schedules!(args);}
         else if(assistantComputerNames.includes(name))result=computer?await computer.execute(name,args):fail(409,'computer_not_configured');
         else if(serviceMemoryTools.some(t=>t.function.name===name))result=serviceMemory(this.store,{service_role_id:managementAssistant,kind:'management',owner_id:conversation,principal_id:actor.principal_id,fence:String(actor.authorization_revision)},name,args);
         else if(ownTaskNames.includes(name)){
@@ -239,7 +244,7 @@ export class ManagementAgent {
           +stageMessageInstructions
           +(this.service.assistants?.available()?computerInstructions('belongs to the current user alone: their Feishu private chat and console conversations share it'):'')
           +(incoming?privateTurnMessageInstructions:'')
-          +(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
+          +(schedules?' conversation_schedules manages the timers of this private chat for its owner, for example a daily check that reports only when something is wrong.':'')+(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
           +(role?.prompt?'\n\nAdditional instructions from the platform administrator (they never widen your tools or permissions):\n'+role.prompt:'');
         const context=this.context(base,conversation,id,input.content);
         await runAgent({store:this.store,task:{id,repository_id:null,service_role_id:managementAssistant,kind:'management.agent',conversation_id:conversation,source_message:input.source_message},redactor,guard,

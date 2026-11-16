@@ -17,6 +17,21 @@ const code = (error: unknown) => error instanceof HttpError || error instanceof 
 /** Lost authority or configuration (4xx) pauses the timer with that reason; a model or network fault only fails the one run. */
 const authority = (error: unknown) => error instanceof HttpError && error.status === 403 || error instanceof TaskError && error.state === 'waiting_configuration';
 
+/**
+ * The timers of the current conversation, for its assistant (#851): the management assistant in a private chat, a group's
+ * assistant in a group at the comment level or higher. Results carry next_at and the next times (future), in epoch ms.
+ */
+export const conversationScheduleName = 'conversation_schedules';
+export const conversationScheduleTool = { type: 'function', function: { name: conversationScheduleName,
+  description: 'Timers of this conversation. Each timer runs its prompt here as a new turn of this assistant at its times and posts the answer here; a run with nothing to report may stay silent. '
+    + 'action list: the timers. create {name, prompt, cron (5 fields, in timezone) or interval_minutes (at least 5), timezone (IANA, default Asia/Shanghai)}. '
+    + 'update {id, and only what changes}; pause, resume or delete {id}. Write the prompt as the task to do at each run, including when to stay silent. '
+    + 'After creating or changing a timer, tell the person its next run time (next_at and future are epoch milliseconds).',
+  parameters: { type: 'object', properties: {
+    action: { type: 'string', enum: ['list', 'create', 'update', 'pause', 'resume', 'delete'] }, id: { type: 'string' },
+    name: { type: 'string', maxLength: 100 }, prompt: { type: 'string', maxLength: 8000 }, timezone: { type: 'string', maxLength: 64 },
+    cron: { type: 'string', maxLength: 120 }, interval_minutes: { type: 'integer', minimum: 5, maximum: 44640 } }, required: ['action'], additionalProperties: false } } };
+
 interface Timing { timezone: string; cron?: string; interval_ms?: number; start_at: number }
 const timing = (row: Row): Timing => ({ timezone: row.timezone, start_at: row.start_at, ...(row.cron ? { cron: row.cron } : { interval_ms: row.interval_ms }) });
 
@@ -105,14 +120,18 @@ export class ChannelSchedules {
   create(actor: ActorContext, chatId: string, input: Json): Json {
     fields(input, ['name', 'prompt', 'timezone', 'cron', 'interval_minutes', 'enabled']);
     const chat = this.host.employees.chat(chatId); this.manage(actor, chat);
+    return { schedule: this.view(this.insert(chat, actor.principal_id, input)) };
+  }
+  /** A new timer on a chat, recorded as created by `by`: the chat's owner, or a group's binding principal (#851). */
+  private insert(chat: Row, by: string, input: Json): Row {
     const spec = this.spec(input), id = randomId(), now = this.clock(), enabled = input.enabled !== false;
     const row = { ...spec, start_at: now };
     this.store.run(`INSERT INTO channel_schedules(id,chat_id,kind,owner_id,created_by,name,prompt,timezone,cron,interval_ms,start_at,state,reason,revision,next_at,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,1,?,?,?)`, id, chat.id, chat.chat_type === 'p2p' ? 'personal' : 'group', chat.chat_type === 'p2p' ? actor.principal_id : null,
-      actor.principal_id, spec.name, this.store.secrets.seal({ prompt: spec.prompt }, 'channel-schedule:' + id), spec.timezone, spec.cron, spec.interval_ms, now,
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,1,?,?,?)`, id, chat.id, chat.chat_type === 'p2p' ? 'personal' : 'group', chat.chat_type === 'p2p' ? by : null,
+      by, spec.name, this.store.secrets.seal({ prompt: spec.prompt }, 'channel-schedule:' + id), spec.timezone, spec.cron, spec.interval_ms, now,
       enabled ? 'active' : 'paused', enabled ? this.next(row, now) : null, now, now);
-    this.store.audit(actor.principal_id, 'channel.schedule.created', id, chat.id);
-    return { schedule: this.view(this.schedule(id)) };
+    this.store.audit(by, 'channel.schedule.created', id, chat.id);
+    return this.schedule(id);
   }
   update(actor: ActorContext, id: string, input: Json): Json {
     fields(input, ['expected_revision', 'name', 'prompt', 'timezone', 'cron', 'interval_minutes', 'enabled']);
@@ -121,23 +140,66 @@ export class ChannelSchedules {
     // Pausing is the one change a platform manager may make to someone else's timer.
     const pauseOnly = Object.keys(input).every(key => key === 'expected_revision' || key === 'enabled') && input.enabled === false;
     if (!(pauseOnly && this.platform(actor))) this.manage(actor, chat);
-    const now = this.clock(), enabled = input.enabled === undefined ? old.state === 'active' : input.enabled === true;
+    return { schedule: this.view(this.change(old, chat, actor.principal_id, input)) };
+  }
+  /** Changes a timer: a new spec (all of name, prompt, timezone and one recurrence), or only whether it runs. */
+  private change(old: Row, chat: Row, by: string, input: Json): Row {
+    const id = old.id, now = this.clock(), enabled = input.enabled === undefined ? old.state === 'active' : input.enabled === true;
     const spec = Object.keys(input).some(key => ['name', 'prompt', 'timezone', 'cron', 'interval_minutes'].includes(key)) ? this.spec(input) : undefined;
     // A new rhythm starts counting from this save; a resumed timer continues from now, never from missed occurrences.
     const row: Row = spec ? { ...old, ...spec, start_at: now } : old;
     this.store.run(`UPDATE channel_schedules SET name=?,prompt=?,timezone=?,cron=?,interval_ms=?,start_at=?,state=?,reason=?,revision=revision+1,next_at=?,updated_at=? WHERE id=?`,
       row.name, spec ? this.store.secrets.seal({ prompt: spec.prompt }, 'channel-schedule:' + id) : old.prompt, row.timezone, row.cron ?? null, row.interval_ms ?? null, row.start_at,
       enabled ? 'active' : 'paused', enabled ? null : old.state === 'active' ? 'user_paused' : old.reason, enabled ? this.next(row, now) : null, now, id);
-    this.store.audit(actor.principal_id, 'channel.schedule.' + (spec ? 'updated' : enabled ? 'resumed' : 'paused'), id, chat.id);
-    return { schedule: this.view(this.schedule(id)) };
+    this.store.audit(by, 'channel.schedule.' + (spec ? 'updated' : enabled ? 'resumed' : 'paused'), id, chat.id);
+    return this.schedule(id);
   }
   remove(actor: ActorContext, id: string, input: Json): Json {
     fields(input, ['expected_revision']);
     const old = this.schedule(id); this.manage(actor, this.host.employees.chat(old.chat_id));
     if (input.expected_revision !== old.revision) fail(409, 'channel_schedule_revision_conflict');
-    this.store.run("UPDATE channel_schedules SET state='deleted',next_at=NULL,revision=revision+1,updated_at=? WHERE id=?", this.clock(), id);
-    this.store.audit(actor.principal_id, 'channel.schedule.deleted', id, old.chat_id);
+    this.drop(old, actor.principal_id);
     return { id, state: 'deleted' };
+  }
+  private drop(old: Row, by: string): void {
+    this.store.run("UPDATE channel_schedules SET state='deleted',next_at=NULL,revision=revision+1,updated_at=? WHERE id=?", this.clock(), old.id);
+    this.store.audit(by, 'channel.schedule.deleted', old.id, old.chat_id);
+  }
+
+  // --- From the conversation (#851) ------------------------------------------------------------------------------------
+  /**
+   * The timers of the conversation an assistant answers in, managed from the chat itself. A private chat's management
+   * assistant acts for the chat's owner, checked as in the console. A group's assistant acts for the group: any member may
+   * ask while the group's binding is at the comment level or higher (it writes Issues), since groups never check the
+   * speaker; the binding's principal is recorded as the author. Actions: list, create, update, pause, resume, delete.
+   */
+  conversation(chatId: string, caller: { actor: ActorContext } | { binding: string }, input: Json): Json {
+    fields(input, ['action', 'id', 'name', 'prompt', 'timezone', 'cron', 'interval_minutes']);
+    const chat = this.host.employees.chat(chatId);
+    let by: string;
+    if ('actor' in caller) {
+      if (chat.chat_type !== 'p2p') fail(403, 'channel_schedule_forbidden');
+      this.manage(caller.actor, chat); by = caller.actor.principal_id;
+    } else {
+      const binding = chat.chat_type === 'p2p' ? undefined : this.host.serviceBindings.active(chat.id);
+      if (!binding || binding.id !== caller.binding) fail(403, 'channel_schedule_forbidden');
+      this.host.serviceBindings.assertUsable(binding!);
+      if (this.host.serviceBindings.permissions(binding!).github_issues !== 'write') fail(403, 'channel_schedule_level_required');
+      by = String(binding!.principal_id);
+    }
+    const action = String(input.action);
+    if (action === 'list') return { schedules: this.store.all("SELECT * FROM channel_schedules WHERE chat_id=? AND state<>'deleted' ORDER BY created_at,rowid", chat.id).map(row => this.view(row)) };
+    const { action: _, id, ...spec } = input;
+    if (action === 'create') return { schedule: this.view(this.insert(chat, by, { timezone: 'Asia/Shanghai', ...spec })) };
+    if (!['update', 'pause', 'resume', 'delete'].includes(action)) return fail(400, 'channel_schedule_action_invalid', 'action');
+    const old = this.schedule(text(id, 64));
+    if (old.chat_id !== chat.id) fail(404, 'channel_schedule_not_found');
+    if (action === 'delete') { this.drop(old, by); return { id: old.id, state: 'deleted' }; }
+    if (action !== 'update') return { schedule: this.view(this.change(old, chat, by, { enabled: action === 'resume' })) };
+    // An update names only what changes; the rest is the timer's current spec, and a new recurrence replaces the old one.
+    const current = this.view(old), recurrence = spec.cron !== undefined || spec.interval_minutes !== undefined;
+    return { schedule: this.view(this.change(old, chat, by, { name: current.name, prompt: current.prompt, timezone: current.timezone,
+      ...(recurrence ? {} : current.cron ? { cron: current.cron } : { interval_minutes: current.interval_minutes }), ...spec })) };
   }
   /** Run once now, whatever the timer's rhythm; one run of a timer at a time. */
   runNow(actor: ActorContext, id: string, input: Json): Json {
