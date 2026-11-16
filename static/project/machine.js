@@ -7,8 +7,15 @@ function machineSection(globalSettings = false) {
   const shown={...pc,...effective,network_policy:effective.egress===undefined?pc.network_policy:effective.egress?'internet egress':'internal, no egress'};
   // A resource left empty follows the global default; own() is the value the project sets (console or repository file).
   const own = name => current.rules?.computer ? current.rules.computer[name] : pc.inherited?.includes(name) ? undefined : pc[name];
-  const number = (name, step) => input(name, own(name) ?? '', { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '',
-    placeholder: `留空使用全局默认（${pc.defaults?.[name] ?? pc[name]}）` });
+  // #865: a number input silently drops text it cannot parse, so the field reads as empty and the old code saved
+  // "clear the project override" instead of refusing the typo. The resource fields keep the typed text as decimal-input
+  // text and are checked below; empty still means "follow the global default", but only when it really is empty.
+  const number = (name, step) => {
+    const control = input(name, own(name) ?? '', { type: 'text', inputMode: 'decimal', autocomplete: 'off', spellcheck: false,
+      min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '',
+      placeholder: `留空使用全局默认（${pc.defaults?.[name] ?? pc[name]}）` });
+    control.dataset.step = step; return control;
+  };
   const configField = (label, control, name) => {
     const wrap = element('div', '', 'machine-config-field'), source = current.rules?.computer_sources?.[name];
     const inherited = specFields.includes(name) && own(name) == null;
@@ -18,7 +25,9 @@ function machineSection(globalSettings = false) {
       const target = own(name) ?? pc.defaults?.[name];
       hint.append(` · ${unread ? '临时值' : '配置目标'} ${target ?? '未知'} · 电脑报告 ${pc[name] ?? '未知'}`);
     }
-    wrap.append(control.tagName === 'LABEL' ? control : field(label, control), hint); return wrap;
+    wrap.append(control.tagName === 'LABEL' ? control : field(label, control), hint);
+    if (specFields.includes(name)) { const note = element('span', '', 'machine-config-field-note'); note.id = `machine-${name}-note`; note.setAttribute('aria-live', 'polite'); note.hidden = true; wrap.append(note); }
+    return wrap;
   };
   const group = (title, text, ...fields) => {
     const section = element('section', '', 'machine-config-group');
@@ -51,10 +60,34 @@ function machineSection(globalSettings = false) {
   const nodes = [
     note(unread?'尚未读取默认分支配置，目前仅显示内置与控制台临时值，无法确认仓库覆盖关系。':source?.source==='repository'?'表单显示默认分支 .bot/computer.yaml 合并后的配置目标，电脑是否已应用需结合上方状态核对。':'表单显示已保存的配置目标；仓库 .bot/computer.yaml 可以按字段覆盖控制台值。'),sourceActions,
     layout];
+  const names = { cpus: 'CPU', memory_mb: '内存', pids: '进程数', tmp_mb: '/tmp', packages: '软件包', setup_script: '初始化脚本', rerun_setup: '重新初始化', egress: '网络', env: '环境变量' };
+  // A resource field is empty on purpose only when the user cleared it; text that is not a finite number in range and on
+  // the step is an error naming the field, never a silent "clear the override" (#865).
+  const resourceValue = control => {
+    const text = control.value.trim();
+    if (!text) return { value: null, error: '' };
+    const value = Number(text), min = control.min === '' ? null : Number(control.min), max = control.max === '' ? null : Number(control.max), step = Number(control.dataset.step);
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text) || !Number.isFinite(value)) return { value: null, error: '请填写有效数字，或留空以跟随全局默认' };
+    if (min !== null && value < min) return { value: null, error: `需不小于 ${control.min}` };
+    if (max !== null && value > max) return { value: null, error: `需不大于 ${control.max}` };
+    const steps = (value - (min ?? 0)) / step;
+    if (step > 0 && Math.abs(steps - Math.round(steps)) > 1e-9) return { value: null, error: `取值步长是 ${control.dataset.step}` };
+    return { value, error: '' };
+  };
+  const resourceNote = (control, name) => {
+    const read = resourceValue(control);
+    if (read.error) return read.error;
+    if (read.value !== null || own(name) == null) return '';
+    return `将清除项目控制台的覆盖，保存后跟随全局默认（${pc.defaults?.[name] ?? pc[name]}）`;
+  };
   const readSpec = form => {
     const spec = {};
     // null clears the project's value, so the resource follows the global default again.
-    for (const name of specFields) { const text = form.elements[name].value.trim(), value = text === '' ? null : Number(text); if (value !== (own(name) ?? null)) spec[name] = value; }
+    for (const name of specFields) {
+      const control = form.elements[name], read = resourceValue(control);
+      if (read.error) throw Object.assign(new Error(`${names[name]}：${read.error}`), { field: name });
+      if (read.value !== (own(name) ?? null)) spec[name] = read.value;
+    }
     if (form.elements.egress.checked !== (shown.network_policy === 'internet egress')) spec.egress = form.elements.egress.checked;
     const packages = [...new Set(form.elements.packages.value.split(/[\s,]+/).filter(Boolean))];
     if (packages.slice().sort().join(' ') !== [...(shown.packages || [])].sort().join(' ')) spec.packages = packages;
@@ -64,16 +97,25 @@ function machineSection(globalSettings = false) {
     return spec;
   };
   const form = settingsForm('配置', nodes, async (form, progress) => {
-    const spec = readSpec(form);
+    let spec;
+    try { spec = readSpec(form); }
+    catch (err) { const control = err.field && form.elements[err.field]; if (control) control.focus(); throw err; }
     if (!Object.keys(spec).length) return '没有改动';
     progress(spec.packages ? '正在安装软件包并重建虚拟电脑，首次可能需要几分钟…' : spec.setup_script !== undefined || spec.rerun_setup ? '正在重建虚拟电脑并运行初始化脚本…' : '正在按新配置重建虚拟电脑…');
     await api(`/api/environments/${current.id}/configure`, 'POST', { operation_id: operationId(), generation: environment.environment.generation, spec });
     return '已保存，虚拟电脑已按新配置重建';
   }, { editable: editable && !unread, hideActions: editable && !unread });
   form.classList.add('machine-config-card');
-  const names = { cpus: 'CPU', memory_mb: '内存', pids: '进程数', tmp_mb: '/tmp', packages: '软件包', setup_script: '初始化脚本', rerun_setup: '重新初始化', egress: '网络', env: '环境变量' };
   const update = () => {
-    try { const changes = Object.keys(readSpec(form.querySelector('form'))); draft.textContent = changes.length ? '有未保存的更改：' + changes.map(key => names[key]).join('、') : '已保存'; }
+    const fields = form.querySelector('form');
+    for (const name of specFields) {
+      const control = fields?.elements?.[name], note = control?.closest('.machine-config-field')?.querySelector('.machine-config-field-note');
+      if (!note) continue;
+      const text = resourceNote(control, name); note.textContent = text; note.hidden = !text;
+      if (text) control.setAttribute('aria-describedby', note.id); else control.removeAttribute('aria-describedby');
+      if (resourceValue(control).error) control.setAttribute('aria-invalid', 'true'); else control.removeAttribute('aria-invalid');
+    }
+    try { const changes = Object.keys(readSpec(fields)); draft.textContent = changes.length ? '有未保存的更改：' + changes.map(key => names[key]).join('、') : '已保存'; }
     catch (err) { draft.textContent = '有未保存的更改：' + readErrorText(err); }
   };
   form.addEventListener('input', update); update();
