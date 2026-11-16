@@ -1,9 +1,10 @@
 import type { Store, Row } from '../storage/database.js';
 import type { Redactor } from '../agent/common.js';
-import { githubWrite } from '../github/write.js';
+import { githubWrite, type WriteResource, type WriteOperation } from '../github/write.js';
 import { githubWriteAllowed } from '../roles/permissions.js';
 import { taskActingRole, taskRolePolicies, sourcePolicies } from './management.js';
 import { effectiveWrites } from './grants.js';
+import { scheduledIssueOperationAllowed } from './schedule-write.js';
 import { publicationScope } from '../github/publisher.js';
 
 /**
@@ -11,14 +12,23 @@ import { publicationScope } from '../github/publisher.js';
  * a review's later round, #770, writes anew),
  * allowed while every policy over the acting role allows the route's resource: the role itself, the source roles that
  * delegated the task and a group binding's service role. A role never lends a write it does not hold.
+ * A scheduled check with `file_issues` may file or comment on Issues even when the executing role has no GitHub write;
+ * the flag never grants Contents or pull-request writes.
  */
+/** Live write check for a task: a scheduled `file_issues` flag can allow or deny Issues writes; otherwise role policy applies. */
+export function taskWriteAllowed(store: Store, task: Row, resource: WriteResource, operation?: WriteOperation): boolean {
+  const scheduled = scheduledIssueOperationAllowed(task, resource, operation);
+  if (scheduled !== null) return scheduled;
+  return taskRolePolicies(store, task).every(policy => githubWriteAllowed(policy, resource, operation));
+}
+
 export function taskGithubWrite(store: Store, task: Row, redactor: Redactor, guard: () => Promise<void>, apiUrl?: string) {
   const scope = 'task:' + publicationScope(task);
   return (args: unknown) => {
     const repository = store.get('SELECT * FROM repositories WHERE id=?', task.repository_id)!;
     return githubWrite({ store, repository, redactor, guard, apiUrl, scope,
       actor: { kind: 'task', role: taskActingRole(store, task), task_id: String(task.id) },
-      allowed: (resource, operation) => taskRolePolicies(store, task).every(policy => githubWriteAllowed(policy, resource, operation)) }, args);
+      allowed: (resource, operation) => taskWriteAllowed(store, task, resource, operation) }, args);
   };
 }
 

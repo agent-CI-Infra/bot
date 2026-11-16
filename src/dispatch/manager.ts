@@ -18,6 +18,7 @@ import { section, workType, workTypes } from '../work/catalog.js';
 import { checkDecision, InvalidDecision, managerRefusal, recordRefusal, renewDispatchLease, type Decision, type DispatchContext } from './store.js';
 import { isRefusal, promptRevision, verifyBasis } from './basis.js';
 import { GitHub } from '../github/client.js';
+import { scheduledCheckDecision } from './schedule.js';
 
 // The Manager's duties come from its editable role template and event-dispatch prompt.
 
@@ -73,6 +74,8 @@ export function dispatchPrompt(store: Store, repositoryId: string) {
  * ends by calling dispatch. The decision is checked as before, with one correction for an invalid one.
  */
 export async function managerDecision(store: Store, context: DispatchContext, githubUrl?: string): Promise<Decision> {
+  const scheduled = scheduledCheckDecision(context);
+  if (scheduled) return scheduled;
   const event = context.event, repositoryId = String(event.repository_id), model = selectedModel(store, repositoryId, 'manager');
   const redactor = new Redactor(); redactor.add(model.key);
   const managerRole = () => roleConfiguration(store, repositoryId).roles.find(role => role.role_id === 'manager');

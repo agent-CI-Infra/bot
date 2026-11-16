@@ -90,7 +90,7 @@ async function renderSchedules(panel, project) {
       if (revoked(error)) return;
       if (!replay && error.status >= 400 && error.status < 500 && !error.message.includes('idempotency_conflict')) { markConflict(state.envelope.operation,error.message); state.envelope = null; state.receipt = null; }
       else state.uncertain = true;
-      status.textContent = readErrorText(error) + '。草稿已保留；先核对当前版本或原回执。';
+      status.textContent = (error.code === 'schedule_occurrence_in_progress' ? '上次检查还在进行，完成后才能再运行' : readErrorText(error)) + '。草稿已保留；先核对当前版本或原回执。';
     } finally { state.sending = false; state.update?.(); }
   }
   state.update = () => { if (!live()) return; if (state.receipt?.state === 'succeeded') void finish(); else showReceipt(); };
@@ -135,6 +135,9 @@ async function renderSchedules(panel, project) {
   const destination = select('计划目的地', destinationOptions), workflow = select('执行内容', [['report.daily', '项目日报'], ['manager.check', 'Manager 定时检查'], ['release.scheduled', '定时发布（处理器未就绪时不支持）']]);
   const instruction=document.createElement('textarea');instruction.rows=3;instruction.setAttribute('aria-label','定时检查内容');instruction.dataset.scheduleField='定时检查内容';
   const instructionField=field('定时检查内容',instruction);
+  const fileIssues=document.createElement('input');fileIssues.type='checkbox';fileIssues.setAttribute('aria-label','允许创建 GitHub Issue');fileIssues.dataset.scheduleField='允许创建 GitHub Issue';
+  const fileIssuesField=field('允许创建 GitHub Issue',fileIssues);
+  fileIssuesField.append(note('勾选后，这次检查可以在本项目仓库创建或回复 Issue；默认只报告，不会改代码或发布。'));
   const misfire = select('遗漏策略', [['skip', '跳过遗漏'], ['once', '宽限期内只补一次']]), grace = input('宽限期分钟', '1', 'number');
   timeRules.append(field('计划时区（IANA）',zone),field('有效期开始（ISO 时间）',start),field('有效期结束（可留空）',end),field('遗漏策略',misfire),field('宽限期分钟',grace));
   const limits = {};
@@ -148,7 +151,7 @@ async function renderSchedules(panel, project) {
   const time = (value,zone) => value == null ? '无记录' : new Date(value).toLocaleString(undefined,{timeZone:zone}) + ' · ' + zone;
   for (const item of plans.schedules) {
     const row = element('article', '', 'schedule-row'); row.append(element('strong',item.spec.name),note((states[item.state] || item.state) + (item.reason ? ' · '+item.reason : '')),
-      facts([['身份',item.spec.kind === 'personal' ? '个人计划' : '项目服务计划'],['时区',item.spec.timezone],['下次触发',item.next_at == null ? '无下次触发' : time(item.next_at,item.spec.timezone)],['最近成功',item.last_success == null ? '尚无成功记录' : time(item.last_success,item.spec.timezone)],['维护人',(destinations.maintainers || []).find(person=>person.id===item.spec.maintainer_id)?.name || item.spec.maintainer_id],['处理器',item.supported ? '已注册' : '未支持，不表示可执行']]));
+      facts([['身份',item.spec.kind === 'personal' ? '个人计划' : '项目服务计划'],['时区',item.spec.timezone],['下次触发',item.next_at == null ? '无下次触发' : time(item.next_at,item.spec.timezone)],['最近成功',item.last_success == null ? '尚无成功记录' : time(item.last_success,item.spec.timezone)],['维护人',(destinations.maintainers || []).find(person=>person.id===item.spec.maintainer_id)?.name || item.spec.maintainer_id],['处理器',item.supported ? '已注册' : '未支持，不表示可执行'],...(item.spec.workflow==='manager.check'?[['创建 Issue',item.spec.parameters?.file_issues?'允许':'只报告']]:[])]));
     if (item.state !== 'deleted') row.append(button('编辑计划：'+item.spec.name,()=>{chosen.value=item.id;chosen.dispatchEvent(new Event('change'));},'quiet'));
     summary.append(row);
   }
@@ -157,6 +160,7 @@ async function renderSchedules(panel, project) {
 
   const syncFields = () => {
     instructionField.hidden=workflow.value!=='manager.check';
+    fileIssuesField.hidden=workflow.value!=='manager.check';
     if (actor.parentElement) actor.parentElement.hidden = kind.value === 'personal';
     if (serviceMissing) serviceMissing.hidden = kind.value === 'personal';
     if (maintainer.parentElement) maintainer.parentElement.hidden = kind.value === 'personal';
@@ -168,7 +172,7 @@ async function renderSchedules(panel, project) {
   preset.onchange=()=>{if(preset.value!=='custom'){recurrence.value='cron';cron.value=preset.value;}timeRules.open=preset.value==='custom';syncFields();};
   const spec = () => ({ ...(original?.spec ?? {}), name: name.value, kind: kind.value, actor_id: kind.value === 'personal' ? me.id : actor.value,
     owner_id: original?.spec.owner_id ?? me.id, maintainer_id: kind.value === 'personal' ? me.id : maintainer.value,
-    workflow: workflow.value, parameters: {...(original?.spec.parameters ?? {}),...(workflow.value==='manager.check'?{instruction:instruction.value}:{})}, timezone: zone.value,
+    workflow: workflow.value, parameters: {...(original?.spec.parameters ?? {}),...(workflow.value==='manager.check'?{instruction:instruction.value,file_issues:!!fileIssues.checked}:{})}, timezone: zone.value,
     cron: recurrence.value === 'cron' ? cron.value : undefined, interval_ms: recurrence.value === 'interval' ? Number(interval.value) * 60000 : undefined,
     start_at: Date.parse(start.value), end_at: end.value ? Date.parse(end.value) : undefined, enabled: original ? original.state === 'active' : true,
     misfire: misfire.value, grace_ms: Number(grace.value) * 60000, destination_id: destination.value,
@@ -184,7 +188,7 @@ async function renderSchedules(panel, project) {
     start.value = new Date(p.start_at).toISOString(); end.value = p.end_at ? new Date(p.end_at).toISOString() : ''; destination.value = p.destination_id; workflow.value = p.workflow;
     misfire.value = p.misfire; grace.value = String(p.grace_ms / 60000); for (const [k, v] of Object.entries(p.limits)) limits[k].value = String(v);
     parsed.textContent = original.state + (original.reason ? ' · ' + original.reason : '') + '\n时区：' + p.timezone + '\n下次触发：' + (original.next_at ? new Date(original.next_at).toISOString() : '无') + '\n最近成功：' + (original.last_success ? new Date(original.last_success).toISOString() : '尚无') + '\n处理器：' + (original.supported ? '可用' : '不支持') + '\n维护人：' + p.maintainer_id;
-    instruction.value=p.parameters?.instruction || ''; syncPreset(true); syncFields(); updateMeta();
+    instruction.value=p.parameters?.instruction || ''; fileIssues.checked=p.parameters?.file_issues===true; syncPreset(true); syncFields(); updateMeta();
   };
   chosen.onchange = async () => {
     const id = chosen.value;
@@ -213,7 +217,7 @@ async function renderSchedules(panel, project) {
   window.addEventListener('resize',onFoldResize);
   syncFoldsForViewport();
   const sections = [
-    ['content','执行内容',[field('计划名称',name),field('执行内容',workflow),instructionField]],
+    ['content','执行内容',[field('计划名称',name),field('执行内容',workflow),instructionField,fileIssuesField]],
     ['identity','身份与维护人',[identityFold]],
     ['time','触发时间',[field('常用触发时间',preset),note('先选每天或每周的常用时间；Cron、时区和有效期在「高级时间规则」里。'),timeRules]],
     ['destination','通知目的地',[field('计划目的地',destination),note('保存和发送仍会重新检查身份、目的地与接收范围；登记不表示已送达。')]],
@@ -272,13 +276,23 @@ async function renderSchedules(panel, project) {
     syncPreset(true); syncFields(); updateMeta(); status.textContent=state.templateNotice; state.templateNotice=null;
   };
   const applyFailureNotice=()=>{ void state.subscription.applyFailureTemplate?.(); };
+  const applyCustomCheck=()=>{
+    name.value='自定义主动任务'; workflow.value='manager.check'; kind.value='personal';
+    zone.value=zone.value||'Asia/Shanghai'; recurrence.value='cron'; cron.value='0 9 * * *';
+    instruction.value=instruction.value||''; fileIssues.checked=false;
+    if (destination.options.length && !destination.value) destination.selectedIndex=0;
+    dirty=true; state.selected=''; state.fields=capture(); state.templateNotice='已套用自定义主动任务模板：每天 09:00 做一次定时检查。请填写检查内容；如需自动创建 GitHub Issue，请勾选后再保存。';
+    if (chosen.value) { dirty=false; chosen.value=''; void renderSchedules(container,project); return; }
+    syncPreset(true); syncFields(); updateMeta(); status.textContent=state.templateNotice; state.templateNotice=null;
+  };
   const templates=element('section','','schedule-templates');
   templates.dataset.testid='schedule-templates';
   templates.append(
     element('h4','常用计划模板'),
     note('先选用一个模板，再按需要改时间和目的地。不必先填完整高级表单。'),
     button('使用每日摘要模板',applyDailyDigest),
-    button('使用失败时通知模板',applyFailureNotice)
+    button('使用失败时通知模板',applyFailureNotice),
+    button('使用自定义主动任务模板',applyCustomCheck)
   );
   const list=panel.querySelector('.schedule-list');
   if (list) list.before(templates); else panel.prepend(templates);
