@@ -85,7 +85,7 @@ test('confirming a started project\'s plan applies each item through its channel
   // The CI suggestion is a development task the person confirmed may change workflows (#931).
   const task = h.store.get('SELECT * FROM tasks WHERE id=?', receipt('ci').detail.task_id), input = JSON.parse(task.input);
   // One generic task kind (#814): the development is a task granted pull_request.
-  assert.deepEqual([task.kind, input.contract.scope, !!input.workflow_changes?.confirmed_by], ['task.request', plan.ci.files, true]);
+  assert.deepEqual([task.kind, input.contract.scope, !!input.workflow_changes?.confirmed_by, input.generic], ['task.request', plan.ci.files, true, true]);
   assert.deepEqual(JSON.parse(h.store.get('SELECT writes FROM task_write_grants WHERE task_id=?', task.id).writes), ['pull_request']);
   assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='onboarding.confirmed' AND repository_id='101'"));
   assert.equal(h.store.get("SELECT count(*) AS n FROM audit WHERE action LIKE 'onboarding.item.%' AND repository_id='101'").n, 7);
