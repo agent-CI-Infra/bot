@@ -544,9 +544,9 @@ export class Projects {
   //
   // Images and the build cache come from one quick /system/df (#671); the containers are asked for on their own (#680),
   // because Docker sizes a container's writable layer by walking it, and a host with a slow or stuck container must not
-  // cost the other two rows their numbers. Volumes are not read at all: /system/df lists every volume, including the
-  // bot-data, manager-data, assistant-homes and *-work ones whose bytes the table already counts as a computer, a
-  // database or "other", so adding them would count the same bytes twice.
+  // cost the other two rows their numbers. The volumes are a third read of their own (#968): most of them hold bytes the
+  // storage table already counts as a database, a trajectory directory or a project computer, and the assistant HOME gets
+  // a row of its own instead of sitting in "other".
   async readDockerUsage(now = Date.now()) {
     if (now - this.dockerUsageAt < 30 * 60_000) return;
     this.dockerUsageAt = now;
@@ -559,13 +559,17 @@ export class Projects {
         ? measuredBytes(images, row => row?.Size) : Number(layers);
       // An image no container uses can be removed; its layers shared with images in use stay, so that part is not counted.
       const unused = images.filter(image => image.Containers === 0);
+      const containers = await this.readContainers().catch(error => { logFailure('reading Docker container usage failed', error); return null; });
+      const volumes = await this.readVolumes().catch(error => { logFailure('reading Docker volume usage failed', error); return null; });
       const usage = { read_at: new Date(now).toISOString(),
         images: { count: images.length, bytes: layersBytes, unused_count: unused.length,
           reclaimable_bytes: unused.reduce((total, image) => total + Math.max(0, (Number(image.Size) || 0) - Math.max(0, Number(image.SharedSize) || 0)), 0) },
         // A container takes its writable layer (SizeRw), not its whole filesystem (SizeRootFs), which is mostly its image.
         // A container read that failed leaves this kind null (not measured), while the two rows that did answer stand.
-        containers: await this.readContainers().catch(error => { logFailure('reading Docker container usage failed', error); return null; }),
-        build_cache: { count: cache.length, bytes: measuredBytes(cache, row => row?.Size), reclaimable_bytes: measuredBytes(cache.filter(row => !row.InUse && !row.Shared), row => row?.Size) } };
+        containers,
+        build_cache: { count: cache.length, bytes: measuredBytes(cache, row => row?.Size), reclaimable_bytes: measuredBytes(cache.filter(row => !row.InUse && !row.Shared), row => row?.Size) },
+        // Only what is not already counted elsewhere, and the assistant HOME with its own attribution.
+        volumes: volumes?.volumes ?? null, assistant_homes: volumes?.assistant_homes ?? null };
       this.db.prepare("INSERT INTO settings VALUES('docker_usage',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(usage));
     } catch (error) { logFailure('reading Docker disk usage failed', error); }
   }
@@ -576,6 +580,25 @@ export class Projects {
     const df = await this.docker.request('GET', '/system/df?type=container', undefined, false, 5 * 60_000);
     const containers = Array.isArray(df?.Containers) ? df.Containers : [];
     return { count: containers.length, bytes: measuredBytes(containers, row => row?.SizeRw) };
+  }
+  // The host's Docker volumes, in a request of their own (#968) for the same reason as the containers: sizing a volume
+  // walks it, and a volume read that is slow or times out must not cost the images or the build cache their numbers.
+  //
+  // The deployment's own volumes hold bytes the storage table already counts under another row: Compose labels every
+  // volume it creates with com.docker.compose.volume (bot-data: control.sqlite and the control trajectories,
+  // manager-data: manager.sqlite and its trajectories, agent-tools: the trusted CLI volume) and the manager labels every
+  // volume it creates with department.bot.* (each *-work and *-notes volume is a project computer's data). Adding those
+  // to a Docker row would count the same bytes twice and could push `known` above the disk's used bytes. Only a volume
+  // outside that set is Docker's own footprint, and assistant-homes — Compose-created but the bot's own data — is
+  // reported on its own so "other" stops absorbing it.
+  async readVolumes() {
+    const df = await this.docker.request('GET', '/system/df?type=volume', undefined, false, 5 * 60_000);
+    const rows = Array.isArray(df?.Volumes) ? df.Volumes : [], labels = row => row?.Labels ?? {};
+    const home = row => labels(row)['com.docker.compose.volume'] === 'assistant-homes' || /(^|[-_])assistant-homes$/.test(String(row?.Name ?? ''));
+    const claimed = row => Object.keys(labels(row)).some(label => label === 'com.docker.compose.volume' || label.startsWith('department.bot.'));
+    const outside = rows.filter(row => !home(row) && !claimed(row)), homes = rows.filter(home);
+    return { volumes: { count: outside.length, bytes: measuredBytes(outside, row => row?.UsageData?.Size) },
+      assistant_homes: homes.length ? { bytes: measuredBytes(homes, row => row?.UsageData?.Size) } : null };
   }
   // The approved image, or one derived from it with the project's system packages. Built once per package set and base image,
   // and only by the manager: apt runs as root at build time, nothing inside the computer needs root.
