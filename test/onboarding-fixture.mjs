@@ -64,7 +64,8 @@ export const call = (step, ...calls) => ({ role: 'assistant', content: null, too
 export async function person(f, id, permission) {
   Object.assign(f.state, { id, login: 'user-' + id, owner: false, permission });
   const login = await f.login();
-  return client(f, session(f.h.store, login.result.principal_id, login.result.identity_id));
+  // The client carries the person's principal id.
+  return Object.assign(client(f, session(f.h.store, login.result.principal_id, login.result.identity_id)), { principal: login.result.principal_id });
 }
 export async function say(byWho, conversation, content) {
   const sent = await byWho(`/api/management/conversations/${conversation}/messages`, 'POST', { source_message: 'm-' + Math.random(), content });
