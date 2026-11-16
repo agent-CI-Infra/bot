@@ -35,10 +35,13 @@ export class ManagementApi {
       }
     }
     // Repository onboarding (#930): the repository's session, opened or closed; its conversation uses the routes above.
-    const onboarding=/^\/api\/management\/onboarding\/([1-9]\d*)(?:\/(close))?$/.exec(path);
+    // Confirming its plan and retrying an item of the confirmed plan (#932).
+    const onboarding=/^\/api\/management\/onboarding\/([1-9]\d*)(?:\/(close|confirm)|\/items\/([a-z_]+)\/(retry))?$/.exec(path);
     if(onboarding){
       const repository=onboarding[1]!;
-      if(method==='GET'&&!onboarding[2])return this.agent.onboarding.view(actor,repository);
+      if(method==='GET'&&!onboarding[2]&&!onboarding[4])return this.agent.onboarding.view(actor,repository);
+      if(method==='POST'&&onboarding[2]==='confirm')return this.agent.onboarding.confirm(actor,repository,input);
+      if(method==='POST'&&onboarding[4])return this.agent.onboarding.retry(actor,repository,onboarding[3]!,input);
       if(method==='POST'){fields(input,[]);return onboarding[2]?this.agent.onboarding.close(actor,repository):this.agent.onboarding.open(actor,repository);}
     }
     return fail(404,'management_endpoint_not_found');

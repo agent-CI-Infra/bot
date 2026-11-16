@@ -15,12 +15,15 @@ import { checkFilters, eventFilters } from '../work/settings.js';
 import { reservedLabel } from '../review/labels.js';
 import { localParts, parseCron } from '../schedules/time.js';
 import { obj } from './catalog-base.js';
+import { OnboardingApply } from './onboarding-apply.js';
+import type { ManagementService } from './service.js';
 
 /**
  * Repository onboarding (#929, #930). An administrator of a repository talks with the management assistant about how the
  * bot should work there, before the project is started or later to re-run it. The assistant only reads that repository,
  * with read-only installation tokens revoked at the end of each turn; it asks questions with recommended answers and
- * saves plan drafts. Nothing is written to GitHub and no setting changes here: applying a confirmed plan is #932.
+ * saves plan drafts. Nothing is written to GitHub and no setting changes in the conversation: a plan is applied only when an
+ * administrator confirms it (#932, onboarding-apply.ts).
  *
  * A session belongs to the repository, not to a person: one is open at a time, and every administrator of the repository
  * opens the same conversation (a management conversation whose scope is `onboarding:<repository id>`).
@@ -185,8 +188,12 @@ export interface OnboardingTurn {
   repository: Row; system: string; tools: Json[]; model: RuntimeModel; task: Json; context: Json; repositories: ServiceRepositories;
   execute(name: string, args: Json): Json;
 }
-export class Onboarding {
-  constructor(readonly store: Store, readonly githubUrl?: string) {}
+export class RepositoryOnboarding {
+  readonly apply: OnboardingApply;
+  constructor(readonly store: Store, readonly service: ManagementService) {
+    this.apply = new OnboardingApply({ store, service, repository: id => onboardingRepository(store, id), actor: (actor, id) => this.actor(actor, id) });
+  }
+  get githubUrl() { return this.service.githubUrl; }
   /** The actor of an onboarding conversation, after checking the person may run it. */
   actor(actor: ActorContext, repositoryId: string): ActorContext {
     const repository = onboardingRepository(this.store, repositoryId);
@@ -210,11 +217,35 @@ export class Onboarding {
     return { repository: { id: repository.id, full_name: repository.full_name, started: repository.started, organization_trusted: !!trustedOrganization(this.store, String(repository.owner_id)) },
       session: session ? { id: session.id, conversation_id: session.conversation_id, state: session.state, created_at: session.created_at, updated_at: session.updated_at } : null,
       questions: session?.questions ? JSON.parse(session.questions) : null,
-      plan: plan ? { id: plan.id, version: plan.version, created_at: plan.created_at, plan: JSON.parse(plan.plan) } : null,
+      plan: plan ? { id: plan.id, version: plan.version, created_at: plan.created_at, plan: JSON.parse(plan.plan), ...this.pending(repository, plan) } : null,
+      // The latest confirmed plan and its receipts (#932), whether or not a session is open.
+      application: this.apply.application(repositoryId),
       model: modelView(this.store, repository),
       // This session's model usage, billed to the management assistant and, once the project exists, to the repository.
       usage: session ? { ...this.store.get(`SELECT count(*) AS requests,sum(input_tokens) AS input_tokens,sum(output_tokens) AS output_tokens FROM model_requests WHERE conversation_id=?`, session.conversation_id),
         costs: this.store.all('SELECT currency,sum(cost) AS amount FROM model_requests WHERE conversation_id=? AND cost IS NOT NULL GROUP BY currency ORDER BY currency', session.conversation_id) } : null };
+  }
+  /**
+   * What confirming this plan would change now (#932): the items that differ from the project, and the revision of that list
+   * a confirmation names. A plan that was confirmed already shows its application instead.
+   */
+  private pending(repository: Row, plan: Row): Json {
+    if (this.store.get('SELECT 1 FROM onboarding_applications WHERE plan_id=?', plan.id)) return { confirmed: true };
+    const changes = this.apply.changes(repository, plan);
+    return { confirmed: false, changes, changes_revision: this.apply.revision(changes) };
+  }
+  /** Confirms the latest plan draft of the repository with the chosen items and applies them (#932). */
+  async confirm(base: ActorContext, repositoryId: string, input: Json): Promise<Json> {
+    this.actor(base, repositoryId);
+    const plan = this.latestPlan(repositoryId);
+    if (!plan) return fail(404, 'onboarding_plan_not_found');
+    await this.apply.confirm(base, repositoryId, plan, input);
+    return this.view(base, repositoryId);
+  }
+  /** Applies one failed item of the latest confirmed plan again (#932). */
+  async retry(base: ActorContext, repositoryId: string, item: string, input: Json): Promise<Json> {
+    await this.apply.retry(base, repositoryId, item, input);
+    return this.view(base, repositoryId);
   }
   /** Opens the repository's session, or returns the one already open; the conversation is created with it. */
   open(base: ActorContext, repositoryId: string): Json {

@@ -1,6 +1,6 @@
 # 内置场景规则
 
-本目录的 Markdown 是 Bot 的内置规则层，`manager-dispatch.md` 是完整的 Manager 分派默认提示词，其他文件用于各任务的内置规则。控制面启动时由 `src/rules/service.ts` 按文件读入 `defaults`，规则接口、引导页的「内置默认」和模型系统提示用的都是这里的原文；运行镜像把本目录复制到 `/app/docs/prompts`。修改这些文件就是修改所有没有覆盖的项目的默认行为。
+本目录的 Markdown 是 Bot 的内置规则层，`manager-dispatch.md` 是完整的 Manager 分派默认提示词，其他文件用于各任务的内置规则。控制面启动时由 `src/rules/service.ts` 按文件读入 `defaults`（`onboarding.md` 除外：它由 `src/management/onboarding.ts` 读入，作为仓库接入向导的系统提示词，不是规则层，也不能覆盖），规则接口、引导页的「内置默认」和模型系统提示用的都是这里的原文；运行镜像把本目录复制到 `/app/docs/prompts`。修改这些文件就是修改所有没有覆盖的项目的默认行为。
 
 ## 文件对应
 
@@ -14,7 +14,7 @@
 | [`manager-dispatch.md`](manager-dispatch.md) | 无仓库文件，可由 Manager 的「分派」章节覆盖 | 每个事件新建、续接还是不处理的默认流程 |
 | [`onboarding.md`](onboarding.md) | 无仓库文件，不可覆盖 | 仓库接入向导：管理助手只读分析一个仓库，给出仓库画像、带推荐答案的问题和接入方案草稿，见[管理助手](../management-agent.md#仓库接入向导) |
 
-三份检视和开发规则以及 CI 观察提示词各带一张 ` ```mermaid ` 流程图（检视：检视 → 回复；开发：Issue 分析 → 开发 → 检视 → 测试，检视或测试发现问题时回到开发），给 agent 说明步骤顺序，见[项目 Manager 与工作类型](../workflows.md)。
+三份检视和开发规则、CI 观察提示词以及接入向导提示词各带一张 ` ```mermaid ` 流程图（检视：检视 → 回复；开发：Issue 分析 → 开发 → 检视 → 测试，检视或测试发现问题时回到开发；接入：读仓库 → 画像 → 提问 → 方案），给 agent 说明步骤顺序，见[项目 Manager 与工作类型](../workflows.md)。
 
 `.bot/guide.md` 与 `.bot/computer.yaml` 的内置内容仍在 `src/rules/service.ts` 中。
 

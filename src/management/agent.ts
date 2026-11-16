@@ -23,7 +23,7 @@ import { sendMessageName, sendMessageTool, stageMessage, stageMessageInstruction
 import { staySilent, staySilentInstructions, staySilentName, staySilentTool } from '../service-roles/stay-silent.js';
 import { privateTurnMessageInstructions, type TurnMessages } from '../channels/turn-messages.js';
 import { conversationScheduleName, conversationScheduleTool } from '../channels/schedules.js';
-import { Onboarding, onboardingRepositoryOf, onboardingToolNames, onboardingTools, type OnboardingTurn } from './onboarding.js';
+import { RepositoryOnboarding, onboardingRepositoryOf, onboardingToolNames, onboardingTools, type OnboardingTurn } from './onboarding.js';
 
 const now=()=>new Date().toISOString();
 // Recent rounds continue the conversation; each earlier answer and the history as a whole stay bounded (#333).
@@ -45,9 +45,9 @@ export class ManagementAgent {
   conversationSchedules?:(actor:ActorContext,conversation:string)=>((args:Json)=>Json)|undefined;
   readonly own:OwnTasks;
   // Repository onboarding (#930): conversations of a repository's administrators, run by this assistant with their own tools.
-  readonly onboarding:Onboarding;
+  readonly onboarding:RepositoryOnboarding;
   constructor(readonly store:Store,readonly service:ManagementService){
-    this.own=new OwnTasks(store);this.onboarding=new Onboarding(store,service.githubUrl);
+    this.own=new OwnTasks(store);this.onboarding=new RepositoryOnboarding(store,service);
     // A person's computer (#457) is bound to their authorization: any change removes it at once.
     service.assistants?.resolve('person',row=>personFence(store,row.subject,row.tenant));
     store.run("UPDATE management_messages SET state='interrupted',updated_at=? WHERE state IN ('pending','running')",now());
