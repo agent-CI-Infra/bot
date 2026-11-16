@@ -78,6 +78,8 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 `main` 只能经 Pull request 合入，合入方式只有 rebase，并且经合并队列（merge queue）排队，不能强推或删除。必需检查在 Pull request 和合并队列上都运行：[`checks.yml`](../.github/workflows/checks.yml) 的 `unit`（`npm run check`、`npm test` 和两个 Compose 文件的校验）与 `e2e`（`npm run test:e2e`，失败时上传 `.tmp/e2e-results`），以及 [`images.yml`](../.github/workflows/images.yml) 构建的四个镜像。新增必需检查的工作流要同时监听 `pull_request` 和 `merge_group`，否则合并队列等不到结果。版本发布见[版本发布与服务器部署](deployment.md#版本发布与服务器部署)。
 
+合入后的 `main` 推送不再重复运行 `unit` 和 `e2e`；镜像仍由 `images.yml` 构建并发布。每日北京时间 00:00（UTC `0 16 * * *`），[`nightly.yml`](../.github/workflows/nightly.yml) 在默认分支运行全量检查，也支持从 Actions 页面手动启动。Nightly 通过 `workflow_call` 复用 `checks.yml`、`images.yml` 和 [`codeql.yml`](../.github/workflows/codeql.yml)，覆盖源码／类型／单元测试、Compose 校验、浏览器 e2e、四个镜像构建及 Actions、JavaScript/TypeScript、Python 三种语言的 CodeQL 扫描；CodeQL 不再另设每周定时。Nightly 不推送镜像、不发版、不部署，且不会取消 main 的镜像发布。浏览器与中文字体缓存只由 main 上的定时或手动 Nightly 在未命中时保存，PR 和合并队列只读取共享缓存。
+
 共享执行入口、任务扩展方式与权限边界见[共享 Agent 后端](agent-runtime.md)。
 
 安装事实档案、持久化同步、回调与身份模块契约及独立容器验收见[安装档案与同步](installation-archive.md)。

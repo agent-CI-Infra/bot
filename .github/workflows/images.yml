@@ -8,14 +8,16 @@ on:
     branches: [main]
   pull_request:
   merge_group:
+  workflow_call:
 
 permissions:
   contents: read
   packages: write
 
 # A newer push to main cancels the older run, so latest never moves back to an earlier commit.
+# Keep Nightly builds separate from publishing runs, even though both use refs/heads/main.
 concurrency:
-  group: images-${{ github.ref }}
+  group: images-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
