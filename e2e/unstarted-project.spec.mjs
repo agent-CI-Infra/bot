@@ -36,9 +36,9 @@ test('未启动的仓库不提供项目设置入口，直接打开其项目地�
     // The global project list links only started repositories to their project page.
     await page.goto(h.admin + '/#/settings/projects');
     const global = id => page.locator(`.global-project-row[data-repository-id="${id}"]`);
-    await expect(global('501').getByRole('link', {name: /全局管理此项目/})).toBeVisible();
+    await expect(global('501').getByRole('link', {name: /项目设置/})).toBeVisible();
     await expect(global('502').getByRole('button', {name: '启动', exact: true})).toBeVisible();
-    await expect(global('502').getByRole('link', {name: /全局管理此项目/})).toHaveCount(0);
+    await expect(global('502').getByRole('link', {name: /项目设置/})).toHaveCount(0);
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, {recursive: true, force: true}); }
 });
