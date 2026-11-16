@@ -1,5 +1,10 @@
 // One installation: its archive snapshot, the repositories it grants and its recent deliveries. Evidence is shown as
 // recorded: a missing history never becomes "no request", and an unverified signature is marked instead of trusted.
+// #871: a table without a caption has no name of its own, and a header cell without scope="col" is not tied to the cells
+// under it, so a screen reader reads a wide row as isolated values. The caption is read aloud and hidden from the page
+// (.sr-only); the narrow layout keeps printing the same column names from data-label.
+function tableCaption(table, text) { const caption = element('caption', text, 'sr-only'); table.prepend(caption); }
+function columnHeader(text) { const cell = element('th', text); cell.scope = 'col'; return cell; }
 const installationStatusNames = { active: '有效', pending_sync: '等待同步', suspended: '已暂停', deleted: '已卸载' };
 const installationCompletenessNames = { complete: '完整', pending: '等待同步', stale: '待核实', error: '同步失败，保留最近成功快照' };
 async function installationDetail(request, ref) {
@@ -52,7 +57,8 @@ function installationDetailBody(base, snapshot, repositories, deliveries, redraw
   else {
     const table = element('table', '', 'rule-table'), head = element('tr', '');
     const captions = ['仓库', '私有', '最近成功同步'];
-    for (const caption of captions) head.append(element('th', caption));
+    tableCaption(table, `仓库（${repositories.length}）：安装授予的每个仓库、它是否私有，以及最近一次成功同步的时间`);
+    for (const caption of captions) head.append(columnHeader(caption));
     const thead = document.createElement('thead'), body = document.createElement('tbody'); thead.append(head); table.append(thead, body);
     for (const repository of repositories) {
       const row = element('tr', ''),
@@ -70,7 +76,8 @@ function installationDetailBody(base, snapshot, repositories, deliveries, redraw
   else {
     const table = element('table', '', 'rule-table'), head = element('tr', '');
     const captions = ['时间', '事件', '动作', '发送者', '申请者', '证据类型', '签名'];
-    for (const caption of captions) head.append(element('th', caption));
+    tableCaption(table, `最近安装事件（${deliveries.length}）：每次投递收到的安装事件、动作、发送者、申请者，以及签名是否已验证`);
+    for (const caption of captions) head.append(columnHeader(caption));
     const thead = document.createElement('thead'), body = document.createElement('tbody'); thead.append(head); table.append(thead, body);
     const person = value => value ? `${value.login || '名称未知'}（${value.id}）` : '未提供';
     for (const event of deliveries) {
