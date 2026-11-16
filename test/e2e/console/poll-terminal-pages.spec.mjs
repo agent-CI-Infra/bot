@@ -73,3 +73,43 @@ test('#743 监听与触发页：403 之后停止 Actions 配置检查并写终�
     expect(reads.n, 'a 403 on the repository read must stop the configuration check').toBe(0);
   } finally { await h.stop(); }
 });
+
+// #878: a 500 or a network error may clear on its own, so the scan keeps polling — but the status it could not refresh
+// must not keep reading as current. It says it is stale and names the last successful read; a later success drops that.
+async function triggersPageWithActionsCheck(page, h, password) {
+  await loginAs(page, h.admin + '/#/projects/101/triggers', password);
+  // Enable the event source through its own switch, the way the page turns the check on.
+  await page.getByLabel('接收默认分支和版本标签的 Actions 失败事件', { exact: true }).check();
+  await page.getByRole('button', { name: '保存事件开关', exact: true }).click();
+  const status = page.locator('[data-actions-status]');
+  await expect(status).toContainText('配置检查通过后', { timeout: 10000 });
+  return status;
+}
+
+test('#878 监听与触发页：可恢复的读取失败标注「读取失败，显示上次结果」和上次成功时间', async ({ page }) => {
+  const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  try {
+    const { admin, password } = await setup(h), a = await account(admin);
+    await repository(admin, a.id, '101');
+    const status = await triggersPageWithActionsCheck(page, h, password);
+    await page.route('**/api/repositories/101', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
+    await expect(status).toContainText('读取失败，显示上次结果', { timeout: 12000 });
+    // The last readable answer stays readable: only its freshness is in doubt.
+    await expect(status).toContainText('配置检查通过后');
+    await expect(status).toContainText(/上次成功读取：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+  } finally { await h.stop(); }
+});
+
+test('#878 监听与触发页：下一次成功读取后清除过期标注', async ({ page }) => {
+  const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  try {
+    const { admin, password } = await setup(h), a = await account(admin);
+    await repository(admin, a.id, '101');
+    const status = await triggersPageWithActionsCheck(page, h, password);
+    await page.route('**/api/repositories/101', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
+    await expect(status).toContainText('读取失败，显示上次结果', { timeout: 12000 });
+    await page.unroute('**/api/repositories/101');
+    await expect(status).not.toContainText('读取失败', { timeout: 20000 });
+    await expect(status).toContainText('配置检查通过后');
+  } finally { await h.stop(); }
+});
