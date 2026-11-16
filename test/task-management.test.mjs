@@ -302,7 +302,7 @@ test('software request endpoint is explicit, defaults off and intersects fixed s
   const report=create(caller(),'A report still does not ask for publication',{execute:false}).id;
   assert.equal(JSON.parse(s.get('SELECT input FROM tasks WHERE id=?',report).input).contract.endpoint,'report');
   const record=new TaskRecords(s).get(report);
-  assert.throws(()=>commands.api({id:'operator',role:'project_admin',repositories:['r']},'PATCH',new URL('http://local/api/tasks/'+report+'/contract'),{expected_revision:record.revision,contract:{...record.contract,endpoint:'reviewable_pull_request'}},caller()),{code:'task_pull_request_forbidden'});
+  assert.throws(()=>commands.api({id:'operator',role:'project_admin',repositories:['r']},'PATCH',new URL('http://local/api/tasks/'+report+'/contract'),{expected_revision:record.revision,contract:{...record.contract,endpoint:'reviewable_pull_request'}},caller()),{code:'delivery_not_granted'});
   assert.equal(new TaskRecords(s).get(report).contract.endpoint,'report');
   assert.equal(commands.tool(caller(),'create_task',{request:'Unknown endpoint',criteria:['Valid result'],endpoint:'merge'}).error,'invalid_task_endpoint');
 });

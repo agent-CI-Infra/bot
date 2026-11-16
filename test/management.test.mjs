@@ -292,7 +292,9 @@ test('public task creation accepts development intent and PR endpoint inference 
   const software=intent!=='report',contract={goal:'Observable delivery '+String(intent),scope:['project'],criteria:['Executable result'],endpoint:software?'reviewable_pull_request':'report'};
   const response=await admin('/api/tasks','POST',{repository_id:'101',request:contract.goal,contract,...(intent?{intent}:{})});
   assert.equal(response.status,201,JSON.stringify(response.value));assert.ok(response.value.id);
-  const task=h.store.get('SELECT * FROM tasks WHERE id=?',response.value.id);assert.equal(task.kind,software?'task.development':'task.request');assert.equal(task.object_number,null);
+  const task=h.store.get('SELECT * FROM tasks WHERE id=?',response.value.id);assert.equal(task.kind,'task.request');assert.equal(task.object_number,null);
+  // One generic task (#814): development intent or a PR endpoint grants it pull_request.
+  assert.deepEqual(JSON.parse(h.store.get('SELECT writes FROM task_write_grants WHERE task_id=?',task.id).writes),software?['pull_request']:[]);
  }
  const before=h.store.get('SELECT count(*) n FROM tasks').n;await admin('/api/repositories/101/policy','PATCH',{development_enabled:false});
  const refused=await admin('/api/tasks','POST',{repository_id:'101',request:'No grant',intent:'development',contract:{goal:'No grant',scope:['project'],criteria:['result'],endpoint:'reviewable_pull_request'}});

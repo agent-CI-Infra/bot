@@ -46,7 +46,7 @@ async function fixture() {
     }
     if (!names.includes('read_file')) return send(res, call('read_file', { path: 'calc.mjs' }, 'read-source'));
     if (!names.includes('write_file')) return send(res, call('write_file', { path: 'report.md', content: reportText }, 'write-report'));
-    return send(res, call('submit_delivery', { summary: 'Observed repository report', artifacts: [{ path: 'report.md', description: 'Repository observation' }], evidence: [], unknowns: [] }, 'deliver-report'));
+    return send(res, call('submit_report', { summary: 'Observed repository report', artifacts: [{ path: 'report.md', description: 'Repository observation' }], evidence: [], unknowns: [] }, 'deliver-report'));
   });
   const closeServer = server => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
   const close = async () => {

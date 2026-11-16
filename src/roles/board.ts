@@ -1,6 +1,7 @@
 import { roleKind } from './catalog.js';
 import { projectCeiling } from '../work/ceiling.js';
 import { createHash } from 'node:crypto';
+import { pullRequestQaGate } from '../tasks/grants.js';
 import type { Store, Row } from '../storage/database.js';
 import { fail, type Json } from '../core/security.js';
 import { roleConfiguration } from './definition.js';
@@ -62,7 +63,8 @@ export function roleConcurrencyValue(store: Store, repositoryId: string, value: 
 
 export function policyView(store: Store, policy: Json | undefined, repositoryId: string): Json | undefined {
   if (!policy) return policy;
-  return { ...policy, capability_ceiling: projectCeiling(store, repositoryId, policy), role_concurrency: roleConcurrency(store, repositoryId) };
+  return { ...policy, capability_ceiling: projectCeiling(store, repositoryId, policy), role_concurrency: roleConcurrency(store, repositoryId),
+    delivery_gates: { pull_request_qa: pullRequestQaGate(store, repositoryId, policy as any) } };
 }
 
 function nextStage(store: Store, taskId: string, order: StageDefinition[]): StageDefinition | null {

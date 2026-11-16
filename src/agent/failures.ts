@@ -11,7 +11,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'actions_app_required','actions_permission_missing','actions_workflow_run_subscription_missing'] },
   github_rejected: { label:'GitHub 拒绝了请求', codes:[] },
   model: { label:'模型服务或模型配置', codes:['role_nomination_stages_incomplete','role_submission_required','acp_submission_required','codex_submission_required','codex_authentication_failed','codex_model_unavailable','codex_model_mismatch','codex_model_rerouted','codex_resume_incompatible','codex_turn_failed','codex_subagent_refused','role_delivery_invalid','role_result_invalid','role_nomination_invalid','role_nomination_required','acceptance_unavailable','acceptance_output_invalid','acceptance_budget_exhausted','model_not_configured','service_role_model_not_configured','channel_service_model_unavailable','service_role_unavailable','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
-    'model_response_too_large','model_finding_invalid','model_review_invalid','model_url_insecure','create_pull_request_required','create_pull_request_not_allowed','pull_request_labels_refused',
+    'model_response_too_large','model_finding_invalid','model_review_invalid','model_url_insecure','create_pull_request_required','create_pull_request_not_allowed','pull_request_labels_refused','delivery_refused',
     'release_notes_model_failed','release_notes_invalid','release_notes_dispatch_failed','manager_dispatch_failed','dispatch_decision_invalid','dispatch_model_invalid','release_observation_failed','release_observation_invalid','actions_classification_invalid','agent_tool_not_allowed','agent_output_invalid','agent_output_budget_exhausted','agent_tool_calls_invalid','agent_turn_limit',
     'claude_submission_required','claude_authentication_failed','claude_model_unavailable','claude_execution_failed','claude_budget_exhausted','claude_output_limit','claude_provider_credential_unavailable','provider_credential_unavailable'] },
   environment: { label:'项目电脑或运行环境', codes:['integration_unavailable','pi_runtime_unavailable','controller_workspace_unavailable','container_workspace_required','acp_not_configured','acp_configuration_invalid','acp_protocol_unsupported','acp_mcp_http_unsupported','harness_timeout','acp_turn_incomplete','acp_execution_failed',
@@ -55,7 +55,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'agent_tool_version_in_use'] },
   // The project's RoleDefinitionV2 configuration: a pinned reference became unusable, or an authority was withdrawn.
   role_configuration: { label:'角色配置', codes:['stage_budget_exhausted','stage_policy_changed','stage_retry_exhausted','stage_plan_stale','role_configuration_changed','unknown_role','role_disabled','unknown_role_harness','agent_backend_unavailable','harness_version_unavailable','harness_role_unsupported',
-    'task_pull_request_forbidden','role_model_not_available','role_model_profile_changed','role_submission_forbidden','skill_bundle_unavailable','role_authority_revoked','harness_version_mismatch',
+    'task_pull_request_forbidden','delivery_not_granted','task_external_write_forbidden','role_model_not_available','role_model_profile_changed','role_submission_forbidden','skill_bundle_unavailable','role_authority_revoked','harness_version_mismatch',
     'harness_model_api_unsupported','harness_tool_calls_required','harness_structured_output_unsupported','harness_model_profile_unsupported',
     // RoleRun admission, budgets and recovery (#169): fail closed instead of downgrading or switching silently.
     'unsupported_capability','role_budget_exhausted','role_usage_unknown','conversation_harness_context_required','model_revision_changed','role_recovery_unsupported','claude_usage_budget_unknown','claude_tool_name_unsupported','claude_submission_tool_required',
@@ -208,6 +208,9 @@ const codeActions: Record<string,string> = {
   actions_permission_missing:'该仓库使用的 App 安装没有 Actions 权限：App 管理员在 Permissions & events 把 Actions 设为「Read and write」（读取运行只需只读，重跑需要写），再由安装所有者接受新权限。不需要 Workflows 权限。',
   actions_workflow_run_subscription_missing:'请 App 管理员在该仓库实际使用的 App 的 Permissions & events → Subscribe to events 勾选「Workflow run」并保存。这是 Webhook 事件订阅，只要求 Actions 读权限，不需要 Workflows 权限；安装设置出现待批准的变更时接受即可。',
   actions_report_write_unknown:'提报写入结果不明，本功能只通过原 Issue 或评论 marker 对账，不盲目重发。',
+  delivery_refused:'执行者多次调用了这个任务现在不能用的交付工具（没有授权、项目上限或开关、来源上限），什么都没写；点「重试」重新执行，或由 Manager 用 grant_writes 授予后再重试。',
+  task_external_write_forbidden:'创建或委派这个任务的角色（或群的档位）没有要做的这项写入，不能借给任务；由项目管理员调整来源的权限，或改为交报告。',
+  delivery_not_granted:'这个任务没有被授予要做的交付（例如开 PR），什么都没写。需要时由 Manager 用 grant_writes 或在任务详情里授予，再点「重试」；不需要时可以取消。',
   pull_request_labels_refused:'模型多次给 PR 选了仓库里没有或保留的标签；点「重试」重新执行，必要时在仓库的贡献规则或 skill 里写清要用的标签。',
   base_branch_changed:'版本差异已记录，Manager 可查看原始证据并决定验证、集成或继续交付。',
   bot_branch_history_changed:'点「重试」会基于当前分支重新规划。',

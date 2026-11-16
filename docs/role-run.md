@@ -44,7 +44,7 @@ RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是�
 
 ### 通用任务管理与来源权限
 
-角色的 `task_management`（禁用／只读／读写）与 `delegation` 独立。前者控制 `list_managed_tasks`、`read_managed_task`、`create_task`、`manage_task`；Manager 创建的任务默认由项目角色团队执行，其他角色创建时默认由调用角色本人执行；`execute=false` 只记录事项。指定其他执行者还须具有委派权限，目标必须存在并启用。独立 QA 是既有验收门，不由模型选择为执行者。`task_records` 继续控制当前运行的证据和事实记录，不会隐式授予创建或调度其他任务的权限。
+角色的 `task_management`（禁用／只读／读写）与 `delegation` 独立。前者控制 `list_managed_tasks`、`read_managed_task`、`create_task`、`manage_task`，项目主控（Manager）还有 `grant_writes`；Manager 创建的任务默认由项目角色团队执行，其他角色创建时默认由调用角色本人执行；`execute=false` 只记录事项。指定其他执行者还须具有委派权限，目标必须存在并启用。独立 QA 是既有验收门，不由模型选择为执行者。`task_records` 继续控制当前运行的证据和事实记录，不会隐式授予创建或调度其他任务的权限。
 
 无业务 task 的连续会话复用同一角色定义、实例表、Harness、runAgent、预算函数与账本。其协议上下文明确为 `task_id=null, conversation_id=...`，没有候选或正式验收阶段；不能拿会话 finish 代替 QA 或伪造 task。任务实例原键不变，会话实例用 `(conversation_id, project_id, role)` 保持身份，每轮物理输入从当前获准原文／摘要重建。飞书消息编辑或撤回只刷新来源投影与通知，不改变会话授权围栏；运行中其他历史消息变化后丢弃旧派生输入并重读当前正文，当前轮问题被撤回只停止该轮。绑定、角色能力或授权真实失效仍作废旧运行。工具次数等计数独立于可清理的私密日志；独立 task 仍使用自己的实例预算，费用可按原来源会话聚合。外部回执共用入账函数，任务预算读取原协议用量时不会再叠加同一回执的账本投影。
 
@@ -54,7 +54,7 @@ RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是�
 
 任务归属约束与 principal 授权相交：`tasks.manage_own` 可单独授予，已有 `tasks.write` 包含此窄能力，旧授权无需回填。角色来源除工具快照外还固定当时实际具备的 principal 项目能力；恢复和知识读取使用这个上限，后来增加授权不会扩大旧任务。关联子任务逐层检查来源链，根角色的委派、任务管理或工具权限撤销后，不能通过新角色／新 task_id 延续已撤销能力。
 
-普通事项的项目写入集合默认继承项目能力上限（`develop` 时含修改代码和开 PR）。执行角色和来源角色（群里建的任务还有该群绑定的权限档位）都对相应 GitHub 资源有写权限、且项目能力上限允许时，才能用 `github_write`，例如用 `POST /issues` 提报 Issue；key 按任务去重，重试不会重复建单，不添加开发标签或分派开发，见[共享 Agent 后端](agent-runtime.md#github-写入github_write)。软件交付可在同一 create_task 显式选 reviewable_pull_request 终点；项目能力上限要为 `develop`，普通事项的 code／pull_request 写入没有被收窄，来源和执行者都要能修改代码。PR 本身是框架交付，不需要角色的 GitHub 写权限。它与普通 report 共用任务／角色实例／调度／预算，默认本人执行；换人仍要委派。候选、项目测试、独立 QA、Publisher、unknown 对账均沿用原机制，QA 与发布之间权限或策略变化会停止推进；无 Issue 来源不生成关闭编号。
+普通事项在自己检出里改代码的权限默认继承项目能力上限（`develop` 时可以）。对外的写入是授予任务的（#814）：`pull_request`（`open_pull_request`）、`review`（`post_review`）、`github`（`github_write`，例如用 `POST /issues` 提报 Issue；key 按任务去重，重试不会重复建单，不添加开发标签或分派开发，见[共享 Agent 后端](agent-runtime.md#github-写入github_write)）。授予和每次调用都要在项目能力上限与开关之内，并且在来源的上限之内：创建或委派任务的角色（群里建的任务还有该群绑定的权限档位）要对相应 GitHub 资源有写权限才能借出 `review`、`github`；执行角色自己的 GitHub 权限不再决定这些工具。`pull_request` 要求项目能力上限为 `develop`、开发开关打开，来源和执行者都要能修改代码；PR 本身是框架交付，不需要角色的 GitHub 写权限。#814 之前建的任务仍按原来的写入集合和执行角色的 GitHub 权限完成。它与普通 report 共用任务／角色实例／调度／预算，默认本人执行；换人仍要委派。候选、项目测试、独立 QA、Publisher、unknown 对账均沿用原机制，QA 与发布之间权限或策略变化会停止推进；无 Issue 来源不生成关闭编号。
 
 角色读取任务事实、原始记录、证据、项目知识以及提出经验候选，都经 `TaskToolGateway.call(token, request)`。服务端每次复核令牌绑定与有效期、当前 epoch、run 仍在运行、项目与租户、发起人的当前授权（人发起的任务按 `tasks.read`/`knowledge.read`/`knowledge.write`）、角色当前策略（`roleAuthority`）。工具：
 

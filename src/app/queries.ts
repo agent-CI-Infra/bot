@@ -2,6 +2,8 @@ import {taskRelations} from '../tasks/priority.js';
 import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
 import { taskDispatch } from '../dispatch/store.js';
+import { taskWritesDetail } from '../tasks/grants.js';
+import { sourcePolicies } from '../tasks/management.js';
 import { taskTrace, traceClean } from '../tasks/trace.js';
 import { TaskRecords } from '../tasks/service.js';
 import { type Store } from '../storage/database.js';
@@ -189,7 +191,9 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
     const canManage = (() => { try { if (user.context) authorize(user.context, 'tasks.write', { project_id: row.repository_id }); return true; } catch { return false; } })();
     return { task: taskWithLinks, can_manage: canManage, ...roleTrace, ...detailHistory(store,row.id),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})),
       // Why the Manager created or continued this task, with the events behind it.
-      dispatch:taskDispatch(store,row.id) };
+      dispatch:taskDispatch(store,row.id),
+      // The writes a generic task holds and the delivery tools each run had (#814); null for older tasks.
+      writes:taskWritesDetail(store,row,sourcePolicies(store,row)) };
   }
   if (path === '/api/audit') return { audit: store.all(`SELECT * FROM audit WHERE ${filter.sql}${repo ? ' AND repository_id=?' : ''}
     ORDER BY created_at DESC LIMIT 100`, ...filter.args, ...(repo ? [repo] : [])) };

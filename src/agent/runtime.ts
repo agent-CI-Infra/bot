@@ -122,6 +122,8 @@ export interface AgentSpec<T> {
   repairInvalid?: (error: unknown) => string | undefined;
   /** An explicitly offered submission tool ends this execution, never the framework's acceptance. */
   finish?: { name: string; names?: string[]; validate: (args: any, name?:string) => T | Promise<T>; finalizationMessage?: string };
+  /** Delivery tools a generic task's grant governs (#814): whether one is offered now, undefined for every other tool. */
+  grants?: (tool: string) => boolean | undefined;
   /** Trusted resource budget: reserve the last turns for saving/submitting, never approval. */
   finalizationTools?: string[];
   /** A transport adapter (for example Pi in a workspace), not a task-kind switch. */

@@ -94,6 +94,32 @@ function taskDispatchCard(entries) {
   }
   section.append(list); return section;
 }
+// Granted writes of a generic task (#814): what it may deliver now, how the grant changed, and each run's delivery tools.
+const writeTitles = { pull_request: '开或更新 bot PR', review: '发布 PR 检视', github: '评论、标签和 Issue' };
+const deliveryToolTitles = { submit_report: '交报告', open_pull_request: '开 PR', post_review: '发检视', github_write: '直接写 GitHub' };
+const writeList = writes => writes?.length ? writes.map(write => writeTitles[write] || write).join('、') : '无（只能交报告）';
+function taskWritesCard(writes) {
+  const section = card('授权写入与交付工具');
+  const narrowed = writes.granted.filter(write => !writes.effective.includes(write));
+  section.append(facts([['已授予', writeList(writes.granted)], ['现在生效', narrowed.length ? `${writeList(writes.effective)}（项目或来源上限收窄了：${writeList(narrowed)}）` : null],
+    ['交付工具', writes.tools.map(tool => deliveryToolTitles[tool] || tool).join('、')],
+    ['开 PR 前', writes.pull_request_qa ? '需要独立 QA 通过' : '项目已关闭独立 QA 门槛，仍要通过项目测试命令']]));
+  if (writes.changes?.length) {
+    const list = element('ul', '', 'history');
+    for (const change of writes.changes) {
+      const what = change.initial ? '创建时授予 ' + writeList(change.writes)
+        : [change.added?.length ? '授予 ' + writeList(change.added) : '', change.removed?.length ? '收回 ' + writeList(change.removed) : ''].filter(Boolean).join('，') || '未变化';
+      list.append(element('li', `${timestamp(change.at)} · ${what} · ${change.actor || '—'}${change.reason ? '：' + change.reason : ''}`));
+    }
+    section.append(element('p', '授予记录', 'muted'), list);
+  }
+  if (writes.runs?.length) {
+    const list = element('ul', '', 'history');
+    for (const run of writes.runs) list.append(element('li', `第 ${run.attempt} 次尝试${run.role ? ' · ' + run.role : ''} · ${run.tools.map(tool => deliveryToolTitles[tool] || tool).join('、')}`));
+    section.append(element('p', '各次运行开始时的交付工具', 'muted'), list);
+  }
+  return section;
+}
 function taskRunHistoryCard(roles) {
   const section = card('实际运行记录');
   section.append(mutedLine('每次重试和恢复保留独立运行；下方 Agent、模型和配置取自该次运行快照。'));
@@ -127,6 +153,7 @@ function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   if (record) side.append(taskFactsCard(task, record, publications), taskExecutionCard(task, record, roles, purposes));
   side.append(taskRunHistoryCard(roles));
   if (detail.dispatch?.length) side.append(taskDispatchCard(detail.dispatch));
+  if (detail.writes) side.append(taskWritesCard(detail.writes));
   const info = card('任务');
   info.append(facts([['优先级', task.priority || 'P2'], ['入队序号', String(task.queue_seq ?? '—')], ['阶段', phaseLabels[task.phase] || task.phase], ['尝试', `第 ${task.attempt} 次`], ['提交', task.head_sha?.slice(0, 12)],
     [task.error_code==='repository_has_no_commit'?'等待原因':'故障', task.error_detail||(task.error_code==='pr_head_pending'?'PR 尚未指向刚推送的提交':ownershipErrors[task.error_code]||taskErrorText(task.error_code))],

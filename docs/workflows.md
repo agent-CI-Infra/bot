@@ -24,7 +24,7 @@
 
 - 工作类型：检视、通用回复和 Actions 失败处理要 `comment`，开发和开发任务要 `develop`；普通事项、CI 观察和发行说明在任何档位都能运行。工作类型的写入（默认值或项目保存的值）超过上限的部分不生效，降回上限后自动恢复。普通事项的写入默认继承上限：`develop` 时可以修改代码并交付 PR。
 - `github_write`：Issues 和 Pull requests 路由要 `comment`，Contents 路由要 `develop`。项目角色、飞书群、管理助手都经同一个入口，超过上限时返回 `capability_ceiling`，带 `needed`（需要的档位）和 `ceiling`（项目当前档位），不发出任何请求。角色的 GitHub 写权限、群档位和私聊里本人的权限都只能在上限之下再收窄。
-- 交付代码：上限低于 `develop` 时，建开发任务返回 403 `capability_ceiling`（`detail.needed` 为 `develop`），Manager 的 `create_task` 得到同样的拒绝并可以改做报告。
+- 交付代码：上限低于 `develop` 时，给任务授予 `pull_request`（建任务时的 `writes`、`intent=development`、PR 终点，或之后的 `grant_writes`）返回 403 `capability_ceiling`（`detail.needed` 为 `develop`），Manager 的 `create_task`／`grant_writes` 得到同样的拒绝并可以改做报告。普通任务开 PR 前默认还要独立 QA 通过，项目可以在「能力上限」里关掉这道门槛，关掉后仍要通过项目测试命令。
 - 事件开关只决定哪些 GitHub 事件交给 Manager，不增加写权限。
 
 调低上限不会取消任务：需要更高档位的任务在下一个工具调用前停下，状态为 `waiting_permission`、原因 `capability_ceiling_lowered`，已有改动保留；调回足够的档位后点「重试」继续。项目禁用（`enabled=false`）仍会结束任务。
