@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { permissionItems } from './permissions.js';
+import { projectRoleItems } from './permissions.js';
 /**
  * Server-defined, versioned building blocks a RoleDefinitionV2 can reference. Project configuration selects entries by id;
  * it never supplies tools, authorities or executable code. Every version is the hash of the entry's own content, so a
@@ -54,4 +54,4 @@ export const allowedFor = (kind: RoleKind) => ({
   environment: environmentProfiles.filter(e => (e.kinds as readonly string[]).includes(kind)).map(e => e.id),
   output: outputSchemas.filter(s => (s.kinds as readonly string[]).includes(kind)).map(s => s.id)
 });
-export const catalog = () => ({ permission_items: permissionItems, environment_profiles: environmentProfiles, budget_policies: budgetPolicies, output_schemas: outputSchemas });
+export const catalog = () => ({ permission_items: projectRoleItems, environment_profiles: environmentProfiles, budget_policies: budgetPolicies, output_schemas: outputSchemas });

@@ -212,6 +212,23 @@ test('role form edits backends without a JSON editor, and marks the draft dirty'
   assert.equal(dev.page.run("roleState.draft.roles.find(r=>r.role_id==='dev').harness_ref.id"),'process');
   assert.equal(dev.page.run('roleState.dirty'), true);
 });
+test('a role\'s permissions show what differs from its defaults and fold the rest (#850)', () => {
+  const data=roleData({schema:2,revision:4,enabled:true,controller:{role:'manager',entries},roles:team('pi'),skills:[]});
+  data.permission_items=[{id:'computer',name:'使用虚拟电脑',group:'platform',modes:['deny','allow'],detail:'工作区。'},{id:'delegation',name:'指派其他角色',group:'platform',modes:['deny','allow'],detail:'委派。'},
+    {id:'github_issues',name:'Issue',group:'github',modes:['none','read','write'],detail:'Issue。'}];
+  // dev holds computer deny (see role()), its default is allow; the other two equal the defaults.
+  data.permission_defaults={dev:{computer:'allow',delegation:'deny',github_issues:'read'}};
+  data.configuration.roles.find(r=>r.role_id==='dev').permissions={computer:'deny',delegation:'deny',github_issues:'read'};
+  const {form}=roleForm(data,'dev'),box=form.querySelector('.role-permissions'),fold=box.querySelector('[data-testid=role-permission-defaults]');
+  const labels=root=>root.querySelectorAll('select').map(select=>select.getAttribute('aria-label'));
+  assert.ok(fold);assert.equal(fold.querySelector('summary').textContent,'与默认相同的 2 项');
+  assert.deepEqual(labels(fold),['dev 指派其他角色权限','dev Issue权限']);
+  assert.deepEqual(labels(box).filter(label=>!labels(fold).includes(label)),['dev 使用虚拟电脑权限']);
+  // Without defaults (the service roles page) every item is listed and nothing is folded.
+  delete data.permission_defaults;data.role_defaults={};
+  const all=roleForm(data,'dev').form.querySelector('.role-permissions');
+  assert.equal(all.querySelector('[data-testid=role-permission-defaults]'),null);assert.equal(labels(all).length,3);
+});
 test('role form preserves stored backends and recommends Pi only for an unsaved project', () => {
   const config={schema:2,revision:0,enabled:true,legacy:true,controller:{role:'manager',entries},roles:team('native'),skills:[]};
   const saved=roleForm(roleData(config),'manager');

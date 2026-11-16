@@ -1,6 +1,6 @@
 import type { Store, Row } from '../storage/database.js';
 import { digest, fail, randomId } from '../core/security.js';
-import { identityProjection, projectCapabilities } from './storage.js';
+import { identityProjection, projectCapabilities, retiredCapabilities } from './storage.js';
 import { readInstallationDomainEvents } from '../installations/archive.js';
 
 export interface ActorContext {
@@ -85,7 +85,7 @@ export function activeScopes(store: Store, principal: string): EffectiveScope[] 
 function lostAuthority(store: Store, principal: string, held: EffectiveScope[]): boolean {
   if (!held.length) return false;
   const now = activeScopes(store, principal);
-  return held.some(g => g.capabilities.some(capability => !now.some(scope => grantMatches(store, scope, capability,
+  return held.some(g => g.capabilities.some(capability => !retiredCapabilities.includes(capability) && !now.some(scope => grantMatches(store, scope, capability,
     g.scope === 'platform' ? null : g.tenant_id, g.scope === 'project' ? g.project_id ?? undefined : undefined))));
 }
 /** Raises the revision only if the principal lost authority it held in `before` (from `activeScopes`); keeping or adding authority never does. */

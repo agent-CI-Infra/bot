@@ -1,7 +1,11 @@
 import type { Store } from '../storage/database.js';
 
-export const projectCapabilities = ['tasks.read', 'tasks.manage_own', 'tasks.write', 'roles.edit', 'roles.publish', 'knowledge.read', 'knowledge.write', 'schedules.manage', 'config.write', 'release.manage'];
+// roles.publish was listed here without ever being checked; it was removed (#850). Grants saved with it keep it, and losing it
+// is not a loss of authority (see retiredCapabilities).
+export const projectCapabilities = ['tasks.read', 'tasks.manage_own', 'tasks.write', 'roles.edit', 'knowledge.read', 'knowledge.write', 'schedules.manage', 'config.write', 'release.manage'];
 // What GitHub collaborators get by default (#847): Write and Maintain ask, create tasks and manage their own; Triage and Read ask.
+/** Capabilities no check ever reads any more; a grant that drops one loses nothing. */
+export const retiredCapabilities = ['roles.publish'];
 export const memberCapabilities = ['tasks.read', 'tasks.write', 'tasks.manage_own'];
 export const readerCapabilities = ['tasks.read'];
 // A grant manager may explicitly delegate these; default/derived project grants never include them.

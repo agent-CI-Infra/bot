@@ -19,7 +19,7 @@ test('current GitHub owner, selected repositories, repo admin and ordinary membe
   assert.throws(() => authorize(actor, 'platform.manage'), /forbidden/);
   state.selection = 'selected'; f.snapshot(); await f.identity.reverify(principal);
   actor = resolveActor(h.store, creds.token); assert.equal(active(h.store, principal).some(g => g.role === 'org_admin'), false);
-  authorize(actor, 'roles.publish', { project_id: '101' });
+  authorize(actor, 'roles.edit', { project_id: '101' });
   state.owner = false; state.admin = true; await f.identity.reverify(principal);
   actor = resolveActor(h.store, creds.token); authorize(actor, 'config.write', { project_id: '101' });
   state.admin = undefined; await f.identity.reverify(principal);
