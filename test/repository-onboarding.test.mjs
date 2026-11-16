@@ -3,80 +3,27 @@
 // provider are local fixtures.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import { once } from 'node:events';
 import { identityFixture } from './identity-fixture.mjs';
 import { settled } from './management-fixture.mjs';
-import { session } from '../dist/app/auth.js';
+import { installed, readToken, repositoryRoutes, provider as scripted, call, person, say } from './onboarding-fixture.mjs';
 
-const client = (f, credentials) => async (path, method = 'GET', body) => {
-  const response = await fetch(f.h.admin + path, { method, headers: { Cookie: 'bot_session=' + credentials.token, ...(method === 'GET' ? {} : { 'X-CSRF-Token': credentials.csrf, 'Content-Type': 'application/json' }) },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  return { status: response.status, value: await response.json() };
-};
-// Installed in organization 10 through the fixture's installation 77, never started.
-const installed = (f, id) => {
-  const now = new Date().toISOString();
-  f.h.store.run(`INSERT INTO installed_repositories(account_id,repository_id,installation_id,full_name,owner_id,owner_login,private,installed,synced_at)
-    VALUES(?,?,'77',?,'10','fixture',1,1,?)`, f.a.id, id, 'fixture/project-' + id, now);
-  f.h.store.run("INSERT OR REPLACE INTO installation_repositories VALUES('github.com/123/77',?,?,'10','fixture',1,1,?)", id, 'fixture/project-' + id, now);
-};
-const readToken = 'onboarding-read-token-0123456789';
-// The repository as GitHub shows it to an installation token: a README and one label.
-function repositoryRoutes(f) {
-  const { state } = f;
-  state.route = (path, method, body, send) => {
-    const id = /^\/repos\/fixture\/project-(\d+)\//.exec(path)?.[1] ?? /^\/repositories\/(\d+)$/.exec(path)?.[1];
-    if (path.endsWith('/installation') && id) return send({ id: 77, account: { id: 10, login: 'fixture' }, events: [],
-      permissions: { metadata: 'read', contents: 'write', issues: 'write', pull_requests: 'write', actions: 'read', checks: 'read', statuses: 'read' } }), true;
-    if (path === '/app/installations/77/access_tokens' && body.repository_ids) return send({ token: readToken, expires_at: new Date(Date.now() + 3600_000).toISOString(), permissions: body.permissions }, 201), true;
-    if (/^\/repositories\/\d+$/.test(path)) return send({ id: Number(id), owner: { id: 10 }, full_name: 'fixture/project-' + id, default_branch: 'main' }), true;
-    if (path.endsWith('/readme')) return send({ encoding: 'base64', content: Buffer.from('# Project\nA command line tool. Run `npm test`.').toString('base64') }), true;
-    if (path.endsWith('/labels')) return send([{ name: 'bug', color: 'd73a4a', description: 'Something is broken' }]), true;
-    return false;
-  };
-}
-// An OpenAI-compatible fixture following one script per user request; `gate` holds a request until it is released.
-async function provider(t) {
-  const requests = [], state = { gate: null };
-  const server = createServer(async (req, res) => {
-    const chunks = []; for await (const chunk of req) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks).toString()); requests.push(body);
-    if (state.gate) await state.gate;
-    const context = JSON.parse(body.messages[1].content), steps = body.messages.filter(m => m.role === 'assistant').length;
-    const call = (...calls) => ({ role: 'assistant', content: null, tool_calls: calls.map(([name, args], i) => ({ id: `call-${steps}-${i}`, type: 'function', function: { name, arguments: JSON.stringify(args) } })) });
-    const repository = context.onboarding?.repository.full_name;
-    const plan = labels => ({ profile: { summary: '命令行工具，Node.js。', sources: ['README.md', '/labels'] }, capability_ceiling: { value: 'comment', reason: '先只检视和打标签' },
-      events: { value: { 'actions.run_failed': true }, reason: '分析 Actions 失败' }, test_command: { value: 'npm test', reason: 'README 写明' },
-      labels: { items: labels, reason: '补齐分类标签' }, conventions: { label_usage: 'kind/ 前缀表示问题类型。' } });
-    const script = String(context.request).includes('先只检视') ? [
-      call(['propose_onboarding_plan', plan([{ name: 'agent/triage', color: 'ededed', action: 'create' }])]),
-      call(['propose_onboarding_plan', plan([{ name: 'kind/bug', color: 'd73a4a', description: '缺陷', action: 'create' }, { name: 'bug', color: 'd73a4a', action: 'keep' }])]),
-      { role: 'assistant', content: '方案草稿已保存。' },
-    ] : [
-      call(['github_read', { repository, path: '/readme' }], ['github_read', { repository, path: '/labels' }]),
-      call(['ask_onboarding_questions', { questions: [{ id: 'level', question: '要不要让 bot 自动开发简单问题？', options: [{ label: '先只检视和打标签' }, { label: '也开发简单问题' }],
-        recommended: '先只检视和打标签', reason: '仓库还没有检视习惯' }] }]),
-      { role: 'assistant', content: '这是一个命令行工具（来源：README.md、/labels）。请回答上面的问题。' },
-    ];
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ choices: [{ message: script[Math.min(steps, script.length - 1)] }], usage: { prompt_tokens: 20, completion_tokens: 5 } }));
-  });
-  server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
-  return { requests, state, url: `http://127.0.0.1:${server.address().port}/v1` };
-}
-// Signs in through the fake GitHub as user `id` with this repository permission, and returns that person's console client.
-async function person(f, id, permission) {
-  Object.assign(f.state, { id, login: 'user-' + id, owner: false, permission });
-  const login = await f.login();
-  return client(f, session(f.h.store, login.result.principal_id, login.result.identity_id));
-}
-async function say(byWho, conversation, content) {
-  const sent = await byWho(`/api/management/conversations/${conversation}/messages`, 'POST', { source_message: 'm-' + Math.random(), content });
-  assert.equal(sent.status, 201, JSON.stringify(sent.value));
-  return { id: sent.value.id, history: await settled(byWho, conversation, sent.value.id) };
-}
+// The assistant reads the README and the labels and asks; a reply about the level gets a plan, first with a reserved label.
+const provider = t => scripted(t, context => {
+  const repository = context.onboarding?.repository.full_name;
+  const plan = labels => ({ profile: { summary: '命令行工具，Node.js。', sources: ['README.md', '/labels'] }, capability_ceiling: { value: 'comment', reason: '先只检视和打标签' },
+    events: { value: { 'actions.run_failed': true }, reason: '分析 Actions 失败' }, test_command: { value: 'npm test', reason: 'README 写明' },
+    labels: { items: labels, reason: '补齐分类标签' }, conventions: { label_usage: 'kind/ 前缀表示问题类型。' } });
+  return String(context.request).includes('先只检视') ? [
+    call(0, ['propose_onboarding_plan', plan([{ name: 'agent/triage', color: 'ededed', action: 'create' }])]),
+    call(1, ['propose_onboarding_plan', plan([{ name: 'kind/bug', color: 'd73a4a', description: '缺陷', action: 'create' }, { name: 'bug', color: 'd73a4a', action: 'keep' }])]),
+    { role: 'assistant', content: '方案草稿已保存。' },
+  ] : [
+    call(0, ['github_read', { repository, path: '/readme' }], ['github_read', { repository, path: '/labels' }]),
+    call(1, ['ask_onboarding_questions', { questions: [{ id: 'level', question: '要不要让 bot 自动开发简单问题？', options: [{ label: '先只检视和打标签' }, { label: '也开发简单问题' }],
+      recommended: '先只检视和打标签', reason: '仓库还没有检视习惯' }] }]),
+    { role: 'assistant', content: '这是一个命令行工具（来源：README.md、/labels）。请回答上面的问题。' },
+  ];
+});
 
 test('an administrator analyzes an installed repository before it is started, reading only; drafts are saved and nothing is written (#930)', async t => {
   const f = await identityFixture(t, { github: true }), { h, admin, state } = f, model = await provider(t);
