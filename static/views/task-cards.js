@@ -183,6 +183,7 @@ function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   }
   if(record?.relations?.length){const relations=card('关联任务');for(const r of record.relations){const target=r.source_task_id===task.id?r.target_task_id:r.source_task_id;relations.append(button(shortId(target)+' · '+r.relationship,()=>openTask(target)),element('p',r.reason,'muted'));}side.append(relations);}
   const result = resultCard(task); if (result) side.append(result);
+  if (detail.browser_evidence?.steps?.length) side.append(browserEvidenceCard(task, detail.browser_evidence));
   side.append(info,taskMetricsCard(task), computerCard(task, environment));
   // A task without a structured record still lists what was written to GitHub.
   if (!record && publications?.length) {
@@ -233,3 +234,29 @@ function resultCard(task) {
 
 $('logout').addEventListener('click', () => { if (taskView.open) leaveTaskDetailPage(); closeTaskPicker(); });
 
+
+function browserEvidenceCard(task, evidence) {
+  const section = card('浏览器证据');
+  const shots = evidence.steps.filter(step => step.screenshot);
+  section.append(element('p', shots.length ? `共 ${evidence.steps.length} 步，其中 ${shots.length} 张截图可打开查看。` : `共 ${evidence.steps.length} 步，没有可查看的截图。`, 'muted'));
+  const list = element('ol', '', 'browser-evidence');
+  for (const step of evidence.steps) {
+    const item = element('li', '');
+    item.append(element('span', `${step.action} · ${step.result}`, step.error ? 'call' : ''));
+    if (step.title) item.append(element('p', step.title, 'muted'));
+    if (step.screenshot?.url) {
+      const link = document.createElement('a');
+      link.href = step.screenshot.url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = '打开截图';
+      const img = document.createElement('img');
+      img.src = step.screenshot.url;
+      img.alt = `${step.action} 第 ${step.n} 步截图`;
+      item.append(img, link);
+    }
+    list.append(item);
+  }
+  section.append(list);
+  return section;
+}

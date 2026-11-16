@@ -60,6 +60,8 @@ export function sqlFingerprint(sql: string): string {
 export class Store {
   readonly db: DatabaseSync;
   readonly secrets: SecretBox;
+  /** Database file path, or ':memory:'. Evidence directories live beside a file store. */
+  readonly path: string;
   // Bodies of agent work (model requests, tool calls, large logs) in per-run JSONL files next to the database.
   readonly trajectories: Trajectories;
   // Free space of the disk the database is on (#671); null for an in-memory store.
@@ -69,6 +71,7 @@ export class Store {
   private transactionStatements = 0;
   private transactionSlowReported = false;
   constructor(path: string, key: Buffer, private readonly options: StoreOptions = {}) {
+    this.path = path;
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
     const empty = !this.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' LIMIT 1").get();

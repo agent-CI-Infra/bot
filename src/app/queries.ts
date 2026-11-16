@@ -17,6 +17,7 @@ import { workTypes } from '../work/catalog.js';
 import { explainFailure } from '../agent/failures.js';
 import { taskGroupSQL } from './project-activity.js';
 import { rejectedArchiveState } from './delivery-audit.js';
+import { listBrowserEvidence } from '../browser/evidence.js';
 import { attachExternalLinks } from '../tasks/external-links.js';
 import { attachTaskRoleFlows, taskRoleTrace } from '../roles/flow.js';
 
@@ -193,6 +194,7 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
     return { task: taskWithLinks, can_manage: canManage, ...roleTrace, ...detailHistory(store,row.id),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})),
       // Why the Manager created or continued this task, with the events behind it.
       dispatch:taskDispatch(store,row.id),
+      browser_evidence:listBrowserEvidence(store,row.id),
       // The writes a generic task holds and the delivery tools each run had (#814); null for older tasks.
       writes:taskWritesDetail(store,row,sourcePolicies(store,row)),
       // Why this development was allowed to start (#815); null when none was recorded.
