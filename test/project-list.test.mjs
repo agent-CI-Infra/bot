@@ -104,7 +104,10 @@ test('a failed permission check is stated above the rows and cleared by its one 
   assert.ok(status, 'the failed permission check is stated on the list');
   assert.equal(status.dataset.check, 'permissions');
   assert.match(status.textContent, /安装权限检查读取失败（503 · github_unavailable）/);
-  assert.match(status.textContent, /上次读到的结果/);
+  // #869 review F3: the permission column shows 未检查 while its reading is stale, so the statement cannot claim the
+  // badges are the previous reading; it names the column's own state instead.
+  assert.match(status.textContent, /需要重新检查的权限徽章显示「未检查」/);
+  assert.doesNotMatch(status.textContent, /还是上次读到的结果/);
   assert.match(status.querySelector('span').textContent, /^上次成功读取：2026-01-01 \d{2}:00:00$/);
   const button = status.querySelector('button');
   assert.equal(button.textContent, '重新检查权限');
@@ -124,6 +127,67 @@ test('a failed permission check is stated above the rows and cleared by its one 
   assert.equal(page.$('rows').querySelector('[data-testid=project-check-status]'), null);
   page.run("tab = 'projects'; drawProjectCheckStatus()");
   assert.ok(page.$('rows').querySelector('[data-testid=project-check-status]'), 'the statement belongs to the project list');
+});
+
+// #869 review F2: the cached read can itself prove a failed check has since run — every gate record fresh, or every row
+// carrying a permission reading and none stale. The statement then goes on its own, instead of staying up until someone
+// presses its button, which is also what the top-bar refresh and the onboarding hook go through.
+test('a failed gate check is withdrawn when the cache proves the check has since run', async () => {
+  const record = { repository_id: '101', gate_state: 'configured', gate_detail: '', dashboard_state: 'none', dashboard_detail: '',
+    checked_at: '2026-01-01T00:00:00.000Z', stale: true };
+  let integrations = [record];
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path === '/api/integrations/check') return [503, { error: 'github_unavailable' }];
+    if (path.startsWith('/api/integrations')) return [200, { integrations }];
+    return [200, { repositories: [], syncs: [] }];
+  });
+  page.run("var projectRoute = () => null; me = { role: 'super_admin' }; tab = 'projects';");
+  const settle = () => new Promise(resolve => setTimeout(resolve, 50));
+  await page.run('render()'); await settle();
+  assert.ok(page.$('rows').querySelector('[data-testid=project-check-status]'), 'the failed check is stated first');
+  // Nothing else touches the console; the next read is the cache, and it now reports the check as current.
+  integrations = [{ ...record, gate_state: 'live', checked_at: '2026-01-02T00:00:00.000Z', stale: false }];
+  await page.run('render()'); await settle();
+  assert.equal(page.$('rows').querySelector('[data-testid=project-check-status]'), null, 'a cache with nothing stale withdraws the statement');
+  assert.equal(page.run('projectCheckFailures.size'), 0);
+});
+
+test('a failed permission check is withdrawn when the list proves the check has since run', async () => {
+  const base = { owner_id: '10', full_name: 'fixture/project-101', registered: true, enabled: true, installed: true, running_tasks: 0,
+    queued_tasks: 0, review_enabled: true, development_enabled: false, model_id: 'm', board_enabled: false, board_state: 'none' };
+  let rows = [{ ...base, id: '101', access_gaps: [], permissions_stale: true, permissions_checked_at: '2026-01-01T00:00:00.000Z' }];
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path.startsWith('/api/integrations')) return [200, { integrations: [{ repository_id: '101', gate_state: 'live', gate_detail: '',
+      dashboard_state: 'none', dashboard_detail: '', checked_at: '2026-01-01T00:00:00.000Z', stale: false }] }];
+    if (method === 'POST' && path === '/api/installations/permissions/check') return [503, { error: 'github_unavailable' }];
+    return [200, { repositories: rows, syncs: [] }];
+  });
+  page.run("var projectRoute = () => null; me = { role: 'super_admin' }; tab = 'projects';");
+  const settle = () => new Promise(resolve => setTimeout(resolve, 50));
+  await page.run('render()'); await settle();
+  assert.ok(page.$('rows').querySelector('[data-testid=project-check-status]'), 'the failed check is stated first');
+  // A list that carries a permission reading for every row and calls none of them stale has been checked since.
+  rows = [{ ...base, id: '101', access_gaps: [], permissions_stale: false, permissions_checked_at: '2026-01-02T00:00:00.000Z' }];
+  await page.run('render()'); await settle();
+  assert.equal(page.$('rows').querySelector('[data-testid=project-check-status]'), null, 'a fresh permission reading withdraws the statement');
+  assert.equal(page.run('projectCheckFailures.size'), 0);
+});
+
+// #869 review F3: with no successful reading there is no old badge to point at, and no time to state either. The
+// statement has to say the check never read anything rather than claim a badge is showing a previous reading.
+test('a failed gate check that never read anything says so, and invents no time', async () => {
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path === '/api/integrations/check') return [503, { error: 'github_unavailable' }];
+    return [200, { integrations: [], repositories: [], syncs: [] }];
+  });
+  page.run("var projectRoute = () => null; me = { role: 'super_admin' }; tab = 'projects';");
+  const settle = () => new Promise(resolve => setTimeout(resolve, 50));
+  await page.run('render()'); await settle();
+  const status = page.$('rows').querySelector('[data-testid=project-check-status]');
+  assert.ok(status, 'the cold-start failure is stated');
+  assert.match(status.textContent, /还没有成功读取过/);
+  assert.doesNotMatch(status.textContent, /还是上次读到的结果/);
+  assert.equal(status.querySelector('span'), null, 'no reading time is invented when there is none');
 });
 
 // #823: the project-admin list comes from GET /api/repositories, which omits access_gaps / permissions_stale.

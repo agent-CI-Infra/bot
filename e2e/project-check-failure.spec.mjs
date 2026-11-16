@@ -3,8 +3,9 @@ import { harness, setup, account, repository } from '../test/helpers.mjs';
 
 // #869: the gate/board check and the permission check both run in the background and keep the badges they read last when
 // they fail. Used to swallow that failure: the reader saw an old badge with no way to tell it was old and no way to ask
-// again. Now the list names the check that failed, says the badges are the previous reading, when it was taken, and
-// offers exactly one manual read. Nothing is retried by itself (#43), so the count stays at the one failed request.
+// again. Now the list names the check that failed, what the badge shows (the previous reading, or 未检查 for a permission
+// column with no current reading), when the reading was taken, and offers exactly one manual read. Nothing is retried by
+// itself (#43), so the count stays at the one failed request.
 const checked = '2026-01-01T00:00:00.000Z';
 const staleIntegration = (overrides = {}) => ({ repository_id: '101', gate_state: 'configured', gate_detail: '', dashboard_state: 'none',
   dashboard_detail: '', checked_at: checked, stale: true, ...overrides });
@@ -90,7 +91,10 @@ test('权限检查读取失败时保留权限徽章、写明是上次结果并�
     const line = page.locator('#rows [data-check="permissions"]');
     await expect(line).toHaveCount(1);
     await expect(line).toContainText('安装权限检查读取失败');
-    await expect(line).toContainText('上次读到的结果');
+    // The permission column shows 未检查 while its reading is stale, so the statement names that state rather than
+    // claiming the badges are the previous reading.
+    await expect(line).toContainText('需要重新检查的权限徽章显示「未检查」');
+    await expect(line).not.toContainText('还是上次读到的结果');
     await expect(line).toContainText(/上次成功读取：2026-01-01 \d{2}:00:00/);
     await expect(page.locator('#rows .row [data-permission]').first()).toHaveText('未检查');
     expect(checks).toBe(1);
@@ -129,8 +133,9 @@ test('缓存为空且首次门禁检查失败时，列表也说明读取失败',
     const line = page.locator('#rows [data-check="integrations"]');
     await expect(line).toHaveCount(1);
     await expect(line).toContainText('门禁与看板接入检查读取失败');
-    // No reading exists yet, so the time is said to be unknown rather than invented.
-    await expect(line).toContainText('上次成功读取的时间未知');
+    // No reading exists yet, so the statement says the check has never read anything and names no time at all.
+    await expect(line).toContainText('还没有成功读取过');
+    await expect(line).not.toContainText('上次成功读取');
     await expect(page.locator('#rows .row [data-integration]').first()).toHaveText('发布检查未完成');
     await expect(retry(line, '重新检查门禁')).toBeVisible();
     expect(checks).toBe(1);
