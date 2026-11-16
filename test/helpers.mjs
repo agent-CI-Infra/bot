@@ -22,6 +22,20 @@ export const testPassword = () => randomBytes(20).toString('hex');
 // A workspace that runs real host processes (LocalManager, runner modules) tags them with its id, and a reap ends every
 // host process with that id, also those of other test sets running at the same time; such workspaces need fresh ids.
 export const randomWorkspaceId = () => randomBytes(24).toString('hex');
+export function fixtureClient(h) {
+  let cookie = '', csrf = '';
+  const client = async (path, method = 'GET', data, headers = {}) => {
+    // Synchronous fixture writes can outlive the server's idle timeout before either side processes the socket close.
+    const r = await fetch(h.admin + path, { method, headers: { 'Content-Type': 'application/json', Connection: 'close', Cookie: cookie, 'X-CSRF-Token': csrf, ...headers },
+      ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
+    const value = await r.json(); if (r.headers.get('set-cookie')) cookie = r.headers.get('set-cookie').split(';')[0];
+    if (value.csrf_token) csrf = value.csrf_token;
+    return { status: r.status, value, headers: r.headers };
+  };
+  // The session of this client, for requests that read a response other than JSON (such as a stream).
+  client.cookie = () => cookie; client.csrf = () => csrf;
+  client.harness = h; return client;
+}
 export async function harness(t, manager, options = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'test-')), database = join(directory, 'control.sqlite'), key = randomBytes(32);
   let store, server;
@@ -41,20 +55,7 @@ export async function harness(t, manager, options = {}) {
   // A browser page may still hold open connections (including speculative ones without a request) when a test stops
   // its servers; close them instead of waiting for the browser to give them up.
   h.stop = async () => { await h.external?.forwarder.close(); await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); store.close(); };
-  h.client = () => {
-    let cookie = '', csrf = '';
-    const client = async (path, method = 'GET', data, headers = {}) => {
-      // Synchronous fixture writes can outlive the server's idle timeout before either side processes the socket close.
-      const r = await fetch(h.admin + path, { method, headers: { 'Content-Type': 'application/json', Connection: 'close', Cookie: cookie, 'X-CSRF-Token': csrf, ...headers },
-        ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
-      const value = await r.json(); if (r.headers.get('set-cookie')) cookie = r.headers.get('set-cookie').split(';')[0];
-      if (value.csrf_token) csrf = value.csrf_token;
-      return { status: r.status, value, headers: r.headers };
-    };
-    // The session of this client, for requests that read a response other than JSON (such as a stream).
-    client.cookie = () => cookie; client.csrf = () => csrf;
-    client.harness = h; return client;
-  };
+  h.client = () => fixtureClient(h);
   h.hook = async (endpoint, secret, delivery, payload, headers = {}) => {
     const raw = typeof payload === 'string' ? payload : JSON.stringify(payload);
     const r = await fetch(h.webhook + endpoint, { method: 'POST', headers: { 'X-GitHub-Delivery': delivery, 'X-GitHub-Event': 'issues',
