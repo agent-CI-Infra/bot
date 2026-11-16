@@ -444,13 +444,11 @@ test('a due manager.check with an instruction starts once on the timer, and file
   assert.equal(f.h.store.get("SELECT count(*) n FROM tasks WHERE unique_key LIKE '101:task.request:%'").n, 1);
 });
 
-test('a project admin cannot register other project workflows, and an outsider cannot create a project manager.check (#905)', async t => {
+test('an outsider cannot create a project manager.check (#905)', async t => {
+  // After #851, a project administrator with config.write may register any project workflow, not only manager.check.
   const f = await fixture(t);
-  const member = await f.member('daily-project-admin', { repository_ids: ['101'] });
   const outsider = await f.member('no-project-user');
-  const plan = await projectPlan(f, member.id);
-  const daily = await command(f, 'schedule.register', { plan }, member.client);
-  assert.equal(daily.value.result?.error || daily.value.error, 'capability_forbidden');
+  const plan = await projectPlan(f, f.principal);
   plan.workflow = 'manager.check';
   plan.parameters = { instruction: 'Weekly hygiene.', file_issues: false };
   f.h.store.run('UPDATE scoped_grants SET capabilities=? WHERE principal_id=?', JSON.stringify(['tasks.read', 'schedules.manage', 'tasks.write']), plan.actor_id);
