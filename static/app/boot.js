@@ -20,9 +20,12 @@ function renderCurrentUser() {
     who.append(avatar, copy);
   } else who.append(copy);
 }
-function showBootFailure(err) {
+// #873: the card is page-level. Signed out it also takes the login header away; a signed-in start that failed leaves the
+// session and its header alone, and only the workspace it could not fill is taken off the screen.
+function showBootFailure(err, { keepSession = false } = {}) {
   $('boot').hidden = false;
-  $('access').hidden = $('workspace').hidden = $('identity').hidden = $('tabs').hidden = true;
+  $('access').hidden = $('workspace').hidden = $('tabs').hidden = true;
+  if (!keepSession) $('identity').hidden = true;
   document.body.classList.remove('board-mode');
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
   const message = $('boot-message');
@@ -73,8 +76,15 @@ async function start() {
   document.querySelectorAll('[data-super]').forEach(el => el.hidden = me.role !== 'super_admin');
   // #549: do not put 存储 back on a project administrator's sidebar. The address still opens; the management area is #550.
   if (typeof applyConsoleNavVisibility === 'function') applyConsoleNavVisibility();
-  repositories = (await api('/api/repositories')).repositories;
-  if (me.role === 'super_admin') accounts = (await api('/api/accounts')).accounts;
+  // #873: this is the read that decides whether the signed-in console has anything to show. Before #873 a failure here
+  // left the shell open on an empty list and only reached the message strip; it now stops like the signed-out boot does,
+  // with the same card and retry, and the session header stays so the reader can see they are still signed in.
+  let listed, listedAccounts = accounts;
+  try {
+    listed = (await api('/api/repositories')).repositories;
+    if (me.role === 'super_admin') listedAccounts = (await api('/api/accounts')).accounts;
+  } catch (err) { showBootFailure(err, { keepSession: true }); return; }
+  repositories = listed; accounts = listedAccounts;
   options($('repository-filter'), repositories, r => r.full_name); options($('account-filter'), accounts, a => a.name);
   if(me.role==='super_admin'&&!accounts.length&&!location.hash)history.replaceState(null,'','#/settings/onboarding/0');
   await route();
