@@ -100,7 +100,7 @@ function confirmDialog({ title, body = [], action = '确认', danger = false, in
       if (!run) { settle(value); return; }
       confirmBusy = true; cancel.disabled = submit.disabled = true; status.className = 'confirm-status progress'; status.textContent = progress;
       try { await run(value); settle(value); }
-      catch (err) { if (settleConfirm !== settle) return; confirmBusy = false; cancel.disabled = submit.disabled = false; status.className = 'confirm-status error'; status.textContent = err.message; }
+      catch (err) { if (settleConfirm !== settle) return; confirmBusy = false; cancel.disabled = submit.disabled = false; status.className = 'confirm-status error'; status.textContent = readErrorText(err); }
     });
     confirmView.replaceChildren(form);
     // A request without a body points at nothing: a dangling aria-describedby would be worse than none, and an input's

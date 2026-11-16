@@ -33,7 +33,7 @@ $('access-form').addEventListener('submit', async event => {
     form.reset(); const url = new URL(location.href); url.searchParams.delete('auth_error'); history.replaceState(null, '', url);
     try { await start(); } catch (err) { showBootFailure(err); }
   } catch (err) {
-    const text = /invalid_login/.test(err.message) ? t('login.invalid') : /login_rate_limited/.test(err.message) ? t('login.rate_limited') : /already_initialized/.test(err.message) ? t('login.already_initialized') : err instanceof TypeError ? t('login.network') : err.message;
+    const text = /invalid_login/.test(err.message) ? t('login.invalid') : /login_rate_limited/.test(err.message) ? t('login.rate_limited') : /already_initialized/.test(err.message) ? t('login.already_initialized') : err instanceof TypeError ? t('login.network') : readErrorText(err);
     if (/already_initialized/.test(err.message)) await start().catch(error);
     notice('message', text, '', 'alert');
   } finally {
@@ -58,7 +58,7 @@ window.refreshIntegrations = () => api('/api/integrations/check', 'POST', {}).th
 $('sync').addEventListener('click', async () => {
   $('sync').disabled = true; notice('message', '正在从 GitHub 同步安装列表…');
   try { const result = await api('/api/installations/sync', 'POST', {}); if (typeof forgetConsoleGaps === 'function') forgetConsoleGaps(); await start(); const conclusion = installationSyncNotice(result); notice('message', conclusion.text, conclusion.tone); }
-  catch (err) { notice('message', '安装列表同步失败：' + err.message + '，还不能判断全部正常。', '', 'alert'); } finally { $('sync').disabled = false; }
+  catch (err) { notice('message', '安装列表同步失败：' + readErrorText(err) + '，还不能判断全部正常。', '', 'alert'); } finally { $('sync').disabled = false; }
 });
 $('filters').addEventListener('submit', event => { event.preventDefault(); offset = 0; render().catch(error); });
 $('hidden-filter').addEventListener('change', () => { offset = 0; render().catch(error); });

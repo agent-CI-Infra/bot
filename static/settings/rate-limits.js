@@ -10,7 +10,7 @@ function rateLimitBody(view, redraw) {
     const probe = button('探测', async () => {
       probe.disabled = true;
       try { view.limits = await api(`/api/accounts/${account.id}/rate-limits/probe`, 'POST', {}); redraw(`已读取 ${account.name} 的请求额度`); }
-      catch (err) { probe.disabled = false; message.textContent = err.message; }
+      catch (err) { probe.disabled = false; message.textContent = readErrorText(err); }
     }, ''), message = element('p', '', 'view-error');
     message.setAttribute('role', 'alert');
     head.append(element('h4', `${account.name}（${account.type === 'github_app' ? 'GitHub App' : 'Token 账号'}）`), probe); nodes.push(head, message);

@@ -93,7 +93,7 @@ function globalProjectControls() {
         const { board } = await api(`/api/installations/${id}/board`, 'PATCH', { enabled });
         Object.assign(installed, { board_enabled: board.enabled, board_state: board.state, board_url: board.url });
         show(); feedback.textContent = board.enabled ? '公开设置已保存；看板数据允许公开访问。' : '已关闭公开访问。';
-      } catch (err) { feedback.textContent = '公开设置保存失败：' + err.message; }
+      } catch (err) { feedback.textContent = '公开设置保存失败：' + readErrorText(err); }
       finally { toggle.disabled = installed.installed !== true; }
     });
     const show = () => { status.textContent = !installed.board_enabled ? '看板未公开' : installed.board_state === 'published' ? '看板已公开' : '已允许公开，等待采集'; toggle.textContent = installed.board_enabled ? '关闭公开看板' : '开启公开看板'; };
@@ -129,7 +129,7 @@ function globalProjectControls() {
         body: [policy.enabled ? '新 Issue／PR 不再处理；正在执行的任务会中止，虚拟电脑停止，已有数据保留。' : '恢复按当前检视、开发与模型配置处理任务。', '公开看板的可见性由上方独立设置控制。'], action: policy.enabled ? '禁用' : '启用', danger: !!policy.enabled })) return;
       change.disabled = true; feedback.textContent = '';
       try { await api(`/api/installations/${id}/${policy.enabled ? 'disable' : 'activate'}`, 'POST', {}); if (current === target) await reloadProject(); }
-      catch (err) { feedback.textContent = `项目${policy.enabled ? '禁用' : '启用'}失败：${err.message}`; }
+      catch (err) { feedback.textContent = `项目${policy.enabled ? '禁用' : '启用'}失败：${readErrorText(err)}`; }
       finally { change.disabled = false; }
     }, policy.enabled ? 'destructive' : '');
     danger.append(change, button('删除项目', () => deleteProject({ id, full_name: repository.full_name, registered: true }, async () => {

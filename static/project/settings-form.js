@@ -66,7 +66,7 @@ function settingsForm(title, nodes, save, { editable = true, caption = '保存',
       if (form.skipReload) return;
       if (after) await after(text); else { current.flash = text; await reloadProject(); }
     }
-    catch (err) { message.className = 'view-error'; message.textContent = err.message; form.dispatchEvent(new CustomEvent('setting-failed', { detail: err })); } finally { submit.disabled = false; set.disabled = !editable; }
+    catch (err) { message.className = 'view-error'; message.textContent = readErrorText(err); form.dispatchEvent(new CustomEvent('setting-failed', { detail: err })); } finally { submit.disabled = false; set.disabled = !editable; }
   });
   section.append(form); return section;
 }
@@ -103,7 +103,7 @@ function attachUnifiedSettingsBar(host, sections, { dirty: dirtyFn = null, advan
           try { texts.push((await section.settingCommit()).text); }
           finally { if (section.settingForm) section.settingForm.skipReload = false; }
         }
-      } catch (err) { bar.messageEl.textContent = err.message || String(err); return; }
+      } catch (err) { bar.messageEl.textContent = readErrorText(err) || String(err); return; }
       current.flash = texts.filter(Boolean).pop() || '已保存';
       await reloadProject();
     },

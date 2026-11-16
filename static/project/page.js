@@ -94,7 +94,7 @@ function projectUnavailable(err, route) {
   else if (kind === 'login') actions.append(button('重新登录', () => signInAgain(), 'btn-primary'));
   else actions.append(button('重试', () => renderProject(route).catch(error), 'btn-primary'), Object.assign(back, { className: 'button-link btn-secondary' }));
   const details = element('details', '', 'console-state-details');
-  details.append(element('summary', '详细信息'), element('code', err.message));
+  details.append(element('summary', '详细信息'), element('code', readErrorText(err)));
   box.append(actions, details); return box;
 }
 async function loadProject(id,section=current.section) {

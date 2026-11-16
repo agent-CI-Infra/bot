@@ -70,7 +70,7 @@ function renderScheduleRecords(host, { project, read, invalidate }) {
       if (!live() || refused(error)) return;
       // Only a definitive refusal permits a new operation. Network failures retain the same key.
       if (error.status >= 400 && error.status < 500 && error.code !== 'idempotency_conflict' && !check) { delete pending.envelope; delete pending.receipt; }
-      status.textContent = error.message + '。先刷新记录或核对原操作；不会自动重复补发。';
+      status.textContent = readErrorText(error) + '。先刷新记录或核对原操作；不会自动重复补发。';
     } finally { pending.sending = false; pending.update?.(); }
   }
   async function retry(row, acknowledged) {

@@ -9,7 +9,7 @@ function channelOwnerTransfer(binding) {
     const name = owner.selectedOptions[0]?.textContent || '';
     if (!confirm(`把这个群聊助手的负责人转交给 ${name}？转交后原负责人不能再修改它。`)) { submit.disabled = false; return; }
     try { await api('/api/channels/chats/' + binding.chat_id + '/service-binding/owner', 'PUT', { owner_id: owner.value, expected_revision: binding.revision }); await start(); }
-    catch (err) { status.textContent = employeeError(err.message); submit.disabled = false; }
+    catch (err) { status.textContent = employeeError(readErrorText(err)); submit.disabled = false; }
   });
   return box;
 }
@@ -109,7 +109,7 @@ async function channelHistory(connector, panel) {
   controls.append(next, button('显式重新同步可见历史', async () => {
     if (!select.value) return;
     try { await api(`/api/channels/chats/${select.value}/sync`, 'POST', { full: true }); await search(); }
-    catch (err) { status.textContent = err.message; }
+    catch (err) { status.textContent = readErrorText(err); }
   }, 'quiet'));
   form.append(queryButton); form.addEventListener('submit', e => { e.preventDefault(); void search(); });
   select.addEventListener('change', () => { void search(); });
@@ -119,11 +119,11 @@ async function channelHistory(connector, panel) {
   const fresh = async () => (await api('/api/channels/chats?connector_id=' + connector.id)).chats.find(c => c.id === select.value);
   retention.append(button('保存本地保留策略', async () => {
     try { const chat = await fresh(); if (!chat) return; await api(`/api/channels/chats/${chat.id}/retention`, 'PUT', { days: days.value ? Number(days.value) : null, expected_revision: chat.revision }); await search(); }
-    catch (err) { status.textContent = err.message; }
+    catch (err) { status.textContent = readErrorText(err); }
   }, 'quiet'), button('清理指定时间之前的本地记录', async () => {
     if (!before.value || !confirm('清理会删除原文及派生摘要，并保留覆盖边界。继续？')) return;
     try { const chat = await fresh(); if (!chat) return; await api(`/api/channels/chats/${chat.id}/retention`, 'DELETE', { before: new Date(before.value).getTime(), expected_revision: chat.revision }); await search(); }
-    catch (err) { status.textContent = err.message; }
+    catch (err) { status.textContent = readErrorText(err); }
   }, 'quiet'));
   section.append(form, status, results, controls, retention); panel.append(section);
   if (chats.length) await search();

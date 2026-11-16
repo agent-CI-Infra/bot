@@ -21,7 +21,7 @@ async function globalProjectSettings(request, id) {
     const control = event.currentTarget, owner = me; control.disabled = true;
     try { const result = await api('/api/installations/sync', 'POST', {}); if (me !== owner) return;
       forgetConsoleGaps(); syncConsoleShell(); if (request !== renderVersion) return; const conclusion = installationSyncNotice(result); notice('message', conclusion.text, conclusion.tone); await route();
-    } catch (err) { if (request === renderVersion) notice('message', err.message, '', 'alert'); } finally { control.disabled = false; }
+    } catch (err) { if (request === renderVersion) notice('message', readErrorText(err), '', 'alert'); } finally { control.disabled = false; }
   }), consoleLink('#/settings/projects/' + (hidden ? 'list.0' : 'hidden.0'), hidden ? '返回项目管理' : '管理已隐藏仓库'));
   selection.append(tools, note(`${hidden ? '已隐藏仓库' : '项目'} · 第 ${offset / 50 + 1} 页 · 本页 ${installed.length} 个`));
   for (const row of installed) {
@@ -50,7 +50,7 @@ async function trustedOrganizations(request) {
   // A failed read stays inside this card: the project list above keeps working.
   let organizations, candidates, models;
   try { [{ organizations, candidates }, { models }] = await Promise.all([api('/api/trusted-organizations'), api('/api/models')]); }
-  catch (err) { box.append(consoleState('受信任的组织读取失败', err.message, { tone: 'error', retry: () => route() })); return box; }
+  catch (err) { box.append(consoleState('受信任的组织读取失败', readErrorText(err), { tone: 'error', retry: () => route() })); return box; }
   if (request !== renderVersion) return box;
   const message = element('p', '', 'view-error'); message.setAttribute('role', 'alert');
   const shared = models.filter(model => model.repository_id === null);
@@ -64,7 +64,7 @@ async function trustedOrganizations(request) {
   const save = async (owner, form) => {
     message.textContent = '';
     try { await api('/api/trusted-organizations/' + owner, 'PUT', { model_id: form.model.value || null, development_enabled: form.development.checked }); await route(); }
-    catch (err) { if (request === renderVersion) message.textContent = err.message; }
+    catch (err) { if (request === renderVersion) message.textContent = readErrorText(err); }
   };
   for (const organization of organizations) {
     const item = element('article', '', 'channel-binding trusted-organization'), form = defaults(organization.owner_login, organization);
@@ -74,7 +74,7 @@ async function trustedOrganizations(request) {
       button('撤销信任', async () => {
         if (!await askConfirm({ title: `撤销对 ${organization.owner_login} 的信任？`, body: ['之后它的仓库管理员不能再自己启动仓库；已启动的项目照常运行。'], action: '撤销信任', danger: true })) return;
         try { await api('/api/trusted-organizations/' + organization.owner_id, 'DELETE', {}); await route(); }
-        catch (err) { if (request === renderVersion) message.textContent = err.message; }
+        catch (err) { if (request === renderVersion) message.textContent = readErrorText(err); }
       }, 'quiet destructive'));
     item.append(element('strong', organization.owner_login), note(`由 ${organization.trusted_by || '超级管理员'} 于 ${timestamp(Date.parse(organization.trusted_at))} 信任`), ...form.controls, actions);
     box.append(item);

@@ -14,7 +14,7 @@ function actionForm(nodes, caption, save, extra = []) {
   form.noValidate = true; submit.type = 'submit'; message.setAttribute('role', 'alert'); actions.append(submit, ...extra); form.append(...nodes, message, actions);
   form.addEventListener('submit', async event => {
     event.preventDefault(); message.textContent = ''; submit.disabled = true;
-    try { await save(); } catch (err) { message.textContent = err.message; } finally { submit.disabled = false; }
+    try { await save(); } catch (err) { message.textContent = readErrorText(err); } finally { submit.disabled = false; }
   });
   return form;
 }

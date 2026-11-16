@@ -64,7 +64,7 @@ async function renderSchedules(panel, project) {
         if (!receipt) { await send(); return; }
         state.sending = true; showReceipt();
         try { state.receipt = await api(endpoint + '/commands/' + receipt.id); await finish(); }
-        catch (error) { if (live() && !revoked(error)) status.textContent = error.message; }
+        catch (error) { if (live() && !revoked(error)) status.textContent = readErrorText(error); }
         finally { state.sending = false; state.update?.(); }
       }, 'quiet'); check.disabled = state.sending; receiptBox.append(check);
     }
@@ -90,7 +90,7 @@ async function renderSchedules(panel, project) {
       if (revoked(error)) return;
       if (!replay && error.status >= 400 && error.status < 500 && !error.message.includes('idempotency_conflict')) { markConflict(state.envelope.operation,error.message); state.envelope = null; state.receipt = null; }
       else state.uncertain = true;
-      status.textContent = error.message + '。草稿已保留；先核对当前版本或原回执。';
+      status.textContent = readErrorText(error) + '。草稿已保留；先核对当前版本或原回执。';
     } finally { state.sending = false; state.update?.(); }
   }
   state.update = () => { if (!live()) return; if (state.receipt?.state === 'succeeded') void finish(); else showReceipt(); };
@@ -221,7 +221,7 @@ async function renderSchedules(panel, project) {
         const p = await read('preview_schedule',{plan,...(id ? {schedule_id:id} : {})});
         if (!live() || index!==activePreview || signature!==JSON.stringify(spec()) || id!==original?.id) return;
         revision=p.revision; parsed.textContent='时区：'+p.timezone+'\n未来触发：\n'+(p.future.length ? p.future.map(t=>time(t,p.timezone)).join('\n') : '无下一次触发')+'\n'+(p.report ? '以下为当前时间的样例日报；正式窗口截至逻辑触发时刻。\n'+p.report.text : p.supported ? '处理器已注册' : '处理器尚不支持，不能视为可执行');
-      } catch(error) { if (live() && index===activePreview && !revoked(error)) { parsed.textContent=error.code === 'schedule_has_no_future_occurrence' ? '无下一次触发：按当前时间规则与有效期，服务端找不到未来触发。' : '未来触发状态未知；请重新预览。'; status.textContent=error.message; } }
+      } catch(error) { if (live() && index===activePreview && !revoked(error)) { parsed.textContent=error.code === 'schedule_has_no_future_occurrence' ? '无下一次触发：按当前时间规则与有效期，服务端找不到未来触发。' : '未来触发状态未知；请重新预览。'; status.textContent = readErrorText(error); } }
     },'quiet'),parsed);
   const save = element('button', '保存计划'); save.type = 'submit'; save.dataset.scheduleWrite='1'; form.append(save);
   form.onsubmit = e => { e.preventDefault(); void command(original ? 'schedule.update' : 'schedule.register', original ? { id: original.id, revision: original.revision, plan: spec() } : { plan: spec() }); };

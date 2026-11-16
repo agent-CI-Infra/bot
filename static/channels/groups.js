@@ -30,7 +30,7 @@ function bindingSaveError(err) {
   const projects = (err.detail?.projects || []).join('、');
   if (err.code === 'service_role_project_scope') return `「${err.detail?.project || '所选项目'}」的专属助手角色只能用于范围只有这个项目的群${projects ? `；${projects} 不属于它` : ''}。请改选全局角色，或把范围缩小到这个项目。`;
   if (err.code === 'channel_service_model_unavailable') return `所选助手角色的模型没有授权给 ${projects || '范围内的部分项目'}。群助手只能用对范围内每个项目都可用的模型：请换一个角色，或请超级管理员把共享模型授权给这些项目。`;
-  return employeeError(err.message);
+  return employeeError(readErrorText(err));
 }
 // One line per binding: the level, or for an advanced binding the items it opens.
 function bindingLevelSummary(b, items) {

@@ -6,7 +6,7 @@ function rolesConsole() {
   const failed = err => {
     if (!live()) return;
     if ([401, 403].includes(err.status)) { target.rolesDraft = null; state = null; holder.replaceChildren(note('当前身份无权读取或修改角色配置，已清空本页草稿。'), message); }
-    const description = err.code === 'invalid_stage_policy' ? stagePolicyErrorText(err.field) : err.message;
+    const description = err.code === 'invalid_stage_policy' ? stagePolicyErrorText(err.field) : readErrorText(err);
     if (err.code === 'invalid_stage_policy' && state) { state.stageError = { field: err.field, message: description }; state.focusStageError = true; }
     message.textContent = `${description}${err.field ? '（配置项：' + err.field + '）' : ''}`;
   };

@@ -11,7 +11,7 @@ function boardForm(title,description,labels,submitCaption,submit) {
   const save=element('button',submitCaption);save.type='submit';actions.append(button('取消',()=>modal.close()),save);form.append(message,actions);modal.append(form);document.body.append(modal);
   form.addEventListener('submit',async event=>{event.preventDefault();save.disabled=true;message.textContent='';
     try{await submit(Object.fromEntries(Object.entries(inputs).map(([name,input])=>[name,input.value.trim()])));modal.close();}
-    catch(err){message.textContent=err.message;}finally{save.disabled=false;}
+    catch(err){message.textContent = readErrorText(err);}finally{save.disabled=false;}
   });modal.addEventListener('close',()=>modal.remove(),{once:true});modal.showModal();
 }
 function boardSaveAs(group=boardState.group) {

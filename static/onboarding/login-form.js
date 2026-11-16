@@ -27,7 +27,7 @@ function githubLoginForm(saved,app){
       throw new Error(({github_client_id_required:'请填写独立 OAuth App 的 Client ID。',github_login_secret_required:'启用前需要保存这个 OAuth App 的 Client secret。',
         github_login_oauth_app_required:'这里需要 OAuth App 的凭据；请到 Developer settings → OAuth Apps 创建，不能使用仓库 GitHub App 的 Client ID。',
         github_login_https_required:'GitHub 登录需要 HTTPS 地址：先在第 1 步验证公网 HTTPS 地址；本机测试可从 127.0.0.1 或 localhost 打开。',
-        invalid_admin_origin:'无法生成登录回调，请先验证公网 HTTPS 地址。',invalid_github_client_id:'Client ID 格式无效，请从 OAuth App 设置复制。'})[code]||err.message);
+        invalid_admin_origin:'无法生成登录回调，请先验证公网 HTTPS 地址。',invalid_github_client_id:'Client ID 格式无效，请从 OAuth App 设置复制。'})[code]|| readErrorText(err));
     }
     secret.value='';await start();notice('message',payload.enabled?'GitHub 登录已启用，用户可从登录页授权登录。':'已保存；当前使用本地账号登录。');return false;
   });

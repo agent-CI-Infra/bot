@@ -276,7 +276,7 @@ function knowledgeSection() {
     feedback.setAttribute('role', 'alert'); const submit = element('button', '确认'); submit.type = 'submit'; form.append(element('h2', title), field(title === '新建文件夹' ? '文件夹名称' : '目标路径', control), feedback, submit, button('取消', () => dialog.close(), 'quiet'));
     form.addEventListener('submit', async event => { event.preventDefault(); submit.disabled = true;
       // Path operations use the page's mutation guard and always leave the error in the live workspace.
-      try { const done = await save(control.value); if (done !== false) dialog.close(); else feedback.textContent = status.textContent || '操作未完成，请重试。'; } catch (error) { feedback.textContent = error.message; } finally { submit.disabled = false; }
+      try { const done = await save(control.value); if (done !== false) dialog.close(); else feedback.textContent = status.textContent || '操作未完成，请重试。'; } catch (error) { feedback.textContent = readErrorText(error); } finally { submit.disabled = false; }
     }); dialog.append(form); root.append(dialog); dialog.addEventListener('close', () => dialog.remove()); dialog.showModal(); control.focus();
   }
   function moveDialog() {

@@ -63,7 +63,7 @@ function providerEditor(group, repositoryId, after) {
       group=next;source=next.find(model=>model.key_configured)||next[0];existing.clear();next.forEach(model=>existing.add(model.model_name));
       for(const name of selected)if(existing.has(name))selected.delete(name);
       message.replaceChildren(comparison);draw();latest.hidden=true;
-    }catch(err){message.textContent=err.message;}finally{latest.disabled=false;}
+    }catch(err){message.textContent = readErrorText(err);}finally{latest.disabled=false;}
   });latest.hidden=true;actions.append(latest);
   const snapshot=()=>group.map(model=>({id:model.id,version:model.version}));
   if(editing&&group.some(model=>model.key_configured))actions.append(button('撤销供应商 Key',async()=>{
@@ -82,7 +82,7 @@ function providerEditor(group, repositoryId, after) {
     try{
       await api(editing?`/api/models/${source.id}/provider`:'/api/models/provider',editing?'PATCH':'POST',editing?{versions:snapshot(),...changes}:{repository_id:repositoryId,api_url:address,api_key:key.value,model_names:[...selected]});
       modal.close();await after(editing?'已保存供应商配置'+(selected.size?'，已添加 '+[...selected].join('、'):''):'已新增供应商，已添加 '+[...selected].join('、'));
-    }catch(err){const code=err.message.replace(/^\d+\s*·\s*/,'');message.textContent=({version_conflict:'供应商已被其他页面修改。草稿已保留，请读取最新版本并核对差异后再保存。',provider_already_exists:'该地址已有供应商，请在对应供应商中编辑。',model_key_missing:'请填写 API Key 后添加模型。',model_already_exists:'要添加的模型已经存在，请重新打开供应商。'})[code]||err.message;latest.hidden=code!=='version_conflict';}
+    }catch(err){const code=err.message.replace(/^\d+\s*·\s*/,'');message.textContent=({version_conflict:'供应商已被其他页面修改。草稿已保留，请读取最新版本并核对差异后再保存。',provider_already_exists:'该地址已有供应商，请在对应供应商中编辑。',model_key_missing:'请填写 API Key 后添加模型。',model_already_exists:'要添加的模型已经存在，请重新打开供应商。'})[code]|| readErrorText(err);latest.hidden=code!=='version_conflict';}
     finally{fields.disabled=false;for(const control of actions.querySelectorAll('button'))control.disabled=false;}
   });
   modal.addEventListener('close',()=>{request++;key.value='';modal.remove();},{once:true});draw();modal.showModal();

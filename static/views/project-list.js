@@ -57,7 +57,7 @@ function projectListControls(row) {
           const {policy} = await api(`/api/repositories/${row.id}/policy`, 'PATCH', {[key]: !row[key]});
           Object.assign(row, policy); feedback.textContent = `${caption}已${row[key] ? '开启' : '关闭'}${!row.enabled ? '；项目仍已禁用' : ''}`;
         }
-      } catch (err) { feedback.classList.add('control-error'); feedback.textContent = `${caption}保存失败：${err.message}`; }
+      } catch (err) { feedback.classList.add('control-error'); feedback.textContent = `${caption}保存失败：${readErrorText(err)}`; }
       finally { pending = false; features.removeAttribute('aria-busy'); sync(); }
     }, 'project-feature-switch');
     control.setAttribute('role', 'switch'); control.setAttribute('aria-label', row.full_name + ' ' + caption);
@@ -343,7 +343,7 @@ const removalErrors = {
 };
 function removalMessage(err) {
   const code = String(err.message).replace(/^\d+\s*·\s*/, '');
-  return removalErrors[code] || (code.startsWith('github_') ? `无法向 GitHub 核对（${code}），记录保留，没有删除。` : err.message);
+  return removalErrors[code] || (code.startsWith('github_') ? `无法向 GitHub 核对（${code}），记录保留，没有删除。` : readErrorText(err));
 }
 // The server asks GitHub again before deleting; the badges on the list are never enough. A refusal stays in the dialog.
 async function deleteProject(row, after) {
@@ -460,6 +460,6 @@ $('activation-form').addEventListener('submit', async event => {
     await api(`/api/installations/${target.row.id}/activate`, 'POST', { model_id: form.elements.model_id.value || null, development_enabled: form.elements.development_enabled.checked,
       ...(target.row.organization_trusted ? {} : { trust_organization: form.elements.trust_organization.checked }) });
     activationView.close(); await target.after();
-  } catch (err) { $('activation-error').textContent = err.message; } finally { submit.disabled = false; }
+  } catch (err) { $('activation-error').textContent = readErrorText(err); } finally { submit.disabled = false; }
 });
 

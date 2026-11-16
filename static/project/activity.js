@@ -126,7 +126,7 @@ function ruleCard(path) {
       if (common) common.querySelector('.common-rule-body').replaceChildren(ruleCard(path));
       else if ($('project-detail')?.redraw) $('project-detail').redraw();
       else { current.focusRule = path; renderProject({ id: current.id, section: current.section, item: current.item }); } }
-    catch (err) { message.textContent = err.message; }
+    catch (err) { message.textContent = readErrorText(err); }
   };
   // Browse first, edit on demand: the editor starts from the console text, or from the built-in default when there is none.
   actions.append(button(consoleLayer ? '编辑控制台覆盖' : '添加控制台覆盖', () => {

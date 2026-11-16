@@ -73,7 +73,7 @@ async function renderFeishuBindingsPage(panel, current) {
           binding_replayed: '此绑定请求已处理，请刷新状态或在原私聊重新发送 /bind。',
           binding_login_already_started: '此请求已关联平台账户，请完成原私聊确认；需要更换账户时重新发送 /bind。',
           channel_application_forbidden: '你在这个机器人所属的组织没有授权，不能通过它绑定。' };
-        status.textContent = Object.entries(reason).find(([code]) => err.message.includes(code))?.[1] || err.message;
+        status.textContent = Object.entries(reason).find(([code]) => err.message.includes(code))?.[1] || readErrorText(err);
         claim.disabled = false;
       }
     }, '');
@@ -142,7 +142,7 @@ async function renderFeishuBindingsPage(panel, current) {
           setTimeout(poll, 2000);
         };
         void poll();
-      } catch (err) { status.textContent = err.message; }
+      } catch (err) { status.textContent = readErrorText(err); }
     };
     const rows = new Map();
     for (const a of data.applications) {
@@ -181,7 +181,7 @@ async function renderFeishuBindingsPage(panel, current) {
           binding_replayed: '认证字符串已使用，请刷新状态；需要重新认证时发送 /reauth。', binding_login_already_started: '此请求已进入链接绑定流程，请回原私聊确认，或重新发送 /bind 获取认证字符串。',
           external_identity_conflict: '这个飞书身份已属于其他平台账户，请登录原账户处理。',
           channel_application_forbidden: '你在这个机器人所属的组织没有授权，不能通过它绑定。' };
-        status.textContent = Object.entries(reasons).find(([key]) => err.message.includes(key))?.[1] || err.message;
+        status.textContent = Object.entries(reasons).find(([key]) => err.message.includes(key))?.[1] || readErrorText(err);
         submit.disabled = false;
       }
     });
@@ -374,7 +374,7 @@ async function renderFeishuBindingsPage(panel, current) {
       // Project administrators manage their projects' assistant roles next to the groups that use them (#849).
       if (groupData.projects.length) void buildProjectRolesSection(groupData, () => { void loadGroups(); }).then(roles => {
         if (current() && groupBody.isConnected && groupBody.contains(rendered.root)) groupBody.append(roles);
-      }).catch(err => { if (current() && groupBody.isConnected) groupBody.append(consoleState('项目群助手角色读取失败', err.message, { tone: 'error' })); });
+      }).catch(err => { if (current() && groupBody.isConnected) groupBody.append(consoleState('项目群助手角色读取失败', readErrorText(err), { tone: 'error' })); });
       if (initialOpen) rendered.editorWrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       else if (querySection === 'groups') groupSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (err) {

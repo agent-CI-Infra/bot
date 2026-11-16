@@ -27,7 +27,7 @@ async function channelSchedules(chatId) {
       if (latest) row.append(note(`最近一次（${latest.trigger === 'manual' ? '手动' : '定时'}，${scheduleTime(latest.created_at, s.timezone)}）：${scheduleRunStates[latest.state] || latest.state}${latest.error ? '，原因：' + scheduleError(latest.error) : ''}`));
       const status = element('p', '', 'view-error'); status.setAttribute('role', 'alert');
       // A step returning false (a cancelled confirmation) leaves the panel as it is.
-      const act = (caption, work) => button(caption, async () => { status.textContent = ''; try { if (await work() !== false) await load(); } catch (err) { status.textContent = scheduleError(err.message); } }, 'quiet');
+      const act = (caption, work) => button(caption, async () => { status.textContent = ''; try { if (await work() !== false) await load(); } catch (err) { status.textContent = scheduleError(readErrorText(err)); } }, 'quiet');
       const actions = element('div', '', 'actions'); row.append(actions);
       if (s.can_manage) actions.append(act('立即运行一次', () => api('/api/channels/schedules/' + s.id + '/run', 'POST', {})),
         act(s.state === 'active' ? '暂停' : '恢复', () => api('/api/channels/schedules/' + s.id, 'PATCH', { expected_revision: s.revision, enabled: s.state !== 'active' })),
@@ -60,7 +60,7 @@ async function channelSchedules(chatId) {
         preview.textContent = '';
         try { const result = await api('/api/channels/schedules/preview', 'POST', { timezone: spec().timezone, ...(kind.value === 'cron' ? { cron: spec().cron } : { interval_minutes: spec().interval_minutes }) });
           preview.textContent = '接下来：' + result.future.map(at => scheduleTime(at, spec().timezone)).join('、'); }
-        catch (err) { preview.textContent = scheduleError(err.message); }
+        catch (err) { preview.textContent = scheduleError(readErrorText(err)); }
       }, 'quiet'), preview, status, save);
       form.addEventListener('submit', async event => {
         event.preventDefault(); save.disabled = true; status.textContent = '';
@@ -69,7 +69,7 @@ async function channelSchedules(chatId) {
           if (editing) await api('/api/channels/schedules/' + editing.id, 'PATCH', { ...body, expected_revision: editing.revision });
           else await api('/api/channels/chats/' + chatId + '/schedules', 'POST', body);
           await load();
-        } catch (err) { status.textContent = scheduleError(err.message); save.disabled = false; }
+        } catch (err) { status.textContent = scheduleError(readErrorText(err)); save.disabled = false; }
       });
       box.append(title, form);
     }

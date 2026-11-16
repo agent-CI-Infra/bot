@@ -26,7 +26,7 @@ function showBootFailure(err) {
   document.body.classList.remove('board-mode');
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
   const message = $('boot-message');
-  message.textContent = t('chrome.boot_failed', { message: err.message });
+  message.textContent = t('chrome.boot_failed', { message: readErrorText(err) });
   message.setAttribute('role', 'alert'); message.classList.add('view-error');
   $('boot-retry').hidden = false;
 }

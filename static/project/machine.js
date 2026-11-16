@@ -74,7 +74,7 @@ function machineSection(globalSettings = false) {
   const names = { cpus: 'CPU', memory_mb: '内存', pids: '进程数', tmp_mb: '/tmp', packages: '软件包', setup_script: '初始化脚本', rerun_setup: '重新初始化', egress: '网络', env: '环境变量' };
   const update = () => {
     try { const changes = Object.keys(readSpec(form.querySelector('form'))); draft.textContent = changes.length ? '有未保存的更改：' + changes.map(key => names[key]).join('、') : '已保存'; }
-    catch (err) { draft.textContent = '有未保存的更改：' + err.message; }
+    catch (err) { draft.textContent = '有未保存的更改：' + readErrorText(err); }
   };
   form.addEventListener('input', update); update();
   form.settingDirty = () => { try { return !!Object.keys(readSpec(form.querySelector('form'))).length; } catch { return true; } };

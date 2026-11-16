@@ -22,7 +22,7 @@ function pendingStartAction(repo) {
   const start = button('启动', async () => {
     start.disabled = true; notice('message', `正在启动 ${repo.full_name}…`);
     try { await api(`/api/installations/${repo.id}/activate`, 'POST', {}); notice('message', `已启动 ${repo.full_name}。`); await route(); }
-    catch (err) { start.disabled = false; notice('message', err.message, '', 'alert'); }
+    catch (err) { start.disabled = false; notice('message', readErrorText(err), '', 'alert'); }
   });
   return start;
 }
