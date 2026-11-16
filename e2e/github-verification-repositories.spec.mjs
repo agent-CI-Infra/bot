@@ -118,3 +118,68 @@ test('身份页上核验完成而列表读取失败：行内按钮重读一次�
     expect(errors).toEqual([]);
   } finally { f.state.apiGate = undefined; c.release(); await f.close(); }
 });
+
+// #945: while the notice is up, the header's refresh runs start() again. That start() reads the same list, and it can fail
+// the same way — the console that is already on screen must keep the notice and its one retry (the only retry a reader has
+// there) instead of being swapped for the boot card. Once the endpoint answers again, the same refresh reads the whole
+// list, so it counts as the recovery #866 describes: the notice goes and the picker follows.
+test('故障期间点刷新：提示行与唯一重试不消失；端点恢复后刷新即算恢复', async ({ page }) => {
+  const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.route('https://avatars.githubusercontent.com/**', route => route.abort());
+  // The endpoint can be made to fail, and one read can be held in flight, so the state of the page during the refresh is
+  // readable instead of guessed from the state after it.
+  let failing = false, heldAgain = false, releaseHeld = null;
+  const listReads = [];
+  page.on('request', request => { if (new URL(request.url()).pathname === '/api/repositories') listReads.push(request.url()); });
+  await page.route('**/api/repositories*', async route => {
+    if (!failing) return route.continue();
+    if (heldAgain) { heldAgain = false; await new Promise(resolve => { releaseHeld = resolve; }); }
+    return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'fixture_unavailable' }) });
+  });
+  // The check is held at its first installation read, so the page is on the project list before the failure lands.
+  let release; const held = new Promise(resolve => { release = resolve; });
+  f.state.apiGate = async path => { if (path === '/app/installations/77') await held; };
+  const listRead = () => page.waitForRequest(request => new URL(request.url()).pathname === '/api/repositories');
+  try {
+    await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    const line = page.locator('#github-verification'), rows = page.locator('#rows'), boot = page.locator('#boot');
+    const picker = page.locator('#console-project option', { hasText: 'fixture/project-101' });
+    const retry = page.getByRole('button', { name: '重新读取项目列表' });
+    await expect(line).toBeVisible();
+    await expect(picker).toHaveCount(0);
+    await consoleNavigate(page, '项目');
+    failing = true; listReads.length = 0; release();
+    await expect(line).toHaveText('权限核验已完成，但项目列表读取失败。重新读取项目列表');
+    await expect(rows).toContainText('项目列表未能读取');
+    // The refresh re-reads the whole list. Its read is held in flight here: the notice and its one retry must already be
+    // untouched while the read is out, or the reader is left with no retry the moment the console is rebuilt.
+    heldAgain = true;
+    const [inFlight] = await Promise.all([listRead(), page.locator('#refresh').click()]);
+    expect(new URL(inFlight.url()).search, 'the refresh reads the whole list').toBe('');
+    await expect(line).toBeVisible();
+    await expect(line).toHaveAttribute('data-state', 'failed');
+    await expect(line).toHaveText('权限核验已完成，但项目列表读取失败。重新读取项目列表');
+    await expect(retry).toHaveCount(1);
+    // The read fails like the one before it: the console stays, the notice stays, and the boot card does not take over.
+    const card = await page.evaluateHandle(() => document.querySelector('#rows').firstElementChild);
+    releaseHeld();
+    await page.waitForFunction(node => document.querySelector('#rows').firstElementChild !== node, card);
+    await expect(boot).toBeHidden();
+    await expect(page.locator('#workspace')).toBeVisible();
+    await expect(line).toBeVisible();
+    await expect(line).toHaveAttribute('data-state', 'failed');
+    await expect(retry).toHaveCount(1);
+    await expect(rows).toContainText('项目列表未能读取');
+    await expect(rows).not.toContainText('正在核验 GitHub 权限');
+    // The endpoint is back: the same refresh reads the whole list, which is the recovery — notice gone, picker filled,
+    // and the page on screen redrawn from it.
+    failing = false;
+    await page.locator('#refresh').click();
+    await expect(line).toBeHidden();
+    await expect(picker).toHaveCount(1);
+    await expect(rows).toContainText('fixture/project-101');
+    expect(new URL(listReads.at(-2)).search, 'the refresh read the whole list').toBe('');
+    expect(new URL(listReads.at(-1)).search, 'the redraw read the page on screen').not.toBe('');
+    expect(errors).toEqual([]);
+  } finally { f.state.apiGate = undefined; release(); releaseHeld?.(); await f.close(); }
+});
