@@ -77,6 +77,12 @@ console.log(`# ${results.length} of ${sets.size} test sets ran, at most ${peak} 
 console.log(`# start and end of each set, in seconds after ${new Date(began).toISOString()}:`);
 for (const r of [...results].sort((a, b) => a.start - b.start || a.end - b.end)) console.log(`#   ${r.set.name.padEnd(28)} ${seconds(r.start).padStart(6)} ${seconds(r.end).padStart(6)}  ${r.state}`);
 console.log(['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo'].map(key => `# ${key} ${total(key)}`).join('\n'));
+// BOT_TEST_SUMMARY: where to write the same totals as named numbers (the simple JSON format the public board charts
+// scheduled runs from, #938). Nightly uploads it as an artifact.
+if (process.env.BOT_TEST_SUMMARY) writeFileSync(process.env.BOT_TEST_SUMMARY, JSON.stringify({ metrics: [
+  ...['tests', 'pass', 'fail', 'cancelled', 'skipped'].map(key => ({ name: key, value: total(key), unit: 'count' })),
+  { name: 'failed sets', value: failed.length + sets.size - results.length, unit: 'count' },
+  { name: 'duration', value: Math.round((Date.now() - began) / 1000), unit: 's' }] }, null, 2) + '\n');
 if (failed.length || results.length < sets.size) { console.log(`# failed sets: ${failed.map(r => r.set.name).join(' ') || 'none'}; their files stay in ${run}`); process.exitCode = 1; }
 else rmSync(run, { recursive: true, force: true });
 

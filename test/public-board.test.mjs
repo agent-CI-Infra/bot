@@ -22,8 +22,8 @@ test('verified deliveries update both public contracts through the real local co
   assert.equal(snapshot.repository.stars, 1);
   assert.ok(snapshot.sections.ci);
   // Generic data only (#938): no gate lanes, test reports or coverage, whatever the repository's CI looks like.
-  assert.equal(snapshot.schema_version, 3);
-  assert.deepEqual(Object.keys(snapshot.sections).sort(), ['ci', 'issues', 'ops', 'prs', 'repo']);
+  assert.equal(snapshot.schema_version, 4);
+  assert.deepEqual(Object.keys(snapshot.sections).sort(), ['ci', 'issues', 'ops', 'prs', 'repo', 'scheduled']);
   assert.equal(snapshot.sections.ci.data.lanes, undefined); assert.equal(snapshot.sections.ci.data.gates, undefined);
   assert.equal((await get('/boards/octo/hello/data/history/manifest.json')).status, 200);
   assert.deepEqual((await get('/dashboard/data/index.json')).data.repos.map(r => r.fullName), ['octo/hello']);
@@ -231,5 +231,5 @@ test('collecting again after the upgrade removes what the gate, coverage and E2E
       for (const field of ['tests', 'coverage', 'reports_status']) assert.equal(field in run, false, `${file}: ${field}`);
     }
   }
-  assert.equal((await get('/boards/octo/hello/data/snapshot.json')).data.schema_version, 3);
+  assert.equal((await get('/boards/octo/hello/data/snapshot.json')).data.schema_version, 4);
 });

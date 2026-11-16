@@ -325,6 +325,7 @@ def collect_ci(ctx: Context) -> dict:
             "in_progress": sum(1 for r in items if r["status"] != "completed"),
             "success_rate": round(ok * 100 / len(decided), 1) if decided else None,
             "median_duration_s": int(statistics.median(durations)) if durations else None,
+            "p90_duration_s": int(statistics.quantiles(durations, n=10, method="inclusive")[8]) if len(durations) > 1 else (durations[0] if durations else None),
         }
 
     per_workflow = []

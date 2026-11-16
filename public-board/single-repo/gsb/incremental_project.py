@@ -3,6 +3,7 @@
 Only generic GitHub data is shown: Issues, pull requests, workflow runs and their jobs, releases, and
 the repository's public maintenance views. Nothing depends on how a repository lays out its CI (#938).
 """
+from collections import Counter
 from datetime import timedelta
 
 from .board import BoardStore
@@ -14,8 +15,8 @@ from .public_sections import public_ops, envelope
 from .sync import stamp
 
 
-# 2: before #938 (lanes, gates, tests and coverage). 3: generic sections only.
-SCHEMA_VERSION = 3
+# 2: before #938 (lanes, gates, tests and coverage). 3: generic sections only. 4: scheduled runs and their results.
+SCHEMA_VERSION = 4
 
 
 def _stored_ci(history, index):
@@ -33,6 +34,48 @@ def _stored_ci(history, index):
                      "html_url": r["url"], "run_started_at": r.get("started_at"), "display_title": r.get("title")}
                     for r in sorted(index.values(), key=lambda r: (r["created_at"], r["id"]), reverse=True)]
     return StoredCI()
+
+
+def _failing_jobs(history, rows, limit=100):
+    """The jobs that failed most often over a workflow's latest runs (their latest attempts)."""
+    failed, inspected = Counter(), 0
+    for row in sorted(rows, key=lambda r: r.get("created_at") or "", reverse=True)[:limit]:
+        record = history.get("runs", history_key(row)) or {}
+        if record.get("jobs_status") != "available":
+            continue
+        inspected += 1
+        failed.update(j.get("name") for j in record.get("jobs", []) if j.get("conclusion") in ("failure", "timed_out"))
+    return {"top_failed_jobs": [{"name": name, "count": count} for name, count in failed.most_common(3)], "jobs_inspected": inspected}
+
+
+def _scheduled(history, rows, limit=60):
+    """Each scheduled workflow with the latest runs it made on schedule or by hand, oldest first, and what each
+    run reported (results.py): the metrics the board charts. Metric names are listed newest run first."""
+    scheduled = {row.get("workflow_id") for row in rows if row.get("event") == "schedule"}
+    by_workflow = {}
+    for row in rows:
+        if row.get("workflow_id") in scheduled and row.get("event") in ("schedule", "workflow_dispatch") and row.get("status") == "completed":
+            by_workflow.setdefault(row["workflow_id"], []).append(row)
+    out = []
+    for workflow, chosen in by_workflow.items():
+        chosen = sorted(chosen, key=lambda r: (r.get("created_at") or "", r["id"]))[-limit:]
+        runs = []
+        for row in chosen:
+            record = history.get("runs", history_key(row)) or row
+            results = record.get("results") or {}
+            runs.append({"id": row["id"], "attempt": row["attempt"], "created_at": row.get("created_at"), "event": row.get("event"),
+                         "conclusion": row.get("conclusion"), "duration_s": record.get("duration_s"), "url": row.get("url"),
+                         "sha": (row.get("sha") or "")[:7], "source": results.get("source"),
+                         "metrics": {m["name"]: m["value"] for m in results.get("metrics", [])},
+                         "jobs": [{"name": j.get("name"), "conclusion": j.get("conclusion"), "duration_s": j.get("duration_s")} for j in record.get("jobs", [])]})
+        units = {}
+        for run in reversed(runs):
+            record = history.get("runs", f"{run['id']}-{run['attempt']}") or {}
+            for metric in (record.get("results") or {}).get("metrics", []):
+                units.setdefault(metric["name"], metric.get("unit", ""))
+        out.append({"workflow_id": workflow, "name": chosen[-1].get("name"), "runs": runs,
+                    "metrics": [{"name": name, "unit": unit} for name, unit in units.items()]})
+    return sorted(out, key=lambda w: (w["name"] or "", w["workflow_id"] or 0))
 
 
 def build_snapshot(sync):
@@ -117,8 +160,10 @@ def build_snapshot(sync):
         line_meta = {**meta, "default_branch": line["ref"]}
         line_index = {ident: project_run(row) for ident, row in index.items() if run_line[ident] == key}
         ci = collect_ci(Context(_stored_ci(history, line_index), cfg, midnight, line_meta))
+        for workflow in ci["workflows"]:
+            workflow.update(_failing_jobs(history, [row for row in line_index.values() if row.get("workflow_id") == workflow["id"]]))
         runs = [project_run(row) for row in history.select("runs", lambda r, key=key: run_line.get(r["id"]) == key and r["attempt"] == index[r["id"]]["attempt"], limit=100)]
-        views[key] = {"ci": wrap(ci), "runs": runs}
+        views[key] = {"ci": wrap(ci), "runs": runs, "scheduled": wrap({"workflows": _scheduled(history, list(line_index.values()))})}
     main = views[lines[0]["key"]]
     runs = main["runs"]
     releases = history.select("releases", limit=30)
@@ -131,11 +176,11 @@ def build_snapshot(sync):
            "history": {"manifest": "./data/history/manifest.json", "totals": history.manifest["totals"]},
            "issues": issues, "prs": prs, "quality": {"runs": runs, "required_checks": old.get("quality", {}).get("required_checks"),
                "workflows": main["ci"]["data"]["workflows"], "status": "available"}, "releases": releases, "notices": [],
-           "sections": {"repo": wrap(repo), "issues": wrap(issues), "prs": wrap(prs), "ci": main["ci"],
+           "sections": {"repo": wrap(repo), "issues": wrap(issues), "prs": wrap(prs), "ci": main["ci"], "scheduled": main["scheduled"],
                         "ops": supplements.get("ops", wrap({}))},
            # The CI page switches lines; sections hold the default one.
            "lines": lines,
-           "line_sections": {line["key"]: {"ci": views[line["key"]]["ci"]} for line in lines[1:]},
+           "line_sections": {line["key"]: {name: views[line["key"]][name] for name in ("ci", "scheduled")} for line in lines[1:]},
            "config": {"stale_days": cfg.stale_days, "review_sla_days": cfg.review_sla_days, "pr_idle_days": cfg.pr_idle_days}}
     doc["board"] = BoardStore(cfg, persist=False).payload(doc)
     doc["details"] = {f"{kind}:{r['number']}": {"body": r.get("body", ""), "cross_references": []}

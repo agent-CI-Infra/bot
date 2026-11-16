@@ -36,6 +36,16 @@ jobs:
       - run: npm test
         env:
           BOT_REQUIRE_PI: '1'
+          BOT_TEST_SUMMARY: .tmp/unit-summary.json
+
+      # Scheduled and manual runs (Nightly) keep their totals for the public board's charts of scheduled runs (#938).
+      - uses: actions/upload-artifact@v7
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        with:
+          name: unit-summary
+          path: .tmp/unit-summary.json
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Compose files
         run: |
@@ -93,6 +103,16 @@ jobs:
           mkdir -p ~/.local/share/fonts && { cp ~/.cache/e2e-fonts/* ~/.local/share/fonts/ 2>/dev/null || echo 'no cached fonts'; }
 
       - run: npm run test:e2e
+        env:
+          PLAYWRIGHT_JUNIT: .tmp/e2e-junit.xml
+
+      - uses: actions/upload-artifact@v7
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        with:
+          name: e2e-junit
+          path: .tmp/e2e-junit.xml
+          if-no-files-found: ignore
+          retention-days: 30
 
       - uses: actions/upload-artifact@v7
         if: failure()

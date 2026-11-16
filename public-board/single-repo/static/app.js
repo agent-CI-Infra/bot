@@ -539,6 +539,8 @@
       { key: 'pull_request', label: 'PR', num: true, render: (w) => `${pct(w.pull_request.success_rate)} <span class="muted">(${w.pull_request.total})</span>`, sort: (w) => w.pull_request.success_rate },
       { key: 'failures_7d', label: '7 天失败', num: true },
       { key: 'median', label: '中位耗时', num: true, render: (w) => dur(w.all.median_duration_s), sort: (w) => w.all.median_duration_s },
+      { key: 'p90', label: 'P90 耗时', num: true, render: (w) => dur(w.all.p90_duration_s), sort: (w) => w.all.p90_duration_s },
+      { key: 'jobs', label: '失败最多的 job', render: (w) => (w.top_failed_jobs?.length ? w.top_failed_jobs.map((j) => `${esc(j.name)} ×${n(j.count)}`).join('，') : '<span class="muted">—</span>'), sortable: false },
       { key: 'last', label: '最近 run', render: (w) => (w.last_run ? `${conclusionBadge(w.last_run.conclusion || w.last_run.status)} ${link(w.last_run.url, esc(w.last_run.branch))} <span class="muted">${ago(w.last_run.created_at)}</span>` : '—'), sortable: false },
     ], d.workflows)}</div>`;
     html += sectionHead('Job 健康', `最近 ${d.job_history_runs} 次${trunk} run 的 job 级统计`);
@@ -564,6 +566,74 @@
       { key: 'created_at', label: '时间', render: (r) => ago(r.created_at) },
     ], runs, { limit: 30 })}</div>`;
     return html;
+  }
+
+  // ------------------------------------------------------------ scheduled runs (#938)
+  // Each scheduled workflow's runs (on schedule or by hand) and what each one reported about itself (see
+  // gsb/results.py): one picked metric as a single series over the runs, with the runs below as the table view.
+  // Only raw values are shown; nothing is scored.
+  const SCHED_SOURCE = { check_run: '检查输出中的表格', artifact: 'JUnit / JSON 产物', jobs: '仅 job 结论与耗时' };
+  STATE.schedMetric = {};
+  const schedOptions = (w) => [
+    ...w.metrics.map((m) => ({ key: `m:${m.name}`, label: m.name, unit: m.unit, value: (run) => run.metrics[m.name] })),
+    { key: 'duration', label: '运行耗时', unit: 's', value: (run) => run.duration_s },
+    ...[...new Set(w.runs.flatMap((run) => run.jobs.map((job) => job.name)))].map((name) => ({ key: `job:${name}`, label: `${name} 耗时`, unit: 's',
+      value: (run) => run.jobs.find((job) => job.name === name)?.duration_s })),
+  ];
+  const schedOption = (w) => { const options = schedOptions(w); return options.find((o) => o.key === STATE.schedMetric[w.workflow_id]) || options[0]; };
+  const schedValue = (value, unit) => (value == null ? '—' : unit === 's' ? dur(value) : unit === '%' ? `${n(value)}%` : `${n(value)}${unit && unit !== 'count' ? ` ${unit}` : ''}`);
+  const schedWorkflows = () => lineSection(STATE.snap, 'scheduled')?.data?.workflows || [];
+
+  function renderScheduled(sec) {
+    const workflows = sec?.data?.workflows || [];
+    if (!workflows.length) return '';
+    let html = sectionHead('定时运行', '定时触发和手动触发的运行各自报告的结果：原始指标及其变化，不打分');
+    html += workflows.map((w) => {
+      const option = schedOption(w), latest = w.runs[w.runs.length - 1];
+      const sources = [...new Set(w.runs.map((run) => run.source).filter(Boolean))].map((source) => SCHED_SOURCE[source] || source);
+      const select = `<label class="sched-pick">指标 <select data-sched-metric="${esc(w.workflow_id)}">${schedOptions(w).map((o) => `<option value="${esc(o.key)}"${o.key === option.key ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select></label>`;
+      const rows = w.runs.slice(-10).reverse().map((run) => `<tr><td>${link(run.url, esc(date(run.created_at)))}${run.event === 'workflow_dispatch' ? ' <span class="muted">手动</span>' : ''}</td><td>${conclusionBadge(run.conclusion)}</td>`
+        + `<td class="num">${esc(schedValue(option.value(run), option.unit))}</td><td class="num">${dur(run.duration_s)}</td><td>${esc(SCHED_SOURCE[run.source] || '尚未读取')}</td></tr>`).join('');
+      const body = `<div class="sched-head">${select}<span class="muted small">结果来源：${esc(sources.join('、') || '尚未读取')}</span></div>`
+        + `<figure class="sched-chart" data-sched-chart="${esc(w.workflow_id)}"></figure>`
+        + `<div class="table-wrap"><table><thead><tr><th>运行</th><th>结论</th><th class="num">${esc(option.label)}</th><th class="num">运行耗时</th><th>结果来源</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      return `<div class="grid one" style="margin-top:12px">${card(w.name, body, { sub: `最近 ${n(w.runs.length)} 次运行 · 最新一次 ${latest ? ago(latest.created_at) : '—'}` })}</div>`;
+    }).join('');
+    return html;
+  }
+
+  // Drawn after the tab is in the page, at its real width. The x axis is the run sequence (dates label it); the
+  // marker shape carries the outcome: filled for a successful run, a ring for any other conclusion.
+  function drawScheduled() {
+    const workflows = schedWorkflows();
+    document.querySelectorAll('[data-sched-chart]').forEach((box) => {
+      const w = workflows.find((item) => String(item.workflow_id) === box.dataset.schedChart);
+      if (!w || !box.clientWidth) return;
+      const option = schedOption(w), points = w.runs.map((run) => ({ run, value: option.value(run) })).filter((p) => typeof p.value === 'number');
+      if (!points.length) { box.innerHTML = empty('这些运行里还没有所选指标的数值'); return; }
+      const width = box.clientWidth, height = 200, left = 56, right = 16, top = 12, bottom = 26, count = points.length;
+      // A change over time: the axis fits the values (about four steps), so small moves stay visible; the caption
+      // says when it does not start at zero.
+      const values = points.map((p) => p.value), vmin = Math.min(...values), vmax = Math.max(...values);
+      const raw = (vmax - vmin || Math.abs(vmax) * 0.1 || 1) / 4, power = 10 ** Math.floor(Math.log10(raw)), step = [1, 2, 5, 10].map((unit) => unit * power).find((size) => raw <= size);
+      let lo = Math.floor(vmin / step) * step, hi = Math.ceil(vmax / step) * step;
+      if (lo === hi) { lo -= step; hi += step; }
+      if (vmin >= 0 && lo < 0) lo = 0;
+      const xAt = (index) => (count > 1 ? left + index * (width - left - right) / (count - 1) : (left + width - right) / 2);
+      const yAt = (value) => top + (1 - (value - lo) / (hi - lo)) * (height - top - bottom);
+      const tick = (value) => (option.unit === 's' ? dur(value) : n(value));
+      const grid = Array.from({ length: Math.round((hi - lo) / step) + 1 }, (_, i) => lo + i * step).map((value) => `<line class="trend-grid" x1="${left}" x2="${width - right}" y1="${yAt(value).toFixed(1)}" y2="${yAt(value).toFixed(1)}"></line><text class="trend-tick" x="${left - 6}" y="${(yAt(value) + 4).toFixed(1)}" text-anchor="end">${esc(tick(value))}</text>`).join('');
+      const every = Math.max(1, Math.ceil(count * 64 / Math.max(1, width - left - right))), labels = [];
+      for (let i = count - 1; i >= 0; i -= every) labels.push(`<text class="trend-tick" x="${xAt(i).toFixed(1)}" y="${height - 6}" text-anchor="middle">${esc(shortDate(points[i].run.created_at))}</text>`);
+      const line = count > 1 ? `<polyline class="trend-line" style="--c: var(--s1)" points="${points.map((p, i) => `${xAt(i).toFixed(1)},${yAt(p.value).toFixed(1)}`).join(' ')}"></polyline>` : '';
+      const marks = points.map((p, i) => {
+        const ok = p.run.conclusion === 'success', x = xAt(i).toFixed(1), y = yAt(p.value).toFixed(1);
+        const text = `${date(p.run.created_at)} · ${CONCLUSION_NAME[p.run.conclusion] || p.run.conclusion || '未知'}${p.run.sha ? ` · ${p.run.sha}` : ''}\n${option.label}：${schedValue(p.value, option.unit)}`;
+        return `<circle class="${ok ? 'trend-dot' : 'sched-miss'}" style="--c: var(--s1)" cx="${x}" cy="${y}" r="4"></circle><circle class="sched-hit" cx="${x}" cy="${y}" r="12" tabindex="0"${tip(text)}></circle>`;
+      }).join('');
+      box.innerHTML = `<svg class="trend-svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(`${w.name}：${option.label}，最近 ${count} 次运行`)}">${grid}${labels.join('')}${line}${marks}</svg>`
+        + `<figcaption class="muted small">每个点是一次运行，按运行先后排列；实心点为成功，空心圈为失败、取消或其他结论。${lo > 0 ? `纵轴从 ${esc(tick(lo))} 开始。` : ''}悬停或聚焦查看数值。</figcaption>`;
+    });
   }
 
   // ------------------------------------------------------------ shell
@@ -614,10 +684,11 @@
     safe('issues', () => renderIssues(snap.sections.issues));
     safe('prs', () => renderPRs(snap.sections.prs));
     const line = currentLine(snap);
-    safe('ci', () => lineBar(snap) + renderCI(lineSection(snap, 'ci'), line));
+    safe('ci', () => lineBar(snap) + renderCI(lineSection(snap, 'ci'), line) + renderScheduled(lineSection(snap, 'scheduled')));
     try { if (window.GSBBoard) window.GSBBoard.onSnapshot(snap); } catch (err) { console.error(err); }
     mountBoard();
     drawTrends();
+    drawScheduled();
   }
 
   function renderAll() { renderShell(); renderTabs(); }
@@ -729,7 +800,7 @@
   // Browsers throttle timers in background tabs; re-sync as soon as the tab is visible again.
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { clearTimeout(STATE.pollTimer); load(); } });
 
-  window.addEventListener('hashchange', () => { STATE.tab = activeTab(); renderShell(); mountBoard(); document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.id === `tab-${STATE.tab}`)); drawTrends(); });
+  window.addEventListener('hashchange', () => { STATE.tab = activeTab(); renderShell(); mountBoard(); document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.id === `tab-${STATE.tab}`)); drawTrends(); drawScheduled(); });
   // Tooltip layer: any element with data-tip.
   const tipEl = $('#tooltip');
   // Beside an element (for keyboard focus); a trend chart anchors it to its crosshair instead.
@@ -757,7 +828,7 @@
   });
   document.addEventListener('focusout', () => tipEl.classList.add('hidden'));
   let trendResize = null;
-  window.addEventListener('resize', () => { clearTimeout(trendResize); trendResize = setTimeout(drawTrends, 150); });
+  window.addEventListener('resize', () => { clearTimeout(trendResize); trendResize = setTimeout(() => { drawTrends(); drawScheduled(); }, 150); });
   // Trend controls: range presets, custom dates and series toggles redraw only that chart.
   document.addEventListener('click', (ev) => {
     const control = ev.target.closest('[data-trend-kind] button');
@@ -767,6 +838,14 @@
     if (control.dataset.trendSeries) { const key = control.dataset.trendSeries; if (view.hidden.has(key)) view.hidden.delete(key); else view.hidden.add(key); }
     drawTrend(kind);
     document.querySelector(`[data-trend-kind="${kind}"] [data-trend-${control.dataset.trendRange ? 'range' : 'series'}="${control.dataset.trendRange || control.dataset.trendSeries}"]`)?.focus();
+  });
+  // The scheduled-run metric: the table column follows, so the whole CI tab is drawn again.
+  document.addEventListener('change', (ev) => {
+    const pick = ev.target.closest('[data-sched-metric]');
+    if (!pick) return;
+    STATE.schedMetric[pick.dataset.schedMetric] = pick.value;
+    renderTabs();
+    document.querySelector(`[data-sched-metric="${pick.dataset.schedMetric}"]`)?.focus();
   });
   document.addEventListener('change', (ev) => {
     const input = ev.target.closest('[data-trend-from], [data-trend-to]');

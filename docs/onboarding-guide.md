@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | **管理面（控制台）** | https://agent-ci-infra-bot-admin.llmbots.co/ | 启动项目、跑一键接入、管理用户与仓库授权 |
 | **公共 Dashboard** | <公网入口地址>/dashboard/ | 看所有已登记仓库的 PR、Issue、贡献者和版本等社区指标 |
-| **单仓看板** | `<公网入口地址>/boards/<owner>/<repo>/` | 单个仓库的 Issue、PR、CI 运行历史和发版，`<owner>/<repo>` 用小写；任何仓库开启后就有内容，不需要按约定配置 CI |
+| **单仓看板** | `<公网入口地址>/boards/<owner>/<repo>/` | 单个仓库的 Issue、PR、CI 运行历史、定时运行结果的趋势图和发版，`<owner>/<repo>` 用小写；任何仓库开启后就有内容，不需要按约定配置 CI |
 | **GitHub App 安装页** | https://github.com/apps/agent-ci-infra-bot/installations/select_target | 把 bot 安装到你的账号/组织 |
 
 ### 管理面怎么登录
@@ -146,7 +146,10 @@ App 的 Workflows 权限仍然申请，只用于上面这类确认过的 CI 任�
 检查器会实时读你的仓库确认。出现未知通常是 App 没装到该仓库、或安装权限还没被批准。装/批之后点一次同步即可。
 
 **"单仓看板"报缺少权限？**
-看板采集仅使用源仓只读权限：Contents、Issues、Pull requests、Actions、Metadata。安装需要允许读取对应数据；不需要 Pages、Administration 或 Workflows 写权限。
+看板采集仅使用源仓只读权限：Contents、Issues、Pull requests、Actions、Checks、Metadata。安装需要允许读取对应数据（没有 Checks 时定时运行的结果只从产物读取）；不需要 Pages、Administration 或 Workflows 写权限。
+
+**单仓看板 CI 页的「定时运行」图怎样才有数据？**
+有定时触发（`schedule`）的 workflow 在默认分支上的运行（定时和手动触发都算）会被逐次读取，看板依次找：该运行检查套件里检查运行输出中的 Markdown 表格（例如测试报告类 action 写的检查结果），运行产物里的 JUnit XML 或简单 JSON（`{"metrics": [{"name": "tests", "value": 120, "unit": "count"}]}`），都没有时只画运行和各 job 的耗时。表格的列、JUnit 的总数和 JSON 的名称都成为可选指标；每次运行最多读 3 个不超过 10 MiB 的产物。Actions 的 step summary（`$GITHUB_STEP_SUMMARY`）GitHub 不经 API 提供，看板读不到。
 
 **私有仓库能接吗？**
 能。安装 App 不代表同意公开私有仓；超管在仓库列表开启看板后，快照才会公开，由 webhook 更新。无需配置额外 secret。

@@ -38,7 +38,7 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 ### 测试集与并行
 
-`npm test` 构建之后由 [`scripts/test-sets.mjs`](../scripts/test-sets.mjs) 把 `test/*.test.mjs` 分成测试集运行。每个测试文件默认自成一个集。一个集在自己的 `node --test` 进程里运行，集内的文件依次运行，文件内的用例也按 `node:test` 的默认方式依次运行；不同的集同时运行，同时运行的集数默认等于 CPU 数，可用 `npm test -- --jobs 4` 或环境变量 `BOT_TEST_JOBS` 调整，`npm test -- test/board.test.mjs` 只运行指定文件。上次各集的耗时记在 `.tmp/test-set-durations.json`，耗时长的集先启动。每个集结束时整段打印它的 TAP 输出，最后列出各集相对开始时刻的起止秒数和合计的 TAP 汇总；任何一个集失败，`npm test` 都以非零状态退出。
+`npm test` 构建之后由 [`scripts/test-sets.mjs`](../scripts/test-sets.mjs) 把 `test/*.test.mjs` 分成测试集运行。每个测试文件默认自成一个集。一个集在自己的 `node --test` 进程里运行，集内的文件依次运行，文件内的用例也按 `node:test` 的默认方式依次运行；不同的集同时运行，同时运行的集数默认等于 CPU 数，可用 `npm test -- --jobs 4` 或环境变量 `BOT_TEST_JOBS` 调整，`npm test -- test/board.test.mjs` 只运行指定文件。上次各集的耗时记在 `.tmp/test-set-durations.json`，耗时长的集先启动。每个集结束时整段打印它的 TAP 输出，最后列出各集相对开始时刻的起止秒数和合计的 TAP 汇总；任何一个集失败，`npm test` 都以非零状态退出。设置 `BOT_TEST_SUMMARY=<文件>` 时，同样的总数还写成简单 JSON（`{"metrics": [{"name", "value", "unit"}]}`）；Nightly 把它和 e2e 的 JUnit 报告（`PLAYWRIGHT_JUNIT=<文件>` 时 Playwright 另写一份）上传为产物，公共看板据此画定时运行的趋势图。
 
 运行器为每个集在 `.tmp/tests-*/<集名>/` 下准备独立资源：`TMPDIR` 指向其中的 `tmp/`，`HOME` 指向 `home/`（同时清除 `XDG_*` 目录变量，遵循 XDG 的程序回落到这个 HOME），`BOT_TEST_SET` 是集名，环境变量是这个集的进程自己的副本。集通过后删除它的目录，失败时保留并打印路径。集内的进程只能连接回环地址：[`scripts/test-network-guard.mjs`](../scripts/test-network-guard.mjs) 经 `NODE_OPTIONS` 加载到集内的每个 Node.js 进程，连接其他地址时按连接被拒绝处理，并让这个集失败，即使被测代码吞掉了这个错误。直接用 `node --test test/<文件>` 运行单个文件也可以，这时临时目录在系统临时目录下，也没有网络限制。
 
