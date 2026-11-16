@@ -22,9 +22,9 @@ import { useWorkspace, workspaceRemoving } from './workspace-cleanup.js';
  *
  * A task that prepares through the computer's git store gets no worktree right away: `worktree_plans` records the commit it
  * works on and the mode the system would give it. The task's controller (runTeam), or its agent when the task runs without
- * a role team, may choose (list_workspaces, use_workspace, create_workspace, no_workspace; src/agent/workspace-tools.ts); when the task
- * first needs its files without a choice, the system's choice above applies. A plan is `planned` until then, `bound` once
- * the task holds a worktree, `none` when it chose to work without one.
+ * a role team, may choose (list_workspaces, use_workspace, create_workspace; src/agent/workspace-tools.ts); when the task
+ * first needs its files without a choice, the system's choice above applies. A plan is `planned` until then and `bound`
+ * once the task holds a worktree. A task that never needs its files never binds one.
  */
 export type WorktreeMode = 'read' | 'write';
 const ended = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'superseded', 'failed'];
@@ -72,7 +72,7 @@ export function taskWorktree(store: Store, task: Row): Row | undefined {
 
 /** What a task is to get when it first needs its files (#769), for its current workspace. */
 export interface WorktreePlan { task_id: string; workspace_id: string; repository_id: string; head_sha: string; tree_sha: string; mode: WorktreeMode; author_email: string | null;
-  state: 'planned' | 'bound' | 'none'; decided_by: string | null; reason: string | null }
+  state: 'planned' | 'bound'; decided_by: string | null }
 export function taskPlan(store: Store, task: Row): WorktreePlan | undefined {
   return task.workspace_id ? store.get('SELECT * FROM worktree_plans WHERE task_id=? AND workspace_id=?', String(task.id), String(task.workspace_id)) as WorktreePlan | undefined : undefined;
 }
@@ -82,9 +82,9 @@ export function planWorktree(store: Store, task: Row, head: string, tree: string
     ON CONFLICT(task_id,workspace_id) DO UPDATE SET head_sha=excluded.head_sha,tree_sha=excluded.tree_sha,mode=excluded.mode,author_email=excluded.author_email,state='planned',
       decided_by=NULL,reason=NULL,decided_at=NULL`, String(task.id), String(task.workspace_id), String(task.repository_id), head, tree, mode, author, now());
 }
-/** The plan was carried out (state bound) or the task chose to work without files (state none). */
-export function decidePlan(store: Store, task: Row, state: 'planned' | 'bound' | 'none', by: string, reason: string | null = null): void {
-  store.run('UPDATE worktree_plans SET state=?,decided_by=?,reason=?,decided_at=? WHERE task_id=? AND workspace_id=?', state, by, reason, now(), String(task.id), String(task.workspace_id));
+/** The plan was carried out: the task holds its worktree (state bound). */
+export function decidePlan(store: Store, task: Row, state: 'planned' | 'bound', by: string): void {
+  store.run('UPDATE worktree_plans SET state=?,decided_by=?,decided_at=? WHERE task_id=? AND workspace_id=?', state, by, now(), String(task.id), String(task.workspace_id));
 }
 /**
  * A review moved to a new head of its pull request (#770): one without a worktree yet follows it by its plan alone, one

@@ -22,7 +22,7 @@ import { TaskEngine } from '../dist/agent/engine.js';
 import { queueWebhook } from '../dist/review/queue.js';
 import { dispatchContext } from '../dist/dispatch/store.js';
 import { Store } from '../dist/storage/database.js';
-import { listWorkspaces, workspaceTool, workspaceCoverage } from '../dist/agent/workspace-tools.js';
+import { listWorkspaces, workspaceTool } from '../dist/agent/workspace-tools.js';
 import { versionTool } from '../dist/tasks/versions.js';
 import { checkpoint } from '../dist/tasks/checkpoint.js';
 
@@ -207,8 +207,8 @@ test('review tasks on one commit share the mirror and the computer store: the se
   assert.ok(!JSON.stringify(h.store.all('SELECT content FROM task_logs')).includes(token));
 });
 
-test('#769 without a role team the review agent chooses its workspace: no_workspace leaves the computer untouched and the summary says so', async t => {
-  const u = await upstream(t), configs = {}, replies = {}, published = [], choice = '2'.repeat(48);
+test('#769 without a role team the review agent is offered the workspace choice; a review that never needs the files makes no worktree', async t => {
+  const u = await upstream(t), configs = {}, published = [];
   const manager = { call: async (_method, path, body) => {
     if (!path.endsWith('/execute')) return { repository_id: '101', state: 'ready', generation: 1, desired: 'ready', revision: 1 };
     const request = body.request, answer = run => run.then(result => ({ ok: true, result }), error => ({ ok: false, error: 'runner_operation_failed', detail: error.message }));
@@ -216,10 +216,8 @@ test('#769 without a role team the review agent chooses its workspace: no_worksp
     if (['workspace_context', 'workspace_read', 'workspace_worktree_create', 'workspace_worktree_bind', 'workspace_worktree_inspect'].includes(request.type))
       return answer(runnerWorkspace(request, join(u.root, 'tasks'), join(u.root, 'store'), undefined, join(u.root, 'worktrees')));
     if (request.type === 'workspace_agent_config') { configs[request.workspace_id] = (configs[request.workspace_id] || '') + Buffer.from(request.base64, 'base64').toString('utf8'); return { ok: true, result: { written: true } }; }
-    if (request.type === 'workspace_agent_tool') { replies[request.request_id] = (replies[request.request_id] || '') + Buffer.from(request.base64, 'base64').toString('utf8'); return { ok: true, result: { written: true } }; }
     if (request.type !== 'workspace_agent_poll') return { ok: true, result: {} };
-    // The agent's first call: this Issue needs no repository files.
-    if (!replies[choice]) return { ok: true, result: { state: 'running', tool_requests: [{ id: choice, name: 'no_workspace', arguments: { reason: 'The Issue asks about the release process.' }, kind: 'control' }] } };
+    // The agent answers from the Issue alone: it never reads a repository file or runs a command.
     return { ok: true, result: { state: 'completed', result: { summary: 'Answered.', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' } } };
   } };
   const github = createServer(async (req, res) => {
@@ -245,19 +243,17 @@ test('#769 without a role team the review agent chooses its workspace: no_worksp
   pinLegacyTaskConfiguration(h.store); engine.tick(); await Promise.all(engine.active.values());
   const task = h.store.get('SELECT * FROM tasks');
   assert.equal(task.status, 'succeeded', task.error_code);
-  // The agent was offered the four tools, as control-plane tools, with the rule in its system prompt and its commit in context.
+  // The agent was offered the three tools, as control-plane tools, with the rule in its system prompt and its commit in context.
   const config = JSON.parse(configs[task.workspace_id]);
-  assert.deepEqual(['list_workspaces', 'use_workspace', 'create_workspace', 'no_workspace'].map(name => [config.tools.some(tool => tool.function.name === name), config.control_tools.includes(name)]), Array(4).fill([true, true]));
+  assert.deepEqual(['list_workspaces', 'use_workspace', 'create_workspace'].map(name => [config.tools.some(tool => tool.function.name === name), config.control_tools.includes(name)]), Array(3).fill([true, true]));
   assert.match(config.system, /Repository workspace: this task holds no worktree until it first needs repository files/);
   assert.deepEqual(JSON.parse(task.input).context.workspace, { commit: u.second, mode: 'read', worktree: 'not_bound', binding: 'The first repository read or command binds an unchanged worktree of this commit that no task holds, or a new one.' });
-  assert.equal(JSON.parse(replies[choice]).result.ok, true);
-  // No worktree was made or taken, and the published summary does not claim a checkout.
+  // The task worked in its task directory alone: no worktree was made or taken, and the plan was never carried out.
   assert.deepEqual([exists(join(u.root, 'worktrees')), exists(join(u.root, 'tasks', task.workspace_id, 'repo')), h.store.get('SELECT count(*) n FROM worktree_bindings').n], [false, false, 0]);
-  assert.deepEqual({ ...h.store.get('SELECT state,decided_by,reason FROM worktree_plans WHERE task_id=?', task.id) }, { state: 'none', decided_by: 'agent', reason: 'The Issue asks about the release process.' });
-  const summary = published.find(entry => entry.path.endsWith('/issues/1/comments')).body.body;
-  assert.match(summary, /Coverage: No checkout: the agent worked without the repository files \(The Issue asks about the release process\.\)/);
+  assert.deepEqual({ ...h.store.get('SELECT state,decided_by FROM worktree_plans WHERE task_id=?', task.id) }, { state: 'planned', decided_by: null });
+  assert.ok(published.some(entry => entry.path.endsWith('/issues/1/comments')));
   const logs = h.store.all('SELECT content FROM task_logs WHERE task_id=?', task.id).map(row => JSON.parse(row.content));
-  assert.deepEqual(logs.filter(log => log.type === 'workspace_chosen').map(log => [log.decided_by, log.choice, log.detail]), [['agent', 'none', '执行 agent 决定不用工作区：The Issue asks about the release process.']]);
+  assert.deepEqual(logs.filter(log => log.type === 'workspace_chosen'), []);
 });
 
 // A task on a project computer: the real runner's workspace and store operations, in directories under the test root, and
@@ -340,10 +336,9 @@ test('#769 the task\'s own choice: share a reader\'s worktree, take a changed on
   assert.deepEqual(b.history('workspace_bound').map(entry => [entry.worktree_id, entry.mode, entry.reused, entry.decided_by]), [[held.id, 'read', true, 'agent']]);
   // Once bound, the task keeps its worktree for the attempt.
   assert.equal((await workspaceTool(b.workspace, 'create_workspace', {}, 'agent')).error, 'workspace_already_bound');
-  // A writer: never read-only, never without files, and only a worktree nobody holds.
+  // A writer: never read-only, and only a worktree nobody holds.
   const c = plannedTask(u.root, 'development.issue'); await c.plan(u.second, mirror);
   assert.deepEqual(await Promise.all([{ worktree_id: held.id }, { worktree_id: held.id, mode: 'read' }].map(args => workspaceTool(c.workspace, 'use_workspace', args, 'agent').then(r => r.error))), ['workspace_busy', 'workspace_mode_not_allowed']);
-  assert.equal((await workspaceTool(c.workspace, 'no_workspace', { reason: 'none' }, 'agent')).error, 'workspace_required');
   assert.equal((await workspaceTool(c.workspace, 'use_workspace', { worktree_id: 'x' }, 'agent')).error, 'invalid_arguments');
   // With the readers done, a reader's leftover change is taken only with on_changes; a refused choice changes nothing.
   a.finish(); b.finish(); writeFileSync(join(path, 'README.md'), 'changed by a reader\n');
@@ -361,21 +356,14 @@ test('#769 the task\'s own choice: share a reader\'s worktree, take a changed on
   const e = plannedTask(u.root, 'development.issue'); await e.plan(u.second, mirror);
   const kept = await workspaceTool(e.workspace, 'use_workspace', { worktree_id: held.id, on_changes: 'keep_changes' }, 'agent');
   assert.deepEqual([kept.changed_count, (await e.workspace.call('read', { type: 'workspace_read', path: 'README.md' })).content], [1, 'work in progress\n']);
-  // A reader that needs no files: nothing is made, a repository call says why, and the review's coverage says so too.
+  // A reader may make a worktree of its own instead of the system's choice.
   const f = plannedTask(u.root); await f.plan(u.second, mirror);
-  assert.equal((await workspaceTool(f.workspace, 'no_workspace', {}, 'agent')).error, 'invalid_arguments');
-  assert.equal((await workspaceTool(f.workspace, 'no_workspace', { reason: 'The question is about the release process.' }, 'agent')).ok, true);
-  const refused = await f.workspace.call('read', { type: 'workspace_read', path: 'README.md' });
-  assert.deepEqual([refused.error, exists(f.repo)], ['no_workspace', false]); assert.match(refused.message, /\(The question is about the release process\.\)/);
-  assert.deepEqual(workspaceCoverage(f.workspace, ['Checkout: 3 files at x', 'Other']), ['No checkout: the agent worked without the repository files (The question is about the release process.)', 'Other']);
-  assert.deepEqual(f.history('workspace_none').map(entry => [entry.decided_by, entry.reason]), [['agent', 'The question is about the release process.']]);
-  // It may still change its mind before it holds one.
   const made = await workspaceTool(f.workspace, 'create_workspace', {}, 'agent');
   assert.deepEqual([made.created, made.mode, (await f.workspace.call('read2', { type: 'workspace_read', path: 'README.md' })).content], [true, 'read', 'second\n']);
   assert.notEqual(made.worktree_id, held.id);
 });
 
-test('#769 reading the versions binds no worktree; a bound review that moves keeps its plan on the new commit; a controller\'s no_workspace names it', async t => {
+test('#769 reading the versions binds no worktree; a bound review that moves keeps its plan on the new commit', async t => {
   const u = await upstream(t), mirror = await u.cache.open('101', { url: u.url, token, commits: [u.first, u.second] });
   const a = plannedTask(u.root), planned = await a.plan(u.first, mirror), row = () => a.store.get('SELECT * FROM tasks WHERE id=?', 'task-' + a.id);
   // A controller reads the versions before it chooses: the planned commit instead of HEAD, and no runner call.
@@ -392,14 +380,6 @@ test('#769 reading the versions binds no worktree; a bound review that moves kee
   const listed = await listWorkspaces(a.workspace), held = a.store.get('SELECT worktree_id FROM worktree_bindings WHERE task_id=?', 'task-' + a.id).worktree_id;
   assert.deepEqual([a.workspace.plannedWorktree().head_sha, listed.task.commit, listed.task.holds.worktree_id], [u.second, u.second, held]);
   assert.deepEqual(listed.worktrees.map(w => [w.worktree_id, w.head, w.at_task_commit]), [[held, u.second, true]]);
-  // A controller chose no files: the roles it delegates to hear that only it can choose, and the summary says who chose.
-  const b = plannedTask(u.root); await b.plan(u.second, mirror);
-  assert.equal((await workspaceTool(b.workspace, 'no_workspace', { reason: 'The comment only thanks the author.' }, 'manager')).ok, true);
-  const refused = await b.workspace.call('read', { type: 'workspace_read', path: 'README.md' });
-  assert.equal(refused.error, 'no_workspace');
-  assert.match(refused.message, /^The task's controller \(manager\) chose to work without repository files \(The comment only thanks the author\.\)\. Work from \.\.\/context\/ and the task records; if the task needs repository files or commands, say so in your result\.$/);
-  assert.deepEqual(workspaceCoverage(b.workspace, ['Checkout: 3 files at x']), ['No checkout: the controller (manager) chose to work without the repository files (The comment only thanks the author.)']);
-  assert.deepEqual((await versionTool(b.store, b.store.get('SELECT * FROM tasks WHERE id=?', 'task-' + b.id), b.workspace, 'read_version_context', {})).workspace, { worktree: 'none', commit: u.second, tree_sha: git(u.bare, 'rev-parse', u.second + '^{tree}') });
 });
 
 test('a task checks out a git worktree with the history; the computer store receives only the commits it lacks', async t => {

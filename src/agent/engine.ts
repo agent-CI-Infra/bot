@@ -46,7 +46,7 @@ import { agentLoop, type PlatformTools } from './loop.js';
 import { roleAssignmentContext } from './profiles.js';
 import { ReadTokens } from './read-token.js';
 import { currentOperation, VolumeFull, Workspace } from './workspace.js';
-import { workspaceContext, workspaceCoverage } from './workspace-tools.js';
+import { workspaceContext } from './workspace-tools.js';
 import {roleBackendWorkspace} from '../roles/workspace.js';
 import {recoverWithManager} from '../roles/manager-recovery.js';
 import { automaticState, isAttemptFailure } from './failures.js';
@@ -764,7 +764,7 @@ export class TaskEngine {
           // A pull request this task published on the way is part of its result.
           const candidate=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),published=candidate?JSON.parse(candidate.data).published:null;
           result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,
-            ...(input.heads?.length>1?{reviewed_heads:input.heads}:{}),coverage:workspaceCoverage(workspace!,input.coverage),object_hash:input.object_hash,...(published?{pull_request:published}:{})};
+            ...(input.heads?.length>1?{reviewed_heads:input.heads}:{}),coverage:input.coverage,object_hash:input.object_hash,...(published?{pull_request:published}:{})};
           await acceptReport(result);
           update({result:JSON.stringify(result),phase:'publish'});validatedPhase='publish';
         }else if(task.phase!=='done')stop('create_pull_request_required',undefined,`开发执行结束时仍处于 ${task.phase} 阶段，未完成 create_pull_request。`);

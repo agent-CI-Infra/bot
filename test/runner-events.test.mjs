@@ -173,7 +173,7 @@ test('a file tool without a checkout asks the control plane for the task worktre
   assert.deepEqual(await readdir(join(dir,'tool-requests')),[],'one request, for the first repository read');
 });
 
-test('a task that chose no workspace answers its file tools with the control plane\'s reason',async t=>{
+test('a task whose worktree cannot be made answers its file tools with the control plane\'s reason',async t=>{
   const base=await mkdtemp(join(tmpdir(),'pi-workspace-')),id=randomWorkspaceId(),root=join(base,id),dir=join(root,'agent');
   await mkdir(dir,{recursive:true});t.after(()=>rm(base,{recursive:true,force:true}));
   const calls=[{name:'read_file',args:{path:'README.md'}},{name:'finish_review',args:{summary:'Done'}}];
@@ -185,8 +185,8 @@ test('a task that chose no workspace answers its file tools with the control pla
   t.after(async()=>{child.kill('SIGKILL');await closed;});
   const request=await until(async()=>{const names=await readdir(join(dir,'tool-requests')).catch(()=>[]);const file=names.find(n=>n.endsWith('.json'));return file&&JSON.parse(await readFile(join(dir,'tool-requests',file),'utf8'));});
   await mkdir(join(dir,'tool-replies'),{recursive:true});
-  await writeFile(join(dir,'tool-replies',`${request.id}.json`),JSON.stringify({error:'no_workspace',message:'This task chose to work without repository files.'}));
+  await writeFile(join(dir,'tool-replies',`${request.id}.json`),JSON.stringify({error:'workspace_unavailable',message:'No worktree could be made for this task on the project computer.'}));
   assert.equal((await closed)[0],0);
   const events=(await readFile(join(dir,'events.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
-  assert.deepEqual(events.find(e=>e.type==='tool'&&e.name==='read_file').result,{error:'no_workspace',message:'This task chose to work without repository files.'});
+  assert.deepEqual(events.find(e=>e.type==='tool'&&e.name==='read_file').result,{error:'workspace_unavailable',message:'No worktree could be made for this task on the project computer.'});
 });

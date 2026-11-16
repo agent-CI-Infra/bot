@@ -204,14 +204,12 @@ test('an unfinished evaluation is an infrastructure fault, never evidence insuff
  assert.equal(f.requests.length,3);assert.equal(f.records.get(f.task.id).rounds,0);assert.equal(f.records.get(f.task.id).acceptance,null);
  assert.equal(f.h.store.get("SELECT count(*) n FROM task_history WHERE type='acceptance_fault'").n,3);
 });
-test('#769 QA of a report whose task chose no workspace verifies without a source checkout; otherwise it pins the source first',async t=>{
+test('#769 QA of a report pins the report\'s source first, also while the task holds no worktree yet',async t=>{
  const f=await fixture(t,()=>({role:'assistant',content:JSON.stringify(pass)}));
  f.h.store.run("UPDATE tasks SET workspace_id=?,input=? WHERE id='delivery'",'c'.repeat(48),JSON.stringify({snapshot_tree:'b'.repeat(40)}));
  const task=f.h.store.get("SELECT * FROM tasks WHERE id='delivery'"),calls=[];
  const manager={call:async(_method,_path,body)=>{calls.push(['verifier',body.request.type]);return {ok:true,result:{tree_sha:'b'.repeat(40),sha:'a'.repeat(40)}};}};
  const workspace=state=>({task,manager,store:f.h.store,plannedWorktree:()=>({state}),log:()=>{},call:async(_key,request)=>{calls.push([state,request.type]);return request.type==='workspace_source'?{local_sha:'a'.repeat(40),tree_sha:'b'.repeat(40)}:{tree_sha:'b'.repeat(40)};}});
- assert.equal((await evaluateDelivery(f.h.store,task,workspace('none'),new Redactor(),async()=>{},false)).outcome,'pass');
- assert.deepEqual(calls,[]);
  assert.equal((await evaluateDelivery(f.h.store,task,workspace('planned'),new Redactor(),async()=>{},false)).outcome,'pass');
  assert.deepEqual(calls.slice(0,2),[['planned','workspace_source'],['verifier','workspace_acceptance']]);
 });
