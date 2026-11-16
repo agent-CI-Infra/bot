@@ -36,7 +36,7 @@
 
 业务运行保存 occurrence_id，在每次工具或模型动作前调用 `ScheduleService.authorizeAction(occurrenceId, capability, usage)`；重启后也使用该入口检查原快照、当前授权、安装、维护归属、运行时长和累计预算。queued/running 业务运行持续占用计划、项目和租户并发名额，不能在 dispatch 返回时就释放；业务服务通过可信的 `settleRun` 回写最终事实。超时运行被标记为 budget_exhausted，之后的工具动作被拒绝。模型动作需要预留调用次数及已知价格的费用上界；不能把未知价格当作零。工作类型的开关仍在 dispatch 时检查，业务服务继续承担它自己的门禁、工具能力、安装权限、角色和成本限制。
 
-`manager.check` 是 Manager 定时检查：到期时成为一个 `schedule.due` 事件交给项目 Manager，`parameters.instruction` 写要检查什么。Manager 按提示词的「定时检查」章节决定是否发起一项只读的普通任务（`task.request`，执行身份是计划的服务主体，合同来自 Manager 的简要说明）；它关着或 Manager 决定不处理时不建任务。这次计划运行在事件交给 Manager 时即算完成，不占用计划的并发名额；分派调用和之后的任务按项目的模型用量计。见[项目 Manager 与工作类型](workflows.md)。
+`manager.check` 是 Manager 定时检查：到期时成为一个 `schedule.due` 事件交给项目 Manager，`parameters.instruction` 写要检查什么。Manager 按提示词的「定时检查」章节决定是否发起一项普通任务（`task.request`，授权身份是计划的服务主体，合同来自 Manager 的简要说明）。这项任务的交付终点是报告，不交付代码；它由 Manager 角色执行：项目能力上限至少为 `comment` 时，它可以经 `github_write` 提报 Issue、在 Issue 和 PR 上评论（#851），上限为 `read` 时这些写入被拒绝且不会发出；项目收窄了 Manager 角色的 GitHub 写权限时随之收窄。它关着或 Manager 决定不处理时不建任务。这次计划运行在事件交给 Manager 时即算完成，不占用计划的并发名额；分派调用和之后的任务按项目的模型用量计。见[项目 Manager 与工作类型](workflows.md)。
 
 `release.scheduled` 目前明确返回 `unsupported/trigger_handler_not_registered`。#146/#147 可以通过同一注册入口接入；本模块不选择版本、不打标签、不创建 Release，不改变无变更不发布、检查失败不发布、SemVer 升高、手动草稿和定时正式发布的既定边界。
 

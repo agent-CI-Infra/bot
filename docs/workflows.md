@@ -124,7 +124,7 @@ Manager 分派提示词在「角色 → Manager」里作为一份完整文本编
 - **发行说明**：控制面核验每个来源恰好出现一次，标题和链接由控制面写出；Manager 不处理时按内置规则直接列出来源。
 - **Actions 失败处理**：日志引用核验、单次重跑预算和同一失败只报一次不变；Manager 不处理时这次失败记为 `ignored`，不重跑也不提报。
 - **接入门禁**：方案只回到对话里，人确认后才开门禁 PR；Manager 不处理时对话里写明原因，可以再发一次。
-- **定时检查**：计划的 `workflow` 写 `manager.check`，`parameters.instruction` 写要检查什么；到期时成为 `schedule.due` 事件，Manager 可以新建一项只读的通用任务（任务的执行身份是计划的服务主体）。
+- **定时检查**：计划的 `workflow` 写 `manager.check`，`parameters.instruction` 写要检查什么；到期时成为 `schedule.due` 事件，Manager 可以新建一项不交付代码的通用任务（授权身份是计划的服务主体，由 Manager 角色执行）；能力上限至少为 `comment` 时它可以经 `github_write` 提报 Issue 和评论，见[定时任务](schedules.md)。
 - 合并队列、发布 outbox、对账、PR head 校验、bot 分支归属、开发标签必须由人加上并在发布前仍在、发布前测试都不变。
 
 ## 升级迁移
