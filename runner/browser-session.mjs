@@ -55,7 +55,9 @@ function talk(workspaceId, message, timeoutMs) {
       socket.destroy();
       resolve(value);
     };
-    const timer = setTimeout(() => done({ error: 'browser_timeout', detail: '这个浏览器动作超过了本任务允许的时间。' }), Math.max(1000, timeoutMs + 2000));
+    // The daemon arms the action deadline after Chromium boot and polls it every 1s,
+    // then bounds page/context close at 1s each. This safety net must outlast that.
+    const timer = setTimeout(() => done({ error: 'browser_timeout', detail: '这个浏览器动作超过了本任务允许的时间。' }), Math.max(1000, timeoutMs + 5_000));
     socket.setEncoding('utf8');
     socket.on('connect', () => socket.write(JSON.stringify(message) + '\n'));
     socket.on('data', chunk => {
