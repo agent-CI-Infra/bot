@@ -7,7 +7,11 @@ export class FakeDocker {
   images = new Map([['approved', { Id: 'sha256:fixture', Config: { Labels: { 'department.bot.toolchain': 'fixture toolchain' } } }]]); builds = []; runs = [];
   calls = [];
   // The raw GET /system/df payload (#671): the same answer the manager parses in readDockerUsage(), not a shape of its own.
+  // A request carrying `type` gets only the lists it asked for, as Docker answers it (#680); one without gets all of them.
   df = { LayersSize: 0, Images: [], Containers: [], Volumes: [], BuildCache: [] };
+  // A path substring whose /system/df read fails, the way a stuck socket or a timeout does (#680), and the limit each
+  // read passed, so a test can tell the container read from the quick one.
+  dfFailure = null; timeouts = [];
   async volumeSource(directory) { return directory; }
   // The manager's own mounts: the assistant HOME volume (#457) and the read-only CLI tool volume (#705).
   async volumeName(destination) {
@@ -15,10 +19,18 @@ export class FakeDocker {
     if (destination === this.toolsMount) return this.toolsVolumeName ?? 'fixture-agent-tools';
     return null;
   }
-  async request(method, path, body) {
+  async request(method, path, body, raw, timeout = 90000) {
     this.calls.push(method + ' ' + path);
     if (path === '/info') return this.info || {};
-    if (path.startsWith('/system/df')) return this.df || { LayersSize: 0, Images: [], BuildCache: [] };
+    if (path.startsWith('/system/df')) {
+      this.timeouts.push({ path, timeout });
+      if (this.dfFailure && path.includes(this.dfFailure)) throw new Error('docker_timeout');
+      const types = new URL('http://docker' + path).searchParams.getAll('type'), df = this.df || {};
+      if (!types.length) return df;
+      return { LayersSize: types.includes('image') ? df.LayersSize : 0,
+        Images: types.includes('image') ? df.Images ?? [] : [], Containers: types.includes('container') ? df.Containers ?? [] : [],
+        BuildCache: types.includes('build-cache') ? df.BuildCache ?? [] : [] };
+    }
     if (path.startsWith('/images/')) return this.images.get(decodeURIComponent(path.split('/')[2])) || null;
     const [kind, named] = path.slice(1).split('?')[0].split('/'), name = named ? decodeURIComponent(named.split('?')[0]) : undefined;
     if (kind === 'volumes' && !named) {
