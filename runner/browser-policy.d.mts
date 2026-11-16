@@ -8,3 +8,5 @@ export function destructiveAllowed(policy: { allow_destructive: boolean | string
 export function redactBrowserValue(value: unknown, depth?: number): unknown;
 export function redactRecordedUrl(value: string | null): string | null;
 export function redactArgs(args: unknown): unknown;
+export function sanitizeBrowserTrajectory(value: unknown, context?: Record<string, unknown>): unknown;
+export function tighterDestructive(current: unknown, next: unknown): boolean | string[];

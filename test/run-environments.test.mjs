@@ -181,3 +181,18 @@ test('run environment creation leaves no orphan database row if agentToolsVolume
     );
   }
 });
+
+test('a run environment accepts workspace_browser keys and rejects a malformed policy or action', async t => {
+  const f = await fixture(t), run = id();
+  await f.runs.create('101', spec(run));
+  const policy = { origins: ['http://127.0.0.1:9'], allow_destructive: false, timeout_ms: 5000 };
+  const request = { type: 'workspace_browser', action: 'open', args: { url: 'http://127.0.0.1:9/' }, policy, workspace_id: run };
+  const ran = await f.runs.execute('101', run, { operation_id: id(), request });
+  assert.equal(ran.ok, true);
+  assert.equal(f.docker.runs.at(-1).type, 'workspace_browser');
+  for (const bad of [
+    { type: 'workspace_browser', workspace_id: run },
+    { type: 'workspace_browser', action: 'launch', policy, workspace_id: run },
+    { type: 'workspace_browser', action: 'open', policy: { origins: [] }, workspace_id: run }
+  ]) await assert.rejects(f.runs.execute('101', run, { operation_id: id(), request: bad }), /invalid_runner_request/, JSON.stringify(bad));
+});

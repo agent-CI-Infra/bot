@@ -210,7 +210,7 @@ export function taskToolAllowed(store: Store, task: Row, role: string, name: str
   // computer does not remove the configured worker's computer; every upstream non-controller ceiling still applies.
   // Never relax GitHub writes, delegation, project policy or principal authorization.
   const teamChild=origin.source_role===roleConfiguration(store,task.repository_id).controller.role&&fixed.delegation==='allow'&&current.delegation==='allow';
-  if(teamChild&&permitsTool({computer:'allow'},name)&&['read_file','write_file','run_command','read_version_file','compare_versions'].includes(name))continue;
+  if(teamChild&&permitsTool({computer:'allow'},name)&&['read_file','write_file','run_command','read_version_file','compare_versions','browser'].includes(name))continue;
   if (!permitsTool(fixed, name) || !permitsTool(current, name)) return false;
   }
   return true;

@@ -11,7 +11,9 @@ export {
   originOf,
   redactArgs,
   redactBrowserValue,
-  redactRecordedUrl
+  redactRecordedUrl,
+  sanitizeBrowserTrajectory,
+  tighterDestructive
 } from '../../runner/browser-policy.mjs';
 
 export type BrowserPolicy = NonNullable<ReturnType<typeof normalizePolicy>>;

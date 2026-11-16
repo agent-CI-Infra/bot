@@ -94,3 +94,37 @@ export function redactArgs(args) {
     safe.text = '[redacted]';
   return redactBrowserValue(safe);
 }
+
+/** Redact typed text and screenshot bytes from records that are persisted. The live runner request still carries them. */
+export function sanitizeBrowserTrajectory(value, context = {}) {
+  if (value == null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(item => sanitizeBrowserTrajectory(item, context));
+  const next = { browser: context.browser || value.type === 'workspace_browser' || value.action === 'type' || context.args,
+    args: context.args, screenshot: context.screenshot };
+  const out = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const child = { ...next, args: next.args || key === 'args', screenshot: next.screenshot || key === 'screenshot' };
+    if (key === 'text' && typeof entry === 'string' && (child.browser || child.args)) out[key] = '[redacted]';
+    else if (key === 'base64' && typeof entry === 'string' && (child.screenshot || child.browser)) out[key] = '[omitted]';
+    else out[key] = sanitizeBrowserTrajectory(entry, child);
+  }
+  return out;
+}
+
+function coversPrefix(parent, child) {
+  if (parent === child) return true;
+  const root = String(parent).endsWith('/') ? parent : parent + '/';
+  return String(child) === parent || String(child).startsWith(root);
+}
+
+/** Origins are compared separately. Destructive grants and timeouts may only shrink. */
+export function tighterDestructive(current, next) {
+  if (next === false || current === false) return false;
+  if (next === true) return current;
+  if (current === true) return next;
+  if (!Array.isArray(current) || !Array.isArray(next)) return false;
+  const out = [];
+  for (const candidate of next) if (current.some(parent => coversPrefix(parent, candidate)) && !out.includes(candidate)) out.push(candidate);
+  for (const candidate of current) if (next.some(parent => coversPrefix(parent, candidate)) && !out.includes(candidate)) out.push(candidate);
+  return out;
+}

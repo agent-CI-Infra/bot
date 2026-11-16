@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { account, harness, repository, setup, testPassword } from './helpers.mjs';
-import { allowedOrigin, browserPolicyOf, destructiveAllowed, networkRequestAllowed, originOf, redactArgs, redactBrowserValue, redactRecordedUrl } from '../dist/browser/policy.js';
+import { allowedOrigin, browserPolicyOf, destructiveAllowed, networkRequestAllowed, originOf, redactArgs, redactBrowserValue, redactRecordedUrl, sanitizeBrowserTrajectory, tighterDestructive } from '../dist/browser/policy.js';
 import { listBrowserEvidence } from '../dist/browser/evidence.js';
 import { browserEvidenceDir } from '../dist/browser/runtime.js';
 import { browserEvidenceRoot } from '../dist/browser/tools.js';
@@ -149,4 +149,25 @@ test('evidence routes reject a bad percent-encoding and a checksum mismatch', as
   assert.equal(mismatched.status, 404);
   const bad = await fetch(h.admin + '/api/tasks/browse-bad/browser-evidence/step-1.png%', { headers: { Cookie: admin.cookie() } });
   assert.ok([400, 404].includes(bad.status), 'an illegal encoding must not become a 5xx');
+});
+
+test('stored browser trajectories omit typed text and screenshot bytes', () => {
+  const recorded = sanitizeBrowserTrajectory({
+    request: { type: 'workspace_browser', action: 'type', args: { text: 'fixture-password-value', name: '口令' } },
+    result: { screenshot: { file: 'step-1.png', base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB' }, title: '登录' }
+  });
+  assert.equal(recorded.request.args.text, '[redacted]');
+  assert.equal(recorded.result.screenshot.base64, '[omitted]');
+  assert.equal(recorded.result.screenshot.file, 'step-1.png');
+  assert.equal(JSON.stringify(recorded).includes('fixture-password-value'), false);
+});
+
+test('destructive grants may only shrink for an existing session', () => {
+  assert.equal(tighterDestructive(true, false), false);
+  assert.equal(tighterDestructive(false, true), false);
+  assert.deepEqual(tighterDestructive(true, ['https://example/app']), ['https://example/app']);
+  assert.deepEqual(tighterDestructive(['https://example/app'], true), ['https://example/app']);
+  assert.deepEqual(tighterDestructive(['https://example/'], ['https://example/app']), ['https://example/app']);
+  assert.deepEqual(tighterDestructive(['https://example/app'], ['https://example/']), ['https://example/app']);
+  assert.deepEqual(tighterDestructive(['https://example/x'], ['https://example/y']), []);
 });

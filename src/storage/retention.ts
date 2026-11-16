@@ -91,6 +91,21 @@ const skippedLimit = 10_000;
  * and left for a later pass; it never stops the rest. stop() waits for a pass in progress, which ends at its next step.
  * The task workspace rules apply in the hourly workspace sweep.
  */
+
+function directoryBytes(dir: string): number {
+  let total = 0;
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      try {
+        if (entry.isDirectory()) total += directoryBytes(path);
+        else total += statSync(path).size;
+      } catch { /* unreadable entry */ }
+    }
+  } catch { return total; }
+  return total;
+}
+
 export class RetentionCleanup {
   private timer?: ReturnType<typeof setInterval>;
   private first?: ReturnType<typeof setTimeout>;
@@ -208,6 +223,7 @@ export class RetentionCleanup {
 
   // Finished tasks past the project's trajectory_days window, plus directories with no task row. Unreadable roots are
   // reported and left alone. In-memory stores have no durable evidence root and are skipped.
+
   private async browserEvidence(settings: RetentionSettings): Promise<Removed> {
     const removed: Removed = { count: 0, bytes: 0, failed: 0 };
     if (this.store.path === ':memory:') return removed;
@@ -226,6 +242,7 @@ export class RetentionCleanup {
     for (const name of names) {
       if (this.stopped || processed >= limit) return removed;
       const dir = browserEvidenceDir(root, name);
+      if (join(root, name) !== dir) continue;
       let st;
       try { st = statSync(dir); } catch (error) { removed.failed++; this.failure(`browser-evidence ${name}`, error); continue; }
       if (!st.isDirectory()) continue;
@@ -238,9 +255,10 @@ export class RetentionCleanup {
       }
       if (!drop) continue;
       try {
+        const bytes = directoryBytes(dir);
         rmSync(dir, { recursive: true, force: true });
         removed.count++;
-        removed.bytes += Number(st.size ?? 0);
+        removed.bytes += bytes;
       } catch (error) {
         removed.failed++;
         this.failure(`browser-evidence ${name}`, error);

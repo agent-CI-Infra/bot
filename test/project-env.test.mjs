@@ -501,3 +501,26 @@ test('the project computer accepts the control plane\'s three-way integration ca
   await assert.rejects(f.projects.operate('101','execute',{operation_id:id(),generation:1,request}),/invalid_runner_request/);
  assert.equal(f.docker.runs.length,count);assert.equal(f.projects.get('101').state,'ready');
 });
+
+test('the project computer accepts workspace_browser keys and rejects a malformed policy or action', async t => {
+  const f = fixture(t); await f.projects.register('101');
+  const policy = { origins: ['http://127.0.0.1:9'], allow_destructive: false, timeout_ms: 5000 };
+  const request = { type: 'workspace_browser', action: 'open', args: { url: 'http://127.0.0.1:9/' }, policy };
+  await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request });
+  const call = f.docker.runs.at(-1);
+  assert.equal(call.type, 'workspace_browser');
+  assert.equal(call.action, 'open');
+  assert.deepEqual(call.policy.origins, policy.origins);
+  const count = f.docker.runs.length;
+  for (const bad of [
+    { type: 'workspace_browser' },
+    { type: 'workspace_browser', action: 'launch', policy },
+    { type: 'workspace_browser', action: 'open', policy: { origins: ['file:///tmp'] } },
+    { type: 'workspace_browser', action: 'open', policy, unknown: true },
+    { type: 'workspace_browser', action: 'open', policy, args: 'url' }
+  ]) await assert.rejects(f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: bad }), /invalid_runner_request/, JSON.stringify(bad));
+  await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_browser', action: 'close' } });
+  assert.equal(f.docker.runs.at(-1).action, 'close');
+  assert.equal(f.docker.runs.length, count + 1);
+  assert.equal(f.projects.get('101').state, 'ready');
+});

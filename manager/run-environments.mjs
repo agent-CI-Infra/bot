@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { ManagerError } from './docker.mjs';
 import { logFailure } from './projects.mjs';
+import { normalizePolicy } from '../runner/browser-policy.mjs';
 
 /**
  * Run environments: one container for one RoleRun, discarded when the run ends. It reuses the project computer's image
@@ -20,7 +21,7 @@ export const runDefaults = { cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 256, w
 // Runner operations a run container accepts; all of them act on the run's own workspace id.
 const runTypes = ['health', 'command', 'read', 'write', 'workspace_init', 'workspace_checkout', 'workspace_read','workspace_export', 'workspace_write', 'workspace_command', 'workspace_browser', 'workspace_snapshot', 'workspace_finalize', 'workspace_blob', 'workspace_agent_poll', 'workspace_agent_token', 'workspace_agent_tool', 'workspace_agent_model_request', 'workspace_agent_model_reply', 'workspace_harness_config', 'workspace_harness_start', 'workspace_harness_stdin', 'workspace_harness_poll', 'workspace_harness_interrupt', 'git_have', 'git_pack', 'git_import', 'git_export', 'reap'];
 // keep_background lets a role keep a process (a test server) beyond one command; the container ends with the run anyway.
-const runKeys = ['type', 'command', 'path', 'content', 'timeout_ms', 'keep_background', 'workspace_id', 'base64', 'offset', 'final', 'mode', 'grace_ms', 'instance_id', 'wait_ms', 'known_tool_ids', 'known_token_ids', 'known_model_ids', 'snapshot', 'sha', 'tree_sha', 'pack_id', 'commits', 'request_id', 'sequence', 'status', 'headers', 'error'];
+const runKeys = ['type', 'command', 'path', 'content', 'timeout_ms', 'keep_background', 'workspace_id', 'base64', 'offset', 'final', 'mode', 'grace_ms', 'instance_id', 'wait_ms', 'known_tool_ids', 'known_token_ids', 'known_model_ids', 'snapshot', 'sha', 'tree_sha', 'pack_id', 'commits', 'request_id', 'sequence', 'status', 'headers', 'error', 'action', 'args', 'policy', 'url', 'name', 'selector', 'text', 'label'];
 export function validateRun(input) {
   // lease_epoch 0: the environment is prepared before the scheduler binds the run; the binding is recorded in the task trace.
   const keys = ['run_id', 'task_id', 'lease_epoch', 'profile', 'network', 'limits'];
@@ -35,8 +36,15 @@ export function validateRun(input) {
 function validIdArray(value) {
   return Array.isArray(value) && value.length <= 512 && value.every(id => typeof id === 'string' && id48.test(id));
 }
+function validateBrowserCall(call) {
+  const actions = ['open', 'see', 'click', 'type', 'screenshot', 'close'];
+  if (!actions.includes(String(call.action || ''))) throw new ManagerError('invalid_runner_request', 400);
+  if (call.action !== 'close' && !normalizePolicy(call.policy)) throw new ManagerError('invalid_runner_request', 400);
+  if (call.args !== undefined && (!call.args || typeof call.args !== 'object' || Array.isArray(call.args))) throw new ManagerError('invalid_runner_request', 400);
+}
 function validateRunCall(run, call) {
   if (!call || !runTypes.includes(call.type) || Object.keys(call).some(k => !runKeys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
+  if (call.type === 'workspace_browser') validateBrowserCall(call);
   // The run's workspace id is its run id: an operation can never name another workspace.
   if (call.workspace_id !== undefined && call.workspace_id !== run.run_id) throw new ManagerError('cross_run_workspace', 403);
   if (call.timeout_ms != null && !(Number.isFinite(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
