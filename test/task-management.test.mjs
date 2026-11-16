@@ -11,7 +11,7 @@ import { authorize, invalidate } from '../dist/identity/authorization.js';
 import { taskTraceAccess } from '../dist/memory/access.js';
 import { roleConfiguration } from '../dist/roles/definition.js';
 import { defaultPermissions, migratePermissions, permissionTools, updatePermissions } from '../dist/roles/permissions.js';
-import { assertManagedExecution, assertTaskRole, assertTaskExternalEffect, roleTaskCaller, taskToolAllowed, taskManagementTools } from '../dist/tasks/management.js';
+import { assertManagedTask, assertManagedExecution, assertTaskRole, assertTaskExternalEffect, roleTaskCaller, taskToolAllowed, taskManagementTools } from '../dist/tasks/management.js';
 import { runRole } from '../dist/roles/run.js';
 import { taskGithubWrite } from '../dist/tasks/github-write.js';
 import { Redactor } from '../dist/agent/common.js';
@@ -29,23 +29,25 @@ function fixture(t) {
     const def = config.roles.find(r => r.role_id === role); Object.assign(def, extra); def.permissions = updatePermissions(def.permissions,permissions);
     s.run("INSERT INTO settings VALUES('roles:r',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify(config));
   };
-  save('reviewer', { computer: 'deny', github_issues:'read',github_pull_requests:'read', task_management: 'write', delegation: 'deny', github: 'read' }, { harness_ref: { id: 'native', version: config.roles.find(r => r.role_id === 'reviewer').harness_ref.version } });
+  save('reviewer', { computer: 'deny', github_issues:'read',github_pull_requests:'read', task_management:'write', delegation: 'deny', github: 'read' }, { harness_ref: { id: 'native', version: config.roles.find(r => r.role_id === 'reviewer').harness_ref.version } });
   const commands = new TaskCommands(s), caller = (source = {}) => roleTaskCaller(s, 'r', 'reviewer', { conversation_id: 'chat-a', source_message: 'message-a', guard() {}, ...source });
   const create = (c = caller(), request = 'Inspect the logs', extra = {}) => {const result=commands.tool(c, 'create_task', { request, criteria: ['Report actual observations'], ...extra });if(result.error)throw Object.assign(new Error(result.error),{code:result.error});return result;};
   return { s, config, save, commands, caller, create };
 }
 
-test('own-task operations are always available; dispatching another role still requires delegation', t => {
+test('ordinary workers cannot create, list or manage tasks through old toggles or direct API calls', t => {
   const { s, save, caller, commands, create } = fixture(t);
   for (const mode of ['none','read','write']) {
     save('reviewer',{task_management:mode,delegation:'deny'});
-    const source=caller(),{id}=create(source,'Own task '+mode,{execute:false});
-    assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?',id).executor_role,'reviewer');
-    assert.ok(commands.tool(source,'list_managed_tasks',{}).tasks.some(task=>task.id===id));
-    commands.tool(source,'manage_task',{task_id:id,action:'retry'});
-    assert.throws(()=>create(source,'Borrow dev',{executor_role:'dev'}),{code:'task_delegation_forbidden'});
+    const source=caller({source_task_id:'parent'});
+    for (const [name,args] of [['create_task',{request:'New task',criteria:['Proof']}],['list_managed_tasks',{}],['manage_task',{task_id:'parent',action:'pause'}]]) {
+      assert.throws(()=>commands.tool(source,name,args),{code:'task_management_forbidden'});
+      assert.ok(!permissionTools(source.permissions).includes(name));
+    }
+    assert.throws(()=>commands.api({id:'role',role:'project_admin',repositories:['r']},'POST',new URL('http://local/api/tasks'),{repository_id:'r',request:'Bypass'},source),{code:'task_management_forbidden'});
+    assert.ok(permissionTools(source.permissions).includes('read_managed_task'));
   }
-  assert.ok(permissionTools({task_management:'none'}).includes('create_task'));
+  assert.equal(s.get('SELECT count(*) n FROM tasks').n,0);
 });
 
 test('delegation is independent of removed task toggles; explicit targets must exist and remain enabled',t=>{
@@ -56,6 +58,12 @@ test('delegation is independent of removed task toggles; explicit targets must e
   assert.throws(()=>create(source,'Missing',{executor_role:'invented'}),{code:'task_executor_unavailable'});
   save('dev',{}, {enabled:false});
   assert.throws(()=>assertManagedExecution(s,s.get('SELECT * FROM tasks WHERE id=?',task.id)),{code:'task_executor_unavailable'});
+});
+
+test('a task caller cannot recover management tools outside its pinned delegation tool ceiling',t=>{
+  const {save,caller,create}=fixture(t);save('reviewer',{delegation:'allow'});
+  const narrowed=caller({source_task_id:'parent',allowed_tools:['read_managed_task','delegate_role','delegate_roles','create_project_task']});
+  assert.throws(()=>create(narrowed),{code:'task_management_forbidden'});
 });
 
 test('caller objects cannot be serialized/forged; models cannot choose owners, principals, scopes or source roles', t => {
@@ -77,6 +85,32 @@ test('task ownership separates conversations and projects; task write cannot mod
   assert.throws(() => commands.tool(source, 'read_managed_task', { task_id: 'foreign-project' }), { code: 'task_not_found' });
   commands.tool(caller({ source_message: 'later-message' }), 'manage_task', { task_id: task.id, action: 'instructions', instruction: 'Continue from the retained observations.' });
   assert.ok(s.get("SELECT 1 FROM task_history WHERE task_id=? AND type='supplemental_instruction'", task.id));
+});
+
+test('a live worker assignment grants reads only, even with explicit management permission', t => {
+  const {s,commands,save}=fixture(t),user={id:'operator',role:'project_admin',repositories:['r']};
+  const {id}=commands.api(user,'POST',new URL('http://local/api/tasks'),{repository_id:'r',request:'Managed parent',contract:{goal:'Managed parent',scope:['r'],criteria:['Proof'],endpoint:'report'}});
+  s.run("UPDATE tasks SET status='running' WHERE id=?",id);
+  s.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,role,context_snapshot,config_snapshot) VALUES('assigned',?,'execution',1,1,'now','running','reviewer','{}','{}')",id);
+  const caller=()=>roleTaskCaller(s,'r','reviewer',{source_task_id:id,source_run_id:'assigned',guard(){}});
+  const before=JSON.stringify({task:s.get('SELECT * FROM tasks WHERE id=?',id),history:s.all('SELECT * FROM task_history WHERE task_id=?',id)});
+  for (const delegation of ['deny','allow']) {
+    save('reviewer',{delegation});const source=caller();
+    assert.ok(commands.tool(source,'read_managed_task',{task_id:id}).task.contract);
+    for (const action of ['pause','cancel','instructions','retry','integrate']) {
+      const args={task_id:id,action,...(action==='instructions'?{instruction:'Overrule Manager'}:action==='integrate'?{base_ref:'task_history:1',reason:'Overrule Manager'}:{})};
+      const code=delegation==='allow'?'task_not_owned':'task_management_forbidden';
+      assert.throws(()=>assertManagedTask(s,source,id,true),{code});
+      assert.throws(()=>commands.tool(source,'manage_task',args),{code});
+      assert.throws(()=>commands.api(user,'POST',new URL('http://local/api/tasks/'+id+'/'+action),{},source),{code});
+    }
+  }
+  assert.equal(JSON.stringify({task:s.get('SELECT * FROM tasks WHERE id=?',id),history:s.all('SELECT * FROM task_history WHERE task_id=?',id)}),before);
+  // The current controller retains authority even when the operator, rather than the controller, owns the task.
+  s.run("UPDATE task_runs SET role='manager' WHERE id='assigned'");
+  const manager=roleTaskCaller(s,'r','manager',{source_task_id:id,source_run_id:'assigned',guard(){}});
+  commands.tool(manager,'manage_task',{task_id:id,action:'instructions',instruction:'Continue the authorized plan'});
+  assert.ok(s.get("SELECT 1 FROM task_history WHERE task_id=? AND type='supplemental_instruction'",id));
 });
 
 test('replayed task intent reuses one task, while new goals create related independent records', t => {
@@ -174,26 +208,30 @@ test('human project API retains explicit operator authority without synthesizing
   assert.throws(() => commands.api({ ...user, repositories: [] }, 'POST', new URL('http://local/api/tasks/' + result.id + '/cancel'), {}), { code: 'repository_forbidden' });
 });
 
-test('real model role tools create the same durable task with a pinned caller, without exposing authority fields', async t => {
-  const { s, save, config } = fixture(t); let calls = 0; const offered = [];
+test('an explicitly authorized role creates owned work but recovers from a refused write to its assignment', async t => {
+  const { s, save } = fixture(t); let calls = 0; const offered = [], observations=[];
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); offered.push(body.tools.map(t => t.function.name));
-    const name = ++calls === 1 ? 'create_task' : 'finish';
-    const args = name === 'create_task' ? { request: 'Read old records', criteria: ['Return sources'], execute: false } : { summary: 'Recorded task' };
+    observations.push(...body.messages.filter(m=>m.role==='tool').map(m=>JSON.parse(m.content)));
+    const name = ['create_task','manage_task','finish'][calls++];
+    const args = name === 'create_task' ? { request: 'Read old records', criteria: ['Return sources'], execute: false } : name === 'manage_task' ? {task_id:'parent',action:'cancel'} : { summary: 'Recorded task' };
     res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'c' + calls, type: 'function', function: { name, arguments: JSON.stringify(args) } }] } }] }));
   }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => new Promise(r => { server.close(r); server.closeAllConnections(); }));
   s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','r',?,'fixture',?,'now')", 'http://127.0.0.1:' + server.address().port + '/v1', s.secrets.seal({ value: 'fixture-provider-key' }, 'model:m'));
   s.run("UPDATE policies SET model_id='m' WHERE repository_id='r'");
   s.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('parent','r','task.request','running','parent')");
-  save('reviewer', {}, { harness_ref: { id: 'native', version: '1' } });
+  save('reviewer', {delegation:'allow'}, { harness_ref: { id: 'native', version: '1' } });
   const task = s.get("SELECT * FROM tasks WHERE id='parent'");
-  await runRole({ store: s, task, redactor: new Redactor(), guard: async () => {}, system: 'Inspect', prompt: '{}', maxTurns: 3,
+  await runRole({ store: s, task, redactor: new Redactor(), guard: async () => {}, system: 'Inspect', prompt: '{}', maxTurns: 4,
     tools: [{ type: 'function', function: { name: 'finish', parameters: { type: 'object' } } }], finish: { name: 'finish', validate: v => v } }, 'reviewer', undefined, 'native');
   const child = s.get("SELECT * FROM task_origins WHERE source_task_id='parent'");
   assert.equal(child.source_role, 'reviewer'); assert.equal(child.executor_role, 'reviewer'); assert.ok(child.source_run_id);
   assert.equal(s.get('SELECT status FROM tasks WHERE id=?', child.task_id).status, 'paused');
   assert.ok(offered.every(names => names.includes('create_task') && !names.includes('delegate_role')));
+  assert.ok(observations.some(value=>value.error==='task_not_owned'&&value.instruction.includes('refused')));
+  assert.equal(s.get("SELECT status FROM tasks WHERE id='parent'").status,'running');
+  assert.equal(s.get("SELECT status FROM task_runs WHERE task_id='parent'").status,'succeeded');
   assert.ok(taskManagementTools.every(t => t.function.parameters.additionalProperties === false));
 });
 

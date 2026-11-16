@@ -127,10 +127,66 @@ test('flat permissions filter actual tools and a later grant cannot widen an exi
   f.put({ roles: [{ role_id: 'dev', permissions: { repository: 'read', commands: 'deny', project_memory: 'none', role_memory: 'none' } }] });
   const old = resolveRole(f.s, 'r', 'dev', 'task.request').snapshot;
   const result = await runRole({ ...f.spec, tools: ['read_file', 'write_file', 'run_command', 'search_project_memory', 'finish'].map(tool) }, 'dev');
-  assert.deepEqual(result.result.tools, ['read_file', 'finish','read_tool_result','list_managed_tasks','read_managed_task','create_task','manage_task','search_role_memory']);
+  assert.deepEqual(result.result.tools, ['read_file', 'finish','read_tool_result','read_managed_task','search_role_memory']);
   f.put({ roles: [{ role_id: 'dev', permissions: { repository: 'write', commands: 'allow' } }] });
   assert.equal(roleAuthority(f.s, 'r', old, 'write_file'), 'tool_not_in_permissions');
   assert.ok(resolveRole(f.s, 'r', 'dev', 'task.request').snapshot.capability.tools.includes('write_file'));
+});
+
+for (const harness of ['native','process','pi']) test(`${harness} workers keep task reads and recover from unoffered management calls`, async t => {
+  for (const role of ['dev','reviewer','test','ux','security']) await t.test(role, async t => {
+    const refused = ['create_task','manage_task','list_managed_tasks'];
+    const f = await fixture(t, body => {
+      const done = results(body.messages);
+      if (done.length < refused.length) return call(refused[done.length], {task_id:'t',action:'cancel',request:'Unowned task',criteria:['Proof']});
+      return call('finish', {tools:body.tools.map(t=>t.function.name),refusals:done});
+    });
+    f.put({roles:[{role_id:role,harness_ref:{id:harness}}]});
+    // Entry-provided schemas cannot smuggle the management tools back into a worker run.
+    const runner = fakeRunner(),workspace = new Workspace(f.s,runner.manager,{...f.task,workspace_id:'d'.repeat(48)},f.spec.redactor,async()=>{},()=>{});
+    const out = await runRole({...f.spec,tools:[tool('finish'),...refused.map(tool)]},role,undefined,undefined,{prepare:controllerWorkspace(workspace)});
+    assert.ok(out.result.tools.includes('read_managed_task'));
+    for (const name of refused) assert.ok(!out.result.tools.includes(name),name);
+    assert.ok(out.result.refusals.every(result=>result.error));
+    assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'running');
+    assert.equal(f.s.get('SELECT count(*) n FROM tasks').n,1);
+    assert.equal(f.s.get('SELECT status FROM task_runs WHERE role=?',role).status,'succeeded');
+  });
+});
+
+test('an upgraded worker rebuilds its old Pi tool session without rewriting the historical snapshot', async t => {
+  const f=await fixture(t,()=>call('finish',{summary:'Continued with task reads'}));
+  f.put({roles:[{role_id:'reviewer',harness_ref:{id:'pi'}}]});
+  const runner=fakeRunner(),workspace=new Workspace(f.s,runner.manager,{...f.task,workspace_id:'c'.repeat(48)},f.spec.redactor,async()=>{},()=>{});
+  const removed=['create_task','manage_task','list_managed_tasks'];
+  const config={system:'Old worker',prompt:'Obsolete tool session',tools:[tool('finish'),...removed.map(tool)]};
+  await workspace.call('old-config',{type:'workspace_agent_config',base64:Buffer.from(JSON.stringify(config)).toString('base64'),offset:0,final:true});
+  await workspace.call('old-start',{type:'workspace_agent_start'});
+  const instance=roleInstance(f.s,f.task,'reviewer'),old=resolveRole(f.s,'r','reviewer','task.request').snapshot;
+  old.capability.tools.push(...removed);const original=JSON.stringify(old);
+  f.s.run('INSERT INTO role_snapshots VALUES(?,?,?,?,?,?,?)','old-worker-snapshot','r','reviewer',1,1,original,'now');
+  f.s.run("UPDATE role_instances SET snapshot_id='old-worker-snapshot',runtime=?,session=?,sequence=1 WHERE id=?",JSON.stringify({workspace_id:workspace.task.workspace_id,generation:f.task.generation}),JSON.stringify([{role:'user',content:'Obsolete worker context'}]),instance.id);
+  f.records.progress('t',['Existing evidence retained'],'Resume the same assignment');
+  const out=await runRole(f.spec,'reviewer',undefined,undefined,{prepare:controllerWorkspace(workspace)});
+  assert.equal(out.instance_id,instance.id);assert.equal(out.result.summary,'Continued with task reads');
+  assert.equal(runner.spaces.get(workspace.task.workspace_id).alive,false);
+  assert.ok(f.requests.every(body=>body.tools.some(t=>t.function.name==='read_managed_task')&&!body.tools.some(t=>removed.includes(t.function.name))));
+  assert.equal(f.s.get("SELECT snapshot FROM role_snapshots WHERE id='old-worker-snapshot'").snapshot,original);
+  assert.deepEqual(f.records.get('t').progress.completed,['Existing evidence retained']);
+  assert.deepEqual(JSON.parse(f.s.get("SELECT data FROM task_history WHERE type='role_tools_narrowed'").data).removed_tools,removed);
+});
+
+test('a surviving Pi entry mailbox cannot relay retired worker management schemas to the provider', async t => {
+  const f=await fixture(t,()=>call('finish',{}));
+  const runner=fakeRunner(),workspace=new Workspace(f.s,runner.manager,{...f.task,workspace_id:'b'.repeat(48)},f.spec.redactor,async()=>{},()=>{});
+  const config={system:'Old worker',prompt:'Old entry session',tools:[tool('create_task'),tool('finish')]};
+  await workspace.call('old-config',{type:'workspace_agent_config',base64:Buffer.from(JSON.stringify(config)).toString('base64'),offset:0,final:true});
+  await workspace.call('old-start',{type:'workspace_agent_start'});
+  let requests=0;
+  const session=roleHarness('pi').createSession({...f.spec,pi:{workspace,resume:true}},{guard:async()=>{},model:{},request:async()=>{requests++;throw Error('must not reach provider');}});
+  await assert.rejects(session.run(),{code:'execution_interrupted',state:'waiting_environment'});
+  await session.close();assert.equal(requests,0);assert.equal(f.requests.length,0);
+  assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'running');
 });
 
 test('only Manager, Coordinator and QA are protected; deleted built-in roles stay deleted through later saves', async t => {

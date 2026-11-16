@@ -92,10 +92,12 @@ const rebuildingRuntime = (instance: Row) => storedRuntime(instance)?.guidance_r
 function rebind(s:Store,task:Row,instance:Row,resolved:Resolved,reason:'delegation'|'checkpoint',endedRun?:string){
  const prior=instance.snapshot_id?s.get('SELECT snapshot FROM role_snapshots WHERE id=?',instance.snapshot_id):null;
  const old=prior?JSON.parse(prior.snapshot):null;
- if(legacyGuidanceSession(instance)||old?.capability?.tools?.some((name:string)=>['read_playbook','select_playbooks'].includes(name))){
+ const removedManagement=(old?.capability?.tools??[]).filter((name:string)=>['create_task','manage_task','list_managed_tasks'].includes(name)&&!resolved.snapshot.capability.tools?.includes(name));
+ const retiredGuidance=legacyGuidanceSession(instance)||old?.capability?.tools?.some((name:string)=>['read_playbook','select_playbooks'].includes(name));
+ if(retiredGuidance||removedManagement.length){
   // External/native sessions can retain old tools and catalog prompts. Rebuild this same instance from durable facts.
   s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=? WHERE id=?",storedRuntime(instance)?JSON.stringify({...storedRuntime(instance),guidance_retired:true}):null,instance.id);
-  traceEvent(s,task.id,'role_guidance_migrated',{role:instance.role,instance_id:instance.id,from_snapshot:instance.snapshot_id,recovery:'rebuilt_from_task_records'},task.trace_run_id,'framework');
+  traceEvent(s,task.id,retiredGuidance?'role_guidance_migrated':'role_tools_narrowed',{role:instance.role,instance_id:instance.id,from_snapshot:instance.snapshot_id,recovery:'rebuilt_from_task_records',...(removedManagement.length?{removed_tools:removedManagement}:{})},task.trace_run_id,'framework');
  }
 
  const from={snapshot_id:instance.snapshot_id??null,config_revision:instance.config_revision??null,role_revision:instance.role_revision??null,harness:instance.harness,version:JSON.parse(instance.definition).version};
@@ -197,7 +199,8 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   // Flat permissions filter every offered tool, including the submission tool.
   const allowedTools=snapshot.capability.tools;
   const memoryAliases=role==='manager'?[]:memoryTools.filter(t=>['search_project_memory','remember_project_memory'].includes(t.function.name)&&spec.tools?.some(x=>x.function.name===t.function.name)).map(t=>({...t,function:{...t.function,name:t.function.name.replace('_project_','_role_')}}));
-  const tools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)),...(snapshot.kind==='evaluator'||role==='coordinator'?[]:taskManagementTools),...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
+  const managedTools=snapshot.kind==='evaluator'||role==='coordinator'?[]:taskManagementTools.filter(t=>t.function.name==='read_managed_task'||snapshot.capability.permissions?.delegation==='allow');
+  const tools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)),...managedTools,...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
   if(spec.finish&&!tools.some(tool=>tool.function.name===spec.finish!.name))stop('role_submission_forbidden','waiting_configuration',`${role}：当前权限禁止提交本次任务要求的结果，请在角色权限中调整。`);
   const bounded=perRunBudget(snapshot)?snapshot.budget:undefined,cumulative=cumulativeBudget(snapshot);
   // External CLIs own their turn semantics; only these three loops share the request-based finalization reserve.
