@@ -29,7 +29,9 @@ def slim_run(run, rules):
             # branch lines match them to the right PR.
             "head_repo": (run.get("head_repository") or {}).get("full_name"),
             # The branch a same-repository PR run targets; fork PRs are matched later.
-            "base_branch": ((run.get("pull_requests") or [{}])[0].get("base") or {}).get("ref"), "jobs": []}
+            "base_branch": ((run.get("pull_requests") or [{}])[0].get("base") or {}).get("ref"), "jobs": [],
+            # The check runs a scheduled run reports its results in (see results.py).
+            "check_suite_id": run.get("check_suite_id")}
 
 
 def _seconds(start, end):

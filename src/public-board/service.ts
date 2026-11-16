@@ -11,7 +11,8 @@ import { fail } from '../core/security.js';
 import { publishedRepositories, queueBoard } from './state.js';
 
 const run = promisify(execFile);
-const readPermissions = { contents: 'read', issues: 'read', pull_requests: 'read', actions: 'read', metadata: 'read' };
+// checks: what a scheduled run reports in its check runs (#938); dropped where the installation does not grant it.
+const readPermissions = { contents: 'read', issues: 'read', pull_requests: 'read', actions: 'read', checks: 'read', metadata: 'read' };
 export interface Collection { repository: Row; token: string; apiUrl: string; directory: string; stateDirectory: string; allowPrivate: boolean; }
 export async function collectBoard(input: Collection): Promise<void> {
   // Only the source read token enters the subprocess. App keys and the host's credentials stay in the control plane.

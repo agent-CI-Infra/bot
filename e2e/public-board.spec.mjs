@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { publicBoardFixture } from '../test/public-board-fixtures.mjs';
+import { publicBoardFixture, scheduledNightly } from '../test/public-board-fixtures.mjs';
 import { mkdirSync } from 'node:fs';
 
 test.use({ locale: 'zh-CN' });
@@ -10,15 +10,19 @@ test('public dashboard and repository board show generic data without console lo
   // The browser and collectors use only this test's local services.
   await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
   const shots = '.tmp/board-938'; mkdirSync(shots, { recursive: true });
-  const capture = async (name) => {
+  const capture = async (name, focus) => {
     for (const [width, height] of [[1440, 900], [390, 844]]) {
       await page.setViewportSize({ width, height });
+      // Charts are drawn again at the new width shortly after a resize.
+      await page.waitForTimeout(400);
+      if (focus) await focus.scrollIntoViewIfNeeded();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${name} ${width}`).toBe(true);
       await page.screenshot({ path: `${shots}/${name}-${width}.png` });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
   };
   try {
+    scheduledNightly(f.state);
     await f.hook('browser-first'); await f.boards.drain();
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(f.h.webhook + '/dashboard/');
@@ -51,9 +55,23 @@ test('public dashboard and repository board show generic data without console lo
     await page.locator('[data-tab="ci"]').click();
     await expect(page.locator('#tab-ci')).toBeVisible();
     await expect(page.locator('#tab-ci')).toContainText('Workflow 健康');
+    // Each workflow's duration spread and the job that fails most often.
+    const nightlyRow = page.locator('#tab-ci tr', { hasText: 'Nightly' }).first();
+    await expect(nightlyRow).toContainText('unit ×1');
     await expect(page.locator('#tab-ci')).not.toContainText('分层历史');
     await expect(page.locator('#tab-ci')).not.toContainText('质量门禁');
-    await capture('board-ci');
+    // The scheduled workflow's runs: the first reported metric over the runs, a ring for the failed one, the runs below.
+    const scheduled = page.locator('#tab-ci .card', { has: page.locator('[data-sched-chart]') });
+    await expect(scheduled).toContainText('Nightly');
+    await expect(scheduled.locator('svg circle.trend-dot')).toHaveCount(7);
+    await expect(scheduled.locator('svg circle.sched-miss')).toHaveCount(1);
+    await expect(scheduled.locator('select[data-sched-metric]')).toHaveValue('m:tests');
+    await expect(scheduled.locator('tbody tr').first()).toContainText('1,222');
+    await scheduled.locator('select[data-sched-metric]').selectOption('duration');
+    await expect(page.locator('#tab-ci .card', { has: page.locator('[data-sched-chart]') }).locator('thead')).toContainText('运行耗时');
+    await page.locator('#tab-ci select[data-sched-metric]').selectOption('m:tests');
+    await capture('board-ci', page.locator('#tab-ci [data-sched-chart]'));
+    await capture('board-ci-workflows', page.locator('#tab-ci h2', { hasText: 'Workflow 健康' }));
     expect(errors).toEqual([]);
   } finally { for (const fn of cleanup.reverse()) await fn(); }
 });

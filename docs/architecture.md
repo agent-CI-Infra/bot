@@ -137,12 +137,12 @@ GitHub 安装令牌只有一小时，而一次检视常常跑得更久。控制�
 
 验签通过且未重复的 webhook 在同一数据库事务中递增该仓的采集代数，包括已安装但未启动的仓库。后台持久队列合并投递、按仓采集、失败退避重试；新投递在采集过程中到达会保留为下一代任务。启动时补齐公开仓初始采集，重启后继续未完成的代数。采集失败保留上一份有效快照，新快照校验仓库身份后整体切换。聚合读取按仓隔离：`/dashboard/data/index.json`、`/dashboard/data/config.json` 与 `/boards/` 中任何一个仓库的导出文件缺失或损坏，只把该仓记入 `unavailable`（`reason` 为 `read_failed` 或 `invalid_json`，不回显内部路径），健康仓照常返回 200；`/boards/` 仍列出该仓，生成时间为 null。所有公开请求重新核对安装状态和私有仓授权，内部 checkpoint、源码及凭据没有公开路由。
 
-Dashboard React 页面、单仓静态页面、社区统计采集器和增量采集器随 bot 一起构建，作为本仓自有实现维护，不再跟随上游模板。看板只展示任何仓库都有的 GitHub 原生数据（#938）：Dashboard 是社区统计（PR、Issue、贡献者、成长、版本），单仓看板是 Issue、PR、每个 workflow 和 job 的运行历史及发版；不按任何 CI 约定打分，门禁页、lane、覆盖率、E2E 记录和模板示例页已删除。升级后第一次采集删除旧快照里的 `gate.json` 和 E2E 页面、私有状态里的标签目录与覆盖率存储，并把运行记录里只为这些视图保存的字段（测试报告、覆盖率等）去掉。Python 采集器只用标准库。快照、历史与内部增量状态保存在数据库旁的 `public-boards/` 数据目录，容器镜像包含 Python 3 和时区数据。`BOT_DASHBOARD_REPO` 与 GitHub Pages 不再参与托管或接入。
+Dashboard React 页面、单仓静态页面、社区统计采集器和增量采集器随 bot 一起构建，作为本仓自有实现维护，不再跟随上游模板。看板只展示任何仓库都有的 GitHub 原生数据（#938）：Dashboard 是社区统计（PR、Issue、贡献者、成长、版本），单仓看板是 Issue、PR、每个 workflow 和 job 的运行历史（成功率、耗时中位数和 P90、失败最多的 job）及发版，以及定时 workflow 每次运行报告的结构化结果：依次读取该运行检查套件里各检查运行输出中的 Markdown 表格、运行产物里的 JUnit XML 和简单 JSON（`{"metrics": [{"name", "value", "unit"}]}`），都没有时只用 job 的结论和耗时，按运行先后画趋势图（Actions 的 step summary 不经 API 提供，不能读取）。定时 workflow 指有定时触发运行的 workflow，它在默认分支上的定时和手动运行都算；每次运行只读一次，解析不写死任何仓库或产物名称。不按任何 CI 约定打分，门禁页、lane、覆盖率、E2E 记录和模板示例页已删除。升级后第一次采集删除旧快照里的 `gate.json` 和 E2E 页面、私有状态里的标签目录与覆盖率存储，并把运行记录里只为这些视图保存的字段（测试报告、覆盖率等）去掉。Python 采集器只用标准库。快照、历史与内部增量状态保存在数据库旁的 `public-boards/` 数据目录，容器镜像包含 Python 3 和时区数据。`BOT_DASHBOARD_REPO` 与 GitHub Pages 不再参与托管或接入。
 
 | 操作 | 目标 | 权限 |
 | --- | --- | --- |
 | 改 CI 的 bot PR（项目管理员确认为 CI 改动的开发任务） | 源仓 | 推送 bot 分支时 contents 写、issues 写、pull_requests 写、workflows 写，按安装实际授权裁剪；其他推送和 `github_write` 都没有 workflows |
-| 看板采集 | 源仓 | contents、issues、pull_requests、actions、metadata 只读，按安装实际授权裁剪 |
+| 看板采集 | 源仓 | contents、issues、pull_requests、actions、checks、metadata 只读，按安装实际授权裁剪；没有 checks 时定时运行的结果只从产物读取 |
 | 看板开关 | bot 本地 | 控制台超管；不向 GitHub 写配置 |
 
 每次采集使用源仓自己的只读安装令牌并在结束时撤销，不再需要外部 dashboard 的 App 安装或 `PRIVATE_SOURCE_TOKEN`。bot 不再生成门禁文件：CI 改动由开发任务按仓库自己的情况修改 workflow，以 bot PR 交付，人合并后才生效（见[接入说明](onboarding-guide.md#22-ci-改动走-bot-pr)）。

@@ -10,6 +10,7 @@ from .config import Config
 from .github import GitHubError
 from .history import History, encode, read_json
 from .project import slim_run, run_details
+from .results import RESULTS_VERSION, extract
 
 # 5: jobs with durations; test reports, coverage, gate reports and tagged catalogs are no longer read (#938).
 DETAILS_VERSION = 5
@@ -59,17 +60,8 @@ class Budget:
                 return out
             page += 1
 
-    def get_text_file(self, *a, **kw):
-        return self.call("get_text_file", *a, **kw)
-
-    def separate_phase(self, *, requests, seconds):
-        """Give a bounded follow-up phase its own budget, sharing downloaded bytes."""
-        phase = Budget(self.gh, requests=requests, seconds=seconds)
-        phase.recent = self.recent
-        return phase
-
     def download_artifact(self, repo, artifact_id, **kwargs):
-        # Reuse artifacts across phases, but honor each caller's per-file limit.
+        # An artifact read twice in one collection is downloaded once; each caller's size limit still holds.
         if (repo, artifact_id) in self.recent:
             data = self.recent[repo, artifact_id]
             if len(data) > kwargs["max_bytes"]:
@@ -223,7 +215,7 @@ class Sync:
         # A list response is metadata, never evidence that previously read
         # jobs disappeared. Keep them across transient errors.
         if old:
-            for field in ("jobs", "jobs_status", "metrics_version"):
+            for field in ("jobs", "jobs_status", "metrics_version", "results"):
                 if field in old:
                     row[field] = old[field]
         self.history.put("runs", row)
@@ -339,17 +331,26 @@ class Sync:
                     row["next_started_at"] = following.get("started_at") or following.get("run_started_at")
                 run_details(self.gh, self.cfg, row)
                 row["metrics_version"] = DETAILS_VERSION
+                # A completed scheduled run also reports its structured result, read once (see results.py).
+                wants_results = row["status"] == "completed" and self.scheduled(row) and (row.get("results") or {}).get("version") != RESULTS_VERSION
+                if wants_results:
+                    try:
+                        row["results"] = extract(self.gh, self.repo, row)
+                    except GitHubError:
+                        pass
                 self.history.put("runs", row)
                 if kind == "attempt":
                     del self.state["pending"][key]
                     continue
                 job["tries"] += 1
                 job.pop("error", None)
-                if row.get("jobs_status") == "unavailable":
+                missing_results = wants_results and (row.get("results") or {}).get("version") != RESULTS_VERSION
+                if row.get("jobs_status") == "unavailable" or missing_results:
                     job["error"] = "details_unavailable"
-                # A completed attempt's jobs no longer change: it leaves the queue once they are read.
-                # Unreadable jobs are retried with backoff for a week.
-                if row["status"] == "completed" and (row.get("jobs_status") == "available" or date(row["updated_at"]) < self.now - timedelta(days=7)):
+                # A completed attempt's jobs and result no longer change: it leaves the queue once they are read.
+                # Unreadable details are retried with backoff for a week.
+                if row["status"] == "completed" and ((row.get("jobs_status") == "available" and not missing_results)
+                                                     or date(row["updated_at"]) < self.now - timedelta(days=7)):
                     del self.state["pending"][key]
                 else:
                     delay = 120 if row["status"] != "completed" else min(86400, 300 * 2 ** min(job["tries"], 9))
@@ -358,8 +359,33 @@ class Sync:
                 job["tries"] += 1
                 job.update(error=err.kind, due=stamp(self.now + timedelta(seconds=min(86400, 60 * 2 ** min(job["tries"], 10)))))
 
+    def scheduled_workflows(self):
+        """Workflows that run on a schedule: some stored run of theirs was triggered by one."""
+        if getattr(self, "_scheduled", None) is None:
+            self._scheduled = {row.get("workflow_id") for _, row in self.history.rows("runs") if row.get("event") == "schedule"}
+        return self._scheduled
+
+    def scheduled(self, row):
+        """A scheduled run, or a manual run of a scheduled workflow (such as Nightly started by hand)."""
+        return row.get("event") == "schedule" or (row.get("event") == "workflow_dispatch" and row.get("workflow_id") in self.scheduled_workflows())
+
+    def queue_results(self, limit=30):
+        """Scheduled runs collected before their results were read, newest first, a few per collection."""
+        rows = sorted((row for key, row in self.history.rows("runs") if row.get("status") == "completed" and self.scheduled(row)),
+                      key=lambda row: row.get("created_at") or "", reverse=True)
+        queued = 0
+        for row in rows:
+            key = f"{row['id']}-{row['attempt']}"
+            if queued >= limit or "run:" + key in self.state["pending"]:
+                continue
+            record = self.history.get("runs", key) or {}
+            if (record.get("results") or {}).get("version") != RESULTS_VERSION:
+                self.queue("run:" + key)
+                queued += 1
+
     def collect(self, changed_runs=()):
         self.changed_jobs = []
+        self._scheduled = None
         self.meta = self.gh.get(self.base)
         if (self.meta.get("private") or self.meta.get("visibility", "public") != "public") and not self.cfg.allow_private:
             raise ValueError("public dashboard requires a public source")
@@ -382,6 +408,7 @@ class Sync:
                 self.guarded("reconcile:" + kind, lambda k=kind: self.objects(k, "reconcile", pages=1))
             self.guarded("reconcile:runs", lambda: self.runs("reconcile", pages=1))
             self.guarded("reconcile:releases", lambda: self.releases("reconcile", pages=1))
+        self.guarded("results", lambda: self.queue_results())
         self.guarded("details", lambda: self.pending(priority={"run:" + key for _, key in self.changed_jobs}))
         self.state["last_poll"] = stamp(self.now)
         return self
