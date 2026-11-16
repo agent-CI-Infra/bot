@@ -100,15 +100,15 @@ function groupProjectRows(rows, lines) {
 // A result that is still stale (a failed check, or more repositories than one check covers) waits for a manual refresh.
 // #869: a failure is no longer swallowed. The chips keep the previous reading, and the list states the failure with the
 // time of the reading it is showing and one manual read; a success clears that statement. A result that lands after the
-// account changed or the list drew again must not write its statement onto the current list, so only the statement is
-// scoped that way; the chips and the navigation bar keep taking every answer, exactly as they did before this change.
+// account changed must not write onto the current list — neither its chips nor its statement (the reviewer's R2). The
+// list render is not part of the guard: a slow answer for the same account still updates the chips it can name.
 async function refreshStaleIntegrations() {
   if (integrationAutoRefresh) return; integrationAutoRefresh = true;
   const ticket = projectCheckTicket();
   try {
     const integrations = (await api('/api/integrations/check', 'POST', {})).integrations || [];
-    updateIntegrationChips(integrations);
-    if (projectCheckCurrent(ticket)) projectCheckPassed('integrations', integrations);
+    if (!projectCheckCurrent(ticket)) return;
+    updateIntegrationChips(integrations); projectCheckPassed('integrations', integrations);
   } catch (err) { if (projectCheckCurrent(ticket)) projectCheckFailed('integrations', err); }
   finally { integrationAutoRefresh = false; }
 }
@@ -119,11 +119,12 @@ async function refreshStalePermissions() {
   const ticket = projectCheckTicket();
   try {
     const rows = (await api('/api/installations/permissions/check', 'POST', {})).repositories || [];
+    if (!projectCheckCurrent(ticket)) return;
     updatePermissionBadges(rows);
     // The check answers with the same snapshot rows the navigation shows gaps from; leaving it out is how the bar and the
     // project header end up describing two different reads.
     if (typeof updateConsoleGaps === 'function') updateConsoleGaps(rows);
-    if (projectCheckCurrent(ticket)) projectCheckPassed('permissions', rows, 'permissions_checked_at');
+    projectCheckPassed('permissions', rows, 'permissions_checked_at');
   } catch (err) { if (projectCheckCurrent(ticket)) projectCheckFailed('permissions', err); }
   finally { permissionAutoRefresh = false; }
 }
