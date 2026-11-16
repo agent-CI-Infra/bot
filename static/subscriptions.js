@@ -24,7 +24,8 @@ function renderSubscriptionEditor(host, { project, destinations, read, command, 
   destinations.destinations.forEach(d=>ensureDestination(d.id));
   const eventFields=element('div','','subscription-events'),checks={};eventFields.setAttribute('role','group');eventFields.setAttribute('aria-label','事件类型');
   for(const [key,label] of Object.entries(labels)){const input=document.createElement('input');input.type='checkbox';input.setAttribute('aria-label',label);checks[key]=input;eventFields.append(field(label,input));}
-  const preview=element('div','','subscription-preview');preview.setAttribute('aria-label','事件订阅时间预览');
+  // #886: a bare `div` maps to generic, where an author name is prohibited; the name needs a role that accepts it.
+  const preview=element('div','','subscription-preview');preview.setAttribute('role','group');preview.setAttribute('aria-label','事件订阅时间预览');
   const errorBox=element('p','','view-error');errorBox.setAttribute('role','alert');
   const subAdvanced=element('details','','fold subscription-advanced');
   subAdvanced.dataset.testid='subscription-advanced';

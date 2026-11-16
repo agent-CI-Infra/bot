@@ -172,7 +172,8 @@ async function renderSchedules(panel, project) {
     start_at: Date.parse(start.value), end_at: end.value ? Date.parse(end.value) : undefined, enabled: original ? original.state === 'active' : true,
     misfire: misfire.value, grace_ms: Number(grace.value) * 60000, destination_id: destination.value,
     limits: Object.fromEntries(Object.entries(limits).map(([key, value]) => [key, Number(value.value)])) });
-  const parsed = element('pre', ''); parsed.setAttribute('aria-label', '计划预览');
+  // #886: a `pre` maps to generic, where an author name is prohibited; the name needs a role that accepts it.
+  const parsed = element('pre', ''); parsed.setAttribute('role', 'group'); parsed.setAttribute('aria-label', '计划预览');
   const contextMeta=element('p','','schedule-context');
   const updateMeta=()=>{contextMeta.textContent='执行时区：'+zone.value+' · 目的地：'+(destination.selectedOptions[0]?.textContent || '尚未选择');};
   const fill = () => {
