@@ -12,6 +12,7 @@ import {authorizeMerge,requestIntegration,integrationStorage} from '../tasks/int
 import {mergeQueue} from '../github/merge-queue.js';
 import {recordRetryFailure,resolveRetry} from '../tasks/retries.js';
 import {covers,projectCeiling} from '../work/ceiling.js';
+import {recordMergeChecks} from '../tasks/external-links.js';
 
 async function checks(s:Store,github:GitHub,taskId:string,head:string){
  const runs:any[]=[];
@@ -21,6 +22,8 @@ async function checks(s:Store,github:GitHub,taskId:string,head:string){
   if(result.check_runs.length<100)break;if(page===100)fail(409,'merge_checks_pagination_limit');
  }
  const statuses=await github.request('GET',github.path('/commits/'+head+'/status'));
+ const repoId=s.get('SELECT repository_id FROM tasks WHERE id=?',taskId)?.repository_id;
+ if(repoId)recordMergeChecks(s,String(repoId),head,runs,statuses.statuses??[]);
  const failed=runs.some(c=>c.status==='completed'&&!['success','neutral','skipped'].includes(c.conclusion))||statuses.state==='failure';
  const pending=runs.some(c=>c.status!=='completed')||(statuses.statuses?.length&&statuses.state!=='success'&&!failed);
  const result={sha:head,failed,pending,check_runs:runs.map(c=>({id:c.id,name:c.name,status:c.status,conclusion:c.conclusion})),status_contexts:statuses.statuses?.map((v:any)=>({context:v.context,state:v.state}))??[],no_remote_checks:!runs.length&&!statuses.statuses?.length};

@@ -132,10 +132,10 @@ function renderTaskSide(detail, environment, roles = null, purposes = {}) {
     [task.error_code==='repository_has_no_commit'?'等待原因':'故障', task.error_detail||(task.error_code==='pr_head_pending'?'PR 尚未指向刚推送的提交':ownershipErrors[task.error_code]||taskErrorText(task.error_code))],
     ['原因', task.error_code&&task.error_code!=='repository_has_no_commit'&&task.error_cause?faultSummary(task.error_code,task.error_cause):null], ['处理', task.error_code!=='repository_has_no_commit'?task.error_cause?.action:null], ['已推送提交',task.pushed_sha], ['创建', timestamp(task.created_at)], ['更新', timestamp(task.updated_at)]]));
   if (task.source_task_id) info.append(button('查看来源检视', () => openTask(task.source_task_id)));
-  if (!terminalStates.includes(task.status)) {
-    const priority=element('select'),reason=element('input');priority.setAttribute('aria-label','任务优先级');reason.placeholder='影响证据与调整理由';reason.style.width='100%';reason.style.boxSizing='border-box';reason.setAttribute('aria-label','优先级调整理由');
+  if (detail.can_manage !== false && !terminalStates.includes(task.status)) {
+    const priority=element('select'),reason=element('input','','priority-reason-input');priority.setAttribute('aria-label','任务优先级');reason.placeholder='影响证据与调整理由';reason.setAttribute('aria-label','优先级调整理由');
     for(const level of ['P0','P1','P2','P3']){const option=element('option',level);option.value=level;priority.append(option);}priority.value=task.priority||'P2';
-    info.append(mutedLine('P0 紧急止损 · P1 核心阻塞 · P2 正常开发 · P3 非核心完善；改级排到新级队尾，不抢占运行。'),priority,reason,button('调整优先级',async()=>{try{await api('/api/tasks/'+task.id+'/priority','POST',{priority:priority.value,reason:reason.value});await openTask(task.id);}catch(e){notice('task-error',readErrorText(e));}}));
+    info.append(mutedLine('P0 紧急止损 · P1 核心阻塞 · P2 正常开发 · P3 非核心完善；改级排到新级队尾，不抢占运行。'),priority,reason,button('调整优先级',async()=>{try{await api('/api/tasks/'+task.id+'/priority','POST',{priority:priority.value,reason:reason.value});await refreshTask();}catch(e){taskPollError='';notice('task-error',readErrorText(e));}}));
   }
   if(record?.relations?.length){const relations=card('关联任务');for(const r of record.relations){const target=r.source_task_id===task.id?r.target_task_id:r.source_task_id;relations.append(button(shortId(target)+' · '+r.relationship,()=>openTask(target)),element('p',r.reason,'muted'));}side.append(relations);}
   const result = resultCard(task); if (result) side.append(result);
@@ -163,7 +163,7 @@ function computerCard(task, environment) {
   section.append(facts([['容器', pc.container], ['代次', task.generation && env.generation && task.generation !== env.generation ? `当前 g${env.generation}，本任务用 g${task.generation}` : env.generation ? 'g' + env.generation : '待创建'],
     ['资源', pc.cpus ? `${pc.cpus} CPU · ${pc.memory_mb} MB 内存 · ${pc.pids} 进程` : null], ['网络', networkText(pc)]]));
   const actions = element('div', '', 'actions');
-  actions.append(button('打开项目机器配置', () => { taskView.close(); openProject(task.repository_id, 'machine'); }), ...environmentButtons(env, running.length > 0, refreshTask, err => notice('task-error',readErrorText(err))));
+  actions.append(button('打开项目机器配置', () => { leaveTaskDetailPage(); openProject(task.repository_id, 'machine'); }), ...environmentButtons(env, running.length > 0, refreshTask, err => notice('task-error',readErrorText(err))));
   section.append(actions); return section;
 }
 function resultCard(task) {
@@ -187,10 +187,5 @@ function resultCard(task) {
   return section;
 }
 
-taskView.addEventListener('close', () => {
-  const origin = taskInboxOrigin; taskInboxOrigin = null;
-  clearTimeout(taskTimer); openTaskId = null; taskReadVersion++; taskLogState = null;
-  if (origin && typeof refreshInboxAfterTask === 'function') void refreshInboxAfterTask(origin);
-});
-$('logout').addEventListener('click', () => { if (taskView.open) taskView.close(); });
+$('logout').addEventListener('click', () => { if (taskView.open) leaveTaskDetailPage(); closeTaskPicker(); });
 

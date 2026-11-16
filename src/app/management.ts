@@ -319,9 +319,11 @@ export async function management(store: Store, user: Actor, method: string, url:
   const roleBoardMatch = /^\/api\/repositories\/([^/]+)\/role-board$/.exec(path);
   if (roleBoardMatch) {
     // Read-only projection: the same project grant as every other /api/repositories/:id read, and no audit entry.
-    repository(store, user, roleBoardMatch[1]!);
+    const repoId = roleBoardMatch[1]!;
+    repository(store, user, repoId);
     if (method !== 'GET') return fail(405, 'method_not_allowed');
-    return roleBoard(store, roleBoardMatch[1]!, url);
+    const canWriteTasks = (() => { try { if (user.context) authorize(user.context, 'tasks.write', { project_id: repoId }); return true; } catch { return false; } })();
+    return { ...(roleBoard(store, repoId, url) as Record<string, Json>), can_write_tasks: canWriteTasks };
   }
   const repoMatch = /^\/api\/repositories\/([^/]+)(\/policy)?$/.exec(path);
   if (repoMatch) {

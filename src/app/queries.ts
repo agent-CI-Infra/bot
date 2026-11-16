@@ -6,6 +6,7 @@ import { taskTrace, traceClean } from '../tasks/trace.js';
 import { TaskRecords } from '../tasks/service.js';
 import { type Store } from '../storage/database.js';
 import { type Actor, repository, scope } from './auth.js';
+import { authorize } from '../identity/authorization.js';
 import { deliveryResult, deliveryDiagnosis } from '../review/delivery.js';
 import { fail, type Json } from '../core/security.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
@@ -13,6 +14,11 @@ import { workTypes } from '../work/catalog.js';
 import { explainFailure } from '../agent/failures.js';
 import { taskGroupSQL } from './project-activity.js';
 import { rejectedArchiveState } from './delivery-audit.js';
+import { attachExternalLinks } from '../tasks/external-links.js';
+import { attachTaskRoleFlows, taskRoleTrace } from '../roles/flow.js';
+
+const completedGroupSQL = "status IN ('succeeded','pr_opened','completed')";
+const taskListGroups: Record<string, string> = { ...taskGroupSQL, completed: completedGroupSQL };
 // A delivery body and a management receipt reach the console, so a credential in either one must not leave the server.
 // A key whose name is exactly one of these loses its value at every depth, in objects and in array elements; nothing is
 // inferred from a value's shape, so a field this list does not name is returned exactly as it was stored.
@@ -93,7 +99,7 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       payload: redactedBody(Buffer.from(row.payload).toString('utf8')), response: redactEgress(JSON.parse(row.response)), ...deliveryResult(store,row), ...deliveryDiagnosis(store,row) } };
   }
   if (path === '/api/tasks') {
-    const clauses=[filter.sql],args=[...filter.args];
+    const clauses=[filter.sql],args:(string|number)[]=[...filter.args];
     for(const [key,column] of [['repository_id','repository_id'],['account_id','account_id'],['owner_id','owner_id']]){
       const value=url.searchParams.get(key!);if(value){clauses.push(key==='repository_id'?'repository_id=?':`repository_id IN (SELECT id FROM repositories WHERE ${column}=?)`);args.push(value);}
     }
@@ -114,10 +120,19 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       else {clauses.push(`kind IN (${selected!.kinds.map(()=>'?').join(',')})`);args.push(...selected!.kinds);}
     }
     const group=url.searchParams.get('group');
-    if(group && group!=='all' && !Object.hasOwn(taskGroupSQL,group)) fail(400,'invalid_task_group');
+    if(group && group!=='all' && !Object.hasOwn(taskListGroups,group)) fail(400,'invalid_task_group');
     if(attention && group && group!=='attention') fail(400,'conflicting_task_filters');
     const summaryRequested=url.searchParams.get('summary');
     if(summaryRequested && summaryRequested!=='1') fail(400,'invalid_task_summary');
+    const flowRequested=url.searchParams.get('flow');
+    if(flowRequested && flowRequested!=='1') fail(400,'invalid_task_flow');
+    const rawSearch=url.searchParams.get('q')?.trim().slice(0,200) ?? '';
+    if(rawSearch){
+      const escaped=rawSearch.replace(/[\\%_]/g,ch=>'\\'+ch);
+      const num=/^#?(\d+)$/.exec(rawSearch)?.[1] ?? null;
+      clauses.push(`(summary LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\'${num ? " OR object_number=? OR (json_valid(result) AND json_extract(result,'$.pr_number')=?)" : ''})`);
+      args.push(`%${escaped}%`,`%${escaped}%`,...(num ? [Number(num),Number(num)] : []));
+    }
     const selected=attention?'attention':group;
     const limit=Math.min(100,Math.max(1,Number(url.searchParams.get('limit'))||50)),offset=Math.max(0,Number(url.searchParams.get('offset'))||0);
     if(!Number.isSafeInteger(limit)||!Number.isSafeInteger(offset))fail(400,'invalid_pagination');
@@ -125,11 +140,14 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       // Count before status filtering and pagination; the transaction keeps counts and rows in one database snapshot.
       const summary=summaryRequested ? { ...store.get(`SELECT COUNT(*) AS "all",${Object.entries(taskGroupSQL).map(([key,sql])=>`COALESCE(SUM(CASE WHEN ${sql} THEN 1 ELSE 0 END),0) AS ${key}`).join(',')}
         FROM tasks WHERE ${clauses.join(' AND ')}`,...args), sampled_at:new Date().toISOString() } : undefined;
+      const completedCount=flowRequested ? Number(store.get(`SELECT COUNT(*) AS n FROM tasks WHERE ${[...clauses,completedGroupSQL].join(' AND ')}`,...args)?.n ?? 0) : undefined;
       const selectedClauses=[...clauses];
-      if(selected && selected!=='all') selectedClauses.push(taskGroupSQL[selected as keyof typeof taskGroupSQL]);
-      return {tasks:withTaskMetrics(store,store.all(`SELECT *,${repositoryName},${pushedSha},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${selectedClauses.join(' AND ')} ORDER BY ${selected==='attention' ? 'updated_at ASC,id ASC' : 'created_at DESC,id DESC'} LIMIT ? OFFSET ?`,...args,limit,offset).map(row=>({...publicTask(row),origin:taskOrigin(store,row.id)}))),execution_available:true,...(summary?{summary}:{})};
+      if(selected && selected!=='all') selectedClauses.push(taskListGroups[selected]!);
+      const baseTasks=withTaskMetrics(store,store.all(`SELECT *,${repositoryName},${pushedSha},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${selectedClauses.join(' AND ')} ORDER BY ${selected==='attention' ? 'updated_at ASC,id ASC' : 'created_at DESC,id DESC'} LIMIT ? OFFSET ?`,...args,limit,offset).map(row=>({...publicTask(row),origin:taskOrigin(store,row.id)})));
+      const tasks=flowRequested ? attachTaskRoleFlows(store,attachExternalLinks(store,baseTasks)) : baseTasks;
+      return {tasks,execution_available:true,...(summary?{summary}:{}),...(completedCount!==undefined?{completed_count:completedCount}:{})};
     };
-    return summaryRequested?store.transaction(read):read();
+    return (summaryRequested || flowRequested)?store.transaction(read):read();
   }
   const relations=/^\/api\/tasks\/([^/]+)\/relations$/.exec(path);
   if(relations){const task=store.get(`SELECT id FROM tasks WHERE id=? AND ${filter.sql}`,relations[1]!,...filter.args);if(!task)fail(404,'task_not_found');const offset=Number(url.searchParams.get('offset')??0);if(!Number.isSafeInteger(offset)||offset<0)fail(400,'invalid_pagination');return taskRelations(store,task!.id,offset);}
@@ -144,7 +162,7 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || after !== null && before !== null ||
         [after, before].some(value => value !== null && (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))))) fail(400, 'invalid_pagination');
       const ascending = after !== null, cursor = after ?? before;
-      const rows = store.all(`SELECT rowid AS sequence,id,content,content_ref,created_at FROM task_logs WHERE task_id=?
+      const rows = store.all(`SELECT rowid AS sequence,id,content,content_ref,created_at,run_id,role FROM task_logs WHERE task_id=?
         ${cursor === null ? '' : 'AND rowid' + (ascending ? '>' : '<') + '?'} ORDER BY rowid ${ascending ? 'ASC' : 'DESC'} LIMIT ?`, row.id, ...(cursor === null ? [] : [Number(cursor)]), limit + 1);
       const more = rows.length > limit; rows.splice(limit); if (!ascending) rows.reverse();
       // A large log's text is in its run's trajectory file; one that fails verification says so instead.
@@ -165,7 +183,11 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       return { logs, log_page: { has_older: ascending ? false : more, has_newer: ascending && more,
         first_sequence: rows[0]?.sequence ?? null, last_sequence: rows.at(-1)?.sequence ?? null } };
     }
-    return { task: {...withTaskMetrics(store,[publicTask(row)])[0],origin:taskOrigin(store,row.id),structured:detailState(store,row.id),error_detail:row.error_detail||null},...detailHistory(store,row.id),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})),
+    const baseTask = {...withTaskMetrics(store,[publicTask(row)])[0],origin:taskOrigin(store,row.id),structured:detailState(store,row.id),error_detail:row.error_detail||null};
+    const taskWithLinks = attachExternalLinks(store, [baseTask])[0]!;
+    const roleTrace = taskRoleTrace(store, taskWithLinks, user.context ? { actor: user.context } : undefined);
+    const canManage = (() => { try { if (user.context) authorize(user.context, 'tasks.write', { project_id: row.repository_id }); return true; } catch { return false; } })();
+    return { task: taskWithLinks, can_manage: canManage, ...roleTrace, ...detailHistory(store,row.id),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})),
       // Why the Manager created or continued this task, with the events behind it.
       dispatch:taskDispatch(store,row.id) };
   }

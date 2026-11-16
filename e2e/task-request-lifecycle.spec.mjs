@@ -112,6 +112,8 @@ for (const width of [1440, 390]) test(`a new report survives pause/retry and sho
     await page.getByRole('button', { name: '刷新任务', exact: true }).click();
     await expect(page.locator('#task-badges')).toContainText('已完成');
     await expect(dialog).toContainText('独立 QA 对当前候选的验收已通过');
+    await expect(dialog.locator('#role-runs-list .role-run-fold')).toHaveCount(3);
+    await dialog.locator('#task-archive-summary').click();
     await expect(dialog).toContainText('没有写到 GitHub');
     await expect(dialog.getByRole('heading', { name: '任务结果', exact: true })).toBeVisible();
     await expect(dialog.getByRole('heading', { name: '开发结果', exact: true })).toHaveCount(0);
@@ -132,6 +134,7 @@ for (const width of [1440, 390]) test(`a new report survives pause/retry and sho
       // At 200% desktop zoom the same 1440 physical pixels have 720 CSS pixels and DPR 2.
       const cdp = await page.context().newCDPSession(page);
       await cdp.send('Emulation.setDeviceMetricsOverride', { width: 720, height: 450, deviceScaleFactor: 2, mobile: false });
+      await page.evaluate(() => scrollTo(0, 0));
       expect(await page.evaluate(() => ({ width: innerWidth, dpr: devicePixelRatio }))).toEqual({ width: 720, dpr: 2 });
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       await expect(page.getByRole('button', { name: '关闭', exact: true })).toBeInViewport();

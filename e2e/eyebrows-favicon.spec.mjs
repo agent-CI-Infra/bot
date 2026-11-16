@@ -51,8 +51,8 @@ test('控制台眉题为中文，站点图标可访问', async ({ page }) => {
     await shot('more');
 
     await page.goto(h.admin + '/#/projects/101/overview');
-    await expect(page.getByRole('heading', { name: '项目总览', exact: true })).toBeVisible();
-    await expect(page.locator('#project-page .eyebrow')).toHaveText('总览');
+    await expect(page.getByRole('navigation', { name: '项目工作台视图', exact: true })).toBeVisible();
+    await expect(page.locator('[data-workbench-view="roles"]')).toContainText('角色视图');
     await shot('overview');
 
     await page.goto(h.admin + '/#/new-task/101');

@@ -10,3 +10,9 @@ let messagePage = null;
 // percent-encoding, so an address a reader typed by hand would take a page down instead of reading as an unknown one.
 // This answers the decoded segment, or null when the segment is not valid encoding.
 const safeDecode = value => { try { return decodeURIComponent(value); } catch { return null; } };
+function taskRoute(hash = location.hash) {
+  const match = /^#\/tasks\/([^/?#]+)$/.exec(String(hash || '').split('?')[0]);
+  if (!match) return null;
+  const id = safeDecode(match[1]);
+  return id ? { id } : null;
+}

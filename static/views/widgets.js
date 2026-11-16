@@ -40,7 +40,12 @@ function keepOpen(container, render) {
   render(); container.querySelectorAll('details > summary').forEach(s => { if (open.has(s.textContent)) s.parentElement.open = true; });
 }
 function networkText(pc) { return pc.network_policy === 'internet egress' ? '可访问外网（项目独立网络）' : pc.network_policy === 'internal, no egress' ? '项目内部网络，无外网' : pc.network_policy; }
-function scroller(node) { return getComputedStyle(node).overflowY === 'auto' ? node : node.parentElement; }
+function scroller(node) {
+  for (let cur = node; cur && cur !== document.body && cur !== document.documentElement; cur = cur.parentElement) {
+    if (typeof getComputedStyle === 'function' && ['auto', 'scroll'].includes(getComputedStyle(cur).overflowY)) return cur;
+  }
+  return document.scrollingElement || document.documentElement || node;
+}
 function operationId() { return [...crypto.getRandomValues(new Uint8Array(24))].map(n => n.toString(16).padStart(2, '0')).join(''); }
 // busy: tasks are running on the computer, so stopping it asks for confirmation first.
 function environmentButtons(environment, busy, after, report) {
@@ -113,10 +118,118 @@ const askConfirm = options => confirmDialog(options).then(value => value === tru
 // Esc closes the dialog as a cancel, except while its action is running.
 confirmView.addEventListener('cancel', event => { if (confirmBusy) event.preventDefault(); });
 confirmView.addEventListener('close', () => { if (!confirmView.open) settleConfirm?.(null); });
-const taskView = dialog('task-view', `<div class="view-head"><div class="title-group"><h2 id="task-title"></h2><span id="task-badges" class="actions"></span></div><div id="task-actions" class="actions"></div></div>
-<p id="task-error" class="view-error" role="alert"></p>
-<section id="task-next" class="task-next" aria-labelledby="task-next-heading" hidden><h3 id="task-next-heading">下一步</h3><p id="task-next-text" class="task-next-text"></p></section>
-<div id="task-picker" class="task-picker" hidden></div>
-<div id="task-layout" class="task-layout"><section class="timeline-panel" aria-labelledby="timeline-heading"><h3 id="timeline-heading">公开工作日志</h3><p class="muted">展示公开输出、工具调用与结果；执行阶段和验收结论按实际记录分别呈现。</p><div id="task-log-controls" class="task-log-controls"></div><ol id="timeline" class="timeline"></ol><div id="timeline-command" class="step step-running" aria-live="off" hidden></div><p id="timeline-live" class="live" role="status" hidden></p></section><aside id="task-side" class="task-side" aria-label="任务信息"></aside></div>`);
-taskView.setAttribute('aria-labelledby', 'task-title');
+function slot(tag, id, className = '') {
+  const existing = document.getElementById(id);
+  if (existing) {
+    if (className) existing.className = className;
+    return existing;
+  }
+  const el = document.createElement(tag);
+  el.id = id;
+  if (className) el.className = className;
+  return el;
+}
+
+const taskPickerDialog = (() => {
+  const view = document.createElement('dialog');
+  view.id = 'task-picker-dialog';
+  view.className = 'wide task-picker-modal';
+  view.setAttribute('aria-labelledby', 'task-picker-title');
+  const head = element('div', '', 'view-head'), tg = element('div', '', 'title-group');
+  const title = slot('h2', 'task-picker-title');
+  tg.append(title);
+  head.append(tg, slot('div', 'task-picker-actions', 'actions'));
+  const err = slot('p', 'task-picker-error', 'view-error');
+  err.setAttribute('role', 'alert');
+  view.append(head, err, slot('div', 'task-picker', 'task-picker'));
+  document.body.append(view);
+  return view;
+})();
+
+function ensureTaskDetailView() {
+  const host = document.getElementById('console-page');
+  let node = document.getElementById('task-view');
+  if (!node || !node.classList?.contains('task-detail-page')) {
+    node = slot('article', 'task-view', 'task-detail-page');
+    node.replaceChildren();
+    node.setAttribute('aria-labelledby', 'task-title');
+
+    const backbar = element('div', '', 'task-detail-backbar');
+    const backLink = slot('a', 'task-back-link', 'back-link task-back-link');
+    backLink.href = '#/projects';
+    backLink.textContent = '← 返回工作区';
+    backbar.append(backLink);
+
+    const summaryCard = element('section', '', 'task-summary-card');
+    summaryCard.setAttribute('aria-labelledby', 'task-title');
+    const topRow = element('div', '', 'task-summary-top');
+    topRow.append(slot('div', 'task-badges', 'actions task-summary-badges'), slot('div', 'task-actions', 'actions task-summary-actions'));
+    const err = slot('p', 'task-error', 'view-error');
+    err.setAttribute('role', 'alert');
+    const title = slot('h1', 'task-title', 'task-detail-title');
+    const goalBox = slot('div', 'task-goal-box', 'task-goal-box');
+    const nextSec = slot('section', 'task-next', 'task-next');
+    nextSec.hidden = true;
+    nextSec.setAttribute('aria-labelledby', 'task-next-heading');
+    const nextHeading = slot('h3', 'task-next-heading', 'sr-only');
+    nextHeading.textContent = '当前进展';
+    nextSec.append(nextHeading, slot('p', 'task-next-text', 'task-next-text'));
+    const faultBox = slot('div', 'task-fault-box', 'task-fault-box');
+    faultBox.hidden = true;
+    const extBar = slot('div', 'task-external-bar', 'task-external-bar');
+    extBar.setAttribute('aria-label', '外部关联信息');
+    const flowBar = slot('div', 'task-flow-bar', 'task-flow-bar');
+    summaryCard.append(topRow, err, title, goalBox, nextSec, faultBox, extBar, flowBar);
+
+    const traceSec = slot('section', 'task-layout', 'task-trace-section');
+    traceSec.setAttribute('aria-labelledby', 'timeline-heading');
+    const traceHead = element('div', '', 'task-trace-head');
+    const traceTitles = element('div', '', 'task-trace-title-group');
+    const traceH2 = slot('h2', 'timeline-heading');
+    traceH2.textContent = '任务执行过程（按角色流转历史）';
+    const traceSub = slot('span', 'task-trace-subtitle', 'muted');
+    traceSub.textContent = '已完成角色默认折叠，当前执行中角色默认展开；点击任意步骤可独立展开详情。';
+    traceTitles.append(traceH2, traceSub);
+    const foldBtns = slot('div', 'task-fold-buttons', 'actions task-fold-buttons');
+    const expandAll = slot('button', 'task-expand-all', 'quiet');
+    expandAll.type = 'button'; expandAll.textContent = '全部展开';
+    const collapseAll = slot('button', 'task-collapse-all', 'quiet');
+    collapseAll.type = 'button'; collapseAll.textContent = '全部折叠';
+    foldBtns.replaceChildren(expandAll, collapseAll);
+    traceHead.append(traceTitles, foldBtns);
+
+    const logControls = slot('div', 'task-log-controls', 'task-log-controls');
+    const roleRunsList = slot('div', 'role-runs-list', 'role-runs-list');
+    roleRunsList.hidden = true;
+    const timeline = slot('ol', 'timeline', 'timeline');
+    const liveCmd = slot('div', 'timeline-command', 'step step-running');
+    liveCmd.setAttribute('aria-live', 'off');
+    liveCmd.hidden = true;
+    const liveStatus = slot('p', 'timeline-live', 'live');
+    liveStatus.setAttribute('role', 'status');
+    liveStatus.hidden = true;
+    traceSec.append(traceHead, logControls, roleRunsList, timeline, liveCmd, liveStatus);
+
+    const archiveFold = slot('details', 'task-archive-fold', 'task-archive-fold');
+    const archiveSummary = slot('summary', 'task-archive-summary');
+    archiveSummary.textContent = '任务契约、优先级调整与完整审计记录';
+    const side = slot('aside', 'task-side', 'task-side task-archive-body');
+    side.setAttribute('aria-label', '任务信息');
+    archiveFold.replaceChildren(archiveSummary, side);
+
+    node.append(backbar, summaryCard, traceSec, archiveFold);
+    if (typeof bindTaskDetailControls === 'function') bindTaskDetailControls(node);
+  }
+  if (host && node.parentElement !== host) {
+    host.replaceChildren(node);
+    host.hidden = false;
+  }
+  return node;
+}
+
+const taskView = {
+  get open() { return Boolean(typeof openTaskId !== 'undefined' && openTaskId); },
+  showModal() { ensureTaskDetailView(); },
+  close() { if (typeof closeTaskDetail === 'function') closeTaskDetail(); }
+};
 

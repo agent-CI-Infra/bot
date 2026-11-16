@@ -10,6 +10,7 @@ import type { AutomationConfig } from '../automation/config.js';
 import { recordInstallationEvent } from './installations.js';
 import { enqueueForwards } from '../external/forward.js';
 import { actionsWebhook } from '../actions/storage.js';
+import { recordCheckWebhook } from '../tasks/external-links.js';
 import { archiveInstallationEvent, isInstallationControlEvent } from '../installations/archive.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { activeScopes, invalidate, invalidateIfLost } from '../identity/authorization.js';
@@ -114,6 +115,7 @@ export async function ingest(
     }
     if (status === 200 && !duplicate && owner && payload) {
       actionsWebhook(store, String(owner.id), event, payload);
+      recordCheckWebhook(store, String(owner.id), event, payload);
       if(['issues','pull_request'].includes(event)){
         store.run('DELETE FROM external_events WHERE received_at<=?',new Date(Date.now()-86400000).toISOString());
         // Cross-endpoint redeliveries must not restart the first delivery's 24-hour window.

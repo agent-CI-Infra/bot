@@ -19,8 +19,9 @@ test('task detail names the webhook delivery that created it and opens its detai
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await page.locator('[data-task-id="source-task"]').getByRole('button', { name: '查看任务', exact: true }).click();
-    const side = page.locator('#task-side');
-    const source = side.locator('[data-source-delivery]');
+    await expect(page).toHaveURL(/#\/tasks\/source-task$/);
+    const extBar = page.locator('#task-external-bar');
+    const source = extBar.locator('[data-source-delivery]');
     await expect(source).toBeVisible();
     await expect(source).toContainText('来源投递');
     await source.getByRole('button', { name: '查看投递', exact: true }).click();
@@ -33,9 +34,16 @@ test('task detail names the webhook delivery that created it and opens its detai
     await page.locator('#close-detail').click();
     await expect(detail).toBeHidden();
     await expect(page.locator('#task-view')).toBeVisible();
+    // #936: if `#detail` is open when route changes, it closes instead of lingering over the next page.
+    await source.getByRole('button', { name: '查看投递', exact: true }).click();
+    await expect(detail).toBeVisible();
+    await page.evaluate(() => { location.hash = '#/projects/101/overview'; });
+    await expect(detail).toBeHidden();
+    await page.goBack();
+    await expect(page.locator('#task-view')).toBeVisible();
     // The same facts stay readable at 390px without horizontal scrolling.
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(side.locator('[data-source-delivery]')).toContainText('来源投递');
+    await expect(extBar.locator('[data-source-delivery]')).toContainText('来源投递');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }

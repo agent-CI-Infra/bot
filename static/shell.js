@@ -398,6 +398,7 @@ async function renderConsoleInbox(request) {
 }
 async function renderConsolePage(request) {
   if (tab === 'not-found') renderNotFoundPage();
+  else if (tab === 'task') await renderTaskRoute(request);
   else if (tab === 'new-task') await renderNewTask(request);
   else if (tab === 'conversations') await renderChannelConsole(request);
   else if (tab === 'more') renderConsoleMore();
@@ -417,9 +418,11 @@ function rememberConsolePosition() {
 function restoreConsolePosition() {
   if (consoleRouteKey === location.hash) return;
   consoleRouteKey = location.hash;
+  if (typeof hasPendingTaskReturn === 'function' && hasPendingTaskReturn()) return;
   const key = consoleRouteKey, saved = consolePositions.get(key);
   requestAnimationFrame(() => {
     if (location.hash !== key) return;
+    if (typeof hasPendingTaskReturn === 'function' && hasPendingTaskReturn()) return;
     scrollTo(0, saved?.y || 0);
     if (saved?.focus) document.getElementById(saved.focus)?.focus({ preventScroll: true });
   });

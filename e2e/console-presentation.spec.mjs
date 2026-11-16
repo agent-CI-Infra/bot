@@ -93,9 +93,11 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     await expect(execution.locator('.role-work > li')).toHaveCount(2);
     await expect(execution.locator('.role-work > li').nth(1)).toContainText('Check the redirect against both criteria');
     await expect(execution).toContainText('这不是预设流程，也不授予权限');
-    // Wide screens keep two columns under the next step: the timeline beside the side panel.
-    const [timelineBox, sideBox, nextBox] = await Promise.all([page.locator('.timeline-panel').boundingBox(), side.boundingBox(), page.locator('#task-next').boundingBox()]);
-    expect(sideBox.x).toBeGreaterThan(timelineBox.x + timelineBox.width - 2); expect(Math.abs(sideBox.y - timelineBox.y)).toBeLessThan(2); expect(nextBox.y + nextBox.height).toBeLessThanOrEqual(timelineBox.y + 1);
+    // #952: single-column standalone task page stacks summary (with #task-next) -> execution trace (#task-layout) -> archive disclosure (#task-archive-fold).
+    await page.locator('#task-archive-summary').click();
+    const [traceBox, sideBox, nextBox] = await Promise.all([page.locator('#task-layout').boundingBox(), side.boundingBox(), page.locator('#task-next').boundingBox()]);
+    expect(nextBox.y + nextBox.height).toBeLessThanOrEqual(traceBox.y + 40);
+    expect(traceBox.y + traceBox.height).toBeLessThanOrEqual(sideBox.y + 1);
     await page.screenshot({ path: `${out}/task-coordinated.png` });
     await side.screenshot({ path: `${out}/task-coordinated-side.png` });
     await page.locator('#task-actions').getByRole('button', { name: '关闭', exact: true }).click(); await page.waitForFunction(() => openTaskId === null);

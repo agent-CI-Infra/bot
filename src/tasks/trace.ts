@@ -4,6 +4,7 @@ import { ProjectMemory } from '../memory/project.js';
 import { taskControllerReads, canReadMemory, memoryAuthorize, visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
 import {executionBaseline} from '../agent/common.js';
 import type { Store, Row } from '../storage/database.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -12,6 +13,15 @@ import { historyData, historyRefBytes, modelSnapshot, unreadable } from '../stor
 
 const botVersion=(()=>{try{return process.env.BOT_VERSION||execFileSync('git',['rev-parse','HEAD'],{cwd:fileURLToPath(new URL('../../',import.meta.url)),encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();}catch{return 'unknown';}})();
 const now=()=>new Date().toISOString();
+const runTraceContext=new AsyncLocalStorage<{taskId:string;runId:string|null;role:string|null}>();
+export function withRunTraceScope<T>(taskId:string,runId:string|null,role:string|null,fn:()=>T):T{
+  return runTraceContext.run({taskId,runId,role},fn);
+}
+export function currentRunTrace(task:Row):{runId:string|null;role:string|null}{
+  const active=runTraceContext.getStore();
+  if(active&&active.taskId===String(task.id??''))return {runId:active.runId,role:active.role};
+  return {runId:typeof task.trace_run_id==='string'?task.trace_run_id:null,role:typeof task.active_role==='string'?task.active_role:null};
+}
 function atomic<T>(store:Store,fn:()=>T):T{const name='trace_'+randomId();store.db.exec('SAVEPOINT '+name);try{const result=fn();store.db.exec('RELEASE '+name);return result;}catch(error){store.db.exec('ROLLBACK TO '+name);store.db.exec('RELEASE '+name);throw error;}}
 export function traceClean(value:any,literal=false):any {
   if(typeof value==='string'){if(!literal&&/^[\[{]/.test(value)){try{const parsed=JSON.parse(value),clean=traceClean(parsed);return JSON.stringify(clean)===JSON.stringify(parsed)?redactCredentials(value):JSON.stringify(clean);}catch{}}return redactCredentials(value);}
@@ -45,7 +55,7 @@ export function traceStorage(store:Store){
     kind TEXT NOT NULL,attempt INTEGER NOT NULL,revision INTEGER NOT NULL,candidate_id TEXT,parent_run_id TEXT,previous_run_id TEXT,
     started_at TEXT NOT NULL,ended_at TEXT,status TEXT NOT NULL,stop_reason TEXT,context_snapshot TEXT NOT NULL,config_snapshot TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS task_run_task ON task_runs(task_id,started_at,id);`);
-  for(const [table,columns] of Object.entries({task_history:{run_id:'TEXT',actor:"TEXT NOT NULL DEFAULT 'legacy_unknown'",source_ref:'TEXT',caused_by:"TEXT NOT NULL DEFAULT '[]'",schema_version:'INTEGER NOT NULL DEFAULT 1'},model_requests:{run_id:'TEXT',request_snapshot:'TEXT',response_snapshot:'TEXT'}})){
+  for(const [table,columns] of Object.entries({task_history:{run_id:'TEXT',actor:"TEXT NOT NULL DEFAULT 'legacy_unknown'",source_ref:'TEXT',caused_by:"TEXT NOT NULL DEFAULT '[]'",schema_version:'INTEGER NOT NULL DEFAULT 1'},model_requests:{run_id:'TEXT',request_snapshot:'TEXT',response_snapshot:'TEXT'},task_logs:{run_id:'TEXT',role:'TEXT'}})){
     const existing=new Set(store.all(`PRAGMA table_info(${table})`).map(r=>r.name));
     for(const [name,type] of Object.entries(columns))if(!existing.has(name))store.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
   }
@@ -83,7 +93,7 @@ export function traceStorage(store:Store){
   // A large log's body is in its run's trajectory file (content_ref); the snapshot keeps the header and the ref.
   store.db.exec(`DROP TRIGGER IF EXISTS trace_task_log;
   CREATE TRIGGER trace_task_log AFTER INSERT ON task_logs WHEN json_valid(NEW.content) BEGIN
-    INSERT INTO task_history(task_id,type,data,created_at,source_ref) VALUES(NEW.task_id,'runtime_log',trace_snapshot(CASE WHEN NEW.content_ref IS NULL THEN NEW.content ELSE json_set(NEW.content,'$.content_ref',NEW.content_ref) END),coalesce(nullif(NEW.created_at,''),strftime('%Y-%m-%dT%H:%M:%fZ','now')),'task_logs:'||NEW.id);
+    INSERT INTO task_history(task_id,type,data,created_at,run_id,source_ref) VALUES(NEW.task_id,'runtime_log',trace_snapshot(CASE WHEN NEW.content_ref IS NULL THEN NEW.content ELSE json_set(NEW.content,'$.content_ref',NEW.content_ref) END),coalesce(nullif(NEW.created_at,''),strftime('%Y-%m-%dT%H:%M:%fZ','now')),NEW.run_id,'task_logs:'||NEW.id);
   END;
   CREATE TRIGGER IF NOT EXISTS trace_model_finish AFTER UPDATE OF finished_at ON model_requests WHEN NEW.task_id IS NOT NULL AND OLD.finished_at IS NULL AND NEW.finished_at IS NOT NULL BEGIN
     INSERT INTO task_history(task_id,type,data,created_at,run_id,source_ref) VALUES(NEW.task_id,'model_request',json_object('request_id',NEW.id,'state',NEW.state,'http_status',NEW.http_status,'request_source','model_requests:'||NEW.id||':request','response_source','model_requests:'||NEW.id||':response'),NEW.finished_at,NEW.run_id,'model_requests:'||NEW.id);

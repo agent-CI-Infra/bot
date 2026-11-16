@@ -22,8 +22,8 @@ test('角色看板在未配置限额时返回 unset，不编造默认上限', as
   assert.equal(view.project.task_concurrency, view.project.task_concurrency_default);
   assert.ok(Array.isArray(view.roles) && view.roles.length > 0);
   for (const role of view.roles) { assert.equal(role.limit, null); assert.equal(role.limit_source, 'unset'); }
-  // A project with no required_stages cannot say which role a queued task waits for; it says so instead of guessing.
-  assert.deepEqual(view.unsupported, ['role_queue']);
+  // Default coordination routes due entry tasks through the configured controller (Manager), so `unsupported` is empty.
+  assert.deepEqual(view.unsupported, []);
   for (const role of view.roles) assert.deepEqual(role.ready, []);
   const detail = await admin('/api/repositories/101');
   assert.deepEqual(detail.value.policy.role_concurrency, {});
@@ -253,4 +253,27 @@ test('角色看板不返回 blocked：准入落地前没有任何被拦截的数
   // Nothing in this slice blocks a run, so a `blocked` object could only carry a hard-coded zero. A reader would take
   // that for a measurement, which is worse than the field being absent until admission lands.
   for (const role of (await board(admin)).value.roles) assert.equal(Object.hasOwn(role, 'blocked'), false);
+});
+
+test('默认主控模式下按真实入口归属排队任务，并展示 #283 role_capacity 等待队列与主控转交态', async t => {
+  const { h, admin } = await fixture(t);
+  const insert = h.store.db.prepare('INSERT INTO tasks(id,repository_id,kind,phase,status,error_code,summary,object_number,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)');
+  insert.run('q-mgr', '101', 'development.issue', 'queued', 'queued', null, '重构任务详情页', 952, '2026-11-16T08:00:00Z', '2026-11-16T08:00:00Z');
+  insert.run('q-qa', '101', 'development.issue', 'acceptance', 'queued', null, '等待独立验收', 951, '2026-11-16T08:01:00Z', '2026-11-16T08:01:00Z');
+  insert.run('q-cap', '101', 'development.issue', 'model', 'retry_wait', 'role_capacity', '修复权限矩阵', 944, '2026-11-16T07:50:00Z', '2026-11-16T08:02:00Z');
+  h.store.run("INSERT INTO task_history(task_id,type,data,created_at) VALUES('q-cap','role_run_admission',?,'2026-11-16T08:02:00Z')", JSON.stringify({ role: 'dev', kind: 'writer' }));
+  insert.run('r-work', '101', 'development.issue', 'model', 'running', null, '流转框图开发', 950, '2026-11-16T07:40:00Z', '2026-11-16T08:03:00Z');
+  h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-mgr','r-work','execution',1,1,'2026-11-16T07:41:00Z','running','{}','{}','manager')");
+  h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-dev','r-work','execution',1,1,'2026-11-16T07:42:00Z','running','{}','{}','dev')");
+
+  const view = (await board(admin)).value;
+  assert.deepEqual(view.unsupported, []);
+  const manager = view.roles.find(r => r.role === 'manager');
+  const dev = view.roles.find(r => r.role === 'dev');
+  const qa = view.roles.find(r => r.role === 'qa');
+  assert.deepEqual(manager.ready.map(e => [e.task_id, e.queue_reason]), [['q-mgr', 'queued']]);
+  assert.deepEqual(qa.ready.map(e => [e.task_id, e.queue_reason]), [['q-qa', 'queued']]);
+  assert.deepEqual(dev.ready.map(e => [e.task_id, e.queue_reason]), [['q-cap', 'role_capacity']]);
+  assert.equal(manager.running[0].delegated_active, true);
+  assert.equal(dev.running[0].delegated_active, false);
 });

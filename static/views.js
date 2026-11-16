@@ -1,6 +1,7 @@
 /** @console-modules
  * views/status-text.js
  * views/widgets.js
+ * views/role-flow.js
  * views/save-bar.js
  * views/task-session.js
  * views/timeline.js
