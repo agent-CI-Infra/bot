@@ -26,9 +26,11 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     // #705: read-only /opt/agent-tools CLI volume availability, compatibility and archive integrity.
     'agent_tools_volume_missing','cli_not_installed','cli_version_incompatible','platform_arch_unsupported','agent_tool_invalid','agent_tool_hash_mismatch','agent_tool_archive_invalid'] },
   repository: { label:'仓库内容或规则', codes:['repository_has_no_commit','credential_in_repository','unsafe_repository_path','repository_path_conflict',
-    'unsupported_blob_encoding','unsafe_bot_rule','pull_request_file_limit','agent_context_too_large','github_pagination_limit',
-    // The repository's .bot/ rule files and .agents/skills/ are the repository's to fix.
-    'bot_rule_too_large','too_many_bot_skills','invalid_bot_rule_file','invalid_rule_content','invalid_bot_label','invalid_bot_computer',
+    'unsupported_blob_encoding','unsafe_skill_file','pull_request_file_limit','agent_context_too_large','github_pagination_limit',
+    // The repository's .agents/skills/ are the repository's to fix.
+    'too_many_bot_skills','invalid_skill_file','invalid_rule_content',
+    // Raised only by versions that still read .bot/ files (before #935) or limited their sizes; tasks may still wait on them.
+    'bot_rule_too_large','invalid_bot_rule_file','invalid_bot_label','invalid_bot_computer','unsafe_bot_rule',
     'release_file_invalid','release_tag_invalid','release_sensitive_body','release_notes_too_large','release_empty_repository','release_ci_unsuccessful',
     'actions_scan_window_overflow','actions_report_sensitive'] },
   task_changed: { label:'任务条件已变化', codes:['obsolete_superseded','obsolete_closed','obsolete_expired','manager_deferred','manager_needs_help','task_coordination_requested','task_coordination_pending','coordination_source_cancelled','coordination_claim_revoked','role_revision_checkpoint','harness_cancelled','harness_run_closed','team_no_progress','role_nomination_stale','acceptance_publication_changed','acceptance_context_changed','checkpoint_context_changed','acceptance_return','acceptance_insufficient_evidence','acceptance_needs_human','acceptance_no_progress','object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
@@ -216,9 +218,11 @@ const codeActions: Record<string,string> = {
   bot_branch_history_changed:'点「重试」会基于当前分支重新规划。',
   revision_scope_unconfirmed:'在 PR 上给出明确的修改意见后点「重试」。',
   create_pull_request_required:'模型没有通过 create_pull_request 提交修改。点「重试」会重新开始一次尝试；反复出现可换用更强的模型。',
-  agent_context_too_large:'压缩后仍超过请求上限。点「重试」会用空检视会话重新读取最新讨论；仍超限时减少仓库 bot 规则或提示文件。',
-  // Raised only by versions that still limited rule file sizes.
-  bot_rule_too_large:'规则文件和 skill 已不再限制大小，点「重试」即可继续。',
+  agent_context_too_large:'压缩后仍超过请求上限。点「重试」会用空检视会话重新读取最新讨论；仍超限时精简 Manager 提示词的规则章节或仓库 skill。',
+  // Codes of the .bot/ files, which are no longer read (#935): what they stopped on is gone.
+  ...Object.fromEntries(['bot_rule_too_large','invalid_bot_rule_file','invalid_bot_label','invalid_bot_computer','unsafe_bot_rule'].map(code=>[code,'仓库的 .bot/ 规则文件已不再读取（规则已迁入 Manager 提示词、项目设置和机器配置），点「重试」即可继续。'])),
+  invalid_skill_file:'.agents/skills/ 下的 SKILL.md 必须是普通文件（不能是符号链接或子模块）：修正后提交到默认分支，再点「重试」。',
+  unsafe_skill_file:'.agents/skills/ 下的 SKILL.md 是符号链接：换成普通文件后提交，再点「重试」。',
   too_many_bot_skills:'.agents/skills/ 下最多 32 个 SKILL.md：合并或删掉一些，提交到默认分支后点「重试」。',
   pull_request_file_limit:'PR 改动文件过多，bot 无法确认完整差异。拆小 PR 后会重新检视。',
   capability_ceiling:'项目能力上限不够这一步（详情写明需要的档位），任务已停下，已有改动保留。需要时由项目管理员在「项目设置 → 监听与触发」调高上限后点「重试」。',

@@ -349,8 +349,8 @@ export class Workspace {
   private async listing(commitSha:string,mirror:Mirror,detail:string){
     const listing=mirror.has(commitSha)?await mirror.listing(commitSha):null;if(!listing)return null;
     this.log({type:'phase',phase:'prepare',sha:commitSha,detail});
-    const unsafe=listing.tree.find(f=>f.mode==='120000'&&(f.path.startsWith('.bot/')||/^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(f.path)));
-    if(unsafe)stop('unsafe_bot_rule','waiting_configuration',`Repository rule is a symbolic link: ${unsafe.path}`);
+    const unsafe=listing.tree.find(f=>f.mode==='120000'&&/^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(f.path));
+    if(unsafe)stop('unsafe_skill_file','waiting_configuration',`Repository skill is a symbolic link: ${unsafe.path}`);
     // The task's own credentials must not be in files the agent reads; the mirror is searched instead of copying the files.
     const leaked=await mirror.secrets(commitSha,this.redactor.values);
     if(leaked.length)stop('credential_in_repository',undefined,`Credential found in repository file: ${leaked[0]}`);
@@ -413,9 +413,9 @@ export class Workspace {
       if(listing){commit={tree:{sha:listing.tree_sha}};tree={tree:listing.tree,directory_fallback:false};}
       else{commit=await github.request('GET',github.path('/git/commits/'+commitSha));tree=await repositoryTree(github,commit.tree.sha);}
       const files=tree.tree.filter((f:any)=>f.type!=='tree');fallback=tree.directory_fallback;
-      // Preserve rule symlink preflight before any workspace writes, including after a truncated-tree fallback.
-      const unsafe=files.find((f:any)=>f.mode==='120000'&&(f.path.startsWith('.bot/')||/^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(f.path)));
-      if(unsafe)stop('unsafe_bot_rule','waiting_configuration',`Repository rule is a symbolic link: ${unsafe.path}`);
+      // Preserve the skill symlink preflight before any workspace writes, including after a truncated-tree fallback.
+      const unsafe=files.find((f:any)=>f.mode==='120000'&&/^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(f.path));
+      if(unsafe)stop('unsafe_skill_file','waiting_configuration',`Repository skill is a symbolic link: ${unsafe.path}`);
       const init=await this.call('prepare:init',{type:'workspace_init',author_email:github.authorEmail()});
       if(init.error)stop('workspace_init_failed','waiting_environment',`Could not initialize workspace: ${init.detail||init.error}`);
       for(const file of files){

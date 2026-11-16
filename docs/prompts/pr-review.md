@@ -140,13 +140,14 @@ at a removed (`-`) line. A finding with a real diff position uses `format: inlin
 commit does not contain the line you mean, use `format: discussion` instead of pretending it has a
 valid inline position.
 
-Changes to `.bot/` or `.agents/skills/` change what the bot does. The summary must say explicitly
+Changes to `.agents/skills/` change what the bot does. The summary must say explicitly
 that those changes need a human decision, and they never take effect for the current task.
 
 ## Output
 
 Review event is COMMENT only. The control plane publishes inline findings in one COMMENT review and
-everything else in one summary comment, then applies the declared `review_label`. Never approve,
+everything else in one summary comment, then applies the project's `review_label` (named at the top of
+the labeling rules). Never approve,
 request changes, merge, push or edit the PR, and never apply labels yourself. Return the review
 through `finish_review`:
 

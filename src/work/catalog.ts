@@ -88,8 +88,9 @@ export const workType = (id: string) => workTypes.find(work => work.id === id);
 export const requestedTask = (task: Record<string,any>) => ['task.request','task.development'].includes(task.kind);
 export const workOf = (task: { kind: string }) => String(task.kind).startsWith('workflow.') ? 'reply' : String(task.kind);
 
-// Sections of the Manager prompt. A section the project has not written uses its built-in text. The review and
-// development sections are the console layer of their .bot/rules/ file: a repository file still replaces them, as before.
+// Sections of the Manager prompt. A section the project has not written uses its built-in text. `rule` keys the review,
+// development, labels and guide sections in rule resolution by the .bot/ file each one replaced; repositories' .bot/
+// files are no longer read (#935).
 const prompt = (name: string) => readFileSync(resolve(import.meta.dirname, '../../docs/prompts', name), 'utf8');
 export interface SectionDefinition { id: string; title: string; rule?: string; repository?: string; builtin: () => string }
 export const sections: SectionDefinition[] = [

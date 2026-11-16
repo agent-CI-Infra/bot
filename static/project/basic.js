@@ -44,6 +44,7 @@ function basicSection() {
   info.append(facts([['仓库', link(`https://github.com/${repository.full_name}`, repository.full_name)],
     ['可见性', installed ? installed.private ? '私有' : '公开' : null],
     ['项目状态', policy.enabled ? '已启用' : '已禁用']]));
+  if (target.rules?.retired_files?.length) info.append(retiredRulesNotice(target.rules));
   const summary = card('当前配置一览');
   const machineSize = current.rules?.computer?.cpus
     ? `${current.rules.computer.cpus} CPU · ${current.rules.computer.memory_mb} MB`
@@ -60,21 +61,20 @@ function basicSection() {
     ['处理账号', installed?.account_name || repository.account_id],
     ['安装', !installed ? null : installed.installed === null ? '不在安装列表' : `${installed.installation_id ? '安装 ' + installed.installation_id : '机器人账号可见'}${installed.installed === false ? '（已移出）' : ''}`],
     ['虚拟电脑', projectEnvironmentState()],
-    ['机器', current.rules?.computer?.cpus ? `${current.rules.computer.cpus} CPU · ${current.rules.computer.memory_mb} MB（${current.rules.files.find(f=>f.path==='.bot/computer.yaml').source==='repository'?'仓库 .bot/computer.yaml':'控制台'}）` : environment?.environment.computer ? `${environment.environment.computer.cpus} CPU · ${environment.environment.computer.memory_mb} MB` : null]]));
+    ['机器', environment?.environment.computer ? `${environment.environment.computer.cpus} CPU · ${environment.environment.computer.memory_mb} MB` : null]]));
   const branch = settingsForm('分支', [field('基准分支', input('base_branch', policy.base_branch, { maxLength: 256, placeholder: '留空使用仓库默认分支' })),
     note('开发任务从这个分支拉取代码并向它开 PR；检视 Issue 时也读取这个分支的代码。')],
     form => save(changed({ base_branch: form.elements.base_branch.value.trim() }, { base_branch: policy.base_branch || '' })), { editable, draftKey: 'branch', hideActions: true });
-  const sources = card('规则来源');
-  sources.append(note('内置默认、项目控制台和默认分支仓库文件依次覆盖。这里仅展示来源，编辑入口沿用角色与机器页面。'));
-  if (!target.rules) sources.append(consoleState('规则来源暂不可读取', '请重新读取；当前不能判断哪一层生效。', { retry: () => reloadProject().catch(error) }));
-  else for (const file of target.rules.files.filter(f => f.path === '.bot/guide.md' || f.path === '.bot/computer.yaml')) {
-    sources.append(facts([['规则', file.path], ['当前来源', layerNames[file.source] || file.source]]));
-  }
-  sources.append(consoleLink(`#/projects/${id}/roles/manager`, '查看与修改规则', '保留现有的来源比较和版本检查'));
-  advanced.append(tech, sources);
+  // The review and development labels are project settings (#935): the review label marks a published review (empty: none),
+  // and a person adds the development label to ask for development.
+  const labels = settingsForm('标签', [field('检视标签', input('review_label', policy.review_label ?? '', { maxLength: 50, placeholder: '留空表示检视后不加标签' })),
+    field('开发标签', input('development_label', policy.development_label ?? '', { maxLength: 50, required: true })),
+    note('检视结论发布后 bot 给 Issue 或 PR 加检视标签；人给 Issue 加上开发标签，表示要求 bot 开发它。两个标签最长 50 个字符，首尾不能有空格。')],
+    form => save(changed({ review_label: form.elements.review_label.value, development_label: form.elements.development_label.value }, { review_label: policy.review_label ?? '', development_label: policy.development_label ?? '' })), { editable, draftKey: 'labels', hideActions: true });
+  advanced.append(tech);
   const layout = element('div', '', 'project-settings-layout');
-  layout.append(info, summary, branch, ...globalProjectControls(), advanced);
-  if (editable) attachUnifiedSettingsBar(layout, [branch]);
+  layout.append(info, summary, branch, labels, ...globalProjectControls(), advanced);
+  if (editable) attachUnifiedSettingsBar(layout, [branch, labels]);
   return [layout];
 }
 

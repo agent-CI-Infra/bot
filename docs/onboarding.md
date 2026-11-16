@@ -70,34 +70,13 @@ Secret 由管理员本人填写，不经聊天或 Issue 转发；输入框始终
 
 模型沿用 URL、API Key、模型名；保存的端点视为可信，项目代码、日志和测试输出可发送给它。Key 只保存、不回显，空白更新保持原值，撤销仍通过已有独立接口。向导可保存部署共享模型，实际项目在「模型」页选用，并配置项目默认模型和任务模型覆盖。共享模型的供应商、Key、模型名和计费单价只在「全局设置 → 模型」修改。
 
-固定覆盖文件如下，规则文件和 skill 都不限大小；控制台单次保存受管理接口 1 MiB 的请求大小限制。给仓库用户看的完整写法和限制见[用仓库文件调整规则](rules.md)。
+bot 在一个仓库里的行为只在项目配置里调整（#935）：检视、开发、标签和行为指南是「角色 → Manager」里 Manager 提示词的章节，检视和开发标签的名字在「项目设置 → 基本 → 标签」，电脑规格在「机器配置」。章节没写时使用 [`prompts/`](prompts/README.md) 下的内置原文。完整说明见[在角色配置里调整行为](rules.md)。
 
-| 文件 | 作用 |
-| --- | --- |
-| `.bot/guide.md` | 总体行为指南 |
-| `.bot/rules/labels.md` | 检视成功后的标签，使用 `review_label: bot-reviewed` 声明标签名 |
-| `.bot/rules/issue-review.md` | 新 Issue 检视与授权意图判断 |
-| `.bot/rules/pr-review.md` | PR 检视、证据位置与 COMMENT 输出 |
-| `.bot/rules/issue-development.md` | 明确要求改代码时的实现与测试；第一行 `development_label: bot-develop` 声明人加上后才开始开发的标签 |
-| `.bot/computer.yaml` | 合并到现有项目电脑规格的资源、软件包、环境与初始化配置 |
-| `.agents/skills/**/SKILL.md` | 仓库追加的简单 skill，仅加载文本，不加载 JS 扩展 |
+仓库里只读取 `.agents/skills/**/SKILL.md`：仓库追加的简单 skill，仅加载文本，不加载 JS 扩展，取自默认分支。skill 只指导本仓库的工作，不能扩大权限或改变平台规则。PR 修改 `.agents/skills`（含移动、删除）时，检视总结会强制写明「这些文件改变了 bot 的行为，需要人来决定」；PR 新内容不会成为该次任务的 skill。
 
-打标签、Issue 检视、PR 检视与 Issue 自动开发四个场景的内置规则就是 [`prompts/`](prompts/README.md) 下的 Markdown 原文；没有控制台覆盖和仓库文件的项目直接使用它们，也可以复制后修改再放进仓库。
+仓库里的 `.bot/guide.md`、`.bot/rules/*.md` 和 `.bot/computer.yaml` 不再读取：升级时每个已有项目按当时生效的那一层一次性导入 Manager 章节、标签设置和机器配置，并在「角色 → Manager」留下导入记录；仓库还留着这些文件时，项目页提示可以删除。控制台覆盖层和 `PUT /api/repositories/:id/rules` 已删除（返回 410）。
 
-优先级为内置默认 → 项目控制台 → 默认分支仓库文件，文本文件整份覆盖。项目「角色 → Manager」的「规则文件来源」表可以展开每份文件的正文、被覆盖的层并编辑控制台覆盖，也可以刷新默认分支规则。完整 Manager 分派提示词与这些任务规则独立保存，编辑时不需要章节标识。项目默认模型与各工作类型的模型在独立的「模型」页配置；电脑规格仍在「机器配置」里编辑。早期版本单独保存的项目检视指引和检视标签，升级时一次性写入对应规则文件的控制台层，之后只在规则文件里编辑。仓库已经覆盖时，保存控制台内容不会悄悄盖过仓库文件。
-
-`computer.yaml` 使用机器配置现有字段，例如：
-
-```yaml
-cpus: 2
-memory_mb: 4096
-packages: [jq]
-setup_script: "python3 -m venv /workspace/home/venv"
-```
-
-其余可用字段为 pids、tmp_mb、egress、env。命令不限时长，旧文件中的 `max_command_minutes` 会被忽略。manager 使用同一套范围校验、镜像派生和初始化逻辑。控制台电脑规格作为独立来源记录，避免把仓库覆盖反写成控制台值；移除仓库文件后可恢复控制台配置。任务准备时应用生效规格，超级管理员也可手动应用；项目管理员不能绕过原来的资源配置权限。
-
-PR 修改 `.bot` 或 `.agents/skills`（含移动、删除）时，检视总结会强制写明「这些文件改变了 bot 的行为，需要人来决定」。PR 新内容不会立即成为该次任务的生效规则／机器配置，规则取自默认分支；行内事件始终是 COMMENT，不能 APPROVE、REQUEST_CHANGES 或自动合并。
+检视的行内事件始终是 COMMENT，不能 APPROVE、REQUEST_CHANGES 或自动合并。
 
 
 ## 为什么选择 Pi

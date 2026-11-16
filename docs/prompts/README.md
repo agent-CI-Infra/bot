@@ -1,33 +1,26 @@
 # 内置场景规则
 
-本目录的 Markdown 是 Bot 的内置规则层，`manager-dispatch.md` 是完整的 Manager 分派默认提示词，其他文件用于各任务的内置规则。控制面启动时由 `src/rules/service.ts` 按文件读入 `defaults`（`onboarding.md` 除外：它由 `src/management/onboarding.ts` 读入，作为仓库接入向导的系统提示词，不是规则层，也不能覆盖），规则接口、引导页的「内置默认」和模型系统提示用的都是这里的原文；运行镜像把本目录复制到 `/app/docs/prompts`。修改这些文件就是修改所有没有覆盖的项目的默认行为。
+本目录的 Markdown 是 Bot 的内置规则层，`manager-dispatch.md` 是完整的 Manager 分派默认提示词，其他文件用于各任务的内置规则。控制面启动时由 `src/rules/service.ts` 按文件读入 `defaults`（`onboarding.md` 除外：它由 `src/management/onboarding.ts` 读入，作为仓库接入向导的系统提示词，不是规则层，也不能覆盖），规则接口、Manager 页的「内置文本」和模型系统提示用的都是这里的原文；运行镜像把本目录复制到 `/app/docs/prompts`。修改这些文件就是修改所有没有写对应章节的项目的默认行为。
 
 ## 文件对应
 
-| 文件 | 内置到的路径 | 作用 |
+| 文件 | Manager 章节 | 作用 |
 | --- | --- | --- |
-| [`labels.md`](labels.md) | `.bot/rules/labels.md` | 检视标签声明；从仓库已有标签里为 Issue 和 PR 选择 `type`、`source`、`priority`、`area`、`size` 等分类标签，由控制面校验后添加；分类不等于授权 |
-| [`issue-review.md`](issue-review.md) | `.bot/rules/issue-review.md` | 新 Issue 的意图、缺失信息、代码证据与授权判断，以及哪些检视结果会启动开发 |
-| [`pr-review.md`](pr-review.md) | `.bot/rules/pr-review.md` | PR 检视：一轮报全、严重度与处置、复审收敛、相关性判断、COMMENT 输出 |
-| [`issue-development.md`](issue-development.md) | `.bot/rules/issue-development.md` | 开发任务的资格、范围、停止条件、测试与 PR 说明 |
-| [`release-observe.md`](release-observe.md) | 无仓库文件，可由 Manager 章节覆盖 | CI 观察的提示词：读取运行、分析日志与代码、给出结论 |
-| [`manager-dispatch.md`](manager-dispatch.md) | 无仓库文件，可由 Manager 的「分派」章节覆盖 | 每个事件新建、续接还是不处理的默认流程 |
-| [`onboarding.md`](onboarding.md) | 无仓库文件，不可覆盖 | 仓库接入向导：管理助手只读分析一个仓库，给出仓库画像、带推荐答案的问题和接入方案草稿，见[管理助手](../management-agent.md#仓库接入向导) |
+| [`labels.md`](labels.md) | `labels` | 检视标签的用法；从仓库已有标签里为 Issue 和 PR 选择 `type`、`source`、`priority`、`area`、`size` 等分类标签，由控制面校验后添加；分类不等于授权 |
+| [`issue-review.md`](issue-review.md) | `review.issue` | 新 Issue 的意图、缺失信息、代码证据与授权判断，以及哪些检视结果会启动开发 |
+| [`pr-review.md`](pr-review.md) | `review.pr` | PR 检视：一轮报全、严重度与处置、复审收敛、相关性判断、COMMENT 输出 |
+| [`issue-development.md`](issue-development.md) | `development` | 开发任务的资格、范围、停止条件、测试与 PR 说明 |
+| [`release-observe.md`](release-observe.md) | CI 观察章节 | CI 观察的提示词：读取运行、分析日志与代码、给出结论 |
+| [`manager-dispatch.md`](manager-dispatch.md) | `dispatch` | 每个事件新建、续接还是不处理的默认流程 |
+| [`onboarding.md`](onboarding.md) | 无，不可覆盖 | 仓库接入向导：管理助手只读分析一个仓库，给出仓库画像、带推荐答案的问题和接入方案草稿，见[管理助手](../management-agent.md#仓库接入向导) |
 
 三份检视和开发规则、CI 观察提示词以及接入向导提示词各带一张 ` ```mermaid ` 流程图（检视：检视 → 回复；开发：Issue 分析 → 开发 → 检视 → 测试，检视或测试发现问题时回到开发；接入：读仓库 → 画像 → 提问 → 方案），给 agent 说明步骤顺序，见[项目 Manager 与工作类型](../workflows.md)。
 
-`.bot/guide.md` 与 `.bot/computer.yaml` 的内置内容仍在 `src/rules/service.ts` 中。
+行为指南（`guide` 章节）的内置内容在 `src/rules/service.ts` 中；代码里这几条规则仍以它们替代的 `.bot/` 文件路径为键，但仓库里的 `.bot/` 文件已不再读取（#935）。
 
 ## 覆盖方式
 
-优先级是「内置默认 → 项目控制台 → 默认分支仓库文件」，每层整份替换，不限大小。
-
-1. **仓库文件**：把改好的文本放到默认分支的 `.bot/rules/<name>.md`。PR 内的改动不会成为当次任务的规则。
-2. **项目控制台**：在项目「角色 → Manager」的规则文件来源中展开并编辑检视、开发、标签和行为指南的控制台覆盖。仓库已经有同名文件时，控制台内容不会悄悄盖过它。
-3. 覆盖 `labels.md` 时保留 `review_label:` 行，它决定检视成功后由控制面加上的标签；去掉这一行就不再打检视标签。
-4. `issue-development.md` 第一行 `development_label:` 是开发标签名，默认 `bot-develop`。覆盖时去掉这一行仍按 `bot-develop` 要求，开发标签这道要求不能通过改规则关闭；不想自动开发就把项目能力上限设在「可开发并开 PR」以下。
-
-标签名最长 50 个字符，不能有控制字符。两行标签声明的完整写法、文件大小和出错时的处理见[用仓库文件调整规则](../rules.md)。
+在项目「角色 → Manager」的 Manager 提示词里写对应章节，整份替换内置文本，不限大小；只影响之后新建的任务。检视标签和开发标签的名字是项目设置（「项目设置 → 基本 → 标签」，默认 `bot-reviewed`／`bot-develop`），不写在这些文本里；模型在 `labels` 和 `development` 章节开头读到它们。完整说明见[在角色配置里调整行为](../rules.md)。
 
 ## 适配边界
 

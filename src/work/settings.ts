@@ -1,7 +1,6 @@
 import type { Store, Row } from '../storage/database.js';
 import { fail, HttpError } from '../core/security.js';
 import { workTypes, workType, sections, section, retiredSections, savedWrites, workAccess, validateWrites, type WorkPermissions } from './catalog.js';
-import { resolveRules } from '../rules/service.js';
 import { covers, projectCeiling, withinCeiling, workLevel } from './ceiling.js';
 
 /**
@@ -11,9 +10,9 @@ import { covers, projectCeiling, withinCeiling, workLevel } from './ceiling.js';
  *
  * The prompt is Markdown. A level-2 heading that ends with a known section id in backticks, such as
  * "## 检视 Issue `review.issue`", starts that section; text before the first one is a preamble the Manager reads with the
- * dispatch section. A section the project has not written uses its built-in text. The sections of the .bot rule files
- * (review, development, labels, guide) are their console layer: policies.rule_overrides is kept equal to them, so rule
- * resolution and task snapshots read the same text, and a repository file still replaces them.
+ * dispatch section. A section the project has not written uses its built-in text. The rule sections (review,
+ * development, labels, guide) are the only text of those rules since #935: policies.rule_overrides is kept equal to them,
+ * so rule resolution and task snapshots read the same text.
  *
  * Every save is a new immutable revision in manager_revisions, with the prompt, work settings and event filters it set;
  * revision 1 of an upgraded project is the migration from workflows (see migration.ts).
@@ -237,8 +236,6 @@ export function saveManager(store: Store, repositoryId: string, change: ManagerC
     }
     const before = parseSections(current.content).sections, after = parseSections(content).sections;
     const overrides = ruleOverrides(content, json(policy.rule_overrides || '{}', {}));
-    // The same checks as saving a rule file: the label lines stay valid; the development label cannot be switched off.
-    resolveRules({ ...policy, rule_overrides: JSON.stringify(overrides) }, {});
     const work = change.work === undefined ? { next: workSettings(store, repositoryId, policy), changed: new Set<string>(), actions: undefined } : checkWork(change.work, workSettings(store, repositoryId, policy));
     // A work type whose section text changed counts as changed, like a workflow whose prompt was edited.
     for (const type of workTypes) if ((before.get(type.section)?.body ?? null) !== (after.get(type.section)?.body ?? null)) work.changed.add(type.id);

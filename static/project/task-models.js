@@ -2,9 +2,9 @@
 function projectTaskLabel(task) { return `${kindLabels[task.kind] || task.kind}${task.object_number == null ? '' : ' #' + task.object_number}`; }
 const builtInTasks = [
   { kind: 'manager', group: 'Manager', title: 'Manager 分派', description: '每个交给 Manager 的事件调用一次：决定新建任务、续接已有任务还是不处理。' },
-  { kind: 'review.issue', group: '检视', title: '检视 Issue', description: '检视 Issue，判断意图、核对代码证据，回复评论并加分类标签。', rule: '.bot/rules/issue-review.md' },
-  { kind: 'review.pr', group: '检视', title: '检视 PR', description: '检视 PR 的变更、测试与证据，发布 COMMENT 检视结论。', rule: '.bot/rules/pr-review.md' },
-  { kind: 'development.issue', group: '开发', title: '开发 Issue', description: 'Issue 明确要求改代码时，在虚拟电脑里实现、测试并创建 bot PR。', rule: '.bot/rules/issue-development.md' },
+  { kind: 'review.issue', group: '检视', title: '检视 Issue', description: '检视 Issue，判断意图、核对代码证据，回复评论并加分类标签。' },
+  { kind: 'review.pr', group: '检视', title: '检视 PR', description: '检视 PR 的变更、测试与证据，发布 COMMENT 检视结论。' },
+  { kind: 'development.issue', group: '开发', title: '开发 Issue', description: 'Issue 明确要求改代码时，在虚拟电脑里实现、测试并创建 bot PR。' },
   { kind: 'development.pr', group: '开发', title: '跟进 bot PR', description: '检视采纳了 bot PR 上的修改要求，或发现可执行问题后，修订 bot 自己的 PR。' },
   { kind: 'reply', group: '通用', title: '通用回复', description: '按 Manager 提示词「通用回复」章节在 Issue 或 PR 上完成一项工作并回复。' },
   { kind: 'release.observe', group: '发版本', title: 'CI 观察', description: '只读分析一次 Release 工作流运行并汇总失败线索；观察操作仍留在「发版本」。' },

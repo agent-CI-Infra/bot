@@ -2,10 +2,12 @@ function machineSection(globalSettings = false) {
   const { environment } = current, pc = environment?.environment.computer, editable = me.role === 'super_admin' && !!pc;
   const status = element('div', '', 'status-grid computer-status-grid'); status.id = 'machine-status'; status.append(...machineStatus());
   if (!pc) return [status, ...(globalSettings ? [] : [concurrencyPage()]), note('暂时读不到虚拟电脑规格。连接恢复后可重新读取本页配置；未保存改动请先保存。'),button('重新读取电脑配置',()=>reloadProject().catch(error))];
-  const unread = !current.rules || current.rules.needs_refresh === true || !current.rules.sha;
-  const effective=current.rules?.computer||pc, source=current.rules?.files.find(f=>f.path==='.bot/computer.yaml');
+  // The saved spec is the project's own layer (#935: no repository file adds to it); without it the form cannot tell
+  // the project's values from the defaults.
+  const unread = !current.rules;
+  const effective=current.rules?.computer||pc;
   const shown={...pc,...effective,network_policy:effective.egress===undefined?pc.network_policy:effective.egress?'internet egress':'internal, no egress'};
-  // A resource left empty follows the global default; own() is the value the project sets (console or repository file).
+  // A resource left empty follows the global default; own() is the value the project sets.
   const own = name => current.rules?.computer ? current.rules.computer[name] : pc.inherited?.includes(name) ? undefined : pc[name];
   const names = { cpus: 'CPU', memory_mb: '内存', pids: '进程数', tmp_mb: '/tmp', packages: '软件包', setup_script: '初始化脚本', rerun_setup: '重新初始化', egress: '网络', env: '环境变量' };
   // An entry the field cannot accept must be reported, never read as「empty → follow the global default」: letters typed
@@ -14,11 +16,8 @@ function machineSection(globalSettings = false) {
   const number = (name, step) => {
     const control = input(name, own(name) ?? '', { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '',
       placeholder: `留空使用全局默认（${pc.defaults?.[name] ?? pc[name]}）` });
-    // A field the repository file writes has no console override to clear: saving null changes nothing there and the
-    // repository value is re-applied on the next task prepare, so clearing must not claim「跟随全局默认」(#865).
-    const repositoryLayer = () => current.rules?.computer_sources?.[name] === 'repository';
-    const emptyNote = () => repositoryLayer() ? '留空不改变仓库文件里的值' : '留空即跟随全局默认';
-    const invalidNote = () => repositoryLayer() ? '这个字段只能填数字；清空不会改变仓库文件里的值' : '这个字段只能填数字';
+    const emptyNote = () => '留空即跟随全局默认';
+    const invalidNote = () => '这个字段只能填数字';
     const error = element('span', '', 'machine-config-error'), follow = element('span', '', 'machine-config-follow');
     error.id = `machine-${name}-error`; error.hidden = true; follow.textContent = emptyNote(); follow.hidden = control.value.trim() !== '';
     control.setAttribute('aria-describedby', error.id);
@@ -49,7 +48,7 @@ function machineSection(globalSettings = false) {
       const text = control.value.trim();
       if (rejected && text !== '' && Number.isFinite(Number(text))) release();
     };
-    const clear = button(repositoryLayer() ? '清空输入' : '清空并跟随全局默认', () => { release(); control.value = ''; control.dispatchEvent(new Event('input', { bubbles: true })); control.focus(); }, 'quiet');
+    const clear = button('清空并跟随全局默认', () => { release(); control.value = ''; control.dispatchEvent(new Event('input', { bubbles: true })); control.focus(); }, 'quiet');
     clear.hidden = true;
     // Characters a number input cannot accept never reach .value and fire no input event; beforeinput still reports them.
     control.addEventListener('beforeinput', event => {
@@ -86,11 +85,6 @@ function machineSection(globalSettings = false) {
     const section = element('section', '', 'machine-config-group');
     section.append(element('h4', title), note(text), ...fields); return section;
   };
-  const sourceLink=element('a','查看规则文件来源');sourceLink.href=`#/projects/${current.id}/roles/manager`;
-  const sourceActions=element('div','','actions');sourceActions.append(sourceLink);
-  // Tasks apply the repository file when they prepare; a super administrator can apply it right away.
-  if(source?.source==='repository'&&editable&&!unread){const apply=button('立即应用仓库文件',async()=>{apply.disabled=true;apply.textContent='正在按仓库文件重建虚拟电脑…';
-    try{await api(`/api/repositories/${current.id}/rules/apply-computer`,'POST',{});current.flash='已按仓库 .bot/computer.yaml 重建虚拟电脑';await reloadProject();}catch(err){apply.disabled=false;apply.textContent='立即应用仓库文件';error(err);}});sourceActions.append(apply);}
   const resourceGrid = element('div', '', 'field-grid');
   resourceGrid.append(configField('CPU（核）', number('cpus', '0.25'), 'cpus'), configField('内存（MB）', number('memory_mb', '128'), 'memory_mb'),
     configField('进程数上限', number('pids', '1'), 'pids'), configField('/tmp 大小（MB）', number('tmp_mb', '16'), 'tmp_mb'));
@@ -108,10 +102,9 @@ function machineSection(globalSettings = false) {
     note(editable ? '保存会按本组改动重建虚拟电脑；正在执行的命令先执行完，任务保留的后台进程会结束。新增软件包需要先构建镜像，首次可能需要几分钟。' : '机器配置由超级管理员设置。'),
     note('工作卷、笔记和代次保留。项目任务并发在另一组单独保存，不会重建电脑。'));
   if (pc.resources_pending) impact.append(note('全局默认已变化，电脑等待空闲后重建。电脑报告的资源是配置目标，不能据此确认运行中容器已使用新上限。'));
-  if (source?.source === 'repository') impact.append(note('仓库仅覆盖写明的字段；表单改动写入项目控制台，下次任务准备时同名字段仍以仓库文件为准。'));
   const layout = element('div', '', 'machine-config-layout'); layout.append(fields, impact);
   const nodes = [
-    note(unread?'尚未读取默认分支配置，目前仅显示内置与控制台临时值，无法确认仓库覆盖关系。':source?.source==='repository'?'表单显示默认分支 .bot/computer.yaml 合并后的配置目标，电脑是否已应用需结合上方状态核对。':'表单显示已保存的配置目标；仓库 .bot/computer.yaml 可以按字段覆盖控制台值。'),sourceActions,
+    note(unread?'暂时读不到已保存的机器配置，目前显示电脑报告的值。':'表单显示已保存的配置目标，电脑是否已应用需结合上方状态核对。机器配置只在这里修改，仓库里的 .bot/computer.yaml 不再读取。'),
     layout];
   const readSpec = (form, releasing = false) => {
     const spec = {};
@@ -119,13 +112,9 @@ function machineSection(globalSettings = false) {
     for (const name of specFields) {
       const control = form.elements[name], text = control.value.trim();
       if (releasing) control.machineReleaseIfAccepted?.();
-      // A refused entry is checked first: it must be reported even for a field the console cannot clear, otherwise the
-      // entry would be read as「no change」and the field error promised above would never appear (review of #903).
+      // A refused entry is checked first, so it is reported instead of being read as「no change」(review of #903).
       if (control.dataset.invalidNumber === '1' || (text !== '' && !Number.isFinite(Number(text))))
-        throw new Error(`${names[name]}：${current.rules?.computer_sources?.[name] === 'repository' ? '这个字段只能填数字；清空不会改变仓库文件里的值' : '这个字段只能填数字'}`);
-      // A repository-written field cannot be cleared from the console; sending null would rebuild the computer and
-      // still leave the repository value in place, so a cleared repository field sends nothing (#865 review finding).
-      if (text === '' && current.rules?.computer_sources?.[name] === 'repository') continue;
+        throw new Error(`${names[name]}：这个字段只能填数字`);
       const value = text === '' ? null : Number(text);
       if (value !== (own(name) ?? null)) spec[name] = value;
     }
@@ -160,8 +149,6 @@ function machineSection(globalSettings = false) {
     if (!live()) return;
     reread.disabled = true; sourceReadError.hidden = true;
     try {
-      // Re-reading an uncached local projection cannot discover repository overrides; fetch the branch first.
-      if (unread && target.rules) await api(`/api/repositories/${target.id}/rules/refresh`, 'POST', {});
       if (live()) await reloadProject();
     } catch (err) { if (live()) { sourceReadError.textContent = '重新读取失败：' + readErrorText(err); sourceReadError.setAttribute('role', 'alert'); sourceReadError.hidden = false; } }
     finally { reread.disabled = false; }
@@ -172,7 +159,7 @@ function machineSection(globalSettings = false) {
   if (!canEdit) toolbar.append(heading, reread);
   else toolbar.append(heading);
   toolbar.after(sourceReadError);
-  if(unread)toolbar.after(note(!current.rules?'规则来源读取失败，不能确认仓库覆盖关系。请重新读取配置后保存。':'尚未读取默认分支文件，不能确认仓库覆盖关系。请重新读取配置后保存。'));
+  if(unread)toolbar.after(note('已保存的机器配置读取失败，不能区分项目自己的值和默认值。请重新读取配置后保存。'));
   const concurrency = globalSettings ? null : concurrencyForm();
   const page = element('div', '', 'machine-settings');
   if (concurrency) page.append(concurrency);

@@ -1,5 +1,3 @@
-review_label: bot-reviewed
-
 # Labeling
 
 These rules cover labels in Issue and PR reviews.

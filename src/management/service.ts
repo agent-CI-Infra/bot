@@ -6,7 +6,7 @@ import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, confinedTenant, effectiveRepositories, listEffectiveScopes, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
 import type { Actor } from '../app/auth.js';
-import type { RuleService } from '../rules/service.js';
+import { projectLabels, rulesUpdateRemoved, type RuleService } from '../rules/service.js';
 import { managerPrompt } from '../work/settings.js';
 import { applyManagerChange, managerView, workCompatibility, workflowUpdate } from '../work/api.js';
 import { parseSections } from '../work/settings.js';
@@ -76,7 +76,7 @@ export class ManagementService {
     return parameterHash({policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',target.project_id),
       schedules:this.store.all('SELECT id,revision FROM schedules WHERE project_id=? ORDER BY id',target.project_id),
       subscriptions:this.store.all('SELECT id,revision FROM notification_subscriptions WHERE project_id=? ORDER BY id',target.project_id),
-      manager:managerPrompt(this.store,target.project_id).revision,
+      manager:managerPrompt(this.store,target.project_id).revision,labels:projectLabels(this.store,target.project_id),
       roles:this.store.get('SELECT value FROM settings WHERE key=?','roles:'+target.project_id),
       sources:this.store.get('SELECT sha,files FROM repository_rule_sources WHERE repository_id=?',target.project_id),
       models:this.store.all(`SELECT id,version,model_name,api_url,api_key FROM models WHERE repository_id=? OR (repository_id IS NULL AND (models.restricted=0 OR EXISTS
@@ -204,6 +204,8 @@ export class ManagementService {
     this.scope(actor,row!.project_id);return this.receipt(row!);
   }
   async submit(actor:ActorContext,input:Json):Promise<Json>{
+    // The rule files' console layer is gone (#935): an old client learns what replaces it instead of a schema error.
+    if(input?.operation==='rules.update')throw Object.assign(new HttpError(410,'rules_update_removed'),{detail:rulesUpdateRemoved});
     validate(commandSchema,input);const command=input as unknown as ManagementCommand,entry=commands[command.operation]!;
     validate(entry.arguments,command.arguments);
     if(hasCredentials(command.arguments))fail(400,'sensitive_management_arguments');
@@ -253,24 +255,15 @@ export class ManagementService {
         if(this.revision(command.target)!==command.expected_revision)fail(409,'management_revision_conflict');
         const user=this.user(actor),{operation,target,arguments:args}=command;
         let result:Json;
-        if(operation==='rules.update'){
-          const policy=this.store.get('SELECT rule_overrides FROM policies WHERE repository_id=?',target.project_id)!;
-          const before=JSON.parse(policy.rule_overrides||'{}')[String(args.path)]??null;
-          this.rules.save(user,target.project_id,args);
-          const source=this.store.get('SELECT files FROM repository_rule_sources WHERE repository_id=?',target.project_id);
-          const overridden=!!(source&&Object.hasOwn(JSON.parse(source.files),String(args.path)));
-          result={saved:true,effect:overridden?'console_overridden':'future_tasks',effective:!overridden,diff:{before:{content:before},after:args},notice:overridden?'控制台层已保存；仓库文件覆盖它，实际行为尚未改变。':'共享规则已保存，只影响之后的新任务。'};
-        }else if(operation==='project.update'){
+        if(operation==='project.update'){
           result=updatePolicy(this.store,user,target.project_id,args);
         }else if(operation==='workflow.update'){
           // A work type's Manager section, switch and writes, under the command name clients used before #207.
-          const id=target.workflow_id!,sectionId=(id.startsWith('development.')?'development':id),rule=({'review.issue':'.bot/rules/issue-review.md','review.pr':'.bot/rules/pr-review.md',development:'.bot/rules/issue-development.md'} as Record<string,string>)[sectionId];
+          const id=target.workflow_id!,sectionId=(id.startsWith('development.')?'development':id);
           const before=managerPrompt(this.store,target.project_id),oldPrompt=parseSectionBody(before.content,sectionId);
           const saved=workflowUpdate(this.store,target.project_id,id,args,user.id);
-          const source=this.store.get('SELECT files,sha FROM repository_rule_sources WHERE repository_id=?',target.project_id);
-          // The exact effective prompt is returned by get_effective_config; repository ownership is never guessed.
-          const overridden=!!(rule&&source&&Object.hasOwn(JSON.parse(source.files),rule)&&Object.hasOwn(args,'prompt'));
-          result={saved:true,manager_revision:saved.revision,effect:overridden?'console_overridden':'future_tasks',effective:!overridden,source:overridden?'repository':'console',diff:{before:{prompt:oldPrompt},after:args},rollback:{operation:'workflow.update',target,arguments:{prompt:oldPrompt},expected_revision:this.revision(target)},configuration_url:'#/projects/'+target.project_id+'/roles',repository_sources:source?.sha??null,notice:overridden?'Manager 章节已保存，但仓库 .bot 文件优先，实际行为尚未改变。可创建配置 PR，待合入生效。':'Manager 章节已保存，只影响之后新建任务；已有 run 保留原配置。'};
+          // The Manager section is the only text of this work (#935): no repository file overrides it any more.
+          result={saved:true,manager_revision:saved.revision,effect:'future_tasks',effective:true,source:'console',diff:{before:{prompt:oldPrompt},after:args},rollback:{operation:'workflow.update',target,arguments:{prompt:oldPrompt},expected_revision:this.revision(target)},configuration_url:'#/projects/'+target.project_id+'/roles',notice:'Manager 章节已保存，只影响之后新建任务；已有 run 保留原配置。'};
         }else if(operation==='manager.update'){
           const before=managerPrompt(this.store,target.project_id),saved=applyManagerChange(this.store,target.project_id,args,user.id);
           result={saved:true,manager_revision:saved.revision,effect:'future_tasks',diff:{before:{revision:before.revision},after:{revision:saved.revision}},configuration_url:'#/projects/'+target.project_id+'/roles',
