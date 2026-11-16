@@ -1,0 +1,122 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { harness, setup, account, repository, testPassword } from './helpers.mjs';
+import { insertTaskLog } from '../dist/storage/payloads.js';
+import { withRunTraceScope } from '../dist/tasks/trace.js';
+import { recordCheckWebhook } from '../dist/tasks/external-links.js';
+
+test('parallel role runs stamp exact run_id and role on task_logs without cross-contamination', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101');
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,phase,created_at,updated_at) VALUES('t-par','101','development.issue','running','Parallel test','model','2026-11-16T08:00:00Z','2026-11-16T08:00:00Z')");
+  const taskRow = h.store.get("SELECT * FROM tasks WHERE id='t-par'");
+  h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-rev','t-par','execution',1,1,'2026-11-16T08:01:00Z','running','{}','{}','reviewer')");
+  h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-tst','t-par','execution',1,1,'2026-11-16T08:01:00Z','running','{}','{}','test')");
+
+  await Promise.all([
+    withRunTraceScope('t-par', 'run-rev', 'reviewer', async () => {
+      await new Promise(r => setTimeout(r, 5));
+      insertTaskLog(h.store, taskRow, JSON.stringify({ type: 'tool', name: 'read_file', arguments: { path: 'src/a.ts' }, result: { bytes: 120 } }));
+    }),
+    withRunTraceScope('t-par', 'run-tst', 'test', async () => {
+      insertTaskLog(h.store, taskRow, JSON.stringify({ type: 'command', command: 'npm test', exit_code: 0, output: 'ok' }));
+    }),
+  ]);
+
+  const res = await admin('/api/tasks/t-par/logs');
+  assert.equal(res.status, 200);
+  const byRole = Object.fromEntries(res.value.logs.map(l => [l.role, l.run_id]));
+  assert.equal(byRole.reviewer, 'run-rev');
+  assert.equal(byRole.test, 'run-tst');
+});
+
+test('role_flow groups parallel observers, tracks returned findings, external PR/Checks, and filters GET /api/tasks', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101');
+
+  const sha = 'a'.repeat(40);
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,priority,summary,object_number,phase,result,created_at,updated_at) VALUES('t-952','101','development.issue','running','P1','重构任务流转详情页',952,'model',?,'2026-11-16T08:00:00Z','2026-11-16T08:10:00Z')",
+    JSON.stringify({ pr_number: 958, branch: 'feat/task-view-952', sha }),
+  );
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,priority,summary,object_number,phase,created_at,updated_at) VALUES('t-done','101','development.issue','pr_opened','P2','历史已完成任务',910,'done','2026-11-15T08:00:00Z','2026-11-15T09:00:00Z')",
+  );
+
+  // Issue & PR board projection + Check Runs via webhook projection
+  h.store.run("INSERT OR REPLACE INTO board_objects(repository_id,object_type,object_number,title,github_state,draft,last_seen) VALUES('101','issue',952,'任务详情两层折叠','open',0,'2026-11-16T08:00:00Z')");
+  h.store.run("INSERT OR REPLACE INTO board_objects(repository_id,object_type,object_number,title,github_state,draft,last_seen) VALUES('101','pr',958,'feat: task detail view','open',0,'2026-11-16T08:09:00Z')");
+  recordCheckWebhook(h.store, '101', 'check_run', { check_run: { id: 1, name: 'unit', head_sha: sha, status: 'completed', conclusion: 'success', html_url: 'https://github.com/fixture/project-101/runs/1' } });
+  recordCheckWebhook(h.store, '101', 'check_run', { check_run: { id: 2, name: 'e2e', head_sha: sha, status: 'in_progress', conclusion: null, html_url: 'https://github.com/fixture/project-101/runs/2' } });
+
+  // Multi-role runs: 1. Manager -> 2. Dev (v1) -> 3a. Reviewer (1 finding) + 3b. Tester (0 findings) -> 4. Dev (v2 running)
+  const insRun = h.store.db.prepare('INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,ended_at,status,context_snapshot,config_snapshot,role,assignment_id,harness) VALUES(?,?,?,1,1,?,?,?,\'{}\',\'{}\',?,?,?)');
+  insRun.run('r1', 't-952', 'execution', '2026-11-16T08:00:05Z', null, 'running', 'manager', null, 'native');
+  insRun.run('r2', 't-952', 'execution', '2026-11-16T08:01:00Z', '2026-11-16T08:03:00Z', 'succeeded', 'dev', 'a-dev-1', 'pi');
+  insRun.run('r3a', 't-952', 'execution', '2026-11-16T08:03:05Z', '2026-11-16T08:04:30Z', 'succeeded', 'reviewer', 'a-rev-1', 'codex');
+  insRun.run('r3b', 't-952', 'execution', '2026-11-16T08:03:06Z', '2026-11-16T08:04:45Z', 'succeeded', 'test', 'a-tst-1', 'pi');
+  insRun.run('r4', 't-952', 'execution', '2026-11-16T08:05:00Z', null, 'running', 'dev', 'a-dev-2', 'pi');
+
+  const insHist = h.store.db.prepare('INSERT INTO task_history(task_id,type,data,created_at,run_id,actor) VALUES(?,?,?,?,?,?)');
+  insHist.run('t-952', 'role_result', JSON.stringify({ role: 'dev', assignment_id: 'a-dev-1', result: { summary: '初版完成' } }), '2026-11-16T08:03:00Z', 'r2', 'role:dev');
+  insHist.run('t-952', 'role_result', JSON.stringify({ role: 'reviewer', assignment_id: 'a-rev-1', result: { summary: '发现折叠状态重置问题', findings: [{ description: '轮询未保留内层展开态', evidence: ['static/views/timeline.js:120'] }], inspected_scope: ['static/'], unknowns: [] } }), '2026-11-16T08:04:30Z', 'r3a', 'role:reviewer');
+  insHist.run('t-952', 'role_result', JSON.stringify({ role: 'test', assignment_id: 'a-tst-1', result: { summary: '单测通过', findings: [], inspected_scope: ['test/'], unknowns: [] } }), '2026-11-16T08:04:45Z', 'r3b', 'role:test');
+  insHist.run('t-952', 'tool_started', JSON.stringify({ call_id: 'c1', name: 'delegate_role', arguments: { role: 'dev', purpose: '修复折叠态' } }), '2026-11-16T08:04:55Z', 'r1', 'agent');
+
+  const detail = await admin('/api/tasks/t-952');
+  assert.equal(detail.status, 200);
+  const { task, role_flow, role_runs } = detail.value;
+
+  // External links check
+  assert.equal(task.external.issue.number, 952);
+  assert.equal(task.external.pull_request.number, 958);
+  assert.equal(task.external.pull_request.branch, 'feat/task-view-952');
+  assert.equal(task.external.actions.status, 'running');
+  assert.equal(task.external.actions.total, 2);
+  assert.equal(task.external.actions.passed, 1);
+  assert.equal(task.external.actions.running, 1);
+
+  // Flow diagram stages: 1. Manager (delegated) -> 2. Dev (completed) -> [3a. Reviewer (returned) + 3b. Tester (completed)] -> 4. Dev (v2 running) -> QA (pending)
+  assert.equal(role_flow.active_role, 'dev');
+  assert.equal(role_flow.stages.length, 5);
+  assert.equal(role_flow.stages[0].nodes[0].state, 'delegated');
+  assert.equal(role_flow.stages[1].nodes[0].state, 'completed');
+  assert.equal(role_flow.stages[2].parallel, true);
+  assert.deepEqual(role_flow.stages[2].nodes.map(n => [n.index_label, n.state, n.findings_count]), [['3a', 'returned', 1], ['3b', 'completed', 0]]);
+  assert.equal(role_flow.stages[3].nodes[0].state, 'running');
+  assert.equal(role_flow.stages[3].nodes[0].badge, '返工中');
+  assert.equal(role_flow.stages[4].nodes[0].role, 'qa');
+  assert.equal(role_flow.stages[4].nodes[0].state, 'pending');
+
+  // Role runs default_open: only r4 (currently running) is default_open=true!
+  assert.deepEqual(role_runs.map(r => [r.index_label, r.default_open]), [['1', false], ['2', false], ['3a', false], ['3b', false], ['4', true]]);
+  assert.equal(role_runs[0].history_steps.length, 1);
+  assert.equal(role_runs[0].history_steps[0].tool, 'delegate_role');
+
+  // List endpoint with flow=1, completed group, and search `q`
+  const listCompleted = await admin('/api/tasks?repository_id=101&summary=1&flow=1&group=completed');
+  assert.equal(listCompleted.status, 200);
+  assert.equal(listCompleted.value.completed_count, 1);
+  assert.deepEqual(listCompleted.value.tasks.map(row => row.id), ['t-done']);
+
+  const searchByPr = await admin('/api/tasks?repository_id=101&flow=1&q=958');
+  assert.equal(searchByPr.status, 200);
+  assert.deepEqual(searchByPr.value.tasks.map(row => row.id), ['t-952']);
+  assert.equal(searchByPr.value.tasks[0].role_flow.active_role, 'dev');
+
+  // Read-only member without tasks.write / knowledge.write gets can_write_tasks=false, can_manage=false, and body_omitted=true
+  const pw = testPassword();
+  const userCreated = await admin('/api/users', 'POST', { username: 'ro-viewer', password: pw, repository_ids: ['101'] });
+  const principal = h.store.get("SELECT id FROM principals WHERE user_id=?", userCreated.value.user.id);
+  h.store.run("UPDATE scoped_grants SET role='viewer',policy='explicit',capabilities=? WHERE principal_id=?", JSON.stringify(['tasks.read']), principal.id);
+  const viewer = h.client();
+  await viewer('/api/auth/login', 'POST', { username: 'ro-viewer', password: pw });
+  const roBoard = await viewer('/api/repositories/101/role-board');
+  assert.equal(roBoard.status, 200);
+  assert.equal(roBoard.value.can_write_tasks, false);
+  const roDetail = await viewer('/api/tasks/t-952');
+  assert.equal(roDetail.status, 200);
+  assert.equal(roDetail.value.can_manage, false);
+  assert.equal(roDetail.value.role_runs[0].history_steps[0].body_omitted, true);
+  assert.equal(roDetail.value.role_runs[0].history_steps[0].arguments, null);
+});

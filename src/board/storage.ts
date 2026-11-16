@@ -1,7 +1,9 @@
 import type { Store } from '../storage/database.js';
+import { commitChecksStorage } from '../tasks/external-links.js';
 
 // Keep a small object projection at ingestion time; board reads never load task inputs or delivery bodies.
 export function boardStorage(store: Store): void {
+  commitChecksStorage(store);
   store.db.exec(`
     CREATE TABLE IF NOT EXISTS board_objects(
       repository_id TEXT NOT NULL REFERENCES repositories(id), object_type TEXT NOT NULL CHECK(object_type IN ('issue','pr')),

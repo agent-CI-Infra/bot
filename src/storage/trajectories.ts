@@ -70,7 +70,8 @@ export function trajectoryStorage(db: DatabaseSync) {
   toolResultStorage(db);
   addColumns(db, 'task_tools', operationRefColumns);
   addColumns(db, 'model_requests', { request_ref: 'TEXT', response_ref: 'TEXT' });
-  addColumns(db, 'task_logs', { content_ref: 'TEXT' });
+  addColumns(db, 'task_logs', { content_ref: 'TEXT', run_id: 'TEXT', role: 'TEXT' });
+  db.exec('CREATE INDEX IF NOT EXISTS task_logs_run ON task_logs(task_id,run_id);');
   db.exec(`CREATE TABLE IF NOT EXISTS trajectory_files(id TEXT PRIMARY KEY,repository_id TEXT,task_id TEXT,run_id TEXT,conversation_id TEXT,turn_id TEXT,
       path TEXT NOT NULL,created_at TEXT NOT NULL,closed_at TEXT,bytes INTEGER,records INTEGER,last_sha256 TEXT,counts TEXT);
     -- Files left open by a stopped process, which the background sealer closes; few rows at any time.

@@ -2,7 +2,7 @@
 const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['projects','external'];
 // Console pages are drawn by static/shell.js (renderConsolePage). They are not tabs of the generic list, and no list
 // read may ever build /api/<tab> from them: #/more would become GET /api/more, an endpoint that does not exist (#365).
-const consoleTabs = ['more', 'inbox', 'new-task', 'conversations', 'not-found'];
+const consoleTabs = ['more', 'inbox', 'new-task', 'conversations', 'task', 'not-found'];
 // #642: an address under #/ that names no page shows 找不到这个页面 instead of keeping (or silently loading) another page.
 // In-page anchors such as the skip link's #main-content are not console addresses and still keep the current page.
 function unknownAddress(hash) {
@@ -12,6 +12,7 @@ function unknownAddress(hash) {
   // page at all, so it reads as unknown instead of becoming a project address built from garbage.
   const legacyComputerId = legacyComputerAddress.exec(path)?.[1];
   if (legacyComputerId && safeDecode(legacyComputerId) === null) return true;
+  if (/^#\/tasks(?:\/|$)/.test(path) && !taskRoute(path)) return true;
   // #/projects/<anything> that is not a project address (#/projects/abc, #/projects/1/Members) is a broken project link.
   if (/^#\/projects\/./.test(path) && !projectRoute()) return true;
   return !addressTab(hash);
@@ -36,6 +37,7 @@ const legacyComputerAddress = /^#\/settings\/computers(?:\/([^/?#]+))?$/;
 // A project page (#/projects/<id>/<section>) replaces the list; any other address shows the current tab's list.
 // The tab an address names: #/<tab>, a project page, a wizard step, or an older address (#external, #/accounts, #/users).
 function addressTab(hash) {
+  if (taskRoute(hash)) return 'task';
   if (/^#\/new-task(?:\/[1-9]\d*)?$/.test(hash)) return 'new-task';
   if (projectRoute() || hash === '#/projects') return 'projects';
   if (['#/reviews', '#/developments'].includes(hash)) return 'board';
@@ -80,7 +82,8 @@ async function route() {
   // same address keeps them, so a poll or a list refresh does not shut a dialog the reader is reading. A dialog that
   // holds unsaved input (#editor, the confirmation box) is never a page dialog and is not touched here.
   if (location.hash !== paintedAddress) {
-    for (const id of ['task-view', 'detail']) { const view = $(id); if (view.open) view.close(); }
+    if ($('detail')?.open) $('detail').close();
+    if (typeof closeTaskPicker === 'function') closeTaskPicker();
   }
   // An address the console does not know keeps the current page (on a fresh load that is the projects page).
   const missing = unknownAddress(location.hash);
@@ -96,6 +99,7 @@ async function route() {
   applyDocumentTitle(missing, target);
   // Global and project computer views reuse DOM ids; discard the inactive view and its scheduled reads.
   if (!target && typeof leaveProjectPage === 'function') leaveProjectPage();
+  if (tab !== 'task' && typeof leaveTaskDetailPage === 'function') leaveTaskDetailPage();
   if (tab !== 'settings') $('settings-panel').replaceChildren();
   const address=tab+':'+location.hash;if(messagePage!==address){notice('message');messagePage=address;}
   const consolePage = consoleTabs.includes(tab);
@@ -132,5 +136,9 @@ async function route() {
   if (resolved !== tab) return;
   announcePage(missing, target, focusBefore);
   paintedAddress = location.hash;
+  if (typeof tryRestoreTaskReturn === 'function') {
+    const proj = projectRoute();
+    tryRestoreTaskReturn({ settle: !(proj && proj.section === 'overview') });
+  }
 }
 window.addEventListener('hashchange', () => { if (me) route().catch(error); });

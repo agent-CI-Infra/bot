@@ -190,6 +190,8 @@ export class Store {
     // scanned the whole table (1.04M rows in production, ~0.35 s each, about a tenth of the control plane's thread).
     // Building it reads task_logs once at the next start (~0.5 GB in production, a few seconds).
     this.db.exec('CREATE INDEX IF NOT EXISTS task_logs_task ON task_logs(task_id)');
+    this.db.exec(`CREATE INDEX IF NOT EXISTS github_effects_task_kind ON github_effects(task_id,kind);
+      CREATE INDEX IF NOT EXISTS bot_pull_requests_source_task ON bot_pull_requests(source_task_id);`);
     // Review rules: which events start a review, the comment language and the administrator's project-specific guidance.
     extend('policies', { review_issues: 'INTEGER NOT NULL DEFAULT 1', review_pull_requests: 'INTEGER NOT NULL DEFAULT 1', review_pr_updates: 'INTEGER NOT NULL DEFAULT 1',
       review_issue_updates: 'INTEGER NOT NULL DEFAULT 1', review_pr_discussion: 'INTEGER NOT NULL DEFAULT 1',

@@ -46,9 +46,10 @@ test('看板卡片和任务详情的来源用白话写明从哪来、交给了�
     // The task detail uses the same sentence.
     await card('101/issue/3', 'development.issue').locator('.board-card-title').click();
     await expect(page.locator('#task-title')).toHaveText('开发 · Issue #3');
-    await expect(page.getByText('来源：GitHub 事件 · 项目管理者交给开发', { exact: true }).first()).toBeVisible();
+    await expect(page.locator('#task-view').getByText('来源：GitHub 事件 · 项目管理者交给开发', { exact: true }).first()).toBeVisible();
     await page.screenshot({ path: `${out}/task-1440.png` });
     await page.locator('#task-actions').getByRole('button', { name: '关闭', exact: true }).click();
+    await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
     await page.setViewportSize({ width: 390, height: 844 });
     // A phone shows one group at a time; open the one that holds the development card.
     const group = page.getByLabel('当前分组', { exact: true });

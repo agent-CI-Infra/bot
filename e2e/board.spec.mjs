@@ -19,7 +19,12 @@ const choose=(page,label,value)=>['执行状态','对象类型'].includes(label)
   ?page.getByRole('group',{name:label,exact:true}).locator('button[data-value="'+value+'"]').click()
   :page.getByLabel(label,{exact:true}).selectOption(value);
 async function more(page){await page.getByRole('button',{name:'更多视图操作',exact:true}).click();}
-async function closeTask(page){await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();}
+async function closeTask(page){
+  const picker=page.locator('#task-picker-dialog[open] #task-picker-actions');
+  if(await picker.count()){await picker.getByRole('button',{name:'关闭',exact:true}).click();return;}
+  await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();
+  await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy','true');
+}
 async function screenshot(page,name){mkdirSync('.tmp/board-evidence',{recursive:true});await page.screenshot({path:'.tmp/board-evidence/'+name+'.png'});}
 const noPageScroll=async page=>expect(await page.evaluate(()=>document.documentElement.scrollHeight<=innerHeight&&document.documentElement.scrollWidth<=innerWidth)).toBe(true);
 

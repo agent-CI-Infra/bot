@@ -22,6 +22,7 @@ function deliverySection(name,title,rows){ const section=element('section','','d
 // collapsed because it is evidence rather than the conclusion.
 function deliveryDetail(value){
   const event=value.event, source=event.source||{}, reception=event.reception||{}, signature=event.signature||{};
+  const dlg=$('detail'); if(dlg?.dataset) dlg.dataset.recordId=String(event.id||'');
   const delivery=element('code',String(event.delivery_id||'')); delivery.dataset.deliveryId='';
   const nodes=[], origin=element('section','','detail-section'); origin.dataset.detailSection='source';
   origin.append(element('h3','来源与引用'), facts([['GitHub delivery ID',delivery],['归档引用',source.reference||('deliveries:'+event.id)],

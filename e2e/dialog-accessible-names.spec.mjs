@@ -31,7 +31,7 @@ test('#756: #editor and #detail take their accessible name from their visible ti
     // The delivery dialog names itself after the heading the reader sees: 投递详情. The task page opens that same dialog.
     await page.goto(h.admin + '/#/inbox/101');
     await page.locator('[data-task-id="dialog-task"]').getByRole('button', { name: '查看任务', exact: true }).click();
-    await page.locator('#task-side').getByRole('button', { name: '查看投递', exact: true }).click();
+    await page.locator('#task-external-bar').getByRole('button', { name: '查看投递', exact: true }).click();
     const detail = page.locator('#detail');
     await expect(detail.getByRole('heading', { name: '投递详情', exact: true })).toBeVisible();
     await expect(detail).toHaveAccessibleName('投递详情');

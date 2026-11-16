@@ -1,6 +1,7 @@
 import { resultSpec, resultOwner } from './tool-results.js';
 import { executionModel, taskConfiguration, supplementalInstructions } from '../tasks/configuration.js';
-import { beginRun, endRun, traceEvent, traceSnapshot } from '../tasks/trace.js';
+import { beginRun, endRun, traceEvent, traceSnapshot, withRunTraceScope } from '../tasks/trace.js';
+import { insertTaskLog } from '../storage/payloads.js';
 import type { Store, Row } from '../storage/database.js';
 import { type Redactor, stop, TaskError } from './common.js';
 import { randomId } from '../core/security.js';
@@ -183,8 +184,8 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
           }
           const retry: ModelRetry = { retry: attempt + 1, retries: attempts - 1, code: error.code, ...(error.detail ? { detail: error.detail } : {}),
             delay_ms: modelRetryDelay(attempt + 1), request_id: requestId };
-          if (spec.task.id && spec.store.get('SELECT id FROM tasks WHERE id=?', spec.task.id)) spec.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)', randomId(), spec.task.id,
-            JSON.stringify({ type: 'model_retry', code: error.code, request_id: requestId, retry: retry.retry, ...(error.detail ? { detail: error.detail } : {}), delay_ms: retry.delay_ms }), new Date().toISOString());
+          if (spec.task.id && spec.store.get('SELECT id FROM tasks WHERE id=?', spec.task.id)) insertTaskLog(spec.store, spec.task,
+            JSON.stringify({ type: 'model_retry', code: error.code, request_id: requestId, retry: retry.retry, ...(error.detail ? { detail: error.detail } : {}), delay_ms: retry.delay_ms }));
           await spec.onModelRetry?.(retry);
           await options?.onRetry?.(retry);
           await pause(retry.delay_ms, spec.executionSignal);
@@ -196,7 +197,8 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   try {
   if(run&&spec.roleRun){const r=spec.roleRun;spec.store.run('UPDATE task_runs SET role_instance_id=?,role=?,role_version=?,harness=?,harness_version=?,assignment_id=?,recovery_mode=?,role_snapshot=? WHERE id=?',r.instance_id,r.role,r.version,r.harness,r.harness_version??'1',r.assignment_id??null,r.recovery_mode,r.snapshot_id??null,run.id);}
   if(run)spec.onRun?.(run.id);
-    const result = spec.adapter ? await spec.adapter(services) : await runTools(spec, services);
+    const activeRole = spec.roleRun?.role ?? (typeof spec.task.active_role === 'string' ? spec.task.active_role : null);
+    const result = await withRunTraceScope(String(spec.task.id ?? ''), run?.id ?? null, activeRole, () => spec.adapter ? spec.adapter(services) : runTools(spec, services));
     await spec.guard();endRun(spec.store,run,'succeeded');return result;
   } catch(error){endRun(spec.store,run,'fault',(error as any).code||'runtime_error');throw error;}
   finally {spec.task.trace_run_id=previousRun;}

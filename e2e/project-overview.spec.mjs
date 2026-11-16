@@ -19,11 +19,22 @@ async function login(page,h,password,username='administrator',hash='#/projects/1
 }
 const metric=(page,key)=>page.locator(`[data-task-group=${key}] strong`);
 
-test('project totals and drill-down share real task records on desktop and mobile',async({page})=>{
+test('project defaults to role view and switches cleanly to task view with real totals and pagination',async({page})=>{
   const {h,password,seed}=await fixture(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   try {
-    await login(page,h,password);await expect(metric(page,'all')).toHaveText('92');await expect(metric(page,'active')).toHaveText('2');
+    await login(page,h,password);
+    // Default project view is Role View (#952)
+    await expect(page.locator('[data-workbench-view="roles"]')).toHaveAttribute('aria-current','page');
+    await expect(page.getByTestId('project-role-board')).toBeVisible();
+    await expect(page.locator('[data-role-row="manager"]')).toContainText('排队 12');
+
+    // Switch to Task View
+    await page.locator('[data-workbench-view="tasks"]').click();
+    await expect(page).toHaveURL(/overview\/tasks$/);
+    await expect(metric(page,'all')).toHaveText('92');await expect(metric(page,'active')).toHaveText('2');
     await expect(metric(page,'queued')).toHaveText('12');await expect(metric(page,'attention')).toHaveText('2');
+    await expect(metric(page,'completed')).toHaveText('75');
+    await page.locator('[data-task-group=active]').click();
     await expect(page.locator('.workspace-task-rows [data-task-id]')).toHaveCount(2);
     await expect(page.locator('.workspace-health-status')).toContainText('不代表任务或 CI 成功');
     await page.locator('[data-task-group=queued]').click();await expect(page.locator('.workspace-task-rows [data-task-id]')).toHaveCount(10);
@@ -33,6 +44,7 @@ test('project totals and drill-down share real task records on desktop and mobil
     await expect(page).toHaveURL(/overview\/queued\.10$/);await expect(page.locator('.workspace-task-rows [data-task-id]')).toHaveCount(3);
     await page.reload();await expect(page.locator('.workspace-task-status')).toContainText('显示 11–13 项');
     await page.locator('[data-task-group=attention]').click();await expect(page.locator('.workspace-task-rows')).toContainText('补齐任务所需的模型');
+    expect(errors).toEqual([]);
   } finally {await h.stop();}
 });
 
@@ -40,7 +52,8 @@ test('overview refresh preserves readings and focus, and labels stale or unavail
   const {h,password,seed}=await fixture();
   try {
     await page.route('**/api/tasks?*',route=>route.fulfill({status:503,contentType:'application/json',body:'{"error":"tasks_unavailable"}'}));
-    await login(page,h,password);await expect(page.locator('.workspace-task-status')).toContainText('暂时无法判断');
+    await login(page,h,password,'administrator','#/projects/101/overview/active');
+    await expect(page.locator('.workspace-task-status')).toContainText('暂时无法判断');
     await expect(metric(page,'active')).toHaveText('—');await expect(page.locator('.workspace-health-status')).toContainText('记录读取于');
     await page.unroute('**/api/tasks?*');await page.getByRole('button',{name:'刷新总览'}).click();await expect(metric(page,'active')).toHaveText('2');
     const focus=page.locator('[data-task-id=active] button');await focus.focus();const y=await page.evaluate(()=>scrollY);
@@ -62,13 +75,16 @@ test('overview deep links, live permissions and late responses retain scope acro
   const {h,admin}=await fixture(),password=testPassword();
   await admin('/api/users','POST',{username:'overview-member',password,repository_ids:['101']});
   try {
-    await login(page,h,password,'overview-member');await expect(metric(page,'all')).toHaveText('92');
+    await login(page,h,password,'overview-member');
+    await expect(page.locator('[data-workbench-view="tasks"]')).toContainText('92');
     mkdirSync('.tmp/project-overview',{recursive:true});
     for(const width of [320,390,768,1024,1440,1920]) {
       await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
       if(width===390||width===1440)await page.screenshot({path:`.tmp/project-overview/overview-${width}.png`,fullPage:true});
     }
-    await page.setViewportSize({width:390,height:844});await page.locator('[data-task-group=attention]').click();
+    await page.setViewportSize({width:390,height:844});
+    await page.locator('[data-workbench-view="tasks"]').click();
+    await page.locator('[data-task-group=attention]').click();
     await expect(page.locator('.workspace-task-rows [data-task-id]')).toHaveCount(2);await expect(page.locator('.workspace-task-rows')).not.toContainText('foreign-private');
     await page.locator('[data-task-id=blocked] button').click();await expect(page.locator('#task-view')).toBeVisible();await page.keyboard.press('Escape');
     await expect(page.locator('[data-task-id=blocked] button')).toBeFocused();
@@ -77,7 +93,7 @@ test('overview deep links, live permissions and late responses retain scope acro
     await page.getByRole('button',{name:'刷新总览'}).click();await page.locator('#console-mobile-nav').getByRole('link',{name:'更多',exact:true}).click();release();
     await expect(page.getByRole('heading',{name:'更多功能',exact:true})).toBeVisible();await expect(page.locator('.workspace-overview')).toHaveCount(0);
     await page.unroute('**/api/tasks?*');await page.goto(h.admin+'/#/projects/202/overview');await expect(page.locator('#project-page')).toContainText('403');
-    await page.goto(h.admin+'/#/projects/101/overview');await expect(metric(page,'active')).toHaveText('2');
+    await page.goto(h.admin+'/#/projects/101/overview/active');await expect(metric(page,'active')).toHaveText('2');
     const user=h.store.get("SELECT id FROM users WHERE username='overview-member'");await admin('/api/project-admin-assignments','PUT',{user_id:user.id,repository_ids:[]});
     await page.getByRole('button',{name:'刷新总览'}).click();await expect(page.locator('#project-page')).toContainText('项目访问已变化');
     await expect(page.locator('.workspace-task-rows')).toHaveCount(0);

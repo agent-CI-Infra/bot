@@ -1,4 +1,5 @@
 import { stageTimeline } from './schedule.js';
+import { taskRoleTrace } from './flow.js';
 import {harnesses} from './harness.js';
 import {agentBackends,modelConnectivity,probeRepositoryModel,recommendedBackend} from './backends.js';
 import type {Store} from '../storage/database.js';
@@ -62,14 +63,15 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
   traceEvent(s,task!.id,'role_revision_requested',{instance_id:instance!.id,role:input.role,config_revision:current.revision,actor:user.id},null,'user:'+user.id);s.audit(user.id,'roles.apply',task!.id,task!.repository_id);
   return {instance_id:instance!.id,pending:true,config_revision:current.revision};
  }
- const task=/^\/api\/tasks\/([^/]+)\/roles$/.exec(url.pathname);if(task&&method==='GET'){const filter=scope(user,'repository_id');if(!s.get(`SELECT id FROM tasks WHERE id=? AND ${filter.sql}`,task[1]!,...filter.args))fail(404,'task_not_found');const after=Number(url.searchParams.get('after')??0),limit=Number(url.searchParams.get('limit')??50);if(!Number.isSafeInteger(after)||after<0||!Number.isSafeInteger(limit)||limit<1||limit>100)fail(400,'invalid_pagination');const assignments=s.all('SELECT rowid AS sequence,* FROM role_assignments WHERE task_id=? AND rowid>? ORDER BY rowid LIMIT ?',task[1]!,after,limit+1),more=assignments.length>limit;assignments.splice(limit);
+ const task=/^\/api\/tasks\/([^/]+)\/roles$/.exec(url.pathname);if(task&&method==='GET'){const filter=scope(user,'repository_id');const taskRow=s.get(`SELECT id,repository_id,kind,status,phase,error_code,result FROM tasks WHERE id=? AND ${filter.sql}`,task[1]!,...filter.args);if(!taskRow)fail(404,'task_not_found');const after=Number(url.searchParams.get('after')??0),limit=Number(url.searchParams.get('limit')??50);if(!Number.isSafeInteger(after)||after<0||!Number.isSafeInteger(limit)||limit<1||limit>100)fail(400,'invalid_pagination');const assignments=s.all('SELECT rowid AS sequence,* FROM role_assignments WHERE task_id=? AND rowid>? ORDER BY rowid LIMIT ?',task[1]!,after,limit+1),more=assignments.length>limit;assignments.splice(limit);
   const instances=s.all('SELECT id,role,definition,harness,harness_state,sequence,updated_at,snapshot_id,config_revision,role_revision,pending_revision FROM role_instances WHERE task_id=? ORDER BY role',task[1]!).map(r=>({...r,definition:JSON.parse(r.definition),harness_state:JSON.parse(r.harness_state)}) as Record<string,any>);
   // Every role run with the snapshot it ran with: the actual model, skills, harness and policy, never conversation bodies.
   // RoleRun facts (#169): the scheduler's lease, the run it resumed, the protocol recovery mode, its RunContext and admission.
   const runs=s.all("SELECT id,kind,status,started_at,ended_at,stop_reason,role,role_instance_id,assignment_id,role_snapshot,role_version,harness,harness_version,cli_version,recovery_mode,lease_scope,lease_epoch,resume_from_run_id,protocol_recovery,run_context,admission FROM task_runs WHERE task_id=? AND role IS NOT NULL ORDER BY rowid",task[1]!).map(r=>({...r,run_context:r.run_context?JSON.parse(String(r.run_context)):null,admission:r.admission?JSON.parse(String(r.admission)):null}) as Record<string,any>);
   const ids=[...new Set([...instances.map(i=>i.snapshot_id),...runs.map(r=>r.role_snapshot)].filter(Boolean))];
   const snapshots=Object.fromEntries(ids.map(id=>[id,JSON.parse(s.get('SELECT snapshot FROM role_snapshots WHERE id=?',id)?.snapshot??'null')]));
-  return {instances,assignments,runs,snapshots,stage_schedule:stageTimeline(s,task[1]!),next_after:more?assignments.at(-1)!.sequence:null};}
+  const trace=taskRoleTrace(s,{...taskRow!,result:taskRow!.result?JSON.parse(String(taskRow!.result)):null},user.context?{actor:user.context}:undefined);
+  return {instances,assignments,runs,snapshots,...trace,stage_schedule:stageTimeline(s,task[1]!),next_after:more?assignments.at(-1)!.sequence:null};}
 }
 export async function roleProbeApi(s:Store,user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
  const match=/^\/api\/repositories\/([^/]+)\/roles\/probe-model$/.exec(url.pathname);

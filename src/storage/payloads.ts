@@ -1,6 +1,6 @@
 import type { Row, Store } from './database.js';
 import { payloadHeader, TrajectoryError } from './trajectories.js';
-import { traceSnapshot } from '../tasks/trace.js';
+import { currentRunTrace, traceSnapshot } from '../tasks/trace.js';
 import { randomId } from '../core/security.js';
 
 // Readers of payloads that moved to trajectory files. A row written since #436 keeps a small header in its old column
@@ -94,11 +94,13 @@ export const inlineLogBytes = 2048;
  * fields (type, phase, code, a clipped detail…) for queries and a ref for the whole text.
  */
 export function insertTaskLog(store: Store, task: Row, content: string, createdAt = new Date().toISOString(), id = randomId()): string {
-  const scope = Buffer.byteLength(content) > inlineLogBytes ? store.trajectories.scopeOf(task) : null, data = scope ? logData(content) : null;
+  const { runId, role } = currentRunTrace(task);
+  const scopedTask = runId && runId !== task.trace_run_id ? { ...task, trace_run_id: runId } : task;
+  const scope = Buffer.byteLength(content) > inlineLogBytes ? store.trajectories.scopeOf(scopedTask) : null, data = scope ? logData(content) : null;
   if (scope && data && !('$text' in (data as object))) {
     const ref = store.trajectories.append(scope, 'log', id, data);
-    store.run('INSERT INTO task_logs(id,task_id,content,created_at,content_ref) VALUES(?,?,?,?,?)', id, task.id, JSON.stringify(payloadHeader(data, ['detail'])), createdAt, ref);
-  } else store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)', id, task.id, content, createdAt);
+    store.run('INSERT INTO task_logs(id,task_id,content,created_at,content_ref,run_id,role) VALUES(?,?,?,?,?,?,?)', id, task.id, JSON.stringify(payloadHeader(data, ['detail'])), createdAt, ref, runId, role);
+  } else store.run('INSERT INTO task_logs(id,task_id,content,created_at,run_id,role) VALUES(?,?,?,?,?,?)', id, task.id, content, createdAt, runId, role);
   return id;
 }
 

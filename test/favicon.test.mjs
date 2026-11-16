@@ -23,7 +23,7 @@ test('console eyebrows are complete Chinese phrases, not English labels', () => 
   for (const label of ['NEEDS ATTENTION', 'PROJECT OVERVIEW', 'NEW TASK']) assert.equal(sources.includes(label), false, label);
   assert.match(sources, /element\('p', '工作区', 'eyebrow'\)/);
   assert.match(sources, /element\('p', '需要关注', 'eyebrow'\)/);
-  assert.match(sources, /element\('p', '总览', 'eyebrow'\)/);
+  assert.match(sources, /'项目工作台视图'/);
   assert.match(sources, /element\('p', '新任务', 'eyebrow'\)/);
   assert.doesNotMatch(sources, /element\('p', 'WORKSPACE', 'eyebrow'\)/);
 });

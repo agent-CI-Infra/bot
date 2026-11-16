@@ -86,7 +86,7 @@ test('changing the address closes an open delivery detail as well', async ({ pag
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await page.locator('[data-task-id="delivery-task"]').getByRole('button', { name: '查看任务', exact: true }).click();
     await expect(taskView(page)).toBeVisible();
-    const source = page.locator('#task-side [data-source-delivery]');
+    const source = page.locator('#task-external-bar [data-source-delivery]');
     await expect(source).toBeVisible();
     await source.getByRole('button', { name: '查看投递', exact: true }).click();
     await expect(page.locator('#detail')).toBeVisible();

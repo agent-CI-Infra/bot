@@ -23,6 +23,10 @@ function pageTitleFor(missing, target) {
   }
   // #799: a settings page that names its own category (存储) is titled after it, not after the whole platform.
   if (tab === 'settings' && typeof settingsPageTitle === 'function') return settingsPageTitle();
+  if (tab === 'task') {
+    const heading = document.querySelector('#task-view #task-title')?.textContent?.trim();
+    return heading && heading !== '正在加载…' ? `${heading} · 任务详情` : '任务详情';
+  }
   const key = pageTitleKeys[tab];
   return key ? t(key) : '';
 }
@@ -59,7 +63,7 @@ function pageChangeWasAsked(from, active) {
   return !active || active === document.body || !active.isConnected;
 }
 function announcePage(missing, target, previousFocus = null) {
-  const page = missing ? 'not-found' : target ? `project:${target.id}/${target.section}` : `page:${tab}`;
+  const page = missing ? 'not-found' : target ? `project:${target.id}/${target.section}` : tab === 'task' ? `task:${taskRoute()?.id || ''}` : `page:${tab}`;
   if (page === announcedPage) return;
   const first = announcedPage === null;
   announcedPage = page;

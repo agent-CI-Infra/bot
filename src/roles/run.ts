@@ -15,7 +15,7 @@ import { roleCapacity } from './board.js';
 import { admitRun,allocateLease,appendRunEvent,assertLease,budgetExceeded,buildRunContext,inputCandidate,instanceUsage,issueRunToken,leaseCurrent,planRecovery,recordCheckpoint,recordRunCliVersion,revokeRunTokens,runBudget,runEvents,scopeUsage,sourceRef,touchRunToken,verifyRunToken,type EnvironmentFacts } from './role-run.js';
 import { githubReadScopes } from './permissions.js';
 import { randomId } from '../core/security.js';
-import { traceEvent,endRun } from '../tasks/trace.js';
+import { traceEvent,endRun,withRunTraceScope } from '../tasks/trace.js';
 import { roleHarness } from './harness.js';
 import { memoryTools } from '../memory/project.js';
 import { taskTraceAccess, visibleMemorySnapshot, memoryViewSnapshot, taskMemoryAccess } from '../memory/access.js';
@@ -485,6 +485,7 @@ export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:strin
  let memory:any;try{memory={availability:'available',...new ProjectMemory(s,taskMemoryAccess(s,{...task,active_role:role})).search(task.repository_id,'',{role,limit:5,baseline:executionBaseline(task)})};}catch{memory={availability:'unavailable',instruction:'Role memory lookup failed; continue from task records and repository sources. Do not infer no prior knowledge.'};traceEvent(s,task.id,'memory_fault',{operation:'role_context',role,code:'role_memory_unavailable'},task.trace_run_id);}
  const previousRole=task.active_role;task.active_role=role;
  try{
+ return await withRunTraceScope(String(task.id??''),typeof task.trace_run_id==='string'?task.trace_run_id:null,role,async()=>{
  for(;;){
   const prepared=await prepareRun(spec,role,assignment,harnessOverride,options,{resolved,instance,continuation},{sourceInput,priorRun,priorSubmission,memory});
   const handle=await startRoleRun(prepared);
@@ -497,6 +498,7 @@ export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:strin
    resolved=next;instance=moved.instance;continuation={ref:moved.ref,from_run:executionRun??null};options={...options,recover:undefined};continue;
   }
  }
+ });
  }finally{task.active_role=previousRole;}
 }
 /**
