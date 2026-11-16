@@ -523,7 +523,7 @@ export class TaskEngine {
         update({generation:environment.generation,workspace_id:task.workspace_id||randomId()});
         const object=await github.object(task.kind,task.object_number);await validate(object);
         let implementationGoal=task.kind==='development.issue'?developmentGoal(input):input.review?.implementation_goal||'',actionableFindings:any[]=[];
-          if(task.kind.endsWith('.pr')){
+        if(task.kind.endsWith('.pr')){
           const owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number);
           if(owned){
             const source=this.store.get('SELECT input FROM tasks WHERE id=?',owned.source_task_id);

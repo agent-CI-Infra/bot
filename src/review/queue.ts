@@ -212,13 +212,14 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
     const kind = object === 'pr' ? 'review.pr' : 'review.issue', head = object === 'pr' ? sha(target?.head?.sha) : null;
     const input = { ...payload, trigger, ...(object === 'pr' ? { pull_request: target } : {}) };
     const discriminator = review.commentId ? `comment:${review.commentId}` : `update:${delivery}`;
+    // An Issue's mention, comment or edit may also start its development, on a basis the Manager states (#815); the Manager
+    // judges it from who is assigned and the latest review, as on a label event (whose own facts replace these).
+    const development = object === 'issue' ? developmentOffer(store, repositoryId, target, number, delivery) : null;
     return { ...base(type, `${type}:${number}:${discriminator}`, object, number, `${type === `${object === 'pr' ? 'pull_request' : 'issue'}.mention` ? '提到 bot' : '更新'}：${clip(target?.title, 120)} #${number}`,
-      { object: objectFacts(target), trigger, ...extra }),
+      { object: objectFacts(target), trigger, ...(development ? { development: developmentFacts(development) } : {}), ...extra }),
       options: [{ id: 'review', work: kind, title: `${object === 'pr' ? '检视 PR' : '检视 Issue'} #${number}`, default: true,
         spec: { type: 'object', kind, number, head, input, delivery, comment_id: review.commentId ?? null, update_id: review.commentId ? null : delivery } },
-        replyOption(object, number, head, input, discriminator, delivery),
-        // An Issue's mention, comment or edit may also start its development, on a basis the Manager states (#815).
-        ...(object === 'issue' ? [developmentOffer(store, repositoryId, target, number, delivery)?.option].filter((o): o is CreateOption => !!o) : [])],
+        replyOption(object, number, head, input, discriminator, delivery), ...(development ? [development.option] : [])],
       merge: { key: merge, data: { ...trigger, object: p.issue || p.pull_request, comment: p.comment, review: p.review }, trigger, head, kinds: [kind] } };
   };
   // An opening counts unless the object is already closed (or a draft), as before; later events need an open object.
@@ -232,9 +233,11 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
     if (action === 'opened') {
       if (!filters['issue.opened']) return filterOff('Issue 打开');
       if (rolePublicationEcho(store, repositoryId, issue.body)) return botContent();
-      return { ...base('issue.opened', `issue.opened:${number}`, 'issue', number, `Issue 打开：${clip(issue.title, 120)} #${number}`, { object: objectFacts(issue) }),
+      const development = developmentOffer(store, repositoryId, issue, number, delivery);
+      return { ...base('issue.opened', `issue.opened:${number}`, 'issue', number, `Issue 打开：${clip(issue.title, 120)} #${number}`,
+        { object: objectFacts(issue), ...(development ? { development: developmentFacts(development) } : {}) }),
         options: [{ id: 'review', work: 'review.issue', title: `检视 Issue #${number}`, default: true, spec: { type: 'object', kind: 'review.issue', number, head: null, input: payload, delivery } },
-          replyOption('issue', number, null, payload, 'opened', delivery), ...[developmentOffer(store, repositoryId, issue, number, delivery)?.option].filter((o): o is CreateOption => !!o)] };
+          replyOption('issue', number, null, payload, 'opened', delivery), ...(development ? [development.option] : [])] };
     }
     if (action === 'labeled') {
       if (!labelUsable(issue)) return null;
@@ -345,6 +348,9 @@ function developmentOffer(store: Store, repositoryId: string, issue: any, number
       input: { review: result, object_hash: digest(JSON.stringify([issue.title, issue.body])) } } };
   return { option, assignees, review: result ? { task_id: String(review!.id), summary: clip(result.summary, 1500), ...(result.recommendation ? { recommendation: clip(result.recommendation, 1500) } : {}) } : null };
 }
+
+// What the Manager judges a development by when an event offers it: who is assigned and the latest published review.
+const developmentFacts = (offer: { assignees: string[]; review: Json | null }) => ({ assignees: offer.assignees, review: offer.review });
 
 /** Writes the Manager event of a webhook delivery. Closing and drafting still cancel work at once, without the Manager. */
 export function queueWebhook(store: Store, repositoryId: string, event: string, payload: Json, delivery: string, currentPullRequest?: Json): number {
