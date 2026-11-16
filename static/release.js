@@ -42,7 +42,7 @@ function releaseSection() {
       if (p.target_sha) preview.append(facts([['默认分支', p.default_branch], ['目标提交', link(p.target_url, p.target_sha)], ['提交标题', p.target_title],
         ['版本', !p.version_valid ? '请填写合法版本号' : p.prerelease ? '预发布' : '稳定版'], ['上一枚版本', p.previous_tag ? `${p.previous_tag.name} · ${p.previous_tag.sha}` : '从仓库历史起算'],
         ['新增提交', Number.isSafeInteger(p.commit_count) ? String(p.commit_count) : '数量未提供'], ['发行说明规则', `${({repository:'仓库文件',console:'项目设置',builtin:'内置规则'})[p.skill.source] || p.skill.source} · ${p.skill.path || p.skill.version}`],
-        ['已有标签', p.existing_tag ? p.existing_tag.commit : '无'], ['已有 Release', p.existing_release ? link(p.existing_release.url, p.existing_release.draft ? '已有草稿' : '已由仓库工作流／外部操作发布') : '无']]));
+        ['已有标签', p.existing_tag ? p.existing_tag.commit : '暂无'], ['已有 Release', p.existing_release ? link(p.existing_release.url, p.existing_release.draft ? '已有草稿' : '已由仓库工作流／外部操作发布') : '暂无']]));
       confirm.disabled = writing || !p.available;
     } catch (error) { if (!live() || token !== checking) return; target.releasePreview = null; confirm.disabled = true; if (!denied(error)) { preview.replaceChildren(note('候选读取失败，当前无法确认目标提交。')); message.textContent = readErrorText(error); } }
   };
@@ -50,7 +50,7 @@ function releaseSection() {
     const token = ++reading;
     try {
       const data = await api(endpoint); if (!live() || token !== reading) return 'stale';
-      readStatus.textContent = `记录读取于 ${new Date().toLocaleTimeString()}；这是读取时间。`;
+      readStatus.textContent = `记录读取于 ${timestamp(new Date())}`;
       if (document.activeElement?.name === 'release_body') return 'ok';
       overview.replaceChildren(...(data.releases.length ? [releaseOverview(data.releases)] : []));
       status.replaceChildren(...data.releases.map(record => releaseRecord(record, endpoint, refresh, message, { live, target })));
