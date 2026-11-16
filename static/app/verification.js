@@ -35,6 +35,10 @@ function showGithubVerification(failures = 0) {
 function watchGithubVerification() {
   if (githubVerificationWatch) clearTimeout(githubVerificationWatch.timer);
   githubVerificationWatch = null;
+  // #866 review: the unread state belongs to the account whose read failed. A new session must not inherit it, or the old
+  // failure's owner would still be set while the line already shows nothing, and the new session's first read would find
+  // no state to clear.
+  if (repositoriesUnreadOwner != null && (!me || me.id !== repositoriesUnreadOwner)) repositoriesUnreadOwner = null;
   showGithubVerification();
   if (!me || !me.github_verification) { githubVerificationOwner = null; return; }
   const owner = githubVerificationOwner = me.id;
@@ -111,6 +115,8 @@ async function finishGithubVerification(next) {
 async function applyGithubRepositories(next, listed) {
   // Signed out or switched accounts while the list was read: the new session's own start() draws its pages.
   if (!me || me.id !== next.id) return;
+  // A read that listed the whole thing — this one and the notice's own button are the only two — is the recovery.
+  clearGithubRepositoriesUnread();
   repositories = listed;
   options($('repository-filter'), repositories, r => r.full_name);
   const editing = tab === 'identity' && identityFormBeingEdited();
@@ -140,18 +146,13 @@ function showGithubRepositoriesUnread(next) {
   line.replaceChildren(element('span', t('verification.repositories_failed')),
     button(t('verification.repositories_retry'), () => readGithubRepositoriesAgain(next), 'btn-secondary'));
 }
-// #866: the failed read is repeated by no redraw, but a later read of the project list answers the same question. When one
-// comes back, the notice goes and the project picker follows the list that was just read, so the line can never keep
-// saying the read failed beside rows that were read.
-function recoverGithubRepositoriesUnread(listed, params) {
-  if (repositoriesUnreadOwner == null || !me || me.id !== repositoriesUnreadOwner) return;
+// The notice, its owner and the failed state on the line go together: only a read of the whole project list clears them
+// (applyGithubRepositories), so a page read — which asks for one offset, one limit and maybe a filter — cannot shrink the
+// project picker to the fifty rows it happened to see, and a filtered read cannot take the notice away either.
+function clearGithubRepositoriesUnread() {
+  if (repositoriesUnreadOwner == null) return;
   repositoriesUnreadOwner = null;
   showGithubVerification();
-  // A filtered page is a slice of the list, not the list the picker stands for.
-  if (params && (params.get('repository_id') || params.get('account_id') || params.get('owner_id'))) return;
-  repositories = listed;
-  options($('repository-filter'), repositories, r => r.full_name);
-  if (typeof syncConsoleShell === 'function') syncConsoleShell(projectRoute());
 }
 async function readGithubRepositoriesAgain(next) {
   if (!me || me.id !== next.id) return;
@@ -164,8 +165,7 @@ async function readGithubRepositoriesAgain(next) {
   catch (err) { if (me && me.id === next.id) showGithubRepositoriesUnread(next); return; }
   // Another account signed in while the list was read: its own start() draws its pages and its own line.
   if (!me || me.id !== next.id) return;
-  repositoriesUnreadOwner = null;
-  showGithubVerification();
-  // The read that just succeeded is the recovery; a render failure after it still goes through the console's error path.
+  // The read that just succeeded is the recovery — it listed the whole list, so applyGithubRepositories clears the notice;
+  // a render failure after it still goes through the console's error path.
   await applyGithubRepositories(next, listed).catch(error);
 }
