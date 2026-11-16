@@ -46,6 +46,18 @@ export async function orphanNotesVolumes(store: Store, projects: NotesVolumes): 
     .sort((a, b) => (a.first_failed_at ?? '').localeCompare(b.first_failed_at ?? '') || a.repository_id.localeCompare(b.repository_id));
 }
 
+/**
+ * The orphan list of a surface that has to answer while the manager is unreachable. A failed read keeps the durable
+ * intents in its place and says so, so the maintenance listing and the readiness report name the same orphans instead
+ * of one of them turning into a 503, and a caller can still tell an empty list from an unreadable one (#808).
+ */
+export async function listNotesOrphans(store: Store, projects: NotesVolumes | undefined): Promise<{ orphans: NotesOrphan[]; unreadable: boolean }> {
+  const intents = () => notesOrphanIntents(store).map(intent => ({ ...intent, name: '' }));
+  if (!projects) return { orphans: intents(), unreadable: false };
+  try { return { orphans: await orphanNotesVolumes(store, projects), unreadable: false }; }
+  catch { return { orphans: intents(), unreadable: true }; }
+}
+
 /** Trajectory directories under this deployment's disk that no repository row claims. */
 export function orphanTrajectoryDirectories(store: Store): OrphanTrajectory[] {
   const known = new Set(store.all('SELECT id FROM repositories').map(row => String(row.id)));
@@ -113,9 +125,7 @@ export class NotesReclaimer {
 
   /** Counts and ages for the health surface; a provider failure reports the durable intents instead of hiding them. */
   async report(threshold = 10, maxAgeMs = 7 * 24 * 3600_000, warnAgeMs = 24 * 3600_000, now = this.now()): Promise<ReclaimReport> {
-    let orphans: NotesOrphan[];
-    try { orphans = await orphanNotesVolumes(this.store, this.projects); }
-    catch { orphans = notesOrphanIntents(this.store).map(intent => ({ ...intent, name: '' })); }
+    const orphans = (await listNotesOrphans(this.store, this.projects)).orphans;
     const ages = orphans.map(orphan => orphan.first_failed_at).filter((value): value is string => !!value)
       .map(value => Date.parse(value)).filter(value => Number.isFinite(value));
     const oldest = ages.length ? Math.max(0, Math.round((now - Math.min(...ages)) / 1000)) : null;

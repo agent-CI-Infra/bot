@@ -148,11 +148,33 @@ test('a manager that cannot list notes volumes leaves the maintenance listing at
     assert.equal(listed.value.notes_volumes[0].name, '', 'the volume name is unknown without the manager');
     assert.equal(typeof listed.value.notes_volumes[0].first_failed_at, 'string', 'the intent keeps its age');
     assert.equal(listed.value.report.orphans, 1, 'the report counts exactly what the listing shows');
+    assert.equal(listed.value.notes_volumes_unreadable, true, 'the answer says the manager could not be read');
   }
   h.projects.notesVolumes = real;
   const listed = await admin('/api/maintenance/orphans');
   assert.equal(listed.status, 200);
   assert.equal(listed.value.notes_volumes[0].name, name, 'the manager names the volume again once it answers');
+  assert.equal(listed.value.notes_volumes_unreadable, false, 'a read answer clears the flag');
+});
+
+test('a sweep treats an unreadable notes-volume list as a failure, not as nothing to reclaim', async t => {
+  const f = await managerFixture(t), h = await harness(t, f.manager), { admin } = await project(h, f);
+  f.docker.failVolume = true;
+  assert.equal((await remove(admin, '101')).status, 200, 'the deletion leaves its intent behind');
+  const reclaim = await import('../dist/projects/reclaim.js');
+  const { ProjectService } = await import('../dist/projects/service.js');
+  // The same normalization the endpoint uses: an answer without a volume list fails the read, so a sweep cannot claim
+  // that nothing is left behind and skip the volume it never saw.
+  const unreadable = new ProjectService(h.store, { call: async () => null });
+  const blind = new reclaim.NotesReclaimer(h.store, unreadable, { baseDelayMs: 0 });
+  await assert.rejects(blind.sweep(), { status: 503, code: 'manager_notes_volumes_unavailable' },
+    'a sweep does not mistake an unreadable list for an empty one');
+  assert.equal(h.store.get("SELECT 1 FROM audit WHERE action='repository.notes_volume_reclaimed'"), undefined, 'nothing is recorded as reclaimed');
+  // The next sweep with a manager that answers reclaims the volume the failed one left alone.
+  f.docker.failVolume = false;
+  const reclaimer = new reclaim.NotesReclaimer(h.store, h.projects, { baseDelayMs: 0 });
+  assert.deepEqual(await reclaimer.sweep(), [], 'the volume is reclaimed once the manager answers');
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE repository_id='101' AND action='repository.notes_volume_reclaimed'"), 'the reclaim is recorded');
 });
 
 test('the notes-volume list reads a bare array and a volumes envelope, and refuses an answer it cannot read', async t => {
