@@ -24,7 +24,10 @@ test('the standing rules card shows the built-in rules, saves an edited list, an
     const reader = page.getByRole('region', { name: 'Manager 分派记录', exact: true });
     await expect(reader.locator('[data-dispatch-event="ruled"]')).toContainText('按常设规则 issue-opened（第 0 版）分派，没有调用模型');
     for (const width of [1440, 390]) {
-      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 }); await rules.scrollIntoViewIfNeeded();
+      // The card just below the role page's sticky save bar, so its heading is not under the bar.
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      await rules.evaluate(element => { element.scrollIntoView({ block: 'start' }); const bar = document.querySelector('.console-save-bar');
+        window.scrollBy(0, element.getBoundingClientRect().top - (bar ? bar.getBoundingClientRect().bottom : 0) - 8); });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       if (shots) { mkdirSync(shots, { recursive: true }); await page.screenshot({ path: `${shots}/standing-rules-${width}.png` }); }
     }
