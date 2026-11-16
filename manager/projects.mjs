@@ -17,6 +17,20 @@ export function logFailure(what, error) {
   const reason = error instanceof ManagerError ? error.message + (error.detail ? ` (${error.detail})` : '') : error?.stack || String(error);
   console.error(`[manager] ${what}: ${reason}`);
 }
+// A size Docker did not report is not a measured zero: a missing field, moby's `-1`, or anything that is not a number
+// means that kind of usage is unknown, so its total stays null (the page lists it as not measured) while the count still
+// says how many rows were looked at. Summing a missing row as 0 would show a short number as complete.
+function measuredBytes(rows, size) {
+  let total = 0;
+  for (const row of rows) {
+    const value = size(row);
+    if (value === undefined || value === null) return null;
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return null;
+    total += bytes;
+  }
+  return total;
+}
 // Default project computer spec and the bounds the manager enforces; callers can only choose values inside them.
 // The resource values are the built-in defaults: a super administrator replaces them in the global settings, and every
 // resource a project does not set itself follows the current default.
@@ -514,43 +528,43 @@ export class Projects {
       .finally(() => { this.scanning = null; });
   }
   // What Docker keeps on the host (#671), read every half hour in the background: the storage page shows it with what
-  // can be reclaimed, and this is the only place those numbers come from. One /system/df carries all four kinds; Docker
-  // sizes volumes by walking them, which can take long, so the read never runs on the request path. A stopped socket or
-  // an answer past the 4 MB cap in request() keeps the previous reading.
+  // can be reclaimed, and this is the only place those numbers come from. The read never runs on the request path, and a
+  // stopped socket or an answer past the 4 MB cap in request() keeps the previous reading.
+  //
+  // Images and the build cache come from one quick /system/df (#671); the containers are asked for on their own (#680),
+  // because Docker sizes a container's writable layer by walking it, and a host with a slow or stuck container must not
+  // cost the other two rows their numbers. Volumes are not read at all: /system/df lists every volume, including the
+  // bot-data, manager-data, assistant-homes and *-work ones whose bytes the table already counts as a computer, a
+  // database or "other", so adding them would count the same bytes twice.
   async readDockerUsage(now = Date.now()) {
     if (now - this.dockerUsageAt < 30 * 60_000) return;
     this.dockerUsageAt = now;
     try {
-      const df = await this.docker.request('GET', '/system/df');
+      const df = await this.docker.request('GET', '/system/df?type=image&type=build-cache');
       const rows = value => Array.isArray(value) ? value : [];
-      const images = rows(df?.Images), containers = rows(df?.Containers), volumes = rows(df?.Volumes), cache = rows(df?.BuildCache);
-      const sum = rows => rows.reduce((total, row) => total + Math.max(0, Number(row.Size) || 0), 0);
-      // A size Docker did not report is not a measured zero: a missing field, moby's `-1`, or anything that is not a
-      // number means that kind of usage is unknown, so its total stays null (the page lists it as not measured) while the
-      // count still says how many rows were looked at. Summing a missing row as 0 would show a short number as complete.
-      const measuredBytes = (rows, size) => {
-        let total = 0;
-        for (const row of rows) {
-          const value = size(row);
-          if (value === undefined || value === null) return null;
-          const bytes = Number(value);
-          if (!Number.isFinite(bytes) || bytes < 0) return null;
-          total += bytes;
-        }
-        return total;
-      };
+      const images = rows(df?.Images), cache = rows(df?.BuildCache);
+      // Docker reports the layers' own total; without it the listed image sizes add up, as long as each one is known.
+      const layers = df?.LayersSize, layersBytes = layers === undefined || layers === null || !Number.isFinite(Number(layers)) || Number(layers) < 0
+        ? measuredBytes(images, row => row?.Size) : Number(layers);
       // An image no container uses can be removed; its layers shared with images in use stay, so that part is not counted.
       const unused = images.filter(image => image.Containers === 0);
       const usage = { read_at: new Date(now).toISOString(),
-        images: { count: images.length, bytes: Number(df?.LayersSize) || sum(images), unused_count: unused.length,
+        images: { count: images.length, bytes: layersBytes, unused_count: unused.length,
           reclaimable_bytes: unused.reduce((total, image) => total + Math.max(0, (Number(image.Size) || 0) - Math.max(0, Number(image.SharedSize) || 0)), 0) },
         // A container takes its writable layer (SizeRw), not its whole filesystem (SizeRootFs), which is mostly its image.
-        containers: { count: containers.length, bytes: measuredBytes(containers, row => row?.SizeRw) },
-        // A volume takes the space its data uses; Docker leaves UsageData out (or answers -1) when it did not size it.
-        volumes: { count: volumes.length, bytes: measuredBytes(volumes, row => row?.UsageData?.Size) },
-        build_cache: { count: cache.length, bytes: sum(cache), reclaimable_bytes: sum(cache.filter(row => !row.InUse && !row.Shared)) } };
+        // A container read that failed leaves this kind null (not measured), while the two rows that did answer stand.
+        containers: await this.readContainers().catch(error => { logFailure('reading Docker container usage failed', error); return null; }),
+        build_cache: { count: cache.length, bytes: measuredBytes(cache, row => row?.Size), reclaimable_bytes: measuredBytes(cache.filter(row => !row.InUse && !row.Shared), row => row?.Size) } };
       this.db.prepare("INSERT INTO settings VALUES('docker_usage',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(usage));
     } catch (error) { logFailure('reading Docker disk usage failed', error); }
+  }
+  // The containers' writable layers, in a request of their own with a limit long enough for a host whose layers are slow
+  // to walk: the default 90 s of request() was shared with the image and build-cache read, so one slow container emptied
+  // every Docker row (#680). Docker answers `Containers` for this type; the other lists stay empty.
+  async readContainers() {
+    const df = await this.docker.request('GET', '/system/df?type=container', undefined, false, 5 * 60_000);
+    const containers = Array.isArray(df?.Containers) ? df.Containers : [];
+    return { count: containers.length, bytes: measuredBytes(containers, row => row?.SizeRw) };
   }
   // The approved image, or one derived from it with the project's system packages. Built once per package set and base image,
   // and only by the manager: apt runs as root at build time, nothing inside the computer needs root.
@@ -888,7 +902,8 @@ export class Projects {
       const entry = open.get(row.repository_id) ?? { repository_id: row.repository_id, kind: 'open', count: 0, bytes: 0 }; entry.count++; entry.bytes += bytes; open.set(row.repository_id, entry);
     }
     let wal = 0; try { wal = statSync(data + '/manager.sqlite-wal').size; } catch {}
-    // The last scan of each computer's work volume and Docker's images and build cache, as the background work left them.
+    // The last scan of each computer's work volume, and Docker's images, containers and build cache, as the background work
+    // left them.
     const computers = this.db.prepare('SELECT repository_id,generation,scanned_at,result FROM computer_storage').all().map(row => ({ ...row, result: JSON.parse(row.result) }));
     const docker = JSON.parse(this.db.prepare("SELECT value FROM settings WHERE key='docker_usage'").get()?.value ?? 'null');
     const compaction = JSON.parse(this.db.prepare("SELECT value FROM settings WHERE key='compaction'").get()?.value ?? 'null');

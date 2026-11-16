@@ -14,7 +14,7 @@ import { noteTaskUsage, workspaceClasses } from '../projects/workspace-cleanup.j
 // blobs take on the control plane, its runner-call files in the manager, and its project computer's work volume (task
 // workspaces by retention class, runner journal, git store, HOME caches, other files). For platform administrators also
 // the two databases (live data, free pages, WAL), the control plane's git cache and public boards, the data disk with
-// Docker's images and build cache, "other" (used less everything known), what can be reclaimed and what the last
+// Docker's images, containers and build cache, "other" (used less everything known), what can be reclaimed and what the last
 // cleanups freed, and an alert for each data disk below its reserve, when background writes pause.
 //
 // A page load reads the counters added when files close (trajectory_usage, a few rows per project), one statfs and a
@@ -196,7 +196,7 @@ export class StorageReport {
 
 const bytesOf = (value: any) => Math.max(0, Number(value) || 0);
 // A size that was measured, or null when it was not (not read yet, the reader failed, or the manager answered with a total
-// it could not measure — a volume or container Docker left unsized keeps the kind null instead of a short number).
+// it could not measure — a container or build-cache row Docker left unsized keeps the kind null instead of a short number).
 const measured = (value: any) => value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Math.max(0, Number(value));
 /**
  * The host's disk split into what the bot knows and "other" (used less known), what could be reclaimed and what the last
@@ -217,7 +217,7 @@ function summary(projects: Record<string, any>[], control: Record<string, any> |
     manager_trajectories: manager ? sum(p => bytesOf(p.manager?.files?.bytes) + bytesOf(p.manager?.open?.bytes)) : null,
     computers: manager?.computers ? sum(p => p.computer?.total_bytes) : null,
     docker_images: measured(manager?.docker?.images?.bytes), docker_build_cache: measured(manager?.docker?.build_cache?.bytes),
-    docker_containers: measured(manager?.docker?.containers?.bytes), docker_volumes: measured(manager?.docker?.volumes?.bytes),
+    docker_containers: measured(manager?.docker?.containers?.bytes),
   };
   const unmeasured = [...Object.entries(known).filter(([, value]) => value === null).map(([key]) => key), ...partial && known.computers !== null ? ['computers'] : []];
   const knownBytes = Object.values(known).reduce((total: number, value) => total + (value ?? 0), 0), disk = control?.disk;
