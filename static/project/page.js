@@ -58,7 +58,7 @@ async function unstartedProject(id, err) {
   if (typeof updateConsoleGaps === 'function') updateConsoleGaps([row]);
   const box = consoleState(`${row.full_name} 还没有启动`, row.installed ? '这个仓库已经安装了 GitHub App，但还没有在控制台启动；启动后才有项目页。'
     : '这个仓库已不在 GitHub App 的安装范围内，不能启动。'), actions = element('div', '', 'actions');
-  if (row.installed) actions.append(button('启动', () => openActivation(row, () => route()).catch(error)));
+  if (row.installed) actions.append(onboardingEntry(row), button('启动', () => openActivation(row, () => route()).catch(error)));
   actions.append(consoleLink('#/settings/projects', '全局设置 · 项目', '启动、隐藏和公开看板'));
   box.append(actions); return box;
 }

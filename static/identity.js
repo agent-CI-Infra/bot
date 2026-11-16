@@ -266,7 +266,7 @@ async function renderIdentity() {
     for (const repo of pendingRepos) {
       const item = element('li', ''); item.dataset.name = repo.full_name;
       item.append(element('strong', repo.full_name), repo.self_start ? element('span', t('identity.pending_repo_self_start'), 'status status-info')
-        : element('span', t('identity.pending_repo_status'), 'status status-warning'));
+        : element('span', t('identity.pending_repo_status'), 'status status-warning'), onboardingEntry(repo, t('identity.start_onboarding')));
       list.append(item);
     }
     overview.append(foldPendingList(list, pendingRepos.length, 'identity'));

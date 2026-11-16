@@ -84,7 +84,7 @@ bot 开出 PR 后，下面几种情况会让它在同一个分支上继续修改
 
 每次修改仍要通过项目的测试命令才会推送。这些修改只在 bot 分支上追加提交，不批准、不合并，也不会强推。
 
-合并不在这个流程里，但不是只有人能做：GitHub 上合并 PR 属于 Contents 写，Manager 默认有 Pull Request 和 Contents 写权限，可以经 `github_write` 批准或合并 PR、写分支（包括默认分支）；其他角色、群助手和管理助手按各自的 Contents 写权限。这类写入不经过控制面的合并校验，也不限制目标分支，能不能合入由仓库的分支保护（或规则集）和必需检查决定，所以接入的仓库应打开这两项，见[接入指南](onboarding-guide.md#3-需要你亲手确认的事项)。不希望 Manager 合并时，在「角色 → Manager」把 Contents 改成只读。人在控制台合并走带校验的 `POST /api/tasks/:id/merge`，见[角色池](role-pool.md#authorized-merge)。
+合并不在这个流程里，但不是只有人能做：GitHub 上合并 PR 属于 Contents 写，Manager 默认有 Pull Request 和 Contents 写权限，可以经 `github_write` 批准或合并 PR、写分支（包括默认分支）；其他角色、群助手和管理助手按各自的 Contents 写权限。这类写入不经过控制面的合并校验，也不限制目标分支，能不能合入由仓库的分支保护（或规则集）和必需检查决定，所以接入的仓库应打开这两项，见[接入指南](onboarding-guide.md#4-需要你亲手确认的事项)。不希望 Manager 合并时，在「角色 → Manager」把 Contents 改成只读。人在控制台合并走带校验的 `POST /api/tasks/:id/merge`，见[角色池](role-pool.md#authorized-merge)。
 
 ## 机器配置
 

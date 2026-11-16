@@ -2,7 +2,9 @@
 const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['projects','external'];
 // Console pages are drawn by static/shell.js (renderConsolePage). They are not tabs of the generic list, and no list
 // read may ever build /api/<tab> from them: #/more would become GET /api/more, an endpoint that does not exist (#365).
-const consoleTabs = ['more', 'inbox', 'new-task', 'conversations', 'task', 'not-found'];
+const consoleTabs = ['more', 'inbox', 'new-task', 'conversations', 'task', 'not-found', 'repository-onboarding'];
+// #934: the onboarding of one repository, started or not (an unstarted one has no project page to live under).
+const repositoryOnboardingAddress = /^#\/onboarding\/([1-9]\d*)$/;
 // #642: an address under #/ that names no page shows 找不到这个页面 instead of keeping (or silently loading) another page.
 // In-page anchors such as the skip link's #main-content are not console addresses and still keep the current page.
 function unknownAddress(hash) {
@@ -39,6 +41,7 @@ const legacyComputerAddress = /^#\/settings\/computers(?:\/([^/?#]+))?$/;
 function addressTab(hash) {
   if (taskRoute(hash)) return 'task';
   if (/^#\/new-task(?:\/[1-9]\d*)?$/.test(hash)) return 'new-task';
+  if (repositoryOnboardingAddress.test(hash)) return 'repository-onboarding';
   if (projectRoute() || hash === '#/projects') return 'projects';
   if (['#/reviews', '#/developments'].includes(hash)) return 'board';
   if (onboardingAddress.test(hash)) return 'settings';
@@ -100,6 +103,7 @@ async function route() {
   // Global and project computer views reuse DOM ids; discard the inactive view and its scheduled reads.
   if (!target && typeof leaveProjectPage === 'function') leaveProjectPage();
   if (tab !== 'task' && typeof leaveTaskDetailPage === 'function') leaveTaskDetailPage();
+  if (typeof leaveRepositoryOnboarding === 'function') leaveRepositoryOnboarding(location.hash);
   if (tab !== 'settings') $('settings-panel').replaceChildren();
   const address=tab+':'+location.hash;if(messagePage!==address){notice('message');messagePage=address;}
   const consolePage = consoleTabs.includes(tab);
