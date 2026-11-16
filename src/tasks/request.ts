@@ -14,7 +14,7 @@ import { runTeam } from '../roles/team.js';
 import { controlled, runRole, roleExecutionModel } from '../roles/run.js';
 import { assertManagedExecution, sourcePolicies, taskRolePolicies } from './management.js';
 import { grantedTaskWrite, postReviewTool, taskGithubWrite } from './github-write.js';
-import { githubWriteTool } from '../github/write.js';
+import { githubWriteTool, grantedGithubWriteTool } from '../github/write.js';
 import { permitsTool } from '../roles/permissions.js';
 import { ProjectMemory,memoryTools,memoryTool } from '../memory/project.js';
 import { traceEvent, traceSnapshot, retainedTextArtifact } from './trace.js';
@@ -131,7 +131,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
         const model=ownRole&&origin?.source_kind!=='operator'?roleExecutionModel(store,task,ownRole):controlled(store,task,entry)?undefined:executionModel(store,task,task.kind);
         // Which delivery tools a plain agent run starts with, for the task details; role runs record their own (runRole).
         if(generic&&!roleRuns)records.history(task.id,'delivery_tools',{attempt:task.attempt,tools:['submit_report',...grantCatalog.filter(g=>effective().includes(g.id)).map(g=>g.tool)]});
-        const deliveryTools=generic?[report,...(projectGrantLimit(store,task.repository_id).includes('pull_request')?[openPullRequest]:[]),...(projectGrantLimit(store,task.repository_id).includes('review')?[postReviewTool]:[]),...(projectGrantLimit(store,task.repository_id).includes('github')?[githubWriteTool]:[])]:[submit];
+        const deliveryTools=generic?[report,...(projectGrantLimit(store,task.repository_id).includes('pull_request')?[openPullRequest]:[]),...(projectGrantLimit(store,task.repository_id).includes('review')?[postReviewTool]:[]),...(projectGrantLimit(store,task.repository_id).includes('github')?[grantedGithubWriteTool]:[])]:[submit];
         const legacyGithubWrite=!generic&&(roleRuns||taskRolePolicies(store,task).every(policy=>permitsTool(policy,'github_write')));
         // A plain agent run keeps its tools for the attempt, so it starts with what is granted now; role runs choose per run.
         const offered=(tools:any[])=>roleRuns||!generic?tools:tools.filter(t=>offeredNow(t.function.name)!==false);

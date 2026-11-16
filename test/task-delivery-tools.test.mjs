@@ -18,7 +18,7 @@ import { Redactor } from '../dist/agent/common.js';
 import { roleTaskCaller } from '../dist/tasks/management.js';
 import { roleConfiguration } from '../dist/roles/definition.js';
 import { policyView } from '../dist/roles/board.js';
-import { grantTaskWrites, grantedWrites, pullRequestQaGate, setDeliveryGates, taskWritesDetail } from '../dist/tasks/grants.js';
+import { grantTaskWrites, grantView, grantedWrites, pullRequestQaGate, setDeliveryGates, taskWritesDetail } from '../dist/tasks/grants.js';
 import { grantedTaskWrite } from '../dist/tasks/github-write.js';
 import { assertRequestPullRequest } from '../dist/tasks/pull-request.js';
 import { taskPermissions } from '../dist/tasks/configuration.js';
@@ -232,6 +232,9 @@ test('grant_writes widens within the ceilings and the Manager\'s own authority, 
   const github = commands.tool(caller, 'grant_writes', { task_id: id, writes: ['github'], reason: 'Comment on the Issue' });
   assert.equal(github.error, 'task_external_write_forbidden', JSON.stringify(github)); assert.deepEqual(grantedWrites(s, id), []);
   s.run("UPDATE policies SET capability_ceiling='develop'");
+  // What the Manager is shown as grantable leaves out what it cannot lend.
+  const manager = roleConfiguration(s, 'r').roles.find(role => role.role_id === 'manager').permissions;
+  assert.deepEqual(grantView(s, task(id), [], [manager]).grantable, ['pull_request']);
   const ok = commands.tool(caller, 'grant_writes', { task_id: id, writes: ['pull_request'], reason: 'Needs a code change' });
   assert.deepEqual(ok.writes, ['pull_request']); assert.deepEqual(ok.effective, ['pull_request']);
   assert.deepEqual(taskPermissions(s, task(id)).writes, ['code', 'pull_request']);
@@ -283,6 +286,10 @@ test('post_review and github_write refuse without the grant and write nothing', 
     const result = await write(name, args);
     assert.equal(result.error, 'delivery_not_granted'); assert.equal(result.tool, name); assert.match(result.missing, /^grant:/);
   }
+  // With the grant, an inline comment without the line GitHub needs is refused before anything is sent.
+  grantTaskWrites(s, task(id), { writes: ['review'], reason: 'Post the review' }, 'user:operator', []);
+  const invalid = await grantedTaskWrite(s, task(id), new Redactor(), async () => {}, 'http://127.0.0.1:' + server.address().port)('post_review', { pull_number: 1, body: 'See inline', key: 'r2', comments: [{ path: 'calc.mjs', body: 'No line' }] });
+  assert.equal(invalid.error, 'invalid_arguments');
   assert.equal(requests, 0);
 });
 

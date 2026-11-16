@@ -26,9 +26,12 @@ const fn = (name: string, description: string, properties: any, required: string
 /** post_review (#814): a COMMENT review on a pull request of the task's repository, with optional inline comments. */
 export const postReviewTool = fn('post_review', 'Publish a review on a pull request of this repository as the bot: always a COMMENT review (it never approves or requests changes), with an optional list of inline comments on lines of the diff. Offered only while this task is granted the review write; each call is checked again and a refusal comes back with its reason, nothing written. key: a short stable name for this review; calling again with the same key returns the earlier result.', {
   pull_number: { type: 'integer', minimum: 1 }, body: { type: 'string' },
-  comments: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['path', 'body'], properties: { path: { type: 'string' }, line: { type: 'integer' }, start_line: { type: 'integer' }, side: { type: 'string', enum: ['LEFT', 'RIGHT'] }, body: { type: 'string' } } } },
+  comments: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['path', 'line', 'body'], properties: { path: { type: 'string' }, line: { type: 'integer', minimum: 1 }, start_line: { type: 'integer', minimum: 1 }, side: { type: 'string', enum: ['LEFT', 'RIGHT'] }, body: { type: 'string' } } } },
   key: { type: 'string', maxLength: 120 } }, ['pull_number', 'body', 'key']);
 
+// GitHub refuses a whole review whose inline comment has no line, so each one is checked before anything is sent.
+const inlineComment = (c: any) => c && typeof c === 'object' && typeof c.path === 'string' && !!c.path && Number.isSafeInteger(c.line) && c.line >= 1 && typeof c.body === 'string' && !!c.body.trim()
+  && (c.start_line === undefined || Number.isSafeInteger(c.start_line) && c.start_line >= 1) && (c.side === undefined || ['LEFT', 'RIGHT'].includes(c.side));
 /**
  * The GitHub writes of a generic task (#814): github_write and post_review, each allowed while the task holds the write and
  * every policy of its source (the roles that created or delegated it, a group's level) allows the route. The executing role's
@@ -47,8 +50,8 @@ export function grantedTaskWrite(store: Store, task: Row, redactor: Redactor, gu
         && (write !== 'review' || resource === 'pull_requests') && sourcePolicies(store, task).every(policy => githubWriteAllowed(policy, resource, operation)) };
     if (name === 'github_write') return githubWrite(context, args);
     if (!args || typeof args !== 'object' || !Number.isSafeInteger(args.pull_number) || args.pull_number < 1 || typeof args.body !== 'string' || !args.body.trim()
-      || args.comments !== undefined && !Array.isArray(args.comments) || Object.keys(args).some(key => !['pull_number', 'body', 'comments', 'key'].includes(key)))
-      return { error: 'invalid_arguments', detail: 'post_review takes pull_number, a nonempty body, optional comments [{path, line, body}] and a key.' };
+      || args.comments !== undefined && !(Array.isArray(args.comments) && args.comments.every(inlineComment)) || Object.keys(args).some(key => !['pull_number', 'body', 'comments', 'key'].includes(key)))
+      return { error: 'invalid_arguments', detail: 'post_review takes pull_number, a nonempty body, optional comments [{path, line, body}] (GitHub needs the line of every inline comment) and a key. Nothing was sent.' };
     return githubWrite(context, { method: 'POST', path: `/pulls/${args.pull_number}/reviews`, key: args.key,
       body: { event: 'COMMENT', body: args.body, ...(args.comments?.length ? { comments: args.comments } : {}) } });
   };

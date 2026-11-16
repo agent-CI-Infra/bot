@@ -139,10 +139,11 @@ export function setDeliveryGates(store: Store, repositoryId: string, value: unkn
   if (before !== after) store.audit(actor, 'policy.delivery_gates', `pull_request_qa: ${before} -> ${after}`, repositoryId);
 }
 /** What the Manager and the console read about a task's writes: granted, in effect now, and what the project could grant. */
-export function grantView(store: Store, task: Row, sources: RolePermissions[]) {
+export function grantView(store: Store, task: Row, sources: RolePermissions[], granter: RolePermissions[] = []) {
   const granted = grantedWrites(store, String(task.id));
   if (!granted) return null;
-  const effective = effectiveWrites(store, task, sources), limit = projectGrantLimit(store, String(task.repository_id)).filter(write => !sourceRefusal(sources, write));
+  // grantable: what a grant_writes call by this granter could add now (the project, the source and the granter's own authority).
+  const effective = effectiveWrites(store, task, sources), limit = projectGrantLimit(store, String(task.repository_id)).filter(write => !sourceRefusal([...sources, ...granter], write));
   return { granted, effective, grantable: limit, revision: Number(store.get('SELECT revision FROM task_write_grants WHERE task_id=?', task.id)?.revision ?? 0),
     tools: ['submit_report', ...grantCatalog.filter(grant => effective.includes(grant.id)).map(grant => grant.tool)],
     pull_request_qa: pullRequestQaGate(store, String(task.repository_id)) };
