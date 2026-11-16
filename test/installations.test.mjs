@@ -16,6 +16,7 @@ import { TaskEngine } from '../dist/agent/engine.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { Redactor } from '../dist/agent/common.js';
 import { command } from '../runner/command.mjs';
+import { appEvents } from '../dist/github/client.js';
 
 const installation = { id: 77, account: { id: 10, login: 'fixture', type: 'Organization' } };
 const added = (...ids) => ({ action: 'added', installation, repository_selection: 'all', repositories_removed: [],
@@ -492,4 +493,27 @@ test('global project actions offer deletion and an installed but never started p
   page.requests.length = 0; await page.run(`restoreInstalled(${JSON.stringify(hiddenRow)}, () => start())`);
   assert.deepEqual(page.requests, ['POST /api/installations/404/restore']);
   assert.equal(page.run('startCalls'), 2);
+});
+
+test('a damaged events grant is unknown for its row instead of failing the whole list', async t => {
+  const h = await harness(t), { admin } = await setup(h), keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const a = await account(admin, { type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
+  verifiedScope(h, a, 101, 202);
+  // A grant and a subscription the list can still compare; only the second row's events column is damaged below.
+  const grant = JSON.stringify({ contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write' });
+  h.store.run('UPDATE installed_repositories SET permissions=?,permissions_at=?,events=? WHERE account_id=? AND repository_id=?',
+    grant, new Date().toISOString(), JSON.stringify(appEvents), a.id, '101');
+  h.store.run('UPDATE installed_repositories SET permissions=?,permissions_at=? WHERE account_id=? AND repository_id=?', grant, new Date().toISOString(), a.id, '202');
+  h.store.run("UPDATE installed_repositories SET events=? WHERE repository_id='202'", '{"issues":');
+  const answer = await admin('/api/installations');
+  assert.equal(answer.status, 200);
+  const rows = answer.value.repositories, damaged = rows.find(r => r.id === '202'), readable = rows.find(r => r.id === '101');
+  // The damaged row reports its subscription as unknown and its grant as stale; nothing was thrown at the list.
+  assert.deepEqual([damaged.events_missing, damaged.events_unreadable, damaged.permissions_stale], [null, true, true]);
+  assert.deepEqual([Array.isArray(damaged.permission_missing), damaged.access_gaps], [true, null]);
+  // The readable row keeps its own answer, and the grant of the damaged one is still read.
+  assert.deepEqual([readable.events_missing, readable.events_unreadable, readable.permissions_stale], [[], false, false]);
+  assert.deepEqual([Array.isArray(readable.permission_missing), Array.isArray(readable.access_gaps)], [true, true]);
+  // The unreadable column is never echoed back into the answer.
+  assert.ok(!JSON.stringify(answer.value).includes('"issues":'));
 });
