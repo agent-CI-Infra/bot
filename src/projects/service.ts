@@ -7,7 +7,7 @@ import { fail, fields, randomId, HttpError, type Json } from '../core/security.j
 import { FailureLog } from '../core/log.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { repositoryConcurrency } from '../app/settings.js';
-import { ownComputer } from '../rules/service.js';
+import { rememberConsoleComputer } from '../rules/service.js';
 
 // timeoutMs 0 waits until the manager answers, for commands that have no time limit.
 export interface Manager { call(method: string, path: string, input?: Json, timeoutMs?: number): Promise<any>; }
@@ -332,7 +332,7 @@ export class ProjectService {
     if (!previous && this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id)) fail(409, 'environment_operation_pending');
     const state = await this.manager.call('GET', '/v1/projects/' + id) || await this.manager.call('PUT', '/v1/projects/' + id);
     this.save(state);
-    if(match[2]==='configure'&&!previous)this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT DO NOTHING',id,JSON.stringify(ownComputer(state.computer)));
+    if(match[2]==='configure'&&!previous)rememberConsoleComputer(this.store,id,state.computer);
     if (!previous && input.generation !== state.generation) fail(409, 'stale_generation');
     this.store.transaction(() => {
       if (!previous) {

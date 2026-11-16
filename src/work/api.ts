@@ -60,7 +60,8 @@ export async function workCompatibility(store: Store, rules: RuleService, reposi
   const view = await rules.view(repositoryId), policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId)!;
   const files = new Map<string, any>(view.files.map((file: any) => [file.path, file])), written = parseSections(managerPrompt(store, repositoryId).content).sections;
   return workTypes.map(type => {
-    const entry = section(type.section)!, file = entry.rule ? files.get(entry.rule) : undefined;
+    // A section's text is its repository skill when the repository has one (release notes), as in managerView.
+    const entry = section(type.section)!, file = entry.rule ? files.get(entry.rule) : entry.repository ? files.get(entry.repository) : undefined;
     const layers = file ? file.layers : [{ source: 'builtin', content: entry.builtin() }, ...(written.has(entry.id) ? [{ source: 'console', content: written.get(entry.id)!.body }] : [])];
     return { id: type.id, name: type.name, builtin: true, enabled: workEnabled(store, repositoryId, type.id, policy), active: workActive(store, repositoryId, type.id, policy),
       // path is the repository file a configuration PR may change: only a section's repository skill, never a retired .bot/ file.

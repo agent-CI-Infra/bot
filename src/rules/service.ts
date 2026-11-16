@@ -8,7 +8,7 @@ import { GitHub, repositoryTree } from '../github/client.js';
 import { type Mirror } from '../agent/git-cache.js';
 import { Redactor } from '../agent/common.js';
 import type { Manager } from '../projects/service.js';
-import { importBotRules, importPending, importRepository } from './imported.js';
+import { importBotRules, importPending, importRepository, importedComputer } from './imported.js';
 
 // The scenario rules are the Markdown files in docs/prompts, read once at startup so the documented text and the
 // text the model receives cannot drift apart. The runtime image copies that directory next to dist.
@@ -43,6 +43,20 @@ const builtinResources: Record<string, number> = { cpus: 2, memory_mb: 4096, pid
 // The console layer taken from a computer the manager describes: its fields without the resources that follow the default.
 export function ownComputer(live: any): Record<string, unknown> {
   return Object.fromEntries(computerKeys.filter(key => live?.[key] !== undefined && !live.inherited?.includes(key)).map(key => [key, live[key]]));
+}
+// The project's console computer spec: the saved one, else the computer as the manager has it, with the .bot/computer.yaml
+// fields the upgrade imported for a project without a saved spec (#935) on top until that spec is first saved.
+export function consoleComputer(store: Store, id: string, live: any): Record<string, unknown> {
+  const row = store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?', id);
+  return row ? JSON.parse(row.spec) : { ...ownComputer(live), ...importedComputer(store, id) };
+}
+// Saves the console spec the first time a task or the machine page changes the computer; the imported fields join it.
+export function rememberConsoleComputer(store: Store, id: string, live: any): void {
+  store.transaction(() => {
+    if (store.get('SELECT 1 FROM computer_console_specs WHERE repository_id=?', id)) return;
+    store.run('INSERT INTO computer_console_specs VALUES(?,?)', id, JSON.stringify(consoleComputer(store, id, live)));
+    if (store.hasTable('rule_imports')) store.run('UPDATE rule_imports SET computer=NULL WHERE repository_id=?', id);
+  });
 }
 // What applying the rules sends to the manager: the effective computer, plus null for every resource the computer still
 // sets as its own although the console no longer does, so that resource follows the global default again. Empty when
@@ -153,8 +167,8 @@ export class RuleService {
     // The repositories' .bot/ files become role configuration once (#935).
     importBotRules(store);
   }
-  consoleComputer(id:string,live:any){const row=this.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?',id);return row?JSON.parse(row.spec):ownComputer(live);}
-  rememberComputer(id:string,live:any){this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT DO NOTHING',id,JSON.stringify(ownComputer(live)));}
+  consoleComputer(id:string,live:any){return consoleComputer(this.store,id,live);}
+  rememberComputer(id:string,live:any){rememberConsoleComputer(this.store,id,live);}
   cache(id: string, sha: string, files: Record<string, string>) { this.store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET sha=excluded.sha,files=excluded.files,updated_at=excluded.updated_at', id, sha, JSON.stringify(files), new Date().toISOString()); }
   // The repository's skills at a commit, and the names (never the contents) of retired .bot/ files. A mirror that holds
   // the commit supplies the listing and contents; the files and their checks are the same either way. `repositoryId`
