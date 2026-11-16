@@ -59,6 +59,8 @@ test('only a super administrator deletes a shared model and clears every selecte
     const result = await client(`/api/models/${id}`, 'DELETE', {});
     assert.equal(result.status, 404); assert.deepEqual(result.value, { error: 'model_not_found' });
   };
+  // Restricted to another project (#850), the shared model is invisible to the project administrator.
+  await admin(`/api/models/${shared.id}/projects`, 'PUT', { repository_ids: ['202'] });
   await missing(member, shared.id); await missing(member, outside.id); await missing(member, 'unknown'); await missing(admin, 'unknown');
   await admin(`/api/models/${shared.id}/projects`, 'PUT', { repository_ids: ['101', '202'] });
   for (const id of ['101', '202']) await admin(`/api/repositories/${id}/policy`, 'PATCH', { model_id: shared.id });

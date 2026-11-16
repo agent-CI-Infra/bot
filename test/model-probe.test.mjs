@@ -133,7 +133,9 @@ test('a saved model is listed and tested with its stored key under the editing r
   assert.equal(tested.value.ok, true); assert.equal(tested.value.model, 'own-2026-01-01'); assert.equal(fake.requests.at(-1).body.max_completion_tokens, 32);
   assert.equal((await member(`/api/models/${own.id}/test`, 'POST', { model_name: 'other' })).status, 400);
 
-  // A project administrator can neither list nor test a shared model: invisible before the grant, forbidden after it.
+  // A project administrator can neither list nor test a shared model: invisible while it is restricted to other projects
+  // (#850), forbidden once it serves theirs.
+  await admin(`/api/models/${shared.id}/projects`, 'PUT', { repository_ids: ['202'] });
   const calls = fake.requests.length;
   for (const action of ['upstream', 'test']) assert.equal((await member(`/api/models/${shared.id}/${action}`, 'POST', {})).status, 404);
   await admin(`/api/models/${shared.id}/projects`, 'PUT', { repository_ids: ['101'] });

@@ -140,7 +140,7 @@ async function createRelayRig(t, options = {}) {
 
 function addProjectModel(store, repoId, { id = hex48().slice(0, 16), url, key, name, interface_type, auth_header, pricing }) {
   store.run(
-    'INSERT INTO models VALUES(?,?,?,?,?,?,?)',
+    'INSERT INTO models(id,repository_id,api_url,model_name,api_key,version,updated_at) VALUES(?,?,?,?,?,?,?)',
     id, repoId, url, name, store.secrets.seal({ value: key }, `model:${id}`), 1, '2026-01-01T00:00:00Z',
   );
   if (interface_type || auth_header) saveModelMetadata(store, id, { ...(interface_type ? { interface_type } : {}), ...(auth_header ? { auth_header } : {}) });

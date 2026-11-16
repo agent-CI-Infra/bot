@@ -70,7 +70,8 @@ test('adapter cannot expand tool set and models stay fixed throughout an invocat
 test('revoked model access stops a pinned run before the next provider request', async t => {
   const f = await fixture(t);
   await assert.rejects(runAgent({ ...f.spec, adapter: async services => {
-    f.store.run("UPDATE models SET repository_id=NULL WHERE id='m'");
+    // A shared model restricted to r (#850): removing r from its list revokes it.
+    f.store.run("UPDATE models SET repository_id=NULL,restricted=1 WHERE id='m'");
     f.store.run("INSERT INTO model_projects(model_id,repository_id) VALUES('m','r')");
     await services.request({ messages: [] }, 'authorized');
     f.store.run("DELETE FROM model_projects WHERE model_id='m'");

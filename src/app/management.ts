@@ -378,8 +378,8 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
       const model = body.model_id === undefined ? previous.model_id : body.model_id === null ? null : text(body.model_id);
       // A super administrator choosing a deployment-shared model also makes it available to this repository.
       const grant = !!model && user.role === 'super_admin' && !!store.get('SELECT id FROM models WHERE id=? AND repository_id IS NULL', model);
-      if (model && !grant && !store.get(`SELECT id FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND EXISTS
-        (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?)))`, model, id, id)) fail(400, 'model_not_available');
+      if (model && !grant && !store.get(`SELECT id FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND (models.restricted=0 OR EXISTS
+        (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?))))`, model, id, id)) fail(400, 'model_not_available');
       // Replace the exact-profile map atomically; {} restores repository defaults for all profiles.
       let taskModels: Record<string, string> | undefined;
       const taskModelGrants: string[] = [];
@@ -389,8 +389,8 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
         for (const [kind, value] of entries) {
           const chosen = value as string;
           const shared = user.role === 'super_admin' && !!store.get('SELECT id FROM models WHERE id=? AND repository_id IS NULL', chosen);
-          if (!shared && !store.get(`SELECT id FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND EXISTS
-            (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?)))`, chosen, id, id)) fail(400, 'model_not_available');
+          if (!shared && !store.get(`SELECT id FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND (models.restricted=0 OR EXISTS
+            (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?))))`, chosen, id, id)) fail(400, 'model_not_available');
           taskModels[kind] = chosen;
           if (shared) taskModelGrants.push(chosen);
         }

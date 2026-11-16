@@ -785,6 +785,8 @@ test('a group may only use a model every project in its scope has: saves, role c
   assert.ok(h.store.all('SELECT repository_id FROM model_requests WHERE conversation_id=?', f.chat.id).every(r => r.repository_id === '101'));
   // Changing the role to a model the group's project lacks is refused, naming the project, instead of the group stopping later.
   const lacking = (await f.admin('/api/models', 'POST', { model_name: 'Unshared', api_url: f.assistantModel.api_url, api_key: 'fixture-provider-key' })).value.model;
+  // A new shared model serves every project (#850); restricted to none, it serves neither.
+  await f.admin('/api/models/' + lacking.id + '/projects', 'PUT', { repository_ids: [] });
   const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
   const change = await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: lacking.id });
   assert.deepEqual([change.status, change.value.error, change.value.detail], [409, 'channel_service_model_unavailable', { projects: [repo(101)] }]);

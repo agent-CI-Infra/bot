@@ -32,7 +32,7 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
   redactor.add(model.key);
   // A service role run may only use the model its role is configured with right now: a shared one, or for a group scoped to
   // one project (#849, billed to it) one that project owns or was granted. A project run uses a model the project owns or was granted.
-  const project = `(m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))`;
+  const project = `(m.repository_id=? OR (m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?))))`;
   const current = task.service_role_id
     ? store.get(`SELECT m.* FROM models m JOIN service_roles s ON s.model_id=m.id WHERE m.id=? AND s.id=? AND s.enabled=1 AND ${task.repository_id ? project : 'm.repository_id IS NULL'}`,
       model.id, task.service_role_id, ...(task.repository_id ? [task.repository_id, task.repository_id] : []))

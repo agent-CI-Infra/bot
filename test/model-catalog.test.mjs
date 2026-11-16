@@ -7,7 +7,7 @@ const card=(id,extra={})=>({id,name:id,attachment:true,reasoning:true,limit:{con
 const data=()=>({deepseek:{name:'DeepSeek',api:'https://api.deepseek.com',doc:'https://api-docs.deepseek.com/quick_start',models:{'deepseek-flash':card('deepseek-flash',{canonical_model_id:'deepseek/deepseek-flash'})}},
   anthropic:{name:'Anthropic',doc:'https://docs.anthropic.com/models',models:{'claude-sonnet-4-5':card('claude-sonnet-4-5',{canonical_model_id:'anthropic/claude-sonnet-4-5'})}},
   proxy:{api:'https://proxy.example/v1',models:{'deepseek/deepseek-flash':card('deepseek/deepseek-flash',{canonical_model_id:'deepseek/deepseek-flash',cost:{input:1,output:2}})}}});
-const storeFor=t=>{const store=new Store(':memory:',Buffer.alloc(32,3));t.after(()=>store.close());store.run("INSERT INTO models VALUES('m',NULL,'https://relay.example/v1','deepseek-flash',NULL,1,'now')");return store;};
+const storeFor=t=>{const store=new Store(':memory:',Buffer.alloc(32,3));t.after(()=>store.close());store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,version,updated_at) VALUES('m',NULL,'https://relay.example/v1','deepseek-flash',NULL,1,'now')");return store;};
 const install=async(store,payload=data())=>{const catalog=new ModelCatalog(store,async()=>new Response(JSON.stringify(payload)));await catalog.refresh();return catalog;};
 
 test('catalog validation drops malformed entries independently, retains zero prices and skips non-chat models',()=>{
@@ -80,7 +80,8 @@ test('catalog API exposes snapshot health, authorizes refresh and keeps metadata
   assert.equal((await admin('/api/models/catalog?q=claude&limit=1')).value.total,1);
   const password=testPassword();await admin('/api/users','POST',{username:'catalog-member',password,repository_ids:['101']});const member=h.client();await member('/api/auth/login','POST',{username:'catalog-member',password});
   assert.equal((await member('/api/models/catalog')).status,200);assert.equal((await member('/api/models/catalog/refresh','POST',{})).status,403);
-  assert.equal((await member('/api/models/'+shared.id,'PATCH',{version:1,capabilities:{reasoning:false}})).status,404);
+  // A shared model serves every project (#850): the project administrator sees it but cannot edit it.
+  assert.equal((await member('/api/models/'+shared.id,'PATCH',{version:1,capabilities:{reasoning:false}})).status,403);
   const own=(await member('/api/models','POST',{repository_id:'101',api_url:'https://relay.example/v1',api_key:testPassword(),model_name:'anthropic/claude-sonnet-4.5'})).value.model;
   assert.equal((await member('/api/models/'+own.id,'PATCH',{version:1,catalog:{mode:'manual',ref:'deepseek/deepseek-flash'},capabilities:{reasoning:false}})).status,200);
   catalog.fetcher=async()=>{throw new Error('offline');};response=await admin('/api/models/catalog/refresh','POST',{});

@@ -246,7 +246,7 @@ function containerCliStatus(
   if (store && repositoryId) {
     modelCount = Number(
       store.get(
-        `SELECT count(*) n FROM models m WHERE m.api_key IS NOT NULL AND (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))`,
+        `SELECT count(*) n FROM models m WHERE m.api_key IS NOT NULL AND (m.repository_id=? OR (m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?))))`,
         repositoryId,
         repositoryId,
       )?.n ?? 0,
