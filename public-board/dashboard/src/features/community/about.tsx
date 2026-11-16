@@ -15,14 +15,12 @@ import { LanguageSwitch } from '@/components/language-switch'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { ThemeSwitch } from '@/components/theme-switch'
-import { ABOUT_COPY, ADD_SNIPPET, GATE_SNIPPET } from './about-copy'
+import { ABOUT_COPY, ADD_SNIPPET } from './about-copy'
 
 const REPO_URL = 'https://github.com/agent-CI-Infra/bot'
 const SITE_URL = '/dashboard/'
 const CONFIG_URL = `${REPO_URL}/blob/main/public-board/config/internal-contributors.json`
-const GATE_CONFIG_URL = `${REPO_URL}/blob/main/docs/onboarding-guide.md`
 const COLLECT_URL = `${REPO_URL}/blob/main/public-board/scripts/collect.mjs`
-const GATE_COLLECT_URL = `${REPO_URL}/blob/main/public-board/collect.mjs`
 const DEPLOY_URL = `${REPO_URL}/blob/main/Dockerfile`
 const ISSUES_URL = `${REPO_URL}/issues`
 
@@ -126,14 +124,8 @@ const TOKENS: Record<string, ReactNode> = {
   config: (
     <CodeLink href={CONFIG_URL}>public-board/config/internal-contributors.json</CodeLink>
   ),
-  gateConfig: (
-    <CodeLink href={GATE_CONFIG_URL}>docs/onboarding-guide.md</CodeLink>
-  ),
   collect: <CodeLink href={COLLECT_URL}>public-board/scripts/collect.mjs</CodeLink>,
   deploy: <CodeLink href={DEPLOY_URL}>Dockerfile</CodeLink>,
-  gateCollect: (
-    <CodeLink href={GATE_COLLECT_URL}>public-board/collect.mjs</CodeLink>
-  ),
   issues: <ExtLink href={ISSUES_URL}>GitHub Issues</ExtLink>,
 }
 
@@ -266,24 +258,14 @@ export function AboutSite() {
           </Table>
         </Section>
 
-        <Section title={c.gate.title} description={c.gate.description}>
-          <p>
-            <RichText text={c.gate.intro} />
-          </p>
-          <p>
-            <RichText text={c.gate.configIntro} />
-          </p>
-          <CodeBlock>{GATE_SNIPPET}</CodeBlock>
+        <Section title={c.boards.title} description={c.boards.description}>
           <BulletList>
-            {c.gate.bullets.map((bullet) => (
+            {c.boards.bullets.map((bullet) => (
               <li key={bullet}>
                 <RichText text={bullet} />
               </li>
             ))}
           </BulletList>
-          <p className='text-muted-foreground'>
-            <RichText text={c.gate.footer} />
-          </p>
         </Section>
 
         <Section title={c.data.title} description={c.data.description}>

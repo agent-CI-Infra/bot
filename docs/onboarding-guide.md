@@ -9,8 +9,8 @@
 | 入口 | 地址 | 用途 |
 | --- | --- | --- |
 | **管理面（控制台）** | https://agent-ci-infra-bot-admin.llmbots.co/ | 启动项目、跑一键接入、管理用户与仓库授权 |
-| **公共 Dashboard** | <公网入口地址>/dashboard/ | 看所有已登记仓库的门禁与时延等指标 |
-| **单仓看板** | `<公网入口地址>/boards/<owner>/<repo>/` | 单个仓库的看板，`<owner>/<repo>` 用小写 |
+| **公共 Dashboard** | <公网入口地址>/dashboard/ | 看所有已登记仓库的 PR、Issue、贡献者和版本等社区指标 |
+| **单仓看板** | `<公网入口地址>/boards/<owner>/<repo>/` | 单个仓库的 Issue、PR、CI 运行历史和发版，`<owner>/<repo>` 用小写；任何仓库开启后就有内容，不需要按约定配置 CI |
 | **GitHub App 安装页** | https://github.com/apps/agent-ci-infra-bot/installations/select_target | 把 bot 安装到你的账号/组织 |
 
 ### 管理面怎么登录

@@ -1,4 +1,4 @@
-"""Branch lines: long-lived branches whose CI, tests and coverage are viewed apart.
+"""Branch lines: long-lived branches whose CI is viewed apart.
 
 A run belongs to the line its work targets: a pull request's base branch, or
 the branch a push, dispatch or schedule ran on. Everything that targets no
@@ -10,7 +10,39 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from .ci_lanes import PR_EVENTS, pr_number
+PR_EVENTS = ("pull_request", "pull_request_target")
+
+
+def _parse(value):
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+    except ValueError:
+        return None
+
+
+def pr_number(run, prs=()):
+    """The pull request a run belongs to. GitHub leaves pull_requests empty for fork PRs: match the PR
+    with the same head branch open at the time; head repository, SHA and title only break ties."""
+    linked = run.get("pull_requests") or []
+    if linked:
+        first = linked[0]
+        return first.get("number") if isinstance(first, dict) else first
+    if run.get("event") not in PR_EVENTS:
+        return None
+    created = _parse(run.get("created_at"))
+    if not created or not run.get("branch"):
+        return None
+    found = []
+    for pr in prs:
+        opened, closed = _parse(pr.get("created_at")), _parse(pr.get("closed_at"))
+        if pr.get("head") == run["branch"] and opened and opened <= created and not (closed and closed < created):
+            found.append(pr)
+    if run.get("head_repo"):
+        found = [pr for pr in found if pr.get("head_repo") in (None, run["head_repo"])]
+    for same in (lambda pr: pr.get("head_sha") == run.get("sha"), lambda pr: pr.get("title") == run.get("title")):
+        if len(found) > 1:
+            found = [pr for pr in found if same(pr)] or found
+    return found[0].get("number") if len(found) == 1 else None
 
 KEY_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,30}\Z")
 

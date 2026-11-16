@@ -1,13 +1,12 @@
 import {
   Activity,
-  BookOpen,
   CircleDot,
   GitPullRequest,
   Globe,
   Info,
   LayoutDashboard,
+  LayoutGrid,
   LineChart,
-  ShieldCheck,
   Tags,
   Users,
 } from 'lucide-react'
@@ -66,16 +65,11 @@ export const sidebarData: SidebarData = {
           ],
         },
         {
-          title: '质量门禁',
-          url: '/gate',
-          icon: ShieldCheck,
-          items: [
-            {
-              title: '接入门禁',
-              url: '/gate-onboarding',
-              icon: BookOpen,
-            },
-          ],
+          // Each repository's own board (PRs, Issues, CI runs), served by the bot outside this app.
+          title: '单仓看板',
+          url: '/boards/',
+          icon: LayoutGrid,
+          external: true,
         },
         {
           title: '关于本站',

@@ -36,9 +36,6 @@ def contributions(kind, row):
             prefix = f"runs:{group}:"
             out[prefix + "total"] = 1
             out[prefix + str(row.get("conclusion") or row["status"])] = 1
-            for report in row.get("tests", []):
-                for name, value in (report.get("counts") or {}).items():
-                    out[prefix + report["layer"] + ":" + name] += value or 0
     return out
 
 

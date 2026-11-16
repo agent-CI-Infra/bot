@@ -1,7 +1,6 @@
 """Budgeted, restartable collection. The Pages repository owns all progress."""
 from __future__ import annotations
 
-from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import time
 from urllib.parse import quote
@@ -11,12 +10,11 @@ from .config import Config
 from .github import GitHubError
 from .history import History, encode, read_json
 from .project import slim_run, run_details
-from .lines import configured_lines
-from .tagged import TaggedStore
 
-# 2: tagged catalogs and harness summaries are read from results artifacts.
-# 3: Real E2E metrics are reduced to public score summaries.
-PARSER_VERSION = 4
+# 5: jobs with durations; test reports, coverage, gate reports and tagged catalogs are no longer read (#938).
+DETAILS_VERSION = 5
+# Fields of run records that only the removed gate, coverage and E2E views used (#938).
+RETIRED_RUN_FIELDS = ("tests", "coverage", "coverage_summaries", "gates", "tagged", "reports_status", "inspected", "inspected_at")
 
 
 def stamp(value):
@@ -98,7 +96,6 @@ class Sync:
             raise ValueError("sync state belongs to a different repository or schema")
         self.base = f"/repos/{repo}"
         self.cfg = Config.from_env(repo=repo)
-        self.tagged = TaggedStore(read_json(self.history.root / ".sync/tagged.json", None))
         if not self.state.get("migrated"):
             old = read_json(self.history.root / "site/data/snapshot.json", {})
             source = (old.get("repository") or {}).get("name", "")
@@ -111,11 +108,26 @@ class Sync:
                         row.pop("idle_days", None)
                         self.history.put(kind, row)
             for row in old.get("quality", {}).get("runs", []):
-                for report in row.get("tests", []):
-                    report.pop("cases", None)
-                    report.pop("commands", None)
                 self.history.put("runs", row)
             self.state["migrated"] = True
+        if not self.state.get("retired_fields"):
+            self.retire_fields()
+            self.state["retired_fields"] = True
+
+    def retire_fields(self):
+        """Once: drop what only the removed gate, coverage and E2E views kept from every stored run (#938).
+
+        The rewritten records replace the published ones, and runs counted as the former "gate"
+        channel become "ci"; aggregates follow because each record is put again."""
+        for bucket, info in list(self.history.manifest["shards"].items()):
+            if info["kind"] != "runs":
+                continue
+            for row in list(self.history._records(bucket).values()):
+                cleaned = {k: v for k, v in row.items() if k not in RETIRED_RUN_FIELDS}
+                if cleaned.get("channel") == "gate":
+                    cleaned["channel"] = "ci"
+                if cleaned != row:
+                    self.history.put("runs", cleaned)
 
     def guarded(self, name, fn):
         try:
@@ -208,16 +220,16 @@ class Sync:
         row["duration_s"] = max(0, int((date(row["updated_at"]) - date(row["started_at"])).total_seconds())) if row["status"] == "completed" and row.get("started_at") and row.get("updated_at") else None
         key = History.key("runs", row)
         old = self.history.get("runs", key)
-        # A list response is metadata, never evidence that previously parsed
-        # metrics disappeared. Keep them across expiration and transient errors.
+        # A list response is metadata, never evidence that previously read
+        # jobs disappeared. Keep them across transient errors.
         if old:
-            for field in ("tests", "jobs", "coverage", "coverage_summaries", "reports_status", "metrics_version", "inspected_at", "inspected"):
+            for field in ("jobs", "jobs_status", "metrics_version"):
                 if field in old:
                     row[field] = old[field]
         self.history.put("runs", row)
         job = self.state["pending"].get("run:" + key)
         if job and old and old.get("status") != "completed" and row["status"] == "completed":
-            # Jobs that finished after the last inspection uploaded more reports.
+            # Jobs that finished after the last inspection are read again.
             job["due"] = stamp(self.now)
         self.queue("run:" + key)
 
@@ -325,48 +337,22 @@ class Sync:
                     if not following:
                         following = self.gh.get(self.base + f"/actions/runs/{run_id}/attempts/{int(attempt)+1}")
                     row["next_started_at"] = following.get("started_at") or following.get("run_started_at")
-                previous = deepcopy(row)
-                try:
-                    run_details(self.gh, self.cfg, row, cache=previous, parser_version=PARSER_VERSION)
-                finally:
-                    slices = row.pop("tagged", None)
-                    if slices:
-                        self.tagged.observe(row, slices, self.meta["default_branch"],
-                                            [line["ref"] for line in configured_lines(self.settings, self.meta["default_branch"])])
-                    # Budget interruption must not erase already parsed artifacts.
-                    for report in previous.get("tests", []):
-                        if report.get("counts") is not None and not any(t["artifact_id"] == report["artifact_id"] for t in row.get("tests", [])):
-                            row.setdefault("tests", []).append(report)
-                    # Strip transient testcase details before any possible commit.
-                    for report in row.get("tests", []):
-                        report.pop("cases", None)
-                        report.pop("commands", None)
-                    self.history.put("runs", row)
-                row["metrics_version"] = PARSER_VERSION
-                # Inspection time is internal progress, not a reason to deploy.
+                run_details(self.gh, self.cfg, row)
+                row["metrics_version"] = DETAILS_VERSION
                 self.history.put("runs", row)
                 if kind == "attempt":
                     del self.state["pending"][key]
                     continue
                 job["tries"] += 1
                 job.pop("error", None)
-                delay = 120 if row["status"] != "completed" else min(86400, 300 * 2 ** min(job["tries"], 9))
-                # Early reports of a running workflow are not the whole run.
-                if row.get("reports_status") == "available" and row["status"] == "completed":
-                    delay = 86400
-                unavailable = row.get("reports_status") == "unavailable" or row.get("jobs_status") == "unavailable" or any(t["status"] == "unavailable" for t in row.get("tests", []))
-                if unavailable:
+                if row.get("jobs_status") == "unavailable":
                     job["error"] = "details_unavailable"
-                # A completed attempt's jobs and artifacts no longer change. It leaves
-                # the queue once its reports are read, or after a second look found
-                # nothing new; only unreadable details keep being retried for a week.
-                settled = row["status"] == "completed" and not unavailable
-                if settled:
-                    job["after"] = job.get("after", 0) + 1
-                if settled and (row.get("reports_status") == "available" or job["after"] >= 2
-                                or date(row["updated_at"]) < self.now - timedelta(days=7)):
+                # A completed attempt's jobs no longer change: it leaves the queue once they are read.
+                # Unreadable jobs are retried with backoff for a week.
+                if row["status"] == "completed" and (row.get("jobs_status") == "available" or date(row["updated_at"]) < self.now - timedelta(days=7)):
                     del self.state["pending"][key]
                 else:
+                    delay = 120 if row["status"] != "completed" else min(86400, 300 * 2 ** min(job["tries"], 9))
                     job["due"] = stamp(self.now + timedelta(seconds=delay))
             except GitHubError as err:
                 job["tries"] += 1
@@ -397,7 +383,6 @@ class Sync:
             self.guarded("reconcile:runs", lambda: self.runs("reconcile", pages=1))
             self.guarded("reconcile:releases", lambda: self.releases("reconcile", pages=1))
         self.guarded("details", lambda: self.pending(priority={"run:" + key for _, key in self.changed_jobs}))
-        self.guarded("tagged", lambda: self.tagged.refresh_schema(self.gh.get_text_file, self.repo))
         self.state["last_poll"] = stamp(self.now)
         return self
 
@@ -411,7 +396,4 @@ class Sync:
                 "failed": len(self.state["errors"]) + sum(bool(v.get("error")) for v in self.state["pending"].values())}
 
     def files(self):
-        files = {**self.history.files(), ".sync/state.json": encode(self.state)}
-        if self.tagged.changed:
-            files[".sync/tagged.json"] = encode(self.tagged.state)
-        return files
+        return {**self.history.files(), ".sync/state.json": encode(self.state)}

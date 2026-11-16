@@ -1,25 +1,31 @@
 # Public board hosting
 
-The dashboard and single-repository pages are vendored from
+The dashboard and single-repository pages started from
 https://github.com/agent-CI-Infra/dashboard at revision
-`9e57dfaf11fa44606517da454c5732a59d1f7996`.
-Their existing presentation and JSON contracts are retained. The dashboard's
-MIT license and the single-repository exporter's Apache-2.0 license are kept
-in their respective directories.
+`9e57dfaf11fa44606517da454c5732a59d1f7996` and are now maintained in this
+repository; they no longer follow the upstream template. The dashboard's MIT
+license and the single-repository exporter's Apache-2.0 license are kept in
+their respective directories.
 
-`dashboard/` builds the existing React application with `/dashboard/` as its
-asset base. `single-repo/static/` contains the existing read-only board pages.
-`single-repo/gsb/` contains the incremental exporter, and `scripts/` contains
-the community collector and gate aggregation adapters. `collect.py` and
-`collect.mjs` adapt these collectors to local storage and repository-scoped
-GitHub credentials. Collection never commits, dispatches workflows or deploys
-to an external site.
+The boards show only data every GitHub repository has, so any repository has
+content as soon as its board is on: the dashboard shows community statistics
+(pull requests, Issues, contributors, growth, releases), and each repository
+board shows Issues, pull requests, the run history of every workflow and job,
+and releases. Nothing depends on how a repository lays out its CI.
+
+`dashboard/` builds the React application with `/dashboard/` as its asset base.
+`single-repo/static/` contains the read-only board pages and
+`single-repo/gsb/` the incremental exporter; `scripts/` contains the community
+collector. `collect.py` and `collect.mjs` adapt these collectors to local
+storage and repository-scoped GitHub credentials. Collection uses a read-only
+installation token and never commits, dispatches workflows or deploys to an
+external site.
 
 Run `npm ci` and `npm run build` at the bot repository root. The production
-image includes Python 3 (standard library only) for the existing exporter.
-Private incremental state and generated snapshots live beside the bot database
-under `public-boards/`; only the explicit exported routes are public.
+image includes Python 3 (standard library only) for the exporter. Private
+incremental state and generated snapshots live beside the bot database under
+`public-boards/`; only the explicit exported routes are public.
 
-Upstream page layouts, metric fields and calculations are retained. Hosting URLs and onboarding instructions point at the bot, and the gate page no longer appends demo repositories outside the installation/publication scope.
 The community collector exports `collectRepo` and accepts its output directory
-from its caller instead of invoking its former command-line entrypoint. Classification configuration is resolved relative to the vendored module.
+from its caller instead of invoking its former command-line entrypoint.
+Classification configuration is resolved relative to the vendored module.

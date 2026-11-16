@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { publicBoardFixture } from './public-board-fixtures.mjs';
 
 // A published repository whose snapshot directory is unreadable must cost only that repository's
-// card. The dashboard aggregate, the gate index, the shared config and the board index keep serving
+// card. The dashboard aggregate, the shared config and the board index keep serving
 // every repository that is still readable, and the aggregate names the repository it could not read
 // instead of quietly presenting it as a board with no data.
 test('one unreadable snapshot does not take the dashboard or the board index down with it', async t => {
@@ -20,12 +20,12 @@ test('one unreadable snapshot does not take the dashboard or the board index dow
   const summary = JSON.parse(await readFile(join(healthy.active_path, 'summary.json'), 'utf8'));
 
   // A second published repository. Its last collection is unusable: the dashboard summary is gone,
-  // the gate document is truncated mid-object and the board snapshot is missing.
+  // the shared config is truncated mid-object and the board snapshot is missing.
   const broken = await mkdtemp(join(tmpdir(), 'broken-board-'));
   t.after(() => rm(broken, { recursive: true, force: true }));
   await cp(healthy.active_path, broken, { recursive: true });
   await unlink(join(broken, 'summary.json'));
-  await writeFile(join(broken, 'gate.json'), '{"truncated":');
+  await writeFile(join(broken, 'config.json'), '{"truncated":');
   await unlink(join(broken, 'board/data/snapshot.json'));
   h.store.run(`INSERT INTO installed_repositories(account_id,repository_id,installation_id,full_name,owner_id,owner_login,private,installed,synced_at)
     VALUES(?,?,?,?,?,?,0,1,?)`, owner.id, '202', '1', 'octo/broken', '10', 'octo', new Date().toISOString());
@@ -39,16 +39,11 @@ test('one unreadable snapshot does not take the dashboard or the board index dow
     'the aggregate names the repository, the file and a stable reason');
   assert.ok(!JSON.stringify(index.data).includes(broken), 'the aggregate never echoes the snapshot path');
 
-  const gate = await get('/dashboard/data/gate/index.json');
-  assert.equal(gate.status, 200, `gate index answered ${gate.status}: ${JSON.stringify(gate.data)}`);
-  assert.deepEqual(gate.data.sources.map(row => row.id), ['octo/hello']);
-  assert.deepEqual(gate.data.unavailable, [{ repository: 'octo/broken', file: 'gate.json', reason: 'invalid_json' }],
-    'a truncated document is reported as invalid JSON, not as a read failure');
-
   const config = await get('/dashboard/data/config.json');
   assert.equal(config.status, 200, `config answered ${config.status}: ${JSON.stringify(config.data)}`);
-  assert.ok(Array.isArray(config.data.bots));
-  assert.deepEqual(config.data.unavailable, [], 'the readable config of the second repository still contributes');
+  assert.ok(Array.isArray(config.data.bots), 'the readable config of the healthy repository still contributes');
+  assert.deepEqual(config.data.unavailable, [{ repository: 'octo/broken', file: 'config.json', reason: 'invalid_json' }],
+    'a truncated document is reported as invalid JSON, not as a read failure');
 
   const boardsPage = await fetch(h.webhook + '/boards/');
   assert.equal(boardsPage.status, 200);

@@ -15,6 +15,8 @@ type BaseNavItem = {
 type NavLink = BaseNavItem & {
   url: LinkProps['to'] | (string & {})
   items?: never
+  /** A page served outside this app (such as the single-repository boards): a plain link, not a route. */
+  external?: boolean
 }
 
 type NavCollapsible = BaseNavItem & {

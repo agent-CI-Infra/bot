@@ -4,31 +4,56 @@ import { mkdirSync } from 'node:fs';
 
 test.use({ locale: 'zh-CN' });
 
-test('public dashboard and repository board render the existing pages without console login', async ({ page }) => {
+test('public dashboard and repository board show generic data without console login (#938)', async ({ page }) => {
   const cleanup = [], f = await publicBoardFixture({ after: fn => cleanup.push(fn) });
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   // The browser and collectors use only this test's local services.
   await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
+  const shots = '.tmp/board-938'; mkdirSync(shots, { recursive: true });
+  const capture = async (name) => {
+    for (const [width, height] of [[1440, 900], [390, 844]]) {
+      await page.setViewportSize({ width, height });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${name} ${width}`).toBe(true);
+      await page.screenshot({ path: `${shots}/${name}-${width}.png` });
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+  };
   try {
-    await page.goto(f.h.webhook + '/dashboard/#/gate');
-    await expect(page.getByText('没有匹配的仓库', { exact: true })).toBeVisible();
-    await expect(page.getByText('sciencediscovery', { exact: true })).toHaveCount(0);
     await f.hook('browser-first'); await f.boards.drain();
-    await page.reload();
-    await expect(page.getByText('hello', { exact: true }).first()).toBeVisible();
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(f.h.webhook + '/dashboard/');
+    const repoLink = page.getByRole('link', { name: /octo\/hello/ }).first();
+    await expect(repoLink).toBeVisible();
     await expect(page.locator('a[href*="github.io"]')).toHaveCount(0);
-    await page.screenshot({ path: '.tmp/public-dashboard-desktop.png', fullPage: true });
+    // The gate pages and the template examples are gone; the sidebar leads to the repository boards instead.
+    const sidebar = page.locator('[data-sidebar="sidebar"]').first();
+    for (const text of ['质量门禁', '接入门禁']) await expect(sidebar.getByText(text, { exact: true })).toHaveCount(0);
+    await capture('dashboard');
+    await page.goto(f.h.webhook + '/dashboard/#/about');
+    await expect(page.locator('main').getByText('单仓看板', { exact: true })).toBeVisible();
+    await expect(page.getByText('质量门禁')).toHaveCount(0);
+    await capture('about');
+    for (const route of ['gate', 'gate-onboarding', 'sign-in', 'tasks', 'users', 'chats', 'apps', 'settings']) {
+      await page.goto(f.h.webhook + `/dashboard/#/${route}`);
+      await expect(page.getByRole('link', { name: /octo\/hello/ })).toHaveCount(0);
+      await expect(page.getByRole('heading', { level: 1 }).first()).not.toHaveText(/门禁|Sign in|Tasks|Users|Chats|Apps|Settings/);
+    }
+    await page.goto(f.h.webhook + '/dashboard/');
     await page.getByRole('link', { name: '单仓看板', exact: true }).click();
     await expect(page).toHaveURL(f.h.webhook + '/boards/');
     await page.locator('a.card').click();
     await expect(page.locator('#repo-link')).toHaveText('octo/hello');
-    await expect(page.locator('#tabs')).toContainText('Coverage');
+    await expect(page.locator('#tabs a')).toHaveText(['总览', 'Issue', 'PR', 'CI']);
     await expect(page.locator('#meta')).not.toContainText('载入中');
+    await expect(page.locator('#tab-overview')).toContainText('流水线');
+    await expect(page.locator('#tab-overview')).toContainText('CI');
+    await capture('board-overview');
     await page.locator('[data-tab="ci"]').click();
     await expect(page.locator('#tab-ci')).toBeVisible();
-    await page.screenshot({ path: '.tmp/public-board-desktop.png', fullPage: true });
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: '.tmp/public-board-mobile.png', fullPage: true });
+    await expect(page.locator('#tab-ci')).toContainText('Workflow 健康');
+    await expect(page.locator('#tab-ci')).not.toContainText('分层历史');
+    await expect(page.locator('#tab-ci')).not.toContainText('质量门禁');
+    await capture('board-ci');
     expect(errors).toEqual([]);
   } finally { for (const fn of cleanup.reverse()) await fn(); }
 });
