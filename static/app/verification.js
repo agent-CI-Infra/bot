@@ -89,9 +89,17 @@ function identityFormBeingEdited() {
 }
 // The check ended: read the projects the person may now manage. The project list and the identity page's root view are
 // drawn again; a page whose form is being filled is left alone, and only the project picker beside it follows.
+// #866: this is the read the check was for, so the grants have just changed — and it can fail, while nothing follows the
+// check any more. It used to end silently with the old list still on screen. The finished check stays finished: the line
+// says the list could not be read, beside a button that reads it again, and only that read is repeated.
 async function finishGithubVerification(next) {
   me = next; showGithubVerification();
-  const listed = (await api('/api/repositories')).repositories;
+  let listed;
+  try { listed = (await api('/api/repositories')).repositories; }
+  catch (err) { if (me && me.id === next.id) showGithubRepositoriesUnread(next); return; }
+  await applyGithubRepositories(next, listed);
+}
+async function applyGithubRepositories(next, listed) {
   // Signed out or switched accounts while the list was read: the new session's own start() draws its pages.
   if (!me || me.id !== next.id) return;
   repositories = listed;
@@ -99,4 +107,24 @@ async function finishGithubVerification(next) {
   const editing = tab === 'identity' && identityFormBeingEdited();
   if (!editing && !projectRoute() && ['projects', 'identity'].includes(tab)) await route();
   else if (typeof syncConsoleShell === 'function') syncConsoleShell(projectRoute());
+}
+function showGithubRepositoriesUnread(next) {
+  const line = $('github-verification'); if (!line) return;
+  line.hidden = false; line.dataset.state = 'failed';
+  line.replaceChildren(element('span', t('verification.repositories_failed')),
+    button(t('verification.repositories_retry'), () => readGithubRepositoriesAgain(next), 'btn-secondary'));
+}
+async function readGithubRepositoriesAgain(next) {
+  if (!me || me.id !== next.id) return;
+  const line = $('github-verification'), retry = line && line.querySelector('button');
+  if (retry) retry.disabled = true;
+  let listed;
+  try { listed = (await api('/api/repositories')).repositories; }
+  // Still failing: say so again, with the button ready for the next try. A read that was overtaken by another account
+  // says nothing — the session that is signed in now draws its own pages.
+  catch (err) { if (me && me.id === next.id) showGithubRepositoriesUnread(next); return; }
+  // Another account signed in while the list was read: its own start() draws its pages and its own line.
+  if (!me || me.id !== next.id) return;
+  showGithubVerification();
+  await applyGithubRepositories(next, listed);
 }
