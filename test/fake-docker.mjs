@@ -6,9 +6,8 @@ export class FakeDocker {
   containers = new Map(); volumes = new Map(); networks = new Map(); starts = 0; failNetwork = false;
   images = new Map([['approved', { Id: 'sha256:fixture', Config: { Labels: { 'department.bot.toolchain': 'fixture toolchain' } } }]]); builds = []; runs = [];
   calls = [];
-  // Whole-host Docker usage (#671), the shape Docker.diskUsage() returns: four null fields when /system/df cannot be read.
-  df = { images_bytes: 1000, containers_bytes: 20, volumes_bytes: 30, build_cache_bytes: 40 };
-  async diskUsage() { this.calls.push('GET /system/df'); return this.df; }
+  // The raw GET /system/df payload (#671): the same answer the manager parses in readDockerUsage(), not a shape of its own.
+  df = { LayersSize: 0, Images: [], Containers: [], Volumes: [], BuildCache: [] };
   async volumeSource(directory) { return directory; }
   // The manager's own mounts: the assistant HOME volume (#457) and the read-only CLI tool volume (#705).
   async volumeName(destination) {

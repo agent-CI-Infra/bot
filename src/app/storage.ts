@@ -195,7 +195,8 @@ export class StorageReport {
 }
 
 const bytesOf = (value: any) => Math.max(0, Number(value) || 0);
-// A size that was measured, or null when it was not (not read yet, the reader failed, or the manager did not answer).
+// A size that was measured, or null when it was not (not read yet, the reader failed, or the manager answered with a total
+// it could not measure — a volume or container Docker left unsized keeps the kind null instead of a short number).
 const measured = (value: any) => value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Math.max(0, Number(value));
 /**
  * The host's disk split into what the bot knows and "other" (used less known), what could be reclaimed and what the last

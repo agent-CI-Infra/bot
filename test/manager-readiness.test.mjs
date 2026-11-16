@@ -20,6 +20,7 @@ async function listen(t, server) {
 test('the manager stays fenced until every saved project has recovered and uncertain work has stopped', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'readiness-'));
   const docker = new FakeDocker(), options = { database: join(directory, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' };
+  docker.df = { LayersSize: 1000, Images: [], Containers: [{ SizeRw: 20 }], Volumes: [{ UsageData: { Size: 30 } }], BuildCache: [] };
   let projects = new Projects(options);
   for (const repo of ['101', '202']) {
     await projects.register(repo);
@@ -61,8 +62,13 @@ test('the manager stays fenced until every saved project has recovered and uncer
   assert.equal(docker.starts, starts + 2, 'recovery stopped and restarted both old computers');
   assert.deepEqual(projects.db.prepare('SELECT state FROM operations ORDER BY id').all().map(row => row.state), ['interrupted', 'interrupted']);
   assert.deepEqual((await client.call('GET', '/v1/projects')).map(row => row.state), ['ready', 'ready']);
-  // /v1/storage waits for the manager's own storage() and carries the host's Docker usage.
-  assert.deepEqual((await client.call('GET', '/v1/storage')).host.docker, { images_bytes: 1000, containers_bytes: 20, volumes_bytes: 30, build_cache_bytes: 40 });
+  // /v1/storage carries the Docker usage the manager read in the background, in the shape the storage page renders:
+  // `docker` at the top level, each kind `{count, bytes}`, not the superseded flat `host.docker` of four byte fields.
+  // The read is off the request path, so wait for it here instead of assuming it finished with recovery.
+  projects.dockerUsageAt = 0; await projects.readDockerUsage();
+  const storage = await client.call('GET', '/v1/storage');
+  assert.deepEqual(storage.docker.containers, { count: 1, bytes: 20 });
+  assert.deepEqual(storage.docker.volumes, { count: 1, bytes: 30 });
   assert.equal((await fetch(base + '/v1/projects')).status, 401);
 });
 
