@@ -12,6 +12,7 @@
 | [`issue-development.md`](issue-development.md) | `.bot/rules/issue-development.md` | 开发任务的资格、范围、停止条件、测试与 PR 说明 |
 | [`release-observe.md`](release-observe.md) | 无仓库文件，可由 Manager 章节覆盖 | CI 观察的提示词：读取运行、分析日志与代码、给出结论 |
 | [`manager-dispatch.md`](manager-dispatch.md) | 无仓库文件，可由 Manager 的「分派」章节覆盖 | 每个事件新建、续接还是不处理的默认流程 |
+| [`onboarding.md`](onboarding.md) | 无仓库文件，不可覆盖 | 仓库接入向导：管理助手只读分析一个仓库，给出仓库画像、带推荐答案的问题和接入方案草稿，见[管理助手](../management-agent.md#仓库接入向导) |
 
 三份检视和开发规则以及 CI 观察提示词各带一张 ` ```mermaid ` 流程图（检视：检视 → 回复；开发：Issue 分析 → 开发 → 检视 → 测试，检视或测试发现问题时回到开发），给 agent 说明步骤顺序，见[项目 Manager 与工作类型](../workflows.md)。
 

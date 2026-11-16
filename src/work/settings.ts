@@ -177,7 +177,7 @@ export const labelDispatched = (filters: EventFilters, object: 'issue' | 'pull_r
 
 // ---- Saving ----
 
-function checkFilters(value: unknown): Partial<EventFilters> {
+export function checkFilters(value: unknown): Partial<EventFilters> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return fail(400, 'invalid_event_filters', 'events');
   const out: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {

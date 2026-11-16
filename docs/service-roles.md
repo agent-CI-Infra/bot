@@ -60,7 +60,7 @@ Bot 里的角色分两个维度：
 
 ## 用量与计费
 
-服务角色的模型请求记在 `model_requests.service_role_id` 上，`repository_id` 为空，不计入任何项目。项目的统计、成本和管理查询 `get_usage` 仍只按项目汇总；服务角色页按角色显示累计请求数、token、费用和未计价请求数。删除自定义角色后，已有记录仍保留原角色 id。
+服务角色的模型请求记在 `model_requests.service_role_id` 上，`repository_id` 为空，不计入任何项目。两处例外同时记在一个仓库上（`repository_id`），计入它的项目用量：范围只有一个仓库的群（见下文），以及管理助手为一个仓库运行的[接入向导](management-agent.md#仓库接入向导)。项目的统计、成本和管理查询 `get_usage` 仍只按项目汇总；服务角色页按角色显示累计请求数、token、费用和未计价请求数。删除自定义角色后，已有记录仍保留原角色 id。
 
 `model_requests.repository_id` 原来是 `NOT NULL`。升级时控制面重建一次这张表：沿用表原有的建表语句（含之后新增的全部列），只去掉这一处 `NOT NULL`，复制全部数据，并按原 SQL 重建全部索引和触发器；完成后在设置项 `model_requests_nullable_repository` 记录时间，之后启动不再重建。
 

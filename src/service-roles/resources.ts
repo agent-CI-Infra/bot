@@ -12,7 +12,11 @@ export const serviceRepositoryTools=repositoryTools.map(({function:tool})=>fn(to
   tool.description.replace(/\s*Call github_read_token first\./g,'')+' Select an authorized repository by full name.',
   {repository,...tool.parameters.properties},['repository',...tool.parameters.required]));
 
-/** Scoped read tools keep the installation credential inside the control plane. */
+/**
+ * Scoped read tools keep the installation credential inside the control plane. `project` resolves the repository the model
+ * named to the row tokens are issued for (id, full_name, owner_id, account_id): a started project, or for an onboarding
+ * session (#930) a repository installed but not started yet.
+ */
 export class ServiceRepositories {
   private readonly clients=new Map<string,{tokens:ReadTokens;explorer:RepositoryExplorer}>();
   constructor(readonly store:Store,readonly redactor:Redactor,readonly guard:()=>Promise<void>,
@@ -20,7 +24,7 @@ export class ServiceRepositories {
   async execute(name:string,args:Json):Promise<unknown>{
     await this.guard();const {repository,...parameters}=args,project=this.project(repository);
     let client=this.clients.get(project.id);
-    if(!client){const tokens=new ReadTokens(this.store,this.store.get('SELECT * FROM repositories WHERE id=?',project.id)!,this.redactor,this.guard,this.apiUrl,this.scopes(),this.scopes);
+    if(!client){const tokens=new ReadTokens(this.store,project,this.redactor,this.guard,this.apiUrl,this.scopes(),this.scopes);
       client={tokens,explorer:new RepositoryExplorer(tokens,this.redactor,this.guard)};this.clients.set(project.id,client);}
     const access=await client.explorer.execute('github_read_token',{});if(access.error)return access;
     return {repository:project.full_name,result:await client.explorer.execute(name,parameters)};
