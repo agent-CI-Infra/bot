@@ -30,14 +30,16 @@ test('#570 基本设置首屏只有常用项，技术信息和危险操作默认
     await expect(page.getByLabel('基准分支', { exact: true })).toBeVisible();
     // Technical identifiers and danger actions are in the document but not on the first screen.
     await expect(page.getByText('仓库 ID', { exact: true })).toBeHidden();
-    await expect(page.getByText('.bot/guide.md')).toBeHidden();
+    // The labels are first-screen settings (#935); the rule file source list is gone.
+    await expect(page.getByLabel('检视标签', { exact: true })).toHaveValue('bot-reviewed');
+    await expect(page.getByLabel('开发标签', { exact: true })).toHaveValue('bot-develop');
     await expect(page.getByRole('button', { name: '禁用项目', exact: true })).toBeHidden();
     await expect(page.getByRole('button', { name: '删除项目', exact: true })).toBeHidden();
     await page.screenshot({ path: `${out}/basic-1440.png`, fullPage: true });
 
     await openBasicAdvanced(page);
     await expect(page.getByText('仓库 ID', { exact: true })).toBeVisible();
-    await expect(page.getByText('.bot/guide.md')).toBeVisible();
+    await expect(page.locator('#project-page')).not.toContainText('规则来源');
     await expect(page.locator('#project-page')).toContainText('处理账号');
 
     await openProjectDanger(page);

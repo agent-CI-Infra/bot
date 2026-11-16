@@ -10,7 +10,7 @@ async function captureWizardStep(page, name) {
  }
 }
 
-test('接入向导验证地址、准备 manifest、跳过安装、保存模型并查看项目规则来源',async({page})=>{
+test('接入向导验证地址、准备 manifest、跳过安装、保存模型并查看仓库 skill',async({page})=>{
  let onboarding;const h=await harness(undefined,undefined,store=>({engine:new TaskEngine(store,{call:async()=>null}),onboarding:onboarding=new Onboarding(store,{probe:async raw=>{const u=new URL(raw);return u.pathname.includes('probe')?{status:200,body:JSON.stringify(onboarding.probe(u.searchParams.get('nonce'),'webhook'))}:{status:404,body:'{}'};}})}));
  const{admin,password}=await setup(h),errors=[];page.on('pageerror',error=>errors.push(error.message));
  try{
@@ -25,12 +25,12 @@ test('接入向导验证地址、准备 manifest、跳过安装、保存模型�
   await page.getByRole('button',{name:'7. 完成',exact:true}).click();
   await expect(page.locator('#onboarding-panel')).toContainText('自动开发默认关闭，在对应项目的「监听与触发」把能力上限设为「可开发并开 PR」');
   await captureWizardStep(page,'wizard-complete');
-  const a=await account(admin);await repository(admin,a.id,'101');const rules=new RuleService(h.store);rules.cache('101','a'.repeat(40),{'.bot/guide.md':'Repository behavior override','.agents/skills/demo/SKILL.md':'Demo skill'});
-  await page.goto(h.admin+'/#/projects/101/workflows/rules.files');await expect(page).toHaveURL(/#\/projects\/101\/roles$/);await goRolePage(page, { role: 'Manager' });const guideSource=page.locator('[data-rule-file=".bot/guide.md"] [data-rule-source]');await expect(guideSource).toHaveText('仓库文件');await expect(page.getByRole('table',{name:'规则文件',exact:true})).toContainText('.agents/skills/demo/SKILL.md');await expect(page.getByRole('dialog')).toHaveCount(0);
+  const a=await account(admin);await repository(admin,a.id,'101');const rules=new RuleService(h.store);rules.cache('101','a'.repeat(40),{'.bot/guide.md':'','.agents/skills/demo/SKILL.md':'Demo skill'});
+  await page.goto(h.admin+'/#/projects/101/workflows/rules.files');await expect(page).toHaveURL(/#\/projects\/101\/roles$/);await goRolePage(page, { role: 'Manager' });await expect(page.getByRole('table',{name:'仓库 skill',exact:true})).toContainText('.agents/skills/demo/SKILL.md');await expect(page.locator('[data-retired-rules]')).toContainText('.bot/guide.md');await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.locator('#project-page .project-content').screenshot({path:'.tmp/onboarding/rules-overview-mobile.png'});
-  await page.locator('[data-rule-file=".bot/guide.md"]').getByRole('button',{name:'展开规则',exact:true}).click();const guide=page.locator('[data-rule-path=".bot/guide.md"]');await expect(guide).toContainText('Repository behavior override');await guide.getByRole('button',{name:'添加控制台覆盖',exact:true}).click();await guide.getByLabel('.bot/guide.md 控制台覆盖',{exact:true}).fill('Console behavior');await guide.getByRole('button',{name:'保存',exact:true}).click();
-  await expect(guide.locator('.flash')).toHaveText('已保存控制台覆盖');await expect(guide).toContainText('默认分支的仓库文件整份覆盖控制台内容');await expect(guide).toContainText('生效：仓库文件');await expect(guideSource).toHaveText('仓库文件');
-  await expect(page.getByLabel('Manager 提示词',{exact:true})).toHaveValue(/## 行为指南\nConsole behavior/);
+  // A skill is read-only here: it is changed in the repository. The console override editor is gone (#935).
+  await page.locator('[data-rule-file=".agents/skills/demo/SKILL.md"]').getByRole('button',{name:'查看内容',exact:true}).click();const skill=page.locator('[data-rule-path=".agents/skills/demo/SKILL.md"]');await expect(skill).toContainText('Demo skill');
+  await expect(skill.getByRole('button',{name:'添加控制台覆盖',exact:true})).toHaveCount(0);await expect(page.locator('#project-page')).not.toContainText('控制台覆盖');
   await page.setViewportSize({width:1365,height:900});await page.screenshot({path:'.tmp/onboarding/rules-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/onboarding/rules-mobile.png',fullPage:true});expect(errors).toEqual([]);expect(h.store.get('SELECT count(*) n FROM tasks').n).toBe(0);
  }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });

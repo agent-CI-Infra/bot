@@ -34,7 +34,7 @@ test('scoped facts, original logs and revisions agree with legacy API; forged ac
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,2);
 });
 
-test('configuration commands execute normally, conflict without overwrite, replay the same result and disclose overridden console layers',async t=>{
+test('configuration commands execute normally, conflict without overwrite, replay the same result, and a repository .bot/ file overrides nothing',async t=>{
   const {h,admin}=await managementFixture(t),before=(await query(admin,'get_effective_config',project)).value;
   const bytes=Buffer.byteLength(JSON.stringify(before));
   assert.ok(bytes<=batchBytes,`The default effective configuration must fit the tool budget (${bytes} > ${batchBytes}); the query cannot page its omitted content.`);
@@ -45,9 +45,10 @@ test('configuration commands execute normally, conflict without overwrite, repla
   assert.equal((await managerSection(admin,'101','review.issue')),'New default');
   assert.equal((await command(admin,'workflow.update',workflow,{prompt:'Different payload'},'save-one',before.revision)).value.error,'idempotency_conflict');
   h.store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)','101','a'.repeat(40),JSON.stringify({'.bot/rules/issue-review.md':'Repository rule'}),'now');
-  const overridden=await command(admin,'workflow.update',workflow,{prompt:'Console shadow'});
-  assert.equal(overridden.value.result.effect,'console_overridden');assert.equal(overridden.value.result.effective,false);
-  const effective=(await query(admin,'get_effective_config',project)).value.workflows.find(w=>w.id==='review.issue');assert.equal(effective.prompt.source,'repository');assert.equal(effective.prompt.version,'a'.repeat(40));assert.equal(effective.prompt.effective,'Repository rule');
+  // The repository's .bot/ files are no longer read (#935): the Manager section is the rule.
+  const saved=await command(admin,'workflow.update',workflow,{prompt:'Console text'});
+  assert.equal(saved.value.result.effect,'future_tasks');assert.equal(saved.value.result.effective,true);
+  const effective=(await query(admin,'get_effective_config',project)).value.workflows.find(w=>w.id==='review.issue');assert.equal(effective.prompt.source,'console');assert.equal(effective.prompt.effective,'Console text');
   assert.equal(h.store.get("SELECT count(*) n FROM management_approvals").n,0);
   assert.equal((await query(admin,'list_audit',project)).value.audit.filter(r=>r.state==='succeeded'&&r.operation==='workflow.update').length,2);
 });

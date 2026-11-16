@@ -132,16 +132,16 @@ test('a slow App metadata lookup preserves newer installation fields and cannot 
  }
  assert.equal((await admin('/api/onboarding/app/refresh','POST',{account_id:a.id})).status,409);
 });
-test('rules show per-file precedence and skills; computer overlays the existing manager spec',()=>{
- const policy={rule_overrides:JSON.stringify({'.bot/guide.md':'Console guide','.bot/rules/labels.md':'review_label: "console-label"'})};
- const result=resolveRules(policy,{'.bot/guide.md':'Repository guide','.bot/rules/pr-review.md':'Repository PR rule','.bot/computer.yaml':'memory_mb: 2048\npackages: [jq]','.agents/skills/review/SKILL.md':'Repository skill'},{cpus:2,memory_mb:4096,packages:[],max_command_minutes:60});
- // max_command_minutes was removed: an old console spec or repository file that still sets it is ignored rather than rejected.
- assert.equal(result.computer.max_command_minutes,undefined);
- assert.deepEqual(resolveRules(policy,{'.bot/computer.yaml':'cpus: 1\nmax_command_minutes: 15'}).computer,{cpus:1});
- const guide=result.files.find(row=>row.path==='.bot/guide.md');assert.deepEqual(guide.layers.map(l=>l.source),['builtin','console','repository']);assert.equal(guide.effective,'Repository guide');assert.equal(result.files.find(row=>row.path==='.bot/rules/pr-review.md').effective,'Repository PR rule');assert.equal(result.review_label,'console-label');assert.equal(result.computer.memory_mb,2048);assert.equal(result.computer.cpus,2);assert.equal(result.files.at(-1).path,'.agents/skills/review/SKILL.md');
- assert.throws(()=>resolveRules(policy,{'.bot/computer.yaml':'docker_socket: /var/run/docker.sock'}));
+test('rules are the console text over the built-in text, skills come from the repository, and the computer is the console spec',()=>{
+ const policy={rule_overrides:JSON.stringify({'.bot/guide.md':'Console guide'})};
+ const result=resolveRules(policy,{'.bot/guide.md':'','.bot/computer.yaml':'','.agents/skills/review/SKILL.md':'Repository skill'},{cpus:2,memory_mb:4096,packages:[],max_command_minutes:60});
+ // max_command_minutes was removed: an old console spec that still sets it is ignored rather than rejected.
+ assert.equal(result.computer.max_command_minutes,undefined);assert.deepEqual(result.computer,{cpus:2,memory_mb:4096,packages:[]});
+ const guide=result.files.find(row=>row.path==='.bot/guide.md');assert.deepEqual(guide.layers.map(l=>l.source),['builtin','console']);assert.equal(guide.effective,'Console guide');
+ assert.equal(result.files.at(-1).path,'.agents/skills/review/SKILL.md');assert.equal(result.files.at(-1).effective,'Repository skill');
+ assert.deepEqual(result.retired_files,['.bot/computer.yaml','.bot/guide.md']);
 });
-test('the built-in scenario rules are the docs/prompts files, and saved overrides still win',()=>{
+test('the built-in scenario rules are the docs/prompts files, and saved console texts win',()=>{
  const names=['labels.md','issue-review.md','pr-review.md','issue-development.md'],plain=resolveRules({},{});
  for(const name of names){
   const text=readFileSync(new URL('../docs/prompts/'+name,import.meta.url),'utf8'),row=plain.files.find(r=>r.path==='.bot/rules/'+name);
@@ -149,52 +149,48 @@ test('the built-in scenario rules are the docs/prompts files, and saved override
   assert.deepEqual(row.layers.map(l=>l.source),['builtin']);assert.equal(row.effective,text);
  }
  assert.equal(plain.review_label,'bot-reviewed');assert.equal(plain.development_label,'bot-develop');
- // A development rule without the label line keeps the requirement with the built-in name.
- assert.equal(resolveRules({rule_overrides:JSON.stringify({'.bot/rules/issue-development.md':'Develop carefully.'})},{}).development_label,'bot-develop');
- assert.equal(resolveRules({},{'.bot/rules/issue-development.md':'development_label: "team go"\n'}).development_label,'team go');
- assert.throws(()=>resolveRules({},{'.bot/rules/issue-development.md':'development_label: '+'x'.repeat(51)}));
  // Only PR review forbids touching the working tree; the guide applies to development too. No organization is built in.
  assert.match(defaults['.bot/rules/pr-review.md'],/never modify the working tree while reviewing a PR/);assert.match(defaults['.bot/rules/pr-review.md'],/Review event is COMMENT only/);
  assert.doesNotMatch(defaults['.bot/guide.md']+defaults['.bot/rules/issue-development.md'],/modify the working tree/i);
  assert.doesNotMatch(names.map(name=>defaults['.bot/rules/'+name]).join('\n'),/PPMA|ScienceDiscovery|agent-CI-Infra/i);
- const layered=resolveRules({rule_overrides:JSON.stringify({'.bot/rules/issue-development.md':'Console development','.bot/rules/labels.md':'review_label: console-label'})},{'.bot/rules/pr-review.md':'Repository review'});
+ const layered=resolveRules({rule_overrides:JSON.stringify({'.bot/rules/issue-development.md':'Console development'})},{'.bot/rules/pr-review.md':''});
  const row=path=>layered.files.find(r=>r.path===path);
  assert.deepEqual(row('.bot/rules/issue-development.md').layers.map(l=>l.source),['builtin','console']);assert.equal(row('.bot/rules/issue-development.md').effective,'Console development');
- assert.equal(row('.bot/rules/pr-review.md').source,'repository');assert.equal(row('.bot/rules/pr-review.md').layers[0].content,defaults['.bot/rules/pr-review.md']);
- assert.equal(layered.review_label,'console-label');
+ assert.equal(row('.bot/rules/pr-review.md').source,'builtin');assert.equal(row('.bot/rules/pr-review.md').effective,defaults['.bot/rules/pr-review.md']);
 });
-test('rule editing and effective configuration APIs preserve repository administrator scope',async t=>{
- const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');const rules=new RuleService(h.store);rules.cache('101','a'.repeat(40),{'.bot/guide.md':'Repository behavior'});
+test('the rules view preserves repository administrator scope, and the console override editor is gone',async t=>{
+ const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');const rules=new RuleService(h.store);rules.cache('101','a'.repeat(40),{'.bot/guide.md':''});
  const password=testPassword();await admin('/api/users','POST',{username:'member',password,repository_ids:['101']});const member=h.client();await member('/api/auth/login','POST',{username:'member',password});
- assert.equal((await member('/api/repositories/101/rules','PUT',{path:'.bot/guide.md',content:'Console change'})).status,200);assert.equal((await member('/api/repositories/101/rules')).value.rules.files[0].effective,'Repository behavior');assert.equal((await member('/api/repositories/202/rules')).status,403);assert.equal((await member('/api/repositories/101/rules','PUT',{path:'constructor',content:'bad'})).status,400);assert.equal((await member('/api/repositories/101/rules/apply-computer','POST',{})).status,403);
-  // The label is declared only in .bot/rules/labels.md; a console file without a review_label line turns labeling off.
-  assert.equal((await member('/api/repositories/101/rules')).value.rules.review_label,'bot-reviewed');assert.equal((await member('/api/repositories/101/policy','PATCH',{review_label:''})).status,400);
-  await member('/api/repositories/101/rules','PUT',{path:'.bot/rules/labels.md',content:'Do not label reviews.'});assert.equal((await member('/api/repositories/101/rules')).value.rules.review_label,'');
+ assert.equal((await member('/api/repositories/202/rules')).status,403);assert.equal((await member('/api/repositories/202/rules','PUT',{path:'.bot/guide.md',content:'x'})).status,403);
+ const put=await member('/api/repositories/101/rules','PUT',{path:'.bot/guide.md',content:'Console change'});assert.equal(put.status,410);assert.equal(put.value.error,'rules_update_removed');
+ const view=(await member('/api/repositories/101/rules')).value.rules;
+ assert.equal(view.files[0].effective,defaults['.bot/guide.md']);assert.deepEqual(view.retired_files,['.bot/guide.md']);assert.equal(view.review_label,'bot-reviewed');
 });
-test('review guidance and the label saved as policy fields by earlier versions move into the rule files once',async t=>{
+test('review guidance and the label saved as policy fields by earlier versions reach the Manager prompt and the label setting at the upgrade',async t=>{
  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+ h.store.run("DELETE FROM settings WHERE key='rules.bot_imported'");h.store.run('DELETE FROM rule_imports');h.store.run('DELETE FROM project_labels');
  h.store.run("UPDATE policies SET review_instructions='Focus on API compatibility.',review_label='legacy-label',rule_overrides=? WHERE repository_id='101'",JSON.stringify({'.bot/rules/pr-review.md':'Explicit PR rule'}));
+ h.store.run("INSERT INTO repository_rule_sources VALUES('101',?,'{}','now')",'a'.repeat(40));
  new RuleService(h.store);new RuleService(h.store);
  const {rules}=(await admin('/api/repositories/101/rules')).value,file=path=>rules.files.find(f=>f.path===path);
- assert.equal(file('.bot/rules/issue-review.md').effective,defaults['.bot/rules/issue-review.md']+'\n\nFocus on API compatibility.');
+ // The Manager prompt keeps a section's text as Markdown: runs of blank lines become one.
+ assert.equal(file('.bot/rules/issue-review.md').effective,(defaults['.bot/rules/issue-review.md']+'\n\nFocus on API compatibility.').replace(/\n{3,}/g,'\n\n'));
  assert.equal(file('.bot/rules/pr-review.md').effective,'Explicit PR rule');assert.equal(rules.review_label,'legacy-label');
  const policy=h.store.get("SELECT * FROM policies WHERE repository_id='101'");assert.deepEqual([policy.review_instructions,policy.review_label],['','']);
- assert.equal(Object.keys(JSON.parse(policy.rule_overrides)).length,3);
+ assert.deepEqual(Object.keys(JSON.parse(policy.rule_overrides)).sort(),['.bot/rules/issue-review.md','.bot/rules/labels.md','.bot/rules/pr-review.md']);
+ // The label line left the labels text; the Manager prompt holds every console text.
+ assert.equal(JSON.parse(policy.rule_overrides)['.bot/rules/labels.md'],'');
 });
-test('a resource removed from .bot/computer.yaml after it was applied follows the global default again',async t=>{
- // The manager reports which resources follow the default (inherited); cpus is the project's own, set by an earlier file.
- const requests=[];let live={cpus:4,memory_mb:4096,pids:1024,tmp_mb:1024,egress:true,packages:[],inherited:['memory_mb','pids','tmp_mb']};
- const manager={call:async(method,path,body)=>{if(method==='POST'){requests.push(body.request);return{computer:live};}return{generation:1,computer:live};}};
- const h=await harness(t,manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
- const rules=new RuleService(h.store,manager);rules.rememberComputer('101',{...live,cpus:2,inherited:['cpus','memory_mb','pids','tmp_mb']});rules.cache('101','a'.repeat(40),{});
- assert.equal((await admin('/api/repositories/101/rules/apply-computer','POST',{})).status,201);
- assert.equal(requests.at(-1).cpus,null);assert.equal(requests.at(-1).memory_mb,undefined);
- // A file that still sets it keeps it; a computer whose resources all follow the default needs no change.
+test('a resource the console spec no longer sets follows the global default again',()=>{
+ // The manager reports which resources follow the default (inherited); cpus is the project's own, set earlier.
+ const live={cpus:4,memory_mb:4096,pids:1024,tmp_mb:1024,egress:true,packages:[],inherited:['memory_mb','pids','tmp_mb']};
+ const request=computerRequest({egress:true},live);assert.equal(request.cpus,null);assert.equal(request.memory_mb,undefined);
+ // A spec that still sets it keeps it; a computer whose resources all follow the default needs no change.
  assert.deepEqual(computerRequest({cpus:4,egress:true},live),null);
  assert.deepEqual(computerRequest({egress:true},{...live,cpus:2,inherited:['cpus','memory_mb','pids','tmp_mb']}),null);
  // A manager that does not say what is inherited is never asked to clear anything.
  assert.equal(computerRequest({egress:true},{cpus:4,egress:true}),null);
 });
-test('removing a repository computer override restores the saved console spec instead of treating the override as console input',async t=>{
- const computer={cpus:2,memory_mb:2048,packages:[]},manager={call:async()=>({computer})};const h=await harness(t,manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');const rules=new RuleService(h.store,manager);rules.rememberComputer('101',{cpus:2,memory_mb:4096,packages:[]});rules.cache('101','a'.repeat(40),{'.bot/computer.yaml':'memory_mb: 2048'});assert.equal((await rules.view('101')).computer.memory_mb,2048);rules.cache('101','b'.repeat(40),{});assert.equal((await rules.view('101')).computer.memory_mb,4096);
+test('a repository .bot/computer.yaml no longer changes the computer: the saved console spec is the computer',async t=>{
+ const computer={cpus:2,memory_mb:2048,packages:[]},manager={call:async()=>({computer})};const h=await harness(t,manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');const rules=new RuleService(h.store,manager);rules.rememberComputer('101',{cpus:2,memory_mb:4096,packages:[]});rules.cache('101','a'.repeat(40),{'.bot/computer.yaml':''});assert.equal((await rules.view('101')).computer.memory_mb,4096);
 });

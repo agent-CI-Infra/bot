@@ -17,7 +17,7 @@ test('the Manager edits its prompt and decisions, while project listeners own ev
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
     await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true });
-    new RuleService(h.store).cache('101', 'a'.repeat(40), { '.bot/rules/pr-review.md': 'Repository PR review rules' });
+    new RuleService(h.store).cache('101', 'a'.repeat(40), { '.bot/rules/pr-review.md': '' });
     // One decided event and one the Manager could not decide, as the dispatcher leaves them.
     configureDispatch(null);
     queueWebhook(h.store, '101', 'issues', { action: 'opened', sender: { type: 'User', login: 'alice', id: 5 }, issue: { number: 3, state: 'open', title: 'Parser drops a line', body: 'x', user: { id: 5 } } }, 'opened-3');

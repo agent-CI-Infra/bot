@@ -88,11 +88,12 @@ test('editable project rules, language and work prompts survive removal of fixed
   const f = await fixture(t, body => call('finish', { system: body.messages[0].content, input: JSON.parse(body.messages[1].content) }));
   const prompt = roleAssignmentContext({ effective_rules: { files: [
     {path:'.bot/guide.md',source:'console',effective:'Preserve the project convention.'},
-    {path:'.bot/computer.yaml',source:'repository',effective:'not a role instruction'}
+    {path:'.bot/computer.yaml',source:'console',effective:'not a role instruction'}
   ] }, review_rules:{language:'zh'} }, {id:'reply',name:'Project reply',prompt:'Apply the editable reply instructions.'});
   f.put({roles:[{role_id:'dev',persona_prompt:'My complete role.'}]});
   const {result} = await runRole({...f.spec,system:'Hidden fixed entry duties.',prompt:JSON.stringify(prompt)},'dev');
-  assert.deepEqual(result.input.project_instructions, { files:[{path:'.bot/guide.md',source:'console',content:'Preserve the project convention.'}], language:'zh', work_prompt:'Apply the editable reply instructions.', work_name:'Project reply' });
+  // The rules are the Manager's sections by id and title (#935), never a .bot/ file name.
+  assert.deepEqual(result.input.project_instructions, { rules:[{section:'guide',title:'行为指南',source:'console',content:'Preserve the project convention.'}], language:'zh', work_prompt:'Apply the editable reply instructions.', work_name:'Project reply' });
   assert.ok(!result.system.includes('Hidden fixed entry duties.'));
   assert.equal(result.input.effective_rules,undefined);
 });

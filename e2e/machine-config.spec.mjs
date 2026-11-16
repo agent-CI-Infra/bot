@@ -20,7 +20,8 @@ async function fixture() {
       operation_id: randomBytes(24).toString('hex'), generation: 1, spec: { cpus: 3 }
     });
     expect(saved.status).toBe(201);
-    new RuleService(h.store).cache('101', 'a'.repeat(40), { '.bot/computer.yaml': 'memory_mb: 8192\n' });
+    // The default branch still has a .bot/computer.yaml; since #935 it is only a name and changes nothing here.
+    new RuleService(h.store).cache('101', 'a'.repeat(40), { '.bot/computer.yaml': '' });
     return { h, password, manager, close };
   } catch (err) { await close(); throw err; }
 }
@@ -38,11 +39,12 @@ test('each machine field names its own source and target, and the same groups re
   try {
     await login(page, f);
     await expect(configField(page, 'CPU（核）')).toContainText('已保存来源：项目控制台');
-    await expect(configField(page, '内存（MB）')).toContainText('已保存来源：仓库文件');
-    await expect(configField(page, '内存（MB）')).toContainText('配置目标 8192 · 电脑报告 4096');
+    await expect(configField(page, '内存（MB）')).toContainText('已保存来源：全局默认');
+    await expect(configField(page, '内存（MB）')).toContainText('配置目标 4096 · 电脑报告 4096');
     await expect(configField(page, '进程数上限')).toContainText('已保存来源：全局默认');
     await expect(page.locator('.machine-config-impact')).toContainText('工作卷、笔记和代次保留');
-    await expect(page.locator('.machine-config-impact')).toContainText('仓库仅覆盖写明的字段');
+    await expect(page.locator('.machine-config-card')).toContainText('仓库里的 .bot/computer.yaml 不再读取');
+    await expect(page.locator('#project-page')).not.toContainText('仓库文件');
     mkdirSync('.tmp/machine-config-231/previews', { recursive: true });
     for (const width of [320, 390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: 1000 });
@@ -83,12 +85,12 @@ test('a stale generation retains the grouped draft and an explicit retry saves t
   } finally { await f.close(); }
 });
 
-test('an unread rule source prevents saving until an explicit read succeeds', async ({ page }) => {
+test('an unreadable saved spec prevents saving until an explicit read succeeds', async ({ page }) => {
   const f = await fixture();
   try {
     await page.route('**/api/repositories/101/rules', route => route.fulfill({ status: 503, json: { error: 'fixture_unavailable' } }));
     await login(page, f);
-    await expect(page.locator('.machine-config-card')).toContainText('规则来源读取失败');
+    await expect(page.locator('.machine-config-card')).toContainText('已保存的机器配置读取失败');
     await expect(page.getByLabel('CPU（核）', { exact: true })).toBeDisabled();
     // The computer spec has no save while unread; only「同时运行的任务」keeps its own (clean, so hidden) bar.
     await expect(page.locator('.machine-config-card').getByRole('button', { name: '保存', exact: true })).toHaveCount(0);
@@ -96,41 +98,26 @@ test('an unread rule source prevents saving until an explicit read succeeds', as
     await page.unroute('**/api/repositories/101/rules');
     await rereadMachine(page);
     await expect(page.getByLabel('CPU（核）', { exact: true })).toBeEnabled();
-    await expect(configField(page, '内存（MB）')).toContainText('已保存来源：仓库文件');
+    await expect(configField(page, '内存（MB）')).toContainText('已保存来源：全局默认');
   } finally { await f.close(); }
 });
 
-for (const width of [1440, 390]) test(`an unrefreshed default branch stays unknown until explicit recovery at ${width}px`, async ({ page }) => {
+// The machine form no longer waits for the default branch (#935): nothing in the repository adds to the saved spec.
+test('a default branch the bot never read leaves the machine form editable and reads nothing from it', async ({ page }) => {
   const f = await fixture();
   try {
     f.h.store.run('DELETE FROM repository_rule_sources WHERE repository_id=?', '101');
-    let refreshes = 0, configures = 0;
-    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) configures++; });
-    await page.route('**/api/repositories/101/rules/refresh', async route => {
-      refreshes++;
-      if (refreshes === 1) return route.fulfill({ status: 503, json: { error: 'fixture_refresh_unavailable' } });
-      new RuleService(f.h.store).cache('101', 'b'.repeat(40), { '.bot/computer.yaml': 'cpus: 1.5\n' });
-      await route.fulfill({ status: 201, json: { ok: true } });
-    });
-    await page.setViewportSize({ width, height: 844 }); await login(page, f);
-    const form = page.locator('.machine-config-card'), read = page.getByRole('button', { name: '重新读取电脑配置', exact: true });
-    await expect(form).toContainText('尚未读取默认分支文件，不能确认仓库覆盖关系');
-    await expect(form.locator('.machine-config-origin')).toHaveCount(8);
-    for (const origin of await form.locator('.machine-config-origin').allTextContents()) {
-      expect(origin).toContain('来源暂未读取'); expect(origin).not.toContain('已保存来源');
-    }
-    await expect(page.getByLabel('CPU（核）', { exact: true })).toBeDisabled();
-    await expect(form.getByRole('button', { name: '保存', exact: true })).toHaveCount(0);
-    await expect(consoleSave(page)).toBeHidden();
-    await expect(read).toBeEnabled();
-    await read.click(); await expect(form.getByRole('alert').filter({ hasText: 'fixture_refresh_unavailable' })).toBeVisible();
-    await expect(page.getByLabel('CPU（核）', { exact: true })).toBeDisabled(); expect(refreshes).toBe(1); expect(configures).toBe(0);
-    mkdirSync('.tmp/machine-config-231/previews', { recursive: true });
-    await page.screenshot({ path: `.tmp/machine-config-231/previews/machine-unread-${width}.png`, fullPage: true });
-    await read.click(); await expect(page.getByLabel('CPU（核）', { exact: true })).toBeEnabled();
-    await expect(page.getByLabel('CPU（核）', { exact: true })).toHaveValue('1.5');
-    await expect(configField(page, 'CPU（核）')).toContainText('已保存来源：仓库文件');
-    expect(refreshes).toBe(2); expect(configures).toBe(0); expect(f.manager.projects.own('101').cpus).toBe(3);
+    let refreshes = 0; page.on('request', request => { if (request.url().endsWith('/api/repositories/101/rules/refresh')) refreshes++; });
+    await login(page, f);
+    const form = page.locator('.machine-config-card');
+    await expect(page.getByLabel('CPU（核）', { exact: true })).toBeEnabled();
+    await expect(page.getByLabel('CPU（核）', { exact: true })).toHaveValue('3');
+    await expect(form).not.toContainText('尚未读取默认分支');
+    for (const origin of await form.locator('.machine-config-origin').allTextContents()) expect(origin).toContain('已保存来源');
+    await page.getByLabel('CPU（核）', { exact: true }).fill('4');
+    await consoleSave(page).click();
+    await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
+    expect(f.manager.projects.own('101').cpus).toBe(4); expect(refreshes).toBe(0);
   } finally { await f.close(); }
 });
 
@@ -201,7 +188,7 @@ test('a rejected entry can be cleared explicitly, and that clear follows the glo
   } finally { await f.close(); }
 });
 
-test('a repository-overridden resource says clearing cannot change it, and sends nothing', async ({ page }) => {
+test('a resource the default branch .bot/computer.yaml used to set is cleared like any other, to the global default', async ({ page }) => {
   const f = await fixture();
   try {
     await login(page, f);
@@ -209,23 +196,16 @@ test('a repository-overridden resource says clearing cannot change it, and sends
     page.on('request', request => {
       if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) spec = JSON.parse(request.postData()).spec;
     });
-    // The fixture's default branch writes .bot/computer.yaml memory_mb: 8192, so there is no console override to clear.
-    const memory = page.getByLabel('内存（MB）', { exact: true }), field = configField(page, '内存（MB）');
-    await expect(memory).toHaveValue('8192');
-    await memory.fill('');
-    await expect(field.locator('.machine-config-follow')).toHaveText('留空不改变仓库文件里的值');
-    // Nothing to save: the console has no override for this resource, so the clear is a no-op.
-    await expect(consoleSave(page)).toBeHidden();
-    // A real console change saves on its own, and the cleared repository field is not sent as null.
-    await page.getByLabel('CPU（核）', { exact: true }).fill('5');
+    const cpu = page.getByLabel('CPU（核）', { exact: true }), field = configField(page, 'CPU（核）');
+    await expect(cpu).toHaveValue('3');
+    await cpu.fill('');
+    await expect(field.locator('.machine-config-follow')).toHaveText('留空即跟随全局默认');
     await consoleSave(page).click();
     await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
-    expect(spec).toEqual({ cpus: 5 });
-    // Text that cannot be parsed is still refused, and it says clearing would not change the repository value either.
-    await memory.fill(''); await page.keyboard.type('abc');
-    await expect(field.locator('.machine-config-error')).toHaveText('这个字段只能填数字；清空不会改变仓库文件里的值');
-    await expect(memory).toHaveAttribute('aria-invalid', 'true');
-    await expect(field.getByRole('button', { name: '清空输入', exact: true })).toBeVisible();
+    expect(spec).toEqual({ cpus: null });
+    await cpu.fill(''); await page.keyboard.type('abc');
+    await expect(field.locator('.machine-config-error')).toHaveText('这个字段只能填数字');
+    await expect(field.getByRole('button', { name: '清空并跟随全局默认', exact: true })).toBeVisible();
   } finally { await f.close(); }
 });
 

@@ -307,13 +307,13 @@ test('GitHub App tokens are signed in the control plane and restricted to the co
   await github.connect(false);assert.deepEqual(tokenRequest.repository_ids,[101]);assert.equal(tokenRequest.permissions.contents,'read');assert.equal(github.actorId,'999');
   assert.equal(redactor.text(installationToken),'[REDACTED]');assert.equal(redactor.text(privateKey.trim()),'[REDACTED]');
 });
-test('the review label is declared in labels.md and validated when the console layer is saved',async t=>{
+test('the review label is a project setting, validated when it is saved (#935)',async t=>{
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
-  const label=async()=>(await admin('/api/repositories/101/rules')).value.rules.review_label,put=content=>admin('/api/repositories/101/rules','PUT',{path:'.bot/rules/labels.md',content});
-  assert.equal(await label(),'bot-reviewed');assert.equal((await admin('/api/repositories/101/policy','PATCH',{review_label:'other'})).status,400);
-  for(const name of ['x'.repeat(51),'"tab\\tlabel"','" padded"'])assert.equal((await put('review_label: '+name)).status,400);
-  assert.equal((await put('review_label: project-reviewed')).status,200);assert.equal(await label(),'project-reviewed');
-  assert.equal((await put(null)).status,200);assert.equal(await label(),'bot-reviewed');
+  const label=async()=>(await admin('/api/repositories/101/rules')).value.rules.review_label,put=review_label=>admin('/api/repositories/101/policy','PATCH',{review_label});
+  assert.equal(await label(),'bot-reviewed');
+  for(const name of ['x'.repeat(51),'tab\tlabel',' padded'])assert.equal((await put(name)).status,400);
+  assert.equal((await put('project-reviewed')).status,200);assert.equal(await label(),'project-reviewed');
+  assert.equal((await put('')).status,200);assert.equal(await label(),'');
 });
 test('reviews always publish one summary comment and the policy label is applied once',async t=>{
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
@@ -366,11 +366,11 @@ test('a person\'s development label reaches the Manager with the facts it judges
   assert.deepEqual(JSON.parse(event.options).map(o=>o.id),['development','review']);
   assert.deepEqual([facts.development.label,facts.development.labeled_by,facts.development.assignees],['bot-develop','maintainer',['someone']]);
   assert.deepEqual([facts.development.review.task_id,facts.development.review.issue_requests_code,facts.development.review.quote_in_issue],['rv',true,true]);
-  // The label name comes from the first line of the development rule.
-  await admin('/api/repositories/101/rules','PUT',{path:'.bot/rules/issue-development.md',content:'development_label: ship-it\n\nRules.'});
+  // The label name is the project's development label setting.
+  await admin('/api/repositories/101/policy','PATCH',{development_label:'ship-it'});
   assert.equal((await admin('/api/repositories/101/rules')).value.rules.development_label,'ship-it');
   assert.equal(await labeled('l4','bot-develop','User',['bot-develop']),0);
-  await admin('/api/repositories/101/rules','PUT',{path:'.bot/rules/issue-development.md',content:null});
+  await admin('/api/repositories/101/policy','PATCH',{development_label:'bot-develop'});
   // A project that does not develop treats the label as an ordinary one.
   await admin('/api/repositories/101/policy','PATCH',{development_enabled:false});assert.equal(await labeled('l5','bot-develop','User',['bot-develop']),0);
   await admin('/api/repositories/101/policy','PATCH',{development_enabled:true});assert.equal(count(),0);assert.equal(events().length,1);

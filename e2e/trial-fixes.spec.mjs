@@ -1,6 +1,6 @@
 import { consoleNavigate } from './console-navigation.mjs';
 import { openModelCatalog } from './open-model-folds.mjs';
-import{test,expect}from'@playwright/test';import{mkdirSync,rmSync}from'node:fs';import{harness,setup,account,repository,testPassword}from'../test/helpers.mjs';import{RuleService}from'../dist/rules/service.js';import{TaskEngine}from'../dist/agent/engine.js';import{Onboarding}from'../dist/onboarding/service.js';
+import{test,expect}from'@playwright/test';import{mkdirSync,rmSync}from'node:fs';import{harness,setup,account,repository,testPassword}from'../test/helpers.mjs';import{RuleService}from'../dist/rules/service.js';import{managerPrompt,saveManager,withSection}from'../dist/work/settings.js';import{TaskEngine}from'../dist/agent/engine.js';import{Onboarding}from'../dist/onboarding/service.js';
 
 test('项目保存、规则刷新、未启动仓库、任务过程及390px导航提供可核验反馈',async({page})=>{
  const computer={cpus:2,memory_mb:4096,pids:512,tmp_mb:128,egress:true,packages:[],env:{},setup_script:'',network_policy:'internet egress'};
@@ -11,8 +11,10 @@ test('项目保存、规则刷新、未启动仓库、任务过程及390px导航
   h.store.run('INSERT INTO installed_repositories(account_id,repository_id,full_name,owner_id,owner_login,private,installed,synced_at) VALUES(?,?,?,?,?,0,1,?)',a.id,'303','fixture/new-project','10','fixture',new Date().toISOString());
   const model=(await admin('/api/models','POST',{repository_id:null,api_url:'https://model.invalid/a-long-but-visible-api-path/v1',api_key:testPassword(),model_name:'Visible model name'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{model_id:model.id,review_enabled:true});
-  await admin('/api/repositories/101/rules','PUT',{path:'.bot/rules/issue-review.md',content:'Console-only directive'});await admin('/api/repositories/101/rules','PUT',{path:'.bot/rules/labels.md',content:'review_label: console-label'});
-  const rules=new RuleService(h.store,manager);rules.cache('101','a'.repeat(40),{'.bot/guide.md':'Long repository guide\n'.repeat(50),'.bot/rules/pr-review.md':'Final repository review only.','.bot/computer.yaml':'cpus: 1.5\nmemory_mb: 2048'});
+  // The review rule is the Manager's section and the label a project setting (#935); the repository's .bot/ files are names only.
+  const current=managerPrompt(h.store,'101');saveManager(h.store,'101',{expected_revision:current.revision,content:withSection(current.content,'review.issue','Console-only directive')},null,'test');
+  await admin('/api/repositories/101/policy','PATCH',{review_label:'console-label'});
+  const rules=new RuleService(h.store,manager);rules.cache('101','a'.repeat(40),{'.bot/guide.md':'','.bot/rules/pr-review.md':'','.bot/computer.yaml':''});
   onboard.save('public',{origin:'https://hooks.invalid'});onboard.save('app',{slug:'fixture-app',account_id:a.id,installations:1});onboard.save('model',model.id);
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,phase,head_sha) VALUES('timeline','101','review.pr','succeeded','Review',7,'done',?)",'a'.repeat(40));
   for(const [i,event]of [{type:'model',step:1,content:'Inspected code'},{type:'model',content:'Ready to finish'},{type:'tool',name:'create_pull_request',arguments:{summary:'Fixed the requested behavior',test_command:'npm test'},result:{finished:true}}].entries())h.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)','log'+i,'timeline',JSON.stringify(event),new Date().toISOString());
@@ -24,7 +26,7 @@ test('项目保存、规则刷新、未启动仓库、任务过程及390px导航
   const prompt=page.getByLabel('Manager 提示词',{exact:true}),savePrompt=page.getByRole('button',{name:'保存 Manager 提示词',exact:true});
   await page.goto(h.admin+'/#/projects/101/roles/manager');
   await expect(page.locator('#project-page')).not.toContainText('项目检视指引');
-  await expect(prompt).toHaveValue(/Console-only directive/);await expect(prompt).toHaveValue(/review_label: console-label/);
+  await expect(prompt).toHaveValue(/Console-only directive/);
   await prompt.fill((await prompt.inputValue()).replace('Console-only directive','Edited console directive'));await savePrompt.click();
   await expect(page.getByText('已保存 Manager 提示词',{exact:true})).toBeVisible();
   expect(JSON.parse(h.store.get("SELECT rule_overrides FROM policies WHERE repository_id='101'").rule_overrides)['.bot/rules/issue-review.md']).toBe('Console-only directive');
@@ -34,27 +36,28 @@ test('项目保存、规则刷新、未启动仓库、任务过程及390px导航
   await prompt.fill('A complete dispatch prompt.');await savePrompt.click();
   await expect.poll(async()=>(await admin('/api/repositories/101/manager')).value.manager.prompt.content).toBe('A complete dispatch prompt.');
   await expect(page.getByText('已保存 Manager 提示词',{exact:true})).toBeVisible();
-  await page.evaluate(()=>{location.hash='#/projects/101/basic';});await expect(page.locator('#project-page')).toContainText('Visible model name');await expect(page.locator('#project-page')).toContainText('1.5 CPU · 2048 MB');
-  await page.evaluate(()=>{location.hash='#/projects/101/machine';});await expect(page.getByText('表单显示默认分支 .bot/computer.yaml 合并后的配置目标',{exact:false})).toBeVisible();await expect(page.getByText('仓库仅覆盖写明的字段；表单改动写入项目控制台',{exact:false})).toBeVisible();await expect(page.getByLabel('CPU（核）',{exact:true})).toHaveValue('1.5');await expect(page.locator('#project-page')).not.toContainText('单条命令最长时间');
-  // Rule file sources: reading the default branch again happens once at a time, updates the sources in place and reports a failure.
-  await page.getByRole('link',{name:'查看规则文件来源',exact:true}).click();
-  const fileSource=path=>page.locator(`[data-rule-file="${path}"] [data-rule-source]`),refresh=page.getByRole('button',{name:'刷新默认分支文件',exact:true}),releaseSkill='.agents/skills/release-notes/SKILL.md';
-  await expect(fileSource('.bot/guide.md')).toHaveText('仓库文件');await expect(fileSource('.bot/rules/issue-review.md')).toHaveText('项目控制台');await expect(refresh).toBeEnabled();
+  await page.evaluate(()=>{location.hash='#/projects/101/basic';});await expect(page.locator('#project-page')).toContainText('Visible model name');await expect(page.locator('#project-page')).toContainText('2 CPU · 4096 MB');
+  await expect(page.locator('[data-retired-rules]')).toContainText('.bot/computer.yaml');await expect(page.getByLabel('检视标签',{exact:true})).toHaveValue('console-label');
+  await page.evaluate(()=>{location.hash='#/projects/101/machine';});await expect(page.getByText('仓库里的 .bot/computer.yaml 不再读取',{exact:false})).toBeVisible();await expect(page.getByLabel('CPU（核）',{exact:true})).toHaveValue('2');await expect(page.locator('#project-page')).not.toContainText('单条命令最长时间');
+  // Repository skills: reading the default branch again happens once at a time, updates the list in place and reports a failure.
+  await page.evaluate(()=>{location.hash='#/projects/101/roles/manager';});
+  const skillRow=path=>page.locator(`[data-rule-file="${path}"]`),retired=page.locator('[data-retired-rules]'),refresh=page.getByRole('button',{name:'刷新默认分支文件',exact:true}),releaseSkill='.agents/skills/release-notes/SKILL.md';
+  await expect(retired).toContainText('.bot/guide.md');await expect(skillRow('.bot/guide.md')).toHaveCount(0);await expect(refresh).toBeEnabled();
   await expect(page.getByText(/^章节与内置文本/)).toHaveCount(0);
   await page.evaluate(()=>window.sameRuleDocument=true);
   let release,count=0;const blocked=new Promise(resolve=>release=resolve);
-  await page.route('**/api/repositories/101/rules/refresh',async route=>{count++;await blocked;rules.cache('101','b'.repeat(40),{'.bot/computer.yaml':'cpus: 1.5\nmemory_mb: 2048',[releaseSkill]:'Refreshed release notes from verified sources.'});await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify((await admin('/api/repositories/101/rules')).value)});});
+  await page.route('**/api/repositories/101/rules/refresh',async route=>{count++;await blocked;rules.cache('101','b'.repeat(40),{'.bot/computer.yaml':'',[releaseSkill]:'Refreshed release notes from verified sources.'});await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify((await admin('/api/repositories/101/rules')).value)});});
   await refresh.click();await expect(page.getByRole('button',{name:'正在读取默认分支…',exact:true})).toBeDisabled();await page.getByRole('button',{name:'正在读取默认分支…',exact:true}).evaluate(node=>node.click());expect(count).toBe(1);release();
   await expect(page.locator('#project-page')).toContainText('默认分支提交 '+'b'.repeat(12));await expect(refresh).toBeEnabled();
-  await expect(fileSource('.bot/guide.md')).toHaveText('内置默认');expect(await page.evaluate(()=>window.sameRuleDocument)).toBe(true);
+  await expect(skillRow(releaseSkill)).toBeVisible();await expect(retired).not.toContainText('.bot/guide.md');expect(await page.evaluate(()=>window.sameRuleDocument)).toBe(true);
   await page.unroute('**/api/repositories/101/rules/refresh');await page.route('**/api/repositories/101/rules/refresh',route=>route.fulfill({status:503,contentType:'application/json',body:'{"error":"github_unavailable"}'}));await refresh.click();await expect(page.locator('.rule-sync [role=status]')).toContainText('github_unavailable');await page.unroute('**/api/repositories/101/rules/refresh');
   // A repository release-notes skill replaces the release notes section; a failed read of the Manager shows an error instead of a guess.
-  await page.reload();await expect(fileSource(releaseSkill)).toHaveText('仓库文件');
+  await page.reload();await expect(skillRow(releaseSkill)).toBeVisible();
   await page.route('**/api/repositories/101/manager',route=>route.fulfill({status:503,contentType:'application/json',body:'{"error":"github_unavailable"}'}));await page.reload();
   await expect(page.locator('#project-page')).toContainText('503 · github_unavailable');await expect(prompt).toHaveCount(0);
   await page.unroute('**/api/repositories/101/manager');await page.reload();await expect(prompt).toBeVisible();
   mkdirSync('.tmp/trial-ui',{recursive:true});await page.setViewportSize({width:1365,height:900});await page.screenshot({path:'.tmp/trial-ui/tasks-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-  await page.locator('[data-rule-file=".bot/guide.md"]').getByRole('button',{name:'展开规则',exact:true}).click();await expect(page.locator('#project-detail .rule-card')).toBeVisible();await page.screenshot({path:'.tmp/trial-ui/tasks-mobile.png',fullPage:true});
+  await skillRow(releaseSkill).getByRole('button',{name:'查看内容',exact:true}).click();await expect(page.locator('#project-detail .rule-card')).toContainText('Refreshed release notes');await page.screenshot({path:'.tmp/trial-ui/tasks-mobile.png',fullPage:true});
   const sectionPicker=page.getByLabel('当前页面',{exact:true});await expect(sectionPicker).toBeVisible();
   await expect(sectionPicker.locator('option').filter({hasText:'项目入口'})).toHaveCount(1);
   for(const caption of ['使用的模型','检视','开发','规则总览'])await expect(page.getByRole('link',{name:caption,exact:true})).toHaveCount(0);

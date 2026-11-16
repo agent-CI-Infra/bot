@@ -213,7 +213,7 @@ test('project removal deletes notes after the rows commit, and a notes volume it
   await assert.rejects(readFile(join(f.projects.notesRoot,'404/repository.md')),/ENOENT/);
 });
 
-test('review and development system prompts require useful maintained notes even when repository rules replace built-ins', async t => {
+test('review and development system prompts require useful maintained notes even when the project rules replace built-ins', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin,a.id,'101');
   const model=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://model.invalid/v1',api_key:'prompt-fixture-key',model_name:'fixture'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{model_id:model.id,capability_ceiling:'develop'});
@@ -227,8 +227,8 @@ test('review and development system prompts require useful maintained notes even
     }};
     h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES(?,'101',?,'running','fixture')", kind, kind);
     pinLegacyTaskConfiguration(h.store, kind);
-    await agentLoop(h.store,{id:kind,repository_id:'101',workspace_id:id(),kind},work,new Redactor(),async()=>{},{effective_rules:{files:[{path:'.bot/rules/pr-review.md',source:'repository',effective:'Replacement rules'}]}},undefined,async()=>({status:'no_changes'}));
-    for(const text of ['At task start','../notes/','repository.md','preferences.md','corrections.md','correct or remove','Do not create empty','Issue or PR language','existing language','not rules','change review events','override .bot rules','Notes are never committed','Replacement rules'])assert.ok(config.system.includes(text),kind+': '+text);
+    await agentLoop(h.store,{id:kind,repository_id:'101',workspace_id:id(),kind},work,new Redactor(),async()=>{},{effective_rules:{files:[{path:'.bot/rules/pr-review.md',source:'console',effective:'Replacement rules'}]}},undefined,async()=>({status:'no_changes'}));
+    for(const text of ['At task start','../notes/','repository.md','preferences.md','corrections.md','correct or remove','Do not create empty','Issue or PR language','existing language','not rules','change review events','override the project rules','Notes are never committed','Replacement rules'])assert.ok(config.system.includes(text),kind+': '+text);
     // Only a workflow without the code write is told to leave the checkout alone.
     assert.equal(config.system.includes('must not modify files in the repository checkout'),!kind.startsWith('development'),kind);
     for(const removed of ['32 files','64 KiB','512 KiB','Never store keys','known credentials are rejected','Note names must match'])assert.ok(!config.system.includes(removed),kind+': '+removed);
