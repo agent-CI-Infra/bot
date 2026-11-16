@@ -28,16 +28,27 @@ function machineSection(globalSettings = false) {
     // empty field fires only a delete, so neither may reset the rejection.
     let rejected = false;
     const render = () => {
+      const accepted = control.value.trim() !== '' && Number.isFinite(Number(control.value.trim()));
       control.dataset.invalidNumber = rejected ? '1' : '';
-      control.setCustomValidity(rejected ? invalidNote() : '');
+      // A refused entry the field can still accept is released by the submit (#944); until then the message stays, but it
+      // must not let the browser reject that submit before readSpec has had the chance to release it.
+      control.setCustomValidity(rejected && !accepted ? invalidNote() : '');
       control.setAttribute('aria-invalid', rejected ? 'true' : 'false');
       error.textContent = rejected ? invalidNote() : '';
       error.hidden = !rejected; clear.hidden = !rejected;
       follow.textContent = emptyNote();
       follow.hidden = rejected || control.value.trim() !== '';
     };
-    const reject = () => { rejected = true; render(); };
+    // A refusal is unsaved state: announce it through the form's change so the dirty bar appears even when the browser
+    // discarded the entry without firing an input event (a letter typed into a number input that already holds a value).
+    const reject = () => { rejected = true; render(); control.dispatchEvent(new Event('change', { bubbles: true })); };
     const release = () => { rejected = false; render(); };
+    // Saving asks every refused field to step aside when its current text is one it accepts (#944); a refused field that
+    // still holds the saved value therefore saves without clearing, and one that holds a new number saves that number.
+    control.machineReleaseIfAccepted = () => {
+      const text = control.value.trim();
+      if (rejected && text !== '' && Number.isFinite(Number(text))) release();
+    };
     const clear = button(repositoryLayer() ? '清空输入' : '清空并跟随全局默认', () => { release(); control.value = ''; control.dispatchEvent(new Event('input', { bubbles: true })); control.focus(); }, 'quiet');
     clear.hidden = true;
     // Characters a number input cannot accept never reach .value and fire no input event; beforeinput still reports them.
@@ -102,11 +113,12 @@ function machineSection(globalSettings = false) {
   const nodes = [
     note(unread?'尚未读取默认分支配置，目前仅显示内置与控制台临时值，无法确认仓库覆盖关系。':source?.source==='repository'?'表单显示默认分支 .bot/computer.yaml 合并后的配置目标，电脑是否已应用需结合上方状态核对。':'表单显示已保存的配置目标；仓库 .bot/computer.yaml 可以按字段覆盖控制台值。'),sourceActions,
     layout];
-  const readSpec = form => {
+  const readSpec = (form, releasing = false) => {
     const spec = {};
     // null clears the project's value, so the resource follows the global default again — only an explicit clear may do that.
     for (const name of specFields) {
       const control = form.elements[name], text = control.value.trim();
+      if (releasing) control.machineReleaseIfAccepted?.();
       // A refused entry is checked first: it must be reported even for a field the console cannot clear, otherwise the
       // entry would be read as「no change」and the field error promised above would never appear (review of #903).
       if (control.dataset.invalidNumber === '1' || (text !== '' && !Number.isFinite(Number(text))))
@@ -126,7 +138,7 @@ function machineSection(globalSettings = false) {
     return spec;
   };
   const form = settingsForm('配置', nodes, async (form, progress) => {
-    const spec = readSpec(form);
+    const spec = readSpec(form, true);
     if (!Object.keys(spec).length) return '没有改动';
     progress(spec.packages ? '正在安装软件包并重建虚拟电脑，首次可能需要几分钟…' : spec.setup_script !== undefined || spec.rerun_setup ? '正在重建虚拟电脑并运行初始化脚本…' : '正在按新配置重建虚拟电脑…');
     await api(`/api/environments/${current.id}/configure`, 'POST', { operation_id: operationId(), generation: environment.environment.generation, spec });
@@ -137,7 +149,7 @@ function machineSection(globalSettings = false) {
     try { const changes = Object.keys(readSpec(form.querySelector('form'))); draft.textContent = changes.length ? '有未保存的更改：' + changes.map(key => names[key]).join('、') : '已保存'; }
     catch (err) { draft.textContent = '有未保存的更改：' + readErrorText(err); }
   };
-  form.addEventListener('input', update); update();
+  form.addEventListener('input', update); form.addEventListener('change', update); update();
   form.settingDirty = () => { try { return !!Object.keys(readSpec(form.querySelector('form'))).length; } catch { return true; } };
   form.settingClearDraft = () => {};
   const sourceReadError = element('p', '', 'view-error'); sourceReadError.hidden = true;
