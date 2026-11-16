@@ -2,6 +2,16 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
 
+/**
+ * The tool results a fixture model has seen, as a model reads them. A result over its share of the context is cut, and the cut
+ * keeps small top-level fields (revision, ids, states) under `fields` (src/agent/tool-context.ts); they are lifted back to the
+ * top, so a step reading `revision` does not depend on how large get_effective_config has grown.
+ */
+export const toolResults = body => body.messages.filter(m => m.role === 'tool').map(m => {
+  const value = JSON.parse(m.content);
+  return value?.truncated && value.fields ? { ...value.fields, ...value } : value;
+});
+
 export async function managementFixture(t,options={}) {
   const h=await harness(t,undefined,options),{admin,password}=await setup(h),a=await account(admin);
   await repository(admin,a.id,'101');await repository(admin,a.id,'102');await repository(admin,a.id,'201');
@@ -18,7 +28,7 @@ export async function managementFixture(t,options={}) {
     if(modelState.gate)await modelState.gate;
     if(modelState.respond){await modelState.respond(body,res);return;}
     if(modelState.failure){res.writeHead(modelState.failure,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'Fixture model failure'}}));return;}
-    const context=JSON.parse(body.messages[1].content),calls=body.messages.filter(m=>m.role==='assistant').flatMap(m=>m.tool_calls??[]),observations=body.messages.filter(m=>m.role==='tool').map(m=>JSON.parse(m.content));
+    const context=JSON.parse(body.messages[1].content),calls=body.messages.filter(m=>m.role==='assistant').flatMap(m=>m.tool_calls??[]),observations=toolResults(body);
     const request=String(context.request),configuration=request.includes('提示词'),pause=request.includes('暂停');
     const call=(name,args)=>({role:'assistant',content:null,tool_calls:[{id:'call-'+calls.length,type:'function',function:{name,arguments:JSON.stringify(args)}}]});
     let message;

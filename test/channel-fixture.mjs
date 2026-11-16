@@ -1,6 +1,6 @@
 import { createCipheriv, createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { managementFixture } from './management-fixture.mjs';
+import { managementFixture, toolResults } from './management-fixture.mjs';
 import { digest, randomId } from '../dist/core/security.js';
 import { FEISHU_SCOPES } from '../dist/channels/feishu.js';
 import { resolvePrincipalActor } from '../dist/identity/authorization.js';
@@ -171,7 +171,7 @@ export { digest };
  * (earlier tool results, the request context) returning either. It serves the management assistant and group assistants. */
 export function scriptedModel(f, steps) {
   f.modelState.respond = async (body, res) => {
-    const done = body.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content));
+    const done = toolResults(body);
     let step = steps[done.length] ?? '已完成。';
     if (typeof step === 'function') step = step(done, JSON.parse(body.messages[1].content));
     const message = typeof step === 'string' ? { role: 'assistant', content: step }

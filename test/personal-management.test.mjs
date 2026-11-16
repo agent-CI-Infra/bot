@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { channelFixture, envelope, post, finished, until, bindFixture } from './channel-fixture.mjs';
-import { query, settled } from './management-fixture.mjs';
+import { query, settled, toolResults } from './management-fixture.mjs';
 
 // Local model protocol fixtures verify transport/service behavior; they do not measure model language quality.
 const respond=(res,message)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:12,completion_tokens:4}}));};
 const reply=(res,content)=>respond(res,{role:'assistant',content});
 const call=(res,operation,target={},args={})=>respond(res,{role:'assistant',content:null,tool_calls:[{id:'fixture-query',type:'function',function:{name:'management_query',arguments:JSON.stringify({operation,target,arguments:args})}}]});
-const observation=body=>body.messages.filter(m=>m.role==='tool').map(m=>JSON.parse(m.content));
+const observation=toolResults;
 const input=body=>JSON.parse(body.messages[1].content);
 async function im(f,content,overrides){const event=envelope(content,overrides),receipt=await post(f.h,f.id,event);return {event,receipt,row:await finished(f.h,receipt.value.operation_id)};}
 async function web(f,content,client=f.admin){const conversation=(await client('/api/management/conversations','POST',{scope:'platform'})).value.conversation.id;
