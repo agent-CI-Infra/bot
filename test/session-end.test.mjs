@@ -97,3 +97,84 @@ test('a project check that answers after sign-out writes nothing', async () => {
   assert.equal(page.run('projectCheckReads.size'), 0);
   assert.equal(page.$('rows').querySelector('[data-testid=project-check-status]'), null, 'the sign-in screen gets no project statement');
 });
+
+// #869 review R1: the statement belongs to the account, not to one list render. A check that answers after the list drew
+// again is still that account's failure and has to be stated — the first version treated the new render as "another list"
+// and swallowed it, which is exactly the silence #869 removed.
+test('a failed check that answers after the list drew again is still stated', async () => {
+  const base = { owner_id: '10', full_name: 'fixture/project-101', registered: true, enabled: true, installed: true, running_tasks: 0,
+    queued_tasks: 0, review_enabled: true, development_enabled: false, model_id: 'm', board_enabled: false, board_state: 'none' };
+  const stale = { ...base, id: '101', access_gaps: [], permissions_stale: true, permissions_checked_at: '2026-01-01T00:00:00.000Z' };
+  let answer;
+  const inFlight = new Promise(resolve => { answer = resolve; });
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (method === 'POST' && path === '/api/installations/permissions/check') return inFlight;
+    if (path.startsWith('/api/integrations')) return [200, { integrations: [] }];
+    return [200, { repositories: [stale], syncs: [] }];
+  });
+  page.run("var projectRoute = () => null; history.replaceState = () => {}; me = { id: '1', role: 'super_admin' }; tab = 'projects';");
+  await page.run('render()');
+  // A second draw of the same page: a filter change, a poll, or the reader coming back to the list.
+  await page.run('render()');
+  answer([503, { error: 'github_unavailable' }]);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(page.run('projectCheckFailures.size'), 1, 'the failure reaches the account that ran the check');
+  assert.ok(page.$('rows').querySelector('[data-testid=project-check-status]'), 'and it is drawn on the list that is now current');
+});
+
+// #869 review R1 (success half): a retry that answers after the list drew again takes the statement away instead of
+// leaving it saying the badge is 未检查 while the badge has just been replaced.
+test('a successful retry that answers after the list drew again clears the statement', async () => {
+  const base = { owner_id: '10', full_name: 'fixture/project-101', registered: true, enabled: true, installed: true, running_tasks: 0,
+    queued_tasks: 0, review_enabled: true, development_enabled: false, model_id: 'm', board_enabled: false, board_state: 'none' };
+  const stale = { ...base, id: '101', access_gaps: [], permissions_stale: true, permissions_checked_at: '2026-01-01T00:00:00.000Z' };
+  const fresh = { ...base, id: '101', access_gaps: [], permissions_stale: false, permissions_checked_at: '2026-01-02T00:00:00.000Z' };
+  let checks = 0, answer;
+  const inFlight = new Promise(resolve => { answer = resolve; });
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (method === 'POST' && path === '/api/installations/permissions/check') {
+      checks += 1;
+      return checks === 1 ? [503, { error: 'github_unavailable' }] : inFlight;
+    }
+    if (path.startsWith('/api/integrations')) return [200, { integrations: [] }];
+    return [200, { repositories: [stale], syncs: [] }];
+  });
+  page.run("var projectRoute = () => null; history.replaceState = () => {}; me = { id: '1', role: 'super_admin' }; tab = 'projects';");
+  await page.run('render()');
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(page.run('projectCheckFailures.size'), 1, 'the failed check is stated first');
+  const retry = page.run('refreshStalePermissions()');
+  await page.run('render()');
+  answer([200, { repositories: [fresh] }]);
+  await retry;
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(page.run('projectCheckFailures.size'), 0, 'the success withdraws the statement');
+  assert.equal(page.$('rows').querySelector('[data-testid=project-check-status]'), null);
+});
+
+// #869 review R2: the render half of the guard is gone, but the account half still holds the chips and the navigation
+// bar: an answer that arrives for the previous account must not paint the next account's list.
+test('a late success for the previous account does not paint the next account chip', async () => {
+  const base = { owner_id: '10', full_name: 'fixture/project-101', registered: true, enabled: true, installed: true, running_tasks: 0,
+    queued_tasks: 0, review_enabled: true, development_enabled: false, model_id: 'm', board_enabled: false, board_state: 'none' };
+  const stale = { ...base, id: '101', access_gaps: [], permissions_stale: true, permissions_checked_at: '2026-01-01T00:00:00.000Z' };
+  const fresh = { ...base, id: '101', access_gaps: [], permissions_stale: false, permissions_checked_at: '2026-01-02T00:00:00.000Z' };
+  let answer;
+  const inFlight = new Promise(resolve => { answer = resolve; });
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (method === 'POST' && path === '/api/installations/permissions/check') return inFlight;
+    if (path.startsWith('/api/integrations')) return [200, { integrations: [] }];
+    return [200, { repositories: [stale], syncs: [] }];
+  });
+  page.run("var projectRoute = () => null; history.replaceState = () => {}; me = { id: '1', role: 'super_admin' }; tab = 'projects';");
+  await page.run('render()');
+  page.run('endSession()');
+  page.run("me = { id: '2', role: 'project_admin' }; tab = 'projects';");
+  await page.run('render()');
+  const before = page.$('rows').querySelector('[data-permission]')?.textContent;
+  answer([200, { repositories: [fresh] }]);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  const after = page.$('rows').querySelector('[data-permission]')?.textContent;
+  assert.equal(after, before, "the previous account's answer does not replace this account's chip");
+  assert.equal(page.run('projectCheckFailures.size'), 0);
+});

@@ -126,11 +126,13 @@ function resetProjectCheckStatus() {
   projectCheckReads.clear(); projectCheckFailures.clear(); projectCheckAccount = null;
   if ($('rows')) clearProjectCheckStatus();
 }
-// A check records the account and the list render that asked for it; an answer that lands after either moved on is
-// dropped instead of being written over the next reader's list.
-function projectCheckTicket() { return { account: projectCheckScope(), request: renderVersion }; }
+// A check records the account that asked for it; an answer that lands after the session moved on is dropped instead of
+// being written over the next reader's list. The list render is deliberately NOT part of this: a failure that arrives
+// after the list drew again is still the failure of this account's check and must be stated (the reviewer's R1), and
+// `drawProjectCheckStatus()` already keeps a statement off any page that is not the project list.
+function projectCheckTicket() { return { account: projectCheckScope() }; }
 function projectCheckCurrent(ticket) {
-  return ticket.account !== null && ticket.account === projectCheckScope() && ticket.request === renderVersion;
+  return ticket.account !== null && ticket.account === projectCheckScope();
 }
 // The newest reading the server reports on the rows it just sent; a time of the console's own would not date the data.
 function projectCheckReading(items, field) {
