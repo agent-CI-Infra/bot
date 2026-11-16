@@ -26,6 +26,9 @@ import { RepositoryExplorer, repositoryTools } from './exploration.js';
 import { permissionTools } from '../roles/permissions.js';
 import { workspaceInstructions, workspaceTool, workspaceToolNames, workspaceTools } from './workspace-tools.js';
 import { taskReadScopes, taskRolePolicies, taskToolAllowed, withTaskPermissions } from '../tasks/management.js';
+import { browserPolicyOf } from '../browser/policy.js';
+import { browserTool, runBrowserTool } from '../browser/tools.js';
+import { closeBrowserSession } from '../browser/runtime.js';
 
 export interface ReviewConversation { history?: any[]; resume?: boolean; offset?: number; model?: AgentModel; boundary(stage: string): Promise<{prompt?: string, messages?: string[]}> }
 /** The platform's write tools for this task, by tool name: the control plane performs the write and answers the agent. */
@@ -35,7 +38,7 @@ type LoopLimits = Pick<AgentSpec<unknown>, 'modelAttempts'> & { validateSubmissi
 export async function agentLoop(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}, limits: LoopLimits = {}) {
   try { return await run(store, task, workspace, redactor, guard, context, tokens, createPullRequest, conversation, platform, limits); }
   // A token the agent exchanged is useless after the model phase; revoke it however the phase ends.
-  finally { await tokens?.revoke(); }
+  finally { await closeBrowserSession(task.id); await tokens?.revoke(); }
 }
 async function run(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}, limits: LoopLimits = {}) {
   // Permissions and a reply task's prompt are read from trusted storage here, for every caller and every attempt. A task of a
@@ -55,6 +58,10 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     };
   }
   for(const tool of memoryTools){if(tool.function.name==='remember_project_memory'&&!profile.capabilities.workspace.notes&&!profile.capabilities.workspace.write)continue;profile.tools.push(tool as any);platform[tool.function.name]=async(_id,args)=>{await guard();return memoryTool(store,task,tool.function.name,redactor.clean(args),async doc=>{const raw=await workspace.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};});};}
+  if (browserPolicyOf(task)) {
+    profile.tools.push(browserTool as any);
+    platform[browserTool.function.name] = async (_id, args) => { await guard(); return runBrowserTool(store, task, args, { guard }); };
+  }
   // Review and Actions analysis under the project controller, and development under its team, run through runTeam below.
   const entry = String(task.kind).startsWith('review.') ? 'review' : task.kind === 'actions.failures' ? 'actions' : null;
   const team = !!entry && controlled(store, task, entry) || profile.completion === 'publication' && !!createPullRequest && controlled(store, task, 'development');

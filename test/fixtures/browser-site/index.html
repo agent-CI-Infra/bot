@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>巡检夹具</title>
+</head>
+<body>
+  <h1>本地巡检页</h1>
+  <p>这是受控测试站点，只供本机任务浏览器访问，不含真实账号。</p>
+  <form method="post" action="/login">
+    <label>用户名 <input name="username" autocomplete="username"></label>
+    <label>口令 <input type="password" name="password" autocomplete="current-password"></label>
+    <button type="submit">登录</button>
+  </form>
+  <p><a href="/about">查看说明</a></p>
+  <p><a href="/delete">删除账号</a></p>
+  <p><a href="https://evil.example/outside">外部站点</a></p>
+</body>
+</html>

@@ -63,3 +63,5 @@ Claude Code 的完整说明见 [Claude Code harness](claude-code.md)；下文说
 运行耗时长不等于卡死。连续执行的 RoleRun 在满 60 分钟及之后每 20 分钟（80、100……）向任务的 Manager 汇报进度，不中断正在工作的角色；旧配置中的整轮 `timeoutMs` 不再强制杀死运行。初始化、单次命令、授权租约以及显式角色/阶段资源预算仍按各自语义生效。
 
 `long_execution_report` 记录精确的 run/assignment、已运行时间、近期活动、工具证据与检查点引用；`long_execution_decision` 记录 Manager 的继续或停止决定。用户取消、权限撤销与预算耗尽仍立即中断。
+
+任务里的真实浏览器、源站允许范围和截图证据见 [任务浏览器与执行证据](browser.md)。生产项目电脑镜像预装 Chromium 由独立单跟踪，不在本文展开。

@@ -5,6 +5,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readStaticAsset } from './console/modules.js';
 import { type Store } from './storage/database.js';
 import { actor, publicActor, session, sessionToken, superAdmin } from './app/auth.js';
+import { sendBrowserEvidence } from './browser/evidence.js';
 import { management } from './app/management.js';
 import { models } from './app/models.js';
 import { queries } from './app/queries.js';
@@ -338,6 +339,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       res.setHeader('Set-Cookie', cookie(req, credentials.token)); respond(res, 200, { ok: true, csrf_token: credentials.csrf }); return;
     }
     if (!user) return fail(401, 'login_required');
+    if (method === 'GET' && sendBrowserEvidence(store, user, url, req, res)) return;
     // github_verification: the progress of a GitHub permission check running for this account (at sign-in, say), else null.
     if (path === '/api/auth/me' && method === 'GET') { respond(res, 200, { ...publicActor(user), github_verification: githubIdentity?.verification(user.id) ?? null }); return; }
     if (path === '/api/identity/github/bind' && method === 'POST') {
