@@ -8,8 +8,9 @@ import { consoleNavigate } from './console-navigation.mjs';
 // draws the new projects and takes the notice away.
 //
 // One read, one recovery: the redraw that puts the finished check on screen must not read the list again (that would draw
-// fresh rows beside a notice saying the read failed, and offer a second retry for one read), and a later read of the list
-// is itself the recovery — the notice goes and the project picker follows what the list now shows.
+// fresh rows beside a notice saying the read failed, and offer a second retry for one read). The recovery is a read of the
+// whole list — the notice's button — because the project picker stands for the whole list while the list page reads one
+// page of it (offset, limit 51, maybe a filter). A page or filtered read is a slice: the notice and the picker stay put.
 const output = '.tmp/ui-866';
 const noOverflow = async page => expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
 
@@ -36,7 +37,7 @@ async function checkedConsole(page, f) {
   return { release, arm: () => { listReads.length = 0; failNext = true; release(); }, listReads, line, picker };
 }
 
-test('项目页上核验完成而列表读取失败：只读一次、不出现第二个重试，页面读回列表后提示消失', async ({ page }) => {
+test('项目页上核验完成而列表读取失败：只读一次、不出现第二个重试，只有整份列表的读取才清提示', async ({ page }) => {
   const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.route('https://avatars.githubusercontent.com/**', route => route.abort());
   mkdirSync(output, { recursive: true });
@@ -74,12 +75,21 @@ test('项目页上核验完成而列表读取失败：只读一次、不出现�
     await expect(page.locator('#identity-panel')).not.toContainText('核验完成后显示你的 GitHub 连接与授权来源');
     await expect(c.line).toBeVisible();
     expect(c.listReads).toHaveLength(1);
-    // Coming back reads the list; that read is the recovery, so the notice goes and the picker follows the list.
+    // Coming back reads one page of the list. A page cannot stand for the whole list, so the notice stays and the picker
+    // stays empty: the page's own retry belongs to the console state below, not to this read.
     await consoleNavigate(page, '项目');
-    await expect(c.line).toBeHidden();
     await expect(rows).toContainText('fixture/project-101');
-    await expect(c.picker).toHaveCount(1);
+    await expect(c.line).toHaveText('权限核验已完成，但项目列表读取失败。重新读取项目列表');
+    await expect(c.line).toHaveAttribute('data-state', 'failed');
+    await expect(c.picker).toHaveCount(0);
     expect(c.listReads).toHaveLength(2);
+    // The one recovery reads the whole list, and only then does the notice go and the picker follow it.
+    await retry.click();
+    await expect(c.line).toBeHidden();
+    await expect(c.picker).toHaveCount(1);
+    // The button read the whole list (no query), and the redraw it caused read the page that is on screen again.
+    expect(c.listReads).toHaveLength(4);
+    expect(new URL(c.listReads[2]).search, 'the recovery read the whole list').toBe('');
     await shots('repositories-read');
     expect(errors).toEqual([]);
   } finally { f.state.apiGate = undefined; c.release(); await f.close(); }
