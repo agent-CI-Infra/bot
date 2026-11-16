@@ -92,3 +92,86 @@ test('pollAfterError is one rule: access lost stops, anything else backs off to 
   assert.equal(decide('pollAfterError({ status: 0 }, 20000)'), '{"terminal":false,"delay":30000}');
   assert.equal(decide('pollAfterError(null, 30000)'), '{"terminal":false,"delay":30000}');
 });
+
+// #877: the failure bar is written by the poll's own catch, so a later refresh that succeeds has to withdraw it — the
+// task is readable again and the bar still claiming otherwise is a lie the screen reader repeats. The bar is shared with
+// the retry path (#745), whose conflict text must outlive refreshes, so only the exact text the poll wrote may be
+// withdrawn, and only after the existing `current()` guard has passed.
+const polledTask = { id: 't9', repository_id: '101', kind: 'review.issue', object_number: 1, status: 'waiting_pr_head', phase: 'publish', attempt: 1 };
+function pollPage(read, retry = () => [409, { error: 'task_already_running' }]) {
+  const page = loadConsole(['static/app.js', 'static/views.js'], async (method, path) => {
+    if (method === 'POST') return retry();
+    if (method === 'GET' && path === '/api/tasks/t9') return read();
+    if (path.endsWith('/logs')) return [200, { logs: [], log_page: { has_older: false, has_newer: false } }];
+    return [200, { task: polledTask, publications: [] }];
+  });
+  page.run("renderTimeline=()=>{};refreshLive=async()=>{};renderTaskSide=()=>{};keepOpen=(node,draw)=>draw();openTaskId='t9';taskView.showModal();");
+  return page;
+}
+const barText = page => page.$('task-error').querySelector('span')?.textContent || '';
+
+test('a refresh that succeeds withdraws the failure the poll wrote (#877)', async t => {
+  let online = false;
+  const page = pollPage(() => online ? [200, { task: polledTask, publications: [] }] : [500, { error: 'internal_error' }]);
+  t.after(() => page.run('taskView.close(); clearTimeout(taskTimer);'));
+  await page.run('refreshTask()');
+  assert.match(barText(page), /500 · internal_error/, 'the failed refresh reports itself');
+  online = true;
+  await page.run('refreshTask()');
+  assert.equal(page.$('task-error').childElementCount, 0, 'a recovered task no longer claims it is unreadable');
+});
+
+test('a failure that keeps happening keeps its bar (#877)', async t => {
+  const page = pollPage(() => [503, { error: 'unavailable' }]);
+  t.after(() => page.run('taskView.close(); clearTimeout(taskTimer);'));
+  await page.run('refreshTask()');
+  await page.run('refreshTask()');
+  assert.match(barText(page), /503 · unavailable/);
+  assert.equal(page.$('task-error').childElementCount, 2, 'the bar still holds its text and close button');
+});
+
+test('an explicit re-read after a terminal failure clears the old bar too (#877)', async t => {
+  let status = 403;
+  const page = pollPage(() => status === 403 ? [403, { error: 'forbidden' }] : [200, { task: polledTask, publications: [] }]);
+  t.after(() => page.run('taskView.close(); clearTimeout(taskTimer);'));
+  await page.run('refreshTask()');
+  assert.equal(page.$('task-title').textContent, '任务暂不可访问');
+  assert.match(barText(page), /403 · forbidden/);
+  status = 200;
+  await page.run('refreshTask()');
+  assert.equal(page.$('task-error').childElementCount, 0, 'the re-read ends the outage, so the bar goes with it');
+});
+
+test('a retry conflict stays visible across a refresh that succeeds (#877 guard)', async t => {
+  const page = pollPage(() => [200, { task: polledTask, publications: [] }]) ;
+  t.after(() => page.run('taskView.close(); clearTimeout(taskTimer);'));
+  await page.run('refreshTask()');
+  const retry = page.$('task-actions').querySelectorAll('button').find(node => node.textContent === '重试');
+  assert.ok(retry, 'a waiting task offers a retry');
+  await retry.listeners.click[0]({ currentTarget: retry });
+  assert.match(barText(page), /这个任务已经在执行或排队/);
+  await page.run('refreshTask()');
+  assert.match(barText(page), /这个任务已经在执行或排队/, 'the retry path owns its text, so the poll leaves it alone');
+});
+
+test('a slow success from before the failure cannot withdraw the newer error (#877 guard)', async t => {
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  let reads = 0;
+  const page = loadConsole(['static/app.js', 'static/views.js'], async (method, path) => {
+    if (method === 'GET' && path === '/api/tasks/t9') {
+      reads += 1;
+      if (reads === 1) { await gate; return [200, { task: polledTask, publications: [] }]; }
+      return [500, { error: 'boom' }];
+    }
+    if (path.endsWith('/logs')) return [200, { logs: [], log_page: { has_older: false, has_newer: false } }];
+    return [200, { task: polledTask, publications: [] }];
+  });
+  page.run("renderTimeline=()=>{};refreshLive=async()=>{};renderTaskSide=()=>{};keepOpen=(node,draw)=>draw();openTaskId='t9';taskView.showModal();");
+  t.after(() => page.run('taskView.close(); clearTimeout(taskTimer);'));
+  const stale = page.run('refreshTask()');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  await page.run('refreshTask()');
+  assert.match(barText(page), /500 · boom/);
+  release(); await stale;
+  assert.match(barText(page), /500 · boom/, 'a newer failure outranks the success that predates it');
+});
