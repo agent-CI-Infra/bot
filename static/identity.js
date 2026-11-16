@@ -21,7 +21,7 @@ function identityRefreshError(err) {
     return t('identity.error.refresh_timeout');
   }
   if (err && err.code) return identityError(err.code);
-  return (err && err.message) || t('identity.error.fallback');
+  return readErrorText(err);
 }
 
 // Identity times use the browser zone and name it, so "05:20" is not mistaken for UTC. Expiry is the remaining time ("还剩 N 分钟") plus the absolute time.

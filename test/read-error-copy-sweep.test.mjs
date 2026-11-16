@@ -23,7 +23,24 @@ const DISPLAY = [
   /:\s*(?:err|error|e)\.message\s*[;,})]/,
   // `${err.message}`
   /\$\{\s*(?:err|error|e)\.message\s*\}/,
+  // element('p', err.message, 'view-error') and every other helper that takes the text as an argument
+  /element\([^()]*\b(?:err|error|e)\.message\b/,
+  // return err.message  (a change-message helper handing the raw text back to its caller)
+  /\breturn\s+(?:err|error|e)\.message\b/,
+  // const detail = err.message;  (a local carried into the visible sentence)
+  /=\s*(?:err|error|e)\.message\s*;/,
+  // (err && err.message) || fallback
+  /\(\s*(?:err|error|e)\s*&&\s*(?:err|error|e)\.message\s*\)/,
+  // element('p', err.message, 'view-error') / replaceChildren(element('p', err.message, …))
+  /element\([^)]*\b(?:err|error|e)\.message\b/,
+  /replaceChildren\([^)]*\b(?:err|error|e)\.message\b/,
+  // a helper returning the raw text to its caller
+  /\breturn\s+[^;]*(?:err|error|e)\.message\b/,
 ];
+
+// static/app/api.js is the helper itself: readErrorText() and retryErrorText() are the two places that are allowed to
+// hand err.message back, and converting them would make the helper call itself.
+const EXEMPT = /[\\/]static[\\/]app[\\/]api\.js$/;
 
 function sources(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
@@ -37,7 +54,9 @@ test('no console failure text interpolates the raw error message', () => {
   const offenders = [];
   for (const file of sources(ROOT)) {
     readFileSync(file, 'utf8').split('\n').forEach((line, index) => {
+      if (EXEMPT.test(file)) return;
       if (!/\b(?:err|error|e)\.message\b/.test(line)) return;
+      if (line.includes('readErrorText(')) return;
       const hit = DISPLAY.find(pattern => pattern.test(line));
       if (hit) offenders.push(`${relative(process.cwd(), file)}:${index + 1}: ${line.trim()}`);
     });

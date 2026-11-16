@@ -3,7 +3,7 @@ function userChangeMessage(err) {
   const code = err.code || String(err.message).replace(/^\d+\s*·\s*/, '');
   if (code === 'last_super_admin') return '这是最后一名可管理全部项目的活跃管理员，不能停用。先启用或新增另一名这样的管理员。';
   if (code === 'user_not_found') return '这个用户已经不存在，请刷新用户列表。';
-  return err.message;
+  return readErrorText(err);
 }
 // #547: how the account signs in, read from the server's own projection (a password sentinel and a GitHub identity),
 // never guessed in the browser from whether a display name happens to exist.

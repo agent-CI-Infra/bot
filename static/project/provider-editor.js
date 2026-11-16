@@ -30,7 +30,7 @@ function providerEditor(group, repositoryId, after) {
       if(version!==request||!modal.isConnected)return;
       if(!value.ok){result.replaceChildren(...probeFailure(value));return;}available=value.models;filter.hidden=!available.length;draw();
       result.replaceChildren(element('p',`返回 ${value.total} 个模型${value.truncated?'（仅显示前 '+value.models.length+' 个）':''}，选择要添加的模型后保存。`,'view-success'));
-    }catch(err){if(version===request)result.replaceChildren(element('p',err.message,'view-error'));}finally{fetchModels.disabled=false;}
+    }catch(err){if(version===request)result.replaceChildren(element('p',readErrorText(err),'view-error'));}finally{fetchModels.disabled=false;}
   });
   const addManual=button('加入待添加',()=>{const name=manual.value.trim();if(!name)return;if(existing.has(name)){message.textContent='这个模型已经在该供应商下';return;}selected.add(name);manual.value='';message.textContent='';draw();});
   // Enter in a text box submits its form, which here saves the provider: in the filter it only filters, in the manual
@@ -49,7 +49,7 @@ function providerEditor(group, repositoryId, after) {
     try{
       const value=await api(editing?`/api/models/${source.id}/test`:'/api/models/test','POST',editing?{version:source.version,api_url:address,api_key:key.value,model_name:name}:{repository_id:repositoryId,api_url:address,api_key:key.value,model_name:name});
       if(version===request&&modal.isConnected)result.replaceChildren(...testOutcome(value),note(`本次测试模型：${name}；测试不会保存连接或添加模型。`));
-    }catch(err){if(version===request&&modal.isConnected)result.replaceChildren(element('p',err.message,'view-error'));}
+    }catch(err){if(version===request&&modal.isConnected)result.replaceChildren(element('p',readErrorText(err),'view-error'));}
     finally{testDraft.disabled=false;}
   });
   fields.append(testDraft,note('测试使用当前填写的 URL 与 Key；编辑时 Key 留空则复用已保存的 Key。测试通过不代表所有待添加模型都可用。'),impact);
@@ -115,7 +115,7 @@ function probeButton(caption, result, call, render, check = () => '') {
     const request = result.dataset.request = String(Number(result.dataset.request || 0) + 1);
     run.disabled = true; result.replaceChildren(element('p', `正在${caption}…`, 'view-progress'));
     try { const value = await call(); if (result.dataset.request === request) result.replaceChildren(...render(value)); }
-    catch (err) { if (result.dataset.request === request) result.replaceChildren(element('p', err.message, 'view-error')); }
+    catch (err) { if (result.dataset.request === request) result.replaceChildren(element('p', readErrorText(err), 'view-error')); }
     finally { run.disabled = false; }
   });
   return run;
