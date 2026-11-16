@@ -124,8 +124,9 @@ async function applyGithubRepositories(next, listed) {
   repositories = listed;
   options($('repository-filter'), repositories, r => r.full_name);
   const editing = tab === 'identity' && identityFormBeingEdited();
-  if (!editing && !projectRoute() && ['projects', 'identity'].includes(tab)) await route();
-  else if (typeof syncConsoleShell === 'function') syncConsoleShell(projectRoute());
+  if (!editing && !projectRoute() && ['projects', 'identity'].includes(tab)) { await route(); return true; }
+  if (typeof syncConsoleShell === 'function') syncConsoleShell(projectRoute());
+  return false;
 }
 // The views the check feeds, drawn into the state they are in now: the check finished, the list not read. The identity
 // root is redrawn from its own reads; the project list shows the failed read where the list itself lives and carries no

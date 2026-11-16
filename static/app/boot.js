@@ -95,8 +95,7 @@ async function start() {
   if(me.role==='super_admin'&&!accounts.length&&!location.hash)history.replaceState(null,'','#/settings/onboarding/0');
   // #945: this read of the whole list is the same read the notice's button makes, so it goes through the one function that
   // counts it as the recovery — clearing the notice and drawing the project picker and the pages from the new list.
-  await applyGithubRepositories(me, listed);
-  if (!['projects', 'identity'].includes(tab) || projectRoute()) await route();
+  if (!(await applyGithubRepositories(me, listed))) await route();
   if (authError) notice('message', identityError(authError), '', 'alert');
 }
 if (typeof onLocaleChange === 'function') onLocaleChange(() => start().catch(error));
