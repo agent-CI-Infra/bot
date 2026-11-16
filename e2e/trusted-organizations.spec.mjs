@@ -27,8 +27,9 @@ test('a trusted organization lets its repository administrator start a repositor
     await member.goto(f.h.admin); await member.getByRole('link', { name: '使用 GitHub 登录' }).click();
     await expect(member.getByRole('button', { name: '退出登录' })).toBeVisible();
     await member.goto(f.h.admin + '/#/projects');
-    await expect(member.getByRole('heading', { name: '等待超级管理员启动' })).toBeVisible();
-    await expect(member.locator('[data-key="pending:103"]').getByRole('button', { name: '复制提醒' })).toBeVisible();
+    await expect(member.getByRole('heading', { name: '待接入的仓库' })).toBeVisible();
+    await expect(member.locator('[data-key="pending:103"]')).toContainText('启动需超级管理员同意');
+    await expect(member.locator('[data-key="pending:103"]').getByRole('link', { name: '开始接入 fixture/project-103' })).toHaveAttribute('href', '#/onboarding/103');
 
     // The super administrator trusts fixture in the settings card, with the shared model and the develop ceiling.
     await login(page, f, '/#/settings/projects');
@@ -45,9 +46,14 @@ test('a trusted organization lets its repository administrator start a repositor
     // The repository administrator now starts 103 themselves, with the organization's defaults.
     await member.reload();
     const row = member.locator('[data-key="pending:103"]');
-    await expect(member.getByRole('heading', { name: '待启动的仓库' })).toBeVisible();
+    await expect(member.getByRole('heading', { name: '待接入的仓库' })).toBeVisible();
     await expect(row).toContainText('可自行启动');
-    await row.getByRole('button', { name: '启动', exact: true }).click();
+    // #934: the row's one entry is the onboarding wizard, which says the confirmation starts it directly.
+    await row.getByRole('link', { name: '开始接入 fixture/project-103' }).click();
+    await expect(member.locator('.ro-scope')).toContainText('所属组织已受信任，确认后可以直接启动');
+    // The start itself is #848's: the same call the wizard's start item makes for a trusted organization.
+    await member.evaluate(() => api('/api/installations/103/activate', 'POST', {}));
+    await member.goto(f.h.admin + '/#/projects');
     await expect(member.locator('[data-key="103"]').first()).toContainText('fixture/project-103');
     expect({ ...f.h.store.get("SELECT enabled,capability_ceiling,development_enabled,model_id FROM policies WHERE repository_id='103'") }).toEqual({ enabled: 1, capability_ceiling: 'develop', development_enabled: 1, model_id: model.id });
 

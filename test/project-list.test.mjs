@@ -239,7 +239,7 @@ test('project list read failure is an error state, not an empty list', async () 
 });
 
 
-test('project administrators see installed-but-not-started repositories as waiting for activation', async () => {
+test('project administrators see installed-but-not-started repositories with one entry into the onboarding wizard (#934)', async () => {
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
     if (path.startsWith('/api/identity')) return [200, { github_connection: { pending_repositories: [{ id: '101', full_name: 'fixture/project-101' }] } }];
     if (path.startsWith('/api/integrations')) return [200, { integrations: [] }];
@@ -248,18 +248,19 @@ test('project administrators see installed-but-not-started repositories as waiti
   page.run(`var projectRoute = () => null; me = {role: 'project_admin'}; tab = 'projects'; repositories = [];`);
   await page.run('render()');
   assert.equal(page.$('rows').querySelector('.console-state'), null, 'pending installations are not the empty-project guidance');
-  assert.equal(page.$('rows').querySelector('h2').textContent, '等待超级管理员启动');
-  assert.equal(page.$('rows').querySelector('.project-pending-intro').textContent, '这些仓库已装好 GitHub App，需要超级管理员在控制台启动后才会出现在上面的项目列表里。');
+  assert.equal(page.$('rows').querySelector('h2').textContent, '待接入的仓库');
+  assert.equal(page.$('rows').querySelector('.project-pending-intro').textContent, '这些仓库已装好 GitHub App。点「开始接入」，助手先只读分析仓库、问几个问题并给出方案；你确认后启动，所属组织未受信任的由超级管理员同意后启动。启动后它们出现在上面的项目列表里。');
   assert.equal(page.$('rows').querySelector('strong').textContent, 'fixture/project-101');
-  assert.ok([...page.$('rows').querySelectorAll('span')].some(el => el.textContent === '待超级管理员启动'));
+  assert.ok([...page.$('rows').querySelectorAll('span')].some(el => el.textContent === '启动需超级管理员同意'));
   assert.equal(page.$('rows').querySelector('.project-pending-row p'), null, '#979: the group intro says it once; the row does not repeat it');
   assert.equal(page.$('rows').querySelector('[data-testid=pending-repo-fold]'), null, 'a short pending list stays open');
-  assert.equal(page.$('rows').querySelector('.project-pending-row button').textContent, '复制提醒', 'a project administrator copies a reminder');
+  assert.equal(page.$('rows').querySelector('.project-pending-row button'), null, 'no 启动 or 复制提醒: the wizard is the entry');
   const links = [...page.$('rows').querySelectorAll('a')];
   assert.ok(links.every(a => a.href !== '#/projects/101/overview'), 'an unstarted repository has no project page');
-  assert.equal(page.$('count').textContent, '0 个项目，1 个待超级管理员启动');
-  assert.equal(links.length, 1); assert.equal(links[0].href, '#/identity');
-  assert.equal(links[0].querySelector('span').textContent, '查看身份与权限');
+  assert.equal(page.$('count').textContent, '0 个项目，1 个待接入');
+  assert.deepEqual(links.map(a => a.href), ['#/onboarding/101', '#/identity']);
+  assert.equal(links[0].textContent, '开始接入'); assert.equal(links[0].getAttribute('aria-label'), '开始接入 fixture/project-101');
+  assert.equal(links[1].querySelector('span').textContent, '查看身份与权限');
 });
 
 
@@ -277,9 +278,9 @@ test('a long pending-activation list folds behind a count and filters by name', 
   assert.ok(fold, 'more than five pending repositories fold');
   assert.equal(fold.tagName, 'DETAILS');
   assert.ok(!fold.open, 'the fold starts closed');
-  assert.equal(fold.querySelector('summary').textContent, '查看 12 个待启动仓库');
+  assert.equal(fold.querySelector('summary').textContent, '查看 12 个待接入仓库');
   assert.equal(fold.querySelectorAll('.project-pending-row').length, 12);
-  assert.equal(page.$('count').textContent, '0 个项目，12 个待超级管理员启动');
+  assert.equal(page.$('count').textContent, '0 个项目，12 个待接入');
   const input = fold.querySelector('[data-testid=pending-repo-search]');
   assert.ok(input, 'more than ten pending repositories get a name filter');
   input.value = 'REPO-1'; input.listeners.input[0]();
@@ -288,7 +289,7 @@ test('a long pending-activation list folds behind a count and filters by name', 
   assert.ok(fold.querySelector('.pending-repo-empty').hidden);
   input.value = 'nothing'; input.listeners.input[0]();
   assert.equal(fold.querySelectorAll('.project-pending-row').filter(row => !row.hidden).length, 0);
-  assert.equal(fold.querySelector('.pending-repo-empty').textContent, '没有名称包含「nothing」的待启动仓库');
+  assert.equal(fold.querySelector('.pending-repo-empty').textContent, '没有名称包含「nothing」的待接入仓库');
   assert.ok(!fold.querySelector('.pending-repo-empty').hidden);
 });
 
@@ -298,7 +299,7 @@ test('a pending list of six folds without a name filter; the fold and filter sur
   const six = Array.from({ length: 6 }, (_, i) => ({ id: String(i), full_name: 'fixture/six-' + i }));
   const group = page.run(`pendingActivationGroup(${JSON.stringify(six)})`);
   const fold = group.querySelector('[data-testid=pending-repo-fold]');
-  assert.equal(fold.querySelector('summary').textContent, '查看 6 个待启动仓库');
+  assert.equal(fold.querySelector('summary').textContent, '查看 6 个待接入仓库');
   assert.equal(fold.querySelector('[data-testid=pending-repo-search]'), null);
   fold.open = true; fold.listeners.toggle[0]();
   assert.ok(page.run(`pendingActivationGroup(${JSON.stringify(six)})`).querySelector('[data-testid=pending-repo-fold]').open, 'an opened fold stays open after a redraw');
@@ -332,40 +333,24 @@ test('changing the signed-in account clears the pending fold and filter', async 
   assert.equal(again.querySelectorAll('.project-pending-row').filter(row => !row.hidden).length, 12, 'every pending row is visible again');
 });
 
-test('a mixed pending group uses the neutral intro and keeps both kinds of row actions', async () => {
+test('a mixed pending group names who starts each repository and gives every row the onboarding entry', async () => {
   const page = loadConsole(['static/app.js', 'static/views.js'], () => [200, {}]);
   page.run(`var projectRoute = () => null; me = {role: 'project_admin'}`);
   const group = page.run(`pendingActivationGroup(${JSON.stringify([
     { id: '1', full_name: 'trusted/repo', self_start: true },
     { id: '2', full_name: 'other/repo', self_start: false },
   ])})`);
-  assert.equal(group.querySelector('h2').textContent, '待启动的仓库');
-  assert.equal(group.querySelector('.project-pending-intro').textContent, '这些仓库已装好 GitHub App，启动后会出现在上面的项目列表里。');
+  assert.equal(group.querySelector('h2').textContent, '待接入的仓库');
+  assert.equal(group.querySelector('.project-pending-intro').textContent, '这些仓库已装好 GitHub App。点「开始接入」，助手先只读分析仓库、问几个问题并给出方案；你确认后启动，所属组织未受信任的由超级管理员同意后启动。启动后它们出现在上面的项目列表里。');
   const rows = [...group.querySelectorAll('.project-pending-row')];
   assert.equal(rows[0].querySelector('.status').textContent, '可自行启动');
-  assert.equal(rows[0].querySelector('button').textContent, '启动');
-  assert.equal(rows[1].querySelector('.status').textContent, '待超级管理员启动');
-  assert.equal(rows[1].querySelector('button').textContent, '复制提醒');
-});
-
-// #716: a project administrator copies a reminder that names the repository and where to start it.
-test('pending activation rows offer 复制提醒 with 已复制 feedback and a manual fallback', async () => {
-  const page = loadConsole(['static/app.js', 'static/views.js'], () => [200, {}]);
-  page.run(`var projectRoute = () => null; location.origin = 'https://launchpad.example'; location.pathname = '/admin';`);
-  page.run(`me = {role: 'project_admin'}`);
-  page.run(`navigator.clipboard = { writeText: async text => { globalThis.__copied = text; } }`);
-  const group = page.run(`pendingActivationGroup([{ id: '101', full_name: 'fixture/project-101' }])`);
-  const copy = group.querySelector('.project-pending-row button');
-  assert.equal(copy.textContent, '复制提醒');
-  await copy.listeners.click[0]();
-  assert.equal(copy.textContent, '已复制');
-  assert.equal(page.run('globalThis.__copied'), '请在 LaunchPad 控制台启动仓库 fixture/project-101：https://launchpad.example/admin#/projects');
-  page.run(`navigator.clipboard = { writeText: async () => { throw new Error('denied'); } }`);
-  const failed = page.run(`pendingActivationGroup([{ id: '101', full_name: 'fixture/project-101' }])`).querySelector('.project-pending-row button');
-  await failed.listeners.click[0]();
-  assert.equal(failed.textContent, '请手动复制');
-  assert.match(failed.title, /fixture\/project-101/);
-  assert.match(failed.parentElement.querySelector('.project-pending-manual').textContent, /^请在 LaunchPad 控制台启动仓库 fixture\/project-101/);
+  assert.equal(rows[0].querySelector('a').href, '#/onboarding/1');
+  assert.equal(rows[1].querySelector('.status').textContent, '启动需超级管理员同意');
+  assert.equal(rows[1].querySelector('a').href, '#/onboarding/2');
+  assert.ok(rows.every(row => !row.querySelector('button')), 'neither 启动 nor 复制提醒 is left on a row');
+  // Only trusted organizations: the intro does not mention a super administrator.
+  const trusted = page.run(`pendingActivationGroup(${JSON.stringify([{ id: '1', full_name: 'trusted/repo', self_start: true }])})`);
+  assert.equal(trusted.querySelector('.project-pending-intro').textContent, '这些仓库已装好 GitHub App。点「开始接入」，助手先只读分析仓库、问几个问题并给出方案；你确认后启动。启动后它们出现在上面的项目列表里。');
 });
 
 test('a failed identity read is a retryable error, not an empty project list', async () => {
@@ -396,8 +381,8 @@ test('the pending-activation group is hidden while a project list filter is set'
   assert.equal(page.$('count').textContent, '0 个项目');
   page.$('owner-filter').value = '';
   await page.run('render()');
-  assert.equal(page.$('rows').querySelector('.project-pending-group h2').textContent, '等待超级管理员启动');
-  assert.equal(page.$('count').textContent, '0 个项目，1 个待超级管理员启动');
+  assert.equal(page.$('rows').querySelector('.project-pending-group h2').textContent, '待接入的仓库');
+  assert.equal(page.$('count').textContent, '0 个项目，1 个待接入');
 });
 
 test('project list endpoints filter before taking 50 rows and never expand administrator scope', async t => {

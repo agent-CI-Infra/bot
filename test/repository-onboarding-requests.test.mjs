@@ -45,11 +45,15 @@ test('a start request reaches the super administrators, is withdrawn, rejected w
   const first = view.request;
   assert.deepEqual([first.state, first.repository.full_name, first.requested_by.principal_id, first.summary.capability_ceiling, first.summary.labels], ['pending', 'fixture/project-103', requesterPrincipal, 'develop', ['kind/bug']]);
   assert.equal(view.application.receipts[0].detail.request_id, first.id);
+  // The console names a GitHub requester by their login, not the internal username (#934).
+  assert.equal(first.requested_by.github_login, 'user-42');
   // Super administrators see it in the console list and are told in their private chat; nobody else may list or decide.
   assert.deepEqual((await admin('/api/management/onboarding-requests')).value.requests.map(r => r.id), [first.id]);
   assert.equal((await requester('/api/management/onboarding-requests')).value.error, 'super_admin_required');
   assert.equal((await requester(`/api/management/onboarding-requests/${first.id}/approve`, 'POST', {})).value.error, 'super_admin_required');
   await told('oc_admin', 'fixture/project-103 申请启动');
+  // The notice links to where it is handled (#934): 待处理 for super administrators.
+  assert.match(JSON.stringify((await told('oc_admin', 'fixture/project-103 申请启动')).content), /https:\/\/console\.example\.test\/#\/inbox/);
   // Waiting is not a failure: the start cannot be retried while the request is open.
   assert.equal((await requester('/api/management/onboarding/103/items/start/retry', 'POST', {})).value.error, 'onboarding_item_not_failed');
 
@@ -69,6 +73,8 @@ test('a start request reaches the super administrators, is withdrawn, rejected w
   view = (await requester('/api/management/onboarding/103')).value;
   assert.deepEqual([receipts(view).start, view.application.receipts[0].detail.reason], [['failed', 'start_rejected'], '先在组织里确认谁来维护。']);
   await told('oc_bob', '先在组织里确认谁来维护。');
+  // The requester's notice links to the repository's onboarding page.
+  assert.match(JSON.stringify((await told('oc_bob', '先在组织里确认谁来维护。')).content), /https:\/\/console\.example\.test\/#\/onboarding\/103/);
   assert.equal((await admin(`/api/management/onboarding-requests/${second.id}/approve`, 'POST', {})).value.error, 'onboarding_request_closed');
   assert.equal(h.store.get("SELECT 1 FROM repositories WHERE id='103'"), undefined);
 
