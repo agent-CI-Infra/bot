@@ -90,7 +90,7 @@ RoleDefinitionV2 的显式角色 apply 仍在安全检查点结束旧 run，并�
 
 **每项怎么应用**：
 
-- `start`：超级管理员按方案的能力上限和部署默认共享模型（`onboarding.model`）启动；仓库属于受信任组织（#848）时，它的管理员按组织默认值自己启动，随后的 `capability_ceiling` 项再把能力上限调到方案值，和启动后在项目设置里调整一样；其他人得到 `start_approval_required`，等超级管理员审批（#933）。启动之前其余各项保持 `pending`（`project_not_started`），启动成功后接着应用。
+- `start`：超级管理员按方案的能力上限和部署默认共享模型（`onboarding.model`）启动；仓库属于受信任组织（#848）时，它的管理员按组织默认值自己启动，随后的 `capability_ceiling` 项再把能力上限调到方案值，和启动后在项目设置里调整一样；其他人确认时由控制面提交启动申请（见下文「申请启动与审批」），这一项保持 `pending`（`start_approval_pending`，`detail.request_id` 是申请），等超级管理员决定。启动之前其余各项保持 `pending`（`project_not_started`），启动成功后接着应用。
 - `capability_ceiling`、`test_command`、`review_language`：管理命令 `project.update`。测试命令不在这里运行，回执标明 `verified: false`，由首个任务或 CI 任务验证。
 - `events`：管理命令 `manager.update` 的 `events`，与「监听与触发」同一套校验。
 - `conventions`：以「本仓库约定（接入向导第 N 版，日期）」为标题的独立段落，追加到 Manager 提示词（项目保存过完整的分派提示词时追加到它末尾，否则追加到 Manager 提示词的前言，分派提示词以前言开头），并追加到每个启用的角色（跨任务的 coordinator 除外）的角色提示词（`manager.update`、`roles.update`），不覆盖已有内容，也不写 `.bot/` 文件；仓库的 `.bot/` 文件不再读取（#935），这两处就是生效的规则。已经带有这一版段落的提示词不再追加。
@@ -100,8 +100,23 @@ RoleDefinitionV2 的显式角色 apply 仍在安全检查点结束旧 run，并�
 
 **回执**：每项一条，状态为 `succeeded`、`exists`（已经和方案一样）、`failed`（带 `error`，必要时带 `detail`）或 `skipped`（确认时去掉了），并记录执行人、尝试次数和管理命令回执 id；审计记录确认（`onboarding.confirmed`）和每项结果（`onboarding.item.<状态>`）。某项失败不影响后面的项。`POST /api/management/onboarding/<仓库 id>/items/<项>/retry`（可带 `schedule_destination_id`）只重试一项失败的项（其他状态返回 409 `onboarding_item_not_failed`），以新的幂等键执行；重试启动成功后接着应用等待它的项。控制面在应用途中重启时，正在应用的项记为失败（`onboarding_item_interrupted`），可以重试。同一个仓库同一时间只应用一份确认（在这个控制面进程里按仓库加锁）：正在应用时再确认或重试都返回 409 `onboarding_apply_running`，回执保持原状，稍后再试。
 
+### 申请启动与审批
+
+仓库所属组织不受信任时（#848），它的管理员不能自己启动项目（#933）。他确认方案时控制面为这个仓库提交一份启动申请，记录申请人、时间和这次确认（方案版本）；同一仓库同时只有一份待处理的申请，再次确认或重试启动都沿用它（新的确认接替旧的）。受信任组织的仓库没有这一步。
+
+**通知**：每位超级管理员在控制台的申请列表里看到它，在自己与 bot 的飞书私聊里收到一条通知（仓库、能力档、要建的标签、定时检查、是否有 CI 建议和仓库画像摘要）；决定之后申请人在飞书私聊里收到结果。私聊消息经持久的消息发件箱发送，只走仓库所属组织的飞书应用或平台自己的应用，不经别的组织的应用；发送前再次核对收件人仍是这个私聊的主人，超级管理员的通知还要求收件人仍是超级管理员。没有绑定私聊的人只在控制台看到。
+
+**接口**（超级管理员，否则 403 `super_admin_required`）：`GET /api/management/onboarding-requests?state=pending|approved|rejected|withdrawn|lapsed|all`（默认 `pending`，最近 100 条）、`GET /api/management/onboarding-requests/<id>`，每条带仓库、申请人、方案版本和摘要、决定人、时间、原因和决定。
+
+- **同意**：`POST .../<id>/approve {model_id?, capability_ceiling?, trust_organization?}`。超级管理员按自己选的模型和能力档启动项目（不填时用部署默认共享模型和方案的能力档；三档都在超级管理员的权限之内），可以顺带信任这个组织，此时按 #848 的语义把这次的共享模型和能力档作为组织默认，之后该组织的仓库由管理员自己启动。启动这一项记在超级管理员名下（`detail.by` 为 `approval`）；超级管理员改了能力档时，方案的能力档一项记为 `skipped`（`decided_by_approval`），不再改回方案值；其余各项以申请人的身份、按申请人自己当前的权限接着应用，失败的项由申请人在接入页重试。
+- **拒绝**：`POST .../<id>/reject {reason}`，必须写原因（400 `rejection_reason_required`）；启动一项失败（`start_rejected`，`detail.reason`），申请人收到原因，之后可以重试启动再次申请。
+- **撤回**：仓库的管理员 `POST /api/management/onboarding/<仓库 id>/request/withdraw`；启动一项失败（`start_request_withdrawn`）。
+- **失效**：仓库被移出安装、项目已经以别的方式启动，或者组织变成受信任组织时，待处理的申请失效（`lapsed`），读取申请时检查，不需要后台任务；启动一项失败（`start_request_lapsed`，项目已启动时除外），组织受信任后重试启动就是自己启动。申请不按时间过期。
+
+已经决定或失效的申请再处理返回 409 `onboarding_request_closed`。页面状态的 `request` 是这个仓库最近一份申请。
+
 ## 扩展与验证
 
 `ManagementService.register` 为配置发布、知识修订、计划和通知提供可信 execute / reconcile 注册接口。`knowledgeSearch` 是受限检索接入点。计划和通知由 [持久化调度模块](schedules.md) 注册，表单和管理工具走同一服务；未注册的业务工作流处理器明确不支持。知识模块未注册时返回明确不可用。角色配置沿用 RoleDefinitionV2 接口与版本检查；Pi prepare、角色快照和显式 revision 续接与项目主控共用现有实现。
 
-`e2e/management-live.spec.mjs` 通过真实模型 SSE 和管理事件流验证完成前渲染、工具进展、多轮文本、Markdown 安全边界、停止、失败、重连、滚动及历史回读。`test/repository-onboarding.test.mjs` 覆盖接入向导：未启动仓库的只读分析（只签发一次只读令牌并在本轮后撤销、令牌不进模型与事件、GitHub 没有写入、项目仍未启动）、非管理员的错误码、多人共用同一会话、问题与方案草稿的校验和保存、一次一轮、启动后用量转记到项目、已启动项目带当前设置，以及受信任组织的默认模型；`test/repository-onboarding-apply.test.mjs` 覆盖确认与应用：差异与确认的各种拒绝、各项经现有通道生效（能力上限、事件、测试命令、Manager 与角色提示词的约定段落、GitHub 新标签、开发任务带 `workflow_changes`）、已存在的标签不改、缺少目的地的定时检查单独失败并可重试、重复确认和重试不重复写入、重新运行只列差异，以及未启动仓库的启动顺序（需要审批、受信任组织自己启动后调到方案档位、超级管理员按方案档位启动）。阶段消息（事件流、10 条上限、私聊送达）和不限步数由 `test/channel-stage-messages.test.mjs` 与 `e2e/stage-messages.spec.mjs` 覆盖。`test/management.test.mjs` 覆盖权限、并发、幂等、配置来源、直接执行（旧审批策略不再生效、遗留待审批命令不执行）、未知结果、停止和会话隔离；`e2e/management.spec.mjs` 使用独立 SQLite、随机监听端口和本地模型协议夹具验证真实持久化查询、配置修改、任务管理及浏览器/API 一致性。全部临时产物应放在工作树 `.tmp/`，运行测试时设置 `TMPDIR` 为该目录。
+`e2e/management-live.spec.mjs` 通过真实模型 SSE 和管理事件流验证完成前渲染、工具进展、多轮文本、Markdown 安全边界、停止、失败、重连、滚动及历史回读。`test/repository-onboarding.test.mjs` 覆盖接入向导：未启动仓库的只读分析（只签发一次只读令牌并在本轮后撤销、令牌不进模型与事件、GitHub 没有写入、项目仍未启动）、非管理员的错误码、多人共用同一会话、问题与方案草稿的校验和保存、一次一轮、启动后用量转记到项目、已启动项目带当前设置，以及受信任组织的默认模型；`test/repository-onboarding-apply.test.mjs` 覆盖确认与应用：差异与确认的各种拒绝、各项经现有通道生效（能力上限、事件、测试命令、Manager 与角色提示词的约定段落、GitHub 新标签、开发任务带 `workflow_changes`）、已存在的标签不改、缺少目的地的定时检查单独失败并可重试、重复确认和重试不重复写入、重新运行只列差异，以及未启动仓库的启动顺序（需要审批、受信任组织自己启动后调到方案档位、超级管理员按方案档位启动）；`test/repository-onboarding-requests.test.mjs` 覆盖启动申请：确认即申请、启动一项等待、超级管理员的列表和飞书私聊通知、非超级管理员不能查看和决定、撤回后重试再申请、拒绝必须写原因并通知申请人、同意时改能力档并信任组织、其余各项以申请人身份应用、移出安装后申请失效。阶段消息（事件流、10 条上限、私聊送达）和不限步数由 `test/channel-stage-messages.test.mjs` 与 `e2e/stage-messages.spec.mjs` 覆盖。`test/management.test.mjs` 覆盖权限、并发、幂等、配置来源、直接执行（旧审批策略不再生效、遗留待审批命令不执行）、未知结果、停止和会话隔离；`e2e/management.spec.mjs` 使用独立 SQLite、随机监听端口和本地模型协议夹具验证真实持久化查询、配置修改、任务管理及浏览器/API 一致性。全部临时产物应放在工作树 `.tmp/`，运行测试时设置 `TMPDIR` 为该目录。

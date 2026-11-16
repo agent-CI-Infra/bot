@@ -48,8 +48,8 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
     ['DELETE FROM service_roles WHERE project_id=? AND id NOT IN (SELECT service_role_id FROM channel_service_bindings)', 1], ['UPDATE service_roles SET enabled=0 WHERE project_id=?', 1],
     [`UPDATE policies SET model_id=NULL WHERE model_id IN (${models})`, 1], [`DELETE FROM model_pricing WHERE model_id IN (${models})`, 1],
     [`DELETE FROM model_projects WHERE repository_id=? OR model_id IN (${models})`, 2], ['DELETE FROM policies WHERE repository_id=?', 1], ['DELETE FROM models WHERE repository_id=?', 1],
-    // Onboarding receipts, applications, plan drafts and sessions (#930, #932); their conversations stay with the people who held them.
-    ['DELETE FROM onboarding_receipts WHERE application_id IN (SELECT id FROM onboarding_applications WHERE repository_id=?)', 1],
+    // Onboarding start requests, receipts, applications, plan drafts and sessions (#930, #932, #933); their conversations stay with the people who held them.
+    ['DELETE FROM onboarding_requests WHERE repository_id=?', 1], ['DELETE FROM onboarding_receipts WHERE application_id IN (SELECT id FROM onboarding_applications WHERE repository_id=?)', 1],
     ['DELETE FROM onboarding_applications WHERE repository_id=?', 1], ['DELETE FROM onboarding_plans WHERE repository_id=?', 1], ['DELETE FROM onboarding_sessions WHERE repository_id=?', 1],
     ['DELETE FROM project_admin_assignments WHERE repository_id=?', 1], ['DELETE FROM repo_integrations WHERE repository_id=?', 1],
     ['DELETE FROM public_board_settings WHERE repository_id=?', 1], ['DELETE FROM public_board_consents WHERE repository_id=?', 1], ['DELETE FROM public_board_jobs WHERE repository_id=?', 1], ['DELETE FROM installed_repositories WHERE repository_id=?', 1], ['DELETE FROM repositories WHERE id=?', 1]];

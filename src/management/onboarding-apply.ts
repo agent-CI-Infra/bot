@@ -15,6 +15,7 @@ import { roleConfiguration } from '../roles/definition.js';
 import { defaultLimits } from '../schedules/types.js';
 import { ServiceRepositories } from '../service-roles/resources.js';
 import type { ManagementService } from './service.js';
+import { OnboardingRequests } from './onboarding-requests.js';
 
 /**
  * Applying a confirmed onboarding plan (#932). The administrator confirms the whole plan once, leaving out the items they do
@@ -44,7 +45,9 @@ export interface ApplyHost {
   repository(id: string): Row | undefined;
   actor(base: ActorContext, id: string): ActorContext;
 }
-type Outcome = { state: 'succeeded' | 'exists'; detail?: Json };
+// A start waiting for a super administrator's approval (#933) stays pending, with the request in its detail.
+// A decision on it (rejected, withdrawn, lapsed) fails it with that reason.
+type Outcome = { state: 'succeeded' | 'exists' | 'pending' | 'failed'; error?: string; detail?: Json };
 
 /** The heading that marks one plan version's conventions in a prompt; its presence means they were appended already. */
 const conventionsMark = (version: number) => `## 本仓库约定（接入向导第 ${version} 版`;
@@ -63,8 +66,15 @@ function conventionsBlock(plan: Json, version: number, date: string): string {
 export class OnboardingApply {
   // Repositories with an application being applied in this control plane: one at a time per repository.
   private readonly applying = new Set<string>();
-  constructor(readonly host: ApplyHost) {}
+  readonly requests: OnboardingRequests;
+  constructor(readonly host: ApplyHost) {
+    this.requests = new OnboardingRequests({ store: host.store, service: host.service, repository: id => host.repository(id), actor: (base, id) => host.actor(base, id),
+      startOutcome: (application, outcome) => this.finish(application, 'start', outcome.executed_by, { state: outcome.state, error: outcome.error, detail: outcome.detail }),
+      resume: (application, base) => this.run(base, application), busy: id => this.applying.has(id) });
+  }
   get store() { return this.host.store; }
+  /** Whether an application of this repository is being applied now (the approval of a start request waits for it). */
+  applyingRepository(id: string): boolean { return this.applying.has(id); }
 
   /**
    * The items of `plan` that would change the repository as it is now, in the order they are applied. A started project lists
@@ -184,7 +194,7 @@ export class OnboardingApply {
    * Runs the pending items in order, one application per repository at a time. Each next item is read again, so the order
    * holds whatever became pending meanwhile. Without a started project the remaining items wait for the start.
    */
-  private async run(base: ActorContext, applicationId: string): Promise<void> {
+  async run(base: ActorContext, applicationId: string): Promise<void> {
     const application = this.store.get('SELECT * FROM onboarding_applications WHERE id=?', applicationId)!, id = String(application.repository_id);
     if (this.applying.has(id)) fail(409, 'onboarding_apply_running');
     this.applying.add(id);
@@ -206,13 +216,14 @@ export class OnboardingApply {
       }
     } finally { this.applying.delete(id); }
   }
-  private finish(applicationId: string, item: string, principal: string, result: Outcome | unknown): void {
+  finish(applicationId: string, item: string, principal: string, result: Outcome | unknown): void {
     const outcome = result instanceof Error || !(result as Outcome)?.state ? undefined : result as Outcome;
     // Anything but a refusal (a bug, a broken response) still ends the item as failed, so the others go on and it can be retried.
-    const error = outcome ? null : result instanceof HttpError ? result : new HttpError(500, 'onboarding_item_error');
+    const error = outcome ? (outcome.error ? new HttpError(409, outcome.error) : null) : result instanceof HttpError ? result : new HttpError(500, 'onboarding_item_error');
     const state = outcome?.state ?? 'failed', detail = outcome?.detail ?? (error?.field || error?.detail ? { ...(error.field ? { field: error.field } : {}), ...(error.detail as Json | undefined) } : null);
     this.store.transaction(() => {
-      this.store.run('UPDATE onboarding_receipts SET state=?,error=?,detail=?,updated_at=? WHERE application_id=? AND item=?', state, error?.code ?? null, detail ? JSON.stringify(detail) : null, now(), applicationId, item);
+      // Who executed it: the person applying, or for an approved start the super administrator who started the project.
+      this.store.run('UPDATE onboarding_receipts SET state=?,error=?,detail=?,executed_by=?,updated_at=? WHERE application_id=? AND item=?', state, error?.code ?? null, detail ? JSON.stringify(detail) : null, principal, now(), applicationId, item);
       this.store.audit(principal, 'onboarding.item.' + state, `${applicationId}:${item}`, String(this.store.get('SELECT repository_id FROM onboarding_applications WHERE id=?', applicationId)!.repository_id));
     });
   }
@@ -261,8 +272,8 @@ export class OnboardingApply {
   /**
    * The start (#899 ceiling included). A super administrator starts it with the plan's ceiling and the deployment's default
    * shared model; an administrator of a trusted organization's repository starts it with the organization's defaults, and
-   * the ceiling item then moves it to the plan's level as they could in the console. Everyone else needs a super
-   * administrator's approval, requested in #933.
+   * the ceiling item then moves it to the plan's level as they could in the console. Everyone else requests it, and a super
+   * administrator approves or rejects (#933, onboarding-requests.ts).
    */
   private async start(c: ItemContext): Promise<Outcome> {
     if (this.store.get('SELECT 1 FROM repositories WHERE id=?', c.id)) return { state: 'exists' };
@@ -273,7 +284,11 @@ export class OnboardingApply {
       const model = this.store.get("SELECT m.id FROM settings s JOIN models m ON m.id=json_extract(s.value,'$') AND m.repository_id IS NULL WHERE s.key='onboarding.model' AND json_valid(s.value)")?.id;
       body = { ...(ceiling ? { capability_ceiling: ceiling } : {}), ...(model ? { model_id: model } : {}) };
     } else if (trustedOrganization(this.store, String(repository.owner_id))) body = {};
-    else return fail(403, 'start_approval_required');
+    else {
+      // Neither: a super administrator decides (#933). The request carries this confirmation; the other items wait for the start.
+      const request = this.requests.open(c.actor, c.application, c.plan);
+      return { state: 'pending', error: 'start_approval_pending', detail: { request_id: request.id } };
+    }
     await installationApi(this.store, undefined, user, 'POST', new URL(`http://local/api/installations/${c.id}/activate`), body);
     const policy = this.store.get('SELECT model_id FROM policies WHERE repository_id=?', c.id);
     return { state: 'succeeded', detail: { by: user.role === 'super_admin' ? 'super_admin' : 'trusted_organization', capability_ceiling: projectCeiling(this.store, c.id), model_id: policy?.model_id ?? null } };
