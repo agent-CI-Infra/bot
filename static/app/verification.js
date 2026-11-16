@@ -96,7 +96,15 @@ async function finishGithubVerification(next) {
   me = next; showGithubVerification();
   let listed;
   try { listed = (await api('/api/repositories')).repositories; }
-  catch (err) { if (me && me.id === next.id) showGithubRepositoriesUnread(next); return; }
+  catch (err) {
+    if (!me || me.id !== next.id) return;
+    // The check itself finished: the views it feeds must stop saying it is still running even though the list read
+    // failed. Redraw them with the same guards the success path uses, then put the notice in the line the redraw owns.
+    const editing = tab === 'identity' && identityFormBeingEdited();
+    if (!editing && !projectRoute() && ['projects', 'identity'].includes(tab)) await route();
+    else if (typeof syncConsoleShell === 'function') syncConsoleShell(projectRoute());
+    showGithubRepositoriesUnread(next); return;
+  }
   await applyGithubRepositories(next, listed);
 }
 async function applyGithubRepositories(next, listed) {

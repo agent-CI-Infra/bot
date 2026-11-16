@@ -51,6 +51,12 @@ test('权限核验完成后的项目列表读取失败有提示，重新读取�
     await expect(retry).toBeVisible();
     await expect(picker).toHaveCount(0);
     await shots('repositories-failed');
+    // The pages the check feeds were redrawn with the finished state: neither still claims the check is running, and
+    // the identity root does not keep its "after the check" placeholder.
+    await expect(page.locator('#rows')).not.toContainText('正在核验 GitHub 权限');
+    await consoleNavigate(page, '身份与权限');
+    await expect(page.locator('#identity-panel')).not.toContainText('核验完成后显示你的 GitHub 连接与授权来源');
+    await consoleNavigate(page, '项目');
     // The button reads the list again; the projects the check just proved arrive and the notice goes.
     await retry.click();
     await expect(line).toBeHidden();
