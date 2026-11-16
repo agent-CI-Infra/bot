@@ -16,9 +16,11 @@ import { nextTime, previewTimes, quietUntil } from '../dist/schedules/time.js';
 import { HttpError, randomId } from '../dist/core/security.js';
 import { projectCapabilities } from '../dist/identity/storage.js';
 import { configureDispatch, ruleDecider } from '../dist/dispatch/worker.js';
-import { taskGithubWrite } from '../dist/tasks/github-write.js';
+import { taskGithubWrite, taskWriteAllowed } from '../dist/tasks/github-write.js';
 import { taskActingRole } from '../dist/tasks/management.js';
 import { Redactor } from '../dist/agent/common.js';
+import { scheduledCheckDecision } from '../dist/dispatch/schedule.js';
+import { scheduledIssueWrite, scheduledIssueOperationAllowed } from '../dist/tasks/schedule-write.js';
 import { channelFixture, envelope, post, finished, until, inGroup, bindFixture, privateChat, boundGroup, registerDestination } from './channel-fixture.mjs';
 
 const target = { project_id: '101' };
@@ -349,12 +351,115 @@ test('a Manager check plan hands its occurrence to the Manager once; the report 
   const recorded = f.h.store.get("SELECT state,actor FROM github_writes WHERE key='check-issue-comment'"); assert.ok(recorded, 'the write was recorded'); assert.notEqual(recorded.state, 'refused');
   // Handing the check over completes the occurrence, so the plan is not held up by the task it started.
   assert.equal(f.h.store.get('SELECT state FROM schedule_business_runs').state, 'succeeded');
-  // The rule decider of other tests starts nothing for a scheduled check: only a Manager does.
-  configureDispatch(ruleDecider);
+  assert.equal(JSON.parse(task.input).file_issues, undefined);
+  assert.equal(scheduledIssueWrite(task), 'unset');
+  assert.equal(scheduledIssueOperationAllowed(task, 'issues', 'create'), null);
+  // The check task is still queued: a second run-now must not stack on it (#893).
+  const blocked = await command(f, 'schedule.run-now', { id: plan.id, revision: 1 });
+  assert.equal(blocked.value.result?.error || blocked.value.error, 'schedule_occurrence_in_progress');
+  // After that task finishes, a later due check with an instruction starts another task (the option is default work).
+  f.h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?", task.id);
+  configureDispatch(context => scheduledCheckDecision(context) ?? ruleDecider(context));
   await command(f, 'schedule.run-now', { id: plan.id, revision: 1 });
   f.worker.produce(); const next = f.worker.claimOccurrence(); f.worker.dispatch(next);
-  assert.equal(requests(), 1);
-  assert.equal(f.h.store.get("SELECT decision FROM dispatch_events WHERE type='schedule.due' ORDER BY created_at DESC,rowid DESC LIMIT 1").decision, 'ignore');
+  assert.equal(requests(), 2);
+  assert.equal(f.h.store.get("SELECT decision FROM dispatch_events WHERE type='schedule.due' ORDER BY created_at DESC,rowid DESC LIMIT 1").decision, 'create');
+});
+
+test('a custom check plan with an instruction starts a task and may file Issues only when allowed (#893)', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { enabled: true });
+  configureDispatch(context => scheduledCheckDecision(context) ?? ruleDecider(context));
+  t.after(() => configureDispatch(ruleDecider));
+  const member = await f.member('custom-check-admin', { repository_ids: ['101'] });
+  bindFixture(f.h, f.id, member.id, 'ou_custom_check');
+  const destination = await registerDestination(member.client, await privateChat(f, 'ou_custom_check', member.id, 'oc_custom_check'));
+  const invalid = await command(f, 'schedule.register', { plan: f.plan({ actor_id: member.id, owner_id: member.id, maintainer_id: member.id, destination_id: destination, workflow: 'manager.check', parameters: { instruction: 'Look around.', unexpected: true } }) }, member.client);
+  assert.equal(invalid.value.result?.error || invalid.value.error, 'invalid_schedule_parameters');
+  const saved = await command(f, 'schedule.register', { plan: f.plan({ name: '自定义主动任务', actor_id: member.id, owner_id: member.id, maintainer_id: member.id, destination_id: destination, workflow: 'manager.check', parameters: { instruction: 'List stale Issues.', file_issues: true } }) }, member.client);
+  assert.equal(saved.value.state, 'succeeded', JSON.stringify(saved.value));
+  const plan = saved.value.result.schedule;
+  assert.equal(plan.spec.parameters.file_issues, true);
+  await command(f, 'schedule.run-now', { id: plan.id, revision: plan.revision }, member.client);
+  f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  const event = f.h.store.get("SELECT * FROM dispatch_events WHERE type='schedule.due'");
+  assert.equal(event.decision, 'create');
+  assert.equal(JSON.parse(event.facts).file_issues, true);
+  assert.equal(JSON.parse(event.options)[0].default, true);
+  const task = f.h.store.get('SELECT * FROM tasks WHERE id=?', JSON.parse(event.result).created[0]);
+  assert.equal(JSON.parse(task.input).file_issues, true);
+  assert.equal(scheduledIssueWrite(task), 'allow');
+  assert.equal(scheduledIssueOperationAllowed(task, 'issues', 'create'), true);
+  assert.equal(scheduledIssueOperationAllowed(task, 'issues', 'reply'), true);
+  assert.equal(scheduledIssueOperationAllowed(task, 'contents', 'create'), null);
+  // A later timer tick while the task is still open is skipped as overlap, not queued again.
+  f.advance(70000);
+  f.worker.produce();
+  assert.equal(f.h.store.get("SELECT count(*) n FROM schedule_occurrences WHERE reason='overlap'").n, 1);
+  assert.equal(f.h.store.get("SELECT count(*) n FROM tasks WHERE unique_key LIKE '101:task.request:%'").n, 1);
+});
+
+test('a project admin can register a project manager.check when a delegated service already exists (#851, #893)', async t => {
+  const f = await fixture(t);
+  const member = await f.member('project-check-admin', { repository_ids: ['101'] });
+  const plan = await projectPlan(f, member.id);
+  plan.workflow = 'manager.check';
+  plan.parameters = { instruction: 'Weekly hygiene.', file_issues: false };
+  f.h.store.run('UPDATE scoped_grants SET capabilities=? WHERE principal_id=?', JSON.stringify(['tasks.read', 'schedules.manage', 'tasks.write']), plan.actor_id);
+  const saved = await command(f, 'schedule.register', { plan }, member.client);
+  assert.equal(saved.value.state, 'succeeded', JSON.stringify(saved.value));
+  assert.equal(saved.value.result.schedule.kind, 'project');
+  const destinations = await query(f, 'list_schedule_destinations', {}, member.client);
+  assert.ok(destinations.services.some(s => s.id === plan.actor_id));
+});
+
+test('a due manager.check with an instruction starts once on the timer, and file_issues false refuses Issue writes (#905)', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { enabled: true });
+  configureDispatch(context => scheduledCheckDecision(context) ?? ruleDecider(context));
+  t.after(() => configureDispatch(ruleDecider));
+  const plan = await f.create(f.plan({
+    name: '到期检查', workflow: 'manager.check', misfire: 'once', grace_ms: 86400000,
+    start_at: f.now() + 60000, interval_ms: 60000,
+    parameters: { instruction: 'Check stale Issues.', file_issues: false }
+  }));
+  f.advance(60000);
+  f.worker.produce();
+  const claim = f.worker.claimOccurrence();
+  assert.ok(claim); assert.equal(claim.source, 'timer');
+  f.worker.dispatch(claim);
+  const event = f.h.store.get("SELECT * FROM dispatch_events WHERE type='schedule.due'");
+  assert.equal(event.decision, 'create', JSON.stringify(event));
+  assert.equal(JSON.parse(event.facts).file_issues, false);
+  const task = f.h.store.get('SELECT * FROM tasks WHERE id=?', JSON.parse(event.result).created[0]);
+  assert.equal(scheduledIssueWrite(task), 'deny');
+  assert.equal(scheduledIssueOperationAllowed(task, 'issues', 'create'), false);
+  assert.equal(taskWriteAllowed(f.h.store, task, 'issues', 'create'), false);
+  // The flag must not grant Contents; Contents still follows role policy.
+  assert.equal(scheduledIssueOperationAllowed(task, 'contents', 'create'), null);
+  // A second timer tick while the check is still queued is skipped, not started again.
+  f.advance(60000);
+  f.worker.produce();
+  assert.equal(f.h.store.get("SELECT count(*) n FROM schedule_occurrences WHERE reason='overlap'").n, 1);
+  assert.equal(f.h.store.get("SELECT count(*) n FROM tasks WHERE unique_key LIKE '101:task.request:%'").n, 1);
+});
+
+test('a project admin cannot register other project workflows, and an outsider cannot create a project manager.check (#905)', async t => {
+  const f = await fixture(t);
+  const member = await f.member('daily-project-admin', { repository_ids: ['101'] });
+  const outsider = await f.member('no-project-user');
+  const plan = await projectPlan(f, member.id);
+  const daily = await command(f, 'schedule.register', { plan }, member.client);
+  assert.equal(daily.value.result?.error || daily.value.error, 'capability_forbidden');
+  plan.workflow = 'manager.check';
+  plan.parameters = { instruction: 'Weekly hygiene.', file_issues: false };
+  f.h.store.run('UPDATE scoped_grants SET capabilities=? WHERE principal_id=?', JSON.stringify(['tasks.read', 'schedules.manage', 'tasks.write']), plan.actor_id);
+  const { revision } = await query(f, 'list_schedules');
+  const denied = await outsider.client('/api/management/commands', 'POST', {
+    operation: 'schedule.register', target, arguments: { plan }, expected_revision: revision,
+    idempotency_key: randomId(), source_conversation: 'schedule-fixture', source_message: 'outsider-check'
+  });
+  assert.equal(denied.value.result?.error || denied.value.error, 'capability_forbidden');
 });
 
 test('controlled workflow contract dispatches a fake business handler once, preserves its run and enforces tool/model budgets', async t => {

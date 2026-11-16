@@ -50,7 +50,8 @@ export class Scheduler {
         if (row.next_at === null) { this.store.run("UPDATE schedules SET state='expired',reason='validity_ended',revision=revision+1 WHERE id=?", row.id); continue; }
         if (row.next_at > now) continue;
         const late = now - row.next_at, missed = late > plan.grace_ms || plan.misfire === 'skip' && late >= 60000;
-        this.service.occurrence(row, 'time:' + row.next_at, row.next_at, 'timer', missed ? 'skipped' : 'pending', missed ? 'misfire' : undefined);
+        const overlap = !missed && plan.workflow === 'manager.check' && this.service.busyManagerCheck(row.id, row.project_id);
+        this.service.occurrence(row, 'time:' + row.next_at, row.next_at, 'timer', missed || overlap ? 'skipped' : 'pending', missed ? 'misfire' : overlap ? 'overlap' : undefined);
         // One due cursor per tick, then jump to the future. Never enumerate an unbounded history.
         this.store.run('UPDATE schedules SET next_at=?,updated_at=? WHERE id=?', nextTime(plan, now), now, row.id);
       }

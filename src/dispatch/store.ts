@@ -54,10 +54,10 @@ export type CreateSpec =
   | { type: 'reply'; kind: 'workflow.issue' | 'workflow.pr'; number: number; head: string | null; input: Json; key: string; delivery: string | null }
   // A task on an event the owning module tracks (release, Actions run).
   | { type: 'event'; kind: string; key: string; sha: string; input: Json; summary: string }
-  // An ordinary request (a scheduled check): no GitHub writes; the Manager's brief becomes its contract.
-  | { type: 'request'; key: string; request: string; principal: { principal_id: string; tenant_id: string } | null };
+  // An ordinary request (a scheduled check). Default: no GitHub writes. `file_issues` allows Issues create/reply via github_write.
+  | { type: 'request'; key: string; request: string; principal: { principal_id: string; tenant_id: string } | null; file_issues?: boolean };
 export interface CreateOption { id: string; work: string; title: string; spec: CreateSpec; hook?: string; ref?: Json;
-  /** What the control plane did before #207 for this event; only the rule decider used in tests reads it, never the Manager. */
+  /** Default work for this event. The test rule decider, and scheduled checks with an instruction, read it. */
   default?: boolean;
   /** Offered only while no task can take the event (#770): a push belongs to the review already working on the pull request. */
   unless_continued?: boolean }
@@ -302,13 +302,15 @@ function create(store: Store, event: Row, option: CreateOption, decision: Decisi
   // A scheduled check: the Manager's brief is the contract of an ordinary request; without a brief there is nothing to do.
   const key = `${repo}:task.request:${spec.key}`;
   if (store.get('SELECT 1 FROM tasks WHERE unique_key=?', key)) return null;
+  const file_issues = spec.file_issues === true ? true : spec.file_issues === false ? false : undefined;
+  const issueFlag = file_issues !== undefined ? { file_issues } : {};
   const goal = decision.brief?.goal || spec.request, contract = { goal, scope: [spec.request.slice(0, 2000)], criteria: decision.brief?.criteria?.length ? decision.brief.criteria : ['Report what was checked, with evidence; change nothing outside the task workspace.'],
-    endpoint: 'report', source: { type: 'schedule', event_id: event.id }, completeness: 'explicit' };
+    endpoint: 'report', source: { type: 'schedule', event_id: event.id, ...issueFlag }, completeness: 'explicit' };
   const id = randomId(), now = new Date().toISOString();
   store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,created_at,updated_at) VALUES(?,?,'task.request','queued',?,?,?,?,?)",
-    id, repo, goal.slice(0, 160), key, JSON.stringify({ request: spec.request, contract, manager }), now, now);
+    id, repo, goal.slice(0, 160), key, JSON.stringify({ request: spec.request, contract, manager, ...issueFlag }), now, now);
   new TaskRecords(store).contract(id, contract as any);
-  store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ request: spec.request, contract: new TaskRecords(store).get(id).contract, manager }), id);
+  store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ request: spec.request, contract: new TaskRecords(store).get(id).contract, manager, ...issueFlag }), id);
   captureTaskConfiguration(store, id);
   if (spec.principal) store.run('INSERT INTO task_authorizations VALUES(?,?,?,?,?)', id, spec.principal.principal_id, spec.principal.tenant_id, repo, 'tasks.write');
   return id;

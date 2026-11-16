@@ -81,7 +81,7 @@ export const workTypes: WorkType[] = [
   { id: 'task.development', name: '开发任务', base: 'development', object: 'schedule', kinds: ['task.development'], section: 'development', family: 'development', defaultEnabled: true,
     description: '直接创建的开发任务，复用项目开发授权、测试、独立 QA 和 PR 交付；可独立执行或关联父任务，不需要虚构 GitHub Issue。' },
   { id: 'task.request', name: '普通事项与定时检查', base: 'request', object: 'schedule', kinds: ['task.request'], section: 'schedule', defaultEnabled: true,
-    description: '处理直接创建的普通事项或 Manager 接受的定时检查。写入默认继承项目能力上限：可开发时可以交付 PR，仍经测试及独立 QA；执行角色有 GitHub 写权限时可以在上限内用 github_write 直接写，例如提报 Issue。' }
+    description: '处理直接创建的普通事项或到期的定时检查。写入默认继承项目能力上限：可开发时可以交付 PR，仍经测试及独立 QA；执行角色有 GitHub 写权限时可以在上限内用 github_write 直接写，例如提报 Issue。计划勾选允许创建 Issue 时，定时检查可以用 github_write 提报或回复 Issue。' }
 ];
 export const workType = (id: string) => workTypes.find(work => work.id === id);
 /** The work type a task belongs to: reply tasks (including those of former custom workflows) are one work type. */

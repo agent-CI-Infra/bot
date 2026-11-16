@@ -10,7 +10,7 @@ import { validate } from '../management/catalog.js';
 import { planSchema, schedulingCommands, subscriptionSchema } from './schema.js';
 import { localParts, nextTime, parseCron, previewTimes, quietUntil } from './time.js';
 import { defaultLimits, type Plan, type SubscriptionSpec, type TriggerHandler, type ActionUsage } from './types.js';
-import { budgetScopes, reserve } from './budget.js';
+import { budgetScopes, reserve, terminalRunStates } from './budget.js';
 import { ReportService } from './report.js';
 
 export const reasonOf = (e: unknown): string => e instanceof HttpError ? e.code : 'schedule_service_failed';
@@ -194,6 +194,12 @@ export class ScheduleService {
     if (plan.workflow === 'report.daily') {
       if (Object.keys(plan.parameters).some(k => k !== 'window_ms') || plan.parameters.window_ms !== undefined && (!Number.isSafeInteger(plan.parameters.window_ms) || Number(plan.parameters.window_ms) < 60000 || Number(plan.parameters.window_ms) > 31 * 86400000)) fail(400, 'invalid_report_parameters');
     }
+    if (plan.workflow === 'manager.check') {
+      if (Object.keys(plan.parameters).some(k => k !== 'instruction' && k !== 'file_issues')) fail(400, 'invalid_schedule_parameters');
+      const instruction = plan.parameters.instruction;
+      if (instruction !== undefined && (typeof instruction !== 'string' || instruction.length > 4000)) fail(400, 'invalid_schedule_parameters');
+      if (plan.parameters.file_issues !== undefined && typeof plan.parameters.file_issues !== 'boolean') fail(400, 'invalid_schedule_parameters');
+    }
     const grant = this.grants(actor, plan, project, existing), tenant = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)!.tenant_id;
     const execution = this.actor({ tenant_id: tenant, project_id: project, grant_snapshot: JSON.stringify(grant) }, plan, !preview);
     return { plan, grant, execution };
@@ -209,6 +215,17 @@ export class ScheduleService {
   private owned(actor: ActorContext, row: Row): void {
     if (row.kind === 'personal' && row.owner_id !== actor.principal_id) fail(403, 'personal_schedule_owner_required');
     if (row.kind === 'project') authorize(actor, 'config.write', { project_id: row.project_id });
+  }
+  /** A later tick or run-now must not stack on a check that is still queued, running, or waiting to be decided. */
+  busyManagerCheck(scheduleId: string, projectId: string): boolean {
+    return !!this.store.get(`SELECT 1 AS n FROM schedule_occurrences o
+      WHERE o.schedule_id=? AND (
+        o.state IN ('pending','retry','running','dispatched')
+        OR EXISTS(SELECT 1 FROM schedule_business_runs b WHERE b.occurrence_id=o.id AND b.state NOT IN ${terminalRunStates})
+        OR EXISTS(SELECT 1 FROM dispatch_events e WHERE e.type='schedule.due' AND e.state IN ('pending','dispatching')
+          AND json_extract(e.facts,'$.occurrence_id')=o.id)
+        OR EXISTS(SELECT 1 FROM tasks t WHERE t.unique_key=? || o.id AND t.status NOT IN ('succeeded','failed','cancelled'))
+      ) LIMIT 1`, scheduleId, `${projectId}:task.request:`);
   }
   occurrence(row: Row, key: string, logical: number, source: string, state = 'pending', reason?: string, initiator?: string): Row {
     const previous = this.store.get('SELECT * FROM schedule_occurrences WHERE schedule_id=? AND logical_key=?', row.id, key);
@@ -247,6 +264,7 @@ export class ScheduleService {
         if (row.revision !== args.revision || row.state === 'deleted') fail(409, 'schedule_revision_conflict');
         if (operation === 'schedule.run-now') {
           if (row.state !== 'active') fail(409, 'schedule_not_active'); this.actor(row, plan);
+          if (plan.workflow === 'manager.check' && this.busyManagerCheck(row.id, project)) fail(409, 'schedule_occurrence_in_progress');
           result = { occurrence: this.occurrence(row, 'manual:' + key, this.clock(), 'run-now:' + actor.principal_id, 'pending', undefined, actor.principal_id) };
         } else {
           const state = operation === 'schedule.delete' ? 'deleted' : operation === 'schedule.resume' ? 'active' : 'paused';
