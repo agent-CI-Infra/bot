@@ -36,7 +36,7 @@ test('任务详情展示浏览器截图证据，窄屏不横向溢出', async ({
     await page.goto(h.admin + '/#/projects/101/activity');
     await expect(page.getByRole('heading', { name: 'fixture/project-101', exact: true })).toBeVisible();
     await page.evaluate(() => openTask('browse-ui'));
-    const card = page.locator('section', { has: page.getByRole('heading', { name: '浏览器证据', exact: true }) });
+    const card = page.locator('section.side-card', { has: page.getByRole('heading', { name: '浏览器证据', exact: true }) });
     await expect(card.getByText('共 1 步，其中 1 张截图可打开查看。')).toBeVisible();
     await expect(card.getByRole('img', { name: 'screenshot 第 1 步截图' })).toBeVisible();
     await expect(card.getByRole('link', { name: '打开截图', exact: true })).toHaveAttribute('href', '/api/tasks/browse-ui/browser-evidence/step-1.png');

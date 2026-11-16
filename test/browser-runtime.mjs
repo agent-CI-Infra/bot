@@ -72,6 +72,32 @@ async function withSite(t) {
       res.end('<!doctype html><html><head><title>stream</title></head><body><h1>stream</h1><script>new EventSource("/events")</script></body></html>');
       return;
     }
+    if (url.pathname === '/webrtc-page') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!doctype html><html><head><title>webrtc</title></head><body><h1>webrtc</h1>
+        <script>
+          const report = {
+            RTCPeerConnection: typeof RTCPeerConnection,
+            webkitRTCPeerConnection: typeof webkitRTCPeerConnection,
+            mozRTCPeerConnection: typeof mozRTCPeerConnection
+          };
+          try {
+            if (typeof RTCPeerConnection === 'function') {
+              const pc = new RTCPeerConnection();
+              report.constructed = true;
+              pc.createOffer().then(() => { report.offer = true; document.title = JSON.stringify(report); })
+                .catch(err => { report.offerError = String(err); document.title = JSON.stringify(report); });
+            } else {
+              document.title = JSON.stringify(report);
+            }
+          } catch (err) {
+            report.error = String(err);
+            document.title = JSON.stringify(report);
+          }
+        </script>
+      </body></html>`);
+      return;
+    }
     if (url.pathname === '/hang') return; // never responds, for timeout
     const file = pages[url.pathname];
     if (!file) { res.writeHead(404); res.end('not found'); return; }
@@ -348,6 +374,23 @@ test('real Chromium blocks a same-origin subresource 302 that leaves the allowli
   await runBrowserTool(f.store, row(), { action: 'close' }, { workspace: f.workspace });
 });
 
+
+test('real Chromium removes WebRTC constructors so a page cannot create a peer connection', async (t) => {
+  const executable = resolveTestChromium();
+  if (!executable) assert.fail('未找到真实 Chromium。本测试必须经项目电脑路径启动真实浏览器，缺少运行时按失败处理，不得跳过。');
+  process.env.BOT_BROWSER_EXECUTABLE = executable;
+  const origin = await withSite(t);
+  const f = await fixture(t, 'task-browser-webrtc', origin);
+  const opened = await runBrowserTool(f.store, f.task(), { action: 'open', url: origin + '/webrtc-page' }, { workspace: f.workspace });
+  assert.equal(opened.error, undefined, opened.detail || 'open should succeed');
+  const report = JSON.parse(String(opened.step?.title || ''));
+  assert.equal(report.RTCPeerConnection, 'undefined');
+  assert.equal(report.webkitRTCPeerConnection, 'undefined');
+  assert.equal(report.constructed, undefined);
+  assert.equal(report.offer, undefined);
+  await runBrowserTool(f.store, f.task(), { action: 'close' }, { workspace: f.workspace });
+});
+
 test('typed secrets and screenshot bytes are absent from persisted workspace operation records', async (t) => {
   const executable = resolveTestChromium();
   if (!executable) assert.fail('未找到真实 Chromium。本测试必须经项目电脑路径启动真实浏览器，缺少运行时按失败处理，不得跳过。');
@@ -391,4 +434,12 @@ test('control-plane browser modules do not import playwright-core', () => {
     const source = readFileSync(rel, 'utf8');
     assert.equal(/playwright-core|from 'playwright'|from "playwright"/.test(source), false, rel);
   }
+});
+
+test('manager image copies browser-policy and import-checks manager modules', () => {
+  const dockerfile = readFileSync(new URL('../manager/Dockerfile', import.meta.url), 'utf8');
+  assert.match(dockerfile, /runner\/browser-policy\.mjs/);
+  assert.match(dockerfile, /import\('\.?\/manager\/projects\.mjs'\)/);
+  assert.match(dockerfile, /import\('\.?\/manager\/run-environments\.mjs'\)/);
+  assert.equal(dockerfile.includes("import('./manager/main.mjs')"), false);
 });

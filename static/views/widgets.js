@@ -179,7 +179,8 @@ function ensureTaskDetailView() {
     const extBar = slot('div', 'task-external-bar', 'task-external-bar');
     extBar.setAttribute('aria-label', '外部关联信息');
     const flowBar = slot('div', 'task-flow-bar', 'task-flow-bar');
-    summaryCard.append(topRow, err, title, goalBox, nextSec, faultBox, extBar, flowBar);
+    const evidenceHost = slot('div', 'task-browser-evidence', 'task-browser-evidence');
+    summaryCard.append(topRow, err, title, goalBox, nextSec, faultBox, extBar, flowBar, evidenceHost);
 
     const traceSec = slot('section', 'task-layout', 'task-trace-section');
     traceSec.setAttribute('aria-labelledby', 'timeline-heading');

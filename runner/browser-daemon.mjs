@@ -92,7 +92,7 @@ async function installRoutes(browserContext, nextPolicy) {
     // Document and navigations: hop-by-hop so a 302 cannot leave the allowlist.
     // EventSource/SSE uses continue() so the body is not buffered in this process. Residual:
     // an already-allowed EventSource URL that later 302s off-origin may still send one request.
-    // WebSocket is aborted below (route does not cover it); WebRTC is disabled at launch.
+    // WebSocket is aborted below (route does not cover it); WebRTC constructors are removed in boot().
     if (type === 'eventsource' || type === 'websocket') {
       if (type === 'websocket') return route.abort('blockedbyclient');
       return route.continue();
@@ -134,10 +134,23 @@ async function boot(nextPolicy) {
     acceptDownloads: false,
     serviceWorkers: 'block',
     timeout,
-    args: ['--disable-dev-shm-usage', '--disable-gpu', '--disable-webrtc', ...(typeof process.getuid === 'function' && process.getuid() === 0 ? ['--no-sandbox'] : [])]
+    args: ['--disable-dev-shm-usage', '--disable-gpu', ...(typeof process.getuid === 'function' && process.getuid() === 0 ? ['--no-sandbox'] : [])]
   });
   context.setDefaultTimeout(timeout);
   context.setDefaultNavigationTimeout(timeout);
+  // Chromium has no --disable-webrtc switch; hide constructors before any page script runs.
+  await context.addInitScript(() => {
+    const hide = (object, name) => {
+      try {
+        Object.defineProperty(object, name, { configurable: true, enumerable: false, writable: true, value: undefined });
+        delete object[name];
+      } catch { /* non-configurable in this environment */ }
+    };
+    for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'mozRTCPeerConnection', 'RTCDataChannel']) {
+      hide(globalThis, name);
+      hide(window, name);
+    }
+  });
   await installRoutes(context, nextPolicy);
   const guardPage = p => {
     p.on('websocket', ws => { try { if (typeof ws.close === 'function') ws.close(); } catch { /* already closed */ } });
