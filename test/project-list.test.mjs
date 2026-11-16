@@ -310,6 +310,44 @@ test('a pending list of six folds without a name filter; the fold and filter sur
   assert.deepEqual(again.querySelectorAll('.project-pending-row').filter(row => !row.hidden).map(row => row.dataset.name), ['fixture/many-10']);
 });
 
+test('changing the signed-in account clears the pending fold and filter', async () => {
+  const pending = Array.from({ length: 12 }, (_, i) => ({ id: String(200 + i), full_name: `fixture/private-${i}` }));
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path.startsWith('/api/identity')) return [200, { github_connection: { pending_repositories: pending } }];
+    if (path.startsWith('/api/integrations')) return [200, { integrations: [] }];
+    return [200, { repositories: [], syncs: [] }];
+  });
+  page.run(`var projectRoute = () => null; me = {id: 'a', role: 'project_admin'}; tab = 'projects'; repositories = [];`);
+  await page.run('render()');
+  const fold = page.$('rows').querySelector('[data-testid=pending-repo-fold]');
+  fold.open = true; fold.listeners.toggle[0]();
+  const input = fold.querySelector('[data-testid=pending-repo-search]');
+  input.value = 'private-1'; input.listeners.input[0]();
+  assert.equal(fold.querySelectorAll('.project-pending-row').filter(row => !row.hidden).length, 3);
+  page.run(`me = {id: 'b', role: 'project_admin'}`);
+  await page.run('render()');
+  const again = page.$('rows').querySelector('[data-testid=pending-repo-fold]');
+  assert.ok(!again.open, 'the fold is closed after the account changes');
+  assert.equal(again.querySelector('[data-testid=pending-repo-search]').value, '');
+  assert.equal(again.querySelectorAll('.project-pending-row').filter(row => !row.hidden).length, 12, 'every pending row is visible again');
+});
+
+test('a mixed pending group uses the neutral intro and keeps both kinds of row actions', async () => {
+  const page = loadConsole(['static/app.js', 'static/views.js'], () => [200, {}]);
+  page.run(`var projectRoute = () => null; me = {role: 'project_admin'}`);
+  const group = page.run(`pendingActivationGroup(${JSON.stringify([
+    { id: '1', full_name: 'trusted/repo', self_start: true },
+    { id: '2', full_name: 'other/repo', self_start: false },
+  ])})`);
+  assert.equal(group.querySelector('h2').textContent, '待启动的仓库');
+  assert.equal(group.querySelector('.project-pending-intro').textContent, '这些仓库已装好 GitHub App，启动后会出现在上面的项目列表里。');
+  const rows = [...group.querySelectorAll('.project-pending-row')];
+  assert.equal(rows[0].querySelector('.status').textContent, '可自行启动');
+  assert.equal(rows[0].querySelector('button').textContent, '启动');
+  assert.equal(rows[1].querySelector('.status').textContent, '待超级管理员启动');
+  assert.equal(rows[1].querySelector('button').textContent, '复制提醒');
+});
+
 // #716: a project administrator copies a reminder that names the repository and where to start it.
 test('pending activation rows offer 复制提醒 with 已复制 feedback and a manual fallback', async () => {
   const page = loadConsole(['static/app.js', 'static/views.js'], () => [200, {}]);

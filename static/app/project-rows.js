@@ -30,9 +30,19 @@ function pendingStartAction(repo) {
 // actions around them. Beyond a handful they fold behind one summary line, and a long list gains a name filter. The fold
 // and the typed name survive a redraw of the same page (a list refresh re-creates the group).
 const pendingFoldThreshold = 5, pendingSearchThreshold = 10, pendingFoldState = new Map();
+let pendingFoldAccount = null;
+// Bind the fold and filter to the signed-in account, the same way ownerFoldState() does, so a later
+// login in this tab does not keep the previous reader's typed repository name or open state (#980 review B2).
+function pendingListState(scope) {
+  const account = me ? String(me.id ?? me.username ?? '') : '';
+  if (account !== pendingFoldAccount) { pendingFoldState.clear(); pendingFoldAccount = account; }
+  const state = pendingFoldState.get(scope) || { open: false, query: '' };
+  pendingFoldState.set(scope, state);
+  return state;
+}
 function foldPendingList(list, count, scope) {
   if (count <= pendingFoldThreshold) return list;
-  const state = pendingFoldState.get(scope) || { open: false, query: '' }; pendingFoldState.set(scope, state);
+  const state = pendingListState(scope);
   const fold = element('details', '', 'pending-repo-fold'); fold.dataset.testid = 'pending-repo-fold'; fold.open = state.open;
   fold.addEventListener('toggle', () => { state.open = fold.open; });
   fold.append(element('summary', `查看 ${count} 个待启动仓库`));
@@ -67,7 +77,7 @@ function pendingActivationGroup(pending) {
     line.append(content, status, actions); list.append(line);
   }
   section.append(element('h2', title, 'project-owner-title'),
-    element('p', pending.every(repo => repo.self_start) ? '这些仓库已装好 GitHub App，启动后会出现在上面的项目列表里。'
+    element('p', pending.some(repo => repo.self_start) ? '这些仓库已装好 GitHub App，启动后会出现在上面的项目列表里。'
       : '这些仓库已装好 GitHub App，需要超级管理员在控制台启动后才会出现在上面的项目列表里。', 'project-pending-intro muted'),
     foldPendingList(list, pending.length, 'projects'), consoleLink('#/identity', '查看身份与权限'));
   return section;
