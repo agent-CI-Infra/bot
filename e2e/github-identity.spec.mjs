@@ -235,7 +235,7 @@ test('已安装但未启动的仓库写明启动需超级管理员同意，项�
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const installedRow = page.locator('#rows .row', { hasText: 'fixture/project-101' });
     await expect(installedRow.getByRole('button', { name: '启动', exact: true })).toBeVisible();
-    await expect(installedRow.getByRole('link', { name: '开始接入 fixture/project-101' })).toHaveAttribute('href', '#/onboarding/101');
+    await expect(installedRow.getByRole('link', { name: /^开始接入/ })).toHaveAttribute('href', '#/onboarding/101');
     await expect(page.locator('.project-pending-group')).toHaveCount(0);
     await installedRow.getByRole('button', { name: '启动', exact: true }).click();
     await expect(page.locator('#activation-title')).toHaveText('启动 fixture/project-101');
