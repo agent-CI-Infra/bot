@@ -1,8 +1,14 @@
 /** Heuristic only: a generic confirm or custom widget can still change data or pay. */
 export const destructivePattern = /delete account|destroy|uninstall|revoke access|terminate|pay now|place order|checkout|purchase|buy now|confirm payment|wire transfer|删除账号|注销|付款|结算下单|确认支付|转账/i;
 const secretQuery = /^(?:token|secret|password|passwd|pwd|authorization|access_token|id_token|refresh_token|api[_-]?key)$/i;
-const defaultTimeoutMs = 60_000;
-const maxTimeoutMs = 180_000;
+export const defaultTimeoutMs = 60_000;
+export const maxTimeoutMs = 180_000;
+
+/** Clamp a task-provided timeout so callers never arm a timer with a raw user value. */
+export function boundedTimeoutMs(value) {
+  const timeout = Number(value);
+  return Number.isFinite(timeout) ? Math.min(maxTimeoutMs, Math.max(1_000, Math.floor(timeout))) : defaultTimeoutMs;
+}
 
 export function originOf(value) {
   let url;
@@ -25,13 +31,12 @@ export function normalizePolicy(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray(raw.origins)) return null;
   const origins = [...new Set(raw.origins.map(value => originOf(String(value ?? ''))))].filter(Boolean);
   if (!origins.length) return null;
-  const timeout = Number(raw.timeout_ms);
   return {
     origins,
     allow_destructive: raw.allow_destructive === true ? true
       : Array.isArray(raw.allow_destructive) ? raw.allow_destructive.map(value => String(value)).filter(Boolean)
       : false,
-    timeout_ms: Number.isFinite(timeout) ? Math.min(maxTimeoutMs, Math.max(1_000, Math.floor(timeout))) : defaultTimeoutMs
+    timeout_ms: boundedTimeoutMs(raw.timeout_ms)
   };
 }
 
