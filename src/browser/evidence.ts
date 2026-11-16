@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Store } from '../storage/database.js';
 import { type Actor, scope } from '../app/auth.js';
 import { fail } from '../core/security.js';
-import { redactBrowserValue } from './policy.js';
+import { redactBrowserValue, redactRecordedUrl } from './policy.js';
 import { browserEvidenceDir } from './runtime.js';
 import { browserEvidenceRoot } from './tools.js';
 
@@ -42,7 +42,7 @@ export function listBrowserEvidence(store: Store, taskId: string): BrowserEviden
         n: Number(step.n) || 0,
         at: String(step.at || ''),
         action: String(step.action || ''),
-        url: typeof step.url === 'string' ? step.url : null,
+        url: typeof step.url === 'string' ? redactRecordedUrl(step.url) : null,
         title: typeof step.title === 'string' ? step.title : null,
         result: String(step.result || ''),
         ...(typeof step.error === 'string' ? { error: step.error } : {}),

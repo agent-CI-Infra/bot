@@ -41,16 +41,15 @@ async function withSite(t) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
-function storeFor(t) {
+function storeFor(t, taskId = 'task-browser') {
   const directory = mkdtempSync(join(tmpdir(), 'bot-browser-runtime-'));
   const store = new Store(join(directory, 'control.sqlite'), randomBytes(32));
   seed(store);
-  t.after(async () => { await closeBrowserSession('task-browser'); store.close(); rmSync(directory, { recursive: true, force: true }); });
+  t.after(async () => { await closeBrowserSession(taskId); store.close(); rmSync(directory, { recursive: true, force: true }); });
   return store;
 }
 
-function task(store, origin, extra = {}) {
-  const id = 'task-browser';
+function task(store, origin, extra = {}, id = 'task-browser') {
   store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES(?,?,?,?,?,?)",
     id, '101', 'task.request', 'running', 'Browse the fixture',
     JSON.stringify({ request: 'Inspect the local fixture', browser: { origins: [origin], timeout_ms: 30_000, ...extra } }));
@@ -86,6 +85,7 @@ test('real Chromium opens a local fixture, records a PNG, and enforces origin, d
   const secret = 'fixture-password-value';
   const filled = await runBrowserTool(store, row, { action: 'type', name: '口令', text: secret });
   assert.equal(filled.secret_field, true);
+  assert.equal(existsSync(file), false, 'screenshots saved before a secret was typed must be removed');
   const withheld = await runBrowserTool(store, row, { action: 'screenshot' });
   assert.equal(withheld.error, 'browser_screenshot_withheld');
   const history = store.all("SELECT data FROM task_history WHERE task_id=? AND type='execution_evidence'", row.id).map(row => row.data).join('\n');
@@ -98,8 +98,78 @@ test('real Chromium opens a local fixture, records a PNG, and enforces origin, d
   await runBrowserTool(store, row, { action: 'close' });
   assert.equal(existingBrowserSession(row.id), undefined);
   assert.equal(existsSync(profile), false);
-  assert.equal(existsSync(file), true);
+  assert.equal(existsSync(file), false);
   // Evidence directory is not a host browser profile and must not be walked as one.
   const leftover = existsSync(profile) ? readdirSync(profile) : [];
   assert.deepEqual(leftover, []);
+});
+
+async function withPairedSites(t) {
+  let evilHits = 0;
+  const evil = createServer((_req, res) => {
+    evilHits += 1;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<html><body>evil</body></html>');
+  });
+  evil.listen(0, '127.0.0.1');
+  await once(evil, 'listening');
+  const evilOrigin = `http://127.0.0.1:${evil.address().port}`;
+  const allowed = createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    if (url.pathname === '/go-out') {
+      res.writeHead(302, { Location: `${evilOrigin}/landed` });
+      res.end();
+      return;
+    }
+    if (url.pathname === '/embeds') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!doctype html><html><body>
+        <h1>允许的页面</h1>
+        <iframe src="${evilOrigin}/frame" id="ext-frame"></iframe>
+        <img src="${evilOrigin}/pixel.png" alt="x">
+        <p>embeds</p>
+      </body></html>`);
+      return;
+    }
+    if (url.pathname === '/token') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<html><body>token page</body></html>');
+      return;
+    }
+    res.writeHead(404);
+    res.end('not found');
+  });
+  allowed.listen(0, '127.0.0.1');
+  await once(allowed, 'listening');
+  t.after(() => new Promise(resolve => {
+    allowed.close(() => evil.close(resolve));
+    allowed.closeAllConnections();
+    evil.closeAllConnections();
+  }));
+  return { origin: `http://127.0.0.1:${allowed.address().port}`, evilOrigin, evilHits: () => evilHits };
+}
+
+test('real Chromium blocks off-origin redirects, iframes and subresources, and redacts token query values', async (t) => {
+  try { resolveChromium(); }
+  catch (error) {
+    assert.fail(error.detail || '未找到真实 Chromium。本测试必须启动真实浏览器，缺少运行时按失败处理，不得跳过。');
+  }
+  const sites = await withPairedSites(t);
+  const store = storeFor(t, 'task-browser-net');
+  const row = task(store, sites.origin, {}, 'task-browser-net');
+  const redirected = await runBrowserTool(store, row, { action: 'open', url: sites.origin + '/go-out' });
+  assert.equal(redirected.error, 'browser_origin_forbidden', redirected.detail || 'redirect must be refused');
+  assert.equal(sites.evilHits(), 0, 'the off-origin redirect target must not be contacted');
+  const embeds = await runBrowserTool(store, row, { action: 'open', url: sites.origin + '/embeds' });
+  assert.equal(embeds.error, undefined, embeds.detail || 'allowed page with blocked embeds should still open');
+  // Give the page a moment to attempt iframe and image loads.
+  await new Promise(resolve => setTimeout(resolve, 500));
+  assert.equal(sites.evilHits(), 0, 'iframe and image requests to another origin must not reach that host');
+  const token = 'super-secret-access-token';
+  const opened = await runBrowserTool(store, row, { action: 'open', url: `${sites.origin}/token?access_token=${token}` });
+  assert.equal(opened.error, undefined, opened.detail);
+  assert.equal(String(opened.step.url).includes(token), false);
+  const steps = readFileSync(join(browserEvidenceDir(browserEvidenceRoot(store), row.id), 'steps.json'), 'utf8');
+  assert.equal(steps.includes(token), false);
+  await runBrowserTool(store, row, { action: 'close' });
 });

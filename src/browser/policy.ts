@@ -10,8 +10,14 @@ export type BrowserPolicy = {
 const defaultTimeoutMs = 60_000;
 const maxTimeoutMs = 180_000;
 
-/** Destructive labels or paths that need an explicit grant on the task. */
+/**
+ * Heuristic labels or paths that need an explicit grant on the task.
+ * This is not a complete detector: a generic “确认” or a custom widget can
+ * still change data or pay without matching these patterns.
+ */
 export const destructivePattern = /delete account|destroy|uninstall|revoke access|terminate|pay now|place order|checkout|purchase|buy now|confirm payment|wire transfer|删除账号|注销|付款|结算下单|确认支付|转账/i;
+
+const secretQuery = /^(?:token|secret|password|passwd|pwd|authorization|access_token|id_token|refresh_token|api[_-]?key)$/i;
 
 export function browserPolicyOf(task: Row): BrowserPolicy | null {
   let input: any;
@@ -40,6 +46,17 @@ export function originOf(value: string): string | null {
   return url.origin;
 }
 
+/** Local documents and in-page data that are not a network request to another origin. */
+export function isBrowserPassthroughUrl(value: string): boolean {
+  if (value === 'about:blank' || value.startsWith('about:')) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'data:' || url.protocol === 'blob:';
+  } catch {
+    return false;
+  }
+}
+
 export function allowedOrigin(policy: BrowserPolicy, value: string): { ok: true; url: URL } | { ok: false; error: string; detail: string } {
   const origin = originOf(value);
   if (!origin) return { ok: false, error: 'browser_url_refused', detail: '只允许没有账号口令的 http 或 https 地址，且必须事先列入本任务允许的站点。' };
@@ -47,6 +64,14 @@ export function allowedOrigin(policy: BrowserPolicy, value: string): { ok: true;
   if (!policy.origins.includes(origin))
     return { ok: false, error: 'browser_origin_forbidden', detail: '这个地址不在本任务允许访问的站点范围内。' };
   return { ok: true, url };
+}
+
+/** Same origin rule as navigation, applied to every request the browser would make, including redirects, iframes and subresources. */
+export function networkRequestAllowed(policy: BrowserPolicy, value: string): { ok: true } | { ok: false; error: string; detail: string } {
+  if (isBrowserPassthroughUrl(value)) return { ok: true };
+  const check = allowedOrigin(policy, value);
+  if (check.ok) return { ok: true };
+  return check;
 }
 
 export function destructiveAllowed(policy: BrowserPolicy, path: string, label: string): { ok: true } | { ok: false; error: string; detail: string } {
@@ -68,4 +93,19 @@ export function redactBrowserValue(value: unknown, depth = 0): unknown {
     if (/^(?:token|secret|password|authorization|cookie|private_key|set-cookie|passwd|pwd)$/i.test(key)) return [key, '[redacted]'];
     return [key, redactBrowserValue(item, depth + 1)];
   }));
+}
+
+/** Keep the origin of a recorded URL, but strip token-like query and fragment values. */
+export function redactRecordedUrl(value: string | null): string | null {
+  if (!value) return null;
+  if (value === 'about:blank' || value.startsWith('about:')) return value;
+  let url: URL;
+  try { url = new URL(value); } catch { return originOf(value) ? value : null; }
+  if (url.username || url.password) return originOf(value);
+  for (const key of [...url.searchParams.keys()]) {
+    if (secretQuery.test(key) || /(?:token|secret|password|passwd|authorization|api[_-]?key)/i.test(key))
+      url.searchParams.set(key, '[redacted]');
+  }
+  if (/(?:token|secret|password|access_token|id_token|authorization)/i.test(url.hash)) url.hash = '#redacted';
+  return url.toString();
 }

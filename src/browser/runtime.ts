@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
-import { allowedOrigin, destructiveAllowed, originOf, redactBrowserValue, type BrowserPolicy } from './policy.js';
+import { allowedOrigin, destructiveAllowed, networkRequestAllowed, originOf, redactBrowserValue, redactRecordedUrl, type BrowserPolicy } from './policy.js';
 
 export type BrowserStep = {
   id: string;
@@ -22,6 +22,7 @@ type LiveSession = BrowserSession & {
   page: Page;
   browser: Browser;
   context: BrowserContext;
+  blocked: { url: string | null };
 };
 
 export type BrowserSession = {
@@ -35,6 +36,18 @@ export type BrowserSession = {
 };
 
 const sessions = new Map<string, LiveSession>();
+const profileDirs = new Set<string>();
+
+function forgetProfile(dir: string): void {
+  profileDirs.delete(dir);
+  try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort profile cleanup */ }
+}
+
+function cleanupForgottenProfiles(): void {
+  for (const dir of [...profileDirs]) forgetProfile(dir);
+}
+
+process.once('exit', cleanupForgottenProfiles);
 
 /** Resolve a real Chromium (or headless shell). Never falls back to a mock page or fake browser. */
 export function resolveChromium(): { executablePath: string; kind: string } {
@@ -76,10 +89,12 @@ export async function openBrowserSession(taskId: string, policy: BrowserPolicy, 
   const profileDir = mkdtempSync(join(tmpdir(), 'bot-browser-'));
   const evidenceDir = browserEvidenceDir(root, taskId);
   mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
+  profileDirs.add(profileDir);
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
   let page: Page | undefined;
   let closed = false;
+  const blocked = { url: null as string | null };
   const close = async () => {
     if (closed) return;
     closed = true;
@@ -87,7 +102,7 @@ export async function openBrowserSession(taskId: string, policy: BrowserPolicy, 
     try { await page?.close(); } catch { /* already gone */ }
     try { await context?.close(); } catch { /* already gone */ }
     try { await browser?.close(); } catch { /* already gone */ }
-    try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* best-effort profile cleanup */ }
+    forgetProfile(profileDir);
   };
   try {
     browser = await chromium.launch({
@@ -104,6 +119,39 @@ export async function openBrowserSession(taskId: string, policy: BrowserPolicy, 
     page = await context.newPage();
     page.setDefaultTimeout(policy.timeout_ms);
     page.setDefaultNavigationTimeout(policy.timeout_ms);
+    await context.route('**/*', async route => {
+      const url = route.request().url();
+      const check = networkRequestAllowed(policy, url);
+      if (!check.ok) {
+        blocked.url = url;
+        return route.abort('blockedbyclient');
+      }
+      // Continue() lets Chromium follow redirects without a second route check, so
+      // fetch one hop at a time and refuse an off-origin Location before it is requested.
+      try {
+        const response = await route.fetch({ maxRedirects: 0 });
+        const status = response.status();
+        if (status >= 300 && status < 400) {
+          const location = response.headers().location;
+          if (location) {
+            let next: string;
+            try { next = new URL(location, url).toString(); }
+            catch {
+              blocked.url = location;
+              return route.abort('blockedbyclient');
+            }
+            const nextCheck = networkRequestAllowed(policy, next);
+            if (!nextCheck.ok) {
+              blocked.url = next;
+              return route.abort('blockedbyclient');
+            }
+          }
+        }
+        return route.fulfill({ response });
+      } catch {
+        return route.abort('failed');
+      }
+    });
   } catch (error) {
     await close();
     throw error;
@@ -111,7 +159,7 @@ export async function openBrowserSession(taskId: string, policy: BrowserPolicy, 
 
   const session = {
     taskId, policy, steps: [] as BrowserStep[], secretTyped: false, profileDir, evidenceDir,
-    page, browser, context, close,
+    page, browser, context, blocked, close,
     run: async (action: string, args: Record<string, unknown>, guard?: () => Promise<void> | void) => {
       const live = sessions.get(taskId);
       if (closed || !live) return { error: 'browser_session_closed', detail: '浏览器已关闭。' };
@@ -146,7 +194,15 @@ async function perform(session: LiveSession, action: string, args: Record<string
   if (action === 'open') {
     const check = allow(String(args.url ?? ''));
     if (!check.ok) return record(session, action, check);
-    await page.goto(check.url.toString(), { waitUntil: 'domcontentloaded' });
+    session.blocked.url = null;
+    try {
+      await page.goto(check.url.toString(), { waitUntil: 'domcontentloaded' });
+    } catch (error) {
+      await page.goto('about:blank').catch(() => {});
+      if (session.blocked.url || isBlockedNavigation(error))
+        return record(session, action, { error: 'browser_origin_forbidden', detail: '页面跳转到了未允许的站点，请求已被拦截。' });
+      throw error;
+    }
     const final = allow(page.url());
     if (!final.ok) {
       await page.goto('about:blank').catch(() => {});
@@ -172,7 +228,16 @@ async function perform(session: LiveSession, action: string, args: Record<string
       const check = allow(new URL(href, page.url()).toString());
       if (!check.ok) return record(session, action, check, true);
     }
-    await loc.click();
+    session.blocked.url = null;
+    try {
+      await loc.click();
+    } catch (error) {
+      if (session.blocked.url || isBlockedNavigation(error)) {
+        await page.goto('about:blank').catch(() => {});
+        return record(session, action, { error: 'browser_origin_forbidden', detail: '点击后跳转到了未允许的站点，请求已被拦截。' });
+      }
+      throw error;
+    }
     const final = allow(page.url());
     if (!final.ok) {
       await page.goto('about:blank').catch(() => {});
@@ -188,7 +253,10 @@ async function perform(session: LiveSession, action: string, args: Record<string
     const type = (await loc.getAttribute('type').catch(() => null) || '').toLowerCase();
     const named = `${await loc.getAttribute('name').catch(() => '')} ${await loc.getAttribute('autocomplete').catch(() => '')} ${await loc.getAttribute('aria-label').catch(() => '')}`;
     const secret = type === 'password' || /password|token|secret|authorization/i.test(named);
-    if (secret) session.secretTyped = true;
+    if (secret) {
+      session.secretTyped = true;
+      withholdSavedScreenshots(session);
+    }
     await loc.fill(text);
     return record(session, action, { ok: true, secret_field: secret }, secret);
   }
@@ -198,6 +266,20 @@ async function perform(session: LiveSession, action: string, args: Record<string
     return summary;
   }
   return record(session, action, { error: 'browser_action_unsupported', detail: '不支持这个浏览器动作。' }, true);
+}
+
+
+function isBlockedNavigation(error: unknown): boolean {
+  return /blockedbyclient|ERR_BLOCKED_BY_CLIENT|NS_ERROR_ABORT|net::ERR_ABORTED/i.test(String((error as Error)?.message || error));
+}
+
+function withholdSavedScreenshots(session: LiveSession): void {
+  for (const step of session.steps) {
+    if (!step.screenshot) continue;
+    try { rmSync(join(session.evidenceDir, step.screenshot.file), { force: true }); } catch { /* already gone */ }
+    delete step.screenshot;
+  }
+  writeFileSync(join(session.evidenceDir, 'steps.json'), JSON.stringify({ task_id: session.taskId, steps: session.steps }, null, 2), { mode: 0o600 });
 }
 
 function describeTarget(args: Record<string, unknown>): string | null {
@@ -233,7 +315,7 @@ async function record(session: LiveSession, action: string, result: Record<strin
   try { title = session.page.isClosed() ? null : await session.page.title(); } catch { title = null; }
   const step: BrowserStep = {
     id, n, at: new Date().toISOString(), action,
-    url: url && (url === 'about:blank' || originOf(url)) ? url : null,
+    url: url && (url === 'about:blank' || originOf(url)) ? redactRecordedUrl(url) : null,
     title,
     result: String(result.detail || result.error || (result.ok ? 'ok' : 'done')),
     ...(typeof result.error === 'string' ? { error: result.error } : {})
