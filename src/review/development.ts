@@ -1,6 +1,6 @@
 import type { Store, Row } from '../storage/database.js';
 import type { GitHub } from '../github/client.js';
-import { HttpError, randomId } from '../core/security.js';
+import { randomId } from '../core/security.js';
 import { assertOwnedPR } from '../github/publisher.js';
 import type { DevelopmentWait } from '../github/text.js';
 import { assigneesOf, developmentReady, reviewRequestsCode, sameLabel } from './queue.js';

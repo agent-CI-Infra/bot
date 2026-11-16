@@ -488,7 +488,7 @@ export class TaskEngine {
       if(task.phase==='prepare'&&event){
         update({generation:environment.generation,workspace_id:task.workspace_id||randomId()});
         await validate();
-        const target=await event.prepare(this.store,github,task,input,redactor),policy=taskConfiguration(this.store,task)?.policy??this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
+        const target=await event.prepare(this.store,github,task,input,redactor);
         const ruleSha=(await github.ref(github.defaultBranch))?.object?.sha||target.sha;
         const mirror=this.gitCache&&github.cloneUrl?await this.gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[target.sha,ruleSha],refs:[`refs/heads/${github.defaultBranch}`]}):undefined;
         let effectiveRules:ReturnType<typeof resolveRules>;

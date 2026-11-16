@@ -28,7 +28,7 @@ export function importBotRules(store: Store): void {
   store.transaction(() => {
     for (const policy of store.all('SELECT repository_id FROM policies')) {
       const id = String(policy.repository_id), cached = store.get('SELECT sha,files FROM repository_rule_sources WHERE repository_id=?', id);
-      if (cached) importFiles(store, id, String(cached.sha), JSON.parse(cached.files));
+      if (cached) importFiles(store, id, String(cached.sha), String(cached.files));
       else store.run('INSERT INTO rule_imports VALUES(?,NULL,NULL,1,?) ON CONFLICT(repository_id) DO NOTHING', id, JSON.stringify(emptyReport()));
     }
     store.run("INSERT INTO settings VALUES('rules.bot_imported',?)", new Date().toISOString());
@@ -42,30 +42,36 @@ export function importPending(store: Store, repositoryId: string): boolean {
 
 /** The pending import of one project, from the .bot/ files at the commit the bot reads first after the upgrade. */
 export function importRepository(store: Store, repositoryId: string, sha: string, files: Record<string, string>): void {
-  store.transaction(() => { if (importPending(store, repositoryId)) importFiles(store, repositoryId, sha, files); });
+  store.transaction(() => { if (importPending(store, repositoryId)) importFiles(store, repositoryId, sha, JSON.stringify(files)); });
 }
 
 const emptyReport = (): ImportReport => ({ files: [], sections: [], labels: { ...defaultLabels }, computer: [], warnings: [] });
 
-function importFiles(store: Store, id: string, sha: string, files: Record<string, string>) {
-  const report = emptyReport();
+// One project's import, from the files as JSON text. Whatever goes wrong in one project (a stored value that is not valid
+// JSON, a save the Manager prompt refuses) rolls back that project only: it keeps its console and built-in rules, and its
+// report says so instead of listing what was rolled back. The startup never stops on it.
+function importFiles(store: Store, id: string, sha: string, filesJson: string) {
+  let report = emptyReport();
   try {
-    store.transaction(() => importProject(store, id, files, sha, report));
+    const attempt = emptyReport();
+    store.transaction(() => importProject(store, id, JSON.parse(filesJson), sha, attempt));
+    report = attempt;
   } catch (error) {
-    // One project's rules that cannot be imported leave its console and built-in rules as they are.
     report.warnings.push(`导入失败，沿用控制台和内置规则：${error instanceof Error ? error.message : String(error)}`);
   }
   // What the repository still has is listed by name only.
   const cached = store.get('SELECT files FROM repository_rule_sources WHERE repository_id=?', id);
-  if (cached) store.run('UPDATE repository_rule_sources SET files=? WHERE repository_id=?',
-    JSON.stringify(Object.fromEntries(Object.entries(JSON.parse(cached.files) as Record<string, string>).map(([path, content]) => [path, retiredPath(path) ? '' : content]))), id);
+  let names: Record<string, string> | null = null;
+  try { names = cached ? Object.fromEntries(Object.entries(JSON.parse(cached.files) as Record<string, string>).map(([path, content]) => [path, retiredPath(path) ? '' : content])) : null; } catch {}
+  if (cached) store.run('UPDATE repository_rule_sources SET files=? WHERE repository_id=?', JSON.stringify(names ?? {}), id);
   store.run('INSERT INTO rule_imports VALUES(?,?,?,0,?) ON CONFLICT(repository_id) DO UPDATE SET sha=excluded.sha,imported_at=excluded.imported_at,pending=0,report=excluded.report',
     id, sha, new Date().toISOString(), JSON.stringify(report));
   store.audit('system', 'rules.imported', report.files.join(', ') || 'none', id);
 }
 
 function importProject(store: Store, id: string, files: Record<string, string>, sha: string, report: ImportReport) {
-  const repository = (path: string) => typeof files[path] === 'string' && files[path] !== '' ? files[path]! : null;
+  // A repository file took effect when it existed, also when it was empty.
+  const repository = (path: string) => Object.hasOwn(files, path) && typeof files[path] === 'string' ? files[path]! : null;
   const policy = store.get('SELECT rule_overrides FROM policies WHERE repository_id=?', id);
   const overrides = JSON.parse(policy?.rule_overrides || '{}');
   // The text a rule section took effect with when the project had its own: the repository file, else the console text.
@@ -118,7 +124,7 @@ function importProject(store: Store, id: string, files: Record<string, string>, 
 
 // The .bot/ rule texts among files (the computer file is merged into the computer, not a text).
 const ruleTexts = (files: Record<string, string>) => Object.fromEntries(Object.entries(files)
-  .filter(([path, content]) => Object.hasOwn(defaults, path) && path !== '.bot/computer.yaml' && typeof content === 'string' && content !== '' && !content.includes('\0')));
+  .filter(([path, content]) => Object.hasOwn(defaults, path) && path !== '.bot/computer.yaml' && typeof content === 'string' && !content.includes('\0')));
 
 /**
  * Tasks under way keep the rule texts they were going to work with. One that already prepared froze the .bot/ texts it
@@ -129,7 +135,8 @@ function keepStartedTasks(store: Store, id: string, imported: Record<string, str
   const rows = store.all(`SELECT c.task_id,c.snapshot FROM task_execution_configs c JOIN tasks t ON t.id=c.task_id
     WHERE t.repository_id=? AND t.status NOT IN (${terminal.map(() => '?').join(',')})`, id, ...terminal);
   for (const row of rows) {
-    const config = JSON.parse(row.snapshot), texts = config.rule_files ? ruleTexts(config.rule_files) : imported;
+    let config: any; try { config = JSON.parse(row.snapshot); } catch { continue; }
+    const texts = config.rule_files ? ruleTexts(config.rule_files) : imported;
     if (!config.policy || !Object.keys(texts).length) continue;
     config.policy = { ...config.policy, rule_overrides: JSON.stringify({ ...JSON.parse(config.policy.rule_overrides || '{}'), ...texts }) };
     if (config.rule_files) config.rule_files = Object.fromEntries(Object.entries(config.rule_files as Record<string, string>).map(([path, content]) => [path, retiredPath(path) ? '' : content]));

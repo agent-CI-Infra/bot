@@ -213,7 +213,7 @@ function repositorySkillsCard() {
     if (flash) message.setAttribute('role', 'status');
     const nodes = [note('检视、开发、标签和行为指南的规则就是上面 Manager 提示词里的章节，检视和开发标签的名字在「项目设置 → 基本」里修改。每个任务读取默认分支 .agents/skills/ 下的 skill：skill 只指导本仓库的工作，不能放宽权限或改变平台规则。'), ruleSync(), ...(flash ? [message] : [])];
     if (current.rules?.retired_files?.length) nodes.push(retiredRulesNotice());
-    if (!skills.length) nodes.push(note(current.rules ? '默认分支没有 .agents/skills/ 下的 skill。' : '暂时读不到仓库 skill。'));
+    if (!skills.length) nodes.push(note(!current.rules ? '暂时读不到仓库 skill。' : !current.rules.sha ? '尚未读取默认分支，还不知道有哪些 skill。' : '默认分支没有 .agents/skills/ 下的 skill。'));
     else {
       const { table, body } = projectTable(['skill', '文件', '操作'], '仓库 skill');
       for (const { path } of skills) {

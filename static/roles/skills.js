@@ -142,7 +142,7 @@ function roleSkillFacts(bundle, state) {
   if (saved?.files?.length) box.append(table.table); else box.append(note('尚无已保存的文件清单；下面编辑的是草稿。'));
   if (bundle.source.type === 'repository') {
     const cached = state.data.skill_sources?.repository;
-    box.append(note(cached ? '当前可选仓库文件来自提交：' + cached.commit : '尚未读取仓库技能缓存；新的仓库来源需要先读取默认分支规则文件。'));
+    box.append(note(cached ? '当前可选仓库文件来自提交：' + cached.commit : '尚未读取仓库技能缓存；新的仓库来源需要先在「角色 → Manager」刷新默认分支的仓库 skill。'));
     if (cached?.commit !== bundle.source.commit) box.append(note('草稿指定的提交与当前仓库缓存不同。未更改的已固定包可原样保存；更换标识、路径或提交需要先取得对应版本，不会自动更新到分支最新内容。'));
   }
   return box;

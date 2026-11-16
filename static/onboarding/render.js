@@ -58,9 +58,9 @@ async function renderOnboarding(request,panel,feedback=''){
     // The same model fields as a project's add-model form: resolved addresses, upstream list and test (project.js).
     panel.append(wizardForm('添加模型',[note('保存的接口视为可信，可接收启用项目的代码、日志和测试材料。Key 加密保存，不明文回读。'),...modelFields(null)],'保存并继续',async value=>{const result=await api('/api/models','POST',{...value,repository_id:null});await api('/api/onboarding/model','POST',{model_id:result.model.id});wizardStep(5);}));next();
   }else if(onboardingStep===5){
-    panel.append(note('四个内置 skill 覆盖标签、Issue 检视、PR 检视和明确要求改代码时的开发。优先级：内置默认 → 项目控制台 → 默认分支仓库文件。PR 修改行为文件时必须由人决定，不能自动合并。'));
+    panel.append(note('四份内置规则覆盖标签、Issue 检视、PR 检视和明确要求改代码时的开发，项目在「角色 → Manager」的 Manager 提示词里改写对应章节；检视和开发标签的名字在项目设置里。仓库里的 .bot/ 文件不再读取。PR 修改仓库 skill 时必须由人决定，不能自动合并。'));
     for(const [path,content]of Object.entries(data.defaults))panel.append(collapsible(path+' · 内置默认',content));
-    panel.append(note('仓库还可提供 .agents/skills/**/SKILL.md。项目「模型」页配置项目默认模型和各工作类型的模型。「角色 → Manager」页编辑 Manager 分派提示词和分派模型，并查看规则文件来源；「角色」页配置职责、权限和预算。项目「监听与触发」页配置能力上限、事件来源和标签触发。computer.yaml 接到现有机器配置，不另建资源系统。'));next();
+    panel.append(note('仓库还可提供 .agents/skills/**/SKILL.md。项目「模型」页配置项目默认模型和各工作类型的模型。「角色 → Manager」页编辑 Manager 分派提示词、规则章节和分派模型，并查看仓库 skill；「角色」页配置职责、权限和预算。项目「监听与触发」页配置能力上限、事件来源和标签触发。电脑规格在项目「机器配置」里修改。'));next();
   }else{
     const summary=card('接入状态');summary.append(facts([['公网地址',data.public_address?.origin||'待验证'],['App',data.app?.slug||'待选择'],['安装',progress[3].text],['GitHub 登录',data.github_login?.enabled?'已启用':'使用本地账号'],['默认模型',progress[4].ready?models.find(m=>m.id===data.model_id)?.model_name||'已配置':'待配置'],['Agent','Pi 1.4.0 · 每仓库长期容器 · 模型请求经控制面代理']]));panel.append(summary);
     const missing=progress.slice(0,6).map((item,index)=>({...item,index})).filter(item=>!item.ready);
