@@ -144,3 +144,67 @@ test('#563 辅助文字与默认芯片对比度至少 4.5:1，侧栏标签至少
     await page.screenshot({ path: `${out}/login-after-390.png`, fullPage: true });
   } finally { await h.stop(); }
 });
+
+// #885: the launcher's 11px hint and the health row are two fixed elements the report measured below AA. The launcher
+// keeps its own `#c5dce1` because the generic console button rule paints the background (`--color-brand`), and the health
+// row loses its `.view-error` red to `.console-ready .muted`. Both are read here in the state that actually renders:
+// the launcher on a work page (and while hovered), the health row after a failed read.
+const measure = selector => {
+  const lin = color => { color = color / 255; return color <= 0.04045 ? color / 12.92 : ((color + 0.055) / 1.055) ** 2.4; };
+  const parse = color => (color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/) || []).slice(1, 4).map(Number);
+  const lum = rgb => 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
+  const ratio = (fg, bg) => {
+    const a = parse(fg), b = parse(bg);
+    if (a.length !== 3 || b.length !== 3) return 0;
+    const one = lum(a), two = lum(b);
+    return (Math.max(one, two) + 0.05) / (Math.min(one, two) + 0.05);
+  };
+  const background = el => {
+    for (let node = el; node; node = node.parentElement) {
+      const bg = getComputedStyle(node).backgroundColor;
+      if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') return bg;
+    }
+    return getComputedStyle(document.body).backgroundColor;
+  };
+  const el = document.querySelector(selector);
+  if (!el) return null;
+  const style = getComputedStyle(el), bg = background(el);
+  return { selector, color: style.color, background: bg, fontSize: parseFloat(style.fontSize), contrast: ratio(style.color, bg) };
+};
+
+test('#885 管理助手启动器小字与健康状态错误态至少 4.5:1', async ({ page }) => {
+  test.setTimeout(120000);
+  const h = await harness();
+  const read = selector => page.evaluate(measure, selector);
+  try {
+    const { admin, password } = await setup(h);
+    const a = await account(admin);
+    await repository(admin, a.id, '101');
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto(h.admin + '/#/projects');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
+
+    await expect(page.locator('#management-launcher')).toBeVisible();
+    const hint = await read('.management-launcher-label small');
+    expect(hint.fontSize).toBe(11);
+    expect(hint.contrast, `启动器小字 ${hint.color} on ${hint.background}`).toBeGreaterThanOrEqual(4.5);
+    await page.locator('#management-launcher').hover();
+    const hovered = await read('.management-launcher-label small');
+    expect(hovered.contrast, `悬停时 ${hovered.color} on ${hovered.background}`).toBeGreaterThanOrEqual(4.5);
+    await page.mouse.move(0, 0);
+    await page.screenshot({ path: `${out}/launcher-885-after-1440.png`, fullPage: true });
+
+    const fail = route => route.fulfill({ status: 500, json: { error: 'unavailable' } });
+    await page.route('**/api/environments/101', fail);
+    await page.goto(h.admin + '/#/projects/101/overview');
+    const healthNode = page.locator('.workspace-health-status.view-error');
+    await expect(healthNode).toBeVisible({ timeout: 20000 });
+    const health = await read('.workspace-health-status');
+    expect(health.contrast, `健康态 ${health.color} on ${health.background}`).toBeGreaterThanOrEqual(4.5);
+    await page.screenshot({ path: `${out}/health-885-after-1440.png`, fullPage: true });
+    await page.unroute('**/api/environments/101', fail);
+  } finally { await h.stop(); }
+});
