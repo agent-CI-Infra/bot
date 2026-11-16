@@ -103,7 +103,8 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     installations[0].events = allEvents; await sync.click();
     await expect(message.locator('span')).toHaveText('安装列表已同步，1 个安装的权限和事件订阅都正常。');
     await expect(message.locator('span')).toHaveClass('view-success');
-    await expect(chip('101')).toBeHidden(); await expect(chip('202')).toBeHidden();
+    // #977: a fresh empty reading names its state on the settings table too, instead of leaving an empty cell.
+    await expect(chip('101')).toHaveText('正常'); await expect(chip('202')).toHaveText('正常');
     // Without workflow_run both rows are flagged; switching the feature on only raises that row from blue to amber.
     installations[0].events = events;
     expect((await admin('/api/repositories/101/policy', 'PATCH', { actions_failures_enabled: true })).status).toBe(200);
@@ -119,7 +120,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     }
     await page.setViewportSize({ width: 1365, height: 900 });
     installations[0].events = allEvents; await sync.click();
-    await expect(message.locator('span')).toHaveText('安装列表已同步，1 个安装的权限和事件订阅都正常。'); await expect(chip('101')).toBeHidden();
+    await expect(message.locator('span')).toHaveText('安装列表已同步，1 个安装的权限和事件订阅都正常。'); await expect(chip('101')).toHaveText('正常');
     // A failed account sync cannot turn cached grants into an all-normal conclusion.
     failInstallations = true; await sync.click();
     await expect(message).toContainText('部分账号同步失败：Department App（github_http_503）');
