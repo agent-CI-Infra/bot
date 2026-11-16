@@ -29,6 +29,8 @@ test('list and columns share filters, grouping and counts at six widths without 
   try {
     await page.getByLabel('工作类型', { exact: true }).selectOption('review.issue');
     await page.getByLabel('按…分列', { exact: true }).selectOption('repository');
+    const expected = ['101/issue/1', '101/issue/3', '101/issue/4', '101/issue/5', '202/issue/1'].map(key => key + '/review.issue');
+    await expect.poll(() => keys(page)).toEqual(expected);
     const before = await keys(page), count = await page.locator('#board-status').innerText();
     await layout(page, '切换为列表');
     await expect(page.locator('#board-columns')).toHaveClass(/board-list-layout/);
