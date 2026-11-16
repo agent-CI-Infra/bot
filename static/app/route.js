@@ -47,6 +47,9 @@ function addressTab(hash) {
   const name = /^#\/([a-z]+)(?:\/|$)/.exec(hash)?.[1];
   return ['accounts', 'users'].includes(name) ? 'settings' : tabAddresses[name] ? name : null;
 }
+// #936: the address whose page was painted last. A dialog opened from that page belongs to it, so a real address
+// change ends the dialog and a repaint of the same address (a list refresh, a poll) leaves it open.
+let paintedAddress = '';
 async function route() {
   renderVersion++;
   // #737: the focus the redraw may take away, so a change the reader asked for can hand it to the page it opens.
@@ -72,6 +75,13 @@ async function route() {
   // redirect, and carries that it came from the list so deleting the project still returns to the batch list.
   const legacyProjectSettings = /^#\/settings\/projects\/([1-9]\d*)$/.exec(location.hash);
   if (legacyProjectSettings) history.replaceState({ projectListOrigin: true }, '', `#/projects/${legacyProjectSettings[1]}/basic`);
+  // #936: the task detail and the read-only delivery detail are dialogs of the page they were opened from. When the
+  // address moves, they go with it - the target page must be usable without a second close - while a repaint of the
+  // same address keeps them, so a poll or a list refresh does not shut a dialog the reader is reading. A dialog that
+  // holds unsaved input (#editor, the confirmation box) is never a page dialog and is not touched here.
+  if (location.hash !== paintedAddress) {
+    for (const id of ['task-view', 'detail']) { const view = $(id); if (view.open) view.close(); }
+  }
   // An address the console does not know keeps the current page (on a fresh load that is the projects page).
   const missing = unknownAddress(location.hash);
   let next = missing ? 'not-found' : addressTab(location.hash) || tab;
@@ -121,5 +131,6 @@ async function route() {
   // unless a later address arrived during the render above and owns the page by now.
   if (resolved !== tab) return;
   announcePage(missing, target, focusBefore);
+  paintedAddress = location.hash;
 }
 window.addEventListener('hashchange', () => { if (me) route().catch(error); });
