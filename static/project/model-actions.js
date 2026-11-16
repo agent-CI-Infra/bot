@@ -9,7 +9,7 @@ function modelActions(model, result, after = reloadWith) {
     const actor=me,target=current,address=location.hash,live=()=>me===actor&&current===target&&location.hash===address;
     let detail;
     try { detail = (await api(`/api/models/${model.id}`)).model; }
-    catch (err) { if(live()){result.hidden = false; result.replaceChildren(element('p', err.message, 'view-error'));} return; }
+    catch (err) { if(live()){result.hidden = false; result.replaceChildren(element('p', readErrorText(err), 'view-error'));} return; }
     if(!live())return;
     if(!Array.isArray(detail.used_by)||!Array.isArray(detail.role_used_by)||typeof detail.onboarding_default!=='boolean'
       ||detail.role_used_by.some(role=>!['project_role','service_role'].includes(role.type))){

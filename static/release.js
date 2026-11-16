@@ -21,7 +21,7 @@ function releaseSection() {
     if (!await askConfirm({ title: `确认打标签 ${p.version}？`, body: [p.target_sha, p.target_title, `范围：${p.previous_tag?.name || '仓库起点'} → ${p.version}`, '标签触发 Release 检查；通过后生成草稿，正式发布仍需独立确认。'], action: '确认打标签' })) return;
     if (!live()) return; writing = true; confirm.disabled = true;
     try { if (!live()) return; await api(endpoint, 'POST', { version: p.version, target_sha: p.target_sha, credential: p.credential }); if (live()) await refresh(); }
-    catch (error) { if (!live()) return; if (!denied(error)) { const detail = error.message;
+    catch (error) { if (!live()) return; if (!denied(error)) { const detail = readErrorText(error);
       if (!error.status || error.status >= 500) { target.releasePreview = null; confirm.disabled = true; await refresh(); if (live()) message.textContent = detail + '；提交结果未确认，请先核对发布记录，再重新检查候选。'; }
       else { await check(); if (live()) message.textContent = detail; } } }
     finally { writing = false; if (live()) confirm.disabled = !target.releasePreview?.available || target.releasePreview.version !== version.value; }

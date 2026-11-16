@@ -6,7 +6,7 @@ function accountChangeMessage(err) {
   if (code === 'invalid_rsa_private_key') return '这不是有效的 RSA 私钥：GitHub App 账号要保存 App 的私钥（PEM），不是令牌。';
   if (code === 'conflicting_credentials') return '一个账号只能用一种凭据：GitHub App 账号保存私钥，Token 账号保存 Token。';
   if (code === 'confirmation_required') return '删除账号需要再确认一次。';
-  return err.message;
+  return readErrorText(err);
 }
 // A registered account row: where its authorization comes from and the way to its own page, in one line. Only a link is
 // added, so the list keeps making exactly the requests the console already made at start. The install target lives on the
