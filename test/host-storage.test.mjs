@@ -8,24 +8,28 @@ import { StorageReport } from '../dist/app/storage.js';
 import { harness, setup } from './helpers.mjs';
 import { managerFixture } from './project-manager-fixture.mjs';
 
-// What the manager stores from one /system/df, and what the storage page reads back from GET /v1/storage.
+// What the manager stores from one pass over /system/df, and what the storage page reads back from GET /v1/storage.
 const dockerUsage = { read_at: '2026-10-01T12:00:00.000Z',
   images: { count: 2, bytes: 1200, unused_count: 1, reclaimable_bytes: 800 },
-  containers: { count: 2, bytes: 30 }, volumes: { count: 2, bytes: 400 },
+  containers: { count: 2, bytes: 30 },
   build_cache: { count: 2, bytes: 900, reclaimable_bytes: 900 } };
 
-test("the manager reads Docker's images, containers, volumes and build cache in one background pass", async t => {
+test("the manager reads Docker's images and build cache in one background pass and its containers in another", async t => {
   const f = await managerFixture(t);
   f.docker.df = { LayersSize: 1200, Images: [{ Size: 900, Containers: 0, SharedSize: 100 }, { Size: 900, Containers: 1 }],
     Containers: [{ SizeRw: 10, SizeRootFs: 5000 }, { SizeRw: 20, SizeRootFs: 6000 }],
     Volumes: [{ UsageData: { Size: 100 } }, { UsageData: { Size: 300 } }], BuildCache: [{ Size: 400 }, { Size: 500 }] };
   await f.projects.readDockerUsage(Date.parse(dockerUsage.read_at));
-  // One answer carries all four kinds; asking Docker to size the volumes only happens here, off the storage request.
-  assert.deepEqual(f.docker.calls, ['GET /system/df']);
+  // Images and the build cache are the quick read; the containers get a request of their own (#680).
+  assert.deepEqual(f.docker.calls, ['GET /system/df?type=image&type=build-cache', 'GET /system/df?type=container']);
+  // The container read gets a longer limit than the default request() would, because Docker walks each writable layer.
+  assert.deepEqual(f.docker.timeouts.map(read => read.timeout), [90000, 300000]);
   assert.deepEqual(f.projects.storage().docker, dockerUsage);
+  // Volumes are not read: /system/df lists the ones the table already counts as a computer, a database or "other".
+  assert.equal(f.projects.storage().docker.volumes, undefined);
   // Read at most every half hour, so the page never waits for Docker and a many-image host is read once, not per load.
   await f.projects.readDockerUsage(Date.parse(dockerUsage.read_at) + 29 * 60_000);
-  assert.deepEqual(f.docker.calls, ['GET /system/df']);
+  assert.equal(f.docker.calls.length, 2);
 });
 
 test('a container counts its writable layer, and a container Docker did not size leaves that kind unmeasured', async t => {
@@ -37,37 +41,46 @@ test('a container counts its writable layer, and a container Docker did not size
   assert.deepEqual(docker.images, { count: 2, bytes: 1000, unused_count: 2, reclaimable_bytes: 1000 });
   // A container without SizeRw was not sized: the count stays, the bytes are unknown, not a measured 0.
   assert.deepEqual(docker.containers, { count: 1, bytes: null });
-  assert.deepEqual(docker.volumes, { count: 0, bytes: 0 });
 });
 
-test('a volume or container Docker could not size keeps that kind unmeasured instead of a short total', async t => {
+test('an image or build-cache row Docker did not size leaves that kind unmeasured instead of a short total', async t => {
   const f = await managerFixture(t);
-  f.docker.df = { LayersSize: 0, Images: [], Containers: [{ SizeRw: 5 }],
-    Volumes: [{ UsageData: { Size: 10 } }, {}], BuildCache: [] };
+  // moby answers -1 for a total it could not compute; the per-image fallback is only as good as the rows behind it.
+  f.docker.df = { LayersSize: -1, Images: [{ Size: 700, Containers: 0 }, {}], Containers: [], BuildCache: [{ Size: 40 }, {}] };
   await f.projects.readDockerUsage();
   let docker = f.projects.storage().docker;
-  assert.deepEqual(docker.volumes, { count: 2, bytes: null }, 'a volume without UsageData makes the total unknown, not 10');
-  assert.deepEqual(docker.containers, { count: 1, bytes: 5 });
-  // moby's -1 marks a volume the daemon could not size; it is not a negative size and not a zero either.
+  assert.equal(docker.images.bytes, null, 'one image without a size makes the layer total unknown, not 700');
+  assert.deepEqual([docker.build_cache.bytes, docker.build_cache.reclaimable_bytes], [null, null], 'a cache row without a size is unknown, not 40');
+  // Every row sized: the totals are numbers again.
   f.projects.dockerUsageAt = 0;
-  f.docker.df = { LayersSize: 0, Images: [], Containers: [{ SizeRw: 5 }],
-    Volumes: [{ UsageData: { Size: 10 } }, { UsageData: { Size: -1 } }], BuildCache: [] };
+  f.docker.df = { LayersSize: 1000, Images: [{ Size: 700, Containers: 0, SharedSize: 100 }, { Size: 300, Containers: 0 }], Containers: [], BuildCache: [{ Size: 40 }] };
   await f.projects.readDockerUsage();
   docker = f.projects.storage().docker;
-  assert.deepEqual(docker.volumes, { count: 2, bytes: null }, '-1 is not a size');
-  // Every row sized: the total is a number again.
-  f.projects.dockerUsageAt = 0;
-  f.docker.df = { LayersSize: 0, Images: [], Containers: [{ SizeRw: 5 }], Volumes: [{ UsageData: { Size: 10 } }, { UsageData: { Size: 20 } }], BuildCache: [] };
+  assert.deepEqual([docker.images.bytes, docker.build_cache.bytes], [1000, 40]);
+});
+
+test('a container read that times out leaves the images and build cache it did not touch measured', async t => {
+  const f = await managerFixture(t);
+  f.docker.df = { LayersSize: 500, Images: [{ Size: 500, Containers: 1 }], Containers: [{ SizeRw: 7 }], BuildCache: [{ Size: 40 }] };
   await f.projects.readDockerUsage();
-  assert.deepEqual(f.projects.storage().docker.volumes, { count: 2, bytes: 30 });
+  const first = f.projects.storage().docker;
+  assert.deepEqual(first.containers, { count: 1, bytes: 7 });
+  // The next pass answers the quick read and times out on the containers: the two rows stand, only containers is unknown.
+  f.projects.dockerUsageAt = 0;
+  f.docker.df = { LayersSize: 500, Images: [{ Size: 500, Containers: 1 }], Containers: [], BuildCache: [{ Size: 60 }] };
+  f.docker.dfFailure = 'type=container';
+  await f.projects.readDockerUsage();
+  const docker = f.projects.storage().docker;
+  assert.deepEqual([docker.images.bytes, docker.build_cache.bytes], [500, 60], 'the pass that answered is kept');
+  assert.equal(docker.containers, null, 'the kind that timed out is not measured, and is not the old number either');
 });
 
 test('a read Docker cannot answer keeps the last numbers and never fails the storage call', async t => {
   const f = await managerFixture(t);
-  f.docker.df = { LayersSize: 5, Containers: [{ SizeRw: 7 }], Volumes: [{ UsageData: { Size: 9 } }], BuildCache: [] };
+  f.docker.df = { LayersSize: 5, Containers: [{ SizeRw: 7 }], BuildCache: [] };
   await f.projects.readDockerUsage();
   const first = f.projects.storage().docker;
-  assert.deepEqual([first.containers, first.volumes], [{ count: 1, bytes: 7 }, { count: 1, bytes: 9 }]);
+  assert.deepEqual(first.containers, { count: 1, bytes: 7 });
   f.docker.request = async () => { throw new Error('docker_response_too_large'); };
   f.projects.dockerUsageAt = 0;
   await f.projects.readDockerUsage();
@@ -87,21 +100,21 @@ function reportFixture(t, docker) {
 }
 const superAdmin = { id: 'admin', role: 'super_admin', repositories: [] };
 
-test("the disk's storage table counts Docker's containers and volumes in what it knows", async t => {
+test("the disk's storage table counts Docker's containers in what it knows, and has no volume row", async t => {
   const view = await reportFixture(t, dockerUsage).api(superAdmin, 'GET', '/api/storage');
   assert.deepEqual(view.totals.manager.docker, dockerUsage);
   assert.equal(view.host.known.docker_containers, 30);
-  assert.equal(view.host.known.docker_volumes, 400);
+  assert.equal(view.host.known.docker_images, 1200);
   assert.ok(!view.host.unmeasured.includes('docker_containers'));
-  assert.ok(!view.host.unmeasured.includes('docker_volumes'));
+  assert.equal('docker_volumes' in view.host.known, false, 'a volume is counted once, as the computer or database that holds it');
 });
 
 test('a Docker total the manager could not measure lists that row as unmeasured on the storage page', async t => {
-  const usage = { ...dockerUsage, volumes: { count: 2, bytes: null } };
+  const usage = { ...dockerUsage, containers: null };
   const view = await reportFixture(t, usage).api(superAdmin, 'GET', '/api/storage');
-  assert.equal(view.host.known.docker_volumes, null);
-  assert.ok(view.host.unmeasured.includes('docker_volumes'));
-  assert.equal(view.host.known.docker_containers, 30, 'the container total beside it is still measured');
+  assert.equal(view.host.known.docker_containers, null);
+  assert.ok(view.host.unmeasured.includes('docker_containers'));
+  assert.equal(view.host.known.docker_images, 1200, 'the rows read in the other request are still measured');
 });
 
 test('Docker read not at all yet leaves those rows unmeasured and the page at 200', async t => {
@@ -110,7 +123,7 @@ test('Docker read not at all yet leaves those rows unmeasured and the page at 20
   const response = await admin('/api/storage');
   assert.equal(response.status, 200);
   assert.equal(response.value.totals.manager.docker, null);
-  for (const key of ['docker_images', 'docker_containers', 'docker_volumes', 'docker_build_cache'])
+  for (const key of ['docker_images', 'docker_containers', 'docker_build_cache'])
     assert.equal(response.value.host.known[key], null, key);
-  assert.ok(response.value.host.unmeasured.includes('docker_volumes'));
+  assert.ok(response.value.host.unmeasured.includes('docker_containers'));
 });

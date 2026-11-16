@@ -20,7 +20,7 @@ async function listen(t, server) {
 test('the manager stays fenced until every saved project has recovered and uncertain work has stopped', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'readiness-'));
   const docker = new FakeDocker(), options = { database: join(directory, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' };
-  docker.df = { LayersSize: 1000, Images: [], Containers: [{ SizeRw: 20 }], Volumes: [{ UsageData: { Size: 30 } }], BuildCache: [] };
+  docker.df = { LayersSize: 1000, Images: [], Containers: [{ SizeRw: 20 }], BuildCache: [] };
   let projects = new Projects(options);
   for (const repo of ['101', '202']) {
     await projects.register(repo);
@@ -68,7 +68,7 @@ test('the manager stays fenced until every saved project has recovered and uncer
   projects.dockerUsageAt = 0; await projects.readDockerUsage();
   const storage = await client.call('GET', '/v1/storage');
   assert.deepEqual(storage.docker.containers, { count: 1, bytes: 20 });
-  assert.deepEqual(storage.docker.volumes, { count: 1, bytes: 30 });
+  assert.equal(storage.docker.volumes, undefined);
   assert.equal((await fetch(base + '/v1/projects')).status, 401);
 });
 
