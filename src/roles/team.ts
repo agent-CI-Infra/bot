@@ -78,10 +78,9 @@ export async function runTeam<T>(spec:AgentSpec<T>,environment:TeamEnvironment):
  const disposition=tool('finish_coordination','Finish this coordination turn without delivery: continue later, wait for an external condition, or explicitly request human help. Never nominates, publishes or completes the task.',{action:{type:'string',enum:['continue','wait','needs_help']},reason:{type:'string'},delay_seconds:{type:'integer',minimum:5,maximum:86400},help_from:{type:'string'},resume_condition:{type:'string'}},['action','reason']);
  // The controller chooses the task's worktree while the task holds none (#769); without a choice the system's applies when
  // the task first needs its files. Its roles get no such tools: they work in what it chose. The rule goes in the prompt, as
- // a role run keeps only its role's own system prompt. A controller on a CLI backend runs in the task's checkout, which is
- // bound before the CLI starts (roleBackendWorkspace), so it has nothing to choose; its instance says which backend runs it.
+ // a role run keeps only its role's own system prompt.
  const worktreePlan=environment.workspace?.plannedWorktree?.();
- const choosing=!!worktreePlan&&worktreePlan.state!=='bound'&&!['claude_code','codex'].includes(String(roleInstance(s,task,controller).harness));
+ const choosing=!!worktreePlan&&worktreePlan.state!=='bound';
  // Once a delegated role has run in this attempt, the choice holds for the attempt: the entry executor is the one session of
  // the task workspace, and running it again in the same attempt returns that session's result. A new attempt prepares the
  // task again, and the controller chooses before it delegates.
