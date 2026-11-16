@@ -43,7 +43,10 @@ test('connected identity lists started repositories and separates pending ones',
   assert.equal(openable.href, '#/projects/101/overview');
   const pending = panel.querySelector('.identity-pending-repos');
   assert.equal(pending.querySelector('strong').textContent, 'ThinkFlowLab/FlyBot');
-  assert.equal(pending.querySelector('.status').textContent, '待超级管理员启动');
+  assert.equal(pending.querySelector('.status').textContent, '启动需超级管理员同意');
+  // #934: each pending repository opens its onboarding wizard.
+  assert.equal(pending.querySelector('a').href, '#/onboarding/202');
+  assert.equal(pending.querySelector('a').textContent, '开始接入');
   assert.equal(panel.querySelector('.identity-openable-repos .status'), null);
 });
 
@@ -60,7 +63,7 @@ test('pending-only identity keeps pending_activation copy and does not say the r
   assert.equal(texts.includes('可在项目列表中打开这些仓库'), false);
   assert.equal(panel.querySelector('.identity-openable-repos'), null);
   assert.equal(panel.querySelector('.identity-pending-repos strong').textContent, 'ThinkFlowLab/FlyBot');
-  assert.equal(panel.querySelector('.identity-pending-repos .status').textContent, '待超级管理员启动');
+  assert.equal(panel.querySelector('.identity-pending-repos .status').textContent, '启动需超级管理员同意');
 });
 
 test('disconnected identity does not list started repositories even when the payload still carries them', async () => {
@@ -89,7 +92,7 @@ test('a long pending list on the identity page folds behind a count with a name 
   const fold = panel.querySelector('[data-testid=pending-repo-fold]');
   assert.ok(fold);
   assert.ok(!fold.open);
-  assert.equal(fold.querySelector('summary').textContent, '查看 11 个待启动仓库');
+  assert.equal(fold.querySelector('summary').textContent, '查看 11 个待接入仓库');
   assert.equal(fold.querySelectorAll('.identity-pending-repos li').length, 11);
   const input = fold.querySelector('[data-testid=pending-repo-search]');
   input.value = 'pending-10'; input.listeners.input[0]();
