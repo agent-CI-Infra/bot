@@ -38,7 +38,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'release_disabled','release_run_changed','release_attempt_changed','release_duplicate','release_range_changed','release_record_changed',
     'release_lease_lost','release_tag_conflict','release_run_ambiguous','release_run_missing','release_rerun_unavailable','release_tag_missing','release_ci_evidence_changed',
     'actions_failures_disabled','actions_lease_lost','actions_run_identity_changed','actions_rerun_identity_changed','actions_attempt_identity_changed',
-    'actions_jobs_identity_changed','actions_development_disabled','actions_development_not_approved',
+    'actions_jobs_identity_changed','actions_development_disabled','actions_development_not_approved','actions_analysis_not_succeeded','write_not_allowed',
     // A work type switched off while its task waited or ran (workflow_* before #207).
     'work_disabled','workflow_disabled','workflow_not_found','task_software_disabled',
     // #850: the project's capability ceiling is below what the step needs, or was lowered while the task waited or ran.

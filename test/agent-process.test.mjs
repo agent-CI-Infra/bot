@@ -423,7 +423,7 @@ test('an Actions failure analysis runs as a task in the project computer: the fa
   const write = (path, content) => { mkdirSync(dirname(join(repoDirectory, path)), { recursive: true }); writeFileSync(join(repoDirectory, path), content); };
   // The agent: it hands job 91 to rerun_failed_run and job 92 to report_failure, then finishes.
   const calls = [{ name: 'rerun_failed_run', arguments: { job_ids: [91], reason: 'Rate limited by the package index.', evidence: ['HTTPError: HTTP 429 Too Many Requests'] } },
-    { name: 'report_failure', arguments: { job_id: 92, kind: 'code', reason: 'The addition test fails.', evidence: ['AssertionError: 1 + 1 !== 2'] } }];
+    { name: 'report_failure', arguments: { cause: 'addition returns an invalid sum', job_ids: [92], kind: 'code', title: 'Correct the addition result', diagnosis: 'The addition test fails. Source investigation identifies an invalid sum; reproduce with the focused check.', report_reason: 'An actionable fixture defect was found.', evidence: [{ type: 'log', job_id: 92, lines: ['AssertionError: 1 + 1 !== 2'] }] } }];
   const manager = { call: async (_method, path, input) => {
     if (!path.endsWith('/execute')) return { state: 'ready', generation: 1, computer: resolveRules({}, {}).computer };
     const r = input.request; let value = {};
@@ -461,6 +461,8 @@ test('an Actions failure analysis runs as a task in the project computer: the fa
   for (const name of ['rerun_failed_run', 'report_failure', 'finish_analysis', 'read_job_log', 'run_command']) assert.ok(config.tools.some(tool => tool.function.name === name), name);
   assert.deepEqual(toolReplies.map(reply => [reply.recorded, reply.cited_lines_found]), [[true, [{ job_id: 91, found: 1 }]], [true, [{ job_id: 92, found: 1 }]]]);
   assert.deepEqual(JSON.parse(task.result).verdicts.map(v => [v.job_id, v.kind]), [[91, 'external'], [92, 'code']]);
+  assert.equal(JSON.parse(task.result).reports[0].cause, 'addition returns an invalid sum');
+  assert.match(JSON.parse(task.result).reports[0].diagnosis, /Source investigation/);
   // Nothing is written to GitHub by the task itself: the Actions module acts on the result.
   assert.equal(h.store.get('SELECT count(*) n FROM github_effects').n, 0);
 });

@@ -7,14 +7,15 @@ import { generateKeyPairSync } from 'node:crypto';
 import { harness, setup, account, repository } from './helpers.mjs';
 import { ActionsFailures, scanPageSize } from '../dist/actions/service.js';
 import { failedStepOutput, verifiedEvidence, classifyFailure, normalizeSignature } from '../dist/actions/classifier.js';
-import { actionsModel } from './actions-model.mjs';
+import { actionsModel, reportFor } from './actions-model.mjs';
 import { runEventTasks } from './event-tasks.mjs';
 import { workspaceProfile } from '../dist/agent/profiles.js';
 import { workAccess as workflowAccess } from '../dist/work/catalog.js';
 import { actionsDevelopmentAllowed, publicText } from '../dist/actions/safety.js';
 import { recordActionsRun } from '../dist/actions/storage.js';
 import { TaskEngine } from '../dist/agent/engine.js';
-import { Redactor } from '../dist/agent/common.js';
+import { Redactor, sha } from '../dist/agent/common.js';
+import { legacySignature } from '../dist/actions/publisher.js';
 import { appEvents } from '../dist/github/client.js';
 import { emptyRepositoryFixture } from './empty-repository-helpers.mjs';
 
@@ -107,8 +108,7 @@ test('the workflow model decides external and code; unsupported, unusable or fai
   // A model that cites a line the step never printed does not spend the rerun.
   let f = await fixture(t, { respond: input => ({ content: JSON.stringify({ jobs: input.failed_jobs.map(job => ({ job_id: job.job_id, kind: 'external', reason: 'Rate limited.', evidence: ['HTTP 429 from upstream'] })) }) }) });
   await f.tick();
-  assert.equal(f.reruns().length, 0); assert.match(f.state.issues[0].body, /classification: \*\*unknown\*\*/);
-  assert.match(f.state.issues[0].body, /The analysis cited no line that the failed steps printed\./);
+  assert.equal(f.reruns().length, 0); assert.equal(f.state.issues.length, 0);
   // The task runs in the project computer on the failed commit: the failed step's output is a context file, and the agent
   // has the workflow prompt, the read tools and the writes of its workflow (rerun and report), which it finishes after.
   const request = f.analysis.requests[0], task = f.h.store.get("SELECT * FROM tasks WHERE kind='actions.failures'");
@@ -123,17 +123,18 @@ test('the workflow model decides external and code; unsupported, unusable or fai
   f = await fixture(t, { log: log('pip install failed: mirror returned an empty index'), respond: input => ({ content: JSON.stringify({ jobs: input.failed_jobs.map(job => ({ job_id: job.job_id, kind: 'external',
     reason: 'The package mirror returned an empty index.', evidence: ['pip install failed: mirror returned an empty index'] })) }) }) });
   await f.tick(); assert.equal(f.reruns().length, 1); assert.equal(f.state.issues.length, 0);
-  // Output that is not a usable classification files an unknown report instead of retrying the model forever.
+  // An unusable analysis ends without manufacturing an unknown report.
   f = await fixture(t, { respond: () => ({ content: 'I think it is flaky.' }) }); await f.tick();
-  assert.equal(f.reruns().length, 0); assert.match(f.state.issues[0].body, /classification: \*\*unknown\*\*/); assert.match(f.state.issues[0].body, /did not return a usable classification/);
+  assert.equal(f.reruns().length, 0); assert.equal(f.state.issues.length, 0);
+  assert.match(JSON.parse(f.h.store.get('SELECT data FROM actions_failure_attempts').data).summary, /did not return a usable/);
   // A model outage writes nothing: the run stays pending and is analyzed again once the model answers.
   let down = true;
   f = await fixture(t, { respond: input => down ? { status: 503 } : { content: JSON.stringify({ jobs: input.failed_jobs.map(job => ({ job_id: job.job_id, kind: 'code', reason: 'Broken test, ping @owner\nnow.', evidence: ['HTTPError: HTTP 429 Too Many Requests'] })) }) } });
   await f.tick(); assert.equal(f.reruns().length, 0); assert.equal(f.state.issues.length, 0);
   assert.match(f.h.store.get('SELECT error FROM actions_failure_scans').error, /^model_/); assert.equal(f.h.store.get("SELECT status FROM tasks WHERE kind='actions.failures'").status, 'retry_wait');
   down = false; await f.tick(); assert.equal(f.state.issues.length, 1); assert.match(f.state.issues[0].body, /classification: \*\*code\*\*/);
-  // The model's reason is published as one line that mentions nobody.
-  assert.ok(f.state.issues[0].body.includes('Broken test, ping &#64;owner now.'));
+  // The full diagnosis keeps paragraphs and newlines while mentions are escaped.
+  assert.ok(f.state.issues[0].body.includes('Broken test, ping &#64;owner\nnow.'));
   // Without a model the workflow waits for configuration instead of guessing.
   f = await fixture(t); await f.policy({ model_id: null }); await f.tick();
   assert.equal(f.state.issues.length, 0); assert.equal(f.h.store.get('SELECT error FROM actions_failure_scans').error, 'model_not_configured');
@@ -157,7 +158,7 @@ test('a successful automatic rerun completes tracking without a report', async t
   assert.equal(f.state.issues.length, 0); assert.equal(f.h.store.get('SELECT tracking FROM actions_failure_runs').tracking, 0);
 });
 
-test('assertion and typecheck each file one code issue, never rerun, and share the existing review path', async t => {
+test('explicit fixture-model code reports reuse the review path without rerunning', async t => {
   for (const text of ['AssertionError: expected 2 to equal 3', 'error TS2322: invalid type']) {
     const f = await fixture(t, { log: log(text) }); await f.hook(); await f.tick();
     assert.equal(f.reruns().length, 0); assert.equal(f.state.issues.length, 1); assert.match(f.state.issues[0].body, /classification: \*\*code\*\*/);
@@ -168,10 +169,12 @@ test('assertion and typecheck each file one code issue, never rerun, and share t
   }
 });
 
-test('missing and mixed evidence files unknown issues and cannot develop even with a label', async t => {
+test('missing logs and mixed symptoms remain in the analysis without automatic issues', async t => {
   for (const text of [null, log('AssertionError: failed\nHTTPError: HTTP 429')]) {
-    const f = await fixture(t, { log: text }); await f.tick(); assert.equal(f.reruns().length, 0); assert.equal(f.state.issues.length, 1);
-    assert.match(f.state.issues[0].body, /classification: \*\*unknown\*\*/); assert.equal(actionsDevelopmentAllowed(f.h.store, '101', 1), false);
+    const f = await fixture(t, { log: text }); await f.tick();
+    assert.equal(f.reruns().length, 0); assert.equal(f.state.issues.length, 0);
+    assert.equal(f.h.store.get('SELECT state FROM actions_failure_attempts').state, 'done');
+    assert.equal(f.analysis.requests.length, 1, 'source/artifact investigation remains possible without logs');
   }
 });
 
@@ -287,7 +290,7 @@ test('secrets and untrusted instructions never become approval or public credent
 
 test('clear code issue reuses review gates and requires a human development label', async t => {
   const f = await fixture(t, { log: log('AssertionError: wrong result') }); await f.tick(); const issue = f.state.issues[0];
-  const review = { requires_code_change: true, clarification_required: false, issue_requests_code: true, product_defect: true, implementation_goal: 'Fix the failed assertion', request_quote: 'Please fix the repository defect' };
+  const review = { requires_code_change: true, clarification_required: false, issue_requests_code: true, product_defect: true, implementation_goal: 'Fix the failed assertion', request_quote: 'correct the demonstrated fixture defect' };
   const task = f.h.store.get("SELECT * FROM tasks WHERE kind='review.issue'"); f.h.store.run("UPDATE tasks SET status='succeeded',result=? WHERE id=?", JSON.stringify(review), task.id);
   const engine = new TaskEngine(f.h.store, {}, undefined, undefined, acceptanceFixture), input = { object: issue, object_hash: 'hash' };
   engine.queueDevelopment({}, task, input, review, false); assert.equal(f.h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n, 0);
@@ -360,7 +363,7 @@ test('an uncertain report cannot prevent another already-sent rerun from reachin
   assert.equal(f.reruns().length, 1); assert.equal(f.h.store.get('SELECT error FROM actions_failure_scans').error, 'actions_report_write_unknown');
 });
 
-test('an unknown report shows the failed step\'s last output, and says when an excerpt was withheld for safety', async t => {
+test('unknown symptoms are not reported; explicit reports say when evidence is withheld', async t => {
   // A one-second job: setup, the step and cleanup share the failed step's whole-second interval, as on github.com.
   const output = log(['Secret source: Actions', 'Prepare workflow directory', 'Complete job name: package',
     '##[group]Run echo "bundle checksum does not match manifest"', 'echo "bundle checksum does not match manifest"', 'exit 3', 'shell: /usr/bin/bash -e {0}', '##[endgroup]',
@@ -368,17 +371,16 @@ test('an unknown report shows the failed step\'s last output, and says when an e
   // Display context only: the script, shell and generic exit lines stay out, and deduplication still keys on the empty quote.
   assert.equal(failedStepOutput(job(), output).tail, 'bundle checksum does not match manifest');
   let f = await fixture(t, { log: output }); await f.tick();
-  assert.match(f.state.issues[0].body, /The analysis cited no log line\. Last output of the failed step:\n\n {4}bundle checksum does not match manifest/);
-  assert.doesNotMatch(f.state.issues[0].body, /could not be made safe|exit 3|Secret source|orphan/);
+  assert.equal(f.state.issues.length, 0);
   // A step whose header block has no exit line still stops at the runner's cleanup.
   assert.equal(failedStepOutput(job(), log(['##[group]Run ./deploy', './deploy', '##[endgroup]', 'state=broken', '##[error]deploy refused', 'Post job cleanup.', 'Cleaning up orphan processes'].join('\n'))).tail,
     'state=broken\n##[error]deploy refused');
   // A recognized line that cannot be made public is withheld, not described as missing.
   f = await fixture(t, { log: log('AssertionError: digest ' + 'Q'.repeat(64)) }); await f.tick();
-  assert.match(f.state.issues[0].body, /classification: \*\*code\*\*/); assert.match(f.state.issues[0].body, /Excerpt omitted: the log lines could not be made safe for public disclosure/);
+  assert.match(f.state.issues[0].body, /classification: \*\*code\*\*/); assert.match(f.state.issues[0].body, /Excerpt omitted: the cited data could not be made safe for public disclosure/);
   assert.ok(!f.state.issues[0].body.includes('Q'.repeat(64)));
   f = await fixture(t, { log: null }); await f.tick();
-  assert.match(f.state.issues[0].body, /No log excerpt is available/);
+  assert.equal(f.state.issues.length, 0);
 });
 
 test('a person\'s rerun of an earlier, untracked run is found without its workflow_run delivery', async t => {
@@ -395,4 +397,217 @@ test('a person\'s rerun of an earlier, untracked run is found without its workfl
   // Recorded once: another check finds nothing new.
   f.h.store.run('UPDATE actions_failure_scans SET reconciled_at=0'); await f.tick();
   assert.equal(listings(), 3); assert.equal(f.state.comments.length, 1); assert.equal(f.state.issues.length, 1);
+});
+
+test('one upstream cause and three downstream failures publish one complete diagnosis with source and artifact references', async t => {
+  const diagnosis = ['## Current behavior', 'The research job produced 2 candidate-bearing expansions; the required minimum is 3.',
+    '## Expected behavior', 'The run needs at least 3 valid expansions.', '## Investigation',
+    ...Array.from({ length: 18 }, (_, n) => `Checked expansion ${n + 1}: artifact observations indicate token exhaustion before a candidate was emitted; this is an observation, not an independent reproduction.`),
+    '## Causal chain', 'research-6 failed first; accounting, merge-gate and outcome-reporter only propagated that failure.',
+    '## Uncertainty', 'The artifact records 24 expanded calls and 22 exhausted at 16000 tokens. The thinking-disabled setting may not match the provider; no independent reproduction was performed. Provider faults are recorded as zero, which does not prove all provider behavior is correct.',
+    '## Requested code change', 'Align the configured provider thinking mode with the per-call budget if a controlled reproduction confirms the mismatch.',
+    '## Next verification', 'Suggested, not executed: replay one expansion with provider thinking disabled and compare candidate output.'].join('\n\n');
+  const report = { cause: 'research expansion budget and provider thinking configuration', job_ids: [91, 92, 93, 94], kind: 'unknown', title: 'Investigate exhausted expansion budgets', diagnosis,
+    report_reason: 'The repeated budget exhaustion and candidate deficit justify an investigation; downstream checks are consequences.',
+    evidence: [{ type: 'log', job_id: 91, lines: ['AssertionError: expected at least 3 expansions; actual 2'] },
+      { type: 'source', path: 'src/budget.py', lines: ['budget = max(configured_budget, 16000)'] }, { type: 'artifact', artifact_id: 77 }] };
+  const f = await fixture(t, { jobs: ['research-6', 'accounting', 'merge-gate', 'outcome-reporter'].map((name, n) => job({ id: 91 + n, name })),
+    log: log('AssertionError: expected at least 3 expansions; actual 2'), respond: () => ({ content: JSON.stringify({ reports: [report], summary: diagnosis }) }) });
+  f.state.custom = ({ path, send }) => {
+    if (path.endsWith('/contents/src/budget.py')) { send({ type: 'file', encoding: 'base64', content: Buffer.from('budget = max(configured_budget, 16000)\n').toString('base64') }); return true; }
+    if (path.endsWith('/actions/artifacts/77')) { send({ id: 77, workflow_run: { id: 800, head_sha: head } }); return true; }
+    return false;
+  };
+  await f.tick(); assert.equal(f.state.issues.length, 1); assert.equal(f.reruns().length, 0);
+  const body = f.state.issues[0].body;
+  assert.ok(body.includes(diagnosis), 'full investigation survives without paragraph flattening or a 1200-character cut');
+  for (const id of report.job_ids) assert.ok(body.includes('/job/' + id));
+  assert.match(body, /blob\/a{40}\/src\/budget.py#L1/); assert.match(body, /actions\/runs\/800\/artifacts\/77/);
+  assert.match(body, /contents and attempt association are analysis observations, not independently verified/);
+  assert.ok(f.state.requests.some(r => r.path.endsWith('/contents/src/budget.py') && r.query === '?ref=' + head));
+  const result = JSON.parse(f.h.store.get("SELECT result FROM tasks WHERE kind='actions.failures'").result);
+  assert.equal(result.summary, diagnosis); assert.equal(result.reports[0].diagnosis, diagnosis);
+  await f.restart(); await f.hook(); await f.tick(); assert.equal(f.state.issues.length, 1); assert.equal(f.state.comments.length, 0);
+  // A newer attempt may rename or renumber all four jobs; the explicit cause retains its identity.
+  f.state.runs[0].run_attempt = 2; f.state.jobs = f.state.jobs.map(j => ({ ...j, id: j.id + 100, name: j.name + '-renamed' }));
+  report.job_ids = [191, 192, 193, 194]; report.evidence[0].job_id = 191;
+  await f.hook(); await f.tick(); assert.equal(f.state.issues.length, 1); assert.equal(f.state.comments.length, 1);
+  assert.match(f.state.comments[0].body, /attempt 2/); assert.ok(f.state.comments[0].body.includes(diagnosis));
+  assert.equal(f.analysis.requests[1].input.reported_causes[0].cause, report.cause);
+  assert.equal(f.analysis.requests[1].input.reported_causes[0].issue_number, 1);
+});
+
+test('explicit independent causes keep separate reports even with identical symptom lines or a shared affected job', async t => {
+  const f = await fixture(t, { log: log('AssertionError: failed'), respond: input => ({ content: JSON.stringify({ reports: [
+    { ...reportFor(input.failed_jobs[0], { kind: 'code', reason: 'Parser drops a field.', evidence: ['AssertionError: failed'] }), cause: 'parser drops a required field' },
+    { ...reportFor(input.failed_jobs[0], { kind: 'code', reason: 'Serializer emits invalid bytes.', evidence: ['AssertionError: failed'] }), cause: 'serializer emits invalid bytes' }
+  ] }) }) });
+  await f.tick(); assert.equal(f.state.issues.length, 2); assert.equal(f.state.comments.length, 0);
+  f.state.runs[0].run_attempt = 2; await f.hook(); await f.tick();
+  assert.equal(f.state.issues.length, 2); assert.equal(f.state.comments.length, 2);
+});
+
+test('omitted jobs and unsuccessful analysis never become implicit reports; explicit unknown investigations remain possible', async t => {
+  let f = await fixture(t, { jobs: [job(), job({ id: 92, name: 'gate' })], log: log('AssertionError: failed'),
+    respond: input => ({ content: JSON.stringify({ reports: [reportFor(input.failed_jobs[0], { kind: 'code', reason: 'A fixture defect.', evidence: ['AssertionError: failed'] })], summary: 'Job 92 remains unresolved; logs do not establish an independent cause.' }) }) });
+  await f.tick(); assert.equal(f.state.issues.length, 1); assert.doesNotMatch(f.state.issues[0].body, /job\/92/);
+  assert.equal(JSON.parse(f.h.store.get('SELECT data FROM actions_failure_attempts').data).evidence.find(e => e.job.id === 92).kind, 'unknown');
+  f = await fixture(t, { log: null, respond: input => ({ content: JSON.stringify({ reports: [{
+    ...reportFor(input.failed_jobs[0], { kind: 'unknown', reason: 'The logs expired; inspected workflow and artifact retention settings.', evidence: [] }),
+    cause: 'retention prevents investigation of intermittent failures', diagnosis: 'Checked retention and prior runs. Logs expired, so the cause cannot be established. Request retaining logs on the next occurrence; no reproduction was performed.',
+    report_reason: 'An explicit investigation request can restore the evidence needed to understand repeated failures.'
+  }] }) }) });
+  await f.tick(); assert.equal(f.state.issues.length, 1); assert.match(f.state.issues[0].body, /explicitly requested investigation/);
+  assert.equal(actionsDevelopmentAllowed(f.h.store, '101', 1), false);
+});
+
+test('source and artifact provenance can support investigation without logs; forged references never authorize a code report', async t => {
+  for (const valid of [false, true]) {
+    const f = await fixture(t, { log: null, respond: input => ({ content: JSON.stringify({ reports: [{
+      ...reportFor(input.failed_jobs[0], { kind: 'code', reason: 'Source pins an invalid budget.', evidence: [] }),
+      evidence: [{ type: 'source', path: 'src/budget.py', lines: ['budget = -1'] }, { type: 'artifact', artifact_id: 77 }]
+    }] }) }) });
+    f.state.custom = ({ path, send }) => {
+      if (path.endsWith('/contents/src/budget.py')) { send({ encoding: 'base64', content: Buffer.from(valid ? 'budget = -1' : 'budget = 16000').toString('base64') }); return true; }
+      if (path.endsWith('/actions/artifacts/77')) { send({ id: 77, workflow_run: { id: 999, head_sha: 'b'.repeat(40) } }); return true; }
+      return false;
+    };
+    await f.tick(); assert.equal(f.state.issues.length, valid ? 1 : 0);
+    if (valid) { assert.match(f.state.issues[0].body, /budget = -1/); assert.match(f.state.issues[0].body, /could not be bound/); assert.doesNotMatch(f.state.issues[0].body, /\/artifacts\/77/); }
+  }
+});
+
+test('legacy task verdicts and cached per-job unknowns are not replayed as fresh issues after upgrade', async t => {
+  const f = await fixture(t, { log: log('AssertionError: failed') }); await f.scan();
+  f.h.store.run("UPDATE tasks SET status='succeeded',result=? WHERE kind='actions.failures'", JSON.stringify({ summary: 'Historical analysis', verdicts: [{ job_id: 91, kind: 'code', reason: 'Historical reason.', evidence: ['AssertionError: failed'] }] }));
+  await f.scan(); assert.equal(f.state.issues.length, 0);
+  f.state.runs[0].run_attempt = 2; await f.hook();
+  f.h.store.run('UPDATE actions_failure_attempts SET data=?,classification=? WHERE attempt=2', JSON.stringify({ kind: 'unknown', evidence: [{ job: { id: 91, name: 'test' }, kind: 'unknown', reason: 'No log.', quote: '' }] }), 'unknown');
+  await f.restart(); await f.tick(); assert.equal(f.state.issues.length, 0); assert.equal(f.h.store.get('SELECT state FROM actions_failure_attempts WHERE attempt=2').state, 'done');
+});
+
+test('historical uncertain receipts reconcile without resending, and the same upstream cause adopts its existing issue', async t => {
+  const f = await fixture(t, { log: log('AssertionError: failed') });
+  const evidence = { job: { id: 91, key: sha('test'), name: 'test' }, kind: 'code', quote: 'AssertionError: failed', reason: 'Historical reason.' };
+  const signature = legacySignature(f.state.runs[0], evidence), key = 'legacy-receipt';
+  f.state.issues.push({ number: 1, state: 'open', title: 'Historical report', body: `Historical diagnosis\n<!-- dept-bot-actions:${key} -->`, labels: [], assignees: [] });
+  recordActionsRun(f.h.store, '101', f.state.runs[0]);
+  f.h.store.run('UPDATE actions_failure_attempts SET data=?,classification=?', JSON.stringify({ kind: 'code', evidence: [evidence] }), 'code');
+  f.h.store.run('INSERT INTO actions_failure_reports(id,repository_id,run_id,attempt,signature,classification,state,body,title) VALUES(?,?,?,?,?,?,?,?,?)', key, '101', 800, 1, signature, 'code', 'unknown', f.state.issues[0].body, 'Historical report');
+  await f.restart(); await f.tick(); assert.equal(f.state.issues.length, 1); assert.equal(f.state.comments.length, 0);
+  assert.equal(f.h.store.get('SELECT state FROM actions_failure_reports').state, 'sent');
+  f.state.runs[0].run_attempt = 2; await f.hook(); await f.tick();
+  assert.equal(f.state.issues.length, 1); assert.equal(f.state.comments.length, 1);
+  await f.restart(); await f.tick(); assert.equal(f.state.comments.length, 1);
+});
+
+test('reporting permission revoked during reconciliation prevents both normal and unconfirmed-rerun writes', async t => {
+  let f = await fixture(t, { log: log('AssertionError: failed') });
+  f.state.custom = ({ path }) => {
+    if (path.endsWith('/issues')) f.h.store.run('UPDATE policies SET work_settings=?', JSON.stringify({ 'actions.failures': { writes: ['actions_rerun'] } }));
+    return false;
+  };
+  await f.tick(); assert.equal(f.state.issues.length, 0); assert.equal(f.h.store.get('SELECT error FROM actions_failure_scans').error, 'write_not_allowed');
+  f = await fixture(t, { noAdvance: true, unknownRerun: true }); await f.tick();
+  f.h.store.run('UPDATE actions_failure_runs SET retry_at=?', Date.now() - 6 * 60_000);
+  f.h.store.run('UPDATE policies SET work_settings=?', JSON.stringify({ 'actions.failures': { writes: ['actions_rerun'] } }));
+  await f.restart(); await f.tick(); assert.equal(f.state.issues.length, 0); assert.equal(f.reruns().length, 1);
+});
+
+test('rerun-only decisions never create fallback issues, including an unconfirmed request', async t => {
+  for (const noAdvance of [false, true]) {
+    const f = await fixture(t, { noAdvance, unknownRerun: noAdvance, respond: input => ({ content: JSON.stringify({
+      jobs: input.failed_jobs.map(j => ({ job_id: j.job_id, kind: 'external', reason: 'A service outage.', evidence: ['HTTPError: HTTP 429 Too Many Requests'] })), reports: []
+    }) }) });
+    await f.tick(); assert.equal(f.reruns().length, 1);
+    f.h.store.run('UPDATE actions_failure_runs SET retry_at=?', Date.now() - 6 * 60_000);
+    Object.assign(f.state.runs[0], { status: 'completed', conclusion: 'failure' });
+    await f.restart(); await f.hook(); await f.tick();
+    assert.equal(f.state.issues.length, 0); assert.equal(f.reruns().length, 1);
+  }
+});
+
+test('mixed causes preserve each report classification and never spend the run-wide external rerun budget', async t => {
+  const f = await fixture(t, { jobs: [job(), job({ id: 92, name: 'compile' })], log: log('HTTPError: HTTP 429 Too Many Requests\nerror TS2322: wrong type'), respond: input => ({ content: JSON.stringify({ reports: [
+    reportFor(input.failed_jobs[0], { kind: 'external', reason: 'The package index is unavailable.', evidence: ['HTTPError: HTTP 429 Too Many Requests'] }),
+    reportFor(input.failed_jobs[1], { kind: 'code', reason: 'Source assigns a string where a number is required.', evidence: ['error TS2322: wrong type'] })
+  ] }) }) });
+  await f.tick(); assert.equal(f.reruns().length, 0); assert.equal(f.state.issues.length, 2);
+  assert.match(f.state.issues[0].body, /classification: \*\*external\*\*/); assert.match(f.state.issues[1].body, /classification: \*\*code\*\*/);
+});
+
+test('the project capability ceiling fences a report even when it changes during reconciliation', async t => {
+  const f = await fixture(t, { log: log('AssertionError: failed') });
+  f.state.custom = ({ path }) => {
+    if (path.endsWith('/issues')) f.h.store.run("UPDATE policies SET capability_ceiling='read'");
+    return false;
+  };
+  await f.tick(); assert.equal(f.state.issues.length, 0); assert.equal(f.reruns().length, 0);
+  assert.equal(f.h.store.get('SELECT error FROM actions_failure_scans').error, 'actions_failures_disabled');
+});
+
+test('verified evidence longer than the historical excerpt limit reaches the issue without truncation', async t => {
+  const lines = Array.from({ length: 60 }, (_, i) => `AssertionError: fixture case ${i} observed a different candidate than expected after checking all recorded fields`);
+  const f = await fixture(t, { log: log(lines.join('\n')), respond: input => ({ content: JSON.stringify({ reports: [reportFor(input.failed_jobs[0], { kind: 'code', reason: 'The fixture produces incorrect candidates.', evidence: lines })] }) }) });
+  await f.tick(); assert.equal(f.state.issues.length, 1);
+  assert.ok(f.state.issues[0].body.includes(lines[0])); assert.ok(f.state.issues[0].body.includes(lines.at(-1)));
+  assert.ok(lines.join('\n').length > 2400);
+});
+
+test('newly registered credentials are removed from encoded source links immediately before publication', async t => {
+  const secret = 'new encoded credential value', path = `src/${secret}.ts`;
+  const f = await fixture(t, { log: null, respond: input => ({ content: JSON.stringify({ reports: [{
+    ...reportFor(input.failed_jobs[0], { kind: 'code', reason: 'The source sets an invalid budget.', evidence: [] }),
+    cause: 'negative configured budget', evidence: [{ type: 'source', path, lines: ['budget = -1'] }]
+  }] }) }) });
+  f.state.custom = ({ path: requested, req, send }) => {
+    if (requested.includes('/contents/src/')) { send({ encoding: 'base64', content: Buffer.from('budget = -1').toString('base64') }); return true; }
+    if (req.method === 'GET' && requested.endsWith('/issues')) f.h.store.run('INSERT OR IGNORE INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)',
+      'encoded-secret-model', '101', 'https://model.invalid', 'fixture', f.h.store.secrets.seal({ value: secret }, 'model:encoded-secret-model'), new Date().toISOString());
+    return false;
+  };
+  await f.tick(); assert.equal(f.state.issues.length, 1);
+  assert.ok(!f.state.issues[0].body.includes(secret)); assert.ok(!f.state.issues[0].body.includes(encodeURIComponent(secret)));
+});
+
+test('an oversized report is withheld terminally without blocking new run discovery or rerun reconciliation', async t => {
+  const large = 'Checked fixture output; preserve the full investigation for later review.\n\n'.repeat(1200);
+  const f = await fixture(t, { log: log('AssertionError: failed'), respond: input => {
+    const report = reportFor(input.failed_jobs[0], { kind: 'code', reason: 'A demonstrated fixture defect.', evidence: ['AssertionError: failed'] });
+    if (input.run.id === 800) report.diagnosis = large;
+    return { content: JSON.stringify({ reports: [report] }) };
+  } });
+  await f.tick(); assert.equal(f.state.issues.length, 0);
+  const attempt = f.h.store.get('SELECT * FROM actions_failure_attempts WHERE run_id=800'), saved = JSON.parse(attempt.data);
+  assert.equal(attempt.state, 'done'); assert.match(saved.reports[0].withheld_reason, /65,536/);
+  assert.equal(saved.reports[0].diagnosis, large);
+  f.state.runs.push(run({ id: 801 }));
+  f.h.store.run("UPDATE actions_failure_scans SET cursor=0,windows='[]',page_data=NULL,reconciled_at=0");
+  await f.tick(); assert.equal(f.state.issues.length, 1); assert.match(f.state.issues[0].body, /runs\/801/);
+  assert.ok(f.h.store.get('SELECT reconciled_at FROM actions_failure_scans').reconciled_at > 0);
+  assert.equal(f.h.store.get('SELECT count(*) n FROM actions_failure_reports WHERE run_id=800').n, 0);
+});
+
+test('an unavailable source reference withholds a code report without manufacturing an unknown issue', async t => {
+  const f = await fixture(t, { log: null, respond: input => ({ content: JSON.stringify({ reports: [{
+    ...reportFor(input.failed_jobs[0], { kind: 'code', reason: 'A source defect was claimed.', evidence: [] }),
+    evidence: [{ type: 'source', path: 'src/missing.ts', lines: ['const invalid = true;'] }]
+  }] }) }) });
+  f.state.custom = ({ path, send }) => {
+    if (path.endsWith('/contents/src/missing.ts')) { send({}, 404); return true; }
+    return false;
+  };
+  await f.tick(); assert.equal(f.state.issues.length, 0);
+  const attempt = f.h.store.get('SELECT * FROM actions_failure_attempts');
+  assert.equal(attempt.state, 'done'); assert.match(JSON.parse(attempt.data).reports[0].withheld_reason, /No cited reference/);
+});
+
+test('re-registering a cause with case or whitespace differences replaces the complete diagnosis', async t => {
+  const f = await fixture(t, { log: log('AssertionError: failed'), respond: input => {
+    const first = { ...reportFor(input.failed_jobs[0], { kind: 'code', reason: 'Initial diagnostic text.', evidence: ['AssertionError: failed'] }), cause: '  Parser   field loss  ' };
+    return { content: JSON.stringify({ reports: [first, { ...first, cause: 'parser field loss', diagnosis: first.diagnosis.replace('Initial diagnostic text.', 'Updated diagnosis after further investigation.') }] }) };
+  } });
+  await f.tick(); assert.equal(f.state.issues.length, 1);
+  assert.match(f.state.issues[0].body, /Updated diagnosis after further investigation/); assert.doesNotMatch(f.state.issues[0].body, /Initial diagnostic text/);
+  assert.equal(JSON.parse(f.h.store.get("SELECT result FROM tasks WHERE kind='actions.failures'").result).reports.length, 1);
 });

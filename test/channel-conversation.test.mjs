@@ -138,7 +138,10 @@ test('other bots are recorded without replies and their messages reach the next 
 
 test('more than 100 local messages retain old source retrieval and a rolling source summary; misses never fetch Feishu',async t=>{
   const f=await fixture(t),now=Date.now();
-  for(let i=0;i<145;i++)f.service.ledger.merge(f.chat,{message_id:'old-'+String(i).padStart(3,'0'),sender_id:i%2?'ou_alice':'ou_bob',sender_tenant:'actor-tenant',sender_type:'user',message_type:'text',content:i===0?'Old source: amber deployment':'Local discussion '+i,raw_content:'{}',created_at:now-86400000+i,updated_at:now-86400000+i,parent_id:'',root_id:'',thread_id:'thread-'+i%3,deleted:false},'history');
+  // Seed history as a batch: hundreds of autocommits can starve the fixture's HTTP keep-alive timers.
+  f.h.store.transaction(()=>{
+    for(let i=0;i<145;i++)f.service.ledger.merge(f.chat,{message_id:'old-'+String(i).padStart(3,'0'),sender_id:i%2?'ou_alice':'ou_bob',sender_tenant:'actor-tenant',sender_type:'user',message_type:'text',content:i===0?'Old source: amber deployment':'Local discussion '+i,raw_content:'{}',created_at:now-86400000+i,updated_at:now-86400000+i,parent_id:'',root_id:'',thread_id:'thread-'+i%3,deleted:false},'history');
+  });
   let searched=false;
   f.modelState.respond=async(body,res)=>{
     if(body.messages[0].content.startsWith('Summarize only'))return say(res,'A participant stated an amber deployment; confirm the original source. No inferred decision.');
