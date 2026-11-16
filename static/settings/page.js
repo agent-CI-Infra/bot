@@ -132,10 +132,11 @@ const settingsCards = {
       host.append(facts([['总量', size(disk?.total_bytes)], ['已用', size(view.host.used_bytes)], ['剩余', size(disk?.free_bytes)], ['保留空间', size(disk?.reserve_bytes)]]));
       const table = costTable(['占用', '大小']);
       for (const [key, label] of [['control_database', '控制面数据库 control.sqlite（含 WAL）'], ['control_trajectories', '控制面轨迹文件与 blob'], ['git_cache', 'git 缓存 git-cache'], ['public_boards', '公开看板 public-boards'], ['browser_evidence', '浏览器截图证据 browser-evidence'],
-        ['manager_database', 'manager 账本 manager.sqlite（含 WAL）'], ['manager_trajectories', 'manager 轨迹文件'], ['computers', '项目电脑工作卷'], ['docker_images', 'Docker 镜像'], ['docker_containers', 'Docker 容器可写层'], ['docker_build_cache', 'Docker 构建缓存']])
+        ['manager_database', 'manager 账本 manager.sqlite（含 WAL）'], ['manager_trajectories', 'manager 轨迹文件'], ['computers', '项目电脑工作卷'], ['docker_images', 'Docker 镜像'], ['docker_containers', 'Docker 容器可写层'], ['docker_build_cache', 'Docker 构建缓存'],
+        ['docker_volumes', 'Docker 卷（未被计入的部分）'], ['assistant_homes', '助手电脑 HOME（assistant-homes 卷）']])
         row(table, [label, known[key] === null || known[key] === undefined ? '尚未测量' : size(known[key]) + ((view.host.unmeasured ?? []).includes(key) ? '（部分电脑未扫完）' : '')]);
       row(table, ['其他（已用 − 以上合计）', size(view.host.other_bytes) + ((view.host.unmeasured ?? []).length ? '（含尚未测量的项）' : '')]);
-      host.append(table.wrap, note('控制面、manager、项目电脑的卷和 Docker 数据在同一块数据盘上；「其他」包括助手电脑的 HOME、系统和不归 bot 管理的目录，只显示、不清理。'));
+      host.append(table.wrap, note('控制面、manager、项目电脑的卷和 Docker 数据在同一块数据盘上；Docker 卷一行只算没有计入上面各项的卷，助手电脑的 HOME 单列；「其他」包括系统和不归 bot 管理的目录，只显示、不清理。'));
       cards.push(host);
       const reclaim = card('可回收与最近清理'), list = costTable(['类别', '可回收', '怎么回收']);
       // A database already compacted returns its free pages in the background; one not yet compacted at its next start.

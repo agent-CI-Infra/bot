@@ -14,7 +14,8 @@ import { noteTaskUsage, workspaceClasses } from '../projects/workspace-cleanup.j
 // blobs take on the control plane, its runner-call files in the manager, and its project computer's work volume (task
 // workspaces by retention class, runner journal, git store, HOME caches, other files). For platform administrators also
 // the two databases (live data, free pages, WAL), the control plane's git cache and public boards, the data disk with
-// Docker's images, containers and build cache, "other" (used less everything known), what can be reclaimed and what the last
+// Docker's images, containers, build cache, the volumes outside what is already counted and the assistant HOME, "other"
+// (used less everything known), what can be reclaimed and what the last
 // cleanups freed, and an alert for each data disk below its reserve, when background writes pause.
 //
 // A page load reads the counters added when files close (trajectory_usage, a few rows per project), one statfs and a
@@ -219,6 +220,8 @@ function summary(projects: Record<string, any>[], control: Record<string, any> |
     computers: manager?.computers ? sum(p => p.computer?.total_bytes) : null,
     docker_images: measured(manager?.docker?.images?.bytes), docker_build_cache: measured(manager?.docker?.build_cache?.bytes),
     docker_containers: measured(manager?.docker?.containers?.bytes),
+    // #968: the volumes no other row counts, and the assistant HOME, which used to sit in "other".
+    docker_volumes: measured(manager?.docker?.volumes?.bytes), assistant_homes: measured(manager?.docker?.assistant_homes?.bytes),
   };
   const unmeasured = [...Object.entries(known).filter(([, value]) => value === null).map(([key]) => key), ...partial && known.computers !== null ? ['computers'] : []];
   const knownBytes = Object.values(known).reduce((total: number, value) => total + (value ?? 0), 0), disk = control?.disk;
