@@ -150,7 +150,7 @@ function step(log) {
     add(line);
   }
   // #769: the worktree the task works in, and who chose it (its agent or controller, or the system at the first file it needed).
-  else if (value.type === 'workspace_chosen') { title.textContent = value.choice === 'none' ? '不用工作区' : '工作区'; meta.prepend(badge(value.decided_by === 'system' ? '系统选择' : '自选', 'info')); add(element('p', value.detail || '', 'say')); }
+  else if (value.type === 'workspace_chosen') { title.textContent = '工作区'; meta.prepend(badge(value.decided_by === 'system' ? '系统选择' : '自选', 'info')); add(element('p', value.detail || '', 'say')); }
   else if (value.type === 'head_moved') { title.textContent = 'PR 有新提交'; add(element('p', value.detail || `${shortSha(value.previous_head)} → ${shortSha(value.current_head)}`, 'say')); }
   else if (value.type === 'continued') { title.textContent = `第 ${value.round} 轮`; meta.prepend(badge('续接', 'info')); add(element('p', value.detail || '', 'say')); }
   else if (value.type === 'runtime_fault') { title.textContent = '运行故障'; add(element('p', value.message || '', 'muted')); if (value.where) add(collapsible('出错位置', value.where)); }

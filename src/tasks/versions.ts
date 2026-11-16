@@ -26,7 +26,7 @@ export async function versionTool(s:Store,task:Row,workspace:Workspace,name:stri
   const saved=s.get('SELECT data FROM development_candidates WHERE task_id=?',task.id),candidate=checkpoint??(saved?JSON.parse(saved.data):null),publication=saved?JSON.parse(saved.data):null;
   // Reading the versions takes no worktree (#769): a task that holds none yet reports its planned commit instead of HEAD,
   // so the controller can still choose the task's worktree after reading them.
-  const plan=workspace.plannedWorktree?.(),unbound=plan&&plan.state!=='bound'?{worktree:plan.state==='none'?'none':'not_bound',commit:plan.head_sha,tree_sha:plan.tree_sha}:null;
+  const plan=workspace.plannedWorktree?.(),unbound=plan&&plan.state!=='bound'?{worktree:'not_bound',commit:plan.head_sha,tree_sha:plan.tree_sha}:null;
   const head=unbound?null:await workspace.call('version-head:'+randomId(),{type:'workspace_source'});
   const record=(purpose:string,commit:any,tree:any,availability:string)=>commit||tree?traceEvent(s,task.id,'version_reference',{purpose,commit_sha:commit??null,tree_sha:tree??null,local_availability:availability,workspace_id:workspace.task.workspace_id,attempt:task.attempt,repository_id:task.repository_id},task.trace_run_id):null;
   const baselineCommit=input.snapshot_sha??candidate?.base_sha??task.head_sha,baselineRef=record('baseline',baselineCommit,input.snapshot_tree??candidate?.base_tree,'unknown');

@@ -55,16 +55,8 @@ function serialized<T>(key:string,work:()=>Promise<T>):Promise<T>{
   void tail.then(()=>{if(queues.get(key)===tail)queues.delete(key);});
   return next;
 }
-/**
- * The answer to a call that needs the repository when the task chose to work without one. An agent that chose can still
- * change its mind; a role whose controller chose cannot, and the choice holds for the attempt, so it says it needs the files.
- */
-export const noWorkspace=(reason:string|null,by:string|null='agent')=>({error:'no_workspace',message:by==='agent'
-  ?`This task chose to work without repository files${reason?` (${reason})`:''}. Choose a workspace with use_workspace or create_workspace before reading repository files or running commands.`
-  :`The task's controller (${by}) chose to work without repository files${reason?` (${reason})`:''}. Work from ../context/ and the task records; if the task needs repository files or commands, say so in your result.`});
-
 export class Workspace {
-  // The task workspace this object saw holding its worktree (or needing none), so later calls do not ask again.
+  // The task workspace this object saw holding its worktree, so later calls do not ask again.
   private settled?:string;
   constructor(readonly store:Store,readonly manager:Manager,readonly task:Row,readonly redactor:Redactor,readonly guard:()=>Promise<void>,readonly log:(value:unknown)=>void,
     readonly operations?:'service_role_operations'){}
@@ -193,7 +185,7 @@ export class Workspace {
   /**
    * Prepares the commit like bind() but leaves the worktree for later (#769): the computer's store gets the commits, and the
    * task records what it is to get (taskPlan). The task's controller, or its agent without a role team, may choose a
-   * worktree or none first (choose()); the first call that needs the files without a choice binds the system's (ensure()).
+   * worktree first (choose()); the first call that needs the files without a choice binds the system's (ensure()).
    * A workspace that already holds a worktree (the same workspace preparing again) is checked again at once, as bind() does.
    * Returns null when this way is not available.
    */
@@ -210,15 +202,13 @@ export class Workspace {
   plannedWorktree(){return taskPlan(this.store,this.task);}
   /**
    * Binds the task's worktree if the task needs one and holds none yet: the system's choice (bind()'s rule) for a task
-   * that prepared by plan() and did not choose. An error answer when it has none: it chose to work without files
-   * (no_workspace), or no worktree could be made.
+   * that prepared by plan() and did not choose. An error answer when no worktree could be made.
    */
   async ensure():Promise<{error?:string;message?:string;worktree?:{id:string;mode:string;reused:boolean}}>{
     if(this.settled&&this.settled===this.task.workspace_id)return {};
     return serialized(`${this.task.id}:${this.task.workspace_id}`,async()=>{
       if(this.settled&&this.settled===this.task.workspace_id)return {};
       const plan=taskPlan(this.store,this.task);
-      if(plan?.state==='none')return noWorkspace(plan.reason,plan.decided_by);
       if(!plan||plan.state==='bound'&&taskWorktree(this.store,this.task)){this.settled=String(this.task.workspace_id);return {};}
       const taken=await this.take(plan.head_sha,plan.tree_sha,plan.mode,plan.author_email,'system');
       if(!taken)return {error:'workspace_unavailable',message:'No worktree could be made for this task on the project computer.'};
@@ -278,28 +268,20 @@ export class Workspace {
   }
   /**
    * The task's own choice (#769), made by its controller or by its agent (`by`): an existing worktree of the project
-   * computer (`use`, read or write), a new one (`create`), or none (`none`). The handover checks are the runner's, as for
+   * computer (`use`, read or write) or a new one (`create`). The handover checks are the runner's, as for
    * the system's choice; a worktree with changes, or at another commit, is taken only with on_changes (reset restores it
    * to the task's commit first, saving its changes as a patch into ../context/; keep_changes takes it as it is, at the
-   * task's commit, for writing). A task that writes cannot work without files, nor read only. Once the task holds a
+   * task's commit, for writing). A task that writes cannot read only. Once the task holds a
    * worktree, it keeps it for this attempt.
    */
-  choose(action:'use'|'create'|'none',args:{worktree_id?:string;mode?:string;on_changes?:string;reason?:string},by:string,callId=randomId()):Promise<any>{
+  choose(action:'use'|'create',args:{worktree_id?:string;mode?:string;on_changes?:string},by:string,callId=randomId()):Promise<any>{
     return serialized(`${this.task.id}:${this.task.workspace_id}`,()=>this.chooseNow(action,args,by,callId));
   }
-  private async chooseNow(action:'use'|'create'|'none',args:{worktree_id?:string;mode?:string;on_changes?:string;reason?:string},by:string,callId:string):Promise<any>{
+  private async chooseNow(action:'use'|'create',args:{worktree_id?:string;mode?:string;on_changes?:string},by:string,callId:string):Promise<any>{
     const plan=taskPlan(this.store,this.task),repo=String(this.task.repository_id);
     if(!plan)return {error:'workspace_not_selectable',message:'This task\'s workspace was prepared without the computer\'s git store; it cannot be chosen.'};
     const held=taskWorktree(this.store,this.task);
     if(held)return {error:'workspace_already_bound',message:'This task already holds a worktree for this attempt; it keeps it.',worktree_id:held.worktree_id,mode:held.mode,head:held.head_sha};
-    if(action==='none'){
-      if(plan.mode==='write')return {error:'workspace_required',message:'This task changes repository files, so it needs a worktree.'};
-      const reason=typeof args.reason==='string'&&args.reason.trim()?args.reason.trim().slice(0,500):null;if(!reason)return {error:'invalid_arguments',message:'Give the reason this task needs no repository files.'};
-      decidePlan(this.store,this.task,'none',by,reason);
-      traceEvent(this.store,String(this.task.id),'workspace_none',{workspace_id:this.task.workspace_id,decided_by:by,reason,attempt:this.task.attempt},this.task.trace_run_id);
-      this.log({type:'workspace_chosen',decided_by:by,choice:'none',reason,detail:`${who(by)}决定不用工作区：${reason}`});
-      return {ok:true,workspace:'none',message:'This task now works without repository files: ../context/ and ../notes/ stay readable. To read repository files later, call use_workspace or create_workspace first.'};
-    }
     const mode=args.mode===undefined?plan.mode:args.mode;
     if(mode!=='read'&&mode!=='write')return {error:'invalid_arguments',message:'mode is read or write.'};
     if(plan.mode==='write'&&mode==='read')return {error:'workspace_mode_not_allowed',message:'This task changes repository files, so it takes its worktree for writing.'};
