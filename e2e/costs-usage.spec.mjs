@@ -205,3 +205,46 @@ test('an all-unpriced range says why and links a super admin to the model prices
     await expect(page).toHaveURL(/#\/settings\/models$/);
   } finally { await f.close(); }
 });
+
+// #875: an outer role="img" flattens the focusable bars, so a screen reader never reached the per-bar label; and the
+// two tables below the chart sum by project and by day, so neither carried the value behind one bar.
+test('the chart is a group of labelled bars and a date × project table carries the same values', async ({ page }) => {
+  test.setTimeout(180000);
+  const f = await managementFixture(), { h } = f;
+  try {
+    seedUsage(h);
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await page.clock.setFixedTime(new Date('2026-11-11T02:00:00Z'));
+    await page.goto(h.admin + '/#/costs');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const panel = page.locator('#costs-panel');
+    const svg = panel.locator('.cost-chart-section svg[data-metric=cost]');
+    await expect(svg).toHaveCount(1);
+    // The chart itself is a labelled group, not one image.
+    await expect(svg).toHaveAttribute('role', 'group');
+    await expect(svg).toHaveAttribute('aria-label', /每日模型估算费用/);
+    // No bar sits inside a role=img subtree any more.
+    expect(await svg.evaluate(node => [...node.querySelectorAll('rect')].filter(rect => rect.closest('[role=img]') !== rect).length)).toBe(0);
+    const labels = await svg.locator('rect').evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-label')));
+    expect(labels.length).toBeGreaterThan(0);
+    for (const label of labels) expect(label).toMatch(/^\d{4}-\d{2}-\d{2} · .+ · .+ · 当日 \d+\.\d%$/);
+    // One row per bar, with the same date · project · amount · share the bar announces.
+    const bars = panel.locator('details.cost-chart-table').filter({ hasText: '日期 × 项目费用明细' });
+    await expect(bars).toHaveCount(1);
+    await bars.locator('summary').click();
+    await expect(bars.locator('tbody tr')).toHaveCount(labels.length);
+    const first = (await bars.locator('tbody tr').first().locator('td').allTextContents()).map(cell => cell.trim());
+    const firstLabel = labels.find(label => label.startsWith(first[0] + ' · ' + first[1] + ' · '));
+    expect(firstLabel).toBeTruthy();
+    expect(firstLabel).toContain(first[2]);
+    expect(firstLabel.endsWith('当日 ' + first[3])).toBe(true);
+    // Focusing a bar still reports it through the existing live line.
+    await svg.locator('rect').first().focus();
+    await expect(panel.locator('.cost-chart-detail').first()).toHaveText(labels[0]);
+    // The two pre-existing tables keep their place and scope.
+    await expect(panel.locator('section.cost-breakdown').filter({ hasText: '项目占比' })).toHaveCount(1);
+    await expect(panel.locator('details.cost-breakdown').filter({ hasText: '每日费用与用量明细' })).toHaveCount(1);
+  } finally { await f.close(); }
+});

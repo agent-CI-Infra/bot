@@ -252,7 +252,9 @@ function costTable(headers) {
 function costChart(container,byDate,projects,currency,tokens=false) {
   const unit=tokens?'用量':currency,value=row=>costChartValue(row,tokens)||0;
   const ns='http://www.w3.org/2000/svg',width=Math.max(800,byDate.size*30+100),height=350,left=90,bottom=45,top=20,plot=height-bottom-top;
-  const svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox',`0 0 ${width} ${height}`);svg.setAttribute('width',String(width));svg.setAttribute('height',String(height));svg.setAttribute('role','img');svg.setAttribute('aria-label',tokens?'每日模型用量，柱内不同颜色代表各项目':'每日模型估算费用，柱内不同颜色代表各项目');svg.dataset.metric=tokens?'tokens':'cost';
+  const svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox',`0 0 ${width} ${height}`);svg.setAttribute('width',String(width));svg.setAttribute('height',String(height));// #875: an outer role="img" flattens its subtree, so the focusable bars inside it were never announced. The chart is
+// a group of labelled bars instead; the summary stays on the group and each bar keeps its own label.
+svg.setAttribute('role','group');svg.setAttribute('aria-label',tokens?'每日模型用量，柱内不同颜色代表各项目':'每日模型估算费用，柱内不同颜色代表各项目');svg.dataset.metric=tokens?'tokens':'cost';
   const muted=(typeof getComputedStyle==='function'&&getComputedStyle(document.documentElement).getPropertyValue('--color-text-muted').trim()||'#607087'),add=(tag,attributes,text)=>{const node=document.createElementNS(ns,tag);for(const [key,value]of Object.entries(attributes))node.setAttribute(key,String(value));if(text!==undefined)node.textContent=text;svg.append(node);return node;};
   const dates=[...byDate],max=Math.max(...dates.map(([,d])=>value(d)),0),axis=costAxis(max,tokens),ceiling=axis.ceiling,step=(width-left-20)/dates.length;
   for(let i=0;i<=4;i++){const y=top+plot*(1-i/4);add('line',{x1:left,y1:y,x2:width-20,y2:y,stroke:'#dce6ed'});add('text',{x:left-8,y:y+4,'text-anchor':'end',fill:muted,'font-size':12},axis.labels[i]);}
@@ -271,4 +273,19 @@ function costChart(container,byDate,projects,currency,tokens=false) {
   });
   const scroll=element('div','','cost-chart-scroll');scroll.tabIndex=0;scroll.setAttribute('aria-label',tokens?'可横向滚动的用量图':'可横向滚动的费用图');scroll.append(svg);container.append(scroll,hover);
   const legend=element('div','','cost-legend');for(const project of projects){const entry=element('span',''),dot=element('span','','cost-color');dot.style.backgroundColor=costColor(project.repository_id);entry.append(dot,document.createTextNode(project.full_name));legend.append(entry);}container.append(legend);
+  // #875: the two tables below the chart sum by project and by day, so neither carries the value behind one bar. This
+  // third table is the chart itself, one row per bar, with the same date · project · amount · share the bar announces.
+  const bars=element('details','','cost-breakdown cost-chart-table'),table=costTable(['日期','项目',tokens?'用量':'金额','当日占比','未计价请求']);
+  bars.append(element('summary',tokens?'日期 × 项目用量明细':'日期 × 项目费用明细'));
+  for(const [date,day]of dates)for(const project of projects){
+    const row=day.rows.find(item=>item.repository_id===project.repository_id),amount=row&&value(row);
+    if(!amount)continue;
+    const line=document.createElement('tr'),name=element('td',''),dot=element('span','','cost-color');
+    dot.style.backgroundColor=costColor(project.repository_id);name.append(dot,document.createTextNode(project.full_name));
+    line.dataset.date=date;line.dataset.project=project.repository_id;
+    line.title=`${date} · ${project.full_name} · ${tokens?metricNumber(amount):money(amount,currency)} · 当日 ${(amount/value(day)*100).toFixed(1)}%`;
+    line.append(element('td',date),name,element('td',tokens?metricNumber(amount):money(amount,currency)),element('td',(amount/value(day)*100).toFixed(1)+'%'),element('td',String(row.unpriced_requests||0)));
+    table.body.append(line);
+  }
+  bars.append(table.wrap);container.append(bars);
 }
