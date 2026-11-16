@@ -7,8 +7,59 @@ function machineSection(globalSettings = false) {
   const shown={...pc,...effective,network_policy:effective.egress===undefined?pc.network_policy:effective.egress?'internet egress':'internal, no egress'};
   // A resource left empty follows the global default; own() is the value the project sets (console or repository file).
   const own = name => current.rules?.computer ? current.rules.computer[name] : pc.inherited?.includes(name) ? undefined : pc[name];
-  const number = (name, step) => input(name, own(name) ?? '', { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '',
-    placeholder: `留空使用全局默认（${pc.defaults?.[name] ?? pc[name]}）` });
+  const names = { cpus: 'CPU', memory_mb: '内存', pids: '进程数', tmp_mb: '/tmp', packages: '软件包', setup_script: '初始化脚本', rerun_setup: '重新初始化', egress: '网络', env: '环境变量' };
+  // An entry the field cannot accept must be reported, never read as「empty → follow the global default」: letters typed
+  // into a number input leave .value empty without badInput, and a value the browser discards loses badInput too. The
+  // invalid state is captured while typing, so a later submit cannot mistake it for an explicit clear.
+  const number = (name, step) => {
+    const control = input(name, own(name) ?? '', { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '',
+      placeholder: `留空使用全局默认（${pc.defaults?.[name] ?? pc[name]}）` });
+    // A field the repository file writes has no console override to clear: saving null changes nothing there and the
+    // repository value is re-applied on the next task prepare, so clearing must not claim「跟随全局默认」(#865).
+    const repositoryLayer = () => current.rules?.computer_sources?.[name] === 'repository';
+    const emptyNote = () => repositoryLayer() ? '留空不改变仓库文件里的值' : '留空即跟随全局默认';
+    const invalidNote = () => repositoryLayer() ? '这个字段只能填数字；清空不会改变仓库文件里的值' : '这个字段只能填数字';
+    const error = element('span', '', 'machine-config-error'), follow = element('span', '', 'machine-config-follow');
+    error.id = `machine-${name}-error`; error.hidden = true; follow.textContent = emptyNote(); follow.hidden = control.value.trim() !== '';
+    control.setAttribute('aria-describedby', error.id);
+    // A refused entry stays refused until the user clears the field, deletes content it actually held, or enters a value
+    // it now accepts. An empty value alone cannot be told apart from an explicit clear, and reading it as one is the
+    // #865 defect: a paste fires `insertFromPaste` and then `input` with an empty value, and Backspace in an already
+    // empty field fires only a delete, so neither may reset the rejection.
+    let rejected = false;
+    const render = () => {
+      control.dataset.invalidNumber = rejected ? '1' : '';
+      control.setCustomValidity(rejected ? invalidNote() : '');
+      control.setAttribute('aria-invalid', rejected ? 'true' : 'false');
+      error.textContent = rejected ? invalidNote() : '';
+      error.hidden = !rejected; clear.hidden = !rejected;
+      follow.textContent = emptyNote();
+      follow.hidden = rejected || control.value.trim() !== '';
+    };
+    const reject = () => { rejected = true; render(); };
+    const release = () => { rejected = false; render(); };
+    const clear = button(repositoryLayer() ? '清空输入' : '清空并跟随全局默认', () => { release(); control.value = ''; control.dispatchEvent(new Event('input', { bubbles: true })); control.focus(); }, 'quiet');
+    clear.hidden = true;
+    // Characters a number input cannot accept never reach .value and fire no input event; beforeinput still reports them.
+    control.addEventListener('beforeinput', event => {
+      const data = event.data ?? '';
+      if ((event.inputType === 'insertText' || event.inputType === 'insertFromPaste') && data && !/^[0-9.eE+\-]+$/.test(data)) reject();
+      // Deleting content the field actually held is an explicit clear; Backspace in an already empty field is not.
+      else if ((event.inputType === 'deleteContentBackward' || event.inputType === 'deleteContentForward') && control.value.trim() !== '') release();
+    });
+    control.addEventListener('input', () => {
+      const text = control.value.trim();
+      // badInput is the browser's own "cannot parse" flag; an entry it discards leaves the value empty but valid.
+      if (control.validity.badInput || (text !== '' && !Number.isFinite(Number(text)))) reject();
+      // Only text the field actually holds releases the refusal. An empty value is not a replacement: a paste over the
+      // saved value drops the selection with the discarded text, so releasing on "changed from the refused value"
+      // would let that empty field pass for an explicit clear (#903 review B1).
+      else if (rejected && text !== '') release();
+      else render();
+    });
+    control.machineExtras = [error, clear, follow];
+    return control;
+  };
   const configField = (label, control, name) => {
     const wrap = element('div', '', 'machine-config-field'), source = current.rules?.computer_sources?.[name];
     const inherited = specFields.includes(name) && own(name) == null;
@@ -18,7 +69,7 @@ function machineSection(globalSettings = false) {
       const target = own(name) ?? pc.defaults?.[name];
       hint.append(` · ${unread ? '临时值' : '配置目标'} ${target ?? '未知'} · 电脑报告 ${pc[name] ?? '未知'}`);
     }
-    wrap.append(control.tagName === 'LABEL' ? control : field(label, control), hint); return wrap;
+    wrap.append(control.tagName === 'LABEL' ? control : field(label, control), ...(control.machineExtras ?? []), hint); return wrap;
   };
   const group = (title, text, ...fields) => {
     const section = element('section', '', 'machine-config-group');
@@ -53,8 +104,19 @@ function machineSection(globalSettings = false) {
     layout];
   const readSpec = form => {
     const spec = {};
-    // null clears the project's value, so the resource follows the global default again.
-    for (const name of specFields) { const text = form.elements[name].value.trim(), value = text === '' ? null : Number(text); if (value !== (own(name) ?? null)) spec[name] = value; }
+    // null clears the project's value, so the resource follows the global default again — only an explicit clear may do that.
+    for (const name of specFields) {
+      const control = form.elements[name], text = control.value.trim();
+      // A refused entry is checked first: it must be reported even for a field the console cannot clear, otherwise the
+      // entry would be read as「no change」and the field error promised above would never appear (review of #903).
+      if (control.dataset.invalidNumber === '1' || (text !== '' && !Number.isFinite(Number(text))))
+        throw new Error(`${names[name]}：${current.rules?.computer_sources?.[name] === 'repository' ? '这个字段只能填数字；清空不会改变仓库文件里的值' : '这个字段只能填数字'}`);
+      // A repository-written field cannot be cleared from the console; sending null would rebuild the computer and
+      // still leave the repository value in place, so a cleared repository field sends nothing (#865 review finding).
+      if (text === '' && current.rules?.computer_sources?.[name] === 'repository') continue;
+      const value = text === '' ? null : Number(text);
+      if (value !== (own(name) ?? null)) spec[name] = value;
+    }
     if (form.elements.egress.checked !== (shown.network_policy === 'internet egress')) spec.egress = form.elements.egress.checked;
     const packages = [...new Set(form.elements.packages.value.split(/[\s,]+/).filter(Boolean))];
     if (packages.slice().sort().join(' ') !== [...(shown.packages || [])].sort().join(' ')) spec.packages = packages;
@@ -71,7 +133,6 @@ function machineSection(globalSettings = false) {
     return '已保存，虚拟电脑已按新配置重建';
   }, { editable: editable && !unread, hideActions: editable && !unread });
   form.classList.add('machine-config-card');
-  const names = { cpus: 'CPU', memory_mb: '内存', pids: '进程数', tmp_mb: '/tmp', packages: '软件包', setup_script: '初始化脚本', rerun_setup: '重新初始化', egress: '网络', env: '环境变量' };
   const update = () => {
     try { const changes = Object.keys(readSpec(form.querySelector('form'))); draft.textContent = changes.length ? '有未保存的更改：' + changes.map(key => names[key]).join('、') : '已保存'; }
     catch (err) { draft.textContent = '有未保存的更改：' + readErrorText(err); }
