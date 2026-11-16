@@ -34,6 +34,30 @@ function roleTaskRefLabel(entry) {
   return '#' + shortId(entry.task_id);
 }
 
+function formatElapsedText(iso) {
+  if (!iso || typeof formatDurationMs !== 'function') return '';
+  const durMs = Date.now() - Date.parse(iso);
+  return Number.isFinite(durMs) && durMs >= 0 ? formatDurationMs(durMs) : '';
+}
+
+function refreshWorkbenchTimes(container) {
+  if (!container?.querySelectorAll) return;
+  for (const el of container.querySelectorAll('[data-started-at]')) {
+    const text = formatElapsedText(el.dataset.startedAt);
+    if (text) { el.textContent = text; el.hidden = false; }
+  }
+  if (typeof waitedFor === 'function') {
+    for (const el of container.querySelectorAll('[data-queued-at]')) {
+      const waited = waitedFor(el.dataset.queuedAt);
+      if (waited) { el.textContent = waited; el.hidden = false; }
+    }
+    for (const el of container.querySelectorAll('[data-updated-at]')) {
+      const rel = waitedFor(el.dataset.updatedAt);
+      if (rel) el.textContent = `${rel}前`;
+    }
+  }
+}
+
 function renderRoleBoardRow(role, unsupportedQueue) {
   const row = element('div', '', 'role-board-row');
   row.dataset.roleRow = role.role;
@@ -82,10 +106,14 @@ function renderRoleBoardRow(role, unsupportedQueue) {
       pulse.setAttribute('aria-hidden', 'true');
       const ref = element('strong', roleTaskRefLabel(run), 'role-chip-ref');
       const sum = element('span', clipText(run.summary || (kindLabels[run.kind] || run.kind), 44), 'role-chip-summary');
-      const durMs = run.started_at ? Date.now() - Date.parse(run.started_at) : NaN;
-      const dur = Number.isFinite(durMs) && durMs >= 0 && typeof formatDurationMs === 'function' ? formatDurationMs(durMs) : '';
+      const dur = formatElapsedText(run.started_at);
       chip.append(pulse, ref, sum);
-      if (dur) chip.append(element('span', dur, 'role-chip-time'));
+      if (run.started_at) {
+        const timeSpan = element('span', dur, 'role-chip-time');
+        timeSpan.dataset.startedAt = run.started_at;
+        timeSpan.hidden = !dur;
+        chip.append(timeSpan);
+      }
       list.append(chip);
     }
     runCell.append(list);
@@ -116,9 +144,12 @@ function renderRoleBoardRow(role, unsupportedQueue) {
       }
       if (item.queue_reason === 'role_capacity') {
         chip.append(badge('等槽位', 'warning'));
-      } else {
+      } else if (item.queued_at) {
         const waited = typeof waitedFor === 'function' ? waitedFor(item.queued_at) : null;
-        if (waited) chip.append(element('span', waited, 'role-chip-time'));
+        const waitSpan = element('span', waited || '', 'role-chip-time');
+        waitSpan.dataset.queuedAt = item.queued_at;
+        waitSpan.hidden = !waited;
+        chip.append(waitSpan);
       }
       list.append(chip);
     });
@@ -186,9 +217,11 @@ function renderWorkbenchTaskRow(row) {
 
   // Col 4: Updated timestamp
   const timeCol = element('div', '', 'task-col task-col-updated');
-  const rel = typeof waitedFor === 'function' ? waitedFor(row.updated_at || row.created_at) : null;
-  const fullTime = timestamp(row.updated_at || row.created_at) || '—';
+  const updatedIso = row.updated_at || row.created_at || '';
+  const rel = typeof waitedFor === 'function' ? waitedFor(updatedIso) : null;
+  const fullTime = timestamp(updatedIso) || '—';
   const timeSpan = element('span', rel ? `${rel}前` : fullTime, 'muted task-updated-text');
+  if (updatedIso) timeSpan.dataset.updatedAt = updatedIso;
   timeSpan.title = fullTime;
   timeCol.append(timeSpan);
 
@@ -234,7 +267,7 @@ function workspaceOverview() {
   const rightBar = element('div', '', 'workbench-right-bar');
   const liveSummary = element('div', '', 'workbench-live-stats');
   const statRunning = element('span', '正在执行：—', 'workbench-stat');
-  const statQueued = element('span', '排队等待：—', 'workbench-stat');
+  const statQueued = element('span', '排队中：—', 'workbench-stat');
   const statSlots = element('span', '项目并发槽位：—', 'workbench-stat');
   liveSummary.append(statRunning, statQueued, statSlots);
 
@@ -361,15 +394,19 @@ function workspaceOverview() {
       roleCountBadge.textContent = String(visibleRoles.length);
 
       const activeRoleCount = visibleRoles.filter(r => (r.running || []).some(run => !run.delegated_active)).length;
-      const queuedTaskCount = board.project?.queued_tasks ?? visibleRoles.reduce((sum, r) => sum + (r.ready?.length || 0), 0);
+      const queuedTaskCount = board.project?.queued_tasks ?? 0;
+      const capacityWaitingCount = board.project?.capacity_waiting_tasks ?? 0;
+      const unattributedQueued = board.project?.unattributed_queued ?? 0;
       const runningSlots = board.project?.running_tasks ?? 0;
       const maxSlots = board.project?.task_concurrency ?? '—';
       statRunning.textContent = `正在执行：${activeRoleCount} 个角色`;
-      statQueued.textContent = `排队等待：${queuedTaskCount} 项任务`;
+      statQueued.textContent = capacityWaitingCount > 0
+        ? `排队中：${queuedTaskCount} 项（另 ${capacityWaitingCount} 项等槽位）`
+        : `排队中：${queuedTaskCount} 项`;
       statSlots.textContent = `项目并发槽位：${runningSlots} / ${maxSlots}`;
 
       const unsupportedQueue = Array.isArray(board.unsupported) && board.unsupported.includes('role_queue');
-      roleStatus.textContent = `共启用 ${visibleRoles.length} 个项目角色 · 角色并发限额${board.enforced ? '已启用' : '未单独限制（共享项目槽位）'} · 更新于 ${timestamp(lastRoles)}`;
+      roleStatus.textContent = `共启用 ${visibleRoles.length} 个项目角色 · 角色并发限额${board.enforced ? '已启用' : '未单独限制（共享项目槽位）'}${unattributedQueued > 0 ? ` · ${unattributedQueued} 项排队任务待调度确定角色` : ''} · 更新于 ${timestamp(lastRoles)}`;
 
       if (viewMode === 'roles') {
         const nextSig = JSON.stringify([visibleRoles, board.unsupported]);
@@ -378,6 +415,8 @@ function workspaceOverview() {
           const focusedTask = roleRows.contains(document.activeElement) ? document.activeElement.dataset?.attentionTask : null;
           roleRows.replaceChildren(...visibleRoles.map(r => renderRoleBoardRow(r, unsupportedQueue)));
           if (focusedTask) roleRows.querySelector(`[data-attention-task="${CSS.escape(focusedTask)}"]`)?.focus({ preventScroll: true });
+        } else {
+          refreshWorkbenchTimes(roleRows);
         }
         if (typeof tryRestoreTaskReturn === 'function') tryRestoreTaskReturn({ settle: true });
       }
@@ -437,6 +476,8 @@ function workspaceOverview() {
           [...rows.children].filter(node => !wanted.includes(node)).forEach(node => node.remove());
         }
         if (focusedTask) rows.querySelector(`[data-attention-task="${CSS.escape(focusedTask)}"]`)?.focus({ preventScroll: true });
+      } else {
+        refreshWorkbenchTimes(rows);
       }
       if (typeof tryRestoreTaskReturn === 'function') tryRestoreTaskReturn({ settle: true });
 

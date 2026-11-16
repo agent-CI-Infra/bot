@@ -14,8 +14,9 @@ export const featureNeeds: Record<Feature, Needs> = {
   // contents: write. Without it reviews are still published and the threads stay open.
   review_threads: { permissions: { metadata: 'read', contents: 'write', pull_requests: 'write' } },
   development: { permissions: { metadata: 'read', contents: 'write', issues: 'write', pull_requests: 'write' }, events: appEvents },
-  // Task agents read CI results with their own read-only token; a missing grant only hides those results.
-  ci_reads: { permissions: { actions: 'read', checks: 'read', statuses: 'read' } },
+  // Task agents read CI results with their own read-only token, and the console displays GitHub Actions / commit status
+  // checks from check_run and status webhooks; a missing grant or subscription only hides those CI results.
+  ci_reads: { permissions: { actions: 'read', checks: 'read', statuses: 'read' }, events: ['check_run', 'status'] },
   board: { permissions: { metadata: 'read', contents: 'read', issues: 'read', pull_requests: 'read', actions: 'read' } },
   release: { app: true, permissions: { metadata: 'read', contents: 'write', actions: 'write', pull_requests: 'read' } },
   ci_changes: { app: true, permissions: { metadata: 'read', contents: 'write', pull_requests: 'write', workflows: 'write' } },

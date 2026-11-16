@@ -1,9 +1,17 @@
 import type { Store, Row } from '../storage/database.js';
-import type { Json } from '../core/security.js';
+import { fail, type Json } from '../core/security.js';
+import { scope, type Actor } from '../app/auth.js';
+import { GitHub } from '../github/client.js';
+import { Redactor, TaskError } from '../agent/common.js';
 
 const hexSha = /^[a-f0-9]{40}$/i;
 const repoPath = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const passingConclusions = new Set(['success', 'neutral', 'skipped']);
+const checkRetentionMs = 30 * 24 * 3600_000;
+const opportunisticPruneIntervalMs = 10 * 60_000;
+const liveSyncCooldownMs = 15_000;
+let lastOpportunisticPruneAt = 0;
+const liveSyncSeen = new Map<string, number>();
 
 export function commitChecksStorage(store: Store): void {
   store.db.exec(`
@@ -18,7 +26,19 @@ export function commitChecksStorage(store: Store): void {
       updated_at TEXT NOT NULL,
       PRIMARY KEY(repository_id,head_sha,check_key)
     );
+    CREATE INDEX IF NOT EXISTS commit_checks_updated ON commit_checks(updated_at);
   `);
+}
+
+/** Bounded retention cleanup for aged `commit_checks` rows so long-running deployments do not grow without bound. */
+export function pruneCommitChecks(store: Store, maxAgeMs = checkRetentionMs, now = Date.now()): number {
+  if (!store.hasTable('commit_checks')) return 0;
+  const cutoff = new Date(now - maxAgeMs).toISOString();
+  const res = store.run(
+    'DELETE FROM commit_checks WHERE rowid IN (SELECT rowid FROM commit_checks WHERE updated_at < ? LIMIT 500)',
+    cutoff,
+  );
+  return Number(res.changes ?? 0);
 }
 
 function upsertCheck(store: Store, repositoryId: string, headSha: string, key: string, name: string, status: string, conclusion: string | null, detailsUrl: string | null, updatedAt = new Date().toISOString()): void {
@@ -42,7 +62,12 @@ function upsertCheck(store: Store, repositoryId: string, headSha: string, key: s
 
 export function recordCheckWebhook(store: Store, repositoryId: string, event: string, payload: any): void {
   if (!repositoryId || !payload || typeof payload !== 'object') return;
-  const now = new Date().toISOString();
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  if (nowMs - lastOpportunisticPruneAt >= opportunisticPruneIntervalMs) {
+    lastOpportunisticPruneAt = nowMs;
+    pruneCommitChecks(store, checkRetentionMs, nowMs);
+  }
   if (event === 'check_run' && payload.check_run && typeof payload.check_run === 'object') {
     const run = payload.check_run;
     const sha = String(run.head_sha ?? '');
@@ -86,7 +111,7 @@ export function recordMergeChecks(store: Store, repositoryId: string, headSha: s
   }
 }
 
-function summarizeChecks(items: { name: string; status: string; conclusion: string | null; details_url: string | null }[], headSha: string | null, fallbackUrl: string | null): Json {
+function summarizeChecks(items: { name: string; status: string; conclusion: string | null; details_url: string | null }[], headSha: string | null, fallbackUrl: string | null, eventsUnsubscribed = false): Json {
   let passed = 0, running = 0, failed = 0;
   for (const item of items) {
     if (item.status !== 'completed') running++;
@@ -96,7 +121,7 @@ function summarizeChecks(items: { name: string; status: string; conclusion: stri
   const total = items.length;
   const status = total === 0 ? 'none' : failed > 0 ? 'failing' : running > 0 ? 'running' : 'passing';
   const url = items.find(i => i.details_url)?.details_url ?? fallbackUrl;
-  return { status, head_sha: headSha, total, passed, running, failed, checks: items.slice(0, 12), url };
+  return { status, head_sha: headSha, total, passed, running, failed, checks: items.slice(0, 12), url, ...(total === 0 && eventsUnsubscribed ? { events_unsubscribed: true } : {}) };
 }
 
 export function attachExternalLinks<T extends Record<string, any>>(store: Store, tasks: T[]): (T & { external: Json })[] {
@@ -161,6 +186,27 @@ export function attachExternalLinks<T extends Record<string, any>>(store: Store,
   if (sourceIds.length) {
     for (const row of store.all(`SELECT id,kind,object_number FROM tasks WHERE id IN (${sourceIds.map(() => '?').join(',')})`, ...sourceIds)) {
       sourceTasks.set(String(row.id), row);
+    }
+  }
+
+  const repoIds = [...new Set(tasks.map(t => String(t.repository_id ?? '')).filter(Boolean))];
+  const unsubscribedRepos = new Set<string>();
+  if (repoIds.length && store.hasTable('installed_repositories')) {
+    for (const row of store.all(
+      `SELECT r.id AS repository_id, a.type AS account_type, i.events AS events
+       FROM repositories r
+       JOIN accounts a ON a.id=r.account_id
+       LEFT JOIN installed_repositories i ON i.account_id=r.account_id AND i.repository_id=r.id AND i.installed=1
+       WHERE r.id IN (${repoIds.map(() => '?').join(',')})`,
+      ...repoIds,
+    )) {
+      if (row.account_type !== 'github_app' || typeof row.events !== 'string') continue;
+      try {
+        const parsed = JSON.parse(row.events);
+        if (Array.isArray(parsed) && !parsed.includes('check_run') && !parsed.includes('status')) {
+          unsubscribedRepos.add(String(row.repository_id));
+        }
+      } catch {}
     }
   }
 
@@ -229,7 +275,7 @@ export function attachExternalLinks<T extends Record<string, any>>(store: Store,
 
     // 3. GitHub Actions / Check Runs resolution
     const checkSha = (pull_request?.head_sha
-      ?? ([task.pushed_sha, result?.sha, (kind === 'actions.failures' ? task.head_sha : null)].find(v => typeof v === 'string' && hexSha.test(v)) ?? null));
+      ?? ([task.pushed_sha, result?.sha, (kind === 'actions.failures' || kind.startsWith('release.') ? task.head_sha : null)].find(v => typeof v === 'string' && hexSha.test(v)) ?? null));
     const normalizedCheckSha = checkSha ? String(checkSha).toLowerCase() : null;
     let checkItems: { name: string; status: string; conclusion: string | null; details_url: string | null }[] = [];
     if (normalizedCheckSha && hasChecks) {
@@ -251,7 +297,8 @@ export function attachExternalLinks<T extends Record<string, any>>(store: Store,
       ];
     }
     const actionsFallbackUrl = pull_request?.url ? `${pull_request.url}/checks` : ghBase ? `${ghBase}/actions` : null;
-    const actions = summarizeChecks(checkItems, normalizedCheckSha ?? (typeof mcSha(mergeChecksByTask.get(id)) === 'string' ? mcSha(mergeChecksByTask.get(id)) : null), actionsFallbackUrl);
+    const resolvedSha = normalizedCheckSha ?? (typeof mcSha(mergeChecksByTask.get(id)) === 'string' ? mcSha(mergeChecksByTask.get(id)) : null);
+    const actions = summarizeChecks(checkItems, resolvedSha, actionsFallbackUrl, unsubscribedRepos.has(repoId));
 
     return { ...task, external: { issue, pull_request, actions } };
   });
@@ -259,4 +306,80 @@ export function attachExternalLinks<T extends Record<string, any>>(store: Store,
 
 function mcSha(mc: any): string | null {
   return typeof mc?.sha === 'string' && hexSha.test(mc.sha) ? mc.sha.toLowerCase() : null;
+}
+
+/** Live read-only GitHub check-runs + commit-status backfill for a task (`GET /api/tasks/:id/checks?sync=1`). */
+export async function taskChecksApi(store: Store, user: Actor, method: string, url: URL, githubUrl?: string): Promise<Json | undefined> {
+  const match = /^\/api\/tasks\/([^/]+)\/checks$/.exec(url.pathname);
+  if (!match) return undefined;
+  if (method !== 'GET') return fail(405, 'method_not_allowed');
+  const filter = scope(user, 'repository_id');
+  const row = store.get(
+    `SELECT tasks.*,
+      (SELECT full_name FROM repositories WHERE id=tasks.repository_id) AS full_name,
+      (SELECT json_extract(data,'$.remote_sha') FROM development_candidates WHERE task_id=tasks.id) AS pushed_sha
+     FROM tasks WHERE id=? AND ${filter.sql}`,
+    match[1]!, ...filter.args,
+  );
+  if (!row) return fail(404, 'task_not_found');
+
+  const buildTask = () => ({
+    ...row,
+    pushed_sha: row.pushed_sha || null,
+    result: row.result ? (() => { try { return JSON.parse(String(row.result)); } catch { return null; } })() : null,
+  });
+
+  const initial = attachExternalLinks(store, [buildTask()])[0]!.external.actions as Record<string, any>;
+  const syncRequested = url.searchParams.get('sync') === '1';
+  if (!syncRequested) return { actions: initial, synced: false };
+
+  const headSha = typeof initial.head_sha === 'string' && hexSha.test(initial.head_sha) ? initial.head_sha.toLowerCase() : null;
+  if (!headSha) return { actions: initial, synced: false, reason: 'no_commit_sha' };
+
+  const repoId = String(row.repository_id);
+  const cacheKey = `${repoId}:${headSha}`;
+  const now = Date.now();
+  for (const [k, at] of liveSyncSeen) {
+    if (now - at >= liveSyncCooldownMs) liveSyncSeen.delete(k);
+  }
+  if ((liveSyncSeen.get(cacheKey) ?? 0) > now - liveSyncCooldownMs) {
+    return { actions: initial, synced: false, cached: true };
+  }
+
+  const repo = store.get('SELECT * FROM repositories WHERE id=?', repoId);
+  if (!repo) return fail(404, 'repository_not_found');
+  const github = new GitHub(store, repo, new Redactor(), async () => store.checkAuthorization(), githubUrl);
+  github.purpose = 'task_checks';
+  try {
+    await github.connect(false, undefined, { checks: 'read', statuses: 'read' }, false);
+    const runs: any[] = [];
+    try {
+      for (let page = 1; page <= 5; page++) {
+        const res = await github.request('GET', github.path(`/commits/${headSha}/check-runs?filter=latest&per_page=100&page=${page}`));
+        if (!Array.isArray(res?.check_runs)) break;
+        runs.push(...res.check_runs);
+        if (res.check_runs.length < 100) break;
+      }
+    } catch (err) {
+      if (!(err instanceof TaskError)) throw err;
+    }
+    let contexts: any[] = [];
+    try {
+      const st = await github.request('GET', github.path(`/commits/${headSha}/status`));
+      if (Array.isArray(st?.statuses)) contexts = st.statuses;
+    } catch (err) {
+      if (!(err instanceof TaskError)) throw err;
+    }
+    store.checkAuthorization();
+    recordMergeChecks(store, repoId, headSha, runs, contexts);
+    liveSyncSeen.set(cacheKey, Date.now());
+  } catch (err) {
+    if (err instanceof TaskError) return fail(502, err.code);
+    throw err;
+  } finally {
+    await github.revokeTokens('task_checks');
+  }
+
+  const updated = attachExternalLinks(store, [buildTask()])[0]!.external.actions;
+  return { actions: updated, synced: true };
 }

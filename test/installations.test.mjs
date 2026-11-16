@@ -363,10 +363,14 @@ test('the global permission check measures only the App definition and keeps its
   app.permissions = full; report = await check(); assert.equal(report.ok, false);
   // Even when installation listing is unavailable, a complete App definition passes; workflow_run is not required.
   app.events = events; report = await check(); assert.equal(report.ok, true); assert.deepEqual(report.app.missing, []);
-  // What only gate onboarding and Actions failure analysis need is reported beside the baseline without failing it.
-  assert.deepEqual(report.app.feature_gaps, [{ kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['ci_changes'] },
-    { kind: 'event', name: 'workflow_run', features: ['actions_failures'] }]);
-  app.permissions = { ...full, workflows: 'write' }; app.events = [...events, 'workflow_run']; report = await check();
+  // What only CI check display, gate onboarding and Actions failure analysis need is reported beside the baseline without failing it.
+  assert.deepEqual(report.app.feature_gaps, [
+    { kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['ci_changes'] },
+    { kind: 'event', name: 'check_run', features: ['ci_reads'] },
+    { kind: 'event', name: 'status', features: ['ci_reads'] },
+    { kind: 'event', name: 'workflow_run', features: ['actions_failures'] },
+  ]);
+  app.permissions = { ...full, workflows: 'write' }; app.events = [...events, 'check_run', 'status', 'workflow_run']; report = await check();
   assert.deepEqual([report.ok, report.app.feature_gaps], [true, []]);
   app.owner = { login: 'someone', type: 'User' }; report = await check();
   assert.equal(report.app.settings_url, 'https://github.com/settings/apps/fixture-app/permissions');

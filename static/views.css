@@ -659,6 +659,13 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   white-space: nowrap;
 }
 .task-ext-sublink:hover { text-decoration: underline; }
+.console-ready button.task-ext-sublink, button.task-ext-sublink {
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+@media (min-width: 768px) {
+  .console-ready button.task-ext-sublink, button.task-ext-sublink { min-height: 28px; }
+}
 .task-check-pills { display: flex; flex-wrap: wrap; gap: 5px; }
 .task-check-pill {
   display: inline-flex;

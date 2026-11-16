@@ -600,8 +600,23 @@ function renderTaskSummaryBody(task, detail) {
         actItem.append(pills);
         if (act.url) actItem.append(link(act.url, '查看运行 ↗', 'task-ext-sublink'));
       } else {
-        actItem.append(element('span', '暂无检查记录', 'muted'));
+        actItem.append(element('span', act?.events_unsubscribed ? '暂无检查记录（App 未订阅 Check run）' : '暂无检查记录', 'muted'));
         if (act?.url) actItem.append(link(act.url, '查看 Actions ↗', 'task-ext-sublink'));
+      }
+      if (act?.head_sha) {
+        const syncBtn = button('同步检查', async event => {
+          const btn = event.currentTarget;
+          btn.disabled = true;
+          try {
+            await api('/api/tasks/' + encodeURIComponent(task.id) + '/checks?sync=1');
+            if (openTaskId === task.id) { taskPollError = ''; notice('task-error'); await refreshTask(); }
+          } catch (err) {
+            if (openTaskId === task.id) { taskPollError = ''; notice('task-error', readErrorText(err)); }
+          } finally {
+            btn.disabled = false;
+          }
+        }, 'btn-text task-ext-sublink');
+        actItem.append(syncBtn);
       }
       extBar.append(actItem);
 

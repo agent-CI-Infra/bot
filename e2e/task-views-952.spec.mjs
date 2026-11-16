@@ -5,7 +5,6 @@ import { TaskEngine } from '../dist/agent/engine.js';
 import { TaskRecords } from '../dist/tasks/service.js';
 import { insertTaskLog } from '../dist/storage/payloads.js';
 import { withRunTraceScope } from '../dist/tasks/trace.js';
-import { recordCheckWebhook } from '../dist/tasks/external-links.js';
 
 async function build952Fixture() {
   const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
@@ -40,9 +39,9 @@ async function build952Fixture() {
 
   h.store.run("INSERT OR REPLACE INTO board_objects(repository_id,object_type,object_number,title,github_state,draft,last_seen) VALUES('101','issue',952,'项目角色队列视图与极简任务详情页','open',0,'2026-11-16T08:00:00Z')");
   h.store.run("INSERT OR REPLACE INTO board_objects(repository_id,object_type,object_number,title,github_state,draft,last_seen) VALUES('101','pr',958,'feat(console): role queue view and two-level task detail','open',0,'2026-11-16T08:11:00Z')");
-  recordCheckWebhook(h.store, '101', 'check_run', { check_run: { id: 10, name: 'unit', head_sha: sha, status: 'completed', conclusion: 'success', html_url: 'https://github.com/fixture/project-101/runs/10' } });
-  recordCheckWebhook(h.store, '101', 'check_run', { check_run: { id: 11, name: 'e2e', head_sha: sha, status: 'in_progress', conclusion: null, html_url: 'https://github.com/fixture/project-101/runs/11' } });
-  recordCheckWebhook(h.store, '101', 'check_run', { check_run: { id: 12, name: 'build', head_sha: sha, status: 'completed', conclusion: 'success', html_url: 'https://github.com/fixture/project-101/runs/12' } });
+  await h.hook(a.path, a.secret, 'e2e-chk-10', { repository: { id: 101 }, check_run: { id: 10, name: 'unit', head_sha: sha, status: 'completed', conclusion: 'success', html_url: 'https://github.com/fixture/project-101/runs/10' } }, { 'X-GitHub-Event': 'check_run' });
+  await h.hook(a.path, a.secret, 'e2e-chk-11', { repository: { id: 101 }, check_run: { id: 11, name: 'e2e', head_sha: sha, status: 'in_progress', conclusion: null, html_url: 'https://github.com/fixture/project-101/runs/11' } }, { 'X-GitHub-Event': 'check_run' });
+  await h.hook(a.path, a.secret, 'e2e-chk-12', { repository: { id: 101 }, check_run: { id: 12, name: 'build', head_sha: sha, status: 'completed', conclusion: 'success', html_url: 'https://github.com/fixture/project-101/runs/12' } }, { 'X-GitHub-Event': 'check_run' });
 
   const insRun = h.store.db.prepare("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,ended_at,status,context_snapshot,config_snapshot,role,assignment_id,harness) VALUES(?,?,?,1,1,?,?,?,'{}','{}',?,?,?)");
   insRun.run('run-mgr', 't-952', 'execution', '2026-11-16T08:00:05Z', null, 'running', 'manager', null, 'native');
@@ -119,12 +118,14 @@ test('role view, task flow list view, and #/tasks/:id two-level collapsible deta
     const mgrRow = page.locator('[data-role-row="manager"]');
     await expect(mgrRow).toContainText('已委派子角色推进中');
     await expect(mgrRow).toContainText('#940');
+    await expect(page.locator('.workbench-live-stats')).toContainText('排队中：1 项（另 1 项等槽位）');
 
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 
-    // 2. Switch to Task List View & verify inline Role Flow Diagram + Search
+    // 2. Switch to Task List View & verify inline Role Flow Diagram + aligned queue pill count + Search
     await page.locator('[data-workbench-view="tasks"]').click();
     await expect(page).toHaveURL(/#\/projects\/101\/overview\/tasks$/);
+    await expect(page.locator('[data-task-group="queued"] strong')).toHaveText('1');
     const taskRow952 = page.locator('.workbench-task-row[data-task-id="t-952"]');
     await expect(taskRow952).toBeVisible();
     await expect(taskRow952).toContainText('Issue #952');

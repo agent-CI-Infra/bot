@@ -33,7 +33,7 @@ const tempDir = t => { const dir = mkdtempSync(join(tmpdir(), 'bot-acceptance-')
 async function githubFixture(t, app = {}) {
   const state = { hook: null, requests: [] }, owner = { id: 10, login: 'agent-CI-Infra', type: 'Organization' };
   const definition = { id: 4242, slug: 'bot-acceptance', owner, permissions: { ...appPermissions, workflows: 'write' },
-    events: [...appEvents, 'workflow_run', 'organization'], ...app };
+    events: [...appEvents, 'check_run', 'status', 'workflow_run', 'organization'], ...app };
   const installation = { id: 77, app_id: 4242, account: owner, repository_selection: 'selected', permissions: definition.permissions, events: definition.events, suspended_at: null };
   state.url = await listen(t, async (req, res) => {
     const path = new URL(req.url, 'http://fixture').pathname; state.requests.push(`${req.method} ${path}`);
@@ -94,7 +94,7 @@ test('bootstrap sets up a fresh instance through the console API and hands the t
 });
 
 test('bootstrap stops with a plain reason when the App lacks what the scenarios need', async t => {
-  const github = await githubFixture(t, { events: [...appEvents, 'organization'] }), { h, model } = await controlPlane(t, github);
+  const github = await githubFixture(t, { events: [...appEvents, 'check_run', 'status', 'organization'] }), { h, model } = await controlPlane(t, github);
   await assert.rejects(bootstrap(options(h, github, model), { dir: tempDir(t), log: () => {} }), /lacks \{"permissions":\[\],"events":\["workflow_run"\]\}/);
   assert.equal(github.hook, null);
 });

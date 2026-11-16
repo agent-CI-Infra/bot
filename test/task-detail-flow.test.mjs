@@ -1,9 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
+import { generateKeyPairSync } from 'node:crypto';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
 import { insertTaskLog } from '../dist/storage/payloads.js';
 import { withRunTraceScope } from '../dist/tasks/trace.js';
-import { recordCheckWebhook } from '../dist/tasks/external-links.js';
+import { pruneCommitChecks } from '../dist/tasks/external-links.js';
+import { deleteProjectRecords } from '../dist/projects/removal.js';
+import { appEvents } from '../dist/github/client.js';
+import { TaskEngine } from '../dist/agent/engine.js';
 
 test('parallel role runs stamp exact run_id and role on task_logs without cross-contamination', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin);
@@ -30,8 +36,8 @@ test('parallel role runs stamp exact run_id and role on task_logs without cross-
   assert.equal(byRole.test, 'run-tst');
 });
 
-test('role_flow groups parallel observers, tracks returned findings, external PR/Checks, and filters GET /api/tasks', async t => {
-  const h = await harness(t), { admin } = await setup(h), a = await account(admin);
+test('role_flow groups parallel observers, ingests check_run/status via signed webhook route, omits trace on /roles by default, and gates permissions', async t => {
+  const h = await harness(t, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), { admin } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101');
 
   const sha = 'a'.repeat(40);
@@ -43,11 +49,34 @@ test('role_flow groups parallel observers, tracks returned findings, external PR
     "INSERT INTO tasks(id,repository_id,kind,status,priority,summary,object_number,phase,created_at,updated_at) VALUES('t-done','101','development.issue','pr_opened','P2','历史已完成任务',910,'done','2026-11-15T08:00:00Z','2026-11-15T09:00:00Z')",
   );
 
-  // Issue & PR board projection + Check Runs via webhook projection
   h.store.run("INSERT OR REPLACE INTO board_objects(repository_id,object_type,object_number,title,github_state,draft,last_seen) VALUES('101','issue',952,'任务详情两层折叠','open',0,'2026-11-16T08:00:00Z')");
   h.store.run("INSERT OR REPLACE INTO board_objects(repository_id,object_type,object_number,title,github_state,draft,last_seen) VALUES('101','pr',958,'feat: task detail view','open',0,'2026-11-16T08:09:00Z')");
-  recordCheckWebhook(h.store, '101', 'check_run', { check_run: { id: 1, name: 'unit', head_sha: sha, status: 'completed', conclusion: 'success', html_url: 'https://github.com/fixture/project-101/runs/1' } });
-  recordCheckWebhook(h.store, '101', 'check_run', { check_run: { id: 2, name: 'e2e', head_sha: sha, status: 'in_progress', conclusion: null, html_url: 'https://github.com/fixture/project-101/runs/2' } });
+
+  // Post real signed check_run & status webhooks through `/hooks/github/<account>/<endpoint>`
+  const hook1 = await h.hook(
+    a.path,
+    a.secret,
+    'del-check-1',
+    { repository: { id: 101 }, check_run: { id: 1, name: 'unit', head_sha: sha, status: 'completed', conclusion: 'success', html_url: 'https://github.com/fixture/project-101/runs/1' } },
+    { 'X-GitHub-Event': 'check_run' },
+  );
+  assert.equal(hook1.status, 200);
+  const hook2 = await h.hook(
+    a.path,
+    a.secret,
+    'del-check-2',
+    { repository: { id: 101 }, check_run: { id: 2, name: 'e2e', head_sha: sha, status: 'in_progress', conclusion: null, html_url: 'https://github.com/fixture/project-101/runs/2' } },
+    { 'X-GitHub-Event': 'check_run' },
+  );
+  assert.equal(hook2.status, 200);
+  const hook3 = await h.hook(
+    a.path,
+    a.secret,
+    'del-status-1',
+    { repository: { id: 101 }, sha, context: 'lint-gate', state: 'success', target_url: 'https://github.com/fixture/project-101/statuses/1' },
+    { 'X-GitHub-Event': 'status' },
+  );
+  assert.equal(hook3.status, 200);
 
   // Multi-role runs: 1. Manager -> 2. Dev (v1) -> 3a. Reviewer (1 finding) + 3b. Tester (0 findings) -> 4. Dev (v2 running)
   const insRun = h.store.db.prepare('INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,ended_at,status,context_snapshot,config_snapshot,role,assignment_id,harness) VALUES(?,?,?,1,1,?,?,?,\'{}\',\'{}\',?,?,?)');
@@ -67,14 +96,23 @@ test('role_flow groups parallel observers, tracks returned findings, external PR
   assert.equal(detail.status, 200);
   const { task, role_flow, role_runs } = detail.value;
 
-  // External links check
+  // External links check (ingested via `/hooks/github/...`)
   assert.equal(task.external.issue.number, 952);
   assert.equal(task.external.pull_request.number, 958);
   assert.equal(task.external.pull_request.branch, 'feat/task-view-952');
   assert.equal(task.external.actions.status, 'running');
-  assert.equal(task.external.actions.total, 2);
-  assert.equal(task.external.actions.passed, 1);
+  assert.equal(task.external.actions.total, 3);
+  assert.equal(task.external.actions.passed, 2);
   assert.equal(task.external.actions.running, 1);
+
+  // `/api/tasks/:id/roles` omits `role_flow`/`role_runs` by default during polling; `?trace=1` includes them on demand
+  const rolesNoTrace = await admin('/api/tasks/t-952/roles');
+  assert.equal(rolesNoTrace.status, 200);
+  assert.equal(rolesNoTrace.value.role_flow, undefined);
+  assert.equal(rolesNoTrace.value.role_runs, undefined);
+  const rolesWithTrace = await admin('/api/tasks/t-952/roles?trace=1');
+  assert.equal(rolesWithTrace.status, 200);
+  assert.equal(rolesWithTrace.value.role_flow.active_role, 'dev');
 
   // Flow diagram stages: 1. Manager (delegated) -> 2. Dev (completed) -> [3a. Reviewer (returned) + 3b. Tester (completed)] -> 4. Dev (v2 running) -> QA (pending)
   assert.equal(role_flow.active_role, 'dev');
@@ -107,7 +145,7 @@ test('role_flow groups parallel observers, tracks returned findings, external PR
   // Read-only member without tasks.write / knowledge.write gets can_write_tasks=false, can_manage=false, and body_omitted=true
   const pw = testPassword();
   const userCreated = await admin('/api/users', 'POST', { username: 'ro-viewer', password: pw, repository_ids: ['101'] });
-  const principal = h.store.get("SELECT id FROM principals WHERE user_id=?", userCreated.value.user.id);
+  const principal = h.store.get('SELECT id FROM principals WHERE user_id=?', userCreated.value.user.id);
   h.store.run("UPDATE scoped_grants SET role='viewer',policy='explicit',capabilities=? WHERE principal_id=?", JSON.stringify(['tasks.read']), principal.id);
   const viewer = h.client();
   await viewer('/api/auth/login', 'POST', { username: 'ro-viewer', password: pw });
@@ -119,4 +157,103 @@ test('role_flow groups parallel observers, tracks returned findings, external PR
   assert.equal(roDetail.value.can_manage, false);
   assert.equal(roDetail.value.role_runs[0].history_steps[0].body_omitted, true);
   assert.equal(roDetail.value.role_runs[0].history_steps[0].arguments, null);
+});
+
+test('live task check sync reads GitHub check-runs/statuses, flags unsubscribed Apps, and prunes/deletes commit_checks cleanly', async t => {
+  const sha = 'c'.repeat(40);
+  let revokedTokens = 0;
+  const ghServer = createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    res.setHeader('Content-Type', 'application/json');
+    if (url.pathname === '/app/installations') {
+      return res.end(JSON.stringify([{ id: 77, account: { id: 10, login: 'fixture' } }]));
+    }
+    if (url.pathname === '/repos/fixture/project-101/installation') {
+      return res.end(JSON.stringify({ id: 77, account: { id: 10, login: 'fixture' }, permissions: { checks: 'read', statuses: 'read', metadata: 'read' }, events: [...appEvents] }));
+    }
+    if (url.pathname === '/app/installations/77/access_tokens') {
+      return res.end(JSON.stringify({ token: 'ghs_live_check_token', expires_at: new Date(Date.now() + 3600_000).toISOString(), permissions: { checks: 'read', statuses: 'read', metadata: 'read' } }));
+    }
+    if (url.pathname === '/installation/token' && req.method === 'DELETE') {
+      revokedTokens++;
+      res.statusCode = 204;
+      return res.end();
+    }
+    if (url.pathname === '/repositories/101') {
+      return res.end(JSON.stringify({ id: 101, full_name: 'fixture/project-101', default_branch: 'main', owner: { id: 10, login: 'fixture' } }));
+    }
+    if (url.pathname === `/repos/fixture/project-101/commits/${sha}/check-runs`) {
+      return res.end(JSON.stringify({
+        check_runs: [
+          { id: 101, name: 'unit', status: 'completed', conclusion: 'success', html_url: 'https://github.com/fixture/project-101/runs/101' },
+          { id: 102, name: 'e2e', status: 'completed', conclusion: 'failure', html_url: 'https://github.com/fixture/project-101/runs/102' },
+        ],
+      }));
+    }
+    if (url.pathname === `/repos/fixture/project-101/commits/${sha}/status`) {
+      return res.end(JSON.stringify({ state: 'success', statuses: [{ context: 'deploy-preview', state: 'success', target_url: 'https://preview.invalid' }] }));
+    }
+    res.statusCode = 404;
+    res.end('{}');
+  });
+  ghServer.listen(0, '127.0.0.1');
+  await once(ghServer, 'listening');
+  t.after(() => new Promise(r => ghServer.close(r)));
+
+  const keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const h = await harness(t, undefined, { githubUrl: `http://127.0.0.1:${ghServer.address().port}` });
+  const { admin } = await setup(h);
+  const app = await account(admin, {
+    type: 'github_app',
+    app_id: '123',
+    private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }),
+    token: undefined,
+  });
+  await repository(admin, app.id, '101');
+  await repository(admin, app.id, '202');
+
+  // Mark installation 101 as lacking check_run/status subscriptions initially
+  h.store.run("UPDATE installed_repositories SET events=? WHERE repository_id='101'", JSON.stringify([...appEvents]));
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,head_sha,phase,created_at,updated_at) VALUES('t-pr','101','review.pr','running','检视 PR #77',77,?,'model','2026-11-16T08:00:00Z','2026-11-16T08:05:00Z')",
+    sha,
+  );
+
+  const beforeSync = (await admin('/api/tasks/t-pr')).value.task;
+  assert.equal(beforeSync.external.actions.total, 0);
+  assert.equal(beforeSync.external.actions.events_unsubscribed, true);
+
+  // Sync live checks from GitHub API and confirm temporary App installation token was revoked
+  const synced = await admin('/api/tasks/t-pr/checks?sync=1');
+  assert.equal(synced.status, 200);
+  assert.equal(synced.value.synced, true);
+  assert.equal(synced.value.actions.total, 3);
+  assert.equal(synced.value.actions.passed, 2);
+  assert.equal(synced.value.actions.failed, 1);
+  assert.equal(synced.value.actions.status, 'failing');
+  assert.equal(revokedTokens, 1);
+
+  // Cooldown prevents duplicate GitHub API fetches on immediate repeat click
+  const cached = await admin('/api/tasks/t-pr/checks?sync=1');
+  assert.equal(cached.status, 200);
+  assert.equal(cached.value.cached, true);
+  assert.equal(revokedTokens, 1);
+
+  // Age/retention prune removes expired rows while keeping fresh rows; project deletion removes only target project's rows
+  h.store.run(
+    "INSERT INTO commit_checks(repository_id,head_sha,check_key,name,status,conclusion,details_url,updated_at) VALUES('202',?,'check:old','old-job','completed','success',NULL,'2026-09-01T00:00:00.000Z')",
+    'd'.repeat(40),
+  );
+  h.store.run(
+    "INSERT INTO commit_checks(repository_id,head_sha,check_key,name,status,conclusion,details_url,updated_at) VALUES('202',?,'check:fresh','fresh-job','completed','success',NULL,?)",
+    'e'.repeat(40),
+    new Date().toISOString(),
+  );
+  const pruned = pruneCommitChecks(h.store, 30 * 24 * 3600_000, Date.parse('2026-11-16T12:00:00Z'));
+  assert.equal(pruned, 1);
+  assert.equal(h.store.get("SELECT COUNT(*) AS n FROM commit_checks WHERE repository_id='202'").n, 1);
+
+  h.store.transaction(() => deleteProjectRecords(h.store, '101'));
+  assert.equal(h.store.get("SELECT COUNT(*) AS n FROM commit_checks WHERE repository_id='101'").n, 0);
+  assert.equal(h.store.get("SELECT COUNT(*) AS n FROM commit_checks WHERE repository_id='202'").n, 1);
 });
