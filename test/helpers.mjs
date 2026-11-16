@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { once } from 'node:events';
 import { randomBytes, createHmac } from 'node:crypto';
-import { Store } from '../dist/storage/database.js';
+import { fixtureStore } from './database-fixture.mjs';
 import { createControlPlane } from '../dist/server.js';
 import { ProjectService } from '../dist/projects/service.js';
 import { configureDispatch, ruleDecider } from '../dist/dispatch/worker.js';
@@ -27,7 +27,7 @@ export async function harness(t, manager, options = {}) {
   let store, server;
   const h = { directory, database, key };
   h.start = async () => {
-    store = new Store(database, key);
+    store = fixtureStore(database, key);
     h.projects = manager ? new ProjectService(store, manager) : undefined;
     const extra = typeof options === 'function' ? options(store) : options; h.external = extra.external;
     const { trustedProxies, security, ...rest } = extra;
