@@ -83,6 +83,10 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   const pendingMarkdown = new Set();
   const drafts = new Map(), turns = new Map(), messages = new Map();
   const alive = generation => !disposed && panel.isConnected && me?.id === user && generation === scopeGeneration;
+  // #874: one error used to leave this line assertive for good, so every ordinary progress written after it was
+  // announced as an alert. Ordinary progress goes through showStatus, which hands the line back to its polite role;
+  // showError and showAccessError still give it the alert role for as long as the error stands.
+  const showStatus = (text = status.textContent) => { if (disposed) return; status.classList.remove('view-error'); status.setAttribute('role', 'status'); status.textContent = text; };
   const showError = err => { if (!disposed) { status.textContent = readErrorText(err); status.classList.add('view-error'); status.setAttribute('role', 'alert'); } };
   const showAccessError = err => {
     if (disposed) return;
@@ -333,7 +337,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
       currentTurn.stage = `模型暂时没有响应，正在重试（第 ${data.retry}/${data.retries} 次）`;
     } else if (row.type === 'text') {
       const item = answer(currentTurn); item.text += data.delta ?? ''; queueMarkdown(item);
-      currentTurn.stage = '正在回复'; status.textContent = '助手正在回复…';
+      currentTurn.stage = '正在回复'; showStatus('助手正在回复…');
     } else if (row.type === 'tool_error') {
       const step = currentTurn.steps.find(item => data.call_id ? item.id === data.call_id : item.name === data.name && item.state === 'running') ?? toolStep(currentTurn, data, row.sequence);
       setStepState(step, currentTurn.state === 'stopped' ? 'interrupted' : 'failed');
@@ -351,7 +355,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   }
   async function read() {
     if (reading || !conversation || disposed) return reading;
-    reconnect.hidden = true; status.classList.remove('view-error');
+    reconnect.hidden = true; showStatus();
     const id = conversation, generation = scopeGeneration;
     const work = (async () => {
       try {
@@ -368,8 +372,8 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
             const value = turn(message.id);
             if (!['pending', 'running'].includes(message.state)) finishTurn(value, message.state, message.updated_at);
           }
-          if (!pending) { status.textContent = '就绪 · 操作结果可在执行进展中核对'; break; }
-          status.textContent = '处理中 · 可以继续写草稿，收起窗口后仍会继续';
+          if (!pending) { showStatus('就绪 · 操作结果可在执行进展中核对'); break; }
+          showStatus('处理中 · 可以继续写草稿，收起窗口后仍会继续');
           streamController = new AbortController();
           const response = await fetch(endpoint + '/conversations/' + id + '/events?stream=1&after=' + cursor, { signal: streamController.signal });
           if (!response.ok) throw new Error('读取运行流失败，请重新连接。');
@@ -389,7 +393,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     if (conversation) drafts.set(conversation, message.value);
     const generation = ++scopeGeneration; formGeneration++; streamController?.abort(); conversation = null; active = null; submitting = false; historyReady = false; opening = true; updateBusy();
     cursor = 0; turns.clear(); messages.clear(); pendingMarkdown.clear(); followOutput = true; unseenOutput = false; latest.hidden = true; reconnect.hidden = true; feed.replaceChildren(welcome); welcome.hidden = false; message.value = '';
-    forms.replaceChildren(); toolsDirty = true; status.classList.remove('view-error'); status.textContent = '正在读取会话…';
+    forms.replaceChildren(); toolsDirty = true; showStatus('正在读取会话…');
     try {
       const all = (await api(endpoint + '/conversations')).conversations.filter(item => item.scope === scope.value);
       if (!alive(generation)) return;
@@ -410,12 +414,12 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   }
   async function submit(body) {
     if (!conversation || opening || !historyReady || submitting || active) return false;
-    const id = conversation, generation = scopeGeneration; submitting = true; updateBusy(); status.classList.remove('view-error');
+    const id = conversation, generation = scopeGeneration; submitting = true; updateBusy(); showStatus();
     try {
       const result = await api(endpoint + '/conversations/' + id + '/messages', 'POST', { source_message: crypto.randomUUID(), ...body });
       if (!alive(generation) || conversation !== id) return true;
       messages.set(result.id, { input: body, state: result.state, created_at: new Date().toISOString() }); turn(result.id); active = result.id;
-      followOutput = true; showTools(false); sessions.open = false; scrollOutput(true); status.textContent = '请求已发送 · 正在连接助手'; void read(); return true;
+      followOutput = true; showTools(false); sessions.open = false; scrollOutput(true); showStatus('请求已发送 · 正在连接助手'); void read(); return true;
     } catch (err) { if (alive(generation)) showError(err); return false; }
     finally { if (alive(generation)) { submitting = false; updateBusy(); } }
   }
