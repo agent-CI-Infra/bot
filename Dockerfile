@@ -20,7 +20,8 @@ RUN npm ci --omit=dev --ignore-scripts
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 # git keeps the repository mirrors (/data/git-cache) that tasks copy their files from.
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates python3 tzdata && rm -rf /var/lib/apt/lists/*
+# Chromium is preinstalled so the control-plane task loop (#908) can start a real browser without apt (#916).
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates python3 tzdata chromium fonts-liberation fonts-noto-cjk && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 10001 bot && useradd --uid 10001 --gid bot --no-create-home bot \
     && mkdir -p /data /keys /internal /tunnel /assistant-homes /opt/agent-tools \
     && chown bot:bot /data /keys /internal /tunnel /assistant-homes /opt/agent-tools \
@@ -42,6 +43,9 @@ COPY runner/command-policy.mjs runner/command-output.mjs ./runner/
 # The control plane compacts control.sqlite at start with the manager's routine (#671).
 COPY manager/compaction.mjs ./manager/compaction.mjs
 COPY scripts/external-token.mjs ./scripts/external-token.mjs
+COPY scripts/bot-chromium.sh /usr/local/bin/bot-chromium
+RUN chmod 755 /usr/local/bin/bot-chromium
+ENV BOT_BROWSER_EXECUTABLE=/usr/local/bin/bot-chromium
 # The entry gateway service runs from this image too (node webhook/main.mjs), as its own container.
 COPY webhook/main.mjs ./webhook/main.mjs
 COPY LICENSE ./LICENSE
