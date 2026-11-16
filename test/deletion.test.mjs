@@ -14,6 +14,7 @@ import { FakeDocker } from './fake-docker.mjs';
 import { loadConsole } from './console-page.mjs';
 import { externalFixture } from './external-helpers.mjs';
 import { deleteProjectRecords } from '../dist/projects/removal.js';
+import { managerFixture as sharedManagerFixture } from './project-manager-fixture.mjs';
 
 const events = ['issues', 'pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment'];
 const full = { contents: 'write', issues: 'write', pull_requests: 'write', statuses: 'write', actions: 'write', checks: 'write', metadata: 'read' };
@@ -719,4 +720,35 @@ test('a blob another project also stored survives this project deletion', async 
   assert.equal(existsSync(blob), true, 'the shared blob is not removed while another project refers to it');
   assert.equal((await remove(admin, '202')).status, 200);
   assert.equal(existsSync(blob), false, 'the last project to hold it removes it');
+});
+
+test('a start the manager refuses because the old notes cannot be cleared is spaced out instead of sent on every pass', async t => {
+  const github = await fakeGitHub(t), f = await sharedManagerFixture(t);
+  let sync; const h = await harness(t, f.manager, store => ({ installations: sync = new InstallationSync(store, github.url), engine: { working: () => [], api: async () => undefined } }));
+  const { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101');
+  const starts = () => h.store.get("SELECT count(*) AS n FROM environment_operations WHERE repository_id='101' AND action='start'").n;
+  await h.projects.reconcile();
+  const before = starts();
+  // A deletion whose notes volume the manager cannot remove still commits: the deletion is done, the purge is owed.
+  f.docker.failVolume = true;
+  await assert.rejects(f.projects.operate('101', 'delete', { operation_id: random(), generation: 1, request: { delete_notes: true } }), /injected_volume_failure/);
+  assert.equal(Number(f.projects.get('101').notes_purge), 1, 'the cleanup is still owed');
+  // The enable is sent once and refused, and the row keeps reading as the committed deletion it is.
+  await h.projects.reconcile();
+  assert.equal(starts(), before + 1, 'the enable is attempted');
+  assert.equal(f.projects.get('101').state, 'deleted', 'a refused enable leaves the deletion committed');
+  // The pass after that does not ask again while the refusal is fresh: the manager already said why it could not clear.
+  await h.projects.reconcile();
+  assert.equal(starts(), before + 1, 'no start is sent while the refusal is still fresh');
+  // When the residue can go, the next retry slot clears it and the project starts; nothing else has to be done by hand.
+  const realNow = Date.now; let offset = 0; Date.now = () => realNow() + offset;
+  t.after(() => { Date.now = realNow; });
+  offset = 31_000; f.docker.failVolume = false;
+  await h.projects.reconcile();
+  assert.equal(f.projects.get('101').state, 'ready', 'the retry clears the residue and starts the project');
+  assert.equal(Number(f.projects.get('101').notes_purge), 0, 'the purge is done');
+  assert.equal(starts(), before + 2);
+  await h.projects.reconcile();
+  assert.equal(starts(), before + 2, 'the answered start clears the retry slot, so the ready project is not started again');
 });
