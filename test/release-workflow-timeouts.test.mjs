@@ -54,10 +54,20 @@ test('the remote commands of the Deploy step are bounded on the server, and the 
   assert.ok(/for attempt in \$\(seq 1 60\); do/.test(text) && script.includes('for i in $(seq 1 1700); do'), 'the Images wait and the 1700-round health wait are unchanged');
 });
 
-test('the Deploy step comment counts the inspect round trip of the health loop in the 145-minute budget', () => {
-  // #923: the loop's 1700 rounds are 85 minutes of sleep plus one docker inspect round trip each, so the step's budget
-  // has to name that cost instead of leaving the loop's wall-clock time out of the arithmetic.
-  assert.match(text, /#923[^]*?inspect/, 'the Deploy step comment records the inspect round trip in the budget');
+test('the Deploy step comment counts the inspect calls of the health loop in the 145-minute budget', () => {
+  // #923: the loop's 1700 rounds are 85 minutes of sleep plus two docker inspect calls each, so the step's budget has to
+  // name that cost instead of leaving the loop's wall-clock time out of the arithmetic.
+  // The search is scoped to the Deploy step: `#923` and `docker inspect` both occur earlier in the file (the pull
+  // comment and the container sweep), so a match against the whole workflow would pass even with the step's own
+  // comment reverted.
+  const start = text.indexOf('- name: Deploy');
+  const end = text.indexOf('timeout-minutes: 145', start);
+  assert.ok(start > -1 && end > start, 'the Deploy step is present with its own timeout-minutes');
+  const stepComment = text.slice(start, end);
+  assert.match(stepComment, /#923[^]*?about 88[^]*?docker inspect/,
+    'the Deploy step comment names the inspect calls and the wall-clock budget they add');
+  // The health loop's 90-minute wording is gone from the workflow as well as from the docs.
+  assert.ok(!/up to 90 minutes/.test(text), 'the deploy job comment has no stale 90-minute health wait');
 });
 
 test('the deployment docs name the server timeout dependency, its bounds and its exit codes', () => {
