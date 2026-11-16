@@ -13,7 +13,7 @@
 | `ghcr.io/agent-ci-infra/bot-project-computer` | 每台虚拟电脑的系统镜像（批准镜像） | `images/project/Dockerfile` | `project-image` |
 | `ghcr.io/agent-ci-infra/bot-cloudflare-tunnel` | 可选的 Cloudflare Tunnel 连接器 | `tunnel/Dockerfile` | `tunnel` |
 
-控制面运行镜像和项目电脑镜像都预装 Debian 的 `chromium`（经 `/usr/local/bin/bot-chromium` 启动，`BOT_BROWSER_EXECUTABLE` 指向它），供任务浏览器在容器内直接启动，不必再 apt。预装不等于开放任意外网：任务浏览器仍只访问该任务列出的源。助手电脑沿用项目电脑基础镜像，现有无网络边界不变，不能因此获得通用外网浏览。manager 与 tunnel 镜像不预装浏览器。合入本改动后也不会自动部署。
+控制面运行镜像和项目电脑镜像都预装 Debian 的 `chromium`（经 `/usr/local/bin/bot-chromium` 启动，`BOT_BROWSER_EXECUTABLE` 指向它），供任务浏览器在容器内直接启动，不必再 apt。包装脚本会把 Chromium 的 `HOME` 固定指到 `BOT_BROWSER_HOME`（默认 `/tmp/bot-chromium-home`），以便在只读根文件系统、没有家目录的控制面容器里写入 crashpad 数据。预装不等于开放任意外网：任务浏览器仍只访问该任务列出的源。助手电脑沿用项目电脑基础镜像，现有无网络边界不变，不能因此获得通用外网浏览。manager 与 tunnel 镜像不预装浏览器。合入本改动后也不会自动部署。
 
 `webhook`（入口网关，服务名沿用旧名，Cloudflare 路由不用改）和 `bot` 用同一个镜像，但仍是单独的容器：只有它同时在 `control` 和 `edge` 两个网络，`tunnel` 只能经它连到 bot 的业务端口 `bot:8791`，连不到 manager。`compose.yaml` 默认使用 `latest`，在 `.env` 设置 `BOT_IMAGE_TAG` 可以把所有镜像固定到某个版本（如 `v1.2.0`）或 `sha-<12 位提交>`。manager 不拉取镜像，只检查 `BOT_PROJECT_IMAGE` 指向的本机镜像，所以它必须和 `project-image` 服务的镜像引用（含标签）完全一致；一次性的 `project-image` 服务负责让 Compose 把这个镜像拉到本机。
 
