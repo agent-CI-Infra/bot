@@ -133,3 +133,38 @@ for (const width of [1440, 390]) test(`an unrefreshed default branch stays unkno
     expect(refreshes).toBe(2); expect(configures).toBe(0); expect(f.manager.projects.own('101').cpus).toBe(3);
   } finally { await f.close(); }
 });
+
+test('a number field that cannot parse its text is refused instead of clearing the project override', async ({ page }) => {
+  const f = await fixture();
+  try {
+    await login(page, f);
+    let configures = 0;
+    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) configures++; });
+    // #865: a number input silently discards text it cannot parse, so the field reads as empty and the old code saved
+    // "clear the project override" — the stored CPU limit (3) must survive a typo instead.
+    const cpu = page.getByLabel('CPU（核）', { exact: true });
+    await cpu.click(); await cpu.pressSequentially('abc');
+    await consoleSave(page).click();
+    await expect(configField(page, 'CPU（核）')).toContainText('请填写有效数字');
+    expect(configures).toBe(0);
+    expect(f.manager.projects.own('101').cpus).toBe(3);
+    // A step that the bounds do not allow is named as well, and the override still stands.
+    await cpu.fill('1.1');
+    await consoleSave(page).click();
+    await expect(configField(page, 'CPU（核）')).toContainText('步长');
+    expect(configures).toBe(0); expect(f.manager.projects.own('101').cpus).toBe(3);
+  } finally { await f.close(); }
+});
+
+test('clearing a resource says it will follow the global default and saves the override away', async ({ page }) => {
+  const f = await fixture();
+  try {
+    await login(page, f);
+    const cpu = page.getByLabel('CPU（核）', { exact: true });
+    await cpu.fill('');
+    await expect(configField(page, 'CPU（核）')).toContainText('跟随全局默认');
+    await consoleSave(page).click();
+    await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
+    expect(f.manager.projects.own('101').cpus).toBeUndefined();
+  } finally { await f.close(); }
+});
