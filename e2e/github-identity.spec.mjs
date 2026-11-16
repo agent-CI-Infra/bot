@@ -210,9 +210,9 @@ test('已安装但未启动的仓库写明待超级管理员启动，项目管�
     await page.goto(f.h.admin + '/#/projects');
     await expect(page.getByRole('heading', { name: '等待超级管理员启动' })).toBeVisible();
     const pendingRow = page.locator('.project-pending-row');
-    await expect(pendingRow).toContainText('需要超级管理员在控制台启动后才能打开');
+    await expect(pendingRow.locator('p')).toHaveCount(0);
     await expect(pendingRow.locator('.status')).toHaveText('待超级管理员启动');
-    await expect(page.locator('.project-pending-intro')).toHaveText('这些仓库已装好 GitHub App，启动后会出现在上面的项目列表里。');
+    await expect(page.locator('.project-pending-intro')).toHaveText('这些仓库已装好 GitHub App，需要超级管理员在控制台启动后才会出现在上面的项目列表里。');
     await expect(pendingRow.getByRole('button', { name: '去启动' })).toHaveCount(0);
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
     await expect(page.getByRole('heading', { name: '已登录，尚无可管理的项目' })).toHaveCount(0);
@@ -366,5 +366,69 @@ test('会话限定在别的组织时，身份页不再说「可在项目列表�
     expect(f.h.store.get('SELECT tenant_id FROM sessions ORDER BY rowid DESC LIMIT 1').tenant_id).toBe(null);
     await page.goto(f.h.admin + '/#/projects');
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+// #979: dozens of installed-but-not-started repositories fold behind one count line on the project list and identity
+// page; a long list filters by name, and the fold opens from the keyboard.
+test('待启动仓库很多时项目列表和身份页默认折叠，可按名称查找', async ({ page }) => {
+  const f = await identityFixture();
+  try {
+    await page.goto(f.h.admin);
+    await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+    await expect(page.getByRole('heading', { name: '我的 GitHub 连接' })).toBeVisible();
+    f.h.store.transaction(() => {
+      f.h.store.run("DELETE FROM policies WHERE repository_id='101'");
+      f.h.store.run("DELETE FROM actions_failure_scans WHERE repository_id='101'");
+      f.h.store.run("DELETE FROM identity_projects WHERE project_id='101'");
+      f.h.store.run("DELETE FROM repositories WHERE id='101'");
+    });
+    // The fixture installs one repository; the reader's identity answer is widened to many to show the long list.
+    await page.route('**/api/identity', async route => {
+      const response = await route.fetch(), body = await response.json();
+      const extra = Array.from({ length: 14 }, (_, i) => ({ id: String(9000 + i), full_name: `fixture/waiting-${String(i).padStart(2, '0')}` }));
+      body.github_connection.pending_repositories = [...(body.github_connection.pending_repositories || []), ...extra];
+      await route.fulfill({ response, json: body });
+    });
+    mkdirSync('.tmp/ui-979', { recursive: true });
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      // A reload starts a fresh page: the fold remembers its state only within one page session.
+      await page.goto(f.h.admin + '/#/projects'); await page.reload();
+      await expect(page.getByRole('heading', { name: '等待超级管理员启动' })).toBeVisible();
+      await expect(page.locator('#count')).toContainText('0 个项目，15 个待超级管理员启动');
+      const fold = page.locator('#rows [data-testid=pending-repo-fold]');
+      await expect(fold.locator('summary')).toHaveText('查看 15 个待启动仓库');
+      await expect(fold.locator('.project-pending-row').first()).toBeHidden();
+      await expect(page.locator('.project-pending-intro')).toHaveText('这些仓库已装好 GitHub App，需要超级管理员在控制台启动后才会出现在上面的项目列表里。');
+      if (width === 390) expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+      await page.screenshot({ path: `.tmp/ui-979/projects-folded-${width}.png`, fullPage: true });
+      await fold.locator('summary').focus();
+      await page.keyboard.press('Enter');
+      await expect(fold.locator('.project-pending-row')).toHaveCount(15);
+      await expect(fold.locator('.project-pending-row').first()).toBeVisible();
+      const search = fold.getByLabel('按名称查找');
+      await search.fill('waiting-1');
+      await expect(fold.locator('.project-pending-row:visible')).toHaveCount(4);
+      await page.screenshot({ path: `.tmp/ui-979/projects-search-${width}.png`, fullPage: true });
+      await search.fill('nope');
+      await expect(fold.locator('.project-pending-row:visible')).toHaveCount(0);
+      await expect(fold.getByRole('status')).toHaveText('没有名称包含「nope」的待启动仓库');
+      await search.fill('');
+      await expect(fold.locator('.project-pending-row:visible')).toHaveCount(15);
+      if (width === 390) expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+
+      await page.goto(f.h.admin + '/#/identity');
+      const identityFold = page.locator('#identity-panel [data-testid=pending-repo-fold]');
+      await expect(identityFold.locator('summary')).toHaveText('查看 15 个待启动仓库');
+      await expect(identityFold.locator('.identity-pending-repos li').first()).toBeHidden();
+      await expect(page.locator('.identity-connection-status')).toContainText('已安装但还没有被超级管理员启动');
+      if (width === 390) expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+      await page.screenshot({ path: `.tmp/ui-979/identity-folded-${width}.png`, fullPage: true });
+      await identityFold.locator('summary').click();
+      await identityFold.getByLabel('按名称查找').fill('waiting-13');
+      await expect(identityFold.locator('.identity-pending-repos li:visible')).toHaveCount(1);
+      await expect(identityFold.locator('.identity-pending-repos li:visible')).toContainText('fixture/waiting-13');
+    }
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
