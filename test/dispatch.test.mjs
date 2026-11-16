@@ -218,6 +218,30 @@ test('filtered events never reach the Manager, and each keeps why', async t => {
   assert.equal(pruneFiltered(f.h.store, Date.now() + 31 * 86400000), 5); assert.equal(events(f.h).length, 0);
 });
 
+test('a filtered event keeps the reason that actually stopped it', async t => {
+  const f = await fixture(t);
+  f.state.decide = () => assert.fail('the Manager must not be asked');
+  const member = { type: 'User', login: 'maintainer', id: 7 }, draft = { number: 99, state: 'open', draft: true, title: 'WIP', head: { sha: head }, user: { id: 5 } };
+  const prComment = (id, body) => ({ action: 'created', sender: member, issue: { number: 99, state: 'open', title: 'WIP', pull_request: {}, user: { id: 5 } },
+    comment: { id, body, author_association: 'MEMBER' } });
+  // A comment payload on a pull request carries no draft flag: the pull request the webhook read says it is a draft.
+  assert.equal(queueWebhook(f.h.store, '101', 'issue_comment', prComment(501, 'Please look'), 'draft-comment', draft), 0);
+  assert.equal(queueWebhook(f.h.store, '101', 'issue_comment', prComment(502, '@bot please look'), 'draft-mention', draft), 0);
+  // With the switches off, the switch stopped the bot's own push (a review trigger) and another review bot's comment on this
+  // bot's pull request (counted like a member's), not their authors.
+  f.h.store.run("UPDATE policies SET review_pr_updates=0,event_filters=? WHERE repository_id='101'", JSON.stringify({ 'pull_request.updated': false }));
+  f.h.store.run("INSERT INTO bot_pull_requests(repository_id,number,pr_id,author_id,head_repository_id,branch,sha,source_task_id) VALUES('101',12,'pr-12','77','101','bot/issue-5',?,'dev')", head);
+  const botPr = { number: 12, state: 'open', title: 'Fix CRLF', head: { sha: head }, user: { id: 77, login: 'bot[bot]' } };
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'synchronize', sender: { type: 'Bot', login: 'bot[bot]', id: 77 }, pull_request: botPr, before: 'b'.repeat(40) }, 'bot-push'), 0);
+  assert.equal(queueWebhook(f.h.store, '101', 'issue_comment', { action: 'created', sender: { type: 'Bot', login: 'reviewer[bot]', id: 88 },
+    issue: { number: 12, state: 'open', title: 'Fix CRLF', pull_request: {}, user: { id: 77 } }, comment: { id: 503, body: 'Rename x.', author_association: 'NONE' } }, 'other-bot', botPr), 0);
+  await f.run();
+  assert.equal(f.requests.length, 0); assert.equal(tasks(f.h).length, 0);
+  assert.deepEqual(events(f.h).map(event => [event.type, event.state, JSON.parse(event.result).filtered]), [['pull_request.updated', 'filtered', 'object_draft'],
+    ['pull_request.mention', 'filtered', 'object_draft'], ['pull_request.synchronize', 'filtered', 'event_filter_off'], ['pull_request.updated', 'filtered', 'event_filter_off']]);
+  assert.match(events(f.h)[2].reason, /PR 推送新提交/); assert.match(events(f.h)[3].reason, /PR 的评论和检视/);
+});
+
 test('neither the Manager prompt nor its decision can widen what a task may write', async t => {
   const f = await fixture(t);
   // The prompt describes the flow; asking for writes there changes nothing.
