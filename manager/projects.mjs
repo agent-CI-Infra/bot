@@ -525,16 +525,29 @@ export class Projects {
       const rows = value => Array.isArray(value) ? value : [];
       const images = rows(df?.Images), containers = rows(df?.Containers), volumes = rows(df?.Volumes), cache = rows(df?.BuildCache);
       const sum = rows => rows.reduce((total, row) => total + Math.max(0, Number(row.Size) || 0), 0);
-      const pay = (rows, pick) => rows.reduce((total, row) => total + Math.max(0, Number(pick(row)) || 0), 0);
+      // A size Docker did not report is not a measured zero: a missing field, moby's `-1`, or anything that is not a
+      // number means that kind of usage is unknown, so its total stays null (the page lists it as not measured) while the
+      // count still says how many rows were looked at. Summing a missing row as 0 would show a short number as complete.
+      const measuredBytes = (rows, size) => {
+        let total = 0;
+        for (const row of rows) {
+          const value = size(row);
+          if (value === undefined || value === null) return null;
+          const bytes = Number(value);
+          if (!Number.isFinite(bytes) || bytes < 0) return null;
+          total += bytes;
+        }
+        return total;
+      };
       // An image no container uses can be removed; its layers shared with images in use stay, so that part is not counted.
       const unused = images.filter(image => image.Containers === 0);
       const usage = { read_at: new Date(now).toISOString(),
         images: { count: images.length, bytes: Number(df?.LayersSize) || sum(images), unused_count: unused.length,
           reclaimable_bytes: unused.reduce((total, image) => total + Math.max(0, (Number(image.Size) || 0) - Math.max(0, Number(image.SharedSize) || 0)), 0) },
         // A container takes its writable layer (SizeRw), not its whole filesystem (SizeRootFs), which is mostly its image.
-        containers: { count: containers.length, bytes: pay(containers, row => row?.SizeRw) },
-        // A volume takes the space its data uses; Docker leaves UsageData out when it did not size the volume.
-        volumes: { count: volumes.length, bytes: pay(volumes, row => row?.UsageData?.Size) },
+        containers: { count: containers.length, bytes: measuredBytes(containers, row => row?.SizeRw) },
+        // A volume takes the space its data uses; Docker leaves UsageData out (or answers -1) when it did not size it.
+        volumes: { count: volumes.length, bytes: measuredBytes(volumes, row => row?.UsageData?.Size) },
         build_cache: { count: cache.length, bytes: sum(cache), reclaimable_bytes: sum(cache.filter(row => !row.InUse && !row.Shared)) } };
       this.db.prepare("INSERT INTO settings VALUES('docker_usage',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(usage));
     } catch (error) { logFailure('reading Docker disk usage failed', error); }

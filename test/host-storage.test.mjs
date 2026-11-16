@@ -28,15 +28,38 @@ test("the manager reads Docker's images, containers, volumes and build cache in 
   assert.deepEqual(f.docker.calls, ['GET /system/df']);
 });
 
-test('a container counts its writable layer and a volume its data, and a daemon that leaves sizes out counts zero', async t => {
+test('a container counts its writable layer, and a container Docker did not size leaves that kind unmeasured', async t => {
   const f = await managerFixture(t);
   f.docker.df = { Images: [{ Size: 700, Containers: 0 }, { Size: 300, Containers: 0 }], Containers: [{ SizeRootFs: 5000 }] };
   await f.projects.readDockerUsage();
   const docker = f.projects.storage().docker;
-  // Without LayersSize the listed image sizes are the fallback; a container without a writable layer adds nothing.
+  // Without LayersSize the listed image sizes are the fallback.
   assert.deepEqual(docker.images, { count: 2, bytes: 1000, unused_count: 2, reclaimable_bytes: 1000 });
-  assert.deepEqual(docker.containers, { count: 1, bytes: 0 });
+  // A container without SizeRw was not sized: the count stays, the bytes are unknown, not a measured 0.
+  assert.deepEqual(docker.containers, { count: 1, bytes: null });
   assert.deepEqual(docker.volumes, { count: 0, bytes: 0 });
+});
+
+test('a volume or container Docker could not size keeps that kind unmeasured instead of a short total', async t => {
+  const f = await managerFixture(t);
+  f.docker.df = { LayersSize: 0, Images: [], Containers: [{ SizeRw: 5 }],
+    Volumes: [{ UsageData: { Size: 10 } }, {}], BuildCache: [] };
+  await f.projects.readDockerUsage();
+  let docker = f.projects.storage().docker;
+  assert.deepEqual(docker.volumes, { count: 2, bytes: null }, 'a volume without UsageData makes the total unknown, not 10');
+  assert.deepEqual(docker.containers, { count: 1, bytes: 5 });
+  // moby's -1 marks a volume the daemon could not size; it is not a negative size and not a zero either.
+  f.projects.dockerUsageAt = 0;
+  f.docker.df = { LayersSize: 0, Images: [], Containers: [{ SizeRw: 5 }],
+    Volumes: [{ UsageData: { Size: 10 } }, { UsageData: { Size: -1 } }], BuildCache: [] };
+  await f.projects.readDockerUsage();
+  docker = f.projects.storage().docker;
+  assert.deepEqual(docker.volumes, { count: 2, bytes: null }, '-1 is not a size');
+  // Every row sized: the total is a number again.
+  f.projects.dockerUsageAt = 0;
+  f.docker.df = { LayersSize: 0, Images: [], Containers: [{ SizeRw: 5 }], Volumes: [{ UsageData: { Size: 10 } }, { UsageData: { Size: 20 } }], BuildCache: [] };
+  await f.projects.readDockerUsage();
+  assert.deepEqual(f.projects.storage().docker.volumes, { count: 2, bytes: 30 });
 });
 
 test('a read Docker cannot answer keeps the last numbers and never fails the storage call', async t => {
@@ -71,6 +94,14 @@ test("the disk's storage table counts Docker's containers and volumes in what it
   assert.equal(view.host.known.docker_volumes, 400);
   assert.ok(!view.host.unmeasured.includes('docker_containers'));
   assert.ok(!view.host.unmeasured.includes('docker_volumes'));
+});
+
+test('a Docker total the manager could not measure lists that row as unmeasured on the storage page', async t => {
+  const usage = { ...dockerUsage, volumes: { count: 2, bytes: null } };
+  const view = await reportFixture(t, usage).api(superAdmin, 'GET', '/api/storage');
+  assert.equal(view.host.known.docker_volumes, null);
+  assert.ok(view.host.unmeasured.includes('docker_volumes'));
+  assert.equal(view.host.known.docker_containers, 30, 'the container total beside it is still measured');
 });
 
 test('Docker read not at all yet leaves those rows unmeasured and the page at 200', async t => {
