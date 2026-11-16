@@ -1,7 +1,10 @@
 // One account or user as a list row, the same markup as the other lists; drawn by the global settings sections.
+// #890: the #561 contract ellipsizes the heading (shell.css), and the row is where an account is told apart from its
+// neighbours, so the heading carries its full text in title the same way the subtitle already did. The text itself is
+// never shortened, so a screen reader keeps reading the whole name and needs no second copy.
 function settingsRow(title, detail, extra, badges, actions) {
   const line = element('div', '', 'row has-actions'), content = element('div', '', 'row-content'), status = element('div', '', 'row-state'), group = element('div', '', 'actions');
-  line.setAttribute('role', 'listitem'); const subtitle = element('p', detail); subtitle.title = subtitle.textContent; content.append(element('strong', title), subtitle, ...extra); status.append(...badges); group.append(...actions);
+  line.setAttribute('role', 'listitem'); const heading = element('strong', title), subtitle = element('p', detail); heading.title = title; subtitle.title = subtitle.textContent; content.append(heading, subtitle, ...extra); status.append(...badges); group.append(...actions);
   line.append(content, status, group); return line;
 }
 function accountLine(row) {
