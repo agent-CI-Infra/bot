@@ -9,7 +9,7 @@ const fn = (name: string, description: string, properties: Record<string, unknow
   ({ type: 'function' as const, function: { name, description, parameters: { type: 'object', properties, required, additionalProperties: false } } });
 
 export const browserTool = fn('browser',
-  'Drive an isolated real browser for this task: open a permitted page, click or type, take a screenshot, or close. Only origins listed on the task may be opened. Destructive actions (delete, pay, checkout, and similar) need an explicit grant. Passwords are never recorded. A fresh profile is used; it does not reuse the host desktop or its cookies.',
+  'Drive an isolated real browser for this task: open a permitted page, click or type, take a screenshot, or close. Every request (pages, redirects, iframes, subresources) must stay on origins listed on the task. A static label/path check flags some destructive wording (delete, pay, checkout and similar) and requires an explicit grant; it cannot recognize every risky click, so a generic confirm may still run. Recognized password or secret fields are not kept in logs, and already-saved screenshots from that session are removed; unrecognized fields can still leak. A fresh profile is used; it does not reuse the host desktop or its cookies.',
   {
     action: { type: 'string', enum: ['open', 'see', 'click', 'type', 'screenshot', 'close'] },
     url: { type: 'string', description: 'Page to open (action=open). Must match an allowed origin.' },

@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { account, harness, repository, setup } from './helpers.mjs';
-import { allowedOrigin, browserPolicyOf, destructiveAllowed, originOf, redactBrowserValue } from '../dist/browser/policy.js';
+import { account, harness, repository, setup, testPassword } from './helpers.mjs';
+import { allowedOrigin, browserPolicyOf, destructiveAllowed, networkRequestAllowed, originOf, redactBrowserValue, redactRecordedUrl } from '../dist/browser/policy.js';
 import { listBrowserEvidence } from '../dist/browser/evidence.js';
 import { browserEvidenceDir } from '../dist/browser/runtime.js';
 import { browserEvidenceRoot } from '../dist/browser/tools.js';
@@ -30,6 +30,8 @@ test('browser policy withholds destructive actions until the task grants them', 
   assert.equal(destructiveAllowed(denied, '/delete', '删除账号').error, 'browser_destructive_forbidden');
   assert.equal(destructiveAllowed(granted, '/delete', '删除账号').ok, true);
   assert.equal(destructiveAllowed(policy(['http://127.0.0.1:8080'], { allow_destructive: true }), '/checkout', '结算下单').ok, true);
+  // The check is a heuristic, not a complete detector: a generic confirm is not withheld.
+  assert.equal(destructiveAllowed(denied, '/submit', '确认').ok, true);
 });
 
 test('browser policy is absent unless the task lists at least one allowed origin', () => {
@@ -45,6 +47,26 @@ test('credential field names are stripped from recorded browser values', () => {
   assert.equal(cleaned.cookie, '[redacted]');
   assert.equal(cleaned.text, 'visible');
   assert.equal(cleaned.step.screenshot.file, 'step-1.png');
+});
+
+test('every network request is bound to the same origin allowlist', () => {
+  const allowed = policy(['http://127.0.0.1:8080']);
+  assert.equal(networkRequestAllowed(allowed, 'http://127.0.0.1:8080/app.js').ok, true);
+  assert.equal(networkRequestAllowed(allowed, 'https://evil.example/pixel.png').error, 'browser_origin_forbidden');
+  assert.equal(networkRequestAllowed(allowed, 'http://127.0.0.1:8080/go').ok, true);
+  assert.equal(networkRequestAllowed(allowed, 'about:blank').ok, true);
+  assert.equal(networkRequestAllowed(allowed, 'data:text/plain,ok').ok, true);
+  assert.equal(networkRequestAllowed(allowed, 'blob:http://127.0.0.1:8080/abc').ok, true);
+  assert.equal(networkRequestAllowed(allowed, 'file:///etc/passwd').error, 'browser_url_refused');
+});
+
+test('recorded page addresses drop token-like query and fragment values', () => {
+  assert.equal(
+    redactRecordedUrl('http://127.0.0.1:8080/cb?access_token=super-secret&tab=1'),
+    'http://127.0.0.1:8080/cb?access_token=%5Bredacted%5D&tab=1'
+  );
+  assert.equal(redactRecordedUrl('http://127.0.0.1:8080/app#id_token=abc'), 'http://127.0.0.1:8080/app#redacted');
+  assert.equal(redactRecordedUrl('about:blank'), 'about:blank');
 });
 
 test('task detail and evidence routes expose stored screenshots and refuse path traversal', async (t) => {
@@ -79,4 +101,22 @@ test('task detail and evidence routes expose stored screenshots and refuse path 
   assert.equal(traversal.status, 404);
   const anon = await fetch(h.admin + '/api/tasks/browse-1/browser-evidence/step-1.png');
   assert.equal(anon.status, 401);
+  const password = testPassword();
+  await repository(admin, acct.id, '202');
+  const created = await admin('/api/users', 'POST', { username: 'outsider', password, repository_ids: ['202'] });
+  assert.equal(created.status, 201);
+  const outsider = h.client();
+  const login = await outsider('/api/auth/login', 'POST', { username: 'outsider', password });
+  assert.equal(login.status, 200);
+  const hiddenList = await fetch(h.admin + '/api/tasks/browse-1/browser-evidence', { headers: { Cookie: outsider.cookie() } });
+  assert.equal(hiddenList.status, 404);
+  const hiddenShot = await fetch(h.admin + '/api/tasks/browse-1/browser-evidence/step-1.png', { headers: { Cookie: outsider.cookie() } });
+  assert.equal(hiddenShot.status, 404);
+  writeFileSync(join(dir, 'steps.json'), JSON.stringify({
+    task_id: 'browse-1',
+    steps: [{ id: 'step-1', n: 1, at: '2026-11-16T00:00:00.000Z', action: 'open', url: 'http://127.0.0.1:9/cb?access_token=super-secret', title: '夹具', result: 'ok' }]
+  }));
+  const cleaned = listBrowserEvidence(h.store, 'browse-1');
+  assert.equal(cleaned.steps[0].url.includes('super-secret'), false);
+  assert.ok(cleaned.steps[0].url.includes('[redacted]') || cleaned.steps[0].url.includes('%5Bredacted%5D'));
 });
