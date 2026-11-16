@@ -36,7 +36,10 @@ async function retentionCard(size, count, time) {
   for (const [key, label, help] of fields) { controls[key] = number(key, settings[key], bounds[key]); form.append(field(label, controls[key]), note(help)); }
   const overrides = costTable(['项目', '轨迹正文保留天数（留空跟随上面的设置）']), perProject = {};
   for (const project of view.projects) {
-    perProject[project.id] = number('trajectory_days_' + project.id, settings.trajectory_days_by_project[project.id], bounds.trajectory_days);
+    const control = number('trajectory_days_' + project.id, settings.trajectory_days_by_project[project.id], bounds.trajectory_days);
+    // #882: the project name is in a sibling cell, and a sibling is not an accessible name — name the input itself.
+    control.setAttribute('aria-label', `${project.name} 轨迹正文保留天数`);
+    perProject[project.id] = control;
     const row = document.createElement('tr'), cell = document.createElement('td'); cell.append(perProject[project.id]); row.append(element('td', project.name), cell); overrides.body.append(row);
   }
   if (view.projects.length) form.append(element('p', '按项目设置轨迹正文的保留天数', 'muted'), overrides.wrap);
