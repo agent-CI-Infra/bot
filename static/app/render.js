@@ -70,9 +70,6 @@ async function render(quiet = false) {
   // #747: the page is the first 50 rows of a 51-row probe; the row beyond the page is the "there is more" signal, and it is
   // never drawn or counted.
   const hasMore=received.length>50, rows=received.slice(0,50);
-  // #866: a project list that reads now answers the question the permission check asked, so the notice beside that check
-  // and the project picker follow this read instead of staying at what the failed one left behind.
-  if(tab==='projects'&&!installedView&&typeof recoverGithubRepositoriesUnread==='function')recoverGithubRepositoriesUnread(rows,params);
   let pendingRepositories=[];
   let pendingRepositoriesError=null;
   const projectListFiltered=!!(params.get('repository_id')||params.get('account_id')||params.get('owner_id'));
