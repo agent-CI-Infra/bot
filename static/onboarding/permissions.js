@@ -26,7 +26,7 @@ function appPermissionCheck(account){
   const check=button('检查权限和事件订阅',async()=>{
     check.disabled=true;result.replaceChildren(element('p','正在检查…','muted'));
     try{result.replaceChildren(...permissionReport(await api(`/api/accounts/${encodeURIComponent(account.id)}/permissions`)));check.textContent='重新检查';}
-    catch(err){result.replaceChildren(element('p','检查失败：'+err.message,'view-error'));}
+    catch(err){result.replaceChildren(element('p','检查失败：'+readErrorText(err),'view-error'));}
     finally{check.disabled=false;}
   });
   box.append(check,result);return box;

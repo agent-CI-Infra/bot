@@ -22,7 +22,7 @@ function managerSection(roles) {
       current.manager = manager; holder.replaceChildren(...managerCards(manager, roles, refresh, notice));
       // An older address (the workflows page, its rule pages) scrolls to its card once the cards are drawn.
       current.managerAnchor?.(); current.managerAnchor = null;
-    } catch (err) { message.textContent = err.message; }
+    } catch (err) { message.textContent = readErrorText(err); }
   };
   void refresh(); return [holder, message];
 }
