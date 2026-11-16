@@ -99,26 +99,31 @@ function groupProjectRows(rows, lines) {
 // Stale chips are checked once in the background and only the chips change; the list is neither reloaded nor cleared.
 // A result that is still stale (a failed check, or more repositories than one check covers) waits for a manual refresh.
 // #869: a failure is no longer swallowed. The chips keep the previous reading, and the list states the failure with the
-// time of the reading it is showing and one manual read; a success clears that statement.
+// time of the reading it is showing and one manual read; a success clears that statement. A result that lands after the
+// account changed or the list drew again belongs to neither, so it is dropped rather than written over the current list.
 async function refreshStaleIntegrations() {
   if (integrationAutoRefresh) return; integrationAutoRefresh = true;
+  const ticket = projectCheckTicket();
   try {
     const integrations = (await api('/api/integrations/check', 'POST', {})).integrations || [];
+    if (!projectCheckCurrent(ticket)) return;
     updateIntegrationChips(integrations); projectCheckPassed('integrations', integrations);
-  } catch (err) { projectCheckFailed('integrations', err); }
+  } catch (err) { if (projectCheckCurrent(ticket)) projectCheckFailed('integrations', err); }
   finally { integrationAutoRefresh = false; }
 }
 // Grants older than the cache are read again once when the list opens; only the permission badges change. They are not
 // part of the five-second task refresh, and a failed check waits for the next visit or a manual sync.
 async function refreshStalePermissions() {
   if (permissionAutoRefresh) return; permissionAutoRefresh = true;
+  const ticket = projectCheckTicket();
   try {
     const rows = (await api('/api/installations/permissions/check', 'POST', {})).repositories || [];
+    if (!projectCheckCurrent(ticket)) return;
     updatePermissionBadges(rows);
     // The check answers with the same snapshot rows the navigation shows gaps from; leaving it out is how the bar and the
     // project header end up describing two different reads.
     if (typeof updateConsoleGaps === 'function') updateConsoleGaps(rows);
     projectCheckPassed('permissions', rows, 'permissions_checked_at');
-  } catch (err) { projectCheckFailed('permissions', err); }
+  } catch (err) { if (projectCheckCurrent(ticket)) projectCheckFailed('permissions', err); }
   finally { permissionAutoRefresh = false; }
 }
