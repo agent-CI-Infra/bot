@@ -437,9 +437,11 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     for(const w of effective.workflows){const o=element('option',w.name+' · '+w.prompt.source);o.value=w.id;workflow.append(o);}
     const prompt=textarea('prompt','',{rows:5});prompt.setAttribute('aria-label','默认提示词');
     const chosen=()=>effective.workflows.find(w=>w.id===workflow.value);
-    const fill=()=>{prompt.value=chosen()?.prompt.effective??'';};workflow.onchange=fill;fill();
-    const form=document.createElement('form'),save=element('button','保存默认提示词');form.append(element('h3','Manager 章节'),field('工作类型',workflow),field('默认提示词',prompt),note('保存的是 Manager 提示词里这类工作的章节，只影响之后新建的任务。由仓库 skill 提供的章节可以创建配置 PR 修改那份 skill，合入后才生效。'),save);
-    form.onsubmit=e=>{e.preventDefault();confirmCommand({operation:'workflow.update',target:{project_id:project,workflow_id:workflow.value},arguments:{prompt:prompt.value},expected_revision:effective.revision},{project,workflow:chosen()?.name});};if(chosen()?.prompt.path){const publish=button('创建配置 PR',()=>confirmCommand({operation:'configuration.pr',target:{project_id:project},arguments:{path:chosen().prompt.path,content:prompt.value},expected_revision:effective.revision},{project,workflow:chosen()?.name}),'quiet');form.append(publish);}
+    // A section whose text comes from the repository's skill (release notes) is changed by a configuration PR of that skill.
+    const sourceNote=note('');
+    const fill=()=>{prompt.value=chosen()?.prompt.effective??'';sourceNote.textContent=chosen()?.prompt.source==='repository'?`这类工作的文本来自仓库 skill ${chosen().prompt.path}，它优先于 Manager 章节：保存章节不改变行为，要改请创建配置 PR，合入后生效。`:'保存的是 Manager 提示词里这类工作的章节，只影响之后新建的任务。'+(chosen()?.prompt.path?`也可以创建配置 PR，在仓库里加上 skill ${chosen().prompt.path}，合入后它优先于这个章节。`:'');};workflow.onchange=fill;fill();
+    const form=document.createElement('form'),save=element('button','保存默认提示词');form.append(element('h3','Manager 章节'),field('工作类型',workflow),field('默认提示词',prompt),sourceNote,save);
+    form.onsubmit=e=>{e.preventDefault();confirmCommand({operation:'workflow.update',target:{project_id:project,workflow_id:workflow.value},arguments:{prompt:prompt.value},expected_revision:effective.revision},{project,workflow:chosen()?.name});};const publish=button('创建配置 PR',()=>confirmCommand({operation:'configuration.pr',target:{project_id:project},arguments:{path:chosen().prompt.path,content:prompt.value},expected_revision:effective.revision},{project,workflow:chosen()?.name}),'quiet');form.append(publish);const showPublish=()=>{publish.hidden=!chosen()?.prompt.path;};workflow.addEventListener('change',showPublish);showPublish();
     forms.append(form);
     const tasks=(await api(endpoint+'/query','POST',{operation:'list_tasks',target:{project_id:project},arguments:{limit:100}})).tasks;
     if(generation!==formGeneration)return;

@@ -12,7 +12,9 @@ import { computerKeys, declaredLabel, defaultLabels, defaults, retiredPath, type
  *   opened by a line naming the file and the commit it came from; sections without a repository file keep their text;
  * - the review label and the development label become project settings, from the layer that declared them, and their
  *   declaration line leaves the section text;
- * - the repository's .bot/computer.yaml is merged into the project computer field by field, as tasks applied it.
+ * - the repository's .bot/computer.yaml is merged into the project computer field by field, as tasks applied it. A
+ *   project without a saved console spec keeps the fields in rule_imports.computer until its spec is first saved
+ *   (rememberConsoleComputer), so the next prepare or machine save applies them on top of the live computer.
  *
  * It reads the files as the bot last read them for a task (repository_rule_sources). A project with nothing cached is
  * imported the first time the bot reads its repository afterwards (importRepository), from that commit. Each project
@@ -23,19 +25,26 @@ export interface ImportReport { files: string[]; sections: string[]; labels: Lab
 const terminal = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'superseded'];
 
 export function importBotRules(store: Store): void {
-  store.db.exec('CREATE TABLE IF NOT EXISTS rule_imports(repository_id TEXT PRIMARY KEY,sha TEXT,imported_at TEXT,pending INTEGER NOT NULL DEFAULT 0,report TEXT NOT NULL)');
+  store.db.exec('CREATE TABLE IF NOT EXISTS rule_imports(repository_id TEXT PRIMARY KEY,sha TEXT,imported_at TEXT,pending INTEGER NOT NULL DEFAULT 0,report TEXT NOT NULL,computer TEXT)');
   if (store.get("SELECT 1 FROM settings WHERE key='rules.bot_imported'")) return;
   store.transaction(() => {
     for (const policy of store.all('SELECT repository_id FROM policies')) {
       const id = String(policy.repository_id), cached = store.get('SELECT sha,files FROM repository_rule_sources WHERE repository_id=?', id);
       if (cached) importFiles(store, id, String(cached.sha), String(cached.files));
-      else store.run('INSERT INTO rule_imports VALUES(?,NULL,NULL,1,?) ON CONFLICT(repository_id) DO NOTHING', id, JSON.stringify(emptyReport()));
+      else store.run('INSERT INTO rule_imports VALUES(?,NULL,NULL,1,?,NULL) ON CONFLICT(repository_id) DO NOTHING', id, JSON.stringify(emptyReport()));
     }
     store.run("INSERT INTO settings VALUES('rules.bot_imported',?)", new Date().toISOString());
   });
 }
 
 /** Whether the project still waits for its one import: it had no cached files at the upgrade. */
+/** The .bot/computer.yaml fields a project without a saved console spec still has to take into it (null: none). */
+export function importedComputer(store: Store, repositoryId: string): Record<string, unknown> | null {
+  if (!store.hasTable('rule_imports')) return null;
+  const row = store.get('SELECT computer FROM rule_imports WHERE repository_id=? AND computer IS NOT NULL', repositoryId);
+  return row ? JSON.parse(String(row.computer)) : null;
+}
+
 export function importPending(store: Store, repositoryId: string): boolean {
   return !!store.get('SELECT 1 FROM rule_imports WHERE repository_id=? AND pending=1', repositoryId);
 }
@@ -51,25 +60,28 @@ const emptyReport = (): ImportReport => ({ files: [], sections: [], labels: { ..
 // JSON, a save the Manager prompt refuses) rolls back that project only: it keeps its console and built-in rules, and its
 // report says so instead of listing what was rolled back. The startup never stops on it.
 function importFiles(store: Store, id: string, sha: string, filesJson: string) {
-  let report = emptyReport();
+  let report = emptyReport(), computer: Record<string, unknown> | null = null;
   try {
     const attempt = emptyReport();
-    store.transaction(() => importProject(store, id, JSON.parse(filesJson), sha, attempt));
+    computer = store.transaction(() => importProject(store, id, JSON.parse(filesJson), sha, attempt));
     report = attempt;
   } catch (error) {
     report.warnings.push(`导入失败，沿用控制台和内置规则：${error instanceof Error ? error.message : String(error)}`);
   }
   // What the repository still has is listed by name only.
   const cached = store.get('SELECT files FROM repository_rule_sources WHERE repository_id=?', id);
-  let names: Record<string, string> | null = null;
-  try { names = cached ? Object.fromEntries(Object.entries(JSON.parse(cached.files) as Record<string, string>).map(([path, content]) => [path, retiredPath(path) ? '' : content])) : null; } catch {}
-  if (cached) store.run('UPDATE repository_rule_sources SET files=? WHERE repository_id=?', JSON.stringify(names ?? {}), id);
-  store.run('INSERT INTO rule_imports VALUES(?,?,?,0,?) ON CONFLICT(repository_id) DO UPDATE SET sha=excluded.sha,imported_at=excluded.imported_at,pending=0,report=excluded.report',
-    id, sha, new Date().toISOString(), JSON.stringify(report));
+  // A cache that cannot be read stays as it is (it is refreshed by the next read of the branch); the report says so.
+  if (cached) {
+    try { store.run('UPDATE repository_rule_sources SET files=? WHERE repository_id=?', JSON.stringify(Object.fromEntries(Object.entries(JSON.parse(cached.files) as Record<string, string>).map(([path, content]) => [path, retiredPath(path) ? '' : content]))), id); }
+    catch { report.warnings.push('缓存的仓库文件无法读取，保留原样，下次读取默认分支时更新'); }
+  }
+  store.run('INSERT INTO rule_imports VALUES(?,?,?,0,?,?) ON CONFLICT(repository_id) DO UPDATE SET sha=excluded.sha,imported_at=excluded.imported_at,pending=0,report=excluded.report,computer=excluded.computer',
+    id, sha, new Date().toISOString(), JSON.stringify(report), computer ? JSON.stringify(computer) : null);
   store.audit('system', 'rules.imported', report.files.join(', ') || 'none', id);
 }
 
-function importProject(store: Store, id: string, files: Record<string, string>, sha: string, report: ImportReport) {
+function importProject(store: Store, id: string, files: Record<string, string>, sha: string, report: ImportReport): Record<string, unknown> | null {
+  let computer: Record<string, unknown> | null = null;
   // A repository file took effect when it existed, also when it was empty.
   const repository = (path: string) => Object.hasOwn(files, path) && typeof files[path] === 'string' ? files[path]! : null;
   const policy = store.get('SELECT rule_overrides FROM policies WHERE repository_id=?', id);
@@ -112,14 +124,17 @@ function importProject(store: Store, id: string, files: Record<string, string>, 
       const known = Object.fromEntries(Object.entries(value).filter(([key]) => computerKeys.includes(key)));
       const ignored = Object.keys(value).filter(key => !computerKeys.includes(key));
       if (ignored.length) report.warnings.push(`.bot/computer.yaml 的字段 ${ignored.join('、')} 不受支持，未导入`);
-      // Without a saved console spec the console layer is the computer as the manager has it, which already carries
-      // the fields tasks applied from the file; a new spec of the file's fields alone would drop the others.
+      // Without a saved console spec the console layer is the computer as the manager has it, which may not carry the
+      // file's fields yet (no task applied them); a new spec of the file's fields alone would drop the others. They wait
+      // in rule_imports.computer and join the spec when it is first saved.
       const saved = store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?', id);
       if (saved) store.run('UPDATE computer_console_specs SET spec=? WHERE repository_id=?', JSON.stringify({ ...JSON.parse(saved.spec), ...known }), id);
+      else if (Object.keys(known).length) computer = known;
       report.files.push('.bot/computer.yaml'); report.computer = Object.keys(known);
     } catch { report.warnings.push('.bot/computer.yaml 不是映射，或含不支持的写法，未导入'); }
   }
   keepStartedTasks(store, id, ruleTexts(files));
+  return computer;
 }
 
 // The .bot/ rule texts among files (the computer file is merged into the computer, not a text).
