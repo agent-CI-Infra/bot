@@ -327,3 +327,16 @@ for(const code of ['execution_interrupted','github_http_502'])for(const inCycle 
     else assert.ok(task.next_run_at>=resumedAt+cycleMs&&task.next_run_at<=Date.now()+cycleMs);
   });
 }
+
+// #815: only a development that started on the label needs it to stay; one started on a maintainer's request does not.
+test('a development started on a maintainer\'s request does not stop when the Issue has no development label', async t => {
+  const object = { ...structuredClone(issue), labels: [] };
+  const h = await emptyRepositoryFixture(t, { github(path, send) { if (path.endsWith('/issues/1')) { send(object); return true; } } }); h.setBranch('ready');
+  h.store.run("UPDATE policies SET capability_ceiling='develop',development_enabled=1,enabled=1 WHERE repository_id='101'");
+  const input = { object: issue, object_hash: sha(JSON.stringify([issue.title, issue.body])), context: { mode: 'development' }, files: [] };
+  h.store.run("UPDATE tasks SET kind='development.issue',status='retry_wait',phase='model',input=?,head_sha=?,workspace_id='old',generation=1,next_run_at=? WHERE id=?", JSON.stringify(input), pull.head.sha, Date.now() - 1, h.taskId);
+  h.store.run("INSERT INTO task_development_basis VALUES(?,?,?,?)", h.taskId, 'maintainer_request', JSON.stringify({ kind: 'maintainer_request', comment_id: '7', author: 'maria', permission: 'triage', url: null, excerpt: 'Please fix.' }), new Date().toISOString());
+  const task = await h.run();
+  assert.notEqual(task.error_code, 'development_not_approved', JSON.stringify([task.status, task.error_code]));
+  assert.notEqual(task.status, 'waiting_permission');
+});
