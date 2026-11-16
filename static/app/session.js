@@ -3,6 +3,9 @@
 // deleted the account (the server session is gone already), so this is the local cleanup only — never a logout call.
 function endSession() {
   renderVersion++; me = null;
+  // #869 review: a failed background check and the time of the reading it kept are that account's; the next sign-in
+  // starts with neither, so its list cannot inherit a statement or a retry that belongs to someone else.
+  if (typeof resetProjectCheckStatus === 'function') resetProjectCheckStatus();
   if (typeof resetAnnouncedPage === 'function') resetAnnouncedPage();
   if (typeof applyStaticTranslations === 'function') applyStaticTranslations();
   tab = 'projects';

@@ -98,15 +98,40 @@ function showProjectActivityStatus(text) {
   $('rows').prepend(status);
 }
 // #869: the gate/board check and the permission check run behind the list and keep the badges they read last when they
-// fail. A failure is therefore said above the rows: which check failed, that the badges are the previous reading, when
-// that reading was taken, and the one manual read that replaces it. The failure itself schedules nothing (#43), and a
-// successful read takes the statement away.
+// fail. A failure is therefore said above the rows: which check failed, what the column shows (the previous reading, or
+// 未检查 for a permission reading that is stale), when that reading was taken, and the one manual read that replaces it.
+// The failure itself schedules nothing (#43), and a successful read takes the statement away.
 const projectCheckCopy = {
-  integrations: { name: '门禁与看板接入检查', reading: '门禁和看板徽章', action: '重新检查门禁' },
-  permissions: { name: '安装权限检查', reading: '权限徽章', action: '重新检查权限' },
+  integrations: { name: '门禁与看板接入检查', action: '重新检查门禁',
+    previous: '列表上的门禁和看板徽章还是上次读到的结果，可能已经过期。',
+    never: '列表上还没有门禁和看板徽章可显示——这项检查还没有成功读取过。' },
+  permissions: { name: '安装权限检查', action: '重新检查权限',
+    previous: '列表上需要重新检查的权限徽章显示「未检查」，不显示上次读到的结果。',
+    never: '列表上的权限徽章显示「未检查」——这项检查还没有成功读取过。' },
 };
 const projectCheckOrder = ['integrations', 'permissions'];
+// #869 review: both records belong to the account that ran the check. The maps are dropped when a different account is
+// signed in (the `ownerFolding` precedent in app/project-rows.js), and endSession() resets them, so one reader's failed
+// check can never be drawn for the next.
 const projectCheckReads = new Map(), projectCheckFailures = new Map();
+let projectCheckAccount = null;
+function projectCheckScope() {
+  // null is "no session"; an account that carries neither an id nor a name is still a signed-in account, not the same
+  // state as nobody being signed in.
+  const account = me ? String(me.id ?? me.username ?? '') : null;
+  if (account !== projectCheckAccount) { projectCheckReads.clear(); projectCheckFailures.clear(); projectCheckAccount = account; }
+  return account;
+}
+function resetProjectCheckStatus() {
+  projectCheckReads.clear(); projectCheckFailures.clear(); projectCheckAccount = null;
+  if ($('rows')) clearProjectCheckStatus();
+}
+// A check records the account and the list render that asked for it; an answer that lands after either moved on is
+// dropped instead of being written over the next reader's list.
+function projectCheckTicket() { return { account: projectCheckScope(), request: renderVersion }; }
+function projectCheckCurrent(ticket) {
+  return ticket.account !== null && ticket.account === projectCheckScope() && ticket.request === renderVersion;
+}
 // The newest reading the server reports on the rows it just sent; a time of the console's own would not date the data.
 function projectCheckReading(items, field) {
   let newest = '';
@@ -114,6 +139,7 @@ function projectCheckReading(items, field) {
   return newest;
 }
 function projectCheckRead(name, items, field) {
+  projectCheckScope();
   const newest = projectCheckReading(items, field); if (newest) projectCheckReads.set(name, newest);
 }
 function clearProjectCheckStatus() {
@@ -121,10 +147,12 @@ function clearProjectCheckStatus() {
 }
 function projectCheckStatusLine(name) {
   const copy = projectCheckCopy[name], read = timestamp(projectCheckReads.get(name) || '');
-  const line = element('p', `${copy.name}读取失败（${projectCheckFailures.get(name)}），列表上的${copy.reading}还是上次读到的结果，可能已经过期。`,
+  // Without a successful reading there is no old badge to point at and no time to state, so the sentence says the check
+  // has never read anything instead of claiming a reading it does not have.
+  const line = element('p', `${copy.name}读取失败（${projectCheckFailures.get(name)}），${read ? copy.previous : copy.never}`,
     'view-warning project-check-status');
   line.dataset.check = name; line.setAttribute('role', 'status'); line.setAttribute('data-testid', 'project-check-status');
-  line.append(element('span', read ? `上次成功读取：${read}` : '上次成功读取的时间未知', 'muted'));
+  if (read) line.append(element('span', `上次成功读取：${read}`, 'muted'));
   const control = button(copy.action, async () => {
     control.disabled = true;
     try { await (name === 'integrations' ? refreshStaleIntegrations() : refreshStalePermissions()); }
@@ -135,19 +163,23 @@ function projectCheckStatusLine(name) {
 }
 // Redrawn from the recorded state so a list that draws again cannot lose a statement that is still true.
 function drawProjectCheckStatus() {
-  // A check outlives the page that started it; its statement belongs to the project list, not to the list now on screen.
-  if (!$('rows') || tab !== 'projects') return;
+  // A check outlives the page that started it; its statement belongs to the project list, not to the list now on screen,
+  // and the hidden-repository list has no gate or permission column for it to explain.
+  if (!$('rows') || tab !== 'projects' || projectRoute() || $('hidden-filter')?.checked) return;
+  projectCheckScope();
   clearProjectCheckStatus();
   const lines = projectCheckOrder.filter(name => projectCheckFailures.has(name)).map(projectCheckStatusLine);
   if (lines.length) $('rows').prepend(...lines);
 }
 function projectCheckFailed(name, err, { draw = true } = {}) {
+  projectCheckScope();
   projectCheckFailures.set(name, readErrorText(err));
   if (draw) drawProjectCheckStatus();
 }
-function projectCheckPassed(name, items, field = 'checked_at') {
+function projectCheckPassed(name, items, field = 'checked_at', { draw = true } = {}) {
+  projectCheckScope();
   projectCheckRead(name, items, field);
-  if (projectCheckFailures.delete(name)) drawProjectCheckStatus();
+  if (projectCheckFailures.delete(name) && draw) drawProjectCheckStatus();
 }
 // The project list render reads the same endpoint, so a list that draws again lifts a stop or a delay left by the poll.
 function resetProjectActivityPoll() {
