@@ -36,7 +36,8 @@ test('dispatch records show the answer round after spent attempts and a stopped 
     }
     await page.keyboard.press('Escape');
     for (const width of [1440, 390]) {
-      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 }); await reader.scrollIntoViewIfNeeded();
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      await reader.locator('[data-dispatch-event="stopped"]').evaluate(node => node.scrollIntoView({ block: 'center' }));
       if (shots) await page.screenshot({ path: `${shots}/dispatch-stopped-list-${width}.png` });
     }
     expect(errors).toEqual([]);
