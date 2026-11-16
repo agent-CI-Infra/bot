@@ -221,7 +221,15 @@ const develop = (basis, extra = {}) => ({ decision: 'create', option_ids: ['deve
 
 test('a maintainer\'s request in a comment starts development with the comment and permission recorded; an outsider\'s comment cannot', async t => {
   const f = await basisFixture(t);
-  f.state.decide = input => { assert.ok(input.work.create.some(work => work.id === 'development'), 'a comment on an Issue offers development'); return develop({ kind: 'maintainer_request', comment_id: 77 }); };
+  // The latest published review and who is assigned come with the event, as on a label event, so the Manager judges from them.
+  const now = new Date().toISOString();
+  f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,result,object_number,created_at,updated_at) VALUES('rv','101','review.issue','succeeded','r','101:review.issue:5:opened','{}',?,5,?,?)",
+    JSON.stringify({ summary: 'parse() drops the last CRLF line.', recommendation: 'Ready for development: keep the last CRLF line.', findings: [] }), now, now);
+  f.state.decide = input => {
+    assert.ok(input.work.create.some(work => work.id === 'development'), 'a comment on an Issue offers development');
+    assert.deepEqual(input.event.facts.development, { assignees: [], review: { task_id: 'rv', summary: 'parse() drops the last CRLF line.', recommendation: 'Ready for development: keep the last CRLF line.' } });
+    return develop({ kind: 'maintainer_request', comment_id: 77 });
+  };
   assert.equal(f.comment(77, 'maria', 'MEMBER', 'Please implement the CRLF fix now.', 'maintainer-comment'), 1); await f.run();
   const development = tasks(f.h).find(task => task.kind === 'development.issue');
   assert.ok(development, JSON.stringify(events(f.h).map(e => [e.state, e.reason, e.refusals, e.error])) + JSON.stringify(f.github.requests));
