@@ -15,7 +15,7 @@ const deliveryIgnoreReasons = {
   payload_too_large:'正文超过大小上限，未读取签名与入口。', unknown_endpoint:'账号下没有这个通知入口，未验签、未处理。',
   missing_event_or_delivery:'缺少事件名或投递编号，未进入处理。' };
 function deliveryOutcome(row){ const result=row.processing_result; return deliveryOutcomes[result]||[deliveryCaption(row),'']; }
-function dispatchCaption(event){ return ({create:'新建任务',continue:'续接任务',ignore:'不处理'})[event.decision]||event.decision||event.state||'待分派'; }
+function dispatchCaption(event){ return event.state==='filtered'?'被过滤，没有交给 Manager':({create:'新建任务',continue:'续接任务',ignore:'不处理'})[event.decision]||event.decision||event.state||'待分派'; }
 function deliverySection(name,title,rows){ const section=element('section','','detail-section'); section.dataset.detailSection=name;
   section.append(element('h3',title), facts(rows)); return section; }
 // The detail keeps the same three facts as sections, then the Manager dispatch and the archived raw request, which stays

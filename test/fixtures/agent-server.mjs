@@ -28,9 +28,9 @@ let config={github_token:'',model_key:''},treeMismatch=false,staled=false,dropCo
 const stats={requests:[],models,dispatches:[],acceptances:[],refWrites:[],reviews:[],comments:[],prs:[],labels:[],trees:[],issues:[]};
 const call=(name,args,id)=>({id:'call-'+id,type:'function',function:{name,arguments:JSON.stringify(args)}});
 function dispatch(context){
-  const {event,options}=context;
+  const {event,work:options}=context;
   if(/^thanks[!.\s]*$/i.test(event.facts.comment?.body||''))return {decision:'ignore',option_ids:[],reason:'只是致谢，无需处理。'};
-  if(options.continue.length)return {decision:'continue',option_ids:[options.continue[0].id],reason:'将更新加入尚未发布的检视。'};
+  if(options.continue.length)return {decision:'continue',option_ids:['continue:'+options.continue[0].task_id],reason:'将更新加入尚未发布的检视。'};
   const work=event.type==='review.published'?`development.${event.object.type}`:`review.${event.object.type}`;
   const option=options.create.find(option=>option.work===work);
   const review=event.facts.review;
@@ -41,9 +41,11 @@ function dispatch(context){
 function model(input){
   const raw=input.messages.find(m=>m.role==='user').content,context=JSON.parse(Array.isArray(raw)?raw.map(c=>c.text||'').join(''):raw);
   // Manager requests have event/options, not the task agent's repository/object context.
-  if(input.tools?.some(tool=>tool.function?.name==='dispatch')){
-    const decision=dispatch(context);stats.dispatches.push({event:context.event,options:context.options,decision,model:input.model});
-    return call('dispatch',decision,'dispatch');
+  // The Manager decides with create_task, continue_task or ignore_event (#815).
+  if(input.tools?.some(tool=>tool.function?.name==='create_task')&&context.work){
+    const decision=dispatch(context);stats.dispatches.push({event:context.event,options:{create:context.work.create,continue:context.work.continue.map(task=>({...task,id:'continue:'+task.task_id}))},decision,model:input.model});
+    return decision.decision==='create'?call('create_task',{work:decision.option_ids,reason:decision.reason},'dispatch')
+      :decision.decision==='continue'?call('continue_task',{task_id:decision.option_ids[0].replace(/^continue:/,''),reason:decision.reason},'dispatch'):call('ignore_event',{reason:decision.reason},'dispatch');
   }
   // Independent acceptance inspects the fixed candidate, not the executor's repository/object prompt.
   if(input.tools?.some(tool=>tool.function?.name==='submit_acceptance')){

@@ -3,10 +3,10 @@ import { randomId, HttpError, type Json } from '../core/security.js';
 import { TaskError } from '../agent/common.js';
 import { captureTaskConfiguration } from '../tasks/configuration.js';
 import { TaskRecords } from '../tasks/service.js';
-import { enqueue } from '../review/queue.js';
+import { enqueue, enqueueRefusal } from '../review/queue.js';
 import { continueFinishedReview } from '../review/continuation.js';
 import { enqueueEventTask } from '../work/events.js';
-import { workOffered, workPermissions } from '../work/settings.js';
+import { workOffered, workPermissions, workRefusal } from '../work/settings.js';
 import { narrowWrites, workType } from '../work/catalog.js';
 import { assertManagedTask, assertTaskCaller, createManagedTask, eventTaskCaller } from '../tasks/management.js';
 
@@ -36,6 +36,8 @@ export function dispatchStorage(store: Store) {
       created_at TEXT NOT NULL,PRIMARY KEY(task_id,event_id));
     CREATE INDEX IF NOT EXISTS task_events_event ON task_events(event_id);
   `);
+  // #815: what the control plane refused when the Manager tried to create work for the event, in order.
+  if (!store.all('PRAGMA table_info(dispatch_events)').some(column => column.name === 'refusals')) store.db.exec('ALTER TABLE dispatch_events ADD COLUMN refusals TEXT');
 }
 
 /** A task the control plane would create for this event, fully specified before the Manager sees it. */
@@ -64,7 +66,11 @@ export interface ContinueOption { id: string; task_id: string; kind: string; sta
 export interface Decision { decision: 'create' | 'continue' | 'ignore'; option_ids: string[]; reason: string; brief?: { goal: string; criteria: string[] } | null; writes?: string[] | null; model?: string | null;
   /** The continue options the decision was made with; a running task that appeared since means deciding again. */
   seen?: string[] }
-export interface DispatchContext { event: Row; facts: Json; options: CreateOption[]; continuations: ContinueOption[]; related: Json[] }
+/** Work the event has an object for, but that the project does not allow now (#815): shown to the Manager with the reason. */
+export interface UnavailableWork { id: string; work: string; title: string; code: string; reason: string }
+export interface DispatchContext { event: Row; facts: Json; options: CreateOption[]; unavailable: UnavailableWork[]; continuations: ContinueOption[]; related: Json[] }
+/** Why the control plane refused to create work the Manager chose (#815); kept on the event and returned to the Manager. */
+export interface Refusal { work: string; code: string; reason: string; task_id?: string }
 
 /** Module hooks: told in the deciding transaction what became of their option. */
 export interface DispatchHook { created(store: Store, task: Row, ref: Json | null, event: Row): void; declined(store: Store, event: Row, reason: string, ref: Json | null): void }
@@ -87,10 +93,13 @@ const activeStates = ['queued', 'retry_wait', 'waiting_configuration', 'waiting_
  * and 0 for one already written. An event with nothing to offer never reaches the Manager.
  */
 export function recordEvent(store: Store, input: EventInput): number {
-  const options = input.options.filter(option => workOffered(store, input.repositoryId, option.work, input.type));
-  if (!options.length && !(input.merge && continuations(store, { repository_id: input.repositoryId, object_number: input.object?.number ?? null, merge: JSON.stringify(input.merge) }).length)) {
-    // Modules still hear that nothing will run for their event.
+  // Every work the event has an object for is kept: what the project does not allow now is shown with its reason (#815).
+  const options = input.options, offered = options.filter(option => workOffered(store, input.repositoryId, option.work, input.type));
+  if (!offered.length && !(input.merge && continuations(store, { repository_id: input.repositoryId, object_number: input.object?.number ?? null, merge: JSON.stringify(input.merge) }).length)) {
+    // Modules still hear that nothing will run for their event, and the event keeps why (#815).
     for (const option of input.options) if (option.hook) hooks.get(option.hook)?.declined(store, { repository_id: input.repositoryId, type: input.type }, 'work_inactive', option.ref ?? null);
+    const reasons = options.map(option => workRefusal(store, input.repositoryId, option.work, input.type)?.reason).filter(Boolean);
+    recordFiltered(store, { ...input, code: 'work_inactive', reason: reasons.length ? [...new Set(reasons)].join(' ') : '这个事件没有项目允许的工作，也没有可以续接的任务。' });
     return 0;
   }
   const id = randomId(), now = new Date().toISOString();
@@ -132,17 +141,71 @@ export function continuations(store: Store, event: Record<string, any>): Continu
   }
   return joinable.map(task => ({ id: 'continue:' + task.id, task_id: String(task.id), kind: String(task.kind), status: String(task.status), summary: String(task.summary), created_at: String(task.created_at) }));
 }
-/** What the Manager reads: the event, the offered options and the tasks already on the same object. */
+/** What the Manager reads: the event, the work it can create, the work the project does not allow now, and the tasks on the object. */
 export function dispatchContext(store: Store, event: Row): DispatchContext {
-  const joinable = continuations(store, event);
-  const options = (JSON.parse(event.options) as CreateOption[]).filter(option => workOffered(store, event.repository_id, option.work, event.type) && !(option.unless_continued && joinable.length));
+  const joinable = continuations(store, event), options: CreateOption[] = [], unavailable: UnavailableWork[] = [];
+  for (const option of JSON.parse(event.options) as CreateOption[]) {
+    // A push belongs to the review already working on the pull request; it is not new work then.
+    if (option.unless_continued && joinable.length) continue;
+    const refusal = workRefusal(store, event.repository_id, option.work, event.type);
+    if (refusal) unavailable.push({ id: option.id, work: option.work, title: option.title, ...refusal }); else options.push(option);
+  }
   const related = event.object_number ? store.all(`SELECT id,kind,status,summary,error_code,created_at,updated_at,result FROM tasks WHERE repository_id=? AND object_number=?
     AND kind NOT IN ('release.observe','release.notes','actions.failures','task.request','task.development') ORDER BY created_at DESC,rowid DESC LIMIT 8`, event.repository_id, event.object_number).map(task => {
     let outcome: unknown = null; try { const result = JSON.parse(task.result || 'null'); outcome = result?.summary ? String(result.summary).slice(0, 300) : result?.pr_url ?? null; } catch { outcome = null; }
     return { id: task.id, kind: task.kind, status: task.status, summary: task.summary, error_code: task.error_code ?? null, created_at: task.created_at, outcome };
   }) : [];
-  return { event, facts: JSON.parse(event.facts), options, continuations: joinable, related };
+  return { event, facts: JSON.parse(event.facts), options, unavailable, continuations: joinable, related };
 }
+
+/**
+ * Why the control plane would not create the work `id` now (#815), null when it would: work the project does not allow,
+ * work the event has no object for, or the task's own conditions (an active development of the object, a task already
+ * created for the event). The same conditions decide the creation itself.
+ */
+export function optionRefusal(store: Store, context: DispatchContext, id: string): Refusal | null {
+  const unavailable = context.unavailable.find(work => work.id === id);
+  if (unavailable) return { work: unavailable.work, code: unavailable.code, reason: unavailable.reason };
+  const option = context.options.find(entry => entry.id === id);
+  if (!option) return { work: id, code: 'work_not_offered', reason: `这个事件没有可以新建的工作「${id}」。` };
+  const spec = option.spec, repo = String(context.event.repository_id), refusal = (code: string, reason: string, task?: Row) => ({ work: option.work, code, reason, ...(task ? { task_id: String(task.id) } : {}) });
+  if (spec.type === 'object') { const refused = enqueueRefusal(store, repo, spec.kind, spec.number, spec.head, spec.input, spec.comment_id ?? null, spec.update_id ?? null); return refused ? { work: option.work, ...refused } : null; }
+  const key = spec.type === 'reply' ? `${repo}:reply:${spec.number}:${spec.key}` : spec.type === 'request' ? `${repo}:task.request:${spec.key}` : null;
+  const existing = key ? store.get('SELECT id FROM tasks WHERE unique_key=?', key) : null;
+  return existing ? refusal('task_already_created', '这个事件要建的任务已经建过了。', existing) : null;
+}
+/**
+ * Outcomes the creation itself handles without refusing the Manager: a task the event already created (a decision taken
+ * again after a restart) and a bot pull request revision that waits for the running one (its requests are kept pending).
+ */
+export const deferredRefusals = ['task_already_created', 'revision_active'];
+/** A refusal the Manager hears at create_task and the event keeps (#815); null also for deferred outcomes. */
+export const managerRefusal = (store: Store, context: DispatchContext, id: string) => {
+  const refusal = optionRefusal(store, context, id);
+  return refusal && !deferredRefusals.includes(refusal.code) ? refusal : null;
+};
+/** Keeps a refusal on the event (the last 20), for the console and for the Manager's answer to the person. */
+export function recordRefusal(store: Store, eventId: string, refusal: Refusal & { tool?: string }) {
+  const row = store.get('SELECT refusals FROM dispatch_events WHERE id=?', eventId); if (!row) return;
+  let list: Json[] = []; try { list = JSON.parse(String(row.refusals || '[]')); } catch { list = []; }
+  store.run('UPDATE dispatch_events SET refusals=? WHERE id=?', JSON.stringify([...list, { ...refusal, at: new Date().toISOString() }].slice(-20)), eventId);
+}
+
+/**
+ * An event the control plane's filters stopped before the Manager (#815): kept as a decided record with the reason, so the
+ * console can say why nothing happened. Kept for filteredRetentionMs, then pruned; never dispatched.
+ */
+export function recordFiltered(store: Store, input: { repositoryId: string; key: string; type: string; source?: string; summary: string;
+  object?: { type: 'issue' | 'pr'; number: number } | null; delivery?: string | null; facts?: Json; code: string; reason: string }) {
+  const now = new Date().toISOString();
+  store.run(`INSERT OR IGNORE INTO dispatch_events(id,repository_id,event_key,type,source,object_type,object_number,delivery_id,summary,facts,options,state,decision,reason,result,created_at,decided_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,'[]','filtered','ignore',?,?,?,?)`, randomId(), input.repositoryId, input.key, input.type, input.source ?? 'github', input.object?.type ?? null,
+    input.object?.number ?? null, input.delivery ?? null, input.summary.slice(0, 300), JSON.stringify(input.facts ?? {}), input.reason.slice(0, 1000), JSON.stringify({ filtered: input.code }), now, now);
+}
+export const filteredRetentionMs = 30 * 86400000;
+/** Drops filtered records older than the retention (decided events are kept as before). */
+export const pruneFiltered = (store: Store, now = Date.now()) =>
+  store.run("DELETE FROM dispatch_events WHERE state='filtered' AND created_at<?", new Date(now - filteredRetentionMs).toISOString()).changes;
 
 /** How long a dispatcher's claim on an event lasts; the Manager's turn renews it before every step. */
 export const dispatchLeaseMs = 5 * 60000;
@@ -165,14 +228,14 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
   if (!reason) fail('dispatch_reason_required', 'Give the reason for the decision.');
   if (new Set(ids).size !== ids.length) fail('dispatch_decision_invalid', 'option_ids repeat an option.');
   if (decision === 'ignore' && ids.length) fail('dispatch_decision_invalid', 'ignore takes no option_ids.');
-  if (decision === 'create' && (!ids.length || ids.length > 3 || ids.some((id: string) => !context.options.some(option => option.id === id))))
-    fail('dispatch_option_not_offered', 'create needs one to three ids of the offered create options.');
+  if (decision === 'create' && (!ids.length || ids.length > 3 || ids.some((id: string) => !context.options.some(option => option.id === id) && !context.unavailable.some(work => work.id === id))))
+    fail('dispatch_option_not_offered', 'create needs one to three ids of the work this event can create.');
   if (decision === 'continue' && (ids.length !== 1 || !context.continuations.some(option => option.id === ids[0])))
     fail('dispatch_option_not_offered', 'continue needs exactly one id of the offered continue options.');
   let writes: string[] | null = null;
   if (value.writes !== undefined && value.writes !== null) {
     if (decision !== 'create' || !Array.isArray(value.writes) || value.writes.some((write: unknown) => typeof write !== 'string')) fail('dispatch_writes_invalid', 'writes narrows the writes of created tasks: a list of write ids.');
-    const allowed = new Set(context.options.filter(option => ids.includes(option.id)).flatMap(option => workPermissions(store, context.event.repository_id, option.work).writes));
+    const allowed = new Set([...context.options, ...context.unavailable].filter(option => ids.includes(option.id)).flatMap(option => workPermissions(store, context.event.repository_id, option.work).writes));
     writes = value.writes;
     if (writes!.some(write => !allowed.has(write))) fail('dispatch_writes_not_allowed', 'writes may only keep writes the project allows for these tasks.');
   }
@@ -270,6 +333,9 @@ export function applyDecision(store: Store, event: Row, decision: Decision, leas
     const options = JSON.parse(current.options) as CreateOption[], created: string[] = [], continued: string[] = [], declined: string[] = [], now = new Date().toISOString();
     const caller = checked.decision === 'ignore' ? null : eventTaskCaller(store,String(current.repository_id),String(current.id));
     if (checked.decision === 'create') for (const id of checked.option_ids) {
+      // The project or the object changed since the Manager decided: that work is refused and the event keeps why.
+      const refused = managerRefusal(store, context, id);
+      if (refused) { recordRefusal(store, String(current.id), refused); declined.push(id); continue; }
       const option = options.find(entry => entry.id === id)!, task = createManagedTask(store,caller!,option.spec.type==='request'?undefined:'dev',()=>create(store, current, option, checked));
       if (!task) { declined.push(id); continue; }
       created.push(task);

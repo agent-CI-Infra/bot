@@ -22,6 +22,13 @@ const head = 'a'.repeat(40);
 const tasks = h => h.store.all('SELECT * FROM tasks ORDER BY created_at,rowid');
 const events = h => h.store.all('SELECT * FROM dispatch_events ORDER BY created_at,rowid');
 
+/** The Manager's tool call for a decision: create_task, continue_task or ignore_event (#815). */
+function decisionCall(decision, id) {
+  const [name, args] = decision.decision === 'create' ? ['create_task', { work: decision.option_ids, reason: decision.reason, ...(decision.brief ? { brief: decision.brief } : {}), ...(decision.writes ? { writes: decision.writes } : {}) }]
+    : decision.decision === 'continue' ? ['continue_task', { task_id: String(decision.option_ids?.[0] ?? '').replace(/^continue:/, ''), reason: decision.reason }]
+    : ['ignore_event', { reason: decision.reason }];
+  return { id, type: 'function', function: { name, arguments: JSON.stringify(args) } };
+}
 // A project with a Manager model served by a local fixture; `state.decide(input, round)` answers each dispatch call, or
 // `state.message(body)` gives the whole assistant message (for a Manager that uses other tools first).
 async function fixture(t) {
@@ -32,7 +39,9 @@ async function fixture(t) {
     let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); requests.push(body);
     if (state.status !== 200) { res.writeHead(state.status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'fixture outage' } })); return; }
     const input = JSON.parse(body.messages[1].content), round = body.messages.filter(m => m.role === 'tool').length;
-    const message = state.message ? state.message(body, input) : { role: 'assistant', content: null, tool_calls: [{ id: 'call-' + round, type: 'function', function: { name: 'dispatch', arguments: JSON.stringify(state.decide(input, round)) } }] };
+    // decide() answers in the shape of a decision; the Manager calls create_task, continue_task or ignore_event (#815).
+    input.options = { create: input.work.create, continue: input.work.continue.map(task => ({ ...task, id: 'continue:' + task.task_id })) };
+    const message = state.message ? state.message(body, input) : { role: 'assistant', content: null, tool_calls: [decisionCall(state.decide(input, round), 'call-' + round)] };
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 20, completion_tokens: 8 } }));
   });
   provider.listen(0, '127.0.0.1'); await once(provider, 'listening');
@@ -49,7 +58,7 @@ test('event dispatch reads the editable Manager role and honors permission revoc
   save({ persona_prompt: 'My complete event and task coordination instructions.' });
   f.state.decide = () => {
     save({ permissions: { delegation: 'deny' } });
-    return { decision: 'create', option_ids: [JSON.parse(f.requests[0].messages[1].content).options.create[0].id], reason: '这条已被收回权限的决策不能落地' };
+    return { decision: 'create', option_ids: [JSON.parse(f.requests[0].messages[1].content).work.create[0].id], reason: '这条已被收回权限的决策不能落地' };
   };
   queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'revoked-manager');
   await f.run();
@@ -87,7 +96,7 @@ test('an event reaches the Manager once; its decision creates the task with the 
   assert.match(f.requests[0].messages[0].content, /project Manager/); assert.match(f.requests[0].messages[0].content, /# Event dispatch/);
   const input = JSON.parse(f.requests[0].messages[1].content);
   assert.equal(input.event.type, 'issue.opened'); assert.equal(input.event.facts.object.title, issue.title);
-  assert.deepEqual(input.options.create.find(o => o.work === 'review.issue').writes, ['reply', 'labels']);
+  assert.deepEqual(input.work.create.find(o => o.work === 'review.issue').writes, ['reply', 'labels']);
   assert.ok(!JSON.stringify(input).includes('"default"'), 'the Manager is never told what the old rules would do');
   // A restart that lost the decided state decides again: the task's own key refuses a second task.
   f.h.store.run("UPDATE dispatch_events SET state='dispatching',lease='lost',lease_until=0");
@@ -143,7 +152,7 @@ test('a later event on the same Issue continues the running review; ignore leave
   assert.equal(f.h.store.get('SELECT count(*) n FROM review_updates WHERE task_id=?', review).n, 1);
   assert.deepEqual(f.h.store.all('SELECT relation FROM task_events WHERE task_id=?', review).map(r => r.relation), ['continued']);
   const offered = JSON.parse(f.requests[0].messages[1].content);
-  assert.equal(offered.options.continue[0].task_id, review); assert.equal(offered.related_tasks[0].id, review);
+  assert.equal(offered.work.continue[0].task_id, review); assert.equal(offered.related_tasks[0].id, review);
   // Once the review has published, the next comment has nothing to continue: the Manager may decide it needs nothing.
   f.h.store.run("UPDATE tasks SET status='succeeded'");
   f.state.decide = () => ({ decision: 'ignore', option_ids: [], reason: '只是致谢，不需要检视' });
@@ -167,7 +176,7 @@ test('a person\'s development label always reaches the Manager: it answers with 
     brief: { goal: 'Answer the development label: say why development does not start and what a person can do.', criteria: ['Names what is missing'] } });
   assert.equal(label('label-1'), 1); await f.run();
   const offered = JSON.parse(f.requests[0].messages[1].content);
-  assert.deepEqual(offered.options.create.map(o => o.work), ['development.issue', 'review.issue']);
+  assert.deepEqual(offered.work.create.map(o => o.work), ['development.issue', 'review.issue']);
   assert.deepEqual([offered.event.facts.development.labeled_by, offered.event.facts.development.review.clarification_required, offered.event.facts.development.review.quote_in_issue],
     ['maintainer', true, false]);
   assert.match(f.requests[0].messages[0].content, /## The development label/);
@@ -185,7 +194,7 @@ test('a person\'s development label always reaches the Manager: it answers with 
   assert.equal(development.unique_key, '101:development.issue:5:update:' + events(f.h).at(-1).delivery_id);
 });
 
-test('filtered events never reach the Manager', async t => {
+test('filtered events never reach the Manager, and each keeps why', async t => {
   const f = await fixture(t);
   f.state.decide = () => assert.fail('the Manager must not be asked');
   const stranger = { type: 'User', login: 'mallory', id: 66 };
@@ -199,7 +208,14 @@ test('filtered events never reach the Manager', async t => {
   await f.admin('/api/repositories/101/policy', 'PATCH', { review_issues: true, review_enabled: false });
   assert.equal(queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue: { ...issue, number: 8 }, sender: alice }, 'review-off'), 0);
   await f.run();
-  assert.equal(events(f.h).length, 0); assert.equal(f.requests.length, 0); assert.equal(tasks(f.h).length, 0);
+  assert.equal(f.requests.length, 0); assert.equal(tasks(f.h).length, 0);
+  // #815: each is a filtered record with its reason, so the console can say why nothing happened.
+  assert.deepEqual(events(f.h).map(event => [event.state, event.decision, JSON.parse(event.result).filtered]),
+    [['filtered', 'ignore', 'bot_own_content'], ['filtered', 'ignore', 'outsider_comment'], ['filtered', 'ignore', 'object_draft'], ['filtered', 'ignore', 'event_filter_off'], ['filtered', 'ignore', 'work_inactive']]);
+  assert.match(events(f.h)[1].reason, /外人/); assert.match(events(f.h)[4].reason, /检视|上限/);
+  // They are kept for 30 days, then pruned.
+  const { pruneFiltered } = await import('../dist/dispatch/store.js');
+  assert.equal(pruneFiltered(f.h.store, Date.now() + 31 * 86400000), 5); assert.equal(events(f.h).length, 0);
 });
 
 test('neither the Manager prompt nor its decision can widen what a task may write', async t => {
@@ -297,14 +313,14 @@ test('the Manager comments on and labels the event Issue before dispatching; it 
       call('github_write', { method: 'POST', path: '/repos/fixture/other/issues', key: 'elsewhere-2', body: { title: 'Elsewhere' } }, 'w4')] };
     // The first attempt decides invalidly twice (an option that was never offered), so the event is dispatched again.
     const option = attempt === 0 ? 'invented' : input.options.create.find(o => o.work === 'review.issue').id;
-    return { role: 'assistant', content: null, tool_calls: [call('dispatch', { decision: 'create', option_ids: [option], reason: '已请作者补充信息，先检视' }, 'd' + step)] };
+    return { role: 'assistant', content: null, tool_calls: [call('create_task', { work: [option], reason: '已请作者补充信息，先检视' }, 'd' + step)] };
   };
   queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'manager-writes');
   await run();
   assert.equal(events(f.h)[0].state, 'pending'); assert.equal(tasks(f.h).length, 0);
   const first = f.requests.slice();
   // A normal agent turn: the Manager's own tools, then dispatch.
-  assert.ok(['github_write', 'dispatch'].every(name => first[0].tools.some(tool => tool.function.name === name))); assert.equal(first[0].tool_choice, 'auto');
+  assert.ok(['github_write', 'create_task', 'continue_task', 'ignore_event'].every(name => first[0].tools.some(tool => tool.function.name === name))); assert.equal(first[0].tool_choice, 'auto');
   const results = first[2].messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content));
   assert.deepEqual(results.slice(0, 2).map(r => [r.html_url, r.status]), [['https://github.example/c/1', 201], [undefined, 200]]);
   assert.deepEqual(results[1].result, ['needs-info']);
@@ -380,4 +396,62 @@ test('upgrading moves workflows into the Manager and project configuration once,
   // Starting again does nothing more.
   await h.stop(); await h.start();
   assert.equal(h.store.get("SELECT count(*) n FROM manager_revisions WHERE repository_id='101'").n, 1);
+});
+
+// #815: the Manager decides with create_task, continue_task or ignore_event; the control plane checks a creation when it is
+// made, returns a refusal with its code and reason, and keeps it on the event.
+const toolCall = (name, args, id) => ({ role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
+const toolResults = body => body.messages.filter(m => m.role === 'tool').map(m => { try { return JSON.parse(m.content); } catch { return {}; } });
+
+test('work the project does not allow is shown with its reason; creating it is refused and kept, and the Manager chooses again', async t => {
+  const f = await fixture(t);
+  f.state.message = (body, input) => {
+    const results = toolResults(body);
+    if (!results.length) {
+      // Reply is off by default: it is listed with the reason, not hidden.
+      assert.deepEqual(input.work.unavailable.map(work => [work.id, work.code]), [['reply', 'work_disabled']]);
+      assert.match(body.messages[0].content, /Work the project does not allow now[\s\S]*reply/);
+      return toolCall('create_task', { work: ['reply'], reason: '作者要的是一条回复' }, 'c1');
+    }
+    assert.equal(results[0].error, 'work_disabled'); assert.equal(results[0].created, false); assert.match(results[0].reason, /关闭/); assert.match(results[0].instruction, /Nothing was created/);
+    return toolCall('create_task', { work: ['review'], reason: '回复关着，改为检视' }, 'c2');
+  };
+  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'refused-reply');
+  await f.run();
+  const event = events(f.h)[0];
+  assert.equal(event.decision, 'create'); assert.equal(tasks(f.h).length, 1); assert.equal(tasks(f.h)[0].kind, 'review.issue');
+  assert.deepEqual(JSON.parse(event.refusals).map(r => [r.work, r.code, r.tool]), [['reply', 'work_disabled', 'create_task']]);
+  // The dispatch detail shows the refusal.
+  const detail = (await f.admin('/api/repositories/101/dispatch/' + event.id)).value;
+  assert.equal(detail.event.refusals[0].code, 'work_disabled');
+});
+
+test('a development the object already has is refused with that task, and the Manager can answer the person and ignore the event', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { development_enabled: true });
+  const now = new Date().toISOString();
+  f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,object_number,created_at,updated_at) VALUES('dev-running','101','development.issue','running','dev','101:development.issue:5:update:old','{}',5,?,?)", now, now);
+  let refusal = null;
+  f.state.message = body => {
+    const results = toolResults(body);
+    if (!results.length) return toolCall('create_task', { work: ['development'], reason: '维护者加了开发标签', brief: { goal: 'Keep the last CRLF line.', criteria: ['A CRLF test'] } }, 'c1');
+    refusal = results[0];
+    return toolCall('ignore_event', { reason: '这个 Issue 已在开发中，不再新建' }, 'c2');
+  };
+  queueWebhook(f.h.store, '101', 'issues', { action: 'labeled', label: { name: 'bot-develop' }, sender: { ...alice, type: 'User' }, issue: { ...issue, labels: [{ name: 'bot-develop' }] } }, 'labeled-again');
+  await f.run();
+  assert.equal(refusal.error, 'development_active'); assert.equal(refusal.task_id, 'dev-running');
+  const event = events(f.h).find(e => e.type === 'issue.labeled');
+  assert.equal(event.decision, 'ignore'); assert.equal(tasks(f.h).length, 1);
+  assert.deepEqual(JSON.parse(event.refusals).map(r => [r.code, r.task_id]), [['development_active', 'dev-running']]);
+});
+
+test('after three refusals the event is ignored with the refusals kept', async t => {
+  const f = await fixture(t);
+  f.state.message = () => toolCall('create_task', { work: ['reply'], reason: '回复' }, 'c');
+  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'three-refusals');
+  await f.run();
+  const event = events(f.h)[0];
+  assert.equal(f.requests.length, 3); assert.equal(event.state, 'decided'); assert.equal(event.decision, 'ignore'); assert.match(event.reason, /控制面拒绝/);
+  assert.equal(JSON.parse(event.refusals).length, 3); assert.equal(tasks(f.h).length, 0);
 });

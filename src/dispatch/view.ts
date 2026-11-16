@@ -1,9 +1,9 @@
 import type { Store, Row } from '../storage/database.js';
 import { fail } from '../core/security.js';
 
-const columns = 'id,type,source,object_type,object_number,summary,state,decision,reason,brief,result,model,attempts,error,created_at,decided_at';
+const columns = 'id,type,source,object_type,object_number,summary,state,decision,reason,brief,result,model,attempts,error,refusals,created_at,decided_at';
 const parsed = (value: unknown) => { try { return JSON.parse(String(value)); } catch { return null; } };
-const project = (row: Row) => ({ ...row, brief: parsed(row.brief), result: parsed(row.result), error: parsed(row.error) });
+const project = (row: Row) => ({ ...row, brief: parsed(row.brief), result: parsed(row.result), error: parsed(row.error), refusals: parsed(row.refusals) ?? [] });
 
 /** Cursor paging keeps a newer event from pushing an already-read event into the next page. */
 export function dispatchList(store: Store, repositoryId: string, params: URLSearchParams) {
@@ -14,7 +14,7 @@ export function dispatchList(store: Store, repositoryId: string, params: URLSear
   };
   const limit = Math.min(100, Math.max(1, integer('limit', 50, Number.MAX_SAFE_INTEGER))), offset = integer('offset', 0, Number.MAX_SAFE_INTEGER);
   const filters: Record<string, string> = {};
-  for (const [name, options] of [['state', ['pending', 'dispatching', 'decided', 'failed']], ['decision', ['create', 'continue', 'ignore']]] as const) {
+  for (const [name, options] of [['state', ['pending', 'dispatching', 'decided', 'failed', 'filtered']], ['decision', ['create', 'continue', 'ignore']]] as const) {
     const value = params.get(name); if (!value) continue;
     if (!(options as readonly string[]).includes(value)) fail(400, 'invalid_dispatch_filter');
     filters[name] = value;

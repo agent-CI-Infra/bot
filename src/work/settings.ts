@@ -1,7 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { fail, HttpError } from '../core/security.js';
 import { workTypes, workType, sections, section, retiredSections, savedWrites, workAccess, validateWrites, type WorkPermissions } from './catalog.js';
-import { covers, projectCeiling, withinCeiling, workLevel } from './ceiling.js';
+import { ceilingMessage, covers, projectCeiling, withinCeiling, workLevel } from './ceiling.js';
 
 /**
  * Project configuration of the Manager: its prompt (the project's only flow definition), and per work type the switch and
@@ -125,6 +125,21 @@ export function workOffered(store: Store, repositoryId: string, id: string, even
   if (!workActive(store, repositoryId, id, policy)) return false;
   const events = workSettings(store, repositoryId, policy)[id]?.events;
   return !Array.isArray(events) || events.includes(eventType);
+}
+/**
+ * Why the Manager may not create this work for an event of this type now (#815), null when it may: the reason a refused
+ * create_task returns to the Manager and the event keeps.
+ */
+export function workRefusal(store: Store, repositoryId: string, id: string, eventType: string, policy = policyOf(store, repositoryId)): { code: string; reason: string } | null {
+  const work = workType(id);
+  if (!work) return { code: 'work_unknown', reason: `没有工作类型 ${id}。` };
+  if (!policy?.enabled) return { code: 'project_disabled', reason: '项目已停用。' };
+  if (!workEnabled(store, repositoryId, id, policy)) return { code: 'work_disabled', reason: `项目关闭了「${work.name}」。` };
+  const ceiling = projectCeiling(store, repositoryId, policy);
+  if (!covers(ceiling, workLevel(id))) return { code: 'capability_ceiling', reason: ceilingMessage(workLevel(id), ceiling) };
+  const events = workSettings(store, repositoryId, policy)[id]?.events;
+  if (Array.isArray(events) && !events.includes(eventType)) return { code: 'work_not_for_event', reason: `项目设置「${work.name}」不处理 ${eventType} 事件。` };
+  return null;
 }
 /**
  * What a task of this work type may do, read from trusted storage: reading is open; writing is the saved writes (or the work
