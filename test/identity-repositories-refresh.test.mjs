@@ -56,3 +56,19 @@ test('a project-list read that works shows no notice at all', async () => {
   assert.deepEqual(read.parts, []);
   assert.deepEqual(JSON.parse(await page.run("JSON.stringify(repositories.map(project => project.full_name))")), ['fixture/project-101']);
 });
+
+// The redraw that puts the finished check on screen used to call route() on the project list, which reads the list again:
+// a transient failure drew fresh rows beside a notice that said the read failed, and an outage offered two retries for
+// one read. The notice's button now owns that read, and the list shows the failure without a second retry.
+test('the list is drawn as a failed read without reading again or offering a second retry', async () => {
+  const page = load(refused);
+  page.run("me = { id: 7 }; tab = 'projects'; $('repository-filter').options = [];");
+  await page.run('finishGithubVerification({ id: 7 })');
+  assert.deepEqual(page.requests.filter(request => request === 'GET /api/repositories'), ['GET /api/repositories'],
+    'one failed read: the redraw draws the state it knows instead of reading the list again');
+  const rows = page.$('rows');
+  assert.equal(rows.querySelectorAll('.console-state-error').length, 1, 'the project list says the read failed');
+  assert.equal(rows.querySelectorAll('button').length, 0, 'the notice above the list is the only retry for this read');
+  assert.ok(rows.querySelectorAll('.console-state-error')[0].querySelectorAll('h2').some(heading => heading.textContent === '项目列表未能读取'));
+  assert.equal((await notice(page)).state, 'failed');
+});

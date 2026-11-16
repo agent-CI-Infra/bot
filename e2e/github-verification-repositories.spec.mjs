@@ -6,26 +6,42 @@ import { consoleNavigate } from './console-navigation.mjs';
 // #866: the permission check ended, but reading the projects it just changed failed. The reader must not be left with the
 // old list and no word: the line says the list could not be read and offers to read it again; a read that comes back
 // draws the new projects and takes the notice away.
+//
+// One read, one recovery: the redraw that puts the finished check on screen must not read the list again (that would draw
+// fresh rows beside a notice saying the read failed, and offer a second retry for one read), and a later read of the list
+// is itself the recovery — the notice goes and the project picker follows what the list now shows.
 const output = '.tmp/ui-866';
 const noOverflow = async page => expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
 
-test('权限核验完成后的项目列表读取失败有提示，重新读取成功后列表更新', async ({ page }) => {
-  const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message));
-  await page.route('https://avatars.githubusercontent.com/**', route => route.abort());
-  mkdirSync(output, { recursive: true });
-  // The check waits at its first installation read until released.
+// The check is held at its first installation read, so the page can be put where the failure will happen before it ends.
+async function checkedConsole(page, f) {
   let release; const held = new Promise(resolve => { release = resolve; });
   f.state.apiGate = async path => { if (path === '/app/installations/77') await held; };
-  // The first project-list read after the check is armed to fail the way a control plane that is down answers; the read
-  // the button asks for goes through to the service.
+  // The next project-list read is armed to fail the way a control plane that is down answers; every later read goes
+  // through to the service. render() reads /api/repositories?<params>, so the glob carries the star — without it the stub
+  // would miss the very read under test and the "failure" would be a read that succeeded.
   let failNext = false;
-  await page.route('**/api/repositories', route => {
+  const listReads = [];
+  page.on('request', request => { if (new URL(request.url()).pathname === '/api/repositories') listReads.push(request.url()); });
+  await page.route('**/api/repositories*', route => {
     if (!failNext) return route.continue();
     failNext = false;
     return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'fixture_unavailable' }) });
   });
+  await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
+  const line = page.locator('#github-verification');
+  await expect(line).toBeVisible();
   const picker = page.locator('#console-project option', { hasText: 'fixture/project-101' });
-  const retry = page.locator('#github-verification').getByRole('button', { name: '重新读取项目列表' });
+  await expect(picker).toHaveCount(0);
+  return { release, arm: () => { listReads.length = 0; failNext = true; release(); }, listReads, line, picker };
+}
+
+test('项目页上核验完成而列表读取失败：只读一次、不出现第二个重试，页面读回列表后提示消失', async ({ page }) => {
+  const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.route('https://avatars.githubusercontent.com/**', route => route.abort());
+  mkdirSync(output, { recursive: true });
+  const c = await checkedConsole(page, f);
+  const rows = page.locator('#rows'), retry = c.line.getByRole('button', { name: '重新读取项目列表' });
   const shots = async name => {
     for (const width of [1440, 768, 390]) {
       await page.setViewportSize({ width, height: 900 }); await noOverflow(page);
@@ -39,33 +55,56 @@ test('权限核验完成后的项目列表读取失败有提示，重新读取�
     await page.setViewportSize({ width: 1440, height: 900 });
   };
   try {
-    await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
-    const line = page.locator('#github-verification');
-    await expect(line).toBeVisible();
-    await expect(picker).toHaveCount(0);
-    // The check ends and the list read fails: the line says so instead of vanishing with the progress it was showing.
-    failNext = true; release();
-    await expect(line).toBeVisible();
-    await expect(line).toHaveText('权限核验已完成，但项目列表读取失败。重新读取项目列表');
-    await expect(line).toHaveAttribute('data-state', 'failed');
-    await expect(retry).toBeVisible();
-    await expect(picker).toHaveCount(0);
+    // The failure lands on the page that shows the list.
+    await consoleNavigate(page, '项目');
+    c.arm();
+    await expect(c.line).toHaveText('权限核验已完成，但项目列表读取失败。重新读取项目列表');
+    await expect(c.line).toHaveAttribute('data-state', 'failed');
+    await expect(c.picker).toHaveCount(0);
+    // The list says the read failed, with no retry of its own: the notice above is the one recovery.
+    await expect(rows).toContainText('项目列表未能读取');
+    await expect(rows.locator('[role=alert]')).toContainText('权限核验已完成');
+    await expect(rows.locator('[data-testid=console-state-retry]')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '重新读取项目列表' })).toHaveCount(1);
+    await expect(rows).not.toContainText('正在核验 GitHub 权限');
+    expect(c.listReads, 'the redraw does not read the failed endpoint again').toHaveLength(1);
     await shots('repositories-failed');
-    // The pages the check feeds were redrawn with the finished state: neither still claims the check is running, and
-    // the identity root does not keep its "after the check" placeholder.
-    await expect(page.locator('#rows')).not.toContainText('正在核验 GitHub 权限');
+    // Leaving for the identity page reads no project list, and its root no longer keeps the "after the check" placeholder.
     await consoleNavigate(page, '身份与权限');
     await expect(page.locator('#identity-panel')).not.toContainText('核验完成后显示你的 GitHub 连接与授权来源');
+    await expect(c.line).toBeVisible();
+    expect(c.listReads).toHaveLength(1);
+    // Coming back reads the list; that read is the recovery, so the notice goes and the picker follows the list.
     await consoleNavigate(page, '项目');
-    // The button reads the list again; the projects the check just proved arrive and the notice goes.
-    await retry.click();
-    await expect(line).toBeHidden();
-    await expect(picker).toHaveCount(1);
+    await expect(c.line).toBeHidden();
+    await expect(rows).toContainText('fixture/project-101');
+    await expect(c.picker).toHaveCount(1);
+    expect(c.listReads).toHaveLength(2);
     await shots('repositories-read');
+    expect(errors).toEqual([]);
+  } finally { f.state.apiGate = undefined; c.release(); await f.close(); }
+});
+
+test('身份页上核验完成而列表读取失败：行内按钮重读一次即恢复列表与项目切换器', async ({ page }) => {
+  const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.route('https://avatars.githubusercontent.com/**', route => route.abort());
+  const c = await checkedConsole(page, f);
+  const retry = c.line.getByRole('button', { name: '重新读取项目列表' });
+  try {
+    // The GitHub login lands on the identity page, which is where the check ends.
+    c.arm();
+    await expect(c.line).toHaveAttribute('data-state', 'failed');
+    await expect(c.picker).toHaveCount(0);
+    expect(c.listReads).toHaveLength(1);
+    // The only recovery reads the list, fills the picker and clears the notice.
+    await retry.click();
+    await expect(c.line).toBeHidden();
+    await expect(c.picker).toHaveCount(1);
+    expect(c.listReads).toHaveLength(2);
     // The project list the check was for now names the project, without reloading the page.
     await consoleNavigate(page, '项目');
-    await expect(page).toHaveURL(/#\/projects$/);
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
+    await expect(page).toHaveURL(/#\/projects$/);
     expect(errors).toEqual([]);
-  } finally { f.state.apiGate = undefined; release(); await f.close(); }
+  } finally { f.state.apiGate = undefined; c.release(); await f.close(); }
 });
