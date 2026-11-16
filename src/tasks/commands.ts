@@ -22,6 +22,7 @@ import { taskTraceAccess,taskControllerReads } from '../memory/access.js';
 import { assertRequestPullRequest, genericTask, pullRequestRefusal, softwareRequest } from './pull-request.js';
 import { assertGrantable, grantTaskWrites, projectRefusal, requestedWrites, setGrant } from './grants.js';
 import { assertCeiling } from '../work/ceiling.js';
+import { recordBasis, requestBasis } from '../dispatch/basis.js';
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
 /** Shared task mutation boundary for the console, management tools and future message adapters. */
@@ -202,6 +203,8 @@ export class TaskCommands {
         // Persist the authoritative validated contract for executor recovery.
         this.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({request:input.request,contract:new TaskRecords(this.store).get(id).contract,...saved}),id);
         setGrant(this.store,{id,repository_id:input.repository_id},writes,caller?.role?'role:'+caller.role:'user:'+user.id,null);
+        // A PR asked for by a person or a Feishu group keeps its basis (#815): the group's grant, or the person's own authority.
+        if(writes.includes('pull_request')&&!caller){const basis=requestBasis(this.store,user.context?.principal_id);if(basis)recordBasis(this.store,id,basis);}
         captureTaskConfiguration(this.store,id);
         if(input.as_child)attachChild(this.store,caller!.source_task_id!,id);
         if (user.context) this.store.run('INSERT INTO task_authorizations VALUES(?,?,?,?,?)', id, user.context.principal_id,

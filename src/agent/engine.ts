@@ -35,9 +35,10 @@ import { GitHub } from '../github/client.js';
 import { repositoryExecutionDenied } from '../installations/archive.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { checkPullRequestLabels } from '../github/pull-request-labels.js';
-import { testEvidence, reviewLanguage, promptedBy, type DevelopmentWait } from '../github/text.js';
-import { developmentReady, reviewRequestsCode } from '../review/queue.js';
-import { actionableFinding, developmentGoal, discussionRequests, developmentApproved, developmentWait,
+import { testEvidence, reviewLanguage, promptedBy } from '../github/text.js';
+import { developmentReady } from '../review/queue.js';
+import { taskBasis } from '../dispatch/basis.js';
+import { actionableFinding, developmentGoal, discussionRequests, developmentApproved,
   ownedPullRequest, developmentLabelForTask, queueDevelopment, revisionRequests, type GoAhead, type RevisionRequest } from '../review/development.js';
 import { actionsConfigurationError, actionsDevelopmentAllowed, actionsIssueAssigned, actionsSourceIssue } from '../actions/safety.js';
 import { taskGithubWrite } from '../tasks/github-write.js';
@@ -321,7 +322,6 @@ export class TaskEngine {
       // the attempt a new head started in a fresh workspace (see moveHead).
       const prior=review&&(task.attempt===1||input.session_attempt===task.attempt)?latestReviewSession(this.store,task):undefined;
       // An Issue development was started by the Manager on a person's label, which is the human decision a review asked for.
-      if(task.kind==='development.pr'&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan','检视结果要求先由人确认需求，开发任务等待重新规划。');
       // validate(object) checks an object just read instead of reading it again; seen is the last object it checked.
       let seen:any=null;
       // A new head of the pull request (#770) never replaces the task working on it. While preparing, the task takes it. A
@@ -346,9 +346,11 @@ export class TaskEngine {
           // This task's own push (development, or any task that updated the bot's PR) moved the head on purpose.
           if(current.head?.sha!==task.head_sha&&!(candidate?.remote_sha===current.head?.sha))await headMoved(String(current.head?.sha),current,move);
         }else if(development&&input.object_hash&&sha(JSON.stringify([current.title,current.body]))!==input.object_hash)stop('issue_needs_replan','needs_replan',`Issue #${task.object_number} 的标题或正文已变化，需要重新规划。`);
-        // The go-ahead must still hold until publication: the person's development label stays on the Issue (and an Issue
-        // filed from an Actions failure stays unassigned).
-        if(task.kind==='development.issue'&&(!developmentReady(current,this.label(task))||actionsIssueAssigned(this.store,task.repository_id,task.object_number,current)))
+        // The go-ahead must still hold until publication: a development started on the label keeps it on the Issue (#815:
+        // other bases do not need it; older developments have no recorded basis and still do), and an Issue filed from an
+        // Actions failure stays unassigned.
+        const basis=task.kind==='development.issue'?taskBasis(this.store,task.id):null;
+        if(task.kind==='development.issue'&&((!basis||basis.kind==='label')&&!developmentReady(current,this.label(task))||actionsIssueAssigned(this.store,task.repository_id,task.object_number,current)))
           stop('development_not_approved','needs_replan',`Issue #${task.object_number} 不再满足开发条件：开发标签已被移除，或这个 Actions 提报的 Issue 已指派给别人。`);
         if(task.kind==='development.issue'&&!actionsDevelopmentAllowed(this.store,task.repository_id,task.object_number,current,input.review))stop('actions_development_not_approved','needs_replan');
         const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number});
@@ -521,8 +523,7 @@ export class TaskEngine {
         update({generation:environment.generation,workspace_id:task.workspace_id||randomId()});
         const object=await github.object(task.kind,task.object_number);await validate(object);
         let implementationGoal=task.kind==='development.issue'?developmentGoal(input):input.review?.implementation_goal||'',actionableFindings:any[]=[];
-        if(task.kind==='development.pr'&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan','检视结果要求先由人确认需求，开发任务等待重新规划。');
-        if(task.kind.endsWith('.pr')){
+          if(task.kind.endsWith('.pr')){
           const owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number);
           if(owned){
             const source=this.store.get('SELECT input FROM tasks WHERE id=?',owned.source_task_id);
@@ -617,6 +618,8 @@ export class TaskEngine {
             context_files:contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
             ...(snapshot.worktree===null?{workspace:workspaceContext({head_sha:ref.object.sha,mode:review?'read':'write'})}:{}),
             implementation_goal:implementationGoal,actionable_findings:actionableFindings,
+            // What a development started on (#815): the PR description names it.
+            ...(task.kind==='development.issue'&&taskBasis(this.store,id)?{development_basis:taskBasis(this.store,id)}:{}),
             // Work saved on an earlier head (the pull request got other commits meanwhile) is not restored over the new one.
             ...(development&&input.recovery?.sha&&input.recovery.base_sha!==ref.object.sha?{earlier_work:{commit:input.recovery.sha,base:input.recovery.base_sha,
               instruction:`This task worked on ${input.recovery.base_sha} before the pull request moved to ${ref.object.sha}; that work is saved as commit ${input.recovery.sha}. If git cat-file -e ${input.recovery.sha} succeeds here, git diff ${input.recovery.base_sha} ${input.recovery.sha} shows it: re-apply what still applies to the new head.`}}:{}),...(input.integration?{integration:{...input.integration,instruction:'Continue the same task on the current main checkout with your earlier delta preserved. Resolve listed conflicts, inspect failed integration checks, rerun required policy, and submit a NEW candidate; historical QA does not approve it.'}}:{}),
@@ -763,7 +766,7 @@ export class TaskEngine {
           update({result:JSON.stringify(redactor.clean(kept)),phase:'done',status:'succeeded',error_code:null});
         }else if(!development){
           // Files that change the bot's own behavior are a person's decision; the summary comment lists them with the others.
-          if(review&&input.behavior_changes?.length){result.behavior_changes=input.behavior_changes;result.clarification_required=true;}
+          if(review&&input.behavior_changes?.length)result.behavior_changes=input.behavior_changes;
           // A pull request this task published on the way is part of its result.
           const candidate=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),published=candidate?JSON.parse(candidate.data).published:null;
           result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,
@@ -802,9 +805,7 @@ export class TaskEngine {
           const setting=this.store.get('SELECT review_language FROM policies WHERE repository_id=?',task.repository_id)?.review_language;
           // A review a person's comment asked for names that person in the summary comment, which also notifies them of the edit.
           const asked=input.trigger?.actor?{actor:input.trigger.actor,url:input.trigger.url||null,what:promptedBy(input.trigger.reason)}:input.comment?{actor:input.comment.user?.login||input.sender?.login||null,url:input.comment.html_url||null,what:'comment' as const}:undefined;
-          // An Issue the review finds ready for development that will not be developed yet says what it waits for.
-          const development=await this.developmentWait(github,task,input,result).catch(()=>null);
-          const outputs=await publisher.review(result,blobValue(this.store,input.files),{language:reviewLanguage(setting,result.summary),trigger:asked,development});
+          const outputs=await publisher.review(result,blobValue(this.store,input.files),{language:reviewLanguage(setting,result.summary),trigger:asked});
           // Labels go on only after the summary comment was published: the policy's review label, plus the classification
           // labels the model named that pass classificationLabels against the repository and the object's current labels.
           // publisher.review ends by validating the object, so its labels are current.
@@ -821,8 +822,6 @@ export class TaskEngine {
           let approved:GoAhead|null=null;
           if(task.kind==='review.issue'&&covers(projectCeiling(this.store,task.repository_id,policy),'develop')){
             approved=await this.developmentApproved(github,task).catch(()=>null);
-            // The log names the reason the summary comment gave: no label yet, or a label added by an app.
-            if(!approved&&reviewRequestsCode(input.object,result))log({type:'development_waiting',reason:development?.reason||'label'});
           }
           // Who wrote the comments a review of the bot's own pull request took on is read from GitHub before the transaction.
           const requests=await this.revisionRequests(github,task,result,input).catch(()=>[]);
@@ -949,7 +948,6 @@ export class TaskEngine {
   label(task:Row){return developmentLabelForTask(this.store,task);}
   async developmentApproved(github:GitHub,task:Row):Promise<GoAhead|null>{return developmentApproved(this,github,task);}
   async revisionRequests(github:GitHub,task:Row,result:any,input:any={}):Promise<RevisionRequest[]>{return revisionRequests(github,task,result,input);}
-  async developmentWait(github:GitHub,task:Row,input:any,result:any):Promise<DevelopmentWait|null>{return developmentWait(this,github,task,input,result);}
   queueDevelopment(github:GitHub,task:Row,input:any,result:any,approved:GoAhead|null=null,requests:RevisionRequest[]=[]){return queueDevelopment(this,github,task,input,result,approved,requests);}
   async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
     const coordination=coordinationApi(this.store,user,method,url,input);if(coordination!==undefined)return coordination;

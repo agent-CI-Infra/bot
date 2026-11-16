@@ -370,7 +370,8 @@ test('a person\'s development label reaches the Manager with the facts it judges
   const {dispatchContext}=await import('../dist/dispatch/store.js'),context=dispatchContext(h.store,event);
   assert.deepEqual(context.options.map(o=>o.id),['development','review']);assert.deepEqual(context.unavailable.map(w=>[w.id,w.code]),[['reply','work_disabled']]);
   assert.deepEqual([facts.development.label,facts.development.labeled_by,facts.development.assignees],['bot-develop','maintainer',['someone']]);
-  assert.deepEqual([facts.development.review.task_id,facts.development.review.issue_requests_code,facts.development.review.quote_in_issue],['rv',true,true]);
+  // The review is reported by its summary and recommendation; it carries no authorization fields since #815.
+  assert.deepEqual([facts.development.review.task_id,facts.development.review.summary,facts.development.review.issue_requests_code],['rv','s',undefined]);
   // The label name is the project's development label setting.
   await admin('/api/repositories/101/policy','PATCH',{development_label:'ship-it'});
   assert.equal((await admin('/api/repositories/101/rules')).value.rules.development_label,'ship-it');
@@ -387,7 +388,9 @@ test('a person\'s development label reaches the Manager with the facts it judges
   assert.equal(h.store.get("SELECT count(*) n FROM task_logs l JOIN tasks t ON t.id=l.task_id WHERE t.kind='development.issue' AND json_extract(l.content,'$.type')='queued'").n,1);
   const created=h.store.get("SELECT input,unique_key FROM tasks WHERE kind='development.issue'"),input=JSON.parse(created.input);
   assert.equal(created.unique_key,'101:development.issue:5:update:'+events().find(e=>JSON.parse(e.result||'{}').created?.length).delivery_id);
-  assert.deepEqual([input.review.request_quote,input.object_hash],['Fix add.',sha(JSON.stringify(['Fix add.','Please fix.']))]);
+  assert.equal(input.object_hash,sha(JSON.stringify(['Fix add.','Please fix.'])));
+  // The development keeps its basis: the person's label (#815).
+  assert.deepEqual(JSON.parse(h.store.get("SELECT detail FROM task_development_basis WHERE task_id=(SELECT id FROM tasks WHERE kind='development.issue')").detail),{kind:'label',label:'bot-develop',labeled_by:'maintainer'});
   // A label already on the Issue when the review is published is a go-ahead only if a user account added it last.
   const engine=new TaskEngine(h.store,{}, undefined, undefined, acceptanceFixture),task=h.store.get("SELECT * FROM tasks WHERE id='rv'"),user={event:'labeled',label:{name:'bot-develop'},actor:{type:'User',login:'maintainer'}};
   const github=(object,events)=>({object:async()=>object,pages:async()=>events,path:p=>p});

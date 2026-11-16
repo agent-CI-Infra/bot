@@ -3,7 +3,7 @@ import { assertPublicationStages } from '../roles/schedule.js';
 import { type Store, type Row } from '../storage/database.js';
 import { GitHub } from './client.js';
 import { blobSha, operationId, sha, stop, TaskError, treeSha } from '../agent/common.js';
-import { implementationText, reviewText, summaryComment, humanItems, markHuman, type HumanItem, type Place, type Prompted, type DevelopmentWait } from './text.js';
+import { implementationText, reviewText, summaryComment, humanItems, markHuman, type HumanItem, type Place, type Prompted } from './text.js';
 import { inlineLocation } from '../review/findings.js';
 import { applyPullRequestLabels } from './pull-request-labels.js';
 import { assertTaskExternalEffect } from '../tasks/management.js';
@@ -67,9 +67,8 @@ export class Publisher {
     outputs.push(await this.discussion('discussion',[text.overview,text.discussion.join('\n\n---\n\n'),coverage].filter(Boolean).join('\n\n')));
     await this.validate();return outputs;
   }
-  // language: the words of the summary comment; trigger: the person's comment this review answers, if any; development: why
-  // an Issue ready for development is not being developed.
-  async review(result:any,files:any[],options:{language:'zh'|'en',trigger?:{actor?:string|null,url?:string|null,what?:Prompted},development?:DevelopmentWait|null}={language:'en'}){
+  // language: the words of the summary comment; trigger: the person's comment this review answers, if any.
+  async review(result:any,files:any[],options:{language:'zh'|'en',trigger?:{actor?:string|null,url?:string|null,what?:Prompted}}={language:'en'}){
     const inline:any[]=[], locations = new Map<string, any>(), language=options.language,pr=this.task.kind==='review.pr';
     // The bot's earlier top-level inline comments, when the review refers to them: a finding that is one of them still
     // applying (comment_id) is not posted again, and the ones it says are fixed (resolved_comments) get their threads resolved.
@@ -104,7 +103,7 @@ export class Publisher {
     const resolved=await this.resolveFixed((result.resolved_comments||[]).map(Number).filter((id:number)=>!still.has(id)).map((id:number)=>earlier.get(id)).filter(Boolean),result.reviewed_sha);
     // Every review publishes one summary discussion comment, even when all findings are inline; later reviews of the same
     // Issue or PR edit it.
-    const count=this.earlierReviews(),body=summaryComment({language,overview:text.overview,discussion:text.discussion,coverage,human,resolved,open:[...kept.values()].map(place),development:options.development,
+    const count=this.earlierReviews(),body=summaryComment({language,overview:text.overview,discussion:text.discussion,coverage,human,resolved,open:[...kept.values()].map(place),
       review:{count:count+1,at:new Date().toISOString().replace('T',' ').slice(0,16)+' UTC',sha:result.reviewed_sha,actor:options.trigger?.actor,url:options.trigger?.url,what:options.trigger?.what}});
     outputs.push({...await this.summary(body),...(resolved.length?{resolved_threads:resolved.map(r=>r.id)}:{})});
     await this.validate();return outputs;

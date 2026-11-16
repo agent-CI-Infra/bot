@@ -122,6 +122,20 @@ function taskWritesCard(writes) {
   }
   return section;
 }
+// Why a development was allowed to start (#815): the label, a maintainer's comment, a rule of the Manager prompt, a group's
+// grant or the requester's own authority.
+function taskBasisCard(basis) {
+  const section = card('开发依据'), rows = {
+    label: [['依据', '有人加了开发标签'], ['标签', basis.label], ['加标签的人', basis.labeled_by]],
+    maintainer_request: [['依据', '维护者在评论里要求'], ['评论人', `${basis.author}（${basis.permission}）`], ['评论', basis.excerpt]],
+    project_rule: [['依据', 'Manager 提示词里的规则'], ['原文', basis.passage], ['提示词版本', basis.prompt_revision]],
+    group_grant: [['依据', '飞书群的授权档位'], ['档位', basis.level], ['授权人', basis.grantor]],
+    requester: [['依据', '提出请求的人自己的权限'], ['请求人', basis.principal]],
+    own_issue: [['依据', 'bot 自己开的 Issue'], ['说明', basis.reason]] }[basis.kind] || [['依据', basis.kind]];
+  section.append(facts(rows));
+  if (basis.kind === 'maintainer_request' && basis.url) { const line = element('p'), link = element('a', '打开这条评论'); link.href = basis.url; link.target = '_blank'; link.rel = 'noreferrer'; line.append(link); section.append(line); }
+  return section;
+}
 function taskRunHistoryCard(roles) {
   const section = card('实际运行记录');
   section.append(mutedLine('每次重试和恢复保留独立运行；下方 Agent、模型和配置取自该次运行快照。'));
@@ -156,6 +170,7 @@ function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   side.append(taskRunHistoryCard(roles));
   if (detail.dispatch?.length) side.append(taskDispatchCard(detail.dispatch));
   if (detail.writes) side.append(taskWritesCard(detail.writes));
+  if (detail.basis) side.append(taskBasisCard(detail.basis));
   const info = card('任务');
   info.append(facts([['优先级', task.priority || 'P2'], ['入队序号', String(task.queue_seq ?? '—')], ['阶段', phaseLabels[task.phase] || task.phase], ['尝试', `第 ${task.attempt} 次`], ['提交', task.head_sha?.slice(0, 12)],
     [task.error_code==='repository_has_no_commit'?'等待原因':'故障', task.error_detail||(task.error_code==='pr_head_pending'?'PR 尚未指向刚推送的提交':ownershipErrors[task.error_code]||taskErrorText(task.error_code))],

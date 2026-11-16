@@ -25,6 +25,7 @@ import { migrateWorkflows } from '../work/migration.js';
 import { ceilingStorage } from '../work/ceiling.js';
 import { retireWorkTypes } from '../work/retired.js';
 import { grantStorage } from '../tasks/grants.js';
+import { basisStorage } from '../dispatch/basis.js';
 import { dispatchStorage } from '../dispatch/store.js';
 import { githubWriteStorage } from '../github/write.js';
 import { installationStorage } from '../installations/storage.js';
@@ -267,6 +268,8 @@ export class Store {
     this.transaction(() => taskManagementStorage(this));
     // Writes granted to generic tasks and the project's delivery gates (#814).
     grantStorage(this);
+    // Why a development was allowed to start (#815).
+    basisStorage(this);
     identityStorage(this);
     managementStorage(this);
     channelStorage(this);

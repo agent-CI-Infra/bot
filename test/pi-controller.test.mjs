@@ -61,7 +61,7 @@ async function entryFixture(t, kind, respond, controlled = false) {
 
 for (const controlled of [false, true]) test(`Pi review entry repairs its own finish tool in one session (controlled=${controlled})`, { skip, timeout: 90000 }, async t => {
   let attempts = 0;
-  const valid = { summary: 'Verified report', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' };
+  const valid = { summary: 'Verified report', findings: [] };
   const f = await entryFixture(t, 'review.issue', body => {
     if (body.tools.some(tool => tool.function.name === 'nominate_delivery')) {
       const ref = results(body.messages).find(result => result.result_ref)?.result_ref;
@@ -81,7 +81,7 @@ for (const controlled of [false, true]) test(`Pi review entry repairs its own fi
 
 test('Pi entry stops with the original validation fault after two unsuccessful repairs', { skip, timeout: 90000 }, async t => {
   let attempts = 0;
-  const f = await entryFixture(t, 'review.issue', () => { attempts++; return call('finish_review', { summary: 'x'.repeat(16001), findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' }); });
+  const f = await entryFixture(t, 'review.issue', () => { attempts++; return call('finish_review', { summary: 'x'.repeat(16001), findings: [] }); });
   await assert.rejects(agentLoop(f.store, f.task, f.workspace, f.redactor, f.guard, {}), { code: 'model_review_invalid' });
   assert.equal(attempts, 3); assert.equal(f.logs.filter(log => log.type === 'pi_session').length, 1);
 });
@@ -230,7 +230,7 @@ test('Pi local command execution honors the configured cap, reports it, and reta
   ];
   const f = await entryFixture(t, 'review.issue', body => {
     const count = body.messages.filter(m => m.role === 'assistant').flatMap(m => m.tool_calls ?? []).filter(c => c.function.name === 'run_command').length;
-    return count < commands.length ? call('run_command', commands[count]) : call('finish_review', { summary: 'Verified local commands', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' });
+    return count < commands.length ? call('run_command', commands[count]) : call('finish_review', { summary: 'Verified local commands', findings: [] });
   });
   assert.equal((await agentLoop(f.store, f.task, f.workspace, f.redactor, f.guard, {})).summary, 'Verified local commands');
   const done = f.logs.filter(l => l.type === 'tool' && l.name === 'run_command').map(l => l.result);
@@ -243,7 +243,7 @@ test('Pi local command execution honors the configured cap, reports it, and reta
 // The SDK reads the generated file, so this covers the actual runner contract as well as the provider boundary.
 import {ModelCatalog} from '../dist/models/catalog.js';
 for (const matched of [false,true]) test(`Pi receives selected model capabilities and output budget (catalog=${matched})`, {skip,timeout:90000}, async t=>{
-  const f=await entryFixture(t,'review.issue',()=>call('finish_review',{summary:'Verified report',findings:[],requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:''}));
+  const f=await entryFixture(t,'review.issue',()=>call('finish_review',{summary:'Verified report',findings:[]}));
   if(matched){
     f.store.run("UPDATE models SET model_name='deepseek-flash' WHERE id='m'");
     const catalog=new ModelCatalog(f.store,async()=>new Response(JSON.stringify({deepseek:{models:{'deepseek-flash':{id:'deepseek-flash',name:'DeepSeek Flash',canonical_model_id:'deepseek/deepseek-flash',attachment:false,reasoning:true,limit:{context:1048576,output:393216},modalities:{input:['text'],output:['text']}}}}})));await catalog.refresh();

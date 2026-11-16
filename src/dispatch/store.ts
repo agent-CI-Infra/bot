@@ -9,6 +9,7 @@ import { enqueueEventTask } from '../work/events.js';
 import { workOffered, workPermissions, workRefusal } from '../work/settings.js';
 import { narrowWrites, workType } from '../work/catalog.js';
 import { assertManagedTask, assertTaskCaller, createManagedTask, eventTaskCaller } from '../tasks/management.js';
+import { ownIssue, recordBasis, type Basis } from './basis.js';
 
 /**
  * Manager dispatch. Every event that passes the control plane's filters is written here once (event_key is unique) with
@@ -64,6 +65,8 @@ export interface EventInput {
 }
 export interface ContinueOption { id: string; task_id: string; kind: string; status: string; summary: string; created_at: string }
 export interface Decision { decision: 'create' | 'continue' | 'ignore'; option_ids: string[]; reason: string; brief?: { goal: string; criteria: string[] } | null; writes?: string[] | null; model?: string | null;
+  /** The checked basis of a development of an Issue the bot did not open (#815), kept with the task. */
+  basis?: Basis | null;
   /** The continue options the decision was made with; a running task that appeared since means deciding again. */
   seen?: string[] }
 /** Work the event has an object for, but that the project does not allow now (#815): shown to the Manager with the reason. */
@@ -336,8 +339,14 @@ export function applyDecision(store: Store, event: Row, decision: Decision, leas
       // The project or the object changed since the Manager decided: that work is refused and the event keeps why.
       const refused = managerRefusal(store, context, id);
       if (refused) { recordRefusal(store, String(current.id), refused); declined.push(id); continue; }
-      const option = options.find(entry => entry.id === id)!, task = createManagedTask(store,caller!,option.spec.type==='request'?undefined:'dev',()=>create(store, current, option, checked));
+      const option = options.find(entry => entry.id === id)!;
+      // A development of an Issue the bot did not open starts only on a basis the Manager stated and the control plane checked.
+      const development = option.spec.type === 'object' && option.spec.kind === 'development.issue';
+      const basis = development ? decision.basis ?? ownIssue(store, String(current.repository_id), Number((option.spec as any).number)) : null;
+      if (development && !basis) { recordRefusal(store, String(current.id), { work: option.work, code: 'development_basis_required', reason: '开发这个 Issue 需要依据（开发标签、维护者的要求或 Manager 提示词里的规则），这次决定没有给出。' }); declined.push(id); continue; }
+      const task = createManagedTask(store,caller!,option.spec.type==='request'?undefined:'dev',()=>create(store, current, option, checked));
       if (!task) { declined.push(id); continue; }
+      if (basis) recordBasis(store, task, basis);
       created.push(task);
       store.run('INSERT OR IGNORE INTO task_events VALUES(?,?,?,?)', task, current.id, 'created', now);
       log(store, task, { type: 'dispatch', relation: 'created', event_id: current.id, event_type: current.type, reason: checked.reason, detail: `Manager 因事件「${current.summary}」新建这个任务：${checked.reason}` });

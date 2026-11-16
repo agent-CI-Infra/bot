@@ -1,9 +1,9 @@
 import { stop } from '../agent/common.js';
+export const retiredReviewFields = ['requires_code_change', 'issue_requests_code', 'clarification_required', 'implementation_goal', 'request_quote'];
 export function validateReview(value: any) {
   if (value?.product_defect !== undefined && typeof value.product_defect !== 'boolean') stop('model_review_invalid');
   if (!value || typeof value.summary !== 'string' || value.summary.length > 16000 || !Array.isArray(value.findings) || value.findings.length > 100
-    || ['requires_code_change','issue_requests_code','clarification_required'].some(k => typeof value[k] !== 'boolean')
-    || typeof value.implementation_goal !== 'string' || typeof value.request_quote !== 'string' || value.event !== undefined
+    || value.recommendation !== undefined && (typeof value.recommendation !== 'string' || value.recommendation.length > 2000) || value.event !== undefined
     || value.labels !== undefined && (!Array.isArray(value.labels) || value.labels.length > 20 || value.labels.some((l: unknown) => typeof l !== 'string' || l.length > 50))) stop('model_review_invalid', undefined, '检视结果的必填字段、类型或长度无效，请检查 finish_review 输出格式。');
   for (const finding of value.findings) if (!finding || typeof finding.body !== 'string' || finding.body.length > 16000 || !['discussion','inline'].includes(finding.format)
     || typeof finding.selection_reason !== 'string' || finding.selection_reason.length > 2000 || finding.event !== undefined) stop('model_finding_invalid', undefined, '检视意见的正文、位置类型或选择原因格式无效，或包含不允许的 event 字段。');
@@ -11,6 +11,9 @@ export function validateReview(value: any) {
   for(const finding of value.findings)if(finding.comment_id!==undefined&&(!Number.isSafeInteger(finding.comment_id)||finding.comment_id<1))stop('model_finding_invalid', undefined, '检视意见的 comment_id 必须是行内评论 ID（正整数）。');
   for(const finding of value.findings)if(finding.requested_in!==undefined&&(typeof finding.requested_in!=='object'||finding.requested_in===null||!['comment','review','review_comment'].includes(finding.requested_in.type)||!Number.isSafeInteger(finding.requested_in.id)||finding.requested_in.id<1))stop('model_finding_invalid', undefined, '检视意见的 requested_in 必须写明提出修改的评论类型（comment、review 或 review_comment）和 GitHub ID（正整数）。');
   for(const finding of value.findings)if(finding.human_action!==undefined&&(typeof finding.human_action!=='string'||finding.human_action.length>2000))stop('model_finding_invalid', undefined, '检视意见的 human_action 必须是不超过 2000 字符的字符串。');
+  // The authorization fields a review returned before #815 are dropped, so nothing reads them: whether to develop is the
+  // Manager's decision, with a basis the control plane checks.
+  for (const key of retiredReviewFields) delete value[key];
   if(value.resolved_comments!==undefined&&(!Array.isArray(value.resolved_comments)||value.resolved_comments.length>200||value.resolved_comments.some((id:unknown)=>!Number.isSafeInteger(id)||Number(id)<1)))stop('model_review_invalid', undefined, '检视结果的 resolved_comments 必须是行内评论 ID（正整数）列表。');
   return value;
 }

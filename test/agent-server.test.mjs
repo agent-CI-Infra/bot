@@ -32,12 +32,12 @@ test('the Docker model fixture serves checked Manager decisions and preserves ta
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 1);
   // The fixture selects work ids from offered options, including a later development option with an arbitrary id.
   recordEvent(h.store, { repositoryId: '101', key: 'fixture-published', type: 'review.published', source: 'review', summary: 'Review published', object: { type: 'issue', number: 1 },
-    facts: { review: { requires_code_change: true, quote_in_issue: true }, development: { assignees: [] } },
+    facts: { review: { recommendation: 'Ready for development.' }, development: { label: 'bot-develop', labeled_by: 'maintainer', assignees: [] } },
     options: [{ id: 'offered-development', work: 'development.issue', title: 'Develop', spec: { type: 'object', kind: 'development.issue', number: 1, head: null, input: { review: { implementation_goal: 'Fix addition' } }, delivery: 'fixture-published' } }] });
   await run();
   assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n, 1);
   recordEvent(h.store, { repositoryId: '101', key: 'fixture-no-code', type: 'review.published', source: 'review', summary: 'No requested change', object: { type: 'issue', number: 2 },
-    facts: { review: { requires_code_change: false, quote_in_issue: false }, development: { assignees: [] } },
+    facts: { review: { recommendation: 'No code change requested.' }, development: { assignees: [] } },
     options: [{ id: 'declined-development', work: 'development.issue', title: 'Develop', spec: { type: 'object', kind: 'development.issue', number: 2, head: null, input: {}, delivery: null } }] });
   await run();
   const events = h.store.all('SELECT * FROM dispatch_events ORDER BY created_at,rowid');

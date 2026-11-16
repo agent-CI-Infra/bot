@@ -14,6 +14,8 @@ import { githubWrite, githubWriteTool, earlierWrites } from '../github/write.js'
 import { managerPrompt, parseSections, workPermissions } from '../work/settings.js';
 import { section, workType, workTypes } from '../work/catalog.js';
 import { checkDecision, InvalidDecision, managerRefusal, recordRefusal, renewDispatchLease, type Decision, type DispatchContext } from './store.js';
+import { isRefusal, promptRevision, verifyBasis } from './basis.js';
+import { GitHub } from '../github/client.js';
 
 // The Manager's duties come from its editable role template and event-dispatch prompt.
 
@@ -27,14 +29,16 @@ const decisionTools = [
     work: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string' }, description: 'Ids from work.create' }, reason,
     brief: { type: 'object', additionalProperties: false, required: ['goal'], description: 'The goal and acceptance criteria of the new work',
       properties: { goal: { type: 'string', minLength: 1 }, criteria: { type: 'array', items: { type: 'string', minLength: 1 } } } },
-    writes: { type: 'array', items: { type: 'string' }, description: 'Optional: keep only these of the work\'s writes for the created tasks' } }, ['work', 'reason']),
+    writes: { type: 'array', items: { type: 'string' }, description: 'Optional: keep only these of the work\'s writes for the created tasks' },
+    basis: { type: 'object', additionalProperties: false, required: ['kind'], description: 'Required for development of an Issue the bot did not open: why you may start it. label: a person added the development label (the control plane checks who). maintainer_request: comment_id of a comment on this Issue by someone with triage permission or higher (checked). project_rule: passage, the exact sentence of the Manager prompt you follow. An outsider\'s comment is never a basis.',
+      properties: { kind: { type: 'string', enum: ['label', 'maintainer_request', 'project_rule'] }, comment_id: { type: 'integer', minimum: 1 }, passage: { type: 'string' } } } }, ['work', 'reason']),
   fn('continue_task', 'Add this event to a running task listed in work.continue (an update it answers in its next turn). This ends your turn.', { task_id: { type: 'string' }, reason }, ['task_id', 'reason']),
   fn('ignore_event', 'Do nothing more for this event. Use it after answering the person, or when the event needs no work. This ends your turn.', { reason }, ['reason'])];
 const decisionNames = decisionTools.map(tool => tool.function.name);
 /** The decision a call of a decision tool stands for; a plain JSON answer in the old dispatch shape is read as it is. */
 function toDecision(name: string | null, args: any): any {
   if (!args || typeof args !== 'object') return args;
-  if (name === 'create_task') return { decision: 'create', option_ids: Array.isArray(args.work) ? args.work : typeof args.work === 'string' ? [args.work] : null, reason: args.reason, brief: args.brief, writes: args.writes };
+  if (name === 'create_task') return { decision: 'create', option_ids: Array.isArray(args.work) ? args.work : typeof args.work === 'string' ? [args.work] : null, reason: args.reason, brief: args.brief, writes: args.writes, basis: args.basis };
   if (name === 'continue_task') return { decision: 'continue', option_ids: typeof args.task_id === 'string' ? ['continue:' + args.task_id.replace(/^continue:/, '')] : null, reason: args.reason };
   if (name === 'ignore_event') return { decision: 'ignore', option_ids: [], reason: args.reason };
   return args;
@@ -138,9 +142,19 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
         try { args = JSON.parse(call ? call.function.arguments || '{}' : String(message?.content || '').replace(/^```(?:json)?\s*|\s*```$/g, '')); } catch { args = null; }
         live();
         try {
-          const decision = checkDecision(store, context, toDecision(call ? String(call.function.name) : null, args));
-          const refused = decision.decision === 'create' ? decision.option_ids.map(id => managerRefusal(store, context, id)).find(Boolean) ?? null : null;
-          if (!refused) return { ...decision, model: model.model };
+          const raw = toDecision(call ? String(call.function.name) : null, args), decision = checkDecision(store, context, raw);
+          let refused = decision.decision === 'create' ? decision.option_ids.map(id => managerRefusal(store, context, id)).find(Boolean) ?? null : null;
+          // A development of an Issue starts on a basis the control plane checks now (#815): GitHub for the label and the
+          // maintainer's comment, the current Manager prompt for a rule.
+          const development = !refused && decision.decision === 'create' ? context.options.find(option => decision.option_ids.includes(option.id) && option.spec.type === 'object' && option.spec.kind === 'development.issue') : undefined;
+          let basis: Decision['basis'] = null;
+          if (development) {
+            // The control plane's own read (not the Manager's tools): the Issue's label events, a comment and its author's permission.
+            const control = async () => { const client = new GitHub(store, repository, redactor, guard, githubUrl); await client.connect(false, undefined, { issues: 'read', metadata: 'read' }); return client; };
+            const prompt = dispatchPrompt(store, repositoryId), checked = await verifyBasis(store, repositoryId, Number((development.spec as any).number), raw?.basis, control, { content: prompt, revision: promptRevision(store, repositoryId, prompt) }, (context.facts as any)?.development);
+            if (isRefusal(checked)) refused = { work: development.work, ...checked }; else basis = checked;
+          }
+          if (!refused) return { ...decision, model: model.model, basis };
           // A refused creation (#815): nothing is created; the event keeps the refusal and the Manager decides again.
           recordRefusal(store, String(event.id), { ...refused, tool: 'create_task' });
           if (++refusals >= maxRefusals || last)

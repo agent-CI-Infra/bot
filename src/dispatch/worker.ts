@@ -123,7 +123,12 @@ export function ruleDecider(context: DispatchContext): Decision {
   if (updates.includes(String(context.event.type)) && joinable.length && !others.length)
     return { decision: 'continue', option_ids: [joinable[0]!.id], reason: 'rule: update joins the review', model: 'rule' };
   const chosen = [...others, ...(updates.includes(String(context.event.type)) && joinable.length ? [] : reviews)];
-  return chosen.length ? { decision: 'create', option_ids: chosen.slice(0, 3).map(option => option.id), reason: 'rule: default work for this event', model: 'rule' }
+  // The development facts of a label event are the label basis the control plane checked when it offered development.
+  const development = (context.facts as any)?.development, label = development?.label ? { kind: 'label' as const, label: String(development.label), labeled_by: String(development.labeled_by ?? '') } : null;
+  // A development works to a brief (#815: no review gives an implementation goal); the rule takes the review's own words.
+  const developing = chosen.some(option => option.work === 'development.issue'), review = (context.facts as any)?.review ?? development?.review;
+  const brief = developing ? { goal: String(review?.recommendation || review?.summary || 'Develop the change the Issue asks for').slice(0, 1500), criteria: ['The change the Issue asks for works and is tested'] } : null;
+  return chosen.length ? { decision: 'create', option_ids: chosen.slice(0, 3).map(option => option.id), reason: 'rule: default work for this event', model: 'rule', basis: label, brief }
     : { decision: 'ignore', option_ids: [], reason: 'rule: no default work', model: 'rule' };
 }
 /** Tests decide synchronously with the rule decider (or another one); null restores Manager dispatch. */

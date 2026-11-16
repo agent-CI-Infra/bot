@@ -211,7 +211,7 @@ test('the summary comment speaks the review language; findings validate their ne
     assert.throws(() => validateReview({ ...valid, findings: [{ ...decision, requested_in }] }), /model_finding_invalid/, JSON.stringify(requested_in));
 });
 
-test('the first line names what the person did, and an Issue ready for development says what it waits for', () => {
+test('the first line names what the person did, and nothing says what development waits for (#815)', () => {
   const base = { overview: 'Ready for development.', discussion: [], coverage: 'Reviewed commit: x', resolved: [], human: [] };
   const header = (language, what, url = 'https://github.invalid/u/1') => summaryComment({ ...base, language, review: { count: 2, at: '2026-11-06 00:10 UTC', sha: 'a'.repeat(40), actor: 'alice', url, what } }).split('\n')[0];
   assert.equal(header('en', 'edit', null), "*Review 2, updated 2026-11-06 00:10 UTC, reviewed commit aaaaaaa; responding to @alice's edit*");
@@ -222,12 +222,8 @@ test('the first line names what the person did, and an Issue ready for developme
   assert.equal(header('zh', 'comment'), '*第 2 次检视，更新于 2026-11-06 00:10 UTC，检视提交 aaaaaaa；回应 @alice 的[评论](https://github.invalid/u/1)*');
   assert.deepEqual(['issue_edited', 'pull_request_edited', 'review_submitted', 'review_reply', 'review_comment', 'labeled', 'comment', 'mention'].map(promptedBy),
     ['edit', 'edit', 'review', 'review_comment', 'review_comment', 'label', 'comment', 'comment']);
-  // Why development has not started follows the overview.
-  const waiting = (language, development) => summaryComment({ ...base, language, development }).split('\n\n')[1];
-  assert.equal(waiting('en', { reason: 'label', label: 'bot-develop' }), 'Development has not started: it waits for a person to add the `bot-develop` label.');
-  assert.equal(waiting('en', { reason: 'app', label: 'bot-develop' }), 'Development has not started: a person, not an app, has to add the `bot-develop` label.');
-  assert.equal(waiting('zh', { reason: 'app', label: 'bot-develop' }), '开发还没开始：`bot-develop` 标签要由人加上，App 加的不算。');
-  assert.equal(summaryComment({ ...base, language: 'en', development: null }), 'Ready for development.\n\nReviewed commit: x');
+  // #815: the summary no longer says what development waits for; whether to develop is the Manager's decision.
+  assert.equal(summaryComment({ ...base, language: 'en' }).split('\n\n')[1], 'Reviewed commit: x');
 });
 
 test('an installation with contents: read reports that fixed review threads are not closed', () => {
