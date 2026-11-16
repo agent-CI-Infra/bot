@@ -86,11 +86,13 @@ function agentToolsInstallNodes(state, redraw, refresh) {
     if (retain.value !== '') body.retain_count = Number(retain.value);
     const answer = await api('/api/agent-tools/install', 'POST', body);
     // The answer already carries the new status: redraw from it instead of assuming the typed retain count won (#740 F2).
-    state.status = answer.status; refresh();
+    state.status = answer.status; state.pruneResult = null; refresh();
     // An install that carried retain_count also saved it as the default, so say so instead of leaving the admin to wonder.
     redraw(`已安装 ${agentToolCliLabel(body.cli)} ${body.version}` + (body.retain_count === undefined ? '' : `，保留版本数默认值改为 ${answer.status.retain_count}`));
   });
-  if (!status.volume_present || !status.arch) { const submit = form.querySelectorAll('button').find(node => node.type === 'submit'); if (submit) submit.disabled = true; }
+  // `querySelectorAll` answers a NodeList, which has no `.find`; a broken deployment (no volume, unknown arch) is
+  // exactly the case this branch serves, so a crash here would take the whole console down (#740 review).
+  if (!status.volume_present || !status.arch) { const submit = Array.from(form.querySelectorAll('button')).find(node => node.type === 'submit'); if (submit) submit.disabled = true; }
   return [form];
 }
 
@@ -101,7 +103,7 @@ function agentToolsPruneNodes(state, redraw, refresh) {
   for (const name of Object.keys(status.clis || {})) { const option = document.createElement('option'); option.value = name; option.textContent = agentToolCliLabel(name); cli.append(option); }
   const retain = input('retain_count', String(status.retain_count), { type: 'number', min: bounds[0], max: bounds[1], step: 1 });
   const nodes = [field('CLI', cli), field('保留版本数（保存为默认值）', retain),
-    note('只保留最新的这几个版本。正在运行的 task_runs.cli_version 不会被删除；清单读不到的残留平时会被清理，只有正在运行或刚安装的版本仍指向的目录会保留，并在下面单独列出。')];
+    note('只保留最新的这几个版本。正在运行的 task_runs.cli_version 和角色会话的 role_conversation_turns.cli_version 不会被删除；清单读不到的残留平时会被清理，只有正在运行或刚安装的版本仍指向的目录会保留，并在下面单独列出。')];
   const result = state.pruneResult;
   if (result) {
     const lines = [];
@@ -112,12 +114,15 @@ function agentToolsPruneNodes(state, redraw, refresh) {
     nodes.unshift(box);
   }
   const form = actionForm(nodes, '清理', async () => {
-    const body = { retain_count: Number(retain.value) };
+    // An emptied number field is not "zero": 0 is outside the allowlist bounds and would be refused. Leaving it out
+    // makes the service keep the saved default, which is what the field opens with (#740 review).
+    const body = {};
+    if (retain.value.trim() !== '') body.retain_count = Number(retain.value);
     if (cli.value) body.cli = cli.value;
     const answer = await api('/api/agent-tools/prune', 'POST', body);
     state.status = answer.status; state.pruneResult = answer; refresh(); redraw('清理完成');
   });
-  if (!status.volume_present || !status.arch) { const submit = form.querySelectorAll('button').find(node => node.type === 'submit'); if (submit) submit.disabled = true; }
+  if (!status.volume_present || !status.arch) { const submit = Array.from(form.querySelectorAll('button')).find(node => node.type === 'submit'); if (submit) submit.disabled = true; }
   return [form];
 }
 
