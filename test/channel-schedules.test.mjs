@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { channelFixture, privateChat, boundGroup, scriptedModel, repositoryAssistant, until, bindFixture } from './channel-fixture.mjs';
+import { channelFixture, privateChat, boundGroup, scriptedModel, repositoryAssistant, until, bindFixture, envelope, inGroup, post, finished } from './channel-fixture.mjs';
 
 // Prompt-driven timers on a Feishu chat (#330). Model and Feishu traffic go to local protocol fixtures.
 const timer = (client, chat, input = {}) => client('/api/channels/chats/' + chat.id + '/schedules', 'POST',
@@ -105,4 +105,83 @@ test('a group timer runs the bound service role within the group scope and its t
   const listed = (await f.admin('/api/channels/chats/' + group.id + '/schedules')).value;
   assert.equal(listed.can_manage, false); assert.equal(listed.schedules[0].reason, 'channel_service_binding_disabled');
   assert.equal((await f.admin('/api/channels/schedules/' + s.id + '/run', 'POST', {})).value.error, 'channel_schedule_forbidden');
+});
+
+const offeredTools = f => (f.requests.at(-1).tools ?? []).map(tool => tool.function.name);
+
+test('the management assistant manages its private chat\'s timers for the owner, from the conversation (#851)', async t => {
+  const f = await channelFixture(t), chat = await privateChat(f);
+  const ask = { action: 'create', name: '每日检查', prompt: '检查 main 的 CI 和新 Issue；有失败时提 Issue 并告诉我，没有就保持沉默。', cron: '0 9 * * *' };
+  scriptedModel(f, [['conversation_schedules', ask], done => ['conversation_schedules', { action: 'update', id: done[0].schedule.id, cron: '30 8 * * *' }],
+    done => ['conversation_schedules', { action: 'list' }], done => `已设置，下次运行 ${new Date(done[1].schedule.next_at).toISOString()}`]);
+  const row = await finished(f.h, (await post(f.h, f.id, envelope('每天早上检查 main 的 CI，有问题提 Issue 告诉我'))).value.operation_id);
+  assert.equal(row.state, 'completed', row.error);
+  assert.ok(offeredTools(f).includes('conversation_schedules'));
+  const saved = f.h.store.get("SELECT * FROM channel_schedules WHERE state<>'deleted'");
+  // A personal timer of this chat, owned by the person: the same timer the console shows them, at the default time zone.
+  assert.deepEqual({ kind: saved.kind, chat: saved.chat_id, owner: saved.owner_id, by: saved.created_by, timezone: saved.timezone, cron: saved.cron, revision: saved.revision },
+    { kind: 'personal', chat: chat.id, owner: f.principal, by: f.principal, timezone: 'Asia/Shanghai', cron: '30 8 * * *', revision: 2 });
+  const listed = (await f.admin('/api/channels/chats/' + chat.id + '/schedules')).value.schedules;
+  assert.equal(listed.length, 1); assert.equal(listed[0].prompt, ask.prompt); assert.equal(listed[0].name, ask.name);
+  assert.equal(new Date(listed[0].next_at).toLocaleTimeString('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit' }), '08:30');
+  assert.deepEqual(f.h.store.all("SELECT action,user_id FROM audit WHERE action LIKE 'channel.schedule.%' ORDER BY rowid").map(r => [r.action, r.user_id]),
+    [['channel.schedule.created', f.principal], ['channel.schedule.updated', f.principal]]);
+});
+
+test('any member of a group at the comment level manages its timers through the assistant; below it the tool is not there (#851)', async t => {
+  const f = await channelFixture(t); await repositoryAssistant(f);
+  const group = await boundGroup(f, ['101']), binding = () => f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', group.id);
+  const level = async value => assert.equal((await f.admin('/api/channels/chats/' + group.id + '/service-binding', 'PUT',
+    { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, level: value, expected_revision: binding().revision })).status, 200);
+  const ask = { action: 'create', name: '群巡检', prompt: '每天检查 main 的 CI；有失败就提 Issue 并在群里说明，没有异常就保持沉默。', cron: '0 9 * * *' };
+  // At read the group cannot change anything on GitHub, and its timers stay with the people who manage its binding.
+  await level('read');
+  scriptedModel(f, [['conversation_schedules', ask], done => `结果：${done[0].error}`]);
+  let row = await finished(f.h, (await post(f.h, f.id, inGroup('每天九点检查一下 CI', 'ou_bob'))).value.operation_id);
+  assert.equal(row.state, 'completed', row.error);
+  assert.ok(!offeredTools(f).includes('conversation_schedules'));
+  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('结果：tool_not_allowed')));
+  assert.equal(f.h.store.get('SELECT count(*) n FROM channel_schedules').n, 0);
+  // At comment anyone in the group may ask, whoever they are; the binding's principal is recorded as the author.
+  await level('comment');
+  scriptedModel(f, [['conversation_schedules', ask], done => ['conversation_schedules', { action: 'pause', id: done[0].schedule.id }],
+    done => `已创建「${done[1].schedule.name}」，状态 ${done[1].schedule.state}`]);
+  row = await finished(f.h, (await post(f.h, f.id, inGroup('每天九点检查一下 CI', 'ou_stranger'))).value.operation_id);
+  assert.equal(row.state, 'completed', row.error);
+  assert.ok(offeredTools(f).includes('conversation_schedules'));
+  assert.match(f.requests.at(-1).messages[0].content, /conversation_schedules manages this group's timers/);
+  const saved = f.h.store.get('SELECT * FROM channel_schedules');
+  assert.deepEqual({ kind: saved.kind, chat: saved.chat_id, owner: saved.owner_id, by: saved.created_by, state: saved.state, reason: saved.reason },
+    { kind: 'group', chat: group.id, owner: null, by: binding().principal_id, state: 'paused', reason: 'user_paused' });
+  // The console shows it to the binding's managers like any group timer; another chat's timer is out of reach.
+  assert.equal((await f.admin('/api/channels/chats/' + group.id + '/schedules')).value.schedules[0].name, '群巡检');
+  assert.throws(() => f.service.schedules.conversation(group.id, { binding: 'another-binding' }, { action: 'list' }), { code: 'channel_schedule_forbidden' });
+});
+
+test('a group timer holds the chat while its grantors are re-verified; a group message arriving meanwhile joins the timer\'s turn (#857, #851)', async t => {
+  const f = await channelFixture(t); await repositoryAssistant(f);
+  const group = await boundGroup(f, ['101']);
+  let request;
+  scriptedModel(f, [(done, context) => { request = context.request; return '定时巡检结果'; }]);
+  const s = (await timer(f.admin, group, { name: '群巡检', prompt: '群巡检任务：汇总本群仓库的情况。' })).value.schedule;
+  // Re-verifying the grantors' GitHub proofs (#846) takes a while: the timer already holds the chat.
+  const renewal = f.service.renewal.bind(f.service); let release, renewing = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  f.service.renewal = async (...args) => { renewing++; await gate; return renewal(...args); };
+  assert.equal((await f.admin('/api/channels/schedules/' + s.id + '/run', 'POST', {})).status, 201);
+  await until(() => renewing, n => n >= 1);
+  const receipt = await post(f.h, f.id, inGroup('现在情况怎么样？', 'ou_bob'));
+  // The message does not take the chat from the timer: no turn starts while the timer's renewal runs.
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(f.h.store.get('SELECT count(*) n FROM channel_service_turns WHERE chat_id=?', group.id).n, 0);
+  assert.equal(f.h.store.get('SELECT state FROM channel_inbox WHERE id=?', receipt.value.operation_id).state, 'queued');
+  release();
+  const run = await settled(f, s.id); assert.equal(run.state, 'completed', run.error);
+  // When the timer's turn opens it takes in the message already waiting for the chat (#458): one turn answers both, in order.
+  assert.equal((await finished(f.h, receipt.value.operation_id)).state, 'completed');
+  const turns = f.h.store.all('SELECT id,source_message FROM channel_service_turns WHERE chat_id=?', group.id);
+  assert.deepEqual(turns.map(turn => turn.source_message.startsWith('schedule:')), [true]);
+  assert.ok(f.h.store.get('SELECT 1 FROM channel_turn_inputs WHERE turn_id=? AND source_event=?', turns[0].id, receipt.value.operation_id), 'the message joined the timer turn');
+  assert.match(request, /群巡检任务/);
+  await until(() => cards(f, group).find(c => c.includes('定时巡检结果')));
 });
