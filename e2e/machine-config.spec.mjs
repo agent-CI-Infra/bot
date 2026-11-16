@@ -133,3 +133,185 @@ for (const width of [1440, 390]) test(`an unrefreshed default branch stays unkno
     expect(refreshes).toBe(2); expect(configures).toBe(0); expect(f.manager.projects.own('101').cpus).toBe(3);
   } finally { await f.close(); }
 });
+
+// A number the field cannot accept must be refused, never read as an explicit "follow the global default".
+test('an unparseable number is refused with a field error instead of clearing the project override', async ({ page }) => {
+  const f = await fixture();
+  try {
+    await login(page, f);
+    let configures = 0;
+    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) configures++; });
+    const cpu = page.getByLabel('CPU（核）', { exact: true }), error = configField(page, 'CPU（核）').locator('.machine-config-error');
+    await expect(cpu).toHaveValue('3');
+    // Letters typed into a number input never reach .value, so the field looks empty although the user typed something.
+    await cpu.fill(''); await page.keyboard.type('abc');
+    await expect(cpu).toHaveValue('');
+    await consoleSave(page).click();
+    await expect(error).toBeVisible(); await expect(error).toHaveText('这个字段只能填数字');
+    await expect(cpu).toHaveAttribute('aria-invalid', 'true');
+    expect(configures).toBe(0);
+    expect(f.manager.projects.own('101').cpus).toBe(3);
+    await cpu.fill('5');
+    await expect(error).toBeHidden();
+    await expect(cpu).toHaveAttribute('aria-invalid', 'false');
+    await consoleSave(page).click();
+    await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
+    expect(f.manager.projects.own('101').cpus).toBe(5);
+  } finally { await f.close(); }
+});
+
+test('an explicitly cleared resource field says it follows the global default and saves null', async ({ page }) => {
+  const f = await fixture();
+  try {
+    await login(page, f);
+    let spec = null;
+    page.on('request', request => {
+      if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) spec = JSON.parse(request.postData()).spec;
+    });
+    const cpu = page.getByLabel('CPU（核）', { exact: true }), field = configField(page, 'CPU（核）'), follow = field.locator('.machine-config-follow');
+    await expect(follow).toBeHidden();
+    await cpu.fill('');
+    await expect(follow).toBeVisible(); await expect(follow).toHaveText('留空即跟随全局默认');
+    await consoleSave(page).click();
+    await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
+    expect(spec).toEqual({ cpus: null });
+  } finally { await f.close(); }
+});
+
+test('a rejected entry can be cleared explicitly, and that clear follows the global default', async ({ page }) => {
+  const f = await fixture();
+  try {
+    await login(page, f);
+    let spec = null;
+    page.on('request', request => {
+      if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) spec = JSON.parse(request.postData()).spec;
+    });
+    const cpu = page.getByLabel('CPU（核）', { exact: true }), field = configField(page, 'CPU（核）');
+    await cpu.fill(''); await page.keyboard.type('abc');
+    await expect(field.locator('.machine-config-error')).toBeVisible();
+    await expect(field.locator('.machine-config-follow')).toBeHidden();
+    await field.getByRole('button', { name: '清空并跟随全局默认', exact: true }).click();
+    await expect(field.locator('.machine-config-error')).toBeHidden();
+    await expect(field.locator('.machine-config-follow')).toBeVisible();
+    await expect(cpu).toHaveValue('');
+    await expect(cpu).not.toHaveAttribute('aria-invalid', 'true');
+    await consoleSave(page).click();
+    await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
+    expect(spec).toEqual({ cpus: null });
+  } finally { await f.close(); }
+});
+
+test('a repository-overridden resource says clearing cannot change it, and sends nothing', async ({ page }) => {
+  const f = await fixture();
+  try {
+    await login(page, f);
+    let spec = null;
+    page.on('request', request => {
+      if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) spec = JSON.parse(request.postData()).spec;
+    });
+    // The fixture's default branch writes .bot/computer.yaml memory_mb: 8192, so there is no console override to clear.
+    const memory = page.getByLabel('内存（MB）', { exact: true }), field = configField(page, '内存（MB）');
+    await expect(memory).toHaveValue('8192');
+    await memory.fill('');
+    await expect(field.locator('.machine-config-follow')).toHaveText('留空不改变仓库文件里的值');
+    // Nothing to save: the console has no override for this resource, so the clear is a no-op.
+    await expect(consoleSave(page)).toBeHidden();
+    // A real console change saves on its own, and the cleared repository field is not sent as null.
+    await page.getByLabel('CPU（核）', { exact: true }).fill('5');
+    await consoleSave(page).click();
+    await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
+    expect(spec).toEqual({ cpus: 5 });
+    // Text that cannot be parsed is still refused, and it says clearing would not change the repository value either.
+    await memory.fill(''); await page.keyboard.type('abc');
+    await expect(field.locator('.machine-config-error')).toHaveText('这个字段只能填数字；清空不会改变仓库文件里的值');
+    await expect(memory).toHaveAttribute('aria-invalid', 'true');
+    await expect(field.getByRole('button', { name: '清空输入', exact: true })).toBeVisible();
+  } finally { await f.close(); }
+});
+
+// A refusal must also survive the paths that look like an explicit clear: a paste fires `beforeinput` with the refused
+// text and then `input` with an empty value, and Backspace in an already empty field fires only a delete (#903).
+test('a pasted non-number is refused, sends no configure and keeps the saved spec', async ({ page, context }) => {
+  const f = await fixture();
+  try {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await login(page, f);
+    let configures = 0;
+    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) configures++; });
+    const cpu = page.getByLabel('CPU（核）', { exact: true }), field = configField(page, 'CPU（核）'), error = field.locator('.machine-config-error');
+    await cpu.fill('');
+    await page.evaluate(() => navigator.clipboard.writeText('abc'));
+    await cpu.click(); await page.keyboard.press('Control+V');
+    await expect(cpu).toHaveValue('');
+    await expect(error).toBeVisible(); await expect(error).toHaveText('这个字段只能填数字');
+    await expect(cpu).toHaveAttribute('aria-invalid', 'true');
+    await expect(field.locator('.machine-config-follow')).toBeHidden();
+    await consoleSave(page).click();
+    expect(configures).toBe(0);
+    expect(f.manager.projects.own('101').cpus).toBe(3);
+    // A value the field accepts ends the refusal, and that value saves normally.
+    await cpu.fill('6');
+    await expect(error).toBeHidden();
+    await expect(cpu).toHaveAttribute('aria-invalid', 'false');
+    await consoleSave(page).click();
+    await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
+    expect(configures).toBe(1);
+    expect(f.manager.projects.own('101').cpus).toBe(6);
+  } finally { await f.close(); }
+});
+
+test('Backspace in a refused empty field keeps the refusal, sends no configure and keeps the saved spec', async ({ page }) => {
+  const f = await fixture();
+  try {
+    await login(page, f);
+    let configures = 0;
+    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) configures++; });
+    const cpu = page.getByLabel('CPU（核）', { exact: true }), field = configField(page, 'CPU（核）'), error = field.locator('.machine-config-error');
+    await cpu.fill(''); await page.keyboard.type('abc');
+    await expect(error).toBeVisible();
+    // The field is already empty, so this Backspace removes nothing: it must not pass for an explicit clear.
+    await page.keyboard.press('Backspace');
+    await expect(error).toBeVisible(); await expect(error).toHaveText('这个字段只能填数字');
+    await expect(cpu).toHaveValue('');
+    await expect(cpu).toHaveAttribute('aria-invalid', 'true');
+    await consoleSave(page).click();
+    expect(configures).toBe(0);
+    expect(f.manager.projects.own('101').cpus).toBe(3);
+    // The explicit clear button is the way out of a refused field.
+    await field.getByRole('button', { name: '清空并跟随全局默认', exact: true }).click();
+    await expect(error).toBeHidden();
+    await expect(field.locator('.machine-config-follow')).toHaveText('留空即跟随全局默认');
+  } finally { await f.close(); }
+});
+
+// A paste over the saved value drops the selection together with the discarded text, so the field ends up empty
+// although the entry was refused; that empty field must not pass for an explicit clear (#903 review B1).
+test('a non-number pasted over the saved value keeps the refusal, sends no configure and keeps the saved spec', async ({ page, context }) => {
+  const f = await fixture();
+  try {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await login(page, f);
+    let configures = 0;
+    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) configures++; });
+    const cpu = page.getByLabel('CPU（核）', { exact: true }), field = configField(page, 'CPU（核）'), error = field.locator('.machine-config-error');
+    await expect(cpu).toHaveValue('3');
+    await page.evaluate(() => navigator.clipboard.writeText('abc'));
+    await cpu.click(); await page.keyboard.press('Control+a');
+    await page.keyboard.press('Control+v');
+    // Chromium discards the paste and with it the selection, so the value is empty — yet nothing was explicitly cleared.
+    await expect(cpu).toHaveValue('');
+    await expect(error).toBeVisible(); await expect(error).toHaveText('这个字段只能填数字');
+    await expect(cpu).toHaveAttribute('aria-invalid', 'true');
+    await expect(field.locator('.machine-config-follow')).toBeHidden();
+    await consoleSave(page).click();
+    expect(configures).toBe(0);
+    expect(f.manager.projects.own('101').cpus).toBe(3);
+    // A value the field accepts ends the refusal, and only then does a save go out.
+    await cpu.fill('4');
+    await expect(error).toBeHidden();
+    await consoleSave(page).click();
+    await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
+    expect(configures).toBe(1);
+    expect(f.manager.projects.own('101').cpus).toBe(4);
+  } finally { await f.close(); }
+});
