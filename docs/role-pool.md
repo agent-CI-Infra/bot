@@ -60,13 +60,15 @@ Project work roles, the management assistant and Feishu group bindings (whose le
 | Platform | `delegation` | deny / allow | Assign another enabled role; a group hands work to the project Manager. Own tasks need no delegation. |
 | Platform | `project_tasks` | none / read / write | Inspect other tasks; write also modifies tasks and sends coordination/scheduling changes. Received notices and own task progress are basic. |
 | Platform | `project_memory` | none / read / write | Read shared knowledge or propose knowledge changes through the existing validation. |
-| Platform | `project_configuration` | none / read / write | Query or change supported project settings and role definitions through the management service. |
-| Platform | `schedules` | none / read / write | Query or change project schedules and notification subscriptions. Destination checks still apply. |
+| Platform | `project_configuration` | none / read / write | Assistants only (the management assistant and group bindings): query or change supported project settings and role definitions through the management service. |
+| Platform | `schedules` | none / read / write | Assistants only: query or change project schedules and notification subscriptions. Destination checks still apply. |
 | GitHub | `github_issues` | none / read / write | View Issues; write offers `github_write` on Issue routes: create, edit and close Issues, comment, labels, assignees, milestones. |
 | GitHub | `github_pull_requests` | none / read / write | View PRs/diffs; write offers `github_write` on pull request routes: open and edit PRs, comment, reviews (including approval), review requests. |
 | GitHub | `github_actions` | none / read | View workflows, runs, jobs and logs. The failure-analysis rerun is a delivery governed by the work type. |
 | GitHub | `github_contents` | none / read / write | Read code; write offers `github_write` on Contents routes: files, Git objects and refs, merging PRs. |
 | GitHub | `github_checks`, `github_statuses` | none / read | Read check runs/suites and commit statuses, including nested commit routes. No status/check write tool. |
+
+`project_configuration` and `schedules` govern the management tools, which only assistants have, so a project role's editor does not offer them (#850); values saved earlier stay and still do nothing. The project role editor lists the items that differ from the role's defaults and folds the rest under 「与默认相同」. GitHub write items are bounded by the project's capability ceiling: Issues and Pull requests need `comment`, Contents `develop` (see [workflows](workflows.md#项目能力上限)).
 
 Workflow YAML reads belong to Contents. Workflow-file publication still requires the existing candidate/publication gates and GitHub App Workflows authorization; there is no separate role-level workflow toggle. The dedicated gate-onboarding confirmation remains unchanged.
 

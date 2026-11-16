@@ -196,35 +196,50 @@ function roleBackendRuntimeBox(role, state) {
   return box;
 }
 const permissionModeLabels = { none: '无权限', read: '只读', write: '读写', allow: '允许', deny: '不允许', custom: '待迁移：保留原有操作' };
-function permissionEditor(permissions, items, change, prefix = '', fixed = false) {
+// `defaults`, when given (a project role's built-in permissions), shows the items that differ from them and folds the rest
+// under one 「与默认相同」 summary (#850); without it every item is listed, as the service roles page does.
+function permissionEditor(permissions, items, change, prefix = '', fixed = false, defaults = null) {
   const box = element('div', '', 'role-permissions');
   box.append(note('基础能力默认可用：处理自己的任务、读取当前会话、使用自己的技能与记忆、记录进度和提交本次结果。项目范围、运行契约和外部授权仍会检查。'));
   if (fixed) box.append(note('全部能力已允许；实际执行仍受当前用户授权、项目范围和入口支持情况约束。'));
-  for (const [group, title] of [['platform', '平台能力'], ['github', 'GitHub']]) {
-    const section = element('fieldset', '', 'role-permission-group'); section.append(element('legend', title));
-    if (group === 'github') section.append(note('只读开放 github_read 等读取工具；读写还开放 github_write，由控制面以 bot 身份按 GitHub REST 接口写入，每次只签发这一项资源的短期写令牌，并转义 @、脱敏和记录审计。默认只有 Manager 可写，且只写它正在处理的事件所在仓库。检视结论、测试通过的 PR、Actions 重跑与失败提报、发行说明和门禁方案属于框架交付，由项目工作类型的写入控制，不需要这里的写权限。角色权限不会扩大 GitHub App 安装授权。'));
-    for (const item of items.filter(item => item.group === group)) {
-      const choices = item.modes.map(mode => [mode, permissionModeLabels[mode]]);
-      if (permissions[item.id] === 'custom') choices.unshift(['custom', permissionModeLabels.custom, true]);
-      const control = roleSelect(prefix + item.name + (prefix ? '权限' : ''), permissions[item.id], choices, value => { permissions[item.id] = value; change(); });
-      control.disabled = fixed || item.supported === false;
-      const row = element('div', '', 'role-permission-row'); row.append(field(item.name, control), note(item.detail));
-      if (item.supported === false) row.append(note('当前没有通用角色执行工具；仅在已有专用入口提供。'));
-      if (permissions[item.id] === 'custom') {
-        const detail = item.id === 'computer' ? `文件：${permissionModeLabels[permissions.legacy_repository]}；命令：${permissionModeLabels[permissions.legacy_commands]}`
-          : item.id === 'project_tasks' ? `其他任务：${permissionModeLabels[permissions.legacy_project_tasks || 'none']}；协调：${permissionModeLabels[permissions.legacy_coordination || 'none']}；调度：${permissionModeLabels[permissions.legacy_nomination || 'deny']}；旧派活附带任务控制：${permissionModeLabels[permissions.legacy_delegation_controls || 'deny']}`
-          : Object.entries(permissions).filter(([key,value]) => key.startsWith('legacy_' + item.id.slice(7) + '_') && value === 'allow')
-            .map(([key]) => ({ read: '读取', create: '创建', reply: '评论', labels: '分类标签', publish: '发布候选', report: '追加报障', write: '全部写入' })[key.split('_').at(-1)]).filter(Boolean).join('、');
-        row.append(note('旧配置保留的能力：' + (detail || '无') + '。选择新等级后按该等级生效，新增能力不会静默启用。'));
-      }
-      section.append(row);
+  const same = item => !!defaults && Object.hasOwn(defaults, item.id) && permissions[item.id] === defaults[item.id];
+  const groups = (shown, host) => {
+    for (const [group, title] of [['platform', '平台能力'], ['github', 'GitHub']]) {
+      const listed = shown.filter(item => item.group === group); if (!listed.length) continue;
+      const section = element('fieldset', '', 'role-permission-group'); section.append(element('legend', title));
+      if (group === 'github') section.append(note('只读开放 github_read 等读取工具；读写还开放 github_write，由控制面以 bot 身份按 GitHub REST 接口写入，每次只签发这一项资源的短期写令牌，并转义 @、脱敏和记录审计。默认只有 Manager 可写，且只写它正在处理的事件所在仓库。检视结论、测试通过的 PR、Actions 重跑与失败提报、发行说明和门禁方案属于框架交付，由项目工作类型的写入控制，不需要这里的写权限。角色权限不会扩大 GitHub App 安装授权。读写还以项目能力上限为顶：「可评论和打标签」只到 Issue 和 Pull Request，「可开发并开 PR」才含 Contents。'));
+      for (const item of listed) section.append(permissionRow(permissions, item, change, prefix, fixed));
+      host.append(section);
     }
-    box.append(section);
+  };
+  const differing = items.filter(item => !same(item)), rest = items.filter(same);
+  if (defaults && !differing.length) box.append(note('全部权限与这个角色的默认值相同。'));
+  groups(differing, box);
+  if (rest.length) {
+    const fold = element('details', '', 'fold role-permission-defaults'); fold.setAttribute('data-testid', 'role-permission-defaults');
+    fold.append(element('summary', `与默认相同的 ${rest.length} 项`)); groups(rest, fold); box.append(fold);
   }
   return box;
 }
+function permissionRow(permissions, item, change, prefix, fixed) {
+  const choices = item.modes.map(mode => [mode, permissionModeLabels[mode]]);
+  if (permissions[item.id] === 'custom') choices.unshift(['custom', permissionModeLabels.custom, true]);
+  const control = roleSelect(prefix + item.name + (prefix ? '权限' : ''), permissions[item.id], choices, value => { permissions[item.id] = value; change(); });
+  control.disabled = fixed || item.supported === false;
+  const row = element('div', '', 'role-permission-row'); row.append(field(item.name, control), note(item.detail));
+  if (item.supported === false) row.append(note('当前没有通用角色执行工具；仅在已有专用入口提供。'));
+  if (permissions[item.id] === 'custom') {
+    const detail = item.id === 'computer' ? `文件：${permissionModeLabels[permissions.legacy_repository]}；命令：${permissionModeLabels[permissions.legacy_commands]}`
+      : item.id === 'project_tasks' ? `其他任务：${permissionModeLabels[permissions.legacy_project_tasks || 'none']}；协调：${permissionModeLabels[permissions.legacy_coordination || 'none']}；调度：${permissionModeLabels[permissions.legacy_nomination || 'deny']}；旧派活附带任务控制：${permissionModeLabels[permissions.legacy_delegation_controls || 'deny']}`
+      : Object.entries(permissions).filter(([key,value]) => key.startsWith('legacy_' + item.id.slice(7) + '_') && value === 'allow')
+        .map(([key]) => ({ read: '读取', create: '创建', reply: '评论', labels: '分类标签', publish: '发布候选', report: '追加报障', write: '全部写入' })[key.split('_').at(-1)]).filter(Boolean).join('、');
+    row.append(note('旧配置保留的能力：' + (detail || '无') + '。选择新等级后按该等级生效，新增能力不会静默启用。'));
+  }
+  return row;
+}
 function rolePermissionEditor(role, state) {
-  return permissionEditor(role.permissions, state.data.permission_items || [], () => markRoleDirty(state), role.role_id + ' ');
+  const defaults = state.data.permission_defaults?.[role.role_id] ?? state.data.role_defaults?.[role.role_id]?.permissions ?? null;
+  return permissionEditor(role.permissions, state.data.permission_items || [], () => markRoleDirty(state), role.role_id + ' ', false, defaults);
 }
 // Arrays of named records merge by identity; order-sensitive lists (tools, dependencies, files) stay atomic.
 // Undefined means removal. A conflicting removal cannot silently delete another editor's changes.

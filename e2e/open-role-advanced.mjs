@@ -42,6 +42,9 @@ export async function openRoleFormAdvanced(page) {
   }
   await fold.evaluate(el => { el.open = true; el.setAttribute('open', ''); });
   await expect.poll(async () => fold.evaluate(el => el.open)).toBe(true);
+  // Permissions equal to the role's defaults are folded under 「与默认相同」 (#850); tests edit those too.
+  const defaults = fold.getByTestId('role-permission-defaults');
+  if (await defaults.count()) await defaults.evaluate(el => { el.open = true; });
 }
 
 export function roleHash(name, view) {

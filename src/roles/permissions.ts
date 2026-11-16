@@ -67,6 +67,13 @@ export const permissionItems: PermissionItem[] = [
   github(access('github_statuses','Commit Status',githubReads,[],'读取提交状态；尚未提供发布状态的角色工具。')),
 ];
 export const servicePermissionIds = permissionItems.map(item => item.id);
+/**
+ * The items a project role's editor offers (#850). project_configuration and schedules only govern the management tools,
+ * which exist for the management assistant and group assistants, never in a project role's run; saved values stay as they
+ * are and keep doing nothing.
+ */
+export const assistantOnlyItems = ['project_configuration', 'schedules'];
+export const projectRoleItems = permissionItems.filter(item => !assistantOnlyItems.includes(item.id));
 export const githubResources = ['issues','pull_requests','actions','contents','checks','statuses'] as const;
 export type GitHubResource = typeof githubResources[number];
 const keyOf = (resource: string) => 'github_' + resource;

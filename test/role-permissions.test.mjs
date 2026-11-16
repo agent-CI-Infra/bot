@@ -125,3 +125,22 @@ test('a resource grant cannot widen a running snapshot, including two concurrent
   assert.deepEqual(scopes,[['issues'],['pull_requests']]);
   assert.ok(taskReadScopes(s,task).includes('pull_requests'),'a later independent run may use the new grant');
 });
+
+test('a project role editor offers no item that does nothing for project roles, and lists each role\'s defaults (#850)', async t => {
+  const { harness, setup, account, repository } = await import('./helpers.mjs');
+  const { projectCapabilities } = await import('../dist/identity/storage.js');
+  const { TaskEngine } = await import('../dist/agent/engine.js');
+  // The roles routes are served with a task engine.
+  const h = await harness(t, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  const response = await admin('/api/repositories/101/roles'), view = response.value; assert.equal(response.status, 200, JSON.stringify(view));
+  const ids = view.permission_items.map(item => item.id);
+  // The management tools these items govern exist only for assistants; the service roles page still offers them.
+  for (const id of ['project_configuration', 'schedules']) assert.ok(!ids.includes(id), id);
+  assert.ok(ids.includes('computer') && ids.includes('github_contents'));
+  assert.ok((await admin('/api/service-roles')).value.permission_items.some(item => item.id === 'schedules'));
+  // Built-in roles read their defaults from role_defaults; permission_defaults adds only the project's own roles.
+  for (const role of view.configuration.roles) assert.deepEqual(view.role_defaults[role.role_id].permissions, defaultPermissions(role.role_id, role.kind), role.role_id);
+  assert.deepEqual(view.permission_defaults, {});
+  // roles.publish was never checked anywhere.
+  assert.ok(!projectCapabilities.includes('roles.publish'));
+});
