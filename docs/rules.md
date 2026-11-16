@@ -1,86 +1,64 @@
-# 用仓库文件调整规则
+# 在角色配置里调整行为
 
-本文写给安装了这套 bot 的代码仓用户。在仓库默认分支放下面这些文件，就能改变 bot 在这个仓库里检视、打标签、开发和准备虚拟电脑的方式；一份都不放时，bot 使用内置规则。最省事的做法是把内置原文复制到对应路径，改好后合入默认分支。
+本文写给安装了这套 bot 的代码仓的管理员。bot 在一个仓库里怎样检视、打标签、开发和准备虚拟电脑，都在控制台的项目配置里调整，只有这一处来源：
 
-## 生效顺序
+| 要调整的行为 | 在哪里改 | 管理命令 |
+| --- | --- | --- |
+| 行为指南、检视 Issue、检视 PR、开发与跟进 bot PR、标签用法 | 「角色 → Manager」的 Manager 提示词，对应章节 `guide`、`review.issue`、`review.pr`、`development`、`labels` | `manager.update` |
+| 各角色的提示词、模型、权限和预算 | 「角色」页的各个角色 | `roles.update` |
+| 检视标签、开发标签的名字 | 「项目设置 → 基本 → 标签」 | `project.update` 的 `review_label`、`development_label` |
+| 虚拟电脑的资源、软件包、环境变量和初始化脚本 | 「机器配置」 | `POST /api/environments/:id/configure` |
+| 仓库自己的 skill | 仓库默认分支的 `.agents/skills/<名称>/SKILL.md` | 改仓库文件 |
 
-每份规则文件分三层，越往后优先级越高：
+章节没写时用内置原文，就是 [`docs/prompts/`](prompts/README.md) 下的 Markdown，见[项目 Manager 与工作类型](workflows.md)。保存只影响之后新建的任务，已经开始的任务按开始时的配置做完。
 
-1. **内置默认**：打标签、Issue 检视、PR 检视和 Issue 开发四份规则就是 [`docs/prompts/`](prompts/README.md) 下的 Markdown 原文；`.bot/guide.md` 和 `.bot/computer.yaml` 的内置内容在 [`src/rules/service.ts`](../src/rules/service.ts)。
-2. **项目控制台**：管理员在项目设置里给这份文件加的控制台覆盖。
-3. **仓库文件**：仓库默认分支上的同名文件。
+## 仓库里的 `.bot/` 文件不再读取
 
-- 文本规则以生效那一层的整份内容为准，不和其他层合并。只想改一句，也要复制整份内置原文再改。`.bot/computer.yaml` 例外，按字段合并，见[机器配置](#机器配置)。
-- 仓库里已经有某份文件时，管理员在控制台「添加控制台覆盖」不会悄悄盖过它；控制台内容要等仓库删掉这份文件后才生效。
-- 规则从分支读，不从正在处理的 PR 的提交里读。正在检视的 PR 即使改了这些文件，也不会成为这一次任务的规则；改动合入后，之后的任务才按新内容执行。PR 改动 `.bot/` 或 `.agents/skills/` 下的文件（含移动、删除）时，检视总结会写明这些文件改变了 bot 的行为，需要人来决定。
-- 各类任务读哪个分支：
-  - PR 检视、bot 按检视意见修订自己的 PR：默认分支。
-  - Issue 检视、Issue 开发：项目的「基准分支」；管理员没设时就是默认分支。
-  - Issue 开发继续修改 bot 已经为它开的 PR：代码检出这条 PR 的 head，规则从这条 PR 的基准分支读。
-  - 「角色」页刷新规则来源时：默认分支。
-- 模型收到的是每份文件生效后的全文，每份只出现一次，并注明来自哪一层；`.bot/computer.yaml` 只用来配置虚拟电脑，不发给模型。仓库文件生效后，被它盖过的控制台内容（包括早期版本从「项目检视指引」迁移过来的内容）不会再发给模型。
-- 每份文件当前哪一层生效，可以请管理员在项目的「角色」页查看。
-- `issue-review.md`、`pr-review.md`、`issue-development.md` 分别是检视 Issue、检视 PR 和开发（含跟进 bot PR）的提示词；控制台层就是 Manager 提示词里的同名章节，见[项目 Manager 与工作类型](workflows.md)。
+早期版本从仓库默认分支读取 `.bot/guide.md`、`.bot/rules/*.md` 和 `.bot/computer.yaml`，并允许管理员在控制台给它们加「控制台覆盖」。这三层已合并成上面的单一来源（#935）：
 
-## 文件一览
+- **升级时一次性导入**：升级后第一次启动时，每个已有项目按当时生效的那一层导入。仓库里有的规则文件写进对应的 Manager 章节，章节开头注明「由 `.bot/<文件>` 导入（提交 <SHA>）」；`labels.md` 第一行的 `review_label` 和 `issue-development.md` 第一行的 `development_label` 成为项目设置里的标签名，这一行从章节里去掉；`.bot/computer.yaml` 的字段并入项目的机器配置。导入前后 bot 的行为相同。
+- 升级时还没读过仓库规则的项目，在 bot 第一次为它读取仓库时导入一次（任务开始或「刷新默认分支文件」）。升级后新加的项目不导入，从内置原文开始。
+- 已经开始的任务保留它读到的规则原文，做完为止。
+- 每个项目的导入结果在「角色 → Manager」的「.bot/ 规则文件导入记录」里：导入了哪些文件、写进了哪些章节、标签名、机器配置字段和需要留意的问题，审计记录为 `rules.imported`。
+- 之后修改仓库里的 `.bot/` 文件不再影响 bot。仓库还留着这些文件时，项目设置和「角色 → Manager」会提示它们已迁入角色配置、可以删除；PR 改动 `.bot/` 也不再被检视总结标为「改变 bot 行为」。
+- 控制台覆盖层和 `rules.update` 管理命令已删除：旧的 `PUT /api/repositories/:id/rules` 和 `rules.update` 返回 `410 rules_update_removed`，说明改用 `manager.update`、`roles.update` 和项目设置；`POST /api/repositories/:id/rules/apply-computer` 同样返回 410。
+- 今后不再新增 `.bot/` 覆盖，见[开发约定](development.md)。
 
-| 路径 | 作用 | 内置原文 | 覆盖方式 |
-| --- | --- | --- | --- |
-| `.bot/guide.md` | 总体行为指南 | 一段英文通用要求 | 整份替换 |
-| `.bot/rules/labels.md` | 检视标签和分类标签 | [`labels.md`](prompts/labels.md) | 整份替换，`review_label` 行见[检视标签](#检视标签) |
-| `.bot/rules/issue-review.md` | 新 Issue 的检视与授权意图判断 | [`issue-review.md`](prompts/issue-review.md) | 整份替换 |
-| `.bot/rules/pr-review.md` | PR 检视 | [`pr-review.md`](prompts/pr-review.md) | 整份替换 |
-| `.bot/rules/issue-development.md` | 按 Issue 改代码、测试并开 PR | [`issue-development.md`](prompts/issue-development.md) | 整份替换，`development_label` 行见[开发标签](#开发标签) |
-| `.bot/computer.yaml` | 虚拟电脑的资源、软件包、环境变量和初始化脚本 | 空（`{}`） | 按字段合并进项目的机器配置 |
-| `.agents/skills/<名称>/SKILL.md` | 仓库追加的文本 skill | 无 | 追加 |
+## 仓库 skill
 
-只有表里这些路径算规则文件。`.agents/skills/` 下各级目录里的 `SKILL.md` 是按需读取的 skill：agent 先只看到每个 skill 的名称、用途（front matter 的 `description`，没有时取第一行）和路径，做到相应工作时再读全文；只加载文本，不加载 JS 扩展，最多 32 份。`.bot/` 下的行为指南和规则则每个任务都直接交给模型。
+`.agents/skills/` 下各级目录里的 `SKILL.md` 是仓库的 skill，bot 像普通 agent 一样读取并遵循：
 
-## 通用限制
+- 规则从分支读，不从正在处理的 PR 的提交里读：PR 检视和 bot 按检视意见修订自己的 PR 读默认分支；Issue 检视和 Issue 开发读项目的「基准分支」（没设时就是默认分支）；继续修改 bot 已经为 Issue 开的 PR 时读这条 PR 的基准分支。
+- agent 先只看到每个 skill 的名称、用途（front matter 的 `description`，没有时取第一行）和路径，做到相应工作时再读全文。只加载文本，不加载 JS 扩展，最多 32 份；单份不限大小。
+- PR 改动 `.agents/skills/` 下的文件（含移动、删除）时，检视总结会写明这些文件改变了 bot 的行为，需要人来决定。
+- 「角色 → Manager」的「仓库 skill」列出默认分支上的 skill，可以刷新和查看全文。
 
-- 规则文件和 skill 不限大小，出错时整份拒绝，不会截断。控制台单次保存受管理接口的请求大小限制（1 MiB，超出时报 `payload_too_large`）。`.bot/` 下的规则原文和 skill 索引每个任务都直接交给模型，它们和任务摘要合计超过 2 MiB 时，任务停下并报 `agent_context_too_large`；skill 全文、讨论和改动文件放在工作区里由 agent 按需读取，不计入。
-- 规则文件是文本，不能含 NUL 字节。
-- 规则文件必须是普通文件，不能是符号链接或子模块；`.bot/` 下和 skill 路径上的其他文件也不能是符号链接。
-- 出错的文件整份拒绝，不会被截断、跳过或当作不存在：
-  - 控制台保存时直接报错，内容不保存：含 NUL 时报 `invalid_rule_content`，标签名不合法时报 `invalid_bot_label`。
-  - 仓库文件出错时，管理员在「角色」页刷新默认分支文件会看到错误码。读到出错文件的检视和开发任务在准备阶段停下，此时还没有发评论；任务状态显示「配置待补」，原因归为「仓库内容或规则」，任务详情写明具体错误码和出错的文件（skill 数量超限时写明总数）：
+**边界**：skill 只能指导与本仓库相关的工作，不能扩大权限或改变平台规则。系统提示词写明了这一点；下面这些照常由控制面拒绝并记录，不因 skill 的内容放开：
 
-    | 错误码 | 原因 |
-    | --- | --- |
-    | `invalid_rule_content` | 文件含 NUL 字节 |
-    | `invalid_bot_label` | `review_label` 或 `development_label` 不合法 |
-    | `invalid_bot_computer` | `computer.yaml` 不是映射，或写了不支持的字段 |
-    | `invalid_bot_rule_file` | 规则文件是符号链接、子模块等，不是普通文件 |
-    | `too_many_bot_skills` | `.agents/skills/` 下的 `SKILL.md` 超过 32 份 |
-    | `unsafe_bot_rule` | 检出的代码里 `.bot/` 或 skill 路径上有符号链接 |
+- 读取或外发凭据、令牌：agent 只拿得到本仓库的只读令牌，没有能写入的 GitHub 凭据和模型凭据；
+- 访问其他仓库：GitHub 读写工具只对本项目的仓库生效；
+- 绕过平台权限、能力上限或发布通道：评论、标签、分支和 PR 只能经控制面的工具发布，每次写入按角色的 GitHub 写权限和项目能力上限检查，`github_write` 永远不能改 `.github/workflows/`；
+- 修改平台配置：任务里没有管理命令。
 
-    修好对应分支上的文件后，等待中的任务会自动重试，按新内容继续。
+出错时任务在准备阶段停下，状态显示「配置待补」，原因归为「仓库内容或规则」：
 
-## 检视标签
+| 错误码 | 原因 |
+| --- | --- |
+| `invalid_rule_content` | `SKILL.md` 含 NUL 字节 |
+| `invalid_skill_file` | `SKILL.md` 是符号链接、子模块等，不是普通文件 |
+| `unsafe_skill_file` | 检出的代码里 skill 路径上有符号链接 |
+| `too_many_bot_skills` | `.agents/skills/` 下的 `SKILL.md` 超过 32 份 |
 
-在 `.bot/rules/labels.md` 里单独写一行，从行首开始：
+修好默认分支上的文件后，等待中的任务会自动重试。规则章节原文和 skill 索引每个任务都直接交给模型，它们和任务摘要合计超过 2 MiB 时，任务停下并报 `agent_context_too_large`。早期版本因 `.bot/` 文件停下的任务（`invalid_bot_label`、`invalid_bot_computer`、`invalid_bot_rule_file`、`unsafe_bot_rule`、`bot_rule_too_large`），点「重试」即可继续。
 
-```text
-review_label: bot-reviewed
-```
+## 检视标签和开发标签
 
-- 内置文件第一行就是 `review_label: bot-reviewed`。检视评论发布后，控制面给 Issue 或 PR 加上这个标签。
-- 冒号后同一行的其余内容（去掉首尾空白）就是标签名，不会读到下一行。要保留确切字符时写成 JSON 字符串：`review_label: "<name>"`，引号内按 JSON 转义。
-- 名字最长 50 个字符，不能有首尾空白（JSON 字符串里也不行），不能有控制字符。
-- 文件里出现多行时，采用第一次出现的那一行。
-- 去掉这一行、冒号后留空（`review_label:`），或写成 `review_label: ""`，就不再打检视标签。
+在「项目设置 → 基本 → 标签」里设置，或用 `project.update` 的 `review_label`、`development_label`：
 
-## 开发标签
-
-在 `.bot/rules/issue-development.md` 里单独写一行，从行首开始；内置文件把它放在第一行：
-
-```text
-development_label: bot-develop
-```
-
-- 有人（不是 App）给 Issue 加上这个标签，是[自动开发](#自动开发什么时候开始)的条件之一。比较标签名时不区分大小写。
-- 写法和限制同检视标签：可以写成 `development_label: "<name>"`；名字最长 50 个字符，不能有首尾空白和控制字符；控制面采用文件里第一次出现的这一行。
-- 去掉这一行、冒号后留空（`development_label:`），或写成 `development_label: ""`，标签名仍是 `bot-develop`。不能靠改规则关掉这道要求；不想让 bot 自动开发，请管理员把该项目的能力上限设在「可开发并开 PR」以下。
+- **检视标签**：检视评论发布后，控制面给 Issue 或 PR 加上这个标签。默认 `bot-reviewed`；留空表示不加。
+- **开发标签**：有人（不是 App）给 Issue 加上这个标签，是[自动开发](#自动开发什么时候开始)的条件之一，比较时不区分大小写。默认 `bot-develop`，不能留空：不想让 bot 自动开发，请把项目的能力上限设在「可开发并开 PR」以下。
+- 名字最长 50 个字符，不能有首尾空白和控制字符，不合法时报 `invalid_label`。
+- 模型在 `labels` 和 `development` 章节开头读到当前的标签名；agent 不能给 PR 选这两个标签。
 
 ## 自动开发什么时候开始
 
@@ -91,7 +69,7 @@ development_label: bot-develop
 
 满足这两条后，每次有人加上开发标签、以及标签在时每次检视发布，事件都会带着「开发 Issue」选项交给 Manager。Manager 读 Issue、最近一次检视的结论（是否需要改代码、Issue 是否提出了请求、原句、实现目标、是否需要人决定）、指派人和同一 Issue 上已有的任务，决定现在开发，还是不开发并新建一次检视来回复。加标签需要仓库的 triage 或写权限，所以 Manager 把它当作维护者的决定：它能回答「bot 可不可以开始」「Issue 正文里保留或认领的工作要不要交给 bot」，回答不了还没定的行为、范围或设计问题。检视提示词要求回应开发标签时先说能不能开发，不能时写明缺什么、人可以做什么，所以加了标签的人总会在 Issue 上收到回复。
 
-检视没有给出实现目标时，Manager 必须写简要说明（目标和验收标准），开发按它进行。控制面发布 PR 前会再查一次标签，被人去掉就停下。同一 Issue 同时只有一个开发任务；每次重新加标签是一次新的放行，可以在上一次开发结束后再开发。`issue-development.md` 里可以再写更严的条件（例如限定 `type`、`size`），由 bot 遵守。
+检视没有给出实现目标时，Manager 必须写简要说明（目标和验收标准），开发按它进行。控制面发布 PR 前会再查一次标签，被人去掉就停下。同一 Issue 同时只有一个开发任务；每次重新加标签是一次新的放行，可以在上一次开发结束后再开发。`development` 章节里可以再写更严的条件（例如限定 `type`、`size`），由 bot 遵守。
 
 检视认为 Issue 可以开发、但还没有人放行时，检视评论会写明在等什么：还没有人加开发标签，或者标签是 App 加的。
 
@@ -109,14 +87,7 @@ bot 开出 PR 后，下面几种情况会让它在同一个分支上继续修改
 
 ## 机器配置
 
-`.bot/computer.yaml` 是一个 YAML 映射，写出的字段合并进该项目现有的机器配置：同名字段以仓库文件为准，没写的字段保持管理员在「机器配置」里设的值。之后的任务准备时，bot 按合并后的配置调整虚拟电脑。
-
-```yaml
-cpus: 2
-memory_mb: 4096
-packages: [jq]
-setup_script: "python3 -m venv /workspace/home/venv"
-```
+在项目的「机器配置」里设置，保存后按新配置重建虚拟电脑：
 
 | 字段 | 含义与范围 |
 | --- | --- |
@@ -129,4 +100,4 @@ setup_script: "python3 -m venv /workspace/home/venv"
 | `env` | 非机密环境变量，最多 64 个；`PATH`、`HOME`、`BOT_*`、`GIT_*` 等保留名会被拒绝 |
 | `setup_script` | 初始化脚本，以项目用户身份运行；内容变化后重新运行 |
 
-写了其他字段，整份文件会被拒绝（`invalid_bot_computer`）；超出范围的值不会被调整到范围内，虚拟电脑无法按它配置，任务会停下。旧文件里的 `max_command_minutes` 会被忽略，命令不限时长。这份文件就在仓库里，不要把密钥写进 `env`。
+环境变量对仓库代码可见，不要填写密钥。

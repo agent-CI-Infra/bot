@@ -1,5 +1,4 @@
 import { taskModelEntries } from '../app/management.js';
-import { validateRuleContent } from '../rules/service.js';
 import type { ServerResponse } from 'node:http';
 import type { ActorContext } from '../identity/authorization.js';
 import { assertCurrent } from '../identity/authorization.js';
@@ -78,14 +77,12 @@ export class ManagementApi {
     const match=/^\/api\/tasks\/([^/]+)\/(retry|pause|cancel|instructions|adopt-config|contract)$/.exec(url.pathname);
     const role=/^\/api\/repositories\/([^/]+)\/roles$/.exec(url.pathname);
     const policy=/^\/api\/repositories\/([^/]+)\/policy$/.exec(url.pathname);
-    const rules=/^\/api\/repositories\/([^/]+)\/rules$/.exec(url.pathname);
-    if(!create&&!(match&&method===(match[2]==='contract'?'PATCH':'POST'))&&!(role&&method==='PUT')&&!(policy&&method==='PATCH')&&!(rules&&method==='PUT'))return;
+    if(!create&&!(match&&method===(match[2]==='contract'?'PATCH':'POST'))&&!(role&&method==='PUT')&&!(policy&&method==='PATCH'))return;
     const task=match?this.service.store.get('SELECT repository_id FROM tasks WHERE id=?',match[1]!):null;
-    const project=create?String(input.repository_id??''):role?role[1]!:rules?rules[1]!:policy?policy[1]!:String(task?.repository_id??'');
-    this.service.scope(actor,project,role?'roles.edit':policy||rules?'config.write':'tasks.write');
-    const operation=role?'roles.update':rules?'rules.update':policy?'project.update':create?'task.create':'task.'+match![2];
+    const project=create?String(input.repository_id??''):role?role[1]!:policy?policy[1]!:String(task?.repository_id??'');
+    this.service.scope(actor,project,role?'roles.edit':policy?'config.write':'tasks.write');
+    const operation=role?'roles.update':policy?'project.update':create?'task.create':'task.'+match![2];
     if(policy&&input.task_models!==undefined)taskModelEntries(input.task_models);
-    if(rules)validateRuleContent(input.content);
     let args={...input};delete args.repository_id;
     if(match?.[2]==='contract'){
       const current=this.service.store.get('SELECT revision FROM task_records WHERE task_id=?',match[1]!);
@@ -94,7 +91,6 @@ export class ManagementApi {
     const target={project_id:project,...(match?{task_id:match[1]!}:{})};
     const receipt=await this.service.submit(actor,{operation,target,arguments:args,expected_revision:this.service.revision(target),idempotency_key:'console:'+randomId(),source_conversation:'console:'+operation,source_message:actor.request_id});
     if(receipt.state!=='succeeded')fail(Number((receipt.result as Json)?.http_status??409),String((receipt.result as Json)?.error??'management_command_failed'),(receipt.result as {field?:string})?.field,(receipt.result as {detail?:Json})?.detail);
-    if(rules)return {rules:await this.service.rules.view(project),management:receipt};
     return {...receipt.result as Json,management:receipt};
   }
 }

@@ -6,7 +6,7 @@ import type { DevelopmentWait } from '../github/text.js';
 import { assigneesOf, developmentReady, reviewRequestsCode, sameLabel } from './queue.js';
 import { actionsDevelopmentAllowed, actionsReport } from '../actions/safety.js';
 import { stop } from '../agent/common.js';
-import { developmentLabel, ruleErrors } from '../rules/service.js';
+import { developmentLabel } from '../rules/service.js';
 import { workActive, eventFilters } from '../work/settings.js';
 import { recordEvent } from '../dispatch/store.js';
 import { covers, projectCeiling } from '../work/ceiling.js';
@@ -23,8 +23,8 @@ export function ownedPullRequest(store:Store,github:GitHub,task:Row,pr:any):Row{
   assertOwnedPR(row,pr,github.actorId,task.repository_id);
   return row!;
 }
-export function developmentLabelForTask(store:Store,task:Row){try{return developmentLabel(store,task.repository_id);}catch(error){const detail=(error as {detail?:string}).detail;
-  return stop(error instanceof HttpError&&ruleErrors.has(error.code)?error.code:'invalid_bot_label','waiting_configuration',`仓库 ${task.repository_id} 的开发标签配置无效${detail?'：'+detail:''}，请检查行为规则。`);}}
+// The development label is a project setting (#935), always a valid name.
+export function developmentLabelForTask(store:Store,task:Row){return developmentLabel(store,task.repository_id);}
 // The go-ahead for development: the label is on the Issue and the latest time it was added was by a user account, not
 // an app. Null without it. Who is assigned is a fact for the Manager, not a condition.
 export async function developmentApproved(context:DevelopmentContext,github:GitHub,task:Row):Promise<GoAhead|null>{

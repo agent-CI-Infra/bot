@@ -282,7 +282,7 @@ export class OnboardingApply {
   /**
    * The conventions as their own section, appended (never replacing anything) to the Manager prompt and to the prompt of each
    * enabled role: the saved dispatch prompt when the project has one, else the preamble of the Manager prompt, which the
-   * dispatch prompt starts with. A repository's `.bot/` files override neither. A prompt that has this version's section keeps it.
+   * dispatch prompt starts with. A prompt that has this version's section keeps it.
    */
   private async conventions(c: ItemContext): Promise<Outcome> {
     const version = Number(c.application.version), mark = conventionsMark(version), block = conventionsBlock(c.plan, version, String(c.application.confirmed_at).slice(0, 10));

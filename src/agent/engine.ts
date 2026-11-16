@@ -51,7 +51,7 @@ import {roleBackendWorkspace} from '../roles/workspace.js';
 import {recoverWithManager} from '../roles/manager-recovery.js';
 import { automaticState, isAttemptFailure } from './failures.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
-import { RuleService, resolveRules, behaviorPath, ruleErrors, skillIndex, computerRequest } from '../rules/service.js';
+import { RuleService, resolveRules, behaviorPath, ruleErrors, skillIndex, computerRequest, projectLabels } from '../rules/service.js';
 import { repositoryConcurrency } from '../app/settings.js';
 import { ReviewUpdated, latestReviewSession, saveReviewSession, pendingReviewUpdates, pruneReviewSessions, reviewObjectState, reviewUpdateLog } from '../review/sessions.js';
 import { continueFinishedReview, continuationContext, resumeFinishedReviews } from '../review/continuation.js';
@@ -73,6 +73,9 @@ export { actionableFinding, discussionRequests } from '../review/development.js'
 export type { RevisionRequest } from '../review/development.js';
 
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
+// The policy a task resolves its rules with, read after the rule fetch: a project's pending .bot/ import (#935) runs in
+// that fetch and writes the imported texts into the project's policy and the snapshots of its unfinished tasks.
+const rulePolicy=(store:Store,task:Row)=>taskConfiguration(store,task)?.policy??store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
 const automaticRetry=new Set(['retry_wait','waiting_configuration','waiting_environment','waiting_pr_head']);
 const retryCycleMs=8*60*60*1000;
 // Reviews and reply tasks answer on the object; development publishes a branch and PR.
@@ -490,10 +493,10 @@ export class TaskEngine {
         const mirror=this.gitCache&&github.cloneUrl?await this.gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[target.sha,ruleSha],refs:[`refs/heads/${github.defaultBranch}`]}):undefined;
         let effectiveRules:ReturnType<typeof resolveRules>;
         try{
-          const ruleFiles=await this.rules.fetch(github,ruleSha,mirror);this.rules.cache(task.repository_id,ruleSha,ruleFiles);
-          effectiveRules=resolveRules(policy,executionRuleFiles(this.store,task,ruleFiles,ruleSha),this.rules.consoleComputer(task.repository_id,environment.computer));
+          const ruleFiles=await this.rules.fetch(github,ruleSha,mirror,task.repository_id);this.rules.cache(task.repository_id,ruleSha,ruleFiles);
+          effectiveRules=resolveRules(rulePolicy(this.store,task),executionRuleFiles(this.store,task,ruleFiles,ruleSha),this.rules.consoleComputer(task.repository_id,environment.computer),projectLabels(this.store,task.repository_id));
         }catch(error){
-          if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库行为规则失败（${error.code}）${detail?'：'+detail:''}，请检查 .bot/ 和 .agents/skills/ 配置。`);}
+          if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库 skill 失败（${error.code}）${detail?'：'+detail:''}，请检查 .agents/skills/。`);}
           throw error;
         }
         // Event work only reads the repository: its worktree is one of the commit it may share with other readers, bound when it
@@ -560,11 +563,11 @@ export class TaskEngine {
         // nothing is published; the retry after the fix then prepares the new commit without earlier writes in the way.
         let effectiveRules:ReturnType<typeof resolveRules>;
         try{
-          const ruleFiles=await this.rules.fetch(github,ruleSha,mirror);
+          const ruleFiles=await this.rules.fetch(github,ruleSha,mirror,task.repository_id);
           this.rules.cache(task.repository_id,ruleSha,ruleFiles);
-          effectiveRules=resolveRules(policy,executionRuleFiles(this.store,task,ruleFiles,ruleSha),this.rules.consoleComputer(task.repository_id,environment.computer));
+          effectiveRules=resolveRules(rulePolicy(this.store,task),executionRuleFiles(this.store,task,ruleFiles,ruleSha),this.rules.consoleComputer(task.repository_id,environment.computer),projectLabels(this.store,task.repository_id));
         }catch(error){
-          if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库行为规则失败（${error.code}）${detail?'：'+detail:''}，请检查 .bot/ 和 .agents/skills/ 配置。`);}
+          if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库 skill 失败（${error.code}）${detail?'：'+detail:''}，请检查 .agents/skills/。`);}
           throw error;
         }
         // A git worktree from the computer's store when the mirror has the commit (#769), bound when the task first needs its
@@ -671,7 +674,7 @@ export class TaskEngine {
         input.context={...input.context,context_files:input.context.context_files.map((file:any)=>({...file,content:descriptions[file.path]||file.content})),
           object:{...input.context.object,title:object.title,body_excerpt:String(object.body||'').slice(0,1000)},
           trigger:input.trigger,merged_updates:input.merged_updates,
-          conversation_notice:`Current checkout/head: ${task.head_sha}. Read the current checkout, .bot rules, skills and ../notes/ for this task. Historical code conclusions may refer to an earlier head.`};
+          conversation_notice:`Current checkout/head: ${task.head_sha}. Read the current checkout, the project rules, skills and ../notes/ for this task. Historical code conclusions may refer to an earlier head.`};
         update({input:storedInput(this.store,redactor.clean(input),task.repository_id)});
         if(updates.length)this.store.run('UPDATE tasks SET review_update_cursor=? WHERE id=?',updates.at(-1)!.id,id);
         // The timeline lists every update the agent took, at its first turn too (those that came while it waited).

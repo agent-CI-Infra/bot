@@ -17,6 +17,7 @@ import { policyView, roleBoard, roleConcurrency, roleConcurrencyValue } from '..
 import { activateActions } from '../actions/storage.js';
 import { authorize, listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
 import { isCeiling, legacySwitchCeiling, projectCeiling, setCeiling, type Ceiling } from '../work/ceiling.js';
+import { saveLabels, validLabel } from '../rules/service.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
 // A user created by signing in with GitHub has no local password: the column is NOT NULL, so it carries this sentinel
@@ -361,9 +362,11 @@ export function taskModelEntries(value:unknown):[string,string][] {
 /** Shared policy mutation used by console and management commands. */
 export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
   repository(store,user,id);
-      // Review guidance and the review label are rule files (PUT /api/repositories/:id/rules), not policy fields.
+      // Review guidance is the Manager's review sections; the review and development labels are settings of their own (#935).
       fields(body, ['model_id', 'capability_ceiling', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','max_revisions','base_branch','automation',
-        'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models','role_concurrency','delivery_gates']);
+        'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models','role_concurrency','delivery_gates',
+        'review_label','development_label']);
+      for (const key of ['review_label', 'development_label'] as const) if (body[key] !== undefined) validLabel(body[key], key);
       const taskConcurrency = body.task_concurrency === undefined || body.task_concurrency === null ? body.task_concurrency : concurrencyValue(body.task_concurrency);
       // Per-role limits are an inner limit inside the project concurrency, never a replacement for it; null unsets one role.
       const roleConcurrencyLimits = body.role_concurrency === undefined ? undefined : roleConcurrencyValue(store, id, body.role_concurrency);
@@ -428,6 +431,7 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
         store.audit(user.id, 'policy.updated', id, id);
         store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),automation,id);
         if (taskConcurrency !== undefined) store.run('UPDATE policies SET task_concurrency=? WHERE repository_id=?', taskConcurrency as number | null, id);
+        if (body.review_label !== undefined || body.development_label !== undefined) saveLabels(store, id, { review_label: body.review_label as string | undefined, development_label: body.development_label as string | undefined });
         // A PATCH changes the limits it names and leaves every other role alone: the body is a delta, not the whole map.
         if (roleConcurrencyLimits !== undefined) store.run('UPDATE policies SET role_concurrency=? WHERE repository_id=?', JSON.stringify({ ...roleConcurrency(store, id), ...roleConcurrencyLimits }), id);
         return { policy: policyView(store, store.get('SELECT * FROM policies WHERE repository_id=?', id), id)!, execution_available: true, role_concurrency_default: null, task_concurrency_default: defaultConcurrency(store) };

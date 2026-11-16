@@ -26,7 +26,8 @@ export class ConfigurationPR implements ManagementExtension {
   }
   async execute(actor:ActorContext,command:ManagementCommand,key:string):Promise<Json>{
     const path=String(command.arguments.path),content=String(command.arguments.content);
-    if(!/^(?:\.bot\/(?:guide\.md|rules\/[a-z][a-z-]*\.md)|\.agents\/skills\/[a-zA-Z0-9_-]+\/SKILL\.md)$/.test(path))fail(400,'invalid_configuration_pr_path');
+    // Only skills are repository configuration now; .bot/ rule files are no longer read (#935).
+    if(!/^\.agents\/skills\/[a-zA-Z0-9_-]+\/SKILL\.md$/.test(path))fail(400,'invalid_configuration_pr_path');
     const gh=await this.client(actor,command);
     try{
       const existing=await this.find(gh,key);if(existing)return existing;

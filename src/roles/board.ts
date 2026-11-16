@@ -1,3 +1,4 @@
+import { projectLabels } from '../rules/service.js';
 import { roleKind } from './catalog.js';
 import { projectCeiling } from '../work/ceiling.js';
 import { createHash } from 'node:crypto';
@@ -63,7 +64,8 @@ export function roleConcurrencyValue(store: Store, repositoryId: string, value: 
 
 export function policyView(store: Store, policy: Json | undefined, repositoryId: string): Json | undefined {
   if (!policy) return policy;
-  return { ...policy, capability_ceiling: projectCeiling(store, repositoryId, policy), role_concurrency: roleConcurrency(store, repositoryId),
+  // The labels are project settings of their own (#935); the policies column of the same name is a pre-rules leftover.
+  return { ...policy, ...projectLabels(store, repositoryId), capability_ceiling: projectCeiling(store, repositoryId, policy), role_concurrency: roleConcurrency(store, repositoryId),
     delivery_gates: { pull_request_qa: pullRequestQaGate(store, repositoryId, policy as any) } };
 }
 

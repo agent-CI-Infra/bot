@@ -1,5 +1,3 @@
-development_label: bot-develop
-
 # Issue development
 
 These rules apply to development tasks: implementing an Issue as a new pull request, or revising a

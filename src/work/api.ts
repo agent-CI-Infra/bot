@@ -20,7 +20,7 @@ function model(policy: Row, id: string) {
 
 /**
  * The Manager configuration of one project: the prompt with its sections (each with the built-in text it replaces, and
- * whether a repository file replaces it in turn), the work types with their switch, writes and model, the event filters,
+ * whether a repository skill replaces it in turn), the work types with their switch, writes and model, the event filters,
  * the migration record of an upgraded project and the latest dispatch decisions.
  */
 export async function managerView(store: Store, rules: RuleService, repositoryId: string) {
@@ -32,7 +32,8 @@ export async function managerView(store: Store, rules: RuleService, repositoryId
     prompt: { revision: prompt.revision, content: dispatchPrompt(store, repositoryId), updated_at: prompt.updated_at, updated_by: prompt.actor, source: prompt.source },
     sections: sections.map(entry => {
       const file = entry.rule ? files.get(entry.rule) : entry.repository ? files.get(entry.repository) : undefined;
-      // A repository file replaces both the project's section and the built-in text, as rule files always did.
+      // A repository skill (the release notes section's) replaces both the project's section and the built-in text; the
+      // .bot/ files of the rule sections are no longer read (#935).
       const repositoryFile = file?.layers?.some((layer: any) => layer.source === 'repository') ?? false;
       const content = parsed.sections.get(entry.id)?.body ?? null;
       return { id: entry.id, title: entry.title, path: entry.rule ?? entry.repository ?? null, written: content !== null, content, builtin: entry.builtin(),

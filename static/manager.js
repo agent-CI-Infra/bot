@@ -1,9 +1,9 @@
-// The Manager role page: its prompt, model, decisions and task rule sources. Project listeners live in triggers.js.
+// The Manager role page: its prompt, model, decisions and the repository's skills. Project listeners live in triggers.js.
 
 const managerErrors = {
   invalid_dispatch_filter: '分派筛选无效，请检查时间范围、状态或事件类型。', invalid_dispatch_cursor: '当前分页位置已失效，请重新读取分派。', dispatch_event_not_found: '未找到本项目中的这条分派记录。',
   manager_revision_conflict: 'Manager 配置已被别人修改，请刷新页面后再保存。', unknown_manager_section: '章节 id 不认识：二级标题末尾反引号里的 id 要用下面列出的章节。',
-  duplicate_manager_section: '同一个章节出现了两次。', invalid_bot_label: '章节里的标签声明不合法（最长 50 个字符，首尾不能有空白）。',
+  duplicate_manager_section: '同一个章节出现了两次。',
   invalid_work_writes: '写入不在这类工作可选的范围里，或开 PR 时没有同时允许修改代码。', invalid_event_filters: '事件开关或标签不合法（标签最长 50 个字符，最多 30 个）。'
 };
 // api() reports "<status> · <code>"; a known code gets its explanation.
@@ -30,7 +30,7 @@ function managerCards(manager, roles, refresh, notice) {
   const behavior = card('项目 Manager 设置');
   behavior.append(note('新任务默认由 Manager 安排角色与执行方式，按任务需要委派工作。角色权限、预算、独立 QA 和发布检查继续生效。'), consoleLink(`#/projects/${current.id}/triggers`, '监听与触发设置', '项目整体的事件来源与自动处理范围'));
   return [...(notice ? [Object.assign(element('p', notice, 'view-success flash'), { role: 'status' })] : []), behavior, managerPromptCard(manager, refresh), taskModelEditor('manager', 'Manager 分派', current.policy, current.models),
-    dispatchCard(), managerRulesCard(), ...(manager.migration ? [migrationCard(manager.migration)] : [])];
+    dispatchCard(), repositorySkillsCard(), ...(manager.migration ? [migrationCard(manager.migration)] : []), ...(current.rules?.imported?.imported_at ? [ruleImportCard(current.rules.imported)] : [])];
 }
 
 function managerPromptCard(manager, refresh) {
@@ -203,22 +203,42 @@ function dispatchEntry(event, open) {
   item.append(button('查看分派详情', () => open(event), 'quiet')); return item;
 }
 
-function managerRulesCard() {
-  const section = card('规则文件来源');
-  // Include repository skills here as well: the complete prompt editor has no separate per-section source list.
-  const paths = [...ruleFiles.map(([rule]) => rule), ...(current.rules?.files || []).map(file => file.path).filter(path => !ruleFiles.some(([rule]) => rule === path))];
+// The repository's skills, the only files the bot reads from the repository (#935). The rule texts are the prompt's
+// sections above, the labels are project settings; a repository that still has .bot/ files is told they can go.
+function repositorySkillsCard() {
+  const section = card('仓库 skill');
   section.dataset.overviewAnchor = 'rule-sources';
-  section.append(note('任务规则的优先级是内置默认 → 项目控制台覆盖 → 默认分支仓库文件，每层整份替换。仓库 skill 和虚拟电脑配置也来自默认分支。'), ruleSync());
-  const { table, body } = projectTable(['文件', '作用', '规则来源', '操作'], '规则文件');
-  for (const path of paths) {
-    const row = document.createElement('tr'), [, purpose, task, target] = ruleInfo(path); row.dataset.ruleFile = path;
-    tableCell(row, '文件', element('strong', purpose)); tableCell(row, '作用', task); tableCell(row, '规则来源', ruleSource(path), element('code', path));
-    if (target === 'machine') { const link = element('a', '查看机器配置'); link.href = `#/projects/${current.id}/machine`; tableCell(row, '操作', link); }
-    else tableCell(row, '操作', button('展开规则', () => openProjectRule(path), 'quiet'));
-    body.append(row);
-  }
-  const detail = element('section', '', 'project-inline-detail'); detail.id = 'project-detail'; detail.hidden = true; detail.setAttribute('role', 'region');
-  section.append(table, detail); return section;
+  const draw = flash => {
+    const skills = (current.rules?.files || []).filter(file => file.path.startsWith('.agents/skills/')), message = element('p', flash || '', flash ? 'view-success flash' : '');
+    if (flash) message.setAttribute('role', 'status');
+    const nodes = [note('检视、开发、标签和行为指南的规则就是上面 Manager 提示词里的章节，检视和开发标签的名字在「项目设置 → 基本」里修改。每个任务读取默认分支 .agents/skills/ 下的 skill：skill 只指导本仓库的工作，不能放宽权限或改变平台规则。'), ruleSync(), ...(flash ? [message] : [])];
+    if (current.rules?.retired_files?.length) nodes.push(retiredRulesNotice());
+    if (!skills.length) nodes.push(note(current.rules ? '默认分支没有 .agents/skills/ 下的 skill。' : '暂时读不到仓库 skill。'));
+    else {
+      const { table, body } = projectTable(['skill', '文件', '操作'], '仓库 skill');
+      for (const { path } of skills) {
+        const row = document.createElement('tr'); row.dataset.ruleFile = path;
+        tableCell(row, 'skill', element('strong', path.replace(/^\.agents\/skills\/|\/SKILL\.md$/g, ''))); tableCell(row, '文件', element('code', path));
+        tableCell(row, '操作', button('查看内容', () => openProjectRule(path), 'quiet')); body.append(row);
+      }
+      nodes.push(table);
+    }
+    const detail = element('section', '', 'project-inline-detail'); detail.id = 'project-detail'; detail.hidden = true; detail.setAttribute('role', 'region');
+    nodes.push(detail);
+    section.replaceChildren(section.firstChild, ...nodes);
+  };
+  section.redraw = draw; draw(); return section;
+}
+// What the upgrade that retired the .bot/ files imported into this project (#935), and what it could not.
+function ruleImportCard(imported) {
+  const section = card('.bot/ 规则文件导入记录');
+  section.dataset.overviewAnchor = 'rule-import';
+  const labels = imported.labels || {};
+  section.append(note(imported.files?.length ? `升级时（${timestamp(imported.imported_at)}）把默认分支提交 ${String(imported.sha || '').slice(0, 12)} 上的仓库规则文件迁入了角色配置，导入前后行为相同。` : `升级时（${timestamp(imported.imported_at)}）仓库没有要导入的 .bot/ 规则文件；原有的控制台规则保留在 Manager 提示词里。`),
+    facts([['导入的文件', (imported.files || []).join('、') || '无'], ['写入的 Manager 章节', (imported.sections || []).join('、') || '无'],
+      ['检视标签', labels.review_label || '不加标签'], ['开发标签', labels.development_label || '—'], ['机器配置字段', (imported.computer || []).join('、') || '无']]));
+  if (imported.warnings?.length) { const list = element('ul', '', 'history'); for (const warning of imported.warnings) list.append(element('li', warning)); section.append(element('h4', '需要留意'), list); }
+  return section;
 }
 
 function migrationCard(migration) {

@@ -40,7 +40,7 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
     // Role configuration revisions, pinned skill bundles and run snapshots belong to the project.
     ['DELETE FROM role_snapshots WHERE repository_id=?', 1], ['DELETE FROM skill_bundle_revisions WHERE repository_id=?', 1], ['DELETE FROM role_config_revisions WHERE repository_id=?', 1],
     ["DELETE FROM settings WHERE key='roles:'||?", 1],
-    ['DELETE FROM computer_console_specs WHERE repository_id=?', 1], ['DELETE FROM manager_revisions WHERE repository_id=?', 1], ['DELETE FROM manager_migrations WHERE repository_id=?', 1], ['DELETE FROM dispatch_events WHERE repository_id=?', 1], ['DELETE FROM repository_rule_sources WHERE repository_id=?', 1],
+    ['DELETE FROM computer_console_specs WHERE repository_id=?', 1], ['DELETE FROM manager_revisions WHERE repository_id=?', 1], ['DELETE FROM manager_migrations WHERE repository_id=?', 1], ['DELETE FROM dispatch_events WHERE repository_id=?', 1], ['DELETE FROM repository_rule_sources WHERE repository_id=?', 1], ['DELETE FROM project_labels WHERE repository_id=?', 1], ['DELETE FROM rule_imports WHERE repository_id=?', 1],
     // Models only this repository may use, with their prices and grants; a shared model only loses its grant to this repository.
     // Group assistant roles of this project (#849) go with it; one still named by a group binding stays, disabled (and
     // without its model if that was this project's), so the group explains why it stopped instead of switching roles.
