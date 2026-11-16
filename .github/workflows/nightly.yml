@@ -1,0 +1,34 @@
+name: Nightly
+
+on:
+  schedule:
+    # 00:00 Asia/Shanghai on the following day.
+    - cron: '0 16 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+# Reuse the same definitions as the PR checks. The called workflows see the caller's
+# event, so Images only builds here: publishing requires a push to main.
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+
+  images:
+    permissions:
+      contents: read
+      packages: write # Required by images.yml; its publish steps only run on main pushes.
+    uses: ./.github/workflows/images.yml
+
+  codeql:
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      security-events: write
+    uses: ./.github/workflows/codeql.yml
