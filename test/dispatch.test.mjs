@@ -382,6 +382,34 @@ test('a Manager that cannot be reached is waited out; a decision that stays inva
   assert.equal(events(f.h)[0].state, 'decided'); assert.equal(tasks(f.h).length, 1);
 });
 
+test('an answer round reaches the Manager even after a matching rule is saved or the work is disabled', async t => {
+  for (const change of ['matching rule', 'disabled work']) await t.test(change, async t => {
+    const f = await fixture(t);
+    f.state.decide = () => ({ decision: 'continue', option_ids: ['continue:nothing'], reason: '续接' });
+    queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'spent');
+    f.h.store.run('UPDATE dispatch_events SET attempts=7');
+    await f.run();
+    assert.equal(events(f.h)[0].answer_round, 1, 'the failed eighth attempt schedules an answer round');
+    // Configuration may change during the fifteen-minute wait; neither change should hide that round from the Manager.
+    if (change === 'matching rule') {
+      const manager = (await f.admin('/api/repositories/101/manager')).value.manager;
+      assert.equal((await f.admin('/api/repositories/101/manager', 'PUT', { expected_revision: manager.prompt.revision,
+        standing_rules: [{ id: 'new-issues', event: 'issue.opened', action: 'create', work: 'review.issue', reason: '检视新 Issue' }] })).status, 200);
+    } else {
+      assert.equal((await f.admin('/api/repositories/101/policy', 'PATCH', { review_enabled: false })).status, 200);
+      const context = dispatchContext(f.h.store, events(f.h)[0]);
+      assert.deepEqual([context.options.length, context.continuations.length], [0, 0]);
+    }
+    const asked = f.requests.length;
+    f.state.decide = () => ({ decision: 'ignore', option_ids: [], reason: '已回应分派失败' });
+    f.h.store.run('UPDATE dispatch_events SET next_run_at=0');
+    await f.run();
+    assert.equal(f.requests.length, asked + 1, 'the Manager gets the answer round');
+    assert.equal(JSON.parse(f.requests[asked].messages[1].content).previous_failures.attempts, 8);
+    assert.deepEqual([events(f.h)[0].state, events(f.h)[0].decision, events(f.h)[0].rule, tasks(f.h).length], ['decided', 'ignore', null, 0]);
+  });
+});
+
 test('events of one object are decided one at a time, so updates that arrive together join one review', async t => {
   const f = await fixture(t);
   f.state.decide = input => input.options.continue.length ? { decision: 'continue', option_ids: [input.options.continue[0].id], reason: '并入正在等的检视' }
