@@ -97,6 +97,58 @@ function showProjectActivityStatus(text) {
   }, 'quiet'));
   $('rows').prepend(status);
 }
+// #869: the gate/board check and the permission check run behind the list and keep the badges they read last when they
+// fail. A failure is therefore said above the rows: which check failed, that the badges are the previous reading, when
+// that reading was taken, and the one manual read that replaces it. The failure itself schedules nothing (#43), and a
+// successful read takes the statement away.
+const projectCheckCopy = {
+  integrations: { name: '门禁与看板接入检查', reading: '门禁和看板徽章', action: '重新检查门禁' },
+  permissions: { name: '安装权限检查', reading: '权限徽章', action: '重新检查权限' },
+};
+const projectCheckOrder = ['integrations', 'permissions'];
+const projectCheckReads = new Map(), projectCheckFailures = new Map();
+// The newest reading the server reports on the rows it just sent; a time of the console's own would not date the data.
+function projectCheckReading(items, field) {
+  let newest = '';
+  for (const item of items || []) { const value = String(item?.[field] || ''); if (value && value > newest) newest = value; }
+  return newest;
+}
+function projectCheckRead(name, items, field) {
+  const newest = projectCheckReading(items, field); if (newest) projectCheckReads.set(name, newest);
+}
+function clearProjectCheckStatus() {
+  for (const line of $('rows').querySelectorAll('.project-check-status')) line.remove();
+}
+function projectCheckStatusLine(name) {
+  const copy = projectCheckCopy[name], read = timestamp(projectCheckReads.get(name) || '');
+  const line = element('p', `${copy.name}读取失败（${projectCheckFailures.get(name)}），列表上的${copy.reading}还是上次读到的结果，可能已经过期。`,
+    'view-warning project-check-status');
+  line.dataset.check = name; line.setAttribute('role', 'status'); line.setAttribute('data-testid', 'project-check-status');
+  line.append(element('span', read ? `上次成功读取：${read}` : '上次成功读取的时间未知', 'muted'));
+  const control = button(copy.action, async () => {
+    control.disabled = true;
+    try { await (name === 'integrations' ? refreshStaleIntegrations() : refreshStalePermissions()); }
+    finally { control.disabled = false; }
+  }, 'quiet');
+  line.append(control);
+  return line;
+}
+// Redrawn from the recorded state so a list that draws again cannot lose a statement that is still true.
+function drawProjectCheckStatus() {
+  // A check outlives the page that started it; its statement belongs to the project list, not to the list now on screen.
+  if (!$('rows') || tab !== 'projects') return;
+  clearProjectCheckStatus();
+  const lines = projectCheckOrder.filter(name => projectCheckFailures.has(name)).map(projectCheckStatusLine);
+  if (lines.length) $('rows').prepend(...lines);
+}
+function projectCheckFailed(name, err, { draw = true } = {}) {
+  projectCheckFailures.set(name, readErrorText(err));
+  if (draw) drawProjectCheckStatus();
+}
+function projectCheckPassed(name, items, field = 'checked_at') {
+  projectCheckRead(name, items, field);
+  if (projectCheckFailures.delete(name)) drawProjectCheckStatus();
+}
 // The project list render reads the same endpoint, so a list that draws again lifts a stop or a delay left by the poll.
 function resetProjectActivityPoll() {
   projectActivityStopped = false; projectActivityDelay = 0; projectActivityNextAt = 0; clearProjectActivityStatus();

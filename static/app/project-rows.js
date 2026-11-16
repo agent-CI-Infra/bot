@@ -98,9 +98,14 @@ function groupProjectRows(rows, lines) {
 }
 // Stale chips are checked once in the background and only the chips change; the list is neither reloaded nor cleared.
 // A result that is still stale (a failed check, or more repositories than one check covers) waits for a manual refresh.
+// #869: a failure is no longer swallowed. The chips keep the previous reading, and the list states the failure with the
+// time of the reading it is showing and one manual read; a success clears that statement.
 async function refreshStaleIntegrations() {
   if (integrationAutoRefresh) return; integrationAutoRefresh = true;
-  try { updateIntegrationChips((await api('/api/integrations/check', 'POST', {})).integrations || []); } catch {}
+  try {
+    const integrations = (await api('/api/integrations/check', 'POST', {})).integrations || [];
+    updateIntegrationChips(integrations); projectCheckPassed('integrations', integrations);
+  } catch (err) { projectCheckFailed('integrations', err); }
   finally { integrationAutoRefresh = false; }
 }
 // Grants older than the cache are read again once when the list opens; only the permission badges change. They are not
@@ -113,6 +118,7 @@ async function refreshStalePermissions() {
     // The check answers with the same snapshot rows the navigation shows gaps from; leaving it out is how the bar and the
     // project header end up describing two different reads.
     if (typeof updateConsoleGaps === 'function') updateConsoleGaps(rows);
-  } catch {}
+    projectCheckPassed('permissions', rows, 'permissions_checked_at');
+  } catch (err) { projectCheckFailed('permissions', err); }
   finally { permissionAutoRefresh = false; }
 }

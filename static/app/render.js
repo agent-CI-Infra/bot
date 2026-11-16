@@ -49,10 +49,12 @@ async function render(quiet = false) {
   // Gate / dashboard connection status (cached; refreshed on demand).
   const integrationMap = new Map(); let staleIntegrations = false;
   if (installedView && !hiddenView) {
-    let integrations = [], checked = false; try { integrations = (await api('/api/integrations')).integrations || []; } catch {}
+    let integrations = [], checked = false;
+    try { integrations = (await api('/api/integrations')).integrations || []; projectCheckRead('integrations', integrations, 'checked_at'); } catch {}
     if (!integrations.length) {
       checked = true;
-      try { $('count').textContent = '正在检查门禁和看板的接入状态…'; integrations = (await api('/api/integrations/check', 'POST', {})).integrations || []; } catch {}
+      // #869: this inline check is the one a cold start or an emptied cache runs, and its failure used to be swallowed too.
+      try { $('count').textContent = '正在检查门禁和看板的接入状态…'; integrations = (await api('/api/integrations/check', 'POST', {})).integrations || []; projectCheckPassed('integrations', integrations); } catch (err) { projectCheckFailed('integrations', err, { draw: false }); }
     }
     integrations.forEach(item => integrationMap.set(item.repository_id, item));
     // What a check just returned is not checked again here, even if part of it is still stale.
@@ -209,6 +211,10 @@ async function render(quiet = false) {
     );
     $('rows').replaceChildren(empty);
   }
+  // #869: the permission reading the rows carry, and the statement of any check that failed — drawn after the rows so a
+  // list that draws again keeps it.
+  if (tab === 'projects' && installedView && !hiddenView) projectCheckRead('permissions', rows, 'permissions_checked_at');
+  if (tab === 'projects' && !hiddenView) drawProjectCheckStatus();
   if(staleIntegrations)refreshStaleIntegrations();
   if(installedView&&!hiddenView&&rows.some(row=>row.permissions_stale))refreshStalePermissions();
 }
