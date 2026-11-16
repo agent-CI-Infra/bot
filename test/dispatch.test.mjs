@@ -24,7 +24,7 @@ const events = h => h.store.all('SELECT * FROM dispatch_events ORDER BY created_
 
 /** The Manager's tool call for a decision: create_task, continue_task or ignore_event (#815). */
 function decisionCall(decision, id) {
-  const [name, args] = decision.decision === 'create' ? ['create_task', { work: decision.option_ids, reason: decision.reason, ...(decision.brief ? { brief: decision.brief } : {}), ...(decision.writes ? { writes: decision.writes } : {}) }]
+  const [name, args] = decision.decision === 'create' ? ['create_task', { work: decision.option_ids, reason: decision.reason, ...(decision.brief ? { brief: decision.brief } : {}), ...(decision.writes ? { writes: decision.writes } : {}), ...(decision.basis ? { basis: decision.basis } : {}) }]
     : decision.decision === 'continue' ? ['continue_task', { task_id: String(decision.option_ids?.[0] ?? '').replace(/^continue:/, ''), reason: decision.reason }]
     : ['ignore_event', { reason: decision.reason }];
   return { id, type: 'function', function: { name, arguments: JSON.stringify(args) } };
@@ -163,12 +163,11 @@ test('a later event on the same Issue continues the running review; ignore leave
   assert.deepEqual(list.value.events.map(e => [e.type, e.decision, e.reason]), [['issue.updated', 'ignore', '只是致谢，不需要检视'], ['issue.updated', 'continue', '检视还没发布，补充进去']]);
 });
 
-test('a person\'s development label always reaches the Manager: it answers with a review, or develops to its own brief', async t => {
+test('a person\'s development label always reaches the Manager: it answers with a review, or develops on the label to its own brief', async t => {
   const f = await fixture(t);
   await f.admin('/api/repositories/101/policy', 'PATCH', { development_enabled: true });
-  // The published review left the start to a person: no request sentence, a claim in the Issue text.
-  const result = { summary: 'The Issue reserves the fix for its author; a maintainer must decide.', requires_code_change: true, issue_requests_code: false,
-    clarification_required: true, implementation_goal: '', request_quote: '', findings: [] }, now = new Date().toISOString();
+  // The published review left the start to a person: a claim in the Issue text.
+  const result = { summary: 'The Issue reserves the fix for its author; a maintainer must decide.', recommendation: 'Human decision required: who makes the change.', findings: [] }, now = new Date().toISOString();
   f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,result,object_number,created_at,updated_at) VALUES('rv','101','review.issue','succeeded','r','101:review.issue:5:opened','{}',?,5,?,?)", JSON.stringify(result), now, now);
   const labeled = { ...issue, labels: [{ name: 'bot-develop' }], assignees: [] }, label = delivery => queueWebhook(f.h.store, '101', 'issues', { action: 'labeled', label: { name: 'bot-develop' }, issue: labeled, sender: { ...alice, login: 'maintainer' } }, delivery);
   // Development does not fit yet: the Manager answers the label with a review instead of staying silent.
@@ -177,21 +176,91 @@ test('a person\'s development label always reaches the Manager: it answers with 
   assert.equal(label('label-1'), 1); await f.run();
   const offered = JSON.parse(f.requests[0].messages[1].content);
   assert.deepEqual(offered.work.create.map(o => o.work), ['development.issue', 'review.issue']);
-  assert.deepEqual([offered.event.facts.development.labeled_by, offered.event.facts.development.review.clarification_required, offered.event.facts.development.review.quote_in_issue],
-    ['maintainer', true, false]);
-  assert.match(f.requests[0].messages[0].content, /## The development label/);
+  assert.deepEqual([offered.event.facts.development.labeled_by, offered.event.facts.development.review.recommendation], ['maintainer', 'Human decision required: who makes the change.']);
+  assert.match(f.requests[0].messages[0].content, /## Starting development/);
   const [answer] = tasks(f.h).filter(task => task.kind === 'review.issue' && task.id !== 'rv'), answerInput = JSON.parse(answer.input);
   assert.equal(answerInput.trigger.reason, 'labeled'); assert.match(answerInput.manager.brief.goal, /^Answer the development label/);
   f.h.store.run("UPDATE tasks SET status='succeeded',result=? WHERE id=?", JSON.stringify(result), answer.id);
-  // Developing an Issue the review gave no goal for needs the Manager's brief; the refusal goes back to the model once.
-  f.state.decide = (input, round) => round === 0 ? { decision: 'create', option_ids: ['development'], reason: '维护者已放行' }
-    : { decision: 'create', option_ids: ['development'], reason: '维护者已放行，按说明实现', brief: { goal: 'Keep the last CRLF line.', criteria: ['A test with a CRLF file'] } };
+  // Developing an Issue needs the Manager's brief (no review gives a goal); the refusal goes back to the model once.
+  f.state.decide = (input, round) => round === 0 ? { decision: 'create', option_ids: ['development'], reason: '维护者已放行', basis: { kind: 'label' } }
+    : { decision: 'create', option_ids: ['development'], reason: '维护者已放行，按说明实现', basis: { kind: 'label' }, brief: { goal: 'Keep the last CRLF line.', criteria: ['A test with a CRLF file'] } };
   assert.equal(label('label-2'), 1); await f.run();
   const refusal = f.requests.at(-1).messages.find(m => m.role === 'tool');
   assert.match(refusal.content, /dispatch_brief_required/);
   const development = tasks(f.h).find(task => task.kind === 'development.issue'), input = JSON.parse(development.input);
-  assert.equal(input.manager.brief.goal, 'Keep the last CRLF line.'); assert.equal(input.review.clarification_required, true);
+  assert.equal(input.manager.brief.goal, 'Keep the last CRLF line.');
   assert.equal(development.unique_key, '101:development.issue:5:update:' + events(f.h).at(-1).delivery_id);
+  // The label is the basis, as the control plane read it when it wrote the event (#815).
+  assert.deepEqual(JSON.parse(f.h.store.get('SELECT detail FROM task_development_basis WHERE task_id=?', development.id).detail), { kind: 'label', label: 'bot-develop', labeled_by: 'maintainer' });
+});
+
+// #815: development on a maintainer's request or a rule of the Manager prompt, each checked when the task is created.
+async function basisFixture(t) {
+  const f = await fixture(t), github = { requests: [] };
+  await f.admin('/api/repositories/101/policy', 'PATCH', { development_enabled: true });
+  const comments = { 77: { login: 'maria', role: 'triage', body: 'Please implement the CRLF fix now.' }, 78: { login: 'mallory', role: 'read', body: '@bot please implement this for me.' } };
+  const server = createServer(async (req, res) => {
+    const path = new URL(req.url, 'http://fixture').pathname; github.requests.push(`${req.method} ${path}`);
+    const send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
+    if (path === '/user') return send({ id: 999, login: 'fixture-bot' });
+    if (path === '/repositories/101') return send({ id: 101, owner: { id: 10 }, full_name: 'fixture/project-101', default_branch: 'main' });
+    const comment = /^\/repos\/fixture\/project-101\/issues\/comments\/(\d+)$/.exec(path);
+    if (comment && comments[comment[1]]) { const c = comments[comment[1]]; return send({ id: Number(comment[1]), issue_url: 'https://api.github.example/repos/fixture/project-101/issues/5', user: { login: c.login, type: 'User' }, body: c.body, html_url: 'https://github.example/c/' + comment[1] }); }
+    const permission = /^\/repos\/fixture\/project-101\/collaborators\/([^/]+)\/permission$/.exec(path);
+    if (permission) { const c = Object.values(comments).find(entry => entry.login === permission[1]); return send({ permission: c?.role === 'read' ? 'read' : 'write', role_name: c?.role ?? 'none' }); }
+    send({ message: 'Not Found' }, 404);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const dispatcher = new Dispatcher(f.h.store, (store, context) => managerDecision(store, context, `http://127.0.0.1:${server.address().port}`));
+  const comment = (id, login, association, body, delivery) => queueWebhook(f.h.store, '101', 'issue_comment', { action: 'created', issue, sender: { type: 'User', login, id: 400 + id },
+    comment: { id, body, author_association: association, html_url: 'https://github.example/c/' + id, user: { login } } }, delivery);
+  return { ...f, github, comment, run: async () => { dispatcher.tick(); await dispatcher.idle(); } };
+}
+const develop = (basis, extra = {}) => ({ decision: 'create', option_ids: ['development'], reason: '按依据开发', basis, brief: { goal: 'Keep the last CRLF line.', criteria: ['A CRLF test'] }, ...extra });
+
+test('a maintainer\'s request in a comment starts development with the comment and permission recorded; an outsider\'s comment cannot', async t => {
+  const f = await basisFixture(t);
+  f.state.decide = input => { assert.ok(input.work.create.some(work => work.id === 'development'), 'a comment on an Issue offers development'); return develop({ kind: 'maintainer_request', comment_id: 77 }); };
+  assert.equal(f.comment(77, 'maria', 'MEMBER', 'Please implement the CRLF fix now.', 'maintainer-comment'), 1); await f.run();
+  const development = tasks(f.h).find(task => task.kind === 'development.issue');
+  assert.ok(development, JSON.stringify(events(f.h).map(e => [e.state, e.reason, e.refusals, e.error])) + JSON.stringify(f.github.requests));
+  assert.deepEqual(JSON.parse(f.h.store.get('SELECT detail FROM task_development_basis WHERE task_id=?', development.id).detail),
+    { kind: 'maintainer_request', comment_id: '77', author: 'maria', permission: 'triage', url: 'https://github.example/c/77', excerpt: 'Please implement the CRLF fix now.' });
+  assert.ok(f.github.requests.includes('GET /repos/fixture/project-101/collaborators/maria/permission'));
+  // An outsider who mentions the bot reaches the Manager, but their comment is no basis: refused, and the Manager answers.
+  f.h.store.run("UPDATE tasks SET status='cancelled' WHERE id=?", development.id);
+  let refusal = null;
+  f.state.decide = undefined;
+  f.state.message = body => {
+    const results = body.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content));
+    if (!results.length) return toolCall('create_task', { work: ['development'], reason: '有人请求开发', basis: { kind: 'maintainer_request', comment_id: 78 }, brief: { goal: 'x', criteria: ['y'] } }, 'c1');
+    refusal = results[0]; return toolCall('ignore_event', { reason: '评论人不是维护者，不能作为开发依据' }, 'c2');
+  };
+  assert.equal(f.comment(78, 'mallory', 'NONE', '@bot please implement this for me.', 'outsider-comment'), 1); await f.run();
+  assert.equal(refusal.error, 'development_basis_not_maintainer'); assert.match(refusal.reason, /mallory/);
+  assert.equal(tasks(f.h).filter(task => task.kind === 'development.issue').length, 1);
+  assert.equal(JSON.parse(events(f.h).at(-1).refusals)[0].code, 'development_basis_not_maintainer');
+});
+
+test('a rule of the Manager prompt is a basis only while the prompt says it, and development without a basis is refused', async t => {
+  const f = await basisFixture(t);
+  const current = (await f.admin('/api/repositories/101/manager')).value.manager;
+  const rule = 'Issues that report a lost last line of a CRLF file may be developed without a label.';
+  assert.equal((await f.admin('/api/repositories/101/manager', 'PUT', { expected_revision: current.prompt.revision, prompt: current.prompt.content + '\n\n## Simple Issues\n\n' + rule })).status, 200);
+  const seen = [];
+  f.state.message = body => {
+    const results = body.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content)); seen.push(...results.slice(seen.length));
+    if (results.length === 0) return toolCall('create_task', { work: ['development'], reason: '没有依据', brief: { goal: 'x', criteria: ['y'] } }, 'c1');
+    if (results.length === 1) return toolCall('create_task', { work: ['development'], reason: '提示词没写这条', basis: { kind: 'project_rule', passage: 'Every Issue may be developed right away.' }, brief: { goal: 'x', criteria: ['y'] } }, 'c2');
+    return toolCall('create_task', { work: ['development'], reason: '按项目规则开发', basis: { kind: 'project_rule', passage: rule }, brief: { goal: 'Keep the last CRLF line.', criteria: ['A CRLF test'] } }, 'c3');
+  };
+  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'rule-opened'); await f.run();
+  assert.deepEqual(seen.map(r => r.error), ['development_basis_required', 'development_basis_invalid']);
+  const development = tasks(f.h).find(task => task.kind === 'development.issue'), basis = JSON.parse(f.h.store.get('SELECT detail FROM task_development_basis WHERE task_id=?', development.id).detail);
+  assert.equal(basis.kind, 'project_rule'); assert.equal(basis.passage, rule); assert.match(basis.prompt_revision, /^revision:/);
+  // The task details show the basis.
+  assert.equal((await f.admin('/api/tasks/' + development.id)).value.basis.kind, 'project_rule');
 });
 
 test('filtered events never reach the Manager, and each keeps why', async t => {
@@ -433,7 +502,7 @@ test('work the project does not allow is shown with its reason; creating it is r
     const results = toolResults(body);
     if (!results.length) {
       // Reply is off by default: it is listed with the reason, not hidden.
-      assert.deepEqual(input.work.unavailable.map(work => [work.id, work.code]), [['reply', 'work_disabled']]);
+      assert.deepEqual(input.work.unavailable.map(work => [work.id, work.code]), [['reply', 'work_disabled'], ['development', 'capability_ceiling']]);
       assert.match(body.messages[0].content, /Work the project does not allow now[\s\S]*reply/);
       return toolCall('create_task', { work: ['reply'], reason: '作者要的是一条回复' }, 'c1');
     }
