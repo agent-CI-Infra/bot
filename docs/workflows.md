@@ -164,10 +164,10 @@ Manager 分派提示词在「角色 → Manager」里作为一份完整文本编
 
 | 路径 | 方法 | 说明 |
 | --- | --- | --- |
-| `/api/repositories/:id/manager` | GET | 提示词（`revision`、`content`）、各章节（内置文本、是否写过、实际来源和生效文本）、工作类型（开关、写入、可选写入、模型）、分派模型、事件开关和迁移记录 |
-| `/api/repositories/:id/manager` | PUT | `expected_revision` 必填，`prompt`（完整分派提示词）、旧 `content`（任务规则）、`work`（`{<工作类型>: {enabled, writes}}`）、`events`（事件开关和标签列表）可选；经管理服务的 `manager.update` 命令执行，审计相同；版本不一致返回 409 `manager_revision_conflict` |
-| `/api/repositories/:id/dispatch` | GET | 事件记录，最新在前：类型、摘要、状态、结果、理由、简要说明、新建或续接的任务、模型、失败原因、控制面拒绝（`refusals`：工作、代码、原因、时间）；`state`（含 `filtered`，即被过滤的事件）、`decision`（create/continue/ignore）、`type`、`from`（含）/`until`（不含，UTC ISO 时间）、`limit`（1–100）可选；`next_cursor` 用于更早分页，原 `offset` 仍兼容但不能和 cursor 同用。游标绑定项目与筛选，改变筛选后重新读取首页 |
-| `/api/repositories/:id/dispatch/:event` | GET | 本项目的事件摘要、来源、原投递编号、已记录的模型名称、当前状态、控制面拒绝（`refusals`）、实际关联任务和最近 50 条人工重试；被过滤的事件在 `result.filtered` 里给出原因代码。排除原始 facts、候选任务输入、租约及凭据；不以当前模型配置补写历史 |
+| `/api/repositories/:id/manager` | GET | 提示词（`revision`、`content`）、各章节（内置文本、是否写过、实际来源和生效文本）、工作类型（开关、写入、可选写入、模型）、分派模型、事件开关、常设规则（`standing_rules`：`revision`、`source` 为 `builtin` 或 `saved`、`rules`）和迁移记录 |
+| `/api/repositories/:id/manager` | PUT | `expected_revision` 必填，`prompt`（完整分派提示词）、旧 `content`（任务规则）、`work`（`{<工作类型>: {enabled, writes}}`）、`events`（事件开关和标签列表）、`standing_rules`（常设规则的完整列表，整份替换，空数组表示都交给 Manager）可选；经管理服务的 `manager.update` 命令执行，审计相同；版本不一致返回 409 `manager_revision_conflict` |
+| `/api/repositories/:id/dispatch` | GET | 事件记录，最新在前：类型、摘要、状态、结果、理由、简要说明、新建或续接的任务、模型、失败原因、控制面拒绝（`refusals`：工作、代码、原因、时间）、按常设规则决定时的规则（`rule`：`id`、`revision`）；`state`（含 `filtered`，即被过滤的事件）、`decision`（create/continue/ignore）、`type`、`from`（含）/`until`（不含，UTC ISO 时间）、`limit`（1–100）可选；`next_cursor` 用于更早分页，原 `offset` 仍兼容但不能和 cursor 同用。游标绑定项目与筛选，改变筛选后重新读取首页 |
+| `/api/repositories/:id/dispatch/:event` | GET | 本项目的事件摘要、来源、原投递编号、已记录的模型名称、当前状态、控制面拒绝（`refusals`）、决定它的常设规则（`rule`）、实际关联任务和最近 50 条人工重试；被过滤的事件在 `result.filtered` 里给出原因代码。排除原始 facts、候选任务输入、租约及凭据；不以当前模型配置补写历史 |
 | `/api/repositories/:id/dispatch/:event/retry` | POST | 重试失败的分派 |
 | `/api/tasks/:id/dispatch` | GET | 任务因哪些事件新建或续接，以及 Manager 的理由 |
 | `/api/repositories/:id/workflows[/...]` | 任意 | 410 `workflows_removed`，说明里给出替代路径 |
