@@ -58,8 +58,19 @@ jobs:
 
       - name: Tags
         id: tags
-        if: env.PUBLISH == 'true'
-        run: echo "list=$IMAGE:sha-${GITHUB_SHA::12},$IMAGE:latest" >> "$GITHUB_OUTPUT"
+        run: |
+          # PR and merge-queue builds load the two browser images locally for the smoke step.
+          # Publishing to GHCR still uses only the registry tags; load and push cannot be combined.
+          smoke=false
+          case "${{ matrix.name }}" in
+            bot-control-plane|bot-project-computer) smoke=true ;;
+          esac
+          if [ "$PUBLISH" = "true" ]; then
+            echo "list=$IMAGE:sha-${GITHUB_SHA::12},$IMAGE:latest" >> "$GITHUB_OUTPUT"
+          elif [ "$smoke" = "true" ]; then
+            echo "list=${{ matrix.name }}:ci" >> "$GITHUB_OUTPUT"
+          fi
+          echo "smoke=$smoke" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v7
         with:
@@ -67,6 +78,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: ${{ env.PUBLISH == 'true' }}
+          load: ${{ env.PUBLISH != 'true' && steps.tags.outputs.smoke == 'true' }}
           tags: ${{ steps.tags.outputs.list }}
           # The source label links the package to this repository.
           labels: |
@@ -76,6 +88,17 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,scope=${{ matrix.name }}
+
+      # Start the preinstalled browser as the runtime user in the compose sandbox (read-only root,
+      # tmpfs /tmp, no capabilities). This is what catches a missing writable HOME; a build-only job would not.
+      - name: Smoke the Chromium wrapper
+        if: env.PUBLISH != 'true' && steps.tags.outputs.smoke == 'true'
+        run: |
+          docker run --rm --user 10001:10001 --network none --read-only \
+            --tmpfs /tmp:size=512m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
+            --entrypoint /usr/local/bin/bot-chromium \
+            "${{ matrix.name }}:ci" \
+            --headless --disable-gpu --user-data-dir=/tmp/ud --dump-dom 'data:text/html,<h1>ok</h1>'
 
       # A new GHCR package starts private and the REST API cannot change that; an organization owner makes it public
       # once in the package settings. Until then anonymous pulls fail, so say so in the run instead of failing it.
