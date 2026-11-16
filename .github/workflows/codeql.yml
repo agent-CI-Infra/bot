@@ -27,6 +27,9 @@ jobs:
     #   - https://gh.io/using-larger-runners (GitHub.com only)
     # Consider using larger runners or machines with greater resources for possible analysis time improvements.
     runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
+    # #734: the slowest recent leg was javascript-typescript at 356 s (run 43825073068); 15 minutes covers a cold CodeQL
+    # pack download and a slow runner while ending a wedged analysis long before the platform's 360-minute default.
+    timeout-minutes: 15
     permissions:
       # required for all workflows
       security-events: write

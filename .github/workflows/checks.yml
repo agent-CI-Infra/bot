@@ -18,6 +18,9 @@ jobs:
   unit:
     name: unit
     runs-on: ubuntu-latest
+    # #734: the slowest recent push run spent 762 s in this job (run 43790528730, npm test alone 727 s), so 30 minutes
+    # leaves room for a cold cache and still ends a wedged required check in half an hour instead of the platform default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -33,7 +36,9 @@ jobs:
       # The Pi SDK of the project computer image, for the real Pi controller test; BOT_REQUIRE_PI turns a skip into a failure.
       - run: npm ci --prefix runner --omit=dev --ignore-scripts
       - run: npm run check
-      - run: npm test
+      # #734: the bound on the command, not only on the job: a wedged test run fails this step in 25 minutes, while the
+      # job's remaining minutes still run Compose files, and a killed command exits non-zero so the check is a failure.
+      - run: timeout --signal=KILL 1500 npm test
         env:
           BOT_REQUIRE_PI: '1'
           BOT_TEST_SUMMARY: .tmp/unit-summary.json
@@ -55,6 +60,9 @@ jobs:
   e2e:
     name: e2e
     runs-on: ubuntu-latest
+    # #734: 400 s was the slowest recent push run of this job (run 43790528730), so the same 30-minute bound as unit
+    # leaves room for a cold Playwright download without ever reaching the platform default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -102,7 +110,9 @@ jobs:
           fi
           mkdir -p ~/.local/share/fonts && { cp ~/.cache/e2e-fonts/* ~/.local/share/fonts/ 2>/dev/null || echo 'no cached fonts'; }
 
-      - run: npm run test:e2e
+      # #734: bound at 20 minutes so a hung Playwright run fails this step (and the failure-only upload below still
+      # runs) instead of holding the required e2e check for the job's whole 30 minutes or the platform default.
+      - run: timeout --signal=KILL 1200 npm run test:e2e
         env:
           PLAYWRIGHT_JUNIT: .tmp/e2e-junit.xml
 

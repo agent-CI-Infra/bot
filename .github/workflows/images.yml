@@ -24,6 +24,9 @@ jobs:
   image:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    # #734: the slowest recent leg was bot-control-plane at 85 s (run 43825073032); 10 minutes is over seven times that,
+    # but it keeps a wedged image build from holding the required image check for the platform's 360-minute default.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
