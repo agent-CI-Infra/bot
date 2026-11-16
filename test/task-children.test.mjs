@@ -16,7 +16,7 @@ function fixture(t){const dir=mkdtempSync(join(tmpdir(),'children-'));let s=new 
 test('authorized explicit children are durable, idempotent, and distinct from ordinary task origins',t=>{const f=fixture(t),s=f.s;const caller=roleTaskCaller(s,'r','manager',{source_task_id:'parent',guard(){}}),cmd=new TaskCommands(s);
  const args={request:'Independent capability',criteria:['observable result'],as_child:true,execute:false};const a=cmd.tool(caller,'create_task',args),b=cmd.tool(caller,'create_task',args);assert.equal(a.id,b.id);assert.equal(childTaskContext(s,'parent').children.length,1);assert.equal(childTaskContext(s,'parent').events.length,0);const child=s.get('SELECT * FROM tasks WHERE id=?',a.id);assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?',a.id).executor_role,null);assert.equal(taskToolAllowed(s,child,'dev','write_file'),true);assert.equal(taskToolAllowed(s,child,'dev','run_command'),true);
  cmd.tool(caller,'create_task',{request:'Separate report',criteria:['report']});assert.equal(childTaskContext(s,'parent').children.length,1);
- assert.equal(cmd.tool(roleTaskCaller(s,'r','dev',{source_task_id:'parent',guard(){}}),'create_task',args).error,'child_task_manager_required');
+ assert.throws(()=>cmd.tool(roleTaskCaller(s,'r','dev',{source_task_id:'parent',guard(){}}),'create_task',args),{code:'task_management_forbidden'});
 });
 for(const status of ['completed','failed','cancelled','superseded','needs_help'])test(`any ${status} child wakes the parent while its sibling continues`,t=>{const f=fixture(t);for(const id of ['a','b']){f.add(id);attachChild(f.s,'parent',id);f.s.run("UPDATE tasks SET status='running' WHERE id=?",id);}assert.equal(f.park().waiting,true);f.s.run('UPDATE tasks SET status=? WHERE id=?',status,'a');f.reopen();resumeParentTasks(f.s,()=>false);assert.equal(f.parent().status,'queued');assert.equal(f.s.get("SELECT status FROM tasks WHERE id='b'").status,'running');const ctx=childTaskContext(f.s,'parent');assert.equal(ctx.events.length,1);assert.equal(new TaskRecords(f.s).get('parent').children.events.length,1);assert.equal(f.park(ctx.after_event_id).waiting,true);resumeParentTasks(f.s,()=>false);assert.equal(f.parent().status,'waiting_coordination');});
 test('early results, concurrent returns, active Manager and cancelled parent do not lose or replay wakes',t=>{const f=fixture(t);for(const id of ['a','b']){f.add(id);attachChild(f.s,'parent',id);}f.s.run("UPDATE tasks SET status='completed' WHERE id='a'");assert.equal(f.park().waiting,false);const first=childTaskContext(f.s,'parent').after_event_id;assert.equal(f.park(first).waiting,true);f.s.run("UPDATE tasks SET status='needs_help' WHERE id='b'");resumeParentTasks(f.s,()=>true);assert.equal(f.parent().status,'waiting_coordination');resumeParentTasks(f.s,()=>false);assert.equal(f.parent().status,'queued');const last=childTaskContext(f.s,'parent').after_event_id;assert.equal(f.park(last).waiting,false);assert.match(f.park(last).instruction,/No child/);f.s.run("UPDATE tasks SET status='cancelled' WHERE id='parent'");resumeParentTasks(f.s,()=>false);assert.equal(f.parent().status,'cancelled');});
@@ -42,11 +42,20 @@ test('an assigned child can read its parent contract but cannot acquire unrelate
  assert.ok(cmd.tool(child,'read_managed_task',{task_id:'parent'}).task.contract);
  const sibling=cmd.tool(manager,'create_task',{request:'Sibling capability',criteria:['Deliver sibling evidence'],as_child:true}).id;
  assert.ok(cmd.tool(child,'read_managed_task',{task_id:sibling}).task.contract);
- assert.throws(()=>cmd.tool(child,'manage_task',{task_id:sibling,action:'pause'}),{code:'task_not_owned'});
+ // Family reads retain original shared evidence, in both directions, without a management grant.
+ for(const target of ['parent',sibling]){
+  const records=new TaskRecords(f.s);records.history(target,'repository_evolved',{merge_sha:target+'-original-evidence'});
+  const source='task_history:'+f.s.get('SELECT max(id) id FROM task_history WHERE task_id=?',target).id;
+  assert.equal(JSON.parse(cmd.tool(child,'read_managed_task',{task_id:target,source}).record.chunk).data.merge_sha,target+'-original-evidence');
+ }
+ f.s.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,role,context_snapshot,config_snapshot) VALUES('parent-run','parent','execution',1,1,'now','running','reviewer','{}','{}')");
+ const parentWorker=roleTaskCaller(f.s,'r','reviewer',{source_task_id:'parent',source_run_id:'parent-run',guard(){}});
+ assert.ok(cmd.tool(parentWorker,'read_managed_task',{task_id:id}).task.contract);
+ assert.throws(()=>cmd.tool(child,'manage_task',{task_id:sibling,action:'pause'}),{code:'task_management_forbidden'});
  f.s.run("UPDATE task_runs SET status='succeeded' WHERE id='child-run'");
  assert.throws(()=>cmd.tool(child,'read_managed_task',{task_id:sibling}),{code:'task_not_owned'});
  f.s.run("UPDATE task_runs SET status='running' WHERE id='child-run'");
- assert.throws(()=>cmd.tool(child,'manage_task',{task_id:'parent',action:'pause'}),{code:'task_not_owned'});
+ assert.throws(()=>cmd.tool(child,'manage_task',{task_id:'parent',action:'pause'}),{code:'task_management_forbidden'});
  f.add('unrelated');assert.throws(()=>cmd.tool(child,'read_managed_task',{task_id:'unrelated'}),{code:'task_not_owned'});
 });
 

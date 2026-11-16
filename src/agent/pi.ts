@@ -245,6 +245,7 @@ export function piAdapter<T>(session: PiSession<T>) {
           const body = state.request.body;
           if (!body || !Array.isArray(body.messages) || Buffer.byteLength(JSON.stringify(body)) > 2 * 1024 * 1024) stop('model_request_invalid', undefined, '模型请求缺少 messages 数组，或请求内容超过 2 MiB 上限。');
           if(body.tools?.some((tool:any)=>['read_playbook','select_playbooks'].includes(tool.function?.name))) stop('execution_interrupted','waiting_environment','旧执行会话仍包含已退役指南工具；保留任务记录并在新工作区恢复。');
+          if(body.tools?.some((tool:any)=>['create_task','manage_task','list_managed_tasks'].includes(tool.function?.name)&&!session.offered(tool.function.name))) stop('execution_interrupted','waiting_environment','旧执行会话仍包含不再获准的任务管理工具；保留任务记录并在新工作区恢复。');
           await session.checkpoint?.();
           const turn=requests++;
           if (session.maxRequests !== undefined) {

@@ -42,7 +42,6 @@ const issued = new WeakMap<TaskCaller, Trust>();
 const sourceGuards = new WeakMap<Store, (origin: Row) => void>();
 export function taskSourceGuard(store: Store, guard: (origin: Row) => void): void { sourceGuards.set(store, guard); }
 const roleOf = (s: Store, project: string, role: string) => roleConfiguration(s, project).roles.find(r => r.role_id === role && r.enabled);
-const canManage = (permissions: RolePermissions, write: boolean) => permitsTool(permissions, write ? 'manage_task' : 'list_managed_tasks');
 function issue(store: Store, data: Omit<TaskCaller, 'owner_key' | 'principal_capabilities'>, trust: Omit<Trust, 'store'>): TaskCaller {
   const owner_key = JSON.stringify([data.kind, data.project_id, data.principal_id, data.conversation_id, data.role]);
   const principal_capabilities = trust.actor ? [...projectCapabilities, ...explicitDelegationCapabilities].filter(cap => {
@@ -90,7 +89,7 @@ export function assertTaskSource(store: Store, caller: TaskCaller): void {
   if (trust.actor) { assertCurrent(trust.actor); authorize(trust.actor, 'tasks.read', { project_id: caller.project_id }); }
   if (caller.role && !roleOf(store, caller.project_id, caller.role)) fail(403, 'task_role_unavailable');
 }
-export function assertTaskCaller(store: Store, caller: TaskCaller, write = false): void {
+export function assertTaskCaller(store: Store, caller: TaskCaller, write = false, tool = write ? 'manage_task' : 'read_managed_task'): void {
   assertTaskSource(store, caller); const trust = issued.get(caller)!;
   if (trust.actor) {
     assertCurrent(trust.actor);
@@ -102,7 +101,10 @@ export function assertTaskCaller(store: Store, caller: TaskCaller, write = false
   }
   if (caller.role) {
     const current = roleOf(store, caller.project_id, caller.role);
-    if (!current || !caller.permissions || !canManage(caller.permissions, write) || !canManage(current.permissions, write)) fail(403, 'task_management_forbidden');
+    // The retired employee-conversation adapter keeps its owner-scoped compatibility entry. Task role runs
+    // always carry source_task_id, so they cannot use this entry to escape the management/delegation grant.
+    const required = caller.kind === 'event' || !caller.source_task_id && caller.conversation_id ? 'read_managed_task' : tool;
+    if (!current || !caller.permissions || !permitsTool(caller.permissions, required) || !permitsTool(current.permissions, required)) fail(403, 'task_management_forbidden');
   }
 }
 export function taskCallerActor(store: Store, caller: TaskCaller): ActorContext | undefined {
@@ -128,7 +130,9 @@ export function assertManagedTask(store: Store, caller: TaskCaller, id: string, 
   if (!task) return fail(404, 'task_not_found');
   if (caller.kind === 'operator' || caller.kind === 'event') return task;
   const origin = store.get('SELECT owner_key FROM task_origins WHERE task_id=?', id);
-  const assigned = caller.source_task_id === id && caller.source_run_id && store.get(
+  // A worker's live assignment grants evidence access, never authority to change its enclosing task.
+  const controller = caller.role !== 'coordinator' && roleOf(store, caller.project_id, caller.role!)?.kind === 'controller';
+  const assigned = (!write || controller) && caller.source_task_id === id && caller.source_run_id && store.get(
     "SELECT 1 FROM task_runs WHERE id=? AND task_id=? AND role=? AND status='running'", caller.source_run_id, id, caller.role!);
   const familyRead=!write&&caller.source_task_id&&caller.source_run_id&&store.get(
     `SELECT 1 FROM task_runs r WHERE r.task_id=? AND r.id=? AND r.role=? AND r.status='running' AND (
@@ -185,7 +189,9 @@ export function assertManagedExecution(store: Store, task: Row): Row | undefined
   }
   if (origin.source_role) {
     const live = roleOf(store, task.repository_id, origin.source_role), fixed = JSON.parse(origin.permissions) as RolePermissions;
-    if (!live || !canManage(fixed, true) || !canManage(live.permissions, true)) return fail(403, 'task_management_forbidden');
+    // Retained origins describe already authorized work, including legacy own-role tasks. Do not turn the
+    // removal of default management tools into a new execution grant requirement for those tasks.
+    if (!live || !permitsTool(fixed, 'read_managed_task') || !permitsTool(live.permissions, 'read_managed_task')) return fail(403, 'task_management_forbidden');
     if (origin.executor_role !== origin.source_role && (fixed.delegation !== 'allow' || live.permissions.delegation !== 'allow')) fail(403, 'task_delegation_forbidden');
     if (origin.executor_role && !roleOf(store, task.repository_id, origin.executor_role)) fail(403, 'task_executor_unavailable');
     if (child && origin.source_kind === 'role' && child.source_role !== origin.source_role && (fixed.delegation !== 'allow' || live.permissions.delegation !== 'allow')) fail(403, 'task_delegation_forbidden');
@@ -275,6 +281,6 @@ export const taskManagementTools = [
   tool('read_managed_task', 'Read an owned, assigned, or explicit parent/child/sibling task as artifact/evidence references; family reads require a live assigned role run. To read an original observation or shared publication/version fact, pass an offered source and a bounded offset/length. The Task Manager can also read all retained records of its own task, including worker run/model records; other tasks retain their existing reference scope.', { task_id: { type: 'string' }, source: { type: 'string' }, offset: { type: 'integer' }, length: { type: 'integer',maximum:32000 } }, ['task_id']),
   tool('create_task', 'Create a task in the current project. Use intent=development for code and PR delivery through normal project development authority; a Task Manager uses the normal role team by default. Other roles execute as themselves by default. Another executor requires delegation. Set execute=false to record it without running. A reviewable_pull_request endpoint requires explicit project code/PR writes and source/executor authority; it never bypasses tests or independent QA.', {
     intent: {type:'string',enum:['report','development'],description:'Development uses the existing project development pipeline; parent association does not grant permissions. PR endpoints also imply development.'}, request: { type: 'string' }, criteria: { type: 'array', items: { type: 'string' } }, endpoint: { type: 'string', enum: ['report','reviewable_pull_request'] }, executor_role: { type: 'string' }, execute: { type: 'boolean' }, as_child: { type: 'boolean', description: 'Task Manager only: associate the new ordinary task with the current parent; execution and permissions are unchanged. Parent may wait for any child result. Use execute=false for work not ready to start.' } }, ['request', 'criteria']),
-  tool('manage_task', 'Append an instruction, continue, pause, or cancel an owned or assigned task. For a published code delivery, optionally request integration onto an offered current_main version ref with a reason; this neither approves QA nor authorizes merge.', {
+  tool('manage_task', 'Append an instruction, continue, pause, or cancel an owned task, or the controller\'s current task. A worker assignment grants read access only. For a published code delivery, optionally request integration onto an offered current_main version ref with a reason; this neither approves QA nor authorizes merge.', {
     task_id: { type: 'string' }, action: { type: 'string', enum: ['instructions', 'retry', 'pause', 'cancel', 'integrate'] }, instruction: { type: 'string' }, base_ref:{type:'string'},reason:{type:'string'} }, ['task_id', 'action'])
 ];

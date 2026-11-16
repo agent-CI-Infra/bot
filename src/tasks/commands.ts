@@ -221,7 +221,7 @@ export class TaskCommands {
   /** Model tools, conversations and role runs all call the same API mutations and ownership checks. */
   tool(caller:TaskCaller,name:string,args:any):Json {
     args=object(args);
-    assertTaskCaller(this.store,caller,!['list_managed_tasks','read_managed_task'].includes(name));
+    assertTaskCaller(this.store,caller,!['list_managed_tasks','read_managed_task'].includes(name),name==='list_managed_tasks'?'list_managed_tasks':undefined);
     const actor=taskCallerActor(this.store,caller),user:Actor={id:caller.principal_id??'role:'+caller.role,username:caller.role??'operator',role:'project_admin',csrf:'',repositories:[caller.project_id],context:actor};
     if(name==='list_managed_tasks'){
       fields(args,['offset','limit']);const offset=args.offset??0,limit=args.limit??20;
