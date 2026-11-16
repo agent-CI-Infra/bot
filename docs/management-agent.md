@@ -84,7 +84,7 @@ RoleDefinitionV2 的显式角色 apply 仍在安全检查点结束旧 run，并�
 
 整份方案一次确认（#932），可以去掉其中几项；确认后控制面按固定顺序逐项应用，每项都走人自己会用的现有通道，以确认人的身份执行，权限照常检查，不借用任何别人的权限。
 
-**确认什么**：页面状态的 `plan.changes` 是这份方案与项目现状的差异，每项带 `item`、生效位置 `where`、现值 `current` 和方案值 `proposed`，按应用顺序排列：启动 `start`（仓库还没启动时）、能力上限 `capability_ceiling`、Manager 的事件开关 `events`、`test_command`、`review_language`、约定 `conventions`、要新建的标签 `labels`、Manager 定时检查 `schedules`、CI 建议 `ci`。已经和方案一样的项不列出：已启动的项目重新运行时只剩差异，没有差异时为空，接入页据此说明"无需改动"；以前的确认已经建过或找到的标签、同一条 CI 建议建过的任务、同名的 Manager 定时检查、正文已在提示词里的约定都算已经一样。方案生成之后有人改过设置，差异里看到的就是改后的现值，由确认的人决定是否覆盖。飞书群建议不是应用项，留给完成页给出绑定入口。`plan.changes_revision` 标识这份差异。
+**确认什么**：页面状态的 `plan.changes` 是这份方案与项目现状的差异，每项带 `item`、生效位置 `where`、现值 `current` 和方案值 `proposed`，按应用顺序排列：启动 `start`（仓库还没启动时）、能力上限 `capability_ceiling`、Manager 的事件开关 `events`、`test_command`、`review_language`、约定 `conventions`、要新建的标签 `labels`、Manager 定时检查 `schedules`、CI 建议 `ci`。已经和方案一样的项不列出：已启动的项目重新运行时只剩差异，没有差异时为空，接入页据此说明"无需改动"；以前的确认已经建过或找到的标签、同一条 CI 建议建过的任务、同名的 Manager 定时检查、正文已在提示词里的约定都算已经一样。方案生成之后有人改过设置，差异里看到的就是改后的现值，由确认的人决定是否覆盖。约定只认接入向导段落（「本仓库约定（接入向导第 N 版…」标题下）里的内容，提示词别处出现同样的字不算。启动一项还写明仓库是否属于受信任组织；属于时带 `organization_capability_ceiling`，即自己启动时用的组织能力档。飞书群建议不是应用项，留给完成页给出绑定入口。`plan.changes_revision` 标识这份差异。
 
 **确认**：`POST /api/management/onboarding/<仓库 id>/confirm`，请求体 `{version, changes_revision, items, schedule_destination_id?}`。`version` 必须是这个仓库最新一版方案（否则 409 `onboarding_plan_outdated`），`changes_revision` 必须与当前差异一致（否则 409 `onboarding_changes_outdated`，重新读取后再确认），`items` 是差异里要应用的项（不在差异里或为空返回 400 `invalid_onboarding_items`，没有差异返回 409 `onboarding_nothing_to_apply`）；仓库还没启动时 `start` 必须在内（400 `onboarding_start_required`）。确认记录确认人、时间和方案版本，方案本身不再改动，要改就让管理助手出新一版。同一版方案只能确认一次，再次确认直接返回已有的结果，不会重复应用。页面状态的 `application` 是这个仓库最近一次确认和它的回执。
 
@@ -96,9 +96,9 @@ RoleDefinitionV2 的显式角色 apply 仍在安全检查点结束旧 run，并�
 - `conventions`：以「本仓库约定（接入向导第 N 版，日期）」为标题的独立段落，追加到 Manager 提示词（项目保存过完整的分派提示词时追加到它末尾，否则追加到 Manager 提示词的前言，分派提示词以前言开头），并追加到每个启用的角色（跨任务的 coordinator 除外）的角色提示词（`manager.update`、`roles.update`），不覆盖已有内容，也不写 `.bot/` 文件；仓库的 `.bot/` 文件覆盖不了这两处。已经带有这一版段落的提示词不再追加。
 - `labels`：先读仓库现有标签；不存在的经 `github_write POST /labels` 新建（只放行这条路由，项目能力上限至少要 `comment`），已经存在的同名标签不改颜色和说明，记为 `exists`。写入按标签名记账，重试不会重复创建。
 - `schedules`：Manager 定时检查（#851）是项目计划，用项目服务身份运行；项目还没有服务身份时，这一项以确认人的委托创建（只拿确认人自己在项目里的能力，失去时随之失效）；差异里这一项的 `service_principal` 为 `delegated` 时接入页在确认前写明这一点，已有服务身份时为 `existing`。计划需要通知目的地：确认或重试时带 `schedule_destination_id`；没带时这一项失败（`schedule_destination_required`），回执的 `detail.destinations` 列出可选的目的地。已有同名的 Manager 定时检查不再创建。
-- `ci`：管理命令 `task.create` 建一个普通开发任务，合同就是这条建议（目标、要改的文件、经 bot PR 交付由人合并），并带 `workflow_changes`：确认 CI 一项就是人在控制台确认这项任务可以修改 `.github/workflows/`（#931），所以这些命令的来源是 `console:onboarding:<仓库 id>`；项目能力上限不到 `develop` 时这一项失败并写明原因。
+- `ci`：管理命令 `task.create` 建一个普通开发任务，合同就是这条建议（目标、要改的文件、经 bot PR 交付由人合并），并带 `workflow_changes`：确认 CI 一项就是人在控制台确认这项任务可以修改 `.github/workflows/`（#931），所以这些命令的来源是 `console:onboarding:<仓库 id>`；项目能力上限不到 `develop` 时这一项失败并写明原因。同一份确认里已经建成的任务（例如建成之后控制面重启、回执没来得及写）在重试时直接沿用，不会再建一个。
 
-**回执**：每项一条，状态为 `succeeded`、`exists`（已经和方案一样）、`failed`（带 `error`，必要时带 `detail`）或 `skipped`（确认时去掉了），并记录执行人、尝试次数和管理命令回执 id；审计记录确认（`onboarding.confirmed`）和每项结果（`onboarding.item.<状态>`）。某项失败不影响后面的项。`POST /api/management/onboarding/<仓库 id>/items/<项>/retry`（可带 `schedule_destination_id`）只重试一项失败的项（其他状态返回 409 `onboarding_item_not_failed`），以新的幂等键执行；重试启动成功后接着应用等待它的项。控制面在应用途中重启时，正在应用的项记为失败（`onboarding_item_interrupted`），可以重试。同一时间一份确认只应用一次（`onboarding_apply_running`）。
+**回执**：每项一条，状态为 `succeeded`、`exists`（已经和方案一样）、`failed`（带 `error`，必要时带 `detail`）或 `skipped`（确认时去掉了），并记录执行人、尝试次数和管理命令回执 id；审计记录确认（`onboarding.confirmed`）和每项结果（`onboarding.item.<状态>`）。某项失败不影响后面的项。`POST /api/management/onboarding/<仓库 id>/items/<项>/retry`（可带 `schedule_destination_id`）只重试一项失败的项（其他状态返回 409 `onboarding_item_not_failed`），以新的幂等键执行；重试启动成功后接着应用等待它的项。控制面在应用途中重启时，正在应用的项记为失败（`onboarding_item_interrupted`），可以重试。同一个仓库同一时间只应用一份确认（在这个控制面进程里按仓库加锁）：正在应用时再确认或重试都返回 409 `onboarding_apply_running`，回执保持原状，稍后再试。
 
 ## 扩展与验证
 
