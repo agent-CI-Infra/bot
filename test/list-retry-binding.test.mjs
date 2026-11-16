@@ -45,7 +45,7 @@ test('a card the console has left behind redraws nothing and says where to retry
   assert.ok(button);
   // A navigation that keeps the card in the DOM but moves the console on: `route()` bumps the version before it draws
   // its own page (a project page, a console page), and the list panel is hidden rather than emptied.
-  page.run("tab = 'events'; renderVersion++");
+  page.run("tab = 'board'; renderVersion++");
   const before = page.requests.length;
   recover();
   button.listeners.click[0]();

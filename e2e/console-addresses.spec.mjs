@@ -16,7 +16,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     // Accounts, users, review and development no longer have top-level tabs.
     for (const gone of ['机器人账号', '用户', '检视', '开发', '接入向导', '消息渠道']) await expect(page.locator('#tabs').getByRole('button', { name: gone, exact: true })).toHaveCount(0);
     const tab = name => ({ click: () => consoleNavigate(page, name) }), current = () => page.locator('#tabs [aria-current=page]');
-    for (const [name, address] of [['任务看板', '#/board'], ['用量与成本', '#/costs'], ['仓库事件', '#/events'], ['外部执行端', '#/external'], ['管理助手', '#/management'], ['项目', '#/projects']]) {
+    for (const [name, address] of [['任务看板', '#/board'], ['用量与成本', '#/costs'], ['外部执行端', '#/external'], ['管理助手', '#/management'], ['项目', '#/projects']]) {
       await tab(name).click(); await expect(page).toHaveURL(new RegExp(address.replace(/[#/]/g, '\\$&') + '$'));
       await page.reload(); await expect(current()).toHaveText(name === '外部执行端' ? '个人设置' : name);
       if (name === '外部执行端') await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('外部执行端');
@@ -25,6 +25,18 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
       await page.goto(h.admin + '/' + address); await expect(current()).toHaveText('任务看板'); await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue(category);
       await expect(page).toHaveURL(/#\/board$/); await page.reload(); await expect(current()).toHaveText('任务看板'); await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue('');
     }
+    // #966: the old delivery-list address is unknown. It shows the existing not-found page and does not read deliveries.
+    const eventsRequests = [];
+    const noteEvents = request => { if (request.url().includes('/api/events')) eventsRequests.push(request.url()); };
+    page.on('request', noteEvents);
+    await page.goto(h.admin + '/#/events');
+    const missing = page.locator('#console-page [data-page-not-found="console"]');
+    await expect(missing).toBeVisible();
+    await expect(missing.getByRole('heading', { name: '找不到这个页面', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '查看详情', exact: true })).toHaveCount(0);
+    await expect(page.locator('[data-delivery-record]')).toHaveCount(0);
+    expect(eventsRequests).toEqual([]);
+    page.off('request', noteEvents);
     // Global settings: one category at a time, each with its own address; a reload keeps it.
     await tab('全局设置').click(); await expect(page).toHaveURL(/#\/settings$/);
     const nav = page.locator('.project-nav'), cards = () => page.locator('#settings-panel h3').allInnerTexts();

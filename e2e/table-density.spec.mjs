@@ -51,12 +51,6 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
     expect(drillAlign.every(align => align === 'left' || align === 'start')).toBeTruthy();
     await page.screenshot({ path: `${out}/costs-drill-after-1440.png`, fullPage: true });
 
-    // #560 also evens out the Webhook delivery rows.
-    await page.goto(h.admin + '/#/events');
-    await expect(page.getByRole('heading', { name: '仓库事件', exact: true })).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
-    await page.screenshot({ path: `${out}/events-after-1440.png`, fullPage: true });
-
     await page.goto(h.admin + '/#/projects/101/roles');
     // A fresh project shows the recommended-roles intro first (main); adopt it so the overview table renders.
     await page.getByTestId('adopt-recommended-roles').click();
@@ -105,9 +99,5 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
     await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     await page.screenshot({ path: `${out}/costs-after-390.png`, fullPage: true });
-    await page.goto(h.admin + '/#/events');
-    await expect(page.getByRole('heading', { name: '仓库事件', exact: true })).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await page.screenshot({ path: `${out}/events-after-390.png`, fullPage: true });
   } finally { await h.stop(); }
 });

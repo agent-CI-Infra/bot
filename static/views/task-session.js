@@ -15,7 +15,7 @@ async function openTask(id) {
   if (!taskView.open) taskView.showModal();
   await refreshTask();
 }
-// The delivery detail already exists behind the events list; a task's source delivery opens that same view, no new route.
+// A task's source delivery opens the archived delivery in this dialog. There is no delivery-list page.
 async function openTaskDelivery(deliveryId) {
   const event = await api('/api/events/' + encodeURIComponent(deliveryId));
   $('detail-title').textContent = '投递详情';

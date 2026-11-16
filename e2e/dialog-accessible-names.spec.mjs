@@ -1,4 +1,3 @@
-import { consoleNavigate } from './console-navigation.mjs';
 import { test, expect } from '@playwright/test';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 
@@ -8,6 +7,9 @@ import { harness, setup, account, repository } from '../test/helpers.mjs';
 test('#756: #editor and #detail take their accessible name from their visible titles', async ({ page }) => {
   const h = await harness(), { admin, password } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101');
+  await h.hook(a.path, a.secret, 'dialog-name-1', { repository: { id: 101, full_name: 'fixture/project-101' }, action: 'opened', issue: { number: 1, title: 'Review' } });
+  const event = h.store.get("SELECT id FROM deliveries WHERE delivery_id='dialog-name-1'");
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,phase,source_delivery_id,created_at,updated_at) VALUES('dialog-task','101','review.issue','failed','Review from webhook',1,'complete',?, '2026-10-01T12:00:00.000Z','2026-10-01T12:00:00.000Z')", event.id);
   try {
     await page.goto(h.admin + '/#/inbox/101');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
@@ -26,11 +28,10 @@ test('#756: #editor and #detail take their accessible name from their visible ti
     await page.keyboard.press('Escape');
     await expect(editor).toBeHidden();
 
-    // The delivery dialog names itself after the heading the reader sees: 投递详情.
-    await h.hook(a.path, a.secret, 'dialog-name-1', { repository: { id: 101 }, action: 'opened', issue: { number: 1 } });
-    await consoleNavigate(page, '仓库事件');
-    await expect(page.getByText('本页 1 条事件')).toBeVisible();
-    await page.getByRole('button', { name: '查看详情', exact: true }).first().click();
+    // The delivery dialog names itself after the heading the reader sees: 投递详情. The task page opens that same dialog.
+    await page.goto(h.admin + '/#/inbox/101');
+    await page.locator('[data-task-id="dialog-task"]').getByRole('button', { name: '查看任务', exact: true }).click();
+    await page.locator('#task-side').getByRole('button', { name: '查看投递', exact: true }).click();
     const detail = page.locator('#detail');
     await expect(detail.getByRole('heading', { name: '投递详情', exact: true })).toBeVisible();
     await expect(detail).toHaveAccessibleName('投递详情');

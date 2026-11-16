@@ -1,5 +1,5 @@
 // The generic list renderer still understands task rows; their old top-level addresses now select a board category.
-const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['projects','events','external'];
+const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['projects','external'];
 // Console pages are drawn by static/shell.js (renderConsolePage). They are not tabs of the generic list, and no list
 // read may ever build /api/<tab> from them: #/more would become GET /api/more, an endpoint that does not exist (#365).
 const consoleTabs = ['more', 'inbox', 'new-task', 'conversations', 'not-found'];

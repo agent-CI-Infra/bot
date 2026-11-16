@@ -32,7 +32,7 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
     await login(page, h, 'administrator', password);
     await expect(page.getByRole('heading', { name: '管理', exact: true })).toBeVisible();
     expect(await adminCaptions(page)).toEqual([
-      '用量与成本', '仓库事件', '外部执行端', '存储', '接入向导', '安装档案', '机器人账号', '全局设置'
+      '用量与成本', '外部执行端', '存储', '接入向导', '安装档案', '机器人账号', '全局设置'
     ]);
     await page.getByTestId('console-admin-group').getByRole('link', { name: /^接入向导/ }).click();
     await expect(page).toHaveURL(/#\/settings\/onboarding/);
@@ -53,10 +53,11 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
     try {
       await member.setViewportSize({ width: 1440, height: 900 });
       await login(member, h, 'admin-area-member', memberPassword);
-      for (const name of ['用量与成本', '仓库事件', '存储', '全局设置']) {
+      for (const name of ['用量与成本', '存储', '全局设置']) {
         await expect(member.locator('#console-sidebar').getByRole('button', { name, exact: true })).toBeHidden();
       }
-      expect(await adminCaptions(member)).toEqual(['用量与成本', '仓库事件', '外部执行端', '存储']);
+      await expect(member.locator('#console-sidebar').getByRole('button', { name: '仓库事件', exact: true })).toHaveCount(0);
+      expect(await adminCaptions(member)).toEqual(['用量与成本', '外部执行端', '存储']);
       for (const name of ['接入向导', '安装档案', '机器人账号', '全局设置']) {
         await expect(member.getByTestId('console-admin-group').getByRole('link', { name, exact: true })).toHaveCount(0);
         await expect(member.locator('#console-page')).not.toContainText(name);
@@ -70,15 +71,21 @@ test('#550 管理区按角色可见：项目管理员看不到接入向导，超
       await member.setViewportSize({ width: 390, height: 844 });
       await member.locator('#console-mobile-nav').getByRole('link', { name: '更多', exact: true }).click();
       await expect(member.getByTestId('console-admin-group')).toBeVisible();
-      expect(await adminCaptions(member)).toEqual(['用量与成本', '仓库事件', '外部执行端', '存储']);
+      expect(await adminCaptions(member)).toEqual(['用量与成本', '外部执行端', '存储']);
       await expect(member.locator('#console-page')).not.toContainText('接入向导');
       await expect(member.locator('#console-page')).not.toContainText('全局设置');
       await expect(member.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
       await member.screenshot({ path: `${out}/admin-member-390.png`, fullPage: true });
 
-      // Addresses still open (permissions unchanged).
+      // Remaining management addresses still open. #/events is not a page.
+      await member.goto(h.admin + '/#/costs');
+      await expect(member.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible();
       await member.goto(h.admin + '/#/events');
-      await expect(member.getByText('本页', { exact: false })).toBeVisible();
+      const missing = member.locator('[data-page-not-found="console"]');
+      await expect(missing).toBeVisible();
+      await expect(missing.getByRole('heading', { name: '找不到这个页面', exact: true })).toBeVisible();
+      await expect(member.locator('[data-delivery-record]')).toHaveCount(0);
+      await expect(member.getByRole('button', { name: '查看详情', exact: true })).toHaveCount(0);
     } finally { await context.close(); }
   } finally { await h.stop(); }
 });
