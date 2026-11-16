@@ -34,6 +34,14 @@ test('dispatch records show refusals with their reasons and filtered events with
     const detail = page.getByRole('dialog', { name: '分派详情', exact: true });
     await reader.locator('[data-dispatch-event="filtered"]').getByRole('button', { name: '查看分派详情', exact: true }).click();
     await expect(detail).toContainText('控制面过滤（没有交给 Manager）'); await expect(detail).toContainText('外人的评论');
+    // Nothing was decided for it: the detail shows the reason code and when it was recorded, not a decision time or attempts.
+    await expect(detail).toContainText('outsider_comment'); await expect(detail).toContainText('记录时间');
+    await expect(detail).not.toContainText('决定时间'); await expect(detail).not.toContainText('当前轮尝试次数');
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      if (shots) await page.screenshot({ path: `${shots}/dispatch-filtered-${width}.png` });
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
     await page.keyboard.press('Escape');
     await reader.getByRole('combobox', { name: '分派状态', exact: true }).selectOption('');
     await reader.getByRole('button', { name: '应用分派筛选', exact: true }).click();
