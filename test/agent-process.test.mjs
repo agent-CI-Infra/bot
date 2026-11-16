@@ -217,8 +217,8 @@ test('review rules choose the triggers, and the comment language and only the ef
   // sections opened by the label the project setting names.
   workspace=proxyWorkspace();
   await legacyAgentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', effective_rules: resolveRules({}, {}) }, undefined, async()=>({status:'no_changes'}));
-  for (const [name, heading] of [['labels.md', '标签规则 `labels` (builtin)\nreview_label: bot-reviewed\n'], ['issue-review.md', '检视 Issue `review.issue` (builtin)'], ['pr-review.md', '检视 PR `review.pr` (builtin)'],
-    ['issue-development.md', '开发与跟进 bot PR `development` (builtin)\ndevelopment_label: bot-develop\n']])
+  for (const [name, heading] of [['labels.md', 'Labeling (Manager section `labels`, builtin)\nreview_label: bot-reviewed\n'], ['issue-review.md', 'Issue review (Manager section `review.issue`, builtin)'], ['pr-review.md', 'Pull request review (Manager section `review.pr`, builtin)'],
+    ['issue-development.md', 'Development and bot pull request follow-up (Manager section `development`, builtin)\ndevelopment_label: bot-develop\n']])
     assert.ok(prompts[2].includes(`## ${heading}\n` + readFileSync(new URL('../docs/prompts/' + name, import.meta.url), 'utf8')), name);
 });
 

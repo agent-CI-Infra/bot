@@ -178,8 +178,8 @@ test('a project waiting for its .bot/ import imports at its first task, which al
   await f.hook(f.account.path,f.account.secret,'opened',{repository:{id:101},action:'opened',issue:f.issue});
   const taskId=f.store.get("SELECT id FROM tasks WHERE kind='review.issue'").id,task=await f.run(taskId);
   assert.equal(task.status,'succeeded',task.error_code);
-  assert.ok(f.config.system.includes('## 行为指南 `guide` (console)\nImported guide.'));
-  assert.ok(f.config.system.includes('## 标签规则 `labels` (console)\nreview_label: team-reviewed\n\n# Our labels'));
+  assert.ok(f.config.system.includes('## Behavior guide (Manager section `guide`, console)\nImported guide.'));
+  assert.ok(f.config.system.includes('## Labeling (Manager section `labels`, console)\nreview_label: team-reviewed\n\n# Our labels'));
   // The project's sections hold the imported texts for the tasks after it.
   const short=f.heads.main.slice(0,7);
   assert.equal(managerSection(f.store,'101','guide'),`由 \`.bot/guide.md\` 导入（提交 ${short}）。\n\nImported guide.`);
@@ -198,7 +198,7 @@ test('long rule sections and skills are sent whole',async t=>{
   await f.hook(f.account.path,f.account.secret,'opened',{repository:{id:101},action:'opened',issue:f.issue});
   const taskId=f.store.get("SELECT id FROM tasks WHERE kind='review.issue'").id,task=await f.run(taskId);
   assert.equal(task.status,'succeeded',task.error_code);
-  assert.ok(f.config.system.includes('## 行为指南 `guide` (console)\n'+'g'.repeat(40000)));
+  assert.ok(f.config.system.includes('## Behavior guide (Manager section `guide`, console)\n'+'g'.repeat(40000)));
   for(const [name,bytes] of [['a',37204],['b',70000],['c',200000]])assert.equal(Buffer.byteLength(f.context[`skills/${name}/SKILL.md`]),bytes,name);
   assert.equal(explainFailure('invalid_rule_content','waiting_configuration').label,'仓库内容或规则');
   assert.equal(explainFailure('bot_rule_too_large','waiting_configuration').action,explainFailure('invalid_bot_label','waiting_configuration').action);
@@ -212,10 +212,10 @@ test('the agent gets the rules and an index of the skills; the skills, the Issue
   const taskId=f.store.get("SELECT id FROM tasks WHERE kind='review.issue'").id,task=await f.run(taskId);
   assert.equal(task.status,'succeeded',task.error_code);
   // The behavior guide is in the system prompt; a skill only by name, with what it is for and where to read it.
-  assert.ok(f.config.system.includes('## 行为指南 `guide` (console)\nBe brief.'));assert.ok(!f.config.system.includes('Run the checks.'));
+  assert.ok(f.config.system.includes('## Behavior guide (Manager section `guide`, console)\nBe brief.'));assert.ok(!f.config.system.includes('Run the checks.'));
   assert.ok(!f.config.system.includes('Repository guide'));
   // The labels section carries the label the control plane applies, which its first line used to declare.
-  assert.ok(f.config.system.includes('## 标签规则 `labels` (builtin)\nreview_label: bot-reviewed\n\n# Labeling'));
+  assert.ok(f.config.system.includes('## Labeling (Manager section `labels`, builtin)\nreview_label: bot-reviewed\n\n# Labeling'));
   const prompt=JSON.parse(f.config.prompt);
   assert.deepEqual(prompt.skills,[{name:'ci',description:'Read, diagnose and change the CI pipeline.',path:'../context/skills/ci/SKILL.md'},{name:'deploy',description:'Deploy the stack',path:'../context/skills/deploy/SKILL.md'}]);
   assert.deepEqual(prompt.context_files.map(file=>file.path),['../context/object.json','../context/comments.json']);

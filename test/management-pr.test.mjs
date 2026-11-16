@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
 import { harness,setup,account,repository } from './helpers.mjs';
-import { command } from './management-fixture.mjs';
+import { command, query } from './management-fixture.mjs';
 import { blobSha } from '../dist/agent/common.js';
 
 test('configuration PR uses a scoped installation token, discloses pending merge and reconciles an unknown response exactly once',async t=>{
@@ -43,4 +43,8 @@ test('configuration PR uses a scoped installation token, discloses pending merge
   const unsafe=await command(admin,'configuration.pr',target,{path:'.github/workflows/injected.yml',content:'unsafe'},'unsafe');assert.notEqual(unsafe.value.state,'succeeded');assert.equal(prs.length,2);
   // .bot/ files are no longer configuration (#935): a configuration PR only changes a skill.
   const retired=await command(admin,'configuration.pr',target,{path:'.bot/rules/issue-review.md',content:'Revised prompt'},'retired');assert.notEqual(retired.value.state,'succeeded');assert.equal(prs.length,2);
+  // So the configuration offers a configuration PR only for a repository skill, never for a rule section's .bot/ name.
+  const paths=(await query(admin,'get_effective_config',target)).value.workflows.map(w=>w.prompt.path);
+  assert.ok(paths.every(path=>path===null||path.startsWith('.agents/skills/')),JSON.stringify(paths));
+  assert.ok((await admin('/api/repositories/101/manager')).value.manager.sections.every(section=>section.path===null||section.path.startsWith('.agents/skills/')));
 });
