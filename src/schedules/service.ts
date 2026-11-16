@@ -216,7 +216,8 @@ export class ScheduleService {
     if (row.kind === 'personal' && row.owner_id !== actor.principal_id) fail(403, 'personal_schedule_owner_required');
     if (row.kind === 'project') authorize(actor, 'config.write', { project_id: row.project_id });
   }
-  /** A later tick or run-now must not stack on a check that is still queued, running, or waiting to be decided. */
+  /** A later tick or run-now must not stack on a check that is still queued, running, or waiting to be decided.
+   *  task.request normally ends as completed (also pr_opened or superseded); those are finished, not busy. */
   busyManagerCheck(scheduleId: string, projectId: string): boolean {
     return !!this.store.get(`SELECT 1 AS n FROM schedule_occurrences o
       WHERE o.schedule_id=? AND (
@@ -224,7 +225,7 @@ export class ScheduleService {
         OR EXISTS(SELECT 1 FROM schedule_business_runs b WHERE b.occurrence_id=o.id AND b.state NOT IN ${terminalRunStates})
         OR EXISTS(SELECT 1 FROM dispatch_events e WHERE e.type='schedule.due' AND e.state IN ('pending','dispatching')
           AND json_extract(e.facts,'$.occurrence_id')=o.id)
-        OR EXISTS(SELECT 1 FROM tasks t WHERE t.unique_key=? || o.id AND t.status NOT IN ('succeeded','failed','cancelled'))
+        OR EXISTS(SELECT 1 FROM tasks t WHERE t.unique_key=? || o.id AND t.status NOT IN ('succeeded','failed','cancelled','completed','pr_opened','superseded'))
       ) LIMIT 1`, scheduleId, `${projectId}:task.request:`);
   }
   occurrence(row: Row, key: string, logical: number, source: string, state = 'pending', reason?: string, initiator?: string): Row {

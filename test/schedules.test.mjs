@@ -444,6 +444,33 @@ test('a due manager.check with an instruction starts once on the timer, and file
   assert.equal(f.h.store.get("SELECT count(*) n FROM tasks WHERE unique_key LIKE '101:task.request:%'").n, 1);
 });
 
+test('a completed scheduled check no longer counts as busy, so the next due run starts (#905)', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { enabled: true });
+  configureDispatch(context => scheduledCheckDecision(context) ?? ruleDecider(context));
+  t.after(() => configureDispatch(ruleDecider));
+  await f.create(f.plan({
+    name: '到期检查', workflow: 'manager.check', misfire: 'once', grace_ms: 86400000,
+    start_at: f.now() + 60000, interval_ms: 60000,
+    parameters: { instruction: 'Check stale Issues.', file_issues: false }
+  }));
+  f.advance(60000);
+  f.worker.produce();
+  f.worker.dispatch(f.worker.claimOccurrence());
+  const event = f.h.store.get("SELECT * FROM dispatch_events WHERE type='schedule.due'");
+  const task = f.h.store.get('SELECT * FROM tasks WHERE id=?', JSON.parse(event.result).created[0]);
+  assert.equal(task.status, 'queued');
+  // A finished task.request ends as completed, not succeeded. Treating that as still running would skip every later tick.
+  f.h.store.run("UPDATE tasks SET status='completed' WHERE id=?", task.id);
+  f.advance(60000);
+  f.worker.produce();
+  const next = f.worker.claimOccurrence();
+  assert.ok(next, 'the next due occurrence should be claimable after the previous check completed');
+  f.worker.dispatch(next);
+  assert.equal(f.h.store.get("SELECT count(*) n FROM schedule_occurrences WHERE reason='overlap'").n, 0);
+  assert.equal(f.h.store.get("SELECT count(*) n FROM tasks WHERE unique_key LIKE '101:task.request:%'").n, 2);
+});
+
 test('an outsider cannot create a project manager.check (#905)', async t => {
   // After #851, a project administrator with config.write may register any project workflow, not only manager.check.
   const f = await fixture(t);
