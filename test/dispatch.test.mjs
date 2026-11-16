@@ -48,6 +48,9 @@ async function fixture(t) {
   t.after(() => new Promise(resolve => { provider.close(resolve); provider.closeAllConnections(); }));
   const model = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'Manager fixture', api_url: `http://127.0.0.1:${provider.address().port}/v1`, api_key: 'manager-fixture-key' })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
+  // These tests are about the Manager's own decisions: the project has no standing rules (#815), so every event reaches it.
+  const manager = (await admin('/api/repositories/101/manager')).value.manager;
+  assert.equal((await admin('/api/repositories/101/manager', 'PUT', { expected_revision: manager.prompt.revision, standing_rules: [] })).status, 200);
   const dispatcher = new Dispatcher(h.store);
   const run = async () => { dispatcher.tick(); await dispatcher.idle(); };
   return { h, admin, a, requests, state, dispatcher, run };

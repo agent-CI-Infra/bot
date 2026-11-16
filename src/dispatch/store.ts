@@ -39,6 +39,8 @@ export function dispatchStorage(store: Store) {
   `);
   // #815: what the control plane refused when the Manager tried to create work for the event, in order.
   if (!store.all('PRAGMA table_info(dispatch_events)').some(column => column.name === 'refusals')) store.db.exec('ALTER TABLE dispatch_events ADD COLUMN refusals TEXT');
+  // The standing rule (id and revision) that decided the event without a model call (#815).
+  if (!store.all('PRAGMA table_info(dispatch_events)').some(column => column.name === 'rule')) store.db.exec('ALTER TABLE dispatch_events ADD COLUMN rule TEXT');
 }
 
 /** A task the control plane would create for this event, fully specified before the Manager sees it. */
@@ -67,6 +69,8 @@ export interface ContinueOption { id: string; task_id: string; kind: string; sta
 export interface Decision { decision: 'create' | 'continue' | 'ignore'; option_ids: string[]; reason: string; brief?: { goal: string; criteria: string[] } | null; writes?: string[] | null; model?: string | null;
   /** The checked basis of a development of an Issue the bot did not open (#815), kept with the task. */
   basis?: Basis | null;
+  /** The standing rule that made this decision without a model call (#815). */
+  rule?: { id: string; revision: number } | null;
   /** The continue options the decision was made with; a running task that appeared since means deciding again. */
   seen?: string[] }
 /** Work the event has an object for, but that the project does not allow now (#815): shown to the Manager with the reason. */
@@ -361,9 +365,9 @@ export function applyDecision(store: Store, event: Row, decision: Decision, leas
     // Options the Manager did not take (or whose own conditions refused them now) end their module's wait.
     for (const option of options) if (option.hook && !checked.option_ids.includes(option.id) || option.hook && declined.includes(option.id))
       hooks.get(option.hook!)?.declined(store, current, checked.decision === 'ignore' ? checked.reason : declined.includes(option.id) ? 'option_refused' : checked.reason, option.ref ?? null);
-    store.run(`UPDATE dispatch_events SET state='decided',decision=?,reason=?,brief=?,result=?,model=?,lease=NULL,lease_until=NULL,error=NULL,decided_at=? WHERE id=?`,
+    store.run(`UPDATE dispatch_events SET state='decided',decision=?,reason=?,brief=?,result=?,model=?,rule=?,lease=NULL,lease_until=NULL,error=NULL,decided_at=? WHERE id=?`,
       checked.decision, checked.reason, checked.brief ? JSON.stringify(checked.brief) : null, JSON.stringify({ created, continued, declined, ...(checked.writes ? { writes: checked.writes } : {}) }),
-      checked.model ?? decision.model ?? null, now, current.id);
+      checked.model ?? decision.model ?? null, decision.rule ? JSON.stringify(decision.rule) : null, now, current.id);
     return { created, continued };
   }); } catch (error) { if (error instanceof HttpError) throw new TaskError(error.code, 'waiting_configuration'); throw error; }
 }

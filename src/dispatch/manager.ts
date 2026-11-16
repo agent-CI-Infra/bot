@@ -11,7 +11,9 @@ import { RepositoryExplorer, repositoryTools } from '../agent/exploration.js';
 import { boundedBatch, chatContextBytes, toolArguments, toolCallsProblem, ToolTranscript } from '../agent/tool-context.js';
 import { traceClean } from '../tasks/trace.js';
 import { githubWrite, githubWriteTool, earlierWrites } from '../github/write.js';
-import { managerPrompt, parseSections, workPermissions } from '../work/settings.js';
+import { managerPrompt, parseSections, saveManager, workPermissions } from '../work/settings.js';
+import { ruleActions, standingRules } from './rules.js';
+import { HttpError } from '../core/security.js';
 import { section, workType, workTypes } from '../work/catalog.js';
 import { checkDecision, InvalidDecision, managerRefusal, recordRefusal, renewDispatchLease, type Decision, type DispatchContext } from './store.js';
 import { isRefusal, promptRevision, verifyBasis } from './basis.js';
@@ -35,6 +37,11 @@ const decisionTools = [
   fn('continue_task', 'Add this event to a running task listed in work.continue (an update it answers in its next turn). This ends your turn.', { task_id: { type: 'string' }, reason }, ['task_id', 'reason']),
   fn('ignore_event', 'Do nothing more for this event. Use it after answering the person, or when the event needs no work. This ends your turn.', { reason }, ['reason'])];
 const decisionNames = decisionTools.map(tool => tool.function.name);
+// Standing rules (#815): the Manager makes an event routine, so later ones like it need no model call.
+const registerRule = fn('register_rule', 'Register a standing rule so that later events like this one are handled without asking you: the event type, optional label conditions, and one action: create one work type (create), continue the object\'s task (continue; continue_active only while it is still running or waiting), continue_or_create, or ignore. Use it only when this project\'s instructions make such events routine. A rule never starts development, its work is checked like create_task, and it does not decide the current event. Rules are kept with the Manager\'s revisions and are editable in 角色 → Manager; registering a rule with an existing id replaces it.', {
+  id: { type: 'string', description: 'A short stable id, lower case, for example docs-label-ignore' }, event: { type: 'string', description: 'The event type, for example issue.labeled' },
+  action: { type: 'string', enum: [...ruleActions] }, work: { type: 'string', description: 'For create and continue_or_create: the work type id, for example review.issue' }, reason,
+  when: { type: 'object', additionalProperties: false, properties: { labels_any: { type: 'array', items: { type: 'string' } }, labels_none: { type: 'array', items: { type: 'string' } } } } }, ['id', 'event', 'action', 'reason']);
 /** The decision a call of a decision tool stands for; a plain JSON answer in the old dispatch shape is read as it is. */
 function toDecision(name: string | null, args: any): any {
   if (!args || typeof args !== 'object') return args;
@@ -89,11 +96,20 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
     const p = live(), read = githubReadScopes(p);
     return [...repositoryTools.filter(t => permitsTool(p, t.function.name) && read.length).map(t => ({ ...t, function: { ...t.function, description: t.function.description.replace(/\s*Call github_read_token first\./g, '') } })),
       // github_write also needs the project's capability ceiling at comment or more (#850); each call is checked again.
-      ...(permitsTool(p, 'github_write') && covers(projectCeiling(store, repositoryId), 'comment') ? [githubWriteTool] : []), ...decisionTools];
+      ...(permitsTool(p, 'github_write') && covers(projectCeiling(store, repositoryId), 'comment') ? [githubWriteTool] : []), ...(permitsTool(p, 'register_rule') ? [registerRule] : []), ...decisionTools];
   };
   const execute = async (name: string, args: unknown): Promise<unknown> => {
     if (!offered().some(t => t.function.name === name)) return { error: 'tool_not_allowed' };
     if (name === 'github_write') return write(args);
+    if (name === 'register_rule') {
+      // A new Manager revision with the rule added (or replaced by id); the same checks as saving the rules in the console.
+      const current = standingRules(store, repositoryId), rule = args as any;
+      try {
+        const saved = saveManager(store, repositoryId, { expected_revision: managerPrompt(store, repositoryId).revision, standing_rules: [...current.rules.filter(entry => entry.id !== rule?.id), rule] }, 'manager', 'manager');
+        store.audit('manager', 'manager.rule', `${String(rule?.id)} (revision ${saved.revision})`, repositoryId);
+        return { saved: true, revision: saved.revision, rule: standingRules(store, repositoryId).rules.find(entry => entry.id === rule?.id) };
+      } catch (error) { if (error instanceof HttpError) return { error: error.code, field: error.field ?? null, saved: false }; throw error; }
+    }
     const connected = await explorer.execute('github_read_token', {});
     return connected.error ? connected : explorer.execute(name, args);
   };

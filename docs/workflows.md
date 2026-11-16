@@ -86,6 +86,24 @@ Manager 的写入只能落在本事件所在的仓库：`github_write` 没有仓
 
 失败的分派按 5 秒、15 秒、45 秒……最长 10 分钟重试，第 8 次仍失败时标为 `failed`，等人在事件记录里点「重试」；等待结果的模块会收到「没有决定」并停止等待。进程重启时认领中的事件回到待分派；再决定一次也不会重复建任务，因为任务规格带唯一键、续接按事件去重。
 
+## 常设规则
+
+例行事件不调用模型（#815）。分派器先按常设规则处理事件：第一条匹配的规则直接决定，事件记录里 `rule` 写明规则 id 和版本，`model` 为空；没有规则匹配的事件才交给 Manager。规则只能新建一种工作、续接对象上的任务或不处理，从不启动开发（开发要 Manager 针对具体 Issue 写明依据）；新建的工作和 Manager 新建的一样受控制面检查，被拒绝时这条规则不适用，事件交给下一条规则或 Manager。
+
+| 字段 | 含义 |
+| --- | --- |
+| `id` | 规则 id，小写，项目内唯一 |
+| `event` | 事件类型，见上表 |
+| `action` | `create`（新建 `work`）、`continue`（续接对象上排队、执行中、等待中或最近一次已结束的检视）、`continue_active`（只续接还在进行的任务）、`continue_or_create`（续接，没有就新建 `work`）、`ignore` |
+| `work` | `create`、`continue_or_create` 新建的工作类型，例如 `review.issue` |
+| `when` | 可选：`labels_any`（对象带其中任一标签）、`labels_none`（对象不带其中任何标签） |
+| `reason` | 写进事件记录的理由 |
+| `enabled` | 可选，`false` 时保留但不生效 |
+
+没有保存过规则的项目用内置规则：Issue 打开、PR 打开时新建检视；PR 推送新提交时续接这个 PR 的检视，没有就检视新 head；Issue 和 PR 的更新只并入还在进行的检视。检视已经结束时的更新（例如一句致谢）、提到 bot、开发标签、检视发布、Actions 失败和定时检查仍交给 Manager。
+
+规则随 Manager 配置版本保存：「角色 → Manager」的「常设规则」整份编辑（`PUT /api/repositories/:id/manager` 的 `standing_rules`，管理命令 `manager.update` 同名字段），空数组表示所有事件都交给 Manager。Manager 在分派时可以用 `register_rule` 登记一条规则（同 id 替换），生成新的 Manager 版本并记审计 `manager.rule`；它只影响之后的事件。
+
 ## Manager 提示词
 
 Manager 分派提示词在「角色 → Manager」里作为一份完整文本编辑。新项目显示完整的内置默认提示词，保存后整份替换；普通 Markdown 标题没有章节 id 语义。控制面仍固定校验可选任务、对象和写入范围。`PUT /api/repositories/:id/manager` 的 `prompt` 字段保存这份文本，并用 `expected_revision` 防止覆盖别人的修改。

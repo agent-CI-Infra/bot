@@ -2,6 +2,7 @@ import type { Store, Row } from '../storage/database.js';
 import { fail, HttpError } from '../core/security.js';
 import { workTypes, workType, sections, section, retiredSections, savedWrites, workAccess, validateWrites, type WorkPermissions } from './catalog.js';
 import { ceilingMessage, covers, projectCeiling, withinCeiling, workLevel } from './ceiling.js';
+import { checkRules, rulesStorage } from '../dispatch/rules.js';
 
 /**
  * Project configuration of the Manager: its prompt (the project's only flow definition), and per work type the switch and
@@ -18,6 +19,8 @@ import { ceilingMessage, covers, projectCeiling, withinCeiling, workLevel } from
  * revision 1 of an upgraded project is the migration from workflows (see migration.ts).
  */
 export function workStorage(store: Store) {
+  // Standing rules (#815) are saved with the Manager's revisions.
+  rulesStorage(store);
   store.db.exec(`
     CREATE TABLE IF NOT EXISTS manager_revisions(repository_id TEXT NOT NULL,revision INTEGER NOT NULL,content TEXT NOT NULL,
       work_settings TEXT NOT NULL,event_filters TEXT NOT NULL,source TEXT NOT NULL,actor TEXT,created_at TEXT NOT NULL,PRIMARY KEY(repository_id,revision));
@@ -233,7 +236,7 @@ function checkWork(value: unknown, current: Record<string, WorkSetting>) {
   }
   return { next, changed, actions };
 }
-export interface ManagerChange { expected_revision: number; content?: string; prompt?: string; work?: unknown; events?: unknown }
+export interface ManagerChange { expected_revision: number; content?: string; prompt?: string; work?: unknown; events?: unknown; standing_rules?: unknown }
 /**
  * Saves one revision atomically. `prompt` is the complete dispatch text; legacy `content` still edits task rule sections.
  * Neither text grants writes. Existing task rules remain validated and switches/writes come only from `work`.
@@ -256,6 +259,7 @@ export function saveManager(store: Store, repositoryId: string, change: ManagerC
     for (const type of workTypes) if ((before.get(type.section)?.body ?? null) !== (after.get(type.section)?.body ?? null)) work.changed.add(type.id);
     for (const id of work.changed) work.next[id] = { ...(work.next[id] ?? {}), version: Number(work.next[id]?.version ?? 0) + 1 };
     const filters = change.events === undefined ? undefined : checkFilters(change.events);
+    const standing = change.standing_rules === undefined ? undefined : checkRules(change.standing_rules, dispatchEventTypes, workTypes.map(type => type.id));
     if (filters?.['actions.run_failed'] !== undefined) {
       if (work.actions !== undefined && work.actions !== filters['actions.run_failed']) fail(400, 'invalid_event_filters', 'events.actions.run_failed');
       work.actions = filters['actions.run_failed'];
@@ -272,6 +276,7 @@ export function saveManager(store: Store, repositoryId: string, change: ManagerC
     store.run('INSERT INTO manager_revisions VALUES(?,?,?,?,?,?,?,?)', repositoryId, revision, content, JSON.stringify(work.next),
       JSON.stringify(eventFilters(store, repositoryId)), source, actor, now);
     if (change.prompt !== undefined) store.run('INSERT INTO manager_dispatch_prompts VALUES(?,?,?)', repositoryId, revision, change.prompt);
+    if (standing) store.run('INSERT INTO manager_rules VALUES(?,?,?)', repositoryId, revision, JSON.stringify(standing));
     return managerPrompt(store, repositoryId);
   });
 }

@@ -8,6 +8,7 @@ import { retryEvent } from '../dispatch/worker.js';
 import { covers, projectCeiling, workLevel, writeLevel } from './ceiling.js';
 import { activateActions } from '../actions/storage.js';
 import { dispatchPrompt } from '../dispatch/manager.js';
+import { standingRules } from '../dispatch/rules.js';
 import { taskDispatch } from '../dispatch/store.js';
 import { dispatchList, dispatchDetail } from '../dispatch/view.js';
 
@@ -46,6 +47,8 @@ export async function managerView(store: Store, rules: RuleService, repositoryId
       writes: workPermissions(store, repositoryId, type.id, policy).writes, write_options: writeOptions(type.id).map(write => ({ ...write, needed: writeLevel(write.id) })), model: model(policy, type.id), events: settings[type.id]?.events ?? null,
       version: Number(settings[type.id]?.version ?? 0) })),
     dispatch_model: model(policy, 'manager'),
+    // Rules that settle routine events without a model call (#815); built-in until the project saves its own.
+    standing_rules: standingRules(store, repositoryId),
     events: eventFilters(store, repositoryId, policy),
     rules: { sha: view.sha, updated_at: view.updated_at, needs_refresh: view.needs_refresh, development_label: view.development_label, review_label: view.review_label },
     migration: migration ? { migrated_at: migration.migrated_at, report: json(migration.report, {}) } : null,
@@ -71,9 +74,9 @@ export async function workCompatibility(store: Store, rules: RuleService, reposi
 }
 /** A Manager save through the management command service; `args` are the command arguments. */
 export function applyManagerChange(store: Store, repositoryId: string, args: Json, actor: string) {
-  fields(args, ['expected_revision', 'content', 'prompt', 'work', 'events']);
+  fields(args, ['expected_revision', 'content', 'prompt', 'work', 'events', 'standing_rules']);
   const expected = args.expected_revision === undefined ? managerPrompt(store, repositoryId).revision : Number(args.expected_revision);
-  return saveManager(store, repositoryId, { expected_revision: expected, content: args.content as string | undefined, prompt: args.prompt as string | undefined, work: args.work, events: args.events }, actor, 'console',
+  return saveManager(store, repositoryId, { expected_revision: expected, content: args.content as string | undefined, prompt: args.prompt as string | undefined, work: args.work, events: args.events, standing_rules: args.standing_rules }, actor, 'console',
     () => activateActions(store, repositoryId));
 }
 /**

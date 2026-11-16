@@ -1,7 +1,8 @@
 import type { Store, Row } from '../storage/database.js';
 import { randomId } from '../core/security.js';
 import { TaskError } from '../agent/common.js';
-import { applyDecision, dispatchContext, decideImmediately, onDispatchEvent, InvalidDecision, dispatchLeaseMs, pruneFiltered, type Decision, type DispatchContext, type CreateOption, dispatchHook } from './store.js';
+import { applyDecision, dispatchContext, decideImmediately, onDispatchEvent, InvalidDecision, dispatchLeaseMs, managerRefusal, pruneFiltered, type Decision, type DispatchContext, type CreateOption, dispatchHook } from './store.js';
+import { ruleDecision } from './rules.js';
 import { managerDecision } from './manager.js';
 
 export type Decider = (store: Store, context: DispatchContext) => Promise<Decision>;
@@ -66,10 +67,12 @@ export class Dispatcher {
     try {
       const context = dispatchContext(this.store, event);
       // Everything it could lead to was switched off or ended meanwhile: nothing to ask.
-      const decision: Decision = context.options.length || context.continuations.length ? await this.decide(this.store, context)
+      // A standing rule settles a routine event without a model call (#815); the others go to the Manager.
+      const ruled = context.options.length || context.continuations.length ? ruleDecision(this.store, context, id => !!managerRefusal(this.store, context, id)) : null;
+      const decision: Decision = ruled ?? (context.options.length || context.continuations.length ? await this.decide(this.store, context)
         : { decision: 'ignore', option_ids: [], model: null, reason: context.unavailable.length
           ? `没有可以新建的工作，也没有可续接的任务：${[...new Set(context.unavailable.map(work => work.reason))].join(' ')}`.slice(0, 1000)
-          : '没有可选的处理方式：相关工作已关闭，或可续接的任务已经结束。' };
+          : '没有可选的处理方式：相关工作已关闭，或可续接的任务已经结束。' });
       applyDecision(this.store, event, { ...decision, seen: context.continuations.map(option => option.id) }, lease);
       this.onApplied();
     } catch (error) {
