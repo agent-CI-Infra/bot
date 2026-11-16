@@ -91,6 +91,9 @@ const properties = { method: { type: 'string', enum: [...writeMethods] }, path: 
 export const githubWriteInstructions = ' If github_write is among your tools, your role may write to this repository on GitHub through the control plane, shaped like the GitHub REST API. Use it only for what this task and its prompt ask for (for example a comment, a label or a follow-up Issue), read the current state with github_read first, keep one stable key per intended write and never use it to approve, merge or push unless the task explicitly asks for that. Your task\'s own result is still delivered by its finishing tool.';
 /** The tool of task entries and the Manager: the repository is the one of the task or event. */
 export const githubWriteTool = fn('github_write', description, properties, ['method', 'path', 'key']);
+/** github_write as a generic task's delivery tool (#814): the task's grant and its source govern it, not the executing role. */
+export const grantedGithubWriteTool = fn('github_write', description.replace("Allowed only where your role has write on the route's GitHub resource (Issues, Pull requests or Contents)",
+  "Offered because this task was granted GitHub writes; each call is allowed only where the task's source (the roles that created or delegated it, a group's level) has write on the route's GitHub resource (Issues, Pull requests or Contents)"), properties, ['method', 'path', 'key']);
 /** The tool of assistants that serve several repositories: the repository is chosen per call and checked against their scope. */
 export const scopedGithubWriteTool = fn('github_write', description.replace('(/repos/{owner}/{repo} is implied)', 'of the selected repository') + ' The repository argument selects one repository you may use; any other is refused.',
   { repository: { type: 'string', description: 'Repository full name (owner/name).' }, ...properties }, ['repository', 'method', 'path', 'key']);
