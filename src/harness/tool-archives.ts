@@ -56,8 +56,10 @@ function parsePaxHeaders(data: Buffer): Record<string, string> {
 
 function normalizeArchiveRelativePath(rawPath: string, stripComponents: number): string | null {
   const cleaned = rawPath.replace(/\\/g, '/').replace(/^\/+/, '');
-  const parts = cleaned.split('/').filter(Boolean);
-  if (parts.some(p => p === '.' || p === '..')) {
+  // `./` is the prefix many tar writers emit and means the same as no prefix; only `..` may still escape. The dot
+  // segments go before stripComponents counts, so `./package/x` strips exactly like `package/x`.
+  const parts = cleaned.split('/').filter(p => p && p !== '.');
+  if (parts.includes('..')) {
     throw new TaskError('agent_tool_archive_invalid', 'failed', `unsafe_archive_path:${rawPath}`);
   }
   if (parts.length <= stripComponents) return null;
