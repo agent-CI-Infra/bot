@@ -176,7 +176,7 @@ async function startTaskDetailSession(id, routeRequest = null) {
   $('task-next-text').textContent = '';
   $('task-fault-box').hidden = true;
   $('task-fault-box').replaceChildren();
-  for (const part of ['timeline', 'role-runs-list', 'task-side', 'task-badges', 'task-actions', 'task-goal-box', 'task-external-bar', 'task-flow-bar']) {
+  for (const part of ['timeline', 'role-runs-list', 'task-side', 'task-badges', 'task-actions', 'task-goal-box', 'task-external-bar', 'task-flow-bar', 'task-browser-evidence']) {
     $(part)?.replaceChildren();
   }
   $('role-runs-list').hidden = true;
@@ -327,6 +327,7 @@ async function refreshTask() {
     if (!current()) return;
     if (typeof applyDocumentTitle === 'function') applyDocumentTitle(false, null);
     keepOpen($('task-side'), () => renderTaskSide(detail, environment, roles, purposes));
+    renderBrowserEvidence(detail);
     if (!terminalStates.includes(detail.task.status)) {
       taskTimer = setTimeout(refreshTask, detail.task.status.startsWith('waiting_') ? 5000 : 2000);
     }
@@ -337,7 +338,7 @@ async function refreshTask() {
     if (poll.terminal) {
       resetTaskRendering();
       taskLogState = { id, logs: [], page: null, error: '', olderPending: false, roleRuns: [] };
-      for (const part of ['timeline', 'role-runs-list', 'task-side', 'task-badges', 'task-actions', 'task-log-controls', 'task-goal-box', 'task-external-bar', 'task-flow-bar', 'task-fault-box']) {
+      for (const part of ['timeline', 'role-runs-list', 'task-side', 'task-badges', 'task-actions', 'task-log-controls', 'task-goal-box', 'task-external-bar', 'task-flow-bar', 'task-fault-box', 'task-browser-evidence']) {
         $(part)?.replaceChildren();
       }
       $('task-next').hidden = $('timeline-command').hidden = $('timeline-live').hidden = $('task-fault-box').hidden = true;

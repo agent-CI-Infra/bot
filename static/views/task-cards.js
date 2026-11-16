@@ -183,7 +183,6 @@ function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   }
   if(record?.relations?.length){const relations=card('关联任务');for(const r of record.relations){const target=r.source_task_id===task.id?r.target_task_id:r.source_task_id;relations.append(button(shortId(target)+' · '+r.relationship,()=>openTask(target)),element('p',r.reason,'muted'));}side.append(relations);}
   const result = resultCard(task); if (result) side.append(result);
-  if (detail.browser_evidence?.steps?.length) side.append(browserEvidenceCard(task, detail.browser_evidence));
   side.append(info,taskMetricsCard(task), computerCard(task, environment));
   // A task without a structured record still lists what was written to GitHub.
   if (!record && publications?.length) {
@@ -274,4 +273,11 @@ function browserEvidenceCard(task, evidence) {
   });
   section.append(list);
   return section;
+}
+
+function renderBrowserEvidence(detail) {
+  const host = $('task-browser-evidence');
+  if (!host) return;
+  host.replaceChildren();
+  if (detail.browser_evidence?.steps?.length) host.append(browserEvidenceCard(detail.task, detail.browser_evidence));
 }

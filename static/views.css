@@ -557,6 +557,9 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   box-shadow: var(--shadow-card);
   min-width: 0;
 }
+.task-browser-evidence:empty { display: none; }
+.task-browser-evidence { margin-top: 12px; min-width: 0; overflow-wrap: anywhere; }
+.task-summary-card .browser-evidence img { max-width: 100%; height: auto; }
 .task-summary-top {
   display: flex;
   align-items: center;
