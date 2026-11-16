@@ -608,8 +608,21 @@ function renderTaskSummaryBody(task, detail) {
           const btn = event.currentTarget;
           btn.disabled = true;
           try {
-            await api('/api/tasks/' + encodeURIComponent(task.id) + '/checks?sync=1');
-            if (openTaskId === task.id) { taskPollError = ''; notice('task-error'); await refreshTask(); }
+            const syncRes = await api('/api/tasks/' + encodeURIComponent(task.id) + '/checks?sync=1');
+            if (openTaskId === task.id) {
+              if (syncRes?.partial && syncRes.error) {
+                await refreshTask();
+                taskPollError = '';
+                notice('task-error', readErrorText(new Error(syncRes.error)));
+              } else if (syncRes?.synced === false && syncRes.reason && !syncRes.cached) {
+                taskPollError = '';
+                notice('task-error', readErrorText(new Error(syncRes.reason)));
+              } else {
+                taskPollError = '';
+                notice('task-error');
+                await refreshTask();
+              }
+            }
           } catch (err) {
             if (openTaskId === task.id) { taskPollError = ''; notice('task-error', readErrorText(err)); }
           } finally {

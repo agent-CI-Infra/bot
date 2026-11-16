@@ -121,7 +121,7 @@ function summarizeChecks(items: { name: string; status: string; conclusion: stri
   const total = items.length;
   const status = total === 0 ? 'none' : failed > 0 ? 'failing' : running > 0 ? 'running' : 'passing';
   const url = items.find(i => i.details_url)?.details_url ?? fallbackUrl;
-  return { status, head_sha: headSha, total, passed, running, failed, checks: items.slice(0, 12), url, ...(total === 0 && eventsUnsubscribed ? { events_unsubscribed: true } : {}) };
+  return { status, head_sha: headSha, total, passed, running, failed, checks: items.slice(0, 12), url, ...(total === 0 && Boolean(headSha) && eventsUnsubscribed ? { events_unsubscribed: true } : {}) };
 }
 
 export function attachExternalLinks<T extends Record<string, any>>(store: Store, tasks: T[]): (T & { external: Json })[] {
@@ -350,9 +350,12 @@ export async function taskChecksApi(store: Store, user: Actor, method: string, u
   if (!repo) return fail(404, 'repository_not_found');
   const github = new GitHub(store, repo, new Redactor(), async () => store.checkAuthorization(), githubUrl);
   github.purpose = 'task_checks';
+  let partialError: TaskError | null = null;
   try {
     await github.connect(false, undefined, { checks: 'read', statuses: 'read' }, false);
     const runs: any[] = [];
+    let runsError: TaskError | null = null;
+    let statusError: TaskError | null = null;
     try {
       for (let page = 1; page <= 5; page++) {
         const res = await github.request('GET', github.path(`/commits/${headSha}/check-runs?filter=latest&per_page=100&page=${page}`));
@@ -362,6 +365,7 @@ export async function taskChecksApi(store: Store, user: Actor, method: string, u
       }
     } catch (err) {
       if (!(err instanceof TaskError)) throw err;
+      runsError = err;
     }
     let contexts: any[] = [];
     try {
@@ -369,17 +373,24 @@ export async function taskChecksApi(store: Store, user: Actor, method: string, u
       if (Array.isArray(st?.statuses)) contexts = st.statuses;
     } catch (err) {
       if (!(err instanceof TaskError)) throw err;
+      statusError = err;
+    }
+    if (runsError && statusError) {
+      const primary = runsError.code === 'github_rate_limited' ? runsError : statusError.code === 'github_rate_limited' ? statusError : runsError;
+      return fail(primary.code === 'github_rate_limited' ? 429 : 502, primary.code);
     }
     store.checkAuthorization();
     recordMergeChecks(store, repoId, headSha, runs, contexts);
-    liveSyncSeen.set(cacheKey, Date.now());
+    partialError = runsError ?? statusError;
+    if (!partialError) liveSyncSeen.set(cacheKey, Date.now());
   } catch (err) {
-    if (err instanceof TaskError) return fail(502, err.code);
+    if (err instanceof TaskError) return fail(err.code === 'github_rate_limited' ? 429 : 502, err.code);
     throw err;
   } finally {
     await github.revokeTokens('task_checks');
   }
 
   const updated = attachExternalLinks(store, [buildTask()])[0]!.external.actions;
+  if (partialError) return { actions: updated, synced: true, partial: true, error: partialError.code };
   return { actions: updated, synced: true };
 }

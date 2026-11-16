@@ -332,8 +332,8 @@ test('repository rows report every feature\'s access gaps, whether or not the fe
   const appGaps = [
     { kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_failures'] },
     { kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['ci_changes'] },
-    { kind: 'event', name: 'check_run', features: ['ci_reads'] },
-    { kind: 'event', name: 'status', features: ['ci_reads'] },
+    { kind: 'event', name: 'check_run', features: ['ci_checks'] },
+    { kind: 'event', name: 'status', features: ['ci_checks'] },
     { kind: 'event', name: 'workflow_run', features: ['actions_failures'] }];
   // The switch only decides how urgent the console shows it, not whether the gap is reported.
   assert.deepEqual(await gaps(), { 101: appGaps, 202: appGaps, 303: [{ kind: 'account', name: 'github_app', features: ['release', 'ci_changes', 'actions_failures'] }] });

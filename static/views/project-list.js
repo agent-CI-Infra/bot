@@ -205,9 +205,10 @@ const eventPermissionNotes = {
 const eventNames = { issues: 'Issues', pull_request: 'Pull request', issue_comment: 'Issue comment', pull_request_review: 'Pull request review', pull_request_review_comment: 'Pull request review comment', check_run: 'Check run', status: 'Status', workflow_run: 'Workflow run' };
 const accessNames = { read: 'Read-only', write: 'Read and write', admin: 'Admin' }, roleNames = { read: 'Read', triage: 'Triage', write: 'Write' };
 // Access gaps (access_gaps) name the features they stop; src/app/access.ts holds what each feature needs.
-const featureNames = { review: '检视', review_threads: '关闭已修复的行内意见', development: '开发', ci_reads: '任务读取 CI 结果', board: '看板', release: '发版本', ci_changes: '经确认的 CI 改动', actions_failures: 'Actions 失败分析' };
+const featureNames = { review: '检视', review_threads: '关闭已修复的行内意见', development: '开发', ci_reads: '任务读取 CI 结果', ci_checks: '控制台检查状态展示', board: '看板', release: '发版本', ci_changes: '经确认的 CI 改动', actions_failures: 'Actions 失败分析' };
 const featureImpact = {
   review: '读不到代码或发不出检视意见', review_threads: '检视照常发布，但作者修复后的行内意见不会自动关闭', development: '推不了分支、开不了或更新不了 PR', ci_reads: '任务看不到 Actions、检查和提交状态',
+  ci_checks: '控制台任务列表与详情收不到或读不到检查状态',
   board: '采集不到看板数据', release: '打不了标签、写不了 Release、重跑不了发布运行', ci_changes: '推不了改动 .github/workflows 的 bot 分支，这类 PR 开不出来',
   actions_failures: '读不到运行、重跑不了外部失败、提报不了 Issue',
 };
@@ -224,7 +225,7 @@ const gapLabels = { permission: '权限不足', role: '权限不足', event: '�
 // Whether a stopped feature is in use on this row: on, off, or run by hand (releases and CI change PRs have no switch).
 function featureState(row, feature) {
   const active = !!row.enabled, on = { review: row.review_enabled, review_threads: row.review_enabled, development: row.development_enabled, ci_reads: row.review_enabled || row.development_enabled,
-    board: row.board_enabled, actions_failures: row.actions_failures_enabled }[feature];
+    ci_checks: row.review_enabled || row.development_enabled, board: row.board_enabled, actions_failures: row.actions_failures_enabled }[feature];
   if (feature === 'release' || feature === 'ci_changes') return row.registered === false ? 'off' : 'manual';
   return feature === 'board' ? on ? 'on' : 'off' : active && on ? 'on' : 'off';
 }

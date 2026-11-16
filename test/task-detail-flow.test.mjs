@@ -7,6 +7,7 @@ import { harness, setup, account, repository, testPassword } from './helpers.mjs
 import { insertTaskLog } from '../dist/storage/payloads.js';
 import { withRunTraceScope } from '../dist/tasks/trace.js';
 import { pruneCommitChecks } from '../dist/tasks/external-links.js';
+import { RetentionCleanup } from '../dist/storage/retention.js';
 import { deleteProjectRecords } from '../dist/projects/removal.js';
 import { appEvents } from '../dist/github/client.js';
 import { TaskEngine } from '../dist/agent/engine.js';
@@ -159,9 +160,10 @@ test('role_flow groups parallel observers, ingests check_run/status via signed w
   assert.equal(roDetail.value.role_runs[0].history_steps[0].arguments, null);
 });
 
-test('live task check sync reads GitHub check-runs/statuses, flags unsubscribed Apps, and prunes/deletes commit_checks cleanly', async t => {
+test('live task check sync reports full/partial failures without cooldown, omits events_unsubscribed without head_sha, and records retention counts', async t => {
   const sha = 'c'.repeat(40);
   let revokedTokens = 0;
+  let mode = 'both_fail';
   const ghServer = createServer((req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     res.setHeader('Content-Type', 'application/json');
@@ -183,6 +185,10 @@ test('live task check sync reads GitHub check-runs/statuses, flags unsubscribed 
       return res.end(JSON.stringify({ id: 101, full_name: 'fixture/project-101', default_branch: 'main', owner: { id: 10, login: 'fixture' } }));
     }
     if (url.pathname === `/repos/fixture/project-101/commits/${sha}/check-runs`) {
+      if (mode === 'both_fail') {
+        res.statusCode = 403;
+        return res.end(JSON.stringify({ message: 'Resource not accessible by integration' }));
+      }
       return res.end(JSON.stringify({
         check_runs: [
           { id: 101, name: 'unit', status: 'completed', conclusion: 'success', html_url: 'https://github.com/fixture/project-101/runs/101' },
@@ -191,6 +197,10 @@ test('live task check sync reads GitHub check-runs/statuses, flags unsubscribed 
       }));
     }
     if (url.pathname === `/repos/fixture/project-101/commits/${sha}/status`) {
+      if (mode === 'both_fail' || mode === 'status_fail') {
+        res.statusCode = 403;
+        return res.end(JSON.stringify({ message: 'Resource not accessible by integration' }));
+      }
       return res.end(JSON.stringify({ state: 'success', statuses: [{ context: 'deploy-preview', state: 'success', target_url: 'https://preview.invalid' }] }));
     }
     res.statusCode = 404;
@@ -218,28 +228,54 @@ test('live task check sync reads GitHub check-runs/statuses, flags unsubscribed 
     "INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,head_sha,phase,created_at,updated_at) VALUES('t-pr','101','review.pr','running','检视 PR #77',77,?,'model','2026-11-16T08:00:00Z','2026-11-16T08:05:00Z')",
     sha,
   );
+  // A task with no commit SHA does not falsely blame App event subscriptions
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,phase,created_at,updated_at) VALUES('t-issue','101','review.issue','running','检视 Issue #78',78,'model','2026-11-16T08:00:00Z','2026-11-16T08:05:00Z')",
+  );
+
+  const issueBefore = (await admin('/api/tasks/t-issue')).value.task;
+  assert.equal(issueBefore.external.actions.head_sha, null);
+  assert.equal(issueBefore.external.actions.events_unsubscribed, undefined);
 
   const beforeSync = (await admin('/api/tasks/t-pr')).value.task;
   assert.equal(beforeSync.external.actions.total, 0);
   assert.equal(beforeSync.external.actions.events_unsubscribed, true);
 
-  // Sync live checks from GitHub API and confirm temporary App installation token was revoked
+  // 1. Both GitHub endpoints failing returns 502 (not synced: true), revokes token, and sets NO cooldown
+  const failedSync = await admin('/api/tasks/t-pr/checks?sync=1');
+  assert.equal(failedSync.status, 502);
+  assert.equal(failedSync.value.synced, undefined);
+  assert.equal(revokedTokens, 1);
+
+  // 2. Immediate retry without waiting 15 s hits GitHub again; partial failure stores check-runs, reports partial+error, and sets NO cooldown
+  mode = 'status_fail';
+  const partialSync = await admin('/api/tasks/t-pr/checks?sync=1');
+  assert.equal(partialSync.status, 200);
+  assert.equal(partialSync.value.synced, true);
+  assert.equal(partialSync.value.partial, true);
+  assert.ok(partialSync.value.error);
+  assert.equal(partialSync.value.actions.total, 2);
+  assert.equal(revokedTokens, 2);
+
+  // 3. Immediate retry after fixing status permission succeeds completely and records cooldown
+  mode = 'ok';
   const synced = await admin('/api/tasks/t-pr/checks?sync=1');
   assert.equal(synced.status, 200);
   assert.equal(synced.value.synced, true);
+  assert.equal(synced.value.partial, undefined);
   assert.equal(synced.value.actions.total, 3);
   assert.equal(synced.value.actions.passed, 2);
   assert.equal(synced.value.actions.failed, 1);
   assert.equal(synced.value.actions.status, 'failing');
-  assert.equal(revokedTokens, 1);
+  assert.equal(revokedTokens, 3);
 
-  // Cooldown prevents duplicate GitHub API fetches on immediate repeat click
+  // Cooldown prevents duplicate GitHub API fetches on immediate repeat click after a clean sync
   const cached = await admin('/api/tasks/t-pr/checks?sync=1');
   assert.equal(cached.status, 200);
   assert.equal(cached.value.cached, true);
-  assert.equal(revokedTokens, 1);
+  assert.equal(revokedTokens, 3);
 
-  // Age/retention prune removes expired rows while keeping fresh rows; project deletion removes only target project's rows
+  // Age/retention prune removes expired rows while keeping fresh rows and records count on RetentionCleanup
   h.store.run(
     "INSERT INTO commit_checks(repository_id,head_sha,check_key,name,status,conclusion,details_url,updated_at) VALUES('202',?,'check:old','old-job','completed','success',NULL,'2026-09-01T00:00:00.000Z')",
     'd'.repeat(40),
@@ -249,8 +285,9 @@ test('live task check sync reads GitHub check-runs/statuses, flags unsubscribed 
     'e'.repeat(40),
     new Date().toISOString(),
   );
-  const pruned = pruneCommitChecks(h.store, 30 * 24 * 3600_000, Date.parse('2026-11-16T12:00:00Z'));
-  assert.equal(pruned, 1);
+  const cleanupResult = await new RetentionCleanup(h.store, undefined, { pauseMs: 0, now: () => Date.parse('2026-11-16T12:00:00Z') }).run();
+  assert.deepEqual(cleanupResult.commit_checks, { count: 1, failed: 0 });
+  assert.equal(pruneCommitChecks(h.store, 30 * 24 * 3600_000, Date.parse('2026-11-16T12:00:00Z')), 0);
   assert.equal(h.store.get("SELECT COUNT(*) AS n FROM commit_checks WHERE repository_id='202'").n, 1);
 
   h.store.transaction(() => deleteProjectRecords(h.store, '101'));
