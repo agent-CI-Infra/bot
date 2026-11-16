@@ -86,7 +86,7 @@ async function renderOnboarding(request,panel,feedback=''){
       catch(err){if(current()){
         for(const item of nav.children){item.dataset.ready='unknown';item.querySelector('small').textContent='状态待重新核验';}
         summary.replaceChildren(element('h3','接入状态待重新核验'),note('配置已变化，目前无法确认最新状态。请重新读取后继续。'));
-        message.textContent='接入配置已变化，状态读取失败：'+err.message+'。请重新读取后继续。';
+        message.textContent='接入配置已变化，状态读取失败：'+readErrorText(err)+'。请重新读取后继续。';
         let retry=actions.querySelector('[data-readiness-retry]');
         if(!retry){retry=button('重新读取接入状态',async()=>{retry.disabled=true;await refreshReadiness();});retry.dataset.readinessRetry='';actions.append(retry);}retry.disabled=false;
       }}finally{refreshing=false;}

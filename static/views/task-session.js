@@ -40,7 +40,7 @@ function openTaskChoices(label, tasks, hasMore = false, onMore = null) {
     const more = button('更多关联任务', async () => {
       more.disabled = true;
       try { const result = await onMore(); openTaskChoices(label, result.tasks, result.hasMore, onMore); }
-      catch (err) { notice('task-error', err.message); more.disabled = false; }
+      catch (err) { notice('task-error', readErrorText(err)); more.disabled = false; }
     }, 'quiet'); picker.append(more);
   }
   if (!taskView.open) taskView.showModal();
@@ -61,7 +61,7 @@ async function refreshTask() {
     renderTaskHeader(detail.task); renderTaskNext(detail.task, roles, purposes);
     // The log read asks the same rule as the detail read, so a change to the terminal statuses reaches both (#745 review).
     if (logResult.error && pollAfterError(logResult.error).terminal) throw logResult.error;
-    if (logResult.error) logState.error = logResult.error.message;
+    if (logResult.error) logState.error = readErrorText(logResult.error);
     else {
       logState.error = ''; mergeTaskLogs(logState, logResult, !after); renderTimeline(detail.task, logState.logs);
     }
@@ -81,12 +81,12 @@ async function refreshTask() {
       $('task-next').hidden = $('timeline-command').hidden = $('timeline-live').hidden = true;
       $('task-title').textContent = '任务暂不可访问';
       $('task-actions').append(button('关闭', () => taskView.close()), button('重新读取', () => refreshTask()));
-      notice('task-error', err.message); taskRetryDelay = 0;
+      notice('task-error', readErrorText(err)); taskRetryDelay = 0;
       return;
     }
     // Anything else may clear on its own, so it keeps polling — backing off so a failing endpoint is not hit every five
     // seconds, and no slower than half a minute.
-    notice('task-error', err.message);
+    notice('task-error', readErrorText(err));
     taskTimer = setTimeout(refreshTask, taskRetryDelay = poll.delay);
   }
 }
@@ -126,7 +126,7 @@ async function loadOlderTaskLogs(cache) {
       $('timeline').replaceChildren(); renderedLogs = new Set(); snapshotProgress = null; renderTimeline(cache.task, cache.logs);
     });
     panel.scrollTop = top + panel.scrollHeight - height;
-  } catch (err) { if (taskLogState === cache) cache.error = err.message; }
+  } catch (err) { if (taskLogState === cache) cache.error = readErrorText(err); }
   finally { cache.olderPending = false; if (taskLogState === cache) updateTaskLogControls(cache); }
 }
 function renderTaskHeader(task) {

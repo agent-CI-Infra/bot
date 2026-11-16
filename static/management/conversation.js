@@ -448,7 +448,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     forms.append(taskBox, previewSlot);
     if (typeof renderSchedules === 'function') {
       const schedules = element('section', ''); forms.append(schedules);
-      try { await renderSchedules(schedules, project); } catch (e) { schedules.append(note('定时计划暂不可用：' + e.message)); }
+      try { await renderSchedules(schedules, project); } catch (e) { schedules.append(note('定时计划暂不可用：' + readErrorText(e))); }
     }
   }
   input.onsubmit = async event => {

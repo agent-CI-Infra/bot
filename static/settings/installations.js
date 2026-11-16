@@ -15,7 +15,7 @@ async function installationDetail(request, ref) {
       const [record, repositories, deliveries] = await Promise.all([api(base), api(base + '/repositories'), api(base + '/events')]);
       content.replaceChildren(...(notice ? [element('p', notice, tone)] : []),
         ...installationDetailBody(base, record.installation, repositories.repositories || [], deliveries.events || [], draw));
-    } catch (err) { content.replaceChildren(note('读不到这条安装：' + err.message)); }
+    } catch (err) { content.replaceChildren(note('读不到这条安装：' + readErrorText(err))); }
   };
   await draw('');
   return [section];

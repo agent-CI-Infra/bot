@@ -178,7 +178,7 @@ function ruleSync() {
       });
       const detail = $('project-detail'); if (detail?.redraw && !detail.hidden && !detail.querySelector('form')) detail.redraw();
       message.className = 'view-success flash'; message.textContent = `已读取默认分支提交 ${rules.sha.slice(0, 12)}`;
-    } catch (err) { message.textContent = err.message; }
+    } catch (err) { message.textContent = readErrorText(err); }
     finally { refresh.disabled = false; refresh.textContent = '刷新默认分支文件'; }
   });
   describe(); section.append(source, refresh, message); return section;

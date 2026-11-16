@@ -120,8 +120,8 @@ async function refreshProjectActivity(force = false) {
     projectActivityStopped = poll.terminal; projectActivityDelay = poll.delay;
     projectActivityNextAt = poll.terminal ? 0 : Date.now() + poll.delay;
     showProjectActivityStatus(poll.terminal
-      ? `任务数已停止更新：${err.message}。已有任务数保留；重新登录，或点「重新读取任务数」再读一次。`
-      : `任务数更新失败：${err.message}；${Math.ceil(poll.delay / 1000)} 秒后重试。`);
+      ? `任务数已停止更新：${readErrorText(err)}。已有任务数保留；重新登录，或点「重新读取任务数」再读一次。`
+      : `任务数更新失败：${readErrorText(err)}；${Math.ceil(poll.delay / 1000)} 秒后重试。`);
   } finally { projectActivityPending = false; }
 }
 

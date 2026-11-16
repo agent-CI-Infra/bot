@@ -29,7 +29,7 @@ async function channelEmployeeHistory(grant, target) {
       if (!result.messages.length && !more) messages.append(note('本地已同步范围没有匹配记录；这不代表飞书历史中从未存在。'));
       for (const m of result.messages) messages.append(facts([['发送者', m.sender_id || '未知'], ['时间', new Date(m.created_at).toLocaleString()], ['消息', m.message_id], ['内容', m.content]]));
       next.hidden = !result.has_more;
-    } catch (err) { status.textContent = employeeError(err.message); }
+    } catch (err) { status.textContent = employeeError(readErrorText(err)); }
   };
   const submit = element('button', '搜索本地记录'); submit.type = 'submit'; form.append(submit);
   form.addEventListener('submit', event => { event.preventDefault(); void read(false); }); target.append(form, status, messages, next); await read(false);
