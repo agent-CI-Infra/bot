@@ -76,17 +76,19 @@ test('the manager scans one running computer at a time every six hours and reads
   const report = f.projects.storage(), row = report.computers.find(entry => entry.repository_id === '101');
   assert.equal(row.result.error, 'storage_scan_failed');
   assert.equal(report.computers.find(entry => entry.repository_id === '102').result.total_bytes, 1000);
-  // Docker: images, container writable layers and the build cache, with what no container uses (no volume row, #680).
+  // Docker: images, container writable layers, the build cache and (since #968) the volumes outside what is already
+  // counted, with what no container uses.
   f.docker.df = { LayersSize: 9 * GiB,
     Images: [{ Size: 5 * GiB, SharedSize: GiB, Containers: 2 }, { Size: 3 * GiB, SharedSize: GiB, Containers: 0 }, { Size: GiB, SharedSize: 0, Containers: 0 }],
     Containers: [{ SizeRw: 0.5 * GiB }, { SizeRw: 0.5 * GiB }],
     BuildCache: [{ Size: 2 * GiB, InUse: false, Shared: false }, { Size: GiB, InUse: true, Shared: false }] };
   await f.projects.readDockerUsage(); await f.projects.readDockerUsage();
-  assert.equal(f.docker.calls.filter(call => call.startsWith('GET /system/df')).length, 2, 'read at most every half hour');
+  assert.equal(f.docker.calls.filter(call => call.startsWith('GET /system/df')).length, 3, 'read at most every half hour');
   const docker = f.projects.storage().docker;
   assert.deepEqual(docker.images, { count: 3, bytes: 9 * GiB, unused_count: 2, reclaimable_bytes: 3 * GiB });
   assert.deepEqual(docker.containers, { count: 2, bytes: GiB });
-  assert.equal(docker.volumes, undefined);
+  assert.deepEqual(docker.volumes, { count: 0, bytes: 0 });
+  assert.equal(docker.assistant_homes, null);
   assert.deepEqual(docker.build_cache, { count: 2, bytes: 3 * GiB, reclaimable_bytes: 2 * GiB });
 });
 
@@ -124,7 +126,8 @@ test('the view lists each computer, the host disk with other, what can be reclai
     calls++; assert.equal(`${method} ${path}`, 'GET /v1/storage');
     return { usage: [{ repository_id: '101', kind: 'files', count: 1, bytes: 2 * GiB }],
       database: { bytes: 10 * GiB, free_pages: 2, free_bytes: 8 * GiB, wal_bytes: 0 }, disk: null, migration: null, expiry: { window_days: 2, last_pass: { finished_at: '2026-11-14T03:00:00Z', files: 9, bytes: 90 * GiB } },
-      docker: { images: { count: 3, bytes: 9 * GiB, unused_count: 2, reclaimable_bytes: 3 * GiB }, containers: { count: 2, bytes: GiB }, build_cache: { count: 2, bytes: 3 * GiB, reclaimable_bytes: 2 * GiB } },
+      docker: { images: { count: 3, bytes: 9 * GiB, unused_count: 2, reclaimable_bytes: 3 * GiB }, containers: { count: 2, bytes: GiB }, build_cache: { count: 2, bytes: 3 * GiB, reclaimable_bytes: 2 * GiB },
+        volumes: { count: 2, bytes: 7 * GiB }, assistant_homes: { bytes: 3 * GiB } },
       computers: [{ repository_id: '101', generation: 1, scanned_at: '2026-11-14T00:00:00Z', result: { complete: true, total_bytes: 100 * GiB, tasks_bytes: 70 * GiB, journal_bytes: GiB, store_bytes: 4 * GiB,
         home_bytes: 20 * GiB, home_entries: [{ name: '.cache', bytes: 15 * GiB }], tmp_bytes: 0, other_bytes: 5 * GiB, tasks: [{ name: running, bytes: 30 * GiB }, { name: done, bytes: 40 * GiB }] } }] };
   } };
@@ -138,6 +141,8 @@ test('the view lists each computer, the host disk with other, what can be reclai
   assert.equal(view.projects.find(row => row.repository_id === '102').computer, null);
   assert.equal(view.host.known.computers, 100 * GiB); assert.equal(view.host.known.docker_images, 9 * GiB); assert.equal(view.host.known.manager_database, 10 * GiB);
   assert.equal(view.host.known.docker_containers, GiB);
+  // #968: only the volume bytes outside the rows above, and the assistant HOME named on its own.
+  assert.equal(view.host.known.docker_volumes, 7 * GiB); assert.equal(view.host.known.assistant_homes, 3 * GiB);
   assert.equal(view.host.known.git_cache, 0); assert.equal(view.host.used_bytes, 600 * GiB);
   assert.equal(view.host.other_bytes, 600 * GiB - view.host.known_bytes); assert.ok(view.host.other_bytes > 0); assert.deepEqual(view.host.unmeasured, []);
   const reclaim = Object.fromEntries(view.reclaimable.map(item => [item.key, item]));
@@ -172,9 +177,8 @@ test('items not measured yet are null and named, not a measured zero', async t =
   await report.refresh();
   report.directories.values.git_cache.bytes = null;
   const view = report.view({ id: 'admin', role: 'super_admin', repositories: [] });
-  for (const key of ['manager_database', 'manager_trajectories', 'computers', 'docker_images', 'docker_containers', 'docker_build_cache', 'git_cache']) assert.equal(view.host.known[key], null, key);
-  assert.equal('docker_volumes' in view.host.known, false);
-  assert.deepEqual(view.host.unmeasured.sort(), ['computers', 'docker_build_cache', 'docker_containers', 'docker_images', 'git_cache', 'manager_database', 'manager_trajectories']);
+  for (const key of ['manager_database', 'manager_trajectories', 'computers', 'docker_images', 'docker_containers', 'docker_build_cache', 'docker_volumes', 'assistant_homes', 'git_cache']) assert.equal(view.host.known[key], null, key);
+  assert.deepEqual(view.host.unmeasured.sort(), ['assistant_homes', 'computers', 'docker_build_cache', 'docker_containers', 'docker_images', 'docker_volumes', 'git_cache', 'manager_database', 'manager_trajectories']);
   assert.equal(view.host.other_bytes, 600 * GiB - view.host.known_bytes);
   const reclaim = Object.fromEntries(view.reclaimable.map(item => [item.key, item]));
   assert.equal(reclaim.manager_free_pages.bytes, null); assert.equal(reclaim.docker_build_cache.bytes, null); assert.equal(reclaim.docker_unused_images.count, null);
