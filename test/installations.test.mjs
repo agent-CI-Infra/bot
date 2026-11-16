@@ -233,7 +233,7 @@ test('a background check of stale integration chips updates them in place and ne
     if (method === 'POST' && path === '/api/integrations/check') return check();
     return [404, { error: 'not_found' }];
   });
-  page.run("var startCalls = 0; start = async () => { startCalls++; }; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
+  page.run("var startCalls = 0, projectRoute = () => null; start = async () => { startCalls++; }; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
   const settle = () => new Promise(r => setTimeout(r, 50)), gate = line => line.querySelectorAll('[data-integration]').map(chip => chip.textContent);
   const once = ['GET /api/integrations', 'GET /api/installations?offset=0&limit=51', 'POST /api/integrations/check'];
   await page.run('render()'); const [line] = page.$('rows').querySelectorAll('.row');

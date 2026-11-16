@@ -12,7 +12,7 @@ function failedProjectsPage() {
     if (failing) return [500, {error: 'fixture_unavailable'}];
     return [200, {repositories: [{id: '101', owner_id: '10', full_name: 'fixture/project-101', registered: true, enabled: true, running_tasks: 0, queued_tasks: 0}], syncs: []}];
   });
-  page.run("me = {role: 'project_admin'}; tab = 'projects'; offset = 0;");
+  page.run("var projectRoute = () => null; me = {role: 'project_admin'}; tab = 'projects'; offset = 0;");
   return {page, recover: () => { failing = false; }};
 }
 const retryButton = page => page.$('rows').querySelector('[data-testid=console-state-retry]');

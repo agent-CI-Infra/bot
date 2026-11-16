@@ -21,7 +21,7 @@ function projectList(total) {
     }
     return [404, { error: 'not_found' }];
   });
-  page.run("me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects'; offset = 0;");
+  page.run("var projectRoute = () => null; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects'; offset = 0;");
   return page;
 }
 
@@ -79,7 +79,7 @@ test('a quiet refresh notices the row that made a new page possible', async () =
     if (method === 'GET' && url.pathname === '/api/integrations') return [200, { integrations: [] }];
     return [404, { error: 'not_found' }];
   });
-  page.run("me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects'; offset = 0;");
+  page.run("var projectRoute = () => null; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects'; offset = 0;");
   await page.run('render()');
   assert.equal(state(page, 'next', 'disabled'), true);
   // The first fifty rows are unchanged; only the row beyond the page appeared. The periodic refresh must still update it.
