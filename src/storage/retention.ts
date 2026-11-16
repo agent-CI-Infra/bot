@@ -139,9 +139,17 @@ export class RetentionCleanup {
     const started = new Date(this.now()).toISOString(), settings = retentionSettings(this.store);
     const manager = await this.syncManager(settings.manager_payload_days);
     const trajectories = await this.trajectories(settings), deliveries = await this.deliveries(settings.webhook_payload_days);
-    try { pruneCommitChecks(this.store, 30 * day, this.now()); } catch (error) { this.failure('commit_checks', error); }
+    const commitChecks = { count: 0, failed: 0 };
+    try {
+      while (!this.stopped) {
+        const removed = pruneCommitChecks(this.store, 30 * day, this.now());
+        commitChecks.count += removed;
+        if (removed < 500) break;
+        await this.pause(this.options.pauseMs ?? 20);
+      }
+    } catch (error) { commitChecks.failed = 1; this.failure('commit_checks', error); }
     if (this.stopped) return {};
-    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, manager_window: manager, last_error: this.lastError });
+    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, commit_checks: commitChecks, manager_window: manager, last_error: this.lastError });
   }
 
   /** Tells the manager its window when it reports another; null when the manager did not answer. */

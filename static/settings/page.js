@@ -70,8 +70,8 @@ async function retentionCard(size, count, time) {
   section.append(note('设置了天数的类别，每天在后台分批清理一次：只删正文，记录行、计费、审计和哈希保留，引用到已删正文的地方会显示「已过保留期删除」。留空表示不过期。'), form);
   const last = view.last_cleanup;
   section.append(facts([
-    ['最近一次清理', last?.finished_at ? `${time(last.finished_at)}：轨迹文件 ${count(last.trajectories?.count ?? 0)} 个（${size(last.trajectories?.bytes ?? 0)}），Webhook 正文 ${count(last.deliveries?.count ?? 0)} 条（${size(last.deliveries?.bytes ?? 0)}）`
-      + ((last.trajectories?.failed || last.deliveries?.failed) ? `；${count((last.trajectories?.failed ?? 0) + (last.deliveries?.failed ?? 0))} 项没能清理，下次再试` : '')
+    ['最近一次清理', last?.finished_at ? `${time(last.finished_at)}：轨迹文件 ${count(last.trajectories?.count ?? 0)} 个（${size(last.trajectories?.bytes ?? 0)}），Webhook 正文 ${count(last.deliveries?.count ?? 0)} 条（${size(last.deliveries?.bytes ?? 0)}），提交检查记录 ${count(last.commit_checks?.count ?? 0)} 条`
+      + ((last.trajectories?.failed || last.deliveries?.failed || last.commit_checks?.failed) ? `；${count((last.trajectories?.failed ?? 0) + (last.deliveries?.failed ?? 0) + (last.commit_checks?.failed ?? 0))} 项没能清理，下次再试` : '')
       + (last.manager_window === null ? '；manager 没有应答，保留天数下次再同步' : '') + (last.last_error ? `；最近一个错误：${last.last_error}` : '') : '尚未运行'],
     ['群聊记录', view.chats ? `${count(view.chats.configured)} / ${count(view.chats.chats)} 个群设置了保留天数${view.chats.configured ? `（${view.chats.min_days}–${view.chats.max_days} 天）` : ''}；在频道控制台按群设置` : '没有群聊']]));
   return section;

@@ -382,8 +382,8 @@ test('the global permission check measures only the App definition and keeps its
   // What only CI check display, gate onboarding and Actions failure analysis need is reported beside the baseline without failing it.
   assert.deepEqual(report.app.feature_gaps, [
     { kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['ci_changes'] },
-    { kind: 'event', name: 'check_run', features: ['ci_reads'] },
-    { kind: 'event', name: 'status', features: ['ci_reads'] },
+    { kind: 'event', name: 'check_run', features: ['ci_checks'] },
+    { kind: 'event', name: 'status', features: ['ci_checks'] },
     { kind: 'event', name: 'workflow_run', features: ['actions_failures'] },
   ]);
   app.permissions = { ...full, workflows: 'write' }; app.events = [...events, 'check_run', 'status', 'workflow_run']; report = await check();

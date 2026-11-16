@@ -71,7 +71,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     const sync = page.getByRole('button', { name: '同步安装列表', exact: true });
     await sync.click(); await expect(message).toContainText('权限和事件订阅并非全部正常。');
     await expect(message).toContainText('fixture（安装 7）：Actions 需要「Read and write」，现在「Read-only」（影响发版本、Actions 失败分析）');
-    await expect(message).toContainText('未订阅事件 Pull request review（影响检视、开发）'); await expect(message).toContainText('未订阅事件 Workflow run（影响 Actions 失败分析）');
+    await expect(message).toContainText('未订阅事件 Pull request review（影响检视、开发）'); await expect(message).toContainText('未订阅事件 Check run（影响控制台检查状态展示）'); await expect(message).toContainText('未订阅事件 Workflow run（影响 Actions 失败分析）');
     await expect(message).not.toContainText('paused');
     for (const id of ['101', '202']) {
       await expect(chip(id)).toHaveText('权限不足 · 事件未订阅'); await expect(chip(id).locator('svg.status-icon')).toBeVisible();

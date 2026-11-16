@@ -1,5 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { rmSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { TaskRecords } from '../dist/tasks/service.js';
@@ -7,8 +9,28 @@ import { insertTaskLog } from '../dist/storage/payloads.js';
 import { withRunTraceScope } from '../dist/tasks/trace.js';
 
 async function build952Fixture() {
+  const sha = 'b'.repeat(40);
+  const ghState = { failSync: true };
+  const ghServer = createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    res.setHeader('Content-Type', 'application/json');
+    if (url.pathname === '/user') return res.end(JSON.stringify({ id: 99, login: 'bot-user' }));
+    if (url.pathname === '/repositories/101') return res.end(JSON.stringify({ id: 101, full_name: 'fixture/project-101', default_branch: 'main', owner: { id: 10, login: 'fixture' }, permissions: { admin: false, push: true, pull: true } }));
+    if (url.pathname === `/repos/fixture/project-101/commits/${sha}/check-runs`) {
+      if (ghState.failSync) { res.statusCode = 503; return res.end(JSON.stringify({ message: 'GitHub unavailable' })); }
+      return res.end(JSON.stringify({ check_runs: [{ id: 99, name: 'lint', status: 'completed', conclusion: 'success', html_url: 'https://github.com/fixture/project-101/runs/99' }] }));
+    }
+    if (url.pathname === `/repos/fixture/project-101/commits/${sha}/status`) {
+      if (ghState.failSync) { res.statusCode = 503; return res.end(JSON.stringify({ message: 'GitHub unavailable' })); }
+      return res.end(JSON.stringify({ state: 'success', statuses: [] }));
+    }
+    res.statusCode = 404; res.end('{}');
+  });
+  ghServer.listen(0, '127.0.0.1');
+  await once(ghServer, 'listening');
+
   const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
-  const h = await harness(undefined, manager, store => ({ engine: new TaskEngine(store, manager) }));
+  const h = await harness(undefined, manager, store => ({ engine: new TaskEngine(store, manager), githubUrl: `http://127.0.0.1:${ghServer.address().port}` }));
   const { admin, password } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101');
 
@@ -22,7 +44,6 @@ async function build952Fixture() {
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, role_concurrency: { dev: 1 } });
 
   const records = new TaskRecords(h.store);
-  const sha = 'b'.repeat(40);
 
   // 1. Active multi-role task `t-952`: Manager -> Dev(v1) -> [Reviewer(1 finding) + Tester(pass)] -> Dev(v2 running)
   h.store.run(
@@ -83,7 +104,7 @@ async function build952Fixture() {
   const viewerPrincipal = h.store.get('SELECT id FROM principals WHERE user_id=?', viewerUser.id);
   h.store.run("UPDATE scoped_grants SET role='viewer',policy='explicit',capabilities=? WHERE principal_id=?", JSON.stringify(['tasks.read']), viewerPrincipal.id);
 
-  return { h, admin, password, viewerPassword, taskRow, close: async () => { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); } };
+  return { h, admin, password, viewerPassword, taskRow, ghState, close: async () => { await h.stop(); await new Promise(r => ghServer.close(r)); rmSync(h.directory, { recursive: true, force: true }); } };
 }
 
 test('role view, task flow list view, and #/tasks/:id two-level collapsible detail work end-to-end across 1440px and 390px', async ({ page }) => {
@@ -161,6 +182,14 @@ test('role view, task flow list view, and #/tasks/:id two-level collapsible deta
     await expect(detail.locator('#task-external-bar')).toContainText('unit ✓');
     await expect(detail.locator('#task-external-bar')).toContainText('e2e ● 运行中');
     await expect(detail.locator('#task-external-bar')).toContainText('build ✓');
+
+    // Live check sync button: surfaces error without cooldown when GitHub fails, then updates check pills on immediate retry
+    await detail.getByRole('button', { name: '同步检查', exact: true }).click();
+    await expect(page.locator('#task-error')).toContainText('github_');
+    f.ghState.failSync = false;
+    await detail.getByRole('button', { name: '同步检查', exact: true }).click();
+    await expect(detail.locator('#task-external-bar')).toContainText('lint ✓');
+    await expect(page.locator('#task-error')).toBeEmpty();
 
     // Level 1 Outer Folds: 1..3b historical roles collapsed by default; 4. Dev (v2) running role expanded by default!
     const outerFolds = detail.locator('#role-runs-list > details.role-run-fold');
