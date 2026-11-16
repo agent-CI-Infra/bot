@@ -46,24 +46,23 @@ test('the work types are the former built-in workflows plus reply and scheduled 
   assert.deepEqual(view.dispatch_model, { id: manager.id, inherited: false, default_id: base.id });
 });
 
-test('a Manager section is the console layer of its rule file; the repository file still wins and the development label stays required', async t => {
+test('a Manager section is the only text of its rule; a repository .bot/ file overrides nothing, and the development label stays required', async t => {
   const { h, admin, a } = await project(t);
   assert.equal((await saveManager(admin, '101', { content: '## 检视 Issue `review.issue`\n\nReview only the public API.\n' })).status, 200);
   assert.equal(JSON.parse(h.store.get("SELECT rule_overrides FROM policies WHERE repository_id='101'").rule_overrides)['.bot/rules/issue-review.md'], 'Review only the public API.');
   assert.equal(await managerSection(admin, '101', 'review.issue'), 'Review only the public API.');
-  // The rules API writes the same section.
-  assert.equal((await admin('/api/repositories/101/rules', 'PUT', { path: '.bot/guide.md', content: 'Be brief.' })).status, 200);
-  assert.match((await admin('/api/repositories/101/manager')).value.manager.prompt.content, /## 行为指南\nBe brief\./);
-  // A repository file on the default branch replaces the section.
-  h.store.run("INSERT INTO repository_rule_sources VALUES('101',?,?,?)", 'a'.repeat(40), JSON.stringify({ '.bot/rules/issue-review.md': 'Repository review rules.' }), new Date().toISOString());
+  // The rules API that wrote the same section is gone (#935).
+  assert.equal((await admin('/api/repositories/101/rules', 'PUT', { path: '.bot/guide.md', content: 'Be brief.' })).status, 410);
+  // A repository file on the default branch is only a name.
+  h.store.run("INSERT INTO repository_rule_sources VALUES('101',?,?,?)", 'a'.repeat(40), JSON.stringify({ '.bot/rules/issue-review.md': '' }), new Date().toISOString());
   const section = (await admin('/api/repositories/101/manager')).value.manager.sections.find(entry => entry.id === 'review.issue');
-  assert.deepEqual([section.effective_source, section.effective, section.content], ['repository', 'Repository review rules.', 'Review only the public API.']);
-  // A development section without the label line keeps bot-develop; an invalid label is refused.
+  assert.deepEqual([section.effective_source, section.effective, section.content], ['console', 'Review only the public API.', 'Review only the public API.']);
+  // The development label is a project setting: a label line in the section is text, and the label stays bot-develop.
   const current = managerPrompt(h.store, '101').content;
   assert.equal((await saveManager(admin, '101', { content: withSection(current, 'development', 'Implement it.') })).status, 200);
   assert.equal((await admin('/api/repositories/101/rules')).value.rules.development_label, 'bot-develop');
-  const refused = await saveManager(admin, '101', { content: withSection(current, 'development', 'development_label: " bad"') });
-  assert.equal(refused.value.error, 'invalid_bot_label');
+  const text = await saveManager(admin, '101', { content: withSection(managerPrompt(h.store, '101').content, 'development', 'development_label: " bad"') });
+  assert.equal(text.status, 200); assert.equal((await admin('/api/repositories/101/rules')).value.rules.development_label, 'bot-develop');
   // Unknown and repeated sections are refused; headings inside fenced blocks are text.
   assert.equal((await saveManager(admin, '101', { content: '## X `nope`\n' })).value.error, 'unknown_manager_section');
   assert.equal((await saveManager(admin, '101', { content: '## A `guide`\n\na\n## B `guide`\n\nb\n' })).value.error, 'duplicate_manager_section');

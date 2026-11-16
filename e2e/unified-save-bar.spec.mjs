@@ -97,7 +97,7 @@ test('机器配置把「重新读取」放进保存栏的高级区，保存仍�
       operation_id: randomBytes(24).toString('hex'), generation: 1, spec: { cpus: 3 }
     });
     expect(saved.status).toBe(201);
-    new RuleService(h.store).cache('101', 'a'.repeat(40), { '.bot/computer.yaml': 'memory_mb: 8192\n' });
+    new RuleService(h.store).cache('101', 'a'.repeat(40), { '.bot/computer.yaml': '' });
     await page.setViewportSize({ width: 1440, height: 900 });
     await login(page, h.admin + '/#/projects/101/machine', password);
     await expect(page.locator('.machine-config-card')).toBeVisible();

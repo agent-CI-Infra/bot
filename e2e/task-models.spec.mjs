@@ -7,7 +7,7 @@ import { consoleSave } from './console-save.mjs';
 import { RuleService } from '../dist/rules/service.js';
 import { openModelOverrides, openModelCatalog } from './open-model-folds.mjs';
 
-test('角色详情查看规则来源，模型独立管理且项目不能修改共享模型', async ({ page }) => {
+test('角色详情查看仓库 skill，模型独立管理且项目不能修改共享模型', async ({ page }) => {
   test.setTimeout(60000);
   const h = await harness(undefined, undefined, store => ({engine:new TaskEngine(store,{call:async()=>null})})), errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -15,7 +15,7 @@ test('角色详情查看规则来源，模型独立管理且项目不能修改�
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
-    new RuleService(h.store).cache('101', 'a'.repeat(40), { '.bot/guide.md': 'Repository behavior guide', '.agents/skills/demo/SKILL.md': 'Demo skill' });
+    new RuleService(h.store).cache('101', 'a'.repeat(40), { '.bot/guide.md': '', '.agents/skills/demo/SKILL.md': 'Demo skill' });
     const create = async (name, repository_id = '101') => (await admin('/api/models', 'POST', { repository_id, model_name: name, api_url: 'https://model.invalid/v1', api_key: testPassword() })).value.model;
     const defaultModel = await create('Project default'), review = await create('Review model'), obsolete = await create('Deleted model'), shared = await create('Shared model', null);
     await admin(`/api/models/${shared.id}/projects`, 'PUT', { repository_ids: ['101', '202'] });
@@ -39,10 +39,12 @@ test('角色详情查看规则来源，模型独立管理且项目不能修改�
     await expect(page.getByRole('heading',{name:'角色概览',exact:true})).toBeVisible();
     await expect(page.locator('[data-work-type]')).toHaveCount(0);
     await goRolePage(page, { role: 'Manager' });
-    await expect(page.locator('[data-rule-file=".bot/guide.md"] [data-rule-source]')).toHaveText('仓库文件');
+    // The Manager page lists the repository's skills; its .bot/ files are only named, as files that can go (#935).
+    await expect(page.locator('[data-rule-file=".bot/guide.md"]')).toHaveCount(0);
+    await expect(page.locator('[data-retired-rules]')).toContainText('.bot/guide.md');
     await expect(page.getByRole('dialog')).toHaveCount(0);
-    await page.locator('[data-rule-file=".bot/guide.md"]').getByRole('button',{name:'展开规则',exact:true}).click();
-    await expect(page.locator('[data-rule-path=".bot/guide.md"]')).toContainText('Repository behavior guide');
+    await page.locator('[data-rule-file=".agents/skills/demo/SKILL.md"]').getByRole('button',{name:'查看内容',exact:true}).click();
+    await expect(page.locator('[data-rule-path=".agents/skills/demo/SKILL.md"]')).toContainText('Demo skill');
     await page.goto(h.admin + '/#/projects/101/model');
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page).toHaveURL(/#\/projects\/101\/model$/);

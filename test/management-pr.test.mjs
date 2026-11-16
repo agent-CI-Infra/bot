@@ -32,8 +32,8 @@ test('configuration PR uses a scoped installation token, discloses pending merge
   const h=await harness(t,undefined,{githubUrl:`http://127.0.0.1:${gh.address().port}`}),{admin}=await setup(h);
   const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048,privateKeyEncoding:{type:'pkcs8',format:'pem'},publicKeyEncoding:{type:'spki',format:'pem'}});
   const a=await account(admin,{type:'github_app',token:undefined,app_id:'123',private_key:privateKey});await repository(admin,a.id,'101');h.store.run("UPDATE repositories SET full_name='agent-test-zone/admin-config' WHERE id='101'");
-  h.store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)','101','a'.repeat(40),JSON.stringify({'.bot/rules/issue-review.md':'Original prompt'}),'now');
-  const target={project_id:'101'},args={path:'.bot/rules/issue-review.md',content:'Revised prompt'};
+  h.store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)','101','a'.repeat(40),JSON.stringify({'.agents/skills/review/SKILL.md':'Original prompt'}),'now');
+  const target={project_id:'101'},args={path:'.agents/skills/review/SKILL.md',content:'Revised prompt'};
   const created=await command(admin,'configuration.pr',target,args,'first-pr');assert.equal(created.value.state,'succeeded');assert.equal(created.value.result.state,'pending_merge');assert.equal(created.value.result.effective,false);assert.equal(prs.length,1);
   assert.deepEqual(tokens[0].repository_ids,[101]);assert.deepEqual(tokens[0].permissions,{contents:'write',pull_requests:'write'});
   assert.deepEqual((await command(admin,'configuration.pr',target,args,'first-pr',created.value.expected_revision)).value,created.value);assert.equal(prs.length,1);
@@ -41,4 +41,6 @@ test('configuration PR uses a scoped installation token, discloses pending merge
   const unknown=await command(admin,'configuration.pr',target,args,'unknown-pr');assert.equal(unknown.value.state,'unknown');assert.equal(prs.length,2);
   const reconciled=await admin('/api/management/commands/'+unknown.value.id+'/resume','POST',{});assert.equal(reconciled.value.state,'succeeded');assert.equal(reconciled.value.result.pr_number,2);assert.equal(prs.length,2);assert.equal(writes.filter(w=>w.path.endsWith('/pulls')).length,2);
   const unsafe=await command(admin,'configuration.pr',target,{path:'.github/workflows/injected.yml',content:'unsafe'},'unsafe');assert.notEqual(unsafe.value.state,'succeeded');assert.equal(prs.length,2);
+  // .bot/ files are no longer configuration (#935): a configuration PR only changes a skill.
+  const retired=await command(admin,'configuration.pr',target,{path:'.bot/rules/issue-review.md',content:'Revised prompt'},'retired');assert.notEqual(retired.value.state,'succeeded');assert.equal(prs.length,2);
 });

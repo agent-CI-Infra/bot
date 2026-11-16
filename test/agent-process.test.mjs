@@ -191,8 +191,8 @@ test('a super administrator choosing a restricted shared model grants it to the 
 
 test('review rules choose the triggers, and the comment language and only the effective file text reaches the model, with language as a separate setting', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-  // Review guidance and the label are rule files now, so the policy no longer accepts them.
-  for (const body of [{ review_issues: 'yes' }, { review_language: 'fr' }, { review_language: ['zh'] }, { review_instructions: 'x' }, { review_label: 'x' }])
+  // Review guidance is the Manager's review sections, so the policy no longer accepts it; the labels are settings (#935).
+  for (const body of [{ review_issues: 'yes' }, { review_language: 'fr' }, { review_language: ['zh'] }, { review_instructions: 'x' }])
     assert.equal((await admin('/api/repositories/101/policy', 'PATCH', body)).status, 400);
   const saved = (await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, review_issues: false, review_pr_updates: false, review_language: 'zh' })).value.policy;
   assert.deepEqual([saved.review_issues, saved.review_pull_requests, saved.review_pr_updates, saved.review_language], [0, 1, 0, 'zh']);
@@ -208,16 +208,18 @@ test('review rules choose the triggers, and the comment language and only the ef
   let workspace = proxyWorkspace(); const rules = { language: 'zh', instructions: 'Focus on API compatibility.' };
   h.store.run("UPDATE policies SET capability_ceiling='develop' WHERE repository_id='101'");
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('r','101','review.pr','running','pr',7,'c'),('d','101','development.issue','running','dev',1,'c')");
-  await legacyAgentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='r'"), workspace, new Redactor(), async () => {}, { mode: 'review', review_rules: rules, effective_rules:{files:[{path:'.bot/rules/pr-review.md',source:'repository',effective:'Repository review content.'}]} });
+  await legacyAgentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='r'"), workspace, new Redactor(), async () => {}, { mode: 'review', review_rules: rules, effective_rules:{files:[{path:'.bot/rules/pr-review.md',source:'console',effective:'Repository review content.'}]} });
   assert.match(prompts[0], /Simplified Chinese/); assert.doesNotMatch(prompts[0], /Administrator review guidance|Focus on API compatibility/);assert.match(prompts[0],/Repository review content\./);assert.doesNotMatch(requestTexts[0],/Focus on API compatibility|Administrator review guidance/);
   reply.tool_calls = [call('g', 'create_pull_request', { summary: 'done', test_command: 'true' })]; workspace=proxyWorkspace();
   await legacyAgentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', review_rules: rules }, undefined, async()=>({status:'no_changes'}));
   assert.doesNotMatch(prompts[1], /Focus on API compatibility/);
-  // With no console layer or repository file, the system prompt carries each docs/prompts file in full.
+  // With no console text, the system prompt carries each docs/prompts file in full under its Manager section, the labels
+  // sections opened by the label the project setting names.
   workspace=proxyWorkspace();
   await legacyAgentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', effective_rules: resolveRules({}, {}) }, undefined, async()=>({status:'no_changes'}));
-  for (const name of ['labels.md', 'issue-review.md', 'pr-review.md', 'issue-development.md'])
-    assert.ok(prompts[2].includes(`## .bot/rules/${name} (builtin)\n` + readFileSync(new URL('../docs/prompts/' + name, import.meta.url), 'utf8')), name);
+  for (const [name, heading] of [['labels.md', '标签规则 `labels` (builtin)\nreview_label: bot-reviewed\n'], ['issue-review.md', '检视 Issue `review.issue` (builtin)'], ['pr-review.md', '检视 PR `review.pr` (builtin)'],
+    ['issue-development.md', '开发与跟进 bot PR `development` (builtin)\ndevelopment_label: bot-develop\n']])
+    assert.ok(prompts[2].includes(`## ${heading}\n` + readFileSync(new URL('../docs/prompts/' + name, import.meta.url), 'utf8')), name);
 });
 
 test('the agent exchanges a read-only GitHub token that is not stored, never reaches the provider and is revoked at the end', async t => {
