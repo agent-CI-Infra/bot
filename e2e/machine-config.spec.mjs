@@ -315,3 +315,51 @@ test('a non-number pasted over the saved value keeps the refusal, sends no confi
     expect(f.manager.projects.own('101').cpus).toBe(4);
   } finally { await f.close(); }
 });
+
+// #944: a field that holds a value can still be refused — the browser discards the entry, leaves the value in place and
+// fires no input event, so the refusal has no non-destructive exit. Saving must release a refusal whose text the field
+// accepts and submit that text, instead of only offering "clear and follow the global default".
+test('a refused field that holds an accepted number saves that number instead of blocking the group', async ({ page }) => {
+  const f = await fixture();
+  try {
+    await login(page, f);
+    let configures = 0;
+    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) configures++; });
+    const cpu = page.getByLabel('CPU（核）', { exact: true }), field = configField(page, 'CPU（核）'), error = field.locator('.machine-config-error');
+    await cpu.fill('4');
+    await expect(consoleSave(page)).toBeVisible();
+    // A letter typed into a filled number input is discarded and fires no input event, so the refusal stays while the
+    // field holds the accepted 4 until the save itself releases it.
+    await cpu.focus(); await page.keyboard.press('End'); await page.keyboard.type('a');
+    await expect(cpu).toHaveValue('4');
+    await expect(error).toBeVisible();
+    await expect(error).toHaveText('这个字段只能填数字');
+    await expect(cpu).toHaveAttribute('aria-invalid', 'true');
+    await consoleSave(page).click();
+    await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
+    expect(configures).toBe(1);
+    expect(f.manager.projects.own('101').cpus).toBe(4);
+    await expect(error).toBeHidden();
+  } finally { await f.close(); }
+});
+
+test('a refused field that still holds the saved number can be saved without clearing the override', async ({ page }) => {
+  const f = await fixture();
+  try {
+    await login(page, f);
+    let configures = 0;
+    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) configures++; });
+    const cpu = page.getByLabel('CPU（核）', { exact: true }), field = configField(page, 'CPU（核）'), error = field.locator('.machine-config-error');
+    await expect(cpu).toHaveValue('3');
+    await cpu.focus(); await page.keyboard.press('End'); await page.keyboard.type('a');
+    await expect(cpu).toHaveValue('3');
+    await expect(error).toBeVisible();
+    // The refused entry is unsaved state, so the group can be saved; saving keeps the saved 3 rather than forcing a clear.
+    await expect(consoleSave(page)).toBeVisible();
+    await consoleSave(page).click();
+    await expect(page.locator('.machine-config-draft')).toHaveText('已保存');
+    expect(configures).toBe(0);
+    expect(f.manager.projects.own('101').cpus).toBe(3);
+    await expect(error).toBeHidden();
+  } finally { await f.close(); }
+});
