@@ -422,6 +422,7 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .machine-config-group h4,.machine-config-impact h4{margin:0;font-size:var(--font-size-touch)}
 .machine-config-field{display:flex;flex-direction:column;gap:6px;min-width:0}
 .machine-config-origin{color:var(--color-text-muted);font-size:var(--font-size-1);line-height:1.6;overflow-wrap:anywhere}
+.machine-config-field-note{color:var(--color-danger);font-size:var(--font-size-1);line-height:1.6;overflow-wrap:anywhere}
 .machine-config-impact{display:flex;flex-direction:column;gap:12px;border:1px solid var(--color-border);border-radius:var(--radius-card);background:var(--color-surface-alt);padding:16px;min-width:0}
 .machine-config-draft{font-weight:600;overflow-wrap:anywhere}
 @media(max-width:1200px){.machine-config-layout{grid-template-columns:minmax(0,1fr)}.machine-config-impact{order:-1}}
