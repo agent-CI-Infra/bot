@@ -23,9 +23,9 @@ import { actionsStorage } from '../actions/storage.js';
 import { workStorage } from '../work/settings.js';
 import { migrateWorkflows } from '../work/migration.js';
 import { ceilingStorage } from '../work/ceiling.js';
+import { retireWorkTypes } from '../work/retired.js';
 import { dispatchStorage } from '../dispatch/store.js';
 import { githubWriteStorage } from '../github/write.js';
-import { gateOnboardingStorage } from '../projects/gate-storage.js';
 import { installationStorage } from '../installations/storage.js';
 import { identityStorage } from '../identity/storage.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -217,13 +217,10 @@ export class Store {
       enabled INTEGER NOT NULL CHECK(enabled IN (0,1)));
       INSERT OR IGNORE INTO public_board_settings(repository_id,enabled)
         SELECT DISTINCT repository_id,1 FROM public_board_consents;`);
-    // Gate/dashboard connection status per repository and one-click onboarding runs.
+    // Gate/dashboard connection status per repository.
     this.db.exec(`CREATE TABLE IF NOT EXISTS repo_integrations(repository_id TEXT PRIMARY KEY,
         gate_state TEXT NOT NULL DEFAULT 'unknown',gate_detail TEXT NOT NULL DEFAULT '',
         dashboard_state TEXT NOT NULL DEFAULT 'unknown',dashboard_detail TEXT NOT NULL DEFAULT '',checked_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS quickstart_runs(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,state TEXT NOT NULL,steps TEXT NOT NULL,
-        pr_url TEXT,error TEXT,dry_run INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
-      CREATE INDEX IF NOT EXISTS quickstart_repo_time ON quickstart_runs(repository_id,created_at);
       PRAGMA user_version=5;`);
     // wait_count: how many times in a row the task stopped for the same reason, so each automatic wait lasts longer.
     extend('tasks', { wait_count: 'INTEGER NOT NULL DEFAULT 0' });
@@ -253,7 +250,6 @@ export class Store {
     workStorage(this);
     dispatchStorage(this);
     githubWriteStorage(this);
-    gateOnboardingStorage(this);
     taskStorage(this);
     priorityStorage(this);
     // Reopening workers replace trace triggers too; DROP and CREATE must be one writer transaction.
@@ -284,6 +280,8 @@ export class Store {
     migrateWorkflows(this);
     // One capability ceiling per project (#850), derived once from the switches and writes it replaces.
     ceilingStorage(this);
+    // Removed work types (gate onboarding, #931): what older versions saved for them.
+    retireWorkTypes(this);
   }
   private get now() { return this.options.now ?? (() => performance.now()); }
   private logSlow(ms: number, op: string, detail: string | (() => string)) {

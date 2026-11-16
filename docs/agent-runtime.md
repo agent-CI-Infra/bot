@@ -12,7 +12,7 @@
 
 - 工作区任务使用正式的 Pi harness（`src/agent/pi.ts` 的 `piAdapter`），在隔离项目电脑中读取文件、执行命令和产生修改；`loop.ts` 只组装任务的配置和工具回调。`profiles.ts` 把固定的硬限制和这类工作的 Manager 章节组合成系统提示，并按项目配置给这类工作的写入生成工具和显式 capabilities。同一个 harness 也运行项目主控会话（见 [Role-Pool](role-pool.md)）：会话配置里的 `control_tools` 由 runner 经控制邮箱交给控制面执行，等待没有期限；控制面只执行本次会话提供过的工具，并在回复里用 `finish` 标出被接受的提交。
 - Pi 入口的完成工具（检视、回复和事件工作）在会话中交给控制面校验。字段或语义不合法时，工具结果说明原因，模型可在原会话内修正两次；仍然无效才按原错误码结束。事件校验不发布结果或改变事件状态，最终通过后才由所属模块接手；恢复已提交会话时重新校验原始提交。
-- CI 观察（`release.observe`）、发行说明（`release.notes`）、Actions 失败处理（`actions.failures`）和接入门禁（`gate.onboarding`，对话的每一轮是一个任务）也是工作区任务：在项目电脑里检出相关提交，事件写在 `../context/`，用各自的结束工具交回结果，由所属模块核验后接手。运行时默认的 tool loop 用于 Native 角色后端；角色可按职责选择 Pi、Native、Process（含主控）或容器内 CLI 后端 Claude Code、Codex（工作与评估角色），工具和结果校验继续由调用方提供。
+- CI 观察（`release.observe`）、发行说明（`release.notes`）和 Actions 失败处理（`actions.failures`）也是工作区任务：在项目电脑里检出相关提交，事件写在 `../context/`，用各自的结束工具交回结果，由所属模块核验后接手。运行时默认的 tool loop 用于 Native 角色后端；角色可按职责选择 Pi、Native、Process（含主控）或容器内 CLI 后端 Claude Code、Codex（工作与评估角色），工具和结果校验继续由调用方提供。
 
 发布确认、幂等 outbox、发布状态机、仓库授权和 claim 是控制面的职责，不交给提示词决定。统一 Agent 不等于移除这些安全边界。
 
@@ -51,9 +51,9 @@ Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这
 - **去重**：key 在一个范围内唯一：一个任务（重试同一任务不会重复写）、一个分派事件、一轮群聊或管理助手对话。已经写成功的 key 直接返回上次的结果（`replayed: true`）；同一 key 换了请求返回 `github_write_key_conflict`；结果未确认时返回 `github_write_unknown`，由 agent 先读 GitHub 核对，再换新 key 写。
 - **结果与审计**：返回 GitHub 响应里有用的部分（编号、链接、sha、状态等）和 HTTP 状态。每次调用写一条 `github_writes`：范围、key、调用方（角色和任务、Manager 和事件、服务角色和会话、管理助手的用户）、仓库、方法、路径、请求摘要、状态、GitHub 状态码和结果链接；被拒绝的调用也记录。项目审计（`audit`）同时记一条 `github.write.<状态>`。
 
-工具出现在每个工作类型、Pi 角色、Manager 分派、群聊助手和管理助手里，再按调用方角色的 GitHub 权限过滤：没有任何资源读写的角色看不到它，硬调也被拒绝。委派的任务还受来源角色的上限约束，角色不能把自己没有的写权限借给别人。内置角色默认只有 Manager 可写（Issue、Pull Request、Contents），其他内置角色对全部 GitHub 资源只读。合并 PR 是 Contents 写，所以 Manager 默认可以经 `PUT /pulls/{n}/merge` 合并 PR，经 `PUT /contents/...`、`POST /git/refs`、`PATCH /git/refs/...` 写分支；没有单独的「可合并」权限，其他角色、群助手和管理助手按各自的 Contents 写（管理助手另要本人对该仓库有 `tasks.write`）。路由不检查目标分支，这类合并也不经过 `POST /api/tasks/:id/merge` 的候选、QA 和检查校验，能否合入由仓库的分支保护（或规则集）和必需检查决定，见[角色池](role-pool.md#authorized-merge)。升级时已保存的内置角色权限一次性重置为这些默认值（模型、后端和提示词等设置保留，自定义角色不变），配置记一个由 `migration:381` 保存的新版本。
+工具出现在每个工作类型、Pi 角色、Manager 分派、群聊助手和管理助手里，再按调用方角色的 GitHub 权限过滤：没有任何资源读写的角色看不到它，硬调也被拒绝。委派的任务还受来源角色的上限约束，角色不能把自己没有的写权限借给别人。内置角色默认只有 Manager 可写（Issue、Pull Request、Contents），其他内置角色对全部 GitHub 资源只读。合并 PR 是 Contents 写，所以 Manager 默认可以经 `PUT /pulls/{n}/merge` 合并 PR，经 `PUT /contents/...`、`POST /git/refs`、`PATCH /git/refs/...` 写分支；没有单独的「可合并」权限，其他角色、群助手和管理助手按各自的 Contents 写（管理助手另要本人对该仓库有 `tasks.write`）。路由不检查目标分支，这类合并也不经过 `POST /api/tasks/:id/merge` 的候选、QA 和检查校验，能否合入由仓库的分支保护（或规则集）和必需检查决定，见[角色池](role-pool.md#authorized-merge)。`github_write` 不改 `.github/workflows/`：写这个目录的文件被拒绝（`github_workflow_write_forbidden`），它申请的令牌也从不带 Workflows 权限，GitHub 因此拒绝改到 workflow 的分支更新。CI 改动只走 bot PR：项目管理员在控制台确认为 CI 改动的开发任务（任务输入的 `workflow_changes`），推送自己的 bot 分支时才申请 `workflows: write`，安装没有授予时 GitHub 照样拒绝。升级时已保存的内置角色权限一次性重置为这些默认值（模型、后端和提示词等设置保留，自定义角色不变），配置记一个由 `migration:381` 保存的新版本。
 
-框架交付不经过 `github_write`，也不需要角色的写权限：检视结论、测试通过的 PR、Actions 重跑与失败提报、发行说明和门禁方案沿用原流程，只看项目工作类型的写入，见 [Manager 与工作类型](workflows.md)。
+框架交付不经过 `github_write`，也不需要角色的写权限：检视结论、测试通过的 PR、Actions 重跑与失败提报和发行说明沿用原流程，只看项目工作类型的写入，见 [Manager 与工作类型](workflows.md)。
 
 2 MiB 是邮箱及观察循环的结果上限。Pi 还会在 `github_read`、`github_search`、`read_job_log` 的结果进入会话历史之前，使用同一 SDK 序列化包含当前历史与同轮已完成工具结果的下一次模型请求，并检查估计输入 token 加本次有效输出预留是否超过所选模型的上下文窗口。上下文与最大输出来自手填能力或 models.dev 目录，显式角色输出额度优先；没有匹配时沿用 128000 上下文和 8192 输出。触及该上限的仓库读取返回 `repository_result_too_large`，让模型缩小读取范围；放得下的结果原样返回，没有新增固定字节配额。序列化检查不会发起模型请求。
 

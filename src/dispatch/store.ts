@@ -17,7 +17,7 @@ import { assertManagedTask, assertTaskCaller, createManagedTask, eventTaskCaller
  * ignore, always with a reason. The decision is applied in one transaction with the event's new state, so a restart can
  * decide again without creating anything twice: task specs carry unique keys and continuations are keyed by event.
  *
- * Modules that own an event (releases, Actions failures, gate onboarding, schedules) name a hook on their option; the hook
+ * Modules that own an event (releases, Actions failures, schedules) name a hook on their option; the hook
  * hears in the same transaction that the task was created, or that the Manager decided otherwise.
  */
 export function dispatchStorage(store: Store) {
@@ -45,7 +45,7 @@ export type CreateSpec =
       update_id?: string | null; requests?: Json[] }
   // A reply task (the work type of former custom workflows) on an Issue or pull request.
   | { type: 'reply'; kind: 'workflow.issue' | 'workflow.pr'; number: number; head: string | null; input: Json; key: string; delivery: string | null }
-  // A task on an event the owning module tracks (release, Actions run, gate turn).
+  // A task on an event the owning module tracks (release, Actions run).
   | { type: 'event'; kind: string; key: string; sha: string; input: Json; summary: string }
   // An ordinary request (a scheduled check): no GitHub writes; the Manager's brief becomes its contract.
   | { type: 'request'; key: string; request: string; principal: { principal_id: string; tenant_id: string } | null };
@@ -137,7 +137,7 @@ export function dispatchContext(store: Store, event: Row): DispatchContext {
   const joinable = continuations(store, event);
   const options = (JSON.parse(event.options) as CreateOption[]).filter(option => workOffered(store, event.repository_id, option.work, event.type) && !(option.unless_continued && joinable.length));
   const related = event.object_number ? store.all(`SELECT id,kind,status,summary,error_code,created_at,updated_at,result FROM tasks WHERE repository_id=? AND object_number=?
-    AND kind NOT IN ('release.observe','release.notes','actions.failures','gate.onboarding','task.request','task.development') ORDER BY created_at DESC,rowid DESC LIMIT 8`, event.repository_id, event.object_number).map(task => {
+    AND kind NOT IN ('release.observe','release.notes','actions.failures','task.request','task.development') ORDER BY created_at DESC,rowid DESC LIMIT 8`, event.repository_id, event.object_number).map(task => {
     let outcome: unknown = null; try { const result = JSON.parse(task.result || 'null'); outcome = result?.summary ? String(result.summary).slice(0, 300) : result?.pr_url ?? null; } catch { outcome = null; }
     return { id: task.id, kind: task.kind, status: task.status, summary: task.summary, error_code: task.error_code ?? null, created_at: task.created_at, outcome };
   }) : [];

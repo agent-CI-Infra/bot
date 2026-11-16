@@ -112,7 +112,6 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   h.store.run("INSERT INTO external_event_cursors VALUES('client-101',1)");
   h.store.run("INSERT INTO public_board_settings VALUES('101',0)");
   h.store.run("INSERT INTO repo_integrations(repository_id,checked_at) VALUES('101',?)", now);
-  h.store.run("INSERT INTO quickstart_runs(id,repository_id,state,steps,created_at,updated_at) VALUES('quickstart-101','101','done','[]',?,?)", now, now);
   const field = (await admin('/api/board/fields', 'POST', { name: 'Priority' })).value.field, option = (await admin(`/api/board/fields/${field.id}/options`, 'POST', { name: 'High' })).value.option;
   assert.equal((await admin('/api/board/cards/101/issue/5', 'PATCH', { field_id: field.id, option_id: option.id })).status, 200);
   assert.ok(h.store.get("SELECT 1 FROM external_events WHERE repository_id='101'"));
@@ -331,10 +330,10 @@ test('repository rows report every feature\'s access gaps, whether or not the fe
   const gaps = async () => Object.fromEntries((await admin('/api/installations')).value.repositories.map(r => [r.id, r.access_gaps]));
   const appGaps = [
     { kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_failures'] },
-    { kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['gate'] },
+    { kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['ci_changes'] },
     { kind: 'event', name: 'workflow_run', features: ['actions_failures'] }];
   // The switch only decides how urgent the console shows it, not whether the gap is reported.
-  assert.deepEqual(await gaps(), { 101: appGaps, 202: appGaps, 303: [{ kind: 'account', name: 'github_app', features: ['release', 'gate', 'actions_failures'] }] });
+  assert.deepEqual(await gaps(), { 101: appGaps, 202: appGaps, 303: [{ kind: 'account', name: 'github_app', features: ['release', 'ci_changes', 'actions_failures'] }] });
   const listed = (await admin('/api/installations')).value.repositories;
   assert.deepEqual(listed.map(r => [r.id, r.actions_failures_enabled]), [['101', true], ['202', false], ['303', false]]);
   // The baseline fields keep their meaning: actions is below the baseline, workflows and workflow_run are not part of it.

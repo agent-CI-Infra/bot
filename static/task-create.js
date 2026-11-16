@@ -8,7 +8,8 @@ function taskCreationError(value) {
     installation_unavailable: '项目安装当前不可用，请先检查接入状态。', installation_scope_changed: '安装仓库范围已变化，请重新同步。',
     management_revision_conflict: '项目配置已变化。重新读取执行上下文后再提交。', task_pull_request_forbidden: '项目或执行角色未获代码与 PR 写入权限，请核对配置。',
     task_software_disabled: '项目尚未启用普通任务的软件交付，请核对工作类型与开发设置。',
-    capability_ceiling: '项目能力上限不是「可开发并开 PR」，不能交付代码；请项目管理员在「项目设置 → 监听与触发」调整。' };
+    capability_ceiling: '项目能力上限不是「可开发并开 PR」，不能交付代码；请项目管理员在「项目设置 → 监听与触发」调整。',
+    invalid_workflow_changes: '只有交付代码 PR 的任务可以允许修改 .github/workflows/。', workflow_changes_need_person: '允许修改 .github/workflows/ 需要项目管理员在控制台确认。' };
   return messages[code] || code;
 }
 async function renderNewTask(request) {
@@ -27,7 +28,7 @@ async function renderNewTask(request) {
     root.append(consoleState(id ? '项目暂不可访问' : '先选择任务所属项目', id ? '请选择当前有权访问的项目。' : '任务沿用所选项目的配置、权限和执行环境。')); return;
   }
   let draft = taskCreationDrafts.get(id);
-  if (!draft) { draft = { request: '', goal: '', scope: '', criteria: '', endpoint: 'report', envelope: null, receipt: null, sending: false }; taskCreationDrafts.set(id, draft); }
+  if (!draft) { draft = { request: '', goal: '', scope: '', criteria: '', endpoint: 'report', workflowChanges: false, envelope: null, receipt: null, sending: false }; taskCreationDrafts.set(id, draft); }
   const layout = element('div', '', 'task-create-layout'), form = document.createElement('form'), set = document.createElement('fieldset');
   form.className = 'project-form task-create-form'; set.disabled = true;
   const original = textarea('request', draft.request, { rows: 4, required: true, maxLength: 16000 });
@@ -41,8 +42,16 @@ async function renderNewTask(request) {
     control.addEventListener('input', () => { draft[key] = control.value; });
     control.addEventListener('change', () => { draft[key] = control.value; });
   }
-  set.append(field('原始需求', original), field('任务目标', goal), field('工作范围（每行一项）', scope), field('验收条件（每行一项）', criteria), field('交付类型', endpoint));
+  // A CI change (#931): only a project administrator confirms that a code PR may change .github/workflows/.
+  const workflows = document.createElement('input'); workflows.type = 'checkbox'; workflows.name = 'workflow_changes'; workflows.checked = draft.workflowChanges;
+  workflows.addEventListener('change', () => { draft.workflowChanges = workflows.checked; });
+  const workflowsLabel = element('label', '', 'task-create-check'); workflowsLabel.append(workflows, element('span', '允许修改 .github/workflows/（CI 改动）'));
+  const workflowsBox = element('div', '', 'task-create-ci');
+  workflowsBox.append(workflowsLabel, note('只有项目管理员可以勾选。bot 推送这个任务的分支时才申请 Workflows 权限；CI 改动以 PR 交付，由人检视合并后才生效。不勾选时，改到 workflow 的分支 GitHub 会拒绝发布。'));
+  set.append(field('原始需求', original), field('任务目标', goal), field('工作范围（每行一项）', scope), field('验收条件（每行一项）', criteria), field('交付类型', endpoint), workflowsBox);
   set.append(note('代码 PR 仍需项目与执行角色的代码和 PR 权限、验证及独立 QA；创建 PR 后仍须按仓库规则合入。'));
+  const showWorkflows = () => { workflowsBox.hidden = endpoint.value !== 'reviewable_pull_request' || effective?.task_creation?.workflow_changes !== true; };
+  endpoint.addEventListener('change', showWorkflows);
   const submit = element('button', '提交任务'); submit.type = 'submit'; submit.disabled = true;
   const feedback = element('div', '', 'task-create-feedback'); feedback.setAttribute('role', 'alert');
   form.append(set, feedback, submit);
@@ -52,7 +61,7 @@ async function renderNewTask(request) {
   const receiptBox = element('section', '', 'task-create-receipt'); receiptBox.setAttribute('aria-label', '创建任务回执'); receiptBox.setAttribute('aria-live', 'polite');
   layout.append(form, context); root.append(layout, receiptBox);
   let effective = null, contextVersion = 0;
-  const sync = () => { set.disabled = !effective?.task_creation?.allowed || !!draft.envelope || draft.sending; submit.disabled = set.disabled; reload.disabled = draft.sending; };
+  const sync = () => { set.disabled = !effective?.task_creation?.allowed || !!draft.envelope || draft.sending; submit.disabled = set.disabled; reload.disabled = draft.sending; showWorkflows(); };
   function revoked(err) {
     if (![401, 403, 404].includes(err.status)) return false;
     taskCreationDrafts.delete(id); effective = null;
@@ -129,7 +138,8 @@ async function renderNewTask(request) {
     }
     const key = 'console-task:' + crypto.randomUUID();
     draft.uncertain = false;
-    draft.envelope = { operation: 'task.create', target: { project_id: id }, arguments: { request: values.request, contract: { goal: values.goal, scope: values.scope, criteria: values.criteria, endpoint: endpoint.value } },
+    const confirmCi = !workflowsBox.hidden && workflows.checked;
+    draft.envelope = { operation: 'task.create', target: { project_id: id }, arguments: { request: values.request, contract: { goal: values.goal, scope: values.scope, criteria: values.criteria, endpoint: endpoint.value }, ...(confirmCi ? { workflow_changes: true } : {}) },
       expected_revision: effective.revision, idempotency_key: key, source_conversation: 'console:new-task', source_message: key };
     void send();
   });

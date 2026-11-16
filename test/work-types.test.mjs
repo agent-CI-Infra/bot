@@ -33,7 +33,7 @@ async function project(t) {
 }
 
 test('the work types are the former built-in workflows plus reply and scheduled checks, each with a model of its own', async t => {
-  assert.deepEqual(workTypes.map(work => work.id), ['review.issue', 'review.pr', 'development.issue', 'development.pr', 'reply', 'release.observe', 'release.notes', 'actions.failures', 'gate.onboarding', 'task.development', 'task.request']);
+  assert.deepEqual(workTypes.map(work => work.id), ['review.issue', 'review.pr', 'development.issue', 'development.pr', 'reply', 'release.observe', 'release.notes', 'actions.failures', 'task.development', 'task.request']);
   const { h, admin } = await project(t);
   const create = async name => (await admin('/api/models', 'POST', { repository_id: '101', model_name: name, api_url: 'https://model.invalid/v1', api_key: 'k'.repeat(20) })).value.model;
   const base = await create('default'), review = await create('review'), manager = await create('manager');
@@ -83,7 +83,7 @@ test('a Manager section is the console layer of its rule file; the repository fi
 
 test('reading is open to every work type; writes are chosen per work type within what it can do', async t => {
   const { h, admin } = await project(t);
-  const defaults = { 'review.issue': ['reply', 'labels'], 'review.pr': ['reply', 'labels'], 'development.issue': ['code', 'pull_request'], 'release.observe': [], 'release.notes': ['release_notes'], 'actions.failures': ['issue', 'actions_rerun'], reply: ['reply'], 'gate.onboarding': ['gate_plan'], 'task.request': ['code', 'pull_request'] };
+  const defaults = { 'review.issue': ['reply', 'labels'], 'review.pr': ['reply', 'labels'], 'development.issue': ['code', 'pull_request'], 'release.observe': [], 'release.notes': ['release_notes'], 'actions.failures': ['issue', 'actions_rerun'], reply: ['reply'], 'task.request': ['code', 'pull_request'] };
   for (const [id, writes] of Object.entries(defaults)) {
     assert.deepEqual(defaultWrites(id), writes, id);
     assert.deepEqual(workflowAccess(id), { workspace: { read: true, write: writes.includes('code'), notes: true, shell: true }, github: githubScopes, agents: true, writes }, id);

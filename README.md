@@ -22,7 +22,7 @@ App 已经创建好了，不需要自己再建。安装地址只用这一个：
 
 ## 手动发版本
 
-超级管理员或对应项目的管理员可在项目页的「发版本」填写 `v1.2.3`、`v1.2.3-beta.1` 等版本，检查并确认完整提交 SHA。仓库需要已接入 CI 门禁，并有版本标签触发的 `.github/workflows/release.yml`。控制面使用 GitHub App 安装令牌创建注释标签，跟踪该标签的 Release 工作流；全部 job 成功后准备 GitHub Release 草稿，由人编辑并点击「正式发布」。预发布版本正式发布后仍保留预发布标记。仓库工作流自行发布的 Release 会显示为外部已发布。
+超级管理员或对应项目的管理员可在项目页的「发版本」填写 `v1.2.3`、`v1.2.3-beta.1` 等版本，检查并确认完整提交 SHA。仓库需要有发布用的 CI（`.github/ci-gates.json` 和运行它的 `ci.yml`），并有版本标签触发的 `.github/workflows/release.yml`。控制面使用 GitHub App 安装令牌创建注释标签，跟踪该标签的 Release 工作流；全部 job 成功后准备 GitHub Release 草稿，由人编辑并点击「正式发布」。预发布版本正式发布后仍保留预发布标记。仓库工作流自行发布的 Release 会显示为外部已发布。
 
 发行说明只使用本次提交历史范围内的提交和已合并 PR。仓库存在 `.agents/skills/release-notes/SKILL.md` 时，控制面固定读取本次 SHA 的文件，并使用项目配置的模型按该规则组织真实来源；否则使用内置来源清单。整理发行说明和运行分析都先交给项目 Manager 分派，Manager 不安排整理时同样使用内置来源清单。可选的运行分析可以主动申请本仓库的 Actions 只读令牌，按需读取本次 run／attempt 的 job 日志；令牌只保留在工具执行端，日志先脱敏再交给模型，分析结束后撤销令牌。页面保留读取的日志行段和来源链接，分析不参与发布状态判定。失败不会自动重跑，同名标签不会被移动或删除。
 
@@ -30,7 +30,7 @@ App 已经创建好了，不需要自己再建。安装地址只用这一个：
 
 发版本的写入只看 GitHub App 安装权限：控制台授权（超级管理员或该项目的管理员）决定谁能操作，不另外核对操作者本人在 GitHub 仓库上的权限。
 
-「接入门禁」先介绍 pr-ready（每次 PR 提交都跑的构建和基础检查）、pr-merge（合入门禁：有 merge queue 时在队列里，没有时在合入后，先重跑 pr-ready 再跑费用或资源较多的检查）、daily、release 几个 lane，再由「接入门禁」这类工作的 agent 和其他任务一样在项目的虚拟电脑里分析仓库、试跑命令（项目需先启动、虚拟电脑就绪、选好模型），和人一起定下各 lane 的命令；不要求是 Node 仓库。已有 CI 或门禁的仓库先由 agent 审视现有配置并给出建议。人在预览里看过新增和修改的文件、确认方案后，控制面才创建门禁 PR，其中包含门禁 job、`.github/ci-gates.json`，以及缺少时的 `scripts/gate/gate.mjs` 和由版本标签触发的 `.github/workflows/release.yml`；已有文件只按方案合并修改，不会被整体覆盖。门禁检出并报告同一个提交（PR 上是 PR head）；有 merge queue 时合入门禁在队列里运行，可以设为必需检查。门禁的 `release.yml` 让「发版本」打标签后运行 release lane 并生成 Release 草稿。空 lane 的 `not_applicable` 报告不代表实际检查通过；控制面不发布 PyPI、npm 包或镜像，详见[接入说明](docs/onboarding-guide.md)。
+CI 改动以 bot PR 交付：项目管理员在「新建任务」写明要改的 CI、确认允许修改 `.github/workflows/`，bot 在项目电脑里按仓库自己的情况改 workflow、测试并开 PR，人检视合并后才生效。没有这样确认的任务和 `github_write` 都改不了 `.github/workflows/`，见[接入说明](docs/onboarding-guide.md#22-ci-改动走-bot-pr)。
 
 ## 部署和管理
 

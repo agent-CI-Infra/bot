@@ -78,7 +78,7 @@ test('the Manager edits its prompt and decisions, while project listeners own ev
     // The models page lists every work type and the Manager's own dispatch model.
     await page.evaluate(() => { location.hash = '#/projects/101/model'; });
     await openModelOverrides(page);
-    for (const kind of ['manager', 'review.issue', 'reply', 'actions.failures', 'gate.onboarding']) await expect(page.locator(`[data-task-kind="${kind}"]`)).toBeVisible();
+    for (const kind of ['manager', 'review.issue', 'reply', 'actions.failures']) await expect(page.locator(`[data-task-kind="${kind}"]`)).toBeVisible();
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/projects/101/roles/manager');

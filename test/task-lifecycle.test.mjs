@@ -21,7 +21,7 @@ const submit=(records,id,version='v1')=>records.submit(id,[{kind:'report',refere
 
 test('all task kinds acquire structured records and real transition history, without invented legacy acceptance',t=>{
  const {store,records,create}=fixture(t);
- for(const [i,kind] of ['review.issue','review.pr','development.issue','workflow.issue','release.observe','release.notes','actions.failures','gate.onboarding','task.request','custom.analysis'].entries()){
+ for(const [i,kind] of ['review.issue','review.pr','development.issue','workflow.issue','release.observe','release.notes','actions.failures','task.request','custom.analysis'].entries()){
   const id=String(i);create(id,kind);const initial=records.get(id);assert.equal(initial.contract.completeness,'unspecified');assert.equal(initial.acceptance,null);
   store.run("UPDATE tasks SET status='running',phase='model',attempt=2,error_code='prior_fault' WHERE id=?",id);
   assert.equal(records.get(id).progress.attempt,2);assert.equal(store.get("SELECT count(*) n FROM task_history WHERE task_id=?",id).n,2);

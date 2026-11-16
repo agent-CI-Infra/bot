@@ -9,6 +9,10 @@
 .task-create-layout :is(.card, .side-card) { margin: 0; min-width: 0; }
 .task-create-receipt { margin-top: 24px; overflow-wrap: anywhere; }
 .task-create-receipt:empty { display: none; }
+.task-create-ci { display: grid; gap: 6px; padding: 12px 14px; border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface-alt); }
+.task-create-ci[hidden] { display: none; }
+.task-create-check { display: flex; align-items: center; gap: 8px; font-weight: 600; overflow-wrap: anywhere; }
+.task-create-check input { width: 18px; height: 18px; flex: none; margin: 0; }
 .board-create-task { min-height: 44px; padding: 8px 12px; }
 @media (max-width: 760px) {
   .board-arrangement { grid-template-columns: minmax(0, 1fr) 44px auto auto; }

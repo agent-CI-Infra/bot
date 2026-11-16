@@ -195,16 +195,16 @@ function installedBadges(row) {
 // GitHub's own wording for App permissions, shared by the project list and the App permission check.
 const permissionNames = { contents: 'Contents', issues: 'Issues', pull_requests: 'Pull requests', statuses: 'Commit statuses', actions: 'Actions', checks: 'Checks', metadata: 'Metadata', workflows: 'Workflows' };
 // What GitHub needs before an event can be ticked. Workflow run is easy to mistake for the Workflows permission, which
-// only lets an App edit .github/workflows files (gate onboarding needs it, Actions failure analysis does not).
+// only lets an App edit .github/workflows files (a confirmed CI change PR needs it, Actions failure analysis does not).
 const eventPermissionNotes = { workflow_run: '这是事件订阅，不是 Workflows 权限：GitHub 只要求 App 至少有 Actions「Read-only」，不需要 Workflows；App 没有 Actions 权限时这个选项不会出现，先补 Actions。' };
 // GitHub's names for the webhook events under Permissions & events → Subscribe to events.
 const eventNames = { issues: 'Issues', pull_request: 'Pull request', issue_comment: 'Issue comment', pull_request_review: 'Pull request review', pull_request_review_comment: 'Pull request review comment', workflow_run: 'Workflow run' };
 const accessNames = { read: 'Read-only', write: 'Read and write', admin: 'Admin' }, roleNames = { read: 'Read', triage: 'Triage', write: 'Write' };
 // Access gaps (access_gaps) name the features they stop; src/app/access.ts holds what each feature needs.
-const featureNames = { review: '检视', review_threads: '关闭已修复的行内意见', development: '开发', ci_reads: '任务读取 CI 结果', board: '看板', release: '发版本', gate: '接入门禁', actions_failures: 'Actions 失败分析' };
+const featureNames = { review: '检视', review_threads: '关闭已修复的行内意见', development: '开发', ci_reads: '任务读取 CI 结果', board: '看板', release: '发版本', ci_changes: '经确认的 CI 改动', actions_failures: 'Actions 失败分析' };
 const featureImpact = {
   review: '读不到代码或发不出检视意见', review_threads: '检视照常发布，但作者修复后的行内意见不会自动关闭', development: '推不了分支、开不了或更新不了 PR', ci_reads: '任务看不到 Actions、检查和提交状态',
-  board: '采集不到看板数据', release: '打不了标签、写不了 Release、重跑不了发布运行', gate: '提交不了 .github/workflows 门禁配置 PR',
+  board: '采集不到看板数据', release: '打不了标签、写不了 Release、重跑不了发布运行', ci_changes: '推不了改动 .github/workflows 的 bot 分支，这类 PR 开不出来',
   actions_failures: '读不到运行、重跑不了外部失败、提报不了 Issue',
 };
 // What a missing event stops, in the words of the triggers it carries (src/review/queue.ts, src/actions).
@@ -215,11 +215,11 @@ const eventImpact = {
   workflow_run: 'Actions 失败分析在读取运行之前停止：不分类、不重跑、不提报 Issue',
 };
 const gapLabels = { permission: '权限不足', role: '权限不足', event: '事件未订阅', account: '需要 GitHub App' };
-// Whether a stopped feature is in use on this row: on, off, or run by hand (releases and gate PRs have no switch).
+// Whether a stopped feature is in use on this row: on, off, or run by hand (releases and CI change PRs have no switch).
 function featureState(row, feature) {
   const active = !!row.enabled, on = { review: row.review_enabled, review_threads: row.review_enabled, development: row.development_enabled, ci_reads: row.review_enabled || row.development_enabled,
     board: row.board_enabled, actions_failures: row.actions_failures_enabled }[feature];
-  if (feature === 'release' || feature === 'gate') return row.registered === false ? 'off' : 'manual';
+  if (feature === 'release' || feature === 'ci_changes') return row.registered === false ? 'off' : 'manual';
   return feature === 'board' ? on ? 'on' : 'off' : active && on ? 'on' : 'off';
 }
 const stateNames = { on: '已开启', off: '未开启', manual: '手动使用时' };
@@ -343,7 +343,7 @@ const removalErrors = {
   repository_deleting: '这个项目正在删除。',
   last_super_admin: '不能删除最后一名活跃的管理员。',
   account_has_projects: '还有项目使用这个账号，请先删除这些项目。',
-  project_account_pending: '项目的虚拟电脑或门禁接入还有未完成的操作，稍后再删除。',
+  project_account_pending: '项目的虚拟电脑还有未完成的操作，稍后再删除。',
 };
 function removalMessage(err) {
   const code = String(err.message).replace(/^\d+\s*·\s*/, '');
@@ -372,7 +372,7 @@ async function restoreInstalled(row, after) {
   try { await api(`/api/installations/${row.id}/restore`, 'POST', {}); notice('message'); } catch (err) { error(err); }
   await after();
 }
-const gateLabels = { none: ['门禁未接入', 'info'], configured: ['门禁已配置', 'warning'], live: ['门禁已生效', 'success'], unknown: ['门禁未知', 'info'] };
+const gateLabels = { none: ['未配置门禁', 'info'], configured: ['门禁已配置', 'warning'], live: ['门禁已生效', 'success'], unknown: ['门禁未知', 'info'] };
 function integrationChip(caption, tone, href, title) {
   if (!href) { const chip = badge(caption, tone); if (title) chip.title = title; return chip; }
   const link = element('a', caption, `status status-${tone} status-link`);
@@ -417,8 +417,7 @@ function installedActions(row, after, { includeSettings = true } = {}) {
     try { await api(`/api/installations/${row.id}/${path}`, 'POST', body); notice('message'); } catch (err) { error(err); }
     await after();
   };
-  // Gate onboarding is a conversation in static/gate-onboarding.js; boards are managed by the list switch.
-  actions.append(button('接入门禁', () => openGateOnboarding(row, after), 'quiet'));
+  // Boards are managed by the list switch.
   if (!row.registered && row.installed) actions.append(button('启动', () => openActivation(row, after), ''));
   // Review has its own switch; this action resumes a disabled project.
   if (row.registered && !row.enabled) actions.append(button('启用', () => call('activate', {}, `正在启用 ${row.full_name}…`), 'quiet'));

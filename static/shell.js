@@ -182,7 +182,6 @@ function syncConsoleShell() {
   $('console-location').hidden = !signedIn;
   if (!signedIn || consoleOwner !== me.id) {
     if (typeof resetTaskCreation === 'function') resetTaskCreation();
-    if (typeof resetGateOnboarding === 'function') resetGateOnboarding();
     if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles();
     if (typeof resetScheduleViews === 'function') resetScheduleViews();
     if (typeof resetBoard === 'function') resetBoard();

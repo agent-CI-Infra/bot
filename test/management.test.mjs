@@ -73,7 +73,7 @@ test('disabled projects save review and development defaults without enabling ex
   assert.equal(h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'waiting_environment');
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,count);
   assert.equal((await admin('/api/repositories/101/policy','PATCH',{enabled:true})).value.policy.enabled,1);
-  assert.deepEqual((await query(admin,'get_effective_config',project)).value.task_creation,{allowed:true,reason:null});
+  assert.deepEqual((await query(admin,'get_effective_config',project)).value.task_creation,{allowed:true,reason:null,workflow_changes:true});
   assert.equal((await admin('/api/repositories/101/policy','PATCH',{enabled:false})).value.policy.enabled,0);
 });
 

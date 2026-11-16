@@ -13,6 +13,15 @@ import { requestedTask,workOf } from '../work/catalog.js';
 import { workEnabled } from '../work/settings.js';
 import { stopAboveCeiling } from '../work/ceiling.js';
 
+/** Whether a person confirmed that this development may change .github/workflows/ (set only when the task is created). */
+export const workflowChanges = (task: Row) => !!JSON.parse(task.input||'{}').workflow_changes?.confirmed_by;
+/**
+ * The token a task's pull request is published with. Only a development a project administrator confirmed as a CI change
+ * (#931) asks for Workflows, and gets it only where the installation grants it; every other push lacks it, so GitHub
+ * refuses a branch that changes .github/workflows/. undefined is the usual development token.
+ */
+export const pullRequestPermissions = (task: Row): Record<string, string> | undefined =>
+  workflowChanges(task) ? { contents: 'write', issues: 'write', pull_requests: 'write', workflows: 'write' } : undefined;
 export const softwareRequest = (task: Row) => requestedTask(task) && JSON.parse(task.input||'{}').contract?.endpoint==='reviewable_pull_request';
 /** A delivery endpoint does not lend file/PR authority to an ordinary report or a delegated executor. */
 export function assertRequestPullRequest(store: Store, task: Row): void {
@@ -50,7 +59,7 @@ export async function publishRequestPullRequest(store: Store, task: Row, redacto
   const repo=store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!,github=new GitHub(store,repo,redactor,validate,apiUrl);github.purpose='pull_request';
   github.beforeWrite=check;
   try{
-    await github.connect(true);
+    await github.connect(true,undefined,pullRequestPermissions(task));
     const candidate=JSON.parse(store.get('SELECT data FROM development_candidates WHERE task_id=?',task.id)!.data);
     const publisher=new Publisher(store,github,task,validate,undefined,log),commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
     await validate();

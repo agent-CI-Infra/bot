@@ -28,7 +28,7 @@ const legacyItems: PermissionItem[] = [
   action('delegation', '委派角色', ['delegate_role', 'delegate_roles'], '将工作委派给已配置并启用的角色。'),
   action('subagents', '启动独立执行会话', ['start_agent'], '启动工具范围不超过当前角色的独立会话。'),
   action('nomination', '交付提名与任务协调', ['nominate_delivery','finish_coordination','submit_followup_plan','submit_retry_decision','set_task_priority','relate_task'], '将候选交给独立 QA，按事实判级或关联任务；不等于通过验收，也不授予 GitHub 写权限。'),
-  action('submission', '提交角色结果', ['submit_role_result', 'submit_delivery', 'finish', 'finish_review', 'finish_analysis', 'finish_observation', 'finish_release_notes', 'submit_gate_plan'], '提交当前任务入口要求的结构化结果。'),
+  action('submission', '提交角色结果', ['submit_role_result', 'submit_delivery', 'finish', 'finish_review', 'finish_analysis', 'finish_observation', 'finish_release_notes'], '提交当前任务入口要求的结构化结果。'),
   action('acceptance', '提交独立验收', ['submit_acceptance'], '仅独立验收入口提供此工具。'),
   action('pull_request', '创建或更新 bot PR', ['create_pull_request'], '请求控制面发布本次任务允许的 PR，仍须通过项目验证和 QA。'),
   action('issues', '提报 Issue', ['create_issue', 'report_failure'], '请求控制面提交本次任务允许的 Issue。'),
@@ -42,7 +42,7 @@ export const basicTools = ['read_tool_result','read_child_tasks','wait_for_child
   'search_role_memory','read_role_memory','remember_role_memory','read_skill','read_related_artifact',
   'read_coordination','acknowledge_coordination','read_stage_schedule','plan_task','start_agent','dispatch',
   'nominate_delivery','finish_coordination','submit_followup_plan','submit_retry_decision','submit_role_result','submit_delivery','finish','finish_review',
-  'finish_analysis','finish_observation','finish_release_notes','submit_gate_plan','submit_acceptance',
+  'finish_analysis','finish_observation','finish_release_notes','submit_acceptance',
   // Framework deliveries (#381): a tested PR from the task's candidate, Actions reruns and failure reports. The work type's
   // writes decide whether a task offers them; the executing role needs no GitHub write for them.
   'create_pull_request','publish_candidate','rerun_failed_run','report_failure',
