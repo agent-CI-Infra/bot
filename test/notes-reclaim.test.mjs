@@ -125,3 +125,44 @@ test('a second failed deletion of the same repository is a new intent even when 
   assert.deepEqual(reclaim.notesOrphanIntents(h.store), [{ repository_id: '101', first_failed_at: '2026-01-02T00:00:00.000Z' }],
     'only the failure no later reclaim answers is an open intent');
 });
+
+test('a manager that cannot list notes volumes leaves the maintenance listing at the durable intents', async t => {
+  const f = await managerFixture(t), h = await harness(t, f.manager), { admin } = await project(h, f);
+  f.docker.failVolume = true;
+  assert.equal((await remove(admin, '101')).status, 200, 'the deletion commits and records what it could not remove');
+  const name = f.projects.notesName('101');
+  assert.ok(f.docker.volumes.has(name), 'the volume stays behind');
+  const { HttpError } = await import('../dist/core/security.js');
+  const real = h.projects.notesVolumes.bind(h.projects);
+  t.after(() => { h.projects.notesVolumes = real; });
+  // docs/api.md promises the audit intents and the report when the manager cannot be read; the listing must not turn
+  // that into a 503 of its own.
+  for (const failure of [
+    () => { throw new HttpError(503, 'docker_operation_failed'); },
+    async () => null,
+  ]) {
+    h.projects.notesVolumes = failure;
+    const listed = await admin('/api/maintenance/orphans');
+    assert.equal(listed.status, 200, 'the listing still answers');
+    assert.deepEqual(listed.value.notes_volumes.map(orphan => orphan.repository_id), ['101'], 'the durable intent is listed instead');
+    assert.equal(listed.value.notes_volumes[0].name, '', 'the volume name is unknown without the manager');
+    assert.equal(typeof listed.value.notes_volumes[0].first_failed_at, 'string', 'the intent keeps its age');
+    assert.equal(listed.value.report.orphans, 1, 'the report counts exactly what the listing shows');
+  }
+  h.projects.notesVolumes = real;
+  const listed = await admin('/api/maintenance/orphans');
+  assert.equal(listed.status, 200);
+  assert.equal(listed.value.notes_volumes[0].name, name, 'the manager names the volume again once it answers');
+});
+
+test('the notes-volume list reads a bare array and a volumes envelope, and refuses an answer it cannot read', async t => {
+  const f = await managerFixture(t), h = await harness(t, f.manager);
+  const { ProjectService } = await import('../dist/projects/service.js');
+  const volume = { name: 'dbot-1-101-notes', repository_id: '101', created_at: null };
+  const service = answer => new ProjectService(h.store, { call: async () => answer });
+  assert.deepEqual(await service([volume]).notesVolumes(), [volume], 'a bare array is the manager answer today');
+  assert.deepEqual(await service({ volumes: [volume] }).notesVolumes(), [volume], 'an envelope is read the same way');
+  for (const unreadable of [null, { volumes: 'nope' }, undefined])
+    await assert.rejects(service(unreadable).notesVolumes(), { status: 503, code: 'manager_notes_volumes_unavailable' },
+      'an answer without a volume list is unreadable, not an empty list');
+});
