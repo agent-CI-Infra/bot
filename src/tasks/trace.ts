@@ -55,7 +55,7 @@ export function traceStorage(store:Store){
     kind TEXT NOT NULL,attempt INTEGER NOT NULL,revision INTEGER NOT NULL,candidate_id TEXT,parent_run_id TEXT,previous_run_id TEXT,
     started_at TEXT NOT NULL,ended_at TEXT,status TEXT NOT NULL,stop_reason TEXT,context_snapshot TEXT NOT NULL,config_snapshot TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS task_run_task ON task_runs(task_id,started_at,id);`);
-  for(const [table,columns] of Object.entries({task_history:{run_id:'TEXT',actor:"TEXT NOT NULL DEFAULT 'legacy_unknown'",source_ref:'TEXT',caused_by:"TEXT NOT NULL DEFAULT '[]'",schema_version:'INTEGER NOT NULL DEFAULT 1'},model_requests:{run_id:'TEXT',request_snapshot:'TEXT',response_snapshot:'TEXT'},task_logs:{run_id:'TEXT',role:'TEXT'}})){
+  for(const [table,columns] of Object.entries({task_history:{run_id:'TEXT',actor:"TEXT NOT NULL DEFAULT 'legacy_unknown'",source_ref:'TEXT',caused_by:"TEXT NOT NULL DEFAULT '[]'",schema_version:'INTEGER NOT NULL DEFAULT 1'},model_requests:{run_id:'TEXT',request_snapshot:'TEXT',response_snapshot:'TEXT'}})){
     const existing=new Set(store.all(`PRAGMA table_info(${table})`).map(r=>r.name));
     for(const [name,type] of Object.entries(columns))if(!existing.has(name))store.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
   }

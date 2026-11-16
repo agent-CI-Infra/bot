@@ -65,7 +65,7 @@ export function attributeControllerQueuedRole(task: Row, config: RoleConfigurati
     target = entryEnabled(config, 'review') ? config.controller.role : 'dev';
   } else if (kind === 'actions.failures') {
     target = entryEnabled(config, 'actions') ? config.controller.role : 'dev';
-  } else if (kind.startsWith('workflow.')) {
+  } else if (kind.startsWith('workflow.') || kind === 'release.observe' || kind === 'release.notes') {
     target = 'dev';
   }
   return target && enabled.has(target) ? target : null;
@@ -651,10 +651,24 @@ export function taskRoleTrace(store: Store, task: Record<string, any>, access?: 
   }
 
   const historyRows = store.hasTable('task_history')
-    ? store.all(`SELECT id,task_id,type,run_id,created_at,CASE WHEN length(data)<=65536 THEN data END AS data
-        FROM task_history WHERE task_id=?
-        AND type IN ('role_result','role_handoff','delivery_nominated','manager_disposition','acceptance','acceptance_evaluated','tool_started','tool_observation','role_run_event')
-        ORDER BY id ASC`, taskId)
+    ? (() => {
+        const structural = store.all(
+          `SELECT id,task_id,type,run_id,created_at,CASE WHEN length(data)<=65536 THEN data END AS data
+           FROM task_history WHERE task_id=?
+           AND type IN ('role_result','role_handoff','delivery_nominated','manager_disposition','acceptance','acceptance_evaluated')
+           ORDER BY id ASC`,
+          taskId,
+        );
+        const stepRows = store.all(
+          `SELECT id,task_id,type,run_id,created_at,CASE WHEN length(data)<=65536 THEN data END AS data
+           FROM task_history WHERE task_id=?
+           AND type IN ('tool_started','tool_observation','role_run_event')
+           ORDER BY id DESC LIMIT 500`,
+          taskId,
+        );
+        stepRows.reverse();
+        return [...structural, ...stepRows].sort((a, b) => Number(a.id) - Number(b.id));
+      })()
     : [];
 
   const origin = store.hasTable('task_origins')

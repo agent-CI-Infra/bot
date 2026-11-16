@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Row, Store } from './database.js';
 import type { Manager } from '../projects/service.js';
 import { fail, type Json } from '../core/security.js';
+import { pruneCommitChecks } from '../tasks/external-links.js';
 
 // Cleanup by days (#671). One set of settings for what the bot keeps and for how long, saved in settings.storage_retention
 // by platform administrators (audited) and applied by a daily background job in bounded batches. A cleanup removes
@@ -138,6 +139,7 @@ export class RetentionCleanup {
     const started = new Date(this.now()).toISOString(), settings = retentionSettings(this.store);
     const manager = await this.syncManager(settings.manager_payload_days);
     const trajectories = await this.trajectories(settings), deliveries = await this.deliveries(settings.webhook_payload_days);
+    try { pruneCommitChecks(this.store, 30 * day, this.now()); } catch (error) { this.failure('commit_checks', error); }
     if (this.stopped) return {};
     return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, manager_window: manager, last_error: this.lastError });
   }

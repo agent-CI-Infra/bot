@@ -196,9 +196,13 @@ function installedBadges(row) {
 const permissionNames = { contents: 'Contents', issues: 'Issues', pull_requests: 'Pull requests', statuses: 'Commit statuses', actions: 'Actions', checks: 'Checks', metadata: 'Metadata', workflows: 'Workflows' };
 // What GitHub needs before an event can be ticked. Workflow run is easy to mistake for the Workflows permission, which
 // only lets an App edit .github/workflows files (a confirmed CI change PR needs it, Actions failure analysis does not).
-const eventPermissionNotes = { workflow_run: '这是事件订阅，不是 Workflows 权限：GitHub 只要求 App 至少有 Actions「Read-only」，不需要 Workflows；App 没有 Actions 权限时这个选项不会出现，先补 Actions。' };
+const eventPermissionNotes = {
+  workflow_run: '这是事件订阅，不是 Workflows 权限：GitHub 只要求 App 至少有 Actions「Read-only」，不需要 Workflows；App 没有 Actions 权限时这个选项不会出现，先补 Actions。',
+  check_run: 'GitHub 要求 App 至少有 Checks「Read-only」权限。',
+  status: 'GitHub 要求 App 至少有 Commit statuses「Read-only」权限。',
+};
 // GitHub's names for the webhook events under Permissions & events → Subscribe to events.
-const eventNames = { issues: 'Issues', pull_request: 'Pull request', issue_comment: 'Issue comment', pull_request_review: 'Pull request review', pull_request_review_comment: 'Pull request review comment', workflow_run: 'Workflow run' };
+const eventNames = { issues: 'Issues', pull_request: 'Pull request', issue_comment: 'Issue comment', pull_request_review: 'Pull request review', pull_request_review_comment: 'Pull request review comment', check_run: 'Check run', status: 'Status', workflow_run: 'Workflow run' };
 const accessNames = { read: 'Read-only', write: 'Read and write', admin: 'Admin' }, roleNames = { read: 'Read', triage: 'Triage', write: 'Write' };
 // Access gaps (access_gaps) name the features they stop; src/app/access.ts holds what each feature needs.
 const featureNames = { review: '检视', review_threads: '关闭已修复的行内意见', development: '开发', ci_reads: '任务读取 CI 结果', board: '看板', release: '发版本', ci_changes: '经确认的 CI 改动', actions_failures: 'Actions 失败分析' };
@@ -212,6 +216,8 @@ const eventImpact = {
   issues: '新 Issue 不检视，编辑后不重新检视，加开发标签不会开始开发，关闭后相关任务不会自动取消',
   issue_comment: 'Issue 和 PR 下的评论不会触发检视跟进', pull_request: 'PR 打开、转为可检视、推送新提交或编辑后不检视，关闭后相关任务不会自动取消',
   pull_request_review: '提交 PR 检视意见后不会触发跟进', pull_request_review_comment: 'PR 行内评论和回复不会触发跟进',
+  check_run: '控制台任务列表与详情收不到实时的 GitHub Actions 作业检查推送',
+  status: '控制台任务列表与详情收不到实时的提交状态检查推送',
   workflow_run: 'Actions 失败分析在读取运行之前停止：不分类、不重跑、不提报 Issue',
 };
 const gapLabels = { permission: '权限不足', role: '权限不足', event: '事件未订阅', account: '需要 GitHub App' };

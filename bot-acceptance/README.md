@@ -28,7 +28,7 @@
 | `ACCEPTANCE_BOT_URL` | bootstrap | 本机控制台地址，默认 `http://127.0.0.1:8791` |
 | `ACCEPTANCE_PUBLIC_ORIGIN` | bootstrap | GitHub 投递 Webhook 的 HTTPS 入口 |
 | `ACCEPTANCE_TUNNEL_TOKEN` | bootstrap | 命名隧道的 token；快速隧道不需要 |
-| `ACCEPTANCE_APP_ID`、`ACCEPTANCE_APP_PRIVATE_KEY`、`ACCEPTANCE_APP_WEBHOOK_SECRET` | bootstrap | 验收专用 App `bot-acceptance`。它要有 Workflows 写权限（门禁接入要提交 workflow）并订阅 Workflow run（Actions 失败处理），缺了初始化会直接停下并写明缺什么 |
+| `ACCEPTANCE_APP_ID`、`ACCEPTANCE_APP_PRIVATE_KEY`、`ACCEPTANCE_APP_WEBHOOK_SECRET` | bootstrap | 验收专用 App `bot-acceptance`。它要有 Workflows 写权限（门禁接入要提交 workflow）并订阅 Check run、Status（检查状态展示）和 Workflow run（Actions 失败处理），缺了初始化会直接停下并写明缺什么 |
 | `ACCEPTANCE_BOT_MODEL_URL`、`ACCEPTANCE_BOT_MODEL_NAME`、`ACCEPTANCE_BOT_MODEL_API_KEY` | bootstrap | 被测 Bot 用的模型，登记为部署共享模型 |
 | `ACCEPTANCE_ENVIRONMENT_TIMEOUT_MINUTES` | bootstrap | 第一次启动项目电脑最多等多久，默认 20 |
 

@@ -70,7 +70,8 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
   const runs=s.all("SELECT id,kind,status,started_at,ended_at,stop_reason,role,role_instance_id,assignment_id,role_snapshot,role_version,harness,harness_version,cli_version,recovery_mode,lease_scope,lease_epoch,resume_from_run_id,protocol_recovery,run_context,admission FROM task_runs WHERE task_id=? AND role IS NOT NULL ORDER BY rowid",task[1]!).map(r=>({...r,run_context:r.run_context?JSON.parse(String(r.run_context)):null,admission:r.admission?JSON.parse(String(r.admission)):null}) as Record<string,any>);
   const ids=[...new Set([...instances.map(i=>i.snapshot_id),...runs.map(r=>r.role_snapshot)].filter(Boolean))];
   const snapshots=Object.fromEntries(ids.map(id=>[id,JSON.parse(s.get('SELECT snapshot FROM role_snapshots WHERE id=?',id)?.snapshot??'null')]));
-  const trace=taskRoleTrace(s,{...taskRow!,result:taskRow!.result?JSON.parse(String(taskRow!.result)):null},user.context?{actor:user.context}:undefined);
+  const includeTrace = after === 0 && url.searchParams.get('trace') === '1';
+  const trace = includeTrace ? taskRoleTrace(s,{...taskRow!,result:taskRow!.result?JSON.parse(String(taskRow!.result)):null},user.context?{actor:user.context}:undefined) : {};
   return {instances,assignments,runs,snapshots,...trace,stage_schedule:stageTimeline(s,task[1]!),next_after:more?assignments.at(-1)!.sequence:null};}
 }
 export async function roleProbeApi(s:Store,user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{

@@ -20,9 +20,9 @@ export const FIXTURE = 'agent-CI-Infra/bot-acceptance-fixture';
 // The project settings every run starts from (playbook section 3).
 export const BASELINE_POLICY = { review_enabled: true, development_enabled: true, actions_failures_enabled: true,
   test_command: 'sh scripts/test.sh', task_concurrency: 3 };
-// What the scenarios need from the App beyond the bot's own permission check: gate onboarding commits workflows (S8, R1)
-// and Actions failure handling listens to workflow_run (S7).
-export const SCENARIO_NEEDS = { permissions: { workflows: 'write', actions: 'write' }, events: ['workflow_run'] };
+// What the scenarios need from the App beyond the bot's own permission check: gate onboarding commits workflows (S8, R1),
+// CI check display listens to check_run and status, and Actions failure handling listens to workflow_run (S7).
+export const SCENARIO_NEEDS = { permissions: { workflows: 'write', actions: 'write' }, events: ['check_run', 'status', 'workflow_run'] };
 
 const secret = () => randomBytes(24).toString('base64url');
 const same = (a, b) => a.toLowerCase() === b.toLowerCase();

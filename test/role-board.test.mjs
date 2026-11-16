@@ -260,6 +260,7 @@ test('默认主控模式下按真实入口归属排队任务，并展示 #283 ro
   const insert = h.store.db.prepare('INSERT INTO tasks(id,repository_id,kind,phase,status,error_code,summary,object_number,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)');
   insert.run('q-mgr', '101', 'development.issue', 'queued', 'queued', null, '重构任务详情页', 952, '2026-11-16T08:00:00Z', '2026-11-16T08:00:00Z');
   insert.run('q-qa', '101', 'development.issue', 'acceptance', 'queued', null, '等待独立验收', 951, '2026-11-16T08:01:00Z', '2026-11-16T08:01:00Z');
+  insert.run('q-rel', '101', 'release.notes', 'queued', 'queued', null, '发行说明 v1.2.0', null, '2026-11-16T08:01:30Z', '2026-11-16T08:01:30Z');
   insert.run('q-cap', '101', 'development.issue', 'model', 'retry_wait', 'role_capacity', '修复权限矩阵', 944, '2026-11-16T07:50:00Z', '2026-11-16T08:02:00Z');
   h.store.run("INSERT INTO task_history(task_id,type,data,created_at) VALUES('q-cap','role_run_admission',?,'2026-11-16T08:02:00Z')", JSON.stringify({ role: 'dev', kind: 'writer' }));
   insert.run('r-work', '101', 'development.issue', 'model', 'running', null, '流转框图开发', 950, '2026-11-16T07:40:00Z', '2026-11-16T08:03:00Z');
@@ -268,12 +269,17 @@ test('默认主控模式下按真实入口归属排队任务，并展示 #283 ro
 
   const view = (await board(admin)).value;
   assert.deepEqual(view.unsupported, []);
+  // `queued_tasks` counts `status='queued'` (3: q-mgr, q-qa, q-rel), aligned with GET /api/tasks?summary=1;
+  // `capacity_waiting_tasks` counts `retry_wait/role_capacity` (1: q-cap) separately.
+  assert.equal(view.project.queued_tasks, 3);
+  assert.equal(view.project.capacity_waiting_tasks, 1);
+  assert.equal(view.project.unattributed_queued, undefined);
   const manager = view.roles.find(r => r.role === 'manager');
   const dev = view.roles.find(r => r.role === 'dev');
   const qa = view.roles.find(r => r.role === 'qa');
   assert.deepEqual(manager.ready.map(e => [e.task_id, e.queue_reason]), [['q-mgr', 'queued']]);
   assert.deepEqual(qa.ready.map(e => [e.task_id, e.queue_reason]), [['q-qa', 'queued']]);
-  assert.deepEqual(dev.ready.map(e => [e.task_id, e.queue_reason]), [['q-cap', 'role_capacity']]);
+  assert.deepEqual(dev.ready.map(e => [e.task_id, e.queue_reason]), [['q-cap', 'role_capacity'], ['q-rel', 'queued']]);
   assert.equal(manager.running[0].delegated_active, true);
   assert.equal(dev.running[0].delegated_active, false);
 });

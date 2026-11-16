@@ -120,6 +120,7 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
 
   const attribution = new Map<string, string>();
   let unsupported: string[] = [];
+  let unattributedQueued = 0;
   if (stages.length > 0) {
     const ambiguous = eligible.filter(task => {
       const stage = nextStage(store, task.id, stages);
@@ -134,6 +135,7 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
     for (const task of eligible) {
       const target = attributeControllerQueuedRole(task, config, origins.get(String(task.id)) ?? null);
       if (target) attribution.set(String(task.id), target);
+      else unattributedQueued++;
     }
   }
 
@@ -249,7 +251,8 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
   const counts = store.get(
     `SELECT
        COALESCE(SUM(CASE WHEN ${taskGroupSQL.active} THEN 1 ELSE 0 END),0) AS running_tasks,
-       COALESCE(SUM(CASE WHEN ${taskGroupSQL.queued} OR (status='retry_wait' AND error_code='role_capacity') THEN 1 ELSE 0 END),0) AS queued_tasks
+       COALESCE(SUM(CASE WHEN ${taskGroupSQL.queued} THEN 1 ELSE 0 END),0) AS queued_tasks,
+       COALESCE(SUM(CASE WHEN status='retry_wait' AND error_code='role_capacity' THEN 1 ELSE 0 END),0) AS capacity_waiting_tasks
      FROM tasks WHERE repository_id=?`,
     repositoryId,
   );
@@ -269,6 +272,8 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
       task_concurrency_default: defaultConcurrency(store),
       running_tasks: Number(counts?.running_tasks ?? 0),
       queued_tasks: Number(counts?.queued_tasks ?? 0),
+      capacity_waiting_tasks: Number(counts?.capacity_waiting_tasks ?? 0),
+      ...(unattributedQueued > 0 ? { unattributed_queued: unattributedQueued } : {}),
     },
     unsupported,
     roles,

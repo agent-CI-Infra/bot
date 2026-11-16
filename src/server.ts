@@ -8,6 +8,7 @@ import { actor, publicActor, session, sessionToken, superAdmin } from './app/aut
 import { management } from './app/management.js';
 import { models } from './app/models.js';
 import { queries } from './app/queries.js';
+import { taskChecksApi } from './tasks/external-links.js';
 import { boardApi } from './board/api.js';
 import { costsApi } from './metrics/api.js';
 import { ingest } from './app/webhook.js';
@@ -456,7 +457,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     guard();
     if (path === '/api/agent-tools/install') res.setTimeout(300_000);
     const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await agentToolsApi(store,agentTools,user,method,path,input) ?? await assistantComputersApi(assistants,user,method,path) ?? await storage.api(user,method,path,input) ?? serviceRolesApi(store,user,method,path,input) ?? trustedOrganizationsApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input,options.githubUrl) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? retiredApi(url) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
-      ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
+      ?? await taskChecksApi(store, user, method, url, options.githubUrl) ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.
     const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/(?:restore|board))?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|knowledge-files|knowledge-directories|releases|roles\/(?:resolve|probe-model))(?:\/.*)?$/.test(path);

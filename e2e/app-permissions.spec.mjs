@@ -9,8 +9,8 @@ import { InstallationSync } from '../dist/app/installations.js';
 test('App 定义只在机器人账号检查，各功能的安装权限和事件缺口在项目行、缺口对话框与同步结论中显示', async ({ page }) => {
   const full = { contents: 'write', issues: 'write', pull_requests: 'write', statuses: 'write', actions: 'write', checks: 'write', metadata: 'read' };
   const events = ['issues', 'pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment'];
-  // Gate onboarding also needs workflows, and Actions failure analysis workflow_run.
-  const everything = { ...full, workflows: 'write' }, allEvents = [...events, 'workflow_run'];
+  // Gate onboarding also needs workflows, CI status display check_run/status, and Actions failure analysis workflow_run.
+  const everything = { ...full, workflows: 'write' }, allEvents = [...events, 'check_run', 'status', 'workflow_run'];
   const app = { slug: 'fixture-app', html_url: 'https://github.com/apps/fixture-app', owner: { login: 'fixture', type: 'Organization' },
     permissions: { ...full, statuses: 'read', actions: undefined }, events: ['issues', 'pull_request'] };
   const installations = [{ id: 7, account: { id: 10, login: 'fixture', type: 'Organization' }, repository_selection: 'all',
@@ -80,12 +80,13 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     // Every gap opens with what is missing, how to fix it and what it stops, including features that are off.
     await chip('101').click();
     const gapsView = page.locator('dialog.access-dialog'), items = gapsView.locator('.access-gaps > li');
-    await expect(gapsView.getByRole('heading', { name: '权限与事件缺口 · fixture/project-101' })).toBeVisible(); await expect(items).toHaveCount(5);
+    await expect(gapsView.getByRole('heading', { name: '权限与事件缺口 · fixture/project-101' })).toBeVisible(); await expect(items).toHaveCount(7);
     await expect(items.nth(1)).toContainText('Workflows 需要「Read and write」，现在「No access」');
     await expect(items.nth(1)).toContainText('把 Workflows 设为「Read and write」并保存；新增权限要由安装所有者（fixture）在 GitHub 的安装设置里接受');
     await expect(items.nth(1)).toContainText('经确认的 CI 改动（手动使用时）：推不了改动 .github/workflows 的 bot 分支，这类 PR 开不出来');
-    await expect(items.nth(4)).toContainText('Actions 失败分析在读取运行之前停止：不分类、不重跑、不提报 Issue。涉及：Actions 失败分析（未开启）');
-    await expect(items.nth(4)).toContainText('勾选 Workflow run 并保存。这是事件订阅，不是 Workflows 权限');
+    await expect(items.nth(4)).toContainText('未订阅事件 Check run');
+    await expect(items.nth(6)).toContainText('Actions 失败分析在读取运行之前停止：不分类、不重跑、不提报 Issue。涉及：Actions 失败分析（未开启）');
+    await expect(items.nth(6)).toContainText('勾选 Workflow run 并保存。这是事件订阅，不是 Workflows 权限');
     for (const [width, height] of [[1365, 900], [1440, 900], [390, 844]]) {
       await page.setViewportSize({ width, height });
       await page.screenshot({ path: `.tmp/app-permissions/gaps-dialog-${width}.png` });
@@ -105,7 +106,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await expect(message.locator('span')).toHaveClass('view-success');
     await expect(chip('101')).toBeHidden(); await expect(chip('202')).toBeHidden();
     // Without workflow_run both rows are flagged; switching the feature on only raises that row from blue to amber.
-    installations[0].events = events;
+    installations[0].events = [...events, 'check_run', 'status'];
     expect((await admin('/api/repositories/101/policy', 'PATCH', { actions_failures_enabled: true })).status).toBe(200);
     await sync.click(); await expect(message).toContainText('未订阅事件 Workflow run（影响 Actions 失败分析）');
     await expect(chip('101')).toHaveText('事件未订阅'); await expect(chip('101')).toHaveClass(/status-warning/);
