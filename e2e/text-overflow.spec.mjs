@@ -46,6 +46,7 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => announcedPage)).toBe('page:projects');
     // After #481, 390 hides the inline 退出登录 and puts it in the account menu; the control itself must stay on-screen.
     const accountBtn = page.locator('#console-account');
     await expect(accountBtn).toBeVisible();
