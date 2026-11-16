@@ -21,7 +21,7 @@ function agentToolsVolumeNodes(status) {
     ['容器内路径', status.container_root || '—'],
     ['架构', status.arch || '读不到架构'],
     ['Node 运行时', (status.node_versions || []).join('、') || '未安装'],
-    ['保留版本数', `保留版本数 ${status.retain_count}（允许 ${bounds[0]}–${bounds[1]}）`],
+    ['保留版本数', `${status.retain_count}（允许 ${bounds[0]}–${bounds[1]}）`],
   ])];
   // An unmounted volume or an unknown architecture makes every install fail with 503: say how to fix the deployment
   // instead of offering a form that cannot work (#740 review F3).
@@ -44,9 +44,14 @@ function agentToolsCliNodes(view) {
   for (const manifest of manifests) {
     nodes.push(element('p', `${manifest.version} · ${manifest.arch}${manifest.libc ? ' · ' + manifest.libc : ''} · 安装于 ${manifest.installed_at}`, 'muted'));
     const table = costTable(['产物', '来源', 'sha256', '字节']);
+    table.wrap.classList.add('agent-tools-manifest');
     for (const artifact of manifest.artifacts || []) {
+      const source = element('td', artifact.source_url), sha = element('td', artifact.sha256);
+      // A URL and a hash are long single tokens: the table's nowrap rule would otherwise push the hash and the size out
+      // of view at every width, which defeats the point of listing them (#740 review).
+      for (const cell of [source, sha]) { cell.style.whiteSpace = 'normal'; cell.style.overflowWrap = 'anywhere'; }
       const row = document.createElement('tr');
-      row.append(element('td', artifact.role), element('td', artifact.source_url), element('td', artifact.sha256), element('td', `${artifact.bytes} 字节`));
+      row.append(element('td', artifact.role), source, sha, element('td', `${artifact.bytes} 字节`));
       table.body.append(row);
     }
     nodes.push(table.wrap);
@@ -70,9 +75,9 @@ function agentToolsInstallNodes(state, redraw, refresh) {
   const syncNative = () => { if (cli.value === 'claude_code') { if (!nativeField.parentElement) nativeSlot.append(nativeField); } else nativeField.remove(); };
   cli.addEventListener('change', syncNative); syncNative();
   const nodes = [field('CLI', cli), field('精确版本', version), field('SHA-256（可选）', sha256), nativeSlot,
-    field('本次安装后保留的版本数（不改变默认值）', retain),
-    note('这里只保留「本次安装」，不会改变清理表单保存的默认值。'),
-    note('安装时会从官方来源下载并校验 sha256，最长等 300 秒；重装正在运行的版本会替换目录（见 #735）。'),
+    field('本次安装后的保留版本数（安装成功即保存为默认值）', retain),
+    note('安装成功后，这里填的数会存成新的默认值：之后的安装和清理没填这一项时也用它。'),
+    note('安装时会从官方来源下载并校验 sha256，最长等 300 秒。正在运行的任务或角色用着的版本（含 Node 运行时）会被拒绝（agent_tool_version_in_use），工具卷不会被改动。'),
     note('不拉取「最新版本」列表：这里只安装你填写的精确 semver。')];
   const form = actionForm(nodes, '安装', async () => {
     const body = { cli: cli.value, version: version.value.trim() };
@@ -81,7 +86,9 @@ function agentToolsInstallNodes(state, redraw, refresh) {
     if (retain.value !== '') body.retain_count = Number(retain.value);
     const answer = await api('/api/agent-tools/install', 'POST', body);
     // The answer already carries the new status: redraw from it instead of assuming the typed retain count won (#740 F2).
-    state.status = answer.status; refresh(); redraw(`已安装 ${agentToolCliLabel(body.cli)} ${body.version}`);
+    state.status = answer.status; refresh();
+    // An install that carried retain_count also saved it as the default, so say so instead of leaving the admin to wonder.
+    redraw(`已安装 ${agentToolCliLabel(body.cli)} ${body.version}` + (body.retain_count === undefined ? '' : `，保留版本数默认值改为 ${answer.status.retain_count}`));
   });
   if (!status.volume_present || !status.arch) { const submit = form.querySelectorAll('button').find(node => node.type === 'submit'); if (submit) submit.disabled = true; }
   return [form];
@@ -94,13 +101,13 @@ function agentToolsPruneNodes(state, redraw, refresh) {
   for (const name of Object.keys(status.clis || {})) { const option = document.createElement('option'); option.value = name; option.textContent = agentToolCliLabel(name); cli.append(option); }
   const retain = input('retain_count', String(status.retain_count), { type: 'number', min: bounds[0], max: bounds[1], step: 1 });
   const nodes = [field('CLI', cli), field('保留版本数（保存为默认值）', retain),
-    note('只保留最新的这几个版本。正在运行的 task_runs.cli_version 不会被删除；清单读不到的版本也会保留，并在下面单独列出。')];
+    note('只保留最新的这几个版本。正在运行的 task_runs.cli_version 不会被删除；清单读不到的残留平时会被清理，只有正在运行或刚安装的版本仍指向的目录会保留，并在下面单独列出。')];
   const result = state.pruneResult;
   if (result) {
     const lines = [];
     for (const [name, versions] of Object.entries(result.pruned || {})) if (versions && versions.length) lines.push(`已清理 ${agentToolCliLabel(name)} ${versions.join('、')}`);
     if (!lines.length) lines.push('本次没有删除任何版本');
-    for (const [name, versions] of Object.entries(result.protected_invalid || {})) if (versions && versions.length) lines.push(`受保护（正在运行或清单读不到）${agentToolCliLabel(name)} ${versions.join('、')}`);
+    for (const [name, versions] of Object.entries(result.protected_invalid || {})) if (versions && versions.length) lines.push(`受保护且清单读不到（正在运行或刚安装）${agentToolCliLabel(name)} ${versions.join('、')}`);
     const box = element('p', lines.join('；'), 'view-success'); box.setAttribute('role', 'status');
     nodes.unshift(box);
   }

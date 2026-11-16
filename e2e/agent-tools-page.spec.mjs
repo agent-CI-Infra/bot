@@ -49,6 +49,8 @@ test('the tool volume page installs a CLI, reports a refused download and keeps 
     await page.locator('.agent-tools-install button[type="submit"]').click();
     await expect(page.locator('.agent-tools-cli[data-cli="codex"]')).toContainText('当前选用 0.166.0');
     await expect(page.locator('.agent-tools-cli[data-cli="codex"]')).toContainText('0.166.0');
+    // The service saves the typed retain count as the new default, so the success line says so (#740 review F1).
+    await expect(page.locator('.agent-tools-install')).toContainText('保留版本数默认值改为');
 
     // A tampered archive is refused with the service's own answer, and the form keeps what was typed.
     upstream.setTamperClaudeHash(true);
@@ -87,6 +89,11 @@ test('the tool volume page installs a CLI, reports a refused download and keeps 
     }
 
     // A project administrator has no entry, and the API itself refuses them.
+    // The manifest table exists to show the source URL, the hash and the size together: at desktop width the long URL
+    // must not push the last columns out of the table's horizontal scroller (#740 review).
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    const manifestFits = await page.locator('.agent-tools-manifest').first().evaluate(el => el.scrollWidth <= el.clientWidth + 1);
+    expect(manifestFits, 'the manifest table fits all four columns without sideways scrolling at 1440').toBe(true);
     const member = h.client();
     expect((await member('/api/auth/login', 'POST', { username: 'member', password: memberPassword })).status).toBe(200);
     expect((await member('/api/agent-tools')).status).toBe(403);

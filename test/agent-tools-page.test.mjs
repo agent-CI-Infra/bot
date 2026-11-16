@@ -72,9 +72,11 @@ test('the tool volume category shows the volume, each CLI, every manifest and a 
   assert.equal(field('version').value, '');
   assert.ok(field('sha256'), 'an exact download hash can be given');
   assert.ok(field('native_sha256'), 'Claude Code checks its native binary too');
-  assert.match(text(install), /本次安装后保留/);
-  assert.match(text(install), /不改变默认值/);
-  assert.match(text(install), /重装正在运行的版本会替换目录/);
+  // The install form says what the service does with the number typed here (#740 review F1/F2).
+  assert.match(text(install), /安装成功即保存为默认值/);
+  assert.match(text(install), /agent_tool_version_in_use/);
+  assert.doesNotMatch(text(install), /重装正在运行的版本会替换目录/);
+  assert.doesNotMatch(text(section(panel, '工具卷')), /保留版本数\s+保留版本数/);
   select('cli').value = 'codex';
   select('cli').listeners.change[0]({ target: select('cli') });
   assert.equal(section(panel, '安装版本').querySelectorAll('input').find(node => node.name === 'native_sha256'), undefined,
@@ -84,6 +86,9 @@ test('the tool volume category shows the volume, each CLI, every manifest and a 
   assert.deepEqual(prune.querySelectorAll('select').find(node => node.name === 'cli').querySelectorAll('option').map(node => node.value), ['', 'claude_code', 'codex']);
   assert.ok(prune.querySelectorAll('input').find(node => node.name === 'retain_count'));
   assert.match(text(section(panel, '清理旧版本')), /正在运行/);
+  // A directory whose manifest cannot be read is cleared unless a running or just-installed version still points at it,
+  // so the note must not promise that every unreadable version survives (#740 review F3).
+  assert.match(text(section(panel, '清理旧版本')), /清单读不到的残留平时会被清理/);
 });
 
 test('installing a version redraws the page from the status the service answered with', async () => {

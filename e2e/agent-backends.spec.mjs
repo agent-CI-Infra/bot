@@ -77,6 +77,12 @@ test('角色按能力选择 Agent 后端：仅开放 Claude Code 与 Codex 外�
     await goRolePage(page, { role: 'dev' });
     await page.getByRole('combobox', { name: 'dev Agent 后端', exact: true }).selectOption('claude_code');
     await expect(page.getByTestId('backend-runtime-status')).toBeVisible();
+    // #740: a role page whose CLI is unavailable is where a super administrator gets the way into the tool volume.
+    await expect(page.getByTestId('backend-runtime-status')).toContainText('未就绪');
+    const roleToolsLink = page.getByTestId('backend-runtime-status').getByRole('link', { name: '打开工具卷设置' });
+    await expect(roleToolsLink).toBeVisible();
+    await expect(roleToolsLink).toHaveAttribute('href', '#/settings/agent-tools');
+    await expect(page.getByTestId('backend-runtime-status')).toContainText('安装或清理 Claude Code 与 Codex 的版本');
     await consoleSave(page).click();
     await expect(page.locator('#project-page .flash')).toContainText('角色配置已保存');
     const savedSub = (await admin('/api/repositories/101/roles')).value;
@@ -134,6 +140,12 @@ test('角色按能力选择 Agent 后端：仅开放 Claude Code 与 Codex 外�
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByTestId('backend-runtime-status')).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    // #740 review: that entry actually opens the tool volume category, and coming back lands on the same role page.
+    await page.getByTestId('backend-runtime-status').getByRole('link', { name: '打开工具卷设置' }).click();
+    await expect(page).toHaveURL(/#\/settings\/agent-tools$/);
+    await expect(page.getByRole('heading', { name: '工具卷', exact: true })).toBeVisible();
+    await page.goBack();
+    await expect(page.getByTestId('backend-runtime-status')).toBeVisible();
     await goRolePage(page, { role: 'qa' });
     await expect(page.getByRole('combobox', { name: 'qa Agent 后端', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -168,6 +180,10 @@ test('角色按能力选择 Agent 后端：仅开放 Claude Code 与 Codex 外�
       await scrollUnderSticky(readerPage, readerPage.getByTestId('backend-runtime-status'));
       expect(await readerPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await readerPage.screenshot({ path: '.tmp/agent-backends/detail-readonly-390.png' });
+      // #740: a project administrator cannot open the tool volume category, so the same role page names who can install.
+      await readerPage.goto(h.admin + '/#/projects/101/roles/dev');
+      await expect(readerPage.getByTestId('backend-runtime-status')).toContainText('请平台管理员在「全局设置 → Agent CLI 工具卷」中安装兼容版本。');
+      await expect(readerPage.getByTestId('backend-runtime-status').getByRole('link', { name: '打开工具卷设置' })).toHaveCount(0);
     } finally {
       await readerContext.close();
     }
