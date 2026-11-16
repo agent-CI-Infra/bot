@@ -13,6 +13,7 @@ import {capabilityNames} from './protocol.js';
 import {catalog} from './catalog.js';
 import {defaultPermissions} from './permissions.js';
 import {roleConfiguration,saveConfiguration,configurationRevision,resolveRole,modelProfileHash} from './definition.js';
+import {cachedRuleFiles} from '../rules/service.js';
 // A resolve error names the configuration field before "：" in its detail; the API returns it as field.
 const resolveError=(error:unknown):never=>{if(error instanceof TaskError)fail(409,error.code,/^(roles\.[^：]+)：/.exec(error.detail??'')?.[1]);throw error;};
 const host=(url:string)=>{try{return new URL(url).host;}catch{return null;}};
@@ -32,7 +33,7 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
    const current=roleConfiguration(s,repo),workflow=url.searchParams.get('workflow')||'development.issue';
    const models=s.all(`SELECT m.id,m.model_name,m.api_url,m.version,m.updated_at,m.repository_id FROM models m WHERE m.api_key IS NOT NULL AND (m.repository_id=? OR (m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))) ORDER BY m.model_name,m.id`,repo,repo)
     .map(m=>({id:m.id,name:m.model_name,host:host(m.api_url),version:m.version,profile_hash:modelProfileHash(m),shared:m.repository_id==null,connectivity:modelConnectivity(s,repo,m)}));
-   const source=s.hasTable('repository_rule_sources')?s.get('SELECT sha,files FROM repository_rule_sources WHERE repository_id=?',repo):undefined;
+   const source=cachedRuleFiles(s,repo);
    const preview=current.roles.filter(r=>r.enabled).map(r=>{try{const {id,snapshot}=resolveRole(s,repo,r.role_id,workflow,{persist:false});return {role:r.role_id,snapshot_id:id,model:snapshot.model,harness:snapshot.harness,skills:snapshot.skills&&{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash}};}catch(error){if(error instanceof TaskError)return {role:r.role_id,error:error.code,detail:error.detail??null};throw error;}});
    // The editable sources of the current bundles, so a console edit can resave them unchanged.
    const skill_inputs=current.skills.map(b=>{const row=s.get('SELECT source,files FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?',repo,b.id,b.revision),source=JSON.parse(row?.source??'{}'),files=JSON.parse(row?.files??'[]');
@@ -45,7 +46,7 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
     // whole, so it stays as small as that.
     permission_defaults:Object.fromEntries(current.roles.filter(r=>!builtIn.some(b=>b.role_id===r.role_id)).map(r=>[r.role_id,defaultPermissions(r.role_id,r.kind)])),
     role_defaults:{observer:{kind:'observer',permissions:defaultPermissions('observer','observer'),environment_profile_ref:{id:'candidate-checkout'},output_schema_ref:{id:'role-findings'}},...Object.fromEntries(builtIn.map(({role_id,kind,permissions,environment_profile_ref,output_schema_ref})=>[role_id,{kind,permissions,environment_profile_ref,output_schema_ref}]))},stage_capabilities:capabilityNames.map(id=>({id,name:({fixed_candidate_read:'读取固定候选',raw_evidence:'提供原始证据',run_isolation:'运行隔离',cancel:'可中断',version_binding:'绑定执行版本',output_validation:'校验输出',fresh_context:'全新上下文'})[id]})),harnesses,backends:agentBackends(s,repo,undefined,workflow),recommended_backend:recommendedBackend,...catalog(),models,skill_inputs,
-    skill_sources:{repository:source?{commit:source.sha,paths:Object.keys(JSON.parse(source.files)).filter(p=>p.startsWith('.agents/skills/'))}:null},
+    skill_sources:{repository:source?{commit:source.sha,paths:Object.keys(source.files).filter(p=>p.startsWith('.agents/skills/'))}:null},
     revisions:s.all('SELECT revision,hash,actor,created_at FROM role_config_revisions WHERE repository_id=? ORDER BY revision DESC LIMIT 20',repo)};
   }
   if(method==='PUT'){const saved=saveConfiguration(s,repo,input,user.id);s.audit(user.id,'roles.configure',String(saved.revision),repo);return {ok:true,configuration:saved};}

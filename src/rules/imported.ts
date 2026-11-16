@@ -26,6 +26,8 @@ const terminal = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'supersede
 
 export function importBotRules(store: Store): void {
   store.db.exec('CREATE TABLE IF NOT EXISTS rule_imports(repository_id TEXT PRIMARY KEY,sha TEXT,imported_at TEXT,pending INTEGER NOT NULL DEFAULT 0,report TEXT NOT NULL,computer TEXT)');
+  // A database a pre-release build of #935 created has the table without the computer column.
+  if (!store.all('PRAGMA table_info(rule_imports)').some(row => row.name === 'computer')) store.db.exec('ALTER TABLE rule_imports ADD COLUMN computer TEXT');
   if (store.get("SELECT 1 FROM settings WHERE key='rules.bot_imported'")) return;
   store.transaction(() => {
     for (const policy of store.all('SELECT repository_id FROM policies')) {
@@ -42,7 +44,7 @@ export function importBotRules(store: Store): void {
 export function importedComputer(store: Store, repositoryId: string): Record<string, unknown> | null {
   if (!store.hasTable('rule_imports')) return null;
   const row = store.get('SELECT computer FROM rule_imports WHERE repository_id=? AND computer IS NOT NULL', repositoryId);
-  return row ? JSON.parse(String(row.computer)) : null;
+  try { const value = row ? JSON.parse(String(row.computer)) : null; return value && typeof value === 'object' && !Array.isArray(value) ? value : null; } catch { return null; }
 }
 
 export function importPending(store: Store, repositoryId: string): boolean {
@@ -70,10 +72,11 @@ function importFiles(store: Store, id: string, sha: string, filesJson: string) {
   }
   // What the repository still has is listed by name only.
   const cached = store.get('SELECT files FROM repository_rule_sources WHERE repository_id=?', id);
-  // A cache that cannot be read stays as it is (it is refreshed by the next read of the branch); the report says so.
+  // A cache that cannot be read is dropped: the project reads as not yet read, and the next task or refresh reads the
+  // branch again. The report says so.
   if (cached) {
     try { store.run('UPDATE repository_rule_sources SET files=? WHERE repository_id=?', JSON.stringify(Object.fromEntries(Object.entries(JSON.parse(cached.files) as Record<string, string>).map(([path, content]) => [path, retiredPath(path) ? '' : content]))), id); }
-    catch { report.warnings.push('缓存的仓库文件无法读取，保留原样，下次读取默认分支时更新'); }
+    catch { store.run('DELETE FROM repository_rule_sources WHERE repository_id=?', id); report.warnings.push('缓存的仓库文件无法读取，已清除，下次读取默认分支时重新获取'); }
   }
   store.run('INSERT INTO rule_imports VALUES(?,?,?,0,?,?) ON CONFLICT(repository_id) DO UPDATE SET sha=excluded.sha,imported_at=excluded.imported_at,pending=0,report=excluded.report,computer=excluded.computer',
     id, sha, new Date().toISOString(), JSON.stringify(report), computer ? JSON.stringify(computer) : null);

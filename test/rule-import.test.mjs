@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { harness, setup, account, repository } from './helpers.mjs';
 import { RuleService, projectLabels, defaults } from '../dist/rules/service.js';
 import { importPending, importedComputer } from '../dist/rules/imported.js';
-import { consoleComputer, rememberConsoleComputer } from '../dist/rules/service.js';
+import { cachedRuleFiles, consoleComputer, rememberConsoleComputer } from '../dist/rules/service.js';
 import { managerPrompt, managerSection, saveManager, withSection } from '../dist/work/settings.js';
 
 // The upgrade that retires the repositories' .bot/ files (#935): each project's effective layer becomes its Manager
@@ -125,6 +125,27 @@ test('an empty repository file is the layer it was, and one project that cannot 
   }
   assert.equal(managerSection(store, '303', 'review.pr'), undefined);
   assert.ok(store.get("SELECT 1 FROM settings WHERE key='rules.bot_imported'"));
+  // The unreadable cache is dropped: 202 reads as not yet read, and its rules, roles and configuration stay readable.
+  assert.match(report(store, '202').report.warnings.join('\n'), /缓存的仓库文件无法读取，已清除/);
+  const rules = await admin('/api/repositories/202/rules');
+  assert.equal(rules.status, 200, JSON.stringify(rules.value)); assert.equal(rules.value.rules.needs_refresh, true); assert.equal(rules.value.rules.imported.warnings.length, 2);
+  // Damage after the upgrade (a cache, the report, the pending computer fields) is read as missing, never as a failure.
+  store.run("INSERT INTO repository_rule_sources VALUES('202',?,'[broken','now')", sha);
+  store.run("UPDATE rule_imports SET report='{broken',computer='not json' WHERE repository_id='202'");
+  for (const path of ['/api/repositories/202/rules', '/api/repositories/202/manager']) assert.equal((await admin(path)).status, 200, path);
+  // The roles page and the skill sources read the cache through the same reader.
+  assert.equal(cachedRuleFiles(store, '202'), null);
+  const damaged = (await admin('/api/repositories/202/rules')).value.rules;
+  assert.equal(damaged.needs_refresh, true); assert.deepEqual(damaged.imported, { sha, imported_at: damaged.imported.imported_at });
+});
+
+test('a rule_imports table a pre-release build created without the computer column gets it', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  const store = h.store; store.run("DELETE FROM settings WHERE key='rules.bot_imported'"); store.db.exec('DROP TABLE rule_imports');
+  store.db.exec('CREATE TABLE rule_imports(repository_id TEXT PRIMARY KEY,sha TEXT,imported_at TEXT,pending INTEGER NOT NULL DEFAULT 0,report TEXT NOT NULL)');
+  new RuleService(store);
+  assert.ok(store.all('PRAGMA table_info(rule_imports)').some(row => row.name === 'computer'));
+  assert.equal(report(store, '101').pending, 1); assert.equal(importedComputer(store, '101'), null);
 });
 
 // A project without a saved console spec: the manager's computer may not carry the file's fields (no task applied them).
