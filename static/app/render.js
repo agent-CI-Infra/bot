@@ -1,4 +1,12 @@
 
+// #872: a failed list read is retried only while its own page is still the page the console shows. Once the console has
+// moved on (a project page, a console page, another list) the card is left in the DOM but is no longer this page, so the
+// button stops offering a redraw of the wrong list and says where the retry belongs.
+function redrawFailedList(version, card) {
+  if (version === renderVersion) { render().catch(error); return; }
+  const retry = card.querySelector('[data-testid=console-state-retry]');
+  if (retry) retry.replaceWith(element('p', '该列表已经离开当前页面，回到这个列表再重试。', 'muted'));
+}
 async function render(quiet = false) {
   // The list renderer never owns a console page. This is the second line of defence for #365: even when a stale route
   // reaches here after `tab` has moved to #/more, it must not turn that tab name into an API path.
@@ -60,7 +68,12 @@ async function render(quiet = false) {
     $('rows').removeAttribute('aria-busy');
     const heading = tab === 'projects' ? '项目列表未能读取' : tab === 'events' ? '仓库事件未能读取' : '列表未能读取';
     $('count').textContent = '读取失败';
-    $('rows').replaceChildren(consoleState(heading, readErrorText(err) + '。这不是空列表，当前无法判断是否有记录。', { tone: 'error', retry: () => render().catch(error) }));
+    // #872: the retry is bound to this read. `render()` re-reads whatever `tab`, `offset` and the filters say when the
+    // button is pressed, so a card the console has left behind would draw this page's list over the page the reader is
+    // on now. `renderVersion` is bumped by every navigation and redraw, which is exactly "this card is stale".
+    const card = consoleState(heading, readErrorText(err) + '。这不是空列表，当前无法判断是否有记录。',
+      { tone: 'error', retry: () => redrawFailedList(request, card) });
+    $('rows').replaceChildren(card);
     return;
   }
   finally { if (request === renderVersion) $('rows').removeAttribute('aria-busy'); }
