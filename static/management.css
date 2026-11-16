@@ -3,7 +3,7 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-launcher-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: #ffffff18; color: #f4cc82; font-size: 23px; }
 .management-launcher-label { display: grid; gap: 2px; }
 .management-launcher-label strong { font-size: var(--font-size-2); }
-.management-launcher-label small { font-size: var(--font-size-micro); color: #c5dce1; font-weight: 400; }
+.management-launcher-label small { font-size: var(--font-size-micro); color: var(--color-brand-weak); font-weight: 400; }
 .management-launcher.has-update .management-launcher-icon { background: #f4cc82; color: #163f50; }
 .management-window { position: fixed; right: 24px; bottom: 24px; z-index: 46; display: flex; flex-direction: column; width: min(480px, calc(100vw - 32px)); height: min(740px, calc(100dvh - 96px)); min-width: 0; min-height: 0; overflow: hidden; border: 1px solid #cbd9de; border-radius: 18px; background: var(--color-surface); color: var(--color-text); box-shadow: 0 18px 70px #123d4e40; }
 .management-window-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0; padding: 16px 20px; border-bottom: 1px solid #e8edef; background: var(--color-surface); }
