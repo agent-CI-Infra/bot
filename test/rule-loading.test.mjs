@@ -173,7 +173,7 @@ test('an Issue development that continues the bot PR checks out its head and rea
 // the import, works with the repository texts it would have read before the upgrade, and with the imported labels (#935).
 test('a project waiting for its .bot/ import imports at its first task, which already uses those rules',async t=>{
   const f=await repositoryFixture(t);
-  f.store.run("INSERT INTO rule_imports VALUES('101',NULL,NULL,1,'{}') ON CONFLICT(repository_id) DO UPDATE SET sha=NULL,pending=1");
+  f.store.run("INSERT INTO rule_imports VALUES('101',NULL,NULL,1,'{}',NULL) ON CONFLICT(repository_id) DO UPDATE SET sha=NULL,pending=1");
   f.heads.main=f.commit({'src/app.js':'export {};\n','.bot/guide.md':'Imported guide.\n','.bot/rules/labels.md':'review_label: team-reviewed\n\n# Our labels\n'});
   await f.hook(f.account.path,f.account.secret,'opened',{repository:{id:101},action:'opened',issue:f.issue});
   const taskId=f.store.get("SELECT id FROM tasks WHERE kind='review.issue'").id,task=await f.run(taskId);

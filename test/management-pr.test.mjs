@@ -47,4 +47,8 @@ test('configuration PR uses a scoped installation token, discloses pending merge
   const paths=(await query(admin,'get_effective_config',target)).value.workflows.map(w=>w.prompt.path);
   assert.ok(paths.every(path=>path===null||path.startsWith('.agents/skills/')),JSON.stringify(paths));
   assert.ok((await admin('/api/repositories/101/manager')).value.manager.sections.every(section=>section.path===null||section.path.startsWith('.agents/skills/')));
+  // A section backed by a repository skill shows that skill's text, so a configuration PR starts from it.
+  h.store.run("UPDATE repository_rule_sources SET files=? WHERE repository_id='101'",JSON.stringify({'.agents/skills/review/SKILL.md':'Original prompt','.agents/skills/release-notes/SKILL.md':'Release notes skill text.'}));
+  const notes=(await query(admin,'get_effective_config',target)).value.workflows.find(w=>w.id==='release.notes').prompt;
+  assert.deepEqual([notes.path,notes.source,notes.effective],['.agents/skills/release-notes/SKILL.md','repository','Release notes skill text.']);
 });
