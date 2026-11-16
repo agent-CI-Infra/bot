@@ -76,3 +76,29 @@ test('disconnected identity does not list started repositories even when the pay
   assert.equal(texts.includes('另有'), false);
   assert.equal(texts.includes('open-x-agents/Douya'), false);
 });
+
+// #979: dozens of pending installations fold behind a count so the identity actions below stay in view.
+test('a long pending list on the identity page folds behind a count with a name filter', async () => {
+  const page = load({
+    state: 'pending_activation',
+    repository_count: 0,
+    repositories: [],
+    pending_repositories: Array.from({ length: 11 }, (_, i) => ({ id: String(300 + i), full_name: `fixture/pending-${i}` })),
+  });
+  const panel = await draw(page);
+  const fold = panel.querySelector('[data-testid=pending-repo-fold]');
+  assert.ok(fold);
+  assert.ok(!fold.open);
+  assert.equal(fold.querySelector('summary').textContent, '查看 11 个待启动仓库');
+  assert.equal(fold.querySelectorAll('.identity-pending-repos li').length, 11);
+  const input = fold.querySelector('[data-testid=pending-repo-search]');
+  input.value = 'pending-10'; input.listeners.input[0]();
+  assert.deepEqual(fold.querySelectorAll('.identity-pending-repos li').filter(item => !item.hidden).map(item => item.dataset.name), ['fixture/pending-10']);
+});
+
+test('a short pending list on the identity page stays open', async () => {
+  const page = load({ state: 'pending_activation', repository_count: 0, repositories: [], pending_repositories: [{ id: '202', full_name: 'ThinkFlowLab/FlyBot' }] });
+  const panel = await draw(page);
+  assert.equal(panel.querySelector('[data-testid=pending-repo-fold]'), null);
+  assert.equal(panel.querySelector('.identity-pending-repos strong').textContent, 'ThinkFlowLab/FlyBot');
+});

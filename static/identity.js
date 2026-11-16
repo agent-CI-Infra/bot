@@ -264,12 +264,12 @@ async function renderIdentity() {
     const list = element('ul', '', 'identity-pending-repos');
     list.setAttribute('aria-label', t('identity.pending_repos'));
     for (const repo of pendingRepos) {
-      const item = element('li', '');
+      const item = element('li', ''); item.dataset.name = repo.full_name;
       item.append(element('strong', repo.full_name), repo.self_start ? element('span', t('identity.pending_repo_self_start'), 'status status-info')
         : element('span', t('identity.pending_repo_status'), 'status status-warning'));
       list.append(item);
     }
-    overview.append(list);
+    overview.append(foldPendingList(list, pendingRepos.length, 'identity'));
   }
   const feedback = element('p', '', 'view-error'); feedback.setAttribute('role', 'alert');
   if (identityRefreshNotice) {

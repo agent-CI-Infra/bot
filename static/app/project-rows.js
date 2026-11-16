@@ -26,6 +26,31 @@ function pendingStartAction(repo) {
   });
   return start;
 }
+// #979: dozens of installed-but-not-started repositories used to spread over the whole page and bury the projects and
+// actions around them. Beyond a handful they fold behind one summary line, and a long list gains a name filter. The fold
+// and the typed name survive a redraw of the same page (a list refresh re-creates the group).
+const pendingFoldThreshold = 5, pendingSearchThreshold = 10, pendingFoldState = new Map();
+function foldPendingList(list, count, scope) {
+  if (count <= pendingFoldThreshold) return list;
+  const state = pendingFoldState.get(scope) || { open: false, query: '' }; pendingFoldState.set(scope, state);
+  const fold = element('details', '', 'pending-repo-fold'); fold.dataset.testid = 'pending-repo-fold'; fold.open = state.open;
+  fold.addEventListener('toggle', () => { state.open = fold.open; });
+  fold.append(element('summary', `查看 ${count} 个待启动仓库`));
+  if (count > pendingSearchThreshold) {
+    const label = element('label', '按名称查找', 'pending-repo-search'), input = document.createElement('input');
+    input.type = 'search'; input.placeholder = '输入仓库名称'; input.setAttribute('autocomplete', 'off'); input.dataset.testid = 'pending-repo-search';
+    const empty = element('p', '', 'muted pending-repo-empty'); empty.setAttribute('role', 'status'); empty.hidden = true;
+    const apply = () => {
+      const typed = input.value.trim(), query = typed.toLowerCase(); let shown = 0; state.query = input.value;
+      for (const item of list.children) { const match = !query || String(item.dataset.name || '').toLowerCase().includes(query); item.hidden = !match; if (match) shown++; }
+      empty.hidden = shown > 0; empty.textContent = shown ? '' : `没有名称包含「${typed}」的待启动仓库`;
+    };
+    input.addEventListener('input', apply); input.value = state.query; if (state.query) apply();
+    label.append(input); fold.append(label, empty);
+  }
+  fold.append(list);
+  return fold;
+}
 function pendingActivationGroup(pending) {
   const section = element('div', '', 'project-owner-group project-pending-group'), own = pending.some(repo => repo.self_start);
   const title = own ? '待启动的仓库' : pendingActivationTitle;
@@ -34,15 +59,17 @@ function pendingActivationGroup(pending) {
   for (const repo of pending) {
     const line = element('div', '', 'row project-pending-row has-actions'), content = element('div', '', 'row-content'), status = element('div', '', 'row-state'), actions = element('div', '', 'actions');
     line.setAttribute('role', 'listitem'); line.dataset.key = 'pending:' + repo.id;
-    const note = element('p', repo.self_start ? '已安装到 GitHub，所属组织已受信任，你可以直接启动；模型和开发设置用组织的默认值。' : '已安装到 GitHub，需要超级管理员在控制台启动后才能打开。');
-    note.title = note.textContent; content.append(element('strong', repo.full_name), note);
+    line.dataset.name = repo.full_name; content.append(element('strong', repo.full_name));
+    // #979: the group intro already says a super administrator starts these; only a row that differs carries its own note.
+    if (repo.self_start) { const note = element('p', '已安装到 GitHub，所属组织已受信任，你可以直接启动；模型和开发设置用组织的默认值。'); note.title = note.textContent; content.append(note); }
     status.append(repo.self_start ? element('span', '可自行启动', 'status status-info') : element('span', '待超级管理员启动', 'status status-warning'));
     actions.append(repo.self_start ? pendingStartAction(repo) : pendingActivationAction(repo));
     line.append(content, status, actions); list.append(line);
   }
   section.append(element('h2', title, 'project-owner-title'),
-    element('p', '这些仓库已装好 GitHub App，启动后会出现在上面的项目列表里。', 'project-pending-intro muted'),
-    list, consoleLink('#/identity', '查看身份与权限'));
+    element('p', pending.every(repo => repo.self_start) ? '这些仓库已装好 GitHub App，启动后会出现在上面的项目列表里。'
+      : '这些仓库已装好 GitHub App，需要超级管理员在控制台启动后才会出现在上面的项目列表里。', 'project-pending-intro muted'),
+    foldPendingList(list, pending.length, 'projects'), consoleLink('#/identity', '查看身份与权限'));
   return section;
 }
 // #544: the shared column header for the project list; it is re-created per list render but skipped by a quiet refresh.
