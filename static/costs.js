@@ -246,8 +246,35 @@ async function statisticsTaskDrill(workflow,row,entry) {
   };
   await load();
 }
+// #904: a table wider than its column scrolls sideways, and a `div` that only scrolls is neither reachable nor named —
+// axe reports `scrollable-region-focusable`. Only the measured width decides the Tab stop, so a table that fits (or an
+// empty one) adds none; the measure runs again when the viewport, a fold above the table, or the table itself changes.
+const costScrolls = new Set();
+let costScrollObserver = null, costScrollWatching = false;
+function measureCostScroll(wrap) {
+  // One pixel is rounding, not a column out of sight: a table that fits must not keep a Tab stop for it.
+  if (wrap.scrollWidth > wrap.clientWidth + 1) wrap.setAttribute('tabindex', '0');
+  else wrap.removeAttribute('tabindex');
+}
+function measureAllCostScrolls() {
+  for (const wrap of costScrolls) { if (wrap.isConnected) measureCostScroll(wrap); else costScrolls.delete(wrap); }
+}
+function watchCostScroll(wrap) {
+  costScrolls.add(wrap);
+  if (!costScrollObserver && typeof ResizeObserver === 'function') costScrollObserver = new ResizeObserver(entries => { for (const entry of entries) measureCostScroll(entry.target); });
+  costScrollObserver?.observe(wrap);
+  // A closed <details> gives its content no dependable layout, so the fold's own toggle is what says the table below it
+  // has just acquired a width. Registered once: the document outlives every table drawn under it.
+  if (!costScrollWatching) { document.addEventListener('toggle', measureAllCostScrolls, true); window.addEventListener('resize', measureAllCostScrolls); costScrollWatching = true; }
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => measureCostScroll(wrap));
+  else measureCostScroll(wrap);
+}
 function costTable(headers) {
-  const wrap=element('div','','cost-table-scroll'),table=document.createElement('table'),head=document.createElement('thead'),row=document.createElement('tr');headers.forEach(name=>{const [caption,title]=Array.isArray(name)?name:[name];const th=element('th',caption);th.scope='col';if(title)th.setAttribute('title',title);row.append(th);});head.append(row);const body=document.createElement('tbody');table.append(head,body);wrap.append(table);return {wrap,body};
+  const wrap=element('div','','cost-table-scroll'),table=document.createElement('table'),head=document.createElement('thead'),row=document.createElement('tr'),captions=[];headers.forEach(name=>{const [caption,title]=Array.isArray(name)?name:[name];captions.push(caption);const th=element('th',caption);th.scope='col';if(title)th.setAttribute('title',title);row.append(th);});head.append(row);const body=document.createElement('tbody');table.append(head,body);wrap.append(table);
+  // A bare `div` maps to generic, where a name is prohibited; `group` accepts one and is not a landmark, so the 13
+  // tables do not turn the landmark list into noise. The name is the columns, which is what the box holds.
+  wrap.setAttribute('role','group');wrap.setAttribute('aria-label','表格：'+captions.join('、'));watchCostScroll(wrap);
+  return {wrap,body};
 }
 function costChart(container,byDate,projects,currency,tokens=false) {
   const unit=tokens?'用量':currency,value=row=>costChartValue(row,tokens)||0;
