@@ -38,9 +38,11 @@ const DISPLAY = [
   /\breturn\s+[^;]*(?:err|error|e)\.message\b/,
 ];
 
-// static/app/api.js is the helper itself: readErrorText() and retryErrorText() are the two places that are allowed to
-// hand err.message back, and converting them would make the helper call itself.
-const EXEMPT = /[\\/]static[\\/]app[\\/]api\.js$/;
+// static/app/api.js is the helper itself: readErrorText()'s own `(err && err.message)` fallback is the only line allowed
+// to read the raw text back, because converting it would make the helper call itself. The rest of that file is scanned
+// like any other source — retryErrorText() is a display helper and has to go through readErrorText() as well.
+const HELPER_FILE = /[\\/]static[\\/]app[\\/]api\.js$/;
+const HELPER_FALLBACK = /\(\s*(?:err|error|e)\s*&&\s*(?:err|error|e)\.message\s*\)/;
 
 function sources(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
@@ -54,7 +56,7 @@ test('no console failure text interpolates the raw error message', () => {
   const offenders = [];
   for (const file of sources(ROOT)) {
     readFileSync(file, 'utf8').split('\n').forEach((line, index) => {
-      if (EXEMPT.test(file)) return;
+      if (HELPER_FILE.test(file) && HELPER_FALLBACK.test(line)) return;
       if (!/\b(?:err|error|e)\.message\b/.test(line)) return;
       if (line.includes('readErrorText(')) return;
       const hit = DISPLAY.find(pattern => pattern.test(line));
