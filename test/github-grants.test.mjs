@@ -248,3 +248,18 @@ test('a login that overlaps an in-flight permission check still renews derived g
   assert.ok(after.verified_at > Date.now() - 15_000);
   assert.ok(listEffectiveScopes(h.store, p).some(g => g.source === 'github_derived' && g.state === 'active'));
 });
+
+test('re-deriving a grant saved with the retired roles.publish loses no authority and keeps sessions current (#850)', async t => {
+  const f = await identityFixture(t), { h } = f, first = await f.login(), principal = first.result.principal_id;
+  const creds = session(h.store, principal, first.result.identity_id);
+  // A derived grant saved before #850 still lists roles.publish, which nothing ever checked.
+  for (const row of h.store.all("SELECT id,capabilities FROM scoped_grants WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", principal))
+    h.store.run('UPDATE scoped_grants SET capabilities=? WHERE id=?', JSON.stringify([...JSON.parse(row.capabilities), 'roles.publish']), row.id);
+  const revision = () => h.store.get('SELECT authorization_revision FROM principals WHERE id=?', principal).authorization_revision, before = revision();
+  const actor = resolveActor(h.store, creds.token);
+  await f.identity.reverify(principal);
+  assert.ok(active(h.store, principal).length && active(h.store, principal).every(g => !g.capabilities.includes('roles.publish')), 'the grant is re-derived without it');
+  assert.equal(revision(), before);
+  // The session issued before the re-derivation still holds; it relies on the same authorization revision.
+  h.store.withAuthorizationGuard(() => assertCurrent(actor), () => {}); authorize(resolveActor(h.store, creds.token), 'roles.edit', { project_id: '101' });
+});
