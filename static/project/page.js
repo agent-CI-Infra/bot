@@ -127,7 +127,7 @@ async function loadProject(id,section=current.section) {
   const overview = section === 'overview' || projectConsolePages.includes(section), target = current;
   const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), overview ? null : api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, overview ? null : api('/api/repositories/'+id+'/rules').catch(()=>null), overview ? null : api(superUser ? '/api/models' : '/api/models?repository_id='+id).catch(()=>null)]);
   const external=section==='external'?await loadExternalProject(id):null;
-  Object.assign(target, { external, repository: repo.repository, canConfigure: repo.can_configure, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, environmentReadError:'', installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
+  Object.assign(target, { external, repository: repo.repository, canConfigure: repo.can_configure, policy: repo.policy, actionsFailures: repo.actions_failures, actionsFailuresSeenAt: new Date().toISOString(), actionsFailuresRead: null, actionsFailuresDelay: 0, concurrencyDefault: repo.task_concurrency_default, environment, environmentReadError:'', installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
     models:(models?.models||[]).filter(model=>model.repository_id===null||model.repository_id===id) });
 }
 async function reloadProject() {

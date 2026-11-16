@@ -60,7 +60,7 @@ function projectEventFiltersCard(manager, target, live) {
   const submit = element('button', '保存事件开关'), buttons = element('div', '', 'actions form-actions'); submit.type = 'submit';
   if (editable) buttons.append(submit);
   const status = element('p', '', 'muted'); status.dataset.actionsStatus = '';
-  if (target.policy.actions_failures_enabled) showActionsFailureStatus(status, target.actionsFailures); else status.textContent = '未开启。';
+  if (target.policy.actions_failures_enabled) showActionsFailureStatus(status, target.actionsFailures, target.actionsFailuresRead); else status.textContent = '未开启。';
   fields.append(boxes, labels('issue.labels', '有人给 Issue 加上这些标签时'), labels('pull_request.labels', '有人给 PR 加上这些标签时'));
   form.append(fields, status, message, buttons);
   form.addEventListener('submit', async event => {
