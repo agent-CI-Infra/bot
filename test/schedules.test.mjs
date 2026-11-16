@@ -15,6 +15,9 @@ import { defaultLimits } from '../dist/schedules/types.js';
 import { nextTime, previewTimes, quietUntil } from '../dist/schedules/time.js';
 import { HttpError, randomId } from '../dist/core/security.js';
 import { configureDispatch, ruleDecider } from '../dist/dispatch/worker.js';
+import { taskGithubWrite } from '../dist/tasks/github-write.js';
+import { taskActingRole } from '../dist/tasks/management.js';
+import { Redactor } from '../dist/agent/common.js';
 import { channelFixture, envelope, post, finished, until, inGroup, bindFixture, privateChat, boundGroup, registerDestination } from './channel-fixture.mjs';
 
 const target = { project_id: '101' };
@@ -291,7 +294,7 @@ test('subscription aggregates a failure incident, links recovery, respects quiet
   const before = f.wire.sent.length; f.advance(60000); await f.worker.tick(); assert.equal(f.wire.sent.length, before); assert.equal(f.h.store.get("SELECT count(*) n FROM notification_outbox WHERE state='blocked'").n, 3);
 });
 
-test('a Manager check plan hands its occurrence to the Manager once; a task it starts is a read-only request run by the plan\'s identity', async t => {
+test('a Manager check plan hands its occurrence to the Manager once; the report task it starts runs for the plan\'s identity and may file an Issue within the ceiling', async t => {
   const f = await fixture(t);
   await f.admin('/api/repositories/101/policy', 'PATCH', { enabled: true });
   // The Manager starts the check, with the goal it read from the plan's instruction.
@@ -306,6 +309,16 @@ test('a Manager check plan hands its occurrence to the Manager once; a task it s
   assert.equal(JSON.parse(task.input).contract.goal, 'List open Issues without a label');
   assert.equal(f.h.store.get('SELECT principal_id FROM task_authorizations WHERE task_id=?', task.id).principal_id, f.principal);
   assert.equal(requests(), 1, 'one occurrence, one event, one task');
+  // #851: the task runs as the Manager, which may write Issues and comments, so a check that finds a problem files an Issue
+  // through github_write within the project's capability ceiling: refused at read before anything is sent, sent at comment
+  // (here to an unreachable GitHub). It delivers no code: its contract ends in a report.
+  const write = key => taskGithubWrite(f.h.store, task, new Redactor(), async () => {}, 'http://127.0.0.1:9')({ method: 'POST', path: '/issues', key, body: { title: 'main CI failed', body: 'The check found a failed run.' } });
+  assert.equal(taskActingRole(f.h.store, task), 'manager'); assert.equal(JSON.parse(task.input).contract.endpoint, 'report');
+  f.h.store.run("UPDATE policies SET capability_ceiling='read' WHERE repository_id='101'");
+  const refused = await write('check-issue-read'); assert.deepEqual([refused.error, refused.needed], ['capability_ceiling', 'comment']);
+  f.h.store.run("UPDATE policies SET capability_ceiling='comment' WHERE repository_id='101'");
+  const sent = await write('check-issue-comment'); assert.ok(!['capability_ceiling', 'github_resource_forbidden'].includes(sent.error), JSON.stringify(sent));
+  const recorded = f.h.store.get("SELECT state,actor FROM github_writes WHERE key='check-issue-comment'"); assert.ok(recorded, 'the write was recorded'); assert.notEqual(recorded.state, 'refused');
   // Handing the check over completes the occurrence, so the plan is not held up by the task it started.
   assert.equal(f.h.store.get('SELECT state FROM schedule_business_runs').state, 'succeeded');
   // The rule decider of other tests starts nothing for a scheduled check: only a Manager does.
