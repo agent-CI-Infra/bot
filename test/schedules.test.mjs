@@ -675,3 +675,10 @@ test('subscription group previews stop after binding revocation and create no de
   const denied = await f.admin('/api/management/query','POST',{operation:'preview_subscription',target,arguments:{subscription:spec}});
   assert.equal(denied.status,403); assert.equal(denied.value.error,'schedule_destination_unavailable'); assert.equal(registered(),before); assert.equal(f.h.store.get('SELECT count(*) n FROM notification_subscriptions').n,0);
 });
+
+test('a fixture project effective config still fits in one management tool result', async t => {
+  const f = await fixture(t), cfg = await query(f, 'get_effective_config');
+  const bytes = Buffer.byteLength(JSON.stringify(cfg));
+  assert.ok(bytes <= 256 * 1024, `get_effective_config is ${bytes} bytes; the management tool budget is 256 KiB so a write can still read the revision`);
+});
+
