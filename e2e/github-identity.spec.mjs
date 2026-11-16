@@ -66,6 +66,8 @@ test('GitHub 页头展示用户名与头像，旧会话和改名可刷新，窄�
     const principal = f.h.store.get("SELECT principal_id FROM external_identities WHERE provider='github'").principal_id;
     f.state.login = 'a-github-username-with-thirty-nine-chars1'; await f.identity.reverify(principal);
     await page.reload(); await expect(who).toContainText('@' + f.state.login);
+    // The header updates before start() finishes routing, which closes any account menu opened in that gap.
+    await expect.poll(() => page.evaluate(() => announcedPage)).toBe('page:identity');
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 844 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -79,6 +81,7 @@ test('GitHub 页头展示用户名与头像，旧会话和改名可刷新，窄�
     await page.screenshot({ path: resolve(output, 'profile-mobile.png'), fullPage: true });
     await page.route('https://avatars.githubusercontent.com/**', route => route.abort());
     await page.reload(); await expect(who.locator('img')).toHaveCount(0); await expect(who).toContainText('@' + f.state.login);
+    await expect.poll(() => page.evaluate(() => announcedPage)).toBe('page:identity');
     await page.locator('#console-account').click();
     await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click();
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
