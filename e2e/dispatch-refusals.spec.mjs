@@ -39,6 +39,7 @@ test('dispatch records show refusals with their reasons and filtered events with
     await expect(detail).not.toContainText('决定时间'); await expect(detail).not.toContainText('当前轮尝试次数');
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       if (shots) await page.screenshot({ path: `${shots}/dispatch-filtered-${width}.png` });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
