@@ -68,10 +68,11 @@ export class Dispatcher {
   private async run(event: Row, lease: string) {
     try {
       const context = dispatchContext(this.store, event);
-      // Everything it could lead to was switched off or ended meanwhile: nothing to ask.
-      // A standing rule settles a routine event without a model call (#815); the others go to the Manager.
-      const ruled = context.options.length || context.continuations.length ? ruleDecision(this.store, context, id => !!managerRefusal(this.store, context, id)) : null;
-      const decision: Decision = ruled ?? (context.options.length || context.continuations.length ? await this.decide(this.store, context)
+      // A spent event goes to the Manager to answer the person, even if a rule matches or the work was switched off.
+      // Other routine events follow a standing rule; with no work left there is nothing to ask.
+      const answering = !!Number(event.answer_round), hasWork = context.options.length || context.continuations.length;
+      const ruled = !answering && hasWork ? ruleDecision(this.store, context, id => !!managerRefusal(this.store, context, id)) : null;
+      const decision: Decision = ruled ?? (answering || hasWork ? await this.decide(this.store, context)
         : { decision: 'ignore', option_ids: [], model: null, reason: context.unavailable.length
           ? `没有可以新建的工作，也没有可续接的任务：${[...new Set(context.unavailable.map(work => work.reason))].join(' ')}`.slice(0, 1000)
           : '没有可选的处理方式：相关工作已关闭，或可续接的任务已经结束。' });
