@@ -1,30 +1,12 @@
-// #716: an installed repository that was never started is started by a super administrator, so the copy names that role
-// and each row offers the one next step this reader has: copy a reminder to send them. In a trusted organization (#848) its
-// administrator starts it, and the row carries 启动 instead. (Super administrators never get this group: their project list
-// is the installed list, where such a row already carries 启动.)
-const pendingActivationTitle = '等待超级管理员启动';
-function pendingActivationReminder(repo) {
-  const address = (location.origin || '') + (location.pathname || '/') + '#/projects';
-  return `请在 LaunchPad 控制台启动仓库 ${repo.full_name}：${address}`;
-}
-function pendingActivationAction(repo) {
-  const copy = button('复制提醒', async () => {
-    const text = pendingActivationReminder(repo);
-    try { await navigator.clipboard.writeText(text); copy.textContent = '已复制'; copy.title = text; }
-    catch { copy.textContent = '请手动复制'; copy.title = text; const box = copy.parentElement; if (box && !box.querySelector('.project-pending-manual')) box.append(element('p', text, 'project-pending-manual')); }
-  });
-  copy.setAttribute('aria-live', 'polite');
-  return copy;
-}
-// #848: in an organization a super administrator trusts, the repository's administrator starts it here. The organization's
-// defaults choose the model and development; nothing else is asked.
-function pendingStartAction(repo) {
-  const start = button('启动', async () => {
-    start.disabled = true; notice('message', `正在启动 ${repo.full_name}…`);
-    try { await api(`/api/installations/${repo.id}/activate`, 'POST', {}); notice('message', `已启动 ${repo.full_name}。`); await route(); }
-    catch (err) { start.disabled = false; notice('message', readErrorText(err), '', 'alert'); }
-  });
-  return start;
+// #934: an installed repository nobody has started is onboarded through the wizard (#/onboarding/<id>): the management
+// assistant reads it, asks and proposes a plan, and confirming the plan starts it. In a trusted organization (#848) its
+// administrator starts it then; otherwise the confirmation asks a super administrator (#933). Either way the row carries one
+// entry, 开始接入. (Super administrators never get this group: their project list is the installed list, where such a row
+// carries 开始接入 and 启动.)
+function onboardingEntry(repo, caption = '开始接入') {
+  const entry = element('a', caption, 'button-link btn-primary'); entry.href = '#/onboarding/' + encodeURIComponent(repo.id);
+  entry.setAttribute('aria-label', `${caption} ${repo.full_name}`);
+  return entry;
 }
 // #979: dozens of installed-but-not-started repositories used to spread over the whole page and bury the projects and
 // actions around them. Beyond a handful they fold behind one summary line, and a long list gains a name filter. The fold
@@ -45,7 +27,7 @@ function foldPendingList(list, count, scope) {
   const state = pendingListState(scope);
   const fold = element('details', '', 'pending-repo-fold'); fold.dataset.testid = 'pending-repo-fold'; fold.open = state.open;
   fold.addEventListener('toggle', () => { state.open = fold.open; });
-  fold.append(element('summary', `查看 ${count} 个待启动仓库`));
+  fold.append(element('summary', `查看 ${count} 个待接入仓库`));
   if (count > pendingSearchThreshold) {
     const label = element('label', '按名称查找', 'pending-repo-search'), input = document.createElement('input');
     input.type = 'search'; input.placeholder = '输入仓库名称'; input.setAttribute('autocomplete', 'off'); input.dataset.testid = 'pending-repo-search';
@@ -53,7 +35,7 @@ function foldPendingList(list, count, scope) {
     const apply = () => {
       const typed = input.value.trim(), query = typed.toLowerCase(); let shown = 0; state.query = input.value;
       for (const item of list.children) { const match = !query || String(item.dataset.name || '').toLowerCase().includes(query); item.hidden = !match; if (match) shown++; }
-      empty.hidden = shown > 0; empty.textContent = shown ? '' : `没有名称包含「${typed}」的待启动仓库`;
+      empty.hidden = shown > 0; empty.textContent = shown ? '' : `没有名称包含「${typed}」的待接入仓库`;
     };
     input.addEventListener('input', apply); input.value = state.query; if (state.query) apply();
     label.append(input); fold.append(label, empty);
@@ -62,8 +44,8 @@ function foldPendingList(list, count, scope) {
   return fold;
 }
 function pendingActivationGroup(pending) {
-  const section = element('div', '', 'project-owner-group project-pending-group'), own = pending.some(repo => repo.self_start);
-  const title = own ? '待启动的仓库' : pendingActivationTitle;
+  const section = element('div', '', 'project-owner-group project-pending-group');
+  const title = '待接入的仓库';
   section.setAttribute('role', 'listitem'); section.dataset.key = 'pending-activation';
   const list = element('div', '', 'project-owner-rows'); list.setAttribute('role', 'list'); list.setAttribute('aria-label', title);
   for (const repo of pending) {
@@ -71,14 +53,13 @@ function pendingActivationGroup(pending) {
     line.setAttribute('role', 'listitem'); line.dataset.key = 'pending:' + repo.id;
     line.dataset.name = repo.full_name; content.append(element('strong', repo.full_name));
     // #979: the group intro already says a super administrator starts these; only a row that differs carries its own note.
-    if (repo.self_start) { const note = element('p', '已安装到 GitHub，所属组织已受信任，你可以直接启动；模型和开发设置用组织的默认值。'); note.title = note.textContent; content.append(note); }
-    status.append(repo.self_start ? element('span', '可自行启动', 'status status-info') : element('span', '待超级管理员启动', 'status status-warning'));
-    actions.append(repo.self_start ? pendingStartAction(repo) : pendingActivationAction(repo));
+    if (repo.self_start) { const note = element('p', '所属组织已受信任，确认方案后你可以直接启动。'); note.title = note.textContent; content.append(note); }
+    status.append(repo.self_start ? element('span', '可自行启动', 'status status-info') : element('span', '启动需超级管理员同意', 'status status-warning'));
+    actions.append(onboardingEntry(repo));
     line.append(content, status, actions); list.append(line);
   }
   section.append(element('h2', title, 'project-owner-title'),
-    element('p', pending.some(repo => repo.self_start) ? '这些仓库已装好 GitHub App，启动后会出现在上面的项目列表里。'
-      : '这些仓库已装好 GitHub App，需要超级管理员在控制台启动后才会出现在上面的项目列表里。', 'project-pending-intro muted'),
+    element('p', '这些仓库已装好 GitHub App。点「开始接入」，助手先只读分析仓库、问几个问题并给出方案；你确认后启动' + (pending.every(repo => repo.self_start) ? '' : '，所属组织未受信任的由超级管理员同意后启动') + '。启动后它们出现在上面的项目列表里。', 'project-pending-intro muted'),
     foldPendingList(list, pending.length, 'projects'), consoleLink('#/identity', '查看身份与权限'));
   return section;
 }

@@ -245,7 +245,7 @@ function syncConsoleShell() {
   $('console-context').textContent = project ? (repo ? organization(repo) + ' · ' + shortName(repo)
     : unstarted?.registered === false ? organization(unstarted) + ' · ' + shortName(unstarted) + ' · ' + t('nav.unstarted')
       : typeof current !== 'undefined' && current?.unavailable && String(current.id) === String(project.id) ? t(current.unavailable === 'missing' ? 'nav.project_not_found' : 'nav.project_unavailable') : t('nav.reading_project'))
-    : tab === 'identity' || tab === 'preferences' ? '' : ({ more: t('nav.more'), inbox: t('nav.inbox'), settings: settingsContext }[tab] || titles[tab] || t('identity.title'));
+    : tab === 'identity' || tab === 'preferences' ? '' : ({ more: t('nav.more'), inbox: t('nav.inbox'), settings: settingsContext, 'repository-onboarding': t('nav.repository_onboarding') }[tab] || titles[tab] || t('identity.title'));
   // A project can be reachable while some of its features cannot run; the navigation every page shares has to say so.
   // Only the installation snapshot names the gaps, and only a super administrator may read it, so nothing is invented.
   const permission = $('console-permission');
@@ -367,6 +367,11 @@ async function renderConsoleInbox(request) {
   picker.add(new Option('所有有权访问的项目', '')); repositories.forEach(r => picker.add(new Option(r.full_name, r.id))); picker.value = id;
   picker.addEventListener('change', () => { location.hash = '#/inbox' + (picker.value ? '/' + picker.value : ''); }); label.append(picker);
   filters.append(label, button('刷新待处理', () => renderConsoleInbox(++renderVersion))); page.append(filters);
+  // #934: start requests (#933) wait for a super administrator before any task exists, so they head the inbox.
+  if (me.role === 'super_admin' && typeof renderStartRequests === 'function') {
+    const requests = element('div', '', 'console-start-requests'); page.append(requests);
+    void renderStartRequests(requests, () => request === renderVersion && tab === 'inbox' && requests.isConnected);
+  }
   const body = element('div', '', 'console-inbox'); body.setAttribute('aria-busy', 'true');
   body.append(consoleState('正在读取待处理事项', '按当前授权范围读取任务记录。')); page.append(body);
   try {
@@ -402,6 +407,7 @@ async function renderConsolePage(request) {
   else if (tab === 'new-task') await renderNewTask(request);
   else if (tab === 'conversations') await renderChannelConsole(request);
   else if (tab === 'more') renderConsoleMore();
+  else if (tab === 'repository-onboarding') await renderRepositoryOnboarding(request);
   else {
     await renderConsoleInbox(request);
     const origin = consoleInboxReturn;

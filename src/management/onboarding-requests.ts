@@ -33,7 +33,7 @@ export interface RequestHost {
   busy(repositoryId: string): boolean;
 }
 /** What a Feishu notice is about, for the delivery to check again before it sends (channels/service.ts). */
-export interface RequestNotice { request_id: string; state: RequestState; tenant: string; audience: 'super_admin' | 'requester' }
+export interface RequestNotice { request_id: string; repository_id: string; state: RequestState; tenant: string; audience: 'super_admin' | 'requester' }
 
 export class OnboardingRequests {
   /**
@@ -60,8 +60,8 @@ export class OnboardingRequests {
       this.store.audit(actor.principal_id, 'onboarding.start_requested', request, id);
     });
     const repository = this.host.repository(id)!;
-    this.notify?.(this.superAdministrators(), `仓库 ${repository.full_name} 申请启动：${summary(plan)}\n在控制台的启动申请里同意或拒绝。`,
-      { request_id: request, state: 'pending', tenant: 'github.com:' + repository.owner_id, audience: 'super_admin' });
+    this.notify?.(this.superAdministrators(), `仓库 ${repository.full_name} 申请启动：${summary(plan)}\n在控制台「待处理」的启动申请里同意或拒绝。`,
+      { request_id: request, repository_id: id, state: 'pending', tenant: 'github.com:' + repository.owner_id, audience: 'super_admin' });
     return this.store.get('SELECT * FROM onboarding_requests WHERE id=?', request)!;
   }
 
@@ -178,15 +178,17 @@ export class OnboardingRequests {
   private fullName(request: Row): string { return String(this.host.repository(String(request.repository_id))?.full_name ?? request.repository_id); }
   private tell(request: Row, state: RequestState, text: string): void {
     const repository = this.host.repository(String(request.repository_id)) ?? this.store.get('SELECT owner_id FROM repositories WHERE id=?', request.repository_id);
-    if (repository) this.notify?.([String(request.requested_by)], text, { request_id: String(request.id), state, tenant: 'github.com:' + repository.owner_id, audience: 'requester' });
+    if (repository) this.notify?.([String(request.requested_by)], text, { request_id: String(request.id), repository_id: String(request.repository_id), state, tenant: 'github.com:' + repository.owner_id, audience: 'requester' });
   }
   private view(row: Row): Json {
     const application = this.store.get('SELECT plan_id,version FROM onboarding_applications WHERE id=?', row.application_id);
     const plan = application ? JSON.parse(this.store.get('SELECT plan FROM onboarding_plans WHERE id=?', application.plan_id)?.plan ?? '{}') as Json : {};
-    const requester = this.store.get('SELECT u.username FROM principals p JOIN users u ON u.id=p.user_id WHERE p.id=?', row.requested_by);
+    // A GitHub account's username is an internal id: the console names it by its GitHub login (#934).
+    const requester = this.store.get(`SELECT u.username,(SELECT i.display_name FROM external_identities i WHERE i.principal_id=p.id AND i.provider='github' AND i.status<>'revoked' ORDER BY i.verified_at DESC LIMIT 1) AS login
+      FROM principals p JOIN users u ON u.id=p.user_id WHERE p.id=?`, row.requested_by);
     const repository = this.host.repository(String(row.repository_id));
     return { id: row.id, state: row.state, repository: { id: row.repository_id, full_name: repository?.full_name ?? null, organization_trusted: repository ? !!trustedOrganization(this.store, String(repository.owner_id)) : false },
-      requested_by: { principal_id: row.requested_by, name: requester?.username ?? null }, requested_at: row.requested_at, plan_version: application?.version ?? null,
+      requested_by: { principal_id: row.requested_by, name: requester?.username ?? null, github_login: requester?.login ?? null }, requested_at: row.requested_at, plan_version: application?.version ?? null,
       summary: { profile: (plan.profile as Json | undefined)?.summary ?? null, capability_ceiling: (plan.capability_ceiling as Json | undefined)?.value ?? null,
         labels: (((plan.labels as Json | undefined)?.items as Json[] | undefined) ?? []).filter(label => label.action === 'create').map(label => label.name),
         schedules: ((plan.schedules as Json[] | undefined) ?? []).map(schedule => schedule.name), ci: !!plan.ci },

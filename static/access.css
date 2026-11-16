@@ -124,6 +124,7 @@ body:not(.console-ready) main { flex: 1; display: flex; flex-direction: column; 
 
 .identity-pending-repos, .identity-openable-repos { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 8px; }
 .identity-pending-repos li, .identity-openable-repos li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.identity-pending-repos li .button-link { margin-left: auto; }
 .project-pending-group { margin-top: 16px; }
 .project-pending-row .status { white-space: nowrap; }
 .project-pending-intro { margin: 4px 0 0; font-size: var(--font-size-1); }

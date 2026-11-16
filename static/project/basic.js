@@ -45,6 +45,8 @@ function basicSection() {
     ['可见性', installed ? installed.private ? '私有' : '公开' : null],
     ['项目状态', policy.enabled ? '已启用' : '已禁用']]));
   if (target.rules?.retired_files?.length) info.append(retiredRulesNotice(target.rules));
+  // #934: the onboarding wizard again, against the project as it is now: it lists only what it would change.
+  if (editable) info.append(consoleLink(`#/onboarding/${id}`, '重新运行接入向导', '助手对照现在的设置给出建议，只列出要改变的项；不确认就不改'));
   const summary = card('当前配置一览');
   const machineSize = current.rules?.computer?.cpus
     ? `${current.rules.computer.cpus} CPU · ${current.rules.computer.memory_mb} MB`

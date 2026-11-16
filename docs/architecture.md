@@ -144,7 +144,7 @@ Dashboard React 页面、单仓静态页面、社区统计采集器和增量采�
 | 看板采集 | 源仓 | contents、issues、pull_requests、actions、checks、metadata 只读，按安装实际授权裁剪；没有 checks 时定时运行的结果只从产物读取 |
 | 看板开关 | bot 本地 | 控制台超管；不向 GitHub 写配置 |
 
-每次采集使用源仓自己的只读安装令牌并在结束时撤销，不再需要外部 dashboard 的 App 安装或 `PRIVATE_SOURCE_TOKEN`。bot 不再生成门禁文件：CI 改动由开发任务按仓库自己的情况修改 workflow，以 bot PR 交付，人合并后才生效（见[接入说明](onboarding-guide.md#22-ci-改动走-bot-pr)）。
+每次采集使用源仓自己的只读安装令牌并在结束时撤销，不再需要外部 dashboard 的 App 安装或 `PRIVATE_SOURCE_TOKEN`。bot 不再生成门禁文件：CI 改动由开发任务按仓库自己的情况修改 workflow，以 bot PR 交付，人合并后才生效（见[接入说明](onboarding-guide.md#32-ci-改动走-bot-pr)）。
 
 ## 代码快照与发布
 

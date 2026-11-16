@@ -418,9 +418,11 @@ export class ChannelService {
   /**
    * A start request notice (#933) to each person's own private chats with the bot, through an application of the repository's
    * organization or the platform's own (never another organization's), queued durably. People without one are skipped: the
-   * console's request list is where everyone finds them.
+   * console's request list is where everyone finds them. The notice links to where it is handled (#934): 待处理 for super
+   * administrators, the repository's onboarding page for the requester.
    */
-  private onboardingNotice(principals: string[], text: string, about: RequestNotice): void {
+  private onboardingNotice(principals: string[], notice: string, about: RequestNotice): void {
+    const text = notice + (this.options.origin ? '\n' + this.options.origin + (about.audience === 'super_admin' ? '/#/inbox' : '/#/onboarding/' + about.repository_id) : '');
     for (const principal of principals) for (const row of this.store.all("SELECT c.id FROM channel_chats c JOIN channel_personal_owners o ON o.chat_id=c.id WHERE o.principal_id=? AND c.chat_type='p2p'", principal)) {
       try {
         const chat = this.employees.chat(String(row.id)), application = this.applicationTenant(chat);

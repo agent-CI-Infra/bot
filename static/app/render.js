@@ -110,7 +110,7 @@ async function render(quiet = false) {
   // The probe row is part of the signature: when the 51st row appears or goes, only `next` changes, and a quiet refresh
   // that compared the drawn rows alone would return early and leave the pager stale (#747).
   const signature=tab+'\n'+(hiddenView?'hidden\n':'')+params+'\n'+String(hasMore)+'\n'+JSON.stringify(rows)+'\n'+JSON.stringify(pendingRepositories)+'\n'+String(!!pendingRepositoriesError);if(quiet&&signature===listSignature)return;listSignature=signature;
-  const lines=[]; $('count').textContent = hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目${pendingRepositories.length?`，${pendingRepositories.length} 个待${pendingRepositories.some(repo=>repo.self_start)?'':'超级管理员'}启动`:pendingRepositoriesError?'，等待启动的仓库暂时无法读取':''}` : `${rows.length} 条记录`;
+  const lines=[]; $('count').textContent = hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目${pendingRepositories.length?`，${pendingRepositories.length} 个待接入`:pendingRepositoriesError?'，等待启动的仓库暂时无法读取':''}` : `${rows.length} 条记录`;
   const count = $('count'); if (count) count.title = count.textContent;
   $('previous').disabled = offset === 0; $('next').disabled = !hasMore; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
@@ -134,7 +134,7 @@ async function render(quiet = false) {
       const actions = element('div', '', 'actions project-cell'); actions.dataset.label = '操作'; actions.setAttribute('aria-labelledby', projectColumnId('操作'));
       if (installedView) {
         if (registered) actions.append(button('设置', () => openProject(row.id), 'quiet'));
-        else if (row.installed) actions.append(button('启动', () => openActivation(row, () => start()).catch(error), 'quiet'));
+        else if (row.installed) actions.append(onboardingEntry(row), button('启动', () => openActivation(row, () => start()).catch(error), 'quiet'));
       } else actions.append(button('设置', () => openProject(row.id), 'quiet'));
       line.append(content, ...cells, actions);
       lines.push(line); return;
@@ -146,7 +146,7 @@ async function render(quiet = false) {
     // An installed repository that was never started has no project page yet; it offers 启动 instead of 设置.
     if(installedView){const actions=element('div','','actions');
       if(row.registered)actions.append(button('设置',()=>openProject(row.id),'quiet'));
-      else if(row.installed&&!hiddenView)actions.append(button('启动',()=>openActivation(row,()=>start()).catch(error),'quiet'));
+      else if(row.installed&&!hiddenView)actions.append(onboardingEntry(row),button('启动',()=>openActivation(row,()=>start()).catch(error),'quiet'));
       if(hiddenView)actions.append(button('恢复',()=>restoreInstalled(row,()=>start()).catch(error),'quiet'));
       if(actions.childElementCount)line.append(actions);}
     else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id),'quiet'));line.append(actions);}
