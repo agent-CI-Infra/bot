@@ -1,7 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { randomId } from '../core/security.js';
 import { TaskError } from '../agent/common.js';
-import { applyDecision, dispatchContext, decideImmediately, onDispatchEvent, InvalidDecision, dispatchLeaseMs, type Decision, type DispatchContext, type CreateOption, dispatchHook } from './store.js';
+import { applyDecision, dispatchContext, decideImmediately, onDispatchEvent, InvalidDecision, dispatchLeaseMs, pruneFiltered, type Decision, type DispatchContext, type CreateOption, dispatchHook } from './store.js';
 import { managerDecision } from './manager.js';
 
 export type Decider = (store: Store, context: DispatchContext) => Promise<Decision>;
@@ -30,8 +30,11 @@ export class Dispatcher {
   // Events of one Issue or pull request are decided one at a time, in order: a decision must see the task the previous
   // one created, or two updates arriving together would each create a review.
   private readonly busy = new Set<string>();
+  private pruned = 0;
   tick() {
     if (this.closing) return;
+    // Records of filtered events (#815) are kept for a while; pruning them once an hour is enough.
+    if (Date.now() - this.pruned > 3600000) { this.pruned = Date.now(); pruneFiltered(this.store); }
     const now = Date.now(), objectKey = (event: Row) => event.object_number == null ? 'event:' + event.id : `${event.repository_id}:${event.object_type}:${event.object_number}`;
     // An expired lease (a stuck call) is taken over; the old call's apply then finds its lease gone.
     // Only an object's own turn enters the window: a due event that still has an earlier pending or dispatching event on
@@ -64,7 +67,9 @@ export class Dispatcher {
       const context = dispatchContext(this.store, event);
       // Everything it could lead to was switched off or ended meanwhile: nothing to ask.
       const decision: Decision = context.options.length || context.continuations.length ? await this.decide(this.store, context)
-        : { decision: 'ignore', option_ids: [], reason: '没有可选的处理方式：相关工作已关闭，或可续接的任务已经结束。', model: null };
+        : { decision: 'ignore', option_ids: [], model: null, reason: context.unavailable.length
+          ? `没有可以新建的工作，也没有可续接的任务：${[...new Set(context.unavailable.map(work => work.reason))].join(' ')}`.slice(0, 1000)
+          : '没有可选的处理方式：相关工作已关闭，或可续接的任务已经结束。' };
       applyDecision(this.store, event, { ...decision, seen: context.continuations.map(option => option.id) }, lease);
       this.onApplied();
     } catch (error) {
@@ -113,7 +118,7 @@ export function ruleDecider(context: DispatchContext): Decision {
   const defaults = context.options.filter(option => option.default);
   const reviews = defaults.filter(option => option.work.startsWith('review.')), others = defaults.filter(option => !option.work.startsWith('review.'));
   // The event's own options, before a joinable review hid the ones offered only when nothing can be continued.
-  const reviewed = (JSON.parse(String(context.event.options || '[]')) as CreateOption[]).some(option => option.default && option.work.startsWith('review.'));
+  const reviewed = (JSON.parse(String(context.event.options || '[]')) as CreateOption[]).some(option => option.default && option.work.startsWith('review.') && !context.unavailable.some(work => work.id === option.id));
   const joinable = context.continuations.filter(option => option.status !== 'succeeded' || reviewed);
   if (updates.includes(String(context.event.type)) && joinable.length && !others.length)
     return { decision: 'continue', option_ids: [joinable[0]!.id], reason: 'rule: update joins the review', model: 'rule' };

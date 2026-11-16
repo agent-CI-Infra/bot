@@ -5,8 +5,8 @@ import { sha as digest } from '../agent/common.js';
 import { reviewObjectState } from './sessions.js';
 import { developmentLabel } from '../rules/service.js';
 import { actionsDevelopmentAllowed, actionsReport } from '../actions/safety.js';
-import { recordEvent, type CreateOption, type EventInput } from '../dispatch/store.js';
-import { eventFilters, labelDispatched, workOffered, type EventFilters } from '../work/settings.js';
+import { recordEvent, recordFiltered, type CreateOption, type EventInput } from '../dispatch/store.js';
+import { eventFilters, labelDispatched, type EventFilters } from '../work/settings.js';
 
 export const sameLabel = (name: unknown, label: string) => String(name ?? '').toLowerCase() === label.toLowerCase();
 // A person's go-ahead for development: the development label is on the Issue. Whether the Issue should be developed
@@ -111,27 +111,41 @@ export function pullRequestNeeded(store: Store, repositoryId: string, event: str
   return filters['pull_request.updated'] && updateTrigger(event, payload, otherBotOnBotPullRequest(store, repositoryId, event, payload))?.kind === 'review.pr';
 }
 
-// `commentId` keys a mention review to its comment; `updateId` keys an update review to its delivery record.
-export function enqueue(store: Store, repositoryId: string, kind: string, number: number, head: string | null, input: Json,
-  delivery: string | null = null, sourceTask: string | null = null, commentId: string | null = null, updateId: string | null = null): string | null {
-  if (!Number.isSafeInteger(number) || number < 1 || kind.endsWith('.pr') && !/^[a-f0-9]{40}$/.test(head || '')) return null;
-  if (kind === 'development.issue' && !actionsDevelopmentAllowed(store, repositoryId, number)) return null;
-  if (commentId !== null && (!['review.issue','review.pr'].includes(kind) || !/^[1-9]\d*$/.test(commentId))) return null;
-  // A development is keyed by the labeling that asked for it, so a person can ask again after an earlier one ended.
-  if (updateId !== null && (!['review.issue','review.pr','development.issue'].includes(kind) || !/^[\w-]{1,200}$/.test(updateId))) return null;
-  if (kind === 'development.issue' && store.get(`SELECT id FROM tasks WHERE repository_id=? AND kind='development.issue' AND object_number=?
-    AND status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication',
-      'running','preparing','implementing','validating','publishing','result_ready') LIMIT 1`, repositoryId, number)) return null;
-  // One revision of a bot pull request at a time: both would push to the same branch. The requests of a review that finds one
-  // running are raised again by the review of the head it pushes.
-  if (kind === 'development.pr' && store.get(`SELECT id FROM tasks WHERE repository_id=? AND kind='development.pr' AND object_number=?
-    AND status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication',
-      'running','preparing','implementing','validating','publishing','result_ready') LIMIT 1`, repositoryId, number)) return null;
+const activeDevelopment = (store: Store, repositoryId: string, kind: string, number: number) => store.get(`SELECT id,status FROM tasks WHERE repository_id=? AND kind=? AND object_number=?
+  AND status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication',
+    'running','preparing','implementing','validating','publishing','result_ready') LIMIT 1`, repositoryId, kind, number);
+const enqueueKey = (repositoryId: string, kind: string, number: number, head: string | null, input: Json, commentId: string | null, updateId: string | null) => {
   // A revision that people or other bots asked for is keyed by those requests, so a revision of the same head that the bot's
   // own review started earlier does not stand in for it.
   const requests = kind === 'development.pr' && Array.isArray((input as any).revision?.requests) ? (input as any).revision.requests.map((r: any) => `${r.type}:${r.id}`).join(',') : '';
-  const key = `${repositoryId}:${kind}:${number}:${commentId !== null ? `comment:${commentId}` : updateId !== null ? `update:${updateId}` : kind.endsWith('.pr') ? head + (requests ? `:requests:${requests}` : '') : 'opened'}`;
-  const existing = store.get('SELECT id FROM tasks WHERE unique_key=?', key); if (existing) return null;
+  return `${repositoryId}:${kind}:${number}:${commentId !== null ? `comment:${commentId}` : updateId !== null ? `update:${updateId}` : kind.endsWith('.pr') ? head + (requests ? `:requests:${requests}` : '') : 'opened'}`;
+};
+/**
+ * Why enqueue would not create this task now (#815), null when it would: the reason a refused create_task returns to the
+ * Manager. The same conditions decide enqueue itself, so the refusal never disagrees with what happens.
+ */
+export function enqueueRefusal(store: Store, repositoryId: string, kind: string, number: number, head: string | null, input: Json,
+  commentId: string | null = null, updateId: string | null = null): { code: string; reason: string; task_id?: string } | null {
+  if (!Number.isSafeInteger(number) || number < 1 || kind.endsWith('.pr') && !/^[a-f0-9]{40}$/.test(head || '')) return { code: 'invalid_object', reason: '事件对象的编号或提交无效。' };
+  if (kind === 'development.issue' && !actionsDevelopmentAllowed(store, repositoryId, number))
+    return { code: 'actions_development_not_allowed', reason: '这是 Actions 失败提报的 Issue，它的分类、结构或指派不允许开发。' };
+  if (commentId !== null && (!['review.issue','review.pr'].includes(kind) || !/^[1-9]\d*$/.test(commentId))) return { code: 'invalid_object', reason: '评论编号无效。' };
+  // A development is keyed by the labeling that asked for it, so a person can ask again after an earlier one ended.
+  if (updateId !== null && (!['review.issue','review.pr','development.issue'].includes(kind) || !/^[\w-]{1,200}$/.test(updateId))) return { code: 'invalid_object', reason: '更新编号无效。' };
+  const active = kind === 'development.issue' || kind === 'development.pr' ? activeDevelopment(store, repositoryId, kind, number) : null;
+  // One development of an Issue at a time; one revision of a bot pull request at a time: both would push to the same branch.
+  // The requests of a review that finds one running are raised again by the review of the head it pushes.
+  if (active) return { code: kind === 'development.issue' ? 'development_active' : 'revision_active', task_id: String(active.id),
+    reason: `${kind === 'development.issue' ? '这个 Issue 已有' : '这个 PR 已有'}未结束的${kind === 'development.issue' ? '开发' : '修订'}任务（${active.status}）。` };
+  const existing = store.get('SELECT id FROM tasks WHERE unique_key=?', enqueueKey(repositoryId, kind, number, head, input, commentId, updateId));
+  if (existing) return { code: 'task_already_created', task_id: String(existing.id), reason: '这个事件要建的任务已经建过了。' };
+  return null;
+}
+// `commentId` keys a mention review to its comment; `updateId` keys an update review to its delivery record.
+export function enqueue(store: Store, repositoryId: string, kind: string, number: number, head: string | null, input: Json,
+  delivery: string | null = null, sourceTask: string | null = null, commentId: string | null = null, updateId: string | null = null): string | null {
+  if (enqueueRefusal(store, repositoryId, kind, number, head, input, commentId, updateId)) return null;
+  const key = enqueueKey(repositoryId, kind, number, head, input, commentId, updateId);
   const id = randomId(), now = new Date().toISOString();
   store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,object_number,head_sha,source_task_id,source_delivery_id,created_at,updated_at)
     VALUES(?,?,?,'queued',?,?,?,?,?,?,?,?,?)`, id, repositoryId, kind, `${kind} #${number}`, key, JSON.stringify(input), number, head, sourceTask, delivery, now, now);
@@ -187,9 +201,9 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
         replyOption('issue', number, null, payload, 'opened', delivery)] };
     if (action === 'labeled' && openObject(issue) && p.sender?.type === 'User' && typeof p.label?.name === 'string') {
       const label = String(p.label.name), options: CreateOption[] = [];
-      // Only a project that develops answers the development label; otherwise it is an ordinary label.
-      const development = filters['issue.development_label'] && workOffered(store, repositoryId, 'development.issue', 'issue.labeled')
-        ? labeledDevelopment(store, repositoryId, p, number, delivery) : null;
+      // A person's development label always reaches the Manager (#815): when the project does not develop now, development is
+      // listed as work it does not allow, with the reason, so the Manager can answer the person instead of staying silent.
+      const development = filters['issue.development_label'] ? labeledDevelopment(store, repositoryId, p, number, delivery) : null;
       if (development) options.push(development.option);
       const dispatched = labelDispatched(filters, 'issue', label);
       // The development label also offers a review that answers it, so that when the Manager does not start development
@@ -283,8 +297,60 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
     store.run("UPDATE dispatch_events SET state='decided',decision='ignore',reason=?,lease=NULL,lease_until=NULL,decided_at=? WHERE repository_id=? AND object_type=? AND object_number=? AND state IN ('pending','failed')",
       '对象已关闭或转为草稿，事件不再分派。', new Date().toISOString(), repositoryId, event === 'issues' ? 'issue' : 'pr', number);
   }
-  if (!policy?.enabled) return 0;
-  if (event === 'issues' && !policy.actions_failures_enabled && store.get('SELECT 1 FROM actions_failure_issues WHERE repository_id=? AND number=?', repositoryId, number)) return 0;
-  const input = webhookEvent(store, repositoryId, event, payload, delivery, currentPullRequest, eventFilters(store, repositoryId, policy));
-  return input ? recordEvent(store, input) : 0;
+  // An event a person caused that the filters stop is kept with the reason (#815), so the console can say why nothing happened.
+  const filtered = (code: string, reason: string) => { const record = filteredEvent(repositoryId, event, payload, delivery); if (record) recordFiltered(store, { ...record, code, reason }); return 0; };
+  if (!policy?.enabled) return filtered('project_disabled', '项目已停用，事件不交给 Manager。');
+  if (event === 'issues' && !policy.actions_failures_enabled && store.get('SELECT 1 FROM actions_failure_issues WHERE repository_id=? AND number=?', repositoryId, number))
+    return filtered('actions_failures_disabled', '这是 Actions 失败提报的 Issue，项目关闭了 Actions 失败处理。');
+  const filters = eventFilters(store, repositoryId, policy), input = webhookEvent(store, repositoryId, event, payload, delivery, currentPullRequest, filters);
+  if (input) return recordEvent(store, input);
+  const reason = filterReason(store, repositoryId, event, payload, filters);
+  return reason ? filtered(reason.code, reason.reason) : 0;
+}
+
+/** The record of a filtered event: only what a person did on an Issue or pull request (#815). */
+function filteredEvent(repositoryId: string, event: string, payload: Json, delivery: string) {
+  const p = payload as any, action = String(p.action || ''), object = p.pull_request ?? p.issue;
+  const pr = !!p.pull_request || !!p.issue?.pull_request, number = Number(object?.number);
+  if (!object || !Number.isSafeInteger(number) || number < 1) return null;
+  const types: Record<string, string> = { 'issues:opened': 'issue.opened', 'issues:edited': 'issue.updated', 'issues:labeled': 'issue.labeled',
+    'issue_comment:created': mentionsBot(event, payload) ? (pr ? 'pull_request.mention' : 'issue.mention') : pr ? 'pull_request.updated' : 'issue.updated',
+    'pull_request:opened': 'pull_request.opened', 'pull_request:ready_for_review': 'pull_request.opened', 'pull_request:synchronize': 'pull_request.synchronize',
+    'pull_request:labeled': 'pull_request.labeled', 'pull_request:edited': 'pull_request.updated',
+    'pull_request_review:submitted': 'pull_request.updated', 'pull_request_review_comment:created': 'pull_request.updated' };
+  const type = types[`${event}:${action}`]; if (!type) return null;
+  return { repositoryId, key: `${repositoryId}:filtered:${delivery}`, type, summary: `${clip(object.title, 120)} #${number}（${String(p.sender?.login || '')}）`,
+    object: { type: pr ? 'pr' as const : 'issue' as const, number }, delivery, facts: { event, action, actor: String(p.sender?.login || '') } };
+}
+/**
+ * Why webhookEvent offered nothing for an event a person caused (#815), in the order its filters apply; null for events
+ * that are not about people (an approval without a body, an edit that changed nothing) and are not kept.
+ */
+function filterReason(store: Store, repositoryId: string, event: string, payload: Json, filters: EventFilters): { code: string; reason: string } | null {
+  const p = payload as any, action = String(p.action || ''), object = p.pull_request ?? p.issue, pr = !!p.pull_request || !!p.issue?.pull_request;
+  if (!object) return null;
+  const comment = p.comment ?? p.review, body = comment?.body ?? (action === 'opened' ? object.body : null);
+  if (object.state === 'closed') return { code: 'object_closed', reason: `${pr ? 'PR' : 'Issue'} 已关闭。` };
+  if (object.draft === true) return { code: 'object_draft', reason: 'PR 是草稿。' };
+  if (action === 'labeled' && p.sender?.type !== 'User') return { code: 'label_by_app', reason: '标签不是人加的。' };
+  if (botWrote(p, body) || action === 'opened' && rolePublicationEcho(store, repositoryId, object.body)) return { code: 'bot_own_content', reason: '这是 bot 或其他 App 写的内容。' };
+  const off = (key: keyof EventFilters, what: string) => !filters[key] ? { code: 'event_filter_off', reason: `项目没有把「${what}」交给 Manager（监听与触发）。` } : null;
+  if (event === 'issues' && action === 'opened') return off('issue.opened', 'Issue 打开');
+  if (event === 'pull_request' && ['opened', 'ready_for_review'].includes(action)) return off('pull_request.opened', 'PR 打开');
+  if (event === 'pull_request' && action === 'synchronize') return off('pull_request.synchronize', 'PR 推送新提交');
+  if (action === 'labeled') {
+    const label = String(p.label?.name ?? ''), development = event === 'issues' && sameLabel(label, developmentLabel(store, repositoryId));
+    if (development && !filters['issue.development_label']) return off('issue.development_label', '开发标签');
+    return development ? null : { code: 'label_not_dispatched', reason: `标签「${label}」不在交给 Manager 的标签里（监听与触发）。` };
+  }
+  if (event === 'issue_comment' && mentionsBot(event, payload)) return off(pr ? 'pull_request.mention' : 'issue.mention', pr ? 'PR 里提到 bot' : 'Issue 里提到 bot');
+  if (comment && ['issue_comment', 'pull_request_review', 'pull_request_review_comment'].includes(event)) {
+    const association = String(comment.author_association ?? ''), author = String(object.user?.id ?? '') === String(p.sender?.id ?? '');
+    if (!['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association) && !author)
+      return { code: 'outsider_comment', reason: '评论人在仓库里没有角色，也不是作者；外人的评论只有提到 bot 时才交给 Manager。' };
+    if (event === 'pull_request_review' && !String(comment.body || '').trim() && comment.state !== 'changes_requested') return null;
+    return off(pr ? 'pull_request.updated' : 'issue.updated', pr ? 'PR 的评论和检视' : 'Issue 的评论和编辑');
+  }
+  if (action === 'edited') return p.changes && ('title' in p.changes || 'body' in p.changes) ? off(pr ? 'pull_request.updated' : 'issue.updated', pr ? 'PR 的编辑' : 'Issue 的编辑') : null;
+  return null;
 }

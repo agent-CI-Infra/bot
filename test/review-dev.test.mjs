@@ -354,16 +354,21 @@ test('a person\'s development label reaches the Manager with the facts it judges
   const issue=(labels,assignees=[])=>({number:5,title:'Fix add.',body:'Please fix.',state:'open',labels:labels.map(name=>({name})),assignees});
   const labeled=async(delivery,name,type,labels,assignees)=>(await h.hook(a.path,a.secret,delivery,{repository:{id:101},action:'labeled',label:{name},sender:{id:5,login:'maintainer',type},issue:issue(labels,assignees)})).value.tasks_created;
   const count=()=>h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n;
-  const events=()=>h.store.all("SELECT * FROM dispatch_events WHERE type='issue.labeled' ORDER BY created_at,rowid");
+  const events=()=>h.store.all("SELECT * FROM dispatch_events WHERE type='issue.labeled' AND state<>'filtered' ORDER BY created_at,rowid");
   // Another label, or a label added by an app, never reaches the Manager.
   assert.equal(await labeled('l1','bug','User',['bug']),0);
   assert.equal(await labeled('l2','bot-develop','Bot',['bot-develop']),0);
   assert.equal(events().length,0);
+  // #815: both are kept as filtered events with the reason.
+  assert.deepEqual(h.store.all("SELECT result FROM dispatch_events WHERE state='filtered' ORDER BY created_at,rowid").map(row=>JSON.parse(row.result).filtered),['label_not_dispatched','label_by_app']);
   // Whether an Issue someone is assigned to is developed is the Manager's judgement: it is offered development and a
   // review that answers the label, with the facts. (The rule decider of these tests keeps the old answer: nothing.)
   assert.equal(await labeled('l3','bot-develop','User',['bot-develop'],[{login:'someone'}]),0);
   const event=events().at(-1),facts=JSON.parse(event.facts);
-  assert.deepEqual(JSON.parse(event.options).map(o=>o.id),['development','review']);
+  // #815: work the project does not allow now (reply is off by default) is kept too, so the Manager is told why.
+  assert.deepEqual(JSON.parse(event.options).map(o=>o.id),['development','review','reply']);
+  const {dispatchContext}=await import('../dist/dispatch/store.js'),context=dispatchContext(h.store,event);
+  assert.deepEqual(context.options.map(o=>o.id),['development','review']);assert.deepEqual(context.unavailable.map(w=>[w.id,w.code]),[['reply','work_disabled']]);
   assert.deepEqual([facts.development.label,facts.development.labeled_by,facts.development.assignees],['bot-develop','maintainer',['someone']]);
   assert.deepEqual([facts.development.review.task_id,facts.development.review.issue_requests_code,facts.development.review.quote_in_issue],['rv',true,true]);
   // The label name is the project's development label setting.
@@ -371,9 +376,12 @@ test('a person\'s development label reaches the Manager with the facts it judges
   assert.equal((await admin('/api/repositories/101/rules')).value.rules.development_label,'ship-it');
   assert.equal(await labeled('l4','bot-develop','User',['bot-develop']),0);
   await admin('/api/repositories/101/policy','PATCH',{development_label:'bot-develop'});
-  // A project that does not develop treats the label as an ordinary one.
+  // A project that does not develop still brings the label to the Manager (#815): development is listed as not allowed,
+  // with the reason, and a review can answer the person.
   await admin('/api/repositories/101/policy','PATCH',{development_enabled:false});assert.equal(await labeled('l5','bot-develop','User',['bot-develop']),0);
-  await admin('/api/repositories/101/policy','PATCH',{development_enabled:true});assert.equal(count(),0);assert.equal(events().length,1);
+  const off=dispatchContext(h.store,events().at(-1));
+  assert.deepEqual([off.options.map(o=>o.id),off.unavailable.map(w=>[w.id,w.code])],[['review'],[['development','capability_ceiling'],['reply','work_disabled']]]);
+  await admin('/api/repositories/101/policy','PATCH',{development_enabled:true});assert.equal(count(),0);assert.equal(events().length,2);
   // A person's label after the review starts development, keyed by that labeling; another one meanwhile is refused.
   assert.equal(await labeled('l6','BOT-develop','User',['bot-develop']),1);assert.equal(await labeled('l7','bot-develop','User',['bot-develop']),0);
   assert.equal(h.store.get("SELECT count(*) n FROM task_logs l JOIN tasks t ON t.id=l.task_id WHERE t.kind='development.issue' AND json_extract(l.content,'$.type')='queued'").n,1);

@@ -80,7 +80,7 @@ function dispatchCard() {
     for (const [value, caption] of entries) { const option = element('option', caption); option.value = value; control.append(option); }
     control.value = filters[name]; form.append(field(label, control)); return control;
   };
-  choose('state', '分派状态', [['', '全部状态'], ['pending', '等待或自动重试'], ['dispatching', 'Manager 处理中'], ['failed', '等待人工重试'], ['decided', '已决定']]);
+  choose('state', '分派状态', [['', '全部状态'], ['pending', '等待或自动重试'], ['dispatching', 'Manager 处理中'], ['failed', '等待人工重试'], ['decided', '已决定'], ['filtered', '被过滤（未交给 Manager）']]);
   choose('decision', '分派结果', [['', '全部结果'], ['create', '新建任务'], ['continue', '续接任务'], ['ignore', '不分派任务']]);
   const type = input('type', filters.type, { placeholder: '例如 issue.opened', maxLength: 80 }); form.append(field('事件类型', type));
   for (const [key, label] of [['from', '开始时间（含）'], ['until', '结束时间（不含）']]) {
@@ -149,9 +149,15 @@ function dispatchCard() {
     const event = value.event, position = dialog.scrollTop; body.replaceChildren();
     const group = (title, ...children) => { const el = element('section'); el.append(element('h3', title), ...children); body.append(el); return el; };
     group('触发事件', facts([['事件编号', event.id], ['事件类型', dispatchEventNames[event.type] || event.type], ['来源', event.source], ['收到时间', timestamp(event.created_at)], ['对象', event.object_number ? `${event.object_type} #${event.object_number}` : '未记录对象'], ['投递编号', event.delivery_id || '未记录']]), element('p', event.summary));
-    group('Manager 判断', facts([['状态', dispatchState(event)], ['决定时间', event.decided_at ? timestamp(event.decided_at) : event.state === 'decided' ? '未记录决定时间' : '尚未决定'], ['记录的模型名称', event.model || '未记录；不能用当前配置推断历史模型'], ['当前轮尝试次数', String(event.attempts)]]), element('p', event.reason || '尚无已保存的决定理由。'));
+    group(event.state === 'filtered' ? '控制面过滤（没有交给 Manager）' : 'Manager 判断', facts([['状态', dispatchState(event)], ['决定时间', event.decided_at ? timestamp(event.decided_at) : event.state === 'decided' ? '未记录决定时间' : '尚未决定'], ['记录的模型名称', event.model || '未记录；不能用当前配置推断历史模型'], ['当前轮尝试次数', String(event.attempts)]]), element('p', event.reason || '尚无已保存的决定理由。'));
     if (event.brief?.goal) body.lastChild.append(element('p', '任务目标：' + event.brief.goal), note((event.brief.criteria || []).join('；')));
     if (event.error) body.lastChild.append(element('p', '最近失败：' + event.error.code + (event.error.detail ? ' · ' + event.error.detail : ''), 'view-error'));
+    // What the control plane refused when the Manager tried to create work (#815), with the reason it was given.
+    if (event.refusals?.length) {
+      const list = element('ul', '', 'history');
+      for (const refusal of event.refusals) list.append(element('li', `${timestamp(refusal.at)} · ${refusal.work} · ${refusal.code}：${refusal.reason}`));
+      group('控制面拒绝', note('Manager 选的这些工作没有建出来；拒绝原因也返回给了 Manager，它可以据此回复提出请求的人。'), list);
+    }
     if (event.state === 'pending' && event.next_run_at) body.lastChild.append(note('下次允许自动尝试：' + timestamp(new Date(event.next_run_at).toISOString())));
     const tasks = group('关联任务');
     if (!value.tasks.length) tasks.append(note(event.state === 'decided' && event.decision === 'ignore' ? '本次没有关联的新建或续接任务。工具操作应结合已保存理由与实际记录核对。' : '当前没有可读取的关联任务；分派结果不等于任务已完成。'));
@@ -192,7 +198,7 @@ function dispatchCard() {
   return section;
 }
 function dispatchState(event) {
-  return event.state === 'decided' ? decisionNames[event.decision]?.[0] || '已决定，结果未识别' : event.state === 'failed' ? '等待人工重试' : event.state === 'dispatching' ? 'Manager 处理中' : event.state === 'pending' ? '等待或自动重试' : '未识别的分派状态';
+  return event.state === 'filtered' ? '被过滤' : event.state === 'decided' ? decisionNames[event.decision]?.[0] || '已决定，结果未识别' : event.state === 'failed' ? '等待人工重试' : event.state === 'dispatching' ? 'Manager 处理中' : event.state === 'pending' ? '等待或自动重试' : '未识别的分派状态';
 }
 function dispatchEntry(event, open) {
   const item = element('li', '', 'manager-dispatch-entry'), head = element('div', '', 'manager-dispatch-head');
@@ -200,6 +206,7 @@ function dispatchEntry(event, open) {
   item.dataset.dispatchEvent = event.id; item.append(head, element('p', event.summary));
   if (event.reason) item.append(note('理由：' + event.reason));
   if (event.error) item.append(note('最近失败：' + event.error.code));
+  if (event.refusals?.length) item.append(note(`控制面拒绝 ${event.refusals.length} 次：` + event.refusals.at(-1).reason));
   item.append(button('查看分派详情', () => open(event), 'quiet')); return item;
 }
 
