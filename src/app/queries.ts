@@ -3,6 +3,7 @@ import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
 import { taskDispatch } from '../dispatch/store.js';
 import { taskWritesDetail } from '../tasks/grants.js';
+import { taskBasis } from '../dispatch/basis.js';
 import { sourcePolicies } from '../tasks/management.js';
 import { taskTrace, traceClean } from '../tasks/trace.js';
 import { TaskRecords } from '../tasks/service.js';
@@ -193,7 +194,9 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       // Why the Manager created or continued this task, with the events behind it.
       dispatch:taskDispatch(store,row.id),
       // The writes a generic task holds and the delivery tools each run had (#814); null for older tasks.
-      writes:taskWritesDetail(store,row,sourcePolicies(store,row)) };
+      writes:taskWritesDetail(store,row,sourcePolicies(store,row)),
+      // Why this development was allowed to start (#815); null when none was recorded.
+      basis:taskBasis(store,row.id) };
   }
   if (path === '/api/audit') return { audit: store.all(`SELECT * FROM audit WHERE ${filter.sql}${repo ? ' AND repository_id=?' : ''}
     ORDER BY created_at DESC LIMIT 100`, ...filter.args, ...(repo ? [repo] : [])) };

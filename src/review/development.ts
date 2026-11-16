@@ -2,12 +2,11 @@ import type { Store, Row } from '../storage/database.js';
 import type { GitHub } from '../github/client.js';
 import { randomId } from '../core/security.js';
 import { assertOwnedPR } from '../github/publisher.js';
-import type { DevelopmentWait } from '../github/text.js';
-import { assigneesOf, developmentReady, reviewRequestsCode, sameLabel } from './queue.js';
+import { assigneesOf, developmentReady, sameLabel } from './queue.js';
 import { actionsDevelopmentAllowed, actionsReport } from '../actions/safety.js';
 import { stop } from '../agent/common.js';
 import { developmentLabel } from '../rules/service.js';
-import { workActive, eventFilters } from '../work/settings.js';
+import { eventFilters } from '../work/settings.js';
 import { recordEvent } from '../dispatch/store.js';
 import { covers, projectCeiling } from '../work/ceiling.js';
 
@@ -59,19 +58,6 @@ export async function revisionRequests(github:GitHub,task:Row,result:any,input:a
   }
   return [...requests.values()];
 }
-// Why development of an Issue this review found ready will not start yet: no development label, or the label added by
-// an app. Null when the go-ahead is there, or when it is not this review's to start (development or its events off, no
-// explicit code request, an Actions report not cleared for development).
-export async function developmentWait(context:DevelopmentContext,github:GitHub,task:Row,input:any,result:any):Promise<DevelopmentWait|null>{
-  if(task.kind!=='review.issue'||!workActive(context.store,task.repository_id,'development.issue'))return null;
-  const filters=eventFilters(context.store,task.repository_id);
-  if(!filters['review.published.issue']&&!filters['issue.development_label'])return null;
-  if(!reviewRequestsCode(input.object,result)||!actionsDevelopmentAllowed(context.store,task.repository_id,task.object_number,input.object,result))return null;
-  const label=context.label(task),issue=await github.object(task.kind,task.object_number);
-  if(!developmentReady(issue,label))return {reason:'label',label};
-  const events=await github.pages(github.path(`/issues/${task.object_number}/events`));
-  return events.filter((e:any)=>e.event==='labeled'&&sameLabel(e.label?.name,label)).at(-1)?.actor?.type==='User'?null:{reason:'app',label};
-}
 /**
  * A published review is an event for the Manager when it may lead to development: an Issue review published while a
  * person's development label is on the Issue, or a review of the bot's own pull request that took on change requests or
@@ -81,34 +67,30 @@ export async function developmentWait(context:DevelopmentContext,github:GitHub,t
  */
 export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:Row,input:any,result:any,approved:GoAhead|null=null,requests:RevisionRequest[]=[]){
   const policy=context.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
-  if(!policy?.enabled||!covers(projectCeiling(context.store,task.repository_id,policy),'develop')||task.kind!=='review.issue'&&result.clarification_required)return;
+  if(!policy?.enabled||!covers(projectCeiling(context.store,task.repository_id,policy),'develop'))return;
   const filters=eventFilters(context.store,task.repository_id,policy),number=task.object_number;
   const facts={review_task:task.id,object:{number,title:String(input.object?.title||'').slice(0,300),url:input.object?.html_url??null},
-    review:{summary:String(result.summary||'').slice(0,1500),requires_code_change:!!result.requires_code_change,implementation_goal:String(result.implementation_goal||'').slice(0,1500),
+    review:{summary:String(result.summary||'').slice(0,1500),...(result.recommendation?{recommendation:String(result.recommendation).slice(0,1500)}:{}),
       actionable_findings:(result.findings||[]).filter(actionableFinding).length}};
   // A review publishes once, in the transaction that ends it, so each call is one publication of its own.
   const published=randomId().slice(0,16);
   const event=(type:'issue'|'pr',title:string,option:any)=>recordEvent(context.store,{repositoryId:task.repository_id,key:`${task.repository_id}:review.published:${task.id}:${published}`,type:'review.published',source:'review',
     summary:title,facts,object:{type,number},delivery:task.source_delivery_id,options:[option]});
   if(task.kind==='review.issue'){
-    // With a person's go-ahead on the Issue, every published review offers development; whether this review supports
-    // developing now (a request in the Issue, nothing left to decide, nobody else on it) is the Manager's judgement.
+    // With a person's development label on the Issue, every published review offers development; whether this review
+    // supports developing now (what it found and recommends, who is assigned) is the Manager's judgement (#815).
     if(!approved||!filters['review.published.issue'])return;
-    const requested=reviewRequestsCode(input.object,result);
     if(!actionsDevelopmentAllowed(context.store,task.repository_id,number,input.object,result))return;
-    if(actionsReport(context.store,task.repository_id,number)&&(approved.assignees.length||!requested||!result.requires_code_change))return;
+    if(actionsReport(context.store,task.repository_id,number)&&approved.assignees.length)return;
     // Development that continues the bot's PR for this Issue revises that PR, so it counts against the same budget.
     const owned=context.store.get(`SELECT p.revisions FROM bot_pull_requests p JOIN tasks t ON t.id=p.source_task_id
       WHERE p.repository_id=? AND t.kind='development.issue' AND t.object_number=? ORDER BY t.created_at LIMIT 1`,task.repository_id,number);
     if(owned&&owned.revisions>=policy.max_revisions)return;
-    // What the control plane did before #207 (for the rule decider in tests): the first development of an unassigned
-    // Issue whose review found the change requested.
+    // What the control plane did before #207 (for the rule decider in tests): the first development of an unassigned Issue.
     const earlier=context.store.get("SELECT 1 FROM tasks WHERE repository_id=? AND kind='development.issue' AND object_number=? AND unique_key IS NOT NULL LIMIT 1",task.repository_id,number);
-    Object.assign(facts,{development:{...approved,bot_pull_request:owned?true:false},
-      review:{...facts.review,issue_requests_code:!!result.issue_requests_code,clarification_required:!!result.clarification_required,
-        request_quote:String(result.request_quote||'').slice(0,500),quote_in_issue:requested}});
+    Object.assign(facts,{development:{...approved,bot_pull_request:owned?true:false}});
     event('issue',`Issue 检视已发布，开发标签已加：#${number}`,{id:'development',work:'development.issue',title:`开发 Issue #${number}`,
-      default:requested&&!!result.requires_code_change&&!result.clarification_required&&!approved.assignees.length&&!earlier,
+      default:!approved.assignees.length&&!earlier,
       spec:{type:'object',kind:'development.issue',number,head:null,input:{review:result,object_hash:input.object_hash},delivery:task.source_delivery_id,source_task:task.id,update_id:task.id}});
   }else{
     if(!filters['review.published.pr'])return;
@@ -128,7 +110,7 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
     const taken=new Set(requests.flatMap(r=>r.findings));
     const own=result.findings.filter((f:any)=>actionableFinding(f)&&!f.requested_in&&!taken.has(f));
     const pushed=input.heads?.length>1||(input.merged_updates||[]).some((update:any)=>update?.reason==='pushed');
-    const ownAllowed=accepted.length>0||(pushed||!input.comment&&!input.trigger)&&!!result.requires_code_change&&owned.revisions<policy.max_revisions;
+    const ownAllowed=accepted.length>0||(pushed||!input.comment&&!input.trigger)&&owned.revisions<policy.max_revisions;
     const findings=[...new Set(accepted.flatMap(r=>r.findings)),...(ownAllowed?own:[])];
     if(!findings.length)return;
     const plain=accepted.map(({findings,...request})=>request);
@@ -145,7 +127,8 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
 
 /** A person's go-ahead for developing an Issue, as the Manager reads it. */
 export interface GoAhead { label:string; labeled_by:string; assignees:string[] }
-// The goal of an Issue development: the reviewed implementation goal, else the goal of the Manager's brief.
+// The goal of a development: the Manager's brief for an Issue (#815); a revision of a bot pull request carries the goal of the
+// development that opened it (input.review.implementation_goal is set by the control plane, never by a review since #815).
 export const developmentGoal=(input:any)=>String(input?.review?.implementation_goal||input?.manager?.brief?.goal||'');
 export const actionableFinding=(finding:any)=>finding.actionable===true&&finding.within_goal===true&&finding.requires_human_decision===false;
 /**

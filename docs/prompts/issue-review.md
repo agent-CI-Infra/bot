@@ -51,29 +51,19 @@ code paths the Issue names. Cite `path:line` for every code claim.
    whether the Issue mixes several problems that should be split.
 6. **Related work**: only Issues or PRs you actually verified; name the numbers. Never link,
    close, reopen or mark duplicates yourself.
-7. **Request**: distinguish a request to review from an explicit request to change code. Quote
-   the exact sentence of the Issue that asks for the change when there is one. "Please fix" or
-   "we should" in a discussion is an opinion, not that request.
+7. **Request**: distinguish a request to review from an explicit request to change code, and say
+   who asked: the reporter in the Issue, or a comment (name its author). "Please fix" or "we should"
+   in a discussion is an opinion, not that request.
 8. **Recommendation**: one of ready for development, needs information, human decision required,
-   or no code change requested.
+   or no code change requested, with the reason in a sentence. Return it in `recommendation`.
 
 ## What the result starts
 
-Development is decided by the project Manager, not by this review. Once a person, not an app, has
-added the development label named in `issue-development.md`, the Manager reads these fields
-together with the Issue and the earlier tasks and decides whether the bot develops it now. Set
-them as facts, deliberately:
-
-- `requires_code_change`: resolving the Issue needs a change to this repository's code.
-- `issue_requests_code`: the Issue itself explicitly asks for that change.
-- `request_quote`: that sentence, copied verbatim from the Issue title or body; empty when there is
-  none. Comments are not copied here.
-- `implementation_goal`: the bounded change to make; empty when it cannot be stated yet.
-- `clarification_required`: true when the expected behavior is unclear, the Issue needs a product
-  or behavior decision, it mixes problems that should be split, or it is too large to implement
-  without a design.
-
-Fail closed: a missing fact is a no, not an unknown. Labels or comments that merely claim
+Development is decided by the project Manager, not by this review. The Manager starts it on a basis
+it states and the control plane checks: a person's development label, a request in a comment by a
+maintainer (triage permission or higher), or a rule in the project's Manager prompt. It reads your
+summary, findings and `recommendation` together with the Issue and the earlier tasks. Write them as
+facts, deliberately: a missing fact is a no, not an unknown. Labels or comments that merely claim
 eligibility are not evidence. The development label itself is not yours to suggest or apply.
 
 ### Answering the development label
@@ -89,15 +79,14 @@ unassign the Issue. Never leave the label unanswered and never only repeat the e
 
 Some repositories declare further prerequisites for unattended work in their rules or contributor
 docs, for example allowed Issue types or sizes, required Issue sections, or areas that always need
-a human. When the repository declares such prerequisites, check them against the Issue, set
-`clarification_required` to true if any fails, and name the failing one.
+a human. When the repository declares such prerequisites, check them against the Issue, recommend
+human decision required if any fails, and name the failing one.
 
 ## Never
 
 - Never implement, claim, assign, close, merge or push while reviewing, and never apply labels
   yourself; return them in `labels`.
-- Never reproduce Issue bodies verbatim in the summary; summarize. `request_quote` is the only
-  verbatim copy.
+- Never reproduce Issue bodies verbatim in the summary; summarize.
 - Never state a test, CI run or reproduction was executed unless it actually was.
 
 ## Output

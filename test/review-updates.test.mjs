@@ -307,23 +307,3 @@ test('a queued PR update review prepares the current head instead of being super
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 1);
 });
 
-test('an Issue the review found ready says why development has not started: no label or an app\'s label; an assignee is the Manager\'s judgement', async t => {
-  const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-  await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true });
-  const engine = new TaskEngine(h.store, {}, undefined, undefined, acceptanceFixture), task = { id: 'review', repository_id: '101', kind: 'review.issue', object_number: 1 };
-  const object = { title: 'Fix it', body: 'Please fix the parser.' };
-  const result = { requires_code_change: true, clarification_required: false, issue_requests_code: true, implementation_goal: 'Fix the parser.', request_quote: 'Please fix the parser.', findings: [] };
-  let issue = {}, events = [];
-  const github = { path: path => path, object: async () => issue, pages: async () => events };
-  const wait = () => engine.developmentWait(github, task, { object }, result);
-  issue = { labels: [], assignees: [] }; assert.deepEqual(await wait(), { reason: 'label', label: 'bot-develop' });
-  // Someone assigned does not hold development back by itself: the Manager reads the assignees when it is offered.
-  issue = { labels: [{ name: 'Bot-Develop' }], assignees: [] }; events = [{ event: 'labeled', label: { name: 'bot-develop' }, actor: { type: 'Bot' } }];
-  assert.deepEqual(await wait(), { reason: 'app', label: 'bot-develop' });
-  events.push({ event: 'labeled', label: { name: 'bot-develop' }, actor: { type: 'User' } }); assert.equal(await wait(), null);
-  issue = { labels: [{ name: 'bot-develop' }], assignees: [{ login: 'alice' }] }; assert.equal(await wait(), null);
-  // Nothing to say when the review found no explicit code request, or development is off.
-  issue = { labels: [], assignees: [] };
-  assert.equal(await engine.developmentWait(github, task, { object }, { ...result, issue_requests_code: false }), null);
-  await admin('/api/repositories/101/policy', 'PATCH', { development_enabled: false }); assert.equal(await wait(), null);
-});

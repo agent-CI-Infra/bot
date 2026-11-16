@@ -37,9 +37,6 @@ export function reviewText(summary: string, findings: any[], inline: Set<string>
 export function reviewLanguage(setting: unknown, summary: string): 'zh' | 'en' {
   return setting === 'zh' || setting === 'en' ? setting : /[㐀-鿿]/.test(summary) ? 'zh' : 'en';
 }
-/** Why an Issue the review found ready for development is not being developed: no development label yet, or the label
- * was added by an app. Everything else about starting development is the Manager's judgement. */
-export interface DevelopmentWait { reason: 'label' | 'app', label: string }
 /** What a person did that this review answers. */
 export type Prompted = 'comment' | 'edit' | 'review' | 'review_comment' | 'label';
 const link = (text: string, url: string) => url ? `[${text}](${url})` : text;
@@ -52,13 +49,11 @@ const words = {
   zh: { review: (n: number, at: string, sha: string) => `第 ${n} 次检视，更新于 ${at}，检视提交 ${sha}`, reply: (actor: string, url: string, what: Prompted) => what === 'label' ? `；回应 @${actor} 加的标签` : `；回应 @${actor} 的${link({ comment: '评论', edit: '修改', review: '检视', review_comment: '行内评论' }[what], url)}`,
     alert: (n: number, items: string) => `需要人工处理 ${n} 项：${items}。汇总见文末。`, heading: (n: number) => `需要人工处理（${n} 项）`, inline: '行内意见', mark: '需要人工处理',
     resolved: (n: number, items: string) => `已关闭 ${n} 条后续提交已修复的行内意见：${items}。`, open: (n: number, items: string) => `之前的行内意见仍未解决 ${n} 条：${items}。`, join: '；', list: '、',
-    behavior: (files: string[]) => `这些文件改变了 bot 的行为，需要维护者决定是否接受：${files.join('、')}`, clarification: '需求有待人确认，确认前不会自动开发',
-    waiting: (w: DevelopmentWait) => w.reason === 'app' ? `开发还没开始：\`${w.label}\` 标签要由人加上，App 加的不算。` : `开发还没开始：等有人给这个 Issue 加上 \`${w.label}\` 标签。` },
+    behavior: (files: string[]) => `这些文件改变了 bot 的行为，需要维护者决定是否接受：${files.join('、')}` },
   en: { review: (n: number, at: string, sha: string) => `Review ${n}, updated ${at}, reviewed commit ${sha}`, reply: (actor: string, url: string, what: Prompted) => what === 'label' ? `; responding to the label @${actor} added` : `; responding to @${actor}'s ${link({ comment: 'comment', edit: 'edit', review: 'review', review_comment: 'inline comment' }[what], url)}`,
     alert: (n: number, items: string) => `Needs a person (${n}): ${items}. Summary at the end.`, heading: (n: number) => `Needs a person (${n})`, inline: 'inline comment', mark: 'Needs a person',
     resolved: (n: number, items: string) => `Resolved ${n} inline comment(s) fixed by later commits: ${items}.`, open: (n: number, items: string) => `Still open from earlier reviews (${n}): ${items}.`, join: '; ', list: ', ',
-    behavior: (files: string[]) => `These files change the bot's behavior; a maintainer decides whether to accept them: ${files.join(', ')}`, clarification: 'The requirement needs a person to confirm it; nothing is developed automatically until then',
-    waiting: (w: DevelopmentWait) => w.reason === 'app' ? `Development has not started: a person, not an app, has to add the \`${w.label}\` label.` : `Development has not started: it waits for a person to add the \`${w.label}\` label.` },
+    behavior: (files: string[]) => `These files change the bot's behavior; a maintainer decides whether to accept them: ${files.join(', ')}` },
 };
 // One line of a finding for the lists: the model's human_action, else the first line of the finding. Heading and quote
 // markers at the start and bold or italic stars go. Code spans and underscores stay, so names such as `total_value` and
@@ -79,7 +74,6 @@ export function humanItems(language: 'zh' | 'en', result: any, inlineUrls: Map<s
   const items: HumanItem[] = result.findings.filter((f: any) => f.requires_human_decision === true)
     .map((f: any) => ({ text: line(String(f.human_action || '').trim() || f.body, 300), url: inlineUrls.get(f.id) || null }));
   if (result.behavior_changes?.length) items.push({ text: words[language].behavior(result.behavior_changes) });
-  if (result.clarification_required && !items.length) items.push({ text: words[language].clarification });
   return items;
 }
 // A finding a person must handle says so where it stands, inline or in the summary comment.
@@ -90,13 +84,13 @@ export const markHuman = (language: 'zh' | 'en', finding: any) => finding.requir
 // they are seen on opening the comment and found again at its end. A comment that later reviews edit says which review
 // it shows and, when a person's comment asked for it, whom it answers.
 export function summaryComment(o: { language: 'zh' | 'en', review?: { count: number, at: string, sha: string, actor?: string | null, url?: string | null, what?: Prompted },
-  overview: string, discussion: string[], coverage: string, human: HumanItem[], resolved: Place[], open?: Place[], development?: DevelopmentWait | null }): string {
+  overview: string, discussion: string[], coverage: string, human: HumanItem[], resolved: Place[], open?: Place[] }): string {
   const w = words[o.language], parts: string[] = [];
   if (o.review && o.review.count > 1) parts.push(`*${w.review(o.review.count, o.review.at, o.review.sha.slice(0, 7))}${o.review.actor ? w.reply(o.review.actor, o.review.url || '', o.review.what || 'comment') : ''}*`);
   // Items run together in one sentence there, so each loses its own closing punctuation.
   const brief = (text: string) => line(text, 120).replace(/[。．.；;，,、:：\s]+$/u, '');
   if (o.human.length) parts.push(`> [!IMPORTANT]\n> ${w.alert(o.human.length, o.human.map(item => brief(item.text)).join(w.join))}`);
-  parts.push(o.overview, o.development ? w.waiting(o.development) : '', o.discussion.join('\n\n---\n\n'));
+  parts.push(o.overview, o.discussion.join('\n\n---\n\n'));
   const places = (list: Place[]) => list.map(r => `[${r.path}${r.line ? ':' + r.line : ''}](${r.html_url})`).join(w.list);
   if (o.open?.length) parts.push(w.open(o.open.length, places(o.open)));
   if (o.resolved.length) parts.push(w.resolved(o.resolved.length, places(o.resolved)));

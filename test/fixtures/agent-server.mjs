@@ -34,9 +34,11 @@ function dispatch(context){
   const work=event.type==='review.published'?`development.${event.object.type}`:`review.${event.object.type}`;
   const option=options.create.find(option=>option.work===work);
   const review=event.facts.review;
-  if(!option||event.type==='review.published'&&event.object.type==='issue'&&(!review?.quote_in_issue||!review.requires_code_change||review.clarification_required||event.facts.development?.assignees?.length||event.facts.development?.bot_pull_request))
+  // Development of an Issue starts on a person's development label (#815); without one, or with someone assigned, it waits.
+  if(!option||event.type==='review.published'&&event.object.type==='issue'&&(!event.facts.development?.label||event.facts.development?.assignees?.length||event.facts.development?.bot_pull_request))
     return {decision:'ignore',option_ids:[],reason:'没有符合本场景的待办工作。'};
-  return {decision:'create',option_ids:[option.id],reason:event.type==='review.published'?'按已发布的检视启动开发。':'检视这次对象事件。'};
+  return {decision:'create',option_ids:[option.id],reason:event.type==='review.published'?'按已发布的检视启动开发。':'检视这次对象事件。',
+    ...(work==='development.issue'?{basis:{kind:'label'},brief:{goal:'Fix addition and document numeric behavior',criteria:['add(2, 3) returns 5']}}:{})};
 }
 function model(input){
   const raw=input.messages.find(m=>m.role==='user').content,context=JSON.parse(Array.isArray(raw)?raw.map(c=>c.text||'').join(''):raw);
@@ -44,7 +46,7 @@ function model(input){
   // The Manager decides with create_task, continue_task or ignore_event (#815).
   if(input.tools?.some(tool=>tool.function?.name==='create_task')&&context.work){
     const decision=dispatch(context);stats.dispatches.push({event:context.event,options:{create:context.work.create,continue:context.work.continue.map(task=>({...task,id:'continue:'+task.task_id}))},decision,model:input.model});
-    return decision.decision==='create'?call('create_task',{work:decision.option_ids,reason:decision.reason},'dispatch')
+    return decision.decision==='create'?call('create_task',{work:decision.option_ids,reason:decision.reason,...(decision.basis?{basis:decision.basis,brief:decision.brief}:{})},'dispatch')
       :decision.decision==='continue'?call('continue_task',{task_id:decision.option_ids[0].replace(/^continue:/,''),reason:decision.reason},'dispatch'):call('ignore_event',{reason:decision.reason},'dispatch');
   }
   // Independent acceptance inspects the fixed candidate, not the executor's repository/object prompt.
@@ -72,7 +74,7 @@ function model(input){
       staled=true;const current=repo.pulls.get(43),files=trees.get(commits.get(current.head.sha).tree.sha).map(f=>f.path==='calc.mjs'?{...f,sha:blob(goodBody(repoId))}:f);
       current.head.sha=commit(files,current.head.sha,'new head');
     }
-    result={summary:number===8?'Do not echo '+config.model_key:'Reviewed project material',requires_code_change:requested||!issue,issue_requests_code:requested,clarification_required:false,implementation_goal:'Fix addition and document numeric behavior',request_quote:requested?context.object.body_excerpt:'',
+    result={summary:number===8?'Do not echo '+config.model_key:'Reviewed project material',recommendation:requested?'Ready for development: fix addition and document numeric behavior.':'No code change requested.',
       findings:[{body:'The arithmetic implementation requires attention.',format:issue?'discussion':'inline',actionable:true,within_goal:true,requires_human_decision:false,selection_reason:issue?'Issue has no inline diff.':'Evidence is on the changed arithmetic line.',path:'calc.mjs',line:number===44?999:1,side:'RIGHT'}]};
     return call('finish_review',result,'finish');
   }

@@ -69,7 +69,7 @@ agent 先调查，再决定是否值得提报。应按需查看完整日志、�
 
 提报通过现有 `queueWebhook(..., issues.opened, ...)` 进入检视，和实际 GitHub webhook 使用同一 opened 唯一键。检视关闭时只保留 Issue。external 和 unknown 的来源类别保存在本地，不论后续日志指令或标签内容如何，都不能进入开发。
 
-code 来源还必须保留 Current behavior、Expected behavior、Requested code change 正文，检视明确返回 `product_defect=true`，通过现有 `requires_code_change`、`issue_requests_code`、无需澄清、非空目标和原文 quote 检查，并由人应用配置的开发标签。quote 必须来自日志区之前的正文。Bot 不加开发标签。进入开发及发布前继续检查功能开关、项目能力上限为 develop、实际安装的事件订阅、Issue 开放、标签仍在且无人指派；对应 bot PR 的修订也保留原 Issue 的开关和批准边界。仍由现有流程测试、发布 `bot/issue-...` 分支和 PR，不合并。
+code 来源还必须保留 Current behavior、Expected behavior、Requested code change 正文，检视明确返回 `product_defect=true`，而且没有人被指派。这是 bot 自己提报的 Issue，开发它不需要别的依据，由 Manager 决定（#815 之前还要原文 quote 和人加的开发标签）。Bot 不加开发标签。进入开发及发布前继续检查功能开关、项目能力上限为 develop、实际安装的事件订阅、Issue 开放且无人指派；对应 bot PR 的修订也保留原 Issue 的开关和批准边界。仍由现有流程测试、发布 `bot/issue-...` 分支和 PR，不合并。
 
 PR 需要的标签（例如仓库要求的一个 `release:*` 类别）由仓库自己的规则告诉 agent，经 `create_pull_request` 的 `labels` 提交，规则见[架构](architecture.md#检视与开发数据流)。
 

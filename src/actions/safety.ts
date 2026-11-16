@@ -63,5 +63,6 @@ export function actionsDevelopmentAllowed(store: Store, id: string, number: numb
   if (!issue) return true;
   const prose = String(issue.body || '').split('<!-- dept-bot-actions-log-start -->')[0]!;
   if (!['Current behavior', 'Expected behavior', 'Requested code change'].every(title => new RegExp(`## ${title}\\n+\\S`).test(prose))) return false;
-  return !result || result.product_defect === true && !!result.request_quote?.trim() && (String(issue.title || '') + '\n' + prose).includes(result.request_quote);
+  // The review that checked repository code confirms the product defect; the quote it once had to return went with #815.
+  return !result || result.product_defect === true;
 }
