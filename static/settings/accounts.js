@@ -56,7 +56,8 @@ function accountDetailBody(account, projects, redraw) {
     : '用户 Token 账号按 Token 所属用户的仓库权限访问，没有 GitHub 安装；关联安装只属于 GitHub App 账号。', 'muted'));
   else {
     const table = element('table', '', 'rule-table'), head = element('tr', ''), thead = document.createElement('thead'), tbody = document.createElement('tbody');
-    for (const caption of ['安装', '目标', '状态', '仓库', '缺什么', '会挡住什么']) head.append(element('th', caption));
+    tableCaption(table, `关联安装（${installs.length}）：这个凭据能到达的 GitHub 安装、它还在不在、缺哪些权限，以及缺口会挡住什么`);
+    for (const caption of ['安装', '目标', '状态', '仓库', '缺什么', '会挡住什么']) head.append(columnHeader(caption));
     thead.append(head); table.append(thead, tbody);
     for (const installation of installs) {
       const gaps = installation.access_gaps, row = element('tr', '');
