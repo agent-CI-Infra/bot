@@ -5,6 +5,7 @@ import { registerEventWork } from '../work/events.js';
 import { sectionText } from '../work/settings.js';
 import { recordEvent } from '../dispatch/store.js';
 import { failedStepOutput, verifiedEvidence, type Evidence, type FailureKind } from './classifier.js';
+import { causeIdentity, validReport, type FailureReport } from './reports.js';
 
 const kinds = new Set<FailureKind>(['external', 'code', 'unknown']);
 // How much of each failed step's output goes into the context file; read_job_log reads the rest when the model needs it.
@@ -15,10 +16,8 @@ const key = (runId: number, attempt: number) => `${runId}:${attempt}`;
 /**
  * The Actions failure analysis is a task in the project computer, on a checkout of the failed commit, when the Manager
  * starts one for the failed run (the run is an event it decides on). The
- * agent reads the failed jobs and records, for each, whether rerunning the same commit is likely to pass (external), the
- * repository is at fault (code), or the evidence does not tell (unknown), through rerun_failed_run and report_failure.
- * The control plane keeps the decisions it bases on that: cited lines must be lines the failed steps printed, an
- * external or code verdict without such a line becomes unknown, and the single rerun and the reports stay its own.
+ * agent investigates causes and explicitly selects useful reports, associating affected jobs with each cause.
+ * The control plane verifies references, retains the full diagnosis and owns publication and the single rerun budget.
  */
 export const analysisTask = (store: Store, repositoryId: string, runId: number, attempt: number) =>
   store.get('SELECT * FROM tasks WHERE unique_key=?', `${repositoryId}:actions.failures:${key(runId, attempt)}`);
@@ -32,17 +31,26 @@ export function analysisDecision(store: Store, repositoryId: string, runId: numb
 }
 /** Asks the Manager whether to analyze this failed attempt; its task (when created) is found by analysisTask. */
 export function requestAnalysis(store: Store, github: GitHub, run: any, failed: Failed[]): void {
+  const known = store.all("SELECT cause,issue_number,run_id,attempt FROM actions_failure_reports WHERE repository_id=? AND workflow_id=? AND state='sent' AND cause IS NOT NULL ORDER BY rowid DESC LIMIT 50", String(github.repository.id), run.workflow_id);
+  const causes: Row[] = [];
+  const seen = new Set<string>();
+  for (const row of known) {
+    const identity = causeIdentity(String(row.cause));
+    if (!identity || seen.has(identity)) continue;
+    seen.add(identity); causes.push(row);
+    if (causes.length === 20) break;
+  }
   const jobs = failed.map(({ job, output }) => {
     const lines = output.lines.slice(-promptLines); let text = lines.join('\n'); if (text.length > promptChars) text = text.slice(-promptChars);
     return { job_id: job.id, name: job.name, failed_steps: (job.steps || []).filter((s: any) => s.conclusion === 'failure').map((s: any) => ({ number: s.number, name: s.name })),
       ...(output.problem ? { log_problem: output.problem } : {}), failed_step_output: text, ...(output.lines.length > lines.length || text.length < lines.join('\n').length ? { output_clipped: true } : {}) };
   });
   const input = github.redactor.clean({ run: { id: run.id, attempt: run.run_attempt, workflow: run.name, event: run.event, branch: run.head_branch, head_sha: run.head_sha,
-    url: `https://github.com/${github.fullName}/actions/runs/${run.id}` }, failed_jobs: jobs });
+    url: `https://github.com/${github.fullName}/actions/runs/${run.id}` }, failed_jobs: jobs, reported_causes: causes });
   const repositoryId = String(github.repository.id);
   recordEvent(store, { repositoryId, key: `${repositoryId}:actions.run_failed:${key(run.id, run.run_attempt)}`, type: 'actions.run_failed', source: 'actions',
     summary: `Actions 运行失败：${String(run.name || '').slice(0, 120)} run ${run.id} / attempt ${run.run_attempt}`,
-    facts: { run: (input as any).run, failed_jobs: (input as any).failed_jobs.map(({ failed_step_output, ...job }: any) => ({ ...job, output_tail: String(failed_step_output || '').slice(-1500) })) },
+    facts: { run: (input as any).run, reported_causes: (input as any).reported_causes, failed_jobs: (input as any).failed_jobs.map(({ failed_step_output, ...job }: any) => ({ ...job, output_tail: String(failed_step_output || '').slice(-1500) })) },
     options: [{ id: 'analysis', work: 'actions.failures', title: `Actions 失败分析 run ${run.id} / attempt ${run.run_attempt}`, default: true,
       spec: { type: 'event', kind: 'actions.failures', key: key(run.id, run.run_attempt), sha: run.head_sha, input, summary: `Actions 失败分析 run ${run.id} / attempt ${run.run_attempt}` } }] });
 }
@@ -51,6 +59,11 @@ export function taskVerdicts(task: Row): Map<unknown, any> | null {
   if (task.status !== 'succeeded' || !task.result) return null;
   const result = JSON.parse(task.result);
   return Array.isArray(result.verdicts) ? new Map(result.verdicts.map((verdict: any) => [verdict.job_id, verdict])) : null;
+}
+export function taskReports(task: Row): FailureReport[] {
+  if (task.status !== 'succeeded' || !task.result) return [];
+  const result = JSON.parse(task.result);
+  return result.version === 2 && Array.isArray(result.reports) ? result.reports : [];
 }
 /** Verdicts checked against the full failed-step output: cited lines must be lines the steps printed. */
 export function classifiedEvidence(failed: Failed[], verdicts: Map<unknown, any> | null): Evidence[] {
@@ -68,7 +81,7 @@ export { failedStepOutput };
 
 registerEventWork('actions.failures', {
   async prepare(store, _github, task, input) {
-    const files: Record<string, string> = { 'run.json': JSON.stringify({ run: input.run, failed_jobs: input.failed_jobs.map(({ failed_step_output: _, ...job }: any) => job) }, null, 2) };
+    const files: Record<string, string> = { 'run.json': JSON.stringify({ run: input.run, reported_causes: input.reported_causes || [], failed_jobs: input.failed_jobs.map(({ failed_step_output: _, ...job }: any) => job) }, null, 2) };
     for (const job of input.failed_jobs) files[`failed-steps/${job.job_id}.log`] = String(job.failed_step_output || '');
     const budget = store.get('SELECT retry_state FROM actions_failure_runs WHERE repository_id=? AND run_id=?', task.repository_id, input.run.id);
     return { sha: input.run.head_sha, files,
@@ -94,7 +107,20 @@ registerEventWork('actions.failures', {
     };
     return {
       ...(writes.includes('actions_rerun') ? { rerun_failed_run: async (_id: string, args: any) => record(Array.isArray(args?.job_ids) ? args.job_ids : [], 'external', args?.reason, args?.evidence) } : {}),
-      ...(writes.includes('issue') ? { report_failure: async (_id: string, args: any) => record([args?.job_id], String(args?.kind), args?.reason, args?.evidence) } : {})
+      ...(writes.includes('issue') ? { report_failure: async (_id: string, args: any) => {
+        // In-flight tasks may still have the old tool schema. Keep their verdict, but do not manufacture a new report.
+        if (args?.job_id !== undefined && !args?.job_ids) return record([args.job_id], String(args.kind), args.reason, args.evidence);
+        if (!validReport(args, new Set(jobs.keys() as Iterable<number>))) return { error: 'analysis_arguments_invalid', message: 'Supply a stable cause, affected job_ids, kind, title, full diagnosis, report_reason and typed evidence references. Use only this attempt\'s failed job ids.' };
+        const report: FailureReport = { cause: args.cause.trim(), job_ids: args.job_ids, kind: args.kind, title: args.title, diagnosis: args.diagnosis, report_reason: args.report_reason, evidence: args.evidence };
+        state.reports ??= Object.create(null);
+        state.reports[causeIdentity(report.cause)] = report;
+        const found = report.job_ids.map(id => {
+          const cited = report.evidence.flatMap(cite => cite.type === 'log' && cite.job_id === id ? cite.lines : []);
+          record([id], report.kind, report.report_reason, cited);
+          return { job_id: id, found: verifiedEvidence(cited, String(jobs.get(id).failed_step_output || '').split('\n')).length };
+        });
+        return { recorded: true, cited_lines_found: found, note: 'This replaces the report for this cause. The full diagnosis is retained. Publication checks full logs and source/artifact provenance after finish_analysis; it does not verify causal conclusions or approve development.' };
+      } } : {})
     };
   },
   checkResult(_store, _task, _input, result) {
@@ -102,6 +128,6 @@ registerEventWork('actions.failures', {
   },
   finish(_store, _task, _input, result, state) {
     if (typeof result?.summary !== 'string') return stop('actions_classification_invalid', 'failed', 'Actions 失败分析没有用 finish_analysis 结束。');
-    return { summary: result.summary, verdicts: Object.values(state.verdicts || {}) };
+    return { version: 2, summary: result.summary, verdicts: Object.values(state.verdicts || {}), reports: Object.values(state.reports || {}) };
   }
 });

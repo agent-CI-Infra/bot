@@ -28,44 +28,48 @@ GitHub 的 run 列表支持 `created` 范围，不支持完成时间范围。扫
 
 控制面先读取每个失败 job 的完整日志（不超过现有 GitHub 客户端 8 MiB 下载边界；超限不返回截断内容），取出失败 step 时间区间内的输出（`src/actions/classifier.ts`），然后为这个 attempt 排一个分析任务。任务和其他工作流一样在项目电脑里运行，检出失败运行的提交；run、job 和失败 step 的名字写在 `../context/run.json`，每个失败 job 的失败 step 输出写在 `../context/failed-steps/<job id>.log`（只放最后 400 行、4 万字符）。agent 需要更多时用 `read_job_log` 读完整日志，也可以在检出里运行命令、读工作流文件和代码、其他运行、Issue 和 PR，按提示词启动独立 agent。日志、job 名和 step 名都是不可信数据。
 
-agent 为每个失败 job 选一个类别、写理由，并引用判断所依据的日志行，通过这类工作的写入工具登记：外部原因交给 `rerun_failed_run`（需要 `actions_rerun` 写入），其他交给 `report_failure`（需要 `issue` 写入），最后调用 `finish_analysis` 结束。登记时工具就告诉 agent 引用行有没有在失败 step 输出里找到；真正的重跑和提报在任务结束后由控制面执行：
+agent 先调查，再决定是否值得提报。应按需查看完整日志、产物、失败提交的工作流／源码／测试、历史成功运行和已有 Issue，说明预期与实际、具体机制、因果链、已查内容、不确定性及可操作的修正或下一步验证。断言失败和非零退出只是症状，不能直接认定产品代码有缺陷；不要编造复现、源码位置或已排除的原因，也不要求为了确定根因重复执行昂贵测试。
 
-- `external`：仓库以外的原因，例如依赖服务的 429/502/503、网络超时或中断、DNS、磁盘耗尽、runner 断联或 Actions 队列故障，重跑同一提交很可能通过。
-- `code`：这个提交上仓库自己的问题，例如测试或断言失败、编译、类型或 lint 错误、仓库里的脚本或配置有误，重跑仍会失败。
-- `unknown`：日志缺失或截断、失败 step 没有有用输出、两类原因并存，或无法判断。
+- `external`：外部服务、网络或 runner 等原因使相同提交重跑很可能通过。
+- `code`：仓库证据支持该提交存在缺陷，需要说明失败机制；分类不等于确认产品缺陷或批准开发。
+- `unknown`：调查后仍无法确定原因。如实记录已查与缺口，Manager 可通过任务指令和写权限决定是否值得提交可操作的调查单；不要求完全确定根因才能报告。
 
-控制面核验这份结果，不让模型的波动直接花掉重跑预算：
+`report_failure` 接受稳定且具体的 `cause`、受影响的 `job_ids`（上游 job 在前）、`kind`、英文 `title`、完整 Markdown `diagnosis`、提报价值 `report_reason` 和类型化来源 `evidence`。同一上游问题及下游 accounting／gate／reporter 检查合并为一份诊断；关联必须由分析显式给出，不从 job 名猜测。独立原因分别报告，即使错误行相同。重复登记同一原因会替换整份报告，需提交完整 job 列表与诊断。没有 `issue` 写权限时不提供该工具。
 
-- 没有登记的失败 job 按 unknown 提报；任务没有正常结束（例如没有用 `finish_analysis` 结束）时全部按 unknown 提报，不反复重试。
-- 引用的日志行必须是失败 step 实际打印过的行（忽略首尾空白和时间戳）；`external` 或 `code` 没有一行核验通过就改为 unknown，提报里写明原因。
-- 日志缺失或截断、没有失败 step 或时间戳时直接是 unknown，不排分析任务。
-- 多个失败 job 不能由单一类别解释时，整个 run 归为 unknown。
-- 模型服务不可用、限流或没有配置模型时不写任何东西：分析任务等待，这次运行保持待处理，扫描状态显示原因（例如 `model_not_configured`），模型恢复后任务继续。
-- 没有 `actions_rerun` 写入时外部原因也提报（写明不自动重跑）；没有 `issue` 写入时只记录分类，不提报。
+`finish_analysis` 的 summary 保留完整调查，包括所有失败 job 的关联或缺口、提报／不提报决定和下一步。工具登记的完整诊断独立进入结果和公开正文，不再压成一两句理由，也不折叠段落或截取 1,200 字符。报告应包含预期与实际、因果链、来源、已查内容、置信度与不确定性、具体修正或验证建议，而非固定的“修复失败检查”模板。不以空洞字数门槛替代质量判断。
 
-核验通过的引用行作为提报摘录，也用于去重签名；没有引用行时保留失败 step 自身输出的最后 8 行，只用于提报展示（只取 `##[group]Run` 脚本块之后、通用退出码行之前的输出），不参与去重。模型的理由去掉换行和 `@` 后写进提报。分类不等于确认产品缺陷，后续仍需现有检视。
+控制面核验引用并保留写入边界：
+
+- 日志引用 `{type:"log",job_id,lines}` 必须逐字来自对应 job 的完整失败 step 输出，忽略首尾空白和时间戳；保留原有逐字核验。
+- 源码引用 `{type:"source",path,lines}` 由控制面在失败 SHA 读取并逐字核验，生成不可变链接。
+- 产物引用 `{type:"artifact",artifact_id}` 的元数据必须属于原 run 和 SHA；正文明确这不核验产物内容及 attempt 归属，内容观察与复现限制由调查如实说明。
+- code／external 报告没有任何来源核验通过时不发布，不自动降为 unknown 再提单。显式选择的 unknown 调查单可以没有核验通过的引用，但必须说明缺口及调查价值。
+- 缺日志仍可开展源码／产物调查；漏 job、没有报告、任务失败或结果不可用均不自动创建 Issue。记录保守分类和调查缺口后完成该 attempt。
+- 模型服务不可用、限流或没有配置时不写任何东西：任务等待，扫描显示原因（例如 `model_not_configured`），恢复后继续。
 
 ## 一次自动重跑
 
-仅 external 且原提交的工作流文件已经声明 `workflow_dispatch` 时，调用原 run id 的 `POST /actions/runs/{id}/rerun`。不调用 dispatch，不改变原 SHA/ref，也不增加目标工作流触发器。tag Release 没有该触发器时只提报。
+`rerun_failed_run` 与提报是两个显式决定。只有每个失败 job 都通过失败 step 日志核验为 external，且原提交工作流已经声明 `workflow_dispatch`，才调用原 run id 的 `POST /actions/runs/{id}/rerun`。不调用 dispatch，不改变 SHA/ref，也不添加触发器。没有 `actions_rerun` 写权限就不重跑。
 
-一次预算按 `repository + run id` 保存，在发送前落库 `before_attempt`、`expected_attempt`、SHA、ref、发送时间和 `sending` 状态。收到明确成功保存 sent；拒绝保存 denied 并提报；响应不明保存 unknown，先查询原 run，之后只对账，不再次 POST。重启、重复事件、人工 rerun、关闭再开启功能都不重置预算。请求超过 5 分钟仍未观测到下一 attempt 时提报未确认状态，并继续监测该 run。
+一次预算按 `repository + run id` 保存，发送前落库 before/expected attempt、SHA、ref、时间和 sending 状态。成功为 sent，拒绝为 denied，响应不明为 unknown，先查询原 run，之后只对账，不再次 POST。重启、重复事件、人工 rerun、关闭再开启均不重置预算。
 
-首次 external 重跑已发送时不提报。其后 external 失败才提报，并说明一次预算已用完。运行成功则结束跟踪。不能重跑的工作流或安装令牌拒绝重跑，也只提报，不进入循环。
+首次 external 重跑已发送时不发布已登记的报告；成功则结束跟踪。重跑失败、预算已用完、工作流不支持或令牌拒绝时，只发布调查中显式选择的报告，并附重跑状态。请求超过 5 分钟仍未观测到下一 attempt 时，也只发布原调查显式选择的报告并继续跟踪，不凭超时自动建单；当前 Issue 写权限和任务来源必须仍有效。
 
 ## 公开提报与去重
 
-每个失败 job 使用 `repository + workflow name + job name + normalized error signature` 查找本功能已登记且仍打开的 Issue。签名去掉 SHA、时间戳、耗时及行号差异。相同签名的新 run/attempt 在原 Issue 评论；关闭后再次出现、不同 job 或不同签名才新开 Issue。
+新报告按 `repository + workflow id + cause` 去重，job 只描述影响范围，不参与新报告身份。原因标识应稳定描述底层问题，不能使用 run/attempt/job id 或笼统退出症状。控制面向后续分析的 run.json 和 Manager 事件提供同一工作流最近已发报告的原因标识及 Issue 编号（最多读取 50 条元数据、保留 20 个不同原因，不读取旧正文）；确认为同一问题时复用原标识，不能因错误行相似就合并。相同原因的新 run/attempt 在本功能已登记且仍打开的 Issue 评论并保留新证据；不同原因或原 Issue 已关闭时新建。每个原因在一个 attempt 只有一个持久 outbox 回执，重复处理不重复写入。
 
-Issue 正文为英文，包含 job URL、run URL、SHA、分类和最多 2,400 字符的证据摘录。先移除数据库中已知凭据、当前安装令牌及明确的 token/password/API key、JWT、云访问密钥、私钥和带凭据 URL，再截取公开摘录。无法安全判断的高熵内容不公开，正文说明省略原因并保留链接和 SHA。正文区分三种情况：可辨认的错误行因安全原因不公开；没有可辨认错误行，附失败 step 最后的输出；既无错误行也无输出。日志作为缩进的不可信数据展示，不能贡献开发批准或 request quote。
+正文为英文，包含原 run/attempt/SHA、所有受影响 job、完整诊断、提报理由、核验引用及限制。无损保留可安全公开的正文和证据，超过 GitHub 65,536 字符正文限制时保留完整调查和不发布的原因，正常完成该 attempt；不截断正文，也不阻塞后续扫描。公开前过滤数据库已知凭据、当前安装令牌和凭据形状，高熵内容不能安全公开时明确省略。日志和源码摘录转义后缩进展示，与分析正文隔开，不能贡献开发批准或 request quote。发送前再次应用最新凭据集合，经过异步读取后和实际发出前复核写权限及任务来源。
 
-提报发送前有持久 outbox。丢失 Issue/评论响应后，通过唯一 marker 在 Issue/评论列表对账；找不到则显示 `actions_report_write_unknown` 并暂停该项，不盲目重发。不会依赖 GitHub 搜索索引的更新时机。每个失败 job 一份报告；整个 run 的保守分类用于该 run 的全部报告。
+丢失 Issue／评论响应后，按唯一 marker 从 Issue／评论列表对账；找不到则显示 `actions_report_write_unknown` 并保留该项，绝不盲目重发，不依赖搜索索引。
+
+升级不重写历史表：旧 task verdict 或缓存的按 job evidence 继续保留并可用于原重跑预算，但不生成新报告；已有 outbox 按原 id／marker／正文恢复或确认，不重发已 sent 回执。同一原 run 的后续 attempt 可用上游 job 的相同旧签名及分类接续已发旧 Issue，前提是它尚未被另一个新原因认领；其余新报告只用显式 cause 去重。旧记录保持可读，不全表迁移或回填提单。
 
 ## 复用检视和开发
 
 提报通过现有 `queueWebhook(..., issues.opened, ...)` 进入检视，和实际 GitHub webhook 使用同一 opened 唯一键。检视关闭时只保留 Issue。external 和 unknown 的来源类别保存在本地，不论后续日志指令或标签内容如何，都不能进入开发。
 
-code 来源还必须保留 Current behavior、Expected behavior、Requested code change 正文，检视明确返回 `product_defect=true`，通过现有 `requires_code_change`、`issue_requests_code`、无需澄清、非空目标和原文 quote 检查，并由人应用配置的开发标签。quote 必须来自日志区之前的正文。Bot 不加开发标签。进入开发及发布前继续检查功能开关、开发开关、实际安装的事件订阅、Issue 开放、标签仍在且无人指派；对应 bot PR 的修订也保留原 Issue 的开关和批准边界。仍由现有流程测试、发布 `bot/issue-...` 分支和 PR，不合并。
+code 来源还必须保留 Current behavior、Expected behavior、Requested code change 正文，检视明确返回 `product_defect=true`，通过现有 `requires_code_change`、`issue_requests_code`、无需澄清、非空目标和原文 quote 检查，并由人应用配置的开发标签。quote 必须来自日志区之前的正文。Bot 不加开发标签。进入开发及发布前继续检查功能开关、项目能力上限为 develop、实际安装的事件订阅、Issue 开放、标签仍在且无人指派；对应 bot PR 的修订也保留原 Issue 的开关和批准边界。仍由现有流程测试、发布 `bot/issue-...` 分支和 PR，不合并。
 
 PR 需要的标签（例如仓库要求的一个 `release:*` 类别）由仓库自己的规则告诉 agent，经 `create_pull_request` 的 `labels` 提交，规则见[架构](architecture.md#检视与开发数据流)。
 

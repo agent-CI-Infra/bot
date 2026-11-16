@@ -28,9 +28,16 @@ export function classifyOutput(job) {
   return { kind, reason: kind === 'external' ? 'A service outside the repository failed.' : kind === 'code' ? 'The repository code failed its own check.' : 'The evidence does not tell.', evidence };
 }
 // The analysis agent of the Actions failure tests: it plays the workflow's task in the project computer (see
-// event-tasks.mjs). By default it answers with the rules above, through the same tools the agent has: an external job is
-// handed to rerun_failed_run, every other job to report_failure. respond(input, request, n) may answer instead with
-// { content } (the JSON of {jobs:[...]} or text that is not), or { status } for a model that does not answer.
+// event-tasks.mjs). It supplies explicit reports for supported synthetic causes and leaves unknown symptoms unreported.
+// respond may provide jobs, full reports and a summary, or { status } for a model that does not answer.
+import { normalizeSignature } from '../dist/actions/classifier.js';
+export const reportFor = (job, verdict) => ({
+  cause: `${job.name}: ${normalizeSignature(verdict.evidence.join('\n'))}`,
+  job_ids: [job.job_id], kind: verdict.kind, title: `Investigate ${job.name}`,
+  diagnosis: `## Current behavior\n${verdict.reason}\n\n## Expected behavior\nThe synthetic fixture check should succeed.\n\n## Investigation\nThe fixture model inspected the failed step output. This synthetic decision is not an independent reproduction.\n\n## Uncertainty\nNo actual repository reproduction was performed.\n\n## Requested code change\nInvestigate the failing check and correct the demonstrated fixture defect.\n\n## Next verification\nRun the affected check with a controlled fixture.`,
+  report_reason: 'The fixture analysis explicitly selected this actionable report.',
+  evidence: verdict.evidence.length ? [{ type: 'log', job_id: job.job_id, lines: verdict.evidence }] : []
+});
 export function actionsModel(_t, respond) {
   const requests = [];
   const agent = async ({ input, target, tools }) => {
@@ -38,13 +45,14 @@ export function actionsModel(_t, respond) {
     const reply = respond ? await respond(input, requests.at(-1), requests.length) : { content: JSON.stringify({ jobs: input.failed_jobs.map(job => ({ job_id: job.job_id, ...classifyOutput(job) })) }) };
     if (reply.status) return { wait: 'model_http_' + reply.status };
     let value; try { value = JSON.parse(reply.content); } catch { value = null; }
-    if (!Array.isArray(value?.jobs)) throw Object.assign(new Error('unusable output'), { code: 'actions_classification_invalid', state: 'failed' });
-    for (const job of value.jobs) {
+    if (!Array.isArray(value?.jobs) && !Array.isArray(value?.reports)) throw Object.assign(new Error('unusable output'), { code: 'actions_classification_invalid', state: 'failed' });
+    for (const job of value.jobs || []) {
       const args = { reason: job.reason, evidence: job.evidence };
       if (job.kind === 'external' && tools.rerun_failed_run) await tools.rerun_failed_run('call', { job_ids: [job.job_id], ...args });
-      else await tools.report_failure?.('call', { job_id: job.job_id, kind: job.kind, ...args });
     }
-    return { summary: 'Analyzed.' };
+    const reports = value.reports || (value.jobs || []).filter(job => job.kind !== 'unknown').map(verdict => reportFor(input.failed_jobs.find(job => job.job_id === verdict.job_id), verdict));
+    for (const report of reports) await tools.report_failure?.('call', report);
+    return { summary: value.summary || 'Analyzed all failed jobs; unsupported symptoms remain unreported.' };
   };
   return { url: 'https://model.invalid/v1', requests, agent };
 }

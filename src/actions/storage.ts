@@ -20,10 +20,17 @@ export function actionsStorage(store: Store) {
     CREATE TABLE IF NOT EXISTS actions_failure_reports(id TEXT PRIMARY KEY, repository_id TEXT NOT NULL REFERENCES repositories(id),
       run_id INTEGER NOT NULL, attempt INTEGER NOT NULL, signature TEXT NOT NULL, classification TEXT NOT NULL,
       state TEXT NOT NULL DEFAULT 'pending', issue_number INTEGER, body TEXT NOT NULL, title TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS actions_report_cause ON actions_failure_reports(repository_id,signature,state);
+    CREATE INDEX IF NOT EXISTS actions_report_attempt ON actions_failure_reports(repository_id,run_id,attempt);
   `);
   // When the last look for reruns of earlier runs happened (milliseconds); see ActionsFailures.reconcileReruns.
   if (!store.all('PRAGMA table_info(actions_failure_scans)').some(r => r.name === 'reconciled_at'))
     store.db.exec('ALTER TABLE actions_failure_scans ADD COLUMN reconciled_at INTEGER NOT NULL DEFAULT 0');
+  // New outbox entries retain reusable cause identities. Historical receipts are left untouched.
+  const reportColumns = new Set(store.all('PRAGMA table_info(actions_failure_reports)').map(r => r.name));
+  if (!reportColumns.has('cause')) store.db.exec('ALTER TABLE actions_failure_reports ADD COLUMN cause TEXT');
+  if (!reportColumns.has('workflow_id')) store.db.exec('ALTER TABLE actions_failure_reports ADD COLUMN workflow_id INTEGER');
+  store.db.exec('CREATE INDEX IF NOT EXISTS actions_report_workflow ON actions_failure_reports(repository_id,workflow_id,state)');
 }
 
 // Activation starts a new discovery epoch; the retry budget and processed attempts outlive toggles.

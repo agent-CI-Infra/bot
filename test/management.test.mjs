@@ -11,6 +11,7 @@ import { TaskRecords } from '../dist/tasks/service.js';
 import { executionModel, taskConfiguration } from '../dist/tasks/configuration.js';
 import { roleApi } from '../dist/roles/api.js';
 import { managementStorage } from '../dist/management/storage.js';
+import { batchBytes } from '../dist/agent/tool-context.js';
 const project={project_id:'101'},workflow={...project,workflow_id:'review.issue'},task={...project,task_id:'blocked'};
 const service=h=>new ManagementService(h.store,new RuleService(h.store),new TaskCommands(h.store));
 
@@ -35,6 +36,8 @@ test('scoped facts, original logs and revisions agree with legacy API; forged ac
 
 test('configuration commands execute normally, conflict without overwrite, replay the same result and disclose overridden console layers',async t=>{
   const {h,admin}=await managementFixture(t),before=(await query(admin,'get_effective_config',project)).value;
+  const bytes=Buffer.byteLength(JSON.stringify(before));
+  assert.ok(bytes<=batchBytes,`The default effective configuration must fit the tool budget (${bytes} > ${batchBytes}); the query cannot page its omitted content.`);
   const result=await command(admin,'workflow.update',workflow,{prompt:'New default'},'save-one',before.revision);
   assert.equal(result.status,201);assert.equal(result.value.state,'succeeded');assert.equal(result.value.channel,'api');assert.equal(result.value.result.diff.after.prompt,'New default');assert.equal(result.value.result.effect,'future_tasks');
   assert.deepEqual((await command(admin,'workflow.update',workflow,{prompt:'New default'},'save-one',before.revision)).value,result.value);
