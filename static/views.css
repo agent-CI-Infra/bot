@@ -191,22 +191,28 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 /* The project row keeps feature status, direct switches and task counts together on the right. */
 /* #544: one shared column definition for the whole list, so the same category sits at the same x in every row and in
    every organization. The header owns the labels; the rows only carry the values. */
-#rows[data-view=projects]{--project-columns:minmax(120px,1.6fr) 58px 50px 50px 78px 66px 62px 92px 68px}
+:is(#rows[data-view=projects], .global-project-table){--project-columns:minmax(120px,1.6fr) 58px 50px 50px 78px 66px 62px 92px 68px}
 /* Wide desktop only: the same columns with more room, still one shared definition for the whole list. */
-@media(min-width:1280px){#rows[data-view=projects]{--project-columns:minmax(180px,1.7fr) 76px 64px 64px 104px 96px 92px 120px 84px}}
-#rows[data-view=projects] .project-table-head,#rows[data-view=projects] .project-list-row{display:grid;grid-template-columns:var(--project-columns);gap:6px 12px;align-items:center}
-#rows[data-view=projects] .project-table-head{padding:6px 14px;border-bottom:1px solid #dde6eb;background:#fbfdfe;font-size:12px;color:var(--color-text-muted)}
-#rows[data-view=projects] .project-list-row{padding:6px 14px;min-height:44px;border-bottom:1px solid #e8eef2}
-#rows[data-view=projects] .project-list-row:hover{background:#fafcfd}
+@media(min-width:1280px){:is(#rows[data-view=projects], .global-project-table){--project-columns:minmax(180px,1.7fr) 76px 64px 64px 104px 96px 92px 120px 84px}}
+.global-project-table{min-width:0;border:1px solid var(--color-border);border-radius:var(--radius-2);overflow:hidden}
+#settings-panel .global-project-table:not(.is-hidden){--project-columns:minmax(140px,1.6fr) 58px 50px 50px 78px 66px 76px 100px minmax(132px,.9fr)}
+#settings-panel .global-project-table.is-hidden{--project-columns:minmax(240px,1fr) minmax(100px,auto)}
+@media(min-width:1440px){#settings-panel .global-project-table:not(.is-hidden){--project-columns:minmax(180px,1.7fr) 76px 64px 64px 104px 96px 92px 120px minmax(160px,1fr)}}
+.global-project-table .project-list-row:last-child{border-bottom:0}
+.global-project-table .project-control-feedback{flex-basis:100%;text-align:left}
+:is(#rows[data-view=projects], .global-project-table) .project-table-head,:is(#rows[data-view=projects], .global-project-table) .project-list-row{display:grid;grid-template-columns:var(--project-columns);gap:6px 12px;align-items:center}
+:is(#rows[data-view=projects], .global-project-table) .project-table-head{padding:6px 14px;border-bottom:1px solid #dde6eb;background:#fbfdfe;font-size:12px;color:var(--color-text-muted)}
+:is(#rows[data-view=projects], .global-project-table) .project-list-row{padding:6px 14px;min-height:44px;border-bottom:1px solid #e8eef2}
+:is(#rows[data-view=projects], .global-project-table) .project-list-row:hover{background:#fafcfd}
 .project-cell{min-width:0;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 /* The name gets the first line to itself, so a medium-length repo such as fixture/project-101 is
    not squeezed by the 项目总览 link and its 12-character note. The compact link and its note sit
    under the name; the note may ellipsis, with the full text in title. The detail line stays last. */
-#rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]{display:grid;grid-template-columns:minmax(0,1fr);align-items:baseline}
-#rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]>strong{grid-column:1;grid-row:1;min-width:0}
-#rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]>a{grid-column:1;grid-row:2;display:flex;flex-direction:row;flex-wrap:nowrap;align-items:baseline;gap:6px;min-height:0;padding:0;min-width:0;max-width:100%;overflow:hidden}
-#rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]>a>small{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]>p{grid-column:1;grid-row:3;margin:1px 0 0}
+:is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="项目"]{display:grid;grid-template-columns:minmax(0,1fr);align-items:baseline}
+:is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="项目"]>strong{grid-column:1;grid-row:1;min-width:0}
+:is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="项目"]>a{grid-column:1;grid-row:2;display:flex;flex-direction:row;flex-wrap:nowrap;align-items:baseline;gap:6px;min-height:0;padding:0;min-width:0;max-width:100%;overflow:hidden}
+:is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="项目"]>a>small{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="项目"]>p{grid-column:1;grid-row:3;margin:1px 0 0}
 .project-list-row .project-cell .status{max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .project-list-row .project-cell>.actions{gap:4px}
 .project-empty{color:#879da7;font-size:12px}
@@ -221,11 +227,11 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 /* Below the table breakpoint the same cells become labelled pairs, so the category is still named and the page never
    scrolls sideways; the list container itself is the only thing that may scroll. */
 @media(max-width:1279px){
-  #rows[data-view=projects] .project-table-head{display:none}
-  #rows[data-view=projects] .project-list-row{grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px;padding:8px 12px;align-items:start;min-height:0}
-  #rows[data-view=projects] .project-list-row>.project-cell[data-label="项目"]{grid-column:1/-1}
-  #rows[data-view=projects] .project-list-row>.project-cell[data-label="任务"],#rows[data-view=projects] .project-list-row>.project-cell[data-label="操作"]{grid-column:1/-1}
-  #rows[data-view=projects] .project-list-row>.project-cell[data-label="操作"]{justify-content:flex-start}
+  :is(#rows[data-view=projects], .global-project-table) .project-table-head{display:none}
+  :is(#rows[data-view=projects], .global-project-table) .project-list-row{grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px;padding:8px 12px;align-items:start;min-height:0}
+  :is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="项目"]{grid-column:1/-1}
+  :is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="任务"],:is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="操作"]{grid-column:1/-1}
+  :is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="操作"]{justify-content:flex-start}
   /* Every other cell is one label/value line, so the card stays compact instead of stacking a caption over each chip. */
   .project-list-row>.project-cell[data-label]:not([data-label="项目"]):not([data-label="操作"]):not([data-label="任务"]){display:grid;grid-template-columns:58px minmax(0,1fr);align-items:center;gap:6px;font-size:12px}
   .project-list-row>.project-cell[data-label]:not([data-label="项目"])::before{content:attr(data-label);color:var(--color-text-muted);font-size:11px;line-height:1.3}
@@ -233,12 +239,22 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 }
 /* Tablet: three label/value pairs per line keeps the card as dense as the row it replaces. */
 @media(min-width:600px) and (max-width:1279px){
-  #rows[data-view=projects] .project-list-row{grid-template-columns:repeat(3,minmax(0,1fr))}
+  :is(#rows[data-view=projects], .global-project-table) .project-list-row{grid-template-columns:repeat(3,minmax(0,1fr))}
   /* Keep the task summary and the action on one line here instead of giving each its own row. */
-  #rows[data-view=projects] .project-list-row>.project-cell[data-label="任务"]{grid-column:1/3}
-  #rows[data-view=projects] .project-list-row>.project-cell[data-label="操作"]{grid-column:3;justify-content:flex-end}
+  :is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="任务"]{grid-column:1/3}
+  :is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="操作"]{grid-column:3;justify-content:flex-end}
 }
 @media(max-width:760px){.project-feature-switch{min-height:36px}.project-features{gap:6px 8px}.project-task-preview{min-height:36px}}
+@media(max-width:599px){
+  .global-project-table .project-feature-switch{gap:4px;padding:4px;min-width:0}
+  .global-project-table .project-feature-switch>span:first-child{display:none}
+  .global-project-table .project-list-row>.project-cell[data-label]:not([data-label="项目"]):not([data-label="操作"]):not([data-label="任务"]){grid-template-columns:44px minmax(0,1fr)}
+}
+@media(max-width:360px){
+  #settings-panel .global-project-table .project-list-row{grid-template-columns:minmax(0,1fr)}
+  #settings-panel .global-project-table .project-list-row>.project-cell[data-label]:not([data-label="项目"]):not([data-label="操作"]):not([data-label="任务"]){grid-template-columns:58px minmax(0,1fr)}
+  #settings-panel .global-project-table .project-list-row>.project-cell[data-label="任务"],#settings-panel .global-project-table .project-list-row>.project-cell[data-label="操作"]{grid-column:1;justify-content:flex-start}
+}
 
 @media(min-width:1001px){.project-task-preview{min-width:112px;justify-content:flex-end}}
 .permission-check{display:grid;gap:6px;justify-items:start;margin-top:6px;min-width:0}.permission-result{display:grid;gap:6px;min-width:0}.permission-result p,.permission-result ul{margin:0}.permission-result ul{padding-left:20px}.permission-result li,.permission-result a{overflow-wrap:anywhere}.permission-result p:not([class]){color:#22313a}.permission-result a{color:var(--color-brand);text-underline-offset:3px}
