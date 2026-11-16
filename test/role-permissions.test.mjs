@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Store } from '../dist/storage/database.js';
-import { normalizePermissions, permissionTools, permitsManagement, resourceAllowed, updatePermissions, fullPermissions, defaultPermissions, githubWriteAllowed, narrowPermissions } from '../dist/roles/permissions.js';
+import { normalizePermissions, permissionItems, permissionTools, permitsManagement, permitsTool, resourceAllowed, updatePermissions, fullPermissions, defaultPermissions, githubWriteAllowed, narrowPermissions } from '../dist/roles/permissions.js';
 import { OwnTasks } from '../dist/service-roles/own-tasks.js';
 import { serviceMemory } from '../dist/service-roles/resources.js';
 import { roleConfiguration, resetBuiltinRolePermissions } from '../dist/roles/definition.js';
@@ -143,4 +143,18 @@ test('a project role editor offers no item that does nothing for project roles, 
   assert.deepEqual(view.permission_defaults, {});
   // roles.publish was never checked anywhere.
   assert.ok(!projectCapabilities.includes('roles.publish'));
+});
+
+test('browser is a catalogued platform action, denied by default and allowed for full or computer-using defaults', () => {
+  assert.ok(permissionItems.some(item => item.id === 'browser' && item.write.includes('browser')));
+  assert.equal(permitsTool(normalizePermissions({ computer: 'deny' }), 'browser'), false);
+  assert.equal(permitsTool(fullPermissions(), 'browser'), true);
+  assert.equal(defaultPermissions('dev', 'writer').browser, 'allow');
+  assert.equal(permitsTool(defaultPermissions('dev', 'writer'), 'browser'), true);
+  assert.equal(defaultPermissions('manager', 'controller').browser, 'deny');
+  assert.equal(permitsTool(defaultPermissions('manager', 'controller'), 'browser'), false);
+  // Saved roles from before this item inherit allow when they already may use the computer.
+  assert.equal(normalizePermissions({ computer: 'allow' }).browser, 'allow');
+  assert.equal(normalizePermissions({ computer: 'allow', browser: 'deny' }).browser, 'deny');
+  assert.ok(!permitsTool(normalizePermissions({ computer: 'allow', browser: 'deny' }), 'browser'));
 });

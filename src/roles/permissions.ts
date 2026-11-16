@@ -56,6 +56,7 @@ const platform = (item: PermissionItem) => ({ ...item, group: 'platform' });
 const github = (item: PermissionItem) => ({ ...item, group: 'github' });
 export const permissionItems: PermissionItem[] = [
   platform(action('computer','使用虚拟电脑',['read_file','read_version_file','compare_versions','write_file','run_command'],'允许读取和修改分配的工作区、执行命令与测试；固定候选和运行隔离仍由任务入口保证。')),
+  platform(action('browser','使用任务浏览器',['browser'],'在项目电脑上打开任务列出的站点并留下截图证据。控制面只派发动作和展示证据，不会在控制面进程里启动浏览器。默认拒绝；未保存或空角色没有这项授权。')),
   platform(action('delegation','指派其他角色',['delegate_role','delegate_roles','create_project_task','list_managed_tasks','create_task','manage_task','grant_writes'],'将工作交给项目团队或其他已启用角色；自己创建和执行任务默认允许。')),
   platform(access('project_tasks','项目任务与协作',['list_project_tasks','read_project_task'],['manage_project_task','request_task_coordination','wait_for_tasks','submit_coordination','set_task_priority','relate_task'],'查询其他角色的任务；读写还可修改、协调其他任务与共享调度。自己的任务、已收到的通知默认可用。')),
   platform(access('project_memory','项目共享知识',['search_project_memory','read_project_memory'],['remember_project_memory'],'查询共享知识或提交候选；自己的私有记忆默认可用，候选仍需原有复核。')),
@@ -111,7 +112,12 @@ function customResource(p:RolePermissions,resource:string):void {
 
 /** Old rows and run snapshots keep their original body. Reading a row converts its permission meaning, not its history. */
 export function normalizePermissions(value: RolePermissions, service = false): RolePermissions {
-  if (Object.hasOwn(value,'computer')) { const { playbooks, ...active } = value; return { ...empty(), ...active }; }
+  if (Object.hasOwn(value,'computer')) {
+    const { playbooks, ...active } = value;
+    const p = { ...empty(), ...active };
+    if (!Object.hasOwn(value, 'browser') && (p.computer === 'allow' || p.computer === 'custom' && p.legacy_commands === 'allow')) p.browser = 'allow';
+    return p;
+  }
   const p = empty();
   const repo = value.repository ?? 'none', commands = value.commands ?? 'deny';
   p.computer = repo === 'write' && commands === 'allow' ? 'allow' : repo === 'none' && commands === 'deny' ? 'deny' : 'custom';
@@ -135,6 +141,7 @@ export function normalizePermissions(value: RolePermissions, service = false): R
       for (const [operation,allowed] of Object.entries({read,create,reply,labels:reply,publish,report:resource==='issues'&&value.issues==='allow'})) p[mask(resource,operation)] = allowed ? 'allow' : 'deny';
     }
   }
+  if (p.computer === 'allow' || p.computer === 'custom' && p.legacy_commands === 'allow') p.browser = 'allow';
   return p;
 }
 
@@ -253,7 +260,7 @@ export function defaultPermissions(id: string, kind: RoleKind): RolePermissions 
   const p = empty();
   for (const resource of githubResources) p[keyOf(resource)] = id === 'manager' && (githubWriteResources as readonly string[]).includes(resource) ? 'write' : 'read';
   if (kind === 'controller') { p.project_tasks = 'write'; if (id !== 'coordinator') p.delegation = 'allow'; }
-  else { p.computer = 'allow'; p.project_memory = kind === 'writer' ? 'write' : 'read'; }
+  else { p.computer = 'allow'; p.browser = 'allow'; p.project_memory = kind === 'writer' ? 'write' : 'read'; }
   return p;
 }
 export function migratePermissions(role: { role_id: string; kind: RoleKind; permissions?: RolePermissions; capability_policy_ref?: { id: string } }): RolePermissions {

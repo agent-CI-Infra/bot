@@ -1,1 +1,9 @@
-{"name":"department-bot-runner","private":true,"type":"module","dependencies":{"@earendil-works/pi-coding-agent":"1.4.0"}}
+{
+  "name": "department-bot-runner",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "playwright-core": "^1.64.1"
+  }
+}

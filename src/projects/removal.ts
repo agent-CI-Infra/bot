@@ -4,6 +4,7 @@ import { fail, fields, type Json } from '../core/security.js';
 import { type InstallationSync } from '../app/installations.js';
 import { dropUninstalledIntegrations } from './integrations.js';
 import { type ProjectService } from './service.js';
+import { removeBrowserEvidence } from '../browser/tools.js';
 
 // The task engine's running work on a repository's computer; a deletion waits for it before removing task rows.
 export interface RunningTasks { working(repositoryId: string): Promise<unknown>[] }
@@ -13,6 +14,7 @@ const finished = "('succeeded','pr_opened','completed','cancelled','superseded',
 // The audit stays: it names repositories without a foreign key. `files: false` deletes only rows, so a read-only check
 // can run this inside a savepoint and roll it back without touching the trajectory files or blobs on disk.
 export function deleteProjectRecords(store: Store, id: string, options: { files?: boolean } = {}): void {
+  const taskIds = options.files === true ? store.all('SELECT id FROM tasks WHERE repository_id=?', id).map(row => String(row.id)) : [];
   const clients = 'SELECT id FROM external_clients WHERE repository_id=?', subscriptions = `SELECT id FROM external_subscriptions WHERE repository_id=? OR client_id IN (${clients})`;
   const deliveries = 'SELECT id FROM deliveries WHERE repository_id=?', tasks = 'SELECT id FROM tasks WHERE repository_id=?', models = 'SELECT id FROM models WHERE repository_id=?';
   const schedules = 'SELECT id FROM schedules WHERE project_id=?', notifications = 'SELECT id FROM notification_outbox WHERE project_id=?';
@@ -60,7 +62,10 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
   // The project's trajectory files (its runs' model requests, tool calls and logs) are removed only when the caller asks
   // for it, after the transaction committed: the default keeps the files, so a dry run or an interrupted caller cannot
   // destroy evidence the rows still point at (#771).
-  if (options.files === true) store.trajectories.remove({ repository_id: id });
+  if (options.files === true) {
+    store.trajectories.remove({ repository_id: id });
+    removeBrowserEvidence(store, taskIds);
+  }
 }
 
 // Both project-removal endpoints share environment and record cleanup. Off-installation removal first checks GitHub.
@@ -124,6 +129,7 @@ export class ProjectRemoval {
       // A deletion still refused at this point (a task that started again, or one the engine reported as working before
       // the settle wait finished) must fail while the project, its notes and its evidence are all still there.
       if (this.engine?.working(id).length) fail(409, 'tasks_still_stopping');
+      const taskIds = this.store.all('SELECT id FROM tasks WHERE repository_id=?', id).map(row => String(row.id));
       const removed = this.store.transaction(() => {
         if (this.engine?.working(id).length) fail(409, 'tasks_still_stopping');
         deleteProjectRecords(this.store, id, { files: false });
@@ -138,7 +144,10 @@ export class ProjectRemoval {
       // The evidence files go only once the rows are committed: a refused commit keeps the trajectory files and blobs on
       // disk, so what a failed deletion leaves behind still explains itself. A cleanup that fails is recorded, not
       // reported as the deletion having been rolled back.
-      try { this.store.trajectories.remove({ repository_id: id }); }
+      try {
+        this.store.trajectories.remove({ repository_id: id });
+        removeBrowserEvidence(this.store, taskIds);
+      }
       catch { this.store.audit(user.id, 'repository.evidence_removal_failed', id, id); }
       return removed;
     } finally { this.projects?.endRemoval(id); }

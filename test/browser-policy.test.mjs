@@ -1,15 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { account, harness, repository, setup, testPassword } from './helpers.mjs';
-import { allowedOrigin, browserPolicyOf, destructiveAllowed, networkRequestAllowed, originOf, redactBrowserValue, redactRecordedUrl } from '../dist/browser/policy.js';
+import { allowedOrigin, browserPolicyOf, destructiveAllowed, networkRequestAllowed, originOf, redactArgs, redactBrowserValue, redactRecordedUrl } from '../dist/browser/policy.js';
 import { listBrowserEvidence } from '../dist/browser/evidence.js';
 import { browserEvidenceDir } from '../dist/browser/runtime.js';
 import { browserEvidenceRoot } from '../dist/browser/tools.js';
 
 const policy = (origins, extra = {}) => ({ origins, allow_destructive: false, timeout_ms: 60_000, ...extra });
 const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082', 'hex');
+const pngSha = createHash('sha256').update(png).digest('hex');
 
 test('browser policy accepts only declared http(s) origins and rejects credentials', () => {
   const allowed = policy(['http://127.0.0.1:8080']);
@@ -82,10 +84,12 @@ test('task detail and evidence routes expose stored screenshots and refuse path 
   writeFileSync(join(dir, 'secret.png'), png);
   writeFileSync(join(dir, 'steps.json'), JSON.stringify({
     task_id: 'browse-1',
-    steps: [{ id: 'step-1', n: 1, at: '2026-11-16T00:00:00.000Z', action: 'screenshot', url: 'http://127.0.0.1:9/', title: '夹具', result: 'ok', screenshot: { file: 'step-1.png', sha256: 'abc', bytes: png.length } }]
+    steps: [{ id: 'step-1', n: 1, at: '2026-11-16T00:00:00.000Z', action: 'screenshot', url: 'http://127.0.0.1:9/', title: '夹具', result: 'ok', screenshot: { file: 'step-1.png', sha256: pngSha, bytes: png.length } }]
   }));
   const listed = listBrowserEvidence(h.store, 'browse-1');
   assert.equal(listed.steps.length, 1);
+  assert.equal(listed.total_steps, 1);
+  assert.equal(listed.truncated, false);
   assert.equal(listed.steps[0].screenshot.url, '/api/tasks/browse-1/browser-evidence/step-1.png');
   const detail = await admin('/api/tasks/browse-1');
   assert.equal(detail.status, 200);
@@ -119,4 +123,30 @@ test('task detail and evidence routes expose stored screenshots and refuse path 
   const cleaned = listBrowserEvidence(h.store, 'browse-1');
   assert.equal(cleaned.steps[0].url.includes('super-secret'), false);
   assert.ok(cleaned.steps[0].url.includes('[redacted]') || cleaned.steps[0].url.includes('%5Bredacted%5D'));
+});
+
+test('recorded tool arguments redact token query values on url fields', () => {
+  const cleaned = redactArgs({ action: 'open', url: 'http://127.0.0.1:8080/cb?access_token=super-secret&tab=1' });
+  assert.equal(String(cleaned.url).includes('super-secret'), false);
+  assert.ok(String(cleaned.url).includes('[redacted]') || String(cleaned.url).includes('%5Bredacted%5D'));
+});
+
+test('evidence routes reject a bad percent-encoding and a checksum mismatch', async (t) => {
+  const h = await harness(t);
+  const { admin } = await setup(h);
+  const acct = await account(admin);
+  await repository(admin, acct.id, '101');
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('browse-bad','101','task.request','succeeded','Fixture',?)",
+    JSON.stringify({ request: 'Inspect the fixture', browser: { origins: ['http://127.0.0.1:9'] } }));
+  const dir = browserEvidenceDir(browserEvidenceRoot(h.store), 'browse-bad');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'step-1.png'), png);
+  writeFileSync(join(dir, 'steps.json'), JSON.stringify({
+    task_id: 'browse-bad',
+    steps: [{ id: 'step-1', n: 1, at: '2026-11-16T00:00:00.000Z', action: 'screenshot', url: 'http://127.0.0.1:9/', title: '夹具', result: 'ok', screenshot: { file: 'step-1.png', sha256: '0'.repeat(64), bytes: png.length } }]
+  }));
+  const mismatched = await fetch(h.admin + '/api/tasks/browse-bad/browser-evidence/step-1.png', { headers: { Cookie: admin.cookie() } });
+  assert.equal(mismatched.status, 404);
+  const bad = await fetch(h.admin + '/api/tasks/browse-bad/browser-evidence/step-1.png%', { headers: { Cookie: admin.cookie() } });
+  assert.ok([400, 404].includes(bad.status), 'an illegal encoding must not become a 5xx');
 });

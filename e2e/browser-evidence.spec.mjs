@@ -1,4 +1,5 @@
 import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test, expect } from '@playwright/test';
@@ -7,6 +8,7 @@ import { browserEvidenceDir } from '../dist/browser/runtime.js';
 import { browserEvidenceRoot } from '../dist/browser/tools.js';
 
 const png = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/browser-site/evidence-card.png'));
+const pngSha = createHash('sha256').update(png).digest('hex');
 
 test('任务详情展示浏览器截图证据，窄屏不横向溢出', async ({ page }) => {
   const errors = [];
@@ -23,7 +25,7 @@ test('任务详情展示浏览器截图证据，窄屏不横向溢出', async ({
     writeFileSync(join(dir, 'step-1.png'), png);
     writeFileSync(join(dir, 'steps.json'), JSON.stringify({
       task_id: 'browse-ui',
-      steps: [{ id: 'step-1', n: 1, at: '2026-11-16T00:00:00.000Z', action: 'screenshot', url: 'http://127.0.0.1:9/', title: '本地巡检页', result: 'ok', screenshot: { file: 'step-1.png', sha256: 'abc', bytes: png.length } }]
+      steps: [{ id: 'step-1', n: 1, at: '2026-11-16T00:00:00.000Z', action: 'screenshot', url: 'http://127.0.0.1:9/', title: '本地巡检页', result: 'ok', screenshot: { file: 'step-1.png', sha256: pngSha, bytes: png.length } }]
     }));
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(h.admin);
@@ -40,12 +42,12 @@ test('任务详情展示浏览器截图证据，窄屏不横向溢出', async ({
     await expect(card.getByRole('link', { name: '打开截图', exact: true })).toHaveAttribute('href', '/api/tasks/browse-ui/browser-evidence/step-1.png');
     await card.scrollIntoViewIfNeeded();
     mkdirSync('.tmp/908-evidence', { recursive: true });
-    await card.screenshot({ path: '.tmp/908-evidence/browser-evidence-1440.png' });
+    await page.screenshot({ path: '.tmp/908-evidence/browser-evidence-1440.png' });
     await page.setViewportSize({ width: 390, height: 844 });
     await card.scrollIntoViewIfNeeded();
     await expect(card.getByRole('heading', { name: '浏览器证据', exact: true })).toBeVisible();
     await expect(card.getByRole('img', { name: 'screenshot 第 1 步截图' })).toBeVisible();
-    await card.screenshot({ path: '.tmp/908-evidence/browser-evidence-390.png' });
+    await page.screenshot({ path: '.tmp/908-evidence/browser-evidence-390.png' });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(errors).toEqual([]);
   } finally {

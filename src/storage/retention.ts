@@ -2,6 +2,10 @@ import { createHash } from 'node:crypto';
 import type { Row, Store } from './database.js';
 import type { Manager } from '../projects/service.js';
 import { fail, type Json } from '../core/security.js';
+import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { browserEvidenceRoot } from '../browser/tools.js';
+import { browserEvidenceDir } from '../browser/runtime.js';
 import { pruneCommitChecks } from '../tasks/external-links.js';
 
 // Cleanup by days (#671). One set of settings for what the bot keeps and for how long, saved in settings.storage_retention
@@ -11,6 +15,7 @@ import { pruneCommitChecks } from '../tasks/external-links.js';
 // - trajectory_days: control-plane trajectory files of finished tasks and of Manager dispatches, closed longer ago;
 //   a project can override it. Records of one run share one file, so the window is per file, not per record type.
 //   Conversation files are not touched (a continued conversation reads its earlier turns).
+//   The same window also covers finished tasks' browser-evidence/ directories on the bot-data volume; orphans (no task row) are removed. A missing or unreadable evidence root is counted as a failure and skipped, not treated as empty.
 // - manager_payload_days: the manager's copies of runner-call bodies (TrajectoryExpiry, default 2), pushed to the manager.
 // - workspace_finished_days / workspace_failed_days: the task workspace rules of #444 (1 and 7 days by default).
 // - webhook_payload_days: the bodies of received webhook deliveries; the row, status and headers stay, with the body's
@@ -138,7 +143,7 @@ export class RetentionCleanup {
     this.lastError = null;
     const started = new Date(this.now()).toISOString(), settings = retentionSettings(this.store);
     const manager = await this.syncManager(settings.manager_payload_days);
-    const trajectories = await this.trajectories(settings), deliveries = await this.deliveries(settings.webhook_payload_days);
+    const trajectories = await this.trajectories(settings), deliveries = await this.deliveries(settings.webhook_payload_days), evidence = await this.browserEvidence(settings);
     const commitChecks = { count: 0, failed: 0 };
     try {
       while (!this.stopped) {
@@ -149,7 +154,7 @@ export class RetentionCleanup {
       }
     } catch (error) { commitChecks.failed = 1; this.failure('commit_checks', error); }
     if (this.stopped) return {};
-    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, commit_checks: commitChecks, manager_window: manager, last_error: this.lastError });
+    return this.record({ started_at: started, finished_at: new Date(this.now()).toISOString(), trajectories, deliveries, evidence, commit_checks: commitChecks, manager_window: manager, last_error: this.lastError });
   }
 
   /** Tells the manager its window when it reports another; null when the manager did not answer. */
@@ -196,6 +201,51 @@ export class RetentionCleanup {
         }
         await this.pause(this.options.pauseMs ?? 50);
       }
+    }
+    return removed;
+  }
+
+
+  // Finished tasks past the project's trajectory_days window, plus directories with no task row. Unreadable roots are
+  // reported and left alone. In-memory stores have no durable evidence root and are skipped.
+  private async browserEvidence(settings: RetentionSettings): Promise<Removed> {
+    const removed: Removed = { count: 0, bytes: 0, failed: 0 };
+    if (this.store.path === ':memory:') return removed;
+    const root = browserEvidenceRoot(this.store);
+    let names: string[];
+    try {
+      if (!existsSync(root)) return removed;
+      names = readdirSync(root);
+    } catch (error) {
+      removed.failed++;
+      this.failure('browser-evidence root', error);
+      return removed;
+    }
+    let processed = 0;
+    const limit = (this.options.batch ?? 50) * 20;
+    for (const name of names) {
+      if (this.stopped || processed >= limit) return removed;
+      const dir = browserEvidenceDir(root, name);
+      let st;
+      try { st = statSync(dir); } catch (error) { removed.failed++; this.failure(`browser-evidence ${name}`, error); continue; }
+      if (!st.isDirectory()) continue;
+      processed++;
+      const row = this.store.get('SELECT id,repository_id,status,updated_at FROM tasks WHERE id=?', name) as { id: string; repository_id: string; status: string; updated_at: string } | undefined;
+      let drop = !row;
+      if (row && ended.includes(row.status)) {
+        const days = trajectoryDays(settings, String(row.repository_id));
+        if (days !== null && new Date(row.updated_at).getTime() <= this.now() - days * day) drop = true;
+      }
+      if (!drop) continue;
+      try {
+        rmSync(dir, { recursive: true, force: true });
+        removed.count++;
+        removed.bytes += Number(st.size ?? 0);
+      } catch (error) {
+        removed.failed++;
+        this.failure(`browser-evidence ${name}`, error);
+      }
+      await this.pause(this.options.pauseMs ?? 50);
     }
     return removed;
   }

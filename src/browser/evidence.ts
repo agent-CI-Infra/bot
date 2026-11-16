@@ -6,10 +6,12 @@ import { type Actor, scope } from '../app/auth.js';
 import { fail } from '../core/security.js';
 import { redactBrowserValue, redactRecordedUrl } from './policy.js';
 import { browserEvidenceDir } from './runtime.js';
-import { browserEvidenceRoot } from './tools.js';
+import { browserEvidenceRoot, evidenceFileDigest } from './tools.js';
 
 export type BrowserEvidenceList = {
   task_id: string;
+  total_steps: number;
+  truncated: boolean;
   steps: Array<{
     id: string;
     n: number;
@@ -24,17 +26,27 @@ export type BrowserEvidenceList = {
 };
 
 const screenshotName = /^step-\d+\.png$/;
+const maxListedSteps = 80;
+
+function safeDecode(value: string): string | null {
+  try { return decodeURIComponent(value); }
+  catch { return null; }
+}
 
 export function listBrowserEvidence(store: Store, taskId: string): BrowserEvidenceList {
   const dir = browserEvidenceDir(browserEvidenceRoot(store), taskId);
   const stepsFile = join(dir, 'steps.json');
-  const empty: BrowserEvidenceList = { task_id: taskId, steps: [] };
+  const empty: BrowserEvidenceList = { task_id: taskId, total_steps: 0, truncated: false, steps: [] };
   if (!existsSync(stepsFile)) return empty;
   let parsed: any;
   try { parsed = JSON.parse(readFileSync(stepsFile, 'utf8')); } catch { return empty; }
-  const steps = Array.isArray(parsed?.steps) ? parsed.steps : [];
+  const all = Array.isArray(parsed?.steps) ? parsed.steps : [];
+  const truncated = all.length > maxListedSteps;
+  const steps = truncated ? all.slice(-maxListedSteps) : all;
   return redactBrowserValue({
     task_id: taskId,
+    total_steps: all.length,
+    truncated,
     steps: steps.map((step: any) => {
       const file = typeof step?.screenshot?.file === 'string' && screenshotName.test(basename(step.screenshot.file)) ? basename(step.screenshot.file) : null;
       return {
@@ -70,7 +82,9 @@ export function sendBrowserEvidence(store: Store, user: Actor, url: URL, _req: I
   const list = /^\/api\/tasks\/([^/]+)\/browser-evidence$/.exec(url.pathname);
   const file = /^\/api\/tasks\/([^/]+)\/browser-evidence\/([^/]+)$/.exec(url.pathname);
   if (!list && !file) return false;
-  const id = decodeURIComponent((list || file)![1]!);
+  const rawId = safeDecode((list || file)![1]!);
+  if (rawId == null) { fail(400, 'invalid_task_id'); return false; }
+  const id = rawId;
   const filter = scope(user, 'repository_id');
   const task = store.get(`SELECT id FROM tasks WHERE id=? AND ${filter.sql}`, id, ...filter.args);
   if (!task) fail(404, 'task_not_found');
@@ -79,11 +93,16 @@ export function sendBrowserEvidence(store: Store, user: Actor, url: URL, _req: I
     res.end(JSON.stringify(listBrowserEvidence(store, id)));
     return true;
   }
-  const name = decodeURIComponent(file![2]!);
+  const rawName = safeDecode(file![2]!);
+  if (rawName == null) { fail(400, 'invalid_evidence_name'); return false; }
+  const name = rawName;
   const path = resolveEvidenceFile(store, id, name);
-  if (!path) fail(404, 'browser_evidence_not_found');
-  const bytes = readFileSync(path!);
+  if (!path) { fail(404, 'browser_evidence_not_found'); return false; }
+  const bytes = readFileSync(path);
   if (bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') fail(404, 'browser_evidence_not_found');
+  const listedHash = listBrowserEvidence(store, id).steps.find(step => step.screenshot?.file === name)?.screenshot?.sha256;
+  const digest = evidenceFileDigest(path!);
+  if (!digest || (listedHash && listedHash !== digest)) fail(404, 'browser_evidence_not_found');
   res.writeHead(200, {
     'Content-Type': 'image/png',
     'Content-Length': bytes.length,
