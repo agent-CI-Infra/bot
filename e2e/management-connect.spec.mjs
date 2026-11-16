@@ -1,5 +1,8 @@
 import { test, expect } from '@playwright/test';
+import { mkdirSync } from 'node:fs';
 import { managementFixture } from '../test/management-fixture.mjs';
+
+const out = '.tmp/ui-874';
 
 // #641: a connect that never returns must end in a stated failure with a working retry, and the floating panel must stay
 // inside the viewport at every width without covering the top bar. #616 covers what happens after a failure exists.
@@ -342,4 +345,43 @@ test('#641 768×432 直接打开对话页：页面视图按自身盒高进紧凑
     expect(m.sendHeight).toBeGreaterThanOrEqual(30);
     expect(m.inside).toBe(true);
   } finally { await f.close(); }
+});
+
+// #874: a broken stream left the status line assertive for good — every ordinary progress it wrote afterwards ("正在读取
+// 会话…", "就绪") was announced as an alert and interrupted the reader. The error itself must still interrupt while it
+// stands; once the read recovers, the same line carries ordinary progress and must hand the role back.
+test('#874 断流错误后重连成功，状态栏从 alert 回到 status，普通进度不再打断读屏', async ({ page }) => {
+  test.setTimeout(90000);
+  const f = await managementFixture();
+  let release; const held = new Promise(resolve => { release = resolve; });
+  f.modelState.gate = held;
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(f.h.admin + '/#/management');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await expect(page.getByRole('button', { name: '发送', exact: true })).toBeEnabled();
+    // The stream breaks while a turn is in flight: the read says the connection is interrupted.
+    await page.route('**/events?stream=1&after=*', route => route.abort('failed'));
+    const message = page.getByLabel('管理消息', { exact: true });
+    await message.fill('检查任务进展'); await page.getByRole('button', { name: '发送', exact: true }).click();
+    const statusBar = page.locator('#management-chat .management-status-bar'), status = statusBar.locator('.management-status');
+    await expect(status).toContainText('连接已中断');
+    await expect(status).toHaveAttribute('role', 'alert');
+    // The connection recovers through the bar's own button: what the line says now is ordinary progress, not an alarm.
+    release(); f.modelState.gate = null;
+    await page.unroute('**/events?stream=1&after=*');
+    await statusBar.getByRole('button', { name: '重新连接', exact: true }).click();
+    await expect(status).toContainText('就绪');
+    await expect(status).toHaveAttribute('role', 'status');
+    // The line that now carries ordinary progress, at each width.
+    mkdirSync(out, { recursive: true });
+    for (const width of [1440, 768, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+      await page.screenshot({ path: `${out}/status-recovered-${width}.png`, fullPage: true });
+    }
+  } finally { release(); await f.close(); }
 });
