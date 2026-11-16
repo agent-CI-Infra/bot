@@ -420,6 +420,12 @@ export async function installationApi(store: Store, sync: InstallationSync | und
   if (!match || method !== 'POST') return fail(404, 'not_found');
   return match[2] === 'activate' ? activate(store, user, match[1]!, input) : disable(store, user, match[1]!, input);
 }
+// A damaged events column (an old migration, a hand edit, a truncated write) must not take the whole list down: that
+// row's subscription reads as unknown and `events_unreadable` names it, while every other row keeps its own answer.
+function readEvents(value: string | null): { missing: string[] | null; unreadable: boolean } {
+  if (!value) return { missing: null, unreadable: false };
+  try { return { missing: missingEvents(JSON.parse(value)), unreadable: false }; } catch { return { missing: null, unreadable: true }; }
+}
 // One row per repository: what GitHub shows as installed, merged with registration, policy and environment.
 function list(store: Store, url?: URL): Json {
   const registered = new Map(store.all(`SELECT r.id,r.full_name,r.owner_id,r.account_id,p.enabled,p.review_enabled,p.development_enabled,p.actions_failures_enabled,p.model_id,
@@ -433,16 +439,17 @@ function list(store: Store, url?: URL): Json {
   const repositories = ids.map(id => {
     const seen = scope.get(id), reg = registered.get(id), listed = !!seen?.installed, publication = boardStatus(store, id);
     // Only a repository the account still lists can be short of permissions; one that left the installation has its own badge.
-    const events = listed && seen!.account_type === 'github_app' ? seen!.events ? missingEvents(JSON.parse(seen!.events)) : null : [];
-    const permissions = { permission_missing: listed ? permissionGap(seen!.account_type, seen!.permissions) : null, events_missing: listed ? events : null,
+    const events = listed && seen!.account_type === 'github_app' ? readEvents(seen!.events) : { missing: [] as string[], unreadable: false };
+    const permissions = { permission_missing: listed ? permissionGap(seen!.account_type, seen!.permissions) : null, events_missing: listed ? events.missing : null,
       access_gaps: listed ? accessGaps(seen!.account_type, seen!.permissions, seen!.events) : null,
       permissions_checked_at: listed ? seen!.permissions_at || null : null,
-      permissions_stale: listed && (!seen!.permissions_at || events === null || now - Date.parse(seen!.permissions_at) > PERMISSIONS_FRESH_MS) };
+      permissions_stale: listed && (!seen!.permissions_at || events.missing === null || now - Date.parse(seen!.permissions_at) > PERMISSIONS_FRESH_MS) };
     return { id, full_name: reg?.full_name || seen!.full_name, owner_id: reg?.owner_id || seen!.owner_id, owner_login: seen?.owner_login || '', private: !!seen?.private,
       account_id: reg?.account_id || seen!.account_id, account_name: seen?.account_name || null, installation_id: seen?.installation_id || null,
       installed: seen ? !!seen.installed : null, synced_at: seen?.synced_at || null, registered: !!reg, enabled: !!reg?.enabled,
       review_enabled: !!reg?.review_enabled, development_enabled: !!reg?.development_enabled, actions_failures_enabled: !!reg?.actions_failures_enabled, model_id: reg?.model_id || null, environment_state: reg?.environment_state || null,
       running_tasks: reg?.running_tasks || 0, queued_tasks: reg?.queued_tasks || 0, ...permissions,
+      events_unreadable: events.unreadable,
       board_enabled: publication.enabled, board_state: publication.state, board_url: publication.url,
       // Whether the owner is trusted (#848): its repository administrators start repositories like this one themselves.
       organization_trusted: !!trustedOrganization(store, String(reg?.owner_id || seen!.owner_id)) };
