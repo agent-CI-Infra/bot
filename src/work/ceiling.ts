@@ -99,7 +99,8 @@ export function legacySwitchCeiling(current: Ceiling, review: unknown, developme
 /**
  * Once per policy (#850): the ceiling is the narrowest level today's switches and writes allow (derivedCeiling), so no project
  * gains authority. Settings that were narrower than that level are written out so every project keeps the writes it had:
- * a project that developed without reviewing keeps its review work types switched off.
+ * a project that developed without reviewing keeps its review work types switched off, and ordinary tasks, which wrote
+ * nothing unless an administrator chose their writes, keep writing nothing instead of inheriting the ceiling.
  */
 export function ceilingStorage(store: Store): void {
   if (!store.all('PRAGMA table_info(policies)').some(column => column.name === 'capability_ceiling'))
@@ -109,12 +110,14 @@ export function ceilingStorage(store: Store): void {
   store.transaction(() => {
     for (const policy of pending) {
       const level = derivedCeiling(policy);
-      if (covers(level, 'comment') && !policy.review_enabled) {
-        let work: Record<string, any> = {};
-        try { const saved = JSON.parse(String(policy.work_settings ?? '{}')); if (saved && typeof saved === 'object' && !Array.isArray(saved)) work = saved; } catch { work = {}; }
+      let work: Record<string, any> = {};
+      try { const saved = JSON.parse(String(policy.work_settings ?? '{}')); if (saved && typeof saved === 'object' && !Array.isArray(saved)) work = saved; } catch { work = {}; }
+      const before = JSON.stringify(work);
+      if (covers(level, 'comment') && !policy.review_enabled)
         for (const id of ['review.issue', 'review.pr']) if (work[id]?.enabled !== false) work[id] = { ...(work[id] ?? {}), enabled: false, version: Number(work[id]?.version ?? 0) + 1 };
-        store.run('UPDATE policies SET work_settings=? WHERE repository_id=?', JSON.stringify(work), policy.repository_id);
-      }
+      // Writes are unchanged in effect, so the version a stage gate compares stays as it was.
+      if (!Array.isArray(work['task.request']?.writes)) work['task.request'] = { ...(work['task.request'] ?? {}), writes: [] };
+      if (JSON.stringify(work) !== before) store.run('UPDATE policies SET work_settings=? WHERE repository_id=?', JSON.stringify(work), policy.repository_id);
       store.run('UPDATE policies SET capability_ceiling=?,review_enabled=?,development_enabled=? WHERE repository_id=?', level, Number(covers(level, 'comment')), Number(level === 'develop'), policy.repository_id);
       store.audit('system', 'policy.capability_ceiling_migrated', level, String(policy.repository_id));
     }

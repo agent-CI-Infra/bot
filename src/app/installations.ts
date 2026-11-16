@@ -11,7 +11,7 @@ import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { accessGaps, appGaps } from './access.js';
 import { installationSnapshot, installationRef, accountRef, queueInstallationSync, installationExecutionDenied } from '../installations/archive.js';
 import { pendingInstalledRepositories } from '../identity/github-status.js';
-import { trustedOrganization, trustOrganization } from './trusted-organizations.js';
+import { requestedCeiling, trustCeiling, trustedOrganization, trustOrganization } from './trusted-organizations.js';
 import { assertSyncClaim, claimInstallationSync, commitInstallationProjection, finishInstallationSync, validateInstallation, type SyncClaim } from '../installations/projection.js';
 import { covers, projectCeiling, setCeiling } from '../work/ceiling.js';
 
@@ -483,7 +483,7 @@ function setHidden(store: Store, user: Actor, id: string, input: Json, hidden: b
 /**
  * A project administrator starts a never-started repository themselves (#848): GitHub makes them its administrator (an
  * active derived grant), and a super administrator trusts its owner. They choose nothing: the organization's defaults pick
- * the model and whether development starts enabled, resources follow the global defaults, and machine configuration stays
+ * the model and the capability ceiling (#850), resources follow the global defaults, and machine configuration stays
  * with super administrators. Starting again a project that was disabled stays with super administrators.
  */
 function selfStart(store: Store, user: Actor, id: string, input: Json): Json {
@@ -495,18 +495,21 @@ function selfStart(store: Store, user: Actor, id: string, input: Json): Json {
   if (!trusted) return fail(403, 'organization_not_trusted');
   // A default model deleted or no longer shared since it was chosen is skipped; the project then waits for a model.
   const model = trusted.model_id && store.get('SELECT 1 FROM models WHERE id=? AND repository_id IS NULL', trusted.model_id) ? trusted.model_id : null;
-  return activate(store, user, id, { model_id: model, development_enabled: !!trusted.development_enabled }, () => {
+  return activate(store, user, id, { model_id: model, capability_ceiling: trustCeiling(trusted) }, () => {
     if (trustedOrganization(store, owner)?.updated_at !== trusted.updated_at) fail(409, 'organization_trust_changed');
   });
 }
 /**
  * `trust_organization` (super administrators, #848): trust the repository's owner as this start does, with the shared model
- * chosen here (if it is one) and this development choice as the organization's defaults. `check` runs inside the start's
- * transaction, for a decision made before it.
+ * chosen here (if it is one) and this start's capability ceiling as the organization's defaults. `check` runs inside the
+ * start's transaction, for a decision made before it.
+ *
+ * The ceiling (#850) is chosen at the start: `capability_ceiling`, or the former `development_enabled` (on: develop, off:
+ * comment). Without a choice a first start reviews (comment), and starting a project again keeps its level, at least comment.
  */
 function activate(store: Store, user: Actor, id: string, input: Json, check: () => void = () => {}): Json {
-  fields(input, ['account_id', 'model_id', 'development_enabled', 'trust_organization']);
-  if (input.development_enabled !== undefined && typeof input.development_enabled !== 'boolean') fail(400, 'invalid_policy');
+  fields(input, ['account_id', 'model_id', 'capability_ceiling', 'development_enabled', 'trust_organization']);
+  const chosenCeiling = requestedCeiling(input);
   if (input.trust_organization !== undefined && typeof input.trust_organization !== 'boolean') fail(400, 'invalid_field', 'trust_organization');
   const registered = store.get('SELECT * FROM repositories WHERE id=?', id);
   const candidates = store.all('SELECT * FROM installed_repositories WHERE repository_id=? AND installed=1', id);
@@ -527,12 +530,11 @@ function activate(store: Store, user: Actor, id: string, input: Json, check: () 
     if (modelRow && modelRow.repository_id === null) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', model, id);
     const policy = store.get('SELECT * FROM policies WHERE repository_id=?', id)!;
     store.run('UPDATE policies SET enabled=1,model_id=? WHERE repository_id=?', model ?? policy.model_id, id);
-    // Starting lets the project review at least (comment); development_enabled asks for develop (#850).
-    const level = projectCeiling(store, id, policy);
-    setCeiling(store, id, input.development_enabled === true ? 'develop' : input.development_enabled === false || !covers(level, 'comment') ? 'comment' : level, user.id);
+    const level = projectCeiling(store, id, policy), ceiling = chosenCeiling ?? (covers(level, 'comment') ? level : 'comment');
+    setCeiling(store, id, ceiling, user.id);
     store.audit(user.id, registered ? 'repository.enabled' : 'repository.activated', id, id);
     if (input.trust_organization === true) trustOrganization(store, user.id, String((chosen || registered)!.owner_id),
-      { model_id: modelRow?.repository_id === null ? model : null, development_enabled: input.development_enabled === true });
+      { model_id: modelRow?.repository_id === null ? model : null, capability_ceiling: ceiling });
     return { repository: (list(store).repositories as Json[]).find(r => r.id === id)! };
   });
 }

@@ -20,7 +20,7 @@
 | `comment` 可评论和打标签 | 评论、加标签、提 Issue、发检视，Actions 失败可以重跑一次 | Issues、Pull requests |
 | `develop` 可开发并开 PR | 还可以改代码、交付 bot PR | 再加 Contents（文件、分支和引用、合并 PR） |
 
-合并 PR 是 Contents 写，包含在 `develop` 里，Manager 默认就有，不单设一档。bot 的每一次写入都在上限之内：
+合并 PR 是 Contents 写，包含在 `develop` 里，Manager 默认就有，不单设一档。上限在启动项目时选择（默认 `comment`；受信任组织可以预设它下面的项目启动时的档位，见[管理员手册](admin.md)），之后由项目管理员在「监听与触发」修改。bot 的每一次写入都在上限之内：
 
 - 工作类型：检视、通用回复和 Actions 失败处理要 `comment`，开发和开发任务要 `develop`；普通事项、CI 观察、发行说明和接入门禁在任何档位都能运行。工作类型的写入（默认值或项目保存的值）超过上限的部分不生效，降回上限后自动恢复。普通事项的写入默认继承上限：`develop` 时可以修改代码并交付 PR。
 - `github_write`：Issues 和 Pull requests 路由要 `comment`，Contents 路由要 `develop`。项目角色、飞书群、管理助手都经同一个入口，超过上限时返回 `capability_ceiling`，带 `needed`（需要的档位）和 `ceiling`（项目当前档位），不发出任何请求。角色的 GitHub 写权限、群档位和私聊里本人的权限都只能在上限之下再收窄。
@@ -31,7 +31,7 @@
 
 策略接口直接设 `capability_ceiling`。原来的 `review_enabled`、`development_enabled` 仍然可以写，并换算成上限：检视开是至少 `comment`、关是 `read`，开发开是 `develop`、关是至多 `comment`；同一请求里不能和 `capability_ceiling` 同时出现，也不能"开开发、关检视"。读到的这两个字段总是与上限一致。
 
-升级时每个项目按原来的开关和写入取最窄的一档：开发开是 `develop`；否则检视开、Actions 失败处理开或通用回复开是 `comment`；否则 `read`。原来开着开发却关着检视的项目，上限为 `develop`，同时把两个检视工作类型关掉，保持升级前的写入不变。审计里记录每个项目的 `policy.capability_ceiling_migrated`，之后每次修改记 `policy.capability_ceiling`。
+升级时每个项目按原来的开关和写入取最窄的一档：开发开是 `develop`；否则检视开、Actions 失败处理开或通用回复开是 `comment`；否则 `read`。原来开着开发却关着检视的项目，上限为 `develop`，同时把两个检视工作类型关掉，保持升级前的写入不变；普通事项原来默认不写，没有保存过写入的项目升级时把它保存为不写，不会因为继承上限多出交付 PR。角色的 GitHub 写权限不参与推导：Manager 默认带的 Contents 写（合并、写分支）在 `develop` 以下的项目里不再生效，`read` 的项目里角色不能经 `github_write` 写。受信任组织原来保存的「启动时开启开发」换算为 `develop`，没开的为 `comment`（启动一直会打开检视）。审计里记录每个项目的 `policy.capability_ceiling_migrated`，之后每次修改记 `policy.capability_ceiling`。
 
 升级或移动页面不会开启以前关闭的事件来源，也不会增加写授权；旧任务的配置快照和执行路线保留。开启 Actions 失败来源后即可进入自动分析流程，仍须满足项目启用、模型与实际授权等既有条件。项目监听、任务许可、Manager 提示词及角色设置分别保存，互不覆盖。现有 `GET/PUT /api/repositories/:id/manager` 保留为兼容接口；事件数据仍是项目策略，不因此归属于 Manager 角色。
 

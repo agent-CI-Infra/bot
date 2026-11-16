@@ -46,7 +46,7 @@ async function globalProjectSettings(request, id) {
 // #848: GitHub owners (organizations or personal accounts) whose repository administrators start their own repositories.
 async function trustedOrganizations(request) {
   const box = card('受信任的组织');
-  box.append(note('受信任组织的仓库管理员可以在项目列表里自己启动仓库：模型和是否开启自动开发用下面的默认值，资源用全局默认值，机器配置仍只由超级管理员修改。撤销信任只影响以后的启动，已启动的项目照常运行。'));
+  box.append(note('受信任组织的仓库管理员可以在项目列表里自己启动仓库：模型和能力上限用下面的默认值，资源用全局默认值，机器配置仍只由超级管理员修改。撤销信任只影响以后的启动，已启动的项目照常运行。'));
   // A failed read stays inside this card: the project list above keeps working.
   let organizations, candidates, models;
   try { [{ organizations, candidates }, { models }] = await Promise.all([api('/api/trusted-organizations'), api('/api/models')]); }
@@ -57,13 +57,14 @@ async function trustedOrganizations(request) {
   const defaults = (owner, value) => {
     const model = document.createElement('select'); model.setAttribute('aria-label', `${owner} 的默认模型`);
     model.add(new Option('不设默认模型（项目会等待模型配置）', '')); shared.forEach(m => model.add(new Option(m.model_name, m.id))); model.value = value?.model?.id || '';
-    const development = document.createElement('input'); development.type = 'checkbox'; development.checked = !!value?.development_enabled;
-    const toggle = element('label', '', 'check'); toggle.append(development, document.createTextNode(' 启动时同时开启自动开发'));
-    return { model, development, controls: [field('默认模型', model), toggle] };
+    // #850: projects started under the organization get this capability ceiling.
+    const ceiling = document.createElement('select'); ceiling.setAttribute('aria-label', `${owner} 的默认能力上限`);
+    projectCeilingOptions.forEach(([level, title]) => ceiling.add(new Option(title, level))); ceiling.value = value?.capability_ceiling || 'comment';
+    return { model, ceiling, controls: [field('默认模型', model), field('默认能力上限', ceiling)] };
   };
   const save = async (owner, form) => {
     message.textContent = '';
-    try { await api('/api/trusted-organizations/' + owner, 'PUT', { model_id: form.model.value || null, development_enabled: form.development.checked }); await route(); }
+    try { await api('/api/trusted-organizations/' + owner, 'PUT', { model_id: form.model.value || null, capability_ceiling: form.ceiling.value }); await route(); }
     catch (err) { if (request === renderVersion) message.textContent = readErrorText(err); }
   };
   for (const organization of organizations) {
