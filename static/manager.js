@@ -1,6 +1,7 @@
-// The Manager role page: its prompt, model, decisions and the repository's skills. Project listeners live in triggers.js.
+// The Manager role page: its prompt, standing rules, model, decisions and the repository's skills. Project listeners live in triggers.js.
 
 const managerErrors = {
+  invalid_standing_rules: '常设规则格式不对：每条要有唯一的 id、已知的 event 和 action，新建类规则要有 work，还要写 reason。', standing_rule_development: '常设规则不能启动开发：开发要 Manager 针对具体 Issue 写明依据。',
   invalid_dispatch_filter: '分派筛选无效，请检查时间范围、状态或事件类型。', invalid_dispatch_cursor: '当前分页位置已失效，请重新读取分派。', dispatch_event_not_found: '未找到本项目中的这条分派记录。',
   manager_revision_conflict: 'Manager 配置已被别人修改，请刷新页面后再保存。', unknown_manager_section: '章节 id 不认识：二级标题末尾反引号里的 id 要用下面列出的章节。',
   duplicate_manager_section: '同一个章节出现了两次。',
@@ -29,7 +30,7 @@ function managerSection(roles) {
 function managerCards(manager, roles, refresh, notice) {
   const behavior = card('项目 Manager 设置');
   behavior.append(note('新任务默认由 Manager 安排角色与执行方式，按任务需要委派工作。角色权限、预算、独立 QA 和发布检查继续生效。'), consoleLink(`#/projects/${current.id}/triggers`, '监听与触发设置', '项目整体的事件来源与自动处理范围'));
-  return [...(notice ? [Object.assign(element('p', notice, 'view-success flash'), { role: 'status' })] : []), behavior, managerPromptCard(manager, refresh), taskModelEditor('manager', 'Manager 分派', current.policy, current.models),
+  return [...(notice ? [Object.assign(element('p', notice, 'view-success flash'), { role: 'status' })] : []), behavior, managerPromptCard(manager, refresh), standingRulesCard(manager, refresh), taskModelEditor('manager', 'Manager 分派', current.policy, current.models),
     dispatchCard(), repositorySkillsCard(), ...(manager.migration ? [migrationCard(manager.migration)] : []), ...(current.rules?.imported?.imported_at ? [ruleImportCard(current.rules.imported)] : [])];
 }
 
@@ -55,6 +56,31 @@ function managerPromptCard(manager, refresh) {
     current.managerDraft = null; await refresh();
   }));
   section.append(form); return section;
+}
+
+// Standing rules (#815): routine events they settle never reach the Manager's model. They are saved whole, with the
+// Manager's revision; an empty list sends every event to the Manager.
+const ruleActionNames = { create: '新建', continue: '续接（含已结束的检视）', continue_active: '只续接还在进行的任务', continue_or_create: '续接，没有就新建', ignore: '不处理' };
+function standingRulesCard(manager, refresh) {
+  const section = card('常设规则'), standing = manager.standing_rules, message = element('p', '', 'view-error');
+  section.dataset.overviewAnchor = 'standing-rules'; message.setAttribute('role', 'alert');
+  section.append(note(standing.source === 'builtin' ? '现在用内置规则：例行事件按规则分派，不调用 Manager 模型；规则没覆盖的事件（提到 bot、开发标签、检视发布等）仍交给 Manager。保存后改用项目自己的规则。'
+    : `项目规则，随 Manager 配置第 ${standing.revision} 版保存。规则没覆盖的事件交给 Manager；规则从不启动开发，新建的工作和 Manager 新建的一样受控制面检查。`));
+  const list = element('ul', '', 'history');
+  for (const rule of standing.rules) list.append(element('li', `${rule.enabled === false ? '（停用）' : ''}${dispatchEventNames[rule.event] || rule.event} → ${ruleActionNames[rule.action] || rule.action}${rule.work ? ' ' + rule.work : ''}${rule.when?.labels_any ? ' · 带标签 ' + rule.when.labels_any.join('、') : ''}${rule.when?.labels_none ? ' · 不带标签 ' + rule.when.labels_none.join('、') : ''} · ${rule.reason}`));
+  if (!standing.rules.length) list.append(element('li', '没有规则：所有事件都交给 Manager。'));
+  const form = document.createElement('form'), editor = textarea('standing_rules', JSON.stringify(standing.rules, null, 2), { rows: 12, spellcheck: false });
+  form.className = 'project-form'; editor.setAttribute('aria-label', '常设规则（JSON）');
+  const submit = element('button', '保存常设规则'); submit.type = 'submit';
+  form.append(field('规则（JSON 数组：id、event、action、work、reason，可选 when.labels_any／labels_none、enabled）', editor), message, submit);
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); message.textContent = '';
+    let rules; try { rules = JSON.parse(editor.value); } catch { message.textContent = '规则不是有效的 JSON。'; return; }
+    submit.disabled = true;
+    try { await api(`/api/repositories/${current.id}/manager`, 'PUT', { expected_revision: manager.prompt.revision, standing_rules: rules }); await refresh('已保存常设规则'); }
+    catch (err) { message.textContent = managerError(err); submit.disabled = false; }
+  });
+  section.append(list, form); return section;
 }
 
 // Task rule edits advance the shared configuration revision. Refresh a pristine dispatch editor without replacing its draft object.
@@ -155,6 +181,7 @@ function dispatchCard() {
     group(event.state === 'filtered' ? '控制面过滤（没有交给 Manager）' : 'Manager 判断', facts(judged), element('p', event.reason || '尚无已保存的决定理由。'));
     if (event.brief?.goal) body.lastChild.append(element('p', '任务目标：' + event.brief.goal), note((event.brief.criteria || []).join('；')));
     if (event.error) body.lastChild.append(element('p', '最近失败：' + event.error.code + (event.error.detail ? ' · ' + event.error.detail : ''), 'view-error'));
+    if (event.rule) body.lastChild.append(note(`按常设规则 ${event.rule.id}（第 ${event.rule.revision} 版）分派，没有调用 Manager 模型。`));
     // What the control plane refused when the Manager tried to create work (#815), with the reason it was given.
     if (event.refusals?.length) {
       const list = element('ul', '', 'history');
@@ -210,6 +237,7 @@ function dispatchEntry(event, open) {
   if (event.reason) item.append(note('理由：' + event.reason));
   if (event.error) item.append(note('最近失败：' + event.error.code));
   if (event.refusals?.length) item.append(note(`控制面拒绝 ${event.refusals.length} 次：` + event.refusals.at(-1).reason));
+  if (event.rule) item.append(note(`按常设规则 ${event.rule.id}（第 ${event.rule.revision} 版）分派，没有调用模型`));
   item.append(button('查看分派详情', () => open(event), 'quiet')); return item;
 }
 

@@ -17,6 +17,9 @@ test('the Docker model fixture serves checked Manager decisions and preserves ta
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: base + '/model', api_key: 'dispatch-fixture-key', model_name: 'manager-model' })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, review_enabled: true, development_enabled: true });
+  // The fixture's Manager decides every event here: no standing rules (#815).
+  const manager = (await admin('/api/repositories/101/manager')).value.manager;
+  await admin('/api/repositories/101/manager', 'PUT', { expected_revision: manager.prompt.revision, standing_rules: [] });
   const dispatcher = new Dispatcher(h.store), run = async () => { dispatcher.tick(); await dispatcher.idle(); };
   const issue = { number: 1, state: 'open', title: 'Fix addition', body: 'Fix add to sum both numbers.' }, sender = { id: 700, login: 'maintainer', type: 'User' };
   queueWebhook(h.store, '101', 'issues', { action: 'opened', issue, sender }, 'fixture-opened');

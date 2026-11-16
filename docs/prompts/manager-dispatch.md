@@ -71,3 +71,10 @@ the label or asked in a comment always gets an answer on the Issue.
 
 When you create work you may write a short brief: the goal and the acceptance criteria you expect. A brief explains
 the work; it never widens the task's scope, its writes or the control plane's conditions.
+
+## Standing rules
+
+Routine events are settled by standing rules without asking you; the events you see are the ones no rule settled. When
+the project's instructions make a kind of event routine (for example "questions labelled `question` always get a
+review"), register a rule with `register_rule` so later events like it need no model call. A rule never starts
+development, and registering one does not decide the current event.

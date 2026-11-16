@@ -1,9 +1,9 @@
 import type { Store, Row } from '../storage/database.js';
 import { fail } from '../core/security.js';
 
-const columns = 'id,type,source,object_type,object_number,summary,state,decision,reason,brief,result,model,attempts,error,refusals,created_at,decided_at';
+const columns = 'id,type,source,object_type,object_number,summary,state,decision,reason,brief,result,model,attempts,error,refusals,rule,created_at,decided_at';
 const parsed = (value: unknown) => { try { return JSON.parse(String(value)); } catch { return null; } };
-const project = (row: Row) => ({ ...row, brief: parsed(row.brief), result: parsed(row.result), error: parsed(row.error), refusals: parsed(row.refusals) ?? [] });
+const project = (row: Row) => ({ ...row, brief: parsed(row.brief), result: parsed(row.result), error: parsed(row.error), refusals: parsed(row.refusals) ?? [], rule: parsed(row.rule) });
 
 /** Cursor paging keeps a newer event from pushing an already-read event into the next page. */
 export function dispatchList(store: Store, repositoryId: string, params: URLSearchParams) {
