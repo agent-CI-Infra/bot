@@ -255,7 +255,11 @@ test('grant_writes widens within the ceilings and the Manager\'s own authority, 
   assert.equal(commands.tool(caller, 'grant_writes', { task_id: 'old', writes: ['pull_request'], reason: 'x' }).error, 'task_writes_not_grantable');
   s.run("UPDATE tasks SET status='completed' WHERE id=?", id);
   assert.equal(commands.tool(caller, 'grant_writes', { task_id: id, writes: ['pull_request'], reason: 'x' }).error, 'task_already_delivered');
+  // Managing tasks needs the delegation permission; even with it, only the controller grants writes.
+  const cfg = roleConfiguration(s, 'r'); cfg.roles.find(role => role.role_id === 'dev').permissions.delegation = 'allow';
+  s.run("UPDATE settings SET value=? WHERE key='roles:r'", JSON.stringify(cfg));
   const dev = roleTaskCaller(s, 'r', 'dev', { source_task_id: 'parent', guard() {} }), own = commands.tool(dev, 'create_task', { request: 'Dev work', criteria: ['Done'] });
+  assert.ok(own.id, JSON.stringify(own));
   assert.equal(commands.tool(dev, 'grant_writes', { task_id: own.id, writes: ['pull_request'], reason: 'x' }).error, 'grant_writes_manager_only');
   // A person who manages the project's tasks may grant too.
   assert.deepEqual(commands.api({ id: 'operator', role: 'project_admin', repositories: ['r'] }, 'POST', new URL('http://local/api/tasks/' + create({ request: 'Another' }).id + '/writes'), { writes: ['pull_request'], reason: 'A person may grant too' }).writes, ['pull_request']);
