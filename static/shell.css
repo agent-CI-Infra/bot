@@ -45,7 +45,11 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--spac
 .console-ready :is(button, .button-link):not(.quiet):not(.btn-secondary):not(.btn-text):not(.btn-danger):not(.status):not(.management-size-handle) { background-color: var(--color-brand); border-color: var(--color-brand); color: var(--color-text-inverse); }
 .console-ready :is(button, a, input, select, textarea, summary):focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: 3px; }
 .console-ready :is(h1, h2, h3, p, label, a, pre) { overflow-wrap: anywhere; }
-.console-ready .muted { color: var(--color-text-muted); line-height: var(--line-height-relaxed); }
+.console-ready .muted { line-height: var(--line-height-relaxed); }
+/* #885: a read that failed says so in `.view-error` (views.css #a2292b on #fbeaea, 6.25:1); the muted colour must not
+   pull that line back to #607087 on the error background (4.34:1) just because the node also carries `.muted`. The
+   line-height above still applies to both, so a failed row keeps its box. */
+.console-ready .muted:not(.view-error) { color: var(--color-text-muted); }
 .console-ready :is(.card, .side-card) { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: var(--space-6); }
 .console-ready .card.list-panel { padding: 0; }
 /* The board scrolls its columns sideways and opens toolbar menus past the panel edge, so it keeps board.css overflow. */
