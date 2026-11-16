@@ -194,12 +194,30 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 :is(#rows[data-view=projects], .global-project-table){--project-columns:minmax(120px,1.6fr) 58px 50px 50px 78px 66px 62px 92px 68px}
 /* Wide desktop only: the same columns with more room, still one shared definition for the whole list. */
 @media(min-width:1280px){:is(#rows[data-view=projects], .global-project-table){--project-columns:minmax(180px,1.7fr) 76px 64px 64px 104px 96px 92px 120px 84px}}
-.global-project-table{min-width:0;border:1px solid var(--color-border);border-radius:var(--radius-2);overflow:hidden}
-#settings-panel .global-project-table:not(.is-hidden){--project-columns:minmax(140px,1.6fr) 58px 50px 50px 78px 66px 76px 100px minmax(132px,.9fr)}
+.global-project-table{min-width:0;border:1px solid var(--color-border);border-radius:var(--radius-2);overflow:visible}
+#settings-panel .global-project-table:not(.is-hidden){--project-columns:minmax(144px,2fr) 58px 50px 50px 78px 66px 76px 100px minmax(120px,.7fr)}
 #settings-panel .global-project-table.is-hidden{--project-columns:minmax(240px,1fr) minmax(100px,auto)}
-@media(min-width:1440px){#settings-panel .global-project-table:not(.is-hidden){--project-columns:minmax(180px,1.7fr) 76px 64px 64px 104px 96px 92px 120px minmax(160px,1fr)}}
+@media(min-width:1440px){#settings-panel .global-project-table:not(.is-hidden){--project-columns:minmax(204px,2.2fr) 76px 64px 64px 104px 96px 92px 120px minmax(120px,.6fr)}}
+.global-project-table .project-list-row{position:relative;padding:8px 14px;min-height:48px}
+.global-project-table .project-list-row:nth-child(even){background:var(--color-surface-alt)}
 .global-project-table .project-list-row:last-child{border-bottom:0}
 .global-project-table .project-control-feedback{flex-basis:100%;text-align:left}
+.global-project-table .project-cell[data-label="项目"]>p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.global-project-table .project-cell[data-label="项目"]>a>small{display:none}
+@media(min-width:1280px){
+  #settings-panel .global-project-table:not(.is-hidden) .project-list-row{min-height:84px}
+  .global-project-table .project-cell:not([data-label="项目"]){flex-wrap:nowrap}
+  .global-project-table .project-cell[data-label="操作"]>.actions{flex-wrap:nowrap}
+  .global-project-table .project-cell .status{white-space:nowrap}
+}
+.project-actions-menu{position:static;display:inline-flex;min-width:0}
+.project-actions-toggle{list-style:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;padding:5px 10px;border:1px solid var(--color-border);border-radius:var(--radius-2);background:var(--color-surface);color:var(--color-text);cursor:pointer;font-size:var(--font-size-1);user-select:none}
+.project-actions-toggle::before{content:'⋯';font-size:16px;line-height:1}
+.project-actions-toggle::-webkit-details-marker{display:none}
+.project-actions-panel{position:absolute;right:0;top:calc(100% + 6px);z-index:60;min-width:168px;padding:6px;background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-2);box-shadow:0 10px 30px #182d4b14}
+.project-actions-panel>.actions{display:flex;flex-direction:column;gap:6px}
+.project-actions-panel button{width:100%;justify-content:center;white-space:nowrap}
+@media(max-width:760px){.project-actions-toggle{min-height:44px}}
 :is(#rows[data-view=projects], .global-project-table) .project-table-head,:is(#rows[data-view=projects], .global-project-table) .project-list-row{display:grid;grid-template-columns:var(--project-columns);gap:6px 12px;align-items:center}
 :is(#rows[data-view=projects], .global-project-table) .project-table-head{padding:6px 14px;border-bottom:1px solid #dde6eb;background:#fbfdfe;font-size:12px;color:var(--color-text-muted)}
 :is(#rows[data-view=projects], .global-project-table) .project-list-row{padding:6px 14px;min-height:44px;border-bottom:1px solid #e8eef2}

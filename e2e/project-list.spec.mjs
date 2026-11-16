@@ -1,6 +1,7 @@
 import { TaskEngine } from '../dist/agent/engine.js';
 import {test,expect} from '@playwright/test';
 import { openProjectDanger } from './open-basic-folds.mjs';
+import { clickGlobalProjectAction } from './global-project-actions.mjs';
 import {mkdirSync,rmSync} from 'node:fs';
 import {harness,setup,account,repository,testPassword} from '../test/helpers.mjs';
 
@@ -142,7 +143,7 @@ test('hidden repositories can be restored and hidden again from global settings'
     h.store.run("INSERT INTO installed_repositories(account_id,repository_id,full_name,owner_id,owner_login,installed,hidden,synced_at) VALUES(?,'401','fixture/hidden','10','fixture',1,1,?)",a.id,new Date().toISOString());
     await page.goto(h.admin+'/#/settings/projects/hidden.0');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
     const row=page.locator('.global-project-row[data-key="401"]');await row.getByRole('button',{name:'恢复',exact:true}).click();await expect(row).toHaveCount(0);
-    await page.getByRole('link',{name:'返回项目管理',exact:false}).click();await row.getByRole('button',{name:'删除',exact:true}).click();
+    await page.getByRole('link',{name:'返回项目管理',exact:false}).click();await clickGlobalProjectAction(page, '401', '删除');
     await page.getByRole('dialog').getByRole('button',{name:'隐藏',exact:true}).click();await expect(row).toHaveCount(0);
     await page.getByRole('link',{name:'管理已隐藏仓库',exact:false}).click();await expect(row).toBeVisible();
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
@@ -292,14 +293,32 @@ test('全局设置的项目管理复用紧凑表格，保留管理操作且宽�
     await expect(table.locator('.project-table-head .project-cell')).toHaveText(['项目', '启用', '检视', '开发', '权限', '门禁', '看板', '任务', '操作']);
     await expect(page.getByLabel('全局设置中的项目')).toHaveCount(0);
     for (const id of ['101', '202', '501']) await expect(row(id).locator(':scope > .project-cell')).toHaveCount(9);
-    await expect(row('101').getByRole('link', {name: /全局管理此项目/})).toBeVisible();
+    await expect(row('101').getByRole('link', {name: /项目设置/})).toBeVisible();
     await expect(row('101').getByRole('button', {name: '设置', exact: true})).toHaveCount(0);
     await expect(row('101').getByRole('switch', {name: /看板/})).toBeVisible();
     await expect(row('501').getByRole('button', {name: '启动', exact: true})).toBeVisible();
-    await expect(row('501').getByRole('link', {name: /全局管理此项目/})).toHaveCount(0);
+    await expect(row('501').getByRole('button', {name: '删除', exact: true})).toBeVisible();
+    await expect(row('501').getByRole('link', {name: /项目设置/})).toHaveCount(0);
     await page.setViewportSize({width: 1440, height: 900});
     expect(await lefts('202')).toEqual(await lefts('101'));
+    const directButtons = row('501').locator('.project-cell[data-label="操作"] button');
+    expect(await directButtons.evaluateAll(buttons => new Set(buttons.map(button => Math.round(button.getBoundingClientRect().top))).size), 'unstarted actions stay on one desktop row').toBe(1);
+    const rowHeights = await page.locator('.global-project-row').evaluateAll(rows => rows.map(row => row.getBoundingClientRect().height));
+    expect(new Set(rowHeights.map(Math.round)).size, `all project rows have equal desktop height: ${rowHeights.join(', ')}`).toBe(1);
+    const actions = row('101').locator('.project-actions-menu'), toggle = actions.locator('.project-actions-toggle');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(row('101').getByRole('button', {name: '禁用', exact: true})).toHaveCount(0);
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await expect(actions.locator('.project-actions-panel').getByRole('button')).toHaveText(['禁用', '删除']);
+    await expect(actions.getByRole('button', {name: '接入门禁', exact: true})).toHaveCount(0);
     mkdirSync('.tmp/global-project-table', {recursive: true});
+    await page.screenshot({path: '.tmp/global-project-table/desktop-actions.png', fullPage: true});
+    await page.keyboard.press('Escape');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(toggle).toBeFocused();
+    await toggle.click(); await page.locator('h3', {hasText: '项目管理'}).click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await page.screenshot({path: '.tmp/global-project-table/desktop.png', fullPage: true});
     for (const [label, width, height] of [['compact', 1024, 900], ['mobile', 390, 844], ['narrow', 320, 700]]) {
       await page.setViewportSize({width, height});
@@ -308,6 +327,13 @@ test('全局设置的项目管理复用紧凑表格，保留管理操作且宽�
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), String(width)).toBe(true);
       expect(await page.locator('.global-project-row').evaluateAll(rows => rows.every(line => line.scrollWidth <= line.clientWidth + 1))).toBe(true);
       await expect(row('101').locator('.project-cell[data-label="权限"]')).toBeVisible();
+      if (label === 'mobile') {
+        await toggle.click();
+        const panel = await actions.locator('.project-actions-panel').boundingBox();
+        expect(panel.x).toBeGreaterThanOrEqual(0); expect(panel.x + panel.width).toBeLessThanOrEqual(width);
+        await page.screenshot({path: '.tmp/global-project-table/mobile-actions.png', fullPage: true});
+        await page.keyboard.press('Escape');
+      }
     }
     await page.goto(h.admin + '/#/settings/projects/hidden.0');
     const hiddenTable = page.locator('.global-project-table.is-hidden');

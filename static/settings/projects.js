@@ -1,3 +1,28 @@
+let projectActionsMenuBound = false;
+function globalProjectActions(row, actions) {
+  const menu = element('div', '', 'project-actions-menu'), panel = element('div', '', 'project-actions-panel');
+  const setOpen = open => {
+    menu.classList.toggle('open', open); panel.hidden = !open;
+    toggle.setAttribute('aria-expanded', String(open));
+  };
+  const toggle = button('操作', () => setOpen(!menu.classList.contains('open')), 'quiet project-actions-toggle');
+  toggle.setAttribute('aria-label', row.full_name + ' 操作'); toggle.setAttribute('aria-expanded', 'false');
+  panel.hidden = true; panel.append(actions); menu.append(toggle, panel);
+  menu.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault(); setOpen(false); toggle.focus();
+  });
+  if (!projectActionsMenuBound) {
+    projectActionsMenuBound = true;
+    document.addEventListener('click', event => {
+      for (const open of document.querySelectorAll('.project-actions-menu.open') ) if (!open.contains(event.target)) {
+        open.classList.remove('open'); open.querySelector('.project-actions-panel').hidden = true;
+        open.querySelector('.project-actions-toggle').setAttribute('aria-expanded', 'false');
+      }
+    });
+  }
+  return menu;
+}
 function globalProjectRow(row, hidden) {
   const item = element('article', '', 'row project-list-row global-project-row');
   item.setAttribute('role', 'listitem'); item.dataset.key = row.id; item.dataset.repositoryId = row.id;
@@ -7,13 +32,13 @@ function globalProjectRow(row, hidden) {
     item.append(content, projectCell('操作', button('恢复', () => restoreInstalled(row, () => route()).catch(error), 'quiet')));
     return item;
   }
-  if (row.registered) content.append(consoleLink('#/projects/' + row.id + '/basic', '全局管理此项目', '启停、删除和公开可见性'));
+  if (row.registered) content.append(consoleLink('#/projects/' + row.id + '/basic', '项目设置', '策略、模型、角色和成员'));
   const detail = element('p', installedDetail(row)); detail.title = detail.textContent; content.append(detail);
   const cells = projectRowCells(row, null, true), board = cells.find(cell => cell.dataset.label === '看板'), permission = cells.find(cell => cell.dataset.label === '权限');
   permission.replaceChildren(permissionBadge(row));
   board.replaceChildren(boardChip(row), projectListControls(row, { showStatus: false, showTasks: false }));
   const actions = installedActions(row, () => route(), { includeSettings: false });
-  item.append(content, ...cells, projectCell('操作', actions));
+  item.append(content, ...cells, projectCell('操作', row.registered ? globalProjectActions(row, actions) : actions));
   return item;
 }
 async function globalProjectSettings(request, id) {

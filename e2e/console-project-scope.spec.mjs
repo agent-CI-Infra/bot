@@ -216,7 +216,7 @@ test('旧的项目全局设置地址落到唯一的项目基本设置页，批�
     // The duplicate editor is gone, so the global list still carries the batch operations.
     await page.goto(h.admin + '/#/settings/projects');
     await expect(page.getByRole('button', { name: '同步安装列表', exact: true })).toBeVisible();
-    await expect(page.getByRole('link', { name: '全局管理此项目', exact: false }).first())
+    await expect(page.getByRole('link', { name: '项目设置', exact: false }).first())
       .toHaveAttribute('href', '#/projects/101/basic');
   } finally { await h.stop(); }
 });
