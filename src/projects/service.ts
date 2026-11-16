@@ -51,6 +51,10 @@ export class ProjectService {
   private readonly failures = new FailureLog('projects');
   // Automatic starts of failed computers: how many in a row, and when the next one may be sent.
   private readonly restarts = new Map<string, { attempts: number, at: number }>();
+  // Starts the manager refused because a deleted project's notes could not be cleared yet (#783): the row stays deleted,
+  // so the deletion itself is not retried on every pass. Same 30 s → 1, 2 … minutes (at most 30) spacing as a failed
+  // computer; one answered start clears it.
+  private readonly notesRetries = new Map<string, { attempts: number, at: number }>();
   constructor(readonly store: Store, readonly manager: Manager) {store.db.exec('CREATE TABLE IF NOT EXISTS computer_console_specs(repository_id TEXT PRIMARY KEY,spec TEXT NOT NULL)');}
   save(row: Row): void {
     if (!row) return;
@@ -128,14 +132,19 @@ export class ProjectService {
       if (state.state !== 'failed') this.restarts.delete(repo.id);
       const retry = repo.enabled && state.state === 'failed' && Date.now() >= (this.restarts.get(repo.id)?.at ?? 0);
       if (retry) { const attempts = (this.restarts.get(repo.id)?.attempts ?? 0) + 1; this.restarts.set(repo.id, { attempts, at: Date.now() + Math.min(30_000 * 2 ** (attempts - 1), 30 * 60_000) }); }
+      // A start still owed a notes purge waits for its retry slot: the manager answered why it could not clear the residue,
+      // and asking again on this pass would only repeat that answer (#783).
+      const notesWaiting = (this.notesRetries.get(repo.id)?.at ?? 0) > Date.now();
       const action = !repo.enabled && !['stopped','deleted'].includes(state.desired) ? 'stop'
-        : repo.enabled && (['stopped','deleted'].includes(state.state) || retry) ? 'start' : null;
+        : repo.enabled && !notesWaiting && (['stopped','deleted'].includes(state.state) || retry) ? 'start' : null;
       if (action) {
         const input = { operation_id: randomId(), generation: state.generation };
         this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, repo.id, action, JSON.stringify(input));
         const result = await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
         // A start that brought the computer up ends the backoff, so a later failure is retried at once.
         if (result?.state !== 'failed') this.restarts.delete(repo.id);
+        // An answered start also clears the notes-retry slot: the residue it owed is gone, or the manager no longer refuses it.
+        this.notesRetries.delete(repo.id);
         if (result?.state) state = result;
       } else if (repo.enabled && state.state === 'ready' && state.computer?.resources_pending) {
         // The resource defaults changed: a computer that follows them is rebuilt once no task runs on it. The engine claims no
@@ -151,6 +160,12 @@ export class ProjectService {
       if (!['failed', 'reset_failed'].includes(state.state)) this.failures.clear('project ' + repo.id);
     } catch (error) { /* The environment page retains a visible fault instead of claiming readiness. */
       this.failures.report('project ' + repo.id, error);
+      // A start refused because the old notes are still there keeps the row deleted; space the retries out instead of
+      // sending one on every pass, and let a successful start clear the slot (#783).
+      if (error instanceof HttpError && error.code === 'notes_residue_unclearable') {
+        const attempts = (this.notesRetries.get(repo.id)?.attempts ?? 0) + 1;
+        this.notesRetries.set(repo.id, { attempts, at: Date.now() + Math.min(30_000 * 2 ** (attempts - 1), 30 * 60_000) });
+      }
       // Recovery is a temporary fence, not a new durable fault of this project's computer.
       if (error instanceof HttpError && error.code === 'manager_not_ready') return;
       if (this.removing.has(repo.id) || !this.store.get('SELECT 1 FROM repositories WHERE id=?', repo.id)) return;

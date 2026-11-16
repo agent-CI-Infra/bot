@@ -294,14 +294,16 @@ export class Projects {
   }
   // #774: a deletion whose notes removal failed leaves the volume under the name this.notesName(repo) derives from the
   // repository id, with the previous project's notes in the directory it binds. A project that is not live (no row, or a
-  // row a committed deletion left deleted) must never adopt that residue: the volume and its directory go before the first
-  // notes read or write, and a Docker that refuses the volume removal fails the entry instead of serving the old content.
+  // row that still owes the purge) must never adopt that residue: the volume and its directory go before the first notes
+  // read or write, and a Docker that refuses the volume removal fails the entry instead of serving the old content.
   async reclaimStaleNotes(repo) {
     const row = this.get(repo);
     // A purge is owed only by a committed deletion whose notes removal failed; a deletion the control plane refused keeps
     // its notes, and a project that failed for another reason keeps real user notes. A repository with no row at all is a
     // reconnect or a first creation: nothing names those notes as still in use, so they go before the new project reads.
-    if (row && !(row.state === 'deleted' && Number(row.notes_purge) === 1)) return false;
+    // notes_purge alone marks that intent (#783): a stop after the deletion, or a pending reset that ended reset_failed,
+    // moves the state away from deleted while the cleanup is still owed, and the marker survives those transitions.
+    if (row && Number(row.notes_purge) !== 1) return false;
     const name = this.notesName(repo), volume = await this.docker.request('GET', '/volumes/' + name);
     if (volume) {
       if (Object.entries(this.notesLabels(repo)).some(([key, value]) => volume.Labels?.[key] !== value)) throw new ManagerError('resource_ownership_mismatch', 403);
@@ -774,9 +776,10 @@ export class Projects {
             }
           }
         } else {
-          // #774: re-enabling or resetting a project a committed deletion left behind reclaims the old notes first, so the
-          // new generation cannot read them; a refusal here leaves the row deleted instead of starting on top of the residue.
-          if (['start', 'reset'].includes(action) && project.state === 'deleted') await this.reclaimStaleNotes(repo);
+          // #774: re-enabling or resetting a project that still owes a notes purge reclaims the old notes first, so the new
+          // generation cannot read them; a refusal here leaves the row as it was instead of starting on top of the residue.
+          // The state is not part of the test (#783): the purge marker is what says the cleanup is still owed.
+          if (['start', 'reset'].includes(action)) await this.reclaimStaleNotes(repo);
           this.update(repo, action === 'reset' ? 'resetting' : 'recovering', action === 'stop' ? 'stopped' : action === 'delete' ? 'deleted' : 'ready');
           await this.stopAll(repo);
           if (action === 'reset') this.db.prepare('UPDATE projects SET generation=generation+1 WHERE repository_id=?').run(repo);
