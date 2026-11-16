@@ -18,7 +18,7 @@ import { Redactor } from '../dist/agent/common.js';
 import { roleTaskCaller } from '../dist/tasks/management.js';
 import { roleConfiguration } from '../dist/roles/definition.js';
 import { policyView } from '../dist/roles/board.js';
-import { grantTaskWrites, grantView, grantedWrites, pullRequestQaGate, setDeliveryGates, taskWritesDetail } from '../dist/tasks/grants.js';
+import { grantTaskWrites, grantView, grantedWrites, pullRequestQaGate, pullRequestQaRequired, setDeliveryGates, taskWritesDetail } from '../dist/tasks/grants.js';
 import { grantedTaskWrite } from '../dist/tasks/github-write.js';
 import { assertRequestPullRequest } from '../dist/tasks/pull-request.js';
 import { taskPermissions } from '../dist/tasks/configuration.js';
@@ -305,5 +305,9 @@ test('the QA gate before a PR is on by default, shown with the policy and only t
   assert.throws(() => setDeliveryGates(s, 'r', { merge: true }, 'operator'), { code: 'invalid_delivery_gates' });
   setDeliveryGates(s, 'r', { pull_request_qa: false }, 'operator');
   assert.equal(pullRequestQaGate(s, 'r'), false);
+  // With the gate off, QA is skipped only for a project whose test command checks the candidate instead.
+  assert.equal(pullRequestQaRequired(s, 'r'), true, 'no test command: QA still runs');
+  s.run("UPDATE policies SET test_command='node --test' WHERE repository_id='r'");
+  assert.equal(pullRequestQaRequired(s, 'r'), false);
   assert.deepEqual(policyView(s, s.get("SELECT * FROM policies WHERE repository_id='r'"), 'r').delivery_gates, { pull_request_qa: false });
 });

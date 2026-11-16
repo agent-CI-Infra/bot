@@ -127,9 +127,17 @@ export function grantTaskWrites(store: Store, task: Row, input: { writes?: unkno
   });
 }
 
-/** The pull request gate (#814): a PR delivery needs a passing independent QA on the same candidate unless the project turned it off. */
+/** The pull request gate as the project set it (#814): on unless the project turned it off. */
 export function pullRequestQaGate(store: Store, repositoryId: string, policy = policyOf(store, repositoryId)): boolean {
   try { return JSON.parse(String(policy?.delivery_gates ?? '{}'))?.pull_request_qa !== false; } catch { return true; }
+}
+/**
+ * Whether a PR delivery needs a passing independent QA on its candidate: the gate is on, or the project has no test command.
+ * Turning the gate off trades QA for the project's own tests, so without a test command nothing would check the candidate
+ * and QA still runs.
+ */
+export function pullRequestQaRequired(store: Store, repositoryId: string, policy = policyOf(store, repositoryId)): boolean {
+  return pullRequestQaGate(store, repositoryId, policy) || !String(policy?.test_command ?? '').trim();
 }
 export function setDeliveryGates(store: Store, repositoryId: string, value: unknown, actor: string) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => key !== 'pull_request_qa') || typeof (value as any).pull_request_qa !== 'boolean')
@@ -146,7 +154,7 @@ export function grantView(store: Store, task: Row, sources: RolePermissions[], g
   const effective = effectiveWrites(store, task, sources), limit = projectGrantLimit(store, String(task.repository_id)).filter(write => !sourceRefusal([...sources, ...granter], write));
   return { granted, effective, grantable: limit, revision: Number(store.get('SELECT revision FROM task_write_grants WHERE task_id=?', task.id)?.revision ?? 0),
     tools: ['submit_report', ...grantCatalog.filter(grant => effective.includes(grant.id)).map(grant => grant.tool)],
-    pull_request_qa: pullRequestQaGate(store, String(task.repository_id)) };
+    pull_request_qa: pullRequestQaRequired(store, String(task.repository_id)) };
 }
 /** Task details (#814): the grant, its changes, and which delivery tools each run of the task started with. */
 export function taskWritesDetail(store: Store, task: Row, sources: RolePermissions[]) {

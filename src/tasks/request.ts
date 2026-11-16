@@ -6,7 +6,7 @@ import {assessRetryReport} from '../roles/retries.js';
 import { taskTraceAccess } from '../memory/access.js';
 import { executionModel } from './configuration.js';
 import { assertRequestPullRequest, genericTask, pullRequestRefusal, softwareRequest, requestPolicyHash, publishRequestPullRequest, workflowChanges } from './pull-request.js';
-import { effectiveWrites, grantCatalog, grantedWrites, projectGrantLimit, pullRequestQaGate, toolGrant } from './grants.js';
+import { effectiveWrites, grantCatalog, grantedWrites, projectGrantLimit, pullRequestQaRequired, toolGrant } from './grants.js';
 import { checkPullRequestLabels, pullRequestLabelsSchema } from '../github/pull-request-labels.js';
 import { ownLabels } from '../rules/service.js';
 import { roleWorkspaces } from '../roles/workspace.js';
@@ -120,7 +120,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
         const pullRequestFields={change_title:{type:'string'},labels:pullRequestLabelsSchema,test_command:{type:'string'}};
         if(software()&&!generic){Object.assign(submit.function.parameters.properties,pullRequestFields);submit.function.description='Submit the fixed software candidate for policy tests and independent QA. The framework publishes its PR only after those gates pass. Include a concise change_title and any labels this repository\'s contribution rules ask for.';}
         // Delivery tools of a generic task (#814): a report always; a PR, a review and direct GitHub writes while granted.
-        const qaGate=pullRequestQaGate(store,task.repository_id);
+        const qaGate=pullRequestQaRequired(store,task.repository_id);
         const report={type:'function',function:{...submit.function,name:'submit_report',description:'Deliver your result as a report for independent acceptance. This ends execution; nothing is published to GitHub. Use it whenever the goal is answered, also when you found that a code change is needed but this task was not granted a pull request: say so in the report.'}};
         const openPullRequest={type:'function',function:{name:'open_pull_request',description:`Deliver the changes in this task checkout as a bot pull request. This ends execution: the framework fixes the candidate, runs the project's test command${qaGate?', then independent QA on the same candidate':''}, and only then pushes the bot branch and opens or updates the PR. A refusal (no grant, the project's ceiling or switches, a failed gate) comes back with its reason and nothing is written. Include a concise change_title and any labels this repository's contribution rules ask for.`,parameters:{...submit.function.parameters,properties:{...submit.function.parameters.properties,...pullRequestFields},required:['summary','artifacts','change_title']}}};
         const effective=()=>effectiveWrites(store,task,sourcePolicies(store,task));
@@ -209,7 +209,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
       const current=records.get(task.id),candidate=current.candidate!;
       const evaluatedPolicy=software()?requestPolicyHash(store,task):null;
       // The PR gate is project policy (#814): on by default, a project may publish a tested candidate without independent QA.
-      const verdict=generic&&software()&&!pullRequestQaGate(store,task.repository_id)?withoutQa(store,task,candidate):await evaluateDelivery(store,task,workspace,redactor,guard);
+      const verdict=generic&&software()&&!pullRequestQaRequired(store,task.repository_id)?withoutQa(store,task,candidate):await evaluateDelivery(store,task,workspace,redactor,guard);
       if(software()&&evaluatedPolicy!==requestPolicyHash(store,task))stop('acceptance_context_changed','retry_wait','独立 QA 期间项目验证策略已变化，候选将重新验收。');
       if(software()&&['pass','pass_with_issues'].includes(verdict.outcome)){
         await guard();assertRequestPullRequest(store,task);
@@ -239,15 +239,16 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
 }
 
 /**
- * The verdict of a PR delivery when the project turned off independent QA before PRs (#814): the project's test command still
+ * The verdict of a PR delivery when the project turned off independent QA before PRs and has a test command (#814): that command
  * has to pass on the same candidate; otherwise the candidate goes back to its executor with the failure.
  */
 function withoutQa(store: Store, task: Row, candidate: any): Verdict {
   const command=String(store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||'').trim();
   const code=candidate.artifacts.find((a:any)=>a.kind==='code');
   const proof=candidate.evidence.find((e:any)=>e.source==='policy_validation'&&e.version===code?.version);
-  const passed=!command||!!proof?.verified&&(proof.result as any)?.command===command;
-  const verdict:Verdict=passed?{outcome:'pass',reason:'项目关闭了 PR 前的独立 QA 门槛；'+(command?`项目测试命令在同一候选上通过：${command}`:'项目没有配置测试命令。'),gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true}
+  // Only a project with a test command skips QA (pullRequestQaRequired), so the command is always there to pass.
+  const passed=!!command&&!!proof?.verified&&(proof.result as any)?.command===command;
+  const verdict:Verdict=passed?{outcome:'pass',reason:`项目关闭了 PR 前的独立 QA 门槛；项目测试命令在同一候选上通过：${command}`,gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true}
     :{outcome:'return',reason:'Required project verification failed for the submitted candidate',gaps:[command+'; '+String((proof?.result as any)?.output||(proof?.result as any)?.error||'verification incomplete').slice(-4000)],residuals:[],core_complete:false,required_evidence_complete:false,acceptable_risk:true};
   new TaskRecords(store).history(task.id,'acceptance_evaluated',{evaluation_id:'gate:'+candidate.id,candidate_id:candidate.id,elapsed_ms:0,verdict,method:'pull_request_qa_gate_off'});
   return verdict;
