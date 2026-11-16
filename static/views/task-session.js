@@ -1,4 +1,4 @@
-let openTaskId = null, taskTimer = null, taskRetryDelay = 0, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null, taskLogState = null, taskReadVersion = 0, taskInboxOrigin = null;
+let openTaskId = null, taskTimer = null, taskRetryDelay = 0, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null, taskLogState = null, taskReadVersion = 0, taskInboxOrigin = null, taskPollError = '';
 function resetTaskRendering() {
   renderedLogs = new Set(); liveCommand = null; snapshotProgress = null;
   delete $('task-actions').dataset.signature;
@@ -11,7 +11,7 @@ async function openTask(id) {
   openTaskId = id; resetTaskRendering(); $('timeline-command').hidden = true; clearTimeout(taskTimer); taskRetryDelay = 0;
   $('task-picker').hidden = true; $('task-layout').hidden = false; $('task-next').hidden = true; $('task-next-text').textContent = '';
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
-  $('task-title').textContent = '正在加载…'; notice('task-error'); $('timeline-live').hidden = true;
+  $('task-title').textContent = '正在加载…'; taskPollError = ''; notice('task-error'); $('timeline-live').hidden = true;
   if (!taskView.open) taskView.showModal();
   await refreshTask();
 }
@@ -25,7 +25,7 @@ async function openTaskDelivery(deliveryId) {
 function openTaskChoices(label, tasks, hasMore = false, onMore = null) {
   taskReadVersion++; taskLogState = null;
   resetTaskRendering(); taskRetryDelay = 0;
-  openTaskId = null; clearTimeout(taskTimer); $('timeline-command').hidden = true; $('timeline-live').hidden = true; notice('task-error');
+  openTaskId = null; clearTimeout(taskTimer); $('timeline-command').hidden = true; $('timeline-live').hidden = true; taskPollError = ''; notice('task-error');
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = `${label} · 选择任务`; $('task-actions').append(button('关闭', () => taskView.close()));
   $('task-layout').hidden = true; $('task-next').hidden = true;
@@ -45,6 +45,16 @@ function openTaskChoices(label, tasks, hasMore = false, onMore = null) {
   }
   if (!taskView.open) taskView.showModal();
 }
+// #877: the bar is written by the poll's own catch, so a refresh that succeeds has to take it back — the task is readable
+// again and a bar still saying otherwise makes the screen reader repeat an outage that ended. The same box carries the
+// retry path's conflict text (#745), which is meant to outlive refreshes, so only the exact text this poll wrote is
+// withdrawn; anything else stays until its own writer clears it.
+function withdrawTaskError() {
+  if (!taskPollError) return;
+  const shown = $('task-error').firstElementChild?.textContent || '';
+  if (shown === taskPollError || !shown) notice('task-error');
+  taskPollError = '';
+}
 async function refreshTask() {
   // Clearing the handle is not enough: a terminal answer must leave no timer at all, so the state says what happened.
   clearTimeout(taskTimer); taskTimer = null; const id = openTaskId; if (!id || !taskView.open) return;
@@ -57,6 +67,7 @@ async function refreshTask() {
     const environment = await api('/api/environments/' + detail.task.repository_id).catch(() => null);
     const roles = roleRecords(roleView), purposes = await rolePurposes(id, roles);
     if (!current()) return;
+    withdrawTaskError();
     taskRetryDelay = 0;
     renderTaskHeader(detail.task); renderTaskNext(detail.task, roles, purposes);
     // The log read asks the same rule as the detail read, so a change to the terminal statuses reaches both (#745 review).
@@ -71,6 +82,7 @@ async function refreshTask() {
     if (!terminalStates.includes(detail.task.status)) taskTimer = setTimeout(refreshTask, detail.task.status.startsWith('waiting_') ? 5000 : 2000);
   } catch (err) {
     if (!current()) return;
+    taskPollError = readErrorText(err);
     // A task this page is no longer allowed to read stays unreadable however often it is asked; the poll then stops and
     // the failure is stated once, with an explicit read left to the person.
     const poll = pollAfterError(err, taskRetryDelay);
@@ -81,12 +93,12 @@ async function refreshTask() {
       $('task-next').hidden = $('timeline-command').hidden = $('timeline-live').hidden = true;
       $('task-title').textContent = '任务暂不可访问';
       $('task-actions').append(button('关闭', () => taskView.close()), button('重新读取', () => refreshTask()));
-      notice('task-error', readErrorText(err)); taskRetryDelay = 0;
+      notice('task-error', taskPollError); taskRetryDelay = 0;
       return;
     }
     // Anything else may clear on its own, so it keeps polling — backing off so a failing endpoint is not hit every five
     // seconds, and no slower than half a minute.
-    notice('task-error', readErrorText(err));
+    notice('task-error', taskPollError);
     taskTimer = setTimeout(refreshTask, taskRetryDelay = poll.delay);
   }
 }
@@ -142,8 +154,8 @@ function renderTaskHeader(task) {
   }));
   if (taskRetryable(task)) actions.append(button('重试', async event => {
     const retry = event.currentTarget; retry.disabled = true;
-    try { await api('/api/tasks/' + task.id + '/retry', 'POST', {}); if(openTaskId===task.id){notice('task-error');notice('message');} }
-    catch (err) { if(openTaskId===task.id)notice('task-error',retryErrorText(err)); }
+    try { await api('/api/tasks/' + task.id + '/retry', 'POST', {}); if(openTaskId===task.id){taskPollError='';notice('task-error');notice('message');} }
+    catch (err) { if(openTaskId===task.id){taskPollError='';notice('task-error',retryErrorText(err));} }
     finally { retry.disabled = false; }
     await refreshTask();
   }));
