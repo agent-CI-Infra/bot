@@ -195,12 +195,16 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const denied=(tool:string|null,reason:string)=>traceEvent(s,task.id,'capability_denied',{role,instance_id:instance.id,tool,reason,snapshot_id:resolved.id,policy:snapshot.capability.id},task.trace_run_id,'framework');
   // Authority is live: a removed role, revoked permission or disabled coordination stops further capability use; the snapshot never extends it.
   const direct=managedTaskOrigin(s,task.id)?.source_kind==='role';
-  const authority=(tool?:string)=>{assertTaskRole(s,task,role);const reason=roleAuthority(s,task.repository_id,snapshot,tool,direct);if(reason){denied(tool??null,reason);stop('role_authority_revoked','waiting_configuration',`${role}：${reason}`);}if(tool&&!taskToolAllowed(s,task,role,tool)){denied(tool,'source_permission_ceiling');stop('role_authority_revoked','waiting_permission','源请求不允许此能力。');}};
+  // A delivery tool of a generic task (#814) follows the task's grant, not the role's GitHub permissions; its call checks the
+  // grant and both ceilings itself and returns a refusal instead of stopping the run.
+  const governed=(tool?:string)=>!!tool&&spec.grants?.(tool)!==undefined;
+  const authority=(tool?:string)=>{assertTaskRole(s,task,role);const reason=roleAuthority(s,task.repository_id,snapshot,governed(tool)?undefined:tool,direct);if(reason){denied(tool??null,reason);stop('role_authority_revoked','waiting_configuration',`${role}：${reason}`);}if(tool&&!governed(tool)&&!taskToolAllowed(s,task,role,tool)){denied(tool,'source_permission_ceiling');stop('role_authority_revoked','waiting_permission','源请求不允许此能力。');}};
   // Flat permissions filter every offered tool, including the submission tool.
   const allowedTools=snapshot.capability.tools;
   const memoryAliases=role==='manager'?[]:memoryTools.filter(t=>['search_project_memory','remember_project_memory'].includes(t.function.name)&&spec.tools?.some(x=>x.function.name===t.function.name)).map(t=>({...t,function:{...t.function,name:t.function.name.replace('_project_','_role_')}}));
-  const managedTools=snapshot.kind==='evaluator'||role==='coordinator'?[]:taskManagementTools.filter(t=>t.function.name==='read_managed_task'||snapshot.capability.permissions?.delegation==='allow');
-  const tools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)),...managedTools,...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
+  // grant_writes (#814) is a task-management tool of the project's controller only.
+  const managedTools=snapshot.kind==='evaluator'||role==='coordinator'?[]:taskManagementTools.filter(t=>(t.function.name==='read_managed_task'||snapshot.capability.permissions?.delegation==='allow')&&(t.function.name!=='grant_writes'||role===roleConfiguration(s,task.repository_id).controller.role));
+  const tools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)),...managedTools,...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>governed(t.function.name)?spec.grants!(t.function.name)===true:(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
   if(spec.finish&&!tools.some(tool=>tool.function.name===spec.finish!.name))stop('role_submission_forbidden','waiting_configuration',`${role}：当前权限禁止提交本次任务要求的结果，请在角色权限中调整。`);
   const bounded=perRunBudget(snapshot)?snapshot.budget:undefined,cumulative=cumulativeBudget(snapshot);
   // External CLIs own their turn semantics; only these three loops share the request-based finalization reserve.
@@ -262,7 +266,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
     return value;},
    system:definition.prompt,
    screen:(name,args)=>{authority(name);spec.screen?.(name,args);},
-   ...(spec.finish ? {finish:{...spec.finish,validate:async(args,name)=>{authority(name??spec.finish!.name);const result=await spec.finish!.validate(args,name);authority(name??spec.finish!.name);return result;}}} : {}),
+   ...(spec.finish ? {finish:{...spec.finish,...(spec.finish.names?{names:spec.finish.names.filter(name=>!governed(name)||tools.some(tool=>tool.function.name===name))}:{}),validate:async(args,name)=>{authority(name??spec.finish!.name);const result=await spec.finish!.validate(args,name);authority(name??spec.finish!.name);return result;}}} : {}),
    ...(spec.validate ? {validate:(content:string)=>{authority(spec.finish?.name??snapshot.output_schema.tool??'finish');return spec.validate!(content);}} : {}),
    ...(spec.finalizationTools ? {finalizationTools:spec.finalizationTools.filter(name=>tools.some(tool=>tool.function.name===name))} : {}),
    prompt:JSON.stringify({...scopedInput(),role_context:{task_ref:'task:'+task.id,...(snapshot.kind!=='evaluator'&&s.get('SELECT 1 FROM tasks WHERE id=?',task.id)?{task_facts:new TaskRecords(s).facts(task.id)}:{}),assignment_ref:ref,recovery_mode:recover,...roleContext,environment:{project_id:task.repository_id,task_id:task.id,work_type:workflow,profile:snapshot.environment,permissions:resolved.definition.permissions,tools:tools.map(tool=>tool.function.name)},
@@ -321,6 +325,9 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    spec.redactor.add(issued.token);
    live.bound={ctx,token:issued.token,token_id:issued.id,run_id:runId,epoch:lease.epoch};
    appendRunEvent(s,{run_id:runId,lease_epoch:lease.epoch,type:'run_started',category:'progress',operation_id:operationId,data:{assignment_id:scope,resume_from_run_id:previous??null,recovery_mode:mode,start_mode:recover,candidate_ref:ctx.candidate_ref,source_ref:ctx.source_ref,budget:ctx.budget.policy_ref,admitted:admission.required}});
+   // Which delivery tools this run of a generic task started with (#814): the grant can change between runs.
+   const delivery=tools.filter(t=>governed(t.function.name)).map(t=>t.function.name);
+   if(delivery.length)traceEvent(s,task.id,'delivery_tools',{role,run_id:runId,attempt:task.attempt,tools:delivery},runId,'framework');
    if(previous)traceEvent(s,task.id,'role_run_recovery',{protocol:roleRunProtocol.id,run_id:runId,resume_from_run_id:previous,lease_epoch:lease.epoch,previous_epoch:lease.previous_epoch??null,recovery_mode:mode??'pending_session_binding',planned:plan},runId,'framework',plan?.checkpoint_ref?[plan.checkpoint_ref]:[]);
    // Wall time is cumulative too; the timer interrupts the session even while a tool call runs.
    if(cumulative&&budget.max_wall_ms!==null){const left=budget.max_wall_ms-instanceUsage(s,instance.id).wall_ms;live.timer=setTimeout(()=>{try{exhaust('max_wall_ms');}catch(error){handles.get(operationId)?.controller.abort(error);}},Math.max(0,left));live.timer.unref?.();}

@@ -36,9 +36,14 @@ function projectWorkPolicyCard() {
     const label = element('label', '', 'check'); label.append(input('capability_ceiling', level, { type: 'radio', checked: level === saved }), ' ' + title);
     choices.append(label, note(detail));
   }
-  return settingsForm('能力上限', [choices,
+  // Independent QA before a PR is project policy (#814), on by default.
+  const qa = policy.delivery_gates?.pull_request_qa !== false;
+  const gate = checkbox('pull_request_qa', qa, '普通任务开 PR 前需要独立 QA 通过');
+  return settingsForm('能力上限', [choices, gate,
+    note('关闭后，普通任务的候选只要通过项目测试命令就可以开或更新 PR，不再等独立 QA；Issue 开发、bot PR 修订和已经创建的任务仍按原来的流程验收。'),
     note('工作类型的写入、角色的 GitHub 写、飞书群档位和私聊个人权限都以这一档为上限，只能更窄。调低后，受影响的任务在下一个工具调用前停下并写明原因，不会被取消；调回后可以重试。事件来源只决定哪些 GitHub 事件交给 Manager，不增加写权限。')],
-    async form => { const level = form.elements.capability_ceiling.value; if (level !== saved) await api(`/api/repositories/${id}/policy`, 'PATCH', { capability_ceiling: level }); },
+    async form => { const level = form.elements.capability_ceiling.value, gated = form.elements.pull_request_qa.checked;
+      if (level !== saved || gated !== qa) await api(`/api/repositories/${id}/policy`, 'PATCH', { ...(level !== saved ? { capability_ceiling: level } : {}), ...(gated !== qa ? { delivery_gates: { pull_request_qa: gated } } : {}) }); },
     { editable: target.canConfigure !== false, draftKey: 'automation', caption: '保存能力上限' });
 }
 

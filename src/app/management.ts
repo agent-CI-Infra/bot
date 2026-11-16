@@ -12,6 +12,7 @@ import { fail, fields, hashPassword, password, randomId, text, type Json } from 
 import { loadAutomationConfig, parseAutomationConfig } from '../automation/config.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { concurrencyValue, defaultConcurrency } from './settings.js';
+import { setDeliveryGates } from '../tasks/grants.js';
 import { policyView, roleBoard, roleConcurrency, roleConcurrencyValue } from '../roles/board.js';
 import { activateActions } from '../actions/storage.js';
 import { authorize, listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
@@ -362,7 +363,7 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
   repository(store,user,id);
       // Review guidance and the review label are rule files (PUT /api/repositories/:id/rules), not policy fields.
       fields(body, ['model_id', 'capability_ceiling', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','max_revisions','base_branch','automation',
-        'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models','role_concurrency']);
+        'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models','role_concurrency','delivery_gates']);
       const taskConcurrency = body.task_concurrency === undefined || body.task_concurrency === null ? body.task_concurrency : concurrencyValue(body.task_concurrency);
       // Per-role limits are an inner limit inside the project concurrency, never a replacement for it; null unsets one role.
       const roleConcurrencyLimits = body.role_concurrency === undefined ? undefined : roleConcurrencyValue(store, id, body.role_concurrency);
@@ -410,6 +411,8 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
         }
         store.run('UPDATE policies SET model_id=?,enabled=? WHERE repository_id=?', model, body.enabled === undefined ? previous.enabled : Number(body.enabled), id);
         setCeiling(store, id, ceiling, user.id);
+        // Delivery gates are project policy (#814): independent QA before a PR is on unless the project turns it off.
+        if (body.delivery_gates !== undefined) setDeliveryGates(store, id, body.delivery_gates, user.id);
         if (grant) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', model, id);
         if (taskModels !== undefined) {
           for (const chosen of taskModelGrants) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', chosen, id);

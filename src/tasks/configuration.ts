@@ -5,6 +5,8 @@ import { workOf, workType, narrowWrites, type WorkPermissions } from '../work/ca
 import { workPermissions } from '../work/settings.js';
 import { resolveRules } from '../rules/service.js';
 import { roleConfiguration } from '../roles/definition.js';
+import { grantedWrites, effectiveWrites } from './grants.js';
+import { sourcePolicies } from './management.js';
 
 export function taskConfiguration(store:Store,task:Row):any|null{
   const row=store.get('SELECT snapshot FROM task_execution_configs WHERE task_id=?',task.id??'');return row?JSON.parse(row.snapshot):null;
@@ -55,6 +57,14 @@ export function executionRuleFiles(store:Store,task:Row,files:Record<string,stri
  */
 export function taskPermissions(store:Store,task:Row):WorkPermissions{
   const work=workOf(task as any),live=workPermissions(store,task.repository_id,work);
+  // A generic task (#814) holds the writes it was granted, as far as the project and its source allow them now. Editing its
+  // own checkout is not a GitHub write: it follows the work type as before (#850), so a report task can prepare a change
+  // that a later grant publishes; a granted PR always carries the checkout changes it delivers.
+  if(grantedWrites(store,String(task.id??''))){
+    const effective=effectiveWrites(store,task,sourcePolicies(store,task));
+    const writes=[...(live.writes.includes('code')||effective.includes('pull_request')?['code']:[]),...effective];
+    return {...live,workspace:{...live.workspace,write:writes.includes('code')},writes};
+  }
   const fixed=taskConfiguration(store,task)?.permissions?.writes,manager=JSON.parse(task.input||'{}').manager?.writes;
   let writes=Array.isArray(fixed)?live.writes.filter(write=>fixed.includes(write)):live.writes;
   if(Array.isArray(manager))writes=narrowWrites(writes,manager,work);

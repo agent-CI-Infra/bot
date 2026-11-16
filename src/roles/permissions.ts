@@ -46,6 +46,8 @@ export const basicTools = ['read_tool_result','read_child_tasks','wait_for_child
   // Framework deliveries (#381): a tested PR from the task's candidate, Actions reruns and failure reports. The work type's
   // writes decide whether a task offers them; the executing role needs no GitHub write for them.
   'create_pull_request','publish_candidate','rerun_failed_run','report_failure',
+  // Delivery tools of generic tasks (#814): offered by the writes the task was granted, checked again at every call.
+  'submit_report','open_pull_request','post_review',
   // The task's own workspace choice (#769): which worktree of the project computer it works in. They read and write no
   // files themselves, so they need no computer permission.
   'list_workspaces','use_workspace','create_workspace'];
@@ -54,7 +56,7 @@ const platform = (item: PermissionItem) => ({ ...item, group: 'platform' });
 const github = (item: PermissionItem) => ({ ...item, group: 'github' });
 export const permissionItems: PermissionItem[] = [
   platform(action('computer','使用虚拟电脑',['read_file','read_version_file','compare_versions','write_file','run_command'],'允许读取和修改分配的工作区、执行命令与测试；固定候选和运行隔离仍由任务入口保证。')),
-  platform(action('delegation','指派其他角色',['delegate_role','delegate_roles','create_project_task','list_managed_tasks','create_task','manage_task'],'将工作交给项目团队或其他已启用角色；自己创建和执行任务默认允许。')),
+  platform(action('delegation','指派其他角色',['delegate_role','delegate_roles','create_project_task','list_managed_tasks','create_task','manage_task','grant_writes'],'将工作交给项目团队或其他已启用角色；自己创建和执行任务默认允许。')),
   platform(access('project_tasks','项目任务与协作',['list_project_tasks','read_project_task'],['manage_project_task','request_task_coordination','wait_for_tasks','submit_coordination','set_task_priority','relate_task'],'查询其他角色的任务；读写还可修改、协调其他任务与共享调度。自己的任务、已收到的通知默认可用。')),
   platform(access('project_memory','项目共享知识',['search_project_memory','read_project_memory'],['remember_project_memory'],'查询共享知识或提交候选；自己的私有记忆默认可用，候选仍需原有复核。')),
   platform(access('project_configuration','项目设置与角色配置',['management_query'],['management_command'],'按操作核对项目配置、角色和共享规则的读取或修改权限；不会增加操作者授权。')),

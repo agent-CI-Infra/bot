@@ -6,7 +6,8 @@ import { Publisher } from '../github/publisher.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { permitsTool } from '../roles/permissions.js';
 import { assertPublicationStages } from '../roles/schedule.js';
-import { assertManagedExecution, assertTaskExternalEffect, taskToolAllowed } from './management.js';
+import { assertManagedExecution, assertTaskExternalEffect, sourcePolicies, taskToolAllowed } from './management.js';
+import { grantedWrites, projectRefusal, sourceRefusal } from './grants.js';
 import { taskPermissions } from './configuration.js';
 import { TaskRecords } from './service.js';
 import { requestedTask,workOf } from '../work/catalog.js';
@@ -22,9 +23,33 @@ export const workflowChanges = (task: Row) => !!JSON.parse(task.input||'{}').wor
  */
 export const pullRequestPermissions = (task: Row): Record<string, string> | undefined =>
   workflowChanges(task) ? { contents: 'write', issues: 'write', pull_requests: 'write', workflows: 'write' } : undefined;
-export const softwareRequest = (task: Row) => requestedTask(task) && JSON.parse(task.input||'{}').contract?.endpoint==='reviewable_pull_request';
+/** A generic task (#814): its deliveries are tools its executor calls, offered by the writes it was granted. */
+export const genericTask = (task: Row) => task.kind==='task.request' && JSON.parse(task.input||'{}').generic===true;
+/** Does the task deliver a PR? A generic task once its executor called open_pull_request; an older one by its endpoint. */
+export const softwareRequest = (task: Row) => { const input=JSON.parse(task.input||'{}');
+  return requestedTask(task) && (genericTask(task) ? input.delivery==='pull_request' : input.contract?.endpoint==='reviewable_pull_request'); };
+/**
+ * Why a generic task may not deliver a PR now (null when it may), checked at every open_pull_request call and again before
+ * publication: the project's limit, the grant, the source's ceiling and an executor that can change the code it delivers.
+ */
+export function pullRequestRefusal(store: Store, task: Row): { code: string; state: 'waiting_permission' | 'waiting_configuration'; message: string; missing: string } | null {
+  const origin=assertManagedExecution(store,task);
+  const project=projectRefusal(store,String(task.repository_id),'pull_request');
+  if(project)return {code:project.code,state:project.code==='capability_ceiling'?'waiting_permission':'waiting_configuration',message:project.message,missing:project.code==='capability_ceiling'?'capability_ceiling:develop':'development_switch'};
+  if(!(grantedWrites(store,String(task.id))??[]).includes('pull_request'))
+    return {code:'delivery_not_granted',state:'waiting_permission',message:'这个任务没有被授予开 PR（pull_request）；Manager 可以用 grant_writes 授予，或改为 submit_report 交报告。',missing:'grant:pull_request'};
+  const source=sourceRefusal(sourcePolicies(store,task),'pull_request');
+  if(source)return {...source,state:'waiting_permission',missing:'source:pull_request'};
+  if(origin?.executor_role){
+    const executor=roleConfiguration(store,task.repository_id).roles.find(r=>r.role_id===origin.executor_role&&r.enabled);
+    if(!executor||!(permitsTool(executor.permissions,'write_file')&&taskToolAllowed(store,task,executor.role_id,'write_file')))
+      return {code:'task_pull_request_forbidden',state:'waiting_permission',message:'执行角色必须能修改虚拟电脑中的代码；任务管理或委派不能增加这项能力。',missing:'executor:write_file'};
+  }
+  return null;
+}
 /** A delivery endpoint does not lend file/PR authority to an ordinary report or a delegated executor. */
 export function assertRequestPullRequest(store: Store, task: Row): void {
+  if(genericTask(task)){const refusal=pullRequestRefusal(store,task);if(refusal)stop(refusal.code,refusal.state,refusal.message);return;}
   const origin=assertManagedExecution(store,task),policy=store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
   if(!softwareRequest(task)||!policy?.enabled||!workEnabled(store,task.repository_id,workOf(task as any)))stop('task_software_disabled','waiting_configuration');
   // Code delivery needs the project's ceiling at develop (#850); below it the refusal names the level needed.

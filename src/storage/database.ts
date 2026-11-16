@@ -24,6 +24,7 @@ import { workStorage } from '../work/settings.js';
 import { migrateWorkflows } from '../work/migration.js';
 import { ceilingStorage } from '../work/ceiling.js';
 import { retireWorkTypes } from '../work/retired.js';
+import { grantStorage } from '../tasks/grants.js';
 import { dispatchStorage } from '../dispatch/store.js';
 import { githubWriteStorage } from '../github/write.js';
 import { installationStorage } from '../installations/storage.js';
@@ -264,6 +265,8 @@ export class Store {
     roleStorage(this);
     // Task origin inheritance must remain available while another worker reopens this database.
     this.transaction(() => taskManagementStorage(this));
+    // Writes granted to generic tasks and the project's delivery gates (#814).
+    grantStorage(this);
     identityStorage(this);
     managementStorage(this);
     channelStorage(this);

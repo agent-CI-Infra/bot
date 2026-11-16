@@ -45,11 +45,13 @@ for(const scenario of ['report','reviewable_pull_request','revoked_after_qa','po
         if(changed&&qaReads===1)f.h.store.run("UPDATE policies SET test_command=? WHERE repository_id='101'",'node -e "process.exit(0)"');
         return send('submit_acceptance',pass);
       }
-      if(tools.includes('submit_delivery')){
+      // A task created since #814 delivers through a tool: a report, or the PR its grant offers.
+      if(tools.includes('submit_report')){
         executing=true;await gate;
         if(!names.includes('read_file'))return send('read_file',{path:'calc.mjs'});
         if(software&&!names.includes('write_file'))return send('write_file',{path:'feature.mjs',content:'export const verified = true;\n'});
-        return send('submit_delivery',{summary:software?'Verified software delivered from the group':'Verified report delivered from the group',artifacts:software?[{path:'feature.mjs',description:'Verified module'}]:[],evidence:[],unknowns:[],...(software?{change_title:'feat: add verified module',test_command:'Project policy check'}:{})});
+        assert.equal(tools.includes('open_pull_request'),software);
+        return send(software?'open_pull_request':'submit_report',{summary:software?'Verified software delivered from the group':'Verified report delivered from the group',artifacts:software?[{path:'feature.mjs',description:'Verified module'}]:[],evidence:[],unknowns:[],...(software?{change_title:'feat: add verified module',test_command:'Project policy check'}:{})});
       }
       throw new Error('unexpected model request: '+tools.join(','));
     }catch(error){modelError=error;if(!res.writableEnded){res.statusCode=500;res.end(JSON.stringify({error:{message:'Local fixture assertion failed'}}));}}};

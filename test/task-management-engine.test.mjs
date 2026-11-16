@@ -29,7 +29,7 @@ test('own tasks use the existing engine, executor role, runs, claims and indepen
   const model = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); requests.push(body);
     const accepting = body.tools.some(t => t.function.name === 'submit_acceptance');
-    const name = accepting ? 'submit_acceptance' : 'submit_delivery', args = accepting ? pass : { summary: 'Scoped report produced by the same configured role', artifacts: [], evidence: [], unknowns: [] };
+    const name = accepting ? 'submit_acceptance' : 'submit_report', args = accepting ? pass : { summary: 'Scoped report produced by the same configured role', artifacts: [], evidence: [], unknowns: [] };
     res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null,
       tool_calls: [{ id: 'finish-' + requests.length, type: 'function', function: { name, arguments: JSON.stringify(args) } }] } }], usage: { prompt_tokens: 5, completion_tokens: 3 } }));
   }); model.listen(0, '127.0.0.1'); await once(model, 'listening');

@@ -23,11 +23,11 @@ test('D admission uses ordinary development authority, with identical independen
  const {s,caller,commands,args}=fixture(t);assert.equal(s.get('SELECT work_settings FROM policies').work_settings,'{}');
  const plain=commands.tool(caller,'create_task',args),child=commands.tool(caller,'create_task',{...args,as_child:true});
  assert.ok(plain.id);assert.ok(child.id);assert.notEqual(plain.id,child.id);
- for(const result of [plain,child]){const task=s.get('SELECT * FROM tasks WHERE id=?',result.id);assert.equal(task.kind,'task.development');assert.equal(task.object_number,null);assertRequestPullRequest(s,task);assert.deepEqual(taskPermissions(s,task).writes,['code','pull_request']);assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?',task.id).executor_role,null);assert.equal(taskToolAllowed(s,task,'dev','write_file'),true);assert.equal(commands.tool(caller,'create_task',{...args,...(result===child?{as_child:true}:{})}).id,result.id);}
+ for(const result of [plain,child]){const task=s.get('SELECT * FROM tasks WHERE id=?',result.id);assert.equal(task.kind,'task.request');assert.deepEqual(JSON.parse(s.get('SELECT writes FROM task_write_grants WHERE task_id=?',task.id).writes),['pull_request']);assert.equal(task.object_number,null);assertRequestPullRequest(s,task);assert.deepEqual(taskPermissions(s,task).writes,['code','pull_request']);assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?',task.id).executor_role,null);assert.equal(taskToolAllowed(s,task,'dev','write_file'),true);assert.equal(commands.tool(caller,'create_task',{...args,...(result===child?{as_child:true}:{})}).id,result.id);}
  assert.equal(s.get('SELECT count(*) n FROM task_children').n,1);
  const report=commands.tool(caller,'create_task',{request:'Observe repository facts',criteria:['Factual report']});assert.equal(s.get('SELECT kind FROM tasks WHERE id=?',report.id).kind,'task.request');
- // An ordinary task inherits the capability ceiling (#850): at develop it holds code and PR writes too.
- assert.deepEqual(taskPermissions(s,s.get('SELECT * FROM tasks WHERE id=?',report.id)).writes,['code','pull_request']);
+ // An ordinary task inherits the capability ceiling (#850) for its own checkout; a PR needs a grant (#814).
+ assert.deepEqual(taskPermissions(s,s.get('SELECT * FROM tasks WHERE id=?',report.id)).writes,['code']);
 });
 test('refused development creation returns useful feedback, leaves no task and allows a different decision',t=>{
  const {s,caller,commands,args}=fixture(t);s.run("UPDATE policies SET capability_ceiling='comment'");const before=s.get('SELECT count(*) n FROM tasks').n;
