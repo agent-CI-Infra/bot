@@ -1,5 +1,6 @@
 async function renderSettings(request) {
-  const route = settingsRoute(), section = route.section, nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content'), body = element('div', '', 'project-body settings-body');
+  // Named apart from the page's own route(): the error card's 重新加载 asks the page to redraw this address.
+  const address = settingsRoute(), section = address.section, nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content'), body = element('div', '', 'project-body settings-body');
   // A project administrator reaches only 存储, so their category bar must not claim to be global settings (#799).
   nav.setAttribute('aria-label', typeof me === 'object' && me && me.role === 'super_admin' ? '全局设置类别' : '设置类别');
   // #615: a group heading only earns its line when it separates groups; one category stays a plain link.
@@ -15,7 +16,18 @@ async function renderSettings(request) {
   // never call anything that is not a declared loader. Anything else falls back to 工作电脑.
   const handler = Object.hasOwn(settingsCards, section) ? settingsCards[section] : settingsCards['work-computers'];
   if (typeof handler !== 'function') return;
-  const cards = await handler(request, route.id);
+  let cards;
+  try { cards = await handler(request, address.id); }
+  catch (err) {
+    // #976: a refused read rejected renderSettings with the placeholder still on the page, so the tab waited forever.
+    // It now stops on the same error card and retry every other console page uses; the retry redraws the address, so
+    // a later good read replaces the card with the real one instead of leaving both.
+    if (request !== renderVersion) return;
+    const caption = visibleSettingsSections().find(([key]) => key === section)?.[1] ?? '设置';
+    $('count').textContent = '读取失败';
+    content.replaceChildren(consoleState(caption + '读取失败', readErrorText(err) + '。这不是空结果，当前无法判断这里是否有数据。', { tone: 'error', retry: () => route() }));
+    return;
+  }
   if (request !== renderVersion) return;
   content.replaceChildren(...cards);
 }
