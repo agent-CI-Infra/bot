@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -12,6 +12,8 @@ import { Redactor } from '../dist/agent/common.js';
 import { beginRun } from '../dist/tasks/trace.js';
 import { removableWorkspaces } from '../dist/projects/workspace-cleanup.js';
 import { externalStorage } from '../dist/external/storage.js';
+import { browserEvidenceRoot } from '../dist/browser/tools.js';
+import { browserEvidenceDir } from '../dist/browser/runtime.js';
 import { harness, setup, testPassword } from './helpers.mjs';
 import { managerFixture } from './project-manager-fixture.mjs';
 
@@ -220,4 +222,26 @@ test('the cleanup reads files and deliveries through their indexes', t => {
   assert.match(deliveries, /SEARCH deliveries USING INDEX delivery_time/, deliveries); assert.doesNotMatch(deliveries, /TEMP B-TREE/, deliveries);
   const forwarding = plan("SELECT DISTINCT source_id FROM external_deliveries WHERE state IN ('pending','retry','sending')");
   assert.match(forwarding, /external_retry_due/, forwarding);
+});
+
+test('browser evidence cleanup counts real file bytes and leaves unsanitized names alone', async t => {
+  const { store } = fixture(t);
+  saveRetention(store, 'admin', { trajectory_days: 30 });
+  task(store, 'ev-old', '101', 'succeeded', daysAgo(40));
+  const root = browserEvidenceRoot(store);
+  const dir = browserEvidenceDir(root, 'ev-old');
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const payload = Buffer.alloc(2048, 7);
+  writeFileSync(join(dir, 'step-1.png'), payload);
+  writeFileSync(join(dir, 'steps.json'), '{"steps":[1]}');
+  const expected = payload.length + Buffer.byteLength('{"steps":[1]}');
+  const odd = join(root, 'bad name');
+  mkdirSync(odd, { recursive: true, mode: 0o700 });
+  writeFileSync(join(odd, 'x.bin'), Buffer.alloc(512, 1));
+  const result = await new RetentionCleanup(store, undefined, { pauseMs: 0, batch: 1 }).run();
+  assert.equal(result.evidence.count, 1);
+  assert.equal(result.evidence.bytes, expected);
+  assert.equal(result.evidence.failed, 0);
+  assert.equal(existsSync(dir), false);
+  assert.equal(existsSync(odd), true, 'a directory whose name would be rewritten must not be deleted');
 });

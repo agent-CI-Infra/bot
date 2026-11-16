@@ -85,12 +85,13 @@ async function withSite(t) {
 }
 
 async function withPairedSites(t) {
-  let evilHits = 0;
+  let evilHits = 0, evilUpgrades = 0, allowedUpgrades = 0;
   const evil = createServer((_req, res) => {
     evilHits += 1;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end('<html><body>evil</body></html>');
   });
+  evil.on('upgrade', (_req, socket) => { evilUpgrades += 1; socket.destroy(); });
   evil.listen(0, '127.0.0.1');
   await once(evil, 'listening');
   const evilOrigin = `http://127.0.0.1:${evil.address().port}`;
@@ -116,9 +117,26 @@ async function withPairedSites(t) {
       res.end('<html><body>token page</body></html>');
       return;
     }
+    if (url.pathname === '/img-go-out') {
+      res.writeHead(302, { Location: `${evilOrigin}/pixel-redirect.png` });
+      res.end();
+      return;
+    }
+    if (url.pathname === '/subresource-redirect') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<!doctype html><html><body><h1>subresource redirect</h1><img src="/img-go-out" alt="x"></body></html>');
+      return;
+    }
+    if (url.pathname === '/ws-page') {
+      const evilWs = evilOrigin.replace(/^http/, 'ws') + '/socket';
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<!doctype html><html><body><h1>ws</h1><script>try { new WebSocket(' + JSON.stringify(evilWs) + '); } catch (e) {} try { new WebSocket("ws://" + location.host + "/same-origin"); } catch (e) {}</script></body></html>');
+      return;
+    }
     res.writeHead(404);
     res.end('not found');
   });
+  allowed.on('upgrade', (_req, socket) => { allowedUpgrades += 1; socket.destroy(); });
   allowed.listen(0, '127.0.0.1');
   await once(allowed, 'listening');
   t.after(() => new Promise(resolve => {
@@ -126,7 +144,7 @@ async function withPairedSites(t) {
     allowed.closeAllConnections();
     evil.closeAllConnections();
   }));
-  return { origin: `http://127.0.0.1:${allowed.address().port}`, evilOrigin, evilHits: () => evilHits };
+  return { origin: `http://127.0.0.1:${allowed.address().port}`, evilOrigin, evilHits: () => evilHits, evilUpgrades: () => evilUpgrades, allowedUpgrades: () => allowedUpgrades };
 }
 
 async function fixture(t, taskId, origin, extra = {}) {
@@ -153,6 +171,25 @@ async function fixture(t, taskId, origin, extra = {}) {
     rmSync(computer, { recursive: true, force: true });
   });
   return { store, manager, workspace, task, workspaceId, computer, directory };
+}
+
+
+function storedText(store, computer, workspaceId, taskId) {
+  const chunks = [JSON.stringify(store.all('SELECT request, result FROM task_tools WHERE task_id=?', taskId))];
+  const walk = dir => {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.name === 'profile') continue;
+      if (entry.isDirectory()) walk(path);
+      else if (/\.(json|log|txt)$/i.test(entry.name)) {
+        try { chunks.push(readFileSync(path, 'utf8')); } catch { /* unreadable */ }
+      }
+    }
+  };
+  walk(computer);
+  return chunks.join('\n');
 }
 
 function profileDir(computer, workspaceId) {
@@ -256,6 +293,7 @@ test('timeout and workspace reap clean the project-computer profile and leave wr
   const row = () => f.task();
   const hung = await runBrowserTool(f.store, row(), { action: 'open', url: origin + '/hang' }, { workspace: f.workspace });
   assert.equal(hung.error, 'browser_timeout', hung.detail || 'a hung navigation must be mapped to browser_timeout');
+  assert.equal(existsSync(profileDir(f.computer, f.workspaceId)), false, 'a timeout must close the session and remove the profile');
   const opened = await runBrowserTool(f.store, row(), { action: 'open', url: origin + '/' }, { workspace: f.workspace });
   assert.equal(opened.error, undefined, opened.detail);
   const shot = await runBrowserTool(f.store, row(), { action: 'screenshot' }, { workspace: f.workspace });
@@ -288,6 +326,62 @@ test('a project computer without Chromium fails honestly and does not start a co
   const f = await fixture(t, 'task-browser-missing', origin);
   const result = await runBrowserTool(f.store, f.task(), { action: 'open', url: origin + '/' }, { workspace: f.workspace });
   assert.equal(result.error, 'browser_runtime_unavailable', result.detail || 'missing Chromium must fail honestly');
+});
+
+
+test('real Chromium blocks a same-origin subresource 302 that leaves the allowlist and disables WebSocket', async (t) => {
+  const executable = resolveTestChromium();
+  if (!executable) assert.fail('未找到真实 Chromium。本测试必须经项目电脑路径启动真实浏览器，缺少运行时按失败处理，不得跳过。');
+  process.env.BOT_BROWSER_EXECUTABLE = executable;
+  const sites = await withPairedSites(t);
+  const f = await fixture(t, 'task-browser-redirect-sub', sites.origin);
+  const row = () => f.task();
+  const page = await runBrowserTool(f.store, row(), { action: 'open', url: sites.origin + '/subresource-redirect' }, { workspace: f.workspace });
+  assert.equal(page.error, undefined, page.detail || 'the allowed page should open');
+  await new Promise(resolve => setTimeout(resolve, 800));
+  assert.equal(sites.evilHits(), 0, 'a same-origin image that 302s off-origin must not contact that host');
+  const ws = await runBrowserTool(f.store, row(), { action: 'open', url: sites.origin + '/ws-page' }, { workspace: f.workspace });
+  assert.equal(ws.error, undefined, ws.detail || 'the websocket test page should still open');
+  await new Promise(resolve => setTimeout(resolve, 800));
+  assert.equal(sites.evilUpgrades(), 0, 'an off-origin WebSocket upgrade must not reach that host');
+  assert.equal(sites.allowedUpgrades(), 0, 'same-origin WebSocket is disabled rather than forwarded');
+  await runBrowserTool(f.store, row(), { action: 'close' }, { workspace: f.workspace });
+});
+
+test('typed secrets and screenshot bytes are absent from persisted workspace operation records', async (t) => {
+  const executable = resolveTestChromium();
+  if (!executable) assert.fail('未找到真实 Chromium。本测试必须经项目电脑路径启动真实浏览器，缺少运行时按失败处理，不得跳过。');
+  process.env.BOT_BROWSER_EXECUTABLE = executable;
+  const origin = await withSite(t);
+  const f = await fixture(t, 'task-browser-logs', origin);
+  const row = () => f.task();
+  const opened = await runBrowserTool(f.store, row(), { action: 'open', url: origin + '/' }, { workspace: f.workspace });
+  assert.equal(opened.error, undefined, opened.detail);
+  const shot = await runBrowserTool(f.store, row(), { action: 'screenshot' }, { workspace: f.workspace });
+  assert.equal(shot.error, undefined, shot.detail);
+  const afterShot = storedText(f.store, f.computer, f.workspaceId, row().id);
+  assert.equal(afterShot.includes('iVBORw0KGgo'), false, 'raw screenshot base64 must not be persisted in operation logs');
+  const toolsAfterShot = JSON.stringify(f.store.all('SELECT request, result FROM task_tools WHERE task_id=?', row().id));
+  assert.equal(toolsAfterShot.includes('iVBORw0KGgo'), false);
+  assert.match(toolsAfterShot, /\[omitted\]|screenshot/, 'the stored result should keep screenshot metadata without pixels');
+  const secret = 'fixture-password-value';
+  const filled = await runBrowserTool(f.store, row(), { action: 'type', name: '口令', text: secret }, { workspace: f.workspace });
+  assert.equal(filled.secret_field, true);
+  const afterType = storedText(f.store, f.computer, f.workspaceId, row().id);
+  assert.equal(afterType.includes(secret), false, 'typed password must not remain in workspace operation logs');
+  const toolsAfterType = JSON.stringify(f.store.all('SELECT request, result FROM task_tools WHERE task_id=?', row().id));
+  assert.equal(toolsAfterType.includes(secret), false);
+  await runBrowserTool(f.store, row(), { action: 'close' }, { workspace: f.workspace });
+});
+
+test('close is not sent when this workspace never opened a browser', async (t) => {
+  const origin = await withSite(t);
+  const f = await fixture(t, 'task-browser-no-open', origin);
+  const calls = [];
+  const original = f.workspace.deliverCleanup.bind(f.workspace);
+  f.workspace.deliverCleanup = async (request) => { calls.push(request); return original(request); };
+  await closeBrowserOnComputer(f.workspace, f.task());
+  assert.deepEqual(calls, []);
 });
 
 test('control-plane browser modules do not import playwright-core', () => {

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { Row, Store } from '../storage/database.js';
 import type { Workspace } from '../agent/workspace.js';
 import { TaskRecords } from '../tasks/service.js';
@@ -14,7 +14,7 @@ const fn = (name: string, description: string, properties: Record<string, unknow
   ({ type: 'function' as const, function: { name, description, parameters: { type: 'object', properties, required, additionalProperties: false } } });
 
 export const browserTool = fn('browser',
-  'Drive an isolated real browser for this task on the project computer: open a permitted page, click or type, take a screenshot, or close. The control plane only dispatches the action and stores evidence; it never starts Chromium. Every HTTP request (pages, redirects, iframes, subresources) must stay on origins listed on the task. WebSocket and WebRTC are not intercepted. A static label/path check flags some destructive wording (delete, pay, checkout and similar) and requires an explicit grant; it cannot recognize every risky click, so a generic confirm may still run. Recognized password or secret fields are not kept in logs, and already-saved screenshots from that session are removed; unrecognized fields can still leak. A fresh profile is used; it does not reuse the host desktop or its cookies. If the project computer or Chromium is unavailable, the tool fails instead of falling back to the control plane.',
+  'Drive an isolated real browser for this task on the project computer: open a permitted page, click or type, take a screenshot, or close. The control plane only dispatches the action and stores evidence; it never starts Chromium. Every HTTP request (pages, redirects, iframes, subresources) must stay on origins listed on the task. WebSocket and WebRTC are disabled rather than intercepted: a page cannot keep a socket or peer connection. EventSource is not hop-by-hop buffered, so an already-allowed stream that later redirects off-origin may still send one request. A static label/path check flags some destructive wording (delete, pay, checkout and similar) and requires an explicit grant; it cannot recognize every risky click, so a generic confirm may still run. Recognized password or secret fields are not kept in logs, and already-saved screenshots from that session are removed; unrecognized fields can still leak. A fresh profile is used; it does not reuse the host desktop or its cookies. If the project computer or Chromium is unavailable, the tool fails instead of falling back to the control plane.',
   {
     action: { type: 'string', enum: ['open', 'see', 'click', 'type', 'screenshot', 'close'] },
     url: { type: 'string', description: 'Page to open (action=open). Must match an allowed origin.' },
@@ -73,9 +73,12 @@ function persistEvidence(store: Store, task: Row, result: Record<string, unknown
       if (buf.subarray(0, 8).equals(pngMagic)) {
         const sha256 = createHash('sha256').update(buf).digest('hex');
         if (!shot.sha256 || shot.sha256 === sha256) {
-          const file = String((incoming.screenshot as { file?: string } | undefined)?.file || shot.file || `step-${incoming.n}.png`);
-          writeFileSync(join(dir, file), buf, { mode: 0o600 });
-          incoming.screenshot = { file, sha256, bytes: buf.length };
+          const file = evidenceShotName(incoming, shot.file);
+          if (!file) { delete incoming.screenshot; }
+          else {
+            writeFileSync(join(dir, file), buf, { mode: 0o600 });
+            incoming.screenshot = { file, sha256, bytes: buf.length };
+          }
         } else delete incoming.screenshot;
       } else delete incoming.screenshot;
     } else if (withhold) delete incoming.screenshot;
@@ -102,8 +105,20 @@ function mapComputerError(result: Record<string, unknown>): Record<string, unkno
 }
 
 /** Close the project-computer browser session. Does nothing when no computer is attached. Never starts Chromium here. */
+
+function evidenceShotName(step: Record<string, unknown>, shotFile?: string): string | null {
+  const raw = basename(String((step.screenshot as { file?: string } | undefined)?.file || shotFile || `step-${step.n}.png`));
+  if (/^step-\d+\.png$/.test(raw)) return raw;
+  const n = Number(step.n);
+  if (Number.isInteger(n) && n >= 0) return `step-${n}.png`;
+  return null;
+}
+
+const openedBrowsers = new WeakSet<Workspace>();
+
 export async function closeBrowserOnComputer(workspace: Workspace | undefined, task: { workspace_id?: unknown; generation?: unknown }): Promise<void> {
-  if (!workspace || !task.workspace_id || !task.generation) return;
+  if (!workspace || !task.workspace_id || !task.generation || !openedBrowsers.has(workspace)) return;
+  openedBrowsers.delete(workspace);
   await workspace.deliverCleanup({ type: 'workspace_browser', action: 'close' }).catch(() => {});
 }
 
@@ -134,6 +149,7 @@ export async function runBrowserTool(
     policy,
     timeout_ms: policy.timeout_ms
   });
+  openedBrowsers.add(workspace);
   const result = mapComputerError(response && typeof response === 'object' ? response as Record<string, unknown> : { error: 'browser_failed', detail: '浏览器动作没有完成。' });
   persistEvidence(store, task, result);
   recordTool(store, task, action, input, result);

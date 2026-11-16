@@ -13,6 +13,7 @@ import { payloadHeader, TrajectoryError } from '../storage/trajectories.js';
 import { operationRequestText, operationResult } from '../storage/payloads.js';
 import { useWorkspace, workspaceRemoving } from '../projects/workspace-cleanup.js';
 import { claimWorktree, decidePlan, movePlan, planWorktree, refuseWorktree, registerWorktree, releaseBinding, releaseWorktrees, reusableWorktrees, taskPlan, taskWorktree, worktreeRestored, type WorktreeMode } from '../projects/worktrees.js';
+import { sanitizeBrowserTrajectory } from '../../runner/browser-policy.mjs';
 
 // Operations each task is waiting on in this process, oldest first. The console shows the newest as the command the task
 // is running. task_tools cannot answer that: it has no task index (2.8M rows in production, so finding a task's pending
@@ -87,9 +88,10 @@ export class Workspace {
     const trajectories=this.store.trajectories,scope=trajectories.scopeOf(this.task);
     if(!row){
       // Conversation rows were sealed before: they keep no fields of the request at all, only its ref and hash.
+      const recordedInput=input.request?.type==='workspace_browser'?sanitizeBrowserTrajectory(input):input;
       if(scope)this.store.run(`INSERT INTO ${table}(id,${owner},request,result,state,request_ref,request_sha256) VALUES(?,?,?,NULL,'pending',?,?)`,id,this.task.id,
-        conversation?'{}':JSON.stringify(payloadHeader(input)),trajectories.append(scope,'tool_call',id,input),digest);
-      else this.store.run(`INSERT INTO ${table}(id,${owner},request,result,state) VALUES(?,?,?,NULL,'pending')`,id,this.task.id,conversation?this.store.secrets.seal(input,'conversation-operation:'+id+':request'):encoded);
+        conversation?'{}':JSON.stringify(payloadHeader(recordedInput)),trajectories.append(scope,'tool_call',id,recordedInput),digest);
+      else this.store.run(`INSERT INTO ${table}(id,${owner},request,result,state) VALUES(?,?,?,NULL,'pending')`,id,this.task.id,conversation?this.store.secrets.seal(recordedInput,'conversation-operation:'+id+':request'):JSON.stringify(recordedInput));
     }
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'phase',phase:'validate',operation_id:id,command:request.command,detail:`正在运行测试：${request.command}`});
     let response;
@@ -110,12 +112,14 @@ export class Workspace {
     let result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed',...(response.detail?{detail:response.detail}:{})});
     if(request.type==='workspace_command'&&scope)result=await commandResult(result,id,async offset=>this.manager.call('GET',`/v1/projects/${this.task.repository_id}/output/${id}?offset=${offset}`),
       new ResultSession(this.store,scope,()=>resultOwner('task',this.task.id,this.task.authority_fence),this.guard));
-    // A repeated call replays this result: it is on disk before the row points to it.
+    // A repeated call replays this result: it is on disk before the row points to it. Browser screenshot bytes and typed
+    // text stay off the stored record; the in-memory result still carries them so evidence can be persisted.
+    const storedResult=request.type==='workspace_browser'?sanitizeBrowserTrajectory(result):result;
     let resultRef:string|null=null;
-    if(scope){resultRef=trajectories.append(scope,'tool_result',id,result);await trajectories.sync(resultRef);}
+    if(scope){resultRef=trajectories.append(scope,'tool_result',id,storedResult);await trajectories.sync(resultRef);}
     await this.guard();
-    if(resultRef)this.store.run(`UPDATE ${table} SET state='completed',result=?,result_ref=? WHERE id=?`,conversation?null:JSON.stringify(payloadHeader(result)),resultRef,id);
-    else this.store.run(`UPDATE ${table} SET state='completed',result=? WHERE id=?`,conversation?this.store.secrets.seal(result,'conversation-operation:'+id+':result'):JSON.stringify(result),id);
+    if(resultRef)this.store.run(`UPDATE ${table} SET state='completed',result=?,result_ref=? WHERE id=?`,conversation?null:JSON.stringify(payloadHeader(storedResult)),resultRef,id);
+    else this.store.run(`UPDATE ${table} SET state='completed',result=? WHERE id=?`,conversation?this.store.secrets.seal(storedResult,'conversation-operation:'+id+':result'):JSON.stringify(storedResult),id);
     // Model commands are logged by the agent loop together with the tool call; others (tests) are logged here.
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'command',command:request.command,...result,output:clip(result.output)});
     // Locks a git process that ended abnormally left in the worktree, which the runner removed before this operation (#712).

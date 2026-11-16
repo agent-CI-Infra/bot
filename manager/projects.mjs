@@ -10,6 +10,7 @@ import { validNoteId } from '../runner/note-catalog.mjs';
 import { LedgerMigration, Trajectories, TrajectoryExpiry, inputHeader, trajectoryStorage } from './trajectories.mjs';
 import { DiskGuard } from './disk.mjs';
 import { IncrementalVacuum } from './compaction.mjs';
+import { normalizePolicy, sanitizeBrowserTrajectory } from '../runner/browser-policy.mjs';
 
 const randomId = () => randomBytes(24).toString('hex');
 // One line on stderr per failure that changes a computer's state, so `docker compose logs manager` says why it happened.
@@ -66,7 +67,7 @@ const digest = value => createHash('sha256').update(value).digest('hex');
 const commandTypes = ['command', 'workspace_command'];
 export const parallelBounds = [1, 32];
 const runnerTypes = ['command','read','write','workspace_init','workspace_acceptance','workspace_source','workspace_restore','workspace_integrate','workspace_integration_check','workspace_checkout','workspace_advance','workspace_context','git_have','git_pack','git_import','git_export','workspace_write','workspace_snapshot','workspace_read','workspace_export','workspace_command','workspace_browser','workspace_finalize','workspace_blob','workspace_worktree_create','workspace_worktree_bind','workspace_worktree_inspect','workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_tool','workspace_agent_model_request','workspace_agent_model_reply','workspace_agent_live','workspace_agent_runtime','workspace_harness_config','workspace_harness_start','workspace_harness_stdin','workspace_harness_poll','workspace_harness_interrupt','reap','tasks_list','tasks_remove','worktrees_list','worktrees_remove'];
-const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','worktree_id','worktree_ids','on_changes','base_tree','base64','offset','author_email','final','mode','grace_ms','instance_id','wait_ms','known_tool_ids','known_token_ids','known_model_ids','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits','entries','status','headers','error'];
+const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','worktree_id','worktree_ids','on_changes','base_tree','base64','offset','author_email','final','mode','grace_ms','instance_id','wait_ms','known_tool_ids','known_token_ids','known_model_ids','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits','entries','status','headers','error','action','args','policy','url','name','selector','text','label'];
 const RUN_TOKEN_PATTERN = /\brrt_[A-Za-z0-9_-]{12}\.[A-Za-z0-9_-]{43}\b/g;
 function sanitizeTrajectoryValue(value) {
   if (typeof value === 'string') return value.includes('rrt_') ? value.replace(RUN_TOKEN_PATTERN, '[redacted:run_token]') : value;
@@ -83,6 +84,7 @@ function sanitizeTrajectoryInput(input) {
   if (input?.request && ['workspace_harness_config', 'workspace_agent_token'].includes(input.request.type) && typeof input.request.base64 === 'string') {
     return sanitizeTrajectoryValue({ ...input, request: { ...input.request, base64: '[redacted]' } });
   }
+  if (input?.request?.type === 'workspace_browser') return sanitizeBrowserTrajectory(sanitizeTrajectoryValue(input));
   return sanitizeTrajectoryValue(input);
 }
 // The control plane's workspace cleanup: list the task directories or shared worktrees, remove a few of them per call
@@ -95,8 +97,15 @@ function validIdArray(value) {
   return Array.isArray(value) && value.length <= 512 && value.every(id => typeof id === 'string' && /^[a-f0-9]{48}$/.test(id));
 }
 // A runner request is checked before it can touch the computer, so a malformed one never interrupts other tasks.
+function validateBrowserCall(call) {
+  const actions = ['open', 'see', 'click', 'type', 'screenshot', 'close'];
+  if (!actions.includes(String(call.action || ''))) throw new ManagerError('invalid_runner_request', 400);
+  if (call.action !== 'close' && !normalizePolicy(call.policy)) throw new ManagerError('invalid_runner_request', 400);
+  if (call.args !== undefined && (!call.args || typeof call.args !== 'object' || Array.isArray(call.args))) throw new ManagerError('invalid_runner_request', 400);
+}
 function validateCall(call) {
   if (!call || !runnerTypes.includes(call.type) || Object.keys(call).some(k => !runnerKeys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
+  if (call.type === 'workspace_browser') validateBrowserCall(call);
   if (call.workspace_id !== undefined && !/^[a-f0-9]{48}$/.test(call.workspace_id) || call.idle !== undefined && call.idle !== true) throw new ManagerError('invalid_runner_request', 400);
   // The three-way integration the control plane starts when a branch fell behind main names the workspace it integrates
   // from (src/tasks/integration.ts:52); runner/workspace.mjs refuses a snapshot without a 40-hex sha, tree and base tree
@@ -809,7 +818,7 @@ export class Projects {
           }
         }
         // A repeated call replays this result: it is on disk before the row points to it.
-        const trajectoryResult = action === 'execute' && input.request.type === 'workspace_agent_poll' ? sanitizeTrajectoryValue(result) : result;
+        const trajectoryResult = action === 'execute' && (input.request.type === 'workspace_agent_poll' || input.request.type === 'workspace_browser') ? (input.request.type === 'workspace_browser' ? sanitizeBrowserTrajectory(sanitizeTrajectoryValue(result)) : sanitizeTrajectoryValue(result)) : result;
         const resultRef = this.trajectories.append(scope, 'tool_result', input.operation_id, trajectoryResult);
         await this.trajectories.sync(resultRef);
         this.db.prepare("UPDATE operations SET state='completed',result=NULL,result_ref=? WHERE id=?").run(resultRef, input.operation_id);

@@ -13,6 +13,7 @@ import {local,workspaceRoot,assistant,worktreesDirectory} from './paths.mjs';
 import { assistantFile } from './assistant-files.mjs';
 import { refuseFull, failedFull } from './disk.mjs';
 import { reapBrowserSession } from './browser-session.mjs';
+import { sanitizeBrowserTrajectory } from './browser-policy.mjs';
 
 const workspace = workspaceRoot, journal = workspace + '/.runner-journal';
 const idPattern = /^[a-f0-9]{48}$/;
@@ -151,7 +152,7 @@ if (request.type === 'journal_clear' && assistant) {
     await save(request.operation_id, { state: 'running' });
     try { result = { ok: true, result: await execute(request) }; }
     catch(error) { result = failedFull(request, error) ?? { ok: false, error: 'runner_operation_failed', ...(/^(?:workspace|assistant)_/.test(request.type)?{detail:`${request.type}${request.path?' '+request.path:''}: ${String(error?.message||'operation failed').slice(0,8000)}`}:{}) }; }
-    await save(request.operation_id, { state: 'completed', result });
+    await save(request.operation_id, { state: 'completed', result: request.type === 'workspace_browser' ? sanitizeBrowserTrajectory(result) : result });
     // Small output is in the journal JSON. A preview does not replace the complete output: retain its file for the
     // control plane's streaming copy and for idempotent retries; journal pruning removes it with the other records.
     if(!result.result?.truncated)await unlink(`${journal}/${request.operation_id}.out`).catch(() => {});

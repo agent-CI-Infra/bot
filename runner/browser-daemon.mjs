@@ -9,7 +9,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
-import { allowedOrigin, destructiveAllowed, networkRequestAllowed, originOf, redactBrowserValue, redactRecordedUrl, normalizePolicy } from './browser-policy.mjs';
+import { allowedOrigin, destructiveAllowed, networkRequestAllowed, originOf, redactBrowserValue, redactRecordedUrl, normalizePolicy, tighterDestructive } from './browser-policy.mjs';
 import { homeDirectory, tasksDirectory } from './paths.mjs';
 
 const workspaceId = process.argv[2] || '';
@@ -90,10 +90,13 @@ async function installRoutes(browserContext, nextPolicy) {
     }
     const type = request.resourceType();
     // Document and navigations: hop-by-hop so a 302 cannot leave the allowlist.
-    // Other resources use continue() so SSE/long-poll bodies are not buffered in this process.
-    // Residual: a same-origin subresource that later 302s off-origin may send one request
-    // before a later check can abort; WebSocket/WebRTC are not covered.
-    if (type !== 'document') return route.continue();
+    // EventSource/SSE uses continue() so the body is not buffered in this process. Residual:
+    // an already-allowed EventSource URL that later 302s off-origin may still send one request.
+    // WebSocket is aborted below (route does not cover it); WebRTC is disabled at launch.
+    if (type === 'eventsource' || type === 'websocket') {
+      if (type === 'websocket') return route.abort('blockedbyclient');
+      return route.continue();
+    }
     try {
       const response = await route.fetch({ maxRedirects: 0 });
       const status = response.status();
@@ -131,11 +134,19 @@ async function boot(nextPolicy) {
     acceptDownloads: false,
     serviceWorkers: 'block',
     timeout,
-    args: ['--disable-dev-shm-usage', '--disable-gpu', ...(typeof process.getuid === 'function' && process.getuid() === 0 ? ['--no-sandbox'] : [])]
+    args: ['--disable-dev-shm-usage', '--disable-gpu', '--disable-webrtc', ...(typeof process.getuid === 'function' && process.getuid() === 0 ? ['--no-sandbox'] : [])]
   });
   context.setDefaultTimeout(timeout);
   context.setDefaultNavigationTimeout(timeout);
   await installRoutes(context, nextPolicy);
+  const guardPage = p => {
+    p.on('websocket', ws => { try { if (typeof ws.close === 'function') ws.close(); } catch { /* already closed */ } });
+  };
+  context.on('page', guardPage);
+  try {
+    if (typeof context.routeWebSocket === 'function') await context.routeWebSocket(/./, ws => { try { ws.close(); } catch { /* gone */ } });
+  } catch { /* Playwright build without routeWebSocket */ }
+  for (const p of context.pages()) guardPage(p);
   page = context.pages()[0] || await context.newPage();
   page.setDefaultTimeout(timeout);
   page.setDefaultNavigationTimeout(timeout);
@@ -282,26 +293,38 @@ async function handle(message) {
   if (action === 'close') {
     const summary = { ok: true, steps: steps.length, withheld: secretTyped };
     await shutdown();
-    process.exit(0);
-    return summary;
+    return { ...summary, _exit: true };
   }
   const next = normalizePolicy(message.policy);
   if (!next) return { error: 'browser_not_configured', detail: '这个任务没有列出允许打开的站点，不能启动浏览器。' };
   if (policy && (next.origins.slice().sort().join(' ') !== policy.origins.slice().sort().join(' ')))
     return { error: 'browser_policy_changed', detail: '本会话的允许源不能在中途扩大或更换。' };
-  policy = policy || next;
+  if (policy) {
+    // Origins cannot change. allow_destructive and timeout may only shrink, so a revocation is honored.
+    policy = {
+      origins: policy.origins,
+      allow_destructive: tighterDestructive(policy.allow_destructive, next.allow_destructive),
+      timeout_ms: Math.min(policy.timeout_ms, next.timeout_ms)
+    };
+  } else policy = next;
   try {
     await boot(policy);
   } catch (error) {
-    const code = error.code || (/executable|Failed to launch|browser_runtime_unavailable/i.test(String(error)) ? 'browser_runtime_unavailable' : 'browser_failed');
-    return { error: code, detail: error.detail || (code === 'browser_runtime_unavailable' ? '项目电脑上未能启动真实浏览器。' : '浏览器没有启动完成。') };
+    const mapped = error.code || (/executable|Failed to launch|browser_runtime_unavailable/i.test(String(error)) ? 'browser_runtime_unavailable' : 'browser_failed');
+    return { error: mapped, detail: error.detail || (mapped === 'browser_runtime_unavailable' ? '项目电脑上未能启动真实浏览器。' : '浏览器没有启动完成。') };
   }
-  const timer = setTimeout(() => {}, policy.timeout_ms + 1_000);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; }, policy.timeout_ms);
   try {
-    return await Promise.race([
+    const outcome = await Promise.race([
       perform(action, message.args || {}),
-      new Promise(resolve => setTimeout(() => resolve({ error: 'browser_timeout', detail: '这个浏览器动作超过了本任务允许的时间。' }), policy.timeout_ms))
+      new Promise(resolve => setTimeout(() => resolve({ error: 'browser_timeout', detail: '这个浏览器动作超过了本任务允许的时间，会话已关闭。' }), policy.timeout_ms))
     ]);
+    if (outcome?.error === 'browser_timeout' || timedOut) {
+      await shutdown();
+      return { ...(outcome || { error: 'browser_timeout' }), _exit: true };
+    }
+    return outcome;
   } catch (error) {
     if (/has been closed|Target closed|browser has been closed|crashed/i.test(String(error)))
       return { error: 'browser_crashed', detail: '项目电脑上的浏览器已关闭或崩溃。' };
@@ -312,6 +335,7 @@ async function handle(message) {
     clearTimeout(timer);
   }
 }
+
 
 writeFileSync(pidPath, String(process.pid), { mode: 0o600 });
 const server = createServer(socket => {
@@ -329,8 +353,10 @@ const server = createServer(socket => {
       return;
     }
     handle(message).then(result => {
+      const exit = result?._exit === true || result?.error === 'browser_crashed';
+      if (result && typeof result === 'object') delete result._exit;
       socket.end(JSON.stringify(result) + '\n');
-      if (message.action === 'close' || result?.error === 'browser_crashed') setTimeout(() => process.exit(0), 10);
+      if (exit) socket.once('close', () => process.exit(0));
     }).catch(async error => {
       try { socket.end(JSON.stringify({ error: 'browser_failed', detail: '浏览器动作没有完成。' }) + '\n'); } catch { /* gone */ }
       console.error(error);
