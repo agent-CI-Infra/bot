@@ -218,8 +218,8 @@ export class RepositoryOnboarding {
       session: session ? { id: session.id, conversation_id: session.conversation_id, state: session.state, created_at: session.created_at, updated_at: session.updated_at } : null,
       questions: session?.questions ? JSON.parse(session.questions) : null,
       plan: plan ? { id: plan.id, version: plan.version, created_at: plan.created_at, plan: JSON.parse(plan.plan), ...this.pending(repository, plan) } : null,
-      // The latest confirmed plan and its receipts (#932), whether or not a session is open.
-      application: this.apply.application(repositoryId),
+      // The latest confirmed plan and its receipts (#932), whether or not a session is open, and its start request (#933).
+      application: this.apply.application(repositoryId), request: this.apply.requests.latest(repositoryId),
       model: modelView(this.store, repository),
       // This session's model usage, billed to the management assistant and, once the project exists, to the repository.
       usage: session ? { ...this.store.get(`SELECT count(*) AS requests,sum(input_tokens) AS input_tokens,sum(output_tokens) AS output_tokens FROM model_requests WHERE conversation_id=?`, session.conversation_id),
@@ -240,6 +240,11 @@ export class RepositoryOnboarding {
     const plan = this.latestPlan(repositoryId);
     if (!plan) return fail(404, 'onboarding_plan_not_found');
     await this.apply.confirm(base, repositoryId, plan, input);
+    return this.view(base, repositoryId);
+  }
+  /** Withdraws the repository's open start request (#933); the start item fails and may be retried to request again. */
+  withdraw(base: ActorContext, repositoryId: string, input: Json): Json {
+    this.apply.requests.withdraw(base, repositoryId, input);
     return this.view(base, repositoryId);
   }
   /** Applies one failed item of the latest confirmed plan again (#932). */

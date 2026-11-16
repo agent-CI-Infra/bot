@@ -4,6 +4,7 @@ import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, confineActor, confinedTenant, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
 import { ManagementAgent } from '../management/agent.js';
+import type { RequestNotice } from '../management/onboarding-requests.js';
 import { managementFailure, managementStates, pausedGroupNotice, serviceFailure } from '../management/presentation.js';
 import { githubProof } from '../identity/github.js';
 import { commands } from '../management/catalog.js';
@@ -119,6 +120,8 @@ export class ChannelService {
     };
     const personalChat=(conversation:string)=>store.get('SELECT h.* FROM channel_sessions s JOIN channel_chats h ON h.connector_id=s.connector_id AND h.chat_id=s.chat_id WHERE s.conversation_id=?',conversation);
     management.sourceVersion=conversation=>{const chat=personalChat(conversation);return chat?this.ledger.sourceVersion(chat.id):0;};
+    // Start requests (#933): super administrators, then the requester, are told in their Feishu private chat.
+    management.onboarding.apply.requests.notify=(principals,text,about)=>this.onboardingNotice(principals,text,about);
     management.conversationSchedules=(actor,conversation)=>{
       const chat=personalChat(conversation);if(!chat||chat.chat_type!=='p2p')return;
       return args=>this.schedules.conversation(chat.id,{actor},args);
@@ -412,6 +415,21 @@ export class ChannelService {
   }
   /** Queues a card to a chat once per key; the protection is checked again right before sending. */
   post(chat: Row, message: string, key: string, source: string, protection: Json): string { return this.queue(this.chatEvent(chat), card(message), key, source, protection); }
+  /**
+   * A start request notice (#933) to each person's own private chats with the bot, through an application of the repository's
+   * organization or the platform's own (never another organization's), queued durably. People without one are skipped: the
+   * console's request list is where everyone finds them.
+   */
+  private onboardingNotice(principals: string[], text: string, about: RequestNotice): void {
+    for (const principal of principals) for (const row of this.store.all("SELECT c.id FROM channel_chats c JOIN channel_personal_owners o ON o.chat_id=c.id WHERE o.principal_id=? AND c.chat_type='p2p'", principal)) {
+      try {
+        const chat = this.employees.chat(String(row.id)), application = this.applicationTenant(chat);
+        if (application && application !== about.tenant) continue;
+        this.schedules.owner(chat, principal);
+        this.post(chat, text, `onboarding-request:${about.request_id}:${about.state}:${chat.id}`, `onboarding-request:${about.request_id}`, { kind: 'onboarding_request', ...about, chat_id: chat.id, principal_id: principal });
+      } catch (error) { if (!(error instanceof HttpError)) throw error; }
+    }
+  }
   chatBusy(chat: string): boolean { return this.business.has(chat); }
   /** Serializes turns, including timers; the active turn may absorb incoming messages before its final answer. */
   exclusive<T>(chat: string, work: () => Promise<T>): Promise<T> {
@@ -633,9 +651,17 @@ export class ChannelService {
   private async deliver(row: Row): Promise<void> {
     const { event, delivery, protection } = this.store.secrets.open(row.payload, 'channel-outbox:' + row.id) as any;
     const c = this.source(event);
-    if(['employee','personal_conversation','personal_task','service_binding','service_task','channel_schedule'].includes(protection?.kind)){
+    if(['employee','personal_conversation','personal_task','service_binding','service_task','channel_schedule','onboarding_request'].includes(protection?.kind)){
       const guard=()=>{
         this.source(event);if(this.stopped)fail(409,'channel_stopped');
+        // A start request notice (#933): still the person's own chat, through an application allowed for the repository, and a
+        // notice for super administrators only while the recipient still is one.
+        if(protection.kind==='onboarding_request'){
+          const chat=this.employees.chat(String(protection.chat_id));this.schedules.owner(chat,String(protection.principal_id));
+          const application=this.applicationTenant(chat);if(application&&application!==protection.tenant)fail(403,'channel_application_tenant_mismatch');
+          if(protection.audience==='super_admin'&&!this.store.get("SELECT 1 FROM principals p JOIN users u ON u.id=p.user_id WHERE p.id=? AND u.role='super_admin' AND u.active=1",protection.principal_id))fail(403,'super_admin_required');
+          return;
+        }
         if(protection.kind==='channel_schedule'){this.schedules.guardDelivery(protection);return;}
         if(protection.kind==='personal_task'){this.personalTaskAllowed(protection);return;}
         if(protection.kind==='service_task'){
@@ -664,7 +690,7 @@ export class ChannelService {
       };
       guard();const remote=await this.sendParts(row,event,delivery,protection,guard,(remote,part)=>{
         // Private timer results and private-chat task results are personal replies: they join no group's context.
-        if(protection.kind==='personal_task'||protection.kind==='channel_schedule'&&!protection.binding_id)return;
+        if(protection.kind==='personal_task'||protection.kind==='onboarding_request'||protection.kind==='channel_schedule'&&!protection.binding_id)return;
         const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!;
         const content=part.message_type==='post'?String((part.content.zh_cn as any)?.content?.[0]?.[0]?.text??''):part.message_type==='image'?'[图片附件]':part.message_type==='file'?'[文件附件]':String((part.content.elements as any)?.[0]?.text?.content??'');
         this.ledger.merge(chat,{message_id:remote,sender_id:c.bot_open_id,sender_tenant:c.installation_tenant,sender_type:'app',message_type:part.message_type??'interactive',content,raw_content:JSON.stringify(part.content),created_at:Date.now(),updated_at:Date.now(),parent_id:event.message_id,root_id:event.root_id??'',thread_id:event.thread_id,deleted:false},'live');

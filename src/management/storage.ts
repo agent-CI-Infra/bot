@@ -56,6 +56,11 @@ function onboardingStorage(store: Store): void {
     CREATE INDEX IF NOT EXISTS onboarding_application_repository ON onboarding_applications(repository_id,confirmed_at);
     CREATE TABLE IF NOT EXISTS onboarding_receipts(application_id TEXT NOT NULL REFERENCES onboarding_applications(id),item TEXT NOT NULL,position INTEGER NOT NULL,
       state TEXT NOT NULL,error TEXT,detail TEXT,executed_by TEXT,attempts INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(application_id,item));
+    -- Requests to start a repository for super administrators to decide (#933, see onboarding-requests.ts); one open per repository.
+    CREATE TABLE IF NOT EXISTS onboarding_requests(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,application_id TEXT NOT NULL REFERENCES onboarding_applications(id),
+      requested_by TEXT NOT NULL,requested_at TEXT NOT NULL,state TEXT NOT NULL,decided_by TEXT,decided_at TEXT,reason TEXT,decision TEXT,updated_at TEXT NOT NULL);
+    CREATE UNIQUE INDEX IF NOT EXISTS onboarding_open_request ON onboarding_requests(repository_id) WHERE state='pending';
+    CREATE INDEX IF NOT EXISTS onboarding_request_state ON onboarding_requests(state,requested_at);
   `);
   // An item that was being applied when the control plane stopped did not finish: it failed and may be retried.
   store.run("UPDATE onboarding_receipts SET state='failed',error='onboarding_item_interrupted',updated_at=? WHERE state='running'", new Date().toISOString());
