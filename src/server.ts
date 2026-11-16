@@ -32,7 +32,7 @@ import { StorageReport } from './app/storage.js';
 import { serviceRolesApi } from './service-roles/api.js';
 import { trustedOrganizationsApi } from './app/trusted-organizations.js';
 import { ProjectRemoval } from './projects/removal.js';
-import { NotesReclaimer, notesOrphanIntents, orphanTrajectoryDirectories, orphanNotesVolumes, type ReclaimReport } from './projects/reclaim.js';
+import { listNotesOrphans, NotesReclaimer, notesOrphanIntents, orphanTrajectoryDirectories, type ReclaimReport } from './projects/reclaim.js';
 import { ReleaseService } from './releases/service.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
 
@@ -413,8 +413,11 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       superAdmin(user);
       // The listing names what cannot be reclaimed yet, so an operator sees the volume, its repository and its age.
       const report = await notesReport(store, options);
-      respond(res, 200, { notes_volumes: options.projects ? await orphanNotesVolumes(store, options.projects)
-        : notesOrphanIntents(store).map(intent => ({ ...intent, name: '' })), trajectories: orphanTrajectoryDirectories(store), report }); return;
+      // A manager that cannot be read keeps the durable intents and the report, as docs/api.md promises; the flag keeps
+      // an empty list distinguishable from an unreadable one.
+      const listing = await listNotesOrphans(store, options.projects);
+      respond(res, 200, { notes_volumes: listing.orphans, notes_volumes_unreadable: listing.unreadable,
+        trajectories: orphanTrajectoryDirectories(store), report }); return;
     }
     if (path === '/api/status' && method === 'GET') {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;

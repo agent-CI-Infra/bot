@@ -183,7 +183,13 @@ export class ProjectService {
    */
   /** Every notes volume the manager owns, including ones no project row here refers to any more (#771). */
   async notesVolumes(): Promise<{ name: string; repository_id: string; created_at: string | null }[]> {
-    return await this.manager.call('GET', '/v1/notes-volumes') as { name: string; repository_id: string; created_at: string | null }[];
+    const answer = await this.manager.call('GET', '/v1/notes-volumes') as unknown;
+    // The manager answers the bare array today; a proxy or a newer manager may wrap it in `volumes`. Any other answer is
+    // unreadable rather than empty: an empty list would claim nothing is left behind while the read actually failed,
+    // so every caller takes its documented failure path instead (#808).
+    const volumes = Array.isArray(answer) ? answer : (answer as { volumes?: unknown } | null | undefined)?.volumes;
+    if (!Array.isArray(volumes)) fail(503, 'manager_notes_volumes_unavailable');
+    return volumes as { name: string; repository_id: string; created_at: string | null }[];
   }
   /** Idempotent, name-based reclaim: it works after the project row is gone, which a retried deletion needs (#771). */
   async reclaimNotes(id: string, waitMs = 120_000): Promise<void> { await this.manager.call('POST', `/v1/projects/${id}/notes/reclaim`, {}, waitMs); }
