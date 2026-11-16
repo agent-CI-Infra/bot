@@ -49,7 +49,7 @@ RoleDefinitionV2 的显式角色 apply 仍在安全检查点结束旧 run，并�
 
 ## 生效来源与配置 PR
 
-`get_effective_config` 返回 builtin / console / repository 的来源和版本。默认分支 `.bot` 文件高于控制台：只改控制台时，回执为 `console_overridden`、`effective:false`，界面明确显示实际行为尚未改变。
+`get_effective_config` 返回每条规则的来源（builtin 内置文本或 console Manager 章节；只有仓库 skill 为 repository）和版本。`.bot/` 文件不再读取（#935），`workflow.update` 和 `manager.update` 保存后即对之后的新任务生效，回执为 `effect: future_tasks`、`effective: true`。
 
 `configuration.pr` 只允许仓库 skill 路径（`.agents/skills/<名称>/SKILL.md`；`.bot/` 文件不再读取），行为规则用 `manager.update`、`roles.update` 和 `project.update` 的标签字段修改；它使用已有 GitHub App installation token，不接受个人写 Token。必须先刷新默认分支规则来源；默认分支变化后要求重新读取。创建 PR 返回 `pending_merge` 和链接，合入并刷新来源之前不宣称生效。分支和 PR 使用持久命令 ID 对账；任何未知外部响应都进入 `unknown`，`POST /api/management/commands/:id/resume` 先查原 PR，未查到仍保留未知状态，绝不盲目重复创建。
 

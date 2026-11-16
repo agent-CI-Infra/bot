@@ -438,7 +438,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     const prompt=textarea('prompt','',{rows:5});prompt.setAttribute('aria-label','默认提示词');
     const chosen=()=>effective.workflows.find(w=>w.id===workflow.value);
     const fill=()=>{prompt.value=chosen()?.prompt.effective??'';};workflow.onchange=fill;fill();
-    const form=document.createElement('form'),save=element('button','保存默认提示词');form.append(element('h3','Manager 章节'),field('工作类型',workflow),field('默认提示词',prompt),note('保存的是 Manager 提示词里这类工作的章节。仓库来源高于控制台层：被覆盖时会保存章节并明确显示实际行为尚未改变；配置 PR 合入后才生效。'),save);
+    const form=document.createElement('form'),save=element('button','保存默认提示词');form.append(element('h3','Manager 章节'),field('工作类型',workflow),field('默认提示词',prompt),note('保存的是 Manager 提示词里这类工作的章节，只影响之后新建的任务。由仓库 skill 提供的章节可以创建配置 PR 修改那份 skill，合入后才生效。'),save);
     form.onsubmit=e=>{e.preventDefault();confirmCommand({operation:'workflow.update',target:{project_id:project,workflow_id:workflow.value},arguments:{prompt:prompt.value},expected_revision:effective.revision},{project,workflow:chosen()?.name});};if(chosen()?.prompt.path){const publish=button('创建配置 PR',()=>confirmCommand({operation:'configuration.pr',target:{project_id:project},arguments:{path:chosen().prompt.path,content:prompt.value},expected_revision:effective.revision},{project,workflow:chosen()?.name}),'quiet');form.append(publish);}
     forms.append(form);
     const tasks=(await api(endpoint+'/query','POST',{operation:'list_tasks',target:{project_id:project},arguments:{limit:100}})).tasks;

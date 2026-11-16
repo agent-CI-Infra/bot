@@ -40,10 +40,12 @@ export function projectRules(rules: any, guideOnly = false): { section: string; 
     // A text a task froze before the upgrade still declares its label itself.
     const key = entry.id === 'labels' ? 'review_label' : entry.id === 'development' ? 'development_label' : null;
     const label = key && !new RegExp(`^${key}:`, 'm').test(row.effective) ? `${key}: ${rules[key] ?? ''}\n\n` : '';
-    return [{ section: entry.id, title: entry.title, source: row.source, content: label + row.effective }];
+    return [{ section: entry.id, title: ruleTitles[entry.id] ?? entry.id, source: row.source, content: label + row.effective }];
   });
 }
-const ruleBlocks = (rules: any, guideOnly = false) => projectRules(rules, guideOnly).map(rule => `## ${rule.title} \`${rule.section}\` (${rule.source})\n${rule.content}`);
+// The model reads English instructions only; the Chinese section titles are the console's.
+const ruleTitles: Record<string, string> = { guide: 'Behavior guide', 'review.issue': 'Issue review', 'review.pr': 'Pull request review', development: 'Development and bot pull request follow-up', labels: 'Labeling' };
+const ruleBlocks = (rules: any, guideOnly = false) => projectRules(rules, guideOnly).map(rule => `## ${rule.title} (Manager section \`${rule.section}\`, ${rule.source})\n${rule.content}`);
 /**
  * What the agent is told about the repository's skills (#935, boundary set by a person on 2026-11-16): they guide work
  * on this repository like any agent's skills, and never widen what the task may do. The control plane enforces the

@@ -36,7 +36,7 @@ export async function managerView(store: Store, rules: RuleService, repositoryId
       // .bot/ files of the rule sections are no longer read (#935).
       const repositoryFile = file?.layers?.some((layer: any) => layer.source === 'repository') ?? false;
       const content = parsed.sections.get(entry.id)?.body ?? null;
-      return { id: entry.id, title: entry.title, path: entry.rule ?? entry.repository ?? null, written: content !== null, content, builtin: entry.builtin(),
+      return { id: entry.id, title: entry.title, path: entry.repository ?? null, written: content !== null, content, builtin: entry.builtin(),
         effective_source: repositoryFile ? 'repository' : content !== null ? 'console' : 'builtin', effective: repositoryFile ? String(file.effective) : content ?? entry.builtin() };
     }),
     work: workTypes.map(type => ({ id: type.id, name: type.name, description: type.description, kinds: type.kinds, section: type.section,
@@ -63,7 +63,8 @@ export async function workCompatibility(store: Store, rules: RuleService, reposi
     const entry = section(type.section)!, file = entry.rule ? files.get(entry.rule) : undefined;
     const layers = file ? file.layers : [{ source: 'builtin', content: entry.builtin() }, ...(written.has(entry.id) ? [{ source: 'console', content: written.get(entry.id)!.body }] : [])];
     return { id: type.id, name: type.name, builtin: true, enabled: workEnabled(store, repositoryId, type.id, policy), active: workActive(store, repositoryId, type.id, policy),
-      prompt: { path: entry.rule ?? entry.repository ?? null, section: entry.id, layers, source: file ? file.source : layers.at(-1)!.source, effective: file ? file.effective : sectionText(store, repositoryId, entry.id) },
+      // path is the repository file a configuration PR may change: only a section's repository skill, never a retired .bot/ file.
+      prompt: { path: entry.repository ?? null, section: entry.id, layers, source: file ? file.source : layers.at(-1)!.source, effective: file ? file.effective : sectionText(store, repositoryId, entry.id) },
       permissions: workPermissions(store, repositoryId, type.id, policy), model: model(policy, type.id) };
   });
 }
