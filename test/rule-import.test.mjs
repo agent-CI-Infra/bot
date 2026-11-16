@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { harness, setup, account, repository } from './helpers.mjs';
 import { RuleService, projectLabels, defaults } from '../dist/rules/service.js';
-import { importPending } from '../dist/rules/imported.js';
+import { importPending, importedComputer } from '../dist/rules/imported.js';
+import { consoleComputer, rememberConsoleComputer } from '../dist/rules/service.js';
 import { managerPrompt, managerSection, saveManager, withSection } from '../dist/work/settings.js';
 
 // The upgrade that retires the repositories' .bot/ files (#935): each project's effective layer becomes its Manager
@@ -124,6 +125,33 @@ test('an empty repository file is the layer it was, and one project that cannot 
   }
   assert.equal(managerSection(store, '303', 'review.pr'), undefined);
   assert.ok(store.get("SELECT 1 FROM settings WHERE key='rules.bot_imported'"));
+});
+
+// A project without a saved console spec: the manager's computer may not carry the file's fields (no task applied them).
+// They are part of the console spec from the import on, and are saved into it when the spec is first saved.
+test('computer.yaml fields of a project without a saved console spec reach its computer after the upgrade', async t => {
+  const live = { cpus: 3, memory_mb: 4096, packages: [], inherited: ['memory_mb', 'pids', 'tmp_mb'] };
+  const manager = { call: async () => ({ generation: 1, computer: live }) };
+  const h = await harness(t, manager), { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
+  const store = h.store; beforeUpgrade(store);
+  store.run('DELETE FROM computer_console_specs');
+  store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)', '101', sha, JSON.stringify({ '.bot/computer.yaml': 'packages: [jq]\nmemory_mb: 8192\n' }), 'now');
+  const service = new RuleService(store, manager);
+  // At the upgrade (cached files) and at a pending project's first read alike.
+  const yaml = { path: suffix => suffix, request: async (_method, path) => path.startsWith('/git/commits/') ? { tree: { sha: 'tree' } } : path.startsWith('/git/trees/')
+    ? { tree: [{ path: '.bot/computer.yaml', type: 'blob', mode: '100644', sha: 'c', size: 14 }], truncated: false } : { content: Buffer.from('packages: [ffmpeg]\n').toString('base64') } };
+  await service.fetch(yaml, 'c'.repeat(40), undefined, '202');
+  for (const [id, fields] of [['101', { packages: ['jq'], memory_mb: 8192 }], ['202', { packages: ['ffmpeg'] }]]) {
+    assert.deepEqual(importedComputer(store, id), fields, id);
+    assert.deepEqual(consoleComputer(store, id, live), { cpus: 3, packages: [], ...fields }, id);
+    assert.deepEqual((await admin(`/api/repositories/${id}/rules`)).value.rules.computer, { cpus: 3, packages: [], ...fields }, id);
+  }
+  // The first save of the spec (a task's prepare or the machine page) takes the fields in and they stop being pending.
+  rememberConsoleComputer(store, '101', live);
+  assert.deepEqual(JSON.parse(store.get("SELECT spec FROM computer_console_specs WHERE repository_id='101'").spec), { cpus: 3, packages: ['jq'], memory_mb: 8192 });
+  assert.equal(importedComputer(store, '101'), null);
+  assert.deepEqual(consoleComputer(store, '101', { ...live, packages: ['jq'], memory_mb: 8192 }), { cpus: 3, packages: ['jq'], memory_mb: 8192 });
 });
 
 test('rules.update answers 410 with what replaces it', async t => {
