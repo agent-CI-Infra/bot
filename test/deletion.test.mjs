@@ -14,6 +14,7 @@ import { FakeDocker } from './fake-docker.mjs';
 import { loadConsole } from './console-page.mjs';
 import { externalFixture } from './external-helpers.mjs';
 import { deleteProjectRecords } from '../dist/projects/removal.js';
+import { builtinRules } from '../dist/dispatch/rules.js';
 import { managerFixture as sharedManagerFixture } from './project-manager-fixture.mjs';
 
 const events = ['issues', 'pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment'];
@@ -113,6 +114,12 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   h.store.run("INSERT INTO external_event_cursors VALUES('client-101',1)");
   h.store.run("INSERT INTO public_board_settings VALUES('101',0)");
   h.store.run("INSERT INTO repo_integrations(repository_id,checked_at) VALUES('101',?)", now);
+  // Standing rules are kept with the Manager's revisions (#815) and go with the project, so a project added again starts
+  // from the built-in rules and can save its own.
+  const manager = (await admin('/api/repositories/101/manager')).value.manager;
+  assert.equal((await admin('/api/repositories/101/manager', 'PUT', { expected_revision: manager.prompt.revision,
+    standing_rules: [{ id: 'issues', event: 'issue.opened', action: 'create', work: 'review.issue', reason: 'fixture' }] })).status, 200);
+  assert.ok(h.store.get("SELECT 1 FROM manager_rules WHERE repository_id='101'"));
   const field = (await admin('/api/board/fields', 'POST', { name: 'Priority' })).value.field, option = (await admin(`/api/board/fields/${field.id}/options`, 'POST', { name: 'High' })).value.option;
   assert.equal((await admin('/api/board/cards/101/issue/5', 'PATCH', { field_id: field.id, option_id: option.id })).status, 200);
   assert.ok(h.store.get("SELECT 1 FROM external_events WHERE repository_id='101'"));
@@ -156,6 +163,13 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   await sync.sync(a.id);
   const again = (await admin('/api/installations')).value.repositories.find(row => row.id === '101');
   assert.deepEqual([again.registered, again.installed, again.enabled], [false, true, false]);
+  await repository(admin, a.id, '101');
+  const freshManager = (await admin('/api/repositories/101/manager')).value.manager;
+  assert.deepEqual(freshManager.standing_rules, { revision: 0, source: 'builtin', rules: builtinRules });
+  const savedAgain = await admin('/api/repositories/101/manager', 'PUT', { expected_revision: freshManager.prompt.revision,
+    standing_rules: [{ id: 'new-issues', event: 'issue.opened', action: 'create', work: 'review.issue', reason: 'new project' }] });
+  assert.equal(savedAgain.status, 200);
+  assert.equal((await admin('/api/repositories/101/manager')).value.manager.standing_rules.rules[0].id, 'new-issues');
 });
 
 test('a GitHub App project is deleted only when GitHub, asked right then, says the account no longer reaches the repository', async t => {

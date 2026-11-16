@@ -96,7 +96,8 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
     const p = live(), read = githubReadScopes(p);
     return [...repositoryTools.filter(t => permitsTool(p, t.function.name) && read.length).map(t => ({ ...t, function: { ...t.function, description: t.function.description.replace(/\s*Call github_read_token first\./g, '') } })),
       // github_write also needs the project's capability ceiling at comment or more (#850); each call is checked again.
-      ...(permitsTool(p, 'github_write') && covers(projectCeiling(store, repositoryId), 'comment') ? [githubWriteTool] : []), ...(permitsTool(p, 'register_rule') ? [registerRule] : []), ...decisionTools];
+      // register_rule comes with the dispatch itself (#815): a rule only settles what the Manager could decide, and every save is audited.
+      ...(permitsTool(p, 'github_write') && covers(projectCeiling(store, repositoryId), 'comment') ? [githubWriteTool] : []), registerRule, ...decisionTools];
   };
   const execute = async (name: string, args: unknown): Promise<unknown> => {
     if (!offered().some(t => t.function.name === name)) return { error: 'tool_not_allowed' };

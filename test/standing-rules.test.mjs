@@ -108,3 +108,22 @@ test('rules are checked and saved whole with the Manager revision; none sends ev
   queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue: { ...issue, number: 6 }, sender: alice }, 'opened-6'); await f.run();
   assert.equal(f.last().rule, null); assert.equal(f.requests.length, 2);
 });
+
+test('continue_or_create creates the work when nothing can be continued; labels_none keeps a rule off labeled objects', async t => {
+  const f = await fixture(t);
+  // A push to a pull request no review covers: the built-in push rule reviews the new head.
+  queueWebhook(f.h.store, '101', 'pull_request', { action: 'synchronize', before: head, pull_request: { ...pull, number: 8, head: { sha: 'c'.repeat(40), ref: 'fix' } }, sender: alice }, 'lone-push');
+  await f.run();
+  let event = f.last();
+  assert.deepEqual([event.decision, JSON.parse(event.rule).id, f.requests.length], ['create', 'pull-request-push', 0]);
+  assert.ok(f.h.store.get("SELECT 1 FROM tasks WHERE kind='review.pr' AND object_number=8 AND head_sha=?", 'c'.repeat(40)));
+  // A rule for Issues without `wontfix` (compared without case): such an Issue goes to the Manager, another is settled by it.
+  const manager = await f.manager();
+  assert.equal((await f.admin('/api/repositories/101/manager', 'PUT', { expected_revision: manager.prompt.revision, standing_rules: [{ id: 'issues', event: 'issue.opened',
+    action: 'create', work: 'review.issue', when: { labels_none: ['wontfix'] }, reason: '常设规则：没有 wontfix 的新 Issue 交给检视。' }] })).status, 200);
+  const revision = (await f.manager()).standing_rules.revision;
+  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue: { ...issue, number: 11, labels: [{ name: 'WontFix' }] }, sender: alice }, 'labeled-issue'); await f.run();
+  event = f.last(); assert.equal(event.rule, null); assert.equal(f.requests.length, 1);
+  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue: { ...issue, number: 12 }, sender: alice }, 'plain-issue'); await f.run();
+  event = f.last(); assert.deepEqual([event.decision, JSON.parse(event.rule)], ['create', { id: 'issues', revision }]); assert.equal(f.requests.length, 1);
+});
