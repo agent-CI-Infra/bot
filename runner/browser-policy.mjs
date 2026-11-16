@@ -10,6 +10,38 @@ export function boundedTimeoutMs(value) {
   return Number.isFinite(timeout) ? Math.min(maxTimeoutMs, Math.max(1_000, Math.floor(timeout))) : defaultTimeoutMs;
 }
 
+/** Fixed poll interval so timer APIs never receive a task-provided duration. */
+export const ACTION_TIMEOUT_POLL_MS = 1000;
+
+export function actionTimeoutResult() {
+  return { error: 'browser_timeout', detail: '这个浏览器动作超过了本任务允许的时间，会话已关闭。' };
+}
+
+/**
+ * Watch a bounded policy deadline with a 1s setInterval.
+ * The task-provided timeout only sets the Date.now() cutoff, never the timer duration.
+ */
+export function startActionTimeout(timeoutMs) {
+  const deadline = Date.now() + boundedTimeoutMs(timeoutMs);
+  let timedOut = false;
+  let timer;
+  const promise = new Promise(resolve => {
+    timer = setInterval(() => {
+      if (Date.now() >= deadline) {
+        timedOut = true;
+        clearInterval(timer);
+        resolve(actionTimeoutResult());
+      }
+    }, ACTION_TIMEOUT_POLL_MS);
+  });
+  return {
+    deadline,
+    promise,
+    get timedOut() { return timedOut; },
+    stop() { clearInterval(timer); }
+  };
+}
+
 export function originOf(value) {
   let url;
   try { url = new URL(value); } catch { return null; }

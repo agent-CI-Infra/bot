@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { account, harness, repository, setup, testPassword } from './helpers.mjs';
 import { allowedOrigin, browserPolicyOf, destructiveAllowed, networkRequestAllowed, originOf, redactArgs, redactBrowserValue, redactRecordedUrl, sanitizeBrowserTrajectory, tighterDestructive } from '../dist/browser/policy.js';
+import { ACTION_TIMEOUT_POLL_MS, actionTimeoutResult, boundedTimeoutMs, defaultTimeoutMs, maxTimeoutMs, normalizePolicy, startActionTimeout } from '../runner/browser-policy.mjs';
 import { listBrowserEvidence } from '../dist/browser/evidence.js';
 import { browserEvidenceDir } from '../dist/browser/runtime.js';
 import { browserEvidenceRoot } from '../dist/browser/tools.js';
@@ -170,4 +171,94 @@ test('destructive grants may only shrink for an existing session', () => {
   assert.deepEqual(tighterDestructive(['https://example/'], ['https://example/app']), ['https://example/app']);
   assert.deepEqual(tighterDestructive(['https://example/app'], ['https://example/']), ['https://example/app']);
   assert.deepEqual(tighterDestructive(['https://example/x'], ['https://example/y']), []);
+});
+
+test('too-small and too-large policy timeouts stay inside the 1s–180s bound', () => {
+  assert.equal(boundedTimeoutMs(1), 1_000);
+  assert.equal(boundedTimeoutMs(999), 1_000);
+  assert.equal(boundedTimeoutMs(10 * 60 * 1000), maxTimeoutMs);
+  assert.equal(boundedTimeoutMs(maxTimeoutMs + 1), maxTimeoutMs);
+  assert.equal(boundedTimeoutMs(undefined), defaultTimeoutMs);
+  assert.equal(boundedTimeoutMs(Number.NaN), defaultTimeoutMs);
+  assert.equal(normalizePolicy({ origins: ['http://127.0.0.1:9'], timeout_ms: 50 }).timeout_ms, 1_000);
+  assert.equal(normalizePolicy({ origins: ['http://127.0.0.1:9'], timeout_ms: 10 * 60 * 1000 }).timeout_ms, maxTimeoutMs);
+  assert.equal(ACTION_TIMEOUT_POLL_MS, 1_000);
+});
+
+async function intervalDelaysOf(t) {
+  const delays = { interval: [], timeout: [] };
+  const nativeInterval = setInterval;
+  const nativeTimeout = setTimeout;
+  t.mock.method(globalThis, 'setInterval', (callback, delay, ...args) => {
+    delays.interval.push(delay);
+    return nativeInterval(callback, delay, ...args);
+  });
+  t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
+    delays.timeout.push(delay);
+    return nativeTimeout(callback, delay, ...args);
+  });
+  return delays;
+}
+
+test('an undersized policy timeout expires at the 1s bound via a fixed interval deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'], now: 1_000_000 });
+  const delays = await intervalDelaysOf(t);
+  const timeout = startActionTimeout(1);
+  t.after(() => timeout.stop());
+  assert.equal(timeout.deadline, 1_000_000 + 1_000);
+  assert.deepEqual(delays.interval, [ACTION_TIMEOUT_POLL_MS]);
+  assert.deepEqual(delays.timeout, []);
+  let settled = false;
+  const waiting = timeout.promise.then(value => {
+    settled = true;
+    return value;
+  });
+  t.mock.timers.tick(999);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(timeout.timedOut, false);
+  t.mock.timers.tick(1);
+  assert.deepEqual(await waiting, actionTimeoutResult());
+  assert.equal(timeout.timedOut, true);
+  assert.deepEqual(delays.timeout, []);
+  assert.ok(delays.interval.every(delay => delay === ACTION_TIMEOUT_POLL_MS));
+});
+
+test('an oversized policy timeout expires at the 180s bound via a fixed interval deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'], now: 1_000_000 });
+  const delays = await intervalDelaysOf(t);
+  const timeout = startActionTimeout(10 * 60 * 1000);
+  t.after(() => timeout.stop());
+  assert.equal(timeout.deadline, 1_000_000 + maxTimeoutMs);
+  assert.deepEqual(delays.interval, [ACTION_TIMEOUT_POLL_MS]);
+  assert.deepEqual(delays.timeout, []);
+  let settled = false;
+  const waiting = timeout.promise.then(value => {
+    settled = true;
+    return value;
+  });
+  t.mock.timers.tick(ACTION_TIMEOUT_POLL_MS);
+  await Promise.resolve();
+  assert.equal(settled, false, 'a 1s poll must not treat the poll interval as the action timeout');
+  assert.equal(timeout.timedOut, false);
+  t.mock.timers.tick(maxTimeoutMs - ACTION_TIMEOUT_POLL_MS - 1);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(timeout.timedOut, false);
+  t.mock.timers.tick(1);
+  assert.deepEqual(await waiting, actionTimeoutResult());
+  assert.equal(timeout.timedOut, true);
+  assert.deepEqual(delays.timeout, []);
+  assert.ok(delays.interval.every(delay => delay === ACTION_TIMEOUT_POLL_MS));
+});
+
+test('a finished action wins the race and stop() clears the deadline interval', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'], now: 1_000_000 });
+  const timeout = startActionTimeout(5_000);
+  const outcome = await Promise.race([Promise.resolve({ ok: true }), timeout.promise]);
+  timeout.stop();
+  assert.deepEqual(outcome, { ok: true });
+  t.mock.timers.tick(5_000);
+  await Promise.resolve();
+  assert.equal(timeout.timedOut, false);
 });

@@ -9,7 +9,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
-import { allowedOrigin, boundedTimeoutMs, destructiveAllowed, networkRequestAllowed, originOf, redactBrowserValue, redactRecordedUrl, normalizePolicy, tighterDestructive } from './browser-policy.mjs';
+import { actionTimeoutResult, allowedOrigin, boundedTimeoutMs, destructiveAllowed, networkRequestAllowed, originOf, redactBrowserValue, redactRecordedUrl, normalizePolicy, startActionTimeout, tighterDestructive } from './browser-policy.mjs';
 import { homeDirectory, tasksDirectory } from './paths.mjs';
 
 const workspaceId = process.argv[2] || '';
@@ -291,11 +291,18 @@ async function perform(action, args) {
   return record(action, { error: 'browser_action_unsupported', detail: '不支持这个浏览器动作。' }, true);
 }
 
+function closeWithin(work) {
+  return Promise.race([
+    Promise.resolve().then(work).catch(() => {}),
+    new Promise(resolve => setTimeout(resolve, 1000))
+  ]);
+}
+
 async function shutdown() {
   if (closed) return;
   closed = true;
-  try { await page?.close(); } catch { /* already gone */ }
-  try { await context?.close(); } catch { /* already gone */ }
+  if (page) await closeWithin(() => page.close());
+  if (context) await closeWithin(() => context.close());
   try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { unlinkSync(sockPath); } catch { /* already gone */ }
   try { unlinkSync(pidPath); } catch { /* already gone */ }
@@ -326,27 +333,29 @@ async function handle(message) {
     const mapped = error.code || (/executable|Failed to launch|browser_runtime_unavailable/i.test(String(error)) ? 'browser_runtime_unavailable' : 'browser_failed');
     return { error: mapped, detail: error.detail || (mapped === 'browser_runtime_unavailable' ? '项目电脑上未能启动真实浏览器。' : '浏览器没有启动完成。') };
   }
-  let timedOut = false;
-  const timeoutMs = boundedTimeoutMs(policy.timeout_ms);
-  const timer = setTimeout(() => { timedOut = true; }, timeoutMs);
+  const timeout = startActionTimeout(policy.timeout_ms);
   try {
     const outcome = await Promise.race([
       perform(action, message.args || {}),
-      new Promise(resolve => setTimeout(() => resolve({ error: 'browser_timeout', detail: '这个浏览器动作超过了本任务允许的时间，会话已关闭。' }), timeoutMs))
+      timeout.promise
     ]);
-    if (outcome?.error === 'browser_timeout' || timedOut) {
+    if (outcome?.error === 'browser_timeout' || timeout.timedOut) {
       await shutdown();
-      return { ...(outcome || { error: 'browser_timeout' }), _exit: true };
+      return { ...(outcome || actionTimeoutResult()), _exit: true };
     }
     return outcome;
   } catch (error) {
+    if (timeout.timedOut || error?.name === 'TimeoutError') {
+      await shutdown();
+      return { ...actionTimeoutResult(), _exit: true };
+    }
     if (/has been closed|Target closed|browser has been closed|crashed/i.test(String(error)))
       return { error: 'browser_crashed', detail: '项目电脑上的浏览器已关闭或崩溃。' };
     if (isBlockedNavigation(error))
       return { error: 'browser_origin_forbidden', detail: '请求被拦截：地址不在本任务允许访问的站点范围内。' };
     throw error;
   } finally {
-    clearTimeout(timer);
+    timeout.stop();
   }
 }
 
