@@ -9,7 +9,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
-import { allowedOrigin, destructiveAllowed, networkRequestAllowed, originOf, redactBrowserValue, redactRecordedUrl, normalizePolicy, tighterDestructive } from './browser-policy.mjs';
+import { allowedOrigin, boundedTimeoutMs, destructiveAllowed, networkRequestAllowed, originOf, redactBrowserValue, redactRecordedUrl, normalizePolicy, tighterDestructive } from './browser-policy.mjs';
 import { homeDirectory, tasksDirectory } from './paths.mjs';
 
 const workspaceId = process.argv[2] || '';
@@ -126,7 +126,7 @@ async function installRoutes(browserContext, nextPolicy) {
 async function boot(nextPolicy) {
   if (context) return;
   const resolved = resolveChromium();
-  const timeout = nextPolicy.timeout_ms;
+  const timeout = boundedTimeoutMs(nextPolicy.timeout_ms);
   context = await chromium.launchPersistentContext(profileDir, {
     executablePath: resolved.executablePath,
     headless: true,
@@ -317,7 +317,7 @@ async function handle(message) {
     policy = {
       origins: policy.origins,
       allow_destructive: tighterDestructive(policy.allow_destructive, next.allow_destructive),
-      timeout_ms: Math.min(policy.timeout_ms, next.timeout_ms)
+      timeout_ms: boundedTimeoutMs(Math.min(policy.timeout_ms, next.timeout_ms))
     };
   } else policy = next;
   try {
@@ -327,11 +327,12 @@ async function handle(message) {
     return { error: mapped, detail: error.detail || (mapped === 'browser_runtime_unavailable' ? '项目电脑上未能启动真实浏览器。' : '浏览器没有启动完成。') };
   }
   let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; }, policy.timeout_ms);
+  const timeoutMs = boundedTimeoutMs(policy.timeout_ms);
+  const timer = setTimeout(() => { timedOut = true; }, timeoutMs);
   try {
     const outcome = await Promise.race([
       perform(action, message.args || {}),
-      new Promise(resolve => setTimeout(() => resolve({ error: 'browser_timeout', detail: '这个浏览器动作超过了本任务允许的时间，会话已关闭。' }), policy.timeout_ms))
+      new Promise(resolve => setTimeout(() => resolve({ error: 'browser_timeout', detail: '这个浏览器动作超过了本任务允许的时间，会话已关闭。' }), timeoutMs))
     ]);
     if (outcome?.error === 'browser_timeout' || timedOut) {
       await shutdown();
