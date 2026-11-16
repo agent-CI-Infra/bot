@@ -45,8 +45,9 @@ Every item maps to a setting that already exists; there is nothing else to confi
 
 - `capability_ceiling`: `read`, `comment` or `develop`, with the reason. Start lower when the repository has little
   review or CI, or when the person is unsure.
-- `events`: which events the Manager receives (`issue.opened`, `issue.updated`, `issue.mention`, `pull_request.opened`,
-  `pull_request.synchronize`, `pull_request.updated`, `pull_request.mention`, `actions.run_failed`, and label lists
+- `events`: which events the Manager receives (`issue.opened`, `issue.updated`, `issue.mention`,
+  `issue.development_label`, `pull_request.opened`, `pull_request.synchronize`, `pull_request.updated`,
+  `pull_request.mention`, `review.published.issue`, `review.published.pr`, `actions.run_failed`, and label lists
   `issue.labels` / `pull_request.labels`). `actions.run_failed` turns on the analysis of failed Actions runs.
 - `test_command`: the command that runs the repository's tests, from its documents, scripts and workflows. It is not
   verified until the first task or the CI task runs it; say so.

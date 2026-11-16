@@ -40,7 +40,7 @@ export function managementStorage(store: Store): void {
   });
 }
 
-// Repository onboarding sessions and plan drafts (#930, see onboarding.ts).
+// Repository onboarding sessions and plan drafts (#930, see onboarding.ts), and confirmed plans (#932).
 function onboardingStorage(store: Store): void {
   store.db.exec(`
     CREATE TABLE IF NOT EXISTS onboarding_sessions(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,conversation_id TEXT NOT NULL,state TEXT NOT NULL,
@@ -50,7 +50,15 @@ function onboardingStorage(store: Store): void {
     -- Plan drafts by repository and version; a later version replaces the earlier draft.
     CREATE TABLE IF NOT EXISTS onboarding_plans(id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES onboarding_sessions(id),repository_id TEXT NOT NULL,
       version INTEGER NOT NULL,plan TEXT NOT NULL,message_id TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(repository_id,version));
+    -- A confirmed plan (#932): one application per plan, one receipt per item (see onboarding-apply.ts).
+    CREATE TABLE IF NOT EXISTS onboarding_applications(id TEXT PRIMARY KEY,plan_id TEXT NOT NULL UNIQUE REFERENCES onboarding_plans(id),
+      repository_id TEXT NOT NULL,version INTEGER NOT NULL,confirmed_by TEXT NOT NULL,confirmed_at TEXT NOT NULL,changes TEXT NOT NULL,options TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS onboarding_application_repository ON onboarding_applications(repository_id,confirmed_at);
+    CREATE TABLE IF NOT EXISTS onboarding_receipts(application_id TEXT NOT NULL REFERENCES onboarding_applications(id),item TEXT NOT NULL,position INTEGER NOT NULL,
+      state TEXT NOT NULL,error TEXT,detail TEXT,executed_by TEXT,attempts INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(application_id,item));
   `);
+  // An item that was being applied when the control plane stopped did not finish: it failed and may be retried.
+  store.run("UPDATE onboarding_receipts SET state='failed',error='onboarding_item_interrupted',updated_at=? WHERE state='running'", new Date().toISOString());
 }
 
 /** Starting a project bills its onboarding usage so far to it (#930): those turns ran before the project existed. */

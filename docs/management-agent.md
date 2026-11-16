@@ -65,7 +65,7 @@ RoleDefinitionV2 的显式角色 apply 仍在安全检查点结束旧 run，并�
 
 ## 仓库接入向导
 
-接入向导（#929）让仓库的管理员在项目启动之前，先和管理助手谈清楚 bot 在这个仓库能做什么、该怎样配置。这一步只读：不写 GitHub，不启动项目，不用项目电脑，也不改任何设置；人确认方案之后的应用另见后续说明。
+接入向导（#929）让仓库的管理员在项目启动之前，先和管理助手谈清楚 bot 在这个仓库能做什么、该怎样配置。对话只读：不写 GitHub，不启动项目，不用项目电脑，也不改任何设置；管理员在接入页确认方案之后，控制面才按方案逐项应用（见下文「确认与应用」）。
 
 **谁能打开**：已启动的项目，要求项目管理员权限（`config.write`，含委派）；已安装但没有启动的仓库，要求 GitHub 认定的仓库管理员或组织所有者（与 #848 自己启动的条件相同），或者超级管理员。仓库必须在本部署某个 GitHub App 安装之下。其他人（例如只有 Write 的协作者）得到 403 `repository_admin_required`。控制台会话限定了组织或项目时，只能打开其中的仓库。
 
@@ -80,8 +80,28 @@ RoleDefinitionV2 的显式角色 apply 仍在安全检查点结束旧 run，并�
 
 **模型与用量**：仓库所属组织受信任（#848）且设了默认模型、该模型仍是共享模型时用它，否则用管理助手自己的共享模型；都没有时这一轮失败并提示请超级管理员先配置，不会改用其他模型（也不用项目自己的模型），页面在发送之前就能从 `model.available` 看到。启动前后用同一个模型：项目只承担用量，所以共享模型即使只限定给其他项目，也照样运行已启动项目的向导。用量记在管理助手名下，并记在这个仓库上：已启动的项目直接计入项目用量；项目还没启动时，模型请求按会话保存（`model_requests.repository_id` 外键指向已启动的项目，这时还没有这一行），启动项目的同一事务里改记到该项目，之后在项目用量里可见。页面状态里的 `usage` 是本次会话的请求数、令牌和费用。
 
+### 确认与应用
+
+整份方案一次确认（#932），可以去掉其中几项；确认后控制面按固定顺序逐项应用，每项都走人自己会用的现有通道，以确认人的身份执行，权限照常检查，不借用任何别人的权限。
+
+**确认什么**：页面状态的 `plan.changes` 是这份方案与项目现状的差异，每项带 `item`、生效位置 `where`、现值 `current` 和方案值 `proposed`，按应用顺序排列：启动 `start`（仓库还没启动时）、能力上限 `capability_ceiling`、Manager 的事件开关 `events`、`test_command`、`review_language`、约定 `conventions`、要新建的标签 `labels`、Manager 定时检查 `schedules`、CI 建议 `ci`。已经和方案一样的项不列出：已启动的项目重新运行时只剩差异，没有差异时为空，接入页据此说明"无需改动"；以前的确认已经建过或找到的标签、同一条 CI 建议建过的任务、同名的 Manager 定时检查、正文已在提示词里的约定都算已经一样。方案生成之后有人改过设置，差异里看到的就是改后的现值，由确认的人决定是否覆盖。飞书群建议不是应用项，留给完成页给出绑定入口。`plan.changes_revision` 标识这份差异。
+
+**确认**：`POST /api/management/onboarding/<仓库 id>/confirm`，请求体 `{version, changes_revision, items, schedule_destination_id?}`。`version` 必须是这个仓库最新一版方案（否则 409 `onboarding_plan_outdated`），`changes_revision` 必须与当前差异一致（否则 409 `onboarding_changes_outdated`，重新读取后再确认），`items` 是差异里要应用的项（不在差异里或为空返回 400 `invalid_onboarding_items`，没有差异返回 409 `onboarding_nothing_to_apply`）；仓库还没启动时 `start` 必须在内（400 `onboarding_start_required`）。确认记录确认人、时间和方案版本，方案本身不再改动，要改就让管理助手出新一版。同一版方案只能确认一次，再次确认直接返回已有的结果，不会重复应用。页面状态的 `application` 是这个仓库最近一次确认和它的回执。
+
+**每项怎么应用**：
+
+- `start`：超级管理员按方案的能力上限和部署默认共享模型（`onboarding.model`）启动；仓库属于受信任组织（#848）时，它的管理员按组织默认值自己启动，随后的 `capability_ceiling` 项再把能力上限调到方案值，和启动后在项目设置里调整一样；其他人得到 `start_approval_required`，等超级管理员审批（#933）。启动之前其余各项保持 `pending`（`project_not_started`），启动成功后接着应用。
+- `capability_ceiling`、`test_command`、`review_language`：管理命令 `project.update`。测试命令不在这里运行，回执标明 `verified: false`，由首个任务或 CI 任务验证。
+- `events`：管理命令 `manager.update` 的 `events`，与「监听与触发」同一套校验。
+- `conventions`：以「本仓库约定（接入向导第 N 版，日期）」为标题的独立段落，追加到 Manager 提示词（项目保存过完整的分派提示词时追加到它末尾，否则追加到 Manager 提示词的前言，分派提示词以前言开头），并追加到每个启用的角色（跨任务的 coordinator 除外）的角色提示词（`manager.update`、`roles.update`），不覆盖已有内容，也不写 `.bot/` 文件；仓库的 `.bot/` 文件覆盖不了这两处。已经带有这一版段落的提示词不再追加。
+- `labels`：先读仓库现有标签；不存在的经 `github_write POST /labels` 新建（只放行这条路由，项目能力上限至少要 `comment`），已经存在的同名标签不改颜色和说明，记为 `exists`。写入按标签名记账，重试不会重复创建。
+- `schedules`：Manager 定时检查（#851）是项目计划，用项目服务身份运行；项目还没有服务身份时，这一项以确认人的委托创建（只拿确认人自己在项目里的能力，失去时随之失效）；差异里这一项的 `service_principal` 为 `delegated` 时接入页在确认前写明这一点，已有服务身份时为 `existing`。计划需要通知目的地：确认或重试时带 `schedule_destination_id`；没带时这一项失败（`schedule_destination_required`），回执的 `detail.destinations` 列出可选的目的地。已有同名的 Manager 定时检查不再创建。
+- `ci`：管理命令 `task.create` 建一个普通开发任务，合同就是这条建议（目标、要改的文件、经 bot PR 交付由人合并），并带 `workflow_changes`：确认 CI 一项就是人在控制台确认这项任务可以修改 `.github/workflows/`（#931），所以这些命令的来源是 `console:onboarding:<仓库 id>`；项目能力上限不到 `develop` 时这一项失败并写明原因。
+
+**回执**：每项一条，状态为 `succeeded`、`exists`（已经和方案一样）、`failed`（带 `error`，必要时带 `detail`）或 `skipped`（确认时去掉了），并记录执行人、尝试次数和管理命令回执 id；审计记录确认（`onboarding.confirmed`）和每项结果（`onboarding.item.<状态>`）。某项失败不影响后面的项。`POST /api/management/onboarding/<仓库 id>/items/<项>/retry`（可带 `schedule_destination_id`）只重试一项失败的项（其他状态返回 409 `onboarding_item_not_failed`），以新的幂等键执行；重试启动成功后接着应用等待它的项。控制面在应用途中重启时，正在应用的项记为失败（`onboarding_item_interrupted`），可以重试。同一时间一份确认只应用一次（`onboarding_apply_running`）。
+
 ## 扩展与验证
 
 `ManagementService.register` 为配置发布、知识修订、计划和通知提供可信 execute / reconcile 注册接口。`knowledgeSearch` 是受限检索接入点。计划和通知由 [持久化调度模块](schedules.md) 注册，表单和管理工具走同一服务；未注册的业务工作流处理器明确不支持。知识模块未注册时返回明确不可用。角色配置沿用 RoleDefinitionV2 接口与版本检查；Pi prepare、角色快照和显式 revision 续接与项目主控共用现有实现。
 
-`e2e/management-live.spec.mjs` 通过真实模型 SSE 和管理事件流验证完成前渲染、工具进展、多轮文本、Markdown 安全边界、停止、失败、重连、滚动及历史回读。`test/repository-onboarding.test.mjs` 覆盖接入向导：未启动仓库的只读分析（只签发一次只读令牌并在本轮后撤销、令牌不进模型与事件、GitHub 没有写入、项目仍未启动）、非管理员的错误码、多人共用同一会话、问题与方案草稿的校验和保存、一次一轮、启动后用量转记到项目、已启动项目带当前设置，以及受信任组织的默认模型。阶段消息（事件流、10 条上限、私聊送达）和不限步数由 `test/channel-stage-messages.test.mjs` 与 `e2e/stage-messages.spec.mjs` 覆盖。`test/management.test.mjs` 覆盖权限、并发、幂等、配置来源、直接执行（旧审批策略不再生效、遗留待审批命令不执行）、未知结果、停止和会话隔离；`e2e/management.spec.mjs` 使用独立 SQLite、随机监听端口和本地模型协议夹具验证真实持久化查询、配置修改、任务管理及浏览器/API 一致性。全部临时产物应放在工作树 `.tmp/`，运行测试时设置 `TMPDIR` 为该目录。
+`e2e/management-live.spec.mjs` 通过真实模型 SSE 和管理事件流验证完成前渲染、工具进展、多轮文本、Markdown 安全边界、停止、失败、重连、滚动及历史回读。`test/repository-onboarding.test.mjs` 覆盖接入向导：未启动仓库的只读分析（只签发一次只读令牌并在本轮后撤销、令牌不进模型与事件、GitHub 没有写入、项目仍未启动）、非管理员的错误码、多人共用同一会话、问题与方案草稿的校验和保存、一次一轮、启动后用量转记到项目、已启动项目带当前设置，以及受信任组织的默认模型；`test/repository-onboarding-apply.test.mjs` 覆盖确认与应用：差异与确认的各种拒绝、各项经现有通道生效（能力上限、事件、测试命令、Manager 与角色提示词的约定段落、GitHub 新标签、开发任务带 `workflow_changes`）、已存在的标签不改、缺少目的地的定时检查单独失败并可重试、重复确认和重试不重复写入、重新运行只列差异，以及未启动仓库的启动顺序（需要审批、受信任组织自己启动后调到方案档位、超级管理员按方案档位启动）。阶段消息（事件流、10 条上限、私聊送达）和不限步数由 `test/channel-stage-messages.test.mjs` 与 `e2e/stage-messages.spec.mjs` 覆盖。`test/management.test.mjs` 覆盖权限、并发、幂等、配置来源、直接执行（旧审批策略不再生效、遗留待审批命令不执行）、未知结果、停止和会话隔离；`e2e/management.spec.mjs` 使用独立 SQLite、随机监听端口和本地模型协议夹具验证真实持久化查询、配置修改、任务管理及浏览器/API 一致性。全部临时产物应放在工作树 `.tmp/`，运行测试时设置 `TMPDIR` 为该目录。
