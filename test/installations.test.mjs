@@ -517,3 +517,23 @@ test('a damaged events grant is unknown for its row instead of failing the whole
   // The unreadable column is never echoed back into the answer.
   assert.ok(!JSON.stringify(answer.value).includes('"issues":'));
 });
+
+test('an events column that parses but is not an array is unknown, not "nothing subscribed"', async t => {
+  const h = await harness(t), { admin } = await setup(h), keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const a = await account(admin, { type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
+  verifiedScope(h, a, 101, 202);
+  const grant = JSON.stringify({ contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write' });
+  h.store.run('UPDATE installed_repositories SET permissions=?,permissions_at=? WHERE account_id=? AND repository_id=?', grant, new Date().toISOString(), a.id, '101');
+  h.store.run('UPDATE installed_repositories SET permissions=?,permissions_at=? WHERE account_id=? AND repository_id=?', grant, new Date().toISOString(), a.id, '202');
+  // Both values are valid JSON, so the parse succeeds; neither is the array of subscribed events it must be.
+  h.store.run("UPDATE installed_repositories SET events='{}' WHERE repository_id='101'");
+  h.store.run('UPDATE installed_repositories SET events=? WHERE repository_id=\'202\'', JSON.stringify('workflow_run'));
+  const answer = await admin('/api/installations');
+  assert.equal(answer.status, 200);
+  for (const id of ['101', '202']) {
+    const row = answer.value.repositories.find(r => r.id === id);
+    // The same row must not be "all events missing" in one field and "unknown" in the other.
+    assert.deepEqual([id, row.events_missing, row.events_unreadable, row.access_gaps], [id, null, true, null]);
+    assert.equal(row.permissions_stale, true);
+  }
+});
