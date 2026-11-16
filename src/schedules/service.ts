@@ -67,7 +67,8 @@ export class ScheduleService {
       if (plan.actor_id !== actor.principal_id || plan.owner_id !== actor.principal_id || plan.maintainer_id !== actor.principal_id) fail(403, 'personal_schedule_identity_mismatch');
       return { approver_id: null, capabilities: required, grants: listEffectiveScopes(this.store, actor.principal_id).filter(g => g.state === 'active') };
     }
-    authorize(actor, 'grants.manage', { project_id: project });
+    // Project plans run as the project's service identity; its administrators (config.write) set them up (#851).
+    authorize(actor, 'config.write', { project_id: project });
     const principal = this.store.get("SELECT * FROM principals WHERE id=? AND kind='service' AND project_id=?", plan.actor_id, project);
     if (!principal || !principal.maintenance) return fail(403, 'service_paused');
     // An existing owner is an immutable audit reference, not the current maintenance authority.
@@ -207,7 +208,7 @@ export class ScheduleService {
   }
   private owned(actor: ActorContext, row: Row): void {
     if (row.kind === 'personal' && row.owner_id !== actor.principal_id) fail(403, 'personal_schedule_owner_required');
-    if (row.kind === 'project') authorize(actor, 'grants.manage', { project_id: row.project_id });
+    if (row.kind === 'project') authorize(actor, 'config.write', { project_id: row.project_id });
   }
   occurrence(row: Row, key: string, logical: number, source: string, state = 'pending', reason?: string, initiator?: string): Row {
     const previous = this.store.get('SELECT * FROM schedule_occurrences WHERE schedule_id=? AND logical_key=?', row.id, key);
@@ -341,13 +342,14 @@ export class ScheduleService {
       });
       // Chats that may receive this project's notifications are offered directly; no separate registration step (#330).
       destinations.push(...this.chatDestinations(actor, project).filter(chat => !destinations.some(d => d.chat_id === chat.chat_id)));
-      let canDelegate = false; try { authorize(actor, 'grants.manage', { project_id: project }); canDelegate = true; } catch { /* Personal schedules need no delegation capability. */ }
+      let canDelegate = false; try { authorize(actor, 'config.write', { project_id: project }); canDelegate = true; } catch { /* Personal schedules need no delegation capability. */ }
       const tenant = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)!.tenant_id;
       const services = canDelegate ? this.store.all("SELECT id,maintenance FROM principals WHERE kind='service' AND active=1 AND project_id=? AND tenant_id=? AND maintenance<>''", project, tenant) : [];
       const maintainers = this.store.all("SELECT p.id,u.username name FROM principals p JOIN users u ON u.id=p.user_id WHERE p.kind='human' AND p.active=1 AND u.active=1").filter(p => {
         try { authorize(resolvePrincipalActor(this.store, p.id, tenant, project), 'schedules.manage', { project_id: project }); return canDelegate || p.id === actor.principal_id; } catch { return false; }
       });
-      return { revision, destinations, services, maintainers };
+      // can_manage_project: the caller sets up project plans here and may create the project's service identity (#851).
+      return { revision, destinations, services, maintainers, can_manage_project: canDelegate };
     }
     const table = ({ list_occurrences: 'schedule_occurrences', list_notification_deliveries: 'notification_outbox', list_schedule_audit: 'schedule_audit' } as Record<string, string>)[operation];
     if (!table) return fail(400, 'unknown_schedule_query');

@@ -325,6 +325,8 @@ test('repository rows report every feature\'s access gaps, whether or not the fe
   github.installations = [installation(77, { ...full, actions: 'read' })]; github.listed = { 77: ['101', '202'] }; github.userRepos = [['303', { admin: false, push: true }]];
   await sync.sync(app.id); await sync.sync(bot.id);
   for (const [id, owner] of [['101', app], ['202', app], ['303', bot]]) await repository(admin, owner.id, id);
+  // A new App project starts with Actions failure handling on (#851); 202 has it off, 101 on.
+  assert.equal((await admin('/api/repositories/202/policy', 'PATCH', { actions_failures_enabled: false })).status, 200);
   assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { actions_failures_enabled: true })).status, 200);
   const gaps = async () => Object.fromEntries((await admin('/api/installations')).value.repositories.map(r => [r.id, r.access_gaps]));
   const appGaps = [

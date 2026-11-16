@@ -49,8 +49,9 @@ test('the policy API sets the ceiling, older switches move it, and work types st
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   const policy = change => admin('/api/repositories/101/policy', 'PATCH', change);
   const work = async () => Object.fromEntries((await admin('/api/repositories/101/manager')).value.manager.work.map(entry => [entry.id, entry]));
-  // The test repository starts with reviews off.
+  // The test repository starts with reviews off. Its bot account cannot handle Actions failures, so that stays off (#851).
   assert.equal((await admin('/api/repositories/101/policy')).value.policy.capability_ceiling, 'read');
+  assert.equal((await admin('/api/repositories/101/policy')).value.policy.actions_failures_enabled, 0);
   let saved = await policy({ capability_ceiling: 'comment' });
   assert.equal(saved.status, 200); assert.equal(saved.value.policy.capability_ceiling, 'comment');
   assert.deepEqual([saved.value.policy.review_enabled, saved.value.policy.development_enabled], [1, 0]);

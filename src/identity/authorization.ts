@@ -270,15 +270,25 @@ export function effectiveRepositories(store: Store, actor: ActorContext): string
     try { permit(actor, 'tasks.read', { project_id: r.project_id }); return [r.project_id as string]; } catch { return []; }
   });
 }
+/**
+ * A project's service identity, which project schedules (Manager checks) run as. Super administrators (grants.manage) create
+ * it with every project capability, standing on its own. Since #851 the project's administrators (config.write) create it too,
+ * within that project: it gets only the project capabilities they hold, and like their other delegations (#847) it lasts only
+ * while they still hold them.
+ */
 export function createProjectServicePrincipal(store: Store, actor: ActorContext, project: string, maintenance: string): string {
-  authorize(actor, 'grants.manage', { project_id: project });
+  let manager = true;
+  try { authorize(actor, 'grants.manage', { project_id: project }); } catch { authorize(actor, 'config.write', { project_id: project }); manager = false; }
   if (!maintenance.trim()) return fail(400, 'maintenance_required');
+  const capabilities = manager ? projectCapabilities : projectCapabilities.filter(capability => {
+    try { authorize(actor, capability, { project_id: project }); return true; } catch { return false; }
+  });
   const tenant = store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)!.tenant_id, id = randomId();
   store.transaction(() => {
     store.run("INSERT INTO principals(id,kind,project_id,tenant_id,maintenance) VALUES(?,'service',?,?,?)", id, project, tenant, maintenance);
     store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
-      VALUES(?,?,?,?,'project','service',?,'explicit_delegation',?,'tenant_maintained','project automation',?)`, randomId(), id, tenant, project,
-      JSON.stringify(projectCapabilities), actor.principal_id, Date.now());
+      VALUES(?,?,?,?,'project','service',?,'explicit_delegation',?,?,'project automation',?)`, randomId(), id, tenant, project,
+      JSON.stringify(capabilities), actor.principal_id, manager ? 'tenant_maintained' : 'project_delegation', Date.now());
     store.audit(actor.principal_id, 'service_principal.created', id, project);
   }); return id;
 }

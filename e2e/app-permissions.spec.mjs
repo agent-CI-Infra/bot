@@ -35,6 +35,8 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     const { admin, password } = await setup(h), keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
     const a = await account(admin, { name: 'Department App', type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
     await admin('/api/installations/sync', 'POST', {}); await repository(admin, a.id, '101');
+    // A new App project starts with Actions failure handling on (#851); this test reads its gaps while it is off.
+    expect((await admin('/api/repositories/101/policy', 'PATCH', { actions_failures_enabled: false })).status).toBe(200);
     await page.goto(h.admin); await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await page.getByRole('button', { name: '全局设置', exact: true }).click(); await page.locator('.project-nav').getByRole('link', { name: '机器人账号', exact: true }).click();

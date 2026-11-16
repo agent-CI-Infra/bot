@@ -394,6 +394,8 @@ test('GET /api/identity names a plain GitHub connection state, the next step, an
   // Installed and administered, but not started: the name is visible, the project list stays empty.
   h.store.transaction(() => {
     h.store.run("DELETE FROM policies WHERE repository_id='101'");
+    // A started project has Actions failure handling on (#851).
+    h.store.run("DELETE FROM actions_failure_scans WHERE repository_id='101'");
     h.store.run("DELETE FROM identity_projects WHERE project_id='101'");
     h.store.run("DELETE FROM repositories WHERE id='101'");
   });

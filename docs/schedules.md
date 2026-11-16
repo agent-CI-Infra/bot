@@ -16,7 +16,7 @@
 
 个人计划的 actor、owner、maintainer 必须是当前操作者，不能修改为项目服务计划，也不能借用另一个用户的授权。后台工作使用当前 principal 授权，不保存或借用登录 token。失权后计划进入 `paused` 并保存原因。
 
-项目计划选择 #163 已有的项目 service principal；创建和修改始终要求操作者拥有 `grants.manage`，只有 `schedules.manage` 的维护人不能修改。新建时 owner 和维护人都必须是 active 且拥有该项目 `schedules.manage` 的人类。更新时 kind、服务身份、owner 和创建人保持不变，历史 owner 离职或失权不影响已有计划的更新和预览；新的维护人仍须 active 且有项目计划管理权限。预览已有计划需在 query arguments 中携带 `schedule_id`，服务端读取原记录并核对身份引用，未携带时按新建计划检查 owner。维护人下拉只表示可被指定的人，不授予保存权限。
+项目计划（包括 Manager 定时检查）以项目服务身份（service principal）运行，由项目管理员设置（#851）：创建、修改、暂停和删除要求操作者在该项目有 `config.write`，超级管理员也可以；只有 `schedules.manage` 的维护人不能修改。项目还没有服务身份时，计划面板的「高级身份选项」里提供「创建项目服务身份」（`POST /api/identity/service-principals`）：项目管理员创建的服务身份只拿到创建者本人在该项目拥有的项目能力，属于创建者的委托（`project_delegation`，#847），创建者失去这些能力时委托随之失效，计划在下一次检查时暂停；超级管理员创建的服务身份拿到全部项目能力，不依赖创建者。`list_schedule_destinations` 的 `can_manage_project` 表示调用者能否设置项目计划。新建时 owner 和维护人都必须是 active 且拥有该项目 `schedules.manage` 的人类。更新时 kind、服务身份、owner 和创建人保持不变，历史 owner 离职或失权不影响已有计划的更新和预览；新的维护人仍须 active 且有项目计划管理权限。预览已有计划需在 query arguments 中携带 `schedule_id`，服务端读取原记录并核对身份引用，未携带时按新建计划检查 owner。维护人下拉只表示可被指定的人，不授予保存权限。
 
 服务身份必须有 project 范围的显式委托，计划保存创建人、owner、维护人、批准人、授权修订及委托快照。执行 Actor 只保留该计划批准的最小能力；日报为 `tasks.read` 和 `schedules.manage`，其他计划（例如 Manager 定时检查 `manager.check`）再增加处理器声明的能力。处理器需要的能力改变、委托撤销或改变、维护人失权、安装不可用都会暂停，不自动扩大能力。执行路径检查当前服务身份、显式委托、维护人及目的地，不依赖创建人或 owner 继续登录。拥有 `grants.manage` 的管理员可显式更换维护人；交接不改变服务身份的已批能力，原 owner 和创建人引用保留用于审计。新建 owner 不合格返回 `schedule_owner_required`，新维护人不合格返回 `schedule_maintainer_required`；历史 owner 已离职不会作为已有计划的拒绝原因。
 
