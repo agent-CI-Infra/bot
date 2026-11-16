@@ -104,6 +104,12 @@ export const sections: SectionDefinition[] = [
   { id: 'release.observe', title: 'CI 观察', builtin: () => prompt('release-observe.md') },
   { id: 'release.notes', title: '发行说明', repository: '.agents/skills/release-notes/SKILL.md', builtin: () => '' },
   { id: 'actions.failures', title: 'Actions 失败处理', builtin: () => prompt('actions-failures.md') },
+  // Keep this section's default empty: a fixture project's get_effective_config is already
+  // ~255 KiB, just under the 256 KiB management tool-result budget. Attaching the recommended
+  // schedule-check text as a builtin pushed it over that budget and truncated the result, so
+  // the assistant lost the top-level revision and could not finish a write. Projects may paste
+  // docs/prompts/schedule-check.md into this section. A due plan that already has an instruction
+  // is started by scheduledCheckDecision without waiting on this text.
   { id: 'schedule', title: '定时检查', builtin: () => '' }
 ];
 export const section = (id: string) => sections.find(entry => entry.id === id);
