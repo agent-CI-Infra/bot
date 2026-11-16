@@ -225,8 +225,9 @@ test('the chart is a group of labelled bars and a date × project table carries 
     // The chart itself is a labelled group, not one image.
     await expect(svg).toHaveAttribute('role', 'group');
     await expect(svg).toHaveAttribute('aria-label', /每日模型估算费用/);
-    // No bar sits inside a role=img subtree any more.
-    expect(await svg.evaluate(node => [...node.querySelectorAll('rect')].filter(rect => rect.closest('[role=img]') !== rect).length)).toBe(0);
+    // No bar sits inside a role=img subtree any more: each bar is its own image, and the svg above it is not one.
+    expect(await svg.evaluate(node => [...node.querySelectorAll('rect')].every(rect => rect.closest('[role=img]') === rect))).toBe(true);
+    expect(await svg.evaluate(node => node.closest('[role=img]') === null)).toBe(true);
     const labels = await svg.locator('rect').evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-label')));
     expect(labels.length).toBeGreaterThan(0);
     for (const label of labels) expect(label).toMatch(/^\d{4}-\d{2}-\d{2} · .+ · .+ · 当日 \d+\.\d%$/);
