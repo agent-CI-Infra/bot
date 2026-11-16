@@ -359,10 +359,21 @@ test('a Manager that cannot be reached is waited out; a decision that stays inva
   f.h.store.run('UPDATE dispatch_events SET attempts=20,next_run_at=0');
   await f.run();
   assert.equal(events(f.h)[0].state, 'pending');
-  // A model that keeps choosing what was not offered runs out of attempts.
+  // A model that keeps choosing what was not offered runs out of attempts. It then gets one more round (#815), told that
+  // deciding failed, so it can answer the person instead of the event waiting for someone to press retry.
   f.state.status = 200; f.state.decide = () => ({ decision: 'continue', option_ids: ['continue:nothing'], reason: '续接' });
   f.h.store.run('UPDATE dispatch_events SET attempts=7,next_run_at=0');
   await f.run();
+  [event] = events(f.h);
+  assert.deepEqual([event.state, event.answer_round, JSON.parse(event.error).code], ['pending', 1, 'dispatch_option_not_offered']);
+  assert.ok(event.next_run_at > Date.now() + 10 * 60000, 'the answer round waits for a passing fault to clear');
+  f.h.store.run('UPDATE dispatch_events SET next_run_at=0');
+  const asked = f.requests.length;
+  await f.run();
+  const answer = f.requests[asked], told = JSON.parse(answer.messages[1].content);
+  assert.deepEqual([told.previous_failures.attempts, told.previous_failures.last_error.code], [8, 'dispatch_option_not_offered']);
+  assert.match(answer.messages[0].content, /Deciding this event failed several times before/);
+  // Only when that round fails too is the event failed, for a person to retry.
   [event] = events(f.h);
   assert.equal(event.state, 'failed'); assert.equal(JSON.parse(event.error).code, 'dispatch_option_not_offered'); assert.equal(tasks(f.h).length, 0);
   f.state.decide = input => ({ decision: 'create', option_ids: [input.options.create[0].id], reason: '恢复后检视' });
