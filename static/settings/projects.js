@@ -35,7 +35,7 @@ function globalProjectRow(row, hidden) {
   if (row.registered) content.append(consoleLink('#/projects/' + row.id + '/basic', '项目设置', '策略、模型、角色和成员'));
   const detail = element('p', installedDetail(row)); detail.title = detail.textContent; content.append(detail);
   const cells = projectRowCells(row, null, true), board = cells.find(cell => cell.dataset.label === '看板'), permission = cells.find(cell => cell.dataset.label === '权限');
-  permission.replaceChildren(permissionBadge(row));
+  permission.replaceChildren(permissionCell(row));
   board.replaceChildren(boardChip(row), projectListControls(row, { showStatus: false, showTasks: false }));
   const actions = installedActions(row, () => route(), { includeSettings: false });
   item.append(content, ...cells, projectCell('操作', row.registered ? globalProjectActions(row, actions) : actions));
