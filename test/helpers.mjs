@@ -36,6 +36,15 @@ export function fixtureClient(h) {
   client.cookie = () => cookie; client.csrf = () => csrf;
   client.harness = h; return client;
 }
+export function fixtureHook(h) {
+  // Webhook and JSON fixtures share one origin, so both must avoid leaving idle pooled sockets.
+  return async (endpoint, secret, delivery, payload, headers = {}) => {
+    const raw = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    const r = await fetch(h.webhook + endpoint, { method: 'POST', headers: { Connection: 'close', 'X-GitHub-Delivery': delivery, 'X-GitHub-Event': 'issues',
+      'X-Hub-Signature-256': 'sha256=' + createHmac('sha256', secret).update(raw).digest('hex'), ...headers }, body: raw });
+    return { status: r.status, value: await r.json() };
+  };
+}
 export async function harness(t, manager, options = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'test-')), database = join(directory, 'control.sqlite'), key = randomBytes(32);
   let store, server;
@@ -56,12 +65,7 @@ export async function harness(t, manager, options = {}) {
   // its servers; close them instead of waiting for the browser to give them up.
   h.stop = async () => { await h.external?.forwarder.close(); await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); store.close(); };
   h.client = () => fixtureClient(h);
-  h.hook = async (endpoint, secret, delivery, payload, headers = {}) => {
-    const raw = typeof payload === 'string' ? payload : JSON.stringify(payload);
-    const r = await fetch(h.webhook + endpoint, { method: 'POST', headers: { 'X-GitHub-Delivery': delivery, 'X-GitHub-Event': 'issues',
-      'X-Hub-Signature-256': 'sha256=' + createHmac('sha256', secret).update(raw).digest('hex'), ...headers }, body: raw });
-    return { status: r.status, value: await r.json() };
-  };
+  h.hook = fixtureHook(h);
   await h.start();
   if (t) t.after(async () => { await h.stop(); rmSync(directory, { recursive: true, force: true }); });
   return h;
