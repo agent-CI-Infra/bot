@@ -77,7 +77,8 @@ export function roleBackendWorkspace(workspaceOrGetter:Workspace|(()=>Workspace)
    const ready=await workspace.ensure?.()??{};if(ready.error&&ready.error!=='no_workspace')stop('workspace_unavailable','waiting_environment',ready.message);
    let egress=false;
    try{const env=await workspace.manager.call('GET','/v1/projects/'+workspace.task.repository_id);egress=computerEgress(env);}catch{}
-   return {roleWorkspace:workspace,containerOptions:{manager:workspace.manager,egress}};
+   // The CLI's own file tools find no files then, and no call answers why: the role's input says it (role_context.workspace).
+   return {roleWorkspace:workspace,containerOptions:{manager:workspace.manager,egress},...(ready.error==='no_workspace'?{workspace:{state:'none' as const,message:String(ready.message)}}:{})};
   }
   if(resolved.snapshot.harness.id!=='pi')return;
   const {store,task}=workspace,runtime=instance.runtime?JSON.parse(instance.runtime):null;

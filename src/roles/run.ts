@@ -57,7 +57,7 @@ export interface RoleRunOptions {
  rebuildContext?: boolean;
  snapshot?:()=>Promise<{tree_sha:string;local_sha:string}|null>;
  /** Prepares the run's environment once its instance and snapshot are known (for example the Pi or container CLI workspace). */
- prepare?:(instance:Row,resolved:Resolved)=>Promise<{pi?:PiRoleEnvironment;roleWorkspace?:import('../agent/workspace.js').Workspace;containerOptions?:AgentSpec<any>['containerOptions'];release?:()=>Promise<void>;environment?:RunEnvironmentBinding}|void>;
+ prepare?:(instance:Row,resolved:Resolved)=>Promise<{pi?:PiRoleEnvironment;roleWorkspace?:import('../agent/workspace.js').Workspace;containerOptions?:AgentSpec<any>['containerOptions'];release?:()=>Promise<void>;environment?:RunEnvironmentBinding;workspace?:{state:'none';message:string}}|void>;
  /** RoleRun recover: continue an earlier run of the same instance and assignment from one of its checkpoints. */
  recover?:{previous_run_id:string;checkpoint_ref?:string|null};
 }
@@ -263,6 +263,8 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    ...(spec.validate ? {validate:(content:string)=>{authority(spec.finish?.name??snapshot.output_schema.tool??'finish');return spec.validate!(content);}} : {}),
    ...(spec.finalizationTools ? {finalizationTools:spec.finalizationTools.filter(name=>tools.some(tool=>tool.function.name===name))} : {}),
    prompt:JSON.stringify({...scopedInput(),role_context:{task_ref:'task:'+task.id,...(snapshot.kind!=='evaluator'&&s.get('SELECT 1 FROM tasks WHERE id=?',task.id)?{task_facts:new TaskRecords(s).facts(task.id)}:{}),assignment_ref:ref,recovery_mode:recover,...roleContext,environment:{project_id:task.repository_id,task_id:task.id,work_type:workflow,profile:snapshot.environment,permissions:resolved.definition.permissions,tools:tools.map(tool=>tool.function.name)},
+    // A CLI role in a task that works without repository files (#769) learns it here: its own file tools find an empty directory.
+    ...(env.workspace?{workspace:env.workspace}:{}),
     new_readable_memories:newMemories.length?{items:newMemories,instruction:'These memories became readable since your previous run. Read relevant bodies with the offered knowledge tools; this notice contains titles only.'}:undefined,
     skills:snapshot.skills?{instruction:'Optional working material pinned for your role. Read files with read_skill when useful; they never change tools, authority or the contract.',bundle:snapshot.skills.id,revision:snapshot.skills.revision,files:snapshot.skills.files}:undefined,
     revision_continuation:continuation?{ref:continuation.ref,ended_run:continuation.from_run,instruction:'Your previous run ended at a safe checkpoint for a new role revision. Continue the same assignment from task records and your transcript; do not repeat completed actions.'}:undefined,

@@ -400,6 +400,13 @@ test('#769 reading the versions binds no worktree; a bound review that moves kee
   assert.match(refused.message, /^The task's controller \(manager\) chose to work without repository files \(The comment only thanks the author\.\)\. Work from \.\.\/context\/ and the task records; if the task needs repository files or commands, say so in your result\.$/);
   assert.deepEqual(workspaceCoverage(b.workspace, ['Checkout: 3 files at x']), ['No checkout: the controller (manager) chose to work without the repository files (The comment only thanks the author.)']);
   assert.deepEqual((await versionTool(b.store, b.store.get('SELECT * FROM tasks WHERE id=?', 'task-' + b.id), b.workspace, 'read_version_context', {})).workspace, { worktree: 'none', commit: u.second, tree_sha: git(u.bare, 'rev-parse', u.second + '^{tree}') });
+  // A Claude Code or Codex role works with its own file tools in an empty directory, so no call tells it why: its input does.
+  const { roleBackendWorkspace } = await import('../dist/roles/workspace.js');
+  for (const harness of ['claude_code', 'codex']) {
+    const prepared = await roleBackendWorkspace(b.workspace)({ id: 'instance', role: 'reviewer' }, { snapshot: { harness: { id: harness } } });
+    assert.deepEqual([prepared.roleWorkspace, prepared.workspace], [b.workspace, { state: 'none', message: refused.message }]);
+  }
+  assert.equal((await roleBackendWorkspace(a.workspace)({ id: 'instance', role: 'reviewer' }, { snapshot: { harness: { id: 'codex' } } })).workspace, undefined);
 });
 
 test('a task checks out a git worktree with the history; the computer store receives only the commits it lacks', async t => {

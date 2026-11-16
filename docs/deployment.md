@@ -128,7 +128,7 @@ worktree 的登记在 `worktrees` 表：所在电脑代次、HEAD 和 HEAD 的 t
 任务自己选时，系统仍保证：
 - `use_workspace(worktree_id, mode, on_changes)` 拿本项目这台电脑上的一个 worktree。读者可以和其他读者共用，写者要求没有未结束任务占着；会写的任务只能以写方式拿。runner 照样核对 HEAD、tree 和改动：有改动或不在任务提交上的 worktree 只有明确选了 `on_changes` 才交出。`reset` 先把改动（已跟踪文件的修改和未被忽略的未跟踪文件）存成任务的 `../context/saved-changes-<worktree>-<旧 head>.patch`，再还原到任务提交，被忽略的依赖和构建产物保留，`refused` 的 worktree 由此恢复为 `ready`；`keep_changes` 只用于写、且 HEAD 已是任务提交，在原有改动上继续。核对不过的选择不改动 worktree，也不把它记为 `refused`。
 - `create_workspace(mode)` 新建任务提交的 worktree。
-- `no_workspace(reason)` 只给不改文件的任务：不建也不占 worktree，此后需要仓库文件的调用回答 `no_workspace` 及原因；检视发布的 coverage 写明没有检出及是谁决定的，QA 不再检出源码快照。主控选的，被委派的角色得到的说明是按 `../context/` 和任务记录工作、需要文件就在结果里写明（跑在 Claude Code 或 Codex 上的角色用自己的文件工具，只看到空目录，暂时拿不到这条说明）。之后仍可改用 `use_workspace` 或 `create_workspace`。
+- `no_workspace(reason)` 只给不改文件的任务：不建也不占 worktree，此后需要仓库文件的调用回答 `no_workspace` 及原因；检视发布的 coverage 写明没有检出及是谁决定的，QA 不再检出源码快照。主控选的，被委派的角色得到的说明是按 `../context/` 和任务记录工作、需要文件就在结果里写明；跑在 Claude Code 或 Codex 上的角色用自己的文件工具，看到的是空目录，所以同样的说明写在它输入的 `role_context.workspace` 里。之后仍可改用 `use_workspace` 或 `create_workspace`。
 - 任务拿到 worktree 后，本轮尝试不再换。主控的选择在本轮尝试里有被委派的角色跑过之后也不再改：`use_workspace`、`create_workspace`、`no_workspace` 回答 `workspace_choice_final`，要改就用 `finish_coordination`（`continue`）结束本轮，下一轮尝试在委派前重新选。`list_workspaces` 列出本项目在这台电脑当前代次的 worktree（最多 30 个）：HEAD、是否是任务的提交、runner 现在看到的改动、最近交出时间、哪些未结束任务以读或写占着、是否在运行，以及系统此刻会给的选择。
 
 控制面启动 5 分钟后清理一次，之后每小时一次，逐台处理运行中的项目电脑：先经 runner 列出任务目录（只返回目录名和最近活动时间），再按下表决定，然后经 runner 每次删除最多 10 个目录，两次之间停 1 秒，让同一电脑上的任务调用先走；之后用同样的方式和同一张表处理 `/workspace/worktrees`（`worktrees_list`、`worktrees_remove`）。一个目录或 worktree 被多个任务用过时，以最晚才能删的那个任务为准，所以 worktree 只在所有用过它的任务都不再需要、且过了保留天数后才删除。删除任务目录只删掉其中的链接，worktree 留下。
