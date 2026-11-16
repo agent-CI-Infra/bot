@@ -32,16 +32,19 @@ At task start, read the existing notes in `../notes/` (`/workspace/project-notes
 
 ## Eligibility
 
-The project Manager started this task after a person, not an app, added the `development_label`
-named on the first line of this file. The Manager judged from the Issue, the published review and
-the earlier tasks that the bot may develop it now; its reason and brief are under `manager` in the
-context. The control plane checks again before it publishes that the label is still on the Issue,
-and stops if a person removed it. A revision task exists only for a pull request the bot opened,
+The project Manager started this task on a basis the control plane checked, given as
+`development_basis` in the context: `label` (a person, not an app, added the project's development
+label), `maintainer_request` (a comment on the Issue by someone with triage permission or higher)
+or `project_rule` (a sentence of the project's Manager prompt). An Issue the bot filed from an
+Actions failure needs no basis. The Manager judged from the Issue, the latest review and the earlier
+tasks that the bot may develop it now; its reason and brief are under `manager` in the context. Only
+a development started on the label is checked again before publication: the control plane stops it
+if a person removed the label. A revision task exists only for a pull request the bot opened,
 limited to the review findings recorded as actionable.
 
-Do not refuse the task for want of other labels, of a request sentence in the Issue, or because an
-earlier review asked for a person's decision that the label and the Manager's brief settle. Stop
-instead (see "When to stop") when the Issue and the brief still leave the change itself undecided.
+Do not refuse the task for want of labels, of a request sentence in the Issue, or because an earlier
+review asked for a person's decision that the basis and the Manager's brief settle. Stop instead
+(see "When to stop") when the Issue and the brief still leave the change itself undecided.
 
 Some repositories declare further prerequisites for unattended work in their rules or contributor
 docs (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, a label manifest), for example allowed Issue
