@@ -5,6 +5,8 @@
 // the failure it is following, so the wait doubles (1.5 s, 3 s, 6 s … capped at 30 s) and, once three reads in a row have
 // failed, the line says so and offers a read now. A hidden tab reads nothing; coming back reads at once.
 let githubVerificationOwner = null, githubVerificationWatch = null;
+// #866: the signed-in account whose project-list read failed after the check, until one read of it comes back.
+let repositoriesUnreadOwner = null;
 const GITHUB_VERIFICATION_POLL_MS = 1500;
 const GITHUB_VERIFICATION_MAX_POLL_MS = 30000;
 const GITHUB_VERIFICATION_FAILURES_SHOWN = 3;
@@ -98,12 +100,11 @@ async function finishGithubVerification(next) {
   try { listed = (await api('/api/repositories')).repositories; }
   catch (err) {
     if (!me || me.id !== next.id) return;
-    // The check itself finished: the views it feeds must stop saying it is still running even though the list read
-    // failed. Redraw them with the same guards the success path uses, then put the notice in the line the redraw owns.
-    const editing = tab === 'identity' && identityFormBeingEdited();
-    if (!editing && !projectRoute() && ['projects', 'identity'].includes(tab)) await route();
-    else if (typeof syncConsoleShell === 'function') syncConsoleShell(projectRoute());
-    showGithubRepositoriesUnread(next); return;
+    // The check finished; the list read it answers did not. One read, one recovery: the notice's button owns the retry,
+    // so the views are drawn from what is known now and the list is not read again here. A route() on the project list
+    // would repeat the endpoint that just failed — drawing fresh rows beside a notice that says the read failed, or a
+    // second retry for one read, and leaving the project picker at its placeholder either way.
+    await showRepositoriesUnread(next, err); return;
   }
   await applyGithubRepositories(next, listed);
 }
@@ -116,11 +117,41 @@ async function applyGithubRepositories(next, listed) {
   if (!editing && !projectRoute() && ['projects', 'identity'].includes(tab)) await route();
   else if (typeof syncConsoleShell === 'function') syncConsoleShell(projectRoute());
 }
+// The views the check feeds, drawn into the state they are in now: the check finished, the list not read. The identity
+// root is redrawn from its own reads; the project list shows the failed read where the list itself lives and carries no
+// retry of its own, because the notice's button reads the list, the project picker and this page together.
+async function showRepositoriesUnread(next, err) {
+  const editing = tab === 'identity' && identityFormBeingEdited();
+  if (!editing && tab === 'identity') await route().catch(error);
+  else if (!projectRoute() && tab === 'projects' && $('rows')) {
+    $('rows').removeAttribute('aria-busy');
+    $('count').textContent = '读取失败';
+    $('rows').replaceChildren(consoleState('项目列表未能读取',
+      `${err && err.message ? err.message : '请求失败'}。权限核验已完成；页面上方的「${t('verification.repositories_retry')}」会重新读取这份列表，并更新项目切换器。`,
+      { tone: 'error' }));
+  }
+  if (typeof syncConsoleShell === 'function') syncConsoleShell(projectRoute());
+  showGithubRepositoriesUnread(next);
+}
 function showGithubRepositoriesUnread(next) {
   const line = $('github-verification'); if (!line) return;
+  repositoriesUnreadOwner = next.id;
   line.hidden = false; line.dataset.state = 'failed';
   line.replaceChildren(element('span', t('verification.repositories_failed')),
     button(t('verification.repositories_retry'), () => readGithubRepositoriesAgain(next), 'btn-secondary'));
+}
+// #866: the failed read is repeated by no redraw, but a later read of the project list answers the same question. When one
+// comes back, the notice goes and the project picker follows the list that was just read, so the line can never keep
+// saying the read failed beside rows that were read.
+function recoverGithubRepositoriesUnread(listed, params) {
+  if (repositoriesUnreadOwner == null || !me || me.id !== repositoriesUnreadOwner) return;
+  repositoriesUnreadOwner = null;
+  showGithubVerification();
+  // A filtered page is a slice of the list, not the list the picker stands for.
+  if (params && (params.get('repository_id') || params.get('account_id') || params.get('owner_id'))) return;
+  repositories = listed;
+  options($('repository-filter'), repositories, r => r.full_name);
+  if (typeof syncConsoleShell === 'function') syncConsoleShell(projectRoute());
 }
 async function readGithubRepositoriesAgain(next) {
   if (!me || me.id !== next.id) return;
@@ -133,6 +164,8 @@ async function readGithubRepositoriesAgain(next) {
   catch (err) { if (me && me.id === next.id) showGithubRepositoriesUnread(next); return; }
   // Another account signed in while the list was read: its own start() draws its pages and its own line.
   if (!me || me.id !== next.id) return;
+  repositoriesUnreadOwner = null;
   showGithubVerification();
-  await applyGithubRepositories(next, listed);
+  // The read that just succeeded is the recovery; a render failure after it still goes through the console's error path.
+  await applyGithubRepositories(next, listed).catch(error);
 }
