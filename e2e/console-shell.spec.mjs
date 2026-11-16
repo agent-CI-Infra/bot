@@ -35,7 +35,8 @@ test('shared desktop rail and mobile navigation expose real destinations across 
       await page.screenshot({path:`${out}/more-${width}.png`,fullPage:true});
     }
     await page.setViewportSize({width:1440,height:1000});await page.goto(h.admin+'/#/projects/101/roles');
-    for(const name of ['项目','管理助手','任务看板','用量与成本','仓库事件','个人设置','全局设置']) await expect(page.locator('#tabs').getByRole('button',{name,exact:true})).toBeVisible();
+    for(const name of ['项目','管理助手','任务看板','用量与成本','个人设置','全局设置']) await expect(page.locator('#tabs').getByRole('button',{name,exact:true})).toBeVisible();
+    await expect(page.locator('#tabs').getByRole('button',{name:'仓库事件',exact:true})).toHaveCount(0);
     // #707: a settings page lists the settings categories only; work pages such as 项目知识 stay behind 项目入口.
     const projectNav = page.getByRole('navigation', { name: '项目设置类别' });
     await expect(projectNav.locator('[aria-current=page]')).toHaveText('角色');
@@ -110,7 +111,7 @@ test('permissions, in-flight navigation, keyboard and history keep their boundar
     await expect(page.locator('.console-settings-nav').getByRole('button',{name:'个人设置',exact:true})).toBeHidden();
     await expect(page.locator('.console-settings-nav').getByRole('button',{name:'全局设置',exact:true})).toBeHidden();
     await expect(page.locator('#tabs').getByRole('button',{name:'用量与成本',exact:true})).toBeHidden();
-    await expect(page.locator('#tabs').getByRole('button',{name:'仓库事件',exact:true})).toBeHidden();
+    await expect(page.locator('#tabs').getByRole('button',{name:'仓库事件',exact:true})).toHaveCount(0);
     await page.setViewportSize({width:390,height:844});
     expect(await page.locator('#console-project option').allTextContents()).not.toContain('202');
     await page.goto(h.admin+'/#/settings/users');await expect(page.locator('#settings-panel')).toBeHidden();

@@ -2,7 +2,7 @@ function deliveryCaption(row){return {tasks_created:'已创建任务',draft:'因
 // #238: reception, signature verification and processing are read as separate facts. Archive outcomes keep their own
 // neutral wording, so duplicate/draft/disabled/untriggered rows never borrow the refusal styling of a bad signature.
 const deliveryOutcomes = {
-  // Wording stays the archive contract the existing trial spec reads: these are archive outcomes, not failures.
+  // The delivery detail keeps this archive wording. These are outcomes, not failures.
   tasks_created:['已创建任务','success'], duplicate:['重复，不重复建任务','info'], draft:['因草稿跳过','info'], not_trigger:['不是触发事件',''],
   review_disabled:['检视未开启，仅归档',''], project_disabled:['项目已禁用，仅归档',''], unregistered_repository:['仓库未启动，仅归档',''],
   invalid_signature:['未处理：签名无效','danger'], invalid_payload:['未处理：正文无效','danger'], payload_too_large:['未处理：正文过大','danger'],
@@ -14,48 +14,7 @@ const deliveryIgnoreReasons = {
   invalid_signature:'签名无效，未通过验签，未进入处理。', invalid_payload:'正文不是合法 JSON，未进入处理。',
   payload_too_large:'正文超过大小上限，未读取签名与入口。', unknown_endpoint:'账号下没有这个通知入口，未验签、未处理。',
   missing_event_or_delivery:'缺少事件名或投递编号，未进入处理。' };
-// List rows use a plain name; the raw GitHub event/action stays in 技术信息.
-const deliveryEventNames = {
-  'workflow_run.completed':'工作流已完成', 'workflow_run.in_progress':'工作流进行中', 'workflow_run.requested':'工作流已请求',
-  'workflow_run':'工作流', 'issue.opened':'Issue 已打开', 'issue.closed':'Issue 已关闭', 'issue.reopened':'Issue 已重新打开',
-  'issue.edited':'Issue 已编辑', 'issue':'Issue', 'issues':'Issue', 'pull_request.opened':'Pull Request 已打开',
-  'pull_request.closed':'Pull Request 已关闭', 'pull_request.synchronize':'Pull Request 有新提交',
-  'pull_request.ready_for_review':'Pull Request 待检视', 'pull_request.review_requested':'Pull Request 请求检视',
-  'pull_request.reopened':'Pull Request 已重新打开', 'pull_request':'Pull Request', 'push':'代码推送',
-  'check_suite.completed':'检查套件已完成', 'check_run.completed':'检查已完成', 'release.published':'版本已发布',
-  'create':'创建引用', 'delete':'删除引用',
-  'issue_comment':'Issue 有新评论', 'issue_comment.created':'Issue 有新评论',
-  'issue_comment.edited':'Issue 评论已编辑', 'issue_comment.deleted':'Issue 评论已删除',
-  'pull_request_review':'Pull Request 收到检视意见', 'pull_request_review.submitted':'Pull Request 收到检视意见',
-  'pull_request_review.edited':'Pull Request 检视已编辑', 'pull_request_review.dismissed':'Pull Request 检视已撤销',
-  'pull_request_review_comment':'Pull Request 有行内评论', 'pull_request_review_comment.created':'Pull Request 有行内评论',
-  'pull_request_review_comment.edited':'Pull Request 行内评论已编辑', 'pull_request_review_comment.deleted':'Pull Request 行内评论已删除'
-};
-
-function deliveryEventName(route, event){
-  const key = route || event || '';
-  if (!key) return '未知事件';
-  if (deliveryEventNames[key]) return deliveryEventNames[key];
-  const stem = key.split('.')[0];
-  return deliveryEventNames[stem] || '其他事件';
-}
-function deliveryDispatchLine(row){
-  const item = (row.dispatch || [])[0];
-  if (item) return '任务分派：' + dispatchCaption(item) + (item.reason ? ' · ' + item.reason : '');
-  if (row.processing_result && deliveryIgnoreReasons[row.processing_result]) return deliveryIgnoreReasons[row.processing_result];
-  return '';
-}
 function deliveryOutcome(row){ const result=row.processing_result; return deliveryOutcomes[result]||[deliveryCaption(row),'']; }
-function deliveryFacet(kind,row){
-  const reception=row.reception||{}, signature=row.signature||{};
-  const [caption,tone]=kind==='reception'?(reception.accepted?['已接收','success']:['已拒收'+(reception.http_status?'（HTTP '+reception.http_status+'）':''),'danger'])
-    :kind==='signature'?(signature.state==='verified'?['签名有效','success']:signature.state==='invalid'?['签名无效','danger']:['未验签',''])
-    :deliveryOutcome(row);
-  const node=element('span',caption,'status'+(tone?' status-'+tone:''));
-  node.dataset.deliveryFacet=kind;
-  node.dataset.deliveryState=kind==='reception'?(reception.accepted?'accepted':'rejected'):kind==='signature'?(signature.state||'unchecked'):String(row.processing_result||'');
-  node.title=kind==='reception'?'接收':kind==='signature'?'验签':'处理结果'; return node;
-}
 function dispatchCaption(event){ return ({create:'新建任务',continue:'续接任务',ignore:'不处理'})[event.decision]||event.decision||event.state||'待分派'; }
 function deliverySection(name,title,rows){ const section=element('section','','detail-section'); section.dataset.detailSection=name;
   section.append(element('h3',title), facts(rows)); return section; }

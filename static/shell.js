@@ -112,7 +112,7 @@ function consoleScope() {
 }
 // #481: the phone's bottom bar owns the five primary destinations (项目 / 任务 / 待处理 / 助手 / 更多), so this page is
 // the supplement behind 更多. It must not repeat what the bar already carries, and it stays short enough to read on a
-// phone. #549: a project administrator's 更多 is only personal settings — webhook, usage, storage and the external
+// phone. #549: a project administrator's 更多 is only personal settings — usage, storage and the external
 // runner belong to the management area (#550), and project sections stay on the project page and 当前页面 picker.
 function consoleGroups() {
   const id = consoleScope(), repo = repositories.find(r => String(r.id) === id);
@@ -123,12 +123,11 @@ function consoleGroups() {
     ['#/identity', '身份与权限', '本人绑定与当前有效授权'],
     ['#/conversations', '飞书会话', '成员消息、执行过程与派生任务']
   ];
-  // #550: webhook, usage, storage, the external runner and (for a super administrator) onboarding,
+  // #550: usage, storage, the external runner and (for a super administrator) onboarding,
   // installation archives and robot accounts live in one 管理 group. Permissions are unchanged:
   // a project administrator only sees the pages their role can already open.
   const management = [
     ['#/costs', '用量与成本', '按项目、日期与工作类型查看'],
-    ['#/events', '仓库事件', '仓库推送来的通知与处理结果'],
     ['#/external', '外部执行端', '接入与连接诊断'],
     ['#/settings/storage', '存储', '本人项目的轨迹与数据量']
   ];
@@ -157,12 +156,12 @@ function consoleGroups() {
 // #549: a project administrator's desktop primary nav is 项目 / 管理助手 / 任务看板 / 待处理, plus a visible
 // 更多功能 entry so 身份与权限 stays reachable at desktop widths (the account menu is phone-only). That address is
 // #/identity since #615; #/preferences stays an alias so old links keep working.
-// 用量与成本, Webhook, 身份与权限 and 存储 leave the sidebar itself; they remain in 更多 (and, for super
+// 用量与成本, 身份与权限 and 存储 leave the sidebar itself; they remain in 更多 (and, for super
 // administrators, in the pinned settings nav).
 function applyConsoleNavVisibility() {
   if (!me) return;
   const isSuper = me.role === 'super_admin';
-  for (const tab of ['costs', 'events', 'preferences', 'settings']) {
+  for (const tab of ['costs', 'preferences', 'settings']) {
     const node = document.querySelector('#tabs [data-tab="' + tab + '"]');
     if (node) node.hidden = !isSuper;
   }
@@ -491,7 +490,6 @@ function consoleIconName(href) {
   if (/\/management(\/|$)/.test(path) || path === '/management') return 'chat';
   if (/^\/conversations/.test(path)) return 'messages';
   if (/^\/costs/.test(path)) return 'chart';
-  if (/^\/events/.test(path)) return 'webhook';
   if (/feishu/.test(path)) return 'message';
   if (/^\/identity/.test(path)) return 'badge';
   if (/\/external(\/|$)/.test(path)) return 'plug';
@@ -553,7 +551,7 @@ function initConsoleShell() {
   primary.append(more);
   // Keep the original tabs and their click handling, but let only the work navigation scroll above the settings.
   tabs.replaceChildren(primary, settings); sidebar.append(scope, tabs);
-  const sidebarIcons = { projects: 'home', management: 'chat', board: 'board', costs: 'chart', events: 'webhook', preferences: 'user', settings: 'gear', more: 'more' };
+  const sidebarIcons = { projects: 'home', management: 'chat', board: 'board', costs: 'chart', preferences: 'user', settings: 'gear', more: 'more' };
   for (const item of tabs.querySelectorAll('[data-tab], #console-inbox-link')) {
     const name = item.id === 'console-inbox-link' ? 'inbox' : sidebarIcons[item.dataset.tab];
     if (!name || item.querySelector('.console-icon')) continue;

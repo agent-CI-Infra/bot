@@ -66,7 +66,7 @@ async function render(quiet = false) {
   catch (err) {
     if (request !== renderVersion) return;
     $('rows').removeAttribute('aria-busy');
-    const heading = tab === 'projects' ? '项目列表未能读取' : tab === 'events' ? '仓库事件未能读取' : '列表未能读取';
+    const heading = tab === 'projects' ? '项目列表未能读取' : '列表未能读取';
     $('count').textContent = '读取失败';
     // #872: the retry is bound to this read. `render()` re-reads whatever `tab`, `offset` and the filters say when the
     // button is pressed, so a card the console has left behind would draw this page's list over the page the reader is
@@ -97,36 +97,20 @@ async function render(quiet = false) {
   // The probe row is part of the signature: when the 51st row appears or goes, only `next` changes, and a quiet refresh
   // that compared the drawn rows alone would return early and leave the pager stale (#747).
   const signature=tab+'\n'+(hiddenView?'hidden\n':'')+params+'\n'+String(hasMore)+'\n'+JSON.stringify(rows)+'\n'+JSON.stringify(pendingRepositories)+'\n'+String(!!pendingRepositoriesError);if(quiet&&signature===listSignature)return;listSignature=signature;
-  const lines=[]; $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条事件` : hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目${pendingRepositories.length?`，${pendingRepositories.length} 个待${pendingRepositories.some(repo=>repo.self_start)?'':'超级管理员'}启动`:pendingRepositoriesError?'，等待启动的仓库暂时无法读取':''}` : `${rows.length} 条记录`;
+  const lines=[]; $('count').textContent = hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目${pendingRepositories.length?`，${pendingRepositories.length} 个待${pendingRepositories.some(repo=>repo.self_start)?'':'超级管理员'}启动`:pendingRepositoriesError?'，等待启动的仓库暂时无法读取':''}` : `${rows.length} 条记录`;
   const count = $('count'); if (count) count.title = count.textContent;
   $('previous').disabled = offset === 0; $('next').disabled = !hasMore; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
     const line = element('div', '', 'row'), content = element('div', '', 'row-content'), status=element('div','','row-state');line.setAttribute('role','listitem');line.dataset.key=String(row.id);rowSignatures.set(line,JSON.stringify(row));
-    if (tab === 'events') {
-      line.dataset.deliveryKey = String(row.delivery_id || ''); line.dataset.deliveryRecord = String(row.id);
-      line.dataset.deliverySource = row.source?.reference || 'deliveries:' + row.id;
-    }
-    const eventLabel = tab==='events' ? deliveryEventName(row.route, row.event) : '';
-    const name = taskTab ? `${row.kind === 'development.pr' ? '跟进 ' : ''}${objectLabel(row)} · ${row.full_name || '仓库 ' + row.repository_id}` : (tab==='events'?(row.full_name?row.full_name+' · '+eventLabel:eventLabel):row.full_name) || row.name || row.username || row.model_name || row.summary || row.route || '未知事件';
-    const heading = element('strong', name); heading.title = tab==='events' ? [row.full_name, row.route || row.event].filter(Boolean).join(' · ') || name : name; heading.classList.add('row-title'); content.append(heading);
+    const name = taskTab ? `${row.kind === 'development.pr' ? '跟进 ' : ''}${objectLabel(row)} · ${row.full_name || '仓库 ' + row.repository_id}` : row.full_name || row.name || row.username || row.model_name || row.summary || row.route || '未知事件';
+    const heading = element('strong', name); heading.title = name; heading.classList.add('row-title'); content.append(heading);
     if (tab === 'projects' && !hiddenView && row.registered !== false) content.append(consoleLink(`#/projects/${row.id}/overview`, '项目总览', '查看工作进展与待处理事项'));
-    if (tab === 'events') {
-      content.append(element('p', timestamp(row.received_at) || '', 'row-event-time'));
-      const tech = element('details', '', 'row-tech');
-      const summary = element('summary', '技术信息'); tech.append(summary);
-      const id = element('code', String(row.delivery_id || '')); id.dataset.deliveryId = ''; id.title = 'GitHub delivery ID';
-      tech.append(element('p', `事件标识：${row.route || row.event || '未知'}`), id, element('p', `来源 ${line.dataset.deliverySource}`));
-      content.append(tech);
-      line.append(content);
-      status.append(...['reception','signature','processing'].map(kind => deliveryFacet(kind, row)));
-    } else {
-      const detail = taskTab ? `${phaseLabels[row.phase] || row.phase} · ${row.head_sha ? '提交 ' + row.head_sha.slice(0,12) : '等待材料'} · 第 ${row.attempt} 次 · 更新于 ${timestamp(row.updated_at)}${row.error_code ? ' · '+faultSummary(row.error_code,row.error_cause) : ''}${tab === 'reviews' && Array.isArray(row.result?.findings) ? ` · ${row.result.findings.length} 条发现` : ''}`
-        : installedView ? installedDetail(row) : (row.model_id ? '' : '还没有默认模型');
-      // The repository number leaves the first screen but stays on hover, with or without a detail line.
-      if (tab === 'projects' && row.id) content.title = '编号 ' + row.id;
-      if (detail) { const detailLine = element('p', detail); detailLine.title = detail; content.append(detailLine); } line.append(content);
-      if(listTabs.includes(tab))status.append(taskTab ? taskState(row) : state(row.status));
-    }
+    const detail = taskTab ? `${phaseLabels[row.phase] || row.phase} · ${row.head_sha ? '提交 ' + row.head_sha.slice(0,12) : '等待材料'} · 第 ${row.attempt} 次 · 更新于 ${timestamp(row.updated_at)}${row.error_code ? ' · '+faultSummary(row.error_code,row.error_cause) : ''}${tab === 'reviews' && Array.isArray(row.result?.findings) ? ` · ${row.result.findings.length} 条发现` : ''}`
+      : installedView ? installedDetail(row) : (row.model_id ? '' : '还没有默认模型');
+    // The repository number leaves the first screen but stays on hover, with or without a detail line.
+    if (tab === 'projects' && row.id) content.title = '编号 ' + row.id;
+    if (detail) { const detailLine = element('p', detail); detailLine.title = detail; content.append(detailLine); } line.append(content);
+    if(listTabs.includes(tab))status.append(taskTab ? taskState(row) : state(row.status));
     // #544: the project list is one shared-column table. Each category gets its own cell so 启用/检视/开发/权限/门禁/看板/任务
     // line up across rows and organizations; the row keeps the selectors the rest of the console refreshes by.
     if (tab === 'projects' && !hiddenView) {
@@ -142,11 +126,6 @@ async function render(quiet = false) {
       line.append(content, ...cells, actions);
       lines.push(line); return;
     }
-    if(tab==='events'){
-      for(const task of row.tasks||[])content.append(button(`${kindLabels[task.kind]||task.kind} #${task.object_number} · 查看任务`,()=>openTask(task.id),'quiet linkish'));
-      const outcome=deliveryDispatchLine(row);
-      if(outcome)content.append(element('p',outcome,'muted row-event-outcome'));
-    }
     if(installedView){status.append(...installedBadges(row));if(!hiddenView)status.append(...installedIntegration(integrationMap.get(row.id),row));}
     if(tab==='projects'&&!hiddenView){line.classList.add('project-list-row');line.dataset.repositoryId=row.id;status.classList.add('project-overview');status.append(projectListControls(row));}
     if(taskTab&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
@@ -158,11 +137,6 @@ async function render(quiet = false) {
       if(hiddenView)actions.append(button('恢复',()=>restoreInstalled(row,()=>start()).catch(error),'quiet'));
       if(actions.childElementCount)line.append(actions);}
     else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id),'quiet'));line.append(actions);}
-    if (tab === 'events') {
-      const button = element('button', '查看详情', 'quiet'); button.addEventListener('click', async () => {
-        try { $('detail-title').textContent='投递详情'; $('detail-body').replaceChildren(...deliveryDetail(await api('/api/events/' + row.id))); $('detail').showModal(); } catch (err) { error(err); }
-      }); const actions=element('div','','actions');actions.append(button);line.append(actions);
-    }
     if(taskTab){
       const actions=element('div','','actions'),detail=element('button','查看过程','quiet');
       detail.addEventListener('click',()=>openTask(row.id).catch(error));actions.append(detail);
@@ -193,7 +167,6 @@ async function render(quiet = false) {
   if (tab === 'projects' && !installedView && !hiddenView && pendingRepositoriesError) {
     $('rows').append(consoleState('等待启动的仓库暂时无法读取', readErrorText(pendingRepositoriesError), { tone: 'error', retry: () => start().catch(error) }));
   }
-  if (tab === 'events' && !rows.length) $('rows').replaceChildren(eventsEmptyState(params));
   // #708: while the GitHub permission check that follows signing in runs, an empty list means "not known yet", not "none".
   if (tab === 'projects' && !installedView && !hiddenView && !repositories.length && !rows.length && me.github_verification) {
     $('rows').replaceChildren(consoleState(t('verification.title'), t('verification.projects'), { tone: 'loading' }));

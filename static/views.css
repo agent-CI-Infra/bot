@@ -418,10 +418,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .machine-config-impact{display:flex;flex-direction:column;gap:12px;border:1px solid var(--color-border);border-radius:var(--radius-card);background:var(--color-surface-alt);padding:16px;min-width:0}
 .machine-config-draft{font-weight:600;overflow-wrap:anywhere}
 @media(max-width:1200px){.machine-config-layout{grid-template-columns:minmax(0,1fr)}.machine-config-impact{order:-1}}
-/* #238 webhooks: a delivery row carries reception, signature and processing as three independent badges, and the
-   detail reads the same facts as labelled sections with the Manager dispatch and the collapsed raw request. */
-/* Desktop only: the narrow layout keeps the shared single-column row so a 390px page does not squeeze the text. */
-@media (min-width: 761px) { #rows[data-view=events] .row.has-actions { grid-template-columns: minmax(0,1fr) 260px 90px; } }
+/* #238: a delivery detail reads reception, signature and processing as labelled sections, then the Manager dispatch and the collapsed raw request. */
 #detail-body code { overflow-wrap:anywhere; }
 #detail-body .detail-section { margin-top:14px; }
 #detail-body .detail-section h3 { margin:0; font-size:var(--font-size-label); }
