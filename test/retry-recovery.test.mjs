@@ -102,7 +102,7 @@ const conditions=[
   ['head','development.pr','retry_wait','pull_request_head_changed'],
   ['policy','review.issue','cancelled','repository_policy_disabled'],
   ['policy','development.issue','cancelled','repository_policy_disabled'],
-  ['goal','development.issue','retry_wait','issue_needs_replan'],
+  // An edit of the Issue no longer stops its development (#815): see 'an Issue edited during its development' below.
   // Who is assigned is the Manager's judgement when it starts development, not a recheck (except for Actions reports).
   ['label','development.issue','waiting_permission','development_not_approved'],
   ['owner','development.pr','waiting_permission','bot_pr_author_changed'],
@@ -114,7 +114,6 @@ for(const phase of ['model','publish'])for(const [condition,kind,status,code] of
     if(condition==='closed')object.state='closed';
     if(condition==='draft')object.draft=true;
     if(condition==='head')object.head.sha='f'.repeat(40);
-    if(condition==='goal')object.body='A different goal.';
     if(condition==='label')object.labels=[];
     if(condition==='owner')object.user.id=42;
     if(condition==='bot_pr_closed')botPR.state='closed';
@@ -150,6 +149,56 @@ for(const phase of ['model','publish'])for(const [condition,kind,status,code] of
     if(condition==='head'&&kind==='review.pr')assert.equal(h.store.get('SELECT head_sha FROM tasks WHERE id=?',h.taskId).head_sha,object.head.sha);
   });
 }
+
+// #815: an edit of the Issue is an update of its development, not a stop. The development keeps the current text and the
+// edit is kept with its updates, which later role assignments read in their task facts.
+test('an Issue edited during its development is an update of the task, not a stop',async t=>{
+  const edited={...structuredClone(issue),body:'A different goal.',html_url:'https://github.invalid/issues/1'};
+  const h=await emptyRepositoryFixture(t,{github(path,send){if(path.endsWith('/issues/1')){send(edited);return true;}}});h.setBranch('ready');
+  h.store.run("UPDATE policies SET capability_ceiling='develop',development_enabled=1 WHERE repository_id='101'");
+  const input={object:issue,object_hash:sha(JSON.stringify([issue.title,issue.body])),context:{mode:'development',object:{title:issue.title,body_excerpt:issue.body}},files:[]};
+  h.store.run("UPDATE tasks SET kind='development.issue',status='retry_wait',phase='model',input=?,workspace_id='old',generation=1,next_run_at=? WHERE id=?",JSON.stringify(input),Date.now()-1,h.taskId);
+  const task=await h.run();
+  assert.notEqual(task.error_code,'issue_needs_replan');assert.notEqual(task.status,'needs_replan');
+  const saved=JSON.parse(task.input);
+  assert.equal(saved.object_hash,sha(JSON.stringify([edited.title,edited.body])));assert.equal(saved.context.object.body_excerpt,'A different goal.');
+  const [update]=h.store.all('SELECT data FROM review_updates WHERE task_id=?',h.taskId).map(row=>JSON.parse(row.data));
+  assert.deepEqual([update.reason,update.changed,update.object.body],['issue_edited',['body'],'A different goal.']);
+  assert.ok(h.store.all('SELECT content FROM task_logs WHERE task_id=?',h.taskId).some(row=>JSON.parse(row.content).type==='issue_updated'));
+  // Role assignments that start later read it in the task facts.
+  const {TaskRecords}=await import('../dist/tasks/service.js');
+  assert.deepEqual(new TaskRecords(h.store).facts(h.taskId).updates.map(u=>[u.reason,u.body_excerpt]),[['issue_edited','A different goal.']]);
+  // Seeing the same text again adds nothing.
+  h.store.run("UPDATE tasks SET status='retry_wait',phase='model',next_run_at=? WHERE id=?",Date.now()-1,h.taskId);await h.run();
+  assert.equal(h.store.get('SELECT count(*) n FROM review_updates WHERE task_id=?',h.taskId).n,1);
+});
+
+// #815: a development stopped because the development label was removed goes back to the Manager to answer the person; a
+// person adding the label again lets the Manager continue it, which resumes the task.
+test('a development stopped by a removed label goes to the Manager, and resumes when the label is added again',async t=>{
+  const unlabeled={...structuredClone(issue),labels:[]};let current=unlabeled;
+  const h=await emptyRepositoryFixture(t,{github(path,send){if(path.endsWith('/issues/1')){send(current);return true;}}});h.setBranch('ready');
+  h.store.run("UPDATE policies SET capability_ceiling='develop',development_enabled=1 WHERE repository_id='101'");
+  const input={object:issue,object_hash:sha(JSON.stringify([issue.title,issue.body])),context:{mode:'development'},files:[]};
+  h.store.run("UPDATE tasks SET kind='development.issue',status='retry_wait',phase='model',input=?,workspace_id='old',generation=1,next_run_at=? WHERE id=?",JSON.stringify(input),Date.now()-1,h.taskId);
+  const task=await h.run();
+  assert.deepEqual([task.status,task.error_code],['waiting_permission','development_not_approved']);
+  const stopped=h.store.get("SELECT * FROM dispatch_events WHERE type='development.stopped'");
+  assert.ok(stopped,'the stop is an event for the Manager');
+  assert.equal(JSON.parse(stopped.facts).development.task_id,h.taskId);assert.deepEqual(JSON.parse(stopped.options).map(o=>o.work),['review.issue']);
+  // The label is added again: the labeling offers the waiting development to continue, and continuing resumes it.
+  current=issue;
+  const {queueWebhook}=await import('../dist/review/queue.js'),{dispatchContext,applyDecision}=await import('../dist/dispatch/store.js');
+  // The Manager decides here (not the rule decider of the other tests), so the labeling waits for its decision.
+  const {configureDispatch,ruleDecider}=await import('../dist/dispatch/worker.js');configureDispatch(null);t.after(()=>configureDispatch(ruleDecider));
+  queueWebhook(h.store,'101','issues',{action:'labeled',label:{name:'bot-develop'},issue,sender:{type:'User',login:'maintainer',id:7}},'relabel');
+  const event=h.store.get("SELECT * FROM dispatch_events WHERE type='issue.labeled'"),context=dispatchContext(h.store,event);
+  assert.deepEqual(context.continuations.map(c=>[c.task_id,c.status]),[[h.taskId,'waiting_permission']]);
+  h.store.run("UPDATE dispatch_events SET state='dispatching',lease='l',attempts=1 WHERE id=?",event.id);
+  applyDecision(h.store,h.store.get('SELECT * FROM dispatch_events WHERE id=?',event.id),{decision:'continue',option_ids:['continue:'+h.taskId],reason:'标签重新加上了，继续开发',model:'fixture',seen:context.continuations.map(c=>c.id)},'l');
+  assert.deepEqual(Object.values(h.store.get('SELECT status,error_code FROM tasks WHERE id=?',h.taskId)),['queued',null]);
+  assert.ok(h.store.all('SELECT content FROM task_logs WHERE task_id=?',h.taskId).some(row=>JSON.parse(row.content).type==='resumed'));
+});
 
 for(const [change,status,code] of [['closed','cancelled','object_closed_or_draft'],['draft','cancelled','object_closed_or_draft'],['head','queued','pull_request_head_changed']]){
   test(`ReviewUpdated rechecks ${change} before continuing the model in the same run`,async t=>{

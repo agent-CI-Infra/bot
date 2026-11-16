@@ -399,7 +399,10 @@ test('a person\'s development label reaches the Manager with the facts it judges
   assert.equal(await engine.developmentApproved(github(issue(['bot-develop']),[user,{...user,actor:{type:'Bot'}}]),task),null);
   assert.deepEqual((await engine.developmentApproved(github(issue(['bot-develop'],[{login:'x'}]),[user]),task)).assignees,['x']);
   assert.equal(await engine.developmentApproved(github(issue([]),[user]),task),null);
+  // The second labeling joined the running development as an update (#815: a labeling can resume a stopped one).
+  assert.equal(h.store.get("SELECT count(*) n FROM review_updates WHERE task_id=(SELECT id FROM tasks WHERE kind='development.issue')").n,1);
   h.store.run("DELETE FROM task_logs WHERE task_id IN (SELECT id FROM tasks WHERE kind='development.issue')");
+  h.store.run("DELETE FROM review_updates WHERE task_id IN (SELECT id FROM tasks WHERE kind='development.issue')");
   h.store.run("DELETE FROM tasks WHERE kind='development.issue'");
   engine.queueDevelopment({},task,{object:issue(['bot-develop']),object_hash:'h'},review,null);assert.equal(count(),0);
   engine.queueDevelopment({},task,{object:issue(['bot-develop']),object_hash:'h'},review,goAhead);assert.equal(count(),1);
