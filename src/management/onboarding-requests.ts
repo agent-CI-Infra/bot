@@ -10,8 +10,9 @@ import type { ManagementService } from './service.js';
  * Requests to start a repository (#933). An administrator of a repository whose organization is not trusted (#848) cannot
  * start it: confirming the onboarding plan files a request instead, and the start item waits for it. Every super
  * administrator is told (console and Feishu private chat); one of them approves — choosing the model and level, optionally
- * trusting the organization — or rejects with a reason, and the requester is told. On approval the super administrator
- * starts the project, and the rest of the plan is applied as the requester, with the requester's own permissions.
+ * trusting the organization — or rejects with a reason, on 待处理 or by answering the notice in the private chat, and the
+ * requester is told. On approval the super administrator starts the project, and the rest of the plan is applied as the
+ * requester, with the requester's own permissions.
  *
  * One request per repository is open at a time; requesting again returns it. The requester (or another administrator of
  * the repository) withdraws it; it lapses when the repository leaves the installation or the project starts another way.
@@ -34,6 +35,22 @@ export interface RequestHost {
 }
 /** What a Feishu notice is about, for the delivery to check again before it sends (channels/service.ts). */
 export interface RequestNotice { request_id: string; repository_id: string; state: RequestState; tenant: string; audience: 'super_admin' | 'requester' }
+
+/**
+ * A super administrator decides requests in their conversation with the management assistant as on 待处理: in the Feishu
+ * private chat that told them, they answer the notice with 同意 or 拒绝 and a reason. Offered to a super administrator while
+ * requests are pending (management/agent.ts).
+ */
+export const startRequestsName = 'start_requests';
+export const startRequestsTool = { type: 'function', function: { name: startRequestsName,
+  description: 'Start requests: administrators of repositories in organizations that are not trusted ask a super administrator, the person you are talking with, to start their project. '
+    + 'context.pending_start_requests lists the pending ones. action list: read them again. '
+    + 'approve {request_id; capability_ceiling, model_id or trust_organization only when the person asks for them}: starts the project and applies the rest of its plan as the requester. '
+    + 'reject {request_id, reason}: the reason is required and is sent to the requester; ask for it when the person gave none. '
+    + 'Decide only when the person says so in this conversation, for example 同意 or 拒绝 with a reason in answer to a start request notice; when several are pending and it is unclear which one they mean, ask instead of choosing.',
+  parameters: { type: 'object', additionalProperties: false, required: ['action'], properties: {
+    action: { type: 'string', enum: ['list', 'approve', 'reject'] }, request_id: { type: 'string', maxLength: 64 }, reason: { type: 'string', maxLength: 2000 },
+    capability_ceiling: { type: 'string', enum: ['read', 'comment', 'develop'] }, model_id: { type: 'string', maxLength: 128 }, trust_organization: { type: 'boolean' } } } } };
 
 export class OnboardingRequests {
   /**
@@ -60,7 +77,8 @@ export class OnboardingRequests {
       this.store.audit(actor.principal_id, 'onboarding.start_requested', request, id);
     });
     const repository = this.host.repository(id)!;
-    this.notify?.(this.superAdministrators(), `仓库 ${repository.full_name} 申请启动：${summary(plan)}\n在控制台「待处理」的启动申请里同意或拒绝。`,
+    // Where to decide depends on the chat it reaches, so the channels add it (channels/service.ts).
+    this.notify?.(this.superAdministrators(), `仓库 ${repository.full_name} 申请启动：${summary(plan)}`,
       { request_id: request, repository_id: id, state: 'pending', tenant: 'github.com:' + repository.owner_id, audience: 'super_admin' });
     return this.store.get('SELECT * FROM onboarding_requests WHERE id=?', request)!;
   }
@@ -73,6 +91,15 @@ export class OnboardingRequests {
     return { requests: rows.map(row => this.view(row)) };
   }
   read(actor: ActorContext, id: string): Json { this.superAdministrator(actor); this.lapse(); return { request: this.view(this.request(id)) }; }
+  /** Whether the person may decide requests: a super administrator, never through an organization's app (it confines them). */
+  decides(actor: ActorContext): boolean { return this.host.service.user(actor).role === 'super_admin'; }
+  /** The start_requests tool of the management assistant: the same list and decisions as the console's 待处理. */
+  async tool(actor: ActorContext, args: Json): Promise<Json> {
+    const { action, request_id: id, ...input } = args;
+    if (action === 'list') return this.list(actor, 'pending');
+    if (typeof id !== 'string' || !id) return fail(400, 'invalid_field', 'request_id');
+    return action === 'approve' ? this.approve(actor, id, input) : this.reject(actor, id, input);
+  }
   /** The repository's latest request, for its onboarding page. */
   latest(repositoryId: string): Json | null {
     this.lapse(repositoryId);

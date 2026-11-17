@@ -419,15 +419,20 @@ export class ChannelService {
    * A start request notice (#933) to each person's own private chats with the bot, through an application of the repository's
    * organization or the platform's own (never another organization's), queued durably. People without one are skipped: the
    * console's request list is where everyone finds them. The notice links to where it is handled (#934): 待处理 for super
-   * administrators, the repository's onboarding page for the requester.
+   * administrators, the repository's onboarding page for the requester. A super administrator answers it in the chat with
+   * 同意 or 拒绝 (the management assistant decides it), except through an organization's app, which confines them: there it
+   * is decided on 待处理 only.
    */
   private onboardingNotice(principals: string[], notice: string, about: RequestNotice): void {
-    const text = notice + (this.options.origin ? '\n' + this.options.origin + (about.audience === 'super_admin' ? '/#/inbox' : '/#/onboarding/' + about.repository_id) : '');
+    const link = this.options.origin ? '\n' + this.options.origin + (about.audience === 'super_admin' ? '/#/inbox' : '/#/onboarding/' + about.repository_id) : '';
     for (const principal of principals) for (const row of this.store.all("SELECT c.id FROM channel_chats c JOIN channel_personal_owners o ON o.chat_id=c.id WHERE o.principal_id=? AND c.chat_type='p2p'", principal)) {
       try {
         const chat = this.employees.chat(String(row.id)), application = this.applicationTenant(chat);
         if (application && application !== about.tenant) continue;
         this.schedules.owner(chat, principal);
+        const decide = about.audience !== 'super_admin' ? '' : application ? '\n在控制台「待处理」的启动申请里同意或拒绝。'
+          : '\n直接回复「同意」即可启动，拒绝请回复「拒绝」并写明原因；也可以在控制台「待处理」里处理。';
+        const text = notice + decide + link;
         this.post(chat, text, `onboarding-request:${about.request_id}:${about.state}:${chat.id}`, `onboarding-request:${about.request_id}`, { kind: 'onboarding_request', ...about, chat_id: chat.id, principal_id: principal });
       } catch (error) { if (!(error instanceof HttpError)) throw error; }
     }

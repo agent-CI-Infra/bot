@@ -24,7 +24,10 @@ export function managementFailure(code:string):string {
   if(contextFault.test(code))return '本次请求需要的上下文超过模型请求上限，请缩小范围（例如指定项目或时间段）后重试。';
   if(/authorization_changed|conversation_source_changed|channel_message_changed|channel_sensitive_message/.test(code))return '身份、权限或来源消息已变化，请核对当前范围后重新说明请求。';
   if(code==='github_reauthorization_required')return reauthorize;
-  if(code==='channel_application_tenant_forbidden')return '这个飞书机器人属于一个 GitHub 组织，经它只能使用你在该组织内的权限，而你在该组织还没有可访问的项目。请改用其他机器人，或请组织管理员为你授权。';
+  // A start request decided in a private chat (#933): someone else decided first, or it lapsed.
+  if(code==='onboarding_request_closed')return '这份启动申请已经有人处理过，或者已经失效（仓库移出了安装、项目已经启动或组织已受信任），请在控制台「待处理」查看。';
+  if(code==='onboarding_apply_running')return '这个仓库正在应用另一份接入方案，请等它结束后再同意。';
+  if(code==='channel_application_tenant_forbidden')return'这个飞书机器人属于一个 GitHub 组织，经它只能使用你在该组织内的权限，而你在该组织还没有可访问的项目。请改用其他机器人，或请组织管理员为你授权。';
   if(/binding|principal_inactive/.test(code))return '当前飞书身份尚未有效绑定，请在私聊发送“绑定”或“重新认证”。';
   if(/forbidden|scope|required.*permission/.test(code))return '当前账户或会话没有访问此对象或执行此操作的权限，请检查身份与权限。';
   if(/revision_conflict/.test(code))return '对象已被其他操作更新，请重新查询并确认后再修改。';

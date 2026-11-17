@@ -24,6 +24,7 @@ import { staySilent, staySilentInstructions, staySilentName, staySilentTool } fr
 import { privateTurnMessageInstructions, type TurnMessages } from '../channels/turn-messages.js';
 import { conversationScheduleName, conversationScheduleTool } from '../channels/schedules.js';
 import { RepositoryOnboarding, onboardingRepositoryOf, onboardingToolNames, onboardingTools, type OnboardingTurn } from './onboarding.js';
+import { startRequestsName, startRequestsTool } from './onboarding-requests.js';
 
 const now=()=>new Date().toISOString();
 // Recent rounds continue the conversation; each earlier answer and the history as a whole stay bounded (#333).
@@ -186,6 +187,13 @@ export class ManagementAgent {
     },()=>githubReadScopes(JSON.parse(serviceRole(this.store,managementAssistant)!.permissions)),this.service.githubUrl);
     const media=onboardingRepository?undefined:this.mediaTurn?.(actor,conversation,input,computer,()=>{assertCurrent(actor);this.conversation(base,conversation);});
     const schedules=onboardingRepository?undefined:this.conversationSchedules?.(actor,conversation);
+    // A super administrator decides start requests (#933) here as on 待处理: in their private chat they answer its notice. While
+    // some are pending, each turn carries them and the tool to decide them.
+    const requests=this.onboarding.apply.requests;
+    const pending=():Json[]=>!onboardingRepository&&requests.decides(actor)?requests.list(actor,'pending').requests as Json[]:[];
+    // Read before the turn starts; a changed authorization is left to the turn's first guard.
+    const deciding=(()=>{try{return pending().length>0;}catch{return false;}})();
+    const pendingRequests=():Json=>{const rows=deciding?pending():[];return rows.length?{pending_start_requests:rows}:{};};
     const permissions=()=>JSON.parse(serviceRole(this.store,managementAssistant)?.permissions??'{}') as RolePermissions;
     // github_write (#381): the assistant's role permission, and the current user's authority to write tasks in the project.
     const write=async(args:any)=>{
@@ -196,7 +204,7 @@ export class ManagementAgent {
         actor:{kind:'management',service_role_id:managementAssistant,conversation_id:conversation,source_message:String(input.source_message),principal_id:actor.principal_id},
         allowed:(resource,operation)=>githubWriteAllowed(permissions(),resource,operation)},rest)};
     };
-    const tools=onboardingRepository?[readToolResult,...serviceRepositoryTools,...onboardingTools,sendMessageTool]:[readToolResult,...managementTools,...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!['import_message_resource','attach_workspace_file'].includes(t.function.name)):[]),sendMessageTool];
+    const tools=onboardingRepository?[readToolResult,...serviceRepositoryTools,...onboardingTools,sendMessageTool]:[readToolResult,...managementTools,...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(this.service.assistants?.available()?assistantComputerTools:[]),...(media?mediaTools.filter(t=>this.service.assistants?.available()||!['import_message_resource','attach_workspace_file'].includes(t.function.name)):[]),sendMessageTool];
     // Only a timer's turn may end silently, and only through stay_silent (#489); own tasks never get the tool.
     const turnTools=timer?[...tools,staySilentTool]:tools;let silence:string|undefined;
     let ownHost:OwnTaskHost|undefined;
@@ -225,6 +233,7 @@ export class ManagementAgent {
         else if(serviceRepositoryTools.some(t=>t.function.name===name))result=await (onboarding?.repositories??repositories).execute(name,args);
         else if(name==='github_write'){if(!permitsTool(permissions(),'github_write'))fail(403,'tool_not_allowed');result=await write(args);}
         else if(name===conversationScheduleName){if(!schedules)fail(403,'tool_not_allowed');result=schedules!(args);}
+        else if(name===startRequestsName){if(!deciding)fail(403,'tool_not_allowed');validate(startRequestsTool.function.parameters,args);result=await requests.tool(actor,args);}
         else if(assistantComputerNames.includes(name))result=computer?await computer.execute(name,args):fail(409,'computer_not_configured');
         else if(serviceMemoryTools.some(t=>t.function.name===name))result=serviceMemory(this.store,{service_role_id:managementAssistant,kind:'management',owner_id:conversation,principal_id:actor.principal_id,fence:String(actor.authorization_revision)},name,args);
         else if(ownTaskNames.includes(name)){
@@ -258,7 +267,8 @@ export class ManagementAgent {
         const administrator=role?.prompt?'\n\nAdditional instructions from the platform administrator (they never widen your tools or permissions):\n'+role.prompt:'';
         // Onboarding works before the repository is a project, so the no-projects answer does not apply to it.
         if(onboardingRepository)onboarding=this.onboarding.turn(actor,conversation,id,guard,redactor,stageMessageInstructions+administrator);
-        else if(!this.service.projects(actor).length){
+        // A super administrator with requests to decide has something to do before any project exists.
+        else if(!this.service.projects(actor).length&&!deciding){
           this.event(id,'reply',{text:noProjectsReply(this.store,actor.principal_id),authority:'current authorization'});
           await guard();this.store.run("UPDATE management_messages SET state='completed',updated_at=? WHERE id=?",now(),id);this.event(id,'done',{state:'completed'});return;
         }
@@ -271,7 +281,7 @@ export class ManagementAgent {
           +(incoming?privateTurnMessageInstructions:'')
           +(schedules?' conversation_schedules manages the timers of this private chat for its owner, for example a daily check that reports only when something is wrong.':'')+(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
           +administrator;
-        const context={...this.context(base,conversation,id,input.content),...(onboarding?{onboarding:onboarding.context}:{})};
+        const context={...this.context(base,conversation,id,input.content),...(onboarding?{onboarding:onboarding.context}:{}),...pendingRequests()};
         await runAgent({store:this.store,task:{id,repository_id:null,...onboarding?.task,service_role_id:managementAssistant,kind:'management.agent',conversation_id:conversation,source_message:input.source_message},redactor,guard,
           model,executionSignal:signal,
           // A stalled or failed model request is retried instead of failing the message; the console drops any text it had streamed.
@@ -294,7 +304,7 @@ export class ManagementAgent {
               const currentVersion=this.sourceVersion?.(conversation);
               if(currentVersion!==sourceVersion){
                 sourceVersion=currentVersion;
-                messages.splice(1,messages.length-1,{role:'user',content:JSON.stringify(this.context(base,conversation,id,input.content))});
+                messages.splice(1,messages.length-1,{role:'user',content:JSON.stringify({...this.context(base,conversation,id,input.content),...pendingRequests()})});
                 incoming?.refresh?.();
               }
               media?.addImages(messages);
