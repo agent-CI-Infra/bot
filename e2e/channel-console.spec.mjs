@@ -353,6 +353,33 @@ test('a refused Feishu name is read once, not on every redraw, and the button st
   } finally { await f.close(); }
 });
 
+// #870: the personal binding row on this page is the third automatic entry: it reads a missing name on its own, so it
+// has to remember a refusal too. `profileRequests` counts the provider lookups the server made on the page's behalf.
+test('a refused Feishu personal name is read once, not on every redraw of the binding page', async ({ page }) => {
+  const f = await channelFixture(), errors = []; page.on('pageerror', error => errors.push(error.message));
+  try {
+    // Only a binding in the robot's own enterprise reads names (`can_read_name`).
+    f.h.store.run("UPDATE external_identities SET external_tenant='install-tenant' WHERE connector LIKE ?", f.id + ':%');
+    f.wire.state.profileCode = 99991672;
+    await page.setViewportSize({ width: 1440, height: 1000 }); await login(page, f, '#/identity/feishu');
+    const row = page.getByRole('article', { name: '我的飞书账号' });
+    await expect(row).toContainText('飞书暂未提供姓名');
+    const first = f.wire.state.profileRequests.length;
+    expect(first).toBeGreaterThan(0);
+    await page.evaluate(() => { location.hash = '#/projects'; });
+    await page.evaluate(() => { location.hash = '#/identity/feishu'; });
+    await page.waitForTimeout(500);
+    expect(f.wire.state.profileRequests.length, 'a redraw does not ask the provider again').toBe(first);
+    // The redrawn row starts from its resting copy; the refusal text of the earlier draw is not carried over.
+    await expect(row).toContainText('飞书姓名暂不可读取');
+    f.wire.state.profileCode = 0; f.wire.state.profileName = '张小明';
+    await row.getByRole('button', { name: '刷新飞书姓名', exact: true }).click();
+    await expect(row).toContainText('张小明');
+    expect(f.wire.state.profileRequests.length, 'the reader can still retry by hand').toBe(first + 1);
+    expect(errors).toEqual([]);
+  } finally { await f.close(); }
+});
+
 for (const width of [1440, 390]) test(`a platform administrator reads another user's complete private conversation at ${width}px`, async ({ page }) => {
   const f = await channelFixture(), errors = []; page.on('pageerror', error => errors.push(error.message));
   try {

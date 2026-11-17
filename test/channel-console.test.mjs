@@ -259,9 +259,24 @@ test('platform managers read another owner’s complete private history across a
 // #870: a missing Feishu name used to be looked up again on every draw, because the only state the console kept was the
 // render it started in. The page is driven here as the browser runs it (`static/channels.js` in the console sandbox), so
 // the number that counts is the provider-side one: each POST the page starts reaches the fixture's Feishu transport.
-const drawSettled = () => new Promise(resolve => setTimeout(resolve, 40));
-const consoleAgainst = f => loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/channels.js'],
-  async (method, path, body) => { const response = await f.admin(path, method, body); return [response.status, response.value]; });
+// What the page decides, counted on the page's own side: a slow fixture cannot hide a lookup it started, and a redraw
+// that starts none leaves the number where it was.
+const nameLookups = page => page.run('globalThis.__nameLookups.length');
+const settle = async page => {
+  let last = -1, quiet = 0;
+  while (quiet < 5) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const now = nameLookups(page);
+    if (now === last) quiet += 1; else { quiet = 0; last = now; }
+  }
+  return last;
+};
+const consoleAgainst = f => {
+  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/channels.js'],
+    async (method, path, body) => { const response = await f.admin(path, method, body); return [response.status, response.value]; });
+  page.run('globalThis.__nameLookups = []; const countedNameRequest = channelNameRequest; channelNameRequest = route => { globalThis.__nameLookups.push(route); return countedNameRequest(route); };');
+  return page;
+};
 // The reader of a console page: the fixture's own session, as the console script's `api()` asks it.
 const signInSandbox = page => page.run("me = { role: 'super_admin', csrf_token: 'fixture-csrf' }; renderVersion = 0;");
 
@@ -272,18 +287,20 @@ test('a refused name lookup is tried once per chat, not on every redraw, and the
   const page = consoleAgainst(f), profile = JSON.stringify({ ...chat, can_refresh_name: true });
   signInSandbox(page);
   page.run(`var chat = ${profile};`);
-  const draw = async () => { page.run('renderVersion++; var box = channelProfileDetails(chat)'); await drawSettled(); };
+  const draw = async () => { page.run('renderVersion++; var box = channelProfileDetails(chat)'); await settle(page); };
   await draw();
-  assert.equal(f.wire.state.chatRequests.length, 1, 'the first draw reads the missing name once');
+  assert.equal(nameLookups(page), 1, 'the first draw reads the missing name once');
+  await until(() => f.wire.state.chatRequests.length, count => count >= 1);
   await draw(); await draw();
-  assert.equal(f.wire.state.chatRequests.length, 1, 'redrawing the same chat does not ask the provider again');
+  assert.equal(nameLookups(page), 1, 'redrawing the same chat does not ask the provider again');
   const refresh = page.run('box.children.find(node => node.tagName === "BUTTON")');
   assert.ok(refresh, 'the details still offer the reader a retry');
   refresh.listeners.click[0]();
-  await drawSettled();
-  assert.equal(f.wire.state.chatRequests.length, 2, 'the reader can still retry by hand');
+  await settle(page);
+  assert.equal(nameLookups(page), 2, 'the reader can still retry by hand');
+  await until(() => f.wire.state.chatRequests.length, count => count >= 2);
   await draw();
-  assert.equal(f.wire.state.chatRequests.length, 2, 'and that failed retry is remembered too');
+  assert.equal(nameLookups(page), 2, 'and that failed retry is remembered too');
 });
 
 test('the group bindings section does not name every group again on each redraw (#870)', async t => {
@@ -294,10 +311,32 @@ test('the group bindings section does not name every group again on each redraw 
   signInSandbox(page);
   page.run(`var groupData = ${JSON.stringify(data)};`);
   await page.run('buildGroupBindingsSection(groupData)');
-  await drawSettled();
-  assert.equal(f.wire.state.chatRequests.length, 1, 'the settings section reads the missing name once');
+  await settle(page);
+  const attempts = nameLookups(page);
+  assert.ok(attempts > 0, 'the settings section reads the missing name');
+  await until(() => f.wire.state.chatRequests.length, count => count >= 1);
+  const requests = f.wire.state.chatRequests.length;
   page.run('renderVersion++; buildGroupBindingsSection(groupData, { initialOpen: true })');
-  await drawSettled();
-  assert.equal(f.wire.state.chatRequests.length, 1, 'and a redraw of the section does not read it again');
+  await settle(page);
+  assert.equal(nameLookups(page), attempts, 'and a redraw of the section does not read any name again');
+  assert.equal(f.wire.state.chatRequests.length, requests, 'so the provider is not asked again either');
+});
+
+// #870: the personal binding row on the Feishu page is a third automatic entry: it enqueues its own refresh when the
+// name is missing, and that entry has to remember a refusal as well.
+test('the personal Feishu binding row reads a refused name once, not on every redraw (#870)', async t => {
+  const f = await channelFixture(t);
+  // Only a binding in the robot's own enterprise reads names (`can_read_name`); console tests bind there too.
+  f.h.store.run("UPDATE external_identities SET external_tenant='install-tenant' WHERE connector LIKE ?", f.id + ':%');
+  f.wire.state.profileCode = 99991672; // the app is missing the contact scope, so the provider refuses every lookup
+  const page = consoleAgainst(f);
+  signInSandbox(page);
+  const draw = async () => { page.run('renderVersion++; renderFeishuBindingsPage(document.getElementById("identity-feishu"), () => true)'); await settle(page); };
+  await draw();
+  assert.equal(nameLookups(page), 1, 'the first draw reads the missing personal name once');
+  await until(() => f.wire.state.profileRequests.length, count => count >= 1);
+  await draw();
+  assert.equal(nameLookups(page), 1, 'redrawing the page does not look the refused name up again');
+  assert.equal(f.wire.state.profileRequests.length, 1, 'and the provider is not asked a second time');
 });
 
