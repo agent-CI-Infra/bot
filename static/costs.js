@@ -47,13 +47,22 @@ function costChartValue(row,tokens) {
   if(!tokens)return row.cost||0;
   return row.input_tokens==null&&row.output_tokens==null?null:(row.input_tokens??0)+(row.output_tokens??0);
 }
+function costRangeValid() {
+  return /^\d{4}-\d{2}-\d{2}$/.test(costState.from) && /^\d{4}-\d{2}-\d{2}$/.test(costState.to) && costState.from <= costState.to;
+}
+function incompleteCostRange() {
+  costRequest++; // An older response must not replace the explanation for the edited range.
+  $('count').textContent='未查询';
+  $('cost-body').replaceChildren(consoleState('请填写有效日期范围','开始日期与结束日期都必填，且开始日期不能晚于结束日期。填写后点击「查看统计」。'));
+}
 async function renderCosts(request) {
   const owner=me.id,panel=$('costs-panel');panel.replaceChildren();
   if(costState?.owner!==owner){const to=timestamp(Date.now()).slice(0,10);costState={owner,to,from:new Date(Date.parse(to+'T00:00:00Z')-29*86400000).toISOString().slice(0,10),currency:'USD'};}
   const form=element('form','','cost-filters');
   for(const [name,caption]of [['from','开始日期（本地）'],['to','结束日期（本地）']]){
     const input=document.createElement('input');Object.assign(input,{name,type:'date',required:true,value:costState[name]});
-    input.addEventListener('input',()=>{costState[name]=input.value;}); input.addEventListener('change',()=>{costState[name]=input.value;});
+    const edit=()=>{costState[name]=input.value;if(!costRangeValid())incompleteCostRange();};
+    input.addEventListener('input',edit); input.addEventListener('change',edit);
     form.append(costControl(caption,input));
   }
   const currency=document.createElement('select');currency.name='currency';currency.setAttribute('aria-label','费用币种');
@@ -65,6 +74,7 @@ async function renderCosts(request) {
   await loadCosts(request);
 }
 async function loadCosts(version) {
+  if(!costRangeValid()){incompleteCostRange();return;}
   const request=++costRequest,owner=me.id,params=new URLSearchParams({from:costState.from,to:costState.to,currency:costState.currency,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone});if(projectRoute()?.id)params.set('repository_id',projectRoute().id);
   $('cost-body').replaceChildren(consoleState('正在加载统计','正在按当前筛选读取用量。',{tone:'loading'}));
   let data;

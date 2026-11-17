@@ -4,7 +4,7 @@
 const managementAccessHints = {
   scope_forbidden: '当前范围里没有已启动、且你有权管理的项目，所以还不能使用管理助手。请改选上面的项目，或先到项目列表、身份与权限查看项目是否已启动。',
   capability_forbidden: '当前账号没有使用管理助手所需的权限。请联系管理员，或到「身份与权限」查看授权。',
-  tenant_forbidden: '当前组织范围与这个项目不一致。请在「身份与权限」切换组织后再试。',
+  tenant_forbidden: '当前身份不能在这个范围管理项目。请在「身份与权限」核对有效授权后再试。',
   project_scope_mismatch: '这个项目不在当前选定的范围内。请改选范围后再试。',
   authorization_changed: '权限已变化，请刷新页面后按当前权限重试。',
   login_required: '登录已失效，请重新登录。',
@@ -63,7 +63,7 @@ function receiptSourceLine(receipt) {
   const line = element('span', ''); line.dataset.receiptSource = '';
   line.append(element('code', receipt.source_conversation), document.createTextNode(' · 消息 '),
     element('code', receipt.source_message || '未记录'), document.createTextNode(' '),
-    managementReceiptLink('#/management', '回到管理会话'));
+    managementReceiptLink(consolePageAddress('management', receipt.project_id || null), '回到管理会话'));
   return line;
 }
 async function renderManagementReceiptPage(id) {
@@ -71,7 +71,7 @@ async function renderManagementReceiptPage(id) {
   // A completed render of this id is already on screen: show it instead of reading the same receipt again.
   if (receiptShownId === id) { page.hidden = false; return; }
   page.hidden = false;
-  const back = element('a', '返回管理助手'); back.href = '#/management'; nav.replaceChildren(back);
+  const back = element('a', '返回管理助手'); back.href = consolePageAddress('management'); nav.replaceChildren(back);
   content.replaceChildren(element('p', '正在加载命令回执…', 'muted'));
   let receipt;
   try {
@@ -94,6 +94,7 @@ async function renderManagementReceiptPage(id) {
     return;
   }
   if (page.hidden) return;
+  back.href = consolePageAddress('management', receipt.project_id || null);
   if (receipt.project_id) {
     const roles = element('a', '项目配置'); roles.href = '#/projects/' + receipt.project_id + '/roles';
     const activity = element('a', '任务'); activity.href = '#/projects/' + receipt.project_id + '/activity';

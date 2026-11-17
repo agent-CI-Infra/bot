@@ -1,17 +1,19 @@
 
 // Commands still use durable, versioned management messages. History and reconnect only read events.
 async function renderManagement(panel, projectId = null, onActivity = () => {}, { signal } = {}) {
-  const endpoint = '/api/management', user = me.id;
-  const projects = (await api(endpoint + '/query', 'POST', { operation: 'list_projects', target: {}, arguments: { limit: 100 } }, { signal })).projects;
+  const endpoint = '/api/management', user = me.id, requestedProject = projectId || consoleScope();
+  const projects = (await api(endpoint + '/query', 'POST', { operation: 'list_projects', target: requestedProject ? { project_id: requestedProject } : {}, arguments: { limit: 100 } }, { signal })).projects;
   if (!panel.isConnected || me?.id !== user) return null;
   panel.replaceChildren(); panel.className = 'management-panel';
   const header = element('div', '', 'management-scope');
-  let scope = (projectId || consoleScope()) ? 'project:' + (projectId || consoleScope()) : 'platform';
+  let scope = requestedProject ? 'project:' + requestedProject : 'platform';
   const conversationKey = () => 'management-conversation:' + user + ':' + scope;
   const stored = key => { try { return localStorage.getItem(key); } catch { return null; } };
   const remember = (key, value) => { try { localStorage.setItem(key, value); } catch { /* Session still works when storage is disabled. */ } };
-  const available = value => value === 'platform' || projects.some(project => 'project:' + project.id === value);
-  const scopeName = value => value === 'platform' ? '全部项目' : projects.find(project => 'project:' + project.id === value)?.full_name;
+  // The directory names projects; it is not the authorization boundary. Conversation reads/creation check each scope.
+  const scopeProject = value => projects.find(project => 'project:' + project.id === value) || repositories.find(project => 'project:' + project.id === value);
+  const available = value => value === 'platform' || !!scopeProject(value);
+  const scopeName = value => value === 'platform' ? '全部项目' : scopeProject(value)?.full_name;
   if (!available(scope)) throw Object.assign(new Error('当前账号无权管理这个项目。'), { code: 'scope_forbidden' });
   const scopeLabel = element('strong', scopeName(scope), 'management-scope-name'); scopeLabel.dataset.scope = scope;
   const toolsButton = button('快捷操作', () => showTools(!toolsOpen), 'quiet'); toolsButton.setAttribute('aria-expanded', 'false'); toolsButton.setAttribute('aria-controls', 'management-tools');

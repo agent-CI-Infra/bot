@@ -19,9 +19,10 @@ async function floatManagementPage() {
   // from a resize handle or another control the person has started using in the meantime.
   chat.openVersion++; setManagementPresentation(chat, 'floating'); chat.client?.focus();
   const scope = consoleScope(), previous = projectRoute(chat.returnAddress), page = addressTab(chat.returnAddress);
-  // Changing presentation keeps the current conversation. Restore the underlying page type in the current scope.
+  // Preserve the exact item or pagination when scope is unchanged; only a scope switch needs a new destination.
   const section = projectConsolePages.includes(page) ? page : previous?.section || 'projects';
-  const destination = consoleAddressScope(chat.returnAddress) === undefined ? chat.returnAddress
+  const returnScope = consoleAddressScope(chat.returnAddress);
+  const destination = returnScope === undefined || returnScope === scope ? chat.returnAddress
     : scope ? consolePageAddress(section, scope) : consolePageAddress(projectConsolePages.includes(section) ? section : 'projects', null);
   history.replaceState(null, '', destination); await route();
 }
