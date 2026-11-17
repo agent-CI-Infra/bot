@@ -26,7 +26,8 @@ const sdk = existsSync('runner/node_modules/@earendil-works/pi-coding-agent/pack
 const skipPi = !sdk && process.env.BOT_REQUIRE_PI !== '1' ? 'Pi SDK not installed' : false;
 const call = (name, args) => ({ role: 'assistant', content: null, tool_calls: [{ id: 'call_' + randomBytes(6).toString('hex'), type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
 const pass = { outcome: 'pass', reason: 'Verified command observations', gaps: [], residuals: [], core_complete: true, required_evidence_complete: true, acceptable_risk: true };
-const review = { summary: 'Observed commands', findings: [] };
+// A review that may label returns labels (#1026); Pi checks the required fields of finish_review.
+const review = { summary: 'Observed commands', findings: [], labels: [] };
 const findings = { summary: 'Observed commands', findings: [], unknowns: [], inspected_scope: ['fixture'] };
 const commandArgs = [{ command: 'printf default' }, { command: 'printf explicit', timeout_seconds: 400, keep_background: true }, { command: 'printf capped', timeout_seconds: 900 }];
 const receipts = body => body.messages.filter(m => m.role === 'tool').map(m => JSON.parse(typeof m.content === 'string' ? m.content : m.content.map(c => c.text ?? '').join('')));

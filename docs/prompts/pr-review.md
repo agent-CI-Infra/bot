@@ -62,7 +62,24 @@ blocking the PR on.
 - significant performance regressions: accidental quadratic work, N+1 calls, blocking hot paths
 
 Do not report style, naming, formatting, comment or documentation wording, missing tests on their
-own, or "consider adding" ideas with no concrete failure.
+own (except as described below), or "consider adding" ideas with no concrete failure.
+
+## Whether the implementation is right
+
+Correct code can still be the wrong change. Read the PR description and the Issues it links or
+fixes (through the GitHub API) and report, each with its concrete consequence:
+
+- **Goal**: a requirement of the linked Issue or the description that the change does not meet, or
+  work nobody asked for.
+- **Fit**: an existing abstraction bypassed, an existing function reimplemented (cite it with
+  `path:line`), or logic in the wrong layer, so that copies drift apart or a contract breaks.
+- **Simpler way**: a clearly simpler or less risky approach, only when you can say what it saves.
+- **Proof**: no test would fail without the fix the PR claims; report it although missing tests
+  alone are not reported.
+
+A requirement left out of an Issue the PR says it fixes (`Fixes #N`) is `high` and `must-fix`; the
+others are usually `medium` suggestions. A PR that does what it should, the way the repository
+already does it, gets no finding here.
 
 ## Severity and disposition
 

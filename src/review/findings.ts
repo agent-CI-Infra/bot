@@ -1,9 +1,12 @@
 import { stop } from '../agent/common.js';
 export const retiredReviewFields = ['requires_code_change', 'issue_requests_code', 'clarification_required', 'implementation_goal', 'request_quote'];
+/** The conclusions of an Issue review (#1026), defined in docs/prompts/issue-review.md. */
+export const reviewConclusions = ['ready_for_development', 'needs_information', 'human_decision_required', 'no_code_change'] as const;
 export function validateReview(value: any) {
   if (value?.product_defect !== undefined && typeof value.product_defect !== 'boolean') stop('model_review_invalid');
   if (!value || typeof value.summary !== 'string' || value.summary.length > 16000 || !Array.isArray(value.findings) || value.findings.length > 100
     || value.recommendation !== undefined && (typeof value.recommendation !== 'string' || value.recommendation.length > 2000) || value.event !== undefined
+    || value.conclusion !== undefined && !(reviewConclusions as readonly unknown[]).includes(value.conclusion)
     || value.labels !== undefined && (!Array.isArray(value.labels) || value.labels.length > 20 || value.labels.some((l: unknown) => typeof l !== 'string' || l.length > 50))) stop('model_review_invalid', undefined, '检视结果的必填字段、类型或长度无效，请检查 finish_review 输出格式。');
   for (const finding of value.findings) if (!finding || typeof finding.body !== 'string' || finding.body.length > 16000 || !['discussion','inline'].includes(finding.format)
     || typeof finding.selection_reason !== 'string' || finding.selection_reason.length > 2000 || finding.event !== undefined) stop('model_finding_invalid', undefined, '检视意见的正文、位置类型或选择原因格式无效，或包含不允许的 event 字段。');

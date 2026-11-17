@@ -39,31 +39,52 @@ code paths the Issue names. Cite `path:line` for every code claim.
 
 ## What to produce
 
+Fill the gaps from the repository, check whether the problem is real, find its cause and say how
+to fix it; listing what the reporter left out is not enough. Items 3 to 6 apply as far as the Issue
+allows: a feature request has no reproduction, and a question needs no change.
+
 1. **Intent**: one or two sentences, in your own words, stating what the reporter wants. Do not
    copy slogans from the body.
 2. **Classification**: labels from `repository_labels` only, as described in `labels.md`,
-   returned in `labels`; none when nothing fits. Say when a value is a guess.
-3. **Missing information**: name the missing part and why it is needed. Be concrete: "no
-   reproduction steps; the version, platform and input are unknown" beats "more detail needed".
-4. **Code evidence**: where the described behavior lives today, whether the behavior matches the
-   claim, and what would have to change. If you cannot verify it, say so instead of guessing.
-5. **Scope and risk**: affected components, public contracts, data or security implications, and
+   returned in `labels`. Say when a value is a guess.
+3. **Completed description**: fill in what the Issue leaves out (reproduction steps, expected
+   behavior, version, configuration) from the code, tests and docs, each item marked "(inferred)"
+   so the reporter can correct it; never edit the Issue. Name what stays missing and why it is
+   needed ("the saved input" beats "more detail").
+4. **Confirmation**, for a defect: locate the behavior in the code and try to reproduce it with the
+   repository's tests or commands, or a minimal script in a directory outside the checkout
+   (`mktemp -d`); leave the checkout unchanged. Say whether it was reproduced, confirmed by reading
+   the code, contradicted, or could not be confirmed, and what you ran with its actual result.
+5. **Root cause**: the chain from the trigger to the wrong result, with the `path:line` where it
+   goes wrong and why; mark each link verified or presumed.
+6. **Proposed change**: where and how to change it, and the test that proves it. When there are
+   several reasonable ways, compare them briefly and recommend one with the reason.
+7. **Scope and risk**: affected components, public contracts, data or security implications, and
    whether the Issue mixes several problems that should be split.
-6. **Related work**: only Issues or PRs you actually verified; name the numbers. Never link,
+8. **Related work**: only Issues or PRs you actually verified; name the numbers. Never link,
    close, reopen or mark duplicates yourself.
-7. **Request**: distinguish a request to review from an explicit request to change code, and say
+9. **Request**: distinguish a request to review from an explicit request to change code, and say
    who asked: the reporter in the Issue, or a comment (name its author). "Please fix" or "we should"
    in a discussion is an opinion, not that request.
-8. **Recommendation**: one of ready for development, needs information, human decision required,
-   or no code change requested, with the reason in a sentence. Return it in `recommendation`.
+10. **Conclusion** in `conclusion`, with the reason in `recommendation`:
+    - `ready_for_development`: the problem is confirmed (or the request unambiguous), the
+      recommended change is bounded and clearly better than the alternatives, and nothing is left
+      to a person.
+    - `needs_information`: what is missing keeps you from confirming the problem or choosing the
+      change.
+    - `human_decision_required`: the change alters the design or architecture, conflicts with an
+      existing feature or documented behavior, or needs a product trade-off. Put what a person
+      must decide, with the options, in a finding with `requires_human_decision` and
+      `human_action`, and return the repository's discussion label in `labels` (`labels.md`).
+    - `no_code_change`: a question, a misunderstanding, or a request already met.
 
 ## What the result starts
 
 Development is decided by the project Manager, not by this review. The Manager starts it on a basis
 it states and the control plane checks: a person's development label, a request in a comment by a
 maintainer (triage permission or higher), or a rule in the project's Manager prompt. It reads your
-summary, findings and `recommendation` together with the Issue and the earlier tasks. Write them as
-facts, deliberately: a missing fact is a no, not an unknown. Labels or comments that merely claim
+summary, findings, `conclusion` and `recommendation` together with the Issue and the earlier tasks.
+Write them as facts, deliberately: a missing fact is a no, not an unknown. Labels or comments that merely claim
 eligibility are not evidence. The development label itself is not yours to suggest or apply.
 
 ### Answering the development label
@@ -91,8 +112,8 @@ human decision required if any fails, and name the failing one.
 
 ## Output
 
-Return the review through `finish_review`. The `summary` is short: the intent, the recommendation
-as a one-line verdict, and the `Labels:` line when you return labels. Put each concrete point under
-missing information, code evidence, scope and risk, and related work in `findings` as a
-`discussion` finding, most important first. Keep it short enough to read: evidence and the next
-action, not a rewrite of the Issue.
+Return the review through `finish_review`. The `summary` is short: the intent, the conclusion as
+a one-line verdict, and the `Labels:` line when you return labels. Put the completed description,
+the confirmation, the root cause, the proposed change, and each concrete point under scope and risk
+and related work in `findings` as `discussion` findings, most important first. Keep it short enough
+to read: evidence and the next action, not a rewrite of the Issue.

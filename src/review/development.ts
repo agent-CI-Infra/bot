@@ -70,7 +70,7 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
   if(!policy?.enabled||!covers(projectCeiling(context.store,task.repository_id,policy),'develop'))return;
   const filters=eventFilters(context.store,task.repository_id,policy),number=task.object_number;
   const facts={review_task:task.id,object:{number,title:String(input.object?.title||'').slice(0,300),url:input.object?.html_url??null},
-    review:{summary:String(result.summary||'').slice(0,1500),...(result.recommendation?{recommendation:String(result.recommendation).slice(0,1500)}:{}),
+    review:{summary:String(result.summary||'').slice(0,1500),...(result.recommendation?{recommendation:String(result.recommendation).slice(0,1500)}:{}),...(result.conclusion?{conclusion:result.conclusion}:{}),
       actionable_findings:(result.findings||[]).filter(actionableFinding).length}};
   // A review publishes once, in the transaction that ends it, so each call is one publication of its own.
   const published=randomId().slice(0,16);
