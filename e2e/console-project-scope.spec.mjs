@@ -42,7 +42,7 @@ async function ready(page, name, id) {
     await expect(page.getByRole('button', { name: '发送', exact: true })).toBeEnabled();
   }
   else if (id) {
-    await expect(page.locator('#console-page h1')).toHaveText(`在 fixture/project-${id} 新建任务`);
+    await expect(page.locator('#console-page h1')).toHaveText('新建任务');
     await expect(page.locator('.task-create-form [name=request]')).toBeEnabled();
   }
   else await expect(page.getByRole('button', { name: '任务项目（必填）', exact: true })).toBeVisible();

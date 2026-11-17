@@ -32,7 +32,7 @@ test('自动停下的任务不算需要处理：看板列、总览与待处理�
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.locator('#tabs').getByRole('button', { name: '任务看板', exact: true }).click();
+    await page.locator('#tabs').getByRole('link', { name: '任务看板', exact: true }).click();
     await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
     // #826: an open draft that was auto-stopped is 已停止, not 未检视, without needing 含已关闭.
     await expect(page.locator('[data-column-id=stopped] [data-card-key="101/issue/9"][data-card-category="review.issue"]')).toBeVisible();

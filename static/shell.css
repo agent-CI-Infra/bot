@@ -112,7 +112,7 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 .console-settings-nav { flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid var(--color-border); }
 #console-sidebar #tabs button, #console-sidebar .console-link { display: flex; align-items: center; width: 100%; min-height: var(--control-min); height: auto; padding: 10px 14px; border: 0; border-radius: var(--radius-control); color: var(--color-nav); background: transparent; text-align: left; text-decoration: none; font-size: var(--font-size-2); font-weight: 550; }
 #console-sidebar #tabs button:hover, #console-sidebar .console-link:hover { background: var(--color-hover); filter: none; }
-#console-sidebar #tabs button[aria-current=page], #console-secondary-nav .project-nav a[aria-current=page] { background: var(--color-brand-weak); color: var(--color-brand); border: 0; }
+#console-sidebar #tabs :is(button,a)[aria-current=page], #console-secondary-nav .project-nav a[aria-current=page] { background: var(--color-brand-weak); color: var(--color-brand); border: 0; }
 #console-secondary-nav { margin: 0 0 var(--space-5); }
 #console-secondary-nav .project-nav { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: 8px 12px; margin: 0; }
 #console-secondary-nav .project-nav .console-nav-label { margin: 0 4px 0 8px; padding: 0; font-size: var(--font-size-1); font-weight: 650; color: var(--color-text-muted); letter-spacing: .04em; }
@@ -291,7 +291,7 @@ body.console-ready .management-page { left: var(--console-rail); }
 .console-ready #identity .quiet { min-height: var(--control-min); }
 .console-ready #tabs button, .console-link { transition: background-color var(--motion-fast), color var(--motion-fast); }
 
-@media(max-width:767px) { body.console-ready.board-mode .console-location { display: none; } }
+@media(max-width:767px) { body.console-ready.board-mode .console-location:has(#console-section-label[hidden]) { display: none; } }
 /* A short viewport cannot hold the floating composer and a second fixed navigation bar. */
 @media(max-width:767px) and (max-height:560px) {
   body.console-ready:has(.management-window:not([hidden]):not(.management-page):not(.management-fullscreen)) { --console-mobile-height: 0px; }

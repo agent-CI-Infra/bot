@@ -18,7 +18,7 @@ test('GitHub 登录、组织切换、权限来源、撤销与本地恢复', asyn
     await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
     await expect(page.locator('#identity-panel')).toContainText('组织管理员');
     await expect(page.locator('#identity-panel')).toContainText('GitHub 当前权限（继承）');
-    await expect(page.getByRole('button', { name: '全局设置', exact: true })).toBeHidden();
+    await expect(page.getByRole('link', { name: '全局设置', exact: true })).toBeHidden();
     const principal = f.h.store.get("SELECT principal_id FROM external_identities WHERE provider='github'").principal_id;
     await f.admin('/api/project-admin-assignments', 'PUT', { user_id: principal, repository_ids: ['101'] });
     await page.reload(); await openIdentityAdvanced(page); await expect(page.locator('#identity-panel')).toContainText('手动分配');

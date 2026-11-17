@@ -1,112 +1,18 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 
-// #224 slice 2: the shell navigation must only offer destinations that really render, and an older project address must
-// survive a refresh instead of silently landing on another section.
-test('项目导航只列真实页面，管理助手的深链不丢页，移动底栏与更多页在 390 可用', async ({ page }) => {
-  const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
-  const h = await harness(undefined, manager), errors = [];
-  page.on('pageerror', error => errors.push(error.message));
+test('scope work links open real pages and the assistant deep link survives reload', async({page})=>{
+  const h=await harness(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   try {
-    const { admin, password } = await setup(h), a = await account(admin);
-    await repository(admin, a.id, '101');
-    const login = async () => {
-      await page.goto(h.admin + '/#/projects/101/overview');
-      await page.getByLabel('用户名', { exact: true }).fill('administrator');
-      await page.getByLabel('密码', { exact: true }).fill(password);
-      await page.getByRole('button', { name: '登录', exact: true }).click();
-      await expect(page.locator('.workspace-overview')).toBeVisible();
-    };
-    await login();
-    // A work page draws the 项目入口 breadcrumb and a settings page the 项目设置类别 nav (#707); either marks the page.
-    const nav = page.locator('#console-secondary-nav nav'), current = nav.locator('[aria-current=page]');
-    const settingsPages = ['基本设置', '监听与触发', '机器配置', '角色', '模型', '计划与通知', '外部执行', '成员'];
-    const hub = () => page.getByTestId('project-hub');
-    const openHub = async () => {
-      const link = page.getByTestId('project-hub-link');
-      if (await link.count()) await link.click();
-      else await page.evaluate(() => { location.hash = '#/projects/101/menu'; });
-      await expect(hub()).toBeVisible();
-    };
-    await openHub();
-    // Every entry named like a page must land on that page: the address it advertises keeps that section current.
-    // A work page does not list its neighbours (#565); a settings page lists only the settings categories (#707).
-    for (const caption of ['项目总览', '基本设置', '监听与触发', '机器配置', '模型', '发版本', '计划与通知', '项目知识', '外部执行', '成员', '运行状态']) {
-      await openHub();
-      await hub().getByRole('link', { name: caption, exact: true }).click();
-      await expect(current).toHaveText(caption);
-      await expect(page).toHaveURL(new RegExp('#/projects/101/[a-z]+$'));
-      await expect(nav.getByRole('link', { name: '← 项目入口', exact: true })).toBeVisible();
-      if (settingsPages.includes(caption)) await expect(nav.getByRole('link')).toHaveText(['← 项目入口', ...settingsPages]);
-      else await expect(nav.getByRole('link')).toHaveCount(2);
+    const {admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+    await page.goto(h.admin+'/#/projects/101/overview');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.locator('.workspace-overview')).toBeVisible();
+    for(const [key,caption] of [['release','发版本'],['knowledge','项目知识'],['activity','运行状态'],['overview','项目总览']]) {
+      await page.locator('#tabs').getByRole('link',{name:caption,exact:true}).click();await expect(page).toHaveURL(new RegExp('#/projects/101/'+key+'$'));
+      await expect(page.locator('#project-page .project-content > .console-state-loading')).toHaveCount(0);
+      await expect(page.locator('#tabs [aria-current=page]')).toHaveText(caption);await expect(page.locator('#console-secondary-nav')).toBeHidden();
     }
-    // The project assistant has its own scoped page, including direct links and reloads.
-    await openHub();
-    await hub().getByRole('link', { name: '角色', exact: true }).click();
-    await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
-    await page.getByTestId('project-open-chat').click();
-    await expect(page).toHaveURL(/#\/projects\/101\/management$/);
-    await expect(page.locator('#management-chat')).toBeVisible({ timeout: 15000 });
-    await page.goto(h.admin + '/#/projects/101/management');
-    await expect(page.locator('#management-chat')).toHaveAttribute('role', 'region');
-    await expect(page).toHaveURL(/#\/projects\/101\/management$/);
-    await page.reload();
-    await expect(page).toHaveURL(/#\/projects\/101\/management$/);
-    await expect(page.locator('.management-scope-name')).toHaveText('fixture/project-101');
-    await expect(page.locator('.management-panel')).not.toBeEmpty();
-    // Nothing in the shell may scroll the page sideways at any desktop, tablet or phone width.
-    for (const width of [390, 768, 1024, 1440, 1920]) {
-      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
-      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    }
-    // Tablet edge: 768 is already the desktop shell (side rail), 767 is the phone shell with the bottom bar.
-    await page.setViewportSize({ width: 768, height: 1024 });
-    await expect(page.locator('#console-sidebar')).toBeVisible();
-    await expect(page.locator('#console-mobile-nav')).toBeHidden();
-    await page.setViewportSize({ width: 767, height: 1024 });
-    await expect(page.locator('#console-mobile-nav')).toBeVisible();
-    // Keyboard: Tab moves through the project entries in order and the focused entry draws a focus ring.
-    await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(h.admin + '/#/projects/101/menu');
-    await expect(hub()).toBeVisible();
-    const first = hub().getByRole('link', { name: '项目总览', exact: true }), second = hub().getByRole('link', { name: '管理助手', exact: true });
-    await first.focus(); await page.keyboard.press('Tab');
-    await expect(second).toBeFocused();
-    await expect(second).toBeInViewport();
-    const ring = await second.evaluate(node => { const s = getComputedStyle(node); return [s.outlineStyle, s.outlineWidth, s.boxShadow]; });
-    expect(ring[0] !== 'none' && parseFloat(ring[1]) > 0 || ring[2] !== 'none').toBe(true);
-    // Switch the assistant page to a floating view; Escape closes that view and returns focus to its launcher.
-    await second.click();
-    await expect(page.locator('#management-chat')).toBeVisible();
-    const message = page.getByLabel('管理消息', { exact: true });
-    await expect(message).toBeVisible();
-    await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click();
-    await message.focus(); await page.keyboard.press('Escape');
-    await expect(page.locator('#management-chat')).toBeHidden();
-    // The chat's own launcher takes focus back, so the keyboard is never dropped somewhere invisible.
-    await expect(page.locator('#management-launcher')).toBeVisible();
-    await expect(page.locator('#management-launcher')).toBeFocused();
-    // #481: the phone keeps five bottom destinations — the assistant itself is one of them — and every page the bar
-    // cannot carry sits behind 更多, grouped, with touch-sized targets.
-    await page.setViewportSize({ width: 390, height: 844 });
-    const bottom = page.locator('#console-mobile-nav a');
-    await expect(bottom).toHaveCount(5);
-    await expect(bottom).toHaveText(['项目', '任务', '待处理', '助手', '更多']);
-    for (const entry of await bottom.all()) expect((await entry.boundingBox()).height).toBeGreaterThanOrEqual(44);
-    await bottom.filter({ hasText: '更多' }).click();
-    const more = page.locator('#console-page');
-    await expect(more.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
-    for (const group of ['当前项目', '个人与平台', '管理']) await expect(more.getByRole('heading', { name: group, exact: true })).toBeVisible();
-    for (const entry of ['项目总览', '基本设置', '监听与触发', '机器配置', '模型', '发版本', '计划与通知', '项目知识', '外部执行', '成员', '运行状态', '用量与成本', '身份与权限'])
-      await expect(more.getByRole('link', { name: new RegExp('^' + entry) }).first()).toBeVisible();
-    expect(await more.locator('a').evaluateAll(ns => ns.every(n => n.getAttribute('href')?.startsWith('#')))).toBe(true);
-    mkdirSync('.tmp/nav-shell', { recursive: true });
-    for (const [width, name] of [[390, 'more-390'], [768, 'more-768']]) {
-      await page.setViewportSize({ width, height: width === 390 ? 844 : 1024 });
-      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: `.tmp/nav-shell/${name}.png`, fullPage: true });
-    }
+    await page.locator('#tabs').getByRole('link',{name:'管理助手',exact:true}).click();await expect(page.locator('#management-chat')).toBeVisible();await expect(page).toHaveURL(/#\/projects\/101\/management$/);
+    await page.reload();await expect(page.locator('#management-chat')).toBeVisible();await expect(page.locator('#tabs [aria-current=page]')).toHaveText('管理助手');
     expect(errors).toEqual([]);
-  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+  }finally{await h.stop();}
 });

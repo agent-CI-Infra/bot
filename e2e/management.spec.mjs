@@ -115,7 +115,7 @@ test('global management chat keeps drafts and a running conversation across navi
     await expect(page.getByRole('button', { name: '停止', exact: true })).toBeVisible();
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
     await expect(launcher).toContainText('正在处理'); await expect(launcher).toHaveAccessibleName(/管理助手\s*正在处理/);
-    await page.locator('#tabs').getByRole('button', { name: '项目', exact: true }).click();
+    await page.locator('#tabs').getByRole('link', { name: '项目总览', exact: true }).click();
     release(); f.modelState.gate = null;
     await expect(launcher).toContainText('有新回复'); await expect(launcher).toHaveAccessibleName(/管理助手\s*有新回复/); await launcher.click();
     const feed = page.getByRole('log', { name: '管理会话记录' });
@@ -170,7 +170,7 @@ test('project chat links select the project, and a delayed old read cannot repla
     // The project entry opens its scoped assistant page and reuses the durable conversation.
     await page.evaluate(() => { location.hash = '#/projects/101/roles'; });
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
-    await page.getByTestId('project-open-chat').click();
+    await page.locator('#tabs').getByRole('link',{name:'管理助手',exact:true}).click();
     await expect(page).toHaveURL(/#\/projects\/101\/management$/); await expect(scope).toHaveAttribute('data-scope', 'project:101'); await expect(message).toHaveValue('101 的草稿');
     await switchConsoleProject(page, '102'); await expect(message).toHaveValue('102 的草稿');
     await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click();
@@ -180,7 +180,7 @@ test('project chat links select the project, and a delayed old read cannot repla
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
     await page.locator('#management-launcher').click();
     await expect(scope).toHaveAttribute('data-scope', 'project:101'); await expect(message).toHaveValue('101 的草稿');
-    await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click();
+    await page.locator('#tabs').getByRole('link', { name: '管理助手', exact: true }).click();
     await expect(scope).toHaveAttribute('data-scope', 'project:101'); await expect(message).toHaveValue('101 的草稿');
     await expect(page).toHaveURL(/#\/projects\/101\/management$/); await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible();
     await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click(); await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
@@ -288,7 +288,7 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await expect(page.getByRole('button', { name: '退出管理助手全屏', exact: true })).toBeFocused();
     await page.keyboard.press('Escape'); const restored = await chat.boundingBox();
     expect(Math.abs(restored.width - resized.width)).toBeLessThan(2); expect(Math.abs(restored.height - resized.height)).toBeLessThan(2);
-    await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click();
+    await page.locator('#tabs').getByRole('link', { name: '管理助手', exact: true }).click();
     await expect(page).toHaveURL(/#\/projects\/101\/management$/); await expect(page.locator('#tabs [aria-current=page]')).toHaveText('管理助手');
     await expect(chat).toHaveAttribute('role', 'region'); await expect(grip).toBeHidden(); await expect(launcher).toBeHidden();
     const pageBox = await chat.boundingBox(), header = await page.locator('body > header').boundingBox();
@@ -300,12 +300,12 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await page.getByRole('button', { name: '退出管理助手全屏', exact: true }).click(); await expect(chat).toHaveAttribute('role', 'region');
     await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click();
     await expect(page).toHaveURL(/#\/projects\/101\/overview$/); expect(Math.abs((await chat.boundingBox()).width - resized.width)).toBeLessThan(2);
-    await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click();
+    await page.locator('#tabs').getByRole('link', { name: '管理助手', exact: true }).click();
     await consoleNavigate(page, '身份与权限');
     await expect(chat).toBeHidden(); await launcher.click(); await expect(message).toHaveValue('保留这条尚未发送的草稿');
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
     expect(f.h.store.get("SELECT count(*) n FROM management_conversations WHERE scope='project:101'").n).toBe(1);
-    await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click(); await page.reload();
+    await page.locator('#tabs').getByRole('link', { name: '管理助手', exact: true }).click(); await page.reload();
     await expect(page).toHaveURL(/#\/projects\/101\/management$/); await expect(chat).toHaveAttribute('role', 'region');
     // Reload preserves the project address and its conversation.
     await expect(page.locator('.management-scope-name')).toHaveAttribute('data-scope', 'project:101');

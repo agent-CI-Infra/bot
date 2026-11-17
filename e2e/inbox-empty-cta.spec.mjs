@@ -62,7 +62,7 @@ test('待处理为空时给出查看看板和新建任务的下一步（#690）'
     await page.screenshot({ path: '.tmp/inbox-empty-690/empty-101-1440.png' });
     await newTask.click();
     await expect(page).toHaveURL(/#\/projects\/101\/new-task$/);
-    await expect(page.locator('#console-page h1')).toHaveText('在 fixture/project-101 新建任务');
+    await expect(page.locator('#console-page h1')).toHaveText('新建任务');
     await expect(page.getByRole('button', { name: '提交任务', exact: true })).toBeEnabled();
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
