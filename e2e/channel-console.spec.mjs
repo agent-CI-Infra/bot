@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { openProjectDanger } from './open-basic-folds.mjs';
 import { mkdirSync } from 'node:fs';
@@ -168,7 +169,7 @@ test('settings keep platform mutations in global settings and project administra
     await page.getByRole('button', { name: '登录', exact: true }).click(); await page.goto(f.h.admin + '/#/preferences');
     await expect(page.locator('#tabs [data-tab=preferences]')).toHaveText('个人设置');
     await expect(page.locator('#tabs [data-tab=settings]')).toBeHidden();
-    await page.getByLabel('切换项目').selectOption('101');
+    await switchConsoleProject(page, '101');
     await page.evaluate(() => { location.hash = '#/projects/101/basic'; });
     await expect(page.getByLabel('基准分支', { exact: true })).toBeEnabled();
     await expect(page.getByRole('button', { name: '删除项目', exact: true })).toHaveCount(0);

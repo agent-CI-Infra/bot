@@ -33,7 +33,7 @@ function syncScopePicker() {
     const name = repo ? scopeRepository(repo) : t('nav.all_projects');
     const detail = repo ? scopeOrganization(repo) : t('scope.count', { count: repositories.length });
     trigger.title = repo?.full_name || name; trigger.dataset.projectId = repo ? String(repo.id) : '';
-    trigger.setAttribute('aria-label', t('nav.switch_project') + '：' + (repo?.full_name || name));
+    trigger.setAttribute('aria-label', t('scope.trigger', { name: repo?.full_name || name }));
     const mark = element('span', repo ? name[0].toUpperCase() : '⊞', 'console-scope-mark'); mark.setAttribute('aria-hidden', 'true');
     const text = element('span', '', 'console-scope-copy'); text.append(element('strong', name), element('small', detail));
     const arrow = element('span', '⌄', 'console-scope-arrow'); arrow.setAttribute('aria-hidden', 'true');
@@ -53,7 +53,7 @@ function drawScopePicker() {
     const id = row ? String(row.id) : '', name = row ? scopeRepository(row) : t('nav.all_projects');
     const item = element('div', '', 'console-scope-option'); item.dataset.projectId = id;
     item.setAttribute('role', 'option'); item.setAttribute('aria-selected', String((selected || '') === id));
-    item.setAttribute('aria-label', row ? row.full_name + (!row.enabled ? '，' + t('scope.disabled') : '') : name);
+    item.setAttribute('aria-label', row ? t('scope.project_option', { name: row.full_name }) + (!row.enabled ? ' · ' + t('scope.disabled') : '') : name);
     item.title = row?.full_name || name; item.append(element('span', name, 'console-scope-name'));
     if (row && !row.enabled) item.append(element('small', t('scope.disabled'), 'console-scope-disabled'));
     item.addEventListener('pointerdown', event => event.preventDefault());

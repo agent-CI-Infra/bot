@@ -81,6 +81,12 @@ test('searchable scope list, long names, disabled state, keyboard and focus acro
     await trigger(page).click(); await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.locator('#console-scope-picker')).not.toBeVisible();
     await expect(trigger(page)).toHaveAttribute('aria-expanded', 'false');
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.getByRole('button', { name: 'English', exact: true }).click();
+    await expect(trigger(page)).toHaveAccessibleName('Switch project: beta/bravo');
+    await trigger(page).click();
+    await expect(page.locator('#console-scope-projects').getByRole('option', { name: 'Project: beta/bravo · Disabled', exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });

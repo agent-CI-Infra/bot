@@ -98,6 +98,9 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 @media(max-width:767px) {
   .console-mobile-scope { display: block; position: sticky; top: 0; z-index: 3; flex: none; margin-bottom: 12px; background: var(--color-bg); }
   body.console-ready .management-page { top: calc(var(--management-header-height,48px) + var(--console-scope-height,0px) + 8px); }
+  /* Errors and pending confirmations need reading space. Their surrounding controls can scroll while they are shown. */
+  body.console-ready .management-page .management-panel:has(.management-command-preview, .management-feed > .console-state-error) { overflow-y: auto; overscroll-behavior: contain; }
+  body.console-ready .management-page .management-panel:has(.management-command-preview, .management-feed > .console-state-error) .management-feed-wrap { min-height: min(320px,50dvh); }
   body.console-ready.board-mode .board-filter-controls { max-height: max(100px,calc(38dvh - var(--console-scope-height,0px))); }
   .console-ready dialog.console-scope-picker { inset: 0; width: 100%; height: 100dvh; max-height: 100dvh; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); border: 0; border-radius: 0; }
   .console-scope-search-row input { font-size: 16px; }
