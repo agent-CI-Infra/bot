@@ -62,6 +62,10 @@ the alternatives, leaves no question for a person and finds no conflict with an 
 to the Issue. Check each part against the review and the Issue yourself; when one fails, ignore the event, the published
 review has answered. The project's capability ceiling stays the switch: below `develop` no development is offered.
 
+A repository document, such as a README or CONTRIBUTING, that only says a person must add the development label before
+the bot works does not cancel this project rule. How to change the code, which tests to run and which existing labels to
+use still follow the repository's own documents and skills.
+
 Create **Develop Issue** when all of these hold:
 
 - the Issue, or the review, describes a bounded change to this repository that the bot can make and test;
