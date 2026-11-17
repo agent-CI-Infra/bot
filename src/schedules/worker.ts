@@ -96,33 +96,20 @@ export class Scheduler {
         guard(); const actor = this.service.actor(schedule, plan);
         const existing = this.store.get('SELECT * FROM schedule_business_runs WHERE occurrence_id=?', row.id);
         if (existing) { this.finishOccurrence(row, ['queued', 'running'].includes(existing.state) ? 'dispatched' : existing.state, null, JSON.parse(existing.result ?? '{}')); return; }
-        let result: Json;
-        if (plan.workflow === 'report.daily') {
-          reserve(this.store, row, plan, this.service.clock(), 'runs'); guard();
-          const report = this.service.reports.render(row.project_id, row.logical_at, plan.timezone, Number(plan.parameters.window_ms ?? 86400000));
-          result = { report, business_state: 'succeeded' };
-        } else {
-          const handler = this.service.handlers.get(plan.workflow);
-          if (!handler) { this.finishOccurrence(row, 'unsupported', 'trigger_handler_not_registered'); return; }
-          if (!scheduleGateOpen(this.store, row.project_id, plan.workflow)) fail(403, 'schedule_workflow_gate_closed');
-          authorize(actor, handler.capability, { project_id: row.project_id });
-          reserve(this.store, row, plan, this.service.clock(), 'runs');
-          const trigger: ControlledTrigger = { occurrence_id: row.id, run_id: row.run_id, project_id: row.project_id, tenant_id: row.tenant_id,
-            workflow: plan.workflow, parameters: plan.parameters, logical_at: row.logical_at, source: row.source,
-            authorization_revision: actor.authorization_revision, config: snapshot.config };
-          const dispatched = handler.dispatch(trigger, actor, guard);
-          if (dispatched instanceof Promise || dispatched.run_id !== row.run_id || !['queued', 'running', 'succeeded', 'failed', 'cancelled'].includes(dispatched.state)) fail(500, 'trigger_requires_transactional_dispatch');
-          // Persist the downstream run identifier; a dispatched business run is not a completed workflow.
-          result = { ...dispatched, business_state: dispatched.state };
-        }
+        // A project plan only hands its occurrence to a registered handler; its results stay in the project, never in a chat (#1027).
+        const handler = this.service.handlers.get(plan.workflow)!;
+        if (!scheduleGateOpen(this.store, row.project_id, plan.workflow)) fail(403, 'schedule_workflow_gate_closed');
+        authorize(actor, handler.capability, { project_id: row.project_id });
+        reserve(this.store, row, plan, this.service.clock(), 'runs');
+        const trigger: ControlledTrigger = { occurrence_id: row.id, run_id: row.run_id, project_id: row.project_id, tenant_id: row.tenant_id,
+          workflow: plan.workflow, parameters: plan.parameters, logical_at: row.logical_at, source: row.source,
+          authorization_revision: actor.authorization_revision, config: snapshot.config };
+        const dispatched = handler.dispatch(trigger, actor, guard);
+        if (dispatched instanceof Promise || dispatched.run_id !== row.run_id || !['queued', 'running', 'succeeded', 'failed', 'cancelled'].includes(dispatched.state)) fail(500, 'trigger_requires_transactional_dispatch');
+        // Persist the downstream run identifier; a dispatched business run is not a completed workflow.
+        const result: Json = { ...dispatched, business_state: dispatched.state };
         guard();
         this.store.run('INSERT INTO schedule_business_runs VALUES(?,?,?,?,?,?,?)', row.run_id, row.id, plan.workflow, categoryOf(plan), String(result.business_state), JSON.stringify(result), this.service.clock());
-        if (result.report) {
-          this.store.run('INSERT OR IGNORE INTO schedule_events(event_key,project_id,type,incident,payload,created_at) VALUES(?,?,\'project.daily\',?,?,?)', 'report:' + row.id, row.project_id, 'report:' + row.id, JSON.stringify({ occurrence_id: row.id, report: result.report }), this.service.clock());
-          this.enqueue({ tenant_id: row.tenant_id, project_id: row.project_id, destination_id: plan.destination_id,
-          schedule_id: row.schedule_id, occurrence_id: row.id, actor_id: plan.actor_id, authorization: row.authorization,
-          logical_key: 'report:' + row.id, incident: 'report:' + row.id, payload: { text: (result.report as Json).text, report: result.report }, next_attempt: this.service.clock() });
-        }
         const state = ['queued', 'running'].includes(String(result.business_state)) ? 'dispatched' : String(result.business_state);
         this.finishOccurrence(row, state, null, { ...result, scheduler_run_id: row.run_id });
         if (state === 'succeeded') this.store.run('UPDATE schedules SET last_success=? WHERE id=?', this.service.clock(), schedule.id);
@@ -173,7 +160,7 @@ export class Scheduler {
             const previous = pending ? JSON.parse(pending.payload) : { events: [], text: '' };
             const events = [...previous.events, { sequence: event.sequence, type: event.type, evidence: JSON.parse(event.payload), at: event.created_at }];
             const repo = this.store.get('SELECT full_name FROM repositories WHERE id=?', sub.project_id)!.full_name;
-            const payload = { events, text: `${repo} · ${event.type}\n关联：${event.incident}\n聚合观测 ${events.length} 条；${spec.timezone}\n${events.filter(e => e.evidence.report).map(e => e.evidence.report.text).join('\n')}\n来源：${events.map(e => this.eventUrl(sub.project_id, e)).join('\n')}\n解除订阅：${(this.service.channels.options.origin ?? '') + '/#/management'}（订阅 ${sub.id}）` };
+            const payload = { events, text: `${repo} · ${event.type}\n关联：${event.incident}\n聚合观测 ${events.length} 条；${spec.timezone}\n来源：${events.map(e => this.eventUrl(sub.project_id, e)).join('\n')}\n解除订阅：${(this.service.channels.options.origin ?? '') + '/#/management'}（订阅 ${sub.id}）` };
             if (pending && ['pending', 'retry'].includes(pending.state)) this.store.run('UPDATE notification_outbox SET payload=? WHERE id=?', JSON.stringify(payload), pending.id);
             else if (!pending) this.enqueue({ tenant_id: sub.tenant_id, project_id: sub.project_id, destination_id: spec.destination_id, subscription_id: sub.id,
               subscription_revision: sub.revision, actor_id: sub.principal_id, authorization: JSON.stringify(authorization),
@@ -187,7 +174,6 @@ export class Scheduler {
   }
   private eventUrl(project: string, event: any): string {
     const p = event.evidence, origin = this.service.channels.options.origin ?? '';
-    if (p.occurrence_id) return origin + '/#/management';
     if (p.task_id) return origin + '/#/projects/' + project + '/activity?task=' + p.task_id;
     if (p.command_id) return origin + '/api/management/commands/' + p.command_id;
     const repo = this.store.get('SELECT full_name FROM repositories WHERE id=?', project)!.full_name;

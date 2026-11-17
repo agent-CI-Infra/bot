@@ -58,7 +58,7 @@
 | `development.stopped` | Issue 的开发因开发标签被去掉（或 Actions 提报的 Issue 被指派给别人）停在 `waiting_permission`（#815） | 无单独开关，项目启用即可 |
 | `release.manual` | 「发版本」页请求 CI 观察或起草发行说明 | 对应工作类型的开关 |
 | `actions.run_failed` | 默认分支的 Actions 运行失败，或推送标签触发、提交在默认分支历史上的运行失败（版本标签运行，事件写明标签名，见 [Actions 失败分类与提报](actions-failures.md#运行范围与扫描)） | Actions 失败处理的开关 |
-| `schedule.due` | `manager.check` 定时计划到期 | 定时检查的开关 |
+| `schedule.due` | `manager.check` 项目定时任务到期 | 定时检查的开关 |
 
 提到 bot 的评论（`issue.mention`、`pull_request.mention`）不按评论人过滤：任何人在打开的 Issue 或 PR 上 `@bot`，包括公开仓库里的仓库外人员，都会交给 Manager 分派一次，由它按提示词决定回答、检视还是不处理。Issue 上的提到 bot 和其他 Issue 事件一样，在能力上限为 `develop` 时也提供「开发 Issue」；开始开发要 Manager 写明依据（有人加的开发标签、triage 以上权限的维护者在评论里的要求，或 Manager 提示词里的规则，#815），外人的评论不作为开发依据，控制面在 `create_task` 时拒绝。Manager 自己的 `github_write` 不受事件来源限制，回应外人时由 Manager 提示词把握。
 
@@ -142,7 +142,7 @@ Manager 分派提示词在「角色 → Manager」里作为一份完整文本编
 - **CI 观察**：请求写成事件，发布记录在 `observation_event` 里等待决定；建了任务才有 `observation_task`，不处理时 `observation_error` 写明 Manager 的理由。
 - **发行说明**：控制面核验每个来源恰好出现一次，标题和链接由控制面写出；Manager 不处理时按内置规则直接列出来源。
 - **Actions 失败处理**：日志引用核验、单次重跑预算和同一失败只报一次不变；Manager 不处理时这次失败记为 `ignored`，不重跑也不提报。
-- **定时检查**：计划的 `workflow` 写 `manager.check`，`parameters.instruction` 写要检查什么。`parameters.file_issues` 会覆盖执行角色的 GitHub 写权限：为真时即使角色没有写权限也允许检查任务用 `github_write` 提报或回复 Issue，为假时即使角色有写权限也拒绝，未设置时跟随角色策略。到期成为 `schedule.due` 事件：已有检查内容时直接建任务，否则由 Manager 按「定时检查」章节决定（授权身份是计划的服务主体，由 Manager 角色执行）；无论计划如何设置，写入仍受项目能力上限约束，上限至少为 `comment` 时才可以经 `github_write` 提报 Issue 和评论，见[定时任务](schedules.md)。
+- **定时检查**（项目定时任务，#1027）：计划的 `workflow` 写 `manager.check`，结果留在任务记录和 GitHub 上，不发飞书；`parameters.instruction` 写要检查什么。`parameters.file_issues` 会覆盖执行角色的 GitHub 写权限：为真时即使角色没有写权限也允许检查任务用 `github_write` 提报或回复 Issue，为假时即使角色有写权限也拒绝，未设置时跟随角色策略。到期成为 `schedule.due` 事件：已有检查内容时直接建任务，否则由 Manager 按「定时检查」章节决定（授权身份是计划的服务主体，由 Manager 角色执行）；无论计划如何设置，写入仍受项目能力上限约束，上限至少为 `comment` 时才可以经 `github_write` 提报 Issue 和评论，见[定时任务](schedules.md)。
 - 合并队列、发布 outbox、对账、PR head 校验、bot 分支归属、以开发标签为依据的开发在发布前标签仍在、发布前测试都不变。
 
 ## 升级迁移

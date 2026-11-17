@@ -185,3 +185,35 @@ test('a group timer holds the chat while its grantors are re-verified; a group m
   assert.match(request, /群巡检任务/);
   await until(() => cards(f, group).find(c => c.includes('定时巡检结果')));
 });
+
+test('two groups each run their own timers by their own assistant and answer in their own chat; a member moves one to 10:00 from the chat (#1027)', async t => {
+  const f = await channelFixture(t); await repositoryAssistant(f);
+  const first = await boundGroup(f, ['101'], 'oc_group'), second = await boundGroup(f, ['101'], 'oc_group_second');
+  const morning = (await timer(f.admin, first, { name: '早间 CI', prompt: '甲群任务：汇报 main 的 CI。', cron: '0 9 * * *' })).value.schedule;
+  const evening = (await timer(f.admin, second, { name: '晚间 Issue', prompt: '乙群任务：汇总今天的新 Issue。', cron: '30 18 * * 1-5' })).value.schedule;
+  // Both are due: each group's assistant gets only its own prompt, and its answer goes back to its own chat.
+  scriptedModel(f, [(done, context) => context.request.includes('甲群任务') ? '甲群：CI 正常。' : '乙群：今天有 2 个新 Issue。']);
+  const at = Date.now() - 1000; due(f, morning.id, at); due(f, evening.id, at);
+  await f.service.schedules.tick();
+  for (const s of [morning, evening]) { const run = await settled(f, s.id, 'timer:' + at); assert.equal(run.state, 'completed', run.error); }
+  await until(() => cards(f, first).find(c => c.includes('定时任务「早间 CI」') && c.includes('甲群：CI 正常。')));
+  await until(() => cards(f, second).find(c => c.includes('定时任务「晚间 Issue」') && c.includes('乙群：今天有 2 个新 Issue。')));
+  assert.ok(!cards(f, first).some(c => c.includes('乙群')) && !cards(f, second).some(c => c.includes('甲群')));
+  const turns = id => f.h.store.all("SELECT service_role_id FROM channel_service_turns WHERE chat_id=? AND source_message LIKE 'schedule:%'", id);
+  assert.deepEqual([turns(first.id).length, turns(second.id).length], [1, 1]);
+  // In the second group (at the comment level) a member asks to move "this timer" to 10:00: the assistant sees only this group's.
+  const binding = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', second.id);
+  assert.equal((await f.admin('/api/channels/chats/' + second.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant',
+    scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, level: 'comment', expected_revision: binding.revision })).status, 200);
+  scriptedModel(f, [['conversation_schedules', { action: 'list' }], done => ['conversation_schedules', { action: 'update', id: done[0].schedules[0].id, cron: '0 10 * * 1-5' }],
+    done => `已改到 10:00，下次运行 ${new Date(done[1].schedule.next_at).toISOString()}`]);
+  const ask = inGroup('把这个定时改到 10 点', 'ou_carol'); ask.event.message.chat_id = 'oc_group_second';
+  const row = await finished(f.h, (await post(f.h, f.id, ask)).value.operation_id); assert.equal(row.state, 'completed', row.error);
+  const listedHere = JSON.parse(f.requests.at(-1).messages.find(m => m.role === 'tool').content);
+  assert.deepEqual(listedHere.schedules.map(s => s.id), [evening.id]);
+  const moved = f.h.store.get('SELECT * FROM channel_schedules WHERE id=?', evening.id), kept = f.h.store.get('SELECT * FROM channel_schedules WHERE id=?', morning.id);
+  assert.deepEqual([moved.cron, moved.timezone, moved.state, moved.revision], ['0 10 * * 1-5', 'Asia/Shanghai', 'active', evening.revision + 1]);
+  assert.equal(new Date(moved.next_at).toLocaleTimeString('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit' }), '10:00');
+  assert.deepEqual([kept.cron, kept.revision], ['0 9 * * *', morning.revision]);
+  await until(() => cards(f, second).find(c => c.includes('已改到 10:00')));
+});

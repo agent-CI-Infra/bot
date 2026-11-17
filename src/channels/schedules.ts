@@ -122,15 +122,18 @@ export class ChannelSchedules {
     const chat = this.host.employees.chat(chatId); this.manage(actor, chat);
     return { schedule: this.view(this.insert(chat, actor.principal_id, input)) };
   }
+  /** A timer carried over from a project's daily report plan (#1027): the same chat, rhythm and time zone, run by the chat's
+   * own assistant from now on. `by` is the private chat's owner, or for a group the plan's owner, recorded as the author. */
+  adopt(chat: Row, by: string, input: Json): Row { return this.insert(chat, by, input, 'channel.schedule.migrated'); }
   /** A new timer on a chat, recorded as created by `by`: the chat's owner, or a group's binding principal (#851). */
-  private insert(chat: Row, by: string, input: Json): Row {
+  private insert(chat: Row, by: string, input: Json, action = 'channel.schedule.created'): Row {
     const spec = this.spec(input), id = randomId(), now = this.clock(), enabled = input.enabled !== false;
     const row = { ...spec, start_at: now };
     this.store.run(`INSERT INTO channel_schedules(id,chat_id,kind,owner_id,created_by,name,prompt,timezone,cron,interval_ms,start_at,state,reason,revision,next_at,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,1,?,?,?)`, id, chat.id, chat.chat_type === 'p2p' ? 'personal' : 'group', chat.chat_type === 'p2p' ? by : null,
       by, spec.name, this.store.secrets.seal({ prompt: spec.prompt }, 'channel-schedule:' + id), spec.timezone, spec.cron, spec.interval_ms, now,
       enabled ? 'active' : 'paused', enabled ? this.next(row, now) : null, now, now);
-    this.store.audit(by, 'channel.schedule.created', id, chat.id);
+    this.store.audit(by, action, id, chat.id);
     return this.schedule(id);
   }
   update(actor: ActorContext, id: string, input: Json): Json {

@@ -35,7 +35,7 @@ const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(valu
 // Where each item takes effect, for the confirmation list and the receipts.
 const where: Record<OnboardingItem, string> = {
   start: '启动项目', capability_ceiling: '项目设置 · 能力上限', events: 'Manager · 监听与触发', test_command: '项目设置 · 测试命令',
-  review_language: '项目设置 · 检视语言', conventions: 'Manager 提示词与角色提示词（独立段落）', labels: 'GitHub 标签', schedules: '计划与通知 · Manager 定时检查',
+  review_language: '项目设置 · 检视语言', conventions: 'Manager 提示词与角色提示词（独立段落）', labels: 'GitHub 标签', schedules: '定时任务与通知 · 项目定时任务',
   ci: '开发任务（开 bot PR，人合并）',
 };
 
@@ -144,7 +144,7 @@ export class OnboardingApply {
    * Confirming the same plan again returns its application: nothing is applied twice.
    */
   async confirm(base: ActorContext, repositoryId: string, plan: Row, input: Json): Promise<void> {
-    fields(input, ['version', 'changes_revision', 'items', 'schedule_destination_id']);
+    fields(input, ['version', 'changes_revision', 'items']);
     const actor = this.host.actor(base, repositoryId), repository = this.host.repository(repositoryId)!;
     if (input.version !== plan.version) fail(409, 'onboarding_plan_outdated', 'version');
     if (this.store.get('SELECT 1 FROM onboarding_applications WHERE plan_id=?', plan.id)) return;
@@ -159,11 +159,9 @@ export class OnboardingApply {
     const chosen = input.items as string[];
     // Every other item works on the project: it cannot be left out of a repository that is not started.
     if (listed.includes('start') && !chosen.includes('start')) fail(400, 'onboarding_start_required', 'items');
-    if (input.schedule_destination_id !== undefined && (typeof input.schedule_destination_id !== 'string' || !input.schedule_destination_id)) fail(400, 'invalid_schedule_destination', 'schedule_destination_id');
     const id = randomId(), time = now();
     this.store.transaction(() => {
-      this.store.run('INSERT INTO onboarding_applications VALUES(?,?,?,?,?,?,?,?)', id, plan.id, repositoryId, plan.version, actor.principal_id, time, JSON.stringify(changes),
-        JSON.stringify(input.schedule_destination_id ? { schedule_destination_id: input.schedule_destination_id } : {}));
+      this.store.run('INSERT INTO onboarding_applications VALUES(?,?,?,?,?,?,?,?)', id, plan.id, repositoryId, plan.version, actor.principal_id, time, JSON.stringify(changes), '{}');
       for (const [position, item] of listed.entries())
         this.store.run('INSERT INTO onboarding_receipts(application_id,item,position,state,updated_at) VALUES(?,?,?,?,?)', id, item, position, chosen.includes(item) ? 'pending' : 'skipped', time);
       this.store.audit(actor.principal_id, 'onboarding.confirmed', String(plan.id), repositoryId);
@@ -173,7 +171,7 @@ export class OnboardingApply {
 
   /** Applies one failed item again; a start that now succeeds goes on with the items that waited for it. */
   async retry(base: ActorContext, repositoryId: string, item: string, input: Json): Promise<void> {
-    fields(input, ['schedule_destination_id']);
+    fields(input, []);
     this.host.actor(base, repositoryId);
     const application = this.store.get('SELECT * FROM onboarding_applications WHERE repository_id=? ORDER BY confirmed_at DESC,rowid DESC LIMIT 1', repositoryId);
     if (!application) return fail(404, 'onboarding_application_not_found');
@@ -182,10 +180,6 @@ export class OnboardingApply {
     if (receipt.state !== 'failed') fail(409, 'onboarding_item_not_failed');
     // Refused before the receipt changes: a retry that cannot run now leaves the item failed, to be retried later.
     if (this.applying.has(repositoryId)) fail(409, 'onboarding_apply_running');
-    if (input.schedule_destination_id !== undefined) {
-      if (typeof input.schedule_destination_id !== 'string' || !input.schedule_destination_id) fail(400, 'invalid_schedule_destination', 'schedule_destination_id');
-      this.store.run('UPDATE onboarding_applications SET options=? WHERE id=?', JSON.stringify({ ...JSON.parse(application.options), schedule_destination_id: input.schedule_destination_id }), application.id);
-    }
     this.store.run("UPDATE onboarding_receipts SET state='pending',updated_at=? WHERE application_id=? AND item=?", now(), application.id, item);
     await this.run(base, String(application.id));
   }
@@ -354,18 +348,12 @@ export class OnboardingApply {
   }
 
   /**
-   * Manager checks (#851) as project plans. They run as the project's service identity: a project without one gets it here,
-   * as the confirming administrator's delegation (shown in the confirmation). The plans report to the destination chosen in the
-   * confirmation; without one the item fails with the destinations the person may choose from, and is retried with one.
+   * Manager checks (#851) as project scheduled tasks. They run as the project's service identity: a project without one gets it
+   * here, as the confirming administrator's delegation (shown in the confirmation). Their results stay in the project (#1027).
    */
   private async schedules(c: ItemContext): Promise<Outcome> {
     const wanted = (c.plan.schedules as Json[]).filter(schedule => !this.scheduleNamed(c.id, String(schedule.name)));
     if (!wanted.length) return { state: 'exists' };
-    const destination = JSON.parse(c.application.options).schedule_destination_id as string | undefined;
-    if (!destination) {
-      const listed = await this.host.service.query(c.actor, { operation: 'list_schedule_destinations', target: { project_id: c.id }, arguments: {} }) as Json;
-      return fail(409, 'schedule_destination_required', 'schedule_destination_id', { destinations: listed.destinations });
-    }
     let service = this.servicePrincipal(c.id);
     const created = !service;
     service ??= createProjectServicePrincipal(this.store, c.actor, c.id, `接入向导第 ${c.application.version} 版的 Manager 定时检查`);
@@ -373,7 +361,7 @@ export class OnboardingApply {
     for (const [i, schedule] of wanted.entries()) {
       await this.command(c, 'schedule.register', { plan: { name: schedule.name, kind: 'project', actor_id: service, owner_id: c.actor.principal_id, maintainer_id: c.actor.principal_id,
         workflow: 'manager.check', parameters: { instruction: schedule.instruction }, timezone: schedule.timezone, cron: schedule.cron, start_at: Date.parse(String(c.application.confirmed_at)),
-        enabled: true, misfire: 'skip', grace_ms: 60000, destination_id: destination, limits: defaultLimits } }, i);
+        enabled: true, misfire: 'skip', grace_ms: 60000, limits: defaultLimits } }, i);
       done.push(String(schedule.name));
     }
     return { state: 'succeeded', detail: { schedules: done, service_principal: service, service_principal_created: created } };

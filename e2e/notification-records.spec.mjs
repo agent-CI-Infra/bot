@@ -2,7 +2,6 @@ import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { channelFixture, privateChat, registerDestination } from '../test/channel-fixture.mjs';
-import { defaultLimits } from '../dist/schedules/types.js';
 
 async function environment() {
   let now=Date.now(),worker;
@@ -14,8 +13,10 @@ async function environment() {
     const result=await f.admin('/api/management/commands','POST',{operation,target:{project_id:'101'},arguments:args,expected_revision:revision,idempotency_key:key,source_conversation:'notification-browser-fixture',source_message:key});
     expect(result.value.state).toBe('succeeded');return result.value;
   };
-  const result=await f.command('schedule.register',{plan:{name:'每日证据窗口',kind:'personal',actor_id:f.principal,owner_id:f.principal,maintainer_id:f.principal,workflow:'report.daily',parameters:{},timezone:'Asia/Shanghai',interval_ms:60000,start_at:now+60000,enabled:true,misfire:'skip',grace_ms:60000,destination_id:f.destination,limits:{...defaultLimits}}});
-  await f.command('schedule.run-now',{id:result.result.schedule.id,revision:1}); await worker.tick();
+  // Notifications come from event subscriptions only (#1027): one failed task, delivered to the private chat.
+  await f.command('notification.register',{subscription:{name:'失败事件通知',destination_id:f.destination,events:['task.failed'],projects:['101'],aggregate_ms:0,timezone:'Asia/Shanghai',enabled:true}});
+  f.h.store.run("INSERT INTO schedule_events(event_key,project_id,type,incident,payload,created_at) VALUES('browser-failure','101','task.failed','task:browser-failure',?,?)",JSON.stringify({task_id:'browser-failure',status:'failed'}),now);
+  worker.fanout(); await worker.tick();
   f.delivery=(await f.query('list_notification_deliveries')).records[0];
   return f;
 }
@@ -26,11 +27,11 @@ async function login(page,f){
   await expect(page.locator('.schedule-record')).toHaveCount(1);
 }
 const card=page=>page.locator('.schedule-record').first();
-test('notification timeline shows real source, window, attempts and destination on desktop and mobile',async({page})=>{
+test('notification timeline shows real source, events, attempts and destination on desktop and mobile',async({page})=>{
   const f=await environment(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   try{
     await login(page,f);await card(page).locator(':scope > summary').click();
-    await expect(card(page)).toContainText('每日证据窗口');await expect(card(page)).toContainText('Asia/Shanghai');await expect(card(page)).toContainText('第 1 次 · 已送达');await expect(card(page)).toContainText('当前有效');await expect(card(page)).toContainText('私聊');await expect(card(page)).toContainText(f.delivery.origin.run_id);
+    await expect(card(page)).toContainText('失败事件通知');await expect(card(page)).toContainText('事件订阅');await expect(card(page)).toContainText('Asia/Shanghai');await expect(card(page)).toContainText('第 1 次 · 已送达');await expect(card(page)).toContainText('当前有效');await expect(card(page)).toContainText('私聊');await expect(card(page)).toContainText('task:browser-failure');await expect(card(page)).toContainText('task.failed');
     mkdirSync('.tmp/notification-trace-234',{recursive:true});
     for(const width of [320,390,768,1024,1440,1920]){await page.setViewportSize({width,height:900});await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);if([390,1440].includes(width)){await card(page).locator(':scope > summary').evaluate(node=>node.scrollIntoView({block:'start'}));await page.screenshot({path:'.tmp/notification-trace-234/notification-'+width+'.png',fullPage:true});}}
     expect(errors).toEqual([]);expect(f.h.store.get('select manual_retries from notification_outbox').manual_retries).toBe(0);

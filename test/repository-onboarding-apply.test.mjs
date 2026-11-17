@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { identityFixture } from './identity-fixture.mjs';
 import { installed, repositoryRoutes, provider, call, person, say, assistantModel } from './onboarding-fixture.mjs';
-import { transport, connector, bindFixture, privateChat, until } from './channel-fixture.mjs';
+import { transport, until } from './channel-fixture.mjs';
 import { dispatchPrompt } from '../dist/dispatch/manager.js';
 import { managerPrompt } from '../dist/work/settings.js';
 import { roleConfiguration } from '../dist/roles/definition.js';
@@ -61,7 +61,7 @@ test('confirming a started project\'s plan applies each item through its channel
   assert.equal(confirmed.status, 201, JSON.stringify(confirmed.value));
   view = confirmed.value;
   assert.deepEqual(receipts(view), { capability_ceiling: 'succeeded', events: 'succeeded', test_command: 'succeeded', review_language: 'skipped', conventions: 'succeeded',
-    labels: 'succeeded', schedules: 'failed', ci: 'succeeded' }, JSON.stringify(view.application.receipts, null, 1));
+    labels: 'succeeded', schedules: 'succeeded', ci: 'succeeded' }, JSON.stringify(view.application.receipts, null, 1));
   const receipt = item => view.application.receipts.find(r => r.item === item);
   assert.ok(view.application.receipts.filter(r => r.state !== 'skipped').every(r => r.executed_by === receipt('ci').executed_by && r.attempts === 1));
 
@@ -71,7 +71,7 @@ test('confirming a started project\'s plan applies each item through its channel
   assert.equal(receipt('test_command').detail.verified, false);
   const commands = h.store.all("SELECT operation,state,principal_id FROM management_commands WHERE idempotency_key LIKE 'onboarding:%' ORDER BY rowid");
   assert.deepEqual(commands.map(c => [c.operation, c.state]), [['project.update', 'succeeded'], ['manager.update', 'succeeded'], ['project.update', 'succeeded'],
-    ['manager.update', 'succeeded'], ['roles.update', 'succeeded'], ['task.create', 'succeeded']]);
+    ['manager.update', 'succeeded'], ['roles.update', 'succeeded'], ['schedule.register', 'succeeded'], ['task.create', 'succeeded']]);
   // The conventions: their own section, appended to the Manager prompt and every role that works on the repository.
   assert.match(managerPrompt(h.store, '101').content, /## 本仓库约定（接入向导第 1 版，\d{4}-\d{2}-\d{2}）[\s\S]*kind\/ 前缀表示问题类型/);
   const roles = roleConfiguration(h.store, '101').roles.filter(role => role.enabled && role.role_id !== 'coordinator');
@@ -80,8 +80,13 @@ test('confirming a started project\'s plan applies each item through its channel
   // Labels: the new one is created; one that exists keeps its colour and description.
   assert.deepEqual(github.created.map(c => [c.path, c.body]), [['/repos/fixture/project-101/labels', { name: 'kind/bug', color: 'd73a4a', description: '缺陷' }]]);
   assert.deepEqual(receipt('labels').detail.labels, [{ name: 'kind/bug', state: 'created' }, { name: 'docs', state: 'exists' }]);
-  // The Manager checks need a destination: the item says so, with the choices, and the others went on.
-  assert.deepEqual([receipt('schedules').error, receipt('schedules').detail.field, receipt('schedules').detail.destinations], ['schedule_destination_required', 'schedule_destination_id', []]);
+  // The Manager checks are project scheduled tasks: no Feishu destination to choose, their results stay in the project (#1027).
+  const scheduled = receipt('schedules');
+  assert.deepEqual([scheduled.state, scheduled.detail.schedules, scheduled.detail.service_principal_created], ['succeeded', ['每日巡检'], true]);
+  // A Manager check of the project, run as its new service identity: the confirming administrator's delegation.
+  const check = h.store.get("SELECT * FROM schedules WHERE project_id='101'"), spec = JSON.parse(check.spec);
+  assert.deepEqual([check.kind, check.actor_id, spec.workflow, spec.cron, spec.timezone, spec.parameters.instruction, spec.destination_id], ['project', scheduled.detail.service_principal, 'manager.check', '0 9 * * 1-5', 'Asia/Shanghai', '看看昨天失败的 Actions。', undefined]);
+  assert.equal(h.store.get("SELECT source FROM scoped_grants WHERE principal_id=?", check.actor_id).source, 'explicit_delegation');
   // The CI suggestion is a development task the person confirmed may change workflows (#931).
   const task = h.store.get('SELECT * FROM tasks WHERE id=?', receipt('ci').detail.task_id), input = JSON.parse(task.input);
   // One generic task kind (#814): the development is a task granted pull_request.
@@ -95,19 +100,8 @@ test('confirming a started project\'s plan applies each item through its channel
   assert.equal((await repoAdmin('/api/management/onboarding/101/items/labels/retry', 'POST', {})).value.error, 'onboarding_item_not_failed');
   assert.equal(h.store.get("SELECT count(*) AS n FROM management_commands WHERE idempotency_key LIKE 'onboarding:%'").n, commands.length);
   assert.equal(github.created.length, 1);
-  // A failed item is retried on its own: once the person has a private chat with the bot, it is offered and chosen.
-  const feishu = await connector(admin);
-  bindFixture(h, feishu, repoAdmin.principal, 'ou_bob'); await privateChat({ h, id: feishu }, 'ou_bob', repoAdmin.principal, 'oc_bob');
-  view = (await repoAdmin('/api/management/onboarding/101/items/schedules/retry', 'POST', {})).value;
-  const offered = view.application.receipts.find(r => r.item === 'schedules');
-  assert.deepEqual([offered.state, offered.attempts, offered.detail.destinations.map(d => d.chat_id)], ['failed', 2, ['oc_bob']]);
-  view = (await repoAdmin('/api/management/onboarding/101/items/schedules/retry', 'POST', { schedule_destination_id: offered.detail.destinations[0].id })).value;
-  const scheduled = view.application.receipts.find(r => r.item === 'schedules');
-  assert.deepEqual([scheduled.state, scheduled.detail.schedules, scheduled.detail.service_principal_created], ['succeeded', ['每日巡检'], true]);
-  // A Manager check of the project, run as its new service identity: the confirming administrator's delegation.
-  const check = h.store.get("SELECT * FROM schedules WHERE project_id='101'"), spec = JSON.parse(check.spec);
-  assert.deepEqual([check.kind, check.actor_id, spec.workflow, spec.cron, spec.timezone, spec.parameters.instruction], ['project', scheduled.detail.service_principal, 'manager.check', '0 9 * * 1-5', 'Asia/Shanghai', '看看昨天失败的 Actions。']);
-  assert.equal(h.store.get("SELECT source FROM scoped_grants WHERE principal_id=?", check.actor_id).source, 'explicit_delegation');
+  // A retry names nothing more than the item: the old destination field is refused.
+  assert.equal((await repoAdmin('/api/management/onboarding/101/items/schedules/retry', 'POST', { schedule_destination_id: 'x' })).status, 400);
 
   // A re-run with the same plan lists only what still differs: the review language left out.
   await say(repoAdmin, opened.session.conversation_id, '再看一遍');
@@ -176,6 +170,8 @@ test('while a repository is applying, a retry of another item is refused and lea
   const opened = (await repoAdmin('/api/management/onboarding/101', 'POST', {})).value;
   await say(repoAdmin, opened.session.conversation_id, '请出方案');
   let view = (await repoAdmin('/api/management/onboarding/101')).value;
+  // The Manager check's save fails too, until the fixture lets it through.
+  h.store.db.exec("CREATE TRIGGER fixture_refuse_schedule BEFORE INSERT ON schedules BEGIN SELECT RAISE(ABORT,'fixture refuses the plan'); END");
   view = (await repoAdmin('/api/management/onboarding/101/confirm', 'POST', { version: 1, changes_revision: view.plan.changes_revision, items: items(view) })).value;
   assert.deepEqual(receipts(view), { capability_ceiling: 'succeeded', test_command: 'succeeded', labels: 'failed', schedules: 'failed' });
   assert.equal(view.application.receipts.find(r => r.item === 'labels').detail.labels[0].error, 'github_http_422');
@@ -190,7 +186,8 @@ test('while a repository is applying, a retry of another item is refused and lea
   state.apiGate = null; gate.resolve();
   const released = (await held).value;
   assert.equal(receipts(released).labels, 'succeeded', JSON.stringify(released.application.receipts.find(r => r.item === 'labels')));
-  // Afterwards it is retried as usual (and fails again for want of a destination).
+  // Afterwards it is retried as usual.
+  h.store.db.exec('DROP TRIGGER fixture_refuse_schedule');
   view = (await repoAdmin('/api/management/onboarding/101/items/schedules/retry', 'POST', {})).value;
-  assert.deepEqual([stateOf('schedules'), view.application.receipts.find(r => r.item === 'schedules').attempts], ['failed', 2]);
+  assert.deepEqual([stateOf('schedules'), view.application.receipts.find(r => r.item === 'schedules').attempts], ['succeeded', 2]);
 });

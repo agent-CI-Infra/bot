@@ -10,15 +10,12 @@ import { validate } from '../management/catalog.js';
 import { planSchema, schedulingCommands, subscriptionSchema } from './schema.js';
 import { localParts, nextTime, parseCron, previewTimes, quietUntil } from './time.js';
 import { defaultLimits, type Plan, type SubscriptionSpec, type TriggerHandler, type ActionUsage } from './types.js';
-import { budgetScopes, reserve, terminalRunStates } from './budget.js';
-import { ReportService } from './report.js';
+import { budgetScopes, notificationWorkflow, reserve, terminalRunStates } from './budget.js';
 
 export const reasonOf = (e: unknown): string => e instanceof HttpError ? e.code : 'schedule_service_failed';
 export class ScheduleService {
   readonly handlers = new Map<string, TriggerHandler>();
-  readonly reports: ReportService;
   constructor(readonly store: Store, readonly management: ManagementService, readonly channels: ChannelService, readonly clock: () => number = Date.now) {
-    this.reports = new ReportService(store, channels.options.origin);
     for (const operation of Object.keys(schedulingCommands)) management.register(operation, {
       execute: async (actor, command, key) => this.command(actor, command, key),
       reconcile: async (actor, command, key) => {
@@ -31,8 +28,15 @@ export class ScheduleService {
     management.schedulingQuery = (actor, operation, project, args) => this.query(actor, operation, project, args);
   }
   register(workflow: string, handler: TriggerHandler): void {
-    if (workflow === 'report.daily' || this.handlers.has(workflow) || !handler.capability) throw new Error('invalid_trigger_registration');
+    if (this.handlers.has(workflow) || !handler.capability) throw new Error('invalid_trigger_registration');
     this.handlers.set(workflow, handler);
+  }
+  /** A project plan runs a registered handler: in production only the project scheduled task, manager.check (#1027). A plan
+   * saved for a workflow that has none, such as a retired daily report, can no longer be saved, resumed or run. */
+  private required(workflow: string): string[] {
+    const handler = this.handlers.get(workflow);
+    if (!handler) return fail(409, 'schedule_workflow_unsupported');
+    return ['tasks.read', 'schedules.manage', handler.capability];
   }
   audit(row: Row, action: string, actor: ActorContext | null, source: string, detail: Json = {}): void {
     const authorization = typeof row.authorization === 'string' ? JSON.parse(row.authorization) : {};
@@ -62,7 +66,7 @@ export class ScheduleService {
     return { row, event };
   }
   private grants(actor: ActorContext, plan: Plan, project: string, existing?: Row): Row {
-    const required = ['tasks.read', 'schedules.manage', ...(plan.workflow === 'report.daily' ? [] : [this.handlers.get(plan.workflow)?.capability ?? (plan.workflow.startsWith('release.') ? 'release.manage' : 'tasks.write')])];
+    const required = this.required(plan.workflow);
     if (plan.kind === 'personal') {
       if (plan.actor_id !== actor.principal_id || plan.owner_id !== actor.principal_id || plan.maintainer_id !== actor.principal_id) fail(403, 'personal_schedule_identity_mismatch');
       return { approver_id: null, capabilities: required, grants: listEffectiveScopes(this.store, actor.principal_id).filter(g => g.state === 'active') };
@@ -84,9 +88,12 @@ export class ScheduleService {
     if (required.some(c => !grants.some(g => g.capabilities.includes(c)))) fail(403, 'schedule_service_delegation_required');
     return { approver_id: actor.principal_id, grants: grants.map(g => ({ ...g, grantor_id: this.store.get('SELECT grantor_id FROM scoped_grants WHERE id=?', g.grant_id)!.grantor_id })), capabilities: required };
   }
-  actor(row: Row, plan: Plan, checkDestination = true): ActorContext {
+  /** The plan's execution identity, narrowed to what it was approved for. Project plans have no Feishu destination (#1027),
+   * so a chat's binding or audience never pauses one: its results stay in the project's task records and on GitHub. */
+  actor(row: Row, plan: Plan): ActorContext {
+    const required = this.required(plan.workflow);
     const actor = plan.kind === 'project' ? resolveServiceActor(this.store, plan.actor_id) : resolvePrincipalActor(this.store, plan.actor_id, row.tenant_id, row.project_id, 'service');
-    const approved = JSON.parse(row.grant_snapshot), required = ['tasks.read', 'schedules.manage', ...(plan.workflow === 'report.daily' ? [] : [this.handlers.get(plan.workflow)?.capability ?? (plan.workflow.startsWith('release.') ? 'release.manage' : 'tasks.write')])];
+    const approved = JSON.parse(row.grant_snapshot);
     if (required.some(c => !(approved.capabilities as string[]).includes(c))) fail(403, 'schedule_capability_changed');
     if (plan.kind === 'project') {
       const principal = this.store.get('SELECT project_id,tenant_id FROM principals WHERE id=?', plan.actor_id)!;
@@ -102,9 +109,8 @@ export class ScheduleService {
     }
     authorize(actor, 'schedules.manage', { project_id: row.project_id });
     authorize(actor, 'tasks.read', { project_id: row.project_id });
-    if (plan.workflow !== 'report.daily') authorize(actor, this.handlers.get(plan.workflow)?.capability ?? (plan.workflow.startsWith('release.') ? 'release.manage' : 'tasks.write'), { project_id: row.project_id });
+    authorize(actor, required[2]!, { project_id: row.project_id });
     this.executionScope(row.project_id);
-    if (checkDestination) this.destination(plan.destination_id, row.project_id);
     return narrowActor(actor, required);
   }
   executionScope(project: string): void {
@@ -164,7 +170,7 @@ export class ScheduleService {
       this.audit(row, 'business.' + state, null, row.source, { run_id: row.run_id });
     });
   }
-  /** Chats the actor may name as this project's destination without registering them first (#330): a private chat of the
+  /** Chats the actor may name as a subscription's destination without registering them first (#330): a private chat of the
    * actor's own with read access to the project, or a group whose assistant the actor manages and whose scope reaches it. */
   chatDestinations(actor: ActorContext, project: string): Json[] {
     const usable = (check: () => unknown) => { try { check(); return true; } catch (error) { if (error instanceof HttpError) return false; throw error; } };
@@ -177,23 +183,19 @@ export class ScheduleService {
     return [...personal, ...groups].map(chat => ({ id: 'chat:' + chat.id, type: chat.chat_type, chat_id: chat.chat_id }));
   }
   /** A chosen chat ('chat:<id>') is registered for this project and registrant when saved, with every check of a registration;
-   * the saved plan or subscription keeps the registered destination. Previews only check that the chat may be chosen. */
+   * the saved subscription keeps the registered destination. Previews only check that the chat may be chosen. */
   private chosen(actor: ActorContext, project: string, id: string, register = true): string {
     if (!id.startsWith('chat:')) return id;
     if (!register) { if (!this.chatDestinations(actor, project).some(d => d.id === id)) fail(403, 'schedule_destination_unavailable'); return id; }
     return String(this.channels.registerDestination(actor, id.slice(5), { project_id: project }).id);
   }
-  validatePlan(actor: ActorContext, project: string, value: unknown, existing?: Row, register = true): { plan: Plan; grant: Row; execution: ActorContext } {
+  validatePlan(actor: ActorContext, project: string, value: unknown, existing?: Row): { plan: Plan; grant: Row; execution: ActorContext } {
     validate(planSchema, value); const plan = value as Plan;
-    const preview = !register && plan.destination_id.startsWith('chat:');
-    plan.destination_id = this.chosen(actor, project, plan.destination_id, register);
+    if (!this.handlers.has(plan.workflow)) fail(400, 'schedule_workflow_unsupported');
     if (existing && (plan.kind !== existing.kind || plan.actor_id !== existing.actor_id || plan.owner_id !== existing.owner_id)) fail(403, 'schedule_identity_immutable');
     if (!!plan.cron === !!plan.interval_ms || plan.end_at !== undefined && plan.end_at <= plan.start_at) fail(400, 'invalid_schedule_recurrence');
     localParts(this.clock(), plan.timezone); if (plan.cron) parseCron(plan.cron);
     if (plan.enabled && nextTime(plan, this.clock()) === null) fail(400, 'schedule_has_no_future_occurrence');
-    if (plan.workflow === 'report.daily') {
-      if (Object.keys(plan.parameters).some(k => k !== 'window_ms') || plan.parameters.window_ms !== undefined && (!Number.isSafeInteger(plan.parameters.window_ms) || Number(plan.parameters.window_ms) < 60000 || Number(plan.parameters.window_ms) > 31 * 86400000)) fail(400, 'invalid_report_parameters');
-    }
     if (plan.workflow === 'manager.check') {
       if (Object.keys(plan.parameters).some(k => k !== 'instruction' && k !== 'file_issues')) fail(400, 'invalid_schedule_parameters');
       const instruction = plan.parameters.instruction;
@@ -201,7 +203,7 @@ export class ScheduleService {
       if (plan.parameters.file_issues !== undefined && typeof plan.parameters.file_issues !== 'boolean') fail(400, 'invalid_schedule_parameters');
     }
     const grant = this.grants(actor, plan, project, existing), tenant = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)!.tenant_id;
-    const execution = this.actor({ tenant_id: tenant, project_id: project, grant_snapshot: JSON.stringify(grant) }, plan, !preview);
+    const execution = this.actor({ tenant_id: tenant, project_id: project, grant_snapshot: JSON.stringify(grant) }, plan);
     return { plan, grant, execution };
   }
   pause(row: Row, reason: string): void {
@@ -339,7 +341,8 @@ export class ScheduleService {
     const plan = JSON.parse(row.spec) as Plan;
     return { ...row, next_at: row.state === 'active' ? row.next_at : null, spec: plan, grant_snapshot: JSON.parse(row.grant_snapshot), parsed: { timezone: plan.timezone, recurrence: plan.cron ?? `每 ${plan.interval_ms} 毫秒`,
       dst: 'gap_skip_fold_first', misfire: plan.misfire, timezone_change: '新版本保存后仅影响新实例' }, future: row.state === 'active' ? previewTimes(plan, this.clock()) : [],
-      supported: plan.workflow === 'report.daily' || this.handlers.has(plan.workflow), handover: { maintainer_id: plan.maintainer_id, required: row.kind === 'project' && row.state === 'paused' },
+      supported: this.handlers.has(plan.workflow), handover: { maintainer_id: plan.maintainer_id, required: row.kind === 'project' && row.state === 'paused' },
+      migration: this.store.get('SELECT outcome,reason,chat_type,channel_schedule_id,created_at FROM schedule_migrations WHERE schedule_id=?', row.id) ?? null,
       latest: this.store.get('SELECT id,state,reason,run_id,logical_at FROM schedule_occurrences WHERE schedule_id=? ORDER BY scheduled_at DESC,id DESC LIMIT 1', row.id) ?? null };
   }
   async query(actor: ActorContext, operation: string, project: string, args: any): Promise<Json> {
@@ -348,10 +351,8 @@ export class ScheduleService {
     if (operation === 'preview_schedule') {
       const existing = args.schedule_id ? this.schedule(project, args.schedule_id) : undefined;
       if (existing) this.owned(actor, existing);
-      const { plan } = this.validatePlan(actor, project, args.plan, existing, false);
-      return { revision, plan, timezone: plan.timezone, future: previewTimes(plan, this.clock()), supported: plan.workflow === 'report.daily' || this.handlers.has(plan.workflow),
-        report_preview_at: this.clock(),
-        report: plan.workflow === 'report.daily' ? this.reports.render(project, this.clock(), plan.timezone, Number(plan.parameters.window_ms ?? 86400000)) : null };
+      const { plan } = this.validatePlan(actor, project, args.plan, existing);
+      return { revision, plan, timezone: plan.timezone, future: previewTimes(plan, this.clock()), supported: this.handlers.has(plan.workflow) };
     }
     if (operation === 'preview_subscription') {
       const { spec, destination } = this.validateSubscription(actor, project, args.subscription, false), now = this.clock();
@@ -371,7 +372,7 @@ export class ScheduleService {
       const destinations: Json[] = this.store.all("SELECT id,created_at FROM channel_outbox WHERE state='registered'").flatMap(r => {
         try { const d = this.destination(r.id, project); return [{ id: r.id, type: d.event.chat_type, chat_id: d.event.chat_id }]; } catch { return []; }
       });
-      // Chats that may receive this project's notifications are offered directly; no separate registration step (#330).
+      // Chats that may receive this project's event notifications are offered directly; no separate registration step (#330).
       destinations.push(...this.chatDestinations(actor, project).filter(chat => !destinations.some(d => d.chat_id === chat.chat_id)));
       let canDelegate = false; try { authorize(actor, 'config.write', { project_id: project }); canDelegate = true; } catch { /* Personal schedules need no delegation capability. */ }
       const tenant = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)!.tenant_id;
@@ -381,6 +382,11 @@ export class ScheduleService {
       });
       // can_manage_project: the caller sets up project plans here and may create the project's service identity (#851).
       return { revision, destinations, services, maintainers, can_manage_project: canDelegate };
+    }
+    if (operation === 'list_schedule_migrations') {
+      // The migration report of this project's daily report plans (#1027): every plan, where it went, or why it did not.
+      const rows = this.store.all('SELECT * FROM schedule_migrations WHERE project_id=? ORDER BY created_at,schedule_id LIMIT ? OFFSET ?', project, limit + 1, offset), more = rows.length > limit; rows.splice(limit);
+      return { revision, migrations: rows.map(r => ({ ...r, detail: JSON.parse(r.detail) })), next_offset: more ? offset + limit : null };
     }
     const table = ({ list_occurrences: 'schedule_occurrences', list_notification_deliveries: 'notification_outbox', list_schedule_audit: 'schedule_audit' } as Record<string, string>)[operation];
     if (!table) return fail(400, 'unknown_schedule_query');
@@ -409,27 +415,19 @@ export class ScheduleService {
 
   deliveryGuard(row: Row): ActorContext {
     this.executionScope(row.project_id);
-    let execution: ActorContext;
-    if (row.schedule_id) {
-      const schedule = this.schedule(row.project_id, row.schedule_id);
-      if (schedule.state !== 'active') fail(403, 'schedule_not_active');
-      const occurrence = this.store.get('SELECT * FROM schedule_occurrences WHERE id=?', row.occurrence_id)!;
-      if (occurrence.state !== 'succeeded') fail(403, 'occurrence_not_successful');
-      const plan = JSON.parse(occurrence.snapshot).plan as Plan;
-      execution = this.actor({ ...schedule, grant_snapshot: JSON.stringify(JSON.parse(occurrence.authorization).grant_snapshot) }, plan);
-    } else {
-      const sub = this.store.get('SELECT * FROM notification_subscriptions WHERE id=?', row.subscription_id);
-      if (!sub) return fail(403, 'subscription_revoked_or_changed');
-      if (sub.state !== 'active' || sub.revision !== row.subscription_revision) fail(403, 'subscription_revoked_or_changed');
-      const actor = resolvePrincipalActor(this.store, sub.principal_id, sub.tenant_id, sub.project_id, 'service');
-      authorize(actor, 'tasks.read', { project_id: sub.project_id }); authorize(actor, 'schedules.manage', { project_id: sub.project_id });
-      execution = actor;
-    }
+    // A plan's own notification came only from a daily report (#1027): one still queued from before is never sent.
+    if (row.schedule_id) return fail(403, 'schedule_notifications_retired');
+    const sub = this.store.get('SELECT * FROM notification_subscriptions WHERE id=?', row.subscription_id);
+    if (!sub) return fail(403, 'subscription_revoked_or_changed');
+    if (sub.state !== 'active' || sub.revision !== row.subscription_revision) fail(403, 'subscription_revoked_or_changed');
+    const actor = resolvePrincipalActor(this.store, sub.principal_id, sub.tenant_id, sub.project_id, 'service');
+    authorize(actor, 'tasks.read', { project_id: sub.project_id }); authorize(actor, 'schedules.manage', { project_id: sub.project_id });
     this.destination(row.destination_id, row.project_id);
-    return execution;
+    return actor;
   }
+  /** Budget limits of a notification: an event subscription's are the defaults, bounded by project and tenant budgets. */
   notificationPlan(row: Row): Plan {
     if (row.occurrence_id) return JSON.parse(this.store.get('SELECT snapshot FROM schedule_occurrences WHERE id=?', row.occurrence_id)!.snapshot).plan;
-    return { workflow: 'report.daily', limits: defaultLimits } as Plan;
+    return { workflow: notificationWorkflow, limits: defaultLimits } as Plan;
   }
 }
