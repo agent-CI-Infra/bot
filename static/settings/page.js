@@ -31,6 +31,14 @@ async function renderSettings(request) {
   if (request !== renderVersion) return;
   content.replaceChildren(...cards);
 }
+// #879: a save result is assertive only when it failed. The role and the sentence move together in one synchronous
+// update: writing the text first leaves the new sentence under the old role for a rendering step (a reader can miss it),
+// and setting the role in a later task has the same gap. No extra aria-live is set — role=alert and role=status already
+// carry it, and a second declaration could contradict the role that was just written.
+function announceSave(target, text, failed) {
+  target.setAttribute('role', failed ? 'alert' : 'status');
+  target.textContent = text;
+}
 // Each category loads only what its cards show.
 // Cleanup by days (#671): one form for every window, saved with PUT /api/storage/retention (platform administrators,
 // audited) and applied by the daily cleanup; group chats keep their own per-chat setting, summarised here.
@@ -58,14 +66,14 @@ async function retentionCard(size, count, time) {
   const save = element('button', '保存清理设置'); save.type = 'submit';
   form.append(status, save);
   form.addEventListener('submit', async event => {
-    event.preventDefault(); status.textContent = '';
+    event.preventDefault(); announceSave(status, '', false);
     const value = control => control.value.trim() === '' ? null : Number(control.value);
     const body = Object.fromEntries(fields.map(([key]) => [key, value(controls[key])]));
     for (const key of ['manager_payload_days', 'workspace_finished_days', 'workspace_failed_days']) if (body[key] === null) body[key] = defaults[key];
     body.trajectory_days_by_project = Object.fromEntries(Object.entries(perProject).map(([id, control]) => [id, value(control)]));
     save.disabled = true;
-    try { await api('/api/storage/retention', 'PUT', body); status.textContent = '已保存，下一次每日清理按新设置执行。'; }
-    catch (err) { status.textContent = readErrorText(err); } finally { save.disabled = false; }
+    try { await api('/api/storage/retention', 'PUT', body); announceSave(status, '已保存，下一次每日清理按新设置执行。', false); }
+    catch (err) { announceSave(status, readErrorText(err), true); } finally { save.disabled = false; }
   });
   section.append(note('设置了天数的类别，每天在后台分批清理一次：只删正文，记录行、计费、审计和哈希保留，引用到已删正文的地方会显示「已过保留期删除」。留空表示不过期。'), form);
   const last = view.last_cleanup;
@@ -93,8 +101,8 @@ const settingsCards = {
     const form = element('form', '', 'project-form'), save = element('button', '保存兑换地址'); save.type = 'submit';
     form.append(field('兑换地址', address), note('填写执行端访问的 HTTPS /external/token 地址。此设置影响全部项目的签名 audience。'), status, save);
     form.addEventListener('submit', async event => { event.preventDefault(); save.disabled = true;
-      try { await api('/api/external/settings', 'PUT', { token_audience: address.value.trim() }); if (request === renderVersion) status.textContent = '兑换地址已保存。'; }
-      catch (err) { if (request === renderVersion) status.textContent = readErrorText(err); } finally { save.disabled = false; }
+      try { await api('/api/external/settings', 'PUT', { token_audience: address.value.trim() }); if (request === renderVersion) announceSave(status, '兑换地址已保存。', false); }
+      catch (err) { if (request === renderVersion) announceSave(status, readErrorText(err), true); } finally { save.disabled = false; }
     }); section.append(form); return [section];
   },
   // Storage (#436, #671): what each project keeps in trajectory files, records and blobs and on its project computer, read
@@ -260,18 +268,18 @@ const settingsCards = {
     const [min, max] = settings.task_concurrency_bounds, concurrency = card('同时运行的任务');
     const form = document.createElement('form'), value = input('task_concurrency', settings.task_concurrency, { type: 'number', min, max, step: 1, required: true });
     const message = element('p', '', 'view-error'), actions = element('div', '', 'actions form-actions'), submit = element('button', '保存');
-    form.className = 'project-form'; form.noValidate = true; submit.type = 'submit'; message.setAttribute('role', 'alert'); actions.append(submit);
+    form.className = 'project-form'; form.noValidate = true; submit.type = 'submit'; message.setAttribute('role', 'status'); actions.append(submit);
     form.append(field('每台电脑默认同时运行的任务数', value),
       note(`取 ${min}–${max}。工作电脑是项目里 Manager、Dev、QA 等工作角色执行任务的虚拟电脑，每个仓库一台；项目在「机器配置」里没有单独设置时使用这个值，超出的任务继续排队。同时运行的任务各用自己的工作目录，共用这台电脑的 CPU、内存和进程数上限。`),
       message, actions);
     form.addEventListener('submit', async event => {
-      event.preventDefault(); message.className = 'view-error'; message.textContent = '';
-      if (!value.checkValidity()) { message.textContent = `需要 ${min}–${max} 之间的整数`; value.focus(); return; }
+      event.preventDefault(); message.className = 'view-error'; announceSave(message, '', false);
+      if (!value.checkValidity()) { announceSave(message, `需要 ${min}–${max} 之间的整数`, true); value.focus(); return; }
       submit.disabled = true;
       try {
         const saved = await api('/api/settings', 'PATCH', { task_concurrency: Number(value.value) });
-        value.value = saved.settings.task_concurrency; message.className = 'view-success'; message.textContent = '已保存，新任务按这个并发数排队';
-      } catch (err) { message.textContent = readErrorText(err); } finally { submit.disabled = false; }
+        value.value = saved.settings.task_concurrency; message.className = 'view-success'; announceSave(message, '已保存，新任务按这个并发数排队', false);
+      } catch (err) { message.className = 'view-error'; announceSave(message, readErrorText(err), true); } finally { submit.disabled = false; }
     });
     concurrency.append(form);
     const resources = { computer: settings.computer_defaults };
