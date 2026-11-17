@@ -18,7 +18,7 @@ export const roleKind = (id: string): RoleKind => Object.hasOwn(builtinKinds, id
  * admission requires a harness that executes inside it and the manager's inspection of that container.
  */
 const environments = [
-  { id: 'control-session', kinds: ['controller'], workspace: 'empty', repository: false, description: 'Fresh restricted Pi session per task run; no repository checkout or shell.' },
+  { id: 'control-session', kinds: ['controller'], workspace: 'empty', repository: false, description: 'Dedicated controller session; native tools follow the role execution permissions.' },
   { id: 'task-workspace', kinds: ['writer'], workspace: 'task', repository: true, description: 'The task workspace that holds the candidate.' },
   { id: 'candidate-checkout', kinds: ['observer'], workspace: 'disposable', repository: true, description: 'A disposable checkout of the fixed candidate snapshot.' },
   { id: 'evaluation-checkout', kinds: ['evaluator'], workspace: 'disposable', repository: true, description: 'A fresh checkout of the exact candidate for independent acceptance.' },

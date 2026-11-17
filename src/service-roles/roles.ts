@@ -1,3 +1,4 @@
+import {addColumns,operationRefColumns} from '../storage/trajectories.js';
 import type { Store, Row } from '../storage/database.js';
 import { modelServes } from '../models/sharing.js';
 import { fail, fields, object, randomId, text, type Json } from '../core/security.js';
@@ -33,6 +34,9 @@ export function serviceRoleStorage(store: Store): void {
   store.db.exec(`CREATE TABLE IF NOT EXISTS service_roles(id TEXT PRIMARY KEY,builtin INTEGER NOT NULL DEFAULT 0,enabled INTEGER NOT NULL DEFAULT 1,
     name TEXT NOT NULL,responsibility TEXT NOT NULL DEFAULT '',prompt TEXT NOT NULL DEFAULT '',model_id TEXT,permissions TEXT,budget TEXT,
     revision INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`);
+  store.db.exec(`CREATE TABLE IF NOT EXISTS service_harness_sessions(id TEXT PRIMARY KEY,service_role_id TEXT NOT NULL,turn_id TEXT NOT NULL,state TEXT NOT NULL DEFAULT '{}',updated_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS service_harness_turn ON service_harness_sessions(turn_id);CREATE TABLE IF NOT EXISTS service_harness_events(id INTEGER PRIMARY KEY,session_id TEXT NOT NULL REFERENCES service_harness_sessions(id),type TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS service_role_operations(id TEXT PRIMARY KEY,turn_id TEXT NOT NULL,request TEXT NOT NULL,result TEXT,state TEXT NOT NULL);`);
+  addColumns(store.db,'service_role_operations',operationRefColumns);
+  if(!store.all('PRAGMA table_info(service_roles)').some(c=>c.name==='harness'))store.db.exec("ALTER TABLE service_roles ADD COLUMN harness TEXT NOT NULL DEFAULT 'native'");
   // Built-in roles are written once and then belong to the administrator; a restart never overwrites their edits.
   // A deployment that already chose a default shared model in the wizard starts them with it.
   // The project owning a group assistant role (#849); global templates have none.
@@ -114,6 +118,7 @@ export function serviceRoleUsage(store: Store, id: string): Json {
 export function serviceRoleView(store: Store, row: Row): Json {
   const model = row.model_id ? store.get('SELECT id,model_name,api_url,api_key,repository_id FROM models WHERE id=?', row.model_id) : undefined;
   return { id: row.id, builtin: !!row.builtin, enabled: !!row.enabled, name: row.name, responsibility: row.responsibility, prompt: row.prompt,
+    harness: row.harness??'native',
     project: row.project_id ? { id: row.project_id, full_name: store.get('SELECT full_name FROM repositories WHERE id=?', row.project_id)?.full_name ?? row.project_id } : null,
     model_id: row.model_id, model: model ? { id: model.id, model_name: model.model_name, api_url: model.api_url, key_configured: !!model.api_key, project_id: model.repository_id ?? null } : null,
     ...(row.id === managementAssistant ? { permissions: fullPermissions() } : {}), permissions_fixed: row.id===managementAssistant,
@@ -134,9 +139,10 @@ function roleModel(store: Store, value: unknown, project: string | null): string
   return id;
 }
 // Accept legacy budget payloads for older clients; definition ignores them and clears the stored value.
-const editable = ['name', 'responsibility', 'prompt', 'model_id', 'permissions', 'budget', 'enabled'];
+const editable = ['name', 'responsibility', 'prompt', 'model_id', 'permissions', 'budget', 'enabled', 'harness'];
 /** Field values for an insert or update; `current` is the stored row when editing. */
 function definition(store: Store, input: Json, current?: Row, project?: string | null) {
+  if(input.harness!==undefined&&!['native','pi','codex','claude_code'].includes(String(input.harness)))fail(400,'unknown_role_harness','harness');
   const builtin = !!current?.builtin, fixed = current?.id === managementAssistant;
   if (input.permissions !== undefined && fixed) {
     const given=object(input.permissions),full=fullPermissions();
@@ -153,6 +159,7 @@ function definition(store: Store, input: Json, current?: Row, project?: string |
     model_id: input.model_id !== undefined ? roleModel(store, input.model_id, current ? current.project_id ?? null : project ?? null) : current?.model_id ?? null,
     // Kept as they were: only bindings migrated before #849 read them, once. New roles carry none.
     permissions: fixed ? JSON.stringify(fullPermissions()) : current ? store.get('SELECT permissions FROM service_roles WHERE id=?', current.id)?.permissions ?? null : null,
+    harness: input.harness??current?.harness??'native',
     budget: null,
     enabled: input.enabled !== undefined ? (input.enabled ? 1 : 0) : current?.enabled ?? 1,
   };
@@ -171,6 +178,7 @@ export function createServiceRole(store: Store, userId: string, input: Json, pro
     store.run(`INSERT INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,revision,created_at,updated_at,project_id)
       VALUES(?,0,?,?,?,?,?,?,?,1,?,?,?)`, id, value.enabled, value.name, value.responsibility, value.prompt, value.model_id, value.permissions, value.budget, time, time, project);
     store.audit(userId, 'service_role.created', id, project);
+    store.run('UPDATE service_roles SET harness=? WHERE id=?',value.harness,id);
   });
   return serviceRoleView(store, serviceRole(store, id)!);
 }
@@ -187,6 +195,7 @@ export function updateServiceRole(store: Store, userId: string, id: string, inpu
     store.run(`UPDATE service_roles SET name=?,responsibility=?,prompt=?,model_id=?,permissions=?,budget=?,enabled=?,revision=revision+1,updated_at=?
       WHERE id=? AND revision=?`, value.name, value.responsibility, value.prompt, value.model_id, value.permissions, value.budget, value.enabled, now(), id, expected);
     store.audit(userId, 'service_role.updated', id, current.project_id ?? null);
+    store.run('UPDATE service_roles SET harness=? WHERE id=?',value.harness,id);
     return serviceRoleView(store, serviceRole(store, id)!);
   });
 }

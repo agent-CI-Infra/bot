@@ -312,7 +312,7 @@ export class TaskCommands {
     }
     if(name==='manage_task'){
       fields(args,['task_id','action','instruction','base_ref','reason']);if(!['instructions','retry','pause','cancel','integrate'].includes(String(args.action)))fail(400,'task_operation_forbidden');
-      if(args.action!=='integrate'&&(args.base_ref!==undefined||args.reason!==undefined))fail(400,'unknown_field');
+      if(args.action!=='integrate'&&args.base_ref!==undefined)fail(400,'unknown_field');
       if(args.action!=='instructions'&&args.instruction!==undefined)fail(400,'unknown_field');
       try{return this.api(user,'POST',new URL('http://local/api/tasks/'+String(args.task_id)+'/'+args.action),args.action==='instructions'?{instruction:args.instruction}:args.action==='integrate'?{base_ref:args.base_ref,reason:args.reason}:{},caller)!;}
       catch(error){if(args.action!=='integrate'||!(error instanceof HttpError)||!['invalid_integration_request','integration_task_running','integration_snapshot_unavailable','integration_pr_unavailable'].includes(error.code))throw error;

@@ -34,6 +34,7 @@ function decisionCall(decision, id) {
 async function fixture(t) {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true });
+  saveConfiguration(h.store,'101',{expected_revision:roleConfiguration(h.store,'101').revision,enabled:true,roles:[{role_id:'manager',harness_ref:{id:'native'}}]},'fixture');
   const requests = [], state = { decide: null, status: 200 };
   const provider = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); requests.push(body);

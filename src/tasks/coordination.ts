@@ -113,7 +113,7 @@ export async function runCoordinator(s:Store,row:Row,token:string,manager?:Manag
  const guard=async()=>{const current=s.get('SELECT * FROM task_coordinations WHERE id=?',row.id);if(['cancelled','superseded'].includes(s.get('SELECT status FROM tasks WHERE id=?',source.id)?.status))stop('coordination_source_cancelled','cancelled');if(current?.claim_token!==token||current.state!=='running')stop('coordination_claim_revoked','cancelled');if(!s.get('SELECT id FROM tasks WHERE id=? AND repository_id=?',source.id,row.repository_id)||!s.get('SELECT enabled FROM policies WHERE repository_id=?',row.repository_id)?.enabled)stop('repository_policy_disabled','cancelled');};
  const submit={type:'function',function:{name:'submit_coordination',description:'Submit coordination advice or a concrete human decision; no product execution or delivery authority.',parameters:coordinationResultSchema}};
  const prepare:NonNullable<RoleRunOptions['prepare']>=async(instance,resolved)=>{
-  if(resolved.snapshot.harness.id!=='pi')return;
+  if(!['pi','codex','claude_code'].includes(resolved.snapshot.harness.id))return;
   if(!manager)stop('pi_environment_required','waiting_configuration','Coordinator 的 Pi 后端需要项目电脑连接。');
   const environment=await manager!.call('GET','/v1/projects/'+row.repository_id);
   if(!environment||!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment');

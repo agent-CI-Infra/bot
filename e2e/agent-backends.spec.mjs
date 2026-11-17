@@ -58,10 +58,9 @@ test('角色按能力选择 Agent 后端：仅开放 Claude Code 与 Codex 外�
       expect(optionValues).toEqual(['pi', 'claude_code', 'codex', 'native', 'process']);
       const optionDisabled = (value) => picker.locator(`option[value="${value}"]`).evaluate(el => el.disabled);
       for (const backend of ['pi', 'native', 'process']) expect(await optionDisabled(backend)).toBe(false);
-      // Claude Code and Codex App Server are worker-only backends (writer / observer / evaluator).
+      // Harness selection is independent of controller/worker role.
       for (const backend of ['claude_code', 'codex']) {
-        if (['coordinator', 'manager'].includes(role)) expect(await optionDisabled(backend)).toBe(true);
-        else expect(await optionDisabled(backend)).toBe(false);
+        expect(await optionDisabled(backend)).toBe(false);
       }
     }
     await goRolePage(page, { role: 'manager' });

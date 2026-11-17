@@ -14,6 +14,7 @@ import { claudeCodeRuntime, ClaudeJsonStream, claudeUserMessage, uuidPattern, ty
 import { COMPATIBLE_CLI_RANGES, DEFAULT_AGENT_TOOLS_ROOT, satisfiesCliRange, selectCompatibleCliVersion } from './agent-tools.js';
 import { readProviderCredentialFile, type FileBackedModelProvider } from './model-gateway.js';
 import { filterPlatformTools, withContainerHarnessSession } from './container-session.js';
+import { modelTransport, type ModelTransport } from './model-connection.js';
 
 export interface ClaudeProviderConfig {
   baseUrl: string;
@@ -21,16 +22,18 @@ export interface ClaudeProviderConfig {
 }
 
 export interface ClaudeConfiguration {
+  modelTransport?: ModelTransport;
   command?: string;
   version: string;
   stateDirectory: string;
   model: string;
-  provider: ClaudeProviderConfig;
+  provider?: ClaudeProviderConfig;
   timeoutMs?: number;
   env?: Record<string, string>;
 }
 
 export interface ClaudePreparation {
+  modelTransport: ModelTransport;
   mode: 'volume' | 'config_file';
   config?: ClaudeConfiguration;
   command: string;
@@ -83,7 +86,7 @@ export function claudeConfiguration(): ClaudeConfiguration {
   }
   if (
     !c ||
-    Object.keys(c).some(k => !['command', 'version', 'stateDirectory', 'model', 'provider', 'timeoutMs', 'env'].includes(k)) ||
+    Object.keys(c).some(k => !['command', 'version', 'stateDirectory', 'model', 'provider', 'timeoutMs', 'env', 'modelTransport'].includes(k)) ||
     typeof c.version !== 'string' ||
     !satisfiesCliRange('claude_code', c.version) ||
     typeof c.stateDirectory !== 'string' ||
@@ -96,19 +99,19 @@ export function claudeConfiguration(): ClaudeConfiguration {
   ) {
     return fail('claude_configuration_invalid');
   }
-  if (
+  if (c.provider !== undefined && (
     !c.provider ||
     typeof c.provider !== 'object' ||
     Array.isArray(c.provider) ||
     Object.keys(c.provider).some(k => !['baseUrl', 'credentialFile'].includes(k)) ||
     typeof c.provider.credentialFile !== 'string' ||
     !isAbsolute(c.provider.credentialFile)
-  ) {
+  )) {
     return fail('claude_configuration_invalid');
   }
   let url: URL;
   try {
-    url = new URL(c.provider.baseUrl);
+    url = new URL(c.provider?.baseUrl ?? 'https://api.anthropic.com');
   } catch {
     return fail('claude_configuration_invalid');
   }
@@ -126,18 +129,19 @@ export function claudeConfiguration(): ClaudeConfiguration {
   if (c.env !== undefined) {
     if (!c.env || typeof c.env !== 'object' || Array.isArray(c.env)) return fail('claude_configuration_invalid');
     for (const [k, v] of Object.entries(c.env)) {
-      if (typeof v !== 'string' || !/^FIXTURE_[A-Z0-9_]+$/.test(k)) return fail('claude_configuration_invalid');
+      if (typeof v !== 'string' || !/^[A-Z_][A-Z0-9_]*$/.test(k) || /^(BOT_|HOME$|PATH$|TMPDIR$)/.test(k)) return fail('claude_configuration_invalid');
       extraEnv[k] = v;
     }
   }
   return {
+    modelTransport: modelTransport(c.modelTransport),
     version: c.version,
     stateDirectory: c.stateDirectory,
     model: c.model,
     ...(c.command ? { command: c.command } : {}),
     ...(c.timeoutMs ? { timeoutMs: c.timeoutMs } : {}),
     ...(Object.keys(extraEnv).length ? { env: extraEnv } : {}),
-    provider: { baseUrl: c.provider.baseUrl, credentialFile: c.provider.credentialFile },
+    ...(c.provider ? {provider: { baseUrl: c.provider.baseUrl, credentialFile: c.provider.credentialFile }} : {}),
   };
 }
 
@@ -189,6 +193,7 @@ export async function prepareClaudeCode<T>(spec: AgentSpec<T>): Promise<ClaudePr
 
   if (process.env.BOT_CLAUDE_CODE_CONFIG) {
     const config = claudeConfiguration();
+    for(const [name,value] of Object.entries(config.env??{}))if(/key|token|secret|password/i.test(name))spec.redactor.add(value);
     const command = config.command ?? claudeBinary();
     privateDirectory(config.stateDirectory);
     const dir = mkdtempSync(join(config.stateDirectory, 'preflight-'));
@@ -206,16 +211,17 @@ export async function prepareClaudeCode<T>(spec: AgentSpec<T>): Promise<ClaudePr
       if (!match || match[1] !== config.version || !satisfiesCliRange('claude_code', match[1])) {
         return fail('claude_version_unsupported');
       }
-      const configurationHash = contentHash({ ...config, command, protocol: claudeCodeRuntime.protocol });
-      const fileProvider: FileBackedModelProvider = {
+      const configurationHash = contentHash({ ...config, command, modelTransport:modelTransport(spec.containerOptions?.modelTransport ?? config.modelTransport), protocol: claudeCodeRuntime.protocol });
+      const fileProvider: FileBackedModelProvider | undefined = config.provider ? {
         id: 'claude_config_provider',
         baseUrl: config.provider.baseUrl,
         credentialFile: config.provider.credentialFile,
         model: config.model,
         interfaceType: 'anthropic-messages',
         authHeader: 'x-api-key',
-      };
+      } : undefined;
       const prepared: ClaudePreparation = {
+        modelTransport: modelTransport(spec.containerOptions?.modelTransport ?? config.modelTransport),
         mode: 'config_file',
         config,
         command,
@@ -264,8 +270,10 @@ export async function prepareClaudeCode<T>(spec: AgentSpec<T>): Promise<ClaudePr
     model: modelName,
     model_id: primaryModel?.id ?? fileProvider?.id ?? 'provider',
     protocol: claudeCodeRuntime.protocol,
+    modelTransport:modelTransport(spec.containerOptions?.modelTransport),
   });
   const prepared: ClaudePreparation = {
+    modelTransport: modelTransport(spec.containerOptions?.modelTransport),
     mode: 'volume',
     command,
     ...(nodeExecutable ? { nodeExecutable } : {}),
@@ -298,7 +306,7 @@ const scope = (ctx: RunContext) => ({
 const identity = (value: any) => value && Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'assignment_id'));
 const inputs = (ctx: RunContext) =>
   contentHash({
-    source: ctx.source_ref,
+    source: ctx.conversation_id ? 'conversation:'+ctx.conversation_id : ctx.source_ref,
     contract: ctx.contract_revision,
     candidate: ctx.candidate_ref,
     role: ctx.role_revision,
@@ -343,7 +351,8 @@ async function preflightFileProvider(provider: FileBackedModelProvider, expected
 }
 
 function isAllowedClaudeTool(name: string, allowedMcpTools: Set<string>, egress: boolean): boolean {
-  if (name.startsWith('mcp__')) return allowedMcpTools.has(name);
+  if (name.startsWith('mcp__bot__')) return allowedMcpTools.has(name);
+  if(name.startsWith('mcp__'))return true;
   if (FORBIDDEN_CLAUDE_TOOLS.has(name)) return false;
   if (!egress && (name === 'WebFetch' || name === 'WebSearch')) return false;
   return /^[A-Z][A-Za-z0-9_]{0,63}$/.test(name);
@@ -358,7 +367,7 @@ export async function runClaudeCode<T>(
   const prepared = (spec.harnessPreparation as ClaudePreparation | undefined) ?? (await prepareClaudeCode(spec));
   const ctx = spec.runContext?.();
   if (!ctx || !spec.runAccess?.token) return fail('claude_run_context_required');
-  if (!['writer', 'observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '')) {
+  if (!['controller', 'writer', 'observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '')) {
     return fail('harness_role_unsupported');
   }
   await spec.guard();
@@ -377,8 +386,7 @@ export async function runClaudeCode<T>(
 
   const previous = spec.harnessState?.value ?? {};
   const fresh =
-    !!ctx.conversation_id ||
-    ['observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '') ||
+    ctx.execution_context?.kind === 'evaluator' ||
     spec.roleRun?.recovery_mode === 'rebuilt_from_task_records';
   if (!fresh && previous.sessionId && previous.scope && contentHash(identity(previous.scope)) !== contentHash(identity(scope(ctx)))) {
     return fail('claude_session_scope_mismatch');
@@ -515,8 +523,7 @@ export async function runClaudeCode<T>(
         !Array.isArray(m.tools) ||
         m.tools.some((n: string) => !isAllowedClaudeTool(n, allowedMcpSet, egress)) ||
         !Array.isArray(m.mcp_servers) ||
-        m.mcp_servers.length !== 1 ||
-        m.mcp_servers.some((s: any) => s.name !== 'bot' || s.status !== 'connected')
+        !m.mcp_servers.some((s: any) => s.name === 'bot' && s.status === 'connected')
       ) {
         return fail('claude_capability_mismatch');
       }
@@ -529,7 +536,7 @@ export async function runClaudeCode<T>(
         version: activeSession?.cliVersion ?? prepared.version,
         configuredModel: prepared.model,
         configurationHash: prepared.configurationHash,
-        usage: 'gateway',
+        usage: prepared.modelTransport === 'gateway' ? 'gateway' : 'native_events',
       });
       return;
     }
@@ -584,17 +591,18 @@ export async function runClaudeCode<T>(
       } else if (c.type === 'tool_use') {
         if (!isAllowedClaudeTool(c.name, allowedMcpSet, egress)) {
           spec.onDenied?.(c.name, 'not_offered');
+          if(c.name.startsWith('mcp__bot__')){emit({type:'tool',callId:c.id,name:c.name,phase:'denied',reason:'not_offered'});continue;}
           return fail('claude_tool_denied');
         }
-        // Only platform MCP tool invocations emit RoleRun tool events; native CLI commands/edits are not logged one-by-one.
-        if (c.name.startsWith('mcp__bot__')) {
+        // Native activity is part of provenance too, not only Bot MCP calls.
+        {
           emit({ type: 'tool', callId: c.id, name: c.name, phase: 'started', raw_cursor: at });
         }
       }
     }
     if (m.type === 'result') {
       reportProvisionalUsage('result', m.usage);
-      if (!m.is_error && m.subtype === 'success' && !activeSession?.dispatcher.submitted && submissionRepairs < 2) {
+      if (!spec.onTurnEnd && !m.is_error && m.subtype === 'success' && !activeSession?.dispatcher.submitted && submissionRepairs < 2) {
         submissionRepairs++;
         result = undefined;
         void activeSession?.writeStdin(
@@ -618,9 +626,11 @@ export async function runClaudeCode<T>(
       spec,
       {
         cli: 'claude_code',
+        modelTransport: prepared.modelTransport,
+        ...(prepared.config?.env?.CLAUDE_CONFIG_DIR ? {claudeHomeOverride:prepared.config.env.CLAUDE_CONFIG_DIR} : {}),
         model: prepared.model,
         systemPrompt,
-        maxTurns: spec.maxTurns ?? 32,
+        maxTurns: spec.harnessAccess ? spec.harnessTurnLimit : spec.maxTurns,
         maxOutputTokens: spec.maxOutputTokens ?? 8192,
         sessionId: requestedSid,
         resume: Boolean(compatible),
@@ -702,6 +712,7 @@ export async function runClaudeCode<T>(
           return fail('claude_process_exit', 'retry_wait', exitDetail);
         }
         if (!result) return fail('claude_result_missing', 'retry_wait');
+        if (!session.dispatcher.submitted&&spec.onTurnEnd) return await spec.onTurnEnd({text:String(result?.result??''),session_id:sid});
         if (!session.dispatcher.submitted) return fail('claude_submission_required', 'retry_wait');
         finished = true;
         return session.dispatcher.result as T;

@@ -1,3 +1,4 @@
+import {dispatchScope} from '../storage/trajectories.js';
 import { redactCredentials } from '../core/redaction.js';
 import {childTaskContext} from './children.js';
 import { ProjectMemory } from '../memory/project.js';
@@ -100,6 +101,13 @@ export function traceStorage(store:Store){
   END;`);
 }
 export function traceEvent(store:Store,taskId:string,type:string,data:any,runId?:string|null,actor='framework',causedBy:string[]=[]){
+  if(typeof taskId==='string'&&taskId.startsWith('dispatch:')){
+    const [eventId,attempt]=taskId.slice(9).split(':');
+    const event=store.get('SELECT * FROM dispatch_events WHERE id=?',eventId!);
+    if(event)return store.trajectories.append(dispatchScope(String(event.repository_id),String(event.id),Number(attempt??event.attempts)),'event',randomId(),{type,data:traceClean(data),actor,caused_by:causedBy});
+  }
+  const service=store.hasTable('service_harness_sessions')?store.get('SELECT id FROM service_harness_sessions WHERE turn_id=?',taskId):null;
+  if(service){const event=store.run('INSERT INTO service_harness_events(session_id,type,payload,created_at) VALUES(?,?,?,?)',service.id,type,store.secrets.seal({data:traceClean(data),actor,caused_by:causedBy},'service-harness:'+service.id),Date.now());return 'service_harness_event:'+event.lastInsertRowid;}
   if (!store.get('SELECT 1 FROM tasks WHERE id=?',taskId) && store.hasTable('role_conversation_turns') && store.get('SELECT 1 FROM role_conversation_turns WHERE id=?',taskId)) {
     if(store.get('SELECT state FROM role_conversation_turns WHERE id=?',taskId)?.state!=='running')return 'conversation_event:unavailable';
     store.run('INSERT INTO role_conversation_events(turn_id,type,payload,created_at) VALUES(?,?,?,?)',taskId,type,

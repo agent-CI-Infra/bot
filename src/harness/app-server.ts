@@ -41,8 +41,10 @@ export interface CodexDialectContext {
   codexHome: string;
   cwd: string;
   egress: boolean;
-  sandbox: 'danger-full-access' | 'workspace-write';
+  sandbox: 'danger-full-access' | 'workspace-write' | 'read-only';
   computerAllowed?: boolean;
+  fileWriteAllowed?: boolean;
+  recordNativeReceipt?:(item:Record<string,unknown>)=>string;
   model?: string;
   modelProvider?: string;
   mcpCommand: string;
@@ -92,11 +94,11 @@ const ignored = new Set([
 ]);
 const turnStatuses = ['completed', 'interrupted', 'failed', 'inProgress'];
 
-/** Native container tools enabled for Codex inside `<task_dir>/repo`, and external app/plugin extensions always disabled. */
+/** Native container tools enabled for Codex inside `<task_dir>/repo`, with optional extensions left to native configuration. */
 export const enabledFeatures = ['shell_tool', 'view_image', 'multi_agent'] as const;
-export const deniedFeatures = ['apps', 'plugins'] as const;
+export const deniedFeatures:readonly string[] = [];
 
-/** Native container items whose per-command execution is not logged one-by-one into RoleRun events (#705). */
+/** Native execution items recorded as public observations with separate full receipts. */
 const quietNativeItems = new Set(['commandExecution', 'fileChange', 'imageView', 'collabAgentToolCall', 'subAgentActivity']);
 
 class RpcError extends Error {
@@ -277,10 +279,11 @@ function decide(
   method: string,
   params: any,
   computerAllowed: boolean,
+  fileWriteAllowed=computerAllowed,
 ): { result?: unknown; error?: [number, string]; decision: string; allowed: boolean; reason: string } {
   switch (method) {
     case 'mcpServer/elicitation/request':
-      return params?.serverName === 'bot' && params?.mode !== 'url'
+      return params?.mode !== 'url'
         ? { result: { action: 'accept', content: {} }, decision: 'accept', allowed: true, reason: 'offered_task_tools_rechecked_by_control_plane' }
         : { result: { action: 'decline' }, decision: 'decline', allowed: false, reason: 'tool_server_not_offered' };
     case 'item/commandExecution/requestApproval':
@@ -288,7 +291,7 @@ function decide(
         ? { result: { decision: 'accept' }, decision: 'accept', allowed: true, reason: 'container_workspace_command_authorized' }
         : { result: { decision: 'decline' }, decision: 'decline', allowed: false, reason: 'computer_command_outside_role_authority' };
     case 'item/fileChange/requestApproval':
-      return computerAllowed
+      return fileWriteAllowed
         ? { result: { decision: 'accept' }, decision: 'accept', allowed: true, reason: 'container_workspace_edit_authorized' }
         : { result: { decision: 'decline' }, decision: 'decline', allowed: false, reason: 'computer_file_change_outside_role_authority' };
     case 'item/permissions/requestApproval':
@@ -322,6 +325,8 @@ const bounded = (value: unknown, limit = 8000) => {
 function itemFields(it: any, completed: boolean) {
   const status = typeof it.status === 'string' ? it.status : completed ? 'completed' : 'in_progress';
   switch (it.type) {
+    case 'commandExecution':return {kind:'command',title:clip(String(it.command??''),300),status,rawInput:{command:it.command,cwd:it.cwd},rawOutput:completed?{exit_code:it.exitCode,output:bounded(it.aggregatedOutput)}:null};
+    case 'fileChange':return {kind:'file_change',title:'file changes',status,rawInput:{changes:bounded(it.changes)},rawOutput:null};
     case 'mcpToolCall':
       return {
         kind: 'mcp',
@@ -357,6 +362,7 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
   const featurePolicy: Record<string, boolean> = {
     ...Object.fromEntries(enabledFeatures.map(name => [name, true])),
     ...Object.fromEntries(deniedFeatures.map(name => [name, false])),
+    shell_tool:computerAllowed,
   };
   let threadId = '';
   let cli: string | null = null;
@@ -463,11 +469,7 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
       const refused =
         it.type === 'dynamicToolCall'
           ? 'dynamic_tool_not_registered'
-          : it.type === 'webSearch' && !ctx.egress
-            ? 'web_search_disabled'
-            : it.type === 'mcpToolCall' && it.server !== 'bot'
-              ? 'tool_server_not_offered'
-              : null;
+          : it.type === 'webSearch' && !ctx.egress ? 'web_search_disabled' : null;
       if (refused) {
         emit({ type: 'tool', callId: it.id, threadId, turnId: p.turnId, itemType: it.type, phase: completed ? 'completed' : 'started', ...redactor.clean(itemFields(it, completed)) });
         refuse(it.type, refused, p.turnId, it.id);
@@ -483,8 +485,8 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
         return;
       }
       // Native container commands, file edits, image reads and sub-agents run inside the isolated container and are not logged one-by-one.
-      if (quietNativeItems.has(it.type)) return;
-      emit({ type: 'tool', callId: it.id, threadId, turnId: p.turnId, itemType: it.type, phase: completed ? 'completed' : 'started', ...redactor.clean(itemFields(it, completed)) });
+      const rawRef=completed&&quietNativeItems.has(it.type)?ctx.recordNativeReceipt?.(it):undefined;
+      emit({ ...(rawRef?{raw_ref:rawRef}:{}),type: 'tool', callId: it.id, threadId, turnId: p.turnId, itemType: it.type, phase: completed ? 'completed' : 'started', ...redactor.clean(itemFields(it, completed)) });
     } else if (method === 'thread/tokenUsage/updated') {
       if (!ours(params, method)) return;
       const total = usageOf(check.usage(params));
@@ -549,7 +551,7 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
 
   const request = (n: number | string, method: string, params: any) => {
     void (async () => {
-      let reply = decide(method, params, computerAllowed);
+      let reply = decide(method, params, computerAllowed, ctx.fileWriteAllowed??computerAllowed);
       if (params?.threadId !== undefined && params.threadId !== threadId) {
         if (reply.allowed) reply = { result: declinePayload(method), decision: 'decline', allowed: false, reason: 'foreign_thread' };
         else reply = { ...reply, reason: 'foreign_thread' };
@@ -601,7 +603,7 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
     const sandbox = (thread.sandbox as any)?.type ?? thread.sandbox;
     const allowedSandboxes = ctx.sandbox === 'danger-full-access'
       ? ['dangerFullAccess', 'danger-full-access']
-      : ['workspaceWrite', 'workspace-write', 'dangerFullAccess', 'danger-full-access'];
+      : ctx.sandbox==='read-only'?['readOnly','read-only']:['workspaceWrite', 'workspace-write'];
     if (thread.approvalPolicy !== 'never' || !allowedSandboxes.includes(String(sandbox))) {
       stop(
         'codex_builtin_tools_enabled',
@@ -622,7 +624,8 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
     if (forbiddenOn.length) {
       stop('codex_builtin_tools_enabled', 'waiting_configuration', `Codex 未授权功能未关闭：${forbiddenOn.join(', ')}`);
     }
-    const missingEnabled = enabledFeatures.filter(name => state.get(name) === false);
+    const missingEnabled = enabledFeatures.filter(name => (name!=='shell_tool'||ctx.computerAllowed!==false)&&state.get(name) === false);
+    if(ctx.computerAllowed===false&&state.get('shell_tool')===true)stop('harness_permission_mismatch','waiting_configuration','Shell is enabled despite the configured command denial.');
     if (missingEnabled.length) {
       stop('codex_builtin_tools_enabled', 'waiting_configuration', `Codex 容器原生工具未开启：${missingEnabled.join(', ')}`);
     }
@@ -651,9 +654,7 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
     const listed = await rpc.request('mcpServerStatus/list', { threadId, detail: 'toolsAndAuthOnly' });
     need(Array.isArray(listed?.data) && listed.data.every((s: any) => typeof s?.name === 'string'), 'mcpServerStatus/list.result');
     const extra = listed.data.map((s: any) => String(s.name)).filter((name: string) => name !== 'bot');
-    if (extra.length || listed.nextCursor) {
-      stop('codex_unauthorized_tool_servers', 'waiting_configuration', `Codex 会话加载了未授权的 MCP/插件服务：${extra.join(', ') || '(more pages)'}`);
-    }
+    emit({type:'configuration',stage:'tool_servers',servers:listed.data.map((server:any)=>server.name),has_more:!!listed.nextCursor});
     const exposed = Object.keys(listed.data.find((s: any) => s.name === 'bot')?.tools ?? {}).sort();
     const offered = [...ctx.tools].sort();
     if (exposed.join('\n') !== offered.join('\n')) {

@@ -1,3 +1,5 @@
+// Controlled provider fixtures exercise the explicit gateway transport.
+process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 // Real Git + runner + SQLite + engine/publication; GitHub and the repair model are controlled transports.
 import test from 'node:test';
 import assert from 'node:assert/strict';

@@ -1,3 +1,5 @@
+// Legacy conversation fixtures verify gateway accounting and use a synthetic non-streaming provider.
+process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import test from 'node:test';
 import { modelSnapshot } from '../dist/storage/payloads.js';
 import assert from 'node:assert/strict';
@@ -60,6 +62,9 @@ for(const harness of ['native','process','pi'])test(`generic conversation uses t
   assert.ok(f.requests.every(r=>!r.tools.some(t=>['run_command','delegate_role','create_pull_request'].includes(t.function.name))));
   const ledger=f.store.get('SELECT * FROM model_requests');assert.equal(ledger.task_id,null);assert.equal(ledger.conversation_id,f.source.id);assert.equal(ledger.role_id,'reviewer');assert.equal(ledger.source_message,'source-1');
   if(harness==='pi'){
+    const firstSession=JSON.parse(f.store.get('SELECT harness_state FROM role_instances WHERE conversation_id=?',f.source.id).harness_state).sessionId;
+    assert.ok(firstSession);await f.conversations.run(f.next());
+    assert.equal(JSON.parse(f.store.get('SELECT harness_state FROM role_instances WHERE conversation_id=?',f.source.id).harness_state).sessionId,firstSession);
     assert.ok(f.store.get('SELECT count(*) n FROM role_conversation_operations').n>0);
     assert.equal(f.store.get('SELECT count(*) n FROM task_tools').n,0);
     assert.ok(!JSON.stringify(f.store.all('SELECT request,result FROM role_conversation_operations')).includes('A source-bound response'));
@@ -83,7 +88,9 @@ for(const harness of ['codex','claude_code'])test(`non-task ${harness} uses its 
   if(harness==='codex'){assert.equal(rows[0].input_tokens,100);assert.equal(rows[0].output_tokens,10);}
   if(harness==='claude_code'){assert.equal(rows[0].input_tokens,9);assert.equal(rows[0].output_tokens,3);assert.equal(f.requests.length,1);}
   const text=JSON.stringify(f.store.all('SELECT * FROM role_conversation_events'));assert.ok(!text.includes('PRIVATE_FIXTURE_REASONING'));
+  const nativeSession=JSON.parse(instance.harness_state).sessionId;assert.ok(nativeSession);
   await f.conversations.run(f.next());assert.equal(f.store.get('SELECT count(*) n FROM role_instances WHERE conversation_id=?',f.source.id).n,1);
+  assert.equal(JSON.parse(f.store.get('SELECT harness_state FROM role_instances WHERE id=?',instance.id).harness_state).sessionId,nativeSession);
   assert.equal(f.store.get('SELECT count(*) n FROM model_requests').n,2);
 });
 

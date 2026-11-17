@@ -1,3 +1,4 @@
+import {managedSession} from '../harness/session.js';
 import { resultSpec, resultOwner } from './tool-results.js';
 import { executionModel, taskConfiguration, supplementalInstructions } from '../tasks/configuration.js';
 import { beginRun, endRun, traceEvent, traceSnapshot, withRunTraceScope } from '../tasks/trace.js';
@@ -18,7 +19,7 @@ export interface AgentServices {
   /** `onRetry` hears about each retry of this one request, for a caller that must keep someone waiting meanwhile.
    * `retry: false` sends an optional request once: a caller that can do without its result should not wait out retries. */
   request: (body: Record<string, any>, requestId: string, onToken?: (delta?: ModelDelta) => Promise<void>, onFinish?: (reason: string) => Promise<void>,
-    options?: { onRetry?: (retry: ModelRetry) => void | Promise<void>; retry?: false }) => ReturnType<typeof requestModel>;
+    options?: { onRetry?: (retry: ModelRetry) => void | Promise<void>; retry?: false; harnessTools?: true }) => ReturnType<typeof requestModel>;
 }
 /** Run-local measurements and the receipts needed to investigate an interrupted provider request. */
 export interface ExternalUsage {
@@ -51,6 +52,13 @@ export interface AgentSpec<T> {
   store: Store;
   /** Trusted preparation and run binding for external protocol drivers; never supplied by model output. */
   harnessPreparation?: unknown;
+  /** Explicit backend request budget; entry-loop defaults must not become native Harness limits. */
+  harnessTurnLimit?:number;
+  harnessResources?:{path:string;content:string}[];
+  /** A native turn may end without proposing a business delivery. The caller records/coordinates that observation. */
+  onTurnEnd?: (turn:{text:string;session_id?:string})=>T|Promise<T>;
+  /** Native tools are owned and selected by the executing Harness, not platform RPC names. */
+  harnessAccess?: import('../harness/access.js').HarnessAccess;
   harnessBinding?: { model_revision?: string; harness_revision: string; cli_version?: string };
   runContext?: () => import('../roles/protocol.js').RunContext | undefined;
   /** Control-plane snapshot of the active workspace. Never populated from a CLI report. */
@@ -75,6 +83,7 @@ export interface AgentSpec<T> {
   roleWorkspace?: import('./workspace.js').Workspace;
   /** Trusted container harness options (never populated from model output). */
   containerOptions?: {
+    modelTransport?: import('../harness/model-connection.js').ModelTransport;
     manager?: import('../projects/service.js').Manager;
     egress?: boolean;
     githubApiUrl?: string;
@@ -169,12 +178,13 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
     model, outputTokens:spec.maxOutputTokens, guard: spec.guard,
     request: async (body, requestId, onToken, onFinish, options) => {
       if(spec.modelTrace?.source==='external_harness')return stop('external_harness_model_request','failed');
-      if (body.tools !== undefined && (!Array.isArray(body.tools) || body.tools.some((tool: any) => !tool || tool.type !== 'function' || !allowed.has(tool.function?.name))))
+      const nativeTools = options?.harnessTools === true || spec.roleRun?.harness === 'pi' && spec.harnessAccess !== undefined;
+      if (!nativeTools && body.tools !== undefined && (!Array.isArray(body.tools) || body.tools.some((tool: any) => !tool || tool.type !== 'function' || !allowed.has(tool.function?.name))))
         return stop('agent_tool_not_allowed', 'failed', 'Agent 请求使用未授权的工具。');
       const choice = body.tool_choice;
-      if (choice && typeof choice === 'object' && !allowed.has(choice.function?.name))
+      if (!nativeTools && choice && typeof choice === 'object' && !allowed.has(choice.function?.name))
         return stop('agent_tool_not_allowed', 'failed', 'Agent 请求使用未授权的工具。');
-      const tools = body.tools?.map((tool: any) => allowed.get(tool.function.name));
+      const tools = nativeTools ? body.tools : body.tools?.map((tool: any) => allowed.get(tool.function.name));
       for (let attempt = 0; ; attempt++) {
         try { await spec.beforeModel?.(); return await requestModel({ ...spec, model, body: { ...body, ...(tools ? { tools } : {}) }, requestId: (spec.requestPrefix || '') + requestId, onToken, onFinish }); }
         catch (error) {
@@ -200,7 +210,12 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   if(run&&spec.roleRun){const r=spec.roleRun;spec.store.run('UPDATE task_runs SET role_instance_id=?,role=?,role_version=?,harness=?,harness_version=?,assignment_id=?,recovery_mode=?,role_snapshot=? WHERE id=?',r.instance_id,r.role,r.version,r.harness,r.harness_version??'1',r.assignment_id??null,r.recovery_mode,r.snapshot_id??null,run.id);}
   if(run)spec.onRun?.(run.id);
     const activeRole = spec.roleRun?.role ?? (typeof spec.task.active_role === 'string' ? spec.task.active_role : null);
-    const result = await withRunTraceScope(String(spec.task.id ?? ''), run?.id ?? null, activeRole, () => spec.adapter ? spec.adapter(services) : runTools(spec, services));
+    const connection = spec.roleRun ? null : managedSession(signal => { const current = {...spec,executionSignal:signal}; return current.adapter ? current.adapter({...services,guard:async()=>{if(signal.aborted)throw signal.reason;await services.guard();}}) : runTools(current,services); }, event=>spec.onHarnessEvent?.(event));
+    const abort=()=>void connection?.cancel(spec.executionSignal?.reason);
+    spec.executionSignal?.addEventListener('abort',abort,{once:true});
+    let result:T;
+    try{if(spec.executionSignal?.aborted)throw spec.executionSignal.reason;result=await withRunTraceScope(String(spec.task.id??''),run?.id??null,activeRole,()=>connection?connection.run():spec.adapter?spec.adapter(services):runTools(spec,services));}
+    finally{spec.executionSignal?.removeEventListener('abort',abort);await connection?.close();}
     await spec.guard();endRun(spec.store,run,'succeeded');return result;
   } catch(error){endRun(spec.store,run,'fault',(error as any).code||'runtime_error');throw error;}
   finally {spec.task.trace_run_id=previousRun;}
@@ -294,7 +309,7 @@ async function subagent<T>(spec: AgentSpec<T>, services: AgentServices, args: an
   const parent = new Set((spec.tools ?? []).map(tool => tool.function?.name));
   const tools = spec.agents!.tools(args.permissions).filter(tool => tool.function?.name !== 'start_agent' && tool.function?.name !== spec.finish?.name && parent.has(tool.function?.name));
   const id = 'agent-' + randomId().slice(0, 12);
-  const child: AgentSpec<string> = { ...spec, system: spec.agents!.system + '\n\n' + args.instructions, prompt: args.task, tools, validate: undefined, adapter: undefined, agents: undefined, finish: undefined, repairInvalid: undefined, finalizationTools: undefined };
+  const child: AgentSpec<string> = { ...spec, system: spec.agents!.system + '\n\n' + args.instructions, prompt: args.task, tools, validate: undefined, adapter: undefined, agents: undefined, finish: undefined, onTurnEnd: undefined, repairInvalid: undefined, finalizationTools: undefined };
   try {
     const result = await runTools(child, { ...services, request: (body, requestId, onToken) => services.request(body, `${id}:${requestId}`, onToken) });
     return { agent_id: id, tools: tools.map(tool => tool.function.name), result };

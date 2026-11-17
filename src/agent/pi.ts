@@ -6,6 +6,7 @@ import type { AgentModel } from './gateway.js';
 import type { Store } from '../storage/database.js';
 import { finalizationReserve } from './tool-context.js';
 import { deliverMailboxToolReply } from '../roles/task-tools.js';
+import { modelTransport, nativeModelConnection } from '../harness/model-connection.js';
 
 /** The Pi SDK the project computer image installs (runner/package.json). scripts/check-runtime.mjs keeps the two equal. */
 export const piRuntime = { agent: 'pi', package: '@earendil-works/pi-coding-agent', version: '1.4.0' } as const;
@@ -13,7 +14,7 @@ export const piRuntime = { agent: 'pi', package: '@earendil-works/pi-coding-agen
 export interface PiConversation { history?: any[]; resume?: boolean; offset?: number; model?: AgentModel; boundary(stage: string): Promise<{prompt?: string, messages?: string[]}> }
 /**
  * One Pi session in a task workspace, driven through the runner mailbox. The control plane keeps the provider boundary
- * (every model request goes through services.request), the tool allowlist and every write; the runner process only runs
+ * for explicit gateway mode, the tool allowlist and every platform write; direct mode lets the native SDK connect to its provider. The runner process runs
  * the Pi SDK loop with the tools named in config.
  */
 export interface PiSession<T> {
@@ -73,6 +74,11 @@ export function piAdapter<T>(session: PiSession<T>) {
   });
   const pause = (ms: number) => abortable(new Promise(resolve => setTimeout(resolve, ms)));
   return async ({ request, model, outputTokens }: AgentServices): Promise<T> => {
+    config.model_transport = modelTransport(config.model_transport);
+    if(config.model_transport==='direct'){
+      config.native_model={...nativeModelConnection(model),model:model.model};
+      redactor.add(model.key);
+    }
     config.model = model.capabilities ? {context_window:model.capabilities.context_window,max_output_tokens:model.capabilities.max_output_tokens,reasoning:model.capabilities.reasoning} : {context_window:128000,max_output_tokens:8192,reasoning:false};
     config.output_tokens = outputTokens ?? config.model.max_output_tokens;
     const finishingNames=new Set(session.finalizationTools??config.finish_tools??[]);
@@ -86,7 +92,9 @@ export function piAdapter<T>(session: PiSession<T>) {
       session.runtime.report(runtime);
       if (runtime.version !== session.runtime.version) stop('harness_version_mismatch', 'waiting_configuration', `项目电脑的 Pi 版本是 ${runtime.version}，角色配置固定的是 ${session.runtime.version}；不会换用其他版本。`);
     }
-    const bytes = Buffer.from(JSON.stringify(redactor.clean(config))); if (bytes.length > 2 * 1024 * 1024) stop('agent_context_too_large', 'waiting_configuration', `执行上下文大小 ${bytes.length} 字节，超过 2 MiB 上限。`);
+    // The private runner bootstrap carries a native provider credential, never a tool result or prompt.
+    const wireConfig=redactor.clean(config);if(config.model_transport==='direct')wireConfig.native_model=config.native_model;
+    const bytes = Buffer.from(JSON.stringify(wireConfig)); if (bytes.length > 2 * 1024 * 1024) stop('agent_context_too_large', 'waiting_configuration', `执行上下文大小 ${bytes.length} 字节，超过 2 MiB 上限。`);
     if (!conversation?.resume && !session.resume) {
       for (let offset = 0; offset < bytes.length; offset += 30000) {
         const saved = await workspace.call(key + ':config:' + offset, { type: 'workspace_agent_config', base64: bytes.subarray(offset, offset + 30000).toString('base64'), offset, final: offset + 30000 >= bytes.length });

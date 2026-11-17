@@ -1,3 +1,4 @@
+import {serviceHarnessTurn} from '../harness/service-session.js';
 import { messageResultSources } from '../storage/tool-results.js';
 import { ResultSession, resultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
 import { hasCredentials } from '../core/redaction.js';
@@ -282,15 +283,17 @@ export class ManagementAgent {
           +(schedules?' conversation_schedules manages the timers of this private chat for its owner, for example a daily check that reports only when something is wrong.':'')+(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
           +administrator;
         const context={...this.context(base,conversation,id,input.content),...(onboarding?{onboarding:onboarding.context}:{}),...pendingRequests()};
-        await runAgent({store:this.store,task:{id,repository_id:null,...onboarding?.task,service_role_id:managementAssistant,kind:'management.agent',conversation_id:conversation,source_message:input.source_message},redactor,guard,
+        const turnSpec:import('../agent/runtime.js').AgentSpec<unknown>={store:this.store,task:{id,repository_id:null,...onboarding?.task,service_role_id:managementAssistant,kind:'management.agent',conversation_id:conversation,source_message:input.source_message},redactor,guard,
           model,executionSignal:signal,
           // A stalled or failed model request is retried instead of failing the message; the console drops any text it had streamed.
           onModelRetry:retry=>{this.event(id,'model_retry',{retry:retry.retry,retries:retry.retries,error:retry.code,delay_ms:retry.delay_ms});},
           system,
           prompt:JSON.stringify(context),tools:turnTools,
-          adapter:async({request})=>{
+          adapter:async(services)=>{
+            const {request}=services;
             ownHost={owner:{service_role_id:managementAssistant,kind:'management',owner_id:conversation,principal_id:actor.principal_id,fence:String(actor.authorization_revision)},
               system,tools:()=>tools,request:async(body,label)=>{media?.addImages(body.messages as any[]);return request(body,label).catch(error=>{if(media)media.modelError(error,body.messages as any[]);throw error;});},execute,check:guard,redact:value=>redactor.text(value),clean:value=>value};
+            if(role?.harness&&role.harness!=='native'){ownHost.run=async input=>serviceHarnessTurn({...turnSpec,system:input.system,prompt:input.prompt,tools:input.tools,guard:input.check,execute:async(name,args)=>input.execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence+':'+input.scope);const message=await serviceHarnessTurn({...turnSpec,execute:async(name,args)=>execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,role,computer,conversation+':'+fence);await guard();this.event(id,'reply',{text:redactor.text(message),authority:'advisory; see tool receipts'});return;}
             const messages:any[]=[{role:'system',content:system+(media?'\nThis Feishu message may contain real attachments: call list_message_resources, then read_message_resource or view_message_image to inspect them. Binary or large inputs need import_message_resource and computer tools. Use attach_message_resource, attach_workspace_file or create_reply_file to send actual attachments with your final answer. Never invent paths or resource IDs; selecting an attachment is not delivery.':'')},{role:'user',content:JSON.stringify(context)}];
             // One query per project across many projects is normal (#333): results share a budget per batch and older ones
             // fold away, so the conversation stays within the model's context however many calls the model makes.
@@ -356,7 +359,8 @@ export class ManagementAgent {
                 this.event(id,'reply',{text:'',silent:true,...silence?{reason:redactor.text(silence)}:{},authority:'advisory; see tool receipts'});return;
               }
             }
-          }});
+          }};
+        await runAgent(turnSpec);
       }
       await guard();if(media?.attachments.length&&silence===undefined)this.event(id,'attachments',{resource_ids:media.attachments,fence:media.fence});
       this.store.run("UPDATE management_messages SET state='completed',updated_at=? WHERE id=?",now(),id);this.event(id,'done',{state:'completed'});

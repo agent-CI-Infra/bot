@@ -103,7 +103,7 @@ function validateBrowserCall(call) {
   if (call.action !== 'close' && !normalizePolicy(call.policy)) throw new ManagerError('invalid_runner_request', 400);
   if (call.args !== undefined && (!call.args || typeof call.args !== 'object' || Array.isArray(call.args))) throw new ManagerError('invalid_runner_request', 400);
 }
-function validateCall(call) {
+export function validateCall(call) {
   if (!call || !runnerTypes.includes(call.type) || Object.keys(call).some(k => !runnerKeys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
   if (call.type === 'workspace_browser') validateBrowserCall(call);
   if (call.workspace_id !== undefined && !/^[a-f0-9]{48}$/.test(call.workspace_id) || call.idle !== undefined && call.idle !== true) throw new ManagerError('invalid_runner_request', 400);

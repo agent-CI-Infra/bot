@@ -30,6 +30,8 @@ export type CanonicalTurn =
   | { role: 'assistant'; parts: CanonicalAssistantPart[] };
 
 export interface CanonicalTool {
+  namespace?: string;
+  localName?: string;
   name: string;
   description?: string;
   inputSchema: Record<string, any>;
@@ -233,13 +235,13 @@ export function parseDownstreamRequest(format: ModelInterfaceType, body: Record<
         if (item.type === 'function_call') {
           const callId = String(item.call_id || item.id || 'call_' + randomUUID().replace(/-/g, '').slice(0, 16));
           const args = typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.arguments ?? {});
-          pushAssistantPart(turns, { type: 'tool_call', callId, name: String(item.name || 'tool'), argumentsJson: args });
+          pushAssistantPart(turns, { type: 'tool_call', callId, name: item.namespace ? String(item.namespace)+'__'+String(item.name || 'tool') : String(item.name || 'tool'), argumentsJson: args });
           continue;
         }
         if (item.type === 'custom_tool_call') {
           const callId = String(item.call_id || item.id || 'call_' + randomUUID().replace(/-/g, '').slice(0, 16));
           const args = JSON.stringify({ input: typeof item.input === 'string' ? item.input : String(item.input ?? '') });
-          pushAssistantPart(turns, { type: 'tool_call', callId, name: String(item.name || 'tool'), argumentsJson: args, custom: true });
+          pushAssistantPart(turns, { type: 'tool_call', callId, name: item.namespace ? String(item.namespace)+'__'+String(item.name || 'tool') : String(item.name || 'tool'), argumentsJson: args, custom: true });
           continue;
         }
         if (item.type === 'function_call_output' || item.type === 'custom_tool_call_output') {
@@ -291,11 +293,14 @@ export function parseDownstreamRequest(format: ModelInterfaceType, body: Record<
     }
     const tools: CanonicalTool[] = [];
     if (Array.isArray(body.tools)) {
-      for (const tool of body.tools) {
+      const expanded = body.tools.flatMap((tool: any) => tool?.type === 'namespace' && Array.isArray(tool.tools)
+        ? tool.tools.map((member: any) => ({...member, namespace: tool.name, localName: member.name, name: tool.name+'__'+member.name})) : [tool]);
+      for (const tool of expanded) {
         if (!tool || typeof tool !== 'object') continue;
         if (tool.type === 'custom' && typeof tool.name === 'string') {
           tools.push({
             name: tool.name,
+            ...(tool.namespace ? {namespace:tool.namespace,localName:tool.localName} : {}),
             ...(typeof tool.description === 'string' ? { description: tool.description } : {}),
             inputSchema: { type: 'object', properties: { input: { type: 'string' } }, required: ['input'], additionalProperties: false },
             custom: true,
@@ -305,6 +310,7 @@ export function parseDownstreamRequest(format: ModelInterfaceType, body: Record<
           if (typeof fn.name === 'string') {
             tools.push({
               name: fn.name,
+              ...(tool.namespace ? {namespace:tool.namespace,localName:tool.localName} : {}),
               ...(typeof fn.description === 'string' ? { description: fn.description } : {}),
               inputSchema: fn.parameters && typeof fn.parameters === 'object' ? fn.parameters : { type: 'object', properties: {} },
               ...(typeof fn.strict === 'boolean' ? { strict: fn.strict } : {}),
@@ -1019,7 +1025,12 @@ export class DownstreamResponseBuilder {
     private readonly stream: boolean,
     private model: string,
     private readonly customToolNames: ReadonlySet<string> = new Set(),
+    private readonly namespacedTools: ReadonlyMap<string, {namespace:string;name:string}> = new Map(),
   ) {}
+
+  private responseToolName(name: string | undefined) {
+    return (this.format === 'openai-responses' ? this.namespacedTools.get(name ?? '') : undefined) ?? {name: name || 'tool'};
+  }
 
   push(events: CanonicalStreamEvent[]): string {
     let out = '';
@@ -1149,11 +1160,11 @@ export class DownstreamResponseBuilder {
         if (isCustom) {
           const customInput = extractCustomInput(b.text);
           out += this.sseEvent('response.custom_tool_call_input.done', { type: 'response.custom_tool_call_input.done', sequence_number: this.seq++, item_id: b.itemId, output_index: b.outputIndex, input: customInput });
-          out += this.sseEvent('response.output_item.done', { type: 'response.output_item.done', sequence_number: this.seq++, output_index: b.outputIndex, item: { id: b.itemId, type: 'custom_tool_call', status: 'completed', call_id: b.callId || b.itemId, name: b.name || 'tool', input: customInput } });
+          out += this.sseEvent('response.output_item.done', { type: 'response.output_item.done', sequence_number: this.seq++, output_index: b.outputIndex, item: { id: b.itemId, type: 'custom_tool_call', status: 'completed', call_id: b.callId || b.itemId, ...this.responseToolName(b.name), input: customInput } });
         } else {
           const args = b.text || '{}';
-          out += this.sseEvent('response.function_call_arguments.done', { type: 'response.function_call_arguments.done', sequence_number: this.seq++, item_id: b.itemId, output_index: b.outputIndex, name: b.name || 'tool', arguments: args });
-          out += this.sseEvent('response.output_item.done', { type: 'response.output_item.done', sequence_number: this.seq++, output_index: b.outputIndex, item: { id: b.itemId, type: 'function_call', status: 'completed', call_id: b.callId || b.itemId, name: b.name || 'tool', arguments: args } });
+          out += this.sseEvent('response.function_call_arguments.done', { type: 'response.function_call_arguments.done', sequence_number: this.seq++, item_id: b.itemId, output_index: b.outputIndex, ...this.responseToolName(b.name), arguments: args });
+          out += this.sseEvent('response.output_item.done', { type: 'response.output_item.done', sequence_number: this.seq++, output_index: b.outputIndex, item: { id: b.itemId, type: 'function_call', status: 'completed', call_id: b.callId || b.itemId, ...this.responseToolName(b.name), arguments: args } });
         }
       }
     }
@@ -1202,7 +1213,7 @@ export class DownstreamResponseBuilder {
     const callId = sanitizeAnthropicId(b.callId || 'call_' + srcIndex);
     b.callId = b.callId || callId;
     if (this.format === 'anthropic-messages') {
-      return this.openAnthropicBlock(srcIndex, { type: 'tool_use', id: callId, name: b.name || 'tool', input: {} });
+      return this.openAnthropicBlock(srcIndex, { type: 'tool_use', id: callId, ...this.responseToolName(b.name), input: {} });
     }
     if (this.format === 'openai-responses') {
       let out = this.emitStart() + this.closeOpenResponsesBlocks(b);
@@ -1214,8 +1225,8 @@ export class DownstreamResponseBuilder {
           sequence_number: this.seq++,
           output_index: b.outputIndex,
           item: isCustom
-            ? { id: b.itemId, type: 'custom_tool_call', status: 'in_progress', call_id: b.callId, name: b.name || 'tool', input: '' }
-            : { id: b.itemId, type: 'function_call', status: 'in_progress', call_id: b.callId, name: b.name || 'tool', arguments: '' },
+            ? { id: b.itemId, type: 'custom_tool_call', status: 'in_progress', call_id: b.callId, ...this.responseToolName(b.name), input: '' }
+            : { id: b.itemId, type: 'function_call', status: 'in_progress', call_id: b.callId, ...this.responseToolName(b.name), arguments: '' },
         });
       }
       return out;
@@ -1224,7 +1235,7 @@ export class DownstreamResponseBuilder {
     if (!this.chatToolIndexMap.has(srcIndex)) {
       const idx = this.nextChatToolIndex++;
       this.chatToolIndexMap.set(srcIndex, idx);
-      out += `data: ${JSON.stringify({ id: this.id, object: 'chat.completion.chunk', created: this.createdAt, model: this.model, choices: [{ index: 0, delta: { tool_calls: [{ index: idx, id: b.callId, type: 'function', function: { name: b.name || 'tool', arguments: '' } }] }, finish_reason: null }] })}\n\n`;
+      out += `data: ${JSON.stringify({ id: this.id, object: 'chat.completion.chunk', created: this.createdAt, model: this.model, choices: [{ index: 0, delta: { tool_calls: [{ index: idx, id: b.callId, type: 'function', function: { ...this.responseToolName(b.name), arguments: '' } }] }, finish_reason: null }] })}\n\n`;
     }
     return out;
   }
@@ -1303,9 +1314,9 @@ export class DownstreamResponseBuilder {
       } else if (b.kind === 'tool') {
         const isCustom = !!(b.name && this.customToolNames.has(b.name));
         if (isCustom) {
-          output.push({ id: b.itemId, type: 'custom_tool_call', status: 'completed', call_id: b.callId || b.itemId, name: b.name || 'tool', input: extractCustomInput(b.text) });
+          output.push({ id: b.itemId, type: 'custom_tool_call', status: 'completed', call_id: b.callId || b.itemId, ...this.responseToolName(b.name), input: extractCustomInput(b.text) });
         } else {
-          output.push({ id: b.itemId, type: 'function_call', status: 'completed', call_id: b.callId || b.itemId, name: b.name || 'tool', arguments: b.text || '{}' });
+          output.push({ id: b.itemId, type: 'function_call', status: 'completed', call_id: b.callId || b.itemId, ...this.responseToolName(b.name), arguments: b.text || '{}' });
         }
       }
     }
@@ -1357,7 +1368,7 @@ export class DownstreamResponseBuilder {
     for (const b of this.orderedBlocks) {
       if (b.kind === 'thinking' && b.text) thinking.push(b.text);
       else if (b.kind === 'text' && b.text) texts.push(b.text);
-      else if (b.kind === 'tool') toolCalls.push({ id: b.callId || b.itemId, type: 'function', function: { name: b.name || 'tool', arguments: b.text || '{}' } });
+      else if (b.kind === 'tool') toolCalls.push({ id: b.callId || b.itemId, type: 'function', function: { ...this.responseToolName(b.name), arguments: b.text || '{}' } });
     }
     const finish = this.stopReason === 'tool_use' ? 'tool_calls' : this.stopReason === 'max_tokens' ? 'length' : this.stopReason === 'content_filter' ? 'content_filter' : 'stop';
     const inTok = this.usage.input_tokens ?? 0, outTok = this.usage.output_tokens ?? 0;

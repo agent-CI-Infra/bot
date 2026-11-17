@@ -1,3 +1,6 @@
+import {checkHarnessAccess} from '../harness/access.js';
+import {computeAllowedGithubScopes} from '../harness/container-session.js';
+import {ReadTokens} from '../agent/read-token.js';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -11,7 +14,7 @@ import { claudeCodeRuntime } from '../harness/claude-code-protocol.js';
 import { codexHarness, prepareCodex } from '../harness/codex.js';
 import { COMPATIBLE_CLI_RANGES } from '../harness/agent-tools.js';
 import type { AgentSpec,AgentServices } from '../agent/runtime.js';
-import { stop } from '../agent/common.js';
+import { TaskError, stop } from '../agent/common.js';
 import { traceEvent } from '../tasks/trace.js';
 import { piAdapter,piRuntime } from '../agent/pi.js';
 import type { RoleKind } from './catalog.js';
@@ -72,9 +75,9 @@ const containerRelayApis=['openai-chat-completions','openai-responses','anthropi
 // communicating with the control plane exclusively through the task mailbox (model relay, stdio MCP `bot`, read-only GitHub token helpers).
 const inProcess:HarnessCapabilities={raw_evidence:'control_plane_tools',cancel:'abort_signal',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['checkpoint_restore','rebuilt_from_task_records']};
 export const harnesses:Required<RoleHarnessMetadata>[]=[
- {id:'claude_code',version:claudeCodeRuntime.version,session:'external_session',events:claudeCodeRuntime.protocol,kinds:['writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:claudeCodeRuntime.package,version:COMPATIBLE_CLI_RANGES.claude_code.tested},externalModel:false,
+ {id:'claude_code',version:claudeCodeRuntime.version,session:'external_session',events:claudeCodeRuntime.protocol,kinds:['controller','writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:claudeCodeRuntime.package,version:COMPATIBLE_CLI_RANGES.claude_code.tested},externalModel:false,
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'run_environment',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
- {id:'codex',version:'1',session:'external_session',events:'codex_app_server_events_and_task_tools',kinds:['writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:'@openai/codex',version:codexAppServer.cli},externalModel:false,
+ {id:'codex',version:'1',session:'external_session',events:'codex_app_server_events_and_task_tools',kinds:['controller','writer','observer','evaluator'],model_api:containerRelayApis,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:'@openai/codex',version:codexAppServer.cli},externalModel:false,
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'run_environment',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
  {id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:inProcess},
  // A Node child process without an OS sandbox; its tool calls carry the run token over JSON-line RPC.
@@ -106,38 +109,64 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
  const base=env.session,tools=spec.tools??[],own=new Set((base?.config?.tools??[]).map((t:any)=>t.function.name)),finish=spec.finish;
  const control=tools.map(t=>t.function.name).filter(name=>!own.has(name)||(finish?.names??[finish?.name]).includes(name));
  const config={...(base?.config??{capabilities:{workspace:{read:false,write:false,notes:false,shell:false},github:{permissions:{},publication:'none'},agents:false,writes:[]},finish_tools:[],finish_on_pull_request:false,review_session:false}),
-  system:spec.system,prompt:spec.prompt,tools,control_tools:control,workspace_id:env.workspace.task.workspace_id};
+  model_transport:spec.containerOptions?.modelTransport,system:spec.system,prompt:spec.prompt,accept_turn_result:!!spec.onTurnEnd,resources:spec.harnessResources,tools,control_tools:control,workspace_id:spec.roleWorkspace?.task.workspace_id??env.workspace.task.workspace_id,...(spec.harnessAccess?{native_access:spec.harnessAccess,native_workspace_id:spec.roleWorkspace?.task.workspace_id,native_fresh:spec.roleRun?.role==='qa',native_previous_session_id:spec.harnessState?.value?.sessionId}:{}),session_key:spec.roleRun?.instance_id??spec.harnessSessionKey};
  return async(services:AgentServices):Promise<T>=>{
+  const nativeUsage=new Map<number,{input:number;output:number;known:boolean}>();
+  const repository=spec.task.repository_id?spec.store.get('SELECT * FROM repositories WHERE id=?',spec.task.repository_id):undefined;
+  const scopeInfo=computeAllowedGithubScopes(spec);
+  const reads=repository&&scopeInfo.initial.length?new ReadTokens(spec.store,repository,spec.redactor,spec.guard,spec.containerOptions?.githubApiUrl,scopeInfo.initial,scopeInfo.live,64):undefined;
   const dispatcher=createTaskToolDispatcher(spec,{maxRepairs:2,includeSubmissionDetails:true,skipScreen:true});
   const onAbort=()=>dispatcher.halt();
   if(spec.executionSignal){if(spec.executionSignal.aborted)onAbort();else spec.executionSignal.addEventListener('abort',onAbort,{once:true});}
+  const sessionWorkspace={call:env.workspace.call.bind(env.workspace),deliver:env.workspace.deliver.bind(env.workspace),log:(event:any)=>{
+   env.workspace.log(event);
+   if(event.type!=='tool'||event.phase&&['read','edit','write','bash','grep','find','ls'].includes(event.name))spec.onHarnessEvent?.(event);
+   if(event.type==='session_bound')spec.harnessState?.save({harness:'pi',sessionId:event.session_id,transcript:event.transcript,recoveryMode:event.recoveryMode,workspaceId:config.native_workspace_id??config.workspace_id});
+   if(event.type==='model'&&event.source==='pi_native'){
+    const u=event.usage,known=Number.isFinite(u?.input)&&Number.isFinite(u?.output);
+    nativeUsage.set(event.step,{input:known?u.input+(u.cacheRead??0)+(u.cacheWrite??0):0,output:known?u.output:0,known});
+    const rows=[...nativeUsage.values()];
+    spec.onExternalUsage?.({model_requests:rows.length,input_tokens:rows.reduce((n,r)=>n+r.input,0),output_tokens:rows.reduce((n,r)=>n+r.output,0),unknown_requests:rows.filter(r=>!r.known).length,semantics:'lower_bound',cost:'unknown',accounting_source:'pi_native_events'});
+    spec.onHarnessEvent?.({type:'usage',source:'pi_native',usage:u,model:event.model});
+   }
+  }};
   try{
-   return await piAdapter<T>({store:spec.store,taskId:spec.task.id,guard:spec.guard,workspace:env.workspace,redactor:spec.redactor,config,conversation:base?.conversation,platform:base?.platform,repository:base?.repository,token:base?.token,createPullRequest:base?.createPullRequest,publication:base?.publication,
-    offered:name=>tools.some(t=>t.function.name===name),ensureWorkspace:async()=>env.workspace.ensure?.()??{},resume:env.resume,key:env.key,signal:spec.executionSignal,maxRequests:base?undefined:spec.maxTurns??32,finalizationTools:spec.finalizationTools??(finish?.names??(finish?[finish.name]:[])),finalizationMessage:finish?.finalizationMessage,checkpoint:spec.checkpoint,runtime:env.runtime,
+   return await piAdapter<T>({store:spec.store,taskId:spec.task.id,guard:spec.guard,workspace:sessionWorkspace,redactor:spec.redactor,config,conversation:base?.conversation,platform:base?.platform,repository:base?.repository,token:base?.token??(reads?()=>reads.issue():undefined),createPullRequest:base?.createPullRequest,publication:base?.publication,
+    offered:name=>tools.some(t=>t.function.name===name),ensureWorkspace:async()=>(spec.roleWorkspace??env.workspace).ensure?.()??{},resume:env.resume,key:env.key,signal:spec.executionSignal,maxRequests:spec.harnessAccess?spec.harnessTurnLimit:base?undefined:spec.maxTurns??32,finalizationTools:spec.finalizationTools??(finish?.names??(finish?[finish.name]:[])),finalizationMessage:finish?.finalizationMessage,checkpoint:spec.checkpoint,runtime:env.runtime,
     // Pi may refuse a call itself (unknown tool, schema mismatch) before the control plane sees it; the model output always
     // passes through here, so every forbidden call is recorded whatever the runtime did with it.
-    inspect:message=>{for(const call of message?.tool_calls??[]){const name=String(call.function?.name);if(!tools.some(t=>t.function.name===name)){spec.onDenied?.(name,'not_offered');continue;}let args:any=null;try{args=JSON.parse(call.function.arguments);}catch{}spec.screen?.(name,args);}},
+    inspect:message=>{for(const call of message?.tool_calls??[]){const name=String(call.function?.name);if(spec.harnessAccess&&['read','edit','write','bash','grep','find','ls'].includes(name))continue;if(!tools.some(t=>t.function.name===name)&&!(spec.harnessAccess&&['read','edit','write','bash','grep','find','ls'].includes(name))){spec.onDenied?.(name,'not_offered');continue;}let args:any=null;try{args=JSON.parse(call.function.arguments);}catch{}spec.screen?.(name,args);}},
     control:async(name,args,meta)=>{
      const out=await dispatcher.call(dispatcher.token,{id:meta?.id??randomId(),name,arguments:args,transport:'mailbox'});
      return {result:out.observation,...(out.submitted?{finish:true}:{})};
     },
     complete:async(state,publication)=>{
      if(dispatcher.submitted)return dispatcher.result as T;
+     if(spec.onTurnEnd&&state.result?.harness_turn)return spec.onTurnEnd({text:String(state.result.text??''),session_id:state.result.session_id});
      // A session that finished while the control plane was away carries its submission; validate it again from task facts.
      if(finish&&state.result?.submitted===true)return finish.validate(state.result.submission,state.result.submission_name);
      if(base?.complete)return base.complete(state,publication);
      return stop('role_submission_required','retry_wait','Pi 会话结束但没有通过控制面提交结果。');
     }})(services);
-  }finally{spec.executionSignal?.removeEventListener('abort',onAbort);await dispatcher.close();}
+  }finally{spec.executionSignal?.removeEventListener('abort',onAbort);await dispatcher.close();await reads?.revoke();}
  };
 }
 export function roleHarness(id:string){
  if(!adapters.has(id))throw new Error('unknown_role_harness');const factory=adapters.get(id);
  const createSession=<T>(spec:AgentSpec<T>,services:AgentServices)=>{
   const emit=(event:import('../harness/session.js').HarnessEvent)=>{traceEvent(spec.store,spec.task.id,'harness_event',spec.redactor.clean(event),spec.task.trace_run_id,'harness');spec.onHarnessEvent?.(spec.redactor.clean(event));};
-  const session=managedSession(async signal=>{const wrapped={...spec,executionSignal:signal,guard:async()=>{if(signal.aborted)throw signal.reason;await spec.guard();}};return factory?factory(wrapped)({...services,guard:wrapped.guard}):runTools(wrapped,{...services,guard:wrapped.guard});},emit);
-  // A RoleRun cancel or an exhausted budget interrupts the session the same way the task guard does.
-  const external=spec.cancelSignal;if(external){const cancel=()=>void session.cancel(external.reason);if(external.aborted)cancel();else external.addEventListener('abort',cancel,{once:true});}
+  const external=spec.cancelSignal;
+  let nativeState=spec.harnessState?.value??{};
+  const cancel=()=>void session.cancel(external?.reason);
+  const session=managedSession(async(signal,message)=>{
+   if(external?.aborted)throw external.reason??new TaskError('harness_cancelled','cancelled');
+   checkHarnessAccess(id,spec.harnessAccess);
+   const wrapped:AgentSpec<T>={...spec,...(message!==undefined?{prompt:message}:{}),executionSignal:signal,
+    harnessState:{value:nativeState,save:value=>{nativeState=value;spec.harnessState?.save(value);}},
+    guard:async()=>{if(signal.aborted)throw signal.reason;await spec.guard();}};
+   return factory?factory(wrapped)({...services,guard:wrapped.guard}):runTools(wrapped,{...services,guard:wrapped.guard});
+  },emit,async()=>external?.removeEventListener('abort',cancel));
+  external?.addEventListener('abort',cancel,{once:true});
   return session;
  };
  return {...harnesses.find(h=>h.id===id)!,prepare:id==='claude_code'?prepareClaudeCode:id==='codex'?prepareCodex:undefined,createSession,adapter:<T>(spec:AgentSpec<T>)=>async(services:AgentServices)=>{

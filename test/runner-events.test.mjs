@@ -23,7 +23,7 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
     {name:'write_file',args:{path:'../notes/secret.md',content:'secret '+token}},
     {name:'read_file',args:{path:'file.txt'}},{name:'run_command',args:{command}},
     {name:'create_pull_request',args:{summary:'Ready',test_command:'true'}},{name:'finish_review',args:{summary:'Done'}}];
-  await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:id,system:'fixture',capabilities:workspaceProfile('development.issue',{}).capabilities,prompt:JSON.stringify(calls),tools:calls.map(({name})=>({function:{name,parameters:{type:'object'}}}))}));
+  await writeFile(join(dir,'input.json'),JSON.stringify({model_transport:'gateway',workspace_id:id,system:'fixture',capabilities:workspaceProfile('development.issue',{}).capabilities,prompt:JSON.stringify(calls),tools:calls.map(({name})=>({function:{name,parameters:{type:'object'}}}))}));
   const entry=pathToFileURL(resolve('runner/pi-entry.mjs')).href,fixture=pathToFileURL(resolve('test/fixtures/pi-session.mjs')).href;
   const hook=join(base,'hooks.mjs');await writeFile(hook,`import {registerHooks} from 'node:module';\nregisterHooks({resolve(specifier,context,next){if(specifier==='@earendil-works/pi-coding-agent'||context.parentURL===${JSON.stringify(entry)}&&specifier==='./workspace.mjs')return {url:${JSON.stringify(fixture)},shortCircuit:true};return next(specifier,context);}});`);
   const child=spawn(process.execPath,['--import',hook,'runner/pi-entry.mjs',root],{env:{...process.env,BOT_RUNNER_TEST_ROOT:base},stdio:['ignore','pipe','pipe']}),closed=once(child,'close');
@@ -54,8 +54,8 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
   assert.equal((await readFile(join(base,'project-notes/repository.md'))).length,131072);
   assert.equal(await readFile(join(base,'project-notes/secret.md'),'utf8'),'secret '+token);
   assert.equal(all.find(event=>event.type==='tool'&&event.arguments?.path==='../notes/secret.md').result.written,true);
-  // The session event comes first: the runtime and the exact tools, with no extensions, skills or context files mixed in.
-  const session=all.shift();assert.deepEqual([session.type,session.agent,session.extensions,session.skills,session.context_files],['pi_session','pi',0,0,0]);
+  // The legacy session event comes first and identifies its runtime and exact tool list. Native resources have their own binding event.
+  const session=all.shift();assert.deepEqual([session.type,session.agent,session.native],['pi_session','pi',false]);
   for(const [i,call] of calls.entries())assert.deepEqual(all.slice(i*3,i*3+3).map(event=>event.type),['model','tool_start','tool'],call.name);
   assert.equal(all.find(event=>event.type==='tool'&&event.name==='run_command').result.output,'[REDACTED]');
   assert.equal(all.at(-2).name,'finish_review');
@@ -98,7 +98,7 @@ test('review file tools can update project notes but refuse repository writes',a
   await mkdir(dir,{recursive:true});await mkdir(join(root,'repo'));t.after(()=>rm(base,{recursive:true,force:true}));
   const calls=[{name:'write_file',args:{path:'../notes/repository.md',content:'Review experience'}},
     {name:'write_file',args:{path:'tracked.md',content:'forbidden'}},{name:'finish_review',args:{summary:'Done'}}];
-  await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:id,system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),tools:['write_file','finish_review'].map(name=>({function:{name,parameters:{type:'object'}}}))}));
+  await writeFile(join(dir,'input.json'),JSON.stringify({model_transport:'gateway',workspace_id:id,system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),tools:['write_file','finish_review'].map(name=>({function:{name,parameters:{type:'object'}}}))}));
   const entry=pathToFileURL(resolve('runner/pi-entry.mjs')).href,fixture=pathToFileURL(resolve('test/fixtures/pi-session.mjs')).href,hook=join(base,'hooks.mjs');
   await writeFile(hook,`import {registerHooks} from 'node:module';registerHooks({resolve(specifier,context,next){if(specifier==='@earendil-works/pi-coding-agent'||context.parentURL===${JSON.stringify(entry)}&&specifier==='./workspace.mjs')return {url:${JSON.stringify(fixture)},shortCircuit:true};return next(specifier,context);}});`);
   const child=spawn(process.execPath,['--import',hook,'runner/pi-entry.mjs',root],{env:{...process.env,BOT_RUNNER_TEST_ROOT:base},stdio:['ignore','pipe','pipe']}),closed=once(child,'close');
@@ -115,7 +115,7 @@ test('review file tools can update project notes but refuse repository writes',a
 async function finishRun(t,{calls,env}){
   const base=await mkdtemp(join(tmpdir(),'pi-finish-')),id=randomWorkspaceId(),root=join(base,id),dir=join(root,'agent');
   await mkdir(dir,{recursive:true});await mkdir(join(root,'repo'));t.after(()=>rm(base,{recursive:true,force:true}));
-  await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:id,system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),
+  await writeFile(join(dir,'input.json'),JSON.stringify({model_transport:'gateway',workspace_id:id,system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),
     tools:['read_file','finish_review'].map(name=>({function:{name,parameters:{type:'object'}}}))}));
   await writeFile(join(root,'repo','README.md'),'fixture');
   const entry=pathToFileURL(resolve('runner/pi-entry.mjs')).href,fixture=pathToFileURL(resolve('test/fixtures/pi-session.mjs')).href,hook=join(base,'hooks.mjs');
@@ -156,7 +156,7 @@ test('a file tool without a checkout asks the control plane for the task worktre
   const base=await mkdtemp(join(tmpdir(),'pi-workspace-')),id=randomWorkspaceId(),root=join(base,id),dir=join(root,'agent');
   await mkdir(dir,{recursive:true});await mkdir(join(root,'context'));await writeFile(join(root,'context','object.json'),'{"title":"Fix"}');t.after(()=>rm(base,{recursive:true,force:true}));
   const calls=[{name:'read_file',args:{path:'../context/object.json'}},{name:'read_file',args:{path:'README.md'}},{name:'run_command',args:{command:'cat README.md'}},{name:'finish_review',args:{summary:'Done'}}];
-  await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:id,system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),
+  await writeFile(join(dir,'input.json'),JSON.stringify({model_transport:'gateway',workspace_id:id,system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),
     tools:['read_file','run_command','finish_review'].map(name=>({function:{name,parameters:{type:'object'}}}))}));
   const entry=pathToFileURL(resolve('runner/pi-entry.mjs')).href,fixture=pathToFileURL(resolve('test/fixtures/pi-session.mjs')).href,hook=join(base,'hooks.mjs');
   await writeFile(hook,`import {registerHooks} from 'node:module';registerHooks({resolve(specifier,context,next){if(specifier==='@earendil-works/pi-coding-agent'||context.parentURL===${JSON.stringify(entry)}&&specifier==='./workspace.mjs')return {url:${JSON.stringify(fixture)},shortCircuit:true};return next(specifier,context);}});`);
@@ -177,7 +177,7 @@ test('a task whose worktree cannot be made answers its file tools with the contr
   const base=await mkdtemp(join(tmpdir(),'pi-workspace-')),id=randomWorkspaceId(),root=join(base,id),dir=join(root,'agent');
   await mkdir(dir,{recursive:true});t.after(()=>rm(base,{recursive:true,force:true}));
   const calls=[{name:'read_file',args:{path:'README.md'}},{name:'finish_review',args:{summary:'Done'}}];
-  await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:id,system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),
+  await writeFile(join(dir,'input.json'),JSON.stringify({model_transport:'gateway',workspace_id:id,system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),
     tools:['read_file','finish_review'].map(name=>({function:{name,parameters:{type:'object'}}}))}));
   const entry=pathToFileURL(resolve('runner/pi-entry.mjs')).href,fixture=pathToFileURL(resolve('test/fixtures/pi-session.mjs')).href,hook=join(base,'hooks.mjs');
   await writeFile(hook,`import {registerHooks} from 'node:module';registerHooks({resolve(specifier,context,next){if(specifier==='@earendil-works/pi-coding-agent'||context.parentURL===${JSON.stringify(entry)}&&specifier==='./workspace.mjs')return {url:${JSON.stringify(fixture)},shortCircuit:true};return next(specifier,context);}});`);

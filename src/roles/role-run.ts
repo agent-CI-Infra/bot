@@ -339,6 +339,12 @@ export function requiredCapabilities(kind: string, environment: { isolation?: st
  * run. A missing capability stops the run before it starts with unsupported_capability; nothing is downgraded silently.
  * run_isolation and fixed_candidate_read are never satisfied by a declaration alone.
  */
+export class UnsupportedCapabilityError extends TaskError {
+  constructor(detail:string,readonly observation:{started:false;role:string;harness:string;environment:string|null;required:string[];missing:string[];available:string[];provided:Record<string,{ok:boolean;basis:string;evidence?:string|null}>;admission_ref:string|null}) {
+    super('unsupported_capability','waiting_configuration',detail);
+  }
+}
+
 export function admitRun(s: Store, input: { task: Row; role: string; kind: string; harness: { id: string; version: string; capabilities?: HarnessCapabilities }; environment: { id: string; isolation?: string } | null;
   environmentFacts?: EnvironmentFacts | null; candidate: { ref: CandidateRef | null; evidence: string | null }; source_ref: string; fresh: boolean; validated: boolean; snapshot_id: string; record?: boolean; required?: CapabilityName[] }) {
   const c = input.harness.capabilities ?? {}, provided: Record<string, { ok: boolean; basis: string; evidence?: string | null }> = {};
@@ -358,8 +364,12 @@ export function admitRun(s: Store, input: { task: Row; role: string; kind: strin
   // before admission existed.
   const capacity = roleCapacity(s, String(input.task.repository_id), input.role, input.kind);
   const admission = { protocol: roleRunProtocol.id, role: input.role, kind: input.kind, harness: `${input.harness.id}@${input.harness.version}`, environment: input.environment?.id ?? null, required, missing, provided: Object.fromEntries(required.map(name => [name, provided[name]])), admitted: !missing.length, ...(capacity ? { capacity } : {}) };
-  if (input.record !== false) traceEvent(s, String(input.task.id), 'role_run_admission', admission, input.task.trace_run_id, 'framework');
-  if (missing.length) stop('unsupported_capability', 'waiting_configuration', `${input.role}（${input.harness.id}）缺少能力：${missing.join('、')}；未启动运行，也不会换用其他执行后端。`);
+  const available=Object.keys(provided).filter(name=>provided[name]!.ok);
+  const admissionRef=input.record !== false?traceEvent(s, String(input.task.id), 'role_run_admission', missing.length?{...admission,started:false,available,provided}:admission, input.task.trace_run_id, 'framework'):null;
+  if (missing.length) throw new UnsupportedCapabilityError(`${input.role}（${input.harness.id}）缺少能力：${missing.join('、')}；未启动运行，也不会换用其他执行后端。`,{
+    started:false,role:input.role,harness:`${input.harness.id}@${input.harness.version}`,environment:input.environment?.id??null,required,missing,
+    available,provided,admission_ref:admissionRef,
+  });
   // Capability comes first: an unadmittable run must not look like a capacity wait. A full role waits for a free slot
   // instead of starting and holds no attempt: nothing ran, so the queue retries it as it is.
   if (capacity && capacity.running >= capacity.limit) stop('role_capacity', 'retry_wait', `${input.role}：本项目该角色的并发上限 ${capacity.limit} 已满（${capacity.running} 个运行中）；本次不启动，任务排队重试，不消耗尝试次数。`);

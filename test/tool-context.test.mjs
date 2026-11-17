@@ -44,7 +44,7 @@ test('a batch of results shares one budget: small results stay whole and large o
     assert.equal(result.truncated, true); assert.match(result.notice, /Narrow it/);
     assert.ok(size(result) >= (batchBytes - size(listing)) / 10 - 512, 'every large result gets an equal share');
     // Small top-level fields survive the cut: the next step usually needs them.
-    assert.equal(result.fields.next_offset, 60); assert.match(result.fields.repository, /^org\/repo-/);
+    assert.equal(result.next_offset, 60); assert.equal(result.fields.next_offset, 60); assert.match(result.fields.repository, /^org\/repo-/);
   }
   // Very many calls still give every result a useful minimum.
   assert.ok(boundedBatch(Array.from({ length: 100 }, () => large[0])).every(result => size(result) >= 8 * 1024 - 512));

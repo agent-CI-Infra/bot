@@ -1,3 +1,5 @@
+import {runDispatchHarness} from './harness.js';
+import type {Manager} from '../projects/service.js';
 import { roleConfiguration, rolePrompt } from '../roles/definition.js';
 import { covers, projectCeiling } from '../work/ceiling.js';
 import { githubReadScopes, githubWriteAllowed, permitsTool } from '../roles/permissions.js';
@@ -73,7 +75,7 @@ export function dispatchPrompt(store: Store, repositoryId: string) {
  * role allows, write to that repository only (github_write, keyed per event so a retried dispatch never writes twice), and it
  * ends by calling dispatch. The decision is checked as before, with one correction for an invalid one.
  */
-export async function managerDecision(store: Store, context: DispatchContext, githubUrl?: string): Promise<Decision> {
+export async function managerDecision(store: Store, context: DispatchContext, githubUrl?: string, manager?:Manager): Promise<Decision> {
   const scheduled = scheduledCheckDecision(context);
   if (scheduled) return scheduled;
   const event = context.event, repositoryId = String(event.repository_id), model = selectedModel(store, repositoryId, 'manager');
@@ -117,6 +119,21 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
     const connected = await explorer.execute('github_read_token', {});
     return connected.error ? connected : explorer.execute(name, args);
   };
+  const assess=async(raw:any)=>{
+  const decision=checkDecision(store,context,raw);
+  let refused = decision.decision === 'create' ? decision.option_ids.map(id => managerRefusal(store, context, id)).find(Boolean) ?? null : null;
+  // A development of an Issue starts on a basis the control plane checks now (#815): GitHub for the label and the
+  // maintainer's comment, the current Manager prompt for a rule.
+  const development = !refused && decision.decision === 'create' ? context.options.find(option => decision.option_ids.includes(option.id) && option.spec.type === 'object' && option.spec.kind === 'development.issue') : undefined;
+  let basis: Decision['basis'] = null;
+  if (development) {
+    // The control plane's own read (not the Manager's tools): the Issue's label events, a comment and its author's permission.
+    const control = async () => { const client = new GitHub(store, repository, redactor, guard, githubUrl); await client.connect(false, undefined, { issues: 'read', metadata: 'read' }); return client; };
+    const prompt = dispatchPrompt(store, repositoryId), checked = await verifyBasis(store, repositoryId, Number((development.spec as any).number), raw?.basis, control, { content: prompt, revision: promptRevision(store, repositoryId, prompt) }, (context.facts as any)?.development);
+    if (isRefusal(checked)) refused = { work: development.work, ...checked }; else basis = checked;
+  }
+  return {decision,refused,basis};
+  };
   const system = rolePrompt(role);
   const work = workTypes.filter(type => context.options.some(option => option.work === type.id)).map(type => `- ${type.id}（${type.name}）：${type.description}`);
   const unavailable = context.unavailable.map(entry => `- ${entry.id}（${workType(entry.work)?.name ?? entry.work}）：${entry.reason}`);
@@ -145,6 +162,12 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
   const transcript = new ToolTranscript(messages, chatContextBytes);
   let corrected = false, refusals = 0;
   try {
+    if(role.harness_ref.id!=='native'){
+      return await runDispatchHarness({store,task,model,redactor,guard,system,prompt:messages[1].content,tools:offered(),execute,
+        finish:{name:decisionNames[0]!,names:decisionNames,validate:async(args,name)=>{const {decision,refused,basis}=await assess(toDecision(name??null,args));if(!refused)return {...decision,model:model.model,basis};recordRefusal(store,String(event.id),{...refused,tool:'create_task'});if(++refusals>=maxRefusals)return {decision:'ignore',option_ids:[],reason:`控制面拒绝了 Manager 选的工作：${refused.reason}`.slice(0,1000),model:model.model};throw new InvalidDecision(refused.code,refused.reason);}},
+        repairInvalid:error=>error instanceof InvalidDecision?error.message:undefined,
+      },role,event,manager);
+    }
     for (let step = 0; step < maxSteps; step++) {
       await guard();
       // The last step can only decide.
@@ -165,18 +188,7 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
         try { args = JSON.parse(call ? call.function.arguments || '{}' : String(message?.content || '').replace(/^```(?:json)?\s*|\s*```$/g, '')); } catch { args = null; }
         live();
         try {
-          const raw = toDecision(call ? String(call.function.name) : null, args), decision = checkDecision(store, context, raw);
-          let refused = decision.decision === 'create' ? decision.option_ids.map(id => managerRefusal(store, context, id)).find(Boolean) ?? null : null;
-          // A development of an Issue starts on a basis the control plane checks now (#815): GitHub for the label and the
-          // maintainer's comment, the current Manager prompt for a rule.
-          const development = !refused && decision.decision === 'create' ? context.options.find(option => decision.option_ids.includes(option.id) && option.spec.type === 'object' && option.spec.kind === 'development.issue') : undefined;
-          let basis: Decision['basis'] = null;
-          if (development) {
-            // The control plane's own read (not the Manager's tools): the Issue's label events, a comment and its author's permission.
-            const control = async () => { const client = new GitHub(store, repository, redactor, guard, githubUrl); await client.connect(false, undefined, { issues: 'read', metadata: 'read' }); return client; };
-            const prompt = dispatchPrompt(store, repositoryId), checked = await verifyBasis(store, repositoryId, Number((development.spec as any).number), raw?.basis, control, { content: prompt, revision: promptRevision(store, repositoryId, prompt) }, (context.facts as any)?.development);
-            if (isRefusal(checked)) refused = { work: development.work, ...checked }; else basis = checked;
-          }
+          const raw=toDecision(call?String(call.function.name):null,args),{decision,refused,basis}=await assess(raw);
           if (!refused) return { ...decision, model: model.model, basis };
           // A refused creation (#815): nothing is created; the event keeps the refusal and the Manager decides again.
           recordRefusal(store, String(event.id), { ...refused, tool: 'create_task' });

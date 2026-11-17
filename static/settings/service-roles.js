@@ -41,6 +41,7 @@ function serviceRoleCard(view, initial) {
     }
     modelSelect.value = role.model_id ?? '';
 
+    const harnessSelect=document.createElement('select');harnessSelect.name='harness';for(const [id,label] of [['native','Native（兼容）'],['pi','Pi'],['codex','Codex'],['claude_code','Claude Code']]){const option=element('option',label);option.value=id;harnessSelect.append(option);}harnessSelect.value=role.harness??'native';
     const grid = role.permissions_fixed ? permissionEditor(structuredClone(role.permissions), view.items, () => {}, '', true)
       : note('这个角色只提供提示词和模型。每个群能读还是能写，由群绑定的权限档位决定，在「个人设置 → 飞书绑定」的群绑定里设置。');
     const enabled = role.builtin ? null : checkbox('enabled', role.enabled, '启用');
@@ -50,10 +51,10 @@ function serviceRoleCard(view, initial) {
       try { await serviceRoleRequest('/api/service-roles/' + role.id, 'DELETE', { expected_revision: role.revision }); live.section.replaceChildren(element('h3', role.name), element('p', '已删除', 'view-success')); }
       catch (err) { remove.disabled = false; error(err); }
     }, 'quiet destructive');
-    nodes.push(actionForm([field('名称', name), field('职责说明', responsibility), field('提示词', prompt), field(role.project ? '模型（本项目可用的模型）' : '模型（部署共享模型）', modelSelect),
+    nodes.push(actionForm([field('名称', name), field('职责说明', responsibility), field('提示词', prompt), field('Agent 后端',harnessSelect), field(role.project ? '模型（本项目可用的模型）' : '模型（部署共享模型）', modelSelect),
       grid,
       ...(enabled ? [enabled] : [])], '保存', async () => {
-      const change = { expected_revision: role.revision, name: name.value, responsibility: responsibility.value, prompt: prompt.value, model_id: modelSelect.value || null };
+      const change = { expected_revision: role.revision, harness:harnessSelect.value, name: name.value, responsibility: responsibility.value, prompt: prompt.value, model_id: modelSelect.value || null };
       if (enabled) change.enabled = enabled.querySelector('input').checked;
       role = (await serviceRoleRequest('/api/service-roles/' + role.id, 'PATCH', change)).service_role;
       live.section.querySelector('h3').textContent = role.name; redraw('已保存');
