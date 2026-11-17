@@ -12,7 +12,7 @@ const login = async (page, admin, username, password) => {
   await page.getByLabel('用户名', { exact: true }).fill(username);
   await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
-  await expect(page.locator('.project-nav [aria-current=page]')).toHaveText('运行状态');
+  await expect(page.locator('#tabs [aria-current=page]')).toHaveText('运行状态');
 };
 
 test('the audit card filters by action code and shows the rest 20 rows at a time', async ({ page }) => {

@@ -101,7 +101,7 @@ test('switching scope preserves each page type and keeps global and personal set
       ['#/projects/101/inbox', '#/projects/202/inbox'], ['#/projects/101/new-task', '#/projects/202/new-task'],
       ['#/projects/101/overview', '#/projects/202/overview'], ['#/projects/101/roles', '#/projects/202/roles'],
       ['#/projects/101/release', '#/projects/202/release'], ['#/projects/101/knowledge', '#/projects/202/knowledge'],
-      ['#/projects/101/menu', '#/projects/202/menu'], ['#/tasks/switch-task', '#/projects/202/overview'],
+      ['#/projects/101/menu', '#/projects/202/overview'], ['#/tasks/switch-task', '#/projects/202/overview'],
       ['#/identity', '#/projects/202/overview'], ['#/settings/users', '#/projects/202/overview'],
       ['#/more', '#/projects/202/overview'], ['#/conversations', '#/projects/202/overview']
     ]) {

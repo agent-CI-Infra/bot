@@ -69,7 +69,8 @@ test('a delayed settings receipt cannot replace the next project or its unsaved 
     await page.route('**/api/repositories/101/policy', async route => { await gate; await route.continue(); });
     await consoleSave(page).click();
     await page.evaluate(() => { location.hash = '#/projects/201/basic'; });
-    await expect(page.getByRole('heading', { name: 'other/project-201', exact: true })).toBeVisible();
+    await expect(page.locator('#console-context')).toHaveText('other / project-201 / 基本设置');
+    await expect(page.getByLabel('基准分支', { exact: true })).toHaveValue(otherBranch);
     await page.getByLabel('基准分支', { exact: true }).fill('new-project-draft');
     release(); await page.unrouteAll({ behavior: 'wait' });
     await expect(page).toHaveURL(/#\/projects\/201\/basic$/);
@@ -121,7 +122,7 @@ test('member read failures replace previous grants, and a project administrator 
     const context = await browser.newContext({ viewport: { width: 390, height: 844 } }), member = await context.newPage();
     try {
       await login(member, f, '/#/projects/101/members', 'project-member', password);
-      await expect(member.locator('.project-nav a')).toHaveCount(9);
+      await expect(member.locator('.project-nav a')).toHaveCount(8);
       await expect(member.locator('.project-nav a[href="#/projects/101/members"]')).toHaveCount(1);
       await expect(member.locator('.project-nav [aria-current=page]')).toHaveText('成员');
       await expect(member.getByLabel('当前页面',{exact:true})).toHaveValue('#/projects/101/members');

@@ -34,7 +34,7 @@ test('任务详情展示浏览器截图证据，窄屏不横向溢出', async ({
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('button', { name: '退出登录', exact: true })).toBeVisible();
     await page.goto(h.admin + '/#/projects/101/activity');
-    await expect(page.getByRole('heading', { name: 'fixture/project-101', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '运行状态', level: 1, exact: true })).toBeVisible();
     await page.evaluate(() => openTask('browse-ui'));
     const card = page.locator('section.side-card', { has: page.getByRole('heading', { name: '浏览器证据', exact: true }) });
     await expect(card.getByText('共 1 步，其中 1 张截图可打开查看。')).toBeVisible();

@@ -16,7 +16,7 @@ test('发版本页读取时间与全站日期时间格式一致，空的标签�
     await page.route('**/api/repositories/*/rules', route => route.fulfill({ json: { rules: { files: [], computer: {} } } }));
     await login(page, f.h.admin, 'administrator', f.password);
     await page.goto(f.h.admin + '/#/projects/101/release');
-    await expect(page.getByRole('heading', { name: '发版本', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '发版本', level: 1, exact: true })).toBeVisible();
     await expect(page.locator('#project-page')).not.toContainText('这是读取时间');
     await expect(page.locator('#project-page')).not.toContainText(/记录读取于 \d{1,2}:\d{2}:\d{2} (AM|PM)/);
     await expect(page.locator('.release-panel p[role="status"]')).toHaveText(/记录读取于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);

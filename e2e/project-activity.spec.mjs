@@ -22,7 +22,7 @@ test('项目运行状态展示执行和排队任务，自动刷新并保留项�
       await target.goto(h.admin + '/#/projects/101/activity');
       await target.getByLabel('用户名', { exact: true }).fill(username); await target.getByLabel('密码', { exact: true }).fill(secret);
       await target.getByRole('button', { name: '登录', exact: true }).click();
-      await expect(target.locator('.project-nav [aria-current=page]')).toHaveText('运行状态');
+      await expect(target.locator('#tabs [aria-current=page]')).toHaveText('运行状态');
     };
     await login(page, 'administrator', password);
     const panel = page.locator('#activity-status'), card = title => panel.locator('section').filter({ has: page.getByRole('heading', { name: title, exact: true }) });

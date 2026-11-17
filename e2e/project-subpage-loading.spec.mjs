@@ -49,7 +49,7 @@ test('同一项目内切换子页面立即显示新页面的加载态，「当�
     await expect(loading.getByRole('heading', { name: '正在打开「发版本」', exact: true })).toBeVisible();
     await expect(body.getByText('项目成员与授权来源', { exact: true })).toHaveCount(0);
     await expect(picker).toHaveValue('#/projects/101/release');
-    await expect(body.getByRole('heading', { name: 'fixture/project-101', exact: true })).toBeVisible();
+    await expect(body.getByRole('heading', { name: '发版本', level: 1, exact: true })).toBeVisible();
     await page.screenshot({ path: `${out}/switch-loading-390.png` });
     gate.held = false; gate.release();
     await expect(body.getByRole('heading', { name: '准备新版本', exact: true })).toBeVisible();

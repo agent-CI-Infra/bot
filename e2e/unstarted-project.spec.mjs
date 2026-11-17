@@ -29,9 +29,9 @@ test('未启动的仓库不提供项目设置入口，直接打开其项目地�
     await expect(state.getByRole('link', {name: /全局设置 · 项目/})).toHaveAttribute('href', '#/settings/projects');
     await state.getByRole('button', {name: '启动', exact: true}).click();
     await page.locator('#activation-view').getByRole('button', {name: '启动', exact: true}).click();
-    await expect(page.locator('#project-page .project-head h1')).toHaveText('fixture/unstarted-501');
+    await expect(page.locator('#project-page .project-head h1')).toHaveText('基本设置');
     await expect(page).toHaveURL(/#\/projects\/501\/basic$/);
-    await expect(page.locator('#console-context')).toHaveText('fixture · unstarted-501');
+    await expect(page.locator('#console-context')).toHaveText('fixture / unstarted-501 / 基本设置');
 
     // The global project list links only started repositories to their project page.
     await page.goto(h.admin + '/#/settings/projects');

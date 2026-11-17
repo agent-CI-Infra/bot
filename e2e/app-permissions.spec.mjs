@@ -98,9 +98,9 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     app.events = allEvents; installations[0].permissions = everything; await sync.click();
     await expect(chip('101')).toHaveText('事件未订阅');
     await row('101').getByRole('link', { name: /项目设置/ }).click();
-    await expect(page.locator('.project-head [data-permission]')).toHaveText('事件未订阅');
-    await expect(page.locator('.project-head [data-permission]')).toHaveAttribute('title', /Pull request review comment.*Workflow run/);
-    await page.getByRole('link', { name: '← 全部项目', exact: true }).click(); await page.goto(h.admin + '/#/settings/projects');
+    await expect(page.locator('#console-permission [data-permission]')).toHaveText('事件未订阅');
+    await expect(page.locator('#console-permission [data-permission]')).toHaveAttribute('title', /Pull request review comment.*Workflow run/);
+    await page.goto(h.admin + '/#/settings/projects');
     installations[0].events = allEvents; await sync.click();
     await expect(message.locator('span')).toHaveText('安装列表已同步，1 个安装的权限和事件订阅都正常。');
     await expect(message.locator('span')).toHaveClass('view-success');

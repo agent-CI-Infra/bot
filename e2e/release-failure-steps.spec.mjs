@@ -24,7 +24,7 @@ test('a failed release names the failing step and its error text, a published on
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
     await page.goto(f.h.admin + '/#/projects/101/release');
-    await expect(page.getByRole('heading', { name: '发版本', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '发版本', level: 1, exact: true })).toBeVisible();
     const failed = page.locator('[data-release-failure="save_draft"]');
     await expect(failed).toHaveCount(1);
     await failed.locator('summary').click();

@@ -1,6 +1,6 @@
 import {test,expect} from '@playwright/test';
 import {releaseFixture,target,writes} from '../test/release-fixtures.mjs';
-async function login(page,f){await page.goto(f.h.admin+'/#/projects/101/release');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.getByRole('heading',{name:'发版本',exact:true})).toBeVisible();}
+async function login(page,f){await page.goto(f.h.admin+'/#/projects/101/release');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.getByRole('heading',{name:'发版本',level:1,exact:true})).toBeVisible();}
 
 // #233: the release list is what a person reads before touching anything — version, exact commit, stage, initiator,
 // update time and what is blocking right now. Every cell comes from a stored field, so a stage the page does not know

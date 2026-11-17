@@ -89,7 +89,7 @@ test('#614 项目读取失败（非权限问题）时给出重试，重试后正
       const state = page.locator('#project-page [data-project-unavailable="failed"]');
       await expect(state.getByRole('heading', { name: '暂时打不开这个项目', exact: true })).toBeVisible();
       // A project already in the list keeps its name in the scope bar; only an unknown one reads 无法打开项目.
-      await expect(page.locator('#console-context')).toHaveText('fixture · project-101');
+      await expect(page.locator('#console-context')).toHaveText('fixture / project-101');
       await expect(state.getByRole('link', { name: '返回项目列表', exact: true })).toHaveAttribute('href', '#/projects');
       await expect(page.getByText('500 · internal_error', { exact: true })).toBeHidden();
       const retry = state.getByRole('button', { name: '重试', exact: true });
@@ -98,7 +98,7 @@ test('#614 项目读取失败（非权限问题）时给出重试，重试后正
       await page.screenshot({ path: `.tmp/project-unavailable/failed-${width}.png`, fullPage: true });
       fail = false; await retry.click();
       await expect(page.locator('#project-page .project-head h1')).toHaveText('fixture/project-101');
-      await expect(page.locator('#console-context')).toHaveText('fixture · project-101');
+      await expect(page.locator('#console-context')).toHaveText('fixture / project-101');
       expect(errors).toEqual([]); await context.close();
     }
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }

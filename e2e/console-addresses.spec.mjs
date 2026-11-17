@@ -38,7 +38,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     expect(eventsRequests).toEqual([]);
     page.off('request', noteEvents);
     // Global settings: one category at a time, each with its own address; a reload keeps it.
-    await tab('全局设置').click(); await expect(page).toHaveURL(/#\/settings$/);
+    await tab('全局设置').click(); await expect(page).toHaveURL(/#\/settings\/work-computers$/);
     const nav = page.locator('.project-nav'), cards = () => page.locator('#settings-panel h3').allInnerTexts();
     await expect(nav.getByRole('link')).toHaveText(['工作电脑', '模型', '服务角色', '助手电脑', 'Agent CLI 工具卷', '存储', '接入向导', '公网接入', '外部执行', '机器人账号', '安装档案', '飞书连接', '项目管理', '用户']);
     for (const [caption, key, shown] of [['工作电脑', 'work-computers', ['同时运行的任务', '默认资源', '当前运行版本']], ['飞书连接', 'feishu', ['飞书应用连接']], ['公网接入', 'access', ['公网 HTTPS 地址', 'Cloudflare Tunnel', 'GitHub 登录（只读）']],

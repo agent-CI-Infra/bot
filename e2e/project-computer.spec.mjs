@@ -10,7 +10,7 @@ async function fixture() {
     image:'approved/project-computer@sha256:'+'a'.repeat(64),build:{state:'ready',output:'Public package build output'},setup:{state:'succeeded',exit_code:0,output:'Public initialization output',generation:1}}};
   const manager={async call(_method,path){const id=path.split('/')[3];if(path.endsWith('/stats')){if(state.offline)fail(503,'manager_unavailable');if(state.absent)fail(404,'project_not_registered');if(state.recovering)fail(503,'manager_not_ready');if(state.responseError)fail(403,'resource_ownership_mismatch');if(state.metricsFail)throw new Error('metrics_unavailable');return {...state.stats,sampled_at:state.stats.sampled_at||new Date().toISOString()};}
     if(state.offline)throw new Error('manager_unavailable');if(state.recovering)fail(503,'manager_not_ready');if(state.responseError)fail(403,'private_response_detail');if(state.absent)return null;
-    return {repository_id:id,generation:1,state:state.liveState,desired:'ready',revision:1,computer:structuredClone(state.computer)};}};
+    return {repository_id:id,generation:1,state:state.liveState,desired:'ready',revision:1,computer:{...structuredClone(state.computer),...(id==='202'?{cpus:8}: {})}};}};
   const h=await harness(undefined,manager),{admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');
   for(const id of ['101','202'])new RuleService(h.store).cache(id,'a'.repeat(40),{});
   for(const [id,status] of [['active','running'],['queued-old','queued'],['queued-new','queued']])h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES(?,'101','task.request',?,?)",id,status,id);
@@ -21,6 +21,7 @@ async function login(page,f) {
   await page.goto(f.h.admin+'/#/settings/computers/101');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);
   await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.locator('#machine-status')).toContainText('运行任务记录');
 }
+const observation=page=>card(page,'机器').locator('dt:has-text("实时核验") + dd');
 const card=(page,name)=>page.locator('#machine-status .side-card').filter({has:page.getByRole('heading',{name,exact:true})});
 
 test('computer state, real zero metrics and the same activity records stay readable across six widths',async({page})=>{
@@ -42,10 +43,10 @@ test('computer state, real zero metrics and the same activity records stay reada
 test('a manager outage or absent record is unknown instead of the saved ready state, and retry restores observation',async({page})=>{
   const f=await fixture();
   try{await login(page,f);f.state.offline=true;await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();
-    await expect(card(page,'机器')).toContainText('manager_unavailable');await expect(page.locator('[data-project-environment-state]')).toHaveText('电脑待核验');
+    await expect(card(page,'机器')).toContainText('manager_unavailable');await expect(observation(page)).toHaveText('未知');
     await expect(page.locator('#computer-action-1')).toBeDisabled();
     f.state.offline=false;f.state.absent=true;await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();await expect(card(page,'机器')).toContainText('未找到电脑记录');
-    f.state.absent=false;await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();await expect(page.locator('[data-project-environment-state]')).toHaveText('就绪');
+    f.state.absent=false;await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();await expect(observation(page)).toHaveText('就绪');
     await expect(page.locator('#computer-action-1')).toBeEnabled();
   }finally{await f.close();}
 });
@@ -53,7 +54,7 @@ test('a manager outage or absent record is unknown instead of the saved ready st
 test('an initially unavailable computer offers explicit configuration recovery after its connection returns',async({page})=>{
   const f=await fixture();
   try{f.state.offline=true;await login(page,f);await expect(page.getByLabel('CPU（核）',{exact:true})).toHaveCount(0);
-    f.state.offline=false;await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();await expect(page.locator('[data-project-environment-state]')).toHaveText('就绪');
+    f.state.offline=false;await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();await expect(observation(page)).toHaveText('就绪');
     await page.getByRole('button',{name:'重新读取电脑配置',exact:true}).click();await expect(page.getByLabel('CPU（核）',{exact:true})).toBeVisible();
   }finally{await f.close();}
 });
@@ -79,8 +80,8 @@ test('status refresh preserves form drafts, expanded logs, focus and position wh
     await expect(refresh).toBeFocused();await expect(build).toHaveAttribute('open','');await expect(cpu).toHaveValue('3');expect(await page.evaluate(()=>scrollY)).toBe(y);
     const gate=new Promise(resolve=>{release=resolve;});await page.route('**/api/environments/101',async route=>{const response=await route.fetch();await gate;await route.fulfill({response});});
     await page.evaluate(()=>{void refreshProjectStatus(renderToken);});await page.evaluate(()=>{location.hash='#/projects/202/machine';});
-    await expect(page.locator('.project-head h1')).toHaveText('fixture/project-202');release();await page.unrouteAll({behavior:'wait'});
-    await expect(page.locator('.project-head h1')).toHaveText('fixture/project-202');
+    await expect(page.locator('.project-head h1')).toHaveText('机器配置');await expect(page.locator('#console-context')).toHaveText('fixture / project-202 / 机器配置');await expect(card(page,'机器')).toContainText('8 CPU');release();await page.unrouteAll({behavior:'wait'});
+    await expect(page.locator('.project-head h1')).toHaveText('机器配置');await expect(page.locator('#console-context')).toHaveText('fixture / project-202 / 机器配置');await expect(card(page,'机器')).toContainText('8 CPU');
   }finally{release();await f.close();}
 });
 
@@ -95,20 +96,19 @@ test('permission loss clears all previous computer data and a late successful re
 });
 
 
-test('manager recovery and answered errors remain distinct from an outage across the header and project overview',async({page})=>{
+test('manager recovery and answered errors remain distinct from an outage in the live observation and project overview',async({page})=>{
   const f=await fixture();
   try{await login(page,f);
     f.state.recovering=true;await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();
     await expect(card(page,'机器')).toContainText('manager_not_ready');await expect(card(page,'机器')).not.toContainText('暂不可达');
-    await expect(page.locator('.project-head [data-project-environment-state]')).toHaveText('管理服务恢复中');
+    await expect(observation(page)).toHaveText('未知');
     f.state.recovering=false;f.state.responseError=true;await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();
     await expect(card(page,'机器')).toContainText('manager_read_failed');await expect(card(page,'机器')).not.toContainText('private_response_detail');
-    await expect(page.locator('.project-head [data-project-environment-state]')).toHaveText('电脑状态未知');
+    await expect(observation(page)).toHaveText('未知');
     f.state.responseError=false;f.state.liveState='future_state';await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();
-    await expect(page.locator('.project-head [data-project-environment-state]')).toHaveText('电脑状态未知');
+    await expect(observation(page)).toHaveText('未知');
     await expect(page.locator('#computer-action-1')).toBeDisabled();
     f.state.offline=true;await page.evaluate(()=>{location.hash='#/projects/101/basic';});
-    await expect(page.locator('.project-head [data-project-environment-state]')).toHaveText('电脑待核验');
     await expect(page.locator('.project-body [data-project-environment-state]')).toHaveText('电脑待核验');
   }finally{await f.close();}
 });
@@ -119,7 +119,7 @@ test('an absent manager record keeps the saved project and draft when its real s
   try{await login(page,f);const cpu=page.getByLabel('CPU（核）',{exact:true});await cpu.fill('3');f.state.absent=true;
     await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();
     await expect(page.locator('#machine-status')).toBeVisible();await expect(cpu).toHaveValue('3');
-    await expect(page.locator('.project-head [data-project-environment-state]')).toHaveText('电脑记录缺失');
+    await expect(observation(page)).toHaveText('未知');
     await expect(card(page,'软件安装与初始化')).toContainText('初始化状态未知');
     await expect(card(page,'软件安装与初始化')).not.toContainText('没有初始化脚本');
     expect(await page.evaluate(async()=>{try{await api('/api/environments/101/stats');}catch(err){return {status:err.status,code:err.code};}})).toEqual({status:404,code:'project_not_registered'});
