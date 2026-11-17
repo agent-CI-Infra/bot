@@ -15,3 +15,6 @@
 .statistics-task-summary .statistics-task-count{display:inline-block;min-width:3ch;text-align:right}
 /* The task drill-down nested in the summary lists text (任务 / 项目 / 状态 / 创建时间): left aligned, natural row height. */
 .statistics-drill-body .cost-table-scroll :is(th,td){text-align:left;font-variant-numeric:normal;height:auto}
+
+.cost-project-link{white-space:nowrap;color:var(--color-brand);text-decoration:underline;text-underline-offset:2px}
+.cost-table-scroll td:has(>.cost-project-link){white-space:nowrap}

@@ -37,9 +37,21 @@ async function ready(page, name, id) {
   else if (name === 'inbox') {
     await expect(page.locator('.console-inbox')).toBeVisible();
     await expect(page.locator('.console-inbox')).not.toHaveAttribute('aria-busy', 'true');
-  } else if (name === 'management') await expect(page.locator('.management-scope-name')).toHaveText(id ? `fixture/project-${id}` : '全部项目');
-  else if (id) await expect(page.locator('#console-page h1')).toHaveText(`在 fixture/project-${id} 新建任务`);
+  } else if (name === 'management') {
+    await expect(page.locator('.management-scope-name')).toHaveText(id ? `fixture/project-${id}` : '全部项目');
+    await expect(page.getByRole('button', { name: '发送', exact: true })).toBeEnabled();
+  }
+  else if (id) {
+    await expect(page.locator('#console-page h1')).toHaveText(`在 fixture/project-${id} 新建任务`);
+    await expect(page.locator('.task-create-form [name=request]')).toBeEnabled();
+  }
   else await expect(page.getByRole('button', { name: '任务项目（必填）', exact: true })).toBeVisible();
+  if (id && page.viewportSize().width <= 767 && ['costs', 'inbox', 'new-task'].includes(name)) {
+    await expect(page.locator('#console-section')).toHaveValue(address(name, id));
+  }
+  if (id && name === 'new-task') {
+    expect(await page.locator('#console-page h1').evaluate(node => node.scrollWidth <= node.clientWidth && node.scrollHeight <= node.clientHeight)).toBe(true);
+  }
 }
 
 for (const width of [1440, 390]) test(`地址是唯一范围，各工作页面无重复选择器（${width}）`, async ({ page }) => {
@@ -140,11 +152,23 @@ test('新地址沿用项目拒绝状态，不查询或泄露无权项目的数�
   await admin('/api/users', 'POST', { username: 'member', password, role: 'project_admin', repository_ids: ['101'] });
   try {
     await login(page, h, password, '#/projects', 'member');
+    mkdirSync('.tmp/project-scope-routes', { recursive: true });
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+      for (const [name, id] of [['board', ''], ['costs', '101']]) {
+        await page.goto(h.admin + '/' + address(name, id)); await ready(page, name, id);
+        await page.screenshot({ path: `.tmp/project-scope-routes/member-${name}-${id || 'all'}-${width}.png` });
+      }
+    }
     const forbiddenReads = queries(page, '/api/board/cards', boardScope);
-    for (const name of ['board', 'costs', 'inbox', 'management', 'new-task']) {
-      await page.goto(h.admin + '/' + address(name, '202'));
-      await expect(page.locator('[data-project-unavailable=forbidden]')).toBeVisible();
-      await expect(page.locator('#workspace')).not.toContainText('fixture/project-202');
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+      for (const name of ['board', 'costs', 'inbox', 'management', 'new-task']) {
+        await page.goto(h.admin + '/' + address(name, '202'));
+        await expect(page.locator('[data-project-unavailable=forbidden]')).toBeVisible();
+        await expect(page.locator('#workspace')).not.toContainText('fixture/project-202');
+        if (name === 'board') await page.screenshot({ path: `.tmp/project-scope-routes/forbidden-board-${width}.png` });
+      }
     }
     expect(forbiddenReads).toEqual([]);
   } finally { await h.stop(); }
@@ -163,6 +187,11 @@ test('已保存仓库条件在全部项目下可移除，单项目忽略，保�
     await expect.poll(() => boards.at(-1)).toBe('101');
     await expect(page.locator('.board-view-scope-note')).toHaveText('此视图的仓库条件在单项目范围内不生效');
     await expect(page.locator('#board-chips')).not.toContainText('仓库');
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+      await page.screenshot({ path: `.tmp/project-scope-routes/saved-view-ignored-${width}.png` });
+    }
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await page.getByLabel('搜索编号或标题', { exact: true }).fill('blocked');
     await expect(page.locator('#board-save')).toBeVisible();
     const saved = page.waitForResponse(response => response.request().method() === 'PATCH' && response.url().endsWith('/api/board/views/' + view.id));

@@ -1,3 +1,4 @@
+import { mkdirSync } from 'node:fs';
 import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { managementFixture } from '../test/management-fixture.mjs';
@@ -248,5 +249,35 @@ test('the chart is a group of labelled bars and a date × project table carries 
     // The two pre-existing tables keep their place and scope.
     await expect(panel.locator('section.cost-breakdown').filter({ hasText: '项目占比' })).toHaveCount(1);
     await expect(panel.locator('details.cost-breakdown').filter({ hasText: '每日费用与用量明细' })).toHaveCount(1);
+  } finally { await f.close(); }
+});
+test('all-project cost rows link to the project address and keep its query scope', async ({ page }) => {
+  const f = await managementFixture(), { h } = f;
+  try {
+    seedUsage(h); mkdirSync('.tmp/project-scope-routes', { recursive: true });
+    await page.clock.setFixedTime(new Date('2026-11-11T02:00:00Z'));
+    await page.goto(h.admin + '/#/costs');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const project = page.locator('section.cost-breakdown a[href="#/projects/101/costs"]').first();
+    await expect(project).toContainText('admin-fixture-101');
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+      await project.click({ trial: true });
+      await expect.poll(() => project.evaluate(node => {
+        const box = node.getBoundingClientRect(), line = parseFloat(getComputedStyle(node).lineHeight);
+        const cell = node.parentElement, style = getComputedStyle(cell), padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+        return { oneLine: box.height <= line + 1 && cell.offsetHeight <= line + padding + 2, hit: node.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)) };
+      })).toMatchObject({ oneLine: true, hit: true });
+      await page.screenshot({ path: `.tmp/project-scope-routes/cost-project-links-${width}.png` });
+    }
+    const scoped = page.waitForRequest(request => {
+      const url = new URL(request.url());
+      return url.pathname === '/api/costs' && url.searchParams.get('repository_id') === '101';
+    });
+    await project.click(); await scoped;
+    await expect(page).toHaveURL(/#\/projects\/101\/costs$/);
+    await expect(page.locator('.cost-token-summary [data-metric="input_tokens"] strong')).toHaveText('1,800');
   } finally { await f.close(); }
 });
