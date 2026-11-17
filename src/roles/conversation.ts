@@ -1,3 +1,4 @@
+import {harnessAccess} from '../harness/access.js';
 import type { Store, Row } from '../storage/database.js';
 import type { Manager } from '../projects/service.js';
 import { fields, fail, randomId, type Json } from '../core/security.js';
@@ -93,7 +94,7 @@ export class RoleConversations {
       redactor.add(token);
       try {
         await guard(); const spec:AgentSpec<string>={store:this.store,task,model:resolved.model,redactor,guard,beforeModel:()=>guard(true),executionSignal:controller.signal,cancelSignal:controller.signal,
-          system,prompt,tools,maxTurns:budget.max_turns??(prefix==='summary'?4:24),maxOutputTokens:budget.max_output_tokens??undefined,modelAttempts:1,
+          harnessTurnLimit:budget.max_turns??undefined,onTurnEnd:turn=>turn.text,system,prompt,tools,maxTurns:budget.max_turns??(prefix==='summary'?4:24),maxOutputTokens:budget.max_output_tokens??undefined,modelAttempts:1,
           requestPrefix:prefix+':',finish:{name:'finish',validate:args=>reply(args,prefix==='reply'&&source.allowSilence)},execute,
           onDenied:(name,reason)=>traceEvent(this.store,id,'capability_denied',{name,reason}),
           screen:name=>{
@@ -104,7 +105,8 @@ export class RoleConversations {
             traceEvent(this.store,id,'conversation_tool',{name});
           },
           roleRun:{instance_id:logicalInstance.id,role:source.caller.role!,version:snapshot.prompt.system_hash,harness:snapshot.harness.id,recovery_mode:'rebuilt_from_authorized_conversation',snapshot_id:resolved.id},
-          harnessSessionKey:invocation,
+          harnessSessionKey:logicalInstance.id+'-'+prefix,
+          harnessState:{value:prefix==='reply'?JSON.parse(logicalInstance.harness_state??'{}'):{},save:value=>{if(prefix==='reply'){this.store.run('UPDATE role_instances SET harness_state=? WHERE id=?',JSON.stringify(redactor.clean(value)),logicalInstance.id);logicalInstance.harness_state=JSON.stringify(redactor.clean(value));}}},
           runAccess:{token,check:(presented:unknown,capability?:string)=>{
             if(presented!==token)stop('run_token_invalid','failed');
             if(capability==='github:read_token'&&(!source.caller.permissions||!githubReadScopes(source.caller.permissions).length||!githubReadScopes(resolved.definition.permissions).length))stop('run_token_capability_denied','failed');
@@ -125,12 +127,17 @@ export class RoleConversations {
           if (!['ready','busy'].includes(environment?.state)) return stop('environment_not_ready','waiting_environment');
           const generation=environment.generation; task.generation=generation;
           const checked=async()=>{await guard();const current=await this.manager!.call('GET','/v1/projects/'+task.repository_id);if(current?.generation!==generation)fail(409,'environment_generation_changed');};
-          space=new Workspace(this.store,this.manager,{...task,workspace_id:randomId()},redactor,checked,value=>traceEvent(this.store,id,'runtime_log',value));
+          const priorRuntime=logicalInstance.runtime?JSON.parse(logicalInstance.runtime):null;
+          const workspaceId=prefix==='reply'&&priorRuntime?.generation===generation?priorRuntime.workspace_id:randomId();
+          space=new Workspace(this.store,this.manager,{...task,workspace_id:workspaceId},redactor,checked,value=>traceEvent(this.store,id,'runtime_log',value));
           const ready=await space.call('initialize',{type:'workspace_init'});if(ready.error)return stop('conversation_workspace_unavailable','waiting_environment');
+          if(prefix==='reply'){this.store.run('UPDATE role_instances SET runtime=? WHERE id=?',JSON.stringify({workspace_id:workspaceId,generation}),logicalInstance.id);}
           const egress=typeof environment?.computer?.egress==='boolean'?environment.computer.egress:environment?.computer?.network_policy==='internet egress';
+          spec.harnessAccess=harnessAccess(resolved.definition.permissions,egress,this.store.get('SELECT full_name FROM repositories WHERE id=?',task.repository_id)?.full_name??null,{read:allowed('read_file'),write:allowed('write_file')&&(!source.caller.principal_capabilities||source.caller.principal_capabilities.includes('tasks.write')),commands:allowed('run_command')&&(!source.caller.principal_capabilities||source.caller.principal_capabilities.includes('tasks.write'))});
+          spec.harnessAccess.github.scopes=spec.harnessAccess.github.scopes.filter(scope=>githubReadScopes(source.caller.permissions??{}).includes(scope));
           spec.roleWorkspace=space;
           spec.containerOptions={...spec.containerOptions,manager:this.manager,egress};
-          spec.pi={workspace:space,key:prefix+':'+space.task.workspace_id,resume:false,runtime:{version:snapshot.harness.version,report:runtime=>traceEvent(this.store,id,'harness_started',{...runtime,recovery:'rebuilt_from_authorized_conversation'})}};
+          spec.pi={workspace:space,key:prefix+':'+space.task.workspace_id+':'+id,resume:false,runtime:{version:snapshot.harness.version,report:runtime=>traceEvent(this.store,id,'harness_started',{...runtime,recovery:'rebuilt_from_authorized_conversation'})}};
         }
         if(driver.externalModel||['claude_code','codex'].includes(driver.id))await guard(true);
         spec.adapter=driver.adapter(spec); const value=await runAgent(spec); await guard();return value;

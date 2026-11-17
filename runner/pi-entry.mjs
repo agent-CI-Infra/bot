@@ -1,9 +1,12 @@
+import {stageSessionSkills} from './session-resources.mjs';
+import {dirname,join} from 'node:path';
+import {startCredentialHelperServer} from './credential-helper.mjs';
 import { localCommandResult, readLocalResult, prepareLocalResults } from './tool-results.mjs';
-import {readFile,writeFile,rename,unlink,appendFile} from 'node:fs/promises';
+import {readFile,writeFile,rename,unlink,appendFile,mkdir} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {randomBytes} from 'node:crypto';
-import {createAgentSession,createExtensionRuntime,ModelRuntime,SessionManager,SettingsManager,estimateTokens} from '@earendil-works/pi-coding-agent';
+import {createAgentSession,createExtensionRuntime,DefaultResourceLoader,createBashTool,createCodingTools,ModelRuntime,SessionManager,SettingsManager,estimateTokens} from '@earendil-works/pi-coding-agent';
 import {workspace as runnerWorkspace,notSelected} from './workspace.mjs';
 import {commandOptions} from './command-policy.mjs';
 import {waitModelReply} from './model-reply.mjs';
@@ -16,19 +19,24 @@ import {runSubagent} from './subagent.mjs';
 import {local} from './paths.mjs';
 import {noSpace,toolDiskFull} from './disk.mjs';
 
-// The model works in the checkout, root/repo, also before the task has its worktree (#769): the first repository read or
-// command binds it there. Tools resolve repository paths against it on every call.
-const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
+const root=process.argv[2],dir=root+'/agent',legacyCwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
+const direct=config.model_transport!=='gateway';
+const native=config.native_access;
+const cwd=native&&/^[a-f0-9]{48}$/.test(config.native_workspace_id??'')?join(dirname(root),config.native_workspace_id,'repo'):legacyCwd;
+const nativeDir=join(dirname(cwd),'cli-state','pi',String(config.session_key??'session').replace(/[^a-zA-Z0-9_-]/g,''));
+let credentialHelper;
+
 if(local)config.system+='\nLocal execution: this is a host process, not a container. Stay inside your task workspace and project notes. Never search the host root filesystem or inspect unrelated projects or credentials. Never use pkill, killall or process-name-wide termination. Use keep_background for servers; the manager cleans your task processes when you finish. Read ../notes/environment.md for verified local tooling.';
 const boot=(await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({}))).boot;
 const save=async value=>{value={...value,pid:process.pid,boot};await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
-let steps=0,session,finished,requestFailure,failureDetail;
+let steps=0,session,nativeSessionId,finished,requestFailure,failureDetail;
 // reserve: tokens a later request needs beyond raw, such as a compaction summary.
 const modelCapabilities=config.model??{context_window:128000,max_output_tokens:8192,reasoning:false};
 const outputReserve=config.output_tokens??modelCapabilities.max_output_tokens;
 const modelRequestTooLarge=(raw,reserve=0)=>estimateTokens({role:'user',content:raw,timestamp:Date.now()})+outputReserve+reserve>modelCapabilities.context_window;
 // Serialize model and tool events in execution order; mask every issued token before it reaches disk.
 const secrets=new Set();let events=Promise.resolve();
+if(config.native_model?.key)secrets.add(config.native_model.key);
 const clean=value=>JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='string'?[...secrets].reduce((text,secret)=>text.replaceAll(secret,'[REDACTED]'),item):item));
 const writeEvent=value=>{const line=JSON.stringify(clean(value))+'\n';events=events.then(()=>appendFile(dir+'/events.jsonl',line,{mode:0o600}));return events;};
 // Asks the control plane for a read-only GitHub token through the task mailbox, as model requests do.
@@ -77,7 +85,7 @@ async function boundary(stage){
 }
 // One model request at a time goes through the mailbox, whether the main agent or a sub-agent sends it.
 let proxyQueue=Promise.resolve();
-const server=createServer((req,res)=>{const run=proxyQueue.then(()=>proxy(req,res));proxyQueue=run.catch(()=>{});});
+const server=direct?null:createServer((req,res)=>{const run=proxyQueue.then(()=>proxy(req,res));proxyQueue=run.catch(()=>{});});
 // A request over the 2 MiB mailbox or 128k context limit never leaves the runner. It is answered the way a provider
 // reports a context overflow (HTTP 413), because Pi's own threshold compaction does not always run first: it measures
 // provider-reported usage, not this raw-request estimate, and it always keeps the latest ~16k tokens, so a huge message
@@ -98,10 +106,13 @@ async function proxy(req,res){
     res.writeHead(response.status,{'Content-Type':response.content_type});res.end(response.body);
   }catch{res.writeHead(502,{'Content-Type':'application/json'});res.end('{"error":"model_proxy_unavailable"}');}
 }
-server.listen(0,'127.0.0.1');await once(server,'listening');
 try{
+  if(direct&&!config.native_model)throw new Error('pi_native_model_required');
+  if(!direct){server.listen(0,'127.0.0.1');await once(server,'listening');}
   // This literal is not a provider credential. The local proxy ignores it and cannot reach any provider itself.
-  await writeFile(dir+'/models.json',JSON.stringify({providers:{'department-proxy':{api:'openai-completions',baseUrl:'http://127.0.0.1:'+server.address().port+'/v1',apiKey:'local-proxy',models:[{id:'selected',name:'Project model',contextWindow:modelCapabilities.context_window,maxTokens:modelCapabilities.max_output_tokens,reasoning:modelCapabilities.reasoning,input:['text'],compat:{supportsStore:false,supportsDeveloperRole:false,supportsReasoningEffort:false}}]}}}),{mode:0o600});
+  const providerId=direct?'department-direct':'department-proxy',modelId=direct?config.native_model.model:'selected';
+  const api=direct?({'openai-chat-completions':'openai-completions','openai-responses':'openai-responses','anthropic-messages':'anthropic-messages'}[config.native_model.interfaceType]):'openai-completions';
+  await writeFile(dir+'/models.json',JSON.stringify({providers:{[providerId]:{api,baseUrl:direct?config.native_model.baseUrl:'http://127.0.0.1:'+server.address().port+'/v1',apiKey:direct?config.native_model.key:'local-proxy',models:[{id:modelId,name:direct?modelId:'Project model',contextWindow:modelCapabilities.context_window,maxTokens:modelCapabilities.max_output_tokens,reasoning:modelCapabilities.reasoning,input:['text'],...(api==='openai-completions'?{compat:{supportsStore:false,supportsDeveloperRole:false,supportsReasoningEffort:false}}:{})}]}}}),{mode:0o600});
   const runtime=await ModelRuntime.create({authPath:dir+'/auth.json',modelsPath:dir+'/models.json',modelsStorePath:dir+'/catalog.json',allowModelNetwork:false});
   // Tools for one agent. cfg holds that agent's trusted capabilities; agent names a sub-agent in the task log; guard
   // checks repository results against that agent's own session.
@@ -160,11 +171,35 @@ try{
     }}));
   // A Pi session from one configuration: its system prompt, its tools and the history it is given (none for a sub-agent).
   async function createSession(cfg,agent,history){
-    const loader={getExtensions:()=>({extensions:[],errors:[],runtime:createExtensionRuntime()}),getSkills:()=>({skills:[],diagnostics:[]}),getPrompts:()=>({prompts:[],diagnostics:[]}),getThemes:()=>({themes:[],diagnostics:[]}),getAgentsFiles:()=>({agentsFiles:[]}),getSystemPrompt:()=>cfg.system,getSystemPromptSource:()=>undefined,getAppendSystemPrompt:()=>[],getAppendSystemPromptSources:()=>[],extendResources:()=>{},reload:async()=>{}};
-    const guard={check:async(_id,_name,value)=>value},tools=makeTools(cfg,agent,guard),sessionManager=SessionManager.inMemory(cwd);
-    for(const message of history)sessionManager.appendMessage(message);
-    const {session:created}=await createAgentSession({cwd,agentDir:dir,modelRuntime:runtime,model:runtime.getModel('department-proxy','selected'),thinkingLevel:'off',resourceLoader:loader,
-      tools:tools.map(tool=>tool.name),customTools:tools,sessionManager,settingsManager:SettingsManager.inMemory({compaction:{enabled:true,reserveTokens:24000,keepRecentTokens:16000},retry:{enabled:false}})});
+    const settingsManager=native?SettingsManager.create(cwd,nativeDir):SettingsManager.inMemory({compaction:{enabled:true,reserveTokens:24000,keepRecentTokens:16000},retry:{enabled:false}});
+    const loader=native?new DefaultResourceLoader({cwd,agentDir:nativeDir,settingsManager,appendSystemPrompt:[cfg.system]}):{getExtensions:()=>({extensions:[],errors:[],runtime:createExtensionRuntime()}),getSkills:()=>({skills:[],diagnostics:[]}),getPrompts:()=>({prompts:[],diagnostics:[]}),getThemes:()=>({themes:[],diagnostics:[]}),getAgentsFiles:()=>({agentsFiles:[]}),getSystemPrompt:()=>cfg.system,getSystemPromptSource:()=>undefined,getAppendSystemPrompt:()=>[],getAppendSystemPromptSources:()=>[],extendResources:()=>{},reload:async()=>{}};
+    if(native){await mkdir(nativeDir,{recursive:true,mode:0o700});await stageSessionSkills(nativeDir,cfg.resources);await loader.reload();}
+    const guard={check:async(_id,_name,value)=>value},tools=makeTools(cfg,agent,guard);
+    const sessionManager=native?(config.native_fresh?SessionManager.create(cwd,nativeDir+'/sessions'):SessionManager.continueRecent(cwd,nativeDir+'/sessions')):SessionManager.inMemory(cwd);
+    if(native&&!agent)nativeSessionId=sessionManager.getSessionId();
+    if(!native)for(const message of history)sessionManager.appendMessage(message);
+    if(native?.commands){
+      credentialHelper??=await startCredentialHelperServer({agentDir:dir,runToken:config.run_token,addSecret:token=>secrets.add(token)});
+      const bin=nativeDir+'/bin';await mkdir(bin,{recursive:true,mode:0o700});
+      await writeFile(bin+'/gh',`#!/bin/sh\nexec "${process.execPath}" "${new URL('./gh-wrapper.mjs',import.meta.url).pathname}" "$@"\n`,{mode:0o700});
+      const bash=createBashTool(cwd,{spawnHook:ctx=>({...ctx,env:{...ctx.env,HOME:nativeDir,PATH:bin+':'+(ctx.env.PATH??''),BOT_WRAPPER_BIN_DIR:bin,BOT_CREDENTIAL_HELPER_URL:credentialHelper.url,BOT_CREDENTIAL_HELPER_SECRET:credentialHelper.secret}})});
+      tools.push({...bash,label:'bash'});
+    }
+    const fileAccess=native?.fileTools??native?.workspace;
+    const builtin=native?[...(fileAccess!=='none'?['read','grep','find','ls']:[]),...(fileAccess==='write'?['edit','write']:[]),...(native.commands?['bash']:[])]:[];
+    if(native){
+      tools.push(...createCodingTools(cwd).filter(tool=>builtin.includes(tool.name)&&tool.name!=='bash'));
+      for(let i=0;i<tools.length;i++)if(builtin.includes(tools[i].name)){
+        const tool=tools[i];tools[i]={...tool,execute:async(...args)=>{
+          const ready=await dispatchTool('ensure_workspace',{},{kind:'workspace',signal:args[2],cancelledError:'workspace_cancelled'});
+          if(ready?.error)return {content:[{type:'text',text:JSON.stringify(ready)}],details:ready,isError:true};
+          return tool.execute(...args);
+        }};
+      }
+    }
+    const {session:created}=await createAgentSession({cwd,agentDir:native?nativeDir:dir,modelRuntime:runtime,model:runtime.getModel(providerId,modelId),resourceLoader:loader,
+      tools:[...builtin,...tools.map(tool=>tool.name)],customTools:tools,sessionManager,settingsManager});
+    if(native)await writeEvent({type:'session_bound',session_id:sessionManager.getSessionId(),recoveryMode:config.native_fresh?'fresh_evaluation':config.native_previous_session_id===sessionManager.getSessionId()?'native_resume':config.native_previous_session_id?'rebuilt_from_task_records':'new_session',transcript:sessionManager.getSessionFile(),native_tools:builtin,resources:{skills:loader.getSkills().skills.map(s=>s.name),context_files:loader.getAgentsFiles().agentsFiles.map(f=>f.path)}});
     guard.check=createToolResultGuard({getMessages:()=>created.messages,tooLarge:modelRequestTooLarge,renderRequest:async messages=>{
       // Let the same SDK serialize the projected request, then stop before any HTTP request or accounting.
       let raw;
@@ -177,11 +212,12 @@ try{
     }});
     let own=0;
     created.subscribe(event=>{
+      if(native&&['tool_execution_start','tool_execution_end'].includes(event.type))void writeEvent({type:'tool',phase:event.type==='tool_execution_start'?'started':'completed',name:event.toolName,call_id:event.toolCallId,...(event.args?{arguments:event.args}:{}),...(event.result?{result:event.result}:{}),isError:event.isError});
       // Pi compacted after an over-limit request and the retry still did not fit, or the compaction itself failed.
       if(event.type==='compaction_end'&&event.reason==='overflow'&&event.errorMessage&&!event.aborted)requestFailure='agent_context_too_large';
       if(event.type==='message_end'&&event.message.role==='assistant'){
         guard.check.reset();
-        const m=event.message;void writeEvent({type:'model',step:agent?++own:++steps,...(agent?{agent}:{}),reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))});
+        const m=event.message;void writeEvent({type:'model',step:agent?++own:++steps,...(agent?{agent}:{}),...(direct?{model:m.model,usage:m.usage,source:'pi_native'}:{}),reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))});
       }
     });
     return created;
@@ -189,7 +225,7 @@ try{
   const history=await readFile(dir+'/restore.json','utf8').then(JSON.parse).catch(()=>[]);
   session=await createSession(config,null,history);
   // The runtime and the exact tool surface of this session, before its first model request.
-  await writeEvent({type:'pi_session',...sdk,tools:config.tools.map(tool=>tool.function.name),control_tools:[...controlTools],extensions:0,skills:0,context_files:0,restored_messages:history.length});
+  await writeEvent({type:'pi_session',...sdk,tools:session.agent.state.tools.map(tool=>tool.name),control_tools:[...controlTools],native:!!native,restored_messages:history.length});
   if(config.review_session){
     session.setSteeringMode('all');
     const previousFinish=session.agent.finishTurn;
@@ -219,7 +255,9 @@ try{
       try{await session.prompt(input);}catch(error){if(!finished||requestFailure)throw error;}
       if(requestFailure)throw Object.assign(new Error(requestFailure),failureDetail?{detail:failureDetail}:{});
       // A controlled session ends only through its control-plane submission; without one the control plane decides.
-      if(finished||controlTools.size)return finished||null;
+      if(finished)return finished;
+      if(config.accept_turn_result)return {harness_turn:true,text:session.getLastAssistantText()??'',session_id:nativeSessionId};
+      if(controlTools.size)return null;
       const result=textResult();if(result!==undefined)return result;
       const names=finishingNames.join(' or ')||'a finishing tool';
       if(nudge>=finishNudges)throw Object.assign(new Error('agent_finish_missing'),{detail:`The model ended ${nudge+1} turns without calling ${names}.`});
@@ -249,4 +287,4 @@ try{
   // The reason goes into the task log; issued tokens are masked like every event.
   const known=['agent_context_too_large','agent_finish_missing','disk_full'];
   await save({state:'failed',error:requestFailure||(known.includes(error?.message)?error.message:noSpace(error)?'disk_full':'pi_execution_failed'),detail:clean(String(failureDetail||error?.detail||error?.message||error||'unknown')).slice(0,1000)});}
-finally{session?.dispose();server.closeAllConnections();server.close();}
+finally{session?.dispose();if(server?.listening){server.closeAllConnections();server.close();}await credentialHelper?.close();}

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { Readable } from 'node:stream';
+import { normalizeResponseFraming } from './response-framing.js';
 import type { Row, Store } from '../storage/database.js';
 import { traceSnapshot } from '../tasks/trace.js';
 import { TaskError, type Redactor } from '../agent/common.js';
@@ -725,7 +726,7 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
         signal: combinedSignal,
       });
       void pendingFetch.catch(() => {});
-      const upstream = await pendingFetch;
+      const upstream = await normalizeResponseFraming(await pendingFetch);
       upstreamStatus = upstream.status;
       armTimeout(timing.idleMs);
 
@@ -765,16 +766,18 @@ export function createMailboxModelGateway(options: MailboxModelGatewayOptions) {
       const upstreamContentType = upstream.headers.get('content-type') ?? 'application/json';
       const upstreamIsSse = upstreamContentType.includes('text/event-stream');
       const decoder = new UpstreamStreamDecoder(target.interfaceType, upstreamIsSse, target.model);
+      const namespacedTools = new Map(canonical.tools.filter(t=>t.namespace&&t.localName).map(t=>[t.name,{namespace:t.namespace!,name:t.localName!}]));
       const customTools = new Set(canonical.tools.filter(t => t.custom).map(t => t.name));
       const responseBuilder = new DownstreamResponseBuilder(
         passthrough ? target.interfaceType : downstreamFormat,
         passthrough ? false : canonical.stream,
         canonical.model,
         customTools,
+        namespacedTools,
       );
       const trajectoryTapBuilder = passthrough
         ? responseBuilder
-        : new DownstreamResponseBuilder(downstreamFormat, false, canonical.model, customTools);
+        : new DownstreamResponseBuilder(downstreamFormat, false, canonical.model, customTools, namespacedTools);
 
       const downstreamHeaders: Record<string, string> = {
         'content-type': passthrough ? upstreamContentType : canonical.stream ? 'text/event-stream; charset=utf-8' : 'application/json',

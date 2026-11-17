@@ -42,6 +42,7 @@ function fixture(t, env = {}, config = {}) {
         env: { CODEX_HOME: home, ...e },
         stateDirectory: sessionsDir,
         version: '0.166.0',
+        modelTransport: 'gateway',
         timeoutMs: 15000,
         cancelGraceMs: 800,
         toolStartupMs: 5000,
@@ -85,7 +86,7 @@ function fixture(t, env = {}, config = {}) {
 }
 const results = s => s.get("SELECT count(*) n FROM task_history WHERE type='role_result'").n;
 
-test('Codex app-server: handshake, stdio MCP task tools, thread/turn binding, quiet native items, no private reasoning', async t => {
+test('Codex app-server: handshake, stdio MCP task tools, thread/turn binding, queryable native items, no private reasoning', async t => {
   const f = fixture(t, { FIXTURE_TOKEN: 'fixture-secret-171', FIXTURE_FRAGMENT: 'true' });
   const out = await runRole(f.spec, 'dev', undefined, 'codex');
   assert.equal(out.result.summary, 'actual fixture result');
@@ -117,9 +118,8 @@ test('Codex app-server: handshake, stdio MCP task tools, thread/turn binding, qu
   assert.match(message.text, /^公开输出 fixture public output/);
   assert.equal(message.turnId, turns[0].turnId);
 
-  // Native container tools (commandExecution, fileChange, subAgentActivity) run quietly without per-command RoleRun tool events;
-  // MCP tool calls and plan items still emit structured events and deduplicate duplicates.
-  assert.equal(events.filter(e => e.type === 'tool' && ['commandExecution', 'fileChange', 'subAgentActivity'].includes(e.itemType)).length, 0);
+  // Native tools must remain visible alongside MCP receipts for diagnosis and provenance.
+  assert.ok(events.filter(e=>e.type==='tool'&&['commandExecution','fileChange','subAgentActivity'].includes(e.itemType)).length>0);
   assert.ok(events.some(e => e.type === 'tool' && e.itemType === 'mcpToolCall' && e.title === 'bot.read_task_record'));
   assert.equal(events.filter(e => e.type === 'tool' && e.itemType === 'plan').length, 1);
 
@@ -147,7 +147,7 @@ test('Codex permission requests allow own-thread container workspace commands/ed
   assert.deepEqual(answers('item/commandExecution/requestApproval'), [{ decision: 'accept' }, { decision: 'decline' }]);
   assert.deepEqual(answers('item/fileChange/requestApproval'), [{ decision: 'accept' }]);
   assert.deepEqual(answers('item/permissions/requestApproval'), [{ permissions: {} }]);
-  assert.deepEqual(answers('mcpServer/elicitation/request'), [{ action: 'accept', content: {} }, { action: 'decline' }, { action: 'decline' }]);
+  assert.deepEqual(answers('mcpServer/elicitation/request'), [{ action: 'accept', content: {} }, { action: 'accept', content: {} }, { action: 'decline' }]);
   assert.deepEqual(answers('item/tool/requestUserInput'), [{ answers: {} }]);
   assert.equal(answers('item/tool/call')[0].success, false);
   assert.equal(answers('account/chatgptAuthTokens/refresh')[0].error.code, -32601);
@@ -156,13 +156,13 @@ test('Codex permission requests allow own-thread container workspace commands/ed
 
   const permissions = f.events().filter(e => e.type === 'permission');
   assert.deepEqual([permissions.length, new Set(permissions.map(p => p.method)).size], [13, codexAppServer.serverRequests.length]);
-  assert.equal(permissions.filter(p => p.allowed).length, 3);
+  assert.equal(permissions.filter(p => p.allowed).length, 4);
   assert.equal(permissions.find(p => p.threadId === 'foreign-thread').reason, 'foreign_thread');
   const denied = f.s.all("SELECT data FROM task_history WHERE type='capability_denied'").map(r => JSON.parse(r.data));
   assert.ok(denied.some(d => d.tool === 'codex:item/commandExecution/requestApproval' && d.reason === 'foreign_thread'));
   assert.ok(denied.some(d => d.tool === 'codex:item/permissions/requestApproval' && d.reason === 'sandbox_escalation_outside_role_authority'));
   const categories = f.runEvents().filter(e => e.type === 'permission').map(e => e.category);
-  assert.deepEqual([categories.filter(c => c === 'progress').length, categories.filter(c => c === 'denied').length], [3, 10]);
+  assert.deepEqual([categories.filter(c => c === 'progress').length, categories.filter(c => c === 'denied').length], [4, 9]);
 });
 
 test('Codex container run routes OpenAI Responses API through loopback model relay and reconciles codex_events usage without double counting', async t => {
@@ -186,7 +186,7 @@ test('Codex container run routes OpenAI Responses API through loopback model rel
   const f = fixture(t, { FIXTURE_NATIVE_WORKSPACE: 'true' }, { model: 'gpt-5-codex' });
   const credFile = join(f.root, 'codex-upstream.key');
   writeFileSync(credFile, 'codex-upstream-secret-705', { mode: 0o600 });
-  f.configure({ FIXTURE_NATIVE_WORKSPACE: 'true' }, {
+  f.configure({ FIXTURE_NATIVE_WORKSPACE: 'true', FIXTURE_PROJECT_TOOL:'project-tool-834' }, {
     model: 'gpt-5-codex',
     provider: {
       baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`,
@@ -196,8 +196,10 @@ test('Codex container run routes OpenAI Responses API through loopback model rel
     },
   });
 
+  const projectBin=join(f.root,'sessions','home','.local','bin');mkdirSync(projectBin,{recursive:true});writeFileSync(join(projectBin,'project-tool-834'),'#!/bin/sh\nprintf project-tool-visible\n',{mode:0o755});
   const out = await runRole(f.spec, 'dev', undefined, 'codex');
   assert.equal(out.result.summary, 'codex native container verified');
+  assert.equal(out.result.projectToolOut,'project-tool-visible');
   assert.equal(out.result.shellOut, 'written natively by codex');
   assert.equal(out.result.relayStatus, 200);
   assert.equal(out.result.relayId, 'resp_codex_705');
@@ -267,7 +269,6 @@ test('Codex failures and version, model, tool or ownership mismatches are explic
     [{ FIXTURE_NO_SUBMIT: 'true' }, 'codex_submission_required'],
     [{ FIXTURE_VERSION: '0.165.0' }, 'codex_version_unsupported'],
     [{ FIXTURE_MODEL: 'other-model' }, 'codex_model_mismatch', { model: 'gpt-fixture' }],
-    [{ FIXTURE_EXTRA_SERVER: 'true' }, 'codex_unauthorized_tool_servers'],
     [{ FIXTURE_REROUTE: 'true' }, 'codex_model_rerouted'],
     [{ FIXTURE_MCP_FAIL: 'true' }, 'codex_task_tools_unavailable'],
     [{ FIXTURE_HOME: '/elsewhere' }, 'codex_home_unexpected'],
@@ -356,7 +357,6 @@ test('Codex container policy enables native workspace tools, verifies feature/sa
   });
 
   for (const env of [
-    { FIXTURE_FEATURE_IGNORED: 'true' },
     { FIXTURE_MISSING_NATIVE_FEATURE: 'true' },
     { FIXTURE_SANDBOX_IGNORED: 'true' },
     { FIXTURE_APPROVAL_IGNORED: 'true' },
@@ -371,7 +371,6 @@ test('Codex container policy enables native workspace tools, verifies feature/sa
   for (const [env, code, toolName] of [
     [{ FIXTURE_DYNAMIC_TOOL: 'true' }, 'codex_builtin_tool_refused', 'codex:dynamicToolCall'],
     [{ FIXTURE_WEB_SEARCH: 'true' }, 'codex_builtin_tool_refused', 'codex:webSearch'],
-    [{ FIXTURE_FOREIGN_MCP: 'true' }, 'codex_builtin_tool_refused', 'codex:mcpToolCall'],
     [{ FIXTURE_SAME_CHUNK: 'true' }, 'codex_builtin_tool_refused', 'codex:dynamicToolCall'],
   ]) {
     await t.test(code + ' ' + toolName + ' ' + Object.keys(env)[0], async t => {
@@ -676,8 +675,8 @@ test('A session refused before its binding counts a restated usage increment onc
   const first = await runRole(f.spec, 'dev', undefined, 'codex');
   const before = f.state();
   assert.equal(before.usage.total, 110);
-  f.configure({ FIXTURE_EXTRA_SERVER: 'true', FIXTURE_EARLY_USAGE: 'true' });
-  for (let i = 0; i < 2; i++) await assert.rejects(runRole(f.spec, 'dev'), { code: 'codex_unauthorized_tool_servers' });
+  f.configure({ FIXTURE_MCP_FAIL: 'true', FIXTURE_EARLY_USAGE: 'true' });
+  for (let i = 0; i < 2; i++) await assert.rejects(runRole(f.spec, 'dev'), { code: 'codex_task_tools_unavailable' });
   assert.deepEqual(f.state(), before);
   assert.equal(f.events().filter(e => e.type === 'usage').length, 1, 'the refused attempts recorded no usage');
   let usage = instanceUsage(f.s, first.instance_id);
@@ -758,6 +757,7 @@ test('Codex launch configuration refuses shared homes, daemons, unsupported sand
   assert.equal(load(base).protocol, 'codex-app-server');
   assert.equal(load({ ...base, sandbox: 'danger-full-access' }).sandbox, 'danger-full-access');
   assert.equal(load({ ...base, sandbox: 'workspace-write' }).sandbox, 'workspace-write');
+  assert.equal(load({ ...base, sandbox: 'read-only' }).sandbox, 'read-only');
   for (const bad of [
     { env: {} },
     { env: { CODEX_HOME: 'relative' } },
@@ -765,7 +765,7 @@ test('Codex launch configuration refuses shared homes, daemons, unsupported sand
     { args: ['app-server', 'proxy'] },
     { args: ['app-server', '--listen', 'ws://127.0.0.1:1'] },
     { args: ['exec'] },
-    { sandbox: 'read-only' },
+    { sandbox: 'network-only' },
     { mode: 'auto' },
     { protocol: 'acp' },
     { version: undefined },
@@ -786,4 +786,43 @@ test('legacy absolute Harness timeout no longer kills active execution; explicit
   cancel = true;
   await assert.rejects(observed, { code: 'task_cancelled' });
   assert.equal(f.events().some(e => e.code === 'harness_timeout'), false);
+});
+
+ test('Codex retains project MCP servers and records their native activity without a Bot tool-name restriction',async t=>{
+  const f=fixture(t,{FIXTURE_EXTRA_SERVER:'true',FIXTURE_FOREIGN_MCP:'true'});
+  const out=await runRole(f.spec,'dev',undefined,'codex');assert.equal(out.result.summary,'actual fixture result');
+  assert.ok(f.events().some(event=>event.type==='tool'&&event.title==='github.push_files'));
+ });
+
+test('default direct Codex preserves its native provider/login configuration and resumes the same thread',async t=>{
+ const f=fixture(t,{}, {modelTransport:undefined});mkdirSync(f.home,{recursive:true});
+ const original='model = "gpt-fixture"\n# native provider settings must survive Bot startup\n';
+ writeFileSync(join(f.home,'config.toml'),original);writeFileSync(join(f.home,'auth.json'),'{"fixture_login":true}',{mode:0o600});
+ await runRole(f.spec,'dev',undefined,'codex');const thread=f.state().sessionId;
+ await runRole(f.spec,'dev',undefined,'codex');
+ assert.equal(f.state().sessionId,thread);assert.equal(f.state().recoveryMode,'native_resume');
+ assert.equal(readFileSync(join(f.home,'config.toml'),'utf8'),original);
+ assert.equal(readFileSync(join(f.home,'auth.json'),'utf8'),'{"fixture_login":true}');
+ assert.ok(f.events().some(e=>e.type==='session_bound'&&e.usage==='native_events'));
+ assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE accounting_source NOT IN ('codex_events')").n,0);
+});
+
+test('direct Codex uses its native provider client without opening the Bot model gateway',async t=>{
+ const requests=[];const upstream=createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;requests.push({url:req.url,authorization:req.headers.authorization,body:JSON.parse(raw)});res.setHeader('content-type','application/json');res.end(JSON.stringify({id:'resp_direct_native',object:'response',model:'gpt-5-codex',output:[],usage:{input_tokens:5,output_tokens:2}}));});
+ upstream.listen(0,'127.0.0.1');await once(upstream,'listening');t.after(()=>upstream.close());
+ const f=fixture(t,{FIXTURE_NATIVE_WORKSPACE:'true'},{model:'gpt-5-codex',modelTransport:undefined});
+ const keyFile=join(f.root,'native-provider.key');writeFileSync(keyFile,'direct-native-key',{mode:0o600});
+ f.configure({FIXTURE_NATIVE_WORKSPACE:'true'},{model:'gpt-5-codex',modelTransport:undefined,provider:{baseUrl:`http://127.0.0.1:${upstream.address().port}/v1/responses`,credentialFile:keyFile}});
+ const out=await runRole(f.spec,'dev',undefined,'codex');
+ assert.equal(out.result.relayId,'resp_direct_native');assert.equal(requests.length,1);assert.equal(requests[0].url,'/v1/responses');assert.equal(requests[0].authorization,'Bearer direct-native-key');
+ assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE accounting_source NOT IN ('codex_events')").n,0);
+ assert.equal(existsSync(join(f.home,'config.toml')),false,'direct startup does not write a proxy config over native settings');
+ assert.doesNotMatch(JSON.stringify(f.events()),/direct-native-key/);
+});
+
+test('direct Codex reports an incompatible provider protocol without silently enabling a gateway',async t=>{
+ const f=fixture(t,{}, {modelTransport:'direct'}),keyFile=join(f.root,'native.key');writeFileSync(keyFile,'native-key',{mode:0o600});
+ f.configure({}, {modelTransport:'direct',model:'gpt-fixture',provider:{baseUrl:'http://127.0.0.1:1/v1',credentialFile:keyFile,interfaceType:'openai-chat-completions'}});
+ await assert.rejects(runRole(f.spec,'dev',undefined,'codex'),{code:'harness_direct_protocol_unsupported'});
+ assert.equal(f.s.get('SELECT count(*) n FROM model_requests').n,0);
 });

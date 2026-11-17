@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import { ManagerError } from './docker.mjs';
-import { logFailure, resourceBounds, validResource } from './projects.mjs';
+import { logFailure, resourceBounds, validResource, validateCall as validateProjectCall } from './projects.mjs';
 
 /**
  * Assistant computers (#457): one short-lived container per conversation owner (a group, or a person's private chats and
@@ -38,7 +38,8 @@ const ticketMs = 15_000;
 const types = ['command', 'assistant_read', 'assistant_write', 'assistant_delete'];
 const keys = { command: ['command', 'timeout_ms'], assistant_read: ['path', 'offset', 'limit'], assistant_write: ['path', 'base64', 'offset'], assistant_delete: ['path'] };
 
-function validateCall(call) {
+function validateCall(call, harness = false) {
+  if(harness&&(call?.type==='workspace_init'||call?.type==='reap'||call?.type?.startsWith('workspace_agent_')||call?.type?.startsWith('workspace_harness_'))){validateProjectCall(call);return;}
   if (!call || typeof call !== 'object' || !types.includes(call.type) || Object.keys(call).some(k => k !== 'type' && !keys[call.type].includes(k))) throw new ManagerError('invalid_runner_request', 400);
   if (call.timeout_ms != null && !(Number.isSafeInteger(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
   if (call.type !== 'command' && (typeof call.path !== 'string' || !call.path || call.path.length > 4096 || call.path.includes('\0'))) throw new ManagerError('invalid_runner_request', 400);
@@ -54,8 +55,8 @@ export function validateAssistantSettings(input, hostCpus = null) {
 
 export class AssistantComputers {
   /** homes: where the HOME volume is mounted in the manager (read-only), to find its name and check a generation exists. */
-  constructor({ docker, db, deployment, image, homes = '/assistant-homes' }) {
-    this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes;
+  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools }) {
+    this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools;
     // owner -> lease; owner -> pending removal; owner -> serialized operations; waiting: owners queued for capacity.
     this.leases = new Map(); this.removing = new Map(); this.locks = new Map(); this.waiting = [];
     this.db.exec('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
@@ -133,7 +134,8 @@ export class AssistantComputers {
    */
   async acquire(owner, input) {
     this.validate(owner);
-    if (!input || typeof input !== 'object' || Object.keys(input).some(k => !['turn', 'fence', 'home_generation', 'home_mode'].includes(k))) throw new ManagerError('invalid_assistant_request', 400);
+    if (input?.harness !== undefined && typeof input.harness !== 'boolean') throw new ManagerError('invalid_assistant_request', 400);
+    if (!input || typeof input !== 'object' || Object.keys(input).some(k => !['turn', 'fence', 'home_generation', 'home_mode','harness'].includes(k))) throw new ManagerError('invalid_assistant_request', 400);
     const { turn, fence, home_generation: generation, home_mode: mode } = input;
     if (!turnPattern.test(turn || '') || !/^[a-f0-9]{16,128}$/.test(fence || '') || !Number.isSafeInteger(generation) || generation < 1 || !['rw', 'ro'].includes(mode)) throw new ManagerError('invalid_assistant_request', 400);
     return this.lock(owner, async () => {
@@ -149,7 +151,7 @@ export class AssistantComputers {
         // The turn already holding it (a retried request) keeps it through new resources and past its lifetime: both apply
         // between turns. A changed fence, HOME generation or mode never keeps it.
         const held = lease.state === 'busy' && lease.turn === turn;
-        const current = lease.fence === fence && lease.generation === generation && lease.mode === mode && lease.image === this.image
+        const current = lease.fence === fence && lease.generation === generation && lease.mode === mode && lease.image === this.image && (!input.harness || lease.harness)
           && (held || (JSON.stringify(lease.resources) === JSON.stringify(resourcesOf(settings)) && now - lease.created < settings.max_lifetime_minutes * 60_000));
         const running = current && (await this.inspect(owner).catch(() => null))?.State?.Running === true;
         if (running) {
@@ -171,7 +173,7 @@ export class AssistantComputers {
         }
         this.waiting = this.waiting.filter(t => t.owner !== owner);
       }
-      lease = { owner, turn, fence, generation, mode, resources: resourcesOf(settings), image: this.image, state: 'creating', created: now, used: now, renewed: now, inflight: 0 };
+      lease = { owner, turn, fence, generation, mode, harness:input.harness===true, resources: resourcesOf(settings), image: this.image, state: 'creating', created: now, used: now, renewed: now, inflight: 0 };
       this.leases.set(owner, lease);
       try {
         await this.create(lease);
@@ -197,11 +199,12 @@ export class AssistantComputers {
     // A container left by an earlier lease of this owner (a failed removal) is never reused.
     if (await this.inspect(owner)) await this.docker.request('DELETE', `/containers/${name}?force=true`);
     // Docker answers 404 (no such image) with nothing: a clear creation failure, not a container gone missing later.
+    const tools=lease.harness?await this.agentTools?.():null;
     const made = await this.docker.request('POST', `/containers/create?name=${name}`, { Image: lease.image, User: '10001:10001', WorkingDir: '/workspace', Hostname: 'assistant',
       Cmd: ['node', '/opt/runner/idle.mjs'], Env: [`HOME=${assistantHome}`, 'LANG=C.UTF-8', 'BOT_COMPUTER_KIND=assistant'], Labels: this.labels(owner),
       HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false, Init: true, RestartPolicy: { Name: 'no' },
         Memory: l.memory_mb * mib, MemorySwap: l.memory_mb * mib, NanoCpus: Math.round(l.cpus * 1e9), PidsLimit: l.pids, IpcMode: 'private', NetworkMode: 'none',
-        Mounts: [{ Type: 'volume', Source: volume, Target: assistantHome, ReadOnly: lease.mode === 'ro', VolumeOptions: { NoCopy: true, Subpath: subpath } }],
+        Mounts: [{ Type: 'volume', Source: volume, Target: assistantHome, ReadOnly: lease.mode === 'ro', VolumeOptions: { NoCopy: true, Subpath: subpath } },...(tools?[{Type:'volume',Source:tools,Target:'/opt/agent-tools',ReadOnly:true}]:[])],
         // Programs run from both, as on a work computer; Docker mounts a tmpfs noexec unless `exec` is given.
         Tmpfs: { '/workspace': `rw,exec,nosuid,nodev,size=${l.workspace_mb * mib},uid=10001,gid=10001,mode=0700`, '/tmp': `rw,exec,nosuid,nodev,size=${l.tmp_mb * mib},mode=1777` } } });
     if (!made) throw Object.assign(new ManagerError('assistant_computer_create_failed', 503), { detail: `image ${lease.image} not found` });
@@ -234,8 +237,9 @@ export class AssistantComputers {
   async execute(owner, input) {
     this.validate(owner);
     if (!input || Object.keys(input).some(k => !['turn', 'operation_id', 'request'].includes(k)) || !turnPattern.test(input.turn || '') || !idPattern.test(input.operation_id || '')) throw new ManagerError('invalid_operation', 400);
-    validateCall(input.request);
-    const lease = this.held(owner, input.turn), command = input.request.type === 'command';
+    const lease = this.held(owner, input.turn);
+    validateCall(input.request, lease.harness);
+    const command = input.request.type === 'command';
     lease.inflight++; lease.renewed = Date.now();
     try {
       return await this.docker.runner(this.name(owner), { ...input.request, operation_id: input.operation_id }, command ? (input.request.timeout_ms ?? 10_000) + 30_000 : 90_000);

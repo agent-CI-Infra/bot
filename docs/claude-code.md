@@ -1,6 +1,8 @@
 # Claude Code harness
 
-`claude_code` 声明的 kind 为 writer、observer、evaluator；未声明 controller 能力，因此保存配置和运行时都拒绝 controller（包括 manager 与 coordinator）。其他后端保持既有能力和兼容约定。该驱动在项目容器（`Workspace`）及隔离运行容器（`RunEnvironments`，声明 `isolation: run_environment`）内执行真实 Claude Code 二进制，不调用普通 Chat Completions 代替 CLI。RoleRun 仍是现有 `task_runs`、assignment、lease epoch、TaskToolGateway 和 Publisher；没有新增任务队列或阶段调度。
+模型连接默认直连：Claude 使用原生供应商客户端，provider 配置和凭据直接用于原生环境；也可省略 provider 并使用专用 `CLAUDE_CONFIG_DIR` 或显式认证环境变量。`modelTransport: "gateway"` / `BOT_HARNESS_MODEL_TRANSPORT=gateway` 才启用下述回环模型中转，平台 MCP 工具与会话管理在两种模式下保持相同。直连需要供应商网络可达，并允许 Harness 使用模型凭据。
+
+`claude_code` 支持 controller、writer、observer、evaluator，包括 Manager 与 Coordinator。该驱动在项目容器（`Workspace`）及隔离运行容器（`RunEnvironments`，声明 `isolation: run_environment`）内执行真实 Claude Code 二进制，不调用普通 Chat Completions 代替 CLI。RoleRun 仍是现有 `task_runs`、assignment、lease epoch、TaskToolGateway 和 Publisher；没有新增任务队列或阶段调度。
 
 ## 工具卷、版本与部署
 
@@ -19,7 +21,7 @@
   "roles": [
     {
       "role_id": "dev",
-      "harness_ref": { "id": "claude_code", "model_source": "gateway" },
+      "harness_ref": { "id": "claude_code" },
       "model_profile_ref": { "model_id": "<model id>" },
       "environment_profile_ref": { "id": "isolated-workspace" }
     }
@@ -27,7 +29,7 @@
 }
 ```
 
-- **平台网关模式（`model_source: "gateway"`，默认）**：默认按“角色显式 `model_profile_ref` → 工作类型模型 `task_models` → 项目默认模型”解析主模型，同时允许容器内 CLI 主会话与原生子 Agent 通过环境变量或配置选用当前项目可见且具备凭据的已授权模型（`allowVisibleModels: true`；跨项目或未授权模型直接拒绝）。控制面多格式模型网关根据 CLI 下游请求端点（Claude Code `/v1/messages`、Codex `/v1/responses`）与上游模型配置的协议自动选择或双向转换协议（Anthropic Messages、OpenAI Responses、OpenAI Chat Completions），无需在角色页手动指定协议覆盖。
+- **平台模型配置（历史字段 `model_source: "gateway"`）**：按“角色显式 `model_profile_ref` → 工作类型模型 `task_models` → 项目默认模型”选定模型。这个历史字段不再代表模型传输开关。默认由原生 Harness 直连供应商；只有显式 `modelTransport: "gateway"` 时，才启用原来的项目可见模型选择与多协议转换。
 - **供应商订阅模式（`model_source: "subscription"`，预留）**：接口与数据结构（`src/harness/subscription.ts`、角色配置页选择器）已预留，当前未实现；选择后保存配置会记录 `model_source: "subscription"`，切回平台网关保存后显式发送 `model_source: "gateway"` 并清除原订阅标记。订阅模式在控制台展示“未实现”，解析与运行准备阶段明确以 `subscription_mode_not_implemented` 拒绝，不会静默回退到网关或宿主凭据。
 
 角色配置页展示 `claude_code` 与 `codex` 的工具卷挂载状态、已安装版本、所选版本、兼容版本范围、实际解析模型配置就绪状态与上游连通性状态（区分“连通性未探测”“连通正常”“连通失败”，并提供“探测模型连通性”操作）及不可用原因。模型完整 ID、CLI 版本和启动配置哈希进入 `RunContext` 和运行快照；同一角色 revision 恢复时变更模型或启动配置会以 `model_revision_changed` 拒绝，不静默换模型。
@@ -37,7 +39,7 @@
 每次运行在容器内由 `runner/harness-entry.mjs` 以独立进程组启动：
 
 1. **回环模型中转（`runner/model-relay.mjs`，`127.0.0.1:0`）**：`ANTHROPIC_BASE_URL` 指向容器内本轮临时端口，`ANTHROPIC_API_KEY` 设为控制面签发的运行级身份令牌 `rrt_…`。中转经任务目录文件邮箱（`model-requests/`、`model-replies/`）转发到控制面 `src/harness/model-gateway.ts`；长期上游模型 API Key 仅保存在控制面加密存储中，永不进入容器环境、命令行或文件。即使隔离运行容器处于 `--network none`，模型调用仍经文件邮箱正常工作。
-2. **运行级身份令牌校验**：控制面在每次模型请求、每次平台工具调用和每次 GitHub 短期只读令牌签发时复核 `rrt_…` 的哈希、租约 `lease_epoch`、角色、项目与能力范围（`model:invoke`、`gateway:<tool>`、`github:read_token`）；撤销、过期或跨运行混用立即拒绝。
+2. **运行级身份令牌校验**：网关模式在每次模型请求、每次平台工具调用和每次 GitHub 短期只读令牌签发时复核 `rrt_…` 的哈希、租约 `lease_epoch`、角色、项目与能力范围（`model:invoke`、`gateway:<tool>`、`github:read_token`）；撤销、过期或跨运行混用立即拒绝。
 3. **GitHub 短期只读令牌辅助器（`runner/git-credential-bot.mjs`、`runner/gh-wrapper.mjs`）**：容器内不放置长期 GitHub Token，也不在 CLI 进程环境中设置 `GH_TOKEN`/`GITHUB_TOKEN`。需要远端只读访问时，Git credential helper 与 `gh` 包装器向 `harness-entry.mjs` 的本机凭据辅助端口申请短期只读安装令牌（剩余有效期不足 10 分钟自动续签），禁止 `gh auth token` / `--show-token` 导出明文，并对子进程输出做流式令牌脱敏；部分 GitHub 读取权限下引导改用平台结构化只读工具。GitHub 写入继续只走控制面受控 `github_write` 与 Publisher。
 
 ## 容器原生工具、平台 MCP 桥与证据边界
@@ -45,9 +47,9 @@
 CLI 工作目录固定为容器内任务仓库检出 `<task_dir>/repo`；`HOME` 与 `CLAUDE_CONFIG_DIR` 指向角色实例专属状态目录 `/workspace/tasks/<state_workspace_id>/cli-state/<session_key>/`，随 `WorkspaceCleanup` 生命周期清理。
 
 - **开放容器原生工具**：启用 `--tools default` 与 `--dangerously-skip-permissions`（安全边界由容器只读根、非特权 UID 10001、capability 丢弃、网络隔离与短期凭据提供），角色可直接在 `<task_dir>/repo` 中使用原生终端（`Bash`）、文件读写与编辑（`Read`、`Write`、`Edit`）、搜索（`Glob`、`Grep`）及原生子 Agent（`Agent`/`Task`）。无外网权限（`!egress`）时通过 `--disallowedTools` 禁用 `WebFetch`、`WebSearch`，同时禁用 `EnterWorktree`/`ExitWorktree` 及无关的宿主计划任务工具。
-- **平台管理工具桥（`runner/mcp-bridge.mjs`）**：通过 `--strict-mcp-config` 仅注入 stdio MCP 服务 `bot`，并设置 `MCP_TOOL_TIMEOUT=3600000` 与 `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=3600000` 以容纳长耗时平台操作。桥接器经文件邮箱（`tool-requests/`、`tool-replies/`）调用控制面 `createTaskToolDispatcher`，提供任务记录读取（`read_task_record`）、角色记忆、技能读取（`read_skill`）、结构化 GitHub 读取/写入及结果提交工具（`finish` 等）；已被 CLI 原生工具替代的底层 `read_file`/`write_file`/`run_command`/`start_agent` 不再重复暴露在 MCP 中。
-- **防仓库投毒**：固定携带 `--disable-slash-commands --setting-sources "" --strict-mcp-config`，并在独立 `settings.json` 中设置 `disableAllHooks: true`、`enableAllProjectMcpServers: false`，仓库检出内的 `.claude/settings.json`、`.mcp.json`、`CLAUDE.md` 钩子或恶意 MCP 配置不会自动执行。
-- **安静的命令日志**：容器内原生命令与文件操作不再逐条刷写控制面运行事件日志；控制面只记录平台 MCP 工具调用回执、模型网关请求轨迹与公开消息摘要。
+- **平台管理工具桥（`runner/mcp-bridge.mjs`）**：追加 stdio MCP 服务 `bot`，保留项目允许的其他原生 MCP 服务，并设置 `MCP_TOOL_TIMEOUT=3600000` 与 `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=3600000` 以容纳长耗时平台操作。桥接器经文件邮箱（`tool-requests/`、`tool-replies/`）调用控制面 `createTaskToolDispatcher`，提供任务记录读取（`read_task_record`）、角色记忆、技能读取（`read_skill`）、结构化 GitHub 读取/写入及结果提交工具（`finish` 等）；已被 CLI 原生工具替代的底层 `read_file`/`write_file`/`run_command`/`start_agent` 不再重复暴露在 MCP 中。
+- **原生资源**：通过 `--setting-sources project,local` 加载仓库指令、Skills 与项目设置，允许项目钩子；专用 HOME 不继承宿主私有设置与凭据。应只在项目被授权的执行环境内运行，不能把“禁用全部项目配置”当作保持原生行为。
+- **公共轨迹**：记录原生工具活动、平台 MCP 调用回执、模型请求与公开消息摘要；不收集私有推理。
 
 CLI 报告或退出码不会自动成为验收通过；writer 的 `collect` 由控制面取得候选快照并运行既有 finish 校验器，observer 只检视已固定的 `role_candidate`，独立 QA 始终使用全新上下文与独立检出。
 
@@ -59,7 +61,7 @@ CLI 报告或退出码不会自动成为验收通过；writer 的 `collect` 由�
 
 取消先发送 `control_request/interrupt`，宽限期后经 `workspace_harness_interrupt` 对整个容器内进程组发送 `SIGKILL` 并执行工作区 `reap`，确保 CLI 派生的测试、构建与子 Agent 进程全部回收，同时撤销运行令牌并拒绝迟到提交。
 
-模型用量与完整请求轨迹由控制面 `model-gateway.ts` 在转发响应时统一写入 `model_requests` 与外部模型账本：明确的 4xx 上游拒绝记已知 0 token，5xx 或断流未拿到完整计数的请求记入 `unknown_requests`（`lower_bound`），并在结束时与 CLI `result.usage` 对账（`usage_reconciliation`）。
+默认直连时，用量从 Claude 原生事件与 `result.usage` 采集，不获取或伪造完整模型请求正文。显式网关模式的模型用量与完整请求轨迹由控制面 `model-gateway.ts` 在转发响应时统一写入 `model_requests` 与外部模型账本：明确的 4xx 上游拒绝记已知 0 token，5xx 或断流未拿到完整计数的请求记入 `unknown_requests`（`lower_bound`），并在结束时与 CLI `result.usage` 对账（`usage_reconciliation`）。
 
 ## 验证分层
 

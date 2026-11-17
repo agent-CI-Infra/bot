@@ -88,3 +88,6 @@ Bot 里的角色分两个维度：
 见 [管理 API](api.md) 的 `/api/service-roles`。
 
 金额用量只统计，不作为调用条件。已知费用按币种汇总，未计价请求与已知 token 分开显示；历史金额配置读取时忽略，重新保存后清除。
+
+
+服务角色可配置 `harness`（`native`、`pi`、`codex`、`claude_code`）。旧角色默认保留 Native。外部后端通过公共会话 Driver 运行在会话所属的助手电脑上；需安装对应工具并配置模型，不能回退到宿主机执行。会话与事件查询及当前权限边界见 [Harness Runtime](harness-runtime.md)。

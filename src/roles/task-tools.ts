@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { randomId } from '../core/security.js';
+import { HttpError, randomId } from '../core/security.js';
 import { stop, TaskError, type Redactor } from '../agent/common.js';
 import type { AgentSpec } from '../agent/runtime.js';
 import { traceEvent } from '../tasks/trace.js';
@@ -150,9 +150,11 @@ export function createTaskToolDispatcher<T>(spec: AgentSpec<T>, options: TaskToo
         try {
           observation = spec.execute ? await spec.execute(name, args) : { error: 'tool_not_allowed' };
         } catch (error) {
-          const feedback = spec.repairInvalid?.(error);
+          await spec.guard();
+          if(error instanceof HttpError&&[400,403,404,409].includes(error.status))observation={error:error.code,...(error.field?{field:error.field}:{}),instruction:'Correct this call or choose another authorized action. The session remains active.'};
+          else{const feedback = spec.repairInvalid?.(error);
           if (!feedback || (options.maxRepairs !== undefined && repairs++ >= options.maxRepairs)) throw error;
-          observation = { error: 'invalid_submission', message: spec.redactor.text(feedback) };
+          observation = { error: 'invalid_submission', message: spec.redactor.text(feedback) };}
         }
         const clean = spec.redactor.clean(observation ?? null);
         traceEvent(spec.store, String(spec.task.id), 'tool_observation', { name, call_id: String(input.id), observation: clean }, spec.task.trace_run_id, 'tool', [started]);

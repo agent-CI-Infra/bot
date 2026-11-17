@@ -13,6 +13,7 @@ import { COMPATIBLE_CLI_RANGES, DEFAULT_AGENT_TOOLS_ROOT, satisfiesCliRange, sel
 import type { ModelAuthHeader, ModelInterfaceType } from '../models/catalog.js';
 import type { FileBackedModelProvider } from './model-gateway.js';
 import { filterPlatformTools, withContainerHarnessSession, type RunningContainerHarness } from './container-session.js';
+import { modelTransport, type ModelTransport } from './model-connection.js';
 
 export interface CodexProviderConfig {
   baseUrl: string;
@@ -22,6 +23,7 @@ export interface CodexProviderConfig {
 }
 
 export interface CodexConfiguration {
+  modelTransport?: ModelTransport;
   command: string;
   args: string[];
   env: Record<string, string>;
@@ -30,7 +32,7 @@ export interface CodexConfiguration {
   protocol: 'codex-app-server';
   model?: string;
   modelProvider?: string;
-  sandbox?: 'workspace-write' | 'danger-full-access';
+  sandbox?: 'workspace-write' | 'danger-full-access' | 'read-only';
   timeoutMs?: number;
   toolStartupMs?: number;
   cancelGraceMs?: number;
@@ -38,6 +40,7 @@ export interface CodexConfiguration {
 }
 
 export interface CodexPreparation {
+  modelTransport: ModelTransport;
   mode: 'volume' | 'config_file';
   config?: CodexConfiguration;
   command: string;
@@ -113,7 +116,7 @@ export function codexConfiguration(): CodexConfiguration {
     return bad("CODEX_HOME must not be the host user's shared Codex home.");
   }
   if (c.mode !== undefined) return bad('mode is not supported; Codex container policy uses sandbox.');
-  if (c.sandbox !== undefined && !['workspace-write', 'danger-full-access'].includes(c.sandbox)) {
+  if (c.sandbox !== undefined && !['workspace-write', 'danger-full-access','read-only'].includes(c.sandbox)) {
     return bad('sandbox must be workspace-write or danger-full-access.');
   }
   if (!optionalString(c.model) || !optionalString(c.modelProvider) || !optionalMs(c.toolStartupMs, 100) || !optionalMs(c.cancelGraceMs, 100)) {
@@ -135,6 +138,7 @@ export function codexConfiguration(): CodexConfiguration {
     };
   }
   return {
+    modelTransport: modelTransport(c.modelTransport),
     command: c.command,
     args,
     env: c.env,
@@ -166,6 +170,7 @@ export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparat
     }
     const command = resolveExecutableOnPath(config.command);
     const executableArgs = stripTrailingAppServerArg(config.args);
+    const connectionMode = modelTransport(spec.containerOptions?.modelTransport ?? config.modelTransport);
     let fileProvider: FileBackedModelProvider | undefined = spec.containerOptions?.fileProvider;
     let primaryModel: RuntimeModel | undefined;
     if (!fileProvider && config.provider) {
@@ -177,22 +182,23 @@ export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparat
         interfaceType: config.provider.interfaceType ?? 'openai-responses',
         authHeader: config.provider.authHeader ?? 'bearer',
       };
-    } else if (!fileProvider) {
+    } else if (!fileProvider && connectionMode === 'gateway') {
       try {
         primaryModel = (spec.model as RuntimeModel | undefined) ?? (executionModel(spec.store, spec.task) as RuntimeModel);
       } catch {
         primaryModel = undefined;
       }
     }
-    const configurationHash = contentHash({ ...config, command, protocol: 'codex-app-server' });
+    const configurationHash = contentHash({ ...config, command, modelTransport:connectionMode, protocol: 'codex-app-server' });
     const prepared: CodexPreparation = {
+      modelTransport: connectionMode,
       mode: 'config_file',
       config,
       command,
       executableArgs,
       version: config.version,
       ...(config.model ? { model: config.model } : {}),
-      ...(config.modelProvider ? { modelProvider: config.modelProvider } : {}),
+      ...(connectionMode === 'direct' && (fileProvider || primaryModel) ? { modelProvider: 'bot_direct' } : config.modelProvider ? { modelProvider: config.modelProvider } : {}),
       ...(primaryModel ? { primaryModel } : {}),
       ...(fileProvider ? { fileProvider } : {}),
       configurationHash,
@@ -227,7 +233,8 @@ export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparat
     ? undefined
     : ((spec.model as RuntimeModel | undefined) ?? (executionModel(spec.store, spec.task) as RuntimeModel));
   const modelName = fileProvider ? fileProvider.model : primaryModel!.model;
-  const modelProvider = 'bot_relay';
+  const connectionMode = modelTransport(spec.containerOptions?.modelTransport);
+  const modelProvider = connectionMode === 'gateway' ? 'bot_relay' : 'bot_direct';
   const configurationHash = contentHash({
     cli: 'codex',
     version: cliVersion,
@@ -235,8 +242,10 @@ export async function prepareCodex<T>(spec: AgentSpec<T>): Promise<CodexPreparat
     model: modelName,
     model_id: primaryModel?.id ?? fileProvider?.id ?? 'provider',
     protocol: 'codex-app-server',
+    modelTransport: connectionMode,
   });
   const prepared: CodexPreparation = {
+    modelTransport: connectionMode,
     mode: 'volume',
     command,
     executableArgs,
@@ -268,7 +277,7 @@ export async function runCodex<T>(
   if (!spec.runAccess?.token) {
     return stop('run_token_invalid', 'failed', '容器内 Codex 运行缺少控制面签发的运行级身份令牌。');
   }
-  if (ctx && !['writer', 'observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '')) {
+  if (ctx && !['controller', 'writer', 'observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '')) {
     return stop('harness_role_unsupported', 'waiting_configuration');
   }
 
@@ -285,7 +294,6 @@ export async function runCodex<T>(
   const rawSessionKey = spec.harnessSessionKey ?? spec.roleRun?.instance_id ?? String(spec.task?.id ?? 'default');
   const sessionKey = String(rawSessionKey).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || 'default';
   const fresh =
-    Boolean(spec.harnessSessionKey) ||
     spec.roleRun?.role === 'qa' ||
     ctx?.execution_context?.kind === 'evaluator' ||
     spec.roleRun?.recovery_mode === 'rebuilt_from_task_records';
@@ -317,8 +325,10 @@ export async function runCodex<T>(
       spec,
       {
         cli: 'codex',
+        modelTransport: prepared.modelTransport,
+        modelProvider: prepared.modelProvider,
         model: prepared.model ?? 'gpt-5-codex',
-        maxTurns: spec.maxTurns ?? 32,
+        maxTurns: spec.maxTurns,
         maxOutputTokens: spec.maxOutputTokens ?? 8192,
         sessionKey,
         egress,
@@ -371,7 +381,7 @@ export async function runCodex<T>(
           ? session.started.mcp_args.map((a: unknown) => String(a))
           : ['/opt/runner/mcp-bridge.mjs', `/workspace/tasks/${session.workspaceId}/agent`];
         const sandbox =
-          prepared.config?.sandbox ??
+          (spec.harnessAccess&&spec.harnessAccess.workspace!=='write'?'read-only':prepared.config?.sandbox) ??
           (cwd.startsWith('/workspace/') ? 'danger-full-access' : 'workspace-write');
 
         let binding: Record<string, unknown> = {};
@@ -394,7 +404,9 @@ export async function runCodex<T>(
           cwd,
           egress,
           sandbox,
-          computerAllowed: true,
+          computerAllowed: spec.harnessAccess?.commands!==false,
+          fileWriteAllowed:spec.harnessAccess?(spec.harnessAccess.fileTools??spec.harnessAccess.workspace)==='write':true,
+          recordNativeReceipt:item=>traceEvent(spec.store,spec.task.id,'harness_native_receipt',spec.redactor.clean(item),spec.task.trace_run_id,'harness'),
           ...(prepared.model ? { model: prepared.model } : {}),
           ...(prepared.modelProvider ? { modelProvider: prepared.modelProvider } : {}),
           mcpCommand,
@@ -437,7 +449,7 @@ export async function runCodex<T>(
             recoveryMode: opened.recovery,
             agentInfo: opened.agentInfo ?? null,
             configuredModel: prepared.model ?? null,
-            usage: 'gateway',
+            usage: prepared.modelTransport === 'gateway' ? 'gateway' : 'native_events',
             protocol: 'codex-app-server',
             ...opened.bound,
           });
@@ -458,6 +470,7 @@ export async function runCodex<T>(
               throw cancelReason;
             }
             if (session.dispatcher.submitted) return session.dispatcher.result as T;
+            if (spec.onTurnEnd) return await spec.onTurnEnd({text,session_id:String(opened.sessionId)});
             if (!spec.finish?.name && spec.validate) return await spec.validate(text);
           }
           return stop('codex_submission_required', 'retry_wait');

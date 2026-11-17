@@ -259,6 +259,7 @@ export const permitsTool = (permissions: RolePermissions, tool: string) => permi
 export function defaultPermissions(id: string, kind: RoleKind): RolePermissions {
   const p = empty();
   for (const resource of githubResources) p[keyOf(resource)] = id === 'manager' && (githubWriteResources as readonly string[]).includes(resource) ? 'write' : 'read';
+  p.computer = 'allow';
   if (kind === 'controller') { p.project_tasks = 'write'; if (id !== 'coordinator') p.delegation = 'allow'; }
   else { p.computer = 'allow'; p.browser = 'allow'; p.project_memory = kind === 'writer' ? 'write' : 'read'; }
   return p;

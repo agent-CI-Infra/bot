@@ -4,8 +4,9 @@ import type { AgentToolCli } from './agent-tools.js';
 /**
  * Reserved subscription model source interfaces for `claude_code` and `codex` (#705).
  *
- * In `'gateway'` mode (default and implemented), the CLI talks exclusively to the per-run loopback
- * model relay (`127.0.0.1:<port>`) using the run identity token, and provider API keys stay in the control plane.
+ * This legacy model-source selector names platform model configuration, not the wire transport.
+ * External Harnesses default to native direct connections; `modelTransport: 'gateway'` explicitly
+ * selects the loopback model relay. Managed subscription credential staging remains reserved.
  *
  * In `'subscription'` mode (reserved for a future release), the CLI would connect directly to vendor domains
  * allowlisted for the container, using sealed subscription credentials staged into the run's CLI state directory

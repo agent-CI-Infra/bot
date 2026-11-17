@@ -1,3 +1,4 @@
+import {harnessAccess} from '../harness/access.js';
 import { resultSpec, resultOwner } from '../agent/tool-results.js';
 import {TaskRecords} from '../tasks/service.js';
 import { taskRecordContext } from '../tasks/record-tools.js';
@@ -72,8 +73,8 @@ export function roleInstance(s:Store,task:Row,role:string,harnessOverride?:strin
    s.run('INSERT INTO role_instances(id,task_id,conversation_id,project_id,role,definition,harness,updated_at,snapshot_id,config_revision,role_revision) VALUES(?,NULL,?,?,?,?,?,?,?,?,?)',id,task.conversation_id,task.repository_id,role,JSON.stringify(runtimeDefinition(role,resolved)),resolved.snapshot.harness.id,new Date().toISOString(),resolved.id,resolved.snapshot.config_revision,resolved.snapshot.role_revision);
    instance=s.get('SELECT * FROM role_instances WHERE id=?',id)!;}
   // Main conversations keep their logical role instance, but rebuild every physical input from current local authority.
-  s.run("UPDATE role_instances SET definition=?,harness=?,snapshot_id=?,config_revision=?,role_revision=?,knowledge_fence=?,session='[]',harness_state='{}',sequence=sequence+1,updated_at=? WHERE id=?",
-   JSON.stringify(runtimeDefinition(role,resolved)),resolved.snapshot.harness.id,resolved.id,resolved.snapshot.config_revision,resolved.snapshot.role_revision,task.authority_fence??null,new Date().toISOString(),instance.id);
+  s.run("UPDATE role_instances SET definition=?,harness=?,snapshot_id=?,config_revision=?,role_revision=?,session=CASE WHEN knowledge_fence IS ? AND snapshot_id=? THEN session ELSE '[]' END,harness_state=CASE WHEN knowledge_fence IS ? AND snapshot_id=? THEN harness_state ELSE '{}' END,runtime=CASE WHEN knowledge_fence IS ? AND snapshot_id=? THEN runtime ELSE NULL END,knowledge_fence=?,sequence=sequence+1,updated_at=? WHERE id=?",
+   JSON.stringify(runtimeDefinition(role,resolved)),resolved.snapshot.harness.id,resolved.id,resolved.snapshot.config_revision,resolved.snapshot.role_revision,task.authority_fence??null,resolved.id,task.authority_fence??null,resolved.id,task.authority_fence??null,resolved.id,task.authority_fence??null,new Date().toISOString(),instance.id);
   return s.get('SELECT * FROM role_instances WHERE id=?',instance.id)!;
  }
  let instance=s.get('SELECT * FROM role_instances WHERE task_id=? AND role=?',task.id,role);
@@ -226,6 +227,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   let executionRun:string|undefined;
   const wrapped:AgentSpec<T>={...spec,model,tools,pi:env.pi??spec.pi,roleWorkspace:env.roleWorkspace??spec.roleWorkspace,containerOptions:env.containerOptions?{...spec.containerOptions,...env.containerOptions}:spec.containerOptions,runEnvironment:env.environment?.handle,
    guard:async()=>{await spec.guard();authority();const b=live.bound;if(b){assertLease(s,b.run_id,b.epoch);if(!touchRunToken(s,b.token_id,tokenTtl))stop('run_token_revoked','cancelled','运行的能力令牌已撤销或过期，运行停止。');budgetGuard();}},
+   harnessTurnLimit:bounded?.max_turns??spec.harnessTurnLimit,
    maxTurns:availableTurns<limitTurns?availableTurns:configuredTurns,maxOutputTokens:bounded?.max_output_tokens??spec.maxOutputTokens,
    onDenied:(name,reason)=>denied(name,reason),
    // A newer revision requested for this running instance ends the run here; the loop below continues it.
@@ -255,7 +257,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
        if(definition&&['writer','observer'].includes(definition.kind))taskExecutor(s,caller(),target);
       }
      }
-     if(taskManagementTools.some(t=>t.function.name===name)){try{return new TaskCommands(s).tool(caller(),name,args);}catch(error){const code=String((error as any).code??'');if(['task_not_owned','task_not_found','task_management_forbidden','task_executor_forbidden','task_scope_forbidden'].includes(code))return {error:code,instruction:'This action was refused. Continue with the offered task records or arrange authorized work; the refusal does not authorize broader access.'};throw error;}}
+     if(taskManagementTools.some(t=>t.function.name===name)){try{return new TaskCommands(s).tool(caller(),name,args);}catch(error){const code=String((error as any).code??'');if(['unknown_field','invalid_action','invalid_input','task_not_retryable','task_not_owned','task_not_found','task_management_forbidden','task_executor_forbidden','task_scope_forbidden'].includes(code))return {error:code,instruction:'This action was refused. Continue with the offered task records or arrange authorized work; the refusal does not authorize broader access.'};throw error;}}
      // Task facts are expanded through the gateway with this run's token: the same server-side checks for every adapter.
      if(b&&gatewayToolNames.includes(name))return gateway(s).call(b.token,{tool:name,arguments:args,run_id:b.run_id,lease_epoch:b.epoch,role});
      if(name==='read_skill'&&snapshot.skills){const files=skillFiles(s,task.repository_id,snapshot.skills);if(args?.path===undefined)return {bundle:{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,source:snapshot.skills.source},files:files.map(({content,...f})=>f)};
@@ -264,6 +266,8 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
      if(memoryAliases.some(t=>t.function.name===name))return spec.execute?.(name.replace('_role_','_project_'),{...args,role_scope:role});return spec.execute?.(name,args);})();
     if(b)appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'tool_result',category:value?.error?'denied':'observation',operation_id:op,data:{name,outcome:value?.error?'error':'ok',error:typeof value?.error==='string'?value.error:null}});
     return value;},
+   harnessResources:snapshot.skills?skillFiles(s,task.repository_id,snapshot.skills).map(({path,content})=>({path,content})):[],
+   harnessAccess:harnessAccess(resolved.definition.permissions,Boolean(env.containerOptions?.egress),s.get('SELECT full_name FROM repositories WHERE id=?',task.repository_id)?.full_name??null,{read:taskToolAllowed(s,task,role,'read_file'),write:taskToolAllowed(s,task,role,'write_file'),commands:taskToolAllowed(s,task,role,'run_command')}),
    system:definition.prompt,
    screen:(name,args)=>{authority(name);spec.screen?.(name,args);},
    ...(spec.finish ? {finish:{...spec.finish,...(spec.finish.names?{names:spec.finish.names.filter(name=>!governed(name)||tools.some(tool=>tool.function.name===name))}:{}),validate:async(args,name)=>{authority(name??spec.finish!.name);const result=await spec.finish!.validate(args,name);authority(name??spec.finish!.name);return result;}}} : {}),
@@ -284,7 +288,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   wrapped.onExternalRequest=value=>{ledger()?.request(value);};
   wrapped.onExternalUsage=usage=>{const b=live.bound;if(!b)return;assertLease(s,b.run_id,b.epoch);traceEvent(s,task.id,'external_model_usage',usage,b.run_id,'harness');budgetGuard();};
   // Public harness events also enter the run's normalized stream; session_bound settles a pending recovery mode.
-  wrapped.onHarnessEvent=event=>{const b=live.bound,mapped=harnessEventType[event.type];if(!b||!mapped)return;ledger()?.event(event);
+  wrapped.onHarnessEvent=event=>{const b=live.bound,mapped=event.type==='tool'&&event.phase==='completed'?['tool_result','observation'] as [RunEvent['type'],RunEvent['category']]:harnessEventType[event.type];if(!b||!mapped)return;ledger()?.event(event);
    if(event.type==='session_bound'){
     const reportedVer=typeof event.version==='string'&&event.version.trim()?event.version.trim():typeof (event.agentInfo as any)?.version==='string'&&String((event.agentInfo as any).version).trim()?String((event.agentInfo as any).version).trim():null;
     if(reportedVer)recordRunCliVersion(s,b.run_id,reportedVer);

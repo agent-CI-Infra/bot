@@ -230,8 +230,7 @@ async function runTurn(turnId, prompt) {
   }
   if (flag('FOREIGN_MCP')) {
     await item('started', turnId, { type: 'mcpToolCall', id: 'fmcp-' + turnId, server: 'github', tool: 'push_files', arguments: {} });
-    lateTool();
-    return;
+    await item('completed', turnId, { type: 'mcpToolCall', id: 'fmcp-' + turnId, server: 'github', tool: 'push_files', arguments: {}, status:'completed',result:{} });
   }
 
   // Native container tools (commandExecution, fileChange, subAgentActivity) are allowed inside <task_dir>/repo and are NOT logged one-by-one.
@@ -270,17 +269,20 @@ async function runTurn(turnId, prompt) {
     const target = join(thread.cwd, 'native-codex.txt');
     writeFileSync(target, 'written natively by codex\n');
     const shellOut = execFileSync('/bin/bash', ['-lc', 'cat native-codex.txt'], { cwd: thread.cwd, encoding: 'utf8' }).trim();
+    const projectToolOut = env.FIXTURE_PROJECT_TOOL ? execFileSync('/bin/bash',['-lc',env.FIXTURE_PROJECT_TOOL],{cwd:thread.cwd,encoding:'utf8'}).trim() : null;
     const loginGhPath = execFileSync('/bin/bash', ['-lc', 'command -v gh'], { cwd: thread.cwd, encoding: 'utf8' }).trim();
-    const relayResp = await fetch(env.OPENAI_BASE_URL + '/responses', {
+    const directProvider=process.argv.find(arg=>arg.startsWith('model_providers.bot_direct ='));
+    const directBase=directProvider?/base_url = ("(?:[^"\\]|\\.)*")/.exec(directProvider)?.[1]:null;
+    const relayResp = await fetch((directBase?JSON.parse(directBase):env.OPENAI_BASE_URL) + '/responses', {
       method: 'POST',
-      headers: { Authorization: 'Bearer ' + env.OPENAI_API_KEY, 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer ' + (directBase?env.BOT_NATIVE_MODEL_KEY:env.OPENAI_API_KEY), 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: thread.model, input: 'native codex relay check' }),
     });
     const relayJson = await relayResp.json();
     const tools = (await rpc('tools/list', {})).tools.map(t => t.name);
     if (tools.includes('read_task_record')) await tool('read_task_record', { ref: taskRef });
     const observerFields = /"fixture_observer":true/.test(String(prompt)) ? { findings: [], inspected_scope: ['a.txt'], unknowns: [] } : {};
-    await tool('finish', { summary: 'codex native container verified', ...observerFields, cwd: thread.cwd, shellOut, loginGhPath, relayStatus: relayResp.status, relayId: relayJson.id ?? null });
+    await tool('finish', { summary: 'codex native container verified', ...observerFields, cwd: thread.cwd, shellOut, projectToolOut, loginGhPath, relayStatus: relayResp.status, relayId: relayJson.id ?? null });
     finish(turnId, 'completed');
     return;
   }

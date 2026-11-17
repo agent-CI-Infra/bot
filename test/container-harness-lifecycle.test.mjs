@@ -1,3 +1,5 @@
+// These legacy protocol fixtures exercise the explicitly enabled gateway transport.
+process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

@@ -1,3 +1,5 @@
+// Controlled provider fixtures exercise the explicit gateway transport.
+process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';

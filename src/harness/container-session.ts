@@ -19,6 +19,7 @@ import { taskReadScopes } from '../tasks/management.js';
 import { workType, workOf } from '../work/catalog.js';
 import { COMPATIBLE_CLI_RANGES, DEFAULT_AGENT_TOOLS_ROOT, selectCompatibleCliVersion, type AgentToolCli } from './agent-tools.js';
 import { createMailboxModelGateway, type FileBackedModelProvider, type PolledModelRequestEntry } from './model-gateway.js';
+import { modelTransport, nativeModelConnection, type ModelTransport } from './model-connection.js';
 
 /**
  * Low-level repository/command/sub-agent tools replaced by the container CLI's native tools and credential helpers.
@@ -49,6 +50,9 @@ export const persistentCliStateWorkspaceId = (instanceId: string): string =>
   createHash('sha256').update('cli-state:' + instanceId).digest('hex').slice(0, 48);
 
 export interface ContainerHarnessLaunch {
+  modelTransport?: ModelTransport;
+  modelProvider?: string;
+  claudeHomeOverride?: string;
   cli: AgentToolCli;
   model: string;
   systemPrompt?: string;
@@ -232,7 +236,7 @@ function resolveRunnerTransport<T>(spec: AgentSpec<T>, launch: ContainerHarnessL
   return stop('container_workspace_required', 'waiting_environment', 'Claude Code 与 Codex 必须在项目容器或隔离运行容器中执行，当前运行未提供容器工作区。');
 }
 
-function computeAllowedGithubScopes<T>(spec: AgentSpec<T>): { initial: string[]; live: () => string[] } {
+export function computeAllowedGithubScopes<T>(spec: AgentSpec<T>): { initial: string[]; live: () => string[] } {
   const repoId = String(spec.task?.repository_id ?? '');
   const roleId = spec.roleRun?.role;
   const computeLive = (): string[] => {
@@ -252,6 +256,7 @@ function computeAllowedGithubScopes<T>(spec: AgentSpec<T>): { initial: string[];
       const trs = taskReadScopes(spec.store, spec.task);
       scopes = scopes.filter(s => trs.includes(s));
     }
+    if(spec.harnessAccess)scopes=scopes.filter(scope=>spec.harnessAccess!.github.scopes.includes(scope));
     return scopes;
   };
   return { initial: computeLive(), live: computeLive };
@@ -315,7 +320,14 @@ export async function withContainerHarnessSession<T, R>(
   const leaseEpoch = Number(runRow?.lease_epoch ?? spec.runContext?.()?.lease_epoch ?? 0);
   const runId = String(boundRunId ?? randomId());
 
-  const modelGateway = createMailboxModelGateway({
+  const connectionMode = modelTransport(launch.modelTransport ?? spec.containerOptions?.modelTransport);
+  const supported = launch.cli === 'codex' ? 'openai-responses' : 'anthropic-messages';
+  const nativeModel = connectionMode === 'direct' ? nativeModelConnection(launch.primaryModel, launch.fileProvider ?? spec.containerOptions?.fileProvider,supported) : undefined;
+  if (nativeModel) {
+    spec.redactor.add(nativeModel.key);
+    if (nativeModel.interfaceType !== supported) stop('harness_direct_protocol_unsupported', 'waiting_configuration', `${launch.cli} needs ${supported} for this provider. Configure a native-compatible provider or explicitly select modelTransport: gateway; no automatic protocol proxy is used.`);
+  }
+  const modelGateway = connectionMode === 'gateway' ? createMailboxModelGateway({
     store: spec.store,
     task: spec.task,
     runId,
@@ -332,7 +344,7 @@ export async function withContainerHarnessSession<T, R>(
     maxOutputTokens: launch.maxOutputTokens ?? spec.maxOutputTokens,
     signal,
     ...(launch.gatewayTiming ? { timing: launch.gatewayTiming } : {}),
-  });
+  }) : undefined;
 
   const repoRow = spec.task?.repository_id
     ? spec.store.get('SELECT * FROM repositories WHERE id=?', spec.task.repository_id)
@@ -353,13 +365,19 @@ export async function withContainerHarnessSession<T, R>(
   const harnessConfig = {
     instance_id: instanceId,
     harness: launch.cli,
+    model_transport: connectionMode,
+    ...(nativeModel ? { native_model: nativeModel } : {}),
+    ...(launch.modelProvider ? { model_provider: launch.modelProvider } : {}),
+    ...(launch.claudeHomeOverride ? { claude_home_override: launch.claudeHomeOverride } : {}),
     executable,
     ...(executableArgs.length ? { executable_args: executableArgs } : {}),
     ...(nodeExecutable ? { node_executable: nodeExecutable } : {}),
     run_token: runToken,
     model: launch.model,
     system_prompt: launch.systemPrompt ?? '',
-    max_turns: launch.maxTurns ?? spec.maxTurns ?? 32,
+    max_turns: spec.harnessAccess ? spec.harnessTurnLimit : launch.maxTurns ?? spec.maxTurns,
+    execution_access: spec.harnessAccess,
+    resources:spec.harnessResources,
     max_output_tokens: launch.maxOutputTokens ?? spec.maxOutputTokens ?? 8192,
     session_id: launch.sessionId ?? null,
     resume: Boolean(launch.resume),
@@ -503,15 +521,7 @@ export async function withContainerHarnessSession<T, R>(
           reply = await readTokens.issueContents();
         }
       } else {
-        const hasFullReadScopes = githubResources.every(scope => liveScopes.includes(scope));
-        if (!hasFullReadScopes) {
-          reply = {
-            structured_only: true,
-            instruction: 'Use github_read, github_search and read_job_log via the bot MCP server. Partial GitHub read scopes do not allow raw gh CLI calls.',
-          };
-        } else {
-          reply = await readTokens.issue();
-        }
+        reply = await readTokens.issue();
       }
     } catch (error) {
       const code = String((error as any)?.code ?? 'github_read_token_unavailable');
@@ -566,7 +576,7 @@ export async function withContainerHarnessSession<T, R>(
           wait_ms: pollWaitMs,
           known_tool_ids: collectKnownIds('tool:'),
           known_token_ids: collectKnownIds('token:'),
-          known_model_ids: modelGateway.knownIds(),
+          known_model_ids: modelGateway?.knownIds() ?? [],
         });
         if (polled?.error === 'disk_full') {
           stop('disk_full', 'waiting_environment', '项目容器工作卷空间不足，容器内 Agent 已停止。');
@@ -647,7 +657,7 @@ export async function withContainerHarnessSession<T, R>(
         const modelEntries = polled.model_requests as PolledModelRequestEntry[] | undefined;
         if (!cancelSignaled) {
           if (Array.isArray(modelEntries) && modelEntries.some(e => !e?.stub)) hadNewRequests = true;
-          modelGateway.dispatchPoll(modelEntries);
+          modelGateway?.dispatchPoll(modelEntries);
         }
 
         if (polled.has_more) {
@@ -657,7 +667,7 @@ export async function withContainerHarnessSession<T, R>(
 
         if (['completed', 'failed', 'interrupted', 'missing'].includes(String(polled.state ?? ''))) {
           if (inFlight.size) await Promise.allSettled([...inFlight.values()]);
-          await modelGateway.drain();
+          await modelGateway?.drain();
           if (backgroundError !== null) throw backgroundError;
           // Drain any final stdout bytes emitted right before exit.
           if (Number.isSafeInteger(polled.stdout_size) && polled.stdout_size > stdoutOffset) continue;
@@ -771,7 +781,7 @@ export async function withContainerHarnessSession<T, R>(
     notifyWake();
     await Promise.allSettled([
       pollLoop,
-      modelGateway.close(),
+      modelGateway?.close(),
       dispatcher.close(),
       readTokens?.revoke(),
       transport.reap(instanceId, superseded),

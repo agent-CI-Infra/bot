@@ -1,3 +1,5 @@
+import {Workspace} from '../agent/workspace.js';
+import {Redactor} from '../agent/common.js';
 import { commandResult } from '../agent/tool-results.js';
 import { chmod, lstat, mkdir, open, readdir, readlink, realpath, rm, statfs, unlink } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -343,23 +345,23 @@ export class AssistantComputer {
   private held = false;
   private heartbeat?: ReturnType<typeof setInterval>;
   constructor(readonly service: AssistantComputerService, readonly options: TurnOptions) {}
-  private async prepare() {
+  private async prepare(runtime=false) {
     if (!this.service.available()) fail(409, 'computer_not_configured');
-    await this.options.check(); this.options.eligible();
+    await this.options.check(); if(!runtime)this.options.eligible();
     if (!this.home) this.home = await this.service.homes!.prepare(this.options.owner, this.options.facts());
     return this.home;
   }
   private notice(): Json { return this.home?.mode === 'ro' ? { home_read_only: true, notice: 'HOME 已超过容量上限，本回合只读：先用 delete_file 删除不再需要的文件，或请管理员在控制台清空；下一回合按清理后的大小恢复可写。' } : {}; }
   /** The owner's container, held by this turn: created or reused, waiting in line while capacity is full. */
-  private async computer(): Promise<string> {
-    const home = await this.prepare();
+  private async computer(runtime=false): Promise<string> {
+    const home = await this.prepare(runtime);
     if (this.held) return home.id;
-    if (!this.options.commands()) fail(400, 'assistant_computer_requires_commands');
+    if (!runtime&&!this.options.commands()) fail(400, 'assistant_computer_requires_commands');
     let told = false, retried = false;
     for (;;) {
       await this.options.check();
       const result = await this.service.manager!.call('PUT', '/v1/assistant-computers/' + home.id,
-        { turn: this.options.turn, fence: this.options.fence(), home_generation: home.generation, home_mode: home.mode }, 120_000).catch(error => {
+        { turn: this.options.turn, fence: this.options.fence(), home_generation: home.generation, home_mode: home.mode,...(runtime?{harness:true}:{}) }, 120_000).catch(error => {
         // No fallback to a project computer or the host: the turn learns that the computer is unavailable.
         if (error instanceof HttpError && ['manager_unavailable', 'docker_operation_failed', 'assistant_computer_create_failed', 'runner_not_ready', 'assistant_homes_unavailable', 'assistant_home_missing', 'not_found'].includes(error.code)) fail(503, 'assistant_computer_unavailable');
         // Removed while it was being created: the turn is not in `active` until this call returns, so the first reconcile
@@ -404,6 +406,20 @@ export class AssistantComputer {
         ...(detail ? { detail: detail.slice(0, 2000) } : {}) });
     }
     return request.type==='command'?commandResult(result.result,'assistant:'+owner+':'+operation,offset=>this.service.manager!.call('POST',`/v1/assistant-computers/${owner}/output`,{turn:this.options.turn,operation_id:operation,offset})):result.result as Json;
+  }
+  /** Trusted Harness transport, never exposed as a model tool. Runtime allocation grants no native tools. */
+  async sessionWorkspace(task:Row,workspaceId:string,redactor:Redactor,log:(event:any)=>void):Promise<Workspace>{
+    const owner=await this.computer(true);
+    const transport={call:async(method:string,path:string,input?:Json)=>{
+      await this.options.check();
+      if(method==='GET')return {state:'ready',generation:this.home!.generation,computer:{egress:false}};
+      if(method!=='POST'||!input?.request)fail(400,'invalid_runner_request');
+      const result=await this.service.manager!.call('POST',`/v1/assistant-computers/${owner}/execute`,{turn:this.options.turn,operation_id:input!.operation_id,request:input!.request});
+      await this.options.check();return result;
+    }} as Manager;
+    const space=new Workspace(this.service.store,transport,{...task,workspace_id:workspaceId,generation:this.home!.generation},redactor,async()=>{await this.options.check();},log,'service_role_operations');
+    const ready=await space.call('session-init:'+randomId(),{type:'workspace_init'});if(ready.error)fail(503,'conversation_workspace_unavailable');
+    return space;
   }
   private drop(): void { clearInterval(this.heartbeat); this.held = false; this.service.active.delete(this.options.turn); }
   private async readComputer(path: string, limit: number): Promise<{ data: Buffer; size: number }> {

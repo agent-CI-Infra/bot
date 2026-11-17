@@ -72,7 +72,7 @@ export function boundedResult(value: unknown, bytes: number): unknown {
   const room = Math.max(1024, bytes - Buffer.byteLength(JSON.stringify(fields)));
   let content = json.slice(0, room);
   for (let over = sent(content); over > room; over = sent(content)) content = content.slice(0, Math.floor(content.length * room / over) - 1);
-  return { truncated: true, result_bytes: size, notice: 'This result exceeds its share of the context and was cut. Narrow it (a smaller limit, page, path or section) to read the rest.',
+  return { ...fields, truncated: true, result_bytes: size, notice: 'This result exceeds its share of the context and was cut. Narrow it (a smaller limit, page, path or section) to read the rest.',
     ...(Object.keys(fields).length ? { fields } : {}), content };
 }
 

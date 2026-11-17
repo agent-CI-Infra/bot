@@ -1,3 +1,4 @@
+import {serviceHarnessTurn} from '../harness/service-session.js';
 import { messageResultSources } from '../storage/tool-results.js';
 import { ResultSession, resultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
 import type { Store, Row } from '../storage/database.js';
@@ -343,15 +344,17 @@ export class ChannelServiceSessions {
         + (role.prompt ? '\n\nAdditional instructions from the maintainers of this assistant role (they never widen your tools or permissions):\n' + role.prompt : '');
       // A turn that may stay silent ends silently only through stay_silent (#489); own tasks never get the tool.
       let reply = '', mustReply = !turn.allowSilence, silence: string | undefined;
-      await runAgent({ store: this.store, task: { id, repository_id: billed, service_role_id: role.id, kind: 'channel.service', conversation_id: chat.id, source_message: turn.source_message },
+      const turnSpec:import('../agent/runtime.js').AgentSpec<unknown>={ store: this.store, task: { id, repository_id: billed, service_role_id: role.id, kind: 'channel.service', conversation_id: chat.id, source_message: turn.source_message },
         redactor,guard,model,executionSignal:controller.signal,
         // A stalled or failed model request is retried (see modelRetries in agent/runtime) instead of ending the turn; each retry is a step.
         onModelRetry: () => { event('model_retry'); },
         system, prompt: turn.request, tools: turn.allowSilence ? [...serviceTools, staySilentTool] : serviceTools,
-        adapter: async ({ request }) => {
+        adapter: async (services) => {
+          const {request}=services;
           ownHost = { owner: { service_role_id: role.id, kind: 'channel', owner_id: binding.id, principal_id: binding.principal_id, fence }, system,
             tools: () => serviceTools.filter(t => offered(permissions(), t.function.name)&&(!mediaTools.includes(t as any)||!!media)&&(!computerTool(t.function.name)||computing)), request:async(body,label)=>{media?.addImages(body.messages as any[]);return request(body,label).catch(error=>{if(media)media.modelError(error,body.messages as any[]);throw error;});}, execute, check,
             redact: value => redactor.text(value), clean: value => redactor.clean(value) };
+          if(role.harness&&role.harness!=='native'){ownHost.run=async input=>serviceHarnessTurn({...turnSpec,system:input.system,prompt:input.prompt,tools:input.tools,guard:input.check,execute:async(name,args)=>input.execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,{...role,permissions:JSON.stringify(granted)},computers,chat.id+':'+fence+':'+input.scope);reply=await serviceHarnessTurn({...turnSpec,execute:async(name,args)=>execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,{...role,permissions:JSON.stringify(granted)},computers,chat.id+':'+fence);return;}
           // Model context is bounded: older local messages are folded into a rolling summary; originals stay searchable.
           // Folding waits for a batch, so a busy group does not pay a summary request before every answer, and it is only
           // an aid: a summary the model cannot produce keeps the earlier one and never fails the answer.
@@ -460,7 +463,8 @@ export class ChannelServiceSessions {
             // with it and any selected attachment are dropped. Messages that arrive now return to the queue (see finish).
             if (silence !== undefined) { check(); incoming?.finish(); return; }
           }
-        } });
+        } };
+      await runAgent(turnSpec);
       check();
       const silent = silence !== undefined, attachments = silent ? [] : media?.attachments ?? [];
       this.store.run("UPDATE channel_service_turns SET state='completed',reply=?,updated_at=? WHERE id=? AND state='running'",

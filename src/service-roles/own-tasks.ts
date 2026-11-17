@@ -31,6 +31,7 @@ export interface OwnTaskOwner { service_role_id: string; kind: 'management' | 'c
 /** What the host lends a task: its system prompt, tools and executor, model request, guard and output cleaning (redaction;
  * the task bounds each result itself). */
 export interface OwnTaskHost {
+  run?: (input:{system:string;prompt:string;tools:Json[];scope:string;check:()=>void|Promise<void>;execute:(name:string,args:unknown,key:string)=>Promise<unknown>})=>Promise<string>;
   owner: OwnTaskOwner; system: string; tools: () => Json[];
   request: (body: Json, label: string) => Promise<{ value?: any }>;
   execute: (name: string, args: unknown, key: string) => Promise<unknown>;
@@ -111,6 +112,13 @@ export class OwnTasks {
     while (shown.length > 1 && Buffer.byteLength(JSON.stringify(shown)) > roundsBytes) { shown.shift(); omitted++; }
     const messages: any[] = [{ role: 'system', content: host.system + suffix },
       { role: 'user', content: JSON.stringify({ own_task: { title: row.title, previous_rounds: shown, ...(omitted ? { earlier_rounds_omitted: omitted } : {}) }, instruction: request }) }];
+    if(host.run){
+      const check=async()=>{await host.check();const control=this.store.get('SELECT control FROM service_role_own_tasks WHERE id=?',row.id)?.control;if(control)fail(409,'own_task_'+control);};
+      const conclusion=host.redact(await host.run({system:host.system+suffix,prompt:JSON.stringify(messages[1].content),tools:tools(),scope:row.id,check,execute:host.execute})).slice(0,8000);
+      await check();if(!conclusion.trim())fail(502,'own_task_reply_invalid');
+      this.store.run("UPDATE service_role_own_tasks SET state='completed',rounds=rounds+1,history=?,error=NULL,updated_at=? WHERE id=? AND state='running'",this.store.secrets.seal({rounds:[...previous,{instruction:request,conclusion,at:Date.now()}]},'own-task:'+row.id),Date.now(),row.id);
+      return {task_id:row.id,title:row.title,state:'completed',round:round+1,conclusion};
+    }
     const transcript = new ToolTranscript(messages, chatContextBytes);
     // No step or round limit (#435): a run ends with an answer without tool calls, when it or its host is stopped, or when the
     // service role's budget runs out (checked before every model request); the transcript keeps the context bounded.

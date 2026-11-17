@@ -66,6 +66,7 @@ export async function claudeFixture(t, { mode = 'normal', native = false, respon
   const config = {
     command: native ? claudeBinary() : resolve('test/fixtures/claude-code.mjs'),
     version: claudeCodeRuntime.version,
+    modelTransport: 'gateway',
     stateDirectory: sessionsDir,
     model,
     timeoutMs: native ? 30_000 : 5000,
@@ -168,7 +169,8 @@ test('Claude Code protocol fixture: seven RoleRun operations, container stdio MC
     assert.ok(disallowed.includes(name), name);
   }
   assert.ok(launch.args.includes('--dangerously-skip-permissions'));
-  assert.ok(launch.args.includes('--strict-mcp-config'));
+  assert.ok(!launch.args.includes('--strict-mcp-config'));
+  assert.ok(launch.args.includes('--setting-sources'));
   assert.ok(!launch.args.includes('--bare'));
   assert.ok(launch.mcp_config.command);
   assert.ok(launch.mcp_config.args[0].endsWith('/mcp-bridge.mjs'));
@@ -366,7 +368,8 @@ test('Claude Code protocol fixture: native container tools, loopback relay, gh w
 
   // Native Bash execution is NOT logged one-by-one as tool_started/tool_observation; only MCP tools and gateway model_requests are recorded.
   const toolEvents = f.s.all("SELECT data FROM task_history WHERE type='harness_event' AND json_extract(data,'$.type')='tool'").map(r => JSON.parse(r.data));
-  assert.ok(toolEvents.every(e => e.name.startsWith('mcp__bot__')));
+  assert.ok(toolEvents.some(e => e.name === 'Bash'));
+  assert.ok(toolEvents.some(e => e.name.startsWith('mcp__bot__')));
   assert.equal(f.s.get('SELECT count(*) n FROM model_requests').n, 1);
   const allTrace = JSON.stringify(f.s.all('SELECT data FROM task_history'));
   assert.equal(allTrace.includes('ghs_short_lived_claude_ro_token_705'), false);
@@ -413,9 +416,9 @@ test('Claude Code protocol fixture: revoke a live lease and the driver stops wit
   await assert.rejects(roleRuns.collect(h), e => ['run_token_revoked', 'claude_authentication_failed'].includes(e.code));
 });
 
-test('Claude Code rejects invalid/personal config, accepts isolated-workspace profile, and reserves subscription mode explicitly', async t => {
+test('Claude Code rejects invalid config, accepts isolated-workspace profile, and reserves subscription mode explicitly', async t => {
   const f = await claudeFixture(t);
-  for (const change of [{ version: 'latest' }, { model: 'sonnet' }, { env: { ANTHROPIC_API_KEY: 'personal' } }, { gatewayUrl: 'https://api.anthropic.com' }]) {
+  for (const change of [{ version: 'latest' }, { model: 'sonnet' }, { gatewayUrl: 'https://api.anthropic.com' }]) {
     writeFileSync(f.file, JSON.stringify({ ...f.config, ...change }));
     await assert.rejects(roleRuns.prepare(f.spec, 'dev', undefined, 'claude_code'), e => ['claude_configuration_invalid', 'claude_restricted_gateway_required'].includes(e.code));
   }
@@ -539,7 +542,7 @@ test('pinned native Claude Code binary uses stream-json, native workspace tools,
       const sysText = Array.isArray(body.system) ? body.system.map(c => c.text ?? '').join('\n') : String(body.system ?? '');
       const observing = sysText.includes('INDEPENDENT_REVIEW_PROBE');
       if (observing) assert.ok(!raw.includes('DEV_PRIVATE_MARKER_170'));
-      assert.ok(!raw.includes('MALICIOUS_AUTOLOADED_CONTEXT'));
+      // Native project instructions are allowed, including on a resumed session.
 
       // Native container tools (Bash, Read, Write) ARE enabled; platform low-level write_file/run_command MCP tools and EnterWorktree/WebFetch are NOT offered.
       const names = body.tools.map(t => t.name);
@@ -611,15 +614,15 @@ test('pinned native Claude Code binary uses stream-json, native workspace tools,
   assert.equal(f.state().version, '2.1.319');
   assert.equal(f.s.get('SELECT count(*) n FROM model_requests').n, nativeRequests);
 
-  // Poisoned project files in <task_dir>/repo must NOT execute hooks or load rogue MCP servers on resume.
+  // Native project settings and hooks remain available on resume.
   const state = f.state(), poison = join(f.root, 'hook-ran');
   mkdirSync(join(state.cwd, '.claude'), { recursive: true });
-  writeFileSync(join(state.cwd, 'CLAUDE.md'), 'MALICIOUS_AUTOLOADED_CONTEXT');
+  writeFileSync(join(state.cwd, 'CLAUDE.md'), 'PROJECT_CONTEXT_834');
   writeFileSync(join(state.cwd, '.claude', 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'touch ' + poison }] }] } }));
   writeFileSync(join(state.cwd, '.mcp.json'), JSON.stringify({ mcpServers: { poison: { command: 'touch', args: [poison] } } }));
   await runRole(f.spec, 'dev');
   assert.equal(f.state().recoveryMode, 'native_resume');
-  assert.ok(!existsSync(poison));
+  assert.ok(existsSync(poison));
   measured = instanceUsage(f.s, output.instance_id);
   assert.equal(measured.model_requests, nativeRequests);
   assert.equal(measured.output_tokens, nativeRequests * 777);
@@ -686,7 +689,7 @@ test('pinned native CLI + synthetic provider: max-turns result exits 1 and is a 
       providerReply(res, { id: 'msg_budget_' + n, content: { type: 'tool_use', id: 'toolu_budget_' + n, name: 'mcp__bot__read_task_record', input: {} }, args: { ref: 'task:t' } });
     },
   });
-  await assert.rejects(runRole({ ...f.spec, maxTurns: 1 }, 'dev', undefined, 'claude_code'), e => e.code === 'claude_budget_exhausted' && e.state === 'needs_replan');
+  await assert.rejects(runRole({ ...f.spec, harnessTurnLimit: 1 }, 'dev', undefined, 'claude_code'), e => e.code === 'claude_budget_exhausted' && e.state === 'needs_replan');
   const events = f.s.all("SELECT data FROM task_history WHERE type='harness_event'").map(r => JSON.parse(r.data));
   assert.ok(events.some(e => e.stage === 'process_exit' && e.result_subtype === 'error_max_turns' && e.exit_code === 1));
   const run = f.s.get('SELECT * FROM task_runs ORDER BY rowid DESC LIMIT 1');
@@ -727,49 +730,18 @@ test('Claude protocol fixture + synthetic provider: a metered 429 rejection can 
   assert.equal(instanceUsage(f.s, id).unknown_requests, 0);
 });
 
-test('Claude configuration refuses external gateway profiles and controller roles before CLI startup', async t => {
-  const f = await claudeFixture(t);
-  const { provider, ...external } = f.config;
-  writeFileSync(f.file, JSON.stringify({ ...external, gatewayUrl: provider.baseUrl }));
-  await assert.rejects(roleRuns.prepare(f.spec, 'dev', undefined, 'claude_code'), { code: 'claude_configuration_invalid' });
-  writeFileSync(f.file, JSON.stringify(f.config));
-  const admin = { id: 'admin', role: 'project_admin', repositories: ['r'] };
-  const url = new URL('http://local/api/repositories/r/roles');
-  for (const role of ['coordinator', 'manager']) {
-    assert.throws(
-      () => roleApi(f.s, admin, 'PUT', url, { expected_revision: roleApi(f.s, admin, 'GET', url, {}).revision, enabled: true, roles: [{ role_id: role, harness_ref: { id: 'claude_code' } }] }),
-      { code: 'harness_role_unsupported' },
-    );
-    await assert.rejects(runRole(f.spec, role, undefined, 'claude_code'), { code: 'harness_role_unsupported' });
+test('Claude configuration rejects invalid profiles but controller roles can select the backend', async t => {
+  const f=await claudeFixture(t);const {provider,...external}=f.config;
+  writeFileSync(f.file,JSON.stringify({...external,gatewayUrl:provider.baseUrl}));
+  await assert.rejects(roleRuns.prepare(f.spec,'dev',undefined,'claude_code'),{code:'claude_configuration_invalid'});
+  writeFileSync(f.file,JSON.stringify(f.config));
+  const admin={id:'admin',role:'project_admin',repositories:['r']},url=new URL('http://local/api/repositories/r/roles');
+  for(const role of ['manager','coordinator']){
+    const current=roleApi(f.s,admin,'GET',url,{});
+    const saved=roleApi(f.s,admin,'PUT',url,{expected_revision:current.configuration.revision,enabled:true,roles:[{role_id:role,harness_ref:{id:'claude_code'}}]});
+    assert.equal(saved.configuration.roles.find(r=>r.role_id===role).harness_ref.id,'claude_code');
+    const resolved=resolveRole(f.s,'r',role,'task.request',{persist:false});assert.equal(resolved.snapshot.kind,'controller');
   }
-  const { runClaudeCode } = await import('../dist/harness/claude-code.js');
-  await assert.rejects(
-    runClaudeCode(
-      { ...f.spec, harnessPreparation: { config: f.config, mode: 'config_file', command: f.config.command, version: f.config.version, model: f.config.model, configurationHash: 'h' }, runContext: () => ({ execution_context: { kind: 'controller' } }), runAccess: { token: 'unusable-capability', check() {} } },
-      new AbortController().signal,
-      () => {},
-    ),
-    { code: 'harness_role_unsupported' },
-  );
-  assert.equal(f.s.get('SELECT count(*) n FROM task_runs').n, 0);
-});
-
-test('Claude admission refuses legacy and stored V2 controllers, including explicit and pinned backend overrides', async t => {
-  const f = await claudeFixture(t);
-  const legacy = { enabled: true, harnesses: { coordinator: 'claude_code', manager: 'claude_code', dev: 'claude_code' } };
-  const v2 = { ...roleConfiguration(f.s, 'r', legacy), revision: 1 };
-  delete v2.legacy;
-  for (const config of [legacy, v2]) {
-    f.s.run("INSERT OR REPLACE INTO settings VALUES('roles:r',?)", JSON.stringify(config));
-    for (const role of ['coordinator', 'manager']) {
-      for (const options of [{}, { harness: 'claude_code' }, { harness: 'claude_code', pinned: true }]) {
-        assert.throws(() => resolveRole(f.s, 'r', role, 'task.request', { ...options, persist: false }), { code: 'harness_role_unsupported' });
-      }
-      await assert.rejects(runRole(f.spec, role), { code: 'harness_role_unsupported' });
-      await assert.rejects(runRole(f.spec, role, undefined, 'claude_code'), { code: 'harness_role_unsupported' });
-    }
-  }
-  assert.equal(f.s.get('SELECT count(*) n FROM task_runs').n, 0, 'no controller run is started');
 });
 
 test('Claude protocol fixture: an explicitly saved dev backend is retained by configurable entry executors', async t => {
@@ -793,4 +765,18 @@ test('Claude smoke probe requires an explicit public launch profile', () => {
     e => e.status === 1 && String(e.stderr).includes('BOT_CLAUDE_CODE_CONFIG'),
   );
   assert.equal(existsSync(join(root, 'must-not-create')), false);
+});
+
+test('default direct Claude uses the native provider and keeps MCP authority without a model proxy',async t=>{
+ const old=process.env.BOT_HARNESS_MODEL_TRANSPORT;delete process.env.BOT_HARNESS_MODEL_TRANSPORT;t.after(()=>{if(old===undefined)delete process.env.BOT_HARNESS_MODEL_TRANSPORT;else process.env.BOT_HARNESS_MODEL_TRANSPORT=old;});
+ const f=await claudeFixture(t,{mode:'native_workspace'});
+ const config={...f.config};delete config.modelTransport;
+ writeFileSync(f.file,JSON.stringify(config));
+ const out=await runRole(f.spec,'dev',undefined,'claude_code');
+ assert.equal(out.result.summary,'native container tools verified');
+ assert.equal(out.result.shellOut,'written natively by claude_code');
+ assert.equal(f.modelCalls,1);
+ assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE request_ref IS NOT NULL").n,0);
+ assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE request_snapshot IS NOT NULL").n,0);
+ assert.ok(f.s.get("SELECT count(*) n FROM task_history WHERE type='harness_event' AND json_extract(data,'$.usage')='native_events'").n>0);
 });

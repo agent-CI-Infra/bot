@@ -1,3 +1,5 @@
+// These fixtures model the control-plane model boundary, so explicitly select gateway mode.
+process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';

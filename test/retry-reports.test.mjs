@@ -68,5 +68,5 @@ test('runner finalize failure retains the Git stderr instead of an unexplained e
  const run=request=>runnerWorkspace({...request,workspace_id:id},join(root,'tasks'),join(root,'git'),join(root,'notes'));
  await run({type:'workspace_init'});execFileSync('git',['init','-q'],{cwd:join(root,'tasks',id,'repo')});const gitdir=join(root,'tasks',id,'repo','.git');mkdirSync(join(gitdir,'index'));
  // A broken index (a lock left over is cleared before finalize since #712, so it no longer makes git fail here).
- await assert.rejects(run({type:'workspace_finalize'}),error=>/git add failed: 128/.test(error.message)&&/\.git\/index: unable to map index file/.test(error.message));
+ await assert.rejects(run({type:'workspace_finalize'}),error=>/git add failed: 128/.test(error.message)&&/\.git\/index: (unable to map index file|index file smaller than expected)/.test(error.message));
 });

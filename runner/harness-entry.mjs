@@ -1,3 +1,5 @@
+import {stageSessionSkills} from './session-resources.mjs';
+import {startCredentialHelperServer} from './credential-helper.mjs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
@@ -56,20 +58,18 @@ function tomlString(value) {
   return JSON.stringify(String(value ?? ''));
 }
 
-function buildCodexConfigToml({ model, relayUrl, egress, nodeExec, mcpBridgePath, agentDir }) {
+function buildCodexConfigToml({ model, relayUrl, egress, nodeExec, mcpBridgePath, agentDir, access }) {
   return [
     `model = ${tomlString(model)}`,
     `model_provider = "bot_relay"`,
     `approval_policy = "never"`,
-    `sandbox_mode = ${tomlString(local ? 'workspace-write' : 'danger-full-access')}`,
+    `sandbox_mode = ${tomlString(access&&access.workspace!=='write'?'read-only':local ? 'workspace-write' : 'danger-full-access')}`,
     `web_search = ${tomlString(egress ? 'live' : 'disabled')}`,
     ``,
     `[features]`,
-    `shell_tool = true`,
+    `shell_tool = ${access?.commands!==false}`,
     `view_image = true`,
     `multi_agent = true`,
-    `apps = false`,
-    `plugins = false`,
     ``,
     `[model_providers.bot_relay]`,
     `name = "Bot Relay"`,
@@ -87,86 +87,6 @@ function buildCodexConfigToml({ model, relayUrl, egress, nodeExec, mcpBridgePath
   ].join('\n');
 }
 
-async function startCredentialHelperServer({ agentDir, runToken, addSecret, signal }) {
-  const helperSecret = randomBytes(32).toString('base64url');
-  const secretBytes = Buffer.from(helperSecret, 'utf8');
-  const exchange = createTokenExchange(agentDir, { token: runToken });
-  const cacheByPurpose = new Map();
-  const inflightByPurpose = new Map();
-
-  const obtainGrant = async purpose => {
-    const cached = cacheByPurpose.get(purpose);
-    if (cached && cached.token && Date.parse(cached.expires_at) - Date.now() >= 10 * 60_000) {
-      return cached;
-    }
-    let pending = inflightByPurpose.get(purpose);
-    if (!pending) {
-      pending = (async () => {
-        const reply = await exchange(signal, { token: runToken, purpose });
-        if (reply && !reply.error && !reply.structured_only && typeof reply.token === 'string' && reply.token) {
-          addSecret(reply.token);
-          cacheByPurpose.set(purpose, reply);
-        } else if (cached && Date.parse(cached.expires_at) <= Date.now()) {
-          cacheByPurpose.delete(purpose);
-        }
-        return reply;
-      })().finally(() => {
-        inflightByPurpose.delete(purpose);
-      });
-      inflightByPurpose.set(purpose, pending);
-    }
-    return pending;
-  };
-
-  const server = createServer(async (req, res) => {
-    res.setHeader('Content-Type', 'application/json');
-    const presented = typeof req.headers['x-bot-helper-secret'] === 'string' ? req.headers['x-bot-helper-secret'] : '';
-    const presentedBytes = Buffer.from(presented, 'utf8');
-    if (presentedBytes.length !== secretBytes.length || !timingSafeEqual(presentedBytes, secretBytes)) {
-      res.writeHead(403);
-      res.end(JSON.stringify({ error: 'forbidden' }));
-      return;
-    }
-    const url = new URL(req.url || '/', 'http://127.0.0.1');
-    if (req.method !== 'POST' || url.pathname !== '/github-read-token') {
-      res.writeHead(404);
-      res.end(JSON.stringify({ error: 'not_found' }));
-      return;
-    }
-    const purpose = url.searchParams.get('purpose') === 'gh' ? 'gh' : 'git';
-    try {
-      const reply = await obtainGrant(purpose);
-      if (!reply || reply.error || reply.structured_only || !reply.token) {
-        res.writeHead(403);
-        res.end(JSON.stringify({
-          error: reply?.error || (reply?.structured_only ? 'structured_tools_only' : 'github_read_token_unavailable'),
-          ...(reply?.instruction ? { instruction: reply.instruction } : {}),
-        }));
-        return;
-      }
-      res.writeHead(200);
-      res.end(JSON.stringify({
-        token: reply.token,
-        expires_at: reply.expires_at,
-        repository: reply.repository,
-      }));
-    } catch {
-      res.writeHead(502);
-      res.end(JSON.stringify({ error: 'github_read_token_failed' }));
-    }
-  });
-
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const address = server.address();
-  const port = typeof address === 'object' && address ? address.port : 0;
-
-  const close = async () => {
-    server.closeAllConnections?.();
-    await new Promise(r => server.close(() => r()));
-  };
-  return { url: `http://127.0.0.1:${port}`, secret: helperSecret, close };
-}
 
 function buildGitConfigEnv(existingEnv, gitCredentialScript, allowHttp) {
   const entries = [
@@ -327,7 +247,10 @@ try {
     await rename(tmpProfile, `${homeDir}/${name}`);
   }
 
-  relay = await startModelRelay({ agentDir, signal: runAbort.signal });
+  const gateway = rawConfig.model_transport === 'gateway';
+  if(gateway) relay = await startModelRelay({ agentDir, signal: runAbort.signal });
+  const nativeModel = gateway ? undefined : rawConfig.native_model;
+  if(nativeModel?.key)addSecret(nativeModel.key);
   credHelper = await startCredentialHelperServer({ agentDir, runToken, addSecret, signal: runAbort.signal });
 
   const githubHost = typeof rawConfig.github_host === 'string' && rawConfig.github_host ? rawConfig.github_host : 'github.com';
@@ -336,7 +259,7 @@ try {
   const gitCredPath = `${runnerRoot}/git-credential-bot.mjs`;
 
   const nodeBinDir = dirname(nodeExecutable);
-  const pathParts = [wrapperBinDir, nodeBinDir, '/usr/local/bin', '/usr/bin', '/bin'];
+  const pathParts = [wrapperBinDir, nodeBinDir, ...String(baseEnv.PATH).split(delimiter)];
   if (local) pathParts.splice(2, 0, dirname(process.execPath));
   const childPath = [...new Set(pathParts.filter(Boolean))].join(delimiter);
 
@@ -357,9 +280,9 @@ try {
     ...(local && process.env.BOT_REAL_GH_BIN ? { BOT_REAL_GH_BIN: process.env.BOT_REAL_GH_BIN } : {}),
   };
 
-  if (local && rawConfig.extra_env && typeof rawConfig.extra_env === 'object' && !Array.isArray(rawConfig.extra_env)) {
+  if (rawConfig.extra_env && typeof rawConfig.extra_env === 'object' && !Array.isArray(rawConfig.extra_env)) {
     for (const [k, v] of Object.entries(rawConfig.extra_env)) {
-      if (/^FIXTURE_[A-Z0-9_]+$/.test(k) && typeof v === 'string') {
+      if (/^[A-Z_][A-Z0-9_]*$/.test(k) && !/^(BOT_|HOME$|PATH$|TMPDIR$)/.test(k) && typeof v === 'string') {
         childEnv[k] = v;
         if (/TOKEN|SECRET|KEY/i.test(k)) addSecret(v);
       }
@@ -374,7 +297,12 @@ try {
   let actualResume = false;
 
   if (harness === 'claude_code') {
-    const claudeHome = await ensureSafeDirectory(`${homeDir}/.claude`, homeDir);
+    // Explicit provider credentials take precedence over an unrelated native login.
+    if(gateway||nativeModel){delete childEnv.ANTHROPIC_AUTH_TOKEN;delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;}
+    const claudeHome = local && rawConfig.claude_home_override?.startsWith('/')
+      ? await ensureSafeDirectory(rawConfig.claude_home_override, dirname(rawConfig.claude_home_override))
+      : await ensureSafeDirectory(`${homeDir}/.claude`, homeDir);
+    await stageSessionSkills(claudeHome,rawConfig.resources);
     await ensureSafeDirectory(`${homeDir}/.config`, homeDir);
     await ensureSafeDirectory(`${homeDir}/.cache`, homeDir);
     if (rawConfig.resume === true && sessionId && claudeTranscriptExists(homeDir, sessionId)) {
@@ -400,6 +328,7 @@ try {
       'Monitor',
     ];
     if (!rawConfig.egress) disallowed.push('WebFetch', 'WebSearch');
+    if(rawConfig.execution_access){const access=rawConfig.execution_access;if(!access.commands)disallowed.push('Bash');if((access.fileTools??access.workspace)!=='write')disallowed.push('Write','Edit','NotebookEdit');if((access.fileTools??access.workspace)==='none')disallowed.push('Read','Glob','Grep');}
 
     const mcpConfig = {
       mcpServers: {
@@ -418,15 +347,13 @@ try {
       '--verbose',
       '--tools', 'default',
       '--disallowedTools', disallowed.join(','),
-      '--disable-slash-commands',
-      '--setting-sources', '',
-      '--settings', JSON.stringify({ disableAllHooks: true, enableAllProjectMcpServers: false, autoUpdatesChannel: 'stable' }),
-      '--strict-mcp-config',
+      '--setting-sources', 'project,local',
+      '--settings', JSON.stringify({ autoUpdatesChannel: 'stable' }),
       '--mcp-config', JSON.stringify(mcpConfig),
       '--dangerously-skip-permissions',
       '--no-chrome',
       '--model', String(rawConfig.model || 'claude-sonnet-4-5-20250929'),
-      '--max-turns', String(rawConfig.max_turns || 32),
+      ...(rawConfig.max_turns?['--max-turns',String(rawConfig.max_turns)]:[]),
       '--system-prompt', String(rawConfig.system_prompt || ''),
       ...(actualResume ? ['--resume', sessionId] : ['--session-id', sessionId]),
     ];
@@ -435,8 +362,8 @@ try {
       CLAUDE_CONFIG_DIR: claudeHome,
       XDG_CONFIG_HOME: `${homeDir}/.config`,
       XDG_CACHE_HOME: `${homeDir}/.cache`,
-      ANTHROPIC_BASE_URL: relay.url,
-      ANTHROPIC_API_KEY: runToken,
+      ...(gateway ? {ANTHROPIC_BASE_URL: relay.url,ANTHROPIC_API_KEY: runToken}
+        : nativeModel ? {ANTHROPIC_BASE_URL:nativeModel.baseUrl,ANTHROPIC_API_KEY:nativeModel.key} : {}),
       CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(rawConfig.max_output_tokens || 8192),
       MCP_TIMEOUT: '60000',
       MCP_TOOL_TIMEOUT: '3600000',
@@ -452,7 +379,8 @@ try {
     const codexHome = local && typeof rawConfig.codex_home_override === 'string' && rawConfig.codex_home_override.startsWith('/')
       ? await ensureSafeDirectory(rawConfig.codex_home_override, dirname(rawConfig.codex_home_override))
       : await ensureSafeDirectory(`${cliStateRoot}/codex-home`, cliStateRoot);
-    await writeFile(
+    await stageSessionSkills(codexHome,rawConfig.resources);
+    if(gateway) await writeFile(
       `${codexHome}/config.toml`,
       buildCodexConfigToml({
         model: String(rawConfig.model || 'gpt-5-codex'),
@@ -461,15 +389,16 @@ try {
         nodeExec: nodeExecutable,
         mcpBridgePath,
         agentDir,
+        access:rawConfig.execution_access,
       }),
       { mode: 0o600 },
     );
-    spawnArgs = [...(Array.isArray(rawConfig.executable_args) ? rawConfig.executable_args : []), 'app-server'];
+    const nativeProvider = nativeModel ? ['-c',`model_providers.bot_direct = { name = "Bot direct", base_url = ${tomlString(nativeModel.baseUrl)}, env_key = "BOT_NATIVE_MODEL_KEY", wire_api = "responses" }`] : [];
+    spawnArgs = [...(Array.isArray(rawConfig.executable_args) ? rawConfig.executable_args : []), ...nativeProvider, 'app-server'];
     Object.assign(childEnv, {
       CODEX_HOME: codexHome,
-      CODEX_RELAY_URL: relay.url,
-      OPENAI_BASE_URL: `${relay.url}/v1`,
-      OPENAI_API_KEY: runToken,
+      ...(gateway ? {CODEX_RELAY_URL: relay.url,OPENAI_BASE_URL: `${relay.url}/v1`,OPENAI_API_KEY: runToken}
+        : nativeModel ? {BOT_NATIVE_MODEL_KEY:nativeModel.key} : {}),
     });
   }
 
@@ -501,7 +430,8 @@ try {
   await writeState({
     state: 'running',
     cli_pid: cliChild.pid ?? null,
-    relay_url: relay.url,
+    model_transport: gateway ? 'gateway' : 'direct',
+    relay_url: relay?.url ?? null,
     session_id: sessionId,
     actual_resume: actualResume,
     repo_dir: repoDir,

@@ -187,7 +187,7 @@ test('the assistant computer imports and exports binary bytes in HOME and /tmp, 
     const file = await computer.exportFile(path, inboundBytes); assert.deepEqual(file.data, png); assert.equal(file.name, 'input.png');
   }
   // The bytes travel to the computer in its own calls, never through a sealed tool receipt.
-  assert.equal(store.get("SELECT count(*) n FROM sqlite_master WHERE name='service_role_operations'").n, 0);
+  assert.equal(store.get("SELECT count(*) n FROM service_role_operations").n, 0);
   await computer.execute('run_command', { command: 'ln -s input.png ~/alias.png && ln -s /tmp/input.png tmp-alias.png' });
   for (const path of ['~/alias.png', 'tmp-alias.png']) await assert.rejects(computer.exportFile(path, inboundBytes), /invalid_path|regular_file_required/, path);
   for (const path of ['/etc/passwd', '~/../outside', 'https://example.test/a', '~']) await assert.rejects(computer.exportFile(path, inboundBytes), undefined, path);

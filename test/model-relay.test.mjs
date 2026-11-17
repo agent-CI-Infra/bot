@@ -959,3 +959,28 @@ test('model relay close() resolves promptly when a slow client disconnects durin
   ]);
   assert.equal(closeResult, 'closed');
 });
+
+test('Codex Responses relay accepts an SSE body advertised as JSON and preserves completion and accounting', async t => {
+  const response = { id:'resp-framing', object:'response', model:'framing-model', status:'completed',
+    output:[{id:'msg-framing',type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:'READY',annotations:[]}]}],
+    usage:{input_tokens:9,output_tokens:2,total_tokens:11} };
+  const body = `event: response.created\ndata: ${JSON.stringify({type:'response.created',response:{...response,status:'in_progress',output:[]}})}\n\nevent: response.completed\ndata: ${JSON.stringify({type:'response.completed',response})}\n\n`;
+  const upstream = createServer(async (req,res) => {
+    for await (const chunk of req) {};
+    res.writeHead(200,{'content-type':'application/json'});
+    res.write('ev');
+    setTimeout(()=>res.end(body.slice(2)),5);
+  });
+  upstream.listen(0,'127.0.0.1');await once(upstream,'listening');
+  t.after(()=>new Promise(resolve=>upstream.close(resolve)));
+  const rig=await createRelayRig(t);
+  const model=addProjectModel(rig.store,rig.repoId,{url:`http://127.0.0.1:${upstream.address().port}/v1`,key:'framing-provider-key',name:'framing-model',interface_type:'openai-responses'});
+  rig.startGateway({primaryModel:model});
+  const reply=await fetch(`${rig.relay.url}/v1/responses`,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+rig.token},body:JSON.stringify({model:'framing-model',stream:true,input:'Say READY'})});
+  assert.equal(reply.status,200);assert.match(reply.headers.get('content-type'),/text\/event-stream/);
+  assert.equal(await reply.text(),body);
+  const deadline=Date.now()+3000;
+  while(rig.store.get('SELECT state FROM model_requests ORDER BY rowid DESC LIMIT 1')?.state!=='received'&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));
+  const stored=rig.store.get('SELECT state,input_tokens,output_tokens FROM model_requests ORDER BY rowid DESC LIMIT 1');
+  assert.deepEqual([stored.state,stored.input_tokens,stored.output_tokens],['received',9,2]);
+});

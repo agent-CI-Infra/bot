@@ -1,3 +1,5 @@
+// Cancellation/recovery fixtures use a controlled model via the explicit gateway.
+process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import { legacySkillBinding } from './skill-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -244,8 +246,8 @@ test('saving RoleDefinitionV2 checks expected_revision, project scope and the ha
   const { snapshot } = resolveRole(f.s, 'r', 'manager', 'task.request');
   assert.equal(snapshot.capability.id, 'permissions');
   // Deliveries such as create_pull_request are offered by the task entry's work type, not by role permissions (#381).
-  for (const name of ['write_file', 'run_command', 'submit_acceptance', 'merge']) assert.ok(!snapshot.capability.tools.includes(name), name);
-  assert.deepEqual(Object.entries(snapshot.capability.authorities).filter(([, v]) => v).map(([k]) => k).sort(), ['coordinate', 'delegate', 'nominate', 'query_facts']);
+  for (const name of ['submit_acceptance', 'merge']) assert.ok(!snapshot.capability.tools.includes(name), name);
+  assert.deepEqual(Object.entries(snapshot.capability.authorities).filter(([, v]) => v).map(([k]) => k).sort(), ['coordinate', 'delegate', 'edit_candidate', 'nominate', 'query_facts']);
   assert.equal(snapshot.harness.id, 'pi'); assert.equal(snapshot.harness.runtime.package, '@earendil-works/pi-coding-agent');
 });
 
@@ -718,8 +720,7 @@ test('backend selection is independent of role; container CLIs use gateway relay
   assert.deepEqual([pi.kinds, pi.session, pi.externalModel], [['controller', 'writer', 'observer', 'evaluator'], 'native_resume', false]);
   // Codex and Claude Code run worker roles inside project/run containers through the platform model relay.
   const codex = view.harnesses.find(h => h.id === 'codex');
-  assert.deepEqual([codex.kinds, codex.session, codex.externalModel, codex.model_api, codex.runtime.version, codex.capabilities.isolation], [['writer', 'observer', 'evaluator'], 'external_session', false, ['openai-chat-completions', 'openai-responses', 'anthropic-messages'], '0.166.0', 'run_environment']);
-  for (const role_id of ['manager', 'coordinator']) rejects(() => put({ expected_revision: 0, roles: [{ role_id, harness_ref: { id: 'codex' } }] }), 'harness_role_unsupported', `roles.${role_id}.harness_ref.id`);
+  assert.deepEqual([codex.kinds, codex.session, codex.externalModel, codex.model_api, codex.runtime.version, codex.capabilities.isolation], [['controller', 'writer', 'observer', 'evaluator'], 'external_session', false, ['openai-chat-completions', 'openai-responses', 'anthropic-messages'], '0.166.0', 'run_environment']);
   const saved = put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm2' } }] }).configuration;
   assert.equal(saved.roles.find(r => r.role_id === 'reviewer').harness_ref.id, 'codex');
   assert.deepEqual([saved.roles.find(r => r.role_id === 'manager').harness_ref.id, saved.roles.find(r => r.role_id === 'dev').harness_ref.id], ['pi', 'pi']);

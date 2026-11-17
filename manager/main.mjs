@@ -19,7 +19,7 @@ projects.db.prepare("INSERT INTO settings VALUES('compaction',?) ON CONFLICT(key
 const runs = new RunEnvironments(projects);
 // Assistant computers use the approved base image (no project's packages) unless BOT_ASSISTANT_IMAGE names another one.
 const assistants = new AssistantComputers({ docker: projects.docker, db: projects.db, deployment: projects.deployment,
-  image: process.env.BOT_ASSISTANT_IMAGE || projects.image, homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes' });
+  agentTools:()=>projects.agentToolsVolume(), image: process.env.BOT_ASSISTANT_IMAGE || projects.image, homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes' });
 const { server, recovered } = createManagerServer({ projects, token, runs, assistants });
 server.listen(8793, '0.0.0.0');
 let timer, assistantTimer, stopping = false, checking = false, checkingAssistants = false;

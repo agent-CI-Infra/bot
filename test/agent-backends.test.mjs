@@ -1,3 +1,5 @@
+// These fixtures model the control-plane model boundary, so explicitly select gateway mode.
+process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -58,7 +60,7 @@ async function fixture(t, respond) {
   return { s, manager, requests, task, redactor, guard, workspace, put, view: () => roleApi(s, admin, 'GET', url, {}) };
 }
 
-test('new roles default to Pi; general backends preserve role authority and Claude Code remains worker-only', async t => {
+test('new roles default to Pi; general backends preserve role authority and container backends also support controllers', async t => {
   const f = await fixture(t, () => call('finish', {}));
   const config = f.put({ roles: [{ role_id: 'security' }] });
   assert.ok(config.roles.every(r => r.harness_ref.id === 'pi'));
@@ -70,17 +72,17 @@ test('new roles default to Pi; general backends preserve role authority and Clau
   }
   const claude = f.view().backends.find(b => b.id === 'claude_code');
   assert.equal(claude.available, true);
-  assert.deepEqual(claude.kinds, ['writer', 'observer', 'evaluator']);
+  assert.deepEqual(claude.kinds, ['controller', 'writer', 'observer', 'evaluator']);
   assert.deepEqual(claude.supported_model_sources, ['gateway', 'subscription']);
   assert.ok(claude.runtime_status && typeof claude.runtime_status.compatible_range === 'string');
   const saved = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' } }] });
   assert.equal(saved.roles.find(r => r.role_id === 'dev').harness_ref.id, 'claude_code');
-  for (const role of ['coordinator', 'manager']) assert.throws(() => f.put({ roles: [{ role_id: role, harness_ref: { id: 'claude_code' } }] }), { code: 'harness_role_unsupported' });
+  for (const role of ['coordinator', 'manager']) assert.equal(f.put({ roles: [{ role_id: role, harness_ref: { id: 'claude_code' } }] }).roles.find(r=>r.role_id===role).harness_ref.id,'claude_code');
   // Codex App Server (#171 / #705) is a container worker backend like Claude Code.
   const codex = f.view().backends.find(b => b.id === 'codex');
-  assert.deepEqual([codex.available, codex.kinds, codex.model_source, codex.supported_model_sources, codex.integration_issue], [true, ['writer', 'observer', 'evaluator'], 'project', ['gateway', 'subscription'], null]);
+  assert.deepEqual([codex.available, codex.kinds, codex.model_source, codex.supported_model_sources, codex.integration_issue], [true, ['controller', 'writer', 'observer', 'evaluator'], 'project', ['gateway', 'subscription'], null]);
   assert.equal(f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }] }).roles.find(r => r.role_id === 'dev').harness_ref.id, 'codex');
-  for (const role of ['coordinator', 'manager']) assert.throws(() => f.put({ roles: [{ role_id: role, harness_ref: { id: 'codex' } }] }), { code: 'harness_role_unsupported' });
+  for (const role of ['coordinator', 'manager']) assert.equal(f.put({ roles: [{ role_id: role, harness_ref: { id: 'codex' } }] }).roles.find(r=>r.role_id===role).harness_ref.id,'codex');
   for (const backend of ['acp', 'opencode']) {
     const view = f.view();
     assert.equal(view.backends.find(b => b.id === backend), undefined);
@@ -175,7 +177,7 @@ test('real Pi workers and fresh QA use controlled tools and a fixed candidate un
 
 test('a Coordinator configured with Pi gets its own real SDK session and restricted tools', { skip, timeout: 120000 }, async t => {
   const f = await fixture(t, body => {
-    assert.deepEqual(body.tools.map(t => t.function.name).sort(), ['read_project_task', 'read_tool_result', 'submit_coordination']);
+    assert.deepEqual(body.tools.map(t => t.function.name).filter(name=>!['read','edit','write','bash','grep','find','ls'].includes(name)).sort(), ['read_project_task', 'read_tool_result', 'submit_coordination']);
     return call('submit_coordination', { summary: 'Align the shared report', outcome: 'notices', notices: [{ task_id: 't', message: 'Recheck the shared report and obtain fresh QA', action: 'review' }] });
   });
   f.put({ roles: [{ role_id: 'coordinator', harness_ref: { id: 'pi' } }] });

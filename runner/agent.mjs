@@ -204,6 +204,12 @@ export async function agentOperation(input,root){
   }
   if(input.type==='workspace_agent_config'||input.type==='workspace_agent_history'){
     if(typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>(input.type==='workspace_agent_history'?32:2)*1024*1024)throw new Error('invalid_agent_config');
+    if(input.type==='workspace_agent_config'&&input.offset===0){
+      const previous=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>null);
+      if(previous?.state==='running'){try{process.kill(previous.pid,0);throw new Error('agent_session_busy');}catch(error){if(error.message==='agent_session_busy')throw error;}}
+      // Native session files live in cli-state; only the completed process's mailbox is reset.
+      for(const name of ['state.json','events.jsonl','boundary.json','continue.json'])await unlink(dir+'/'+name).catch(error=>{if(error.code!=='ENOENT')throw error;});
+    }
     const prefix=input.type==='workspace_agent_history'?'/restore':'/input';
     const path=dir+prefix+'.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
     try{if((await file.stat()).size!==input.offset)throw new Error('agent_config_offset');const bytes=Buffer.from(input.base64,'base64');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}

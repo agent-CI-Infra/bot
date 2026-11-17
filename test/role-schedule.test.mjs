@@ -82,7 +82,6 @@ test('a repair round can delegate the same passed writer without a stage_id',asy
 
 test('runTeam preserves permanent gate codes and the engine waits for an explicit human operation',async t=>{
   const scenarios={
-    stage_retry_exhausted:async f=>{await f.writer();await f.observer('reviewer');},
     stage_policy_changed:async f=>f.s.run("UPDATE policies SET test_command='changed' WHERE repository_id='r'"),
     stage_plan_stale:async f=>f.records.contract('t',{...f.records.get('t').contract,criteria:['changed']}),
     repository_policy_disabled:async f=>f.s.run("UPDATE policies SET enabled=0 WHERE repository_id='r'"),
@@ -116,18 +115,31 @@ test('runTeam stops a newly added applicable required policy even when its snaps
   captureTaskConfiguration(f.s,'t');assert.equal(f.plan().revision,1);
 });
 
-test('a stage exhausting its last attempt inside runTeam is not converted to a tool error or nomination failure',async t=>{
-  let ref;const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev'],attempts:1})],handler:body=>{
-    if(body.tools.some(t=>t.function.name==='nominate_delivery')){
-      const done=body.messages.filter(m=>m.role==='tool').map(m=>JSON.parse(m.content));ref??=done.find(r=>r.result_ref)?.result_ref;
-      return ref?call('delegate_role',{role:'reviewer',purpose:'Inspect',refs:[ref]}):call('delegate_role',{role:'dev',purpose:'Deliver',refs:['task:t']});
-    }
-    return body.tools.some(t=>t.function.name==='submit_role_result')?call('submit_role_result',{summary:'Need actual evidence',findings:[],unknowns:[],inspected_scope:['fixture']}):call('finish',{summary:'implemented'});
-  }});
-  await assert.rejects(runTeam(f.spec(),{prepare:async role=>{if(role!=='dev')traceEvent(f.s,'t','role_candidate',{role,sha:tree('a'),version:tree('b'),workspace_id:'readonly'});},snapshot:async()=>({local_sha:tree('a'),tree_sha:tree('b')})}),{code:'stage_retry_exhausted',state:'paused'});
-  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='reviewer'").n,1);
-  assert.equal(f.s.get("SELECT stop_reason FROM task_runs WHERE role='manager'").stop_reason,'stage_retry_exhausted');
-  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='delivery_nominated'").n,0);
+test('stage threshold reports to the same Manager, which can continue without increasing the limit',async t=>{
+ let step=0,devRef,reportRef,reviewCalls=0,managerRun;let f;
+ f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev'],attempts:1})],handler:body=>{
+  if(body.tools.some(t=>t.function.name==='nominate_delivery')){
+   const current=f.s.get("SELECT id FROM task_runs WHERE role='manager' AND status='running'").id;
+   if(managerRun)assert.equal(current,managerRun);else managerRun=current;
+   switch(step++){
+    case 0:return call('delegate_role',{role:'dev',purpose:'Deliver',refs:['task:t']});
+    case 1:devRef=JSON.parse(body.messages.at(-1).content).result_ref;return call('delegate_role',{role:'reviewer',purpose:'Inspect',refs:[devRef]});
+    case 2:return call('delegate_role',{role:'reviewer',purpose:'Inspect with evidence',refs:[devRef]});
+    case 3:{const report=JSON.parse(body.messages.at(-1).content);assert.equal(report.status,'stage_attempt_threshold_reached');assert.equal(report.started,false);assert.equal(report.attempts,1);assert.equal(report.threshold,1);reportRef=report.report_ref;return call('delegate_role',{role:'reviewer',purpose:'Inspect with evidence',refs:[devRef],attempt_report_ref:reportRef});}
+    case 4:return call('nominate_delivery',{result_ref:devRef});
+    default:assert.fail('unexpected Manager restart');
+   }
+  }
+  if(body.tools.some(t=>t.function.name==='submit_role_result'))return reviewCalls++===1?call('read_task_record',{ref:'task:t'}):call('submit_role_result',{summary:'Checked',findings:[],unknowns:[],inspected_scope:['fixture']});
+  return call('finish',{summary:'implemented'});
+ }});
+ const result=await runTeam({...f.spec(),maxTurns:8},{prepare:async role=>{if(role!=='dev')traceEvent(f.s,'t','role_candidate',{role,sha:tree('a'),version:tree('b'),workspace_id:'readonly'});},snapshot:async()=>({local_sha:tree('a'),tree_sha:tree('b')})});
+ assert.equal(result.summary,'implemented');assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='reviewer'").n,2);
+ assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager'").n,1);assert.equal(f.s.get("SELECT status FROM task_runs WHERE id=?",managerRun).status,'succeeded');
+ assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'running');
+ assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='stage_attempt_report'").n,1);
+ assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='stage_attempt_continue' AND json_extract(data,'$.report_ref')=?",reportRef).n,1);
+ assert.equal(reconcileAssignments(f.s,'t').stages.find(s=>s.stage_id==='reviewer').retry.max_attempts,1);
 });
 
 test('runTeam lets the manager repair missing evidence and dependencies while attempts remain',async t=>{
@@ -261,15 +273,15 @@ test('absent stages preserve minimal teams; code gates do not apply to artifact 
   assert.equal(evaluateRequiredStages(f.s,'t',null).satisfied,true);
 });
 
-test('stage budgets and retries survive optional replanning and do not open a new execution allowance',async t=>{
+test('hard stage resource budgets survive optional replanning; run-count thresholds do not pause',async t=>{
   for(const harness of ['native','process'])await t.test(harness,async t=>{
   const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev'],budget:{max_tool_calls:1},attempts:1})],roles:[{role_id:'reviewer',harness_ref:{id:harness}}],handler:body=>!body.tools.some(tool=>tool.function.name==='submit_role_result')?call('finish',{summary:'implemented'}):body.messages.filter(m=>m.role==='tool').length<2?call('read_file',{path:'fixture'}):call('submit_role_result',{summary:'inspected',findings:[],unknowns:[],inspected_scope:['fixture']})});const plan=f.plan();await f.writer();
   await assert.rejects(f.observer('reviewer'),{code:'stage_budget_exhausted'});
-  assert.equal(reconcileAssignments(f.s,'t').stages.find(s=>s.stage_id==='reviewer').waiting_reason,'stage_retry_exhausted');
+  assert.notEqual(reconcileAssignments(f.s,'t').stages.find(s=>s.stage_id==='reviewer').waiting_reason,'stage_retry_exhausted');
   const optional={...stage('ux',{deps:['dev']}),required:false};planTask(f.s,'t',f.records.get('t').revision,[...JSON.parse(plan.stages),optional],plan.revision);
   assert.equal(reconcileAssignments(f.s,'t').stages.find(s=>s.stage_id==='dev').status,'passed');
-  assert.throws(()=>f.assign('reviewer','retry-again','reviewer'),{code:'stage_retry_exhausted'});
-  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='reviewer'").n,1);
+  const before=f.calls.length;await assert.rejects(f.observer('reviewer','retry-again'),{code:'stage_budget_exhausted'});
+  assert.equal(f.calls.length,before,'an explicit hard resource budget still prevents additional model work');
   });
 });
 
@@ -467,4 +479,99 @@ test('non-array parallel assignments return validation facts without aborting Ma
  let step=0;const f=await fixture(t,{handler:body=>{if(step++===0)return call('delegate_roles',{assignments:'invalid'});assert.equal(JSON.parse(body.messages.at(-1).content).error,'parallel_observers_required');return call('finish_coordination',{action:'continue',reason:'Correct parallel assignment format'});}});
  await assert.rejects(runTeam(f.spec(),{prepare:async()=>{},withRole:async()=>assert.fail('no role should start')}),{code:'manager_deferred'});
  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager' AND status='fault'").n,0);
+});
+
+test('capability refusal returns to the same Manager turn, which revises the optional plan and delegates successfully',async t=>{
+ let managerSteps=0,workerCalls=0,refused,managerRun;
+ const unavailable={...stage('repair',{writer:true,capabilities:['run_isolation']}),required:false};
+ const supported={...unavailable,role_constraints:{...unavailable.role_constraints,capabilities:unavailable.role_constraints.capabilities.filter(c=>c!=='run_isolation')}};
+ let f;
+ f=await fixture(t,{handler:body=>{
+  if(!body.tools.some(t=>t.function.name==='nominate_delivery')){workerCalls++;return call('finish',{summary:'implemented after capability negotiation'});}
+  const current=f.s.get("SELECT id FROM task_runs WHERE role='manager' AND status='running'").id;
+  if(managerRun)assert.equal(current,managerRun);else managerRun=current;
+  const rev=f.records.get('t').revision;
+  switch(managerSteps++){
+   case 0:return call('plan_task',{expected_revision:rev,expected_plan_revision:0,stages:[unavailable]});
+   case 1:return call('delegate_role',{role:'dev',purpose:'Repair requested code',refs:[],stage_id:'repair'});
+   case 2:{
+    refused=JSON.parse(body.messages.at(-1).content);
+    assert.equal(refused.error,'unsupported_capability');assert.equal(refused.started,false);
+    assert.deepEqual(refused.missing,['run_isolation']);assert.ok(refused.available.includes('version_binding'));
+    assert.equal(refused.available.includes('run_isolation'),false);assert.equal(refused.provided.run_isolation.ok,false);
+    assert.match(refused.admission_ref,/^task_history:/);assert.equal(workerCalls,0);
+    const persisted=JSON.parse(f.s.get("SELECT data FROM task_history WHERE 'task_history:'||id=?",refused.admission_ref).data);
+    assert.deepEqual(persisted.available,refused.available);assert.equal(persisted.provided.run_isolation.ok,false);
+    assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='dev'").n,0);
+    return call('plan_task',{expected_revision:rev,expected_plan_revision:1,stages:[supported]});
+   }
+   case 3:return call('delegate_role',{role:'dev',purpose:'Repair requested code',refs:[],stage_id:'repair'});
+   case 4:return call('nominate_delivery',{result_ref:JSON.parse(body.messages.at(-1).content).result_ref});
+   default:assert.fail('unexpected Manager restart or loop');
+  }
+ }});
+ const spec={...f.spec(),maxTurns:8};
+ const result=await runTeam(spec,{prepare:async()=>{},snapshot:async()=>({local_sha:tree('a'),tree_sha:tree('b')})});
+ assert.equal(result.summary,'implemented after capability negotiation');assert.equal(workerCalls,1);assert.equal(managerSteps,5);
+ assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager'").n,1);
+ assert.equal(f.s.get("SELECT status FROM task_runs WHERE id=?",managerRun).status,'succeeded');
+ assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'running');
+ assert.equal(f.s.get("SELECT attempt FROM tasks WHERE id='t'").attempt,1);
+ const failures=f.s.all("SELECT data FROM task_history WHERE type='role_assignment_fault'").map(r=>JSON.parse(r.data));
+ assert.equal(failures.length,1);assert.equal(failures[0].started,false);assert.equal(failures[0].admission_ref,refused.admission_ref);
+});
+
+test('parallel delegation keeps successful peer results when another role lacks a capability',async t=>{
+ let step=0,devRef,peerCalls=0,managerRun;let f;
+ const optional=id=>({...stage(id,{capabilities:id==='reviewer'?['run_isolation']:[]}),required:false,completion:{evidence_types:['role_result'],min_evidence:1,no_findings:true}});
+ f=await fixture(t,{handler:body=>{
+  if(!body.tools.some(t=>t.function.name==='nominate_delivery')){
+   if(body.tools.some(t=>t.function.name==='submit_role_result')){peerCalls++;return call('submit_role_result',{summary:'Checked fixed candidate',findings:[],unknowns:[],inspected_scope:['fixture']});}
+   return call('finish',{summary:'implemented with a successful peer inspection'});
+  }
+  const run=f.s.get("SELECT id FROM task_runs WHERE role='manager' AND status='running'").id;
+  if(managerRun)assert.equal(run,managerRun);else managerRun=run;
+  switch(step++){
+   case 0:return call('delegate_role',{role:'dev',purpose:'Implement',refs:[]});
+   case 1:devRef=JSON.parse(body.messages.at(-1).content).result_ref;return call('plan_task',{expected_revision:f.records.get('t').revision,expected_plan_revision:0,stages:[optional('test'),optional('reviewer')]});
+   case 2:return call('delegate_roles',{assignments:[{role:'test',purpose:'Test fixed candidate',refs:[],stage_id:'test'},{role:'reviewer',purpose:'Review with isolation',refs:[],stage_id:'reviewer'}]});
+   case 3:{
+    const value=JSON.parse(body.messages.at(-1).content);assert.equal(value.results.length,2);
+    assert.match(value.results[0].result_ref,/^task_history:/);
+    assert.equal(value.results[1].error,'unsupported_capability');assert.equal(value.results[1].role,'reviewer');assert.equal(value.results[1].started,false);
+    assert.deepEqual(value.results[1].missing,['run_isolation']);
+    return call('nominate_delivery',{result_ref:devRef});
+   }
+   default:assert.fail('Manager must continue in the same turn');
+  }
+ }});
+ const result=await runTeam({...f.spec(),maxTurns:8},{prepare:async role=>{if(role!=='dev')traceEvent(f.s,'t','role_candidate',{role,sha:tree('a'),version:tree('b'),workspace_id:'readonly-'+role});},snapshot:async()=>({local_sha:tree('a'),tree_sha:tree('b')}),withRole:async(_role,work)=>work()});
+ assert.equal(result.summary,'implemented with a successful peer inspection');assert.equal(peerCalls,1);
+ assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='reviewer'").n,0);
+ assert.equal(f.s.get("SELECT status FROM task_runs WHERE role='test'").status,'succeeded');
+ assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager'").n,1);
+});
+
+test('two successful Dev runs report before a third; an old report cannot silently authorize a fourth',async t=>{
+ let step=0,firstReport,latestDev,managerRun;let f;
+ f=await fixture(t,{stages:[stage('dev',{writer:true,attempts:2})],handler:body=>{
+  if(!body.tools.some(t=>t.function.name==='nominate_delivery'))return call('finish',{summary:'successful development'});
+  const current=f.s.get("SELECT id FROM task_runs WHERE role='manager' AND status='running'").id;
+  if(managerRun)assert.equal(current,managerRun);else managerRun=current;
+  switch(step++){
+   case 0:return call('delegate_role',{role:'dev',purpose:'Third development',refs:[],stage_id:'dev'});
+   case 1:{const report=JSON.parse(body.messages.at(-1).content);assert.equal(report.started,false);assert.equal(report.attempts,2);assert.equal(report.threshold,2);assert.equal(report.next_attempt,3);assert.deepEqual(report.attempt_history.map(r=>r.status),['succeeded','succeeded']);firstReport=report.report_ref;return call('delegate_role',{role:'dev',purpose:'Third development',refs:[],stage_id:'dev',attempt_report_ref:firstReport});}
+   case 2:latestDev=JSON.parse(body.messages.at(-1).content).result_ref;return call('delegate_role',{role:'dev',purpose:'Fourth development',refs:[],stage_id:'dev',attempt_report_ref:firstReport});
+   case 3:{const report=JSON.parse(body.messages.at(-1).content);assert.equal(report.started,false);assert.equal(report.attempts,3);assert.notEqual(report.report_ref,firstReport);assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='dev'").n,3);return call('nominate_delivery',{result_ref:latestDev});}
+   default:assert.fail('unexpected Manager retry');
+  }
+ }});
+ f.plan();await f.writer('dev-first','a','b');await f.writer('dev-second','c','d');
+ const result=await runTeam({...f.spec(),maxTurns:8},{prepare:async()=>{},snapshot:async()=>({local_sha:tree('e'),tree_sha:tree('f')})});
+ assert.equal(result.summary,'successful development');assert.equal(step,4);
+ assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='dev'").n,3);
+ assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager'").n,1);
+ assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'running');
+ const reports=f.s.all("SELECT run_id FROM task_history WHERE type='stage_attempt_report'");assert.equal(reports.length,2);assert.ok(reports.every(r=>r.run_id===managerRun));
+ assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='stage_attempt_continue'").n,1);
 });

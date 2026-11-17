@@ -28,3 +28,9 @@ export async function createAgentSession({customTools}){
     }
   }};
 }
+
+// Legacy loop fixtures do not exercise native resources; fail explicitly if they accidentally enter that mode.
+export class DefaultResourceLoader { constructor(){throw new Error('native resource loader not part of legacy fixture');} }
+export function createBashTool(){throw new Error('native bash not part of legacy fixture');}
+
+export function createCodingTools(){throw new Error('native tools not part of legacy fixture');}
