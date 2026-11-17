@@ -55,6 +55,7 @@ jobs:
         with:
           name: unit-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: .tmp/unit-shard-${{ matrix.shard }}.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
 
@@ -92,6 +93,7 @@ jobs:
         with:
           name: unit-balance-attempt-${{ github.run_attempt }}
           path: .tmp/unit-balance.json
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14
       # Preserve the public board's existing Nightly metric names and artifact.
@@ -100,6 +102,7 @@ jobs:
         with:
           name: unit-summary
           path: .tmp/unit-summary.json
+          include-hidden-files: true
           overwrite: true
           if-no-files-found: ignore
           retention-days: 30

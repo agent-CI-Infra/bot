@@ -11,7 +11,8 @@ const workflows = new URL('../.github/workflows/', import.meta.url);
 const read = name => parse(readFileSync(new URL(`${name}.yml`, workflows), 'utf8'));
 const steps = job => job.steps ?? [];
 
-// Sizes decided on #734 from each job's own recent runs: unit/e2e 30 minutes (slowest recent 762 s and 400 s),
+// Sizes decided on #734: unit shards/e2e keep 30 minutes (slowest recent 762 s and 400 s);
+// the unit fan-in only validates/uploads reports and is bounded at 5 minutes.
 // analyze 15 (slowest leg 356 s), image 10 (slowest leg 85 s).
 const jobBounds = new Map([
   ['checks', new Map([['unit-shards', 30], ['unit', 5], ['e2e', 30]])],
