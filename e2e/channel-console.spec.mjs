@@ -323,6 +323,35 @@ for (const width of [1440, 390]) test(`Feishu names identify private chats and g
   } finally { await f.close(); }
 });
 
+// #870: a name the provider refuses (here: the app lacks the contact scope) is read once for the page, not again on
+// every redraw, and the retry belongs to the reader. `chatRequests` counts the provider lookups the console started.
+test('a refused Feishu name is read once, not on every redraw, and the button still retries it', async ({ page }) => {
+  const f = await channelFixture(), errors = []; page.on('pageerror', error => errors.push(error.message));
+  try {
+    await boundGroup(f);
+    f.h.store.run("UPDATE channel_connectors SET app_name='研发助手',tenant_name='示例企业' WHERE id=?", f.id);
+    f.wire.state.chatCode = 99991672;
+    await page.setViewportSize({ width: 1440, height: 1000 }); await login(page, f, '#/identity/feishu');
+    const binding = page.getByRole('article', { name: '群聊助手绑定' });
+    await expect(binding).toContainText('暂时无法读取名称。');
+    await page.waitForTimeout(500);
+    const first = f.wire.state.chatRequests.length;
+    expect(first).toBeGreaterThan(0);
+    // The console is one page: leave and come back by hash, as a reader does, so the page state that remembers the
+    // refused lookup survives — a full reload is a new page and may try again.
+    await page.evaluate(() => { location.hash = '#/conversations'; });
+    await expect(page.getByLabel('可查看的飞书会话')).toBeVisible();
+    await page.evaluate(() => { location.hash = '#/identity/feishu'; });
+    await expect(binding.getByRole('button', { name: '刷新群名称', exact: true })).toBeVisible();
+    await page.waitForTimeout(500);
+    expect(f.wire.state.chatRequests.length, 'a redraw does not ask the provider again').toBe(first);
+    f.wire.state.chatCode = 0; f.wire.state.chatName = '基础设施讨论群';
+    await binding.getByRole('button', { name: '刷新群名称', exact: true }).click();
+    await expect(binding).toContainText('基础设施讨论群');
+    expect(f.wire.state.chatRequests.length, 'the reader can still retry by hand').toBe(first + 1);
+    expect(errors).toEqual([]);
+  } finally { await f.close(); }
+});
 
 for (const width of [1440, 390]) test(`a platform administrator reads another user's complete private conversation at ${width}px`, async ({ page }) => {
   const f = await channelFixture(), errors = []; page.on('pageerror', error => errors.push(error.message));
