@@ -145,6 +145,6 @@ Task coordination: `GET /api/tasks/:id/coordination` reads explicit requests, no
 
 ### 协调与分派恢复
 
-分派详情的 `failure_before` 为正整数尝试游标，非法值为 400 `invalid_dispatch_failure_cursor`；`recovery` 没有失败时为 null，否则提供 failures/reports/next_before_attempt。自动失败持续退避（最长 10 分钟），每 3 次留存提醒，不因次数变成终止失败。`POST /api/repositories/:id/dispatch/:event/retry` 接受 failed 或 pending 退避事件，保留累计次数，其余返回 409 `dispatch_event_not_failed`。
+分派详情的 `failure_before` 为正整数尝试游标，非法值为 400 `invalid_dispatch_failure_cursor`；`recovery` 没有失败时为 null，否则提供 failures/reports/next_before_attempt。自动失败持续退避（最长 10 分钟），每 3 次留存提醒，不因次数变成终止失败。`POST /api/repositories/:id/dispatch/:event/retry` 接受非明确取消的 failed 或 pending 退避事件，保留累计次数，其余返回 409 `dispatch_event_not_failed`。
 
 协调 burst 用完后为 `manager_review`，原错误与证据交给请求方 Manager。`decide_coordination` 接受 retry/dismiss、coordination_id、reason（retry 可带 proposal）；可处理 manager_review、旧 failed 和 Coordinator 的 advisory needs_human。它不能绕过任务 needs_help、用户取消/暂停、权限或 QA。`POST /api/tasks/:id/coordination/:request_id/retry` 同样接受 manager_review。协调详情见 [任务协调](task-coordination.md)。

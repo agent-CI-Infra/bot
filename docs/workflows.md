@@ -83,9 +83,9 @@ Manager 的写入只能落在本事件所在的仓库：`github_write` 没有仓
 
 决定在一个事务里落地：新建任务、写续接、记录理由，并通知拥有这个事件的模块。新建任务的输入里有 `manager`（事件 id、理由、简要说明、收窄后的写入），执行时作为说明交给 agent，不能扩大范围、写入或控制面条件；任务日志有一条 `dispatch` 记录，`task_events` 把任务和事件关联起来。
 
-人工重试仍使用原事件编号，事务中把失败原因和累计尝试次数保存到 `dispatch_retries`。失败事件及处于退避期的 pending 事件可请求立即重试；不重置累计次数，也不丢失自动失败历史。其他状态返回 409。详情保留最近 50 条人工重试。
+人工重试仍使用原事件编号，事务中把失败原因和累计尝试次数保存到 `dispatch_retries`。非明确取消的失败事件及处于退避期的 pending 事件可请求立即重试；不重置累计次数，也不丢失自动失败历史。其他状态返回 409。详情保留最近 50 条人工重试。
 
-失败的分派按 5 秒、15 秒、45 秒……最长 10 分钟自动退避。没有固定八次或“最后一轮”后终止：每 3 次失败记录提醒，下一次 Manager 输入通过 `recovery` 提供原始失败、尝试及报告入口。没有形成决定不等于忽略事件，不调用等待模块的 declined hook；显式取消仍是终止边界。`answer_round` 仅用于读取历史行，当前不再新增这种最后一轮。进程重启恢复认领，任务规格和续接继续按事件幂等。
+失败的分派按 5 秒、15 秒、45 秒……最长 10 分钟自动退避。没有固定八次或“最后一轮”后终止：每 3 次失败记录提醒，下一次 Manager 输入通过 `recovery` 提供原始失败、尝试及报告入口。没有形成决定不等于忽略事件，不调用等待模块的 declined hook；显式取消仍是终止边界，API 拒绝手动复活、UI 不提供重试按钮。`answer_round` 仅用于读取历史行，当前不再新增这种最后一轮，也不再注入 previous_failures 的最后机会提示。历史行缺少逐次记录时，原错误通过 recovery.legacy_failure 提供。进程重启恢复认领，任务规格和续接继续按事件幂等。
 
 `dispatch_failures` 跟随已有项目 `trajectory_days` 保留窗口，由存储日常清理按批处理。默认 null 表示明确选择长期保留；设置项目/全局天数后，旧自动失败记录与对应原始轨迹按同一策略过期，最新错误、累计次数和事件仍保留，不改变重试状态。清理数量见存储状态的 `retention_cleanup.dispatch_failures`，记录占用包括在现有 SQLite 存储总量中。
 
@@ -171,7 +171,7 @@ Manager 分派提示词在「角色 → Manager」里作为一份完整文本编
 | `/api/repositories/:id/manager` | PUT | `expected_revision` 必填，`prompt`（完整分派提示词）、旧 `content`（任务规则）、`work`（`{<工作类型>: {enabled, writes}}`）、`events`（事件开关和标签列表）、`standing_rules`（常设规则的完整列表，整份替换，空数组表示都交给 Manager）可选；经管理服务的 `manager.update` 命令执行，审计相同；版本不一致返回 409 `manager_revision_conflict` |
 | `/api/repositories/:id/dispatch` | GET | 事件记录，最新在前：类型、摘要、状态、结果、理由、简要说明、新建或续接的任务、模型、失败原因、控制面拒绝（`refusals`：工作、代码、原因、时间）、按常设规则决定时的规则（`rule`：`id`、`revision`）、历史回答轮兼容字段（`answer_round`，当前不再新增）；`state`（含 `filtered`，即被过滤的事件）、`decision`（create/continue/ignore）、`type`、`from`（含）/`until`（不含，UTC ISO 时间）、`limit`（1–100）可选；`next_cursor` 用于更早分页，原 `offset` 仍兼容但不能和 cursor 同用。游标绑定项目与筛选，改变筛选后重新读取首页 |
 | `/api/repositories/:id/dispatch/:event` | GET | 本项目的事件摘要、来源、原投递编号、已记录的模型名称、当前状态、控制面拒绝（`refusals`）、决定它的常设规则（`rule`）、历史回答轮兼容字段（`answer_round`）、`recovery`（失败、提醒及分页游标）、实际关联任务和最近 50 条人工重试；被过滤的事件在 `result.filtered` 里给出原因代码。支持 `failure_before` 按失败尝试号分页，非法值返回 400 `invalid_dispatch_failure_cursor`；排除原始 facts、候选任务输入、租约及凭据；不以当前模型配置补写历史 |
-| `/api/repositories/:id/dispatch/:event/retry` | POST | failed 或 pending 退避事件立即重试，保留累计次数；其余返回 409 `dispatch_event_not_failed`（历史错误码） |
+| `/api/repositories/:id/dispatch/:event/retry` | POST | 非明确取消的 failed 或 pending 退避事件立即重试，保留累计次数；其余返回 409 `dispatch_event_not_failed`（历史错误码） |
 | `/api/tasks/:id/dispatch` | GET | 任务因哪些事件新建或续接，以及 Manager 的理由 |
 | `/api/repositories/:id/workflows[/...]` | 任意 | 410 `workflows_removed`，说明里给出替代路径 |
 

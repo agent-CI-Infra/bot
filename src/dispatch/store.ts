@@ -49,7 +49,13 @@ export function dispatchStorage(store: Store) {
 
 /** Same-project recovery facts for the next Manager call and existing event-detail query. */
 export function dispatchRecovery(store:Store,repositoryId:string,eventId:string,beforeAttempt=Number.MAX_SAFE_INTEGER){
- if(!store.get('SELECT id FROM dispatch_events WHERE id=? AND repository_id=?',eventId,repositoryId)||!store.get('SELECT 1 FROM dispatch_failures WHERE event_id=? LIMIT 1',eventId))return null;
+ const event=store.get('SELECT id,answer_round,error,attempts FROM dispatch_events WHERE id=? AND repository_id=?',eventId,repositoryId);if(!event)return null;
+ if(!store.get('SELECT 1 FROM dispatch_failures WHERE event_id=? LIMIT 1',eventId)){
+  if(!Number(event.answer_round))return null;
+  const retry=store.get('SELECT previous_error,previous_attempts FROM dispatch_retries WHERE event_id=? ORDER BY rowid DESC LIMIT 1',eventId),raw=event.error??retry?.previous_error;
+  if(!raw)return null;
+  return {failures:[],reports:[],next_before_attempt:null,legacy_failure:{error:JSON.parse(raw),previous_attempts:retry?.previous_attempts??null,source:'dispatch_events:'+eventId},history_entry:'/api/repositories/'+encodeURIComponent(repositoryId)+'/dispatch/'+encodeURIComponent(eventId),instruction:'Retained historical dispatch failure. Per-attempt rows were not recorded by that version; inspect this original error and current options. No last-chance prompt or count-based stop applies.'};
+ }
  const rows=store.all('SELECT attempt,created_at,error,next_run_at,report FROM dispatch_failures WHERE event_id=? AND attempt<? ORDER BY attempt DESC LIMIT 9',eventId,beforeAttempt),page=rows.slice(0,8);
  return {failures:page.map(row=>({...row,error:JSON.parse(row.error),ref:'dispatch_failures:'+eventId+':'+row.attempt})),next_before_attempt:rows.length>8?page.at(-1)!.attempt:null,history_entry:'/api/repositories/'+encodeURIComponent(repositoryId)+'/dispatch/'+encodeURIComponent(eventId),
   reports:store.all('SELECT attempt,created_at,error,next_run_at FROM dispatch_failures WHERE event_id=? AND report=1 ORDER BY attempt DESC LIMIT 10',eventId).map(row=>({...row,error:JSON.parse(row.error),ref:'dispatch_failures:'+eventId+':'+row.attempt})),

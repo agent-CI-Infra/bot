@@ -94,7 +94,7 @@ export class Dispatcher {
         const terminal=error instanceof TaskError&&error.state==='cancelled';
         const attempt=Number(current.attempts),next=Date.now()+backoff(attempt),report=!terminal&&attempt%reportEvery===0;
         const evidenceRef='dispatch_failures:'+event.id+':'+attempt;
-        const failure=traceClean({code,detail:detail.slice(0,2000)});
+        const failure=traceClean({code,detail:detail.slice(0,2000),...(terminal?{terminal:true}:{})});
         this.store.run('INSERT INTO dispatch_failures VALUES(?,?,?,?,?,?)',event.id,attempt,new Date().toISOString(),JSON.stringify(failure),next,report?1:0);
         this.store.run("UPDATE dispatch_events SET state=?,lease=NULL,lease_until=NULL,next_run_at=?,error=? WHERE id=?",terminal?'failed':'pending',next,JSON.stringify({...failure,attempts:attempt,evidence_ref:evidenceRef,...(report?{retry_report:true}:{})}),event.id);
         if(report)this.store.audit('system','dispatch.retry_report',event.id,event.repository_id);
@@ -111,6 +111,7 @@ export function retryEvent(store: Store, repositoryId: string, id: string) {
   return store.transaction(() => {
     const previous = store.get("SELECT attempts,error FROM dispatch_events WHERE id=? AND repository_id=? AND (state='failed' OR (state='pending' AND error IS NOT NULL AND next_run_at>0))", id, repositoryId);
     if (!previous) return false;
+    const failure=previous.error?JSON.parse(previous.error):null;if(failure?.terminal===true||failure?.code==='dispatch_cancelled')return false;
     // Keep the failure a person retried even after the existing event advances to its next result.
     store.run('INSERT INTO dispatch_retries(id,event_id,requested_at,previous_attempts,previous_error) VALUES(?,?,?,?,?)', randomId(), id, new Date().toISOString(), previous.attempts, previous.error);
     return store.run("UPDATE dispatch_events SET state='pending',next_run_at=0,error=NULL WHERE id=? AND repository_id=? AND (state='failed' OR (state='pending' AND error IS NOT NULL AND next_run_at>0))", id, repositoryId).changes > 0;
