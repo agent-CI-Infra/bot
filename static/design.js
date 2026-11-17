@@ -52,6 +52,8 @@ function designStatus(tone, caption, icon) {
 
 function designRows() {
   const rows = element('div', '', 'rows');
+  // #883: the rows below are listitems; the list role goes on their box, exactly as #rows does in the shell.
+  rows.setAttribute('role', 'list');
   for (const [title, note, tone, caption, action] of [
     ['检视 issue #12', 'fixture/project-101 · 模型执行中', 'info', '执行中', '查看'],
     ['开发 issue #9', 'fixture/project-101 · 已创建 PR', 'success', '已完成', '详情'],
