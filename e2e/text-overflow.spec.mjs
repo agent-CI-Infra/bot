@@ -97,6 +97,29 @@ test('#561 长文本截断，窄屏不遮挡主操作，桌面不误截中等名
     expect(list.actionsAboveChips).toBe(true);
     expect(list.settingVisible).toBe(true);
     expect(list.overflow).toBe(390);
+    // #1002: the 操作 caption and 设置 button must not share the same pixels.
+    const actionHit = await page.evaluate((expected) => {
+      const row = [...document.querySelectorAll('.project-list-row')].find(r => r.querySelector('.row-title')?.textContent === expected);
+      const cell = row.querySelector('.project-cell[data-label="操作"]');
+      const setting = [...(cell?.querySelectorAll('button') || [])].find(b => b.textContent.trim() === '设置');
+      const sb = setting.getBoundingClientRect();
+      const cb = cell.getBoundingClientRect();
+      const cs = getComputedStyle(cell);
+      const firstCol = parseFloat(cs.gridTemplateColumns);
+      const gap = parseFloat(cs.columnGap || cs.gap) || 0;
+      return {
+        display: cs.display,
+        firstCol,
+        separated: sb.left + 0.5 >= cb.left + firstCol + gap,
+        before: getComputedStyle(cell, '::before').content,
+        settingHeight: sb.height,
+      };
+    }, longName);
+    expect(actionHit.display).toBe('grid');
+    expect(actionHit.firstCol).toBeGreaterThanOrEqual(44);
+    expect(actionHit.separated).toBe(true);
+    expect(actionHit.before).toMatch(/操作/);
+    expect(actionHit.settingHeight).toBeGreaterThan(0);
     await page.screenshot({ path: resolve(out, 'projects-390.png'), fullPage: true });
 
     // Folded state first: the page's primary action stays visible and no note is drawn over it (F5).
