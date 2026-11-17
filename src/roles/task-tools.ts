@@ -1,4 +1,5 @@
 import { boundedResult, batchBytes } from '../agent/tool-context.js';
+import {submissionFeedback} from './submission-feedback.js';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { HttpError, randomId } from '../core/security.js';
@@ -14,6 +15,7 @@ export interface TaskToolCallInput {
 }
 
 export interface TaskToolDispatcherOptions {
+  /** Retained for adapter compatibility; correctable submissions now report every third rejection. */
   maxRepairs?: number;
   includeSubmissionDetails?: boolean;
   skipScreen?: boolean;
@@ -39,7 +41,7 @@ export interface TaskToolDispatcher<T> {
 export function createTaskToolDispatcher<T>(spec: AgentSpec<T>, options: TaskToolDispatcherOptions = {}): TaskToolDispatcher<T> {
   const fallbackToken = randomId();
   const currentToken = () => spec.runAccess?.token ?? fallbackToken;
-  let submitted = false, result: T | undefined, active = true, repairs = 0;
+  let submitted = false, result: T | undefined, active = true;
   let submissionInFlight: Promise<void> | null = null;
   const inFlight = new Set<Promise<unknown>>(), nonFinishInFlight = new Set<Promise<unknown>>();
 
@@ -126,9 +128,9 @@ export function createTaskToolDispatcher<T>(spec: AgentSpec<T>, options: TaskToo
             didSubmit = true;
             observation = options.includeSubmissionDetails ? { submitted: true, submission: args, submission_name: name } : { submitted: true };
           } catch (error) {
-            const feedback = spec.repairInvalid?.(error);
-            if (!feedback || (options.maxRepairs !== undefined && repairs++ >= options.maxRepairs)) throw error;
-            observation = { error: 'invalid_submission', message: spec.redactor.text(feedback) };
+            const feedback = submissionFeedback(spec,error);
+            if (!feedback) throw error;
+            observation = feedback;
           }
           const clean = spec.redactor.clean(observation ?? null);
           traceEvent(spec.store, String(spec.task.id), 'tool_observation', { name, call_id: String(input.id), observation: clean }, spec.task.trace_run_id, 'tool', [started]);
@@ -153,9 +155,9 @@ export function createTaskToolDispatcher<T>(spec: AgentSpec<T>, options: TaskToo
         } catch (error) {
           await spec.guard();
           if(error instanceof HttpError&&[400,403,404,409].includes(error.status))observation={error:error.code,...(error.field?{field:error.field}:{}),instruction:'Correct this call or choose another authorized action. The session remains active.'};
-          else{const feedback = spec.repairInvalid?.(error);
-          if (!feedback || (options.maxRepairs !== undefined && repairs++ >= options.maxRepairs)) throw error;
-          observation = { error: 'invalid_submission', message: spec.redactor.text(feedback) };}
+          else{const feedback = submissionFeedback(spec,error);
+          if (!feedback) throw error;
+          observation = feedback;}
         }
         const clean = boundedResult(spec.redactor.clean(observation ?? null),batchBytes,value=>spec.resultSession?.preserve(value,name));
         traceEvent(spec.store, String(spec.task.id), 'tool_observation', { name, call_id: String(input.id), observation: clean }, spec.task.trace_run_id, 'tool', [started]);

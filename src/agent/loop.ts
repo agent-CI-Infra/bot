@@ -1,4 +1,5 @@
 import { readToolResult } from './tool-results.js';
+import {submissionFeedback} from '../roles/submission-feedback.js';
 import { commandTimeoutLimit, commandTool, runCommand } from './command.js';
 import {GitHub} from '../github/client.js';
 import { taskTraceAccess } from '../memory/access.js';
@@ -164,13 +165,13 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   // Legacy single-executor Pi sessions use the same live validation as role-backed entries. Keep the raw submission
   // in the runner receipt so a control-plane restart can validate it again without publishing anything twice.
   const complete=session.complete;
-  let submitted:{value:any}|undefined,repairs=0;
+  let submitted:{value:any}|undefined;
   Object.assign(config,{control_tools:[...profile.finishTools,...choosing?workspaceToolNames:[]].filter(name=>initial.includes(name))});
   session.control=async(name,args,meta)=>{
     if(choosing&&workspaceToolNames.includes(name))return {result:redactor.clean(await workspaceTool(workspace,name,redactor.clean(args),'agent',meta?.id))};
     if(!profile.finishTools.includes(name))return {result:{error:'tool_not_allowed'}};
     try {const value=await complete({result:args},null);submitted={value};return {result:{submitted:true,submission:args,submission_name:name},finish:true};}
-    catch(error){const feedback=repairInvalid(error);if(!feedback||repairs++>=2)throw error;return {result:{error:'invalid_submission',message:redactor.text(feedback)}};}
+    catch(error){const feedback=submissionFeedback({store,task,redactor,repairInvalid} as import('./runtime.js').AgentSpec<any>,error);if(!feedback)throw error;return {result:feedback};}
   };
   session.complete=(state,publication)=>submitted?submitted.value:complete(state.result?.submitted===true?{...state,result:state.result.submission}:state,publication);
   return withTaskPermissions(store,task,'dev',fixed,()=>runAgent({ store, task, redactor, guard:liveGuard, system, modelAttempts: limits.modelAttempts, prompt: config.prompt, tools: profile.tools, model: conversation?.model, adapter: piAdapter(session) }));

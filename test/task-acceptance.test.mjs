@@ -168,10 +168,10 @@ test('format feedback can correct an invalid pass into a truthful return instead
  const result=await evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{});
  assert.equal(result.outcome,'return');assert.equal(result.core_complete,false);assert.equal(f.requests.length,2);assert.equal(f.records.get(f.task.id).acceptance,null);
 });
-test('unrepairable verdicts have two format corrections and a finite evaluation-fault exit',async t=>{
+test('text without a structured verdict exhausts each QA turn budget and reports repeated faults',async t=>{
  const f=await fixture(t,()=>({role:'assistant',content:'{}'}));
  for(let i=0;i<3;i++)await assert.rejects(evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{}),{code:i===2?'acceptance_unavailable':'acceptance_output_invalid'});
- assert.equal(f.requests.length,9);assert.equal(f.records.get(f.task.id).rounds,0);assert.equal(f.records.get(f.task.id).acceptance,null);
+ assert.equal(f.requests.length,96);assert.equal(f.records.get(f.task.id).rounds,0);assert.equal(f.records.get(f.task.id).acceptance,null);
 });
 
 test('typed acceptance submission repairs schema errors while preserving a real core gap',async t=>{
