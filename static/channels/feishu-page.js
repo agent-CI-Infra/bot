@@ -245,11 +245,16 @@ async function renderFeishuBindingsPage(panel, current) {
       const refreshName = async () => {
         if (refresh.disabled) return;
         refresh.disabled = true; nameStatus.textContent = '正在读取飞书姓名…';
+        // #870: an attempt counts at once, so a redraw while this one is in flight does not start a second one; a success
+        // clears it again. The key is the identity id the console passes as `binding_id`, so both entries share one mark.
+        channelNameFailures.add(channelNameKey(b));
         try {
           const result = await channelNameRequest('/api/channels/bindings/' + encodeURIComponent(b.id) + '/name');
+          channelNameFailures.delete(channelNameKey(b));
           if (request !== renderVersion) return;
           b.display_name = result.display_name; renderName(); nameStatus.textContent = '飞书姓名已更新。';
         } catch (err) {
+          channelNameFailures.add(channelNameKey(b));
           if (request !== renderVersion) return;
           const changed = ['authorization_changed', 'external_binding_required', 'identity_not_found', 'channel_connector_inactive', 'channel_configuration_changed', 'login_required'].some(code => err.message.includes(code));
           nameStatus.textContent = changed ? '绑定或机器人连接状态已变化，请刷新飞书绑定状态。' : `${name() ? '暂时无法更新飞书姓名，保留上次读取的姓名。' : '飞书暂未提供姓名，当前显示关联的平台账户。'}${err.message.includes('channel_user_name_permission_required') ? channelNamePermissionHint : '请管理员检查完整应用权限、发布状态和通讯录可见范围后重试。'}`;
@@ -257,7 +262,8 @@ async function renderFeishuBindingsPage(panel, current) {
       };
       const refresh = button('刷新飞书姓名', refreshName, 'quiet');
       rowActions.append(refresh);
-      if (!name()) nameLookups.push(refreshName);
+      // A missing name is filled in once per binding; after a refusal the reader's own button still retries it.
+      if (!name() && channelNameAutoRead(b)) nameLookups.push(refreshName);
     }
 
     const connectorId = typeof b.connector === 'string' ? b.connector.split(':')[0] : '';
