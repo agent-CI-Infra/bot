@@ -7,12 +7,17 @@ services:
   key-init:
     image: ghcr.io/agent-ci-infra/bot-control-plane:${BOT_IMAGE_TAG:-latest}
     command: ["node", "dist/keygen.js", "/keys/master.key", "/internal/manager.token"]
+    environment:
+      BOT_TOOL_RESULTS_DIR: /tool-results
+      BOT_DATABASE_PATH: /data/control.sqlite
     network_mode: none
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     volumes:
       - bot-keys:/keys
+      - bot-data:/data
+      - tool-results:/tool-results
       - internal-keys:/internal
     healthcheck:
       disable: true
@@ -28,6 +33,7 @@ services:
       TMPDIR: /tmp
       SQLITE_TMPDIR: /tmp
       BOT_DATABASE_PATH: /data/control.sqlite
+      BOT_TOOL_RESULTS_DIR: /tool-results
       BOT_MASTER_KEY_FILE: /keys/master.key
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
       BOT_MANAGER_URL: http://manager:8793
@@ -61,6 +67,7 @@ services:
       - "${BOT_BIND_ADDRESS:-127.0.0.1}:${BOT_PORT:-${BOT_WEBHOOK_PORT:-8791}}:8791"
     volumes:
       - bot-data:/data
+      - tool-results:/tool-results
       - bot-keys:/keys:ro
       - internal-keys:/internal:ro
       - tunnel-keys:/tunnel
@@ -119,9 +126,11 @@ services:
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
       # The manager only inspects this image and never pulls; it must equal the project-image reference below, tag included.
       BOT_PROJECT_IMAGE: ghcr.io/agent-ci-infra/bot-project-computer:${BOT_IMAGE_TAG:-latest}
+      BOT_TOOL_RESULTS_DIR: /tool-results
       BOT_PROJECT_EGRESS: "${BOT_PROJECT_EGRESS:-true}"
     volumes:
       - manager-data:/data
+      - tool-results:/tool-results:ro
       - internal-keys:/internal:ro
       - /var/run/docker.sock:/var/run/docker.sock
       # Read-only: the manager finds the volume's name here and mounts one owner's HOME directory (a subpath) per computer.
@@ -146,6 +155,9 @@ services:
     security_opt: [no-new-privileges:true]
     restart: "no"
 volumes:
+  tool-results:
+    labels:
+      department.bot.kind: tool-results
   agent-tools:
     labels:
       department.bot.kind: agent-tools

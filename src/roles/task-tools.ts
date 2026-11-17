@@ -1,3 +1,4 @@
+import { boundedResult, batchBytes } from '../agent/tool-context.js';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { HttpError, randomId } from '../core/security.js';
@@ -156,7 +157,7 @@ export function createTaskToolDispatcher<T>(spec: AgentSpec<T>, options: TaskToo
           if (!feedback || (options.maxRepairs !== undefined && repairs++ >= options.maxRepairs)) throw error;
           observation = { error: 'invalid_submission', message: spec.redactor.text(feedback) };}
         }
-        const clean = spec.redactor.clean(observation ?? null);
+        const clean = boundedResult(spec.redactor.clean(observation ?? null),batchBytes,value=>spec.resultSession?.preserve(value,name));
         traceEvent(spec.store, String(spec.task.id), 'tool_observation', { name, call_id: String(input.id), observation: clean }, spec.task.trace_run_id, 'tool', [started]);
         return { observation: clean, isError: !!(clean && typeof clean === 'object' && 'error' in clean && clean.error), submitted: false };
       })();

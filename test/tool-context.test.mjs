@@ -1,3 +1,5 @@
+import { Store } from '../dist/storage/database.js';
+import { ResultSession } from '../dist/agent/tool-results.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { batchBytes, boundedBatch, boundedResult, chatContextBytes, requestBytes, requestLimit, toolArguments, toolCallsProblem, ToolTranscript } from '../dist/agent/tool-context.js';
@@ -28,49 +30,40 @@ test('any number of structurally valid tool calls is accepted; malformed, duplic
   assert.equal(toolArguments({ function: { arguments: '{broken' } }), null);
 });
 
-test('a batch of results shares one budget: small results stay whole and large ones split the rest', () => {
-  const size = value => Buffer.byteLength(JSON.stringify(value));
-  // A single large result without paging (a project's effective configuration is about 240 KB) fits whole.
-  const config = { revision: 'r1', workflows: 'w'.repeat(230 * 1024) };
-  assert.equal(boundedBatch([config])[0], config);
-  // Eleven calls: the small listing stays whole, ten large results share what is left equally.
-  const listing = { projects: Array.from({ length: 10 }, (_, n) => ({ repository: 'org/repo-' + n })) };
-  const large = Array.from({ length: 10 }, (_, n) => ({ repository: 'org/repo-' + n, next_offset: 60, items: Array.from({ length: 60 }, () => ({ title: '失败的检查'.repeat(60) })) }));
-  const [kept, ...cut] = boundedBatch([listing, ...large]);
-  assert.equal(kept, listing);
-  const total = size(listing) + cut.reduce((sum, result) => sum + size(result), 0);
-  assert.ok(total <= batchBytes + 11 * 512, 'the batch stays within its budget');
-  for (const result of cut) {
-    assert.equal(result.truncated, true); assert.match(result.notice, /Narrow it/);
-    assert.ok(size(result) >= (batchBytes - size(listing)) / 10 - 512, 'every large result gets an equal share');
-    // Small top-level fields survive the cut: the next step usually needs them.
-    assert.equal(result.next_offset, 60); assert.equal(result.fields.next_offset, 60); assert.match(result.fields.repository, /^org\/repo-/);
-  }
-  // Very many calls still give every result a useful minimum.
-  assert.ok(boundedBatch(Array.from({ length: 100 }, () => large[0])).every(result => size(result) >= 8 * 1024 - 512));
-  // Quote-heavy JSON grows when it becomes a string inside the tool message; the cut accounts for it.
-  const quoted = boundedResult({ items: Array.from({ length: 4000 }, () => ({ a: '"', b: '' })) }, 20000);
-  assert.ok(Buffer.byteLength(JSON.stringify(quoted.content)) <= 20000);
+test('a batch keeps small results whole and saves large results within its total budget',t=>{
+  const store=new Store(':memory:',Buffer.alloc(32,1));t.after(()=>store.close());
+  const files=new ResultSession(store,store.trajectories.scopeOf({id:'turn',conversation_id:'chat'}),()=> 'computer',()=>{});
+  const config={revision:'r1',workflows:'w'.repeat(230*1024)};
+  assert.equal(boundedBatch([config],undefined,files.preserve)[0],config);
+  assert.equal(store.get('SELECT count(*) n FROM tool_result_files').n,0);
+  const listing={projects:['a','b']},large={items:'中😀"'.repeat(100000),last:'ERROR_AT_END'};
+  const result=boundedBatch([listing,...Array.from({length:100},()=>large)],undefined,files.preserve);
+  assert.equal(result[0],listing);
+  assert.ok(Buffer.byteLength(JSON.stringify(result))<=batchBytes+102,'all previews share the total budget');
+  for(const value of result.slice(1)){assert.ok(value.file);assert.match(value.notice,/read_tool_result/);assert.match(value.tail,/ERROR_AT_END/);}
+  const quoted=boundedResult(large,20000,files.preserve);assert.ok(Buffer.byteLength(JSON.stringify(quoted))<=20000);
 });
 
-test('the transcript folds the oldest tool results first and stops only when nothing is left to fold', () => {
+test('the transcript folds the oldest tool results first and stops only when nothing is left to fold', t => {
+  const store=new Store(':memory:',Buffer.alloc(32,1));t.after(()=>store.close());
+  const files=new ResultSession(store,store.trajectories.scopeOf({id:'turn',conversation_id:'chat'}),()=> 'computer',()=>{});
   const big = 'x'.repeat(100 * 1024);
   const messages = [{ role: 'system', content: 's' }, { role: 'user', content: 'u' }];
   for (let i = 0; i < 6; i++) messages.push({ role: 'assistant', content: null, tool_calls: [call('c' + i)] }, { role: 'tool', tool_call_id: 'c' + i, content: big });
-  const transcript = new ToolTranscript(messages, chatContextBytes), body = { messages, tools: [] };
+  const transcript = new ToolTranscript(messages, chatContextBytes, files.preserve), body = { messages, tools: [] };
   transcript.fit(body);
   assert.ok(requestBytes(body) <= chatContextBytes);
   const tools = messages.filter(m => m.role === 'tool');
-  assert.deepEqual(tools.map(m => m.content.startsWith('{"elided":true')), [true, true, true, false, false, false], 'the newest results stay');
+  assert.deepEqual(tools.map(m => JSON.parse(m.content.startsWith('{')?m.content:'{}').elided===true), [true, true, true, false, false, false], 'the newest results stay');
   assert.equal(JSON.parse(tools[0].content).result_characters, big.length);
   // A latest batch the model has not seen yet is kept over the fold size; it goes only past the gateway limit.
   const batch = [{ role: 'user', content: 'u' }, { role: 'assistant', content: null, tool_calls: [call('a'), call('b')] },
     { role: 'tool', tool_call_id: 'a', content: 'a'.repeat(300 * 1024) }, { role: 'tool', tool_call_id: 'b', content: 'b'.repeat(300 * 1024) }];
-  new ToolTranscript(batch, chatContextBytes).fit({ messages: batch });
-  assert.ok(batch.slice(2).every(m => !m.content.startsWith('{"elided"')));
+  new ToolTranscript(batch, chatContextBytes, files.preserve).fit({ messages: batch });
+  assert.ok(batch.slice(2).every(m => !JSON.parse(m.content.startsWith('{')?m.content:'{}').elided===true));
   batch.push({ role: 'tool', tool_call_id: 'c', content: 'c'.repeat(1700 * 1024) });
-  new ToolTranscript(batch, chatContextBytes).fit({ messages: batch });
-  assert.deepEqual(batch.slice(2).map(m => m.content.startsWith('{"elided"')), [true, false, false]);
+  new ToolTranscript(batch, chatContextBytes, files.preserve).fit({ messages: batch });
+  assert.deepEqual(batch.slice(2).map(m => JSON.parse(m.content.startsWith('{')?m.content:'{}').elided===true), [true, false, false]);
   // Only tool results fold: a request over the gateway limit without any left stops the run with a clear code.
   const huge = [{ role: 'user', content: 'y'.repeat(requestLimit) }];
   assert.throws(() => new ToolTranscript(huge, chatContextBytes).fit({ messages: huge }), error => error.code === 'agent_context_too_large');

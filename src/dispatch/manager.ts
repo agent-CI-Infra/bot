@@ -1,3 +1,4 @@
+import { ResultSession, projectResultOwner, readToolResult } from '../agent/tool-results.js';
 import {runDispatchHarness} from './harness.js';
 import type {Manager} from '../projects/service.js';
 import { roleConfiguration, rolePrompt } from '../roles/definition.js';
@@ -99,13 +100,14 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
   // The tools the role's permissions offer now; reads take the event's repository, never another one.
   const offered = () => {
     const p = live(), read = githubReadScopes(p);
-    return [...repositoryTools.filter(t => permitsTool(p, t.function.name) && read.length).map(t => ({ ...t, function: { ...t.function, description: t.function.description.replace(/\s*Call github_read_token first\./g, '') } })),
+    return [readToolResult, ...repositoryTools.filter(t => permitsTool(p, t.function.name) && read.length).map(t => ({ ...t, function: { ...t.function, description: t.function.description.replace(/\s*Call github_read_token first\./g, '') } })),
       // github_write also needs the project's capability ceiling at comment or more (#850); each call is checked again.
       // register_rule comes with the dispatch itself (#815): a rule only settles what the Manager could decide, and every save is audited.
       ...(permitsTool(p, 'github_write') && covers(projectCeiling(store, repositoryId), 'comment') ? [githubWriteTool] : []), registerRule, ...decisionTools];
   };
-  const execute = async (name: string, args: unknown): Promise<unknown> => {
+  const executeRaw = async (name: string, args: unknown): Promise<unknown> => {
     if (!offered().some(t => t.function.name === name)) return { error: 'tool_not_allowed' };
+    if (name === 'read_tool_result') return resultFiles.read(args);
     if (name === 'github_write') return write(args);
     if (name === 'register_rule') {
       // A new Manager revision with the rule added (or replaced by id); the same checks as saving the rules in the console.
@@ -159,11 +161,13 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
   // Each dispatch attempt is a run of the Manager with its own trajectory file of model requests and responses.
   const trajectory = dispatchScope(repositoryId, String(event.id), Number(event.attempts));
   const task = { id: null, repository_id: repositoryId, kind: 'manager.dispatch', trajectory };
-  const transcript = new ToolTranscript(messages, chatContextBytes);
+  const resultFiles = new ResultSession(store, trajectory, () => projectResultOwner(repositoryId), guard, redactor.values);
+  const execute = (name: string, args: unknown) => resultFiles.execute(name,args,()=>executeRaw(name,args),false);
+  const transcript = new ToolTranscript(messages, chatContextBytes, resultFiles.preserve);
   let corrected = false, refusals = 0;
   try {
     if(role.harness_ref.id!=='native'){
-      return await runDispatchHarness({store,task,model,redactor,guard,system,prompt:messages[1].content,tools:offered(),execute,
+      return await runDispatchHarness({resultSession:resultFiles,store,task,model,redactor,guard,system,prompt:messages[1].content,tools:offered(),execute,
         finish:{name:decisionNames[0]!,names:decisionNames,validate:async(args,name)=>{const {decision,refused,basis}=await assess(toDecision(name??null,args));if(!refused)return {...decision,model:model.model,basis};recordRefusal(store,String(event.id),{...refused,tool:'create_task'});if(++refusals>=maxRefusals)return {decision:'ignore',option_ids:[],reason:`控制面拒绝了 Manager 选的工作：${refused.reason}`.slice(0,1000),model:model.model};throw new InvalidDecision(refused.code,refused.reason);}},
         repairInvalid:error=>error instanceof InvalidDecision?error.message:undefined,
       },role,event,manager);
@@ -181,7 +185,7 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
       // Reads and writes of the same batch run first, in order; a dispatch among them then decides.
       const results: unknown[] = [];
       for (const c of others) results.push(redactor.clean(await execute(String(c.function.name), toolArguments(c))));
-      const answer = () => boundedBatch(results).forEach((result, i) => messages.push({ role: 'tool', tool_call_id: others[i].id, content: JSON.stringify(result) }));
+      const answer = () => boundedBatch(results, undefined, resultFiles.preserve, others.map(call=>call.function.name)).forEach((result, i) => messages.push({ role: 'tool', tool_call_id: others[i].id, content: JSON.stringify(result) }));
       if (call || !calls.length) {
         // The decision: the dispatch call, or a plain JSON answer from a model that did not call it.
         let args: any = null;

@@ -1,6 +1,6 @@
 import {Workspace} from '../agent/workspace.js';
 import {Redactor} from '../agent/common.js';
-import { commandResult } from '../agent/tool-results.js';
+import { commandResult, assistantResultOwner } from '../agent/tool-results.js';
 import { chmod, lstat, mkdir, open, readdir, readlink, realpath, rm, statfs, unlink } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import type { Store, Row } from '../storage/database.js';
@@ -206,6 +206,7 @@ export class AssistantHomes {
   /** Removes an owner's data: every generation, or (keep) all but an empty current one. */
   async clear(owner: string, keep: boolean): Promise<void> {
     const row = this.row(owner);
+    this.store.trajectories.results.removeOwner(assistantResultOwner(owner));
     await rm(`${this.root}/${owner}`, { recursive: true, force: true });
     this.store.run('DELETE FROM assistant_home_sealed WHERE owner=?', owner);
     if (keep && row) {
@@ -355,6 +356,7 @@ export class AssistantComputer {
   /** The owner's container, held by this turn: created or reused, waiting in line while capacity is full. */
   private async computer(runtime=false): Promise<string> {
     const home = await this.prepare(runtime);
+    this.service.store.trajectories.results.directory(assistantResultOwner(home.id));
     if (this.held) return home.id;
     if (!runtime&&!this.options.commands()) fail(400, 'assistant_computer_requires_commands');
     let told = false, retried = false;

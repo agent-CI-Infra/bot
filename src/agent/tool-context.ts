@@ -15,7 +15,8 @@ export const chatContextBytes = 384 * 1024;
 /** One batch of tool results shares one budget, so a call per repository cannot flood the context, while a single large
  * result without paging (a project's effective configuration is about 240 KB) still fits whole. */
 export const batchBytes = 256 * 1024;
-const minShare = 8 * 1024;
+const resultBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(JSON.stringify(value) ?? 'null'));
+export type PreserveResult = (value: unknown, name?: string) => any;
 
 /** Structural check of the tool calls in one model message, without any count limit. Returns what is wrong, or null.
  * Ids must be unique because every result answers its call by id in the next request. */
@@ -42,58 +43,48 @@ export function toolArguments(call: { function: { arguments?: string } }): unkno
   try { return JSON.parse(raw); } catch { return null; }
 }
 
-/** Bounds every result of one batch within the batch budget: results under an equal share stay whole and leave the rest
- * to the larger ones, which share it equally (every result keeps at least minShare). */
-export function boundedBatch(results: unknown[], budget = batchBytes): unknown[] {
-  const sizes = results.map(result => Buffer.byteLength(JSON.stringify(result) ?? 'null')), shares: number[] = [];
+/** Small results stay whole; larger results share the remaining serialized batch budget. */
+export function boundedBatch(results: unknown[], budget = batchBytes, preserve?: PreserveResult, names?: string[]): unknown[] {
+  const sizes = results.map(result => resultBytes(result)), shares: number[] = [];
   let left = budget;
   sizes.map((_, i) => i).sort((a, b) => sizes[a]! - sizes[b]!).forEach((i, k) => {
-    const share = Math.max(minShare, Math.floor(left / (sizes.length - k)));
+    const share = Math.max(0, Math.floor(left / (sizes.length - k)));
     shares[i] = share; left -= Math.min(sizes[i]!, share);
   });
-  return results.map((result, i) => boundedResult(result, shares[i]!));
+  return results.map((result, i) => boundedResult(result, shares[i]!, preserve && (value => preserve(value,names?.[i]))));
 }
 
-/** A result over its share is cut, with what the model needs to read the rest in parts. Small top-level fields (revision,
- * next_offset, ids, states) stay whole because the next step usually needs them. The cut is measured as it is sent: the
- * JSON text becomes a string inside the tool message, so its quotes are escaped once more. */
-export function boundedResult(value: unknown, bytes: number): unknown {
-  const json = JSON.stringify(value) ?? 'null', size = Buffer.byteLength(json), sent = (text: string) => Buffer.byteLength(JSON.stringify(text));
-  if (size <= bytes) return value;
-  if (value && typeof value === 'object' && typeof (value as any).file === 'string' && (value as any).file.startsWith('result:')) {
-    const v=value as any, status=Object.fromEntries(['file','bytes','encoding','notice','exit_code','signal','timed_out','error','output_bytes','log_path','running'].filter(k=>Object.hasOwn(v,k)).map(k=>[k,v[k]]));
-    let head=String(v.head??v.content??v.output??''),tail=String(v.tail??'');
-    const make=()=>({...status,truncated:true,head,tail});
-    while(Buffer.byteLength(JSON.stringify(make()))>Math.max(1024,bytes)&&head.length+tail.length){head=head.slice(0,Math.floor(head.length*.75));tail=tail.length>1?tail.slice(-Math.floor(tail.length*.75)):'';}
-    return make();
+/** Save a result before replacing it with a preview. Count JSON escaping in the actual tool-message string. */
+export function boundedResult(value: unknown, bytes: number, preserve?: PreserveResult): any {
+  if (resultBytes(value) <= bytes) return value;
+  const v: any = value && typeof value === 'object' && String((value as any).file).startsWith('result:') ? value : preserve?.(value);
+  if (!v?.file) return { error: 'tool_result_storage_failed', notice: 'The complete result could not be saved. Inspect result storage before querying the source again.' };
+  const status = { ...v.fields, ...Object.fromEntries(['file','path','bytes','encoding','expires_at','notice','exit_code','signal','timed_out','error','output_bytes','log_path','running','position','next_position','eof','fields'].filter(k => Object.hasOwn(v,k)).map(k => [k,v[k]])) };
+  let head = String(v.head ?? v.content ?? v.output ?? ''), tail = String(v.tail ?? '');
+  const make = () => ({ ...status, truncated: true, head, tail });
+  while (resultBytes(make()) > bytes && head.length + tail.length) {
+    head = head.slice(0, Math.floor(head.length * .75)); tail = tail.slice(Math.max(0, tail.length - Math.floor(tail.length * .75)));
   }
-  const fields = value && typeof value === 'object' && !Array.isArray(value)
-    ? Object.fromEntries(Object.entries(value).filter(([, v]) => v === null || typeof v !== 'object' && Buffer.byteLength(JSON.stringify(v) ?? '') <= 256)) : {};
-  const room = Math.max(1024, bytes - Buffer.byteLength(JSON.stringify(fields)));
-  let content = json.slice(0, room);
-  for (let over = sent(content); over > room; over = sent(content)) content = content.slice(0, Math.floor(content.length * room / over) - 1);
-  return { ...fields, truncated: true, result_bytes: size, notice: 'This result exceeds its share of the context and was cut. Narrow it (a smaller limit, page, path or section) to read the rest.',
-    ...(Object.keys(fields).length ? { fields } : {}), content };
+  return make();
 }
 
-/** What the model gets instead of a result that cannot fit any request. A command has already run, so its status stays. */
-export function withheldResult(name: string, value: any) {
-  if(value?.file)return boundedResult(value,8192);
-  const status = name === 'run_command' && value && typeof value === 'object' ? Object.fromEntries(['exit_code', 'signal', 'timed_out', 'truncated'].filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])) : {};
-  return { error: 'tool_result_too_large', ...status, result_characters: JSON.stringify(value)?.length ?? 0, detail: name === 'run_command'
-    ? 'The command ran, but its output alone exceeds the model request limit and was not returned. Do not print it again in full: pipe it through head, tail, grep or wc, or redirect it to a file and read only the parts you need.'
-    : 'This result alone exceeds the model request limit and was not returned. Read a smaller part instead, for example one file at a time or a line range.' };
+/** Preserve a complete result before replacing the model-facing body. */
+export function withheldResult(name: string, value: any, preserve?: PreserveResult) {
+  const result = value?.file ? value : preserve?.(value, name);
+  return boundedResult(result ?? { error: 'tool_result_storage_failed' }, 8192, preserve);
 }
-const elidedResult = (characters: number, content?: string) => {
-  let reference:any={};try{const value=JSON.parse(content??'null');if(value?.file)reference=Object.fromEntries(['file','bytes','encoding','notice'].filter(k=>Object.hasOwn(value,k)).map(k=>[k,value[k]]));}catch{}
-  return JSON.stringify({ elided: true, ...reference, result_characters: characters, detail: Object.keys(reference).length?'Read this file with read_tool_result; do not repeat its original operation.':'This earlier tool result was removed to keep the request within the model limit. Run or read it again, narrowed, if you still need it.' });
+const elidedResult = (characters: number, content?: string, preserve?: PreserveResult, name?: string) => {
+  let value: any; try { value = JSON.parse(content ?? 'null'); } catch { value = content; }
+  const reference = value?.file ? value : preserve?.(value, name);
+  return JSON.stringify({ elided: true, ...boundedResult(reference ?? { error: 'tool_result_storage_failed' }, 4096, preserve),
+    result_characters: characters, detail: 'Read this file with read_tool_result; do not repeat its original operation.' });
 };
 
 /** The messages of one tool loop and the folding that keeps its requests within budget. */
 export class ToolTranscript {
   private readonly elided = new WeakSet<object>();
   /** fold: the request size above which the oldest tool results are elided; requestLimit stays the hard bound. */
-  constructor(readonly messages: any[], readonly fold = requestLimit) {}
+  constructor(readonly messages: any[], readonly fold = requestLimit, readonly preserve?: PreserveResult) {}
   /** Before each request: over the fold size, the oldest tool results the model has already seen are elided first (it can
    * read them again). Results of the latest batch, not seen yet, go only when the request is still over the gateway limit;
    * a request over it even then stops the run instead of failing at the gateway. */
@@ -106,18 +97,17 @@ export class ToolTranscript {
         // A restored session may already carry markers.
         if (message.role !== 'tool' || this.elided.has(message) || typeof message.content !== 'string' || message.content.startsWith('{"elided":true')) continue;
         const before = Buffer.byteLength(JSON.stringify(message.content));
-        message.content = elidedResult(message.content.length,message.content); this.elided.add(message);
+        message.content = elidedResult(message.content.length, message.content, this.preserve, this.messages.flatMap(m => m.tool_calls ?? []).find(c => c.id === message.tool_call_id)?.function?.name); this.elided.add(message);
         bytes -= before - Buffer.byteLength(JSON.stringify(message.content));
       }
     };
     elide(this.fold, unseen); elide(requestLimit, this.messages.length);
     if (bytes > requestLimit) stop('agent_context_too_large', 'failed', 'Agent 请求省略较早的工具结果后仍超过 2 MiB 上限。');
   }
-  /** A result that would not fit even with every earlier tool result elided never enters the conversation: the model gets
-   * tool_result_too_large and reads a smaller part, instead of the next request failing the run. */
+  /** Preserve a result before admitting its bounded preview to the next request. */
   admit(name: string, result: unknown, tools: any[]): string {
-    const content = JSON.stringify((result as any)?.file?boundedResult(result,batchBytes):result), base = requestBytes({ tools, messages: this.messages.map(message => message.role === 'tool' && !this.elided.has(message) ? { ...message, content: elidedResult(0,message.content) } : message) });
+    const content = JSON.stringify(boundedResult(result, batchBytes, this.preserve && (value => this.preserve!(value, name)))), base = requestBytes({ tools, messages: this.messages.map(message => message.role === 'tool' && !this.elided.has(message) ? { ...message, content: JSON.stringify({elided:true,file:'result:'+ '0'.repeat(48),head:'',tail:'',notice:'read_tool_result'}) } : message) });
     // The content is a string inside the request, so it is escaped once more there.
-    return base + Buffer.byteLength(JSON.stringify(content)) + 64 > requestLimit ? JSON.stringify(withheldResult(name, result)) : content;
+    return base + Buffer.byteLength(JSON.stringify(content)) + 64 > requestLimit ? JSON.stringify(withheldResult(name, result, this.preserve)) : content;
   }
 }

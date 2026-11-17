@@ -1,7 +1,7 @@
 import {stageSessionSkills} from './session-resources.mjs';
 import {dirname,join} from 'node:path';
 import {startCredentialHelperServer} from './credential-helper.mjs';
-import { localCommandResult, readLocalResult, prepareLocalResults } from './tool-results.mjs';
+import { localCommandResult, prepareLocalResults } from './tool-results.mjs';
 import {readFile,writeFile,rename,unlink,appendFile,mkdir} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
@@ -135,7 +135,7 @@ try{
       }
       // A sub-agent is a new session built from its own configuration; it never sees this conversation.
       else if(name==='start_agent'&&!agent)result=await runSubagent({config:cfg,args,id:'agent-'+randomBytes(6).toString('hex'),createSession:(child,childId)=>createSession(child,childId,[]),writeEvent});
-      else if(name==='read_tool_result')result=await readLocalResult(dir+'/results',cfg.workspace_id+':'+(agent||''),args);
+      else if(name==='read_tool_result')result=await repositoryTool(name,args,signal);
       else if(name==='read_file')result=await workspace({type:'workspace_read',workspace_id:cfg.workspace_id,path:args.path},signal);
       else if(name==='write_file'){
         const note=typeof args.path==='string'&&args.path.startsWith('../notes/');
@@ -151,7 +151,7 @@ try{
           try{await prepareLocalResults(outputDirectory);
             await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify(clean({operation_id:id,output_file:outputDirectory+'/'+outputId+'.utf8',...options.request})),{mode:0o600});
             result=await workspace({...options.request,workspace_id:cfg.workspace_id,output_file:outputDirectory+'/'+outputId+'.utf8',secret_env},signal);
-            result=await localCommandResult(outputDirectory,cfg.workspace_id+':'+(agent||''),outputId,result);
+            result=await localCommandResult(outputId,result,args=>repositoryTool('store_command_result',args,signal));
             if(options.timeout_notice)result={...result,timeout_notice:options.timeout_notice};
           }catch(error){if(!noSpace(error))throw error;result={error:String(error.message)};}
           finally{await unlink(dir+'/live.json').catch(()=>{});}
@@ -200,7 +200,7 @@ try{
     const {session:created}=await createAgentSession({cwd,agentDir:native?nativeDir:dir,modelRuntime:runtime,model:runtime.getModel(providerId,modelId),resourceLoader:loader,
       tools:[...builtin,...tools.map(tool=>tool.name)],customTools:tools,sessionManager,settingsManager});
     if(native)await writeEvent({type:'session_bound',session_id:sessionManager.getSessionId(),recoveryMode:config.native_fresh?'fresh_evaluation':config.native_previous_session_id===sessionManager.getSessionId()?'native_resume':config.native_previous_session_id?'rebuilt_from_task_records':'new_session',transcript:sessionManager.getSessionFile(),native_tools:builtin,resources:{skills:loader.getSkills().skills.map(s=>s.name),context_files:loader.getAgentsFiles().agentsFiles.map(f=>f.path)}});
-    guard.check=createToolResultGuard({getMessages:()=>created.messages,tooLarge:modelRequestTooLarge,renderRequest:async messages=>{
+    guard.check=createToolResultGuard({getMessages:()=>created.messages,tooLarge:modelRequestTooLarge,preserve:(name,value)=>repositoryTool('store_tool_result',{name,value}),renderRequest:async messages=>{
       // Let the same SDK serialize the projected request, then stop before any HTTP request or accounting.
       let raw;
       const stream=runtime.streamSimple(created.agent.state.model,{messages:await created.agent.convertToLlm(messages),tools:created.agent.state.tools},{

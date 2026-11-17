@@ -38,7 +38,7 @@ Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这
 
 升级时同步更新控制面、manager 和项目电脑镜像；结构化读取、PR 发布与控制面工具统一通过 `runner/tool-dispatch.mjs` 和 `workspace_agent_tool` 邮箱操作投递，控制面由无传输绑定的 `createTaskToolDispatcher` 统一校验工具白名单、运行身份令牌与租约、项目启用状态和单次提交。项目主控另用 `workspace_agent_runtime`（报告 runner 实际安装的 Pi SDK 版本），旧项目电脑镜像会返回 `pi_runtime_unavailable` 并等待升级。Pi 的会话事件 `pi_session` 记录实际 SDK 版本、提供的工具以及没有混入的扩展、技能和上下文文件；`src/agent/pi.ts` 固定的版本与 `runner/package.json` 由 `npm run check` 核对一致。
 
-每个已进入邮箱的仓库请求最多等待 120 秒，超时返回 `repository_tool_timeout`；超时或取消后的迟到回复不会中断任务。共享执行器按现有 2 MiB 邮箱容量检查脱敏后 JSON 的 UTF-8 字节数，超出时向观察循环和 Pi 返回完整的 `repository_result_too_large` 工具错误。例如 `/git/trees/<sha>?recursive=1` 的结果无法投递时，模型应缩小 path、去掉 recursive 或继续分页，并用 page/per_page 减小每页结果；不会截断 JSON 后冒充成功结果。
+每个已进入邮箱的仓库请求最多等待 120 秒，超时返回 `repository_tool_timeout`；超时或取消后的迟到回复不会中断任务。完整结果超过模型或邮箱预算时，控制面先脱敏写入临时结果文件，再投递首尾预览及 `file`、`bytes`、`encoding`、`expires_at`；即使大于 2 MiB，也可用 `read_tool_result` 按 UTF-8 字节继续读取，无需重新调用 GitHub。所有工具循环（含 Manager 分派与 Pi 控制面工具）采用同一规则，批预算压缩和较早上下文省略仍保留可读文件。结果的电脑归属、只读 `/results` 挂载和 24 小时过期规则见[完整工具结果与模型分页](trajectories.md#完整工具结果与模型分页)。
 
 ## GitHub 写入（github_write）
 
@@ -55,13 +55,11 @@ Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这
 
 框架交付不经过 `github_write`，也不需要角色的写权限：检视结论、测试通过的 PR、Actions 重跑与失败提报和发行说明沿用原流程，只看项目工作类型的写入，见 [Manager 与工作类型](workflows.md)。
 
-2 MiB 是邮箱及观察循环的结果上限。Pi 还会在 `github_read`、`github_search`、`read_job_log` 的结果进入会话历史之前，使用同一 SDK 序列化包含当前历史与同轮已完成工具结果的下一次模型请求，并检查估计输入 token 加本次有效输出预留是否超过所选模型的上下文窗口。上下文与最大输出来自手填能力或 models.dev 目录，显式角色输出额度优先；没有匹配时沿用 128000 上下文和 8192 输出。触及该上限的仓库读取返回 `repository_result_too_large`，让模型缩小读取范围；放得下的结果原样返回，没有新增固定字节配额。序列化检查不会发起模型请求。
-
-其他工具（`run_command`、`read_file`、记忆与任务记录查询等）的结果也在进入会话历史前检查。命令超过 1 MiB 后继续运行，完整输出脱敏后落盘，模型收到首尾预览和 `file`，通过 `read_tool_result({file,position,length})` 分页读取；读取不会重跑命令，`exit_code`、`timed_out` 和 `error` 决定命令是否成功，`truncated` 只表示预览省略。Pi 先缩小带文件引用的预览，压缩和上下文检查仍保留文件引用及读取提示。没有可分页文件的结果，只有压缩仍放不下时才返回 `tool_result_too_large`，让模型缩小读取范围。Pi 压缩保留最新工具调用及同批结果，检查还为历史摘要和拆分轮次的前缀摘要预留两份 8192 token。
+2 MiB 是邮箱及控制面模型请求的传输上限。Pi 在结果进入会话历史前，用同一 SDK 序列化当前历史与同轮已完成工具结果的下一次请求，检查估计输入 token 加有效输出预留是否超过所选模型上下文窗口。上下文与最大输出来自配置或 models.dev，显式角色输出额度优先；未匹配时沿用 128000 上下文和 8192 输出。超限的仓库查询及其他工具结果由控制面保存，Pi 保留有文件句柄的有界预览，而不是要求模型重查；序列化检查本身不发起模型请求。其他工具按压缩后保留的最新工具调用、同批结果与系统提示检查，并为历史摘要和拆分轮次的前缀摘要预留两份 8192 token。
 
 Pi 不保证请求达到 runner 上限前一定压缩过。SDK 在每次请求前检查上次报告的用量加新增消息的 chars/4，超过所选模型上下文窗口减去 24000 的压缩预留才压缩；它还保留最近约 16000 token 的消息。若超大内容就在保留区，压缩可能没有可切掉的部分。runner 则按原始请求 JSON 估算输入，包括工具定义、系统提示和 JSON 转义，并加本次有效输出预留，两者口径不同。runner 判断超限时不发送到模型服务，而是返回 HTTP 413（`context_length_exceeded`），Pi 据此压缩再重试同一轮。压缩后仍放不下或压缩失败时，任务以 `agent_context_too_large` 失败。
 
-控制面自己的工具循环（`runTools`：请求任务的执行、验收、发布观察和未走 Pi 的角色）受网关的 2 MiB 请求上限约束，不套用 Pi 的上下文估算。命令的大输出先保存为结果文件，再向模型返回首尾预览；`read_tool_result` 读取同一文件，无需重跑命令。对于没有文件引用、即使省略旧结果也放不下的结果，模型收到 `tool_result_too_large` 并改读较小范围。请求前超过 2 MiB 时，从最早的工具结果开始省略，换成 `elided` 标记；已有文件引用、状态和读取提示仍保留。省略后仍超限的请求不发出，任务以 `agent_context_too_large` 失败。
+控制面自己的工具循环（`runTools`：请求任务的执行、验收、发布观察和未走 Pi 的角色）受网关 2 MiB 请求上限约束，不套用 Pi 的上下文估算。超长结果、无法直接准入的结果和需要省略的较早工具结果都先保存完整文件，再保留首尾预览、文件引用及读取提示。模型可用 `read_tool_result` 读取，无需重跑。请求省略较早工具结果后仍超限时不发出，任务以 `agent_context_too_large` 失败。
 
 单条模型消息里的工具调用数量不设上限，由模型自己决定（#333）：跨十个仓库各查一次是正常用法。各工具循环只校验结构（`src/agent/tool-context.ts` 的 `toolCallsProblem`）：`tool_calls` 为数组，每项是 `function` 调用、名称非空、参数为字符串或省略，`id` 为 1–128 个可见 ASCII 字符且同一条消息内不重复；结构不合法时默认循环以 `agent_tool_calls_invalid` 停止。参数不是 JSON 时，这一项调用返回 `invalid_arguments` 观察（Process harness 返回 `invalid_tool_arguments`），由模型改正。上面的省略与拦截由同一模块的 `ToolTranscript` 实现，管理助手、群聊助手和服务角色的独立任务也使用它，规则见下一段。
 

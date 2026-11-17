@@ -1,5 +1,5 @@
 import {harnessAccess} from '../harness/access.js';
-import { resultSpec, resultOwner } from '../agent/tool-results.js';
+import { resultSpec, taskResultOwner } from '../agent/tool-results.js';
 import {TaskRecords} from '../tasks/service.js';
 import { taskRecordContext } from '../tasks/record-tools.js';
 import {observeLongExecution,decideLongExecution} from './long-execution.js';
@@ -139,7 +139,8 @@ const harnessEventType:Record<string,[RunEvent['type'],RunEvent['category']]>={s
 async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|undefined,harnessOverride:string|undefined,options:RoleRunOptions,state:LoopState,shared:{sourceInput:string;priorRun:Row|undefined;priorSubmission:Row|null|undefined;memory:any}):Promise<PreparedRun<T>>{
  const s=spec.store,task=spec.task,stage=stageForAssignment(s,assignment),workflow=workOf(task as any),{resolved,continuation}=state;let instance=state.instance;
  const sourceFence=taskAuthorizationFence(s,task,role);
- spec=resultSpec(spec,()=>resultOwner('task-role',task.id,role,sourceFence));
+ let resultEnvironment: unknown, resultMounted=false;
+ spec=resultSpec(spec,()=>taskResultOwner(task,resultEnvironment),()=>resultMounted);
  if(instance.source_fence!==sourceFence){
   if(instance.sequence>0){const runtime=rebuildingRuntime(instance);s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=? WHERE id=?",runtime,instance.id);instance={...instance,session:'[]',harness_state:'{}',runtime};traceEvent(s,task.id,'source_authorization_changed',{role,instance_id:instance.id,recovery:'rebuilt_from_authorized_facts'},task.trace_run_id);}
   s.run('UPDATE role_instances SET source_fence=? WHERE id=?',sourceFence,instance.id);instance.source_fence=sourceFence;
@@ -225,6 +226,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const budgetGuard=(pendingTools=0)=>{assertStageRun(s,task.id,assignment,snapshot.kind);const stageLimit=stageBudgetExceeded(s,assignment);if(stageLimit)exhaustStage(stageLimit);if(!cumulative||!live.bound)return;const reached=budgetExceeded(budget,instanceUsage(s,instance.id),{tool_calls:pendingTools});if(reached)exhaust(reached);};
   const access={get token(){return live.bound?.token??'';},check(presented:unknown,capability?:string){const b=live.bound;if(!b||presented!==b.token)throw new TaskError('run_token_invalid','failed');verifyRunToken(s,presented,{tenant_id:b.ctx.tenant_id,project_id:b.ctx.project_id,task_id:b.ctx.task_id!,run_id:b.run_id,lease_epoch:b.epoch,role},capability);}};
   let executionRun:string|undefined;
+  resultEnvironment=env.environment?.handle;
   const wrapped:AgentSpec<T>={...spec,model,tools,pi:env.pi??spec.pi,roleWorkspace:env.roleWorkspace??spec.roleWorkspace,containerOptions:env.containerOptions?{...spec.containerOptions,...env.containerOptions}:spec.containerOptions,runEnvironment:env.environment?.handle,
    guard:async()=>{await spec.guard();authority();const b=live.bound;if(b){assertLease(s,b.run_id,b.epoch);if(!touchRunToken(s,b.token_id,tokenTtl))stop('run_token_revoked','cancelled','运行的能力令牌已撤销或过期，运行停止。');budgetGuard();}},
    harnessTurnLimit:bounded?.max_turns??spec.harnessTurnLimit,
@@ -280,6 +282,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
     prior_submission:shared.priorSubmission?{ref:'task_history:'+shared.priorSubmission.id,run_id:shared.priorRun!.id,instruction:'A previous submission failed formatting. Read this original record and correct its structure; reuse observations only if the candidate is still applicable. Do not repeat checks merely to fix formatting.'}:null,role_memory:visibleMemorySnapshot(s,task.repository_id,shared.memory,taskTraceAccess(s,{...task,active_role:role}))}}),
    requestPrefix:`role:${instance.id}:${instance.sequence}:`,roleRun:{instance_id:instance.id,role,version:definition.version,harness,harness_version:driver.version,assignment_id:assignment,recovery_mode:recover,snapshot_id:resolved.id},
    session:{messages:messages.length&&messages[0]?.role==='system'?[{role:'system',content:definition.prompt},...messages.slice(1)]:messages,save:msgs=>{s.run('UPDATE role_instances SET session=?,updated_at=? WHERE id=?',JSON.stringify(cleanRoleMessages(spec.redactor.clean(msgs))),new Date().toISOString(),instance!.id);}}};
+  resultMounted=!!(wrapped.runEnvironment||wrapped.roleWorkspace||wrapped.pi?.workspace||wrapped.containerOptions?.manager)&&!!wrapped.harnessAccess?.commands;
   // Adapters read the run's credential after the run is bound (the adapter starts after onRun); before that there is none.
   Object.defineProperty(wrapped,'runAccess',{get:()=>live.bound?access:undefined,enumerable:true,configurable:true});
   wrapped.runContext=()=>live.bound?.ctx;

@@ -1,3 +1,4 @@
+import { ResultSession, projectResultOwner, resultScope, commandResult } from './tool-results.js';
 import { randomId } from '../core/security.js';
 import { stop, TaskError, type Redactor } from './common.js';
 import type { AgentServices } from './runtime.js';
@@ -19,6 +20,7 @@ export interface PiConversation { history?: any[]; resume?: boolean; offset?: nu
  */
 export interface PiSession<T> {
   store: Store;
+  results?: ResultSession;
   taskId: string;
   /** The task lifecycle guard, checked before every mailbox exchange. */
   guard: () => Promise<void>;
@@ -65,6 +67,8 @@ export interface PiSession<T> {
 
 export function piAdapter<T>(session: PiSession<T>) {
   const { store, taskId, guard, workspace, redactor, config, conversation, signal } = session, key = session.key ?? 'pi';
+  const task=store.get('SELECT * FROM tasks WHERE id=?',taskId)??{id:taskId};
+  const resultFiles=session.results??new ResultSession(store,resultScope(store,task),()=>projectResultOwner(task.repository_id),guard,redactor.values,()=>true);
   // Every wait of the control plane ends as soon as the session is cancelled. A cancelled session is never reported as a
   // resumable interruption: the caller releases its workspace, and the next run starts from task records.
   const cancelled = () => signal?.reason ?? new TaskError('harness_cancelled', 'cancelled');
@@ -220,6 +224,19 @@ export function piAdapter<T>(session: PiSession<T>) {
               await deliverMailboxToolReply(redactor.clean(reply), id, chunk => workspace.deliver(chunk), '发送工作区结果时中断。');
               return;
             }
+            if (kind === 'repository' && ['store_command_result','store_tool_result','read_tool_result'].includes(name)) {
+              await guard();
+              let result: any = {error:'tool_not_allowed'};
+              if (name === 'read_tool_result' && session.offered(name)) result = await resultFiles.read(args);
+              else if (name === 'store_tool_result' && session.offered(args?.name)) result = resultFiles.preserve(args.value,args.name);
+              else if (name === 'store_command_result' && session.offered('run_command') && /^[a-f0-9]{48}$/.test(args?.output_id ?? '')) {
+                result=await resultFiles.run(()=>commandResult({...args.preview,truncated:true,output_file:'journal'},'pi:'+args.output_id,
+                  offset=>workspace.deliver({type:'workspace_agent_result',request_id:args.output_id,offset})),true);
+              }
+              await guard();
+              await deliverMailboxToolReply(redactor.clean(result), id, chunk => workspace.deliver(chunk), '发送完整工具结果时中断。');
+              return;
+            }
             if (kind === 'control' || (config.control_tools || []).includes(name)) {
               const allowed = session.control && session.offered(name) && (config.control_tools || []).includes(name) && (!finalizing || finishingNames.has(name));
               const reply = allowed ? await abortable(session.control!(name, args, { id, token: toolRequest?.token })) : { result: { error: 'tool_not_allowed' } };
@@ -242,7 +259,7 @@ export function piAdapter<T>(session: PiSession<T>) {
             const offered = session.offered(name);
             let result: any;
             if (session.platform && Object.hasOwn(session.platform, name)) result = offered ? await abortable(session.platform[name]!(id, args)) : { error: 'write_not_allowed' };
-            else result = !offered || !session.repository ? { error: 'tool_not_allowed' } : await abortable(session.repository(name, args));
+            else result = !offered || !session.repository ? { error: 'tool_not_allowed' } : await resultFiles.execute(name,args,()=>abortable(session.repository!(name,args)));
             await deliverMailboxToolReply(redactor.clean(result), id, chunk => workspace.deliver(chunk), '发送仓库读取结果时中断。');
           });
         }

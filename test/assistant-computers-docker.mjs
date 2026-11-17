@@ -1,3 +1,4 @@
+import { computerResultOwner } from '../runner/result-owner.mjs';
 // Real-Docker acceptance of assistant computers (#457). It builds a test image from an existing project-computer image with
 // this checkout's runner on top, runs this checkout's manager code in-process under a deployment id of its own, and removes
 // every container, volume and image it created (all labelled with that deployment). Nothing of another Compose project is
@@ -14,7 +15,7 @@ import { Docker } from '../manager/docker.mjs';
 import { AssistantComputers } from '../manager/assistant-computers.mjs';
 
 const tag = randomBytes(4).toString('hex'), root = resolve('.tmp/assistant-computers-docker'), work = join(root, tag);
-const deployment = 'ac457' + tag, image = `dbot-assistant-457-${tag}:test`, volume = `dbot-${deployment}-assistant-homes`;
+const deployment = 'ac457' + tag, image = `dbot-assistant-457-${tag}:test`, volume = `dbot-${deployment}-assistant-homes`, resultVolume=`dbot-${deployment}-tool-results`;
 const base = process.env.BOT_TEST_BASE_IMAGE || 'department-bot-project-computer:local';
 mkdirSync(work, { recursive: true });
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...opts });
@@ -24,12 +25,12 @@ const hex = n => randomBytes(n).toString('hex');
 // The manager runs on the host here: the volume name is known, and the generation directories are made by a helper
 // container as the computers' user, the way the control plane makes them in its own container.
 class HostDocker extends Docker { async volumeName() { return volume; } }
-const docker = new HostDocker(), db = new DatabaseSync(':memory:');
-let computers = new AssistantComputers({ docker, db, deployment, image, homes: null });
+const docker = new HostDocker(), db = new DatabaseSync(':memory:'), resultOwners=new Set();
+let computers = new AssistantComputers({ docker, db, deployment, image, homes: null, resultMount:async owner=>resultOwners.has(owner)?[{Type:'volume',Source:resultVolume,Target:'/results',ReadOnly:true,VolumeOptions:{NoCopy:true,Subpath:computerResultOwner('assistant',owner)}}]:[] });
 const fence = 'a'.repeat(64), other = 'b'.repeat(64);
 // As the control plane would: create (or list) directories in the HOME volume as uid 10001.
 const homes = script => sh('docker', ['run', '--rm', '--network', 'none', '--user', '10001:10001', '--label', 'department.bot.deployment=' + deployment,
-  '-v', volume + ':/assistant-homes', '--entrypoint', 'sh', image, '-c', script]).trim();
+  '-v', volume + ':/assistant-homes', '-v', resultVolume + ':/tool-results', '--entrypoint', 'sh', image, '-c', script]).trim();
 const percentile = (values, p) => { const sorted = [...values].sort((a, b) => a - b); return sorted[Math.min(sorted.length - 1, Math.ceil(p / 100 * sorted.length) - 1)]; };
 const timed = async fn => { const start = performance.now(); const value = await fn(); return [performance.now() - start, value]; };
 try {
@@ -37,12 +38,14 @@ try {
   //    first mount of the empty volume takes its ownership (as the control-plane image does for /assistant-homes).
   const context = join(work, 'context'); mkdirSync(join(context, 'runner'), { recursive: true });
   for (const name of readdirSync('runner')) if (name.endsWith('.mjs')) cpSync(join('runner', name), join(context, 'runner', name));
-  writeFileSync(join(context, 'Dockerfile'), `FROM ${base}\nUSER root\nCOPY runner/ /opt/runner/\nRUN for f in /opt/runner/*.mjs; do node --check "$f"; done && chmod -R a-w /opt/runner \\\n && mkdir /assistant-homes && chown 10001:10001 /assistant-homes && chmod 750 /assistant-homes\nUSER 10001:10001\n`);
+  writeFileSync(join(context, 'Dockerfile'), `FROM ${base}\nUSER root\nCOPY runner/ /opt/runner/\nRUN for f in /opt/runner/*.mjs; do node --check "$f"; done && chmod -R a-w /opt/runner \\\n && mkdir /assistant-homes /tool-results && chown 10001:10001 /assistant-homes /tool-results && chmod 750 /assistant-homes && chmod 755 /tool-results\nUSER 10001:10001\n`);
   sh('docker', ['build', '-q', '-t', image, '--label', 'department.bot.deployment=' + deployment, context]);
   sh('docker', ['volume', 'create', '--label', 'department.bot.deployment=' + deployment, volume]);
+  sh('docker', ['volume', 'create', '--label', 'department.bot.deployment=' + deployment, resultVolume]);
   passed('test image and HOME volume created from ' + base);
-  const [A, B] = [hex(16), hex(16)];
+  const [A, B] = [hex(16), hex(16)];resultOwners.add(A);resultOwners.add(B);
   homes(`set -e; for o in ${A} ${B}; do mkdir -p -m 750 /assistant-homes/$o; mkdir -m 700 /assistant-homes/$o/home-1; done; stat -c '%U %a %n' /assistant-homes /assistant-homes/${A}/home-1`);
+  homes(`mkdir -p /tool-results/${computerResultOwner('assistant',A)} /tool-results/${computerResultOwner('assistant',B)}; printf '{\"issues\":[452,459],\"tail\":\"中😀\"}' > /tool-results/${computerResultOwner('assistant',A)}/sample.utf8; printf other > /tool-results/${computerResultOwner('assistant',B)}/other.utf8; chmod 444 /tool-results/*/*.utf8`);
   const run = async (owner, turn, command, timeout_ms = 30_000) => {
     const r = await computers.execute(owner, { turn, operation_id: hex(24), request: { type: 'command', command, timeout_ms } });
     assert.equal(r.ok, true, JSON.stringify(r)); return r.result;
@@ -51,6 +54,12 @@ try {
 
   // 2. Two owners side by side: each sees only its own HOME, /tmp, processes and no network.
   assert.equal((await acquire(A, 'ta')).state, 'ready'); assert.equal((await acquire(B, 'tb')).state, 'ready');
+  const resultView=await run(A,'ta',"cat /results/sample.utf8; test ! -e /results/other.utf8; for action in 'printf changed > /results/sample.utf8' 'rm /results/sample.utf8' 'touch /results/new'; do if sh -c \"$action\"; then exit 90; fi; done; cat /results/sample.utf8");
+  assert.equal(resultView.exit_code,0,resultView.output);assert.equal((resultView.output.match(/中😀/g)||[]).length,2);
+  const hidden=await run(B,'tb','test ! -e /results/sample.utf8 && cat /results/other.utf8');assert.equal(hidden.exit_code,0);assert.match(hidden.output,/other/);
+  homes(`rm /tool-results/${computerResultOwner('assistant',A)}/sample.utf8`);
+  assert.equal((await run(A,'ta','test ! -e /results/sample.utf8')).exit_code,0);
+  passed('results are UTF-8 readable, owner-isolated, read-only and disappear when the control plane expires them');
   await run(A, 'ta', 'echo a-secret > ~/a-home.txt && echo a-tmp > /tmp/a-tmp.txt && (sleep 600 &) && ln -s /assistant-homes/' + B + '/home-1/b-home.txt ~/link-to-b && ln -s ../../../etc/passwd ~/dots');
   await run(B, 'tb', 'echo b-secret > ~/b-home.txt && echo b-tmp > /tmp/b-tmp.txt && (B_SECRET=b-env sleep 600 &)');
   const view = await run(A, 'ta', `id -u; echo $HOME; ls -A ~; ls -A /tmp; cat ~/link-to-b 2>&1; ls /home; grep -rl b-secret /home /tmp /workspace /opt /etc 2>/dev/null | head -5; cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c B_SECRET; ls /sys/class/net; grep ' /home/assistant ' /proc/self/mountinfo | wc -l; node -e "require('net').connect(80,'1.1.1.1').on('error',e=>console.log('net',e.code))"`);
@@ -157,7 +166,7 @@ try {
 } finally {
   await computers.shutdown().catch(() => {});
   for (const id of sh('docker', ['ps', '-aq', '--filter', 'label=department.bot.deployment=' + deployment]).split('\n').filter(Boolean)) sh('docker', ['rm', '-f', id]);
-  try { sh('docker', ['volume', 'rm', '-f', volume]); } catch {}
+  try { sh('docker', ['volume', 'rm', '-f', volume, resultVolume]); } catch {}
   try { sh('docker', ['image', 'rm', '-f', image]); } catch {}
   writeFileSync(join(work, 'evidence.json'), JSON.stringify(evidence, null, 2));
   rmSync(join(work, 'context'), { recursive: true, force: true });

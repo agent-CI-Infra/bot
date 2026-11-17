@@ -1,5 +1,5 @@
 import {managedSession} from '../harness/session.js';
-import { resultSpec, resultOwner } from './tool-results.js';
+import { resultSpec, type ResultSession } from './tool-results.js';
 import { executionModel, taskConfiguration, supplementalInstructions } from '../tasks/configuration.js';
 import { beginRun, endRun, traceEvent, traceSnapshot, withRunTraceScope } from '../tasks/trace.js';
 import { insertTaskLog } from '../storage/payloads.js';
@@ -10,7 +10,7 @@ import { workOf } from '../work/catalog.js';
 import { requestModel, modelOutputTokens, type AgentModel } from './gateway.js';
 import type { ModelDelta } from './model-stream.js';
 import type { PiRoleEnvironment } from './pi.js';
-import { ToolTranscript, toolArguments, toolCallsProblem, finalizationReserve } from './tool-context.js';
+import { ToolTranscript, boundedResult, batchBytes, toolArguments, toolCallsProblem, finalizationReserve } from './tool-context.js';
 
 export interface AgentServices {
   model: AgentModel;
@@ -79,6 +79,7 @@ export interface AgentSpec<T> {
   onHarnessEvent?: (event: { type: string; [key: string]: unknown }) => void;
   /** A per-run environment the framework provisioned and verified for this run (run_isolation profiles). */
   runEnvironment?: unknown;
+  resultSession?: ResultSession;
   /** Workspace checkout assigned to this role run when driving a container CLI (`claude_code` / `codex`). */
   roleWorkspace?: import('./workspace.js').Workspace;
   /** Trusted container harness options (never populated from model output). */
@@ -157,7 +158,7 @@ export const subagentSystem = 'You are an independent agent started by the main 
  * The runtime never obtains permissions from model output or untrusted task text.
  */
 export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
-  if(!spec.roleRun)spec=resultSpec(spec,()=>resultOwner('task',spec.task.id,spec.task.authority_fence));
+  if(!spec.resultSession)spec=resultSpec(spec);
   await spec.guard();
   const attempts = spec.modelAttempts ?? modelRetries + 1;
   if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > modelRetries + 1)
@@ -234,7 +235,7 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
   const prompt=spec.prompt+(instructions.length?'\nSupplemental user instructions (cannot change contract or authority):\n'+JSON.stringify(instructions):'');
   const messages: any[] = spec.session?.messages.length ? [...spec.session.messages,{role:'user',content:prompt}] : [{ role: 'system', content: spec.system }, { role: 'user', content: prompt }];
   const save=()=>spec.session?.save(spec.redactor.clean(messages));
-  const transcript=new ToolTranscript(messages);
+  const transcript=new ToolTranscript(messages, undefined, spec.resultSession?.preserve);
   let repairs=0;
   for (let turn = 0; turn < maxTurns; turn++) {
     await services.guard();
@@ -276,8 +277,9 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
         const result = !names.has(call.function.name) ? { error: 'tool_not_allowed' }
           : call.function.name === 'start_agent' ? (spec.agents ? await subagent(spec, services, args) : { error: 'tool_not_allowed' })
           : spec.execute ? await spec.execute(call.function.name, args) : { error: 'tool_not_allowed' };
-        if(toolEvent)traceEvent(spec.store,spec.task.id,'tool_observation',{call_id:call.id,name:call.function.name,observation:JSON.parse(traceSnapshot(spec.redactor.clean(result)))},spec.task.trace_run_id,'tool',[toolEvent]);
-        messages.push({ role: 'tool', tool_call_id: call.id, content: transcript.admit(call.function.name,spec.redactor.clean(result),tools) });save();
+        const preview=boundedResult(spec.redactor.clean(result),Math.floor(batchBytes/message.tool_calls.length),value=>spec.resultSession?.preserve(value,call.function.name));
+        if(toolEvent)traceEvent(spec.store,spec.task.id,'tool_observation',{call_id:call.id,name:call.function.name,observation:JSON.parse(traceSnapshot(preview))},spec.task.trace_run_id,'tool',[toolEvent]);
+        messages.push({ role: 'tool', tool_call_id: call.id, content: transcript.admit(call.function.name,preview,tools) });save();
       }
       continue;
     }

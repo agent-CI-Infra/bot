@@ -1,3 +1,4 @@
+import { computerResultOwner } from '../../runner/result-owner.mjs';
 import { commandResult } from '../agent/tool-results.js';
 import { randomId } from '../core/security.js';
 import { TaskError } from '../agent/common.js';
@@ -44,8 +45,12 @@ export function verifyRunEnvironment(facts: any, expected: { run_id: string; net
   const isAllowedToolsMount = (m: any) =>
     m?.type === 'volume' && m?.destination === '/opt/agent-tools' && m?.rw === false && !m?.subpath &&
     typeof m?.name === 'string' && allowedToolsVolumeName.test(m.name) && isTrustedToolsLabels(m?.labels);
+  const isResultMount = (m: any) => m?.type === 'volume' && m?.destination === '/results' && m?.rw === false &&
+    m?.subpath === computerResultOwner('run',expected.run_id) && typeof m?.name === 'string' &&
+    (m?.labels?.['com.docker.compose.volume'] === 'tool-results' || m?.labels?.['department.bot.kind'] === 'tool-results');
+  const resultsMounts = (c.mounts ?? []).filter((m: any) => m?.destination === '/results');
   const toolsMounts = (c.mounts ?? []).filter((m: any) => m?.destination === '/opt/agent-tools');
-  if (toolsMounts.length > 1 || c.mounts?.some((m: any) => m.type !== 'tmpfs' && !isAllowedToolsMount(m)) || c.binds?.length) violations.push('external_mount');
+  if (resultsMounts.length > 1 || toolsMounts.length > 1 || c.mounts?.some((m: any) => m.type !== 'tmpfs' && !isAllowedToolsMount(m) && !isResultMount(m)) || c.binds?.length) violations.push('external_mount');
   if (JSON.stringify([c.mounts, c.binds]).includes('docker.sock')) violations.push('docker_socket');
   if (!c.tmpfs?.['/workspace'] || !/size=\d+/.test(c.tmpfs['/workspace']) || !c.tmpfs?.['/tmp'] || !/size=\d+/.test(c.tmpfs['/tmp'])) violations.push('workspace_not_private_tmpfs');
   const ownNetwork = expected.network === 'egress' ? new RegExp(`-run-${expected.run_id.slice(0, 20)}-net$`) : null;

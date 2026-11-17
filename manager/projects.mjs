@@ -1,3 +1,5 @@
+import { computerResultOwner } from '../runner/result-owner.mjs';
+import { lstat } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -53,7 +55,7 @@ export function validateSpec(input) {
 const digest = value => createHash('sha256').update(value).digest('hex');
 const commandTypes = ['command', 'workspace_command'];
 export const parallelBounds = [1, 32];
-const runnerTypes = ['command','read','write','workspace_init','workspace_acceptance','workspace_source','workspace_restore','workspace_integrate','workspace_integration_check','workspace_checkout','workspace_advance','workspace_context','git_have','git_pack','git_import','git_export','workspace_write','workspace_snapshot','workspace_read','workspace_export','workspace_command','workspace_browser','workspace_finalize','workspace_blob','workspace_worktree_create','workspace_worktree_bind','workspace_worktree_inspect','workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_tool','workspace_agent_model_request','workspace_agent_model_reply','workspace_agent_live','workspace_agent_runtime','workspace_harness_config','workspace_harness_start','workspace_harness_stdin','workspace_harness_poll','workspace_harness_interrupt','reap','tasks_list','tasks_remove','worktrees_list','worktrees_remove'];
+const runnerTypes = ['command','read','write','workspace_init','workspace_acceptance','workspace_source','workspace_restore','workspace_integrate','workspace_integration_check','workspace_checkout','workspace_advance','workspace_context','git_have','git_pack','git_import','git_export','workspace_write','workspace_snapshot','workspace_read','workspace_export','workspace_command','workspace_browser','workspace_finalize','workspace_blob','workspace_worktree_create','workspace_worktree_bind','workspace_worktree_inspect','workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_tool','workspace_agent_model_request','workspace_agent_model_reply','workspace_agent_live','workspace_agent_runtime','workspace_agent_result','workspace_harness_config','workspace_harness_start','workspace_harness_stdin','workspace_harness_poll','workspace_harness_interrupt','reap','tasks_list','tasks_remove','worktrees_list','worktrees_remove'];
 const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','worktree_id','worktree_ids','on_changes','base_tree','base64','offset','author_email','final','mode','grace_ms','instance_id','wait_ms','known_tool_ids','known_token_ids','known_model_ids','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits','entries','status','headers','error','action','args','policy','url','name','selector','text','label'];
 const RUN_TOKEN_PATTERN = /\brrt_[A-Za-z0-9_-]{12}\.[A-Za-z0-9_-]{43}\b/g;
 function sanitizeTrajectoryValue(value) {
@@ -93,6 +95,7 @@ function validateBrowserCall(call) {
 export function validateCall(call) {
   if (!call || !runnerTypes.includes(call.type) || Object.keys(call).some(k => !runnerKeys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
   if (call.type === 'workspace_browser') validateBrowserCall(call);
+  if (call.type === 'workspace_agent_result' && (!/^[a-f0-9]{48}$/.test(call.request_id??'') || !Number.isSafeInteger(call.offset) || call.offset<0)) throw new ManagerError('invalid_runner_request',400);
   if (call.workspace_id !== undefined && !/^[a-f0-9]{48}$/.test(call.workspace_id) || call.idle !== undefined && call.idle !== true) throw new ManagerError('invalid_runner_request', 400);
   // The three-way integration the control plane starts when a branch fell behind main names the workspace it integrates
   // from (src/tasks/integration.ts:52); runner/workspace.mjs refuses a snapshot without a 40-hex sha, tree and base tree
@@ -122,11 +125,11 @@ export function validateCall(call) {
     : call.entries !== undefined) throw new ManagerError('invalid_runner_request', 400);
 }
 export class Projects {
-  constructor({ database, docker, deployment, image, egress = true, tools = '/opt/agent-tools' }) {
+  constructor({ database, docker, deployment, image, egress = true, tools = '/opt/agent-tools', results = null }) {
     // background: repository -> task workspaces whose kept processes may outlive a command.
     // gates: repository -> runner calls running now, whether a lifecycle action holds the computer, and who waits.
     // restarting: computers with a restart queued under the exclusive lock (restartAlone).
-    this.egress = egress; this.toolsMount = tools; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
+    this.resultsMount = results; this.egress = egress; this.toolsMount = tools; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
     // pruned: when each computer's journal was last pruned; pruning: computers with a prune running now.
     this.pruned = new Map(); this.pruning = new Set();
     // scanning: the work volume scan running now (one computer at a time); dockerUsageAt: when Docker's usage was read.
@@ -404,6 +407,17 @@ export class Projects {
     if (!volume || !trusted) throw new ManagerError('agent_tools_volume_invalid', 503);
     return name;
   }
+  async resultMount(owner) {
+    if (!this.resultsMount) return [];
+    if (!/^[a-z]+-[a-f0-9]{64}$/.test(owner)) throw new ManagerError('tool_result_owner_invalid', 400);
+    const name = await this.docker.volumeName(this.resultsMount);
+    if (!name) throw new ManagerError('tool_result_volume_missing', 503);
+    const volume = await this.docker.request('GET', '/volumes/' + encodeURIComponent(name));
+    if (!volume || !(volume.Labels?.['com.docker.compose.volume'] === 'tool-results' || volume.Labels?.['department.bot.kind'] === 'tool-results')) throw new ManagerError('tool_result_volume_invalid', 503);
+    const info = await lstat(this.resultsMount + '/' + owner).catch(() => null);
+    if (!info?.isDirectory()) throw new ManagerError('tool_result_directory_missing', 503);
+    return [{ Type: 'volume', Source: name, Target: '/results', ReadOnly: true, VolumeOptions: { NoCopy: true, Subpath: owner } }];
+  }
   async inspect(repo, generation, kind) {
     if (!this.db.prepare('SELECT 1 FROM resources WHERE repository_id=? AND generation=?').get(repo, generation)) throw new ManagerError('unregistered_resource');
     const name = this.names(repo, generation)[kind];
@@ -441,6 +455,7 @@ export class Projects {
     await this.inspect(repo, generation, 'volume');
     await this.notesVolume(repo);
     const toolsVolume = await this.agentToolsVolume();
+    const resultMounts = await this.resultMount(computerResultOwner('project',repo));
     let network = await this.inspect(repo, generation, 'network'), container = await this.inspect(repo, generation, 'container');
     // A container whose template or spec differs (approved image, init, resources, network policy) is replaced in place when
     // provisioned; the work volume and generation stay. This never happens in the middle of a command.
@@ -455,7 +470,7 @@ export class Projects {
     if (container && (container.Image !== approved.Id || host?.Init !== true || networkStale || envStale || host?.Memory !== memory || host?.MemorySwap !== memory
       || host?.NanoCpus !== Math.round(spec.cpus * 1e9) || host?.PidsLimit !== spec.pids || host?.Tmpfs?.['/tmp'] !== tmpfs
       || !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === this.notesName(repo) && m.Target === '/workspace/project-notes' && !m.ReadOnly)
-      || toolsMountStale)) {
+      || toolsMountStale || (host?.Mounts?.filter(m => m.Target === '/results').length ?? 0) !== resultMounts.length || resultMounts.some(expected => !host?.Mounts?.some(m => m.Target === '/results' && m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath)))) {
       if (container.State.Running) await this.docker.request('POST', `/containers/${names.container}/stop?t=2`);
       await this.docker.request('DELETE', `/containers/${names.container}?force=true`); container = null;
     }
@@ -468,6 +483,7 @@ export class Projects {
         { Type: 'volume', Source: names.volume, Target: '/workspace' },
         { Type: 'volume', Source: this.notesName(repo), Target: '/workspace/project-notes', ReadOnly: false },
         ...(toolsVolume ? [{ Type: 'volume', Source: toolsVolume, Target: '/opt/agent-tools', ReadOnly: true }] : []),
+        ...resultMounts,
       ];
       await this.docker.request('POST', `/containers/create?name=${names.container}`, { Image: resource.image, User: '10001:10001', WorkingDir: '/workspace',
         Cmd: ['node', '/opt/runner/idle.mjs'], Env: env, Labels: this.labels(repo, generation, 'container'),

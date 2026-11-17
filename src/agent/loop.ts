@@ -1,3 +1,4 @@
+import { readToolResult } from './tool-results.js';
 import { commandTimeoutLimit, commandTool, runCommand } from './command.js';
 import {GitHub} from '../github/client.js';
 import { taskTraceAccess } from '../memory/access.js';
@@ -70,6 +71,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const system = profile.system + '\n' + taskRecordInstructions + (choosing ? '\n' + workspaceInstructions : '');
   context={...context,project_memory:new ProjectMemory(store).context(task),structured_task:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?records.context(task.id):null};
   // Only development ends with its pull request; any other work that may open one carries on to its own finish.
+  if(!profile.tools.some(t=>t.function.name==='read_tool_result'))profile.tools.push(readToolResult);
   const config = { command_timeout: { default_seconds: null, max_seconds: commandTimeoutLimit() }, system, prompt: JSON.stringify(roleAssignmentContext(context, prompt)), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
     finish_on_pull_request: profile.completion === 'publication', finish_tools: profile.finishTools,
     ...(profile.subagentSystem ? { subagent_system: profile.subagentSystem } : {}) };

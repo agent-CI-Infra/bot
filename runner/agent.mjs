@@ -1,3 +1,4 @@
+import { constants } from 'node:fs';
 import {mkdir,readdir,readFile,writeFile,rename,open,stat,unlink,appendFile,rm} from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import {spawn} from 'node:child_process';
@@ -173,6 +174,16 @@ export async function agentOperation(input,root){
   const dir=root+'/agent';
   if(input.type!=='workspace_harness_poll')await mkdir(dir,{recursive:true,mode:0o700});
   const statLine=await readFile('/proc/1/stat','utf8'),boot=statLine.slice(statLine.lastIndexOf(')')+2).split(' ')[19];
+  if(input.type==='workspace_agent_result'){
+    if(!/^[a-f0-9]{48}$/.test(input.request_id??'')||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_tool_result_range');
+    const file=await open(dir+'/results/'+input.request_id+'.utf8',constants.O_RDONLY|constants.O_NOFOLLOW);
+    try{
+      const size=(await file.stat()).size,data=Buffer.alloc(Math.max(0,Math.min(65539,size-input.offset)));
+      const {bytesRead}=await file.read(data,0,data.length,input.offset);let end=Math.min(65536,bytesRead);
+      if(input.offset+end<size)while(end>0&&(data[end]&0xc0)===0x80)end--;
+      return {data:data.subarray(0,end).toString('utf8'),offset:input.offset+end,size};
+    }finally{await file.close();}
+  }
   if(input.type==='workspace_agent_live'){
     const live=await readFile(dir+'/live.json','utf8').then(JSON.parse).catch(()=>null);if(!live)return {running:false};
     if(!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_offset');
