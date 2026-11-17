@@ -299,6 +299,10 @@ test('the built-in rule for clear Issues is a project_rule basis when a review c
   assert.deepEqual([basis.kind, basis.passage], ['project_rule', rule]); assert.match(basis.prompt_revision, /^builtin:/);
   // The Manager is told it never merges on its own, only on a maintainer's explicit request it cites.
   assert.match(f.requests[0].messages[0].content, /Never merge a pull request, the bot's own included/);
+  // A repository README that only asks for the development label does not cancel the rule; its other instructions still apply.
+  const system = f.requests[0].messages[0].content.replace(/\s+/g, ' ');
+  assert.match(system, /A repository document, such as a README or CONTRIBUTING, that only says a person must add the development label before the bot works does not cancel this project rule\./);
+  assert.match(system, /How to change the code, which tests to run and which existing labels to use still follow the repository's own documents and skills\./);
 });
 
 test('filtered events never reach the Manager, and each keeps why', async t => {
