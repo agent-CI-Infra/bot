@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { channelFixture, boundGroup, privateChat, bindFixture, repositoryAssistant, scriptedModel, inGroup, envelope, post, finished, until } from './channel-fixture.mjs';
 import { testPassword } from './helpers.mjs';
+import { loadConsole } from './console-page.mjs';
 import { ledgerStorage } from '../dist/channels/ledger.js';
 
 test('group names migrate, fill existing views and refresh without changing chat or assistant revisions', async t => {
@@ -254,3 +255,49 @@ test('platform managers read another owner’s complete private history across a
   assert.equal((await f.admin(`/api/channels/chats/${chat.id}/timeline`)).value.conversation.turns.length, 2);
   assert.ok((await f.admin('/api/channels/conversations')).value.conversations.some(c => c.id === chat.id));
 });
+
+// #870: a missing Feishu name used to be looked up again on every draw, because the only state the console kept was the
+// render it started in. The page is driven here as the browser runs it (`static/channels.js` in the console sandbox), so
+// the number that counts is the provider-side one: each POST the page starts reaches the fixture's Feishu transport.
+const drawSettled = () => new Promise(resolve => setTimeout(resolve, 40));
+const consoleAgainst = f => loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/channels.js'],
+  async (method, path, body) => { const response = await f.admin(path, method, body); return [response.status, response.value]; });
+// The reader of a console page: the fixture's own session, as the console script's `api()` asks it.
+const signInSandbox = page => page.run("me = { role: 'super_admin', csrf_token: 'fixture-csrf' }; renderVersion = 0;");
+
+test('a refused name lookup is tried once per chat, not on every redraw, and the button still retries it (#870)', async t => {
+  const f = await channelFixture(t), chat = await boundGroup(f);
+  assert.equal(chat.display_name, '', 'the fixture chat starts without a name');
+  f.wire.state.chatCode = 99991672; // the app is missing the contact scope, so the provider refuses every lookup
+  const page = consoleAgainst(f), profile = JSON.stringify({ ...chat, can_refresh_name: true });
+  signInSandbox(page);
+  page.run(`var chat = ${profile};`);
+  const draw = async () => { page.run('renderVersion++; var box = channelProfileDetails(chat)'); await drawSettled(); };
+  await draw();
+  assert.equal(f.wire.state.chatRequests.length, 1, 'the first draw reads the missing name once');
+  await draw(); await draw();
+  assert.equal(f.wire.state.chatRequests.length, 1, 'redrawing the same chat does not ask the provider again');
+  const refresh = page.run('box.children.find(node => node.tagName === "BUTTON")');
+  assert.ok(refresh, 'the details still offer the reader a retry');
+  refresh.listeners.click[0]();
+  await drawSettled();
+  assert.equal(f.wire.state.chatRequests.length, 2, 'the reader can still retry by hand');
+  await draw();
+  assert.equal(f.wire.state.chatRequests.length, 2, 'and that failed retry is remembered too');
+});
+
+test('the group bindings section does not name every group again on each redraw (#870)', async t => {
+  const f = await channelFixture(t), chat = await boundGroup(f);
+  assert.equal(chat.display_name, '', 'the fixture chat starts without a name');
+  f.wire.state.chatCode = 99991672;
+  const page = consoleAgainst(f), data = (await f.admin('/api/channels/service-bindings')).value;
+  signInSandbox(page);
+  page.run(`var groupData = ${JSON.stringify(data)};`);
+  await page.run('buildGroupBindingsSection(groupData)');
+  await drawSettled();
+  assert.equal(f.wire.state.chatRequests.length, 1, 'the settings section reads the missing name once');
+  page.run('renderVersion++; buildGroupBindingsSection(groupData, { initialOpen: true })');
+  await drawSettled();
+  assert.equal(f.wire.state.chatRequests.length, 1, 'and a redraw of the section does not read it again');
+});
+

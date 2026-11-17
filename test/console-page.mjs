@@ -19,6 +19,8 @@ class FakeElement {
   }
   get childElementCount() { return this.children.length; }
   get lastElementChild() { return this.children.at(-1) || null; }
+  // A select lists its choices through `options`, and `add` appends to that same list.
+  get options() { return this.children.filter(child => child.tagName === 'OPTION'); }
   setAttribute(name, value) { if (name.startsWith('data-')) this.dataset[camel(name)] = String(value); else this.attributes[name] = String(value); }
   getAttribute(name) { return (name.startsWith('data-') ? this.dataset[camel(name)] : this.attributes[name]) ?? null; }
   hasAttribute(name) { return this.getAttribute(name) !== null; }
@@ -39,6 +41,8 @@ class FakeElement {
     for (const node of nodes) node.remove();
     parent.children.splice(parent.children.indexOf(this), 1, ...nodes); nodes.forEach(node => { node.parentElement = parent; }); this.parentElement = null;
   }
+  // A page can click a control itself, not only a reader: #870's console starts a name lookup on its own.
+  click() { if (this.disabled) return; for (const listener of this.listeners.click || []) listener({ type: 'click', target: this }); }
   // Dialogs open and close as in a browser, except that `close` is dispatched at once.
   showModal() { this.open = true; }
   close() { if (!this.open) return; this.open = false; for (const listener of this.listeners.close || []) listener({ type: 'close' }); }
@@ -47,6 +51,8 @@ class FakeElement {
   remove() { if (this.parentElement) { this.parentElement.children.splice(this.parentElement.children.indexOf(this), 1); this.parentElement = null; } }
   querySelectorAll(selector) { return select(this, selector); }
   querySelector(selector) { return select(this, selector)[0] || null; }
+  // A settings panel reads the label a control sits in (`control.closest('label')`), as the group bindings section does.
+  closest(selector) { const parts = selector.split(',').map(value => value.trim()); for (let node = this; node; node = node.parentElement) if (parts.some(part => simple(node, part))) return node; return null; }
 }
 const camel = name => name.slice(5).replace(/-(\w)/g, (_, c) => c.toUpperCase());
 function simple(element, part) {
