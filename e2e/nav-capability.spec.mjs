@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 
@@ -22,12 +23,11 @@ test('the shared shell groups projects by organization and keeps the selected pr
     h.store.run('UPDATE installed_repositories SET permissions=? WHERE repository_id=?', JSON.stringify({ pull: true }), '101');
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password, '#/projects/101/overview');
-    const picker = page.locator('#console-project'), location = page.locator('#console-location');
-    // The picker is one group per organization instead of one flat list of repositories.
-    await expect(picker.locator('optgroup')).toHaveCount(2);
-    await expect(picker.locator('optgroup[label="alpha"] option')).toHaveCount(1);
-    await expect(picker.locator('optgroup[label="alpha"] option')).toHaveText(['alpha/project-101']);
-    await expect(picker.locator('optgroup[label="beta"] option')).toHaveText(['beta/project-102']);
+    const location = page.locator('#console-location');
+    // The searchable list keeps the organization grouping without reading permission snapshots per option.
+    await expect(page.locator('#console-scope-projects [role=group]')).toHaveCount(2);
+    await expect(page.locator('#console-scope-org-0 [role=option]')).toHaveText(['project-101']);
+    await expect(page.locator('#console-scope-org-1 [role=option]')).toHaveText(['project-102']);
     // The current scope bar names the organization and the project, and a project whose permissions are short of a feature says so there.
     await expect(page.locator('#console-context')).toContainText('alpha · project-101');
     const permission = page.locator('#console-location [data-permission]');
@@ -41,7 +41,7 @@ test('the shared shell groups projects by organization and keeps the selected pr
     // badge names a project and opens its dialog, so keeping it would describe something other than the scope text.
     // The snapshot is delayed here, because an assertion that retries cannot tell a cleared badge from a late answer.
     await page.route('**/api/installations?repository_id=102', async route => { await new Promise(resolve => setTimeout(resolve, 2500)); await route.continue(); });
-    await picker.selectOption('102');
+    await switchConsoleProject(page, '102');
     await expect(page.locator('#console-context')).toContainText('beta · project-102');
     expect(await page.locator('#console-location [data-permission]').count()).toBe(0);
     await page.unroute('**/api/installations?repository_id=102');
@@ -52,7 +52,7 @@ test('the shared shell groups projects by organization and keeps the selected pr
     // The sync answers here, so the assertion tests the order of the clear rather than the harness's missing installation
     // client: before the answer the cache still holds the old row, after it the bar reads the project again.
     await page.route('**/api/installations/sync', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ results: [] }) }));
-    await picker.selectOption('');
+    await switchConsoleProject(page, '');
     await page.goto(h.admin + '/#/settings/projects');
     const sync = page.getByRole('button', { name: '同步安装列表', exact: true });
     await expect(sync).toBeVisible(); await sync.click(); await expect(sync).toBeEnabled();

@@ -3,6 +3,7 @@ import { mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { managerFixture } from '../test/project-manager-fixture.mjs';
+import { switchConsoleProject } from './console-scope-picker.mjs';
 
 async function fixture(page) {
   const cleanup=[],f=await managerFixture({after:fn=>cleanup.push(fn)}),h=await harness(undefined,f.manager),{admin,password}=await setup(h),a=await account(admin);
@@ -39,13 +40,20 @@ test('real directories, stable file ids, safe previews and mobile version restor
 test('conflict comparisons preserve drafts and navigation asks before leaving unsaved content',async({page})=>{
   test.setTimeout(60000);const f=await fixture(page);
   try{
+    const a=(await f.admin('/api/accounts')).value.accounts[0];await repository(f.admin,a.id,'202');
     const base='/api/repositories/101/knowledge-files',file=(await f.admin(base,'POST',{name:'draft.txt',content:'version one'})).value.file,endpoint=base+'/'+encodeURIComponent(file.id);
     await f.login();await exact(page,'draft.txt').click();await exact(page,'编辑文件').click();await page.getByLabel('内容',{exact:true}).fill('my unsaved draft');
     await exact(page,'← 返回目录').click();await expect(page.getByRole('dialog')).toBeVisible();await page.getByRole('dialog').getByRole('button',{name:'取消',exact:true}).click();await expect(page.getByLabel('内容',{exact:true})).toHaveValue('my unsaved draft');
     await f.admin(endpoint,'PUT',{content:'another writer',expected_revision:1});await exact(page,'保存文件').click();await expect(page.getByLabel('内容',{exact:true})).toHaveValue('my unsaved draft');await expect(page.locator('.knowledge-conflict')).toContainText('another writer');await expect(page.locator('.knowledge-status')).toContainText('草稿已保留');
     await exact(page,'基于 v2 保存草稿').click();await page.getByRole('dialog').getByRole('button',{name:'保存草稿',exact:true}).click();await expect(page.locator('.knowledge-content')).toContainText('my unsaved draft');expect((await f.admin(endpoint)).value.file.revision).toBe(3);
     await exact(page,'编辑文件').click();await page.getByLabel('内容',{exact:true}).fill('kept after route return');await page.getByTestId('project-hub-link').click();await page.getByRole('dialog').getByRole('button',{name:'离开文件',exact:true}).click();await expect(page).toHaveURL(/\/menu$/);
-    await page.goto(f.h.admin+'/#/projects/101/knowledge');await expect(page.getByLabel('内容',{exact:true})).toHaveValue('kept after route return');expect(f.errors).toEqual([]);
+    await page.goto(f.h.admin+'/#/projects/101/knowledge');await expect(page.getByLabel('内容',{exact:true})).toHaveValue('kept after route return');
+    // Scope switching uses the same guard: cancellation keeps both the editor and the shared default in this project.
+    await switchConsoleProject(page,'202');await page.getByRole('dialog').getByRole('button',{name:'取消',exact:true}).click();
+    await expect(page).toHaveURL(/\/projects\/101\/knowledge$/);await expect(page.locator('#console-project')).toHaveAttribute('data-project-id','101');
+    await expect(page.getByLabel('内容',{exact:true})).toHaveValue('kept after route return');
+    await switchConsoleProject(page,'202');await page.getByRole('dialog').getByRole('button',{name:'离开文件',exact:true}).click();
+    await expect(page).toHaveURL(/\/projects\/202\/knowledge$/);await expect(page.locator('#console-project')).toHaveAttribute('data-project-id','202');expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });
 

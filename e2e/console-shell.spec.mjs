@@ -113,7 +113,7 @@ test('permissions, in-flight navigation, keyboard and history keep their boundar
     await expect(page.locator('#tabs').getByRole('button',{name:'用量与成本',exact:true})).toBeHidden();
     await expect(page.locator('#tabs').getByRole('button',{name:'仓库事件',exact:true})).toHaveCount(0);
     await page.setViewportSize({width:390,height:844});
-    expect(await page.locator('#console-project option').allTextContents()).not.toContain('202');
+    await expect(page.locator('#console-scope-projects [data-project-id="202"]')).toHaveCount(0);
     await page.goto(h.admin+'/#/settings/users');await expect(page.locator('#settings-panel')).toBeHidden();
     await page.goto(h.admin+'/#/inbox/202');await expect(page.locator('.console-state')).toContainText('403');
     let release;const gate=new Promise(resolve=>{release=resolve;});

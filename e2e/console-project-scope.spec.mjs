@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 
@@ -72,7 +73,7 @@ test('选择项目后看板、用量和管理助手都以它为默认范围，�
     const boards = boardScopes(page), costs = costScopes(page);
 
     // Choosing a project inside a project route keeps the reader in that project.
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
 
     // The board takes the shell project as its effective scope, and says so next to its controls.
@@ -98,7 +99,7 @@ test('选择项目后看板、用量和管理助手都以它为默认范围，�
     // 「全部项目」 is the explicit all-project scope: it clears the default without navigating away.
     board = boardScopeRequest(page, '');
     await page.goto(h.admin + '/#/board');
-    await page.locator('#console-project').selectOption('');
+    await switchConsoleProject(page, '');
     await expect(page).toHaveURL(/#\/board$/);
     await board;
     expect(boards.at(-1)).toBe('');
@@ -121,7 +122,7 @@ test('页面自己的临时过滤保持可见，与顶栏默认区分且不改�
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password);
     const boards = boardScopes(page), costs = costScopes(page);
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
 
     await page.goto(h.admin + '/#/board');
@@ -154,7 +155,7 @@ test('页面自己的临时过滤保持可见，与顶栏默认区分且不改�
     await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
     expect(boards.at(-1)).toBe('202');
     await expect(page.locator('#board-scope')).toContainText('本页覆盖');
-    await expect(page.locator('#console-project')).toHaveValue('101');
+    await expect(page.locator('#console-project')).toHaveAttribute('data-project-id', '101');
   } finally { await h.stop(); }
 });
 
@@ -163,11 +164,11 @@ test('桌面侧栏不额外提供新建任务一级入口，项目与导航范�
   try {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password);
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
     await expect(page.locator('#console-new-task')).toHaveCount(0);
     await expect(page.locator('#console-sidebar').getByRole('link', { name: '＋ 新建任务', exact: true })).toHaveCount(0);
-    await expect(page.locator('#console-project')).toHaveValue('101');
+    await expect(page.locator('#console-project')).toHaveAttribute('data-project-id', '101');
     await page.screenshot({ path: '.tmp/console-project-scope/no-primary-task-1440.png', fullPage: true });
     await page.setViewportSize({ width: 1440, height: 360 });
     await expect(page.locator('#console-project')).toBeVisible();
@@ -186,7 +187,7 @@ test('统计页选「所有有权访问的项目」是本页覆盖，不再声�
   try {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password);
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
     const first = costScopeRequest(page, '101');
     await page.goto(h.admin + '/#/costs');
@@ -201,7 +202,7 @@ test('统计页选「所有有权访问的项目」是本页覆盖，不再声�
     await expect(page.locator('#costs-scope')).toContainText('所有有权访问的项目');
     await expect(page.locator('#costs-scope')).toContainText('本页覆盖');
     await expect(page.locator('#costs-scope')).toContainText('顶栏默认：fixture/project-101');
-    await expect(page.locator('#console-project')).toHaveValue('101');
+    await expect(page.locator('#console-project')).toHaveAttribute('data-project-id', '101');
   } finally { await h.stop(); }
 });
 
@@ -226,7 +227,7 @@ test('浏览器里留下的管理范围不再决定打开范围，换用户清�
   try {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password);
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
     // A stale per-user preference must not override the shell choice.
     await page.evaluate(() => localStorage.setItem('management-scope:administrator', 'project:202'));
@@ -235,10 +236,10 @@ test('浏览器里留下的管理范围不再决定打开范围，换用户清�
     // Signing out clears the shared default for the next user.
     await page.getByRole('button', { name: '退出登录', exact: true }).click();
     await expect(page.locator('#console-sidebar')).toBeHidden();
-    await expect(page.locator('#console-project')).toHaveValue('');
+    await expect(page.locator('#console-project')).toHaveAttribute('data-project-id', '');
     await login(page, h, password, '#/board');
     await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
-    await expect(page.locator('#console-project')).toHaveValue('');
+    await expect(page.locator('#console-project')).toHaveAttribute('data-project-id', '');
     await expect(page.locator('#board-panel')).toContainText('全部仓库');
   } finally { await h.stop(); }
 });
@@ -249,7 +250,7 @@ test('保存看板视图只存页面自己的筛选，顶栏默认不进视图',
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password);
     const boards = boardScopes(page);
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
     const board101 = boardScopeRequest(page, '101');
     await page.goto(h.admin + '/#/board');
@@ -270,7 +271,7 @@ test('保存看板视图只存页面自己的筛选，顶栏默认不进视图',
     expect(JSON.stringify(view.filters)).toContain('blocked');
     // Clearing the shell default returns the same view to all projects.
     const cleared = boardScopeRequest(page, '');
-    await page.locator('#console-project').selectOption('');
+    await switchConsoleProject(page, '');
     await expect(page).toHaveURL(/#\/board$/);
     await cleared;
     await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
@@ -291,7 +292,7 @@ test('跟随顶栏默认时，管理助手的作用域与会话一起真的换�
     // With no page override the assistant follows the shell default: the control, the sentence and the conversation move
     // together, so the answer can never belong to the project the header no longer names.
     let reopened = conversationScopeRequest(page, 'project:101');
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     await expect(page).toHaveURL(/#\/management$/);
     await reopened;
     await expect(scope).toHaveValue('project:101');
@@ -299,7 +300,7 @@ test('跟随顶栏默认时，管理助手的作用域与会话一起真的换�
     await expect(page.locator('#management-scope-note')).toContainText('顶栏默认');
     // Still following, not an override: the next picker change is followed again.
     reopened = conversationScopeRequest(page, 'project:202');
-    await page.locator('#console-project').selectOption('202');
+    await switchConsoleProject(page, '202');
     await reopened;
     await expect(scope).toHaveValue('project:202');
     await expect(page.locator('#management-scope-note')).toContainText('project-202');
@@ -317,7 +318,7 @@ test('页内显式管理范围不被顶栏切换冲掉，跟随默认的那种�
     // A scope chosen in the page is explicit: the shell picker must not replace it.
     await scope.selectOption('project:202');
     await expect(page.locator('#management-scope-note')).toContainText('本页覆盖');
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     await expect(page).toHaveURL(/#\/management$/);
     await expect(scope).toHaveValue('project:202');
     await expect(page.locator('#management-scope-note')).toContainText('本页覆盖');
@@ -326,7 +327,7 @@ test('页内显式管理范围不被顶栏切换冲掉，跟随默认的那种�
     await page.goto(h.admin + '/#/projects/101/overview');
     await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click();
     await expect(scope).toHaveValue('project:101');
-    await expect(page.locator('#console-project')).toHaveValue('101');
+    await expect(page.locator('#console-project')).toHaveAttribute('data-project-id', '101');
     await expect(page.locator('#management-scope-note')).toContainText('顶栏默认');
     await expect(page.locator('#management-scope-note')).not.toContainText('本页覆盖');
   } finally { await h.stop(); }
@@ -347,15 +348,9 @@ test('窄屏 390：页内覆盖时顶栏切换在同一帧刷新范围说明，�
     await expect(page.locator('#management-scope-note')).toContainText('顶栏未选项目');
     await scope.selectOption('project:202');
     await expect(page.locator('#management-scope-note')).toContainText('本页覆盖；顶栏未选项目');
-    // The sidebar picker is not reachable at this width, so the shell's own change event stands in for the picker change:
-    // the value is written and exactly the event the picker dispatches is dispatched on it.
-    const note = await page.evaluate(() => {
-      const picker = document.getElementById('console-project');
-      picker.value = '101';
-      picker.dispatchEvent(new Event('change', { bubbles: true }));
-      // Same frame: read back before any awaited work can repaint the sentence.
-      return document.getElementById('management-scope-note')?.textContent || '';
-    });
+    // The mobile range bar exercises the same real control as desktop.
+    await switchConsoleProject(page, '101');
+    const note = await page.locator('#management-scope-note').textContent();
     expect(note).toContain('本页覆盖');
     expect(note).toContain('顶栏默认：fixture/project-101');
     expect(note).not.toContain('顶栏未选项目');
@@ -385,7 +380,7 @@ test('桌面 1440：页内覆盖时顶栏切换在同一帧刷新范围说明，
       if (url.pathname !== '/api/management/conversations' || request.method() !== 'POST') return;
       try { opened.push(JSON.parse(request.postData() || '{}').scope); } catch { /* a body without a scope is not one */ }
     });
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     await expect(page).toHaveURL(/#\/management$/);
     // Read straight after the change, before any awaited work: the sentence already names 101 as the shell default.
     const shown = await page.evaluate(() => document.getElementById('management-scope-note')?.textContent || '');
@@ -411,7 +406,7 @@ test('桌面 1440：页内覆盖时顶栏切换在同一帧刷新范围说明，
     }, name);
     const conversationOf202 = await sessionOf('project:202');
     expect(conversationOf202).toBeTruthy();
-    await page.locator('#console-project').selectOption('202');
+    await switchConsoleProject(page, '202');
     await expect(scope).toHaveValue('project:202');
     await expect(note).toContainText('fixture/project-202');
     await expect(note).toContainText('（顶栏默认）');
@@ -437,7 +432,7 @@ test('桌面 1440：无页内覆盖时范围说明仍是顶栏默认，会话随
     await expect(note).toContainText('顶栏未选项目');
     // The picker names a project: the sentence names it as the default it is, and the conversation is opened for it.
     const openedOn101 = conversationScopeRequest(page, 'project:101');
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     // Same frame: the sentence already names 101 as the default, read back before the conversation request is awaited.
     const shownOn101 = await page.evaluate(() => document.getElementById('management-scope-note')?.textContent || '');
     expect(shownOn101).toContain('fixture/project-101');
@@ -449,7 +444,7 @@ test('桌面 1440：无页内覆盖时范围说明仍是顶栏默认，会话随
     await expect(note).not.toContainText('本页覆盖');
     // A second picker change moves everything again: still one wording, and 202 gets its own conversation.
     const openedOn202 = conversationScopeRequest(page, 'project:202');
-    await page.locator('#console-project').selectOption('202');
+    await switchConsoleProject(page, '202');
     const shownOn202 = await page.evaluate(() => document.getElementById('management-scope-note')?.textContent || '');
     expect(shownOn202).toContain('fixture/project-202');
     expect(shownOn202).toContain('（顶栏默认）');
@@ -478,14 +473,14 @@ test('桌面 1440：页内覆盖被顶栏选成默认后，下一次顶栏切换
     await scope.selectOption('project:202');
     await expect(note).toContainText('本页覆盖；顶栏未选项目');
     // The picker names the project the page already shows: one scope, one wording, and the control keeps 202.
-    await page.locator('#console-project').selectOption('202');
+    await switchConsoleProject(page, '202');
     await expect(scope).toHaveValue('project:202');
     await expect(note).toContainText('fixture/project-202');
     await expect(note).toContainText('（顶栏默认）');
     await expect(note).not.toContainText('本页覆盖');
     // With the override gone, the next picker change really moves the scope and opens 101's conversation.
     const openedOn101 = conversationScopeRequest(page, 'project:101');
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     await openedOn101;
     await expect(scope).toHaveValue('project:101');
     await expect(note).toContainText('fixture/project-101');
@@ -525,14 +520,14 @@ test('管理助手页切换顶栏项目时，带项目的收件箱导航链接�
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password);
     await page.goto(h.admin + '/#/management');
-    await expect(page.locator('#console-project')).toHaveValue('');
+    await expect(page.locator('#console-project')).toHaveAttribute('data-project-id', '');
     await expect(page.locator('#console-inbox-link')).toHaveAttribute('href', '#/inbox');
     const opened = conversationScopeRequest(page, 'project:101');
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     await opened;
     await expect(page.locator('#console-inbox-link')).toHaveAttribute('href', '#/inbox/101');
     // Clearing the choice must not leave the link naming the project it just left.
-    await page.locator('#console-project').selectOption('');
+    await switchConsoleProject(page, '');
     await expect(page.locator('#console-inbox-link')).toHaveAttribute('href', '#/inbox');
   } finally { await h.stop(); }
 });
@@ -559,7 +554,7 @@ test('管理面板还在连接时切换顶栏项目，作用域与对话也跟�
     await page.goto(h.admin + '/#/management');
     await firstRead;
     // The panel is drawn and waiting for its first answer, but it has no client yet: this is the change that got lost.
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     const created = conversationScopeRequest(page, 'project:101');
     release();
     await expect(page.locator('select[aria-label="当前管理作用域"]')).toHaveValue('project:101');
@@ -601,7 +596,7 @@ test('管理面板还在连接时选定的页内范围，不被晚到的 client 
     await scope.selectOption('project:202');
     await expect(page.locator('#management-scope-note')).toContainText('本页覆盖；顶栏未选项目');
     // The picker moves inside the same window, so this change lands with no client to forward it to.
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     await expect(page.locator('#console-inbox-link')).toHaveAttribute('href', '#/inbox/101');
     release();
     // The connection that finishes afterwards names the picker's default, in the frame it writes the note, and stops there.
@@ -619,10 +614,10 @@ test('#/inbox 的「全部项目」同时清掉共享默认，看板与用量读
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password);
     const boards = boardScopes(page);
-    await page.locator('#console-project').selectOption('101');
+    await switchConsoleProject(page, '101');
     await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
     await page.goto(h.admin + '/#/inbox');
-    await expect(page.locator('#console-project')).toHaveValue('');
+    await expect(page.locator('#console-project')).toHaveAttribute('data-project-id', '');
     // The board no longer reads the project the inbox left behind.
     const boardAll = boardScopeRequest(page, '');
     await page.goto(h.admin + '/#/board');
@@ -638,10 +633,10 @@ test('#/inbox 的「全部项目」同时清掉共享默认，看板与用量读
     await expect(page.locator('#costs-scope')).toContainText('顶栏未选项目');
     // The usage page re-reads in place for a new default; the inbox then clears it again.
     const cost202 = costScopeRequest(page, '202');
-    await page.locator('#console-project').selectOption('202');
+    await switchConsoleProject(page, '202');
     await cost202;
     await expect(page).toHaveURL(/#\/costs$/);
     await page.goto(h.admin + '/#/inbox/all');
-    await expect(page.locator('#console-project')).toHaveValue('');
+    await expect(page.locator('#console-project')).toHaveAttribute('data-project-id', '');
   } finally { await h.stop(); }
 });
