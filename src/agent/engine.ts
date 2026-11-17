@@ -36,10 +36,10 @@ import { repositoryExecutionDenied } from '../installations/archive.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { checkPullRequestLabels } from '../github/pull-request-labels.js';
 import { testEvidence, reviewLanguage, promptedBy } from '../github/text.js';
-import { developmentReady } from '../review/queue.js';
+import { assigneesOf, developmentReady } from '../review/queue.js';
 import { taskBasis } from '../dispatch/basis.js';
 import { actionableFinding, developmentGoal, discussionRequests, developmentApproved,
-  ownedPullRequest, developmentLabelForTask, developmentStopped, queueDevelopment, revisionRequests, type GoAhead, type RevisionRequest } from '../review/development.js';
+  ownedPullRequest, developmentLabelForTask, developmentStopped, queueDevelopment, revisionRequests, type DevelopmentOffer, type GoAhead, type RevisionRequest } from '../review/development.js';
 import { actionsConfigurationError, actionsDevelopmentAllowed, actionsIssueAssigned, actionsSourceIssue } from '../actions/safety.js';
 import { taskGithubWrite } from '../tasks/github-write.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
@@ -830,12 +830,16 @@ export class TaskEngine {
           }
           log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0,...(o.resolved_threads?{resolved_threads:o.resolved_threads.length}:{})})});
           result={...result,outputs};
-          // A published Issue review offers development to the Manager only with a person's go-ahead already on the Issue;
-          // otherwise the labeled webhook offers it later. A failed check counts as no go-ahead.
+          // A published Issue review offers development to the Manager with a person's go-ahead already on the Issue, or,
+          // without one, when it concludes ready_for_development (#1026): the Manager then needs a basis of its own, such as
+          // its prompt's rule for clear Issues. Otherwise the labeled webhook offers it later. A failed check counts as no
+          // go-ahead; the assignees of an offer without one are those of the object publisher.review just validated.
           const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
-          let approved:GoAhead|null=null;
+          let approved:DevelopmentOffer|null=null;
           if(task.kind==='review.issue'&&covers(projectCeiling(this.store,task.repository_id,policy),'develop')){
             approved=await this.developmentApproved(github,task).catch(()=>null);
+            if(!approved&&result.conclusion==='ready_for_development')approved=await (seen?Promise.resolve(seen):github.object(task.kind,task.object_number))
+              .then((issue:any)=>({label:null,labeled_by:null,assignees:assigneesOf(issue)}),()=>null);
           }
           // Who wrote the comments a review of the bot's own pull request took on is read from GitHub before the transaction.
           const requests=await this.revisionRequests(github,task,result,input).catch(()=>[]);
@@ -965,7 +969,7 @@ export class TaskEngine {
   label(task:Row){return developmentLabelForTask(this.store,task);}
   async developmentApproved(github:GitHub,task:Row):Promise<GoAhead|null>{return developmentApproved(this,github,task);}
   async revisionRequests(github:GitHub,task:Row,result:any,input:any={}):Promise<RevisionRequest[]>{return revisionRequests(github,task,result,input);}
-  queueDevelopment(github:GitHub,task:Row,input:any,result:any,approved:GoAhead|null=null,requests:RevisionRequest[]=[]){return queueDevelopment(this,github,task,input,result,approved,requests);}
+  queueDevelopment(github:GitHub,task:Row,input:any,result:any,approved:DevelopmentOffer|null=null,requests:RevisionRequest[]=[]){return queueDevelopment(this,github,task,input,result,approved,requests);}
   async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
     const coordination=coordinationApi(this.store,user,method,url,input);if(coordination!==undefined)return coordination;
     const merge=await mergeApi(this.store,user,method,url,input,this.githubUrl);if(merge!==undefined)return merge;

@@ -164,6 +164,28 @@ test('a comment continues the published Issue review as its next round, with tri
   assert.equal(development.source_task_id,task.id);assert.equal(development.status,'queued');assert.equal(development.unique_key,'101:development.issue:1:update:'+task.id);
 });
 
+test('an Issue review that concludes ready_for_development offers development without a label, only at the develop ceiling (#1026)',async t=>{
+  for(const [ceiling,conclusion,offered] of [['develop','ready_for_development',true],['develop','needs_information',false],['comment','ready_for_development',false]]){
+    const issue={id:1,number:1,state:'open',title:'Fix the bug.',body:'Please fix.',labels:[],assignees:[{login:'someone'}]};
+    const h=await emptyRepositoryFixture(t,{
+      github:(path,send)=>{if(path.endsWith('/issues/1')){send(issue);return true;}if(path.endsWith('/issues/1/events')){send([]);return true;}},
+      execute:request=>{if(request.type==='workspace_agent_poll')return {ok:true,result:{state:'completed',result:{summary:'parse() drops the last line.',recommendation:'Keep the last line.',conclusion,findings:[]}}};}});
+    h.setBranch('ready');
+    if(ceiling==='develop')await h.admin('/api/repositories/101/policy','PATCH',{development_enabled:true});
+    assert.equal((await h.run()).status,'succeeded',`${ceiling} ${conclusion}`);
+    const event=h.store.get("SELECT * FROM dispatch_events WHERE type='review.published'");
+    assert.equal(!!event,offered,`${ceiling} ${conclusion}`);
+    if(!offered)continue;
+    // No label is on the Issue, so the Manager needs a basis of its own; the rule decider of the tests never develops.
+    const facts=JSON.parse(event.facts),[option]=JSON.parse(event.options);
+    assert.deepEqual([facts.development.label,facts.development.labeled_by,facts.development.assignees],[null,null,['someone']]);
+    assert.equal(facts.review.conclusion,'ready_for_development');
+    assert.deepEqual([option.id,option.work,option.default],['development','development.issue',false]);
+    assert.match(event.summary,/结论为可开发/);
+    assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n,0);
+  }
+});
+
 test('an Issue development the Manager started on a label works to its brief and is not held back by the review asking for a person',async t=>{
   const issue={id:1,number:1,state:'open',title:'Fix the bug.',body:'Please fix.',labels:[{name:'bot-develop'}],assignees:[{login:'someone'}]};
   const config=[];

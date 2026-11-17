@@ -14,6 +14,8 @@ import { roleConfiguration, saveConfiguration } from '../dist/roles/definition.j
 import { managerDecision } from '../dist/dispatch/manager.js';
 import { recordEvent, checkDecision, dispatchContext, applyDecision } from '../dist/dispatch/store.js';
 import { TaskRecords } from '../dist/tasks/service.js';
+import { queueDevelopment } from '../dist/review/development.js';
+import { readFileSync } from 'node:fs';
 
 // These tests ask the Manager for real: events wait for its model call instead of the rule decider other tests use.
 configureDispatch(null);
@@ -275,6 +277,28 @@ test('a rule of the Manager prompt is a basis only while the prompt says it, and
   assert.equal(basis.kind, 'project_rule'); assert.equal(basis.passage, rule); assert.match(basis.prompt_revision, /^revision:/);
   // The task details show the basis.
   assert.equal((await f.admin('/api/tasks/' + development.id)).value.basis.kind, 'project_rule');
+});
+
+test('the built-in rule for clear Issues is a project_rule basis when a review concludes ready_for_development (#1026)', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { development_enabled: true });
+  // The rule's sentence as the built-in Manager prompt states it; no prompt was saved for this project.
+  const rule = /The bot may develop an Issue on its own when [^.]+\./.exec(readFileSync(new URL('../docs/prompts/manager-dispatch.md', import.meta.url), 'utf8').replace(/\s+/g, ' '))[0];
+  const now = new Date().toISOString(), result = { summary: 'parse() drops the last CRLF line.', recommendation: 'Keep the last line, with a CRLF test.', conclusion: 'ready_for_development', findings: [] };
+  f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,result,object_number,created_at,updated_at) VALUES('rv','101','review.issue','succeeded','r','101:review.issue:5:opened','{}',?,5,?,?)", JSON.stringify(result), now, now);
+  // What the engine offers after publishing such a review without a development label.
+  queueDevelopment({ store: f.h.store, owned: () => assert.fail('no pull request'), label: () => 'bot-develop' }, {}, f.h.store.get("SELECT * FROM tasks WHERE id='rv'"), { object: issue, object_hash: 'h' }, result, { label: null, labeled_by: null, assignees: [] });
+  f.state.decide = input => {
+    assert.equal(input.event.type, 'review.published'); assert.equal(input.event.facts.review.conclusion, 'ready_for_development'); assert.equal(input.event.facts.development.label, null);
+    return develop({ kind: 'project_rule', passage: rule });
+  };
+  await f.run();
+  const development = tasks(f.h).find(task => task.kind === 'development.issue');
+  assert.ok(development, JSON.stringify(events(f.h).map(e => [e.state, e.reason, e.refusals, e.error])));
+  const basis = JSON.parse(f.h.store.get('SELECT detail FROM task_development_basis WHERE task_id=?', development.id).detail);
+  assert.deepEqual([basis.kind, basis.passage], ['project_rule', rule]); assert.match(basis.prompt_revision, /^builtin:/);
+  // The Manager is told it never merges on its own, only on a maintainer's explicit request it cites.
+  assert.match(f.requests[0].messages[0].content, /Never merge a pull request, the bot's own included/);
 });
 
 test('filtered events never reach the Manager, and each keeps why', async t => {
