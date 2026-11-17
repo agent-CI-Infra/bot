@@ -62,7 +62,7 @@ test('manual retry retains the original failure across restarts and later decisi
   assert.equal((await admin('/api/repositories/101/dispatch/failed/retry', 'POST', {})).status, 201);
   assert.equal((await admin('/api/repositories/101/dispatch/failed/retry', 'POST', {})).status, 409);
   const pending = (await admin('/api/repositories/101/dispatch/failed')).value;
-  assert.equal(pending.event.state, 'pending'); assert.equal(pending.event.attempts, 0); assert.equal(pending.event.error, null);
+  assert.equal(pending.event.state, 'pending'); assert.equal(pending.event.attempts, 8); assert.equal(pending.event.error, null);
   assert.equal(pending.retries.length, 1); assert.equal(pending.retries[0].previous_attempts, 8); assert.equal(pending.retries[0].previous_error.code, 'invalid_decision');
   h.store.run("UPDATE dispatch_events SET state='decided',decision='ignore',reason='Now safely ignored' WHERE id='failed'");
   await h.stop(); await h.start();

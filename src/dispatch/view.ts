@@ -1,7 +1,8 @@
+import {dispatchRecovery} from './store.js';
 import type { Store, Row } from '../storage/database.js';
 import { fail } from '../core/security.js';
 
-const columns = 'id,type,source,object_type,object_number,summary,state,decision,reason,brief,result,model,attempts,answer_round,error,refusals,rule,created_at,decided_at';
+const columns = 'id,type,source,object_type,object_number,summary,state,decision,reason,brief,result,model,attempts,answer_round,error,refusals,rule,created_at,decided_at,next_run_at';
 const parsed = (value: unknown) => { try { return JSON.parse(String(value)); } catch { return null; } };
 const project = (row: Row) => ({ ...row, brief: parsed(row.brief), result: parsed(row.result), error: parsed(row.error), refusals: parsed(row.refusals) ?? [], rule: parsed(row.rule) });
 
@@ -46,10 +47,11 @@ export function dispatchList(store: Store, repositoryId: string, params: URLSear
 }
 
 /** Deliberately excludes raw facts, candidate task inputs, credentials and the dispatch lease. */
-export function dispatchDetail(store: Store, repositoryId: string, id: string) {
-  const row = store.get(`SELECT ${columns},delivery_id,next_run_at FROM dispatch_events WHERE id=? AND repository_id=?`, id, repositoryId);
+export function dispatchDetail(store: Store, repositoryId: string, id: string, params=new URLSearchParams()) {
+  const row = store.get(`SELECT ${columns},delivery_id FROM dispatch_events WHERE id=? AND repository_id=?`, id, repositoryId);
   if (!row) return fail(404, 'dispatch_event_not_found');
-  return { event: project(row), tasks: store.all(`SELECT t.id,t.kind,t.status,e.relation FROM task_events e JOIN tasks t ON t.id=e.task_id
+  const cursor=params.get('failure_before');if(cursor!==null&&(!/^[1-9]\d*$/.test(cursor)||!Number.isSafeInteger(Number(cursor))))fail(400,'invalid_dispatch_failure_cursor');
+  return { event: project(row), recovery:dispatchRecovery(store,repositoryId,id,cursor===null?undefined:Number(cursor)), tasks: store.all(`SELECT t.id,t.kind,t.status,e.relation FROM task_events e JOIN tasks t ON t.id=e.task_id
       WHERE e.event_id=? AND t.repository_id=? ORDER BY e.created_at,t.id`, id, repositoryId),
     retries: store.all('SELECT requested_at,previous_attempts,previous_error FROM dispatch_retries WHERE event_id=? ORDER BY rowid DESC LIMIT 50', id)
       .map(row => ({ ...row, previous_error: parsed(row.previous_error) })) };

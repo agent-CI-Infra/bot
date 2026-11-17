@@ -18,7 +18,7 @@ import { managerPrompt, parseSections, saveManager, workPermissions } from '../w
 import { ruleActions, standingRules } from './rules.js';
 import { HttpError } from '../core/security.js';
 import { section, workType, workTypes } from '../work/catalog.js';
-import { checkDecision, InvalidDecision, managerRefusal, recordRefusal, renewDispatchLease, type Decision, type DispatchContext } from './store.js';
+import { dispatchRecovery,checkDecision, InvalidDecision, managerRefusal, recordRefusal, renewDispatchLease, type Decision, type DispatchContext } from './store.js';
 import { isRefusal, promptRevision, verifyBasis } from './basis.js';
 import { GitHub } from '../github/client.js';
 import { scheduledCheckDecision } from './schedule.js';
@@ -149,6 +149,7 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
       + (Number(event.answer_round) ? ' Deciding this event failed several times before (previous_failures). Decide now, as simply as you can; when you cannot start what a person asked for, answer them on the object with github_write, then ignore_event.' : '') },
     { role: 'user', content: JSON.stringify({
       event: { id: event.id, type: event.type, source: event.source, summary: event.summary, object: event.object_number ? { type: event.object_type, number: event.object_number } : null, facts: context.facts },
+      recovery:dispatchRecovery(store,repositoryId,event.id),
       related_tasks: context.related,
       work: {
         create: context.options.map(option => ({ id: option.id, work: option.work, work_name: workType(option.work)?.name ?? option.work, title: option.title,

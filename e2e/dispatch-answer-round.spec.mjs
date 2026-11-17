@@ -3,11 +3,10 @@ import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 
-// #815: an event whose attempts ran out goes back to the Manager for one more round, and a development stopped by a
-// removed label is an event of its own; the dispatch records name both.
+// Repeated dispatch failures remain recoverable; stopped development remains a separate event.
 const shots = process.env.BOT_E2E_SCREENSHOTS;
 
-test('dispatch records show the answer round after spent attempts and a stopped development', async ({ page }) => {
+test('dispatch records show retained retry evidence without a terminal attempt cap and a stopped development', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
@@ -20,6 +19,7 @@ test('dispatch records show the answer round after spent attempts and a stopped 
       at: '2026-11-16T10:00:00.000Z', decided_at: '2026-11-16T10:00:20.000Z' });
     add('answer', { type: 'issue.mention', source: 'github', summary: '提到 bot：Parser drops the last line #5', state: 'pending', attempts: 8, answer_round: 1,
       error: JSON.stringify({ code: 'dispatch_option_not_offered', detail: 'continue:nothing' }), next_run_at: Date.parse('2026-11-16T10:20:00.000Z'), at: '2026-11-16T10:05:00.000Z' });
+    for (const attempt of [3,6,8]) h.store.run('INSERT INTO dispatch_failures VALUES(?,?,?,?,?,?)','answer',attempt,'2026-11-16T10:10:00.000Z',JSON.stringify({code:'dispatch_option_not_offered',detail:'continue:nothing'}),Date.parse('2026-11-16T10:20:00.000Z'),attempt%3===0?1:0);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(h.admin + '/#/projects/101/roles/manager');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -28,7 +28,10 @@ test('dispatch records show the answer round after spent attempts and a stopped 
     await expect(reader.locator('[data-dispatch-event="stopped"]')).toContainText('开发停下');
     const detail = page.getByRole('dialog', { name: '分派详情', exact: true });
     await reader.locator('[data-dispatch-event="answer"]').getByRole('button', { name: '查看分派详情', exact: true }).click();
-    await expect(detail).toContainText('自动尝试已用完：这一轮交给 Manager 再判断一次');
+    await expect(detail).toContainText('重复失败只触发提醒与退避；尚未决定分派结果。');
+    await expect(detail).toContainText('第 8 次 · dispatch_option_not_offered');
+    await expect(detail).toContainText('第 6 次 · dispatch_option_not_offered · continue:nothing · 已记录重复失败提醒');
+    await expect(detail).not.toContainText('自动尝试已用完');
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

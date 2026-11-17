@@ -1,3 +1,5 @@
+import {TaskError} from '../dist/agent/common.js';
+import {registerDispatchHook} from '../dist/dispatch/store.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -360,38 +362,27 @@ test('a Manager that cannot be reached is waited out; a decision that stays inva
   f.h.store.run('UPDATE dispatch_events SET attempts=20,next_run_at=0');
   await f.run();
   assert.equal(events(f.h)[0].state, 'pending');
-  // A model that keeps choosing what was not offered runs out of attempts. It then gets one more round (#815), told that
-  // deciding failed, so it can answer the person instead of the event waiting for someone to press retry.
+  // Invalid decisions remain recoverable after the former eight-attempt cap.
   f.state.status = 200; f.state.decide = () => ({ decision: 'continue', option_ids: ['continue:nothing'], reason: '续接' });
   f.h.store.run('UPDATE dispatch_events SET attempts=7,next_run_at=0');
   await f.run();
   [event] = events(f.h);
-  assert.deepEqual([event.state, event.answer_round, JSON.parse(event.error).code], ['pending', 1, 'dispatch_option_not_offered']);
-  assert.ok(event.next_run_at > Date.now() + 10 * 60000, 'the answer round waits for a passing fault to clear');
-  f.h.store.run('UPDATE dispatch_events SET next_run_at=0');
-  const asked = f.requests.length;
-  await f.run();
-  const answer = f.requests[asked], told = JSON.parse(answer.messages[1].content);
-  assert.deepEqual([told.previous_failures.attempts, told.previous_failures.last_error.code], [8, 'dispatch_option_not_offered']);
-  assert.match(answer.messages[0].content, /Deciding this event failed several times before/);
-  // Only when that round fails too is the event failed, for a person to retry.
-  [event] = events(f.h);
-  assert.equal(event.state, 'failed'); assert.equal(JSON.parse(event.error).code, 'dispatch_option_not_offered'); assert.equal(tasks(f.h).length, 0);
-  f.state.decide = input => ({ decision: 'create', option_ids: [input.options.create[0].id], reason: '恢复后检视' });
+  assert.equal(event.state, 'pending'); assert.equal(JSON.parse(event.error).code, 'dispatch_option_not_offered'); assert.equal(tasks(f.h).length, 0);
+  f.state.decide = input => ({ decision: 'create', option_ids: [input.work.create[0].id], reason: '恢复后检视' });
   assert.equal((await f.admin(`/api/repositories/101/dispatch/${event.id}/retry`, 'POST', {})).status, 201);
   await f.run();
   assert.equal(events(f.h)[0].state, 'decided'); assert.equal(tasks(f.h).length, 1);
 });
 
-test('an answer round reaches the Manager even after a matching rule is saved or the work is disabled', async t => {
+test('a failed dispatch reaches the Manager with recovery evidence even if rules or enabled work change', async t => {
   for (const change of ['matching rule', 'disabled work']) await t.test(change, async t => {
     const f = await fixture(t);
     f.state.decide = () => ({ decision: 'continue', option_ids: ['continue:nothing'], reason: '续接' });
     queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'spent');
     f.h.store.run('UPDATE dispatch_events SET attempts=7');
     await f.run();
-    assert.equal(events(f.h)[0].answer_round, 1, 'the failed eighth attempt schedules an answer round');
-    // Configuration may change during the fifteen-minute wait; neither change should hide that round from the Manager.
+    assert.equal(events(f.h)[0].state, 'pending', 'the failed eighth attempt remains recoverable');
+    // Configuration changes must not hide the retained failure evidence from the Manager.
     if (change === 'matching rule') {
       const manager = (await f.admin('/api/repositories/101/manager')).value.manager;
       assert.equal((await f.admin('/api/repositories/101/manager', 'PUT', { expected_revision: manager.prompt.revision,
@@ -406,7 +397,7 @@ test('an answer round reaches the Manager even after a matching rule is saved or
     f.h.store.run('UPDATE dispatch_events SET next_run_at=0');
     await f.run();
     assert.equal(f.requests.length, asked + 1, 'the Manager gets the answer round');
-    assert.equal(JSON.parse(f.requests[asked].messages[1].content).previous_failures.attempts, 8);
+    assert.equal(JSON.parse(f.requests[asked].messages[1].content).recovery.failures[0].attempt, 8);
     assert.deepEqual([events(f.h)[0].state, events(f.h)[0].decision, events(f.h)[0].rule, tasks(f.h).length], ['decided', 'ignore', null, 0]);
   });
 });
@@ -598,4 +589,36 @@ test('after three refusals the event is ignored with the refusals kept', async t
   const event = events(f.h)[0];
   assert.equal(f.requests.length, 3); assert.equal(event.state, 'decided'); assert.equal(event.decision, 'ignore'); assert.match(event.reason, /控制面拒绝/);
   assert.equal(JSON.parse(event.refusals).length, 3); assert.equal(tasks(f.h).length, 0);
+});
+
+test('dispatch survives more than eight invalid decisions, reports 3/6/9, and gives recovery evidence to the next Manager',async t=>{
+ const f=await fixture(t);let declined=0;registerDispatchHook('retry-recovery-fixture',{created(){},declined(){declined++;}});
+ f.state.decide=()=>({decision:'continue',option_ids:['continue:not-offered'],reason:'invalid fixture choice'});
+ queueWebhook(f.h.store,'101','issues',{action:'opened',issue,sender:alice},'recovery-input');const event=events(f.h)[0];
+ const options=JSON.parse(event.options);options[0].hook='retry-recovery-fixture';f.h.store.run('UPDATE dispatch_events SET options=? WHERE id=?',JSON.stringify(options),event.id);
+ for(let i=1;i<=10;i++){
+  f.h.store.run('UPDATE dispatch_events SET next_run_at=0 WHERE id=?',event.id);await f.run();
+  const row=events(f.h)[0];assert.equal(row.state,'pending');assert.equal(row.attempts,i);assert.ok(row.next_run_at>Date.now());
+ }
+ assert.equal(declined,0,'a failed Manager call must not decline the owning work');assert.equal(tasks(f.h).length,0);
+ const detail=(await f.admin('/api/repositories/101/dispatch/'+event.id)).value;
+ assert.equal(detail.recovery.failures.length,8);assert.deepEqual(detail.recovery.reports.map(r=>r.attempt),[9,6,3]);assert.equal(detail.event.attempts,10);
+ const older=(await f.admin('/api/repositories/101/dispatch/'+event.id+'?failure_before='+detail.recovery.next_before_attempt)).value;assert.deepEqual(older.recovery.failures.map(r=>r.attempt),[2,1]);assert.equal(older.recovery.next_before_attempt,null);assert.equal((await f.admin('/api/repositories/101/dispatch/'+event.id+'?failure_before=nope')).status,400);
+ await f.dispatcher.close();const recovered=new Dispatcher(f.h.store);t.after(()=>recovered.close());
+ f.state.decide=input=>{assert.equal(input.recovery.failures[0].attempt,10);assert.equal(input.recovery.failures[0].error.code,'dispatch_option_not_offered');return {decision:'ignore',option_ids:[],reason:'Manager chooses no work after reviewing current facts'};};
+ f.h.store.run('UPDATE dispatch_events SET next_run_at=0 WHERE id=?',event.id);recovered.tick();await recovered.idle();
+ assert.equal(events(f.h)[0].state,'decided');assert.equal(events(f.h)[0].decision,'ignore');assert.equal(declined,1,'only an actual Manager decision ends the owning work');
+ assert.equal(f.h.store.get('SELECT count(*) n FROM dispatch_failures WHERE event_id=?',event.id).n,10);
+});
+
+test('explicit cancellation remains a terminal boundary rather than an automatic retry',async t=>{
+ const f=await fixture(t);queueWebhook(f.h.store,'101','issues',{action:'opened',issue,sender:alice},'cancelled-dispatch');
+ const dispatcher=new Dispatcher(f.h.store,async()=>{throw new TaskError('dispatch_cancelled','cancelled','Explicit stop');});t.after(()=>dispatcher.close());dispatcher.tick();await dispatcher.idle();
+ const event=events(f.h)[0];assert.equal(event.state,'failed');assert.equal(event.attempts,1);assert.equal(JSON.parse(event.error).code,'dispatch_cancelled');
+ f.h.store.run('UPDATE dispatch_events SET next_run_at=0');dispatcher.tick();await dispatcher.idle();assert.equal(events(f.h)[0].attempts,1);assert.equal(tasks(f.h).length,0);
+});
+
+test('first dispatch context never claims that prior attempts failed',async t=>{
+ const {dispatchRecovery}=await import('../dist/dispatch/store.js'),f=await fixture(t);queueWebhook(f.h.store,'101','issues',{action:'opened',issue,sender:alice},'no-prior-fault');
+ const event=events(f.h)[0];assert.equal(dispatchRecovery(f.h.store,'101',event.id),null);
 });
