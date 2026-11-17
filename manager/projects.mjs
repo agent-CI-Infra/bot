@@ -80,8 +80,8 @@ function sanitizeTrajectoryValue(value) {
   }
   return out;
 }
-function sanitizeTrajectoryInput(input) {
-  if (input?.request && ['workspace_harness_config', 'workspace_agent_token'].includes(input.request.type) && typeof input.request.base64 === 'string') {
+export function sanitizeTrajectoryInput(input) {
+  if (input?.request && ['workspace_harness_config', 'workspace_agent_token', 'workspace_agent_config'].includes(input.request.type) && typeof input.request.base64 === 'string') {
     return sanitizeTrajectoryValue({ ...input, request: { ...input.request, base64: '[redacted]' } });
   }
   if (input?.request?.type === 'workspace_browser') return sanitizeBrowserTrajectory(sanitizeTrajectoryValue(input));

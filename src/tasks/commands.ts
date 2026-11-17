@@ -7,7 +7,7 @@ import {roleConfiguration} from '../roles/definition.js';
 import {relateTasks} from './followups.js';
 import {setTaskPriority} from './priority.js';
 import type { Store, Row } from '../storage/database.js';
-import { randomId, fields, fail, digest, object, HttpError, type Json } from '../core/security.js';
+import { randomId, fields, fail, digest, object, text, HttpError, type Json } from '../core/security.js';
 import { authorize } from '../identity/authorization.js';
 import { type Actor, scope, repository } from '../app/auth.js';
 import { TaskRecords } from './service.js';
@@ -314,7 +314,8 @@ export class TaskCommands {
       fields(args,['task_id','action','instruction','base_ref','reason']);if(!['instructions','retry','pause','cancel','integrate'].includes(String(args.action)))fail(400,'task_operation_forbidden');
       if(args.action!=='integrate'&&args.base_ref!==undefined)fail(400,'unknown_field');
       if(args.action!=='instructions'&&args.instruction!==undefined)fail(400,'unknown_field');
-      try{return this.api(user,'POST',new URL('http://local/api/tasks/'+String(args.task_id)+'/'+args.action),args.action==='instructions'?{instruction:args.instruction}:args.action==='integrate'?{base_ref:args.base_ref,reason:args.reason}:{},caller)!;}
+      const reason=args.action!=='integrate'&&args.reason!==undefined?text(args.reason,2000):undefined;
+      try{const result=this.api(user,'POST',new URL('http://local/api/tasks/'+String(args.task_id)+'/'+args.action),args.action==='instructions'?{instruction:args.instruction}:args.action==='integrate'?{base_ref:args.base_ref,reason:args.reason}:{},caller)!;if(reason)new TaskRecords(this.store).history(String(args.task_id),'management_reason',{action:args.action,reason,actor:user.id});return result;}
       catch(error){if(args.action!=='integrate'||!(error instanceof HttpError)||!['invalid_integration_request','integration_task_running','integration_snapshot_unavailable','integration_pr_unavailable'].includes(error.code))throw error;
         return {error:error.code,task_ref:'task:'+String(args.task_id),discovery:{tool:'read_managed_task',arguments:{task_id:args.task_id}},instruction:'Integration is optional and needs a recorded code candidate, an offered current_main base_ref and a reason. Inspect current facts and decide how to continue.'};} 
     }

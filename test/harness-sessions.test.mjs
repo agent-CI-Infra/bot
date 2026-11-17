@@ -93,3 +93,9 @@ test('public driver sessions keep updated native bindings between sends and reje
  await assert.rejects(stopped.run(),/already cancelled/);await stopped.close();
  }finally{s.close();}
 });
+
+test('generated shell access truthfully reports writable filesystem even when direct edit tools are absent',()=>{
+ const access=harnessAccess(defaultPermissions('manager','controller'),false,null,{read:true,write:false,commands:true});
+ assert.equal(access.workspace,'write');assert.notEqual(access.fileTools,'write');assert.equal(access.commands,true);
+ assert.doesNotThrow(()=>checkHarnessAccess('pi',access));assert.doesNotThrow(()=>checkHarnessAccess('claude_code',access));
+});

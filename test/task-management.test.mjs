@@ -83,7 +83,8 @@ test('task ownership separates conversations and projects; task write cannot mod
   assert.equal(commands.tool(foreign, 'list_managed_tasks', {}).tasks.length, 0);
   s.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('foreign-project','other','task.request','queued','foreign')");
   assert.throws(() => commands.tool(source, 'read_managed_task', { task_id: 'foreign-project' }), { code: 'task_not_found' });
-  commands.tool(caller({ source_message: 'later-message' }), 'manage_task', { task_id: task.id, action: 'instructions', instruction: 'Continue from the retained observations.' });
+  commands.tool(caller({ source_message: 'later-message' }), 'manage_task', { task_id: task.id, action: 'instructions', instruction: 'Continue from the retained observations.',reason:'Preserve useful evidence' });
+  assert.equal(JSON.parse(s.get("SELECT data FROM task_history WHERE task_id=? AND type='management_reason'",task.id).data).reason,'Preserve useful evidence');
   assert.ok(s.get("SELECT 1 FROM task_history WHERE task_id=? AND type='supplemental_instruction'", task.id));
 });
 
