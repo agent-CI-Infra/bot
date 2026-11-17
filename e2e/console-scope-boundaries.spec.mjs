@@ -81,3 +81,14 @@ test('an authorized project outside the first management directory page opens by
   await login(page,h,password,'#/projects/'+target+'/management');await expect(page.locator('.management-scope-name')).toHaveAttribute('data-scope','project:'+target);await expect(page.getByRole('button',{name:'发送',exact:true})).toBeEnabled();expect(seen).toContainEqual({project_id:target});await switchConsoleProject(page,'101');await expect(page.locator('.management-scope-name')).toHaveAttribute('data-scope','project:101');await switchConsoleProject(page,target);await expect(page.locator('.management-scope-name')).toHaveAttribute('data-scope','project:'+target);await expect(page.getByRole('heading',{name:'无法打开管理助手',exact:true})).toHaveCount(0);
  }finally{await h.stop();}
 });
+
+for(const member of [false,true]) test(`neutral-page refresh preserves the last chosen scope for the next root login (${member?'project admin':'super admin'})`,async({page})=>{
+ const {h,admin,password}=await fixture();const user=member?'memory-member':'administrator',secret=member?testPassword():password;
+ try{
+  if(member)await admin('/api/users','POST',{username:user,password:secret,repository_ids:['101']});
+  await login(page,h,secret,'#/projects/101/board',user);await expect(page.locator('#board-columns')).toBeVisible();await expect(page.locator('#console-project')).toHaveAttribute('data-project-id','101');
+  const key=await page.evaluate(()=> 'console-last-scope:'+me.id);expect(await page.evaluate(k=>localStorage.getItem(k),key)).toBe('101');
+  await page.goto(h.admin+'/#/identity');await expect(page.getByRole('heading',{name:'身份与权限',exact:true})).toBeVisible();await page.reload();await expect(page.getByRole('heading',{name:'身份与权限',exact:true})).toBeVisible();expect(await page.evaluate(k=>localStorage.getItem(k),key)).toBe('101');
+  await page.locator('#logout').click();await expect(page.locator('#access')).toBeVisible();await login(page,h,secret,'',user);await expect(page).toHaveURL(/#\/projects\/101\/overview$/);await expect(page.locator('.workspace-overview')).toBeVisible();
+ }finally{await h.stop();}
+});

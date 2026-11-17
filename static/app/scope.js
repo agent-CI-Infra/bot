@@ -30,7 +30,9 @@ function syncConsoleScope() {
   if (scope !== undefined) consoleRetainedScope = scope;
   if (scopePickerRepositoriesOwner !== me.id) return;
   // A forbidden deep link still names its project, but neither neutral pages nor future visits inherit that grant.
+  const beforeValidation = consoleRetainedScope;
   consoleRetainedScope = retainedConsoleScope();
+  if (scope === undefined && beforeValidation === consoleRetainedScope) return;
   try { localStorage.setItem(consoleLastScopeKey(), consoleRetainedScope || 'all'); } catch { /* Navigation works with storage disabled. */ }
 }
 function restoreConsoleStart(rows) {
