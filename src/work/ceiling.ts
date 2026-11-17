@@ -7,7 +7,8 @@ import { workType } from './catalog.js';
  * The project's capability ceiling (#850): the most the bot may write in a project, in three levels.
  *
  * - read: answer and review in chat; nothing is written on GitHub.
- * - comment: comments, labels, Issues and reviews on GitHub (writes on Issues and Pull requests), Actions reruns.
+ * - comment: every write on Issues and Pull requests (comments, labels, titles and bodies, assignees, closing, new Issues,
+ *   reviews) and Actions reruns; no code.
  * - develop: change code and open PRs as well, including Contents writes and merging, which the Manager holds by default.
  *
  * Every write the bot makes sits under it: the deliveries of work types, and github_write of project roles, Feishu groups and
@@ -22,6 +23,14 @@ const rank = (level: Ceiling) => ceilingLevels.indexOf(level);
 /** Does a ceiling allow what needs `needed`? */
 export const covers = (ceiling: Ceiling, needed: Ceiling) => rank(ceiling) >= rank(needed);
 export const ceilingTitles: Record<Ceiling, string> = { read: '只读问答', comment: '可评论和打标签', develop: '可开发并开 PR' };
+/**
+ * What each level allows, said with its title wherever a level is named to people or models. The short title of comment
+ * reads as "comments and labels only", while the level covers every Issue and Pull request write.
+ */
+export const ceilingScopes: Record<Ceiling, string> = {
+  read: '不在 GitHub 上写任何内容',
+  comment: '可以写 Issue 和 PR：评论、加删标签、改标题和正文、指派人、关闭或重开、新建 Issue、发检视，不改代码',
+  develop: '另外可以改代码、开 PR、写分支和合并 PR' };
 
 /**
  * The level today's switches and writes stand for, used once to upgrade a policy and for a policy row nothing has set the
@@ -62,9 +71,12 @@ export function workLevel(id: string): Ceiling {
 /** The writes of a list the ceiling allows. */
 export const withinCeiling = (ceiling: Ceiling, writes: string[]) => writes.filter(write => covers(ceiling, writeLevel(write)));
 
-/** Why something above the ceiling was refused, for people: the project's level and the level needed. */
+/**
+ * Why something above the ceiling was refused: the project's level and the level needed, each with what it allows. People
+ * read it on refused tasks and API calls; the Manager reads it on work an event cannot create.
+ */
 export const ceilingMessage = (needed: Ceiling, ceiling: Ceiling) =>
-  `项目能力上限为「${ceilingTitles[ceiling]}」(${ceiling})，这项操作需要「${ceilingTitles[needed]}」(${needed})；项目管理员可以在「项目设置 → 监听与触发」调整。`;
+  `项目能力上限为「${ceilingTitles[ceiling]}」(${ceiling}，${ceilingScopes[ceiling]})，这项操作需要「${ceilingTitles[needed]}」(${needed}，${ceilingScopes[needed]})；项目管理员可以在「项目设置 → 监听与触发」调整。`;
 /** For a running task: stops with `code` (capability_ceiling, or capability_ceiling_lowered from the guard) until a person
  * raises the ceiling and retries it. */
 export function stopAboveCeiling(store: Store, repositoryId: string, needed: Ceiling, code = 'capability_ceiling', policy?: Row): void {

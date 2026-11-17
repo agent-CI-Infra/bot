@@ -105,6 +105,9 @@ test('lowering the ceiling stops a development task before its next tool call in
   assert.equal(task.status, 'waiting_permission'); assert.equal(task.error_code, 'capability_ceiling_lowered');
   const fault = h.store.all('SELECT content FROM task_logs WHERE task_id=?', h.taskId).map(row => JSON.parse(row.content)).find(entry => entry.type === 'fault');
   assert.match(fault.detail, /可评论和打标签.*可开发并开 PR/);
+  // Each level says what it allows: the comment title alone reads as comments and labels only, not every Issue and PR write.
+  assert.match(fault.detail, /「可评论和打标签」\(comment，可以写 Issue 和 PR：评论、加删标签、改标题和正文、指派人、关闭或重开、新建 Issue、发检视，不改代码\)/);
+  assert.match(fault.detail, /「可开发并开 PR」\(develop，另外可以改代码、开 PR、写分支和合并 PR\)/);
   assert.equal((await h.admin('/api/repositories/101/policy', 'PATCH', { capability_ceiling: 'develop' })).status, 200);
   const retried = await h.admin('/api/tasks/' + h.taskId + '/retry', 'POST', {});
   assert.equal(retried.status, 201, JSON.stringify(retried.value));

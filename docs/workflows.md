@@ -17,7 +17,7 @@
 | 档位 | 含义 | GitHub 写入 |
 | --- | --- | --- |
 | `read` 只读问答 | 在飞书和控制台里回答、检视讨论 | 无 |
-| `comment` 可评论和打标签 | 评论、加标签、提 Issue、发检视，Actions 失败可以重跑一次 | Issues、Pull requests |
+| `comment` 可评论和打标签 | 写 Issue 和 PR：评论、加删标签、改标题和正文、指派人、关闭或重开、提 Issue、发检视，Actions 失败可以重跑一次；不改代码 | Issues、Pull requests |
 | `develop` 可开发并开 PR | 还可以改代码、交付 bot PR | 再加 Contents（文件、分支和引用、合并 PR） |
 
 合并 PR 是 Contents 写，包含在 `develop` 里，Manager 默认就有，不单设一档。上限在启动项目时选择（默认 `comment`；受信任组织可以预设它下面的项目启动时的档位，见[管理员手册](admin.md)），之后由项目管理员在「监听与触发」修改。bot 的每一次写入都在上限之内：
