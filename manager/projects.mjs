@@ -584,13 +584,14 @@ export class Projects {
   // The host's Docker volumes, in a request of their own (#968) for the same reason as the containers: sizing a volume
   // walks it, and a volume read that is slow or times out must not cost the images or the build cache their numbers.
   //
-  // The deployment's own volumes hold bytes the storage table already counts under another row: Compose labels every
-  // volume it creates with com.docker.compose.volume (bot-data: control.sqlite and the control trajectories,
-  // manager-data: manager.sqlite and its trajectories, agent-tools: the trusted CLI volume) and the manager labels every
-  // volume it creates with department.bot.* (each *-work and *-notes volume is a project computer's data). Adding those
-  // to a Docker row would count the same bytes twice and could push `known` above the disk's used bytes. Only a volume
-  // outside that set is Docker's own footprint, and assistant-homes — Compose-created but the bot's own data — is
-  // reported on its own so "other" stops absorbing it.
+  // A labelled volume never enters the Docker volume row, so the same bytes are not counted twice: the deployment labels
+  // every volume it creates with com.docker.compose.volume and the manager labels every volume it creates with
+  // department.bot.*. Some of those bytes are already in `known`: bot-data and manager-data (the two databases and
+  // their trajectory directories) and the in-use *-work volumes (the `computers` row), so counting them again would
+  // double them. The rest are excluded from the row but have no known row either — agent-tools, bot-keys/internal-keys/
+  // tunnel-keys, the *-notes volumes, and the *-work volumes of deleted projects or older generations survive — so their
+  // bytes stay in "other"; none of them is Docker's own footprint. Only a volume outside that set is Docker's own, and
+  // assistant-homes — Compose-created but the bot's own data — is reported on its own so "other" stops absorbing it.
   async readVolumes() {
     const df = await this.docker.request('GET', '/system/df?type=volume', undefined, false, 5 * 60_000);
     const rows = Array.isArray(df?.Volumes) ? df.Volumes : [], labels = row => row?.Labels ?? {};
