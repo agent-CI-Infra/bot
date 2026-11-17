@@ -15,7 +15,7 @@ test('项目页完整 beta 发版：确认 SHA、Release lane、草稿编辑和�
     await page.route('**/api/repositories/*/rules', route => route.fulfill({ json: { rules: { files: [], computer: {} } } }));
     await login(page, f.h.admin, 'administrator', f.password);
     await page.goto(f.h.admin + '/#/projects/101/release');
-    await expect(page.getByRole('heading', { name: '发版本', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '发版本', level: 1, exact: true })).toBeVisible();
     const version = page.getByLabel('版本号', { exact: true }), confirm = page.getByRole('button', { name: '确认打标签', exact: true });
     await version.fill('v01.2.3'); await page.getByRole('button', { name: '检查候选提交' }).click(); await expect(confirm).toBeDisabled();
     await version.fill('v1.2.3-beta.1'); await page.getByRole('button', { name: '检查候选提交' }).click(); await expect(confirm).toBeEnabled();

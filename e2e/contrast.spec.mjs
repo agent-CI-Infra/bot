@@ -52,7 +52,7 @@ function contrastScript() {
       body: sample('body'),
       heading: sample('h1'),
       mutedText: sample('.muted') || sample('.cost-note') || sample('.cost-scope'),
-      navLabel: sample('.console-nav-label'),
+      navLabel: sample('.console-project-picker > span'),
       chip: sample('.status'),
       role: sample('.current-user-role'),
     };

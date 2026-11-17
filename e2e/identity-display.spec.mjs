@@ -8,9 +8,8 @@ async function navigateIdentity(page, width) {
   if (width < 768) {
     await page.locator('#console-mobile-nav a[href="#/more"]').click();
     await page.locator('#console-page a[href="#/identity"]').click();
-  } else if (await page.locator('#tabs [data-tab="preferences"]').isVisible()) {
-    await page.locator('#tabs [data-tab="preferences"]').click();
-    await page.locator('#console-secondary-nav a[href="#/identity"]').click();
+  } else if (await page.locator('#tabs a[href="#/identity"]').isVisible()) {
+    await page.locator('#tabs a[href="#/identity"]').click();
   } else {
     await page.locator('#console-more-link').click();
     await page.locator('#console-page a[href="#/identity"]').click();

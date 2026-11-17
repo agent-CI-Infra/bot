@@ -28,7 +28,7 @@ test('#743 发布页：404 之后停止读取发布记录并写终态文案', as
   try {
     await loginAs(page, f.h.admin, f.password);
     await page.goto(f.h.admin + '/#/projects/101/release');
-    await expect(page.getByRole('heading', { name: '发版本', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '发版本', level: 1, exact: true })).toBeVisible();
     await page.route('**/api/repositories/101/releases', route => route.fulfill({ status: 404, json: { error: 'not_found' } }));
     await page.getByRole('button', { name: '刷新发布记录', exact: true }).click();
     await expect(page.getByText(/发布记录已不可读取/)).toBeVisible();
@@ -44,7 +44,7 @@ test('#743 发布页：5xx 仍会继续轮询', async ({ page }) => {
   try {
     await loginAs(page, f.h.admin, f.password);
     await page.goto(f.h.admin + '/#/projects/101/release');
-    await expect(page.getByRole('heading', { name: '发版本', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '发版本', level: 1, exact: true })).toBeVisible();
     await page.route('**/api/repositories/101/releases', route => route.fulfill({ status: 503, json: { error: 'unavailable' } }));
     await page.getByRole('button', { name: '刷新发布记录', exact: true }).click();
     await expect(page.getByText(/发布记录读取失败/)).toBeVisible();

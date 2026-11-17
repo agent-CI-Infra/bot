@@ -23,7 +23,7 @@ test('a command receipt names the conversation and message it came from', async 
     await expect(source).toContainText(receipt.source_conversation);
     await expect(source).toContainText(receipt.source_message);
     // The line is a way back, not just two opaque ids.
-    await expect(source.getByRole('link', { name: '回到管理会话', exact: true })).toHaveAttribute('href', '#/management');
+    await expect(source.getByRole('link', { name: '回到管理会话', exact: true })).toHaveAttribute('href', '#/projects/101/management');
     // A phone keeps the ids readable without pushing the page sideways.
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

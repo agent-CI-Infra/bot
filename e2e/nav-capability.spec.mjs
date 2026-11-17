@@ -29,7 +29,7 @@ test('the shared shell groups projects by organization and keeps the selected pr
     await expect(page.locator('#console-scope-org-0 [role=option]')).toHaveText(['project-101']);
     await expect(page.locator('#console-scope-org-1 [role=option]')).toHaveText(['project-102']);
     // The current scope bar names the organization and the project, and a project whose permissions are short of a feature says so there.
-    await expect(page.locator('#console-context')).toContainText('alpha · project-101');
+    await expect(page.locator('#console-context')).toContainText('alpha / project-101');
     const permission = page.locator('#console-location [data-permission]');
     await expect(permission).toBeVisible(); await expect(permission).toContainText('权限不足');
     // The badge opens the same gap dialog the project list uses, and Escape returns to it.
@@ -42,7 +42,7 @@ test('the shared shell groups projects by organization and keeps the selected pr
     // The snapshot is delayed here, because an assertion that retries cannot tell a cleared badge from a late answer.
     await page.route('**/api/installations?repository_id=102', async route => { await new Promise(resolve => setTimeout(resolve, 2500)); await route.continue(); });
     await switchConsoleProject(page, '102');
-    await expect(page.locator('#console-context')).toContainText('beta · project-102');
+    await expect(page.locator('#console-context')).toContainText('beta / project-102');
     expect(await page.locator('#console-location [data-permission]').count()).toBe(0);
     await page.unroute('**/api/installations?repository_id=102');
     // Re-reading the installation list drops the snapshot the navigation cached earlier, so the badge on returning to
@@ -61,7 +61,7 @@ test('the shared shell groups projects by organization and keeps the selected pr
     expect(snapshotReads).toBeGreaterThanOrEqual(1);
     // A project with nothing missing keeps the bar to the scope only.
     await page.goto(h.admin + '/#/projects/102/overview');
-    await expect(page.locator('#console-context')).toContainText('beta · project-102');
+    await expect(page.locator('#console-context')).toContainText('beta / project-102');
     await expect(page.locator('#console-location [data-permission]')).toHaveCount(0);
     // No breakpoint gains a page-level horizontal scrollbar from the extra scope text and badge.
     for (const width of [390, 768, 1024, 1440, 1920]) {
@@ -99,7 +99,7 @@ test('a background permission check reaches the scope bar without a fresh projec
     await page.evaluate(() => { location.hash = '#/projects'; });
     await expect(page.locator('#rows .project-list-row')).toHaveCount(1);
     await page.evaluate(() => { location.hash = '#/projects/101/overview'; });
-    await expect(page.locator('#console-context')).toContainText('alpha · project-101');
+    await expect(page.locator('#console-context')).toContainText('alpha / project-101');
     await expect(badge).toHaveCount(0);
     expect(errors).toEqual([]);
   } finally { await h.stop(); }

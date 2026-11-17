@@ -189,7 +189,7 @@ test('#562 390 / 768 / 1440 核心页不横向溢出，主操作不被浮钮或�
     expect(tablet.overflow).toBe(768);
     // #707: the project settings categories wrap instead of scrolling sideways, so all of them stay one click away.
     expect(tablet.wrap).toBe('wrap');
-    expect(tablet.settingsCategories).toBe(9);
+    expect(tablet.settingsCategories).toBe(8);
     expect(tablet.allOnScreen).toBe(true);
     expect(tablet.roleNavOneRow).toBe(true);
     expect(tablet.sidebarVisible).toBe(true);

@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -43,7 +44,7 @@ test('管理员完成初始化、登记账号，项目管理员只看到自己�
     // Each project row opens its settings page through the "设置" action.
     await page.locator('#rows .row').filter({ hasText: 'fixture/project-101' }).getByRole('button', { name: '设置', exact: true }).click();
     await expect(page).toHaveURL(/#\/projects\/101\/basic$/); await expect(page.getByRole('link', { name: '基本设置', exact: true })).toBeVisible();
-    await page.getByRole('link', { name: '项目', exact: true }).click();
+    await switchConsoleProject(page, '');
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
     await expect(page.locator('#rows')).not.toContainText('fixture/project-202');
     await expect(page.getByRole('link', { name: '全局设置', exact: true })).toBeHidden(); await expect(page.getByRole('button', { name: '接入向导', exact: true })).toBeHidden();

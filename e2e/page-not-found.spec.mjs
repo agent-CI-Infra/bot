@@ -49,7 +49,7 @@ test('#642 未知地址与项目内未知子页显示「找不到这个页面」
         await expect(inner.getByRole('heading', { name: '找不到这个页面', exact: true })).toBeVisible();
         // Compare the address as a plain string: no RegExp is built from it, so no metacharacter needs escaping.
         await expect.poll(() => new URL(page.url()).hash).toBe(address);
-        await expect(page.locator('#project-page .project-head h1')).toHaveText('fixture/project-101');
+        await expect(page.locator('#project-page .project-head h1')).toHaveText('找不到页面');
         await expect(page.locator('#project-page h3', { hasText: '项目概况' })).toHaveCount(0);
         await expect(page).toHaveTitle('找不到页面 · launchpad 管理');
         await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveCount(0);
@@ -60,7 +60,7 @@ test('#642 未知地址与项目内未知子页显示「找不到这个页面」
       await page.screenshot({ path: `.tmp/page-not-found/project-${width}.png`, fullPage: true });
       await page.locator('#project-page').getByRole('link', { name: '回到项目总览', exact: true }).click();
       await expect(page).toHaveURL(/#\/projects\/101\/overview$/); await expect(page.locator('#project-page [data-page-not-found]')).toHaveCount(0);
-      await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('项目总览'); await expect(page).toHaveTitle('fixture/project-101 · 项目总览 · launchpad 管理');
+      await expect(page.locator('#tabs [aria-current=page]')).toHaveText('项目总览'); await expect(page).toHaveTitle('fixture/project-101 · 项目总览 · launchpad 管理');
       // A project address with no section still opens 基本设置, as before.
       await page.goto(h.admin + '/#/projects/101'); await expect(page.locator('#console-secondary-nav .project-nav [aria-current=page]')).toHaveText('基本设置');
       // A broken project link that is not a project address at all is a top-level not-found.

@@ -36,7 +36,7 @@ test('creating, resetting and a failed reset are named, never folded into 就绪
   try {
     await login(page, f);
     await page.setViewportSize({ width: 1440, height: 900 });
-    const badge = page.locator('[data-project-environment-state]');
+    const badge = page.locator('#machine-status .side-card').filter({has:page.getByRole('heading',{name:'机器',exact:true})}).locator('dt:has-text("实时核验") + dd');
     const seen = [];
     for (const [live, label] of [['provisioning', '创建中'], ['resetting', '重置中'], ['reset_failed', '重置失败']]) {
       f.state.liveState = live;
@@ -59,7 +59,8 @@ test('creating, resetting and a failed reset are named, never folded into 就绪
     // A manager outage is still unknown rather than the last transitional word: the fallback text is its own state.
     f.state.offline = true;
     await page.getByRole('button', { name: '刷新电脑状态', exact: true }).click();
-    await expect(badge).toHaveText('电脑待核验');
+    await expect(badge).toHaveText('未知');
+    await expect(page.locator('#machine-status')).toContainText('manager_unavailable');
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });

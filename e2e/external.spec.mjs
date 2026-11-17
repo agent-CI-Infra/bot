@@ -124,7 +124,7 @@ test('a cancelled subscription response cannot reopen its secret in another proj
     });
     await page.getByRole('button',{name:'新增转发订阅',exact:true}).click();await page.getByLabel('订阅名称',{exact:true}).fill('Late secret');await page.getByLabel('接收 URL',{exact:true}).fill('https://receiver.invalid/late');await save(page);
     await expect.poll(()=>!!secret).toBe(true);await page.getByRole('button',{name:'取消',exact:true}).click();
-    await page.evaluate(()=>{location.hash='#/projects/202/external';});await expect(page.locator('.project-head h1')).toHaveText('fixture/project-202');
+    await page.evaluate(()=>{location.hash='#/projects/202/external';});await expect(page.locator('.project-head h1')).toHaveText('外部执行');await expect(page.locator('#console-context')).toHaveText('fixture / project-202 / 外部执行');await expect(page.getByRole('button',{name:'新增转发订阅',exact:true})).toBeVisible();
     release();await page.unrouteAll({behavior:'wait'});
     await expect(page.getByRole('dialog',{name:'一次性凭据'})).not.toBeVisible();await expect(page.locator('#external-secret')).toHaveValue('');
     expect(await page.content()).not.toContain(secret);expect(h.store.get("SELECT count(*) n FROM external_subscriptions WHERE name='Late secret'").n).toBe(1);

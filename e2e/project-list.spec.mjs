@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import {test,expect} from '@playwright/test';
 import { openProjectDanger } from './open-basic-folds.mjs';
@@ -54,7 +55,7 @@ test('项目按所有者分组，筛选和每页 50 条分页保持项目完整�
     }
     await expect(row('101').getByRole('switch')).toHaveCount(0);
     await row('101').getByRole('button', {name: '设置', exact: true}).click(); await expect(page).toHaveURL(/#\/projects\/101\/basic$/);
-    await page.getByRole('link', {name: '← 全部项目', exact: true}).click();
+    await switchConsoleProject(page, '');
     const filtersFold = page.getByTestId('project-filters-fold');
     await expect(filtersFold).toBeVisible();
     if (!await filtersFold.evaluate(el => el.open)) await filtersFold.locator('summary').click();

@@ -10,7 +10,7 @@ test('任务详情展示持久化优先级，调整后进入新级队尾并保�
   const {admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('priority-ui','101','task.request','queued','检查文档与交付优先级','{}')");
   const before=h.store.get("SELECT queue_seq FROM tasks WHERE id='priority-ui'").queue_seq;
-  await page.goto(h.admin);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.getByRole('button',{name:'退出登录',exact:true})).toBeVisible();await page.goto(h.admin+'/#/projects/101/activity');await expect(page.getByRole('heading',{name:'fixture/project-101',exact:true})).toBeVisible();
+  await page.goto(h.admin);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();await expect(page.getByRole('button',{name:'退出登录',exact:true})).toBeVisible();await page.goto(h.admin+'/#/projects/101/activity');await expect(page.getByRole('heading',{name:'运行状态',level:1,exact:true})).toBeVisible();
   await page.evaluate(()=>openTask('priority-ui'));
   await expect(page).toHaveURL(/#\/tasks\/priority-ui$/);
   await page.locator('#task-archive-summary').click();
