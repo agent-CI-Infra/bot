@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { discoverSets, loadWeights, planShards } from './test-plan.mjs';
@@ -7,17 +7,21 @@ import { discoverSets, loadWeights, planShards } from './test-plan.mjs';
 const median = values => { const sorted = [...values].sort((a, b) => a - b), i = Math.floor(sorted.length / 2); return sorted.length % 2 ? sorted[i] : (sorted[i - 1] + sorted[i]) / 2; };
 const integer = value => Number.isSafeInteger(value) && value >= 0;
 
+function identity(plan, report, { revision, runId, attempt = Infinity } = {}) {
+  assert.equal(report.version, 1, 'unsupported shard report');
+  assert.equal(report.planHash, plan.hash, 'shard planned a different corpus or weights');
+  assert.equal(report.corpusHash, plan.corpusHash, 'shard corpus differs');
+  assert.equal(report.shard.total, plan.shards.length, 'wrong shard count');
+  assert.ok(integer(report.shard.index) && report.shard.index >= 1 && report.shard.index <= plan.shards.length, 'invalid shard index');
+  assert.ok(integer(report.attempt) && report.attempt >= 1 && report.attempt <= attempt, 'invalid attempt');
+  if (revision !== undefined) assert.equal(report.revision, revision, 'wrong revision');
+  if (runId !== undefined) assert.equal(report.runId, runId, 'wrong workflow run');
+}
+
 export function mergeReports(plan, input, { jobs = 4, revision, runId, attempt = Infinity } = {}) {
   const latest = new Map(), seen = new Set();
   for (const report of input) {
-    assert.equal(report.version, 1, 'unsupported shard report');
-    assert.equal(report.planHash, plan.hash, 'shard planned a different corpus or weights');
-    assert.equal(report.corpusHash, plan.corpusHash, 'shard corpus differs');
-    assert.equal(report.shard.total, plan.shards.length, 'wrong shard count');
-    assert.ok(integer(report.shard.index) && report.shard.index >= 1 && report.shard.index <= plan.shards.length, 'invalid shard index');
-    assert.ok(integer(report.attempt) && report.attempt >= 1 && report.attempt <= attempt, 'invalid attempt');
-    if (revision !== undefined) assert.equal(report.revision, revision, 'wrong revision');
-    if (runId !== undefined) assert.equal(report.runId, runId, 'wrong workflow run');
+    identity(plan, report, { revision, runId, attempt });
     const key = `${report.shard.index}/${report.attempt}`;
     assert.ok(!seen.has(key), 'duplicate shard report for the same attempt'); seen.add(key);
     if (!latest.has(report.shard.index) || latest.get(report.shard.index).attempt < report.attempt) latest.set(report.shard.index, report);
@@ -51,6 +55,64 @@ export function mergeReports(plan, input, { jobs = 4, revision, runId, attempt =
       idleFraction: maximum ? 1 - shards.reduce((n, shard) => n + shard.seconds, 0) / (shards.length * maximum) : 0 }, reports };
 }
 
+// Diagnostics survive failed/missing shards, but never turn them into a successful gate.
+// Unknown test counts stay unknown: missing sets and report errors are separate metrics.
+export function summarizeReports(plan, input, options = {}) {
+  const latest = new Map(), ambiguous = new Set(), errors = [], counts = Object.fromEntries(['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo'].map(key => [key, 0]));
+  for (const report of input) {
+    try { identity(plan, report, options); assert.equal(report.jobs, options.jobs ?? 4, 'wrong worker count'); assert.ok(Array.isArray(report.sets), 'missing sets'); }
+    catch (error) { errors.push(report?.reportError || error.message); continue; }
+    const old = latest.get(report.shard.index);
+    if (!old || report.attempt > old.attempt) { latest.set(report.shard.index, report); ambiguous.delete(report.shard.index); }
+    else if (report.attempt === old.attempt) { ambiguous.add(report.shard.index); errors.push('duplicate latest shard report'); }
+  }
+  let missing = 0, failed = 0, reported = 0;
+  const selected = [];
+  for (const shard of plan.shards) {
+    const report = !ambiguous.has(shard.index) && latest.get(shard.index);
+    if (!report) { missing += shard.sets.length; continue; }
+    selected.push(report);
+    const groups = new Map();
+    for (const set of report.sets) { const values = groups.get(set.name) || []; values.push(set); groups.set(set.name, values); }
+    for (const set of report.sets) if (!shard.sets.some(wanted => wanted.name === set.name)) errors.push(`unexpected test set ${set.name}`);
+    for (const wanted of shard.sets) {
+      const group = groups.get(wanted.name);
+      try {
+        assert.equal(group?.length, 1, 'missing or duplicate set');
+        const set = group[0]; assert.deepEqual([...set.files].sort(), [...wanted.files].sort());
+        for (const key of Object.keys(counts)) assert.ok(integer(set.counts[key]), `missing TAP ${key}`);
+        assert.equal(set.counts.tests, set.counts.pass + set.counts.fail + set.counts.cancelled + set.counts.skipped + set.counts.todo, 'inconsistent TAP totals');
+        for (const key of Object.keys(counts)) counts[key] += set.counts[key];
+        reported++; if (!set.ok || set.counts.fail || set.counts.cancelled) failed++;
+      } catch (error) { missing++; errors.push(`${wanted.name}: ${error.message}`); }
+    }
+  }
+  const metrics = [
+    ...['tests', 'pass', 'fail', 'cancelled', 'skipped'].map(key => ({ name: key, value: counts[key], unit: 'count' })),
+    { name: 'failed sets', value: failed + missing, unit: 'count' },
+    { name: 'reported sets', value: reported, unit: 'count' }, { name: 'missing sets', value: missing, unit: 'count' },
+    { name: 'report errors', value: errors.length, unit: 'count' },
+  ];
+  const durations = selected.map(report => report.seconds).filter(value => Number.isFinite(value) && value >= 0);
+  if (durations.length) metrics.push({ name: 'pool duration max', value: Math.round(Math.max(...durations)), unit: 's' });
+  // Keep duration as a whole-pool wall clock, not a renamed maximum. A carried report
+  // would include the human's wait before rerunning; incomplete/mixed runs omit it.
+  if (selected.length === plan.shards.length && new Set(selected.map(report => report.attempt)).size === 1 &&
+      selected.every(report => integer(report.startedAt) && integer(report.endedAt) && report.endedAt >= report.startedAt)) {
+    metrics.push({ name: 'duration', value: Math.round((Math.max(...selected.map(report => report.endedAt)) - Math.min(...selected.map(report => report.startedAt))) / 1000), unit: 's' });
+  }
+  return { metrics, complete: !missing && !errors.length, errors };
+}
+
+export function writeResults(plan, input, options = {}, directory = '.tmp') {
+  mkdirSync(directory, { recursive: true });
+  rmSync(join(directory, 'unit-balance.json'), { force: true });
+  writeFileSync(join(directory, 'unit-summary.json'), JSON.stringify(summarizeReports(plan, input, options), null, 2) + '\n');
+  const result = mergeReports(plan, input, options); // Still throws on every incomplete or failed run.
+  writeFileSync(join(directory, 'unit-balance.json'), JSON.stringify(result, null, 2) + '\n');
+  return result;
+}
+
 // Median ratios remove a runner's broad slowdown before learning relative costs. A patrol must
 // still check hardware, source changes and the before/after balance; this produces a reviewable
 // candidate, never an automatic edit to CI or the checked-in weights.
@@ -73,20 +135,21 @@ export function candidateWeights(plan, balances, weights = loadWeights()) {
   return Object.fromEntries([...values].sort(([a], [b]) => a.localeCompare(b, 'en')).map(([name, samples]) => [name, Math.round(median(samples) * 1000) / 1000]));
 }
 
-function reportsIn(directory) {
-  return readdirSync(directory, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? reportsIn(join(directory, entry.name))
-    : /^unit-shard-\d+\.json$/.test(entry.name) ? [JSON.parse(readFileSync(join(directory, entry.name), 'utf8'))] : []);
+export function readReports(directory) {
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+    if (entry.isDirectory()) return readReports(join(directory, entry.name));
+    if (!/^unit-shard-\d+\.json$/.test(entry.name)) return [];
+    try { return [JSON.parse(readFileSync(join(directory, entry.name), 'utf8'))]; }
+    catch { return [{ version: 0, reportError: `${entry.name}: unreadable or invalid JSON` }]; }
+  });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const [command, ...paths] = process.argv.slice(2), plan = planShards(discoverSets());
   if (command === 'merge' && paths.length === 1) {
-    const result = mergeReports(plan, reportsIn(paths[0]), { revision: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID,
+    const result = writeResults(plan, readReports(paths[0]), { revision: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID,
       attempt: process.env.GITHUB_RUN_ATTEMPT ? Number(process.env.GITHUB_RUN_ATTEMPT) : Infinity });
-    writeFileSync('.tmp/unit-balance.json', JSON.stringify(result, null, 2) + '\n');
-    writeFileSync('.tmp/unit-summary.json', JSON.stringify({ metrics: [
-      ...['tests', 'pass', 'fail', 'cancelled', 'skipped'].map(key => ({ name: key, value: result.counts[key], unit: 'count' })),
-      { name: 'failed sets', value: 0, unit: 'count' }, { name: 'duration', value: Math.round(result.balance.maximumSeconds), unit: 's' }] }, null, 2) + '\n');
     const text = ['| Shard | Sets | Tests | Pool seconds | Estimated work | CPU |', '|---|---:|---:|---:|---:|---|',
       ...result.shards.map(shard => `| ${shard.index} | ${shard.sets} | ${shard.tests} | ${shard.seconds.toFixed(1)} | ${shard.estimatedSeconds.toFixed(1)} | ${shard.machine.cpu} |`),
       `\nPool max/min: ${result.balance.ratio?.toFixed(3)}; idle tail: ${(result.balance.idleFraction * 100).toFixed(1)}%\n`].join('\n');

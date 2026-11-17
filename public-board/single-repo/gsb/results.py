@@ -22,7 +22,7 @@ from xml.etree import ElementTree
 
 from .github import GitHubError
 
-RESULTS_VERSION = 1
+RESULTS_VERSION = 2                     # re-read cached jobs-only results whose quota was consumed by build records
 MAX_METRICS = 60
 MAX_ARTIFACTS = 3                       # downloads per run
 MAX_ARTIFACT_BYTES = 10 * 1024 * 1024
@@ -149,7 +149,10 @@ def extract(gh, repo, run):
         if metrics:
             return {"source": "check_run", "metrics": metrics[:MAX_METRICS], "version": RESULTS_VERSION}
     artifacts = gh.paginate(f"/repos/{repo}/actions/runs/{run['id']}/artifacts", key="artifacts", max_pages=1)
-    readable = sorted((a for a in artifacts if not a.get("expired") and 0 < (a.get("size_in_bytes") or 0) <= MAX_ARTIFACT_BYTES),
+    # Docker build records are a binary format, not JSON/JUnit result archives. Do not
+    # spend the bounded download budget on them before reaching a run's report artifacts.
+    readable = sorted((a for a in artifacts if not a.get("expired") and 0 < (a.get("size_in_bytes") or 0) <= MAX_ARTIFACT_BYTES
+                       and not (a.get("name") or "").lower().endswith(".dockerbuild")),
                       key=lambda a: a.get("name") or "")[:MAX_ARTIFACTS]
     groups = []
     for artifact in readable:

@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { parse } from 'yaml';
 import { publicBoardFixture } from './public-board-fixtures.mjs';
 
 // #938: what scheduled CI runs report about themselves becomes named numbers on the repository board, from check run
@@ -42,6 +44,20 @@ test('tables, JUnit and the simple JSON format become metrics deterministically;
   assert.deepEqual(fromArtifact.map(m => m.name), ['unit · tests', 'unit · failures', 'unit · errors', 'unit · skipped', 'unit · time', 'summary · tests']);
 });
 
+test('cached results from before build-record filtering are queued once for a fresh extraction', () => {
+  const value = python(`from types import SimpleNamespace
+from gsb.sync import Sync
+def queued(version):
+    row = {"id": 950, "attempt": 1, "status": "completed", "created_at": "2026-01-01", "event": "schedule", "results": {"version": version}}
+    history = SimpleNamespace(rows=lambda kind: [("950-1", row)], get=lambda kind, key: row)
+    keys = []
+    sync = SimpleNamespace(history=history, state={"pending": {}}, scheduled=lambda row: True, queue=keys.append)
+    Sync.queue_results(sync)
+    return keys
+print(json.dumps({"old": queued(1), "current": queued(results.RESULTS_VERSION)}))`, null);
+  assert.deepEqual(value, { old: ['run:950-1'], current: [] });
+});
+
 test('the board charts what scheduled runs reported, read once with the read-only token, and leaves other runs alone', async t => {
   const { boards, state, hook, get } = await publicBoardFixture(t);
   const at = days => new Date(Date.now() - days * 86400_000).toISOString();
@@ -52,10 +68,20 @@ test('the board charts what scheduled runs reported, read once with the read-onl
   // 950 reports a table in a check run of its suite; 951 uploads a JSON summary and a JUnit report; 952 has only its jobs.
   state.checkRuns[7001] = [{ id: 1, name: 'unit', output: { title: 'Unit', summary: '| tests | pass | fail | duration |\n|---|---|---|---|\n| 120 | 118 | 2 | 95.5s |', text: null } }];
   state.checkRuns[7004] = [{ id: 2, name: 'build', output: { summary: '| tests |\n|---|\n| 1 |' } }];
+  // Use the actual workflow's diagnostic names: adding readable non-metric artifacts must
+  // not push unit-summary beyond the board's three-download budget on a real Nightly run.
+  const jobs = parse(readFileSync(new URL('../.github/workflows/checks.yml', import.meta.url), 'utf8')).jobs;
+  const shardName = jobs['unit-shards'].steps.find(step => step.with?.name?.includes('matrix.shard')).with.name;
+  const balanceName = jobs.unit.steps.find(step => step.with?.path === '.tmp/unit-balance.json').with.name;
+  const artifactName = (name, shard) => name.replace('${{ matrix.shard }}', String(shard)).replace('${{ github.run_attempt }}', '1');
   state.artifacts[951] = [{ id: 61, name: 'unit-summary', size_in_bytes: 300, expired: false }, { id: 62, name: 'e2e-junit', size_in_bytes: 300, expired: false },
+    { id: 65, name: artifactName(shardName, 1), size_in_bytes: 300, expired: false }, { id: 66, name: artifactName(shardName, 2), size_in_bytes: 300, expired: false },
+    { id: 67, name: artifactName(balanceName), size_in_bytes: 300, expired: false },
+    ...[71, 72, 73, 74].map(id => ({ id, name: `org~repo~${id}.dockerbuild`, size_in_bytes: 300, expired: false })),
     { id: 63, name: 'huge-trace', size_in_bytes: 500 * 1024 * 1024, expired: false }, { id: 64, name: 'gone', size_in_bytes: 300, expired: true }];
   state.blobs[61] = zip({ 'unit-summary.json': JSON.stringify({ metrics: [{ name: 'tests', value: 130, unit: 'count' }, { name: 'duration', value: 100, unit: 's' }] }) });
   state.blobs[62] = zip({ 'e2e-junit.xml': '<testsuites tests="40" failures="1" errors="0" skipped="2" time="300"/>' });
+  for (const id of [65, 66, 67]) state.blobs[id] = zip({ 'diagnostic.json': JSON.stringify({ version: 1, sets: [], shards: [] }) });
   state.jobs[952] = [{ name: 'unit', status: 'completed', conclusion: 'failure', started_at: at(1), completed_at: new Date(Date.parse(at(1)) + 120_000).toISOString(), steps: [{ name: 'npm test', conclusion: 'failure' }] }];
 
   await hook('scheduled'); await boards.drain();
@@ -83,6 +109,8 @@ test('the board charts what scheduled runs reported, read once with the read-onl
   const paths = state.requests.map(r => r.path);
   assert.ok(!paths.some(p => p.includes('/check-suites/7004/')), 'the push run is not inspected');
   assert.ok(!paths.some(p => /\/actions\/artifacts\/(63|64)\/zip$/.test(p)));
+  assert.ok(!paths.some(p => /\/actions\/artifacts\/7[1-4]\/zip$/.test(p)), 'binary Docker build records do not consume the three result downloads');
+  assert.ok(paths.some(p => p.endsWith('/actions/artifacts/61/zip')), 'the full Nightly artifact set must still yield unit-summary');
   assert.ok(state.requests.filter(r => r.path.endsWith('/access_tokens')).every(r => r.body.permissions.checks === 'read' && Object.values(r.body.permissions).every(p => p === 'read')));
 
   // A second collection reads nothing again for runs whose result is known.
