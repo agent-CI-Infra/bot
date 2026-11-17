@@ -15,12 +15,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  unit:
-    name: unit
+  unit-shards:
+    name: unit shard ${{ matrix.shard }} / 2
     runs-on: ubuntu-latest
     # #734: the slowest recent push run spent 762 s in this job (run 43790528730, npm test alone 727 s), so 30 minutes
     # leaves room for a cold cache and still ends a wedged required check in half an hour instead of the platform default.
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -41,21 +45,64 @@ jobs:
       - run: timeout --signal=KILL 1500 npm test
         env:
           BOT_REQUIRE_PI: '1'
-          BOT_TEST_SUMMARY: .tmp/unit-summary.json
+          BOT_TEST_JOBS: '4'
+          BOT_TEST_SHARD: ${{ matrix.shard }}/2
+          BOT_TEST_REPORT: .tmp/unit-shard-${{ matrix.shard }}.json
 
-      # Scheduled and manual runs (Nightly) keep their totals for the public board's charts of scheduled runs (#938).
+      # Keep every attempt: rerunning a failed shard must not erase its first failure evidence.
       - uses: actions/upload-artifact@v7
-        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        if: always()
         with:
-          name: unit-summary
-          path: .tmp/unit-summary.json
-          if-no-files-found: ignore
-          retention-days: 30
+          name: unit-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: .tmp/unit-shard-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Compose files
         run: |
           docker compose config --quiet
           docker compose -f compose.yaml -f compose.build.yaml config --quiet
+
+  # Keep the required check named unit. Success requires both jobs and a disjoint,
+  # complete report for the current source/weight plan, including on merge_group.
+  unit:
+    name: unit
+    needs: unit-shards
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: unit-shard-*
+          path: .tmp/unit-shards
+      - run: node scripts/unit-shards.mjs merge .tmp/unit-shards
+      - name: All shard jobs succeeded
+        env:
+          SHARD_RESULT: ${{ needs.unit-shards.result }}
+        run: test "$SHARD_RESULT" = success
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: unit-balance-attempt-${{ github.run_attempt }}
+          path: .tmp/unit-balance.json
+          if-no-files-found: ignore
+          retention-days: 14
+      # Preserve the public board's existing Nightly metric names and artifact.
+      - uses: actions/upload-artifact@v7
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        with:
+          name: unit-summary
+          path: .tmp/unit-summary.json
+          overwrite: true
+          if-no-files-found: ignore
+          retention-days: 30
 
   e2e:
     name: e2e
