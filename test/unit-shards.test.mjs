@@ -151,4 +151,7 @@ test('the workflow keeps the unit gate dependent on two four-worker shards and p
   assert.ok(gate.steps.some(step => step.env?.SHARD_RESULT === '${{ needs.unit-shards.result }}' && step.run.includes('= success')));
   assert.ok(shard.steps.some(step => step.if === 'always()' && step.with?.name?.includes('github.run_attempt')));
   assert.ok(gate.steps.some(step => step.with?.name === 'unit-summary'));
+  const uploads = [...shard.steps, ...gate.steps].filter(step => step.uses?.startsWith('actions/upload-artifact@') && step.with?.path?.startsWith('.tmp/unit-'));
+  assert.equal(uploads.length, 3, 'both shard reports, the balance report and the Nightly summary must be configured');
+  for (const step of uploads) assert.equal(step.with['include-hidden-files'], true, 'the explicit JSON reports under .tmp must upload');
 });
