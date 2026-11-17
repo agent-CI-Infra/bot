@@ -74,8 +74,10 @@ for(const role of ['super','member']) test(`${role}: sidebar, phone destinations
     await page.setViewportSize({width:1440,height:1000});
     await page.getByRole('button',{name:'English',exact:true}).click();
     await expect(page.locator('.console-primary-nav a')).toHaveText(['Project overview','Task board','Needs attention','Management assistant','Releases','Project knowledge','Activity',...(role==='super'?['Usage & costs']:[]),'Project settings',...(role==='member'?['More']:[])]);
+    if(role==='super') {await expect(page.locator('.console-settings-nav')).toHaveAccessibleName('Settings and administration');await expect(page.locator('.console-settings-nav a')).toHaveText(['Personal settings','Global settings']);}
     await page.getByRole('button',{name:'中文',exact:true}).click();
     await expect(page.locator('.console-primary-nav a').first()).toHaveText('项目总览');
+    if(role==='super') {await expect(page.locator('.console-settings-nav')).toHaveAccessibleName('设置与管理');await expect(page.locator('.console-settings-nav a')).toHaveText(['个人设置','全局设置']);}
     expect(errors).toEqual([]);
   }finally{await h.stop();}
 });

@@ -503,6 +503,7 @@ function initConsoleShell() {
   const scope = element('div', '', 'console-project-picker'); scope.append(scopeCaption, scopePickerButton('console-project'));
   const tabs = $('tabs'), primary = element('div', '', 'console-primary-nav'), settings = element('div', '', 'console-settings-nav');
   settings.setAttribute('role', 'group'); settings.setAttribute('aria-label', t('nav.settings_group'));
+  settings.setAttribute('data-i18n', 'nav.settings_group'); settings.setAttribute('data-i18n-attr', 'aria-label');
   tabs.replaceChildren(primary, settings); sidebar.append(scope, tabs);
   const locationBox = element('div', '', 'console-location'); locationBox.id = 'console-location'; locationBox.hidden = true;
   const area = element('span', '', 'eyebrow'), context = element('span'); area.id = 'console-area'; context.id = 'console-context';
