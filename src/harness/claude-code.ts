@@ -129,7 +129,7 @@ export function claudeConfiguration(): ClaudeConfiguration {
   if (c.env !== undefined) {
     if (!c.env || typeof c.env !== 'object' || Array.isArray(c.env)) return fail('claude_configuration_invalid');
     for (const [k, v] of Object.entries(c.env)) {
-      if (typeof v !== 'string' || !/^[A-Z_][A-Z0-9_]*$/.test(k) || /^(BOT_|HOME$|PATH$|TMPDIR$)/.test(k)) return fail('claude_configuration_invalid');
+      if (typeof v !== 'string' || !(k==='CLAUDE_CONFIG_DIR'||/^FIXTURE_[A-Z0-9_]+$/.test(k))) return fail('claude_configuration_invalid');
       extraEnv[k] = v;
     }
   }
@@ -352,7 +352,7 @@ async function preflightFileProvider(provider: FileBackedModelProvider, expected
 
 function isAllowedClaudeTool(name: string, allowedMcpTools: Set<string>, egress: boolean): boolean {
   if (name.startsWith('mcp__bot__')) return allowedMcpTools.has(name);
-  if(name.startsWith('mcp__'))return true;
+  if(name.startsWith('mcp__'))return false;
   if (FORBIDDEN_CLAUDE_TOOLS.has(name)) return false;
   if (!egress && (name === 'WebFetch' || name === 'WebSearch')) return false;
   return /^[A-Z][A-Za-z0-9_]{0,63}$/.test(name);
@@ -523,7 +523,7 @@ export async function runClaudeCode<T>(
         !Array.isArray(m.tools) ||
         m.tools.some((n: string) => !isAllowedClaudeTool(n, allowedMcpSet, egress)) ||
         !Array.isArray(m.mcp_servers) ||
-        !m.mcp_servers.some((s: any) => s.name === 'bot' && s.status === 'connected')
+        !m.mcp_servers.some((s: any) => s.name === 'bot' && s.status === 'connected') || m.mcp_servers.some((s:any)=>s.name!=='bot')
       ) {
         return fail('claude_capability_mismatch');
       }

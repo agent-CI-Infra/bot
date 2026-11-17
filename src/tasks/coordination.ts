@@ -114,7 +114,7 @@ export async function runCoordinator(s:Store,row:Row,token:string,manager?:Manag
  const submit={type:'function',function:{name:'submit_coordination',description:'Submit coordination advice or a concrete human decision; no product execution or delivery authority.',parameters:coordinationResultSchema}};
  const prepare:NonNullable<RoleRunOptions['prepare']>=async(instance,resolved)=>{
   if(!['pi','codex','claude_code'].includes(resolved.snapshot.harness.id))return;
-  if(!manager)stop('pi_environment_required','waiting_configuration','Coordinator 的 Pi 后端需要项目电脑连接。');
+  if(!manager)stop('pi_environment_required','waiting_configuration','Coordinator 所选 Harness 需要项目电脑连接。');
   const environment=await manager!.call('GET','/v1/projects/'+row.repository_id);
   if(!environment||!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment');
   const workspace=new Workspace(s,manager!,{...task,generation:environment.generation},new Redactor(),guard,()=>{});

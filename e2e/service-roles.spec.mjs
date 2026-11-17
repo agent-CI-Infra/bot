@@ -22,6 +22,8 @@ test('全局设置的服务角色页查看和修改内置角色，新建、停�
     await expect(repository.getByLabel('Issue',{exact:true})).toHaveCount(0);
     await expect(repository.getByLabel('当前会话记录',{exact:true})).toHaveCount(0);
     await expect(assistant.getByRole('combobox',{name:'Agent 后端',exact:true})).toHaveValue('native');
+    const captureBackend=async state=>{for(const width of [1440,390]){await page.setViewportSize({width,height:900});await expect(assistant.getByRole('combobox',{name:'Agent 后端',exact:true})).toBeVisible();expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/service-roles/backend-'+state+'-'+width+'.png',fullPage:true});}await page.setViewportSize({width:1440,height:1000});};
+    await captureBackend('before-save');
     await assistant.getByRole('combobox',{name:'Agent 后端',exact:true}).selectOption('pi');
     await expect(assistant.locator('.endpoint-warning')).toContainText('不会改用其他模型');
     await expect(repository).toContainText('由每个群绑定的权限档位决定'); await expect(repository).toContainText('个人设置 → 飞书绑定');
@@ -35,6 +37,9 @@ test('全局设置的服务角色页查看和修改内置角色，新建、停�
     await expect(assistant).not.toContainText('预算上限');
     expect(h.store.get("SELECT harness FROM service_roles WHERE id='management-assistant'").harness).toBe('pi');
     expect(h.store.get("SELECT model_id,budget FROM service_roles WHERE id='management-assistant'")).toEqual({ model_id: shared.id, budget: null });
+    await page.reload();
+    await expect(assistant.getByRole('combobox',{name:'Agent 后端',exact:true})).toHaveValue('pi');
+    await captureBackend('saved-reloaded');
     await page.screenshot({ path: '.tmp/service-roles/settings-desktop.png', fullPage: true });
 
     // The repository assistant: a new prompt. An edit saved elsewhere first is reported, not overwritten.

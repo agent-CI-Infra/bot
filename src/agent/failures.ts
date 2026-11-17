@@ -128,7 +128,7 @@ const codeActions: Record<string,string> = {
   stage_policy_changed:'阶段策略已变化，任务已暂停。等到安全检查点后采用新配置，旧 run 和证据保留为历史。',
   stage_plan_stale:'阶段计划的合同版本已过期，任务已暂停。显式重试或采用当前配置并重新规划后继续。',
   required_stages_incomplete:'必需阶段缺少当前候选的合格证据。读取阶段等待原因，安排原角色修复或补证后再提名；阶段齐备仍需独立 QA。',
-  stage_retry_exhausted:'这个阶段已达到有限重试上限。检查失败记录，修正阶段策略或运行环境后采用新配置继续。',
+  stage_retry_exhausted:'这是旧版本留下的阶段次数上限记录；当前版本将次数阈值作为 Manager 提醒。检查最近运行和提醒，由 Manager 决定如何继续。',
   stage_budget_exhausted:'这个阶段的累计预算已用尽，恢复运行不会重开预算。保留产物和证据，调整策略并采用新配置后继续。',
   candidate_writer_busy:'同一候选已有写者或只读检视运行。等待当前运行收集结束后继续，不同时修改被检视内容。',
   role_capacity:'这个角色已达到项目设定的并发上限，任务在队列里等一个运行结束；不消耗尝试次数，也不要手动重试。',

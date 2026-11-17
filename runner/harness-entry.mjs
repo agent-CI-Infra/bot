@@ -282,7 +282,7 @@ try {
 
   if (rawConfig.extra_env && typeof rawConfig.extra_env === 'object' && !Array.isArray(rawConfig.extra_env)) {
     for (const [k, v] of Object.entries(rawConfig.extra_env)) {
-      if (/^[A-Z_][A-Z0-9_]*$/.test(k) && !/^(BOT_|HOME$|PATH$|TMPDIR$)/.test(k) && typeof v === 'string') {
+      if (local && /^FIXTURE_[A-Z0-9_]+$/.test(k) && typeof v === 'string') {
         childEnv[k] = v;
         if (/TOKEN|SECRET|KEY/i.test(k)) addSecret(v);
       }
@@ -347,9 +347,11 @@ try {
       '--verbose',
       '--tools', 'default',
       '--disallowedTools', disallowed.join(','),
-      '--setting-sources', 'project,local',
-      '--settings', JSON.stringify({ autoUpdatesChannel: 'stable' }),
+      '--setting-sources', '',
+      '--add-dir', repoDir,
+      '--settings', JSON.stringify({ autoUpdatesChannel: 'stable', disableAllHooks:true }),
       '--mcp-config', JSON.stringify(mcpConfig),
+      '--strict-mcp-config',
       '--dangerously-skip-permissions',
       '--no-chrome',
       '--model', String(rawConfig.model || 'claude-sonnet-4-5-20250929'),
@@ -370,6 +372,7 @@ try {
       CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: '3600000',
       ENABLE_TOOL_SEARCH: 'false',
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+      CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
       DISABLE_AUTOUPDATER: '1',
       DISABLE_TELEMETRY: '1',
       DISABLE_ERROR_REPORTING: '1',

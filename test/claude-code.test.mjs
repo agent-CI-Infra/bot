@@ -169,7 +169,9 @@ test('Claude Code protocol fixture: seven RoleRun operations, container stdio MC
     assert.ok(disallowed.includes(name), name);
   }
   assert.ok(launch.args.includes('--dangerously-skip-permissions'));
-  assert.ok(!launch.args.includes('--strict-mcp-config'));
+  assert.ok(launch.args.includes('--strict-mcp-config'));
+  assert.equal(launch.args[launch.args.indexOf('--setting-sources')+1],'');
+  assert.equal(JSON.parse(launch.args[launch.args.indexOf('--settings')+1]).disableAllHooks,true);
   assert.ok(launch.args.includes('--setting-sources'));
   assert.ok(!launch.args.includes('--bare'));
   assert.ok(launch.mcp_config.command);
@@ -530,7 +532,7 @@ function providerReply(res, { id, content, args = {}, input = 5, output = 777, t
 // Real pinned native executable + synthetic Anthropic wire server over the container stdio MCP bridge and loopback model relay.
 test('pinned native Claude Code binary uses stream-json, native workspace tools, stdio MCP bridge and loopback model relay (synthetic provider)', async t => {
   let nativeToolCalls = 0, nativeRequests = 0;
-  let activeRepo = '';
+  let activeRepo = '',sawProjectInstructions=false;
   const f = await claudeFixture(t, {
     native: true,
     respond: async (req, res) => {
@@ -543,6 +545,7 @@ test('pinned native Claude Code binary uses stream-json, native workspace tools,
       const observing = sysText.includes('INDEPENDENT_REVIEW_PROBE');
       if (observing) assert.ok(!raw.includes('DEV_PRIVATE_MARKER_170'));
       // Native project instructions are allowed, including on a resumed session.
+      if(raw.includes('PROJECT_CONTEXT_834'))sawProjectInstructions=true;
 
       // Native container tools (Bash, Read, Write) ARE enabled; platform low-level write_file/run_command MCP tools and EnterWorktree/WebFetch are NOT offered.
       const names = body.tools.map(t => t.name);
@@ -587,6 +590,7 @@ test('pinned native Claude Code binary uses stream-json, native workspace tools,
   const devWsId = '1'.repeat(48);
   const devRepo = join(f.config.stateDirectory, 'tasks', devWsId, 'repo');
   mkdirSync(devRepo, { recursive: true });
+  writeFileSync(join(devRepo,'CLAUDE.md'),'PROJECT_CONTEXT_834');
   writeFileSync(join(devRepo, 'add.mjs'), 'export const add = (a, b) => a - b;\n');
   writeFileSync(join(devRepo, 'add.test.mjs'), 'import {add} from "./add.mjs"; import assert from "node:assert/strict"; assert.equal(add(2,3),5);\n');
   const commandOptions = { cwd: devRepo, encoding: 'utf8', timeout: 5000, env: { LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'] };
@@ -614,7 +618,7 @@ test('pinned native Claude Code binary uses stream-json, native workspace tools,
   assert.equal(f.state().version, '2.1.319');
   assert.equal(f.s.get('SELECT count(*) n FROM model_requests').n, nativeRequests);
 
-  // Native project settings and hooks remain available on resume.
+  // Project instructions remain available; candidate hooks and additional MCP servers cannot widen access on resume.
   const state = f.state(), poison = join(f.root, 'hook-ran');
   mkdirSync(join(state.cwd, '.claude'), { recursive: true });
   writeFileSync(join(state.cwd, 'CLAUDE.md'), 'PROJECT_CONTEXT_834');
@@ -622,7 +626,8 @@ test('pinned native Claude Code binary uses stream-json, native workspace tools,
   writeFileSync(join(state.cwd, '.mcp.json'), JSON.stringify({ mcpServers: { poison: { command: 'touch', args: [poison] } } }));
   await runRole(f.spec, 'dev');
   assert.equal(f.state().recoveryMode, 'native_resume');
-  assert.ok(existsSync(poison));
+  assert.equal(existsSync(poison),false);
+  assert.equal(sawProjectInstructions,true,'disabling executable project settings preserves CLAUDE.md discovery');
   measured = instanceUsage(f.s, output.instance_id);
   assert.equal(measured.model_requests, nativeRequests);
   assert.equal(measured.output_tokens, nativeRequests * 777);
@@ -779,4 +784,13 @@ test('default direct Claude uses the native provider and keeps MCP authority wit
  assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE request_ref IS NOT NULL").n,0);
  assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE request_snapshot IS NOT NULL").n,0);
  assert.ok(f.s.get("SELECT count(*) n FROM task_history WHERE type='harness_event' AND json_extract(data,'$.usage')='native_events'").n>0);
+});
+
+test('operator extra env cannot inject runtime loaders, model routing or credentials',async t=>{
+ const {claudeConfiguration}=await import('../dist/harness/claude-code.js');
+ const f=await claudeFixture(t),original=JSON.parse(readFileSync(process.env.BOT_CLAUDE_CODE_CONFIG,'utf8'));
+ for(const name of ['NODE_OPTIONS','LD_PRELOAD','PYTHONPATH','GH_TOKEN','ANTHROPIC_API_KEY','ANTHROPIC_BASE_URL','OPENAI_API_KEY']){
+  writeFileSync(process.env.BOT_CLAUDE_CODE_CONFIG,JSON.stringify({...original,env:{[name]:'fixture-injected'}}));
+  assert.throws(()=>claudeConfiguration(),{code:'claude_configuration_invalid'},name);
+ }
 });
