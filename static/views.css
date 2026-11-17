@@ -208,7 +208,10 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
   #settings-panel .global-project-table:not(.is-hidden) .project-list-row{min-height:84px}
   .global-project-table .project-cell:not([data-label="项目"]){flex-wrap:nowrap}
   .global-project-table .project-cell[data-label="操作"]>.actions{flex-wrap:nowrap}
-  .global-project-table .project-cell .status{white-space:nowrap}
+  /* #978: this table's columns are narrower than the state sentences (门禁 66–96px, 看板 next to its switch), so the
+     base .status nowrap let the shared ellipsis cut「发布检查未完成」to「发布检…」. Chips wrap to another line and the
+     row grows with them; #/projects keeps its own nowrap because that list lays these chips in .project-features. */
+  .global-project-table .project-cell .status{white-space:normal}
 }
 .project-actions-menu{position:static;display:inline-flex;min-width:0}
 .project-actions-toggle{list-style:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;padding:5px 10px;border:1px solid var(--color-border);border-radius:var(--radius-2);background:var(--color-surface);color:var(--color-text);cursor:pointer;font-size:var(--font-size-1);user-select:none}
