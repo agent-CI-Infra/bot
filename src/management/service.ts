@@ -124,10 +124,12 @@ export class ManagementService {
     // Whether this person may confirm a development as a CI change (#931): project configuration rights.
     if(taskCreation.allowed){try{authorize(actor,'config.write',{project_id:project});taskCreation.workflow_changes=true;}catch{taskCreation.workflow_changes=false;}}
     const roles=roleApi(this.store,this.user(actor),'GET',new URL('http://local/api/repositories/'+project+'/roles'),{}) as {configuration:any;preview:{error?:string}[]};
-    // manager is the project's flow definition; workflows lists the work types in the shape older clients read.
+    // manager is the project's flow definition; workflows lists the work types in the shape older clients read. A section
+    // replaces the layers below it, so effective is the text in force; each layer keeps its source and version, not a
+    // second copy of the text (#1026: the copies pushed this result past the management tool budget).
     return traceClean({project_id:project,revision:this.revision({project_id:project}),task_creation:taskCreation,manager:{prompt:manager.prompt,work:manager.work,events:manager.events,migration:manager.migration},
       workflows:work.map(w=>({...w,
-      prompt:{...w.prompt,version:w.prompt.source==='repository'?sources.sha:parameterHash(w.prompt.effective),layers:w.prompt.layers.map((l:any)=>({...l,version:l.source==='repository'?sources.sha:parameterHash(l.content)}))},
+      prompt:{...w.prompt,version:w.prompt.source==='repository'?sources.sha:parameterHash(w.prompt.effective),layers:w.prompt.layers.map(({content,...l}:any)=>({...l,version:l.source==='repository'?sources.sha:parameterHash(content)}))},
       model:{...w.model,source:w.model.id||w.model.default_id?'console':'builtin',version:this.store.get('SELECT version FROM models WHERE id=?',w.model.id||w.model.default_id)?.version??null}})),
       roles:{...roles,version:parameterHash(roles.configuration),roles:roles.configuration.roles.map((r:any)=>({...r,source:!roles.configuration.legacy||r.persona_prompt?'console':'builtin'}))},
       skills:rules.files.filter((f:any)=>f.path.startsWith('.agents/skills/')).map((f:any)=>({path:f.path,source:f.source,version:sources.sha,content:f.effective})),
