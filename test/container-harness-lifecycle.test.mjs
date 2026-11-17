@@ -857,3 +857,70 @@ test('minor lifecycle fixes: createToolDispatch handles JSON null replies, Works
   assert.equal(prepCodex.version, '0.166.0');
   assert.equal(prepCodex.command, '/opt/agent-tools/codex/0.166.0/bin/codex');
 });
+
+test('login shells keep the CLI PATH after a Debian-style /etc/profile resets it (#1024)', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-login-path-'));
+  const wsId = hex48();
+  mkdirSync(join(root, 'tasks', wsId, 'repo'), { recursive: true, mode: 0o700 });
+  mkdirSync(join(root, 'project-notes'), { recursive: true, mode: 0o700 });
+  t.after(async () => {
+    await execLocalRunner(root, { type: 'reap', workspace_id: wsId }).catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  // Tools installed by the computer user (local mode: HOME is <workspace>/home), one in each user-level directory.
+  const tools = { '.local/bin': 'pip-tool-1024', '.cargo/bin': 'cargo-tool-1024', '.npm-global/bin': 'npm-tool-1024' };
+  for (const [dir, name] of Object.entries(tools)) {
+    mkdirSync(join(root, 'home', dir), { recursive: true });
+    writeFileSync(join(root, 'home', dir, name), `#!/bin/sh\nprintf ${name}-ran\n`, { mode: 0o755 });
+  }
+  // Stands in for Debian's /etc/profile, which a login shell reads before $HOME/.profile; the host's own is never used.
+  const etcProfile = join(root, 'etc-profile');
+  writeFileSync(etcProfile, 'PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games"\nexport PATH\n');
+  const probe = `printf '%s\\n' "$PATH"; ${Object.values(tools).join('; ')}; echo; command -v gh; command -v node`;
+  const cliScript = join(root, 'login-cli.mjs');
+  writeFileSync(cliScript, `import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+const login = (shell, script) => {
+  try { return execFileSync(shell, ['-c', script + '; ' + ${JSON.stringify(probe)}, shell, process.env.FIXTURE_ETC_PROFILE], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim().split('\\n'); }
+  catch (error) { return { error: String(error.stderr || error.message) }; }
+};
+writeFileSync(process.env.FIXTURE_LOGIN_MARKER, JSON.stringify({
+  cliPath: process.env.PATH,
+  sh: login('/bin/sh', '. "$1"; . "$HOME/.profile"'),
+  bash: login('/bin/bash', '. "$1"; . "$HOME/.bash_profile"'),
+  nested: login('/bin/sh', '. "$1"; . "$HOME/.profile"; . "$1"; . "$HOME/.profile"'),
+}));
+`);
+
+  const instanceId = hex48(), marker = join(root, 'login.json');
+  const config = {
+    instance_id: instanceId, harness: 'codex', executable: process.execPath, executable_args: [cliScript],
+    run_token: 'rrt_' + hex48(), model: 'gpt-5-codex', system_prompt: '', max_turns: 1, max_output_tokens: 1024,
+    session_id: null, resume: false, session_key: 'default', state_workspace_id: wsId, egress: false,
+    github_host: 'github.com', allow_http_git: false, mcp_tools: [],
+    extra_env: { FIXTURE_ETC_PROFILE: etcProfile, FIXTURE_LOGIN_MARKER: marker },
+  };
+  const saved = await execLocalRunner(root, { type: 'workspace_harness_config', workspace_id: wsId,
+    base64: Buffer.from(JSON.stringify(config)).toString('base64'), offset: 0, final: true });
+  assert.equal(saved.ok, true);
+  const started = await execLocalRunner(root, { type: 'workspace_harness_start', workspace_id: wsId, instance_id: instanceId });
+  assert.equal(started.result?.started, true, JSON.stringify(started));
+  const result = await waitFor(() => existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')) : null, 10_000);
+
+  const wrapperGh = join(root, 'tasks', wsId, 'agent', 'bin', 'gh');
+  const cliPath = result.cliPath.split(':');
+  // The CLI PATH itself: wrapper first, then Node (local mode adds the runner's own Node), then the user's tool directories.
+  assert.equal(cliPath[0], dirname(wrapperGh));
+  assert.ok(cliPath.includes(dirname(process.execPath)));
+  assert.ok(Object.keys(tools).every(dir => cliPath.indexOf(join(root, 'home', dir)) < cliPath.indexOf('/usr/bin')));
+  for (const shell of ['sh', 'bash', 'nested']) {
+    const lines = result[shell];
+    assert.ok(Array.isArray(lines), `${shell}: ${lines?.error}`);
+    // Same order as the CLI PATH; only the directories the system profile added follow it.
+    assert.equal(lines[0], `${result.cliPath}:/usr/local/games:/usr/games`, shell);
+    assert.equal(lines[1], Object.values(tools).map(name => `${name}-ran`).join(''), shell);
+    assert.equal(lines[2], wrapperGh, shell);
+    assert.equal(lines[3], process.execPath, shell);
+  }
+});

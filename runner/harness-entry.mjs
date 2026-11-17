@@ -11,6 +11,7 @@ import { maskedStream } from './command-output.mjs';
 import { environment as baseEnv, workspaceTag } from './command.mjs';
 import { startModelRelay } from './model-relay.mjs';
 import { local, runnerRoot, tasksDirectory } from './paths.mjs';
+import { bashProfile, loginProfile } from './login-profile.mjs';
 import { createTokenExchange } from './token-exchange.mjs';
 
 const ID48_RE = /^[a-f0-9]{48}$/;
@@ -224,22 +225,7 @@ try {
   );
   await chmod(`${wrapperBinDir}/gh`, 0o700);
 
-  // Login shells (`bash -lc` / `sh -lc`, used by Claude Code's shell snapshot and Codex's shell tool) source
-  // `/etc/profile`, which overwrites PATH on Debian. Restore the wrapper and bundled runtime directories at the front.
-  const loginProfile = [
-    '# Managed by Bot container harness (#705)',
-    'case "${PATH:-}" in',
-    '  "${BOT_NODE_BIN_DIR}:"*|"${BOT_WRAPPER_BIN_DIR}:${BOT_NODE_BIN_DIR}:"*) ;;',
-    '  *) [ -n "${BOT_NODE_BIN_DIR:-}" ] && PATH="${BOT_NODE_BIN_DIR}${PATH:+:$PATH}" ;;',
-    'esac',
-    'case "${PATH:-}" in',
-    '  "${BOT_WRAPPER_BIN_DIR}:"*) ;;',
-    '  *) [ -n "${BOT_WRAPPER_BIN_DIR:-}" ] && PATH="${BOT_WRAPPER_BIN_DIR}${PATH:+:$PATH}" ;;',
-    'esac',
-    'export PATH',
-    '',
-  ].join('\n');
-  const bashProfile = 'if [ -f "$HOME/.profile" ]; then\n  . "$HOME/.profile"\nfi\n';
+  // Login shells restore the CLI's PATH (BOT_LOGIN_PATH below) after `/etc/profile` resets it; see login-profile.mjs.
   for (const [name, content] of [['.profile', loginProfile], ['.bash_profile', bashProfile]]) {
     const tmpProfile = `${homeDir}/${name}.tmp`;
     await unlink(tmpProfile).catch(() => {});
@@ -274,7 +260,7 @@ try {
     BOT_CREDENTIAL_HELPER_URL: credHelper.url,
     BOT_CREDENTIAL_HELPER_SECRET: credHelper.secret,
     BOT_WRAPPER_BIN_DIR: wrapperBinDir,
-    BOT_NODE_BIN_DIR: nodeBinDir,
+    BOT_LOGIN_PATH: childPath,
     BOT_GITHUB_HOST: githubHost,
     ...(allowHttpGit ? { BOT_ALLOW_HTTP_GIT_CREDENTIAL: 'true' } : {}),
     ...(local && process.env.BOT_REAL_GH_BIN ? { BOT_REAL_GH_BIN: process.env.BOT_REAL_GH_BIN } : {}),

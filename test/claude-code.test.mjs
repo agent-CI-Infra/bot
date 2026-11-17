@@ -533,7 +533,7 @@ function providerReply(res, { id, content, args = {}, input = 5, output = 777, t
 // Real pinned native executable + synthetic Anthropic wire server over the container stdio MCP bridge and loopback model relay.
 test('pinned native Claude Code binary uses stream-json, native workspace tools, stdio MCP bridge and loopback model relay (synthetic provider)', async t => {
   let nativeToolCalls = 0, nativeRequests = 0;
-  let activeRepo = '',sawProjectInstructions=false;
+  let activeRepo = '',sawProjectInstructions=false,sawUserTool=false;
   const f = await claudeFixture(t, {
     native: true,
     respond: async (req, res) => {
@@ -547,6 +547,8 @@ test('pinned native Claude Code binary uses stream-json, native workspace tools,
       if (observing) assert.ok(!raw.includes('DEV_PRIVATE_MARKER_170'));
       // Native project instructions are allowed, including on a resumed session.
       if(raw.includes('PROJECT_CONTEXT_834'))sawProjectInstructions=true;
+      // Only the Bash tool result carries the user tool's output (#1024).
+      if(raw.includes('USER_TOOL_RAN_1024'))sawUserTool=true;
 
       // Native container tools (Bash, Read, Write) ARE enabled; platform low-level write_file/run_command MCP tools and EnterWorktree/WebFetch are NOT offered.
       const names = body.tools.map(t => t.name);
@@ -578,7 +580,7 @@ test('pinned native Claude Code binary uses stream-json, native workspace tools,
         mcp__bot__read_task_record: { ref: 'task:t' },
         Read: { file_path: join(activeRepo, 'add.mjs') },
         Write: { file_path: join(activeRepo, 'add.mjs'), content: 'export const add = (a, b) => a + b;\n' },
-        Bash: { command: 'env -u NODE_TEST_CONTEXT node --test add.test.mjs' },
+        Bash: { command: 'project-tool-1024 && env -u NODE_TEST_CONTEXT node --test add.test.mjs' },
         mcp__bot__finish: observing
           ? { summary: 'Preseeded defect detected', findings: [{ description: 'add returns one too many', evidence: ['node --test add.test.mjs exited 1'] }], inspected_scope: ['add.mjs'], unknowns: [] }
           : { summary: 'Real CLI edited repo natively and reported via stdio MCP' },
@@ -594,6 +596,10 @@ test('pinned native Claude Code binary uses stream-json, native workspace tools,
   writeFileSync(join(devRepo,'CLAUDE.md'),'PROJECT_CONTEXT_834');
   writeFileSync(join(devRepo, 'add.mjs'), 'export const add = (a, b) => a - b;\n');
   writeFileSync(join(devRepo, 'add.test.mjs'), 'import {add} from "./add.mjs"; import assert from "node:assert/strict"; assert.equal(add(2,3),5);\n');
+  // Installed by the computer user; Claude Code's Bash runs from a login-shell snapshot, after /etc/profile resets PATH.
+  const userBin = join(f.config.stateDirectory, 'home', '.local', 'bin');
+  mkdirSync(userBin, { recursive: true });
+  writeFileSync(join(userBin, 'project-tool-1024'), '#!/bin/sh\necho USER_TOOL_RAN_1024\n', { mode: 0o755 });
   const commandOptions = { cwd: devRepo, encoding: 'utf8', timeout: 5000, env: { LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'] };
   assert.throws(() => execFileSync(process.execPath, ['--test', 'add.test.mjs'], commandOptions), e => e.status === 1);
 
@@ -609,6 +615,7 @@ test('pinned native Claude Code binary uses stream-json, native workspace tools,
   assert.equal(readFileSync(join(devRepo, 'add.mjs'), 'utf8'), 'export const add = (a, b) => a + b;\n');
   assert.match(execFileSync(process.execPath, ['--test', 'add.test.mjs'], commandOptions), /pass 1/);
   assert.ok(f.modelCalls >= 2);
+  assert.equal(sawUserTool, true, 'native Bash finds tools in the computer user\'s .local/bin');
 
   let measured = instanceUsage(f.s, output.instance_id);
   assert.equal(measured.model_requests, nativeRequests);

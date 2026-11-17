@@ -16,6 +16,7 @@ Role 服务选择执行器并组装角色说明、assignment 和任务事实引�
 - **Role/Manager**：选择角色、assignment、人设、记忆入口与 Harness；Review 反馈通过持久化引用回到同一 `dev` 实例。
 - **任务与平台工具**：`claude_code` 与 `codex` 在容器内经 `runner/mcp-bridge.mjs`（stdio MCP `bot`）调用与内置路径相同的平台工具、执行器与完成提交校验器；已被容器原生工具替代的底层 `read_file`/`write_file`/`run_command`/`start_agent` 不在 MCP 重复提供。提交通过后不再接受后续工具修改。
 - **工作区与凭据隔离**：容器内 CLI 在 `<task_dir>/repo` 直接操作任务检出；默认由 CLI/Pi 原生客户端直接连接供应商：使用其已配置的登录，或把选定项目模型的凭据通过私有启动配置交给原生客户端。此模式下模型凭据属于运行环境中的 Harness，不能宣称它对原生 Shell 不可见；长期 GitHub 凭据仍不下发。显式网关模式才用 `rrt_…` 经文件邮箱转发模型请求；Git 与 `gh` 通过 `runner/git-credential-bot.mjs` 和 `runner/gh-wrapper.mjs` 按需申请短期只读安装令牌并流式脱敏。
+- **命令路径**：CLI 的 `PATH` 依次是 `gh` 包装目录、Node 目录、电脑用户的 `~/.local/bin`、`~/.cargo/bin`、`~/.npm-global/bin` 和系统目录，同一值也放在 `BOT_LOGIN_PATH` 里。Debian 的 `/etc/profile` 会在登录 shell（`bash -lc`、`sh -lc`）里重设 `PATH`；CLI 状态目录里的 `.profile`（`runner/login-profile.mjs`）随后按原顺序恢复它，系统 profile 新加的目录排在最后。因此原生终端能直接运行装在电脑用户 HOME 下的工具，`gh` 仍解析到包装器。
 - **公共事件与 Trace**：原生工具活动、会话绑定与公开文本进入运行事件；Codex 原生命令/文件结果有脱敏回执引用，Pi 保存原生 transcript 入口。平台 MCP、模型用量及结束原因继续关联原运行；不留存私有 `reasoning`/`thinking`。
 - **QA/Publisher**：执行器正常结束不代表任务验收通过；角色结果继续经框架校验，QA 始终使用全新上下文与固定候选检出，远端发布和合入仍由受控 Publisher 执行。
 
