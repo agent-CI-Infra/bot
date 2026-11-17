@@ -139,3 +139,8 @@ test('cooling-down dispatch exposes paged recovery evidence and an immediate ret
   expect(h.store.get("SELECT attempts FROM dispatch_events WHERE id='failed'").attempts).toBe(9);expect(h.store.get("SELECT count(*) n FROM dispatch_failures WHERE event_id='failed'").n).toBe(9);
  }finally{await h.stop();}
 });
+
+test('an explicitly cancelled dispatch has no manual retry action and the API cannot revive it',async({page})=>{
+ const {h,reader,admin}=await prepared(page);
+ try{h.store.run("UPDATE dispatch_events SET state='failed',error=? WHERE id='failed'",JSON.stringify({code:'dispatch_cancelled',detail:'Explicit user stop',terminal:true}));await reader.locator('[data-dispatch-event="failed"]').getByRole('button',{name:'查看分派详情',exact:true}).click();await expect(detail(page)).toContainText('Explicit user stop');await expect(detail(page).getByRole('button',{name:'重试这条分派',exact:true})).toBeHidden();mkdirSync('.tmp/manager-dispatch-229/recovery',{recursive:true});for(const width of [1440,390]){await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/manager-dispatch-229/recovery/cancelled-'+width+'.png'});}expect((await admin('/api/repositories/101/dispatch/failed/retry','POST',{})).status).toBe(409);expect(h.store.get("SELECT state FROM dispatch_events WHERE id='failed'").state).toBe('failed');}finally{await h.stop();}
+});

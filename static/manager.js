@@ -136,7 +136,7 @@ function dispatchCard() {
     revoked = true; request++; detailRequest++; loading = false; detailBusy = false; rows = []; detail = null; selected = null; detailStatus.textContent = ''; list.replaceChildren(); body.replaceChildren();
     if (dialog.open) dialog.close(); address(); more.hidden = true; count.textContent = '当前身份无法读取分派，已清空旧记录。'; controls(); return true;
   };
-  const canRetry = event => event && (event.state === 'failed' || event.state === 'pending' && event.error && event.next_run_at > 0);
+  const canRetry = event => event && event.error?.terminal!==true && event.error?.code!=='dispatch_cancelled' && (event.state === 'failed' || event.state === 'pending' && event.error && event.next_run_at > 0);
   const controls = () => { apply.disabled = refresh.disabled = more.disabled = loading; read.disabled = detailBusy; retry.disabled = detailBusy; retry.hidden = !canRetry(detail?.event) || revoked; };
   async function load(append) {
     if (!live() || loading) return;

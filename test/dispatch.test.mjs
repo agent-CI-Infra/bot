@@ -616,9 +616,19 @@ test('explicit cancellation remains a terminal boundary rather than an automatic
  const dispatcher=new Dispatcher(f.h.store,async()=>{throw new TaskError('dispatch_cancelled','cancelled','Explicit stop');});t.after(()=>dispatcher.close());dispatcher.tick();await dispatcher.idle();
  const event=events(f.h)[0];assert.equal(event.state,'failed');assert.equal(event.attempts,1);assert.equal(JSON.parse(event.error).code,'dispatch_cancelled');
  f.h.store.run('UPDATE dispatch_events SET next_run_at=0');dispatcher.tick();await dispatcher.idle();assert.equal(events(f.h)[0].attempts,1);assert.equal(tasks(f.h).length,0);
+ const retry=await f.admin('/api/repositories/101/dispatch/'+event.id+'/retry','POST',{});assert.equal(retry.status,409);assert.equal(events(f.h)[0].state,'failed');assert.equal(JSON.parse(events(f.h)[0].error).code,'dispatch_cancelled');assert.equal(f.h.store.get('SELECT count(*) n FROM dispatch_retries WHERE event_id=?',event.id).n,0);
+ for(const error of [{code:'dispatch_cancelled'},{code:'operator_stopped',terminal:true}]){f.h.store.run('UPDATE dispatch_events SET error=? WHERE id=?',JSON.stringify(error),event.id);assert.equal((await f.admin('/api/repositories/101/dispatch/'+event.id+'/retry','POST',{})).status,409);assert.equal(events(f.h)[0].state,'failed');}
 });
 
 test('first dispatch context never claims that prior attempts failed',async t=>{
  const {dispatchRecovery}=await import('../dist/dispatch/store.js'),f=await fixture(t);queueWebhook(f.h.store,'101','issues',{action:'opened',issue,sender:alice},'no-prior-fault');
  const event=events(f.h)[0];assert.equal(dispatchRecovery(f.h.store,'101',event.id),null);
+});
+
+test('retried historical answer-round event exposes legacy evidence through recovery without a last-chance prompt',async t=>{
+ const f=await fixture(t);queueWebhook(f.h.store,'101','issues',{action:'opened',issue,sender:alice},'legacy-answer');const event=events(f.h)[0];
+ f.h.store.run("UPDATE dispatch_events SET state='failed',answer_round=1,attempts=8,error=? WHERE id=?",JSON.stringify({code:'legacy_fault',detail:'original legacy failure'}),event.id);
+ assert.equal((await f.admin('/api/repositories/101/dispatch/'+event.id+'/retry','POST',{})).status,201);
+ f.state.decide=input=>{assert.equal(input.previous_failures,undefined);assert.equal(input.recovery.legacy_failure.error.code,'legacy_fault');assert.equal(input.recovery.legacy_failure.previous_attempts,8);return {decision:'ignore',option_ids:[],reason:'Manager chooses after inspecting historical evidence'};};
+ await f.run();assert.equal(events(f.h)[0].state,'decided');assert.ok(!f.requests.at(-1).messages[0].content.includes('Deciding this event failed several times before'));
 });

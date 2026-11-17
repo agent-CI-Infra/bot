@@ -123,6 +123,7 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   const field = (await admin('/api/board/fields', 'POST', { name: 'Priority' })).value.field, option = (await admin(`/api/board/fields/${field.id}/options`, 'POST', { name: 'High' })).value.option;
   assert.equal((await admin('/api/board/cards/101/issue/5', 'PATCH', { field_id: field.id, option_id: option.id })).status, 200);
   assert.ok(h.store.get("SELECT 1 FROM external_events WHERE repository_id='101'"));
+  for(const repoId of ['101','202']){h.store.run("INSERT INTO dispatch_events(id,repository_id,event_key,type,source,summary,facts,options,state,created_at) VALUES(?,?,?,'probe','fixture','failure cleanup','{}','[]','failed',?)",'failure-'+repoId,repoId,'failure-'+repoId,now);h.store.run('INSERT INTO dispatch_failures VALUES(?,?,?,?,?,?)','failure-'+repoId,1,now,JSON.stringify({code:'fixture_failure'}),0,0);}
   // The running task stops at its next checkpoint once it is cancelled, as the engine's guard does.
   let stoppedAs = null;
   running.set('101', new Promise(resolve => { const timer = setInterval(() => {
@@ -134,6 +135,7 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   const result = await remove(admin, '101');
   assert.equal(result.status, 200); assert.deepEqual(result.value, { deleted: true, repository_id: '101', registered: true });
   assert.equal(stoppedAs, 'cancelled');
+  assert.equal(h.store.get("SELECT count(*) n FROM dispatch_failures WHERE event_id='failure-101'").n,0);assert.equal(h.store.get("SELECT count(*) n FROM dispatch_failures WHERE event_id='failure-202'").n,1);
   assert.deepEqual(await listedIds(admin), ['202']);
   assert.ok(github.requests.includes('GET /repositories/101'));
   // Nothing that names 101 is left except the audit, which keeps its records.
@@ -164,6 +166,7 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   const again = (await admin('/api/installations')).value.repositories.find(row => row.id === '101');
   assert.deepEqual([again.registered, again.installed, again.enabled], [false, true, false]);
   await repository(admin, a.id, '101');
+  assert.equal(h.store.get("SELECT count(*) n FROM dispatch_failures WHERE event_id='failure-101'").n,0);assert.equal((await admin('/api/repositories/101/dispatch/failure-101/retry','POST',{})).status,409);
   const freshManager = (await admin('/api/repositories/101/manager')).value.manager;
   assert.deepEqual(freshManager.standing_rules, { revision: 0, source: 'builtin', rules: builtinRules });
   const savedAgain = await admin('/api/repositories/101/manager', 'PUT', { expected_revision: freshManager.prompt.revision,
