@@ -14,7 +14,7 @@ const steps = job => job.steps ?? [];
 // Sizes decided on #734 from each job's own recent runs: unit/e2e 30 minutes (slowest recent 762 s and 400 s),
 // analyze 15 (slowest leg 356 s), image 10 (slowest leg 85 s).
 const jobBounds = new Map([
-  ['checks', new Map([['unit', 30], ['e2e', 30]])],
+  ['checks', new Map([['unit-shards', 30], ['unit', 5], ['e2e', 30]])],
   ['codeql', new Map([['analyze', 15]])],
   ['images', new Map([['image', 10]])],
 ]);

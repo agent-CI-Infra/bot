@@ -3,41 +3,42 @@
 // and its processes may only connect to loopback (scripts/test-network-guard.mjs). Rules for writing tests that fit
 // this: docs/development.md, section 测试集与并行.
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { availableParallelism } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { availableParallelism, cpus } from 'node:os';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { discoverSets, planShards } from './test-plan.mjs';
 
-const usage = 'usage: node scripts/test-sets.mjs [--jobs N] [test/<name>.test.mjs ...]';
-let jobs = Number(process.env.BOT_TEST_JOBS) || availableParallelism();
+const usage = 'usage: node scripts/test-sets.mjs [--jobs N] [--shard INDEX/TOTAL] [test/<name>.test.mjs ...]';
+let jobs = Number(process.env.BOT_TEST_JOBS) || availableParallelism(), shardArg = process.env.BOT_TEST_SHARD;
 const picked = [];
 for (let i = 2; i < process.argv.length; i++) {
   const arg = process.argv[i];
   if (arg === '--jobs') jobs = Number(process.argv[++i]);
   else if (arg.startsWith('--jobs=')) jobs = Number(arg.slice('--jobs='.length));
+  else if (arg === '--shard') shardArg = process.argv[++i] ?? '';
+  else if (arg.startsWith('--shard=')) shardArg = arg.slice('--shard='.length);
   else if (arg.startsWith('-')) fail(usage);
   else picked.push(arg);
 }
 if (!Number.isInteger(jobs) || jobs < 1) fail(usage);
 
-// *.live.test.mjs files call real external services; they never join the pool and are run by hand with node --test.
-const live = file => file.endsWith('.live.test.mjs');
-const files = picked.length ? picked : readdirSync('test').filter(name => name.endsWith('.test.mjs') && !live(name)).sort().map(name => `test/${name}`);
-if (files.some(live)) fail('*.live.test.mjs files call real external services; run them with node --test, not as a test set');
-// A file is a set of its own, unless a "// test-set: <name> <reason>" line puts it into a named set with other files.
-const sets = new Map();
-for (const file of files) {
-  const line = /^\/\/ test-set:(.*)$/m.exec(readFileSync(file, 'utf8'))?.[1].trim(), named = line && /^([a-z0-9-]+)\s+\S/.exec(line)?.[1];
-  if (line !== undefined && !named) fail(`${file}: write "// test-set: <name> <why these files must not run at the same time>"`);
-  const name = named || basename(file, '.test.mjs'), set = sets.get(name) || { name, files: [], size: 0 };
-  set.files.push(file); set.size += statSync(file).size; sets.set(name, set);
-}
+let plan, shard;
+try {
+  const match = shardArg === undefined ? null : /^(\d+)\/(\d+)$/.exec(shardArg);
+  if (shardArg !== undefined && !match) fail(usage);
+  plan = planShards(discoverSets(picked.length ? picked : undefined), match ? Number(match[2]) : 1);
+  const index = match ? Number(match[1]) : 1;
+  if (index < 1 || index > plan.shards.length) fail(usage);
+  shard = plan.shards[index - 1];
+} catch (error) { fail(error.message); }
+const sets = new Map(shard.sets.map(set => [set.name, set]));
 
 mkdirSync('.tmp', { recursive: true });
 // The longest sets of the last run start first, so that no long set is left running alone at the end; sets without a
 // recorded duration (new ones, or every set on a fresh checkout) go first, the bigger files before the smaller.
 const timings = resolve('.tmp/test-set-durations.json'), previous = (() => { try { return JSON.parse(readFileSync(timings, 'utf8')); } catch { return {}; } })();
-const queue = [...sets.values()].sort((a, b) => (previous[b.name] ?? Infinity) - (previous[a.name] ?? Infinity) || b.size - a.size);
+const queue = [...sets.values()].sort((a, b) => (previous[b.name] ?? (shardArg ? b.weight : Infinity)) - (previous[a.name] ?? (shardArg ? a.weight : Infinity)) || b.size - a.size);
 const run = mkdtempSync(resolve('.tmp/tests-')), guard = pathToFileURL(resolve('scripts/test-network-guard.mjs')).href;
 const began = Date.now(), seconds = at => ((at - began) / 1000).toFixed(1), results = [], children = new Set();
 let active = 0, peak = 0, stopping = false;
@@ -58,6 +59,8 @@ async function runSet(set) {
     NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --import=${guard}`.trim() };
   // Removed so that programs following the XDG layout fall back to the set's HOME, and nothing prefers TMP over TMPDIR.
   for (const name of ['XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'TMP', 'TEMP']) delete env[name];
+  // Nested runner tests must not write over the parent shard's artifacts.
+  delete env.BOT_TEST_REPORT; delete env.BOT_TEST_SUMMARY; delete env.BOT_TEST_SHARD;
   mkdirSync(env.TMPDIR, { recursive: true }); mkdirSync(env.HOME);
   const start = Date.now(), output = [];
   const child = spawn(process.execPath, ['--test', '--test-reporter=tap', '--test-concurrency=1', ...set.files], { env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -91,6 +94,11 @@ if (process.env.BOT_TEST_SUMMARY) writeFileSync(process.env.BOT_TEST_SUMMARY, JS
   ...['tests', 'pass', 'fail', 'cancelled', 'skipped'].map(key => ({ name: key, value: total(key), unit: 'count' })),
   { name: 'failed sets', value: failed.length + sets.size - results.length, unit: 'count' },
   { name: 'duration', value: Math.round((Date.now() - began) / 1000), unit: 's' }] }, null, 2) + '\n');
+if (process.env.BOT_TEST_REPORT) writeFileSync(process.env.BOT_TEST_REPORT, JSON.stringify({ version: 1, planHash: plan.hash, corpusHash: plan.corpusHash,
+  revision: process.env.GITHUB_SHA ?? null, runId: process.env.GITHUB_RUN_ID ?? null, attempt: Number(process.env.GITHUB_RUN_ATTEMPT || 1),
+  shard: { index: shard.index, total: plan.shards.length }, jobs, seconds: (Date.now() - began) / 1000,
+  machine: { cpu: cpus()[0]?.model || 'unknown', parallelism: availableParallelism(), node: process.version, image: process.env.ImageVersion ?? null },
+  sets: results.map(r => ({ name: r.set.name, files: r.set.files, ok: r.ok, counts: r.counts, seconds: (r.end - r.start) / 1000 })) }, null, 2) + '\n');
 if (failed.length || results.length < sets.size) { console.log(`# failed sets: ${failed.map(r => r.set.name).join(' ') || 'none'}; their files stay in ${run}`); process.exitCode = 1; }
 else rmSync(run, { recursive: true, force: true });
 
