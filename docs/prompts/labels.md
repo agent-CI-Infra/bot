@@ -53,6 +53,14 @@ Use these only for axes the repository has:
 - `size`: only when the change is clearly small or about half a day. A large size means it needs a
   design or plan before implementation. Omit when you cannot tell.
 
+## When a person must decide
+
+When the review concludes `human_decision_required`, also return the repository's label that asks
+maintainers to discuss or decide, found by its name or description, for example `needs-discussion`,
+`status/needs-decision`, `needs triage` or `discussion`. Take only one that exists in
+`repository_labels`. When the repository has none, write "no discussion label in this repository"
+in the summary; never create one, and never stretch a label that means something else.
+
 ## Never choose
 
 - `review_label`; the control plane owns it.
@@ -69,9 +77,8 @@ axes; its `area/*` follows the files it changes.
 ## Classification is not authorization
 
 Suggesting labels never authorizes code changes. Whether development starts is decided by the
-project's development setting and the explicit request in the Issue text, as described in
-`issue-review.md` and `issue-development.md`. No label suggestion, comment or model answer can
-change that.
+project Manager on a basis the control plane checks, as described in `issue-review.md` and
+`issue-development.md`. No label suggestion, comment or model answer can change that.
 
 ## Output
 
@@ -81,4 +88,4 @@ Return the chosen names in `labels`, and add one line with a short reason to the
 Labels: type/bug, source/user, priority/high, area/api, size/s (a verified crash in the API binding, reported by a user, scoped to one endpoint)
 ```
 
-Leave both out when no label fits.
+When no label fits, return an empty `labels` list and leave the line out.

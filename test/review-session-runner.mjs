@@ -20,7 +20,7 @@ import {roleConfiguration,saveConfiguration} from '../dist/roles/definition.js';
 
 const text=message=>typeof message.content==='string'?message.content:message.content.map(block=>block.text||'').join('');
 const actor={type:'User',login:'alice',id:5};
-const result=summary=>({summary,findings:[],requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:''});
+const result=summary=>({summary,findings:[],labels:[],requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:''});
 const call=(name,args)=>({id:'call-'+Math.random().toString(16).slice(2),type:'function',function:{name,arguments:JSON.stringify(args)}});
 async function until(read){
   for(const end=Date.now()+15000;Date.now()<end;await new Promise(resolve=>setTimeout(resolve,20))){const value=await read();if(value)return value;}

@@ -7,6 +7,7 @@ import { loopbackHostname } from '../core/security.js';
 import { pricingFor } from '../metrics/accounting.js';
 import { githubWriteTool } from '../github/write.js';
 import { pullRequestLabelsSchema } from '../github/pull-request-labels.js';
+import { reviewConclusions } from '../review/findings.js';
 // Exact task-profile overrides are trusted administrator configuration, never model/tool input.
 // Keep invalid/deleted overrides visible: falling back would silently change the user's chosen model.
 export function selectedModel(store: Store, repositoryId: string, taskKind?: string) {
@@ -82,7 +83,7 @@ const string={type:'string'};
 export function tools(profile: { workspaceWrite: boolean; completion: 'review' | 'publication' | 'reply' | 'event'; read?: boolean; shell?: boolean; notes?: boolean; github?: boolean; writes?: string[] }){
   const development = profile.completion === 'publication', allow = (flag?: boolean) => flag !== false;
   const writes = profile.writes ?? (development ? ['code', 'pull_request'] : profile.completion === 'review' ? ['reply', 'labels'] : ['reply']);
-  const labels = writes.includes('labels') ? { labels: { type: 'array', items: string, description: 'Classification labels for this Issue or PR, chosen only from repository_labels. The control plane adds the valid ones after publishing; never apply labels yourself' } } : {};
+  const labels = writes.includes('labels') ? { labels: { type: 'array', items: string, description: 'Classification labels for this Issue or PR, chosen only from repository_labels; an empty list when none fits. Only this list is applied, never a Labels line in the summary. The control plane adds the valid ones after publishing; never apply labels yourself' } } : {};
   const result:any[]=[readToolResult];
   if(allow(profile.read))result.push(fn('read_file','Read a file in this task workspace',{path:string},['path']));
   if(allow(profile.shell))result.push(commandTool(null));
@@ -99,13 +100,15 @@ export function tools(profile: { workspaceWrite: boolean; completion: 'review' |
   if(profile.completion==='reply')result.push(fn('finish_review',writes.includes('reply')?'Finish this workflow with the reply the control plane publishes; only real diff locations of a pull request can be inline':'Finish this workflow with your result. This workflow does not reply on GitHub: the result is kept for the console only',{
     summary:string,...labels,findings:{type:'array',items:{type:'object',properties:{body:string,format:{type:'string',enum:['discussion','inline']},selection_reason:string,path:string,line:{type:'integer'},side:{type:'string',enum:['LEFT','RIGHT']},start_line:{type:'integer'},start_side:{type:'string',enum:['LEFT','RIGHT']}},required:['body','format','selection_reason'],additionalProperties:false}}
   },['summary','findings']));
-  // A review reports findings and a recommendation (#815); whether to develop is the Manager's decision, not a field here.
+  // A review reports findings, a recommendation (#815) and, for an Issue, its conclusion (#1026); whether to develop is the
+  // Manager's decision, not a field here.
   else result.push(fn('finish_review','Finish review with evidence, findings and a recommendation; only real diff locations can be inline',{
     summary:string,...labels,recommendation:{type:'string',description:'What you recommend the project do next, in one or two sentences: for an Issue, whether it can be developed as asked and what is still open; for a pull request, whether it is ready. The Manager reads it; it is never a permission.'},
+    conclusion:{type:'string',enum:[...reviewConclusions],description:'For an Issue review: ready_for_development, needs_information, human_decision_required or no_code_change, as the review rules define them. Omit it for a pull request. The Manager reads it; it is never a permission.'},
     resolved_comments:{type:'array',items:{type:'integer'},description:'Ids (from review_comments.json) of this bot\'s earlier top-level inline comments that the reviewed head has fixed; the control plane resolves their threads'},
     product_defect:{type:'boolean',description:'For automatically filed Actions code failures, true only after repository evidence confirms a product defect, a concrete current/expected behavior and a code fix. External failures, ambiguous evidence and engineering-only failures are false. This is not development approval.'},
     findings:{type:'array',items:{type:'object',properties:{body:string,format:{type:'string',enum:['discussion','inline']},selection_reason:string,actionable:{type:'boolean'},within_goal:{type:'boolean'},requires_human_decision:{type:'boolean'},human_action:{type:'string',description:'When requires_human_decision is true: one sentence on what a person must decide or do'},comment_id:{type:'integer',description:'When this finding is one of this bot\'s earlier top-level inline comments that still applies: its id from review_comments.json. It is not posted again; the summary links to it'},requested_in:{type:'object',description:'On a pull request this bot opened: the comment, review or inline comment of a person or another review bot that asked for this change, when you will make it (with actionable and within_goal true). The control plane checks who wrote it and then revises the pull request',properties:{type:{type:'string',enum:['comment','review','review_comment'],description:'comment: comments.json; review: reviews.json; review_comment: review_comments.json'},id:{type:'integer'}},required:['type','id'],additionalProperties:false},path:string,line:{type:'integer'},side:{type:'string',enum:['LEFT','RIGHT']},start_line:{type:'integer'},start_side:{type:'string',enum:['LEFT','RIGHT']}},required:['body','format','selection_reason','actionable','within_goal','requires_human_decision'],additionalProperties:false}}
-  },['summary','findings']));
+  },['summary','findings',...(writes.includes('labels')?['labels']:[])]));
   return result;
 }
 // The finishing tool of a workflow that runs on an event, and the writes only it has. Rerun and report are recorded when

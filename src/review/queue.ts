@@ -351,7 +351,7 @@ function developmentOffer(store: Store, repositoryId: string, issue: any, number
   const option: CreateOption = { id: 'development', work: 'development.issue', title: `开发 Issue #${number}`,
     spec: { type: 'object', kind: 'development.issue', number, head: null, delivery, source_task: review?.id ?? null, update_id: delivery,
       input: { review: result, object_hash: digest(JSON.stringify([issue.title, issue.body])) } } };
-  return { option, assignees, review: result ? { task_id: String(review!.id), summary: clip(result.summary, 1500), ...(result.recommendation ? { recommendation: clip(result.recommendation, 1500) } : {}) } : null };
+  return { option, assignees, review: result ? { task_id: String(review!.id), summary: clip(result.summary, 1500), ...(result.recommendation ? { recommendation: clip(result.recommendation, 1500) } : {}), ...(result.conclusion ? { conclusion: result.conclusion } : {}) } : null };
 }
 
 // What the Manager judges a development by when an event offers it: who is assigned and the latest published review.
