@@ -10,6 +10,7 @@ import { workOffered, workPermissions, workRefusal } from '../work/settings.js';
 import { narrowWrites, workType } from '../work/catalog.js';
 import { assertManagedTask, assertTaskCaller, createManagedTask, eventTaskCaller } from '../tasks/management.js';
 import { ownIssue, recordBasis, type Basis } from './basis.js';
+import { scheduledCheckCriteria } from '../tasks/schedule-write.js';
 
 /**
  * Manager dispatch. Every event that passes the control plane's filters is written here once (event_key is unique) with
@@ -54,7 +55,7 @@ export type CreateSpec =
   | { type: 'reply'; kind: 'workflow.issue' | 'workflow.pr'; number: number; head: string | null; input: Json; key: string; delivery: string | null }
   // A task on an event the owning module tracks (release, Actions run).
   | { type: 'event'; kind: string; key: string; sha: string; input: Json; summary: string }
-  // An ordinary request (a scheduled check). Default: no GitHub writes. `file_issues` allows Issues create/reply via github_write.
+  // An ordinary request (a scheduled check). `file_issues` true allows Issue create/reply, false denies them, unset falls back to role policy.
   | { type: 'request'; key: string; request: string; principal: { principal_id: string; tenant_id: string } | null; file_issues?: boolean };
 export interface CreateOption { id: string; work: string; title: string; spec: CreateSpec; hook?: string; ref?: Json;
   /** Default work for this event. The test rule decider, and scheduled checks with an instruction, read it. */
@@ -304,7 +305,7 @@ function create(store: Store, event: Row, option: CreateOption, decision: Decisi
   if (store.get('SELECT 1 FROM tasks WHERE unique_key=?', key)) return null;
   const file_issues = spec.file_issues === true ? true : spec.file_issues === false ? false : undefined;
   const issueFlag = file_issues !== undefined ? { file_issues } : {};
-  const goal = decision.brief?.goal || spec.request, contract = { goal, scope: [spec.request.slice(0, 2000)], criteria: decision.brief?.criteria?.length ? decision.brief.criteria : ['Report what was checked, with evidence; change nothing outside the task workspace.'],
+  const goal = decision.brief?.goal || spec.request, contract = { goal, scope: [spec.request.slice(0, 2000)], criteria: decision.brief?.criteria?.length ? decision.brief.criteria : scheduledCheckCriteria(file_issues),
     endpoint: 'report', source: { type: 'schedule', event_id: event.id, ...issueFlag }, completeness: 'explicit' };
   const id = randomId(), now = new Date().toISOString();
   store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,created_at,updated_at) VALUES(?,?,'task.request','queued',?,?,?,?,?)",

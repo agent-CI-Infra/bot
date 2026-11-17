@@ -1,6 +1,6 @@
 # 内置场景规则
 
-本目录的 Markdown 是 Bot 的内置规则层，`manager-dispatch.md` 是完整的 Manager 分派默认提示词，其他文件用于各任务的内置规则。控制面启动时由 `src/rules/service.ts` 按文件读入 `defaults`（`onboarding.md` 除外：它由 `src/management/onboarding.ts` 读入，作为仓库接入向导的系统提示词，不是规则层，也不能覆盖），规则接口、Manager 页的「内置文本」和模型系统提示用的都是这里的原文；运行镜像把本目录复制到 `/app/docs/prompts`。修改这些文件就是修改所有没有写对应章节的项目的默认行为。
+本目录的 Markdown 是 Bot 的内置规则层，`manager-dispatch.md` 是完整的 Manager 分派默认提示词，其他文件用于各任务的内置规则。控制面启动时由 `src/rules/service.ts` 按文件读入 `defaults`（`onboarding.md` 除外：它由 `src/management/onboarding.ts` 读入，作为仓库接入向导的系统提示词，不是规则层，也不能覆盖），规则接口、Manager 页的「内置文本」和模型系统提示用的都是这里的原文；运行镜像把本目录复制到 `/app/docs/prompts`。修改这些文件就是修改所有没有写对应章节的项目的默认行为。项目可以把 [定时检查章节的建议文本](../schedule-check.md) 自行写入 Manager「定时检查」章节；那份文本必须留在 `docs/` 下作为模板，不得加入本目录或登记为内置提示词（该章节默认保持为空，以免撑破管理助手单次工具结果的 256 KiB 上限）。
 
 ## 文件对应
 

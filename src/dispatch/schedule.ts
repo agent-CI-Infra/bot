@@ -6,8 +6,9 @@ import { recordEvent, type Decision, type DispatchContext } from './store.js';
 
 // A scheduled Manager check: a plan of this kind becomes an event when it is due. When the plan already has an
 // instruction, the offered option is the default and dispatch starts the ordinary request without waiting on the
-// Manager. Without an instruction, the Manager follows its "定时检查" section, or ignores the event. The plan's service
-// identity is the task's actor. `parameters.file_issues` is the only way this path may file GitHub Issues.
+// Manager. Without an instruction, the Manager follows its Scheduled check section, or ignores the event. The plan's
+// service identity is the task's actor. `parameters.file_issues` is authoritative: true allows Issue create/reply,
+// false denies them, and an absent flag falls back to the executing role.
 export const scheduledCheck = 'manager.check';
 const workOfPlan = (plan: string) => plan === scheduledCheck ? 'task.request' : plan;
 

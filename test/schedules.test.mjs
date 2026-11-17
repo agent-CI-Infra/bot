@@ -20,7 +20,7 @@ import { taskGithubWrite, taskWriteAllowed } from '../dist/tasks/github-write.js
 import { taskActingRole } from '../dist/tasks/management.js';
 import { Redactor } from '../dist/agent/common.js';
 import { scheduledCheckDecision } from '../dist/dispatch/schedule.js';
-import { scheduledIssueWrite, scheduledIssueOperationAllowed } from '../dist/tasks/schedule-write.js';
+import { scheduledIssueWrite, scheduledIssueOperationAllowed, scheduledCheckCriteria } from '../dist/tasks/schedule-write.js';
 import { channelFixture, envelope, post, finished, until, inGroup, bindFixture, privateChat, boundGroup, registerDestination } from './channel-fixture.mjs';
 
 const target = { project_id: '101' };
@@ -357,8 +357,8 @@ test('a Manager check plan hands its occurrence to the Manager once; the report 
   // The check task is still queued: a second run-now must not stack on it (#893).
   const blocked = await command(f, 'schedule.run-now', { id: plan.id, revision: 1 });
   assert.equal(blocked.value.result?.error || blocked.value.error, 'schedule_occurrence_in_progress');
-  // After that task finishes, a later due check with an instruction starts another task (the option is default work).
-  f.h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?", task.id);
+  // After that task finishes (task.request ends as completed, not succeeded), a later run-now starts another task.
+  f.h.store.run("UPDATE tasks SET status='completed' WHERE id=?", task.id);
   configureDispatch(context => scheduledCheckDecision(context) ?? ruleDecider(context));
   await command(f, 'schedule.run-now', { id: plan.id, revision: 1 });
   f.worker.produce(); const next = f.worker.claimOccurrence(); f.worker.dispatch(next);
@@ -388,6 +388,7 @@ test('a custom check plan with an instruction starts a task and may file Issues 
   assert.equal(JSON.parse(event.options)[0].default, true);
   const task = f.h.store.get('SELECT * FROM tasks WHERE id=?', JSON.parse(event.result).created[0]);
   assert.equal(JSON.parse(task.input).file_issues, true);
+  assert.deepEqual(JSON.parse(task.input).contract.criteria, scheduledCheckCriteria(true));
   assert.equal(scheduledIssueWrite(task), 'allow');
   assert.equal(scheduledIssueOperationAllowed(task, 'issues', 'create'), true);
   assert.equal(scheduledIssueOperationAllowed(task, 'issues', 'reply'), true);
@@ -432,6 +433,7 @@ test('a due manager.check with an instruction starts once on the timer, and file
   assert.equal(event.decision, 'create', JSON.stringify(event));
   assert.equal(JSON.parse(event.facts).file_issues, false);
   const task = f.h.store.get('SELECT * FROM tasks WHERE id=?', JSON.parse(event.result).created[0]);
+  assert.deepEqual(JSON.parse(task.input).contract.criteria, scheduledCheckCriteria(false));
   assert.equal(scheduledIssueWrite(task), 'deny');
   assert.equal(scheduledIssueOperationAllowed(task, 'issues', 'create'), false);
   assert.equal(taskWriteAllowed(f.h.store, task, 'issues', 'create'), false);
@@ -701,9 +703,59 @@ test('subscription group previews stop after binding revocation and create no de
   assert.equal(denied.status,403); assert.equal(denied.value.error,'schedule_destination_unavailable'); assert.equal(registered(),before); assert.equal(f.h.store.get('SELECT count(*) n FROM notification_subscriptions').n,0);
 });
 
+test('scheduled check contract criteria name Issue writes for file_issues true, false, and unset (#905)', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { enabled: true });
+  configureDispatch(context => scheduledCheckDecision(context) ?? ruleDecider(context));
+  t.after(() => configureDispatch(ruleDecider));
+  for (const flag of [true, false, undefined]) {
+    const parameters = { instruction: 'Check stale Issues.', ...(flag === undefined ? {} : { file_issues: flag }) };
+    const plan = await f.create(f.plan({ name: 'criteria-' + String(flag), workflow: 'manager.check', parameters }));
+    await command(f, 'schedule.run-now', { id: plan.id, revision: plan.revision });
+    f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+    const task = f.h.store.get("SELECT * FROM tasks WHERE unique_key LIKE '101:task.request:%' ORDER BY created_at DESC, rowid DESC LIMIT 1");
+    assert.deepEqual(JSON.parse(task.input).contract.criteria, scheduledCheckCriteria(flag));
+    assert.equal(scheduledIssueWrite(task), flag === true ? 'allow' : flag === false ? 'deny' : 'unset');
+    assert.equal(JSON.parse(task.input).file_issues, flag);
+    f.h.store.run("UPDATE tasks SET status='completed' WHERE id=?", task.id);
+  }
+});
+
+test('busyManagerCheck looks only at non-terminal work and still sees a busy task in a long history (#905)', async t => {
+  const f = await fixture(t);
+  const plan = await f.create(f.plan({ name: '长期历史', workflow: 'manager.check', parameters: { instruction: 'Check stale Issues.' } }));
+  const row = f.h.store.get('SELECT * FROM schedules WHERE id=?', plan.id);
+  const now = f.now(), snapshot = JSON.stringify({ plan: JSON.parse(row.spec) }), authorization = JSON.stringify({ actor_id: row.actor_id, initiator: f.principal, grant_snapshot: {} });
+  const count = 8000;
+  f.h.store.db.exec('BEGIN');
+  const insertOcc = f.h.store.db.prepare(`INSERT INTO schedule_occurrences(id,schedule_id,tenant_id,project_id,revision,logical_key,logical_at,scheduled_at,source,snapshot,authorization,run_id,state,finished_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  const insertTask = f.h.store.db.prepare(`INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`);
+  for (let i = 0; i < count; i++) {
+    const id = 'occ_hist_' + i, run = 'run_hist_' + i, logical = now - (count - i) * 60000;
+    insertOcc.run(id, plan.id, row.tenant_id, row.project_id, plan.revision, 'hist:' + i, logical, logical, 'timer', snapshot, authorization, run, 'succeeded', logical);
+    const iso = new Date(logical).toISOString();
+    insertTask.run('task_hist_' + i, '101', 'task.request', 'completed', 'finished check', '101:task.request:' + id, '{}', iso, iso);
+  }
+  f.h.store.db.exec('COMMIT');
+  assert.equal(f.worker.service.busyManagerCheck(plan.id, '101'), false, 'a long history of completed checks is not busy');
+  // An old occurrence that already finished can still have a queued task; that must keep the plan busy.
+  const stuck = 'occ_hist_0';
+  f.h.store.run("UPDATE tasks SET status='queued' WHERE unique_key=?", '101:task.request:' + stuck);
+  assert.equal(f.worker.service.busyManagerCheck(plan.id, '101'), true, 'a still-busy task in a long history is still detected');
+  f.h.store.run("UPDATE tasks SET status='completed' WHERE unique_key=?", '101:task.request:' + stuck);
+  assert.equal(f.worker.service.busyManagerCheck(plan.id, '101'), false);
+  const pendingId = 'occ_hist_pending', pendingAt = now;
+  f.h.store.run(`INSERT INTO schedule_occurrences(id,schedule_id,tenant_id,project_id,revision,logical_key,logical_at,scheduled_at,source,snapshot,authorization,run_id,state)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, pendingId, plan.id, row.tenant_id, row.project_id, plan.revision, 'hist:pending', pendingAt, pendingAt, 'timer', snapshot, authorization, 'run_hist_pending', 'pending');
+  assert.equal(f.worker.service.busyManagerCheck(plan.id, '101'), true, 'a pending occurrence is still detected among a long finished history');
+});
+
 test('a fixture project effective config still fits in one management tool result', async t => {
   const f = await fixture(t), cfg = await query(f, 'get_effective_config');
   const bytes = Buffer.byteLength(JSON.stringify(cfg));
-  assert.ok(bytes <= 256 * 1024, `get_effective_config is ${bytes} bytes; the management tool budget is 256 KiB so a write can still read the revision`);
+  const budget = 256 * 1024, margin = budget - bytes;
+  assert.ok(bytes <= budget, `get_effective_config is ${bytes} bytes; the management tool budget is 256 KiB so a write can still read the revision`);
+  assert.ok(margin >= 256, `get_effective_config has only ${margin} bytes of headroom under the 256 KiB tool budget (${bytes} bytes used). Reduce Manager section volume or truncate large sections before this query grows past the budget; do not paginate get_effective_config.`);
 });
 

@@ -217,16 +217,28 @@ export class ScheduleService {
     if (row.kind === 'project') authorize(actor, 'config.write', { project_id: row.project_id });
   }
   /** A later tick or run-now must not stack on a check that is still queued, running, or waiting to be decided.
-   *  task.request normally ends as completed (also pr_opened or superseded); those are finished, not busy. */
+   *  task.request normally ends as completed (also pr_opened or superseded); those are finished, not busy.
+   *  Only non-terminal occurrences, runs, events, or tasks are considered, so a long history of finished
+   *  checks is not scanned. A still-busy task is detected even when its occurrence already finished. */
   busyManagerCheck(scheduleId: string, projectId: string): boolean {
-    return !!this.store.get(`SELECT 1 AS n FROM schedule_occurrences o
-      WHERE o.schedule_id=? AND (
-        o.state IN ('pending','retry','running','dispatched')
-        OR EXISTS(SELECT 1 FROM schedule_business_runs b WHERE b.occurrence_id=o.id AND b.state NOT IN ${terminalRunStates})
-        OR EXISTS(SELECT 1 FROM dispatch_events e WHERE e.type='schedule.due' AND e.state IN ('pending','dispatching')
-          AND json_extract(e.facts,'$.occurrence_id')=o.id)
-        OR EXISTS(SELECT 1 FROM tasks t WHERE t.unique_key=? || o.id AND t.status NOT IN ('succeeded','failed','cancelled','completed','pr_opened','superseded'))
-      ) LIMIT 1`, scheduleId, `${projectId}:task.request:`);
+    const taskKey = `${projectId}:task.request:`;
+    return !!this.store.get(`SELECT 1 AS n WHERE EXISTS(
+        SELECT 1 FROM schedule_occurrences o
+        WHERE o.schedule_id=? AND o.state IN ('pending','retry','running','dispatched')
+      ) OR EXISTS(
+        SELECT 1 FROM schedule_business_runs b
+        JOIN schedule_occurrences o ON o.id=b.occurrence_id
+        WHERE o.schedule_id=? AND b.state NOT IN ${terminalRunStates}
+      ) OR EXISTS(
+        SELECT 1 FROM dispatch_events e
+        JOIN schedule_occurrences o ON o.id=json_extract(e.facts,'$.occurrence_id')
+        WHERE e.type='schedule.due' AND e.state IN ('pending','dispatching') AND o.schedule_id=?
+      ) OR EXISTS(
+        SELECT 1 FROM tasks t
+        WHERE t.status NOT IN ('succeeded','failed','cancelled','completed','pr_opened','superseded')
+          AND t.unique_key LIKE ? || '%'
+          AND EXISTS(SELECT 1 FROM schedule_occurrences o WHERE o.schedule_id=? AND t.unique_key=? || o.id)
+      )`, scheduleId, scheduleId, scheduleId, taskKey, scheduleId, taskKey);
   }
   occurrence(row: Row, key: string, logical: number, source: string, state = 'pending', reason?: string, initiator?: string): Row {
     const previous = this.store.get('SELECT * FROM schedule_occurrences WHERE schedule_id=? AND logical_key=?', row.id, key);

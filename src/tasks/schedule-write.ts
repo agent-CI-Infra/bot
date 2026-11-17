@@ -6,8 +6,11 @@ export function taskInputOf(task: Row): any {
 }
 
 /**
- * A scheduled check may file Issues only when its plan set `parameters.file_issues`.
- * Unset keeps the existing role-gated default. The flag never grants Contents or pull-request writes.
+ * The plan's `file_issues` flag is authoritative for Issue create/reply on a scheduled check:
+ * true allows those writes even if the executing role has no GitHub write; false denies them
+ * even if the role has it; absent/unset falls back to role policy. The flag never grants
+ * Contents or pull-request writes, and every write still goes through the project capability
+ * ceiling (#850).
  */
 export function scheduledIssueWrite(task: Row): 'allow' | 'deny' | 'unset' {
   const input = taskInputOf(task);
@@ -27,8 +30,13 @@ export function scheduledIssueOperationAllowed(task: Row, resource: WriteResourc
   return null;
 }
 
-export function taskGithubWriteAllowedBySchedule(task: Row, resource: WriteResource, operation?: WriteOperation, roleAllows?: boolean): boolean {
-  const scheduled = scheduledIssueOperationAllowed(task, resource, operation);
-  if (scheduled !== null) return scheduled;
-  return !!roleAllows;
+/** Default contract criteria when a scheduled check starts without a Manager brief. */
+export function scheduledCheckCriteria(file_issues?: boolean): string[] {
+  if (file_issues === true) {
+    return ['Report what was checked, with evidence; create or reply to Issues when the instruction requires it; change nothing else outside the task workspace.'];
+  }
+  if (file_issues === false) {
+    return ['Report what was checked, with evidence; do not create or reply to Issues; change nothing outside the task workspace.'];
+  }
+  return ['Report what was checked, with evidence; create or reply to Issues only when the instruction requires it and github_write is offered; change nothing else outside the task workspace.'];
 }
