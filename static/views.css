@@ -207,6 +207,11 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 @media(min-width:1280px){
   #settings-panel .global-project-table:not(.is-hidden) .project-list-row{min-height:84px}
   .global-project-table .project-cell:not([data-label="项目"]){flex-wrap:nowrap}
+  /* #978 review: the 看板 cell also carries the row's board switch (static/views/project-list.js:64, a 96px pill), and the
+     nowrap above squeezed the chip into a one-character-per-line column while the switch parked on top of it and
+     covered three characters. This one cell wraps instead: the chip takes the whole column on its first line and the
+     switch sits below, so neither paints over the other. */
+  .global-project-table .project-cell[data-label="看板"]{flex-wrap:wrap}
   .global-project-table .project-cell[data-label="操作"]>.actions{flex-wrap:nowrap}
   /* #978: this table's columns are narrower than the state sentences (门禁 66–96px, 看板 next to its switch), so the
      base .status nowrap let the shared ellipsis cut「发布检查未完成」to「发布检…」. Chips wrap to another line and the
