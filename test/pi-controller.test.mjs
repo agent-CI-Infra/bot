@@ -81,11 +81,13 @@ for (const controlled of [false, true]) test(`Pi review entry repairs its own fi
   assert.equal(f.store.get('SELECT count(*) n FROM tasks').n, 1);
 });
 
-test('Pi entry stops with the original validation fault after two unsuccessful repairs', { skip, timeout: 90000 }, async t => {
+test('Pi entry reports repeated invalid submissions and lets the same session correct them', { skip, timeout: 90000 }, async t => {
   let attempts = 0;
-  const f = await entryFixture(t, 'review.issue', () => { attempts++; return call('finish_review', { summary: 'x'.repeat(16001), findings: [] }); });
-  await assert.rejects(agentLoop(f.store, f.task, f.workspace, f.redactor, f.guard, {}), { code: 'model_review_invalid' });
-  assert.equal(attempts, 3); assert.equal(f.logs.filter(log => log.type === 'pi_session').length, 1);
+  const f = await entryFixture(t, 'review.issue', () => { attempts++; return call('finish_review', { summary: attempts<=7?'x'.repeat(16001):'Verified after correction', findings: [] }); });
+  const result=await agentLoop(f.store, f.task, f.workspace, f.redactor, f.guard, {});
+  assert.equal(result.summary,'Verified after correction');assert.equal(attempts,8);
+  assert.equal(f.logs.filter(log => log.type === 'pi_session').length, 1);
+  assert.equal(f.store.get("SELECT count(*) n FROM task_history WHERE type='submission_retry_report'").n,2);
 });
 
 test('Pi event finish validates release-note source coverage before ending the session', { skip, timeout: 90000 }, async t => {

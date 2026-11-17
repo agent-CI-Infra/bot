@@ -575,3 +575,24 @@ test('two successful Dev runs report before a third; an old report cannot silent
  const reports=f.s.all("SELECT run_id FROM task_history WHERE type='stage_attempt_report'");assert.equal(reports.length,2);assert.ok(reports.every(r=>r.run_id===managerRun));
  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='stage_attempt_continue'").n,1);
 });
+
+test('Manager corrects repeated wrong refs then reuses an accepted child without another Dev run',async t=>{
+ let step=0;let f;
+ f=await fixture(t,{handler:body=>{
+  assert.ok(body.tools.some(t=>t.function.name==='nominate_delivery'),'no worker execution should be needed');
+  if(step>0&&step<=4){const feedback=JSON.parse(body.messages.at(-1).content);assert.equal(feedback.reason,'reference_not_found_or_inaccessible');if(step===3)assert.equal(feedback.manager_notice.attempts,3);}
+  return step++<4?call('nominate_delivery',{result_ref:'task_history:999999'}):call('nominate_delivery',{result_ref:'task:child',summary:'Integrated parent capability',change_title:'Parent delivery'});
+ }});
+ f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('child','r','task.development','pr_opened','child','{}')");
+ const child=f.records.get('child'),revision=child.revision;
+ f.s.run("INSERT INTO task_children VALUES('t','child','now')");
+ f.s.run("UPDATE tasks SET result=? WHERE id='child'",JSON.stringify({summary:'child done',change_title:'Child result'}));
+ f.s.run("UPDATE task_records SET candidate=?,acceptance=? WHERE task_id='child'",JSON.stringify({id:'c',revision,artifacts:[]}),JSON.stringify({outcome:'pass',revision,candidate_id:'c'}));
+ const result=await runTeam(f.spec(),{prepare:async()=>{}});
+ assert.equal(result.summary,'Integrated parent capability');assert.equal(step,5);
+ assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='dev'").n,0);
+ assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='manager'").n,1);
+ assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'running','nomination is not acceptance');
+ const nominated=JSON.parse(f.s.get("SELECT data FROM task_history WHERE task_id='t' AND type='delivery_nominated'").data);
+ assert.equal(nominated.qa_required,true);assert.equal(nominated.sources[0].task_id,'child');assert.equal(nominated.candidate_scope,'current_parent_workspace');
+});

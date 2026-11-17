@@ -1,3 +1,4 @@
+import {submissionFeedback} from './submission-feedback.js';
 import {checkHarnessAccess} from '../harness/access.js';
 import {computeAllowedGithubScopes} from '../harness/container-session.js';
 import {ReadTokens} from '../agent/read-token.js';
@@ -28,8 +29,8 @@ export function processHarness<T>(spec:AgentSpec<T>){return async(services:Agent
  spec.executionSignal?.addEventListener('abort',abort,{once:true});
  child.once('close',()=>spec.executionSignal?.removeEventListener('abort',abort));
  child.once('spawn',()=>traceEvent(spec.store,spec.task.id,'harness_started',{harness:'process',version:'1',pid:child.pid,recovery:'checkpoint_transcript'},runId));
- const lines=createInterface({input:child.stdout});let settled=false,result:T,requests=0,pending=Promise.resolve();let bytes=0,repairs=0;
- const repair=(error:unknown)=>{const feedback=spec.repairInvalid?.(error);if(!feedback||repairs++>=2)throw error;return {error:'invalid_submission',message:spec.redactor.text(feedback)};};
+ const lines=createInterface({input:child.stdout});let settled=false,result:T,requests=0,pending=Promise.resolve();let bytes=0;
+ const repair=(error:unknown)=>{const feedback=submissionFeedback(spec,error);if(!feedback)throw error;return feedback;};
  const fail=(e:unknown)=>{if(settled)return;settled=true;child.kill('SIGKILL');reject(e);};
  child.on('error',fail);child.stderr.resume();child.stdin.on('error',fail);child.on('close',code=>{if(!settled)fail(new Error('role_worker_exit:'+code));});
  lines.on('line',line=>{bytes+=line.length;if(bytes>64*1024*1024){fail(new Error('role_worker_output_limit'));return;}
@@ -115,7 +116,7 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
   const repository=spec.task.repository_id?spec.store.get('SELECT * FROM repositories WHERE id=?',spec.task.repository_id):undefined;
   const scopeInfo=computeAllowedGithubScopes(spec);
   const reads=repository&&scopeInfo.initial.length?new ReadTokens(spec.store,repository,spec.redactor,spec.guard,spec.containerOptions?.githubApiUrl,scopeInfo.initial,scopeInfo.live,64):undefined;
-  const dispatcher=createTaskToolDispatcher(spec,{maxRepairs:2,includeSubmissionDetails:true,skipScreen:true});
+  const dispatcher=createTaskToolDispatcher(spec,{includeSubmissionDetails:true,skipScreen:true});
   const onAbort=()=>dispatcher.halt();
   if(spec.executionSignal){if(spec.executionSignal.aborted)onAbort();else spec.executionSignal.addEventListener('abort',onAbort,{once:true});}
   const sessionWorkspace={call:env.workspace.call.bind(env.workspace),deliver:env.workspace.deliver.bind(env.workspace),log:(event:any)=>{

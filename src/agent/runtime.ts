@@ -1,3 +1,4 @@
+import {submissionFeedback} from '../roles/submission-feedback.js';
 import {managedSession} from '../harness/session.js';
 import { resultSpec, type ResultSession } from './tool-results.js';
 import { executionModel, taskConfiguration, supplementalInstructions } from '../tasks/configuration.js';
@@ -236,7 +237,6 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
   const messages: any[] = spec.session?.messages.length ? [...spec.session.messages,{role:'user',content:prompt}] : [{ role: 'system', content: spec.system }, { role: 'user', content: prompt }];
   const save=()=>spec.session?.save(spec.redactor.clean(messages));
   const transcript=new ToolTranscript(messages, undefined, spec.resultSession?.preserve);
-  let repairs=0;
   for (let turn = 0; turn < maxTurns; turn++) {
     await services.guard();
     const updates=spec.task.id&&spec.store.get('SELECT 1 FROM tasks WHERE id=?',spec.task.id)?supplementalInstructions(spec.store,spec.task):[];
@@ -268,8 +268,8 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
         const finishing=spec.finish;
         if(finishing&&(finishing.names??[finishing.name]).includes(call.function.name)&&names.has(call.function.name)){
           try{const result=await finishing.validate(args,call.function.name);messages.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({submitted:true})});for(const pending of message.tool_calls.slice(message.tool_calls.indexOf(call)+1))messages.push({role:'tool',tool_call_id:pending.id,content:JSON.stringify({skipped:'execution_submitted'})});save();return result;}catch(error){
-            const feedback=spec.repairInvalid?.(error);if(!feedback||repairs++>=2)throw error;
-            messages.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({error:'invalid_submission',message:spec.redactor.text(feedback)})});continue;
+            const feedback=submissionFeedback(spec,error);if(!feedback)throw error;
+            messages.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(feedback)});continue;
           }
         }
         // The model cannot call an unadvertised tool, even if an executor happens to support it.
@@ -297,9 +297,9 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
     // Validators see raw content to reject (rather than silently save) sensitive output.
     try{const result=spec.validate ? await spec.validate(message.content) : spec.redactor.text(message.content) as T;messages.push({role:'assistant',content:spec.redactor.text(message.content)});save();return result;}
     catch(error){
-      const feedback=spec.repairInvalid?.(error);
-      if(!feedback||repairs++>=2)throw error;
-      messages.push({role:'assistant',content:spec.redactor.text(message.content)},{role:'user',content:spec.redactor.text(feedback)});
+      const feedback=submissionFeedback(spec,error);
+      if(!feedback)throw error;
+      messages.push({role:'assistant',content:spec.redactor.text(message.content)},{role:'user',content:JSON.stringify(feedback)});
     }
   }
   return stop('agent_turn_limit', 'failed', `Agent 达到 ${maxTurns} 轮上限，请检查已取得的证据后继续。`);
