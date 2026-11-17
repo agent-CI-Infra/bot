@@ -245,3 +245,12 @@ test('browser evidence cleanup counts real file bytes and leaves unsanitized nam
   assert.equal(existsSync(dir), false);
   assert.equal(existsSync(odd), true, 'a directory whose name would be rewritten must not be deleted');
 });
+
+test('dispatch failure evidence follows the explicit project trajectory window; default keep preserves records',async t=>{
+ const {store}=fixture(t);
+ for(const [event,repo] of [['bounded','101'],['keep','102']]){store.run("INSERT INTO dispatch_events(id,repository_id,event_key,type,source,summary,facts,options,state,created_at) VALUES(?,?,?,'probe','fixture','retention','{}','[]','pending',?)",event,repo,event,daysAgo(10));for(const [attempt,age] of [[1,5],[2,0]])store.run('INSERT INTO dispatch_failures VALUES(?,?,?,?,?,?)',event,attempt,daysAgo(age),JSON.stringify({code:'fixture_failure'}),0,0);}
+ let cleanup=new RetentionCleanup(store,undefined,{pauseMs:0});t.after(()=>cleanup.stop());await cleanup.run();assert.equal(store.get('SELECT count(*) n FROM dispatch_failures').n,4);
+ saveRetention(store,'admin',{trajectory_days_by_project:{101:1}});const result=await cleanup.run();assert.equal(result.dispatch_failures.count,1);
+ assert.deepEqual(store.all('SELECT event_id,attempt FROM dispatch_failures ORDER BY event_id,attempt').map(r=>[r.event_id,r.attempt]),[['bounded',2],['keep',1],['keep',2]]);
+ assert.equal(store.get("SELECT state FROM dispatch_events WHERE id='bounded'").state,'pending','retention never stops retries');
+});

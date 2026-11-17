@@ -9,7 +9,7 @@ import {join} from 'node:path';
 import {spawn} from 'node:child_process';
 import {Store} from '../dist/storage/database.js';
 import {TaskRecords} from '../dist/tasks/service.js';
-import {CoordinationWorker,waitForCoordinatedTasks,requestCoordination,coordinationContext,acknowledgeCoordination,assertCoordinationCurrent,resumeCoordinatedTasks,coordinationApi} from '../dist/tasks/coordination.js';
+import {CoordinationWorker,decideCoordination,waitForCoordinatedTasks,requestCoordination,coordinationContext,acknowledgeCoordination,assertCoordinationCurrent,resumeCoordinatedTasks,coordinationApi} from '../dist/tasks/coordination.js';
 import {runTeam} from '../dist/roles/team.js';
 import {TaskEngine} from '../dist/agent/engine.js';
 import {Redactor} from '../dist/agent/common.js';
@@ -51,7 +51,7 @@ test('QA retains a coordination suggestion; Manager explicitly requests coordina
  const f=await setup(t,()=>call('submit_coordination',{summary:'User must decide conflicting explicit retention requirements',outcome:'needs_human',notices:[]}));
  const r=f.records(),c=r.submit('a',[{kind:'report',reference:'fixture',version:'v'}],[],{}),human={...verdict,outcome:'needs_human',core_complete:false,gaps:['Cross-task storage contract conflict'],coordination:request};
  const result=r.decide('a',c.id,c.revision,human);assert.equal(result.coordination_requested,undefined);assert.equal(r.get('a').acceptance.outcome,'needs_human');assert.equal(r.get('a').progress.status,'queued');requestCoordination(f.s,f.s.get("SELECT * FROM tasks WHERE id='a'"),request);f.s.run("UPDATE tasks SET status='waiting_coordination' WHERE id='a'");
- const worker=new CoordinationWorker(f.s);await drain(worker);resumeCoordinatedTasks(f.s,()=>false);assert.equal(f.s.get("SELECT error_code FROM tasks WHERE id='a'").error_code,'coordination_needs_human');
+ const worker=new CoordinationWorker(f.s);await drain(worker);resumeCoordinatedTasks(f.s,()=>false);assert.equal(f.s.get("SELECT status FROM tasks WHERE id='a'").status,'queued');assert.equal(coordinationContext(f.s,'a').requests[0].state,'needs_human');
  const b=r.submit('b',[{kind:'report',reference:'fixture',version:'v'}],[],{});r.decide('b',b.id,b.revision,{...human,coordination:undefined});assert.equal(r.get('b').progress.status,'queued');assert.equal(f.s.get('SELECT count(*) n FROM task_coordinations').n,1);await worker.close();
 });
 test('project isolation, conflicting idempotency keys, objections and bounded failures are explicit',async t=>{
@@ -60,7 +60,7 @@ test('project isolation, conflicting idempotency keys, objections and bounded fa
  const req=requestCoordination(f.s,source,request);assert.throws(()=>requestCoordination(f.s,source,{...request,problem:'different'}),/key_conflict/);
  assert.throws(()=>coordinationApi(f.s,{id:'other',role:'project_admin',repositories:['other']},'GET',new URL('http://local/api/tasks/a/coordination'),{}),e=>e.code==='task_not_found');
  const worker=new CoordinationWorker(f.s);for(let i=0;i<3;i++){f.s.run('UPDATE task_coordinations SET next_run_at=0');await drain(worker);}
- assert.equal(f.s.get('SELECT state FROM task_coordinations WHERE id=?',req.coordination_id).state,'failed');assert.equal(coordinationContext(f.s,'foreign').notices.length,0);assert.equal(f.s.get("SELECT count(*) n FROM github_effects").n,0);await worker.close();
+ assert.equal(f.s.get('SELECT state FROM task_coordinations WHERE id=?',req.coordination_id).state,'manager_review');assert.equal(coordinationContext(f.s,'foreign').notices.length,0);assert.equal(f.s.get("SELECT count(*) n FROM github_effects").n,0);await worker.close();
 });
 test('coordinator uses a separate execution slot while ordinary independent tasks can dispatch',async t=>{
  let release;const gate=new Promise(r=>{release=r;});const f=await setup(t,async()=>{await gate;return call('submit_coordination',notices());});
@@ -130,4 +130,70 @@ test('coordinator discovers omitted same-project owners without expanding cross-
  });
  const req=requestCoordination(f.s,f.s.get("SELECT * FROM tasks WHERE id='a'"),request);f.s.run("UPDATE tasks SET status='waiting_coordination' WHERE id='a'");const worker=new CoordinationWorker(f.s);await drain(worker);
  assert.equal(f.s.get('SELECT state FROM task_coordinations WHERE id=?',req.coordination_id).state,'awaiting_feedback');await worker.close();
+});
+
+test('Coordinator failure burst reports evidence to Manager, survives restart and can retry without erasing history',async t=>{
+ const f=await setup(t,()=>call('submit_coordination',{...notices(),notices:[{task_id:'foreign',message:'invalid',action:'rework'}]}));
+ const req=requestCoordination(f.s,f.s.get("SELECT * FROM tasks WHERE id='a'"),request);f.s.run("UPDATE tasks SET status='waiting_coordination' WHERE id='a'");
+ let worker=new CoordinationWorker(f.s);for(let i=0;i<3;i++){f.s.run('UPDATE task_coordinations SET next_run_at=0');await drain(worker);}await worker.close();
+ f.reopen();worker=new CoordinationWorker(f.s);worker.recover();
+ assert.equal(coordinationContext(f.s,'a').requests[0].state,'manager_review');assert.ok(coordinationContext(f.s,'a').requests[0].reports.length>=3);
+ resumeCoordinatedTasks(f.s,()=>false);assert.equal(f.s.get("SELECT status FROM tasks WHERE id='a'").status,'queued');
+ const args={coordination_id:req.coordination_id,action:'retry',reason:'Try narrower coordination',proposal:'Preserve original requirements and narrow the shared interface'};
+ assert.equal(f.records().tool('a','decide_coordination',args,{role:'reviewer',task_id:'a'}).error,'requesting_manager_required');
+ assert.equal(decideCoordination(f.s,'b',args,'role:manager').error,'coordination_not_found');
+ assert.equal(f.records().tool('a','decide_coordination',args,{role:'manager',task_id:'a'}).ok,true);
+ assert.equal(f.records().tool('a','decide_coordination',args,{role:'manager',task_id:'a'}).replayed,true);assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='coordination_decision'").n,1);
+ assert.equal(f.s.get('SELECT attempts FROM task_coordinations WHERE id=?',req.coordination_id).attempts,3);
+ for(let i=0;i<3;i++){f.s.run('UPDATE task_coordinations SET next_run_at=0');await drain(worker);}
+ assert.equal(f.s.get('SELECT attempts FROM task_coordinations WHERE id=?',req.coordination_id).attempts,6);assert.equal(coordinationContext(f.s,'a').requests[0].state,'manager_review');
+ assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='coordination_manager_report'").n,2);
+ assert.equal(decideCoordination(f.s,'a',{coordination_id:req.coordination_id,action:'dismiss',reason:'Continue without this advice; preserve requirements'},'role:manager').state,'resolved');
+ assert.deepEqual(f.records().get('a').contract.criteria,['No data loss']);await worker.close();
+});
+
+test('repeated disputes ask Manager instead of declaring a human dependency; withdrawing advice wakes affected peers',async t=>{
+ const f=await setup(t,()=>call('submit_coordination',notices()));const req=requestCoordination(f.s,f.s.get("SELECT * FROM tasks WHERE id='a'"),request);const worker=new CoordinationWorker(f.s);
+ for(let i=0;i<3;i++){
+  await drain(worker);const n=coordinationContext(f.s,'b').notices[0];
+  acknowledgeCoordination(f.s,'b',{notice_id:n.id,disposition:'disputed',reason:'This advice misses a compatibility case'});
+ }
+ assert.equal(coordinationContext(f.s,'a').requests[0].state,'manager_review');
+ const report=JSON.parse(f.s.get("SELECT data FROM task_history WHERE task_id='a' AND type='coordination_manager_report'").data);assert.equal(report.reason,'repeated_disputes');
+ assert.equal(f.s.get("SELECT task_id FROM task_history WHERE id=?",Number(report.evidence_ref.split(':')[1])).task_id,'a','report originals are readable by the requesting Manager');
+ f.s.run("UPDATE tasks SET status='waiting_coordination',error_code='task_coordination_pending' WHERE id IN ('a','b')");
+ resumeCoordinatedTasks(f.s,id=>id==='a');assert.equal(f.s.get("SELECT status FROM tasks WHERE id='a'").status,'waiting_coordination','never interrupts an active Manager');
+ resumeCoordinatedTasks(f.s,()=>false);assert.equal(f.s.get("SELECT status FROM tasks WHERE id='a'").status,'queued');
+ decideCoordination(f.s,'a',{coordination_id:req.coordination_id,action:'dismiss',reason:'Withdraw stale advice; work continues under original contracts'},'role:manager');
+ resumeCoordinatedTasks(f.s,()=>false);assert.equal(f.s.get("SELECT status FROM tasks WHERE id='b'").status,'queued');assert.equal(coordinationContext(f.s,'b').notices[0].state,'superseded');
+ assert.equal(JSON.parse(f.s.get("SELECT input FROM tasks WHERE id='b'").input).coordination_update,undefined);await worker.close();
+});
+
+test('the actual Task Manager can use the offered coordination decision tool without executing or approving product work',async t=>{
+ let requestId,step=0;const f=await setup(t,body=>{
+  const names=body.tools.map(t=>t.function.name);assert.ok(names.includes('decide_coordination'));
+  return step++===0?call('decide_coordination',{coordination_id:requestId,action:'dismiss',reason:'The retained disagreement is nonblocking; continue under existing contracts'}):call('finish_coordination',{action:'continue',reason:'Proceed with original work after withdrawing this coordination',delay_seconds:5});
+ });
+ requestId=requestCoordination(f.s,f.s.get("SELECT * FROM tasks WHERE id='a'"),request).coordination_id;
+ f.s.run("UPDATE task_coordinations SET state='manager_review',attempts=3 WHERE id=?",requestId);
+ await assert.rejects(runTeam({store:f.s,task:f.s.get("SELECT * FROM tasks WHERE id='a'"),redactor:new Redactor(),guard:async()=>{},system:'fixture',prompt:'{}',tools:[]},{prepare:async()=>{}}),e=>e.code==='manager_deferred');
+ assert.equal(step,2);assert.equal(coordinationContext(f.s,'a').requests[0].state,'resolved');assert.equal(f.records().get('a').acceptance,null);
+});
+
+test('withdrawing advice does not leave a running peer a wake marker for a later unrelated wait',async t=>{
+ const f=await setup(t,()=>call('submit_coordination',notices()));const req=requestCoordination(f.s,f.s.get("SELECT * FROM tasks WHERE id='a'"),request),worker=new CoordinationWorker(f.s);await drain(worker);
+ f.s.run("UPDATE task_coordinations SET state='manager_review' WHERE id=?",req.coordination_id);
+ assert.equal(f.s.get("SELECT status FROM tasks WHERE id='b'").status,'running');
+ decideCoordination(f.s,'a',{coordination_id:req.coordination_id,action:'dismiss',reason:'Withdraw only this advice'},'role:manager');
+ assert.equal(JSON.parse(f.s.get("SELECT input FROM tasks WHERE id='b'").input).coordination_update,undefined);
+ const own=requestCoordination(f.s,f.s.get("SELECT * FROM tasks WHERE id='b'"),{...request,key:'own-new-wait',task_ids:['b','independent']});
+ f.s.run("UPDATE tasks SET status='waiting_coordination',error_code='task_coordination_pending' WHERE id='b'");
+ resumeCoordinatedTasks(f.s,()=>false);assert.equal(f.s.get("SELECT status FROM tasks WHERE id='b'").status,'waiting_coordination');assert.equal(f.s.get('SELECT state FROM task_coordinations WHERE id=?',own.coordination_id).state,'queued');await worker.close();
+});
+
+test('Coordinator human advice goes to Manager but never automatically clears an actual task help state',async t=>{
+ const f=await setup(t,()=>call('submit_coordination',notices())),req=requestCoordination(f.s,f.s.get("SELECT * FROM tasks WHERE id='a'"),request);
+ f.s.run("UPDATE task_coordinations SET state='needs_human' WHERE id=?",req.coordination_id);f.s.run("UPDATE tasks SET status='needs_help' WHERE id='a'");
+ resumeCoordinatedTasks(f.s,()=>false);assert.equal(f.s.get("SELECT status FROM tasks WHERE id='a'").status,'needs_help');
+ f.s.run("UPDATE tasks SET status='running' WHERE id='a'");assert.equal(decideCoordination(f.s,'a',{coordination_id:req.coordination_id,action:'dismiss',reason:'Advice does not establish a human dependency'},'role:manager').state,'resolved');
 });

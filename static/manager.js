@@ -136,7 +136,8 @@ function dispatchCard() {
     revoked = true; request++; detailRequest++; loading = false; detailBusy = false; rows = []; detail = null; selected = null; detailStatus.textContent = ''; list.replaceChildren(); body.replaceChildren();
     if (dialog.open) dialog.close(); address(); more.hidden = true; count.textContent = '当前身份无法读取分派，已清空旧记录。'; controls(); return true;
   };
-  const controls = () => { apply.disabled = refresh.disabled = more.disabled = loading; read.disabled = detailBusy; retry.disabled = detailBusy; retry.hidden = !detail || detail.event.state !== 'failed' || revoked; };
+  const canRetry = event => event && (event.state === 'failed' || event.state === 'pending' && event.error && event.next_run_at > 0);
+  const controls = () => { apply.disabled = refresh.disabled = more.disabled = loading; read.disabled = detailBusy; retry.disabled = detailBusy; retry.hidden = !canRetry(detail?.event) || revoked; };
   async function load(append) {
     if (!live() || loading) return;
     const own = ++request; loading = true; message.textContent = ''; controls();
@@ -177,7 +178,7 @@ function dispatchCard() {
     group('触发事件', facts([['事件编号', event.id], ['事件类型', dispatchEventNames[event.type] || event.type], ['来源', event.source], ['收到时间', timestamp(event.created_at)], ['对象', event.object_number ? `${event.object_type} #${event.object_number}` : '未记录对象'], ['投递编号', event.delivery_id || '未记录']]), element('p', event.summary));
     // A filtered event never reached the Manager: nothing was decided, no model ran, no attempt was made (#815).
     const judged = event.state === 'filtered' ? [['状态', dispatchState(event)], ['原因代码', event.result?.filtered || '未记录'], ['记录时间', timestamp(event.decided_at || event.created_at)]]
-      : [['状态', dispatchState(event)], ['决定时间', event.decided_at ? timestamp(event.decided_at) : event.state === 'decided' ? '未记录决定时间' : '尚未决定'], ['记录的模型名称', event.model || '未记录；不能用当前配置推断历史模型'], ['当前轮尝试次数', String(event.attempts)]];
+      : [['状态', dispatchState(event)], ['决定时间', event.decided_at ? timestamp(event.decided_at) : event.state === 'decided' ? '未记录决定时间' : '尚未决定'], ['记录的模型名称', event.model || '未记录；不能用当前配置推断历史模型'], ['累计尝试次数', String(event.attempts)]];
     group(event.state === 'filtered' ? '控制面过滤（没有交给 Manager）' : 'Manager 判断', facts(judged), element('p', event.reason || '尚无已保存的决定理由。'));
     if (event.brief?.goal) body.lastChild.append(element('p', '任务目标：' + event.brief.goal), note((event.brief.criteria || []).join('；')));
     if (event.error) body.lastChild.append(element('p', '最近失败：' + event.error.code + (event.error.detail ? ' · ' + event.error.detail : ''), 'view-error'));
@@ -189,21 +190,24 @@ function dispatchCard() {
       group('控制面拒绝', note('Manager 选的这些工作没有建出来；拒绝原因也返回给了 Manager，它可以据此回复提出请求的人。'), list);
     }
     if (event.state === 'pending' && event.next_run_at) body.lastChild.append(note('下次允许自动尝试：' + timestamp(new Date(event.next_run_at).toISOString())));
-    // #815: after the attempts ran out the Manager gets one more round to answer the person; only then is the event failed.
-    if (event.answer_round && event.state !== 'decided') body.lastChild.append(note(event.state === 'failed' ? '自动尝试用完后已交给 Manager 再判断一轮，仍然失败；可以人工重试。' : '自动尝试已用完：这一轮交给 Manager 再判断一次，告诉它之前的失败，让它回应提出请求的人。'));
     const tasks = group('关联任务');
     if (!value.tasks.length) tasks.append(note(event.state === 'decided' && event.decision === 'ignore' ? '本次没有关联的新建或续接任务。工具操作应结合已保存理由与实际记录核对。' : '当前没有可读取的关联任务；分派结果不等于任务已完成。'));
     for (const task of value.tasks) tasks.append(button(`${task.relation === 'created' ? '新建' : '续接'} · ${task.kind} · ${task.id.slice(0, 8)} · ${task.status}`, () => { dialog.close(); if (live()) openTask(task.id).catch(error); }));
-    const history = group('人工重试记录', note('重试沿用同一事件编号，原决定的幂等约束继续生效；只有失败状态可以请求人工重试。这里显示最近 50 条人工重试，不表示任务一定成功。'));
+    if (value.recovery?.failures.length) {
+      const recovery = group('自动恢复记录', note('重复失败只触发提醒与退避；尚未决定分派结果。'));
+      for (const record of value.recovery.failures) recovery.append(element('p', `第 ${record.attempt} 次 · ${record.error.code}${record.error.detail ? ' · ' + record.error.detail : ''}${record.report ? ' · 已记录重复失败提醒' : ''}`));
+      if (value.recovery.next_before_attempt) recovery.append(button('读取更早的恢复记录', () => void readDetail(selected, value.recovery.next_before_attempt), 'quiet'));
+    }
+    const history = group('人工重试记录' , note('重试沿用同一事件编号，原决定的幂等约束继续生效；失败状态或正在退避的分派可请求立即重试；累计次数和故障证据保留。这里显示最近 50 条人工重试，不表示任务一定成功。'));
     if (!value.retries.length) history.append(note('没有人工重试记录。'));
     for (const record of value.retries) history.append(element('p', `${timestamp(record.requested_at)} · 原轮尝试 ${record.previous_attempts} 次 · ${record.previous_error?.code || '未记录错误码'}${record.previous_error?.detail ? ' · ' + record.previous_error.detail : ''}`));
     dialog.scrollTop = position;
   }
-  async function readDetail(eventId) {
+  async function readDetail(eventId, before) {
     if (!live() || !eventId) return;
     const own = ++detailRequest; detailBusy = true; detailMessage.textContent = ''; controls();
     try {
-      const value = await api(`/api/repositories/${id}/dispatch/${encodeURIComponent(eventId)}`);
+      const value = await api(`/api/repositories/${id}/dispatch/${encodeURIComponent(eventId)}` + (before ? `?failure_before=${before}` : ''));
       if (!live() || own !== detailRequest || selected !== eventId) return;
       detail = value; drawDetail(value);
     } catch (err) {
@@ -213,7 +217,7 @@ function dispatchCard() {
     } finally { if (live() && own === detailRequest) { detailBusy = false; controls(); } }
   }
   async function retrySelected() {
-    if (!live() || detailBusy || detail?.event.state !== 'failed') return;
+    if (!live() || detailBusy || !canRetry(detail?.event)) return;
     const eventId = selected, own = ++detailRequest; detailBusy = true; detailStatus.textContent = ''; detailMessage.textContent = ''; controls();
     try {
       await api(`/api/repositories/${id}/dispatch/${encodeURIComponent(eventId)}/retry`, 'POST', {});

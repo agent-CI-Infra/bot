@@ -125,3 +125,17 @@ test('opening a linked task reports a rejected read without an unhandled rejecti
     expect(await page.evaluate(() => window.linkedTaskRequests)).toEqual(['linked-failure']); expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });
+
+test('cooling-down dispatch exposes paged recovery evidence and an immediate retry without resetting attempts', async ({page})=>{
+ const {h,reader}=await prepared(page);
+ const capture=async state=>{mkdirSync('.tmp/manager-dispatch-229/recovery',{recursive:true});for(const width of [1440,390]){await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);expect(await detail(page).evaluate(el=>el.scrollWidth<=el.clientWidth)).toBe(true);await page.screenshot({path:'.tmp/manager-dispatch-229/recovery/'+state+'-'+width+'.png'});}await page.setViewportSize({width:1440,height:900});};
+ try{
+  h.store.run("UPDATE dispatch_events SET state='pending',attempts=9,error=?,next_run_at=? WHERE id='failed'",JSON.stringify({code:'invalid_decision',detail:'Recoverable decision failure'}),Date.now()+600000);
+  for(let attempt=1;attempt<=9;attempt++)h.store.run('INSERT INTO dispatch_failures VALUES(?,?,?,?,?,?)','failed',attempt,new Date().toISOString(),JSON.stringify({code:'invalid_decision',detail:'Attempt evidence '+attempt}),Date.now()+600000,attempt%3===0?1:0);
+  await reader.locator('[data-dispatch-event="failed"]').getByRole('button',{name:'查看分派详情',exact:true}).click();
+  await expect(detail(page)).toContainText('已记录重复失败提醒');await expect(detail(page)).toContainText('Attempt evidence 9');await expect(detail(page).getByRole('button',{name:'重试这条分派',exact:true})).toBeEnabled();await capture('cooldown-list');
+  await detail(page).getByRole('button',{name:'读取更早的恢复记录',exact:true}).click();await expect(detail(page)).toContainText('Attempt evidence 1');await capture('older-page');
+  await detail(page).getByRole('button',{name:'重试这条分派',exact:true}).click();await expect(detail(page).getByRole('status')).toHaveText('已请求重试，仍使用同一条分派记录。');await capture('retry-receipt');
+  expect(h.store.get("SELECT attempts FROM dispatch_events WHERE id='failed'").attempts).toBe(9);expect(h.store.get("SELECT count(*) n FROM dispatch_failures WHERE event_id='failed'").n).toBe(9);
+ }finally{await h.stop();}
+});

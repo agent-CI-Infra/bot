@@ -95,3 +95,7 @@ Codex 的 `BOT_CODEX_CONFIG` 可以只声明 executable、专用 `env.CODEX_HOME
 交付提名可以引用当前任务的最新 Dev `task_history:` 记录，也可以引用同项目已验收的后代任务 `task:<id>`（可用 `supporting_refs` 附带更多来源）。引用只是复用交付说明与证据，不导入或覆盖文件；Manager 应先检查父任务实际工作区并自行决定集成、测试或委派。框架保存来源任务、契约版本、候选和验收版本，后续策略测试和独立 QA 仍针对父任务的当前候选与完整目标，不继承子任务通过结论。
 
 提交拒绝在产生处携带原因、期望、实际记录类型/角色/版本以及可查询入口；不可读的引用不泄露其归属。Native、Process、Pi 与 MCP/mailbox 使用同类纠正反馈：没有“两次纠正后抛出”的次数上限，有 tasks 记录的任务会话中，同类拒绝每 3 次保存并返回一次 Manager 提醒，累计次数从 task_history 恢复；非任务 dispatch 等会话仅保留拒绝证据入口，不返回虚构次数或 Manager 提醒，角色/任务现有资源预算及权限检查仍生效。Manager 可通过任务上下文的 submission_reports 和历史查询读取提醒、拒绝及工具原始记录。
+
+Coordinator 的单轮自动尝试保留三次边界；运行失败或连续争议到达边界后返回 `manager_review`，将错误、争议和原始记录入口交给请求方 Task Manager，不按次数判为必须人工处理。Manager 使用 `decide_coordination` 选择 retry（可调整 proposal）或 dismiss；主动求助仍用既有 finish_coordination。重试保留累计次数及证据，重复相同决定返回已有结果；撤回建议不修改任务目标或通过 QA，并通知受影响的等待任务。
+
+事件分派的失败保持 pending 并退避，稳定状态最多每十分钟自动尝试一次；每第三次失败记录持久化报告。下一次同一事件的普通 Manager 调用会收到此前失败证据，不另起一层 Manager。分派错误次数本身不会调用 declined hook，也不会被当作 ignore；明确取消仍结束当前事件。已有事件详情入口返回恢复记录，`failure_before` 可向前分页；人工重试可跳过冷却期，历史次数不清零。历史版本已经 failed 的事件仍可用既有重试入口恢复，不自动重新触发曾被拒绝的工作。

@@ -118,7 +118,7 @@ export async function managerApi(store: Store, rules: RuleService, user: Actor, 
     if (!events[2] && method === 'GET') {
       return dispatchList(store, repositoryId, url.searchParams);
     }
-    if (events[2] && !events[3] && method === 'GET') return dispatchDetail(store, repositoryId, dispatchEventId(events[2]));
+    if (events[2] && !events[3] && method === 'GET') return dispatchDetail(store, repositoryId, dispatchEventId(events[2]), url.searchParams);
     if (events[2] && events[3] && method === 'POST') {
       fields(input, []);
       const eventId = dispatchEventId(events[2]);

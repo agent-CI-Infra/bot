@@ -22,7 +22,7 @@ const legacyItems: PermissionItem[] = [
   access('github', 'GitHub 内容', ['github_read_token', 'github_read', 'github_search', 'read_job_log'], [], '读取本次任务授权的仓库；不授予 GitHub 写入凭据。'),
   // 「访问其他角色的任务」：拒绝 / 只读 / 读写。读写的工具只在提供它的入口出现（服务角色的任务操作），工作角色现有的值和快照不变。
   access('project_tasks', '其他角色的任务', ['list_project_tasks', 'read_project_task'], ['manage_project_task'], '只读查询范围内其他角色任务的进展；读写还可以追加指令、暂停、继续或取消这些任务，仍走管理服务的版本检查和幂等。角色自己的独立任务不受这一项限制。'),
-  access('coordination', '跨任务协调记录', ['read_coordination'], ['acknowledge_coordination', 'request_task_coordination', 'wait_for_tasks', 'submit_coordination'], '读取协调通知，或提出请求、等待依赖、登记采纳和提交建议。'),
+  access('coordination', '跨任务协调记录', ['read_coordination'], ['acknowledge_coordination', 'decide_coordination', 'request_task_coordination', 'wait_for_tasks', 'submit_coordination'], '读取协调通知，或提出请求、等待依赖、登记采纳、提交建议；请求方 Manager 还可决定重试或撤回协调建议。'),
   access('stage_plan', '任务阶段计划', ['read_stage_schedule'], ['plan_task'], '读取阶段进度，或安排可选阶段；项目必需阶段仍由控制面校验。'),
   action('dispatch', '处理项目事件', ['dispatch'], '决定为事件新建任务、续接任务或不处理。'),
   action('delegation', '委派角色', ['delegate_role', 'delegate_roles'], '将工作委派给已配置并启用的角色。'),
@@ -58,7 +58,7 @@ export const permissionItems: PermissionItem[] = [
   platform(action('computer','使用虚拟电脑',['read_file','read_version_file','compare_versions','write_file','run_command'],'允许读取和修改分配的工作区、执行命令与测试；固定候选和运行隔离仍由任务入口保证。')),
   platform(action('browser','使用任务浏览器',['browser'],'在项目电脑上打开任务列出的站点并留下截图证据。控制面只派发动作和展示证据，不会在控制面进程里启动浏览器。默认拒绝；未保存或空角色没有这项授权。')),
   platform(action('delegation','指派其他角色',['delegate_role','delegate_roles','create_project_task','list_managed_tasks','create_task','manage_task','grant_writes'],'将工作交给项目团队或其他已启用角色；自己创建和执行任务默认允许。')),
-  platform(access('project_tasks','项目任务与协作',['list_project_tasks','read_project_task'],['manage_project_task','request_task_coordination','wait_for_tasks','submit_coordination','set_task_priority','relate_task'],'查询其他角色的任务；读写还可修改、协调其他任务与共享调度。自己的任务、已收到的通知默认可用。')),
+  platform(access('project_tasks','项目任务与协作',['list_project_tasks','read_project_task'],['manage_project_task','decide_coordination','request_task_coordination','wait_for_tasks','submit_coordination','set_task_priority','relate_task'],'查询其他角色的任务；读写还可修改、协调其他任务，决定协调重试或撤回建议，并参与共享调度。自己的任务、已收到的通知默认可用。')),
   platform(access('project_memory','项目共享知识',['search_project_memory','read_project_memory'],['remember_project_memory'],'查询共享知识或提交候选；自己的私有记忆默认可用，候选仍需原有复核。')),
   platform(access('project_configuration','项目设置与角色配置',['management_query'],['management_command'],'按操作核对项目配置、角色和共享规则的读取或修改权限；不会增加操作者授权。')),
   platform(access('schedules','项目定时与通知',['management_query'],['management_command'],'管理共享项目计划和通知订阅，目标与收件人仍受项目范围限制。')),
@@ -214,7 +214,7 @@ export function permissionTools(value: RolePermissions): string[] {
     const item = permissionItems.find(item => item.id === 'project_tasks')!;
     if (['read','write'].includes(p.legacy_project_tasks!) || p.legacy_delegation_controls==='allow') item.read.forEach(name => tools.add(name));
     if (p.legacy_project_tasks === 'write' || p.legacy_delegation_controls==='allow') tools.add('manage_project_task');
-    if (p.legacy_coordination === 'write') ['request_task_coordination','wait_for_tasks','submit_coordination'].forEach(name => tools.add(name));
+    if (p.legacy_coordination === 'write') ['decide_coordination','request_task_coordination','wait_for_tasks','submit_coordination'].forEach(name => tools.add(name));
     if (p.legacy_nomination === 'allow') ['set_task_priority','relate_task'].forEach(name => tools.add(name));
   }
   if (['project_tasks','project_memory','project_configuration','schedules'].some(id => ['read','write'].includes(p[id]!))) tools.add('management_query');
