@@ -1,4 +1,12 @@
 const channelNameRequests = new Map();
+// #870: one automatic lookup per chat and connection. A render version says whether a draw still wants the answer, not
+// that this chat was already tried: the console redraws (and re-enters) often, and a refused lookup — no contact scope,
+// for example — answers with the same empty name every time. Remember the failure here, keyed by the chat, and hand the
+// next attempt to the reader's own button. A successful or manual retry clears it.
+const channelNameFailures = new Set();
+const channelNameKey = chat => String(chat.binding_id || chat.id);
+const channelNameAutoRead = chat => !channelNameFailures.has(channelNameKey(chat));
+
 function channelNameRequest(route) {
   const key = renderVersion + ':' + route;
   if (!channelNameRequests.has(key)) channelNameRequests.set(key, api(route, 'POST', {}).finally(() => channelNameRequests.delete(key)));
@@ -18,15 +26,17 @@ function channelProfileDetails(chat, changed = () => {}) {
       try {
         // Several panels can show the same chat. Share the in-flight lookup, without keeping a cross-account cache.
         const result = await channelNameRequest(route); if (request !== renderVersion) return;
+        channelNameFailures.delete(channelNameKey(chat));
         Object.assign(chat, result, { id: chat.id }); context.textContent = channelChatContext(chat); changed(); status.textContent = '名称已更新。';
       } catch (err) {
+        channelNameFailures.add(channelNameKey(chat));
         if (request !== renderVersion) return;
         const changedAccess = [401, 404, 409].includes(err.status) || /authorization_changed|channel_history_forbidden|capability_forbidden|source_inactive|external_binding_required/.test(err.message);
         status.textContent = changedAccess ? '会话或权限已变化，请刷新页面。' : `${chat.display_name ? '暂时无法更新，保留上次读取的名称。' : '暂时无法读取名称。'}${err.message.includes('channel_user_name_permission_required') ? channelNamePermissionHint : '请管理员检查飞书应用权限、发布状态和通讯录可见范围后重试。'}`;
       } finally { refresh.disabled = false; }
     }, 'quiet');
     box.append(refresh, status);
-    if (!chat.display_name) setTimeout(() => { if (request === renderVersion && !chat.display_name) refresh.click(); }, 0);
+    if (!chat.display_name && channelNameAutoRead(chat)) setTimeout(() => { if (request === renderVersion && !chat.display_name) refresh.click(); }, 0);
   }
   return box;
 }
