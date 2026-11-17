@@ -29,7 +29,9 @@ const run = (extra = {}) => ({ id: 800, run_attempt: 1, repository: { id: 101 },
 
 async function fixture(t, options = {}) {
   const state = { runs: [run()], jobs: [job()], log: log('HTTPError: HTTP 429 Too Many Requests'), requests: [], issues: [], comments: [],
-    events: [...appEvents, 'workflow_run'], permissions: { contents: 'write', issues: 'write', actions: 'write' }, workflow: 'name: Nightly\non: [schedule, workflow_dispatch]\n', tokens: [], ...options };
+    events: [...appEvents, 'workflow_run'], permissions: { contents: 'write', issues: 'write', actions: 'write' }, workflow: 'name: Nightly\non: [schedule, workflow_dispatch]\n', tokens: [],
+    // Tag refs by name ({ type, sha } as GitHub's git ref object) and annotated tag objects by SHA.
+    tags: {}, tagObjects: {}, ...options };
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
     const url = new URL(req.url, 'http://fixture'), path = url.pathname, body = raw ? JSON.parse(raw) : undefined;
@@ -53,6 +55,9 @@ async function fixture(t, options = {}) {
     if (/\/actions\/workflows\/\d+$/.test(path)) return send({ path: '.github/workflows/nightly.yml' });
     if (path.includes('/contents/')) return send({ encoding: 'base64', content: Buffer.from(state.workflow).toString('base64') });
     if (path.includes('/compare/')) return send({ merge_base_commit: { sha: state.runs[0].head_sha } });
+    const tagRef = /\/git\/ref\/tags\/(.+)$/.exec(path), tagObject = /\/git\/tags\/([a-f0-9]{40})$/.exec(path);
+    if (tagRef) { const name = decodeURIComponent(tagRef[1]); return state.tags[name] ? send({ ref: 'refs/tags/' + name, object: state.tags[name] }) : send({ message: 'Not Found' }, 404); }
+    if (tagObject) return state.tagObjects[tagObject[1]] ? send({ sha: tagObject[1], object: state.tagObjects[tagObject[1]] }) : send({ message: 'Not Found' }, 404);
     if (path.endsWith('/rerun')) {
       if (state.denyRerun) return send({ message: 'Resource not accessible by integration' }, 403);
       const r = state.runs.find(r => path.endsWith(`/${r.id}/rerun`));
@@ -163,6 +168,9 @@ test('explicit fixture-model code reports reuse the review path without rerunnin
     const f = await fixture(t, { log: log(text) }); await f.hook(); await f.tick();
     assert.equal(f.reruns().length, 0); assert.equal(f.state.issues.length, 1); assert.match(f.state.issues[0].body, /classification: \*\*code\*\*/);
     assert.ok(f.state.issues[0].body.includes(head)); assert.match(f.state.issues[0].body, /actions\/runs\/800\/job\/91/); assert.ok(f.state.issues[0].body.includes(text));
+    // A default-branch run names its branch and is not called a version-tag run.
+    const facts = JSON.parse(f.h.store.get("SELECT facts FROM dispatch_events WHERE type='actions.run_failed'").facts).run;
+    assert.deepEqual([facts.branch, facts.tag_run, facts.tag], ['main', undefined, undefined]); assert.doesNotMatch(f.state.issues[0].body, /Version tag run/);
     assert.equal(f.h.store.get("SELECT count(*) n FROM tasks WHERE kind='review.issue'").n, 1);
     assert.equal(f.h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n, 0);
     assert.equal(f.state.requests.filter(r => r.path.endsWith('/labels')).length, 0);
@@ -183,6 +191,73 @@ test('PR failures, cancelled, skipped, successful and other-branch runs are igno
   const f = await fixture(t, { log: log('AssertionError: failed') }); f.state.runs = cases.map((change, i) => run({ id: 810 + i, ...change }));
   for (const r of f.state.runs) await f.hook(r); await f.tick(); assert.equal(f.state.issues.length, 0); assert.equal(f.reruns().length, 0);
   assert.ok(!f.state.requests.some(r => r.path.endsWith('/logs')));
+});
+
+test('a failed version-tag run of any workflow on the default branch history is handled once as a version-tag run, apart from releases (#1028)', async t => {
+  // An annotated v1.2.3 tag on a default-branch commit, pushed for a workflow that is not called Release.
+  const tagObject = 'c'.repeat(40), f = await fixture(t, { log: log('AssertionError: package lists 2 files; expected 3'), workflow: 'name: Publish\non: {push: {tags: [v*]}}\n',
+    tags: { 'v1.2.3': { type: 'tag', sha: tagObject } }, tagObjects: { [tagObject]: { type: 'commit', sha: head } } });
+  f.state.runs[0] = run({ name: 'Publish', head_branch: 'v1.2.3', event: 'push' });
+  // The release page's record of this version: Actions failure handling neither reads it nor changes it.
+  f.h.store.run(`INSERT INTO project_releases(id,repository_id,version,target_sha,actor_id,stage,active,data,created_at,updated_at)
+    VALUES('release-v1.2.3','101','v1.2.3',?,'fixture','published',0,'{"detail":"release page record"}',?,?)`, head, at, at);
+  const releases = () => JSON.stringify(['project_releases', 'release_preflights', 'release_effects', 'release_observers', 'release_attempts'].map(table => f.h.store.all(`SELECT * FROM ${table}`)));
+  const before = releases();
+  // The same run delivered twice under one delivery id and once under another, then found again by the next scan.
+  await f.hook(f.state.runs[0], 'tag-run'); await f.hook(f.state.runs[0], 'tag-run'); await f.hook(); await f.tick(); await f.hook(); await f.tick();
+  // One event for the Manager, saying it is a version-tag run and naming the tag instead of a branch.
+  const events = f.h.store.all("SELECT * FROM dispatch_events WHERE type='actions.run_failed'");
+  assert.equal(events.length, 1); assert.equal(events[0].summary, 'Actions 运行失败（版本标签运行 v1.2.3）：Publish run 800 / attempt 1');
+  const facts = JSON.parse(events[0].facts).run;
+  assert.deepEqual([facts.tag_run, facts.tag, facts.branch, facts.workflow, facts.event, facts.head_sha], [true, 'v1.2.3', undefined, 'Publish', 'push', head]);
+  // One analysis, on the tagged commit, with the tag in its run.json and in its title.
+  const tasks = f.h.store.all("SELECT * FROM tasks WHERE kind='actions.failures'");
+  assert.equal(tasks.length, 1); assert.match(tasks[0].summary, /版本标签运行 v1\.2\.3/);
+  assert.equal(f.analysis.requests.length, 1); assert.equal(f.analysis.requests[0].target.sha, head);
+  assert.deepEqual(JSON.parse(f.analysis.requests[0].target.files['run.json']).run, facts);
+  // One report, saying it is a version-tag run; a code failure is not rerun.
+  assert.equal(f.state.issues.length, 1); assert.equal(f.state.comments.length, 0); assert.equal(f.reruns().length, 0);
+  assert.match(f.state.issues[0].body, /Run: \S+\/actions\/runs\/800 \(attempt 1\)\n\nVersion tag run: `v1\.2\.3`/);
+  assert.equal(f.h.store.get("SELECT count(*) n FROM actions_failure_attempts WHERE state='done'").n, 1);
+  // The release side is untouched: the same records, no CI observation or release notes, no release request.
+  assert.equal(releases(), before);
+  assert.equal(f.h.store.get("SELECT count(*) n FROM tasks WHERE kind IN ('release.observe','release.notes')").n, 0);
+  assert.equal(f.h.store.get("SELECT count(*) n FROM dispatch_events WHERE type='release.manual'").n, 0);
+  assert.ok(!f.state.requests.some(r => r.path.includes('/releases')));
+});
+
+test('tags off the default branch history, branches that are not tags and PR runs are not version-tag runs (#1028)', async t => {
+  const other = 'b'.repeat(40), f = await fixture(t, { log: log('AssertionError: failed'), workflow: 'name: Publish\non: {push: {tags: [v*]}}\n',
+    tags: { 'v1.2.3': { type: 'commit', sha: head }, 'v2.0.0-rc.1': { type: 'commit', sha: other } } });
+  f.state.runs = [
+    // The tag's commit is only on another branch: the default branch history does not contain it.
+    run({ id: 820, name: 'Publish', event: 'push', head_branch: 'v2.0.0-rc.1', head_sha: other }),
+    // A pushed branch, not a tag, although its commit is on the default branch history.
+    run({ id: 821, name: 'Publish', event: 'push', head_branch: 'release/next' }),
+    // The tag of that name now names another commit than the run's.
+    run({ id: 822, name: 'Publish', event: 'push', head_branch: 'v2.0.0-rc.1' }),
+    // PR-related runs, even with a tag's name as their head.
+    run({ id: 823, name: 'Publish', event: 'pull_request', head_branch: 'v1.2.3' }),
+    run({ id: 824, name: 'Publish', event: 'push', head_branch: 'v1.2.3', pull_requests: [{ number: 1 }] })];
+  f.state.custom = ({ path, send }) => { if (path.includes('/compare/' + other)) { send({ merge_base_commit: { sha: 'd'.repeat(40) } }); return true; } return false; };
+  for (const r of f.state.runs) await f.hook(r); await f.tick();
+  assert.equal(f.h.store.get("SELECT count(*) n FROM dispatch_events WHERE type='actions.run_failed'").n, 0);
+  assert.equal(f.analysis.requests.length, 0); assert.equal(f.state.issues.length, 0); assert.equal(f.reruns().length, 0);
+  assert.ok(!f.state.requests.some(r => r.path.endsWith('/logs')));
+  assert.equal(f.h.store.get("SELECT count(*) n FROM actions_failure_attempts WHERE state='done'").n, 5);
+  // PR runs are excluded before any lookup; only the tag that names the run's own commit is compared with the default branch.
+  assert.ok(!f.state.requests.some(r => r.path.endsWith('/git/ref/tags/v1.2.3')));
+  assert.deepEqual(f.state.requests.filter(r => r.path.includes('/compare/')).map(r => r.path.split('/compare/')[1]), [`${other}...main`]);
+});
+
+test('a version-tag run keeps its single rerun, and a report after an unconfirmed rerun still names the tag (#1028)', async t => {
+  const f = await fixture(t, { unknownRerun: true, noAdvance: true, workflow: 'name: Publish\non: {push: {tags: [v*]}, workflow_dispatch: {}}\n', tags: { 'v1.2.3': { type: 'commit', sha: head } } });
+  f.state.runs[0] = run({ name: 'Publish', head_branch: 'v1.2.3', event: 'push' }); await f.tick();
+  assert.equal(f.reruns().length, 1); assert.equal(f.state.issues.length, 0);
+  // The report published from the stored record after five minutes does not look the tag up again.
+  f.h.store.run('UPDATE actions_failure_runs SET retry_at=?', Date.now() - 6 * 60_000); await f.restart(); await f.tick();
+  assert.equal(f.reruns().length, 1); assert.equal(f.state.issues.length, 1);
+  assert.match(f.state.issues[0].body, /could not be confirmed/); assert.match(f.state.issues[0].body, /Version tag run: `v1\.2\.3`/);
 });
 
 test('same normalized signature comments on an open issue; different job/signature or closed issue opens another', async t => {
@@ -212,7 +287,8 @@ test('an unconfirmed send without an observed attempt is reported after reconcil
 test('denied rerun reports once without resetting budget; unsupported/tag Release never reruns', async t => {
   const denied = await fixture(t, { denyRerun: true }); await denied.tick(); await denied.tick(); assert.equal(denied.reruns().length, 1);
   assert.equal(denied.state.issues.length, 1); assert.match(denied.state.issues[0].body, /could not be sent/);
-  const release = await fixture(t, { workflow: 'name: Release\non: {push: {tags: [v*]}}\n' }); release.state.runs[0] = run({ name: 'Release', head_branch: 'v1.0.0', event: 'push' }); await release.tick();
+  const release = await fixture(t, { workflow: 'name: Release\non: {push: {tags: [v*]}}\n', tags: { 'v1.0.0': { type: 'commit', sha: head } } });
+  release.state.runs[0] = run({ name: 'Release', head_branch: 'v1.0.0', event: 'push' }); await release.tick();
   assert.equal(release.reruns().length, 0); assert.equal(release.state.issues.length, 1); assert.match(release.state.issues[0].body, /does not already support/);
 });
 

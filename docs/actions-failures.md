@@ -12,7 +12,9 @@ App 管理员需要在已有 App 的事件订阅中添加 `workflow_run`，即 G
 
 ## 运行范围与扫描
 
-签名验证通过的 `workflow_run.completed` 事件只记入持久收件记录。每 5 秒检查待处理事件；后台扫描间隔为 60 秒，每页 50 个 run。只处理 `conclusion=failure`，忽略 PR 事件、带有 PR 关联的 run，以及成功、取消和跳过。普通 run 必须属于默认分支；Release 的 tag push 还需通过 compare 确认该 SHA 是默认分支的祖先。不会修改任何目标仓库工作流。
+签名验证通过的 `workflow_run.completed` 事件只记入持久收件记录。每 5 秒检查待处理事件；后台扫描间隔为 60 秒，每页 50 个 run。只处理 `conclusion=failure`，忽略 PR 事件、带有 PR 关联的 run，以及成功、取消和跳过。普通 run 必须属于默认分支。推送标签触发的 run（版本标签运行，#1028）不限 workflow 名字：GitHub 给这类 run 的 `event` 是 `push`，`head_branch` 是标签名，控制面用 `GET /git/ref/tags/<标签名>` 确认这个标签存在、并且（附注标签解到它指向的对象后）指向 run 的提交，再通过 compare 确认该提交是默认分支的祖先。同名的分支、已删除或已改指别的提交的标签、不在默认分支历史上的提交都不进入。不会修改任何目标仓库工作流。
+
+版本标签运行和默认分支的失败走同一套处理：同样作为 `actions.run_failed` 事件交给 Manager，先调查，最多重跑一次，按原因合并报告，同一 `repository + run id + attempt` 重复投递只处理一次。为了让 Manager 和分析任务区分，事件摘要和分析任务的标题写明「版本标签运行」和标签名，事件和 `run.json` 里的 `run` 用 `tag_run: true` 和 `tag` 代替 `branch`；公开报告在 run 链接下一行写 `Version tag run: <标签名>`。它和「发版本」是两件事：本功能不读写发版本记录，不影响发版本页面的流程；发版本页面请求的 CI 观察和发行说明（`release.observe`、`release.notes`）照旧是独立任务，不依赖本功能，两者互不取消。
 
 首次开启保存精确的 `enabled_at`。已经在该时刻前完成的运行不补报，之前开始且仍在运行的任务会跟踪到完成。为发现这种较早开始的运行，首次扫描读取历史 run 的元数据，但不读取已完成历史运行的日志、不处理其失败。之后只扫描新增创建时间窗口；已发现的未完成 run 和已发送重跑的 run 单独轮询到结束。
 

@@ -15,8 +15,11 @@ export const legacySignature = (run: any, evidence: Evidence) => sha(JSON.string
 const markerFor = (id: string) => `<!-- dept-bot-actions:${id} -->`;
 const block = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/@/g, '&#64;').split('\n').map(line => '    ' + line).join('\n');
 
-/** A cause owns one outbox entry per attempt. Jobs describe impact, never the identity of a new report. */
-export async function publishReport(store: Store, github: GitHub, run: any, report: CheckedReport, evidence: Evidence[], retryReason: string) {
+/**
+ * A cause owns one outbox entry per attempt. Jobs describe impact, never the identity of a new report. `tag` names the
+ * version tag of a run that pushing it started; the report says so next to the run.
+ */
+export async function publishReport(store: Store, github: GitHub, run: any, report: CheckedReport, evidence: Evidence[], retryReason: string, tag?: string | null) {
   if (report.withheld_reason) return;
   const signature = 'cause-v2:' + sha(JSON.stringify([run.workflow_id, causeIdentity(report.cause)]));
   const id = sha(JSON.stringify([github.repository.id, run.id, run.run_attempt, signature]));
@@ -35,7 +38,9 @@ export async function publishReport(store: Store, github: GitHub, run: any, repo
     });
     return [prose(ref.label), safePath ? publicText(ref.url, github.redactor, false) : '[Reference URL withheld for public disclosure.]', ref.quote ? quote ? block(quote) : 'Excerpt omitted: the cited data could not be made safe for public disclosure.' : 'Reference only; no artifact contents are certified by this report.'].join('\n\n');
   });
-  const body = [`Actions failure classification: **${report.kind}**.`, `Run: ${runUrl} (attempt ${run.run_attempt})`, `Head SHA: \`${run.head_sha}\``,
+  // A tag name may hold backticks, mentions or markup; it is shown like a job name.
+  const tagLine = tag ? `Version tag run: \`${publicText(tag, github.redactor).replace(/[\r\n`#<>@]/g, ' ') || '[tag name withheld]'}\` (the run was started by pushing this tag; its commit is on the default branch history).` : '';
+  const body = [`Actions failure classification: **${report.kind}**.`, `Run: ${runUrl} (attempt ${run.run_attempt})`, tagLine, `Head SHA: \`${run.head_sha}\``,
     '## Cause identity', prose(report.cause), '## Affected checks', jobs, prose(report.diagnosis), '## Why report this', prose(report.report_reason),
     retryReason, 'This report does not approve development. Existing review gates and a development label applied by a person are required.',
     '<!-- dept-bot-actions-log-start -->', '### Untrusted log data and source references',

@@ -57,7 +57,7 @@
 | `review.published` | 检视发布：Issue 上有人加的开发标签时的 Issue 检视，或 bot PR 的检视采纳了修改要求、发现可执行问题 | `review.published.issue`、`review.published.pr` |
 | `development.stopped` | Issue 的开发因开发标签被去掉（或 Actions 提报的 Issue 被指派给别人）停在 `waiting_permission`（#815） | 无单独开关，项目启用即可 |
 | `release.manual` | 「发版本」页请求 CI 观察或起草发行说明 | 对应工作类型的开关 |
-| `actions.run_failed` | 默认分支的 Actions 运行失败 | Actions 失败处理的开关 |
+| `actions.run_failed` | 默认分支的 Actions 运行失败，或推送标签触发、提交在默认分支历史上的运行失败（版本标签运行，事件写明标签名，见 [Actions 失败分类与提报](actions-failures.md#运行范围与扫描)） | Actions 失败处理的开关 |
 | `schedule.due` | `manager.check` 定时计划到期 | 定时检查的开关 |
 
 提到 bot 的评论（`issue.mention`、`pull_request.mention`）不按评论人过滤：任何人在打开的 Issue 或 PR 上 `@bot`，包括公开仓库里的仓库外人员，都会交给 Manager 分派一次，由它按提示词决定回答、检视还是不处理。Issue 上的提到 bot 和其他 Issue 事件一样，在能力上限为 `develop` 时也提供「开发 Issue」；开始开发要 Manager 写明依据（有人加的开发标签、triage 以上权限的维护者在评论里的要求，或 Manager 提示词里的规则，#815），外人的评论不作为开发依据，控制面在 `create_task` 时拒绝。Manager 自己的 `github_write` 不受事件来源限制，回应外人时由 Manager 提示词把握。

@@ -31,7 +31,7 @@ permissions.
 | Pull request edited, discussed, reviewed, review comments answered, a comment that mentions the bot | continue the pull request's review, whether it is running, waiting or finished; otherwise create **Review PR** |
 | An Issue review was published while a person's development label is on the Issue | create **Develop Issue** when the review supports developing now (see "Starting development"); otherwise ignore, the published review has answered |
 | A review of the bot's own pull request took on change requests or found actionable problems | create **Follow up bot PR** |
-| A default-branch Actions run failed | create **Actions failure handling** |
+| A default-branch Actions run failed, or a version-tag run on the default branch history failed (`run.tag_run`, the tag in `run.tag`) | create **Actions failure handling** |
 | The release page asked for a CI observation or release notes | create **CI observation** or **Release notes** |
 | A scheduled check is due | If the plan already has an instruction, the control plane starts the check task; do not ignore it. If it has no instruction, follow the Scheduled check section; without one, ignore. File an Issue only when allowed: `file_issues` true allows it, false denies it, unset follows the executing role. |
 

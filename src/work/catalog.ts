@@ -77,7 +77,7 @@ export const workTypes: WorkType[] = [
   { id: 'release.notes', name: '发行说明', base: 'release.notes', object: 'release', kinds: ['release.notes'], section: 'release.notes', defaultEnabled: true,
     description: '把已核验的提交和合并 PR 整理成发行说明；起草与正式发布仍留在「发版本」。' },
   { id: 'actions.failures', name: 'Actions 失败处理', base: 'actions', object: 'actions', kinds: ['actions.failures'], section: 'actions.failures', defaultEnabled: false,
-    description: '调查默认分支的 Actions 失败，按原因决定是否提报完整诊断；合并连带检查，外部原因最多重跑原运行一次。' },
+    description: '调查默认分支和版本标签运行（提交在默认分支历史上）的 Actions 失败，按原因决定是否提报完整诊断；合并连带检查，外部原因最多重跑原运行一次。' },
   { id: 'task.development', name: '开发任务', base: 'development', object: 'schedule', kinds: ['task.development'], section: 'development', family: 'development', defaultEnabled: true,
     description: '直接创建的开发任务，复用项目开发授权、测试、独立 QA 和 PR 交付；可独立执行或关联父任务，不需要虚构 GitHub Issue。' },
   { id: 'task.request', name: '普通事项与定时检查', base: 'request', object: 'schedule', kinds: ['task.request'], section: 'schedule', defaultEnabled: true,

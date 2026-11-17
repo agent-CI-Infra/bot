@@ -13,7 +13,7 @@ test('项目默认关闭 Actions 失败处理，保存开关并清晰显示独�
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     // Failed Actions runs are an event source, configured alongside the other project event sources.
-    const toggle=page.getByLabel('接收默认分支的 Actions 失败事件',{exact:true}), save=page.getByRole('button',{name:'保存事件开关',exact:true});
+    const toggle=page.getByLabel('接收默认分支和版本标签的 Actions 失败事件',{exact:true}), save=page.getByRole('button',{name:'保存事件开关',exact:true});
     await expect(toggle).not.toBeChecked();
     const status = page.locator('[data-actions-status]');
     await expect(status).toHaveText('未开启。');
