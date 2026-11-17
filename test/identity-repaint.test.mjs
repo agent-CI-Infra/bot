@@ -3,21 +3,21 @@
 // check's answer changes nothing on it, so redrawing it would only take the input away.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadConsole } from './console-page.mjs';
+import { loadProjectScopeConsole } from './console-page.mjs';
 
 const repositories = [{ id: 101, full_name: 'fixture/project-101' }, { id: 102, full_name: 'fixture/project-102' }];
-const load = () => loadConsole(['static/app.js', 'static/views.js', 'static/project.js'],
+const load = () => loadProjectScopeConsole(
   (_method, path) => path === '/api/repositories' ? [200, { repositories }] : [200, {}]);
 // The console as the check ends on it: signed in, the check had been running, the address and tab are the reader's.
 const arrange = (page, hash, tab = 'identity') => page.run(`location.hash = ${JSON.stringify(hash)}; tab = ${JSON.stringify(tab)};
-  me = { id: 7, github_verification: { checked: 0, total: 1 } }; $('repository-filter').options = [];`);
+  me = { id: 7, github_verification: { checked: 0, total: 1 } };`);
 // What the reader typed into the page: a field with a value, in the identity panel the console would replace.
 const typed = (page, value = 'cli_typed_by_person') => page.run(`(() => { const field = document.createElement('input');
   field.name = 'app_id'; field.value = ${JSON.stringify(value)}; $('identity-panel').append(field); return $('identity-panel').childElementCount; })()`);
 // The check ends: count the redraws, and read the project picker the end updates either way.
-const endCheck = page => page.run(`(async () => { let drawn = 0; route = async () => { drawn++; };
+const endCheck = page => page.run(`(async () => { let drawn = 0; route = async () => { drawn++; syncScopePicker(); };
   await finishGithubVerification({ id: 7, github_verification: null });
-  return { drawn, picker: $('repository-filter').childElementCount, line: $('github-verification').hidden }; })()`);
+  return { drawn, picker: $('console-scope-list').querySelectorAll('[role=option]').filter(node => node.dataset.projectId).length, line: $('github-verification').hidden }; })()`);
 
 test('the app wizard keeps what was typed into it when the permission check ends', async () => {
   const page = load(); arrange(page, '#/identity/feishu-apps/new/1'); typed(page);

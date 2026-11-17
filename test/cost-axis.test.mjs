@@ -5,7 +5,7 @@ import {loadConsole} from './console-page.mjs';
 // #643: the chart's axis is data a person reads as a number, so it has to be exact and readable: a token count is a
 // whole number (abbreviated 万/亿 once it gets long), a cost keeps two decimals, and the top tick is never below the
 // tallest bar. Before this the page printed `1,439,074.45` for tokens because the ceiling was `max * 1.1`.
-const page = () => loadConsole(['static/app.js', 'static/metrics.js', 'static/costs.js'], () => [200, {}]);
+const page = () => loadConsole(['static/app.js', 'static/metrics.js', 'static/project.js', 'static/costs.js'], () => [200, {}]);
 
 const axisOf = (value, tokens) => page().run(`costAxis(${value},${tokens})`);
 
@@ -47,7 +47,7 @@ const unpriced = {from: '2026-11-10', to: '2026-11-11', currency: 'USD', collect
   days: [{date: '2026-11-10', repository_id: '101', full_name: 'fixture/project', cost: 0, requests: 2, unpriced_requests: 2, input_tokens: 1400000, output_tokens: 39074, cached_input_tokens: 0}]};
 
 const costsPage = role => {
-  const p = loadConsole(['static/app.js', 'static/metrics.js', 'static/costs.js'], () => [200, JSON.parse(JSON.stringify(unpriced))]);
+  const p = loadConsole(['static/app.js', 'static/metrics.js', 'static/project.js', 'static/costs.js'], () => [200, JSON.parse(JSON.stringify(unpriced))]);
   p.run(`me={id:'admin',role:'${role}'};tab='costs';costState={from:'2026-11-10',to:'2026-11-11',currency:'USD'};document.createTextNode=text=>element('span',text);document.createElementNS=(_ns,tag)=>document.createElement(tag);`);
   return p;
 };

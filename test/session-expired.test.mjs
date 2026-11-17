@@ -42,7 +42,8 @@ test('every error card shown while expired says 登录已过期 with 重新登�
   assert.equal(p.run(`consoleState('还没有仓库', '空列表')`).querySelector('h2').textContent, '还没有仓库');
   // The project page's own login branch now uses the same card instead of stacking a second set of actions.
   const project = p.run(`projectUnavailable(Object.assign(new Error('401 · login_required'), { status: 401, code: 'login_required' }), { id: '7', section: 'overview' })`);
-  assert.equal(project.dataset.projectUnavailable, 'login');
+  assert.equal(project.dataset.sessionExpired, 'true');
+  assert.match(project.querySelector('details code').textContent, /401 · login_required/);
   assert.equal(project.querySelectorAll('button').length, 1);
 });
 

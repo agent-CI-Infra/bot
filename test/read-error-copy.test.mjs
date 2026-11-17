@@ -13,7 +13,7 @@ const costData = { from: '2026-10-22', to: '2026-10-23', currency: 'USD', collec
   summary: { cost: 0, requests: 0, unpriced_requests: 0, usage_missing_requests: 0, input_tokens: 0, output_tokens: 0, cached_input_tokens: 0 }, prices: [], days: [] };
 
 function costsPage(respond) {
-  const page = loadConsole(['static/app.js', 'static/views.js', 'static/metrics.js', 'static/costs.js'], respond);
+  const page = loadConsole(['static/app.js', 'static/views.js', 'static/metrics.js', 'static/project.js', 'static/costs.js'], respond);
   page.run("me={id:'admin'};tab='costs';costState={from:'2026-10-22',to:'2026-10-23',currency:'USD'};document.createTextNode=text=>element('span',text);");
   return page;
 }

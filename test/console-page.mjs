@@ -98,3 +98,13 @@ export function loadConsole(files, respond) {
   for (const file of scripts) vm.runInContext(readConsoleScriptSync(file), context, { filename: file });
   return { requests, $: id => document.getElementById(id), run: code => vm.runInContext(code, context) };
 }
+
+// Permission-refresh tests draw the real searchable picker without mounting the shell's responsive layout.
+export function loadProjectScopeConsole(respond) {
+  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/scope-picker.js'], respond);
+  page.run(`$('console-scope-search').value = '';
+    $('list-panel').className = 'list-panel';
+    $('console-scope-picker').append(element('button', '', 'console-scope-close'));
+    var syncConsoleShell = () => syncScopePicker();`);
+  return page;
+}
