@@ -1,6 +1,6 @@
 # Actions 失败分类与提报
 
-Actions 失败处理是工作类型 `actions.failures`。它的开关就是每个仓库的 `actions_failures_enabled`。经 GitHub App 安装首次启动、能力上限至少为 `comment` 的新项目默认打开（#851）：只分析、每个失败的运行最多重跑一次、提报 Issue，不会自己开始开发；机器人账号的项目和以 `read` 启动的项目默认关闭，再次启用已禁用的项目保留原来的选择。在「项目设置 → 监听与触发」中开关「接收默认分支的 Actions 失败事件」并保存，或通过 `PATCH /api/repositories/:id/policy` 保存布尔值。每个失败的运行 attempt 是一个 `actions.run_failed` 事件，由项目 Manager 决定是否分析；Manager 决定不处理时这次失败记为 `ignored`，不重跑也不提报。失败原因由这类工作的模型分析，提示词是 Manager 提示词的「Actions 失败处理」章节；它和所有工作类型一样能读取仓库的全部 GitHub 内容、启动独立 agent，见下文「分析与分类」。它还要求项目能力上限至少为 `comment`（见[项目能力上限](workflows.md#项目能力上限)），上限为 `read` 时开关打开也不会运行。关闭后不再为本功能重跑、提报或启动开发；上限为 `comment`（没有开发）时仍处理分类、重跑和提报。
+Actions 失败处理是工作类型 `actions.failures`。它的开关就是每个仓库的 `actions_failures_enabled`。经 GitHub App 安装首次启动、能力上限至少为 `comment` 的新项目默认打开（#851）：只分析、每个失败的运行最多重跑一次、提报 Issue，不会自己开始开发；机器人账号的项目和以 `read` 启动的项目默认关闭，再次启用已禁用的项目保留原来的选择。在「项目设置 → 监听与触发」中开关「接收默认分支和版本标签的 Actions 失败事件」并保存，或通过 `PATCH /api/repositories/:id/policy` 保存布尔值。每个失败的运行 attempt 是一个 `actions.run_failed` 事件，由项目 Manager 决定是否分析；Manager 决定不处理时这次失败记为 `ignored`，不重跑也不提报。失败原因由这类工作的模型分析，提示词是 Manager 提示词的「Actions 失败处理」章节；它和所有工作类型一样能读取仓库的全部 GitHub 内容、启动独立 agent，见下文「分析与分类」。它还要求项目能力上限至少为 `comment`（见[项目能力上限](workflows.md#项目能力上限)），上限为 `read` 时开关打开也不会运行。关闭后不再为本功能重跑、提报或启动开发；上限为 `comment`（没有开发）时仍处理分类、重跑和提报。
 
 ## 配置前提
 
@@ -12,7 +12,7 @@ App 管理员需要在已有 App 的事件订阅中添加 `workflow_run`，即 G
 
 ## 运行范围与扫描
 
-签名验证通过的 `workflow_run.completed` 事件只记入持久收件记录。每 5 秒检查待处理事件；后台扫描间隔为 60 秒，每页 50 个 run。只处理 `conclusion=failure`，忽略 PR 事件、带有 PR 关联的 run，以及成功、取消和跳过。普通 run 必须属于默认分支。推送标签触发的 run（版本标签运行，#1028）不限 workflow 名字：GitHub 给这类 run 的 `event` 是 `push`，`head_branch` 是标签名，控制面用 `GET /git/ref/tags/<标签名>` 确认这个标签存在、并且（附注标签解到它指向的对象后）指向 run 的提交，再通过 compare 确认该提交是默认分支的祖先。同名的分支、已删除或已改指别的提交的标签、不在默认分支历史上的提交都不进入。不会修改任何目标仓库工作流。
+签名验证通过的 `workflow_run.completed` 事件只记入持久收件记录。每 5 秒检查待处理事件；后台扫描间隔为 60 秒，每页 50 个 run。只处理 `conclusion=failure`，忽略 PR 事件、带有 PR 关联的 run，以及成功、取消和跳过。普通 run 必须属于默认分支。推送标签触发的 run（版本标签运行，#1028）不限 workflow 名字：GitHub 给这类 run 的 `event` 是 `push`，`head_branch` 是标签名，控制面用 `GET /git/ref/tags/<标签名>` 确认这个标签存在、并且（附注标签解到它指向的对象后）指向 run 的提交，再通过 compare 确认该提交是默认分支的祖先。GitHub 不给这类 run 标出引用类型，所以判断只看同名标签：已删除或已改指别的提交的标签、不在默认分支历史上的提交都不进入；分支推送的 run 只有在恰好有同名标签指向同一个提交时，才会被当作版本标签运行（这个提交同样在默认分支历史上）。不会修改任何目标仓库工作流。
 
 版本标签运行和默认分支的失败走同一套处理：同样作为 `actions.run_failed` 事件交给 Manager，先调查，最多重跑一次，按原因合并报告，同一 `repository + run id + attempt` 重复投递只处理一次。为了让 Manager 和分析任务区分，事件摘要和分析任务的标题写明「版本标签运行」和标签名，事件和 `run.json` 里的 `run` 用 `tag_run: true` 和 `tag` 代替 `branch`；公开报告在 run 链接下一行写 `Version tag run: <标签名>`。它和「发版本」是两件事：本功能不读写发版本记录，不影响发版本页面的流程；发版本页面请求的 CI 观察和发行说明（`release.observe`、`release.notes`）照旧是独立任务，不依赖本功能，两者互不取消。
 
