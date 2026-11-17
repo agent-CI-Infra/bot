@@ -97,8 +97,10 @@ test('global management chat keeps drafts and a running conversation across navi
     await page.goto(f.h.admin + '/#/projects');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    const launcher = page.getByRole('button', { name: '打开管理助手', exact: true }), chat = page.getByRole('dialog', { name: '管理助手', exact: true });
+    const launcher = page.locator('#management-launcher'), chat = page.getByRole('dialog', { name: '管理助手', exact: true });
     await expect(launcher).toBeVisible(); await expect(chat).toBeHidden();
+    // #914: the launcher's accessible name must contain the words the reader sees, so a voice-control user can say them.
+    await expect(launcher).toHaveAccessibleName(/管理助手\s*随时唤起/);
     await launcher.click();
     await expect(page).toHaveURL(/#\/projects$/); await expect(chat).toBeVisible();
     await page.getByLabel('当前管理作用域').selectOption('project:101');
@@ -111,10 +113,10 @@ test('global management chat keeps drafts and a running conversation across navi
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await expect(page.getByRole('button', { name: '停止', exact: true })).toBeVisible();
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
-    await expect(launcher).toContainText('正在处理');
+    await expect(launcher).toContainText('正在处理'); await expect(launcher).toHaveAccessibleName(/管理助手\s*正在处理/);
     await page.locator('#tabs').getByRole('button', { name: '项目', exact: true }).click();
     release(); f.modelState.gate = null;
-    await expect(launcher).toContainText('有新回复'); await launcher.click();
+    await expect(launcher).toContainText('有新回复'); await expect(launcher).toHaveAccessibleName(/管理助手\s*有新回复/); await launcher.click();
     const feed = page.getByRole('log', { name: '管理会话记录' });
     await expect(feed).toContainText('任务正在等待项目电脑'); await expect(feed.locator('.management-user')).toHaveCount(1);
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
@@ -171,7 +173,7 @@ test('project chat links select the project, and a delayed old read cannot repla
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/); await expect(scope).toHaveValue('project:101'); await expect(message).toHaveValue('101 的草稿');
     await scope.selectOption('project:102'); await expect(message).toHaveValue('102 的草稿');
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
-    await page.getByRole('button', { name: '打开管理助手', exact: true }).click();
+    await page.locator('#management-launcher').click();
     await expect(scope).toHaveValue('project:102'); await expect(message).toHaveValue('102 的草稿');
     await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click();
     await expect(scope).toHaveValue('project:101'); await expect(message).toHaveValue('101 的草稿');
@@ -184,7 +186,7 @@ test('project chat links select the project, and a delayed old read cannot repla
     for (const nav of await page.locator('#tabs button:visible').all()) { await nav.scrollIntoViewIfNeeded(); expect(await nav.evaluate(unobstructed)).toBe(true); }
     mkdirSync('.tmp/management-fixes', { recursive: true }); await page.screenshot({ path: '.tmp/management-fixes/narrow-header.png' });
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.getByRole('button', { name: '打开管理助手', exact: true }).click(); await expect(message).toHaveValue('101 的草稿');
+    await page.locator('#management-launcher').click(); await expect(message).toHaveValue('101 的草稿');
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
     expect(errors).toEqual([]);
   } finally { release?.(); await page.unrouteAll({ behavior: 'wait' }); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
@@ -262,7 +264,7 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await page.setViewportSize({ width: 1440, height: 1000 }); await page.goto(f.h.admin + '/#/projects');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    const chat = page.locator('#management-chat'), launcher = page.getByRole('button', { name: '打开管理助手', exact: true });
+    const chat = page.locator('#management-chat'), launcher = page.locator('#management-launcher');
     await launcher.click(); await page.getByLabel('当前管理作用域').selectOption('project:101');
     const message = page.getByLabel('管理消息', { exact: true }), send = page.getByRole('button', { name: '发送', exact: true });
     await message.fill('任务为什么没有继续？'); await send.click();
