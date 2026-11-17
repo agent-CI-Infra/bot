@@ -587,11 +587,13 @@ export class Projects {
   // A labelled volume never enters the Docker volume row, so the same bytes are not counted twice: the deployment labels
   // every volume it creates with com.docker.compose.volume and the manager labels every volume it creates with
   // department.bot.*. Some of those bytes are already in `known`: bot-data and manager-data (the two databases and
-  // their trajectory directories) and the in-use *-work volumes (the `computers` row), so counting them again would
-  // double them. The rest are excluded from the row but have no known row either — agent-tools, bot-keys/internal-keys/
-  // tunnel-keys, the *-notes volumes, and the *-work volumes of deleted projects or older generations survive — so their
-  // bytes stay in "other"; none of them is Docker's own footprint. Only a volume outside that set is Docker's own, and
-  // assistant-homes — Compose-created but the bot's own data — is reported on its own so "other" stops absorbing it.
+  // their trajectory directories) and every current-generation *-work volume that was scanned — that includes the last
+  // generation a deleted project was ever scanned in, because computer_storage rows are never deleted and the `computers`
+  // row sums every one of them. The rest are excluded from the row but have no known row either — agent-tools, bot-keys/
+  // internal-keys/tunnel-keys, the *-notes volumes, an older-generation *-work volume left behind after a reset whose new
+  // generation has been scanned, and a work volume never scanned — so their bytes stay in "other"; none of them is
+  // Docker's own footprint. Only a volume outside that set is Docker's own, and assistant-homes — Compose-created but
+  // the bot's own data — is reported on its own so "other" stops absorbing it.
   async readVolumes() {
     const df = await this.docker.request('GET', '/system/df?type=volume', undefined, false, 5 * 60_000);
     const rows = Array.isArray(df?.Volumes) ? df.Volumes : [], labels = row => row?.Labels ?? {};
