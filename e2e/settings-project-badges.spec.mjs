@@ -6,6 +6,11 @@ import { harness, setup, account, repository } from '../test/helpers.mjs';
 //「发布检…」— the administrator read half a state at 1280 and 1440. The rule this pins: a chip in this table wraps to
 // another line instead of losing characters, the row grows with it (行高自适应), and below the 1280 breakpoint the
 // two-column card layout — which already fits every chip — stays as it is.
+// #1011 review: wrapping the chip alone left the 看板 sentence readable in the DOM and unreadable on screen. That cell
+// also hosts the row's board switch, and the cell's nowrap squeezed the chip to a one-character-per-line column while
+// the 96px switch parked on top of it and covered three characters. So readable now also means hit-testable — the
+// topmost element at the centre and quarter points of every rendered line is the chip or its descendant — and a chip
+// must never fold into a single-character column.
 const row = (page, id) => page.locator(`.global-project-row[data-repository-id="${id}"]`);
 
 test('#978 设置页项目管理表：门禁与看板徽章在 1280/1440 完整可读，换行后行高自适应', async ({ page }) => {
@@ -28,6 +33,26 @@ test('#978 设置页项目管理表：门禁与看板徽章在 1280/1440 完整�
     expect(box.lines, `${label} 有渲染文字`).toBeGreaterThan(0);
     expect(box.inside, `${label} 每一行都在徽章内`).toBe(true);
     expect(box.clippedDown, `${label} 高度不被裁剪`).toBe(false);
+    return box;
+  };
+  // A line rect inside the chip's own box still proves nothing on screen: another element can paint over it — the
+  // #1011 review measured the board switch sitting on three of the chip's five characters while every line rect was
+  // inside. The topmost element at the centre and the quarter points of every rendered line must be the chip or one
+  // of its descendants; anything else means the sentence is not what an administrator can actually read.
+  const hittable = async (chip, label) => {
+    const misses = await chip.evaluate(el => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const misses = [];
+      [...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0).forEach((rect, line) => {
+        for (const fx of [0.25, 0.5, 0.75]) {
+          const hit = document.elementFromPoint(rect.left + rect.width * fx, rect.top + rect.height / 2);
+          if (!hit || !el.contains(hit)) misses.push({ line, fx, hit: hit ? `${hit.tagName}.${hit.className}` : 'off-document' });
+        }
+      });
+      return misses;
+    });
+    expect(misses, `${label} 每行命中测试（不得被开关等元素盖住）`).toEqual([]);
   };
   const readRow = async (id, width) => {
     const line = row(page, id);
@@ -37,8 +62,14 @@ test('#978 设置页项目管理表：门禁与看板徽章在 1280/1440 完整�
     // 发布检查未完成), and the board was just switched on (看板采集中).
     await expect(gate).toHaveText('发布检查未完成');
     await expect(board).toHaveText('看板采集中');
-    await fits(gate, `${width} 门禁`);
-    await fits(board, `${width} 看板`);
+    const gateBox = await fits(gate, `${width} 门禁`);
+    const boardBox = await fits(board, `${width} 看板`);
+    await hittable(gate, `${width} 门禁`);
+    await hittable(board, `${width} 看板`);
+    // A chip squeezed to one character per line technically keeps every glyph inside its box, and that shape is what
+    // the 看板 cell used to fold into while the switch covered it; a five-character sentence must not read as a
+    // five-line column.
+    expect(boardBox.lines, `${width} 看板不折叠成单字列`).toBeLessThanOrEqual(2);
     // 行高自适应：the row keeps its 84px floor and holds the wrapped chip inside itself, so the taller chip never
     // leans on the next row or the actions menu.
     const box = await line.evaluate(el => ({ height: el.getBoundingClientRect().height, cw: el.clientWidth, sw: el.scrollWidth, ch: el.clientHeight, sh: el.scrollHeight }));
