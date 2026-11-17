@@ -13,7 +13,7 @@ const withDocker = async route => {
   if (json.host) {
     json.host.known = { ...json.host.known, docker_images: docker.images, docker_containers: docker.containers,
       docker_build_cache: docker.build_cache, docker_volumes: docker.volumes, assistant_homes: docker.assistant_homes };
-    json.host.unmeasured = (json.host.unmeasured ?? []).filter(key => !String(key).startsWith('docker_'));
+    json.host.unmeasured = (json.host.unmeasured ?? []).filter(key => !String(key).startsWith('docker_') && key !== 'assistant_homes');
     json.host.other_bytes = Math.max(0, Number(json.host.other_bytes ?? 0) - added);
   }
   if (json.totals?.manager) json.totals.manager.docker = { images: { count: 12, bytes: docker.images },

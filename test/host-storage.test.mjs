@@ -39,9 +39,9 @@ test('a volume the deployment already counts is left out, a volume outside it is
   const f = await managerFixture(t);
   f.docker.df = { LayersSize: 1000, Images: [{ Size: 1000, Containers: 0 }], Containers: [], BuildCache: [],
     Volumes: [
-      // Compose's own label and the manager's department.bot.* labels both mean `known` already counts the bytes in
-      // that volume: bot-data and manager-data are the two databases and their trajectory directories, a *-work volume
-      // is a project computer, and agent-tools is the trusted CLI volume.
+      // A labelled volume never enters the Docker volume row, so the same bytes are not counted twice. bot-data,
+      // manager-data and the in-use *-work volume already sit in `known`; agent-tools is labelled but has no known row,
+      // so its bytes stay in "other" — the case this fixture pins.
       { Name: 'bot_bot-data', Labels: { 'com.docker.compose.volume': 'bot-data' }, UsageData: { Size: 500 } },
       { Name: 'bot_manager-data', Labels: { 'com.docker.compose.volume': 'manager-data' }, UsageData: { Size: 300 } },
       { Name: 'bot_agent-tools', Labels: { 'com.docker.compose.volume': 'agent-tools', 'department.bot.kind': 'agent-tools' }, UsageData: { Size: 100 } },
