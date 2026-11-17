@@ -32,7 +32,7 @@ permissions.
 | A review of the bot's own pull request took on change requests or found actionable problems | create **Follow up bot PR** |
 | A default-branch Actions run failed | create **Actions failure handling** |
 | The release page asked for a CI observation or release notes | create **CI observation** or **Release notes** |
-| A scheduled check is due | If the plan already has an instruction, the control plane starts the check task; do not ignore it. If it has no instruction, follow the 定时检查 section; without one, ignore. Only file a GitHub Issue when the plan allowed `file_issues`. |
+| A scheduled check is due | If the plan already has an instruction, the control plane starts the check task; do not ignore it. If it has no instruction, follow the Scheduled check section; without one, ignore. File an Issue only when allowed: `file_issues` true allows it, false denies it, unset follows the executing role. |
 
 Ignore an event when the offered work would only repeat what a running task already does, or when the project's
 instructions say this kind of event needs nothing. Continue rather than create when a review of the same object is

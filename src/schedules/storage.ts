@@ -13,6 +13,7 @@ export function scheduleStorage(store: Store): void {
       lease TEXT,lease_until INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,
       started_at INTEGER,finished_at INTEGER,UNIQUE(schedule_id,logical_key));
     CREATE INDEX IF NOT EXISTS occurrence_claim ON schedule_occurrences(state,next_attempt,lease_until);
+    CREATE INDEX IF NOT EXISTS occurrence_by_schedule_state ON schedule_occurrences(schedule_id, state);
     CREATE TABLE IF NOT EXISTS schedule_business_runs(id TEXT PRIMARY KEY,occurrence_id TEXT NOT NULL UNIQUE,workflow TEXT NOT NULL,
       category TEXT NOT NULL,state TEXT NOT NULL,result TEXT,created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS notification_subscriptions(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,project_id TEXT NOT NULL,

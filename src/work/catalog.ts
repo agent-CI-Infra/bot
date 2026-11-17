@@ -81,7 +81,7 @@ export const workTypes: WorkType[] = [
   { id: 'task.development', name: '开发任务', base: 'development', object: 'schedule', kinds: ['task.development'], section: 'development', family: 'development', defaultEnabled: true,
     description: '直接创建的开发任务，复用项目开发授权、测试、独立 QA 和 PR 交付；可独立执行或关联父任务，不需要虚构 GitHub Issue。' },
   { id: 'task.request', name: '普通事项与定时检查', base: 'request', object: 'schedule', kinds: ['task.request'], section: 'schedule', defaultEnabled: true,
-    description: '处理直接创建的普通事项或到期的定时检查。写入默认继承项目能力上限：可开发时可以交付 PR，仍经测试及独立 QA；执行角色有 GitHub 写权限时可以在上限内用 github_write 直接写，例如提报 Issue。计划勾选允许创建 Issue 时，定时检查可以用 github_write 提报或回复 Issue。' }
+    description: '处理直接创建的普通事项或到期的定时检查。写入仍受项目能力上限约束：可开发时可交付 PR，经测试及独立 QA。定时检查的 `file_issues` 覆盖角色策略：true 允许用 github_write 提报或回复 Issue，false 拒绝，未设置则跟随角色；角色有写权限时也可在上限内直接写。' }
 ];
 export const workType = (id: string) => workTypes.find(work => work.id === id);
 /** The work type a task belongs to: reply tasks (including those of former custom workflows) are one work type. */
@@ -108,8 +108,8 @@ export const sections: SectionDefinition[] = [
   // ~255 KiB, just under the 256 KiB management tool-result budget. Attaching the recommended
   // schedule-check text as a builtin pushed it over that budget and truncated the result, so
   // the assistant lost the top-level revision and could not finish a write. Projects may paste
-  // docs/prompts/schedule-check.md into this section. A due plan that already has an instruction
-  // is started by scheduledCheckDecision without waiting on this text.
+  // docs/schedule-check.md into this section. That file must not become a builtin. A due plan
+  // that already has an instruction is started by scheduledCheckDecision without waiting on this text.
   { id: 'schedule', title: '定时检查', builtin: () => '' }
 ];
 export const section = (id: string) => sections.find(entry => entry.id === id);

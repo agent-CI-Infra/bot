@@ -12,8 +12,10 @@ import { publicationScope } from '../github/publisher.js';
  * a review's later round, #770, writes anew),
  * allowed while every policy over the acting role allows the route's resource: the role itself, the source roles that
  * delegated the task and a group binding's service role. A role never lends a write it does not hold.
- * A scheduled check with `file_issues` may file or comment on Issues even when the executing role has no GitHub write;
- * the flag never grants Contents or pull-request writes.
+ * A scheduled check's `file_issues` flag overrides role policy for Issue create/reply: true allows
+ * those writes even when the executing role has no GitHub write; false denies them even when the
+ * role has it; absent/unset falls back to role policy. The flag never grants Contents or
+ * pull-request writes. Every write still goes through the project capability ceiling (#850).
  */
 /** Live write check for a task: a scheduled `file_issues` flag can allow or deny Issues writes; otherwise role policy applies. */
 export function taskWriteAllowed(store: Store, task: Row, resource: WriteResource, operation?: WriteOperation): boolean {
