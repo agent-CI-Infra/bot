@@ -482,7 +482,7 @@ test('personal Feishu guide completes both ends, shows the current identity and 
     const confirmation = await page.getByLabel('在原私聊发送的确认指令', { exact: true }).inputValue();
     expect(f.h.store.get("SELECT count(*) n FROM external_identities WHERE provider='feishu'").n).toBe(0);
     const grants = f.h.store.get('SELECT count(*) n FROM scoped_grants').n;
-    await expect(page.getByRole('button', { name: '全局设置', exact: true })).toBeHidden();
+    await expect(page.getByRole('link', { name: '全局设置', exact: true })).toBeHidden();
     await expect(page.getByRole('link', { name: '管理员：连接或管理飞书应用' })).toHaveCount(0);
     await expect(page.locator('input[name="app_secret"]')).toHaveCount(0);
     await page.setViewportSize({ width: 1440, height: 1100 }); await page.screenshot({ path: output + '/personal-pending-desktop.png', fullPage: true });

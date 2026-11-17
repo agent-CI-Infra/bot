@@ -14,7 +14,7 @@ async function login(page, h, username, password, hash = '#/projects') {
 
 async function visiblePrimaryCaptions(page) {
   return page.locator('#console-sidebar').evaluate(root => {
-    const nodes = [...root.querySelectorAll('.console-primary-nav [data-tab], .console-primary-nav a, .console-settings-nav [data-tab]')]
+    const nodes = [...root.querySelectorAll('.console-primary-nav [data-tab], .console-primary-nav a, .console-settings-nav a')]
       .filter(node => {
         const style = getComputedStyle(node);
         return style.display !== 'none' && style.visibility !== 'hidden' && !node.hidden && node.getClientRects().length;
@@ -37,7 +37,7 @@ test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可
     await page.setViewportSize({ width: 1440, height: 900 });
     await login(page, h, 'nav-member', password);
     const desktop = await visiblePrimaryCaptions(page);
-    expect(desktop).toEqual(['项目', '管理助手', '任务看板', '待处理', '更多功能']);
+    expect(desktop).toEqual(['项目', '任务看板', '待处理', '管理助手', '更多功能']);
     for (const name of ['用量与成本', '个人设置', '存储', '全局设置']) {
       await expect(page.locator('#console-sidebar').getByRole('button', { name, exact: true })).toBeHidden();
     }
@@ -68,7 +68,7 @@ test('#549 项目管理员桌面侧栏含可见的更多功能，个人设置可
 
     await page.setViewportSize({ width: 768, height: 900 });
     await expect(page.locator('#console-sidebar')).toBeVisible();
-    expect(await visiblePrimaryCaptions(page)).toEqual(['项目', '管理助手', '任务看板', '待处理', '更多功能']);
+    expect(await visiblePrimaryCaptions(page)).toEqual(['项目', '任务看板', '待处理', '管理助手', '更多功能']);
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(768);
     await page.screenshot({ path: `${out}/nav-member-768.png`, fullPage: true });
 

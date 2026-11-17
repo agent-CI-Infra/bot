@@ -73,6 +73,8 @@ async function route() {
   // Replace legacy scope paths in place: Back must not revisit a redirect entry.
   const oldInbox = /^#\/inbox\/([1-9]\d*)(?:\/(\d+))?$/.exec(location.hash);
   if (oldInbox) history.replaceState(null, '', `#/projects/${oldInbox[1]}/inbox${oldInbox[2] ? '/' + oldInbox[2] : ''}`);
+  const oldMenu = /^#\/projects\/([1-9]\d*)\/menu$/.exec(location.hash);
+  if (oldMenu) history.replaceState(null, '', `#/projects/${oldMenu[1]}/overview`);
   const oldCreation = /^#\/new-task\/([1-9]\d*)$/.exec(location.hash);
   if (oldCreation) history.replaceState(null, '', `#/projects/${oldCreation[1]}/new-task`);
   const legacy = legacyOnboardingAddress.exec(location.hash);

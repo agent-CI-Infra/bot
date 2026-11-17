@@ -15,7 +15,7 @@ export async function consoleNavigate(page, name) {
   };
   if (!await page.evaluate(() => matchMedia('(max-width:767px)').matches)) {
     if (['身份与权限', '飞书绑定', '外部执行端', '飞书会话'].includes(name)) {
-      const prefs = page.locator('#tabs [data-tab=preferences]');
+      const prefs = page.locator('#tabs [data-console-nav=preferences]');
       if (await prefs.isVisible()) {
         await prefs.click();
         await page.locator('#console-secondary-nav .project-nav').getByRole('link', { name, exact: true }).click();
@@ -24,11 +24,11 @@ export async function consoleNavigate(page, name) {
       return goHash();
     }
     if (name === '设置' || name === '个人设置') {
-      const prefs = page.locator('#tabs [data-tab=preferences]');
+      const prefs = page.locator('#tabs [data-console-nav=preferences]');
       if (await prefs.isVisible()) { await prefs.click(); return; }
       return goHash();
     }
-    const desktop = page.locator('#tabs').getByRole('button', { name, exact: true });
+    const desktop = page.locator('#tabs').getByRole('link', { name, exact: true });
     if (await desktop.isVisible()) { await desktop.click(); return; }
     return goHash();
   }

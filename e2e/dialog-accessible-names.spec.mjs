@@ -18,7 +18,7 @@ test('#756: #editor and #detail take their accessible name from their visible ti
     await expect(page.locator('#workspace')).toBeVisible({ timeout: 15000 });
 
     // The credential/user editor's title is written per kind and per row; here it is the fixed "新增用户" heading.
-    await page.getByRole('button', { name: '全局设置', exact: true }).click();
+    await page.getByRole('link', { name: '全局设置', exact: true }).click();
     await page.locator('.project-nav').getByRole('link', { name: '用户', exact: true }).click();
     await page.getByRole('button', { name: '新增用户', exact: true }).click();
     const editor = page.locator('#editor');

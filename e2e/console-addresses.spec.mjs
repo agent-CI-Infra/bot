@@ -76,7 +76,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     await member.getByLabel('用户名', { exact: true }).fill('member'); await member.getByLabel('密码', { exact: true }).fill(memberPassword); await member.getByRole('button', { name: '登录', exact: true }).click();
     await expect(member.locator('#tabs [aria-current=page]')).toHaveText('项目'); await expect(member.locator('#settings-panel')).toBeHidden();
     // #549: 存储 leaves the project administrator's sidebar; the address still opens (permissions unchanged).
-    await expect(member.locator('#tabs').getByRole('button', { name: '全局设置', exact: true })).toBeHidden();
+    await expect(member.locator('#tabs').getByRole('link', { name: '全局设置', exact: true })).toBeHidden();
     await expect(member.locator('#tabs').getByRole('button', { name: '存储', exact: true })).toBeHidden();
     await member.goto(h.admin + '/#/settings/storage'); await expect(member.locator('#settings-panel')).toBeVisible();
     await expect(member.locator('.project-nav').getByRole('link')).toHaveText(['存储']);

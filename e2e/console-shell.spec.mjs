@@ -35,9 +35,9 @@ test('shared desktop rail and mobile navigation expose real destinations across 
       await page.screenshot({path:`${out}/more-${width}.png`,fullPage:true});
     }
     await page.setViewportSize({width:1440,height:1000});await page.goto(h.admin+'/#/projects/101/roles');
-    for(const name of ['项目','管理助手','任务看板','用量与成本','个人设置','全局设置']) await expect(page.locator('#tabs').getByRole('button',{name,exact:true})).toBeVisible();
+    for(const name of ['项目总览','管理助手','任务看板','用量与成本','个人设置','全局设置']) await expect(page.locator('#tabs').getByRole('link',{name,exact:true})).toBeVisible();
     await expect(page.locator('#tabs').getByRole('button',{name:'仓库事件',exact:true})).toHaveCount(0);
-    // #707: a settings page lists the settings categories only; work pages such as 项目知识 stay behind 项目入口.
+    // Settings categories stay separate from the scope work navigation.
     const projectNav = page.getByRole('navigation', { name: '项目设置类别' });
     await expect(projectNav.locator('[aria-current=page]')).toHaveText('角色');
     await expect(projectNav.getByRole('link',{name:'项目知识',exact:true})).toHaveCount(0);
@@ -45,14 +45,12 @@ test('shared desktop rail and mobile navigation expose real destinations across 
     await expect(page).toHaveURL(/#\/projects\/101\/model$/);await page.reload();
     await expect(projectNav.locator('[aria-current=page]')).toHaveText('模型');
     await page.setViewportSize({width:390,height:844});
-    await page.getByLabel('当前页面',{exact:true}).selectOption('#/projects/101/menu');
-    await expect(page).toHaveURL(/#\/projects\/101\/menu$/);
-    await page.getByTestId('project-hub').getByRole('link',{name:'项目知识',exact:true}).click();
+    await page.getByLabel('当前页面',{exact:true}).selectOption('#/projects/101/knowledge');
     await expect(page).toHaveURL(/#\/projects\/101\/knowledge$/);
     await page.locator('#console-mobile-nav').getByRole('link',{name:'更多',exact:true}).click();
     // #481: 更多 is the short supplement behind the bar — the project's own pages, the analysis entries and one way into
     // personal and platform settings (whose sections the 当前页面 picker carries).
-    await expect(page.locator('.console-group').filter({has:page.getByRole('heading',{name:'当前项目',exact:true})})).toContainText('机器配置');
+    await expect(page.locator('.console-group').filter({has:page.getByRole('heading',{name:'当前项目',exact:true})})).toContainText('项目设置');
     await expect(page.locator('#console-page a[href="#/settings/work-computers"]')).toBeVisible();
     // A short desktop keeps settings visible while a long category list scrolls above them.
     await page.setViewportSize({width:1440,height:360});await page.goto(h.admin+'/#/settings/users');
@@ -64,9 +62,9 @@ test('shared desktop rail and mobile navigation expose real destinations across 
     const mainBox=await primary.boundingBox(), settingsBox=await settings.boundingBox();
     expect(mainBox.y+mainBox.height).toBeLessThanOrEqual(settingsBox.y);
     expect(settingsBox.y+settingsBox.height).toBeLessThanOrEqual(500);
-    await settings.getByRole('button',{name:'个人设置',exact:true}).click();
+    await settings.getByRole('link',{name:'个人设置',exact:true}).click();
     await expect(page.getByRole('heading',{name:'身份与权限',exact:true})).toBeVisible();
-    await expect(settings.getByRole('button',{name:'个人设置',exact:true})).toHaveAttribute('aria-current','page');
+    await expect(settings.getByRole('link',{name:'个人设置',exact:true})).toHaveAttribute('aria-current','page');
     await page.screenshot({path:`${out}/settings-footer-short-desktop.png`,fullPage:true});
     await page.setViewportSize({width:1440,height:1000});
     await page.screenshot({path:`${out}/settings-footer-desktop.png`,fullPage:true});
@@ -108,9 +106,9 @@ test('permissions, in-flight navigation, keyboard and history keep their boundar
     await expect(page.getByRole('link',{name:'飞书连接',exact:false})).toHaveCount(0);
     await page.setViewportSize({width:1440,height:900});
     // #549: a project administrator's sidebar keeps four destinations; 个人设置 lives in 更多 and the account menu.
-    await expect(page.locator('.console-settings-nav').getByRole('button',{name:'个人设置',exact:true})).toBeHidden();
-    await expect(page.locator('.console-settings-nav').getByRole('button',{name:'全局设置',exact:true})).toBeHidden();
-    await expect(page.locator('#tabs').getByRole('button',{name:'用量与成本',exact:true})).toBeHidden();
+    await expect(page.locator('.console-settings-nav').getByRole('link',{name:'个人设置',exact:true})).toBeHidden();
+    await expect(page.locator('.console-settings-nav').getByRole('link',{name:'全局设置',exact:true})).toBeHidden();
+    await expect(page.locator('#tabs').getByRole('link',{name:'用量与成本',exact:true})).toBeHidden();
     await expect(page.locator('#tabs').getByRole('button',{name:'仓库事件',exact:true})).toHaveCount(0);
     await page.setViewportSize({width:390,height:844});
     await expect(page.locator('#console-scope-projects [data-project-id="202"]')).toHaveCount(0);

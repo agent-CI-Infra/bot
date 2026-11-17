@@ -1,9 +1,7 @@
-// Project pages: one settings page per repository (#/projects/<id>/<section>). The 项目入口 hub (#/projects/<id>/menu) lists
-// every page; a work page shows a two-item breadcrumb and a settings page lists every settings category.
+// Project work pages live in the scope navigation; settings share one secondary category list.
 // Loaded after app.js and views.js and reuses their helpers.
 const projectSections = [['overview', '项目总览'], ['management', '管理助手'], ['board', '任务看板'], ['inbox', '待处理'], ['costs', '用量与成本'], ['new-task', '新建任务'], ['release', '发版本'], ['knowledge', '项目知识'], ['activity', '运行状态'], ['basic', '基本设置'], ['triggers', '监听与触发'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['schedules', '计划与通知'], ['external', '外部执行'], ['members', '成员']];
-// #707: the settings categories are also the secondary nav of every settings page, so the hub, that nav and the phone's
-// 当前页面 picker all read this one list.
+// Settings categories are shared by the secondary nav and the phone page picker.
 const projectSettingsSections = [
   ['basic', '基本设置', '项目概况、分支与启停'],
   ['triggers', '监听与触发', '项目事件来源与自动处理范围'],
@@ -14,17 +12,13 @@ const projectSettingsSections = [
   ['external', '外部执行', '外部执行端'],
   ['members', '成员', '项目成员与权限']
 ];
-// #565: the 项目入口 hub groups.
-const projectSectionGroups = [
-  ['项目工作', [
-    ['overview', '项目总览', '工作进展与待处理事项'],
-    ['management', '管理助手', '查进展、找原因、调整配置'],
-    ['release', '发版本', '发布与版本说明'],
-    ['knowledge', '项目知识', '项目文档与资料'],
-    ['activity', '运行状态', '近期运行与记录']
-  ]],
-  ['设置', projectSettingsSections]
-];
+// One source for the scope sidebar, phone page picker and the current-project group in More.
+function projectWorkSections() {
+  return [['overview', t('nav.project_overview')], ['board', t('nav.board')], ['inbox', t('nav.inbox')], ['management', t('nav.management')],
+    ['release', t('nav.project_release')], ['knowledge', t('nav.project_knowledge')], ['activity', t('nav.project_activity')],
+    ...(me.role === 'super_admin' ? [['costs', t('nav.costs')]] : [])];
+}
+function projectNavigationGroups() { return [[t('nav.project_work'), projectWorkSections()], [t('nav.project_settings_group'), projectSettingsSections]]; }
 // Older addresses open the Manager page: the workflows page it replaced, the task overview and the review, development and rule pages.
 const legacyProjectSections = { workflows: 'manager-prompt', tasks: '', review: '', development: '', rules: 'rule-sources' };
 // The only files the bot reads from a repository are its skills (#935): the rule texts are Manager prompt sections, the

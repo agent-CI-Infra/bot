@@ -41,9 +41,9 @@ test('#737 标题随路由更新：列表、控制台页、全局设置、项目
     await expect(page).toHaveTitle('fixture/project-101 · 项目总览' + zh);
     await page.evaluate(() => { location.hash = '#/projects/101/activity'; });
     await expect(page).toHaveTitle('fixture/project-101 · 运行状态' + zh);
-    // 项目入口 is a project page the settings catalog does not list, and the title still names it.
+    // The retired directory address is replaced by the overview, including its browser title.
     await page.evaluate(() => { location.hash = '#/projects/101/menu'; });
-    await expect(page).toHaveTitle('fixture/project-101 · 项目入口' + zh);
+    await expect(page).toHaveTitle('fixture/project-101 · 项目总览' + zh);
     // A shared link to a project this reader cannot reach must not keep the name of the project before it.
     await page.evaluate(() => { location.hash = '#/projects/999/overview'; });
     await expect(page).toHaveTitle('项目总览' + zh);
@@ -122,18 +122,18 @@ test('#737 真实的地址变化把焦点移到新页面标题，同地址重绘
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
     // The page a reader opens with is not announced: signing in leaves focus where the browser put it.
     expect((await active()).id).not.toBe('page-title');
-    await page.locator('#tabs').getByRole('button', { name: '用量与成本', exact: true }).click();
+    await page.locator('#tabs').getByRole('link', { name: '用量与成本', exact: true }).click();
     await expect(page.locator('#costs-panel')).toBeVisible();
     await expect.poll(() => page.evaluate(() => document.activeElement?.id || null)).toBe('page-title');
     expect(await active()).toEqual({ id: 'page-title', tag: 'H1', text: '用量与成本' });
     // The board hides its list toolbar, so the page has no visible heading to land on and the skip link's target gets it.
-    await page.locator('#tabs').getByRole('button', { name: '任务看板', exact: true }).click();
+    await page.locator('#tabs').getByRole('link', { name: '任务看板', exact: true }).click();
     await expect(page.locator('#board-panel')).toBeVisible();
     await expect.poll(() => page.evaluate(() => document.activeElement?.id || null)).toBe('main-content');
     // A redraw of the same address (a poll, a locale refresh) must not move the focus a reader already set.
-    await page.locator('#tabs').getByRole('button', { name: '项目', exact: true }).focus();
+    await page.locator('#tabs').getByRole('link', { name: '项目', exact: true }).focus();
     await page.evaluate(() => route());
-    expect(await page.evaluate(() => document.activeElement?.dataset?.tab)).toBe('projects');
+    expect(await page.evaluate(() => document.activeElement?.dataset?.consoleNav)).toBe('projects');
     // A project page announces its own heading, which is the project name rather than a tab caption.
     await page.evaluate(() => { location.hash = '#/projects/101/overview'; });
     await expect(page.locator('#project-page .project-head h1')).toHaveText('fixture/project-101');

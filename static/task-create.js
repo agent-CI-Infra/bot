@@ -19,8 +19,7 @@ async function renderNewTask(request) {
   const root = element('section', '', 'task-create-page');
   const alive = () => root.isConnected && me?.id === owner && location.hash === address && request === renderVersion;
   const heading = element('div', '', 'console-page-head');
-  const repository = repositories.find(repo => String(repo.id) === id);
-  heading.append(element('p', '新任务', 'eyebrow'), element('h1', repository ? `在 ${repository.full_name} 新建任务` : '新建任务'), note('写清需求与验收条件，提交后查看真实任务进展和证据。'));
+  heading.append(element('p', '新任务', 'eyebrow'), element('h1', '新建任务'), note('写清需求与验收条件，提交后查看真实任务进展和证据。'));
   root.append(heading); page.replaceChildren(root);
   if (!id) {
     const picker = button('搜索并选择项目', () => openScopePicker(picker), 'btn-primary');

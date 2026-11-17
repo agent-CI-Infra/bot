@@ -80,7 +80,7 @@ test('系统超级管理员在全局设置向导启用 GitHub 登录，密钥不
     await page.goto(f.h.admin); await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.locator('#tabs').getByRole('button', { name: '接入向导', exact: true })).toHaveCount(0);
-    await page.getByRole('button', { name: '全局设置', exact: true }).click();
+    await page.getByRole('link', { name: '全局设置', exact: true }).click();
     await page.locator('.project-nav').getByRole('link', { name: '接入向导', exact: true }).click();
     await page.getByRole('button', { name: '3. GitHub 登录', exact: true }).click();
     await expect(page).toHaveURL(/#\/settings\/onboarding\/2$/);
@@ -114,7 +114,7 @@ test('系统超级管理员在全局设置向导启用 GitHub 登录，密钥不
     await page.locator('#console-account').click(); await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click();
     await page.getByRole('link', { name: '使用 GitHub 登录', exact: true }).click();
     await expect(page.getByRole('heading', { name: '我的 GitHub 连接', exact: true })).toBeVisible();
-    await expect(page.locator('#tabs').getByRole('button', { name: '全局设置', exact: true })).toBeHidden();
+    await expect(page.locator('#tabs').getByRole('link', { name: '全局设置', exact: true })).toBeHidden();
     await page.goto(f.h.admin + '/#/settings/onboarding/2');
     await expect(page.locator('#settings-panel')).toBeHidden();
     expect(await page.evaluate(async () => (await fetch('/api/onboarding')).status)).toBe(403);

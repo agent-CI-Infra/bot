@@ -47,12 +47,17 @@ $('logout').addEventListener('click', async () => {
   try { await api('/api/auth/logout', 'POST', {}); endSession(); await start(); } catch (err) { error(err); } });
 // The address is written without waiting for hashchange, so the page switches in the same click; back and forward still
 // fire hashchange and draw the page they return to.
-// A click can land on a tab's icon or label span (#554), so resolve the tab from the nearest [data-tab] ancestor.
-$('tabs').addEventListener('click', async event => { const name = event.target.closest?.('[data-tab]')?.dataset.tab; if (!name) return;
-  if (typeof confirmKnowledgeLeave === 'function' && !await confirmKnowledgeLeave()) return;
+// Leave confirmation applies to the actual link address, including project settings and work pages.
+$('tabs').addEventListener('click', async event => {
+  const item = event.target.closest?.('[data-console-nav], [data-tab]'); if (!item) return;
+  if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  const name = item.dataset.consoleNav || item.dataset.tab;
   if (name === 'management') { void openManagementPage(consoleScope()).catch(error); return; }
-  const address = ['projects', ...projectConsolePages].includes(name) ? consolePageAddress(name) : tabAddresses[name];
-  if (location.hash !== address) history.pushState(null, '', address); offset = 0; route().catch(error); });
+  if (typeof confirmKnowledgeLeave === 'function' && !await confirmKnowledgeLeave()) return;
+  const address = item.getAttribute('href') || (['projects', ...projectConsolePages].includes(name) ? consolePageAddress(name) : tabAddresses[name]);
+  if (location.hash !== address) history.pushState(null, '', address); offset = 0; route().catch(error);
+});
 $('refresh').addEventListener('click', () => start().catch(error));
 // The onboarding dialog calls this once a run reaches a terminal state.
 window.refreshIntegrations = () => api('/api/integrations/check', 'POST', {}).then(() => start()).catch(() => {});

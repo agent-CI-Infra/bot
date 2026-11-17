@@ -11,7 +11,7 @@ async function fixture(){
 }
 async function login(page,url,password,username='administrator'){
   await page.goto(url);await page.getByLabel('用户名',{exact:true}).fill(username);await page.getByLabel('密码',{exact:true}).fill(password);
-  await page.getByRole('button',{name:'登录',exact:true}).click();await page.locator('#tabs').getByRole('button',{name:'任务看板',exact:true}).click();
+  await page.getByRole('button',{name:'登录',exact:true}).click();await page.locator('#tabs').getByRole('link',{name:'任务看板',exact:true}).click();
   await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy','true');
 }
 const work=(page,key,category)=>page.locator(`[data-card-key="${key}"][data-card-category="${category}"]`);
@@ -98,7 +98,7 @@ test('旧地址只转换一次，保存视图恢复旧的工作类别、对象�
     await choose(page,'对象类型','issue');await choose(page,'视图',own);
     await expect(page.getByRole('group',{name:'对象类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','pr');await expect(page.getByLabel('按…分列',{exact:true})).toHaveValue('category');
     await expect(page.locator('[data-column-id="development.pr"]')).toHaveClass(/board-collapsed/);
-    await page.locator('#tabs').getByRole('button',{name:'项目',exact:true}).click();await page.goBack();
+    await page.locator('#tabs').getByRole('link',{name:'项目',exact:true}).click();await page.goBack();
     await expect(page.getByLabel('工作类型',{exact:true})).toHaveValue('development');
     await page.getByRole('button',{name:'展开 跟进 bot PR',exact:true}).click();
     await choose(page,'对象类型','');await page.getByRole('button',{name:'保存视图',exact:true}).click();
