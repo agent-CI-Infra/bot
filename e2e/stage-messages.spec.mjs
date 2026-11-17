@@ -37,8 +37,7 @@ test('a management turn shows its progress message while it runs, before the ans
     await expect(feed.locator('.management-turn-state')).toHaveText('已完成');
     await expect(feed.locator('.management-answer').last()).toContainText('任务都在正常推进。');
     await page.reload();
-    // #480: the page-local scope lasts for one opening, so a reload returns to the shell default; reopening the project
-    // scope is how the replayed conversation is read again.
+    // The explicit project address reopens the same conversation for replay.
     const scope = page.locator('.management-scope-name');
     await expect(scope).toHaveAttribute('data-scope', 'project:101');
     await switchConsoleProject(page, '101');

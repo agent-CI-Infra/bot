@@ -85,7 +85,6 @@ function boardColumns() {
 }
 function boardFilter(field) { return boardState.filters.find(f=>f.field===field)?.value; }
 // A saved repository condition applies only to All projects. A project address always owns the query scope.
-function boardEffectiveScope() { return projectRoute()?.id || String(boardFilter('repository_id') || ''); }
 function boardGrouping() { return projectRoute() && boardState.group === 'repository' ? 'bot_stage' : boardState.group; }
 function boardCategory() { return boardFilter('category')||'all'; }
 function boardSetFilter(field,value) {

@@ -34,10 +34,11 @@ test('每类工作的卡片在所有维度保留状态、徽章和任务目标�
   h.store.run("UPDATE tasks SET status='succeeded',updated_at='2026-10-03' WHERE id='developing'");
   // A reply task ran on Issue #1: it gets a card of its own, named as its work type.
   const docs={id:'reply'};boardTask(h.store,'docs-check',1,'workflow.issue','succeeded');
+  const legacyView=(await admin('/api/board/views','POST',{name:'Saved repository condition',group_by:'repository',filters:[{field:'repository_id',value:'101'},{field:'category',value:'review.issue'},{field:'execution_status',value:'running'}],hidden_columns:[]})).value.view;
   try{
     await page.setViewportSize({width:1600,height:900});await login(page,h.admin,password);
     await expect(page.getByRole('group',{name:'对象类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','');
-    await expect(page.locator('.board-filter-controls select')).toHaveCount(2);
+    await expect(page.locator('.board-filter-controls select')).toHaveCount(1);
     await expect(work(page,'101/pr/2','review.pr')).toBeVisible();await expect(work(page,'101/issue/3','review.issue')).toBeVisible();
     await expect(work(page,'101/pr/2','review.pr')).toContainText('PR #2');
     await expect(page.getByLabel('工作类型',{exact:true}).locator('option')).toHaveText(['全部工作类型','检视 Issue','检视 PR','开发 Issue','跟进 bot PR','通用回复','通用任务','发版本']);
@@ -66,7 +67,7 @@ test('每类工作的卡片在所有维度保留状态、徽章和任务目标�
     await page.getByRole('button',{name:'移除筛选 对象类型：Issue',exact:true}).click();await expect(work(page,'101/pr/2','review.pr')).toBeVisible();
     // One work type at a time; an object work type already names its object type, so that filter steps aside.
     await choose(page,'工作类型','review.issue');await expect(page.getByRole('group',{name:'对象类型',exact:true})).toBeHidden();
-    await choose(page,'仓库','101');await choose(page,'执行状态','running');
+    await page.locator('#board-view-select').selectOption(legacyView.id);
     await expect(work(page,'101/issue/3','review.issue')).toBeVisible();await expect(page.locator('.board-card')).toHaveCount(1);
     await choose(page,'按…分列','repository');await expect(page.locator('.board-column')).toHaveCount(1);await expect(page.locator('.board-column')).toHaveAttribute('data-column-id','101');
     await page.getByRole('button',{name:'移除筛选 执行状态：正在执行',exact:true}).click();await expect(work(page,'101/issue/1','review.issue')).toBeVisible();
@@ -249,7 +250,8 @@ test('首次进入看板在数据返回前显示加载提示，而不是空白�
 
 test('桌面上一列超过 420px 且不超过 720px，两列时每列也超过 420px 且等宽，390 与列表布局仍铺满滚动容器，页面不出现横向滚动（#838）', async ({ page }) => {
   test.setTimeout(60000);
-  const {h,password}=await fixture();
+  const {h,admin,password}=await fixture();
+  const legacyView=(await admin('/api/board/views','POST',{name:'Saved repository condition',group_by:'repository',filters:[{field:'repository_id',value:'101'}],hidden_columns:[]})).value.view;
   const column=page.locator('#board-columns>.board-column');
   const noPageX=async()=>expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   const widthOf=el=>el.evaluate(node=>node.getBoundingClientRect().width);
@@ -278,7 +280,7 @@ test('桌面上一列超过 420px 且不超过 720px，两列时每列也超过 
       await noPageX();
     }
     await page.getByRole('button',{name:'移除筛选 工作类型：检视 Issue',exact:true}).click();
-    await choose(page,'仓库','101');
+    await page.locator('#board-view-select').selectOption(legacyView.id);
     await choose(page,'按…分列','repository');
     await expect(column).toHaveCount(1);
     await expect(column).toHaveAttribute('data-column-id','101');

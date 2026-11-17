@@ -190,6 +190,7 @@ test('管理助手三种范围的会话独立，悬浮窗口跟随地址且不�
     }
     expect(new Set(Object.values(ids)).size).toBe(3);
     await page.locator('#management-chat').getByRole('button', { name: '切换为悬浮窗口', exact: true }).click();
+    await page.locator('#management-chat').getByRole('button', { name: '收起管理助手', exact: true }).click();
     await page.evaluate(() => { location.hash = '#/projects/202/board'; }); await ready(page, 'board', '202');
     await page.locator('#management-launcher').click();
     await expect(page.locator('.management-scope-name')).toHaveText('fixture/project-202');
@@ -212,4 +213,38 @@ test('全部项目的新建任务使用搜索选择，项目草稿各自保留',
     await switchConsoleProject(page, '202'); await expect(request).toHaveValue('project 202 draft');
     await expect(page.getByLabel('任务项目', { exact: true })).toHaveCount(0);
   } finally { await h.stop(); }
+});
+
+test('任务详情读取成功后使用所属项目并记住范围', async ({ page }) => {
+  const { h, password } = await fixture();
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,phase) VALUES('scope-detail','202','review.issue','failed','范围详情','model')");
+  try {
+    await login(page, h, password, '#/tasks/scope-detail');
+    await expect(page.locator('#task-view')).toBeVisible();
+    await expect(trigger(page)).toHaveAttribute('data-project-id', '202');
+    await page.evaluate(() => { location.hash = '#/identity'; });
+    await expect(trigger(page)).toHaveAttribute('data-project-id', '202');
+    await page.locator('#logout').click(); await expect(page.locator('#access')).toBeVisible();
+    await login(page, h, password, ''); await expect(page).toHaveURL(/#\/projects\/202\/overview$/);
+  } finally { await h.stop(); }
+});
+
+test('助手连接完成较晚时使用最新地址范围', async ({ page }) => {
+  const { h, password } = await fixture();
+  let entered, release;
+  const arrived = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  let held = false;
+  await page.route('**/api/management/query', async route => {
+    if (held || route.request().postDataJSON().operation !== 'list_projects') return route.continue();
+    held = true; const response = await route.fetch(); entered(); await gate; await route.fulfill({ response });
+  });
+  try {
+    await login(page, h, password, '#/management'); await arrived;
+    await switchConsoleProject(page, '202');
+    await expect(page).toHaveURL(/#\/projects\/202\/management$/);
+    release(); await ready(page, 'management', '202');
+    await expect(page.getByLabel('持久会话', { exact: true })).not.toHaveValue('');
+    await switchConsoleProject(page, ''); await ready(page, 'management', '');
+    await expect(page.getByLabel('持久会话', { exact: true })).not.toHaveValue('');
+  } finally { release(); await page.unrouteAll({ behavior: 'wait' }); await page.goto('about:blank'); await h.stop(); }
 });

@@ -18,7 +18,12 @@ async function floatManagementPage() {
   // The chat is already open: keep it and focus synchronously. Loading the underlying page must not take focus back
   // from a resize handle or another control the person has started using in the meantime.
   chat.openVersion++; setManagementPresentation(chat, 'floating'); chat.client?.focus();
-  history.replaceState(null, '', chat.returnAddress); await route();
+  const scope = consoleScope(), previous = projectRoute(chat.returnAddress), page = addressTab(chat.returnAddress);
+  // Changing presentation keeps the current conversation. Restore the underlying page type in the current scope.
+  const section = projectConsolePages.includes(page) ? page : previous?.section || 'projects';
+  const destination = consoleAddressScope(chat.returnAddress) === undefined ? chat.returnAddress
+    : scope ? consolePageAddress(section, scope) : consolePageAddress(projectConsolePages.includes(section) ? section : 'projects', null);
+  history.replaceState(null, '', destination); await route();
 }
 function minimizeManagementChat(focus = true) {
   const chat = managementChat; if (!chat || chat.window.hidden) return;
