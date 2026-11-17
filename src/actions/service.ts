@@ -141,13 +141,28 @@ export class ActionsFailures {
     }
     this.store.run('UPDATE actions_failure_scans SET reconciled_at=? WHERE repository_id=?', now, id);
   }
-  private async eligible(github: GitHub, run: any) {
-    if (['pull_request', 'pull_request_target', 'pull_request_review', 'pull_request_review_comment'].includes(run.event) || run.pull_requests?.length) return false;
-    if (run.head_branch === github.defaultBranch) return true;
-    // A tag Release can fail on a default-branch commit, but does not gain a dispatch trigger here.
-    if (run.name !== 'Release' || run.event !== 'push') return false;
+  /**
+   * Whether this failure handling takes the run. Returns null when it does not; otherwise `{ tag }`, where `tag` is the
+   * version tag the run was started for, or null for a default-branch run. PR-related runs never count. A run that
+   * pushing a tag started counts whatever its workflow is called (#1028): GitHub gives such a run event `push` and the tag
+   * name in `head_branch`, so that name must be a tag of this repository that names the run's own commit (a branch of
+   * that name does not count), and the commit must be on the default branch history. It stays a plain Actions failure:
+   * nothing here reads or writes release records.
+   */
+  private async eligible(github: GitHub, run: any): Promise<{ tag: string | null } | null> {
+    if (['pull_request', 'pull_request_target', 'pull_request_review', 'pull_request_review_comment'].includes(run.event) || run.pull_requests?.length) return null;
+    if (run.head_branch === github.defaultBranch) return { tag: null };
+    if (run.event !== 'push' || typeof run.head_branch !== 'string' || !run.head_branch) return null;
+    if (await this.tagCommit(github, run.head_branch) !== run.head_sha) return null;
     const comparison = await github.request('GET', github.path(`/compare/${run.head_sha}...${encodeURIComponent(github.defaultBranch)}`));
-    return comparison.merge_base_commit?.sha === run.head_sha;
+    return comparison.merge_base_commit?.sha === run.head_sha ? { tag: run.head_branch } : null;
+  }
+  // The commit a tag names, through annotated tag objects; null when there is no such tag or it names no commit.
+  private async tagCommit(github: GitHub, name: string): Promise<string | null> {
+    let object = (await github.request('GET', github.path('/git/ref/tags/' + name.split('/').map(encodeURIComponent).join('/')), undefined, true))?.object;
+    for (let depth = 0; depth < 8 && object?.type === 'tag' && /^[a-f0-9]{40}$/.test(object.sha); depth++)
+      object = (await github.request('GET', github.path('/git/tags/' + object.sha), undefined, true))?.object;
+    return object?.type === 'commit' && /^[a-f0-9]{40}$/.test(object.sha) ? object.sha : null;
   }
   async processRun(github: GitHub, runId: number) {
     const id = github.repository.id, live = await github.request('GET', github.path('/actions/runs/' + runId));
@@ -166,8 +181,10 @@ export class ActionsFailures {
       const finish = () => this.store.run("UPDATE actions_failure_attempts SET state='done' WHERE repository_id=? AND run_id=? AND attempt=?", id, runId, attempt.attempt);
       if (run.status !== 'completed') continue;
       if (!Number.isFinite(Date.parse(run.updated_at))) stop('actions_completion_time_missing');
-      if (run.conclusion !== 'failure' || budget.retry_state === 'none' && Date.parse(run.updated_at) < Date.parse(activated) || !await this.eligible(github, run)) { finish(); continue; }
-      let data: { version?: number; kind: FailureKind; evidence: Evidence[]; reports?: CheckedReport[]; summary?: string };
+      const eligible = run.conclusion !== 'failure' || budget.retry_state === 'none' && Date.parse(run.updated_at) < Date.parse(activated) ? null : await this.eligible(github, run);
+      if (!eligible) { finish(); continue; }
+      const tag = eligible.tag;
+      let data: { version?: number; kind: FailureKind; evidence: Evidence[]; reports?: CheckedReport[]; summary?: string; tag?: string };
       const task = analysisTask(this.store, id, runId, run.run_attempt);
       if(task)assertManagedExecution(this.store,task);
       // The rerun and the reports are framework deliveries (#381): the work type's writes decide, not the executing role.
@@ -202,7 +219,7 @@ export class ActionsFailures {
         // The workflow's agent classifies the failed jobs; the control plane checks what it cites and acts on the result.
         const outputs = logs.map(({ job, log }) => ({ job, output: failedStepOutput(job, log) }));
         // Missing logs still merit investigation of source/artifacts; they never manufacture a public report.
-        if (outputs.length && !task) { requestAnalysis(this.store, github, run, outputs); analyzing = true; continue; }
+        if (outputs.length && !task) { requestAnalysis(this.store, github, run, outputs, tag); analyzing = true; continue; }
         const verdicts = task ? taskVerdicts(task) : null;
         for (const classified of failed.length ? classifiedEvidence(outputs, verdicts) : []) {
           const job = classified.job;
@@ -215,7 +232,9 @@ export class ActionsFailures {
         }
         if (!evidence.length) evidence.push({ job: { name: 'Workflow', id: null }, kind: 'unknown', reason: 'Failed job evidence is unavailable.', quote: '' });
         data = { version: 2, kind: classifyFailure(evidence), evidence, reports: task ? await checkReports(github, run, taskReports(task), outputs) : [],
-          summary: task?.status === 'succeeded' ? publicText(String(JSON.parse(task.result || '{}').summary || ''), github.redactor) : 'Analysis did not return a usable result; no report was requested.' };
+          summary: task?.status === 'succeeded' ? publicText(String(JSON.parse(task.result || '{}').summary || ''), github.redactor) : 'Analysis did not return a usable result; no report was requested.',
+          // Kept for reports published later from this record (a rerun that was never observed), which do not look the tag up again.
+          ...(tag ? { tag } : {}) };
         this.store.run('UPDATE actions_failure_attempts SET classification=?,data=? WHERE repository_id=? AND run_id=? AND attempt=?', data.kind, JSON.stringify(data), id, runId, run.run_attempt);
       }
       budget = this.store.get('SELECT * FROM actions_failure_runs WHERE repository_id=? AND run_id=?', id, runId)!;
@@ -259,7 +278,7 @@ export class ActionsFailures {
       if (writes.includes('issue')) {
         if (data.version === 2) for (const report of data.reports || []) {
           const before = report.withheld_reason;
-          await publishReport(this.store, github, run, report, data.evidence, reason);
+          await publishReport(this.store, github, run, report, data.evidence, reason, tag);
           if (report.withheld_reason !== before) this.store.run('UPDATE actions_failure_attempts SET data=? WHERE repository_id=? AND run_id=? AND attempt=?', JSON.stringify(data), id, runId, run.run_attempt);
         }
         // Upgrade recovery honors existing receipts without replaying per-job verdicts as new Issues.
@@ -277,7 +296,7 @@ export class ActionsFailures {
         const saved = JSON.parse(attempt.data), original = { ...live, run_attempt: budget.before_attempt };
         if (saved.version === 2) for (const report of saved.reports || []) {
           const before = report.withheld_reason;
-          await publishReport(this.store, github, original, report, saved.evidence, 'The single automatic retry request could not be confirmed after querying the original run. It will not be resent; completion is still being monitored.');
+          await publishReport(this.store, github, original, report, saved.evidence, 'The single automatic retry request could not be confirmed after querying the original run. It will not be resent; completion is still being monitored.', saved.tag);
           if (report.withheld_reason !== before) this.store.run('UPDATE actions_failure_attempts SET data=? WHERE repository_id=? AND run_id=? AND attempt=?', JSON.stringify(saved), id, runId, budget.before_attempt);
         }
         await resumeReports(this.store, github, original);

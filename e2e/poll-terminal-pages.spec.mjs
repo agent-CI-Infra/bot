@@ -61,7 +61,7 @@ test('#743 监听与触发页：403 之后停止 Actions 配置检查并写终�
     await repository(admin, a.id, '101');
     await loginAs(page, h.admin + '/#/projects/101/triggers', password);
     // Enable the event source through its own switch, the way the page turns the check on.
-    await page.getByLabel('接收默认分支的 Actions 失败事件', { exact: true }).check();
+    await page.getByLabel('接收默认分支和版本标签的 Actions 失败事件', { exact: true }).check();
     await page.getByRole('button', { name: '保存事件开关', exact: true }).click();
     const status = page.locator('[data-actions-status]');
     await expect(status).toContainText('配置检查通过后', { timeout: 10000 });

@@ -29,8 +29,12 @@ export function analysisDecision(store: Store, repositoryId: string, runId: numb
   if (event.state === 'failed') return { state: 'failed' };
   return JSON.parse(event.result || '{}').created?.length ? { state: 'pending' } : { state: 'declined', reason: String(event.reason || '') };
 }
-/** Asks the Manager whether to analyze this failed attempt; its task (when created) is found by analysisTask. */
-export function requestAnalysis(store: Store, github: GitHub, run: any, failed: Failed[]): void {
+/**
+ * Asks the Manager whether to analyze this failed attempt; its task (when created) is found by analysisTask. `tag` is set
+ * for a version-tag run (#1028): the run facts then carry `tag_run` and `tag` instead of a branch, and the event's summary
+ * and the task's title say 版本标签运行, so the Manager and the analysis can tell it from a default-branch failure.
+ */
+export function requestAnalysis(store: Store, github: GitHub, run: any, failed: Failed[], tag: string | null = null): void {
   const known = store.all("SELECT cause,issue_number,run_id,attempt FROM actions_failure_reports WHERE repository_id=? AND workflow_id=? AND state='sent' AND cause IS NOT NULL ORDER BY rowid DESC LIMIT 50", String(github.repository.id), run.workflow_id);
   const causes: Row[] = [];
   const seen = new Set<string>();
@@ -45,14 +49,15 @@ export function requestAnalysis(store: Store, github: GitHub, run: any, failed: 
     return { job_id: job.id, name: job.name, failed_steps: (job.steps || []).filter((s: any) => s.conclusion === 'failure').map((s: any) => ({ number: s.number, name: s.name })),
       ...(output.problem ? { log_problem: output.problem } : {}), failed_step_output: text, ...(output.lines.length > lines.length || text.length < lines.join('\n').length ? { output_clipped: true } : {}) };
   });
-  const input = github.redactor.clean({ run: { id: run.id, attempt: run.run_attempt, workflow: run.name, event: run.event, branch: run.head_branch, head_sha: run.head_sha,
+  const input = github.redactor.clean({ run: { id: run.id, attempt: run.run_attempt, workflow: run.name, event: run.event, ...(tag ? { tag_run: true, tag } : { branch: run.head_branch }), head_sha: run.head_sha,
     url: `https://github.com/${github.fullName}/actions/runs/${run.id}` }, failed_jobs: jobs, reported_causes: causes });
-  const repositoryId = String(github.repository.id);
+  const repositoryId = String(github.repository.id), tagged = tag ? `（版本标签运行 ${String((input as any).run.tag).slice(0, 100)}）` : '';
+  const title = `Actions 失败分析${tagged} run ${run.id} / attempt ${run.run_attempt}`;
   recordEvent(store, { repositoryId, key: `${repositoryId}:actions.run_failed:${key(run.id, run.run_attempt)}`, type: 'actions.run_failed', source: 'actions',
-    summary: `Actions 运行失败：${String(run.name || '').slice(0, 120)} run ${run.id} / attempt ${run.run_attempt}`,
+    summary: `Actions 运行失败${tagged}：${String(run.name || '').slice(0, 120)} run ${run.id} / attempt ${run.run_attempt}`,
     facts: { run: (input as any).run, reported_causes: (input as any).reported_causes, failed_jobs: (input as any).failed_jobs.map(({ failed_step_output, ...job }: any) => ({ ...job, output_tail: String(failed_step_output || '').slice(-1500) })) },
-    options: [{ id: 'analysis', work: 'actions.failures', title: `Actions 失败分析 run ${run.id} / attempt ${run.run_attempt}`, default: true,
-      spec: { type: 'event', kind: 'actions.failures', key: key(run.id, run.run_attempt), sha: run.head_sha, input, summary: `Actions 失败分析 run ${run.id} / attempt ${run.run_attempt}` } }] });
+    options: [{ id: 'analysis', work: 'actions.failures', title, default: true,
+      spec: { type: 'event', kind: 'actions.failures', key: key(run.id, run.run_attempt), sha: run.head_sha, input, summary: title } }] });
 }
 /** What the finished task recorded per job, or null when it ended without a usable result. */
 export function taskVerdicts(task: Row): Map<unknown, any> | null {

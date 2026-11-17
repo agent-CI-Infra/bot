@@ -44,7 +44,7 @@ for (const role of ['super_admin', 'project_admin']) test(`${role} configures pr
     await development.check(); await page.getByRole('button', { name: '保存能力上限', exact: true }).click();
     await expect(page.locator('.flash')).toHaveText('已保存');
     expect((await admin('/api/repositories/101/policy')).value.policy.capability_ceiling).toBe('develop');
-    const actions = page.getByLabel('接收默认分支的 Actions 失败事件', { exact: true });
+    const actions = page.getByLabel('接收默认分支和版本标签的 Actions 失败事件', { exact: true });
     await expect(actions).not.toBeChecked(); await actions.check();
     await page.getByLabel('PR 推送新提交', { exact: true }).uncheck();
     await page.getByRole('button', { name: '保存事件开关', exact: true }).click();
@@ -93,7 +93,7 @@ test('project listeners load without the role engine, retry failed reads and rej
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('heading', { name: '监听与触发配置读取失败', exact: true })).toBeVisible();
     failRead = false; await page.getByRole('button', { name: '重新读取监听配置', exact: true }).click();
-    const actions = page.getByLabel('接收默认分支的 Actions 失败事件', { exact: true }); await expect(actions).not.toBeChecked();
+    const actions = page.getByLabel('接收默认分支和版本标签的 Actions 失败事件', { exact: true }); await expect(actions).not.toBeChecked();
     const { manager } = (await admin('/api/repositories/101/manager')).value;
     expect((await admin('/api/repositories/101/manager', 'PUT', { expected_revision: manager.prompt.revision, prompt: 'Updated elsewhere.' })).status).toBe(200);
     await actions.check(); await page.getByRole('button', { name: '保存事件开关', exact: true }).click();
