@@ -16,7 +16,7 @@ async function login(page, f) {
   await page.getByRole('button', { name: '登录', exact: true }).click();
   await switchConsoleProject(page, '101');
   await page.getByRole('button', { name: '快捷操作', exact: true }).click();
-  await expect(page.getByRole('button', { name: '预览日报计划', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '预览触发时间', exact: true })).toBeVisible();
 }
 
 test('#744: a hand-edited Cron or a 重复方式 switch keeps 常用触发时间 and the advanced fold in step', async ({ page }) => {

@@ -2,7 +2,9 @@ import type { Store, Row } from '../storage/database.js';
 import { fail } from '../core/security.js';
 import { defaultLimits, type Limits, type Plan } from './types.js';
 
-export const categoryOf = (plan: Plan): string => plan.workflow === 'report.daily' ? 'report' : 'development';
+/** Notifications budget as 'report', as the retired daily report plans did (#1027); plan runs as 'development'. */
+export const notificationWorkflow = 'notification';
+export const categoryOf = (plan: Plan): string => plan.workflow === notificationWorkflow || plan.workflow === 'report.daily' ? 'report' : 'development';
 export const terminalRunStates = "('succeeded','completed','failed','cancelled','blocked','budget_exhausted','dead')";
 export function budgetScopes(store: Store, row: Row, plan: Plan): { scope: string; id: string; limits: Limits }[] {
   return [{ scope: 'schedule', id: row.schedule_id ?? row.id, limits: plan.limits },

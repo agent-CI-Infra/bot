@@ -21,15 +21,19 @@ async function login(page, f) {
 
 const out = '.tmp/schedule-templates-572';
 
-test('#572 可用模板创建每日摘要和失败时通知，高级字段默认折叠', async ({ page }) => {
+test('#572 #1027 可用模板创建项目定时任务和失败时通知，没有每日摘要模板，高级字段默认折叠', async ({ page }) => {
   test.setTimeout(90000);
   const f = await environment();
   mkdirSync(out, { recursive: true });
   try {
     await page.setViewportSize({ width: 1440, height: 1100 });
     await login(page, f);
-    await expect(page.getByRole('button', { name: '使用每日摘要模板', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '使用项目定时任务模板', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '使用失败时通知模板', exact: true })).toBeVisible();
+    // #1027: a project no longer sends a scheduled report to Feishu, so there is no daily digest template or destination.
+    await expect(page.getByRole('button', { name: '使用每日摘要模板', exact: true })).toHaveCount(0);
+    await expect(page.getByLabel('计划目的地', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('combobox', { name: '执行内容', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: '保存计划', exact: true })).toBeVisible();
     await expect(page.getByLabel('Cron 表达式', { exact: true })).toBeHidden();
     await expect(page.getByLabel('计划时区', { exact: true })).toBeHidden();
@@ -40,17 +44,18 @@ test('#572 可用模板创建每日摘要和失败时通知，高级字段默认
     await expect(page.getByLabel('静默开始', { exact: true })).toBeHidden();
     await page.screenshot({ path: `${out}/schedules-1440.png`, fullPage: true });
 
-    await page.getByRole('button', { name: '使用每日摘要模板', exact: true }).click();
-    await expect(page.getByLabel('计划名称', { exact: true })).toHaveValue('每日摘要');
-    await expect(page.getByRole('combobox', { name: '执行内容', exact: true })).toHaveValue('report.daily');
+    await page.getByRole('button', { name: '使用项目定时任务模板', exact: true }).click();
+    await expect(page.getByLabel('计划名称', { exact: true })).toHaveValue('项目定时任务');
     await expect(page.getByLabel('常用触发时间', { exact: true })).toHaveValue('0 9 * * *');
+    await page.getByRole('textbox', { name: '要做什么', exact: true }).fill('每天检查 Nightly 的结果，指标变差就分析并提 Issue。');
     await page.getByLabel('常用触发时间', { exact: true }).selectOption('0 18 * * *');
     await page.getByRole('button', { name: '保存计划', exact: true }).click();
     await expect.poll(() => f.h.store.get('SELECT count(*) n FROM schedules').n).toBe(1);
     const plan = f.h.store.get('SELECT id, state, spec FROM schedules');
     const spec = typeof plan.spec === 'string' ? JSON.parse(plan.spec) : plan.spec;
-    expect(spec.name).toBe('每日摘要');
-    expect(spec.workflow).toBe('report.daily');
+    expect(spec.name).toBe('项目定时任务');
+    expect(spec.workflow).toBe('manager.check');
+    expect(spec.destination_id).toBeUndefined();
     expect(spec.cron).toBe('0 18 * * *');
 
     await page.getByRole('button', { name: '使用失败时通知模板', exact: true }).click();
@@ -80,7 +85,7 @@ test('#572 可用模板创建每日摘要和失败时通知，高级字段默认
     await page.setViewportSize({ width: 390, height: 844 });
     await page.evaluate(() => window.scrollTo(0, 0));
     await expect(page.getByTestId('schedule-templates')).toBeVisible();
-    await expect(page.getByRole('button', { name: '使用每日摘要模板', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '使用项目定时任务模板', exact: true })).toBeVisible();
     await expect(page.getByLabel('Cron 表达式', { exact: true })).toBeHidden();
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
     await page.screenshot({ path: `${out}/schedules-390.png`, fullPage: true });
@@ -88,7 +93,7 @@ test('#572 可用模板创建每日摘要和失败时通知，高级字段默认
 });
 
 
-test('#905 可用模板创建自定义主动任务，并在桌面与窄屏上看到检查内容和权限三态', async ({ page }) => {
+test('#905 可用模板创建项目定时任务，并在桌面与窄屏上看到要做什么和权限三态', async ({ page }) => {
   test.setTimeout(90000);
   const f = await environment();
   const out893 = '.tmp/schedule-templates-893';
@@ -96,22 +101,21 @@ test('#905 可用模板创建自定义主动任务，并在桌面与窄屏上看
   try {
     await page.setViewportSize({ width: 1440, height: 1100 });
     await login(page, f);
-    await expect(page.getByRole('button', { name: '使用自定义主动任务模板', exact: true })).toBeVisible();
-    await page.getByRole('button', { name: '使用自定义主动任务模板', exact: true }).click();
-    await expect(page.getByLabel('计划名称', { exact: true })).toHaveValue('自定义主动任务');
-    await expect(page.getByRole('combobox', { name: '执行内容', exact: true })).toHaveValue('manager.check');
+    await expect(page.getByRole('button', { name: '使用项目定时任务模板', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '使用项目定时任务模板', exact: true }).click();
+    await expect(page.getByLabel('计划名称', { exact: true })).toHaveValue('项目定时任务');
     await expect(page.getByLabel('常用触发时间', { exact: true })).toHaveValue('0 9 * * *');
-    await expect(page.getByLabel('定时检查内容', { exact: true })).toBeVisible();
+    await expect(page.getByRole('textbox', { name: '要做什么', exact: true })).toBeVisible();
     await expect(page.getByRole('combobox', { name: '创建 Issue 的权限', exact: true })).toBeVisible();
     await expect(page.getByRole('combobox', { name: '创建 Issue 的权限', exact: true })).toHaveValue('inherit');
-    await page.getByLabel('定时检查内容', { exact: true }).fill('每周检查未关闭的过期 Issue，只报告发现。');
+    await page.getByRole('textbox', { name: '要做什么', exact: true }).fill('每周检查未关闭的过期 Issue，只报告发现。');
     await page.getByRole('combobox', { name: '创建 Issue 的权限', exact: true }).selectOption('allow');
     await page.screenshot({ path: `${out893}/custom-check-1440.png`, fullPage: true });
     await page.getByRole('button', { name: '保存计划', exact: true }).click();
     await expect.poll(() => f.h.store.get('SELECT count(*) n FROM schedules').n).toBe(1);
     const plan = f.h.store.get('SELECT id, spec FROM schedules');
     const spec = typeof plan.spec === 'string' ? JSON.parse(plan.spec) : plan.spec;
-    expect(spec.name).toBe('自定义主动任务');
+    expect(spec.name).toBe('项目定时任务');
     expect(spec.workflow).toBe('manager.check');
     expect(spec.kind).toBe('personal');
     expect(spec.timezone).toBe('Asia/Shanghai');
@@ -124,7 +128,7 @@ test('#905 可用模板创建自定义主动任务，并在桌面与窄屏上看
     await expect(page.getByRole('combobox', { name: '创建 Issue 的权限', exact: true })).toHaveValue('allow');
     await page.evaluate(() => window.scrollTo(0, 0));
     await expect(page.getByTestId('schedule-templates')).toBeVisible();
-    await expect(page.getByRole('button', { name: '使用自定义主动任务模板', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '使用项目定时任务模板', exact: true })).toBeVisible();
     await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
     await page.screenshot({ path: `${out893}/custom-check-390.png`, fullPage: true });
   } finally { await f.close(); }
@@ -140,9 +144,9 @@ test('#905 未设置的 file_issues 原样保存，允许与拒绝可以往返',
   try {
     await page.setViewportSize({ width: 1440, height: 1100 });
     await login(page, f);
-    await page.getByRole('button', { name: '使用自定义主动任务模板', exact: true }).click();
+    await page.getByRole('button', { name: '使用项目定时任务模板', exact: true }).click();
     await expect(page.getByRole('combobox', { name: '创建 Issue 的权限', exact: true })).toHaveValue('inherit');
-    await page.getByLabel('定时检查内容', { exact: true }).fill('检查未关闭的 Issue，权限跟随角色。');
+    await page.getByRole('textbox', { name: '要做什么', exact: true }).fill('检查未关闭的 Issue，权限跟随角色。');
     await page.getByRole('button', { name: '保存计划', exact: true }).click();
     await expect.poll(() => f.h.store.get('SELECT count(*) n FROM schedules').n).toBe(1);
     expect(savedSpec().parameters.file_issues).toBeUndefined();

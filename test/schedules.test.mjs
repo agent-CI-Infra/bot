@@ -11,6 +11,7 @@ import { ChannelService } from '../dist/channels/service.js';
 import { ScheduleService } from '../dist/schedules/service.js';
 import { Scheduler } from '../dist/schedules/worker.js';
 import { scheduleStorage } from '../dist/schedules/storage.js';
+import { migrateDailyReports } from '../dist/schedules/migration.js';
 import { defaultLimits } from '../dist/schedules/types.js';
 import { nextTime, previewTimes, quietUntil } from '../dist/schedules/time.js';
 import { HttpError, randomId } from '../dist/core/security.js';
@@ -21,7 +22,7 @@ import { taskActingRole } from '../dist/tasks/management.js';
 import { Redactor } from '../dist/agent/common.js';
 import { scheduledCheckDecision } from '../dist/dispatch/schedule.js';
 import { scheduledIssueWrite, scheduledIssueOperationAllowed, scheduledCheckCriteria } from '../dist/tasks/schedule-write.js';
-import { channelFixture, envelope, post, finished, until, inGroup, bindFixture, privateChat, boundGroup, registerDestination } from './channel-fixture.mjs';
+import { channelFixture, envelope, post, finished, until, inGroup, bindFixture, privateChat, boundGroup, registerDestination, scriptedModel } from './channel-fixture.mjs';
 
 const target = { project_id: '101' };
 const query = async (f, operation, args = {}, client = f.admin, project = '101') => {
@@ -33,27 +34,41 @@ async function command(f, operation, args, client = f.admin, key = randomId()) {
   return client('/api/management/commands', 'POST', { operation, target, arguments: args, expected_revision: revision,
     idempotency_key: key, source_conversation: 'schedule-fixture', source_message: key });
 }
+// Plans run a registered handler (#1027); the fixture's hands its occurrence over at once, like the Manager check does.
+const fixtureWorkflow = 'fixture.run';
+const registerFixture = service => service.register(fixtureWorkflow, { capability: 'tasks.read', dispatch: (trigger, _actor, guard) => { guard(); return { run_id: trigger.run_id, state: 'succeeded' }; } });
 async function fixture(t, timeOfDay) {
   let now = Date.now(), worker;
-  const f = await channelFixture(t, { schedules: { clock: () => now, automatic: false }, onSchedules: s => { worker = s; } });
+  const f = await channelFixture(t, { schedules: { clock: () => now, automatic: false }, onSchedules: s => { worker = s; registerFixture(s.service); } });
   now = Date.now();
   // Daily quota tests must keep their successive occurrences in the same UTC day.
   if (timeOfDay !== undefined) now = Math.floor(now / 86400000) * 86400000 + timeOfDay;
   f.worker = worker; f.advance = ms => { now += ms; }; f.now = () => now;
   f.actor = () => resolveActor(f.h.store, f.admin.cookie().split('=')[1], { project_id: '101' });
-  f.destination = await registerDestination(f.admin, await privateChat(f));
-  f.plan = override => ({ name: '项目日报', kind: 'personal', actor_id: f.principal, owner_id: f.principal, maintainer_id: f.principal,
-    workflow: 'report.daily', parameters: {}, timezone: 'Asia/Shanghai', interval_ms: 60000, start_at: f.now() + 60000, enabled: true,
-    misfire: 'skip', grace_ms: 60000, destination_id: f.destination, limits: { ...defaultLimits }, ...override });
+  // A plan of an unknown work type runs while its project is on.
+  f.h.store.run("UPDATE policies SET enabled=1 WHERE repository_id='101'");
+  f.chat = await privateChat(f); f.destination = await registerDestination(f.admin, f.chat);
+  f.plan = override => ({ name: '项目定时任务', kind: 'personal', actor_id: f.principal, owner_id: f.principal, maintainer_id: f.principal,
+    workflow: fixtureWorkflow, parameters: {}, timezone: 'Asia/Shanghai', interval_ms: 60000, start_at: f.now() + 60000, enabled: true,
+    misfire: 'skip', grace_ms: 60000, limits: { ...defaultLimits }, ...override });
   f.create = async (plan = f.plan()) => {
     const r = await command(f, 'schedule.register', { plan }); assert.equal(r.status, 201); assert.equal(r.value.state, 'succeeded', JSON.stringify(r.value)); return r.value.result.schedule;
   };
+  // Notifications come from event subscriptions only (#1027): a subscription to failed tasks, and one failed task event.
+  f.subscribe = async (override = {}, client = f.admin) => {
+    const r = await command(f, 'notification.register', { subscription: { name: '失败通知', destination_id: f.destination, events: ['task.failed'], projects: ['101'],
+      aggregate_ms: 0, timezone: 'UTC', enabled: true, ...override } }, client);
+    assert.equal(r.value.state, 'succeeded', JSON.stringify(r.value)); return r.value.result.subscription;
+  };
+  f.failure = (incident = randomId()) => f.h.store.run("INSERT INTO schedule_events(event_key,project_id,type,incident,payload,created_at) VALUES(?,'101','task.failed',?,?,?)",
+    'fixture:' + incident, 'task:' + incident, JSON.stringify({ task_id: incident, status: 'failed' }), f.now());
   return f;
 }
 function otherWorker(f, t, transport) {
   const store = new Store(f.h.database, f.h.key), management = new ManagementService(store, new RuleService(store), new TaskCommands(store));
   const channels = new ChannelService(store, new ManagementAgent(store, management), { origin: 'https://console.example.test', fetch: f.wire.fetch });
   const service = new ScheduleService(store, management, channels, f.now), worker = new Scheduler(service, transport);
+  registerFixture(service);
   t.after(async () => { await worker.close(); store.close(); }); return worker;
 }
 /** A group bound by a maintainer who stays: its binding's authority belongs to that maintainer, not to a departing plan owner. */
@@ -67,8 +82,7 @@ async function projectPlan(f, maintainer, owner = f.principal) {
   f.h.store.run("INSERT INTO principals(id,kind,project_id,tenant_id,maintenance) VALUES(?,'service','101','github.com:10','project maintainers')", service);
   f.h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
     VALUES(?,?,'github.com:10','101','project','service',?,'explicit_delegation',?,'schedule','fixture approval',?)`, randomId(), service, JSON.stringify(['tasks.read', 'schedules.manage']), f.principal, f.now());
-  const destination = await registerDestination(f.admin, await keptGroup(f));
-  return f.plan({ kind: 'project', actor_id: service, maintainer_id: maintainer, owner_id: owner, destination_id: destination });
+  return f.plan({ kind: 'project', actor_id: service, maintainer_id: maintainer, owner_id: owner });
 }
 test('wall-clock preview chooses first DST fold, skips gaps, uses cron OR semantics and bounds misfires', () => {
   const plan = { timezone: 'America/New_York', cron: '30 1 * * *', start_at: 0 };
@@ -94,7 +108,7 @@ test('nextTime excludes a trigger that lands exactly on end_at and rejects a win
   const f = await fixture(t);
   await assert.rejects(query(f, 'preview_schedule', { plan: f.plan({ interval_ms: undefined, cron: '0 9 * * *', end_at: f.now() }) }), /invalid_schedule_recurrence/);
 });
-test('user creates and previews a daily report, sees evidence, runs now and receives a persisted delivery', async t => {
+test('a project scheduled task names no Feishu destination, runs only a registered workflow and sends nothing to a chat (#1027)', async t => {
   const f = await fixture(t);
   f.modelState.failure = 503;
   // Chat text no longer registers a destination; registration happens in the console (#312).
@@ -103,17 +117,23 @@ test('user creates and previews a daily report, sees evidence, runs now and rece
   assert.equal(f.h.store.get("SELECT count(*) n FROM channel_outbox WHERE state='registered'").n, registeredBefore);
   const modelRequests = f.requests.length;
   const preview = await query(f, 'preview_schedule', { plan: f.plan({ cron: '0 9 * * *', interval_ms: undefined }) });
-  assert.equal(preview.timezone, 'Asia/Shanghai'); assert.equal(preview.future.length, 5);
-  assert.ok(preview.report.evidence.some(e => e.id === 'task:blocked'));
-  assert.match(preview.report.text, /不能据此判定全部成功/); assert.match(preview.report.text, /仍未结束的任务：1/);
+  assert.equal(preview.timezone, 'Asia/Shanghai'); assert.equal(preview.future.length, 5); assert.equal(preview.supported, true); assert.equal(preview.report, undefined);
+  // A destination is no part of a plan any more, and the daily report or an unhandled release is no plan a project can save.
+  const withDestination = await command(f, 'schedule.register', { plan: { ...f.plan(), destination_id: f.destination } });
+  assert.equal(withDestination.status, 400, JSON.stringify(withDestination.value));
+  for (const workflow of ['report.daily', 'release.scheduled']) {
+    const refused = await command(f, 'schedule.register', { plan: f.plan({ workflow }) });
+    assert.equal(refused.value.result?.error ?? refused.value.error, 'schedule_workflow_unsupported', workflow);
+  }
   const schedule = await f.create(), run = await command(f, 'schedule.run-now', { id: schedule.id, revision: 1 });
-  assert.equal(run.value.state, 'succeeded');
+  assert.equal(run.value.state, 'succeeded'); assert.equal(schedule.spec.destination_id, undefined);
   await f.worker.tick(); const occurrence = (await query(f, 'list_occurrences')).records[0];
   assert.equal(occurrence.state, 'succeeded'); assert.equal(occurrence.snapshot.plan.timezone, 'Asia/Shanghai');
-  const deliveries = (await query(f, 'list_notification_deliveries')).records;
-  assert.equal(deliveries[0].state, 'sent'); assert.equal(deliveries[0].attempts, 1); assert.ok(deliveries[0].remote_message_id);
   assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_business_runs').n, 1);
-  assert.equal(f.requests.length, modelRequests); assert.equal(deliveries[0].payload.report.model, 'deterministic_no_model');
+  // The plan's run leaves its results in the project: no notification, no chat message, no model call.
+  assert.equal(f.h.store.get('SELECT count(*) n FROM notification_outbox').n, 0);
+  assert.equal(f.h.store.get("SELECT count(*) n FROM schedule_events WHERE type='project.daily'").n, 0);
+  assert.equal(f.requests.length, modelRequests);
 });
 test('restart recovers an expired lease and two workers/replayed ticks create one occurrence and one business run', async t => {
   const f = await fixture(t); await f.create(); f.advance(60000); f.worker.produce();
@@ -124,12 +144,10 @@ test('restart recovers an expired lease and two workers/replayed ticks create on
   await Promise.all([f.worker.tick(), second.tick(), f.worker.tick()]);
   assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_occurrences').n, 1);
   assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_business_runs').n, 1);
-  assert.equal(f.h.store.get('SELECT count(*) n FROM notification_outbox').n, 1);
   const row = f.h.store.get('SELECT * FROM schedule_occurrences'); assert.equal(row.attempts, 2); assert.equal(row.state, 'succeeded');
   // Close and reopen the real control plane against the same on-disk database.
   await f.h.stop(); await f.h.start();
   assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_business_runs').n, 1);
-  assert.equal(f.h.store.get('SELECT count(*) n FROM notification_outbox').n, 1);
 });
 test('misfire skips an unbounded history; once runs only one due instance, updates are versioned and started snapshots stay fixed', async t => {
   const f = await fixture(t), s = await f.create(); f.advance(86400000 * 5); await f.worker.tick();
@@ -143,32 +161,31 @@ test('misfire skips an unbounded history; once runs only one due instance, updat
   f.worker.dispatch(claim); assert.equal(f.h.store.get('SELECT state FROM schedule_occurrences WHERE id=?', claim.id).state, 'succeeded');
   assert.equal(JSON.parse(f.h.store.get('SELECT snapshot FROM schedule_occurrences WHERE id=?', claim.id).snapshot).plan.timezone, 'UTC');
 });
-test('revoking a personal owner pauses the plan and blocks its queued notification before transport', async t => {
+test('revoking a personal owner pauses the plan, and blocks their subscription\'s queued notification before transport', async t => {
   const f = await fixture(t), member = await f.member('schedule-member', { repository_ids: ['101'] });
   bindFixture(f.h, f.id, member.id, 'ou_member');
   const destination = await registerDestination(member.client, await privateChat(f, 'ou_member', member.id, 'oc_member_private'));
-  const plan = f.plan({ actor_id: member.id, owner_id: member.id, maintainer_id: member.id, destination_id: destination });
+  const plan = f.plan({ actor_id: member.id, owner_id: member.id, maintainer_id: member.id });
   const saved = await command(f, 'schedule.register', { plan }, member.client); assert.equal(saved.value.state, 'succeeded');
-  f.advance(60000); f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  await f.subscribe({ destination_id: destination }, member.client); f.failure(); f.worker.fanout();
   assert.equal(f.h.store.get('SELECT state FROM notification_outbox').state, 'pending');
   f.h.store.run('DELETE FROM project_admin_assignments WHERE user_id=?', member.id);
-  const before = f.wire.sent.length; await f.worker.tick();
+  const before = f.wire.sent.length; f.advance(60000); await f.worker.tick();
   assert.equal(f.h.store.get('SELECT state FROM schedules').state, 'paused'); assert.equal(f.h.store.get('SELECT state FROM notification_outbox').state, 'blocked'); assert.equal(f.wire.sent.length, before);
+  assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_occurrences').n, 0);
 });
-test('a group destination follows its binding: a queued report stops when the binding no longer reaches the project', async t => {
+test('a group destination follows its binding: a queued event notification stops when the binding no longer reaches the project', async t => {
   const f = await fixture(t), chat = await boundGroup(f), destination = await registerDestination(f.admin, chat);
   const listed = await query(f, 'list_schedule_destinations');
   assert.deepEqual(listed.destinations.map(d => d.type).sort(), ['group', 'p2p']);
-  // A preview may name a chat directly (#330); only saving registers it.
-  const registered = f.h.store.get("SELECT count(*) n FROM channel_outbox WHERE state='registered'").n;
-  const chosen = await f.admin('/api/management/query', 'POST', { operation: 'preview_schedule', target, arguments: { plan: f.plan({ destination_id: 'chat:' + chat.id }) } });
-  assert.equal(chosen.status, 201, JSON.stringify(chosen.value)); assert.equal(f.h.store.get("SELECT count(*) n FROM channel_outbox WHERE state='registered'").n, registered);
-  await f.create(f.plan({ destination_id: destination })); f.advance(60000); f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  const subscription = { name: '群里的失败通知', destination_id: destination, events: ['task.failed'], projects: ['101'], aggregate_ms: 0, timezone: 'UTC', enabled: true };
+  await f.subscribe({ destination_id: destination }); f.failure(); f.worker.fanout();
+  assert.equal(f.h.store.get('SELECT state FROM notification_outbox').state, 'pending');
   // The maintainer narrows the group to another repository: project 101 is out of its scope now.
   const revision = f.h.store.get('SELECT revision FROM channel_service_bindings').revision;
   assert.equal((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['102'] }, enabled: true, expected_revision: revision })).status, 200);
   const before = f.wire.sent.length;
-  const preview = await f.admin('/api/management/query', 'POST', { operation: 'preview_schedule', target, arguments: { plan: f.plan({ destination_id: destination }) } });
+  const preview = await f.admin('/api/management/query', 'POST', { operation: 'preview_subscription', target, arguments: { subscription } });
   assert.equal(preview.status, 403); assert.equal(preview.value.error, 'channel_service_scope_paused');
   await f.worker.tick(); assert.equal(f.h.store.get('SELECT state FROM notification_outbox').state, 'blocked'); assert.equal(f.wire.sent.length, before);
   assert.deepEqual((await query(f, 'list_schedule_destinations')).destinations.map(d => d.type), ['p2p']);
@@ -183,8 +200,7 @@ test('project service uses explicit minimum capabilities, survives creator depar
   f.h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
     VALUES(?,?,'github.com:10','101','project','service',?,'explicit_delegation',?,'schedule','fixture approval',?)`, grant, service, JSON.stringify(['tasks.read', 'schedules.manage']), f.principal, f.now());
   f.h.store.run('UPDATE principals SET authorization_revision=9 WHERE id=?', service);
-  const destination = await registerDestination(f.admin, await keptGroup(f));
-  const schedule = await f.create(f.plan({ kind: 'project', actor_id: service, maintainer_id: maintainer.id, destination_id: destination }));
+  const schedule = await f.create(f.plan({ kind: 'project', actor_id: service, maintainer_id: maintainer.id }));
   const audit = f.h.store.get("SELECT * FROM schedule_audit WHERE action='schedule.register'"); assert.equal(audit.initiator, f.principal); assert.equal(audit.actor_id, service); assert.equal(audit.authorization_revision, 9);
   const serviceActor = f.worker.service.actor(f.h.store.get('SELECT * FROM schedules'), schedule.spec);
   assert.throws(() => authorize(serviceActor, 'release.manage', { project_id: '101' }), /capability_forbidden/);
@@ -205,9 +221,8 @@ test('a project administrator sets up a project Manager check without a super ad
   assert.deepEqual([grant.policy, grant.grantor_id, grant.project_id], ['project_delegation', owner.id, '101']);
   assert.deepEqual(new Set(JSON.parse(grant.capabilities)), new Set(projectCapabilities));
   assert.deepEqual((await query(f, 'list_schedule_destinations', {}, owner.client)).services.map(s => s.id), [service]);
-  const destination = await registerDestination(f.admin, await keptGroup(f));
   const plan = f.plan({ name: '每日检查', kind: 'project', actor_id: service, owner_id: owner.id, maintainer_id: owner.id, workflow: 'manager.check',
-    parameters: { instruction: 'Check main CI and new Issues.' }, destination_id: destination });
+    parameters: { instruction: 'Check main CI and new Issues.' } });
   const registered = await command(f, 'schedule.register', { plan }, owner.client);
   assert.equal(registered.value.state, 'succeeded', JSON.stringify(registered.value));
   const schedule = registered.value.result.schedule;
@@ -268,14 +283,14 @@ test('personal plans still require the current actor as owner and maintainer and
   assert.equal(f.h.store.get('SELECT creator_id FROM schedules').creator_id, f.principal);
 });
 test('outbox timeout is unknown, crash recovery never blindly resends and reconciliation retains the logical key', async t => {
-  const f = await fixture(t); await f.create(); f.advance(60000); f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  const f = await fixture(t); await f.subscribe(); f.failure(); f.worker.fanout();
   let sends = 0;
   const second = otherWorker(f, t, { send: async (_row, guard) => { guard(); sends++; throw new Error('connection lost after delivery'); }, reconcile: async (_row, guard) => { guard(); return 'reconciled-message'; } });
   const claim = second.claimNotification(); await second.send(claim);
   assert.equal(f.h.store.get('SELECT state FROM notification_outbox').state, 'unknown'); await second.tick(); assert.equal(sends, 1);
   const reconciled = await second.reconcile(claim.id); assert.equal(reconciled.state, 'sent');
   assert.equal(f.h.store.get('SELECT remote_message_id FROM notification_outbox').remote_message_id, 'reconciled-message');
-  f.advance(60000); f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  f.failure(); f.worker.fanout();
   const crashed = f.worker.claimNotification(); assert.ok(crashed); f.advance(60001); second.claimNotification();
   assert.equal(f.h.store.get('SELECT state FROM notification_outbox WHERE id=?', crashed.id).state, 'unknown');
 });
@@ -283,8 +298,9 @@ test('429 backs off, attempts remain durable, retry budget dead-letters and rate
   const f = await fixture(t);
   // Keep the first send and the 2001 ms retry in the same fixed minute bucket.
   f.advance(60000 - f.now() % 60000);
-  await f.create(f.plan({ limits: { ...defaultLimits, retries: 1, notifications_per_minute: 1 } }));
-  f.advance(60000); f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  // A subscription has the default limits; the project's trusted budget narrows them.
+  f.h.store.run("INSERT INTO schedule_budgets VALUES('project','101','report',?)", JSON.stringify({ ...defaultLimits, retries: 1, notifications_per_minute: 1 }));
+  await f.subscribe(); f.advance(60000); f.failure(); f.worker.fanout();
   const second = otherWorker(f, t, { send: async () => { throw new HttpError(503, 'channel_rate_limited'); } });
   const claim = second.claimNotification(); await second.send(claim);
   let row = f.h.store.get('SELECT * FROM notification_outbox'); assert.equal(row.state, 'retry'); assert.equal(row.attempts, 1); assert.ok(row.next_attempt > f.now());
@@ -302,14 +318,25 @@ test('plan/project/tenant budgets and runtime limits stop new actions, retries d
   f.advance(60000); f.worker.produce(); const claim = f.worker.claimOccurrence(); f.advance(2); f.worker.dispatch(claim);
   assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_business_runs').n, 1);
 });
-test('transaction rollback cannot separate report completion from its notification and unregistered release remains unsupported', async t => {
-  const f = await fixture(t); await f.create(); f.advance(60000); f.worker.produce(); const claim = f.worker.claimOccurrence();
-  f.h.store.db.exec("CREATE TRIGGER fixture_reject_notification BEFORE INSERT ON notification_outbox BEGIN SELECT RAISE(ABORT,'fixture abort'); END");
-  f.worker.dispatch(claim); assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_business_runs').n, 0); assert.equal(f.h.store.get('SELECT count(*) n FROM notification_outbox').n, 0);
-  f.h.store.db.exec('DROP TRIGGER fixture_reject_notification');
-  const s = await f.create(f.plan({ workflow: 'release.scheduled' })); const run = await command(f, 'schedule.run-now', { id: s.id, revision: 1 }); assert.equal(run.value.state, 'succeeded');
-  await f.worker.tick(); assert.equal(f.h.store.get('SELECT state FROM schedule_occurrences WHERE schedule_id=?', s.id).state, 'unsupported');
-  assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_business_runs').n, 0);
+test('transaction rollback cannot separate a handler\'s dispatch from its business run; a stored plan whose workflow has no handler pauses (#1027)', async t => {
+  const f = await fixture(t); let dispatched = 0;
+  f.worker.service.register('custom.rollback', { capability: 'tasks.read', dispatch: (trigger, _actor, guard) => {
+    guard(); dispatched++; f.h.store.run("INSERT INTO schedule_events(event_key,project_id,type,incident,payload,created_at) VALUES(?,'101','task.failed',?,'{}',?)", 'rollback:' + trigger.run_id, 'rollback', f.now());
+    return { run_id: trigger.run_id, state: 'succeeded' };
+  } });
+  await f.create(f.plan({ workflow: 'custom.rollback' })); f.advance(60000); f.worker.produce(); const claim = f.worker.claimOccurrence();
+  f.h.store.db.exec("CREATE TRIGGER fixture_reject_run BEFORE INSERT ON schedule_business_runs BEGIN SELECT RAISE(ABORT,'fixture abort'); END");
+  f.worker.dispatch(claim); assert.equal(dispatched, 1);
+  assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_business_runs').n, 0); assert.equal(f.h.store.get("SELECT count(*) n FROM schedule_events WHERE incident='rollback'").n, 0);
+  f.h.store.db.exec('DROP TRIGGER fixture_reject_run');
+  // A plan saved by an older version for a workflow nothing handles now cannot run: the next tick pauses it with the reason.
+  const s = await f.create(), stored = f.h.store.get('SELECT * FROM schedules WHERE id=?', s.id);
+  f.h.store.run('UPDATE schedules SET spec=? WHERE id=?', JSON.stringify({ ...JSON.parse(stored.spec), workflow: 'release.scheduled' }), s.id);
+  await f.worker.tick();
+  assert.deepEqual({ ...f.h.store.get('SELECT state,reason FROM schedules WHERE id=?', s.id) }, { state: 'paused', reason: 'schedule_workflow_unsupported' });
+  assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_occurrences WHERE schedule_id=?', s.id).n, 0);
+  const resumed = await command(f, 'schedule.resume', { id: s.id, revision: f.h.store.get('SELECT revision FROM schedules WHERE id=?', s.id).revision });
+  assert.equal(resumed.value.result?.error ?? resumed.value.error, 'schedule_workflow_unsupported');
 });
 test('subscription aggregates a failure incident, links recovery, respects quiet hours and blocks old outbox after unsubscribe', async t => {
   const f = await fixture(t), spec = { name: '失败与恢复', destination_id: f.destination, events: ['task.failed', 'ci.failed', 'ci.recovered'], projects: ['101'], aggregate_ms: 60000, timezone: 'UTC', enabled: true };
@@ -372,11 +399,9 @@ test('a custom check plan with an instruction starts a task and may file Issues 
   configureDispatch(context => scheduledCheckDecision(context) ?? ruleDecider(context));
   t.after(() => configureDispatch(ruleDecider));
   const member = await f.member('custom-check-admin', { repository_ids: ['101'] });
-  bindFixture(f.h, f.id, member.id, 'ou_custom_check');
-  const destination = await registerDestination(member.client, await privateChat(f, 'ou_custom_check', member.id, 'oc_custom_check'));
-  const invalid = await command(f, 'schedule.register', { plan: f.plan({ actor_id: member.id, owner_id: member.id, maintainer_id: member.id, destination_id: destination, workflow: 'manager.check', parameters: { instruction: 'Look around.', unexpected: true } }) }, member.client);
+  const invalid = await command(f, 'schedule.register', { plan: f.plan({ actor_id: member.id, owner_id: member.id, maintainer_id: member.id, workflow: 'manager.check', parameters: { instruction: 'Look around.', unexpected: true } }) }, member.client);
   assert.equal(invalid.value.result?.error || invalid.value.error, 'invalid_schedule_parameters');
-  const saved = await command(f, 'schedule.register', { plan: f.plan({ name: '自定义主动任务', actor_id: member.id, owner_id: member.id, maintainer_id: member.id, destination_id: destination, workflow: 'manager.check', parameters: { instruction: 'List stale Issues.', file_issues: true } }) }, member.client);
+  const saved = await command(f, 'schedule.register', { plan: f.plan({ name: '自定义主动任务', actor_id: member.id, owner_id: member.id, maintainer_id: member.id, workflow: 'manager.check', parameters: { instruction: 'List stale Issues.', file_issues: true } }) }, member.client);
   assert.equal(saved.value.state, 'succeeded', JSON.stringify(saved.value));
   const plan = saved.value.result.schedule;
   assert.equal(plan.spec.parameters.file_issues, true);
@@ -517,12 +542,12 @@ test('controlled workflow contract dispatches a fake business handler once, pres
 });
 test('project and tenant limits bound all plans; concurrency claims, installation revocation and authorization remain live', async t => {
   const f = await fixture(t, 12 * 3600000); const a = await f.create(), b = await f.create();
-  f.h.store.run("INSERT INTO schedule_budgets VALUES('project','101','report',?)", JSON.stringify({ ...defaultLimits, concurrency: 1, runs: 1 }));
+  f.h.store.run("INSERT INTO schedule_budgets VALUES('project','101','development',?)", JSON.stringify({ ...defaultLimits, concurrency: 1, runs: 1 }));
   f.advance(60000); f.worker.produce(); const first = f.worker.claimOccurrence(); assert.ok(first); assert.equal(f.worker.claimOccurrence(), null);
   f.worker.dispatch(first); const second = f.worker.claimOccurrence(); assert.ok(second); f.worker.dispatch(second);
   assert.equal(f.h.store.get("SELECT count(*) n FROM schedule_occurrences WHERE state='budget_exhausted'").n, 1);
   f.h.store.run('DELETE FROM schedule_budgets');
-  f.h.store.run("INSERT INTO schedule_budgets VALUES('tenant','github.com:10','report',?)", JSON.stringify({ ...defaultLimits, runs: 1 }));
+  f.h.store.run("INSERT INTO schedule_budgets VALUES('tenant','github.com:10','development',?)", JSON.stringify({ ...defaultLimits, runs: 1 }));
   f.advance(60000); f.worker.produce(); let claim; while ((claim = f.worker.claimOccurrence())) f.worker.dispatch(claim);
   assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_business_runs').n, 1);
   f.h.store.run("UPDATE installed_repositories SET installed=0 WHERE repository_id='101'"); await f.worker.tick();
@@ -530,7 +555,7 @@ test('project and tenant limits bound all plans; concurrency claims, installatio
   assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_business_runs').n, 1);
 });
 test('manual retry acknowledges unknown results, preserves attempts/idempotency and consumes a separate bounded allowance', async t => {
-  const f = await fixture(t); await f.create(); f.advance(60000); f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
+  const f = await fixture(t); await f.subscribe(); f.failure(); f.worker.fanout();
   const worker = otherWorker(f, t, { send: async () => { throw new Error('unknown'); } });
   const first = worker.claimNotification(); await worker.send(first);
   assert.equal((await command(f, 'notification.retry', { id: first.id })).value.result.error, 'notification_duplicate_risk_acknowledgement_required');
@@ -540,7 +565,7 @@ test('manual retry acknowledges unknown results, preserves attempts/idempotency 
   assert.equal(f.h.store.get('SELECT count(*) n FROM notification_outbox').n, 1);
 });
 
-test('signed CI mutations atomically publish supported events, daily reports query the real check evidence, and approval events are retired', async t => {
+test('signed CI mutations atomically publish supported events, and approval and daily report events are retired', async t => {
   const f = await fixture(t);
   const repo = { id: 101, full_name: 'agent-test-zone/admin-fixture-101', owner: { id: 10 } }, run = { id: 4321, run_attempt: 1, status: 'completed', conclusion: 'failure' };
   const send = async (id, conclusion) => f.h.hook(f.a.path, f.a.secret, id, { action: 'completed', repository: repo, workflow_run: { ...run, conclusion } }, { 'X-GitHub-Event': 'workflow_run' });
@@ -548,9 +573,6 @@ test('signed CI mutations atomically publish supported events, daily reports que
   assert.equal((await send('ci-fail', 'failure')).status, 200); assert.equal((await send('ci-fail', 'failure')).value.duplicate, true);
   assert.equal((await send('ci-recovery', 'success')).status, 200);
   assert.deepEqual(f.h.store.all('SELECT type FROM schedule_events ORDER BY sequence').map(r => r.type), ['ci.failed', 'ci.recovered']);
-  f.advance(60000); const report = f.worker.service.reports.render('101', f.now(), 'UTC');
-  assert.ok(report.evidence.some(e => e.id.startsWith('delivery:') && e.kind === 'ci' && e.status === 'success')); assert.equal(report.counts['ci:success'], 1);
-  assert.ok(!report.evidence.some(e => e.kind === 'approval')); assert.ok(!report.text.includes('审批'));
   // A policy left by an older version holds nothing back, and no approval.waiting event exists any more.
   f.h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"schedule.register\"]')");
   const saved = await command(f, 'schedule.register', { plan: f.plan() }); assert.equal(saved.value.state, 'succeeded', JSON.stringify(saved.value));
@@ -560,12 +582,18 @@ test('signed CI mutations atomically publish supported events, daily reports que
   const legacy = (id, events) => f.h.store.run(`INSERT INTO notification_subscriptions(id,tenant_id,project_id,principal_id,spec,revision,state,reason,event_cursor,created_at,updated_at)
     VALUES(?,'github.com:10','101',?,?,3,'active',NULL,0,?,?)`, id, f.principal, JSON.stringify({ name: id, destination_id: f.destination, events, projects: ['101'], aggregate_ms: 0, timezone: 'UTC', enabled: true }), f.now(), f.now());
   legacy('mixed', ['task.failed', 'approval.waiting']); legacy('approval-only', ['approval.waiting']); legacy('untouched', ['ci.failed']);
+  // project.daily came only from the daily report plans, which left with #1027.
+  legacy('daily-mixed', ['project.daily', 'ci.failed']); legacy('daily-only', ['project.daily']);
   scheduleStorage(f.h.store);
   const read = id => f.h.store.get('SELECT * FROM notification_subscriptions WHERE id=?', id);
   assert.deepEqual(JSON.parse(read('mixed').spec).events, ['task.failed']); assert.equal(read('mixed').state, 'active'); assert.equal(read('mixed').revision, 4);
   assert.deepEqual(JSON.parse(read('approval-only').spec).events, []); assert.equal(read('approval-only').state, 'paused');
   assert.equal(read('approval-only').reason, 'approval_event_retired'); assert.equal(read('approval-only').revision, 4);
+  assert.deepEqual(JSON.parse(read('daily-mixed').spec).events, ['ci.failed']); assert.equal(read('daily-mixed').state, 'active'); assert.equal(read('daily-mixed').reason, null);
+  assert.deepEqual([read('daily-only').state, read('daily-only').reason, read('daily-only').revision], ['paused', 'daily_report_retired', 4]);
   assert.equal(read('untouched').revision, 3);
+  const refused = await command(f, 'notification.register', { subscription: { name: 'daily', destination_id: f.destination, events: ['project.daily'], projects: ['101'], aggregate_ms: 0, timezone: 'UTC', enabled: true } });
+  assert.equal(refused.status, 400, JSON.stringify(refused.value));
 });
 
 test('a real worker process exits after its committed claim; replacement processes recover one run under competition', async t => {
@@ -583,7 +611,8 @@ test('a real worker process exits after its committed claim; replacement process
     const input=JSON.parse(readFileSync(0,'utf8')),store=new Store(input.path,Buffer.from(input.key,'hex'));
     const management=new ManagementService(store,new RuleService(store),new TaskCommands(store));
     const channels=new ChannelService(store,new ManagementAgent(store,management));
-    const worker=new Scheduler(new ScheduleService(store,management,channels,()=>input.now));
+    const service=new ScheduleService(store,management,channels,()=>input.now),worker=new Scheduler(service);
+    service.register('fixture.run',{capability:'tasks.read',dispatch:(trigger,_actor,guard)=>{guard();return {run_id:trigger.run_id,state:'succeeded'};}});
     worker.produce();const claim=worker.claimOccurrence();
     if(claim&&input.mode==='execute')worker.dispatch(claim);
     process.stdout.write(JSON.stringify({claim:claim?.id,attempt:claim?.attempts,occurrences:store.get('SELECT count(*) n FROM schedule_occurrences').n,runs:store.get('SELECT count(*) n FROM schedule_business_runs').n}));
@@ -601,18 +630,14 @@ test('a real worker process exits after its committed claim; replacement process
   const replacements = await Promise.all([run('execute'), run('execute')]);
   assert.equal(replacements.filter(r => r.claim).length, 1); assert.equal(replacements.find(r => r.claim).attempt, 2);
   assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_occurrences').n, 1); assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_business_runs').n, 1);
-  assert.equal(f.h.store.get('SELECT count(*) n FROM notification_outbox').n, 1);
 });
 
-test('delivery diagnostics use the historical occurrence, verify destinations and paginate only scoped records', async t => {
-  const f = await fixture(t), plan = await f.create();
-  f.advance(60000); f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence()); await f.worker.tick();
+test('delivery diagnostics verify destinations and paginate only scoped records', async t => {
+  const f = await fixture(t); await f.subscribe(); f.failure(); f.worker.fanout(); await f.worker.tick();
   const first = (await query(f, 'list_notification_deliveries')).records[0];
-  assert.equal(first.origin.name, '项目日报'); assert.equal(first.origin.state, 'succeeded');
+  assert.equal(first.origin.name, '失败通知'); assert.equal(first.origin.revision, 1);
   assert.equal(first.destination.valid, true); assert.equal(first.destination.type, 'p2p');
-  assert.equal(first.attempts_detail[0].state, 'sent'); assert.equal(first.payload.report.window.end, first.origin.logical_at);
-  const changed = f.plan({ name: '之后修改的计划' });
-  f.h.store.run('UPDATE schedules SET spec=? WHERE id=?', JSON.stringify(changed), plan.id);
+  assert.equal(first.attempts_detail[0].state, 'sent'); assert.equal(first.payload.events[0].type, 'task.failed');
   for (let i = 0; i < 20; i++) f.h.store.run(`INSERT INTO notification_outbox
     SELECT ?,tenant_id,project_id,destination_id,schedule_id,occurrence_id,subscription_id,subscription_revision,actor_id,authorization,
       ?,incident,parent_id,payload,state,attempts,manual_retries,next_attempt,lease,lease_until,last_error,remote_message_id,created_at,sent_at
@@ -621,12 +646,12 @@ test('delivery diagnostics use the historical occurrence, verify destinations an
   const rest = await query(f, 'list_notification_deliveries', { limit: 20, offset: page.next_offset });
   assert.equal(page.records.length, 20); assert.equal(rest.records.length, 1); assert.equal(rest.next_offset, null);
   assert.equal(new Set([...page.records, ...rest.records].map(r => r.id)).size, 21);
-  assert.ok(page.records.every(r => r.origin.name === '项目日报'));
+  assert.ok(page.records.every(r => r.origin.name === '失败通知'));
   assert.equal((await query(f, 'list_notification_deliveries', {}, f.admin, '102')).records.length, 0);
   f.h.store.run("UPDATE channel_outbox SET state='blocked' WHERE id=?", f.destination);
   const invalid = (await query(f, 'list_notification_deliveries')).records[0];
   assert.equal(invalid.destination.valid, false); assert.ok(invalid.destination.reason);
-  assert.equal(invalid.origin.name, '项目日报'); assert.equal(invalid.destination.chat_id, undefined);
+  assert.equal(invalid.origin.name, '失败通知'); assert.equal(invalid.destination.chat_id, undefined);
   const user = await f.member('diagnostic-without-project');
   const denied = await user.client('/api/management/query', 'POST', { operation:'list_notification_deliveries', target, arguments:{} });
   assert.equal(denied.status, 403); assert.equal(denied.value.records, undefined);
@@ -749,6 +774,71 @@ test('busyManagerCheck looks only at non-terminal work and still sees a busy tas
   f.h.store.run(`INSERT INTO schedule_occurrences(id,schedule_id,tenant_id,project_id,revision,logical_key,logical_at,scheduled_at,source,snapshot,authorization,run_id,state)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, pendingId, plan.id, row.tenant_id, row.project_id, plan.revision, 'hist:pending', pendingAt, pendingAt, 'timer', snapshot, authorization, 'run_hist_pending', 'pending');
   assert.equal(f.worker.service.busyManagerCheck(plan.id, '101'), true, 'a pending occurrence is still detected among a long finished history');
+});
+
+test('daily report plans move to timers on the chats they were sent to, stop, and are listed in the migration report (#1027)', async t => {
+  const f = await fixture(t), store = f.h.store, repository = 'agent-test-zone/admin-fixture-101';
+  const groupChat = await keptGroup(f), group = await registerDestination(f.admin, groupChat);
+  // Plans an older version saved: the daily report is no plan a project can save now.
+  const legacy = (id, state, spec) => store.run(`INSERT INTO schedules(id,tenant_id,project_id,creator_id,owner_id,maintainer_id,actor_id,kind,approver_id,authorization_revision,grant_snapshot,spec,revision,state,reason,next_at,created_at,updated_at)
+    VALUES(?,'github.com:10','101',?,?,?,?,'personal',NULL,1,'{"capabilities":["tasks.read","schedules.manage"],"grants":[]}',?,2,?,NULL,?,?,?)`, id, f.principal, f.principal, f.principal, f.principal,
+    JSON.stringify({ name: '项目日报', kind: 'personal', actor_id: f.principal, owner_id: f.principal, maintainer_id: f.principal, workflow: 'report.daily', parameters: {},
+      timezone: 'Asia/Shanghai', cron: '0 9 * * *', start_at: f.now(), enabled: state === 'active', misfire: 'skip', grace_ms: 60000, destination_id: f.destination, limits: defaultLimits, ...spec }),
+    state, f.now() + 60000, f.now(), f.now());
+  legacy('daily-private', 'active', { parameters: { window_ms: 43200000 } });
+  legacy('daily-group', 'paused', { name: '群日报', cron: undefined, interval_ms: 90000, destination_id: group, end_at: f.now() + 86400000 * 30 });
+  legacy('daily-lost', 'active', { destination_id: 'no-such-registration' });
+  legacy('daily-deleted', 'deleted', {});
+  store.run(`INSERT INTO notification_outbox(id,tenant_id,project_id,destination_id,schedule_id,occurrence_id,actor_id,authorization,logical_key,incident,payload,state,next_attempt,created_at)
+    VALUES('queued-report','github.com:10','101',?,'daily-private',NULL,?,'{}','report:old','report:old','{"text":"old"}','pending',0,?)`, f.destination, f.principal, f.now());
+  // A Manager check saved with a destination before: it keeps running, without one.
+  const check = await f.create(f.plan({ workflow: 'manager.check', parameters: { instruction: 'Check main CI.' } }));
+  store.run('UPDATE schedules SET spec=? WHERE id=?', JSON.stringify({ ...check.spec, destination_id: f.destination }), check.id);
+  scheduleStorage(store);
+  assert.equal(JSON.parse(store.get('SELECT spec FROM schedules WHERE id=?', check.id).spec).destination_id, undefined);
+  assert.equal(store.get('SELECT state FROM schedules WHERE id=?', check.id).state, 'active');
+
+  const moved = migrateDailyReports(f.worker.service);
+  assert.deepEqual(moved.map(r => [r.schedule_id, r.outcome, r.reason]).sort(), [['daily-deleted', 'skipped', 'plan_deleted'], ['daily-group', 'migrated', null],
+    ['daily-lost', 'failed', 'schedule_destination_unavailable'], ['daily-private', 'migrated', null]]);
+  // The private chat's timer belongs to its owner and asks the management assistant for the old report's window.
+  const timerOf = id => store.get('SELECT * FROM channel_schedules WHERE id=?', moved.find(r => r.schedule_id === id).channel_schedule_id);
+  const personal = timerOf('daily-private'), shared = timerOf('daily-group');
+  assert.deepEqual({ kind: personal.kind, chat: personal.chat_id, owner: personal.owner_id, by: personal.created_by, cron: personal.cron, timezone: personal.timezone, state: personal.state, name: personal.name },
+    { kind: 'personal', chat: f.chat.id, owner: f.principal, by: f.principal, cron: '0 9 * * *', timezone: 'Asia/Shanghai', state: 'active', name: `项目日报（${repository}）` });
+  const listed = (await f.admin('/api/channels/chats/' + f.chat.id + '/schedules')).value.schedules;
+  assert.equal(listed.length, 1); assert.match(listed[0].prompt, new RegExp(`汇报项目 ${repository} 过去 12 小时的情况`)); assert.match(listed[0].prompt, /不要提 Issue/);
+  // The group's timer runs the group's assistant; a paused plan stays paused, an interval rounds up to five minutes from now.
+  assert.deepEqual({ kind: shared.kind, chat: shared.chat_id, owner: shared.owner_id, by: shared.created_by, interval: shared.interval_ms, state: shared.state },
+    { kind: 'group', chat: groupChat.id, owner: null, by: f.principal, interval: 300000, state: 'paused' });
+  // Each plan stops and keeps its saved spec; nothing it queued is sent, and it never runs again.
+  const plan = id => store.get('SELECT * FROM schedules WHERE id=?', id);
+  assert.deepEqual([plan('daily-private').state, plan('daily-private').reason, plan('daily-private').revision], ['paused', 'migrated_to_chat_schedule', 3]);
+  assert.deepEqual([plan('daily-lost').state, plan('daily-lost').reason], ['paused', 'daily_report_retired']);
+  assert.deepEqual([plan('daily-deleted').state, plan('daily-deleted').revision], ['deleted', 2]);
+  assert.equal(JSON.parse(plan('daily-private').spec).destination_id, f.destination);
+  assert.equal(store.get("SELECT state FROM notification_outbox WHERE id='queued-report'").state, 'blocked');
+  const resumed = await command(f, 'schedule.resume', { id: 'daily-private', revision: 3 });
+  assert.equal(resumed.value.result?.error ?? resumed.value.error, 'schedule_workflow_unsupported');
+  f.advance(86400000); await f.worker.tick();
+  assert.equal(store.get("SELECT count(*) n FROM schedule_occurrences WHERE schedule_id LIKE 'daily-%'").n, 0);
+  // The report, per project: every plan, where it went or why not; the plan list says the same.
+  const report = await query(f, 'list_schedule_migrations');
+  assert.deepEqual(report.migrations.map(m => [m.schedule_id, m.outcome, m.chat_type]), [['daily-deleted', 'skipped', null], ['daily-group', 'migrated', 'group'],
+    ['daily-lost', 'failed', null], ['daily-private', 'migrated', 'p2p']]);
+  assert.deepEqual(report.migrations.find(m => m.schedule_id === 'daily-group').detail.notes, ['interval_rounded', 'end_at_not_carried']);
+  assert.equal(report.migrations.find(m => m.schedule_id === 'daily-private').detail.timer.prompt, listed[0].prompt);
+  assert.equal((await query(f, 'list_schedule_migrations', {}, f.admin, '102')).migrations.length, 0);
+  const view = (await query(f, 'list_schedules')).schedules.find(s => s.id === 'daily-private');
+  assert.deepEqual([view.migration.outcome, view.migration.channel_schedule_id, view.supported], ['migrated', personal.id, false]);
+  assert.ok(store.get("SELECT 1 FROM schedule_audit WHERE resource_id='daily-private' AND action='migration.migrated'"));
+  assert.ok(store.get("SELECT 1 FROM audit WHERE action='channel.schedule.migrated' AND resource_id=?", personal.id));
+  // Once only: a second start migrates nothing again.
+  assert.deepEqual(migrateDailyReports(f.worker.service), []); assert.equal(store.get('SELECT count(*) n FROM channel_schedules').n, 2);
+  // At its time the chat's own assistant answers in the chat; the project sent nothing.
+  scriptedModel(f, ['过去 12 小时没有失败的任务。']);
+  assert.equal((await f.admin('/api/channels/schedules/' + personal.id + '/run', 'POST', {})).status, 201);
+  await until(() => f.wire.sent.find(s => s.receive_id === f.chat.chat_id && JSON.stringify(s.content).includes('过去 12 小时没有失败的任务')));
 });
 
 test('a fixture project effective config still fits in one management tool result', async t => {

@@ -11,7 +11,7 @@ function leaveRepositoryOnboarding(hash) {
   if (repoOnboardingPage && repoOnboardingPage.address !== hash) { repoOnboardingPage.dispose(); repoOnboardingPage = null; }
 }
 const repoOnboardingItemNames = { start: '启动项目', capability_ceiling: '能力上限', events: '监听与触发', test_command: '测试命令', review_language: '检视语言',
-  conventions: '本仓库约定', labels: 'GitHub 标签', schedules: 'Manager 定时检查', ci: 'CI 建议' };
+  conventions: '本仓库约定', labels: 'GitHub 标签', schedules: '项目定时任务', ci: 'CI 建议' };
 const repoOnboardingLanguages = { auto: '自动（跟随 Issue／PR 的语言）', zh: '中文', en: '英文' };
 const repoOnboardingFeishuLevels = { read: '只读', comment: '可评论', dispatch: '可派任务' };
 const repoOnboardingReceiptStates = { succeeded: ['已生效', 'success'], exists: ['已是方案值', 'success'], skipped: ['未应用', ''], pending: ['等待中', 'info'], running: ['应用中', 'info'], failed: ['未生效', 'danger'] };
@@ -207,7 +207,7 @@ function mountRepositoryOnboarding(page, id, initial) {
     try { view = await api(base + '/confirm', 'POST', { version: view.plan.version, changes_revision: view.plan.changes_revision, items }); }
     finally { clearInterval(watch); }
   });
-  const retry = (item, destination) => act('retry:' + item, async () => { view = await api(`${base}/items/${item}/retry`, 'POST', destination ? { schedule_destination_id: destination } : {}); });
+  const retry = item => act('retry:' + item, async () => { view = await api(`${base}/items/${item}/retry`, 'POST', {}); });
   const withdraw = () => act('withdraw', async () => { view = await api(base + '/request/withdraw', 'POST', {}); });
 
   // Waiting for someone else (the super administrator's decision) or for items to finish: read the state again now and then.
@@ -469,7 +469,8 @@ function mountRepositoryOnboarding(page, id, initial) {
       case 'start_rejected': return '超级管理员拒绝了启动申请：' + (d.reason || '未写原因') + '。调整后点「重试」会再次申请。';
       case 'start_request_withdrawn': return '启动申请已撤回。点「重试」会再次申请。';
       case 'start_request_lapsed': return d.reason === 'organization_trusted' ? '所属组织已受信任，申请自动失效：点「重试」直接启动。' : d.reason === 'repository_not_installed' ? '仓库已不在 GitHub App 的安装范围内，申请失效。' : '申请已失效。';
-      case 'schedule_destination_required': return '需要选定定时检查的结果发到哪里，选好后重试。';
+      // Left by an older version: project scheduled tasks no longer report to Feishu (#1027), so a retry needs nothing more.
+      case 'schedule_destination_required': return '旧版本要求选择结果发到哪个飞书会话；项目定时任务现在不发飞书，直接重试即可。';
       case 'labels_unreadable': return '读不到仓库现有的标签，稍后重试。';
       case 'labels_failed': return '有标签没建成：' + (d.labels || []).filter(l => l.state === 'failed').map(l => `${l.name}（${l.error}）`).join('、');
       case 'onboarding_item_interrupted': return '控制面重启中断了这一项，可以重试。';
@@ -479,7 +480,7 @@ function mountRepositoryOnboarding(page, id, initial) {
     if (receipt.item === 'start' && receipt.state === 'succeeded') return { approval: '超级管理员同意后启动', super_admin: '由超级管理员启动', trusted_organization: '按受信任组织的默认值启动' }[d.by] + (d.capability_ceiling ? `，能力上限「${repoOnboardingCeiling(d.capability_ceiling)[1]}」` : '') + '。';
     if (receipt.item === 'test_command' && receipt.state === 'succeeded') return '已保存，尚未验证：首个任务或 CI 任务运行时验证。';
     if (receipt.item === 'labels' && d.labels) return d.labels.map(l => `${l.name}${l.state === 'created' ? ' 已新建' : ' 已存在'}`).join('、');
-    if (receipt.item === 'schedules' && d.schedules) return '已建定时检查：' + d.schedules.join('、') + (d.service_principal_created ? '（以你的委托新建了项目服务身份）' : '');
+    if (receipt.item === 'schedules' && d.schedules) return '已建项目定时任务：' + d.schedules.join('、') + (d.service_principal_created ? '（以你的委托新建了项目服务身份）' : '');
     if (receipt.item === 'conventions' && receipt.state === 'succeeded') return '已追加到 Manager 提示词' + (d.roles?.length ? '和 ' + d.roles.length + ' 个角色的提示词' : '') + '。';
     return '';
   }
@@ -493,13 +494,8 @@ function mountRepositoryOnboarding(page, id, initial) {
     const detail = receiptDetail(receipt); if (detail) item.append(element('p', detail, receipt.state === 'failed' ? 'ro-receipt-error' : 'ro-receipt-detail'));
     if (receipt.item === 'ci' && receipt.detail?.task_id) item.append(consoleLink('#/tasks/' + encodeURIComponent(receipt.detail.task_id), '查看 CI 开发任务'));
     if (receipt.state === 'failed' && !['repository_not_installed'].includes(receipt.detail?.reason)) {
-      const actions = element('div', '', 'actions'); let destination = null;
-      if (receipt.error === 'schedule_destination_required' && receipt.detail?.destinations?.length) {
-        destination = document.createElement('select'); destination.setAttribute('aria-label', '定时检查结果发到');
-        for (const d of receipt.detail.destinations) destination.append(new Option(`${d.type === 'p2p' ? '飞书私聊' : '飞书群'} · ${d.name || d.chat_id}`, d.id));
-        actions.append(field('结果发到', destination));
-      } else if (receipt.error === 'schedule_destination_required') item.append(note('还没有可用的飞书私聊或群：先绑定飞书（个人设置 · 飞书绑定），再重试。'));
-      const again = button(busy === 'retry:' + receipt.item ? '正在重试…' : '重试', () => void retry(receipt.item, destination?.value), 'btn-secondary');
+      const actions = element('div', '', 'actions');
+      const again = button(busy === 'retry:' + receipt.item ? '正在重试…' : '重试', () => void retry(receipt.item), 'btn-secondary');
       again.disabled = !!busy; again.setAttribute('aria-label', `重试「${repoOnboardingItemNames[receipt.item] ?? receipt.item}」`); actions.append(again); item.append(actions);
     }
     return item;
@@ -534,7 +530,7 @@ function mountRepositoryOnboarding(page, id, initial) {
       feishu.append('私聊：在「个人设置 · 飞书绑定」绑定后，私聊 bot 等同你在控制台的权限。群里：项目管理员在群里绑定这个仓库并选择权限档' + (plan?.feishu ? `，方案推荐「${repoOnboardingFeishuLevels[plan.feishu.level] ?? plan.feishu.level}」` : '') + '。 ', consoleLink('#/identity/feishu', '飞书绑定'));
       block('在飞书里怎么用', feishu);
       const where = element('div', '', 'ro-guide-links');
-      for (const [section, caption, hint] of [['basic', '基本设置', '能力上限、测试命令、标签'], ['triggers', '监听与触发', '接收哪些事件'], ['roles', '角色', '提示词和本仓库约定'], ['schedules', '计划与通知', '定时检查']])
+      for (const [section, caption, hint] of [['basic', '基本设置', '能力上限、测试命令、标签'], ['triggers', '监听与触发', '接收哪些事件'], ['roles', '角色', '提示词和本仓库约定'], ['schedules', '定时任务与通知', '项目定时任务']])
         where.append(consoleLink(`#/projects/${id}/${section}`, caption, hint));
       block('以后在哪里改', where);
       parts.push(guide);

@@ -2,13 +2,13 @@
 function renderSubscriptionEditor(host, { project, destinations, read, command, model, busy, invalidate, active }) {
   const root=element('section','','subscription-editor-panel');root.setAttribute('aria-label','事件订阅管理');host.append(root);
   const address=location.hash, live=()=>active()&&root.isConnected&&address===location.hash;
-  const labels={'task.failed':'任务失败','ci.failed':'CI 失败','ci.recovered':'CI 恢复','project.daily':'项目日报'};
+  const labels={'task.failed':'任务失败','ci.failed':'CI 失败','ci.recovered':'CI 恢复'};
   const stateLabel={active:'订阅已启用',paused:'已暂停',deleted:'已解除'};
   const heading=element('div','','subscription-heading'), list=element('div','','subscription-list'), controls=element('div','','actions');
   const message=element('p','','muted'), context=element('p','','subscription-context'), comparison=element('section','','subscription-comparison');
   message.setAttribute('role','status');comparison.setAttribute('role','alert');comparison.hidden=true;
   const layout=element('div','','subscription-layout'),editor=element('div','','subscription-editor-content');root.append(heading,message,context,controls,layout);layout.append(list,editor);editor.append(comparison);
-  heading.append(element('h4','事件订阅'),note('事件到达后才会触发，与定时计划分别管理。每条订阅独立授权一个项目。'));
+  heading.append(element('h4','事件订阅'),note('事件到达后才会触发，与项目定时任务分别管理。每条订阅独立授权一个项目。'));
   let rows=[],next=null,loading=false,ready=false,generation=0,previewGeneration=0,projectName='项目 '+project,observedAt=null,selected=null;
   const form=document.createElement('form');form.className='subscription-form';form.setAttribute('aria-label','事件订阅编辑');
   const fields=document.createElement('fieldset');fields.className='subscription-fields';form.append(fields);
@@ -54,7 +54,7 @@ function renderSubscriptionEditor(host, { project, destinations, read, command, 
   model.applyFailureTemplate=async()=>{
     if(model.selected||model.fields){await select(null);if(!live()||model.selected)return;}
     name.value='失败时通知';
-    checks['task.failed'].checked=true;checks['ci.failed'].checked=true;checks['ci.recovered'].checked=false;checks['project.daily'].checked=false;
+    checks['task.failed'].checked=true;checks['ci.failed'].checked=true;checks['ci.recovered'].checked=false;
     if(destination.options.length&&!destination.value)destination.selectedIndex=0;
     enabled.checked=true;
     changed();

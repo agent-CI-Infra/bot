@@ -54,6 +54,7 @@ import { ChannelConnections } from './channels/connections.js';
 import { ScheduleService } from './schedules/service.js';
 import { Scheduler } from './schedules/worker.js';
 import { registerScheduledChecks } from './dispatch/schedule.js';
+import { migrateDailyReports } from './schedules/migration.js';
 import type { StallMonitor } from './core/stalls.js';
 import { loginBucket } from './core/client-address.js';
 import { AssistantComputerService, assistantComputersApi } from './service-roles/assistant-computers.js';
@@ -141,6 +142,9 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   options.onChannels?.(channels);
   const schedules = new ScheduleService(store, sharedManagement, channels, options.schedules?.clock);
   registerScheduledChecks(schedules);
+  // Daily report plans move to their chats' timers once (#1027); the report stays readable per project.
+  for (const row of migrateDailyReports(schedules)) console.log(`[schedules] daily report plan ${row.schedule_id} (project ${row.project_id}): ${row.outcome}`
+    + (row.channel_schedule_id ? ` to ${row.chat_type} timer ${row.channel_schedule_id}` : '') + (row.reason ? ` (${row.reason})` : ''));
   const scheduler = new Scheduler(schedules); options.onSchedules?.(scheduler);
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
   const storage = options.storage ?? new StorageReport(store, options.projects?.manager);

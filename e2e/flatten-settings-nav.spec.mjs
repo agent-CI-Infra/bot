@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 
-const settings = [['基本设置','basic'],['监听与触发','triggers'],['机器配置','machine'],['角色','roles'],['模型','model'],['计划与通知','schedules'],['外部执行','external'],['成员','members']];
+const settings = [['基本设置','basic'],['监听与触发','triggers'],['机器配置','machine'],['角色','roles'],['模型','model'],['定时任务与通知','schedules'],['外部执行','external'],['成员','members']];
 const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
 
 test('project settings keep eight categories with one current item and share the phone picker', async ({ page }) => {

@@ -44,7 +44,7 @@ for(const role of ['super','member']) test(`${role}: sidebar, phone destinations
           await group.getByRole('link',{name:'项目设置',exact:false}).click();await expect(page.getByRole('button',{name:'刷新项目设置',exact:true})).toBeVisible();
           const picker=page.getByLabel('当前页面',{exact:true});await hit(picker);
           await expect(picker.locator('optgroup[label="项目工作"] option')).toHaveText([...work.map(([,name])=>name),...(role==='super'?['用量与成本']:[])]);
-          await expect(picker.locator('optgroup[label="设置"] option')).toHaveText(['基本设置','监听与触发','机器配置','角色','模型','计划与通知','外部执行','成员']);
+          await expect(picker.locator('optgroup[label="设置"] option')).toHaveText(['基本设置','监听与触发','机器配置','角色','模型','定时任务与通知','外部执行','成员']);
           if(width===390)await page.screenshot({path:`${out}/${role}-settings-390.png`});
           await picker.selectOption('#/projects/101/board');await expect(page.locator('#board-columns')).toBeVisible();
           await hit(picker);await expect(picker).toHaveValue('#/projects/101/board');

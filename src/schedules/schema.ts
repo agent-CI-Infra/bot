@@ -8,7 +8,7 @@ export const limitsSchema = obj({ concurrency: { ...integer, minimum: 1, maximum
 export const planSchema = obj({ name: str, kind: { type: 'string', enum: ['personal', 'project'] }, actor_id: str, owner_id: str, maintainer_id: str,
   workflow: str, parameters: { type: 'object' }, timezone: str, cron: { ...str, maxLength: 100 }, interval_ms: { ...integer, minimum: 60000, maximum: 31536000000 },
   start_at: integer, end_at: integer, enabled: bool, misfire: { type: 'string', enum: ['skip', 'once'] }, grace_ms: { ...integer, maximum: 86400000 },
-  destination_id: str, limits: limitsSchema }, ['name', 'kind', 'actor_id', 'owner_id', 'maintainer_id', 'workflow', 'parameters', 'timezone', 'start_at', 'enabled', 'misfire', 'grace_ms', 'destination_id', 'limits']);
+  limits: limitsSchema }, ['name', 'kind', 'actor_id', 'owner_id', 'maintainer_id', 'workflow', 'parameters', 'timezone', 'start_at', 'enabled', 'misfire', 'grace_ms', 'limits']);
 export const subscriptionSchema = obj({ name: str, destination_id: str, events: { type: 'array', minItems: 1, maxItems: 5, items: { type: 'string', enum: eventTypes } },
   projects: { type: 'array', minItems: 1, maxItems: 100, items: str }, aggregate_ms: { ...integer, maximum: 86400000 }, timezone: str,
   quiet_start: str, quiet_end: str, enabled: bool }, ['name', 'destination_id', 'events', 'projects', 'aggregate_ms', 'timezone', 'enabled']);

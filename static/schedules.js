@@ -13,8 +13,8 @@ async function renderSchedules(panel, project) {
   const container = panel; panel = element('section', '', 'schedule-panel'); container.replaceChildren(panel);
   let accessLost = false;
   const live = () => !accessLost && panel.isConnected && scheduleOwner === owner && owner === JSON.stringify([me?.id, me?.actor?.tenant_id, me?.actor?.principal_id]);
-  panel.append(element('h3', '定时计划与通知'));
-  if (location.hash !== '#/projects/'+project+'/schedules') panel.append(consoleLink('#/projects/'+project+'/schedules','在项目页管理计划与通知'));
+  panel.append(element('h3', '定时任务与通知'));
+  if (location.hash !== '#/projects/'+project+'/schedules') panel.append(consoleLink('#/projects/'+project+'/schedules','在项目页管理定时任务与通知'));
   const status = element('p', '', 'muted'); status.setAttribute('role', 'status'); panel.append(status);
   function revoked(error) {
     // Channel audience failures invalidate the destination, while project read authority may still be valid.
@@ -24,8 +24,8 @@ async function renderSchedules(panel, project) {
   }
   const target = { project_id: project }, endpoint = '/api/management';
   const read = (operation, args = {}) => api(endpoint + '/query', 'POST', { operation, target, arguments: args });
-  let plans, destinations;
-  try { [plans, destinations] = await Promise.all([read('list_schedules'), read('list_schedule_destinations')]); }
+  let plans, destinations, migrations;
+  try { [plans, destinations, migrations] = await Promise.all([read('list_schedules'), read('list_schedule_destinations'), read('list_schedule_migrations', { limit: 100 })]); }
   catch (error) {
     if (!live()) return;
     if (revoked(error)) return;
@@ -108,11 +108,15 @@ async function renderSchedules(panel, project) {
     return input;
   };
   const input = (label, value, type = 'text') => { const node = document.createElement('input'); node.type = type; node.value = value; node.setAttribute('aria-label', label); node.dataset.scheduleField = label; return node; };
-  const destinationOptions = destinations.destinations.map(d => [d.id, (d.type === 'group' ? '群聊 ' : '私聊 ') + d.chat_id]);
-  for (const s of plans.schedules) if (!destinationOptions.some(d => d[0] === s.spec.destination_id)) destinationOptions.push([s.spec.destination_id, '目的地已失效 · ' + s.spec.destination_id.slice(0, 8)]);
-  panel.append(note('目的地可直接选择你本人已绑定的飞书私聊，或你能管理、且范围包含本项目的群；保存时自动登记，无需先到其他页面操作。每次发送仍检查当前权限和范围。'));
-  const form = document.createElement('form'), chosen = select('编辑计划', [['', '新建计划'], ...plans.schedules.filter(s => s.state !== 'deleted').map(s => [s.id, s.spec.name + ' · ' + s.state])]);
-  const name = input('计划名称', '项目日报'), kind = select('执行身份类型', [['personal', '个人计划'], ['project', '项目服务计划']]);
+  // #1027: the one kind of project plan is the project scheduled task (manager.check). Its results stay in the project; a
+  // scheduled summary in Feishu is a timer on that chat, run by the chat's own assistant.
+  const editable = item => item.state !== 'deleted' && item.spec.workflow === 'manager.check';
+  const intro = element('div', '', 'schedule-intro');
+  intro.append(note('项目定时任务到点由项目的角色（Manager 安排）处理，结果留在项目的任务记录和 GitHub 上，不发到飞书。需要在飞书里定时收到汇报，请在对应私聊或群的「定时任务」里添加，由那个会话的助手执行。'),
+    consoleLink('#/identity/feishu', '管理飞书会话的定时任务'));
+  panel.append(intro);
+  const form = document.createElement('form'), chosen = select('编辑计划', [['', '新建定时任务'], ...plans.schedules.filter(editable).map(s => [s.id, s.spec.name + ' · ' + s.state])]);
+  const name = input('计划名称', '项目定时任务'), kind = select('执行身份类型', [['personal', '个人计划'], ['project', '项目服务计划']]);
   const actor = select('项目服务身份', (destinations.services ?? []).map(s => [s.id, s.maintenance + ' · ' + s.id.slice(0, 8)]));
   const maintainer = select('项目维护人', (destinations.maintainers ?? [{ id: me.id, name: userDisplayName(me) }]).map(s => [s.id, s.name]));
   const zone = input('计划时区', 'Asia/Shanghai'), recurrence = select('重复方式', [['cron', 'Cron（本地时间）'], ['interval', '固定周期']]);
@@ -132,9 +136,9 @@ async function renderSchedules(panel, project) {
   };
 
   const start = input('有效期开始', new Date().toISOString(), 'text'), end = input('有效期结束（可留空）', '', 'text');
-  const destination = select('计划目的地', destinationOptions), workflow = select('执行内容', [['report.daily', '项目日报'], ['manager.check', 'Manager 定时检查'], ['release.scheduled', '定时发布（处理器未就绪时不支持）']]);
-  const instruction=document.createElement('textarea');instruction.rows=3;instruction.setAttribute('aria-label','定时检查内容');instruction.dataset.scheduleField='定时检查内容';
-  const instructionField=field('定时检查内容',instruction);
+  const instruction=document.createElement('textarea');instruction.rows=3;instruction.setAttribute('aria-label','要做什么');instruction.dataset.scheduleField='要做什么';
+  instruction.placeholder='例如：检查 Nightly 的结果，指标变差就分析原因并提 Issue。';
+  const instructionField=field('要做什么',instruction);
   const fileIssues=select('创建 Issue 的权限',[['inherit','跟随角色（未设置）'],['allow','允许创建或回复 Issue'],['deny','拒绝创建或回复 Issue']]);
   const fileIssuesField=field('创建 Issue 的权限',fileIssues);
   fileIssuesField.append(note('这项计划开关会覆盖执行角色的 GitHub 写权限：允许时即使角色没有写权限也可以在本项目仓库创建或回复 Issue；拒绝时即使角色有写权限也不允许；跟随角色（未设置）时不写入该标志，沿用角色策略。无论哪种选择，写入仍受项目能力上限约束，也不会改代码或发布。新建计划默认跟随角色。'));
@@ -145,47 +149,66 @@ async function renderSchedules(panel, project) {
   for (const [key, label, value] of [['concurrency', '计划并发', 1], ['runtime_ms', '最长运行毫秒', 60000], ['runs', '每天运行次数', 100], ['model_calls', '每天模型调用次数', 0], ['cost_micros', '每天费用上限（微单位）', 0], ['retries', '最大自动重试', 3], ['manual_retries', '人工补发次数上限', 1], ['notifications_per_minute', '每分钟通知数', 10]]) {
     limits[key] = input(label, String(value), 'number'); budgetBox.append(field(label, limits[key]));
   }
-  const summary = element('section', '', 'schedule-list'); summary.setAttribute('aria-label','项目计划列表');
-  summary.append(element('h4','计划列表'), note('时区和触发时间来自服务端记录；尚未成功或没有下次触发不会显示为零。'));
+  const summary = element('section', '', 'schedule-list'); summary.setAttribute('aria-label','项目定时任务列表');
+  summary.append(element('h4','项目定时任务'), note('时区和触发时间来自服务端记录；尚未成功或没有下次触发不会显示为零。'));
   const states = { active:'启用中',paused:'已暂停',deleted:'已删除',unsupported:'处理器未支持' };
+  const reasons = { migrated_to_chat_schedule:'已迁移到飞书会话的定时任务', daily_report_retired:'项目日报已停用', schedule_workflow_unsupported:'执行内容已不支持' };
   const time = (value,zone) => value == null ? '无记录' : new Date(value).toLocaleString(undefined,{timeZone:zone}) + ' · ' + zone;
   for (const item of plans.schedules) {
-    const row = element('article', '', 'schedule-row'); row.append(element('strong',item.spec.name),note((states[item.state] || item.state) + (item.reason ? ' · '+item.reason : '')),
-      facts([['身份',item.spec.kind === 'personal' ? '个人计划' : '项目服务计划'],['时区',item.spec.timezone],['下次触发',item.next_at == null ? '无下次触发' : time(item.next_at,item.spec.timezone)],['最近成功',item.last_success == null ? '尚无成功记录' : time(item.last_success,item.spec.timezone)],['维护人',(destinations.maintainers || []).find(person=>person.id===item.spec.maintainer_id)?.name || item.spec.maintainer_id],['处理器',item.supported ? '已注册' : '未支持，不表示可执行'],...(item.spec.workflow==='manager.check'?[['创建 Issue',item.spec.parameters?.file_issues===true?'允许（覆盖角色）':item.spec.parameters?.file_issues===false?'拒绝（覆盖角色）':'跟随角色']]:[])]));
-    if (item.state !== 'deleted') row.append(button('编辑计划：'+item.spec.name,()=>{chosen.value=item.id;chosen.dispatchEvent(new Event('change'));},'quiet'));
+    const legacy = item.spec.workflow !== 'manager.check';
+    const row = element('article', '', 'schedule-row'); row.append(element('strong',item.spec.name),note((states[item.state] || item.state) + (item.reason ? ' · '+(reasons[item.reason] || item.reason) : '')),
+      facts([['执行内容',legacy ? (item.spec.workflow==='report.daily' ? '项目日报（已停用）' : item.spec.workflow + '（不支持）') : '项目定时任务'],['身份',item.spec.kind === 'personal' ? '个人计划' : '项目服务计划'],['时区',item.spec.timezone],['下次触发',item.next_at == null ? '无下次触发' : time(item.next_at,item.spec.timezone)],['最近成功',item.last_success == null ? '尚无成功记录' : time(item.last_success,item.spec.timezone)],['维护人',(destinations.maintainers || []).find(person=>person.id===item.spec.maintainer_id)?.name || item.spec.maintainer_id],...(legacy?[]:[['创建 Issue',item.spec.parameters?.file_issues===true?'允许（覆盖角色）':item.spec.parameters?.file_issues===false?'拒绝（覆盖角色）':'跟随角色']]),...(item.migration?[['迁移',item.migration.outcome==='migrated'?'已迁成'+(item.migration.chat_type==='group'?'群聊':'私聊')+'的会话定时任务':'未迁移（见下方迁移记录）']]:[])]));
+    if (editable(item)) row.append(button('编辑计划：'+item.spec.name,()=>{chosen.value=item.id;chosen.dispatchEvent(new Event('change'));},'quiet'));
     summary.append(row);
   }
-  if (!plans.schedules.length) summary.append(note('当前项目没有计划。')); panel.append(summary);
+  if (!plans.schedules.length) summary.append(note('当前项目没有定时任务。')); panel.append(summary);
+  // #1027: the report of the daily report plans moved to chat timers at the upgrade, one entry per plan.
+  if (migrations.migrations.length) {
+    const outcomes = { migrated:'已迁移', failed:'未迁移', skipped:'已跳过' };
+    const why = { schedule_destination_unavailable:'原来的通知目的地已不存在', channel_chat_not_found:'找不到原来的飞书会话', channel_schedule_owner_unavailable:'私聊的主人已不在这个会话', channel_service_binding_missing:'这个群没有群聊助手绑定', plan_deleted:'原计划已删除', plan_expired:'原计划已过期' };
+    const notes = { interval_rounded:'固定周期取整为至少 5 分钟，从迁移时开始计算', end_at_not_carried:'会话定时任务没有结束时间，需要时请手动暂停或删除' };
+    const record = element('section', '', 'schedule-migrations'); record.setAttribute('aria-label', '项目日报迁移记录');
+    record.append(element('h4', '项目日报迁移记录'), note('升级时，原来定时发到飞书的项目日报已迁成同一会话上的会话定时任务，由该会话的助手执行；原计划已停用并保留在上方列表。'));
+    for (const m of migrations.migrations) {
+      const entry = element('article', '', 'schedule-row');
+      entry.append(element('strong', m.plan_name), note(outcomes[m.outcome] || m.outcome), facts([
+        ['会话', m.chat_type ? (m.chat_type === 'group' ? '群聊' : '私聊') : '无'],
+        ['会话定时任务', m.channel_schedule_id ? (m.detail?.timer?.name || m.channel_schedule_id) + (m.detail?.timer?.enabled === false ? '（已暂停，与原计划一致）' : '') : '未创建'],
+        ['原因', m.reason ? (why[m.reason] || m.reason) : '无'],
+        ...(m.detail?.notes?.length ? [['说明', m.detail.notes.map(n => notes[n] || n).join('；')]] : []),
+        ['迁移时间', new Date(m.created_at).toLocaleString()]]));
+      record.append(entry);
+    }
+    panel.append(record);
+  }
   let original = null, dirty = false, serviceMissing = null;
 
   const syncFields = () => {
-    instructionField.hidden=workflow.value!=='manager.check';
-    fileIssuesField.hidden=workflow.value!=='manager.check';
     if (actor.parentElement) actor.parentElement.hidden = kind.value === 'personal';
     if (serviceMissing) serviceMissing.hidden = kind.value === 'personal';
     if (maintainer.parentElement) maintainer.parentElement.hidden = kind.value === 'personal';
     if (cron.parentElement) cron.parentElement.hidden = recurrence.value !== 'cron';
     if (interval.parentElement) interval.parentElement.hidden = recurrence.value !== 'interval';
   };
-  kind.onchange = syncFields; recurrence.onchange = () => { syncFields(); syncPreset(); }; workflow.onchange=syncFields;
+  kind.onchange = syncFields; recurrence.onchange = () => { syncFields(); syncPreset(); };
   for (const node of [cron, interval]) { node.addEventListener('input', () => syncPreset()); node.addEventListener('change', () => syncPreset()); }
   preset.onchange=()=>{if(preset.value!=='custom'){recurrence.value='cron';cron.value=preset.value;}timeRules.open=preset.value==='custom';syncFields();};
-  const spec = () => ({ ...(original?.spec ?? {}), name: name.value, kind: kind.value, actor_id: kind.value === 'personal' ? me.id : actor.value,
+  const spec = () => ({ ...(original?.spec ?? {}), destination_id: undefined, name: name.value, kind: kind.value, actor_id: kind.value === 'personal' ? me.id : actor.value,
     owner_id: original?.spec.owner_id ?? me.id, maintainer_id: kind.value === 'personal' ? me.id : maintainer.value,
-    workflow: workflow.value, parameters: (()=>{const parameters={...(original?.spec.parameters ?? {})};if(workflow.value==='manager.check'){parameters.instruction=instruction.value;if(fileIssues.value==='allow')parameters.file_issues=true;else if(fileIssues.value==='deny')parameters.file_issues=false;else delete parameters.file_issues;}return parameters;})(), timezone: zone.value,
+    workflow: 'manager.check', parameters: (()=>{const parameters={...(original?.spec.parameters ?? {})};parameters.instruction=instruction.value;if(fileIssues.value==='allow')parameters.file_issues=true;else if(fileIssues.value==='deny')parameters.file_issues=false;else delete parameters.file_issues;return parameters;})(), timezone: zone.value,
     cron: recurrence.value === 'cron' ? cron.value : undefined, interval_ms: recurrence.value === 'interval' ? Number(interval.value) * 60000 : undefined,
     start_at: Date.parse(start.value), end_at: end.value ? Date.parse(end.value) : undefined, enabled: original ? original.state === 'active' : true,
-    misfire: misfire.value, grace_ms: Number(grace.value) * 60000, destination_id: destination.value,
+    misfire: misfire.value, grace_ms: Number(grace.value) * 60000,
     limits: Object.fromEntries(Object.entries(limits).map(([key, value]) => [key, Number(value.value)])) });
   // #886: a `pre` maps to generic, where an author name is prohibited; the name needs a role that accepts it.
   const parsed = element('pre', ''); parsed.setAttribute('role', 'group'); parsed.setAttribute('aria-label', '计划预览');
   const contextMeta=element('p','','schedule-context');
-  const updateMeta=()=>{contextMeta.textContent='执行时区：'+zone.value+' · 目的地：'+(destination.selectedOptions[0]?.textContent || '尚未选择');};
+  const updateMeta=()=>{contextMeta.textContent='执行时区：'+zone.value+' · 结果留在项目的任务记录和 GitHub 上';};
   const fill = () => {
     original = plans.schedules.find(s => s.id === chosen.value) ?? null; if (!original) return;
     const p = original.spec; name.value = p.name; kind.value = p.kind; actor.value = p.actor_id; maintainer.value = p.maintainer_id;
     zone.value = p.timezone; recurrence.value = p.cron ? 'cron' : 'interval'; cron.value = p.cron ?? ''; interval.value = String((p.interval_ms ?? 86400000) / 60000);
-    start.value = new Date(p.start_at).toISOString(); end.value = p.end_at ? new Date(p.end_at).toISOString() : ''; destination.value = p.destination_id; workflow.value = p.workflow;
+    start.value = new Date(p.start_at).toISOString(); end.value = p.end_at ? new Date(p.end_at).toISOString() : '';
     misfire.value = p.misfire; grace.value = String(p.grace_ms / 60000); for (const [k, v] of Object.entries(p.limits)) limits[k].value = String(v);
     parsed.textContent = original.state + (original.reason ? ' · ' + original.reason : '') + '\n时区：' + p.timezone + '\n下次触发：' + (original.next_at ? new Date(original.next_at).toISOString() : '无') + '\n最近成功：' + (original.last_success ? new Date(original.last_success).toISOString() : '尚无') + '\n处理器：' + (original.supported ? '可用' : '不支持') + '\n维护人：' + p.maintainer_id;
     instruction.value=p.parameters?.instruction || ''; fileIssues.value=p.parameters?.file_issues===true?'allow':p.parameters?.file_issues===false?'deny':'inherit'; syncPreset(true); syncFields(); updateMeta();
@@ -217,10 +240,9 @@ async function renderSchedules(panel, project) {
   window.addEventListener('resize',onFoldResize);
   syncFoldsForViewport();
   const sections = [
-    ['content','执行内容',[field('计划名称',name),field('执行内容',workflow),instructionField,fileIssuesField]],
+    ['content','要做什么',[field('计划名称',name),instructionField,fileIssuesField]],
     ['identity','身份与维护人',[identityFold]],
     ['time','触发时间',[field('常用触发时间',preset),note('先选每天或每周的常用时间；Cron、时区和有效期在「高级时间规则」里。'),timeRules]],
-    ['destination','通知目的地',[field('计划目的地',destination),note('保存和发送仍会重新检查身份、目的地与接收范围；登记不表示已送达。')]],
     ['limits','运行限制',[budgetBox]],
   ];
   const steps=element('nav','','schedule-editor-steps');steps.setAttribute('aria-label','计划编辑步骤');
@@ -232,13 +254,13 @@ async function renderSchedules(panel, project) {
   }
   step('content');
   form.append(
-    button('预览日报计划', async () => {
+    button('预览触发时间', async () => {
       const plan=spec(), signature=JSON.stringify(plan), index=++activePreview, id=original?.id;
       parsed.textContent='正在按服务端算法读取未来触发时间…';
       try {
         const p = await read('preview_schedule',{plan,...(id ? {schedule_id:id} : {})});
         if (!live() || index!==activePreview || signature!==JSON.stringify(spec()) || id!==original?.id) return;
-        revision=p.revision; parsed.textContent='时区：'+p.timezone+'\n未来触发：\n'+(p.future.length ? p.future.map(t=>time(t,p.timezone)).join('\n') : '无下一次触发')+'\n'+(p.report ? '以下为当前时间的样例日报；正式窗口截至逻辑触发时刻。\n'+p.report.text : p.supported ? '处理器已注册' : '处理器尚不支持，不能视为可执行');
+        revision=p.revision; parsed.textContent='时区：'+p.timezone+'\n未来触发：\n'+(p.future.length ? p.future.map(t=>time(t,p.timezone)).join('\n') : '无下一次触发');
       } catch(error) { if (live() && index===activePreview && !revoked(error)) { parsed.textContent=error.code === 'schedule_has_no_future_occurrence' ? '无下一次触发：按当前时间规则与有效期，服务端找不到未来触发。' : '未来触发状态未知；请重新预览。'; status.textContent = readErrorText(error); } }
     },'quiet'),parsed);
   const save = element('button', '保存计划'); save.type = 'submit'; save.dataset.scheduleWrite='1'; form.append(save);
@@ -255,8 +277,8 @@ async function renderSchedules(panel, project) {
   form.addEventListener('input',event=>{if(event.target===chosen)return;dirty=true;state.fields=capture();updateMeta();++activePreview;parsed.textContent='表单已修改，请重新预览当前时间和计划。';});
   form.addEventListener('change',event=>{if(event.target!==chosen){dirty=true;state.fields=capture();updateMeta();++activePreview;}});
   const previewBox=element('aside','','schedule-time-preview');previewBox.setAttribute('aria-label','触发时间预览');
-  const previewAction=[...form.querySelectorAll('button')].find(node=>node.textContent==='预览日报计划');
-  previewBox.append(element('h4','何时触发、发给谁'),previewAction,parsed,note('未来时间来自服务端解析；日报是当前样例，不代表未来执行结果。'));
+  const previewAction=[...form.querySelectorAll('button')].find(node=>node.textContent==='预览触发时间');
+  previewBox.append(element('h4','何时触发'),previewAction,parsed,note('未来时间来自服务端解析；到点生成一个项目任务，结果留在任务记录和 GitHub 上。'));
   const editor=element('div','','schedule-editor-layout');editor.append(form,previewBox);panel.append(editor,receiptBox);
   if(state.conflict){
     const comparison=element('section','','schedule-conflict');comparison.setAttribute('role','alert');
@@ -267,32 +289,22 @@ async function renderSchedules(panel, project) {
   }
   syncPreset(true); syncFields(); updateMeta(); showReceipt();
   renderSubscriptionEditor(panel, {project,destinations,read,command,model:state.subscription,busy:()=>state.sending || !!state.envelope,invalidate:revoked,active:live});
-  const applyDailyDigest=()=>{
-    name.value='每日摘要'; workflow.value='report.daily'; kind.value='personal';
-    zone.value=zone.value||'Asia/Shanghai'; recurrence.value='cron'; cron.value='0 9 * * *';
-    if (destination.options.length && !destination.value) destination.selectedIndex=0;
-    dirty=true; state.selected=''; state.fields=capture(); state.templateNotice='已套用每日摘要模板：每天 09:00 发送项目日报。可改常用触发时间和目的地后保存。';
-    if (chosen.value) { dirty=false; chosen.value=''; void renderSchedules(container,project); return; }
-    syncPreset(true); syncFields(); updateMeta(); status.textContent=state.templateNotice; state.templateNotice=null;
-  };
   const applyFailureNotice=()=>{ void state.subscription.applyFailureTemplate?.(); };
   const applyCustomCheck=()=>{
-    name.value='自定义主动任务'; workflow.value='manager.check'; kind.value='personal';
+    name.value='项目定时任务'; kind.value='personal';
     zone.value=zone.value||'Asia/Shanghai'; recurrence.value='cron'; cron.value='0 9 * * *';
     instruction.value=instruction.value||''; fileIssues.value='inherit';
-    if (destination.options.length && !destination.value) destination.selectedIndex=0;
-    dirty=true; state.selected=''; state.fields=capture(); state.templateNotice='已套用自定义主动任务模板：每天 09:00 做一次定时检查。请填写检查内容。创建 Issue 的权限默认跟随执行角色；如需明确允许或拒绝，请在保存前选择。';
+    dirty=true; state.selected=''; state.fields=capture(); state.templateNotice='已套用项目定时任务模板：每天 09:00 生成一个项目任务。请写明要做什么。创建 Issue 的权限默认跟随执行角色；如需明确允许或拒绝，请在保存前选择。';
     if (chosen.value) { dirty=false; chosen.value=''; void renderSchedules(container,project); return; }
     syncPreset(true); syncFields(); updateMeta(); status.textContent=state.templateNotice; state.templateNotice=null;
   };
   const templates=element('section','','schedule-templates');
   templates.dataset.testid='schedule-templates';
   templates.append(
-    element('h4','常用计划模板'),
-    note('先选用一个模板，再按需要改时间和目的地。不必先填完整高级表单。'),
-    button('使用每日摘要模板',applyDailyDigest),
-    button('使用失败时通知模板',applyFailureNotice),
-    button('使用自定义主动任务模板',applyCustomCheck)
+    element('h4','常用模板'),
+    note('先选用一个模板，再按需要修改。不必先填完整高级表单。'),
+    button('使用项目定时任务模板',applyCustomCheck),
+    button('使用失败时通知模板',applyFailureNotice)
   );
   const list=panel.querySelector('.schedule-list');
   if (list) list.before(templates); else panel.prepend(templates);

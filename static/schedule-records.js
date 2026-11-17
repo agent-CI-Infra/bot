@@ -7,7 +7,7 @@ function renderScheduleRecords(host, { project, read, invalidate }) {
   const pending = notificationTraceCommands.get(project) || {};
   notificationTraceCommands.set(project, pending);
   const address = location.hash, root = element('section', '', 'schedule-records');
-  root.setAttribute('aria-label', '计划与通知记录'); host.append(root);
+  root.setAttribute('aria-label', '定时任务与通知记录'); host.append(root);
   const live = () => root.isConnected && address === location.hash && owner === JSON.stringify([me?.id, me?.csrf_token]);
   const title = element('h4', '运行与通知记录'), tabs = element('div', '', 'schedule-record-tabs');
   const status = element('p', '选择记录类型，读取服务端保存的事实。', 'muted'); status.setAttribute('role', 'status');
@@ -84,12 +84,12 @@ function renderScheduleRecords(host, { project, read, invalidate }) {
   }
   function delivery(row) {
     const card = element('details', '', 'schedule-record'); card.dataset.recordId = row.id;
-    card.append(element('summary', caption(row.state) + ' · ' + (row.origin?.name || (row.schedule_id ? '定时计划' : '事件订阅')) + ' · ' + at(row.created_at)));
+    card.append(element('summary', caption(row.state) + ' · ' + (row.origin?.name || (row.schedule_id ? '项目日报（已停用）' : '事件订阅')) + ' · ' + at(row.created_at)));
     const steps = element('ol', '', 'schedule-record-timeline'), origin = row.origin || {}, zone = origin.timezone || row.payload?.report?.window?.timezone || 'UTC';
     const step = (label, content) => { const li = element('li'); li.append(element('h5',label), content); steps.append(li); };
-    step('触发来源', facts([['类型',row.schedule_id ? '定时计划' : '事件订阅'],['名称',origin.name || '未读取到来源名称'],['来源编号',row.schedule_id || row.subscription_id],['保存版本',origin.revision ?? row.subscription_revision],['逻辑触发标识',row.logical_key],['关联事件',row.incident]]));
+    step('触发来源', facts([['类型',row.schedule_id ? '项目日报（已停用）' : '事件订阅'],['名称',origin.name || '未读取到来源名称'],['来源编号',row.schedule_id || row.subscription_id],['保存版本',origin.revision ?? row.subscription_revision],['逻辑触发标识',row.logical_key],['关联事件',row.incident]]));
     const window = row.payload?.report?.window;
-    step('逻辑窗口与执行', facts([['逻辑触发时间',at(origin.logical_at,zone)],['日报窗口',window ? '[' + at(window.start,window.timezone) + ', ' + at(window.end,window.timezone) + ')' : '此记录未保存日报窗口'],['运行编号',origin.run_id],['执行结果',origin.state ? caption(origin.state) : row.subscription_id ? '事件直接形成通知，不代表一次定时运行' : '未读取到执行结果'],['执行原因',origin.reason || '未记录异常原因']]));
+    step('逻辑窗口与执行', facts([['逻辑触发时间',at(origin.logical_at,zone)],['日报窗口（旧记录）',window ? '[' + at(window.start,window.timezone) + ', ' + at(window.end,window.timezone) + ')' : '此记录未保存日报窗口'],['运行编号',origin.run_id],['执行结果',origin.state ? caption(origin.state) : row.subscription_id ? '事件直接形成通知，不代表一次定时运行' : '未读取到执行结果'],['执行原因',origin.reason || '未记录异常原因']]));
     if (row.payload?.events?.length) {
       const events = element('ul');
       for (const event of row.payload.events) events.append(element('li', event.type + ' · ' + at(event.at,zone) + ' · 事件序号 ' + event.sequence));

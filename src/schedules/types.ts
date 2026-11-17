@@ -1,7 +1,8 @@
 import type { ActorContext } from '../identity/authorization.js';
 import type { Json } from '../core/security.js';
 
-export const eventTypes = ['project.daily', 'task.failed', 'ci.failed', 'ci.recovered'] as const;
+// project.daily left with the daily report plans (#1027): a scheduled summary in Feishu is a timer on that chat now.
+export const eventTypes = ['task.failed', 'ci.failed', 'ci.recovered'] as const;
 export interface Limits {
   concurrency: number; runtime_ms: number; runs: number; model_calls: number; cost_micros: number;
   retries: number; manual_retries: number; notifications_per_minute: number;
@@ -11,7 +12,7 @@ export interface Plan {
   name: string; kind: 'personal' | 'project'; actor_id: string; owner_id: string; maintainer_id: string;
   workflow: string; parameters: Json; timezone: string; cron?: string; interval_ms?: number;
   start_at: number; end_at?: number; enabled: boolean; misfire: 'skip' | 'once'; grace_ms: number;
-  destination_id: string; limits: Limits;
+  limits: Limits;
 }
 export interface SubscriptionSpec {
   name: string; destination_id: string; events: string[]; projects: string[]; aggregate_ms: number;

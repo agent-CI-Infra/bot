@@ -64,16 +64,27 @@ export function scheduleStorage(store: Store): void {
         AND (json_extract(obj,'$.conclusion')<>'success' OR EXISTS(SELECT 1 FROM schedule_events e
           WHERE e.project_id=NEW.repository_id AND e.type='ci.failed' AND e.incident='ci:'||NEW.event||':'||json_extract(obj,'$.id'))); END;
   `);
-  // Subscriptions drop the retired approval.waiting event; one left with no event pauses with a reason instead of
-  // silently never firing. The revision moves so an editor holding the old version gets a conflict.
-  const retired = store.all("SELECT id,spec FROM notification_subscriptions WHERE spec LIKE '%approval.waiting%'");
+  // One row per daily report plan moved to a Feishu chat timer (#1027), whatever the outcome: the migration report.
+  store.db.exec(`CREATE TABLE IF NOT EXISTS schedule_migrations(schedule_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,plan_name TEXT NOT NULL,
+    plan_state TEXT NOT NULL,destination_id TEXT,chat_id TEXT,chat_type TEXT,channel_schedule_id TEXT,
+    outcome TEXT NOT NULL CHECK(outcome IN ('migrated','failed','skipped')),reason TEXT,detail TEXT NOT NULL,created_at INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS schedule_migrations_project ON schedule_migrations(project_id,created_at)`);
+  // Subscriptions drop retired events: approval.waiting (#312) and project.daily (#1027, it came only from daily report
+  // plans). One left with no event pauses with a reason instead of silently never firing. The revision moves so an editor
+  // holding the old version gets a conflict.
+  const retiredEvents: Record<string, string> = { 'approval.waiting': 'approval_event_retired', 'project.daily': 'daily_report_retired' };
+  const retired = store.all("SELECT id,spec FROM notification_subscriptions WHERE spec LIKE '%approval.waiting%' OR spec LIKE '%project.daily%'");
   if (retired.length) store.transaction(() => {
     for (const row of retired) {
-      const spec = JSON.parse(row.spec), events = (spec.events ?? []).filter((e: string) => e !== 'approval.waiting');
-      if (events.length === (spec.events ?? []).length) continue;
+      const spec = JSON.parse(row.spec), before: string[] = spec.events ?? [], events = before.filter(e => !retiredEvents[e]);
+      if (events.length === before.length) continue;
+      const reason = before.map(e => retiredEvents[e]).find(Boolean)!;
       store.run(`UPDATE notification_subscriptions SET spec=?,revision=revision+1,updated_at=?,
-        state=CASE WHEN ?=0 THEN 'paused' ELSE state END,reason=CASE WHEN ?=0 THEN 'approval_event_retired' ELSE reason END WHERE id=?`,
-        JSON.stringify({ ...spec, events }), Date.now(), events.length, events.length, row.id);
+        state=CASE WHEN ?=0 THEN 'paused' ELSE state END,reason=CASE WHEN ?=0 THEN ? ELSE reason END WHERE id=?`,
+        JSON.stringify({ ...spec, events }), Date.now(), events.length, events.length, reason, row.id);
     }
   });
+  // Project plans have no Feishu destination any more (#1027). A daily report plan keeps its saved spec, destination
+  // included, as the record its migration reads; every other plan drops the field, which it never used to run.
+  store.run("UPDATE schedules SET spec=json_remove(spec,'$.destination_id') WHERE json_extract(spec,'$.workflow')<>'report.daily' AND json_type(spec,'$.destination_id') IS NOT NULL");
 }
