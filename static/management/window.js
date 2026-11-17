@@ -29,7 +29,9 @@ function syncManagementChat() {
   resize.setAttribute('aria-label', '调整管理助手窗口大小'); resize.title = '拖动左上角调整大小；方向键微调';
   const panel = element('div', '', 'management-panel'); box.append(resize, head, panel);
   const launcher = button('', () => openManagementChat(), 'management-launcher'); launcher.id = 'management-launcher';
-  launcher.setAttribute('aria-controls', box.id); launcher.setAttribute('aria-expanded', 'false'); launcher.setAttribute('aria-label', '打开管理助手');
+  // #914: no aria-label — the launcher's name is the text it already shows (管理助手 + its state), so voice control and
+  // screen readers say the same words the reader sees, in all three states.
+  launcher.setAttribute('aria-controls', box.id); launcher.setAttribute('aria-expanded', 'false');
   const icon = element('span', '✦', 'management-launcher-icon'); icon.setAttribute('aria-hidden', 'true');
   const label = element('span', '', 'management-launcher-label'), state = element('small', '随时唤起');
   label.append(element('strong', '管理助手'), state); launcher.append(icon, label);
