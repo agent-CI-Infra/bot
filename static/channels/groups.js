@@ -57,10 +57,11 @@ async function buildGroupBindingsSection(data, { initialOpen = false, initialCha
   const chat = channelSelect(form, '助手所在群', 'binding_chat', [...chats]);
   const updateOption = selected => { const option = [...chat.options].find(o => o.value === selected.id); if (option) option.textContent = chatLabel(selected); };
   const request = renderVersion;
-  for (const selected of profiles.values()) if (!selected.display_name && selected.can_refresh_name) {
+  for (const selected of profiles.values()) if (!selected.display_name && selected.can_refresh_name && channelNameAutoRead(selected)) {
     void channelNameRequest('/api/channels/chats/' + encodeURIComponent(selected.id) + '/name').then(result => {
+      channelNameFailures.delete(channelNameKey(selected));
       if (request === renderVersion) { Object.assign(selected, result); updateOption(selected); }
-    }).catch(() => {});
+    }).catch(() => { channelNameFailures.add(channelNameKey(selected)); });
   }
   const profile = element('div'); form.append(profile);
   const showProfile = () => {
