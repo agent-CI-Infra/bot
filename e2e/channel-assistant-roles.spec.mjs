@@ -37,14 +37,14 @@ for (const width of [1440, 390]) test(`a project administrator creates a project
     expect(h.store.get("SELECT project_id,prompt FROM service_roles WHERE name='101 群助手'")).toEqual({ project_id: '101', prompt: '先给结论，再列出处。' });
     // A group that also covers 102 is refused, naming 102; scoped to 101 it is saved.
     await page.getByRole('button', { name: '创建群绑定', exact: true }).click();
-    await page.getByLabel('fixture/project-101', { exact: true }).check(); await page.getByLabel('fixture/project-102', { exact: true }).check();
+    await page.getByRole('checkbox', { name: 'fixture/project-101', exact: true }).check(); await page.getByRole('checkbox', { name: 'fixture/project-102', exact: true }).check();
     await page.getByLabel('助手角色', { exact: true }).selectOption({ label: '101 群助手（fixture/project-101 专属）' });
     await expect(page.locator('#feishu-group-editor')).toContainText('只能用于范围只有 fixture/project-101 的群');
     const save = page.getByRole('button', { name: '保存群聊助手', exact: true }), alert = page.locator('form').filter({ has: save }).getByRole('alert');
     await save.click();
     await expect(alert).toHaveText('「fixture/project-101」的专属助手角色只能用于范围只有这个项目的群；fixture/project-102 不属于它。请改选全局角色，或把范围缩小到这个项目。');
     mkdirSync('.tmp/channel-assistant-roles', { recursive: true }); await page.screenshot({ path: `.tmp/channel-assistant-roles/refused-${width}.png`, fullPage: true });
-    await page.getByLabel('fixture/project-102', { exact: true }).uncheck(); await save.click();
+    await page.getByRole('checkbox', { name: 'fixture/project-102', exact: true }).uncheck(); await save.click();
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
     await expect(binding.getByText('生效中 · 101 群助手', { exact: true })).toBeVisible();
     expect(h.store.get('SELECT b.scope,r.project_id FROM channel_service_bindings b JOIN service_roles r ON r.id=b.service_role_id')).toEqual({ scope: 'repositories', project_id: '101' });

@@ -408,17 +408,23 @@ test('a rollback previews the command it would send, and sends it only after it 
       return { top: b.top, bottom: b.bottom, hit: !!hit && el.contains(hit), inside: b.top >= 0 && b.bottom <= innerHeight }; });
     expect(shown.hit).toBe(true); expect(shown.inside).toBe(true);
     await page.screenshot({ path: '.tmp/management-rollback/1440.png', fullPage: true });
-    // The same confirmation stays inside a 390 px panel instead of widening it.
-    await page.setViewportSize({ width: 390, height: 844 });
-    await expect(preview).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    expect(await preview.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
-    await preview.evaluate(el => el.scrollIntoView({ block: 'center' }));
-    const mobileShown = await preview.evaluate(el => { const b = el.getBoundingClientRect();
-      const head = el.querySelector('h3').getBoundingClientRect(), hit = document.elementFromPoint(head.left + 8, head.top + head.height / 2);
-      return { top: b.top, bottom: b.bottom, hit: !!hit && el.contains(hit), inside: b.top >= 0 && b.top <= innerHeight - 48 }; });
-    expect(mobileShown.hit).toBe(true); expect(mobileShown.inside).toBe(true);
-    await page.screenshot({ path: '.tmp/management-rollback/390.png', fullPage: true });
+    // Both phone widths keep the confirmation heading reachable within the conversation.
+    for (const width of [390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect(preview).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      expect(await preview.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+      await preview.evaluate(el => el.scrollIntoView({ block: 'center' }));
+      const mobileShown = await preview.evaluate(el => { const b = el.getBoundingClientRect();
+        const head = el.querySelector('h3').getBoundingClientRect(), hit = document.elementFromPoint(head.left + 8, head.top + head.height / 2);
+        return { top: b.top, bottom: b.bottom, headingTop: head.top, occluder: hit?.className, hit: !!hit && el.contains(hit), inside: b.top >= 0 && b.top <= innerHeight - 48 }; });
+      expect(mobileShown.hit, JSON.stringify(mobileShown)).toBe(true); expect(mobileShown.inside).toBe(true);
+      const confirm = preview.getByRole('button', { name: '确认执行', exact: true });
+      await confirm.evaluate(el => el.scrollIntoView({ block: 'center' }));
+      await expect(confirm).toBeInViewport({ ratio: 1 });
+      expect(await confirm.evaluate(el => { const b = el.getBoundingClientRect(); return el.contains(document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)); })).toBe(true);
+      await page.screenshot({ path: `.tmp/management-rollback/${width}.png`, fullPage: true });
+    }
     await page.setViewportSize({ width: 1440, height: 1000 });
     // 取消 drops the rollback without a command.
     await preview.getByRole('button', { name: '取消', exact: true }).click();
@@ -451,11 +457,13 @@ test('项目管理员在没有已启动项目或接口 403 时看到原因和重
     await expect(panel.getByText('正在连接管理助手…')).toHaveCount(0);
     await expect(page.getByLabel('管理消息')).toBeDisabled();
     await page.screenshot({ path: '.tmp/ui-522/after-empty-desktop.png', fullPage: true });
-    await page.setViewportSize({ width: 390, height: 844 });
-    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    await expect(panel.getByRole('heading', { name: '无法打开管理会话' })).toBeVisible();
-    await expect(panel.getByRole('button', { name: '重试', exact: true })).toBeInViewport();
-    await page.screenshot({ path: '.tmp/ui-522/after-empty-390.png', fullPage: true });
+    for (const width of [390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+      await expect(panel.getByRole('heading', { name: '无法打开管理会话' })).toBeVisible();
+      await expect(panel.getByRole('button', { name: '重试', exact: true })).toBeInViewport({ ratio: 1 });
+      await page.screenshot({ path: `.tmp/ui-522/after-empty-${width}.png`, fullPage: true });
+    }
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(f.h.admin + '/#/projects');

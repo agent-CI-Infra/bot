@@ -26,7 +26,7 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     await expect(page.locator('#feishu-group-editor')).toContainText('包括没有平台账号的人和其他企业的外部成员');
     await expect(page.getByLabel('Contents', { exact: true })).toBeHidden();
     await expect(page.getByText(/群内所有成员都能看到助手读取的所选仓库内容/)).toBeVisible();
-    await page.getByLabel('fixture/project-101', { exact: true }).check(); await page.getByLabel('fixture/project-102', { exact: true }).check();
+    await page.getByRole('checkbox', { name: 'fixture/project-101', exact: true }).check(); await page.getByRole('checkbox', { name: 'fixture/project-102', exact: true }).check();
     await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
     const binding = page.getByRole('article', { name: '群聊助手绑定' });
     await expect(binding.getByText('生效中 · 仓库问答助手', { exact: true })).toBeVisible();
@@ -36,8 +36,8 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     // Repositories and the level remain one click away on an existing group binding row.
     await binding.getByRole('button', { name: '配置仓库与权限', exact: true }).click();
     await expect(page.locator('#feishu-group-editor')).toBeVisible();
-    await expect(page.getByLabel('fixture/project-101', { exact: true })).toBeChecked();
-    await expect(page.getByLabel('fixture/project-102', { exact: true })).toBeChecked();
+    await expect(page.getByRole('checkbox', { name: 'fixture/project-101', exact: true })).toBeChecked();
+    await expect(page.getByRole('checkbox', { name: 'fixture/project-102', exact: true })).toBeChecked();
     await page.getByLabel('可派活', { exact: true }).check();
     await page.getByRole('button', { name: '保存群聊助手', exact: true }).click();
     await expect(binding.getByText('权限档位：可派活', { exact: true })).toBeVisible();
@@ -109,7 +109,7 @@ test('saving explains an app without the member scope, and a gateway page, inste
     await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(h.admin + '/#/identity/feishu/groups');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.getByLabel('fixture/project-101', { exact: true }).check();
+    await page.getByRole('checkbox', { name: 'fixture/project-101', exact: true }).check();
     const save = page.getByRole('button', { name: '保存群聊助手', exact: true }), alert = page.locator('form').filter({ has: save }).getByRole('alert');
     await save.click();
     await expect(alert).toHaveText('飞书应用还没有读取群成员的权限，无法核验你是否在群中。请超级管理员在「全局设置 → 飞书连接」查看缺少的权限，为应用开通 im:chat.members:read 并发布新版本后再保存。');
