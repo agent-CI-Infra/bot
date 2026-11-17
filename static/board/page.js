@@ -75,8 +75,12 @@ function boardShell() {
   });types.hidden=category==='release'||boardObjectWorkflow(category);
   const search=element('label','搜索','board-search'),input=document.createElement('input');
   input.type='search';input.maxLength=200;input.placeholder='编号、标题或版本';input.setAttribute('aria-label','搜索编号或标题');input.value=boardFilter('text')||'';
-  let timer;input.addEventListener('input',event=>{if(event.isComposing)return;clearTimeout(timer);timer=setTimeout(()=>{
-    if((boardFilter('text')||'')===input.value.trim())return;apply('text',input.value.trim());},300);});search.append(input);
+  let timer;
+  const runSearch=()=>{clearTimeout(timer);if((boardFilter('text')||'')===input.value.trim())return;apply('text',input.value.trim());};
+  input.addEventListener('input',event=>{if(event.isComposing)return;clearTimeout(timer);timer=setTimeout(runSearch,300);});
+  input.addEventListener('search',event=>{if(event.isComposing)return;runSearch();});
+  input.addEventListener('keydown',event=>{if(event.key!=='Enter'||event.isComposing)return;event.preventDefault();runSearch();});
+  search.append(input);
   const closed=element('label','','board-check'),check=document.createElement('input');check.type='checkbox';check.checked=boardFilter('include_closed')===true;
   check.addEventListener('change',()=>apply('include_closed',check.checked));closed.append(check,document.createTextNode('含已关闭'));closed.hidden=category==='release';
   controls.append(categories.label,execution,types,search,closed);filters.append(controls);

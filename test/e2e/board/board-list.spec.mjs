@@ -160,3 +160,33 @@ test('窄屏筛选区只向下滚动：搜索和「含已关闭」在首屏，�
     await expect(details).not.toHaveAttribute('open');
   } finally { await close(h); }
 });
+
+test('搜索按下回车立刻应用，不必等输入防抖', async ({ page }) => {
+  const h = await fixture(page);
+  try {
+    // Freeze timers so the 300ms input debounce cannot apply the filter for this test.
+    await page.clock.install({ toFake: ['setTimeout', 'clearTimeout'] });
+    const input = page.getByLabel('搜索编号或标题', { exact: true });
+    await input.fill('#40');
+    const textFilter = req => {
+      if (!req.url().includes('/api/board/cards')) return false;
+      try {
+        return (new URL(req.url()).searchParams.get('filters') || '').includes('#40');
+      } catch { return false; }
+    };
+    const pending = page.waitForRequest(textFilter);
+    await input.press('Enter');
+    await pending;
+    await expect(page.locator('#board-chips')).toContainText('40');
+    const cleared = page.waitForRequest(req => {
+      if (!req.url().includes('/api/board/cards')) return false;
+      try {
+        return !(new URL(req.url()).searchParams.get('filters') || '').includes('#40');
+      } catch { return false; }
+    });
+    await input.fill('');
+    await input.dispatchEvent('search');
+    await cleared;
+    await expect(page.locator('#board-chips')).not.toContainText('40');
+  } finally { await close(h); }
+});
