@@ -94,4 +94,4 @@ Codex 的 `BOT_CODEX_CONFIG` 可以只声明 executable、专用 `env.CODEX_HOME
 
 交付提名可以引用当前任务的最新 Dev `task_history:` 记录，也可以引用同项目已验收的后代任务 `task:<id>`（可用 `supporting_refs` 附带更多来源）。引用只是复用交付说明与证据，不导入或覆盖文件；Manager 应先检查父任务实际工作区并自行决定集成、测试或委派。框架保存来源任务、契约版本、候选和验收版本，后续策略测试和独立 QA 仍针对父任务的当前候选与完整目标，不继承子任务通过结论。
 
-提交拒绝在产生处携带原因、期望、实际记录类型/角色/版本以及可查询入口；不可读的引用不泄露其归属。Native、Process、Pi 与 MCP/mailbox 使用同类纠正反馈：没有“两次纠正后抛出”的次数上限，同类拒绝每 3 次保存并返回一次 Manager 提醒，累计次数从 task_history 恢复，角色/任务现有资源预算及权限检查仍生效。Manager 可通过任务上下文的 submission_reports 和历史查询读取提醒、拒绝及工具原始记录。
+提交拒绝在产生处携带原因、期望、实际记录类型/角色/版本以及可查询入口；不可读的引用不泄露其归属。Native、Process、Pi 与 MCP/mailbox 使用同类纠正反馈：没有“两次纠正后抛出”的次数上限，有 tasks 记录的任务会话中，同类拒绝每 3 次保存并返回一次 Manager 提醒，累计次数从 task_history 恢复；非任务 dispatch 等会话仅保留拒绝证据入口，不返回虚构次数或 Manager 提醒，角色/任务现有资源预算及权限检查仍生效。Manager 可通过任务上下文的 submission_reports 和历史查询读取提醒、拒绝及工具原始记录。
