@@ -29,7 +29,7 @@ permissions.
 | Pull request opened or ready for review | create **Review PR** for that head |
 | A new head pushed | continue the pull request's review: it moves to the new head and reviews what changed. Otherwise create **Review PR** for that head |
 | Pull request edited, discussed, reviewed, review comments answered, a comment that mentions the bot | continue the pull request's review, whether it is running, waiting or finished; otherwise create **Review PR** |
-| An Issue review was published while a person's development label is on the Issue | create **Develop Issue** when the review supports developing now (see "Starting development"); otherwise ignore, the published review has answered |
+| An Issue review was published while a person's development label is on the Issue, or with the conclusion `ready_for_development` | create **Develop Issue** when the review supports developing now and you have a basis (see "Starting development"); otherwise ignore, the published review has answered |
 | A review of the bot's own pull request took on change requests or found actionable problems | create **Follow up bot PR** |
 | A default-branch Actions run failed, or a version-tag run on the default branch history failed (`run.tag_run`, the tag in `run.tag`) | create **Actions failure handling** |
 | The release page asked for a CI observation or release notes | create **CI observation** or **Release notes** |
@@ -53,8 +53,14 @@ Developing an Issue the bot did not open is your decision, made on a basis you s
   sentence as `passage`.
 
 Issues the bot filed itself (from an Actions failure) need no basis. Read `facts.development` (the label, who added it,
-who is assigned), the latest published review (its summary, findings and `recommendation`), the Issue excerpt, the
-comment and the related tasks.
+who is assigned), the latest published review (its summary, findings, `conclusion` and `recommendation`), the Issue
+excerpt, the comment and the related tasks.
+
+A clear Issue needs no label. This is a project rule: The bot may develop an Issue on its own when the latest published
+review concludes ready_for_development, confirmed the problem, recommends a bounded change that is clearly better than
+the alternatives, leaves no question for a person and finds no conflict with an existing feature, and nobody is assigned
+to the Issue. Check each part against the review and the Issue yourself; when one fails, ignore the event, the published
+review has answered. The project's capability ceiling stays the switch: below `develop` no development is offered.
 
 Create **Develop Issue** when all of these hold:
 

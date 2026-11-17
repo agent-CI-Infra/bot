@@ -20,7 +20,7 @@
 | `comment` 可评论和打标签 | 写 Issue 和 PR：评论、加删标签、改标题和正文、指派人、关闭或重开、提 Issue、发检视，Actions 失败可以重跑一次；不改代码 | Issues、Pull requests |
 | `develop` 可开发并开 PR | 还可以改代码、交付 bot PR | 再加 Contents（文件、分支和引用、合并 PR） |
 
-合并 PR 是 Contents 写，包含在 `develop` 里，Manager 默认就有，不单设一档。上限在启动项目时选择（默认 `comment`；受信任组织可以预设它下面的项目启动时的档位，见[管理员手册](admin.md)），之后由项目管理员在「监听与触发」修改。bot 的每一次写入都在上限之内：
+合并 PR 是 Contents 写，包含在 `develop` 里，Manager 默认就有，不单设一档；提示词要求 bot 不自行合并，见[在角色配置里调整行为](rules.md#bot-开的-pr-怎样跟进修改)。上限在启动项目时选择（默认 `comment`；受信任组织可以预设它下面的项目启动时的档位，见[管理员手册](admin.md)），之后由项目管理员在「监听与触发」修改。bot 的每一次写入都在上限之内：
 
 - 工作类型：检视、通用回复和 Actions 失败处理要 `comment`，开发和开发任务要 `develop`；普通事项、CI 观察和发行说明在任何档位都能运行。工作类型的写入（默认值或项目保存的值）超过上限的部分不生效，降回上限后自动恢复。普通事项的写入默认继承上限：`develop` 时可以修改代码并交付 PR。
 - `github_write`：Issues 和 Pull requests 路由要 `comment`，Contents 路由要 `develop`。项目角色、飞书群、管理助手都经同一个入口，超过上限时返回 `capability_ceiling`，带 `needed`（需要的档位）和 `ceiling`（项目当前档位），不发出任何请求。角色的 GitHub 写权限、群档位和私聊里本人的权限都只能在上限之下再收窄。
@@ -54,7 +54,7 @@
 | `pull_request.updated` | PR 修改、可信讨论、提交检视、回复检视意见 | `review_pr_discussion`，默认还要 `review_pull_requests` 开着 |
 | `pull_request.mention` | PR 上的评论提到 bot | 默认跟随 `review_pull_requests` |
 | `pull_request.labeled` | 有人给 PR 加上项目登记的标签 | 标签列表 |
-| `review.published` | 检视发布：Issue 上有人加的开发标签时的 Issue 检视，或 bot PR 的检视采纳了修改要求、发现可执行问题 | `review.published.issue`、`review.published.pr` |
+| `review.published` | 检视发布：Issue 上有人加的开发标签时的 Issue 检视；能力上限为 `develop` 时，结论为「可开发」（`conclusion` 为 `ready_for_development`）的 Issue 检视（没有开发标签也算，#1026）；或 bot PR 的检视采纳了修改要求、发现可执行问题 | `review.published.issue`、`review.published.pr` |
 | `development.stopped` | Issue 的开发因开发标签被去掉（或 Actions 提报的 Issue 被指派给别人）停在 `waiting_permission`（#815） | 无单独开关，项目启用即可 |
 | `release.manual` | 「发版本」页请求 CI 观察或起草发行说明 | 对应工作类型的开关 |
 | `actions.run_failed` | 默认分支的 Actions 运行失败，或推送标签触发、提交在默认分支历史上的运行失败（版本标签运行，事件写明标签名，见 [Actions 失败分类与提报](actions-failures.md#运行范围与扫描)） | Actions 失败处理的开关 |

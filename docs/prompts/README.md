@@ -28,5 +28,5 @@
 
 - **检视输出**：PR 与 Issue 检视都通过 `finish_review` 返回，总结和每条发现分开；有真实 diff 位置的发现走行内，其余并入一条总结评论。GitHub review event 只用 COMMENT，模型不批准、不请求变更、不合并，也不调用标签接口。
 - **工具边界**：PR 检视可以读代码、跑仓库已有的测试和 lint，不直接执行 PR 首次加入的脚本，不抓取 PR 文本里的 URL，不改工作树。这条只写在 `pr-review.md`；开发任务必须改文件。Issue 检视只能打开指向 GitHub（`github.com`、`*.githubusercontent.com`）的链接，其他主机的链接不打开。模型需要自己读本仓库的 Issue、PR、评论、行内检视、Actions 运行和检查状态时，调用 `github_read_token` 兑换只读令牌；令牌不能写，评论、标签、检视和 PR 仍由控制面发布。
-- **开发资格**：开发别人开的 Issue 由项目 Manager 决定，并写明依据：有人（不是 App）加的开发标签、triage 以上权限的维护者在评论里的要求，或 Manager 提示词里的规则；控制面建任务时核对依据并记在任务上，外人的评论不算（见 [manager-dispatch.md](manager-dispatch.md)）。以标签为依据的开发在发布前再查一次标签。限定 `type`／`size`、敏感区域必须人工这类额外条件，只在仓库自己的规则声明时才遵守。PR 由控制面从 Bot 自己的分支发布，PR 说明写明开发的依据和实现的目标。
+- **开发资格**：开发别人开的 Issue 由项目 Manager 决定，并写明依据：有人（不是 App）加的开发标签、triage 以上权限的维护者在评论里的要求，或 Manager 提示词里的规则（内置提示词带一条自主开发规则：检视结论为「可开发」且方案明确时可以自行开发，#1026）；控制面建任务时核对依据并记在任务上，外人的评论不算（见 [manager-dispatch.md](manager-dispatch.md)）。以标签为依据的开发在发布前再查一次标签。限定 `type`／`size`、敏感区域必须人工这类额外条件，只在仓库自己的规则声明时才遵守。PR 由控制面从 Bot 自己的分支发布，PR 说明写明开发的依据和实现的目标。
 - **标签**：可用标签就是仓库里已有的标签，控制面把清单作为 `repository_labels` 交给模型。模型在 `finish_review` 的 `labels` 里选标签，不调用标签接口；控制面在总结评论发布后校验并添加，和检视标签一起加。校验时丢弃以下几类：仓库里没有的标签、保留标签（检视标签、开发标签、`agent/*`、`blocker`、`priority/critical`、`pr/*`、`gate/*`）、Issue 或 PR 上已经有值的维度。`priority` 只保留一个。

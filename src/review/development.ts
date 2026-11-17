@@ -60,12 +60,13 @@ export async function revisionRequests(github:GitHub,task:Row,result:any,input:a
 }
 /**
  * A published review is an event for the Manager when it may lead to development: an Issue review published while a
- * person's development label is on the Issue, or a review of the bot's own pull request that took on change requests or
- * found actionable problems. The control plane's conditions (the capability ceiling at develop, a person's label, Actions clearance,
- * budgets, one revision at a time) decide whether development is offered at all; the Manager decides whether to start it,
- * reading what the review found and who is assigned.
+ * person's development label is on the Issue or that concludes ready_for_development (#1026), or a review of the bot's own
+ * pull request that took on change requests or found actionable problems. The control plane's conditions (the capability
+ * ceiling at develop, a person's label or the review's conclusion, Actions clearance, budgets, one revision at a time) decide
+ * whether development is offered at all; the Manager decides whether to start it, reading what the review found and who is
+ * assigned, and states its basis (without a label, a rule of its prompt).
  */
-export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:Row,input:any,result:any,approved:GoAhead|null=null,requests:RevisionRequest[]=[]){
+export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:Row,input:any,result:any,approved:DevelopmentOffer|null=null,requests:RevisionRequest[]=[]){
   const policy=context.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
   if(!policy?.enabled||!covers(projectCeiling(context.store,task.repository_id,policy),'develop'))return;
   const filters=eventFilters(context.store,task.repository_id,policy),number=task.object_number;
@@ -78,7 +79,8 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
     summary:title,facts,object:{type,number},delivery:task.source_delivery_id,options:[option]});
   if(task.kind==='review.issue'){
     // With a person's development label on the Issue, every published review offers development; whether this review
-    // supports developing now (what it found and recommends, who is assigned) is the Manager's judgement (#815).
+    // supports developing now (what it found and recommends, who is assigned) is the Manager's judgement (#815). Without
+    // the label the engine offers only a review that concluded ready_for_development (approved.label is null then).
     if(!approved||!filters['review.published.issue'])return;
     if(!actionsDevelopmentAllowed(context.store,task.repository_id,number,input.object,result))return;
     if(actionsReport(context.store,task.repository_id,number)&&approved.assignees.length)return;
@@ -89,8 +91,9 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
     // What the control plane did before #207 (for the rule decider in tests): the first development of an unassigned Issue.
     const earlier=context.store.get("SELECT 1 FROM tasks WHERE repository_id=? AND kind='development.issue' AND object_number=? AND unique_key IS NOT NULL LIMIT 1",task.repository_id,number);
     Object.assign(facts,{development:{...approved,bot_pull_request:owned?true:false}});
-    event('issue',`Issue 检视已发布，开发标签已加：#${number}`,{id:'development',work:'development.issue',title:`开发 Issue #${number}`,
-      default:!approved.assignees.length&&!earlier,
+    // The rule decider of the tests never develops without a label, as before #1026.
+    event('issue',approved.label?`Issue 检视已发布，开发标签已加：#${number}`:`Issue 检视已发布，结论为可开发：#${number}`,{id:'development',work:'development.issue',title:`开发 Issue #${number}`,
+      default:!!approved.label&&!approved.assignees.length&&!earlier,
       spec:{type:'object',kind:'development.issue',number,head:null,input:{review:result,object_hash:input.object_hash},delivery:task.source_delivery_id,source_task:task.id,update_id:task.id}});
   }else{
     if(!filters['review.published.pr'])return;
@@ -127,6 +130,11 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
 
 /** A person's go-ahead for developing an Issue, as the Manager reads it. */
 export interface GoAhead { label:string; labeled_by:string; assignees:string[] }
+/**
+ * What an Issue review offers development on: a person's go-ahead, or without one an Issue review that concluded
+ * ready_for_development (#1026), where label and labeled_by are null and the Manager needs another basis.
+ */
+export type DevelopmentOffer = GoAhead | { label:null; labeled_by:null; assignees:string[] };
 // The goal of a development: the Manager's brief for an Issue (#815); a revision of a bot pull request carries the goal of the
 // development that opened it (input.review.implementation_goal is set by the control plane, never by a review since #815).
 /**
