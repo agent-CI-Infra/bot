@@ -45,7 +45,8 @@ test('real Pi Manager uses native shell, repository instructions and project Ski
  const model=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);requests.push(body);
   const names=body.tools.map(t=>t.function.name);assert.ok(names.includes('bash'));assert.ok(names.includes('read'));assert.ok(names.includes('write'));assert.ok(!names.includes('read_ci_evidence'));
   assert.match(JSON.stringify(body.messages),/PROJECT_INSTRUCTION_834/);assert.match(JSON.stringify(body.messages),/triage834/);
-  const message=requests.length===1?call('bash',{command:'cat evidence.txt; printf "native-result" > native-result.txt'}):call('finish_coordination',{action:'wait',reason:'Read actual evidence: fixture-ci-infrastructure-unavailable',resume_condition:'CI service is restored'});
+  assert.match(JSON.stringify(body.messages),/roadmap-decomposition/);
+  const message=requests.length===1?call('read_skill',{path:'defaults/roadmap-decomposition/SKILL.md'}):requests.length===2?call('bash',{command:'cat evidence.txt; printf "native-result" > native-result.txt'}):call('finish_coordination',{action:'wait',reason:'Read actual evidence: fixture-ci-infrastructure-unavailable',resume_condition:'CI service is restored'});
   res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:20,completion_tokens:20}}));
  });model.listen(0,'127.0.0.1');await once(model,'listening');
  t.after(async()=>{await manager.recover();model.closeAllConnections();await new Promise(r=>model.close(r));s.close();rmSync(root,{recursive:true,force:true});});
@@ -64,8 +65,9 @@ test('real Pi Manager uses native shell, repository instructions and project Ski
  writeFileSync(join(repo,'evidence.txt'),'fixture-ci-infrastructure-unavailable');
  await assert.rejects(runTeam({store:s,task,redactor:new Redactor(),guard:async()=>{},system:'Task',prompt:'{}',tools:[]},{prepare:async()=>{},controller:controllerWorkspace(workspace)}),{code:'manager_deferred',state:'retry_wait'});
  assert.equal(readFileSync(join(repo,'native-result.txt'),'utf8'),'native-result');
- assert.equal(requests.length,2);assert.match(JSON.stringify(requests[1].messages),/fixture-ci-infrastructure-unavailable/);
- const bound=logs.find(e=>e.type==='session_bound');assert.ok(bound.session_id);assert.ok(bound.transcript);assert.ok(bound.resources.skills.includes('triage834'));
+ assert.equal(requests.length,3);assert.match(JSON.stringify(requests[1].messages),/current allocation of responsibility/);assert.match(JSON.stringify(requests[2].messages),/fixture-ci-infrastructure-unavailable/);
+ const bound=logs.find(e=>e.type==='session_bound');assert.ok(bound.session_id);assert.ok(bound.transcript);assert.ok(bound.resources.skills.includes('triage834'));assert.ok(bound.resources.skills.includes('roadmap-decomposition'));
+ assert.ok(s.get("SELECT 1 FROM task_history WHERE type='skill_read' AND json_extract(data,'$.path')='defaults/roadmap-decomposition/SKILL.md'"));
 });
 
 test('effective access is prepared from one permission definition',()=>{
