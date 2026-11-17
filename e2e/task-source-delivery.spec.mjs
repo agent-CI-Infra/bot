@@ -14,7 +14,7 @@ test('task detail names the webhook delivery that created it and opens its detai
   const errors = [];
   page.on('pageerror', err => errors.push(err.message));
   try {
-    await page.goto(h.admin + '/#/inbox/101');
+    await page.goto(h.admin + '/#/projects/101/inbox');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();

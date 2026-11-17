@@ -98,7 +98,7 @@ test('switching scope preserves each page type and keeps global and personal set
     await login(page, h, password);
     h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,phase) VALUES('switch-task','101','review.issue','failed','scope task','model')");
     for (const [from, expected] of [
-      ['#/inbox/101', '#/inbox/202'], ['#/new-task/101', '#/new-task/202'],
+      ['#/projects/101/inbox', '#/projects/202/inbox'], ['#/projects/101/new-task', '#/projects/202/new-task'],
       ['#/projects/101/overview', '#/projects/202/overview'], ['#/projects/101/roles', '#/projects/202/roles'],
       ['#/projects/101/release', '#/projects/202/release'], ['#/projects/101/knowledge', '#/projects/202/knowledge'],
       ['#/projects/101/menu', '#/projects/202/menu'], ['#/tasks/switch-task', '#/projects/202/overview'],
@@ -115,7 +115,7 @@ test('switching scope preserves each page type and keeps global and personal set
       await expect(page).toHaveURL(h.admin + '/' + expected);
       await expect(trigger(page)).toHaveAttribute('data-project-id', '202');
     }
-    for (const [from, expected] of [['#/inbox/202', '#/inbox'], ['#/new-task/202', '#/new-task'], ['#/projects/202/roles', '#/projects']]) {
+    for (const [from, expected] of [['#/projects/202/inbox', '#/inbox'], ['#/projects/202/new-task', '#/new-task'], ['#/projects/202/roles', '#/projects']]) {
       await page.goto(h.admin + '/' + from); await switchConsoleProject(page, '');
       await expect(page).toHaveURL(h.admin + '/' + expected);
       await expect(trigger(page)).toHaveAttribute('data-project-id', '');
@@ -165,7 +165,7 @@ test('mobile range bar stays visible on board, inbox and projects; drawer is sea
     await login(page, h, password);
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 844 });
-      for (const hash of ['#/board', '#/inbox/101', '#/projects/101/overview']) {
+      for (const hash of ['#/board', '#/projects/101/inbox', '#/projects/101/overview']) {
         await page.goto(h.admin + '/' + hash);
         await expect(page.locator('#console-mobile-project')).toBeVisible();
         await expect(page.locator('#console-mobile-nav')).toBeVisible();

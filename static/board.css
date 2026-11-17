@@ -81,6 +81,7 @@ body.board-mode .list-panel>.toolbar{display:none}
 .board-view-controls .board-view-choice select{max-width:180px}
 .board-view-state{flex:none;padding:2px 7px;border-radius:999px;background:var(--color-warning-bg);color:var(--color-warning);font-size:var(--font-size-1);line-height:18px;white-space:nowrap}
 .board-view-controls .board-save{flex:none}
+.board-view-scope-note{flex-basis:100%;font-size:var(--font-size-1);overflow-wrap:anywhere}
 .board-spacer{flex:1}
 .board-chips{display:flex;gap:6px;flex-wrap:wrap}
 .board-chips:empty{display:none}

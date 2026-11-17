@@ -2,8 +2,10 @@ async function renderManagementPage() {
   const receipt = /^#\/management\/commands\/([a-f0-9]+)$/.exec(location.hash)?.[1];
   if (receipt) { leaveManagementPage(receiptShownId === receipt); await renderManagementReceiptPage(receipt); return; }
   hideManagementReceiptPage();
-  syncManagementChat(); const project = managementChat?.requestedProject || null;
-  if (managementChat) managementChat.requestedProject = null;
+  syncManagementChat(); const project = consoleScope();
+  if (paintedAddress && !/^#\/management(?:\/|$)/.test(paintedAddress) && projectRoute(paintedAddress)?.section !== 'management') {
+    managementChat.returnAddress = paintedAddress;
+  }
   window.scrollTo(0, 0); await openManagementChat(project, { mode: 'page' });
 }
 function leaveManagementPage(keepReceipt = false) {
@@ -76,7 +78,7 @@ async function openManagementChat(projectId = null, { mode = 'floating' } = {}) 
       chat.client = client;
       // #623: the picker may have moved while this panel was connecting, and the render chose its scope before that
       // change. Now that a client exists, replay the change so the control, the sentence and the conversation follow.
-      if (client && pendingScopeChange.has(chat)) { pendingScopeChange.delete(chat); followSharedScope(chat); }
+      if (client) syncManagementScope();
     }).catch(err => {
       if (managementChat !== chat || timedOut || cancelled) return;
       const box = consoleState('无法连接管理助手', managementAccessMessage(err), { tone: 'error', retry: reconnect });
@@ -87,29 +89,15 @@ async function openManagementChat(projectId = null, { mode = 'floating' } = {}) 
   }
   await chat.loading;
   if (managementChat !== chat || version !== chat.openVersion || !chat.client) return;
-  if (projectId) await chat.client.setScope('project:' + projectId);
+  await syncManagementScope();
   if (!chat.window.hidden && document.activeElement === focusAtOpen) chat.client.focus();
   activity(chat.active);
 }
 
-// #480: the shell picker can change while the assistant is open. An explicit page-local scope survives that; otherwise the
-// open chat follows the new default, so the header, the scope control and the conversation cannot describe two projects.
-// The control itself is written by setScope: writing it here first would leave its change handler convinced the scope was
-// already current, so the conversation would stay on the old project.
-function followSharedScope(chat) {
-  const select = chat.panel.querySelector('select[aria-label="当前管理作用域"]');
-  if (!select) return;
-  // #493: a page-local override keeps the scope and the conversation the reader chose, but the sentence beside the control
-  // still has to name the default the shell picker now shows; only the note is rewritten, in this same frame. Rewriting it
-  // also re-decides the override flag against that default, so a picker that lands on the page's own project clears the
-  // flag here and the next change follows it instead of rewording the sentence again.
-  if (select.dataset.override === '1') { chat.client.refreshScopeNote?.(); return; }
-  const shared = typeof consoleDefaultProject === 'function' ? consoleDefaultProject() : null;
-  const value = shared && [...select.options].some(option => option.value === 'project:' + shared) ? 'project:' + shared : 'platform';
-  chat.client.setScope(value).catch(() => { /* the chat reports its own reconnect state */ });
-}
-addEventListener('console-scope-change', () => {
+// Both the page and floating assistant use the resolved address. A connection completing late re-reads this value.
+function syncManagementScope() {
   const chat = managementChat;
-  if (!chat?.client) { if (chat) pendingScopeChange.set(chat, true); return; }
-  followSharedScope(chat);
-});
+  if (!chat?.client) return;
+  const project = consoleScope();
+  return chat.client.setScope(project ? 'project:' + project : 'platform').catch(() => { /* The chat renders its own access error. */ });
+}

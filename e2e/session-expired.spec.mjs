@@ -18,7 +18,7 @@ test('登录过期后各页显示登录已过期与重新登录，只有一条�
     await expect(page.locator('#who')).toContainText('项目管理员');
     f.h.store.run('DELETE FROM sessions');
     const banner = page.locator('.session-expired-banner');
-    for (const [name, hash] of [['projects', '#/projects'], ['identity', '#/identity'], ['costs', '#/costs'], ['inbox', '#/inbox/101']]) {
+    for (const [name, hash] of [['projects', '#/projects'], ['identity', '#/identity'], ['costs', '#/costs'], ['inbox', '#/projects/101/inbox']]) {
       await page.evaluate(h => { location.hash = h; }, hash);
       const card = page.locator('[data-session-expired]:visible').first();
       await expect(card.getByRole('heading', { name: '登录已过期' })).toBeVisible();

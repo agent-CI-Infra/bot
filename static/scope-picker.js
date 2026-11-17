@@ -100,6 +100,7 @@ function openScopePicker(trigger) {
   scopePickerTrigger = trigger; $('console-scope-search').value = ''; drawScopePicker();
   if (consoleMedia.matches) panel.showModal(); else panel.show();
   for (const button of [$('console-project'), $('console-mobile-project')]) button.setAttribute('aria-expanded', 'true');
+  trigger.setAttribute('aria-expanded', 'true');
   $('console-scope-search').setAttribute('aria-expanded', 'true');
   $('console-scope-search').focus(); activateScopeOption(scopePickerActive);
 }
@@ -108,6 +109,7 @@ function closeScopePicker(restore = true) {
   panel.close();
   for (const button of [$('console-project'), $('console-mobile-project')]) button.setAttribute('aria-expanded', 'false');
   $('console-scope-search').setAttribute('aria-expanded', 'false');
+  scopePickerTrigger?.setAttribute('aria-expanded', 'false');
   if (restore) scopePickerTrigger?.focus({ preventScroll: true });
   scopePickerTrigger = null;
 }
@@ -116,17 +118,9 @@ async function chooseConsoleScope(id) {
   if ((consoleScope() || null) === id) return;
   if (id && !repositories.some(row => String(row.id) === id)) return;
   if (typeof confirmKnowledgeLeave === 'function' && !await confirmKnowledgeLeave()) return;
-  // Commit only after the existing editor guard accepts. The default must be ready before hashchange: a second
-  // navigation can replace that pending event, and must still see the scope the reader just chose.
-  setConsoleDefaultProject(id); consoleProject = id;
-  if (/^#\/(board|costs|management)(\/|$)/.test(location.hash)) {
-    if (tab === 'management') syncConsoleShell(); else route().catch(error);
-    return;
-  }
   const project = projectRoute();
-  if (consoleInboxRoute()) location.hash = '#/inbox' + (id ? '/' + id : '');
-  else if (/^#\/new-task(?:\/|$)/.test(location.hash)) location.hash = '#/new-task' + (id ? '/' + id : '');
-  else location.hash = id ? `#/projects/${id}/${project?.section || 'overview'}` : '#/projects';
+  const page = projectConsolePages.includes(tab) ? tab : project?.section || 'projects';
+  location.hash = id ? consolePageAddress(page, id) : consolePageAddress(projectConsolePages.includes(page) ? page : 'projects', null);
 }
 function initScopePicker() {
   const panel = document.createElement('dialog'); panel.id = 'console-scope-picker'; panel.className = 'console-scope-picker';
@@ -150,7 +144,7 @@ function initScopePicker() {
   panel.addEventListener('cancel', event => { event.preventDefault(); closeScopePicker(); });
   footer.addEventListener('click', event => { if (event.target.closest('a')) closeScopePicker(); });
   document.addEventListener('click', event => {
-    if (panel.open && !panel.contains(event.target) && !event.target.closest('.console-scope-trigger')) closeScopePicker();
+    if (panel.open && !panel.contains(event.target) && !event.target.closest('.console-scope-trigger, [data-scope-picker-trigger]')) closeScopePicker();
   });
   document.addEventListener('keydown', event => {
     if (!me || event.key.toLowerCase() !== 'k' || !(event.ctrlKey || event.metaKey) || event.altKey || event.isComposing) return;

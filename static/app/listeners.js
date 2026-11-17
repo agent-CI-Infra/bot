@@ -50,8 +50,9 @@ $('logout').addEventListener('click', async () => {
 // A click can land on a tab's icon or label span (#554), so resolve the tab from the nearest [data-tab] ancestor.
 $('tabs').addEventListener('click', async event => { const name = event.target.closest?.('[data-tab]')?.dataset.tab; if (!name) return;
   if (typeof confirmKnowledgeLeave === 'function' && !await confirmKnowledgeLeave()) return;
-  if (name === 'management') { void openManagementPage(projectRoute()?.id || null).catch(error); return; }
-  if (location.hash !== tabAddresses[name]) history.pushState(null, '', tabAddresses[name]); offset = 0; route().catch(error); });
+  if (name === 'management') { void openManagementPage(consoleScope()).catch(error); return; }
+  const address = ['projects', ...projectConsolePages].includes(name) ? consolePageAddress(name) : tabAddresses[name];
+  if (location.hash !== address) history.pushState(null, '', address); offset = 0; route().catch(error); });
 $('refresh').addEventListener('click', () => start().catch(error));
 // The onboarding dialog calls this once a run reaches a terminal state.
 window.refreshIntegrations = () => api('/api/integrations/check', 'POST', {}).then(() => start()).catch(() => {});

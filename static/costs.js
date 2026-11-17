@@ -44,42 +44,20 @@ function costChartValue(row,tokens) {
 }
 async function renderCosts(request) {
   const owner=me.id,panel=$('costs-panel');panel.replaceChildren();
-  if(costState?.owner!==owner){const to=timestamp(Date.now()).slice(0,10);costState={owner,to,from:new Date(Date.parse(to+'T00:00:00Z')-29*86400000).toISOString().slice(0,10),currency:'USD',repository_id:'',scopeTouched:false};}
-  // A project this page named can lose its grant while the page keeps the choice. Widening the query to every project while
-  // still calling it the shell default would describe numbers that are not the reader's scope, so the page returns to the
-  // default and the sentence says that again.
-  if(costState.repository_id&&!repositories.some(r=>r.id===costState.repository_id)){costState.repository_id='';costState.scopeTouched=false;}
-  // #480: the page starts on the shell picker's project unless the reader has chosen a scope here. The choice is kept for
-  // this visit only and is always shown as an override of the shared default, so the numbers never describe another project.
-  const sharedScope=typeof consoleDefaultProject==='function'?consoleDefaultProject():null;
-  const defaultScope=sharedScope&&repositories.some(r=>String(r.id)===String(sharedScope))?String(sharedScope):'';
-  if(!costState.scopeTouched)costState.repository_id=defaultScope;
-  // Three facts only: the page follows the shared default, the page names a project, or the page covers every accessible
-  // project. "Touched but empty" is the third case, not the default: the request carries no repository then.
-  const scopeCaption=()=>{
-    const name=id=>repositories.find(r=>String(r.id)===id)?.full_name||('仓库 '+id),own=costState.repository_id?name(costState.repository_id):'';
-    if(!defaultScope)return '生效范围：'+(own?own+'（本页覆盖）':'所有有权访问的项目（顶栏未选项目）');
-    if(!costState.scopeTouched)return `生效范围：${name(defaultScope)}（顶栏默认）`;
-    return `生效范围：${own||'所有有权访问的项目'}（本页覆盖；顶栏默认：${name(defaultScope)}）`;
-  };
+  if(costState?.owner!==owner){const to=timestamp(Date.now()).slice(0,10);costState={owner,to,from:new Date(Date.parse(to+'T00:00:00Z')-29*86400000).toISOString().slice(0,10),currency:'USD'};}
   const form=element('form','','cost-filters');
   for(const [name,caption]of [['from','开始日期（本地）'],['to','结束日期（本地）']]){
     const input=document.createElement('input');Object.assign(input,{name,type:'date',required:true,value:costState[name]});form.append(costControl(caption,input));
   }
   const currency=document.createElement('select');currency.name='currency';currency.setAttribute('aria-label','费用币种');
   [['USD','美元 USD'],['CNY','人民币 CNY']].forEach(([value,name])=>currency.add(new Option(name,value)));currency.value=costState.currency;form.append(costControl('费用币种',currency));
-  const repo=document.createElement('select');repo.name='repository_id';repo.setAttribute('aria-label','统计项目');repo.add(new Option('所有有权访问的项目',''));repositories.forEach(r=>repo.add(new Option(r.full_name,r.id)));repo.value=costState.repository_id;form.append(costControl('统计项目',repo));
-  const scopeNote=element('p',scopeCaption(),'cost-scope');scopeNote.id='costs-scope';form.append(scopeNote);
-  // Same rule as the board: choosing the default's own project here is still the default, so the sentence and the choice
-  // never disagree about which of the two the reader is looking at.
-  repo.addEventListener('change',()=>{costState.repository_id=repo.value;costState.scopeTouched=repo.value!==defaultScope;scopeNote.textContent=scopeCaption();});
   const submit=element('button','查看统计','quiet');submit.type='submit';form.append(submit);
   const body=element('div','','cost-body');body.id='cost-body';panel.append(form,body);
   form.addEventListener('submit',async event=>{event.preventDefault();Object.assign(costState,Object.fromEntries(new FormData(form)));submit.disabled=true;try{await loadCosts(request);}catch(err){error(err);}finally{submit.disabled=false;}});
   await loadCosts(request);
 }
 async function loadCosts(version) {
-  const request=++costRequest,owner=me.id,params=new URLSearchParams({from:costState.from,to:costState.to,currency:costState.currency,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone});if(costState.repository_id)params.set('repository_id',costState.repository_id);
+  const request=++costRequest,owner=me.id,params=new URLSearchParams({from:costState.from,to:costState.to,currency:costState.currency,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone});if(projectRoute()?.id)params.set('repository_id',projectRoute().id);
   $('cost-body').replaceChildren(consoleState('正在加载统计','正在按当前筛选读取用量。',{tone:'loading'}));
   let data;
   try { data=await api('/api/costs?'+params); }
@@ -152,7 +130,7 @@ async function loadCosts(version) {
   }
   const projectTable=costTable(['项目','已计价费用',tokenMode?'用量占比':'已计价费用占比',...costTokenFields.map(([,label])=>label),'未计价请求']);
   for(const project of projects){
-    const row=document.createElement('tr'),name=element('td',''),dot=element('span','','cost-color');dot.style.backgroundColor=costColor(project.repository_id);name.append(dot,document.createTextNode(project.full_name));
+    const row=document.createElement('tr'),name=element('td',''),dot=element('span','','cost-color');dot.style.backgroundColor=costColor(project.repository_id);name.append(dot,!projectRoute()&&project.repository_id?consoleLink(consolePageAddress('costs',project.repository_id),project.full_name):document.createTextNode(project.full_name));
     const amount=costChartValue(project,tokenMode),total=costChartValue(data.summary,tokenMode);
     row.append(name,costCostCell(project,data.currency),element('td',amount!=null&&total>0?(amount/total*100).toFixed(1)+'%':'—'),...costTokenCells(project),element('td',String(project.unpriced_requests)));projectTable.body.append(row);
   }
@@ -308,7 +286,7 @@ svg.setAttribute('role','group');svg.setAttribute('aria-label',tokens?'每日模
     const row=day.rows.find(item=>item.repository_id===project.repository_id),amount=row&&value(row);
     if(!amount)continue;
     const line=document.createElement('tr'),name=element('td',''),dot=element('span','','cost-color');
-    dot.style.backgroundColor=costColor(project.repository_id);name.append(dot,document.createTextNode(project.full_name));
+    dot.style.backgroundColor=costColor(project.repository_id);name.append(dot,!projectRoute()&&project.repository_id?consoleLink(consolePageAddress('costs',project.repository_id),project.full_name):document.createTextNode(project.full_name));
     line.dataset.date=date;line.dataset.project=project.repository_id;
     line.title=`${date} · ${project.full_name} · ${tokens?metricNumber(amount):money(amount,currency)} · 当日 ${(amount/value(day)*100).toFixed(1)}%`;
     line.append(element('td',date),name,element('td',tokens?metricNumber(amount):money(amount,currency)),element('td',(amount/value(day)*100).toFixed(1)+'%'),element('td',String(row.unpriced_requests||0)));

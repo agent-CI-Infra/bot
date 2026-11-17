@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
@@ -89,7 +90,7 @@ test('the management chat offers a configuration PR only for a skill-backed sect
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await switchConsoleProject(page, '101');
     await page.getByRole('button', { name: '快捷操作', exact: true }).click();
     const workType = page.getByLabel('工作类型', { exact: true }), form = workType.locator('xpath=ancestor::form'), publish = form.getByRole('button', { name: '创建配置 PR', exact: true });
     await expect(form).toContainText('保存的是 Manager 提示词里这类工作的章节'); await expect(publish).toBeHidden();

@@ -25,7 +25,7 @@ async function render(quiet = false) {
   const filtersFold = document.querySelector('[data-testid=project-filters-fold]');
   if (filtersFold) {
     filtersFold.hidden = $('filters').hidden;
-    const active = $('repository-filter').value || $('account-filter').value || $('owner-filter').value;
+    const active = $('account-filter').value || $('owner-filter').value;
     const summary = filtersFold.querySelector('summary');
     if (summary) summary.textContent = active ? '筛选（已设条件）' : '筛选';
     if (active) filtersFold.open = true;

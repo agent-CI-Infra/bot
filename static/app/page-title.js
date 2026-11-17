@@ -45,7 +45,7 @@ function setNotFoundTitle(missing) { applyDocumentTitle(missing); }
 // own h1, or the list heading. A page without one falls back to the skip link's target, which is focusable already.
 function pageHeading(target) {
   const shown = el => !!el && !el.closest('[hidden]') && el.getClientRects().length > 0;
-  const candidates = target ? [document.querySelector('#project-page .project-head h1')]
+  const candidates = target && !projectConsoleRoute(target) ? [document.querySelector('#project-page .project-head h1')]
     : [...document.querySelectorAll('#console-page h1, #settings-panel h1, #page-title')];
   const heading = candidates.find(shown);
   if (heading) return heading;

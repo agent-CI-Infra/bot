@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { openScheduleTimeRules } from './open-schedule-folds.mjs';
 import { channelFixture, privateChat, registerDestination } from '../test/channel-fixture.mjs';
@@ -13,7 +14,7 @@ async function login(page, f) {
   await page.goto(f.h.admin + '/#/management');
   await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
-  await page.getByLabel('当前管理作用域').selectOption('project:101');
+  await switchConsoleProject(page, '101');
   await page.getByRole('button', { name: '快捷操作', exact: true }).click();
   await expect(page.getByRole('button', { name: '预览日报计划', exact: true })).toBeVisible();
 }

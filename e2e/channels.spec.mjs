@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { channelFixture, envelope, post, finished, until, inGroup } from '../test/channel-fixture.mjs';
@@ -21,12 +22,12 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     const operation = h.store.get("SELECT * FROM management_commands WHERE channel='im'"); expect(operation.state).toBe('succeeded');
     await until(() => wire.sent.some(s => JSON.stringify(s.content).includes('已执行')));
     await page.getByRole('button', { name: '管理助手', exact: true }).click();
-    await page.getByLabel('当前管理作用域').selectOption('platform');
+    await switchConsoleProject(page, '');
     await page.getByText('会话记录', { exact: true }).click();
     await page.getByLabel('持久会话').selectOption(result.conversation_id);
     const feed = page.getByRole('log', { name: '管理会话记录' });
     await expect(feed).toContainText(operation.id); await expect(feed).toContainText('操作 更新工作配置 · 已执行');
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await switchConsoleProject(page, '101');
     await page.getByRole('button', { name: '快捷操作', exact: true }).click();
     await expect(page.getByLabel('默认提示词', { exact: true })).toHaveValue('Inspect evidence and cite the original logs.');
     await page.screenshot({ path: '.tmp/channels-165/shared-operation-desktop.png', fullPage: true });

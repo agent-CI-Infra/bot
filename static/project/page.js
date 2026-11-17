@@ -29,7 +29,20 @@ async function renderProject(route) {
     return; }
   if (token !== renderToken) return;
   current.unavailable = null;
-  const known = route.section === 'menu' || projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin'));
+  if (projectConsoleRoute(route)) {
+    current.section = route.section; current.shownSection = route.section;
+    if (!repositories.some(repo => String(repo.id) === route.id)) repositories.push(current.repository);
+    page.replaceChildren(); page.hidden = true;
+    const consolePage = ['inbox', 'new-task'].includes(route.section);
+    document.querySelector('.list-panel').hidden = consolePage || route.section === 'management';
+    $('console-page').hidden = !consolePage;
+    if (consolePage) await renderConsolePage(renderVersion);
+    else if (route.section === 'management') await renderManagementPage();
+    else await render();
+    if (token === renderToken && typeof syncConsoleShell === 'function') syncConsoleShell();
+    return;
+  }
+  const known = route.section === 'menu' || projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin') && (!projectConsolePages.includes(key) || projectConsoleRoute(route)));
   const section = known ? route.section : 'basic';
   // A newly granted or externally created project may not be in the list loaded at login.
   if (!repositories.some(repo => String(repo.id) === String(current.id))) repositories.push(current.repository);
@@ -100,7 +113,7 @@ function projectUnavailable(err, route) {
 async function loadProject(id,section=current.section) {
   const superUser = me.role === 'super_admin';
   // Capture the visited object before awaiting: a different project replaces current while this request is in flight.
-  const overview = section === 'overview' || section === 'menu', target = current;
+  const overview = section === 'overview' || section === 'menu' || projectConsolePages.includes(section), target = current;
   const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), overview ? null : api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, overview ? null : api('/api/repositories/'+id+'/rules').catch(()=>null), overview ? null : api(superUser ? '/api/models' : '/api/models?repository_id='+id).catch(()=>null)]);
   const external=section==='external'?await loadExternalProject(id):null;
   Object.assign(target, { external, repository: repo.repository, canConfigure: repo.can_configure, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, environmentReadError:'', installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
@@ -153,7 +166,6 @@ function projectHeader(section = current.section) {
   const chat = element('a', '管理助手', 'button-link btn-primary');
   chat.href = `#/projects/${current.id}/management`;
   chat.dataset.testid = 'project-open-chat';
-  chat.addEventListener('click', event => { event.preventDefault(); void openManagementChat(current.id).catch(error); });
   // #707: the way into the settings categories on every project page, including on a phone where the category nav is hidden.
   const settings = element('a', '设置', 'button-link btn-secondary');
   settings.href = `#/projects/${current.id}/${projectSettingsSections[0][0]}`;
@@ -213,10 +225,6 @@ function menuSection() {
       card.setAttribute('aria-label', caption);
       card.dataset.testid = 'project-hub-' + key;
       card.append(element('strong', caption), element('span', hint));
-      if (key === 'management') {
-        const project = current.id;
-        card.addEventListener('click', event => { event.preventDefault(); void openManagementChat(project).catch(error); });
-      }
       grid.append(card);
     }
     group.append(grid);

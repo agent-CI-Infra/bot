@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { channelFixture, privateChat, registerDestination } from '../test/channel-fixture.mjs';
@@ -20,7 +21,7 @@ async function environment() {
 }
 async function login(page,f){
   await page.goto(f.h.admin+'/#/management');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);await page.getByRole('button',{name:'登录',exact:true}).click();
-  await page.getByLabel('当前管理作用域').selectOption('project:101');await page.getByRole('button',{name:'快捷操作',exact:true}).click();
+  await switchConsoleProject(page, '101');await page.getByRole('button',{name:'快捷操作',exact:true}).click();
   await page.getByRole('button',{name:'查看通知及失败队列',exact:true}).click();
   await expect(page.locator('.schedule-record')).toHaveCount(1);
 }
@@ -67,8 +68,8 @@ test('a confirmed reply arriving after a scope switch unlocks the reopened origi
     f.h.store.run("update notification_outbox set state='dead' where id=?",f.delivery.id);await login(page,f);await card(page).locator(':scope > summary').click();
     await page.route('**/api/management/commands',async route=>{if(route.request().postDataJSON().operation!=='notification.retry'){await route.continue();return;}commands++;const response=await route.fetch();entered();await gate;await route.fulfill({response});});
     await page.getByRole('button',{name:'人工补发 '+f.delivery.id.slice(0,12),exact:true}).click();await page.getByRole('button',{name:'确认人工补发',exact:true}).click();await seen;
-    await page.getByLabel('当前管理作用域').selectOption('project:102');await expect(page.getByLabel('通知补发回执')).toBeEmpty();
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await switchConsoleProject(page, '102');await expect(page.getByLabel('通知补发回执')).toBeEmpty();
+    await switchConsoleProject(page, '101');
     await expect(page.getByRole('button',{name:'核对同一次通知补发',exact:true})).toBeDisabled();release();
     await expect(page.getByLabel('通知补发回执')).toBeEmpty();await expect(page.getByRole('status').filter({hasText:'已读取 1 条记录'})).toBeVisible();
     expect(commands).toBe(1);expect(f.h.store.get('select manual_retries from notification_outbox').manual_retries).toBe(1);

@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { managementFixture } from '../test/management-fixture.mjs';
@@ -50,7 +51,7 @@ test('#641 连接请求一直没有返回时 10 秒内进入失败态，「重�
     // Retrying really reconnects: the second request is allowed through and the scope control appears.
     hanging = false;
     await retry.click();
-    await expect(page.locator('#management-chat').getByLabel('当前管理作用域')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('#management-chat .management-scope-name')).toBeVisible({ timeout: 15000 });
     expect(attempts).toBeGreaterThanOrEqual(2);
     expect(errors).toEqual([]);
   } finally {
@@ -67,7 +68,7 @@ test('#641 长视口与短视口（含 768×432 的 250% 缩放）下面板四�
     await page.goto(f.h.admin + '/#/projects');
     await signIn(page, f.h, f.password);
     await page.locator('#management-launcher').click();
-    await expect(page.locator('#management-chat').getByLabel('当前管理作用域')).toBeVisible();
+    await expect(page.locator('#management-chat .management-scope-name')).toBeVisible();
     const measure = () => page.evaluate(() => {
       const box = node => {
         if (!node || !node.getClientRects().length || getComputedStyle(node).display === 'none') return null;
@@ -140,7 +141,7 @@ test('#641 手机从底栏打开管理助手：390×500 下面板与输入区都
     const bar = page.locator('#console-mobile-nav a[data-page="assistant"]');
     await expect(bar).toBeVisible(); await bar.click();
     const panel = page.locator('#management-chat');
-    await expect(panel.getByLabel('当前管理作用域')).toBeVisible({ timeout: 15000 });
+    await expect(panel.locator('.management-scope-name')).toBeVisible({ timeout: 15000 });
     const measure = () => page.evaluate(() => {
       const rect = node => { const r = node.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, height: r.height }; };
       const win = document.getElementById('management-chat');
@@ -187,7 +188,7 @@ test('#641 短手机（390×500）连接后状态栏可见且是单行（有文�
     const navBar = page.locator('#console-mobile-nav a[data-page="assistant"]');
     await expect(navBar).toBeVisible(); await navBar.click();
     const panel = page.locator('#management-chat');
-    await expect(panel.getByLabel('当前管理作用域')).toBeVisible({ timeout: 15000 });
+    await expect(panel.locator('.management-scope-name')).toBeVisible({ timeout: 15000 });
     // The bar is not only the failure exit: it carries the normal progress text too (正在读取会话… / 就绪 / 处理中),
     // so at this height it has to stay on screen as one compact line rather than be removed (#641 review).
     const status = panel.locator('.management-status');
@@ -222,7 +223,7 @@ test('#641 短手机（390×500）断流后错误文案与「重新连接」可�
     const navBar = page.locator('#console-mobile-nav a[data-page="assistant"]');
     await expect(navBar).toBeVisible(); await navBar.click();
     const panel = page.locator('#management-chat');
-    await expect(panel.getByLabel('当前管理作用域')).toBeVisible({ timeout: 15000 });
+    await expect(panel.locator('.management-scope-name')).toBeVisible({ timeout: 15000 });
     const message = page.getByLabel('管理消息', { exact: true });
     await message.fill('检查任务进展'); await panel.getByRole('button', { name: '发送', exact: true }).click();
     const statusBar = panel.locator('.management-status-bar'), status = statusBar.locator('.management-status');
@@ -279,7 +280,7 @@ test('#641 离开悬浮面板时不继承短盒紧凑布局：全屏与对话页
     await signIn(page, f.h, f.password);
     await page.locator('#management-launcher').click();
     const panel = page.locator('#management-chat');
-    await expect(panel.getByLabel('当前管理作用域')).toBeVisible({ timeout: 20000 });
+    await expect(panel.locator('.management-scope-name')).toBeVisible({ timeout: 20000 });
     // Shrink the floating panel below 520px with its own resize grip: that is the state whose tag must not survive.
     const grip = panel.locator('.management-size-handle');
     await grip.focus();
@@ -361,7 +362,7 @@ test('#874 断流错误后重连成功，状态栏从 alert 回到 status，普�
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await switchConsoleProject(page, '101');
     await expect(page.getByRole('button', { name: '发送', exact: true })).toBeEnabled();
     // The stream breaks while a turn is in flight: the read says the connection is interrupted.
     await page.route('**/events?stream=1&after=*', route => route.abort('failed'));

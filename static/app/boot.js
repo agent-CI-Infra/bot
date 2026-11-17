@@ -92,7 +92,8 @@ async function start() {
     showBootFailure(err, { keepSession: true }); return;
   }
   accounts = listedAccounts; options($('account-filter'), accounts, a => a.name);
-  if(me.role==='super_admin'&&!accounts.length&&!location.hash)history.replaceState(null,'','#/settings/onboarding/0');
+  if(me.role==='super_admin'&&!accounts.length&&(!location.hash||location.hash==='#/'))history.replaceState(null,'','#/settings/onboarding/0');
+  else restoreConsoleStart(listed);
   // #945: this read of the whole list is the same read the notice's button makes, so it goes through the one function that
   // counts it as the recovery — clearing the notice and drawing the project picker and the pages from the new list.
   if (!(await applyGithubRepositories(me, listed))) await route();

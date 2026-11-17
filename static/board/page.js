@@ -64,11 +64,6 @@ function boardShell() {
   const summary=element('summary','筛选');summary.addEventListener('click',()=>{boardState.filterOpen=!filters.open;});filters.append(summary);
   const controls=element('div','','board-filter-controls');controls.setAttribute('role','group');controls.setAttribute('aria-label','筛选');
   const apply=async(field,value,rebuild=false)=>{boardSetFilter(field,value);if(rebuild)boardShell();else boardChips();await boardLoadCards().catch(error);};
-  const repoChoices=[['','全部仓库'],...repositories.map(r=>[r.id,r.full_name])],repo=boardEffectiveScope();
-  if(repo&&!repoChoices.some(c=>c[0]===repo))repoChoices.push([repo,'仓库不可访问']);
-  // #482: repositories and work types grow with the account, so they are compact selects instead of rows of buttons.
-  const repository=boardSelect('仓库',repoChoices,repo||'');repository.label.classList.add('board-field');
-  repository.select.addEventListener('change',()=>apply('repository_id',repository.select.value));
   const categories=boardSelect('工作类型',boardCategories(),category==='all'?'':category);categories.label.classList.add('board-field');
   categories.select.addEventListener('change',()=>apply('category',categories.select.value,true));
   const execution=boardOptions('执行状态',[['','全部状态'],...boardExecutionStatuses],boardFilter('execution_status')||'',value=>apply('execution_status',value));
@@ -81,12 +76,11 @@ function boardShell() {
     if((boardFilter('text')||'')===input.value.trim())return;apply('text',input.value.trim());},300);});search.append(input);
   const closed=element('label','','board-check'),check=document.createElement('input');check.type='checkbox';check.checked=boardFilter('include_closed')===true;
   check.addEventListener('change',()=>apply('include_closed',check.checked));closed.append(check,document.createTextNode('含已关闭'));closed.hidden=category==='release';
-  controls.append(repository.label,categories.label,execution,types,search,closed);filters.append(controls);
+  controls.append(categories.label,execution,types,search,closed);filters.append(controls);
   const chips=element('div','','board-chips');chips.id='board-chips';chips.setAttribute('aria-label','当前筛选');
-  const scopeNote=element('p',boardScopeCaption(),'board-scope');scopeNote.id='board-scope';
   const arrangement=element('div','','board-arrangement');arrangement.setAttribute('role','group');arrangement.setAttribute('aria-label','排列与视图');
   // #482: grouping stays one compact select; choosing a dimension the builtin view does not store opens the save dialog.
-  const groups=boardSelect('按…分列',[['bot_stage','bot 执行阶段'],['repository','仓库'],['execution_status','执行状态'],['category','工作类型'],...boardState.fields.map(f=>[f.id,f.name])],boardState.group);
+  const groups=boardSelect('按…分列',[['bot_stage','bot 执行阶段'],...(!projectRoute()?[['repository','仓库']]:[]),['execution_status','执行状态'],['category','工作类型'],...boardState.fields.map(f=>[f.id,f.name])],boardGrouping());
   groups.label.className='board-field board-grouping';groups.select.id='board-grouping';
   groups.select.addEventListener('change',async()=>{
     const value=groups.select.value,previous=boardState.group;groups.select.value=previous;
@@ -104,11 +98,12 @@ function boardShell() {
   const viewState=element('span','','board-view-state');viewState.id='board-view-state';viewState.textContent='未保存';viewState.hidden=true;
   const save=boardButton('保存视图',boardSave,'quiet board-save');save.id='board-save';save.hidden=true;
   const viewControls=element('div','','board-view-controls');viewControls.append(views.label,viewState,save);
+  if(projectRoute()&&boardFilter('repository_id'))viewControls.append(element('span','此视图的仓库条件在单项目范围内不生效','muted board-view-scope-note'));
   const more=boardMenu('⋯','更多视图操作');more.menu.id='board-view-menu';
   const status=element('div','','board-status');status.id='board-status';status.setAttribute('role','status');
-  const create=consoleLink('#/new-task'+(repo?'/'+repo:''),'新建任务');create.id='board-create-task';create.classList.add('board-create-task');
+  const create=consoleLink(consolePageAddress('new-task'),'新建任务');create.id='board-create-task';create.classList.add('board-create-task');
   arrangement.append(groups.label,viewControls,more.menu,element('span','','board-spacer'),status,create,boardButton('刷新',()=>boardLoadCards()));
-  toolbar.append(filters,scopeNote,chips,arrangement);
+  toolbar.append(filters,chips,arrangement);
   const mobile=boardSelect('当前分组',[],'');mobile.label.className='board-mobile-group';mobile.select.id='board-mobile-group';
   mobile.select.addEventListener('change',()=>{boardState.mobileColumn=mobile.select.value;boardRenderCards();});
   const zero=element('div','','board-zero-counts');zero.id='board-zero-counts';
@@ -139,16 +134,13 @@ function boardViewControls() {
 }
 function boardChips() {
   const chips=$('board-chips');if(!chips)return;chips.replaceChildren();
-  const scopeNote=$('board-scope');if(scopeNote)scopeNote.textContent=boardScopeCaption();
   const choices={repository_id:['仓库',repositories.map(r=>[r.id,r.full_name])],category:['工作类型',boardCategories()],
     execution_status:['执行状态',boardExecutionStatuses],object_type:['对象类型',boardTypes],
     bot_stage:['阶段',boardState.stages.map(s=>[s.id,boardStage(s).name])],text:['搜索',[]],include_closed:['含已关闭',[]]};
-  for(const filter of boardConditions()){
+  for(const filter of boardOwnFilters().filter(filter=>!projectRoute()||filter.field!=='repository_id')){
     const [prefix,options]=choices[filter.field]||[filter.field,[]],value=options.find(([id])=>id===filter.value)?.[1]||(filter.field==='repository_id'?'仓库不可访问':filter.value);
-    const caption=filter.field==='include_closed'?prefix:prefix+'：'+value+(filter.field==='repository_id'&&boardFollowsDefault()?'（顶栏默认）':''),chip=element('span','','board-chip');
+    const caption=filter.field==='include_closed'?prefix:prefix+'：'+value,chip=element('span','','board-chip');
     chip.append(element('span',caption));
-    // A scope that comes from the shell picker is cleared there, not by a chip that would silently restore all projects.
-    if(filter.field==='repository_id'&&boardFollowsDefault()){chips.append(chip);continue;}
     const remove=button('×',async()=>{boardSetFilter(filter.field,'');if(filter.field==='object_type')boardState.type='all';boardShell();await boardLoadCards().catch(error);},'quiet board-chip-remove');remove.setAttribute('aria-label','移除筛选 '+caption);
     chip.append(remove);chips.append(chip);
   }

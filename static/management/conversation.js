@@ -5,47 +5,19 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   const projects = (await api(endpoint + '/query', 'POST', { operation: 'list_projects', target: {}, arguments: { limit: 100 } }, { signal })).projects;
   if (!panel.isConnected || me?.id !== user) return null;
   panel.replaceChildren(); panel.className = 'management-panel';
-  const header = element('div', '', 'management-scope'), scope = document.createElement('select');
-  scope.setAttribute('aria-label', '当前管理作用域');
-  const addScope = (value, caption) => { const option = element('option', caption); option.value = value; scope.append(option); };
-  addScope('platform', '全部有权访问的项目');
-  for (const tenant of new Set(projects.map(p => p.tenant_id).filter(Boolean))) addScope('tenant:' + tenant, '组织 ' + tenant);
-  for (const project of projects) addScope('project:' + project.id, project.full_name);
-  const conversationKey = () => 'management-conversation:' + user + ':' + scope.value;
+  const header = element('div', '', 'management-scope');
+  let scope = (projectId || consoleScope()) ? 'project:' + (projectId || consoleScope()) : 'platform';
+  const conversationKey = () => 'management-conversation:' + user + ':' + scope;
   const stored = key => { try { return localStorage.getItem(key); } catch { return null; } };
   const remember = (key, value) => { try { localStorage.setItem(key, value); } catch { /* Session still works when storage is disabled. */ } };
-  const available = value => [...scope.options].some(option => option.value === value);
-  // #480: what the assistant opens on is, in order, the project this page was opened for, the shell picker's project, and
-  // the platform scope. A per-user stored scope no longer decides it (and is not rewritten here); 「全部项目」 is platform.
-  const defaultScopeOf = () => {
-    const shared = typeof consoleDefaultProject === 'function' ? consoleDefaultProject() : null;
-    return shared && available('project:' + shared) ? 'project:' + shared : 'platform';
-  };
-  const scopeName = value => value === 'platform' ? '全部有权访问的项目'
-    : (projects.find(project => 'project:' + project.id === value)?.full_name || '组织 ' + value.slice('tenant:'.length));
-  // A scope is an override only while it names something the shell default does not. Choosing the default's own project is
-  // the default, so it keeps following the picker and the note keeps one wording instead of claiming both at once.
-  const isOwnScope = value => value !== defaultScopeOf();
-  // #493: one place decides the flag, from the control's value and the default as they are now. The render, applyScope and
-  // the note a picker change rewrites all ask here, so the sentence, the control and the flag cannot disagree: a scope that
-  // the picker has since made the default stops being an override, and the next change follows it instead of only rewording.
-  const syncOverride = () => { scope.dataset.override = isOwnScope(scope.value) ? '1' : ''; };
-  scope.value = projectId && available('project:' + projectId) ? 'project:' + projectId : defaultScopeOf();
-  syncOverride();
-  const scopeNote = element('p', '', 'management-scope-note'), scopeNoteId = 'management-scope-note';
-  scopeNote.id = scopeNoteId;
-  const scopeCaption = () => {
-    const shared = defaultScopeOf();
-    if (!isOwnScope(scope.value)) return shared === 'platform'
-      ? '生效范围：全部有权访问的项目（顶栏未选项目）' : '生效范围：' + scopeName(shared) + '（顶栏默认）';
-    return shared === 'platform'
-      ? '生效范围：' + scopeName(scope.value) + '（本页覆盖；顶栏未选项目）'
-      : `生效范围：${scopeName(scope.value)}（本页覆盖；顶栏默认：${scopeName(shared)}）`;
-  };
+  const available = value => value === 'platform' || projects.some(project => 'project:' + project.id === value);
+  const scopeName = value => value === 'platform' ? '全部项目' : projects.find(project => 'project:' + project.id === value)?.full_name;
+  if (!available(scope)) throw Object.assign(new Error('当前账号无权管理这个项目。'), { code: 'scope_forbidden' });
+  const scopeLabel = element('strong', scopeName(scope), 'management-scope-name'); scopeLabel.dataset.scope = scope;
   const toolsButton = button('快捷操作', () => showTools(!toolsOpen), 'quiet'); toolsButton.setAttribute('aria-expanded', 'false'); toolsButton.setAttribute('aria-controls', 'management-tools');
   const fresh = button('＋ 新建会话', () => openConversation(true).catch(showAccessError), 'quiet management-new-conversation');
   fresh.setAttribute('aria-label', '新建会话');
-  header.append(field('管理范围', scope), fresh, toolsButton); scopeNote.textContent = scopeCaption(); header.append(scopeNote); panel.append(header);
+  header.append(scopeLabel, fresh, toolsButton); panel.append(header);
   const sessions = element('details', '', 'management-sessions'), sessionBody = element('div', '', 'management-session-controls');
   sessions.append(element('summary', '会话记录'));
   const conversations = document.createElement('select'); conversations.setAttribute('aria-label', '持久会话');
@@ -145,7 +117,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     const generation = scopeGeneration;
     try { await configureForms(); } catch (err) { if (alive(generation)) { toolsDirty = true; forms.replaceChildren(note('快捷操作暂不可用：' + readErrorText(err)), button('重新读取', refreshTools, 'quiet')); } }
   }
-  const target = () => scope.value.startsWith('project:') ? { project_id: scope.value.slice(8) } : {};
+  const target = () => scope.startsWith('project:') ? { project_id: scope.slice(8) } : {};
   const query = (operation, targetValue = target()) => submit({ query: { operation, target: targetValue, arguments: {} } });
   // One pending command at a time across the whole console (#355): opening another preview drops the earlier one, and a
   // write leaves this page only after 确认执行 — for a quick action and for a receipt's rollback alike.
@@ -395,7 +367,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     cursor = 0; turns.clear(); messages.clear(); pendingMarkdown.clear(); followOutput = true; unseenOutput = false; latest.hidden = true; reconnect.hidden = true; feed.replaceChildren(welcome); welcome.hidden = false; message.value = '';
     forms.replaceChildren(); toolsDirty = true; showStatus('正在读取会话…');
     try {
-      const all = (await api(endpoint + '/conversations')).conversations.filter(item => item.scope === scope.value);
+      const all = (await api(endpoint + '/conversations')).conversations.filter(item => item.scope === scope);
       if (!alive(generation)) return;
       conversations.replaceChildren(...all.map(item => { const option = element('option', timestamp(item.created_at) + ' · ' + item.id.slice(0, 8)); option.value = item.id; return option; }));
       if (create || !all.length) {
@@ -403,7 +375,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
           showAccessError(Object.assign(new Error(managementAccessHints.scope_forbidden), { code: 'scope_forbidden' }));
           return;
         }
-        const result = await api(endpoint + '/conversations', 'POST', { scope: scope.value }); if (!alive(generation)) return;
+        const result = await api(endpoint + '/conversations', 'POST', { scope: scope }); if (!alive(generation)) return;
         conversation = result.conversation.id; const option = element('option', '新会话 ' + conversation.slice(0, 8)); option.value = conversation; conversations.prepend(option);
       } else conversation = all.find(item => item.id === (selected || stored(conversationKey())))?.id ?? all[0].id;
       conversations.value = conversation; remember(conversationKey(), conversation); message.value = drafts.get(conversation) ?? '';
@@ -468,25 +440,22 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   message.addEventListener('keydown', event => {
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); input.requestSubmit(); }
   });
-  // One place writes the control, so the note, the "override" state and the conversation always describe the same scope.
-  // It reports whether the scope really changed: a control the reader moved has already written the value itself.
   const applyScope = value => {
-    const changed = scope.value !== value;
-    scope.value = value;
-    syncOverride();
-    scopeNote.textContent = scopeCaption();
+    const changed = scope !== value;
+    scope = value; scopeLabel.textContent = scopeName(scope); scopeLabel.dataset.scope = scope;
     return changed;
   };
-  scope.onchange = () => { applyScope(scope.value); openConversation().catch(showAccessError); };
   conversations.onchange = () => openConversation(false, conversations.value).catch(showAccessError);
   const elapsedTimer = setInterval(() => { for (const value of turns.values()) if (['pending', 'running'].includes(value.state)) paintTurn(value); }, 1000);
   try { await openConversation(); } catch (err) { clearInterval(elapsedTimer); document.removeEventListener('selectionchange', selectionChanged); throw err; }
   return {
-    async setScope(value) { if (!available(value)) { showAccessError(Object.assign(new Error('当前账号无权管理这个项目。'), { code: 'scope_forbidden' })); return; } if (applyScope(value)) await openConversation().catch(showAccessError); },
-    // #493: a shell-picker change may rewrite the note while an override is active; the control and the conversation stay
-    // where the reader put them, and the flag is re-decided here from the default the picker now shows. The note is still
-    // the only thing this writes, and applyScope stays the single writer of the control's value.
-    refreshScopeNote() { syncOverride(); scopeNote.textContent = scopeCaption(); },
+    async setScope(value) {
+      if (!available(value)) {
+        scopeGeneration++; streamController?.abort(); send.disabled = true;
+        showAccessError(Object.assign(new Error('当前账号无权管理这个项目。'), { code: 'scope_forbidden' })); return;
+      }
+      if (applyScope(value)) await openConversation().catch(showAccessError);
+    },
     focus() { if (toolsOpen) toolsButton.focus(); else message.focus(); },
     dispose() { disposed = true; scopeGeneration++; formGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); document.removeEventListener('selectionchange', selectionChanged); pendingMarkdown.clear(); drafts.clear(); }
   };

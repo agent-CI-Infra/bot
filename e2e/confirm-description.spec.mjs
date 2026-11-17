@@ -10,7 +10,7 @@ test('#749: the confirmation dialog describes its body, and leaves no dangling d
   const h = await harness(), { admin, password } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101');
   try {
-    await page.goto(h.admin + '/#/inbox/101');
+    await page.goto(h.admin + '/#/projects/101/inbox');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();

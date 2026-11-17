@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { managementFixture, command } from '../test/management-fixture.mjs';
 
@@ -114,7 +115,7 @@ test('the receipt card in the transcript links to that same receipt page', async
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await switchConsoleProject(page, '101');
     await expect(page.getByRole('button', { name: '发送', exact: true })).toBeEnabled();
     const feed = page.getByRole('log', { name: '管理会话记录' });
     await page.getByLabel('管理消息', { exact: true }).fill('更新任务默认提示词');

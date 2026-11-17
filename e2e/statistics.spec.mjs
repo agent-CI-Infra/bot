@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import {test,expect} from '@playwright/test';
 import {mkdirSync,rmSync} from 'node:fs';
 import {harness,setup,account,repository,testPassword} from '../test/helpers.mjs';
@@ -56,7 +57,7 @@ test('统计按浏览器本地日显示费用、token、各工作类型的任务
     await expect(page.locator('.statistics-tasks details tbody')).toContainText('25 小时 1 分');
     await expect(page.locator('#costs-panel')).toContainText('不含外部执行端自行发起');await expect(page.locator('#costs-panel')).not.toContainText('UTC');
     await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'.tmp/statistics-evidence/statistics-desktop.png',fullPage:true});
-    await page.getByLabel('统计项目',{exact:true}).selectOption('101');await page.getByRole('button',{name:'查看统计',exact:true}).click();
+    await switchConsoleProject(page, '101');await page.getByRole('button',{name:'查看统计',exact:true}).click();
     await expect(page.locator('.cost-summary')).toContainText('USD 2.00');await expect(taskRow(page,'review.pr').locator('td').nth(1)).toHaveText('1');
     await expect(page.locator('#cost-body')).not.toContainText('project-202');
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
@@ -73,7 +74,7 @@ test('统计按浏览器本地日显示费用、token、各工作类型的任务
     try{
       await login(member,h.admin,'statistics-member',memberPassword);await dates(member,'2026-11-04');
       await expect(member.locator('.cost-summary')).toContainText('USD 2.00');await expect(member.locator('#costs-panel')).not.toContainText('project-202');
-      await expect(member.getByLabel('统计项目',{exact:true}).locator('option')).toHaveCount(2);
+      await member.locator('.console-scope-trigger:visible').click(); await expect(member.locator('#console-scope-projects [role=option]')).toHaveCount(1); await member.keyboard.press('Escape');
       expect((await context.request.get(h.admin+'/api/costs?from=2026-11-04&to=2026-11-04&repository_id=202&timezone=Asia%2FShanghai')).status()).toBe(403);
       await member.screenshot({path:'.tmp/statistics-evidence/statistics-member.png',fullPage:true});
     }finally{await context.close();}

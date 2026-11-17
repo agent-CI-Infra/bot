@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { managementFixture } from '../test/management-fixture.mjs';
 
@@ -125,7 +126,7 @@ test('a work type count opens only its tasks and an empty type says there are no
     await expect(drill.locator('table')).toHaveCount(0);
 
     // The opened list follows the project filter, so it covers the same scope as the summary above it.
-    await panel.getByLabel('统计项目').selectOption('101');
+    await switchConsoleProject(panel, '101');
     await panel.getByRole('button', { name: '查看统计' }).click();
     await expect(panel.locator('tr.statistics-drill')).toHaveCount(0);
     await summary.locator('tr[data-kind="review.issue"] button').click();

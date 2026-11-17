@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { managementFixture } from '../test/management-fixture.mjs';
@@ -7,7 +8,7 @@ async function fixture() {
   f.close = async () => { await close(); rmSync(f.h.directory, { recursive: true, force: true }); }; return f;
 }
 async function login(page, f, project = '101') {
-  await page.goto(f.h.admin + '/#/new-task/' + project);
+  await page.goto(f.h.admin + '/#/projects/' + project + '/new-task');
   await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
   await expect(page.getByRole('button', { name: '提交任务', exact: true })).toBeEnabled();
@@ -24,15 +25,12 @@ test('the mobile board keeps a compact new-task entry and carries the current pr
   const f = await fixture();
   try {
     await login(page, f); await page.setViewportSize({ width: 390, height: 844 });
-    await page.evaluate(() => { location.hash = '#/board'; });
+    await page.evaluate(() => { location.hash = '#/projects/101/board'; });
     await expect(page.locator('#board-columns')).toBeVisible();
-    await page.locator('.board-filter-details > summary').click();
-    await page.getByLabel('仓库', { exact: true }).selectOption('101');
-    await page.locator('.board-filter-details > summary').click();
     const entry = page.getByRole('link', { name: '新建任务', exact: true });
-    await expect(entry).toHaveAttribute('href', '#/new-task/101'); await expect(entry).toBeVisible();
+    await expect(entry).toHaveAttribute('href', '#/projects/101/new-task'); await expect(entry).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight)).toBe(true);
-    await entry.click(); await expect(page.getByLabel('任务项目', { exact: true })).toHaveValue('101');
+    await entry.click(); await expect(page.locator('#console-page h1')).toHaveText('在 agent-test-zone/admin-fixture-101 新建任务');
     await expect(page.getByRole('button', { name: '提交任务', exact: true })).toBeEnabled();
   } finally { await f.close(); }
 });
@@ -78,7 +76,7 @@ test('a read-only project grant cannot submit and logout clears drafts before th
     await expect(page.getByLabel('用户名', { exact: true })).toBeVisible();
     const reader = await f.member('task-reader', { repository_ids: ['101'] });
     f.h.store.run("UPDATE scoped_grants SET capabilities='[\"tasks.read\"]' WHERE principal_id=?", reader.id);
-    await page.goto(f.h.admin + '/#/new-task/101');
+    await page.goto(f.h.admin + '/#/projects/101/new-task');
     await page.getByLabel('用户名', { exact: true }).fill('task-reader'); await page.getByLabel('密码', { exact: true }).fill(reader.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('region', { name: '执行上下文', exact: true })).toContainText('没有创建此项目任务的权限');
@@ -98,7 +96,7 @@ test('a lost create response is reconciled with the original key across page nav
     await expect(page.getByRole('heading', { name: '提交结果待核实', exact: true })).toBeVisible();
     await expect(page.getByLabel('原始需求', { exact: true })).toBeDisabled();
     await page.evaluate(() => { location.hash = '#/more'; }); await expect(page.getByRole('heading', { name: '更多功能' })).toBeVisible();
-    await page.evaluate(() => { location.hash = '#/new-task/101'; });
+    await page.evaluate(() => { location.hash = '#/projects/101/new-task'; });
     await page.getByRole('button', { name: '核对同一次提交', exact: true }).click();
     await expect(page.getByRole('heading', { name: '任务已创建', exact: true })).toBeVisible();
     expect(keys).toHaveLength(2); expect(keys[0]).toBe(keys[1]); expect(createCount(f)).toBe(1);
@@ -113,9 +111,9 @@ test('returning to a still-pending submission receives its original receipt with
     await page.route('**/api/management/commands', async route => { const response = await route.fetch(); await gate; await route.fulfill({ response }); });
     await page.getByRole('button', { name: '提交任务', exact: true }).click();
     await expect.poll(() => createCount(f)).toBe(1);
-    await page.getByLabel('任务项目', { exact: true }).selectOption('102');
+    await switchConsoleProject(page, '102');
     await expect(page.getByLabel('原始需求', { exact: true })).toHaveValue('');
-    await page.getByLabel('任务项目', { exact: true }).selectOption('101');
+    await switchConsoleProject(page, '101');
     await expect(page.getByLabel('原始需求', { exact: true })).toBeDisabled();
     release(); await page.unrouteAll({ behavior: 'wait' });
     await expect(page.getByRole('heading', { name: '任务已创建', exact: true })).toBeVisible(); expect(createCount(f)).toBe(1);
@@ -180,7 +178,7 @@ test('server preflight blocks a disabled project and a late context response can
       const response = await route.fetch(); await gate; await route.fulfill({ response });
     });
     await page.getByRole('button', { name: '重新读取执行上下文', exact: true }).click();
-    await page.getByLabel('任务项目', { exact: true }).selectOption('102');
+    await switchConsoleProject(page, '102');
     await expect(page.getByRole('region', { name: '执行上下文', exact: true })).toContainText('admin-fixture-102');
     release(); await page.unrouteAll({ behavior: 'wait' });
     await expect(page.getByRole('region', { name: '执行上下文', exact: true })).not.toContainText('admin-fixture-101');
@@ -245,7 +243,7 @@ test('a project administrator confirms a CI change on a code PR; the box is not 
     const member = await f.member('task-writer', { repository_ids: [] });
     const principal = f.h.store.get('SELECT id FROM principals WHERE user_id=?', member.id).id, tenant = f.h.store.get("SELECT tenant_id FROM identity_projects WHERE project_id='101'").tenant_id;
     expect((await f.admin('/api/identity/grants', 'POST', { principal_id: principal, tenant_id: tenant, project_id: '101', capabilities: ['tasks.read', 'tasks.write'] })).status).toBe(201);
-    await page.goto(f.h.admin + '/#/new-task/101');
+    await page.goto(f.h.admin + '/#/projects/101/new-task');
     await page.getByLabel('用户名', { exact: true }).fill('task-writer'); await page.getByLabel('密码', { exact: true }).fill(member.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('button', { name: '提交任务', exact: true })).toBeEnabled();

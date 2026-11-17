@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { managementFixture } from '../test/management-fixture.mjs';
@@ -23,7 +24,7 @@ test('a management turn shows its progress message while it runs, before the ans
   };
   try {
     await page.setViewportSize({ width: 1440, height: 1000 }); await login(page, f, '/#/management');
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await switchConsoleProject(page, '101');
     const feed = page.getByRole('log', { name: '管理会话记录' }), message = page.getByLabel('管理消息', { exact: true });
     await message.fill('看看任务进展'); await page.getByRole('button', { name: '发送', exact: true }).click();
     const sent = feed.locator('.management-progress-message');
@@ -38,9 +39,9 @@ test('a management turn shows its progress message while it runs, before the ans
     await page.reload();
     // #480: the page-local scope lasts for one opening, so a reload returns to the shell default; reopening the project
     // scope is how the replayed conversation is read again.
-    const scope = page.getByLabel('当前管理作用域', { exact: true });
-    await expect(scope).toHaveValue('platform');
-    await scope.selectOption('project:101');
+    const scope = page.locator('.management-scope-name');
+    await expect(scope).toHaveAttribute('data-scope', 'project:101');
+    await switchConsoleProject(page, '101');
     await expect(feed.locator('.management-progress-message')).toContainText('正在读取任务列表');
     await expect(feed.locator('.management-answer')).toHaveCount(2);
     await expect(feed.locator('.management-answer').last()).toContainText('任务都在正常推进。');

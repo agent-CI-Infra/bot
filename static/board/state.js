@@ -69,12 +69,12 @@ function boardStage(stage,type=boardState.type) {
     :type==='all'?{developing:'开发 / 跟进 / 发版中',developed:'开发 / 跟进 / 发版完成'}:{})[stage.id];
   return {...stage,...(type==='pr'?stage.pr:{}),...(mixed?{name:mixed}:{})};
 }
-function boardCustomField() { return boardState.fields.find(f=>f.id===boardState.group); }
+function boardCustomField() { return boardState.fields.find(f=>f.id===boardGrouping()); }
 function boardColumns() {
-  if(boardState.group==='bot_stage')return boardState.stages.map(s=>boardStage(s));
-  if(boardState.group==='repository')return repositories.filter(r=>!boardFilter('repository_id')||r.id===boardFilter('repository_id')).map(r=>({id:r.id,name:r.full_name,hint:'仅列出你有权访问的仓库'}));
-  if(boardState.group==='execution_status')return boardExecutionStatuses.map(([id,name])=>({id,name}));
-  if(boardState.group==='category'){
+  if(boardGrouping()==='bot_stage')return boardState.stages.map(s=>boardStage(s));
+  if(boardGrouping()==='repository')return repositories.filter(r=>!boardFilter('repository_id')||r.id===boardFilter('repository_id')).map(r=>({id:r.id,name:r.full_name,hint:'仅列出你有权访问的仓库'}));
+  if(boardGrouping()==='execution_status')return boardExecutionStatuses.map(([id,name])=>({id,name}));
+  if(boardGrouping()==='category'){
     // Cards of any other category keep a column of their own.
     const columns=boardCategories().slice(1).filter(([id])=>!boardFamilies[id]&&boardInCategory(id)).map(([id,name])=>({id,name}));
     for(const id of Object.keys(boardState.columnCounts||{}))if(!columns.some(c=>c.id===id)&&boardInCategory(id))
@@ -84,37 +84,22 @@ function boardColumns() {
   return [{id:'unassigned',name:'未设置',hint:'还没有为这个字段选值'},...(boardCustomField()?.options||[])];
 }
 function boardFilter(field) { return boardState.filters.find(f=>f.field===field)?.value; }
-// #480: an explicit board filter wins; otherwise the shell picker's project is the effective scope. The default is never
-// written into the saved view, so a saved view keeps exactly the filters it was saved with.
-function boardDefaultScope() {
-  const shared=typeof consoleDefaultProject==='function'?consoleDefaultProject():null;
-  return shared&&repositories.some(r=>String(r.id)===String(shared))?String(shared):'';
-}
-function boardEffectiveScope() { return String(boardFilter('repository_id')||'')||boardDefaultScope(); }
-// Choosing the default's own project on this page is still the default: it keeps following the picker, and the chip and the
-// sentence must not call the same scope both "an override" and "the shell default".
-function boardFollowsDefault() { const shared=boardDefaultScope(),explicit=String(boardFilter('repository_id')||''); return !explicit||(!!shared&&explicit===shared); }
-function boardScopeCaption() {
-  const name=id=>repositories.find(r=>String(r.id)===id)?.full_name||('仓库 '+id),explicit=boardFilter('repository_id'),shared=boardDefaultScope();
-  if(!shared)return '生效范围：'+(explicit?name(String(explicit))+'（本页覆盖）':'全部仓库（顶栏未选项目）');
-  if(!boardFollowsDefault())return `生效范围：${name(String(explicit))}（本页覆盖；顶栏默认：${name(shared)}）`;
-  return `生效范围：${name(shared)}（顶栏默认）`;
-}
+// A saved repository condition applies only to All projects. A project address always owns the query scope.
+function boardEffectiveScope() { return projectRoute()?.id || String(boardFilter('repository_id') || ''); }
+function boardGrouping() { return projectRoute() && boardState.group === 'repository' ? 'bot_stage' : boardState.group; }
 function boardCategory() { return boardFilter('category')||'all'; }
 function boardSetFilter(field,value) {
   boardState.mobileColumn=null;
   boardState.filters=boardState.filters.filter(f=>f.field!==field);
   if(value!==''&&value!==undefined&&value!==false)boardState.filters.push({field,value});
-  if(field==='repository_id'&&$('board-create-task'))$('board-create-task').href='#/new-task'+(boardEffectiveScope()?'/'+boardEffectiveScope():'');
   boardDirty();
 }
-// What the reader actually filtered on this page. Saved views store exactly this, never the shell default, so clearing the
-// picker later cannot leave a view pinned to a project the reader never selected in it.
+// Saving a view never adds the address's project. Legacy repository conditions remain part of that view.
 function boardOwnFilters() { return boardState.filters.filter(f=>f.value!==''&&f.value!==undefined); }
-// What the board queries with: the page's own filters plus the shared default when the page names no repository.
 function boardConditions() {
-  const conditions=boardOwnFilters();
-  if(!conditions.some(f=>f.field==='repository_id')&&boardDefaultScope())conditions.push({field:'repository_id',value:boardDefaultScope()});
+  const project = projectRoute()?.id;
+  const conditions = boardOwnFilters().filter(filter => !project || filter.field !== 'repository_id');
+  if (project) conditions.push({field:'repository_id',value:project});
   return conditions;
 }
 // Unsaved means different from the stored view, so undoing a change hides the save button again.

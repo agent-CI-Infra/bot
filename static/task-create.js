@@ -15,15 +15,19 @@ function taskCreationError(value) {
 async function renderNewTask(request) {
   const page = $('console-page'), owner = me.id, address = location.hash;
   if (taskCreationOwner !== owner) { taskCreationDrafts.clear(); taskCreationOwner = owner; }
-  const id = /^#\/new-task\/([1-9]\d*)$/.exec(address)?.[1] || '';
+  const id = projectRoute()?.id || '';
   const root = element('section', '', 'task-create-page');
   const alive = () => root.isConnected && me?.id === owner && location.hash === address && request === renderVersion;
   const heading = element('div', '', 'console-page-head');
-  heading.append(element('p', '新任务', 'eyebrow'), element('h1', '新建任务'), note('写清需求与验收条件，提交后查看真实任务进展和证据。'));
-  const picker = document.createElement('select'); picker.setAttribute('aria-label', '任务项目');
-  picker.add(new Option('请选择项目', '')); repositories.forEach(repo => picker.add(new Option(repo.full_name, repo.id))); picker.value = id;
-  picker.addEventListener('change', () => { location.hash = '#/new-task' + (picker.value ? '/' + picker.value : ''); });
-  root.append(heading, field('任务项目', picker)); page.replaceChildren(root);
+  const repository = repositories.find(repo => String(repo.id) === id);
+  heading.append(element('p', '新任务', 'eyebrow'), element('h1', repository ? `在 ${repository.full_name} 新建任务` : '新建任务'), note('写清需求与验收条件，提交后查看真实任务进展和证据。'));
+  root.append(heading); page.replaceChildren(root);
+  if (!id) {
+    const picker = button('搜索并选择项目', () => openScopePicker(picker), 'btn-primary');
+    picker.setAttribute('aria-label', '任务项目（必填）'); picker.setAttribute('aria-haspopup', 'listbox');
+    picker.setAttribute('data-scope-picker-trigger', ''); picker.setAttribute('aria-controls', 'console-scope-list'); picker.setAttribute('aria-expanded', 'false');
+    root.append(field('任务项目（必填）', picker));
+  }
   if (!id || !repositories.some(repo => String(repo.id) === id)) {
     root.append(consoleState(id ? '项目暂不可访问' : '先选择任务所属项目', id ? '请选择当前有权访问的项目。' : '任务沿用所选项目的配置、权限和执行环境。')); return;
   }

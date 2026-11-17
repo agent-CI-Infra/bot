@@ -42,7 +42,9 @@ function addressTab(hash) {
   if (taskRoute(hash)) return 'task';
   if (/^#\/new-task(?:\/[1-9]\d*)?$/.test(hash)) return 'new-task';
   if (repositoryOnboardingAddress.test(hash)) return 'repository-onboarding';
-  if (projectRoute() || hash === '#/projects') return 'projects';
+  const project = projectRoute(hash);
+  if (project) return projectConsoleRoute(project) ? project.section : 'projects';
+  if (hash === '#/projects') return 'projects';
   if (['#/reviews', '#/developments'].includes(hash)) return 'board';
   if (onboardingAddress.test(hash)) return 'settings';
   if (hash === '#external') return 'external';
@@ -67,11 +69,11 @@ async function route() {
   const legacyComputer = legacyComputerAddress.exec(location.hash);
   if (legacyComputer?.[1]) { const id = safeDecode(legacyComputer[1]); if (id !== null) history.replaceState(null, '', `#/projects/${id}/machine`); }
   else if (legacyComputer) history.replaceState(null, '', '#/settings/work-computers');
-  // A project chat link keeps the project context; the top-level management address is a page of its own.
-  const chatProject = /^#\/projects\/([^/]+)\/management$/.exec(location.hash)?.[1];
-  // The project chat trigger has no settings section of its own: keep the project, open its first page underneath,
-  // so a shared or reloaded address does not silently become 基本设置.
-  if (chatProject) history.replaceState(null, '', `#/projects/${chatProject}/overview`);
+  // Replace legacy scope paths in place: Back must not revisit a redirect entry.
+  const oldInbox = /^#\/inbox\/([1-9]\d*)(?:\/(\d+))?$/.exec(location.hash);
+  if (oldInbox) history.replaceState(null, '', `#/projects/${oldInbox[1]}/inbox${oldInbox[2] ? '/' + oldInbox[2] : ''}`);
+  const oldCreation = /^#\/new-task\/([1-9]\d*)$/.exec(location.hash);
+  if (oldCreation) history.replaceState(null, '', `#/projects/${oldCreation[1]}/new-task`);
   const legacy = legacyOnboardingAddress.exec(location.hash);
   if (legacy) history.replaceState(null, '', '#/settings/onboarding/' + ([0, 1, 3, 4, 5, 6][Number(legacy[1] || 0)] ?? 0));
   // Accounts and users were tabs of their own; their old addresses open the matching settings section.
@@ -110,18 +112,21 @@ async function route() {
   if (!consolePage) $('console-page').replaceChildren();
   const sample = !target && tab === 'design', samplePage = $('design-page');
   page.hidden = !target; samplePage.hidden = !sample; list.hidden = !!target || tab === 'management' || consolePage || sample;
-  $('console-page').hidden = !consolePage;
+  $('console-page').hidden = !!target || !consolePage;
   // #553: a list read that this navigation abandoned must not leave its loading state behind the hidden list.
   if (list.hidden) $('rows').querySelector(':scope > .console-state-loading')?.remove();
   if (typeof syncConsoleShell === 'function') syncConsoleShell(target);
   // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
-  document.body.classList.toggle('board-mode', !target && tab === 'board');
+  document.body.classList.toggle('board-mode', tab === 'board');
   const activeNavTab = ['preferences', 'identity', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', !target && el.dataset.tab === activeNavTab ? 'page' : 'false'));
   // A second address can arrive while the first one is still loading (a hash change during a list read): the newer
   // route owns the page, so this one stops before it can redraw it from the address it no longer represents.
   if (resolved !== tab) return;
-  if (consolePage) {
+  if (target) {
+    if (tab !== 'management' && typeof leaveManagementPage === 'function') leaveManagementPage();
+    await renderProject(target);
+  } else if (consolePage) {
     if (typeof leaveManagementPage === 'function') leaveManagementPage();
     await renderConsolePage(renderVersion);
   } else if (sample) {
@@ -130,8 +135,7 @@ async function route() {
   } else if (tab === 'management' && !target) await renderManagementPage();
   else {
     if (typeof leaveManagementPage === 'function') leaveManagementPage();
-    if (target) await renderProject(target); else await render();
-    if (chatProject) void openManagementChat(chatProject).catch(error);
+    await render();
   }
   if (typeof syncConsoleShell === 'function') syncConsoleShell(target);
   if (typeof restoreConsolePosition === 'function') restoreConsolePosition();

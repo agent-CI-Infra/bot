@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { managementFixture } from '../test/management-fixture.mjs';
@@ -42,7 +43,7 @@ test('a management message that fails through every retry says why, with the err
   try {
     f.modelState.failure = 503;
     await page.setViewportSize({ width: 1440, height: 1000 }); await login(page, f, '#/management');
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await switchConsoleProject(page, '101');
     const feed = page.getByRole('log', { name: '管理会话记录' });
     await page.getByLabel('管理消息', { exact: true }).fill('看看任务进展'); await page.getByRole('button', { name: '发送', exact: true }).click();
     await expect(feed.locator('.management-turn-state').last()).toHaveText('处理失败');
