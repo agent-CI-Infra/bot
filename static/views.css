@@ -251,7 +251,10 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
   :is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="任务"],:is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="操作"]{grid-column:1/-1}
   :is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="操作"]{justify-content:flex-start}
   /* Every other cell is one label/value line, so the card stays compact instead of stacking a caption over each chip. */
-  .project-list-row>.project-cell[data-label]:not([data-label="项目"]):not([data-label="操作"]):not([data-label="任务"]){display:grid;grid-template-columns:58px minmax(0,1fr);align-items:center;gap:6px;font-size:12px}
+  /* #1002: include 操作 in the same labelled grid so 设置 does not sit on the ::before caption. 任务 stays out: it is a longer summary line.
+     操作 uses max-content for the button so tablet (flex-end) and phone layouts keep a compact 设置 control instead of stretching it. */
+  .project-list-row>.project-cell[data-label]:not([data-label="项目"]):not([data-label="任务"]){display:grid;grid-template-columns:58px minmax(0,1fr);align-items:center;gap:6px;font-size:12px}
+  .project-list-row>.project-cell[data-label="操作"]:not([data-label="项目"]):not([data-label="任务"]){grid-template-columns:58px max-content}
   .project-list-row>.project-cell[data-label]:not([data-label="项目"])::before{content:attr(data-label);color:var(--color-text-muted);font-size:11px;line-height:1.3}
   .project-features{justify-content:flex-start}.project-control-feedback{text-align:left}
 }
@@ -266,11 +269,13 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 @media(max-width:599px){
   .global-project-table .project-feature-switch{gap:4px;padding:4px;min-width:0}
   .global-project-table .project-feature-switch>span:first-child{display:none}
-  .global-project-table .project-list-row>.project-cell[data-label]:not([data-label="项目"]):not([data-label="操作"]):not([data-label="任务"]){grid-template-columns:44px minmax(0,1fr)}
+  .global-project-table .project-list-row>.project-cell[data-label]:not([data-label="项目"]):not([data-label="任务"]){grid-template-columns:44px minmax(0,1fr)}
+  :is(#rows[data-view=projects], .global-project-table) .project-list-row>.project-cell[data-label="操作"]{grid-template-columns:44px max-content}
 }
 @media(max-width:360px){
   #settings-panel .global-project-table .project-list-row{grid-template-columns:minmax(0,1fr)}
-  #settings-panel .global-project-table .project-list-row>.project-cell[data-label]:not([data-label="项目"]):not([data-label="操作"]):not([data-label="任务"]){grid-template-columns:58px minmax(0,1fr)}
+  #settings-panel .global-project-table .project-list-row>.project-cell[data-label]:not([data-label="项目"]):not([data-label="任务"]){grid-template-columns:58px minmax(0,1fr)}
+  #settings-panel .global-project-table .project-list-row>.project-cell[data-label="操作"]{grid-template-columns:58px max-content}
   #settings-panel .global-project-table .project-list-row>.project-cell[data-label="任务"],#settings-panel .global-project-table .project-list-row>.project-cell[data-label="操作"]{grid-column:1;justify-content:flex-start}
 }
 
