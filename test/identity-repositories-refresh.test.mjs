@@ -4,10 +4,10 @@
 // to read it again; only that read is repeated, and a read that comes back draws the new projects and clears the notice.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadConsole } from './console-page.mjs';
+import { loadProjectScopeConsole } from './console-page.mjs';
 
 const listed = [{ id: 101, full_name: 'fixture/project-101' }];
-const load = respond => loadConsole(['static/app.js', 'static/views.js', 'static/project.js'], (method, path) => {
+const load = respond => loadProjectScopeConsole((method, path) => {
   if (path === '/api/repositories') return respond();
   return [200, {}];
 });
@@ -20,7 +20,7 @@ const notice = async page => JSON.parse(await line(page));
 
 test('a project-list read that fails after the check says so on the line instead of ending silently', async () => {
   const page = load(refused);
-  page.run("me = { id: 7 }; tab = 'settings'; $('repository-filter').options = [];");
+  page.run("me = { id: 7 }; tab = 'settings';");
   // The rejection used to reach the caller's `.catch(error)`: the watch had already ended, so nothing read again.
   await page.run('finishGithubVerification({ id: 7 })');
   const read = await notice(page);
@@ -34,21 +34,21 @@ test('a project-list read that fails after the check says so on the line instead
 test('the button reads the list again, and a read that comes back draws the new projects and clears the line', async () => {
   let failures = 1;
   const page = load(() => failures-- > 0 ? refused() : served());
-  page.run("me = { id: 7 }; tab = 'settings'; $('repository-filter').options = [];");
+  page.run("me = { id: 7 }; tab = 'settings';");
   await page.run('finishGithubVerification({ id: 7 })');
   assert.equal((await notice(page)).state, 'failed');
-  assert.equal(await page.run("$('repository-filter').childElementCount"), 0, 'the failed read listed nothing');
+  assert.equal(await page.run("$('console-scope-list').querySelectorAll('[role=option]').filter(node => node.dataset.projectId).length"), 0, 'the failed read listed nothing');
   await page.run("$('github-verification').querySelector('button').listeners.click[0]()");
   const read = await notice(page);
   assert.equal(read.hidden, true, 'a read that came back takes the notice away');
   assert.deepEqual(JSON.parse(await page.run("JSON.stringify(repositories.map(project => project.full_name))")), ['fixture/project-101']);
-  assert.deepEqual(JSON.parse(await page.run("JSON.stringify([...$('repository-filter').children].map(node => node.textContent))")),
+  assert.deepEqual(JSON.parse(await page.run("JSON.stringify($('console-scope-list').querySelectorAll('[role=option]').filter(node => node.dataset.projectId).map(node => node.title))")),
     ['fixture/project-101'], 'and the project picker carries the projects it named');
 });
 
 test('a project-list read that works shows no notice at all', async () => {
   const page = load(served);
-  page.run("me = { id: 7 }; tab = 'settings'; $('repository-filter').options = [];");
+  page.run("me = { id: 7 }; tab = 'settings';");
   await page.run('finishGithubVerification({ id: 7 })');
   const read = await notice(page);
   assert.equal(read.hidden, true);
@@ -60,12 +60,12 @@ test('a project-list read that works shows no notice at all', async () => {
 // #866 review: the project picker stands for the whole list. The list page reads one page of it — offset, limit 51 and
 // maybe a filter — so such a read is a slice and must leave the notice, its account and the picker exactly as they are.
 const sixty = Array.from({ length: 60 }, (_, index) => ({ id: String(100 + index), full_name: `fixture/project-${100 + index}` }));
-const picker = page => page.run(`JSON.stringify([...$('repository-filter').children].map(node => node.value))`);
+const picker = page => page.run(`JSON.stringify($('console-scope-list').querySelectorAll('[role=option]').filter(node => node.dataset.projectId).map(node => node.dataset.projectId))`);
 const setupPage = page => page.run("me = { id: 7, role: 'project_admin', github_verification: null }; repositories = []; tab = 'projects'; var projectRoute = () => null; " +
-  "$('repository-filter').options = [{ value: '' }]; $('repository-filter').value = ''; $('account-filter').options = [{ value: '' }]; $('owner-filter').options = [{ value: '' }];");
+  "$('account-filter').options = [{ value: '' }]; $('owner-filter').options = [{ value: '' }];");
 
 test('a page read of the project list does not clear the notice or put its fifty rows in the project picker', async () => {
-  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js'], (method, path) => {
+  const page = loadProjectScopeConsole((method, path) => {
     if (path === '/api/repositories') return refused();
     if (path.startsWith('/api/repositories?')) return [200, { repositories: sixty.slice(0, 51) }];
     return [200, {}];
@@ -84,16 +84,16 @@ test('a page read of the project list does not clear the notice or put its fifty
 
 test('a filtered read leaves the notice alone, and the notice\'s own read still recovers the whole list', async () => {
   let failures = 1;
-  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js'], (method, path) => {
+  const page = loadProjectScopeConsole((method, path) => {
     if (path === '/api/repositories') return failures-- > 0 ? refused() : [200, { repositories: sixty }];
     if (path.startsWith('/api/repositories?')) return [200, { repositories: sixty.slice(0, 1) }];
     return [200, {}];
   });
   setupPage(page);
   await page.run('finishGithubVerification({ id: 7 })');
-  page.run("$('repository-filter').value = '100'");
+  page.run("$('owner-filter').value = 'fixture'");
   await page.run('render()');
-  assert.match(page.requests.at(-1), /repository_id=100/, 'the page read one repository');
+  assert.ok(page.requests.some(request => /^GET \/api\/repositories\?/.test(request) && request.includes('owner_id=fixture')), 'the page read one organization');
   assert.equal((await notice(page)).state, 'failed', 'a range is not the list either: the notice stays');
   assert.equal(await page.run('repositoriesUnreadOwner'), 7, 'and so does its account, so a later whole read can still recover');
   assert.deepEqual(JSON.parse(await picker(page)), [], 'the picker does not follow a filtered read');
@@ -106,7 +106,7 @@ test('a filtered read leaves the notice alone, and the notice\'s own read still 
 
 test('a new session does not inherit the failed read of the session before it', async () => {
   const page = load(refused);
-  page.run("me = { id: 7, role: 'project_admin', github_verification: null }; repositories = []; tab = 'settings'; $('repository-filter').options = [{ value: '' }];");
+  page.run("me = { id: 7, role: 'project_admin', github_verification: null }; repositories = []; tab = 'settings';");
   await page.run('finishGithubVerification({ id: 7 })');
   assert.equal(await page.run('repositoriesUnreadOwner'), 7);
   page.run("me = { id: 8, role: 'project_admin', github_verification: null }; watchGithubVerification();");
@@ -118,7 +118,7 @@ test('a new session does not inherit the failed read of the session before it', 
 // one read. The notice's button now owns that read, and the list shows the failure without a second retry.
 test('the list is drawn as a failed read without reading again or offering a second retry', async () => {
   const page = load(refused);
-  page.run("me = { id: 7 }; tab = 'projects'; $('repository-filter').options = [];");
+  page.run("me = { id: 7 }; tab = 'projects';");
   await page.run('finishGithubVerification({ id: 7 })');
   assert.deepEqual(page.requests.filter(request => request === 'GET /api/repositories'), ['GET /api/repositories'],
     'one failed read: the redraw draws the state it knows instead of reading the list again');

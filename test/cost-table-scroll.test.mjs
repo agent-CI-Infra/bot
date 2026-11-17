@@ -25,7 +25,7 @@ const namedScrollBoxes = panel => panel.querySelectorAll('.cost-table-scroll').m
 }));
 
 test('every cost table is a named group, and no table takes a Tab stop without a measured overflow', async () => {
-  const page = loadConsole(['static/app.js', 'static/views.js', 'static/metrics.js', 'static/costs.js'], () => [200, costsData]);
+  const page = loadConsole(['static/app.js', 'static/views.js', 'static/metrics.js', 'static/project.js', 'static/costs.js'], () => [200, costsData]);
   page.run("me={id:'admin'};tab='costs';costState={from:'2026-11-03',to:'2026-11-03',currency:'USD'};document.createTextNode=text=>element('span',text);costChart=()=>{};");
   await page.run('loadCosts(0)');
   const boxes = namedScrollBoxes(page.$('cost-body'));

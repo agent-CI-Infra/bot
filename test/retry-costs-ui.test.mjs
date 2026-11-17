@@ -42,7 +42,7 @@ test('cost view shows token totals, per-project and daily tokens, and all saved 
     prices:[2,3].map(input=>({model_name:'fixture-model',currency:'USD',input_per_million:input,output_per_million:10,cache_per_million:0.0002})),
     days:[{date:'2026-10-22',repository_id:'101',full_name:'fixture/project',cost:1,requests:1,unpriced_requests:0,input_tokens:1000,output_tokens:100,cached_input_tokens:750},
       {date:'2026-10-23',repository_id:'101',full_name:'fixture/project',cost:2,requests:2,unpriced_requests:1,input_tokens:2000,output_tokens:200,cached_input_tokens:1000}]};
-  const page=loadConsole(['static/app.js','static/metrics.js','static/costs.js'],()=>[200,data]);
+  const page=loadConsole(['static/app.js','static/metrics.js','static/project.js','static/costs.js'],()=>[200,data]);
   page.run("me={id:'admin'};tab='costs';costState={from:'2026-10-22',to:'2026-10-23',currency:'USD'};document.createTextNode=text=>element('span',text);costChart=()=>{};");
   await page.run('loadCosts(0)');const body=page.$('cost-body');
   assert.match(text(body),/输入用量包含缓存命中/);const totals=body.querySelector('.cost-token-summary');
@@ -57,7 +57,7 @@ test('cost view shows token totals, per-project and daily tokens, and all saved 
 });
 
 function chartPage(data){
-  const page=loadConsole(['static/app.js','static/metrics.js','static/costs.js'],()=>[200,data]);
+  const page=loadConsole(['static/app.js','static/metrics.js','static/project.js','static/costs.js'],()=>[200,data]);
   page.run("me={id:'admin'};tab='costs';costState={from:'2026-10-22',to:'2026-10-23',currency:'USD'};document.createTextNode=text=>element('span',text);document.createElementNS=(_ns,tag)=>document.createElement(tag);");
   return page;
 }
