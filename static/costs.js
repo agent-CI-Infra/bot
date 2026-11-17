@@ -1,4 +1,9 @@
 let costState=null,costRequest=0;
+function costProjectName(project) {
+  if (projectRoute() || !project.repository_id) return document.createTextNode(project.full_name);
+  const name = element('a', project.full_name, 'cost-project-link');
+  name.href = consolePageAddress('costs', project.repository_id); return name;
+}
 const money=(value,currency)=>currency+' '+(value>0&&value<0.000001?'< 0.000001':Number(value).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:6}));
 // #643: an axis label is a number a person reads, so the top of the chart is a round number with four equal segments
 // instead of `max * 1.1`. A token count is a whole thing, so its labels are integers abbreviated 万/亿; a cost keeps
@@ -133,7 +138,7 @@ async function loadCosts(version) {
   }
   const projectTable=costTable(['项目','已计价费用',tokenMode?'用量占比':'已计价费用占比',...costTokenFields.map(([,label])=>label),'未计价请求']);
   for(const project of projects){
-    const row=document.createElement('tr'),name=element('td',''),dot=element('span','','cost-color');dot.style.backgroundColor=costColor(project.repository_id);name.append(dot,!projectRoute()&&project.repository_id?consoleLink(consolePageAddress('costs',project.repository_id),project.full_name):document.createTextNode(project.full_name));
+    const row=document.createElement('tr'),name=element('td',''),dot=element('span','','cost-color');dot.style.backgroundColor=costColor(project.repository_id);name.append(dot,costProjectName(project));
     const amount=costChartValue(project,tokenMode),total=costChartValue(data.summary,tokenMode);
     row.append(name,costCostCell(project,data.currency),element('td',amount!=null&&total>0?(amount/total*100).toFixed(1)+'%':'—'),...costTokenCells(project),element('td',String(project.unpriced_requests)));projectTable.body.append(row);
   }
@@ -289,7 +294,7 @@ svg.setAttribute('role','group');svg.setAttribute('aria-label',tokens?'每日模
     const row=day.rows.find(item=>item.repository_id===project.repository_id),amount=row&&value(row);
     if(!amount)continue;
     const line=document.createElement('tr'),name=element('td',''),dot=element('span','','cost-color');
-    dot.style.backgroundColor=costColor(project.repository_id);name.append(dot,!projectRoute()&&project.repository_id?consoleLink(consolePageAddress('costs',project.repository_id),project.full_name):document.createTextNode(project.full_name));
+    dot.style.backgroundColor=costColor(project.repository_id);name.append(dot,costProjectName(project));
     line.dataset.date=date;line.dataset.project=project.repository_id;
     line.title=`${date} · ${project.full_name} · ${tokens?metricNumber(amount):money(amount,currency)} · 当日 ${(amount/value(day)*100).toFixed(1)}%`;
     line.append(element('td',date),name,element('td',tokens?metricNumber(amount):money(amount,currency)),element('td',(amount/value(day)*100).toFixed(1)+'%'),element('td',String(row.unpriced_requests||0)));

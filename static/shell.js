@@ -264,6 +264,10 @@ function syncConsoleShell() {
       }
       sectionPicker.append(group);
     }
+    // New work pages may not yet belong to a directory group; the picker must still name the page on screen.
+    if (here && ![...sectionPicker.options].some(option => option.value === here)) {
+      sectionPicker.prepend(new Option(nav.querySelector('[aria-current=page]').textContent, here, true, true));
+    }
   } else if (nav) {
     let group = null;
     for (const child of nav.children) {

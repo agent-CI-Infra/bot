@@ -42,7 +42,7 @@ async function renderProject(route) {
   if (projectConsoleRoute(route)) {
     current.section = route.section; current.shownSection = route.section;
     if (!repositories.some(repo => String(repo.id) === route.id)) repositories.push(current.repository);
-    page.replaceChildren(); page.hidden = true;
+    page.replaceChildren(projectCrumb(route.section)); page.hidden = true;
     const consolePage = ['inbox', 'new-task'].includes(route.section);
     document.querySelector('.list-panel').hidden = consolePage || route.section === 'management';
     $('console-page').hidden = !consolePage;
