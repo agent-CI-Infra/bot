@@ -41,22 +41,20 @@ test('项目导航只列真实页面，管理助手的深链不丢页，移动�
       if (settingsPages.includes(caption)) await expect(nav.getByRole('link')).toHaveText(['← 项目入口', ...settingsPages]);
       else await expect(nav.getByRole('link')).toHaveCount(2);
     }
-    // 管理助手 is a chat, not a settings section: opening it keeps the settings page underneath.
+    // The project assistant has its own scoped page, including direct links and reloads.
     await openHub();
     await hub().getByRole('link', { name: '角色', exact: true }).click();
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
     await page.getByTestId('project-open-chat').click();
-    await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
+    await expect(page).toHaveURL(/#\/projects\/101\/management$/);
     await expect(page.locator('#management-chat')).toBeVisible({ timeout: 15000 });
-    // An older address for that chat must open the chat on a page that address still describes, not on 基本设置.
     await page.goto(h.admin + '/#/projects/101/management');
-    await expect(page.locator('#management-chat')).toBeVisible({ timeout: 15000 });
-    await expect(current).toHaveText('项目总览');
-    await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
+    await expect(page.locator('#management-chat')).toHaveAttribute('role', 'region');
+    await expect(page).toHaveURL(/#\/projects\/101\/management$/);
     await page.reload();
-    await expect(current).toHaveText('项目总览');
-    await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
-    await expect(page.locator('.project-content')).not.toBeEmpty();
+    await expect(page).toHaveURL(/#\/projects\/101\/management$/);
+    await expect(page.locator('.management-scope-name')).toHaveText('fixture/project-101');
+    await expect(page.locator('.management-panel')).not.toBeEmpty();
     // Nothing in the shell may scroll the page sideways at any desktop, tablet or phone width.
     for (const width of [390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
@@ -78,12 +76,13 @@ test('项目导航只列真实页面，管理助手的深链不丢页，移动�
     await expect(second).toBeInViewport();
     const ring = await second.evaluate(node => { const s = getComputedStyle(node); return [s.outlineStyle, s.outlineWidth, s.boxShadow]; });
     expect(ring[0] !== 'none' && parseFloat(ring[1]) > 0 || ring[2] !== 'none').toBe(true);
-    // Escape closes the floating chat and puts focus back on the entry that opened it.
+    // Switch the assistant page to a floating view; Escape closes that view and returns focus to its launcher.
     await second.click();
     await expect(page.locator('#management-chat')).toBeVisible();
     const message = page.getByLabel('管理消息', { exact: true });
-    await expect(message).toBeVisible(); await message.focus();
-    await page.keyboard.press('Escape');
+    await expect(message).toBeVisible();
+    await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click();
+    await message.focus(); await page.keyboard.press('Escape');
     await expect(page.locator('#management-chat')).toBeHidden();
     // The chat's own launcher takes focus back, so the keyboard is never dropped somewhere invisible.
     await expect(page.locator('#management-launcher')).toBeVisible();

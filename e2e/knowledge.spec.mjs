@@ -49,10 +49,10 @@ test('conflict comparisons preserve drafts and navigation asks before leaving un
     await exact(page,'编辑文件').click();await page.getByLabel('内容',{exact:true}).fill('kept after route return');await page.getByTestId('project-hub-link').click();await page.getByRole('dialog').getByRole('button',{name:'离开文件',exact:true}).click();await expect(page).toHaveURL(/\/menu$/);
     await page.goto(f.h.admin+'/#/projects/101/knowledge');await expect(page.getByLabel('内容',{exact:true})).toHaveValue('kept after route return');
     // Scope switching uses the same guard: cancellation keeps both the editor and the shared default in this project.
-    await switchConsoleProject(page,'202');await page.getByRole('dialog').getByRole('button',{name:'取消',exact:true}).click();
+    await switchConsoleProject(page,'202',{waitForNavigation:false});await page.getByRole('dialog').getByRole('button',{name:'取消',exact:true}).click();
     await expect(page).toHaveURL(/\/projects\/101\/knowledge$/);await expect(page.locator('#console-project')).toHaveAttribute('data-project-id','101');
     await expect(page.getByLabel('内容',{exact:true})).toHaveValue('kept after route return');
-    await switchConsoleProject(page,'202');await page.getByRole('dialog').getByRole('button',{name:'离开文件',exact:true}).click();
+    await switchConsoleProject(page,'202',{waitForNavigation:false});await page.getByRole('dialog').getByRole('button',{name:'离开文件',exact:true}).click();
     await expect(page).toHaveURL(/\/projects\/202\/knowledge$/);await expect(page.locator('#console-project')).toHaveAttribute('data-project-id','202');expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });

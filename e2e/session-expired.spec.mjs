@@ -44,7 +44,7 @@ test('登录过期后各页显示登录已过期与重新登录，只有一条�
     await expect(card.locator('details code')).toContainText('login_required');
     // 重新登录 goes through GitHub sign-in and comes back to the inbox, not to #/identity.
     await banner.getByRole('button', { name: '重新登录' }).click();
-    await expect(page).toHaveURL(/#\/inbox\/101$/);
+    await expect(page).toHaveURL(/#\/projects\/101\/inbox$/);
     await expect(page.locator('#who')).toContainText('项目管理员');
     await expect(banner).toHaveCount(0);
     await expect(page.locator('[data-session-expired]')).toHaveCount(0);

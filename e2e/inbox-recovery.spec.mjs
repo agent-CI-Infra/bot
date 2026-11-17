@@ -108,7 +108,9 @@ test('access revoked during an open task clears the returned inbox instead of re
     const selected = page.locator('.console-inbox [data-task-id="inbox-0"]'); await selected.getByRole('button', { name: '查看任务', exact: true }).click();
     const member = h.store.get("SELECT id FROM users WHERE username='inbox-member'");
     await admin('/api/project-admin-assignments', 'PUT', { user_id: member.id, repository_ids: [] });
-    await page.keyboard.press('Escape'); await expect(page.getByRole('heading', { name: '待处理事项未能读取', exact: true })).toBeVisible();
-    await expect(page.locator('.console-inbox [data-task-id]')).toHaveCount(0); await expect(page.locator('.console-inbox')).toContainText('403');
+    await page.keyboard.press('Escape'); await expect(page.getByRole('heading', { name: '没有权限打开这个项目', exact: true })).toBeVisible();
+    await expect(page.locator('.console-inbox [data-task-id]')).toHaveCount(0); await expect(page.locator('[data-project-unavailable=forbidden]')).toContainText('403');
+    await expect(page.locator('#console-context')).toHaveText('无法打开项目');
+    await expect(page.locator('.console-scope-trigger:visible')).toHaveAttribute('data-project-id', '');
   } finally { await h.stop(); }
 });

@@ -60,8 +60,9 @@ test('项目入口总览可到达全部页面，页头有设置入口，设置�
       await expect(hub()).toBeVisible();
       await hub().getByRole('link', { name: caption, exact: true }).click();
       if (caption === '管理助手') {
-        await expect(page).toHaveURL(/#\/projects\/101\/menu$/);
+        await expect(page).toHaveURL(/#\/projects\/101\/management$/);
         await expect(page.locator('#management-chat')).toBeVisible({ timeout: 15000 });
+        await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click();
         await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
         await expect(page.locator('#management-chat')).toBeHidden();
         continue;
