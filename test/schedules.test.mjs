@@ -841,6 +841,27 @@ test('daily report plans move to timers on the chats they were sent to, stop, an
   await until(() => f.wire.sent.find(s => s.receive_id === f.chat.chat_id && JSON.stringify(s.content).includes('过去 12 小时没有失败的任务')));
 });
 
+test('a daily report plan whose migration faults is reported failed, and neither stops the others nor the control plane start (#1027)', async t => {
+  const f = await fixture(t), spec = destination => JSON.stringify({ name: '项目日报', kind: 'personal', actor_id: f.principal, owner_id: f.principal, maintainer_id: f.principal,
+    workflow: 'report.daily', parameters: {}, timezone: 'UTC', cron: '0 9 * * *', start_at: f.now(), enabled: true, misfire: 'skip', grace_ms: 60000, destination_id: destination, limits: defaultLimits });
+  const legacy = (id, json) => f.h.store.run(`INSERT INTO schedules(id,tenant_id,project_id,creator_id,owner_id,maintainer_id,actor_id,kind,approver_id,authorization_revision,grant_snapshot,spec,revision,state,reason,next_at,created_at,updated_at)
+    VALUES(?,'github.com:10','101',?,?,?,?,'personal',NULL,1,'{}',?,1,'active',NULL,?,?,?)`, id, f.principal, f.principal, f.principal, f.principal, json, f.now() + 60000, f.now(), f.now());
+  // A registration whose sealed payload no longer opens (another key, or damaged), and a spec that is not JSON.
+  f.h.store.db.exec(`CREATE TEMP TABLE corrupt AS SELECT * FROM channel_outbox WHERE id='${f.destination}';
+    UPDATE corrupt SET id='corrupt-registration',idempotency_key='corrupt-registration',payload=X'00';
+    INSERT INTO channel_outbox SELECT * FROM corrupt; DROP TABLE corrupt;`);
+  legacy('daily-a-corrupt', spec('corrupt-registration')); legacy('daily-b-malformed', '{"workflow":"report.daily","name":'); legacy('daily-c-good', spec(f.destination));
+  // Restarting the control plane runs the upgrade at start, as a deployment does.
+  await f.h.stop(); await f.h.start();
+  const rows = f.h.store.all('SELECT schedule_id,outcome,reason,detail FROM schedule_migrations ORDER BY schedule_id');
+  assert.deepEqual(rows.map(r => [r.schedule_id, r.outcome, r.reason]), [['daily-a-corrupt', 'failed', 'migration_step_failed'], ['daily-b-malformed', 'failed', 'migration_step_failed'], ['daily-c-good', 'migrated', null]]);
+  assert.ok(rows.slice(0, 2).every(r => JSON.parse(r.detail).error), 'the fault is kept in the report');
+  assert.deepEqual(f.h.store.all("SELECT id,state,reason FROM schedules WHERE id LIKE 'daily-%' ORDER BY id").map(r => [r.id, r.state, r.reason]),
+    [['daily-a-corrupt', 'paused', 'daily_report_retired'], ['daily-b-malformed', 'paused', 'daily_report_retired'], ['daily-c-good', 'paused', 'migrated_to_chat_schedule']]);
+  assert.equal(f.h.store.get('SELECT count(*) n FROM channel_schedules').n, 1, 'no half-made timer for the faulting plans');
+  assert.equal((await query(f, 'list_schedule_migrations')).migrations.length, 3);
+});
+
 test('a fixture project effective config still fits in one management tool result', async t => {
   const f = await fixture(t), cfg = await query(f, 'get_effective_config');
   const bytes = Buffer.byteLength(JSON.stringify(cfg));

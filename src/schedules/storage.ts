@@ -76,7 +76,9 @@ export function scheduleStorage(store: Store): void {
   const retired = store.all("SELECT id,spec FROM notification_subscriptions WHERE spec LIKE '%approval.waiting%' OR spec LIKE '%project.daily%'");
   if (retired.length) store.transaction(() => {
     for (const row of retired) {
-      const spec = JSON.parse(row.spec), before: string[] = spec.events ?? [], events = before.filter(e => !retiredEvents[e]);
+      let spec: { events?: string[] };
+      try { spec = JSON.parse(row.spec); } catch { continue; } // A malformed spec is left for its owner to see; it never blocks the start.
+      const before: string[] = Array.isArray(spec.events) ? spec.events : [], events = before.filter(e => !retiredEvents[e]);
       if (events.length === before.length) continue;
       const reason = before.map(e => retiredEvents[e]).find(Boolean)!;
       store.run(`UPDATE notification_subscriptions SET spec=?,revision=revision+1,updated_at=?,
@@ -86,5 +88,6 @@ export function scheduleStorage(store: Store): void {
   });
   // Project plans have no Feishu destination any more (#1027). A daily report plan keeps its saved spec, destination
   // included, as the record its migration reads; every other plan drops the field, which it never used to run.
-  store.run("UPDATE schedules SET spec=json_remove(spec,'$.destination_id') WHERE json_extract(spec,'$.workflow')<>'report.daily' AND json_type(spec,'$.destination_id') IS NOT NULL");
+  store.run(`UPDATE schedules SET spec=json_remove(spec,'$.destination_id')
+    WHERE CASE WHEN json_valid(spec) THEN json_extract(spec,'$.workflow') IS NOT 'report.daily' AND json_type(spec,'$.destination_id') IS NOT NULL ELSE 0 END`);
 }

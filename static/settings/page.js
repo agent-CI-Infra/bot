@@ -51,7 +51,7 @@ async function retentionCard(size, count, time) {
     ['manager_payload_days', 'manager 重复正文保留天数', `默认 ${defaults.manager_payload_days} 天。控制面另存了同样的请求和结果。`],
     ['workspace_finished_days', '任务工作区：任务结束后保留天数', `默认 ${defaults.workspace_finished_days} 天；没有任务记录的目录也按这个。为打开的 PR 保留的不受影响。`],
     ['workspace_failed_days', '任务工作区：任务失败后保留天数', `默认 ${defaults.workspace_failed_days} 天。`],
-    ['webhook_payload_days', 'Webhook 投递正文保留天数（留空不过期）', `至少 ${bounds.webhook_payload_days[0]} 天：日报和外部执行端会读最近的投递。删除后投递记录、状态和正文的 sha256 保留。`]];
+    ['webhook_payload_days', 'Webhook 投递正文保留天数（留空不过期）', `至少 ${bounds.webhook_payload_days[0]} 天：外部执行端会读最近的投递。删除后投递记录、状态和正文的 sha256 保留。`]];
   const controls = {};
   for (const [key, label, help] of fields) { controls[key] = number(key, settings[key], bounds[key]); form.append(field(label, controls[key]), note(help)); }
   const overrides = costTable(['项目', '轨迹正文保留天数（留空跟随上面的设置）']), perProject = {};
