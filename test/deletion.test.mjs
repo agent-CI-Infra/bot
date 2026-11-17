@@ -236,7 +236,7 @@ test('a GitHub App project is deleted only when GitHub, asked right then, says t
 test('project removal deletes scheduling children and project accounting while retaining other projects, tenant budgets and audit', async t => {
   const h = await harness(t, undefined, { schedules: { automatic: false } }), { admin } = await setup(h), a = await account(admin), store = h.store;
   await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
-  const projectTables = ['notification_outbox', 'schedule_occurrences', 'schedules', 'notification_subscriptions', 'schedule_events', 'schedule_operations', 'schedule_audit'];
+  const projectTables = ['notification_outbox', 'schedule_occurrences', 'schedules', 'notification_subscriptions', 'schedule_events', 'schedule_operations', 'schedule_audit', 'schedule_migrations'];
   const accounting = ['schedule_usage', 'schedule_notification_slots', 'schedule_budgets'];
   store.transaction(() => {
     for (const id of ['101', '202']) {
@@ -257,6 +257,9 @@ test('project removal deletes scheduling children and project accounting while r
       store.run("INSERT INTO schedule_operations VALUES(?,?,'{}')", 'operation-' + id, id);
       store.run(`INSERT INTO schedule_audit(project_id,resource_id,initiator,actor_id,authorization_revision,revision,source,action,detail,created_at)
         VALUES(?,'schedule','creator','service',1,1,'timer','created','{}',0)`, id);
+      // The daily report migration report (#1027) belongs to the project too.
+      store.run(`INSERT INTO schedule_migrations(schedule_id,project_id,plan_name,plan_state,outcome,reason,detail,created_at)
+        VALUES(?,?,'项目日报','active','failed','schedule_destination_unavailable','{}',0)`, 'schedule-' + id, id);
     }
     for (const [scope, id] of [['project', '101'], ['project', '202'], ['schedule', 'schedule-101'], ['schedule', 'subscription-101'], ['schedule', 'schedule-202'], ['schedule', 'subscription-202'], ['tenant', 'github.com:10']]) {
       store.run("INSERT INTO schedule_budgets VALUES(?,?,'report','{}')", scope, id);

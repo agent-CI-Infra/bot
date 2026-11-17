@@ -20,7 +20,7 @@ import { pruneCommitChecks } from '../tasks/external-links.js';
 // - manager_payload_days: the manager's copies of runner-call bodies (TrajectoryExpiry, default 2), pushed to the manager.
 // - workspace_finished_days / workspace_failed_days: the task workspace rules of #444 (1 and 7 days by default).
 // - webhook_payload_days: the bodies of received webhook deliveries; the row, status and headers stay, with the body's
-//   sha256. At least 7 days: daily reports and external executors read recent deliveries.
+//   sha256. At least 7 days: external executors read recent deliveries.
 // Unset (null) keeps everything, as decided in #436; the manager window and the workspace rules keep their defaults.
 export interface RetentionSettings {
   trajectory_days: number | null;
