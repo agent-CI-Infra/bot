@@ -242,9 +242,11 @@ export async function startModelRelay({
       sendError(502, 'api_error');
     } finally {
       res.removeListener('close', onClose);
+      // The request file is the writer's liveness marker. Remove it before response artifacts: a concurrent
+      // writer must see cancellation rather than ENOENT/offset errors while the request still looks live.
+      await unlink(reqPath).catch(() => {});
       await Promise.all([
         unlink(reqTmp).catch(() => {}),
-        unlink(reqPath).catch(() => {}),
         unlink(streamPath).catch(() => {}),
         unlink(cursorPath).catch(() => {}),
         unlink(cursorTmp).catch(() => {}),
