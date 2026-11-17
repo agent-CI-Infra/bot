@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { parse } from 'yaml';
 import { discoverSets, planShards, loadWeights } from '../scripts/test-plan.mjs';
-import { mergeReports, candidateWeights } from '../scripts/unit-shards.mjs';
+import { mergeReports, candidateWeights, summarizeReports, writeResults, readReports } from '../scripts/unit-shards.mjs';
 
 function fixture(t) {
   mkdirSync('.tmp', { recursive: true });
@@ -23,7 +23,8 @@ function fixture(t) {
 function reports(plan, attempt = 1) {
   return plan.shards.map(shard => ({ version: 1, planHash: plan.hash, corpusHash: plan.corpusHash,
     revision: 'source', runId: 'run', attempt, shard: { index: shard.index, total: plan.shards.length }, jobs: 4,
-    seconds: shard.index === 1 ? 10 : 12, machine: { cpu: 'fixture', parallelism: 4, node: 'v22', image: 'test' },
+    seconds: shard.index === 1 ? 10 : 12, startedAt: shard.index * 1000, endedAt: shard.index * 1000 + (shard.index === 1 ? 10 : 12) * 1000,
+    machine: { cpu: 'fixture', parallelism: 4, node: 'v22', image: 'test' },
     sets: shard.sets.map(set => ({ name: set.name, files: set.files, ok: true, seconds: set.weight,
       counts: { tests: set.files.length, pass: set.files.length, fail: 0, cancelled: 0, skipped: 0, todo: 0 } })) }));
 }
@@ -96,6 +97,51 @@ test('a failed-only rerun carries a successful old shard but uses the latest att
   assert.throws(() => mergeReports(plan, reports(plan, 3), { attempt: 2 }), /invalid attempt/);
 });
 
+test('failed sets still write accurate Nightly metrics before the gate rejects them', t => {
+  const f = fixture(t), rows = reports(f.plan);
+  writeResults(f.plan, rows, {}, f.dir);
+  assert.ok(existsSync(join(f.dir, 'unit-balance.json')));
+  rows[0].sets[0].ok = false;
+  rows[0].sets[0].counts.pass--; rows[0].sets[0].counts.fail++;
+  assert.throws(() => writeResults(f.plan, rows, {}, f.dir), /failed test set/);
+  assert.equal(existsSync(join(f.dir, 'unit-balance.json')), false, 'a previous successful balance report must not survive a failed gate');
+  const summary = JSON.parse(readFileSync(join(f.dir, 'unit-summary.json'), 'utf8'));
+  const values = Object.fromEntries(summary.metrics.map(metric => [metric.name, metric.value]));
+  assert.equal(summary.complete, true);
+  assert.equal(values.tests, 5); assert.equal(values.pass, 4); assert.equal(values.fail, 1); assert.equal(values['failed sets'], 1);
+  assert.equal(values.duration, 13, 'whole pool spans from 1000 to 14000, not just the 12s slowest shard');
+  assert.equal(values['pool duration max'], 12);
+});
+
+test('partial and invalid reports expose gaps without inventing unseen test counts', t => {
+  const f = fixture(t), rows = reports(f.plan);
+  assert.throws(() => writeResults(f.plan, rows.slice(0, 1), {}, f.dir), /missing shard/);
+  const summary = JSON.parse(readFileSync(join(f.dir, 'unit-summary.json'), 'utf8'));
+  const values = Object.fromEntries(summary.metrics.map(metric => [metric.name, metric.value]));
+  assert.equal(summary.complete, false); assert.equal(values.tests, 3); assert.equal(values['missing sets'], 2); assert.equal(values['failed sets'], 2);
+  assert.ok(!Object.hasOwn(values, 'duration'));
+  const foreign = structuredClone(rows); foreign[0].planHash = 'foreign';
+  assert.ok(summarizeReports(f.plan, foreign).errors.length > 0);
+  assert.throws(() => mergeReports(f.plan, foreign), /different corpus/);
+  const empty = summarizeReports(f.plan, []);
+  assert.equal(empty.metrics.find(metric => metric.name === 'missing sets').value, 4);
+  const carried = reports(f.plan); carried[1].attempt = 2;
+  assert.ok(!summarizeReports(f.plan, carried).metrics.some(metric => metric.name === 'duration'));
+});
+
+test('a truncated artifact still preserves metrics from the readable shard and fails the gate', t => {
+  const f = fixture(t), rows = reports(f.plan), directory = join(f.dir, 'artifacts');
+  mkdirSync(directory); writeFileSync(join(directory, 'unit-shard-1.json'), JSON.stringify(rows[0]));
+  writeFileSync(join(directory, 'unit-shard-2.json'), '{');
+  const input = readReports(directory);
+  assert.throws(() => writeResults(f.plan, input, {}, f.dir), /unsupported shard report/);
+  const summary = JSON.parse(readFileSync(join(f.dir, 'unit-summary.json'), 'utf8'));
+  assert.equal(summary.metrics.find(metric => metric.name === 'tests').value, 3);
+  assert.equal(summary.metrics.find(metric => metric.name === 'missing sets').value, 2);
+  assert.match(summary.errors.join(' '), /unit-shard-2.json/);
+  assert.deepEqual(readReports(join(directory, 'missing')), []);
+});
+
 test('weight candidates need three complete runs and normalize whole-runner slowdowns', t => {
   let id = 0;
   const f = fixture(t), sample = speed => {
@@ -136,6 +182,19 @@ test('the real runner executes both shards, reports exact coverage and rejects m
     assert.equal(result.code, 2, result.output);
   }
   const missing = await run([...f.files, '--shard'], env); assert.equal(missing.code, 2);
+  // Exercise an actual failed node:test process, not only a hand-written failed report.
+  writeFileSync(f.files[0], "// test-set: shared one resource must remain serial\nimport {test} from 'node:test'; test('expected failure',()=>{throw new Error('fixture failure');});\n");
+  const failedRows = [];
+  for (const index of [1, 2]) {
+    const path = join(f.dir, `failed-${index}.json`);
+    const result = await run([...f.files, '--shard', `${index}/2`], { ...env, BOT_TEST_REPORT: path });
+    const report = JSON.parse(readFileSync(path, 'utf8')); failedRows.push(report);
+    assert.equal(result.code, report.sets.some(set => !set.ok) ? 1 : 0, result.output);
+  }
+  assert.throws(() => writeResults(planShards(discoverSets(f.files)), failedRows, {}, f.dir), /failed test set/);
+  const summary = JSON.parse(readFileSync(join(f.dir, 'unit-summary.json'), 'utf8'));
+  assert.equal(summary.metrics.find(metric => metric.name === 'fail').value, 1);
+  assert.equal(summary.metrics.find(metric => metric.name === 'pass').value, 4);
 });
 
 test('the workflow keeps the unit gate dependent on two four-worker shards and preserves failure evidence', () => {
@@ -148,6 +207,7 @@ test('the workflow keeps the unit gate dependent on two four-worker shards and p
   assert.equal(step.env.BOT_TEST_SHARD, '${{ matrix.shard }}/2');
   assert.equal(gate.name, 'unit'); assert.equal(gate.needs, 'unit-shards'); assert.match(gate.if, /always\(\)/);
   assert.ok(gate.steps.some(step => step.run === 'node scripts/unit-shards.mjs merge .tmp/unit-shards'));
+  assert.equal(gate.steps.find(step => step.run === 'node scripts/unit-shards.mjs merge .tmp/unit-shards').if, 'always()');
   assert.ok(gate.steps.some(step => step.env?.SHARD_RESULT === '${{ needs.unit-shards.result }}' && step.run.includes('= success')));
   assert.ok(shard.steps.some(step => step.if === 'always()' && step.with?.name?.includes('github.run_attempt')));
   assert.ok(gate.steps.some(step => step.with?.name === 'unit-summary'));

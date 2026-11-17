@@ -94,9 +94,10 @@ if (process.env.BOT_TEST_SUMMARY) writeFileSync(process.env.BOT_TEST_SUMMARY, JS
   ...['tests', 'pass', 'fail', 'cancelled', 'skipped'].map(key => ({ name: key, value: total(key), unit: 'count' })),
   { name: 'failed sets', value: failed.length + sets.size - results.length, unit: 'count' },
   { name: 'duration', value: Math.round((Date.now() - began) / 1000), unit: 's' }] }, null, 2) + '\n');
+const endedAt = Date.now();
 if (process.env.BOT_TEST_REPORT) writeFileSync(process.env.BOT_TEST_REPORT, JSON.stringify({ version: 1, planHash: plan.hash, corpusHash: plan.corpusHash,
   revision: process.env.GITHUB_SHA ?? null, runId: process.env.GITHUB_RUN_ID ?? null, attempt: Number(process.env.GITHUB_RUN_ATTEMPT || 1),
-  shard: { index: shard.index, total: plan.shards.length }, jobs, seconds: (Date.now() - began) / 1000,
+  shard: { index: shard.index, total: plan.shards.length }, jobs, seconds: (endedAt - began) / 1000, startedAt: began, endedAt,
   machine: { cpu: cpus()[0]?.model || 'unknown', parallelism: availableParallelism(), node: process.version, image: process.env.ImageVersion ?? null },
   sets: results.map(r => ({ name: r.set.name, files: r.set.files, ok: r.ok, counts: r.counts, seconds: (r.end - r.start) / 1000 })) }, null, 2) + '\n');
 if (failed.length || results.length < sets.size) { console.log(`# failed sets: ${failed.map(r => r.set.name).join(' ') || 'none'}; their files stay in ${run}`); process.exitCode = 1; }

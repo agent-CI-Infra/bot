@@ -49,11 +49,12 @@ jobs:
           BOT_TEST_SHARD: ${{ matrix.shard }}/2
           BOT_TEST_REPORT: .tmp/unit-shard-${{ matrix.shard }}.json
 
-      # Keep every attempt: rerunning a failed shard must not erase its first failure evidence.
+      # Keep every attempt. Diagnostic artifact names sort after unit-summary so the
+      # generic board reader still finds its metrics within its bounded download budget.
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: unit-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          name: unit-test-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: .tmp/unit-shard-${{ matrix.shard }}.json
           include-hidden-files: true
           if-no-files-found: error
@@ -81,9 +82,10 @@ jobs:
           node-version: 22
       - uses: actions/download-artifact@v8
         with:
-          pattern: unit-shard-*
+          pattern: unit-test-shard-*
           path: .tmp/unit-shards
       - run: node scripts/unit-shards.mjs merge .tmp/unit-shards
+        if: always()
       - name: All shard jobs succeeded
         env:
           SHARD_RESULT: ${{ needs.unit-shards.result }}
@@ -91,7 +93,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: unit-balance-attempt-${{ github.run_attempt }}
+          name: unit-test-balance-attempt-${{ github.run_attempt }}
           path: .tmp/unit-balance.json
           include-hidden-files: true
           if-no-files-found: ignore
