@@ -144,7 +144,7 @@ const settingsCards = {
         ['docker_volumes', 'Docker 卷（未被计入的部分）'], ['assistant_homes', '助手电脑 HOME（assistant-homes 卷）']])
         row(table, [label, known[key] === null || known[key] === undefined ? '尚未测量' : size(known[key]) + ((view.host.unmeasured ?? []).includes(key) ? '（部分电脑未扫完）' : '')]);
       row(table, ['其他（已用 − 以上合计）', size(view.host.other_bytes) + ((view.host.unmeasured ?? []).length ? '（含尚未测量的项）' : '')]);
-      host.append(table.wrap, note('控制面、manager、项目电脑的卷和 Docker 数据在同一块数据盘上；Docker 卷一行只算不带 compose/department.bot 标签的卷（带标签的卷不重复计入；其中 agent-tools、keys、notes 和已删除或旧代工作卷在 known 里没有对应行，字节仍留在「其他」），助手电脑的 HOME 单列；「其他」包含系统目录和还没单列的 bot 数据（agent-tools、各项目笔记 *-notes、*-keys 等被按标签排除又无单独已知行的卷），只显示、不清理。'));
+      host.append(table.wrap, note('控制面、manager、项目电脑的卷和 Docker 数据在同一块数据盘上；Docker 卷一行只算不带 compose/department.bot 标签的卷（带标签的卷不重复计入；其中 agent-tools、keys、notes 和重置后遗留的旧代工作卷、从未扫描到的工作卷在 known 里没有对应行，字节仍留在「其他」），助手电脑的 HOME 单列；「其他」包含系统目录和还没单列的 bot 数据（agent-tools、各项目笔记 *-notes、*-keys 等被按标签排除又无单独已知行的卷），只显示、不清理。'));
       cards.push(host);
       const reclaim = card('可回收与最近清理'), list = costTable(['类别', '可回收', '怎么回收']);
       // A database already compacted returns its free pages in the background; one not yet compacted at its next start.
