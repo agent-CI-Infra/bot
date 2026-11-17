@@ -625,10 +625,12 @@ test('pre-header keepalive heartbeats do not prematurely commit 200/application/
 test('propagates client cancellation to upstream when runner returns {error, detail} objects like Workspace.deliver', async t => {
   const rig = await createRelayRig(t);
   // Wrap runner to match runner/runner.mjs + Workspace.deliver: catch agentOperation errors and return {error, detail}.
+  const runnerErrors=[];
   const wrappedRunner = async input => {
     try {
       return await rig.runner(input);
     } catch (err) {
+      runnerErrors.push(String(err?.message));
       return {
         error: 'runner_operation_failed',
         detail: `${input.type}: ${String(err?.message || 'operation failed')}`,
@@ -700,7 +702,7 @@ test('propagates client cancellation to upstream when runner returns {error, det
     if (row?.state && row.state !== 'pending') break;
     await new Promise(resolve => setTimeout(resolve, 25));
   }
-  assert.equal(row?.state, 'cancelled');
+  assert.equal(row?.state, 'cancelled',JSON.stringify({runnerErrors,response:row?.response_ref?rig.store.trajectories.read(row.response_ref).data:null}));
 });
 
 test('preserves tool-result images, multi-byte UTF-8 across chunks, text-tool-text blocks, mid-stream SSE errors, and OpenAI protocol auto-selection', async t => {
