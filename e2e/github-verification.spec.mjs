@@ -40,7 +40,7 @@ test('GitHub 登录不等权限核验：先进控制台并显示核验进度，�
     release();
     await expect(line).toBeHidden();
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
-    await expect(page.locator('#console-project option', { hasText: 'fixture/project-101' })).toHaveCount(1);
+    await expect(page.locator('#console-scope-projects [role=option][title="fixture/project-101"]')).toHaveCount(1);
     await shots('projects-verified');
     expect(errors).toEqual([]);
   } finally { f.state.apiGate = undefined; release(); await f.close(); }
@@ -75,7 +75,7 @@ test('核验结束时，身份子页上正在填写的凭据不被重绘清掉',
     // The check ends: the line goes and the newly proved projects arrive, but the page being filled stays as it is.
     release();
     await expect(page.locator('#github-verification')).toBeHidden();
-    await expect(page.locator('#console-project option', { hasText: 'fixture/project-101' })).toHaveCount(1);
+    await expect(page.locator('#console-scope-projects [role=option][title="fixture/project-101"]')).toHaveCount(1);
     await expect(page.locator('input[name="app_id"]')).toHaveValue('cli_typed_by_person');
     await expect(page.locator('input[name="app_secret"]')).toHaveValue('secret_typed_by_person');
     await expect(page.locator('#repaint-probe')).toHaveCount(1);
@@ -101,7 +101,7 @@ test('核验结束时，没有人填写的身份子页仍然重绘，授权页�
     // Nothing was typed: the sub-page follows the check as before, and the project picker still gains the new project.
     await expect(page.locator('#repaint-probe')).toHaveCount(0);
     await expect(page.locator('#identity-panel')).toContainText('飞书应用连接向导');
-    await expect(page.locator('#console-project option', { hasText: 'fixture/project-101' })).toHaveCount(1);
+    await expect(page.locator('#console-scope-projects [role=option][title="fixture/project-101"]')).toHaveCount(1);
     expect(errors).toEqual([]);
   } finally { f.state.apiGate = undefined; release(); await f.close(); }
 });

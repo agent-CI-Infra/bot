@@ -1,6 +1,6 @@
 // Shared navigation wraps the existing console; business pages keep their routes and renderers.
 const consoleMedia = matchMedia('(max-width:767px)');
-let consoleOwner = null, consoleProject = null, consoleNavSignature = '', consoleRouteKey = null;
+let consoleOwner = null, consoleProject = null, consoleRouteKey = null;
 const consolePositions = new Map();
 // What a project is currently short of, from the installation snapshot: one read per project and page session, because the
 // navigation is redrawn on every route and must not turn a badge into a request per click.
@@ -108,7 +108,8 @@ function taskOriginCaption(origin) {
 }
 function consoleScope() {
   const inbox = consoleInboxRoute();
-  return projectRoute()?.id || (inbox ? (inbox[1] === 'all' ? null : inbox[1]) : consoleProject);
+  const creation = /^#\/new-task(?:\/([1-9]\d*))?$/.exec(location.hash);
+  return projectRoute()?.id || (inbox ? (inbox[1] === 'all' ? null : inbox[1]) : creation ? creation[1] || null : consoleProject);
 }
 // #481: the phone's bottom bar owns the five primary destinations (项目 / 任务 / 待处理 / 助手 / 更多), so this page is
 // the supplement behind 更多. It must not repeat what the bar already carries, and it stays short enough to read on a
@@ -179,62 +180,50 @@ function syncConsoleShell() {
   $('console-sidebar').hidden = !signedIn;
   $('console-mobile-nav').hidden = !signedIn;
   $('console-location').hidden = !signedIn;
+  $('console-mobile-scope').hidden = !signedIn;
   if (!signedIn || consoleOwner !== me.id) {
     if (typeof resetTaskCreation === 'function') resetTaskCreation();
     if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles();
     if (typeof resetScheduleViews === 'function') resetScheduleViews();
     if (typeof resetBoard === 'function') resetBoard();
     if (typeof resetPersonalApps === 'function') resetPersonalApps();
-    consoleOwner = me?.id || null; consoleProject = null; consoleNavSignature = ''; consolePositions.clear(); consoleRouteKey = null;
+    consoleOwner = me?.id || null; consoleProject = null; consolePositions.clear(); consoleRouteKey = null;
     // #480: the shared default is this session's choice, so a different user never inherits it.
     if (typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(null);
-    const clearedPicker = $('console-project'); if (clearedPicker) clearedPicker.value = '';
+    closeScopePicker(false);
     $('console-secondary-nav').replaceChildren(); $('console-page').replaceChildren();
     setAccountMenu(false);
     // #481: the bar's assistant state belongs to one session. A different owner starts idle and read, so a turn left
     // running or a reply left unread by the previous user never survives the sign-out.
     updateConsoleAssistant();
   }
-  if (!signedIn) return;
+  if (!signedIn) { syncScopePicker(); return; }
   applyConsoleNavVisibility();
   // The menu names the same person the header used to print beside the sign-out button.
   $('console-account-login').textContent = userDisplayName(me);
   $('console-account-role').textContent = currentRoleText();
-  const project = projectRoute(), inbox = consoleInboxRoute();
-  const routed = project?.id || (inbox ? (inbox[1] === 'all' ? null : inbox[1]) : null) || null;
+  const project = projectRoute(), inbox = consoleInboxRoute(), creation = /^#\/new-task(?:\/([1-9]\d*))?$/.exec(location.hash);
+  const routed = project?.id || (inbox ? (inbox[1] === 'all' ? null : inbox[1]) : creation?.[1]) || null;
   // #480: the address wins where it names a project; the board, costs and management pages follow the shell picker.
   // A page that names no project keeps the project the reader last stood in, and only a chosen default replaces it.
-  if (project || inbox) {
+  if (project || inbox || creation) {
     consoleProject = routed;
     // The picker shows this project, so it is also the default the board, costs and management read. An address that
     // names a project must not leave those three describing another one.
     if (routed && typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(routed);
     // #494: an inbox address that names no project shows 「全部项目」 in the picker, so the shared default has to become empty
     // as well. Otherwise the picker, the board, usage and the assistant would read two different values for one choice.
-    else if (inbox && typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(null);
+    else if ((inbox || creation) && typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(null);
   } else if (typeof consoleDefaultProject === 'function' && consoleDefaultProject()) consoleProject = consoleDefaultProject();
   const repo = repositories.find(r => String(r.id) === consoleProject);
   // A revoked project is never kept in the project picker merely because it was selected earlier.
   if (!repo && consoleProject) { consoleProject = null; if (typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(null); }
   // A GitHub full name carries its owner, so the picker groups by organization without asking for another projection:
   // the same repository name can arrive from two owners and then must not look like one project.
-  const organization = r => (r.full_name || '').includes('/') ? r.full_name.split('/')[0] : (r.account_name || '其他组织');
-  const signature = JSON.stringify([me.id, consoleProject, typeof currentLocale === 'function' ? currentLocale() : '', repositories.map(r => [r.id, r.full_name, organization(r)])]);
-  if (signature !== consoleNavSignature) {
-    consoleNavSignature = signature;
-    const picker = $('console-project'); picker.replaceChildren(new Option(t('nav.all_projects'), ''));
-    const groups = new Map();
-    for (const r of repositories) { const name = organization(r); if (!groups.has(name)) groups.set(name, []); groups.get(name).push(r); }
-    for (const [name, rows] of [...groups].sort((left, right) => left[0].localeCompare(right[0]))) {
-      const group = document.createElement('optgroup'); group.label = name;
-      for (const r of rows) group.append(new Option(r.full_name, r.id));
-      picker.append(group);
-    }
-    picker.value = consoleProject || '';
-  }
+  const organization = scopeOrganization;
+  syncScopePicker();
   const platform = tab === 'settings', personal = !project && ['preferences', 'identity', 'external', 'conversations'].includes(tab);
   const settingsContext = platform && typeof settingsPageTitle === 'function' ? settingsPageTitle() : t('nav.settings');
-  $('console-project').closest('label').hidden = platform;
   $('console-area').textContent = platform ? (typeof settingsScope === 'function' ? settingsScope() : t('nav.platform')) : project ? t('nav.project_workspace') : personal ? t('nav.personal') : t('nav.workspace');
   // The scope bar names both halves of the current address: a project name alone does not say which organization it is in.
   const shortName = r => (r.full_name || '').includes('/') ? r.full_name.split('/').slice(1).join('/') : r.full_name;
@@ -525,26 +514,10 @@ function consoleIconName(href) {
 
 function initConsoleShell() {
   const sidebar = $('console-sidebar');
+  initScopePicker();
   const kicker = element('p', t('nav.workspace'), 'console-nav-label'); kicker.setAttribute('data-i18n', 'nav.workspace');
   const scopeCaption = element('span', t('nav.switch_project')); scopeCaption.setAttribute('data-i18n', 'nav.switch_project');
-  const scope = element('label', '', 'console-project-picker'); scope.append(scopeCaption);
-  const picker = document.createElement('select');
-  picker.id = 'console-project'; picker.setAttribute('aria-label', t('nav.switch_project')); picker.setAttribute('data-i18n', 'nav.switch_project'); picker.setAttribute('data-i18n-attr', 'aria-label');
-  // #480: the picker is the console-wide default. The board and the usage page read that default, so choosing a project
-  // there re-reads the page in place and keeps the reader where the scope applies; the management assistant follows the
-  // default itself (its own scope control and conversation move together), so re-rendering that page would open a second
-  // conversation for one choice. Every other page is a navigation surface, unchanged: it opens the chosen project (or the
-  // projects list), because its address names what it shows.
-  picker.addEventListener('change', () => {
-    const id = picker.value || null;
-    if (typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(id);
-    consoleProject = id;
-    if (/^#\/(board|costs)(\/|$)/.test(location.hash)) route().catch(error);
-    // The open assistant follows the default itself, so this page is not re-rendered. The console link that names the
-    // project comes from that same default and is written only in syncConsoleShell(), so it is refreshed here too (#494).
-    else if (/^#\/management(\/|$)/.test(location.hash)) syncConsoleShell();
-    else location.hash = id ? `#/projects/${id}/overview` : '#/projects';
-  }); scope.append(picker);
+  const scope = element('div', '', 'console-project-picker'); scope.append(scopeCaption, scopePickerButton('console-project'));
   const tabs = $('tabs'), primary = element('div', '', 'console-primary-nav'), settings = element('div', '', 'console-settings-nav');
   settings.setAttribute('role', 'group'); settings.setAttribute('aria-label', t('nav.settings_group')); settings.setAttribute('data-i18n', 'nav.settings_group'); settings.setAttribute('data-i18n-attr', 'aria-label');
   settings.append(tabs.querySelector('[data-tab=preferences]'), tabs.querySelector('[data-tab=settings]'));
@@ -578,7 +551,14 @@ function initConsoleShell() {
   const permission = element('span', '', 'console-permission'); permission.id = 'console-permission';
   locationBox.append(area, context, permission);
   const secondary = element('div', '', 'console-secondary-nav'); secondary.id = 'console-secondary-nav'; secondary.hidden = true;
-  $('main-content').prepend(locationBox, secondary);
+  const mobileScope = element('div', '', 'console-mobile-scope'); mobileScope.id = 'console-mobile-scope'; mobileScope.hidden = true;
+  mobileScope.append(scopePickerButton('console-mobile-project'));
+  $('main-content').prepend(mobileScope, locationBox, secondary);
+  // The fixed assistant page and the board's filter scroller share the space the mobile range bar consumes.
+  new ResizeObserver(() => {
+    const height = mobileScope.getBoundingClientRect().height;
+    document.documentElement.style.setProperty('--console-scope-height', height ? Math.ceil(height + 12) + 'px' : '0px');
+  }).observe(mobileScope);
   const sectionCaption = element('span', t('nav.current_page')); sectionCaption.setAttribute('data-i18n', 'nav.current_page');
   const section = element('label', '', 'console-section-picker'); section.append(sectionCaption);
   const sectionPicker = document.createElement('select'); section.id = 'console-section-label'; sectionPicker.id = 'console-section'; sectionPicker.setAttribute('aria-label', t('nav.current_page')); sectionPicker.setAttribute('data-i18n', 'nav.current_page'); sectionPicker.setAttribute('data-i18n-attr', 'aria-label'); section.hidden = true;

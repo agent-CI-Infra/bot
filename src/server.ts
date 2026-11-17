@@ -276,7 +276,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       '/access.css': ['access.css', 'text/css'],
       '/workspace.js': ['workspace.js', 'text/javascript'], '/workspace.css': ['workspace.css', 'text/css'],
       '/task-create.js': ['task-create.js', 'text/javascript'], '/task-create.css': ['task-create.css', 'text/css'],
-      '/shell.js': ['shell.js', 'text/javascript'], '/shell.css': ['shell.css', 'text/css'], '/models.css': ['models.css', 'text/css'], '/management.css': ['management.css', 'text/css'], '/vendor/marked.js': ['../node_modules/marked/lib/marked.umd.js', 'text/javascript'], '/vendor/purify.js': ['../node_modules/dompurify/dist/purify.min.js', 'text/javascript'],
+      '/scope-picker.js': ['scope-picker.js', 'text/javascript'], '/shell.js': ['shell.js', 'text/javascript'], '/shell.css': ['shell.css', 'text/css'], '/models.css': ['models.css', 'text/css'], '/management.css': ['management.css', 'text/css'], '/vendor/marked.js': ['../node_modules/marked/lib/marked.umd.js', 'text/javascript'], '/vendor/purify.js': ['../node_modules/dompurify/dist/purify.min.js', 'text/javascript'],
       '/docs/external-token-api.md': ['../docs/external-token-api.md', 'text/plain'], '/favicon.ico': ['favicon.ico', 'image/x-icon'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
     if (method === 'GET' && assets[path]) {
       const [name, mime] = assets[path]; const bytes = await readStaticAsset(options.staticDirectory, name);

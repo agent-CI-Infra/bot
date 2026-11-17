@@ -32,7 +32,7 @@ async function checkedConsole(page, f) {
   await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
   const line = page.locator('#github-verification');
   await expect(line).toBeVisible();
-  const picker = page.locator('#console-project option', { hasText: 'fixture/project-101' });
+  const picker = page.locator('#console-scope-projects [role=option][title="fixture/project-101"]');
   await expect(picker).toHaveCount(0);
   return { release, arm: () => { listReads.length = 0; failNext = true; release(); }, listReads, line, picker };
 }
@@ -143,7 +143,7 @@ test('故障期间点刷新：提示行与唯一重试不消失；端点恢复�
   try {
     await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
     const line = page.locator('#github-verification'), rows = page.locator('#rows'), boot = page.locator('#boot');
-    const picker = page.locator('#console-project option', { hasText: 'fixture/project-101' });
+    const picker = page.locator('#console-scope-projects [role=option][title="fixture/project-101"]');
     const retry = page.getByRole('button', { name: '重新读取项目列表' });
     await expect(line).toBeVisible();
     await expect(picker).toHaveCount(0);

@@ -169,7 +169,7 @@ test('「更多」不再重复底栏目的地，按三组补充且只保留当�
     await page.goto(h.admin + '/#/projects/101/overview');
     await expect(page.locator('#project-page')).toBeVisible();
     // The project container is shown before bootstrap has populated the shell's repository picker.
-    await expect(page.locator('#console-project')).toHaveValue('101');
+    await expect(page.locator('#console-project')).toHaveAttribute('data-project-id', '101');
     await page.goto(h.admin + '/#/more');
     await expect(page.locator('.console-group h2')).toHaveText(['当前项目', '个人与平台', '管理']);
     const captions = await page.locator('.console-group a .console-link-copy > span').allInnerTexts();

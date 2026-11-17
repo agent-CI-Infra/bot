@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import {test,expect} from '@playwright/test';
 import {mkdirSync,rmSync} from 'node:fs';
 import {harness,setup,account,repository,testPassword} from '../test/helpers.mjs';
@@ -36,7 +37,7 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
     await page.getByRole('button',{name:'用量与成本',exact:true}).click();
     // #480: the project page this run came through is now the shell default, so a cross-project report starts by choosing
     // 全部项目. The totals, the chart and the permission rules below are unchanged.
-    await page.locator('#console-project').selectOption('');
+    await switchConsoleProject(page, '');
     await expect(page.locator('#costs-scope')).toContainText('顶栏未选项目');
     await page.getByLabel('开始日期（本地）',{exact:true}).fill('2026-10-22');await page.getByLabel('结束日期（本地）',{exact:true}).fill('2026-10-23');
     await page.getByRole('button',{name:'查看统计',exact:true}).click();await expect(page.locator('.cost-summary')).toContainText('USD 8.56');await expect(page.locator('.cost-incomplete')).toContainText('2 次请求');
