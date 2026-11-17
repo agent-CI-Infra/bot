@@ -213,3 +213,26 @@ test('#769 QA of a report pins the report\'s source first, also while the task h
  assert.equal((await evaluateDelivery(f.h.store,task,workspace('planned'),new Redactor(),async()=>{},false)).outcome,'pass');
  assert.deepEqual(calls.slice(0,2),[['planned','workspace_source'],['verifier','workspace_acceptance']]);
 });
+test('QA receives compact related indexes rather than repeated repository manifests',async t=>{
+ const f=await fixture(t,body=>{
+  const input=JSON.parse(body.messages[1].content);
+  assert.equal(input.related_deliveries.length,5);
+  assert.equal(input.related_deliveries_page.total,6);
+  assert.equal(input.related_deliveries_page.next_offset,5);
+  assert.ok(input.related_deliveries.every(d=>d.file_count===2200&&!('files' in d)));
+  assert.ok(body.messages[1].content.length<40000);
+  assert.ok(body.tools.some(t=>t.function.name==='read_related_artifact'));
+  return {role:'assistant',content:JSON.stringify(pass)};
+ });
+ for(let i=0;i<6;i++){
+  const id='qa-child-'+i;
+  f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES(?,'101','task.request','running','Related delivery','{}')",id);
+  f.records.contract(id,{goal:'Complete related behavior',scope:['behavior'],criteria:['regression checks'],endpoint:'artifact'});
+  f.h.store.run("INSERT INTO task_children VALUES('delivery',?,'now')",id);
+  const revision=f.records.get(id).revision;
+  const candidate={id:'c-'+i,revision,artifacts:[{kind:'code',reference:'task:'+id,version:'tree',content:{local_sha:'a'.repeat(40),files:Array.from({length:2200},(_,n)=>({path:'src/file-'+n,sha:'b'.repeat(40)}))}}]};
+  f.h.store.run('UPDATE task_records SET candidate=? WHERE task_id=?',JSON.stringify(candidate),id);
+ }
+ const result=await evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{},false);
+ assert.equal(result.outcome,'pass');
+});

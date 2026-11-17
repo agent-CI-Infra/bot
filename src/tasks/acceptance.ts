@@ -7,7 +7,7 @@ import { runRole,roleExecutionModel } from '../roles/run.js';
 import { isolatedRunEnvironment,roleBackendWorkspace,candidateCheckout } from '../roles/workspace.js';
 import { ProjectMemory,memoryTools,memoryTool } from '../memory/project.js';
 import { beginRun, endRun } from './trace.js';
-import { relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
+import { relatedDeliveryIndex,relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
 import { readEvidence, previousVerificationEvidence, boundedCandidate } from './evidence.js';
 import type { Store, Row } from '../storage/database.js';
 import { Workspace } from '../agent/workspace.js';
@@ -44,7 +44,7 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
   const records=new TaskRecords(store),record=records.get(task.id),candidate=record.candidate;
   if(!candidate)throw new Error('acceptance_candidate_required');
   assertRequiredStages(store,task.id,deliveryCandidate(candidate,task.kind));
-  const related=relatedDeliveries(store,task);
+  const related=relatedDeliveries(store,task),relatedIndex=relatedDeliveryIndex(related);
   const parentContext=related.find(r=>r.description.relationship==='parent');
   const contextFiles=acceptanceContextFiles(JSON.parse(task.input||'{}'),parentContext?JSON.parse(parentContext.row.input||'{}'):null);
   if(parentContext)contextFiles.push('../context/parent-delivery.json','../context/related-deliveries.json');
@@ -96,7 +96,7 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
     const {result:verdict}=await runRole({store,task,redactor,guard,model,system:acceptanceSystem,
       prompt:JSON.stringify({project_memory:hasMemory?new ProjectMemory(store).context({...task,active_role:'qa',head_sha:snapshot?.local_sha||task.head_sha}):undefined,contract:record.contract,
         requirements_instruction:acceptanceRequirements(record.contract.completeness),
-        scope_differences:record.scope_differences.map(d=>({...d,version_matches_candidate:candidate.artifacts.some(a=>a.version===d.source_version)})),revision:record.revision,project:record.project,candidate:boundedCandidate(candidate),previous_verification_evidence:previousVerificationEvidence(store,task.id,candidate),related_deliveries:related.map(r=>r.description),context_files:[...new Set(contextFiles)],additional_verification:additionalVerification?{...additionalVerification,output:String(additionalVerification.output||'').slice(-8000)}:undefined,previous_acceptance:record.pending||record.acceptance,prior_staged_residuals:store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_staged' AND json_array_length(json_extract(data,'$.residuals'))>0 ORDER BY id DESC LIMIT 1",task.id).map(row=>JSON.parse(row.data)),
+        scope_differences:record.scope_differences.map(d=>({...d,version_matches_candidate:candidate.artifacts.some(a=>a.version===d.source_version)})),revision:record.revision,project:record.project,candidate:boundedCandidate(candidate),previous_verification_evidence:previousVerificationEvidence(store,task.id,candidate),related_deliveries:relatedIndex.deliveries,related_deliveries_page:{...relatedIndex,deliveries:undefined},context_files:[...new Set(contextFiles)],additional_verification:additionalVerification?{...additionalVerification,output:String(additionalVerification.output||'').slice(-8000)}:undefined,previous_acceptance:record.pending||record.acceptance,prior_staged_residuals:store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_staged' AND json_array_length(json_extract(data,'$.residuals'))>0 ORDER BY id DESC LIMIT 1",task.id).map(row=>JSON.parse(row.data)),
         delivery_boundary:files?.kind==='code'?{stage:'pre_publication',remaining:'Framework creates or updates the PR after acceptance; judge candidate readiness, do not require an unpublished URL or claim it exists.'}:undefined,
         policy:{test_command:candidate.artifacts.some(a=>a.kind==='code')?store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||null:null},workspace:'Candidate files are available at their original paths.'}),
       tools,requestPrefix:`acceptance:${evaluationId}:`,maxTurns:32,maxOutputChars:40000,finish:{name:'submit_acceptance',validate:validateDecision,finalizationMessage:'Verification tools are closed for this attempt. Use the inspected artifacts and versioned observations to submit_acceptance now. Do not invent proof or defer a missing core goal as a residual. Missing raw proof is insufficient_evidence; unresolved necessary authority is needs_human. If the evaluation itself cannot finish despite available evidence, submit evaluation_incomplete as an infrastructure fault. This concludes this one acceptance; no recursive acceptance is created.'},finalizationTools:['submit_acceptance'],

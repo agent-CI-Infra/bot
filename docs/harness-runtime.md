@@ -99,3 +99,9 @@ Codex 的 `BOT_CODEX_CONFIG` 可以只声明 executable、专用 `env.CODEX_HOME
 Coordinator 的单轮自动尝试保留三次边界；运行失败或连续争议到达边界后返回 `manager_review`，将错误、争议和原始记录入口交给请求方 Task Manager，不按次数判为必须人工处理。Manager 使用 `decide_coordination` 选择 retry（可调整 proposal）或 dismiss；主动求助仍用既有 finish_coordination。重试保留累计次数及证据，重复相同决定返回已有结果；撤回建议不修改任务目标或通过 QA，并通知受影响的等待任务。
 
 事件分派的失败保持 pending 并退避，稳定状态最多每十分钟自动尝试一次；每第三次失败记录持久化报告。下一次同一事件的普通 Manager 调用会收到此前失败证据，不另起一层 Manager。分派错误次数本身不会调用 declined hook，也不会被当作 ignore；明确取消仍结束当前事件。已有事件详情入口返回恢复记录，`failure_before` 可向前分页；人工重试可跳过冷却期，历史次数不清零。历史版本已经 failed 的事件仍可用既有重试入口恢复，不自动重新触发曾被拒绝的工作。
+
+### 关联交付物的渐进式披露
+
+QA 输入、`context/related-deliveries.json` 与 `read_related_artifact` 共用精简索引。首页最多 5 个交付物、24 Ki 字符元数据；每项提供目标摘要、验收状态、候选/树版本、文件数量与读取入口，不嵌入整个仓库文件清单。截断和未展示的页面都有标识；完整页面不再建议翻到不存在的下一页。摘要不能代替原始要求或验收证据。
+
+复用现有 `read_related_artifact`，传 `task_id` 和提供的 `candidate_id`。不传 path 时按 `directory`/路径子串 `query` 过滤文件名，用 offset/limit 翻页；传 path 时从候选记录的本地 SHA 读取原文并返回 blob SHA。文件原文、`section: contract` 和 `section: delivery` 用 offset/length 分段（默认 8000、最多 16000 字符），沿 next_offset 读取直到 complete。恢复全文时 goal_truncated 为 false。候选改变时返回 related_candidate_changed，不能悄悄切换版本。超大清单条目显式报错并推进游标，避免原地循环。读取不改变源任务工作区；这些预算限制关联信息披露，不是任意 QA 输入字段的总截断器。
