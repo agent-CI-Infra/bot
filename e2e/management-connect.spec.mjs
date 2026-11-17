@@ -145,7 +145,7 @@ test('#641 手机从底栏打开管理助手：390×500 下面板与输入区都
     const measure = () => page.evaluate(() => {
       const rect = node => { const r = node.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, height: r.height }; };
       const win = document.getElementById('management-chat');
-      return { viewport: { width: innerWidth, height: innerHeight }, win: rect(win), header: rect(document.querySelector('body > header')),
+      return { viewport: { width: innerWidth, height: innerHeight }, win: rect(win), header: rect(document.querySelector('body > header')), scope: rect(document.getElementById('console-mobile-scope')),
         field: rect(win.querySelector('textarea')),
         send: rect([...win.querySelectorAll('button')].find(node => node.textContent.trim() === '发送')) };
     });
@@ -161,9 +161,9 @@ test('#641 手机从底栏打开管理助手：390×500 下面板与输入区都
     expect(m.field.bottom).toBeLessThanOrEqual(m.win.bottom + 0.5);
     expect(m.send.height).toBeGreaterThanOrEqual(30);
     expect(m.send.bottom).toBeLessThanOrEqual(m.win.bottom + 0.5);
-    // F5: the floating panel hides the bottom bar, so the bar's 64px must not be subtracted from the room it gets.
-    expect(m.win.height).toBeGreaterThanOrEqual(350);
-    expect(m.win.top).toBeLessThanOrEqual(120);
+    // The bottom bar is hidden; the floating assistant fills the remaining room below the reachable scope bar.
+    expect(Math.abs(m.win.height - (m.viewport.height - m.scope.bottom - 20))).toBeLessThanOrEqual(1);
+    expect(Math.abs(m.win.top - (m.scope.bottom + 10))).toBeLessThanOrEqual(1);
     await expect(panel.getByRole('button', { name: '发送', exact: true })).toBeVisible();
     // Review fix: the send button keeps the 44px touch target even here; the conversation is what gives up room, by
     // scrolling inside its own box, and the session fold stays reachable instead of being removed at this height.

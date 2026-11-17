@@ -56,8 +56,9 @@ function addressTab(hash) {
 }
 // #936: the address whose page was painted last. A dialog opened from that page belongs to it, so a real address
 // change ends the dialog and a repaint of the same address (a list refresh, a poll) leaves it open.
-let paintedAddress = '';
+let paintedAddress = '', routeGeneration = 0;
 async function route() {
+  const generation = ++routeGeneration;
   renderVersion++;
   // #737: the focus the redraw may take away, so a change the reader asked for can hand it to the page it opens.
   const focusBefore = document.activeElement;
@@ -122,7 +123,7 @@ async function route() {
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', (!target || projectConsoleRoute(target)) && el.dataset.tab === activeNavTab ? 'page' : 'false'));
   // A second address can arrive while the first one is still loading (a hash change during a list read): the newer
   // route owns the page, so this one stops before it can redraw it from the address it no longer represents.
-  if (resolved !== tab) return;
+  if (generation !== routeGeneration || resolved !== tab) return;
   if (target) {
     if (tab !== 'management' && typeof leaveManagementPage === 'function') leaveManagementPage();
     await renderProject(target);
@@ -141,7 +142,7 @@ async function route() {
   if (typeof restoreConsolePosition === 'function') restoreConsolePosition();
   // #737: the page a navigation landed on says its name in the title, and a real address change hands it the focus -
   // unless a later address arrived during the render above and owns the page by now.
-  if (resolved !== tab) return;
+  if (generation !== routeGeneration || resolved !== tab) return;
   announcePage(missing, target, focusBefore);
   paintedAddress = location.hash;
   if (typeof tryRestoreTaskReturn === 'function') {

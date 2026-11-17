@@ -47,10 +47,13 @@ async function renderCosts(request) {
   if(costState?.owner!==owner){const to=timestamp(Date.now()).slice(0,10);costState={owner,to,from:new Date(Date.parse(to+'T00:00:00Z')-29*86400000).toISOString().slice(0,10),currency:'USD'};}
   const form=element('form','','cost-filters');
   for(const [name,caption]of [['from','开始日期（本地）'],['to','结束日期（本地）']]){
-    const input=document.createElement('input');Object.assign(input,{name,type:'date',required:true,value:costState[name]});form.append(costControl(caption,input));
+    const input=document.createElement('input');Object.assign(input,{name,type:'date',required:true,value:costState[name]});
+    input.addEventListener('input',()=>{costState[name]=input.value;}); input.addEventListener('change',()=>{costState[name]=input.value;});
+    form.append(costControl(caption,input));
   }
   const currency=document.createElement('select');currency.name='currency';currency.setAttribute('aria-label','费用币种');
   [['USD','美元 USD'],['CNY','人民币 CNY']].forEach(([value,name])=>currency.add(new Option(name,value)));currency.value=costState.currency;form.append(costControl('费用币种',currency));
+  currency.addEventListener('change',()=>{costState.currency=currency.value;});
   const submit=element('button','查看统计','quiet');submit.type='submit';form.append(submit);
   const body=element('div','','cost-body');body.id='cost-body';panel.append(form,body);
   form.addEventListener('submit',async event=>{event.preventDefault();Object.assign(costState,Object.fromEntries(new FormData(form)));submit.disabled=true;try{await loadCosts(request);}catch(err){error(err);}finally{submit.disabled=false;}});
@@ -198,7 +201,7 @@ async function statisticsTaskDrill(workflow,row,entry) {
   const drill=document.createElement('tr'),cell=document.createElement('td'),list=element('div','','statistics-drill-body');
   drill.className='statistics-drill';cell.colSpan=3;list.setAttribute('aria-live','polite');cell.append(list);drill.append(cell);row.after(drill);
   const params=new URLSearchParams({workflow:workflow.key,limit:'100',summary:'1'});
-  if(costState?.repository_id)params.set('repository_id',costState.repository_id);
+  if(projectRoute()?.id)params.set('repository_id',projectRoute().id);
   const load=async()=>{
     const version=costRequest;
     list.replaceChildren(element('p',`正在读取「${workflow.name}」的任务…`,'muted'));

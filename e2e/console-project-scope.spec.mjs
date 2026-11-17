@@ -248,3 +248,24 @@ test('助手连接完成较晚时使用最新地址范围', async ({ page }) => 
     await expect(page.getByLabel('持久会话', { exact: true })).not.toHaveValue('');
   } finally { release(); await page.unrouteAll({ behavior: 'wait' }); await page.goto('about:blank'); await h.stop(); }
 });
+
+test('先前项目读取较晚完成时不覆盖新地址的看板或标题', async ({ page }) => {
+  const { h, password } = await fixture();
+  const boards = queries(page, '/api/board/cards', boardScope);
+  let entered, release;
+  const arrived = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  await page.route('**/api/repositories/101', async route => {
+    const response = await route.fetch(); entered(); await gate; await route.fulfill({ response });
+  });
+  try {
+    await login(page, h, password, '#/board'); await ready(page, 'board', '');
+    await switchConsoleProject(page, '101'); await arrived;
+    await switchConsoleProject(page, '202'); await ready(page, 'board', '202');
+    const returned = page.waitForResponse(response => new URL(response.url()).pathname === '/api/repositories/101');
+    release(); await (await returned).finished();
+    await expect(page).toHaveURL(/#\/projects\/202\/board$/);
+    await expect(trigger(page)).toHaveAttribute('data-project-id', '202');
+    await expect(page).toHaveTitle('fixture/project-202 · 任务看板 · launchpad 管理');
+    expect(boards.at(-1)).toBe('202'); expect(boards).not.toContain('101');
+  } finally { release(); await page.unrouteAll({ behavior: 'wait' }); await h.stop(); }
+});

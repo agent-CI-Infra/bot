@@ -18,15 +18,25 @@ async function renderProject(route) {
   else if (current.repository && route.section !== current.shownSection && !(typeof knowledgeUnsaved === 'function' && knowledgeUnsaved())) { current.shownSection = route.section; page.replaceChildren(projectHeader(route.section), projectLoadingBody(route.section)); if (typeof syncConsoleShell === 'function') syncConsoleShell(); }
   if (legacyFocus) current.focusAnchor = legacyFocus;
   try { await loadProject(route.id,route.section); } catch (err) {
-    if (token === renderToken) { if ([401,403].includes(err.status)) { if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles(); if (current?.id === route.id) current.rolesDraft = null; }
-      const unstarted = await unstartedProject(route.id, err);
-      if (token === renderToken) {
-        // #614: the scope bar must stop saying 正在读取项目… once the read has failed, whatever the reason.
-        if (current?.id === route.id) { current.unavailable = unstarted ? null : projectUnavailableKind(err); current.shownSection = null; }
-        page.replaceChildren(unstarted || projectUnavailable(err, route));
-        if (typeof syncConsoleShell === 'function') syncConsoleShell();
-      } }
-    return; }
+    if (token !== renderToken) return;
+    if ([401,403].includes(err.status)) {
+      if (err.status === 403) repositories = repositories.filter(repo => String(repo.id) !== route.id);
+      if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles();
+      if (current?.id === route.id) current.rolesDraft = null;
+      // A newly forbidden project must not retain the work page it displayed before its grant was revoked.
+      $('console-page').replaceChildren(); $('costs-panel').replaceChildren();
+      if (typeof resetBoard === 'function') resetBoard();
+      if (typeof taskCreationDrafts !== 'undefined') taskCreationDrafts.delete(route.id);
+      if (typeof leaveManagementPage === 'function') leaveManagementPage();
+    }
+    const unstarted = await unstartedProject(route.id, err);
+    if (token !== renderToken) return;
+    if (current?.id === route.id) { current.unavailable = unstarted ? null : projectUnavailableKind(err); current.shownSection = null; }
+    page.replaceChildren(unstarted || projectUnavailable(err, route));
+    if (typeof syncConsoleShell === 'function') syncConsoleShell();
+    applyDocumentTitle(false, route);
+    return;
+  }
   if (token !== renderToken) return;
   current.unavailable = null;
   if (projectConsoleRoute(route)) {
@@ -94,6 +104,7 @@ const projectUnavailableCopy = {
 };
 function projectUnavailable(err, route) {
   const kind = projectUnavailableKind(err), [title, text] = projectUnavailableCopy[kind];
+  if (kind === 'login' && sessionExpired) return sessionExpiredState(title, readErrorText(err));
   const box = consoleState(title, text, { tone: 'error' });
   box.classList.add('project-unavailable'); box.dataset.projectUnavailable = kind;
   // #715: while the session is expired consoleState already returns the shared 登录已过期 card with 重新登录.
