@@ -146,6 +146,7 @@ test('plan validation requires needs and a well-formed target',t=>{
 });
 
 test('the base system prompt every role receives carries the rule',()=>{
- assert.match(systemInstructions,/Unless its author explicitly asked for it in that issue or pull request, do not push to, rebase, edit the title, body or labels of, or otherwise change an issue or pull request someone else opened, including its branch in a fork, and do not plan or delegate work that would\./);
+ assert.match(systemInstructions,/Change one someone else opened \(title, body, labels, assignees, state, anything\) only when its author or a maintainer explicitly asked for that change in its body or a comment on it; a label is never such a request\./);
+ assert.match(systemInstructions,/Never push to, rebase or force-push someone else's branch, including a fork's\. Do not plan or delegate work that breaks this\./);
  assert.match(systemInstructions,/Report problems in someone else's work through comments and review findings/);
 });
