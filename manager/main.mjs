@@ -1,3 +1,4 @@
+import { computerResultOwner } from '../runner/result-owner.mjs';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { Docker } from './docker.mjs';
@@ -14,12 +15,12 @@ const token = readFileSync(process.env.BOT_MANAGER_TOKEN_FILE), database = proce
 const compaction = await compactDatabase(database, { log: line => console.log('[manager] ' + line) });
 const projects = new Projects({ database, docker: new Docker(),
   deployment: createHash('sha256').update(token).digest('hex').slice(0, 16), image: process.env.BOT_PROJECT_IMAGE || 'department-bot-project-computer:local',
-  egress: process.env.BOT_PROJECT_EGRESS !== 'false' });
+  results: process.env.BOT_TOOL_RESULTS_DIR || null, egress: process.env.BOT_PROJECT_EGRESS !== 'false' });
 projects.db.prepare("INSERT INTO settings VALUES('compaction',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(compaction));
 const runs = new RunEnvironments(projects);
 // Assistant computers use the approved base image (no project's packages) unless BOT_ASSISTANT_IMAGE names another one.
 const assistants = new AssistantComputers({ docker: projects.docker, db: projects.db, deployment: projects.deployment,
-  agentTools:()=>projects.agentToolsVolume(), image: process.env.BOT_ASSISTANT_IMAGE || projects.image, homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes' });
+  resultMount:owner=>projects.resultMount(computerResultOwner('assistant',owner)), agentTools:()=>projects.agentToolsVolume(), image: process.env.BOT_ASSISTANT_IMAGE || projects.image, homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes' });
 const { server, recovered } = createManagerServer({ projects, token, runs, assistants });
 server.listen(8793, '0.0.0.0');
 let timer, assistantTimer, stopping = false, checking = false, checkingAssistants = false;

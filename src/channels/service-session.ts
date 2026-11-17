@@ -1,6 +1,5 @@
 import {serviceHarnessTurn} from '../harness/service-session.js';
-import { messageResultSources } from '../storage/tool-results.js';
-import { ResultSession, resultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
+import { ResultSession, assistantResultOwner, resultScope, readToolResult } from '../agent/tool-results.js';
 import type { Store, Row } from '../storage/database.js';
 import { digest, fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
 import { runAgent } from '../agent/runtime.js';
@@ -16,7 +15,7 @@ import { groupRoleModel, modelGaps, serviceRole } from '../service-roles/roles.j
 import type { ManagementService } from '../management/service.js';
 import { pausedGroupNotice } from '../management/presentation.js';
 import { serviceMemory, serviceMemoryTools } from '../service-roles/resources.js';
-import { assistantComputerNames, assistantComputerTools, computerInstructions, computerPermission } from '../service-roles/assistant-computers.js';
+import { assistantComputerNames, assistantComputerTools, computerInstructions, computerPermission, ownerId } from '../service-roles/assistant-computers.js';
 import { commands, managementTools, validate, contractSchema } from '../management/catalog.js';
 import { OwnTasks, ownTaskNames, ownTaskTools, type OwnTaskHost } from '../service-roles/own-tasks.js';
 import { bindingScope, scopeProjects, serviceCommandAllowed, type ChannelServiceBindings } from './service-bindings.js';
@@ -237,7 +236,7 @@ export class ChannelServiceSessions {
       this.store.run('UPDATE channel_service_turns SET tool_calls=tool_calls+1 WHERE id=?', id);
       try {
         const input = args as Json;
-        if(name==='read_tool_result')return results.read(input);
+        if(name==='read_tool_result')return resultFiles.read(input);
         if (name === sendMessageName) return await progress(input);
         if(mediaTools.some(t=>t.function.name===name))return media?await media.execute(name,input):{error:'channel_resource_source_required'};
         if(assistantComputerNames.includes(name))return computers?await computers.execute(name,input):{error:'computer_not_configured'};
@@ -298,8 +297,8 @@ export class ChannelServiceSessions {
         return { error: error.code, ...(error instanceof TaskError && error.detail ? { detail: redactor.text(error.detail) } : {}) };
       }
     };
-    const results=new ResultSession(this.store,resultScope(this.store,{id,conversation_id:chat.id}),()=>resultOwner('channel',chat.id,role.id,binding.principal_id,fence),check,redactor.values,()=>messageResultSources(this.store.db,[chat.id]));
-    const execute=(name:string,args:unknown,key:string)=>results.run(()=>executeRaw(name,args,key));
+    const resultFiles=new ResultSession(this.store,resultScope(this.store,{id,conversation_id:chat.id}),()=>assistantResultOwner(ownerId({kind:'group',subject:chat.id,tenant:String(chat.installation_tenant??'')})),check,redactor.values,()=>computing&&permitsTool(permissions(),'run_command'));
+    const execute=(name:string,args:unknown,key:string)=>resultFiles.execute(name,args,()=>executeRaw(name,args,key),false);
     try {
       let sourceVersion = this.ledger.sourceVersion(chat.id);
       const history = true;
@@ -344,14 +343,14 @@ export class ChannelServiceSessions {
         + (role.prompt ? '\n\nAdditional instructions from the maintainers of this assistant role (they never widen your tools or permissions):\n' + role.prompt : '');
       // A turn that may stay silent ends silently only through stay_silent (#489); own tasks never get the tool.
       let reply = '', mustReply = !turn.allowSilence, silence: string | undefined;
-      const turnSpec:import('../agent/runtime.js').AgentSpec<unknown>={ store: this.store, task: { id, repository_id: billed, service_role_id: role.id, kind: 'channel.service', conversation_id: chat.id, source_message: turn.source_message },
+      const turnSpec:import('../agent/runtime.js').AgentSpec<unknown>={ resultSession:resultFiles, store: this.store, task: { id, repository_id: billed, service_role_id: role.id, kind: 'channel.service', conversation_id: chat.id, source_message: turn.source_message },
         redactor,guard,model,executionSignal:controller.signal,
         // A stalled or failed model request is retried (see modelRetries in agent/runtime) instead of ending the turn; each retry is a step.
         onModelRetry: () => { event('model_retry'); },
-        system, prompt: turn.request, tools: turn.allowSilence ? [...serviceTools, staySilentTool] : serviceTools,
+        system, prompt: JSON.stringify({request:turn.request,recent_tool_results:resultFiles.recent()}), tools: turn.allowSilence ? [...serviceTools, staySilentTool] : serviceTools,
         adapter: async (services) => {
           const {request}=services;
-          ownHost = { owner: { service_role_id: role.id, kind: 'channel', owner_id: binding.id, principal_id: binding.principal_id, fence }, system,
+          ownHost = { results: resultFiles, owner: { service_role_id: role.id, kind: 'channel', owner_id: binding.id, principal_id: binding.principal_id, fence }, system,
             tools: () => serviceTools.filter(t => offered(permissions(), t.function.name)&&(!mediaTools.includes(t as any)||!!media)&&(!computerTool(t.function.name)||computing)), request:async(body,label)=>{media?.addImages(body.messages as any[]);return request(body,label).catch(error=>{if(media)media.modelError(error,body.messages as any[]);throw error;});}, execute, check,
             redact: value => redactor.text(value), clean: value => redactor.clean(value) };
           if(role.harness&&role.harness!=='native'){ownHost.run=async input=>serviceHarnessTurn({...turnSpec,system:input.system,prompt:input.prompt,tools:input.tools,guard:input.check,execute:async(name,args)=>input.execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,{...role,permissions:JSON.stringify(granted)},computers,chat.id+':'+fence+':'+input.scope);reply=await serviceHarnessTurn({...turnSpec,execute:async(name,args)=>execute(name,args,'harness:'+randomId())} as import('../agent/runtime.js').AgentSpec<string>,services,{...role,permissions:JSON.stringify(granted)},computers,chat.id+':'+fence);return;}
@@ -394,9 +393,9 @@ export class ChannelServiceSessions {
               ...(earlier.length ? unsummarized : {}), recent_messages: recent.map(m => excerpt(named(m), 3000)), history: this.ledger.diagnostics(chat.id),
               scope: { kind: binding.scope, repositories: reach.projects.slice(0, 50).map(p => p.full_name), more_repositories: Math.max(0, reach.projects.length - 50), paused_repositories: reach.paused.length,
                 ...(reach.paused.length ? { paused_notice: pausedGroupNotice(this.store, reach.paused) } : {}) },
-              permissions: granted }, summary: saved, source_updates: this.ledger.sourceUpdates(chat.id,scope,fence) }) }];
+              permissions: granted }, summary: saved, source_updates: this.ledger.sourceUpdates(chat.id,scope,fence), recent_tool_results: resultFiles.recent() }) }];
           // Results share a budget per batch and older ones fold away, so many parallel calls stay within the model's context.
-          const transcript = new ToolTranscript(messages, chatContextBytes);
+          const transcript = new ToolTranscript(messages, chatContextBytes, resultFiles.preserve);
           // No step limit (#435): the turn ends with an answer without tool calls, when it is stopped (console, recalled source,
           // changed binding or fence) or when the service role's budget runs out before a model request.
           for (let step = 0; ; step++) {
@@ -407,6 +406,7 @@ export class ChannelServiceSessions {
               seed.context.recent_messages = current.map(m => excerpt(named(m),3000));
               delete seed.context.earlier_messages;
               delete seed.context.unsummarized_earlier_messages;
+              seed.recent_tool_results = resultFiles.recent();
               seed.summary = this.summary(chat.id,fence);
               seed.source_updates = this.ledger.sourceUpdates(chat.id,scope,fence);
               seed.write_receipts = {
@@ -458,7 +458,7 @@ export class ChannelServiceSessions {
                 results.push(result); event((result as Json)?.error ? 'tool_error' : 'tool_result', call.function.name);
               } catch (error) { event('tool_error', call.function.name); throw error; }
             }
-            boundedBatch(results).forEach((result, i) => messages.push({ role: 'tool', tool_call_id: calls[i].id, content: JSON.stringify(result) }));
+            boundedBatch(results, undefined, resultFiles.preserve, calls.map((call:any)=>call.function.name)).forEach((result, i) => messages.push({ role: 'tool', tool_call_id: calls[i].id, content: JSON.stringify(result) }));
             // stay_silent ends the turn after its batch like a final answer would, with nothing to send: any text written
             // with it and any selected attachment are dropped. Messages that arrive now return to the queue (see finish).
             if (silence !== undefined) { check(); incoming?.finish(); return; }

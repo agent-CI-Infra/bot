@@ -114,10 +114,10 @@ export class Trajectories {
     this.temporary = root === null;
     this.root = root === null ? mkdtempSync(join(tmpdir(), 'bot-trajectories-')) : resolve(root);
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
-    this.results = new ToolResultFiles(db, this.root);
+    this.results = new ToolResultFiles(db, root === null ? join(this.root, 'tool-results') : process.env.BOT_TOOL_RESULTS_DIR || join(dirname(this.root), 'tool-results'), this.root);
     this.blobs = root === null ? join(this.root, '.blobs') : join(dirname(this.root), 'blobs');
     // A file nothing appended to for a while is closed; a later record opens a continuation file.
-    this.timer = setInterval(() => this.closeIdle(), Math.min(idleMs, 60_000));
+    this.timer = setInterval(() => { this.closeIdle(); try { this.results.sweep(); } catch (error) { console.error('[tool-results] cleanup failed:', error); } }, Math.min(idleMs, 60_000));
     this.timer.unref?.();
   }
 

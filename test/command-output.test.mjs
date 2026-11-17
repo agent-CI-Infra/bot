@@ -1,6 +1,9 @@
+import { Store } from '../dist/storage/database.js';
+import { ResultSession, commandResult } from '../dist/agent/tool-results.js';
+import { agentOperation } from '../runner/agent.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -46,26 +49,34 @@ test('a complete output file that cannot be written is an explicit failure',asyn
 });
 
 
-import {localCommandResult,readLocalResult,prepareLocalResults} from '../runner/tool-results.mjs';
+import {localCommandResult,prepareLocalResults} from '../runner/tool-results.mjs';
+function piResults(t,root) {
+  const store=new Store(':memory:',Buffer.alloc(32,1));t.after(()=>store.close());
+  const session=new ResultSession(store,store.trajectories.scopeOf({id:'turn',repository_id:'101',conversation_id:'chat'}),()=> 'project-computer',()=>{});
+  const save=({output_id,preview})=>session.run(()=>commandResult({...preview,output_file:'journal'},'pi:'+output_id,offset=>agentOperation({type:'workspace_agent_result',request_id:output_id,offset},root)),true);
+  return {session,save};
+}
 test('local Pi result files page an immutable command without workspace command permission',async t=>{
   const directory=mkdtempSync(join(tmpdir(),'command-pi-pages-'));t.after(()=>rmSync(directory,{recursive:true,force:true}));await prepareLocalResults(directory);
-  const id='a'.repeat(48),path=join(directory,id+'.utf8'),body='HEAD\n'+'中😀'.repeat(800000)+'\nERROR_END\n';
+  const {session,save}=piResults(t,directory);mkdirSync(join(directory,'agent','results'),{recursive:true});
+  const id='a'.repeat(48),path=join(directory,'agent','results',id+'.utf8'),body='HEAD\n'+'中😀'.repeat(800000)+'\nERROR_END\n';
   const producer="process.stdout.write('HEAD\\n'+'中😀'.repeat(800000)+'\\nERROR_END\\n',()=>{process.exitCode=1})";
   const raw=await command(quote(process.execPath)+' -e '+quote(producer),directory,30000,{outputFile:path});
-  const result=await localCommandResult(directory,'workspace:agent',id,raw);assert.equal(result.exit_code,1);assert.equal(result.output_file,undefined);assert.match(result.tail,/ERROR_END/);
-  let position=0,complete='';for(;;){const page=await readLocalResult(directory,'workspace:agent',{file:result.file,position,length:65536});assert.equal(page.error,undefined);complete+=page.content;if(page.eof)break;position=page.next_position;}
-  assert.equal(complete,body);assert.equal((await readLocalResult(directory,'other-agent',{file:result.file})).error,'tool_result_not_found');assert.equal((await readLocalResult(directory,'workspace:agent',{file:result.file,position:7})).error,'tool_result_range_invalid');
+  const result=await localCommandResult(id,raw,save);assert.equal(result.exit_code,1);assert.equal(result.output_file,undefined);assert.match(result.tail,/ERROR_END/);
+  let position=0,complete='';for(;;){const page=await session.read({file:result.file,position,length:65536});assert.equal(page.error,undefined);complete+=page.content;if(page.eof)break;position=page.next_position;}
+  assert.equal(complete,body);assert.equal((await session.read({file:result.file,position:7})).error,'tool_result_range_invalid');
 });
 
 import {Docker} from '../manager/docker.mjs';
 test('local Pi background files retain their startup snapshot while later logs grow',async t=>{
   const directory=mkdtempSync(join(tmpdir(),'command-pi-background-'));t.after(()=>rmSync(directory,{recursive:true,force:true}));await prepareLocalResults(directory);
-  const id='b'.repeat(48),path=join(directory,id+'.utf8'),log=join(directory,'live.log'),startup='HEAD\n'+'中😀'.repeat(200000)+'\nSTARTED\n';
+  const {session,save}=piResults(t,directory);mkdirSync(join(directory,'agent','results'),{recursive:true});
+  const id='b'.repeat(48),path=join(directory,'agent','results',id+'.utf8'),log=join(directory,'live.log'),startup='HEAD\n'+'中😀'.repeat(200000)+'\nSTARTED\n';
   writeFileSync(path,startup);writeFileSync(log,startup);
-  const result=await localCommandResult(directory,'workspace:agent',id,{running:true,exit_code:null,timed_out:false,truncated:true,output_file:path,log_path:log,head:'HEAD\n',tail:'STARTED\n'});
+  const result=await localCommandResult(id,{running:true,exit_code:null,timed_out:false,truncated:true,output_file:path,log_path:log,head:'HEAD\n',tail:'STARTED\n'},save);
   assert.equal(result.error,undefined);assert.match(result.notice,/startup snapshot/);assert.match(result.notice,/read_tool_result/);assert.equal(result.log_path,log);
   appendFileSync(log,'LATER_OUTPUT\n');let position=0,restored='';
-  for(;;){const page=await readLocalResult(directory,'workspace:agent',{file:result.file,position,length:65536});assert.equal(page.error,undefined);restored+=page.content;if(page.eof)break;position=page.next_position;}
+  for(;;){const page=await session.read({file:result.file,position,length:65536});assert.equal(page.error,undefined);restored+=page.content;if(page.eof)break;position=page.next_position;}
   assert.equal(restored,startup);assert.ok(readFileSync(log,'utf8').endsWith('LATER_OUTPUT\n'));
 });
 

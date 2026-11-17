@@ -1,3 +1,4 @@
+import { ResultSession, resultScope, projectResultOwner, readToolResult } from '../dist/agent/tool-results.js';
 import test from 'node:test';import assert from 'node:assert/strict';import {randomBytes} from 'node:crypto';import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from 'node:fs';import {tmpdir} from 'node:os';import {join,resolve} from 'node:path';
 import {roleHarness} from '../dist/roles/harness.js';
 import {request as httpRequest} from 'node:http';
@@ -126,4 +127,17 @@ test('transport-agnostic task tool dispatcher runs non-submission tools in paral
   assert.ok(denied.includes('repository_policy_disabled'));
   await dispatcher.close();
   await fresh.close();
+});
+
+
+test('a large gateway result is saved before MCP/mailbox tracing even when the role executor bypasses resultSpec',async t=>{
+  const f=fixture(t),files=new ResultSession(f.s,resultScope(f.s,f.spec.task),()=>projectResultOwner('r'),f.spec.guard);
+  const payload={revision:'gateway-revision',content:'中😀'.repeat(500000)},dispatcher=createTaskToolDispatcher({...f.spec,resultSession:files,tools:[tool('read_task_record'),readToolResult],
+    execute:async(name,args)=>name==='read_tool_result'?files.read(args):payload});
+  t.after(()=>dispatcher.close());
+  const out=await dispatcher.call(dispatcher.token,{id:'a'.repeat(48),name:'read_task_record',arguments:{},transport:'mailbox'});
+  assert.ok(out.observation.file);assert.equal(out.observation.revision,'gateway-revision');assert.ok(Buffer.byteLength(JSON.stringify(out.observation))<256*1024);
+  const page=await dispatcher.call(dispatcher.token,{id:'b'.repeat(48),name:'read_tool_result',arguments:{file:out.observation.file,length:65536},transport:'http'});
+  assert.match(page.observation.content,/gateway-revision/);assert.equal(page.observation.eof,false);
+  const record=f.s.get("SELECT data FROM task_history WHERE type='tool_observation' ORDER BY id LIMIT 1");assert.ok(record);assert.ok(record.data.length<256*1024,'trace keeps the preview and handle');
 });

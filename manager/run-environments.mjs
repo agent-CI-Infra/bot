@@ -1,3 +1,4 @@
+import { computerResultOwner } from '../runner/result-owner.mjs';
 import { randomBytes } from 'node:crypto';
 import { ManagerError } from './docker.mjs';
 import { logFailure } from './projects.mjs';
@@ -86,6 +87,7 @@ export class RunEnvironments {
       const image = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, project.generation)?.image;
       if (!image) throw new ManagerError('environment_not_ready');
       const toolsVolume = await this.projects.agentToolsVolume();
+      const resultMounts = await this.projects.resultMount(computerResultOwner('run',spec.run_id));
       const now = Date.now(), row = { run_id: spec.run_id, repository_id: repo, task_id: spec.task_id, lease_epoch: spec.lease_epoch, profile: spec.profile, network: spec.network, limits: JSON.stringify(spec.limits), image, state: 'ready', deadline: now + spec.limits.timeout_ms, created_at: now };
       this.db.prepare('INSERT INTO run_environments(run_id,repository_id,task_id,lease_epoch,profile,network,limits,image,state,deadline,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(row.run_id, repo, row.task_id, row.lease_epoch, row.profile, row.network, row.limits, image, 'ready', row.deadline, now);
       const names = this.names(repo, spec.run_id), l = spec.limits;
@@ -96,7 +98,7 @@ export class RunEnvironments {
           HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false, Init: true, RestartPolicy: { Name: 'no' },
             Memory: l.memory_mb * mib, MemorySwap: l.memory_mb * mib, NanoCpus: Math.round(l.cpus * 1e9), PidsLimit: l.pids, IpcMode: 'private',
             NetworkMode: spec.network === 'egress' ? names.network : 'none',
-            Mounts: toolsVolume ? [{ Type: 'volume', Source: toolsVolume, Target: '/opt/agent-tools', ReadOnly: true }] : [],
+            Mounts: [...resultMounts, ...(toolsVolume ? [{ Type: 'volume', Source: toolsVolume, Target: '/opt/agent-tools', ReadOnly: true }] : [])],
             Tmpfs: { '/workspace': `rw,nosuid,nodev,exec,size=${l.workspace_mb * mib},uid=10001,gid=10001,mode=0700`, '/tmp': `rw,nosuid,nodev,exec,size=${l.tmp_mb * mib},mode=1777` } } });
         await this.docker.request('POST', `/containers/${names.container}/start`);
         const health = await this.docker.runner(names.container, { operation_id: randomBytes(24).toString('hex'), type: 'health' });
@@ -111,7 +113,7 @@ export class RunEnvironments {
     const mounts = container ? await Promise.all((container.Mounts ?? []).map(async m => {
       const vol = m.Type === 'volume' && m.Name ? await this.docker.request('GET', '/volumes/' + encodeURIComponent(m.Name)).catch(() => null) : null;
       return { type: m.Type, name: m.Name ?? null, source: m.Source ?? m.Name ?? null, destination: m.Destination, rw: !!m.RW,
-        ...(m.Subpath ? { subpath: m.Subpath } : {}), ...(vol?.Labels ? { labels: vol.Labels } : {}) };
+        ...((m.Subpath ?? host.Mounts?.find(v => v.Target === m.Destination)?.VolumeOptions?.Subpath) ? { subpath: m.Subpath ?? host.Mounts.find(v => v.Target === m.Destination).VolumeOptions.Subpath } : {}), ...(vol?.Labels ? { labels: vol.Labels } : {}) };
     })) : [];
     return { run_id: row.run_id, task_id: row.task_id, lease_epoch: row.lease_epoch, profile: row.profile, state: row.state, deadline: row.deadline, limits: JSON.parse(row.limits), image: row.image,
       container: container ? { name: this.names(row.repository_id, row.run_id).container, running: !!container.State?.Running, user: config.User ?? null, readonly_rootfs: host.ReadonlyRootfs === true, privileged: host.Privileged === true,

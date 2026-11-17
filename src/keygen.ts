@@ -1,3 +1,7 @@
+import { existsSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import { join } from 'node:path';
+import { computerResultOwner } from '../runner/result-owner.mjs';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -15,3 +19,20 @@ for (const [index, path] of paths.entries()) {
   if (readFileSync(path).length !== 32) throw new Error('invalid existing key file');
 }
 console.log('Encryption key is ready');
+
+// Prepare persisted projects before manager recovery: Docker's volume subpath must exist even on the first upgrade.
+if (process.env.BOT_TOOL_RESULTS_DIR) {
+  const root = process.env.BOT_TOOL_RESULTS_DIR;
+  mkdirSync(root, { recursive: true, mode: 0o755 }); chmodSync(root, 0o755);
+  const path = process.env.BOT_DATABASE_PATH;
+  if (path && existsSync(path)) {
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name='repositories'").get())
+        for (const row of db.prepare('SELECT id FROM repositories').all()) {
+          const directory = join(root,computerResultOwner('project',row.id));
+          mkdirSync(directory, { recursive: true, mode: 0o755 }); chmodSync(directory, 0o755);
+        }
+    } finally { db.close(); }
+  }
+}

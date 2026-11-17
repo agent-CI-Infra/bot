@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -19,7 +19,7 @@ async function fixture(t) {
   await projects.register('101'); await projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { env: { NPM_TOKEN: 'project-secret-value' } } });
   const runs = new RunEnvironments(projects);
   t.after(() => { projects.db.close(); rmSync(directory, { recursive: true, force: true }); });
-  return { docker, projects, runs };
+  return { directory, docker, projects, runs };
 }
 const spec = (run = id(), extra = {}) => ({ run_id: run, task_id: 't1', lease_epoch: 3, profile: 'observer', ...extra });
 
@@ -195,4 +195,31 @@ test('a run environment accepts workspace_browser keys and rejects a malformed p
     { type: 'workspace_browser', action: 'launch', policy, workspace_id: run },
     { type: 'workspace_browser', action: 'open', policy: { origins: [] }, workspace_id: run }
   ]) await assert.rejects(f.runs.execute('101', run, { operation_id: id(), request: bad }), /invalid_runner_request/, JSON.stringify(bad));
+});
+
+
+import { computerResultOwner } from '../runner/result-owner.mjs';
+import { AssistantComputers } from '../manager/assistant-computers.mjs';
+test('project, assistant and isolated computers mount only their own results read-only without repeated drift',async t=>{
+  const f=await fixture(t),root=join(f.directory,'results'),name='fixture-tool-results';
+  f.projects.resultsMount=root;
+  f.docker.volumes.set(name,{Name:name,Labels:{'department.bot.kind':'tool-results'}});
+  const original=f.docker.volumeName.bind(f.docker);
+  f.docker.volumeName=async path=>path===root?name:path===null?'fixture-assistant-homes':original(path);
+  const project=computerResultOwner('project','101'),other=computerResultOwner('project','102'),run=id(),isolated=computerResultOwner('run',run),assistantId='a'.repeat(32),assistant=computerResultOwner('assistant',assistantId);
+  for(const owner of [project,other,isolated,assistant])mkdirSync(join(root,owner),{recursive:true});
+  await f.projects.provision('101');const made=f.docker.created;await f.projects.provision('101');assert.equal(f.docker.created,made,'correct mount does not rebuild again');
+  const projectMount=f.docker.containers.get(f.projects.names('101',1).container).HostConfig.Mounts.find(m=>m.Target==='/results');
+  assert.equal(projectMount.ReadOnly,true);assert.equal(projectMount.VolumeOptions.Subpath,project);
+  assert.notEqual((await f.projects.resultMount(other))[0].VolumeOptions.Subpath,project);
+  const facts=await f.runs.create('101',spec(run));assert.equal(verifyRunEnvironment(facts,{run_id:run,network:'none'}).verified,true);
+  const mount=facts.container.mounts.find(m=>m.destination==='/results');assert.equal(mount.rw,false);assert.equal(mount.subpath,isolated);
+  mount.subpath=project;assert.ok(verifyRunEnvironment(facts,{run_id:run,network:'none'}).violations.includes('external_mount'));
+  const assistants=new AssistantComputers({docker:f.docker,db:f.projects.db,deployment:'fixture',image:'approved',homes:null,resultMount:owner=>f.projects.resultMount(computerResultOwner('assistant',owner))});
+  await assistants.acquire(assistantId,{turn:'turn',fence:'f'.repeat(64),home_generation:1,home_mode:'rw'});
+  const assistantMount=f.docker.containers.get(assistants.name(assistantId)).HostConfig.Mounts.find(m=>m.Target==='/results');
+  assert.equal(assistantMount.ReadOnly,true);assert.equal(assistantMount.VolumeOptions.Subpath,assistant);
+  await assistants.shutdown();
+  await assert.rejects(f.projects.resultMount(computerResultOwner('run','missing')),/tool_result_directory_missing/);
+  f.projects.resultsMount=null;assert.deepEqual(await f.projects.resultMount(project),[],'unconfigured deployments keep file pagination without mounting');
 });

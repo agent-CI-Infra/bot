@@ -5,7 +5,7 @@ COPY public-board/dashboard/package.json ./public-board/dashboard/package.json
 RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
-COPY runner/command-policy.mjs runner/command-policy.d.mts runner/command-output.mjs runner/command-output.d.mts runner/browser-policy.mjs runner/browser-policy.d.mts ./runner/
+COPY runner/command-policy.mjs runner/command-policy.d.mts runner/command-output.mjs runner/command-output.d.mts runner/browser-policy.mjs runner/browser-policy.d.mts runner/result-owner.mjs runner/result-owner.d.mts ./runner/
 COPY manager/compaction.mjs manager/compaction.d.mts ./manager/
 COPY public-board ./public-board
 RUN npm run build
@@ -23,9 +23,9 @@ WORKDIR /app
 # Chromium is preinstalled so the control-plane task loop (#908) can start a real browser without apt (#916).
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates python3 tzdata chromium fonts-liberation fonts-noto-cjk && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 10001 bot && useradd --uid 10001 --gid bot --no-create-home bot \
-    && mkdir -p /data /keys /internal /tunnel /assistant-homes /opt/agent-tools \
-    && chown bot:bot /data /keys /internal /tunnel /assistant-homes /opt/agent-tools \
-    && chmod 700 /data /keys /tunnel && chmod 750 /internal /assistant-homes && chmod 755 /opt/agent-tools
+    && mkdir -p /tool-results /data /keys /internal /tunnel /assistant-homes /opt/agent-tools \
+    && chown bot:bot /tool-results /data /keys /internal /tunnel /assistant-homes /opt/agent-tools \
+    && chmod 700 /data /keys /tunnel && chmod 750 /internal /assistant-homes && chmod 755 /tool-results /opt/agent-tools
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY package.json ./package.json
 COPY --from=build /app/dist ./dist
@@ -39,7 +39,7 @@ COPY config ./config
 COPY skills ./skills
 # Process Harness executes this worker in the control-plane container.
 COPY runner/role-worker.mjs ./runner/role-worker.mjs
-COPY runner/command-policy.mjs runner/command-output.mjs runner/browser-policy.mjs ./runner/
+COPY runner/command-policy.mjs runner/command-output.mjs runner/browser-policy.mjs runner/result-owner.mjs ./runner/
 # The control plane compacts control.sqlite at start with the manager's routine (#671).
 COPY manager/compaction.mjs ./manager/compaction.mjs
 COPY scripts/external-token.mjs ./scripts/external-token.mjs

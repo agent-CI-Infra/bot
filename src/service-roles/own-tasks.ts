@@ -32,6 +32,7 @@ export interface OwnTaskOwner { service_role_id: string; kind: 'management' | 'c
  * the task bounds each result itself). */
 export interface OwnTaskHost {
   run?: (input:{system:string;prompt:string;tools:Json[];scope:string;check:()=>void|Promise<void>;execute:(name:string,args:unknown,key:string)=>Promise<unknown>})=>Promise<string>;
+  results?: ResultSession;
   owner: OwnTaskOwner; system: string; tools: () => Json[];
   request: (body: Json, label: string) => Promise<{ value?: any }>;
   execute: (name: string, args: unknown, key: string) => Promise<unknown>;
@@ -102,7 +103,7 @@ export class OwnTasks {
   }
   private async work(row: Row, request: string, host: OwnTaskHost): Promise<Json> {
     const previous = this.history(row), round = previous.length;
-    const resultFiles=new ResultSession(this.store,resultScope(this.store,{id:row.id,conversation_id:host.owner.owner_id}),()=>resultOwner('own-task',row.id,host.owner),host.check);
+    const resultFiles=host.results??new ResultSession(this.store,resultScope(this.store,{id:row.id,conversation_id:host.owner.owner_id}),()=>resultOwner('own-task',row.id,host.owner),host.check);
     // Own tasks run with the host's tools minus the own-task tools themselves (no recursion, nothing the host may not do)
     // and minus progress messages: only the host conversation addresses its people.
     const tools = () => host.tools().filter(t => !ownTaskNames.includes((t as any).function.name) && (t as any).function.name !== sendMessageName);
@@ -119,7 +120,7 @@ export class OwnTasks {
       this.store.run("UPDATE service_role_own_tasks SET state='completed',rounds=rounds+1,history=?,error=NULL,updated_at=? WHERE id=? AND state='running'",this.store.secrets.seal({rounds:[...previous,{instruction:request,conclusion,at:Date.now()}]},'own-task:'+row.id),Date.now(),row.id);
       return {task_id:row.id,title:row.title,state:'completed',round:round+1,conclusion};
     }
-    const transcript = new ToolTranscript(messages, chatContextBytes);
+    const transcript = new ToolTranscript(messages, chatContextBytes, resultFiles.preserve);
     // No step or round limit (#435): a run ends with an answer without tool calls, when it or its host is stopped, or when the
     // service role's budget runs out (checked before every model request); the transcript keeps the context bounded.
     for (let step = 0; ; step++) {
@@ -150,7 +151,7 @@ export class OwnTasks {
         results.push(host.clean(!tools().some(t => (t as any).function.name === name) ? { error: 'tool_not_allowed' }
           : await resultFiles.run(()=>host.execute(name, toolArguments(call), 'own:' + row.id + ':' + round + ':' + step + ':' + call.id),true)));
       }
-      boundedBatch(results).forEach((result, i) => messages.push({ role: 'tool', tool_call_id: calls[i].id, content: JSON.stringify(result) }));
+      boundedBatch(results, undefined, resultFiles.preserve, calls.map((call:any)=>call.function.name)).forEach((result, i) => messages.push({ role: 'tool', tool_call_id: calls[i].id, content: JSON.stringify(result) }));
     }
   }
 }

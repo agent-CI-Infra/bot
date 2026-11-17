@@ -55,8 +55,8 @@ export function validateAssistantSettings(input, hostCpus = null) {
 
 export class AssistantComputers {
   /** homes: where the HOME volume is mounted in the manager (read-only), to find its name and check a generation exists. */
-  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools }) {
-    this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools;
+  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, resultMount }) {
+    this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools; this.resultMount=resultMount;
     // owner -> lease; owner -> pending removal; owner -> serialized operations; waiting: owners queued for capacity.
     this.leases = new Map(); this.removing = new Map(); this.locks = new Map(); this.waiting = [];
     this.db.exec('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
@@ -199,12 +199,12 @@ export class AssistantComputers {
     // A container left by an earlier lease of this owner (a failed removal) is never reused.
     if (await this.inspect(owner)) await this.docker.request('DELETE', `/containers/${name}?force=true`);
     // Docker answers 404 (no such image) with nothing: a clear creation failure, not a container gone missing later.
-    const tools=lease.harness?await this.agentTools?.():null;
+    const tools=lease.harness?await this.agentTools?.():null, results=await this.resultMount?.(owner)??[];
     const made = await this.docker.request('POST', `/containers/create?name=${name}`, { Image: lease.image, User: '10001:10001', WorkingDir: '/workspace', Hostname: 'assistant',
       Cmd: ['node', '/opt/runner/idle.mjs'], Env: [`HOME=${assistantHome}`, 'LANG=C.UTF-8', 'BOT_COMPUTER_KIND=assistant'], Labels: this.labels(owner),
       HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false, Init: true, RestartPolicy: { Name: 'no' },
         Memory: l.memory_mb * mib, MemorySwap: l.memory_mb * mib, NanoCpus: Math.round(l.cpus * 1e9), PidsLimit: l.pids, IpcMode: 'private', NetworkMode: 'none',
-        Mounts: [{ Type: 'volume', Source: volume, Target: assistantHome, ReadOnly: lease.mode === 'ro', VolumeOptions: { NoCopy: true, Subpath: subpath } },...(tools?[{Type:'volume',Source:tools,Target:'/opt/agent-tools',ReadOnly:true}]:[])],
+        Mounts: [...results, { Type: 'volume', Source: volume, Target: assistantHome, ReadOnly: lease.mode === 'ro', VolumeOptions: { NoCopy: true, Subpath: subpath } },...(tools?[{Type:'volume',Source:tools,Target:'/opt/agent-tools',ReadOnly:true}]:[])],
         // Programs run from both, as on a work computer; Docker mounts a tmpfs noexec unless `exec` is given.
         Tmpfs: { '/workspace': `rw,exec,nosuid,nodev,size=${l.workspace_mb * mib},uid=10001,gid=10001,mode=0700`, '/tmp': `rw,exec,nosuid,nodev,size=${l.tmp_mb * mib},mode=1777` } } });
     if (!made) throw Object.assign(new ManagerError('assistant_computer_create_failed', 503), { detail: `image ${lease.image} not found` });

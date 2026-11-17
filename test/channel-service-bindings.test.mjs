@@ -543,7 +543,7 @@ test('a group assistant reads ten repositories with one tool call each in a sing
   assert.equal(JSON.parse(tools[0].content).projects.length, 10);
   for (const message of tools.slice(1)) {
     const result = JSON.parse(message.content);
-    assert.equal(result.truncated, true); assert.match(result.notice, /Narrow it/); assert.match(result.fields.repository, /admin-fixture-1\d\d$/);
+    assert.equal(result.truncated, true); assert.match(result.notice, /read_tool_result/); assert.ok(result.file); assert.match(result.fields.repository, /admin-fixture-1\d\d$/);
     assert.ok(Buffer.byteLength(message.content) <= 256 * 1024 / 10 + 512, 'each large result gets an equal share of the batch');
   }
   assert.ok(tools.reduce((sum, m) => sum + Buffer.byteLength(m.content), 0) <= 256 * 1024 + 11 * 512, 'the batch stays within its budget');

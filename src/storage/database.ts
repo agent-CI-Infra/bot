@@ -93,6 +93,8 @@ export class Store {
       try { this.transaction(() => this.initialize()); }
       catch (error) { this.trajectories.dispose(); this.db.close(); throw error; }
     } else this.initialize();
+    this.trajectories.results.migrateLegacy();
+    this.trajectories.results.sweep();
   }
   private initialize(): void {
     this.db.exec(`

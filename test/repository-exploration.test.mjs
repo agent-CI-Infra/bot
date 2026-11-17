@@ -1,3 +1,4 @@
+import { ResultSession, resultScope, projectResultOwner } from '../dist/agent/tool-results.js';
 import { pinLegacyTaskConfiguration } from './helpers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -71,8 +72,9 @@ test('decoded repository text is redacted, permission errors are explicit and a 
   await assert.rejects(denied.execute('github_read_token', {}), /disabled/);
 });
 
-test('serialized UTF-8 results use the existing 2 MiB capacity without truncating JSON or imposing a smaller quota', async t => {
+test('GitHub results beyond 2 MiB are saved and paged without another GitHub request', async t => {
   const f = await explorerFixture(t), limit = 2 * 1024 * 1024;
+  const session=new ResultSession(f.h.store,resultScope(f.h.store,{id:'turn',repository_id:'101'}),()=>projectResultOwner('101'),()=>{});
   await f.explorer.execute('github_read_token', {});
   let data;
   f.state.custom = async ({ path, send }) => {
@@ -83,9 +85,9 @@ test('serialized UTF-8 results use the existing 2 MiB capacity without truncatin
     const length = size - Buffer.byteLength(JSON.stringify({ content: '' }));
     data = { content: '仓'.repeat(Math.floor(length / 3)) + 'x'.repeat(length % 3) };
     assert.equal(Buffer.byteLength(JSON.stringify(data)), size);
-    const result = await f.explorer.execute('github_read', { path: '/git/trees/' + 'a'.repeat(40) + '?recursive=1' });
+    const result = await session.run(()=>f.explorer.execute('github_read', { path: '/git/trees/' + 'a'.repeat(40) + '?recursive=1' }));
     if (size <= limit) assert.deepEqual(result, data);
-    else { assert.equal(result.error, 'repository_result_too_large'); assert.match(result.detail, /path.*recursive.*page/); }
+    else { assert.ok(result.file);const before=f.state.requests.length;let position=0,restored='';for(;;){const page=await session.read({file:result.file,position,length:65536});restored+=page.content;if(page.eof)break;position=page.next_position;}assert.deepEqual(JSON.parse(restored),data);assert.equal(f.state.requests.length,before); }
     if (size === limit) {
       const root = join(f.h.directory, 'exact-mailbox'), dir = join(root, 'agent'), id = 'a'.repeat(48), reply = Buffer.from(JSON.stringify(result));
       mkdirSync(join(dir, 'tool-requests'), { recursive: true }); writeFileSync(join(dir, 'tool-requests', id + '.json'), JSON.stringify({ id, kind: 'repository', name: 'github_read' }));
@@ -94,7 +96,7 @@ test('serialized UTF-8 results use the existing 2 MiB capacity without truncatin
     }
   }
   data = { items: [{ repository_url: f.apiUrl + '/repos/fixture/project-101', body: 'x'.repeat(limit) }] };
-  assert.equal((await f.explorer.execute('github_search', { query: 'dependency' })).error, 'repository_result_too_large');
+  assert.ok((await session.run(()=>f.explorer.execute('github_search', { query: 'dependency' }))).file);
 });
 
 test('review and development Pi adapters execute the same repository tools through the control plane', async t => {

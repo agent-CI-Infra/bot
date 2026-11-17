@@ -1,3 +1,4 @@
+import { projectResultOwner } from '../agent/tool-results.js';
 import { request as httpRequest } from 'node:http';
 import { historyData, logContent, unreadable } from '../storage/payloads.js';
 import { request as httpsRequest } from 'node:https';
@@ -99,6 +100,7 @@ export class ProjectService {
     return row?.t ? String(row.t) : null;
   }
   private async reconcileProject(repo: Row): Promise<void> {
+    this.store.trajectories.results.directory(projectResultOwner(repo.id));
     try {
       // The repository is connected again while the notes volume of the project it used to be is still there: the old
       // notes must never be readable by the new project, so the volume goes before anything can start against it (#771).
@@ -236,6 +238,7 @@ export class ProjectService {
     return result;
   }
   private async send(op: Row): Promise<Json> {
+    this.store.trajectories.results.directory(projectResultOwner(op.repository_id));
     try {
       // Starting, resetting, reconfiguring or refreshing may build a package image and run the setup script: allow up to 35 minutes.
       const result = await this.manager.call('POST', `/v1/projects/${op.repository_id}/${op.action}`, JSON.parse(op.input), ['start', 'reset', 'configure', 'refresh'].includes(op.action) ? 35 * 60000 : 90000);
@@ -330,6 +333,7 @@ export class ProjectService {
     const payload = JSON.stringify({ operation_id: input.operation_id, generation: input.generation, ...(match[2] === 'configure' ? { request: input.spec } : {}) });
     if (previous && (previous.repository_id !== id || previous.action !== match[2] || previous.input !== payload)) fail(409, 'operation_id_conflict');
     if (!previous && this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id)) fail(409, 'environment_operation_pending');
+    this.store.trajectories.results.directory(projectResultOwner(id));
     const state = await this.manager.call('GET', '/v1/projects/' + id) || await this.manager.call('PUT', '/v1/projects/' + id);
     this.save(state);
     if(match[2]==='configure'&&!previous)rememberConsoleComputer(this.store,id,state.computer);
