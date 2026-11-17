@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { managementFixture, query, command } from '../test/management-fixture.mjs';
 
@@ -87,8 +88,8 @@ test('switching the chat to another project and back keeps the submitted receipt
   page.on('pageerror', error => errors.push(error.message));
   try {
     await login(page, f);
-    const scope = page.getByLabel('当前管理作用域'), message = page.getByLabel('管理消息', { exact: true }), feed = page.getByRole('log', { name: '管理会话记录' });
-    await scope.selectOption('project:101');
+    const scope = page.locator('.management-scope-name'), message = page.getByLabel('管理消息', { exact: true }), feed = page.getByRole('log', { name: '管理会话记录' });
+    await switchConsoleProject(page, '101');
     await message.fill('更新任务默认提示词');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await expect(feed.getByText('操作 更新工作配置')).toHaveCount(1);
@@ -96,10 +97,10 @@ test('switching the chat to another project and back keeps the submitted receipt
     const commands = () => f.h.store.get("SELECT count(*) n FROM management_commands WHERE operation='workflow.update'").n;
     expect(commands()).toBe(1);
     // Another project has its own conversation: the receipt of 101 is not carried over.
-    await scope.selectOption('project:102');
+    await switchConsoleProject(page, '102');
     await expect(feed.getByText('操作 更新工作配置')).toHaveCount(0);
     // Coming back re-reads the same conversation and renders the receipt once, not twice.
-    await scope.selectOption('project:101');
+    await switchConsoleProject(page, '101');
     await expect(feed.getByText('操作 更新工作配置')).toHaveCount(1);
     await expect(feed).toContainText('已执行');
     expect(commands()).toBe(1);

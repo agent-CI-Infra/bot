@@ -11,7 +11,7 @@ test('#756: #editor and #detail take their accessible name from their visible ti
   const event = h.store.get("SELECT id FROM deliveries WHERE delivery_id='dialog-name-1'");
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,phase,source_delivery_id,created_at,updated_at) VALUES('dialog-task','101','review.issue','failed','Review from webhook',1,'complete',?, '2026-10-01T12:00:00.000Z','2026-10-01T12:00:00.000Z')", event.id);
   try {
-    await page.goto(h.admin + '/#/inbox/101');
+    await page.goto(h.admin + '/#/projects/101/inbox');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
@@ -29,7 +29,7 @@ test('#756: #editor and #detail take their accessible name from their visible ti
     await expect(editor).toBeHidden();
 
     // The delivery dialog names itself after the heading the reader sees: 投递详情. The task page opens that same dialog.
-    await page.goto(h.admin + '/#/inbox/101');
+    await page.goto(h.admin + '/#/projects/101/inbox');
     await page.locator('[data-task-id="dialog-task"]').getByRole('button', { name: '查看任务', exact: true }).click();
     await page.locator('#task-external-bar').getByRole('button', { name: '查看投递', exact: true }).click();
     const detail = page.locator('#detail');

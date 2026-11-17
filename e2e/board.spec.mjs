@@ -157,7 +157,7 @@ test('自定义字段保留对象值与折叠列，成员视图和卡片不泄�
     const context=await browser.newContext(),member=await context.newPage();
     try{
       await login(member,h.admin,memberPassword,'board-member');await expect(member.locator('[data-card-key^="202/"]')).toHaveCount(0);
-      await expect(member.locator('#board-panel')).not.toContainText('v9.9.9');await expect(member.getByLabel('仓库',{exact:true}).locator('option')).toHaveText(['全部仓库','fixture/project-101']);
+      await expect(member.locator('#board-panel')).not.toContainText('v9.9.9');await member.locator('.console-scope-trigger:visible').click(); await expect(member.locator('#console-scope-projects [role=option]')).toHaveText(['project-101']); await member.keyboard.press('Escape');
       await expect(member.getByLabel('按…分列',{exact:true}).locator('option')).toHaveCount(4);await expect(member.getByLabel('视图',{exact:true}).locator('option')).toHaveCount(1);
     }finally{await context.close();}
     expect(custom).not.toBe('bot_stage');

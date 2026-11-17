@@ -3,17 +3,17 @@ function boardToggleColumn(id) {
 }
 function boardCardCategory(item) { return item.card_category; }
 function boardColumnValue(item) {
-  if(boardState.group==='bot_stage')return item.bot_stage;
-  if(boardState.group==='repository')return item.repository_id;
-  if(boardState.group==='execution_status')return item.execution_status;
-  if(boardState.group==='category')return boardCardCategory(item);
+  if(boardGrouping()==='bot_stage')return item.bot_stage;
+  if(boardGrouping()==='repository')return item.repository_id;
+  if(boardGrouping()==='execution_status')return item.execution_status;
+  if(boardGrouping()==='category')return boardCardCategory(item);
   return item.field_value||'unassigned';
 }
 function boardRenderCards(keepScroll=false) {
   const columns=$('board-columns');if(!columns)return;
   const left=columns.scrollLeft,top=columns.scrollTop,tops=new Map([...columns.querySelectorAll('.board-column')].map(c=>[c.dataset.columnId,c.querySelector('.board-column-list')?.scrollTop||0]));
   columns.classList.toggle('board-list-layout',boardState.layout==='list');
-  columns.replaceChildren();const stageMode=boardState.group==='bot_stage',customMode=!!boardCustomField(),visible=boardState.cards,allColumns=boardColumns();
+  columns.replaceChildren();const stageMode=boardGrouping()==='bot_stage',customMode=!!boardCustomField(),visible=boardState.cards,allColumns=boardColumns();
   const total=id=>boardState.columnCounts?.[id]||0;
   if(!allColumns.some(c=>c.id===boardState.mobileColumn))boardState.mobileColumn=allColumns.find(c=>total(c.id)>0)?.id||allColumns[0]?.id;
   const mobile=$('board-mobile-group');mobile.replaceChildren();allColumns.forEach(c=>mobile.add(new Option(c.name+' · '+total(c.id),c.id)));mobile.value=boardState.mobileColumn||'';
@@ -21,7 +21,7 @@ function boardRenderCards(keepScroll=false) {
   const displayed=allColumns.filter(c=>customMode||total(c.id)>0||boardMedia.matches&&c.id===boardState.mobileColumn);
   for(const column of displayed){
     const collapsed=boardState.layout!=='list'&&!boardMedia.matches&&boardState.hidden.includes(column.id),cards=visible.filter(c=>boardColumnValue(c)===column.id);
-    const section=element('section','','board-column'+(collapsed?' board-collapsed':''));section.dataset.columnId=column.id;section.dataset.dimension=boardState.group;section.classList.toggle('board-mobile-selected',column.id===boardState.mobileColumn);
+    const section=element('section','','board-column'+(collapsed?' board-collapsed':''));section.dataset.columnId=column.id;section.dataset.dimension=boardGrouping();section.classList.toggle('board-mobile-selected',column.id===boardState.mobileColumn);
     if(stageMode)section.dataset.stage=column.id;section.setAttribute('aria-label',column.name);
     const heading=element('div','','board-column-heading'),dot=element('span','','board-column-dot'),count=element('span',String(total(column.id)),'board-column-count');
     if(column.hint)heading.title=column.hint;dot.setAttribute('aria-hidden','true');count.setAttribute('aria-label',total(column.id)+' 项工作');
@@ -156,7 +156,7 @@ function boardCard(item) {
 }
 async function boardMove(item,option) {
   if(!boardCustomField()||item.card_type==='release')return;
-  await api('/api/board/cards/'+boardKey(item),'PATCH',{field_id:boardState.group,option_id:option});
+  await api('/api/board/cards/'+boardKey(item),'PATCH',{field_id:boardGrouping(),option_id:option});
   // Custom fields describe the GitHub object and are shared by its work cards.
   boardState.cards.filter(c=>boardKey(c)===boardKey(item)).forEach(c=>c.field_value=option);await boardLoadCards();
 }

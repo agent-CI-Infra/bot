@@ -1,7 +1,7 @@
 // Project pages: one settings page per repository (#/projects/<id>/<section>). The 项目入口 hub (#/projects/<id>/menu) lists
 // every page; a work page shows a two-item breadcrumb and a settings page lists every settings category.
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['overview', '项目总览'], ['management', '管理助手'], ['release', '发版本'], ['knowledge', '项目知识'], ['activity', '运行状态'], ['basic', '基本设置'], ['triggers', '监听与触发'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['schedules', '计划与通知'], ['external', '外部执行'], ['members', '成员']];
+const projectSections = [['overview', '项目总览'], ['management', '管理助手'], ['board', '任务看板'], ['inbox', '待处理'], ['costs', '用量与成本'], ['new-task', '新建任务'], ['release', '发版本'], ['knowledge', '项目知识'], ['activity', '运行状态'], ['basic', '基本设置'], ['triggers', '监听与触发'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['schedules', '计划与通知'], ['external', '外部执行'], ['members', '成员']];
 // #707: the settings categories are also the secondary nav of every settings page, so the hub, that nav and the phone's
 // 当前页面 picker all read this one list.
 const projectSettingsSections = [

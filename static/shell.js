@@ -1,6 +1,6 @@
 // Shared navigation wraps the existing console; business pages keep their routes and renderers.
 const consoleMedia = matchMedia('(max-width:767px)');
-let consoleOwner = null, consoleProject = null, consoleRouteKey = null;
+let consoleOwner = null, consoleRouteKey = null;
 const consolePositions = new Map();
 // What a project is currently short of, from the installation snapshot: one read per project and page session, because the
 // navigation is redrawn on every route and must not turn a badge into a request per click.
@@ -40,7 +40,11 @@ const consoleAttention = {
   needs_help: ['需要帮助', 'Manager 已明确请求外部帮助；查看所需操作与恢复条件。'],
   needs_replan: ['需要重新规划', '查看验收缺口和已有产物，再决定下一步。']
 };
-function consoleInboxRoute() { return /^#\/inbox(?:\/(all|[1-9]\d*))?(?:\/(\d+))?$/.exec(location.hash); }
+function consoleInboxRoute() {
+  const project = projectRoute();
+  if (project?.section === 'inbox') return [location.hash, project.id, project.item || '0'];
+  return /^#\/inbox(?:\/(all|[1-9]\d*))?(?:\/(\d+))?$/.exec(location.hash);
+}
 // Return metadata stays in memory: no draft, credential or task detail is stored in a URL or browser storage.
 let consoleInboxReturn = null;
 function captureConsoleInbox(taskId) {
@@ -105,11 +109,6 @@ function taskOriginCaption(origin) {
   const from = origin.source_role ? taskOriginRole(origin.source_role) : '', to = origin.executor_role ? taskOriginRole(origin.executor_role) : '';
   const handoff = !to ? '按原执行流程处理' : from && origin.source_role === origin.executor_role ? `${to}自己执行` : `${from}交给${to}`;
   return '来源：' + source + ' · ' + handoff;
-}
-function consoleScope() {
-  const inbox = consoleInboxRoute();
-  const creation = /^#\/new-task(?:\/([1-9]\d*))?$/.exec(location.hash);
-  return projectRoute()?.id || (inbox ? (inbox[1] === 'all' ? null : inbox[1]) : creation ? creation[1] || null : consoleProject);
 }
 // #481: the phone's bottom bar owns the five primary destinations (项目 / 任务 / 待处理 / 助手 / 更多), so this page is
 // the supplement behind 更多. It must not repeat what the bar already carries, and it stays short enough to read on a
@@ -187,9 +186,8 @@ function syncConsoleShell() {
     if (typeof resetScheduleViews === 'function') resetScheduleViews();
     if (typeof resetBoard === 'function') resetBoard();
     if (typeof resetPersonalApps === 'function') resetPersonalApps();
-    consoleOwner = me?.id || null; consoleProject = null; consolePositions.clear(); consoleRouteKey = null;
-    // #480: the shared default is this session's choice, so a different user never inherits it.
-    if (typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(null);
+    consoleOwner = me?.id || null; consolePositions.clear(); consoleRouteKey = null;
+    syncConsoleScope();
     closeScopePicker(false);
     $('console-secondary-nav').replaceChildren(); $('console-page').replaceChildren();
     setAccountMenu(false);
@@ -202,22 +200,10 @@ function syncConsoleShell() {
   // The menu names the same person the header used to print beside the sign-out button.
   $('console-account-login').textContent = userDisplayName(me);
   $('console-account-role').textContent = currentRoleText();
-  const project = projectRoute(), inbox = consoleInboxRoute(), creation = /^#\/new-task(?:\/([1-9]\d*))?$/.exec(location.hash);
-  const routed = project?.id || (inbox ? (inbox[1] === 'all' ? null : inbox[1]) : creation?.[1]) || null;
-  // #480: the address wins where it names a project; the board, costs and management pages follow the shell picker.
-  // A page that names no project keeps the project the reader last stood in, and only a chosen default replaces it.
-  if (project || inbox || creation) {
-    consoleProject = routed;
-    // The picker shows this project, so it is also the default the board, costs and management read. An address that
-    // names a project must not leave those three describing another one.
-    if (routed && typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(routed);
-    // #494: an inbox address that names no project shows 「全部项目」 in the picker, so the shared default has to become empty
-    // as well. Otherwise the picker, the board, usage and the assistant would read two different values for one choice.
-    else if ((inbox || creation) && typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(null);
-  } else if (typeof consoleDefaultProject === 'function' && consoleDefaultProject()) consoleProject = consoleDefaultProject();
-  const repo = repositories.find(r => String(r.id) === consoleProject);
-  // A revoked project is never kept in the project picker merely because it was selected earlier.
-  if (!repo && consoleProject) { consoleProject = null; if (typeof setConsoleDefaultProject === 'function') setConsoleDefaultProject(null); }
+  const project = projectRoute();
+  syncConsoleScope();
+  const consoleProject = consoleScope(), repo = repositories.find(r => String(r.id) === consoleProject);
+  if (typeof syncManagementScope === 'function') syncManagementScope();
   // A GitHub full name carries its owner, so the picker groups by organization without asking for another projection:
   // the same repository name can arrive from two owners and then must not look like one project.
   const organization = scopeOrganization;
@@ -247,7 +233,7 @@ function syncConsoleShell() {
   }
   if (repo && me.role === 'super_admin' && !consoleGaps.has(String(repo.id))) setTimeout(() => loadConsoleGaps(String(repo.id)), 0);
 
-  $('console-inbox-link').href = '#/inbox' + (consoleProject ? '/' + consoleProject : '');
+  $('console-inbox-link').href = consolePageAddress('inbox');
   const scopeKey = project ? 'project:' + project.id : platform ? 'settings' : personal ? 'personal' : '';
   const secondary = project ? $('project-page').querySelector('.project-nav')
     : platform ? $('settings-panel').querySelector('.project-nav')
@@ -301,7 +287,7 @@ function syncConsoleMobileCurrent() {
   const chat = typeof managementChatState === 'function' ? managementChatState() : null;
   const chosen = chat?.open ? 'assistant' : ['projects', 'board', 'inbox'].includes(tab) ? tab : ['design', 'not-found'].includes(tab) ? '' : 'more';
   for (const a of $('console-mobile-nav').querySelectorAll('a')) {
-    if (a.dataset.page === 'inbox') a.href = '#/inbox' + (consoleProject ? '/' + consoleProject : '');
+    if (['projects', 'board', 'inbox'].includes(a.dataset.page)) a.href = consolePageAddress(a.dataset.page);
     if (a.dataset.page === chosen) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
 }
@@ -352,12 +338,10 @@ async function renderConsoleInbox(request) {
   const head = element('div', '', 'console-page-head'), title = element('div');
   title.append(element('p', '需要关注', 'eyebrow'), element('h1', '待处理'), element('p', '需要关注的真实任务；自动排队和正常执行不计入。具体操作以当前权限和任务回执为准。', 'muted'));
   head.append(title); page.replaceChildren(head);
-  const filters = element('div', '', 'console-inbox-filters'), label = element('label', '项目'), picker = document.createElement('select');
-  picker.add(new Option('所有有权访问的项目', '')); repositories.forEach(r => picker.add(new Option(r.full_name, r.id))); picker.value = id;
-  picker.addEventListener('change', () => { location.hash = '#/inbox' + (picker.value ? '/' + picker.value : ''); }); label.append(picker);
-  filters.append(label, button('刷新待处理', () => renderConsoleInbox(++renderVersion))); page.append(filters);
+  const filters = element('div', '', 'console-inbox-filters');
+  filters.append(button('刷新待处理', () => renderConsoleInbox(++renderVersion))); page.append(filters);
   // #934: start requests (#933) wait for a super administrator before any task exists, so they head the inbox.
-  if (me.role === 'super_admin' && typeof renderStartRequests === 'function') {
+  if (!id && me.role === 'super_admin' && typeof renderStartRequests === 'function') {
     const requests = element('div', '', 'console-start-requests'); page.append(requests);
     void renderStartRequests(requests, () => request === renderVersion && tab === 'inbox' && requests.isConnected);
   }
@@ -371,7 +355,7 @@ async function renderConsoleInbox(request) {
     if (!rows.length) {
       body.append(consoleState('当前范围没有待处理任务', '这表示未发现上述等待或失败事项，不代表服务、CI 或其他任务已经全部成功。'));
       const next = element('div', '', 'console-inbox-next');
-      next.append(consoleLink('#/board', '查看任务看板'), consoleLink('#/new-task' + (id ? '/' + id : ''), '新建任务'));
+      next.append(consoleLink(consolePageAddress('board', id || null), '查看任务看板'), consoleLink(consolePageAddress('new-task', id || null), '新建任务'));
       body.append(next);
     } else {
       body.append(element('p', `本页 ${rows.length} 项 · 按最近状态变更时间从早到晚排列`, 'muted'));
@@ -380,7 +364,7 @@ async function renderConsoleInbox(request) {
       }
     }
     const paging = element('nav', '', 'console-inbox-paging'); paging.setAttribute('aria-label', '待处理分页');
-    const href = next => '#/inbox/' + (id || 'all') + '/' + next;
+    const href = next => id ? consolePageAddress('inbox', id) + '/' + next : '#/inbox/all/' + next;
     // The explicit "all" segment preserves an unscoped page when navigating pagination links.
     if (offset) paging.append(consoleLink(href(Math.max(0, offset - 50)), '上一页'));
     if (result.tasks.length > 50) paging.append(consoleLink(href(offset + 50), '下一页'));

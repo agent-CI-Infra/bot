@@ -83,7 +83,7 @@ for (const width of [1440, 390]) test(`a new report survives pause/retry and sho
   const f = await fixture(), errors = []; let running;
   page.on('pageerror', error => errors.push(error.message));
   try {
-    await page.setViewportSize({ width, height: 900 }); await page.goto(f.h.admin + '/#/new-task/101');
+    await page.setViewportSize({ width, height: 900 }); await page.goto(f.h.admin + '/#/projects/101/new-task');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();

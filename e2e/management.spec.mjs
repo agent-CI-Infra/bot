@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { consoleNavigate } from './console-navigation.mjs';
 import { test,expect } from '@playwright/test';
 import { mkdirSync,rmSync,writeFileSync } from 'node:fs';
@@ -12,7 +13,7 @@ test('mobile management sends and previews a configuration on the first press wh
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await switchConsoleProject(page, '101');
     const send = page.getByRole('button', { name: '发送', exact: true });
     await expect(send).toBeEnabled();
     const message = page.getByLabel('管理消息', { exact: true });
@@ -42,7 +43,7 @@ test('management UI, direct API and model tools agree on real persisted query, c
   try{
     await page.setViewportSize({width:1440,height:1100});await page.goto(h.admin+'/#/management');
     await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await switchConsoleProject(page, '101');
     await expect(page.getByRole('region',{name:'管理助手',exact:true})).toBeVisible();
     await expect(page.getByLabel('默认提示词',{exact:true})).toBeHidden();
     const feed=page.getByRole('log',{name:'管理会话记录'}),message=page.getByLabel('管理消息',{exact:true});
@@ -71,8 +72,8 @@ test('management UI, direct API and model tools agree on real persisted query, c
     const writes=h.store.get('SELECT count(*) n FROM management_commands').n;
     // #480: a page-local scope is not restored on reload; the assistant opens on the shell default (none here, so platform).
     await page.reload();await expect(page).toHaveURL(/#\/management$/);
-    await expect(page.getByLabel('当前管理作用域')).toHaveValue('platform');
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await expect(page.locator('.management-scope-name')).toHaveAttribute('data-scope', 'platform');
+    await switchConsoleProject(page, '101');
     // The receipt is persisted on the server, so the project's conversation still shows it once that scope is chosen.
     await expect(feed).toContainText('操作 暂停任务 · 已执行');expect(h.store.get('SELECT count(*) n FROM management_commands').n).toBe(writes);
     // Explicit UI form shares the task command handler and updates the same persisted state.
@@ -103,7 +104,7 @@ test('global management chat keeps drafts and a running conversation across navi
     await expect(launcher).toHaveAccessibleName(/管理助手\s*随时唤起/);
     await launcher.click();
     await expect(page).toHaveURL(/#\/projects$/); await expect(chat).toBeVisible();
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await switchConsoleProject(page, '101');
     const message = page.getByLabel('管理消息', { exact: true }); await message.fill('任务为什么没有继续？');
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
     await launcher.click(); await expect(message).toHaveValue('任务为什么没有继续？');
@@ -147,10 +148,10 @@ test('project chat links select the project, and a delayed old read cannot repla
     await page.goto(f.h.admin + '/#/projects/101/management');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    // The chat address has no settings section of its own: it keeps the project and opens its first page underneath.
-    await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
-    const scope = page.getByLabel('当前管理作用域'), message = page.getByLabel('管理消息', { exact: true }), feed = page.getByRole('log', { name: '管理会话记录' });
-    await expect(scope).toHaveValue('project:101'); await expect(feed).toContainText('environment_not_ready');
+    // A project chat link now opens the actual project-scoped assistant page.
+    await expect(page).toHaveURL(/#\/projects\/101\/management$/);
+    const scope = page.locator('.management-scope-name'), message = page.getByLabel('管理消息', { exact: true }), feed = page.getByRole('log', { name: '管理会话记录' });
+    await expect(scope).toHaveAttribute('data-scope', 'project:101'); await expect(feed).toContainText('environment_not_ready');
     await message.fill('101 的草稿');
     let blocked; const arrived = new Promise(resolve => { blocked = resolve; }), gate = new Promise(resolve => { release = resolve; });
     await page.route('**/conversations/' + conversation + '/events?after=*', async route => {
@@ -159,25 +160,27 @@ test('project chat links select the project, and a delayed old read cannot repla
     });
     await page.getByRole('button', { name: '快捷操作', exact: true }).click();
     await page.getByRole('button', { name: '重新连接', exact: true }).click(); await arrived;
-    await scope.selectOption('project:102');
+    await switchConsoleProject(page, '102');
     await page.getByRole('button', { name: '返回对话', exact: true }).click();
     await expect(page.getByRole('button', { name: '发送', exact: true })).toBeEnabled();
     await message.fill('102 的草稿'); release();
     await expect(feed).not.toContainText('environment_not_ready'); await expect(message).toHaveValue('102 的草稿');
     await page.unrouteAll({ behavior: 'wait' });
-    await scope.selectOption('project:101'); await expect(message).toHaveValue('101 的草稿'); await expect(feed).toContainText('environment_not_ready');
-    // Opening the project entry again reuses the same chat and keeps the current settings page.
+    await switchConsoleProject(page, '101'); await expect(message).toHaveValue('101 的草稿'); await expect(feed).toContainText('environment_not_ready');
+    // The project entry opens its scoped assistant page and reuses the durable conversation.
     await page.evaluate(() => { location.hash = '#/projects/101/roles'; });
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
     await page.getByTestId('project-open-chat').click();
-    await expect(page).toHaveURL(/#\/projects\/101\/roles$/); await expect(scope).toHaveValue('project:101'); await expect(message).toHaveValue('101 的草稿');
-    await scope.selectOption('project:102'); await expect(message).toHaveValue('102 的草稿');
+    await expect(page).toHaveURL(/#\/projects\/101\/management$/); await expect(scope).toHaveAttribute('data-scope', 'project:101'); await expect(message).toHaveValue('101 的草稿');
+    await switchConsoleProject(page, '102'); await expect(message).toHaveValue('102 的草稿');
+    await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click();
+    await expect(scope).toHaveAttribute('data-scope', 'project:101');
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
     await page.locator('#management-launcher').click();
-    await expect(scope).toHaveValue('project:102'); await expect(message).toHaveValue('102 的草稿');
+    await expect(scope).toHaveAttribute('data-scope', 'project:101'); await expect(message).toHaveValue('101 的草稿');
     await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click();
-    await expect(scope).toHaveValue('project:101'); await expect(message).toHaveValue('101 的草稿');
-    await expect(page).toHaveURL(/#\/management$/); await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible();
+    await expect(scope).toHaveAttribute('data-scope', 'project:101'); await expect(message).toHaveValue('101 的草稿');
+    await expect(page).toHaveURL(/#\/projects\/101\/management$/); await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible();
     await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click(); await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
     // With the chat collapsed on a narrow screen, its launcher covers none of the header navigation.
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
@@ -200,19 +203,19 @@ test('a delayed send receipt clears only the submitted draft even when its conve
     await page.goto(f.h.admin + '/#/management');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    const scope = page.getByLabel('当前管理作用域'), message = page.getByLabel('管理消息', { exact: true }), send = page.getByRole('button', { name: '发送', exact: true });
-    await scope.selectOption('project:101'); await expect(send).toBeEnabled();
+    const scope = page.locator('.management-scope-name'), message = page.getByLabel('管理消息', { exact: true }), send = page.getByRole('button', { name: '发送', exact: true });
+    await switchConsoleProject(page, '101'); await expect(send).toBeEnabled();
     async function delayedSend(text, newerDraft = null) {
       let accepted; const arrived = new Promise(resolve => { accepted = resolve; }), gate = new Promise(resolve => { release = resolve; });
       const pattern = '**/api/management/conversations/*/messages';
       await page.route(pattern, async route => { const response = await route.fetch(); accepted(); await gate; await route.fulfill({ response }); });
       await message.fill(text); await send.click(); await arrived;
       if (newerDraft !== null) await message.fill(newerDraft);
-      await scope.selectOption('project:102'); await expect(send).toBeEnabled(); await message.fill('102 的新草稿');
+      await switchConsoleProject(page, '102'); await expect(send).toBeEnabled(); await message.fill('102 的新草稿');
       const received = page.waitForResponse(response => response.request().method() === 'POST' && /\/conversations\/[^/]+\/messages$/.test(new URL(response.url()).pathname));
       release(); await (await received).finished(); await page.unroute(pattern);
       await expect(message).toHaveValue('102 的新草稿');
-      await scope.selectOption('project:101'); await expect(message).toHaveValue(newerDraft ?? ''); await expect(send).toBeEnabled();
+      await switchConsoleProject(page, '101'); await expect(message).toHaveValue(newerDraft ?? ''); await expect(send).toBeEnabled();
     }
     await delayedSend('send this only once');
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
@@ -222,7 +225,7 @@ test('a delayed send receipt clears only the submitted draft even when its conve
     // A rejected POST must leave the unsent draft available after changing scope.
     await page.route('**/api/management/conversations/*/messages', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'fixture_unavailable' }) }));
     await message.fill('发送失败的草稿'); await send.click(); await expect(page.locator('.management-status')).toContainText('fixture_unavailable');
-    await scope.selectOption('project:102'); await expect(send).toBeEnabled(); await scope.selectOption('project:101'); await expect(message).toHaveValue('发送失败的草稿');
+    await switchConsoleProject(page, '102'); await expect(send).toBeEnabled(); await switchConsoleProject(page, '101'); await expect(message).toHaveValue('发送失败的草稿');
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(2); expect(errors).toEqual([]);
   } finally { release?.(); await page.unrouteAll({ behavior: 'wait' }); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
@@ -235,23 +238,23 @@ test('loading a scope disables composing until its draft is restored, and abando
     await page.goto(f.h.admin + '/#/management');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    const scope = page.getByLabel('当前管理作用域'), message = page.getByLabel('管理消息', { exact: true }), send = page.getByRole('button', { name: '发送', exact: true });
-    await scope.selectOption('project:101'); await expect(send).toBeEnabled(); await message.fill('101 保留的草稿');
+    const scope = page.locator('.management-scope-name'), message = page.getByLabel('管理消息', { exact: true }), send = page.getByRole('button', { name: '发送', exact: true });
+    await switchConsoleProject(page, '101'); await expect(send).toBeEnabled(); await message.fill('101 保留的草稿');
     let arrived, finished, held = false;
     const blocked = new Promise(resolve => { arrived = resolve; }), done = new Promise(resolve => { finished = resolve; }), gate = new Promise(resolve => { release = resolve; });
     await page.route('**/api/management/conversations', async route => {
       if (route.request().method() !== 'GET' || held) return route.continue();
       held = true; const response = await route.fetch(); arrived(); await gate; await route.fulfill({ response }); finished();
     });
-    await scope.selectOption('project:102'); await blocked;
+    await switchConsoleProject(page, '102'); await blocked;
     await expect(message).toBeDisabled(); await expect(send).toBeDisabled();
     await expect(page.getByRole('button', { name: /查看任务进展/ })).toBeDisabled();
-    await scope.selectOption('project:201'); await expect(message).toBeEnabled(); await message.fill('201 载入后的新草稿');
-    release(); await done; await expect(scope).toHaveValue('project:201'); await expect(message).toHaveValue('201 载入后的新草稿');
+    await switchConsoleProject(page, '201'); await expect(message).toBeEnabled(); await message.fill('201 载入后的新草稿');
+    release(); await done; await expect(scope).toHaveAttribute('data-scope', 'project:201'); await expect(message).toHaveValue('201 载入后的新草稿');
     await page.unrouteAll({ behavior: 'wait' });
-    await scope.selectOption('project:101'); await expect(message).toHaveValue('101 保留的草稿');
-    await scope.selectOption('project:102'); await expect(message).toBeEnabled(); await message.fill('102 载入后的新草稿');
-    await scope.selectOption('project:201'); await expect(message).toHaveValue('201 载入后的新草稿');
+    await switchConsoleProject(page, '101'); await expect(message).toHaveValue('101 保留的草稿');
+    await switchConsoleProject(page, '102'); await expect(message).toBeEnabled(); await message.fill('102 载入后的新草稿');
+    await switchConsoleProject(page, '201'); await expect(message).toHaveValue('201 载入后的新草稿');
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(0); expect(errors).toEqual([]);
   } finally { release?.(); await page.unrouteAll({ behavior: 'wait' }); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
@@ -265,7 +268,7 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const chat = page.locator('#management-chat'), launcher = page.locator('#management-launcher');
-    await launcher.click(); await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await launcher.click(); await switchConsoleProject(page, '101');
     const message = page.getByLabel('管理消息', { exact: true }), send = page.getByRole('button', { name: '发送', exact: true });
     await message.fill('任务为什么没有继续？'); await send.click();
     await expect(page.getByRole('log', { name: '管理会话记录' })).toContainText('任务正在等待项目电脑'); await expect(send).toBeEnabled();
@@ -303,8 +306,8 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click(); await page.reload();
     await expect(page).toHaveURL(/#\/management$/); await expect(chat).toHaveAttribute('role', 'region');
     // #480: the reload reopens on the shell default (no project picked here), not on the page-local scope chosen before it.
-    await expect(page.getByLabel('当前管理作用域')).toHaveValue('platform');
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await expect(page.locator('.management-scope-name')).toHaveAttribute('data-scope', 'platform');
+    await switchConsoleProject(page, '101');
     await message.fill('窄屏整页中的草稿'); await page.setViewportSize({ width: 390, height: 844 });
     await expect(send).toBeInViewport(); await expect(message).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
@@ -344,7 +347,7 @@ test('a console write previews its operation, target and expected revision, and 
     await page.goto(h.admin + '/#/management');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await switchConsoleProject(page, '101');
     await page.getByRole('button', { name: '快捷操作', exact: true }).click();
     await page.getByLabel('管理任务', { exact: true }).selectOption('blocked');
     const preview = page.getByRole('region', { name: '执行前确认', exact: true }), before = commands();
@@ -385,7 +388,7 @@ test('a rollback previews the command it would send, and sends it only after it 
     await page.goto(h.admin + '/#/management');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await switchConsoleProject(page, '101');
     await page.getByRole('button', { name: '快捷操作', exact: true }).click();
     const before = commands(), original = await prompt();
     await page.getByLabel('默认提示词', { exact: true }).fill('回滚要能回到的旧提示词');

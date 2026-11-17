@@ -29,7 +29,7 @@ test('task details show the granted writes, their changes and each run\'s delive
     grantTaskWrites(h.store, h.store.get('SELECT * FROM tasks WHERE id=?', id), { writes: ['pull_request'], reason: '报告发现 calc.mjs 需要改，在同一个任务里开 PR' }, 'role:manager', []);
     traceEvent(h.store, id, 'delivery_tools', { role: 'dev', run_id: 'run-2', attempt: 1, tools: ['submit_report', 'open_pull_request'] }, null, 'framework');
     await page.setViewportSize({ width: 1440, height: 900 });
-    await login(page, h.admin + '/#/inbox/101', password);
+    await login(page, h.admin + '/#/projects/101/inbox', password);
     await page.locator(`[data-task-id="${id}"]`).getByRole('button', { name: '查看任务', exact: true }).click();
     // The task page keeps these records in its folded archive section (#952): open it as a person would.
     await page.locator('details.task-archive-fold > summary').click();

@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { managementFixture, settled } from '../test/management-fixture.mjs';
@@ -8,15 +9,14 @@ async function login(page, f) {
   await page.getByLabel('用户名', { exact: true }).fill('administrator');
   await page.getByLabel('密码', { exact: true }).fill(f.password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
-  await page.getByLabel('当前管理作用域').selectOption('project:101');
+  await switchConsoleProject(page, '101');
   await expect(page.getByRole('button', { name: '发送', exact: true })).toBeEnabled();
 }
-// #480: a scope chosen on the page lasts for one opening, so a reload returns to the shell default. Reopening the scope is
-// how a test about stored messages gets back to the conversation it wrote.
+// A reloaded project address reopens the same durable conversation.
 async function reopenScope(page) {
-  const scope = page.getByLabel('当前管理作用域', { exact: true });
-  await expect(scope).toHaveValue('platform');
-  await scope.selectOption('project:101');
+  const scope = page.locator('.management-scope-name');
+  await expect(scope).toHaveAttribute('data-scope', 'project:101');
+  await switchConsoleProject(page, '101');
 }
 const chunk = (res, delta, finish = null) => res.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finish }] }) + '\n\n');
 const complete = res => { chunk(res, {}, 'stop'); res.end('data: [DONE]\n\n'); };

@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { managementFixture } from '../test/management-fixture.mjs';
@@ -83,7 +84,7 @@ test('移动端从「助手」打开现有管理助手，不再有悬浮按钮�
     await assistant.click();
     const window_ = page.locator('.management-window');
     await expect(window_).toBeVisible();
-    await expect(page.getByLabel('当前管理作用域', { exact: true })).toBeVisible();
+    await expect(page.locator('.management-scope-name')).toBeVisible();
     // Opening from the bar is the same call the launcher made: no project argument, so #480's default order decides.
     await expect(assistant).toHaveAttribute('aria-current', 'page');
     // Minimizing returns to the bar instead of revealing a floating control over the page.
@@ -109,17 +110,17 @@ test('助手的作用域与会话在底栏入口处保留，不因入口变化�
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const assistant = page.locator('#console-mobile-nav a[data-page="assistant"]');
     await assistant.click();
-    const scope = page.getByLabel('当前管理作用域', { exact: true });
+    const scope = page.locator('.management-scope-name');
     await expect(scope).toBeVisible();
-    await scope.selectOption('project:101');
-    await expect(page.locator('#management-scope-note')).toContainText('admin-fixture-101');
+    await switchConsoleProject(page, '101');
+    await expect(page.locator('.management-scope-name')).toContainText('admin-fixture-101');
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
     await expect(page.locator('.management-window')).toBeHidden();
     // The bar opens the same assistant instance: the scope the reader chose is still selected and the conversation is
     // the one it was, not a new one.
     await assistant.click();
-    await expect(scope).toHaveValue('project:101');
-    expect(await page.locator('#management-scope-note').innerText()).toContain('admin-fixture-101');
+    await expect(scope).toHaveAttribute('data-scope', 'project:101');
+    expect(await page.locator('.management-scope-name').innerText()).toContain('admin-fixture-101');
   } finally { await f.close(); }
 });
 

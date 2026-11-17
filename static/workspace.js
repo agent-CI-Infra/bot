@@ -273,7 +273,7 @@ function workspaceOverview() {
 
   const refresh = button('刷新总览', () => void update(), 'quiet');
   const newTaskBtn = element('a', '+ 新建任务', 'button-link btn-primary workbench-new-task');
-  newTaskBtn.href = `#/new-task/${id}`;
+  newTaskBtn.href = consolePageAddress('new-task', id);
   rightBar.append(liveSummary, refresh, newTaskBtn);
   topBar.append(viewTabs, rightBar);
   root.append(topBar);
@@ -360,7 +360,7 @@ function workspaceOverview() {
     element('a', '项目电脑状态 →', 'workbench-quick-link'),
   );
   quickLinks.children[0].href = `#/projects/${id}/roles`;
-  quickLinks.children[1].href = `#/inbox/${id}`;
+  quickLinks.children[1].href = consolePageAddress('inbox', id);
   quickLinks.children[2].href = `#/projects/${id}/machine`;
   footer.append(healthStatus, quickLinks);
 

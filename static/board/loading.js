@@ -1,5 +1,5 @@
 function boardParams(offset) {
-  return new URLSearchParams({view_id:boardState.viewId,group_by:boardState.group,offset:String(offset),limit:String(boardPageSize),
+  return new URLSearchParams({view_id:boardState.viewId,group_by:boardGrouping(),offset:String(offset),limit:String(boardPageSize),
     filters:JSON.stringify(boardConditions())});
 }
 // #503: the scroll areas that actually scroll the cards in the current layout. Desktop columns scroll one by one;
@@ -59,7 +59,7 @@ async function boardPoll() {
   if(!me||tab!=='board'||!boardState||boardState.owner!==me.id){boardPollStop();return;}
   const columns=$('board-columns');
   if(!columns||columns.hasAttribute('aria-busy')||columns.contains(document.activeElement)||document.querySelector('dialog[open],.board-menu.open')
-    ||projectRoute()||document.hidden||boardDragging){boardPollSchedule();return;}
+    ||document.hidden||boardDragging){boardPollSchedule();return;}
   const request=boardRequest,owner=me.id;let result;
   try{result=await api('/api/board/cards?'+boardParams(0));}
   catch(err){

@@ -16,7 +16,7 @@ test('a development shows its basis: the maintainer\'s comment, who wrote it and
     h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,object_number,created_at,updated_at) VALUES('dev-basis','101','development.issue','paused','development.issue #5','101:development.issue:5:update:d','{}',5,?,?)", now, now);
     recordBasis(h.store, 'dev-basis', { kind: 'maintainer_request', comment_id: '77', author: 'maria', permission: 'triage', url: 'https://github.example/fixture/project-101/issues/5#issuecomment-77', excerpt: 'Please implement the CRLF fix now; the last line of a CRLF file is lost.' });
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(h.admin + '/#/inbox/101');
+    await page.goto(h.admin + '/#/projects/101/inbox');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await page.locator('[data-task-id="dev-basis"]').getByRole('button', { name: '查看任务', exact: true }).click();

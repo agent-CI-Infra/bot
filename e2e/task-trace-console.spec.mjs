@@ -12,7 +12,7 @@ async function fixture() {
   return { h, password, close: async () => { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); } };
 }
 async function login(page, f) {
-  await page.goto(f.h.admin + '/#/inbox/101');
+  await page.goto(f.h.admin + '/#/projects/101/inbox');
   await page.getByLabel('用户名', { exact: true }).fill('administrator');
   await page.getByLabel('密码', { exact: true }).fill(f.password);
   await page.getByRole('button', { name: '登录', exact: true }).click();

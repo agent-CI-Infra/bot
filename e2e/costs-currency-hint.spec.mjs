@@ -1,3 +1,4 @@
+import { switchConsoleProject } from './console-scope-picker.mjs';
 import { test, expect } from '@playwright/test';
 import { managementFixture } from '../test/management-fixture.mjs';
 
@@ -56,7 +57,7 @@ test('the costs page says when the other currency also had requests under the sa
     await expect(panel.locator('[data-other-currency]')).not.toContainText('4 次');
     // A filter whose other currency had no request keeps a single currency on screen and says nothing.
     await page.getByLabel('费用币种').selectOption('USD');
-    await page.getByLabel('统计项目').selectOption('102');
+    await switchConsoleProject(page, '102');
     await page.getByRole('button', { name: '查看统计', exact: true }).click();
     await expect(panel).not.toContainText('正在加载统计');
     await expect(panel.locator('[data-other-currency]')).toHaveCount(0);

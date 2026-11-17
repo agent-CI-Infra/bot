@@ -123,7 +123,6 @@ async function applyGithubRepositories(next, listed) {
   clearGithubRepositoriesUnread();
   repositories = listed;
   if (typeof scopePickerRepositoriesOwner !== 'undefined') scopePickerRepositoriesOwner = me.id;
-  options($('repository-filter'), repositories, r => r.full_name);
   const editing = tab === 'identity' && identityFormBeingEdited();
   if (!editing && !projectRoute() && ['projects', 'identity'].includes(tab)) { await route(); return true; }
   if (typeof syncConsoleShell === 'function') syncConsoleShell(projectRoute());

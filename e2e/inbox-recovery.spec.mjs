@@ -101,10 +101,10 @@ test('access revoked during an open task clears the returned inbox instead of re
     // #481: below the phone breakpoint sign-out lives in the account menu; wide screens keep the inline button.
     if (await page.locator('#console-account').isVisible()) { await page.locator('#console-account').click(); await page.locator('#console-account-menu').getByRole('button', { name: '退出登录', exact: true }).click(); }
     else await page.getByRole('button', { name: '退出登录', exact: true }).click();
-    await expect(page.getByRole('button', { name: '登录', exact: true })).toBeVisible(); await page.goto(h.admin + '/#/inbox/101');
+    await expect(page.getByRole('button', { name: '登录', exact: true })).toBeVisible(); await page.goto(h.admin + '/#/projects/101/inbox');
     await page.getByLabel('用户名', { exact: true }).fill('inbox-member'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(page.locator('#workspace')).toBeVisible(); await page.goto(h.admin + '/#/inbox/101');
+    await expect(page.locator('#workspace')).toBeVisible(); await page.goto(h.admin + '/#/projects/101/inbox');
     const selected = page.locator('.console-inbox [data-task-id="inbox-0"]'); await selected.getByRole('button', { name: '查看任务', exact: true }).click();
     const member = h.store.get("SELECT id FROM users WHERE username='inbox-member'");
     await admin('/api/project-admin-assignments', 'PUT', { user_id: member.id, repository_ids: [] });

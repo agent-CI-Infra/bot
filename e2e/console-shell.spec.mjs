@@ -80,7 +80,7 @@ test('attention uses real tasks, does not count queued work, and handles failure
     const {admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
     for(const [id,status,text]of [['blocked','waiting_configuration','补齐模型配置'],['queued','queued','自动排队任务']])
       h.store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,phase) VALUES(?,?,?,?,?,?)',id,'101','review.issue',status,text,'model');
-    await page.setViewportSize({width:390,height:844});await login(page,h,password,'administrator','#/inbox/101');
+    await page.setViewportSize({width:390,height:844});await login(page,h,password,'administrator','#/projects/101/inbox');
     await expect(page.locator('.console-attention-row')).toHaveCount(1);await expect(page.locator('.console-attention-row')).toContainText('补齐模型配置');
     await page.getByRole('button',{name:'查看任务',exact:true}).click();await expect(page.locator('#task-view')).toBeVisible();
     await page.keyboard.press('Escape');await expect(page.locator('#task-view')).not.toBeVisible();
@@ -115,7 +115,7 @@ test('permissions, in-flight navigation, keyboard and history keep their boundar
     await page.setViewportSize({width:390,height:844});
     await expect(page.locator('#console-scope-projects [data-project-id="202"]')).toHaveCount(0);
     await page.goto(h.admin+'/#/settings/users');await expect(page.locator('#settings-panel')).toBeHidden();
-    await page.goto(h.admin+'/#/inbox/202');await expect(page.locator('.console-state')).toContainText('403');
+    await page.goto(h.admin+'/#/projects/202/inbox');await expect(page.locator('.console-state')).toContainText('403');
     let release;const gate=new Promise(resolve=>{release=resolve;});
     await page.route('**/api/tasks?attention=*',async route=>{await gate;await route.continue();});
     await page.goto(h.admin+'/#/inbox');await expect(page.getByRole('heading',{name:'正在读取待处理事项'})).toBeVisible();

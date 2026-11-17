@@ -1,9 +1,5 @@
 // One authenticated chat surface survives page navigation. Minimizing it never cancels a submitted command.
 let managementChat = null;
-// #623: a picker change can arrive while a panel is still connecting, before it has a client to forward the change to.
-// Remember it on that one chat, so the connection that finishes afterwards replays it instead of keeping the scope the
-// render began with.
-const pendingScopeChange = new WeakMap();
 // #481: the phone's bottom bar is the assistant's only entry point, so it reads the same state the floating
 // launcher shows on wide screens instead of keeping a second copy of it.
 function managementChatState() {
@@ -37,7 +33,7 @@ function syncManagementChat() {
   label.append(element('strong', '管理助手'), state); launcher.append(icon, label);
   document.body.append(box, launcher);
   const chat = managementChat = { user: me.id, window: box, launcher, panel, state, minimize, maximize, resize, client: null, loading: null, openVersion: 0, active: false, unread: false,
-    mode: 'floating', fullscreenFrom: 'floating', returnAddress: '#/projects', requestedProject: null, size: { width: 480, height: 740 } };
+    mode: 'floating', fullscreenFrom: 'floating', returnAddress: '#/projects', size: { width: 480, height: 740 } };
   try { const saved = JSON.parse(localStorage.getItem('management-window-size:' + chat.user)); if (saved && Number.isFinite(saved.width) && Number.isFinite(saved.height)) chat.size = saved; } catch { /* Use the default size when storage is unavailable. */ }
   const header = document.querySelector('body > header');
   const updateViewport = () => {
@@ -134,6 +130,7 @@ function toggleManagementFullscreen() {
 async function openManagementPage(projectId = null) {
   if (typeof confirmKnowledgeLeave === 'function' && !await confirmKnowledgeLeave()) return;
   syncManagementChat(); const chat = managementChat; if (!chat) return;
-  if (location.hash !== '#/management') { chat.returnAddress = location.hash || '#/projects'; history.pushState(null, '', '#/management'); }
-  chat.requestedProject = projectId; await route();
+  const address = consolePageAddress('management', projectId);
+  if (location.hash !== address) { chat.returnAddress = location.hash || '#/projects'; history.pushState(null, '', address); }
+  await route();
 }

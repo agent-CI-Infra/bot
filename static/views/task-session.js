@@ -308,6 +308,10 @@ async function refreshTask() {
     withdrawTaskError();
     taskRetryDelay = 0;
     currentTaskRepoId = detail.task.repository_id || null;
+    if (taskRoute()?.id === id) {
+      consoleTaskScope = { owner: me.id, task: id, project: currentTaskRepoId ? String(currentTaskRepoId) : null };
+      syncConsoleShell();
+    }
     logState.roleRuns = Array.isArray(detail.role_runs) ? detail.role_runs : Array.isArray(roleView?.role_runs) ? roleView.role_runs : [];
 
     renderTaskHeader(detail.task, detail);
