@@ -10,21 +10,28 @@ function consoleAddressScope(hash = location.hash) {
   if (project) return project.id;
   const task = taskRoute(hash);
   if (task) return consoleTaskScope?.owner === me?.id && consoleTaskScope.task === task.id ? consoleTaskScope.project : undefined;
+  if (/^#\/management\//.test(hash)) return undefined;
   if (/^#\/(projects|board|reviews|developments|inbox|costs|management|new-task)(?:\/|$)/.test(hash)) return null;
   return undefined;
 }
+function retainedConsoleScope() {
+  if (consoleScopeOwner !== me?.id) return null;
+  // Only the complete account-owned list may revoke a scope; startup and filtered lists are not authoritative.
+  return scopePickerRepositoriesOwner === me?.id && consoleRetainedScope && !repositories.some(row => String(row.id) === consoleRetainedScope) ? null : consoleRetainedScope;
+}
 function consoleScope() {
   const scope = consoleAddressScope();
-  return scope === undefined ? (consoleScopeOwner === me?.id ? consoleRetainedScope : null) : scope;
+  return scope === undefined ? retainedConsoleScope() : scope;
 }
 function syncConsoleScope() {
   if (consoleScopeOwner !== me?.id) { consoleScopeOwner = me?.id || null; consoleRetainedScope = null; }
+  if (!me) return;
   const scope = consoleAddressScope();
-  if (!me || scope === undefined) return;
-  consoleRetainedScope = scope;
-  // A placeholder list during startup cannot revoke a remembered scope. Unknown deep links are never persisted.
-  if (scopePickerRepositoriesOwner !== me.id || scope && !repositories.some(row => String(row.id) === scope)) return;
-  try { localStorage.setItem(consoleLastScopeKey(), scope || 'all'); } catch { /* Navigation works with storage disabled. */ }
+  if (scope !== undefined) consoleRetainedScope = scope;
+  if (scopePickerRepositoriesOwner !== me.id) return;
+  // A forbidden deep link still names its project, but neither neutral pages nor future visits inherit that grant.
+  consoleRetainedScope = retainedConsoleScope();
+  try { localStorage.setItem(consoleLastScopeKey(), consoleRetainedScope || 'all'); } catch { /* Navigation works with storage disabled. */ }
 }
 function restoreConsoleStart(rows) {
   if (location.hash && location.hash !== '#/') return;
