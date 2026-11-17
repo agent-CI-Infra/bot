@@ -47,6 +47,8 @@ function syncManagementChat() {
   chat.updateViewport = updateViewport;
   const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(updateViewport) : null;
   if (header) observer?.observe(header);
+  const scopeBar = document.getElementById('console-mobile-scope');
+  if (scopeBar) observer?.observe(scopeBar);
   window.addEventListener('resize', updateViewport);
   chat.cleanup = () => { observer?.disconnect(); window.removeEventListener('resize', updateViewport); };
   resize.addEventListener('pointerdown', event => {
@@ -81,6 +83,8 @@ function fitManagementWindow(chat) {
   // covered the bar's 退出登录 / account entry. The box is clamped between the header and the bottom bar instead.
   const margin = innerWidth <= 600 ? 10 : 24;
   const header = document.querySelector('body > header')?.getBoundingClientRect().height || 0;
+  const scopeBar = document.getElementById('console-mobile-scope');
+  const scopeBottom = scopeBar && getComputedStyle(scopeBar).display !== 'none' ? scopeBar.getBoundingClientRect().bottom : 0;
   const bar = document.querySelector('.console-mobile-nav');
   // The bar is measured as it is right now: shell.css hides it only on a short phone (≤767x560) while the floating panel
   // is up, and that is why the fit below runs again once the window is visible (#641 F5).
@@ -88,7 +92,8 @@ function fitManagementWindow(chat) {
   // A short viewport keeps the panel under the header and above the bar even when that leaves little height: at
   // 250% zoom (768×432 CSS) the panel used to reach 24px and sit 40px under the 64px top bar. The max-height media query
   // already compresses the composer there, so a short box stays usable, while a box over the top bar is not.
-  const room = innerHeight - header - barHeight - margin * 2;
+  // The mobile scope switcher remains reachable while the assistant floats over another page.
+  const room = innerHeight - Math.max(header, scopeBottom) - barHeight - margin * 2;
   const maxWidth = Math.max(1, innerWidth - margin * 2), maxHeight = Math.max(1, room);
   const width = Math.max(Math.min(360, maxWidth), Math.min(chat.size.width, maxWidth)), height = Math.max(Math.min(460, maxHeight), Math.min(chat.size.height, maxHeight));
   chat.window.style.width = Math.round(width) + 'px'; chat.window.style.height = Math.round(height) + 'px';

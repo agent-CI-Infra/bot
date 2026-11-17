@@ -146,7 +146,7 @@ function consoleGroups() {
   }
   // 管理助手 is the bar's 助手 destination, and each project section is one address the phone can reach from here.
   if (repo) groups.push({ title: '当前项目', items: projectSections
-    .filter(([key]) => key !== 'management')
+    .filter(([key]) => key !== 'management' && !projectConsolePages.includes(key))
     .map(([key, name]) => [`#/projects/${id}/${key}`, name, repo.full_name]) });
   // `wide` (#557) keys the full-row layout on the group itself: 当前项目 and 个人与平台 share the first row, and the
   // longer 管理 group (#550) spans the full row under them with its entries in three columns.

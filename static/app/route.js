@@ -119,7 +119,7 @@ async function route() {
   // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
   document.body.classList.toggle('board-mode', tab === 'board');
   const activeNavTab = ['preferences', 'identity', 'external', 'conversations'].includes(tab) ? 'preferences' : tab;
-  document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', !target && el.dataset.tab === activeNavTab ? 'page' : 'false'));
+  document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', (!target || projectConsoleRoute(target)) && el.dataset.tab === activeNavTab ? 'page' : 'false'));
   // A second address can arrive while the first one is still loading (a hash change during a list read): the newer
   // route owns the page, so this one stops before it can redraw it from the address it no longer represents.
   if (resolved !== tab) return;

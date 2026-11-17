@@ -70,9 +70,9 @@ test('management UI, direct API and model tools agree on real persisted query, c
     await expect(feed).toContainText('操作 暂停任务 · 已执行');await expect(page.getByRole('button',{name:'停止',exact:true})).toBeHidden();
     expect((await query(admin,'get_task',{project_id:'101',task_id:'blocked'})).value.task.status).toBe('paused');expect((await admin('/api/tasks/blocked')).value.task.status).toBe('paused');
     const writes=h.store.get('SELECT count(*) n FROM management_commands').n;
-    // #480: a page-local scope is not restored on reload; the assistant opens on the shell default (none here, so platform).
-    await page.reload();await expect(page).toHaveURL(/#\/management$/);
-    await expect(page.locator('.management-scope-name')).toHaveAttribute('data-scope', 'platform');
+    // The explicit project address reopens the same scope on reload.
+    await page.reload();await expect(page).toHaveURL(/#\/projects\/101\/management$/);
+    await expect(page.locator('.management-scope-name')).toHaveAttribute('data-scope', 'project:101');
     await switchConsoleProject(page, '101');
     // The receipt is persisted on the server, so the project's conversation still shows it once that scope is chosen.
     await expect(feed).toContainText('操作 暂停任务 · 已执行');expect(h.store.get('SELECT count(*) n FROM management_commands').n).toBe(writes);
@@ -174,7 +174,9 @@ test('project chat links select the project, and a delayed old read cannot repla
     await expect(page).toHaveURL(/#\/projects\/101\/management$/); await expect(scope).toHaveAttribute('data-scope', 'project:101'); await expect(message).toHaveValue('101 的草稿');
     await switchConsoleProject(page, '102'); await expect(message).toHaveValue('102 的草稿');
     await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click();
-    await expect(scope).toHaveAttribute('data-scope', 'project:101');
+    await expect(page).toHaveURL(/#\/projects\/102\/roles$/);
+    await expect(scope).toHaveAttribute('data-scope', 'project:102');
+    await switchConsoleProject(page, '101'); await expect(message).toHaveValue('101 的草稿');
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
     await page.locator('#management-launcher').click();
     await expect(scope).toHaveAttribute('data-scope', 'project:101'); await expect(message).toHaveValue('101 的草稿');
@@ -287,7 +289,7 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await page.keyboard.press('Escape'); const restored = await chat.boundingBox();
     expect(Math.abs(restored.width - resized.width)).toBeLessThan(2); expect(Math.abs(restored.height - resized.height)).toBeLessThan(2);
     await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click();
-    await expect(page).toHaveURL(/#\/management$/); await expect(page.locator('#tabs [aria-current=page]')).toHaveText('管理助手');
+    await expect(page).toHaveURL(/#\/projects\/101\/management$/); await expect(page.locator('#tabs [aria-current=page]')).toHaveText('管理助手');
     await expect(chat).toHaveAttribute('role', 'region'); await expect(grip).toBeHidden(); await expect(launcher).toBeHidden();
     const pageBox = await chat.boundingBox(), header = await page.locator('body > header').boundingBox();
     const rail = await page.locator('#console-sidebar').boundingBox();
@@ -297,16 +299,16 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await page.getByRole('button', { name: '全屏显示管理助手', exact: true }).click();
     await page.getByRole('button', { name: '退出管理助手全屏', exact: true }).click(); await expect(chat).toHaveAttribute('role', 'region');
     await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click();
-    await expect(page).toHaveURL(/#\/projects$/); expect(Math.abs((await chat.boundingBox()).width - resized.width)).toBeLessThan(2);
+    await expect(page).toHaveURL(/#\/projects\/101\/overview$/); expect(Math.abs((await chat.boundingBox()).width - resized.width)).toBeLessThan(2);
     await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click();
     await consoleNavigate(page, '身份与权限');
     await expect(chat).toBeHidden(); await launcher.click(); await expect(message).toHaveValue('保留这条尚未发送的草稿');
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
     expect(f.h.store.get("SELECT count(*) n FROM management_conversations WHERE scope='project:101'").n).toBe(1);
     await page.locator('#tabs').getByRole('button', { name: '管理助手', exact: true }).click(); await page.reload();
-    await expect(page).toHaveURL(/#\/management$/); await expect(chat).toHaveAttribute('role', 'region');
-    // #480: the reload reopens on the shell default (no project picked here), not on the page-local scope chosen before it.
-    await expect(page.locator('.management-scope-name')).toHaveAttribute('data-scope', 'platform');
+    await expect(page).toHaveURL(/#\/projects\/101\/management$/); await expect(chat).toHaveAttribute('role', 'region');
+    // Reload preserves the project address and its conversation.
+    await expect(page.locator('.management-scope-name')).toHaveAttribute('data-scope', 'project:101');
     await switchConsoleProject(page, '101');
     await message.fill('窄屏整页中的草稿'); await page.setViewportSize({ width: 390, height: 844 });
     await expect(send).toBeInViewport(); await expect(message).toBeInViewport();
@@ -317,10 +319,10 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await expect(send).toBeInViewport(); await message.focus(); await page.keyboard.press('Escape');
     await expect(chat).toHaveAttribute('role', 'region'); await expect(message).toHaveValue('窄屏整页中的草稿');
     let returnArrived; const returning = new Promise(resolve => { returnArrived = resolve; }), returnGate = new Promise(resolve => { releaseReturn = resolve; });
-    await page.route('**/api/installations?**', async route => { const response = await route.fetch(); returnArrived(); await returnGate; await route.fulfill({ response }); });
+    await page.route('**/api/repositories/101', async route => { const response = await route.fetch(); returnArrived(); await returnGate; await route.fulfill({ response }); });
     await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click(); await returning; await grip.focus();
-    const returned = page.waitForResponse(response => response.url().includes('/api/installations?'));
-    releaseReturn(); await (await returned).finished(); await expect(page.locator('#rows .row')).toHaveCount(3); await expect(grip).toBeFocused();
+    const returned = page.waitForResponse(response => response.url().endsWith('/api/repositories/101'));
+    releaseReturn(); await (await returned).finished(); await expect(page.locator('#project-page .project-head h1')).toHaveText('agent-test-zone/admin-fixture-101'); await expect(grip).toBeFocused();
     await page.unrouteAll({ behavior: 'wait' });
     for (let n = 0; n < 12; n++) { await page.keyboard.press('Shift+ArrowRight'); await page.keyboard.press('Shift+ArrowDown'); }
     const small = await chat.boundingBox(); expect(small.width).toBe(360); expect(small.height).toBe(460); expect(small.x).toBeGreaterThanOrEqual(0); expect(small.y).toBeGreaterThanOrEqual(0);
