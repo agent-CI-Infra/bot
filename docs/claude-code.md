@@ -47,8 +47,8 @@
 CLI 工作目录固定为容器内任务仓库检出 `<task_dir>/repo`；`HOME` 与 `CLAUDE_CONFIG_DIR` 指向角色实例专属状态目录 `/workspace/tasks/<state_workspace_id>/cli-state/<session_key>/`，随 `WorkspaceCleanup` 生命周期清理。
 
 - **开放容器原生工具**：启用 `--tools default` 与 `--dangerously-skip-permissions`（安全边界由容器只读根、非特权 UID 10001、capability 丢弃、网络隔离与短期凭据提供），角色可直接在 `<task_dir>/repo` 中使用原生终端（`Bash`）、文件读写与编辑（`Read`、`Write`、`Edit`）、搜索（`Glob`、`Grep`）及原生子 Agent（`Agent`/`Task`）。无外网权限（`!egress`）时通过 `--disallowedTools` 禁用 `WebFetch`、`WebSearch`，同时禁用 `EnterWorktree`/`ExitWorktree` 及无关的宿主计划任务工具。
-- **平台管理工具桥（`runner/mcp-bridge.mjs`）**：追加 stdio MCP 服务 `bot`，保留项目允许的其他原生 MCP 服务，并设置 `MCP_TOOL_TIMEOUT=3600000` 与 `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=3600000` 以容纳长耗时平台操作。桥接器经文件邮箱（`tool-requests/`、`tool-replies/`）调用控制面 `createTaskToolDispatcher`，提供任务记录读取（`read_task_record`）、角色记忆、技能读取（`read_skill`）、结构化 GitHub 读取/写入及结果提交工具（`finish` 等）；已被 CLI 原生工具替代的底层 `read_file`/`write_file`/`run_command`/`start_agent` 不再重复暴露在 MCP 中。
-- **原生资源**：通过 `--setting-sources project,local` 加载仓库指令、Skills 与项目设置，允许项目钩子；专用 HOME 不继承宿主私有设置与凭据。应只在项目被授权的执行环境内运行，不能把“禁用全部项目配置”当作保持原生行为。
+- **平台管理工具桥（`runner/mcp-bridge.mjs`）**：通过 `--strict-mcp-config` 仅加载授权的 stdio MCP 服务 `bot`，不加载候选配置的其他 MCP 服务，并设置 `MCP_TOOL_TIMEOUT=3600000` 与 `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=3600000` 以容纳长耗时平台操作。桥接器经文件邮箱（`tool-requests/`、`tool-replies/`）调用控制面 `createTaskToolDispatcher`，提供任务记录读取（`read_task_record`）、角色记忆、技能读取（`read_skill`）、结构化 GitHub 读取/写入及结果提交工具（`finish` 等）；已被 CLI 原生工具替代的底层 `read_file`/`write_file`/`run_command`/`start_agent` 不再重复暴露在 MCP 中。
+- **原生资源与防仓库投毒**：使用 `--setting-sources ''`、`disableAllHooks: true` 与 `--strict-mcp-config` 禁用项目/local 可执行配置、hooks 及额外 MCP 服务；专用 HOME 不继承宿主私有设置与凭据。通过原生 `--add-dir` 和 `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` 加载已授权仓库的 CLAUDE.md 指令文档，真实 CLI 回归验证文档进入模型请求而投毒 hook/MCP 不执行。第一版保留 `--disable-slash-commands`，不自动激活候选提供的 slash commands/Skills；技能文件仍可通过已授权的原生文件工具或平台 `read_skill` 按需读取，不扩大可用工具。候选原生技能自动激活的权限边界另行验证。
 - **公共轨迹**：记录原生工具活动、平台 MCP 调用回执、模型请求与公开消息摘要；不收集私有推理。
 
 CLI 报告或退出码不会自动成为验收通过；writer 的 `collect` 由控制面取得候选快照并运行既有 finish 校验器，observer 只检视已固定的 `role_candidate`，独立 QA 始终使用全新上下文与独立检出。

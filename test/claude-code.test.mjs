@@ -170,6 +170,7 @@ test('Claude Code protocol fixture: seven RoleRun operations, container stdio MC
   }
   assert.ok(launch.args.includes('--dangerously-skip-permissions'));
   assert.ok(launch.args.includes('--strict-mcp-config'));
+  assert.ok(launch.args.includes('--disable-slash-commands'));
   assert.equal(launch.args[launch.args.indexOf('--setting-sources')+1],'');
   assert.equal(JSON.parse(launch.args[launch.args.indexOf('--settings')+1]).disableAllHooks,true);
   assert.ok(launch.args.includes('--setting-sources'));

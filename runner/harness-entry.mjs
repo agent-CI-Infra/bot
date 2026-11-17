@@ -352,6 +352,7 @@ try {
       '--settings', JSON.stringify({ autoUpdatesChannel: 'stable', disableAllHooks:true }),
       '--mcp-config', JSON.stringify(mcpConfig),
       '--strict-mcp-config',
+      '--disable-slash-commands',
       '--dangerously-skip-permissions',
       '--no-chrome',
       '--model', String(rawConfig.model || 'claude-sonnet-4-5-20250929'),
