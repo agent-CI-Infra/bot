@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { identityFixture } from './identity-fixture.mjs';
 import { installed, repositoryRoutes, provider, call, person, say, assistantModel } from './onboarding-fixture.mjs';
-import { transport, connector, bindFixture, privateChat, until } from './channel-fixture.mjs';
+import { transport, connector, bindFixture, privateChat, until, post, envelope, finished, managementOutcome } from './channel-fixture.mjs';
 import { projectCeiling } from '../dist/work/ceiling.js';
 
 const plan = {
@@ -100,4 +100,84 @@ test('a start request reaches the super administrators, is withdrawn, rejected w
   assert.deepEqual((await admin('/api/management/onboarding-requests?state=all')).value.requests.map(r => [r.repository.id, r.state]), [['104', 'lapsed'], ['103', 'approved'], ['103', 'rejected'], ['103', 'withdrawn']]);
   assert.equal(h.store.get("SELECT error FROM onboarding_receipts r JOIN onboarding_applications a ON a.id=r.application_id WHERE a.repository_id='104' AND r.item='start'").error, 'start_request_lapsed');
   assert.ok(channels);
+});
+
+test('a super administrator decides a start request by answering its notice in the Feishu private chat; the requester cannot (#933)', async t => {
+  const wire = transport();
+  const f = await identityFixture(t, { github: true, channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
+  const { h, admin, state } = f;
+  installed(f, '103'); installed(f, '104'); installed(f, '105'); state.accessible = ['101', '103', '104', '105']; repositoryRoutes(f);
+  // The onboarding turn proposes the plan; in a private chat the management assistant rejects (拒绝, with the reason given) or
+  // approves the pending request the turn carries, and has nothing to decide without one.
+  const decision = context => {
+    const pending = context.pending_start_requests?.[0];
+    if (!pending) return [{ role: 'assistant', content: '没有待处理的启动申请。' }];
+    return /拒绝/.test(JSON.stringify(context.request))
+      ? [call(0, ['start_requests', { action: 'reject', request_id: pending.id, reason: '先确认谁来维护。' }]), { role: 'assistant', content: '已拒绝。' }]
+      : [call(0, ['start_requests', { action: 'approve', request_id: pending.id }]), { role: 'assistant', content: '已同意，项目已启动。' }];
+  };
+  const model = await provider(t, context => context.onboarding ? [call(0, ['propose_onboarding_plan', plan]), { role: 'assistant', content: '方案草稿已保存。' }] : decision(context));
+  await assistantModel(admin, model);
+  const requester = await person(f, 42, 'admin');
+  const feishu = await connector(admin), superAdmin = (await admin('/api/auth/me')).value.id;
+  bindFixture(h, feishu, superAdmin); bindFixture(h, feishu, requester.principal, 'ou_bob');
+  const chats = { h, id: feishu };
+  await privateChat(chats, 'ou_alice', superAdmin, 'oc_admin'); await privateChat(chats, 'ou_bob', requester.principal, 'oc_bob');
+  const told = (chat, text) => until(() => wire.sent.find(m => m.receive_id === chat && JSON.stringify(m.content).includes(text)));
+  const answer = async (actor, chat, text) => {
+    const row = await finished(h, (await post(h, feishu, envelope(text, { sender: { sender_id: { open_id: actor } }, message: { chat_id: chat } }))).value.operation_id);
+    assert.equal(row.state, 'completed', JSON.stringify(managementOutcome(h, row.id)));
+    return model.requests.filter(body => JSON.parse(body.messages[1].content).source_message === 'feishu:' + row.id);
+  };
+  const offered = body => body.tools.some(tool => tool.function.name === 'start_requests');
+  const decided = id => { const row = h.store.get('SELECT state,reason,decided_by FROM onboarding_requests WHERE id=?', id); return [row.state, row.reason, row.decided_by]; };
+  const confirm = async id => {
+    const opened = (await requester(`/api/management/onboarding/${id}`, 'POST', {})).value;
+    await say(requester, opened.session.conversation_id, '请出方案');
+    const view = (await requester(`/api/management/onboarding/${id}`)).value;
+    return (await requester(`/api/management/onboarding/${id}/confirm`, 'POST', { version: view.plan.version, changes_revision: view.plan.changes_revision, items: view.plan.changes.map(c => c.item) })).value;
+  };
+
+  // The super administrator's notice says it can be answered right there.
+  const first = (await confirm('103')).request;
+  await told('oc_admin', '直接回复「同意」即可启动');
+  // The requester is no super administrator: their assistant neither carries the request nor offers the decision.
+  const theirs = await answer('ou_bob', 'oc_bob', '同意');
+  assert.ok(theirs.length);
+  assert.ok(theirs.every(body => !offered(body) && !JSON.parse(body.messages[1].content).pending_start_requests));
+  assert.deepEqual(decided(first.id), ['pending', null, null]);
+
+  // 拒绝 with a reason rejects it, as on 待处理: the requester is told the reason.
+  const rejecting = await answer('ou_alice', 'oc_admin', '拒绝，先确认谁来维护。');
+  assert.ok(offered(rejecting[0]));
+  assert.deepEqual(JSON.parse(rejecting[0].messages[1].content).pending_start_requests.map(r => [r.id, r.repository.full_name]), [[first.id, 'fixture/project-103']]);
+  assert.deepEqual(decided(first.id), ['rejected', '先确认谁来维护。', superAdmin]);
+  await told('oc_bob', '先确认谁来维护。');
+
+  // Requested again, 同意 approves it: the super administrator starts the project, the rest is applied as the requester.
+  const second = (await requester('/api/management/onboarding/103/items/start/retry', 'POST', {})).value.request;
+  await answer('ou_alice', 'oc_admin', '同意');
+  assert.deepEqual(decided(second.id), ['approved', null, superAdmin]);
+  const view = (await requester('/api/management/onboarding/103')).value;
+  const executed = Object.fromEntries(view.application.receipts.map(r => [r.item, [r.state, r.executed_by]]));
+  assert.deepEqual([executed.start, executed.test_command, executed.labels], [['succeeded', superAdmin], ['succeeded', requester.principal], ['succeeded', requester.principal]]);
+  assert.equal(projectCeiling(h.store, '103'), 'develop');
+  await told('oc_bob', 'fixture/project-103 的启动申请已同意');
+
+  // Decided on 待处理 while the assistant was answering: the 同意 in the chat ends with what happened instead.
+  const third = (await confirm('104')).request, before = model.requests.length;
+  let release; model.state.gate = new Promise(resolve => { release = resolve; });
+  const operation = (await post(h, feishu, envelope('同意', { message: { chat_id: 'oc_admin' } }))).value.operation_id;
+  await until(() => model.requests.length > before);
+  assert.equal((await admin(`/api/management/onboarding-requests/${third.id}/reject`, 'POST', { reason: '已在控制台处理。' })).status, 201);
+  model.state.gate = null; release();
+  await finished(h, operation);
+  assert.equal(managementOutcome(h, operation).error, 'onboarding_request_closed');
+  await told('oc_admin', '这份启动申请已经有人处理过');
+  assert.deepEqual(decided(third.id), ['rejected', '已在控制台处理。', superAdmin]);
+
+  // Through an organization's app a super administrator is confined to it and decides nothing (#424): the notice sends them to 待处理.
+  h.store.run("UPDATE channel_connectors SET owner_tenant='github.com:10' WHERE id=?", feishu);
+  await confirm('105');
+  await told('oc_admin', '在控制台「待处理」的启动申请里同意或拒绝');
 });
