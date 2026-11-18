@@ -41,7 +41,8 @@ COPY skills ./skills
 COPY runner/role-worker.mjs ./runner/role-worker.mjs
 COPY runner/command-policy.mjs runner/command-output.mjs runner/browser-policy.mjs runner/result-owner.mjs runner/filesystem-id.mjs ./runner/
 # The control plane compacts control.sqlite at start with the manager's routine (#671).
-COPY manager/compaction.mjs manager/storage-footprint.mjs ./manager/compaction.mjs
+COPY manager/compaction.mjs manager/storage-footprint.mjs ./manager/
+RUN node --input-type=module -e "await import('./dist/app/storage.js'); await import('./manager/compaction.mjs');"
 COPY scripts/external-token.mjs ./scripts/external-token.mjs
 COPY docker/bot-chromium.sh /usr/local/bin/bot-chromium
 RUN chmod 755 /usr/local/bin/bot-chromium
