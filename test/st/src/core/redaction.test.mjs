@@ -34,6 +34,22 @@ test('real credential shapes and registered values remain redacted', () => {
   const redactor = new Redactor();redactor.add('registered-private-value');
   assert.equal(publicText('value: registered-private-value',redactor),'value: [REDACTED]');
 });
+test('public diagnostics redact encoded credentials and preserve unrelated Base64 and hashes', () => {
+  const redactor = new Redactor(), secret = 'synthetic\u{1F512}\u{1FFFF}fixture';
+  redactor.add(secret);
+  for (const encoding of ['base64', 'base64url']) {
+    for (const value of [secret, JSON.stringify({ debug: { message: 'upstream returned ' + secret } })]) {
+      const encoded = Buffer.from(value).toString(encoding);
+      const line = JSON.stringify({ observation: JSON.stringify({ value: encoded }) });
+      assert.equal(publicText(line, redactor), line.replace(encoded, '[REDACTED]'));
+    }
+    const benign = Buffer.from('public diagnostic information from the build').toString(encoding);
+    assert.equal(publicText(benign, redactor), benign);
+  }
+  const hash = '0123456789abcdef'.repeat(4);
+  assert.equal(publicText('commit ' + hash, redactor), 'commit ' + hash);
+});
+
 test('management input and commands accept and retain normal text without trace-only transformations',async t=>{
   const f=await managementFixture(t);
   f.modelState.respond=(_body,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:'已读取'}}]}));};
