@@ -12,7 +12,7 @@ test('ordinary authentication prose, code and formatted JSON retain their exact 
     assert.equal(hasCredentials(text), false, text);
     assert.equal(redactCredentials(text), text);
     assert.equal(traceClean(text), text);
-    assert.equal(publicText(text, new Redactor(), false), text);
+    assert.equal(publicText(text, new Redactor()), text);
   }
   const value = { analysis: 'ordinary explanation', token: 'public word', max_tokens: 8192 };
   assert.equal(hasCredentials(value), false);assert.deepEqual(traceClean(value), value);
@@ -22,7 +22,7 @@ test('ordinary authentication prose, code and formatted JSON retain their exact 
 test('real credential shapes and registered values remain redacted', () => {
   for (const secret of ['Authorization: Bearer '+'a'.repeat(40), 'Bearer AbCd0123456789AbCd0123456789', 'Basic dXNlcjpwYXNzd29yZA==', 'ghp_'+'a'.repeat(30), 'sk-'+'a'.repeat(30), 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.fixtureSignature', 'https://user:pass@host/path', '-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----', 'password=hunter2', 'token="AbCd0123456789AbCd0123456789"']) {
     assert.equal(hasCredentials(secret), true, secret);assert.ok(redactCredentials(secret).includes('[REDACTED]'));
-    assert.notEqual(publicText(secret, new Redactor(), false), secret);
+    assert.notEqual(publicText(secret, new Redactor()), secret);
   }
   assert.equal(hasCredentials({ analysis: { password: 'fixture-password' } }), true);
   for(const value of [{password:'123456'},{password:'some(password)'},'password="some(password)"'])assert.equal(hasCredentials(value),true);
@@ -32,7 +32,7 @@ test('real credential shapes and registered values remain redacted', () => {
   assert.equal(hasCredentials(escaped),true);assert.equal(JSON.parse(redactCredentials(escaped)).token,'[REDACTED]');
   assert.deepEqual(traceClean({token:'AbCd0123456789AbCd0123456789'}),{token:'[REDACTED]'});
   const redactor = new Redactor();redactor.add('registered-private-value');
-  assert.equal(publicText('value: registered-private-value',redactor,false),'value: [REDACTED]');
+  assert.equal(publicText('value: registered-private-value',redactor),'value: [REDACTED]');
 });
 test('management input and commands accept and retain normal text without trace-only transformations',async t=>{
   const f=await managementFixture(t);
@@ -60,7 +60,7 @@ test('camelCase credential fields, header schemes and numeric passwords retain p
     for(const input of [{[name]:value},JSON.stringify({[name]:value}),`https://host/cb?${name}=${value}`]) {
       assert.equal(hasCredentials(input),true,JSON.stringify(input));
       assert.ok(!JSON.stringify(redactCredentials(input)).includes(value));
-      assert.ok(!publicText(typeof input==='string'?input:JSON.stringify(input),new Redactor(),false).includes(value));
+      assert.ok(!publicText(typeof input==='string'?input:JSON.stringify(input),new Redactor()).includes(value));
     }
   }
   for(const header of ['Basic YTpi','Bearer abcdef','Token '+value,'Digest username="u", response="fixture"']) {
@@ -81,7 +81,7 @@ test('secretKey and credentialValue names protect credentials without rejecting 
       assert.ok(!JSON.stringify(redactCredentials(input)).includes(value));
     }
     const code=`const ${name} = readKey();`;
-    assert.equal(hasCredentials(code),false);assert.equal(publicText(code,new Redactor(),false),code);
+    assert.equal(hasCredentials(code),false);assert.equal(publicText(code,new Redactor()),code);
   }
   for(const input of [{credentialValue:'ordinary public value'},{credentialValue:8192},{max_tokens:8192},'This describes a secret key and a credential value.']) {
     assert.equal(hasCredentials(input),false);assert.deepEqual(redactCredentials(input),input);
@@ -105,5 +105,20 @@ test('GitHub comments retain ordinary prose, code and JSON through the write bou
   for(const [index,body] of ordinary.slice(0,5).entries()) {
     const result=await githubWrite(context,{method:'POST',path:'/issues/1/comments',body:{body},key:'ordinary-'+index});
     assert.equal(result.status,201,JSON.stringify(result));assert.ok(posted[index].body.startsWith(body+'\n\n<!-- dept-bot-write:'));
+  }
+});
+
+test('inline headers, signed download parameters and multiline key blocks leave adjacent diagnostics intact', () => {
+  const safeURL = 'https://github.com/openJiuwen-ai/sciencediscovery/actions/runs/44199315530';
+  for (const [input, expected] of [
+    ['Authorization: Bearer AbC1 returned HTTP 401', 'Authorization: [REDACTED] returned HTTP 401'],
+    ['Cookie: session=fixture; csrf=second caused HTTP 403', 'Cookie: [REDACTED] caused HTTP 403'],
+    ['-----BEGIN PGP PRIVATE KEY BLOCK-----\nfixture\n\nmore\n-----END PGP PRIVATE KEY BLOCK-----\nHTTP 403', '[REDACTED]\nHTTP 403'],
+    ['[log](https://logs.invalid/a?sv=1&%73ig=short%2Bvalue&page=2)', '[log](https://logs.invalid/a?sv=1&%73ig=[REDACTED]&page=2)'],
+    ['[log](https://logs.invalid/a?X-Goog-Signature=google-signed)', '[log](https://logs.invalid/a?X-Goog-Signature=[REDACTED])']
+  ]) {
+    const value = input + '\n\n' + safeURL, cleaned = expected + '\n\n' + safeURL;
+    assert.equal(redactCredentials(value), cleaned);
+    assert.equal(redactCredentials(cleaned), cleaned);
   }
 });

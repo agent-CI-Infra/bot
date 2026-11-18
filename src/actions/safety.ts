@@ -1,3 +1,4 @@
+import { marked } from 'marked';
 import { redactCredentials } from '../core/redaction.js';
 import type { Store } from '../storage/database.js';
 import { Redactor } from '../agent/common.js';
@@ -16,9 +17,14 @@ export function actionsConfigurationError(github: { installationPermissions: Rec
   return null;
 }
 
-export function actionsRedactor(store: Store) {
-  const redactor = new Redactor();
-  const add = (value: unknown) => { if (typeof value === 'string' && value) redactor.values.add(value); };
+export function actionsRedactor(store: Store, redactor = new Redactor()) {
+  const add = (value: unknown) => {
+    if (typeof value !== 'string' || !value) return;
+    redactor.values.add(value);
+    // A URL may encode the whole value or each repository path segment.
+    redactor.values.add(encodeURIComponent(value));
+    redactor.values.add(value.split('/').map(encodeURIComponent).join('/'));
+  };
   for (const account of store.all('SELECT id,credentials FROM accounts')) {
     const credentials = store.secrets.open(account.credentials, `account:${account.id}`);
     for (const name of ['token', 'private_key', 'webhook_secret']) add(credentials[name]);
@@ -28,12 +34,12 @@ export function actionsRedactor(store: Store) {
   return redactor;
 }
 
-export function publicText(value: string, redactor: Redactor, checkOpaque = true): string {
-  let text = redactCredentials(redactor.text(value));
-  text = text.replace(/-----BEGIN [^-]*CERTIFICATE-----[\s\S]*?(?:-----END [^-]+-----|$)/g, '[REDACTED]');
-  // Encoded/high-entropy material cannot reliably be made public by replacing known shapes.
-  if (checkOpaque && /\b[A-Za-z0-9+/_=-]{48,}\b/.test(text) || /\x00|-----BEGIN/.test(text)) return '';
-  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
+export function publicText(value: string, redactor: Redactor): string {
+  if (value.includes('\0')) return '';
+  const text = redactor.text(value).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
+  const cleaned = redactCredentials(redactor.text(text))
+    .replace(/-----BEGIN ([A-Z0-9][A-Z0-9 -]*)-----[\s\S]*?(?:-----END \1-----|$)/g, '[REDACTED]');
+  return cleaned.includes('-----BEGIN') ? '' : cleaned;
 }
 
 // Revisions of a bot PR retain the original Issue's feature and approval boundary.
@@ -62,7 +68,11 @@ export function actionsDevelopmentAllowed(store: Store, id: string, number: numb
   if (!config?.configured_at || actionsConfigurationErrors.includes(config.error)) return false;
   if (!issue) return true;
   const prose = String(issue.body || '').split('<!-- dept-bot-actions-log-start -->')[0]!;
-  if (!['Current behavior', 'Expected behavior', 'Requested code change'].every(title => new RegExp(`## ${title}\\n+\\S`).test(prose))) return false;
+  // Only sections in the author's prose count. Examples inside fenced code and blockquotes are evidence.
+  const blocks = marked.lexer(prose).filter(block => block.type !== 'space');
+  const sections = new Set(blocks.flatMap((block, index) => block.type === 'heading' && block.depth === 2
+    && ['paragraph', 'list'].includes(blocks[index + 1]?.type ?? '') ? [block.text] : []));
+  if (!['Current behavior', 'Expected behavior', 'Requested code change'].every(title => sections.has(title))) return false;
   // The review that checked repository code confirms the product defect; the quote it once had to return went with #815.
   return !result || result.product_defect === true;
 }

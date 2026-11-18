@@ -155,7 +155,7 @@ function sanitize(entry: Route, body: unknown, redactor: Redactor, marker: strin
     : Array.isArray(value) ? value.map(plain) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, plain(v)])) : value;
   const human = (value: unknown, title = false) => {
     if (typeof value !== 'string') return plain(value);
-    const cleaned = publicText(value, redactor, false);
+    const cleaned = publicText(value, redactor);
     if (value.trim() && !cleaned.trim()) throw new Unsendable('github_write_text_unsafe', 'The text contains key or certificate material that cannot be published; remove it and write again.');
     const text = escapeMentions(cleaned);
     return title ? text.replace(/[\r\n]+/g, ' ').trim() : text;

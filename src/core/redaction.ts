@@ -16,15 +16,23 @@ function secretValue(name: string, value: string, code = false): boolean {
 }
 function redactText(text: string, hit: () => void): string {
   const marker = () => { hit(); return '[REDACTED]'; };
-  return text.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g, marker)
+  return text.replace(/-----BEGIN ([A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?)-----[\s\S]*?(?:-----END \1-----|$)/g, marker)
     .replace(/\b(?:github_pat_|gh[pousr]_)[\w]+|\b(?:sk|sk-proj)-[\w-]+|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\b(?:glpat-[\w-]+|xox[baprs]-[\w-]+|AIza[\w-]{30,})|\brrt_[\w-]{12}\.[\w-]{20,}|\beyJ[\w-]+\.[\w-]+\.[\w-]+\b/g, marker)
-    .replace(/\b(authorization|cookie|set-cookie)["']?\s*[:=]\s*([^\r\n]+)/gi, (all, name: string, value: string) => secretValue(name, value.replace(/^["']|["',]$/g, '')) ? marker() : all)
+    // Match the value inside prose or a backtick span. Digest authorization may contain several quoted parameters.
+    .replace(/(\bauthorization["']?[ \t]*[:=][ \t]*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|(?:Bearer|Basic|Token)[ \t]+[^\s`"',;]+|\[REDACTED\]|[^\r\n`]+)/gi,
+      (all, prefix: string) => all.slice(prefix.length) === '[REDACTED]' ? all : prefix + marker())
+    // Cookie headers can carry several name=value pairs. Keep the sentence following the last pair.
+    .replace(/(\b(?:cookie|set-cookie)["']?[ \t]*[:=][ \t]*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[\w!#$%&'*+.^_|~-]+=(?:"[^"\r\n]*"|[^;\s`'"]*)(?:;[ \t]*[\w!#$%&'*+.^_|~-]+=(?:"[^"\r\n]*"|[^;\s`'"]*))*|\[REDACTED\]|[^\r\n`]+)/gi,
+      (all, prefix: string) => all.slice(prefix.length) === '[REDACTED]' ? all : prefix + marker())
     .replace(/\b(?:Bearer|Basic)\s+([A-Za-z0-9._~+/=-]+)/gi, (all, value: string) => credentialLike(value) ? marker() : all)
-    .replace(/([?&])([\w%.-]{1,128})=([^&#\s"'<>{}]*)/g, (all, separator: string, name: string, value: string) => {
-      let key=name,decoded=value;try{key=decodeURIComponent(name);decoded=decodeURIComponent(value);}catch{}
-      return secretValue(key,decoded) ? separator+name+'='+marker() : all;
+    .replace(/([?&](?:amp;)?)([\w%.-]{1,128})=(\[REDACTED\]|[^&#\s"'<>{}`)\]]*)/g, (all, separator: string, name: string, value: string) => {
+      let key = name;
+      try { key = decodeURIComponent(name); } catch { /* Keep the literal parameter name. */ }
+      const sensitive = credentialName.test(key.replace(/([a-z0-9])([A-Z])/g, '$1_$2'))
+        || /^(?:sig|signature|jwt|x-(?:amz|goog)-(?:signature|credential|security-token)|key-pair-id|googleaccessid|awsaccesskeyid)$/i.test(key);
+      return sensitive && value && value !== '[REDACTED]' ? separator + name + '=' + marker() : all;
     })
-    .replace(/((\b(?:api[ _-]?key|access[ _-]?key|[\w-]{1,128})|密码|凭据|私钥)["']?\s*[:=]\s*)(?:(["'])(.*?)\3|([^\s,;"'}]+))/gi,
+    .replace(/((\b(?:api[ _-]?key|access[ _-]?key|[\w-]{1,128})|密码|凭据|私钥)["']?\s*[:=]\s*)(?:(["'])(.*?)\3|(\[REDACTED\]|[^\s,;"'}]+))/gi,
       (all, prefix: string, name: string, _quote: string, quoted: string | undefined, unquoted: string | undefined) => secretValue(name, quoted ?? unquoted ?? '', unquoted !== undefined) ? prefix + marker() : all)
     .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, (_all, scheme: string) => scheme + marker() + '@');
 }

@@ -15,8 +15,6 @@ export interface FailureReport {
   evidence: Citation[];
 }
 export interface CheckedReport extends FailureReport {
-  references: { label: string; url: string; quote?: string }[];
-  problems: string[];
   withheld_reason?: string;
 }
 export const causeIdentity = (value: string) => value.toLowerCase().replace(/\s+/g, ' ').trim();
@@ -38,35 +36,30 @@ export function validReport(value: any, jobIds: Set<number>): value is FailureRe
 /** Logs are matched verbatim; source is read at the failed SHA. An artifact link verifies origin, never its contents. */
 export async function checkReports(github: GitHub, run: any, reports: FailureReport[], outputs: { job: any; output: { lines: string[] } }[]): Promise<CheckedReport[]> {
   const jobs = new Map(outputs.map(item => [item.job.id, item.output.lines]));
-  const base = `https://github.com/${github.fullName}`, runUrl = `${base}/actions/runs/${run.id}`;
   const sources = new Map<string, string[]>(), artifacts = new Map<number, any>();
   const checked: CheckedReport[] = [];
   for (const report of reports) {
     if (!validReport(report, new Set(jobs.keys()))) continue;
-    const references: CheckedReport['references'] = [], problems: string[] = [];
+    if (report.kind === 'unknown') { checked.push(report); continue; }
+    let verified = false;
     for (const cite of report.evidence) {
       if (cite.type === 'log') {
-        const quote = verifiedEvidence(cite.lines, jobs.get(cite.job_id) || []);
-        if (quote.length !== cite.lines.length) problems.push(`Some cited lines were not found in job ${cite.job_id}'s failed steps.`);
-        if (quote.length) references.push({ label: `Verified failed-step output of job ${cite.job_id}`, url: `${runUrl}/job/${cite.job_id}`, quote: quote.join('\n') });
+        verified = verifiedEvidence(cite.lines, jobs.get(cite.job_id) || []).length > 0;
       } else if (cite.type === 'source') {
         if (!sources.has(cite.path)) {
           const file = await github.request('GET', github.path('/contents/' + cite.path.split('/').map(encodeURIComponent).join('/') + '?ref=' + run.head_sha), undefined, true);
           sources.set(cite.path, file?.type !== 'dir' && file?.encoding === 'base64' && typeof file.content === 'string' ? Buffer.from(file.content, 'base64').toString('utf8').split('\n') : []);
         }
-        const content = sources.get(cite.path)!, quote = verifiedEvidence(cite.lines, content);
-        if (quote.length !== cite.lines.length) problems.push(`Some cited source lines were not found at the failed commit: ${cite.path}.`);
-        if (quote.length) references.push({ label: `Verified source at failed commit: ${cite.path}`, url: `${base}/blob/${run.head_sha}/${cite.path.split('/').map(encodeURIComponent).join('/')}#L${content.findIndex(line => line.trim() === quote[0]) + 1}`, quote: quote.join('\n') });
+        verified = verifiedEvidence(cite.lines, sources.get(cite.path)!).length > 0;
       } else {
         if (!artifacts.has(cite.artifact_id)) artifacts.set(cite.artifact_id, await github.request('GET', github.path('/actions/artifacts/' + cite.artifact_id), undefined, true));
         const artifact = artifacts.get(cite.artifact_id);
-        if (artifact?.id === cite.artifact_id && artifact.workflow_run?.id === run.id && artifact.workflow_run?.head_sha === run.head_sha)
-          references.push({ label: `Artifact ${cite.artifact_id} belongs to this run and commit; its contents and attempt association are analysis observations, not independently verified`, url: `${runUrl}/artifacts/${cite.artifact_id}` });
-        else problems.push(`Artifact ${cite.artifact_id} could not be bound to this run and commit.`);
+        verified = artifact?.id === cite.artifact_id && artifact.workflow_run?.id === run.id && artifact.workflow_run?.head_sha === run.head_sha;
       }
+      if (verified) break; // One verified source satisfies the publication gate.
     }
     // Invalid citations never silently turn a code accusation into an automatically filed unknown report.
-    checked.push({ ...report, references, problems, ...(report.kind !== 'unknown' && !references.length
+    checked.push({ ...report, ...(!verified
       ? { withheld_reason: 'No cited reference could be verified; this report was withheld rather than automatically filed as unknown.' } : {}) });
   }
   return redactCredentials(github.redactor.clean(checked));
