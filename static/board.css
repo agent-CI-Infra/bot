@@ -136,7 +136,9 @@ body.board-mode .list-panel>.toolbar{display:none}
   .board-arrangement>button{grid-column:4/5;grid-row:3;justify-self:start}
   .board-status{grid-row:3;grid-column:5/7;min-width:0;justify-self:end;max-width:100%;overflow:hidden;font-size:var(--font-size-1);white-space:nowrap;text-overflow:ellipsis;flex-wrap:nowrap}
   .board-spacer{display:none}
-  .board-menu-panel{right:0}
+  /* `⋯` sits in the toolbar's first column here, so the right-anchored 210px panel opened 168px left of the viewport and
+     none of its items could be tapped. Anchor it to the menu's left edge: it opens inward, over the toolbar. */
+  .board-menu-panel{left:0;right:auto}
   .board-mobile-group{display:flex;flex-direction:row;align-items:center;gap:8px;font-size:var(--font-size-1)}
   .board-mobile-group select{flex:1;min-width:0;height:34px;padding:4px 8px}
   .board-zero-counts{display:none}

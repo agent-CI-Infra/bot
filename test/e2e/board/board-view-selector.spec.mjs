@@ -147,7 +147,7 @@ test('320/390 未保存态：视图、保存、新建任务与更多操作互不
 // #482: the work type is the view selector's neighbour in one toolbar row — compact selects reading 视图 → 工作类型 —
 // and the phone keeps both usable on its first screen without opening `⋯` or 筛选. The repository condition stays a
 // chip only: a work page's address is its single scope entry, so the board must never render a second 仓库 selector
-// (e2e/console-project-scope.spec.mjs asserts that contract).
+// (test/e2e/console/console-project-scope.spec.mjs asserts that contract).
 test('工作类型紧挨视图：1440 一排按视图→工作类型，390 首屏命中可点，且看板没有第二个仓库选择器', async ({ page }) => {
   const { h, admin, password } = await fixture();
   try {
@@ -210,7 +210,7 @@ test('工作类型紧挨视图：1440 一排按视图→工作类型，390 首�
 
 // #482 review, blocking: at 390 the toolbar must keep origin/main's three-line height. A fourth line took the board's
 // scroll area down to 4px, so the first card's title sat under the fixed bottom bar where no scroll could reach it and a
-// click could never land — CI showed it as e2e/metrics.spec.mjs:7 timing out at 30s against a 4.9s green baseline. The
+// click could never land — CI showed it as test/e2e/management/metrics.spec.mjs:7 timing out at 30s against a 4.9s green baseline. The
 // live status now closes the actions line instead of opening one of its own.
 test('390 工具栏最多三行：状态非空时点第一张卡打开任务详情，固定底栏不挡', async ({ page }) => {
   const { h, admin, password } = await fixture();
@@ -269,5 +269,51 @@ test('390 工具栏最多三行：状态非空时点第一张卡打开任务详�
     });
     expect(reached.inside).toBe(true);
     if (reached.navTop !== null) expect(reached.bottom).toBeLessThanOrEqual(reached.navTop);
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});
+
+// #482 review, blocking: moving `⋯` to the toolbar's first grid column on a narrow screen left `.board-menu-panel`
+// anchored to its right edge, so the 210px panel opened to the left of the viewport (left=-168 at 390) and none of its
+// items could be tapped. The panel must stay inside the viewport and every item must be hit-testable at every width,
+// and it must still close from the same toggle.
+test('打开「更多视图操作」后菜单面板与每一项都在视口内且可点（320/390/1440）', async ({ page }) => {
+  const { h, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 }); await login(page, h.admin, password);
+    for (const [width, height] of [[390, 844], [320, 800], [1440, 900]]) {
+      await page.setViewportSize({ width, height });
+      const toggle = page.locator('#board-view-menu .board-menu-toggle');
+      const panel = page.locator('#board-view-menu .board-menu-panel');
+      await expect(panel).toBeHidden();
+      await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      await toggle.click();
+      await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+      await expect(panel).toBeVisible();
+      const m = await page.evaluate(() => {
+        const round = r => ({ left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom) });
+        const box = node => round(node.getBoundingClientRect());
+        const panel = document.querySelector('#board-view-menu .board-menu-panel');
+        const items = [...panel.querySelectorAll('.board-menu-item')].map(node => {
+          const r = node.getBoundingClientRect();
+          const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          return { text: (node.textContent || '').trim(), box: round(r),
+            hitSelf: !!(hit && (hit === node || node.contains(hit))) };
+        });
+        return { panel: box(panel), items, innerWidth, innerHeight };
+      });
+      expect(m.items.length).toBeGreaterThanOrEqual(2);
+      // The whole panel sits inside the viewport, level with the toolbar rather than off its left edge.
+      expect(m.panel.left).toBeGreaterThanOrEqual(0);
+      expect(m.panel.right).toBeLessThanOrEqual(m.innerWidth);
+      for (const item of m.items) {
+        expect({ text: item.text, left: item.box.left >= 0 }).toEqual({ text: item.text, left: true });
+        expect({ text: item.text, right: item.box.right <= m.innerWidth }).toEqual({ text: item.text, right: true });
+        expect({ text: item.text, hit: item.hitSelf }).toEqual({ text: item.text, hit: true });
+      }
+      // The same toggle closes it again, at every width.
+      await toggle.click();
+      await expect(panel).toBeHidden();
+      await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    }
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });

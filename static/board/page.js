@@ -70,7 +70,7 @@ function boardShell() {
   // #482: the work type is a compact select in the toolbar beside the view selector, not a row inside the filter fold. It
   // writes the same filter it always did (category), so a saved view still restores it and the chip still shows it.
   // The repository condition stays a chip-only filter: the address is the one scope entry on a work page, so the board
-  // never renders a second repository selector (e2e/console-project-scope.spec.mjs).
+  // never renders a second repository selector (test/e2e/console/console-project-scope.spec.mjs).
   const categories=boardSelect('工作类型',boardCategories(),category==='all'?'':category);
   categories.label.className='board-field board-worktype-choice';categories.select.id='board-worktype-select';
   categories.select.addEventListener('change',()=>apply('category',categories.select.value,true));
