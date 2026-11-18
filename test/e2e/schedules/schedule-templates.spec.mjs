@@ -93,6 +93,38 @@ test('#572 #1027 可用模板创建项目定时任务和失败时通知，没有
 });
 
 
+test('#1072 定时触发 workflow 模板填好示例指令：先查有没有正在跑的运行，保存为项目定时任务', async ({ page }) => {
+  test.setTimeout(90000);
+  const f = await environment(), shots = '.tmp/schedule-templates-1072';
+  mkdirSync(shots, { recursive: true });
+  try {
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await login(page, f);
+    await page.getByRole('button', { name: '使用定时触发 workflow 模板', exact: true }).click();
+    await expect(page.getByLabel('计划名称', { exact: true })).toHaveValue('定时触发 Nightly');
+    const instruction = page.getByRole('textbox', { name: '要做什么', exact: true });
+    await expect(instruction).toHaveValue(/^在 main 上触发 \.github\/workflows\/nightly\.yml（github_write POST \/actions\/workflows\/nightly\.yml\/dispatches，ref 为 main）。/);
+    await expect(instruction).toHaveValue(/有没有排队或正在运行的运行，有就不再触发/);
+    await expect(page.getByText(/已套用定时触发 workflow 模板/)).toBeVisible();
+    // 00:00 is not one of the common times, so the advanced time rules open with the Cron.
+    await expect(page.getByLabel('Cron 表达式', { exact: true })).toHaveValue('0 0 * * *');
+    await page.screenshot({ path: `${shots}/dispatch-template-1440.png`, fullPage: true });
+    await page.getByRole('button', { name: '保存计划', exact: true }).click();
+    await expect.poll(() => f.h.store.get('SELECT count(*) n FROM schedules').n).toBe(1);
+    const saved = f.h.store.get('SELECT spec FROM schedules'), spec = typeof saved.spec === 'string' ? JSON.parse(saved.spec) : saved.spec;
+    expect([spec.name, spec.workflow, spec.cron]).toEqual(['定时触发 Nightly', 'manager.check', '0 0 * * *']);
+    expect(spec.parameters.instruction).toContain('POST /actions/workflows/nightly.yml/dispatches');
+    expect(spec.parameters.file_issues).toBeUndefined();
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('button', { name: '使用定时触发 workflow 模板', exact: true }).click();
+    await expect(page.getByLabel('计划名称', { exact: true })).toHaveValue('定时触发 Nightly');
+    await page.evaluate(() => { document.activeElement?.blur?.(); window.scrollTo(0, 0); });
+    await expect(page.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
+    await page.screenshot({ path: `${shots}/dispatch-template-390.png`, fullPage: true });
+  } finally { await f.close(); }
+});
+
 test('#905 可用模板创建项目定时任务，并在桌面与窄屏上看到要做什么和权限三态', async ({ page }) => {
   test.setTimeout(90000);
   const f = await environment();

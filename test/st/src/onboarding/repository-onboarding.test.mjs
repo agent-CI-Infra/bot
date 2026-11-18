@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import { identityFixture } from '../../../fixtures/identity-fixture.mjs';
 import { settled } from '../../../fixtures/management-fixture.mjs';
 import { installed, readToken, repositoryRoutes, provider as scripted, call, person, say } from '../../../fixtures/onboarding-fixture.mjs';
-import { withDevelopingLabel } from '../../../../dist/management/onboarding.js';
+import { withDevelopingLabel, planProblem } from '../../../../dist/management/onboarding.js';
+import { onboardingItems } from '../../../../dist/management/onboarding-apply.js';
 
 // The assistant reads the README and the labels and asks; a reply about the level gets a plan, first with a reserved label.
 const provider = t => scripted(t, context => {
@@ -161,4 +162,13 @@ test('a plan that lets the bot develop also creates the developing label, once, 
   const comment = { ...develop, capability_ceiling: { value: 'comment', reason: 'r' } };
   assert.equal(withDevelopingLabel(comment, 'bot-developing'), comment);
   assert.equal(withDevelopingLabel(develop, ''), develop, 'a project that keeps no developing label');
+});
+
+test('the bot-scheduling recommendation is saved with the plan but is never one of the items applied (#1072)', () => {
+  const plan = { profile: { summary: 'Nightly 构建的库。', sources: ['.github/workflows/nightly.yml', '/actions/runs'] },
+    scheduled_dispatch: { workflows: [{ path: '.github/workflows/nightly.yml', cron: '0 16 * * *', delay: '最近 5 次平均晚 7 小时' }], reason: '定时运行经常晚几个小时。' } };
+  assert.equal(planProblem(plan), null);
+  assert.deepEqual(planProblem({ ...plan, scheduled_dispatch: { workflows: [], reason: '没有 workflow' } }), { error: 'invalid_onboarding_plan', field: 'scheduled_dispatch.workflows' });
+  assert.deepEqual(planProblem({ ...plan, scheduled_dispatch: { workflows: [{ path: 'nightly.yml' }], reason: '缺 cron' } }), { error: 'invalid_onboarding_plan', field: 'scheduled_dispatch.workflows.0.cron' });
+  assert.ok(!onboardingItems.includes('scheduled_dispatch'));
 });

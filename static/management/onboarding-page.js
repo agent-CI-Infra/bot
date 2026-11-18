@@ -322,6 +322,27 @@ function mountRepositoryOnboarding(page, id, initial) {
 
   // ---- Panels ----
   const planOf = () => view.plan?.plan ?? null;
+  // The plan's bot-scheduling recommendation (#1072): never applied with the plan and never in the way of the start. Once the
+  // project is started it can go to the management assistant, as a request to send, or to the schedules page.
+  function dispatchRecommendation() {
+    const recommended = planOf()?.scheduled_dispatch; if (!recommended?.workflows?.length) return null;
+    const box = element('section', '', 'ro-recommendation'); box.dataset.item = 'scheduled_dispatch';
+    const head = element('div', '', 'ro-receipt-head');
+    head.append(element('strong', '用 Bot 定时触发 workflow'), element('span', '推荐 · 可选', 'status status-info'));
+    const list = element('ul', '', 'ro-recommendation-list');
+    for (const w of recommended.workflows) list.append(element('li', `${w.path}：${w.cron}${w.delay ? '，' + w.delay : ''}`));
+    box.append(head, element('p', recommended.reason), list,
+      note('GitHub 的定时触发在高峰时会推迟甚至丢掉。做法：项目定时任务到点用 workflow_dispatch 触发；workflow 保留 schedule 兜底，concurrency 设 cancel-in-progress: false，第一个 job 在 schedule 触发且已有成功的手动运行时跳过后面的 job。这一项不随方案应用，也不影响启动项目。'));
+    const actions = element('div', '', 'actions');
+    if (view.repository.started) {
+      const workflows = recommended.workflows.map(w => `${w.path}（${w.cron}）`).join('、');
+      const ask = `请为 ${view.repository.full_name} 开启 Bot 定时触发：${workflows}。先核对这些 workflow 有没有声明 workflow_dispatch，再建项目定时任务按时触发（触发前先查看有没有排队或正在运行的运行，有就不触发）；没有声明的，提一个 Issue 推荐：加 workflow_dispatch、保留 schedule 兜底、concurrency 设 cancel-in-progress: false、第一个 job 在 schedule 触发且已有成功的手动运行时跳过。`;
+      actions.append(button('交给管理助手', () => void openManagementChat().then(() => managementChat?.client?.draft?.(ask)).catch(error), 'btn-secondary'),
+        consoleLink(`#/projects/${id}/schedules`, '去定时任务页', '使用「定时触发 workflow」模板'));
+    } else actions.append(note('项目启动后可以交给管理助手处理，或在项目的「定时任务与通知」页添加。'));
+    box.append(actions);
+    return box;
+  }
   function paintProfile() {
     const plan = planOf(), signature = JSON.stringify(plan?.profile ?? null) + (phase === 'analyzing');
     if (signatures.profile === signature) return; signatures.profile = signature;
@@ -424,7 +445,8 @@ function mountRepositoryOnboarding(page, id, initial) {
     if (['requested', 'applying', 'done'].includes(phase)) { body.replaceChildren(...requestNotice(), receiptList()); return; }
     if (!plan) { body.replaceChildren(note('助手给出方案后，这里逐项列出会改什么、在哪里生效。你可以去掉不想要的项，整份方案确认一次。')); return; }
     const intro = element('p', `第 ${plan.version} 版方案 · ${timestamp(plan.created_at)}`, 'muted ro-plan-version');
-    if (!plan.changes.length) { body.replaceChildren(intro, note('项目现状已经和这份方案一致，没有要改的。想调整什么，直接在对话里告诉助手。')); return; }
+    const recommendation = dispatchRecommendation();
+    if (!plan.changes.length) { body.replaceChildren(intro, note('项目现状已经和这份方案一致，没有要改的。想调整什么，直接在对话里告诉助手。'), ...(recommendation ? [recommendation] : [])); return; }
     if (excludedPlan !== plan.id) { excluded.clear(); excludedPlan = plan.id; }
     const form = document.createElement('form'); form.className = 'ro-plan-form';
     const list = element('ul', '', 'ro-changes');
@@ -442,7 +464,7 @@ function mountRepositoryOnboarding(page, id, initial) {
     form.addEventListener('change', event => { if (event.target.name === 'item') { if (event.target.checked) excluded.delete(event.target.value); else excluded.add(event.target.value); } recount(); });
     form.addEventListener('submit', event => { event.preventDefault(); void confirm([...form.querySelectorAll('input[name=item]:checked')].map(b => b.value)); });
     form.append(list, count, submit); recount();
-    body.replaceChildren(intro, form);
+    body.replaceChildren(intro, form, ...(recommendation ? [recommendation] : []));
   }
   function requestNotice() {
     const request = view.request; if (!request) return [];
@@ -534,6 +556,7 @@ function mountRepositoryOnboarding(page, id, initial) {
         where.append(consoleLink(`#/projects/${id}/${section}`, caption, hint));
       block('以后在哪里改', where);
       parts.push(guide);
+      const recommendation = dispatchRecommendation(); if (recommendation) parts.push(recommendation);
     }
     done.replaceChildren(...parts);
   }

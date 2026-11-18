@@ -2,6 +2,9 @@
 let scheduleOwner = null;
 const scheduleViews = new Map();
 function resetScheduleViews() { scheduleOwner = null; scheduleViews.clear(); }
+// The example instruction of a project scheduled task that starts a workflow (#1072); the onboarding page hands the same
+// recommendation to the management assistant.
+const scheduleDispatchExample = '在 main 上触发 .github/workflows/nightly.yml（github_write POST /actions/workflows/nightly.yml/dispatches，ref 为 main）。触发前先用 github_read 查看这个 workflow 有没有排队或正在运行的运行，有就不再触发，只在报告里说明；触发后在报告里写上 GitHub 返回的运行链接。';
 async function renderSchedules(panel, project) {
   const owner = JSON.stringify([me?.id, me?.actor?.tenant_id, me?.actor?.principal_id]);
   if (scheduleOwner !== owner) { resetScheduleViews(); scheduleOwner = owner; }
@@ -298,12 +301,23 @@ async function renderSchedules(panel, project) {
     if (chosen.value) { dirty=false; chosen.value=''; void renderSchedules(container,project); return; }
     syncPreset(true); syncFields(); updateMeta(); status.textContent=state.templateNotice; state.templateNotice=null;
   };
+  // #1072: a project scheduled task can start a workflow on time when GitHub's own schedule runs late. The example tells the
+  // agent to check for a queued or running run first; GitHub decides the rest (workflow_dispatch declared, ref, permissions).
+  const applyDispatchCheck=()=>{
+    name.value='定时触发 Nightly'; kind.value='personal';
+    zone.value=zone.value||'Asia/Shanghai'; recurrence.value='cron'; cron.value='0 0 * * *';
+    instruction.value=scheduleDispatchExample; fileIssues.value='inherit';
+    dirty=true; state.selected=''; state.fields=capture(); state.templateNotice='已套用定时触发 workflow 模板：每天 00:00 触发 nightly.yml。请把 workflow 文件名、分支和时间改成你的；workflow 需要声明 workflow_dispatch，项目能力上限至少「可评论和打标签」，执行的 Manager 需要 Actions 读写。';
+    if (chosen.value) { dirty=false; chosen.value=''; void renderSchedules(container,project); return; }
+    syncPreset(true); syncFields(); updateMeta(); status.textContent=state.templateNotice; state.templateNotice=null;
+  };
   const templates=element('section','','schedule-templates');
   templates.dataset.testid='schedule-templates';
   templates.append(
     element('h4','常用模板'),
     note('先选用一个模板，再按需要修改。不必先填完整高级表单。'),
     button('使用项目定时任务模板',applyCustomCheck),
+    button('使用定时触发 workflow 模板',applyDispatchCheck),
     button('使用失败时通知模板',applyFailureNotice)
   );
   const list=panel.querySelector('.schedule-list');

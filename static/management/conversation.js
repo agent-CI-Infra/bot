@@ -477,6 +477,8 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
       if (applyScope(value)) await openConversation().catch(showAccessError);
     },
     focus() { if (toolsOpen) toolsButton.focus(); else message.focus(); },
+    // Puts a prepared request in the composer for the person to read and send (#1072: the onboarding page's recommendation).
+    draft(text) { if (toolsOpen) toolsButton.click(); message.value = text; message.focus(); },
     dispose() { disposed = true; scopeGeneration++; formGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); document.removeEventListener('selectionchange', selectionChanged); pendingMarkdown.clear(); drafts.clear(); }
   };
 }

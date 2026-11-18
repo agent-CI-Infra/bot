@@ -15,12 +15,14 @@ const questions = [
     recommended: '用 kind/ 前缀', reason: '现有标签不够用来分类。' },
 ];
 const plan = {
-  profile: { summary: '一个 Node.js 命令行工具。README 写明用 `npm test` 跑测试；还没有 GitHub Actions 工作流，PR 很少有人检视。', stack: ['Node.js', 'npm'],
-    collaboration: '维护者直接开 PR，少有检视。', ci: '没有 Actions 工作流。', labels: '只有 bug 一个标签。', sources: ['README.md', '/labels'] },
+  profile: { summary: '一个 Node.js 命令行工具。README 写明用 `npm test` 跑测试；只有一个定时的 Nightly 工作流，PR 很少有人检视。', stack: ['Node.js', 'npm'],
+    collaboration: '维护者直接开 PR，少有检视。', ci: '只有 nightly.yml，每天 UTC 16:00 定时运行。', labels: '只有 bug 一个标签。', sources: ['README.md', '/labels', '.github/workflows/nightly.yml', '/actions/runs'] },
   capability_ceiling: { value: 'comment', reason: '先只检视和打标签。' },
   test_command: { value: 'npm test', reason: 'README 写明。' },
   labels: { items: [{ name: 'kind/bug', color: 'd73a4a', description: '缺陷', action: 'create' }, { name: 'kind/feature', color: '0e8a16', description: '新功能', action: 'create' }], reason: '用 kind/ 前缀分类。' },
   conventions: { label_usage: 'kind/bug 表示缺陷，kind/feature 表示新功能。', review_focus: '关注命令行参数的兼容性。' },
+  // #1072: a recommendation only; it is never one of the changes and never in the way of the start.
+  scheduled_dispatch: { workflows: [{ path: '.github/workflows/nightly.yml', cron: '0 16 * * *', delay: '最近 5 次平均晚 7 小时' }], reason: 'Nightly 的定时运行经常晚好几个小时，建议改由 bot 按时触发。' },
 };
 // The first message reads the repository, reports progress and asks; the answers bring the plan.
 const script = context => String(context.request).startsWith('我的回答') ? [
@@ -106,6 +108,13 @@ for (const width of [1440, 390]) test(`场景 A 在 ${width} 宽度下走完接�
     await expect(planPanel.locator('[data-item=labels]')).toContainText('在哪里生效：GitHub 标签');
     await planPanel.locator('[data-item=conventions]').getByRole('checkbox').uncheck();
     await expect(planPanel).toContainText('将应用 4 项，共 5 项');
+    // The bot-scheduling recommendation sits below the plan, outside its items; before the start it only says what comes next.
+    const recommended = planPanel.locator('[data-item=scheduled_dispatch]');
+    await expect(recommended).toContainText('用 Bot 定时触发 workflow');
+    await expect(recommended).toContainText('.github/workflows/nightly.yml：0 16 * * *，最近 5 次平均晚 7 小时');
+    await expect(recommended).toContainText('不随方案应用，也不影响启动项目');
+    await expect(recommended).toContainText('项目启动后可以交给管理助手处理');
+    await expect(recommended.getByRole('checkbox')).toHaveCount(0);
     // The profile: its own tab on a phone, beside the plan on a desktop.
     if (width === 390) {
       await page.getByRole('tab', { name: /画像/ }).click();
@@ -168,7 +177,15 @@ for (const width of [1440, 390]) test(`场景 A 在 ${width} 宽度下走完接�
     await expect(done).toContainText('在 Issue 或 PR 的评论里 @ 这个 GitHub App 的机器人账号');
     await expect(done).toContainText('私聊 bot 等同你在控制台的权限');
     await expect(done.getByRole('link', { name: /监听与触发/ })).toHaveAttribute('href', '#/projects/103/triggers');
+    const dispatch = done.locator('[data-item=scheduled_dispatch]');
+    await expect(dispatch.getByRole('link', { name: /去定时任务页/ })).toHaveAttribute('href', '#/projects/103/schedules');
     await shot(page, '10-done');
+    // 交给管理助手 puts the request in the assistant's composer; the person reads it and sends it themselves.
+    await dispatch.getByRole('button', { name: '交给管理助手' }).click();
+    const composer = page.getByLabel('管理消息', { exact: true });
+    await expect(composer).toHaveValue(/^请为 fixture\/project-103 开启 Bot 定时触发：\.github\/workflows\/nightly\.yml（0 16 \* \* \*）。/);
+    await expect(composer).toBeFocused();
+    await shot(page, '11-dispatch-to-assistant');
 
     // The started project offers to run the wizard again from its settings.
     await page.goto(f.h.admin + '/#/projects/103/basic');
