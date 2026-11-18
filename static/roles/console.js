@@ -60,28 +60,7 @@ function rolesConsole() {
       roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus);
       if (role.role_id === 'manager') fields.append(...managerSection(state.data));
       fields.append(roleSettingsCard(role, state, draw, { live, failed }));
-    } else {
-      const cards = roleOverviewCards(state, draw);
-      const unconfiguredOverview = state.data.configured === false && !current.item && !auxiliaryView;
-      if (unconfiguredOverview) {
-        const intro = card(rolePageText('introTitle'));
-        intro.setAttribute('data-testid', 'recommended-roles-intro');
-        const introStatus = note(roleVersionText(state)); introStatus.dataset.roleVersion = '';
-        intro.append(introStatus,
-          note(rolePageText('introNote')));
-        const adopt = button(rolePageText('adopt'), () => saveRoles(), '');
-        adopt.disabled = !!state.busy || !!state.conflict;
-        adopt.setAttribute('data-testid', 'adopt-recommended-roles');
-        intro.append(adopt);
-        const advanced = element('details', '', 'fold role-advanced');
-        advanced.setAttribute('data-testid', 'role-advanced');
-        // Redraws (backend picker, skill edits, etc.) must not slam the fold shut mid-edit.
-        advanced.open = !!state.roleAdvancedOpen;
-        advanced.addEventListener('toggle', () => { state.roleAdvancedOpen = advanced.open; });
-        advanced.append(element('summary', rolePageText('foldAdvanced')), ...cards);
-        fields.append(intro, advanced);
-      } else fields.append(...cards);
-    }
+    } else fields.append(...roleOverviewCards(state, draw)); // Defaults included, the list shows the configuration in force (#1068).
     holder.append(nav);
     const comparison = state.comparison ? roleComparison(state, draw, () => { message.textContent = ''; }) : null;
     saveRoles = async () => {
@@ -93,24 +72,37 @@ function rolesConsole() {
         await api(`/api/repositories/${id}/roles`, 'PUT', { ...draft, roles: draft.roles.map(({ kind, ...role }) => role), ...(stagesChanged ? { required_stages } : {}), expected_revision: state.data.configuration.revision });
         // The result belongs to this project; navigating elsewhere must not clear that other project's draft.
         if (target.rolesDraft === state) target.rolesDraft = null;
-        if (current === target && current.section === 'roles') await reloadWith(state.data.configured === false && !state.dirty ? '已使用推荐配置。新任务按默认角色分工；收回权限会阻止后续调用' : '角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
+        if (current === target && current.section === 'roles') await reloadWith(state.data.configured === false ? rolePageText('savedCustom') : '角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
       } catch (err) {
         if (live() && err.code === 'role_configuration_conflict') { state.conflict = true; message.textContent = '角色配置已被别人修改。当前草稿仍保留，请读取最新版本并比较。'; }
         else if (live() && err.code === 'retired_skill_source') message.textContent = '旧指南来源已停用。请读取最新配置保留已迁移文件，或改用仓库技能文件、自定义文件。';
         else failed(err);
       } finally { if (state) state.busy = false; if (state) state.redraw?.(); }
     };
-    const unconfiguredOverview = state.data.configured === false && !current.item && !auxiliaryView;
+    // Restoring the defaults replaces the project's own configuration with the "follow the defaults" revision (#1068).
+    state.restoreDefaults = async () => {
+      if (state.busy || state.conflict || state.data.configured === false) return;
+      if (!await askConfirm({ title: rolePageText('restoreTitle'), body: [...rolePageText('restoreBody'), ...(state.dirty ? [rolePageText('restoreDraft')] : [])], action: rolePageText('restore') })) return;
+      if (!live()) return;
+      state.busy = true; draw(); message.textContent = '';
+      try {
+        await api(`/api/repositories/${id}/roles`, 'PUT', { expected_revision: state.data.configuration.revision, follow_default: true });
+        if (target.rolesDraft === state) target.rolesDraft = null;
+        if (current === target && current.section === 'roles') await reloadWith(rolePageText('restored'));
+      } catch (err) {
+        if (live() && err.code === 'role_configuration_conflict') { state.conflict = true; message.textContent = '角色配置已被别人修改。当前草稿仍保留，请读取最新版本并比较。'; }
+        else failed(err);
+      } finally { if (state) state.busy = false; if (state) state.redraw?.(); }
+    };
     const compareButton = button('读取最新版本并比较', compare, 'quiet'); compareButton.disabled = !!state.busy;
     const discardRoles = async () => {
       if (state.busy) return;
       if (state.dirty && !await askConfirm({ title: '放弃未保存的更改？', body: ['将丢弃这次修改，并重新读取已保存的配置。'], action: '放弃更改' })) return;
       if (!live()) return; target.rolesDraft = null; await read();
     };
-    // Unconfigured first screen keeps「使用推荐配置」on the intro card (#564). The sticky bar appears once there is a draft.
-    const showBar = !unconfiguredOverview || !!state.dirty;
-    const actions = showBar ? consoleSaveBar({
-      status: state.busy ? '正在读取或保存…' : roleVersionText(state) === '有未保存的更改' ? '有未保存的更改。保存后新任务会用新配置，正在运行的任务不受影响。' : roleVersionText(state),
+    const dirtyText = state.data.configured === false ? rolePageText('defaultDirty') : '有未保存的更改。保存后新任务会用新配置，正在运行的任务不受影响。';
+    const actions = consoleSaveBar({
+      status: state.busy ? '正在读取或保存…' : state.dirty ? dirtyText : roleVersionText(state),
       dirty: !!state.dirty,
       busy: !!state.busy,
       conflict: !!state.conflict,
@@ -119,13 +111,9 @@ function rolesConsole() {
       onDiscard: discardRoles,
       advanced: [compareButton],
       message,
-    }) : element('div', '', 'actions role-save');
-    if (showBar) {
-      actions.classList.add('role-save');
-      state.saveBar = actions;
-    } else {
-      state.saveBar = null;
-    }
+    });
+    actions.classList.add('role-save');
+    state.saveBar = actions;
     holder.append(actions);
 
     if (comparison) holder.append(comparison); holder.append(fields);
@@ -145,7 +133,7 @@ function rolesConsole() {
       state = target.rolesDraft;
       if (!state || !state.dirty) {
         const base = editableRoleDraft(data);
-        state = { data, base, dirty: false, draft: { ...editableRoleDraft(data, true), deleted_roles: [] } }; target.rolesDraft = state;
+        state = { data, base, dirty: false, draft: { ...editableRoleDraft(data), deleted_roles: [] } }; target.rolesDraft = state;
       }
       draw();
     } catch (err) {

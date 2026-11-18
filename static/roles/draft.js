@@ -12,15 +12,16 @@ function roleSelect(name, value, choices, change) {
 // The list states which revision is in force and whether the draft has moved away from it; every control that
 // dirties the draft refreshes that line, so "saved" and "edited but not saved" are never confused.
 let roleDraftStatus = null;
-const roleVersionText = state => plainSaveStatus(!!state.dirty, { configured: state.data.configured !== false });
+// A project without a configuration of its own runs the built-in defaults and follows their updates (#1068).
+const roleVersionText = state => plainSaveStatus(!!state.dirty, { configured: state.data.configured !== false, unconfiguredText: rolePageText('followsDefault') });
 function markRoleDirty(state) {
   state.dirty = true;
   const text = roleVersionText(state);
   document.querySelectorAll('[data-role-version]').forEach(el => { el.textContent = text; });
   if (roleDraftStatus) roleDraftStatus.textContent = text;
-  // Show「保存」without waiting for a full redraw (e.g. after a prompt edit). If the bar was omitted
-  // (unconfigured overview), redraw once so it appears.
-  if (state.saveBar) state.saveBar.refresh({ dirty: true, status: text, saveLabel: '保存' });
+  // Show「保存」without waiting for a full redraw (e.g. after a prompt edit). Leaving the defaults is said at once.
+  const status = state.data.configured === false ? rolePageText('defaultDirty') : text;
+  if (state.saveBar) state.saveBar.refresh({ dirty: true, status, saveLabel: '保存' });
   else state.redraw?.();
 }
 function roleBound(control, change, state) {
@@ -276,11 +277,11 @@ function mergeRoleDraft(base, draft, latest, choices = {}) {
   };
   return { draft: merge(base, draft, latest, []), conflicts };
 }
-function editableRoleDraft(data, recommend = false) {
+// The draft is the configuration in force, defaults included: the server alone defines the recommended values.
+function editableRoleDraft(data) {
   const config = data.configuration;
   return { controller: { role: config.controller.role },
-    roles: config.roles.map(role => ({ ...editableRole(role), kind: role.kind,
-      ...(recommend && !data.configured ? { harness_ref: { id: data.recommended_backend || 'pi' } } : {}) })),
+    roles: config.roles.map(role => ({ ...editableRole(role), kind: role.kind })),
     skills: structuredClone(data.skill_inputs), required_stages: structuredClone(config.required_stages || []) };
 }
 function roleComparison(state, redraw, clearFeedback) {

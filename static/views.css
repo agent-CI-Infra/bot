@@ -502,13 +502,17 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .audit-tech{margin-top:2px}.audit-tech>summary{cursor:pointer;color:var(--color-text-muted,#4b5563);font-size:var(--font-size-1)}
 .audit-tech dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:2px 10px;margin:4px 0 0}.audit-tech dt{color:var(--color-text-muted,#4b5563)}.audit-tech dd{margin:0;min-width:0}
 
-/* #564: recommended-config first screen; advanced role details stay folded. */
-.role-advanced { margin-top: var(--space-5, 16px); }
-.role-advanced > summary { cursor: pointer; font-weight: 600; min-height: var(--control-min, 44px); display: flex; align-items: center; }
+/* #1068: the role list says when the configuration is the project's own and offers the way back to the defaults. */
+.role-config-source { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.role-config-source > p { margin: 0; }
 
-/* #566: role detail is one scrolling form; advanced fields stay folded. */
+/* #566: role detail is one scrolling form; advanced fields stay folded. A flex summary loses the native marker, so it
+   draws its own (#1068). */
 .role-form-advanced { margin-top: 16px; padding-top: 8px; border-top: 1px solid var(--border, #d8dee9); }
-.role-form-advanced > summary { cursor: pointer; font-weight: 600; min-height: var(--control-min, 44px); display: flex; align-items: center; }
+.role-form-advanced > summary { cursor: pointer; font-weight: 600; min-height: var(--control-min, 44px); display: flex; align-items: center; list-style: none; }
+.role-form-advanced > summary::-webkit-details-marker { display: none; }
+.role-form-advanced > summary::before { content: '▸'; margin-right: 8px; color: var(--color-text-muted); }
+.role-form-advanced[open] > summary::before { content: '▾'; }
 .role-nav a[data-testid="role-list-link"] { font-weight: 600; }
 
 /* #570: technical identifiers and the danger zone stay folded on the basic settings first screen. */
@@ -532,7 +536,10 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .console-save-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .console-save-actions button { min-height: var(--control-min, 44px); }
 .console-save-advanced { flex-basis: 100%; }
-.console-save-advanced > summary { cursor: pointer; min-height: var(--control-min, 44px); display: flex; align-items: center; }
+.console-save-advanced > summary { cursor: pointer; min-height: var(--control-min, 44px); display: flex; align-items: center; list-style: none; }
+.console-save-advanced > summary::-webkit-details-marker { display: none; }
+.console-save-advanced > summary::before { content: '▸'; margin-right: 8px; }
+.console-save-advanced[open] > summary::before { content: '▾'; }
 @media (max-width: 767px) {
   .console-save-bar { padding: 10px; }
 }

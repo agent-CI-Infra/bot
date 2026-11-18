@@ -52,12 +52,13 @@ test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生�
     config = (await admin('/api/repositories/101/roles')).value;
     await expect(status).toHaveText(`已保存`);
 
+    // A project without a configuration shows the defaults in force, with no intro or fold in front (#1068).
     await repository(admin, a.id, '102'); await page.goto(h.admin + '/#/projects/102/roles');
-    await expect(page.getByRole('heading', { name: '使用推荐的角色分工', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: '使用推荐配置', exact: true })).toBeVisible();
-    await expect(page.getByTestId('role-advanced')).toBeVisible();
-    expect(await page.getByTestId('role-advanced').evaluate(el => el.open)).toBe(false);
-    await expect(page.locator('[data-role-version]').first()).toHaveText('尚未保存。可先使用推荐配置。');
+    await expect(page.locator('[data-role-version]').first()).toHaveText('正在使用默认配置，内置默认更新时自动跟随。');
+    await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible();
+    await expect(page.locator('tr[data-role=manager]')).toContainText('默认配置');
+    await expect(page.getByRole('button', { name: '使用推荐配置', exact: true })).toHaveCount(0);
+    await expect(page.locator('details.role-advanced')).toHaveCount(0);
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });
@@ -71,12 +72,13 @@ async function prepared(page) {
   const model = (await admin('/api/models/provider', 'POST', { repository_id: '101', api_url: 'http://127.0.0.1:9/v1', api_key: 'sk-role-team', model_names: ['fixture-model'] })).value.models[0];
   const config = (await admin('/api/repositories/101/roles')).value;
   const dev = config.configuration.roles.find(role => role.role_id === 'dev');
-  const { revision, kind, ...editable } = dev;
+  const { revision, kind, entry_harness_source, ...editable } = dev;
   // A configuration that renders all three controls: a model profile (structured output), an environment list, and a
   // metered resource budget; legacy monetary values are accepted but omitted on save.
   const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: config.revision, enabled: true,
     skills: [{ id: 'skills_1', source: { type: 'inline', files: [{ path: 'guide.md', content: 'fixture' }] } }],
-    roles: [{ ...editable, model_profile_ref: { model_id: model.id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' },
+    // Native, which offers two structured output modes to switch between (Pi, the default, offers one).
+    roles: [{ ...editable, harness_ref: { id: 'native' }, model_profile_ref: { model_id: model.id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' },
       budget_policy_ref: { id: 'metered', max_tool_calls: 5, max_cost: { amount: 1, currency: 'USD' } } }] });
   expect(saved.status).toBe(200);
   expect(saved.value.configuration.roles.find(role=>role.role_id==='dev').budget_policy_ref.max_cost).toBeUndefined();
@@ -113,7 +115,7 @@ for (const [name, act] of [
     await expect(status).toHaveText(`已保存`);
   } finally { await h.stop(); }
 });
-test('尚未配置过角色的项目保持「尚未保存。可先使用推荐配置。」，勾选后也不出现「配置版本 0」', async ({ page }) => {
+test('跟随默认配置的项目显示「正在使用默认配置」，勾选后也不出现「配置版本 0」', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
   try {
@@ -123,7 +125,7 @@ test('尚未配置过角色的项目保持「尚未保存。可先使用推荐�
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const status = page.locator('[data-role-version]').first();
-    await expect(status).toHaveText('尚未保存。可先使用推荐配置。');
+    await expect(status).toHaveText('正在使用默认配置，内置默认更新时自动跟随。');
     await openRoleAdvanced(page);
     await page.locator('tr[data-role=dev]').getByRole('checkbox').uncheck();
     await expect(status).toHaveText('有未保存的更改');

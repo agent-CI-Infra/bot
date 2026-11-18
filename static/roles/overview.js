@@ -12,16 +12,24 @@ function roleListComparable(role) {
     kind: role.kind
   });
 }
-function roleListStart(role, data) {
-  if (data.configured !== false) return role;
-  return { ...role, harness_ref: { ...(role.harness_ref || {}), id: data.recommended_backend || 'pi' } };
-}
 function roleListStatus(role, state, start) {
   const parts = [role.enabled ? rolePageText('statusEnabled') : rolePageText('statusDisabled')];
   if (!start || roleListComparable(role) !== roleListComparable(start)) parts.push(rolePageText('statusUnsaved'));
   else if (state.data.configured) parts.push(rolePageText('statusSaved'));
-  else parts.push(rolePageText('statusRecommended'));
+  else parts.push(rolePageText('statusDefault'));
   return parts.join(' · ');
+}
+// A configuration of the project's own no longer follows built-in updates; returning to the defaults is one confirmed
+// step, and the saved revisions stay in the history (#1068).
+function roleDefaultsControl(state) {
+  const box = element('div', '', 'role-config-source'); box.dataset.testid = 'role-config-source';
+  box.append(note(rolePageText('customNote')));
+  if (state.data.can_edit === false) return box;
+  const restore = button(rolePageText('restore'), () => state.restoreDefaults?.(), 'quiet');
+  restore.dataset.testid = 'restore-default-roles';
+  restore.disabled = !!state.busy || !!state.conflict;
+  box.append(restore);
+  return box;
 }
 function roleBackendAvailabilityCard(state) {
   const containerBackends = (state.data.backends || []).filter(entry => entry.runtime_status);
@@ -64,8 +72,9 @@ function roleOverviewCards(state, redraw) {
   const { data, draft } = state, overview = card(rolePageText('overview')), { table, body } = projectTable(rolePageText('columns'), rolePageText('tableLabel'));
   // The version line is the one place that says whether what is on screen is in force or still a draft.
   roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; overview.append(roleDraftStatus);
+  if (data.configured !== false) overview.append(roleDefaultsControl(state));
   overview.append(note(rolePageText('overviewNote')));
-  const starting = new Map((data.configuration.roles || []).map(role => [role.role_id, roleListStart(role, data)]));
+  const starting = new Map((data.configuration.roles || []).map(role => [role.role_id, role]));
   for (const role of draft.roles) {
     const row = document.createElement('tr'); row.dataset.role = role.role_id;
     const link = element('a', roleConfigName(role.role_id, role.name)); link.href = `#/projects/${current.id}/roles/${role.role_id}`;

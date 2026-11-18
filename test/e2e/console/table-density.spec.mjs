@@ -52,9 +52,7 @@ test('#560 角色概览与统计表列对齐，390 下角色表按列堆叠', as
     await page.screenshot({ path: `${out}/costs-drill-after-1440.png`, fullPage: true });
 
     await page.goto(h.admin + '/#/projects/101/roles');
-    // A fresh project shows the recommended-roles intro first (main); adopt it so the overview table renders.
-    await page.getByTestId('adopt-recommended-roles').click();
-    await expect(page.locator('.flash')).toContainText('已使用推荐配置');
+    // A fresh project shows the default configuration in force directly (#1068).
     await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible({ timeout: 15000 });
     const table = page.locator('.project-table[aria-label="角色解析结果"]');
     await expect(table).toBeVisible({ timeout: 10000 });

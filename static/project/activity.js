@@ -11,7 +11,7 @@ const auditActionNames = {
   'repository.activated': '启用项目', 'repository.enabled': '启用项目', 'repository.disabled': '停用项目', 'repository.restored': '恢复项目',
   'repository.hidden': '隐藏项目', 'repository.removed': '移出项目', 'repository.deleting': '开始删除项目', 'repository.deleted': '删除项目',
   'repository.board.updated': '修改看板设置', 'board.value.updated': '修改看板字段', 'policy.updated': '修改项目设置', 'settings.updated': '修改设置',
-  'rules.updated': '修改规则文件', 'rules.computer_applied': '把规则应用到项目电脑', 'roles.configure': '修改角色配置', 'roles.apply': '按角色配置执行',
+  'rules.updated': '修改规则文件', 'rules.computer_applied': '把规则应用到项目电脑', 'roles.configure': '修改角色配置', 'roles.follow_default': '恢复默认角色配置', 'roles.apply': '按角色配置执行',
   'assignments.updated': '修改任务分工', 'dispatch.retry': '重新分派事件', 'delegation.created': '新增委派授权', 'delegation.changed': '修改委派授权',
   'delegation.revoked': '收回委派授权', 'task.create': '创建任务', 'task.retry': '重试任务', 'task.cancel': '取消任务', 'task.pause': '暂停任务',
   'task.priority': '调整任务优先级', 'task.contract': '修改任务约定', 'task.instructions': '补充任务说明', 'task.relate': '关联任务', 'task.request': '提交任务请求',

@@ -63,7 +63,8 @@ function roleSettingsCard(role, state, redraw, access) {
   const backendInfo = (state.data.backends || []).find(entry => entry.id === role.harness_ref.id);
   const runtimeBox = roleBackendRuntimeBox(role, state);
   agent.append(
-    note('已保存 · ' + workTypeName(state.data.workflow) + '：' + roleModelText(state.data.preview.find(row => row.role === role.role_id))),
+    // What runs now: the saved configuration, or the defaults a project without one follows (#1068).
+    note((state.data.configured === false ? rolePageText('statusDefault') : '已保存') + ' · ' + workTypeName(state.data.workflow) + '：' + roleModelText(state.data.preview.find(row => row.role === role.role_id))),
     note('下面是待保存的选择；修改不会重写运行中任务的模型快照。'),
     field('Agent 后端', roleBackendPicker(role, state, redraw)),
     ...(runtimeBox ? [runtimeBox] : []),
