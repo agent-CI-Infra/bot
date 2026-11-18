@@ -74,7 +74,7 @@ test('searchable scope list, long names, disabled state, keyboard and focus acro
     await expect(trigger(page)).toBeFocused();
     await expect(trigger(page)).toHaveAttribute('aria-expanded', 'false');
     await page.keyboard.press('Meta+k'); await expect(search).toBeFocused();
-    await page.locator('#console-context').click(); await expect(page.locator('#console-scope-picker')).not.toBeVisible();
+    await page.locator('#console-project-header .project-head h1').click(); await expect(page.locator('#console-scope-picker')).not.toBeVisible();
     // Choosing the current row only closes: no re-render, navigation or extra project read.
     let reads = 0; page.on('request', request => { if (new URL(request.url()).pathname === '/api/repositories/202') reads++; });
     await switchConsoleProject(page, '202'); expect(reads).toBe(0);

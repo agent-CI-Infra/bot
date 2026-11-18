@@ -100,6 +100,25 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await row('101').getByRole('link', { name: /项目设置/ }).click();
     await expect(page.locator('#console-permission [data-permission]')).toHaveText('事件未订阅');
     await expect(page.locator('#console-permission [data-permission]')).toHaveAttribute('title', /Pull request review comment.*Workflow run/);
+    await expect(page.locator('.project-head h1')).toHaveText('基本设置');
+    await expect(page.locator('.project-head [data-permission]')).toHaveCount(0);
+    await expect(page.locator('#console-project-header .workbench-tabs')).toHaveCount(0);
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: `.tmp/app-permissions/project-${width}.png`, fullPage: true });
+    }
+    await page.goto(h.admin + '/#/projects/101/overview');
+    await expect(page.getByTestId('project-role-board')).toBeVisible();
+    await expect(page.locator('#console-permission [data-permission]')).toHaveText('事件未订阅');
+    await expect(page.locator('.project-head [data-permission]')).toHaveCount(0);
+    await expect(page.locator('#console-project-header .workbench-tabs')).toBeVisible();
+    await expect(page.locator('.workbench-tab-count').first()).toHaveText(/\d+/);
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: `.tmp/app-permissions/overview-gap-${width}.png`, fullPage: true });
+    }
     await page.goto(h.admin + '/#/settings/projects');
     installations[0].events = allEvents; await sync.click();
     await expect(message.locator('span')).toHaveText('安装列表已同步，1 个安装的权限和事件订阅都正常。');

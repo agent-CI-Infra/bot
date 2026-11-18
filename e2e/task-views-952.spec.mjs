@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
@@ -125,6 +125,8 @@ test('role view, task flow list view, and #/tasks/:id two-level collapsible deta
     await expect(page.locator('[data-workbench-view="roles"]')).toHaveAttribute('aria-current', 'page');
     const roleBoard = page.getByTestId('project-role-board');
     await expect(roleBoard).toBeVisible();
+    await expect(page.locator('#console-project-header .workbench-tabs')).toBeVisible();
+    await expect(page.locator('.workbench-top .workbench-tabs')).toHaveCount(0);
     // No inline configuration forms mixed into Role View
     expect(await roleBoard.locator('select, textarea, input').count()).toBe(0);
 
@@ -140,6 +142,8 @@ test('role view, task flow list view, and #/tasks/:id two-level collapsible deta
     await expect(mgrRow).toContainText('已委派子角色推进中');
     await expect(mgrRow).toContainText('#940');
     await expect(page.locator('.workbench-live-stats')).toContainText('排队中：1 项（另 1 项等槽位）');
+    mkdirSync('.tmp/compact-project-nav', { recursive: true });
+    await page.screenshot({ path: '.tmp/compact-project-nav/roles-1440.png', fullPage: true });
 
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 
@@ -252,12 +256,18 @@ test('role view, task flow list view, and #/tasks/:id two-level collapsible deta
     // Return link goes back to Task View cleanly
     await detail.locator('#task-back-link').click();
     await expect(page).toHaveURL(/#\/projects\/101\/overview\/tasks$/);
+    await expect(page.locator('.workbench-task-row[data-task-id="t-952"]')).toBeVisible();
+    await expect(page.locator('#console-project-header [data-workbench-view="tasks"]')).toHaveAttribute('aria-current', 'page');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(await page.locator('.workspace-overview').evaluate(el => el.querySelectorAll('[style]').length)).toBe(0);
+    await page.screenshot({ path: '.tmp/compact-project-nav/tasks-390.png', fullPage: true });
 
     await page.locator('[data-workbench-view="roles"]').click();
     await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
+    await expect(page.locator('[data-role-row="dev"]')).toContainText('gpt-5.4');
+    await expect(page.locator('#console-project-header [data-workbench-view="roles"]')).toHaveAttribute('aria-current', 'page');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/compact-project-nav/roles-390.png', fullPage: true });
 
     // 4. Read-only viewer perspective (`tasks.read` only): hides `+ 新建任务` and task mutation controls
     await page.setViewportSize({ width: 1440, height: 920 });
@@ -268,6 +278,11 @@ test('role view, task flow list view, and #/tasks/:id two-level collapsible deta
     await page.goto(f.h.admin + '/#/projects/101/overview');
     await expect(page.getByTestId('project-role-board')).toBeVisible();
     await expect(page.locator('.workbench-new-task')).toBeHidden();
+    await page.screenshot({ path: '.tmp/compact-project-nav/viewer-1440.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/compact-project-nav/viewer-390.png', fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 920 });
     await page.goto(f.h.admin + '/#/tasks/t-952');
     await expect(detail.locator('#task-flow-bar')).toContainText('Reviewer');
     await expect(detail.getByRole('button', { name: '追加指令', exact: true })).toHaveCount(0);

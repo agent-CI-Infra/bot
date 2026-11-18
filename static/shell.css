@@ -38,6 +38,14 @@ header .sub, .current-user-role { color: var(--color-text-muted); }
 header .quiet { color: var(--color-text); border-color: var(--color-border); background: var(--color-surface); min-height: var(--control-min); }
 #header-tools { margin-left: auto; display: flex; align-items: center; gap: 12px; min-width: 0; }
 #identity { margin-left: 0; }
+#console-project-header { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.console-ready #console-project-header .project-head { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; gap: 8px; padding: 0; border: 0; }
+.console-ready #console-project-header .project-head .title-group { flex: 0 1 auto; }
+.console-ready #console-project-header .project-head h1 { font-size: var(--font-size-title); letter-spacing: 0; }
+.console-ready #console-project-header .project-head .actions { flex: none; }
+.console-ready #console-project-header .project-head .btn-secondary { min-height: 36px; padding: 4px 8px; font-size: var(--font-size-1); white-space: nowrap; }
+#console-project-header .workbench-tabs, #console-project-header .console-permission { flex: none; margin: 0; }
+#console-project-header .status { white-space: nowrap; }
 body.console-ready main { margin: 0 0 0 var(--console-rail); padding: var(--space-6) var(--space-8) var(--space-10); min-width: 0; }
 #main-content:focus { outline: none; }
 .console-ready :is(button, .button-link, input:not([type=checkbox]):not([type=radio]), select) { min-height: var(--control-min); }
@@ -130,6 +138,9 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 .console-location .console-permission .status { white-space: normal; }
 .console-ready .project-body { grid-template-columns: minmax(0, 1fr); }
 .console-ready .project-head { padding: var(--space-6) var(--space-7); }
+.console-ready .project-head .title-group { flex-direction: row; flex-wrap: nowrap; align-items: center; }
+.console-ready .project-head .title-group > h1 { flex: 0 1 auto; }
+.console-ready .project-head .title-group > .status { flex: none; }
 .console-ready .project-head h1 { font-size: var(--font-size-5); font-weight: 650; line-height: var(--line-height-tight); letter-spacing: -.02em; }
 .console-ready .project-content { min-width: 0; }
 .console-section-picker, .console-mobile-nav { display: none; }
@@ -401,6 +412,31 @@ body:not(.console-ready) header .locale-switch { background: #fff; }
   body.console-ready { --console-header: 108px; }
   body.console-ready > header { flex-wrap: wrap; row-gap: 4px; }
   body.console-ready #header-tools { flex: 1 1 100%; width: 100%; justify-content: flex-end; margin-left: 0; }
+}
+@media (max-width: 1100px) {
+  body.console-ready:has(#console-project-header:not([hidden])) { --console-header: 112px; }
+  body.console-ready:has(#console-project-header:not([hidden])) > header { flex-wrap: wrap; row-gap: 8px; padding-block: 8px; }
+  body.console-ready > header #console-project-header { order: 3; flex-basis: 100%; }
+  body.console-ready:has(#console-project-header:not([hidden])) > header .brand { min-width: 0; }
+  body.console-ready:has(#console-project-header:not([hidden])) > header .brand .sub { display: none; }
+}
+@media (max-width: 767px) {
+  body.console-ready:has(#console-project-header:not([hidden])) { --console-header: 156px; }
+  body.console-ready > header #console-project-header { gap: 8px; }
+  .console-ready #console-project-header .project-head { flex-basis: 100%; }
+  .console-ready #console-project-header .project-head .actions { flex: none; }
+  body.console-ready:has(#console-project-header:not([hidden])) #console-location > :is(#console-area, #console-context) { display: none; }
+}
+@media (min-width: 380px) and (max-width: 480px) {
+  body.console-ready:has(#console-project-header:not([hidden])) #header-tools { flex: 0 0 auto; width: auto; margin-left: auto; }
+}
+@media (max-width: 360px) {
+  body.console-ready:has(#console-project-header:not([hidden])) { --console-header: 204px; }
+}
+@media (min-width: 380px) and (max-width: 767px) and (max-height: 560px) {
+  body.console-ready:has(#console-project-header:not([hidden])) { --console-header: 112px; }
+  .console-ready #console-project-header .project-head { flex: 1 1 0; }
+  body.console-ready:has(#console-project-header:not([hidden])) #header-tools { flex: 0 0 auto; width: auto; margin-left: auto; }
 }
 /* #642: 找不到这个页面 — one primary way back, full-width buttons on a phone. */
 .page-not-found-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: 16px 0 0; }

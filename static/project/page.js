@@ -141,16 +141,14 @@ async function reloadWith(notice) { if (notice) current.flash = notice; await re
 function projectStatus() {
   const { policy, installed } = current;
   const status = !policy.enabled ? badge('已禁用', 'warning') : badge('已启用', 'info');
-  const permission = installed?.access_gaps?.length ? [permissionBadge(installed)] : [];
-  return [status, ...(installed?.installed === false ? [badge('已移出安装', 'danger')] : []), ...permission, ...(current.environment ? [projectEnvironmentState()] : [])];
+  return [status, ...(installed?.installed === false ? [badge('已移出安装', 'danger')] : []), ...(current.environment ? [projectEnvironmentState()] : [])];
 }
-// A background permission check answers with the whole snapshot row for every repository. This header drew its own read
-// earlier, so it has to take that answer too; otherwise one screen shows the old grant next to the bar's new one. Only the
-// header is redrawn: re-reading the page would discard what the reader has already typed into the settings forms.
+// A background installation snapshot can change the header's membership status as well as the bar's grant details. Only
+// the header is redrawn: re-reading the page would discard what the reader has already typed into the settings forms.
 function applyInstalledRow(row) {
   if (!row || !current || String(row.id) !== String(current.id) || projectRoute()?.id !== String(current.id)) return false;
   current.installed = { ...(current.installed || {}), ...row };
-  const title = document.querySelector('#project-page .project-head .title-group'), name = title?.querySelector('h1');
+  const title = document.querySelector('#console-project-header .project-head .title-group, #project-page .project-head .title-group'), name = title?.querySelector('h1');
   if (!name || current.section !== 'overview') return false;
   title.replaceChildren(name, ...projectStatus());
   return true;
@@ -164,13 +162,14 @@ function projectEnvironmentState() {
 }
 function projectHeader(section = current.section) {
   const head = element('div', '', 'project-head'), title = element('div', '', 'title-group');
+  head.dataset.projectId = current.id;
   const overview = section === 'overview', caption = overview ? current.repository.full_name : projectSectionCaption(section) || '找不到页面';
-  const heading = element('h1', caption); title.append(heading);
+  const heading = element('h1', caption); if (overview) heading.title = caption; title.append(heading);
   if (overview) title.append(...projectStatus());
   head.append(title);
   if (overview) {
-    const actions = element('div', '', 'actions');
-    actions.append(link(`https://github.com/${current.repository.full_name}`, '在 GitHub 打开', 'button-link btn-secondary'));
+    const actions = element('div', '', 'actions'), github = link(`https://github.com/${current.repository.full_name}`, 'GitHub', 'button-link btn-secondary');
+    github.setAttribute('aria-label', '在 GitHub 打开'); actions.append(github);
     head.append(actions);
   } else if (section === 'basic') head.append(button('刷新项目设置', () => reloadProject().catch(error), 'btn-secondary'));
   return head;
