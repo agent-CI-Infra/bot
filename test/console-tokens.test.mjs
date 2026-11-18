@@ -153,6 +153,14 @@ test('#551 management.css and views.css map heading, body and muted values onto 
   assert.equal(management.includes('#16636b'), false);
   const views = read('static/views.css');
   assert.match(views, /\.timeline-panel h3,\.side-card h3\{[^}]*color:\s*var\(--color-text\)/);
+  // #1039: a settings card title is an h2 but keeps the h3 tokens, and a sub-section inside it is an h3 that keeps the
+  // h4 size. Both are class/token rules, so the outline changes and the pixels do not.
+  assert.match(views, /\.side-card>h2\{[^}]*font-size:\s*var\(--font-size-2\)[^}]*margin:\s*0 0 10px/);
+  assert.match(views, /\.console-ready \.side-card>h2\{[^}]*font-weight:\s*700[^}]*line-height:\s*normal/);
+  assert.match(views, /\.settings-panel \.side-card>h2\{font-size:\s*var\(--font-size-row\)\}/);
+  assert.match(views, /\.project-content \.side-card :is\(\.card-sub,\.rate-account\)\{[^}]*font-size:\s*var\(--font-size-label\)[^}]*margin:\s*6px 0 0/);
+  const rateLimits = read('static/settings/rate-limits.js');
+  assert.match(rateLimits, /element\('h3',[^)]*'rate-account'\)/, 'the quota account names keep their own level and class');
   assert.match(views, /\.step-meta\{[^}]*color:\s*var\(--color-text-muted\);font-size:\s*var\(--font-size-1\)/);
   assert.match(views, /button\.linkish\{[^}]*color:\s*var\(--color-brand\)/);
   assert.match(views, /\.choice\{[^}]*color:\s*var\(--color-text\)/);

@@ -12,6 +12,10 @@ const settingsGroups = [
   ['仓库与用户', [['projects', '项目管理'], ['users', '用户']]]
 ];
 const settingsSections = settingsGroups.flatMap(([, items]) => items);
+// #1039: a settings page carries its own h1 (全局设置, or 存储 for the one page a project administrator may open), so the
+// cards under it are h2. Only these files use this wrapper: card() keeps its h3 default for every page outside settings,
+// and views.css restates the old h3 sizes on .side-card>h2 so the change is tag-only.
+const settingsCard = (title, level = 'h2') => card(title, level);
 // #799: the settings shell names the category it shows, not the whole platform: 存储 is a page a project administrator
 // may open, and the first crumb says 工作区 for them, 平台管理 only for a super administrator.
 function settingsPageTitle(section = settingsRoute().section) { return section === 'storage' ? t('nav.storage') : t('nav.settings'); }

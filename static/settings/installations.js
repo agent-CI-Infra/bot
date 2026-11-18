@@ -8,7 +8,7 @@ function columnHeader(text) { const cell = element('th', text); cell.scope = 'co
 const installationStatusNames = { active: '有效', pending_sync: '等待同步', suspended: '已暂停', deleted: '已卸载' };
 const installationCompletenessNames = { complete: '完整', pending: '等待同步', stale: '待核实', error: '同步失败，保留最近成功快照' };
 async function installationDetail(request, ref) {
-  const section = card('安装档案详情'), content = element('div', ''), back = settingsLink('#/settings/installations', '返回安装档案');
+  const section = settingsCard('安装档案详情'), content = element('div', ''), back = settingsLink('#/settings/installations', '返回安装档案');
   section.append(back, content);
   const match = /^([^/]+)\/([1-9]\d*)\/([1-9]\d*)$/.exec(ref || '');
   if (!match) { content.append(note('安装地址不完整，请从安装档案列表打开。')); return [section]; }
@@ -27,7 +27,7 @@ async function installationDetail(request, ref) {
 }
 function installationDetailBody(base, snapshot, repositories, deliveries, redraw) {
   const nodes = [], installation = snapshot.installation, evidence = snapshot.evidence || {};
-  nodes.push(element('h4', `${snapshot.target.login || '目标待同步'} · 安装 ${installation.installation_id}`),
+  nodes.push(element('h3', `${snapshot.target.login || '目标待同步'} · 安装 ${installation.installation_id}`, 'card-sub'),
     facts([['状态', installationStatusNames[snapshot.status] || snapshot.status],
       ['范围', snapshot.repository_selection === 'all' ? '全部仓库' : snapshot.repository_selection === 'selected' ? '指定仓库' : '待同步'],
       ['完整性', installationCompletenessNames[snapshot.completeness] || snapshot.completeness],
@@ -40,7 +40,7 @@ function installationDetailBody(base, snapshot, repositories, deliveries, redraw
   // own evidence. The list page already runs the App check against GitHub; this page offers the same check so that the
   // profile answers "what does the App declare" on its own and names the features a gap would block.
   const app = accounts.find(account => account.type === 'github_app' && String(account.app_id) === String(installation.app_id));
-  const appSection = element('section', ''); appSection.append(element('h4', 'App 定义检查'));
+  const appSection = element('section', ''); appSection.append(element('h3', 'App 定义检查', 'card-sub'));
   appSection.append(facts([['App', app ? `${app.name}（GitHub App · App ID ${app.app_id}）` : '未匹配到已登记账号（App 已删除或凭据已撤销）'],
     ['安装范围', snapshot.repository_selection === 'all' ? '全部仓库' : snapshot.repository_selection === 'selected' ? '指定仓库' : '待同步']]));
   if (app?.credentials_configured) appSection.append(note('这一项只检查 App 自己声明的权限与事件订阅；安装范围看上面的「范围」，实际用户授权在账号页与身份页分别核对。缺项会写明影响哪些已开启的功能。'), appPermissionCheck(app));
@@ -52,7 +52,7 @@ function installationDetailBody(base, snapshot, repositories, deliveries, redraw
     const person = value => value ? `${value.login || '名称未知'}（${value.id}）` : '未提供';
     nodes.push(facts([['安装事件触发者', person(evidence.sender)], ['申请者', person(evidence.requester)], ['批准者', evidence.approval?.label || '批准者未知']]));
   }
-  const repoSection = element('section', ''); repoSection.append(element('h4', `仓库（${repositories.length}）`));
+  const repoSection = element('section', ''); repoSection.append(element('h3', `仓库（${repositories.length}）`, 'card-sub'));
   if (!repositories.length) repoSection.append(element('p', '无仓库（零仓库安装也会保留；同步后新仓库会出现）', 'muted'));
   else {
     const table = element('table', '', 'rule-table'), head = element('tr', '');
@@ -71,7 +71,7 @@ function installationDetailBody(base, snapshot, repositories, deliveries, redraw
     const wrap = element('div', '', 'rule-table-wrap'); wrap.append(table); repoSection.append(wrap);
   }
   nodes.push(repoSection);
-  const eventSection = element('section', ''); eventSection.append(element('h4', `最近安装事件（${deliveries.length}）`));
+  const eventSection = element('section', ''); eventSection.append(element('h3', `最近安装事件（${deliveries.length}）`, 'card-sub'));
   if (!deliveries.length) eventSection.append(element('p', '还没有记录到安装事件。', 'muted'));
   else {
     const table = element('table', '', 'rule-table'), head = element('tr', '');

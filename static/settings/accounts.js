@@ -21,7 +21,7 @@ function accountProfileLine(account) {
 // One account: what it is, which projects use it, where GitHub posts, and the three changes the API already offered
 // (rename, rotate the credential, remove the account). Every request of this page happens here and nowhere in the list.
 async function accountDetail(request, id) {
-  const section = card('账号详情'), content = element('div', ''), back = settingsLink('#/settings/accounts', '返回机器人账号');
+  const section = settingsCard('账号详情'), content = element('div', ''), back = settingsLink('#/settings/accounts', '返回机器人账号');
   section.append(back, content);
   const draw = async (notice, tone = 'view-success') => {
     content.replaceChildren(element('p', '正在加载…', 'muted'));
@@ -36,13 +36,13 @@ async function accountDetail(request, id) {
 }
 function accountDetailBody(account, projects, redraw) {
   const nodes = [], isApp = account.type === 'github_app', id = encodeURIComponent(account.id);
-  nodes.push(element('h4', account.name),
+  nodes.push(element('h3', account.name, 'card-sub'),
     facts([['类型', isApp ? `GitHub App · App ID ${account.app_id}` : '用户 Token'],
       ['凭据', account.credentials_configured ? '凭据已配置' : '凭据已撤销，需要重新登记'],
       ['登记时间', account.created_at ? timestamp(account.created_at) : '未记录']]));
   // The count is the server's own registered-repository count; the names are the rows this page read alongside it.
   const named = Number(account.project_count ?? projects.length), projectSection = element('section', '');
-  projectSection.append(element('h4', `使用项目（${named}）`));
+  projectSection.append(element('h3', `使用项目（${named}）`, 'card-sub'));
   if (!projects.length) projectSection.append(element('p', named ? `已登记 ${named} 个项目，但这一页没有读到它们的名字（安装列表可能分页），到项目页查看。` : '这个账号还没有已登记的项目。', 'muted'));
   else for (const project of projects) projectSection.append(element('p', project.full_name));
   nodes.push(projectSection);
@@ -50,7 +50,7 @@ function accountDetailBody(account, projects, redraw) {
   // installation GitHub stopped listing stays as history, a grant that was never read says so instead of "no gaps", and a
   // bot account states it has none at all because a user token does not go through an installation.
   const installs = account.installations || [], installSection = element('section', '');
-  installSection.append(element('h4', `关联安装（${installs.length}）`));
+  installSection.append(element('h3', `关联安装（${installs.length}）`, 'card-sub'));
   if (!installs.length) installSection.append(element('p', isApp
     ? '这个账号还没有关联的 GitHub 安装：同步安装列表后会出现，零仓库的安装也会保留。'
     : '用户 Token 账号按 Token 所属用户的仓库权限访问，没有 GitHub 安装；关联安装只属于 GitHub App 账号。', 'muted'));
@@ -89,7 +89,7 @@ function accountDetailBody(account, projects, redraw) {
     if (unread.length) installSection.append(element('p', `安装 ${unread.map(installation => installation.installation_id).join('、')} 还没有读到授权，因此上面的「缺什么」不能当成「没有缺口」；同步一次安装列表再读。`, 'endpoint-warning'));
   }
   nodes.push(installSection);
-  const endpointSection = element('section', ''); endpointSection.append(element('h4', `Webhook 入口（${(account.endpoints || []).length}）`));
+  const endpointSection = element('section', ''); endpointSection.append(element('h3', `Webhook 入口（${(account.endpoints || []).length}）`, 'card-sub'));
   if (!(account.endpoints || []).length) endpointSection.append(element('p', '还没有 Webhook 入口。', 'muted'));
   else {
     const table = element('table', '', 'rule-table'), head = element('tr', ''), thead = document.createElement('thead'), body = document.createElement('tbody'), table_ = table;
@@ -114,7 +114,7 @@ function accountDetailBody(account, projects, redraw) {
     catch (err) { await redraw(accountChangeMessage(err), 'view-error'); }
     finally { saveName.disabled = false; }
   });
-  rename.append(nameField, saveName); nodes.push(element('h4', '改名'), rename);
+  rename.append(nameField, saveName); nodes.push(element('h3', '改名', 'card-sub'), rename);
 
   // A new credential replaces the sealed one; the server validates it, so a wrong key is refused in words.
   const rotate = element('div', '', 'actions'), credentialField = document.createElement(isApp ? 'textarea' : 'input');
@@ -131,7 +131,7 @@ function accountDetailBody(account, projects, redraw) {
     catch (err) { await redraw(accountChangeMessage(err), 'view-error'); }
     finally { saveCredential.disabled = false; }
   });
-  rotate.append(credentialField, saveCredential); nodes.push(element('h4', '轮换凭据'), rotate);
+  rotate.append(credentialField, saveCredential); nodes.push(element('h3', '轮换凭据', 'card-sub'), rotate);
 
   // Removal is confirmed in the console's own dialog, which keeps the server's refusal in place so it can be retried.
   const remove = element('div', '', 'actions'), deleteAccount = button('删除账号', async () => {

@@ -28,7 +28,7 @@ function userGithubName(user) {
 // One platform account per row. The first cell keeps the access lines the old list showed, so a project administrator's
 // visible projects and manual grants stay readable without opening the detail.
 function userTable(users, intro) {
-  const section = card('用户', 'h2'), head = element('div', '', 'actions settings-list-head');
+  const section = settingsCard('用户', 'h2'), head = element('div', '', 'actions settings-list-head');
   head.append(note(intro), button('新增用户', () => openEditor('users'), ''));
   if (!users.length) { section.append(head, element('p', '还没有用户。', 'muted')); return section; }
   const captions = ['用户', '登录方式', '本地账号', 'GitHub 账号', '绑定关系', '角色', '状态', '操作'];
@@ -55,7 +55,7 @@ function userTable(users, intro) {
 }
 // One user's access projection plus the enable/disable switch the API already offered but the console did not show.
 function userDetail(id, users) {
-  const section = card('用户详情'), content = element('div', ''), back = settingsLink('#/settings/users', '返回用户列表'),
+  const section = settingsCard('用户详情'), content = element('div', ''), back = settingsLink('#/settings/users', '返回用户列表'),
     message = element('p', '', 'view-error');
   message.setAttribute('role', 'alert');
   section.append(back, content);
@@ -66,7 +66,7 @@ function userDetail(id, users) {
     content.replaceChildren();
     if (notice) content.append(element('p', notice, 'view-success'));
     // The same fields as the row, so the list and the detail cannot disagree about how someone signs in.
-    content.append(element('h4', userDisplayName(user)),
+    content.append(element('h3', userDisplayName(user), 'card-sub'),
       facts([['角色', user.role === 'super_admin' ? '管理员 · 可管理全部项目' : '项目管理员'], ['状态', user.active ? '已启用' : '已停用'],
         ['账号 ID', user.id], ['登录方式', userLoginMethods(user)],
         ['本地账号', user.local_login ? (user.local_account || '未知') : '无本地登录'],

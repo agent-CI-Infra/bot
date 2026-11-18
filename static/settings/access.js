@@ -32,7 +32,7 @@ function tunnelBody(view, redraw) {
 const loginOriginSources = { public_address: '已验证的公网地址', deployment: '部署配置的入口（BOT_PUBLIC_ORIGIN）', local: '本机地址（只在本地测试时可用）' };
 const loginConfigSources = { wizard: '控制台向导保存', deployment: '部署环境变量', empty: '未配置' };
 function loginAccessCard(login) {
-  const section = card('GitHub 登录（只读）');
+  const section = settingsCard('GitHub 登录（只读）');
   if (!login) { section.append(note('这个部署没有登录配置接口，读不到 GitHub 登录设置。')); return section; }
   const separate = login.application_type === 'oauth_app', configured = login.source !== 'empty';
   section.append(facts([['登录状态', login.enabled ? '已启用：用户可以用 GitHub 账号登录' : '未启用：只能用本地账号登录'],

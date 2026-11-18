@@ -2,9 +2,11 @@ function catalogStatusText(status) {
   if (!status?.fetched_at) return '目录尚未成功下载，使用现有默认能力；未手填价格的请求暂不计价。';
   return `快照：${new Date(status.fetched_at).toLocaleString()} · ${status.entries} 个模型${status.rejected ? ` · 已丢弃 ${status.rejected} 个非法条目` : ''}${status.last_error ? ' · 最近刷新失败，继续使用此快照' : ''}`;
 }
-function modelCatalogPanel() {
+function modelCatalogPanel(level = 'h4') {
   const panel = element('section', '', 'model-catalog-status'), message = element('p', '正在读取目录…', 'muted');
-  message.setAttribute('role', 'status'); panel.append(element('h4', '在线能力与价格目录'), message, note('目录来自 models.dev，每 6 小时刷新。中转模型参考官方 USD 定价，不做人民币换算；手填值优先。'));
+  // #1039: the settings page draws this panel under an h2 card title, the project page under an h3 card: the caller names
+  // the level and .card-sub keeps the h4 size of the heading this section used to be.
+  message.setAttribute('role', 'status'); panel.append(element(level, '在线能力与价格目录', level === 'h3' ? 'card-sub' : ''), message, note('目录来自 models.dev，每 6 小时刷新。中转模型参考官方 USD 定价，不做人民币换算；手填值优先。'));
   const actor = me, address = location.hash, live = () => me === actor && location.hash === address && panel.isConnected;
   const show = status => { if (live()) message.textContent = catalogStatusText(status); };
   if (me.role === 'super_admin') panel.append(button('立即刷新目录', async event => {
