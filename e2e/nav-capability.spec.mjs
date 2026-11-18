@@ -30,7 +30,7 @@ test('the shared shell groups projects by organization and keeps the selected pr
     await expect(page.locator('#console-scope-org-1 [role=option]')).toHaveText(['project-102']);
     // The current scope bar names the organization and the project, and a project whose permissions are short of a feature says so there.
     await expect(page.locator('#console-context')).toContainText('alpha / project-101');
-    const permission = page.locator('#console-location [data-permission]');
+    const permission = page.locator('#console-project-header [data-permission]');
     await expect(permission).toBeVisible(); await expect(permission).toContainText('权限不足');
     // The badge opens the same gap dialog the project list uses, and Escape returns to it.
     await permission.click();
@@ -41,9 +41,12 @@ test('the shared shell groups projects by organization and keeps the selected pr
     // badge names a project and opens its dialog, so keeping it would describe something other than the scope text.
     // The snapshot is delayed here, because an assertion that retries cannot tell a cleared badge from a late answer.
     await page.route('**/api/installations?repository_id=102', async route => { await new Promise(resolve => setTimeout(resolve, 2500)); await route.continue(); });
+    const read102 = page.waitForResponse(response => new URL(response.url()).pathname === '/api/installations' && new URL(response.url()).searchParams.get('repository_id') === '102');
     await switchConsoleProject(page, '102');
     await expect(page.locator('#console-context')).toContainText('beta / project-102');
-    expect(await page.locator('#console-location [data-permission]').count()).toBe(0);
+    await expect(page.locator('#console-project-header .workbench-tabs')).toHaveAttribute('data-project-id', '102');
+    expect(await page.locator('#console-project-header [data-permission]').count()).toBe(0);
+    await read102;
     await page.unroute('**/api/installations?repository_id=102');
     // Re-reading the installation list drops the snapshot the navigation cached earlier, so the badge on returning to
     // the project comes from the new read instead of the page session's first answer.
@@ -57,17 +60,17 @@ test('the shared shell groups projects by organization and keeps the selected pr
     const sync = page.getByRole('button', { name: '同步安装列表', exact: true });
     await expect(sync).toBeVisible(); await sync.click(); await expect(sync).toBeEnabled();
     await page.evaluate(() => { location.hash = '#/projects/101/overview'; });
-    await expect(page.locator('#console-location [data-permission]')).toBeVisible();
+    await expect(page.locator('#console-project-header [data-permission]')).toBeVisible();
     expect(snapshotReads).toBeGreaterThanOrEqual(1);
     // A project with nothing missing keeps the bar to the scope only.
     await page.goto(h.admin + '/#/projects/102/overview');
     await expect(page.locator('#console-context')).toContainText('beta / project-102');
-    await expect(page.locator('#console-location [data-permission]')).toHaveCount(0);
+    await expect(page.locator('#console-project-header [data-permission]')).toHaveCount(0);
     // No breakpoint gains a page-level horizontal scrollbar from the extra scope text and badge.
     for (const width of [390, 768, 1024, 1440, 1920]) {
       await page.setViewportSize({ width, height: 900 });
       await page.goto(h.admin + '/#/projects/101/overview');
-      await expect(page.locator('#console-location [data-permission]')).toBeVisible();
+      await expect(page.locator('#console-project-header [data-permission]')).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       if (width < 768) expect(await page.locator('#console-mobile-nav a').count()).toBe(5);
     }
@@ -92,7 +95,7 @@ test('a background permission check reaches the scope bar without a fresh projec
     }));
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password, '#/projects/101/overview');
-    const badge = page.locator('#console-location [data-permission]');
+    const badge = page.locator('#console-project-header [data-permission]');
     await expect(badge).toBeVisible();
     // Open the list so the check answers, then come back: the bar has to show what the check returned, not the row it
     // cached before that answer. A fresh project read would bring the old gap back, so no read may be needed here.
@@ -126,7 +129,7 @@ test('a sync that answers after a project was opened still reaches the scope bar
       : route.continue());
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password, '#/projects/101/overview');
-    const badge = page.locator('#console-location [data-permission]');
+    const badge = page.locator('#console-project-header [data-permission]');
     await expect(badge).toBeVisible();
     // Open the list, start the sync, and open the project again while the answer is still in flight: that read caches
     // the pre-sync row, so the answer itself has to drop it after it lands, not before it starts.

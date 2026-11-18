@@ -21,20 +21,21 @@ test('a background snapshot answer reaches the project header, not only the shar
     // The check answers after the project page has already read and drawn the old snapshot.
     await page.route('**/api/installations/permissions/check', async route => {
       await new Promise(resolve => setTimeout(resolve, 1500));
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ repositories: [{ id: '101', full_name: 'alpha/project-101', owner_login: 'alpha', access_gaps: [] }] }) });
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ repositories: [{ id: '101', full_name: 'alpha/project-101', owner_login: 'alpha', access_gaps: [], installed: false }] }) });
     });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password, '#/projects/101/overview');
-    const barBadge = page.locator('#console-location [data-permission]'), headerBadge = page.locator('#project-page [data-permission]');
-    await expect(barBadge).toBeVisible(); await expect(headerBadge).toBeVisible();
+    const barBadge = page.locator('#console-project-header [data-permission]'), duplicateBadge = page.locator('#project-page [data-permission]');
+    await expect(barBadge).toBeVisible(); await expect(duplicateBadge).toHaveCount(0);
     // Open the list so the check starts, then open the project again while the answer is still in flight: its own read
-    // draws the gap, and the check that lands afterwards must update the header as well as the bar.
+    // draws the gap once, and the check that lands afterwards removes that same global-header marker.
     await page.evaluate(() => { location.hash = '#/projects'; });
     await expect(page.locator('#rows .project-list-row')).toHaveCount(1);
     await page.evaluate(() => { location.hash = '#/projects/101/overview'; });
-    await expect(headerBadge).toBeVisible();
+    await expect(duplicateBadge).toHaveCount(0);
     await expect(barBadge).toHaveCount(0, { timeout: 15000 });
-    await expect(headerBadge).toHaveCount(0, { timeout: 15000 });
+    await expect(duplicateBadge).toHaveCount(0, { timeout: 15000 });
+    await expect(page.locator('#console-project-header .project-head')).toContainText('已移出安装');
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });
@@ -54,7 +55,7 @@ test('a sync started inside the onboarding wizard makes the project bar read the
     await page.route('**/api/installations/sync', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ results: [], repositories: [] }) }));
     await page.setViewportSize({ width: 1440, height: 1000 });
     await login(page, h, password, '#/projects/101/overview');
-    const barBadge = page.locator('#console-location [data-permission]');
+    const barBadge = page.locator('#console-project-header [data-permission]');
     await expect(barBadge).toBeVisible();
     expect(reads).toBe(1);
     // Step 6 is addressed in the URL, so the wizard opens there directly.

@@ -203,7 +203,14 @@ function syncConsoleShell() {
     // running or a reply left unread by the previous user never survives the sign-out.
     updateConsoleAssistant();
   }
-  if (!signedIn) { syncScopePicker(); return; }
+  if (!signedIn) {
+    const globalHeader = $('console-project-header');
+    globalHeader.hidden = true;
+    globalHeader.querySelector('.project-head')?.remove(); globalHeader.querySelector('.workbench-tabs')?.remove();
+    const locationBox = $('console-location'), permission = $('console-permission');
+    if (permission.parentElement !== locationBox) locationBox.insertBefore(permission, locationBox.querySelector('.console-section-picker'));
+    syncScopePicker(); return;
+  }
   // The menu names the same person the header used to print beside the sign-out button.
   $('console-account-login').textContent = userDisplayName(me);
   $('console-account-role').textContent = currentRoleText();
@@ -239,6 +246,20 @@ function syncConsoleShell() {
     const row = consoleGaps.get(String(repo.id));
     permission.replaceChildren(...(row?.access_gaps?.length ? [permissionBadge(row)] : []));
   }
+  const locationBox = $('console-location'), overview = project?.section === 'overview', globalHeader = $('console-project-header');
+  const activeOverview = overview && current?.section === 'overview' && !current.unavailable;
+  const existingHead = globalHeader.querySelector('.project-head');
+  const nextHead = activeOverview ? $('project-page').querySelector('.project-head') : null;
+  if (nextHead && nextHead !== existingHead) { existingHead?.remove(); globalHeader.prepend(nextHead); }
+  else if (!nextHead && (!activeOverview || existingHead?.dataset.projectId !== String(project.id))) existingHead?.remove();
+  const existingTabs = globalHeader.querySelector('.workbench-tabs');
+  const tabs = activeOverview ? $('project-page').querySelector('.workbench-tabs') : null;
+  if (tabs && tabs !== existingTabs) { existingTabs?.remove(); globalHeader.append(tabs); }
+  else if (!tabs && (!activeOverview || existingTabs?.dataset.projectId !== String(project.id))) existingTabs?.remove();
+  if (activeOverview) globalHeader.append(permission);
+  else if (permission.parentElement !== locationBox) locationBox.insertBefore(permission, locationBox.querySelector('.console-section-picker'));
+  globalHeader.hidden = !activeOverview;
+  locationBox.hidden = !signedIn || activeOverview && !consoleMedia.matches;
   if (repo && me.role === 'super_admin' && !consoleGaps.has(String(repo.id))) setTimeout(() => loadConsoleGaps(String(repo.id)), 0);
 
   const scopeKey = project ? 'project:' + project.id : platform ? 'settings' : personal ? 'personal' : '';
@@ -505,6 +526,8 @@ function initConsoleShell() {
   settings.setAttribute('role', 'group'); settings.setAttribute('aria-label', t('nav.settings_group'));
   settings.setAttribute('data-i18n', 'nav.settings_group'); settings.setAttribute('data-i18n-attr', 'aria-label');
   tabs.replaceChildren(primary, settings); sidebar.append(scope, tabs);
+  const globalHeader = element('div', '', 'console-project-header'); globalHeader.id = 'console-project-header'; globalHeader.hidden = true;
+  document.querySelector('body > header').insertBefore(globalHeader, $('header-tools'));
   const locationBox = element('div', '', 'console-location'); locationBox.id = 'console-location'; locationBox.hidden = true;
   const area = element('span', '', 'eyebrow'), context = element('span'); area.id = 'console-area'; context.id = 'console-context';
   const permission = element('span', '', 'console-permission'); permission.id = 'console-permission';

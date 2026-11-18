@@ -37,7 +37,7 @@ test('#737 标题随路由更新：列表、控制台页、全局设置、项目
     }
     // The owner of the page is the project and the section it shows; the record inside the section does not rename it.
     await page.evaluate(() => { location.hash = '#/projects/101/overview'; });
-    await expect(page.locator('#project-page .project-head h1')).toHaveText('fixture/project-101');
+    await expect(page.locator('#console-project-header .project-head h1')).toHaveText('fixture/project-101');
     await expect(page).toHaveTitle('fixture/project-101 · 项目总览' + zh);
     await page.evaluate(() => { location.hash = '#/projects/101/activity'; });
     await expect(page).toHaveTitle('fixture/project-101 · 运行状态' + zh);
@@ -136,7 +136,7 @@ test('#737 真实的地址变化把焦点移到新页面标题，同地址重绘
     expect(await page.evaluate(() => document.activeElement?.dataset?.consoleNav)).toBe('projects');
     // A project page announces its own heading, which is the project name rather than a tab caption.
     await page.evaluate(() => { location.hash = '#/projects/101/overview'; });
-    await expect(page.locator('#project-page .project-head h1')).toHaveText('fixture/project-101');
+    await expect(page.locator('#console-project-header .project-head h1')).toHaveText('fixture/project-101');
     await expect.poll(() => page.evaluate(() => document.activeElement?.textContent?.trim() || null)).toBe('fixture/project-101');
     expect(await page.evaluate(() => document.activeElement?.tagName)).toBe('H1');
     expect(errors).toEqual([]);

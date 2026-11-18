@@ -14,7 +14,7 @@
 .project-member .facts { margin-top: var(--space-4); }
 .console-ready .project-content:has(.workspace-overview) { max-width: none; }
 
-/* Workbench Top Bar: Role View / Task View Switcher + Live Capacity Summary */
+/* View tabs sit in the global project header; this row keeps live capacity and actions. */
 .workbench-top {
   display: flex;
   align-items: center;
@@ -73,6 +73,7 @@
   flex-wrap: wrap;
   gap: 10px 14px;
   min-width: 0;
+  margin-left: auto;
 }
 .workbench-live-stats {
   display: flex;

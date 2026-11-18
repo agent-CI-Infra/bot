@@ -29,7 +29,7 @@ test('#614 无权限的项目地址：人话说明、面包屑「无法打开项
         const state = page.locator('#project-page [data-project-unavailable="forbidden"]');
         await expect(state.getByRole('heading', { name: '没有权限打开这个项目', exact: true })).toBeVisible();
         await expect(state).toContainText('当前账号看不到这个项目');
-        await expect(page.locator('#console-context')).toHaveText('无法打开项目');
+        await expect(page.locator('#console-context')).toBeVisible(); await expect(page.locator('#console-context')).toHaveText('无法打开项目');
         await expect(page.getByText('403 · repository_forbidden', { exact: true })).toBeHidden();
         await expect(page.getByText('正在读取项目…')).toHaveCount(0); await expect(page.getByText('正在加载…')).toHaveCount(0);
         await expect(state.getByRole('link', { name: '查看身份与权限', exact: true })).toHaveAttribute('href', '#/identity');
@@ -64,7 +64,7 @@ test('#614 超级管理员打开不存在的项目：「找不到这个项目」
       await expect(state.getByRole('heading', { name: '找不到这个项目', exact: true })).toBeVisible();
       await expect(page.getByText('没有权限打开这个项目')).toHaveCount(0);
       await expect(state.getByRole('link', { name: '查看身份与权限', exact: true })).toHaveCount(0);
-      await expect(page.locator('#console-context')).toHaveText('找不到项目');
+      await expect(page.locator('#console-context')).toBeVisible(); await expect(page.locator('#console-context')).toHaveText('找不到项目');
       await expect(page.getByText('正在读取项目…')).toHaveCount(0);
       const back = state.getByRole('link', { name: '返回项目列表', exact: true });
       await expect(back).toBeVisible(); await expect(back).toHaveAttribute('href', '#/projects');
@@ -89,7 +89,7 @@ test('#614 项目读取失败（非权限问题）时给出重试，重试后正
       const state = page.locator('#project-page [data-project-unavailable="failed"]');
       await expect(state.getByRole('heading', { name: '暂时打不开这个项目', exact: true })).toBeVisible();
       // A project already in the list keeps its name in the scope bar; only an unknown one reads 无法打开项目.
-      await expect(page.locator('#console-context')).toHaveText('fixture / project-101');
+      await expect(page.locator('#console-context')).toBeVisible(); await expect(page.locator('#console-context')).toHaveText('fixture / project-101');
       await expect(state.getByRole('link', { name: '返回项目列表', exact: true })).toHaveAttribute('href', '#/projects');
       await expect(page.getByText('500 · internal_error', { exact: true })).toBeHidden();
       const retry = state.getByRole('button', { name: '重试', exact: true });
@@ -97,9 +97,41 @@ test('#614 项目读取失败（非权限问题）时给出重试，重试后正
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: `.tmp/project-unavailable/failed-${width}.png`, fullPage: true });
       fail = false; await retry.click();
-      await expect(page.locator('#project-page .project-head h1')).toHaveText('fixture/project-101');
+      await expect(page.locator('#console-project-header .project-head h1')).toHaveText('fixture/project-101');
       await expect(page.locator('#console-context')).toHaveText('fixture / project-101');
       expect(errors).toEqual([]); await context.close();
     }
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});
+
+
+test('an overview permission change removes the old global project header', async ({ page }) => {
+  test.setTimeout(60000);
+  const h = await harness(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+    mkdirSync('.tmp/project-unavailable', { recursive: true });
+    await page.goto(h.admin + '/#/projects/101/overview');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      if (width === 390) await page.reload();
+      else await page.goto(h.admin + '/#/projects/101/overview');
+      const tabs = page.locator('#console-project-header .workbench-tabs');
+      await expect(tabs).toBeVisible();
+      await expect(tabs.locator('.workbench-tab-count').first()).toHaveText(/\d+/);
+      await page.route('**/api/repositories/101/role-board', route => route.fulfill({ status: 403, json: { error: 'repository_forbidden' } }));
+      await page.getByRole('button', { name: '刷新总览', exact: true }).click();
+      await expect(page.getByRole('heading', { name: '项目访问已变化', exact: true })).toBeVisible();
+      await expect(page.locator('#console-project-header')).toBeHidden();
+      await expect(tabs).toHaveCount(0);
+      await expect(page.locator('#console-context')).toBeVisible(); await expect(page.locator('#console-context')).toHaveText('无法打开项目');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: `.tmp/project-unavailable/revoked-${width}.png`, fullPage: true });
+      await page.unroute('**/api/repositories/101/role-board');
+    }
+    expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });

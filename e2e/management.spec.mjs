@@ -322,13 +322,14 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await page.route('**/api/repositories/101', async route => { const response = await route.fetch(); returnArrived(); await returnGate; await route.fulfill({ response }); });
     await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click(); await returning; await grip.focus();
     const returned = page.waitForResponse(response => response.url().endsWith('/api/repositories/101'));
-    releaseReturn(); await (await returned).finished(); await expect(page.locator('#project-page .project-head h1')).toHaveText('agent-test-zone/admin-fixture-101'); await expect(grip).toBeFocused();
+    releaseReturn(); await (await returned).finished(); await expect(page.locator('#console-project-header .project-head h1')).toHaveText('agent-test-zone/admin-fixture-101'); await expect(grip).toBeFocused();
     await page.unrouteAll({ behavior: 'wait' });
     for (let n = 0; n < 12; n++) { await page.keyboard.press('Shift+ArrowRight'); await page.keyboard.press('Shift+ArrowDown'); }
     const small = await chat.boundingBox(); expect(small.width).toBe(360); expect(small.height).toBe(460); expect(small.x).toBeGreaterThanOrEqual(0); expect(small.y).toBeGreaterThanOrEqual(0);
     await expect(send).toBeInViewport(); await expect(message).toHaveValue('窄屏整页中的草稿');
     await page.screenshot({ path: '.tmp/management-display/floating-mobile.png' });
-    await page.setViewportSize({ width: 520, height: 430 }); await expect(send).toBeInViewport();
+    await page.setViewportSize({ width: 520, height: 430 }); await page.screenshot({ path: '.tmp/management-display/floating-short.png' });
+    await expect(send).toBeInViewport();
     const short = await chat.boundingBox(); expect(short.y).toBeGreaterThanOrEqual(0); expect(short.y + short.height).toBeLessThanOrEqual(430);
     await page.setViewportSize({ width: 390, height: 844 });
     // #481: at this width the bar's 助手 destination is the way back in; the floating launcher is not on screen.

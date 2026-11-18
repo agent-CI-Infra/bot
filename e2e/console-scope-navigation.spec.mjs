@@ -25,7 +25,7 @@ for(const role of ['super','member']) test(`${role}: sidebar, phone destinations
         await expect(page.locator('.console-settings-nav a')).toHaveText(role==='super'?['个人设置','全局设置']:[]);
         await expect(page.locator('#tabs [aria-current=page]')).toHaveText(scope==='all'?'项目':'项目总览');
         expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
-        if(width===1440)await page.screenshot({path:`${out}/${role}-${scope}-1440.png`});
+        await page.screenshot({path:`${out}/${role}-${scope}-${width}.png`});
       }
       for(const width of [390,320]) {
         await page.setViewportSize({width,height:844});const bar=page.locator('#console-mobile-nav');
