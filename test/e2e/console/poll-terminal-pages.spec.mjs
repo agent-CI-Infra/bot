@@ -119,6 +119,8 @@ test('#878 监听与触发页：下一次成功读取后清除过期标注', asy
 // would make every later ordinary update interrupt the reader (#874), so the role is pinned after the failure too. The
 // 401 below keeps the console's own session state out of the way (`invalid_login` is the code api.js does not read as an
 // expired session); the row's terminal branch is what this test is about.
+// The success branch of the poll is the other half: it repeats the same sentence every five seconds, and a live region
+// announces any child-node change, so rewriting that sentence unchanged would interrupt the reader on every poll.
 test('#1078 监听与触发页：状态行常驻 polite live region，失败与终止之后仍是 status', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
   try {
@@ -126,20 +128,41 @@ test('#1078 监听与触发页：状态行常驻 polite live region，失败与�
     await repository(admin, a.id, '101');
     await loginAs(page, h.admin + '/#/projects/101/triggers', password);
     const status = page.locator('[data-actions-status]');
-    const semantics = () => status.evaluate(node => [node.getAttribute('role'), node.getAttribute('aria-live'), node.getAttribute('aria-atomic')].join('/'));
+    // Each attribute is asserted on its own and named in the message, so a failure says which one is missing instead of
+    // handing back one joined string for all three.
+    const expectSemantics = async where => {
+      for (const [name, value] of [['role', 'status'], ['aria-live', 'polite'], ['aria-atomic', 'true']])
+        await expect(status, `${where} (${name})`).toHaveAttribute(name, value);
+    };
     // The row is rendered before the switch is turned on, so its semantics are there from the first paint.
     await expect(status).toContainText('未开启。');
-    expect(await semantics(), 'the status row is a polite live region from its first render').toBe('status/polite/true');
+    await expectSemantics('the status row is a polite live region from its first render');
     await page.getByLabel('接收默认分支和版本标签的 Actions 失败事件', { exact: true }).check();
     await page.getByRole('button', { name: '保存事件开关', exact: true }).click();
     await expect(status).toContainText('配置检查通过后', { timeout: 10000 });
-    expect(await semantics(), 'a successful read keeps the role').toBe('status/polite/true');
+    await expectSemantics('a successful read keeps the role');
+    // The successful poll answers the same sentence every five seconds. Watch the row across one full interval: the
+    // request count proves a poll happened in that window, and the mutation count has to stay at zero because an
+    // unchanged sentence is not news for the reader.
+    await page.evaluate(() => {
+      const row = document.querySelector('[data-actions-status]');
+      window.__rowChanges = 0;
+      new MutationObserver(records => { window.__rowChanges += records.length; })
+        .observe(row, { childList: true, characterData: true, subtree: true });
+    });
+    const poll = url => url.pathname === '/api/repositories/101';
+    let polls = 0;
+    await page.route(poll, route => { polls++; return route.continue(); });
+    await page.waitForTimeout(7000);
+    await page.unroute(poll);
+    expect(polls, 'the row was polled while it was watched').toBeGreaterThan(0);
+    expect(await page.evaluate(() => window.__rowChanges), 'an unchanged answer must not rewrite a live region: a reader announces every child-node change again').toBe(0);
     await page.route('**/api/repositories/101', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
     await expect(status).toContainText('读取失败，显示上次结果', { timeout: 12000 });
-    expect(await semantics(), 'a failed refresh keeps the role instead of turning the row into an alert').toBe('status/polite/true');
+    await expectSemantics('a failed refresh keeps the role instead of turning the row into an alert');
     await page.unroute('**/api/repositories/101');
     await page.route('**/api/repositories/101', route => route.fulfill({ status: 401, json: { error: 'invalid_login' } }));
     await expect(status).toContainText('配置检查已停止', { timeout: 20000 });
-    expect(await semantics(), 'a stopped check keeps the role too').toBe('status/polite/true');
+    await expectSemantics('a stopped check keeps the role too');
   } finally { await h.stop(); }
 });
