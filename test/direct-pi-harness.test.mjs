@@ -17,6 +17,12 @@ import {operationRequestText} from '../dist/storage/payloads.js';
 test('default direct Pi dispatch uses native model streaming, platform task tools and no model mailbox',{timeout:60000},async t=>{
  const root=mkdtempSync(join(tmpdir(),'dispatch-pi-')),s=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root);let calls=0;
  const provider=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);calls++;
+  // #1058: a non-native dispatch carries the same system content as native — the dispatch prompt (with the built-in
+  // "Starting development" rule), the work this event can create, and the Tools write/merge rules. The whole request is
+  // read because a harness may carry the system text outside `messages`.
+  const request=JSON.stringify(body);
+  assert.match(request,/# Project Manager prompt/,'the dispatch prompt reaches a Pi Manager');
+  assert.match(request,/## Starting development/,'the built-in development rule reaches a Pi Manager');
   assert.ok(body.tools.some(t=>t.function.name==='bash'));
   assert.ok(body.tools.some(t=>t.function.name==='ignore_event'));
   assert.equal(req.headers.authorization,'Bearer fixture-key');assert.equal(body.stream,true);
