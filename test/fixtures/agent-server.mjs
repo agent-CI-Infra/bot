@@ -112,6 +112,14 @@ export const server=createServer(async(req,res)=>{
     }
     if(!url.pathname.startsWith('/github/'))return send({},404);
     const path=decodeURIComponent(url.pathname.slice(7));stats.requests.push({method,path});
+    // A GitHub App account (#1072): the installation of a fixture repository mints its token as the configured token.
+    let app;
+    if((app=/^\/repos\/fixture\/project-(\d+)\/installation$/.exec(path))&&repositories.has(app[1]))return send({id:55,account:{id:10,login:'fixture'},
+      permissions:{contents:'write',issues:'write',pull_requests:'write',actions:'write',checks:'read',statuses:'read',metadata:'read'}});
+    if(path==='/app'&&method==='GET')return send({id:123,slug:'fixture-bot',name:'fixture-bot'});
+    if(path==='/users/fixture-bot[bot]')return send({id:998,login:'fixture-bot[bot]'});
+    if(path==='/app/installations/55/access_tokens'&&method==='POST')return send({token:config.github_token,expires_at:new Date(Date.now()+3600000).toISOString(),permissions:body.permissions},201);
+    if(path==='/installation/token'&&method==='DELETE'){res.writeHead(204);return res.end();}
     if(req.headers.authorization!=='Bearer '+config.github_token)return send({},401);
     if(path==='/user')return send({id:999,login:'department-bot'});
     if(path==='/user/repos')return send(Number(url.searchParams.get('page')||1)===1?[...repositories.values()].map(r=>({...publicRepo(r),private:false})):[]);
@@ -122,7 +130,8 @@ export const server=createServer(async(req,res)=>{
     let m;
     // The developing label (#1047): read by name, created when missing, and taken off an Issue again.
     if((m=/^\/labels\/(.+)$/.exec(suffix))&&method==='GET'){const known=[...(repo.repositoryLabels||[]),...repo.createdLabels.map(l=>l.name)].find(name=>name.toLowerCase()===m[1].toLowerCase());return known?send({name:known}):send({message:'Not Found'},404);}
-    // A workflow start (#1072): GitHub answers with the run it created when asked to (return_run_details).
+    // A workflow's runs and a workflow start (#1072): GitHub answers with the run it created when asked to (return_run_details).
+    if((m=/^\/actions\/workflows\/([^/]+)\/runs$/.exec(suffix))&&method==='GET'){const runs=stats.workflowRuns.filter(run=>run.repository_id===repo.id&&run.workflow===m[1]).map((run,i)=>({id:9000+stats.workflowRuns.indexOf(run),event:'workflow_dispatch',status:'completed',conclusion:'success'}));return send({total_count:runs.length,workflow_runs:runs});}
     if((m=/^\/actions\/workflows\/([^/]+)\/dispatches$/.exec(suffix))&&method==='POST'){
       const id=9000+stats.workflowRuns.length,run={repository_id:repo.id,workflow:m[1],body};stats.workflowRuns.push(run);
       if(!body.return_run_details){res.writeHead(204);return res.end();}
