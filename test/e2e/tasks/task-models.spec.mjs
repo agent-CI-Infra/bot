@@ -34,7 +34,8 @@ test('角色详情查看仓库 skill，模型独立管理且项目不能修改�
     // The old task overview address opens the Manager page, which replaced the workflows page.
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
     await expect(page.getByRole('link', { name: '角色', exact: true })).toHaveAttribute('aria-current', 'page');
-    for (const caption of ['使用的模型', '检视', '开发', '规则总览', '任务总览', '工作流']) await expect(page.getByRole('link', { name: caption, exact: true })).toHaveCount(0);
+    // The role list's own links (开发, 检视 …) are roles, shown since #1068; no other link carries these captions.
+    for (const caption of ['使用的模型', '检视', '开发', '规则总览', '任务总览', '工作流']) await expect(page.getByRole('link', { name: caption, exact: true }).and(page.locator('a:not([data-testid^="role-list-"])'))).toHaveCount(0);
     await openRoleAdvanced(page);
     await expect(page.getByRole('heading',{name:'角色概览',exact:true})).toBeVisible();
     await expect(page.locator('[data-work-type]')).toHaveCount(0);

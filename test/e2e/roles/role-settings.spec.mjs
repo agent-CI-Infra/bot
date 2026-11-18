@@ -19,7 +19,7 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     const categories = page.getByRole('navigation', { name: '项目设置类别' });
     await expect(categories.locator('[aria-current=page]')).toHaveText('角色');
     await expect(categories.getByRole('link', { name: '项目知识', exact: true })).toHaveCount(0);
-    await expect(page.getByTestId('recommended-roles-intro')).toBeVisible();
+    await expect(page.locator('[data-role-version]').first()).toHaveText('正在使用默认配置，内置默认更新时自动跟随。');
     await openRoleAdvanced(page);
     await expect(page.getByRole('heading', { name: '角色概览', exact: true })).toBeVisible();
     await expect(page.locator('textarea[name=role_configuration]')).toHaveCount(0);
@@ -46,7 +46,8 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await expect(page.getByLabel('角色提示词', { exact: true })).toHaveValue('先读复现，再修改代码并验证。');
     await expect(page.getByLabel('dev 模型', { exact: true })).toHaveValue(model.id);
     await consoleSave(page).click();
-    await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
+    // The first save leaves the defaults (#1068).
+    await expect(page.locator('.flash')).toHaveText('角色配置已保存为自定义配置，不再跟随内置默认。新任务使用新配置；收回权限会阻止后续调用');
     let saved = (await admin('/api/repositories/101/roles')).value.configuration, dev = saved.roles.find(role => role.role_id === 'dev');
     expect(dev.persona_prompt).toBe('先读复现，再修改代码并验证。'); expect(dev.model_profile_ref.model_id).toBe(model.id);
     expect(dev.permissions).toMatchObject({ computer: 'deny', project_tasks: 'write', delegation: 'deny' });
@@ -119,7 +120,8 @@ test('新增角色、删除内置角色并重载，只有三个必需角色不�
     await openRoleFormAdvanced(page);
     await page.getByLabel('security 使用虚拟电脑权限', { exact: true }).selectOption('deny');
     await consoleSave(page).click();
-    await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
+    // The first save leaves the defaults (#1068).
+    await expect(page.locator('.flash')).toHaveText('角色配置已保存为自定义配置，不再跟随内置默认。新任务使用新配置；收回权限会阻止后续调用');
     for (const name of ['Manager', '跨任务协调', '独立 QA']) {
       await goRolePage(page, { role: name });
       await openRoleFormAdvanced(page);

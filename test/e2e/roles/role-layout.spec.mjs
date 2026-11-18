@@ -11,8 +11,6 @@ async function loginRoles(page, h, password) {
   await page.getByLabel('用户名', { exact: true }).fill('administrator');
   await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
-  await page.getByTestId('adopt-recommended-roles').click();
-  await expect(page.locator('.flash')).toContainText('已使用推荐配置');
   await openRoleAdvanced(page);
 }
 

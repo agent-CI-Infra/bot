@@ -37,9 +37,9 @@ test('角色、基本设置和模型共用一条「保存」栏，放弃可恢�
     await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
 
     await page.setViewportSize({ width: 1440, height: 900 });
+    // A saved configuration of the project's own, so the bar starts from 已保存.
+    expect((await admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0 })).status).toBe(200);
     await login(page, h.admin + '/#/projects/101/roles', password);
-    await page.getByTestId('adopt-recommended-roles').click();
-    await expect(page.locator('.flash')).toContainText('已使用推荐配置');
     await page.goto(h.admin + '/#/projects/101/roles/dev');
     await expect(page.getByTestId('role-form')).toBeVisible();
     await expect(consoleSaveStatus(page)).toHaveText('已保存');

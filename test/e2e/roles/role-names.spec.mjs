@@ -25,8 +25,6 @@ test('中文界面的角色列表和详情使用完整中文名称与职责，�
     await repository(admin, a.id, '101');
     await page.setViewportSize({ width: 1440, height: 900 });
     await login(page, h.admin + '/#/projects/101/roles', password);
-    await page.getByTestId('adopt-recommended-roles').click();
-    await expect(page.locator('.flash')).toContainText('已使用推荐配置');
     await openRoleAdvanced(page);
     const table = page.getByRole('table', { name: '角色解析结果', exact: true });
     for (const name of chineseNames) await expect(table.getByRole('link', { name, exact: true })).toBeVisible();
@@ -70,8 +68,6 @@ test('英文界面同一位置使用完整英文，不再中英夹杂', async ({
     await page.addInitScript(() => { globalThis.__consoleLocale = 'en'; document.documentElement.lang = 'en'; });
     await page.setViewportSize({ width: 1440, height: 900 });
     await login(page, h.admin + '/#/projects/101/roles', password);
-    await page.getByTestId('adopt-recommended-roles').click();
-    await expect(page.locator('.flash')).toBeVisible();
     await openRoleAdvanced(page);
     await expect(page.getByRole('heading', { name: 'Roles', exact: true })).toBeVisible();
     const table = page.getByRole('table', { name: 'Role list', exact: true });
