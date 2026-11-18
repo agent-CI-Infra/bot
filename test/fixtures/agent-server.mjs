@@ -25,7 +25,7 @@ function makeRepo(id){
 for(const id of ['101','202','303'])repositories.set(id,makeRepo(id));
 // refFailures answers 500 without writing; refLostResponses writes the ref and still answers 500 (the answer is lost).
 let config={github_token:'',model_key:''},treeMismatch=false,staled=false,dropComment=true,pullFailures=0,refFailures=0,refLostResponses=0;
-const stats={requests:[],models,dispatches:[],acceptances:[],refWrites:[],reviews:[],comments:[],commentEdits:[],prs:[],labels:[],unlabels:[],createdLabels:[],trees:[],issues:[]};
+const stats={requests:[],models,dispatches:[],acceptances:[],refWrites:[],reviews:[],comments:[],commentEdits:[],prs:[],labels:[],unlabels:[],createdLabels:[],trees:[],issues:[],workflowRuns:[]};
 const call=(name,args,id)=>({id:'call-'+id,type:'function',function:{name,arguments:JSON.stringify(args)}});
 function dispatch(context){
   const {event,work:options}=context;
@@ -122,6 +122,12 @@ export const server=createServer(async(req,res)=>{
     let m;
     // The developing label (#1047): read by name, created when missing, and taken off an Issue again.
     if((m=/^\/labels\/(.+)$/.exec(suffix))&&method==='GET'){const known=[...(repo.repositoryLabels||[]),...repo.createdLabels.map(l=>l.name)].find(name=>name.toLowerCase()===m[1].toLowerCase());return known?send({name:known}):send({message:'Not Found'},404);}
+    // A workflow start (#1072): GitHub answers with the run it created when asked to (return_run_details).
+    if((m=/^\/actions\/workflows\/([^/]+)\/dispatches$/.exec(suffix))&&method==='POST'){
+      const id=9000+stats.workflowRuns.length,run={repository_id:repo.id,workflow:m[1],body};stats.workflowRuns.push(run);
+      if(!body.return_run_details){res.writeHead(204);return res.end();}
+      return send({workflow_run_id:id,run_url:`https://api.github.com/repos/fixture/project-${repo.id}/actions/runs/${id}`,html_url:`https://github.com/fixture/project-${repo.id}/actions/runs/${id}`});
+    }
     if(suffix==='/labels'&&method==='POST'){repo.createdLabels.push(body);stats.createdLabels.push({repository_id:repo.id,...body});return send({id:repo.createdLabels.length,...body},201);}
     if((m=/^\/issues\/(\d+)\/labels\/(.+)$/.exec(suffix))&&method==='DELETE'){
       const number=Number(m[1]),labels=repo.labels.get(number)||[],at=labels.findIndex(name=>name.toLowerCase()===m[2].toLowerCase());stats.unlabels.push({repository_id:repo.id,number,label:m[2]});
