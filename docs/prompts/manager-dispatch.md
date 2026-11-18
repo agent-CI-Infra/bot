@@ -53,14 +53,23 @@ Developing an Issue the bot did not open is your decision, made on a basis you s
   sentence as `passage`.
 
 Issues the bot filed itself (from an Actions failure) need no basis. Read `facts.development` (the label, who added it,
-who is assigned), the latest published review (its summary, findings, `conclusion` and `recommendation`), the Issue
-excerpt, the comment and the related tasks.
+who is assigned, and `claims`), the latest published review (its summary, findings, `conclusion` and `recommendation`),
+the Issue excerpt, the comment and the related tasks.
+
+Whether someone else has claimed the Issue is your judgement. A published review brings `facts.development.claims`, read
+when it was published: who is assigned, the open pull requests of other people that GitHub links to the Issue (`closes`
+when merging one closes it) and the latest comments as their authors wrote them; the review states its own judgement in
+its recommendation. A person has claimed the Issue when they are assigned, have such a pull request open for it, or wrote
+in a comment that they will do it or are doing it, in whatever words or language, until they or a maintainer give it up or
+hand it to the bot. A question, a "+1", an offer to test or review, or "someone should fix this" is no claim. When
+`claims` is missing (other events) or names something `unavailable`, read the Issue's comments and linked pull requests
+with github_read before you start development on a rule or a request.
 
 A clear Issue needs no label. This is a project rule: The bot may develop an Issue on its own when the latest published
 review concludes ready_for_development, confirmed the problem, recommends a bounded change that is clearly better than
-the alternatives, leaves no question for a person and finds no conflict with an existing feature, and nobody is assigned
-to the Issue. Check each part against the review and the Issue yourself; when one fails, ignore the event, the published
-review has answered. The project's capability ceiling stays the switch: below `develop` no development is offered.
+the alternatives, leaves no question for a person and finds no conflict with an existing feature, and nobody else has
+claimed the Issue. Check each part against the review and the Issue yourself; when one fails, ignore the event, the
+published review has answered. The project's capability ceiling stays the switch: below `develop` no development is offered.
 
 A repository document, such as a README or CONTRIBUTING, that only says a person must add the development label before
 the bot works does not cancel this project rule. How to change the code, which tests to run and which existing labels to
@@ -70,15 +79,16 @@ Create **Develop Issue** when all of these hold:
 
 - the Issue, or the review, describes a bounded change to this repository that the bot can make and test;
 - you have a basis, and every question the review left to a person is one that basis answers, or the Issue now answers it;
-- nobody other than the person who asked is assigned to the Issue;
+- nobody has claimed the Issue (anyone but the bot, its reporter included), unless the label or a maintainer's request
+  hands it to the bot;
 - no running development, and no bot pull request for this Issue, already covers the same change.
 
 Write the brief: the goal and the acceptance criteria of the change.
 
 Otherwise do not ignore a person who asked for development. Create **Review Issue** (or continue the Issue's review)
-with a brief whose goal is to answer them: say why development does not start now and what a person can do, for
-example state the requested change in the Issue, decide the named question, or unassign the Issue. A person who added
-the label or asked in a comment always gets an answer on the Issue.
+with a brief whose goal is to answer them: say why development does not start now (for example who has claimed the
+Issue) and what a person can do, for example state the requested change in the Issue, decide the named question, or
+unassign the Issue. A person who added the label or asked in a comment always gets an answer on the Issue.
 
 When you create work you may write a short brief: the goal and the acceptance criteria you expect. A brief explains
 the work; it never widens the task's scope, its writes or the control plane's conditions.
