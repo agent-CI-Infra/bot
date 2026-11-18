@@ -12,12 +12,15 @@ an hour late.
    (the workflow file name, `workflow_dispatch`, "schedule"). If one exists, comment on it with the new observations
    instead of opening another; if people closed it as not wanted, leave it.
 3. **Write the recommendation** as an Issue with `github_write` when it is offered, in the language the repository's
-   Issues use; without `github_write`, put it in your result or reply. It contains:
+   Issues use; without `github_write`, put it in your result or reply. Recommend one plan with two parts that go
+   together, not alternatives: the bot starts the workflow on time, and the workflow keeps `schedule` only as a fallback
+   that skips itself once the bot's run has succeeded. Without the bot's run the skip never applies; without the skip
+   the late scheduled run repeats the bot's work. The recommendation contains:
    - the evidence: the workflow, its cron and the late runs;
-   - turning on bot scheduling: in the bot's console, ask the management assistant, or add a project scheduled task on
-     the project's 定时任务与通知 page with an instruction such as "start nightly.yml on main; first check that no run of
-     it is queued or in progress, and if one is, start nothing";
-   - changing the workflow: add `workflow_dispatch` and keep `schedule` as a fallback, set `concurrency` with
+   - part 1, turning on bot scheduling: in the bot's console, ask the management assistant, or add a project scheduled
+     task on the project's 定时任务与通知 page with an instruction such as "start nightly.yml on main; first check that no
+     run of it is queued or in progress, and if one is, start nothing";
+   - part 2, changing the workflow: add `workflow_dispatch` and keep `schedule` as a fallback, set `concurrency` with
      `cancel-in-progress: false` so a scheduled run waits for a running manual one instead of cancelling it, and let the
      first job skip all the others when the run was started by `schedule` and a manual run succeeded since the previous
      scheduled time. For example, adapting the cron, the file name and the time window:

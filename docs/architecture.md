@@ -114,7 +114,7 @@ webhook 不直接创建开发任务，开发只由 Manager 按上述依据创建
 
 ## 仓库只读探索
 
-检视、开发与 CI 观察共享 `RepositoryExplorer`，通过 `github_read`、`github_search` 和 `read_job_log` 读取当前接入仓库的代码、其他 Issue/PR、讨论和相关 Actions。触发对象是分析起点，不是全部可读上下文。CI 通过控制面执行这些工具；Pi 使用任务邮箱传递工具请求与分块结果。读取路径、HTTP GET 方法和搜索仓库由控制面校验，内容及日志在返回模型前脱敏。具体工具和触发目标边界见[共享 Agent 后端](agent-runtime.md#触发上下文与仓库探索)。
+检视、开发、CI 观察和请求任务（包括项目定时任务）共享 `RepositoryExplorer`，通过 `github_read`、`github_search` 和 `read_job_log` 读取当前接入仓库的代码、其他 Issue/PR、讨论和相关 Actions。触发对象是分析起点，不是全部可读上下文。CI 通过控制面执行这些工具；Pi 使用任务邮箱传递工具请求与分块结果。读取路径、HTTP GET 方法和搜索仓库由控制面校验，内容及日志在返回模型前脱敏。具体工具和触发目标边界见[共享 Agent 后端](agent-runtime.md#触发上下文与仓库探索)。
 
 ## 任务只读令牌
 
