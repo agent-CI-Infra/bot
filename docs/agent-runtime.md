@@ -26,7 +26,7 @@
 
 ## 触发上下文与仓库探索
 
-Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这一个对象。`src/agent/exploration.ts` 的 `RepositoryExplorer` 为 CI 观察、检视和开发提供同一套只读工具：
+Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这一个对象。`src/agent/exploration.ts` 的 `RepositoryExplorer` 为 CI 观察、检视、开发和请求任务（包括项目定时任务，#1072）提供同一套只读工具：
 
 - `github_read`：读取当前仓库的目录、文件、Git tree、提交、其他 Issue/PR 与讨论、Actions 和检查信息。路径相对当前仓库，文件内容解码为 UTF-8，可用 `ref` 选择固定提交并按 API 分页读取列表。
 - `github_search`：搜索当前仓库的 Issue 与 PR，支持 GitHub issue search 语法和分页；仓库范围由执行器固定并核对返回项。
@@ -52,7 +52,7 @@ Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这
 - **触发 workflow**：正文是 `ref` 和可选的 `inputs`，控制面总是加上 `return_run_details: true`，GitHub 返回 200 和这次运行的 `workflow_run_id`、`run_url`、`html_url`（不支持这个参数的 GitHub 返回 204，只有状态）。workflow 有没有声明 `workflow_dispatch`、`ref` 是否存在、是否已有运行在跑，控制面都不预先检查，GitHub 的拒绝（例如 422）原样交给 agent；触发前先看有没有正在跑的运行，由提示词和指令要求，见[定时任务](schedules.md#定时触发-workflow)。
 - **结果与审计**：返回 GitHub 响应里有用的部分（编号、链接、sha、状态、运行 ID 等）和 HTTP 状态。每次调用写一条 `github_writes`：范围、key、调用方（角色和任务、Manager 和事件、服务角色和会话、管理助手的用户）、仓库、方法、路径、请求摘要、状态、GitHub 状态码和结果链接；被拒绝的调用也记录。项目审计（`audit`）同时记一条 `github.write.<状态>`。
 
-工具出现在每个工作类型、Pi 角色、Manager 分派、群聊助手和管理助手里，再按调用方角色的 GitHub 权限过滤：没有任何资源读写的角色看不到它，硬调也被拒绝。委派的任务还受来源角色的上限约束，角色不能把自己没有的写权限借给别人。内置角色默认只有 Manager 可写（Issue、Pull Request、Contents、Actions；Actions 读写默认跟随 Issue 读写，#1072），其他内置角色对全部 GitHub 资源只读。团队执行的报告类请求任务（例如项目定时任务）由 Manager 保留它的 `github_write`，所以定时任务能直接触发 workflow 或提 Issue；只读的工作角色仍拿不到。合并 PR 是 Contents 写，所以 Manager 默认可以经 `PUT /pulls/{n}/merge` 合并 PR，经 `PUT /contents/...`、`POST /git/refs`、`PATCH /git/refs/...` 写分支；没有单独的「可合并」权限，其他角色、群助手和管理助手按各自的 Contents 写（管理助手另要本人对该仓库有 `tasks.write`）。路由不检查目标分支，这类合并也不经过 `POST /api/tasks/:id/merge` 的候选、QA 和检查校验，能否合入由仓库的分支保护（或规则集）和必需检查决定，见[角色池](role-pool.md#authorized-merge)。`github_write` 不改 `.github/workflows/`：写这个目录的文件被拒绝（`github_workflow_write_forbidden`），它申请的令牌也从不带 Workflows 权限，GitHub 因此拒绝改到 workflow 的分支更新。CI 改动只走 bot PR：项目管理员在控制台确认为 CI 改动的开发任务（任务输入的 `workflow_changes`），推送自己的 bot 分支时才申请 `workflows: write`，安装没有授予时 GitHub 照样拒绝。升级时已保存的内置角色权限一次性重置为这些默认值（模型、后端和提示词等设置保留，自定义角色不变），配置记一个由 `migration:381` 保存的新版本。
+工具出现在每个工作类型、Pi 角色、Manager 分派、群聊助手和管理助手里，再按调用方角色的 GitHub 权限过滤：没有任何资源读写的角色看不到它，硬调也被拒绝。委派的任务还受来源角色的上限约束，角色不能把自己没有的写权限借给别人。内置角色默认只有 Manager 可写（Issue、Pull Request、Contents、Actions；Actions 读写默认跟随 Issue 读写，#1072），其他内置角色对全部 GitHub 资源只读。团队执行的报告类请求任务（例如项目定时任务）由 Manager 保留它的 `github_write`，所以定时任务能直接触发 workflow 或提 Issue；只读的工作角色仍拿不到。直接执行请求任务的角色（例如执行到期检查的 Manager）和团队里的开发角色还有上面的 `github_read`、`github_search` 和 `read_job_log`，触发前可以先查这个 workflow 有没有排队或正在跑的运行；仍按角色的 GitHub 读权限过滤。合并 PR 是 Contents 写，所以 Manager 默认可以经 `PUT /pulls/{n}/merge` 合并 PR，经 `PUT /contents/...`、`POST /git/refs`、`PATCH /git/refs/...` 写分支；没有单独的「可合并」权限，其他角色、群助手和管理助手按各自的 Contents 写（管理助手另要本人对该仓库有 `tasks.write`）。路由不检查目标分支，这类合并也不经过 `POST /api/tasks/:id/merge` 的候选、QA 和检查校验，能否合入由仓库的分支保护（或规则集）和必需检查决定，见[角色池](role-pool.md#authorized-merge)。`github_write` 不改 `.github/workflows/`：写这个目录的文件被拒绝（`github_workflow_write_forbidden`），它申请的令牌也从不带 Workflows 权限，GitHub 因此拒绝改到 workflow 的分支更新。CI 改动只走 bot PR：项目管理员在控制台确认为 CI 改动的开发任务（任务输入的 `workflow_changes`），推送自己的 bot 分支时才申请 `workflows: write`，安装没有授予时 GitHub 照样拒绝。升级时已保存的内置角色权限一次性重置为这些默认值（模型、后端和提示词等设置保留，自定义角色不变），配置记一个由 `migration:381` 保存的新版本。
 
 框架交付不经过 `github_write`，也不需要角色的写权限：检视结论、测试通过的 PR、Actions 重跑与失败提报和发行说明沿用原流程，只看项目工作类型的写入，见 [Manager 与工作类型](workflows.md)。
 
