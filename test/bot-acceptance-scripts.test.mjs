@@ -1,11 +1,11 @@
-// The scripts that set up and drive the AI scenario acceptance (bot-acceptance/) against the real control plane with a
+// The scripts that set up and drive the AI scenario acceptance (test/acceptance/) against the real control plane with a
 // local GitHub and model fixture: they only use the console API, so a change to that API must not break them unseen.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { harness } from './helpers.mjs';
@@ -13,12 +13,13 @@ import { Onboarding } from '../dist/onboarding/service.js';
 import { InstallationSync } from '../dist/app/installations.js';
 import { appEvents, appPermissions } from '../dist/github/client.js';
 import { taskGroupSQL } from '../dist/app/project-activity.js';
-import { bootstrap, BASELINE_POLICY, FIXTURE } from '../bot-acceptance/bootstrap.mjs';
-import { resetFixture } from '../bot-acceptance/reset.mjs';
-import { BUSY, parse, waitFor } from '../bot-acceptance/wait.mjs';
-import { call } from '../bot-acceptance/console.mjs';
-import { readJson } from '../bot-acceptance/lib/state.mjs';
-import { GitHub } from '../bot-acceptance/lib/github.mjs';
+import { bootstrap, BASELINE_POLICY, FIXTURE } from './acceptance/bootstrap.mjs';
+import { resetFixture } from './acceptance/reset.mjs';
+import { settings } from './acceptance/stack.mjs';
+import { BUSY, parse, waitFor } from './acceptance/wait.mjs';
+import { call } from './acceptance/console.mjs';
+import { readJson } from './acceptance/lib/state.mjs';
+import { GitHub } from './acceptance/lib/github.mjs';
 
 async function listen(t, handler) {
   const server = createServer(handler); server.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -153,4 +154,14 @@ test('wait settles only after the matching tasks stop and stay unchanged, and re
   const none = await run(['--number', '7', '--allow-none', '--settle', '20'], [[task('succeeded')]]);
   assert.deepEqual([none.settled, none.waited_seconds], [true, 20]);
   assert.throws(() => parse(['--number', 'x']), /--number/);
+});
+
+test('stack settings resolve existing Compose files for both named and quick tunnels', () => {
+  const named = settings({ ACCEPTANCE_TUNNEL: 'named' });
+  assert.equal(named.files.length, 2);
+  assert.equal(existsSync(named.files[1]), true, named.files[1]);
+  const quick = settings({ ACCEPTANCE_TUNNEL: 'quick' });
+  assert.equal(quick.files.length, 4);
+  assert.equal(existsSync(quick.files[1]), true, quick.files[1]);
+  assert.equal(existsSync(quick.files[3]), true, quick.files[3]);
 });

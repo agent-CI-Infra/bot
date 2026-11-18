@@ -1,16 +1,41 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { basename } from 'node:path';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { basename, posix } from 'node:path';
 
-export function discoverSets(files = readdirSync('test').filter(name => name.endsWith('.test.mjs') && !name.endsWith('.live.test.mjs')).sort().map(name => `test/${name}`)) {
+function walkTests(dir) {
+  if (!existsSync(dir)) return [];
+  const found = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const rel = posix.join(dir, entry.name);
+    if (entry.isDirectory()) found.push(...walkTests(rel));
+    else if (entry.isFile() && entry.name.endsWith('.test.mjs') && !entry.name.endsWith('.live.test.mjs')) found.push(rel);
+  }
+  return found;
+}
+
+export function defaultTestFiles(root = 'test') {
+  const flat = existsSync(root)
+    ? readdirSync(root, { withFileTypes: true })
+        .filter(entry => entry.isFile() && entry.name.endsWith('.test.mjs') && !entry.name.endsWith('.live.test.mjs'))
+        .map(entry => posix.join(root, entry.name))
+    : [];
+  const nested = ['ut', 'st'].flatMap(tier => walkTests(posix.join(root, tier)));
+  return [...flat, ...nested].sort((a, b) => a.localeCompare(b, 'en'));
+}
+
+export function discoverSets(files = defaultTestFiles()) {
   if (files.some(file => file.endsWith('.live.test.mjs'))) throw new Error('*.live.test.mjs files call real external services; run them with node --test, not as a test set');
   if (new Set(files).size !== files.length) throw new Error('duplicate test files');
-  const sets = new Map();
+  const sets = new Map(), explicit = new Set();
   for (const file of files) {
     const text = readFileSync(file, 'utf8'), line = /^\/\/ test-set:(.*)$/m.exec(text)?.[1].trim();
     const named = line && /^([a-z0-9-]+)\s+\S/.exec(line)?.[1];
     if (line !== undefined && !named) throw new Error(`${file}: write "// test-set: <name> <why these files must not run at the same time>"`);
-    const name = named || basename(file, '.test.mjs'), set = sets.get(name) || { name, files: [], size: 0 };
+    const name = named || basename(file, '.test.mjs');
+    if (sets.has(name) && (!named || !explicit.has(name)))
+      throw new Error(`duplicate test-set name "${name}" (${sets.get(name).files[0]} and ${file}); rename one file or declare "// test-set: <name> <reason>" in both`);
+    if (named) explicit.add(name);
+    const set = sets.get(name) || { name, files: [], size: 0 };
     set.files.push(file); set.size += statSync(file).size; sets.set(name, set);
   }
   return [...sets.values()];

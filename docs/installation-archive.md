@@ -59,7 +59,7 @@ npm ci
 npm run check
 mkdir -p .tmp
 TMPDIR="$PWD/.tmp" SQLITE_TMPDIR="$PWD/.tmp" npm test
-node test/installation-archive-docker.mjs
+node test/docker/identity/installation-archive-docker.mjs
 ```
 
 Docker 验收使用一次性的 `bot-install-archive-162-*` 项目、独立镜像与随机 localhost 端口，真实控制面和浏览器配本地 GitHub 分页固件，覆盖容器重启、失败恢复及未知项展示。脚本仅清理本次项目及其卷，不替换既有部署或共享 local 镜像标签。浏览器使用 Playwright 已安装的 Chromium；产物在 `.tmp/install-archive-162/docker/`。真实 GitHub 登录与当前权限验证的集成留给 #163，本模块的适配器测试不冒充真实 OAuth 验收。

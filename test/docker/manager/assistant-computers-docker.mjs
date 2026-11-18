@@ -1,4 +1,4 @@
-import { computerResultOwner } from '../runner/result-owner.mjs';
+import { computerResultOwner } from '../../../runner/result-owner.mjs';
 // Real-Docker acceptance of assistant computers (#457). It builds a test image from an existing project-computer image with
 // this checkout's runner on top, runs this checkout's manager code in-process under a deployment id of its own, and removes
 // every container, volume and image it created (all labelled with that deployment). Nothing of another Compose project is
@@ -11,8 +11,8 @@ import { mkdirSync, writeFileSync, cpSync, readdirSync, rmSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { Docker } from '../manager/docker.mjs';
-import { AssistantComputers } from '../manager/assistant-computers.mjs';
+import { Docker } from '../../../manager/docker.mjs';
+import { AssistantComputers } from '../../../manager/assistant-computers.mjs';
 
 const tag = randomBytes(4).toString('hex'), root = resolve('.tmp/assistant-computers-docker'), work = join(root, tag);
 const deployment = 'ac457' + tag, image = `dbot-assistant-457-${tag}:test`, volume = `dbot-${deployment}-assistant-homes`, resultVolume=`dbot-${deployment}-tool-results`;

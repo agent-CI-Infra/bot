@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Starts and removes the throwaway bot an acceptance run tests, as its own Compose project.
 //
-//   node bot-acceptance/stack.mjs up      pull and start the images of ACCEPTANCE_IMAGE_TAG (e.g. sha-<12 hex>)
-//   node bot-acceptance/stack.mjs logs    copy every service's log into <state>/evidence/compose/
-//   node bot-acceptance/stack.mjs down    remove the project, its volumes and every container, volume, network and image
+//   node test/acceptance/stack.mjs up      pull and start the images of ACCEPTANCE_IMAGE_TAG (e.g. sha-<12 hex>)
+//   node test/acceptance/stack.mjs logs    copy every service's log into <state>/evidence/compose/
+//   node test/acceptance/stack.mjs down    remove the project, its volumes and every container, volume, network and image
 //                                     its manager created (they carry the deployment label, not the Compose project)
 //
 //   ACCEPTANCE_PROJECT    Compose project, default bot-acceptance; it must start with bot-acceptance, so the local
@@ -17,14 +17,14 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { stateDir, writeJson } from './lib/state.mjs';
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 export function settings(env = process.env) {
   const project = env.ACCEPTANCE_PROJECT || 'bot-acceptance', tunnel = env.ACCEPTANCE_TUNNEL || 'named', port = env.ACCEPTANCE_PORT || '8791';
   if (!/^bot-acceptance[a-z0-9-]*$/.test(project)) throw new Error('ACCEPTANCE_PROJECT must start with bot-acceptance');
   if (!['quick', 'named'].includes(tunnel)) throw new Error('ACCEPTANCE_TUNNEL is quick or named');
   if (!/^\d+$/.test(port)) throw new Error('ACCEPTANCE_PORT must be a port number');
-  const files = ['-f', join(root, 'docker/compose.yaml'), ...(tunnel === 'quick' ? ['-f', join(root, 'bot-acceptance/compose.quick-tunnel.yaml')] : [])];
+  const files = ['-f', join(root, 'docker/compose.yaml'), ...(tunnel === 'quick' ? ['-f', join(root, 'test/acceptance/compose.quick-tunnel.yaml')] : [])];
   return { project, tunnel, port, files };
 }
 

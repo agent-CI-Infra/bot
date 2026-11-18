@@ -1,9 +1,9 @@
 // Checks the installed Codex CLI against the app-server protocol lock in src/harness/app-server.ts.
-// Usage: npm run build && node scripts/codex-protocol-lock.mjs [work-dir] [--codex /path/to/codex]
+// Usage: npm run build && node test/live/codex/codex-protocol-lock.mjs [work-dir] [--codex /path/to/codex]
 // It regenerates the JSON Schema with the CLI under a throwaway CODEX_HOME (no login or shared config is read), hashes the
 // definitions the client depends on and compares the CLI version and the digest. Exit code 1 means the lock is stale.
 import {execFileSync} from 'node:child_process';import {createHash} from 'node:crypto';import {mkdirSync,readFileSync,rmSync} from 'node:fs';import {join,resolve} from 'node:path';
-import {codexAppServer} from '../dist/harness/app-server.js';
+import {codexAppServer} from '../../../dist/harness/app-server.js';
 const args=process.argv.slice(2),flag=args.indexOf('--codex'),codex=flag>=0?args.splice(flag,2)[1]:'codex';
 const work=resolve(args[0]??'.tmp/codex-protocol-lock'),home=join(work,'codex-home'),out=join(work,'schema');
 rmSync(work,{recursive:true,force:true});mkdirSync(home,{recursive:true});

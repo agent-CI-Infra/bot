@@ -1,4 +1,4 @@
-// Loaded into every Node.js process of a unit test set (scripts/test-sets.mjs adds it to NODE_OPTIONS): TCP connections
+// Loaded into every Node.js process of a unit test set (test/framework/test-sets.mjs adds it to NODE_OPTIONS): TCP connections
 // may only go to loopback, where the local fake servers listen. Any other connection fails as if it had been refused and
 // is written to BOT_TEST_NETWORK_LOG, which fails the set even when the code under test swallows the error. Tests that
 // need a real external service belong in *.live.test.mjs (docs/development.md, section 测试集与并行).

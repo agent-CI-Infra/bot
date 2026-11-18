@@ -1,4 +1,4 @@
-// Run with: npm ci --prefix runner && node --test test/review-session-runner.mjs
+// Run with: npm ci --prefix runner && node --test test/live/review/review-session-runner.mjs
 // The fixture model answers plain JSON, which the explicitly enabled gateway transport relays to Pi.
 process.env.BOT_HARNESS_MODEL_TRANSPORT??='gateway';
 import test from 'node:test';
@@ -10,14 +10,14 @@ import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {generateKeyPairSync} from 'node:crypto';
-import {emptyRepositoryFixture} from './empty-repository-helpers.mjs';
-import {saveManager} from './helpers.mjs';
-import {queueWebhook} from '../dist/review/queue.js';
-import {workspace} from '../runner/workspace.mjs';
-import {estimateTokens} from '../runner/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
-import {subagentSystem} from '../dist/agent/runtime.js';
-import {TaskRecords} from '../dist/tasks/service.js';
-import {roleConfiguration,saveConfiguration} from '../dist/roles/definition.js';
+import {emptyRepositoryFixture} from '../../empty-repository-helpers.mjs';
+import {saveManager} from '../../helpers.mjs';
+import {queueWebhook} from '../../../dist/review/queue.js';
+import {workspace} from '../../../runner/workspace.mjs';
+import {estimateTokens} from '../../../runner/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
+import {subagentSystem} from '../../../dist/agent/runtime.js';
+import {TaskRecords} from '../../../dist/tasks/service.js';
+import {roleConfiguration,saveConfiguration} from '../../../dist/roles/definition.js';
 
 const text=message=>typeof message.content==='string'?message.content:message.content.map(block=>block.text||'').join('');
 const actor={type:'User',login:'alice',id:5};

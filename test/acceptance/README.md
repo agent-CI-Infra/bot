@@ -8,12 +8,12 @@
 
 | 步骤 | 命令 | 做什么 |
 | --- | --- | --- |
-| 1 | `node bot-acceptance/reset.mjs` | 用测试者令牌重置夹具仓：删规则集和 main 的分支保护，关闭打开的 PR 和 Issue，删除 main 以外的分支，把 main 强推回 `seed` 标签。写 `fixture.json` |
-| 2 | `node bot-acceptance/stack.mjs up` | 以 Compose 项目 `bot-acceptance` 拉起 `ACCEPTANCE_IMAGE_TAG` 的全部镜像，业务端口只绑本机回环。快速隧道模式下打印随机的 `trycloudflare.com` 地址。写 `stack.json` |
-| 3 | `node bot-acceptance/bootstrap.mjs` | 建超级管理员（密码当场随机生成）→ 交隧道 token（命名隧道时）→ 验证公网地址 → 登记 App 并把它的 Webhook 改到本实例 → 登记并测试模型 → 同步安装、启动夹具仓项目、写入基线策略、完成向导 → 建只管夹具仓的项目管理员 → 预检（能力、项目行、权限缺口、项目电脑就绪、版本、GitHub 额度）。写 `target.json` |
+| 1 | `node test/acceptance/reset.mjs` | 用测试者令牌重置夹具仓：删规则集和 main 的分支保护，关闭打开的 PR 和 Issue，删除 main 以外的分支，把 main 强推回 `seed` 标签。写 `fixture.json` |
+| 2 | `node test/acceptance/stack.mjs up` | 以 Compose 项目 `bot-acceptance` 拉起 `ACCEPTANCE_IMAGE_TAG` 的全部镜像，业务端口只绑本机回环。快速隧道模式下打印随机的 `trycloudflare.com` 地址。写 `stack.json` |
+| 3 | `node test/acceptance/bootstrap.mjs` | 建超级管理员（密码当场随机生成）→ 交隧道 token（命名隧道时）→ 验证公网地址 → 登记 App 并把它的 Webhook 改到本实例 → 登记并测试模型 → 同步安装、启动夹具仓项目、写入基线策略、完成向导 → 建只管夹具仓的项目管理员 → 预检（能力、项目行、权限缺口、项目电脑就绪、版本、GitHub 额度）。写 `target.json` |
 | 4 | 测试 AI | 按剧本操作 GitHub；用 `console.mjs` 读写控制台，用 `wait.mjs` 等 Bot 处理完 |
-| 5 | `node bot-acceptance/evidence.mjs`、`node bot-acceptance/stack.mjs logs` | 导出版本、项目行、策略、全部任务的详情和公开日志、投递、费用，以及各服务的容器日志，放到 `evidence/` |
-| 6 | `node bot-acceptance/stack.mjs down` | 删除 Compose 项目和卷，以及 manager 按部署标签创建的项目电脑容器、卷、网络和镜像 |
+| 5 | `node test/acceptance/evidence.mjs`、`node test/acceptance/stack.mjs logs` | 导出版本、项目行、策略、全部任务的详情和公开日志、投递、费用，以及各服务的容器日志，放到 `evidence/` |
+| 6 | `node test/acceptance/stack.mjs down` | 删除 Compose 项目和卷，以及 manager 按部署标签创建的项目电脑容器、卷、网络和镜像 |
 
 重置放在初始化之前：这时 App 的 Webhook 还没有指向新实例，重置产生的关闭和推送不会变成本轮的任务。
 
@@ -44,10 +44,10 @@
 ## 测试 AI 能用的命令
 
 ```sh
-node bot-acceptance/console.mjs GET '/api/tasks?repository_id={repo}&limit=20'
-node bot-acceptance/console.mjs PATCH /api/repositories/{repo}/policy '{"test_command":"sh scripts/test.sh"}'
-node bot-acceptance/wait.mjs --number 12            # Issue/PR #12 的任务出现且全部不再排队或运行，并保持 60 秒不变
-node bot-acceptance/wait.mjs --number 7 --allow-none   # 预期 Bot 不处理时（如草稿 PR）也能结束
+node test/acceptance/console.mjs GET '/api/tasks?repository_id={repo}&limit=20'
+node test/acceptance/console.mjs PATCH /api/repositories/{repo}/policy '{"test_command":"sh scripts/test.sh"}'
+node test/acceptance/wait.mjs --number 12            # Issue/PR #12 的任务出现且全部不再排队或运行，并保持 60 秒不变
+node test/acceptance/wait.mjs --number 7 --allow-none   # 预期 Bot 不处理时（如草稿 PR）也能结束
 ```
 
 `{repo}` 换成夹具仓的项目 ID。`console.mjs` 只接受本实例的 `/api/` 路径，会话是项目管理员的，能看什么、改什么由 Bot 自己的权限决定；部署级设置和超级管理员凭据它拿不到。`wait.mjs` 结束时退出码 0，超时（默认 30 分钟）退出码 2，两种情况都打印匹配任务的摘要。
@@ -66,12 +66,12 @@ node bot-acceptance/wait.mjs --number 7 --allow-none   # 预期 Bot 不处理时
 ```sh
 export ACCEPTANCE_PROJECT=bot-acceptance-dev ACCEPTANCE_PORT=18791 ACCEPTANCE_TUNNEL=quick \
   ACCEPTANCE_STATE_DIR=.tmp/bot-acceptance-dev ACCEPTANCE_IMAGE_TAG=sha-$(git rev-parse --short=12 origin/main)
-node bot-acceptance/reset.mjs
-node bot-acceptance/stack.mjs up
+node test/acceptance/reset.mjs
+node test/acceptance/stack.mjs up
 ACCEPTANCE_BOT_URL=http://127.0.0.1:18791 \
   ACCEPTANCE_PUBLIC_ORIGIN=$(node -p "require('./.tmp/bot-acceptance-dev/stack.json').public_origin") \
-  node bot-acceptance/bootstrap.mjs      # 另需 App、模型变量
-node bot-acceptance/stack.mjs down
+  node test/acceptance/bootstrap.mjs      # 另需 App、模型变量
+node test/acceptance/stack.mjs down
 ```
 
 新的快速隧道域名大约一分钟后才能从公网解析，`bootstrap.mjs` 会重试公网地址验证，最多 3 分钟。

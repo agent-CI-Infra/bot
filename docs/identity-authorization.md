@@ -90,7 +90,7 @@ npm ci
 npm run check
 npm test
 npx playwright test e2e/github-identity.spec.mjs e2e/admin-grants.spec.mjs
-node test/github-identity-docker.mjs
+node test/docker/identity/github-identity-docker.mjs
 ```
 
 Docker 验收使用随机 `bot-github-163-*` Compose 项目、专用镜像、卷与 localhost 随机端口，配本地 GitHub 固件，无真实 GitHub 写入。证据在 `.tmp/github-login-163/`，脚本只清理自己创建的资源。

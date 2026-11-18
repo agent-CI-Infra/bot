@@ -1,13 +1,13 @@
-import { Store } from '../dist/storage/database.js';
-import { ResultSession, resultScope, commandResult } from '../dist/agent/tool-results.js';
+import { Store } from '../../../dist/storage/database.js';
+import { ResultSession, resultScope, commandResult } from '../../../dist/agent/tool-results.js';
 // Opt-in acceptance using real Docker execs, process groups and pipes. No deployed containers are modified.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, cpSync, readdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { Docker } from '../manager/docker.mjs';
-import { Projects } from '../manager/projects.mjs';
+import { Docker } from '../../../manager/docker.mjs';
+import { Projects } from '../../../manager/projects.mjs';
 
 const id=()=>randomBytes(24).toString('hex'),tag=randomBytes(4).toString('hex');
 const deployment='commands'+tag,image=`bot-command-lifecycle-${tag}:test`,repo='632';

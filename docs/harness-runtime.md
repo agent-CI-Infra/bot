@@ -24,7 +24,7 @@ Claude Code 的完整说明见 [Claude Code harness](claude-code.md)；下文说
 
 ## 容器内 Codex（`codex app-server`）
 
-`codex` 驱动（`src/harness/codex.ts` + `src/harness/app-server.ts`）通过 `runner/harness-entry.mjs` 在容器内以独立进程组启动 `codex app-server`（stdio JSON-RPC 协议），兼容范围由 `src/harness/agent-tools.ts` 管理（当前 `>=0.166.0 <1.0.0`，协议基线 `0.166.0`；可用 `node scripts/codex-protocol-lock.mjs` 复核协议摘要）。
+`codex` 驱动（`src/harness/codex.ts` + `src/harness/app-server.ts`）通过 `runner/harness-entry.mjs` 在容器内以独立进程组启动 `codex app-server`（stdio JSON-RPC 协议），兼容范围由 `src/harness/agent-tools.ts` 管理（当前 `>=0.166.0 <1.0.0`，协议基线 `0.166.0`；可用 `node test/live/codex/codex-protocol-lock.mjs` 复核协议摘要）。
 
 ### 工具卷与配置
 

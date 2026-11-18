@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Blocks until the bot has finished reacting, so the test AI does not spend its own turns polling.
 //
-//   node bot-acceptance/wait.mjs --number 12            tasks for Issue/PR #12 have appeared and none is still queued or running
-//   node bot-acceptance/wait.mjs --number 7 --allow-none   also settles when the bot never starts a task (e.g. a draft PR)
-//   node bot-acceptance/wait.mjs --since 2026-11-14T08:00:00Z --kind development
+//   node test/acceptance/wait.mjs --number 12            tasks for Issue/PR #12 have appeared and none is still queued or running
+//   node test/acceptance/wait.mjs --number 7 --allow-none   also settles when the bot never starts a task (e.g. a draft PR)
+//   node test/acceptance/wait.mjs --since 2026-11-14T08:00:00Z --kind development
 //
 // "Settled" means no matching task is queued or running and the matching tasks have not changed for --settle seconds
 // (default 60: a review may still trigger a follow-up). Exit 0 when settled, 2 on --timeout (default 30 minutes);
