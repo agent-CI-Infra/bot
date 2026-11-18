@@ -236,7 +236,7 @@ test('an explicitly authorized role creates owned work but recovers from a refus
   assert.ok(taskManagementTools.every(t => t.function.parameters.additionalProperties === false));
 });
 
-test('github_write from a task files an Issue once per key, escapes mentions, redacts secrets and follows the live role', async t => {
+test('github_write from a task files an Issue once per key, sends mentions and code as written, redacts secrets and follows the live role', async t => {
   const { s, save, caller, create } = fixture(t); let writes = 0, failOnce = true; const issues = [], requests = [];
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk; const body = raw ? JSON.parse(raw) : null;
@@ -252,7 +252,7 @@ test('github_write from a task files an Issue once per key, escapes mentions, re
   t.after(() => new Promise(r => { server.close(r); server.closeAllConnections(); }));
   save('reviewer', { github_issues: 'write' });
   const task = s.get('SELECT * FROM tasks WHERE id=?', create(caller(), 'Report Issue').id), url = 'http://127.0.0.1:' + server.address().port;
-  const write = taskGithubWrite(s, task, new Redactor(), async () => {}, url), body = { title: 'Observed\ndefect', body: 'Report to @maintainer; seen with fixture-bot-token.' };
+  const write = taskGithubWrite(s, task, new Redactor(), async () => {}, url), body = { title: 'Observed\ndefect', body: 'Report to @maintainer; seen with fixture-bot-token.\n\n```yaml\n- uses: actions/checkout@v4\n```' };
   // An answer that never arrived: the key is held as unknown and never sent again.
   const lost = await write({ method: 'POST', path: '/issues', key: 'report-1', body });
   assert.equal(lost.error, 'github_response_unknown'); assert.match(lost.instruction, /new key/);
@@ -260,8 +260,10 @@ test('github_write from a task files an Issue once per key, escapes mentions, re
   const filed = await write({ method: 'POST', path: '/issues', key: 'report-2', body });
   assert.deepEqual([filed.number, filed.html_url, filed.status, filed.replayed], [2, 'https://example.invalid/issues/2', 201, undefined]);
   assert.deepEqual(await write({ method: 'POST', path: '/issues', key: 'report-2', body }), { ...filed, replayed: true }); assert.equal(writes, 2);
-  // People's text: mentions escaped, the title on one line; every known credential redacted.
-  assert.equal(issues[1].title, 'Observed defect'); assert.match(issues[1].body, /^Report to &#64;maintainer; seen with \[REDACTED\]\.\n\n<!-- dept-bot-write:[a-f0-9]{24} -->$/);
+  // People's text as written, `@` included, so a mention reaches the person and a code block stays valid; the title on one
+  // line; every known credential redacted.
+  assert.equal(issues[1].title, 'Observed defect');
+  assert.match(issues[1].body, /^Report to @maintainer; seen with \[REDACTED\]\.\n\n```yaml\n- uses: actions\/checkout@v4\n```\n\n<!-- dept-bot-write:[a-f0-9]{24} -->$/);
   assert.equal(queueWebhook(s, 'r', 'issues', { action: 'opened', issue: { ...issues[1], state: 'open' }, sender: { id: 9, type: 'User', login: 'fixture-bot' } }, 'echo'), 0);
   assert.equal((await write({ method: 'POST', path: '/issues', key: 'report-2', body: { ...body, title: 'Changed intent' } })).error, 'github_write_key_conflict');
   // Who, where and what, for every call.

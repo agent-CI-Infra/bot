@@ -401,7 +401,7 @@ test('real Pi forwards github_write to the control plane: a role with Issues wri
   d.h.store.run('DELETE FROM task_execution_configs WHERE task_id=?',d.h.taskId);
   const [task]=await d.run();
   assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
-  assert.equal(filed.length,1);assert.match(filed[0].body,/ping &#64;alice/);assert.doesNotMatch(filed[0].title,/@/);
+  assert.equal(filed.length,1);assert.match(filed[0].body,/ping @alice/);assert.equal(filed[0].title,'Follow-up for @alice');
   // Pi received the control plane's answer as the tool result, then finished the review as usual.
   assert.match(JSON.stringify(d.requests[1].messages),/"number\\":77/);
   assert.ok(d.requests[0].tools.some(tool=>tool.function.name==='github_write'));

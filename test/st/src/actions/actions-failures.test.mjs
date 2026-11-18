@@ -150,8 +150,8 @@ test('the workflow model decides external and code; unsupported, unusable or fai
   await f.tick(); assert.equal(f.reruns().length, 0); assert.equal(f.state.issues.length, 0);
   assert.match(f.h.store.get('SELECT error FROM actions_failure_scans').error, /^model_/); assert.equal(f.h.store.get("SELECT status FROM tasks WHERE kind='actions.failures'").status, 'retry_wait');
   down = false; await f.tick(); assert.equal(f.state.issues.length, 1); assert.equal(filedFor(f, 800).classification, 'code');
-  // The full diagnosis keeps paragraphs and newlines while mentions are escaped.
-  assert.ok(f.state.issues[0].body.includes('Broken test, ping &#64;owner\nnow.'));
+  // The full diagnosis keeps paragraphs, newlines and mentions as written.
+  assert.ok(f.state.issues[0].body.includes('Broken test, ping @owner\nnow.'));
   // Without a model the workflow waits for configuration instead of guessing.
   f = await fixture(t); await f.policy({ model_id: null }); await f.tick();
   assert.equal(f.state.issues.length, 0); assert.equal(f.h.store.get('SELECT error FROM actions_failure_scans').error, 'model_not_configured');

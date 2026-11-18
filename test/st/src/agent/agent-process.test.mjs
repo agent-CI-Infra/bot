@@ -414,8 +414,8 @@ test('a reply task whose role writes Issues files one with github_write, opens a
   const d = await developmentHarness(t, { custom: { writes: ['reply', 'code', 'pull_request'], issue: true, permissions: { github_issues: 'write' } } });
   assert.equal(d.task.status, 'succeeded', JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
   const state = await fetch(d.endpoint + '/fixture/state').then(r => r.json()), result = JSON.parse(d.task.result);
-  // github_write POST /issues: one Issue, mentions escaped, GitHub's useful answer returned to the agent and audited.
-  const issue = state.issues.at(-1); assert.match(issue.body, /Ask &#64;someone/); assert.doesNotMatch(issue.title, /@/);
+  // github_write POST /issues: one Issue, written as given, GitHub's useful answer returned to the agent and audited.
+  const issue = state.issues.at(-1); assert.match(issue.body, /^Ask @someone to document add\./); assert.equal(issue.title, 'Follow-up: @someone document add');
   assert.equal(d.toolReplies.length, 1); assert.equal(d.toolReplies[0].number, issue.number); assert.equal(d.toolReplies[0].html_url, issue.html_url); assert.equal(d.toolReplies[0].status, 201);
   const ledger = d.h.store.get('SELECT * FROM github_writes WHERE scope=?', 'task:' + d.task.id);
   assert.deepEqual([ledger.method, ledger.path, ledger.state, ledger.status, ledger.html_url, JSON.parse(ledger.actor).role], ['POST', '/issues', 'sent', 201, issue.html_url, 'dev']);
