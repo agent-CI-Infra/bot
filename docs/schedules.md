@@ -45,6 +45,22 @@
 
 定时发布没有处理器，`release.scheduled` 不能保存。#146/#147 可以通过同一注册入口接入；本模块不选择版本、不打标签、不创建 Release，不改变无变更不发布、检查失败不发布、SemVer 升高、手动草稿和定时正式发布的既定边界。
 
+## 定时触发 workflow
+
+GitHub Actions 的 `schedule` 触发在 GitHub 负载高时会推迟，有时被丢掉，整点是高峰（#1072）。需要按时跑的构建（例如 Nightly）可以改由 bot 触发：不新增处理器，就用一条项目定时任务，指令写明在哪个分支上触发哪个 workflow，例如：
+
+> 在 main 上触发 .github/workflows/nightly.yml（github_write POST /actions/workflows/nightly.yml/dispatches，ref 为 main）。触发前先用 github_read 查看这个 workflow 有没有排队或正在运行的运行，有就不再触发，只在报告里说明；触发后在报告里写上 GitHub 返回的运行链接。
+
+「定时任务与通知」页的「常用模板」里有「使用定时触发 workflow 模板」，填好这条指令和每天 00:00 的时间，改成自己的 workflow 文件名、分支和时间即可；管理助手的提示词里有同一个示例，可以直接在对话里让它建。
+
+- **怎么触发**：Manager 执行这条任务，用 `github_write` 调 `POST /actions/workflows/{文件名或 id}/dispatches`，正文是 `ref` 和可选的 `inputs`。控制面总是带上 `return_run_details: true`，GitHub 返回 200 和这次运行的 `workflow_run_id`、`run_url`、`html_url`，agent 拿到运行链接写进报告，写入账本记下 `html_url`。每次调用单独签发只带 `actions: write` 的令牌，用完撤销；同一个 key 不会触发第二次，和其他写入一样记账本和审计。
+- **谁可以**：项目能力上限至少「可评论和打标签」（`comment`），执行角色有 Actions 读写（Manager 默认有，见[共用角色权限](role-pool.md#shared-role-permissions)）。GitHub 账户还要有 `actions: write`：GitHub App 缺这项时，项目列表的权限缺口里会列出「触发 Actions 工作流」；机器人账号需要仓库 Write 角色。管理助手和「可评论和打标签」及以上档位的飞书群也可以触发，例如在群里说「跑一下 Nightly」。
+- **平台不预先检查**：workflow 有没有声明 `workflow_dispatch`、`ref` 对不对、有没有运行正在跑，都交给 GitHub 的返回（例如 422）和 agent 自己判断。「触发前先看有没有正在跑的」写在指令里，不是固定流程。
+
+workflow 这边建议同时改造，保留 `schedule` 兜底：加上 `workflow_dispatch`，`concurrency` 设 `cancel-in-progress: false`（定时运行等手动运行跑完，而不是取消它），第一个 job 检查到本次是 `schedule` 触发、并且上一个定时时点以来已经有成功的手动运行时，跳过后面所有 job。完整 YAML 示例在 [`docs/prompts/late-schedules.md`](prompts/late-schedules.md)。
+
+bot 在看 Actions 时（Actions 失败处理、CI 观察、项目定时任务、群聊助手和管理助手的问答）如果发现某个 workflow 的定时运行经常比 cron 晚很多（参考：经常晚 1 小时以上），会在 Issue 里推荐这个方案：先查重，同一个仓库只推荐一次，已经有相关 Issue 就在下面评论；没有 `github_write` 时写在结果或回复里。推荐什么、怎么判断都写在 [`docs/prompts/late-schedules.md`](prompts/late-schedules.md) 里，这份文本原样交给模型，是提示词，不是固定流程。仓库接入向导看到带 `on.schedule` 的 workflow 时也会把它列为推荐项，见[仓库接入指南](onboarding-guide.md)。
+
 ## 升级：项目日报迁到会话定时任务（#1027）
 
 原来的项目计划可以选 `report.daily`（确定性统计的项目日报）并发到飞书私聊或群。这类「项目定时往飞书发」的计划已经移除。升级后控制面启动时把每一条项目日报计划迁一次：

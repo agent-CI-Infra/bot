@@ -86,6 +86,9 @@ export const planSchema = obj({
   ci: obj({ summary: s(4000), files: list(s(300), 50) }, ['summary', 'files']),
   schedules: list(obj({ name: s(80), cron: s(100), timezone: s(64), instruction: s(4000) }, ['name', 'cron', 'timezone', 'instruction']), 5, 1),
   feishu: obj({ level: { type: 'string', enum: ['read', 'comment', 'dispatch'] }, reason }, ['level', 'reason']),
+  // A recommendation only, like feishu (#1072): workflows with on.schedule that the bot could start on time. Nothing is
+  // applied; the page hands it to the management assistant or the schedules page.
+  scheduled_dispatch: obj({ workflows: list(obj({ path: s(300), cron: s(200), delay: s(500) }, ['path', 'cron']), 10, 1), reason }, ['workflows', 'reason']),
 }, ['profile']);
 const fn = (name: string, description: string, parameters: Json) => ({ type: 'function', function: { name, description, parameters } });
 export const onboardingTools = [

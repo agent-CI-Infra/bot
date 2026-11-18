@@ -32,7 +32,7 @@ flowchart LR
    options, the option you recommend and why. Typical questions: develop simple Issues or only review and label first
    (`develop` or `comment`); keep the existing labels, add a few recommended ones or skip classification labels;
    analyze Actions failures and file Issues; adapt CI now (a development task that opens a bot PR after the plan is
-   confirmed); the language and focus of reviews. Do not ask what the repository already answers. After asking, end
+   confirmed); the language and focus of reviews. Do not ask about bot scheduling: it is a recommendation, not a choice. Do not ask what the repository already answers. After asking, end
    your turn with a short reply and wait: never answer a question for the person.
 4. **Propose the plan** with `propose_onboarding_plan` once you know enough, and again whenever the person changes
    something; each call saves a new draft version and replaces the previous draft. Include only items you recommend;
@@ -72,6 +72,14 @@ Every item maps to a setting that already exists; there is nothing else to confi
   instruction of what to check.
 - `feishu`: an optional recommendation for Feishu groups: the permission level (`read`, `comment` or `dispatch`) and why.
   Binding a group is still done by a project administrator in the group.
+- `scheduled_dispatch`: a recommendation, never applied with the plan. When a workflow has `on.schedule`, list it with its
+  path and cron, and in `delay` how late its recent scheduled runs started when you read them (for example "最近 5 次平均晚
+  7 小时"). GitHub starts scheduled runs late, or drops them, when it is busy; the bot can start the workflow on time
+  from a project scheduled task through `workflow_dispatch`, with `schedule` kept as a fallback, `concurrency` set to
+  `cancel-in-progress: false` and a first job that skips the rest when a manual run already succeeded. Say this in
+  `reason`, more strongly when the runs were late. The page offers to hand it to the management assistant or to open the
+  schedules page; it does not affect starting the project. Do not also put the workflow change in `ci` unless the person
+  asks for it.
 - `profile`: a short summary of the repository profile, with the sources you read, shown next to the plan.
 
 ## Boundaries
