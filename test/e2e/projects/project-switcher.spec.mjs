@@ -83,7 +83,8 @@ test('searchable scope list, long names, disabled state, keyboard and focus acro
     await expect(trigger(page)).toHaveAttribute('aria-expanded', 'false');
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.getByRole('button', { name: 'English', exact: true }).click();
-    await expect(trigger(page)).toHaveAccessibleName('Switch project: beta/bravo');
+    // #1060: the name is now computed from the trigger's content (org then repository, as drawn), not from an aria-label.
+    await expect(trigger(page)).toHaveAccessibleName('Switch project: bravo beta');
     await trigger(page).click();
     await expect(page.locator('#console-scope-projects').getByRole('option', { name: 'Project: beta/bravo · Disabled', exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
