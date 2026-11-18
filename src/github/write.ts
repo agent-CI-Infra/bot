@@ -14,8 +14,8 @@ import { covers, projectCeiling, resourceLevel } from '../work/ceiling.js';
  * one call, sends the request, revokes the token and returns the useful part of GitHub's answer. The agent never holds a
  * token that can write.
  *
- * - Text meant for people (title and body of Issues, comments, PRs and reviews) has `@` mentions escaped; every string is
- *   redacted for known secrets. Code and file content are redacted but never escaped.
+ * - Text meant for people (title and body of Issues, comments, PRs and reviews) gets the public-text redaction and is
+ *   sent as written, `@` included; every other string (code, file content) only loses known secrets.
  * - The key makes a retried call return the earlier result instead of writing twice: within one scope (a task, a dispatched
  *   event, a group or management turn) a key that already reached GitHub is answered from the ledger.
  * - Every call is recorded in github_writes (who, repository, method, path, a request digest, GitHub's status and URL) and in
@@ -42,7 +42,7 @@ export interface WriteContext {
 }
 
 // One route: `shared` routes act on an Issue or a pull request by number (GitHub keeps both under /issues), `comment` routes on
-// an Issue or PR conversation comment by id. human: which body fields people read and therefore get their mentions escaped.
+// an Issue or PR conversation comment by id. human: which body fields people read and therefore get the public-text redaction.
 // base64: whether body.content is base64 file content always (contents) or only with encoding base64 (blobs).
 // dispatch: a workflow_dispatch, whose body always asks GitHub to return the run it started.
 interface Route { methods: string[]; pattern: RegExp; resource: WriteResource | 'shared' | 'comment'; operation?: WriteOperation; human?: 'text' | 'review'; base64?: 'always' | 'encoding'; dispatch?: boolean }
@@ -90,7 +90,7 @@ const description = 'Write to GitHub through the control plane, exactly like the
   + 'POST /pulls/7/reviews {event, body, comments}; PUT /pulls/7/merge; PUT /contents/docs/a.md {message, content (base64), sha?, branch?}; POST /git/refs {ref, sha}; '
   + 'POST /actions/workflows/nightly.yml/dispatches {ref, inputs?} starts a workflow that declares workflow_dispatch and returns its workflow_run_id and html_url (read its runs first: do not start one that is already queued or running unless asked). '
   + 'Allowed only where your role has write on the route\'s GitHub resource (Issues, Pull requests, Contents or Actions) and the project\'s capability ceiling allows it (comment for Issues, pull requests and Actions, develop for Contents); other repositories, other routes and changes to .github/workflows/ are refused. '
-  + 'Mentions (@) in titles and bodies people read are escaped and secrets are removed. key: a short stable name for this write (for example "triage-comment"); calling again with the same key returns the earlier result instead of writing twice, so keep it when retrying and use a new key for a different write. '
+  + 'Text is sent as written: an @mention notifies that person, so mention someone only when the task asks for it; secrets are removed. key: a short stable name for this write (for example "triage-comment"); calling again with the same key returns the earlier result instead of writing twice, so keep it when retrying and use a new key for a different write. '
   + 'Use github_read to check state before writing; write only what your task needs.';
 const properties = { method: { type: 'string', enum: [...writeMethods] }, path: { type: 'string', description: 'Repository-relative REST path, such as /issues/12/comments. No query string.' },
   body: { type: 'object', description: 'The REST request body. Omit when the route takes none.' }, key: { type: 'string', maxLength: 120 } };
@@ -148,11 +148,10 @@ export function writeRoute(method: string, path: string): (Route & { number?: nu
 // Known secrets shapes that are never legitimate repository content: private keys and GitHub tokens.
 const secretShapes = (text: string) => text.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]+-----|$)/g, '[REDACTED]')
   .replace(/\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]{20,}/g, '[REDACTED]');
-const escapeMentions = (text: string) => text.replace(/@/g, '&#64;');
 // A body that cannot be sent as given: binary content holding a credential, or human text that redaction would empty.
 class Unsendable extends Error { constructor(readonly code: string, readonly detail: string) { super(code); } }
 /**
- * The body GitHub receives. Human text gets the public-text redaction and escaped mentions; every other string (code, commit
+ * The body GitHub receives. Human text gets the public-text redaction; every other string (code, commit
  * messages, refs) only loses known secrets. Base64 file content is redacted as text when it is UTF-8; binary content that
  * contains a known secret is refused instead of being corrupted. Every text body carries the bot's marker: a bot account
  * writes as an ordinary user, and the marker keeps its own comments and Issues from coming back as new events.
@@ -164,8 +163,7 @@ function sanitize(entry: Route, body: unknown, redactor: Redactor, marker: strin
     if (typeof value !== 'string') return plain(value);
     const cleaned = publicText(value, redactor);
     if (value.trim() && !cleaned.trim()) throw new Unsendable('github_write_text_unsafe', 'The text contains key or certificate material that cannot be published; remove it and write again.');
-    const text = escapeMentions(cleaned);
-    return title ? text.replace(/[\r\n]+/g, ' ').trim() : text;
+    return title ? cleaned.replace(/[\r\n]+/g, ' ').trim() : cleaned;
   };
   const marked = (value: unknown) => typeof value === 'string' ? value + '\n\n' + marker : value;
   if (!body || typeof body !== 'object' || Array.isArray(body)) return entry.dispatch && body === undefined ? { return_run_details: true } : plain(body);
