@@ -13,7 +13,7 @@ function rateLimitBody(view, redraw) {
       catch (err) { probe.disabled = false; message.textContent = readErrorText(err); }
     }, ''), message = element('p', '', 'view-error');
     message.setAttribute('role', 'alert');
-    head.append(element('h3', `${account.name}（${account.type === 'github_app' ? 'GitHub App' : 'Token 账号'}）`), probe); nodes.push(head, message);
+    head.append(element('h3', `${account.name}（${account.type === 'github_app' ? 'GitHub App' : 'Token 账号'}）`, 'rate-account'), probe); nodes.push(head, message);
     if (!recorded?.buckets.length) { nodes.push(note('还没有记录，点「探测」读取。')); continue; }
     const table = element('table', '', 'rule-table rate-table'), headRow = element('tr', '');
     for (const caption of ['对象', '额度', '已用', '剩余', '窗口重置', '状态']) headRow.append(element('th', caption));
