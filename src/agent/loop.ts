@@ -28,6 +28,7 @@ import { permissionTools } from '../roles/permissions.js';
 import { workspaceInstructions, workspaceTool, workspaceToolNames, workspaceTools } from './workspace-tools.js';
 import { taskReadScopes, taskRolePolicies, taskToolAllowed, withTaskPermissions } from '../tasks/management.js';
 import { browserPolicyOf } from '../browser/policy.js';
+import { milestoneTool, milestoneToolName } from '../review/progress.js';
 import { browserTool, closeBrowserOnComputer, runBrowserTool } from '../browser/tools.js';
 
 export type ReviewConversation = import('./pi.js').PiConversation;
@@ -58,6 +59,8 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     };
   }
   for(const tool of memoryTools){if(tool.function.name==='remember_project_memory'&&!profile.capabilities.workspace.notes&&!profile.capabilities.workspace.write)continue;profile.tools.push(tool as any);platform[tool.function.name]=async(_id,args)=>{await guard();return memoryTool(store,task,tool.function.name,redactor.clean(args),async doc=>{const raw=await workspace.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};});};}
+  // An Issue's development reports its milestones on the Issue's status comment (#1047): the engine offers the handler.
+  if (platform[milestoneToolName]) profile.tools.push(milestoneTool as any);
   if (browserPolicyOf(task)) {
     profile.tools.push(browserTool as any);
     platform[browserTool.function.name] = async (_id, args) => { await guard(); return runBrowserTool(store, task, args, { guard, workspace }); };
@@ -77,7 +80,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     ...(profile.subagentSystem ? { subagent_system: profile.subagentSystem } : {}) };
   const repairInvalid = (error: unknown) => error instanceof TaskError && ['model_review_invalid','model_finding_invalid','release_notes_invalid','release_observation_invalid','actions_classification_invalid'].includes(error.code)
     ? `Correct the submission and call the finish tool again using the evidence already available. ${error.code}: ${error.detail ?? ''}` : undefined;
-  if(profile.completion==='publication'&&createPullRequest&&controlled(store,task,'development'))return developmentTeam(workspace,system,config.prompt,createPullRequest,profile.capabilities.workspace,platform.github_write&&(args=>platform.github_write!(randomId(),args)),tokens?.allowedScopes().includes('contents')?async()=>{const github=new GitHub(store,tokens.repository,redactor,guard,tokens.apiUrl);await github.connect(false,undefined,{contents:'read',...(tokens.allowedScopes().includes('pull_requests')?{pull_requests:'read'}:{})},false);return github;}:undefined);
+  if(profile.completion==='publication'&&createPullRequest&&controlled(store,task,'development'))return developmentTeam(workspace,system,config.prompt,createPullRequest,profile.capabilities.workspace,platform.github_write&&(args=>platform.github_write!(randomId(),args)),platform[milestoneToolName]&&(args=>platform[milestoneToolName]!(randomId(),args)),tokens?.allowedScopes().includes('contents')?async()=>{const github=new GitHub(store,tokens.repository,redactor,guard,tokens.apiUrl);await github.connect(false,undefined,{contents:'read',...(tokens.allowedScopes().includes('pull_requests')?{pull_requests:'read'}:{})},false);return github;}:undefined);
   // The work type's own executor: one Pi session in the task workspace (the formal Pi harness, src/agent/pi.ts).
   const session: PiSession<any> = { store, taskId: task.id, guard, workspace, redactor, config, conversation, platform, createPullRequest, ensureWorkspace: async () => workspace.ensure?.() ?? {},
     offered: name => profile.tools.some(tool => tool.function.name === name), publication: profile.capabilities.github.publication,
@@ -165,9 +168,11 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   // in the runner receipt so a control-plane restart can validate it again without publishing anything twice.
   const complete=session.complete;
   let submitted:{value:any}|undefined;
-  Object.assign(config,{control_tools:[...profile.finishTools,...choosing?workspaceToolNames:[]].filter(name=>initial.includes(name))});
+  // The milestone tool is a control tool: the runner forwards it through the mailbox like a finish tool, without ending.
+  Object.assign(config,{control_tools:[...profile.finishTools,...choosing?workspaceToolNames:[],...platform[milestoneToolName]?[milestoneToolName]:[]].filter(name=>initial.includes(name))});
   session.control=async(name,args,meta)=>{
     if(choosing&&workspaceToolNames.includes(name))return {result:redactor.clean(await workspaceTool(workspace,name,redactor.clean(args),'agent',meta?.id))};
+    if(name===milestoneToolName&&platform[name])return {result:redactor.clean(await platform[name]!(meta?.id??randomId(),args))};
     if(!profile.finishTools.includes(name))return {result:{error:'tool_not_allowed'}};
     try {const value=await complete({result:args},null);submitted={value};return {result:{submitted:true,submission:args,submission_name:name},finish:true};}
     catch(error){const feedback=submissionFeedback({store,task,redactor,repairInvalid} as import('./runtime.js').AgentSpec<any>,error);if(!feedback)throw error;return {result:feedback};}

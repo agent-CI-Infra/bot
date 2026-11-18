@@ -265,12 +265,14 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
 // The manager substitutes for the project computer; no deployment or external API is used.
 // custom: run a reply task with these writes instead of development; it files an Issue (github_write, when custom.issue),
 // opens the PR and replies. custom.permissions: the executing dev role's saved permissions.
-async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true, faults, custom, acceptor = acceptanceFixture, labels, repositoryLabels } = {}) {
+async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true, faults, custom, acceptor = acceptanceFixture, labels, repositoryLabels, milestones = [] } = {}) {
   githubFixture.listen(0, '127.0.0.1'); await once(githubFixture, 'listening');
   t.after(() => new Promise(resolve => { githubFixture.close(resolve); githubFixture.closeAllConnections(); }));
   const endpoint = 'http://127.0.0.1:' + githubFixture.address().port;
   let repoDirectory, step = 0, started = false, terminal, bytes = [], snapshots = 0, revision = 0;
   const replies = [], commands = [], requests = [], ids = [], manifests = [], toolReplies = [];let toolBytes = [], filed = false;
+  // Milestones the agent reports first (#1047), one control tool request at a time, each answered before the next.
+  const milestoneReplies = [], milestoneIds = milestones.map(() => randomBytes(24).toString('hex'));let milestoneBytes = [];
   const gitBytes = (...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], { cwd: repoDirectory, stdio: ['ignore', 'pipe', 'pipe'] });
   const git = (...args) => gitBytes(...args).toString().trim();
   const write = (path, content) => { mkdirSync(dirname(join(repoDirectory, path)), { recursive: true }); writeFileSync(join(repoDirectory, path), content); };
@@ -286,6 +288,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
       if (custom && terminal) value = { state: 'completed', result: { summary: 'Opened a fix for the addition.', findings: [] } };
       else if (terminal) value = { state: 'completed', result: { ...args, ...terminal } };
       else if (custom?.issue && !filed) value = { state: 'running', tool_requests: [{ id: 'f'.repeat(48), kind: 'repository', name: 'github_write', arguments: { method: 'POST', path: '/issues', key: 'follow-up', body: { title: 'Follow-up: @someone document add', body: 'Ask @someone to document add.' } } }] };
+      else if (milestoneReplies.length < milestones.length) value = { state: 'running', tool_requests: [{ id: milestoneIds[milestoneReplies.length], kind: 'control', name: 'report_development_milestone', arguments: milestones[milestoneReplies.length] }] };
       else {
         if (!started) { started = true; if (change) write('calc.mjs', revision ? 'export const add = (a, b) => Number(a) + Number(b);\n' : 'export const add = (a, b) => a + b;\n'); }
         ids[step] ||= randomBytes(24).toString('hex');
@@ -308,6 +311,9 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
       try { value = { exit_code: 0, output: execFileSync('/bin/sh', ['-c', r.command], { cwd: repoDirectory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), timed_out: false, truncated: false }; }
       catch (error) { value = { exit_code: error.status, output: String(error.stdout) + String(error.stderr), timed_out: false, truncated: false }; }
       if (validationResult) value = { ...value, ...validationResult };
+    } else if (r.type === 'workspace_agent_tool' && milestoneIds.includes(r.request_id)) {
+      milestoneBytes.push(Buffer.from(r.base64, 'base64'));
+      if (r.final) { milestoneReplies.push(JSON.parse(Buffer.concat(milestoneBytes))); milestoneBytes = []; }
     } else if (r.type === 'workspace_agent_tool' && r.request_id === 'f'.repeat(48)) {
       toolBytes.push(Buffer.from(r.base64, 'base64'));
       if (r.final) { toolReplies.push(JSON.parse(Buffer.concat(toolBytes))); toolBytes = []; filed = true; }
@@ -358,7 +364,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
     await engine.run(nextId, 'claim');
     return { task: h.store.get('SELECT * FROM tasks WHERE id=?', nextId), candidate: JSON.parse(h.store.get('SELECT data FROM development_candidates WHERE task_id=?', nextId)?.data || 'null') };
   };
-  return { h, task, candidate: saved && JSON.parse(saved.data), replies, toolReplies, commands, requests, snapshots, manifests, repoDirectory, endpoint, engine, git, continueIssue };
+  return { h, task, candidate: saved && JSON.parse(saved.data), replies, toolReplies, milestoneReplies, commands, requests, snapshots, manifests, repoDirectory, endpoint, engine, git, continueIssue };
 }
 
 test('create_pull_request with empty policy never reruns agent evidence and returns the published call-time tree', async t => {
@@ -375,6 +381,33 @@ test('create_pull_request with empty policy never reruns agent evidence and retu
   assert.match(state.prs.at(-1).body, /not rerun by the control plane/); assert.doesNotMatch(state.prs.at(-1).body, /Exit code:/);
   // Only the one edited file goes to GitHub, on top of the snapshot's source tree, and GitHub's tree is the verified one.
   assert.deepEqual(state.trees.at(-1), { repository_id: 101, base_tree: d.candidate.source_tree, entries: 1 });
+});
+
+test('an Issue development shows on the Issue: the developing label while it works and one status comment from start to pull request (#1047)', async t => {
+  const plan = { milestone: 'plan', conclusion: 'add() subtracts instead of adding.', decisions: [{ decision: 'Fix add() in place', reason: 'No caller relies on the old result' }],
+    changes: ['Return a + b from add()'], acceptance: ['A test for add(1, 2)'] };
+  const d = await developmentHarness(t, { milestones: [{ milestone: 'plan' }, plan, { milestone: 'completed', changes: ['add() returns the sum'], tests: ['npm test: 3 passed'] }] });
+  assert.equal(d.task.status, 'pr_opened', JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
+  // The milestone tool is offered to an Issue development as a control tool; an incomplete plan is refused with what to add.
+  const config = JSON.parse(Buffer.concat(d.requests.filter(r => r.type === 'workspace_agent_config').map(r => Buffer.from(r.base64, 'base64'))).toString());
+  assert.ok(config.tools.some(tool => tool.function.name === 'report_development_milestone')); assert.ok(config.control_tools.includes('report_development_milestone'));
+  assert.deepEqual(d.milestoneReplies.map(reply => reply.result.error ?? reply.result.milestone), ['milestone_invalid', 'plan', 'completed']);
+  const state = await fetch(d.endpoint + '/fixture/state').then(r => r.json()), result = JSON.parse(d.task.result);
+  const row = d.h.store.get('SELECT * FROM issue_development_progress WHERE task_id=?', d.task.id);
+  assert.deepEqual([row.label, row.label_on, row.final, row.pending, row.error], ['bot-developing', 0, 1, 0, null]);
+  // The repository had no developing label: the control plane created it with its color and meaning, then put it on and took it off.
+  assert.ok(state.createdLabels.some(label => label.name === 'bot-developing' && label.color === 'fbca04' && /removed when its pull request is opened/.test(label.description)));
+  assert.ok(state.labels.some(entry => entry.number === 1 && entry.labels.includes('bot-developing')));
+  assert.ok(state.unlabels.some(entry => entry.number === 1 && entry.label === 'bot-developing'));
+  // One comment for this development, created once and edited: the plan, then the pull request with its key changes and tests.
+  const marker = `<!-- dept-bot:development-status:${d.task.id} -->`, mine = state.comments.filter(comment => comment.body.includes(marker));
+  assert.equal(mine.length, 1); assert.equal(String(mine[0].id), row.comment_id);
+  const final = state.commentEdits.filter(edit => edit.id === mine[0].id).at(-1).body;
+  assert.match(final, /add\(\) subtracts instead of adding\./); assert.match(final, /Fix add\(\) in place/); assert.match(final, /No caller relies on the old result/);
+  assert.ok(final.includes(`[#${result.pr_number}](${result.pr_url})`)); assert.match(final, /add\(\) returns the sum/); assert.match(final, /npm test: 3 passed/);
+  assert.ok(final.includes(marker));
+  // "Implemented in" is no longer a comment of its own.
+  assert.ok(!state.comments.some(comment => comment.number === 1 && /^Implemented in/.test(comment.body)));
 });
 
 test('a reply task whose role writes Issues files one with github_write, opens a bot PR and still finishes with its reply', async t => {

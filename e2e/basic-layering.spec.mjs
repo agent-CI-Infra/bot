@@ -33,6 +33,8 @@ test('#570 基本设置首屏只有常用项，技术信息和危险操作默认
     // The labels are first-screen settings (#935); the rule file source list is gone.
     await expect(page.getByLabel('检视标签', { exact: true })).toHaveValue('bot-reviewed');
     await expect(page.getByLabel('开发标签', { exact: true })).toHaveValue('bot-develop');
+    // The label an Issue carries while the bot develops it (#1047).
+    await expect(page.getByLabel('开发中标签', { exact: true })).toHaveValue('bot-developing');
     await expect(page.getByRole('button', { name: '禁用项目', exact: true })).toBeHidden();
     await expect(page.getByRole('button', { name: '删除项目', exact: true })).toBeHidden();
     await page.screenshot({ path: `${out}/basic-1440.png`, fullPage: true });

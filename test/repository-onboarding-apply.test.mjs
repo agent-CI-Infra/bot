@@ -77,9 +77,11 @@ test('confirming a started project\'s plan applies each item through its channel
   const roles = roleConfiguration(h.store, '101').roles.filter(role => role.enabled && role.role_id !== 'coordinator');
   assert.ok(roles.length > 1 && roles.every(role => role.persona_prompt.includes('## 本仓库约定（接入向导第 1 版') && role.persona_prompt.includes('只改一个文件')));
   assert.deepEqual(receipt('conventions').detail, { manager: 'appended', roles: roles.map(role => role.role_id) });
-  // Labels: the new one is created; one that exists keeps its colour and description.
-  assert.deepEqual(github.created.map(c => [c.path, c.body]), [['/repos/fixture/project-101/labels', { name: 'kind/bug', color: 'd73a4a', description: '缺陷' }]]);
-  assert.deepEqual(receipt('labels').detail.labels, [{ name: 'kind/bug', state: 'created' }, { name: 'docs', state: 'exists' }]);
+  // Labels: the new one is created; one that exists keeps its colour and description. A plan at develop also creates the label
+  // the bot keeps on an Issue while it develops it (#1047).
+  assert.deepEqual(github.created.map(c => [c.path, c.body]), [['/repos/fixture/project-101/labels', { name: 'kind/bug', color: 'd73a4a', description: '缺陷' }],
+    ['/repos/fixture/project-101/labels', { name: 'bot-developing', color: 'fbca04', description: 'The bot is developing this Issue; removed when its pull request is opened or it stops' }]]);
+  assert.deepEqual(receipt('labels').detail.labels, [{ name: 'kind/bug', state: 'created' }, { name: 'docs', state: 'exists' }, { name: 'bot-developing', state: 'created' }]);
   // The Manager checks are project scheduled tasks: no Feishu destination to choose, their results stay in the project (#1027).
   const scheduled = receipt('schedules');
   assert.deepEqual([scheduled.state, scheduled.detail.schedules, scheduled.detail.service_principal_created], ['succeeded', ['每日巡检'], true]);
@@ -99,7 +101,7 @@ test('confirming a started project\'s plan applies each item through its channel
   assert.equal((await confirm({ items: ['test_command'] })).status, 201);
   assert.equal((await repoAdmin('/api/management/onboarding/101/items/labels/retry', 'POST', {})).value.error, 'onboarding_item_not_failed');
   assert.equal(h.store.get("SELECT count(*) AS n FROM management_commands WHERE idempotency_key LIKE 'onboarding:%'").n, commands.length);
-  assert.equal(github.created.length, 1);
+  assert.equal(github.created.length, 2);
   // A retry names nothing more than the item: the old destination field is refused.
   assert.equal((await repoAdmin('/api/management/onboarding/101/items/schedules/retry', 'POST', { schedule_destination_id: 'x' })).status, 400);
 

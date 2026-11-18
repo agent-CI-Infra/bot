@@ -183,3 +183,22 @@ for(const backend of ['native','process','pi'])test(`QA consumes a complete larg
   try{assert.equal((await evaluateDelivery(f.store,f.task,f.workspace,f.redactor,f.guard)).outcome,'pass');}catch(error){t.diagnostic(JSON.stringify(f.bodies.slice(1,3).map(b=>receipts(b).slice(-3).map(r=>({keys:Object.keys(r),error:r.error,file:r.file,position:r.position,eof:r.eof,exit_code:r.exit_code})))));throw error;}assert.ok(observed?.file);
   assert.equal(f.commands.filter(c=>c.command.includes('800000')).length,1,'paging must not repeat the command');
 });
+
+// #1047: a development under the project team reports its milestones like a single executor: the dev role is offered the
+// tool, and each report goes to the control plane's handler (which writes the Issue's status comment).
+for (const backend of ['native', 'pi']) test(`role development offers the dev role the milestone tool and hands each report to the control plane (${backend})`, { skip: backend === 'pi' && skipPi, timeout: 90000 }, async t => {
+  const reported = [];
+  const f = await fixture(t, backend, 'development.issue', body => {
+    if (body.tools.some(t => t.function.name === 'nominate_delivery')) {
+      const ref = receipts(body).find(r => r.result_ref)?.result_ref;
+      return ref ? call('nominate_delivery', { result_ref: ref }) : call('delegate_role', { role: 'dev', purpose: 'Fix it', refs: [] });
+    }
+    return JSON.stringify(body.messages).includes('milestone_recorded') ? call('submit_delivery', { summary: 'Fixed', test_command: 'printf ok' })
+      : call('report_development_milestone', { milestone: 'plan', conclusion: 'The value is cut at its second "=".', changes: ['Split at the first "="'] });
+  });
+  const result = await developmentTeam(f.workspace, 'Implement', '{}', async () => ({ pr: { number: 1 } }), { read: true, write: true, shell: true }, undefined,
+    async args => { reported.push(args); return { recorded: true, milestone: args.milestone, note: 'milestone_recorded' }; });
+  assert.equal(result.pr.number, 1);
+  assert.deepEqual(reported, [{ milestone: 'plan', conclusion: 'The value is cut at its second "=".', changes: ['Split at the first "="'] }]);
+  assert.ok(f.bodies.some(body => body.tools.some(tool => tool.function.name === 'report_development_milestone')));
+});

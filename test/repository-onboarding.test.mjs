@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { identityFixture } from './identity-fixture.mjs';
 import { settled } from './management-fixture.mjs';
 import { installed, readToken, repositoryRoutes, provider as scripted, call, person, say } from './onboarding-fixture.mjs';
+import { withDevelopingLabel } from '../dist/management/onboarding.js';
 
 // The assistant reads the README and the labels and asks; a reply about the level gets a plan, first with a reserved label.
 const provider = t => scripted(t, context => {
@@ -147,4 +148,17 @@ test('a started project opens the same onboarding with its settings; the default
   // Without a default model the assistant's own shared model runs it again.
   assert.equal((await admin('/api/trusted-organizations/10', 'PUT', {})).status, 200);
   assert.deepEqual((await repoAdmin('/api/management/onboarding/103')).value.model.source, 'assistant');
+});
+
+test('a plan that lets the bot develop also creates the developing label, once, and never for a lower level (#1047)', () => {
+  const developing = { name: 'bot-developing', color: 'fbca04', description: 'The bot is developing this Issue; removed when its pull request is opened or it stops', action: 'create' };
+  const develop = { profile: { summary: 's', sources: ['README.md'] }, capability_ceiling: { value: 'develop', reason: 'r' } };
+  assert.deepEqual(withDevelopingLabel(develop, 'bot-developing').labels, { items: [developing], reason: 'bot 开发 Issue 期间给它加这个标签，开出 PR 或停下时去掉。' });
+  const listed = { ...develop, labels: { items: [{ name: 'kind/bug', color: 'd73a4a', action: 'create' }], reason: 'r' } };
+  assert.deepEqual(withDevelopingLabel(listed, 'wip').labels.items.map(item => item.name), ['kind/bug', 'wip']);
+  const kept = { ...develop, labels: { items: [{ name: 'Bot-Developing', color: '000000', action: 'keep' }], reason: 'r' } };
+  assert.equal(withDevelopingLabel(kept, 'bot-developing'), kept);
+  const comment = { ...develop, capability_ceiling: { value: 'comment', reason: 'r' } };
+  assert.equal(withDevelopingLabel(comment, 'bot-developing'), comment);
+  assert.equal(withDevelopingLabel(develop, ''), develop, 'a project that keeps no developing label');
 });

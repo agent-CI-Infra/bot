@@ -13,6 +13,8 @@ import { ServiceRepositories } from '../service-roles/resources.js';
 import { projectCeiling } from '../work/ceiling.js';
 import { checkFilters, eventFilters } from '../work/settings.js';
 import { reservedLabel } from '../review/labels.js';
+import { developingColor, developingDescription } from '../review/progress.js';
+import { developingLabel } from '../rules/service.js';
 import { localParts, parseCron } from '../schedules/time.js';
 import { obj } from './catalog-base.js';
 import { OnboardingApply } from './onboarding-apply.js';
@@ -146,6 +148,18 @@ export function planProblem(plan: unknown): Problem | null {
     try { localParts(Date.now(), String(item.timezone)); } catch { return invalid('invalid_onboarding_plan', `schedules.${i}.timezone`, 'invalid_schedule_timezone'); }
   }
   return null;
+}
+/**
+ * A plan that lets the bot develop (`develop`) also creates the label the bot keeps on an Issue while it develops it (#1047),
+ * unless the plan names that label already or the project keeps none. A label the repository has is found when applying.
+ */
+export function withDevelopingLabel(plan: Json, label: string): Json {
+  if ((plan.capability_ceiling as Json | undefined)?.value !== 'develop' || !label) return plan;
+  const items = ((plan.labels as Json | undefined)?.items as Json[] | undefined) ?? [];
+  if (items.some(item => String(item.name).toLowerCase() === label.toLowerCase())) return plan;
+  const developing = { name: label, color: developingColor, description: developingDescription, action: 'create' };
+  return { ...plan, labels: plan.labels ? { ...(plan.labels as Json), items: [...items, developing] }
+    : { items: [developing], reason: 'bot 开发 Issue 期间给它加这个标签，开出 PR 或停下时去掉。' } };
 }
 export function questionsProblem(args: unknown): Problem | null {
   const field = mismatch(onboardingTools[0]!.function.parameters, args);
@@ -310,9 +324,10 @@ export class RepositoryOnboarding {
           return { recorded: true, questions: (args.questions as Json[]).length, notice: '问题已展示给对方；用一两句话结束本轮，等对方回答，不要替对方作答。' };
         }
         const problem = planProblem(args); if (problem) return problem;
+        const plan = withDevelopingLabel(args, developingLabel(this.store, id));
         return this.store.transaction(() => {
           const version = Number(this.store.get('SELECT max(version) AS v FROM onboarding_plans WHERE repository_id=?', id)?.v ?? 0) + 1;
-          this.store.run('INSERT INTO onboarding_plans VALUES(?,?,?,?,?,?,?,?)', randomId(), session.id, id, version, JSON.stringify(args), message, actor.principal_id, now());
+          this.store.run('INSERT INTO onboarding_plans VALUES(?,?,?,?,?,?,?,?)', randomId(), session.id, id, version, JSON.stringify(plan), message, actor.principal_id, now());
           this.store.run('UPDATE onboarding_sessions SET updated_at=? WHERE id=?', now(), session.id);
           return { saved: true, version, notice: `方案草稿已保存为第 ${version} 版，尚未应用：对方在接入页确认后才会生效。` };
         });

@@ -1,7 +1,7 @@
 import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';import{createServer}from'node:http';import{once}from'node:events';import{createHash}from'node:crypto';import{rmSync}from'node:fs';
 import{harness,setup,account,repository,pinLegacyTaskConfiguration}from'./helpers.mjs';import{TaskEngine}from'../dist/agent/engine.js';import{blobSha}from'../dist/agent/common.js';
-import{RuleService,resolveRules,developmentLabel,skillIndex,behaviorPath,projectLabels}from'../dist/rules/service.js';import{explainFailure}from'../dist/agent/failures.js';
+import{RuleService,resolveRules,developmentLabel,developingLabel,ownLabels,skillIndex,behaviorPath,projectLabels}from'../dist/rules/service.js';import{explainFailure}from'../dist/agent/failures.js';
 import{managerPrompt,managerSection,saveManager,withSection}from'../dist/work/settings.js';
 
 const id=value=>createHash('sha1').update(JSON.stringify(value)).digest('hex');
@@ -89,18 +89,23 @@ test('a project added after the upgrade reads its skills and lists its .bot/ fil
   assert.deepEqual(JSON.parse(f.store.get("SELECT files FROM repository_rule_sources WHERE repository_id='101'").files)['.bot/rules/labels.md'],'');
 });
 
-test('the labels are project settings: an empty review label means none, the development label cannot be empty',async t=>{
+test('the labels are project settings: an empty review or developing label means none, the development label cannot be empty',async t=>{
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   const policy=async()=>(await admin('/api/repositories/101/policy')).value.policy;
-  assert.deepEqual([(await policy()).review_label,(await policy()).development_label],['bot-reviewed','bot-develop']);
+  assert.deepEqual([(await policy()).review_label,(await policy()).development_label,(await policy()).developing_label],['bot-reviewed','bot-develop','bot-developing']);
   const patch=values=>admin('/api/repositories/101/policy','PATCH',values);
   assert.equal((await patch({review_label:'',development_label:'team go'})).status,200);
-  assert.deepEqual(projectLabels(h.store,'101'),{review_label:'',development_label:'team go'});
+  // A project saved before the developing label existed keeps the built-in one (#1047).
+  assert.deepEqual(projectLabels(h.store,'101'),{review_label:'',development_label:'team go',developing_label:'bot-developing'});
   assert.equal(developmentLabel(h.store,'101'),'team go');
-  for(const values of [{development_label:''},{review_label:' padded'},{review_label:'x'.repeat(51)},{development_label:'tab\there'}]){
+  assert.equal((await patch({developing_label:'in progress'})).status,200);
+  assert.deepEqual(projectLabels(h.store,'101'),{review_label:'',development_label:'team go',developing_label:'in progress'});
+  assert.deepEqual(ownLabels(h.store,'101'),['team go','in progress']);
+  for(const values of [{development_label:''},{review_label:' padded'},{review_label:'x'.repeat(51)},{development_label:'tab\there'},{developing_label:'trailing '}]){
     const refused=await patch(values);assert.equal(refused.status,400,JSON.stringify(values));assert.equal(refused.value.error,'invalid_label');
   }
-  assert.deepEqual(projectLabels(h.store,'101'),{review_label:'',development_label:'team go'});
+  assert.equal((await patch({developing_label:''})).status,200);assert.equal(developingLabel(h.store,'101'),'');
+  assert.deepEqual(projectLabels(h.store,'101'),{review_label:'',development_label:'team go',developing_label:''});
   // The rules view reads the same settings.
   assert.equal((await admin('/api/repositories/101/rules')).value.rules.review_label,'');
 });

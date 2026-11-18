@@ -523,9 +523,9 @@ function mountRepositoryOnboarding(page, id, initial) {
       const ceiling = repoOnboardingCeiling(level);
       block('bot 现在会做什么', level ? `能力上限「${ceiling[1]}」：${ceiling[2]}` : '按项目设置处理新的 Issue 和 PR。',
         'Manager 按「监听与触发」的设置接收 Issue、PR 和 Actions 事件，决定检视、回复或开发。' + (policy?.actions_failures_enabled ? '默认分支的 Actions 失败会被分析，必要时提 Issue。' : ''));
-      const dev = policy?.development_label;
+      const dev = policy?.development_label, developing = policy?.developing_label;
       block('在 GitHub 上怎么用', '在 Issue 或 PR 的评论里 @ 这个 GitHub App 的机器人账号提问、请它检视或修改。',
-        level === 'develop' ? `要 bot 开发一个 Issue：给它加开发标签${dev ? `「${dev}」` : ''}，或由维护者（triage 以上权限）在评论里提出；Manager 提示词里允许开发的规则（例如这次确认的「简单问题」约定）也算。bot 在自己的分支上开发并开 PR，由人合并。` : '现在的能力上限不含开发；要让 bot 开发 Issue，先在「基本设置」把能力上限调到「可开发并开 PR」。');
+        level === 'develop' ? `要 bot 开发一个 Issue：给它加开发标签${dev ? `「${dev}」` : ''}，或由维护者（triage 以上权限）在评论里提出；Manager 提示词里允许开发的规则（例如这次确认的「简单问题」约定）也算，已被别人认领的 Issue 不会自行开发。开发期间 Issue 上有${developing ? `「${developing}」标签和` : ''}一条持续更新的进展评论；bot 在自己的分支上开发并开 PR，由人合并。` : '现在的能力上限不含开发；要让 bot 开发 Issue，先在「基本设置」把能力上限调到「可开发并开 PR」。');
       const feishu = element('p', '');
       feishu.append('私聊：在「个人设置 · 飞书绑定」绑定后，私聊 bot 等同你在控制台的权限。群里：项目管理员在群里绑定这个仓库并选择权限档' + (plan?.feishu ? `，方案推荐「${repoOnboardingFeishuLevels[plan.feishu.level] ?? plan.feishu.level}」` : '') + '。 ', consoleLink('#/identity/feishu', '飞书绑定'));
       block('在飞书里怎么用', feishu);

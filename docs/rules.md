@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | 行为指南、检视 Issue、检视 PR、开发与跟进 bot PR、标签用法 | 「角色 → Manager」的 Manager 提示词，对应章节 `guide`、`review.issue`、`review.pr`、`development`、`labels` | `manager.update` |
 | 各角色的提示词、模型、权限和预算 | 「角色」页的各个角色 | `roles.update` |
-| 检视标签、开发标签的名字 | 「项目设置 → 基本 → 标签」 | `project.update` 的 `review_label`、`development_label` |
+| 检视标签、开发标签、开发中标签的名字 | 「项目设置 → 基本 → 标签」 | `project.update` 的 `review_label`、`development_label`、`developing_label` |
 | 虚拟电脑的资源、软件包、环境变量和初始化脚本 | 「机器配置」 | `POST /api/environments/:id/configure` |
 | 仓库自己的 skill | 仓库默认分支的 `.agents/skills/<名称>/SKILL.md` | 改仓库文件 |
 
@@ -51,14 +51,15 @@
 
 修好默认分支上的文件后，等待中的任务会自动重试。规则章节原文和 skill 索引每个任务都直接交给模型，它们和任务摘要合计超过 2 MiB 时，任务停下并报 `agent_context_too_large`。早期版本因 `.bot/` 文件停下的任务（`invalid_bot_label`、`invalid_bot_computer`、`invalid_bot_rule_file`、`unsafe_bot_rule`、`bot_rule_too_large`），点「重试」即可继续。
 
-## 检视标签和开发标签
+## 检视标签、开发标签和开发中标签
 
-在「项目设置 → 基本 → 标签」里设置，或用 `project.update` 的 `review_label`、`development_label`：
+在「项目设置 → 基本 → 标签」里设置，或用 `project.update` 的 `review_label`、`development_label`、`developing_label`：
 
 - **检视标签**：检视评论发布后，控制面给 Issue 或 PR 加上这个标签。默认 `bot-reviewed`；留空表示不加。
 - **开发标签**：有人（不是 App）给 Issue 加上这个标签，是[自动开发](#自动开发什么时候开始)的依据之一，比较时不区分大小写。默认 `bot-develop`，不能留空：不想让 bot 自动开发，请把项目的能力上限设在「可开发并开 PR」以下。
+- **开发中标签**（#1047）：bot 开发一个 Issue 期间，控制面给它加上这个标签；PR 开出（或 bot 自己的 PR 更新）后去掉，开发没有产出 PR 就停下（失败、取消、暂停、开发标签被去掉、无需改动）时也去掉，重新开始时再加上。仓库没有这个标签时控制面先创建（颜色 `fbca04`，带说明）。不论开发的依据是标签、维护者的评论还是 Manager 的规则都加。默认 `bot-developing`；留空表示不加。开发开始时记下当时的名字，中途改设置不影响去掉哪一个。接入向导给能力上限为 `develop` 的方案在要新建的标签里加上它（仓库已有时不改）。
 - 名字最长 50 个字符，不能有首尾空白和控制字符，不合法时报 `invalid_label`。
-- 模型在 `labels` 和 `development` 章节开头读到当前的标签名；agent 不能给 PR 选这两个标签。
+- 模型在 `labels` 和 `development` 章节开头读到检视标签和开发标签的名字；agent 不能给 PR 选这三个标签，检视也不会把它们当分类标签加。
 
 ## 自动开发什么时候开始
 
@@ -76,7 +77,9 @@ Issue 的打开、编辑、评论和提到 bot，有人加开发标签，标签�
 
 **有没有被别人认领由模型判断**（#1047），控制面只提供事实，不用字符串或正则匹配评论内容：指派人；其他人打开的、GitHub 上与这个 Issue 关联的 PR（从 PR 引用了它的 cross-reference，或合入后会关闭它的 `closedByPullRequestsReferences`，标出 `closes`；bot 自己的 PR 不算）；最近 10 条评论原文（bot 自己的评论不算）。Issue 检视在上下文的 `claims` 里读到指派人和关联 PR（评论在 `comments.json`），在 `recommendation` 里写明有没有人认领、是谁、凭哪条评论、指派或 PR；认领不改变检视结论。检视发布时控制面重新读一遍，作为 `facts.development.claims` 随「检视已发布」事件交给 Manager；其他事件没有这份事实，Manager 要按规则自行开发或按评论要求开发前，用 `github_read` 自己读评论和关联 PR。有人被指派、开着处理它的 PR，或在评论里说要做、正在做（不论措辞和语言），就算认领，直到本人或维护者放弃或交给 bot；提问、+1、表示愿意帮忙测试或检视、「应该有人修」都不算。被别人认领的 Issue 不自行开发，开发标签或维护者在评论里的要求可以把它交给 bot。
 
-开发按 Manager 写的简要说明（目标和验收标准）进行。以开发标签为依据的开发在发布 PR 前会再查一次标签，被人去掉就停下（`waiting_permission`），这件事作为 `development.stopped` 事件交给 Manager，由它决定要不要在 Issue 上回复；有人重新加上标签时，Manager 续接这个开发，任务接着做，不用人点「重试」。以其他依据开始的不看标签。开发期间 Issue 的标题或正文被修改不会让开发停下：任务改用当前的文本，修改作为更新记下，之后开始的角色在任务事实（`updates`）里读到；Issue 的编辑、评论和提到 bot 的事件也可以由 Manager 续接到运行中的开发（内置常设规则 `issue-update` 就这样做）。已经在运行的会话实时收到更新，要等 Harness 会话层（#834）。同一 Issue 同时只有一个开发任务。`development` 章节里可以再写更严的条件（例如限定 `type`、`size`），由 bot 遵守。
+开发按 Manager 写的简要说明（目标和验收标准）进行。
+
+**开发进展只写在 Issue 上的一条评论里**（#1047）。开发开始时控制面创建这条评论，之后只编辑它，不另发评论，原来 PR 开出后单独发的 "Implemented in <PR>" 也并进来（修订 bot 自己的 PR 时仍在那个 PR 上说明）。评论只写里程碑：开始的依据和 Manager 写的目标、验收标准；开发 agent 用 `report_development_milestone` 提交的「分析与计划」（结论、自己做的设计和决定及理由、主要改动和验收）和「完成」（修改重点、测试要点）；结束时控制面填上的 PR 链接，或停下的原因和需要人做什么（agent 自己停下时用它提交的原因，控制面停下时按停止码说明，不写内部细节）。agent 只能提交这三类里程碑，不能报「正在开发」「正在测试」，也不能自己评论。评论和标签由控制面根据任务状态写到 GitHub：写失败不影响开发，记下后按 30 秒起、每次翻倍、最长 1 小时重试，连续 12 次失败后放弃；开发在运行之外结束（有人取消或暂停、Issue 被关闭）时，engine 的巡检在一秒内补上。评论末尾带 `<!-- dept-bot:development-status:<任务 ID> -->` 标记，重试时先按标记找已经发出的评论，不会发第二条。以开发标签为依据的开发在发布 PR 前会再查一次标签，被人去掉就停下（`waiting_permission`），这件事作为 `development.stopped` 事件交给 Manager，由它决定要不要在 Issue 上回复（开发的进展评论已经写明停下和重新加标签可以继续，内置规则只在有人提问时再新建检视回答，不另发评论，#1047）；有人重新加上标签时，Manager 续接这个开发，任务接着做，不用人点「重试」。以其他依据开始的不看标签。开发期间 Issue 的标题或正文被修改不会让开发停下：任务改用当前的文本，修改作为更新记下，之后开始的角色在任务事实（`updates`）里读到；Issue 的编辑、评论和提到 bot 的事件也可以由 Manager 续接到运行中的开发（内置常设规则 `issue-update` 就这样做）。已经在运行的会话实时收到更新，要等 Harness 会话层（#834）。同一 Issue 同时只有一个开发任务。`development` 章节里可以再写更严的条件（例如限定 `type`、`size`），由 bot 遵守。
 
 ## bot 开的 PR 怎样跟进修改
 
