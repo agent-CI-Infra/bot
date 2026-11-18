@@ -528,15 +528,17 @@ export class Projects {
       || now - Date.parse(last.get(p.repository_id).scanned_at) >= (this.scanIntervalMs ?? 6 * 3600_000));
     if (!due) return;
     const repo = due.repository_id, generation = due.generation;
-    this.scanning = repo;
+    this.scanning = repo; this.scanInvalidated = false;
     void this.docker.runner(this.names(repo, generation).container, { operation_id: randomId(), type: 'storage_scan' }, 0)
       .then(answer => {
+        if (this.scanInvalidated) return;
         // A failed scan is retried at the next interval, like a successful one, rather than every few seconds.
         const result = answer?.ok ? answer.result : { scanned_at: new Date().toISOString(), error: answer?.error || 'storage_scan_failed' };
         if (!answer?.ok) logFailure(`project ${repo} storage scan failed`, answer?.error || 'no detail');
         this.db.prepare(`INSERT INTO computer_storage VALUES(?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET generation=excluded.generation,
           scanned_at=excluded.scanned_at,result=excluded.result`).run(repo, generation, new Date().toISOString(), JSON.stringify(result));
       }, error => {
+        if (this.scanInvalidated) return;
         logFailure(`project ${repo} storage scan failed`, error);
         this.db.prepare(`INSERT INTO computer_storage VALUES(?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET generation=excluded.generation,
           scanned_at=excluded.scanned_at,result=excluded.result`).run(repo, generation, new Date().toISOString(), JSON.stringify({ error: error instanceof ManagerError ? error.message : 'storage_scan_failed' }));
@@ -770,6 +772,12 @@ export class Projects {
             const request = command ? { ...call, timeout_ms: limit } : call,
               timeout = command ? (limit === null ? 0 : limit + 60000) : call.type === 'workspace_browser' ? (Number(call.timeout_ms) > 0 ? Number(call.timeout_ms) + 120000 : 180000) : ['workspace_acceptance','workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','git_import','tasks_remove','worktrees_remove'].includes(call.type) ? 0 : ['tasks_list','worktrees_list'].includes(call.type) ? 300000 : 90000;
             result = await this.docker.runner(this.names(repo, project.generation).container, { ...request, operation_id: input.operation_id }, timeout);
+            if (['tasks_remove', 'worktrees_remove'].includes(call.type) && result.ok && result.result?.removed?.length) {
+              // Exclude the pre-cleanup total until the next background check scans the volume.
+              // A scan already in flight may have visited the deleted directories too.
+              if (this.scanning === repo) this.scanInvalidated = true;
+              this.db.prepare('DELETE FROM computer_storage WHERE repository_id=? AND generation=?').run(repo, project.generation);
+            }
             if (commandTypes.includes(call.type)) {
               if (call.type === 'workspace_command' && call.keep_background === true && result.ok) kept.add(call.workspace_id);
               // Processes that escaped a task command's process group end here, unless the task keeps background work; the
