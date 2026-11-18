@@ -317,3 +317,75 @@ test('打开「更多视图操作」后菜单面板与每一项都在视口内�
     }
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
+
+// #482 review, blocking (short screens): the panel opened downward from the toolbar's third line, so at 390x640 its last
+// item's centre sat at y=587, under the fixed bottom bar that starts at 576, and at 390x568 and 320x568 the panel ran from
+// 466 to 616 — past the 568 viewport and past the bar at 504. origin/main at 390x568 kept the panel at 357..507, above
+// the bar, so this is ours. The panel must open upward when the space below the toggle is short, and every item must stay
+// inside the viewport and above the fixed bar at every height, without changing the desktop placement.
+test('短屏（390×640、390×568、320×568）：⋯ 面板与每一项都在视口内且不被固定底栏压住', async ({ page }) => {
+  const { h, admin, password } = await fixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 }); await login(page, h.admin, password);
+    const toggle = page.locator('#board-view-menu .board-menu-toggle');
+    const panel = page.locator('#board-view-menu .board-menu-panel');
+    const measure = () => page.evaluate(() => {
+      const round = r => ({ left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom) });
+      const panel = document.querySelector('#board-view-menu .board-menu-panel');
+      const nav = document.querySelector('#console-mobile-nav');
+      const bar = nav && getComputedStyle(nav).position === 'fixed' ? nav.getBoundingClientRect() : null;
+      const items = [...panel.querySelectorAll('.board-menu-item')].map(node => {
+        const r = node.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return { text: (node.textContent || '').trim(), box: round(r), hitSelf: !!(hit && (hit === node || node.contains(hit))) };
+      });
+      return { panel: round(panel.getBoundingClientRect()), toggle: round(document.querySelector('#board-view-menu .board-menu-toggle').getBoundingClientRect()),
+        navTop: bar ? Math.round(bar.top) : null, items, innerWidth, innerHeight };
+    });
+    for (const [width, height] of [[390, 640], [390, 568], [320, 568]]) {
+      await page.setViewportSize({ width, height });
+      await page.goto(h.admin + '/#/reviews');
+      await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
+      // The reviewer measured with the unsaved-state chip on screen: it gives the toolbar's first line its two-row form.
+      await page.getByLabel('工作类型', { exact: true }).selectOption('review.issue');
+      await expect(page.locator('#board-view-state')).toHaveText('未保存');
+      await expect(panel).toBeHidden();
+      await toggle.click();
+      await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+      await expect(panel).toBeVisible();
+      const m = await measure();
+      expect(m.items.length).toBeGreaterThanOrEqual(2);
+      // The whole panel, and every item in it, stays between the viewport's top edge and the fixed bottom bar.
+      expect({ size: `${width}x${height}`, panelTop: m.panel.top >= 0 }).toEqual({ size: `${width}x${height}`, panelTop: true });
+      expect({ size: `${width}x${height}`, panelBottom: m.panel.bottom <= m.innerHeight }).toEqual({ size: `${width}x${height}`, panelBottom: true });
+      expect({ size: `${width}x${height}`, aboveBar: m.navTop === null || m.panel.bottom <= m.navTop }).toEqual({ size: `${width}x${height}`, aboveBar: true });
+      // The short screen is only reachable if the panel opened upward: its bottom edge sits above the toggle's top.
+      expect({ size: `${width}x${height}`, opensUp: m.panel.bottom <= m.toggle.top }).toEqual({ size: `${width}x${height}`, opensUp: true });
+      for (const item of m.items) {
+        const tag = `${width}x${height} ${item.text}`;
+        expect({ tag, top: item.box.top >= 0 }).toEqual({ tag, top: true });
+        expect({ tag, bottom: item.box.bottom <= m.innerHeight }).toEqual({ tag, bottom: true });
+        expect({ tag, aboveBar: m.navTop === null || item.box.bottom <= m.navTop }).toEqual({ tag, aboveBar: true });
+        expect({ tag, hit: item.hitSelf }).toEqual({ tag, hit: true });
+      }
+      await toggle.click();
+      await expect(panel).toBeHidden();
+      await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    }
+    // Desktop keeps the downward placement: nothing about 768 or 1440 may start opening upward.
+    for (const [width, height] of [[768, 1024], [1440, 900]]) {
+      await page.setViewportSize({ width, height });
+      await page.goto(h.admin + '/#/reviews');
+      await expect(page.locator('#board-columns')).not.toHaveAttribute('aria-busy', 'true');
+      await expect(panel).toBeHidden();
+      await toggle.click();
+      await expect(panel).toBeVisible();
+      const m = await measure();
+      expect({ size: `${width}x${height}`, opensDown: m.panel.top >= m.toggle.bottom }).toEqual({ size: `${width}x${height}`, opensDown: true });
+      expect(m.panel.left).toBeGreaterThanOrEqual(0);
+      expect(m.panel.right).toBeLessThanOrEqual(m.innerWidth);
+      await toggle.click();
+      await expect(panel).toBeHidden();
+    }
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});
