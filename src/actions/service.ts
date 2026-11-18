@@ -225,8 +225,8 @@ export class ActionsFailures {
           const job = classified.job;
           const quote = publicText(classified.quote, github.redactor).slice(0, 2400);
           // Keep readable reasons in the attempt record; only explicit cause reports are published.
-          const reason = publicText(classified.reason, github.redactor).replace(/@/g, '&#64;') || 'The reason could not be made safe for public disclosure.';
-          evidence.push({ ...classified, reason, job: { id: job.id, key: sha(String(job.name)), name: publicText(String(job.name), github.redactor).replace(/[\r\n`#<>@]/g, ' ') || 'Failed job' }, quote });
+          const reason = publicText(classified.reason, github.redactor) || 'The reason could not be made safe for public disclosure.';
+          evidence.push({ ...classified, reason, job: { id: job.id, key: sha(String(job.name)), name: publicText(String(job.name), github.redactor).replace(/[\r\n`#<>]/g, ' ') || 'Failed job' }, quote });
         }
         if (!evidence.length) evidence.push({ job: { name: 'Workflow', id: null }, kind: 'unknown', reason: 'Failed job evidence is unavailable.', quote: '' });
         data = { version: 2, kind: classifyFailure(evidence), evidence, reports: task ? await checkReports(github, run, taskReports(task), outputs) : [],

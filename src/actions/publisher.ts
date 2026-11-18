@@ -16,7 +16,7 @@ const markerFor = (id: string) => `<!-- dept-bot-actions:${id} -->`;
 
 // Only the receipt may add platform comments. Redact after removing markup so it cannot split a credential.
 const publicProse = (value: string, github: GitHub) => publicText(value.replace(/<!--[\s\S]*?(?:-->|$)/g, ''), github.redactor)
-  .replace(/<!--/g, '&lt;!--').replace(/@/g, '&#64;');
+  .replace(/<!--/g, '&lt;!--');
 const publicTitle = (value: string, github: GitHub) => publicProse(value, github).replace(/[\r\n]/g, ' ').slice(0, 240).trim();
 
 /** A cause owns one outbox entry per attempt; both Issues and follow-ups carry the analysis author's diagnosis. */
