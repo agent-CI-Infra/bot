@@ -303,8 +303,9 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media(max-width:760px){.confirm-head{padding:18px 18px 6px}.confirm-body,.confirm-status{padding-left:18px;padding-right:18px}.confirm-actions{padding:12px 18px}.confirm-actions button{flex:1}}
 /* Global settings: version, deployment-wide defaults and wizard settings side by side, stacking on narrow screens; the shared model list spans the full width. */
 .settings-panel{display:block;padding:0}.settings-panel .side-card h3{font-size:var(--font-size-row)}.settings-panel .side-card>h2{font-size:var(--font-size-row)}
-/* #1039: the rate-limit card's account names become h3 for the outline but keep the h4 they replaced. */
-.project-content .side-card .rate-account{font-size:var(--font-size-label);margin:6px 0 0;font-weight:700;line-height:normal;color:var(--color-text)}.settings-panel .settings-wide{grid-column:1/-1}.settings-panel .side-card .flash{margin:0 0 8px}.settings-panel .side-card>form{margin-top:10px}.settings-panel .history .muted{margin:2px 0 0}
+/* #1039: a sub-section inside a settings card (the rate-limit account names, detail-page sections) is an h3 under the
+   card's h2 but keeps the h4 size, weight and spacing it had, so the outline changes and the pixels do not. */
+.project-content .side-card :is(.card-sub,.rate-account){font-size:var(--font-size-label);margin:6px 0 0;font-weight:700;line-height:normal;color:var(--color-text)}.settings-panel .settings-wide{grid-column:1/-1}.settings-panel .side-card .flash{margin:0 0 8px}.settings-panel .side-card>form{margin-top:10px}.settings-panel .history .muted{margin:2px 0 0}
 
 /* Global settings (static/settings.js): the project page's category layout inside the list card. */
 .settings-body{border-top:1px solid #e3eaf0;min-height:calc(100svh - 170px)}

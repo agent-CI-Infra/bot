@@ -30,8 +30,9 @@ test('the assistant computer category saves timers and HOME limits together, eac
   page.run("me = { role: 'super_admin', csrf_token: 'csrf' }; location.hash = '#/settings/assistant-computers';");
   await page.run('renderSettings(renderVersion)');
   const panel = page.$('settings-panel'), text = node => [node.textContent, ...node.children.flatMap(text)].join(' ');
-  const section = title => panel.querySelectorAll('section').find(node => node.querySelector('h3')?.textContent === title);
-  assert.deepEqual(panel.querySelectorAll('h3').map(node => node.textContent), ['助手电脑设置', '每台电脑的资源', 'HOME 占用']);
+  // #1039: settings card titles are h2 now; sub-sections inside them stay h3.
+  const section = title => panel.querySelectorAll('section').find(node => (node.querySelector('h2') || node.querySelector('h3'))?.textContent === title);
+  assert.deepEqual(panel.querySelectorAll('h2').map(node => node.textContent), ['助手电脑设置', '每台电脑的资源', 'HOME 占用']);
   assert.equal(panel.querySelector('nav a[aria-current=page]').textContent, '助手电脑');
   const form = section('助手电脑设置').querySelector('form'), value = name => form.querySelectorAll('input').find(i => i.name === name);
   assert.deepEqual(['idle_minutes', 'max_containers', 'max_lifetime_minutes', 'home_limit_gb', 'retention_days', 'total_alert_gb'].map(name => String(value(name).value)), ['5', '20', '240', '5', '30', '50']);

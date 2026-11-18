@@ -28,7 +28,8 @@ const status = (overrides = {}) => ({
   volume_root: '/srv/agent-tools', container_root: '/opt/agent-tools', volume_present: true, arch: 'x64', node_versions: ['22.15.0'],
   retain_count: 3, retain_bounds: [1, 10], clis: { claude_code: claude(), codex: codex() }, ...overrides,
 });
-const section = (panel, title) => panel.querySelectorAll('section').find(node => node.querySelector('h3')?.textContent === title);
+// #1039: a settings card title is an h2 (its sub-sections are h3), so match the card by the heading it starts with.
+const section = (panel, title) => panel.querySelectorAll('section').find(node => (node.querySelector('h2') || node.querySelector('h3'))?.textContent === title);
 
 test('the tool volume category shows the volume, each CLI, every manifest and a usable install form', async () => {
   const page = loadConsole(scripts, (method, path) => {

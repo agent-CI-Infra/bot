@@ -42,7 +42,7 @@ function globalProjectRow(row, hidden) {
   return item;
 }
 async function globalProjectSettings(request, id) {
-  const selection = card('项目管理');
+  const selection = settingsCard('项目管理');
   selection.append(note('按统一列查看项目状态并进入管理操作。仅超级管理员可配置；项目管理员请使用项目内的「设置」。'));
   const listing = /^(list|hidden)\.(\d+)$/.exec(id || ''), hidden = listing?.[1] === 'hidden', offset = Number(listing?.[2] || 0);
   // #494: this page keeps only the batch list. app.js sends every numeric project id to the project workspace, and a list
@@ -79,7 +79,7 @@ async function globalProjectSettings(request, id) {
 }
 // #848: GitHub owners (organizations or personal accounts) whose repository administrators start their own repositories.
 async function trustedOrganizations(request) {
-  const box = card('受信任的组织');
+  const box = settingsCard('受信任的组织');
   box.append(note('受信任组织的仓库管理员可以在项目列表里自己启动仓库：模型和能力上限用下面的默认值，资源用全局默认值，机器配置仍只由超级管理员修改。撤销信任只影响以后的启动，已启动的项目照常运行。'));
   // A failed read stays inside this card: the project list above keeps working.
   let organizations, candidates, models;
@@ -120,7 +120,7 @@ async function trustedOrganizations(request) {
     candidates.forEach(candidate => owner.add(new Option(`${candidate.owner_login}（${candidate.repositories} 个已安装仓库）`, candidate.owner_id)));
     const form = defaults('新组织'), add = element('div', '', 'trusted-organization-add');
     const actions = element('div', '', 'actions'); actions.append(button('信任', () => save(owner.value, form)));
-    add.append(element('h4', '信任一个组织'), field('组织', owner), ...form.controls, actions);
+    add.append(element('h3', '信任一个组织', 'card-sub'), field('组织', owner), ...form.controls, actions);
     box.append(add);
   }
   box.append(message);

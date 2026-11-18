@@ -284,9 +284,17 @@ test('global settings change the wizard settings and shared models without a pro
   const panel = page.$('settings-panel'), text = node => [node.textContent, ...node.children.flatMap(text)].join(' ');
   // Each category has its own address and draws only its own cards.
   const open = async key => { page.run(`location.hash = '#/settings/${key}'`); await page.run('renderSettings(renderVersion)'); };
-  // #1039: the four settings categories in scope draw h2 card titles; the rest still draw h3. The fake DOM
-  // has no :is(), so read both tags; every asserted category uses one level, so their order is unchanged.
-  const cards = () => ['h2', 'h3'].flatMap(tag => panel.querySelectorAll(tag)).map(node => node.textContent);
+  // #1039: settings cards are h2 under the page h1, and a card's own sub-sections are h3. The fake DOM cannot select
+  // two tags in one query, so walk the tree and keep document order instead of concatenating one level after the other.
+  const headingNodes = () => {
+    const found = [], walk = node => { for (const child of node.children) { if (/^H[1-6]$/.test(child.tagName)) found.push(child); walk(child); } };
+    walk(panel); return found;
+  };
+  // A card title is the first child of a card the page put directly into its content; a sub-section heading sits deeper
+  // and is not a card, so the titles stay comparable across categories.
+  const cards = () => headingNodes()
+    .filter(node => node.parentElement?.tagName === 'SECTION' && node.parentElement.parentElement === panel.querySelector('.project-content'))
+    .map(node => node.textContent);
   const section = title => panel.querySelectorAll('section').find(node => (node.querySelector('h2') || node.querySelector('h3'))?.textContent === title);
   const buttons = (node, caption) => node.querySelectorAll('button').filter(b => b.textContent === caption);
   const submit = form => form.listeners.submit[0]({ preventDefault() {} }), view = page.run('confirmView');

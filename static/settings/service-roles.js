@@ -48,7 +48,7 @@ function serviceRoleCard(view, initial) {
     const remove = role.builtin ? null : button('删除角色', async () => {
       if (!await askConfirm({ title: `删除服务角色 ${role.name}？`, body: ['已记录的用量保留，仍按这个角色归属。'], action: '删除', danger: true })) return;
       remove.disabled = true;
-      try { await serviceRoleRequest('/api/service-roles/' + role.id, 'DELETE', { expected_revision: role.revision }); live.section.replaceChildren(element('h3', role.name), element('p', '已删除', 'view-success')); }
+      try { await serviceRoleRequest('/api/service-roles/' + role.id, 'DELETE', { expected_revision: role.revision }); live.section.replaceChildren(element('h2', role.name), element('p', '已删除', 'view-success')); }
       catch (err) { remove.disabled = false; error(err); }
     }, 'quiet destructive');
     nodes.push(actionForm([field('名称', name), field('职责说明', responsibility), field('提示词', prompt), field('Agent 后端',harnessSelect), field(role.project ? '模型（本项目可用的模型）' : '模型（部署共享模型）', modelSelect),
@@ -57,14 +57,14 @@ function serviceRoleCard(view, initial) {
       const change = { expected_revision: role.revision, harness:harnessSelect.value, name: name.value, responsibility: responsibility.value, prompt: prompt.value, model_id: modelSelect.value || null };
       if (enabled) change.enabled = enabled.querySelector('input').checked;
       role = (await serviceRoleRequest('/api/service-roles/' + role.id, 'PATCH', change)).service_role;
-      live.section.querySelector('h3').textContent = role.name; redraw('已保存');
+      live.section.querySelector('h2').textContent = role.name; redraw('已保存');
     }, remove ? [remove] : []));
     return nodes;
   });
   return live.section;
 }
 function serviceRoleCreate(view) {
-  const section = card('新建服务角色'), name = input('name', '', { maxLength: 80, required: true }), responsibility = textarea('responsibility', '', { maxLength: 2000, rows: 2 });
+  const section = settingsCard('新建服务角色'), name = input('name', '', { maxLength: 80, required: true }), responsibility = textarea('responsibility', '', { maxLength: 2000, rows: 2 });
   section.append(note('新角色是一份提示词和模型，可以用在多个群里；每个群能做什么由它的群绑定的权限档位决定。保存后可以在它的卡片里选择模型和填写提示词。'),
     actionForm([field('名称', name), field('职责说明', responsibility)], '新建', async () => {
       if (!name.value.trim()) throw new Error('先填写名称');
