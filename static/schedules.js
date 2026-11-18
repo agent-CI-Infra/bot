@@ -156,7 +156,7 @@ async function renderSchedules(panel, project) {
   summary.append(element('h4','项目定时任务'), note('时区和触发时间来自服务端记录；尚未成功或没有下次触发不会显示为零。'));
   const states = { active:'启用中',paused:'已暂停',deleted:'已删除',unsupported:'处理器未支持' };
   const reasons = { migrated_to_chat_schedule:'已迁移到飞书会话的定时任务', daily_report_retired:'项目日报已停用', schedule_workflow_unsupported:'执行内容已不支持' };
-  const time = (value,zone) => value == null ? '无记录' : timestampAt(value,zone) + ' · ' + zone;
+  const time = (value,zone) => value == null ? '无记录' : stamped(value,zone);
   for (const item of plans.schedules) {
     const legacy = item.spec.workflow !== 'manager.check';
     const row = element('article', '', 'schedule-row'); row.append(element('strong',item.spec.name),note((states[item.state] || item.state) + (item.reason ? ' · '+(reasons[item.reason] || item.reason) : '')),
