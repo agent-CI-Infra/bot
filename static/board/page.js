@@ -50,8 +50,25 @@ function boardMenu(caption,label) {
   const toggle=button(caption,()=>boardOpenMenu(menu,panel.hidden),'quiet board-menu-toggle');
   toggle.setAttribute('aria-label',label);toggle.setAttribute('aria-expanded','false');toggle.title=label;menu.append(toggle,panel);return {menu,panel};
 }
+// #482 review: the phone toolbar's third line leaves room for the 210px panel below the toggle on tall screens, but on a
+// short one the panel ran under the fixed bottom bar (390x640: 36px below the toggle against 408px above, panel 466..616
+// with the bar at 576) and past the viewport (390x568, 320x568). Opening it upward keeps it in view; the desktop keeps its
+// downward placement because nothing here runs above the 760px breakpoint.
+function boardFitMenu(menu) {
+  const panel=menu.querySelector('.board-menu-panel'),toggle=menu.querySelector('.board-menu-toggle');
+  menu.classList.remove('board-menu-up');panel.style.maxHeight='';
+  if(!boardMedia.matches)return;
+  const t=toggle.getBoundingClientRect(),p=panel.getBoundingClientRect(),nav=$('console-mobile-nav');
+  const bar=nav&&getComputedStyle(nav).position==='fixed'?nav.getBoundingClientRect().top:innerHeight;
+  const below=Math.min(innerHeight,bar)-t.bottom-8,above=t.top-8;
+  if(p.height<=below)return;
+  if(above>below)menu.classList.add('board-menu-up');
+  // The clamp is the hard backstop: whichever side wins, the panel can never reach past that edge.
+  panel.style.maxHeight=`${Math.max(64,Math.floor(above>below?above:below))}px`;
+}
 function boardOpenMenu(menu,open) {
   menu.classList.toggle('open',open);menu.querySelector('.board-menu-panel').hidden=!open;menu.querySelector('.board-menu-toggle').setAttribute('aria-expanded',String(open));
+  if(open)boardFitMenu(menu);
 }
 function boardShell() {
   const panel=$('board-panel');panel.replaceChildren();

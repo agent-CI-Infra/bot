@@ -12,7 +12,9 @@ body.board-mode .list-panel>.toolbar{display:none}
 .board-field{flex-direction:row;align-items:center;gap:6px;white-space:nowrap;font-size:var(--font-size-1);color:var(--color-text-muted)}
 .board-chip-remove{min-height:0;height:20px!important;width:20px;padding:0;border:0;background:transparent;color:var(--color-text-muted);font-size:var(--font-size-row);line-height:1}.board-chip-remove:hover{background:var(--color-danger-bg);color:var(--color-danger)}
 .board-menu{position:relative}.board-toolbar .board-menu-toggle{width:32px;padding:0}.board-menu.open .board-menu-toggle{border-color:var(--color-brand);background:var(--color-brand-weak)}
-.board-menu-panel{position:absolute;z-index:20;top:calc(100% + 6px);left:0;min-width:150px;display:grid;gap:2px;padding:6px;border:1px solid var(--color-border);border-radius:var(--radius-control);background:var(--color-surface);box-shadow:var(--shadow-popover)}
+/* #482 review: a fixed bottom bar and a viewport-locked page leave the panel no scroll of its own, so it is capped to the
+   viewport height here and to the room its open side has in board/page.js (the upward class below). */
+.board-menu-panel{position:absolute;z-index:20;top:calc(100% + 6px);left:0;min-width:150px;max-height:calc(100dvh - 24px);overflow-y:auto;display:grid;gap:2px;padding:6px;border:1px solid var(--color-border);border-radius:var(--radius-control);background:var(--color-surface);box-shadow:var(--shadow-popover)}
 .board-menu-panel .board-menu-item{height:auto;min-height:32px;border:0;background:transparent;color:var(--color-text);text-align:left;font-weight:500;padding:6px 10px}
 .board-menu-panel .board-menu-item:hover{background:var(--color-hover);filter:none}.board-menu-panel .danger{color:var(--color-danger)}
 .board-status{display:flex;align-items:center;gap:6px;font-size:var(--font-size-1);color:var(--color-text-muted);white-space:nowrap}.board-status:empty{display:none}
@@ -139,6 +141,11 @@ body.board-mode .list-panel>.toolbar{display:none}
   /* `⋯` sits in the toolbar's first column here, so the right-anchored 210px panel opened 168px left of the viewport and
      none of its items could be tapped. Anchor it to the menu's left edge: it opens inward, over the toolbar. */
   .board-menu-panel{left:0;right:auto}
+  /* #482 review: on a short phone the room below the toggle is the fixed bar's top edge, not the viewport's, so the panel
+     dropped under the bar (390x640: 466..616 against a bar at 576) and off 568-high screens. board/page.js adds this class
+     when the room above is the larger half; the panel then opens upward from the toggle. Nothing above the 760px
+     breakpoint can take this class, so the desktop keeps its downward placement. */
+  .board-menu-up>.board-menu-panel{top:auto;bottom:calc(100% + 6px)}
   .board-mobile-group{display:flex;flex-direction:row;align-items:center;gap:8px;font-size:var(--font-size-1)}
   .board-mobile-group select{flex:1;min-width:0;height:34px;padding:4px 8px}
   .board-zero-counts{display:none}
