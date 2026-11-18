@@ -37,3 +37,10 @@
 .storage-diagnostics>summary{cursor:pointer;padding:.65rem 0;font-weight:600}.storage-diagnostics>.side-card{margin:.65rem 0}
 
 .storage-updated p{margin:0;font-size:.85rem}.side-card .storage-number{margin:.5rem 0 .7rem}
+
+.storage-windows{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:1rem}
+.storage-windows>div{min-width:0}
+.storage-overrides.cost-table-scroll table{width:100%;min-width:0;table-layout:fixed}
+.storage-overrides :is(th,td):last-child{width:8rem}
+.storage-overrides input{box-sizing:border-box;width:100%;min-width:0;max-width:7rem}
+@media(max-width:620px){.storage-overrides.cost-table-scroll :is(th,td){padding:.4rem}.storage-overrides :is(th,td):last-child{width:6rem}}

@@ -63,6 +63,12 @@ test('the administrator can inspect shares and reclaim expired files from storag
       expect(await shares.getByRole('table').evaluate(el => el.scrollWidth <= el.parentElement.clientWidth + 1)).toBe(true);
     }
     await parent.getByText('保留天数与项目设置', { exact: true }).click();
+    const override = parent.getByRole('spinbutton', { name: 'fixture/project-101 轨迹正文保留天数' });
+    await override.scrollIntoViewIfNeeded();
+    expect(await override.evaluate(el => {
+      const table = el.closest('.storage-overrides').getBoundingClientRect(), box = el.getBoundingClientRect();
+      return box.left >= table.left && box.right <= table.right;
+    })).toBe(true);
     const days = parent.getByLabel('manager 重复正文保留天数');
     await days.focus(); await days.press('ControlOrMeta+a'); await days.press('Backspace'); await days.pressSequentially('14');
     await parent.getByRole('button', { name: '保存清理设置' }).click();

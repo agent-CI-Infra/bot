@@ -52,9 +52,15 @@ async function retentionCard(size, count, time, refresh) {
     ['workspace_finished_days', '任务工作区：任务结束后保留天数', `默认 ${defaults.workspace_finished_days} 天；没有任务记录的目录也按这个。为打开的 PR 保留的不受影响。`],
     ['workspace_failed_days', '任务工作区：任务失败后保留天数', `默认 ${defaults.workspace_failed_days} 天。`],
     ['webhook_payload_days', 'Webhook 投递正文保留天数（留空不过期）', `至少 ${bounds.webhook_payload_days[0]} 天：外部执行端会读最近的投递。删除后投递记录、状态和正文的 sha256 保留。`]];
-  const controls = {};
-  for (const [key, label, help] of fields) { controls[key] = number(key, settings[key], bounds[key]); form.append(field(label, controls[key]), note(help)); }
-  const overrides = costTable(['项目', '轨迹正文保留天数（留空跟随上面的设置）']), perProject = {};
+  const controls = {}, windows = element('div', '', 'storage-windows');
+  for (const [key, label, help] of fields) {
+    controls[key] = number(key, settings[key], bounds[key]);
+    const group = element('div');
+    group.append(field(label, controls[key]), note(help)); windows.append(group);
+  }
+  form.append(windows);
+  const overrides = costTable(['项目', '保留天数']), perProject = {};
+  overrides.wrap.classList.add('storage-overrides');
   for (const project of view.projects) {
     const control = number('trajectory_days_' + project.id, settings.trajectory_days_by_project[project.id], bounds.trajectory_days);
     // #882: the project name is in a sibling cell, and a sibling is not an accessible name — name the input itself.
@@ -62,7 +68,7 @@ async function retentionCard(size, count, time, refresh) {
     perProject[project.id] = control;
     const row = document.createElement('tr'), cell = document.createElement('td'); cell.append(perProject[project.id]); row.append(element('td', project.name), cell); overrides.body.append(row);
   }
-  if (view.projects.length) form.append(element('p', '按项目设置轨迹正文的保留天数', 'muted'), overrides.wrap);
+  if (view.projects.length) form.append(element('p', '项目轨迹正文保留天数（留空沿用全局设置）', 'muted'), overrides.wrap);
   const save = element('button', '保存清理设置'); save.type = 'submit';
   form.append(status, save);
   form.addEventListener('submit', async event => {
@@ -97,7 +103,7 @@ async function retentionCard(size, count, time, refresh) {
     }
     if (section.isConnected) await refresh?.(section);
   }
-  function problem(err) { action.disabled = false; announceSave(outcome, readErrorText(err), true); }
+  function problem(err) { action.disabled = false; announceSave(outcome, '无法确认回收状态，请稍后重试。' + readErrorText(err), true); }
   action.addEventListener('click', async () => {
     if (action.disabled) return;
     show({ status: 'running' });
