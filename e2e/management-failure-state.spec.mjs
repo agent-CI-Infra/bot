@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { managementFixture } from '../test/management-fixture.mjs';
+import { switchConsoleProject } from './console-scope-picker.mjs';
 
 // #616: with no started project to manage, the assistant cannot open a conversation. The failure has to be stated
 // once, its recovery links have to be on the first screen at phone heights, and nothing may look able to send.
@@ -36,5 +37,28 @@ test('a management assistant that cannot open states the reason once and leaves 
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       expect(await panel.locator('.management-access-state').evaluate(el => el.scrollHeight <= el.clientHeight + 1), String(height)).toBe(true);
     }
+  } finally { await f.close(); }
+});
+
+// #616: a failed open must also take away what the previous scope left on screen. With a working conversation and the
+// shortcut drawer open, a failing 新建会话 used to leave that drawer under the card, its query buttons still looking
+// usable while submit() quietly returned false.
+test('a failed 新建会话 closes an open shortcut drawer and disables both header controls', async ({ page }) => {
+  test.setTimeout(60000);
+  const f = await managementFixture();
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(f.h.admin + '/#/projects');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click(); await switchConsoleProject(page, '101');
+    await page.locator('#tabs').getByRole('link', { name: '管理助手', exact: true }).click();
+    const fresh = page.getByRole('button', { name: '新建会话', exact: true }), tools = page.getByRole('button', { name: '快捷操作', exact: true });
+    await expect(page.getByLabel('管理消息', { exact: true })).toBeVisible({ timeout: 10_000 });
+    await tools.click(); await expect(page.locator('#management-tools')).toBeVisible();
+    await page.route('**/api/management/conversations', route => route.request().method() === 'GET' ? route.fulfill({ status: 403, json: { error: 'scope_forbidden' } }) : route.continue());
+    await fresh.click();
+    await expect(page.getByRole('heading', { name: '无法打开管理会话' })).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('#management-tools')).toBeHidden();
+    await expect(page.getByLabel('管理消息', { exact: true })).toBeHidden();
+    await expect(fresh).toBeDisabled(); await expect(tools).toBeDisabled();
   } finally { await f.close(); }
 });
