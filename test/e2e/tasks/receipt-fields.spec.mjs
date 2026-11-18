@@ -87,6 +87,9 @@ test('an unconfirmed command has its own section, and a recorded impact is shown
     await expect(impact).not.toContainText('服务端未提供影响描述');
     // A recorded impact outranks a notice even when an effect backs the notice, so the row names the more specific field.
     await expect(impact).not.toContainText('这条 notice 应该让位给 result.impact。');
+    // #1081: the impact row took the more specific field, not the notice, so the notice is still recorded once — the
+    // fix must not start dropping a notice the row never showed.
+    await expect(panel.locator('[data-receipt-record]')).toContainText('这条 notice 应该让位给 result.impact。');
     // The idempotency rule holds for an unconfirmed command too: that is exactly when it matters.
     await expect(panel.locator('[data-receipt-idempotency]')).toContainText('同一个幂等键重放不会重复执行');
   } finally { await f.close(); }
