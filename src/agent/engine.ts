@@ -37,6 +37,7 @@ import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { checkPullRequestLabels } from '../github/pull-request-labels.js';
 import { testEvidence, reviewLanguage, promptedBy } from '../github/text.js';
 import { assigneesOf, developmentReady } from '../review/queue.js';
+import { issueClaims } from '../review/claims.js';
 import { taskBasis } from '../dispatch/basis.js';
 import { actionableFinding, developmentGoal, discussionRequests, developmentApproved,
   ownedPullRequest, developmentLabelForTask, developmentStopped, queueDevelopment, revisionRequests, type DevelopmentOffer, type GoAhead, type RevisionRequest } from '../review/development.js';
@@ -603,6 +604,8 @@ export class TaskEngine {
         const comments=await github.pages(github.path(`/issues/${task.object_number}/comments`));
         // The whole discussion and the project's skills are files the agent reads when it needs them, next to the checkout.
         const reviews=pr?await github.pages(github.path(`/pulls/${task.object_number}/reviews`)):[],reviewComments=pr?await github.pages(github.path(`/pulls/${task.object_number}/comments`)):[];
+        // Who else may be working on the Issue (#1047): the review judges a claim from these facts and the comments.
+        const claims=task.kind==='review.issue'?await issueClaims(github,this.store,object):null;
         const skills=skillIndex(effectiveRules.files),json=(value:unknown)=>JSON.stringify(value,null,2);
         await workspace.context({'object.json':json(object),'comments.json':json(comments),
           ...(pr?{'files.json':json(files),'reviews.json':json(reviews),'review_comments.json':json(reviewComments)}:{}),
@@ -621,7 +624,7 @@ export class TaskEngine {
           files,...(pr?{heads:[...(input.heads||[]).filter((head:string)=>head!==ref.object.sha),ref.object.sha]}:{}),coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':review?'review':'workflow',repository:github.fullName,reviewed_sha:ref.object.sha,...(development?{}:{bot_login:github.actorLogin||null}),
             ...(!pr ? {actions_failure:this.store.get('SELECT classification FROM actions_failure_issues WHERE repository_id=? AND number=?',task.repository_id,task.object_number)||null} : {}),
             object:{number:object.number,title:object.title,state:object.state,author:object.user?.login||null,html_url:object.html_url||null,labels:(object.labels||[]).map((l:any)=>typeof l==='string'?l:l.name),
-              ...(pr?{draft:object.draft===true}:{}),body_excerpt:String(object.body||'').slice(0,1000)},
+              ...(pr?{draft:object.draft===true}:{}),body_excerpt:String(object.body||'').slice(0,1000)},...(claims?{claims}:{}),
             ...(pr?{pull_request:{base:{ref:object.base?.ref||null,sha:prBase},head:{ref:object.head?.ref||null,sha:object.head?.sha||null},
               diff:snapshot.history&&prBase?`git diff ${prBase}...${object.head?.sha}`:null}}:{}),
             context_files:contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
@@ -839,6 +842,8 @@ export class TaskEngine {
             approved=await this.developmentApproved(github,task).catch(()=>null);
             if(!approved&&result.conclusion==='ready_for_development')approved=await (seen?Promise.resolve(seen):github.object(task.kind,task.object_number))
               .then((issue:any)=>({label:null,labeled_by:null,assignees:assigneesOf(issue)}),()=>null);
+            // Whether someone else has taken the Issue on is the Manager's judgement (#1047); it gets the facts as they are now.
+            if(approved){const issue=seen??await github.object(task.kind,task.object_number).catch(()=>({number:task.object_number}));approved={...approved,claims:await issueClaims(github,this.store,issue,{comments:true})};}
           }
           // Who wrote the comments a review of the bot's own pull request took on is read from GitHub before the transaction.
           const requests=await this.revisionRequests(github,task,result,input).catch(()=>[]);

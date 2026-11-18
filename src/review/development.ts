@@ -9,6 +9,7 @@ import { developmentLabel } from '../rules/service.js';
 import { eventFilters } from '../work/settings.js';
 import { recordEvent } from '../dispatch/store.js';
 import { covers, projectCeiling } from '../work/ceiling.js';
+import type { ClaimFacts } from './claims.js';
 
 // Use the caller's lookups so development follows the same ownership and label checks as task execution.
 export interface DevelopmentContext {
@@ -132,9 +133,10 @@ export function queueDevelopment(context:DevelopmentContext,github:GitHub,task:R
 export interface GoAhead { label:string; labeled_by:string; assignees:string[] }
 /**
  * What an Issue review offers development on: a person's go-ahead, or without one an Issue review that concluded
- * ready_for_development (#1026), where label and labeled_by are null and the Manager needs another basis.
+ * ready_for_development (#1026), where label and labeled_by are null and the Manager needs another basis. A published review
+ * adds the claim facts read at publication (#1047).
  */
-export type DevelopmentOffer = GoAhead | { label:null; labeled_by:null; assignees:string[] };
+export type DevelopmentOffer = (GoAhead | { label:null; labeled_by:null; assignees:string[] }) & { claims?:ClaimFacts };
 // The goal of a development: the Manager's brief for an Issue (#815); a revision of a bot pull request carries the goal of the
 // development that opened it (input.review.implementation_goal is set by the control plane, never by a review since #815).
 /**

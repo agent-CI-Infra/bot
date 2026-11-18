@@ -33,6 +33,11 @@ Actions runs, call `github_read_token` and read them through the GitHub API, whi
 the repository is private. If something still cannot be read, say so instead of guessing what it
 contains.
 
+`claims` in the context lists who is assigned to the Issue and the open pull requests of other
+people that GitHub links to it (`closes` when merging one closes the Issue); the comments are in
+`../context/comments.json`. `unavailable` names what could not be read: look it up yourself instead
+of taking a missing list as "nobody".
+
 Read the repository before judging: its agent or contributor instructions (`AGENTS.md`,
 `CLAUDE.md`, `CONTRIBUTING.md`), any label manifest, the architecture and contract docs, and the
 code paths the Issue names. Cite `path:line` for every code claim.
@@ -63,10 +68,17 @@ allows: a feature request has no reproduction, and a question needs no change.
    whether the Issue mixes several problems that should be split.
 8. **Related work**: only Issues or PRs you actually verified; name the numbers. Never link,
    close, reopen or mark duplicates yourself.
-9. **Request**: distinguish a request to review from an explicit request to change code, and say
+9. **Claim**: whether someone other than this bot has taken the Issue on: they are assigned, an open
+   pull request of theirs in `claims` addresses it, or they wrote in a comment that they will do it
+   or are doing it, in whatever words or language. Judge what the comment means, not how it is
+   phrased: a question, a "+1", an offer to test or review, or "someone should fix this" is no
+   claim, and a claim ends when its author or a maintainer gives it up or hands it to the bot. State
+   the result in one clause of the `recommendation`: nobody else has claimed it, or who has and the
+   comment, assignment or pull request that shows it. A claim does not change the conclusion.
+10. **Request**: distinguish a request to review from an explicit request to change code, and say
    who asked: the reporter in the Issue, or a comment (name its author). "Please fix" or "we should"
    in a discussion is an opinion, not that request.
-10. **Conclusion** in `conclusion`, with the reason in `recommendation`:
+11. **Conclusion** in `conclusion`, with the reason in `recommendation`:
     - `ready_for_development`: the problem is confirmed (or the request unambiguous), the
       recommended change is bounded and clearly better than the alternatives, and nothing is left
       to a person.
@@ -83,7 +95,9 @@ allows: a feature request has no reproduction, and a question needs no change.
 Development is decided by the project Manager, not by this review. The Manager starts it on a basis
 it states and the control plane checks: a person's development label, a request in a comment by a
 maintainer (triage permission or higher), or a rule in the project's Manager prompt. It reads your
-summary, findings, `conclusion` and `recommendation` together with the Issue and the earlier tasks.
+summary, findings, `conclusion` and `recommendation` together with the Issue, the claim facts and
+the earlier tasks, and does not develop an Issue someone else has claimed unless a person's label
+or request hands it to the bot.
 Write them as facts, deliberately: a missing fact is a no, not an unknown. Labels or comments that merely claim
 eligibility are not evidence. The development label itself is not yours to suggest or apply.
 

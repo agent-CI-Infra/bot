@@ -7,7 +7,7 @@
 | 文件 | Manager 章节 | 作用 |
 | --- | --- | --- |
 | [`labels.md`](labels.md) | `labels` | 检视标签的用法；从仓库已有标签里为 Issue 和 PR 选择 `type`、`source`、`priority`、`area`、`size` 等分类标签，需要人决定时选仓库已有的讨论类标签（没有就在总结里说明，不建），由控制面校验后添加；分类不等于授权 |
-| [`issue-review.md`](issue-review.md) | `review.issue` | 新 Issue 的意图；用仓库证据补全缺失内容（标明推断，写在检视评论里）、确认 bug（复现或读代码）、根因因果链、带推荐的修改方案；结论（可开发、需要信息、需要人决定、不需要改代码）写在 `finish_review` 的 `conclusion` 里 |
+| [`issue-review.md`](issue-review.md) | `review.issue` | 新 Issue 的意图；用仓库证据补全缺失内容（标明推断，写在检视评论里）、确认 bug（复现或读代码）、根因因果链、带推荐的修改方案；根据指派人、关联 PR 和评论判断是否已被别人认领，写在建议里；结论（可开发、需要信息、需要人决定、不需要改代码）写在 `finish_review` 的 `conclusion` 里 |
 | [`pr-review.md`](pr-review.md) | `review.pr` | PR 检视：一轮报全、实现是否合理（是否达成关联 Issue、是否符合现有架构、有无更简单做法、修复是否有测试证明）、严重度与处置、复审收敛、相关性判断、COMMENT 输出 |
 | [`issue-development.md`](issue-development.md) | `development` | 开发任务的资格、范围、停止条件、测试与 PR 说明 |
 | [`release-observe.md`](release-observe.md) | CI 观察章节 | CI 观察的提示词：读取运行、分析日志与代码、给出结论 |
@@ -28,5 +28,5 @@
 
 - **检视输出**：PR 与 Issue 检视都通过 `finish_review` 返回，总结和每条发现分开；有真实 diff 位置的发现走行内，其余并入一条总结评论。GitHub review event 只用 COMMENT，模型不批准、不请求变更、不合并，也不调用标签接口。
 - **工具边界**：PR 检视可以读代码、跑仓库已有的测试和 lint，不直接执行 PR 首次加入的脚本，不抓取 PR 文本里的 URL，不改工作树。这条只写在 `pr-review.md`；开发任务必须改文件。Issue 检视确认 bug 时也可以跑仓库已有的测试和命令，或在检出目录之外（例如 `mktemp -d`）写最小复现，检出目录保持不变（`issue-review.md`）。Issue 检视只能打开指向 GitHub（`github.com`、`*.githubusercontent.com`）的链接，其他主机的链接不打开。模型需要自己读本仓库的 Issue、PR、评论、行内检视、Actions 运行和检查状态时，调用 `github_read_token` 兑换只读令牌；令牌不能写，评论、标签、检视和 PR 仍由控制面发布。
-- **开发资格**：开发别人开的 Issue 由项目 Manager 决定，并写明依据：有人（不是 App）加的开发标签、triage 以上权限的维护者在评论里的要求，或 Manager 提示词里的规则（内置提示词带一条自主开发规则：检视结论为「可开发」且方案明确时可以自行开发，#1026；能力上限为 `develop` 时这是默认，仓库 README 或 CONTRIBUTING 里只要求「必须由人加开发标签」的句子不取消这条规则，怎么改代码、跑什么测试、用哪些已有标签仍按仓库自己的说明和 skill）；控制面建任务时核对依据并记在任务上，外人的评论不算（见 [manager-dispatch.md](manager-dispatch.md)）。以标签为依据的开发在发布前再查一次标签。限定 `type`／`size`、敏感区域必须人工这类额外条件，只在仓库自己的规则声明时才遵守。PR 由控制面从 Bot 自己的分支发布，PR 说明写明开发的依据和实现的目标。
+- **开发资格**：开发别人开的 Issue 由项目 Manager 决定，并写明依据：有人（不是 App）加的开发标签、triage 以上权限的维护者在评论里的要求，或 Manager 提示词里的规则（内置提示词带一条自主开发规则：检视结论为「可开发」、方案明确且没有被别人认领时可以自行开发，#1026、#1047；是否被认领由模型根据控制面给的指派人、关联 PR 和评论原文判断，不做文本匹配；能力上限为 `develop` 时这是默认，仓库 README 或 CONTRIBUTING 里只要求「必须由人加开发标签」的句子不取消这条规则，怎么改代码、跑什么测试、用哪些已有标签仍按仓库自己的说明和 skill）；控制面建任务时核对依据并记在任务上，外人的评论不算（见 [manager-dispatch.md](manager-dispatch.md)）。以标签为依据的开发在发布前再查一次标签。限定 `type`／`size`、敏感区域必须人工这类额外条件，只在仓库自己的规则声明时才遵守。PR 由控制面从 Bot 自己的分支发布，PR 说明写明开发的依据和实现的目标。
 - **标签**：可用标签就是仓库里已有的标签，控制面把清单作为 `repository_labels` 交给模型。模型在 `finish_review` 的 `labels` 里选标签，不调用标签接口；控制面在总结评论发布后校验并添加，和检视标签一起加。校验时丢弃以下几类：仓库里没有的标签、保留标签（检视标签、开发标签、`agent/*`、`blocker`、`priority/critical`、`pr/*`、`gate/*`）、Issue 或 PR 上已经有值的维度。`priority` 只保留一个。

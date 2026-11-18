@@ -186,6 +186,30 @@ test('an Issue review that concludes ready_for_development offers development wi
   }
 });
 
+test('an Issue review reads the claim facts, and its publication hands them to the Manager as read then (#1047)',async t=>{
+  const issue={id:1,number:1,state:'open',title:'Fix the bug.',body:'Please fix.',labels:[],assignees:[{login:'someone'}]},config=[],queries=[];
+  const linked={closedByPullRequestsReferences:{nodes:[{number:8,title:'Fix it',url:'https://github.example/fixture/project-101/pull/8',state:'OPEN',isDraft:true,author:{login:'carol'},repository:{nameWithOwner:'fixture/project-101'}}]},timelineItems:{nodes:[]}};
+  const comments=[{id:51,user:{login:'carol'},author_association:'CONTRIBUTOR',created_at:'2026-11-18T01:00:00Z',body:'I will take this one.',html_url:'https://github.example/c/51'}];
+  const h=await emptyRepositoryFixture(t,{
+    github:(path,send,res,body)=>{
+      if(path==='/graphql'){queries.push(body.variables);send({data:{repository:{issue:linked}}});return true;}
+      if(path.endsWith('/issues/1')){send(issue);return true;}if(path.endsWith('/issues/1/events')){send([]);return true;}
+      if(path.endsWith('/issues/1/comments')&&res.req.method==='GET'){send(comments);return true;}},
+    execute:request=>{
+      if(request.type==='workspace_agent_config')config.push(Buffer.from(request.base64,'base64'));
+      if(request.type==='workspace_agent_poll')return {ok:true,result:{state:'completed',result:{summary:'parse() drops the last line.',recommendation:'Keep the last line; carol said she will take it.',conclusion:'ready_for_development',findings:[]}}};
+    }});
+  h.setBranch('ready');await h.admin('/api/repositories/101/policy','PATCH',{development_enabled:true});
+  assert.equal((await h.run()).status,'succeeded');
+  // The review gets assignees and linked pull requests in its context; the comments are its comments.json.
+  const prompt=JSON.parse(JSON.parse(Buffer.concat(config).toString()).prompt);
+  assert.deepEqual(prompt.claims,{assignees:['someone'],pull_requests:[{number:8,title:'Fix it',author:'carol',draft:true,url:'https://github.example/fixture/project-101/pull/8',closes:true}]});
+  // Published, it offers development with the facts read again, now with the latest comments as written.
+  const facts=JSON.parse(h.store.get("SELECT facts FROM dispatch_events WHERE type='review.published'").facts);
+  assert.deepEqual(facts.development.claims,{...prompt.claims,comments:[{id:'51',author:'carol',association:'CONTRIBUTOR',created_at:'2026-11-18T01:00:00Z',body:'I will take this one.',url:'https://github.example/c/51'}]});
+  assert.deepEqual(queries,[{owner:'fixture',name:'project-101',number:1},{owner:'fixture',name:'project-101',number:1}]);
+});
+
 test('an Issue development the Manager started on a label works to its brief and is not held back by the review asking for a person',async t=>{
   const issue={id:1,number:1,state:'open',title:'Fix the bug.',body:'Please fix.',labels:[{name:'bot-develop'}],assignees:[{login:'someone'}]};
   const config=[];
