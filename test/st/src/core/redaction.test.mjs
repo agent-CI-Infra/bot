@@ -50,6 +50,21 @@ test('public diagnostics redact encoded credentials and preserve unrelated Base6
   assert.equal(publicText('commit ' + hash, redactor), 'commit ' + hash);
 });
 
+test('line-wrapped Base64 is inspected as a single diagnostic payload', () => {
+  const redactor = new Redactor(), secret = 'fixture-actions-installation-token';
+  redactor.add(secret);
+  for (const width of [64, 65, 76, 80]) {
+    for (const encoding of ['base64', 'base64url']) {
+      const wrap = value => Buffer.from(JSON.stringify(value)).toString(encoding).match(new RegExp('.{1,' + width + '}', 'g')).join('\r\n');
+      const payload = { pad: 'x'.repeat(25), log: 'HTTP 401: ' + secret };
+      const encoded = wrap(payload), benign = wrap({ ...payload, log: 'HTTP 401: ordinary public information' });
+      assert.equal(publicText('Diagnostic payload:\nAttachment\n' + encoded + '\nNext verification step.', redactor),
+        'Diagnostic payload:\nAttachment\n[REDACTED]\nNext verification step.', encoding + ' at ' + width);
+      assert.equal(publicText(benign, redactor), benign.replaceAll('\r\n', '\n'));
+    }
+  }
+});
+
 test('management input and commands accept and retain normal text without trace-only transformations',async t=>{
   const f=await managementFixture(t);
   f.modelState.respond=(_body,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:'已读取'}}]}));};
