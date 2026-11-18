@@ -79,7 +79,7 @@ export function classifiedEvidence(failed: Failed[], verdicts: Map<unknown, any>
     // A verdict the cited log does not support is not acted on.
     const kind: FailureKind = output.problem ? 'unknown' : verdict.kind !== 'unknown' && !quote.length ? 'unknown' : verdict.kind;
     const reason = output.problem ?? (kind !== verdict.kind ? 'The analysis cited no line that the failed steps printed.' : String(verdict.reason || '').trim() || 'No reason was given.');
-    return { job, kind, reason, quote: quote.join('\n'), ...(!quote.length && output.tail ? { context: output.tail } : {}) };
+    return { job, kind, reason, quote: quote.join('\n') };
   });
 }
 export { failedStepOutput };
