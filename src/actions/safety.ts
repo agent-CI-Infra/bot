@@ -47,11 +47,34 @@ export function publicText(value: string, redactor: Redactor): string {
   if (value.includes('\0')) return '';
   // A log can encode an entire JSON object or header, so its token need not equal Base64(secret).
   // Inspect the payload before literal replacement; an encoding may share a substring with the encoded secret.
-  const inspected = value.replace(/[A-Za-z0-9+/_-]{8,}={0,2}/g, encoded => {
+  const inspect = (encoded: string) => {
     const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-    if (redactor.text(decoded) !== decoded || hasCredentials(decoded)) return '[REDACTED]';
-    return encoded;
-  });
+    return redactor.text(decoded) !== decoded || hasCredentials(decoded) ? '[REDACTED]' : encoded;
+  };
+  // CLI/MIME encoders use fixed-width lines with a possibly shorter final line. Keep surrounding
+  // Markdown and prose outside the payload, including a label before the first encoded line.
+  const tokens = /[A-Za-z0-9+/_-]{8,}={0,2}/g;
+  const continuation = /[ \t]*\r?\n[ \t]*([A-Za-z0-9+/_-]+={0,2})(?=[ \t]*\r?$|[`"'\])>])/my;
+  let inspected = '', copied = 0;
+  for (let first; (first = tokens.exec(value));) {
+    const width = first[0].length;
+    let line = first[0], end = tokens.lastIndex;
+    while (line.length === width && !line.endsWith('=')) {
+      continuation.lastIndex = end;
+      const next = continuation.exec(value)?.[1];
+      if (!next || next.length > width) break;
+      line = next;
+      end = continuation.lastIndex;
+    }
+    const encoded = value.slice(first.index, end);
+    let safe = inspect(encoded);
+    // Adjacent independent Base64 strings may each carry their own credential.
+    if (safe === encoded && end > tokens.lastIndex) safe = encoded.replace(tokens, inspect);
+    inspected += value.slice(copied, first.index) + safe;
+    copied = end;
+    tokens.lastIndex = end;
+  }
+  inspected += value.slice(copied);
   const text = redactor.text(inspected).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
   const cleaned = redactCredentials(redactor.text(text))
     .replace(/-----BEGIN ([A-Z0-9][A-Z0-9 -]*)-----[\s\S]*?(?:-----END \1-----|$)/g, '[REDACTED]');

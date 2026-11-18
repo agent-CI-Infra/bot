@@ -718,7 +718,7 @@ test('the Issue and follow-up preserve six diagnostic paragraphs and redact only
   const privateKey = '-----BEGIN PRIVATE KEY-----\nfixture-material\n\nmore-material\n-----END PRIVATE KEY-----';
   const signed = 'https://fixture.invalid/archive?X-Amz-Credential=fixture-signer&X-Amz-Signature=fixture-signature';
   const encodedKey = Buffer.from('actions-analysis-model-key').toString('base64');
-  const encodedLog = Buffer.from(JSON.stringify({ log: 'HTTP 401: fixture-actions-installation-token' })).toString('base64url');
+  const encodedLog = Buffer.from(JSON.stringify({ pad: 'x'.repeat(25), log: 'HTTP 401: fixture-actions-installation-token' })).toString('base64url').match(/.{1,76}/g).join('\n');
   const title = cause + ' with ' + encodedKey;
   const f = await fixture(t, { log: log('AssertionError: internal-only evidence'), respond: input => {
     const diagnosis = [`Attempt ${input.run.attempt}`, ...paragraphs, 'Authorization: Bearer shortKey7 returned HTTP 401.',
@@ -745,7 +745,7 @@ test('the Issue and follow-up preserve six diagnostic paragraphs and redact only
 test('legacy pending text is redacted at delivery, then reconciled with its original receipt', async t => {
   const f = await fixture(t, { log: null, unknownIssue: true });
   const id = 'legacy-pending', marker = `<!-- dept-bot-actions:${id} -->`;
-  const encoded = Buffer.from('actions-analysis-model-key').toString('base64url');
+  const encoded = Buffer.from(JSON.stringify({ pad: 'x'.repeat(25), log: 'HTTP 403: actions-analysis-model-key' })).toString('base64url').match(/.{1,76}/g).join('\n');
   const body = `HTTP 403 https://logs.invalid/a?sig=short-signed-value\nPayload: ${encoded}\n\n<!-- dept-bot-actions-log-start -->\nold appendix\n${marker}`;
   recordActionsRun(f.h.store, '101', f.state.runs[0]);
   f.h.store.run('UPDATE actions_failure_attempts SET data=?', JSON.stringify({ kind: 'unknown', evidence: [] }));
@@ -757,7 +757,7 @@ test('legacy pending text is redacted at delivery, then reconciled with its orig
   assert.ok(issue.body.endsWith(marker));
   assert.match(issue.body, /HTTP 403 https:\/\/logs.invalid\/a\?sig=\[REDACTED\]/);
   assert.doesNotMatch(issue.body, /short-signed-value|old appendix/);
-  assert.match(issue.body, /Payload: \[REDACTED\]/);
+  assert.match(issue.body, /Payload: \[REDACTED\]\s*<!--/);
   assert.ok(!issue.body.includes(encoded));
   await f.restart(); await f.tick(); await f.hook(); await f.tick();
   assert.deepEqual([f.state.issues.length, f.state.comments.length, filedFor(f, 800).id], [1, 0, id]);
