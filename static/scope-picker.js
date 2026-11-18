@@ -22,7 +22,7 @@ function syncScopePicker() {
   if (!me) {
     closeScopePicker(false); scopePickerVisit = null; scopePickerSignature = ''; scopePickerRepositoriesOwner = null;
     for (const trigger of [$('console-project'), $('console-mobile-project')]) {
-      trigger.replaceChildren(); trigger.dataset.projectId = ''; trigger.title = ''; trigger.setAttribute('aria-label', t('nav.switch_project'));
+      trigger.replaceChildren(element('span', t('scope.trigger', { name: '' }), 'sr-only')); trigger.dataset.projectId = ''; trigger.title = '';
     }
     $('console-scope-list').replaceChildren(); $('console-scope-footer').replaceChildren(); return;
   }
@@ -33,11 +33,13 @@ function syncScopePicker() {
     const name = repo ? scopeRepository(repo) : t('nav.all_projects');
     const detail = repo ? scopeOrganization(repo) : t('scope.count', { count: repositories.length });
     trigger.title = repo?.full_name || name; trigger.dataset.projectId = repo ? String(repo.id) : '';
-    trigger.setAttribute('aria-label', t('scope.trigger', { name: repo?.full_name || name }));
+    // #1060: name the trigger from its content, not from aria-label. The visible glyphs (mark, count/project and arrow)
+    // have to appear in the accessible name (WCAG 2.5.3), so the only extra word is a hidden "切换项目：" prefix.
+    const prefix = element('span', t('scope.trigger', { name: '' }), 'sr-only');
     const mark = element('span', repo ? name[0].toUpperCase() : '⊞', 'console-scope-mark'); mark.setAttribute('aria-hidden', 'true');
     const text = element('span', '', 'console-scope-copy'); text.append(element('strong', name), element('small', detail));
     const arrow = element('span', '⌄', 'console-scope-arrow'); arrow.setAttribute('aria-hidden', 'true');
-    trigger.replaceChildren(mark, text, arrow);
+    trigger.replaceChildren(prefix, mark, text, arrow);
   }
   const signature = JSON.stringify([me.id, me.role, id, currentLocale(), recent, repositories.map(row => [row.id, row.full_name, row.account_name, row.enabled])]);
   if (signature !== scopePickerSignature) { scopePickerSignature = signature; drawScopePicker(); }
