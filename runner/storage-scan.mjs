@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { filesystemId } from './filesystem-id.mjs';
 import { statfs } from 'node:fs/promises';
 import { relative, sep } from 'node:path';
 
@@ -38,7 +39,7 @@ export async function storageScan(root, { timeoutMs = scanLimits.timeoutMs } = {
   // Files directly in /workspace have no line of their own: they are the total less the directories.
   if (total !== null) groups.other += Math.max(0, total - [...top.values()].reduce((sum, bytes) => sum + bytes, 0));
   const largest = list => list.sort((a, b) => b.bytes - a.bytes).slice(0, scanLimits.entries);
-  let disk = null; try { const stats = await statfs(root); disk = { free_bytes: stats.bavail * stats.bsize, total_bytes: stats.blocks * stats.bsize }; } catch {}
+  let disk = null; try { const stats = await statfs(root); disk = { device: await filesystemId(root), free_bytes: stats.bavail * stats.bsize, total_bytes: stats.blocks * stats.bsize }; } catch {}
   return { scanned_at: new Date().toISOString(), duration_ms: Date.now() - started, complete: !error, total_bytes: total, ...Object.fromEntries(Object.entries(groups).map(([key, value]) => [key + '_bytes', value])),
     tasks: tasks.sort((a, b) => b.bytes - a.bytes).slice(0, scanLimits.tasks), task_count: tasks.length,
     home_entries: largest(home), other_entries: largest([...others].map(([name, bytes]) => ({ name, bytes }))), disk };

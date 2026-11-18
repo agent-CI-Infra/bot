@@ -31,6 +31,7 @@ test('the data disk lists Docker containers, the volumes outside the deployment 
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
+    await page.getByText('查看采集、回收与项目明细', { exact: true }).click();
     const table = page.locator('.cost-table-scroll', { hasText: 'Docker 容器可写层' }).first();
     await expect(table).toContainText('Docker 容器可写层');
     await expect(table).toContainText('Docker 构建缓存');

@@ -38,6 +38,13 @@ export function createManagerServer({ projects, token, runs = null, assistants =
       else if (req.method === 'GET' && path === '/v1/notes-volumes') result = await projects.notesVolumes();
       else if (req.method === 'POST' && /^\/v1\/projects\/[1-9]\d{0,19}\/notes\/reclaim$/.test(path)) result = await projects.reclaimNotes(path.split('/')[3]);
       else if (req.method === 'GET' && path === '/v1/storage') result = projects.storage();
+      else if (req.method === 'POST' && path === '/v1/storage/reclaim') {
+        projects.setRetention(await json(req));
+        result = await projects.expiry.pass();
+        await projects.readingFootprint;
+        projects.footprint = null;
+        await projects.refreshFootprint();
+      }
       // The window of the manager's copies of runner-call bodies, set from the control plane's storage settings (#671).
       else if (req.method === 'PUT' && path === '/v1/storage/retention') result = projects.setRetention(await json(req));
       else if (req.method === 'PUT' && path === '/v1/defaults') result = await projects.setDefaults(await json(req));

@@ -144,7 +144,7 @@ test('the view lists each computer, the host disk with other, what can be reclai
   // #968: only the volume bytes outside the rows above, and the assistant HOME named on its own.
   assert.equal(view.host.known.docker_volumes, 7 * GiB); assert.equal(view.host.known.assistant_homes, 3 * GiB);
   assert.equal(view.host.known.git_cache, 0); assert.equal(view.host.used_bytes, 600 * GiB);
-  assert.equal(view.host.other_bytes, 600 * GiB - view.host.known_bytes); assert.ok(view.host.other_bytes > 0); assert.deepEqual(view.host.unmeasured, []);
+  assert.equal(view.host.other_bytes, null); assert.equal(view.overview.machine, null); assert.deepEqual(view.host.unmeasured, []);
   const reclaim = Object.fromEntries(view.reclaimable.map(item => [item.key, item]));
   assert.equal(reclaim.manager_free_pages.bytes, 8 * GiB); assert.deepEqual([reclaim.expiring_workspaces.bytes, reclaim.expiring_workspaces.count], [40 * GiB, 1]);
   assert.equal(reclaim.docker_build_cache.bytes, 2 * GiB); assert.equal(reclaim.docker_unused_images.bytes, 3 * GiB);
@@ -179,7 +179,7 @@ test('items not measured yet are null and named, not a measured zero', async t =
   const view = report.view({ id: 'admin', role: 'super_admin', repositories: [] });
   for (const key of ['manager_database', 'manager_trajectories', 'computers', 'docker_images', 'docker_containers', 'docker_build_cache', 'docker_volumes', 'assistant_homes', 'git_cache']) assert.equal(view.host.known[key], null, key);
   assert.deepEqual(view.host.unmeasured.sort(), ['assistant_homes', 'computers', 'docker_build_cache', 'docker_containers', 'docker_images', 'docker_volumes', 'git_cache', 'manager_database', 'manager_trajectories']);
-  assert.equal(view.host.other_bytes, 600 * GiB - view.host.known_bytes);
+  assert.equal(view.host.other_bytes, null, 'data disk and Docker numbers have different scopes');
   const reclaim = Object.fromEntries(view.reclaimable.map(item => [item.key, item]));
   assert.equal(reclaim.manager_free_pages.bytes, null); assert.equal(reclaim.docker_build_cache.bytes, null); assert.equal(reclaim.docker_unused_images.count, null);
 });

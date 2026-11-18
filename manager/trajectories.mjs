@@ -298,13 +298,16 @@ export const defaultRetentionDays = 2;
  * a pass runs after the start and every hour, and first removes the files a stopped pass had marked.
  */
 export class TrajectoryExpiry {
-  constructor(db, trajectories, options = {}) { this.db = db; this.trajectories = trajectories; this.options = options; this.stopped = false; }
+  constructor(db, trajectories, options = {}) { this.db = db; this.trajectories = trajectories; this.options = options; this.stopped = false; this.timers = new Set(); }
   start() { this.running ??= this.loop().catch(error => console.error('[manager] trajectory expiry stopped:', error)); }
-  async stop() { this.stopped = true; this.wake?.(); await this.running; }
+  async stop() { this.stopped = true; for (const done of this.timers) done(); await Promise.all([this.running, this.active]); }
   // The pause between batches holds the process like the pass awaiting it; the hour between passes does not.
   pause(ms, hold = false) {
     if (this.stopped) return Promise.resolve();
-    return new Promise(resolve => { const timer = setTimeout(done, ms); if (!hold) timer.unref?.(); function done() { clearTimeout(timer); resolve(); } this.wake = done; });
+    return new Promise(resolve => {
+      const done = () => { clearTimeout(timer); this.timers.delete(done); resolve(); };
+      const timer = setTimeout(done, ms); if (!hold) timer.unref?.(); this.timers.add(done);
+    });
   }
   /** The retention window in whole days. */
   windowDays() {
@@ -331,7 +334,10 @@ export class TrajectoryExpiry {
     }
   }
   /** One pass over the files closed before the window; returns what it removed. */
-  async pass() {
+  pass() {
+    return this.active ??= this.expire().finally(() => { this.active = null; });
+  }
+  async expire() {
     const started = new Date().toISOString(), removed = { files: 0, bytes: 0 };
     await this.removeMarked();
     const before = new Date((this.options.now?.() ?? Date.now()) - this.windowDays() * day).toISOString();

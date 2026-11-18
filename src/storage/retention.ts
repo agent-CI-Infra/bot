@@ -131,7 +131,9 @@ export class RetentionCleanup {
     return this.running ??= this.pass().catch(error => {
       if (this.stopped) return {};
       console.error('[retention] cleanup failed:', error);
-      try { return this.record({ last_error: String((error as Error)?.message ?? error).slice(0, 300) }); } catch { return {}; }
+      const failure = { last_error: String((error as Error)?.message ?? error).slice(0, 300) };
+      try { this.record(failure); } catch {}
+      return failure;
     }).finally(() => { this.running = null; });
   }
   /** What the last cleanup did, for the storage page. */

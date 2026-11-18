@@ -37,6 +37,7 @@ services:
       BOT_MASTER_KEY_FILE: /keys/master.key
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
       BOT_MANAGER_URL: http://manager:8793
+      BOT_HOST_STORAGE_DIR: /run/host-storage
       BOT_COMMAND_TIMEOUT_MAX_SECONDS: "${BOT_COMMAND_TIMEOUT_MAX_SECONDS:-600}"
       BOT_GITHUB_API_URL: "${BOT_GITHUB_API_URL:-https://api.github.com}"
       BOT_MENTION_NAMES: "${BOT_MENTION_NAMES-bot,agent-ci-infra-bot}"
@@ -71,6 +72,7 @@ services:
       - bot-keys:/keys:ro
       - internal-keys:/internal:ro
       - tunnel-keys:/tunnel
+      - ${BOT_HOST_STORAGE_DIR:-storage-metrics}:/run/host-storage:ro
       # Persistent HOME of every assistant computer (#457), one directory per group or person; the control plane reads,
       # writes, measures and deletes them as the computers' own user (10001).
       - assistant-homes:/assistant-homes
@@ -155,6 +157,7 @@ services:
     security_opt: [no-new-privileges:true]
     restart: "no"
 volumes:
+  storage-metrics:
   tool-results:
     labels:
       department.bot.kind: tool-results

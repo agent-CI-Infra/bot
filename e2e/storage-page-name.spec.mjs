@@ -32,6 +32,7 @@ test('the storage page names itself for both roles and drops the jargon from its
     await expect(page.locator('#console-area')).toHaveText('平台管理');
     await expect(page.locator('#console-context')).toHaveText('存储');
     await expect(page).toHaveTitle(/^存储 · /);
+    await page.getByText('查看采集、回收与项目明细', { exact: true }).click();
     const headers = panel.locator('.storage-projects thead');
     await expect(headers).toHaveCount(2);
     for (const term of ['blob', 'manager 轨迹', 'runner journal', 'git 存储', 'HOME 缓存'])
