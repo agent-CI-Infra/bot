@@ -1,6 +1,6 @@
 # 内置场景规则
 
-本目录的 Markdown 是 Bot 的内置规则层，`manager-dispatch.md` 是完整的 Manager 分派默认提示词，其他文件用于各任务的内置规则。控制面启动时由 `src/rules/service.ts` 按文件读入 `defaults`（`onboarding.md` 除外：它由 `src/management/onboarding.ts` 读入，作为仓库接入向导的系统提示词，不是规则层，也不能覆盖），规则接口、Manager 页的「内置文本」和模型系统提示用的都是这里的原文；运行镜像把本目录复制到 `/app/docs/prompts`。修改这些文件就是修改所有没有写对应章节的项目的默认行为。项目可以把 [定时检查章节的建议文本](../schedule-check.md) 自行写入 Manager「定时检查」章节；那份文本必须留在 `docs/` 下作为模板，不得加入本目录或登记为内置提示词（该章节默认保持为空，以免撑破管理助手单次工具结果的 256 KiB 上限）。
+本目录的 Markdown 是 Bot 的内置规则层，`manager-dispatch.md` 是完整的 Manager 分派默认提示词，其他文件用于各任务的内置规则。控制面启动时由 `src/rules/service.ts` 按文件读入 `defaults`（`onboarding.md` 和 `late-schedules.md` 除外：前者由 `src/management/onboarding.ts` 读入，作为仓库接入向导的系统提示词；后者由 `src/actions/late-schedules.ts` 读入；两者都不是规则层，也不能覆盖），规则接口、Manager 页的「内置文本」和模型系统提示用的都是这里的原文；运行镜像把本目录复制到 `/app/docs/prompts`。修改这些文件就是修改所有没有写对应章节的项目的默认行为。项目可以把 [定时检查章节的建议文本](../schedule-check.md) 自行写入 Manager「定时检查」章节；那份文本必须留在 `docs/` 下作为模板，不得加入本目录或登记为内置提示词（该章节默认保持为空，以免撑破管理助手单次工具结果的 256 KiB 上限）。
 
 ## 文件对应
 
@@ -12,6 +12,7 @@
 | [`issue-development.md`](issue-development.md) | `development` | 开发任务的资格、范围、停止条件、测试与 PR 说明；开发 Issue 时用 `report_development_milestone` 提交分析与计划、完成、停止三类里程碑，由控制面写进 Issue 上的一条进展评论 |
 | [`release-observe.md`](release-observe.md) | CI 观察章节 | CI 观察的提示词：读取运行、分析日志与代码、给出结论 |
 | [`manager-dispatch.md`](manager-dispatch.md) | `dispatch` | 每个事件新建、续接还是不处理的默认流程 |
+| [`late-schedules.md`](late-schedules.md) | 无，不可覆盖 | 定时运行延迟严重时的推荐（#1072）：怎样判断 workflow 的定时运行晚得多、先查重（同一仓库只推荐一次）、在 Issue 里推荐 bot 定时触发并附 workflow 改造的 YAML 示例。由 `src/actions/late-schedules.ts` 读入，作为 `late_scheduled_runs` 交给 Actions 失败处理、CI 观察和项目定时任务，并附在群聊助手（能读 Actions 时）和管理助手的系统提示后面，见[定时任务](../schedules.md#定时触发-workflow) |
 | [`onboarding.md`](onboarding.md) | 无，不可覆盖 | 仓库接入向导：管理助手只读分析一个仓库，给出仓库画像、带推荐答案的问题和接入方案草稿，见[管理助手](../management-agent.md#仓库接入向导) |
 
 三份检视和开发规则、CI 观察提示词以及接入向导提示词各带一张 ` ```mermaid ` 流程图（检视：检视 → 回复；开发：Issue 分析 → 开发 → 检视 → 测试，检视或测试发现问题时回到开发；接入：读仓库 → 画像 → 提问 → 方案），给 agent 说明步骤顺序，见[项目 Manager 与工作类型](../workflows.md)。

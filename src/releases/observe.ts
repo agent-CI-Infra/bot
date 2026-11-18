@@ -3,6 +3,7 @@ import { stop } from '../agent/common.js';
 import { randomId } from '../core/security.js';
 import { eventTaskActive, registerEventWork } from '../work/events.js';
 import { sectionText } from '../work/settings.js';
+import { lateSchedules } from '../actions/late-schedules.js';
 import { recordEvent, registerDispatchHook } from '../dispatch/store.js';
 import { runSnapshot } from './actions.js';
 
@@ -68,7 +69,7 @@ registerEventWork('release.observe', {
       contextFiles: [{ path: '../context/run.json', content: 'The release Actions run to observe, with its jobs and steps as GitHub reports them' }],
       context: { release: { version: row.version, target_sha: row.target_sha }, run: { id: snapshot.id, attempt: snapshot.attempt, url: snapshot.url },
         failed_jobs: failedJobs(snapshot).map((job: any) => ({ id: job.id, name: job.name, conclusion: job.conclusion })),
-        work_name: 'CI 观察', work_prompt: sectionText(store, task.repository_id, 'release.observe') } };
+        work_name: 'CI 观察', work_prompt: sectionText(store, task.repository_id, 'release.observe'), late_scheduled_runs: lateSchedules } };
   },
   validate(store, task, input) { bound(store, task, input); },
   checkResult(_store, _task, input, result) { submittedJobs(input, result); },

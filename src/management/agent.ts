@@ -25,6 +25,7 @@ import { privateTurnMessageInstructions, type TurnMessages } from '../channels/t
 import { conversationScheduleName, conversationScheduleTool } from '../channels/schedules.js';
 import { RepositoryOnboarding, onboardingRepositoryOf, onboardingToolNames, onboardingTools, type OnboardingTurn } from './onboarding.js';
 import { startRequestsName, startRequestsTool } from './onboarding-requests.js';
+import { lateSchedules } from '../actions/late-schedules.js';
 
 const now=()=>new Date().toISOString();
 // Recent rounds continue the conversation; each earlier answer and the history as a whole stay bounded (#333).
@@ -279,7 +280,11 @@ export class ManagementAgent {
           +stageMessageInstructions
           +(this.service.assistants?.available()?computerInstructions('belongs to the current user alone: their Feishu private chat and console conversations share it'):'')
           +(incoming?privateTurnMessageInstructions:'')
-          +(schedules?' conversation_schedules manages the timers of this private chat for its owner, for example a daily check that reports only when something is wrong.':'')+(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
+          +(schedules?' conversation_schedules manages the timers of this private chat for its owner, for example a daily check that reports only when something is wrong.':'')
+          // #1072: a project scheduled task can start a workflow on time; its example instruction checks for a running run first.
+          +' A project scheduled task (management_command schedule.register, workflow manager.check) can also start a GitHub Actions workflow on time, for example when GitHub\'s own schedule runs late. Its instruction says which workflow, on which ref, and to check first, for example: 「在 main 上触发 .github/workflows/nightly.yml（github_write POST /actions/workflows/nightly.yml/dispatches，ref 为 main）。触发前先用 github_read 查看这个 workflow 有没有排队或正在运行的运行，有就不再触发，只在报告里说明；触发后在报告里写上 GitHub 返回的运行链接。」 The Manager runs it with github_write, which needs the project\'s capability ceiling at comment or more, Actions write on the Manager role and the workflow declaring workflow_dispatch; GitHub refuses the rest and the task reports it.'
+          +'\n\n'+lateSchedules
+          +(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
           +administrator;
         const context={...this.context(base,conversation,id,input.content),...(onboarding?{onboarding:onboarding.context}:{}),...pendingRequests(),recent_tool_results:resultFiles.recent()};
         const turnSpec:import('../agent/runtime.js').AgentSpec<unknown>={resultSession:resultFiles,store:this.store,task:{id,repository_id:null,...onboarding?.task,service_role_id:managementAssistant,kind:'management.agent',conversation_id:conversation,source_message:input.source_message},redactor,guard,
