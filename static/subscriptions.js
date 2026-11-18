@@ -41,7 +41,7 @@ function renderSubscriptionEditor(host, { project, destinations, read, command, 
   const previewButton=button('预览事件订阅时间',async()=>{
     if(!live()||!ready||loading)return;model.step='confirm';form.dataset.step='confirm';for(const node of steps.children)node.setAttribute('aria-current',node.dataset.step==='confirm'?'step':'false');const spec=capture(),signature=JSON.stringify(spec),request=++previewGeneration;preview.textContent='正在核验当前订阅草稿…';
     try{const result=await read('preview_subscription',{subscription:spec});if(!live()||request!==previewGeneration||signature!==JSON.stringify(capture()))return;
-      const at=value=>value==null?'未安排发送':timestampAt(value,result.timezone)+' · '+result.timezone;
+      const at=value=>value==null?'未安排发送':stamped(value,result.timezone);
       preview.replaceChildren(note('假设此刻收到一条事件；这不是已经安排的触发或实际通知。'),facts([['事件收到',at(result.event_received_at)],['聚合结束',at(result.aggregation_ends_at)],['最早发送',at(result.first_send_at)],['接收方',destinationLabel(result.destination.id)]]));errorBox.textContent='';
     }catch(error){if(!live()||request!==previewGeneration)return;if(!destinationError(error)&&invalidate(error))return;preview.textContent='发送时间未知，请修正后重新预览。';errorBox.textContent=destinationError(error)?'目的地或受众需要重新核验；草稿已保留。'+readErrorText(error):readErrorText(error);}
   },'quiet');

@@ -5,6 +5,15 @@ function timestamp(value) {
   const pad=(n,width=2)=>String(n).padStart(width,'0');
   return `${pad(date.getFullYear(),4)}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
+// A row that appends " · zone" only does so when there is a reading in front of it; otherwise it says so.
+function stamped(value, zone) {
+  const reading = timestampAt(value, zone);
+  return reading ? reading + ' · ' + zone : '时间无法识别';
+}
+// Rows that print a local reading keep their own wording for a value they cannot read.
+function timeText(value, fallback = '时间未知') {
+  return timestamp(value) || fallback;
+}
 // The same reading in a named zone, for the rows that keep a " · zone" suffix.
 function timestampAt(value, zone) {
   if(value==null||value==='')return '';

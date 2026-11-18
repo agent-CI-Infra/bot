@@ -19,7 +19,7 @@ function renderScheduleRecords(host, { project, read, invalidate }) {
   const caption = value => captions[value] || value || '未知';
   const at = (value, zone = 'UTC') => {
     if (value == null) return '未记录';
-    try { return timestampAt(value, zone) + ' · ' + zone; }
+    try { return stamped(value, zone); }
     catch { return '时间或时区无法识别'; }
   };
   const facts = entries => {
