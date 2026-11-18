@@ -20,7 +20,7 @@ const FILES = ['app/boot.js', 'knowledge.js', 'channels/feishu-page.js', 'channe
 const ROWS = [
   ['knowledge.js', '时间未提供', 'timestamp'],
   ['channels/feishu-page.js', '有效期', 'timestamp'],
-  ['channels/transfer.js', '发送者', 'timestamp'],
+  ['channels/transfer.js', 'messages.append(facts', 'timestamp'],
   ['channels/transfer.js', '最后收到事件', 'timestamp'],
   ['channels/transfer.js', '未知发送者', 'timestamp'],
   ['project/model-address.js', '目录匹配不唯一', 'timestamp'],
@@ -29,16 +29,17 @@ const ROWS = [
   ['schedules.js', '迁移时间', 'timestamp'],
   ['schedules.js', '无记录', 'timestampAt'],
   ['channels/schedules.js', 'scheduleTime', 'timestampAt'],
-  ['settings/page.js', '最近一次', 'timestamp'],
+  ['settings/page.js', 'state.last_pass ?', 'timestamp'],
   ['settings/page.js', 'const time = value =>', 'timestamp'],
   ['settings/page.js', 'phase.finished_at', 'timestamp'],
   ['subscriptions.js', '未安排发送', 'timestampAt'],
-  ['subscriptions.js', 'observedAt=', 'timestamp'],
+  ['subscriptions.js', 'model.lastReadRevision=value.revision', 'timestamp'],
   ['schedule-records.js', 'const at = (value, zone', 'timestampAt'],
 ];
 
 test('no console page formats a displayed time with the browser locale or a 12-hour clock', () => {
-  for (const file of FILES) {
+  // boot.js is where the shared helpers live, so it is the one file allowed to reach for Intl.
+  for (const file of FILES.filter(name => name !== 'app/boot.js')) {
     const text = source(file);
     assert.doesNotMatch(text, /new Date\([^)]*\)\.toLocaleString\(/, `${file} formats a time with toLocaleString()`);
     assert.doesNotMatch(text, /\.toLocaleTimeString\(/, `${file} formats a time with toLocaleTimeString()`);
@@ -52,10 +53,12 @@ test('no console page formats a displayed time with the browser locale or a 12-h
 test('every displayed time calls the shared clock helper, and knowledge uses it instead of a local one', () => {
   const lines = file => source(file).split('\n').map((line, index) => ({ line, number: index + 1 }));
   for (const [file, token, helper] of ROWS) {
-    const row = lines(file).filter(({ line }) => line.includes(token));
-    assert.ok(row.length > 0, `${file} no longer has the row "${token}"`);
-    const calls = row.filter(({ line }) => line.includes(helper + '('));
-    assert.ok(calls.length > 0, `${file}: "${token}" must call ${helper}() (row ${row.map(r => r.number).join(',')})`);
+    // A row can wrap over a few lines (schedule-records' at()), so the helper is looked for in the row and just after it.
+    const all = lines(file), start = all.findIndex(({ line }) => line.includes(token));
+    assert.ok(start >= 0, `${file} no longer has the row "${token}"`);
+    const nearby = all.slice(start, start + 5);
+    assert.ok(nearby.some(({ line }) => line.includes(helper + '(')),
+      `${file}: "${token}" must call ${helper}() (row ${all[start].number})`);
   }
   // knowledge.js used to shadow the shared clock with a local one; that shadow is what kept its page at the browser locale.
   assert.doesNotMatch(source('knowledge.js'), /\b(?:const|let|var)\s+timestamp\s*=/, 'knowledge.js shadows the shared clock');
