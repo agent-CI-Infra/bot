@@ -37,16 +37,35 @@ const ROWS = [
   ['schedule-records.js', 'const at = (value, zone', 'timestampAt'],
 ];
 
+// Every new Intl.DateTimeFormat(...) call in the text, with its own parentheses balanced, so the rule can read the
+// options it was given rather than guessing from one line.
+function intlCalls(text) {
+  const calls = [];
+  for (let start = text.indexOf('new Intl.DateTimeFormat('); start >= 0; start = text.indexOf('new Intl.DateTimeFormat(', start + 1)) {
+    let depth = 0, end = text.indexOf('(', start);
+    for (; end < text.length; end += 1) {
+      if (text[end] === '(') depth += 1;
+      else if (text[end] === ')') { depth -= 1; if (depth === 0) break; }
+    }
+    calls.push(text.slice(start, end + 1));
+  }
+  return calls;
+}
+
 test('no console page formats a displayed time with the browser locale or a 12-hour clock', () => {
-  // boot.js is where the shared helpers live, so it is the one file allowed to reach for Intl.
-  for (const file of FILES.filter(name => name !== 'app/boot.js')) {
+  for (const file of FILES) {
     const text = source(file);
     assert.doesNotMatch(text, /new Date\([^)]*\)\.toLocaleString\(/, `${file} formats a time with toLocaleString()`);
     assert.doesNotMatch(text, /\.toLocaleTimeString\(/, `${file} formats a time with toLocaleTimeString()`);
     assert.doesNotMatch(text, /\.toLocaleDateString\(/, `${file} formats a date with toLocaleDateString()`);
-    assert.doesNotMatch(text, /new Intl\.DateTimeFormat\(/, `${file} formats a time with Intl.DateTimeFormat`);
     assert.doesNotMatch(text, /\bhour12\s*:/, `${file} picks a 12/24-hour clock`);
     assert.doesNotMatch(text, /\b(?:dateStyle|timeStyle)\s*:/, `${file} formats a time with dateStyle/timeStyle`);
+    // Intl is allowed only where the call names its zone and pins a 24-hour clock; a call without them is the
+    // browser-language clock this issue is about.
+    for (const call of intlCalls(text)) {
+      assert.match(call, /timeZone\s*:/, `${file} formats a time without naming its zone: ${call.slice(0, 80)}`);
+      assert.match(call, /hourCycle\s*:\s*'h23'/, `${file} formats a time without hourCycle 'h23': ${call.slice(0, 80)}`);
+    }
   }
 });
 
@@ -64,5 +83,9 @@ test('every displayed time calls the shared clock helper, and knowledge uses it 
   assert.doesNotMatch(source('knowledge.js'), /\b(?:const|let|var)\s+timestamp\s*=/, 'knowledge.js shadows the shared clock');
   assert.doesNotMatch(source('knowledge.js'), /function\s+timestamp\s*\(/, 'knowledge.js shadows the shared clock');
   // The zone-aware helper lives next to the shared clock, so a page with a " · zone" suffix keeps rendering that zone.
-  assert.match(source('app/boot.js'), /function\s+timestampAt\s*\(\s*value\s*,\s*zone\s*\)/, 'app/boot.js must define timestampAt(value, zone)');
+  const boot = source('app/boot.js'), start = boot.indexOf('function timestampAt');
+  assert.ok(start >= 0, 'app/boot.js must define timestampAt(value, zone)');
+  const definition = boot.slice(start, start + 400);
+  assert.match(definition, /timeZone\s*:/, 'timestampAt must pass a timeZone');
+  assert.match(definition, /hourCycle\s*:\s*'h23'/, "timestampAt must pin hourCycle 'h23'");
 });
