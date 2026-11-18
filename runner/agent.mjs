@@ -196,11 +196,6 @@ export async function agentOperation(input,root){
     }finally{await file.close();}
     const {output_file,...details}=live;return {...details,running:true,output,offset,state:'running'};
   }
-  if(input.type==='workspace_agent_session'){
-    if(!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_session_offset');
-    const data=await readFile(dir+'/history.json');
-    return {base64:data.subarray(input.offset,input.offset+45000).toString('base64'),size:data.length};
-  }
   if(input.type==='workspace_agent_continue'){
     await writeFile(dir+'/continue.json','{}',{mode:0o600});return {written:true};
   }
@@ -213,18 +208,18 @@ export async function agentOperation(input,root){
     try{if((await file.stat()).size!==input.offset)throw new Error('boundary_reply_offset');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
     if(input.final)await rename(path+'.tmp',path+'.json');return {written:true};
   }
-  if(input.type==='workspace_agent_config'||input.type==='workspace_agent_history'){
-    if(typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>(input.type==='workspace_agent_history'?32:2)*1024*1024)throw new Error('invalid_agent_config');
-    if(input.type==='workspace_agent_config'&&input.offset===0){
+  if(input.type==='workspace_agent_config'){
+    if(typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_agent_config');
+    if(input.offset===0){
       const previous=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>null);
       if(previous?.state==='running'){try{process.kill(previous.pid,0);throw new Error('agent_session_busy');}catch(error){if(error.message==='agent_session_busy')throw error;}}
-      // Native session files live in cli-state; only the completed process's mailbox is reset.
-      for(const name of ['state.json','events.jsonl','boundary.json','continue.json'])await unlink(dir+'/'+name).catch(error=>{if(error.code!=='ENOENT')throw error;});
+      // Pi's session files live in its session store; only the completed process's mailbox is reset, with the history
+      // files that runners before #1040 left behind.
+      for(const name of ['state.json','events.jsonl','boundary.json','continue.json','restore.json','history.json'])await unlink(dir+'/'+name).catch(error=>{if(error.code!=='ENOENT')throw error;});
     }
-    const prefix=input.type==='workspace_agent_history'?'/restore':'/input';
-    const path=dir+prefix+'.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
+    const path=dir+'/input.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
     try{if((await file.stat()).size!==input.offset)throw new Error('agent_config_offset');const bytes=Buffer.from(input.base64,'base64');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
-    if(input.final)await rename(path,dir+prefix+'.json');return {written:true};
+    if(input.final)await rename(path,dir+'/input.json');return {written:true};
   }
   if(input.type==='workspace_agent_start'){
     const old=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>null);

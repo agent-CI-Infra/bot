@@ -174,17 +174,18 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   // A crash can leave an assistant tool batch partially answered. Mark absent receipts as
   // interrupted, never fabricate their observations; the role must query durable task facts.
   for(let i=0;i<messages.length;i++){const msg=messages[i];if(msg.role!=='assistant'||!msg.tool_calls?.length)continue;const replies=new Set<string>();let end=i+1;while(messages[end]?.role==='tool'){replies.add(messages[end].tool_call_id);end++;}const missing=msg.tool_calls.filter((c:any)=>!replies.has(c.id)).map((c:any)=>({role:'tool',tool_call_id:c.id,content:JSON.stringify({error:'interrupted_observation',instruction:'Inspect task records before repeating any action.'})}));messages.splice(end,0,...missing);i=end+missing.length-1;}
+  const qaState=role==='qa'||rebuild?{}:JSON.parse(instance.harness_state??'{}');
   // The starting recovery mode depends on the driver's session kind. An external session is pending until the agent binds
-  // it (ACP session_bound then records native_resume or rebuilt_from_task_records); a Pi session is native_resume only
-  // when its live session is reattached.
+  // it (ACP session_bound then records native_resume or rebuilt_from_task_records); a Pi session is native_resume when its
+  // live session is reattached or its bound session file is opened again (#1040), and the runner's session_bound corrects
+  // the run when that file is gone.
   const recover=role==='qa'?'fresh_evaluation':rebuild?'rebuilt_from_task_records':persistence==='external_session'?'external_session_pending'
-   :persistence==='native_resume'?(env.pi?.resume?'native_resume':instance.sequence>0?'rebuilt_from_task_records':'new_session')
+   :persistence==='native_resume'?(env.pi?.resume||qaState.harness==='pi'&&qaState.sessionId?'native_resume':instance.sequence>0?'rebuilt_from_task_records':'new_session')
    :persistence==='checkpoint_transcript'?(messages.length?'checkpoint_transcript':'new_session'):instance.sequence>0?'rebuilt_from_task_records':'new_session';
   // Admission: what this kind and environment need against what the driver declares and the environment verified.
   const kind=snapshot.kind,scope=assignmentScope(s,task,instance,assignment);let candidate=inputCandidate(s,task,role,kind);
   if(stage&&kind==='observer'){const ref=latestRoleCandidate(s,task.id);if(ref){if(ref.kind==='code'&&candidate.ref?.kind==='code'&&candidateKey(ref)!==candidateKey(candidate.ref))stop('candidate_changed','retry_wait');candidate={ref,evidence:candidate.evidence};}}
   const profile=environmentProfiles.find(e=>e.id===snapshot.environment.id) as {id:string;isolation?:string}|undefined;
-  const qaState=role==='qa'||rebuild?{}:JSON.parse(instance.harness_state??'{}');
   // A Pi entry executor submits through its workflow session's finish tools and completion check, not spec.finish.
   const admission=admitRun(s,{task,role,kind,harness:{id:driver.id,version:driver.version,capabilities:driver.capabilities},environment:profile?{id:profile.id,isolation:profile.isolation}:null,environmentFacts:env.environment?.facts??null,
    candidate,source_ref:sourceRef(s,task),required:stage?.role_constraints.capabilities,fresh:!messages.length&&!Object.keys(qaState).length,validated:!!(spec.finish||spec.validate||env.pi?.session),snapshot_id:resolved.id});

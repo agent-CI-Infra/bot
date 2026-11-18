@@ -1,4 +1,6 @@
 // Run with: npm ci --prefix runner && node --test test/review-session-runner.mjs
+// The fixture model answers plain JSON, which the explicitly enabled gateway transport relays to Pi.
+process.env.BOT_HARNESS_MODEL_TRANSPORT??='gateway';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdir,mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
@@ -12,7 +14,6 @@ import {emptyRepositoryFixture} from './empty-repository-helpers.mjs';
 import {saveManager} from './helpers.mjs';
 import {queueWebhook} from '../dist/review/queue.js';
 import {workspace} from '../runner/workspace.mjs';
-import {listTaskDirectories,removeTaskDirectories} from '../runner/task-dirs.mjs';
 import {estimateTokens} from '../runner/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
 import {subagentSystem} from '../dist/agent/runtime.js';
 import {TaskRecords} from '../dist/tasks/service.js';
@@ -284,7 +285,7 @@ test('real Pi starts a sub-agent as a new session that sees only its own instruc
   assert.ok(events.some(event=>event.type==='model'&&event.agent));
 });
 
-test('real Pi keeps 26 waiting updates, injects after a model request and tool results, then restores only successful history',async t=>{
+test('real Pi keeps 26 waiting updates and injects them after a model request and tool results',async t=>{
   let releaseRequest,requestStarted,releaseTool;
   const requestGate=new Promise(resolve=>releaseRequest=resolve),requestSeen=new Promise(resolve=>requestStarted=resolve);
   const d=await live(t,{model:async(request,n,{base,h,update})=>{
@@ -311,23 +312,12 @@ test('real Pi keeps 26 waiting updates, injects after a model request and tool r
   assert.equal(d.update('during tool'),0);await releaseTool();
   const [first]=await work;assert.equal(first.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
   assert.equal(d.h.store.all('SELECT * FROM tasks').length,1);assert.equal(d.h.store.all('SELECT * FROM model_requests').length,3);
-  const saved=d.h.store.get('SELECT * FROM review_sessions');assert.ok(JSON.parse(saved.messages).some(m=>m.role==='toolResult'));assert.equal(first.messages,null);
-  // A clean cache is reused. Notes advance independently of the model history.
-  await rm(join(d.base,first.workspace_id,'repo/release'));
-  assert.equal(d.update('next successful review'),1);const tasks=await d.run();assert.equal(tasks.at(-1).status,'succeeded');
-  assert.equal(tasks.at(-1).workspace_id,first.workspace_id);
-  assert.match(JSON.stringify(d.requests.at(-1).messages),/during tool/);
-  assert.match(JSON.stringify(d.requests.at(-1).messages.at(-1)),/Historical code conclusions/);
+  // The conversation stays in Pi's session file (#1040); the control plane keeps no copy. A next round reopens it, see
+  // test/pi-controller.test.mjs.
+  assert.equal(first.messages,null);
+  const bound=d.h.store.all('SELECT content FROM task_logs WHERE task_id=?',first.id).map(row=>JSON.parse(row.content)).find(event=>event.type==='session_bound');
+  assert.match(await readFile(bound.transcript,'utf8'),/tool-finished/);
   assert.equal(await readFile(join(d.base,'project-notes/repository.md'),'utf8'),'Stable project note');
-  // The workspace cleanup removing the checkout affects only the computer; the control-plane conversation survives.
-  const listed=(await listTaskDirectories(d.base)).entries;assert.equal(listed.length,1);
-  assert.equal((await removeTaskDirectories(listed,d.base,join(d.base,'git'))).removed.length,1);
-  assert.equal(d.update('after container cache loss'),1);const third=(await d.run()).at(-1);
-  assert.equal(third.status,'succeeded');assert.notEqual(third.workspace_id,first.workspace_id);
-  assert.match(JSON.stringify(d.requests.at(-1).messages),/next successful review/);
-  d.h.setGeneration(2);d.update('after container rebuild');const rebuilt=(await d.run()).at(-1);
-  assert.equal(rebuilt.status,'succeeded');assert.equal(rebuilt.generation,2);assert.notEqual(rebuilt.workspace_id,third.workspace_id);
-  assert.match(JSON.stringify(d.requests.at(-1).messages),/after container cache loss/);
 });
 
 test('finish_review can be revised until the first GitHub write, and only the final result is posted',async t=>{
@@ -359,7 +349,7 @@ test('resuming an unpublished review retains its pinned model configuration',asy
   assert.equal(d.h.comments.filter(comment=>comment.body.includes('dept-bot:')).length,0);
 });
 
-test('an update during publication waits for completion and restores that successful conversation',async t=>{
+test('an update during publication waits for completion and continues from that successful round',async t=>{
   let inserted=false;
   const d=await live(t,{github:(path,send,res,body,{h,update})=>{
     if(!path.endsWith('/issues/1/comments')||!body.body||inserted)return false;
@@ -373,22 +363,6 @@ test('an update during publication waits for completion and restores that succes
   assert.match(JSON.stringify(d.requests[1].messages),/Done 1/);assert.match(JSON.stringify(d.requests[1].messages),/arrived during GitHub write/);
 });
 
-test('a failed model attempt retries with an empty history and the latest complete discussion',async t=>{
-  // The provider stays unavailable for the whole attempt: a single 503 is retried within the attempt and would succeed.
-  let failing=false,failures=0;
-  const d=await live(t,{model:async(_request,_n,{update})=>{
-    if(failing){if(!failures++)update('latest after failure');return {status:503,body:{error:{message:'temporarily unavailable'}}};}
-  }});
-  assert.equal((await d.run())[0].status,'succeeded');failing=true;d.update('start failed follow-up');
-  let task=(await d.run()).at(-1);assert.equal(task.status,'retry_wait');assert.equal(task.phase,'prepare');assert.equal(task.messages,null);
-  assert.ok(failures>1,'the attempt retried the request before giving up');
-  assert.match(JSON.stringify(d.requests[1].messages),/Done 1/);
-  failing=false;d.update('latest before retry');d.h.store.run('UPDATE tasks SET next_run_at=0 WHERE id=?',task.id);
-  const retried=d.requests.length;task=(await d.run()).at(-1);assert.equal(task.status,'succeeded');
-  const messages=d.requests[retried].messages;assert.deepEqual(messages.map(m=>m.role),['system','user']);
-  assert.match(text(messages[1]),/latest before retry/);assert.doesNotMatch(text(messages[1]),/Done 1/);
-});
-
 test('a new PR head joins the running review, which restarts on it in a fresh checkout with the last successful history when it cannot move in place',async t=>{
   const head='b'.repeat(40);
   const d=await live(t,{pr:true,model:async(request,n,{pushHead})=>{
@@ -398,51 +372,11 @@ test('a new PR head joins the running review, which restarts on it in a fresh ch
   // This harness copies files instead of using a Git cache, so the checkout cannot move in place: the same task starts over.
   const tasks=await d.run(),review=tasks[1];assert.equal(tasks.length,2);
   assert.deepEqual([review.status,review.error_code,review.attempt],['queued','pull_request_head_changed',2]);
-  assert.equal(d.h.store.get('SELECT task_id FROM review_sessions').task_id,first.id);
   d.h.store.run('UPDATE tasks SET next_run_at=0 WHERE id=?',review.id);
   const current=(await d.run()).at(-1);assert.equal(current.id,review.id);assert.equal(current.status,'succeeded');assert.equal(current.head_sha,head);assert.notEqual(current.workspace_id,first.workspace_id);
   assert.match(text(d.requests.at(-1).messages.at(-1)),new RegExp('Current checkout/head: '+head));
   assert.match(JSON.stringify(d.requests.at(-1).messages),/Done 1/);
 });
-
-test('real Pi compacts restored history, uses current rules, and charges compaction to the new review',async t=>{
-  let summaries=0;
-  const d=await live(t,{model:async(request)=>{
-    if(!request.tools?.length){summaries++;return {body:{choices:[{message:{role:'assistant',content:'A compact history summary of prior discussion.'}}],usage:{prompt_tokens:50000,completion_tokens:20}}};}
-  }});
-  assert.equal((await d.run())[0].status,'succeeded');
-  const saved=d.h.store.get('SELECT * FROM review_sessions'),history=JSON.parse(saved.messages),assistant=history.find(m=>m.role==='assistant');
-  const messages=Array.from({length:16},(_,i)=>[
-    {role:'user',content:[{type:'text',text:'prior discussion '+i+' '+('context '.repeat(1500))}],timestamp:i*2},
-    {...assistant,content:[{type:'text',text:'Earlier response '+i}],stopReason:'stop',usage:{...assistant.usage,input:110000,totalTokens:110020},timestamp:i*2+1}
-  ]).flat();
-  d.h.store.run('UPDATE review_sessions SET messages=?',JSON.stringify(messages));
-  await d.h.admin('/api/repositories/101/policy','PATCH',{review_language:'en'});d.update('continue after compression');
-  const current=(await d.run()).at(-1);assert.equal(current.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
-  assert.ok(summaries>0);assert.ok(d.h.store.get('SELECT count(*) n FROM model_requests WHERE task_id=?',current.id).n>=2);
-  assert.match(text(d.requests.at(-1).messages[0]),/Write the summary and every finding in English/);
-  const projection=d.h.store.get('SELECT messages FROM review_sessions').messages;
-  assert.match(projection,/compact history summary/);assert.ok(projection.length<JSON.stringify(messages).length);
-  assert.ok(!d.h.store.all('SELECT request,result FROM task_tools').some(row=>JSON.stringify(row).includes('prior discussion 0')),'history transport does not leave another persistent copy in task tools');
-  for(const request of d.requests){assert.ok(Buffer.byteLength(JSON.stringify(request))<=2*1024*1024);assert.ok(JSON.stringify(request).length/4+8192<=128000);}
-});
-
-for(const size of [520000,2200000])test(`an oversized ${size}-character history fails and manual retry starts empty`,async t=>{
-  const d=await live(t);assert.equal((await d.run())[0].status,'succeeded');
-  const saved=JSON.parse(d.h.store.get('SELECT messages FROM review_sessions').messages),assistant=saved.find(m=>m.role==='assistant');
-  const messages=[{role:'user',content:'oversized history '+('x'.repeat(size)),timestamp:1},{...assistant,content:[{type:'text',text:'Earlier answer'}],stopReason:'stop',usage:{...assistant.usage,input:1,totalTokens:1},timestamp:2}];
-  d.h.store.run('UPDATE review_sessions SET messages=?',JSON.stringify(messages));d.update('try oversized history');
-  let task=(await d.run()).at(-1);assert.equal(task.status,'failed');assert.equal(task.error_code,'agent_context_too_large');assert.equal(task.messages,null);
-  assert.equal(d.requests.length,1,'oversized requests never reach the provider');
-  // A manual retry queues the task again, so the next update joins it instead of starting another review of the object.
-  const retry=await d.h.admin('/api/tasks/'+task.id+'/retry','POST',{});assert.equal(retry.status,201);
-  const tasks=d.h.store.get('SELECT count(*) n FROM tasks').n;d.update('latest discussion after oversized failure');await d.run();
-  task=d.h.store.get('SELECT * FROM tasks WHERE id=?',task.id);assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs WHERE task_id=?',task.id)));
-  assert.equal(d.h.store.get('SELECT count(*) n FROM tasks').n,tasks,'the update joined the retried review');
-  assert.deepEqual(d.requests.at(-1).messages.map(m=>m.role),['system','user']);
-  assert.match(text(d.requests.at(-1).messages.at(-1)),/latest discussion after oversized failure/);
-});
-
 
 test('an update arriving after prepare but before the first request refreshes both the prompt and discussion files',async t=>{
   let inserted=false;

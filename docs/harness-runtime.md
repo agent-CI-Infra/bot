@@ -70,6 +70,8 @@ Claude Code 的完整说明见 [Claude Code harness](claude-code.md)；下文说
 
 `send` 接受后续输入；`cancel` 中断当前轮，后续轮可继续；`close` 关闭连接。一次原生轮次正常结束与业务 Task 完成是两个事实。Manager 可留下观察结果并交回调度，只有正式候选、独立 QA 与既有发布流程才能完成交付。
 
+Pi 自己管理会话（#1040）：会话文件按任务和角色实例放在独立的任务目录（与 Claude Code、Codex 的 CLI 状态目录同一个 `/workspace/tasks/<由角色实例算出的 ID>`），`role_instances.harness_state` 保存会话 ID 和文件。下一次运行用 `SessionManager.open` 在当前工作目录下打开它（`native_resume`），文件不在时新开会话（`rebuilt_from_task_records`），QA 每次新开（`fresh_evaluation`）；运行实际的恢复方式在会话绑定时记入 `task_runs.recovery_mode`。上下文超限或被取消的会话清掉绑定，下次新开。压缩、重试等使用 Pi 自己的设置。
+
 Pi SDK 使用默认资源加载器和原生文件、搜索、编辑、Shell 工具，按有效权限开启；不再将原生工具名当作 Bot MCP 工具来鉴权。角色固定 Skill 作为补充资源装入专用配置目录，保留项目指令和 Skills 的原生发现。Claude Code 保留项目指令原生加载和技能文件按需读取，但禁用项目/local 运行设置、hooks、额外 MCP 服务以及候选 slash commands/Skills 自动激活，Codex 保留原生扩展配置。每个角色使用专用 Harness HOME，不继承宿主私有配置或凭证。撤权、取消和明确预算仍由既有运行入口检查。
 
 服务角色也可选择 `native / pi / codex / claude_code`。非项目会话通过同一 Driver 使用会话所有者的助手电脑，不创建虚假的业务项目/任务。旧部署保持 Native；已有角色的显式权限不会因升级自动扩大。`service_harness_sessions` 保存绑定，`service_harness_events` 保存加密公共事件；超级管理员可读 `GET /api/service-roles/:role/sessions` 及 `/sessions/:session/events`（最近 100 条）。项目角色继续使用 `role_instances / task_runs / task_history`。

@@ -116,7 +116,7 @@ Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一�
 
 ## 任务工作区清理
 
-每个任务在项目电脑上有自己的目录 `/workspace/tasks/<工作区 ID>`，里面是任务上下文和 agent 状态。仓库检出（#769）是共享的 git worktree，放在 `/workspace/worktrees/<worktree ID>`，任务目录里的 `repo` 是指向它的链接，测试装的依赖和构建产物在 worktree 里；观察者角色和独立 QA 的检出也是 worktree：各用一个自己的任务目录，链接到停在候选提交上、为读而建的 worktree；Git 缓存不可用时的文件拷贝、从文件拷贝复制出来的评估者检出和隔离运行环境仍是任务目录里自己的 `repo`。控制面在 `task_workspaces` 表里记录每个任务目录和 worktree 被哪些任务用过：任务自己的目录、评估者和其他角色检出固定候选用的目录（`kind` 为 `checkout`）、重试恢复或集成用到的旧工作区，以及任务用过的 worktree（`kind` 为 `worktree`，每个用到它的任务各一行）。重试和重置会把 `tasks.workspace_id` 清空，旧目录仍能按这份记录找到所属任务。
+每个任务在项目电脑上有自己的目录 `/workspace/tasks/<工作区 ID>`，里面是任务上下文和 agent 状态。仓库检出（#769）是共享的 git worktree，放在 `/workspace/worktrees/<worktree ID>`，任务目录里的 `repo` 是指向它的链接，测试装的依赖和构建产物在 worktree 里；观察者角色和独立 QA 的检出也是 worktree：各用一个自己的任务目录，链接到停在候选提交上、为读而建的 worktree；Git 缓存不可用时的文件拷贝、从文件拷贝复制出来的评估者检出和隔离运行环境仍是任务目录里自己的 `repo`。控制面在 `task_workspaces` 表里记录每个任务目录和 worktree 被哪些任务用过：任务自己的目录、评估者和其他角色检出固定候选用的目录（`kind` 为 `checkout`）、重试恢复或集成用到的旧工作区，以及任务用过的 worktree（`kind` 为 `worktree`，每个用到它的任务各一行）。角色实例的 CLI 状态目录（Claude Code、Codex 的状态和 Pi 的会话文件，`/workspace/tasks/<由角色实例算出的 ID>`）也按所属任务记在这里，随任务按下表删除；它不是 worktree，worktree 清理不碰它。重试和重置会把 `tasks.workspace_id` 清空，旧目录仍能按这份记录找到所属任务。
 
 worktree 的登记在 `worktrees` 表：所在电脑代次、HEAD 和 HEAD 的 tree、为读还是写而建、能否交出（`ready`、`refused`、`removed`）。每次任务拿到一个 worktree 记一行 `worktree_bindings`（任务、任务目录、读或写、拿到时的提交），同时写任务历史 `workspace_bound`（含 `decided_by`：`system`、`agent` 或主控角色），这就是“这次运行用了哪个 worktree、哪个提交、谁选的”的记录。
 

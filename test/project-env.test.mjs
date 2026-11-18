@@ -205,10 +205,13 @@ test('publication replies are allowed and policy cleanup preserves the waiting a
   const workspace_id = id(), execute = request => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request });
   await execute({ type: 'workspace_agent_tool', workspace_id, request_id: id(), base64: Buffer.from('{}').toString('base64'), offset: 0, final: true });
   assert.ok(f.docker.runs.some(r => r.type === 'workspace_agent_tool'));
-  for(const type of ['workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_agent_progress']){
+  for(const type of ['workspace_agent_boundary','workspace_agent_continue','workspace_agent_progress']){
     await execute({type,workspace_id,request_id:id(),base64:Buffer.from('{}').toString('base64'),offset:0,final:true,sequence:1});
     assert.ok(f.docker.runs.some(r=>r.type===type),type);
   }
+  // A review's history is Pi's own session file (#1040); the calls that copied it in and out are gone.
+  for(const type of ['workspace_agent_history','workspace_agent_session'])
+    await assert.rejects(execute({type,workspace_id,base64:Buffer.from('[]').toString('base64'),offset:0,final:true}),/invalid_runner_request/,type);
   // #769: a shared worktree is named only by the calls that create or bind it, by a 48-hex id; the review cache calls it
   // replaced are gone.
   const worktree_id=id(),commit={sha:'a'.repeat(40),tree_sha:'b'.repeat(40)};
