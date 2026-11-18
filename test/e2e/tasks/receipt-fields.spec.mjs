@@ -116,3 +116,25 @@ test('a notice without an effect statement stays out of the impact row', async (
     }
   } finally { await f.close(); }
 });
+
+// #1081: the same sentence twice reads as two records. A notice the impact row already shows is the effect of this
+// command; the record section keeps only what the impact row does not say, so the notice is on the page exactly once.
+test('a notice shown as the impact is not repeated in the record section', async ({ page }) => {
+  const f = await managementFixture();
+  try {
+    const receipt = (await command(f.admin, 'workflow.update', { project_id: '101', workflow_id: 'review.issue' }, { prompt: 'One notice only.' })).value;
+    expect(receipt.state).toBe('succeeded');
+    expect(receipt.result?.effect).toBe('future_tasks');
+    const notice = receipt.result?.notice;
+    expect(notice).toBeTruthy();
+    await login(page, f);
+    const panel = await open(page, f, receipt.id);
+    await expect(panel).toBeVisible();
+    // The recorded notice is what this command affects, so the impact row names it.
+    await expect(panel.locator('[data-receipt-impact]')).toContainText(notice);
+    // And it is on the page once: 回执记录 does not repeat the sentence the impact row already carries.
+    await expect(panel.locator('[data-receipt-record]')).not.toContainText(notice);
+    const occurrences = await panel.evaluate((node, text) => node.innerText.split(text).length - 1, notice);
+    expect(occurrences).toBe(1);
+  } finally { await f.close(); }
+});
