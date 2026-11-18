@@ -403,7 +403,28 @@ async function renderIdentity() {
   const advanced = element('details', '', 'fold identity-advanced');
   advanced.open = keepAdvancedOpen;
   advanced.append(element('summary', t('identity.advanced')), diagnostic, selection, identities, permissions);
-  const layout = element('div', '', 'identity-layout'); layout.append(overview, feishuSlot, advanced); panel.replaceChildren(layout);
+  // #750: the theme choice belongs to the person, so it sits beside the account card. It writes the localStorage key and
+  // <html data-theme> through /theme-boot.js, the one place that resolves "follow the system" before the first paint.
+  const appearance = card(t('theme.title'), 'h2');
+  appearance.classList.add('identity-appearance');
+  appearance.append(note(t('theme.note')));
+  const themeChoices = element('div', '', 'theme-options');
+  themeChoices.setAttribute('role', 'radiogroup');
+  themeChoices.setAttribute('aria-label', t('theme.title'));
+  const themeStatus = element('p', '', 'muted theme-status');
+  themeStatus.setAttribute('role', 'status');
+  const chosen = window.launchpadTheme ? launchpadTheme.choice() : 'system';
+  for (const [value, label] of [['system', t('theme.system')], ['light', t('theme.light')], ['dark', t('theme.dark')]]) {
+    const row = element('label', '', 'theme-option'), radio = document.createElement('input');
+    radio.type = 'radio'; radio.name = 'theme'; radio.value = value; radio.checked = chosen === value;
+    radio.addEventListener('change', () => {
+      if (!radio.checked || !window.launchpadTheme) return;
+      launchpadTheme.set(value); themeStatus.textContent = t('theme.saved');
+    });
+    row.append(radio, element('span', label)); themeChoices.append(row);
+  }
+  appearance.append(themeChoices, themeStatus);
+  const layout = element('div', '', 'identity-layout'); layout.append(overview, appearance, feishuSlot, advanced); panel.replaceChildren(layout);
   const loadProvider = async () => {
     try {
       const { enabled } = await api('/api/auth/github/status'); if (!current()) return;

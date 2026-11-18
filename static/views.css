@@ -43,7 +43,7 @@ a.call-link{background:#e5f2e9;color:#24603d}
 .findings{margin:8px 0 0;padding-left:18px;font-size:var(--font-size-label)}.findings li+li{margin-top:10px}
 .history{list-style:none;margin:0;padding:0}.history li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:3px 10px;padding:7px 0;border-bottom:1px solid #edf1f4;font-size:var(--font-size-label)}
 .history li:last-child{border-bottom:0}.history.wrap li{overflow-wrap:anywhere}.history .wide-cell{grid-column:1/-1}.history code{overflow-wrap:anywhere;font-size:var(--font-size-1)}
-button.linkish{border:0;background:none;padding:0;min-height:0;color:var(--color-brand);text-align:left;font-weight:600;overflow-wrap:anywhere}
+button.linkish{border:0;background:none;padding:0;min-height:0;color: var(--color-brand-text);text-align:left;font-weight:600;overflow-wrap:anywhere}
 .environment-layout{flex:1;min-height:0;overflow:auto;padding:14px 16px;display:grid;grid-template-columns:minmax(280px,380px) minmax(0,1fr);gap:12px;align-items:start;background:#f7fafb}
 .stack{display:flex;flex-direction:column;gap:12px;min-width:0}
 .raw summary{font-weight:600}
@@ -66,7 +66,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 .project-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:12px 16px;border-bottom:1px solid #e3eaf0}
 /* #707: the project name keeps 16rem; when the header actions do not fit beside it they wrap below instead of squeezing it. */
 .project-head .title-group{flex:1 1 16rem;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.project-head h1{font-size:19px;margin:0;overflow-wrap:anywhere}
-.back-link{flex-basis:100%;font-size:var(--font-size-1);color:var(--color-brand);text-decoration:none}.back-link:hover{text-decoration:underline}
+.back-link{flex-basis:100%;font-size:var(--font-size-1);color: var(--color-brand-text);text-decoration:none}.back-link:hover{text-decoration:underline}
 .project-body{display:grid;grid-template-columns:minmax(0,1fr);min-height:calc(100svh - 200px)}
 .project-nav{display:flex;flex-direction:column;gap:2px;padding:12px 8px;border-right:1px solid #e3eaf0;background:#f7fafb}
 .project-nav a{padding:8px 12px;border-radius:5px;color:var(--color-text-muted);text-decoration:none;font-weight:600;font-size:var(--font-size-2)}
@@ -82,7 +82,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 .login-guide>li>*{display:block;margin-top:8px}.login-guide>li>strong{margin-top:0;font-size:var(--font-size-2)}.login-guide>li>label{display:flex}
 .github-login-callback{padding:8px;background:#edf2f5;white-space:normal;overflow-wrap:anywhere;word-break:break-word;min-width:0}
 .login-addresses{min-width:0}.login-addresses code{overflow-wrap:anywhere;word-break:break-word}
-.release-panel>label,.release-panel>details,.release-record>label,.release-record>details{margin-top:10px}.release-history{display:grid;gap:12px;margin-top:10px}.release-panel .release-jobs{display:grid;gap:8px;margin-top:10px}.release-job{padding:8px 10px;border:1px solid #e3eaf0;border-radius:5px}.release-job p{margin:0 0 4px}.release-panel summary{cursor:pointer;color:var(--color-brand);font-size:var(--font-size-label)}.release-record textarea{font:var(--font-size-label)/1.5 ui-monospace,monospace;min-height:240px}.release-record .actions a{font-size:var(--font-size-label)}.release-panel>.view-error:empty{display:none}.release-panel .release-check-failed{color:#a2292b;font-weight:600}
+.release-panel>label,.release-panel>details,.release-record>label,.release-record>details{margin-top:10px}.release-history{display:grid;gap:12px;margin-top:10px}.release-panel .release-jobs{display:grid;gap:8px;margin-top:10px}.release-job{padding:8px 10px;border:1px solid #e3eaf0;border-radius:5px}.release-job p{margin:0 0 4px}.release-panel summary{cursor:pointer;color: var(--color-brand-text);font-size:var(--font-size-label)}.release-record textarea{font:var(--font-size-label)/1.5 ui-monospace,monospace;min-height:240px}.release-record .actions a{font-size:var(--font-size-label)}.release-panel>.view-error:empty{display:none}.release-panel .release-check-failed{color:#a2292b;font-weight:600}
 .form-actions{justify-content:flex-start}.view-success{margin:0;color:#24603d}.flash{padding:8px 12px;border-radius:5px;background:#e5f2e9}.view-progress{margin:0;color:#2c5791}.view-success:empty,.view-progress:empty{display:none}
 .status-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-6);align-items:stretch}.status-grid>.side-card{min-width:0;height:100%;display:flex;flex-direction:column}
 #activity-status{grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -106,7 +106,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 .other-rule-rows{border-top:2px solid #d7e3e8}
 @media(max-width:650px){.project-table th,.project-table td{padding:10px 4px}.project-table button{padding:6px;min-height:36px;font-size:var(--font-size-1)}.task-model-editor{grid-template-columns:minmax(0,1fr)}.task-model-editor>.actions{grid-column:1;justify-content:flex-start}.task-model-editor select{font-size:var(--font-size-label)}.project-table[aria-label="工作流模型"] th:first-child{width:28%}
 .common-rule summary>.muted{margin-left:0}.rule-sync{align-items:flex-start}.rule-sync>.muted{flex-basis:100%}}
-.add-model{margin-top:8px}.add-model>summary{font-weight:600;color:var(--color-brand)}.add-model .side-card{border:0;padding:8px 0 0}
+.add-model{margin-top:8px}.add-model>summary{font-weight:600;color: var(--color-brand-text)}.add-model .side-card{border:0;padding:8px 0 0}
 .member-add{margin-top:8px}.member-add select{width:auto;min-width:220px}
 @media(max-width:760px){
   .project-body{grid-template-columns:minmax(0,1fr);min-height:0}
@@ -242,7 +242,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 .switch-track::after{content:'';position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff}
 .project-feature-switch[aria-checked=true] .switch-track{background:var(--color-brand)}.project-feature-switch[aria-checked=true] .switch-track::after{left:14px}.switch-value{min-width:1em}
 .project-task-preview{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;font-size:var(--font-size-1);padding:6px;border-radius:4px;text-decoration:none}
-.project-task-preview:hover{background:#edf4f6;text-decoration:underline}.task-count-active{color:var(--color-brand);font-weight:700}.project-control-feedback{max-width:460px;text-align:right;overflow-wrap:anywhere}.project-control-feedback:empty{display:none}.project-control-feedback.control-error{color:#a2292b}
+.project-task-preview:hover{background:#edf4f6;text-decoration:underline}.task-count-active{color: var(--color-brand-text);font-weight:700}.project-control-feedback{max-width:460px;text-align:right;overflow-wrap:anywhere}.project-control-feedback:empty{display:none}.project-control-feedback.control-error{color:#a2292b}
 /* Below the table breakpoint the same cells become labelled pairs, so the category is still named and the page never
    scrolls sideways; the list container itself is the only thing that may scroll. */
 @media(max-width:1279px){
@@ -281,23 +281,23 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 }
 
 @media(min-width:1001px){.project-task-preview{min-width:112px;justify-content:flex-end}}
-.permission-check{display:grid;gap:6px;justify-items:start;margin-top:6px;min-width:0}.permission-result{display:grid;gap:6px;min-width:0}.permission-result p,.permission-result ul{margin:0}.permission-result ul{padding-left:20px}.permission-result li,.permission-result a{overflow-wrap:anywhere}.permission-result p:not([class]){color:#22313a}.permission-result a{color:var(--color-brand);text-underline-offset:3px}
+.permission-check{display:grid;gap:6px;justify-items:start;margin-top:6px;min-width:0}.permission-result{display:grid;gap:6px;min-width:0}.permission-result p,.permission-result ul{margin:0}.permission-result ul{padding-left:20px}.permission-result li,.permission-result a{overflow-wrap:anywhere}.permission-result p:not([class]){color:#22313a}.permission-result a{color: var(--color-brand-text);text-underline-offset:3px}
 button.quiet.destructive{color:#a02b31}
 @media(min-width:761px){.external-group .row.has-actions{grid-template-columns:minmax(0,1fr) auto max-content}}
 /* In-page confirmation (confirmDialog in views.js) */
-dialog.confirm-dialog{width:min(500px,calc(100vw - 24px));padding:0;border:0;border-radius:10px;box-shadow:0 20px 56px #0f2f3b47;overflow:hidden}
-dialog.confirm-dialog::backdrop{background:#16374485}
+dialog.confirm-dialog{width:min(500px,calc(100vw - 24px));padding:0;border:0;border-radius:10px;box-shadow:var(--shadow-confirm);overflow:hidden;background:var(--color-surface);color:var(--color-text)}
+dialog.confirm-dialog::backdrop{background:var(--color-modal-backdrop)}
 .confirm-form{gap:0}
 .confirm-head{display:flex;align-items:center;gap:12px;padding:22px 24px 8px}
 .confirm-head h2{font-size:var(--font-size-touch);line-height:1.45;overflow-wrap:anywhere}
-.confirm-icon{flex:none;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:var(--font-size-touch);font-weight:700;background:#e8f0fb;color:#2c5791}
-.confirm-icon.danger{background:#fbeaea;color:#a02b31}
+.confirm-icon{flex:none;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:var(--font-size-touch);font-weight:700;background:var(--color-info-bg);color:var(--color-info)}
+.confirm-icon.danger{background:var(--color-danger-bg);color:var(--color-danger)}
 .confirm-body{display:grid;gap:8px;padding:2px 24px 16px 68px;color:var(--color-text-muted);font-size:var(--font-size-label);line-height:1.7;overflow-wrap:anywhere}
 .confirm-body p,.confirm-body ul{margin:0}.confirm-body ul{padding-left:18px}.confirm-body li+li{margin-top:2px}
-.confirm-body label{margin-top:4px;color:#22313a}
+.confirm-body label{margin-top:4px;color:var(--color-text)}
 .confirm-status{margin:0;padding:0 24px 14px 68px;font-size:var(--font-size-label);line-height:1.6}.confirm-status:empty{display:none}
-.confirm-status.progress{color:#2c5791}.confirm-status.error{color:#a02b31}
-.confirm-actions{display:flex;justify-content:flex-end;gap:8px;padding:14px 24px;background:#f6f9fa;border-top:1px solid #e3eaf0}
+.confirm-status.progress{color:var(--color-info)}.confirm-status.error{color:var(--color-danger)}
+.confirm-actions{display:flex;justify-content:flex-end;gap:8px;padding:14px 24px;background:var(--color-surface-alt);border-top:1px solid var(--color-border)}
 .confirm-actions button{min-width:76px;justify-content:center}
 button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media(max-width:760px){.confirm-head{padding:18px 18px 6px}.confirm-body,.confirm-status{padding-left:18px;padding-right:18px}.confirm-actions{padding:12px 18px}.confirm-actions button{flex:1}}
@@ -308,10 +308,10 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .project-content .side-card :is(.card-sub,.rate-account){font-size:var(--font-size-label);margin:6px 0 0;font-weight:700;line-height:normal;color:var(--color-text)}.settings-panel .settings-wide{grid-column:1/-1}.settings-panel .side-card .flash{margin:0 0 8px}.settings-panel .side-card>form{margin-top:10px}.settings-panel .history .muted{margin:2px 0 0}
 
 /* Global settings (static/settings.js): the project page's category layout inside the list card. */
-.settings-body{border-top:1px solid #e3eaf0;min-height:calc(100svh - 170px)}
+.settings-body{border-top:1px solid var(--color-border);min-height:calc(100svh - 170px)}
 .settings-body .project-content{max-width:none;width:100%}
 .settings-list-head{justify-content:space-between;align-items:flex-start;flex-wrap:nowrap;gap:12px}.settings-list-head>.muted{flex:1;margin:0}
-.settings-rows{margin-top:8px;border-top:1px solid #e8eef2}
+.settings-rows{margin-top:8px;border-top:1px solid var(--color-border)}
 .settings-rows .row{padding:10px 0;grid-template-columns:minmax(0,1fr) max-content max-content}
 .settings-rows .row:last-child{border-bottom:0}
 .settings-rows .row-content p{margin:2px 0 0}
@@ -322,7 +322,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 }
 
 /* Provider connection settings are edited once, separately from model-specific operations. */
-.provider-create{margin-top:12px}#provider-edit{width:min(800px,calc(100vw - 24px))}#provider-edit form{gap:16px}.provider-fields{border:0;padding:0;margin:0;min-width:0;display:flex;flex-direction:column;gap:10px}.provider-fields h3{margin:8px 0 0;font-size:var(--font-size-2)}.provider-fields p{margin:0}.provider-fields .model-chips:empty,.provider-fields .probe-result:empty{display:none}.provider-fields>button{align-self:flex-start}.provider-manual{align-items:flex-end}.provider-manual label{flex:1 1 220px}.provider-selected .model-chip{border-color:var(--color-brand);color:var(--color-brand)}.provider-editor-actions{justify-content:flex-end}.provider-editor-actions .destructive{margin-right:auto}.provider-fields .model-chips{max-height:220px;overflow:auto;padding:2px}.provider-fields input[type=search]{max-width:320px}
+.provider-create{margin-top:12px}#provider-edit{width:min(800px,calc(100vw - 24px))}#provider-edit form{gap:16px}.provider-fields{border:0;padding:0;margin:0;min-width:0;display:flex;flex-direction:column;gap:10px}.provider-fields h3{margin:8px 0 0;font-size:var(--font-size-2)}.provider-fields p{margin:0}.provider-fields .model-chips:empty,.provider-fields .probe-result:empty{display:none}.provider-fields>button{align-self:flex-start}.provider-manual{align-items:flex-end}.provider-manual label{flex:1 1 220px}.provider-selected .model-chip{border-color:var(--color-brand);color: var(--color-brand-text)}.provider-editor-actions{justify-content:flex-end}.provider-editor-actions .destructive{margin-right:auto}.provider-fields .model-chips{max-height:220px;overflow:auto;padding:2px}.provider-fields input[type=search]{max-width:320px}
 @media(max-width:760px){#provider-edit{padding:16px}.provider-head>button{margin-left:0}.provider-manual label{flex-basis:100%}.provider-editor-actions{gap:8px}}
 /* Workflows: a list beside a tabbed editor over the whole width, the chat as a side panel, and the flowchart drawn from the prompt. */
 .release-advice{margin:6px 0 10px;font-size:var(--font-size-label);line-height:1.6;overflow-wrap:anywhere;color:#24414f}.release-advice h4{margin:10px 0 4px;font-size:var(--font-size-label)}.release-advice p{margin:4px 0}.release-advice ul,.release-advice ol{margin:4px 0;padding-left:20px}.release-advice code{font:var(--font-size-1) ui-monospace,monospace;background:#eef3f5;border-radius:3px;padding:0 3px}
@@ -494,7 +494,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media(max-width:767px){.role-save{top:0;bottom:auto;padding:10px;background:var(--surface,#fff)}.role-save button{min-height:44px}.role-compare-values{grid-template-columns:minmax(0,1fr)}}
 .audit-filters{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
 .audit-filters button{font-size:var(--font-size-1);padding:4px 10px}
-.audit-filters button[aria-pressed=true]{border-color:var(--color-brand);color:var(--color-brand);background:#e8f3f4}
+.audit-filters button[aria-pressed=true]{border-color:var(--color-brand);color: var(--color-brand-text);background:#e8f3f4}
 /* #698: one audit row reads as a sentence (action · who), then time and the object link; codes fold under 技术信息. */
 .history li.audit-row{display:block;padding:9px 0}
 .audit-row-head{font-size:var(--font-size-row,14px);overflow-wrap:anywhere}.audit-row-head .audit-actor{color:var(--color-text-muted,#4b5563)}
@@ -600,7 +600,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .task-repo-link {
   text-decoration: none;
   font-weight: 600;
-  color: var(--color-brand);
+  color: var(--color-brand-text);
 }
 .task-repo-link:hover { text-decoration: underline; }
 .task-cancel-btn { color: #991b1b; border-color: #fecaca; }
@@ -672,7 +672,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   white-space: nowrap;
 }
 .task-ext-link {
-  color: var(--color-brand);
+  color: var(--color-brand-text);
   font-weight: 600;
   text-decoration: none;
   overflow-wrap: anywhere;
@@ -680,7 +680,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .task-ext-link:hover { text-decoration: underline; }
 .task-ext-sublink {
   font-size: var(--font-size-1);
-  color: var(--color-brand);
+  color: var(--color-brand-text);
   text-decoration: none;
   white-space: nowrap;
 }
