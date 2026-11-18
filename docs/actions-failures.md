@@ -67,6 +67,10 @@ agent 先调查，再决定是否值得提报。应按需查看完整日志、�
 
 升级不重写历史表：旧 task verdict 或缓存的按 job evidence 继续保留并可用于原重跑预算，但不生成新报告；已有 outbox 沿用原 id 和 marker 恢复或确认，旧正文中的日志附录不再发送，不重发已 sent 回执。同一原 run 的后续 attempt 可用上游 job 的相同旧签名及分类接续已发旧 Issue，前提是它尚未被另一个新原因认领；其余新报告只用显式 cause 去重。旧记录保持可读，不全表迁移或回填提单。
 
+## 定时运行延迟严重时
+
+分析任务的上下文还带着 [`docs/prompts/late-schedules.md`](prompts/late-schedules.md)（`late_scheduled_runs`，#1072）：失败的运行或查看过的相关运行显示某个 workflow 的定时运行经常比 cron 晚很多时（参考：经常晚 1 小时以上），agent 在 Issue 里推荐用 bot 定时触发这个 workflow，并保留 `schedule` 兜底、`concurrency` 设 `cancel-in-progress: false`、第一个 job 在已有成功的手动运行时跳过。推荐先查重，同一个仓库只推荐一次，已有相关 Issue 就在下面评论；执行角色有 `github_write` 时由它写，否则写进 `finish_analysis`。这不是失败报告，不经 `report_failure`，也不占重跑预算。CI 观察、项目定时任务和两个助手用同一份文本，见[定时任务](schedules.md#定时触发-workflow)。
+
 ## 复用检视和开发
 
 提报通过现有 `queueWebhook(..., issues.opened, ...)` 进入检视，和实际 GitHub webhook 使用同一 opened 唯一键。检视关闭时只保留 Issue。external 和 unknown 的来源类别保存在本地，不论后续日志指令或标签内容如何，都不能进入开发。

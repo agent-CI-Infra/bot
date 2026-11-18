@@ -3,6 +3,7 @@ import type { GitHub } from '../github/client.js';
 import { stop } from '../agent/common.js';
 import { registerEventWork } from '../work/events.js';
 import { sectionText } from '../work/settings.js';
+import { lateSchedules } from './late-schedules.js';
 import { recordEvent } from '../dispatch/store.js';
 import { failedStepOutput, verifiedEvidence, type Evidence, type FailureKind } from './classifier.js';
 import { causeIdentity, validReport, type FailureReport } from './reports.js';
@@ -94,7 +95,7 @@ registerEventWork('actions.failures', {
         ...input.failed_jobs.map((job: any) => ({ path: `../context/failed-steps/${job.job_id}.log`, content: `What the failed steps of job ${job.job_id} (${job.name}) printed${job.output_clipped ? ', the last part only' : ''}${job.log_problem ? ': ' + job.log_problem : ''}` }))],
       context: { run: input.run, failed_jobs: input.failed_jobs.map((job: any) => ({ job_id: job.job_id, name: job.name, log_problem: job.log_problem })),
         rerun_budget: !budget || budget.retry_state === 'none' ? 'available' : 'used',
-        work_name: 'Actions 失败处理', work_prompt: sectionText(store, task.repository_id, 'actions.failures') } };
+        work_name: 'Actions 失败处理', work_prompt: sectionText(store, task.repository_id, 'actions.failures'), late_scheduled_runs: lateSchedules } };
   },
   validate(store, task, input) {
     const attempt = store.get('SELECT state FROM actions_failure_attempts WHERE repository_id=? AND run_id=? AND attempt=?', task.repository_id, input.run.id, input.run.attempt);
