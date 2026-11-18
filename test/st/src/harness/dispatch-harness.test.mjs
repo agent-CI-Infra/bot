@@ -16,8 +16,8 @@ import {Dispatcher} from '../../../../dist/dispatch/worker.js';
 import {managerDecision} from '../../../../dist/dispatch/manager.js';
 
 test('event dispatch uses a real Pi session and retains native binding without a business Task',{timeout:60000},async t=>{
- const root=mkdtempSync(join(tmpdir(),'dispatch-pi-')),s=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root);let calls=0;
- const provider=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);calls++;
+ const root=mkdtempSync(join(tmpdir(),'dispatch-pi-')),s=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root);let calls=0;const bodies=[];
+ const provider=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);calls++;bodies.push(body);
   assert.ok(body.tools.some(t=>t.function.name==='bash'));
   res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',tool_calls:[{id:'d'+calls,type:'function',function:{name:'ignore_event',arguments:JSON.stringify({reason:'This event is informational.'})}}]}}],usage:{prompt_tokens:10,completion_tokens:10}}));
  });provider.listen(0,'127.0.0.1');await once(provider,'listening');
@@ -33,4 +33,9 @@ test('event dispatch uses a real Pi session and retains native binding without a
  const binding=s.get('SELECT * FROM dispatch_harness_sessions');assert.equal(binding.harness,'pi');assert.ok(JSON.parse(binding.state).sessionId);
  assert.equal(s.get('SELECT count(*) n FROM tasks').n,0);assert.equal(calls,1);
  assert.ok(s.get('SELECT count(*) n FROM model_requests').n>0);
+ // The Pi Manager reads what the native one reads (#1058): the project's dispatch prompt, with the rule a project_rule basis
+ // quotes, the work this event can create, and the write and merge rules; not the role prompt alone.
+ const system=JSON.stringify(bodies[0].messages.filter(m=>m.role==='system'||m.role==='developer'));
+ for(const text of ['# Project Manager prompt','## Starting development','The bot may develop an Issue on its own when','# Work this event can create','task.request','Never merge a pull request'])
+  assert.ok(system.includes(text),text);
 });
