@@ -168,16 +168,12 @@ const settingsCards = {
       + (state.last_error ? `；最近一个错误：${state.last_error}` : '');
     const time = value => value ? new Date(value).toLocaleString('zh-CN') : '—', row = (table, cells) => { const tr = document.createElement('tr'); for (const text of cells) tr.append(element('td', text)); table.body.append(tr); };
     const cards = [], intro = view.overview ? element('div', '', 'storage-updated') : settingsCard('存储', 'h2');
-    // #482: what counts as storage and how often it is read is a methodology note, so it folds behind one labelled
-    // summary. The current refresh state — and a failed manager read, which is status rather than explanation — stay on
-    // the first screen beside the numbers they qualify.
-    intro.append(note(`存储数字来自后台快照，最近刷新：${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`
+    intro.append(note(`这里统计已采集的文件与项目工作卷。后台快照每 5 分钟更新一次，目录按小时测量，工作卷每 6 小时扫描。最近刷新 ${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`
       // A failed manager read keeps the numbers it gave last (#793), so the page says which read they come from.
       + (view.manager_error ? view.manager_read_at
         ? `上次读取于 ${time(view.manager_read_at)}；本次 manager 读取失败（${view.manager_error}），manager 的数字保留上次结果，可能过期。`
         : `本次 manager 读取失败（${view.manager_error}），还没有读到过 manager 的数字。`
         : '')));
-    intro.append(advancedHelp('存储统计的范围与刷新频率', '这里统计已采集的文件与项目工作卷，以及哪些空间可以回收：轨迹文件、浏览器截图证据、控制面与 manager 的数据库、项目电脑的工作卷和整块数据盘。后台快照每 5 分钟更新一次，目录按小时测量，项目电脑的卷每 6 小时扫描一次；打开页面不遍历文件。'));
     cards.push(intro);
     // A data disk below its reserve (#671): background writes pause, and tasks wait once the disk is all but full.
     if (view.alerts?.length) {
@@ -376,9 +372,7 @@ const settingsCards = {
     // Roles owned by a project are maintained with its group bindings (#849); this page keeps the global templates.
     const view = { request, roles: roles.filter(role => !role.project), items, models: models.filter(model => model.repository_id === null) };
     const intro = settingsCard('服务角色');
-    // #482: what a service role is, and who maintains which kind, is a permission explanation — folded, with the role
-    // cards themselves still the first thing the page shows.
-    intro.append(advancedHelp('服务角色是什么', '服务角色是平台级的助手：管理助手服务于控制台页面和个人私聊，仓库问答助手是群聊的默认推荐角色。它们不属于某个项目，使用部署共享模型，用量按角色单独记录，不计入任何项目。群聊助手角色只决定提示词和模型，群能做什么由每个群绑定的权限档位决定。这里维护全局模板；项目管理员为自己项目建的群助手角色在「个人设置 → 飞书绑定」维护。项目里的 Manager、Dev、QA 等工作角色在各项目的「角色」页配置。'));
+    intro.append(note('服务角色是平台级的助手：管理助手服务于控制台页面和个人私聊，仓库问答助手是群聊的默认推荐角色。它们不属于某个项目，使用部署共享模型，用量按角色单独记录，不计入任何项目。群聊助手角色只决定提示词和模型，群能做什么由每个群绑定的权限档位决定。这里维护全局模板；项目管理员为自己项目建的群助手角色在「个人设置 → 飞书绑定」维护。项目里的 Manager、Dev、QA 等工作角色在各项目的「角色」页配置。'));
     return [intro, ...view.roles.map(role => serviceRoleCard(view, role, 'h2')), serviceRoleCreate(view, 'h2')];
   },
   async users(request, id) {
