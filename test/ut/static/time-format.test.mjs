@@ -130,3 +130,18 @@ test('an unreadable time gets its own text instead of a bare zone suffix', () =>
   assert.equal(page.run("scheduleTime('not-a-date','Asia/Shanghai')"), '时间或时区无法识别');
   assert.equal(page.run("scheduleTime('2026-11-18T09:03:00Z','Asia/Shanghai')"), '2026-11-18 17:03:00');
 });
+
+// The e2e only checks the shape of a reading, so a helper shifted by hours would still pass. These are fixed instants
+// with literal readings, worked out independently (Python zoneinfo): an offset in timestampAt() moves at least one of
+// them, and midnight must stay '00' rather than '24'.
+test('a fixed instant reads the same in each named zone, and midnight is 00', () => {
+  const page = loadConsole(['static/app.js'], () => [404, {}]);
+  const readings = page.run(`[
+    timestampAt(1795050000000, 'Asia/Shanghai'),
+    timestampAt(1795050000000, 'UTC'),
+    timestampAt(1795050000000, 'America/New_York'),
+    timestampAt(1763481600000, 'Asia/Shanghai')
+  ]`);
+  // The sandbox returns its own Array, so compare the readings as text.
+  assert.equal(readings.join('|'), '2026-11-19 09:00:00|2026-11-19 01:00:00|2026-11-18 20:00:00|2025-11-19 00:00:00');
+});
