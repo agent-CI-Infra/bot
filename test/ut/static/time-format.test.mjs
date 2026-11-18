@@ -3,6 +3,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { loadConsole } from '../../fixtures/console-page.mjs';
 
+// The shared clock in static/app/boot.js reads a time in the machine's own zone (getFullYear(), getHours(), …), so
+// this file pins the zone before any test runs: the expected readings stay literals, and computing them with the page
+// helper would make the guard agree with whatever offset the helper got wrong. `node --test` runs each test file in its
+// own process, so this does not reach another set.
+process.env.TZ = 'UTC';
+
 // #691: the console showed the same kind of timestamp three ways — the shared clock ("2026-11-18 09:03:00"),
 // zh-CN medium ("2026年11月18日 09:03:00") and the browser's own language ("11/18/2026, 9:03:00 AM" in en-US).
 // The issue asks for one reading across pages, so every clock uses the shared helpers in static/app/boot.js and
