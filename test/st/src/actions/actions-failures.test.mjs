@@ -130,6 +130,8 @@ test('the workflow model decides external and code; unsupported, unusable or fai
   assert.deepEqual([task.head_sha, task.status], ['a'.repeat(40), 'succeeded']); assert.equal(request.target.sha, 'a'.repeat(40));
   assert.deepEqual(request.input.failed_jobs.map(job => [job.job_id, job.failed_step_output]), [[91, 'HTTPError: HTTP 429 Too Many Requests']]);
   assert.equal(request.target.files['failed-steps/91.log'], 'HTTPError: HTTP 429 Too Many Requests');
+  // #1072: the analysis also carries what to recommend when it sees a workflow's scheduled runs start late.
+  assert.match(request.target.context.late_scheduled_runs, /^# Late scheduled workflow runs[\s\S]*workflow_dispatch/);
   const profile = workspaceProfile('actions.failures', request.target.context, workflowAccess('actions.failures')), names = profile.tools.map(tool => tool.function.name);
   assert.match(profile.system, /# Actions failure analysis/); assert.deepEqual(profile.finishTools, ['finish_analysis']);
   for (const name of ['read_file', 'run_command', 'read_job_log', 'rerun_failed_run', 'report_failure', 'finish_analysis', 'start_agent']) assert.ok(names.includes(name), name);
