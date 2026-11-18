@@ -41,7 +41,7 @@
 4. **发布与检查**：在飞书发布版本、设置可用范围并完成必要审核，再检查机器人信息；检查自动同步保存机器人身份。商店应用先保存连接配置、接收 app_ticket，再完成此检查，未获取机器人身份时拒绝处理消息和卡片。检查只证明凭据和机器人信息可读，不证明消息或卡片回调已经送达。
 5. **绑定与试用**：每位用户完成个人双端绑定，在私聊直接发送“你好”或“我能管理哪些项目”，收到助手回复后才完成接入；此页可查看收件和发送状态。群聊的项目范围、权限档位与服务角色在「个人设置 → 飞书绑定」点击「创建群绑定」或对应群条目的「配置仓库与权限」单独设置。结果卡片只带“登录后台查看”链接，不再有回调按钮；较早版本发出的“刷新执行状态”按钮点击后提示已过期。
 
-富文本与图片、文件是默认能力；交互卡片继续支持。所需权限只在服务端 `FEISHU_SCOPES`（`src/channels/feishu.ts`）维护一份，经 `GET /api/channels/setup` 的 `feishu_scopes` 下发：向导第 1 步和连接列表里的完整权限 JSON、连接的自动权限检查都由它生成。下表与它逐项一致，`test/channel-setup.test.mjs` 会核对。JSON 按当前应用类型生成，包含以下应用身份权限，个人身份权限为空；获取企业信息和包含机器人消息的权限仅加入企业自建应用的权限 JSON：
+富文本与图片、文件是默认能力；交互卡片继续支持。所需权限只在服务端 `FEISHU_SCOPES`（`src/channels/feishu.ts`）维护一份，经 `GET /api/channels/setup` 的 `feishu_scopes` 下发：向导第 1 步和连接列表里的完整权限 JSON、连接的自动权限检查都由它生成。下表与它逐项一致，`test/st/src/channels/channel-setup.test.mjs` 会核对。JSON 按当前应用类型生成，包含以下应用身份权限，个人身份权限为空；获取企业信息和包含机器人消息的权限仅加入企业自建应用的权限 JSON：
 
 | 权限 | 用途 |
 | --- | --- |
@@ -308,15 +308,15 @@ UTF-8 文本可分页读取；PNG/JPEG/GIF/WebP 可通过 `view_message_image` �
 
 ## 验证
 
-`npm ci`、`npm run check`、`npm test` 是基础检查；`test/channel-service-bindings.test.mjs` 用本地 GitHub App 和飞书协议夹具覆盖群聊绑定的授权条件、飞书应用缺少成员权限时的拒绝、跨仓库问答与范围拒绝、权限档位（同一项目的两个群分别只读和可派活、无平台账号的成员派活、档位与逐项设置的校验）与升级迁移（档位和授权围栏不变）、任务读写与撤权、经 Manager 派活（新建、追加说明、修改约定、取消，不能指定角色）与结果回群、撤销派活后停止任务、群聊助手独立任务的运行时围栏检查、两个群的范围隔离、授权者失权、迁移和删除检查，`test/channel-conversation.test.mjs` 覆盖发言范围、长原文、滚动摘要和来源变化；`test/channel-stage-messages.test.mjs` 覆盖群聊、私聊、控制台和定时任务的阶段消息（运行中送达、顺序、每轮 10 条上限）、源消息撤回后不再发送、控制台停止的权限与结果，以及群聊助手、管理助手和独立任务不再有步数上限；`e2e/stage-messages.spec.mjs` 在页面上验证管理助手显示阶段消息、群聊助手会话显示阶段消息并由负责人停止；`test/channel-schedules.test.mjs` 覆盖私聊和群聊定时任务的管理权限、跨项目执行、范围与工具拒绝、撤权暂停、逻辑触发点去重和用量归属，以及两个群各自的定时任务由各自的群助手执行、回到各自的群，群里改时间只改本群的；`test/channels.test.mjs` 覆盖项目面板直接选择会话作为目的地、聊天文本不再触发 `/project` 流程、验签/解密、重投、慢模型、双端绑定、群字段范围、会话隔离、撤权、旧卡片、发送重试和重启恢复。`test/channel-setup.test.mjs` 覆盖向导和凭据检查的管理员边界、个人应用范围、敏感信息过滤、异步版本检查及部分凭据更新。
+`npm ci`、`npm run check`、`npm test` 是基础检查；`test/st/src/channels/channel-service-bindings.test.mjs` 用本地 GitHub App 和飞书协议夹具覆盖群聊绑定的授权条件、飞书应用缺少成员权限时的拒绝、跨仓库问答与范围拒绝、权限档位（同一项目的两个群分别只读和可派活、无平台账号的成员派活、档位与逐项设置的校验）与升级迁移（档位和授权围栏不变）、任务读写与撤权、经 Manager 派活（新建、追加说明、修改约定、取消，不能指定角色）与结果回群、撤销派活后停止任务、群聊助手独立任务的运行时围栏检查、两个群的范围隔离、授权者失权、迁移和删除检查，`test/st/src/channels/channel-conversation.test.mjs` 覆盖发言范围、长原文、滚动摘要和来源变化；`test/st/src/channels/channel-stage-messages.test.mjs` 覆盖群聊、私聊、控制台和定时任务的阶段消息（运行中送达、顺序、每轮 10 条上限）、源消息撤回后不再发送、控制台停止的权限与结果，以及群聊助手、管理助手和独立任务不再有步数上限；`test/e2e/roles/stage-messages.spec.mjs` 在页面上验证管理助手显示阶段消息、群聊助手会话显示阶段消息并由负责人停止；`test/st/src/channels/channel-schedules.test.mjs` 覆盖私聊和群聊定时任务的管理权限、跨项目执行、范围与工具拒绝、撤权暂停、逻辑触发点去重和用量归属，以及两个群各自的定时任务由各自的群助手执行、回到各自的群，群里改时间只改本群的；`test/st/src/channels/channels.test.mjs` 覆盖项目面板直接选择会话作为目的地、聊天文本不再触发 `/project` 流程、验签/解密、重投、慢模型、双端绑定、群字段范围、会话隔离、撤权、旧卡片、发送重试和重启恢复。`test/st/src/channels/channel-setup.test.mjs` 覆盖向导和凭据检查的管理员边界、个人应用范围、敏感信息过滤、异步版本检查及部分凭据更新。
 
-`e2e/channels.spec.mjs` 使用独立 SQLite、随机本地 HTTP 端口、官方事件结构的合法签名样本以及 GitHub/模型/飞书协议夹具验证用户路径。截图和结构化证据保存在 `.tmp/channels-165/`。测试中只使用测试凭据，不调用真实飞书租户，也不接触正在运行的部署。运行 Playwright 时，将 `TMPDIR` 和 `PLAYWRIGHT_BROWSERS_PATH` 设为工作树内目录。
+`test/e2e/channels/channels.spec.mjs` 使用独立 SQLite、随机本地 HTTP 端口、官方事件结构的合法签名样本以及 GitHub/模型/飞书协议夹具验证用户路径。截图和结构化证据保存在 `.tmp/channels-165/`。测试中只使用测试凭据，不调用真实飞书租户，也不接触正在运行的部署。运行 Playwright 时，将 `TMPDIR` 和 `PLAYWRIGHT_BROWSERS_PATH` 设为工作树内目录。
 
-`e2e/feishu-setup.spec.mjs` 经实际页面验证管理员创建/恢复连接、失败提示、版本冲突，以及用户从合法飞书绑定事件开始，经本地平台登录或可选 GitHub OAuth、原私聊确认到查看与解绑的完整路径。本地登录场景不配置 GitHub OAuth，并核对绑定不增加仓库授权。桌面和手机截图保存在 `.tmp/feishu-setup-165/`；同样使用本地协议夹具，不代表已连接真实飞书应用。
+`test/e2e/channels/feishu-setup.spec.mjs` 经实际页面验证管理员创建/恢复连接、失败提示、版本冲突，以及用户从合法飞书绑定事件开始，经本地平台登录或可选 GitHub OAuth、原私聊确认到查看与解绑的完整路径。本地登录场景不配置 GitHub OAuth，并核对绑定不增加仓库授权。桌面和手机截图保存在 `.tmp/feishu-setup-165/`；同样使用本地协议夹具，不代表已连接真实飞书应用。
 
-`e2e/channel-service-bindings.spec.mjs` 在桌面和手机宽度验证维护人选择仓库绑定仓库问答助手、查询本地群记录和停用，并验证应用缺少成员权限和入口返回网关错误页时保存给出可读提示；`e2e/channel-conversation.spec.mjs` 验证群聊助手与个人私聊的连续会话页面。截图保存在 `.tmp/channel-service-bindings-312/` 和 `.tmp/channel-conversation-312/`。
+`test/e2e/channels/channel-service-bindings.spec.mjs` 在桌面和手机宽度验证维护人选择仓库绑定仓库问答助手、查询本地群记录和停用，并验证应用缺少成员权限和入口返回网关错误页时保存给出可读提示；`test/e2e/channels/channel-conversation.spec.mjs` 验证群聊助手与个人私聊的连续会话页面。截图保存在 `.tmp/channel-service-bindings-312/` 和 `.tmp/channel-conversation-312/`。
 
-`test/channel-ledger.test.mjs` 验证事务回滚、官方 SDK frame 的失败/成功 ACK、数据库重启、全部分页和 thread、过期租约、429、异常游标、撤回合并、敏感信息、本地零回源及保留边界。`e2e/channel-history.spec.mjs` 在桌面和手机验证超过 100 条、跨成员/thread/日期的本地消息分页、搜索、同步诊断和保留配置；均为本地协议夹具，不是飞书或 GitHub 真实集成。
+`test/st/src/channels/channel-ledger.test.mjs` 验证事务回滚、官方 SDK frame 的失败/成功 ACK、数据库重启、全部分页和 thread、过期租约、429、异常游标、撤回合并、敏感信息、本地零回源及保留边界。`test/e2e/channels/channel-history.spec.mjs` 在桌面和手机验证超过 100 条、跨成员/thread/日期的本地消息分页、搜索、同步诊断和保留配置；均为本地协议夹具，不是飞书或 GitHub 真实集成。
 
 实现依据：[飞书回调验签与解密](https://open.feishu.cn/document/event-subscription-guide/callback-subscription/receive-and-handle-callbacks)、[官方 Node SDK](https://github.com/larksuite/node-sdk)、[长连接接收事件](https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-)。实际开通时仍需按应用类型核对权限与可用事件。
 

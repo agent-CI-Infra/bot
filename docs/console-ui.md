@@ -56,7 +56,7 @@
 
 按钮的四种用法是 `.btn-primary`（每页默认最多一个启用的主操作）、`.btn-secondary`（与 `.quiet` 同外观）、`.btn-danger`（与 `.quiet.destructive` 同外观）和 `.btn-text`（工具栏文字操作；行内链接仍用 `.linkish`）。`.card` 与 `.side-card` 共用内边距、圆角、边框和阴影；列表容器 `.card.list-panel` 去掉内边距以便行贴边。
 
-`test/console-tokens.test.mjs` 同时检查变量声明与跨模块固定值。契约覆盖的模块样式新增公共变量引用时，在 `SHARED` 中登记 `static/shell.css` 的实际值，并运行主题契约测试；变量已声明并不代表其固定值已登记。
+`test/ut/static/console-tokens.test.mjs` 同时检查变量声明与跨模块固定值。契约覆盖的模块样式新增公共变量引用时，在 `SHARED` 中登记 `static/shell.css` 的实际值，并运行主题契约测试；变量已声明并不代表其固定值已登记。
 
 | 入口 | 用法 |
 | --- | --- |
@@ -137,7 +137,7 @@
 
 ## 验证
 
-`e2e/console-shell.spec.mjs` 使用独立控制面和真实 API，验证六个宽度、短窗口滚动与底部设置、深链、项目/平台入口、移动选择器、任务详情、网络失败重试、越权拒绝、迟到回包、返回和退出；`e2e/mobile-console-nav.spec.mjs` 单独锚定手机壳层：五个目的地与 44px 触控、767/768 断点、助手的入口/焦点/未读镜像、更多页去重与角色可见性、当前页面选择器的分组、账号菜单键盘操作，以及 320/390/767 与矮窗下的横向溢出和遮挡。截图保存在 `.tmp/console-shell/`。`test/control-plane.test.mjs` 验证关注筛选先于分页、排队任务不计入，以及跨项目授权。
+`test/e2e/console/console-shell.spec.mjs` 使用独立控制面和真实 API，验证六个宽度、短窗口滚动与底部设置、深链、项目/平台入口、移动选择器、任务详情、网络失败重试、越权拒绝、迟到回包、返回和退出；`test/e2e/console/mobile-console-nav.spec.mjs` 单独锚定手机壳层：五个目的地与 44px 触控、767/768 断点、助手的入口/焦点/未读镜像、更多页去重与角色可见性、当前页面选择器的分组、账号菜单键盘操作，以及 320/390/767 与矮窗下的横向溢出和遮挡。截图保存在 `.tmp/console-shell/`。`test/st/src/app/control-plane.test.mjs` 验证关注筛选先于分页、排队任务不计入，以及跨项目授权。
 
 同时执行现有地址、看板和管理助手回归；涉及公共样式的交付需要全量浏览器回归。软键盘的真实设备行为与屏幕阅读器仍需设备验收，浏览器视口缩小和键盘操作不能代替这些检查。
 

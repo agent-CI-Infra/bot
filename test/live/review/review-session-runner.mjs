@@ -10,8 +10,8 @@ import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {generateKeyPairSync} from 'node:crypto';
-import {emptyRepositoryFixture} from '../../empty-repository-helpers.mjs';
-import {saveManager} from '../../helpers.mjs';
+import {emptyRepositoryFixture} from '../../fixtures/empty-repository-helpers.mjs';
+import {saveManager} from '../../fixtures/helpers.mjs';
 import {queueWebhook} from '../../../dist/review/queue.js';
 import {workspace} from '../../../runner/workspace.mjs';
 import {estimateTokens} from '../../../runner/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
@@ -313,7 +313,7 @@ test('real Pi keeps 26 waiting updates and injects them after a model request an
   const [first]=await work;assert.equal(first.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
   assert.equal(d.h.store.all('SELECT * FROM tasks').length,1);assert.equal(d.h.store.all('SELECT * FROM model_requests').length,3);
   // The conversation stays in Pi's session file (#1040); the control plane keeps no copy. A next round reopens it, see
-  // test/pi-controller.test.mjs.
+  // test/st/src/roles/pi-controller.test.mjs.
   assert.equal(first.messages,null);
   const bound=d.h.store.all('SELECT content FROM task_logs WHERE task_id=?',first.id).map(row=>JSON.parse(row.content)).find(event=>event.type==='session_bound');
   assert.match(await readFile(bound.transcript,'utf8'),/tool-finished/);

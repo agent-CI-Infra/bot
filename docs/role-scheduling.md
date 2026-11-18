@@ -68,4 +68,4 @@
 
 `task_history` 保留 `stage_plan`、`stage_result`，原 trace 可以继续按引用查证。角色页提供上述项目策略编辑与草稿依赖预览；它不表示某次任务的实时阶段进度，具体运行状态仍以任务记录及角色查询为准。
 
-验证：`npm run check`、`npm test`；重点用例在 `test/role-schedule.test.mjs`，真实 Pi 主控用例在 `test/pi-controller.test.mjs`（先安装 runner 依赖，见开发文档）。
+验证：`npm run check`、`npm test`；重点用例在 `test/st/src/roles/role-schedule.test.mjs`，真实 Pi 主控用例在 `test/st/src/roles/pi-controller.test.mjs`（先安装 runner 依赖，见开发文档）。

@@ -69,7 +69,7 @@ Document promotion accepts only server-observed PR/file data. A default-base mer
 
 Pi uses its existing control-plane mailbox, and container CLI backends (Claude Code and Codex) use the in-container stdio `bot` MCP bridge over the task mailbox. All backends invoke `memoryTool` and ProjectMemory with the same task actor and role checks; changing backend adds no database/file permissions. Reads trace the actual revision, source reference, baseline, offset, returned character count and content digest. A failure is an explicit result and never completes or reopens a task. Work-directory pruning does not delete database knowledge; explicit project removal retains the existing lifecycle. Legacy notes and memories appear in the same file browser without copying private content into the shared volume, and no private chat or credential import is installed.
 
-Acceptance includes the existing SQLite/Git compatibility tests, `test/knowledge.test.mjs`, the real Pi SDK plus container Codex/MCP protocol fixture in `test/knowledge-backends.test.mjs`, and `e2e/knowledge.spec.mjs`. These tests assert source, revision and authorization behavior; they do not claim a real external model run, a live GitHub merge, or improved model quality.
+Acceptance includes the existing SQLite/Git compatibility tests, `test/st/src/memory/knowledge.test.mjs`, the real Pi SDK plus container Codex/MCP protocol fixture in `test/st/src/memory/knowledge-backends.test.mjs`, and `test/e2e/knowledge/knowledge.spec.mjs`. These tests assert source, revision and authorization behavior; they do not claim a real external model run, a live GitHub merge, or improved model quality.
 
 ## Free files and version history
 

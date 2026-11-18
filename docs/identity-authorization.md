@@ -89,7 +89,7 @@ principal 的 `authorization_revision` 只在账号失去原有有效权限时�
 npm ci
 npm run check
 npm test
-npx playwright test e2e/github-identity.spec.mjs e2e/admin-grants.spec.mjs
+npx playwright test -c test/e2e/playwright.config.mjs test/e2e/identity/github-identity.spec.mjs test/e2e/identity/admin-grants.spec.mjs
 node test/docker/identity/github-identity-docker.mjs
 ```
 

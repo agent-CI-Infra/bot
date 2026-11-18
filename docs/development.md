@@ -32,15 +32,28 @@ docker compose -f docker/compose.yaml config --quiet
 docker compose -f docker/compose.yaml -f docker/compose.build.yaml config --quiet
 ```
 
-完整测试前需要安装项目内 runner 依赖：`npm ci --prefix runner --omit=dev --ignore-scripts`。`test/role-conversation.test.mjs` 的通用 Pi 会话用例与 `test/pi-controller.test.mjs` 都用本机 runner 和真实 Pi SDK；缺少 SDK 时通用会话会失败，部分旧用例会跳过。CI 安装依赖并设置 `BOT_REQUIRE_PI=1`，缺少 SDK 会失败而不是跳过。本机也可用这个变量确保实际覆盖 Pi 路径。
+完整测试前需要安装项目内 runner 依赖：`npm ci --prefix runner --omit=dev --ignore-scripts`。`test/st/src/roles/role-conversation.test.mjs` 的通用 Pi 会话用例与 `test/st/src/roles/pi-controller.test.mjs` 都用本机 runner 和真实 Pi SDK；缺少 SDK 时通用会话会失败，部分旧用例会跳过。CI 安装依赖并设置 `BOT_REQUIRE_PI=1`，缺少 SDK 会失败而不是跳过。本机也可用这个变量确保实际覆盖 Pi 路径。
 
-`test/claude-code.test.mjs` 启动 lockfile 固定的真实 Claude Code 二进制，以合成 provider 验证 MCP、受控代码修改、实际测试和精确恢复；另有明确标注的协议 fixture。它们不需要个人登录态，也不代替真实模型验收，部署和 opt-in probe 见 [Claude Code harness](claude-code.md)。在 `node:test` 内启动子进程 `node --test` 时要显式构造环境，避免继承 `NODE_TEST_CONTEXT` 导致子测试静默跳过，并断言实际执行项数和失败/成功状态。
+`test/st/src/harness/claude-code.test.mjs` 启动 lockfile 固定的真实 Claude Code 二进制，以合成 provider 验证 MCP、受控代码修改、实际测试和精确恢复；另有明确标注的协议 fixture。它们不需要个人登录态，也不代替真实模型验收，部署和 opt-in probe 见 [Claude Code harness](claude-code.md)。在 `node:test` 内启动子进程 `node --test` 时要显式构造环境，避免继承 `NODE_TEST_CONTEXT` 导致子测试静默跳过，并断言实际执行项数和失败/成功状态。
 
 `npm test` 覆盖并发初始化只成功一次、重启、权限收回、跨项目列表／详情／日志／模型隔离、凭据加密及不回显、验签、事务回滚重试、重复投递、先落库再确认和空配置不执行。SQLite 使用 Node 内置 `node:sqlite`，Node 22 会显示实验特性提示。
 
+### 测试分层与目录
+
+全部测试资产统一收纳在 `test/<测试类别>/<测试模块>/` 下：
+
+- `test/ut/`：单元测试，内层目录与被测源码树一致（`src/<模块>/`、`manager/`、`runner/`、`static/`、`public-board/`、`docker/`、`workflows/`、`scripts/`、`framework/`、`acceptance/`）。
+- `test/st/`：服务与进程内集成测试（启动进程内控制面／SQLite／本地 HTTP 与 runner 夹具），内层目录同样与主被测源码目录一致。
+- `test/e2e/`：浏览器端到端测试（`playwright.config.mjs`、`helpers/`、`browser/browser-runtime.mjs` 及按功能模块划分的 `*.spec.mjs`）。
+- `test/docker/`：真实 Docker 容器与 Compose 系统测试（按 `agent`、`deploy`、`external`、`identity`、`manager`、`projects`、`runner` 分模块）。
+- `test/acceptance/`：面向完整部署栈与测试仓夹具的 AI 剧本验收脚本及 `compose.quick-tunnel.yaml`。
+- `test/live/`：需显式凭据或本机真实 CLI 的实况／协议探针测试（`*.live.test.mjs`、`*-smoke.mjs`、`*-probe.mjs`）。
+- `test/fixtures/`：跨测试类别复用的夹具、假服务与辅助模块。
+- `test/framework/`：测试集递归发现、并行运行、CI 分片均衡与回环网络守卫。
+
 ### 测试集与并行
 
-`npm test` 构建之后由 [`test/framework/test-sets.mjs`](../test/framework/test-sets.mjs) 把 `test/ut/**/*.test.mjs`、`test/st/**/*.test.mjs`（及根目录过渡期 `test/*.test.mjs`）分成测试集运行。每个测试文件默认自成一个集。一个集在自己的 `node --test` 进程里运行，集内的文件依次运行，文件内的用例也按 `node:test` 的默认方式依次运行；不同的集同时运行，同时运行的集数默认等于 CPU 数，可用 `npm test -- --jobs 4` 或环境变量 `BOT_TEST_JOBS` 调整，`npm test -- test/board.test.mjs` 只运行指定文件。上次各集的耗时记在 `.tmp/test-set-durations.json`，耗时长的集先启动。每个集结束时整段打印它的 TAP 输出，最后列出各集相对开始时刻的起止秒数和合计的 TAP 汇总；任何一个集失败，`npm test` 都以非零状态退出。设置 `BOT_TEST_SUMMARY=<文件>` 时，同样的总数还写成简单 JSON（`{"metrics": [{"name", "value", "unit"}]}`）；Nightly 从分片报告另行汇总同格式的 `unit-summary`，并上传 e2e 的 JUnit 报告（`PLAYWRIGHT_JUNIT=<文件>` 时 Playwright 另写一份），公共看板据此画定时运行的趋势图。
+`npm test` 构建之后由 [`test/framework/test-sets.mjs`](../test/framework/test-sets.mjs) 把 `test/ut/**/*.test.mjs`、`test/st/**/*.test.mjs`分成测试集运行。每个测试文件默认自成一个集。一个集在自己的 `node --test` 进程里运行，集内的文件依次运行，文件内的用例也按 `node:test` 的默认方式依次运行；不同的集同时运行，同时运行的集数默认等于 CPU 数，可用 `npm test -- --jobs 4` 或环境变量 `BOT_TEST_JOBS` 调整，`npm test -- test/st/src/board/board.test.mjs` 只运行指定文件。上次各集的耗时记在 `.tmp/test-set-durations.json`，耗时长的集先启动。每个集结束时整段打印它的 TAP 输出，最后列出各集相对开始时刻的起止秒数和合计的 TAP 汇总；任何一个集失败，`npm test` 都以非零状态退出。设置 `BOT_TEST_SUMMARY=<文件>` 时，同样的总数还写成简单 JSON（`{"metrics": [{"name", "value", "unit"}]}`）；Nightly 从分片报告另行汇总同格式的 `unit-summary`，并上传 e2e 的 JUnit 报告（`PLAYWRIGHT_JUNIT=<文件>` 时 Playwright 另写一份），公共看板据此画定时运行的趋势图。
 
 Actions 的 UT 固定使用两台 runner，每台四路；PR、合并队列和 Nightly 复用同一配置。`npm test -- --jobs 4 --shard 1/2` 与 `--shard 2/2` 分别运行两片，也可设置 `BOT_TEST_SHARD=1/2`。分片按 [`test/framework/test-set-weights.json`](../test/framework/test-set-weights.json) 的历史耗时，从重到轻放入预计工作量较少的一片；新测试按文件大小估算。完整命名测试集不拆开。分片归属只由提交中的源码与权重决定，本地耗时缓存只影响片内顺序，不能改变归属。普通本地 `npm test` 仍跑全部集。
 
@@ -54,23 +67,23 @@ node test/framework/unit-shards.mjs weights .tmp/run-a/unit-balance.json .tmp/ru
 
 此命令要求至少三个不同运行、相同测试语料与分片计划的完整报告，先用片内中位比率归一化 runner 的整体快慢，再取逐集中位数；只输出候选，不自动修改权重或并发。确认持续失衡与候选分配后，在独立分支更新权重，并比较改前／改后的真实均衡指标。不得为提速删覆盖、放宽预算或增加盲目重试。
 
-运行器为每个集在 `.tmp/tests-*/<集名>/` 下准备独立资源：`TMPDIR` 指向其中的 `tmp/`，`HOME` 指向 `home/`（同时清除 `XDG_*` 目录变量，遵循 XDG 的程序回落到这个 HOME），`BOT_TEST_SET` 是集名，环境变量是这个集的进程自己的副本。集通过后删除它的目录，失败时保留并打印路径。集内的进程只能连接回环地址：[`test/framework/test-network-guard.mjs`](../test/framework/test-network-guard.mjs) 经 `NODE_OPTIONS` 加载到集内的每个 Node.js 进程，连接其他地址时按连接被拒绝处理，并让这个集失败，即使被测代码吞掉了这个错误。直接用 `node --test test/<文件>` 运行单个文件也可以，这时临时目录在系统临时目录下，也没有网络限制。
+运行器为每个集在 `.tmp/tests-*/<集名>/` 下准备独立资源：`TMPDIR` 指向其中的 `tmp/`，`HOME` 指向 `home/`（同时清除 `XDG_*` 目录变量，遵循 XDG 的程序回落到这个 HOME），`BOT_TEST_SET` 是集名，环境变量是这个集的进程自己的副本。集通过后删除它的目录，失败时保留并打印路径。集内的进程只能连接回环地址：[`test/framework/test-network-guard.mjs`](../test/framework/test-network-guard.mjs) 经 `NODE_OPTIONS` 加载到集内的每个 Node.js 进程，连接其他地址时按连接被拒绝处理，并让这个集失败，即使被测代码吞掉了这个错误。直接用 `node --test test/ut/<模块>/<文件>`（或 `test/st/<模块>/<文件>`）运行单个文件也可以，这时临时目录在系统临时目录下，也没有网络限制。
 
 新测试放进已有文件，或新建一个文件自成一个集，并自备独立资源：
 
-- 临时目录、SQLite 文件和其他产物放在 `mkdtempSync(join(tmpdir(), '<前缀>-'))` 建的目录里，在 `t.after` 中删除；数据库也可以用 `:memory:`。不要写死 `.tmp/` 或仓库里的其他路径，也不要删除不是自己建的目录。`test/helpers.mjs` 的 `harness` 已经这样准备数据库目录和端口。
+- 临时目录、SQLite 文件和其他产物放在 `mkdtempSync(join(tmpdir(), '<前缀>-'))` 建的目录里，在 `t.after` 中删除；数据库也可以用 `:memory:`。不要写死 `.tmp/` 或仓库里的其他路径，也不要删除不是自己建的目录。`test/fixtures/helpers.mjs` 的 `harness` 已经这样准备数据库目录和端口。
 - 服务一律 `listen(0, '127.0.0.1')`，把实际端口传给被测代码；不写死端口，也不先占一个空闲端口、关闭后再复用。
 - 修改 `process.env` 只影响本文件的进程，用完恢复。
-- 通过 `LocalManager` 或 runner 模块在本机运行进程的工作区，id 用 `test/helpers.mjs` 的 `randomWorkspaceId()`。这些进程带着工作区 id，清理（reap）会结束本机上所有同 id 的进程，固定 id 会让同时运行的集、甚至另一个工作树里的测试互相结束对方的进程。
+- 通过 `LocalManager` 或 runner 模块在本机运行进程的工作区，id 用 `test/fixtures/helpers.mjs` 的 `randomWorkspaceId()`。这些进程带着工作区 id，清理（reap）会结束本机上所有同 id 的进程，固定 id 会让同时运行的集、甚至另一个工作树里的测试互相结束对方的进程。
 - 不使用 Docker、全局 git 配置或其他本机共享状态；这些属于 `npm run test:docker` 等单独的验收。
 
 集内串行：同一个文件里的用例本来就依次运行。如果几个文件共用一份无法拆开的资源、不能同时运行，在每个文件里写一行 `// test-set: <集名> <原因>`，运行器把它们放进同一个集依次运行；这一行缺少原因时 `npm test` 拒绝运行。优先给每个文件准备独立资源，而不是合并成一个集；目前所有文件都各自成集。
 
-真实外部服务例外：会真实访问飞书开放平台、GitHub、模型供应商或本机 CLI 的实况／探针测试放在 `test/live/<模块>/`（如 `*.live.test.mjs`、`*-smoke.mjs`、`*-probe.mjs`）。`npm test` 不运行这类文件，运行器也拒绝把它们当作测试集；需要时带上所需凭据，用 `node --test test/live/<模块>/<名字>.live.test.mjs` 单独运行。只在断言或夹具里出现 `api.github.com`、飞书字段，或者访问本地假服务器（`test/fixtures/`、`test/git-server.mjs` 等）的测试不属于例外，留在并行的测试集里。
+真实外部服务例外：会真实访问飞书开放平台、GitHub、模型供应商或本机 CLI 的实况／探针测试放在 `test/live/<模块>/`（如 `*.live.test.mjs`、`*-smoke.mjs`、`*-probe.mjs`）。`npm test` 不运行这类文件，运行器也拒绝把它们当作测试集；需要时带上所需凭据，用 `node --test test/live/<模块>/<名字>.live.test.mjs` 或 `node test/live/<模块>/<脚本>.mjs` 单独运行。只在断言或夹具里出现 `api.github.com`、飞书字段，或者访问本地假服务器（`test/fixtures/`、`test/fixtures/git-server.mjs` 等）的测试不属于例外，留在并行的测试集里。
 
-浏览器验收使用固定在 lockfile 的 Playwright，先运行 `npx playwright install chromium --only-shell`，再执行 `npm run test:e2e`。每个 `e2e/*.spec.mjs` 文件是一个测试集，文件内的用例依次运行，不同文件由同一台机器上的 Playwright worker 并行执行；默认 worker 数为 Node.js 的 `availableParallelism()`，本地和 CI 使用同一配置，CI 仍只有一个 `e2e` 作业，不通过增加 runner 分片。可用 `npm run test:e2e -- --workers 4` 限制并发，或 `--workers 1` 作串行对照；命令后跟文件名只运行指定集。
+浏览器验收使用固定在 lockfile 的 Playwright，先运行 `npx playwright install chromium --only-shell`，再执行 `npm run test:e2e`。每个 `test/e2e/**/*.spec.mjs` 文件是一个测试集，文件内的用例依次运行，不同文件由同一台机器上的 Playwright worker 并行执行；默认 worker 数为 Node.js 的 `availableParallelism()`，本地和 CI 使用同一配置，CI 仍只有一个 `e2e` 作业，不通过增加 runner 分片。可用 `npm run test:e2e -- --workers 4` 限制并发，或 `--workers 1` 作串行对照；命令后跟文件名只运行指定集。
 
-新增浏览器测试按主题放进独立的 spec 文件，不把所有用例包进一个串行大集。需要按顺序操作同一资源的场景留在一个文件中，并说明依赖原因；跨文件不共享可写状态。每个用例使用独立的浏览器 context、自己的 SQLite 与临时目录和 `listen(0, '127.0.0.1')` 随机端口；`test/helpers.mjs` 的 harness 和现有 manager fixture 已这样隔离资源。临时数据在 `tmpdir()` 下用 `mkdtemp` 创建，只清理自己创建的目录；真实本机进程的工作区 id 使用 `randomWorkspaceId()`。截图目录也必须按 spec 主题独立，复制测试时不能沿用另一个文件的输出路径。测试使用本地假服务器和夹具，不占用部署数据、固定试用端口或其他本机共享状态。Playwright 的逐用例结果放在 `.tmp/e2e-results`，截图等产物也放在忽略提交的 `.tmp/`；不要在同一工作树同时启动两次会清理这一输出目录的 Playwright 命令。
+新增浏览器测试按主题放进独立的 spec 文件，不把所有用例包进一个串行大集。需要按顺序操作同一资源的场景留在一个文件中，并说明依赖原因；跨文件不共享可写状态。每个用例使用独立的浏览器 context、自己的 SQLite 与临时目录和 `listen(0, '127.0.0.1')` 随机端口；`test/fixtures/helpers.mjs` 的 harness 和现有 manager fixture 已这样隔离资源。临时数据在 `tmpdir()` 下用 `mkdtemp` 创建，只清理自己创建的目录；真实本机进程的工作区 id 使用 `randomWorkspaceId()`。截图目录也必须按 spec 主题独立，复制测试时不能沿用另一个文件的输出路径。测试使用本地假服务器和夹具，不占用部署数据、固定试用端口或其他本机共享状态。Playwright 的逐用例结果放在 `.tmp/e2e-results`，截图等产物也放在忽略提交的 `.tmp/`；不要在同一工作树同时启动两次会清理这一输出目录的 Playwright 命令。
 
 实际 Docker 验收运行 `npm run test:docker`，需要 Docker 和上述 Playwright 浏览器。它用 [`docker/compose.yaml`](../docker/compose.yaml) 加 [`docker/compose.build.yaml`](../docker/compose.build.yaml) 从当前源码构建镜像，标签是 `department-bot*:local`，和同一台机器上从源码构建的部署共用：运行中的容器不受影响，但那份部署下次 `up` 会用上测试构建的镜像；按 GHCR 镜像运行的部署不受影响。它使用独立 Compose 项目和 18881／18883 测试端口，18881 是业务端口，18883 仅在测试覆盖文件里映射 manager；生产 Compose 不发布该端口。测试会检查两个真实环境、串行与并行、文件／卷／网络隔离、无凭据、代次重置、重启和角色页面，并按本次部署标签清理容器、网络及卷。输出保存在 `.tmp/project-env/`。
 
@@ -84,7 +97,7 @@ node test/framework/unit-shards.mjs weights .tmp/run-a/unit-balance.json .tmp/ru
 
 `npm run test:assistant:docker` 验收群聊助手和管理助手的电脑（#457）：同样以本机已有的项目电脑镜像（`BOT_TEST_BASE_IMAGE`）叠加本检出的 runner 构建测试镜像，建一个测试用的 HOME 卷，在进程内运行本检出的 `manager/assistant-computers.mjs`（独立 deployment id），检查两个归属之间 HOME、/tmp、进程、环境变量、符号链接和网络的隔离，资源上限，文件操作的路径限制（只在 HOME、/workspace、/tmp 内且不跟随符号链接），回合结束回收进程、空闲复用、fence 变化重建、只读 HOME、HOME 换代、空闲删除、manager 重启清理和创建失败，并输出冷启动、复用时每条命令开销、10 个并发启动和内存；结束后只删除该 deployment 标签下的容器、卷和测试镜像，证据在 `.tmp/assistant-computers-docker/`。
 
-`npm run test:deploy:docker` 验收生产部署这一步：取出 `.github/workflows/release.yml` 中 Deploy 步骤发到服务器的脚本原文，在一次性的 Compose 项目 `bot-deploy-recovery-*` 里运行。项目里的 `bot`、`manager` 替身保持 `compose.yaml` 的依赖关系，并忽略停止信号；用例覆盖首次部署、发布新版本、在已创建替换容器时中断（旧容器仍在，以及只剩替换容器）后重跑，以及失败时输出每个容器的状态。基础镜像取本机已有的 `BOT_TEST_BASE_IMAGE`（默认 `department-bot-project-computer:local`，任何带 `sh` 的本机镜像都可以），不拉取镜像；结束后只删除本项目的容器和网络，日志在 `.tmp/deploy-recovery/`。
+`npm run test:deploy:docker` 验收生产部署这一步：取出 `.github/workflows/release.yml` 中 Deploy 步骤发到服务器的脚本原文，在一次性的 Compose 项目 `bot-deploy-recovery-*` 里运行。项目里的 `bot`、`manager` 替身保持 `docker/compose.yaml` 的依赖关系，并忽略停止信号；用例覆盖首次部署、发布新版本、在已创建替换容器时中断（旧容器仍在，以及只剩替换容器）后重跑，以及失败时输出每个容器的状态。基础镜像取本机已有的 `BOT_TEST_BASE_IMAGE`（默认 `department-bot-project-computer:local`，任何带 `sh` 的本机镜像都可以），不拉取镜像；结束后只删除本项目的容器和网络，日志在 `.tmp/deploy-recovery/`。
 
 `npm run test:commands:docker` 使用 `BOT_TEST_BASE_IMAGE`（默认 `department-bot-project-computer:local`）叠加当前 runner，在独立项目电脑中模拟无工作区调用的真实 Docker RPC 超时，检查仅清理该 operation、runner 健康时并发任务继续、健康检查失败时停机。还验证后台服务在 runner 退出后持续输出超过管道容量、自动日志可读且 HTTP 服务仍可访问，以及普通命令的进程组回收。证据在 `.tmp/command-lifecycle-docker/`，结束后删除本次资源和临时镜像。
 
@@ -108,7 +121,7 @@ GitHub 登录、统一授权、迁移和隔离验收见 [身份与授权](identi
 
 飞书应用连接、双端绑定、群聊助手绑定、共享管理会话、通知目的地和发送队列见 [消息渠道与飞书应用机器人](message-channels.md)。
 
-新增飞书权限时，只在 `src/channels/feishu.ts` 的 `FEISHU_SCOPES` 加一项并写明用途，同时补上 [message-channels.md](message-channels.md) 的权限表，`test/channel-setup.test.mjs` 会核对两者一致。向导第 1 步和连接列表里的完整权限 JSON、连接列表的自动权限检查都从这份清单生成，页面里不另写权限名。这样已有连接的管理员打开连接列表就能看到缺少哪些权限，导入一次 JSON 即可补齐。
+新增飞书权限时，只在 `src/channels/feishu.ts` 的 `FEISHU_SCOPES` 加一项并写明用途，同时补上 [message-channels.md](message-channels.md) 的权限表，`test/st/src/channels/channel-setup.test.mjs` 会核对两者一致。向导第 1 步和连接列表里的完整权限 JSON、连接列表的自动权限检查都从这份清单生成，页面里不另写权限名。这样已有连接的管理员打开连接列表就能看到缺少哪些权限，导入一次 JSON 即可补齐。
 
 持久化调度、项目定时任务、事件订阅、受控触发契约、通知 outbox 和项目日报的迁移见 [项目定时任务与事件订阅](schedules.md)。
 

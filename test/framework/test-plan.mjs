@@ -14,13 +14,16 @@ function walkTests(dir) {
 }
 
 export function defaultTestFiles(root = 'test') {
-  const flat = existsSync(root)
-    ? readdirSync(root, { withFileTypes: true })
-        .filter(entry => entry.isFile() && entry.name.endsWith('.test.mjs') && !entry.name.endsWith('.live.test.mjs'))
-        .map(entry => posix.join(root, entry.name))
-    : [];
-  const nested = ['ut', 'st'].flatMap(tier => walkTests(posix.join(root, tier)));
-  return [...flat, ...nested].sort((a, b) => a.localeCompare(b, 'en'));
+  if (existsSync(root)) {
+    const stray = readdirSync(root, { withFileTypes: true })
+      .filter(entry => entry.isFile() && entry.name.endsWith('.test.mjs'))
+      .map(entry => posix.join(root, entry.name));
+    if (stray.length)
+      throw new Error(`place *.test.mjs files under ${root}/ut/<module>/ or ${root}/st/<module>/, not directly in ${root}/ (${stray.join(', ')})`);
+  }
+  return ['ut', 'st']
+    .flatMap(tier => walkTests(posix.join(root, tier)))
+    .sort((a, b) => a.localeCompare(b, 'en'));
 }
 
 export function discoverSets(files = defaultTestFiles()) {

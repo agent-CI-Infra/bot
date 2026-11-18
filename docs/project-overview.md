@@ -33,4 +33,4 @@
 
 ## 验证
 
-`test/project-overview.test.mjs`、`test/role-board.test.mjs` 与 `test/task-detail-flow.test.mjs` 验证分组统计、角色队列归属、并行角色日志隔离、Webhook 检查入库、实时检查同步、保留清理与只读权限边界。`e2e/project-overview.spec.mjs` 与 `e2e/task-views-952.spec.mjs` 通过真实控制面 API 与多断点视口验证角色视图、任务流转视图、`#/tasks/<id>` 两层独立折叠、键盘导航、故障恢复及权限撤销。浏览器检查不代替真实设备软键盘或屏幕阅读器验收。
+`test/st/src/projects/project-overview.test.mjs`、`test/st/src/roles/role-board.test.mjs` 与 `test/st/src/tasks/task-detail-flow.test.mjs` 验证分组统计、角色队列归属、并行角色日志隔离、Webhook 检查入库、实时检查同步、保留清理与只读权限边界。`test/e2e/projects/project-overview.spec.mjs` 与 `test/e2e/tasks/task-views-952.spec.mjs` 通过真实控制面 API 与多断点视口验证角色视图、任务流转视图、`#/tasks/<id>` 两层独立折叠、键盘导航、故障恢复及权限撤销。浏览器检查不代替真实设备软键盘或屏幕阅读器验收。

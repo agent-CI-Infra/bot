@@ -65,7 +65,7 @@ CLI 报告或退出码不会自动成为验收通过；writer 的 `collect` 由�
 
 ## 验证分层
 
-- `npm run check`、`npm test`：`test/claude-code.test.mjs` 与 `test/model-relay.test.mjs` 验证协议替身、容器内原生工具、stdio MCP 桥、回环模型中转、短期 GitHub 只读令牌脱敏、进程组取消回收、订阅模式预留拒绝，以及锁定真实 Claude Code 二进制对接合成供应商的完整链路。
+- `npm run check`、`npm test`：`test/st/src/harness/claude-code.test.mjs` 与 `test/st/src/harness/model-relay.test.mjs` 验证协议替身、容器内原生工具、stdio MCP 桥、回环模型中转、短期 GitHub 只读令牌脱敏、进程组取消回收、订阅模式预留拒绝，以及锁定真实 Claude Code 二进制对接合成供应商的完整链路。
 - `npm run test:docker`、`npm run test:isolation:docker`：在真实 Docker 项目容器与 `--network none` 隔离运行容器中端到端验证只读 `/opt/agent-tools` 挂载、`<task_dir>/repo` 原生读写执行、MCP 工具桥、容器内模型中转、Git/`gh` 短期凭据脱敏、跨容器会话恢复及取消进程组回收。
 
 官方接口依据：[headless](https://code.claude.com/docs/en/headless)、[CLI reference](https://code.claude.com/docs/en/cli-reference)。

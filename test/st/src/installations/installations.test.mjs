@@ -1,0 +1,559 @@
+import { acceptanceFixture } from '../../../fixtures/acceptance-fixture.mjs';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
+import { generateKeyPairSync } from 'node:crypto';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { harness, setup, account, repository, testPassword } from '../../../fixtures/helpers.mjs';
+import { InstallationSync, recordInstallationEvent } from '../../../../dist/app/installations.js';
+import { commitInstallationProjection } from '../../../../dist/installations/projection.js';
+import { IntegrationChecker } from '../../../../dist/projects/integrations.js';
+import { loadConsole } from '../../../fixtures/console-page.mjs';
+import { TaskEngine } from '../../../../dist/agent/engine.js';
+import { Workspace } from '../../../../dist/agent/workspace.js';
+import { Redactor } from '../../../../dist/agent/common.js';
+import { command } from '../../../../runner/command.mjs';
+import { appEvents } from '../../../../dist/github/client.js';
+
+const installation = { id: 77, account: { id: 10, login: 'fixture', type: 'Organization' } };
+const added = (...ids) => ({ action: 'added', installation, repository_selection: 'all', repositories_removed: [],
+  repositories_added: ids.map(id => ({ id, name: 'project-' + id, full_name: 'fixture/project-' + id, private: true })) });
+// These integration-check regressions start from a previously verified scope. Positive webhooks now wait for REST sync.
+function verifiedScope(h, a, ...ids) {
+  const value = { ...installation, app_id: 123, repository_selection: 'all', permissions: {}, events: [] };
+  h.store.transaction(() => {
+    recordInstallationEvent(h.store, a.id, 'installation_repositories', added(...ids));
+    commitInstallationProjection(h.store, h.store.get('SELECT * FROM accounts WHERE id=?', a.id), [value],
+      ids.map(id => ({ repository_id: String(id), installation_id: '77', full_name: 'fixture/project-' + id, owner_id: '10', owner_login: 'fixture', private: true })), new Date().toISOString());
+  });
+}
+
+test('installed repositories are listed but only work after an administrator starts them, and can be disabled', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin), events = { 'X-GitHub-Event': 'installation_repositories' };
+  const answer = response => [response.status, response.value.error];
+  assert.equal((await h.hook(a.path, a.secret, 'install-1', added(101, 202), events)).status, 200);
+  let list = (await admin('/api/installations')).value.repositories;
+  assert.deepEqual(list.map(r => [r.id, r.installed, r.registered, r.owner_login, r.installation_id]), [['101', true, false, 'fixture', '77'], ['202', true, false, 'fixture', '77']]);
+  // Not started means no project yet: a super administrator hears that, not an organization mismatch (it has no organization).
+  for (const path of ['/api/repositories/202', '/api/repositories/202/members']) assert.deepEqual(answer(await admin(path)), [404, 'repository_not_found']);
+  const issue = (n) => ({ repository: { id: 101 }, action: 'opened', issue: { number: n, title: 'Review this', body: 'Review this' } });
+  assert.equal((await h.hook(a.path, a.secret, 'before-start', issue(1))).value.tasks_created, 0);
+  const shared = (await admin('/api/models', 'POST', { repository_id: null, api_url: 'https://model.invalid/v1', api_key: testPassword(), model_name: 'shared' })).value.model;
+  const started = (await admin('/api/installations/101/activate', 'POST', { model_id: shared.id })).value.repository;
+  assert.deepEqual([started.registered, started.enabled, started.review_enabled, started.development_enabled, started.model_id], [true, true, true, false, shared.id]);
+  assert.ok(h.store.get('SELECT 1 FROM model_projects WHERE model_id=? AND repository_id=?', shared.id, '101'));
+  assert.equal((await h.hook(a.path, a.secret, 'after-start', issue(2))).value.tasks_created, 1);
+  assert.equal((await admin('/api/installations/101/disable', 'POST', {})).value.repository.enabled, false);
+  assert.equal((await h.hook(a.path, a.secret, 'after-disable', issue(3))).value.tasks_created, 0);
+  assert.equal((await admin('/api/installations/101/activate', 'POST', {})).value.repository.enabled, true);
+  assert.equal((await admin('/api/installations/999/activate', 'POST', {})).status, 404);
+  await h.hook(a.path, a.secret, 'remove-202', { ...added(), repositories_removed: [{ id: 202, full_name: 'fixture/project-202' }] }, events);
+  list = (await admin('/api/installations')).value.repositories;
+  assert.equal(list.find(r => r.id === '202').installed, false);
+  const member = h.client(), memberPassword = testPassword();
+  await admin('/api/users', 'POST', { username: 'member', password: memberPassword, repository_ids: ['101'] });
+  await member('/api/auth/login', 'POST', { username: 'member', password: memberPassword });
+  assert.equal((await member('/api/installations')).status, 403);
+  // Someone without the project is still refused before it is looked up, so the answer does not reveal whether it exists.
+  for (const id of ['202', '999']) assert.deepEqual(answer(await member('/api/repositories/' + id)), [403, 'repository_forbidden']);
+});
+
+test('repositories cannot be registered by hand; they come from installation sync and are started from the console', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin);
+  const manual = await admin('/api/repositories', 'POST', { id: '101', full_name: 'fixture/project-101', owner_id: '10', account_id: a.id });
+  assert.equal(manual.status, 404); assert.equal(h.store.get('SELECT count(*) AS n FROM repositories').n, 0);
+  assert.equal((await admin('/api/installations/101/activate', 'POST', {})).status, 404);
+});
+
+test('a full sync lists every installation repository and marks the rest as no longer installed', async t => {
+  const h = await harness(t), { admin } = await setup(h), keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const a = await account(admin, { type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
+  await h.hook(a.path, a.secret, 'old', added(303, 101), { 'X-GitHub-Event': 'installation_repositories' });
+  verifiedScope(h, a, 303, 101);
+  // A failed App check is still cached as unknown with the time of the check; the caller does not see an error.
+  const checker = new IntegrationChecker(h.store, 'http://127.0.0.1:9'), cached = id => h.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', id);
+  await checker.check('303'); await checker.check('101');
+  assert.deepEqual([cached('303').gate_detail, cached('101').dashboard_detail], ['github_unavailable', '看板已关闭']);
+  assert.deepEqual([cached('303').gate_state, cached('101').dashboard_state], ['unknown', 'none']);
+  const requests = [];
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://fake'); requests.push(req.method + ' ' + url.pathname); res.setHeader('Content-Type', 'application/json');
+    if (url.pathname === '/app/installations') return res.end(JSON.stringify(url.searchParams.get('page') === '1' ?
+      [{ ...installation, repository_selection: 'all', permissions: {}, events: [] }, { ...installation, id: 78, repository_selection: 'all', permissions: {}, events: [], suspended_at: '2026-01-01' }] : []));
+    if (url.pathname === '/app/installations/77/access_tokens') return res.end(JSON.stringify({ token: 'installation-token-fixture' }));
+    if (url.pathname === '/installation/repositories') {
+      assert.equal(req.headers.authorization, 'Bearer installation-token-fixture');
+      const page = Number(url.searchParams.get('page')), ids = page === 1 ? Array.from({ length: 100 }, (_, i) => 1000 + i) : page === 2 ? [101] : [];
+      return res.end(JSON.stringify({ total_count: 101, repositories: ids.map(id => ({ id, full_name: 'fixture/p' + id, private: false, owner: { id: 10, login: 'fixture' } })) }));
+    }
+    res.statusCode = 404; res.end('{}');
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(r => server.close(r)));
+  const sync = new InstallationSync(h.store, `http://127.0.0.1:${server.address().port}`);
+  assert.equal((await sync.sync(a.id)).repositories, 101);
+  assert.ok(!requests.includes('POST /app/installations/78/access_tokens'));
+  const rows = h.store.all('SELECT repository_id,installed FROM installed_repositories WHERE account_id=?', a.id);
+  assert.equal(rows.filter(r => r.installed).length, 101); assert.equal(rows.find(r => r.repository_id === '303').installed, 0);
+  assert.match(String((await admin('/api/installations')).value.syncs[0].synced_at), /^20/);
+  // The repository the listing no longer has loses its cached status in the same write; the one still listed keeps it.
+  assert.equal(cached('303'), undefined); assert.ok(cached('101'));
+  const expired = '2026-01-01T00:00:00.000Z';
+  h.store.run('UPDATE repo_integrations SET checked_at=? WHERE repository_id=?', expired, '101');
+  await checker.check('101');
+  assert.equal(cached('101').gate_detail, 'github_unavailable'); assert.ok(cached('101').checked_at > expired);
+  assert.equal(await checker.check('303'), null); assert.equal(cached('303'), undefined);
+});
+
+// A GitHub without any files: gates come back as not connected and the dashboard source list as unreadable.
+async function emptyGitHub(t) {
+  const requests = [], server = createServer((req, res) => {
+    requests.push(new URL(req.url, 'http://fake').pathname); res.statusCode = 404; res.setHeader('Content-Type', 'application/json'); res.end('{}');
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(r => server.close(r)));
+  return { url: `http://127.0.0.1:${server.address().port}`, requests };
+}
+
+// A GitHub that knows one App installation on fixture/project-101 and the dashboard repository. Every read must use the
+// minted installation token; the App JWT only resolves the installation and mints/revokes tokens.
+async function appGitHub(t, { installed = true, mint = 201 } = {}) {
+  const requests = [], revoked = [], keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const privateKey = keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token = 'installation-token-fixture';
+  const file = text => ({ type: 'file', content: Buffer.from(text).toString('base64'), sha: 'sha-' + text.length });
+  const server = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    const url = new URL(req.url, 'http://fake'), path = decodeURIComponent(url.pathname);
+    const auth = (req.headers.authorization || '').replace(/^Bearer /, '');
+    requests.push({ method: req.method, path, auth, body: raw ? JSON.parse(raw) : undefined });
+    const send = (status, value) => { res.statusCode = status; res.setHeader('Content-Type', 'application/json'); res.end(value === undefined ? '' : JSON.stringify(value)); };
+    const jwt = auth.split('.').length === 3;
+    if (path === '/repos/fixture/project-101/installation') return jwt && installed ? send(200, { id: 77, account: { id: 10, login: 'fixture' } }) : send(404, {});
+    if (path === '/app/installations/77/access_tokens' && req.method === 'POST') {
+      return !jwt ? send(401, {}) : mint !== 201 ? send(mint, {}) : send(201, { token, expires_at: '2099-01-01T00:00:00Z' });
+    }
+    if (path === '/installation/token' && req.method === 'DELETE') { if (auth === token) revoked.push(auth); return send(204); }
+    if (auth !== token) return send(auth ? 401 : 404, {});
+    const contents = {
+      '/repos/fixture/project-101/contents/.github/ci-gates.json': '{"version":1}',
+      '/repos/fixture/project-101/contents/.github/workflows/ci.yml': 'name: CI\n',
+      '/repos/fixture/dashboard/contents/config/gate-sources.json': JSON.stringify({ sources: [{ id: 'fixture/project-101', owner: 'fixture', name: 'project-101' }] }),
+      '/repos/fixture/dashboard/contents/public/data/gate/index.json': JSON.stringify({ sources: [{ id: 'fixture/project-101' }] }),
+    };
+    if (contents[path]) return send(200, file(contents[path]));
+    if (path === '/repos/fixture/project-101/actions/workflows') return send(200, { workflows: [{ id: 5, name: 'CI', path: '.github/workflows/ci.yml' }] });
+    if (path === '/repos/fixture/project-101/actions/workflows/5/runs') return send(200, { workflow_runs: [{ conclusion: 'success', created_at: new Date().toISOString() }] });
+    return send(404, {});
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(r => server.close(r)));
+  return { url: `http://127.0.0.1:${server.address().port}`, privateKey, token, requests, revoked };
+}
+
+test('a GitHub App project is checked with a repository-scoped read-only token that is revoked afterwards', async t => {
+  const github = await appGitHub(t), h = await harness(t), { admin } = await setup(h);
+  const a = await account(admin, { type: 'github_app', app_id: '123', private_key: github.privateKey, token: undefined });
+  await h.hook(a.path, a.secret, 'app-install', added(101), { 'X-GitHub-Event': 'installation_repositories' });
+  verifiedScope(h, a, 101);
+  const checker = new IntegrationChecker(h.store, github.url);
+  await checker.check('101');
+  const row = h.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', '101');
+  assert.deepEqual([row.gate_state, row.dashboard_state], ['live', 'none']);
+  assert.match(row.gate_detail, /最近一次 CI 通过/);
+  // Exactly one token, limited to this repository and read-only, then revoked through GitHub.
+  const minted = github.requests.filter(r => r.path === '/app/installations/77/access_tokens');
+  assert.deepEqual(minted.map(r => r.body), [{ repository_ids: [101], permissions: { contents: 'read', actions: 'read', metadata: 'read' } }]);
+  assert.equal(minted[0].auth.split('.').length, 3);
+  const installation = github.requests.find(r => r.path === '/repos/fixture/project-101/installation');
+  assert.equal(installation.auth, minted[0].auth);
+  for (const request of github.requests.filter(r => r.path.includes('/contents/') || r.path.includes('/actions/'))) assert.equal(request.auth, github.token, request.path);
+  assert.deepEqual(github.revoked, [github.token]);
+  assert.deepEqual(github.requests.filter(r => r.method !== 'GET').map(r => r.method + ' ' + r.path),
+    ['POST /app/installations/77/access_tokens', 'DELETE /installation/token']);
+});
+
+test('an App that is not installed, or refuses a token, leaves both states unknown without throwing', async t => {
+  const h = await harness(t), { admin } = await setup(h);
+  for (const [options, detail] of [[{ installed: false }, 'GitHub App 没有安装到该仓库'], [{ mint: 403 }, 'github_http_403']]) {
+    const github = await appGitHub(t, options), a = await account(admin, { type: 'github_app', app_id: '123', private_key: github.privateKey, token: undefined });
+    await h.hook(a.path, a.secret, options.installed === false ? 'app-missing' : 'app-refused', added(101), { 'X-GitHub-Event': 'installation_repositories' });
+    verifiedScope(h, a, 101);
+    const checker = new IntegrationChecker(h.store, github.url);
+    await checker.check('101');
+    const row = h.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', '101');
+    assert.deepEqual([row.gate_state, row.dashboard_state, row.gate_detail], ['unknown', 'none', detail]);
+    assert.deepEqual(github.revoked, []);
+    // No token was minted, so nothing is revoked either; the only non-read is the refused token request.
+    assert.ok(github.requests.every(r => r.method === 'GET' || r.path === '/app/installations/77/access_tokens'), detail);
+  }
+});
+
+test('a repository that leaves the installation drops its cached integration status and is not checked again', async t => {
+  const github = await emptyGitHub(t);
+  const h = await harness(t, undefined, store => ({ integrations: new IntegrationChecker(store, github.url) }));
+  const { admin } = await setup(h), a = await account(admin), events = { 'X-GitHub-Event': 'installation_repositories' };
+  const cached = id => h.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', id), ids = list => list.map(item => item.repository_id);
+  const checks = id => github.requests.filter(path => path === `/repos/fixture/project-${id}/contents/.github/ci-gates.json`).length;
+  await h.hook(a.path, a.secret, 'install', added(101, 202, 303), events);
+  assert.equal((await admin('/api/installations/202/activate', 'POST', {})).status, 201);
+  assert.deepEqual(ids((await admin('/api/integrations/check', 'POST', {})).value.integrations), ['101', '202', '303']);
+  assert.deepEqual([checks('101'), checks('202')], [1, 1]);
+  // 101 stays installed with a status older than the cache allows; the started project 202 leaves the installation.
+  const expired = '2026-01-01T00:00:00.000Z';
+  h.store.run('UPDATE repo_integrations SET checked_at=? WHERE repository_id=?', expired, '101');
+  await h.hook(a.path, a.secret, 'remove-202', { ...added(), action: 'removed', repositories_removed: [{ id: 202, full_name: 'fixture/project-202' }] }, events);
+  assert.equal(cached('202'), undefined);
+  assert.deepEqual((await admin('/api/integrations')).value.integrations.map(i => [i.repository_id, i.stale]), [['101', true], ['303', false]]);
+  const integrations = (await admin('/api/integrations/check', 'POST', {})).value.integrations;
+  assert.deepEqual(integrations.map(i => [i.repository_id, i.stale]), [['101', false], ['303', false]]);
+  assert.ok(integrations[0].checked_at > expired);
+  assert.deepEqual([checks('101'), checks('202')], [2, 1]); assert.equal(cached('202'), undefined);
+  assert.equal((await admin('/api/integrations/check', 'POST', { repository_id: '202' })).value.integrations.length, 2); assert.equal(cached('202'), undefined);
+  // The project keeps its registration and policy; only the cached status went.
+  assert.ok(h.store.get('SELECT 1 FROM policies WHERE repository_id=?', '202'));
+  const removed = (await admin('/api/installations')).value.repositories.find(r => r.id === '202');
+  assert.deepEqual([removed.registered, removed.installed], [true, false]);
+  // A row an older version left behind is not listed, and the next check drops it.
+  h.store.run('INSERT INTO repo_integrations(repository_id,checked_at) VALUES(?,?)', '202', expired);
+  assert.deepEqual(ids((await admin('/api/integrations')).value.integrations), ['101', '303']);
+  await admin('/api/integrations/check', 'POST', {}); assert.equal(cached('202'), undefined);
+  // Deleting or suspending the installation drops every repository it covered.
+  await h.hook(a.path, a.secret, 'suspend', { action: 'suspend', installation }, { 'X-GitHub-Event': 'installation' });
+  assert.deepEqual([cached('101'), cached('303')], [undefined, undefined]);
+  assert.deepEqual((await admin('/api/integrations')).value.integrations, []);
+});
+
+test('a background check of stale integration chips updates them in place and never reloads the project list', async () => {
+  const integration = (gate_state, stale, checked_at = '') => ({ repository_id: '101', gate_state, gate_detail: '', dashboard_state: 'none', dashboard_detail: '', checked_at, stale });
+  let check = () => [200, { integrations: [integration('live', true)] }];
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path === '/api/integrations') return [200, { integrations: [integration('configured', true, '2026-01-01T00:00:00.000Z')] }];
+    if (path === '/api/installations?offset=0&limit=51') return [200, { syncs: [], repositories: [{ id: '101', full_name: 'fixture/project-101', owner_id: '10', installed: true,
+      registered: true, enabled: true, review_enabled: true, development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0 }] }];
+    if (method === 'POST' && path === '/api/integrations/check') return check();
+    return [404, { error: 'not_found' }];
+  });
+  page.run("var startCalls = 0, projectRoute = () => null; start = async () => { startCalls++; }; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
+  const settle = () => new Promise(r => setTimeout(r, 50)), gate = line => line.querySelectorAll('[data-integration]').map(chip => chip.textContent);
+  const once = ['GET /api/integrations', 'GET /api/installations?offset=0&limit=51', 'POST /api/integrations/check'];
+  await page.run('render()'); const [line] = page.$('rows').querySelectorAll('.row');
+  const globalLine = page.run("var globalLine = element('article', '', 'global-project-row'); globalLine.dataset.repositoryId = '101'; globalLine.append(...installedIntegration({ gate_state: 'configured' }, { board_enabled: false })); document.getElementById('global-project-test').append(globalLine); globalLine;");
+  assert.deepEqual(gate(line), ['门禁已配置']);
+  assert.deepEqual(gate(globalLine), ['门禁已配置']);
+  const boardChip = line.querySelector('[data-board-status]'); assert.equal(boardChip.textContent, '看板已关闭');
+  await settle();
+  // The check ran once and only the chips changed, although the answer is still stale: the same row stays on the list.
+  assert.equal(page.run('startCalls'), 0); assert.deepEqual(page.requests, once);
+  assert.equal(page.$('rows').querySelector('.row'), line); assert.deepEqual(gate(line), ['门禁已生效']);
+  assert.deepEqual(gate(globalLine), ['门禁已生效']);
+  assert.equal(line.querySelector('[data-board-status]'), boardChip);
+  // A failed check leaves the chips as they are and is not retried either.
+  check = () => [502, { error: 'github_unavailable' }]; page.requests.length = 0;
+  await page.run('render()'); const [next] = page.$('rows').querySelectorAll('.row'); await settle();
+  assert.equal(page.run('startCalls'), 0); assert.deepEqual(page.requests, once);
+  assert.equal(page.$('rows').querySelector('.row'), next); assert.deepEqual(gate(next), ['门禁已配置']);
+  // #869: the failure is said in words above the rows, with the reading the badges still show and one manual read — and
+  // the failure itself scheduled nothing (the request set is still the same three).
+  const status = page.$('rows').querySelector('[data-testid=project-check-status]');
+  assert.ok(status, 'the failed gate check is stated on the list');
+  assert.equal(status.getAttribute('role'), 'status');
+  assert.equal(status.dataset.check, 'integrations');
+  assert.match(status.textContent, /门禁与看板接入检查读取失败（502 · github_unavailable）/);
+  assert.match(status.textContent, /上次读到的结果/);
+  assert.match(status.querySelector('span').textContent, /^上次成功读取：2026-01-01 \d{2}:00:00$/);
+  assert.equal(status.querySelector('button').textContent, '重新检查门禁');
+  // The single manual read replaces the line and the badge together.
+  check = () => [200, { integrations: [integration('live', false, '2026-01-02T00:00:00.000Z')] }];
+  status.querySelector('button').listeners.click[0](); await settle();
+  assert.equal(page.$('rows').querySelector('[data-testid=project-check-status]'), null);
+  assert.deepEqual(gate(next), ['门禁已生效']);
+  assert.equal(page.requests.at(-1), 'POST /api/integrations/check');
+  // Refresh still reloads the page; the manual integration-check control has been removed.
+  page.$('refresh').listeners.click[0]();
+  assert.equal(page.run('startCalls'), 1);
+  assert.equal(page.$('check').listeners.click, undefined);
+});
+
+test('the console reads the output of the command a running task is executing', async t => {
+  // The project computer answers the command only when it ends; until then the task is executing it.
+  const calls = [];let finish;
+  const manager = { call: async (method, path, body) => {
+    calls.push(path);
+    if (path.endsWith('/execute') && body?.request?.type === 'workspace_command') return new Promise(resolve => { finish = resolve; });
+    return { data: 'step 1\n', offset: 7, size: 7, state: 'running' };
+  } };
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101');
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,attempt,generation,workspace_id) VALUES('t1','101','review.pr','running','pr',4,2,1,'w1')");
+  // A row an interrupted attempt left pending is not running anymore and must not be shown as the current command.
+  const stale = 'b'.repeat(48);
+  h.store.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES(?,?,?,NULL,'pending')", stale, 't1', JSON.stringify({ operation_id: stale, generation: 1, request: { type: 'workspace_command', command: 'old command' } }));
+  const engine = new TaskEngine(h.store, manager, undefined, undefined, acceptanceFixture), url = path => new URL('http://local' + path);
+  const user = { id: 'x', role: 'super_admin', repositories: [] };
+  assert.deepEqual(await engine.api(user, 'GET', url('/api/tasks/t1/live'), {}), { running: false });
+  const task = h.store.get("SELECT * FROM tasks WHERE id='t1'");
+  const workspace = new Workspace(h.store, manager, task, new Redactor(), async () => {}, () => {});
+  const command = workspace.call('test', { type: 'workspace_command', command: 'npm test', timeout_ms: 600000, keep_background: false });
+  while (!finish) await new Promise(resolve => setImmediate(resolve));
+  const op = h.store.get("SELECT id FROM task_tools WHERE task_id='t1' AND id<>?", stale).id;
+  calls.length = 0;
+  assert.deepEqual(await engine.api(user, 'GET', url('/api/tasks/t1/live?offset=3'), {}),
+    { running: true, operation_id: op, command: 'npm test', timeout_ms: 600000, keep_background: false, output: 'step 1\n', offset: 7, state: 'running' });
+  assert.deepEqual(calls, [`/v1/projects/101/output/${op}?offset=3`]);
+  finish({ ok: true, result: { exit_code: 0, output: 'ok' } });await command;
+  assert.deepEqual(await engine.api(user, 'GET', url('/api/tasks/t1/live'), {}), { running: false });
+  h.store.run("UPDATE tasks SET status='succeeded' WHERE id='t1'");
+  assert.deepEqual(await engine.api(user, 'GET', url('/api/tasks/t1/live'), {}), { running: false });
+  await assert.rejects(engine.api({ id: 'y', role: 'project_admin', repositories: ['202'] }, 'GET', url('/api/tasks/t1/live'), {}), /task_not_found/);
+});
+
+test('runner commands stream output while running and can keep background processes for the task', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'command-')), out = join(dir, 'op.out'); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const running = command('echo first; sleep 1; echo second', dir, 10000, { outputFile: out });
+  await new Promise(r => setTimeout(r, 500)); assert.equal(readFileSync(out, 'utf8'), 'first\n');
+  assert.deepEqual(await running, { exit_code: 0, signal: null, output: 'first\nsecond\n', timed_out: false, truncated: false });
+  const kept = await command('sleep 30 & echo $! > pid', dir, 5000, { keepBackground: true });
+  const pid = Number(readFileSync(join(dir, 'pid'), 'utf8')); assert.equal(kept.exit_code, 0);
+  assert.doesNotThrow(() => process.kill(pid, 0)); process.kill(pid, 'SIGKILL');
+  await command('sleep 30 & echo $! > pid2', dir, 5000);
+  // Without keep_background the process group ends with the command (a zombie awaiting its reaper counts as ended).
+  const ended = Number(readFileSync(join(dir, 'pid2'), 'utf8')), state = () => { try { return readFileSync(`/proc/${ended}/stat`, 'utf8').split(') ')[1][0]; } catch { return 'gone'; } };
+  await new Promise(r => setTimeout(r, 100)); assert.ok(['gone', 'Z'].includes(state()));
+});
+
+test('runner commands without a timeout run until they end; an explicit timeout still stops them', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'command-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.deepEqual(await command('sleep 0.3; echo done', dir, null), { exit_code: 0, signal: null, output: 'done\n', timed_out: false, truncated: false });
+  const stopped = await command('sleep 5; echo late', dir, 200); assert.equal(stopped.timed_out, true); assert.equal(stopped.output, '');
+});
+
+test('automatic background logs mask credentials split across writes after the command returns',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'command-log-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const token='ghs_'+'x'.repeat(36),other='q'.repeat(40);
+  const script=`const fs=require('fs');process.stdout.write(process.env.GH_TOKEN.slice(0,12));setTimeout(()=>{process.stdout.write(process.env.GH_TOKEN.slice(12)+'\\n');process.stderr.write(process.env.GITHUB_TOKEN+'\\n');fs.writeFileSync('finished','yes')},800)`;
+  const result=await command(`${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,dir,5000,{keepBackground:true,secretEnv:{GH_TOKEN:token,GITHUB_TOKEN:other}});
+  t.after(()=>{try{process.kill(-result.pid,'SIGKILL');}catch{}});
+  assert.equal(result.running,true);assert.ok(!result.output.includes(token));
+  const waited=await command('while test ! -f finished; do sleep 0.05; done',dir,5000);assert.equal(waited.exit_code,0);
+  // Wait for the logger to drain the child streams, not just for the child's marker.
+  for(let n=0;n<100&&!readFileSync(result.log_path,'utf8').includes('[REDACTED]\n[REDACTED]');n++)await new Promise(r=>setTimeout(r,20));
+  assert.equal(readFileSync(result.log_path,'utf8'),'[REDACTED]\n[REDACTED]\n');
+});
+
+test('a task read token reaches runner commands only as GH_TOKEN and GITHUB_TOKEN and is masked in their output', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'token-')), out = join(dir, 'op.out'), token = 'ghs_' + 'x'.repeat(36); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const result = await command('echo "$GH_TOKEN|$GITHUB_TOKEN|$OTHER"', dir, 10000, { outputFile: out, secretEnv: { GH_TOKEN: token, GITHUB_TOKEN: token, OTHER: 'not-a-token-variable' } });
+  assert.equal(result.output, '[REDACTED]|[REDACTED]|\n'); assert.equal(readFileSync(out, 'utf8'), '[REDACTED]|[REDACTED]|\n');
+  assert.equal((await command('echo "$GH_TOKEN"', dir, 10000)).output, '\n');
+  // The answer to a token request goes to the request it was made for, and only that one.
+  const { agentOperation } = await import('../../../../runner/agent.mjs'), id = 'a'.repeat(48);
+  mkdirSync(join(dir, 'agent', 'token-requests'), { recursive: true }); writeFileSync(join(dir, 'agent', 'token-requests', `${id}.json`), JSON.stringify({ id }));
+  assert.deepEqual((await agentOperation({ type: 'workspace_agent_poll' }, dir)).token_requests, [{ id }]);
+  const base64 = Buffer.from(JSON.stringify({ token })).toString('base64');
+  await assert.rejects(agentOperation({ type: 'workspace_agent_token', request_id: 'b'.repeat(48), base64 }, dir), /agent_request_changed/);
+  assert.deepEqual(await agentOperation({ type: 'workspace_agent_token', request_id: id, base64 }, dir), { written: true });
+  assert.equal(JSON.parse(readFileSync(join(dir, 'agent', 'token-replies', `${id}.json`), 'utf8')).token, token);
+});
+
+test('the global permission check measures only the App definition and keeps its GitHub settings link', async t => {
+  const full = { contents: 'write', issues: 'write', pull_requests: 'write', statuses: 'write', actions: 'write', checks: 'write', metadata: 'read' };
+  const events = ['issues', 'pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment'];
+  const app = { slug: 'fixture-app', html_url: 'https://github.com/apps/fixture-app', owner: { login: 'fixture', type: 'Organization' },
+    permissions: { contents: 'write', issues: 'write', pull_requests: 'write', metadata: 'read', statuses: 'read' }, events: ['issues', 'pull_request'] };
+  const requests = [], server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://fake'); requests.push(url.pathname); res.setHeader('Content-Type', 'application/json');
+    if (url.pathname === '/app') return res.end(JSON.stringify(app));
+    res.statusCode = 503; res.end('{}');
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(r => server.close(r)));
+  const h = await harness(t, undefined, store => ({ installations: new InstallationSync(store, `http://127.0.0.1:${server.address().port}`) })), { admin } = await setup(h);
+  const keys = generateKeyPairSync('rsa', { modulusLength: 2048 }), bot = await account(admin);
+  const a = await account(admin, { type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
+  const check = async () => (await admin(`/api/accounts/${a.id}/permissions`)).value;
+  let report = await check();
+  assert.equal(report.ok, false); assert.deepEqual(report.required, full); assert.deepEqual(report.required_events, events);
+  assert.deepEqual(report.app.missing_events, ['issue_comment', 'pull_request_review', 'pull_request_review_comment']);
+  assert.deepEqual(report.app.missing.map(m => [m.permission, m.required, m.current]), [['statuses', 'write', 'read'], ['actions', 'write', null], ['checks', 'write', null]]);
+  assert.equal(report.app.settings_url, 'https://github.com/organizations/fixture/settings/apps/fixture-app/permissions');
+  assert.equal(report.installations, undefined);
+  app.permissions = full; report = await check(); assert.equal(report.ok, false);
+  // Even when installation listing is unavailable, a complete App definition passes; workflow_run is not required.
+  app.events = events; report = await check(); assert.equal(report.ok, true); assert.deepEqual(report.app.missing, []);
+  // What only CI check display, gate onboarding and Actions failure analysis need is reported beside the baseline without failing it.
+  assert.deepEqual(report.app.feature_gaps, [
+    { kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['ci_changes'] },
+    { kind: 'event', name: 'check_run', features: ['ci_checks'] },
+    { kind: 'event', name: 'status', features: ['ci_checks'] },
+    { kind: 'event', name: 'workflow_run', features: ['actions_failures'] },
+  ]);
+  app.permissions = { ...full, workflows: 'write' }; app.events = [...events, 'check_run', 'status', 'workflow_run']; report = await check();
+  assert.deepEqual([report.ok, report.app.feature_gaps], [true, []]);
+  app.owner = { login: 'someone', type: 'User' }; report = await check();
+  assert.equal(report.app.settings_url, 'https://github.com/settings/apps/fixture-app/permissions');
+  assert.deepEqual(requests, ['/app', '/app', '/app', '/app', '/app']);
+  assert.equal((await admin(`/api/accounts/${bot.id}/permissions`)).status, 409);
+});
+
+test('sync conclusions count installations and retain gaps, account failures and App definition warnings', () => {
+  const page = loadConsole(['static/app.js', 'static/views.js']);
+  page.run("accounts = [{ id: 'broken', name: 'Broken App' }]");
+  const conclusion = result => page.run('installationSyncNotice(' + JSON.stringify(result) + ')');
+  const message = result => conclusion(result).text;
+  const installation = { id: '7', account: 'fixture', missing: [], missing_events: [], gaps: [] };
+  const good = { results: [{ account_id: 'app', installations: [installation], app: { missing: [], missing_events: [] } }], repositories: [{ id: '101' }, { id: '202' }] };
+  assert.equal(message(good), '安装列表已同步，1 个安装的权限和事件订阅都正常。');
+  assert.equal(conclusion(good).tone, 'view-success');
+  // Installation gaps cover every feature, so an installation missing only workflow_run is not all normal.
+  const missing = structuredClone(good); missing.results[0].installations[0].gaps = [
+    { kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_failures'] },
+    { kind: 'event', name: 'workflow_run', features: ['actions_failures'] }];
+  missing.results[0].app.missing_events = ['issue_comment'];
+  assert.match(message(missing), /并非全部正常。fixture（安装 7）：Actions 需要「Read and write」，现在「Read-only」（影响发版本、Actions 失败分析）；未订阅事件 Workflow run（影响 Actions 失败分析）。点仓库行上的提示查看处理方法。/);
+  assert.equal(conclusion(missing).tone, '');
+  assert.match(message(missing), /App 定义仍有缺口，请到「全局设置 → 机器人账号」查看/);
+  missing.results.push({ account_id: 'broken', error: 'github_http_503' });
+  assert.match(message(missing), /部分账号同步失败：Broken App（github_http_503），因此还不能判断全部安装/);
+  assert.match(message(missing), /fixture（安装 7）/);
+  const unchecked = structuredClone(good); unchecked.results[0].app = { error: 'app_check_failed' };
+  assert.match(message(unchecked), /App 定义暂时无法核对/);
+  // Bot accounts have no installation snapshot; their repositories carry the gaps, and an App-only feature gap counts.
+  const bot = structuredClone(good); bot.repositories[0] = { id: '303', full_name: 'fixture/project-303', installation_id: null,
+    access_gaps: [{ kind: 'account', name: 'github_app', features: ['release', 'ci_changes', 'actions_failures'] }] };
+  assert.equal(message(bot), '安装列表已同步，权限和事件订阅并非全部正常。fixture/project-303：项目挂在机器人账号上，不是 GitHub App 安装（影响发版本、经确认的 CI 改动、Actions 失败分析）。点仓库行上的提示查看处理方法。');
+  assert.equal(conclusion(bot).tone, '');
+  const appFeatures = structuredClone(good); appFeatures.results[0].app.feature_gaps = [{ kind: 'event', name: 'workflow_run', features: ['actions_failures'] }];
+  assert.match(message(appFeatures), /App 定义仍有缺口/);
+});
+
+test('an installed but never started repository is hidden from the list, survives sync, and can be restored', async t => {
+  // A GitHub that lists both repositories; no hide/restore request below may reach it.
+  const requests = [], repo = id => ({ id, full_name: 'fixture/project-' + id, private: false, owner: { id: 10, login: 'fixture' } });
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://fake'); requests.push(`${req.method} ${url.pathname}`);
+    res.setHeader('Content-Type', 'application/json');
+    if (url.pathname === '/user/repos') return res.end(JSON.stringify(url.searchParams.get('page') === '1' ? [repo(101), repo(202)] : []));
+    res.statusCode = 404; res.end('{}');
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(r => server.close(r)));
+  let sync;
+  const h = await harness(t, undefined, store => ({ installations: sync = new InstallationSync(store, `http://127.0.0.1:${server.address().port}`) }));
+  const { admin, password } = await setup(h), a = await account(admin), events = { 'X-GitHub-Event': 'installation_repositories' };
+  const listed = async () => (await admin('/api/installations')).value.repositories.map(row => row.id).sort();
+  await h.hook(a.path, a.secret, 'install', added(101, 202), events);
+  assert.deepEqual(await listed(), ['101', '202']);
+  // Only super administrators hide and restore, and both mutations need the session's CSRF token.
+  const userPassword = testPassword(), member = h.client();
+  assert.equal((await admin('/api/users', 'POST', { username: 'member', password: userPassword, repository_ids: ['101'] })).status, 201);
+  await member('/api/auth/login', 'POST', { username: 'member', password: userPassword });
+  assert.deepEqual([(await member('/api/installations/202', 'DELETE', {})).status, (await member('/api/installations/202/restore', 'POST', {})).status,
+    (await member('/api/installations/hidden')).status], [403, 403, 403]);
+  const login = await fetch(h.admin + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'administrator', password }) });
+  const cookie = String(login.headers.get('set-cookie')).split(';')[0];
+  const refused = await fetch(h.admin + '/api/installations/202', { method: 'DELETE', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: '{}' });
+  assert.deepEqual([refused.status, (await refused.json()).error], [403, 'csrf_required']);
+  const refusedRestore = await fetch(h.admin + '/api/installations/202/restore', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: '{}' });
+  assert.deepEqual([refusedRestore.status, (await refusedRestore.json()).error], [403, 'csrf_required']);
+
+  const hidden = await admin('/api/installations/202', 'DELETE', {});
+  assert.deepEqual([hidden.status, hidden.value], [200, { hidden: true }]);
+  assert.deepEqual(await listed(), ['101']);
+  const hiddenRows = (await admin('/api/installations/hidden')).value.repositories;
+  assert.deepEqual(hiddenRows.map(row => [row.id, row.hidden, row.registered]), [['202', true, false]]);
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE repository_id='202' AND action='repository.hidden'"));
+  assert.equal(h.store.get("SELECT enabled FROM policies WHERE repository_id='202'"), undefined);
+  // A full sync sees both repositories again, but the hidden flag survives and the list stays without it.
+  assert.equal((await sync.sync(a.id)).repositories, 2);
+  assert.equal(h.store.get('SELECT hidden FROM installed_repositories WHERE repository_id=?', '202').hidden, 1);
+  assert.deepEqual(await listed(), ['101']);
+  // Let the hook's scheduled sync finish, then require restore to be silent as well.
+  await sync.sync(a.id).catch(() => {}); requests.length = 0;
+  // Restore is the only way back.
+  const restored = await admin('/api/installations/202/restore', 'POST', {});
+  assert.deepEqual([restored.status, restored.value], [201, { hidden: false }]);
+  assert.deepEqual(await listed(), ['101', '202']);
+  assert.deepEqual((await admin('/api/installations/hidden')).value.repositories, []);
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE repository_id='202' AND action='repository.restored'"));
+  // Unknown repositories are 404 on both endpoints, and nothing above asked GitHub anything.
+  assert.deepEqual([(await admin('/api/installations/999', 'DELETE', {})).status, (await admin('/api/installations/999/restore', 'POST', {})).status], [404, 404]);
+  assert.equal((await admin('/api/installations/999', 'DELETE', {})).value.error, 'repository_not_installed');
+  assert.deepEqual(requests, []);
+});
+
+test('global project actions offer deletion and an installed but never started project hides through its endpoint', async () => {
+  const row = (id, extra) => ({ id, full_name: 'fixture/project-' + id, owner_id: '10', installed: true, registered: false, enabled: false,
+    review_enabled: false, development_enabled: false, model_id: null, running_tasks: 0, queued_tasks: 0, permission_missing: [], permissions_stale: false, ...extra });
+  const listing = [row('101'), row('202', { installed: false, registered: true }), row('303', { registered: true, enabled: true, review_enabled: true, model_id: 'm' })];
+  const hiddenRow = { ...row('404'), hidden: true, installed: false };
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path === '/api/integrations') return [200, { integrations: [] }];
+    if (path === '/api/installations?offset=0&limit=51') return [200, { syncs: [], repositories: listing }];
+    if (path === '/api/installations/hidden?offset=0&limit=51') return [200, { repositories: [hiddenRow] }];
+    if (method === 'DELETE' && path === '/api/installations/101') return [200, { hidden: true }];
+    if (method === 'POST' && path === '/api/installations/404/restore') return [200, { hidden: false }];
+    return [404, { error: 'not_found' }];
+  });
+  page.run("var startCalls = 0; start = async () => { startCalls++; }; var projectRoute = () => null; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
+  await page.run('render()');
+  assert.ok(page.$('rows').querySelectorAll('.row').every(line => !line.querySelectorAll('button').some(button => button.textContent === '删除')));
+  page.run(`tab = 'settings'; $('rows').replaceChildren(...${JSON.stringify(listing)}.map(project => { const line = element('div', '', 'row'); line.append(installedActions(project, () => start())); return line; }));`);
+  const rows = page.$('rows').querySelectorAll('.row'), actions = line => line.querySelectorAll('button').map(button => button.textContent);
+  assert.deepEqual(rows.map(actions).map(names => names.includes('删除')), [true, true, true]);
+  const view = page.run('confirmView'), settle = () => new Promise(r => setTimeout(r, 20));
+  const texts = selector => view.querySelectorAll(selector).map(node => node.textContent);
+  rows[0].querySelectorAll('button').find(button => button.textContent === '删除').listeners.click[0]();
+  assert.equal(view.open, true);
+  assert.ok(texts('p').some(line => line.includes('只从列表里隐藏这一行')));
+  view.querySelector('form').listeners.submit[0]({ preventDefault() {} });
+  await settle();
+  assert.equal(view.open, false);
+  assert.ok(page.requests.includes('DELETE /api/installations/101'));
+  assert.equal(page.run('startCalls'), 1);
+  // The global hidden-project page uses the same authenticated restore handler.
+  page.requests.length = 0; await page.run(`restoreInstalled(${JSON.stringify(hiddenRow)}, () => start())`);
+  assert.deepEqual(page.requests, ['POST /api/installations/404/restore']);
+  assert.equal(page.run('startCalls'), 2);
+});
+
+test('a damaged events grant is unknown for its row instead of failing the whole list', async t => {
+  const h = await harness(t), { admin } = await setup(h), keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const a = await account(admin, { type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
+  verifiedScope(h, a, 101, 202);
+  // A grant and a subscription the list can still compare; only the second row's events column is damaged below.
+  const grant = JSON.stringify({ contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write' });
+  h.store.run('UPDATE installed_repositories SET permissions=?,permissions_at=?,events=? WHERE account_id=? AND repository_id=?',
+    grant, new Date().toISOString(), JSON.stringify(appEvents), a.id, '101');
+  h.store.run('UPDATE installed_repositories SET permissions=?,permissions_at=? WHERE account_id=? AND repository_id=?', grant, new Date().toISOString(), a.id, '202');
+  h.store.run("UPDATE installed_repositories SET events=? WHERE repository_id='202'", '{"issues":');
+  const answer = await admin('/api/installations');
+  assert.equal(answer.status, 200);
+  const rows = answer.value.repositories, damaged = rows.find(r => r.id === '202'), readable = rows.find(r => r.id === '101');
+  // The damaged row reports its subscription as unknown and its grant as stale; nothing was thrown at the list.
+  assert.deepEqual([damaged.events_missing, damaged.events_unreadable, damaged.permissions_stale], [null, true, true]);
+  assert.deepEqual([Array.isArray(damaged.permission_missing), damaged.access_gaps], [true, null]);
+  // The readable row keeps its own answer, and the grant of the damaged one is still read.
+  assert.deepEqual([readable.events_missing, readable.events_unreadable, readable.permissions_stale], [[], false, false]);
+  assert.deepEqual([Array.isArray(readable.permission_missing), Array.isArray(readable.access_gaps)], [true, true]);
+  // The unreadable column is never echoed back into the answer.
+  assert.ok(!JSON.stringify(answer.value).includes('"issues":'));
+});
+
+test('an events column that parses but is not an array is unknown, not "nothing subscribed"', async t => {
+  const h = await harness(t), { admin } = await setup(h), keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const a = await account(admin, { type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
+  verifiedScope(h, a, 101, 202);
+  const grant = JSON.stringify({ contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write' });
+  h.store.run('UPDATE installed_repositories SET permissions=?,permissions_at=? WHERE account_id=? AND repository_id=?', grant, new Date().toISOString(), a.id, '101');
+  h.store.run('UPDATE installed_repositories SET permissions=?,permissions_at=? WHERE account_id=? AND repository_id=?', grant, new Date().toISOString(), a.id, '202');
+  // Both values are valid JSON, so the parse succeeds; neither is the array of subscribed events it must be.
+  h.store.run("UPDATE installed_repositories SET events='{}' WHERE repository_id='101'");
+  h.store.run('UPDATE installed_repositories SET events=? WHERE repository_id=\'202\'', JSON.stringify('workflow_run'));
+  const answer = await admin('/api/installations');
+  assert.equal(answer.status, 200);
+  for (const id of ['101', '202']) {
+    const row = answer.value.repositories.find(r => r.id === id);
+    // The same row must not be "all events missing" in one field and "unknown" in the other.
+    assert.deepEqual([id, row.events_missing, row.events_unreadable, row.access_gaps], [id, null, true, null]);
+    assert.equal(row.permissions_stale, true);
+  }
+});

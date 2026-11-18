@@ -1,0 +1,210 @@
+import { ResultSession, resultScope, projectResultOwner } from '../../../../dist/agent/tool-results.js';
+import { pinLegacyTaskConfiguration } from '../../../fixtures/helpers.mjs';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { releaseFixture } from '../../../fixtures/release-fixtures.mjs';
+import { RepositoryExplorer, repositoryTools } from '../../../../dist/agent/exploration.js';
+import { ReadTokens } from '../../../../dist/agent/read-token.js';
+import { Redactor } from '../../../../dist/agent/common.js';
+import { agentLoop } from '../../../../dist/agent/loop.js';
+const legacyAgentLoop = (store, task, ...args) => { pinLegacyTaskConfiguration(store, task.id); return agentLoop(store, task, ...args); };
+import { Workspace } from '../../../../dist/agent/workspace.js';
+import { workspaceProfile } from '../../../../dist/agent/profiles.js';
+import { agentOperation } from '../../../../runner/agent.mjs';
+
+async function explorerFixture(t) {
+  const f = await releaseFixture(t), redactor = new Redactor(), repo = f.h.store.get("SELECT * FROM repositories WHERE id='101'");
+  const tokens = new ReadTokens(f.h.store, repo, redactor, async () => {}, f.apiUrl);
+  t.after(() => tokens.revoke());
+  const explorer = new RepositoryExplorer(tokens, redactor, async () => {});
+  f.state.custom = async ({ path, url, send }) => {
+    if (path.endsWith('/contents/src/build.ts')) { send({ encoding: 'base64', content: Buffer.from('export const packageName = "compiler";').toString('base64') }); return true; }
+    if (path.endsWith('/issues/42/comments')) { send([{ body: 'Related discussion: dependency renamed.' }]); return true; }
+    if (path.endsWith('/pulls/9/files')) { send([{ filename: 'src/build.ts', patch: 'dependency renamed' }]); return true; }
+    if (path === '/search/issues') { assert.match(url.searchParams.get('q'), /^repo:fixture\/project-101 /); send({ total_count: 1, items: [{ number: 42, repository_url: f.apiUrl + '/repos/fixture/project-101', title: 'Earlier failure' }] }); return true; }
+    return false;
+  };
+  return { ...f, explorer, tokens, redactor };
+}
+
+test('the shared explorer reads code, unrelated Issue/PR discussions, search pages and related Actions logs', async t => {
+  const f = await explorerFixture(t), before = f.state.requests.length;
+  assert.equal((await f.explorer.execute('github_read', { path: '/contents/src/build.ts' })).error, 'github_read_token_required');
+  const grant = await f.explorer.execute('github_read_token', {});
+  assert.equal(grant.repository, 'fixture/project-101'); assert.ok(!Object.hasOwn(grant, 'token'));
+  assert.ok(Object.values(grant.permissions).every(value => value === 'read'));
+  const file = await f.explorer.execute('github_read', { path: '/contents/src/build.ts?ref=' + 'a'.repeat(40) });
+  assert.equal(file.encoding, 'utf-8'); assert.match(file.content, /compiler/);
+  assert.match(JSON.stringify(await f.explorer.execute('github_read', { path: '/issues/42/comments?page=2' })), /Related discussion/);
+  assert.match(JSON.stringify(await f.explorer.execute('github_read', { path: '/pulls/9/files' })), /src\/build.ts/);
+  assert.equal((await f.explorer.execute('github_search', { query: 'is:issue dependency', page: 2 })).items[0].number, 42);
+  f.state.jobs = [{ id: 2, run_id: 801, run_attempt: 3, name: 'Earlier build', html_url: 'https://github.com/fixture/project-101/actions/runs/801/job/2' }];
+  f.state.logs[2] = 'Build setup\nError: old dependency\n';
+  const log = await f.explorer.execute('read_job_log', { job_id: 2, start_line: 2 });
+  assert.equal(log.run_id, 801); assert.equal(log.attempt, 3); assert.match(log.content, /old dependency/);
+  assert.ok(f.state.requests.slice(before).filter(r => !r.path.endsWith('/access_tokens')).every(r => r.method === 'GET'));
+  assert.equal(f.state.tokens.at(-1).repository_ids[0], 101);
+});
+
+test('read tools reject URL/path escapes, cross-repository search and writes before sending requests', async t => {
+  const f = await explorerFixture(t); await f.explorer.execute('github_read_token', {});
+  const before = f.state.requests.length;
+  for (const path of ['https://evil.invalid/contents/a', '//evil.invalid/a', '/repos/other/private/issues', '/contents/../../repos/other/private', '/contents/%2e%2e/issues', '/contents/%252e%252e/issues', '/issues/1%2f../../other', '/contents/a\\b', '/actions/jobs/1/logs', '/installation/token'])
+    assert.equal((await f.explorer.execute('github_read', { path })).error, 'invalid_arguments', path);
+  assert.equal((await f.explorer.execute('github_read', { path: '/issues', method: 'POST' })).error, 'invalid_arguments');
+  assert.equal((await f.explorer.execute('github_search', { query: 'repo:other/private secret' })).error, 'invalid_arguments');
+  assert.equal((await f.explorer.execute('github_search', { query: 'org:other is:pr' })).error, 'invalid_arguments');
+  assert.equal((await f.explorer.execute('rerun', {})).error, 'tool_not_allowed');
+  assert.equal(f.state.requests.length, before);
+  f.state.custom = async ({ path, send }) => { if (path !== '/search/issues') return false; send({ items: [{ repository_url: f.apiUrl + '/repos/other/private', body: 'foreign' }] }); return true; };
+  assert.deepEqual(await f.explorer.execute('github_search', { query: 'dependency' }), { error: 'github_search_repository_mismatch' });
+});
+
+test('decoded repository text is redacted, permission errors are explicit and a revoked guard stops exploration', async t => {
+  const f = await explorerFixture(t); f.redactor.add('exploration-secret'); await f.explorer.execute('github_read_token', {});
+  f.state.custom = async ({ path, send }) => { if (!path.includes('/contents/')) return false; send({ encoding: 'base64', content: Buffer.from('code exploration-secret').toString('base64') }); return true; };
+  assert.equal((await f.explorer.execute('github_read', { path: '/contents/a' })).content, 'code [REDACTED]');
+  f.state.deny = '/repos/fixture/project-101/issues/42';
+  assert.equal((await f.explorer.execute('github_read', { path: '/issues/42' })).error, 'github_permission_403');
+  const denied = new RepositoryExplorer(f.tokens, f.redactor, async () => { throw new Error('disabled'); });
+  await assert.rejects(denied.execute('github_read_token', {}), /disabled/);
+});
+
+test('GitHub results beyond 2 MiB are saved and paged without another GitHub request', async t => {
+  const f = await explorerFixture(t), limit = 2 * 1024 * 1024;
+  const session=new ResultSession(f.h.store,resultScope(f.h.store,{id:'turn',repository_id:'101'}),()=>projectResultOwner('101'),()=>{});
+  await f.explorer.execute('github_read_token', {});
+  let data;
+  f.state.custom = async ({ path, send }) => {
+    if (!path.includes('/git/trees/') && path !== '/search/issues') return false;
+    send(data); return true;
+  };
+  for (const size of [600000, limit, limit + 1]) {
+    const length = size - Buffer.byteLength(JSON.stringify({ content: '' }));
+    data = { content: '仓'.repeat(Math.floor(length / 3)) + 'x'.repeat(length % 3) };
+    assert.equal(Buffer.byteLength(JSON.stringify(data)), size);
+    const result = await session.run(()=>f.explorer.execute('github_read', { path: '/git/trees/' + 'a'.repeat(40) + '?recursive=1' }));
+    if (size <= limit) assert.deepEqual(result, data);
+    else { assert.ok(result.file);const before=f.state.requests.length;let position=0,restored='';for(;;){const page=await session.read({file:result.file,position,length:65536});restored+=page.content;if(page.eof)break;position=page.next_position;}assert.deepEqual(JSON.parse(restored),data);assert.equal(f.state.requests.length,before); }
+    if (size === limit) {
+      const root = join(f.h.directory, 'exact-mailbox'), dir = join(root, 'agent'), id = 'a'.repeat(48), reply = Buffer.from(JSON.stringify(result));
+      mkdirSync(join(dir, 'tool-requests'), { recursive: true }); writeFileSync(join(dir, 'tool-requests', id + '.json'), JSON.stringify({ id, kind: 'repository', name: 'github_read' }));
+      for (let offset = 0; offset < reply.length; offset += 30000) await agentOperation({ type: 'workspace_agent_tool', request_id: id, base64: reply.subarray(offset, offset + 30000).toString('base64'), offset, final: offset + 30000 >= reply.length }, root);
+      assert.deepEqual(JSON.parse(readFileSync(join(dir, 'tool-replies', id + '.json'))), data);
+    }
+  }
+  data = { items: [{ repository_url: f.apiUrl + '/repos/fixture/project-101', body: 'x'.repeat(limit) }] };
+  assert.ok((await session.run(()=>f.explorer.execute('github_search', { query: 'dependency' }))).file);
+});
+
+test('review and development Pi adapters execute the same repository tools through the control plane', async t => {
+  const f = await explorerFixture(t);
+  const model = (await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'exploration-model-key', model_name: 'fixture' })).value.model;
+  await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
+  for (const kind of ['review.issue', 'review.pr', 'development.issue', 'development.pr']) {
+    const profile = workspaceProfile(kind, {});
+    assert.ok(repositoryTools.every(tool => profile.tools.includes(tool))); assert.match(profile.system, /not the boundary of evidence/);
+  }
+  const id = 'exploration'; f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES(?,'101','review.issue','running','Explore',1)", id);
+  const task = f.h.store.get('SELECT * FROM tasks WHERE id=?', id), replies = [], requests = [
+    { name: 'github_read', arguments: { path: '/contents/src/build.ts' } },
+    { name: 'github_read', arguments: { path: '/issues/42/comments' } },
+    { name: 'github_read', arguments: { path: '/pulls/9/files' } }
+  ];
+  let authorized = false, index = 0, reply = [];
+  const workspace = { log() {}, async call(_key, input) {
+    if (input.type !== 'workspace_agent_poll') return { written: true, started: true };
+    if (!authorized) return { state: 'running', token_requests: [{ id: 'a'.repeat(48) }] };
+    if (index < requests.length) return { state: 'running', tool_requests: [{ id: String(index).padStart(48, 'b'), kind: 'repository', ...requests[index] }] };
+    return { state: 'completed', result: { summary: 'Read related evidence.', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' } };
+  }, async deliver(input) {
+    if (input.type === 'workspace_agent_token') authorized = true;
+    if (input.type === 'workspace_agent_tool') { reply.push(Buffer.from(input.base64, 'base64')); if (input.final) { replies.push(JSON.parse(Buffer.concat(reply))); reply = []; index++; } }
+    return { written: true };
+  } };
+  const result = await legacyAgentLoop(f.h.store, task, workspace, f.redactor, async () => {}, {}, f.tokens);
+  assert.match(result.summary, /related/); assert.match(replies[0].content, /compiler/); assert.match(replies[1][0].body, /Related/); assert.equal(replies[2][0].filename, 'src/build.ts');
+  assert.ok(!JSON.stringify(replies).includes('fixture-installation-'));
+  assert.ok(f.state.requests.some(r => r.method === 'DELETE' && r.path === '/installation/token'));
+  // The runner can survive a control-plane restart and go straight to a read with its cached grant.
+  const issued = f.state.tokens.length; index = 0; replies.length = 0;
+  await legacyAgentLoop(f.h.store, task, workspace, f.redactor, async () => {}, {}, f.tokens);
+  assert.match(replies[0].content, /compiler/); assert.equal(f.state.tokens.length, issued + 1);
+});
+
+test('runner tool mailbox binds replies to the matching request id and preserves chunk order', async t => {
+  const f = await releaseFixture(t), root = join(f.h.directory, 'exploration'), dir = join(root, 'agent'); mkdirSync(join(dir, 'tool-requests'), { recursive: true });
+  const id = 'a'.repeat(48); writeFileSync(join(dir, 'tool-requests', id + '.json'), JSON.stringify({ id, kind: 'repository', name: 'github_read', arguments: { path: '/issues/42' } }));
+  assert.equal((await agentOperation({ type: 'workspace_agent_poll' }, root)).tool_requests[0].name, 'github_read');
+  await assert.rejects(agentOperation({ type: 'workspace_agent_tool', request_id: 'b'.repeat(48), base64: '', offset: 0 }, root), /agent_request_changed/);
+  const reply = Buffer.from(JSON.stringify({ content: '仓库内容'.repeat(100) }));
+  for (let offset = 0; offset < reply.length; offset += 25) await agentOperation({ type: 'workspace_agent_tool', request_id: id, base64: reply.subarray(offset, offset + 25).toString('base64'), offset, final: offset + 25 >= reply.length }, root);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'tool-replies', id + '.json'))), JSON.parse(reply));
+});
+
+test('real Workspace delivery ignores only abandoned repository replies, including runner-wrapped errors', async t => {
+  const f = await explorerFixture(t);
+  const model = (await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'late-reply-model', model_name: 'fixture' })).value.model;
+  await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
+  f.state.custom = async ({ path, send }) => {
+    if (!path.endsWith('/issues/42/comments')) return false;
+    send([{ body: 'Related evidence. '.repeat(4000) }]); return true;
+  };
+  const cases = [
+    { error: 'agent_request_changed', continues: true },
+    { error: 'runner_operation_failed', detail: 'workspace_agent_tool: agent_request_changed', continues: true },
+    { error: 'agent_reply_offset' },
+    { error: 'runner_operation_failed', detail: 'workspace_agent_tool: agent_reply_offset' },
+    { error: 'runner_operation_failed' },
+    { error: 'runner_operation_failed', detail: 'workspace_agent_progress: agent_request_changed' },
+    { error: 'runner_operation_failed', detail: 'workspace_agent_tool: agent_request_changed unexpectedly' }
+  ];
+  for (const [index, { continues, ...failure }] of cases.entries()) await t.test(JSON.stringify(failure), async () => {
+    const id = 'late-' + index;
+    f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES(?,'101','review.issue','running','Read')", id);
+    const task = f.h.store.get('SELECT * FROM tasks WHERE id=?', id), deliveries = [];
+    const manager = { async call(_method, _path, { request }) {
+      if (request.type === 'workspace_agent_tool') {
+        deliveries.push(request); return { ok: false, ...failure };
+      }
+      if (request.type !== 'workspace_agent_poll') return { ok: true, result: {} };
+      return { ok: true, result: deliveries.length
+        ? { state: 'completed', result: { summary: 'Continued after the read.', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' } }
+        : { state: 'running', tool_requests: [{ id: 'a'.repeat(48), kind: 'repository', name: 'github_read', arguments: { path: '/issues/42/comments' } }] } };
+    } };
+    const workspace = new Workspace(f.h.store, manager, task, f.redactor, async () => {}, () => {});
+    const running = legacyAgentLoop(f.h.store, task, workspace, f.redactor, async () => {}, {}, f.tokens);
+    if (continues) assert.match((await running).summary, /Continued/);
+    else await assert.rejects(running, { code: 'execution_interrupted' });
+    assert.equal(deliveries.length, 1, 'stop sending chunks after the first rejected delivery');
+    assert.equal(deliveries[0].offset, 0); assert.equal(deliveries[0].final, false);
+    assert.ok(f.state.requests.some(r => r.method === 'DELETE' && r.path === '/installation/token'));
+  });
+});
+
+
+test('resource-scoped reads separate Issue/PR routes, search, logs and nested commit CI resources',async t=>{
+  const f=await explorerFixture(t),repo=f.h.store.get("SELECT * FROM repositories WHERE id='101'");
+  let scopes=['issues'];
+  const tokens=new ReadTokens(f.h.store,repo,f.redactor,async()=>{},f.apiUrl,['issues','pull_requests','actions','contents','checks','statuses'],()=>scopes);
+  t.after(()=>tokens.revoke());const explorer=new RepositoryExplorer(tokens,f.redactor,async()=>{});
+  f.state.custom=async({path,url,send})=>{
+    if(path==='/repos/fixture/project-101/issues'){send([{number:1},{number:2,pull_request:{url:'pr'}}]);return true;}
+    if(path.endsWith('/issues/2')){send({number:2,pull_request:{url:'pr'}});return true;}
+    if(path==='/search/issues'){assert.match(url.searchParams.get('q'),/is:issue/);send({items:[{number:1,repository_url:f.apiUrl+'/repos/fixture/project-101'}]});return true;}
+    return false;
+  };
+  await explorer.execute('github_read_token',{});
+  assert.deepEqual(f.state.tokens.at(-1).permissions,{issues:'read',metadata:'read'});
+  assert.deepEqual(await explorer.execute('github_read',{path:'/issues'}),[{number:1}]);
+  assert.equal((await explorer.execute('github_search',{query:'regression'})).items[0].number,1);
+  const before=f.state.requests.length;
+  for(const path of ['/pulls/9/files','/commits/abc/pulls','/commits/abc/check-runs','/commits/abc/status','/contents/src/build.ts','/actions/runs','/issues/comments'])
+    assert.equal((await explorer.execute('github_read',{path})).error,'github_resource_forbidden',path);
+  assert.equal((await explorer.execute('read_job_log',{job_id:1})).error,'github_resource_forbidden');
+  assert.equal(f.state.requests.length,before);
+  assert.equal((await explorer.execute('github_read',{path:'/issues/2/comments'})).error,'github_resource_forbidden');
+  scopes=[];assert.equal((await explorer.execute('github_search',{query:'old token'})).error,'github_resource_forbidden');
+});

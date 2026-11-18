@@ -49,7 +49,7 @@ console.log(`# ${sets.size} test sets, up to ${jobs} at a time, in ${run}`);
 // there. BOT_RUNNER_DIR is the directory to check (default `runner`); the test that pins this line points it elsewhere.
 const runnerDir = process.env.BOT_RUNNER_DIR || 'runner';
 if (!existsSync(join(runnerDir, 'node_modules', '@earendil-works', 'pi-coding-agent', 'package.json')))
-  console.log(`# runner dependencies missing under ${runnerDir}/node_modules: role-conversation (test/role-conversation.test.mjs) and integration-engine (test/integration-engine.test.mjs) fail for that reason\n`
+  console.log(`# runner dependencies missing under ${runnerDir}/node_modules: role-conversation (test/st/src/roles/role-conversation.test.mjs) and integration-engine (test/st/src/tasks/integration-engine.test.mjs) fail for that reason\n`
     + '#   install them with: npm ci --prefix runner --omit=dev --ignore-scripts   (docs/development.md:33)');
 
 async function runSet(set) {

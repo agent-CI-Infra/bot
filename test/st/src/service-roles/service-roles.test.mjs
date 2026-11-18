@@ -1,0 +1,224 @@
+import test from 'node:test';
+import { fullPermissions, permissionItems } from '../../../../dist/roles/permissions.js';
+import { repositoryAssistantPermissions } from '../../../../dist/service-roles/roles.js';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { managementFixture, settled } from '../../../fixtures/management-fixture.mjs';
+import { assistantManager } from '../../../fixtures/assistant-computer-fixture.mjs';
+import { until } from '../../../fixtures/channel-fixture.mjs';
+import { TaskEngine } from '../../../../dist/agent/engine.js';
+import { Store } from '../../../../dist/storage/database.js';
+
+const reply=(res,content)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content}}],usage:{prompt_tokens:12,completion_tokens:6}}));};
+const roles=async client=>(await client('/api/service-roles')).value.service_roles;
+const role=async(client,id)=>(await roles(client)).find(r=>r.id===id);
+async function web(f,content,client=f.admin){
+  const conversation=(await client('/api/management/conversations','POST',{scope:'platform'})).value.conversation.id;
+  const message=(await client('/api/management/conversations/'+conversation+'/messages','POST',{source_message:'service-role-'+Math.random(),content})).value;
+  const history=await settled(client,conversation,message.id);
+  return {conversation,message:history.messages.find(m=>m.id===message.id),events:history.events.filter(e=>e.message_id===message.id)};
+}
+
+test('built-in service roles are seeded once, edited with revisions and audit, and only super administrators maintain them',async t=>{
+  const f=await managementFixture(t),{admin,h}=f,member=await f.member('service-role-member',{repository_ids:['101']});
+  const seeded=await roles(admin);
+  assert.deepEqual(seeded.map(r=>[r.id,r.builtin,r.enabled]),[['management-assistant',true,true],['repository-assistant',true,true]]);
+  const assistant=seeded[0],repository=seeded[1];
+  assert.deepEqual(assistant.permissions,fullPermissions());assert.equal(assistant.permissions_fixed,true);assert.equal(assistant.model.model_name,'Management fixture');
+  // A group assistant role is a prompt and a model: what a group may do is its binding's level (#849).
+  assert.equal(Object.hasOwn(repository,'permissions'),false);assert.equal(repository.permissions_fixed,false);
+  assert.deepEqual((await admin('/api/service-roles')).value.permission_items.map(i=>[i.id,i.modes]),
+    permissionItems.map(i=>[i.id,i.modes]));
+  // Project administrators neither read nor change platform service roles; they only see their own projects' roles (#849).
+  assert.deepEqual((await member.client('/api/service-roles')).value.service_roles,[]);
+  assert.equal((await member.client('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,name:'x'})).status,403);
+
+  const saved=await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,name:'Committer 助手',budget:{currency:'USD',limit_amount:5}});
+  assert.equal(saved.status,200,JSON.stringify(saved.value));
+  assert.equal(saved.value.service_role.revision,repository.revision+1);
+  assert.deepEqual(JSON.parse(h.store.get("SELECT permissions FROM service_roles WHERE id='repository-assistant'").permissions),repositoryAssistantPermissions,'the pre-#849 items stay for migration only');
+  assert.equal(Object.hasOwn(saved.value.service_role,'budget'),false);assert.equal(h.store.get("SELECT budget FROM service_roles WHERE id='repository-assistant'").budget,null);
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='service_role.updated' AND resource_id='repository-assistant'"));
+  const stale=await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,name:'Stale'});
+  assert.deepEqual([stale.status,stale.value.error],[409,'service_role_revision_conflict']);
+  assert.equal((await role(admin,'repository-assistant')).name,'Committer 助手');
+
+  for(const [body,code] of [[{permissions:{computer:'allow'}},'service_role_permissions_moved'],[{permissions:{github:'write'}},'service_role_permissions_moved'],
+    [{model_id:f.model.id},'shared_model_required'],[{unknown:true},'unknown_field']]){
+    const current=await role(admin,'repository-assistant'),result=await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:current.revision,...body});
+    assert.deepEqual([result.status,result.value.error],[400,code],JSON.stringify(body));
+  }
+  // The management assistant always uses the current user's own permissions; built-in roles stay enabled and undeletable.
+  assert.equal((await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:assistant.revision,permissions:{github:'read'}})).value.error,'service_role_permissions_fixed');
+  assert.equal((await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:assistant.revision,enabled:false})).value.error,'builtin_service_role_required');
+  assert.equal((await admin('/api/service-roles/management-assistant','DELETE',{expected_revision:assistant.revision})).value.error,'builtin_service_role_required');
+
+  const created=(await admin('/api/service-roles','POST',{name:'可信 committer 群',responsibility:'可以暂停和取消任务'})).value.service_role;
+  assert.match(created.id,/^custom-/);assert.equal(created.builtin,false);assert.equal(Object.hasOwn(created,'permissions'),false);
+  assert.equal(h.store.get('SELECT permissions FROM service_roles WHERE id=?',created.id).permissions,null,'a new role carries no group items');
+  const disabled=(await admin('/api/service-roles/'+created.id,'PATCH',{expected_revision:created.revision,enabled:false})).value.service_role;
+  assert.deepEqual([disabled.enabled,disabled.permissions_fixed],[false,false]);
+  assert.equal((await admin('/api/service-roles/'+created.id,'DELETE',{expected_revision:created.revision})).value.error,'service_role_revision_conflict');
+  assert.equal((await admin('/api/service-roles/'+created.id,'DELETE',{expected_revision:disabled.revision})).value.ok,true);
+  assert.deepEqual((await roles(admin)).map(r=>r.id),['management-assistant','repository-assistant']);
+  assert.deepEqual(h.store.all("SELECT action FROM audit WHERE resource_id=? ORDER BY created_at,rowid",created.id).map(r=>r.action),['service_role.created','service_role.updated','service_role.deleted']);
+
+  // A restart keeps administrator edits instead of reseeding the built-in roles.
+  await h.stop();await h.start();
+  assert.equal((await role(admin,'repository-assistant')).name,'Committer 助手');
+});
+
+test('the management assistant uses its own model and ledger even when the first project has no model',async t=>{
+  const f=await managementFixture(t),{admin,h}=f;
+  f.modelState.respond=async(body,res)=>{assert.match(body.messages[0].content,/No project is preselected/);assert.match(body.messages[0].content,/Only answer about authorized projects/);reply(res,'你好！');};
+  const current=await role(admin,'management-assistant');
+  await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:current.revision,prompt:'Only answer about authorized projects.'});
+  h.store.run("UPDATE policies SET model_id=NULL");
+  const greeting=await web(f,'你好');assert.equal(greeting.message.state,'completed',JSON.stringify(greeting.events));
+  assert.deepEqual(h.store.all('SELECT repository_id,service_role_id,model_id FROM model_requests').map(r=>({...r})),[{repository_id:null,service_role_id:'management-assistant',model_id:f.assistantModel.id}]);
+  // Project statistics never include the assistant; the service role page does.
+  const costs=(await admin('/api/costs')).value;assert.equal(costs.summary.requests,0);
+  const usage=(await role(admin,'management-assistant')).usage;
+  assert.deepEqual([usage.requests,usage.input_tokens,usage.output_tokens,usage.unpriced_requests],[1,12,6,1]);
+
+  // A project's own model is never borrowed: without the assistant's model the turn stops and says where to configure it.
+  h.store.run("UPDATE service_roles SET model_id=NULL WHERE id='management-assistant'");
+  const before=f.requests.length,missing=await web(f,'你好');
+  assert.equal(missing.message.state,'failed');assert.equal(f.requests.length,before);
+  const failure=missing.events.find(e=>e.type==='error').data;
+  assert.equal(failure.error,'service_role_model_not_configured');assert.match(failure.notice,/全局设置 → 服务角色/);
+});
+
+test('legacy service role monetary budgets never block unpriced, over-limit or differently priced usage',async t=>{
+  const f=await managementFixture(t),{admin,h}=f;f.modelState.respond=async(_body,res)=>reply(res,'正常回答');
+  h.store.run("UPDATE service_roles SET budget='not-valid-json' WHERE id='management-assistant'");
+  assert.equal(Object.hasOwn(await role(admin,'management-assistant'),'budget'),false);
+  const before=f.requests.length;assert.equal((await web(f,'没有单价也继续')).message.state,'completed');assert.equal(f.requests.length,before+1);
+  const model=h.store.get('SELECT version FROM models WHERE id=?',f.assistantModel.id);
+  assert.equal((await admin('/api/models/'+f.assistantModel.id,'PATCH',{version:model.version,pricing:{currency:'USD',input_per_million:1000,output_per_million:1000,cache_per_million:1000}})).status,200);
+  h.store.run('UPDATE service_roles SET budget=? WHERE id=?',JSON.stringify({currency:'CNY',limit_amount:0.001}),'management-assistant');
+  for(const request of ['超过旧限额','跨币种继续'])assert.equal((await web(f,request)).message.state,'completed');
+  assert.equal(h.store.get("SELECT round(sum(cost),6) cost FROM model_requests WHERE service_role_id='management-assistant'").cost,0.036);
+  const usage=(await role(admin,'management-assistant')).usage;assert.equal(usage.unpriced_requests,1);assert.deepEqual(usage.costs,[{currency:'USD',amount:0.036}]);
+});
+
+test('a budgeted assistant retries a failed model request: a request that returned nothing costs nothing and never blocks the budget',async t=>{
+  const f=await managementFixture(t),{admin,h}=f;let calls=0;
+  const model=h.store.get('SELECT version FROM models WHERE id=?',f.assistantModel.id);
+  assert.equal((await admin('/api/models/'+f.assistantModel.id,'PATCH',{version:model.version,pricing:{currency:'USD',input_per_million:1000,output_per_million:1000,cache_per_million:1000}})).status,200);
+  const current=await role(admin,'management-assistant');
+  assert.equal((await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:current.revision,budget:{currency:'USD',limit_amount:1}})).status,200);
+  // A 503 and a dropped connection, then the answer: both failures are retried within the same message.
+  f.modelState.respond=async(_body,res)=>{calls++;if(calls===1){res.writeHead(503,{'Content-Type':'application/json'});res.end('{"error":"busy"}');return;}if(calls===2){res.socket.destroy();return;}reply(res,'重试后的回答');};
+  let result=await web(f,'你好');assert.equal(result.message.state,'completed',JSON.stringify(result.events));
+  assert.deepEqual(h.store.all("SELECT state,cost FROM model_requests WHERE service_role_id='management-assistant' ORDER BY rowid").map(r=>[r.state,r.cost]),
+    [['http_error',0],['transport_error',0],['received',0.018]]);
+  assert.equal((await web(f,'再问一次')).message.state,'completed');
+  // A request that failed after streaming part of an answer may have been charged: its cost stays unknown, and the budget stops.
+  calls=0;f.modelState.respond=async(_body,res)=>{if(++calls===1){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('data: '+JSON.stringify({choices:[{index:0,delta:{content:'半截'}}]})+'\n\n');setTimeout(()=>res.socket.destroy(),20);return;}reply(res,'不会发出');};
+  result=await web(f,'第三次');
+  assert.equal(result.message.state,'completed');
+  assert.equal(h.store.get("SELECT cost FROM model_requests WHERE service_role_id='management-assistant' AND state='transport_error' ORDER BY rowid DESC LIMIT 1").cost,null);
+});
+
+test('deleting the shared model clears it from service roles and the wizard default fills built-in roles without one',async t=>{
+  const f=await managementFixture(t),{admin,h}=f,before=await role(admin,'management-assistant');
+  assert.equal((await admin('/api/models/'+f.assistantModel.id,'DELETE',{})).status,200);
+  const after=await role(admin,'management-assistant');
+  assert.deepEqual([after.model_id,after.revision],[null,before.revision+1]);
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='service_role.model_cleared' AND resource_id='management-assistant'"));
+  const replacement=(await admin('/api/models','POST',{model_name:'Wizard default',api_url:'http://127.0.0.1:9/v1',api_key:'fixture-provider-key'})).value.model;
+  const kept=(await admin('/api/models','POST',{model_name:'Kept choice',api_url:'http://127.0.0.1:9/v1',api_key:'fixture-provider-key'})).value.model;
+  const repository=await role(admin,'repository-assistant');await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,model_id:kept.id});
+  assert.equal((await admin('/api/onboarding/model','POST',{model_id:replacement.id})).status,201);
+  assert.equal((await role(admin,'management-assistant')).model_id,replacement.id);
+  assert.equal((await role(admin,'repository-assistant')).model_id,kept.id);
+});
+
+test('an existing ledger is rebuilt once with a nullable repository, keeping every row, column, index and trigger',async t=>{
+  const directory=mkdtempSync(join(tmpdir(),'service-ledger-')),path=join(directory,'control.sqlite'),key=randomBytes(32);
+  t.after(()=>rmSync(directory,{recursive:true,force:true}));
+  // The ledger as an upgraded deployment has it: the original NOT NULL table plus the columns and indexes added since.
+  const legacy=new DatabaseSync(path,{enableForeignKeyConstraints:false});
+  legacy.exec(`CREATE TABLE model_requests(id TEXT PRIMARY KEY,task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+      repository_id TEXT NOT NULL REFERENCES repositories(id),request_id TEXT NOT NULL,model_id TEXT NOT NULL,model_name TEXT NOT NULL,
+      requested_at TEXT NOT NULL,finished_at TEXT,http_status INTEGER,state TEXT NOT NULL DEFAULT 'pending',
+      input_tokens INTEGER,output_tokens INTEGER,cached_input_tokens INTEGER,
+      currency TEXT,input_per_million REAL,output_per_million REAL,cache_per_million REAL,cost REAL);
+    ALTER TABLE model_requests ADD COLUMN run_id TEXT;ALTER TABLE model_requests ADD COLUMN request_snapshot TEXT;ALTER TABLE model_requests ADD COLUMN response_snapshot TEXT;
+    ALTER TABLE model_requests ADD COLUMN conversation_id TEXT;ALTER TABLE model_requests ADD COLUMN role_id TEXT;ALTER TABLE model_requests ADD COLUMN source_message TEXT;
+    ALTER TABLE model_requests ADD COLUMN external_key TEXT;ALTER TABLE model_requests ADD COLUMN accounting_source TEXT NOT NULL DEFAULT 'native';
+    CREATE INDEX model_request_task ON model_requests(task_id);
+    CREATE INDEX model_request_date ON model_requests(requested_at,repository_id);
+    CREATE INDEX model_request_repo_date ON model_requests(repository_id,requested_at);
+    CREATE INDEX model_conversation_scope ON model_requests(conversation_id,role_id,requested_at);
+    CREATE UNIQUE INDEX external_model_request ON model_requests(external_key) WHERE external_key IS NOT NULL;
+    CREATE INDEX model_request_run ON model_requests(run_id);
+    CREATE TABLE ledger_probe(id TEXT);
+    CREATE TRIGGER ledger_probe_insert AFTER INSERT ON model_requests BEGIN INSERT INTO ledger_probe VALUES(NEW.id); END;`);
+  const insert=legacy.prepare(`INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,finished_at,http_status,state,
+    input_tokens,output_tokens,cached_input_tokens,currency,input_per_million,output_per_million,cache_per_million,cost,run_id,request_snapshot,response_snapshot,
+    conversation_id,role_id,source_message,external_key,accounting_source) VALUES(?,NULL,?,?,?,?,?,?,200,'received',?,?,?,'USD',1,2,0.5,?,?,?,?,?,?,?,?,?)`);
+  insert.run('old-1','101','review:1','m1','Old model','2026-01-01T00:00:00.000Z','2026-01-01T00:00:01.000Z',10,5,2,0.00002,'run-1','{"a":1}','{"b":2}','conv-1','dev','msg-1',null,'native');
+  insert.run('old-2','102','manager:2','m2','Old model 2','2026-01-02T00:00:00.000Z',null,null,null,null,null,null,null,null,'conv-2','qa','msg-2','ext-2','codex_events');
+  const columns=legacy.prepare('PRAGMA table_info(model_requests)').all().map(r=>r.name),rows=legacy.prepare('SELECT * FROM model_requests ORDER BY id').all();
+  const indexes=legacy.prepare("SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='model_requests' AND sql IS NOT NULL ORDER BY name").all();
+  legacy.close();
+
+  let store=new Store(path,key);
+  const info=store.all('PRAGMA table_info(model_requests)');
+  assert.equal(info.find(r=>r.name==='repository_id').notnull,0);
+  assert.deepEqual(info.map(r=>r.name),[...columns,'service_role_id','request_ref','response_ref']);
+  assert.deepEqual(store.all(`SELECT ${columns.join(',')} FROM model_requests ORDER BY id`),rows);
+  const rebuilt=store.all("SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='model_requests' AND sql IS NOT NULL ORDER BY name");
+  for(const index of indexes)assert.deepEqual(rebuilt.find(r=>r.name===index.name),index);
+  assert.ok(rebuilt.some(r=>r.name==='model_request_service_role'));
+  assert.ok(store.get("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='ledger_probe_insert' AND tbl_name='model_requests'"));
+  assert.ok(store.get("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='trace_model_finish'"));
+  assert.deepEqual(store.all('PRAGMA foreign_key_list(model_requests)').map(r=>[r.table,r.from]).sort(),[['repositories','repository_id'],['tasks','task_id']]);
+  assert.equal(store.get('PRAGMA foreign_keys').foreign_keys,1);
+  // The rebuilt ledger accepts service role rows, and project rows still need a valid repository.
+  store.run("INSERT INTO model_requests(id,repository_id,service_role_id,request_id,model_id,model_name,requested_at) VALUES('service-1',NULL,'management-assistant','r','m','n','2026-01-03T00:00:00.000Z')");
+  assert.ok(store.get("SELECT 1 FROM ledger_probe WHERE id='service-1'"));
+  assert.throws(()=>store.run("INSERT INTO model_requests(id,repository_id,request_id,model_id,model_name,requested_at) VALUES('bad',?, 'r','m','n','2026-01-03T00:00:00.000Z')",'missing-repository'),/FOREIGN KEY/);
+  const migrated=store.get("SELECT value FROM settings WHERE key='model_requests_nullable_repository'").value,table=store.get("SELECT sql FROM sqlite_master WHERE name='model_requests'").sql;
+  store.close();
+  // Opening again does not rebuild a second time.
+  store=new Store(path,key);t.after(()=>store.close());
+  assert.equal(store.get("SELECT value FROM settings WHERE key='model_requests_nullable_repository'").value,migrated);
+  assert.equal(store.get("SELECT sql FROM sqlite_master WHERE name='model_requests'").sql,table);
+  assert.equal(store.get('SELECT count(*) n FROM model_requests').n,3);
+});
+
+
+test('the full management role cannot lend computer execution to a read-only operator',async t=>{
+  // Drain work triggered by the fixture before its provider, computers and database are closed.
+  let engine;t.after(()=>engine?.close());
+  // Project computers stay with the original fake; the assistant computers are this checkout's manager code (#457).
+  const assistant=await assistantManager(t),manager={async call(method,path,input,timeout){
+    if(path.startsWith('/v1/assistant-computers'))return assistant.manager.call(method,path,input,timeout);
+    return method==='GET'?{generation:1,state:'ready'}:{ok:true,result:{written:true}};
+  }};
+  const f=await managementFixture(t,store=>({engine:engine=new TaskEngine(store,manager),assistantHomes:assistant.homes}));
+  const reader=await f.member('computer-reader',{repository_ids:['101']});
+  f.h.store.run('UPDATE scoped_grants SET capabilities=? WHERE principal_id=?',JSON.stringify(['tasks.read']),reader.id);
+  f.modelState.respond=async(body,res)=>{
+    if(body.messages.some(m=>m.role==='tool'))return reply(res,'命令已执行');
+    res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:[{id:'computer',type:'function',function:{name:'run_command',arguments:JSON.stringify({command:'printf computer-check'})}}]}}]}));
+  };
+  const denied=await web(f,'执行检查',reader.client);
+  assert.equal(denied.message.state,'failed');assert.equal(assistant.docker.created||0,0);
+  assert.equal(denied.events.find(e=>e.type==='tool_error').data.error,'capability_forbidden');
+  assert.equal(f.h.store.get('SELECT count(*) n FROM assistant_homes').n,0);
+  const allowed=await web(f,'执行检查');
+  assert.equal(allowed.message.state,'completed',JSON.stringify(allowed.events));
+  assert.deepEqual(assistant.commands.map(c=>c.command),['printf computer-check']);
+  assert.equal(JSON.parse(JSON.stringify(allowed.events.find(e=>e.type==='tool_result').data.result)).output,'computer-check');
+  // The turn releases its computer after the message is completed (in its finally): it then waits idle for the person's next turn.
+  assert.deepEqual(await until(()=>[...assistant.computers.leases.values()].map(l=>l.state),states=>states.join()==='idle'),['idle']);
+  assert.equal(f.h.store.get('SELECT count(*) n FROM role_conversation_operations').n,0);
+});
