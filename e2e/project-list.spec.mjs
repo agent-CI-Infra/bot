@@ -318,7 +318,8 @@ test('全局设置的项目管理复用紧凑表格，保留管理操作且宽�
     await page.keyboard.press('Escape');
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await expect(toggle).toBeFocused();
-    await toggle.click(); await page.locator('h3', {hasText: '项目管理'}).click();
+    // #1039: a settings card title is an h2 now, so click the card heading by role and level.
+    await toggle.click(); await page.getByRole('heading', {name: '项目管理', exact: true, level: 2}).click();
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await page.screenshot({path: '.tmp/global-project-table/desktop.png', fullPage: true});
     for (const [label, width, height] of [['compact', 1024, 900], ['mobile', 390, 844], ['narrow', 320, 700]]) {

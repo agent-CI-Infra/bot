@@ -11,7 +11,8 @@ async function localLogin(page, origin, password) {
   await page.getByRole('button', { name: '登录', exact: true }).click();
   await expect(page.locator('#identity')).toBeVisible();
 }
-const cards = page => page.locator('#settings-panel h3').allInnerTexts();
+// #1039: a settings card title is an h2 under the page h1 (sub-sections inside a card are h3).
+const cards = page => page.locator('#settings-panel .side-card > h2').allInnerTexts();
 const loginCard = page => page.locator('#settings-panel .side-card').filter({ has: page.getByRole('heading', { name: 'GitHub 登录（只读）', exact: true }) });
 
 test('公网接入同屏显示地址、验证结果、Tunnel 与只读的 GitHub 登录配置，且不新增请求', async ({ page }) => {
