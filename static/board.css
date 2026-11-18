@@ -117,8 +117,9 @@ body.board-mode .list-panel>.toolbar{display:none}
   .board-filter-controls .board-search{max-width:none;min-width:0}
   /* The view row gets a line of its own: sharing it with `⋯`, 新建任务 and 刷新 squeezed the selector to 18px at 320 and
      put 保存视图 22px under the menu. #482 then moved the work type here out of the filter fold, so line two is the two
-     selects half each and the remaining actions keep the third line three-up. A six-column grid lets both lines fill
-     the width exactly, so no row leaves an empty column. Nothing can shrink into a neighbour. */
+     selects half each and line three carries the actions plus the live status as a one-line ellipsis. Three lines is the
+     ceiling: a fourth put the first card under the fixed bottom bar, where no scroll reached it (metrics.spec.mjs at
+     390). A six-column grid fills every line exactly, so nothing shrinks into a neighbour. */
   .board-arrangement{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;align-items:center}
   .board-arrangement>.board-view-controls{grid-column:1/-1;grid-row:1;flex-wrap:wrap;min-width:0}
   .board-view-controls .board-view-choice{flex:1 1 120px;min-width:120px}
@@ -130,10 +131,10 @@ body.board-mode .list-panel>.toolbar{display:none}
   .board-arrangement>.board-grouping{grid-column:4/7;grid-row:2;min-width:0;flex-direction:column;gap:4px}
   .board-arrangement>.board-grouping>.board-options-label{line-height:1.4}
   .board-arrangement>.board-grouping select{width:100%;max-width:none;min-width:0}
-  .board-arrangement>.board-menu{grid-column:1/3;grid-row:3;justify-self:start}
-  .board-arrangement>.board-create-task{grid-column:3/5;grid-row:3}
-  .board-arrangement>button{grid-column:5/7;grid-row:3;justify-self:end}
-  .board-status{grid-row:4;grid-column:1/-1;font-size:var(--font-size-1);white-space:normal;flex-wrap:wrap}
+  .board-arrangement>.board-menu{grid-column:1/2;grid-row:3;justify-self:start}
+  .board-arrangement>.board-create-task{grid-column:2/4;grid-row:3}
+  .board-arrangement>button{grid-column:4/5;grid-row:3;justify-self:start}
+  .board-status{grid-row:3;grid-column:5/7;min-width:0;justify-self:end;max-width:100%;overflow:hidden;font-size:var(--font-size-1);white-space:nowrap;text-overflow:ellipsis;flex-wrap:nowrap}
   .board-spacer{display:none}
   .board-menu-panel{right:0}
   .board-mobile-group{display:flex;flex-direction:row;align-items:center;gap:8px;font-size:var(--font-size-1)}
