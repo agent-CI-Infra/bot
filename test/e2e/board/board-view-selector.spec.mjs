@@ -130,3 +130,63 @@ test('320/390 未保存态：视图、保存、新建任务与更多操作互不
     expect(clean.overlaps).toBe(false);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
+
+// #482: repository and work type are the view selector's neighbours in one toolbar row — compact selects reading
+// 视图 → 仓库 → 工作类型 — and the phone keeps all three usable on its first screen without opening `⋯` or 筛选.
+test('仓库与工作类型紧挨视图：1440 一排按视图→仓库→工作类型，390 首屏三个控件命中可点', async ({ page }) => {
+  const { h, admin, password } = await fixture();
+  try {
+    const saved = (await admin('/api/board/views', 'POST', { name: '只看仓库 202', group_by: 'bot_stage', filters: [{ field: 'repository_id', value: '202' }], hidden_columns: [] })).value.view;
+    await page.setViewportSize({ width: 1440, height: 900 }); await login(page, h.admin, password);
+    const view = page.getByLabel('视图', { exact: true }), repo = page.getByLabel('仓库', { exact: true }), work = page.getByLabel('工作类型', { exact: true });
+    await expect(repo).toBeVisible();
+    await expect(work).toBeVisible();
+    // The three controls share one line and read left to right in that order, with no horizontal overflow.
+    const row = await page.evaluate(() => {
+      const box = node => { const r = node.getBoundingClientRect(); return { left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top) }; };
+      const select = label => [...document.querySelectorAll('.board-arrangement select')].find(node => node.getAttribute('aria-label') === label) || null;
+      const node = { view: select('视图'), repo: select('仓库'), work: select('工作类型') };
+      return { view: node.view && box(node.view), repo: node.repo && box(node.repo), work: node.work && box(node.work),
+        docWidth: document.documentElement.scrollWidth, innerWidth };
+    });
+    expect(row.repo).not.toBeNull(); expect(row.work).not.toBeNull();
+    expect(row.repo.left).toBeGreaterThanOrEqual(row.view.right);
+    expect(row.work.left).toBeGreaterThanOrEqual(row.repo.right);
+    expect(Math.abs(row.repo.top - row.view.top)).toBeLessThanOrEqual(1);
+    expect(Math.abs(row.work.top - row.view.top)).toBeLessThanOrEqual(1);
+    expect(row.docWidth).toBeLessThanOrEqual(row.innerWidth);
+    // The repository select is the same repository filter the chips already carried: choosing one sets the condition.
+    await repo.selectOption('202');
+    await expect(page.locator('#board-chips')).toContainText('仓库');
+    await expect(page.locator('#board-chips')).toContainText('202');
+    await page.getByLabel('工作类型', { exact: true }).selectOption('');
+    // A saved view that already holds a repository condition shows it in the select instead of an empty one.
+    await page.locator('#board-view-select').selectOption(saved.id);
+    await expect(page.getByLabel('仓库', { exact: true })).toHaveValue('202');
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    const details = page.locator('.board-filter-details');
+    await expect(details).not.toHaveAttribute('open');
+    const more = page.getByRole('button', { name: '更多视图操作', exact: true });
+    await expect(more).toHaveAttribute('aria-expanded', 'false');
+    // All three controls are on the phone's first screen and nothing covers them: a tap at their centre reaches them.
+    const hit = await page.evaluate(() => {
+      const ids = {};
+      const pick = (element, name) => { const r = element.getBoundingClientRect(); ids[name] = { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), top: Math.round(r.top), bottom: Math.round(r.bottom) }; };
+      pick(document.getElementById('board-view-select'), 'view');
+      const select = label => [...document.querySelectorAll('.board-arrangement select')].find(node => node.getAttribute('aria-label') === label);
+      pick(select('仓库'), 'repo'); pick(select('工作类型'), 'work');
+      const reach = ({ x, y }) => { const node = document.elementFromPoint(x, y); return node && node.tagName === 'SELECT' ? node.getAttribute('aria-label') : null; };
+      return { ids, view: reach(ids.view), repo: reach(ids.repo), work: reach(ids.work), innerWidth };
+    });
+    expect(hit.view).toBe('视图'); expect(hit.repo).toBe('仓库'); expect(hit.work).toBe('工作类型');
+    expect(hit.ids.view.bottom).toBeLessThanOrEqual(844);
+    expect(hit.ids.repo.bottom).toBeLessThanOrEqual(844);
+    expect(hit.ids.work.bottom).toBeLessThanOrEqual(844);
+    // Switching the view never needs the `⋯` menu: the toolbar select does it with the menu still closed.
+    await page.getByLabel('视图', { exact: true }).selectOption(saved.id);
+    await expect(page.getByLabel('视图', { exact: true })).toHaveValue(saved.id);
+    await expect(more).toHaveAttribute('aria-expanded', 'false');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});
