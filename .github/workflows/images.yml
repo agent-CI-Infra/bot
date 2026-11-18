@@ -1,6 +1,6 @@
 name: Images
 
-# Builds the deployment images that compose.yaml runs. Pull requests and the merge queue only build them; pushes to
+# Builds the deployment images that docker/compose.yaml runs. Pull requests and the merge queue only build them; pushes to
 # main publish ghcr.io/agent-ci-infra/<name> with the tags sha-<12-character commit> and latest. release.yml later
 # adds a version tag to the sha- images of the tagged commit.
 on:
@@ -32,16 +32,16 @@ jobs:
       matrix:
         include:
           - name: bot-control-plane
-            dockerfile: Dockerfile
+            dockerfile: docker/control-plane.Dockerfile
             description: Control plane (admin console, webhook receiver, task engine); also runs key-init and the webhook gateway.
           - name: bot-computer-manager
-            dockerfile: manager/Dockerfile
+            dockerfile: docker/manager.Dockerfile
             description: Creates and runs the per-repository project computers; the only service with the Docker socket.
           - name: bot-project-computer
-            dockerfile: images/project/Dockerfile
+            dockerfile: docker/project-computer.Dockerfile
             description: System image of the per-repository project computers.
           - name: bot-cloudflare-tunnel
-            dockerfile: tunnel/Dockerfile
+            dockerfile: docker/tunnel.Dockerfile
             description: Optional Cloudflare Tunnel connector for the webhook listener.
     env:
       IMAGE: ghcr.io/agent-ci-infra/${{ matrix.name }}

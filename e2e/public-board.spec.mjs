@@ -35,6 +35,7 @@ test('public dashboard and repository board show generic data without console lo
     await capture('dashboard');
     await page.goto(f.h.webhook + '/dashboard/#/about');
     await expect(page.locator('main').getByText('单仓看板', { exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'docker/control-plane.Dockerfile' })).toHaveAttribute('href', 'https://github.com/agent-CI-Infra/bot/blob/main/docker/control-plane.Dockerfile');
     await expect(page.getByText('质量门禁')).toHaveCount(0);
     await capture('about');
     for (const route of ['gate', 'gate-onboarding', 'sign-in', 'tasks', 'users', 'chats', 'apps', 'settings']) {

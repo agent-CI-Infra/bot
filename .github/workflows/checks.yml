@@ -62,8 +62,9 @@ jobs:
 
       - name: Compose files
         run: |
-          docker compose config --quiet
-          docker compose -f compose.yaml -f compose.build.yaml config --quiet
+          docker compose -f docker/compose.yaml config --quiet
+          docker compose -f docker/compose.yaml -f docker/compose.build.yaml config --quiet
+          BOT_BUILD_CONTEXT=. docker compose --project-directory . -f docker/compose.yaml -f docker/compose.build.yaml config --quiet
 
   # Keep the required check named unit. Success requires both jobs and a disjoint,
   # complete report for the current source/weight plan, including on merge_group.

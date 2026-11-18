@@ -1,7 +1,7 @@
 // The release workflow was the one long path without job-level bounds (#741): a registry, remote Docker daemon or SSH
 // session that hung kept the runner until the platform's 360-minute ceiling, which reads as "still releasing" while
 // nothing runs. The workflow file is the subject here, so that a later edit cannot drop a bound again, and the bounds
-// stay above the waits they cover: 30 minutes for the manager to start (compose.yaml start_period: 30m), 85 minutes for
+// stay above the waits they cover: 30 minutes for the manager to start (docker/compose.yaml start_period: 30m), 85 minutes for
 // bot to become healthy (the loop in the Deploy script, 1700 rounds of 3 seconds), and the rest for pull and recreate.
 // test/deploy-recovery-docker.mjs still extracts the remote script between the <<'SCRIPT' and SCRIPT markers.
 import test from 'node:test';

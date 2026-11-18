@@ -18,7 +18,7 @@ RUN cd /opt/runner && npm ci --omit=dev --ignore-scripts && npm cache clean --fo
 COPY runner /opt/runner
 RUN for file in /opt/runner/*.mjs; do node --check "$file"; done
 COPY LICENSE NOTICE /opt/licenses/
-COPY scripts/bot-chromium.sh /usr/local/bin/bot-chromium
+COPY docker/bot-chromium.sh /usr/local/bin/bot-chromium
 RUN chmod 755 /usr/local/bin/bot-chromium && chmod -R a-w /opt/runner /opt/bot
 # Preinstalled browser for task harness (#916). Assistant computers reuse this image but still have no network.
 ENV BOT_BROWSER_EXECUTABLE=/usr/local/bin/bot-chromium

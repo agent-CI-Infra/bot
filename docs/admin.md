@@ -23,7 +23,7 @@
 
 ```sh
 mkdir department-bot && cd department-bot
-curl -fsSLO https://raw.githubusercontent.com/agent-CI-Infra/bot/main/compose.yaml
+curl -fsSLO https://raw.githubusercontent.com/agent-CI-Infra/bot/main/docker/compose.yaml
 docker compose up -d
 ```
 
@@ -124,7 +124,7 @@ docker compose up -d
 
 数据在五个部署卷里：`bot-data`（控制面数据库）、`bot-keys`（加密凭据的主密钥）、`internal-keys`（bot 与 manager 的内部认证）、`manager-data`（虚拟电脑账本及各项目笔记卷的文件）和 `assistant-homes`（群聊助手、管理助手电脑的持久 HOME）；`tunnel-keys` 只放 Cloudflare Tunnel token。丢了主密钥，已保存的 App 私钥和模型 Key 都解不开。`docker compose down` 会保留卷；日常升级不要加 `-v`（`--volumes`），它会删掉这些卷。备份见[备份与恢复](deployment.md#备份与恢复)。
 
-以前在仓库根目录用 `docker compose up --build -d` 从源码部署的实例，更新代码后再运行 `docker compose up -d` 会改为拉取 GHCR 镜像（同一目录，数据卷不变）；要继续从源码构建，改用 `docker compose -f compose.yaml -f compose.build.yaml up -d --build`。
+以前在仓库根目录用 `docker compose` 从源码部署的实例，Compose 文件已迁至 `docker/` 目录；要继续沿用仓库根目录的 `.env`、项目名和数据卷从源码构建，运行 `BOT_BUILD_CONTEXT=. docker compose --project-directory . -f docker/compose.yaml -f docker/compose.build.yaml up -d --build`（全新检出不需沿用旧根目录项目名时，也可直接运行 `docker compose -f docker/compose.yaml -f docker/compose.build.yaml up -d --build`）。
 
 ## 常用设置
 

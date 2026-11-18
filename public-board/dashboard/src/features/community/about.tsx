@@ -21,7 +21,7 @@ const REPO_URL = 'https://github.com/agent-CI-Infra/bot'
 const SITE_URL = '/dashboard/'
 const CONFIG_URL = `${REPO_URL}/blob/main/public-board/config/internal-contributors.json`
 const COLLECT_URL = `${REPO_URL}/blob/main/public-board/scripts/collect.mjs`
-const DEPLOY_URL = `${REPO_URL}/blob/main/Dockerfile`
+const DEPLOY_URL = `${REPO_URL}/blob/main/docker/control-plane.Dockerfile`
 const ISSUES_URL = `${REPO_URL}/issues`
 
 /** Inline code token, e.g. a file path or a login name. */
@@ -125,7 +125,7 @@ const TOKENS: Record<string, ReactNode> = {
     <CodeLink href={CONFIG_URL}>public-board/config/internal-contributors.json</CodeLink>
   ),
   collect: <CodeLink href={COLLECT_URL}>public-board/scripts/collect.mjs</CodeLink>,
-  deploy: <CodeLink href={DEPLOY_URL}>Dockerfile</CodeLink>,
+  deploy: <CodeLink href={DEPLOY_URL}>docker/control-plane.Dockerfile</CodeLink>,
   issues: <ExtLink href={ISSUES_URL}>GitHub Issues</ExtLink>,
 }
 

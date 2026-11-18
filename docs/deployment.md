@@ -1,6 +1,6 @@
 # 部署细节
 
-日常部署只需要仓库根目录的 `compose.yaml`，上手步骤见[部署这套 bot 和管理员面板](admin.md)。本文说明镜像、从源码构建、版本发布与服务器部署、端口与环境变量、服务隔离和备份。
+日常部署只需要 [`docker/compose.yaml`](../docker/compose.yaml)（单独下载保存为 `compose.yaml` 即可运行），上手步骤见[部署这套 bot 和管理员面板](admin.md)。本文说明镜像、从源码构建、版本发布与服务器部署、端口与环境变量、服务隔离和备份。
 
 ## 镜像
 
@@ -8,10 +8,10 @@
 
 | 镜像 | 用途 | Dockerfile | Compose 服务 |
 | --- | --- | --- | --- |
-| `ghcr.io/agent-ci-infra/bot-control-plane` | 控制面：管理页、登录、GitHub 回调、Webhook 接收、任务调度；也用来生成密钥和运行入口网关 | `Dockerfile` | `bot`、`key-init`、`webhook` |
-| `ghcr.io/agent-ci-infra/bot-computer-manager` | 创建和运行各仓库的虚拟电脑，唯一挂载 Docker socket 的服务 | `manager/Dockerfile` | `manager` |
-| `ghcr.io/agent-ci-infra/bot-project-computer` | 每台虚拟电脑的系统镜像（批准镜像） | `images/project/Dockerfile` | `project-image` |
-| `ghcr.io/agent-ci-infra/bot-cloudflare-tunnel` | 可选的 Cloudflare Tunnel 连接器 | `tunnel/Dockerfile` | `tunnel` |
+| `ghcr.io/agent-ci-infra/bot-control-plane` | 控制面：管理页、登录、GitHub 回调、Webhook 接收、任务调度；也用来生成密钥和运行入口网关 | `docker/control-plane.Dockerfile` | `bot`、`key-init`、`webhook` |
+| `ghcr.io/agent-ci-infra/bot-computer-manager` | 创建和运行各仓库的虚拟电脑，唯一挂载 Docker socket 的服务 | `docker/manager.Dockerfile` | `manager` |
+| `ghcr.io/agent-ci-infra/bot-project-computer` | 每台虚拟电脑的系统镜像（批准镜像） | `docker/project-computer.Dockerfile` | `project-image` |
+| `ghcr.io/agent-ci-infra/bot-cloudflare-tunnel` | 可选的 Cloudflare Tunnel 连接器 | `docker/tunnel.Dockerfile` | `tunnel` |
 
 控制面运行镜像和项目电脑镜像都预装 Debian 的 `chromium`（经 `/usr/local/bin/bot-chromium` 启动，`BOT_BROWSER_EXECUTABLE` 指向它），供任务浏览器在容器内直接启动，不必再 apt。包装脚本会把 Chromium 的 `HOME` 固定指到 `BOT_BROWSER_HOME`（默认 `/tmp/bot-chromium-home`），以便在只读根文件系统、没有家目录的控制面容器里写入 crashpad 数据。预装不等于开放任意外网：任务浏览器仍只访问该任务列出的源。助手电脑沿用项目电脑基础镜像，现有无网络边界不变，不能因此获得通用外网浏览。manager 与 tunnel 镜像不预装浏览器。合入本改动后也不会自动部署。
 
@@ -19,13 +19,13 @@
 
 ## 从源码构建
 
-`compose.build.yaml` 只把镜像换成本地标签 `department-bot*:local` 并加上构建上下文，其余配置都来自 `compose.yaml`，所以两个文件一起使用：
+`docker/compose.build.yaml` 只把镜像换成本地标签 `department-bot*:local` 并加上构建上下文（默认 `..` 指向仓库根目录，可通过 `BOT_BUILD_CONTEXT` 覆盖），其余配置都来自 `docker/compose.yaml`，所以两个文件一起使用：
 
 ```sh
-docker compose -f compose.yaml -f compose.build.yaml up -d --build
+docker compose -f docker/compose.yaml -f docker/compose.build.yaml up -d --build
 ```
 
-需要验证未发布的改动、GHCR 包还没公开或者机器拉不到 GHCR 时用它。Compose 项目名取第一个文件所在的目录名，同一目录里在两种方式之间切换会沿用原来的卷；虚拟电脑在下次准备时换成新的批准镜像，工作卷和代次不变。以前在仓库根目录用 `docker compose up --build -d` 部署的实例，更新代码后如果只运行 `docker compose up -d`，会改为拉取已发布镜像；要继续从源码构建，就用上面的命令。
+需要验证未发布的改动、GHCR 包还没公开或者机器拉不到 GHCR 时用它。未传 `-p` 或 `--project-directory` 时，Compose 默认以第一个文件所在的 `docker/` 为项目目录和项目名；若需以仓库检出根目录作为 Compose 工作目录和 `.env` 读取基准（例如沿用以前在仓库根目录部署的项目名与卷，或配合工作树部署工具记录工作树路径），运行 `BOT_BUILD_CONTEXT=. docker compose --project-directory . -f docker/compose.yaml -f docker/compose.build.yaml up -d --build`。同一项目名下在已发布镜像与源码构建两种方式之间切换会沿用原来的卷；虚拟电脑在下次准备时换成新的批准镜像，工作卷和代次不变。
 
 ## 版本发布与服务器部署
 
@@ -38,7 +38,7 @@ docker compose -f compose.yaml -f compose.build.yaml up -d --build
 
 要给某次推送到 `main` 的最新提交打标签：合并队列一次合入多个 PR 时只有最后一个提交发布镜像，`main` 的新推送也会取消旧提交还没完成的发布，这些提交打标签会失败。
 
-部署经 SSH 把该版本的 `compose.yaml` 写到服务器目录，在同目录 `.env` 里写入 `BOT_IMAGE_TAG=<版本>`（其他设置保留），然后运行 `docker compose pull`，清理上次中断留下的替换容器，再运行 `docker compose up -d --force-recreate`，等 `bot` 的健康检查通过。服务器上这两条命令由 GNU coreutils 的 `timeout` 限时：pull 最多 15 分钟，重建最多 35 分钟（manager 可能用满 30 分钟的启动宽限），再加上 `bot` 最多 85 分钟的健康等待（含每轮两次 `docker inspect` 往返约 88 分钟），都算在部署步骤的 145 分钟里。到点先发 SIGTERM，30 秒宽限期后仍未退出就以 SIGKILL 结束，本次部署以非零状态失败（正常到点是 124，用到宽限期时是 137），与健康检查失败的报错分开；排除原因后重跑同一次运行即可收敛。`compose.yaml` 每次发布都会被覆盖，服务器自己的设置放在 `.env` 或 `compose.override.yaml`。
+部署经 SSH 把该版本的 `docker/compose.yaml` 写到服务器目录的 `compose.yaml`，在同目录 `.env` 里写入 `BOT_IMAGE_TAG=<版本>`（其他设置保留），然后运行 `docker compose pull`，清理上次中断留下的替换容器，再运行 `docker compose up -d --force-recreate`，等 `bot` 的健康检查通过。服务器上这两条命令由 GNU coreutils 的 `timeout` 限时：pull 最多 15 分钟，重建最多 35 分钟（manager 可能用满 30 分钟的启动宽限），再加上 `bot` 最多 85 分钟的健康等待（含每轮两次 `docker inspect` 往返约 88 分钟），都算在部署步骤的 145 分钟里。到点先发 SIGTERM，30 秒宽限期后仍未退出就以 SIGKILL 结束，本次部署以非零状态失败（正常到点是 124，用到宽限期时是 137），与健康检查失败的报错分开；排除原因后重跑同一次运行即可收敛。`compose.yaml` 每次发布都会被覆盖，服务器自己的设置放在 `.env` 或 `compose.override.yaml`。
 
 部署要能重跑。Compose 重建一个容器时，先以 `<旧容器 id>_<项目>-<服务>-<序号>` 创建替换容器，再删掉旧容器，最后把替换容器改回 `<项目>-<服务>-<序号>`。中途退出（例如 Docker 停不掉某个容器）会给同一个服务留下第二个容器：普通 `up -d` 会沿用它并保留临时名，`--force-recreate` 则会因为旧容器还占着名字而失败。所以部署在 `up` 之前，先删掉本项目服务中名字不是 `<项目>-<服务>-<序号>` 的容器（只查 `docker compose ps` 列出的服务容器，不碰 manager 创建的项目电脑；替换容器没有数据，数据都在卷里），再用 `--force-recreate` 按该版本的 `compose.yaml` 重建全部服务。发布本来就会换掉所有镜像标签，每个容器都会重建，所以正常部署的停机时间不会因此增加。部署中断或失败后，先看日志排除原因，然后在 Actions 里对该次 Release 运行选择 Re-run failed jobs，只重跑 deploy 任务即可恢复到该版本，不需要上服务器手工处理。任何一步失败时，日志末尾都有 `docker compose ps -a` 列出的每个容器及其状态；`bot` 容器停止，或 85 分钟内没有变为健康时，还会附上它最近 50 行日志；等待期间每分钟输出一次压缩进度（见[启动时压缩数据库](#启动时压缩数据库)）。manager 启动时要逐个恢复已保存的项目，期间 `up -d` 等它健康后才启动 `bot`，这段等待算在 `up -d` 里。`npm run test:deploy:docker` 用真实 Docker Compose 验收这一步，见[开发说明](development.md)。
 
@@ -75,7 +75,7 @@ Compose 只发布这一个端口，宿主端口默认 `8791`，默认只绑定�
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `BOT_IMAGE_TAG` | `latest` | 所有镜像的标签：版本（如 `v1.2.0`）或 `sha-<12 位提交>`；也传给控制面进程，「全局设置」显示它作为当前运行版本。叠加 `compose.build.yaml` 时不选择镜像，控制面收到空值，页面显示源码运行 |
+| `BOT_IMAGE_TAG` | `latest` | 所有镜像的标签：版本（如 `v1.2.0`）或 `sha-<12 位提交>`；也传给控制面进程，「全局设置」显示它作为当前运行版本。叠加 `docker/compose.build.yaml` 时不选择镜像，控制面收到空值，页面显示源码运行 |
 | `BOT_PORT` | `8791` | 唯一业务端口的宿主端口 |
 | `BOT_BIND_ADDRESS` | `127.0.0.1` | 业务端口的宿主绑定地址；只有反向代理在另一台机器时才改为 `0.0.0.0` 或具体网卡地址 |
 | `BOT_PUBLIC_ORIGIN` | 空 | 部署的统一入口 origin，例如 `https://bot.example.com`，不含路径；只允许 HTTPS，本机测试可用 `http://localhost` 或 `http://127.0.0.1`（可带端口），格式不符时控制面拒绝启动。它始终是写请求的合法 Origin；向导尚未验证公网地址时，也用于 GitHub 登录回调和消息链接。向导验证过的地址优先用于生成这些 URL |
@@ -106,7 +106,7 @@ Compose 只发布这一个端口，宿主端口默认 `8791`，默认只绑定�
 
 ## 服务、卷与隔离
 
-Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一次性的 `key-init` 与 `project-image`。`key-init` 首次启动时生成主密钥和内部认证。`project-image` 仅确保批准的项目镜像已在本机 Docker 中（`compose.yaml` 拉取，加上 `compose.build.yaml` 时构建），不是某个仓库的长期环境。`tunnel` 在向导保存 Cloudflare Tunnel token 之前不连接任何账号；它只在独立的 `edge` 网络，经 `webhook` 入口网关固定转发到 `bot:8791`，不能直接连接 bot 或 manager。manager 按仓库创建动态项目容器，按群或私信的归属创建短时的助手电脑容器（无网络，空闲到期即删除），它们都不属于 Compose 静态服务，不对宿主或公网发布端口；manager 启动时删除上次留下的助手电脑。
+Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一次性的 `key-init` 与 `project-image`。`key-init` 首次启动时生成主密钥和内部认证。`project-image` 仅确保批准的项目镜像已在本机 Docker 中（`docker/compose.yaml` 拉取，加上 `docker/compose.build.yaml` 时构建），不是某个仓库的长期环境。`tunnel` 在向导保存 Cloudflare Tunnel token 之前不连接任何账号；它只在独立的 `edge` 网络，经 `webhook` 入口网关固定转发到 `bot:8791`，不能直接连接 bot 或 manager。manager 按仓库创建动态项目容器，按群或私信的归属创建短时的助手电脑容器（无网络，空闲到期即删除），它们都不属于 Compose 静态服务，不对宿主或公网发布端口；manager 启动时删除上次留下的助手电脑。
 
 `bot-data` 保存控制面 SQLite、仓库 Git 镜像（`/data/git-cache`，只是缓存，删掉后任务会重新从 GitHub 拉取；控制面进程的 `BOT_GIT_CACHE_DIR` 可改位置）以及任务浏览器截图证据（`browser-evidence/`，与轨迹正文共用保留窗口），`bot-keys` 保存加密主密钥，仅 bot 可读；`internal-keys` 保存 bot 与 manager 的内部认证，manager 不挂载上游凭据或控制面数据库。`manager-data` 保存环境和操作账本。`assistant-homes` 保存群聊助手和管理助手电脑的持久 HOME（每个群或每个人一个目录，按代次分子目录）：bot 以与这些电脑相同的用户（10001）读写挂载，manager 只读挂载，用来找到卷名，并为每台助手电脑只挂入一个归属当前代次的子目录（Docker 卷 subpath，需要 Engine API 1.45 及以上）。`agent-tools` 保存受信任的 Agent CLI（Claude Code 及其绑定 Node 运行时、Codex 静态二进制）多版本目录与来源 `manifest.json`（#705）：bot 以用户 10001 读写挂载在 `/opt/agent-tools`，仅经哈希校验后的超级管理员安装接口写入；manager 只读挂载在 `/opt/agent-tools` 以核验该卷的 Compose／平台标签，并将其只读挂入每台项目电脑和按运行隔离的 `RunEnvironments` 容器的 `/opt/agent-tools`，任务进程无权修改。`tunnel-keys` 只放 Cloudflare Tunnel token 文件。每个环境代次拥有独立具名工作卷和内部网络，标签同时绑定部署、仓库 ID、代次和资源类型。部署 ID 从独立内部认证材料派生，不同部署不会共用资源名。
 
@@ -192,7 +192,7 @@ runner 只接受 48 位十六进制的目录名，只删除 `/workspace/tasks` �
    - `BOT_ADMIN_ORIGIN` 改名为 `BOT_PUBLIC_ORIGIN`，值改为统一入口（不再是独立管理域名，也不再指向 `8792`）。旧名在 v0.3.0 之前仍会读取，并在日志里提示改名；两者同时设置且不同时控制面拒绝启动，日志写明原因。
    - 以前依赖 Webhook 端口绑定 `0.0.0.0`、反向代理在另一台机器的部署，设置 `BOT_BIND_ADDRESS=0.0.0.0` 并用防火墙限制来源。同机反向代理和 Cloudflare Tunnel 不需要这一项。
 2. 改入口：自建反向代理把统一域名整个转发到 `http://<这台机器>:8791`。原来指向 `8792` 的独立管理域名可以删除，也可以同样改为转发到 `8791`：它仍能登录和写入，但 GitHub 回调和生成的链接都用统一入口。Cloudflare Tunnel 的 Published application 继续用 `http://webhook:8791`，删除指向管理端口的路由。本机书签和 SSH 端口转发从 `8792` 改为 `8791`。
-3. 运行 `docker compose pull` 和 `docker compose up -d`（源码构建时叠加 `compose.build.yaml`）。
+3. 运行 `docker compose pull` 和 `docker compose up -d`（源码构建时叠加 `docker/compose.build.yaml`）。
 4. 在「全局设置 → 公网接入」确认统一入口已验证。新的检查只核对 HTTPS 和本实例的一次性凭证，不再因为入口提供管理页面而失败。
 5. 在独立 OAuth App 设置里：Authorization callback URL 改为 `<统一入口>/auth/github/callback`；仓库 GitHub App 的 Setup URL 改为 `<统一入口>/onboarding/github/setup`，点「Save changes」。Webhook URL 不在统一入口下时，到「机器人账号」点当前 App 的「重新检查」。确认没人再用旧地址后，再删除旧的 Callback URL。
 6. 打开「接入向导 → GitHub 登录」。为独立控制台地址保存过的配置会同时列出旧、新 Callback URL；完成第 5 步后点一次「保存登录配置」，提示消失。只在本机测试、没有公网入口、以 `http://127.0.0.1:8792` 保存过登录配置的部署，从 `http://127.0.0.1:8791` 打开这一步保存一次，并把 OAuth App 的 Authorization callback URL 改成页面显示的新地址。

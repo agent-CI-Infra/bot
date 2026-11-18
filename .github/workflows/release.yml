@@ -214,7 +214,7 @@ jobs:
           dir=$(printf %q "$DEPLOY_PATH")
 
           # The compose.yaml of the release replaces the server's; local changes belong in .env or compose.override.yaml.
-          remote "mkdir -p $dir && cat > $dir/compose.yaml.next && mv $dir/compose.yaml.next $dir/compose.yaml" < compose.yaml
+          remote "mkdir -p $dir && cat > $dir/compose.yaml.next && mv $dir/compose.yaml.next $dir/compose.yaml" < docker/compose.yaml
           remote "bash -s -- $dir $(printf %q "$TAG")" <<'SCRIPT'
           set -euo pipefail
           cd "$1"

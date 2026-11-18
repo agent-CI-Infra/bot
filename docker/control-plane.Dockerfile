@@ -43,7 +43,7 @@ COPY runner/command-policy.mjs runner/command-output.mjs runner/browser-policy.m
 # The control plane compacts control.sqlite at start with the manager's routine (#671).
 COPY manager/compaction.mjs ./manager/compaction.mjs
 COPY scripts/external-token.mjs ./scripts/external-token.mjs
-COPY scripts/bot-chromium.sh /usr/local/bin/bot-chromium
+COPY docker/bot-chromium.sh /usr/local/bin/bot-chromium
 RUN chmod 755 /usr/local/bin/bot-chromium
 ENV BOT_BROWSER_EXECUTABLE=/usr/local/bin/bot-chromium
 # The entry gateway service runs from this image too (node webhook/main.mjs), as its own container.
