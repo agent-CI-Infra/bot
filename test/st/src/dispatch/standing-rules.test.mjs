@@ -7,6 +7,7 @@ import { harness, setup, account, repository } from '../../../fixtures/helpers.m
 import { configureDispatch, Dispatcher } from '../../../../dist/dispatch/worker.js';
 import { queueWebhook } from '../../../../dist/review/queue.js';
 import { builtinRules } from '../../../../dist/dispatch/rules.js';
+import { nativeRoles } from '../../../fixtures/native-roles.mjs';
 
 configureDispatch(null);
 
@@ -17,6 +18,8 @@ const call = (name, args, id) => ({ role: 'assistant', content: null, tool_calls
 
 async function fixture(t) {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  // The Manager decides in process here; on the default Pi backend it needs a project computer (#1068).
+  nativeRoles(h.store, '101');
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true });
   const requests = [], state = { message: null };
   const provider = createServer(async (req, res) => {

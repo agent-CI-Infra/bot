@@ -6,8 +6,9 @@ import { selectedModel, visibleModel, openModel } from '../agent/model.js';
 import { rolePool, systemInstructions, roleTemplate, requiredRoles, configuredRoles } from './pool.js';
 import { roleKind, builtinKinds, environmentProfiles, budgetPolicies, outputSchemas, allowedFor, type RoleKind } from './catalog.js';
 import { harnesses } from './harness.js';
-import { defaultPermissions, migratePermissions, githubReadScopes, validPermissionInput, updatePermissions, permissionSnapshot, permitsTool, type RolePermissions } from './permissions.js';
+import { defaultPermissions, migratePermissions, normalizePermissions, githubReadScopes, validPermissionInput, updatePermissions, permissionSnapshot, permitsTool, type RolePermissions } from './permissions.js';
 import { recommendedBackend, plannedBackend } from './backends.js';
+import { earlierTemplates, earlierPermissions } from './earlier-defaults.js';
 import { validateStages, type StageDefinition } from './stage-policy.js';
 import { cachedRuleFiles } from '../rules/service.js';
 import { assertHarnessModelSourceImplemented, isHarnessModelSource, type HarnessModelSource } from '../harness/subscription.js';
@@ -34,7 +35,8 @@ export interface RoleDefinitionV2 {
 export type Entry = 'development' | 'request' | 'review' | 'actions';
 export interface RoleConfiguration {
   // enabled/entries remain readable in historical task snapshots; current projects always use the Manager.
-  schema: 2; revision: number; enabled: boolean; legacy?: boolean;
+  // follows_default: the project has no configuration of its own and runs the current built-in defaults (#1068).
+  schema: 2; revision: number; enabled: boolean; legacy?: boolean; follows_default?: boolean;
   controller: { role: string; entries: Record<Entry, boolean> };
   required_stages?: StageDefinition[];
   roles: RoleDefinitionV2[];
@@ -61,6 +63,30 @@ const defaultHarness = () => recommendedBackend;
 const harnessRef = (id: string) => ({ id, version: harnesses.find(h => h.id === id)?.version ?? 'unregistered' });
 const definitionHash = ({ revision, ...rest }: RoleDefinitionV2) => short(rest);
 
+/**
+ * The recommended configuration (#1068), the only definition of it: what a project without a configuration of its own
+ * runs, what the console shows for it and what "restore defaults" returns to. It is built from the current code each
+ * time, so such a project follows built-in updates; a task keeps the copy it froze when it started. A role that has to
+ * run on another backend says so here, never by whether the project saved a configuration.
+ */
+export function defaultRoles(): RoleDefinitionV2[] {
+  return rolePool.map(({ id }) => {
+    const kind = roleKind(id), [name, responsibility] = names(id);
+    return { role_id: id, revision: 0, enabled: true, kind, name, responsibility, persona_prompt: roleTemplate(id), model_profile_ref: null, skill_bundle_ref: null,
+      harness_ref: harnessRef(defaultHarness()), permissions: defaultPermissions(id, kind),
+      // The review and Actions entries run the dev role's own backend, as a saved recommended configuration always did.
+      ...(id === 'dev' ? { entry_harness_source: 'role' as const } : {}),
+      environment_profile_ref: catalogRef(environmentProfiles, allowedFor(kind).environment[0]!), budget_policy_ref: catalogRef(budgetPolicies, 'entry-default'),
+      output_schema_ref: catalogRef(outputSchemas, id === 'coordinator' ? 'coordination-result' : allowedFor(kind).output[0]!) };
+  });
+}
+/** A stored "follow the defaults" record: a revision and who set it, no roles. Reading it expands the current defaults. */
+const followsDefault = (value: any) => value?.schema === 2 && !Array.isArray(value.roles);
+function defaultConfiguration(marker: { revision?: number; updated_at?: string; updated_by?: string }): RoleConfiguration {
+  return { schema: 2, revision: Number(marker.revision ?? 0), enabled: true, follows_default: true, controller: { role: 'manager', entries: managerEntries() },
+    required_stages: [], roles: defaultRoles(), skills: [], ...(marker.updated_at ? { updated_at: marker.updated_at, updated_by: marker.updated_by } : {}) };
+}
+
 export function roleStorageV2(s: Store) {
   s.db.exec(`
   CREATE TABLE IF NOT EXISTS role_config_revisions(repository_id TEXT NOT NULL,revision INTEGER NOT NULL,config TEXT NOT NULL,hash TEXT NOT NULL,actor TEXT,created_at TEXT NOT NULL,PRIMARY KEY(repository_id,revision));
@@ -69,8 +95,76 @@ export function roleStorageV2(s: Store) {
   `);
   resetBuiltinRolePermissions(s);
   actionsWriteFollowsIssues(s);
+  // After #381 and #1072 have brought saved permissions to the defaults it compares with.
+  followBuiltinDefaults(s);
   retireAcpRoleBindings(s);
   retireAcpTaskExecutionConfigs(s);
+}
+
+const canonical = (value: Record<string, unknown>) => JSON.stringify(Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : 1)));
+/**
+ * Whether a stored configuration is a built-in default nobody changed (#1068): the recommended configuration as it was
+ * when the project adopted it, or as migrations later rewrote it. Read in its current form, it has exactly the built-in
+ * roles, no skills or required stages, and every role is enabled, keeps its built-in name, duty, environment, output and
+ * unlimited entry budget, has no model or skill of its own, runs the recommended backend through the gateway, and has
+ * the role's current or an earlier built-in prompt and permissions (earlier-defaults.ts). A legacy configuration from
+ * before RoleDefinitionV2 counts when it chose no backend and added no role or instructions. Everything else is a
+ * customisation.
+ */
+export function unmodifiedConfiguration(s: Store, repositoryId: string, stored: any, earlier = { templates: earlierTemplates, permissions: earlierPermissions }): boolean {
+  if (followsDefault(stored)) return true;
+  if (stored?.schema !== 2) return !!stored && typeof stored === 'object' && !Object.keys(stored.harnesses ?? {}).length
+    && (stored.roles ?? []).every((role: any) => !role?.prompt && rolePool.some(entry => entry.id === role?.id));
+  if (!Array.isArray(stored.roles) || (stored.skills ?? []).length || (stored.required_stages ?? []).length || (stored.controller?.role ?? 'manager') !== 'manager') return false;
+  const current = roleConfiguration(s, repositoryId, stored).roles, builtin = defaultRoles();
+  if (current.length !== builtin.length) return false;
+  return builtin.every(want => {
+    const role = current.find(entry => entry.role_id === want.role_id);
+    if (!role || !role.enabled || role.name !== want.name || role.responsibility !== want.responsibility || role.model_profile_ref || role.skill_bundle_ref) return false;
+    if (role.harness_ref?.id !== want.harness_ref.id || (role.harness_ref.model_source ?? 'gateway') !== 'gateway') return false;
+    if (role.environment_profile_ref?.id !== want.environment_profile_ref.id || role.output_schema_ref?.id !== want.output_schema_ref.id) return false;
+    if (role.budget_policy_ref?.id !== want.budget_policy_ref.id || Object.keys(role.budget_policy_ref).some(key => !['id', 'version'].includes(key))) return false;
+    const permissions = canonical(normalizePermissions(role.permissions));
+    if (![{}, ...(earlier.permissions[want.role_id] ?? [])].some(change => canonical(normalizePermissions({ ...want.permissions, ...change })) === permissions)) return false;
+    return role.persona_prompt === want.persona_prompt || (earlier.templates[want.role_id] ?? []).includes(sha256(role.persona_prompt).slice(0, 16));
+  });
+}
+
+/**
+ * Turns one project to the built-in defaults under a new revision; earlier revisions and their audit rows stay. A stored
+ * configuration without a revision row of its own (one from before RoleDefinitionV2, revision 0) is kept as the next
+ * revision first, in the form it is read in, so it stays readable through `?revision=` once the defaults replace it.
+ */
+function storeFollowDefault(s: Store, repositoryId: string, stored: any, revision: number, actor: string) {
+  const now = new Date().toISOString(), insert = 'INSERT INTO role_config_revisions VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING';
+  if (!s.get('SELECT 1 FROM role_config_revisions WHERE repository_id=? AND revision=?', repositoryId, revision)) {
+    const { updated_at, updated_by, ...kept } = { ...roleConfiguration(s, repositoryId, stored), revision: ++revision };
+    s.run(insert, repositoryId, revision, JSON.stringify({ ...kept, updated_at: now, updated_by: actor }), short(kept), actor, now);
+  }
+  const marker = { schema: 2 as const, revision: revision + 1, follows_default: true }, saved = { ...marker, updated_at: now, updated_by: actor };
+  s.run(insert, repositoryId, marker.revision, JSON.stringify(saved), short(marker), actor, now);
+  s.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', 'roles:' + repositoryId, JSON.stringify(saved));
+  return saved;
+}
+
+/**
+ * One-time migration (#1068): a project that saved the recommended configuration and never changed it froze that day's
+ * defaults. It now follows the built-in defaults like a project that never saved, under a new revision by
+ * 'migration:1068'. Customised projects stay as they are; running tasks keep the configuration they froze.
+ */
+export function followBuiltinDefaults(s: Store, earlier?: Parameters<typeof unmodifiedConfiguration>[3]) {
+  const marker = 'migration:1068:follow-builtin-defaults';
+  if (s.get('SELECT 1 FROM settings WHERE key=?', marker)) return;
+  s.transaction(() => {
+    for (const row of s.all("SELECT key,value FROM settings WHERE key LIKE 'roles:%'")) {
+      let stored: any; try { stored = JSON.parse(String(row.value)); } catch { continue; }
+      const repositoryId = String(row.key).slice('roles:'.length);
+      if (followsDefault(stored) || !unmodifiedConfiguration(s, repositoryId, stored, earlier)) continue;
+      const saved = storeFollowDefault(s, repositoryId, stored, Number(stored.schema === 2 ? stored.revision : 0), 'migration:1068');
+      s.audit('migration:1068', 'roles.follow_default', String(saved.revision), repositoryId);
+    }
+    s.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO NOTHING', marker, new Date().toISOString());
+  });
 }
 
 /**
@@ -223,22 +317,30 @@ export function actionsWriteFollowsIssues(s: Store) {
   });
 }
 
-/** Current project defaults use the Manager. An explicit stored value is a historical/task configuration, kept intact. */
+/**
+ * The project's role configuration. Without one of its own (no row, or a "follow the defaults" record) it is the current
+ * recommended configuration. An explicit stored value is a saved, historical or task configuration, kept intact.
+ */
 export function roleConfiguration(s: Store, repositoryId: string, stored?: any): RoleConfiguration {
   if (stored === undefined) {
     const saved = s.get('SELECT value FROM settings WHERE key=?', 'roles:' + repositoryId);
-    const config = roleConfiguration(s, repositoryId, saved ? JSON.parse(saved.value) : { enabled: false, harnesses: {} });
+    const config = roleConfiguration(s, repositoryId, saved ? JSON.parse(saved.value) : { schema: 2, revision: 0 });
     // Resolve the retired switches without rewriting revisions, permissions, event filters or frozen task snapshots.
     return { ...config, enabled: true, controller: { ...config.controller, entries: managerEntries() } };
   }
   const value = stored;
+  if (followsDefault(value)) return defaultConfiguration(value);
   if (value.schema === 2) {
     const roles = value.roles.map((role: any) => {
       const { capability_policy_ref, ...definition } = role;
       return { ...definition, permissions: migratePermissions(role), persona_prompt: role.permissions ? retireLegacyRoleGuidance(role.persona_prompt) : roleTemplate(role.role_id) + (role.persona_prompt ? '\nProject instructions:\n' + role.persona_prompt : '') };
     });
-    if (!roles.some((role: RoleDefinitionV2) => role.role_id === 'coordinator')) roles.push(roleConfiguration(s, repositoryId, { enabled: value.enabled, harnesses: {} }).roles.find(role => role.role_id === 'coordinator')!);
-    return { ...value, roles, skills: value.skills.map((bundle: any) => ({ ...bundle, source: skillSourceDescriptor(bundle.source, bundle) })) };
+    // A configuration saved before the coordinator existed runs the recommended one.
+    if (!roles.some((role: RoleDefinitionV2) => role.role_id === 'coordinator')) roles.push(defaultRoles().find(role => role.role_id === 'coordinator')!);
+    // Stored roles are fixed, even in a copy of the defaults (a task's frozen configuration, or one saved as read): only a
+    // record without roles follows the defaults.
+    const { follows_default, ...fixed } = value;
+    return { ...fixed, roles, skills: value.skills.map((bundle: any) => ({ ...bundle, source: skillSourceDescriptor(bundle.source, bundle) })) };
   }
   // Legacy: built-in prompts with appended project instructions, the per-role driver map, the native manager.
   const legacy = configuredRoles(value);
@@ -438,8 +540,8 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
     // Echoing an old V2 id (as the console does on every save) is not a new backend choice.
     if (id === 'dev' && (current.legacy || !previous?.harness_ref || previous.entry_harness_source === 'role' || harness!.id !== previous.harness_ref.id))
       definition.entry_harness_source = 'role';
-    // A role's revision moves only when its own definition changes.
-    definition.revision = previous && !current.legacy && definitionHash(previous) === definitionHash(definition) ? previous.revision : (previous?.revision ?? 0) + 1;
+    // A role's revision moves only when its own definition changes. Leaving the defaults saves every role for the first time.
+    definition.revision = previous && !current.legacy && !current.follows_default && definitionHash(previous) === definitionHash(definition) ? previous.revision : (previous?.revision ?? 0) + 1;
     return definition;
   });
   const controllerInput = input.controller ?? {};
@@ -455,19 +557,38 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
   return { config, added };
 }
 
-/** Saves a validated configuration as the next immutable revision. Running role runs keep the snapshot they started with. */
-export function saveConfiguration(s: Store, repositoryId: string, input: any, actor: string) {
+/** Drops the concurrency limits of roles the configuration no longer has. */
+function dropRoleLimits(s: Store, repositoryId: string, roles: string[]) {
+  if (!roles.length) return;
+  const raw = s.get('SELECT role_concurrency FROM policies WHERE repository_id=?', repositoryId)?.role_concurrency;
+  let limits: unknown;
+  try { limits = JSON.parse(String(raw ?? '{}')); } catch { limits = {}; }
+  if (limits && typeof limits === 'object' && !Array.isArray(limits)) {
+    for (const role of roles) delete (limits as Record<string, unknown>)[role];
+    s.run('UPDATE policies SET role_concurrency=? WHERE repository_id=?', JSON.stringify(limits), repositoryId);
+  }
+}
+
+/**
+ * Saves a validated configuration as the next immutable revision; it is the project's own from then on and no longer
+ * follows built-in updates. `{expected_revision, follow_default: true}` instead returns the project to the built-in
+ * defaults under the next revision; the custom revisions stay in the history. Running role runs keep their snapshot.
+ */
+export function saveConfiguration(s: Store, repositoryId: string, input: any, actor: string): RoleConfiguration {
   return s.transaction(() => {
-    const current = roleConfiguration(s, repositoryId), { config, added } = normalizeConfiguration(s, repositoryId, input, current), now = new Date().toISOString();
-    if (input.deleted_roles?.length) {
-      const raw = s.get('SELECT role_concurrency FROM policies WHERE repository_id=?', repositoryId)?.role_concurrency;
-      let limits: unknown;
-      try { limits = JSON.parse(String(raw ?? '{}')); } catch { limits = {}; }
-      if (limits && typeof limits === 'object' && !Array.isArray(limits)) {
-        for (const role of input.deleted_roles as string[]) delete (limits as Record<string, unknown>)[role];
-        s.run('UPDATE policies SET role_concurrency=? WHERE repository_id=?', JSON.stringify(limits), repositoryId);
-      }
+    const current = roleConfiguration(s, repositoryId);
+    if (input?.follow_default !== undefined) {
+      const extra = Object.keys(input).find(k => !['expected_revision', 'follow_default'].includes(k)); if (extra) invalid('unknown_field', extra);
+      if (input.follow_default !== true) invalid('invalid_role_configuration', 'follow_default');
+      if (!Number.isSafeInteger(input.expected_revision) || input.expected_revision < 0) invalid('expected_revision_required', 'expected_revision');
+      if (input.expected_revision !== current.revision) fail(409, 'role_configuration_conflict', 'expected_revision');
+      if (current.follows_default) return current;
+      dropRoleLimits(s, repositoryId, current.roles.map(role => role.role_id).filter(id => !rolePool.some(role => role.id === id)));
+      const stored = JSON.parse(String(s.get('SELECT value FROM settings WHERE key=?', 'roles:' + repositoryId)!.value));
+      return roleConfiguration(s, repositoryId, storeFollowDefault(s, repositoryId, stored, current.revision, actor));
     }
+    const { config, added } = normalizeConfiguration(s, repositoryId, input, current), now = new Date().toISOString();
+    if (input.deleted_roles?.length) dropRoleLimits(s, repositoryId, input.deleted_roles as string[]);
     for (const bundle of added) s.run('INSERT INTO skill_bundle_revisions VALUES(?,?,?,?,?,?,?)', repositoryId, bundle.id, bundle.revision, JSON.stringify(bundle.source), JSON.stringify(bundle.files.map((f: any) => ({ path: f.path, sha256: sha256(f.content), bytes: Buffer.byteLength(f.content), content: f.content }))), bundle.content_hash, now);
     const saved = { ...config, updated_at: now, updated_by: actor };
     s.run('INSERT INTO role_config_revisions VALUES(?,?,?,?,?,?)', repositoryId, saved.revision, JSON.stringify(saved), short(config), actor, now);

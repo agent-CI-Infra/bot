@@ -9,11 +9,12 @@ import {assertRequestPullRequest} from '../../../../dist/tasks/pull-request.js';
 import {taskPermissions} from '../../../../dist/tasks/configuration.js';
 import {TaskError} from '../../../../dist/agent/common.js';
 import {roleConfiguration} from '../../../../dist/roles/definition.js';
+import { nativeRoles } from '../../../fixtures/native-roles.mjs';
 function fixture(t){
  const s=new Store(':memory:',Buffer.alloc(32,7));t.after(()=>s.close());
- s.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,'{}','now')");s.run("INSERT INTO repositories VALUES('r','fixture/r','1','a')");
+ s.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,'{}','now')");s.run("INSERT INTO repositories VALUES('r','fixture/r','1','a')");nativeRoles(s,'r');
  s.run("INSERT INTO policies(repository_id,enabled,development_enabled) VALUES('r',1,1)");
- const cfg=roleConfiguration(s,'r');cfg.enabled=true;s.run("INSERT INTO settings VALUES('roles:r',?)",JSON.stringify(cfg));
+ const cfg=roleConfiguration(s,'r');cfg.enabled=true;s.run("UPDATE settings SET value=? WHERE key='roles:r'",JSON.stringify(cfg));
  s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('parent','r','development.issue','running','Full roadmap','{}')");
  new TaskRecords(s).contract('parent',{goal:'Full roadmap',scope:['Full roadmap'],criteria:['Both capabilities and integration'],endpoint:'reviewable_pull_request'});
  const caller=roleTaskCaller(s,'r','manager',{source_task_id:'parent',guard(){if(s.get("SELECT status FROM tasks WHERE id='parent'").status==='cancelled')throw new TaskError('task_claim_revoked','cancelled');}});

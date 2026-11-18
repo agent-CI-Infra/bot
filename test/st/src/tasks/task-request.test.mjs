@@ -15,6 +15,7 @@ import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { LocalManager } from '../../../../dist/projects/local-manager.js';
 import { server as github } from '../../../fixtures/agent-server.mjs';
 import { configureModelRetry } from '../../../../dist/agent/runtime.js';
+import { nativeRoles } from '../../../fixtures/native-roles.mjs';
 
 const pass={outcome:'pass',reason:'Read the actual submitted report from its pinned Git object',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
 const call=(name,args,id)=>({role:'assistant',content:null,tool_calls:[{id,type:'function',function:{name,arguments:JSON.stringify(args)}}]});
@@ -83,6 +84,8 @@ test('historical ordinary tasks omit retired guidance, correct invalid paths, an
  model.listen(0,'127.0.0.1');await once(model,'listening');t.after(()=>new Promise(r=>{model.close(r);model.closeAllConnections();}));
  store.run('INSERT INTO accounts VALUES(?,?,?,?,?,?)','a','fixture','bot_account',null,store.secrets.seal({token:'fixture-github-token'},'account:a'),'now');
  store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
+  // These historical tasks and the follow-ups they create run in process, as they did before #1068.
+  nativeRoles(store,'101');
  store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101','http://127.0.0.1:'+model.address().port+'/v1','fixture',store.secrets.seal({value:'fixture-model-token'},'model:m'),'now');
  store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
  const memorySeed=new ProjectMemory(store,{actor:knowledgeActor(store,'owner','101')}).save('101','memory.reuse',{kind:'implementation',body:'Inspect calc.mjs and actual observations before reporting. fixture-model-token',sources:[{reference:'controlled repository fixture'}],scope:{module:'memory'}},0,'user:owner','seed retrieval integration');
@@ -132,6 +135,10 @@ test('historical ordinary tasks omit retired guidance, correct invalid paths, an
 });
 
 test('default and saved-disabled projects execute an ordinary request with Manager, Dev and fresh QA',async t=>{
+ // Without a configuration the roles run the recommended Pi backend (#1068); its sessions reach this fixture model
+ // through the control plane's model relay.
+ const transport=process.env.BOT_HARNESS_MODEL_TRANSPORT;process.env.BOT_HARNESS_MODEL_TRANSPORT='gateway';
+ t.after(()=>{if(transport===undefined)delete process.env.BOT_HARNESS_MODEL_TRANSPORT;else process.env.BOT_HARNESS_MODEL_TRANSPORT=transport;});
  for(const saved of [false,true])await t.test(saved?'saved disabled coordination':'no role configuration',async t=>{
   const root=mkdtempSync(join(tmpdir(),'manager-default-')),store=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root);
   github.listen(0,'127.0.0.1');await once(github,'listening');
@@ -142,14 +149,22 @@ test('default and saved-disabled projects execute an ordinary request with Manag
    const toolResults=messages.filter(m=>m.role==='tool').map(m=>{try{return JSON.parse(m.content);}catch{return {};}});
    const names=messages.filter(m=>m.role==='assistant').flatMap(m=>m.tool_calls||[]).map(c=>c.function.name);
    let message;
+   // Native sends text content; a Pi session sends content parts (the default backend since #1068).
+   const text=content=>typeof content==='string'?content:Array.isArray(content)?content.map(part=>part?.text??'').join(''):'';
    if(body.tools?.some(tool=>tool.function.name==='delegate_role')){
-    const ref=toolResults.find(result=>result.result_ref)?.result_ref;
-    message=!ref?call('delegate_role',{role:'dev',purpose:'Write the requested report',refs:[JSON.parse(messages[1].content).task_ref]},'delegate')
+    const ref=toolResults.find(result=>result.result_ref)?.result_ref,input=messages.filter(m=>m.role==='user').map(m=>{try{return JSON.parse(text(m.content));}catch{return null;}}).find(value=>value?.task_ref);
+    message=!ref?call('delegate_role',{role:'dev',purpose:'Write the requested report',refs:[input.task_ref]},'delegate')
      :!names.includes('read_task_record')?call('read_task_record',{ref},'read-result'):call('nominate_delivery',{result_ref:ref},'nominate');
-   }else if(messages[0].content.includes('independent delivery acceptance evaluator')){
-    message=!names.includes('read_file')?call('read_file',{path:'report.md'},'qa-read'):{role:'assistant',content:JSON.stringify(pass)};
-   }else message=!names.includes('write_file')?call('write_file',{path:'report.md',content:'Observed repository fact: calc.mjs contains arithmetic.'},'write')
-    :call('submit_delivery',{summary:'Observed report',artifacts:[{path:'report.md',description:'Observed report'}],evidence:[],unknowns:[]},'submit');
+   }else if(text(messages[0].content).includes('independent delivery acceptance evaluator')){
+    // A Pi session submits through the offered tool; the in-process loop also takes the verdict as text.
+    const tools=(body.tools??[]).map(tool=>tool.function.name);
+    message=!names.includes('read_file')?call('read_file',{path:'report.md'},'qa-read'):tools.includes('submit_acceptance')?call('submit_acceptance',pass,'qa-verdict'):{role:'assistant',content:JSON.stringify(pass)};
+   }else{
+    // Pi writes with its own file tool, the in-process loop with write_file.
+    const write=(body.tools??[]).some(tool=>tool.function.name==='write_file')?'write_file':'write';
+    message=!names.includes(write)?call(write,{path:'report.md',content:'Observed repository fact: calc.mjs contains arithmetic.'},'write')
+     :call('submit_delivery',{summary:'Observed report',artifacts:[{path:'report.md',description:'Observed report'}],evidence:[],unknowns:[]},'submit');
+   }
    res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message}]}));
   });
   model.listen(0,'127.0.0.1');await once(model,'listening');
@@ -166,6 +181,8 @@ test('default and saved-disabled projects execute an ordinary request with Manag
   await engine.run('request','claim');
   assert.equal(new TaskRecords(store).get('request').progress.status,'completed',JSON.stringify(store.all("SELECT content FROM task_logs WHERE task_id='request'")));
   assert.deepEqual(store.all("SELECT DISTINCT role FROM task_runs WHERE task_id='request' AND role IS NOT NULL ORDER BY role").map(row=>row.role),['dev','manager','qa']);
+  // The defaults run every role on the recommended backend; the legacy configuration kept Native.
+  assert.deepEqual(store.all("SELECT DISTINCT role,harness FROM task_runs WHERE task_id='request' AND role IS NOT NULL ORDER BY role").map(row=>row.role+':'+row.harness),['dev','manager','qa'].map(role=>role+':'+(saved?'native':'pi')));
   assert.equal(new TaskRecords(store).get('request').acceptance.outcome,'pass');
   assert.equal(store.get("SELECT actions_failures_enabled FROM policies WHERE repository_id='101'").actions_failures_enabled,0);
  });

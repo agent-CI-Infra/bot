@@ -4,11 +4,12 @@ import {roleHarness} from '../../../../dist/roles/harness.js';
 import {request as httpRequest} from 'node:http';
 import {roleApi} from '../../../../dist/roles/api.js';
 import {Store} from '../../../../dist/storage/database.js';import {TaskRecords} from '../../../../dist/tasks/service.js';import {runRole} from '../../../../dist/roles/run.js';import {Redactor,TaskError} from '../../../../dist/agent/common.js';import {managedSession} from '../../../../dist/harness/session.js';import {taskToolServer,createTaskToolDispatcher,handleMailboxToolRequest} from '../../../../dist/roles/task-tools.js';
+import { nativeRoles } from '../../../fixtures/native-roles.mjs';
 const tool=name=>({type:'function',function:{name,description:name,parameters:{type:'object',properties:{},additionalProperties:true}}});
 function fixture(t,env={}){
  const root=mkdtempSync(join(tmpdir(),'bot-harness-')),key=randomBytes(32),file=join(root,'db'),codexHome=join(root,'codex-home'),sessions=join(root,'sessions');
  mkdirSync(codexHome,{recursive:true,mode:0o700});mkdirSync(sessions,{recursive:true,mode:0o700});
- let s=new Store(file,key);s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('r','fixture/OpenToday','o','a')");s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('t','r','task.request','running','harness fixture','{}')");new TaskRecords(s).contract('t',{goal:'harness fixture',scope:['fixture'],criteria:['Read the task fact'],endpoint:'artifact'});
+ let s=new Store(file,key);s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('r','fixture/OpenToday','o','a')");nativeRoles(s,'r');s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('t','r','task.request','running','harness fixture','{}')");new TaskRecords(s).contract('t',{goal:'harness fixture',scope:['fixture'],criteria:['Read the task fact'],endpoint:'artifact'});
  const config=join(root,'codex.json');
  const writeConfig=(extraEnv=env)=>writeFileSync(config,JSON.stringify({command:process.execPath,args:[resolve('test/fixtures/codex-app-server.mjs'),'app-server'],version:'0.166.0',env:{CODEX_HOME:codexHome,...extraEnv},stateDirectory:sessions,cancelGraceMs:400,toolStartupMs:3000}));
  writeConfig();

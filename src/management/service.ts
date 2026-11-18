@@ -131,7 +131,7 @@ export class ManagementService {
       workflows:work.map(w=>({...w,
       prompt:{...w.prompt,version:w.prompt.source==='repository'?sources.sha:parameterHash(w.prompt.effective),layers:w.prompt.layers.map(({content,...l}:any)=>({...l,version:l.source==='repository'?sources.sha:parameterHash(content)}))},
       model:{...w.model,source:w.model.id||w.model.default_id?'console':'builtin',version:this.store.get('SELECT version FROM models WHERE id=?',w.model.id||w.model.default_id)?.version??null}})),
-      roles:{...roles,version:parameterHash(roles.configuration),roles:roles.configuration.roles.map((r:any)=>({...r,source:!roles.configuration.legacy||r.persona_prompt?'console':'builtin'}))},
+      roles:{...roles,version:parameterHash(roles.configuration),roles:roles.configuration.roles.map((r:any)=>({...r,source:roles.configuration.follows_default?'builtin':'console'}))},
       skills:rules.files.filter((f:any)=>f.path.startsWith('.agents/skills/')).map((f:any)=>({path:f.path,source:f.source,version:sources.sha,content:f.effective})),
       sources,capability_gaps:[...new Set(roles.preview.filter(r=>r.error).map(r=>r.error))],semantics:{defaults:'只影响之后新建的任务。',instructions:'追加记录，不改写旧 run 快照；后续步骤读取。',contract:'增加合同 revision，清除旧候选和验收。',adopt_config:'先暂停并等待旧执行结束，再显式采用新配置 revision。'}});
   }
@@ -272,7 +272,8 @@ export class ManagementService {
             notice:'Manager 配置已保存为第 '+saved.revision+' 版，只影响之后的分派和新建任务；已有 run 保留原配置。'};
         }else if(operation==='roles.update'){
           const allowed=JSON.parse(this.policy(actor,target.project_id)?.role_fields??'["enabled","controller","roles","skills","required_stages"]');
-          if(Object.keys(args).some(k=>k!=='expected_revision'&&!allowed.includes(k==='deleted_roles'?'roles':k)))fail(403,'role_setting_forbidden');
+          // Deleting roles and restoring the defaults (#1068) both rewrite the roles.
+          if(Object.keys(args).some(k=>k!=='expected_revision'&&!allowed.includes(['deleted_roles','follow_default'].includes(k)?'roles':k)))fail(403,'role_setting_forbidden');
           result=roleApi(this.store,user,'PUT',new URL('http://local/api/repositories/'+target.project_id+'/roles'),args)!;
           result={...result,effect:'future_tasks'};
         }else if(operation.startsWith('task.')){

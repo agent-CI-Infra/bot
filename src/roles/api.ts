@@ -12,7 +12,7 @@ import {rolePool,systemInstructions,roleTemplate,requiredRoles} from './pool.js'
 import {capabilityNames} from './protocol.js';
 import {catalog} from './catalog.js';
 import {defaultPermissions} from './permissions.js';
-import {roleConfiguration,saveConfiguration,configurationRevision,resolveRole,modelProfileHash} from './definition.js';
+import {roleConfiguration,saveConfiguration,configurationRevision,resolveRole,modelProfileHash,defaultRoles} from './definition.js';
 import {cachedRuleFiles} from '../rules/service.js';
 // A resolve error names the configuration field before "：" in its detail; the API returns it as field.
 const resolveError=(error:unknown):never=>{if(error instanceof TaskError)fail(409,error.code,/^(roles\.[^：]+)：/.exec(error.detail??'')?.[1]);throw error;};
@@ -29,7 +29,9 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
   }
   if(method==='GET'){
    const revision=url.searchParams.get('revision');
-   if(revision!==null){if(!/^\d+$/.test(revision))fail(400,'invalid_revision');const old=configurationRevision(s,repo,Number(revision));if(!old)fail(404,'role_configuration_revision_not_found');return {configuration:old};}
+   if(revision!==null){if(!/^\d+$/.test(revision))fail(400,'invalid_revision');const old=configurationRevision(s,repo,Number(revision));if(!old)fail(404,'role_configuration_revision_not_found');
+    // A "follow the defaults" revision stores no roles: it shows the defaults of the current version.
+    return {configuration:Array.isArray(old!.roles)?old:roleConfiguration(s,repo,old)};}
    const current=roleConfiguration(s,repo),workflow=url.searchParams.get('workflow')||'development.issue';
    const models=s.all(`SELECT m.id,m.model_name,m.api_url,m.version,m.updated_at,m.repository_id FROM models m WHERE m.api_key IS NOT NULL AND (m.repository_id=? OR (m.repository_id IS NULL AND (m.restricted=0 OR EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))) ORDER BY m.model_name,m.id`,repo,repo)
     .map(m=>({id:m.id,name:m.model_name,host:host(m.api_url),version:m.version,profile_hash:modelProfileHash(m),shared:m.repository_id==null,connectivity:modelConnectivity(s,repo,m)}));
@@ -39,8 +41,9 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
    const skill_inputs=current.skills.map(b=>{const row=s.get('SELECT source,files FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?',repo,b.id,b.revision),source=JSON.parse(row?.source??'{}'),files=JSON.parse(row?.files??'[]');
     return {id:b.id,source:['inline','builtin'].includes(source.type)?{type:'inline',files:files.map((f:any)=>({path:f.path,content:f.content}))}:{type:'repository',commit:source.commit,paths:source.paths}};});
     const can_edit=(()=>{try{if(user.context)authorize(user.context,'roles.edit',{project_id:repo});return true;}catch{return false;}})();
-    const builtIn=roleConfiguration(s,repo,{enabled:false,harnesses:{}}).roles;
-    return {configuration:current,configured:!!s.get('SELECT value FROM settings WHERE key=?','roles:'+repo),can_edit,revision:current.revision,workflow,preview,system_prompt:systemInstructions,role_templates:{observer:roleTemplate('observer'),...Object.fromEntries(rolePool.map(role=>[role.id,roleTemplate(role.id)]))},required_roles:requiredRoles,
+    const builtIn=defaultRoles();
+    // configured: the project has a configuration of its own; otherwise it follows the built-in defaults (#1068).
+    return {configuration:current,configured:!current.follows_default,can_edit,revision:current.revision,workflow,preview,system_prompt:systemInstructions,role_templates:{observer:roleTemplate('observer'),...Object.fromEntries(rolePool.map(role=>[role.id,roleTemplate(role.id)]))},required_roles:requiredRoles,
     // The editor shows only the permissions that differ from a role's defaults (#850): built-in roles read theirs from
     // role_defaults; this adds the defaults of the project's own roles, by kind. The management assistant reads this view
     // whole, so it stays as small as that.
@@ -49,7 +52,8 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
     skill_sources:{repository:source?{commit:source.sha,paths:Object.keys(source.files).filter(p=>p.startsWith('.agents/skills/'))}:null},
     revisions:s.all('SELECT revision,hash,actor,created_at FROM role_config_revisions WHERE repository_id=? ORDER BY revision DESC LIMIT 20',repo)};
   }
-  if(method==='PUT'){const saved=saveConfiguration(s,repo,input,user.id);s.audit(user.id,'roles.configure',String(saved.revision),repo);return {ok:true,configuration:saved};}
+  if(method==='PUT'){const before=roleConfiguration(s,repo).revision,saved=saveConfiguration(s,repo,input,user.id);
+   if(saved.revision!==before)s.audit(user.id,saved.follows_default?'roles.follow_default':'roles.configure',String(saved.revision),repo);return {ok:true,configuration:saved};}
   return fail(405,'method_not_allowed');
  }
  const apply=/^\/api\/tasks\/([^/]+)\/roles\/apply$/.exec(url.pathname);
