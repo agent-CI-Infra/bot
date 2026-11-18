@@ -1,3 +1,4 @@
+import { storageFootprint, managerLocations } from './storage-footprint.mjs';
 import { computerResultOwner } from '../runner/result-owner.mjs';
 import { lstat } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
@@ -136,6 +137,7 @@ export class Projects {
     this.scanning = null; this.dockerUsageAt = 0;
     mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(database); this.docker = docker; this.deployment = deployment; this.image = image;
+    this.databasePath = database;
     this.notesRoot = dirname(database) + '/project-notes';
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=${walSizeLimit};
       CREATE TABLE IF NOT EXISTS projects(repository_id TEXT PRIMARY KEY,generation INTEGER NOT NULL,state TEXT NOT NULL,desired TEXT NOT NULL,error TEXT,started_at TEXT);
@@ -560,6 +562,13 @@ export class Projects {
       this.db.prepare("INSERT INTO settings VALUES('docker_usage',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(usage));
     } catch (error) { logFailure('reading Docker disk usage failed', error); }
   }
+  refreshFootprint(now = Date.now()) {
+    if (!this.readingFootprint && (!this.footprint || now - Date.parse(this.footprint.measured_at) >= 3600_000)) {
+      this.readingFootprint = storageFootprint(this.databasePath, managerLocations(this.databasePath))
+        .then(result => { this.footprint = result; }).finally(() => { this.readingFootprint = null; });
+    }
+    return this.readingFootprint;
+  }
   async readContainers() { return readDockerContainers(this.docker); }
   async readVolumes() { return readDockerVolumes(this.docker); }
   // The approved image, or one derived from it with the project's system packages. Built once per package set and base image,
@@ -875,7 +884,7 @@ export class Projects {
   // Liveness check of idle computers only: one with runner calls in flight is skipped rather than queued behind them.
   async check() {
     for (const row of this.list()) if (['ready', 'busy'].includes(row.state)) this.prune(row.repository_id);
-    this.scanStorage(); void this.readDockerUsage();
+    this.scanStorage(); void this.readDockerUsage(); void this.refreshFootprint();
     await Promise.all(this.list().filter(p => p.state === 'ready' && !this.gates.has(p.repository_id)).map(row => this.lock(row.repository_id, async () => {
       const current = this.get(row.repository_id); if (current.state !== 'ready') return;
       try {
@@ -901,10 +910,10 @@ export class Projects {
     let wal = 0; try { wal = statSync(data + '/manager.sqlite-wal').size; } catch {}
     // The last scan of each computer's work volume, and Docker's images, containers and build cache, as the background work
     // left them.
-    const computers = this.db.prepare('SELECT repository_id,generation,scanned_at,result FROM computer_storage').all().map(row => ({ ...row, result: JSON.parse(row.result) }));
+    const computers = this.db.prepare('SELECT s.repository_id,s.generation,s.scanned_at,s.result FROM computer_storage s JOIN projects p ON p.repository_id=s.repository_id AND p.generation=s.generation WHERE p.state<>\'deleted\'').all().map(row => ({ ...row, result: JSON.parse(row.result) }));
     const docker = JSON.parse(this.db.prepare("SELECT value FROM settings WHERE key='docker_usage'").get()?.value ?? 'null');
     const compaction = JSON.parse(this.db.prepare("SELECT value FROM settings WHERE key='compaction'").get()?.value ?? 'null');
-    return { usage: [...usage, ...open.values()], database: { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal, auto_vacuum: value('auto_vacuum') },
+    return { footprint: this.footprint ?? null, workspace_projects: this.db.prepare("SELECT DISTINCT r.repository_id FROM resources r JOIN projects p ON p.repository_id=r.repository_id AND p.generation=r.generation WHERE p.state<>'deleted'").all().map(row => row.repository_id), usage: [...usage, ...open.values()], database: { bytes: pageSize * pages, pages, page_size: pageSize, free_pages: free, free_bytes: pageSize * free, wal_bytes: wal, auto_vacuum: value('auto_vacuum') },
       disk: this.disk.check(), migration: this.migration.state(), expiry: this.expiry.state(), computers, docker, compaction, vacuum: this.vacuum.state() };
   }
   /** Saves the expiry window in days (1–365); the next expiry pass uses it. */

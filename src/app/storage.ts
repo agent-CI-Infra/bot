@@ -4,10 +4,13 @@ import { dirname, join } from 'node:path';
 import type { Store } from '../storage/database.js';
 import type { Manager } from '../projects/service.js';
 import { scope, superAdmin, type Actor } from './auth.js';
-import { retentionBounds, retentionDefaults, retentionSettings, saveRetention } from '../storage/retention.js';
+import { RetentionCleanup, retentionBounds, retentionDefaults, retentionSettings, saveRetention } from '../storage/retention.js';
 import { fail, HttpError, type Json } from '../core/security.js';
 import { migrationProgress } from '../storage/migration.js';
 import { diskState } from '../storage/disk.js';
+import { storageFootprint, type Footprint, type Category } from '../../manager/storage-footprint.mjs';
+import { machineSample, storageOverview, type MachineSample } from '../storage/overview.js';
+import { ManualReclaim } from '../storage/reclaim.js';
 import { noteTaskUsage, workspaceClasses } from '../projects/workspace-cleanup.js';
 
 // The storage page (#436, #671): every kind of storage the bot uses. Per project, what its trajectory files, records and
@@ -42,15 +45,27 @@ export async function directoryBytes(path: string, timeoutMs = 10 * 60_000): Pro
 }
 
 export class StorageReport {
+  private footprint: Footprint | null = null;
+  private machine: MachineSample | null = null;
+  private readonly reclaim: ManualReclaim;
   private snapshot: Snapshot | null = null;
   private refreshing?: Promise<void>;
   private timer?: ReturnType<typeof setInterval>;
   // The directories measured with du (at most hourly), and each computer's classification by the scan it came from.
   private directories: { at: number; values: Record<string, Measured> } = { at: 0, values: {} };
   private readonly classified = new Map<string, { scanned_at: string; value: Json | null }>();
+  private readonly machineDirectory?: string;
+  private readonly extra: string[];
   private readonly paths: Record<string, string>;
-  constructor(private readonly store: Store, private readonly manager?: Manager, paths: { git_cache?: string; public_boards?: string } = {},
-    private readonly vacuum?: { state(): unknown }) {
+  constructor(private readonly store: Store, private readonly manager?: Manager, paths: { git_cache?: string; public_boards?: string; homes?: string; tools?: string; machine?: string } = {},
+    private readonly vacuum?: { state(): unknown }, retention = new RetentionCleanup(store, manager), workspaces?: { run(): Promise<{ count: number; bytes: number; failed: number }> }) {
+    this.machineDirectory = paths.machine;
+    this.extra = [paths.homes, paths.tools].filter((path): path is string => Boolean(path));
+    this.reclaim = new ManualReclaim(store, retention, manager, workspaces, async () => {
+      await this.refreshing;
+      this.directories.at = 0;
+      await this.refresh();
+    });
     const data = store.trajectories.root ? dirname(store.trajectories.root) : null;
     this.paths = Object.fromEntries(Object.entries({ git_cache: paths.git_cache ?? (data && join(data, 'git-cache')), public_boards: paths.public_boards ?? (data && join(data, 'public-boards')), browser_evidence: data && join(data, 'browser-evidence') })
       .filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
@@ -62,7 +77,11 @@ export class StorageReport {
     this.timer = setInterval(() => void this.refresh().catch(error => console.error('[storage] refresh failed:', error)), intervalMs);
     this.timer.unref?.();
   }
-  stop(): void { if (this.timer) clearInterval(this.timer); }
+  async stop(): Promise<void> {
+    if (this.timer) clearInterval(this.timer);
+    await this.reclaim.settle();
+    await this.refreshing;
+  }
 
   refresh(): Promise<void> {
     return this.refreshing ??= (async () => {
@@ -84,9 +103,21 @@ export class StorageReport {
             managerError = error instanceof HttpError && /^[a-z][a-z0-9_]{0,63}$/.test(error.code) ? error.code : 'manager_unavailable';
           }
         }
+        this.machine = await machineSample(this.machineDirectory);
         if (Date.now() - this.directories.at >= hour) {
           const values: Record<string, Measured> = {};
-          for (const [name, path] of Object.entries(this.paths)) values[name] = { bytes: await directoryBytes(path), measured_at: new Date().toISOString() };
+          if (this.store.path !== ':memory:') {
+            const locations: [Category, string, boolean?, string?][] = [
+              ['trajectories', this.store.trajectories.root, true], ['trajectories', this.store.trajectories.blobs],
+              ['other', this.store.trajectories.results.root], ...this.extra.map(path => ['other', path] as [Category, string]),
+              ...Object.entries(this.paths).map(([name, path]) => ['other', path, false, name] as [Category, string, boolean, string]),
+            ];
+            this.footprint = await storageFootprint(this.store.path, locations);
+          }
+          for (const key of Object.keys(this.paths)) values[key] = {
+            bytes: this.footprint?.entries.find(row => row.label === key)?.bytes ?? null,
+            measured_at: new Date().toISOString(),
+          };
           this.directories = { at: Date.now(), values };
         }
         // A failed read keeps the computers of the last one; only a read that answered replaces them.
@@ -124,10 +155,16 @@ export class StorageReport {
   }
 
   async api(user: Actor, method: string, path: string, input: Json = {}): Promise<Json | undefined> {
+    if (path === '/api/storage/reclaim') {
+      superAdmin(user);
+      if (method === 'POST') return this.reclaim.start(user.id);
+      if (method === 'GET') return this.reclaim.state();
+      return fail(405, 'method_not_allowed');
+    }
     if (path === '/api/storage/retention') return this.retention(user, method, input);
     if (path !== '/api/storage' || method !== 'GET') return undefined;
-    // The first view after a start waits for the first refresh; later views read the last one.
-    if (!this.snapshot) await this.refresh().catch(() => {});
+    // While the production sampler warms up, return an explicitly incomplete overview without waiting on du.
+    if (!this.snapshot && !this.timer) await this.refresh().catch(() => {});
     return this.view(user);
   }
 
@@ -146,7 +183,7 @@ export class StorageReport {
     let cleanup: Json | null = null; try { cleanup = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='retention_cleanup'")?.value ?? 'null'); } catch {}
     let chats: Json | null = null;
     if (this.store.hasTable('channel_chats')) chats = this.store.get('SELECT count(*) AS chats,count(retention_days) AS configured,min(retention_days) AS min_days,max(retention_days) AS max_days FROM channel_chats') ?? null;
-    return { settings: retentionSettings(this.store), defaults: retentionDefaults, bounds: retentionBounds, last_cleanup: cleanup, chats,
+    return { settings: retentionSettings(this.store), defaults: retentionDefaults, bounds: retentionBounds, last_cleanup: cleanup, reclaim: this.reclaim.state(), chats,
       projects: this.store.all('SELECT id,full_name FROM repositories ORDER BY full_name').map(row => ({ id: String(row.id), name: String(row.full_name) })) };
   }
 
@@ -162,6 +199,7 @@ export class StorageReport {
       return entry;
     };
     for (const row of this.store.all(`SELECT id,full_name FROM repositories WHERE ${visible.sql} ORDER BY full_name`, ...visible.args)) project(String(row.id), String(row.full_name));
+    const registered = new Set(projects.keys());
     const allowed = (id: string) => projects.has(id) || platform && !this.store.get('SELECT 1 FROM repositories WHERE id=?', id);
     const add = (target: Record<string, any>, kind: string, value: Usage) => {
       // expired: the manager's files removed after their retention window (#671).
@@ -189,7 +227,7 @@ export class StorageReport {
     // An alert the manager's last read raised stays, marked stale when the numbers beside it could not be read again (#793).
     const alerts = ([['control', control?.disk], ['manager', manager?.disk]] as [string, any][]).filter(([, disk]) => disk?.low)
       .map(([where, disk]) => ({ where, free_bytes: disk.free_bytes, total_bytes: disk.total_bytes, reserve_bytes: disk.reserve_bytes, stale: where === 'manager' && managerError !== null }));
-    return { refreshed_at: snapshot?.refreshed_at ?? null, manager_read_at: managerReadAt, manager_error: managerError, projects: list, alerts, ...summary(list, control, manager, snapshot?.cleanup ?? {}),
+    return { refreshed_at: snapshot?.refreshed_at ?? null, manager_read_at: managerReadAt, manager_error: managerError, projects: list, alerts, overview: storageOverview(list.filter(p => registered.has(p.repository_id)) as {repository_id: string | null; name: string}[], this.footprint, manager?.footprint, manager?.workspace_projects, this.machine && Date.now() - Date.parse(this.machine.measured_at) <= 15 * 60_000 ? this.machine : null), ...summary(list, control, manager, snapshot?.cleanup ?? {}),
       totals: { control, manager: manager ? { database: manager.database ?? null, disk: manager.disk ?? null, migration: manager.migration ?? null, expiry: manager.expiry ?? null, docker: manager.docker ?? null,
         compaction: manager.compaction ?? null, vacuum: manager.vacuum ?? null } : null } };
   }
@@ -200,10 +238,8 @@ const bytesOf = (value: any) => Math.max(0, Number(value) || 0);
 // it could not measure — a container or build-cache row Docker left unsized keeps the kind null instead of a short number).
 const measured = (value: any) => value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Math.max(0, Number(value));
 /**
- * The host's disk split into what the bot knows and "other" (used less known), what could be reclaimed and what the last
- * cleanups freed. The control plane, the manager, the computers' volumes and Docker's data share one data disk in the
- * Compose deployment; "other" is measured against the control plane's disk. An item not measured is null and listed in
- * `unmeasured`, so "other" then includes it rather than the page showing a measured 0.
+ * Legacy diagnostic rows from distinct scopes. They remain available to API consumers, but their sum
+ * cannot be subtracted from the control data filesystem. The verified split is in overview.machine.
  */
 function summary(projects: Record<string, any>[], control: Record<string, any> | null, manager: Record<string, any> | null | undefined, cleanup: Record<string, any>): Json {
   const sum = (pick: (project: Record<string, any>) => unknown) => projects.reduce((total, project) => total + bytesOf(pick(project)), 0);
@@ -239,7 +275,7 @@ function summary(projects: Record<string, any>[], control: Record<string, any> |
     { key: 'manager_expiry', at: manager?.expiry?.last_pass?.finished_at ?? null, bytes: bytesOf(manager?.expiry?.last_pass?.bytes), count: bytesOf(manager?.expiry?.last_pass?.files) },
     { key: 'workspace_cleanup', at: latest, bytes: sweeps.reduce((total, sweep) => total + bytesOf(sweep.bytes), 0), count: sweeps.reduce((total, sweep) => total + bytesOf(sweep.removed), 0) },
   ];
-  return { host: { disk: disk ?? null, used_bytes: used, known, known_bytes: knownBytes, unmeasured, other_bytes: used === null ? null : Math.max(0, used - knownBytes) }, reclaimable, freed };
+  return { host: { disk: disk ?? null, used_bytes: used, known, known_bytes: knownBytes, unmeasured, other_bytes: null }, reclaimable, freed };
 }
 
 /** A database's size and free pages; PRAGMAs read the header, not the tables. */

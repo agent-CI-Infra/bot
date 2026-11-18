@@ -42,8 +42,8 @@ function announceSave(target, text, failed) {
 // Each category loads only what its cards show.
 // Cleanup by days (#671): one form for every window, saved with PUT /api/storage/retention (platform administrators,
 // audited) and applied by the daily cleanup; group chats keep their own per-chat setting, summarised here.
-async function retentionCard(size, count, time) {
-  const view = await api('/api/storage/retention'), section = settingsCard('按天数清理', 'h2'), form = element('form', '', 'project-form');
+async function retentionCard(size, count, time, refresh) {
+  const view = await api('/api/storage/retention'), section = settingsCard('空间回收', 'h2'), form = element('form', '', 'project-form');
   const { settings, defaults, bounds } = view, status = note(''); status.setAttribute('role', 'status');
   const number = (name, value, [min, max]) => input(name, value ?? '', { type: 'number', min, max, step: 1 });
   const fields = [
@@ -75,9 +75,41 @@ async function retentionCard(size, count, time) {
     try { await api('/api/storage/retention', 'PUT', body); announceSave(status, '已保存，下一次每日清理按新设置执行。', false); }
     catch (err) { announceSave(status, readErrorText(err), true); } finally { save.disabled = false; }
   });
-  section.append(note('设置了天数的类别，每天在后台分批清理一次：只删正文，记录行、计费、审计和哈希保留，引用到已删正文的地方会显示「已过保留期删除」。留空表示不过期。'), form);
+  const settingsPanel = element('details', '', 'storage-settings');
+  settingsPanel.append(element('summary', '保留天数与项目设置'));
+  const action = element('button', '立即回收'), outcome = note('');
+  action.type = 'button'; outcome.setAttribute('role', 'status');
+  function show(result) {
+    action.disabled = result?.status === 'running';
+    const when = result?.finished_at ? time(result.finished_at) + ' · ' : '';
+    const totals = '已清理 ' + count(result?.count ?? 0) + ' 项，文件 ' + size(result?.file_bytes ?? 0) + '，库内正文 ' + size(result?.payload_bytes ?? 0);
+    const messages = { running: '正在按已保存策略回收…', completed: when + (result?.count ? totals : '没有可回收内容。'),
+      partial: when + totals + '。有 ' + count(result?.failed) + ' 项清理失败，可稍后重试。',
+      failed: '回收失败，请核对统计后重试。', interrupted: '上次回收被服务重启中断，可重新执行。' };
+    announceSave(outcome, messages[result?.status] ?? '', ['failed', 'partial', 'interrupted'].includes(result?.status));
+  }
+  async function follow(result) {
+    show(result);
+    while (result?.status === 'running') {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (!section.isConnected) return;
+      result = await api('/api/storage/reclaim'); show(result);
+    }
+    if (section.isConnected) await refresh?.(section);
+  }
+  function problem(err) { action.disabled = false; announceSave(outcome, readErrorText(err), true); }
+  action.addEventListener('click', async () => {
+    if (action.disabled) return;
+    show({ status: 'running' });
+    try { await follow(await api('/api/storage/reclaim', 'POST', {})); } catch (err) { problem(err); }
+  });
+  show(view.reclaim);
+  if (view.reclaim?.status === 'running') void follow(view.reclaim).catch(problem);
+  section.append(note('按已保存天数清理过期正文、证据和工作区。运行中的任务、会话及为打开的 PR 保留的工作区继续受保护。'), action, outcome);
+  settingsPanel.append(note('设置了天数的类别，每天在后台分批清理一次：只删正文，记录行、计费、审计和哈希保留，引用到已删正文的地方会显示「已过保留期删除」。留空表示不过期。'), form);
+  section.append(settingsPanel);
   const last = view.last_cleanup;
-  section.append(facts([
+  settingsPanel.append(facts([
     ['最近一次清理', last?.finished_at ? `${time(last.finished_at)}：轨迹文件 ${count(last.trajectories?.count ?? 0)} 个（${size(last.trajectories?.bytes ?? 0)}），Webhook 正文 ${count(last.deliveries?.count ?? 0)} 条（${size(last.deliveries?.bytes ?? 0)}），浏览器证据 ${count(last.evidence?.count ?? 0)} 个目录（${size(last.evidence?.bytes ?? 0)}），提交检查记录 ${count(last.commit_checks?.count ?? 0)} 条`
       + ((last.trajectories?.failed || last.deliveries?.failed || last.evidence?.failed || last.commit_checks?.failed) ? `；${count((last.trajectories?.failed ?? 0) + (last.deliveries?.failed ?? 0) + (last.evidence?.failed ?? 0) + (last.commit_checks?.failed ?? 0))} 项没能清理，下次再试` : '')
       + (last.manager_window === null ? '；manager 没有应答，保留天数下次再同步' : '') + (last.last_error ? `；最近一个错误：${last.last_error}` : '') : '尚未运行'],
@@ -109,8 +141,8 @@ const settingsCards = {
   // from counters kept when files close and a background snapshot; platform administrators also see the data disk with
   // everything known on it and "other", what can be reclaimed, the databases, the migration, the removal of the manager's
   // copies and an alert for a disk below its reserve.
-  async storage() {
-    const view = await api('/api/storage'), size = value => Number.isFinite(value) ? bytes(value) : '未知', count = value => Number.isFinite(value) ? value.toLocaleString('zh-CN') : '未知';
+  async storage(request, _id, retained) {
+    const view = await api('/api/storage'), size = storageSize, count = value => Number.isFinite(value) ? value.toLocaleString('zh-CN') : '未知';
     const reasons = { disk_space: '剩余空间不够放下一份实际数据', few_free_pages: '空闲页不多，不需要', incremental: '已压缩，由后台增量回收', database_busy: '数据库正被占用', wal_not_empty: 'WAL 没能并入数据库',
       integrity_check: '新文件没通过完整性检查，旧文件保留', error: '出错，数据库保持原样', no_database: '还没有数据库' };
     const compacted = state => !state ? '尚未记录' : state.action === 'compacted' ? `${time(state.at)} 由 ${size(state.before?.bytes)} 压缩到 ${size(state.after_bytes)}，用时 ${Math.round(state.duration_ms / 1000)} 秒`
@@ -120,8 +152,8 @@ const settingsCards = {
     const expiry = state => !state ? '读不到' : `保留 ${state.window_days} 天；` + (state.last_pass ? `最近一次 ${new Date(state.last_pass.finished_at).toLocaleString('zh-CN')} 删除 ${count(state.last_pass.files)} 个文件（${size(state.last_pass.bytes)}）` : '尚未运行')
       + (state.last_error ? `；最近一个错误：${state.last_error}` : '');
     const time = value => value ? new Date(value).toLocaleString('zh-CN') : '—', row = (table, cells) => { const tr = document.createElement('tr'); for (const text of cells) tr.append(element('td', text)); table.body.append(tr); };
-    const cards = [], intro = settingsCard('存储', 'h2');
-    intro.append(note(`这里统计 bot 使用的各类存储：轨迹文件、浏览器截图证据、控制面与 manager 的数据库、项目电脑的工作卷和整块数据盘，以及哪些空间可以回收。数字来自后台快照，每 5 分钟更新一次；项目电脑的卷每 6 小时扫描一次，打开页面不遍历文件。最近刷新：${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`
+    const cards = [], intro = view.overview ? element('div', '', 'storage-updated') : settingsCard('存储', 'h2');
+    intro.append(note(`这里统计已采集的文件与项目工作卷。后台快照每 5 分钟更新一次，目录按小时测量，工作卷每 6 小时扫描。最近刷新 ${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`
       // A failed manager read keeps the numbers it gave last (#793), so the page says which read they come from.
       + (view.manager_error ? view.manager_read_at
         ? `上次读取于 ${time(view.manager_read_at)}；本次 manager 读取失败（${view.manager_error}），manager 的数字保留上次结果，可能过期。`
@@ -135,16 +167,20 @@ const settingsCards = {
         + (item.stale ? '（上次已知状态，可能已过期：本次 manager 读取失败。）' : ''), 'view-error'));
       cards.push(alert);
     }
+    if (view.overview) cards.push(...storageCapacity(view.overview, view.host, time), storageProjects(view.overview));
+    if (view.totals) cards.push(retained ?? await retentionCard(size, count, time, async section => {
+      const next = await settingsCards.storage(request, null, section);
+      if (section.isConnected && request === renderVersion) section.parentElement.replaceChildren(...next);
+    }));
+    const detailStart = cards.length;
     if (view.host) {
-      const host = settingsCard('数据盘', 'h2'), disk = view.host.disk, known = view.host.known ?? {};
-      host.append(facts([['总量', size(disk?.total_bytes)], ['已用', size(view.host.used_bytes)], ['剩余', size(disk?.free_bytes)], ['保留空间', size(disk?.reserve_bytes)]]));
+      const host = settingsCard('采集明细', 'h2'), known = view.host.known ?? {};
       const table = costTable(['占用', '大小']);
       for (const [key, label] of [['control_database', '控制面数据库 control.sqlite（含 WAL）'], ['control_trajectories', '控制面轨迹文件与 blob'], ['git_cache', 'git 缓存 git-cache'], ['public_boards', '公开看板 public-boards'], ['browser_evidence', '浏览器截图证据 browser-evidence'],
         ['manager_database', 'manager 账本 manager.sqlite（含 WAL）'], ['manager_trajectories', 'manager 轨迹文件'], ['computers', '项目电脑工作卷'], ['docker_images', 'Docker 镜像'], ['docker_containers', 'Docker 容器可写层'], ['docker_build_cache', 'Docker 构建缓存'],
         ['docker_volumes', 'Docker 卷（未被计入的部分）'], ['assistant_homes', '助手电脑 HOME（assistant-homes 卷）']])
         row(table, [label, known[key] === null || known[key] === undefined ? '尚未测量' : size(known[key]) + ((view.host.unmeasured ?? []).includes(key) ? '（部分电脑未扫完）' : '')]);
-      row(table, ['其他（已用 − 以上合计）', size(view.host.other_bytes) + ((view.host.unmeasured ?? []).length ? '（含尚未测量的项）' : '')]);
-      host.append(table.wrap, note('控制面、manager、项目电脑的卷和 Docker 数据在同一块数据盘上；Docker 卷一行只算不带 compose/department.bot 标签的卷（带标签的卷不重复计入；其中 agent-tools、keys、notes 和重置后遗留的旧代工作卷、从未扫描到的工作卷在 known 里没有对应行，字节仍留在「其他」），助手电脑的 HOME 单列；「其他」包含系统目录和还没单列的 bot 数据（agent-tools、各项目笔记 *-notes、*-keys 等被按标签排除又无单独已知行的卷），只显示、不清理。'));
+      host.append(table.wrap, note('各项取自控制面、manager、项目卷或 Docker，各自的采集范围和时间不同。Docker 数字覆盖整个引擎。'));
       cards.push(host);
       const reclaim = settingsCard('可回收与最近清理', 'h2'), list = costTable(['类别', '可回收', '怎么回收']);
       // A database already compacted returns its free pages in the background; one not yet compacted at its next start.
@@ -159,7 +195,6 @@ const settingsCards = {
       reclaim.append(facts((view.freed ?? []).map(item => [freed[item.key]?.[0] ?? item.key, item.at ? (freed[item.key]?.[1] ?? (() => size(item.bytes)))(item) : '尚未运行'])));
       cards.push(reclaim);
     }
-    if (view.totals) cards.push(await retentionCard(size, count, time));
     if (view.totals) {
       const totals = settingsCard('数据库与磁盘', 'h2'), side = value => value ? `文件 ${size(value.bytes)}：实际数据 ${size(value.bytes - value.free_bytes)}，空闲页 ${count(value.free_pages)}（${size(value.free_bytes)}）；WAL ${size(value.wal_bytes)}` : '读不到';
       totals.append(facts([['控制面数据库 control.sqlite', side(view.totals.control?.database)], ['manager 账本 manager.sqlite', side(view.totals.manager?.database)],
@@ -216,6 +251,11 @@ const settingsCards = {
     computers.append(scanned.length ? volumes.wrap : note('还没有项目电脑的扫描结果：电脑运行后会在后台扫描。'));
     computers.append(note('任务工作区按保留规则分类：运行中（任务未结束或有后续任务）、为 PR 保留（对应的 PR 仍打开）、待删除（已结束，到期后由后台清理删除）。「其他」含 /workspace/tmp 和卷根目录下的其他文件；项目笔记是单独的卷，不计入。'));
     cards.push(computers);
+    if (view.overview) {
+      const details = element('details', '', 'storage-diagnostics');
+      details.append(element('summary', '查看采集、回收与项目明细'), ...cards.splice(detailStart));
+      cards.push(details);
+    }
     return cards;
   },
   async feishu(request) {

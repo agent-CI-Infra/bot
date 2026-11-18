@@ -36,6 +36,7 @@ test('#879 设置页三张保存表单：失败用 alert 播报，成功回到 s
 
     // 1. 按天数清理 — the failure never reached the service, so the sentence is readErrorText's network wording.
     await page.goto(h.admin + '/#/settings/storage');
+    await page.getByText('保留天数与项目设置', { exact: true }).click();
     const retention = page.locator('form').filter({ has: page.getByRole('button', { name: '保存清理设置', exact: true }) });
     await expect(retention).toBeVisible();
     await retention.getByRole('button', { name: '保存清理设置', exact: true }).click();

@@ -174,7 +174,7 @@ test('assistant-homes is its own row, so it no longer lands in "other"', async t
   // Both rows are inside `known`, and "other" is still used minus every known row, so the bytes that used to hide in
   // "other" are now named above it.
   assert.ok(view.host.known_bytes >= 250);
-  assert.equal(view.host.other_bytes, view.host.used_bytes - view.host.known_bytes);
+  assert.equal(view.host.other_bytes, null, 'an engine-wide reading cannot be subtracted from the data filesystem');
 });
 
 test('a Docker total the manager could not measure lists that row as unmeasured on the storage page', async t => {

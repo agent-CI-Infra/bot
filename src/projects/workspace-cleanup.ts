@@ -204,7 +204,7 @@ async function recoverRecords(store: Store): Promise<void> {
 export class WorkspaceCleanup {
   private first: ReturnType<typeof setTimeout> | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
-  private running: Promise<void> | null = null;
+  private running: Promise<{ count: number; bytes: number; failed: number }> | null = null;
   private closing = false;
   private readonly failures = new FailureLog('workspaces');
   constructor(readonly store: Store, readonly manager: Manager, readonly options: { firstDelayMs?: number; intervalMs?: number; pauseMs?: number; skip?: (repo: string) => boolean } = {}) {}
@@ -213,23 +213,25 @@ export class WorkspaceCleanup {
     this.timer = setInterval(() => void this.run(), this.options.intervalMs ?? hour); this.timer.unref();
   }
   /** One sweep of every project; a sweep still running is returned instead of starting another. */
-  run(): Promise<void> {
-    if (this.closing) return Promise.resolve();
-    this.running ??= this.sweep().catch(error => this.failures.report('sweep', error)).finally(() => { this.running = null; });
+  run() {
+    if (this.closing) return Promise.resolve({ count: 0, bytes: 0, failed: 1 });
+    this.running ??= this.sweep().catch(error => { this.failures.report('sweep', error); return { count: 0, bytes: 0, failed: 1 }; }).finally(() => { this.running = null; });
     return this.running;
   }
   // Stops scheduling; a removal call already sent finishes on the computer, and the next start lists what is left.
   close(): void { this.closing = true; clearTimeout(this.first); clearInterval(this.timer); }
-  private async sweep(): Promise<void> {
+  private async sweep() {
+    const total = { count: 0, bytes: 0, failed: 0 };
     await recoverRecords(this.store);
     for (const { id } of this.store.all('SELECT r.id FROM repositories r JOIN policies p ON p.repository_id=r.id ORDER BY r.id')) {
-      if (this.closing) return;
+      if (this.closing) { total.failed++; break; }
       if (this.options.skip?.(id)) continue;
-      try { await this.project(id); this.failures.clear('project ' + id); } catch (error) { this.failures.report('project ' + id, error); }
+      try { const result = await this.project(id); if (result) { total.count += result.removed; total.bytes += result.bytes; } this.failures.clear('project ' + id); } catch (error) { total.failed++; this.failures.report('project ' + id, error); }
       // Records of directories removed a month ago have served their purpose.
       this.store.run('DELETE FROM task_workspaces WHERE rowid IN (SELECT rowid FROM task_workspaces WHERE repository_id=? AND released_at<? LIMIT 5000)',
         id, new Date(Date.now() - sweepLimits.releasedKeptMs).toISOString());
     }
+    return total;
   }
   private async runner(repo: string, generation: number, request: Json, timeoutMs: number): Promise<any> {
     const response = await this.manager.call('POST', `/v1/projects/${repo}/execute`, { operation_id: randomId(), generation, request }, timeoutMs);
@@ -248,7 +250,7 @@ export class WorkspaceCleanup {
         VALUES(?,?,'','unrecorded',?,?,?,?)`, repo, item.name, new Date(item.active_at ?? Date.now()).toISOString(), now, item.reason, item.bytes);
     } });
   }
-  private async project(repo: string): Promise<void> {
+  private async project(repo: string) {
     const environment = await this.manager.call('GET', '/v1/projects/' + repo);
     if (!environment || !['ready', 'busy'].includes(environment.state)) return;
     const prs = pullRequests(this.store, repo), tasks = await this.pass(repo, environment.generation, prs, false), worktrees = await this.pass(repo, environment.generation, prs, true);
@@ -258,6 +260,7 @@ export class WorkspaceCleanup {
     const swept = JSON.parse(this.store.get("SELECT value FROM settings WHERE key='workspace_cleanup'")?.value ?? '{}');
     swept[repo] = { at: new Date().toISOString(), removed, bytes, skipped };
     this.store.run("INSERT INTO settings VALUES('workspace_cleanup',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify(swept));
+    return { removed, bytes };
   }
   // One kind of directory on the computer: the task directories, or the shared worktrees (#769), each listed and removed
   // through its own runner calls. A worktree's rows (kind 'worktree') come from its bindings; the same retention applies.
