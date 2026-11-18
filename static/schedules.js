@@ -155,9 +155,15 @@ async function renderSchedules(panel, project) {
   const reasons = { migrated_to_chat_schedule:'已迁移到飞书会话的定时任务', daily_report_retired:'项目日报已停用', schedule_workflow_unsupported:'执行内容已不支持' };
   const time = (value,zone) => value == null ? '无记录' : new Date(value).toLocaleString(undefined,{timeZone:zone}) + ' · ' + zone;
   for (const item of plans.schedules) {
+    const checkLatest = item.latest?.check;
+    const latestText = checkLatest
+      ? [checkLatest.outcome_text, checkLatest.reason_text, checkLatest.issues?.length
+          ? checkLatest.issues.map(issue => issue.number != null ? 'Issue #' + issue.number : '已留下 Issue 链接').join('、')
+          : (checkLatest.write_refusal?.text || null)].filter(Boolean).join(' · ')
+      : (item.latest ? (({pending:'待执行',retry:'等待重试',running:'执行中',dispatched:'已交给检查任务',succeeded:'执行成功',failed:'执行失败',skipped:'已跳过',cancelled:'已取消',blocked:'未能执行',unsupported:'这项执行内容还不能运行',budget_exhausted:'已达到运行限额',dead:'多次重试仍未执行'})[item.latest.state] || item.latest.state) : '尚无运行记录');
     const legacy = item.spec.workflow !== 'manager.check';
     const row = element('article', '', 'schedule-row'); row.append(element('strong',item.spec.name),note((states[item.state] || item.state) + (item.reason ? ' · '+(reasons[item.reason] || item.reason) : '')),
-      facts([['执行内容',legacy ? (item.spec.workflow==='report.daily' ? '项目日报（已停用）' : item.spec.workflow + '（不支持）') : '项目定时任务'],['身份',item.spec.kind === 'personal' ? '个人计划' : '项目服务计划'],['时区',item.spec.timezone],['下次触发',item.next_at == null ? '无下次触发' : time(item.next_at,item.spec.timezone)],['最近成功',item.last_success == null ? '尚无成功记录' : time(item.last_success,item.spec.timezone)],['维护人',(destinations.maintainers || []).find(person=>person.id===item.spec.maintainer_id)?.name || item.spec.maintainer_id],...(legacy?[]:[['创建 Issue',item.spec.parameters?.file_issues===true?'允许（覆盖角色）':item.spec.parameters?.file_issues===false?'拒绝（覆盖角色）':'跟随角色']]),...(item.migration?[['迁移',item.migration.outcome==='migrated'?'已迁成'+(item.migration.chat_type==='group'?'群聊':'私聊')+'的会话定时任务':'未迁移（见下方迁移记录）']]:[])]));
+      facts([['执行内容',legacy ? (item.spec.workflow==='report.daily' ? '项目日报（已停用）' : item.spec.workflow + '（不支持）') : '项目定时任务'],['身份',item.spec.kind === 'personal' ? '个人计划' : '项目服务计划'],['时区',item.spec.timezone],['下次触发',item.next_at == null ? '无下次触发' : time(item.next_at,item.spec.timezone)],['最近成功',item.last_success == null ? '尚无成功记录' : time(item.last_success,item.spec.timezone)],['最近结果',latestText],['维护人',(destinations.maintainers || []).find(person=>person.id===item.spec.maintainer_id)?.name || item.spec.maintainer_id],...(legacy?[]:[['创建 Issue',item.spec.parameters?.file_issues===true?'允许（覆盖角色）':item.spec.parameters?.file_issues===false?'拒绝（覆盖角色）':'跟随角色']]),...(item.migration?[['迁移',item.migration.outcome==='migrated'?'已迁成'+(item.migration.chat_type==='group'?'群聊':'私聊')+'的会话定时任务':'未迁移（见下方迁移记录）']]:[])]));
     if (editable(item)) row.append(button('编辑计划：'+item.spec.name,()=>{chosen.value=item.id;chosen.dispatchEvent(new Event('change'));},'quiet'));
     summary.append(row);
   }

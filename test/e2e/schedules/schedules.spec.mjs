@@ -279,7 +279,7 @@ for (const surface of ['management', 'project']) {
       const record = page.locator('.schedule-record').first();
       await page.getByRole('button', { name: '查看运行与跳过原因', exact: true }).click();
       await record.locator(':scope > summary').click();
-      await expect(record).toHaveAttribute('data-record-id', occurrence.id); await expect(record).toContainText('执行成功');
+      await expect(record).toHaveAttribute('data-record-id', occurrence.id); await expect(record).toContainText('已交接，尚无检查任务');
       expect(commands.filter(operation => operation === 'schedule.register')).toHaveLength(1);
       expect(commands.filter(operation => operation === 'schedule.run-now')).toHaveLength(1);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
