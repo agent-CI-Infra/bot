@@ -94,8 +94,8 @@ test('#878 监听与触发页：可恢复的读取失败标注「读取失败，
     const status = await triggersPageWithActionsCheck(page, h, password);
     await page.route('**/api/repositories/101', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
     await expect(status).toContainText('读取失败，显示上次结果', { timeout: 12000 });
-    // The last readable answer stays readable: only its freshness is in doubt.
-    await expect(status).toContainText('配置检查通过后');
+    // The last readable answer stays readable on the line under the result: only its freshness is in doubt.
+    await expect(page.locator('[data-actions-policy]')).toContainText('配置检查通过后');
     await expect(status).toContainText(/上次成功读取：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
   } finally { await h.stop(); }
 });
@@ -164,5 +164,46 @@ test('#1078 监听与触发页：状态行常驻 polite live region，失败与�
     await page.route('**/api/repositories/101', route => route.fulfill({ status: 401, json: { error: 'invalid_login' } }));
     await expect(status).toContainText('配置检查已停止', { timeout: 20000 });
     await expectSemantics('a stopped check keeps the role too');
+  } finally { await h.stop(); }
+});
+
+// #1079: the row used to carry two different kinds of sentence as one — what the check does ("配置检查通过后每分钟扫描…")
+// and what this read found ("读取失败，…"). A reader takes the description of the check for the answer it just gave, the
+// ASCII space after the Chinese full stop strands at a line edge, and "可能已过期" is sewn into a parenthesis. The policy
+// sentence moves to its own muted note beside the row, the row keeps only this read's result, and the space is gone.
+test('#1079 监听与触发页：策略句搬到同级的 note，状态行只讲本次结果', async ({ page }) => {
+  const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  try {
+    const { admin, password } = await setup(h), a = await account(admin);
+    await repository(admin, a.id, '101');
+    await loginAs(page, h.admin + '/#/projects/101/triggers', password);
+    const status = page.locator('[data-actions-status]'), policy = page.locator('[data-actions-policy]');
+    await page.getByLabel('接收默认分支和版本标签的 Actions 失败事件', { exact: true }).check();
+    await page.getByRole('button', { name: '保存事件开关', exact: true }).click();
+    // Nothing has failed yet, so the policy sentence is the only thing to say and it stays in the row, word for word.
+    await expect(status).toContainText('配置检查通过后每分钟扫描', { timeout: 10000 });
+    await expect(policy).toBeHidden();
+    await page.route('**/api/repositories/101', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
+    await expect(status).toContainText('读取失败，显示上次结果', { timeout: 12000 });
+    // Two sentences on two lines, each readable on its own: the row is this read's result only, and the policy sentence
+    // is still on the page in the note under it. Both are asserted as visible, so a note that is merely in the DOM —
+    // folded into a closed details, or removed from the layout — cannot pass this.
+    await expect(status).toBeVisible();
+    await expect(status).not.toContainText('配置检查通过后');
+    await expect(status).not.toContainText('每分钟扫描');
+    await expect(status).toContainText(/上次成功读取：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+    await expect(policy).toBeVisible();
+    await expect(policy).toHaveText('配置检查通过后每分钟扫描；重复事件和人工重跑共用原运行的一次自动重试预算。');
+    // The note is a sibling of the row, never inside it: the row is a live region and would announce the policy as news.
+    expect(await page.evaluate(() => !document.querySelector('[data-actions-status]').contains(document.querySelector('[data-actions-policy]'))), 'the policy note must not sit inside the live region').toBe(true);
+    const [row, note] = [await status.boundingBox(), await policy.boundingBox()];
+    expect(note.y, 'the note is its own line below the result, not the same line').toBeGreaterThanOrEqual(row.y + row.height - 1);
+    // A Chinese full stop no longer runs into "读取失败" through an ASCII space, in the row or across the two lines.
+    expect(await status.textContent()).not.toMatch(/。\s+读取失败/);
+    expect(await page.evaluate(() => document.querySelector('[data-overview-anchor="project-events"]').innerText)).not.toMatch(/。\s+读取失败/);
+    // The narrowest layout must not gain a horizontal scrollbar from the split.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(policy).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'the result row and the policy note must not overflow at 390').toBe(true);
   } finally { await h.stop(); }
 });
