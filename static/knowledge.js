@@ -38,7 +38,7 @@ function knowledgeSection() {
   const url = id => endpoint + '/' + encodeURIComponent(id);
   const locationText = path => path || '全部文件';
   const fileBytes = value => value == null ? '大小未知' : value < 1024 ? value + ' B' : bytes(value);
-  const timestamp = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : '时间未提供';
+  const timeText = value => timestamp(value) || '时间未提供';
   const actor = value => value ? value === 'filesystem' ? '文件系统变更' : value === 'user:'+me.actor?.principal_id ? (userDisplayName(me) || '当前用户') : value : '修改人未提供';
   const write = () => listing?.can_write === true;
   const routeState = () => {
@@ -148,7 +148,7 @@ function knowledgeSection() {
     }
     aside.append(rows, actionButton('已删除文件', () => directory('', true))); return aside;
   }
-  function metadata(file) { return note(`v${file.revision ?? '未知'} · ${timestamp(file.created_at)} · ${actor(file.actor)} · ${fileBytes(file.bytes)}`); }
+  function metadata(file) { return note(`v${file.revision ?? '未知'} · ${timeText(file.created_at)} · ${actor(file.actor)} · ${fileBytes(file.bytes)}`); }
   function directoriesPage(main) {
     main.append(element('h2', state.trash ? '已删除文件' : locationText(state.directory)));
     const search = input('knowledge_query', state.query, { placeholder: '搜索文件名或路径' }), form = element('form', '', 'knowledge-search');
@@ -253,7 +253,7 @@ function knowledgeSection() {
       // A move entry is the only record of the old path once the file no longer exists under it (the file-tree manager records
       // from_path and to_path on the move version). Name the previous path here so an older version stays findable.
       const movedFrom = version.operation === 'move' ? (version.from_path ? '自 ' + version.from_path : version.to_path ? '到 ' + version.to_path : '') : '';
-      const row = element('div', '', 'knowledge-history-row'); row.append(actionButton(`v${version.revision}${version.deleted ? ' · 删除' : version.operation === 'move' ? ' · 移动' : ''}`, () => openFile(state.file, version.revision)), note([timestamp(version.created_at), actor(version.actor), movedFrom].filter(Boolean).join(' · '))); panel.append(row);
+      const row = element('div', '', 'knowledge-history-row'); row.append(actionButton(`v${version.revision}${version.deleted ? ' · 删除' : version.operation === 'move' ? ' · 移动' : ''}`, () => openFile(state.file, version.revision)), note([timeText(version.created_at), actor(version.actor), movedFrom].filter(Boolean).join(' · '))); panel.append(row);
     }
     requestAnimationFrame(() => { if (panel.isConnected) panel.scrollTop = state.historyScroll; }); return panel;
   }

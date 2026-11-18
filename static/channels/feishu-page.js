@@ -205,7 +205,7 @@ async function renderFeishuBindingsPage(panel, current) {
     const pending = element('div', '', 'feishu-binding-row channel-binding'); pending.setAttribute('aria-label', '待确认的飞书身份');
     pending.append(element('strong', '等待原飞书操作者确认'), facts([[t('feishu.platform_account'), userDisplayName(me)],
       ['飞书账号', '发起本次绑定的飞书账号'], ['机器人', p.app_name || '机器人名称暂未获取'],
-      ['机器人所属企业', p.tenant_name || '企业名称暂未获取'], ['有效期', new Date(p.expires_at).toLocaleString()]]),
+      ['机器人所属企业', p.tenant_name || '企业名称暂未获取'], ['有效期', timestamp(p.expires_at)]]),
       channelCopy('在原私聊发送的确认指令', '确认绑定 ' + p.confirmation));
     personalSection.append(pending);
   }

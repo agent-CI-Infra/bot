@@ -27,7 +27,7 @@ async function channelEmployeeHistory(grant, target) {
       const result = await api(`/api/channels/chats/${grant.chat_id}/messages?${query}`); cursor = result.next_cursor;
       status.textContent = `本地同步状态：${channelSyncText(result.sync_state)}。未核验／缺口：${result.gaps.map(g => channelGapText(g.reason)).join('、')}。`;
       if (!result.messages.length && !more) messages.append(note('本地已同步范围没有匹配记录；这不代表飞书历史中从未存在。'));
-      for (const m of result.messages) messages.append(facts([['发送者', m.sender_id || '未知'], ['时间', new Date(m.created_at).toLocaleString()], ['消息', m.message_id], ['内容', m.content]]));
+      for (const m of result.messages) messages.append(facts([['发送者', m.sender_id || '未知'], ['时间', timestamp(m.created_at)], ['消息', m.message_id], ['内容', m.content]]));
       next.hidden = !result.has_more;
     } catch (err) { status.textContent = employeeError(readErrorText(err)); }
   };
@@ -60,7 +60,7 @@ async function channelDiagnostics(c, panel, history = true) {
   const [{ operations }, { deliveries }] = await Promise.all([api('/api/channels/connectors/' + c.id + '/events'), api('/api/channels/connectors/' + c.id + '/outbox')]);
   const view = card('连接健康与收发记录');
   view.append(facts([['连接状态', c.enabled ? '启用' : '停用'], ['传输状态', c.transport === 'http' ? 'HTTP 事件回调' : c.health.connection_state],
-    ['最后收到事件', c.health.last_received_at ? new Date(c.health.last_received_at).toLocaleString() : '尚未收到'], ['诊断', c.health.last_error || '无'], ['待处理', c.health.queued], ['发送失败', c.health.failed]]),
+    ['最后收到事件', c.health.last_received_at ? timestamp(c.health.last_received_at) : '尚未收到'], ['诊断', c.health.last_error || '无'], ['待处理', c.health.queued], ['发送失败', c.health.failed]]),
     note('应用鉴权成功或长连接已连接，都不能证明消息已经送达。请完成发布并在飞书中实测。群聊的项目范围与服务角色在「个人设置 → 飞书绑定」中为每个群单独设置。'));
   for (const op of operations.slice(0, 10)) view.append(note(`渠道操作 ${op.operation_id} · ${op.state}${op.error ? ' · ' + op.error : ''}${op.conversation_id ? ' · 会话 ' + op.conversation_id : ''}`));
   if (operations.some(op => op.reaction_error === 'channel_reaction_permission_required'))
@@ -99,7 +99,7 @@ async function channelHistory(connector, panel) {
       if (!result.messages.length && !more) results.append(note('本地已同步范围没有匹配消息；这不代表飞书历史中从未存在。'));
       for (const m of result.messages) {
         const item = element('article', '', 'channel-binding');
-        item.append(element('strong', `${m.sender_id || '未知发送者'} · ${m.message_type}`), note(new Date(m.created_at).toLocaleString() + ' · ' + m.message_id),
+        item.append(element('strong', `${m.sender_id || '未知发送者'} · ${m.message_type}`), note(timestamp(m.created_at) + ' · ' + m.message_id),
           element('p', m.content || '此消息没有可显示的文本'), ...(m.resources || []).map(r => note(`附件：${r.name} · ${{ pending: '待下载', ready: '可用', failed: '读取失败' }[r.state] || r.state}${r.size === null ? '' : ' · ' + r.size + ' 字节'}${r.mime ? ' · ' + r.mime : ''}${r.error ? ' · ' + r.error : ''}`)), ...(m.thread_id ? [note('话题 ' + m.thread_id)] : [])); results.append(item);
       }
       next.hidden = !result.has_more;

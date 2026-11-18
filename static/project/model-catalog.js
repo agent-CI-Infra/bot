@@ -1,6 +1,6 @@
 function catalogStatusText(status) {
   if (!status?.fetched_at) return '目录尚未成功下载，使用现有默认能力；未手填价格的请求暂不计价。';
-  return `快照：${new Date(status.fetched_at).toLocaleString()} · ${status.entries} 个模型${status.rejected ? ` · 已丢弃 ${status.rejected} 个非法条目` : ''}${status.last_error ? ' · 最近刷新失败，继续使用此快照' : ''}`;
+  return `快照：${timestamp(status.fetched_at)} · ${status.entries} 个模型${status.rejected ? ` · 已丢弃 ${status.rejected} 个非法条目` : ''}${status.last_error ? ' · 最近刷新失败，继续使用此快照' : ''}`;
 }
 function modelCatalogPanel(level = 'h4') {
   const panel = element('section', '', 'model-catalog-status'), message = element('p', '正在读取目录…', 'muted');
@@ -45,7 +45,7 @@ function modelCapabilitiesEditor(model, after) {
   const sync = () => { pick.hidden = searchField.hidden = results.hidden = mode.value !== 'manual'; choices.required = mode.value === 'manual'; };
   mode.addEventListener('change', () => {sync(); if(mode.value === 'manual') void query();});
   search.addEventListener('input', () => void query()); sync();
-  form.append(title, note(`当前：${match?.entry?.ref || ({ambiguous:'多个候选，请手动选择',disabled:'已取消匹配',unavailable:'目录不可用',missing:'指定条目已不存在'}[match?.state] || '未匹配')} · ${match?.fetched_at ? new Date(match.fetched_at).toLocaleString() : '无快照'}`), field('目录匹配',mode), searchField,pick,results,
+  form.append(title, note(`当前：${match?.entry?.ref || ({ambiguous:'多个候选，请手动选择',disabled:'已取消匹配',unavailable:'目录不可用',missing:'指定条目已不存在'}[match?.state] || '未匹配')} · ${match?.fetched_at ? timestamp(match.fetched_at) : '无快照'}`), field('目录匹配',mode), searchField,pick,results,
     note('留空的能力值继承目录；没有匹配时使用 128000 上下文、8192 最大输出、非推理模型。保存只影响新请求，不改写历史。'));
   for (const [name, caption] of [['context_window','上下文窗口（token）'],['max_output_tokens','最大输出（token）']]) {
     const value = input(name, manual[name] ?? '', {type:'number',min:1,max:name === 'context_window'?32000000:16000000,step:1,placeholder:String(effective?.[name] ?? '')}); form.append(field(caption,value));

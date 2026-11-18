@@ -316,7 +316,7 @@ test('schedule preview matches the server after a timezone change, is reachable 
     const server = (await f.admin('/api/management/query', 'POST', { operation: 'preview_schedule', target: { project_id: '101' }, arguments: { plan } })).value;
     const ui = (await page.getByLabel('计划预览').innerText()).split('\n').filter(line => line.includes('Europe/Berlin') && !line.startsWith('时区：') && !line.startsWith('时间窗口'));
     const expected = [];
-    for (const at of server.future) expected.push(await page.evaluate(([ts, zone]) => new Date(ts).toLocaleString(undefined, { timeZone: zone }) + ' · ' + zone, [at, 'Europe/Berlin']));
+    for (const at of server.future) expected.push(await page.evaluate(([ts, zone]) => timestampAt(ts, zone) + ' · ' + zone, [at, 'Europe/Berlin']));
     expect(ui).toEqual(expected);
     // 有效期结束后不再显示某个时间。
     await page.getByLabel('有效期结束（可留空）', { exact: true }).fill(new Date(Date.now() - 3600000).toISOString());
