@@ -61,7 +61,7 @@ agent 先调查，再决定是否值得提报。应按需查看完整日志、�
 
 新报告按 `repository + workflow id + cause` 去重，job 只描述影响范围，不参与新报告身份。原因标识应稳定描述底层问题，不能使用 run/attempt/job id 或笼统退出症状。控制面向后续分析的 run.json 和 Manager 事件提供同一工作流最近已发报告的原因标识及 Issue 编号（最多读取 50 条元数据、保留 20 个不同原因，不读取旧正文）；确认为同一问题时复用原标识，不能因错误行相似就合并。相同原因的新 run/attempt 在本功能已登记且仍打开的 Issue 评论并保留新证据；不同原因或原 Issue 已关闭时新建。每个原因在一个 attempt 只有一个持久 outbox 回执，重复处理不重复写入。
 
-分析任务的英文 `title` 和 Markdown `diagnosis` 分别作为 Issue 标题和完整正文。同一原因的跟进评论也只展示本次诊断。作者决定如何说明根因、引用证据、放置稳定的 Actions 链接及表达不确定性。`evidence` 和 `report_reason` 用于内部核验与分类。公开前仅遮盖已知密钥、凭据字段或请求头、私钥块和签名参数，保留普通路径、SHA、链接和相邻诊断文字。平台附加隐藏的回执标记用于对账；模型文本中的标记不能作为平台标记。超过 GitHub 65,536 字符上限时保留完整调查及未发布原因。实际写入前再次用最新凭据集合处理标题、正文和已保存的待发送内容，并复核权限与任务来源。
+分析任务的英文 `title` 和 Markdown `diagnosis` 分别作为 Issue 标题和完整正文。同一原因的跟进评论也只展示本次诊断。作者决定如何说明根因、引用证据、放置稳定的 Actions 链接及表达不确定性。`evidence` 和 `report_reason` 用于内部核验与分类。公开前仅遮盖已知密钥、凭据字段或请求头、私钥块和签名参数，保留普通路径、SHA、链接和相邻诊断文字。Base64 或 Base64url 数据中含有已注册凭据或可识别的凭据字段时，只遮盖那段编码。平台附加隐藏的回执标记用于对账；模型文本中的标记不能作为平台标记。超过 GitHub 65,536 字符上限时保留完整调查及未发布原因。实际写入前再次用最新凭据集合处理标题、正文和已保存的待发送内容，并复核权限与任务来源。
 
 丢失 Issue／评论响应后，按发布账号的 GitHub 用户 ID 和唯一 marker 从 Issue／评论列表对账；找不到则显示 `actions_report_write_unknown` 并保留该项，绝不盲目重发，不依赖搜索索引。
 
@@ -71,7 +71,7 @@ agent 先调查，再决定是否值得提报。应按需查看完整日志、�
 
 提报通过现有 `queueWebhook(..., issues.opened, ...)` 进入检视，和实际 GitHub webhook 使用同一 opened 唯一键。检视关闭时只保留 Issue。external 和 unknown 的来源类别保存在本地，不论后续日志指令或标签内容如何，都不能进入开发。
 
-code 来源还必须保留 Current behavior、Expected behavior、Requested code change 正文，检视明确返回 `product_defect=true`，而且没有人被指派。这是 bot 自己提报的 Issue，开发它不需要别的依据，由 Manager 决定（#815 之前还要原文 quote 和人加的开发标签）。Bot 不加开发标签。进入开发及发布前继续检查功能开关、项目能力上限为 develop、实际安装的事件订阅、Issue 开放且无人指派；对应 bot PR 的修订也保留原 Issue 的开关和批准边界。仍由现有流程测试、发布 `bot/issue-...` 分支和 PR，不合并。
+code 来源还必须保留 Current behavior、Expected behavior、Requested code change 三个顶层二级标题及其内容。段落、列表、代码块、表格和引用块均可提供章节内容，摘录中的标题不能代替顶层标题。进入开发前，检视明确返回 `product_defect=true`，而且没有人被指派。这是 bot 自己提报的 Issue，开发它不需要别的依据，由 Manager 决定（#815 之前还要原文 quote 和人加的开发标签）。Bot 不加开发标签。进入开发及发布前继续检查功能开关、项目能力上限为 develop、实际安装的事件订阅、Issue 开放且无人指派；对应 bot PR 的修订也保留原 Issue 的开关和批准边界。仍由现有流程测试、发布 `bot/issue-...` 分支和 PR，不合并。
 
 PR 需要的标签（例如仓库要求的一个 `release:*` 类别）由仓库自己的规则告诉 agent，经 `create_pull_request` 的 `labels` 提交，规则见[架构](architecture.md#检视与开发数据流)。
 

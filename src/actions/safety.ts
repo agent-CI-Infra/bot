@@ -1,5 +1,5 @@
 import { marked } from 'marked';
-import { redactCredentials } from '../core/redaction.js';
+import { hasCredentials, redactCredentials } from '../core/redaction.js';
 import type { Store } from '../storage/database.js';
 import { Redactor } from '../agent/common.js';
 import { covers, projectCeiling } from '../work/ceiling.js';
@@ -17,26 +17,42 @@ export function actionsConfigurationError(github: { installationPermissions: Rec
   return null;
 }
 
-export function actionsRedactor(store: Store, redactor = new Redactor()) {
-  const add = (value: unknown) => {
+// GitHub registers newly minted tokens through add() on this same instance during delivery.
+class ActionsRedactor extends Redactor {
+  override add(value: unknown) {
     if (typeof value !== 'string' || !value) return;
-    redactor.values.add(value);
-    // A URL may encode the whole value or each repository path segment.
-    redactor.values.add(encodeURIComponent(value));
-    redactor.values.add(value.split('/').map(encodeURIComponent).join('/'));
-  };
+    this.values.add(value);
+    this.values.add(encodeURIComponent(value));
+    this.values.add(value.split('/').map(encodeURIComponent).join('/'));
+    const base64 = Buffer.from(value).toString('base64');
+    const urlSafe = base64.replace(/\+/g, '-').replace(/\//g, '_');
+    for (const encoded of [base64, urlSafe]) {
+      this.values.add(encoded);
+      this.values.add(encoded.replace(/=+$/, ''));
+    }
+  }
+}
+
+export function actionsRedactor(store: Store, redactor: Redactor = new ActionsRedactor()) {
   for (const account of store.all('SELECT id,credentials FROM accounts')) {
     const credentials = store.secrets.open(account.credentials, `account:${account.id}`);
-    for (const name of ['token', 'private_key', 'webhook_secret']) add(credentials[name]);
+    for (const name of ['token', 'private_key', 'webhook_secret']) redactor.add(credentials[name]);
   }
-  for (const model of store.all('SELECT id,api_key FROM models WHERE api_key IS NOT NULL')) add(store.secrets.open(model.api_key, `model:${model.id}`).value);
-  for (const endpoint of store.all('SELECT id,secret FROM endpoints')) add(store.secrets.open(endpoint.secret, `endpoint:${endpoint.id}`).value);
+  for (const model of store.all('SELECT id,api_key FROM models WHERE api_key IS NOT NULL')) redactor.add(store.secrets.open(model.api_key, `model:${model.id}`).value);
+  for (const endpoint of store.all('SELECT id,secret FROM endpoints')) redactor.add(store.secrets.open(endpoint.secret, `endpoint:${endpoint.id}`).value);
   return redactor;
 }
 
 export function publicText(value: string, redactor: Redactor): string {
   if (value.includes('\0')) return '';
-  const text = redactor.text(value).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
+  // A log can encode an entire JSON object or header, so its token need not equal Base64(secret).
+  // Inspect the payload before literal replacement; an encoding may share a substring with the encoded secret.
+  const inspected = value.replace(/[A-Za-z0-9+/_-]{8,}={0,2}/g, encoded => {
+    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+    if (redactor.text(decoded) !== decoded || hasCredentials(decoded)) return '[REDACTED]';
+    return encoded;
+  });
+  const text = redactor.text(inspected).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
   const cleaned = redactCredentials(redactor.text(text))
     .replace(/-----BEGIN ([A-Z0-9][A-Z0-9 -]*)-----[\s\S]*?(?:-----END \1-----|$)/g, '[REDACTED]');
   return cleaned.includes('-----BEGIN') ? '' : cleaned;
@@ -69,9 +85,13 @@ export function actionsDevelopmentAllowed(store: Store, id: string, number: numb
   if (!issue) return true;
   const prose = String(issue.body || '').split('<!-- dept-bot-actions-log-start -->')[0]!;
   // Only sections in the author's prose count. Examples inside fenced code and blockquotes are evidence.
-  const blocks = marked.lexer(prose).filter(block => block.type !== 'space');
-  const sections = new Set(blocks.flatMap((block, index) => block.type === 'heading' && block.depth === 2
-    && ['paragraph', 'list'].includes(blocks[index + 1]?.type ?? '') ? [block.text] : []));
+  const sections = new Set<string>();
+  let section = '';
+  for (const block of marked.lexer(prose)) {
+    if (block.type === 'heading') section = block.depth === 2 ? block.text : '';
+    else if (section && ['paragraph', 'list', 'code', 'table', 'blockquote'].includes(block.type)
+      && ('text' in block ? block.text : block.raw).trim()) sections.add(section);
+  }
   if (!['Current behavior', 'Expected behavior', 'Requested code change'].every(title => sections.has(title))) return false;
   // The review that checked repository code confirms the product defect; the quote it once had to return went with #815.
   return !result || result.product_defect === true;
