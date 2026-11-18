@@ -9,7 +9,7 @@ const scheduleErrors = { channel_schedule_forbidden: '只有私聊的本人，�
   channel_schedule_changed: '定时任务在运行中被修改或删除', external_binding_required: '本人的飞书身份绑定已失效', principal_inactive: '账户已停用',
   user_paused: '已手动暂停', invalid_field: '名称、提示词和时区都需要填写。' };
 const scheduleError = value => scheduleErrors[String(value)] || employeeError(value);
-const scheduleTime = (at, zone) => timestampAt(at, zone) || '时间无法识别';
+const scheduleTime = (at, zone) => timestampAt(at, zone) || '时间或时区无法识别';
 async function channelSchedules(chatId) {
   const box = element('div', '', 'channel-schedules'); box.setAttribute('aria-label', '定时任务');
   const load = async () => {

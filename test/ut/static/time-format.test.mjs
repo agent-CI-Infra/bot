@@ -118,9 +118,15 @@ test('every displayed time calls the shared clock helper, and knowledge uses it 
 test('an unreadable time gets its own text instead of a bare zone suffix', () => {
   const page = loadConsole(['static/app.js', 'static/channels/schedules.js'], () => [404, {}]);
   assert.equal(page.run("timestampAt('not-a-date','UTC')"), '');
-  assert.equal(page.run("stamped('not-a-date','UTC')"), '时间无法识别');
-  assert.equal(page.run("stamped(null,'UTC')"), '时间无法识别');
+  assert.equal(page.run("stamped('not-a-date','UTC')"), '时间或时区无法识别');
+  assert.equal(page.run("stamped(null,'UTC')"), '时间或时区无法识别');
+  assert.equal(page.run("timeText('not-a-date','时间未提供')"), '时间或时区无法识别');
+  assert.equal(page.run("timeText(null,'时间未提供')"), '时间未提供');
+  assert.equal(page.run("timeText('','时间未提供')"), '时间未提供');
+  assert.equal(page.run("timeText('2026-11-18T09:03:00Z','时间未提供')"), '2026-11-18 09:03:00');
+  // The shared clock keeps its own meaning of an empty reading, because many other rows slice it.
+  assert.equal(page.run("timestamp('not-a-date')"), '');
   assert.equal(page.run("stamped('2026-11-18T09:03:00Z','UTC')"), '2026-11-18 09:03:00 · UTC');
-  assert.equal(page.run("scheduleTime('not-a-date','Asia/Shanghai')"), '时间无法识别');
+  assert.equal(page.run("scheduleTime('not-a-date','Asia/Shanghai')"), '时间或时区无法识别');
   assert.equal(page.run("scheduleTime('2026-11-18T09:03:00Z','Asia/Shanghai')"), '2026-11-18 17:03:00');
 });
