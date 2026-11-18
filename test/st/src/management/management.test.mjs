@@ -170,6 +170,8 @@ test('persistent conversations execute actual model tools, replay messages and s
   assert.ok(!JSON.stringify(requests).includes('fixture-provider-key'));
   // The assistant is not told about a repository .bot/ layer: none exists since #935, and a workflow.update takes effect.
   const system=requests[0].messages[0].content;assert.doesNotMatch(system,/\.bot\b/);assert.match(system,/configuration pull request \(a repository skill\)/);
+  // #1072: an example scheduled task that starts a workflow (checking for a running run first), and the late-schedule recommendation.
+  assert.match(system,/POST \/actions\/workflows\/nightly\.yml\/dispatches.*有没有排队或正在运行的运行，有就不再触发/);assert.match(system,/# Late scheduled workflow runs[\s\S]*cancel-in-progress: false/);
   assert.equal(result.events.find(e=>e.type==='tool_result'&&e.data.result.state==='succeeded').data.result.result.effective,true);
   const starts=result.events.filter(e=>e.type==='model_start');assert.deepEqual(starts.map(e=>e.data.turn),[0,1,2]);
   for(const call of result.events.filter(e=>e.type==='tool_call')){

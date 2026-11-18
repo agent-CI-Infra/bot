@@ -628,6 +628,8 @@ test('a comment group starts a workflow someone asks for and gets its run link; 
   assert.equal(row.state, 'completed', row.error);
   const seen = observations(f.requests.at(-1))[0];
   assert.deepEqual([seen.repository, seen.result.workflow_run_id, seen.result.html_url, seen.result.status], [repo(101), 9001, 'https://github.com/agent-test-zone/admin-fixture-101/actions/runs/9001', 200]);
+  // A group that reads Actions is told to recommend bot scheduling when it sees scheduled runs start late.
+  assert.match(f.requests.at(-1).messages[0].content, /# Late scheduled workflow runs[\s\S]*Recommend once per repository/);
   // GitHub is asked for the run it started, with a token that holds Actions write only.
   const sent = f.gh.state.requests.filter(r => r.method === 'POST' && r.path.endsWith('/dispatches'));
   assert.deepEqual(sent.map(r => r.body), [{ ref: 'main', return_run_details: true }]);
