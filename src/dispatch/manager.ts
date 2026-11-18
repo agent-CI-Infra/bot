@@ -170,7 +170,9 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
   let corrected = false, refusals = 0;
   try {
     if(role.harness_ref.id!=='native'){
-      return await runDispatchHarness({resultSession:resultFiles,store,task,model,redactor,guard,system,prompt:messages[1].content,tools:offered(),execute,
+      // Another backend gets the same system message as the native loop (#1058): the role prompt alone would leave out the
+      // dispatch prompt (the rules a project_rule basis quotes), the work this event can create and the write and merge rules.
+      return await runDispatchHarness({resultSession:resultFiles,store,task,model,redactor,guard,system:messages[0].content,prompt:messages[1].content,tools:offered(),execute,
         finish:{name:decisionNames[0]!,names:decisionNames,validate:async(args,name)=>{const {decision,refused,basis}=await assess(toDecision(name??null,args));if(!refused)return {...decision,model:model.model,basis};recordRefusal(store,String(event.id),{...refused,tool:'create_task'});if(++refusals>=maxRefusals)return {decision:'ignore',option_ids:[],reason:`控制面拒绝了 Manager 选的工作：${refused.reason}`.slice(0,1000),model:model.model};throw new InvalidDecision(refused.code,refused.reason);}},
         repairInvalid:error=>error instanceof InvalidDecision?error.message:undefined,
       },role,event,manager);
