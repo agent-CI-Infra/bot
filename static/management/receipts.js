@@ -139,9 +139,11 @@ function managementReceiptBody(receipt) {
     ? '同一个幂等键重放不会重复执行：同一发起人用同一个键和同一份参数再提交，服务端直接返回这份回执，不再执行一次。'
     : '这条回执没有幂等键：服务端无法用它识别重放，重复提交会再执行一次。', 'muted'));
   overview.append(idempotency);
-  // What the command is expected to affect. The server does not record it today, so the page says that rather than
-  // leaving the reader to assume "nothing".
-  const impactValue = [receipt.result?.impact, receipt.impact].find(value => typeof value === 'string' && value.trim());
+  // What the command is expected to affect. The server records it as the notice it writes together with an effect
+  // (workflow.update, manager.update); a notice without an effect is the outcome or a caveat, so it stays in the record
+  // section and this row keeps its honest fallback. A dedicated impact field wins, and a row-level copy is still honored.
+  const effectNotice = receipt.result?.effect ? receipt.result?.notice : null;
+  const impactValue = [receipt.result?.impact, effectNotice, receipt.impact].find(value => typeof value === 'string' && value.trim());
   const impact = element('div', ''); impact.dataset.receiptImpact = '';
   impact.append(facts([['影响', impactValue]]));
   impact.append(element('p', impactValue ? '上面是服务端为这次操作记录的影响描述。' : '服务端未提供影响描述：这次操作会影响什么，只能从「具体变更」和「配置差异」里读。', 'muted'));
