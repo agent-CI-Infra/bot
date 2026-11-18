@@ -195,9 +195,10 @@ function managementReceiptBody(receipt) {
   }
   result.append(resultBox); nodes.push(result);
   // Everything that is a record of the command rather than its outcome: server notes, the links it produced and the
-  // receipt id with the raw JSON behind it.
+  // receipt id with the raw JSON behind it. A notice the impact row already shows is not repeated here (#1081): the
+  // same sentence twice reads as two records.
   const recordCard = card('回执记录'), recordBox = element('div', ''); recordBox.dataset.receiptRecord = '';
-  if (outcome.notice) recordBox.append(element('p', String(outcome.notice)));
+  if (outcome.notice && String(outcome.notice) !== impactValue) recordBox.append(element('p', String(outcome.notice)));
   if (outcome.pr_url) recordBox.append(managementReceiptLink(String(outcome.pr_url), '查看配置 PR（待合入）'));
   if (outcome.configuration_url) recordBox.append(managementReceiptLink(String(outcome.configuration_url), '查看当前配置'));
   const taskId = receipt.target?.task_id ?? (receipt.operation === 'task.create' ? outcome.id : null);
