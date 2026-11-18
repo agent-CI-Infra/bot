@@ -43,38 +43,94 @@ export function actionsRedactor(store: Store, redactor: Redactor = new ActionsRe
   return redactor;
 }
 
-export function publicText(value: string, redactor: Redactor): string {
-  if (value.includes('\0')) return '';
-  // A log can encode an entire JSON object or header, so its token need not equal Base64(secret).
-  // Inspect the payload before literal replacement; an encoding may share a substring with the encoded secret.
-  const inspect = (encoded: string) => {
-    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-    return redactor.text(decoded) !== decoded || hasCredentials(decoded) ? '[REDACTED]' : encoded;
-  };
-  // CLI/MIME encoders use fixed-width lines with a possibly shorter final line. Keep surrounding
-  // Markdown and prose outside the payload, including a label before the first encoded line.
+function redactEncodedCredentials(value: string, redactor: Redactor): string {
+  const sensitive = (decoded: string) => redactor.text(decoded) !== decoded || hasCredentials(decoded);
+  const decode = (encoded: string) => Buffer.from(encoded, 'base64').toString('utf8');
+  // Ignore an incomplete trailing UTF-8 character when classifying the start of a text fragment.
+  const nonText = (part: string) => /[\u0000-\u0008\u000e-\u001f\u007f\uFFFD]/.test(decode(part).replace(/\uFFFD$/, ''));
   const tokens = /[A-Za-z0-9+/_-]{8,}={0,2}/g;
-  const continuation = /[ \t]*\r?\n[ \t]*([A-Za-z0-9+/_-]+={0,2})(?=[ \t]*\r?$|[`"'\])>])/my;
+  // A report may wrap a log in a blockquote or list, or reflow its lines into one paragraph.
+  // Capture only the Base64 characters: an ordered list number or a dash is not payload data.
+  const linePrefix = /[ \t]*\r?\n[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?/;
+  const clock = /(?:\d{4}-\d{2}-\d{2}[T ])?\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})?/;
+  const stamp = `(?:\\[${clock.source}\\]|${clock.source})[ \\t]+`;
+  const continuation = new RegExp(`(?:${linePrefix.source}(?<timestamp>${stamp})?|[ \\t]+)(?<fragment>[A-Za-z0-9+/_-]+={0,2})`, 'y');
   let inspected = '', copied = 0;
   for (let first; (first = tokens.exec(value));) {
-    const width = first[0].length;
-    let line = first[0], end = tokens.lastIndex;
+    const width = first[0].length, parts = [first[0]];
+    const ends = [tokens.lastIndex];
+    const timedLines: { end: number; prefix: string }[] = [];
+    let line = first[0], end = tokens.lastIndex, lastFullEnd = end;
     while (line.length === width && !line.endsWith('=')) {
       continuation.lastIndex = end;
-      const next = continuation.exec(value)?.[1];
+      const groups = continuation.exec(value)?.groups;
+      const next = groups?.fragment;
       if (!next || next.length > width) break;
+      if (groups?.timestamp) timedLines.push({ end: continuation.lastIndex, prefix: value.slice(end, continuation.lastIndex - next.length) });
       line = next;
+      parts.push(next);
       end = continuation.lastIndex;
+      ends.push(end);
+      if (next.length === width) lastFullEnd = end;
     }
-    const encoded = value.slice(first.index, end);
-    let safe = inspect(encoded);
-    // Adjacent independent Base64 strings may each carry their own credential.
-    if (safe === encoded && end > tokens.lastIndex) safe = encoded.replace(tokens, inspect);
+    const decoded = decode(parts.join(''));
+    let safe: string;
+    const second = parts[1];
+    if (second && nonText(first[0]) && !nonText(second) && sensitive(decode(parts.slice(1).join('')))) {
+      // A SHA or other public identifier can have exactly the encoder's line width. Inspect
+      // it independently when the following fragments already identify a sensitive text payload.
+      end = tokens.lastIndex;
+      safe = sensitive(decode(first[0])) ? '[REDACTED]' : first[0];
+    } else if (sensitive(decoded)) {
+      // A complete JSON diagnostic can end on an unpadded, full-width fragment. Following
+      // prose and SHAs belong to the report even when their tokens have exactly that width.
+      const document = parts.length > 1 ? jsonDocumentPrefix(decoded) : undefined;
+      const count = document ? Math.ceil(Buffer.byteLength(document) * 4 / 3) / width : 0;
+      if (document && count && Number.isInteger(count) && count < parts.length && sensitive(document)) {
+        end = ends[count - 1]!;
+      } else if (lastFullEnd < end) {
+        const prefix = decode(parts.slice(0, -1).join(''));
+        if (sensitive(prefix) && (redactor.values.has(prefix)
+          || !prefix.includes('\uFFFD') && decoded.includes('\uFFFD'))) end = lastFullEnd;
+      }
+      // Preserve the timestamps of individual log records, including their Markdown prefixes.
+      safe = '[REDACTED]' + timedLines.filter(record => record.end <= end).map(record => record.prefix + '[REDACTED]').join('');
+    } else {
+      // A shorter token can start another folded payload. Reconsider it at its own width,
+      // and check the full-width tokens individually for adjacent independent encodings.
+      end = lastFullEnd;
+      safe = parts.length === 1 ? first[0] : value.slice(first.index, end)
+        .replace(tokens, encoded => sensitive(decode(encoded)) ? '[REDACTED]' : encoded);
+    }
     inspected += value.slice(copied, first.index) + safe;
     copied = end;
     tokens.lastIndex = end;
   }
-  inspected += value.slice(copied);
+  return inspected + value.slice(copied);
+}
+
+// Locate the document boundary once even when unrelated Base64-looking prose decodes after it.
+function jsonDocumentPrefix(text: string): string | undefined {
+  if (!/^\s*[\[{]/.test(text)) return;
+  let depth = 0, quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (quoted) {
+      if (char === '\\') i++;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === '{' || char === '[') depth++;
+    else if ((char === '}' || char === ']') && --depth === 0) {
+      const prefix = text.slice(0, i + 1);
+      try { JSON.parse(prefix); return prefix; } catch { return; }
+    }
+  }
+}
+
+export function publicText(value: string, redactor: Redactor): string {
+  if (value.includes('\0')) return '';
+  // Inspect encoded diagnostic objects and headers before replacing individual registered values.
+  const inspected = redactEncodedCredentials(value, redactor);
   const text = redactor.text(inspected).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '');
   const cleaned = redactCredentials(redactor.text(text))
     .replace(/-----BEGIN ([A-Z0-9][A-Z0-9 -]*)-----[\s\S]*?(?:-----END \1-----|$)/g, '[REDACTED]');
