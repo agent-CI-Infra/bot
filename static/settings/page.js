@@ -164,9 +164,9 @@ const settingsCards = {
       : `${time(state.at)} ${state.action === 'not_needed' ? '未压缩' : state.action === 'skipped' ? '跳过，下次启动再试' : '失败，下次启动再试'}：${reasons[state.reason] ?? state.reason}`
         + (state.reason === 'disk_space' ? `（需要 ${size(state.required_bytes)}，剩余 ${size(state.disk_free_bytes)}）` : '');
     const vacuumed = state => !state ? '读不到' : state.auto_vacuum !== 2 ? '未启用（压缩后启用）' : state.last ? `最近 ${time(state.last.finished_at)} 归还 ${size(state.last.bytes)}` : '已启用，暂无可归还的页';
-    const expiry = state => !state ? '读不到' : `保留 ${state.window_days} 天；` + (state.last_pass ? `最近一次 ${new Date(state.last_pass.finished_at).toLocaleString('zh-CN')} 删除 ${count(state.last_pass.files)} 个文件（${size(state.last_pass.bytes)}）` : '尚未运行')
+    const expiry = state => !state ? '读不到' : `保留 ${state.window_days} 天；` + (state.last_pass ? `最近一次 ${timestamp(state.last_pass.finished_at)} 删除 ${count(state.last_pass.files)} 个文件（${size(state.last_pass.bytes)}）` : '尚未运行')
       + (state.last_error ? `；最近一个错误：${state.last_error}` : '');
-    const time = value => value ? new Date(value).toLocaleString('zh-CN') : '—', row = (table, cells) => { const tr = document.createElement('tr'); for (const text of cells) tr.append(element('td', text)); table.body.append(tr); };
+    const time = value => value ? timestamp(value) : '—', row = (table, cells) => { const tr = document.createElement('tr'); for (const text of cells) tr.append(element('td', text)); table.body.append(tr); };
     const cards = [], intro = view.overview ? element('div', '', 'storage-updated') : settingsCard('存储', 'h2');
     intro.append(note(`这里统计已采集的文件与项目工作卷。后台快照每 5 分钟更新一次，目录按小时测量，工作卷每 6 小时扫描。最近刷新 ${view.refreshed_at ? time(view.refreshed_at) : '尚未刷新'}。`
       // A failed manager read keeps the numbers it gave last (#793), so the page says which read they come from.
@@ -226,7 +226,7 @@ const settingsCards = {
         for (const [name, phase] of Object.entries(state?.phases ?? {})) {
           const row = document.createElement('tr');
           for (const text of [where, name, count(phase.migrated), count(phase.skipped), count(phase.failed), size(phase.bytes), count(state.remaining?.[name]),
-            phase.finished_at ? new Date(phase.finished_at).toLocaleString('zh-CN') : state.paused ? '磁盘空间不足，已暂停' : '进行中'])
+            phase.finished_at ? timestamp(phase.finished_at) : state.paused ? '磁盘空间不足，已暂停' : '进行中'])
             row.append(element('td', text));
           table.body.append(row);
         }

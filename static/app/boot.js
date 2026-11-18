@@ -5,6 +5,14 @@ function timestamp(value) {
   const pad=(n,width=2)=>String(n).padStart(width,'0');
   return `${pad(date.getFullYear(),4)}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
+// The same reading in a named zone, for the rows that keep a " · zone" suffix.
+function timestampAt(value, zone) {
+  if(value==null||value==='')return '';
+  const date=new Date(value);if(Number.isNaN(date.getTime()))return '';
+  const parts=new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(date);
+  const part=type=>parts.find(item=>item.type===type)?.value||'';
+  return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}:${part('second')}`;
+}
 function options(select, rows, label) { const selected = select.value; while (select.options.length > 1) select.remove(1); rows.forEach(row => select.add(new Option(label(row), row.id))); if (rows.some(row => row.id === selected)) select.value = selected; }
 function renderCurrentUser() {
   const who = $('who'), role = currentRoleText();

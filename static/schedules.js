@@ -156,7 +156,7 @@ async function renderSchedules(panel, project) {
   summary.append(element('h4','项目定时任务'), note('时区和触发时间来自服务端记录；尚未成功或没有下次触发不会显示为零。'));
   const states = { active:'启用中',paused:'已暂停',deleted:'已删除',unsupported:'处理器未支持' };
   const reasons = { migrated_to_chat_schedule:'已迁移到飞书会话的定时任务', daily_report_retired:'项目日报已停用', schedule_workflow_unsupported:'执行内容已不支持' };
-  const time = (value,zone) => value == null ? '无记录' : new Date(value).toLocaleString(undefined,{timeZone:zone}) + ' · ' + zone;
+  const time = (value,zone) => value == null ? '无记录' : timestampAt(value,zone) + ' · ' + zone;
   for (const item of plans.schedules) {
     const legacy = item.spec.workflow !== 'manager.check';
     const row = element('article', '', 'schedule-row'); row.append(element('strong',item.spec.name),note((states[item.state] || item.state) + (item.reason ? ' · '+(reasons[item.reason] || item.reason) : '')),
@@ -179,7 +179,7 @@ async function renderSchedules(panel, project) {
         ['会话定时任务', m.channel_schedule_id ? (m.detail?.timer?.name || m.channel_schedule_id) + (m.detail?.timer?.enabled === false ? '（已暂停，与原计划一致）' : '') : '未创建'],
         ['原因', m.reason ? (why[m.reason] || m.reason) : '无'],
         ...(m.detail?.notes?.length ? [['说明', m.detail.notes.map(n => notes[n] || n).join('；')]] : []),
-        ['迁移时间', new Date(m.created_at).toLocaleString()]]));
+        ['迁移时间', timestamp(m.created_at)]]));
       record.append(entry);
     }
     panel.append(record);
