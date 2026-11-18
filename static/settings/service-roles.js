@@ -21,7 +21,10 @@ function serviceUsageText(usage) {
   if (usage.unpriced_requests) parts.push(`${usage.unpriced_requests} 次未计价`);
   return parts.join(' · ');
 }
-function serviceRoleCard(view, initial) {
+// #1039: the role card is an h2 on the settings page (its page h1 is 全局设置) and an h3 on the Feishu bindings page,
+// where buildProjectRolesSection draws it inside its own h3 card (static/channels/assistant-roles.js), so the caller
+// names the level instead of inheriting the settings default.
+function serviceRoleCard(view, initial, level = 'h3') {
   let role = initial;
   const live = liveCard(role.name, redraw => {
     const kind = [role.builtin ? badge('内置', 'info') : badge(role.project ? '项目角色' : '自定义', ''), role.enabled ? badge('已启用', 'success') : badge('已停用', 'warning')], head = element('p', '');
@@ -48,7 +51,7 @@ function serviceRoleCard(view, initial) {
     const remove = role.builtin ? null : button('删除角色', async () => {
       if (!await askConfirm({ title: `删除服务角色 ${role.name}？`, body: ['已记录的用量保留，仍按这个角色归属。'], action: '删除', danger: true })) return;
       remove.disabled = true;
-      try { await serviceRoleRequest('/api/service-roles/' + role.id, 'DELETE', { expected_revision: role.revision }); live.section.replaceChildren(element('h2', role.name), element('p', '已删除', 'view-success')); }
+      try { await serviceRoleRequest('/api/service-roles/' + role.id, 'DELETE', { expected_revision: role.revision }); live.section.replaceChildren(element(level, role.name), element('p', '已删除', 'view-success')); }
       catch (err) { remove.disabled = false; error(err); }
     }, 'quiet destructive');
     nodes.push(actionForm([field('名称', name), field('职责说明', responsibility), field('提示词', prompt), field('Agent 后端',harnessSelect), field(role.project ? '模型（本项目可用的模型）' : '模型（部署共享模型）', modelSelect),
@@ -57,10 +60,10 @@ function serviceRoleCard(view, initial) {
       const change = { expected_revision: role.revision, harness:harnessSelect.value, name: name.value, responsibility: responsibility.value, prompt: prompt.value, model_id: modelSelect.value || null };
       if (enabled) change.enabled = enabled.querySelector('input').checked;
       role = (await serviceRoleRequest('/api/service-roles/' + role.id, 'PATCH', change)).service_role;
-      live.section.querySelector('h2').textContent = role.name; redraw('已保存');
+      live.section.querySelector(level).textContent = role.name; redraw('已保存');
     }, remove ? [remove] : []));
     return nodes;
-  });
+  }, level);
   return live.section;
 }
 function serviceRoleCreate(view) {

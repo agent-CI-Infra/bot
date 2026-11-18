@@ -34,6 +34,26 @@ for (const width of [1440, 390]) test(`a project administrator creates a project
     await card.locator('textarea[name=prompt]').fill('先给结论，再列出处。');
     await card.getByRole('button', { name: '保存', exact: true }).click();
     await expect(card).toContainText('已保存'); await expect(card).toContainText('Project 101 model');
+    // #1039: this page draws the project-role card inside its own 项目群助手角色 card, so the role card keeps the h3 of the
+    // card that contains it and 新建项目角色 keeps h4 — no h2 → h4 skip and no card outranking its container. The page
+    // already had an h1 → h3 jump before this issue and the maintainer does not ask for it here (issue #1039 acceptance is
+    // the settings pages), so the assertions are exactly the two regressions this change could cause, not full ordering.
+    const outline = await page.evaluate(() => [...document.querySelectorAll('h1, h2, h3, h4, h5, h6')]
+      .filter(node => {
+        if (node.closest('[hidden]') || node.closest('[aria-hidden="true"]')) return false;
+        const style = getComputedStyle(node), box = node.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+      }).map(node => ({ level: Number(node.tagName.slice(1)), text: node.textContent.trim() })));
+    const levels = outline.map(heading => heading.level), shown = outline.map(heading => `h${heading.level} "${heading.text}"`).join(', ');
+    // 1. liveCard's settings default (h2) must not leak onto this page: nothing here is an h2 any more.
+    expect(levels, `#/identity/feishu must not gain an h2: ${shown}`).not.toContain(2);
+    // 2. No h2 → h4 skip and no card outranking its container: the role card sits at the level of 项目群助手角色, and
+    //    新建项目角色 stays one level under it.
+    const container = outline.find(heading => heading.text === '项目群助手角色'), roleCard = outline.find(heading => heading.text === '101 群助手'), child = outline.find(heading => heading.text === '新建项目角色');
+    expect(container?.level, `项目群助手角色 missing: ${shown}`).toBe(3);
+    expect(roleCard?.level, `the project role card must keep the level of its container, not become h2: ${shown}`).toBe(container.level);
+    expect(child?.level, `新建项目角色 must stay one level under its card: ${shown}`).toBe(container.level + 1);
+    expect(levels.filter(level => level === 1).length, `one h1 on #/identity/feishu: ${shown}`).toBe(1);
     expect(h.store.get("SELECT project_id,prompt FROM service_roles WHERE name='101 群助手'")).toEqual({ project_id: '101', prompt: '先给结论，再列出处。' });
     // A group that also covers 102 is refused, naming 102; scoped to 101 it is saved.
     await page.getByRole('button', { name: '创建群绑定', exact: true }).click();
