@@ -38,10 +38,11 @@ test('每类工作的卡片在所有维度保留状态、徽章和任务目标�
   try{
     await page.setViewportSize({width:1600,height:900});await login(page,h.admin,password);
     await expect(page.getByRole('group',{name:'对象类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','');
-    // #482: the work type and the repository are toolbar selects beside the view, so the filter fold holds no select;
-    // the arrangement holds 视图, 仓库, 工作类型 and 按…分列.
+    // #482: the work type is a toolbar select beside the view, so the filter fold holds no select; the arrangement
+    // holds 视图, 工作类型 and 按…分列. The repository condition stays a chip: the address is the only scope entry.
     await expect(page.locator('.board-filter-controls select')).toHaveCount(0);
-    await expect(page.locator('.board-arrangement select')).toHaveCount(4);
+    await expect(page.locator('.board-arrangement select')).toHaveCount(3);
+    await expect(page.locator('.board-arrangement select[aria-label="仓库"]')).toHaveCount(0);
     await expect(work(page,'101/pr/2','review.pr')).toBeVisible();await expect(work(page,'101/issue/3','review.issue')).toBeVisible();
     await expect(work(page,'101/pr/2','review.pr')).toContainText('PR #2');
     await expect(page.getByLabel('工作类型',{exact:true}).locator('option')).toHaveText(['全部工作类型','检视 Issue','检视 PR','开发 Issue','跟进 bot PR','通用回复','通用任务','发版本']);
