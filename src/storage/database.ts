@@ -26,6 +26,7 @@ import { ceilingStorage } from '../work/ceiling.js';
 import { retireWorkTypes } from '../work/retired.js';
 import { grantStorage } from '../tasks/grants.js';
 import { basisStorage } from '../dispatch/basis.js';
+import { progressStorage } from '../review/progress.js';
 import { dispatchStorage } from '../dispatch/store.js';
 import { githubWriteStorage } from '../github/write.js';
 import { installationStorage } from '../installations/storage.js';
@@ -274,6 +275,8 @@ export class Store {
     grantStorage(this);
     // Why a development was allowed to start (#815).
     basisStorage(this);
+    // What an Issue development shows on the Issue: its developing label and status comment (#1047).
+    progressStorage(this);
     identityStorage(this);
     managementStorage(this);
     channelStorage(this);

@@ -41,7 +41,7 @@ test('labels.md, pr-review.md and computer.yaml become role configuration once, 
   assert.equal(managerSection(store, '101', 'guide'), undefined);
   assert.equal(managerPrompt(store, '101').revision, before + 1);
   assert.equal(managerPrompt(store, '101').source, 'upgrade');
-  assert.deepEqual(projectLabels(store, '101'), { review_label: 'team-reviewed', development_label: 'ship it' });
+  assert.deepEqual(projectLabels(store, '101'), { review_label: 'team-reviewed', development_label: 'ship it', developing_label: 'bot-developing' });
   // The computer file's fields over the console's, as tasks applied them.
   assert.deepEqual(JSON.parse(store.get("SELECT spec FROM computer_console_specs WHERE repository_id='101'").spec), { cpus: 3, memory_mb: 8192, packages: ['jq'] });
   // The report names what was imported, and the cache keeps the .bot/ names only.
@@ -75,18 +75,18 @@ test('labels.md, pr-review.md and computer.yaml become role configuration once, 
   const github = { path: suffix => suffix, request: async (_method, path) => path.startsWith('/git/commits/') ? { tree: { sha: 'tree' } } : path.startsWith('/git/trees/')
     ? { tree: [{ path: '.bot/rules/labels.md', type: 'blob', mode: '100644', sha: 'labels', size: 20 }], truncated: false } : { content: Buffer.from('review_label: changed\n').toString('base64') } };
   service.cache('101', 'b'.repeat(40), await service.fetch(github, 'b'.repeat(40), undefined, '101'));
-  assert.deepEqual(projectLabels(store, '101'), { review_label: 'team-reviewed', development_label: 'ship it' });
+  assert.deepEqual(projectLabels(store, '101'), { review_label: 'team-reviewed', development_label: 'ship it', developing_label: 'bot-developing' });
   assert.equal((await admin('/api/repositories/101/rules')).value.rules.review_label, 'team-reviewed');
 
   // 202 had nothing cached: it imports the first time the bot reads its repository, from that commit.
   assert.equal(importPending(store, '202'), true); assert.equal(report(store, '202').sha, null);
-  assert.deepEqual(projectLabels(store, '202'), { review_label: 'bot-reviewed', development_label: 'bot-develop' });
+  assert.deepEqual(projectLabels(store, '202'), { review_label: 'bot-reviewed', development_label: 'bot-develop', developing_label: 'bot-developing' });
   const pending = { path: suffix => suffix, request: async (_method, path) => path.startsWith('/git/commits/') ? { tree: { sha: 'tree' } } : path.startsWith('/git/trees/')
     ? { tree: [{ path: '.bot/rules/labels.md', type: 'blob', mode: '100644', sha: 'labels', size: 20 }, { path: '.bot/guide.md', type: 'blob', mode: '100644', sha: 'guide', size: 5 }], truncated: false }
     : { content: Buffer.from(path.endsWith('labels') ? 'review_label:\n# Our labels\n' : 'Guide').toString('base64') } };
   assert.deepEqual(await service.fetch(pending, 'c'.repeat(40), undefined, '202'), { '.bot/rules/labels.md': '', '.bot/guide.md': '' });
   assert.equal(importPending(store, '202'), false); assert.equal(report(store, '202').sha, 'c'.repeat(40));
-  assert.deepEqual(projectLabels(store, '202'), { review_label: '', development_label: 'bot-develop' });
+  assert.deepEqual(projectLabels(store, '202'), { review_label: '', development_label: 'bot-develop', developing_label: 'bot-developing' });
   assert.equal(managerSection(store, '202', 'labels'), `由 \`.bot/rules/labels.md\` 导入（提交 ccccccc）。\n\n# Our labels`);
   assert.equal(managerSection(store, '202', 'guide'), `由 \`.bot/guide.md\` 导入（提交 ccccccc）。\n\nGuide`);
 });
@@ -98,9 +98,9 @@ test('a project on the built-in texts keeps the built-in labels, and an invalid 
   store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)', '101', sha, JSON.stringify({}), 'now');
   store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)', '202', sha, JSON.stringify({ '.bot/rules/labels.md': 'review_label: ' + 'y'.repeat(51) + '\n# Labels\n' }), 'now');
   new RuleService(store);
-  assert.deepEqual(projectLabels(store, '101'), { review_label: 'bot-reviewed', development_label: 'bot-develop' });
+  assert.deepEqual(projectLabels(store, '101'), { review_label: 'bot-reviewed', development_label: 'bot-develop', developing_label: 'bot-developing' });
   assert.deepEqual(report(store, '101').report.files, []);
-  assert.deepEqual(projectLabels(store, '202'), { review_label: 'bot-reviewed', development_label: 'bot-develop' });
+  assert.deepEqual(projectLabels(store, '202'), { review_label: 'bot-reviewed', development_label: 'bot-develop', developing_label: 'bot-developing' });
   assert.match(report(store, '202').report.warnings.join('\n'), /review_label 不合法，使用默认值 bot-reviewed/);
   // The built-in texts no longer declare the labels: the settings name them.
   assert.doesNotMatch(defaults['.bot/rules/labels.md'], /^review_label:/m); assert.doesNotMatch(defaults['.bot/rules/issue-development.md'], /^development_label:/m);
@@ -117,7 +117,7 @@ test('an empty repository file is the layer it was, and one project that cannot 
   store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)', '303', sha, JSON.stringify({ '.bot/rules/pr-review.md': 'Rule.' }), 'now');
   store.run("UPDATE policies SET rule_overrides='{broken' WHERE repository_id='303'");
   new RuleService(store);
-  assert.deepEqual(projectLabels(store, '101'), { review_label: '', development_label: 'bot-develop' });
+  assert.deepEqual(projectLabels(store, '101'), { review_label: '', development_label: 'bot-develop', developing_label: 'bot-developing' });
   assert.equal(managerSection(store, '101', 'labels'), `由 \`.bot/rules/labels.md\` 导入（提交 ${sha.slice(0, 7)}）。`);
   for (const id of ['202', '303']) {
     const { report: failed } = report(store, id);

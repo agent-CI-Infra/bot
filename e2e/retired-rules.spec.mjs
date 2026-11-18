@@ -39,10 +39,12 @@ test('an upgraded project shows its imported .bot/ files as deletable, its label
     await expect(page.getByLabel('检视标签', { exact: true })).toHaveValue('team-reviewed');
     await expect(page.getByLabel('开发标签', { exact: true })).toHaveValue('bot-develop');
     await page.screenshot({ path: `${out}/basic-1440.png` });
-    // The labels save through the page's save bar; an empty review label means none.
+    // The labels save through the page's save bar; an empty review label means none, and so does an empty developing label (#1047).
     await page.getByLabel('检视标签', { exact: true }).fill('');
+    await page.getByLabel('开发中标签', { exact: true }).fill('');
     await consoleSave(page).click();
     await expect.poll(async () => (await admin('/api/repositories/101/policy')).value.policy.review_label).toBe('');
+    await expect.poll(async () => (await admin('/api/repositories/101/policy')).value.policy.developing_label).toBe('');
     await page.setViewportSize({ width: 390, height: 844 }); await page.evaluate(() => window.scrollTo(0, 0));
     await notice.scrollIntoViewIfNeeded(); await expect(notice).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

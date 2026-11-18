@@ -17,7 +17,7 @@ function makeRepo(id){
   const files=[{path:'calc.mjs',mode:'100644',type:'blob',sha:blob(baseBody(id))},{path:'calc.test.mjs',mode:'100644',type:'blob',sha:blob("import test from 'node:test';import assert from 'node:assert/strict';import {add} from './calc.mjs';test('addition',()=>assert.equal(add(2,3),5));\n")},
     {path:'README.md',mode:'100644',type:'blob',sha:blob(`REPO_${id}_ONLY. Run tests with node --test. Fix implementation; preserve tests.\n`)}];
   const base=commit(files),foreign=commit(files.map(f=>f.path==='calc.mjs'?{...f,sha:blob(baseBody(id).trim()+' // contributor\n')}:f),base,'contributor');
-  const repo={id:Number(id),full_name:'fixture/project-'+id,owner:{id:10,login:'fixture'},default_branch:'trunk',refs:{trunk:base,contributor:foreign},issues:new Map(),pulls:new Map(),comments:new Map(),reviews:new Map(),labels:new Map(),refWrites:[],createdPrs:[],nextPr:70};
+  const repo={id:Number(id),full_name:'fixture/project-'+id,owner:{id:10,login:'fixture'},default_branch:'trunk',refs:{trunk:base,contributor:foreign},issues:new Map(),pulls:new Map(),comments:new Map(),reviews:new Map(),labels:new Map(),createdLabels:[],refWrites:[],createdPrs:[],nextPr:70};
   for(const [number,body] of [[1,'Fix add to sum both numbers.'],[2,'Explain the addition implementation.'],[3,'Fix add to sum both numbers.'],[4,'Explain the addition implementation.'],[6,'Fix add to sum both numbers.'],[8,'Explain the addition implementation.'],[10,'Explain recovery behavior.'],[12,'Fix add to sum both numbers.']])repo.issues.set(number,{id:1000+number,number,title:body,body,state:'open',assignees:[],labels:body.startsWith('Fix')?[{name:'bot-develop'}]:[]});
   for(const number of [42,43,44,99])repo.pulls.set(number,{id:4000+number,number,title:'Review contributor change',body:'Please review this pull request.',state:'open',draft:number===99,user:{id:800,login:'contributor'},head:{sha:foreign,ref:'contributor',repo:{id:Number(id)}},base:{sha:base,ref:'trunk',repo:{id:Number(id)}},html_url:`https://github.invalid/${id}/pull/${number}`});
   return repo;
@@ -25,7 +25,7 @@ function makeRepo(id){
 for(const id of ['101','202','303'])repositories.set(id,makeRepo(id));
 // refFailures answers 500 without writing; refLostResponses writes the ref and still answers 500 (the answer is lost).
 let config={github_token:'',model_key:''},treeMismatch=false,staled=false,dropComment=true,pullFailures=0,refFailures=0,refLostResponses=0;
-const stats={requests:[],models,dispatches:[],acceptances:[],refWrites:[],reviews:[],comments:[],prs:[],labels:[],trees:[],issues:[]};
+const stats={requests:[],models,dispatches:[],acceptances:[],refWrites:[],reviews:[],comments:[],commentEdits:[],prs:[],labels:[],unlabels:[],createdLabels:[],trees:[],issues:[]};
 const call=(name,args,id)=>({id:'call-'+id,type:'function',function:{name,arguments:JSON.stringify(args)}});
 function dispatch(context){
   const {event,work:options}=context;
@@ -120,6 +120,17 @@ export const server=createServer(async(req,res)=>{
     const repo=repositories.get(match[1]),suffix=match[2];if(!repo)return send({},404);
     if(!suffix)return send(publicRepo(repo));
     let m;
+    // The developing label (#1047): read by name, created when missing, and taken off an Issue again.
+    if((m=/^\/labels\/(.+)$/.exec(suffix))&&method==='GET'){const known=[...(repo.repositoryLabels||[]),...repo.createdLabels.map(l=>l.name)].find(name=>name.toLowerCase()===m[1].toLowerCase());return known?send({name:known}):send({message:'Not Found'},404);}
+    if(suffix==='/labels'&&method==='POST'){repo.createdLabels.push(body);stats.createdLabels.push({repository_id:repo.id,...body});return send({id:repo.createdLabels.length,...body},201);}
+    if((m=/^\/issues\/(\d+)\/labels\/(.+)$/.exec(suffix))&&method==='DELETE'){
+      const number=Number(m[1]),labels=repo.labels.get(number)||[],at=labels.findIndex(name=>name.toLowerCase()===m[2].toLowerCase());stats.unlabels.push({repository_id:repo.id,number,label:m[2]});
+      if(at<0)return send({message:'Label does not exist'},404);labels.splice(at,1);return send(labels.map(name=>({name})));
+    }
+    if((m=/^\/issues\/comments\/(\d+)$/.exec(suffix))&&method==='PATCH'){
+      const comment=[...repo.comments.values()].flat().find(c=>c.id===Number(m[1]));if(!comment)return send({message:'Not Found'},404);
+      comment.body=body.body;stats.commentEdits.push({repository_id:repo.id,id:comment.id,body:body.body});return send(comment);
+    }
     if(suffix==='/labels'&&repo.repositoryLabels)return send(Number(url.searchParams.get('page')||1)===1?repo.repositoryLabels.map(name=>({name})):[]);
     if((m=/^\/issues\/(\d+)\/comments$/.exec(suffix))){
       const number=Number(m[1]),comments=repo.comments.get(number)||[];

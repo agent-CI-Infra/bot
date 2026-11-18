@@ -46,6 +46,8 @@ export const basicTools = ['read_tool_result','read_child_tasks','wait_for_child
   // Framework deliveries (#381): a tested PR from the task's candidate, Actions reruns and failure reports. The work type's
   // writes decide whether a task offers them; the executing role needs no GitHub write for them.
   'create_pull_request','publish_candidate','rerun_failed_run','report_failure',
+  // An Issue development's milestones on the Issue's status comment (#1047), written by the control plane.
+  'report_development_milestone',
   // Delivery tools of generic tasks (#814): offered by the writes the task was granted, checked again at every call.
   'submit_report','open_pull_request','post_review',
   // The task's own workspace choice (#769): which worktree of the project computer it works in. They read and write no

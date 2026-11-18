@@ -78,8 +78,8 @@ Every item maps to a setting that already exists; there is nothing else to confi
 
 - At the `develop` level the Manager develops an Issue on a basis: a person's development label (`bot-develop` by
   default), a maintainer's request in a comment, or a rule in the Manager prompt. The built-in prompt has one: an Issue
-  whose review confirmed the problem and recommends a bounded fix, with nothing left to a person and nobody assigned,
-  may be developed without a label; the confirmed rule for simple Issues this plan writes adds to it. The bot opens a
+  whose review confirmed the problem and recommends a bounded fix, with nothing left to a person and nobody else has
+  claimed it, may be developed without a label; the confirmed rule for simple Issues this plan writes adds to it. The bot opens a
   pull request and never merges it unless a person asks. Say so when you recommend `develop`.
 - The plan cannot widen anyone's permissions: the capability level is checked against what the approver may grant when
   the plan is applied, and changing CI only happens through a development task the person confirmed.

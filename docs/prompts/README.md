@@ -9,7 +9,7 @@
 | [`labels.md`](labels.md) | `labels` | 检视标签的用法；从仓库已有标签里为 Issue 和 PR 选择 `type`、`source`、`priority`、`area`、`size` 等分类标签，需要人决定时选仓库已有的讨论类标签（没有就在总结里说明，不建），由控制面校验后添加；分类不等于授权 |
 | [`issue-review.md`](issue-review.md) | `review.issue` | 新 Issue 的意图；用仓库证据补全缺失内容（标明推断，写在检视评论里）、确认 bug（复现或读代码）、根因因果链、带推荐的修改方案；根据指派人、关联 PR 和评论判断是否已被别人认领，写在建议里；结论（可开发、需要信息、需要人决定、不需要改代码）写在 `finish_review` 的 `conclusion` 里 |
 | [`pr-review.md`](pr-review.md) | `review.pr` | PR 检视：一轮报全、实现是否合理（是否达成关联 Issue、是否符合现有架构、有无更简单做法、修复是否有测试证明）、严重度与处置、复审收敛、相关性判断、COMMENT 输出 |
-| [`issue-development.md`](issue-development.md) | `development` | 开发任务的资格、范围、停止条件、测试与 PR 说明 |
+| [`issue-development.md`](issue-development.md) | `development` | 开发任务的资格、范围、停止条件、测试与 PR 说明；开发 Issue 时用 `report_development_milestone` 提交分析与计划、完成、停止三类里程碑，由控制面写进 Issue 上的一条进展评论 |
 | [`release-observe.md`](release-observe.md) | CI 观察章节 | CI 观察的提示词：读取运行、分析日志与代码、给出结论 |
 | [`manager-dispatch.md`](manager-dispatch.md) | `dispatch` | 每个事件新建、续接还是不处理的默认流程 |
 | [`onboarding.md`](onboarding.md) | 无，不可覆盖 | 仓库接入向导：管理助手只读分析一个仓库，给出仓库画像、带推荐答案的问题和接入方案草稿，见[管理助手](../management-agent.md#仓库接入向导) |

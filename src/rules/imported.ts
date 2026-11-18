@@ -21,7 +21,9 @@ import { computerKeys, declaredLabel, defaultLabels, defaults, retiredPath, type
  * gets a report (rule_imports) and an audit entry; tasks already under way keep the rule texts they started with. After
  * that the bot never reads .bot/ contents again: a project added later starts from the built-in texts.
  */
-export interface ImportReport { files: string[]; sections: string[]; labels: Labels; computer: string[]; warnings: string[] }
+// The labels .bot/ files could declare: the developing label (#1047) came after them.
+type ImportedLabels = Pick<Labels, 'review_label' | 'development_label'>;
+export interface ImportReport { files: string[]; sections: string[]; labels: ImportedLabels; computer: string[]; warnings: string[] }
 const terminal = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'superseded'];
 
 export function importBotRules(store: Store): void {
@@ -56,7 +58,7 @@ export function importRepository(store: Store, repositoryId: string, sha: string
   store.transaction(() => { if (importPending(store, repositoryId)) importFiles(store, repositoryId, sha, JSON.stringify(files)); });
 }
 
-const emptyReport = (): ImportReport => ({ files: [], sections: [], labels: { ...defaultLabels }, computer: [], warnings: [] });
+const emptyReport = (): ImportReport => ({ files: [], sections: [], labels: { review_label: defaultLabels.review_label, development_label: defaultLabels.development_label }, computer: [], warnings: [] });
 
 // One project's import, from the files as JSON text. Whatever goes wrong in one project (a stored value that is not valid
 // JSON, a save the Manager prompt refuses) rolls back that project only: it keeps its console and built-in rules, and its
@@ -94,7 +96,7 @@ function importProject(store: Store, id: string, files: Record<string, string>, 
   const own = (path: string) => repository(path) ?? (Object.hasOwn(overrides, path) ? String(overrides[path]) : null);
   // Labels: the first declaration line of the layer that took effect, as tasks read them. The line then leaves the
   // section text: the setting is the only place that names the label from now on.
-  const declarations: Record<string, keyof Labels> = { '.bot/rules/labels.md': 'review_label', '.bot/rules/issue-development.md': 'development_label' };
+  const declarations: Record<string, keyof ImportedLabels> = { '.bot/rules/labels.md': 'review_label', '.bot/rules/issue-development.md': 'development_label' };
   const line = (key: string) => new RegExp(`^${key}:[ \\t]*.*(?:\\n|$)`, 'm');
   for (const [path, key] of Object.entries(declarations)) {
     const text = own(path); if (text === null) continue;
@@ -112,7 +114,7 @@ function importProject(store: Store, id: string, files: Record<string, string>, 
     // A console text kept only in rule_overrides (an older version wrote it there) joins the prompt, so saving it keeps it.
     else if (console !== null && ((key && line(key).test(console)) || !written.has(section.id))) write(section.id, plain(console));
   }
-  store.run('INSERT INTO project_labels VALUES(?,?,?) ON CONFLICT(repository_id) DO NOTHING', id, report.labels.review_label, report.labels.development_label);
+  store.run('INSERT INTO project_labels(repository_id,review_label,development_label) VALUES(?,?,?) ON CONFLICT(repository_id) DO NOTHING', id, report.labels.review_label, report.labels.development_label);
   if (report.sections.length) {
     const current = managerPrompt(store, id);
     saveManager(store, id, { expected_revision: current.revision, content }, null, 'upgrade');

@@ -38,6 +38,7 @@ import { checkPullRequestLabels } from '../github/pull-request-labels.js';
 import { testEvidence, reviewLanguage, promptedBy } from '../github/text.js';
 import { assigneesOf, developmentReady } from '../review/queue.js';
 import { issueClaims } from '../review/claims.js';
+import { dueProgress, milestoneToolName, reportMilestone, settleProgress, startProgress } from '../review/progress.js';
 import { taskBasis } from '../dispatch/basis.js';
 import { actionableFinding, developmentGoal, discussionRequests, developmentApproved,
   ownedPullRequest, developmentLabelForTask, developmentStopped, queueDevelopment, revisionRequests, type DevelopmentOffer, type GoAhead, type RevisionRequest } from '../review/development.js';
@@ -53,7 +54,7 @@ import {roleBackendWorkspace} from '../roles/workspace.js';
 import {recoverWithManager} from '../roles/manager-recovery.js';
 import { automaticState, isAttemptFailure } from './failures.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
-import { RuleService, resolveRules, behaviorPath, ruleErrors, skillIndex, computerRequest, projectLabels } from '../rules/service.js';
+import { RuleService, resolveRules, behaviorPath, ruleErrors, skillIndex, computerRequest, projectLabels, developingLabel } from '../rules/service.js';
 import { repositoryConcurrency } from '../app/settings.js';
 import { ReviewUpdated, pendingReviewUpdates, reviewObjectState, reviewUpdateLog } from '../review/sessions.js';
 import { continueFinishedReview, continuationContext, resumeFinishedReviews } from '../review/continuation.js';
@@ -153,6 +154,7 @@ export class TaskEngine {
       this.store.run("UPDATE tasks SET status='queued',phase='prepare',input=?,next_run_at=0 WHERE id=? AND status='needs_replan'",JSON.stringify({...input,manager_feedback:{code:parked.error_code,detail:'Legacy parked task: review original records before deciding how to continue. Existing candidates and effects are retained.'}}),parked.id);
       traceEvent(this.store,parked.id,'manager_recovery_queued',{previous_status:'needs_replan',code:parked.error_code},null,'framework');
     }
+    this.sweepProgress();
     const checkpoint=Date.now();
     this.store.run('UPDATE task_metrics SET runtime_ms=runtime_ms+max(0,?-active_since),active_since=? WHERE active_since IS NOT NULL',checkpoint,checkpoint);
     const tasks=this.store.all(`SELECT * FROM tasks WHERE ${engineKinds} AND
@@ -212,7 +214,28 @@ export class TaskEngine {
     if(idle)this.clearing.add(repo);
     try{await workspace.release(idle);}finally{if(idle)this.clearing.delete(repo);}
   }
-  async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await this.dispatcher.close();await Promise.allSettled([...this.active.values(),...this.merging.values()]);await this.coordinator.close();}
+  async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await this.dispatcher.close();await Promise.allSettled([...this.active.values(),...this.merging.values()]);await this.progressSweep;await this.coordinator.close();}
+  // Issues whose development is not shown as it is (#1047): a write to retry, or a development that ended or paused outside a
+  // run (a person cancelled it, the Issue was closed). A running development settles its Issue itself. One sweep at a time,
+  // with one GitHub client per project.
+  private progressSweep:Promise<void>|undefined;
+  private sweepProgress(){
+    if(this.progressSweep||this.closing)return;
+    const due=dueProgress(this.store).filter(row=>!this.active.has(row.task_id));
+    if(!due.length)return;
+    this.progressSweep=(async()=>{
+      for(const repositoryId of new Set(due.map(row=>row.repository_id))){
+        // The project's client is made only when one of its Issues needs a write: most status changes of a development
+        // (a retry wait, queued again) change nothing on the Issue.
+        let connected:Promise<GitHub>|undefined;
+        const client=()=>connected??=(async()=>{
+          const repo=this.store.get('SELECT * FROM repositories WHERE id=?',repositoryId);if(!repo)throw new Error('repository_missing');
+          const github=new GitHub(this.store,repo!,new Redactor(),async()=>{},this.githubUrl);github.purpose='task';await github.connect(false,undefined,{issues:'write',metadata:'read'});return github;
+        })();
+        for(const row of due.filter(row=>row.repository_id===repositoryId)){if(this.closing)return;await settleProgress(this.store,row.task_id,client);}
+      }
+    })().catch(error=>console.error(`[engine] issue progress sweep: ${(error as Error)?.message}`)).finally(()=>{this.progressSweep=undefined;});
+  }
   async run(id:string,token:string){
     const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const records=new TaskRecords(this.store);const redactor=new Redactor(),event=eventWork(task.kind);
     const policyHashFor=(artifacts:any[])=>sha(artifacts.some(a=>a.kind==='code')?String(this.store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||''):'');
@@ -470,6 +493,18 @@ export class TaskEngine {
         }
       };
 
+      // The Issue a development works on shows it (#1047): the developing label and the status comment, brought in line with
+      // the task's state. A failed write is retried by the engine's sweep and never stops the development.
+      const issueProgress=async()=>{
+        if(task.kind!=='development.issue'||await settleProgress(this.store,id,github))return;
+        log({type:'issue_progress',error:this.store.get('SELECT error FROM issue_development_progress WHERE task_id=?',id)?.error??null});
+      };
+      // Once per run, after the task's go-ahead was checked again: the development starts, or goes on, on the Issue.
+      let progressStarted=false;
+      const beginProgress=async()=>{
+        if(progressStarted||task.kind!=='development.issue')return;
+        progressStarted=true;startProgress(this.store,task,input.object);await issueProgress();
+      };
       // Another task's pull request: published like development's, recorded on its candidate, and the task carries on.
       const publishPullRequest=async()=>{
         log({type:'phase',phase:'pull_request',target:'pull_request',detail:'正在发布到 GitHub：创建或更新 PR…'});
@@ -492,8 +527,11 @@ export class TaskEngine {
         const commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
         log({type:'published',outputs:[{html_url:pr.html_url,branch:candidate.branch,sha:commit}]});
         integratedPublication(this.store,task,commit);
-        await publisher.discussion('development-result',`Implemented in ${pr.html_url}\n\n${candidate.summary}\n\n${testEvidence(candidate)}\nCommit: ${commit}`);
+        // An Issue's development reports its pull request in its status comment (#1047); a revision of the bot's own pull
+        // request still says so on that pull request.
+        if(task.kind!=='development.issue')await publisher.discussion('development-result',`Implemented in ${pr.html_url}\n\n${candidate.summary}\n\n${testEvidence(candidate)}\nCommit: ${commit}`);
         update({result:JSON.stringify({summary:candidate.summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.published_tree_sha||candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
+        await issueProgress();
         return {pr:{number:pr.number,html_url:pr.html_url,sha:commit}};
       };
       // Event work runs on a checkout of the commit its event concerns, with the event as context files.
@@ -714,13 +752,19 @@ export class TaskEngine {
       if(task.phase==='model'){
         // The agent is idle here unless a restart found its process still running: then the next turn's boundary moves it.
         if(validatedPhase!=='model')await validate(undefined,!!conversation?.resume||!this.store.get('SELECT model_started FROM tasks WHERE id=?',id)?.model_started);
-        validatedPhase=undefined;
+        validatedPhase=undefined;await beginProgress();
         log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
         // github_write: a direct write the acting role's GitHub permissions allow (#381), keyed per task so a retried attempt
         // never writes twice. Event work's own write tools (Actions rerun and report) come from its module.
         input.context={...input.context,acceptance_feedback:records.get(id).acceptance};
         const platform:PlatformTools={...(event?.tools?.(this.store,task,input,writes,eventState)??{})};
         const write=taskGithubWrite(this.store,task,redactor,guard,this.githubUrl);
+        // The milestones of an Issue's development go to its status comment (#1047); the control plane writes the comment.
+        if(task.kind==='development.issue')platform[milestoneToolName]=async(_callId,args)=>{
+          const recorded=reportMilestone(this.store,id,redactor.clean(args));
+          if(!('error' in recorded))await issueProgress();
+          return recorded;
+        };
         platform.github_write=async(_callId,args)=>{
           const result=await write(args);
           if(result?.html_url&&!result.replayed)log({type:'published',outputs:[{html_url:result.html_url,...(result.number?{number:result.number}:{})}]});
@@ -740,7 +784,7 @@ export class TaskEngine {
           }
           // Labels are checked against the repository before any branch is published, so a refusal can be corrected in the
           // same tool conversation (#845); the publisher adds the accepted ones once the pull request exists.
-          const labels=await checkPullRequestLabels(github,args.labels,[input.review_label,input.development_label]);
+          const labels=await checkPullRequestLabels(github,args.labels,[input.review_label,input.development_label,developingLabel(this.store,task.repository_id)]);
           if('error' in labels)return labels;
           if(input.integration){
             const checked=await workspace!.call('integration-check:'+requestId,{type:'workspace_integration_check'});
@@ -793,7 +837,7 @@ export class TaskEngine {
       }
       if(task.phase==='publish'){
         if(validatedPhase!=='publish')await validate();
-        validatedPhase=undefined;
+        validatedPhase=undefined;await beginProgress();
         if(!development)await acceptReport(result);
         update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log,development?undefined:()=>{
           // No await between checking the inbox and fencing the first GitHub write.
@@ -810,7 +854,7 @@ export class TaskEngine {
           }
           if(writes.includes('labels')&&result.labels?.length){
             const current=(seen||await github.object(task.kind,task.object_number)).labels;
-            const names=classificationLabels(result.labels,input.repository_labels,current,[input.review_label,input.development_label]);
+            const names=classificationLabels(result.labels,input.repository_labels,current,[input.review_label,input.development_label,developingLabel(this.store,task.repository_id)]);
             if(names.length)outputs.push({labels:(await publisher.labels(names)).map((l:any)=>l.name)});
           }
           if(outputs.length)log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0})});
@@ -827,7 +871,7 @@ export class TaskEngine {
           // publisher.review ends by validating the object, so its labels are current.
           if(writes.includes('labels')){
             const label=input.review_label,current=(seen||await github.object(task.kind,task.object_number)).labels;
-            const names=[...(label?[label]:[]),...classificationLabels(result.labels,input.repository_labels,current,[label,input.development_label])];
+            const names=[...(label?[label]:[]),...classificationLabels(result.labels,input.repository_labels,current,[label,input.development_label,developingLabel(this.store,task.repository_id)])];
             if(names.length)outputs.push({labels:(await publisher.labels(names)).map((l:any)=>l.name)});
           }
           log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0,...(o.resolved_threads?{resolved_threads:o.resolved_threads.length}:{})})});
@@ -873,7 +917,7 @@ export class TaskEngine {
         throw error;
       }
       }
-      await this.release(workspace,task);log({type:'completed',status:task.status});
+      await this.release(workspace,task);await issueProgress();log({type:'completed',status:task.status});
     }catch(error){
       // An unexpected error keeps its message and where it was thrown (the top stack frames), in the task log and in the
       // control plane's log; both pass through the task's redactor.

@@ -15,16 +15,32 @@ flowchart LR
 
 1. **Issue analysis**: read the recorded `implementation_goal` (on a revision, the `actionable_findings`), the
    repository instructions and the code the change touches. Stop as described under "When to stop" when the work
-   does not fit the goal.
+   does not fit the goal. Report the `plan` milestone (see "Progress on the Issue") before you change code.
 2. **Develop**: make the change and add or update meaningful executable regression tests in the repository. Assert the changed behavior so future PRs and CI can detect breakage; one-off manual checks do not replace these tests. Explain the coverage and actual results in the delivery evidence. Review and QA should check that the tests protect the behavior, rather than merely mirror the implementation.
 3. **Review**: when `start_agent` is available, start an independent reviewer: give it the goal, tell it to read
    the change with `git diff` and the files around it, to report only real defects with `path:line` evidence, and
    pass `permissions` with `write_workspace: false`. It has its own session and does not see this conversation, so
    put everything it needs in its instructions. Check each defect it reports against the code; for a real one, go
    back to step 2. Without `start_agent`, review the diff yourself the same way.
-4. **Test**: run the repository's real tests, then call `create_pull_request`. When a test fails, or the call
-   returns `validation_failed`, go back to step 2. Nothing is pushed and no pull request is opened until the tests
-   pass.
+4. **Test**: run the repository's real tests, report the `completed` milestone, then call `create_pull_request`.
+   When a test fails, or the call returns `validation_failed`, go back to step 2. Nothing is pushed and no pull
+   request is opened until the tests pass.
+
+## Progress on the Issue
+
+When you develop an Issue, `report_development_milestone` is offered. The control plane keeps one status comment on
+the Issue and edits it with what you report, so the people on the Issue can follow the work and correct it early;
+you never comment yourself. Report these milestones in the language the Issue's title and body are written in, whatever
+language your brief uses:
+
+- `plan`, once the analysis is done and before you change code: the conclusion of the analysis, the design decisions
+  you made on your own with the reason for each, the main changes and how they will be checked.
+- `completed`, right before `create_pull_request`: the key points of the change and the tests you ran with what they
+  showed. The control plane adds the pull request link once it exists.
+- `stopped`, when you stop without a pull request: why, and what a person must decide or do.
+
+Report what you found and decided, never activity such as "developing" or "running tests". Reporting a milestone
+again replaces it: do so only when the plan really changed.
 
 ## Project notes
 
@@ -82,8 +98,8 @@ Stop and leave the decision to a human instead of continuing when the change:
 - cannot be verified with a meaningful test
 - on a revision, meets review comments that question the approach rather than the code
 
-To stop, restore the working tree to the snapshot you started from and call `create_pull_request`
-with a summary that names the concrete blocker. The control plane publishes nothing when the
+To stop, report the `stopped` milestone when it is offered, restore the working tree to the snapshot
+you started from and call `create_pull_request` with a summary that names the concrete blocker. The control plane publishes nothing when the
 working tree is unchanged. Do not guess.
 
 ## Tests and evidence
