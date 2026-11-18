@@ -86,7 +86,7 @@ function boardShell() {
   check.addEventListener('change',()=>apply('include_closed',check.checked));closed.append(check,document.createTextNode('含已关闭'));closed.hidden=category==='release';
   controls.append(execution,types,search,closed);filters.append(controls);
   const chips=element('div','','board-chips');chips.id='board-chips';chips.setAttribute('aria-label','当前筛选');
-  const arrangement=element('div','','board-arrangement');arrangement.setAttribute('role','group');arrangement.setAttribute('aria-label','排列与视图');
+  const arrangement=element('div','','board-arrangement');arrangement.setAttribute('role','group');arrangement.setAttribute('aria-label','视图与看板操作');
   // #482: grouping stays one compact select; choosing a dimension the builtin view does not store opens the save dialog.
   const groups=boardSelect('按…分列',[['bot_stage','bot 执行阶段'],...(!projectRoute()?[['repository','仓库']]:[]),['execution_status','执行状态'],['category','工作类型'],...boardState.fields.map(f=>[f.id,f.name])],boardGrouping());
   groups.label.className='board-field board-grouping';groups.select.id='board-grouping';
