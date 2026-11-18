@@ -12,7 +12,6 @@ import { defaultLimits } from '../../../dist/schedules/types.js';
 test.use({ locale: 'en-US' });
 
 const CLOCK = '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}';
-const clock = new RegExp('^' + CLOCK + '(?: · [A-Za-z_/]+)?$');
 const twelveHour = /\b(?:AM|PM)\b/;
 
 async function knowledge(page) {
@@ -63,7 +62,7 @@ test('a file row in the knowledge page reads its time with the shared clock, not
   } finally { await f.close(); }
 });
 
-test('the project schedule list shows next run and migration times in the shared clock with their zone suffix', async ({ page }) => {
+test('the project schedule list shows its next run in the shared clock with its zone suffix', async ({ page }) => {
   const f = await channel();
   try {
     const plan = { name: '夜间检查', kind: 'personal', actor_id: f.principal, owner_id: f.principal, maintainer_id: f.principal,
