@@ -15,6 +15,8 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-window:not(.management-page):not(.management-fullscreen) .management-window-head { padding-left: 28px; }
 .management-size-handle { position: absolute; left: 1px; top: 1px; z-index: 1; width: 20px; height: 20px; min-height: 0; padding: 0; border: 0; border-radius: 10px 0 0; background: transparent; color: #78949e; cursor: nwse-resize; touch-action: none; font-size: 17px; line-height: 20px; }
 .management-panel { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+/* A region these rules give `display` to must still disappear when #616 hides it for the failed-open state. */
+.management-panel > [hidden] { display: none; }
 .management-scope { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; padding: 12px 18px 8px; flex-shrink: 0; }
 /* The header names the same address scope as the shared project switcher. */
 .management-scope-name { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
@@ -27,6 +29,10 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-session-controls select { width: 100%; min-width: 0; font-size: var(--font-size-1); }
 .management-feed-wrap { position: relative; display: flex; flex: 1; min-height: 0; min-width: 0; }
 .management-feed { flex: 1; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; overflow-anchor: none; padding: 28px 20px 32px; background: #fcfdfd; scroll-padding-top: 24px; }
+/* #616: the failed-open card is a page state, so it is laid out beside the feed instead of scrolling inside it; on a
+   phone the whole card (reason, retry, both recovery links) fits the first screen without an inner scroll. */
+.management-access-state { display: flex; flex: 1; min-height: 0; min-width: 0; justify-content: center; align-items: flex-start; overflow: auto; padding: 28px 20px 32px; background: #fcfdfd; }
+.management-access-state .console-state { width: min(100%, 560px); margin: 0; padding: var(--space-6) var(--space-5); gap: var(--space-3); }
 .management-latest { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); padding: 7px 14px; border-radius: 20px; box-shadow: 0 3px 15px #123d4e18; white-space: nowrap; font-size: var(--font-size-1); }
 .management-welcome { display: flex; flex-direction: column; align-items: center; padding: 26px 0; text-align: center; color: var(--color-text); }
 .management-welcome-icon { display: grid; place-items: center; width: 54px; height: 54px; margin-bottom: 18px; border: 1px solid #d4e5e5; border-radius: 18px; background: #eef6f4; color: #2b7671; font-size: 32px; }
@@ -170,6 +176,8 @@ body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
   .management-scope button { padding: 5px 10px; min-height: 30px; }
   .management-sessions { padding-left: 12px; padding-right: 12px; }
   .management-feed, :is(.management-page,.management-fullscreen) .management-feed { padding: 20px 12px; }
+  .management-access-state { padding: 4px 12px 4px; }
+  .management-access-state .console-state { padding: 14px 12px; gap: 6px; }
   .management-welcome, :is(.management-page,.management-fullscreen) .management-welcome { padding-top: 16px; }
   .management-welcome h3 { font-size: var(--font-size-display); }
   .management-welcome-icon { width: 42px; height: 42px; margin-bottom: 12px; }

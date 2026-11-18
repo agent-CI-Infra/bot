@@ -37,6 +37,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   // Blurring the composer can restore mobile navigation and move this button before pointer-up.
   latest.addEventListener('pointerdown', event => event.preventDefault());
   latest.hidden = true; feedWrap.append(feed, latest); panel.append(feedWrap);
+  // #616: a failed open is a page state of its own, not a message inside the scrolling transcript, so its card and the
+  // recovery links sit in this slot and the feed steps aside while it shows.
+  const accessSlot = element('div', '', 'management-access-state'); accessSlot.hidden = true; panel.append(accessSlot);
   const tools = element('div', '', 'management-tools'); tools.id = 'management-tools'; tools.hidden = true;
   tools.append(element('h3', '快捷操作'), note('直接查询或使用表单。操作结果会回到对话里。'),
     note('默认配置只影响新任务；补充指令会追加记录。修改目标或验收条件会使旧候选和验收失效。采用新执行配置前，请先暂停并等待旧执行结束。'));
@@ -62,16 +65,26 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   // showError and showAccessError still give it the alert role for as long as the error stands.
   const showStatus = (text = status.textContent) => { if (disposed) return; status.classList.remove('view-error'); status.setAttribute('role', 'status'); status.textContent = text; };
   const showError = err => { if (!disposed) { status.textContent = readErrorText(err); status.classList.add('view-error'); status.setAttribute('role', 'alert'); } };
+  // #616: a working conversation is what puts the composer and the transcript back; until then the page states the
+  // failure once, in one card, and leaves nothing that looks able to send.
+  const showConversation = () => {
+    accessSlot.hidden = true; accessSlot.replaceChildren();
+    statusBar.hidden = false; sessions.hidden = false; feedWrap.hidden = toolsOpen; input.hidden = toolsOpen;
+    for (const control of [fresh, toolsButton]) { control.removeAttribute('title'); control.removeAttribute('aria-describedby'); }
+  };
   const showAccessError = err => {
     if (disposed) return;
-    status.textContent = managementAccessMessage(err);
-    status.classList.add('view-error');
-    status.setAttribute('role', 'alert');
     welcome.hidden = true;
     const empty = consoleState('无法打开管理会话', managementAccessMessage(err), { tone: 'error', retry: () => openConversation().catch(showAccessError) });
     const reload = empty.querySelector('button'); if (reload) reload.textContent = '重试';
-    empty.append(consoleLink('#/projects', '查看项目列表'), consoleLink('#/identity', '查看身份与权限'));
-    feed.replaceChildren(empty);
+    empty.append(consoleLink('#/projects', '查看项目列表'), consoleLink('#/identity', '查看身份与权限')); empty.id = 'management-access-reason';
+    // The card is the only place this reason is written: the status line keeps its polite role and stays empty, instead
+    // of announcing the same sentence a second time as an alert.
+    status.textContent = ''; status.classList.remove('view-error'); status.setAttribute('role', 'status');
+    statusBar.hidden = true;
+    feedWrap.hidden = true; sessions.hidden = true; accessSlot.replaceChildren(empty); accessSlot.hidden = false; input.hidden = true;
+    fresh.setAttribute('title', '恢复管理会话后才能新建会话。'); toolsButton.setAttribute('title', '恢复管理会话后才能使用快捷操作。');
+    for (const control of [fresh, toolsButton]) control.setAttribute('aria-describedby', 'management-access-reason');
   };
   const selectedWithin = node => {
     const selection = window.getSelection();
@@ -108,7 +121,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     message.disabled = opening || !conversation;
     for (const suggestion of welcome.querySelectorAll('button')) suggestion.disabled = message.disabled;
     send.disabled = opening || !historyReady || submitting || !!active; stopButton.hidden = !active;
-    fresh.disabled = opening || submitting; input.classList.toggle('is-running', !!active); onActivity(!!active);
+    // #616: without a conversation the two header controls are unusable too, not just the composer.
+    fresh.disabled = opening || submitting || !conversation; toolsButton.disabled = !conversation;
+    input.classList.toggle('is-running', !!active); onActivity(!!active);
   };
   function showTools(open) {
     toolsOpen = open; tools.hidden = !open; feedWrap.hidden = open; feed.hidden = open; input.hidden = open;
@@ -329,7 +344,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   }
   async function read() {
     if (reading || !conversation || disposed) return reading;
-    reconnect.hidden = true; showStatus();
+    showConversation(); reconnect.hidden = true; showStatus();
     const id = conversation, generation = scopeGeneration;
     const work = (async () => {
       try {
