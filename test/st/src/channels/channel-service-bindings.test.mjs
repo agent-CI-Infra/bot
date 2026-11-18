@@ -599,7 +599,7 @@ test('a group whose level writes Issues files one in a repository in scope with 
   // The write token carries exactly Issues write for this repository, and is revoked after the call.
   const posted = f.gh.state.requests.filter(r => r.method === 'POST' && r.path.endsWith('/issues'));
   assert.equal(posted.length, 1); assert.equal(posted[0].path, '/repos/agent-test-zone/admin-fixture-101/issues');
-  assert.match(posted[0].body.body, /^Reported in the group by &#64;carol\.\n\n<!-- dept-bot-write:[a-f0-9]{24} -->$/);
+  assert.match(posted[0].body.body, /^Reported in the group by @carol\.\n\n<!-- dept-bot-write:[a-f0-9]{24} -->$/);
   const minted = f.gh.state.requests.filter(r => r.path.endsWith('/access_tokens')).map(r => r.body.permissions);
   assert.ok(minted.some(p => JSON.stringify(p) === JSON.stringify({ issues: 'write', metadata: 'read' })));
   assert.ok(minted.every(p => Object.entries(p).every(([name, level]) => level === 'read' || name === 'issues')));

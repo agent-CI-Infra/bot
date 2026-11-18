@@ -489,7 +489,7 @@ test('the Manager comments on and labels the event Issue before dispatching; it 
   assert.deepEqual(results[1].result, ['needs-info']);
   // No other repository: the tool takes no repository, and a path cannot name one.
   assert.deepEqual(results.slice(2).map(r => r.error), ['invalid_arguments', 'github_write_route_unsupported']);
-  assert.equal(github.comments.length, 1); assert.match(github.comments[0].body, /^Thanks &#64;alice: which file loses its last line\?\n\n<!-- dept-bot-write:[a-f0-9]{24} -->$/);
+  assert.equal(github.comments.length, 1); assert.match(github.comments[0].body, /^Thanks @alice: which file loses its last line\?\n\n<!-- dept-bot-write:[a-f0-9]{24} -->$/);
   assert.deepEqual(github.labels, [{ labels: ['needs-info'] }]);
   // Dispatched again: the earlier writes are listed, the same keys answer from the ledger and GitHub sees nothing new.
   attempt = 1; f.h.store.run('UPDATE dispatch_events SET next_run_at=0'); const writes = github.requests.filter(r => !r.startsWith('GET')).length;
