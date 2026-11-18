@@ -55,6 +55,9 @@ function boardOpenMenu(menu,open) {
 }
 function boardShell() {
   const panel=$('board-panel');panel.replaceChildren();
+  // #1039: board mode hides the shared toolbar (and its h1) in CSS, so the board carries its own heading. It is
+  // visually hidden because the board's toolbar layout has no title slot; the reading order still starts at h1.
+  const heading=element('h1',t('nav.board'),'sr-only');heading.id='board-heading';
   const toolbar=element('div','','board-toolbar'),category=boardCategory();
   const filters=document.createElement('details');filters.className='board-filter-details';
   // #482: a board rendered on the desktop keeps its filters open; narrowing the window to the phone layout folds them, so
@@ -111,7 +114,7 @@ function boardShell() {
   scroll.addEventListener('scroll',()=>{if(scroll.isConnected&&tab==='board'&&scroll.clientHeight>0&&boardState?.owner===me?.id){
     (boardState.positions??={})[boardState.layout]={top:scroll.scrollTop,left:scroll.scrollLeft};
   }},{passive:true});
-  panel.append(toolbar,mobile.label,zero,scroll);boardViewControls();boardChips();
+  panel.append(heading,toolbar,mobile.label,zero,scroll);boardViewControls();boardChips();
 }
 function boardViewControls() {
   const save=$('board-save'),panel=document.querySelector('#board-view-menu .board-menu-panel'),state=$('board-view-state');

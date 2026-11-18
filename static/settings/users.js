@@ -28,7 +28,7 @@ function userGithubName(user) {
 // One platform account per row. The first cell keeps the access lines the old list showed, so a project administrator's
 // visible projects and manual grants stay readable without opening the detail.
 function userTable(users, intro) {
-  const section = card('用户'), head = element('div', '', 'actions settings-list-head');
+  const section = card('用户', 'h2'), head = element('div', '', 'actions settings-list-head');
   head.append(note(intro), button('新增用户', () => openEditor('users'), ''));
   if (!users.length) { section.append(head, element('p', '还没有用户。', 'muted')); return section; }
   const captions = ['用户', '登录方式', '本地账号', 'GitHub 账号', '绑定关系', '角色', '状态', '操作'];

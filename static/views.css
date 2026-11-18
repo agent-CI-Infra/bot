@@ -11,6 +11,8 @@ dialog.wide[open]{display:flex;flex-direction:column}
 .task-choice-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px 14px;padding:10px 12px;border:1px solid #dce6eb;border-radius:7px;background:#f7fafb}
 .task-choice-open{justify-self:start;text-align:left;white-space:normal;height:auto;overflow-wrap:anywhere}.task-choice-row .task-metrics{grid-column:1/-1;margin:0}
 .timeline-panel{min-height:0;overflow:auto;padding:14px 18px 20px}.timeline-panel h3,.side-card h3{font-size:var(--font-size-2);margin:0 0 10px;color:var(--color-text)}
+/* #1039: a card title can be an h2; the element name never sets the size, the same tokens do. */
+.side-card>h2{font-size:var(--font-size-2);margin:0 0 10px;color:var(--color-text)}
 .task-log-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0}.task-log-controls>p{flex-basis:100%;margin:0}.task-log-controls button{min-height:44px}
 .timeline-panel>.muted{font-size:var(--font-size-label);line-height:1.6}
 .task-side{min-height:0;overflow:auto;padding:14px;background:#f7fafb;border-left:1px solid #e3eaf0;display:flex;flex-direction:column;gap:12px}
@@ -298,7 +300,7 @@ dialog.confirm-dialog::backdrop{background:#16374485}
 button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media(max-width:760px){.confirm-head{padding:18px 18px 6px}.confirm-body,.confirm-status{padding-left:18px;padding-right:18px}.confirm-actions{padding:12px 18px}.confirm-actions button{flex:1}}
 /* Global settings: version, deployment-wide defaults and wizard settings side by side, stacking on narrow screens; the shared model list spans the full width. */
-.settings-panel{display:block;padding:0}.settings-panel .side-card h3{font-size:var(--font-size-row)}.settings-panel .settings-wide{grid-column:1/-1}.settings-panel .side-card .flash{margin:0 0 8px}.settings-panel .side-card>form{margin-top:10px}.settings-panel .history .muted{margin:2px 0 0}
+.settings-panel{display:block;padding:0}.settings-panel .side-card h3{font-size:var(--font-size-row)}.settings-panel .side-card>h2{font-size:var(--font-size-row)}.settings-panel .settings-wide{grid-column:1/-1}.settings-panel .side-card .flash{margin:0 0 8px}.settings-panel .side-card>form{margin-top:10px}.settings-panel .history .muted{margin:2px 0 0}
 
 /* Global settings (static/settings.js): the project page's category layout inside the list card. */
 .settings-body{border-top:1px solid #e3eaf0;min-height:calc(100svh - 170px)}
