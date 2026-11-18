@@ -24,7 +24,9 @@ function collapsible(title, text, open = false) {
 }
 function output(text) { return collapsible(`输出（${String(text).split('\n').length} 行）`, text, text.length < 800); }
 function button(caption, onClick, className = 'quiet') { const b = element('button', caption, className); b.type = 'button'; b.addEventListener('click', onClick); return b; }
-function card(title) { const section = element('section', '', 'side-card'); section.append(element('h3', title)); return section; }
+// #1039: a card's title sits one level below the page h1. Pass the level where the page's own outline needs it; the
+// default stays h3 so pages that already nest the card under another heading keep their level.
+function card(title, level = 'h3') { const section = element('section', '', 'side-card'); section.append(element(level, title)); return section; }
 function facts(rows) {
   const list = element('dl', '', 'facts');
   for (const [key, value] of rows) {

@@ -236,7 +236,7 @@ async function renderIdentity() {
   const scopes = data.scopes.filter(g => !data.actor.tenant_id || !g.tenant_id || g.tenant_id === data.actor.tenant_id);
   const active = scopes.filter(g => g.state === 'active'), pending = scopes.filter(g => g.state !== 'active');
   const connection = data.github_connection;
-  const overview = card(t('identity.github_connection')); overview.classList.add('identity-overview');
+  const overview = card(t('identity.github_connection'), 'h2'); overview.classList.add('identity-overview');
   const statusText = connection ? githubConnectionStatus(connection) : (active.length ? t('identity.logged_in_with_grants') : t('identity.logged_in_no_grants'));
   overview.append(element('p', statusText, 'identity-connection-status'));
   if (connection && connection.state) {

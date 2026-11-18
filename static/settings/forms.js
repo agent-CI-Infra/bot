@@ -1,6 +1,6 @@
 // A card whose body `draw(redraw)` builds; `redraw(notice)` draws it again with the outcome of the last action on top.
-function liveCard(title, draw) {
-  const section = card(title), heading = section.children[0];
+function liveCard(title, draw, level = 'h3') {
+  const section = card(title, level), heading = section.children[0];
   const redraw = notice => {
     const nodes = draw(redraw);
     if (notice) { const flash = element('p', notice, 'view-success flash'); flash.setAttribute('role', 'status'); nodes.unshift(flash); }

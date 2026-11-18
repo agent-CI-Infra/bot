@@ -39,7 +39,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     page.off('request', noteEvents);
     // Global settings: one category at a time, each with its own address; a reload keeps it.
     await tab('全局设置').click(); await expect(page).toHaveURL(/#\/settings\/work-computers$/);
-    const nav = page.locator('.project-nav'), cards = () => page.locator('#settings-panel h3').allInnerTexts();
+    const nav = page.locator('.project-nav'), cards = () => page.locator('#settings-panel .side-card > :is(h2,h3)').allInnerTexts();
     await expect(nav.getByRole('link')).toHaveText(['工作电脑', '模型', '服务角色', '助手电脑', 'Agent CLI 工具卷', '存储', '接入向导', '公网接入', '外部执行', '机器人账号', '安装档案', '飞书连接', '项目管理', '用户']);
     for (const [caption, key, shown] of [['工作电脑', 'work-computers', ['同时运行的任务', '默认资源', '当前运行版本']], ['飞书连接', 'feishu', ['飞书应用连接']], ['公网接入', 'access', ['公网 HTTPS 地址', 'Cloudflare Tunnel', 'GitHub 登录（只读）']],
       ['机器人账号', 'accounts', ['接入向导使用的 GitHub App', '已登记的账号', 'GitHub 请求额度']], ['安装档案', 'installations', ['GitHub App 安装档案']],
@@ -57,7 +57,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     // #736: a malformed percent-encoding is an unknown address like any other, not a URIError shown to the reader.
     await page.goto(h.admin + '/#/settings/computers/%E0%A4%A');
     await expect(page.locator('#console-page [data-page-not-found="console"]')).toBeVisible();
-    await expect(page.locator('#settings-panel h3')).toHaveCount(0);
+    await expect(page.locator('#settings-panel .side-card > :is(h2,h3)')).toHaveCount(0);
     await expect(page.locator('#message')).not.toContainText('URI malformed');
     await page.screenshot({ path: '.tmp/console-addresses/malformed-address-desktop.png', fullPage: true });
     // A settings detail id that cannot be decoded reads as "no id": that section still opens as a list.
@@ -81,7 +81,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     await member.goto(h.admin + '/#/settings/storage'); await expect(member.locator('#settings-panel')).toBeVisible();
     await expect(member.locator('.project-nav').getByRole('link')).toHaveText(['存储']);
     // A project administrator sees its projects' trajectories and computers, nothing of the host (#671).
-    await expect.poll(() => member.locator('#settings-panel h3').allInnerTexts()).toEqual(['存储', '按项目', '项目电脑']);
+    await expect.poll(() => member.locator('#settings-panel .side-card > :is(h2,h3)').allInnerTexts()).toEqual(['存储', '按项目', '项目电脑']);
     await expect(member.locator('#settings-panel')).toContainText('fixture/project-101'); await context.close();
     await page.setViewportSize({ width: 390, height: 844 }); await page.goto(h.admin + '/#/settings/users'); await expect(page.locator('#settings-panel')).toContainText('administrator');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); await page.screenshot({ path: '.tmp/console-addresses/settings-users-mobile.png', fullPage: true });

@@ -284,8 +284,10 @@ test('global settings change the wizard settings and shared models without a pro
   const panel = page.$('settings-panel'), text = node => [node.textContent, ...node.children.flatMap(text)].join(' ');
   // Each category has its own address and draws only its own cards.
   const open = async key => { page.run(`location.hash = '#/settings/${key}'`); await page.run('renderSettings(renderVersion)'); };
-  const cards = () => panel.querySelectorAll('h3').map(node => node.textContent);
-  const section = title => panel.querySelectorAll('section').find(node => node.querySelector('h3')?.textContent === title);
+  // #1039: the four settings categories in scope draw h2 card titles; the rest still draw h3. The fake DOM
+  // has no :is(), so read both tags; every asserted category uses one level, so their order is unchanged.
+  const cards = () => ['h2', 'h3'].flatMap(tag => panel.querySelectorAll(tag)).map(node => node.textContent);
+  const section = title => panel.querySelectorAll('section').find(node => (node.querySelector('h2') || node.querySelector('h3'))?.textContent === title);
   const buttons = (node, caption) => node.querySelectorAll('button').filter(b => b.textContent === caption);
   const submit = form => form.listeners.submit[0]({ preventDefault() {} }), view = page.run('confirmView');
   const confirm = async opening => { await settle(); await submit(view.querySelector('form')); await opening; };
