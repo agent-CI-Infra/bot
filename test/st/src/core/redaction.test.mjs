@@ -65,6 +65,61 @@ test('line-wrapped Base64 is inspected as a single diagnostic payload', () => {
   }
 });
 
+test('Markdown keeps its prose when a folded credential is quoted, listed or written inline', () => {
+  const redactor = new Redactor(), secret = 'fixture-actions-installation-token';
+  redactor.add(secret);
+  const encode = log => Buffer.from(JSON.stringify({ pad: 'x'.repeat(25), log })).toString('base64url');
+  const sensitive = encode('HTTP 401: ' + secret), benign = encode('HTTP 401: public diagnostic data');
+  const sha = '0123456789abcdef'.repeat(4);
+  const nextToCommit = sha + ' ' + sensitive.match(/.{1,64}/g).join(' ');
+  assert.equal(publicText('commit ' + nextToCommit + ' was returned.', redactor), 'commit ' + sha + ' [REDACTED] was returned.');
+  // Also cover an unpadded payload that ends on a full-width fragment immediately before prose.
+  for (const width of [76, Math.ceil(sensitive.length / 2)]) {
+    for (const [prefix, join] of [['', '\n'], ['> ', '\n> '], ['> > ', '\r\n> > '],
+      ['- ', '\n- '], ['1. ', '\n2. '], ['', ' '], ['', '\t']]) {
+      const format = value => prefix + value.match(new RegExp('.{1,' + width + '}', 'g')).join(join) + ' was returned by the gateway.';
+      assert.equal(publicText(format(sensitive), redactor), prefix + '[REDACTED] was returned by the gateway.');
+      assert.equal(publicText(format(benign), redactor), format(benign).replaceAll('\r\n', '\n'));
+    }
+  }
+});
+
+test('folded diagnostics keep a longer preceding URL', () => {
+  const redactor = new Redactor(), secret = 'fixture-actions-installation-token';
+  redactor.add(secret);
+  const url = 'https://logs.invalid/' + 'a'.repeat(80);
+  const wrapped = Buffer.from(JSON.stringify({ pad: 'x'.repeat(25), log: 'HTTP 401: ' + secret })).toString('base64').match(/.{1,76}/g).join('\n');
+  assert.equal(publicText(url + '\n' + wrapped, redactor), url + '\n[REDACTED]');
+});
+
+test('a SHA following an unpadded full-width final fragment stays visible', () => {
+  const redactor = new Redactor(), secret = 'fixture-actions-installation-token';
+  redactor.add(secret);
+  const encode = size => Buffer.from(JSON.stringify({ pad: 'x'.repeat(size - 4) + '}[]"', log: 'HTTP 401: ' + secret })).toString('base64');
+  for (const [size, width, nextSha] of [[50, 76, 'b'.repeat(40)], [32, 64, 'a'.repeat(64)]]) {
+    const fullLines = encode(size).match(new RegExp('.{1,' + width + '}', 'g'));
+    assert.deepEqual(fullLines.map(line => line.length), [width, width]);
+    assert.ok(!fullLines.at(-1).endsWith('='));
+    assert.equal(publicText(['Encoded payload:', ...fullLines, nextSha, 'Next verification step.'].join('\n'), redactor),
+      ['Encoded payload:', '[REDACTED]', nextSha, 'Next verification step.'].join('\n'));
+  }
+});
+
+test('timestamps on folded Actions log lines stay visible around the redacted fragments', () => {
+  const redactor = new Redactor(), secret = 'fixture-actions-installation-token';
+  redactor.add(secret);
+  const encode = message => Buffer.from(JSON.stringify({ pad: 'x'.repeat(25), log: message })).toString('base64url').match(/.{1,76}/g);
+  for (const [first, second] of [
+    ['2026-11-18T11:22:23.1234567Z', '2026-11-18T11:22:24.0000000Z'],
+    ['[11:22:23.123]', '[11:22:24.000]']
+  ]) {
+    const format = parts => '> ' + first + ' ' + parts[0] + '\n> ' + second + ' ' + parts[1] + ' was returned.';
+    const benign = format(encode('HTTP 401: ordinary public data'));
+    assert.equal(publicText(benign, redactor), benign);
+    assert.equal(publicText(format(encode('HTTP 401: ' + secret)), redactor), format(['[REDACTED]', '[REDACTED]']));
+  }
+});
+
 test('management input and commands accept and retain normal text without trace-only transformations',async t=>{
   const f=await managementFixture(t);
   f.modelState.respond=(_body,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:'已读取'}}]}));};

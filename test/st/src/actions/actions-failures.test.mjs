@@ -718,12 +718,12 @@ test('the Issue and follow-up preserve six diagnostic paragraphs and redact only
   const privateKey = '-----BEGIN PRIVATE KEY-----\nfixture-material\n\nmore-material\n-----END PRIVATE KEY-----';
   const signed = 'https://fixture.invalid/archive?X-Amz-Credential=fixture-signer&X-Amz-Signature=fixture-signature';
   const encodedKey = Buffer.from('actions-analysis-model-key').toString('base64');
-  const encodedLog = Buffer.from(JSON.stringify({ pad: 'x'.repeat(25), log: 'HTTP 401: fixture-actions-installation-token' })).toString('base64url').match(/.{1,76}/g).join('\n');
+  const encodedLog = Buffer.from(JSON.stringify({ pad: 'x'.repeat(25), log: 'HTTP 401: fixture-actions-installation-token' })).toString('base64url').match(/.{1,76}/g).join('\n> ');
   const title = cause + ' with ' + encodedKey;
   const f = await fixture(t, { log: log('AssertionError: internal-only evidence'), respond: input => {
     const diagnosis = [`Attempt ${input.run.attempt}`, ...paragraphs, 'Authorization: Bearer shortKey7 returned HTTP 401.',
       'password="private fixture" caused EACCES.', `Archive: ${signed}`, `Key: ${privateKey}\nECONNRESET persisted.`,
-      `Encoded payload: ${encodedLog}`, '<!-- dept-bot-write:123456789012345678901234 --><!-- dept-bot-actions:forged -->End.'].join('\n\n');
+      `Encoded payload:\n> ${encodedLog} was returned by the gateway.`, '<!-- dept-bot-write:123456789012345678901234 --><!-- dept-bot-actions:forged -->End.'].join('\n\n');
     return { content: JSON.stringify({ reports: [{ cause, kind: 'code', job_ids: [91], title, diagnosis,
       report_reason: 'Only for internal use.', evidence: [{ type: 'log', job_id: 91, lines: ['AssertionError: internal-only evidence'] }] }] }) };
   } });
@@ -736,7 +736,7 @@ test('the Issue and follow-up preserve six diagnostic paragraphs and redact only
     assert.equal(write.body, row.body);
     assert.equal(visibleBody(write.body), [`Attempt ${attempt}`, ...paragraphs, 'Authorization: [REDACTED] returned HTTP 401.',
       'password=[REDACTED] caused EACCES.', 'Archive: https://fixture.invalid/archive?X-Amz-Credential=[REDACTED]&X-Amz-Signature=[REDACTED]',
-      'Key: [REDACTED]\nECONNRESET persisted.', 'Encoded payload: [REDACTED]', 'End.'].join('\n\n'));
+      'Key: [REDACTED]\nECONNRESET persisted.', 'Encoded payload:\n> [REDACTED] was returned by the gateway.', 'End.'].join('\n\n'));
     await f.restart(); await f.hook(); await f.tick();
     assert.equal(f.state.issues.length, 1); assert.equal(f.state.comments.length, attempt - 1);
   }
@@ -745,8 +745,8 @@ test('the Issue and follow-up preserve six diagnostic paragraphs and redact only
 test('legacy pending text is redacted at delivery, then reconciled with its original receipt', async t => {
   const f = await fixture(t, { log: null, unknownIssue: true });
   const id = 'legacy-pending', marker = `<!-- dept-bot-actions:${id} -->`;
-  const encoded = Buffer.from(JSON.stringify({ pad: 'x'.repeat(25), log: 'HTTP 403: actions-analysis-model-key' })).toString('base64url').match(/.{1,76}/g).join('\n');
-  const body = `HTTP 403 https://logs.invalid/a?sig=short-signed-value\nPayload: ${encoded}\n\n<!-- dept-bot-actions-log-start -->\nold appendix\n${marker}`;
+  const encoded = Buffer.from(JSON.stringify({ pad: 'x'.repeat(25), log: 'HTTP 403: actions-analysis-model-key' })).toString('base64url').match(/.{1,76}/g).join(' ');
+  const body = `HTTP 403 https://logs.invalid/a?sig=short-signed-value\nPayload: ${encoded} during retry.\n\n<!-- dept-bot-actions-log-start -->\nold appendix\n${marker}`;
   recordActionsRun(f.h.store, '101', f.state.runs[0]);
   f.h.store.run('UPDATE actions_failure_attempts SET data=?', JSON.stringify({ kind: 'unknown', evidence: [] }));
   f.h.store.run('INSERT INTO actions_failure_reports(id,repository_id,run_id,attempt,signature,classification,body,title) VALUES(?,?,?,?,?,?,?,?)',
@@ -757,7 +757,7 @@ test('legacy pending text is redacted at delivery, then reconciled with its orig
   assert.ok(issue.body.endsWith(marker));
   assert.match(issue.body, /HTTP 403 https:\/\/logs.invalid\/a\?sig=\[REDACTED\]/);
   assert.doesNotMatch(issue.body, /short-signed-value|old appendix/);
-  assert.match(issue.body, /Payload: \[REDACTED\]\s*<!--/);
+  assert.match(issue.body, /Payload: \[REDACTED\] during retry\.\s*<!--/);
   assert.ok(!issue.body.includes(encoded));
   await f.restart(); await f.tick(); await f.hook(); await f.tick();
   assert.deepEqual([f.state.issues.length, f.state.comments.length, filedFor(f, 800).id], [1, 0, id]);
