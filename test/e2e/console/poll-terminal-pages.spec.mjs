@@ -113,3 +113,33 @@ test('#878 监听与触发页：下一次成功读取后清除过期标注', asy
     await expect(status).toContainText('配置检查通过后');
   } finally { await h.stop(); }
 });
+
+// #1078: the Actions check row changes on its own — a failed refresh, a stopped check, a recovery — and every change
+// replaces its text in place, so the node has to stay a polite live region. A row turned into an alert after one error
+// would make every later ordinary update interrupt the reader (#874), so the role is pinned after the failure too. The
+// 401 below keeps the console's own session state out of the way (`invalid_login` is the code api.js does not read as an
+// expired session); the row's terminal branch is what this test is about.
+test('#1078 监听与触发页：状态行常驻 polite live region，失败与终止之后仍是 status', async ({ page }) => {
+  const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  try {
+    const { admin, password } = await setup(h), a = await account(admin);
+    await repository(admin, a.id, '101');
+    await loginAs(page, h.admin + '/#/projects/101/triggers', password);
+    const status = page.locator('[data-actions-status]');
+    const semantics = () => status.evaluate(node => [node.getAttribute('role'), node.getAttribute('aria-live'), node.getAttribute('aria-atomic')].join('/'));
+    // The row is rendered before the switch is turned on, so its semantics are there from the first paint.
+    await expect(status).toContainText('未开启。');
+    expect(await semantics(), 'the status row is a polite live region from its first render').toBe('status/polite/true');
+    await page.getByLabel('接收默认分支和版本标签的 Actions 失败事件', { exact: true }).check();
+    await page.getByRole('button', { name: '保存事件开关', exact: true }).click();
+    await expect(status).toContainText('配置检查通过后', { timeout: 10000 });
+    expect(await semantics(), 'a successful read keeps the role').toBe('status/polite/true');
+    await page.route('**/api/repositories/101', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
+    await expect(status).toContainText('读取失败，显示上次结果', { timeout: 12000 });
+    expect(await semantics(), 'a failed refresh keeps the role instead of turning the row into an alert').toBe('status/polite/true');
+    await page.unroute('**/api/repositories/101');
+    await page.route('**/api/repositories/101', route => route.fulfill({ status: 401, json: { error: 'invalid_login' } }));
+    await expect(status).toContainText('配置检查已停止', { timeout: 20000 });
+    expect(await semantics(), 'a stopped check keeps the role too').toBe('status/polite/true');
+  } finally { await h.stop(); }
+});
