@@ -54,7 +54,7 @@ import { automaticState, isAttemptFailure } from './failures.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
 import { RuleService, resolveRules, behaviorPath, ruleErrors, skillIndex, computerRequest, projectLabels } from '../rules/service.js';
 import { repositoryConcurrency } from '../app/settings.js';
-import { ReviewUpdated, latestReviewSession, saveReviewSession, pendingReviewUpdates, pruneReviewSessions, reviewObjectState, reviewUpdateLog } from '../review/sessions.js';
+import { ReviewUpdated, pendingReviewUpdates, reviewObjectState, reviewUpdateLog } from '../review/sessions.js';
 import { continueFinishedReview, continuationContext, resumeFinishedReviews } from '../review/continuation.js';
 import { type GitCache } from './git-cache.js';
 import { workOf } from '../work/catalog.js';
@@ -152,7 +152,7 @@ export class TaskEngine {
       this.store.run("UPDATE tasks SET status='queued',phase='prepare',input=?,next_run_at=0 WHERE id=? AND status='needs_replan'",JSON.stringify({...input,manager_feedback:{code:parked.error_code,detail:'Legacy parked task: review original records before deciding how to continue. Existing candidates and effects are retained.'}}),parked.id);
       traceEvent(this.store,parked.id,'manager_recovery_queued',{previous_status:'needs_replan',code:parked.error_code},null,'framework');
     }
-    const checkpoint=Date.now();pruneReviewSessions(this.store,checkpoint);
+    const checkpoint=Date.now();
     this.store.run('UPDATE task_metrics SET runtime_ms=runtime_ms+max(0,?-active_since),active_since=? WHERE active_since IS NOT NULL',checkpoint,checkpoint);
     const tasks=this.store.all(`SELECT * FROM tasks WHERE ${engineKinds} AND
       status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_pr_head') AND next_run_at<=? ORDER BY priority,queue_seq,id`,Date.now());
@@ -317,10 +317,6 @@ export class TaskEngine {
         event?{contents:'read',actions:'read',checks:'read',statuses:'read',issues:'write',pull_requests:'read'}:undefined);
       let input=JSON.parse(task.input),result=task.result?JSON.parse(task.result):null;
       const development=task.kind.startsWith('development.'),review=task.kind.startsWith('review.');
-      // Only reviews continue an earlier conversation; a reply task starts fresh every time. A retry starts with an empty one,
-      // except the attempt that continues the last published one (session_attempt): a finished review's next round (#770), or
-      // the attempt a new head started in a fresh workspace (see moveHead).
-      const prior=review&&(task.attempt===1||input.session_attempt===task.attempt)?latestReviewSession(this.store,task):undefined;
       // An Issue development was started by the Manager on a person's label, which is the human decision a review asked for.
       // validate(object) checks an object just read instead of reading it again; seen is the last object it checked.
       let seen:any=null;
@@ -402,7 +398,6 @@ export class TaskEngine {
         const held=taskWorktree(this.store,task),shared=!!held&&heldBy(this.store,String(task.repository_id),held.worktree_id).some(row=>row.task_id!==task.id);
         const moved=mirror&&!shared?await workspace!.advance(next,mirror,base?[base]:[],String(heads.length)):null;
         if(!moved){
-          update({input:JSON.stringify({...JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),session_attempt:task.attempt+1})});
           return stop('pull_request_head_changed','queued',`PR #${number} 有了新提交 ${next}，工作区不能原地移到新提交（${!mirror?'Git 缓存不可用':shared?'这个 worktree 还有别的任务在用':'不是 git worktree，或移动失败'}），任务在新工作区按新提交重新准备。`);
         }
         const compare=await github.request('GET',github.path(`/compare/${previous}...${next}`)).then(headComparison,(error:any)=>({error:String(error?.code||'compare_unavailable')}));
@@ -640,8 +635,9 @@ export class TaskEngine {
             // On a revision people or other review bots asked for: their comments, which the findings above carry out.
             ...(development&&input.revision?.requests?.length?{revision_requests:input.revision.requests}:{}),review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
             ...(input.comment?{trigger_comment:input.comment}:{}),...(input.trigger?{trigger:input.trigger}:{}),
-            // A finished review's next round (#770): what it continues and how to see what changed since.
-            ...(review&&Number(input.round)>1?{continuation:continuationContext(input,ref.object.sha,pr,!!prior)}:{}),
+            // A finished review's next round (#770): what it continues and how to see what changed since. The earlier round
+            // is summarized here; a session that still holds it is told so at its start (the conversation's boundary below).
+            ...(review&&Number(input.round)>1?{continuation:continuationContext(input,ref.object.sha,pr,false)}:{}),
             // On a pull request this bot opened: the comments, reviews and inline comments this review answers. Each change the
             // review takes on from one of them names it in requested_in.
             ...(review&&pr&&this.store.get('SELECT 1 FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number)
@@ -673,8 +669,9 @@ export class TaskEngine {
 
       }
       if(task.phase==='validate')stop('create_pull_request_required','needs_replan','任务停在 validate 阶段，需要重新规划并通过 create_pull_request 提交候选修改。');
-      // Every attempt refreshes GitHub before its first request. Turn boundaries do the same for pending updates.
-      const conversation=!review?undefined:{history:prior?JSON.parse(prior.messages):[],resume:false,boundary:async(stage:string)=>{
+      // Every attempt refreshes GitHub before its first request. Turn boundaries do the same for pending updates. A review's
+      // conversation is its Pi session (#1040): a later round or a retry reopens it, and Pi compacts it when it must.
+      const conversation=!review?undefined:{resume:false,boundary:async(stage:string,recovery?:string)=>{
         if(stage!=='start'&&!pendingReviewUpdates(this.store,task).length)return {messages:[]};
         // Between turns nothing runs in the workspace: a new head moves it there, which is an update of its own.
         const object=await github.object(task.kind,task.object_number);await validate(object,true);
@@ -696,7 +693,9 @@ export class TaskEngine {
         if(updates.length)this.store.run('UPDATE tasks SET review_update_cursor=? WHERE id=?',updates.at(-1)!.id,id);
         // The timeline lists every update the agent took, at its first turn too (those that came while it waited).
         for(const row of updates)log(reviewUpdateLog(JSON.parse(row.data)));
-        return stage==='start'?{prompt:JSON.stringify(roleAssignmentContext({...input.context,structured_task:records.context(id)}))}
+        // A next round's session that holds the earlier round (native_resume) needs no summary of it; any other start gets one.
+        const continuation=input.context.continuation&&recovery==='native_resume'?{continuation:continuationContext(input,String(input.snapshot_sha),task.kind==='review.pr',true)}:{};
+        return stage==='start'?{prompt:JSON.stringify(roleAssignmentContext({...input.context,...continuation,structured_task:records.context(id)}))}
           :{messages:updateMessages(updates.map(row=>JSON.parse(row.data)),object,String(task.head_sha))};
       }};
       if(development&&task.phase==='model'&&controlled(this.store,task,'development'))recoverRoleCheckpoint(this.store,task,input.snapshot_sha);
@@ -846,7 +845,6 @@ export class TaskEngine {
           if(requests.length)log({type:'revision_requests',requests:requests.map(r=>({type:r.type,id:r.id,author:r.author,author_type:r.author_type,url:r.url}))});
           this.store.transaction(()=>{
             update({result:JSON.stringify(result),phase:'done',status:'succeeded',error_code:null});
-            saveReviewSession(this.store,task);
             this.queueDevelopment(github,task,input,result,approved,requests);
           });
         }

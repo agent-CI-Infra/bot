@@ -23,7 +23,6 @@ import { workType } from '../work/catalog.js';
 import { sectionText } from '../work/settings.js';
 import { randomId } from '../core/security.js';
 import { type ReadTokens } from './read-token.js';
-import type { AgentModel } from './gateway.js';
 import { RepositoryExplorer, repositoryTools } from './exploration.js';
 import { permissionTools } from '../roles/permissions.js';
 import { workspaceInstructions, workspaceTool, workspaceToolNames, workspaceTools } from './workspace-tools.js';
@@ -31,7 +30,7 @@ import { taskReadScopes, taskRolePolicies, taskToolAllowed, withTaskPermissions 
 import { browserPolicyOf } from '../browser/policy.js';
 import { browserTool, closeBrowserOnComputer, runBrowserTool } from '../browser/tools.js';
 
-export interface ReviewConversation { history?: any[]; resume?: boolean; offset?: number; model?: AgentModel; boundary(stage: string): Promise<{prompt?: string, messages?: string[]}> }
+export type ReviewConversation = import('./pi.js').PiConversation;
 /** The platform's write tools for this task, by tool name: the control plane performs the write and answers the agent. */
 export type PlatformTools = Record<string, (id: string, args: any) => Promise<any>>;
 type LoopLimits = Pick<AgentSpec<unknown>, 'modelAttempts'> & { validateSubmission?: (result: any) => void };

@@ -54,8 +54,11 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
   assert.equal((await readFile(join(base,'project-notes/repository.md'))).length,131072);
   assert.equal(await readFile(join(base,'project-notes/secret.md'),'utf8'),'secret '+token);
   assert.equal(all.find(event=>event.type==='tool'&&event.arguments?.path==='../notes/secret.md').result.written,true);
-  // The legacy session event comes first and identifies its runtime and exact tool list. Native resources have their own binding event.
-  const session=all.shift();assert.deepEqual([session.type,session.agent,session.native],['pi_session','pi',false]);
+  // Every session binds first: the session and file the control plane keeps so the next run opens them again (#1040). Then
+  // the session event identifies its runtime and exact tool list.
+  const [bound,session]=all.splice(0,2);
+  assert.deepEqual([bound.type,bound.session_id,bound.recoveryMode,bound.transcript],['session_bound','fixture-session','new_session',join(root,'cli-state/pi/session/sessions/fixture-session.jsonl')]);
+  assert.deepEqual([session.type,session.agent,session.native,session.recovery],['pi_session','pi',false,'new_session']);
   for(const [i,call] of calls.entries())assert.deepEqual(all.slice(i*3,i*3+3).map(event=>event.type),['model','tool_start','tool'],call.name);
   assert.equal(all.find(event=>event.type==='tool'&&event.name==='run_command').result.output,'[REDACTED]');
   assert.equal(all.at(-2).name,'finish_review');
@@ -142,6 +145,23 @@ test('a session that never finishes fails with agent_finish_missing instead of a
   assert.equal(state.state,'failed');assert.equal(state.error,'agent_finish_missing');
   assert.match(state.detail,/ended 4 turns without calling finish_review/);
   assert.equal(events.filter(e=>e.type==='agent_nudge').length,3);
+});
+
+// #1040: Pi owns compaction. Only a retry that still does not fit after Pi compacted the session is
+// agent_context_too_large; a compaction that failed on its own keeps Pi's message under its own code.
+for(const [message,code] of [['Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.','agent_context_too_large'],
+  // The compaction's own summary request did not fit: reopening the session would fail the same way.
+  ['Context overflow recovery failed: Turn prefix summarization failed: 413: {"type":"invalid_request_error","code":"context_length_exceeded"}','agent_context_too_large'],
+  ['Context overflow recovery failed: 503 temporarily unavailable','agent_compaction_failed']])test(`a failed overflow recovery ends the session as ${code} with Pi's reason`,async t=>{
+  const {state,events}=await finishRun(t,{calls:[{event:{type:'compaction_end',reason:'overflow',aborted:false,willRetry:false,errorMessage:message}}],env:{BOT_FIXTURE_LAST_TEXT:''}});
+  assert.deepEqual([state.state,state.error,state.detail],['failed',code,message]);
+  assert.equal(events.filter(e=>e.type==='agent_nudge').length,0,'a session that cannot continue is not asked to');
+});
+
+test('a session that never finishes after a failed model reply names that error',async t=>{
+  const failed={type:'message_end',message:{role:'assistant',stopReason:'error',errorMessage:'429 rate limit reached',content:[]}};
+  const {state}=await finishRun(t,{calls:[{event:failed}],env:{BOT_FIXTURE_LAST_TEXT:''}});
+  assert.equal(state.error,'agent_finish_missing');assert.match(state.detail,/ended 4 turns without calling finish_review\. Last model error: 429 rate limit reached/);
 });
 
 test('a JSON answer written as text still finishes the session without asking it to continue',async t=>{

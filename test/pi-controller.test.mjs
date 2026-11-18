@@ -21,6 +21,8 @@ import { Redactor } from '../dist/agent/common.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { LocalManager } from '../dist/projects/local-manager.js';
 import { agentLoop } from '../dist/agent/loop.js';
+import { continueFinishedReview } from '../dist/review/continuation.js';
+import { persistentCliStateWorkspaceId } from '../dist/harness/container-session.js';
 import { eventWork } from '../dist/work/events.js';
 import { releaseStorage } from '../dist/releases/storage.js';
 import '../dist/releases/notes.js';
@@ -79,6 +81,67 @@ for (const controlled of [false, true]) test(`Pi review entry repairs its own fi
   assert.equal(f.logs.filter(log => log.type === 'pi_session').length, 1, 'correction uses the original Pi process and workspace');
   assert.equal(f.logs.filter(log => log.type === 'tool' && log.result?.submitted === true).length, 1);
   assert.equal(f.store.get('SELECT count(*) n FROM tasks').n, 1);
+});
+
+// #1040: a review's next round runs in a new workspace (and worktree), yet reopens the Pi session of its earlier round from
+// the role instance's own session store. When that file is gone, the round starts a new session from its prompt alone:
+// nothing is restored into it and nothing is compacted, however large the earlier rounds were.
+test('a review round reopens its Pi session in a new workspace; a lost session file rebuilds without compaction', { skip, timeout: 180000 }, async t => {
+  let round = 1, compactions = 0;
+  const marker = n => `ROUND-${n}-PROMPT`, devRequests = [], starts = [];
+  const f = await entryFixture(t, 'review.issue', body => {
+    if (!body.tools?.length) { compactions++; return { role: 'assistant', content: 'summary' }; }
+    if (body.tools.some(tool => tool.function.name === 'nominate_delivery')) {
+      const ref = results(body.messages).find(result => result.result_ref)?.result_ref;
+      return ref ? call('nominate_delivery', { result_ref: ref }) : call('delegate_role', { role: 'dev', purpose: 'Review the Issue', refs: ['task:t'] });
+    }
+    devRequests.push({ round, messages: body.messages });
+    return call('finish_review', { summary: `Round ${round} reviewed`, findings: [] });
+  }, true);
+  // The engine's conversation of one run (src/agent/engine.ts): its start boundary learns how the session began.
+  const conversation = () => ({ resume: false, boundary: async (stage, recovery) => {
+    if (stage !== 'start') return { messages: [] };
+    starts.push([round, recovery]);
+    return { prompt: marker(round) + (round === 1 ? ' earlier discussion ' + 'x'.repeat(200000) : '') };
+  } });
+  const text = messages => JSON.stringify(messages);
+  const nextRound = async () => {
+    // What a published round and the Manager's continuation leave (src/review/continuation.ts): a new attempt in a new workspace.
+    f.store.run("UPDATE tasks SET status='succeeded',phase='done',result=? WHERE id='t'", JSON.stringify({ summary: `Round ${round} reviewed`, findings: [] }));
+    f.store.run("INSERT INTO review_updates(task_id,event_key,data) VALUES('t',?,?)", 'update-' + round, JSON.stringify({ reason: 'commented', actor: 'alice' }));
+    assert.equal(continueFinishedReview(f.store, 't'), true); round++;
+    f.store.run("UPDATE tasks SET status='running',phase='model',workspace_id=?,generation=? WHERE id='t'", randomBytes(24).toString('hex'), f.task.generation);
+    const task = f.store.get("SELECT * FROM tasks WHERE id='t'"), workspace = new Workspace(f.store, f.workspace.manager, task, f.redactor, f.guard, value => f.logs.push(value));
+    assert.equal((await workspace.call('init-' + round, { type: 'workspace_init' })).initialized, true);
+    return agentLoop(f.store, task, workspace, f.redactor, f.guard, {}, undefined, undefined, conversation());
+  };
+  const dev = () => f.store.get("SELECT * FROM role_instances WHERE task_id='t' AND role='dev'");
+  const devRun = () => f.store.get("SELECT recovery_mode FROM task_runs WHERE task_id='t' AND role='dev' ORDER BY rowid DESC LIMIT 1").recovery_mode;
+
+  assert.equal((await agentLoop(f.store, f.task, f.workspace, f.redactor, f.guard, {}, undefined, undefined, conversation())).summary, 'Round 1 reviewed');
+  const first = JSON.parse(dev().harness_state), store = join(f.root, 'tasks', persistentCliStateWorkspaceId(dev().id));
+  // The session file is in the instance's own task directory, not in the round's workspace or checkout.
+  assert.ok(first.transcript.startsWith(join(store, 'cli-state/pi', dev().id, 'sessions') + '/'), first.transcript);
+  assert.ok(existsSync(first.transcript)); assert.deepEqual(starts, [[1, 'new_session']]);
+
+  assert.equal((await nextRound()).summary, 'Round 2 reviewed');
+  const second = devRequests.filter(r => r.round === 2);
+  assert.ok(second.length >= 1);
+  // The same session, opened under the new workspace: round 1's prompt and answer come before round 2's prompt.
+  assert.match(text(second[0].messages), /ROUND-1-PROMPT[\s\S]*Round 1 reviewed[\s\S]*ROUND-2-PROMPT/);
+  assert.deepEqual(starts.at(-1), [2, 'native_resume']); assert.equal(devRun(), 'native_resume');
+  assert.equal(JSON.parse(dev().harness_state).sessionId, first.sessionId);
+
+  rmSync(JSON.parse(dev().harness_state).transcript);
+  assert.equal((await nextRound()).summary, 'Round 3 reviewed');
+  const third = devRequests.filter(r => r.round === 3);
+  // A new session from this round's prompt alone; the control plane's prompt is where a summary of the earlier rounds goes.
+  assert.deepEqual(third[0].messages.map(m => m.role), ['system', 'user']);
+  assert.doesNotMatch(text(third[0].messages), /ROUND-1-PROMPT/); assert.match(text(third[0].messages), /ROUND-3-PROMPT/);
+  assert.deepEqual(starts.at(-1), [3, 'rebuilt_from_task_records']); assert.equal(devRun(), 'rebuilt_from_task_records');
+  assert.notEqual(JSON.parse(dev().harness_state).sessionId, first.sessionId);
+  assert.equal(compactions, 0, 'no compaction was attempted, on the new session or before it');
+  assert.ok(!f.logs.some(log => log.type === 'agent_failure'));
 });
 
 test('Pi entry reports repeated invalid submissions and lets the same session correct them', { skip, timeout: 90000 }, async t => {

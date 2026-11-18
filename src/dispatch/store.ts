@@ -159,9 +159,9 @@ export function continuations(store: Store, event: Record<string, any>): Continu
   const latest = active.find(running);
   const joinable = [...(latest ? [latest] : []), ...active.filter(task => !running(task))].slice(0, 5);
   if (!joinable.length) {
-    // The one that published the object's conversation, which its next round resumes; else the most recently finished.
+    // The most recently finished review: its next round reopens its Pi session (#1040).
     const finished = store.get(`SELECT id,kind,status,summary,created_at FROM tasks t WHERE repository_id=? AND object_number=? AND kind IN (${kinds}) AND kind LIKE 'review.%'
-      AND status='succeeded' ORDER BY EXISTS(SELECT 1 FROM review_sessions s WHERE s.task_id=t.id) DESC,updated_at DESC,rowid DESC LIMIT 1`,
+      AND status='succeeded' ORDER BY updated_at DESC,rowid DESC LIMIT 1`,
       String(event.repository_id), Number(event.object_number), ...merge.kinds);
     if (finished) joinable.push(finished);
   }

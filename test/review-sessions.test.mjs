@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {harness,setup,account,repository} from './helpers.mjs';
 import {enqueue,queueWebhook} from '../dist/review/queue.js';
-import {ReviewUpdated,latestReviewSession,saveReviewSession,reviewObjectState,pruneReviewSessions,pendingReviewUpdates} from '../dist/review/sessions.js';
+import {ReviewUpdated,reviewObjectState,pendingReviewUpdates} from '../dist/review/sessions.js';
 import {deleteProjectRecords} from '../dist/projects/removal.js';
 import {continueFinishedReview,resumeFinishedReviews} from '../dist/review/continuation.js';
 import {GitHub} from '../dist/github/client.js';
@@ -47,7 +47,7 @@ test('parallel reviews receive updates on the most recently claimed task, which 
   assert.equal(continueFinishedReview(h.store,recent),false);
   h.store.run('DELETE FROM task_claims WHERE task_id=?',recent);assert.equal(continueFinishedReview(h.store,recent),true);
   const next=h.store.get('SELECT * FROM tasks WHERE id=?',recent),input=JSON.parse(next.input);
-  assert.deepEqual([next.status,next.phase,next.attempt,input.round,input.session_attempt],['queued','prepare',2,2,2]);
+  assert.deepEqual([next.status,next.phase,next.attempt,input.round],['queued','prepare',2,2]);
   // Shaped like a review those updates would have created: the latest comment is the trigger, the earlier one is merged.
   assert.equal(input.comment.id,3);assert.equal(input.trigger.source.id,3);assert.deepEqual(input.merged_updates.map(update=>update.source.id),[2]);
   assert.equal(continueFinishedReview(h.store,recent),false);
@@ -68,7 +68,7 @@ test('a finished review takes the next update as its next round, once; a push of
   assert.equal(queueWebhook(h.store,'101','pull_request',{action:'synchronize',before:head,pull_request:{...pr,head:{sha:next}},sender:user},'push'),0);
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,1);
   const task=h.store.get('SELECT * FROM tasks WHERE id=?',id),input=JSON.parse(task.input);
-  assert.deepEqual([task.status,task.attempt,input.round,input.session_attempt],['queued',2,2,2]);
+  assert.deepEqual([task.status,task.attempt,input.round],['queued',2,2]);
   // A push asks nobody's question: no trigger, the push is the update; the earlier result is summarized for a fresh session.
   assert.equal(input.trigger,undefined);assert.deepEqual(input.merged_updates.map(update=>[update.reason,update.after]),[['pushed',next]]);
   const {finished_at,...previous}=input.previous_result;assert.ok(finished_at);
@@ -84,30 +84,21 @@ test('a finished review takes the next update as its next round, once; a push of
   assert.deepEqual(Object.values(h.store.get('SELECT status,attempt FROM tasks WHERE id=?',id)),['queued',3]);
 });
 
-test('sessions are scoped by repository, kind and number, survive reopening/restart, expire after 15 days and delete with the project',async t=>{
-  // Restart the Store without constructing another environment or reading container files.
-  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'102');
-  const id=enqueue(h.store,'101','review.issue',1,null,{}),task=h.store.get('SELECT * FROM tasks WHERE id=?',id);
-  h.store.run("UPDATE tasks SET status='succeeded',messages=? WHERE id=?",JSON.stringify([{role:'user',content:'earlier history',timestamp:1}]),id);
-  saveReviewSession(h.store,task);
-  assert.equal(latestReviewSession(h.store,task).task_id,id);
-  for(const other of [{...task,kind:'review.pr'},{...task,object_number:2},{...task,repository_id:'102'}])assert.equal(latestReviewSession(h.store,other),undefined);
-  // A session is saved only when a review publishes. It stays the source while its task runs a next round, and after that
-  // round failed or was stopped (#770).
-  for(const status of ['queued','running','failed','cancelled','superseded']){
-    h.store.run('UPDATE tasks SET status=? WHERE id=?',status,id);assert.equal(latestReviewSession(h.store,task).task_id,id);
-  }
-  h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?",id);
-  await h.stop();await h.start();assert.equal(latestReviewSession(h.store,task).task_id,id);
-  const now=Date.now();reviewObjectState(h.store,'101','review.issue',1,true,now-14*86400000);
-  reviewObjectState(h.store,'101','review.issue',1,false,now);assert.ok(latestReviewSession(h.store,task));
-  reviewObjectState(h.store,'101','review.issue',1,true,now-16*86400000);reviewObjectState(h.store,'101','review.issue',1,false,now);
-  assert.equal(latestReviewSession(h.store,task),undefined);
-  h.store.run('UPDATE tasks SET messages=? WHERE id=?','[]',id);saveReviewSession(h.store,task);
-  reviewObjectState(h.store,'101','review.issue',1,true,now-16*86400000);pruneReviewSessions(h.store,now);
-  assert.equal(h.store.get('SELECT count(*) n FROM review_sessions').n,0);
-  h.store.run('UPDATE tasks SET messages=? WHERE id=?','[]',id);saveReviewSession(h.store,task);
-  deleteProjectRecords(h.store,'101');assert.equal(h.store.get('SELECT count(*) n FROM review_sessions').n,0);assert.equal(h.store.get('SELECT count(*) n FROM review_objects').n,0);
+test('a next round keeps each role instance\'s Pi session binding, clears other backends and keeps no conversation copy',async t=>{
+  const h=await fixture(t),id=enqueue(h.store,'101','review.issue',1,null,{issue});
+  h.store.run("UPDATE tasks SET status='succeeded',phase='done',result=? WHERE id=?",JSON.stringify({summary:'Reviewed.',findings:[]}),id);
+  // Bindings as the harnesses save them: Pi's session and file (src/roles/harness.ts), and a Codex thread.
+  const pi={harness:'pi',sessionId:'s1',transcript:'/workspace/tasks/'+'c'.repeat(48)+'/cli-state/pi/dev-instance/sessions/a_s1.jsonl'};
+  for(const [role,harness,state] of [['dev','pi',pi],['manager','codex',{sessionId:'thread-1'}]])
+    h.store.run('INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at,harness_state,session) VALUES(?,?,?,?,?,?,?,?)',role+'-instance',id,role,'{}',harness,'now',JSON.stringify(state),'[{"role":"user","content":"x"}]');
+  h.store.run("INSERT INTO review_updates(task_id,event_key,data) VALUES(?,'next',?)",id,JSON.stringify({reason:'commented',actor:'alice'}));
+  assert.equal(continueFinishedReview(h.store,id),true);
+  // #1040: the next round reopens the Pi session it had; other backends start again as before.
+  assert.deepEqual(h.store.all('SELECT role,harness_state,session FROM role_instances ORDER BY role').map(r=>[r.role,JSON.parse(r.harness_state),r.session]),[['dev',pi,'[]'],['manager',{},'[]']]);
+  // The conversation lives in the session file only: the control plane keeps no copy, and project removal still works.
+  assert.equal(h.store.get("SELECT count(*) n FROM sqlite_master WHERE name='review_sessions'").n,0);
+  reviewObjectState(h.store,'101','review.issue',1,true);
+  deleteProjectRecords(h.store,'101');assert.equal(h.store.get('SELECT count(*) n FROM review_objects').n,0);assert.equal(h.store.get('SELECT count(*) n FROM role_instances').n,0);
 });
 
 test('a new PR head joins the running review as an update, like discussion of any head; close and draft cancellation remain',async t=>{

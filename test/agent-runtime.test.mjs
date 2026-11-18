@@ -192,14 +192,15 @@ test('mapping changes affect future runs while a pinned run rechecks credential 
   assert.equal(f.requests.length,2);
 });
 
-test('workspace review conversations retain history and boundaries while using the pinned gateway', async t => {
-  for (const changeModel of [false, true]) await t.test(changeModel ? 'changed model stops the next request' : 'ready history is persisted', async t => {
+test('workspace review conversations leave history to the Pi session and tell its start boundary how it began', async t => {
+  for (const changeModel of [false, true]) await t.test(changeModel ? 'changed model stops the next request' : 'ready round keeps no history copy', async t => {
     const f = await fixture(t), task = {id:'review',repository_id:'r',kind:'review.pr',workspace_id:'workspace'};
     f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('review','r','review.pr','running','Review')");
-    const history = [{role:'user',content:'Earlier discussion secret-model-key'}], configBytes = [], restoreBytes = [], stages = [];
+    const configBytes = [], stages = [], operations = [];
     const ready = {summary:'Reviewed',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]};
     let config, boundaryDone = false, replies = 0;
     const workspace = { log() {}, async call(_key, request) {
+      operations.push(request.type);
       if (request.type === 'workspace_agent_poll') assert.fail('Conversation polls must use deliver, not the old cached path');
       if (request.type === 'workspace_agent_config') {
         configBytes.push(Buffer.from(request.base64,'base64'));
@@ -212,30 +213,28 @@ test('workspace review conversations retain history and boundaries while using t
       }
       return {};
     }, async deliver(request) {
-      if (request.type === 'workspace_agent_history') restoreBytes.push(Buffer.from(request.base64,'base64'));
-      if (request.type === 'workspace_agent_session') {
-        const bytes = Buffer.from(JSON.stringify(history)); return {size:bytes.length,base64:bytes.toString('base64')};
-      }
+      operations.push(request.type);
       if (request.type === 'workspace_agent_poll') {
-        if (!boundaryDone) return {state:'running',boundary:{id:'b'.repeat(48),stage:'start'}};
+        if (!boundaryDone) return {state:'running',boundary:{id:'b'.repeat(48),stage:'start',recovery:'native_resume'}};
         if (!replies || changeModel && replies === 1) return {state:'running',request:{id:(replies?'d':'c').repeat(48),body:{messages:[{role:'user',content:'Current review'}],tools:config.tools}}};
         return {state:'review_ready',offset:12,result:ready};
       }
       return {};
     }};
-    const conversation = {history,boundary:async stage => {stages.push(stage);return {prompt:'Current discussion'};}};
+    const conversation = {boundary:async (stage, recovery) => {stages.push([stage, recovery]);return {prompt:'Current discussion'};}};
     pinLegacyTaskConfiguration(f.store,task.id);
     const running = agentLoop(f.store,task,workspace,f.spec.redactor,f.spec.guard,{},undefined,undefined,conversation);
     if (changeModel) await assert.rejects(running,{code:'model_configuration_changed'});
     else {
       assert.equal((await running).summary,'Reviewed');
-      assert.deepEqual(JSON.parse(f.store.get("SELECT messages FROM tasks WHERE id='review'").messages),[{role:'user',content:'Earlier discussion [REDACTED]'}]);
+      // The conversation stays in Pi's session file (#1040): the control plane neither sends nor collects a copy of it.
+      assert.equal(f.store.get("SELECT messages FROM tasks WHERE id='review'").messages,null);
       assert.equal(conversation.offset,12);
     }
+    assert.ok(!operations.some(type => ['workspace_agent_history','workspace_agent_session'].includes(type)), operations.join());
     assert.equal(config.review_session,true); assert.equal(config.capabilities.workspace.write,false);
     assert.ok(!config.tools.some(tool=>tool.function.name==='create_pull_request'));
-    assert.deepEqual(stages,['start']);
-    assert.deepEqual(JSON.parse(Buffer.concat(restoreBytes)),[{role:'user',content:'Earlier discussion [REDACTED]'}]);
+    assert.deepEqual(stages,[['start','native_resume']]);
     assert.equal(f.requests.length,1);
     assert.equal(f.store.get("SELECT model_started FROM tasks WHERE id='review'").model_started,1);
     assert.match(f.store.get('SELECT request_id FROM model_requests').request_id,/^review\.pr:review:/);

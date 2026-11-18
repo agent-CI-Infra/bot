@@ -12,7 +12,12 @@ import { modelTransport, nativeModelConnection } from '../harness/model-connecti
 /** The Pi SDK the project computer image installs (runner/package.json). scripts/check-runtime.mjs keeps the two equal. */
 export const piRuntime = { agent: 'pi', package: '@earendil-works/pi-coding-agent', version: '1.4.0' } as const;
 
-export interface PiConversation { history?: any[]; resume?: boolean; offset?: number; model?: AgentModel; boundary(stage: string): Promise<{prompt?: string, messages?: string[]}> }
+/**
+ * A review's conversation with its Pi session. The session itself lives in Pi's session files (#1040); the control plane
+ * answers its boundaries: the start prompt (given how the session began: `recovery` is native_resume when it holds the
+ * earlier round), and the updates between turns. resume continues the session still waiting in this workspace.
+ */
+export interface PiConversation { resume?: boolean; offset?: number; model?: AgentModel; boundary(stage: string, recovery?: string): Promise<{prompt?: string, messages?: string[]}> }
 /**
  * One Pi session in a task workspace, driven through the runner mailbox. The control plane keeps the provider boundary
  * for explicit gateway mode, the tool allowlist and every platform write; direct mode lets the native SDK connect to its provider. The runner process runs
@@ -104,14 +109,6 @@ export function piAdapter<T>(session: PiSession<T>) {
         const saved = await workspace.call(key + ':config:' + offset, { type: 'workspace_agent_config', base64: bytes.subarray(offset, offset + 30000).toString('base64'), offset, final: offset + 30000 >= bytes.length });
         if (saved.error) stop('execution_interrupted', 'waiting_environment', `写入执行配置时中断，offset=${offset}。`);
       }
-      if (conversation?.history?.length) {
-        const history = Buffer.from(JSON.stringify(redactor.clean(conversation.history)));
-        if (history.length > 32 * 1024 * 1024) stop('agent_context_too_large');
-        for (let offset = 0; offset < history.length; offset += 30000) {
-          const saved = await workspace.deliver({ type: 'workspace_agent_history', base64: history.subarray(offset, offset + 30000).toString('base64'), offset, final: offset + 30000 >= history.length });
-          if (saved.error) stop('execution_interrupted', 'waiting_environment');
-        }
-      }
     }
     // A stored started receipt is not evidence that its PID still exists. Ask the runner again on every entry;
     // it checks the saved process before returning started, including after a control-plane restart.
@@ -161,7 +158,8 @@ export function piAdapter<T>(session: PiSession<T>) {
         if (state.boundary && conversation && !answered.has('boundary:' + state.boundary.id)) {
           const id = String(state.boundary.id);
           if (!/^[a-f0-9]{48}$/.test(id)) stop('model_request_invalid');
-          const reply = Buffer.from(JSON.stringify(redactor.clean(await conversation.boundary(state.boundary.stage))));
+          const recovery = typeof state.boundary.recovery === 'string' ? state.boundary.recovery : undefined;
+          const reply = Buffer.from(JSON.stringify(redactor.clean(await conversation.boundary(state.boundary.stage, recovery))));
           if (reply.length > 32 * 1024 * 1024) stop('agent_context_too_large');
           for (let at = 0; at < reply.length; at += 30000) {
             const sent = await workspace.call(`${key}:boundary:${id}:${at}`, { type: 'workspace_agent_boundary', request_id: id, base64: reply.subarray(at, at + 30000).toString('base64'), offset: at, final: at + 30000 >= reply.length });
@@ -172,22 +170,17 @@ export function piAdapter<T>(session: PiSession<T>) {
         if (state.state === 'completed' || state.state === 'review_ready') {
           if (inFlight.size) await Promise.allSettled([...inFlight.values()]);
           if (backgroundError !== null) throw backgroundError;
-          if (state.state === 'review_ready') {
-            const parts: Buffer[] = []; let size = 1;
-            for (let at = 0; at < size; at += 45000) {
-              const part = await workspace.deliver({ type: 'workspace_agent_session', offset: at });
-              if (part.error || !Number.isSafeInteger(part.size) || part.size > 32 * 1024 * 1024 || typeof part.base64 !== 'string') stop('agent_context_too_large');
-              size = part.size; parts.push(Buffer.from(part.base64, 'base64'));
-            }
-            const messages = JSON.stringify(redactor.clean(JSON.parse(Buffer.concat(parts).toString('utf8'))));
-            store.run('UPDATE tasks SET messages=? WHERE id=?', messages, taskId);
-          }
           return session.complete({ ...state, result: redactor.clean(state.result) }, publication);
         }
-        // A failed agent carries error as well, so it takes this path and is retried in a fresh workspace; its reason is kept.
-        if (state.error === 'agent_context_too_large') stop('agent_context_too_large', 'failed', '会话压缩后仍超过 2 MiB 或 128k 上下文上限；重试将使用空会话。');
+        // The runner's reason goes into the task log before any stop, and the fault names it too (#1040).
         if (state.state === 'failed') workspace.log({ type: 'agent_failure', error: state.error || null, detail: redactor.text(String(state.detail || '')).slice(0, 1000) || null });
-        if (state.error === 'disk_full') stop('disk_full', 'waiting_environment', `项目电脑的工作卷空间不足，任务执行进程已停止${state.detail ? '：' + redactor.text(String(state.detail)).replace(/\s+/g, ' ').slice(0, 300) : ''}。`);
+        const reason = state.detail ? '：' + redactor.text(String(state.detail)).replace(/\s+/g, ' ').slice(0, 300) : '';
+        // The session no longer fits after Pi compacted it and retried; the next run does not reopen it (src/roles/harness.ts).
+        if (state.error === 'agent_context_too_large') stop('agent_context_too_large', 'failed', `Pi 压缩会话并重试后，请求仍超过模型上下文${reason}。重试时不再续接这个会话，按任务记录重新开始。`);
+        // Pi's compaction itself failed, usually its summary request; the session is kept and the retry reopens it.
+        if (state.error === 'agent_compaction_failed') stop('agent_compaction_failed', 'retry_wait', `Pi 压缩会话失败${reason}。`);
+        // A failed agent carries error as well, so it takes this path and is retried in a fresh workspace; its reason is kept.
+        if (state.error === 'disk_full') stop('disk_full', 'waiting_environment', `项目电脑的工作卷空间不足，任务执行进程已停止${reason}。`);
         if (state.error || ['interrupted', 'missing'].includes(state.state)) stop('execution_interrupted', 'waiting_environment', state.state === 'failed'
           ? `任务执行进程失败：${redactor.text(String(state.detail || '没有返回原因')).replace(/\s+/g, ' ').slice(0, 300)}。`
           : `轮询任务执行进程时中断，状态=${state.state || '未知'}，offset=${offset}。`);

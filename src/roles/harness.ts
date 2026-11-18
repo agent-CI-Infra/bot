@@ -1,6 +1,7 @@
 import {submissionFeedback} from './submission-feedback.js';
 import {checkHarnessAccess} from '../harness/access.js';
-import {computeAllowedGithubScopes} from '../harness/container-session.js';
+import {computeAllowedGithubScopes,persistentCliStateWorkspaceId} from '../harness/container-session.js';
+import {useWorkspace} from '../projects/workspace-cleanup.js';
 import {ReadTokens} from '../agent/read-token.js';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -109,10 +110,20 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
  const env=spec.pi;if(!env)return stop('pi_environment_required','waiting_configuration','Pi harness 需要项目电脑工作区；这个入口没有为角色准备 Pi 会话。');
  const base=env.session,tools=spec.tools??[],own=new Set((base?.config?.tools??[]).map((t:any)=>t.function.name)),finish=spec.finish;
  const control=tools.map(t=>t.function.name).filter(name=>!own.has(name)||(finish?.names??[finish?.name]).includes(name));
+ // Pi manages its own sessions (#1040). A role instance's session files live in a task directory of their own, as
+ // Claude Code's and Codex's state does (persistentCliStateWorkspaceId), so a later round or retry in another workspace or
+ // worktree finds them; it is recorded with the task and removed with the task's directories. The binding saved when the
+ // session started (harness_state) names the session and file the runner opens again.
+ const sessionStore=spec.roleRun?.instance_id?persistentCliStateWorkspaceId(spec.roleRun.instance_id):undefined;
+ if(sessionStore)useWorkspace(spec.store,{...env.workspace.task,workspace_id:sessionStore},'workspace_harness_start');
+ const bound=spec.harnessState?.value?.harness==='pi'&&typeof spec.harnessState.value.sessionId==='string'?spec.harnessState.value:undefined;
  const config={...(base?.config??{capabilities:{workspace:{read:false,write:false,notes:false,shell:false},github:{permissions:{},publication:'none'},agents:false,writes:[]},finish_tools:[],finish_on_pull_request:false,review_session:false}),
-  model_transport:spec.containerOptions?.modelTransport,system:spec.system,prompt:spec.prompt,accept_turn_result:!!spec.onTurnEnd,resources:spec.harnessResources,tools,control_tools:control,workspace_id:spec.roleWorkspace?.task.workspace_id??env.workspace.task.workspace_id,...(spec.harnessAccess?{native_access:spec.harnessAccess,native_workspace_id:spec.roleWorkspace?.task.workspace_id,native_fresh:spec.roleRun?.role==='qa',native_previous_session_id:spec.harnessState?.value?.sessionId}:{}),session_key:spec.roleRun?.instance_id??spec.harnessSessionKey};
+  model_transport:spec.containerOptions?.modelTransport,system:spec.system,prompt:spec.prompt,accept_turn_result:!!spec.onTurnEnd,resources:spec.harnessResources,tools,control_tools:control,workspace_id:spec.roleWorkspace?.task.workspace_id??env.workspace.task.workspace_id,...(spec.harnessAccess?{native_access:spec.harnessAccess,native_workspace_id:spec.roleWorkspace?.task.workspace_id,native_fresh:spec.roleRun?.role==='qa'}:{}),
+  ...(bound?{native_session:{id:bound.sessionId,file:bound.transcript}}:{}),...(sessionStore?{session_store:sessionStore}:{}),session_key:spec.roleRun?.instance_id??spec.harnessSessionKey};
  return async(services:AgentServices):Promise<T>=>{
   const nativeUsage=new Map<number,{input:number;output:number;known:boolean}>();
+  // Whether this run bound a session (session_bound), which an ending that must not be reopened clears again.
+  let binding=false;
   const repository=spec.task.repository_id?spec.store.get('SELECT * FROM repositories WHERE id=?',spec.task.repository_id):undefined;
   const scopeInfo=computeAllowedGithubScopes(spec);
   const reads=repository&&scopeInfo.initial.length?new ReadTokens(spec.store,repository,spec.redactor,spec.guard,spec.containerOptions?.githubApiUrl,scopeInfo.initial,scopeInfo.live,64):undefined;
@@ -122,7 +133,12 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
   const sessionWorkspace={call:env.workspace.call.bind(env.workspace),deliver:env.workspace.deliver.bind(env.workspace),log:(event:any)=>{
    env.workspace.log(event);
    if(event.type!=='tool'||event.phase&&['read','edit','write','bash','grep','find','ls'].includes(event.name))spec.onHarnessEvent?.(event);
-   if(event.type==='session_bound')spec.harnessState?.save({harness:'pi',sessionId:event.session_id,transcript:event.transcript,recoveryMode:event.recoveryMode,workspaceId:config.native_workspace_id??config.workspace_id});
+   if(event.type==='session_bound'){
+    binding=true;spec.harnessState?.save({harness:'pi',sessionId:event.session_id,transcript:event.transcript,recoveryMode:event.recoveryMode,workspaceId:config.native_workspace_id??config.workspace_id,...(sessionStore?{stateWorkspaceId:sessionStore}:{})});
+    // The run records what the session actually did, as Claude Code and Codex runs do: reopened, or rebuilt because the
+    // bound file is gone. A new session keeps the start mode the run was prepared with.
+    if(spec.roleRun&&spec.task.trace_run_id&&['native_resume','rebuilt_from_task_records'].includes(event.recoveryMode))spec.store.run('UPDATE task_runs SET recovery_mode=? WHERE id=?',event.recoveryMode,spec.task.trace_run_id);
+   }
    if(event.type==='model'&&event.source==='pi_native'){
     const u=event.usage,known=Number.isFinite(u?.input)&&Number.isFinite(u?.output);
     nativeUsage.set(event.step,{input:known?u.input+(u.cacheRead??0)+(u.cacheWrite??0):0,output:known?u.output:0,known});
@@ -149,6 +165,11 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
      if(base?.complete)return base.complete(state,publication);
      return stop('role_submission_required','retry_wait','Pi 会话结束但没有通过控制面提交结果。');
     }})(services);
+  }catch(error){
+   // A session over the context limit after Pi's own recovery, or one that was cancelled, is not reopened: the next run
+   // starts a new session from task records. Any other ending keeps the binding, and the next run continues the session.
+   if(error instanceof TaskError&&['agent_context_too_large','harness_cancelled'].includes(error.code)&&(binding||bound))spec.harnessState?.save({});
+   throw error;
   }finally{spec.executionSignal?.removeEventListener('abort',onAbort);await dispatcher.close();await reads?.revoke();}
  };
 }
