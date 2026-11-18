@@ -115,7 +115,7 @@ test('task workspaces are counted as running, kept for an open pull request or w
   assert.deepEqual(classes, { active: { count: 1, bytes: 10 }, pull_request: { count: 1, bytes: 20 }, expiring: { count: 3, bytes: 120 } });
 });
 
-test('the view lists each computer, the host disk with other, what can be reclaimed and what cleanups freed; page loads read no new tables', async t => {
+test('the view lists each computer, the data filesystem, what can be reclaimed and what cleanups freed; page loads read no new tables', async t => {
   const { store } = storeFixture(t), [running, done] = [id(), id()];
   owned(store, '101', running, 't-running', 'running'); owned(store, '101', done, 't-done', 'succeeded', 'review.issue', 2);
   store.run("INSERT INTO trajectory_usage VALUES('101','files',3,4000)");

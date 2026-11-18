@@ -1,11 +1,71 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { storageOverview } from '../dist/storage/overview.js';
+import { chmod, link, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { machineSample, storageOverview } from '../dist/storage/overview.js';
+import { storageFootprint } from '../manager/storage-footprint.mjs';
 import { StorageReport } from '../dist/app/storage.js';
 import { harness, setup } from './helpers.mjs';
 
 const entry = (kind, device, bytes, projects = {}) => ({ kind, device, bytes, projects });
 const sample = entries => ({ measured_at: '2026-01-01T00:00:00Z', entries, missing: [] });
+
+async function fixtureDir(t) {
+  const dir = await mkdtemp(join(tmpdir(), 'storage-overview-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+test('the footprint assigns numeric repository directories and counts shared hard links once', async t => {
+  const dir = await fixtureDir(t), db = join(dir, 'control.sqlite');
+  const traces = join(dir, 'traces'), project = join(traces, '101'), notes = join(dir, 'notes');
+  const shared = join(traces, 'shared'), capture = join(project, 'capture'), note = join(notes, '201');
+  await mkdir(project, { recursive: true }); await mkdir(shared); await mkdir(note, { recursive: true });
+  await writeFile(db, 'data'); await writeFile(capture, Buffer.alloc(65536, 1));
+  await link(capture, join(note, 'same-file'));
+  const blocks = async path => (await stat(path)).blocks * 512;
+  const locations = [['trajectories', traces, true], ['knowledge', notes, true]];
+  const measured = await storageFootprint(db, locations);
+  assert.deepEqual(measured.missing, []);
+  const [database, trajectory, knowledge] = measured.entries;
+  assert.equal(database.bytes, await blocks(db));
+  assert.deepEqual(trajectory.projects, { 101: await blocks(project) + await blocks(capture) });
+  assert.equal(trajectory.bytes, await blocks(traces) + await blocks(shared) + trajectory.projects[101]);
+  assert.deepEqual(knowledge.projects, { 201: await blocks(note) });
+  assert.equal(knowledge.bytes, await blocks(notes) + knowledge.projects[201]);
+
+  const nested = await storageFootprint(db, [...locations, ['other', project]]);
+  assert.deepEqual(nested.entries, measured.entries);
+  assert.deepEqual(nested.missing, ['other']);
+  if (process.getuid?.() !== 0) {
+    await chmod(shared, 0);
+    try {
+      const partial = await storageFootprint(db, locations);
+      assert.deepEqual(partial.missing, ['trajectories']);
+      assert.deepEqual(partial.entries.find(row => row.kind === 'knowledge'), knowledge);
+    } finally { await chmod(shared, 0o700); }
+  }
+});
+
+test('only a bounded, recent, same-boot inventory of distinct filesystems is accepted', async t => {
+  const dir = await fixtureDir(t), boot = join(dir, 'boot-id'), file = join(dir, 'filesystems.json');
+  await writeFile(boot, 'test-boot\n');
+  const measured_at = new Date().toISOString(), device = { device: '10:abcd', total: 150, free: 50 };
+  const report = { version: 1, boot_id: 'test-boot', measured_at, filesystems: [device] };
+  const read = async value => {
+    await writeFile(file, JSON.stringify(value));
+    return machineSample(dir, boot);
+  };
+  assert.deepEqual(await read(report), { measured_at, filesystems: [device] });
+  for (const invalid of [
+    { version: 2 }, { boot_id: 'other' }, { measured_at: new Date(Date.now() - 16 * 60_000).toISOString() },
+    { measured_at: new Date(Date.now() + 60_000).toISOString() }, { filesystems: [] },
+    { filesystems: [device, device] }, { filesystems: [{ ...device, device: '10' }] },
+    { filesystems: [{ ...device, free: 151 }] }, { padding: ' '.repeat(65536) },
+  ]) assert.equal(await read({ ...report, ...invalid }), null);
+});
+
 test('the two allocation breakdowns reconcile, and only matching filesystems enter the host bar', () => {
   const ctrl = sample([entry('database', '10:abcd', 15), entry('trajectories', '10:abcd', 30, { 101: 20, 999: 5 })]);
   const manager = sample([entry('knowledge', '11:ffff', 12, { 101: 12 }), entry('other', '10:cafe', 3)]);

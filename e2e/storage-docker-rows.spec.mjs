@@ -5,16 +5,14 @@ import { identityFixture } from '../test/identity-fixture.mjs';
 // cache beside everything else that is already known. The volumes /system/df lists are mostly the project computers, the
 // manager's data and the control plane's data directories, which the table already counts, so the volume row carries only
 // the remainder; the assistant HOME gets a row of its own instead of hiding in "other". The control-plane harness has no
-// manager, so the read is injected; the numbers are chosen small enough to leave "other" positive.
+// manager, so the read is injected.
 const docker = { images: 644_245_094, containers: 73_400_320, build_cache: 231_928_258, volumes: 12_582_912, assistant_homes: 8_388_608 };
-const added = Object.values(docker).reduce((total, bytes) => total + bytes, 0);
 const withDocker = async route => {
   const response = await route.fetch(), json = await response.json();
   if (json.host) {
     json.host.known = { ...json.host.known, docker_images: docker.images, docker_containers: docker.containers,
       docker_build_cache: docker.build_cache, docker_volumes: docker.volumes, assistant_homes: docker.assistant_homes };
     json.host.unmeasured = (json.host.unmeasured ?? []).filter(key => !String(key).startsWith('docker_') && key !== 'assistant_homes');
-    json.host.other_bytes = Math.max(0, Number(json.host.other_bytes ?? 0) - added);
   }
   if (json.totals?.manager) json.totals.manager.docker = { images: { count: 12, bytes: docker.images },
     containers: { count: 3, bytes: docker.containers }, build_cache: { count: 9, bytes: docker.build_cache },

@@ -7,7 +7,7 @@ export interface MachineSample { measured_at: string; filesystems: Filesystem[] 
 const validBytes = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
 
 /** Accept only a recent, same-boot host inventory. Container statfs is never a machine fallback. */
-export async function machineSample(directory: string | undefined): Promise<MachineSample | null> {
+export async function machineSample(directory: string | undefined, bootIdFile = '/proc/sys/kernel/random/boot_id'): Promise<MachineSample | null> {
   if (!directory) return null;
   try {
     const file = await open(join(directory, 'filesystems.json'), 'r');
@@ -17,7 +17,7 @@ export async function machineSample(directory: string | undefined): Promise<Mach
       if (bytesRead === buffer.length) return null;
       data = JSON.parse(buffer.toString('utf8', 0, bytesRead));
     } finally { await file.close(); }
-    const boot = (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim();
+    const boot = (await readFile(bootIdFile, 'utf8')).trim();
     const age = Date.now() - Date.parse(data.measured_at), devices = new Set<string>();
     if (data.version !== 1 || data.boot_id !== boot || !Number.isFinite(age) || age < 0 || age > 15 * 60_000 ||
         !Array.isArray(data.filesystems) || !data.filesystems.length) return null;
