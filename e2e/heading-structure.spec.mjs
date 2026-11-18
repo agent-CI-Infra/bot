@@ -38,13 +38,29 @@ async function outlineProblems(page, route) {
   }
   return { headings, problems };
 }
-// Settings cards load after the shell: wait for the placeholder to be replaced so the outline is the real one.
+// Settings cards load after the shell. Wait deterministically for the real outline instead of a fixed delay: sample the
+// headings inside the panel until the signature is non-empty and unchanged across two consecutive samples, so a slow
+// page is never judged while only the page title exists (that outline would pass silently). An empty signature never
+// counts as settled; the caller then fails on "no visible heading" rather than passing green.
+async function settledHeadings(page, attempts = 200) {
+  const sample = () => page.evaluate(() => [...document.querySelectorAll('#settings-panel h1, #settings-panel h2, #settings-panel h3, #settings-panel h4, #settings-panel h5, #settings-panel h6')]
+    .map(node => `${node.tagName} ${node.textContent.trim()}`).join('\n'));
+  let previous = await sample();
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    await page.waitForTimeout(25);
+    const current = await sample();
+    if (current && current === previous) return current;
+    previous = current;
+  }
+  return previous;
+}
 async function openSettings(page, base, route) {
   await page.goto(base + '/' + route);
   const content = page.locator('#settings-panel .project-content');
   await expect(content).toBeVisible();
   await expect(content).not.toContainText('正在加载…');
-  await page.waitForTimeout(150);
+  // The settled signature is what openSettings guarantees; outlineProblems re-reads the viewport-visible headings.
+  expect(await settledHeadings(page), `${route}: the settings panel never rendered a stable heading outline`).not.toBe('');
   return content;
 }
 

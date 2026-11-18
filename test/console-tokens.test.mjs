@@ -161,6 +161,15 @@ test('#551 management.css and views.css map heading, body and muted values onto 
   assert.match(views, /\.project-content \.side-card :is\(\.card-sub,\.rate-account\)\{[^}]*font-size:\s*var\(--font-size-label\)[^}]*margin:\s*6px 0 0/);
   const rateLimits = read('static/settings/rate-limits.js');
   assert.match(rateLimits, /element\('h3',[^)]*'rate-account'\)/, 'the quota account names keep their own level and class');
+  // #1039: serviceRoleCard is drawn on the settings page (h2 under 全局设置) and inside the Feishu bindings page's own h3
+  // card, so the level is an argument: the settings caller passes h2, the bindings caller keeps the h3 default. Without
+  // this the settings default would leak out and make an h2 → h4 skip on #/identity/feishu.
+  const serviceRoles = read('static/settings/service-roles.js');
+  assert.match(serviceRoles, /function serviceRoleCard\(view, initial, level = 'h3'\)/, 'the role card level is the caller\'s');
+  assert.match(serviceRoles, /\}, level\);/, 'the level reaches liveCard');
+  assert.match(serviceRoles, /querySelector\(level\)/, 'the saved name is rewritten on the heading of that level');
+  assert.match(read('static/settings/page.js'), /serviceRoleCard\(view, role, 'h2'\)/, 'the settings page asks for h2');
+  assert.match(read('static/channels/assistant-roles.js'), /serviceRoleCard\(view, role\)/, 'the Feishu bindings page keeps h3');
   assert.match(views, /\.step-meta\{[^}]*color:\s*var\(--color-text-muted\);font-size:\s*var\(--font-size-1\)/);
   assert.match(views, /button\.linkish\{[^}]*color:\s*var\(--color-brand\)/);
   assert.match(views, /\.choice\{[^}]*color:\s*var\(--color-text\)/);
